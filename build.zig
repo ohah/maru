@@ -1967,6 +1967,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-b3-1",
         "B3-1 inert RPC response authority focused Debug and ReleaseFast gates",
     );
+    const session_host_b3_2_step = b.step(
+        "test-session-host-b3-2",
+        "B3-2 private destination admission focused Debug and ReleaseFast gates",
+    );
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -1980,6 +1984,19 @@ pub fn build(b: *std.Build) void {
     run_b3_1_boundary_tests.setCwd(b.path("."));
     session_host_b3_1_step.dependOn(&run_b3_1_boundary_tests.step);
     boundary_step.dependOn(&run_b3_1_boundary_tests.step);
+    const b3_2_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_b3_2_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"B3-2 private destination admission"},
+    });
+    const run_b3_2_boundary_tests = b.addRunArtifact(b3_2_boundary_tests);
+    run_b3_2_boundary_tests.addArg("--maru-expect-tests=1");
+    run_b3_2_boundary_tests.setCwd(b.path("."));
+    session_host_b3_2_step.dependOn(&run_b3_2_boundary_tests.step);
+    boundary_step.dependOn(&run_b3_2_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
         const b3_1_leaf_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -2010,6 +2027,39 @@ pub fn build(b: *std.Build) void {
         run_b3_1_registry_tests.setCwd(b.path("."));
         session_host_b3_1_step.dependOn(&run_b3_1_leaf_tests.step);
         session_host_b3_1_step.dependOn(&run_b3_1_registry_tests.step);
+        const b3_2_registry_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/attachment_cleanup_registry.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"B3-2 private destination admission"},
+        });
+        const run_b3_2_registry_tests = b.addRunArtifact(b3_2_registry_tests);
+        run_b3_2_registry_tests.addArg("--maru-expect-tests=3");
+        run_b3_2_registry_tests.setCwd(b.path("."));
+        session_host_b3_2_step.dependOn(&run_b3_2_registry_tests.step);
+        const b3_2_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_slot.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "B3-2 product prepare",
+                "B3-0.3 public execute rejects forged response destinations",
+            },
+        });
+        const run_b3_2_product_tests = b.addRunArtifact(b3_2_product_tests);
+        run_b3_2_product_tests.addArg("--maru-expect-tests=2");
+        run_b3_2_product_tests.setCwd(b.path("."));
+        session_host_b3_2_step.dependOn(&run_b3_2_product_tests.step);
     }
     if (target.result.os.tag == .macos) {
         const ended_purge_orchestration_drift_test = addProjectTest(b, .{

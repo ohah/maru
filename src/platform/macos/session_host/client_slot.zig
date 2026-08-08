@@ -634,6 +634,9 @@ pub const GenerationTransportOwnerQuery = struct {
 
 pub const GenerationRequestExecute = struct {
     request: GenerationRequestAbort,
+    // Execute revalidates the transport's current stream instead of trusting only the
+    // stream captured in the prepared registry entry.
+    bound_stream_id: u64 = 0,
     response_out_addr: usize,
     owner_addr: usize,
     owner_size: usize,
@@ -1377,14 +1380,18 @@ pub fn prepareGenerationRequest(
     defer endRegisteredNodeOperation(admission.operation);
     const node = admission.operation.node;
     const identity = admission.identity;
-    const authorized = node.cleanup_registry.requestAuthorized(
+    const decision = node.cleanup_registry.requestDecision(
         request.reservation.cleanup,
         identity,
         family,
         tag,
         request.bound_stream_id,
     ) catch return error.InvalidOwner;
-    if (!authorized) return error.Unauthorized;
+    switch (decision) {
+        .allowed => {},
+        .unauthorized => return error.Unauthorized,
+        .busy => return error.Busy,
+    }
 
     const storage: *client_mod.PreparedBlockingRpcStorage =
         @ptrFromInt(request.prepared_storage_addr);
@@ -2421,14 +2428,24 @@ pub fn executeGenerationRequest(
         admission.owner.owner_addr,
         admission.owner.owner_size,
     )) return error.InvalidResponseDestination;
-    const maybe_canonical = node.cleanup_registry.preparedRequestForReceipt(
+    const prepared_admission = node.cleanup_registry.preparedAttachAdmission(
         request.reservation.cleanup,
         identity,
         request.transport_addr,
         request.transport_incarnation,
         request.receipt,
-    ) catch return error.InvalidOwner;
-    const canonical = maybe_canonical orelse return error.InvalidReceipt;
+        execution.bound_stream_id,
+    ) catch |err| return switch (err) {
+        error.InvalidOwner => error.InvalidOwner,
+        error.InvalidReceipt => error.InvalidReceipt,
+        error.InvalidResponseDestination => error.InvalidResponseDestination,
+    };
+    switch (prepared_admission.decision) {
+        .allowed => {},
+        .unauthorized => return error.Unauthorized,
+        .busy => return error.Busy,
+    }
+    const canonical = prepared_admission.canonical;
     const storage: *client_mod.PreparedBlockingRpcStorage =
         @ptrFromInt(request.prepared_storage_addr);
     const prepared_identity: client_mod.PreparedBlockingRpcIdentity = .{
@@ -7355,6 +7372,34 @@ test "B3-0.3 public execute rejects forged response destinations before authorit
     };
     const owner_addr = @intFromPtr(&owner);
     const response_size = @sizeOf(executed_response_mod.ExecutedResponse);
+    slot.current.active_operation_generation = 1;
+    errdefer slot.current.active_operation_generation = 0;
+    var invalid_receipt_while_busy = request;
+    invalid_receipt_while_busy.receipt.request_digest +%= 1;
+    try std.testing.expectError(error.Busy, executeGenerationRequest(.{
+        .request = invalid_receipt_while_busy,
+        .response_out_addr = @intFromPtr(&owner.response),
+        .owner_addr = owner_addr,
+        .owner_size = @sizeOf(Owner),
+    }));
+    slot.current.active_operation_generation = 0;
+    try std.testing.expect(!client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+
+    try std.testing.expectError(error.Unauthorized, executeGenerationRequest(.{
+        .request = request,
+        .bound_stream_id = 1,
+        .response_out_addr = @intFromPtr(&owner.response),
+        .owner_addr = owner_addr,
+        .owner_size = @sizeOf(Owner),
+    }));
+    try std.testing.expect(!client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.busy,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            identity,
+        ),
+    );
     // The request remains bound to the canonical owner seal while the outer execute wrapper
     // advertises an attacker-selected range that happens to contain its destination.  The
     // pre-admission scalar check passes; only the post-admission canonical equality check may
@@ -7410,6 +7455,69 @@ test "B3-0.3 public execute rejects forged response destinations before authorit
         reservation,
         contract.ExecutedCallReceipt.fromPrepared(prepared.receipt).?,
     );
+}
+
+test "B3-2 product prepare rejects spawn before request publication" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB350);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB350);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0xB351,
+    );
+    const transport_incarnation: u64 = 0xB352;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const before_request_id = slot.current.client.next_request_id;
+    try std.testing.expect(slot.current.client.pending_outbound == null);
+    try std.testing.expectError(error.Unauthorized, prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = reservation.identity.slot_incarnation,
+        .node_incarnation = reservation.identity.node_incarnation,
+        .host_id = reservation.identity.host_id,
+        .pid = reservation.identity.pid,
+        .process_nonce = reservation.identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 0,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.spawnFull(),
+    }));
+    try std.testing.expectEqual(before_request_id, slot.current.client.next_request_id);
+    try std.testing.expect(slot.current.client.pending_outbound == null);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            reservation.identity,
+        ),
+    );
+    try transport_owner_seal.terminalize(transport_incarnation);
+    try slot.abortAttachmentBinding(&owner.binding, reservation);
 }
 
 test "B3-0.4 guarded allocator rejects exact partial and overflow execution authority aliases" {

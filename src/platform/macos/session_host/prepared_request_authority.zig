@@ -170,6 +170,12 @@ pub const Authority = struct {
             std.mem.eql(u8, &self.seal, &sealFor(self));
     }
 
+    pub fn terminalExact(self: *const Authority) bool {
+        return self.rawLifecycleValid() and self.rawPreparedPresenceValid() and
+            self.lifecycle == .terminal and self.prepared_present == 0 and
+            self.preparedBytesZero() and std.mem.eql(u8, &self.seal, &sealFor(self));
+    }
+
     pub fn beginExecute(self: *Authority, prepared: Prepared) Error!void {
         if (!self.matches(prepared)) return error.InvalidPrepared;
         self.lifecycle = .executing;

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const max_source_bytes = 8 * 1024 * 1024;
 
-test "B3-1 inert RPC authority has one private registry owner and zero product execution callers" {
+test "B3-1 RPC authority remains leaf-owned while B3-3 opens only registry execution transitions" {
     const allocator = std.testing.allocator;
     const leaf_path = "src/platform/macos/session_host/rpc_response_authority.zig";
     const registry_path = "src/platform/macos/session_host/attachment_cleanup_registry.zig";
@@ -13,7 +13,8 @@ test "B3-1 inert RPC authority has one private registry owner and zero product e
     const leaf_product = productPrefix(leaf);
     const registry_product = productPrefix(registry);
 
-    try std.testing.expectEqual(@as(usize, 3), count(leaf_product, "@import(\""));
+    // B3-3 adds only the builtin test-mode gate for its destructive epoch-exhaustion fixture.
+    try std.testing.expectEqual(@as(usize, 4), count(leaf_product, "@import(\""));
     inline for (.{
         "@import(\"std\")",
         "@import(\"generation_attachment_contract.zig\")",
@@ -76,12 +77,20 @@ test "B3-1 inert RPC authority has one private registry owner and zero product e
     inline for (.{
         ".rpc_response_authority.reserveExecuting(",
         ".rpc_response_authority.rollbackExecuting(",
+        ".rpc_response_authority.settleExecutingTerminal(",
+    }) |b3_3_transition| try std.testing.expectEqual(
+        @as(usize, 1),
+        count(registry_product, b3_3_transition),
+    );
+    inline for (.{
         ".rpc_response_authority.publish(",
         ".rpc_response_authority.borrow(",
         ".rpc_response_authority.beginRelease(",
         ".rpc_response_authority.finishReusable(",
-        ".rpc_response_authority.settleExecutingTerminal(",
-    }) |transition| try std.testing.expectEqual(@as(usize, 0), count(registry_product, transition));
+    }) |future_transition| try std.testing.expectEqual(
+        @as(usize, 0),
+        count(registry_product, future_transition),
+    );
 
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
@@ -94,7 +103,12 @@ test "B3-1 inert RPC authority has one private registry owner and zero product e
         if (std.mem.eql(u8, path, leaf_path) or std.mem.eql(u8, path, registry_path)) continue;
         const source = try readSource(allocator, path);
         defer allocator.free(source);
-        try std.testing.expectEqual(@as(usize, 0), count(source, "rpc_response_authority"));
+        const expected: usize = if (std.mem.eql(
+            u8,
+            path,
+            "src/platform/macos/session_host/client_slot.zig",
+        )) 4 else 0;
+        try std.testing.expectEqual(expected, count(source, "rpc_response_authority"));
     }
 }
 

@@ -1441,8 +1441,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    3. registry `reserveRpcResponseExecution`이 entry-local `RpcResponseAuthority`의 checked epoch를 발급하고 canonical receipt를 반환하면
       txn이 즉시 `.response_reserved`를 게시한다.
    4. `beginPreparedRequestExecute`가 request authority를 `.executing`으로 옮긴다.
-   5. Client `beginPreparedRequestExecution`이 mutation fence를 잡은 final-address lease 안에서 기존 pending wire를 flush하고 allocator/parser
-      provenance와 progress를 봉인한다. lease 종료 전에는 다른 Client public mutation이 같은 Client를 통과하지 못한다.
+   5. Client `beginPreparedRequestExecution`이 final-address lease를 봉인한다. 독립 진입은 기존 mutation fence의 idle state를 execution
+      lease로 원자 획득하고, registry가 이미 보유한 exact single shared pin은 `shared(1)→execution→shared(1)`로 원자 승격·강등한다.
+      그 안에서 기존 pending wire를 flush하고 allocator/parser provenance와 progress를 봉인한다. lease 종료 전에는 다른 Client public
+      mutation과 teardown이 같은 Client를 통과하지 못한다. fence 주소·generation·process-local checked-monotonic incarnation을
+      함께 봉인하며 null/foreign pointer, generation drift, same-address reincarnation 중 어느 것도 새 fence의 release 권위로
+      재채택하지 않는다.
    6. cleanup registry `executingRpcAdmission`이 expected `.executing` transcript, current stream/role/controller state, exact RPC canonical과
       response destination을 같은 classifier로 다시 resolve한다. caller tag/family/Entry snapshot과 cached B3-2 verdict는 입력하지 않는다.
    7. 성공 verdict를 저장하지 않고 같은 stack의 callback/allocation/syscall-free suffix가 lease·canonical final address를 검사해 request
@@ -1459,7 +1463,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `pristine|response_reserved|settled`의 closed enum이다. request phase는 내장 transaction, wire phase는 lease progress에서만 읽고
    합성 phase에 중복하지 않는다. request backing/
    `PreparedRequestAuthority` 정산을 기존 transaction에 위임한 뒤에만 `RpcResponseAuthority`를 rollback 또는 terminalize한다. 별도
-   request-free 구현, progress bool, cached admission verdict는 두지 않는다. callback 중 response authority가 executing으로 남아 새 RPC를
+   request-free 구현, progress bool, cached admission verdict는 두지 않는다. execution lease를 얻은 경로는 request backing과 두
+   authority를 모두 정산한 뒤에만 fence를 마지막으로 release한다. callback 중 response authority가 executing으로 남아 새 RPC를
    Busy로 막고, callback 복귀 뒤 canonical이 exact할 때만 response 전이를 게시한다. B3-3 구현은 production 타입과 private wrapper를
    사용하지만 테스트 fixture 밖 제품 caller는 0이며 public destination/ABI와 사용자 가시 동작은 B3-6까지 열지 않는다.
 

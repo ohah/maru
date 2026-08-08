@@ -6,6 +6,7 @@
 //! every entry has been settled by a later cleanup owner.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const contract = @import("generation_attachment_contract.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
 const rpc_response_authority = @import("rpc_response_authority.zig");
@@ -451,6 +452,126 @@ pub const AttachmentCleanupRegistry = struct {
             bound_stream_id,
             .prepared,
             .execute_attach,
+        );
+    }
+
+    pub fn preparedRpcAdmission(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+        bound_stream_id: u64,
+    ) AdmissionError!PreparedAdmission {
+        return self.classifyRequestAdmission(
+            reservation,
+            identity,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            bound_stream_id,
+            .prepared,
+            .execute_rpc,
+        );
+    }
+
+    pub fn executingRpcAdmission(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+        bound_stream_id: u64,
+    ) AdmissionError!PreparedAdmission {
+        return self.classifyRequestAdmission(
+            reservation,
+            identity,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            bound_stream_id,
+            .executing,
+            .execute_rpc,
+        );
+    }
+
+    pub fn reserveRpcResponseExecution(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+        destination_addr: usize,
+    ) (Error || rpc_response_authority.Authority.Error)!rpc_response_authority.Canonical {
+        const entry = try self.exactEntry(reservation, identity);
+        const canonical = requestForReceiptInEntry(
+            entry,
+            prepared.transport_addr,
+            prepared.transport_incarnation,
+            prepared.receipt,
+            .prepared,
+        ) orelse return error.InvalidState;
+        if (!std.meta.eql(canonical, prepared)) return error.InvalidState;
+        return entry.rpc_response_authority.reserveExecuting(.{
+            .registry_incarnation = self.incarnation,
+            .binding = identity,
+            .transport_addr = prepared.transport_addr,
+            .transport_incarnation = prepared.transport_incarnation,
+            .family = prepared.family,
+            .tag = prepared.tag,
+            .request_id = prepared.receipt.request_id,
+            .request_digest = prepared.receipt.request_digest,
+            .destination_addr = destination_addr,
+        });
+    }
+
+    pub fn exhaustRpcResponseEpochForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        if (!builtin.is_test) unreachable;
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.exhaustNextEpochForTest();
+    }
+
+    pub fn rpcExecutionAuthoritiesTerminalForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) Error!bool {
+        if (!builtin.is_test) unreachable;
+        const entry = try self.exactEntry(reservation, identity);
+        return entry.prepared_request.terminalExact() and
+            entry.rpc_response_authority.terminalExactFor(self.incarnation, identity);
+    }
+
+    pub fn rollbackRpcResponseExecution(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        return entry.rpc_response_authority.rollbackExecuting(
+            canonical,
+            self.incarnation,
+            identity,
+        );
+    }
+
+    pub fn settleRpcResponseExecutionTerminal(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        return entry.rpc_response_authority.settleExecutingTerminal(
+            canonical,
+            self.incarnation,
+            identity,
         );
     }
 
@@ -1198,6 +1319,92 @@ test "B3-2 private destination admission resolves canonical receipt and never mu
     try registry.beginBoundDrop(reserved.reservation, reserved.identity, 0xB326);
     try registry.completeActiveDrop(reserved.reservation, reserved.identity, 0xB326);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "B3-3 registry composes RPC admission response reserve and reusable rollback" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB330);
+    const reserved = try registry.reserve(fixtureSeed(0xB331, 0xB332));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB333);
+    const prepared = fixturePrepared(
+        reserved.identity,
+        .observation,
+        .bound_observation,
+        0xB334,
+        0xB335,
+        0xB336,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+    try std.testing.expectEqual(AdmissionDecision.allowed, (try registry.preparedRpcAdmission(
+        reserved.reservation,
+        reserved.identity,
+        prepared.transport_addr,
+        prepared.transport_incarnation,
+        prepared.receipt,
+        0xB333,
+    )).decision);
+    const response = try registry.reserveRpcResponseExecution(
+        reserved.reservation,
+        reserved.identity,
+        prepared,
+        0xB337,
+    );
+    try registry.beginPreparedRequestExecute(reserved.reservation, reserved.identity, prepared);
+    try std.testing.expectEqual(AdmissionDecision.allowed, (try registry.executingRpcAdmission(
+        reserved.reservation,
+        reserved.identity,
+        prepared.transport_addr,
+        prepared.transport_incarnation,
+        prepared.receipt,
+        0xB333,
+    )).decision);
+    try registry.settlePreparedRequest(reserved.reservation, reserved.identity, prepared, false);
+    try registry.rollbackRpcResponseExecution(
+        reserved.reservation,
+        reserved.identity,
+        response,
+    );
+    try std.testing.expectEqual(
+        rpc_response_authority.SettlementReadiness.settled,
+        registry.entries[reserved.reservation.entry_index].rpc_response_authority.settlementReadiness(),
+    );
+}
+
+test "B3-3 registry terminal settlement rejects copied response canonical" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB338);
+    const reserved = try registry.reserve(fixtureSeed(0xB339, 0xB33A));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB33B);
+    const prepared = fixturePrepared(
+        reserved.identity,
+        .observation,
+        .bound_observation,
+        0xB33C,
+        0xB33D,
+        0xB33E,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+    const response = try registry.reserveRpcResponseExecution(
+        reserved.reservation,
+        reserved.identity,
+        prepared,
+        0xB33F,
+    );
+    var forged = response;
+    forged.destination_addr += 1;
+    try std.testing.expectError(
+        error.InvalidCanonical,
+        registry.settleRpcResponseExecutionTerminal(
+            reserved.reservation,
+            reserved.identity,
+            forged,
+        ),
+    );
+    try registry.settleRpcResponseExecutionTerminal(
+        reserved.reservation,
+        reserved.identity,
+        response,
+    );
 }
 
 test "B3-2 private destination admission exhausts context policy and raw discriminants" {

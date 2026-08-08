@@ -127,6 +127,27 @@ pub const Spacing = struct {
     // TS2: pill 스타일의 세로 inset(px) — 바 위아래에서 이만큼 들여 둥근 pill이 strip 위에 떠 보인다. radius는
     // corner_radius_px, 테두리 두께는 border.line_thickness_px 재사용. connected/underline은 미사용. rich>0.
     tab_pill_inset_px: u16 = 0,
+    // BAR-H: 창 상단 chrome 바(터미널 pane 탭 바·도크 뷰 스위처)가 **함께 쓰는** 높이(pt, 폰트 독립).
+    // >0이면 그 값이 곧 바 높이다 — terminal cell이 식에 들어가지 않는다. 0이면 셀 파생
+    // (`cell_height + 2*tab_bar_pad_y_px`)으로 떨어진다.
+    //
+    // **여기 있는 이유**: 이 값은 두 chrome이 공유하는 정렬 계약이다. 도크 뷰 스위처는 예전에
+    // `DockMetrics.view_switcher_h`(40pt)를, 터미널 탭 바는 셀 파생 높이를 따로 써서 두 바의 아래 경계선이
+    // 어긋나 있었다(사용자 보고). 두 소비자가 이 token 하나를 보면 어떤 값이든 정렬은 자동으로 성립한다
+    // (docs/agent-session-list.md §2.1.3이 예고한 해법).
+    //
+    // **셀 항을 `@max`로도 섞지 않는 이유**: 한때 `@max(이값, cell + 2*pad)`였는데, 그러면 terminal 폰트가
+    // 도크 기하를 정하게 되어(docs/layering-and-portability.md 금지) `font-scale-rects` fixture가 실제로
+    // 깨졌다 — 14pt↔24pt에서 도크 rect가 12px 밀렸고, `tab_bar_pad_y_px`가 backing px 고정이라 1x↔2x 비례도
+    // 어긋났다. Ghostty는 폰트 확대가 탭 바를 건드리지 않고 VS Code는 chrome을 `window.zoomLevel`에만 묶는데,
+    // 그 관례가 옳았다. 셀 항이 막으려던 것(큰 폰트에서 탭 제목이 바 밖으로 넘침)은 탭 제목이 terminal 셀
+    // 그리드로 렌더되기 때문이며, 진짜 해법은 그 텍스트를 chrome 폰트로 옮기는 것이지 chrome을 폰트에
+    // 묶는 것이 아니다.
+    //
+    // **tui=0(셀 파생)은 의도다.** tui는 "터미널 셀 격자에 정렬된 미니멀 chrome"이 정체성이고, 탭 바 배경도
+    // 셀 한 행(`paneBarBgCell`)이라 셀에서 떨어진 높이를 주면 배경이 위쪽만 칠해진다. 그 경로에서는 폰트
+    // 파생이 결함이 아니라 요구사항이다. 어느 쪽이든 **두 바가 같은 식을 쓰므로 정렬은 유지된다**.
+    bar_height_pt: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -226,6 +247,10 @@ pub const Tokens = struct {
         tk.space.tab_underbar_px = 3;
         // TS2: pill 스타일 세로 inset 4px(바 위아래) — lifted 회색으로 채운 둥근 캡슐이 strip 위에 떠 보이게(Warp식).
         tk.space.tab_pill_inset_px = 4;
+        // BAR-H: rich 상단 바 40pt 고정 — 도크 뷰 스위처가 쓰던 `DockMetrics.view_switcher_h`와 **같은 값**을
+        // 이제 터미널 탭 바도 함께 본다(두 바의 아래 경계선 정렬). 고정이므로 terminal 폰트를 바꿔도 두 바가
+        // 함께 제자리에 있고, 도크 rect가 폰트에 흔들리지 않는다(`font-scale-rects` fixture).
+        tk.space.bar_height_pt = 40;
         // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
         // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근
         // GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).

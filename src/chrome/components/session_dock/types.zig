@@ -135,10 +135,11 @@ pub const Props = struct {
 /// prevents terminal family/line-spacing from moving a visible Chrome hit target; the host may
 /// deliberately compose an explicit bounded UI zoom into `scale_milli`.
 pub const DockMetrics = struct {
-    /// Session Dock을 고르는 상단 view switcher의 logical height. 이 값은 terminal tab bar와
-    /// 공유하지 않는다. terminal family/line spacing은 content origin을 움직이지 않지만, explicit
-    /// bounded Dock UI zoom은 the same completed tree's card/action rect와 함께 적용된다.
-    view_switcher_h: u32,
+    // 상단 view switcher의 높이는 더 이상 여기 없다. 그 바는 terminal tab bar와 **아래 경계선을 맞춰야**
+    // 하는 유일한 도크 chrome이라, 두 소비자가 공유하는 logical token(`chrome.tokens` `space.bar_height_pt`)
+    // 하나가 소유한다(docs/file-explorer.md §3.5). DockMetrics에 남겨 두면 같은 높이의 출처가 둘이 되고,
+    // 그러면 한쪽만 바뀌어 경계선이 다시 어긋난다 — 그게 이 필드를 지운 이유다. 아래 필드들은 그 바 **아래**
+    // 도크 본문의 치수라 계속 Dock UI zoom에 비례한다.
     header_h: u32,
     scope_h: u32,
     search_h: u32,
@@ -211,7 +212,6 @@ pub const DockMetrics = struct {
         const detail_turn_y = @max(saturatedAdd(saturatedAdd(detail_record_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)), spacing.pointsPx(64, scale));
         const detail_turn_step = saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.overline, scale), spacing.px(.xxs, scale)), typography.lineHeightPx(.body, scale)), spacing.px(.sm, scale));
         return .{
-            .view_switcher_h = geometryPx(spacing.pointsPx(40, scale)),
             // Heading + supporting + 4pt stack gap + 12pt vertical inset on each side.
             .header_h = geometryPx(@max(spacing.pointsPx(76, scale), saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.dock_heading, scale), typography.lineHeightPx(.supporting, scale)), spacing.px(.xxs, scale)), saturatedMul(spacing.px(.sm, scale), 2)))),
             .scope_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
@@ -314,7 +314,6 @@ fn saturatedMul(a: u32, b: u32) u32 {
 
 test "DockMetrics fixes all Session Dock geometry independently of terminal cells" {
     const m = DockMetrics.resolve(1000);
-    try std.testing.expectEqual(@as(u32, 40), m.view_switcher_h);
     try std.testing.expectEqual(@as(u32, 76), m.header_h);
     try std.testing.expectEqual(@as(u32, 48), m.scope_h);
     try std.testing.expectEqual(@as(u32, 48), m.search_h);

@@ -196,19 +196,34 @@ capture 판정은
 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
 이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
 
-이 독립성은 카드 내부에만 한정하지 않는다. 도크를 고르는 상단 switcher는 `DockMetrics`의
-40pt이고, right dock의 시작선은 terminal title strip이 아니라 28pt native-title safety band다.
-따라서 terminal font family/line spacing은 terminal grid/title icon에는 영향을 줄 수 있어도 Session Dock의
-header, scope, search, card, expanded card, resume/reveal border rect의 backing 좌표를 바꾸지 않는다. 반면
-명시적 `Cmd` font-size zoom은 동일한 Dock tree 전체를 함께 확대·축소한다.
+이 독립성은 카드 내부에만 한정하지 않는다. terminal font family/line spacing은 terminal grid/title icon에는
+영향을 줄 수 있어도 Session Dock의 header, scope, search, card, expanded card, resume/reveal border rect의
+backing 좌표를 바꾸지 않는다. 반면 명시적 `Cmd` font-size zoom은 동일한 Dock tree 전체를 함께 확대·축소한다.
 
-**이 둘은 `agent_sessions`만의 예외가 아니라 도크 전체의 규칙이다.** view bar와 도크 시작선은 도크가
-소유한 chrome이므로 `explorer`·`source_control`도 같은 값을 쓴다. 예전에는 그 둘만 pane tab bar와
-높이를 맞췄는데(`terminal cell 높이 + padding`, 시작선은 `max(cell 높이, 28pt)`), 그러면 같은 아이콘
-세 개가 뷰를 바꿀 때마다 오르내리고(실측 53px ↔ 80px) terminal font 크기가 도크 기하를 정하게 된다 —
-[레이어링과 이식성](layering-and-portability.md)이 막으려는 방향이다. 그 대가로 도크 view bar와 terminal
-tab bar의 높이는 더 이상 일치하지 않는다. 이것은 의도된 선택이며, 정렬이 필요하면 terminal 쪽이 아니라
-두 chrome이 공유하는 logical token을 새로 만든다.
+**이 규칙은 `agent_sessions`만의 예외가 아니라 도크 전체의 것이다.** `explorer`·`source_control`도 같은 값을
+쓰며, 뷰를 바꾼다고 어떤 rect도 움직이지 않는다.
+
+**단, 상단 view switcher와 도크 시작선은 여기서 빠진다.** 둘 다 terminal 쪽과 한 줄로 맞아야 하기 때문이다.
+시작선은 terminal과 **같은 상단 띠**(`titlebar_strip_px` = 펼침 28pt / 접힘 30pt)를 쓴다 — 예전에는 도크만
+28pt 고정 band를 따로 받았는데, 그러면 사이드바를 접을 때 두 상단 바의 시작선이 갈려 아래 경계선을 맞춰
+놔도 어긋나 보인다(사용자 보고). **그 띠는 terminal 폰트에 무관하다** — 한때 `max(cell 높이, 28pt)`였으나
+그러면 큰 폰트에서 도크 rect가 통째로 밀려 아래 계약이 깨진다(실측: 14pt↔24pt에서 12px 이동).
+
+그 바의 **높이**도 같은 이유로 여기서 빠진다. 그 바는 terminal tab bar와 아래 경계선을 맞춰야 하는
+유일한 도크 chrome이라(사용자 보고: 두 바가 어긋나 보인다), `DockMetrics`의 40pt를 혼자 쓰지 않고 두
+chrome이 공유하는 logical token(`chrome.tokens`의 `space.bar_height_pt`)을 본다 — 이 문서가 예전에
+"정렬이 필요하면 terminal 쪽이 아니라 두 chrome이 공유하는 logical token을 새로 만든다"고 적어 둔 그
+해법이다. 방향이 반대라는 점이 핵심이다: 도크가 terminal 식을 물려받는 게 아니라 terminal 쪽이 도크의
+40pt를 함께 본다.
+
+**그 token에 terminal cell을 `@max`로도 섞지 않는다.** 한때 `@max(pt, cell + 2*pad)`였는데, 그러면 도크
+기하가 terminal 폰트에서 나와 위 계약이 깨진다 — 실제로 깨졌고(14pt↔24pt 도크 rect 12px 이동,
+`tab_bar_pad_y_px`가 backing px 고정이라 1x↔2x 비례도 이탈) `font-scale-rects` fixture가 잡아냈다. 셀 항이
+막으려던 것(큰 폰트에서 탭 제목이 바 밖으로 넘침)의 원인은 탭 제목이 terminal 셀 그리드로 렌더된다는
+점이며, 해법은 그 텍스트를 chrome 폰트로 옮기는 것이지 chrome을 폰트에 묶는 것이 아니다. 높이의 단일
+출처와 그 아래 텍스트 세로 정렬 규칙은
+[file-explorer.md](file-explorer.md) §3.5가 소유한다. `DockMetrics`의 나머지 필드는 그 바 **아래** 도크
+본문의 치수라 계속 Dock UI zoom에만 비례한다.
 
 #### 2.1.4 B1-button 이관 순서
 

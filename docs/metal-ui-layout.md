@@ -256,10 +256,21 @@ fixture 전용 `render_scale_milli`를 drawable·resize에 일관되게 주입�
 `window.backingScaleFactor`와 주입된 scale을 **분리해** 기록한다. 따라서 이 gate는 제품 host 경로의
 1×/2× projection을 증명하지만 물리 모니터 이동 이벤트를 대체하지 않으며, 후자는 수동 gate다.
 
-`SessionDock`은 terminal tab bar 높이를 재사용하지 않는다. `DockMetrics.view_switcher_h`의 40pt와
-28pt native-title safety band가 right dock의 local origin을 결정한다. `SessionDockUiZoom`이 커져도 terminal
-title strip이 session header를 아래로 밀어서는 안 된다. explorer/source-control은 pane tab bar 정렬이
-별도 UX 계약이므로 이 예외를 쓰지 않는다.
+`SessionDock`의 **본문**은 terminal metric을 재사용하지 않는다. `SessionDockUiZoom`이 커져도 그 아래 header,
+scope, search, card rect는 terminal font family/line spacing에 무관해야 한다.
+
+**예외는 상단 두 가지 — 시작선과 view switcher 한 줄이다.** 둘 다 terminal 쪽과 한 줄로 맞아야 한다.
+right dock의 local origin은 terminal과 **같은 상단 띠**(`titlebar_strip_px` = 펼침 28pt native-title safety band /
+접힘 30pt)이고, view switcher 바는 두 chrome이 공유하는 logical token(`space.bar_height_pt`, rich 40pt)이다.
+도크만 별도 기준선·별도 metric을 쓰던 예전 방식은 접힘에서 두 상단 바의 시작선을 갈랐다(사용자 보고).
+
+**이 예외는 terminal font 독립성을 깨지 않는다.** 두 값 모두 pt 고정이며 terminal cell이 `@max`로도 섞이지
+않는다. 한때 `@max(pt, cell + 2*pad)`로 두었다가 이 문서가 요구하는 계약이 실제로 깨졌다 — 아래 fixture가
+14pt↔24pt에서 도크 rect 12px 이동을 잡았고, `tab_bar_pad_y_px`가 backing px 고정이라 1x↔2x 비례도 이탈했다.
+정렬은 두 소비자가 **같은 고정값**을 보는 것으로 충분하며, 폰트를 끌어들일 이유가 없었다. 이 정렬은
+explorer/source-control만의 UX 계약이 아니라 도크 전체의 규칙이다(단일 출처:
+[file-explorer.md](file-explorer.md) §3.5). 그 바 아래 dock rect/action hit rect는 이 문서의 나머지 규칙대로
+terminal font에 무관해야 한다.
 
 각 JSON은 raw backing-pixel과 `logical = raw_px × 1000 / render_scale_milli`를 함께 기록하고,
 header·scope·search·첫 card·expanded card·resume/log action의 published border/hit rect를 포함한다. icon/label의

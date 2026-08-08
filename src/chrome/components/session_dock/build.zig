@@ -245,8 +245,13 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // 정렬 토글은 header의 유일한 자식이다. `justify = .end`라 오른쪽 끝에 붙고, refresh 자리만큼
     // right margin을 두어 그 **왼쪽**에 앉는다. hit-test가 entry를 역순으로 훑으므로 이 자식이 header
     // 전체에 걸린 refresh action보다 먼저 잡힌다.
-    const sort_nodes = buffers.nodes[nested_cursor + 3 + 4 ..][0..1];
-    sort_nodes[0] = tree.card(.{
+    //
+    // 좁은 도크에서는 아예 내지 않는다. view는 이 노드의 유무만 보고 나머지 utility 배치를 정하므로
+    // published tree가 단일 출처로 남는다.
+    const header_width: u32 = @intFromFloat(@max(0, props.viewport_px.width - @as(f32, @floatFromInt(m.root_inset))));
+    const sort_count: usize = @intFromBool(m.headerFitsSortToggle(header_width));
+    const sort_nodes = buffers.nodes[nested_cursor + 3 + 4 ..][0..sort_count];
+    if (sort_count == 1) sort_nodes[0] = tree.card(.{
         .id = NodeIds.sort_toggle,
         .style = .{
             .width = .{ .px = @floatFromInt(m.header_sort_extent) },
@@ -1031,6 +1036,59 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
             return error.TestUnexpectedResult;
         } else |_| {}
     }
+}
+
+// 최소 도크 폭은 120pt다(session/dock_layout.zig). 정렬 토글까지 넣으면 utility control이 제목을 통째로
+// 밀어내는 폭이 실제로 존재하므로, 그 구간에서는 토글을 발행하지 않는다. view는 이 노드의 유무만 보고
+// 나머지 utility 배치를 정하므로 published tree가 단일 출처다.
+test "SessionDock 좁은 도크는 정렬 토글을 발행하지 않는다" {
+    const std = @import("std");
+    const items = [_]types.Item{
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+    };
+    const Built = struct {
+        nodes: [32]tree.UiNode = undefined,
+        entries: [32]tree.RectEntry = undefined,
+        layout_items: [32]layout.Item = undefined,
+        flex_scratch: [32]layout.FlexScratch = undefined,
+        child_rects: [32]layout.UiRect = undefined,
+        actions: [32]ids.Entry = undefined,
+
+        fn run(self: *@This(), props: types.Props) !Frame {
+            return build(props, .{
+                .nodes = &self.nodes,
+                .entries = &self.entries,
+                .layout_items = &self.layout_items,
+                .flex_scratch = &self.flex_scratch,
+                .child_rects = &self.child_rects,
+                .actions = &self.actions,
+            });
+        }
+    };
+
+    var wide_storage = Built{};
+    const wide = try wide_storage.run(.{
+        .viewport_px = .{ .width = 480, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 1,
+        .items = &items,
+    });
+    try std.testing.expect(wide.tree.find(NodeIds.sort_toggle) != null);
+
+    var narrow_storage = Built{};
+    const narrow = try narrow_storage.run(.{
+        .viewport_px = .{ .width = 160, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 1,
+        .items = &items,
+    });
+    try std.testing.expect(narrow.tree.find(NodeIds.sort_toggle) == null);
+    // 토글이 없어도 refresh는 남는다 — 목록을 갱신할 방법까지 사라지면 안 된다.
+    try std.testing.expect(narrow.tree.find(NodeIds.header) != null);
 }
 
 test "SessionDock publishes no scrollbar when the list fits" {

@@ -431,6 +431,11 @@ fn cacheParsed(state: *State, candidate: Candidate, parsed: *const archive.Parse
     if (state.cache.items.len == max_cache_entries) {
         // A cache miss must never turn a bounded scan into an unbounded
         // process-lifetime metadata store. Existing warm entries remain valid.
+        //
+        // 축출이 아니라 **새 항목을 버리는** 정책이다. 상한이 후보 수보다 훨씬 크므로(실사용 337개 vs
+        // 65,536) 실제로 도달하지 않는다. 삭제된 세션의 항목은 프로세스 수명 동안 남지만 레코드당
+        // 약 250 B라 수천 개여도 MB 미만이고, 앱을 다시 켜면 사라진다. 상한에 실제로 닿는 규모가
+        // 나오면 그때 LRU를 도입한다 — 지금 넣으면 검증할 수 없는 코드가 된다.
         state.allocator.free(path);
         var owned = parsed_copy;
         owned.deinit(state.allocator);

@@ -359,7 +359,8 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
      - `.m`의 아이콘 세로 보정(`py_nudge` 0.30ch)은 토큰·미러 가드 밖이다(배율만 미러한다).
      - `chrome/file_tree_icon.IconKind`가 `icons.Icon`과 **다른 어휘**를 유지한다(`code`↔`file_code`, `config`↔`file_config`, `git`↔`git_branch`). 두 번째 이름 체계라 언제 합칠지 결정이 필요하다.
      - 이름이 그림과 어긋나는 후보: `data`(=데이터베이스 실린더), `web`(=지구본). 개명은 생성물 3종 + 소비처 동시 변경이라 별도 슬라이스다.
-   - **다음 소비처(하단 상태표시줄)를 위해 남은 것**: 아이콘 색을 라벨과 **따로** 줄 수단(`Op.Text.role`이 op당 하나라 "빨간 오류 아이콘 + 중립 라벨"을 한 group으로 못 낸다), 아이콘 슬롯 밀도 세 번째 단계(도크가 이미 20·24pt를 토큰 밖에서 쓴다), 그리고 **상태 변형 축**(활성/비활성/채움)을 `Fit`에 섞지 않는다는 결정 — 섞으면 IC3가 없앤 이름 폭발이 재발한다.
+   - **chrome draw-op 소비처를 위해 남은 것**: 아이콘 색을 라벨과 **따로** 줄 수단(`Op.Text.role`이 op당 하나라 "빨간 오류 아이콘 + 중립 라벨"을 한 group으로 못 낸다), 아이콘 슬롯 밀도 세 번째 단계(도크가 이미 20·24pt를 토큰 밖에서 쓴다), 그리고 **상태 변형 축**(활성/비활성/채움)을 `Fit`에 섞지 않는다는 결정 — 섞으면 IC3가 없앤 이름 폭발이 재발한다.
+     - ⚠️ **이 셋을 "다음 소비처(하단 상태표시줄)의 선결"로 적어 뒀었는데, 상태표시줄은 그 셋 없이 나왔다.** 예측이 틀린 지점은 경로다 — 바 항목은 chrome draw-op이 아니라 **셀 경로**(`coretext_frame_builder.buildStatusBarItemDrawList` → `pane_frames`)로 그려서, 아이콘 셀과 텍스트 셀이 **각각 다른 `style.foreground`**를 받는다(`icon_fg` / `fg`). 그래서 ①(아이콘 색 분리)이 애초에 걸림돌이 아니었다. 셋은 여전히 유효한 과제지만 **draw-op 경로 소비처**에 한한 것이다([status-bar.md](status-bar.md) §5.1).
    - **가드가 무엇을 증명하는가(적대적 검증으로 좁힌 범위)**: 세 생성물이 같은 **집합**을 보는 것만으로는 부족하다 — 이름↔자산 **대응**이 통째로 뒤바뀌어도 집합은 그대로다(실측: gear↔plus를 일관되게 맞바꿔도 전 테스트 통과). 그래서 `icon_glyph.zig`가 `asset_manifest[].name`과 `@tagName(icon)[+"_"+fit]`을 맞추고, `Fit`도 `@typeInfo`로 comptime 전수한다(손으로 적은 배열은 새 fit을 검증 밖에 남긴다). 렌더러가 아이콘별로 분기하는 구조(`is_corner_icon`·`is_bell_icon`·에이전트 배율) 자체를 없애는 것은 셀 DTO에 role을 싣는 별도 작업이다.
 
 ## 10. 리스크 & 미해결

@@ -159,7 +159,40 @@ const codex_working_line = LineMatch{ .prefix = "•", .contains = &.{ "working"
 
 const codex_rules = [_]Rule{
     .{ .id = "action_required_title", .state = .blocked, .priority = 1000, .region = .title, .all = &.{"action required"}, .visible_blocker = true },
-    .{ .id = "confirmation_prompt", .state = .blocked, .priority = 990, .region = .screen, .any = &.{ "press enter to confirm or esc to cancel", "press enter to confirm or esc to go back", "press enter to continue", "allow command?", "enter to submit answer", "enter to submit all" }, .max_lines_from_bottom = 6, .visible_blocker = true },
+    // 확인 문구가 **composer에 타이핑된 경우**는 근거로 치지 않는다. codex 승인 화면은 composer를 대체하므로 정상
+    // 승인 화면에는 `›` 입력 줄이 아예 없다(실측 0.146.1 — 옵션 줄만 `›`를 쓰고 확인 문구는 그 아래 별도 줄이다).
+    // 반대로 사용자가 그 문구를 입력 줄에 치면(승인 UI 문구를 다루는 작업에서 실제로 일어난다) `screen` region +
+    // 하단 6줄 게이트에 그대로 걸려 거짓 blocked가 섰다 — 작업 중인 세션이 "입력 대기"로 뒤집히고 blocked는 절대
+    // 우선이라 워크스페이스 대표 상태까지 오염된다.
+    //
+    // claude와 좁히기 수단이 다른 이유는 «상태 모델과 우선순위»가 적은 그대로다. codex composer는 박스 테두리 없이
+    // 프롬프트 아래 상태줄이 상수로 붙는 구조라 `footer`/`prompt_anchor` region이 성립하지 않으므로, 구조 region이
+    // 아니라 **한 줄의 모양**(`›`로 시작하는 줄에 확인 문구가 있는가)으로 배제한다. `not`이라 정상 승인 화면
+    // (그런 줄이 없음)은 그대로 통과한다.
+    .{
+        .id = "confirmation_prompt",
+        .state = .blocked,
+        .priority = 990,
+        .region = .screen,
+        .max_lines_from_bottom = 6,
+        .visible_blocker = true,
+        .gate = .{
+            .any = &.{
+                .{ .contains = &.{"press enter to confirm or esc to cancel"} },
+                .{ .contains = &.{"press enter to confirm or esc to go back"} },
+                .{ .contains = &.{"press enter to continue"} },
+                .{ .contains = &.{"allow command?"} },
+                .{ .contains = &.{"enter to submit answer"} },
+                .{ .contains = &.{"enter to submit all"} },
+            },
+            // `enter to`·`allow command?`는 위 여섯 문구를 모두 덮는 최소 공통 조각이다. composer 한 줄에 이 조각이
+            // 있으면 그 화면은 승인 대기가 아니라 사용자가 타이핑 중인 화면이다.
+            .not = &.{.{ .any = &.{
+                .{ .line = .{ .prefix = "›", .contains = &.{"enter to"} } },
+                .{ .line = .{ .prefix = "›", .contains = &.{"allow command?"} } },
+            } }},
+        },
+    },
     .{ .id = "interrupted_prompt", .state = .idle, .priority = 885, .region = .screen, .all = &.{"conversation interrupted"}, .max_lines_from_bottom = 4, .visible_idle = true },
     // Codex는 turn 실행 중에도 아래 composer를 열어 steering 입력을 받는다. 따라서 prompt가 더 아래에 있어도
     // 실행 footer가 현재 tail에 함께 보이면 idle 근거가 아니다. 즉 codex에서는 "아래=최신" tiebreak가 성립하지 않고
@@ -252,7 +285,13 @@ fn matchPosition(rule: Rule, input: Input, lines: *const LineScan) ?usize {
     if (rule.gate) |g| {
         // 평면 조건과 같은 의미의 위치(근거가 실제로 보이는 자리)를 쓴다. region 끝을 쓰면 게이트 규칙이
         // 위치 tiebreak에서 항상 이겨 "더 아래가 최신"이라는 의미가 깨진다.
-        return base + (gateMatchPosition(g, haystack) orelse return null);
+        //
+        // 거리 게이트도 평면 경로와 **같은 의미**로 적용한다(가장 위 근거 기준). 예전에는 게이트 규칙이면 여기서
+        // 곧바로 반환해 `max_lines_from_bottom`이 조용히 무시됐다 — 데이터에 값을 적어도 동작하지 않는 함정이라,
+        // 게이트로 옮기는 것만으로 오버레이 규칙이 현재성을 잃는다(실제로 `confirmation_prompt` 이관에서 재현).
+        const span = gateMatchSpan(g, haystack) orelse return null;
+        if (tooFarFromBottom(rule, haystack, span.earliest)) return null;
+        return base + span.latest;
     }
     var latest: usize = 0;
     // 거리 게이트는 **가장 위 근거**를 기준으로 잰다. 가장 아래 근거만 보면 조건이 여럿인 규칙이 20행 떨어진 조각을
@@ -285,54 +324,72 @@ fn matchPosition(rule: Rule, input: Input, lines: *const LineScan) ?usize {
         earliest = @min(earliest orelse pos, pos);
     }
     const anchor = earliest orelse return null;
-    if (rule.max_lines_from_bottom) |max_lines| {
-        var lines_after: usize = 0;
-        for (haystack[anchor..]) |byte| if (byte == '\n') {
-            lines_after += 1;
-        };
-        if (lines_after >= max_lines) return null;
-    }
+    if (tooFarFromBottom(rule, haystack, anchor)) return null;
     return base + latest;
 }
 
-/// 게이트가 매치하면 **근거의 위치**(region 안 byte offset)를 돌려준다. 여러 근거가 맞으면 가장 아래(가장 최신
-/// chrome) 위치를 쓴다 — 평면 조건의 위치 의미와 같게 맞춰, 게이트 규칙도 같은 tiebreak 규칙을 따르게 한다.
+/// 거리 게이트 판정(평면·게이트 경로 공용 단일 출처). `anchor`는 **가장 위 근거**의 offset이다 — 가장 아래만
+/// 재면 조건이 여럿인 규칙이 멀리 떨어진 조각을 조합해도 통과한다(위 주석의 재현 사례).
+fn tooFarFromBottom(rule: Rule, haystack: []const u8, anchor: usize) bool {
+    const max_lines = rule.max_lines_from_bottom orelse return false;
+    var lines_after: usize = 0;
+    for (haystack[anchor..]) |byte| if (byte == '\n') {
+        lines_after += 1;
+    };
+    return lines_after >= max_lines;
+}
+
+/// 게이트 근거가 차지한 구간. `latest`(가장 아래)는 위치 tiebreak에, `earliest`(가장 위)는 거리 게이트에 쓴다 —
+/// 평면 조건이 `latest`/`earliest`를 각각 그 두 곳에 쓰는 것과 **같은 의미**다. 하나만 두면 게이트로 옮긴 규칙이
+/// 조용히 다른 의미가 된다.
+const GateSpan = struct {
+    earliest: usize,
+    latest: usize,
+
+    fn absorb(self: *GateSpan, pos: usize, seen: *bool) void {
+        self.earliest = if (seen.*) @min(self.earliest, pos) else pos;
+        self.latest = if (seen.*) @max(self.latest, pos) else pos;
+        seen.* = true;
+    }
+};
+
+/// 게이트가 매치하면 **근거가 차지한 구간**(region 안 byte offset)을 돌려준다. 여러 근거가 맞으면 tiebreak는 가장
+/// 아래(가장 최신 chrome), 거리 게이트는 가장 위를 본다 — 평면 조건의 의미와 같게 맞춰, 게이트 규칙도 같은
+/// tiebreak·현재성 규칙을 따르게 한다.
 /// 양성 근거가 하나도 없는 게이트는 매치로 치지 않는다(빌드 검증 `validateGate`가 1차 방어, 이건 2차).
-fn gateMatchPosition(gate: Gate, text: []const u8) ?usize {
-    var latest: usize = 0;
+fn gateMatchSpan(gate: Gate, text: []const u8) ?GateSpan {
+    var span = GateSpan{ .earliest = 0, .latest = 0 };
     var positive = false;
     for (gate.contains) |needle| {
-        latest = @max(latest, lastIndexOfIgnoreCase(text, needle) orelse return null);
-        positive = true;
+        span.absorb(lastIndexOfIgnoreCase(text, needle) orelse return null, &positive);
     }
     for (gate.line_prefix) |prefix| {
         const single = [_][]const u8{prefix};
-        latest = @max(latest, lastLinePrefixPosition(text, &single) orelse return null);
-        positive = true;
+        span.absorb(lastLinePrefixPosition(text, &single) orelse return null, &positive);
     }
     if (gate.leading_codepoint_ranges.len > 0) {
-        latest = @max(latest, lastLeadingCodepointPosition(text, gate.leading_codepoint_ranges) orelse return null);
-        positive = true;
+        span.absorb(lastLeadingCodepointPosition(text, gate.leading_codepoint_ranges) orelse return null, &positive);
     }
     if (gate.line) |line| {
-        latest = @max(latest, lastLineMatchPosition(text, line) orelse return null);
-        positive = true;
+        span.absorb(lastLineMatchPosition(text, line) orelse return null, &positive);
     }
     for (gate.all) |sub| {
-        latest = @max(latest, gateMatchPosition(sub, text) orelse return null);
-        positive = true;
+        const sub_span = gateMatchSpan(sub, text) orelse return null;
+        span.absorb(sub_span.earliest, &positive);
+        span.absorb(sub_span.latest, &positive);
     }
     if (gate.any.len > 0) {
+        // any는 하나만 성립하면 되므로 **가장 아래로 성립한 하나**의 위치를 근거로 쓴다(평면 `any`와 같다).
+        // 성립하지 않은 다른 항목의 위치까지 구간에 넣으면 거리 게이트가 엉뚱하게 넓어진다.
         var best: ?usize = null;
-        for (gate.any) |sub| if (gateMatchPosition(sub, text)) |pos| {
-            best = @max(best orelse 0, pos);
+        for (gate.any) |sub| if (gateMatchSpan(sub, text)) |sub_span| {
+            best = @max(best orelse 0, sub_span.latest);
         };
-        latest = @max(latest, best orelse return null);
-        positive = true;
+        span.absorb(best orelse return null, &positive);
     }
-    for (gate.not) |sub| if (gateMatchPosition(sub, text) != null) return null;
+    for (gate.not) |sub| if (gateMatchSpan(sub, text) != null) return null;
     if (!positive) return null;
-    return latest;
+    return span;
 }
 
 /// 양성 매처가 없는 게이트는 모든 텍스트에 매치되어 규칙이 조용히 전역 발화한다. 데이터 실수를 런타임이 아니라
@@ -877,9 +934,9 @@ test "skip_state_update 규칙은 매치해도 상태를 바꾸지 않고 직전
 test "양성 매처 없는 게이트는 매치로 치지 않는다" {
     // 빈 게이트가 참이면 규칙이 모든 화면에서 조용히 발화한다. 빌드 검증(validateGate)이 1차 방어이고,
     // 런타임에서도 매치로 치지 않는지 여기서 못박는다.
-    try std.testing.expect(gateMatchPosition(.{}, "아무 화면") == null);
-    try std.testing.expect(gateMatchPosition(.{}, "") == null);
-    try std.testing.expect(gateMatchPosition(.{ .any = &.{.{}} }, "무엇이든") == null);
+    try std.testing.expect(gateMatchSpan(.{}, "아무 화면") == null);
+    try std.testing.expect(gateMatchSpan(.{}, "") == null);
+    try std.testing.expect(gateMatchSpan(.{ .any = &.{.{}} }, "무엇이든") == null);
     try std.testing.expect(!gateHasPositiveMatcher(.{}));
     try std.testing.expect(gateHasPositiveMatcher(.{ .contains = &.{"x"} }));
 }
@@ -887,11 +944,11 @@ test "양성 매처 없는 게이트는 매치로 치지 않는다" {
 test "게이트 매치 위치는 region 끝이 아니라 근거가 보이는 자리다" {
     const screen = "esc to interrupt\nanswer\nready";
     // 가장 위 줄의 근거를 잡으면 위치도 그 자리여야 한다(region 끝이면 screen.len이 되어 항상 최댓값).
-    const pos = gateMatchPosition(.{ .contains = &.{"esc to interrupt"} }, screen).?;
+    const pos = gateMatchSpan(.{ .contains = &.{"esc to interrupt"} }, screen).?.latest;
     try std.testing.expectEqual(@as(usize, 0), pos);
     try std.testing.expect(pos < screen.len);
     // 여러 근거면 더 아래(최신) 자리를 쓴다.
-    const lower = gateMatchPosition(.{ .contains = &.{ "esc to interrupt", "ready" } }, screen).?;
+    const lower = gateMatchSpan(.{ .contains = &.{ "esc to interrupt", "ready" } }, screen).?.latest;
     try std.testing.expectEqual(std.mem.indexOf(u8, screen, "ready").?, lower);
 }
 
@@ -1345,4 +1402,70 @@ test "claude: 승인 문구가 대화 본문·composer에 있으면 blocked가 �
     try std.testing.expect(detect(.claude, .{ .screen = typed_anchor }).state != .blocked);
     try std.testing.expect(detect(.claude, .{ .screen = spoken_anchor }).state != .blocked);
     try std.testing.expect(detect(.claude, .{ .screen = typed_footer_hint }).state != .blocked);
+}
+
+// codex 승인 화면은 composer를 대체하므로 `›` 입력 줄이 없다. 그 비대칭이 "지금 승인을 기다리는 화면"과 "사용자가
+// 승인 문구를 타이핑 중인 화면"을 가르는 유일한 관측 근거다. 터미널에서 중요한 이유: blocked는 절대 우선이라
+// 거짓 blocked는 작업 중인 세션을 입력 대기로 뒤집고 워크스페이스 대표 상태까지 오염시킨다.
+
+test "codex 실측: 승인·플랜 승인 화면은 blocked이고 composer에 친 같은 문구는 아니다" {
+    // 실측 0.146.1 — 명령 승인. 옵션 줄만 `›`이고 확인 문구는 그 아래 별도 줄이다.
+    const command_approval =
+        "  Would you like to run the following command?\n" ++
+        "  $ printf 'hi' > /Users/u/probe.txt\n" ++
+        "› 1. Yes, proceed (y)\n" ++
+        "  2. Yes, and don't ask again for commands that start with `printf`\n" ++
+        "  3. No, and tell Codex what to do differently (esc)\n" ++
+        "\n" ++
+        "  Press enter to confirm or esc to cancel";
+    // 실측 0.146.1 — `/plan` 승인. 문구가 `… or esc to go back`으로 다르다.
+    const plan_approval =
+        "  Implement this plan?\n" ++
+        "\n" ++
+        "› 1. Yes, implement this plan          Switch to Default and start coding.\n" ++
+        "  2. Yes, clear context and implement  Fresh thread. Context: 2% used.\n" ++
+        "  3. No, stay in Plan mode             Continue planning with the model.\n" ++
+        "\n" ++
+        "  Press enter to confirm or esc to go back";
+    try std.testing.expectEqual(State.blocked, detect(.codex, .{ .screen = command_approval }).state);
+    try std.testing.expectEqual(State.blocked, detect(.codex, .{ .screen = plan_approval }).state);
+
+    // composer에 같은 문구를 친 화면. codex composer는 `› 입력` + 빈 행 + 상태줄(상수 2행) 구조라 하단 거리
+    // 게이트만으로는 걸러지지 않는다 — `›` 줄 모양으로 배제해야 한다.
+    const typed_confirm =
+        "• 승인 UI 문구를 정리하겠습니다.\n" ++
+        "\n" ++
+        "› press enter to confirm or esc to go back 이 어디서 뜨는지 찾아줘\n" ++
+        "\n" ++
+        "  gpt-5.6-sol · /work/maru";
+    const typed_allow =
+        "› allow command? 문구를 코드에서 찾아줘\n" ++
+        "\n" ++
+        "  gpt-5.6-sol · /work/maru";
+    try std.testing.expect(detect(.codex, .{ .screen = typed_confirm }).state != .blocked);
+    try std.testing.expect(detect(.codex, .{ .screen = typed_allow }).state != .blocked);
+}
+
+test "게이트 규칙에도 거리 게이트가 평면 규칙과 같은 의미로 적용된다" {
+    // 예전에는 `rule.gate`가 있으면 matchPosition이 곧바로 반환해 `max_lines_from_bottom`이 조용히 무시됐다.
+    // 데이터에 값을 적어도 동작하지 않는 함정이라, 평면 규칙을 게이트로 옮기는 것만으로 오버레이 규칙이
+    // 현재성을 잃는다(스크롤로 위에 밀린 과거 문구가 계속 blocked를 세운다).
+    const rules = [_]Rule{
+        .{ .id = "gated_overlay", .state = .blocked, .priority = 100, .region = .screen, .visible_blocker = true, .max_lines_from_bottom = 3, .gate = .{ .contains = &.{"allow command?"} } },
+    };
+    // 하단 2행 안 → 현재 근거다.
+    try std.testing.expectEqual(State.blocked, detectWithRules(&rules, .{ .screen = "Allow command?\n› 1. Yes\n" }).state);
+    // 위로 밀린 과거 문구 → 근거가 아니다(거리 게이트가 잘라야 한다).
+    const scrolled = "Allow command?\nout1\nout2\nout3\nout4\n› \n";
+    try std.testing.expectEqual(State.unknown, detectWithRules(&rules, .{ .screen = scrolled }).state);
+
+    // 거리는 **가장 위 근거**로 잰다. 아래 근거만 보면 멀리 떨어진 조각을 조합해도 통과한다.
+    const spread = [_]Rule{
+        .{ .id = "spread_gate", .state = .blocked, .priority = 100, .region = .screen, .visible_blocker = true, .max_lines_from_bottom = 3, .gate = .{ .all = &.{
+            .{ .contains = &.{"far above"} },
+            .{ .contains = &.{"near bottom"} },
+        } } },
+    };
+    try std.testing.expectEqual(State.unknown, detectWithRules(&spread, .{ .screen = "far above\na\nb\nc\nd\nnear bottom\n" }).state);
+    try std.testing.expectEqual(State.blocked, detectWithRules(&spread, .{ .screen = "x\nfar above\nnear bottom\n" }).state);
 }

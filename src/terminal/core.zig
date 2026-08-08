@@ -8057,3 +8057,55 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[1].codepoint); // 다음 칸은 빈칸
     try std.testing.expectEqual(@as(u16, 1), core.screen.cursor.col);
 }
+
+// 문자열 시퀀스(OSC/DCS/APC) 도중의 ESC는 그 시퀀스를 취소하고 **그 ESC부터 새 시퀀스를 시작**한다
+// (ECMA-48·vt100.net DEC 상태 머신의 anywhere transition). 예전에는 abort하며 ESC를 소비해, 뒤따르는
+// `]777;notify;…`가 본문 텍스트로 화면에 찍히고 알림은 유실됐다. 터미널에서 중요한 이유: TUI는 프레임마다
+// 타이틀 OSC를 다시 쓰므로 알림 OSC가 그 사이에 끼어드는 인터리빙이 실제로 일어나며(실측), 증상이 셋으로
+// 번진다 — 알림 유실 + 제어 문자열이 사용자 화면에 노출 + 그 줄이 화면 하단을 차지해 agent observer의
+// 거리 게이트가 blocker 근거를 잘라내 승인 대기가 유휴로 뒤집힌다.
+test "문자열 시퀀스 abort는 ESC를 삼키지 않고 새 시퀀스로 재시작한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+
+    const cases = [_]struct { prefix: []const u8, body: []const u8 }{
+        .{ .prefix = "\x1b]0;title-being-set", .body = "osc-restart" }, // 미완성 OSC 뒤 새 OSC(실측 재현 경로)
+        .{ .prefix = "\x1b", .body = "esc-esc" }, // ESC 다음에 또 ESC
+        .{ .prefix = "\x1bP1$r", .body = "dcs-abort" }, // 미완성 DCS
+        .{ .prefix = "\x1b_Gi=1", .body = "apc-abort" }, // 미완성 APC(kitty graphics)
+        .{ .prefix = "\x1b[38;2;1", .body = "csi-abort" }, // 미완성 CSI
+    };
+    for (cases) |c| {
+        try core.write(c.prefix);
+        try core.write("\x1b]777;notify;T;");
+        try core.write(c.body);
+        try core.write("\x07");
+        const n = core.pendingNotification() orelse return error.NotificationLost;
+        try std.testing.expectEqualStrings("T", n.title);
+        try std.testing.expectEqualStrings(c.body, n.body);
+        core.clearNotification();
+    }
+}
+
+test "abort된 시퀀스 뒤 OSC 본문이 화면 텍스트로 새지 않는다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    // 실측 증상: 화면에 `]777;notify;Claude Code;Claude needs your permission`이 글자로 찍혔다.
+    try core.write("\x1b]0;incomplete");
+    try core.write("\x1b]777;notify;Claude Code;Claude needs your permission\x07");
+    try std.testing.expect(core.pendingNotification() != null);
+    core.clearNotification();
+
+    // 첫 행에 제어 문자열 조각이 남아 있으면 안 된다.
+    var row: std.ArrayList(u8) = .empty;
+    defer row.deinit(std.testing.allocator);
+    for (core.viewportRow(0)) |cell| {
+        const cp = cell.codepoint;
+        if (cp == 0 or cp == ' ') continue;
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch continue;
+        try row.appendSlice(std.testing.allocator, buf[0..len]);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, row.items, "777") == null);
+    try std.testing.expect(std.mem.indexOf(u8, row.items, "notify") == null);
+}

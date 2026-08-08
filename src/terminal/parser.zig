@@ -871,9 +871,19 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                 // OSC 안에서 ESC 다음 바이트. ST(ESC \)면 정상 종료로 dispatch(defer가 capacity 반납),
                 // 그 외(abort)도 OSC를 끝내되(관대 처리 — 내용은 버린다) dispatch를 안 거치므로 여기서 직접
                 // 반납한다 — 안 그러면 대용량 OSC 52를 abort로 끊었을 때 megabyte가 상주한다(상한 재확립).
-                if (bytes[index_] == '\\') dispatchOsc(self) else reclaimOscBuffer(self);
-                self.parser = .ground;
-                index_ += 1;
+                if (bytes[index_] == '\\') {
+                    dispatchOsc(self);
+                    self.parser = .ground;
+                    index_ += 1;
+                } else {
+                    reclaimOscBuffer(self);
+                    // **ESC를 삼키지 않는다.** ECMA-48/DEC 상태 머신에서 ESC는 anywhere transition이라, 문자열
+                    // 시퀀스 도중의 ESC는 그 시퀀스를 취소하고 **그 ESC부터 새 시퀀스를 시작**한다. 예전에는
+                    // abort하며 ESC를 소비해, 뒤따르는 `]777;notify;…`가 본문 텍스트로 화면에 찍히고 알림은
+                    // 유실됐다(실측: claude가 타이틀 OSC 재설정 중 알림 OSC를 보내면 재현). index_를 올리지 않고
+                    // `.escape`로 되돌려 현재 바이트를 새 시퀀스의 첫 바이트로 다시 본다.
+                    self.parser = .escape;
+                }
             },
             .apc => {
                 const byte = bytes[index_];
@@ -891,10 +901,15 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                 index_ += 1;
             },
             .apc_escape => {
-                // APC 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 APC를 끝낸다(관대 처리).
-                if (bytes[index_] == '\\') dispatchApc(self);
-                self.parser = .ground;
-                index_ += 1;
+                // APC 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외는 APC를 취소하고 그 ESC부터 새
+                // 시퀀스를 시작한다(osc_escape와 같은 근거 — ESC는 anywhere transition).
+                if (bytes[index_] == '\\') {
+                    dispatchApc(self);
+                    self.parser = .ground;
+                    index_ += 1;
+                } else {
+                    self.parser = .escape;
+                }
             },
             .dcs => {
                 const byte = bytes[index_];
@@ -910,10 +925,15 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                 index_ += 1;
             },
             .dcs_escape => {
-                // DCS 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 DCS를 끝낸다(관대 처리).
-                if (bytes[index_] == '\\') dispatchDcs(self);
-                self.parser = .ground;
-                index_ += 1;
+                // DCS 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외는 DCS를 취소하고 그 ESC부터 새
+                // 시퀀스를 시작한다(osc_escape와 같은 근거 — ESC는 anywhere transition).
+                if (bytes[index_] == '\\') {
+                    dispatchDcs(self);
+                    self.parser = .ground;
+                    index_ += 1;
+                } else {
+                    self.parser = .escape;
+                }
             },
         }
     }
@@ -1001,6 +1021,10 @@ fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
             self.escape_intermediate_byte = byte;
             self.parser = .escape_intermediate;
         },
+        // ESC 다음에 또 ESC가 오면 앞의 것은 버려진 시작이고 뒤의 것이 진짜 시작이다(ESC는 anywhere
+        // transition). ground로 떨어뜨리면 이어지는 `]777;…`이 본문 텍스트가 되어 화면을 더럽히고 알림이
+        // 유실된다 — 문자열 시퀀스 abort와 같은 결함이라 여기서도 escape 상태를 유지한다.
+        0x1b => self.parser = .escape,
         // 그 밖의 ESC <final>(NEL 등)은 A1에서 소비만 한다.
         else => self.parser = .ground,
     }

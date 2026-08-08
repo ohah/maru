@@ -8545,6 +8545,23 @@ pub const Client = struct {
         };
     }
 
+    /// Revalidates every Client-owned response publication invariant after allocator/parser
+    /// callbacks have returned and before an external response owner is initialized.
+    pub fn revalidatePreparedResponsePublication(
+        self: *const Client,
+        lease: *const PreparedRequestExecutionLease,
+        expected_payload_allocator: std.mem.Allocator,
+    ) PreparedBlockingRpcError!void {
+        if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease) or
+            lease.progress != .request_maybe_written or lease.response_read_started != 1 or
+            !std.meta.eql(expected_payload_allocator, self.allocator) or
+            !self.parser.usesAllocator(expected_payload_allocator) or
+            lease.identity.request_id == std.math.maxInt(u64) or
+            self.next_request_id != lease.identity.request_id + 1 or self.fd < 0 or
+            self.unusable or self.first_poison_reason != null)
+            return error.InvalidPreparedRpc;
+    }
+
     fn readCorrelatedPreparedResponse(
         self: *Client,
         request_id: u64,
@@ -13005,6 +13022,15 @@ test "B3-4/5 response-only lease read correlates without request replay or id ad
     try std.testing.expectEqualStrings("{\"result\":true}", response.payload);
     try std.testing.expectEqual(identity.request_id, response.response_request_id);
     try std.testing.expectEqual(next_after_write, client.next_request_id);
+    try client.revalidatePreparedResponsePublication(&lease, expected_allocator);
+    lease.response_read_started = 0;
+    lease.seal = preparedExecutionLeaseSeal(&lease);
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.revalidatePreparedResponsePublication(&lease, expected_allocator),
+    );
+    lease.response_read_started = 1;
+    lease.seal = preparedExecutionLeaseSeal(&lease);
     try std.testing.expectError(
         error.InvalidPreparedRpc,
         client.readPreparedResponseUnderExecutionLease(&lease, expected_allocator, null),

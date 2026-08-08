@@ -2215,7 +2215,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"B3-4/5 RPC free evidence"},
         });
         const run_b3_4_5_evidence_tests = b.addRunArtifact(b3_4_5_evidence_tests);
-        run_b3_4_5_evidence_tests.addArg("--maru-expect-tests=3");
+        run_b3_4_5_evidence_tests.addArg("--maru-expect-tests=4");
         run_b3_4_5_evidence_tests.setCwd(b.path("."));
         session_host_b3_4_5_step.dependOn(&run_b3_4_5_evidence_tests.step);
 

@@ -23,6 +23,24 @@ const budgets = struct {
     // 회당 ~30ms(행당 free+alloc+복사) — 60fps 두 프레임으로 사용자 체감이 없는 수준이고, 50회
     // 예산 2s는 회당 40ms를 상한으로 고정한다(행 버퍼 풀링 등 구조 변경으로 더 줄이는 건 후속).
     const scrollback_rewrap_ns = 2 * std.time.ns_per_s;
+    // 스크롤백 Find(findMatches)는 검색어 키 입력마다, 그리고 Find가 열린 채 출력이 있는 매 tick마다
+    // core lock 아래에서 스크롤백 전체를 재스캔한다(app_session/find.zig `recomputeFind`,
+    // app_session.zig의 tick 재검색). 인덱스도 결과 캐시도 없는 구조라 비용이 스크롤백 깊이에 선형인지가
+    // 이 게이트의 관심사다. 측정(2026-08, ReleaseFast, 120열): 기본 `scrollback.lines=1000`에서 회당
+    // **0.1ms** = 30Hz(33ms) 예산의 0.3%로, kitty 파이프라인(0.87ms)보다 싸다 — 증분 결과 캐시가
+    // 불필요하다는 결론의 전제가 이 값이다. 깊이에 선형이라 설정 최대 100,000행에서 14.8ms가 된다.
+    // 매치 밀도의 영향은 있지만 지배적이지 않다(10,000행 40회 ReleaseFast에서 0매치 50ms vs 20,046매치
+    // 57ms로 14% 차 — 스캔이 비용을 지배한다). 기본 1000행은 잡음에 묻혀 회귀 감지력이 없으므로
+    // 5,000행으로 재고, needle은 매치가 다수 나오는 것을 골라 결과 append 경로까지 함께 덮는다.
+    //
+    // 반복 수는 **CI 실측**으로 정했다. 이 게이트는 ubuntu-latest에서만 도는데 로컬 macOS보다 2.45배
+    // 느리다(같은 Debug 빌드). 처음엔 로컬 Debug 989ms=예산 50%를 근거로 40회로 뒀다가 CI에서
+    // 2450ms로 **실패**했다 — 로컬 값으로 CI 예산을 정하면 안 된다는 뜻이다(항목별 로컬↔CI 비율이
+    // 0.27~2.45배로 흩어져 다른 항목에서 외삽할 수도 없다). 20회·5,000행(총 스캔량 1/4)으로 줄여
+    // 로컬 Debug 247ms → CI 예상 ~605ms = 예산의 30%가 된다. 여기에 CI 부하 변동(같은 코드로 12 run
+    // max/avg ~1.2)을 얹은 max ~726ms = 36%로, 다른 항목의 실측 대역(max 기준 18~44%)과 같다.
+    // 남은 여유가 감지 배율 ~2.75배라 구조 회귀(선형이 깨지는 제곱화, 셀당 여분 할당)를 잡는다.
+    const core_find_scrollback_ns = 2 * std.time.ns_per_s;
     // kitty 이미지 파이프라인(buildGpuImages + planImageUploads)은 이미지가 있는 동안 매 frame 돈다.
     // 측정(2026-06): 최악(200 placement × 50 image)에서도 회당 ~0.87ms = 30Hz(33ms) 예산의 ~2.6%라
     // 캐시화(#10)가 불필요하다고 결론. 이 게이트는 그 비용이 조용히 회귀하지 않게 1000회 2s(회당 2ms
@@ -57,6 +75,7 @@ pub fn main(init: std.process.Init) !void {
         try measureResizeLoop(allocator, io),
         try measureSnapshotSerialization(allocator, io),
         try measureScrollbackRewrap(allocator, io),
+        try measureFindScrollback(allocator, io),
         try measureKittyImagePipeline(allocator, io),
         try measureRenderBuildDrawList(allocator, io),
         try measureRenderBuildScrolled(allocator, io),
@@ -174,6 +193,46 @@ fn measureScrollbackRewrap(allocator: std.mem.Allocator, io: std.Io) !Budget {
         .name = "scrollback_rewrap",
         .elapsed_ns = elapsed,
         .budget_ns = budgets.scrollback_rewrap_ns,
+        .units = iterations,
+    };
+}
+
+fn measureFindScrollback(allocator: std.mem.Allocator, io: std.Io) !Budget {
+    var core = try maru.terminal.TerminalCore.init(allocator, .{ .cols = 120, .rows = 24 });
+    defer core.deinit();
+
+    // 기본 cap(1000행)은 회당 0.1ms라 러너 잡음에 묻힌다 — 깊이 선형성을 실제로 볼 수 있게 5배로 둔다
+    // (config `scrollback.lines` 허용 범위는 0~100,000이므로 사용자가 실제로 겪을 수 있는 구간이다).
+    // 깊이×반복의 총 스캔량이 CI 소요를 정하므로, 이 값을 바꾸면 반복 수도 함께 재산정해야 한다.
+    const sb_lines = 5_000;
+    core.screen.sb.cap = sb_lines;
+    for (0..sb_lines + 24) |line_no| { // +rows: 스크롤백을 cap까지 채우고 활성 화면도 내용으로 덮는다
+        var line_buffer: [160]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&line_buffer);
+        try writer.print("find-source-{d}-abcdefghijklmnopqrstuvwxyz0123456789\r\n", .{line_no});
+        try core.write(writer.buffered());
+    }
+
+    var matches: std.ArrayList(maru.terminal.Match) = .empty;
+    defer matches.deinit(allocator);
+
+    // needle "source-1"은 line_no가 1로 시작하는 줄에 걸린다 — 1·10~19·100~199·1000~1999의 1,111줄
+    // (실측)이 매치돼 스캔뿐 아니라 결과 append 경로도 함께 덮는다(논리 줄 안에서 비겹침이라 줄당 1개).
+    // 스크롤백 0~4999가 cap에 정확히 들어가 eviction은 없고, 활성 화면(5000~5023)은 needle과 안 겹친다.
+    const iterations = 20;
+    const start = now(io);
+    for (0..iterations) |_| try core.findMatches(allocator, "source-1", &matches);
+    const elapsed = now(io) - start;
+
+    // 검색이 스크롤백까지 훑었는지 확인한다 — 활성 화면(24행)만 봤다면 매치가 24개를 못 넘으므로,
+    // 게이트가 "빈 스크롤백을 빠르게 훑고 통과"하는 false-green이 되지 않게 한다. 실측 1,111개보다
+    // 넉넉히 낮게 잡아, setup 라인 형식을 손대도 이 가드가 먼저 깨지지 않게 한다(깊이 검증이 목적).
+    if (matches.items.len <= @as(usize, core.size.rows)) return error.PerfResultMissingFindMatches;
+
+    return .{
+        .name = "core_find_scrollback",
+        .elapsed_ns = elapsed,
+        .budget_ns = budgets.core_find_scrollback_ns,
         .units = iterations,
     };
 }

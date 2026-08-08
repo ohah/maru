@@ -43,6 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
+        with:
+          # PR에서는 캐시를 **쓰지 않는다**(읽기는 유지). GitHub 캐시는 ref 스코프라 `refs/pull/N/merge`에
+          # 저장된 툴체인 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 영영 못 읽으면서 한도(10GB)만 먹는다.
+          # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache

@@ -7,6 +7,7 @@
 const std = @import("std");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response = @import("executed_response.zig");
+const rpc_executed_response = @import("rpc_executed_response.zig");
 const client_queue_limits = @import("client_queue_limits.zig");
 
 pub const max_entries: usize = client_queue_limits.max_observed_response_payloads;
@@ -69,6 +70,12 @@ pub const PayloadFailStopReason = enum {
 pub const TransferOutcome = union(enum) {
     transferred,
     rejected_safe_released: executed_response.ExecutedResponse.InitError,
+    fail_stop_required: PayloadFailStopReason,
+};
+
+pub const RpcTransferOutcome = union(enum) {
+    transferred,
+    rejected_safe_released: rpc_executed_response.RpcExecutedResponse.Error,
     fail_stop_required: PayloadFailStopReason,
 };
 
@@ -324,6 +331,59 @@ pub const Ledger = struct {
                 entry.lifecycle = .terminal_no_free;
                 entry.terminal_reason = .ledger_drift;
                 return .{ .fail_stop_required = .ledger_drift };
+            }
+            entry.lifecycle = .retired;
+            const backing = self.captureBackingSnapshot() catch {
+                self.sealLedgerTerminalNoFree(.ledger_drift);
+                return .{ .fail_stop_required = .ledger_drift };
+            };
+            if (payload.len != 0) allocator.free(payload);
+            if (!self.backingSnapshotStillExact(backing)) {
+                self.sealLedgerTerminalNoFree(.ledger_drift);
+                return .{ .fail_stop_required = .ledger_drift };
+            }
+            _ = self.entryForReceipt(receipt, .retired) catch {
+                self.sealLedgerTerminalNoFree(.ledger_drift);
+                return .{ .fail_stop_required = .ledger_drift };
+            };
+            return .{ .rejected_safe_released = err };
+        };
+        entry.lifecycle = .transferred_response;
+        return .transferred;
+    }
+
+    /// Atomically consumes one promoted ledger entry into the repeating-RPC byte owner. The owner
+    /// receives neutral scalar provenance only and never gains a reverse dependency on this ledger.
+    pub fn transferPromotedRpcResponse(
+        self: *Ledger,
+        receipt: Receipt,
+        out: *rpc_executed_response.RpcExecutedResponse,
+        identity: rpc_executed_response.Identity,
+    ) RpcTransferOutcome {
+        const entry = self.entryForReceipt(receipt, .promoted_response) catch {
+            self.sealLedgerTerminalNoFree(.ledger_drift);
+            return .{ .fail_stop_required = .ledger_drift };
+        };
+        const allocator = allocatorFromIdentity(entry.allocator);
+        const payload = payloadFromEntry(entry.*);
+        rpc_executed_response.RpcExecutedResponse.initLiveInPlace(
+            out,
+            identity,
+            allocator,
+            payload,
+            .{
+                .ledger_addr = @intFromPtr(self),
+                .guard_addr = receipt.authority.guard_addr,
+                .node_addr = receipt.authority.node_addr,
+                .operation_incarnation = receipt.authority.operation_incarnation,
+                .index = receipt.index,
+                .generation = receipt.generation,
+            },
+        ) catch |err| {
+            if (!out.pristineExact() or err == error.AliasedStorage) {
+                entry.lifecycle = .terminal_no_free;
+                entry.terminal_reason = if (err == error.AliasedStorage) .owner_alias else .ledger_drift;
+                return .{ .fail_stop_required = entry.terminal_reason.? };
             }
             entry.lifecycle = .retired;
             const backing = self.captureBackingSnapshot() catch {
@@ -807,6 +867,138 @@ test "B3-0a canonical transfer atomically publishes response and consumes promot
     try std.testing.expectEqualStrings("accepted", try response.borrowAccepted(&owner));
     try std.testing.expectEqual(executed_response.DeinitOutcome.cleaned, response.deinit(&owner));
     try ledger.endOperation();
+}
+
+fn rpcFixtureBinding(destination_addr: usize) contract.BindingIdentity {
+    return contract.BindingIdentity.init(.{
+        .binding_incarnation = 51,
+        .binding_storage_addr = 0x7100,
+        .destination_addr = destination_addr,
+        .binding_reservation_id = 53,
+        .slot_incarnation = 59,
+        .node_incarnation = 61,
+        .host_id = 67,
+        .connection_generation = 1,
+        .runtime_id = 71,
+        .role = .controller,
+        .pid = 73,
+        .process_nonce = 79,
+    }).?;
+}
+
+fn rpcFixtureIdentity(destination_addr: usize) rpc_executed_response.Identity {
+    return .{
+        .registry_incarnation = 83,
+        .binding = rpcFixtureBinding(destination_addr),
+        .transport_addr = 0x7200,
+        .transport_incarnation = 89,
+        .family = .bound_observation,
+        .tag = .observation,
+        .request_id = 97,
+        .request_digest = 101,
+        .response_epoch = 1,
+        .destination_addr = destination_addr,
+    };
+}
+
+test "B3-4/5 RPC ledger transfer publishes owner and consumes promoted entry" {
+    const allocator = std.testing.allocator;
+    var ledger: Ledger = .{};
+    try Ledger.initInPlace(&ledger, allocator, .{
+        .guard_addr = 0x7300,
+        .node_addr = 0x7400,
+        .operation_incarnation = 103,
+    }, 1);
+    const payload = try allocator.dupe(u8, "rpc-response");
+    const generation = try ledger.reserveObserved(payload.len, allocator);
+    try ledger.commitObserved(generation, payload, allocator);
+    const receipt = switch (ledger.classifyResponsePayloadProvenance(
+        generation,
+        payload,
+        allocator,
+        allocator,
+    )) {
+        .promoted => |value| value,
+        .fail_stop_required => return error.TestUnexpectedResult,
+    };
+    var response: rpc_executed_response.RpcExecutedResponse = .{};
+    const identity = rpcFixtureIdentity(@intFromPtr(&response));
+    try std.testing.expect(ledger.transferPromotedRpcResponse(receipt, &response, identity) == .transferred);
+    var borrow: rpc_executed_response.RpcResponseBorrow = .{};
+    try response.prepareBorrow(identity, &borrow);
+    var finish: rpc_executed_response.RpcResponseFinishTxn = .{};
+    try response.prepareFinish(identity, &borrow, &finish);
+    response.commitFreeNoFail(identity, &borrow, &finish);
+    try std.testing.expect(finish.freeCaptured());
+    response.finishCleanNoFail(&finish);
+    try ledger.endOperation();
+}
+
+test "B3-4/5 RPC ledger transfer safely releases empty promoted payload" {
+    const allocator = std.testing.allocator;
+    var ledger: Ledger = .{};
+    try Ledger.initInPlace(&ledger, allocator, .{
+        .guard_addr = 0x7500,
+        .node_addr = 0x7600,
+        .operation_incarnation = 107,
+    }, 1);
+    const empty: []u8 = @constCast(&[_]u8{});
+    const generation = try ledger.reserveObserved(0, allocator);
+    try ledger.commitObserved(generation, empty, allocator);
+    const receipt = switch (ledger.classifyResponsePayloadProvenance(
+        generation,
+        empty,
+        allocator,
+        allocator,
+    )) {
+        .promoted => |value| value,
+        .fail_stop_required => return error.TestUnexpectedResult,
+    };
+    var response: rpc_executed_response.RpcExecutedResponse = .{};
+    const outcome = ledger.transferPromotedRpcResponse(
+        receipt,
+        &response,
+        rpcFixtureIdentity(@intFromPtr(&response)),
+    );
+    try std.testing.expect(outcome == .rejected_safe_released);
+    try std.testing.expectEqual(
+        rpc_executed_response.RpcExecutedResponse.Error.InvalidPayload,
+        outcome.rejected_safe_released,
+    );
+    try std.testing.expect(response.pristineExact());
+    try ledger.endOperation();
+}
+
+test "B3-4/5 RPC ledger transfer rejects copied receipt without owner mutation" {
+    const allocator = std.testing.allocator;
+    var ledger: Ledger = .{};
+    try Ledger.initInPlace(&ledger, allocator, .{
+        .guard_addr = 0x7700,
+        .node_addr = 0x7800,
+        .operation_incarnation = 109,
+    }, 1);
+    const payload = try allocator.dupe(u8, "rpc-response");
+    defer allocator.free(payload);
+    const generation = try ledger.reserveObserved(payload.len, allocator);
+    try ledger.commitObserved(generation, payload, allocator);
+    const receipt = switch (ledger.classifyResponsePayloadProvenance(
+        generation,
+        payload,
+        allocator,
+        allocator,
+    )) {
+        .promoted => |value| value,
+        .fail_stop_required => return error.TestUnexpectedResult,
+    };
+    var copied = receipt;
+    copied.generation += 1;
+    var response: rpc_executed_response.RpcExecutedResponse = .{};
+    try std.testing.expect(ledger.transferPromotedRpcResponse(
+        copied,
+        &response,
+        rpcFixtureIdentity(@intFromPtr(&response)),
+    ) == .fail_stop_required);
+    try std.testing.expect(response.pristineExact());
 }
 
 test "B3-0a provenance classification uses exact generation and seals no-free reason" {

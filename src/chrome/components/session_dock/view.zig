@@ -87,7 +87,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
 
     // 정렬 토글. published 자식 rect 안에 label을 중앙 정렬해 그린다 — 방향이 바뀌어도 slot 폭이
     // 고정이라 옆의 `로컬`과 refresh가 움직이지 않는다.
-    if (sort_rect) |rect| try writer.text(rect, 0, props.sort_order.label(), .surface_fg, .control, 4, false, true);
+    if (sort_rect) |rect| try writer.text(rect, 0, props.sort_order.label(), .surface_fg, .control, 1, false, true);
 
     try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, .control, 1, false, true);
     try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, .control, 1, false, true);

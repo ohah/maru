@@ -188,6 +188,9 @@ pub const DockMetrics = struct {
     /// 고정한다 — label 길이에 따라 slot이 늘었다 줄면 그 옆의 `로컬`과 refresh가 방향을 바꿀 때마다
     /// 움직인다.
     header_sort_extent: u32,
+    /// 정렬 토글의 line box 높이. control role 한 줄이며, 이 값이 있어야 header가 토글을 세로 중앙에
+    /// 놓는다.
+    header_sort_line_h: u32,
     header_trailing_inset: u32,
     group_disclosure_inset_x: u32,
     group_disclosure_extent: u32,
@@ -267,6 +270,7 @@ pub const DockMetrics = struct {
             // shared dock content edge, so neither the SVG nor the spinner reads as clipped.
             .header_refresh_extent = geometryPx(spacing.pointsPx(24, scale)),
             .header_sort_extent = geometryPx(spacing.pointsPx(72, scale)),
+            .header_sort_line_h = geometryPx(typography.lineHeightPx(.control, scale)),
             .header_trailing_inset = geometryPx(spacing.px(.lg, scale)),
             // The root already contributes the dock's 20pt content inset. The disclosure gets
             // only its local 8pt slot, preventing the chevron from inheriting a second 20pt.

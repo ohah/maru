@@ -251,19 +251,21 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const header_width: u32 = @intFromFloat(@max(0, props.viewport_px.width - @as(f32, @floatFromInt(m.root_inset))));
     const sort_count: usize = @intFromBool(m.headerFitsSortToggle(header_width));
     const sort_nodes = buffers.nodes[nested_cursor + 3 + 4 ..][0..sort_count];
-    if (sort_count == 1) sort_nodes[0] = tree.card(.{
+    if (sort_count == 1) sort_nodes[0] = tree.button(.{
         .id = NodeIds.sort_toggle,
         .style = .{
             .width = .{ .px = @floatFromInt(m.header_sort_extent) },
-            // 세로는 지정하지 않는다. header의 `align_items = .stretch`가 채우며, cross axis에 fill을
-            // 쓰면 layout이 `FillOnCrossAxis`로 fail-close한다.
+            // 세로는 control 한 줄로 고정한다. header의 `align_items = .center`가 그 줄을 세로 중앙에
+            // 놓는다 — stretch로 두면 label이 헤더 위쪽에 붙고 상자가 옆의 두 utility보다 훨씬 커진다.
+            .height = .{ .px = @floatFromInt(m.header_sort_line_h) },
             .margin = .{ .right = @floatFromInt(m.header_trailing_inset + m.header_refresh_extent + m.header_utility_gap) },
         },
-        .variant = .surface,
-        .paint = .{},
+        // `ghost`는 평소 panel과 같은 배경을 써 **테두리 없이 label만** 보인다. Card `.surface`로 두면
+        // 둥근 테두리 상자가 그려져 배경 없는 `로컬`·refresh와 톤이 갈린다.
+        .variant = .ghost,
         .action = sort,
         .overflow = .clip,
-    }, &.{});
+    });
 
     const top = buffers.nodes[nested_cursor + 3 ..][0..4];
     top[0] = tree.card(.{
@@ -271,6 +273,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{ .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .right = @floatFromInt(m.root_inset) } },
         .direction = .row,
         .justify = .end,
+        .align_items = .center,
         // Header text has no enclosing card in the dock reference. It remains a Card only so
         // refresh retains one completed action rect.  Its bottom rule is deliberately explicit:
         // a borderless header must not make the fixed chrome merge into the control/list area.

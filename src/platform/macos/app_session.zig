@@ -3409,6 +3409,9 @@ pub const AppSession = struct {
     dock_list_scrollbar_idle_ticks: u32 = default_scrollbar_visible_ticks + default_scrollbar_fade_ticks,
     dock_list_scrollbar_last_offset_px: u32 = 0,
     dock_list_scrollbar_hovered: bool = false,
+    /// 포인터가 사이드바 막대 위인가. 커서 종류는 **안 바꾸고**(얇은 띠라 깜빡임 방지 — pane·도크와 같은
+    /// 규율) alpha만 full로 올려 "잡을 수 있다"를 알린다.
+    sidebar_scrollbar_hovered: bool = false,
     file_tree_projection_generation: u64 = 1,
     file_tree_perf_counters: ?*FileTreePerfCounters = null,
     // path+row-kind가 selection SSOT다. index는 rebuild에서 fallback/scroll 보정에만 쓰는 힌트이며 영속하지 않는다.
@@ -14800,12 +14803,19 @@ pub const AppSession = struct {
         if (self.file_tree_projection_generation == 0) self.file_tree_projection_generation = 1;
         self.dock_list_scroll_entry_count = 0;
         self.dock_list_scrollbar_hovered = false;
+        self.sidebar_scrollbar_hovered = false;
         if (self.scrollbarCaptureActive()) self.endScrollbarCapture();
     }
 
     fn setDockListScrollbarHovered(self: *AppSession, hovered: bool) void {
         if (self.dock_list_scrollbar_hovered == hovered) return;
         self.dock_list_scrollbar_hovered = hovered;
+        self.metal_dirty = true;
+    }
+
+    fn setSidebarScrollbarHovered(self: *AppSession, hovered: bool) void {
+        if (self.sidebar_scrollbar_hovered == hovered) return;
+        self.sidebar_scrollbar_hovered = hovered;
         self.metal_dirty = true;
     }
 
@@ -26344,6 +26354,7 @@ pub const AppSession = struct {
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
         self.setDockListScrollbarHovered(if (self.dockListScrollbarGeometry()) |geometry| geometry.trackContains(x_px, y_px) else false);
+        self.setSidebarScrollbarHovered(self.pointOnSidebarScrollbar(x_px, y_px));
         // Phase 7e-4: browser 주소창 밴드 nav 버튼 호버도 매 이동 갱신한다(스크롤바 호버처럼 아래 early return 전에 항상 —
         // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
@@ -32724,7 +32735,9 @@ pub const AppSession = struct {
         self.buildSidebarScrollTree();
         const snapshot = self.sidebarScrollTree();
         if (snapshot.entries.len == 0) return;
-        const alpha: u8 = self.scrollbarAlpha(self.sidebar_scrollbar_idle_ticks); // pane과 같은 fade 곡선
+        // 호버·드래그 중이면 full로 — 커서를 안 바꾸는 대신 이 강조가 "잡을 수 있다"를 알린다(도크와 같은 규율).
+        const emphasized = self.sidebar_scrollbar_hovered or (self.scrollbar_drag_target == .sidebar);
+        const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.sidebar_scrollbar_idle_ticks);
 
         var ops: [sidebar_scroll_max_entries]chrome.draw.Op = undefined;
         const tokens = self.buildChromeTokens();

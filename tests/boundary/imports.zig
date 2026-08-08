@@ -188,7 +188,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 종결부는 요약 필드에 값을 쓸 뿐이고 Client 구성이나 `@field` 접근과 무관하다.
     // `mouse`의 진행 중 포인터 제스처 라우팅 9블록을 `routeActivePointerGesture`로 떼어내며 또 바뀐다.
     // count는 4 그대로다 — 블록을 통째로 옮겼을 뿐 `@field` 접근을 더하거나 빼지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "8f969ce0b5fa9bca30945bfbfdf0d775d3b4ea5fccc10cc451dea6604fcae03f" },
+    // `tick`의 지연 포인터 입력 적용·pre housekeeping·Find 뷰포트 span 계산을 각각 함수로 떼어내며 또
+    // 바뀐다. count는 4 그대로다 — 블록 이동일 뿐 `@field` 접근과 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "1f2b8afa0fb84e48cd7c6dc6f6e68d0c1f4f7ce6408bdb845d99a6c693d65a81" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

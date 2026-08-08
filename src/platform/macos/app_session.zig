@@ -30346,21 +30346,10 @@ pub const AppSession = struct {
         };
     }
 
-    pub fn tick(self: *AppSession) !FrameSummary {
-        // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
-        // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
-        // 제품 Metal view가 같은 RenderFrame을 그대로 그릴 수 있다. CoreText는 platform
-        // 경계라 builder가 소유한다.
-        //
-        // 비-macOS(주로 Linux CI의 ABI 계약 테스트)에는 CoreText 브리지 심볼이 없다. OS
-        // 게이트는 comptime이라 Linux 빌드는 macOS 분기를 codegen에서 제외하므로 extern
-        // 참조가 생기지 않고, frame loop 계약만 fake backend로 유지한다.
-        // PTY queue를 non-blocking으로 비운다(output/exit 감지). 이 drain은 매 tick 필요하지만
-        // 싸다. 생명주기 회계(이벤트 합산, 종료 reap)도 build 여부와 무관하게 매 tick 한다 —
-        // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
-        // (reader join/child reap)을 건너뛰지 않게 한다.
-        // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
-        // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
+    /// 지난 프레임 동안 포인터가 남긴 것을 이번 tick에 정확히 한 번씩 적용하고, 살아 있는 탭 드래그가
+    /// 아직 유효한지 확인한다. 프레임 계측보다 **앞**에 둔다 — geometry가 확정된 상태로 아래 build와
+    /// 투영이 돌아야 한다.
+    fn settleDeferredPointerInput(self: *AppSession) void {
         // 이 tick의 divider resize와 scrollbar scroll을 여기서 한 번씩 적용한다 — move가 몇 번 왔든 최종
         // 좌표 하나이고, clamp 결과가 직전과 같으면 effect가 없다(계약 §4.3). frame 계측이 시작되기 전에
         // 두어 geometry가 확정된 상태로 아래 build/투영이 돌게 한다.
@@ -30387,28 +30376,13 @@ pub const AppSession = struct {
         // 부른 것이 아니라 비동기로 뜨므로, 그걸로 취소하면 하던 재정렬이 배경 이벤트에 파기된다(2차 리뷰).
         // 토스트가 `mouse()`를 삼켜 up이 못 오는 문제는 그쪽에서 드래그 이벤트를 통과시켜 푼다.
         if (self.pointerGestureIs(.terminal_tab) and self.anyModalOverlayOpen()) self.cancelPointerGesture();
-        const ft_on = diag_gate.maruDebugEnabled();
-        const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
-        var ft_pre: i128 = ft_start;
-        var ft_titles: i128 = ft_start;
-        var ft_drain: i128 = ft_start;
-        var ft_project: i128 = ft_start;
-        defer if (ft_on) self.logFrameTime(ft_start, ft_pre, ft_titles, ft_drain, ft_project);
-        // [M3d-2a-i 결함[0]] 빈 source(0탭): mergeSessionInto/moveWorkspaceToSession가 마지막 워크스페이스를 옮겨
-        // 창을 비우면 활성 surface가 없다 — 아래 readActiveSnapshot·투영·요약이 모두 activeSurface()(=app_window.active().?)를
-        // deref하므로 0탭에서 null unwrap 패닉한다. 이 창은 이미 ended_seen이 latch됐고(§1.6) Swift가 다음 tick의
-        // app_should_terminate 신호로 실제로 닫는다 → active-surface 경로를 전부 건너뛰고 ended 요약만 만들어 조기
-        // 반환한다(writeSummaryFromState는 위 [0] 가드로 0탭 안전). 드레인/reap 대상도 없다(탭 0개). 비-0탭 경로 불변.
-        if (self.tabs.items.len == 0) {
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(
-                if (self.ended_seen) EventKind.app_should_terminate else EventKind.frame_tick,
-            );
-            self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
-            self.quit_decision = .none;
-            self.last_summary.web_surfaces_present = if (self.webSurfacesPresent()) 1 else 0;
-            return self.last_summary;
-        }
+    }
+
+    /// 프레임 계측이 시작되기 전 단계 — 저자가 `ft_pre` 마크에 "pre(housekeeping)"이라 이름 붙인 구간이다.
+    /// 백그라운드 worker가 남긴 결과를 메인 스레드 상태로 옮기고(아카이브·파일 트리·git·업로드·업데이트),
+    /// 렌더 전에 성립해야 하는 불변식을 정리한다. 여기서 하는 일은 전부 큐에서 꺼내 적용하는 것뿐이고
+    /// 파일시스템·네트워크 I/O는 worker가 소유한다 — 이 순서가 무너지면 tick이 blocking I/O를 물게 된다.
+    fn runFramePreHousekeeping(self: *AppSession) void {
         if (!self.update_started) { // 첫 tick에서 인앱 새 버전 안내 백그라운드 체크를 1회 띄운다(config로 끔)
             self.update_started = true;
             self.startUpdateCheck();
@@ -30487,6 +30461,109 @@ pub const AppSession = struct {
         }
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
+    }
+
+    /// Find(⌘F) 하이라이트를 이 프레임 기준으로 다시 계산한다. 뷰포트에 보이는 매치를
+    /// `find_view_spans`에 채우고 현재 매치 span을 돌려준다 — 현재 매치만 별도 강조색으로 그리기 때문에
+    /// 나머지 span과 갈라서 반환한다.
+    ///
+    /// `output_events`는 이 tick에 새 출력이 들어왔는지다. 출력이 있으면 매치의 절대 좌표가 스크롤백
+    /// eviction으로 어긋날 수 있어 재검색하고, 없으면 이전 결과를 그대로 클립만 한다.
+    fn collectFindViewSpans(self: *AppSession, output_events: u64) ?terminal.SelectionSpan {
+        // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
+        // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
+        const find_active = self.chrome_host.find.open or self.find_nav;
+        // 스크롤백 Find 재검색·뷰포트 클립은 활성 surface 코어를 읽고(findMatches는 ensureScrollbackRewrapped로
+        // 스크롤백을 mutate) 리더 core.write와 경합하므로 락 아래(docs/io-render-threading.md PR3). matchViewportSpan
+        // 루프까지 한 락으로 — find_view_spans/setMatchCount는 app 상태라 락 보유 중 안전.
+        self.find_view_spans.clearRetainingCapacity();
+        var find_current_span: ?terminal.SelectionSpan = null;
+        // [4e-2, §6] 활성 Term이 web이면 스크롤백 Find 재검색·뷰포트 클립을 건너뛴다(sentinel엔 스크롤백/매치 없음) —
+        // find_view_spans/current_span은 위에서 비운 상태 유지. terminal이면 activeSurface()라 byte-identical.
+        if (self.activeTerminalSurface()) |fa_surface| {
+            if (is_macos and fa_surface.remote != null) {
+                // §6c host-backed: 검색은 host가(콘텐츠·스크롤백 소유 — placeholder는 빈 셀이라 못 함). output(스크롤도
+                // delta라 포함)/query 변화 시만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 remote_find_spans에
+                // 캐시하고, tick은 그 캐시를 find_view_spans에 복사만 한다(매 tick RPC 회피). 현재 매치 강조색·네비는 #6c-2.
+                if (find_active) {
+                    if (self.remote_find_dirty or output_events > 0) {
+                        self.refreshRemoteFind(fa_surface);
+                        self.remote_find_dirty = false;
+                    }
+                    find_current_span = self.remote_find_current; // §6c-2 현재 매치 강조색(host가 계산해 반환).
+                    if (self.chrome_host.find.open) self.find_view_spans.appendSlice(self.allocator, self.remote_find_spans.items) catch {};
+                } else {
+                    self.remote_find_spans.clearRetainingCapacity();
+                    self.remote_find_current = null;
+                }
+            } else {
+                fa_surface.lockCore(self.io);
+                defer fa_surface.unlockCore(self.io);
+                if (find_active and output_events > 0) {
+                    const now_alt = fa_surface.core.alt_active;
+                    fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+                    self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
+                    // primary<->alt 화면 전환이면 매치 셋의 좌표 도메인이 통째로 바뀌어 이전 current가 무의미하다
+                    // (setMatchCount는 clamp만). 첫 매치로 리셋한다 — 같은 화면 내 출력(스크롤백 eviction)이면 유지.
+                    if (now_alt != self.find_was_alt) self.chrome_host.find.current = 0;
+                    self.find_was_alt = now_alt;
+                }
+                // 활성 surface 매치를 뷰포트 span으로 클립(Find 활성일 때만). 현재 매치는 별도 강조색(current_match),
+                // 나머지는 find_view_spans. 닫힌 채 ⌘G 네비(find_nav,!open)면 현재 매치만.
+                if (find_active) {
+                    for (self.find_matches.items, 0..) |m, mi| {
+                        const span = fa_surface.core.matchViewportSpan(m) orelse continue;
+                        if (mi == self.chrome_host.find.current) {
+                            find_current_span = span;
+                        } else if (self.chrome_host.find.open) {
+                            self.find_view_spans.append(self.allocator, span) catch {};
+                        }
+                    }
+                }
+            }
+        }
+        return find_current_span;
+    }
+
+    pub fn tick(self: *AppSession) !FrameSummary {
+        // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
+        // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
+        // 제품 Metal view가 같은 RenderFrame을 그대로 그릴 수 있다. CoreText는 platform
+        // 경계라 builder가 소유한다.
+        //
+        // 비-macOS(주로 Linux CI의 ABI 계약 테스트)에는 CoreText 브리지 심볼이 없다. OS
+        // 게이트는 comptime이라 Linux 빌드는 macOS 분기를 codegen에서 제외하므로 extern
+        // 참조가 생기지 않고, frame loop 계약만 fake backend로 유지한다.
+        // PTY queue를 non-blocking으로 비운다(output/exit 감지). 이 drain은 매 tick 필요하지만
+        // 싸다. 생명주기 회계(이벤트 합산, 종료 reap)도 build 여부와 무관하게 매 tick 한다 —
+        // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
+        // (reader join/child reap)을 건너뛰지 않게 한다.
+        // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
+        // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
+        self.settleDeferredPointerInput();
+        const ft_on = diag_gate.maruDebugEnabled();
+        const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+        var ft_pre: i128 = ft_start;
+        var ft_titles: i128 = ft_start;
+        var ft_drain: i128 = ft_start;
+        var ft_project: i128 = ft_start;
+        defer if (ft_on) self.logFrameTime(ft_start, ft_pre, ft_titles, ft_drain, ft_project);
+        // [M3d-2a-i 결함[0]] 빈 source(0탭): mergeSessionInto/moveWorkspaceToSession가 마지막 워크스페이스를 옮겨
+        // 창을 비우면 활성 surface가 없다 — 아래 readActiveSnapshot·투영·요약이 모두 activeSurface()(=app_window.active().?)를
+        // deref하므로 0탭에서 null unwrap 패닉한다. 이 창은 이미 ended_seen이 latch됐고(§1.6) Swift가 다음 tick의
+        // app_should_terminate 신호로 실제로 닫는다 → active-surface 경로를 전부 건너뛰고 ended 요약만 만들어 조기
+        // 반환한다(writeSummaryFromState는 위 [0] 가드로 0탭 안전). 드레인/reap 대상도 없다(탭 0개). 비-0탭 경로 불변.
+        if (self.tabs.items.len == 0) {
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(
+                if (self.ended_seen) EventKind.app_should_terminate else EventKind.frame_tick,
+            );
+            self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
+            self.quit_decision = .none;
+            self.last_summary.web_surfaces_present = if (self.webSurfacesPresent()) 1 else 0;
+            return self.last_summary;
+        }
+        self.runFramePreHousekeeping();
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
         self.reprojectSidebarIfCardLinesStale(); // 관측·활성 Term 변화로 카드 줄 수가 바뀌었으면 재투영(아래 주석)
@@ -30717,58 +30794,7 @@ pub const AppSession = struct {
             // (view_offset은 gate-time 폴백이 OOM retry spin 방지라 성공/실패 무관하게 갱신 — 정당한 차이.)
             if (builtin.os.tag != .macos or rendered_view_offset != null) self.last_rendered_esu = core_snap.esu;
 
-            // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
-            // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
-            const find_active = self.chrome_host.find.open or self.find_nav;
-            // 스크롤백 Find 재검색·뷰포트 클립은 활성 surface 코어를 읽고(findMatches는 ensureScrollbackRewrapped로
-            // 스크롤백을 mutate) 리더 core.write와 경합하므로 락 아래(docs/io-render-threading.md PR3). matchViewportSpan
-            // 루프까지 한 락으로 — find_view_spans/setMatchCount는 app 상태라 락 보유 중 안전.
-            self.find_view_spans.clearRetainingCapacity();
-            var find_current_span: ?terminal.SelectionSpan = null;
-            // [4e-2, §6] 활성 Term이 web이면 스크롤백 Find 재검색·뷰포트 클립을 건너뛴다(sentinel엔 스크롤백/매치 없음) —
-            // find_view_spans/current_span은 위에서 비운 상태 유지. terminal이면 activeSurface()라 byte-identical.
-            if (self.activeTerminalSurface()) |fa_surface| {
-                if (is_macos and fa_surface.remote != null) {
-                    // §6c host-backed: 검색은 host가(콘텐츠·스크롤백 소유 — placeholder는 빈 셀이라 못 함). output(스크롤도
-                    // delta라 포함)/query 변화 시만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 remote_find_spans에
-                    // 캐시하고, tick은 그 캐시를 find_view_spans에 복사만 한다(매 tick RPC 회피). 현재 매치 강조색·네비는 #6c-2.
-                    if (find_active) {
-                        if (self.remote_find_dirty or drain_summary.output_events > 0) {
-                            self.refreshRemoteFind(fa_surface);
-                            self.remote_find_dirty = false;
-                        }
-                        find_current_span = self.remote_find_current; // §6c-2 현재 매치 강조색(host가 계산해 반환).
-                        if (self.chrome_host.find.open) self.find_view_spans.appendSlice(self.allocator, self.remote_find_spans.items) catch {};
-                    } else {
-                        self.remote_find_spans.clearRetainingCapacity();
-                        self.remote_find_current = null;
-                    }
-                } else {
-                    fa_surface.lockCore(self.io);
-                    defer fa_surface.unlockCore(self.io);
-                    if (find_active and drain_summary.output_events > 0) {
-                        const now_alt = fa_surface.core.alt_active;
-                        fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
-                        self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
-                        // primary<->alt 화면 전환이면 매치 셋의 좌표 도메인이 통째로 바뀌어 이전 current가 무의미하다
-                        // (setMatchCount는 clamp만). 첫 매치로 리셋한다 — 같은 화면 내 출력(스크롤백 eviction)이면 유지.
-                        if (now_alt != self.find_was_alt) self.chrome_host.find.current = 0;
-                        self.find_was_alt = now_alt;
-                    }
-                    // 활성 surface 매치를 뷰포트 span으로 클립(Find 활성일 때만). 현재 매치는 별도 강조색(current_match),
-                    // 나머지는 find_view_spans. 닫힌 채 ⌘G 네비(find_nav,!open)면 현재 매치만.
-                    if (find_active) {
-                        for (self.find_matches.items, 0..) |m, mi| {
-                            const span = fa_surface.core.matchViewportSpan(m) orelse continue;
-                            if (mi == self.chrome_host.find.current) {
-                                find_current_span = span;
-                            } else if (self.chrome_host.find.open) {
-                                self.find_view_spans.append(self.allocator, span) catch {};
-                            }
-                        }
-                    }
-                }
-            }
+            const find_current_span = self.collectFindViewSpans(drain_summary.output_events);
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
             // 활성 surface 코어 색/선택 상태(palette 복사·fg/bg·reverse·selection·hover)를 하나의 락 아래

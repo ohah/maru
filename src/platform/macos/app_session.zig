@@ -26422,6 +26422,15 @@ pub const AppSession = struct {
                 self.clearHoverUrlAnchor();
                 return if (region == .search) .text else .link;
             }
+            // 스크롤바 위는 슬롯이 아니다(SV4b). 막대는 gutter 안에 서므로 카드와 안 겹치지만, hover가
+            // x를 안 보고 y만으로 슬롯을 고르면 **막대 위에서 카드가 호버된 것처럼 보인다**. down 경로가
+            // 스크롤바를 먼저 보는 것과 같은 규율을 hover에도 적용한다.
+            if (self.pointOnSidebarScrollbar(x_px, y_px)) {
+                self.setHoveredSlot(null);
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return .default;
+            }
             self.setHoveredSlot(self.sidebarSlotAt(y_px));
             self.setHoveredTab(null); // 사이드바로 가면 pane 탭 호버 해제(stale ✕ 방지)
             self.clearHoverUrlAnchor();
@@ -32725,7 +32734,13 @@ pub const AppSession = struct {
             else => {},
         };
         // rect는 이미 backing 좌표다(`buildSidebarScrollTree`가 옮겼다) — origin을 다시 더하지 않는다.
+        const before = self.gpu_quads.items.len;
         chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
+        // **layer를 3(over)으로 되돌린다.** 공용 lowering은 quad를 layer 2로 내리는데, 렌더러는 그 버킷을
+        // 맨 처음 그리고 **그 위에 사이드바 배경 strip을 덮는다** — 막대가 발행돼도 화면에서 사라진다
+        // (실측: tree에는 track/thumb이 있는데 사이드바에 아무것도 안 보였다). 도크·탐색기 스크롤바가
+        // layer 2로 살아남는 것은 그 자리에 strip이 없어서지, layer 2가 안전해서가 아니다.
+        for (self.gpu_quads.items[before..]) |*q| q.layer = 3;
     }
 
     /// 탐색기 스크롤바를 **공용 paint 경로**로 그린다(SV2b). 발행된 tree를 `ui_paint`가 quad op으로
@@ -32924,6 +32939,14 @@ pub const AppSession = struct {
         }
         self.sidebar_scroll_entry_count = built.entries.len;
         self.sidebar_scroll_max_offset_px = extent.max_offset_px;
+    }
+
+    /// 이 지점이 사이드바 스크롤바 트랙 위인가. hover·hit-test가 슬롯 대신 막대를 보게 하는 게이트다.
+    /// **발행된 tree를 읽기만 한다** — 여기서 다시 발행하면 hover가 매 프레임 세대를 올려 드래그 carry를
+    /// 흔든다.
+    fn pointOnSidebarScrollbar(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        const geometry = self.sidebarScrollbarGeometry() orelse return false;
+        return geometry.trackContains(x_px, y_px);
     }
 
     fn sidebarScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
@@ -55172,6 +55195,18 @@ test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock lis
 
     // ⑤ 트랙 **밖**을 누르면 스크롤바가 잡히지 않는다 — 카드 클릭이 스크롤로 새면 안 된다.
     try std.testing.expect(!session.beginSidebarScrollbarGesture(0, @as(f64, geometry.track_y) + 1));
+
+    // ⑥ 막대 위에서는 카드가 **호버되지 않는다.** hover가 x를 안 보고 y만으로 슬롯을 고르면 막대 위에서
+    //    카드가 눌린 것처럼 밝아진다(실제로 그렇게 보였다). down 경로와 같은 게이트를 hover도 지나야 한다.
+    const on_bar_x: f64 = @as(f64, geometry.track_x) + @as(f64, geometry.track_w) / 2;
+    const on_bar_y: f64 = @as(f64, geometry.track_y) + @as(f64, geometry.track_h) / 2;
+    try std.testing.expect(session.pointOnSidebarScrollbar(on_bar_x, on_bar_y));
+    _ = session.hoverCursor(on_bar_x, on_bar_y, 0);
+    try std.testing.expect(session.hovered_slot == null);
+
+    // 같은 높이의 카드 본문(막대 왼쪽)은 여전히 호버된다 — 게이트가 사이드바 전체를 죽이면 안 된다.
+    const on_card_x: f64 = @as(f64, geometry.track_x) - 8;
+    try std.testing.expect(!session.pointOnSidebarScrollbar(on_card_x, on_bar_y));
 }
 
 test "sidebar gets an active-tab highlight band that follows tab create and switch" {

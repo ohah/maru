@@ -90,11 +90,17 @@ pub fn buildFrame(
     tokens: *const chrome.Tokens,
     buffers: FrameBuffers,
 ) !Frame {
+    // strip은 `.m`이 직접 그린다(승인 예외). 여기서 도크를 그리면 **전폭으로** 깔려 strip 경계에 걸치는데,
+    // 제품에서는 사이드바와 도크가 그렇게 겹치지 않는다 — 리뷰어가 보는 그림이 제품을 오도한다.
+    // 그래서 chrome을 **아무것도 내지 않고** strip과 배경만 남긴다(골든이 보려는 것도 그 경계 하나다).
+    if (scenario.id == .sidebar_status_strip) return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
+    };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        // strip은 `.m`이 직접 그린다(승인 예외) — chrome 프레임은 빈 것으로 충분하다. 도크 내용을 넣으면
-        // 그쪽 변경마다 이 골든이 흔들려, 정작 보려는 strip 경계와 무관한 이유로 깨진다.
-        .sidebar_status_strip,
+        // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
+        .sidebar_status_strip => unreachable,
         .empty,
         .loading,
         .retained_list,

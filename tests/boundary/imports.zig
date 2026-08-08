@@ -157,7 +157,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 잇는 것뿐이다.
     // 세션 재개를 로그인 셸 경유로 바꾸며 또 바뀐다(`buildResumeShellCommand`). count는 4 그대로다 —
     // spawn request의 command/args를 다르게 채울 뿐 Client 구성과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "2cb1f3bfd79c1e95995c467eca74cdd9087e0a2c667bd209dc3219846e1592a5" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "04e9b108936d369ab6036c69c277e7161e750b3a370e37610f32f5c6af2a6531" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

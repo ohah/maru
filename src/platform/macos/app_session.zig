@@ -22827,6 +22827,30 @@ pub const AppSession = struct {
         return self.handleKeyEvent(event);
     }
 
+    /// key-down 처리의 공통 종결부 — 요약을 상태에서 다시 쓰고 이벤트 종류를 key_down으로 확정한다.
+    /// `handleKeyEvent`의 라우팅 분기는 20개가 넘는데 전부 이 두 줄로 끝나므로, 한 분기만 빠뜨려도
+    /// 그 경로의 요약이 이전 이벤트 값을 물고 나간다. 종결을 한 곳에 모아 그 실수를 구조적으로 막는다.
+    fn settleKeyEventSummary(self: *AppSession) void {
+        self.writeSummaryFromState();
+        self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+    }
+
+    /// 앱(chrome 오버레이·rename·주소창·사이드바 검색·도크·파일 트리 등)이 키를 소비했다.
+    /// PTY로 내려보내지 않고 여기서 끝낸다.
+    fn keyConsumedByApp(self: *AppSession) FrameSummary {
+        self.total_app_key_events += 1;
+        self.settleKeyEventSummary();
+        return self.last_summary;
+    }
+
+    /// 라우팅할 live surface가 없거나(닫힌 pane의 late input) 터미널 write가 실패한 키.
+    /// 치명적 fault가 아니므로 회계만 하고 정상으로 닫는다.
+    fn keyIgnored(self: *AppSession) FrameSummary {
+        self.total_ignored_key_events += 1;
+        self.settleKeyEventSummary();
+        return self.last_summary;
+    }
+
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
         // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
         // write는 기존 FrameLoop 경계를 통과해야 smoke와 제품 app이 같은 shortcut 정책을 쓴다.
@@ -22835,10 +22859,7 @@ pub const AppSession = struct {
         // 내려보내면 UnknownSurface/SessionClosed로 실패하는데, 그건 치명적 세션 fault가
         // 아니라 닫힌 pane의 late input이므로 ignored로 회계만 하고 정상으로 닫는다.
         if (self.ended_seen) {
-            self.total_ignored_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyIgnored();
         }
         // §4.4 복원 트리거(Escape). 탭 드래그가 살아 있으면 Escape는 시작 순서로 되돌리고 제스처를 끝낸다.
         // model을 안 건드렸으므로 복원은 preview 파기 하나로 끝나고 effect는 0이다. rename/주소창/모달
@@ -22853,10 +22874,7 @@ pub const AppSession = struct {
             !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift)
         {
             self.cancelPointerGesture();
-            self.total_app_key_events += 1; // 앱이 소비 — 터미널로 흘리지 않는다
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp(); // 앱이 소비 — 터미널로 흘리지 않는다
         }
         // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
         // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
@@ -22869,10 +22887,7 @@ pub const AppSession = struct {
         if (self.rename != null and !self.anyModalOverlayOpen()) {
             self.handleRenameKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
-            self.total_app_key_events += 1; // rename(앱)이 소비
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp(); // rename(앱)이 소비
         }
         // Phase 7e-2a: browser 주소창 편집이 활성이면 키를 주소창 편집으로 라우팅한다(rename과 같은 최상위 규율 — 활성 중
         // 모든 키 소비, 터미널/단축키로 안 흘린다). Enter=확정(navigate)·Esc=취소·Backspace·평문 글자를 handleAddrEditKey가
@@ -22914,10 +22929,7 @@ pub const AppSession = struct {
                 self.handleAddrEditKey(ie);
                 self.resetCursorBlink();
                 self.metal_dirty = true;
-                self.total_app_key_events += 1; // 주소창 편집(앱)이 소비
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp(); // 주소창 편집(앱)이 소비
             }
         }
         // 사이드바 검색바가 활성이면 키를 검색 입력으로 라우팅한다(rename과 같은 규율 — 활성 중 모든 키 소비).
@@ -22927,10 +22939,7 @@ pub const AppSession = struct {
         if (self.sidebar_search_active and !self.anyModalOverlayOpen()) {
             self.handleSidebarSearchKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
-            self.total_app_key_events += 1; // 검색(앱)이 소비
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp(); // 검색(앱)이 소비
         }
         // keybind recorder 녹음 중이면 raw 키를 chord로 **가로챈다**(chrome 변환 전 — chromeInputFromKeyEvent가 키를
         // 축약 enum으로 줄여 Tab/Home/F-키 등을 잃으므로, 전체 키 정보가 있는 terminal.KeyEvent를 직접 캡처). 한 키로
@@ -22939,10 +22948,7 @@ pub const AppSession = struct {
             self.captureKeybindRecording(event);
             self.resetCursorBlink();
             self.metal_dirty = true;
-            self.total_app_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp();
         }
         // held 창(비정상 시작 사망 유지): **⏎(Enter)** 는 그 자리에서 셸을 재시작한다(in-place respawn). 위의 rename·
         // 사이드바 검색·keybind 녹음이 이미 처리·소비해 그들의 Enter를 뺏지 않는다. 입력받는 모달(설정·팔레트·확인 등)이
@@ -22958,10 +22964,7 @@ pub const AppSession = struct {
                 self.showNotice("셸 재시작에 실패했습니다 — 설정(⌘,)을 확인하세요.");
             };
             self.metal_dirty = true;
-            self.total_app_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp();
         }
         // §7 묘비: **⏎만** 그 자리에서 새 셸을 만든다. 복원이 위장 세션을 만들지 않도록 자동 fresh spawn을 금지했으므로
         // 이 명시 입력이 유일한 승격 경로다(아무 키나 붙여넣기로는 되살아나지 않는다). 게이트는 위 startup_held와 같다 —
@@ -22981,10 +22984,7 @@ pub const AppSession = struct {
                 self.showNotice("셸을 시작하지 못했습니다 — 설정(⌘,)에서 shell.command·shell.args를 확인하세요.");
             };
             self.metal_dirty = true;
-            self.total_app_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp();
         }
         // chrome 모달(confirm/notice/context_menu/find/palette/settings) 중 하나라도 열려 있으면 키를 chrome으로
         // 라우팅한다 — 최상위(PTY/스크롤보다 먼저, 모달은 단일-오버레이 불변식으로 한 번에 하나). handleInput이 컴포넌트
@@ -23000,35 +23000,23 @@ pub const AppSession = struct {
             if (self.settingsPaletteArrowIntercept(event)) {
                 self.resetCursorBlink();
                 self.metal_dirty = true;
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp();
             }
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
             self.resetCursorBlink(); // 오버레이 타이핑 직후 caret 보이게(활동 reset — 새 주기 시작)
             self.metal_dirty = true;
-            self.total_app_key_events += 1; // chrome(앱)이 소비
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp(); // chrome(앱)이 소비
         }
         // Session Dock keyboard focus remains with the dock while an inline detail is expanded.
         // Page keys therefore keep reaching the visible scroll owner.
         if (self.dockVisible() and self.dock.view == .agent_sessions) {
             if (self.handleAgentSessionArchiveSearchKey(event)) {
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp();
             }
             if (self.handleAgentSessionDockScrollKey(event)) {
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp();
             }
             // `/`도 Enter·Page와 같은 게이트를 쓴다. 도크가 보인다는 이유만으로 잡으면 터미널에서 친
             // 경로(`/usr/local/...`)·정규식·vi 검색의 첫 글자가 셸이 아니라 도크 검색을 열고 사라진다.
@@ -23040,10 +23028,7 @@ pub const AppSession = struct {
             }) {
                 self.agent_session_archive_search_active = true;
                 self.metal_dirty = true;
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp();
             }
             // ⌘ 조합은 위 focus 게이트를 일부러 쓰지 않는다. 수식키 없는 키(Enter·`/`·Esc·Page)는 터미널로
             // 갈 **입력**이라 도크가 focus 없이 가로채면 타이핑이 사라지지만, ⌘ chord는 어느 경우에도 PTY
@@ -23062,10 +23047,7 @@ pub const AppSession = struct {
                 if (self.agentSessionDockShortcutIntent(wanted)) |intent| {
                     self.applyAgentSessionDockIntent(intent);
                     self.metal_dirty = true;
-                    self.total_app_key_events += 1;
-                    self.writeSummaryFromState();
-                    self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                    return self.last_summary;
+                    return self.keyConsumedByApp();
                 }
             }
             // Escape도 같은 게이트다. 카드를 펼쳐 둔 채 터미널로 돌아가면 vim의 Esc가 셸이 아니라 도크
@@ -23075,10 +23057,7 @@ pub const AppSession = struct {
                 self.agent_session_inline_detail != null)
             {
                 self.closeAgentSessionInlineDetail();
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp();
             }
         }
         // One plain activation toggles the selected dock card.  The provider remains inert
@@ -23092,10 +23071,7 @@ pub const AppSession = struct {
             if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
                 self.applyAgentSessionDockIntent(.{ .select_card = @intCast(selected) });
                 self.metal_dirty = true;
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp();
             };
         }
         // project tree focus는 terminal byte stream과 완전히 분리한다. 사용자 app binding이 최우선이고 explicit
@@ -23106,10 +23082,7 @@ pub const AppSession = struct {
                 .tree_default => self.handleFileTreeDefaultKey(event),
                 .consumed => {},
             }
-            self.total_app_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp();
         }
         // 빈 editor group은 구조 input owner다. 사용자/기본 app action은 실행하되 terminal macro와
         // 일반 텍스트를 모두 소비해 보이지 않는 PTY에 입력이 새지 않게 한다.
@@ -23118,10 +23091,7 @@ pub const AppSession = struct {
                 .app_action => |action| self.dispatchAppAction(action),
                 .tree_default, .consumed => {},
             }
-            self.total_app_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyConsumedByApp();
         }
         // PageUp/PageDown는 메인 화면에선 Maru 스크롤백을 한 페이지씩 스크롤한다(Mac 네이티브 —
         // Terminal.app/iTerm2 동작). 셸의 기본 keymap엔 \e[5~/\e[6~가 unbound라, PTY로 보내면
@@ -23145,10 +23115,7 @@ pub const AppSession = struct {
             const page_delta = pageScrollDelta(self.page_keys_scroll, page_alt_active, event.key);
             if (page_delta != 0) {
                 self.scrollPage(page_delta);
-                self.total_app_key_events += 1; // 앱(터미널)이 소비 — PTY로 안 보냄
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                return self.keyConsumedByApp(); // 앱(터미널)이 소비 — PTY로 안 보냄
             }
         }
         // 타이핑하면 live(바닥)로 돌아간다 — 과거를 보다가 입력하면 현재 화면으로 점프(표준 터미널).
@@ -23188,10 +23155,7 @@ pub const AppSession = struct {
             // 치명적 fault가 아니라 닫힌 pane의 late input이므로 ignored로 회계만 한다(ended_seen 경로와 같은 규율).
             // 앱 단축키(⌘T·⌘, 등)는 host가 `.app_action`으로 resolve해 **write 없이** 처리하므로 이 catch에 안 걸린다
             // → held 창에서도 앱 단축키로 복구가 된다. (write하는 터미널 입력만 죽은 surface에서 걸러진다.)
-            self.total_ignored_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            return self.keyIgnored();
         };
         switch (result) {
             .terminal_input => |terminal_input| {
@@ -23224,8 +23188,7 @@ pub const AppSession = struct {
             },
             .ignored => self.total_ignored_key_events += 1,
         }
-        self.writeSummaryFromState();
-        self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+        self.settleKeyEventSummary();
         return self.last_summary;
     }
 
@@ -23303,8 +23266,7 @@ pub const AppSession = struct {
             self.dispatchAppAction(action);
         }
         self.total_app_key_events += 1;
-        self.writeSummaryFromState();
-        self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+        self.settleKeyEventSummary();
         return true;
     }
 

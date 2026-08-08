@@ -119,6 +119,11 @@ pub fn main(init: std.process.Init) !void {
     var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
     var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
+    // SB1 §5.2: 사이드바 배경 strip이 상태바 위에서 끊기는지 **픽셀로** 보는 시나리오에서만 값을 싣는다.
+    // 나머지 시나리오는 0이라 기존 캡처와 바이트 동일하다.
+    const sidebar_width_px: u32 = if (scenario_id == .sidebar_status_strip) 180 else 0;
+    const status_bar_height_px: u32 = if (scenario_id == .sidebar_status_strip) 26 else 0;
+
     const frame = try lab.buildFrame(.{
         .id = scenario_id,
         .viewport_px = viewport,
@@ -335,6 +340,8 @@ pub fn main(init: std.process.Init) !void {
         0,
         if (rich_glyphs.items.len > 0) rich_glyphs.items.ptr else null,
         rich_glyphs.items.len,
+        sidebar_width_px,
+        status_bar_height_px,
         &native,
     );
 
@@ -410,6 +417,7 @@ fn registerLabFont(variant: FontVariant, postscript_name_out: []u8) ![]const u8 
 }
 
 fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
+    if (std.mem.eql(u8, raw, "sidebar-status-strip")) return .sidebar_status_strip;
     if (std.mem.eql(u8, raw, "empty")) return .empty;
     if (std.mem.eql(u8, raw, "loading")) return .loading;
     if (std.mem.eql(u8, raw, "retained-list")) return .retained_list;
@@ -443,6 +451,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .detail_ready => "detail-ready",
         .detail_stale => "detail-stale",
         .detail_unavailable => "detail-unavailable",
+        .sidebar_status_strip => "sidebar-status-strip",
     };
 }
 

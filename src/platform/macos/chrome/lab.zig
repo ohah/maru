@@ -37,6 +37,9 @@ pub const ScenarioId = enum {
     detail_ready,
     detail_stale,
     detail_unavailable,
+    /// SB1 §5.2 — 사이드바 배경 strip이 창 바닥까지 가지 않고 **상태바 위에서 끊기는지**를 픽셀로 본다.
+    /// 도크 내용은 필요 없다(strip은 `.m`이 직접 그린다) — 빈 프레임에 사이드바 폭·상태바 높이만 실어 준다.
+    sidebar_status_strip,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -89,6 +92,9 @@ pub fn buildFrame(
 ) !Frame {
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
+        // strip은 `.m`이 직접 그린다(승인 예외) — chrome 프레임은 빈 것으로 충분하다. 도크 내용을 넣으면
+        // 그쪽 변경마다 이 골든이 흔들려, 정작 보려는 strip 경계와 무관한 이유로 깨진다.
+        .sidebar_status_strip,
         .empty,
         .loading,
         .retained_list,
@@ -197,7 +203,7 @@ fn buildDockFrame(
             .partial_scroll => retained[1..],
             .partial_group_scroll, .scrollbar => &retained,
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
-            .empty, .loading => &.{},
+            .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => unreachable,
         },
     };

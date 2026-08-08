@@ -21,7 +21,7 @@
 
 ```text
 Agent 세션 기록                              로컬   [새로 고침]
-N개 표시 · 최근 500개
+N개 표시                                      [최신순 ⇄ 오래된순]
 [현재 작업공간] [현재 프로젝트] [전체]
 [⌕ 세션 검색]
 ────────────────────────────────────────────────────────────────
@@ -32,8 +32,24 @@ N개 표시 · 최근 500개
   ────────────────────────────────────────────────────────────
   제목                                                   Claude
   마지막 사용자 요청의 안전한 짧은 요약
-  메시지 94개 · 3분 전 · claude-…
+  메시지 94개 · 3분 전 · claude-… · 서브에이전트 4
 ```
+
+### 2.3 카드가 싣는 값과 정렬
+
+카드의 `메시지 N개`는 전체 transcript를 세어 얻는다. 목록 스캔이 파일 전체를 읽으므로(§4) 정확하며,
+이 값을 근사치로 낮추는 대가로 읽기를 줄이지 않는다 — 요약이 **마지막** 메시지에서 나오기 때문에
+앞뒤 일부만 읽는 방식은 목록의 30%가 틀린 요약을 보이게 한다(실측 2026-08-08).
+
+`서브에이전트 N`은 Claude 세션 파일과 같은 이름의 디렉터리 아래 `subagents/`의 transcript 개수다.
+**파일을 열지 않고 디렉터리 항목만 센다** — 순회 비용은 이미 지불한 것이고 read budget과 무관하다.
+0이면 그리지 않는다. 값은 스캔 시점 기준이므로 다음 refresh까지 갱신되지 않는다. Codex는 worker가 별도
+파일이 아니라 같은 rollout 트리에 섞여 있어 부모 세션과 연결할 규칙이 없으므로 이 표시의 대상이 아니다.
+
+정렬은 **최신순**이 기본이고 토글로 **오래된순**을 고른다. 정렬 키는 transcript의 마지막 활동 시각이며,
+그 값을 얻지 못하면 파일 mtime으로 폴백한다 — mtime은 대화 외의 이유(복사·도구의 메타 갱신)로도 밀리기
+때문에 내부 시각이 있으면 그쪽이 정확하다. 토글은 **표시 계층에서만** 방향을 바꾸고 스캔 순서는 항상
+최신 우선이다(부분 publish가 최신부터 차오르는 것과 같은 근거).
 
 ### 2.1 Metal GPU card layout와 컴포넌트 경계
 
@@ -431,15 +447,39 @@ inline disclosure다. card click/Enter는 새 archive tab이나 terminal surface
 | provider | discovery root | 사용자 세션 확정 | title/summary 신호 |
 | --- | --- | --- | --- |
 | Claude Code | `~/.claude/projects/*/*.jsonl`의 **직속** 파일만 | 직속 JSONL만; 하위 `subagents` 계층은 절대 재귀하지 않음 | `custom-title`, `ai-title`, first/last user message 순 |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `session_meta.payload.thread_source == "user"`가 있어야 함 | `session_index.jsonl` title(검증 가능한 경우), 없으면 user event |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `session_meta`의 worker 판정(§3.1)이 사용자 세션일 것 | `session_index.jsonl` title(검증 가능한 경우), 없으면 user event |
 
-Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 user/subagent를 구별할 근거가 없으므로 v1 기본 목록에서 **제외**하고 `검증할 수 없는 이전 Codex 기록 n개`로만 알린다. 사용자가 토글 하나로 섞어 보게 하는 방식은 잘못된 worker 재개와 목록 오염을 정상화하므로 v1에 넣지 않는다. Claude의 nested subagent transcript도 같은 이유로 제외한다.
+### 3.1 Codex worker 판정
+
+`thread_source`는 최근 Codex가 추가한 필드다. 판정은 신호 순서로 한다.
+
+| 신호 | 판정 |
+| --- | --- |
+| `thread_source`(또는 `threadSource`)가 있음 | `"user"`면 사용자 세션, 그 외 값은 worker |
+| 없고 `payload.source.subagent`가 객체 | worker |
+| 둘 다 없음 | **사용자 세션**(목록에 포함) |
+
+기본을 "제외"가 아니라 **"포함"** 으로 둔다. 목록에서 조용히 사라진 세션은 사용자가 알아챌 방법이 없지만,
+worker가 섞이면 보고 무시할 수 있다. 실측(2026-08-08, 개발자 머신): `thread_source`가 없는 구버전 Codex
+파일 67개가 전부 실제 사용자 대화였고 모두 `payload.id`를 갖고 있어 식별에도 문제가 없었다. 이 67개는
+제외 규칙 때문에 목록에서 통째로 빠져 있었다.
+
+**한 파일에 `session_meta`가 여러 번 나온다.** 실측상 Codex 파일 256개 중 123개가 그렇고, 그중 118개는
+첫 메타가 `subagent`이지만 마지막 메타가 `user`인 정상 세션이다. 따라서 **판정은 파일 안에서 마지막으로
+관측한 `session_meta`를 따른다.** 첫 메타로 확정하면 그 118개가 사라진다.
+
+읽기를 조기에 끊어 비용을 아끼는 경우에도 같은 규율을 지킨다 — worker 확정은 **앞 512 KiB를 다 읽고도
+`user` 신호를 한 번도 보지 못했을 때만** 한다(실측 `user` 메타 최대 위치 18.6 KiB의 27배 여유). 판정에
+필요한 메타를 못 본 파일은 제외하지 않고 끝까지 읽는다. 제외는 확신할 때만 한다.
+
+Claude의 nested subagent transcript는 discovery 단계에서 재귀하지 않으므로 애초에 후보가 아니다(§3 표).
+다만 그 존재는 부모 세션의 정보이므로 개수를 세어 카드에 보인다(§2.3).
 
 각 record의 안정 identity는 provider의 session id와 source file `(device,inode)`다. 같은 provider/session id가 여러 source에 있으면 newest verified source 하나만 표시하고, id 또는 file identity가 충돌/변경되면 둘 다 불신하고 다음 refresh까지 publish하지 않는다. title index는 보조 정보이며 session transcript의 provider/id와 맞을 때만 적용한다.
 
 ## 4. 스캔·성능·수명
 
-`SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot` **완료본 하나**만 건넨다. main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
+`SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot`만 건넨다. **이전 완료본이 있으면 새 완료본 하나로만 교체**하며, 첫 진입처럼 이전 완료본이 없을 때만 부분 snapshot을 점진 publish한다(§4.1). main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
 
 `SessionDock`의 비례 system-UI text는 이와 **다른** 규율을 따른다. provider JSONL은 worker의 일이지만
 텍스트 셰이핑은 아니다. render tick은 rich-text artifact cache가 miss하면 **그 자리에서 CoreText로 셰이핑해
@@ -487,17 +527,73 @@ teardown, 연속 resize에서도 main actor가 native shaping이나 join으로 �
 AS2는 한 PR에 병렬 parser까지 억지로 섞지 않는다. **AS2-a**는 backend-owned monotonic request generation, dock 이탈/종료 cancel, candidate/file 경계의 cooperative cancel, cancelled generation의 publish 폐기와 재진입 latest-wins 재요청을 닫는다. **AS2-b**가 그 동일 cancellation token과 총 byte reservation을 소비하는 최대 4개 parse worker pool 및 actual peak-concurrency metric/fixture gate를 추가한다. 따라서 AS2-a가 끝나기 전에는 현재 단일 scanner thread를 “동시 parse≤4 구현”이라고 주장하지 않는다.
 
 1. trusted discovery root에서 no-follow directory traversal로 regular file만 수집한다. symlink, socket, FIFO, device, nested Claude directory, 예상 밖 파일명은 skip하며 debug artifact에는 raw 제목/프롬프트/경로를 남기지 않는다.
-2. provider별 최대 4,096개 후보 metadata를 mtime 순으로 고르고, 합쳐 최근 순으로 분석한다. 이 상한을 넘으면 header에 `일부 최근 후보만 검사함`을 표시한다.
-3. worker는 최근 후보를 제한된 worker pool(동시 parse 최대 4)로 분석한다. 파일은 streaming JSONL parser로 읽고 파일당 128 MiB, refresh당 512 MiB budget을 둔다. worker는 새 **완료** immutable snapshot만 publish하며 main actor는 그것을 한 번에 swap한다. 손상 JSON line은 그 line만 버리고 record를 추측해 만들지 않는다. cap/cancel/OOM이면 완성된 record만 포함한 partial snapshot을 publish한다.
-4. first guard는 앱 실행 중의 완료 snapshot TTL 15초다. TTL hit는 filesystem I/O 없이 현재 snapshot만 보이고, force refresh만 이를 우회한다. worker는 다음 guard로 `(device,inode,mtime,size)`가 같은 파일의 verified parse 결과를 재사용한다. cache miss/identity 변경 파일만 다시 분석하며, cache 결과와 새 parse 결과를 mtime 순으로 합친 **완료 snapshot**을 publish한다. 500개 verified record가 완성되면 더 오래된 후보는 v1 refresh에서 분석하지 않는다. memory-only snapshot과 parse cache이므로 앱 종료 후 title/prompt metadata, source path, session id를 디스크에 남기지 않는다. persistent cache는 개인정보 보존·삭제 정책을 별도로 승인하기 전 비목표다.
+2. 후보 metadata는 디렉터리 순회와 `stat`만으로 모으므로 개수 상한을 두지 않는다. 실측(2026-08-08) 351개
+   후보 수집이 **2.4 ms**다 — 여기에 상한을 두면 목록의 완전성만 잃고 아끼는 비용이 없다.
+3. worker는 후보를 최근 순으로 분석한다. 파일은 **streaming JSONL parser**로 읽는다: 고정 크기 버퍼로
+   순차 읽고 줄 단위로 소비하며, 청크 경계에 걸친 줄만 이어 붙인다. **파일 전체를 메모리에 올리지
+   않는다** — 그래야 파일 크기와 무관하게 메모리가 일정하고, 아래 4의 상한들이 필요 없어진다.
+   손상 JSON line은 그 line만 버리고 record를 추측해 만들지 않는다. 한 줄이 16 MiB를 넘으면 그 줄을
+   버리고 `partial`에 기록한다(손상 파일이 줄 버퍼를 무한히 키우는 것만 막는 방어이며, 정상 파일은
+   전부 통과한다 — 실측 최장 줄 6.85 MB).
+4. **read budget을 두지 않는다.** 예전에는 파일당 128 MiB·refresh당 512 MiB 상한이 있었는데, 그 둘은
+   "파일 전체를 메모리에 올린다"를 방어하려고 존재했다. streaming으로 그 전제가 사라지면 상한도 함께
+   사라진다. 남는 상한은 한 refresh가 무한히 돌지 않게 하는 **시간 상한 하나**이며, 그 상한에 걸려
+   끊긴 refresh는 `partial`로 표시한다.
 
-따라서 첫 진입이 즉시 500개를 완성한다는 보장은 없다. UI는 `228개 표시 · 최근 500개 중 분석 중`처럼 현재 snapshot과 scan 상태를 분리해 말해야 하며, search/scope가 partial snapshot을 완전한 결과인 것처럼 보이게 해서는 안 된다. 이미 완료 snapshot이 있으면 같은 문구를 overlay로만 보이고 카드 목록은 유지한다.
+   read budget이 목록을 자르면 **캐시 상태가 결과를 바꾼다.** 캐시 히트는 budget을 쓰지 않으므로, 같은
+   데이터·같은 코드인데 몇 번째 refresh냐에 따라 보이는 세션 수가 달라진다. 실측(2026-08-08)에서 첫
+   refresh 69개가 12번 반복 뒤 272개가 됐고 그래도 완성되지 않았다. **캐시는 순수 최적화여야 하며
+   관측 가능한 결과를 바꿔서는 안 된다.** budget 제거가 그 조건을 회복시킨다.
+5. first guard는 앱 실행 중의 완료 snapshot TTL 15초다. TTL hit는 filesystem I/O 없이 현재 snapshot만
+   보이고, force refresh만 이를 우회한다. worker는 다음 guard로 `(device,inode,mtime,size)`가 같은 파일의
+   verified parse 결과를 재사용한다. cache miss/identity 변경 파일만 다시 분석하며, cache 결과와 새 parse
+   결과를 정렬해 합친 snapshot을 publish한다. `(device,inode)`는 캐시를 위해서가 아니라 **스캔 시점과
+   열기 시점 사이의 파일 교체를 막기 위한 identity**이며(§5), 캐시 키는 그것을 재사용한다.
+   memory-only snapshot과 parse cache이므로 앱 종료 후 title/prompt metadata와 source path를 디스크에
+   남기지 않는다. persistent cache는 개인정보 보존·삭제 정책을 별도로 승인하기 전 비목표다.
+
+### 4.1 첫 진입의 점진 publish
+
+read budget을 없애면 첫 진입이 사용자 이력 전체를 한 번에 분석한다. 실측(2026-08-08, 351개/8.1 GB,
+`ReleaseSafe`·제품 allocator): 전체 완료까지 **약 16초**이고 두 번째 refresh부터는 캐시로 **약 1초**다.
+비용의 97.5%는 JSON parse이며 I/O는 1.2초다.
+
+그래서 **이전 snapshot이 없을 때만** 완료를 기다리지 않고 부분 snapshot을 주기적으로 publish한다.
+
+- **이전 완료 snapshot이 있으면**: 지금과 같다. 완료본 하나로 원자 교체하고 scroll/selection anchor를
+  보존한다. refresh가 목록을 흔들지 않는다는 계약은 그대로다.
+- **없으면**(첫 진입): 정렬 순서대로 분석하며 부분 snapshot을 발행해 목록이 위에서부터 찬다.
+  실측 채움 속도는 첫 카드 6 ms, 20개 약 2초, 100개 8.4초, 전체 15.7초다. 즉 **첫 화면은 budget이
+  있던 때보다 빠르고, 최종 목록은 완전하다.**
+- 부분 snapshot은 **완료로 취급하지 않는다.** TTL 갱신에 쓰지 않으며(쓰면 재스캔이 막혀 목록이
+  불완전한 채 고정된다), "이전 snapshot이 있다"는 판정에도 쓰지 않는다(취소로 남은 부분 목록을
+  완성본으로 오인하면 다음 진입이 점진 경로를 타지 않는다).
+- 발행 간격은 초반을 촘촘히 하고 이후 넓힌다. main actor가 발행마다 filter/projection/anchor 복원을
+  다시 하므로 너무 잦으면 그 자체가 비용이다.
+
+**budget이 없어도 UI는 여전히 불완전을 말해야 한다.** 시간 상한, 16 MiB 초과 줄, 읽기·parse 실패는
+`partial`로 남고, UI는 `228개 표시 · 분석 중`처럼 현재 snapshot과 scan 상태를 분리해 말한다.
+search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 안 된다. 이미 완료 snapshot이 있으면 같은
+문구를 overlay로만 보이고 카드 목록은 유지한다. **정책적 제외(worker)는 이 경고에 포함하지 않는다** —
+정상 동작이 상시 경고로 보이면 경고가 무의미해진다.
 
 ## 5. 보안·개인정보·관측
 
 - provider log는 민감한 개인 데이터다. 원문·prompt·token·절대 home path를 trace, crash artifact, fixture, analytics, config에 쓰지 않는다. fixture는 synthetic·redacted JSONL만 허용하며 [project-rules.md](project-rules.md)의 redaction 기준을 공유한다.
 - scanner는 no-follow로 열고 fstat identity를 discovery snapshot과 다시 대조한다. parse 중 교체되거나 permission이 바뀐 파일은 stale로 버린다. published record는 앱 실행 중에만 absolute source path와 `(device,inode)`를 함께 보존하며, `로그 보기`는 사용자가 누른 때에만 그 identity를 다시 검사해 OS file reveal API에 넘긴다. 교체·삭제·비정규 파일이면 reveal을 거부한다.
-- resume command는 shell string concat이 아니라 argv array다. session id/provider/cwd는 UI text나 log에서 명령으로 재해석되지 않는다. parse한 prompt는 실행 인자로 절대 넣지 않는다.
+- resume은 **사용자 로그인 셸을 거쳐** provider를 실행한다. `/usr/bin/env <provider>`를 직접 exec하면
+  provider를 **부모 프로세스의 PATH에서만** 찾으므로, Dock/Finder에서 띄운 앱은 실패한다 — GUI 앱이
+  물려받는 PATH에는 `~/.local/bin`이나 버전 매니저 shim이 없다(실측 2026-08-08: `launchctl getenv PATH`
+  미설정, `env -i … zsh -lc 'command -v claude'` 실패, `-lic`는 성공). 터미널에서 띄웠을 때만 우연히
+  동작하던 것이라 재현이 갈렸다.
+  - 셸을 `-l -i -c "exec <provider> --resume <id>"` 형태로 부른다. `-i`가 필요한 이유는 PATH를
+    `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지 않기 때문이다. 일반 새 탭은 이미
+    대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을 일치시킨다.
+  - 셸 basename이 `zsh`·`bash`·`sh`일 때만 이 형태를 쓰고, 그 외(fish·nushell 등)는 문법이 다르므로
+    직접 exec으로 폴백한다.
+  - 명령 문자열에 들어가는 각 인자는 예외 없이 single-quote escape한다. **cwd는 명령 문자열에 넣지
+    않고 spawn request의 작업 디렉터리로만 전달한다.** parse한 prompt는 실행 인자로 절대 넣지 않는다.
+  - session id/provider는 UI text나 log에서 명령으로 재해석되지 않는다.
 - metrics는 candidate/verified/partial/rejected 개수와 scan duration/bytes만 남긴다. title·요약·cwd·session id는 observability event의 payload가 될 수 없다.
 
 ## 6. 구현 순서와 완료 조건

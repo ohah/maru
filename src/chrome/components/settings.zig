@@ -466,7 +466,12 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const content_rows = title_rows + @as(u32, @intCast(body_rows)); // 힌트는 title_rows 영역(제목 아래 줄)에 둬 별도 행 불필요
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const form_x = box.inner_x + @as(i32, @intCast((nav_cols + nav_gap_cols) * box.cw));
-    const form_cols = box.inner_cols -| (nav_cols + nav_gap_cols);
+    // 스크롤바 gutter를 폼 폭에서 **한 번** 뗀다(SV5c). 여기가 폼 폭의 단일 출처라, control·↺ 위치를
+    // 내는 헬퍼(`fieldControlRect`·`resetIconX`)가 자동으로 따라온다 — 팔레트에서는 요소마다 손으로
+    // 빼야 해서 두 번 빠뜨렸는데(단축키·선택 밴드), 세팅은 `reset_gutter_cols`로 같은 패턴을 이미
+    // 갖고 있어 그 자리에 하나 더 얹으면 된다.
+    const scroll_gutter_cols: u32 = if (cw > 0) (p.metrics.overlay_scroll_gutter_px + cw - 1) / cw else 0;
+    const form_cols = box.inner_cols -| (nav_cols + nav_gap_cols) -| scroll_gutter_cols;
     // 창이 너무 좁아 modal_box가 박스를 nav+gap+content보다 좁게 clamp하면 form_cols가 우측 블록보다 작아져
     // fieldControlRect·paletteGridRect의 (form_cols -| 우측블록 -| gutter)가 0으로 saturate → 위젯/그리드가 라벨 위로
     // 겹쳐 그려지거나(리뷰 #823), 라벨 truncate 폭이 0이 돼 라벨이 통째 사라졌다(리뷰). 그 경우 레이아웃 불가로 보고
@@ -816,6 +821,33 @@ pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: 
         .y = modal_box.rowY(box, 0),
         .w = box.cw,
         .h = box.ch,
+    };
+}
+
+/// 폼 목록의 스크롤 창과 그 뷰포트 rect(SV5c) — host가 스크롤바를 발행하는 데 쓴다.
+///
+/// **컴포넌트가 막대를 그리지 않는다.** 모양·기하는 공용 경로(`chrome/ui/scroll_area.zig`)가 소유하고,
+/// 여기서는 "어디에 얼마만큼"만 알려 준다. `searchCaretRect`가 caret 위치만 알려 주는 것과 같은 형태다.
+///
+/// `win_start`는 selected에서 매번 재파생된 값이라 **저장되는 상태가 아니다**(팔레트와 같다 — SV5b).
+pub const ScrollView = struct { viewport: draw.Rect, total: usize, visible: usize, win_start: usize };
+
+pub fn scrollView(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?ScrollView {
+    if (!state.open) return null;
+    const l = computeLayout(sections, rows, state.selected, p, tk) orelse return null;
+    if (rows.len <= l.win_len or l.win_len == 0) return null; // 안 넘침 — 막대 없음
+    const box = l.box;
+    return .{
+        .viewport = .{
+            .x = l.form_x,
+            .y = modal_box.rowY(box, l.first_field_row),
+            // 폼 폭은 이미 gutter를 뗀 값이라, 막대가 설 자리는 그 **오른쪽**이다.
+            .w = (l.form_cols + ((p.metrics.overlay_scroll_gutter_px + box.cw - 1) / @max(box.cw, 1))) * box.cw,
+            .h = @as(u32, @intCast(l.win_len)) * box.ch,
+        },
+        .total = rows.len,
+        .visible = l.win_len,
+        .win_start = l.win_start,
     };
 }
 
@@ -2237,4 +2269,60 @@ test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor f
         if (op == .fill and op.fill.role == .cursor) has_caret = true;
     }
     try std.testing.expect(has_buf and has_caret);
+}
+
+// SV5c — 세팅 폼 목록에 스크롤바가 생겼다. 팔레트와 달리 폼 폭이 nav·control·↺ 여백에 얽혀 있어,
+// **뷰포트를 컴포넌트가 준다**(host가 다시 계산하면 두 벌이 갈린다). gutter도 폼 폭 계산 한 곳에서
+// 빠지므로 control·↺ 위치가 자동으로 따라온다 — 팔레트에서 두 번 빠뜨렸던 그 흩어짐이 여기엔 없다.
+test "settings reserves the scrollbar gutter once and reports a viewport for the host" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const gutter: u32 = 11;
+    const base = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 1600,
+        .backing_height_px = 600,
+    } };
+    var with_gutter = base;
+    with_gutter.metrics.overlay_scroll_gutter_px = gutter;
+
+    const sections = [_][]const u8{"일반"};
+    var rows_buf: [80]FieldRow = undefined;
+    for (&rows_buf, 0..) |*r, i| {
+        _ = i;
+        r.* = .{ .label = "옵션", .kind = .{ .toggle = false } };
+    }
+    const rows: []const FieldRow = &rows_buf;
+
+    var s: State = .{};
+    s.open = true;
+    s.selected = 0;
+
+    // ① gutter를 주면 control 열이 그만큼 **왼쪽으로** 물러난다 — 폼 폭 한 곳에서 뺐으니 소비처가 따라온다.
+    const l_bare = computeLayout(&sections, rows, s.selected, base, &tk).?;
+    const l_gut = computeLayout(&sections, rows, s.selected, with_gutter, &tk).?;
+    try std.testing.expect(l_gut.form_cols < l_bare.form_cols);
+
+    // ② 넘치면 host가 쓸 뷰포트를 준다. 창(win_start)은 selected에서 재파생된 값이라 상태가 아니다.
+    const sv = scrollView(&s, &sections, rows, with_gutter, &tk) orelse return error.NoScrollView;
+    try std.testing.expectEqual(rows.len, sv.total);
+    try std.testing.expect(sv.visible > 0 and sv.visible < rows.len);
+    try std.testing.expectEqual(@as(usize, 0), sv.win_start);
+    try std.testing.expect(sv.viewport.w > 0 and sv.viewport.h > 0);
+
+    // ③ 선택을 끝으로 옮기면 창이 따라간다(파생값의 증거).
+    s.selected = rows.len - 1;
+    const sv_end = scrollView(&s, &sections, rows, with_gutter, &tk).?;
+    try std.testing.expect(sv_end.win_start > 0);
+
+    // ④ 안 넘치면 막대가 없다 — 트랙만 남은 막대를 그리지 않는다.
+    const few: []const FieldRow = rows[0..1];
+    s.selected = 0;
+    try std.testing.expect(scrollView(&s, &sections, few, with_gutter, &tk) == null);
+
+    // ⑤ 닫혀 있으면 없다.
+    s.open = false;
+    try std.testing.expect(scrollView(&s, &sections, rows, with_gutter, &tk) == null);
 }

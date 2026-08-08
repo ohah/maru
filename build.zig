@@ -2049,38 +2049,41 @@ pub fn build(b: *std.Build) void {
     session_host_b3_4_5_step.dependOn(&run_b3_4_5_boundary_tests.step);
     boundary_step.dependOn(&run_b3_4_5_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
-        const b3_6_generation_transport_mod = b.createModule(.{
-            .root_source_file = b.path(
-                "src/platform/macos/session_host/generation_transport.zig",
-            ),
-            .target = target,
-            .optimize = b3_optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
-        });
-        const b3_6_tests = addProjectTest(b, .{
+        const b3_6_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_b3_6_boundary.zig"),
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/generation_transport.zig",
+                ),
                 .target = target,
                 .optimize = b3_optimize,
                 .link_libc = true,
-                .imports = &.{
-                    .{ .name = "maru", .module = maru_mod },
-                    .{ .name = "generation_transport_tests", .module = b3_6_generation_transport_mod },
-                },
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             .filters = &.{"CR3a-2c3b internal rpc substrate"},
         });
-        const run_b3_6_tests = b.addSystemCommand(&.{
+        const run_b3_6_runtime_tests = b.addSystemCommand(&.{
             "/usr/bin/env",
             "-i",
             "MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC=run-isolated-v1",
         });
-        run_b3_6_tests.addArtifactArg(b3_6_tests);
-        run_b3_6_tests.addArg("--maru-expect-tests=3");
-        run_b3_6_tests.setCwd(b.path("."));
-        session_host_b3_6_step.dependOn(&run_b3_6_tests.step);
-        boundary_step.dependOn(&run_b3_6_tests.step);
+        run_b3_6_runtime_tests.addArtifactArg(b3_6_runtime_tests);
+        run_b3_6_runtime_tests.addArg("--maru-expect-tests=2");
+        run_b3_6_runtime_tests.setCwd(b.path("."));
+        session_host_b3_6_step.dependOn(&run_b3_6_runtime_tests.step);
+
+        const b3_6_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_b3_6_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3b internal rpc substrate"},
+        });
+        const run_b3_6_boundary_tests = b.addRunArtifact(b3_6_boundary_tests);
+        run_b3_6_boundary_tests.addArg("--maru-expect-tests=1");
+        run_b3_6_boundary_tests.setCwd(b.path("."));
+        session_host_b3_6_step.dependOn(&run_b3_6_boundary_tests.step);
+        boundary_step.dependOn(&run_b3_6_boundary_tests.step);
 
         const b3_1_leaf_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

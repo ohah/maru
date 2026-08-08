@@ -1173,16 +1173,18 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   private substrate의 ownership-only settlement exact-one callsite와 actual transport slot 2/64회는 correction gate가 소유한다.
   payload semantic read와 normal `RemoteRuntime` product caller는 0이다. correction부터 client-slot
   module-public entry는 `fail_stop_required`를 return type에 노출하거나 저장하지 않고 기존 private noreturn sink로 즉시 소비한다.
-  B3-6은 동작 변경 없이 같은 strict behavior의 isolated subprocess/source 증거를 완성하며 test-only cross-file escape는 0이다.
+  B3-6은 public facade/semantic decode 변경 없이 peer/resource read 실패의 내부 fail-stop 오분류를 교정하고 같은 strict behavior의
+  isolated subprocess/source 증거를 완성한다. owner/capability의 test-only cross-file escape는 0이며 scalar case/nonce/stage-fd hook만 exact 1 허용한다.
   GenerationTransport 제품 facade의 recursive parameter/return과 normal product callsite에서 raw response pointer·slot address accessor·
   borrow·finish·reset은 0이고 normal `RemoteRuntime` family callsite와 사용자 가시 동작도 0이다. 이는 owner/internal client-slot
   declaration까지 프로젝트 전체 0이라는 뜻이 아니다.
   correction 전용 `CR3a-2c3b reusable response correction` artifact는 exact count 5(same-slot 2, same-slot 64, evidence-retire,
-  rearm permit drift/replay, post-rearm 금지 동작), B3-6 전용 `CR3a-2c3b internal rpc substrate` artifact는 exact count 3
+  rearm permit drift/replay, post-rearm 금지 동작), B3-6 전용 `CR3a-2c3b internal rpc substrate` focused gate는
+  runtime 2+boundary 1, total exact count 3
   (peer-error non-crash actual socket, local invariant fail-stop child, boundary+exact-one callsite)이다. 기존 B3-0a count 4 artifact를
   대신 세지 않는다. 같은 private wrapper에서 peer wire frame/header/envelope malformed·wrong-id·truncated·empty·cap+1·OOM은
   process alive+connection terminal+
-  permanent tombstone+rearm 0+second free 0, local seal/allocator/authority/rearm drift만 abnormal exit여야 한다. runtime permit
+  registry response authority permanent tombstone+payload owner pristine+rearm 0+second free 0, local seal/allocator/authority/rearm drift만 abnormal exit여야 한다. runtime permit
   drift/lifecycle tests가 primary이고 source-order tokenizer는 금지된 post-rearm callsite를 보조 검증한다. 두 artifact는 각각
   `/usr/bin/env -i`, 독립 parent-minted pipe capability, inert collector, exact-count zero-test 방지를 적용하고
   `MARU_SESSION_HOST_RPC_REUSE_EXEC|MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC`의 closed 3-mode를 교차 수용하지 않는다.
@@ -1191,9 +1193,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   process-alive protocol terminal+permanent tombstone+semantic read 0+rearm 0이다. exact cases는
   bad magic, wrong major, invalid kind, wrong request id, declared cap+1, truncated header, truncated payload, zero-byte EOF, 실제 response
   allocation ordinal 전수, correct-id empty payload와 correct response 뒤 coalesced duplicate old-id다. duplicate는 첫 cycle 뒤 다음
-  cycle correlation loss로 terminal되고 두 번째 publication/free/rearm 0을 검증한다. 미래 request id의 완전한 response 선송신은
+  cycle correlation loss로 terminal되고 두 번째 RPC-slot publication/owner-free/rearm 0, parser discard free exact once를 검증한다. 미래 request id의 완전한 response 선송신은
   정상 future response와 wire상 구분 불가능한 compromised-peer 비목표다.
-  isolated child는 parent-minted `{version,case_id,nonce,stage}` fixed record의 case별 exact prefix+final sentinel과 예상 abnormal termination이
+  isolated child는 parent-minted `{version,case_id,nonce,stage}` 11-byte record(`nonce` little-endian)의 case별 exact prefix+final sentinel과 예상 abnormal termination이
   함께 맞아야 한다. response seal/allocator drift는 `free_once` 뒤, authority drift는 permit 준비 뒤, rearm drift는
   `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. stderr marker 단독, exec 126/127,
   capability/nonce mismatch, generic panic, stage 누락·중복·역전은 실패다. stderr/stage pipe는 child 종료 전 동시에 nonblocking drain하며

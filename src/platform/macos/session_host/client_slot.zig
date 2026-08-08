@@ -30,6 +30,65 @@ var process_runtime_pid: std.atomic.Value(u32) = .init(0);
 threadlocal var prepared_execution_cleanup_active_addr: usize = 0;
 threadlocal var finish_permit_alias_case_for_test: u8 = 0;
 
+const RpcSubstrateFailStopTestHook = struct {
+    const version: u8 = 1;
+    const Case = enum(u8) {
+        response_seal_drift = 1,
+        allocator_transcript_drift = 2,
+        authority_permit_drift = 3,
+        rearm_permit_drift = 4,
+    };
+    const Stage = enum(u8) {
+        armed = 1,
+        canonical_execute = 2,
+        response_published = 3,
+        response_borrowed = 4,
+        free_once = 5,
+        allocator_returned = 6,
+        permits_prepared = 7,
+        authority_idle = 8,
+        evidence_retired = 9,
+        rearm_precondition = 10,
+        drift_injected = 11,
+    };
+    const record_size: usize = 11;
+
+    lifecycle: enum(u8) { pristine, armed, active } = .pristine,
+    case: Case = .response_seal_drift,
+    nonce: u64 = 0,
+    stage_fd: c.fd_t = -1,
+
+    fn writeStage(self: *@This(), stage: Stage) void {
+        if (self.lifecycle == .pristine) return;
+        var bytes: [record_size]u8 = undefined;
+        bytes[0] = version;
+        bytes[1] = @intFromEnum(self.case);
+        std.mem.writeInt(u64, bytes[2..10], self.nonce, .little);
+        bytes[10] = @intFromEnum(stage);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const written = c.write(self.stage_fd, bytes[offset..].ptr, bytes.len - offset);
+            if (written < 0 and std.posix.errno(written) == .INTR) continue;
+            if (written <= 0) @panic("RPC substrate fail-stop stage write failed");
+            offset += @intCast(written);
+        }
+    }
+
+    fn activate(self: *@This()) void {
+        if (self.lifecycle == .pristine) return;
+        if (self.lifecycle != .armed) @panic("RPC substrate fail-stop hook replayed");
+        self.lifecycle = .active;
+        self.writeStage(.canonical_execute);
+    }
+
+    fn activeCase(self: *const @This(), case: Case) bool {
+        return self.lifecycle == .active and self.case == case;
+    }
+};
+
+threadlocal var rpc_substrate_fail_stop_test_hook: if (builtin.is_test) RpcSubstrateFailStopTestHook else void =
+    if (builtin.is_test) .{} else {};
+
 test "CR3a-2c2b3b quarantine leaf participates in the session-host gate" {
     _ = ended_purge_quarantine;
 }
@@ -1989,11 +2048,32 @@ pub fn prepareGenerationRequest(
         .rpc_prepare,
         &allocator_scope,
     ) catch |err| {
-        if (err == error.IdentityExhausted) {
-            node.client.poison(.local_invariant_violation);
-            return error.IdentityExhausted;
-        }
-        return error.Busy;
+        return switch (err) {
+            error.IdentityExhausted => blk: {
+                node.client.poison(.local_invariant_violation);
+                break :blk error.IdentityExhausted;
+            },
+            error.AdminBusy => error.Busy,
+            error.ConnectionClosed, error.WriteFailed => error.ConnectionClosed,
+            error.OutOfMemory, error.EventQueueFull, error.CapacityExhausted => error.ResourceExhausted,
+            error.Unauthorized => error.Unauthorized,
+            error.MovedOrCopied,
+            error.InvalidIdentity,
+            error.InvalidReservation,
+            error.InvalidState,
+            error.InvalidStream,
+            error.InvalidDescriptor,
+            => error.InvalidOwner,
+            error.EndpointAbsent,
+            error.EndpointDenied,
+            error.EndpointTransient,
+            error.HandshakeFailed,
+            error.IncompatibleVersion,
+            error.ProtocolError,
+            error.ExternalMode,
+            error.DestinationOccupied,
+            => error.ProtocolError,
+        };
     };
     defer node.client.restoreGenerationAllocatorScope(&allocator_scope) catch
         @panic("generation allocator scope restore drifted");
@@ -3012,6 +3092,28 @@ const PreparedRpcExecutionTxn = struct {
         return outcome;
     }
 
+    fn settleRecoveredTerminal(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+    ) !SettlementOutcome {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .response_reserved or
+            !self.responseDestinationStillPristine() or self.request.phase != .pre_wire_backing_live or
+            !self.request.settlement.pendingExact()) return error.ProtocolError;
+        const node = self.request.ownerNode(operation) orelse return error.ProtocolError;
+        const storage: *const client_mod.PreparedBlockingRpcStorage =
+            @ptrFromInt(self.request.canonical_prepared.descriptor.storage_addr);
+        if (!client_mod.Client.preparedBlockingRpcStorageSettled(storage) or
+            !node.cleanup_registry.rpcExecutionRecoveryTerminalExact(
+                self.request.reservation.cleanup,
+                self.request.binding_identity,
+            )) return error.ProtocolError;
+        self.request.phase = .post_execute_backing_settled;
+        const outcome = self.request.publishTerminal(reason);
+        self.phase = .settled;
+        return outcome;
+    }
+
     fn ensureSettledOrFailStop(
         self: *@This(),
         operation: RegisteredNodeOperation,
@@ -3376,6 +3478,17 @@ const PreparedRpcPublicationScope = struct {
         node.guarded_allocator.endOperationGuard();
         self.guard_active = false;
         self.self_addr = 0;
+        if (builtin.is_test) {
+            const cleanup_observer = &node.guarded_allocator.request_free_test_observer;
+            cleanup_observer.cleanup_count += 1;
+            cleanup_observer.guard_inactive = !node.guarded_allocator.operation_guard_active;
+            cleanup_observer.allocator_scope_restored = self.allocator_scope.lifecycle == .restored and
+                self.allocator_scope.self_addr == 0;
+            cleanup_observer.client_scope_restored = node.client.active_generation_allocator_scope == null;
+            cleanup_observer.ledger_ended = self.ledger.self_addr == 0 and
+                !self.ledger.active and self.ledger.entry_count == 0;
+            cleanup_observer.cleanup_settled = true;
+        }
     }
 };
 
@@ -4006,12 +4119,15 @@ fn executePreparedRpcPrivate(
     var lease_active = true;
     defer if (lease_active) {
         publication.finish(node, &lease);
-        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
-            node,
-            &lease,
-            &txn,
-            admission.operation,
-        );
+        if (txn.phase == .settled)
+            finishPreparedRpcLeaseOrFailStop(node, &lease, &txn, admission.operation)
+        else
+            settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
+                node,
+                &lease,
+                &txn,
+                admission.operation,
+            );
     };
 
     if (test_failure == .after_execution_lease) {
@@ -4125,11 +4241,40 @@ fn publishPreparedRpcResponse(
         lease,
         response_allocator,
         publication.observer(node),
-    ) catch failStopRpcPublication(
-        node,
-        payload_cleanup,
-        .ledger_drift,
-    );
+    ) catch |err| switch (err) {
+        // Peer framing/correlation failures and bounded local allocation exhaustion poison the
+        // connection, but they do not prove local ownership drift. The caller's unwind owns the
+        // publication scope and execution lease; close the armed recovery authority first so the
+        // slot becomes a permanent tombstone without invoking the local-invariant fail-stop path.
+        error.EndpointAbsent,
+        error.EndpointDenied,
+        error.EndpointTransient,
+        error.HandshakeFailed,
+        error.AdminBusy,
+        error.Unauthorized,
+        error.IncompatibleVersion,
+        error.ProtocolError,
+        error.WriteFailed,
+        error.ConnectionClosed,
+        error.EventQueueFull,
+        error.ExternalMode,
+        error.OutOfMemory,
+        => {
+            const reason = (node.client.preparedRequestExecutionPoisonReason(lease) catch
+                failStopRpcPublication(node, payload_cleanup, .ledger_drift)) orelse
+                failStopRpcPublication(node, payload_cleanup, .ledger_drift);
+            node.cleanup_registry.commitRpcExecutionRecoveryTerminalNoFail();
+            const outcome = txn.settleRecoveredTerminal(operation, reason) catch
+                failStopRpcPublication(node, payload_cleanup, .ledger_drift);
+            txn.request.finishOrFailStop(operation, outcome);
+            return err;
+        },
+        error.PayloadProvenanceRejected, error.InvalidPreparedRpc => failStopRpcPublication(
+            node,
+            payload_cleanup,
+            .ledger_drift,
+        ),
+    };
     const payload_receipt = switch (publication.ledger.classifyResponsePayloadProvenance(
         response.payload_observation_generation,
         response.payload,
@@ -4305,6 +4450,7 @@ fn executePreparedRpcCorrelatedResponseForTest(
 /// One ownership-only RPC cycle for GenerationTransport's canonical inline slot. Semantic
 /// response bytes deliberately remain unread until the decoder slice owns that contract.
 pub fn executeGenerationRpcSubstrate(execution: GenerationRpcSubstrateExecute) GenerationExecuteError!void {
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.activate();
     executePreparedRpcPrivate(
         execution.request,
         execution.bound_stream_id,
@@ -4326,15 +4472,61 @@ pub fn executeGenerationRpcSubstrate(execution: GenerationRpcSubstrateExecute) G
             else => @errorCast(err),
         };
     };
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.response_published);
     const response_addr = canonicalRpcResponseAddress(execution.request) catch
         @panic("RPC substrate lost its canonical response address after publication");
     const response: *RpcExecutedResponse = @ptrFromInt(response_addr);
     var borrow: rpc_executed_response.RpcResponseBorrow = .{};
     beginRpcResponseBorrow(execution.request, response, &borrow) catch
         @panic("RPC substrate borrow settlement drifted");
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.response_borrowed);
     finishRpcResponseOwned(execution.request, response, &borrow, .reusable) catch
         @panic("RPC substrate reusable settlement drifted");
     if (!response.pristineExact()) @panic("RPC substrate reusable slot did not rearm");
+}
+
+/// Arms one destructive, process-local B3-6 fixture. The hook is deliberately scalar-only and
+/// one-shot: the external test owns the pipe capability and the canonical product stack consumes
+/// the case. Case ids are 1=response seal, 2=allocator transcript, 3=authority permit, 4=rearm
+/// permit. Production builds cannot call or carry this authority.
+pub fn armRpcSubstrateFailStopForTest(case_id: u8, nonce: u64, stage_fd: c.fd_t) void {
+    if (!builtin.is_test) @compileError("test-only RPC substrate fail-stop hook");
+    if (rpc_substrate_fail_stop_test_hook.lifecycle != .pristine or nonce == 0 or stage_fd < 3)
+        @panic("invalid RPC substrate fail-stop hook authority");
+    const case = std.enums.fromInt(RpcSubstrateFailStopTestHook.Case, case_id) orelse
+        @panic("invalid RPC substrate fail-stop case");
+    rpc_substrate_fail_stop_test_hook = .{
+        .lifecycle = .armed,
+        .case = case,
+        .nonce = nonce,
+        .stage_fd = stage_fd,
+    };
+    rpc_substrate_fail_stop_test_hook.writeStage(.armed);
+}
+
+test "B3-6 RPC substrate fail-stop stage record is fixed and case-bound" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(usize, 11), RpcSubstrateFailStopTestHook.record_size);
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
+    defer _ = c.close(fds[0]);
+    var hook: RpcSubstrateFailStopTestHook = .{
+        .lifecycle = .armed,
+        .case = .authority_permit_drift,
+        .nonce = 0xB306_F17E_D00D,
+        .stage_fd = fds[1],
+    };
+    hook.writeStage(.permits_prepared);
+    _ = c.close(fds[1]);
+    var bytes: [RpcSubstrateFailStopTestHook.record_size]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(isize, @intCast(bytes.len)),
+        c.read(fds[0], &bytes, bytes.len),
+    );
+    try std.testing.expectEqual(RpcSubstrateFailStopTestHook.version, bytes[0]);
+    try std.testing.expectEqual(@as(u8, 3), bytes[1]);
+    try std.testing.expectEqual(@as(u64, 0xB306_F17E_D00D), std.mem.readInt(u64, bytes[2..10], .little));
+    try std.testing.expectEqual(@as(u8, 7), bytes[10]);
 }
 
 fn canonicalRpcResponseAddress(request: GenerationRequestAbort) GenerationRequestError!usize {
@@ -4590,6 +4782,7 @@ fn finishRpcResponseOwned(
         permits.releasing,
     );
     response.commitFreeNoFail(identity, borrow, &finish);
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.free_once);
     node.cleanup_registry.commitRpcResponseReleasing(
         request.reservation.cleanup,
         admission.identity,
@@ -4609,6 +4802,16 @@ fn finishRpcResponseOwned(
             evidence,
             "RPC response allocator callback settlement drifted",
         );
+    if (builtin.is_test) {
+        rpc_substrate_fail_stop_test_hook.writeStage(.allocator_returned);
+        if (rpc_substrate_fail_stop_test_hook.activeCase(.response_seal_drift)) {
+            response.seal[0] ^= 1;
+            rpc_substrate_fail_stop_test_hook.writeStage(.drift_injected);
+        } else if (rpc_substrate_fail_stop_test_hook.activeCase(.allocator_transcript_drift)) {
+            finish.terminal_evidence[0] ^= 1;
+            rpc_substrate_fail_stop_test_hook.writeStage(.drift_injected);
+        }
+    }
     switch (disposition) {
         .reusable => node.cleanup_registry.prepareRpcResponseReusable(
             request.reservation.cleanup,
@@ -4658,6 +4861,13 @@ fn finishRpcResponseOwned(
             evidence,
             "RPC response reusable rearm preflight drifted",
         );
+    if (builtin.is_test) {
+        rpc_substrate_fail_stop_test_hook.writeStage(.permits_prepared);
+        if (rpc_substrate_fail_stop_test_hook.activeCase(.authority_permit_drift)) {
+            permits.finish_authority.seal[0] ^= 1;
+            rpc_substrate_fail_stop_test_hook.writeStage(.drift_injected);
+        }
+    }
     response.finishCleanNoFail(&finish);
     switch (disposition) {
         .reusable => node.cleanup_registry.commitRpcResponseReusable(
@@ -4673,11 +4883,21 @@ fn finishRpcResponseOwned(
             permits.finish_authority,
         ),
     }
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.authority_idle);
     node.rpc_free_evidence.commitEvidenceRetireNoFail(permits.evidence_retire);
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.evidence_retired);
     if (disposition == .protocol_failure)
         node.client.poison(.peer_contract_violation);
-    if (disposition == .reusable)
+    if (disposition == .reusable) {
+        if (builtin.is_test) {
+            rpc_substrate_fail_stop_test_hook.writeStage(.rearm_precondition);
+            if (rpc_substrate_fail_stop_test_hook.activeCase(.rearm_permit_drift)) {
+                permits.rearm.expected_consumed_finish_digest[0] ^= 1;
+                rpc_substrate_fail_stop_test_hook.writeStage(.drift_injected);
+            }
+        }
         response.commitReusableRearmNoFail(&finish, permits.rearm);
+    }
 }
 
 fn terminalizeBorrowedRpcResponseNoFree(

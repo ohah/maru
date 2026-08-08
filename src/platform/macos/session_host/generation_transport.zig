@@ -1054,6 +1054,445 @@ test "CR3a-2c3b reusable response correction uses transport inline slot 64 times
     try runReusableResponseCorrection(64, null);
 }
 
+test "CR3a-2c3b internal rpc substrate peer matrix is non-crashing and fail-closed" {
+    const mode_ptr = c.getenv("MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC");
+    if (mode_ptr == null) return;
+    const mode = std.mem.span(mode_ptr.?);
+    if (std.mem.eql(u8, mode, "skip-in-aggregate-v1") or
+        std.mem.eql(u8, mode, "execute-fixture-v1")) return;
+    if (!std.mem.eql(u8, mode, "run-isolated-v1"))
+        return error.InvalidRpcSubstrateSubprocessMode;
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const PeerCase = enum {
+        bad_magic,
+        wrong_major,
+        invalid_kind,
+        wrong_id,
+        cap_plus_one,
+        truncated_header,
+        truncated_payload,
+        zero_byte_eof,
+        zero_length_terminal,
+    };
+    inline for (std.enums.values(PeerCase)) |peer_case| {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var harness: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &harness,
+            allocator,
+            0x2C3B_6000 + @as(u128, @intFromEnum(peer_case)),
+            .alloc,
+        );
+        defer harness.deinit();
+        try prepareB36RpcHarness(&harness, allocator, @intFromEnum(peer_case));
+
+        var header = (protocol.Header{
+            .kind = .response,
+            .request_id = harness.receipt.request_id,
+            .payload_len = 0,
+        }).encode();
+        var reply: []const u8 = &header;
+        var truncated_payload: [protocol.header_size + 1]u8 = undefined;
+        switch (peer_case) {
+            .bad_magic => header[0] = 'X',
+            .wrong_major => std.mem.writeInt(
+                u16,
+                header[4..6],
+                protocol.version_major + 1,
+                .big,
+            ),
+            .invalid_kind => std.mem.writeInt(u16, header[6..8], 0xFFFF, .big),
+            .wrong_id => std.mem.writeInt(
+                u64,
+                header[12..20],
+                harness.receipt.request_id + 1,
+                .big,
+            ),
+            .cap_plus_one => std.mem.writeInt(
+                u32,
+                header[28..32],
+                @intCast(protocol.max_control_json + 1),
+                .big,
+            ),
+            .truncated_header => reply = header[0 .. protocol.header_size - 1],
+            .truncated_payload => {
+                std.mem.writeInt(u32, header[28..32], 2, .big);
+                @memcpy(truncated_payload[0..protocol.header_size], &header);
+                truncated_payload[protocol.header_size] = '{';
+                reply = &truncated_payload;
+            },
+            .zero_byte_eof => reply = header[0..0],
+            .zero_length_terminal => {},
+        }
+        try harness.startPeer(reply);
+        const call = executePreparedRpcSubstrate(
+            &harness.owner.transport,
+            harness.receipt,
+        );
+        harness.joinPeer();
+        try std.testing.expectEqual(B3ActualSocketPeerOutcome.exact, harness.peer_state.outcome);
+        try harness.request_free.expectExecutionFinalZero();
+        try std.testing.expectEqual(@as(usize, 1), harness.request_free.exact_free_count);
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &harness.owner.transport.prepared_storage,
+        ));
+        try std.testing.expect(harness.slot.current.cleanup_registry.rpcExecutionRecoveryTerminalExact(
+            harness.reservation.?.cleanup,
+            harness.reservation.?.identity,
+        ));
+        try std.testing.expectError(switch (peer_case) {
+            .zero_byte_eof => error.ConnectionClosed,
+            else => error.ProtocolError,
+        }, call);
+        try std.testing.expect(harness.slot.logicalClient().firstPoisonReason() != null);
+        try std.testing.expect(harness.owner.transport.rpc_response.pristineExact());
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            harness.owner.transport.prepareRequest(contract.RuntimeRequest.observation()),
+        );
+    }
+
+    var reached_allocation_success = false;
+    var fail_offset: usize = 0;
+    while (fail_offset < 1024) : (fail_offset += 1) {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var harness: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &harness,
+            allocator,
+            0x2C3B_6100 + @as(u128, fail_offset),
+            .alloc,
+        );
+        defer harness.deinit();
+        try prepareB36RpcHarness(&harness, allocator, @intCast(fail_offset));
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = harness.receipt.request_id },
+            "{}",
+        );
+        defer allocator.free(response);
+        try harness.startPeer(response);
+        harness.ordinal.armNext(fail_offset);
+        const call = executePreparedRpcSubstrate(&harness.owner.transport, harness.receipt);
+        harness.joinPeer();
+        try std.testing.expectEqual(B3ActualSocketPeerOutcome.exact, harness.peer_state.outcome);
+        try harness.request_free.expectExecutionFinalZero();
+        if (harness.ordinal.induced_failure) {
+            try std.testing.expectError(error.OutOfMemory, call);
+            try std.testing.expectEqual(@as(usize, 1), harness.ordinal.induced_failure_count);
+            try std.testing.expectEqual(@as(usize, 1), harness.request_free.exact_free_count);
+            try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+                &harness.owner.transport.prepared_storage,
+            ));
+            try std.testing.expect(harness.owner.transport.rpc_response.pristineExact());
+            try std.testing.expect(harness.slot.logicalClient().firstPoisonReason() != null);
+            try std.testing.expect(harness.slot.current.cleanup_registry.rpcExecutionRecoveryTerminalExact(
+                harness.reservation.?.cleanup,
+                harness.reservation.?.identity,
+            ));
+        } else {
+            try call;
+            try std.testing.expect(harness.owner.transport.rpc_response.pristineExact());
+            reached_allocation_success = true;
+            break;
+        }
+    }
+    try std.testing.expect(reached_allocation_success);
+
+    try runB36CoalescedDuplicateCase();
+}
+
+const b36_fail_stop_record_size: usize = 11;
+
+fn setB36Nonblocking(fd: c.fd_t) !void {
+    const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+    if (flags < 0 or c.fcntl(
+        fd,
+        c.F.SETFL,
+        flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true })),
+    ) < 0) return error.TestUnexpectedResult;
+}
+
+fn drainB36Pipe(fd: c.fd_t, captured: []u8, used: *usize, truncated: *bool) !bool {
+    var discard: [4096]u8 = undefined;
+    while (true) {
+        const target = if (used.* < captured.len) captured[used.*..] else &discard;
+        const count = c.read(fd, target.ptr, target.len);
+        if (count > 0) {
+            const amount: usize = @intCast(count);
+            if (used.* < captured.len) {
+                used.* += amount;
+            } else {
+                truncated.* = true;
+            }
+            continue;
+        }
+        if (count == 0) return true;
+        switch (posix.errno(count)) {
+            .INTR => continue,
+            .AGAIN => return false,
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+fn expectB36FailStopTranscript(case_id: u8, nonce: u64, bytes: []const u8) !void {
+    const early = [_]u8{ 1, 2, 3, 4, 5, 6, 11 };
+    const authority = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 11 };
+    const rearm = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    const expected: []const u8 = switch (case_id) {
+        1, 2 => &early,
+        3 => &authority,
+        4 => &rearm,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(expected.len * b36_fail_stop_record_size, bytes.len);
+    for (expected, 0..) |stage, index| {
+        const record = bytes[index * b36_fail_stop_record_size ..][0..b36_fail_stop_record_size];
+        try std.testing.expectEqual(@as(u8, 1), record[0]);
+        try std.testing.expectEqual(case_id, record[1]);
+        try std.testing.expectEqual(nonce, std.mem.readInt(u64, record[2..10], .little));
+        try std.testing.expectEqual(stage, record[10]);
+    }
+}
+
+test "CR3a-2c3b internal rpc substrate local invariant fail-stop is authenticated" {
+    // A panic string alone can be emitted before the canonical owner reaches the intended
+    // destructive boundary. The parent therefore accepts a crash only when its unforgeable nonce
+    // accompanies the exact case-specific stage transcript produced inside the product stack.
+    const mode_ptr = c.getenv("MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC");
+    if (mode_ptr == null) return;
+    const mode = std.mem.span(mode_ptr.?);
+    if (std.mem.eql(u8, mode, "skip-in-aggregate-v1")) return;
+    if (std.mem.eql(u8, mode, "execute-fixture-v1")) {
+        const capability_fd = std.fmt.parseInt(
+            c.fd_t,
+            std.mem.span(c.getenv("MARU_SESSION_HOST_RPC_SUBSTRATE_CAP_FD") orelse
+                return error.InvalidRpcSubstrateCapability),
+            10,
+        ) catch return error.InvalidRpcSubstrateCapability;
+        const stage_fd = std.fmt.parseInt(
+            c.fd_t,
+            std.mem.span(c.getenv("MARU_SESSION_HOST_RPC_SUBSTRATE_STAGE_FD") orelse
+                return error.InvalidRpcSubstrateCapability),
+            10,
+        ) catch return error.InvalidRpcSubstrateCapability;
+        const case_id = std.fmt.parseInt(
+            u8,
+            std.mem.span(c.getenv("MARU_SESSION_HOST_RPC_SUBSTRATE_CASE") orelse
+                return error.InvalidRpcSubstrateCapability),
+            10,
+        ) catch return error.InvalidRpcSubstrateCapability;
+        var received: [@sizeOf(u64)]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < received.len) {
+            const count = c.read(capability_fd, received[offset..].ptr, received.len - offset);
+            if (count > 0) {
+                offset += @intCast(count);
+                continue;
+            }
+            if (count < 0 and posix.errno(count) == .INTR) continue;
+            return error.InvalidRpcSubstrateCapability;
+        }
+        _ = c.close(capability_fd);
+        const nonce = std.mem.bytesToValue(u64, &received);
+        if (nonce == 0) return error.InvalidRpcSubstrateCapability;
+        client_slot_mod.armRpcSubstrateFailStopForTest(case_id, nonce, stage_fd);
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var harness: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &harness,
+            allocator,
+            0x2C3B_6200 + @as(u128, case_id),
+            .alloc,
+        );
+        try prepareB36RpcHarness(&harness, allocator, case_id);
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = harness.receipt.request_id },
+            "{}",
+        );
+        try harness.startPeer(response);
+        executePreparedRpcSubstrate(&harness.owner.transport, harness.receipt) catch
+            @panic("authenticated RPC substrate fixture returned a typed error");
+        @panic("authenticated RPC substrate fixture unexpectedly returned");
+    }
+    if (!std.mem.eql(u8, mode, "run-isolated-v1"))
+        return error.InvalidRpcSubstrateSubprocessMode;
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const self_path_z = try std.process.executablePathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(self_path_z);
+    var case_id: u8 = 1;
+    while (case_id <= 4) : (case_id += 1) {
+        var capability_pipe: [2]c.fd_t = undefined;
+        var stage_pipe: [2]c.fd_t = undefined;
+        var stderr_pipe: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&capability_pipe));
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stage_pipe));
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
+        const nonce: u64 = 0xB306_0000_0000_0000 | @as(u64, case_id);
+        const capability = std.mem.asBytes(&nonce);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(capability.len)),
+            c.write(capability_pipe[1], capability.ptr, capability.len),
+        );
+        const child = c.fork();
+        if (child < 0) return error.TestUnexpectedResult;
+        if (child == 0) {
+            _ = c.close(capability_pipe[1]);
+            _ = c.close(stage_pipe[0]);
+            _ = c.close(stderr_pipe[0]);
+            if (c.dup2(stderr_pipe[1], 2) < 0) c._exit(126);
+            _ = c.close(stderr_pipe[1]);
+            var inherited_fd: c.fd_t = 3;
+            while (inherited_fd < getdtablesize()) : (inherited_fd += 1) {
+                if (inherited_fd != capability_pipe[0] and inherited_fd != stage_pipe[1])
+                    _ = c.close(inherited_fd);
+            }
+            var cap_fd_buf: [96]u8 = undefined;
+            const cap_fd_env = std.fmt.bufPrintZ(
+                &cap_fd_buf,
+                "MARU_SESSION_HOST_RPC_SUBSTRATE_CAP_FD={d}",
+                .{capability_pipe[0]},
+            ) catch c._exit(126);
+            var stage_fd_buf: [96]u8 = undefined;
+            const stage_fd_env = std.fmt.bufPrintZ(
+                &stage_fd_buf,
+                "MARU_SESSION_HOST_RPC_SUBSTRATE_STAGE_FD={d}",
+                .{stage_pipe[1]},
+            ) catch c._exit(126);
+            var case_buf: [96]u8 = undefined;
+            const case_env = std.fmt.bufPrintZ(
+                &case_buf,
+                "MARU_SESSION_HOST_RPC_SUBSTRATE_CASE={d}",
+                .{case_id},
+            ) catch c._exit(126);
+            const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
+            const child_env = [_:null]?[*:0]const u8{
+                "MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC=execute-fixture-v1",
+                cap_fd_env.ptr,
+                stage_fd_env.ptr,
+                case_env.ptr,
+            };
+            _ = c.execve(self_path_z.ptr, &argv, &child_env);
+            c._exit(127);
+        }
+        var child_reaped = false;
+        errdefer {
+            inline for (.{ &capability_pipe[0], &capability_pipe[1], &stage_pipe[0], &stage_pipe[1], &stderr_pipe[0], &stderr_pipe[1] }) |fd| {
+                if (fd.* >= 0) {
+                    _ = c.close(fd.*);
+                    fd.* = -1;
+                }
+            }
+            if (!child_reaped) {
+                _ = c.kill(child, c.SIG.KILL);
+                var cleanup_status: c_int = 0;
+                while (true) {
+                    const waited = c.waitpid(child, &cleanup_status, 0);
+                    if (waited == child) break;
+                    if (waited < 0 and posix.errno(waited) == .INTR) continue;
+                    break;
+                }
+                child_reaped = true;
+            }
+        }
+        _ = c.close(capability_pipe[0]);
+        capability_pipe[0] = -1;
+        _ = c.close(capability_pipe[1]);
+        capability_pipe[1] = -1;
+        _ = c.close(stage_pipe[1]);
+        stage_pipe[1] = -1;
+        _ = c.close(stderr_pipe[1]);
+        stderr_pipe[1] = -1;
+        try setB36Nonblocking(stage_pipe[0]);
+        try setB36Nonblocking(stderr_pipe[0]);
+
+        var stage_bytes: [b36_fail_stop_record_size * 16]u8 = undefined;
+        var stderr_bytes: [64 * 1024]u8 = undefined;
+        var stage_len: usize = 0;
+        var stderr_len: usize = 0;
+        var stage_eof = false;
+        var stderr_eof = false;
+        var stage_truncated = false;
+        var stderr_truncated = false;
+        var status: c_int = 0;
+        const deadline = B3ActualSocketPeer.monotonicMs() + 5_000;
+        while (!child_reaped or !stage_eof or !stderr_eof) {
+            stage_eof = stage_eof or try drainB36Pipe(
+                stage_pipe[0],
+                &stage_bytes,
+                &stage_len,
+                &stage_truncated,
+            );
+            stderr_eof = stderr_eof or try drainB36Pipe(
+                stderr_pipe[0],
+                &stderr_bytes,
+                &stderr_len,
+                &stderr_truncated,
+            );
+            if (!child_reaped) {
+                const waited = c.waitpid(child, &status, c.W.NOHANG);
+                if (waited == child) {
+                    child_reaped = true;
+                } else if (waited < 0 and posix.errno(waited) != .INTR) {
+                    return error.TestUnexpectedResult;
+                }
+            }
+            if (child_reaped and stage_eof and stderr_eof) break;
+            if (B3ActualSocketPeer.monotonicMs() >= deadline) {
+                if (!child_reaped) {
+                    _ = c.kill(child, c.SIG.KILL);
+                    while (true) {
+                        const waited = c.waitpid(child, &status, 0);
+                        if (waited == child) break;
+                        if (waited < 0 and posix.errno(waited) == .INTR) continue;
+                        return error.TestUnexpectedResult;
+                    }
+                    child_reaped = true;
+                }
+                return error.TestUnexpectedResult;
+            }
+            var ready = [_]c.pollfd{
+                .{ .fd = stage_pipe[0], .events = c.POLL.IN, .revents = 0 },
+                .{ .fd = stderr_pipe[0], .events = c.POLL.IN, .revents = 0 },
+            };
+            _ = c.poll(&ready, ready.len, 10);
+        }
+        _ = c.close(stage_pipe[0]);
+        stage_pipe[0] = -1;
+        _ = c.close(stderr_pipe[0]);
+        stderr_pipe[0] = -1;
+        try std.testing.expect(!stage_truncated);
+        try std.testing.expect(!stderr_truncated);
+        try expectB36FailStopTranscript(case_id, nonce, stage_bytes[0..stage_len]);
+        const unsigned_status: c_uint = @bitCast(status);
+        if (c.W.IFEXITED(unsigned_status)) {
+            const exit_code = c.W.EXITSTATUS(unsigned_status);
+            try std.testing.expect(exit_code != 0 and exit_code != 126 and exit_code != 127);
+        } else {
+            try std.testing.expect(c.W.IFSIGNALED(unsigned_status));
+        }
+        const expected_panic = switch (case_id) {
+            1, 2 => "RPC response reusable rearm preflight drifted",
+            3 => "invalid RPC response transition permit",
+            4 => "RPC response reusable rearm permit mismatch",
+            else => unreachable,
+        };
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            stderr_bytes[0..stderr_len],
+            expected_panic,
+        ) != null);
+    }
+}
+
 test "CR3a-2c3b reusable response correction forbids work after rearm before operation release" {
     const mode_ptr = c.getenv("MARU_SESSION_HOST_RPC_REUSE_EXEC");
     if (mode_ptr == null) return;
@@ -3816,6 +4255,31 @@ const B3ExecutionHarness = struct {
     fn cleanupBinding(self: *@This()) !void {
         if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
         if (self.binding_cleaned or self.reservation == null) return;
+        if (self.binding.lifecycle == .committed) {
+            try std.testing.expect(operationReceiptTranscriptExact(
+                self.slot.current.guarded_allocator.request_free_test_observer,
+            ));
+            try self.slot.beginAttachmentDrop(&self.binding, self.reservation.?, &self.lease);
+            try terminalizeOwned(
+                &self.owner.transport,
+                @intFromPtr(&self.owner.transport),
+            );
+            self.slot.finishActiveAttachmentDrop(
+                &self.binding,
+                self.reservation.?,
+                &self.lease,
+            );
+            self.transport_live = false;
+            self.binding_cleaned = true;
+            const operation = &self.slot.current.guarded_allocator.request_free_test_observer;
+            operation.registered_operation_begin_receipts = [_]u128{0} ** 8;
+            operation.registered_operation_end_receipts = [_]u128{0} ** 8;
+            operation.registered_operation_begin_count = 0;
+            operation.registered_operation_end_count = 0;
+            operation.registered_operation_active_receipt = 0;
+            operation.registered_operation_receipt_drift = false;
+            return;
+        }
         if (self.transport_live) {
             const operation_count_before = self.slot.current.guarded_allocator
                 .request_free_test_observer.registered_operation_begin_count;
@@ -3873,6 +4337,152 @@ const B3ExecutionHarness = struct {
         self.self_addr = 0;
     }
 };
+
+fn prepareB36RpcHarness(
+    harness: *B3ExecutionHarness,
+    allocator: std.mem.Allocator,
+    case_id: u64,
+) !void {
+    try harness.owner.transport.abortPreparedRequest(harness.receipt);
+    allocator.free(harness.expected_request);
+    harness.expected_request = &.{};
+    harness.request_free.exact_free_count = 0;
+    harness.request_free.authority_was_executing = false;
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0x2C3B_6010 + case_id,
+        .request_id = 0x2C3B_6020 + case_id,
+        .request_digest = 0x2C3B_6030 + case_id,
+    }).?;
+    try harness.binding.pairRequest(attach_receipt);
+    try harness.binding.beginExecute(attach_receipt);
+    try harness.slot.commitAttachmentBinding(
+        &harness.binding,
+        harness.reservation.?,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?,
+            attach_receipt.request_id,
+        ).?,
+        91,
+        &harness.lease,
+    );
+    try bindCommittedStreamOwned(
+        &harness.owner.transport,
+        @intFromPtr(&harness.owner),
+        91,
+    );
+    harness.receipt = try harness.owner.transport.prepareRequest(
+        contract.RuntimeRequest.observation(),
+    );
+    const reservation = harness.reservation.?;
+    const canonical = (try harness.slot.current.cleanup_registry.preparedRequestForReceipt(
+        reservation.cleanup,
+        reservation.identity,
+        @intFromPtr(&harness.owner.transport),
+        harness.owner.transport.transport_incarnation,
+        harness.receipt,
+    )).?;
+    harness.canonical = canonical;
+    harness.request_free.arm(&harness.slot, reservation, canonical);
+    harness.expected_request = try allocator.dupe(
+        u8,
+        @as([*]const u8, @ptrFromInt(canonical.descriptor.frame_addr))[0..canonical.descriptor.frame_len],
+    );
+}
+
+fn runB36CoalescedDuplicateCase() !void {
+    const Peer = struct {
+        fn readExact(fd: c.fd_t, bytes: []u8) bool {
+            var offset: usize = 0;
+            while (offset < bytes.len) {
+                const read_count = c.read(fd, bytes.ptr + offset, bytes.len - offset);
+                if (read_count < 0 and posix.errno(read_count) == .INTR) continue;
+                if (read_count <= 0) return false;
+                offset += @intCast(read_count);
+            }
+            return true;
+        }
+
+        fn readRequest(fd: c.fd_t) ?protocol.Header {
+            var header_bytes: [protocol.header_size]u8 = undefined;
+            if (!readExact(fd, &header_bytes)) return null;
+            const header = protocol.Header.decode(&header_bytes) catch return null;
+            if (header.kind != .request or header.payload_len > protocol.max_control_json) return null;
+            const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return null;
+            defer std.heap.page_allocator.free(payload);
+            if (!readExact(fd, payload)) return null;
+            return header;
+        }
+
+        fn run(fd: c.fd_t, complete: *bool) void {
+            defer _ = c.close(fd);
+            const first = readRequest(fd) orelse return;
+            const response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = first.request_id },
+                "{}",
+            ) catch return;
+            defer std.heap.page_allocator.free(response);
+            socket_server.writeAll(fd, response) catch return;
+            socket_server.writeAll(fd, response) catch return;
+            _ = readRequest(fd) orelse return;
+            complete.* = true;
+        }
+    };
+
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var harness: B3ExecutionHarness = undefined;
+    try B3ExecutionHarness.initInPlace(&harness, allocator, 0x2C3B_6200, .alloc);
+    defer harness.deinit();
+    try prepareB36RpcHarness(&harness, allocator, 0x200);
+    var complete = false;
+    const peer = try std.Thread.spawn(.{}, Peer.run, .{ harness.fds[1], &complete });
+    harness.fds[1] = -1;
+    defer {
+        if (harness.slot_initialized) _ = c.shutdown(harness.slot.logicalClient().fd, c.SHUT.RDWR);
+        peer.join();
+    }
+    try executePreparedRpcSubstrate(&harness.owner.transport, harness.receipt);
+    try std.testing.expect(harness.owner.transport.rpc_response.pristineExact());
+    try harness.request_free.expectExecutionFinalZero();
+    try harness.request_free.expectExactOnceBeforeAuthoritySettlement();
+    const free_count_after_first = harness.ordinal.free_receipt_count;
+    harness.receipt = try harness.owner.transport.prepareRequest(
+        contract.RuntimeRequest.observation(),
+    );
+    const reservation = harness.reservation.?;
+    const second_canonical = (try harness.slot.current.cleanup_registry.preparedRequestForReceipt(
+        reservation.cleanup,
+        reservation.identity,
+        @intFromPtr(&harness.owner.transport),
+        harness.owner.transport.transport_incarnation,
+        harness.receipt,
+    )).?;
+    harness.request_free.exact_free_count = 0;
+    harness.request_free.authority_was_executing = false;
+    harness.request_free.arm(&harness.slot, reservation, second_canonical);
+    try std.testing.expectError(
+        error.ProtocolError,
+        executePreparedRpcSubstrate(&harness.owner.transport, harness.receipt),
+    );
+    try harness.request_free.expectExecutionFinalZero();
+    try harness.request_free.expectExactOnceBeforeAuthoritySettlement();
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+        &harness.owner.transport.prepared_storage,
+    ));
+    try std.testing.expect(harness.slot.current.cleanup_registry.rpcExecutionRecoveryTerminalExact(
+        harness.reservation.?.cleanup,
+        harness.reservation.?.identity,
+    ));
+    try std.testing.expect(harness.slot.logicalClient().firstPoisonReason() != null);
+    try std.testing.expect(harness.owner.transport.rpc_response.pristineExact());
+    var duplicate_payload_frees: usize = 0;
+    for (harness.ordinal.free_receipts[free_count_after_first..harness.ordinal.free_receipt_count]) |receipt| {
+        if (receipt.len == 2) duplicate_payload_frees += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), duplicate_payload_frees);
+    try std.testing.expect(complete);
+}
 
 test "B3-0.4 actual socket uncertain settlement follows full request then EOF boundaries" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

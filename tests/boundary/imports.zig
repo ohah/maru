@@ -1565,6 +1565,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "generation_response_incarnation_issuer" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "prepared_execution_cleanup_active_addr" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "finish_permit_alias_case_for_test" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcSubstrateFailStopTestHook" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "rpc_substrate_fail_stop_test_hook" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ProcessRuntimeInitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
@@ -1613,6 +1615,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusable" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteTerminal" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteTerminalWithLease" },
+                .{ .parent = "PreparedRpcExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settleRecoveredTerminal" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackPreWireWithLease" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePreWireTerminalWithLease" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopCleanupFailure" },
@@ -1691,6 +1694,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopPermitAliasPreflight" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinishPermitRawStorage" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "armFinishPermitAliasForTest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "armRpcSubstrateFailStopForTest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRpcResponseBorrow" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishRpcResponseOwned" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeBorrowedRpcResponseNoFree" },
@@ -2850,7 +2854,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 4),
+        @as(usize, 5),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -7007,14 +7011,14 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
         );
         try std.testing.expectEqual(
-            @as(usize, if (is_generation_transport) 3 else if (is_generation_attachment) 1 else 0),
+            @as(usize, if (is_generation_transport) 4 else if (is_generation_attachment) 1 else 0),
             countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
         );
         if (is_generation_transport) {
-            // Two lexical calls are confined to private test harnesses; the public facade/product
-            // callsite remains the original single call.
+            // Three lexical terminalize calls and the B3-6 helper references are confined to
+            // private test harnesses; the public facade/product callsite remains unchanged.
             try std.testing.expectEqual(
-                @as(usize, 1),
+                @as(usize, 4),
                 countIdentifierOutsideTopLevelTests(source, "B3ExecutionHarness"),
             );
         }
@@ -7023,9 +7027,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             transport_count: usize,
             attachment_count: usize = 1,
         }{
-            // The correction's actual-transport fixture is a top-level test helper and owns the
-            // second lexical call; there is still one product-facade callsite.
-            .{ .name = "bindCommittedStreamOwned", .transport_count = 2 },
+            // The correction and B3-6 actual-transport fixtures are top-level test helpers and own
+            // two lexical calls; there is still one product-facade callsite.
+            .{ .name = "bindCommittedStreamOwned", .transport_count = 3 },
             .{ .name = "beginControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },

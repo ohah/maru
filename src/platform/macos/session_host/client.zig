@@ -6236,7 +6236,12 @@ pub const Client = struct {
     ) (ClientError || generation_batch_registry.Error)!void {
         if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease))
             return error.InvalidState;
-        return self.restoreGenerationAllocatorScopeUnchecked(scope);
+        try self.restoreGenerationAllocatorScopeUnchecked(scope);
+        // The allocator domain is part of the sealed execution authority. Keep the still-held
+        // lease synchronized so terminal settlement can authenticate it after publication cleanup.
+        lease.allocator_ptr = @intFromPtr(self.allocator.ptr);
+        lease.allocator_vtable = @intFromPtr(self.allocator.vtable);
+        lease.seal = preparedExecutionLeaseSeal(lease);
     }
 
     fn restoreGenerationAllocatorScopeUnchecked(
@@ -8607,7 +8612,7 @@ pub const Client = struct {
             return error.InvalidPreparedRpc;
         lease.response_read_started = 1;
         lease.seal = preparedExecutionLeaseSeal(lease);
-        return self.readCorrelatedPreparedResponse(
+        const response = self.readCorrelatedPreparedResponse(
             lease.identity.request_id,
             .blocking,
             expected_payload_allocator,
@@ -8621,11 +8626,37 @@ pub const Client = struct {
                 error.ProtocolError => .frame_malformed,
                 else => .local_invariant_violation,
             });
+            // Connection poison canonicalizes ownership/io mode while the execution fence remains
+            // held. Peer/resource failures must keep that canonical lease finishable; otherwise a
+            // normal terminal unwind is misclassified as caller-token drift and aborts the process.
+            switch (err) {
+                error.ConnectionClosed, error.OutOfMemory, error.ProtocolError => {
+                    lease.ownership_raw = @intFromEnum(self.ownership);
+                    lease.io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode));
+                    lease.seal = preparedExecutionLeaseSeal(lease);
+                },
+                else => {},
+            }
             return switch (err) {
                 error.DeadlineExceeded => unreachable,
                 else => |read_err| read_err,
             };
         };
+        // The strict prepared-execution owner has no canonical empty response representation.
+        // Keep legacy/deadline correlated reads unchanged and reject empty only at this boundary.
+        if (response.payload.len == 0) {
+            if (payload_observer) |active| {
+                if (response.payload_observation_generation != 0)
+                    active.discard_fn(active.context, response.payload_observation_generation);
+            }
+            response.payload_allocator.free(response.payload);
+            self.poisonWhilePreparedExecutionHeld(.frame_malformed);
+            lease.ownership_raw = @intFromEnum(self.ownership);
+            lease.io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode));
+            lease.seal = preparedExecutionLeaseSeal(lease);
+            return error.ProtocolError;
+        }
+        return response;
     }
 
     /// Revalidates every Client-owned response publication invariant after allocator/parser

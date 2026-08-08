@@ -1341,14 +1341,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    별도 compile filter `CR3a-2c3b reusable response correction`과 `--maru-expect-tests=5`를 사용한다. exact inventory는
    (1) same-slot 2회, (2) same-slot 64회, (3) evidence-retire prepare/drift, (4) rearm permit copy/move/replay/wrong-order,
    (5) rearm 뒤 금지된 callback/lookup/mutation source+runtime oracle이다. B3-6은 별도 compile filter
-   `CR3a-2c3b internal rpc substrate`와 `--maru-expect-tests=3`을 사용한다. exact inventory는
+   `CR3a-2c3b internal rpc substrate`와 runtime `--maru-expect-tests=2`+boundary `--maru-expect-tests=1`, total 3을 사용한다. exact inventory는
    (1) private `.rpc` wrapper peer-error non-crash actual-socket matrix, (2) local invariant fail-stop parent/child matrix,
-   (3) public/private boundary와 exact-one callsite oracle이다. 두 destructive artifact의 parent-minted pipe sentinel은 최소
-   `free exact once → authority idle → evidence retired → rearm precondition` stage를 구분한다. reset 전 local drift는
+   (3) public/private boundary와 exact-one callsite oracle이다. destructive artifact의 parent-minted pipe sentinel은 case별로 도달 가능한
+   `free exact once`, permit 준비, `authority idle → evidence retired → rearm precondition` stage를 구분한다. reset 전 local drift는
    abnormal exit, second free 0이어야 하고 rearm 뒤에는 canonical operation release 외 stage가 없다. B3-6의 같은 `.rpc` wrapper
    actual-socket sibling은 peer wire frame/header/envelope malformed·wrong-id·truncated·empty·cap+1·OOM에서 process alive,
-   connection terminal, slot permanent
-   tombstone, rearm 0, second free 0을 단언한다. bounded nonempty correct-id payload의 JSON/application semantic 오류는 여기서 읽거나
+   connection terminal, registry response authority permanent tombstone, payload owner pristine, rearm 0, second free 0을 단언한다. bounded nonempty correct-id payload의 JSON/application semantic 오류는 여기서 읽거나
    판정하지 않고 2c3e decoder gate가 소유한다. local injected seal/allocator/authority/rearm drift만 isolated abnormal exit로 닫는다.
    두 새 artifact도 위 B3-0a의 `/usr/bin/env -i`, parent-minted pipe capability, inert collector, zero-test 방지 규율을 각각 독립 상속한다.
    env key는 correction의 `MARU_SESSION_HOST_RPC_REUSE_EXEC`, B3-6의 `MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC`이며 각 key는
@@ -1357,9 +1356,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    아니므로 process-alive protocol terminal로 정산하며 permanent tombstone, semantic read 0, rearm 0이다. exact peer cases는 bad magic, wrong major, invalid kind, wrong request id,
    declared payload cap+1, truncated header, truncated payload, zero-byte EOF, actual allocation ordinal 전수와 correct-id empty payload다.
    correct response 뒤 같은 socket write에 붙은 duplicate old-id response는 첫 cycle 정산 뒤 다음 cycle correlation loss로 terminal되고
-   두 번째 payload publication/rearm은 0이다. 미래 request id의 완전한 response를 악성 host가 미리 보내는 경우는 wire상 정상 future
+   두 번째 RPC-slot publication/owner-free/rearm은 0이고 parser discard payload free는 정확히 1회다. 미래 request id의 완전한
+   response를 악성 host가 미리 보내는 경우는 wire상 정상 future
    response와 구분할 수 없는 compromised-peer 범위이며 local ownership gate의 증거로 세지 않는다.
-   B3-6 child stage pipe는 fixed-width `{version,case_id,nonce,stage}` record만 받고 case별 exact prefix와 final sentinel을 검증한다.
+   B3-6 child stage pipe는 `{version,case_id,nonce,stage}` 11-byte record(`nonce` little-endian)만 받고 case별 exact prefix와 final sentinel을 검증한다.
    response seal/allocator drift는 `free_once` 뒤, authority drift는 permit 준비 뒤, rearm drift는
    `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. stderr marker만으로는 성공하지 않으며 exec 126/127, nonce/case mismatch,
    generic panic, stage 누락·중복·역전은 실패다. parent는 stderr/stage를 동시에 nonblocking drain하고 각 capture cap을 넘은 bytes도 EOF까지
@@ -1751,7 +1751,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    isolated subprocess 증거는 열지 않는다. correction이 generation-transport-file-private RPC substrate의 exact-one internal
    ownership-only private settlement callsite를 열며 payload semantic read와 normal `RemoteRuntime` product caller는 0이다.
    client-slot module-public entry는 이때부터 `fail_stop_required`를 반환/저장하지 않고 기존 private
-   noreturn sink로 즉시 소비한다. B3-6은 동작을 뒤늦게 바꾸지 않고 동일 strict behavior를 dedicated subprocess에 결속해 같은
+   noreturn sink로 즉시 소비한다. B3-6은 public facade와 semantic decode를 유지하되 peer/resource read 실패의 내부 fail-stop 오분류를
+   process-alive terminal로 교정하고, 나머지 strict behavior를 dedicated subprocess에 결속해 같은
    stack에서 outcome을 반환·저장하지 않은 채 즉시 fail-stop하는 subprocess 증거를 소유한다. B3-0a의 기존 attach-only production strict
    wrapper 의미는 바꾸지 않는다. B3-6의 normal `RemoteRuntime` family callsite와 사용자 가시 동작은 0이며 제품 decoder 전환은 2c3e다.
    계속 실행하며 누수를 축적하는 quarantine registry는 만들지 않는다. GUI process 종료는 daemon PTY를 종료하지 않으므로 다음 앱

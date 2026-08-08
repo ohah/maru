@@ -273,6 +273,24 @@ pub const AttachmentCleanupRegistry = struct {
             .matchesExecuting(prepared);
     }
 
+    pub fn executingRequestForReceipt(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+    ) Error!?prepared_request_authority.Prepared {
+        return self.requestForReceipt(
+            reservation,
+            identity,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            .executing,
+        );
+    }
+
     pub fn preparedRequestForReceipt(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
@@ -281,14 +299,37 @@ pub const AttachmentCleanupRegistry = struct {
         transport_incarnation: u64,
         receipt: contract.PreparedCallReceipt,
     ) Error!?prepared_request_authority.Prepared {
+        return self.requestForReceipt(
+            reservation,
+            identity,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            .prepared,
+        );
+    }
+
+    fn requestForReceipt(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+        expected_lifecycle: prepared_request_authority.Lifecycle,
+    ) Error!?prepared_request_authority.Prepared {
         const authority = &(try self.exactEntry(reservation, identity)).prepared_request;
-        if (!authority.rawLifecycleValid() or authority.lifecycle != .prepared or
+        if (!authority.rawLifecycleValid() or authority.lifecycle != expected_lifecycle or
             authority.prepared_present != 1)
             return null;
         const prepared = authority.prepared;
         if (prepared.transport_addr != transport_addr or
             prepared.transport_incarnation != transport_incarnation or
-            !prepared.receipt.matches(receipt) or !authority.matches(prepared))
+            !prepared.receipt.matches(receipt) or switch (expected_lifecycle) {
+            .prepared => !authority.matches(prepared),
+            .executing => !authority.matchesExecuting(prepared),
+            .idle, .terminal => true,
+        })
             return null;
         return prepared;
     }

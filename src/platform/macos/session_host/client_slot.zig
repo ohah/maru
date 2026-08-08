@@ -18,12 +18,14 @@ const compatibility = @import("compatibility.zig");
 const socket_server = @import("socket_server.zig");
 const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
+const client_poison = @import("client_poison.zig");
 const executed_response_mod = @import("executed_response.zig");
 const response_payload_allocation = @import("response_payload_allocation.zig");
 
 const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
 var process_runtime_pid: std.atomic.Value(u32) = .init(0);
+threadlocal var prepared_execution_cleanup_active_addr: usize = 0;
 
 test "CR3a-2c2b3b quarantine leaf participates in the session-host gate" {
     _ = ended_purge_quarantine;
@@ -96,9 +98,46 @@ pub const Lifecycle = enum {
 };
 
 const GenerationGuardedAllocator = struct {
-    const max_operation_ranges = 8;
+    const max_operation_ranges = 12;
     const OperationRangeInput = struct { start: usize, len: usize };
     const OperationRange = struct { start: usize, end: usize };
+    const allocator_vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+    const RequestFreeTestObserver = struct {
+        target_addr: usize = 0,
+        target_len: usize = 0,
+        descriptor_allocator_ptr: usize = 0,
+        descriptor_allocator_vtable: usize = 0,
+        entry_count: usize = 0,
+        descriptor_exact: bool = false,
+        cleanup_count: usize = 0,
+        guard_inactive: bool = false,
+        allocator_scope_restored: bool = false,
+        client_scope_restored: bool = false,
+        ledger_ended: bool = false,
+        cleanup_settled: bool = false,
+        inject_pending_before_execute: bool = false,
+        pending_frame_addr: usize = 0,
+        pending_frame_len: usize = 0,
+        pending_injected: bool = false,
+        poison_before_execute: bool = false,
+        drift_request_before_execute: bool = false,
+        force_not_executed: bool = false,
+        registered_operation_begin_receipts: [8]u128 = [_]u128{0} ** 8,
+        registered_operation_end_receipts: [8]u128 = [_]u128{0} ** 8,
+        registered_operation_begin_count: usize = 0,
+        registered_operation_end_count: usize = 0,
+        registered_operation_active_receipt: u128 = 0,
+        registered_operation_receipt_drift: bool = false,
+        response_payload_addr: usize = 0,
+        response_payload_len: usize = 0,
+        cleanup_drift_kind: u8 = 0,
+        cleanup_drift_consumed: bool = false,
+    };
 
     parent: std.mem.Allocator,
     client: ?*client_mod.Client = null,
@@ -118,6 +157,7 @@ const GenerationGuardedAllocator = struct {
     operation_range_count: usize = 0,
     operation_guard_active: bool = false,
     operation_alias_rejected: bool = false,
+    request_free_test_observer: if (builtin.is_test) RequestFreeTestObserver else void = if (builtin.is_test) .{} else {},
 
     fn beginOperationGuard(
         self: *GenerationGuardedAllocator,
@@ -135,21 +175,20 @@ const GenerationGuardedAllocator = struct {
         return true;
     }
 
-    fn endOperationGuard(self: *GenerationGuardedAllocator) void {
-        if (!self.operation_guard_active)
-            @panic("generation operation allocator guard was not active");
+    fn finishOperationGuard(self: *GenerationGuardedAllocator) error{InvalidOwner}!void {
+        if (!self.operation_guard_active) return error.InvalidOwner;
         self.operation_guard_active = false;
         self.operation_range_count = 0;
         self.operation_ranges = undefined;
     }
 
+    fn endOperationGuard(self: *GenerationGuardedAllocator) void {
+        self.finishOperationGuard() catch
+            @panic("generation operation allocator guard was not active");
+    }
+
     fn allocator(self: *GenerationGuardedAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{
-            .alloc = alloc,
-            .resize = resize,
-            .remap = remap,
-            .free = free,
-        } };
+        return .{ .ptr = self, .vtable = &allocator_vtable };
     }
 
     fn rejects(self: *const GenerationGuardedAllocator, ptr: [*]u8, len: usize) bool {
@@ -172,6 +211,7 @@ const GenerationGuardedAllocator = struct {
     fn recordAliasRejection(self: *GenerationGuardedAllocator) void {
         if (self.operation_guard_active) {
             self.operation_alias_rejected = true;
+            self.client.?.poison(.local_invariant_violation);
         } else if (self.snapshot_guard_active) {
             self.snapshot_alias_rejected = true;
         } else {
@@ -255,6 +295,15 @@ const GenerationGuardedAllocator = struct {
         return_address: usize,
     ) void {
         const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
+        if (builtin.is_test and
+            @intFromPtr(memory.ptr) == self.request_free_test_observer.target_addr and
+            memory.len == self.request_free_test_observer.target_len)
+        {
+            self.request_free_test_observer.entry_count += 1;
+            self.request_free_test_observer.descriptor_exact =
+                self.request_free_test_observer.descriptor_allocator_ptr == @intFromPtr(self) and
+                self.request_free_test_observer.descriptor_allocator_vtable == @intFromPtr(&allocator_vtable);
+        }
         if (!self.client.?.enterGenerationAllocatorCallback())
             @panic("nested generation allocator free");
         defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
@@ -794,16 +843,146 @@ const RegisteredNodeLookup = struct {
 
 const RegisteredNodeOperation = struct {
     node: *ClientNode,
+    registry_index: u16,
+    operation_id: u64,
+    pid: u32,
 };
+
+const max_registered_node_operations = 4096;
+const RegisteredNodeOperationEntry = struct {
+    const State = enum(u8) { empty, reserved, live, releasing };
+
+    state: State = .empty,
+    operation_id: u64 = 0,
+    slot_addr: usize = 0,
+    slot_incarnation: u64 = 0,
+    node_addr: usize = 0,
+    node_incarnation: u64 = 0,
+    pid: u32 = 0,
+    owner_thread_incarnation: u64 = 0,
+};
+var registered_node_operation_mutex: std.atomic.Mutex = .unlocked;
+var registered_node_operations: [max_registered_node_operations]RegisteredNodeOperationEntry =
+    [_]RegisteredNodeOperationEntry{.{}} ** max_registered_node_operations;
+var registered_node_operation_free_stack: [max_registered_node_operations]u16 = blk: {
+    @setEvalBranchQuota(max_registered_node_operations * 2);
+    var indices: [max_registered_node_operations]u16 = undefined;
+    for (&indices, 0..) |*entry, index| entry.* = @intCast(index);
+    break :blk indices;
+};
+var registered_node_operation_free_count: usize = max_registered_node_operations;
+var next_registered_node_operation_id: u64 = 1;
+
+const RegisteredNodeOperationReservation = struct {
+    index: usize,
+    entry: RegisteredNodeOperationEntry,
+};
+
+fn reserveRegisteredNodeOperation(
+    lookup: RegisteredNodeLookup,
+) error{Busy}!RegisteredNodeOperationReservation {
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const operation_id = next_registered_node_operation_id;
+    if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.Busy;
+    if (registered_node_operation_free_count == 0) return error.Busy;
+    registered_node_operation_free_count -= 1;
+    const index: usize = registered_node_operation_free_stack[registered_node_operation_free_count];
+    if (registered_node_operations[index].state != .empty)
+        @panic("registered node operation free stack drifted");
+    next_registered_node_operation_id = operation_id + 1;
+    const entry: RegisteredNodeOperationEntry = .{
+        .state = .reserved,
+        .operation_id = operation_id,
+        .slot_addr = lookup.slot_addr,
+        .slot_incarnation = lookup.slot_incarnation,
+        .pid = currentPid(),
+        .owner_thread_incarnation = operation_thread_incarnation,
+    };
+    registered_node_operations[index] = entry;
+    return .{ .index = index, .entry = entry };
+}
+
+fn abortRegisteredNodeOperationReservation(reservation: RegisteredNodeOperationReservation) void {
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = &registered_node_operations[reservation.index];
+    if (entry.state != .reserved or entry.operation_id != reservation.entry.operation_id)
+        @panic("registered node operation reservation drifted");
+    entry.* = .{};
+    if (registered_node_operation_free_count >= registered_node_operation_free_stack.len)
+        @panic("registered node operation free stack overflow");
+    registered_node_operation_free_stack[registered_node_operation_free_count] =
+        @intCast(reservation.index);
+    registered_node_operation_free_count += 1;
+}
+
+fn publishRegisteredNodeOperation(
+    reservation: RegisteredNodeOperationReservation,
+    slot_entry: ClientSlotRegistryEntry,
+) RegisteredNodeOperation {
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = &registered_node_operations[reservation.index];
+    if (entry.state != .reserved or entry.operation_id != reservation.entry.operation_id or
+        entry.slot_addr != slot_entry.slot_addr or entry.slot_incarnation != slot_entry.slot_incarnation or
+        entry.pid != currentPid() or !operationThreadMatches(entry.owner_thread_incarnation))
+        @panic("registered node operation publication drifted");
+    entry.node_addr = slot_entry.node_addr;
+    entry.node_incarnation = slot_entry.node_incarnation;
+    entry.state = .live;
+    return .{
+        .node = @ptrFromInt(slot_entry.node_addr),
+        .registry_index = @intCast(reservation.index),
+        .operation_id = entry.operation_id,
+        .pid = entry.pid,
+    };
+}
+
+fn resolveRegisteredNodeOperation(operation: RegisteredNodeOperation) ?*ClientNode {
+    const pid = currentPid();
+    const index: usize = operation.registry_index;
+    if (pid == 0 or operation.pid != pid or process_runtime_pid.load(.acquire) != pid or
+        index >= registered_node_operations.len or operation.operation_id == 0 or
+        @intFromPtr(operation.node) == 0)
+        return null;
+    var observed: ?RegisteredNodeOperationEntry = null;
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    const candidate = registered_node_operations[index];
+    if (candidate.state == .live and candidate.operation_id == operation.operation_id and
+        candidate.node_addr == @intFromPtr(operation.node) and candidate.pid == pid and
+        operationThreadMatches(candidate.owner_thread_incarnation))
+    {
+        observed = candidate;
+    }
+    // Lock order invariant: never hold the operation registry while acquiring ClientSlot registry.
+    registered_node_operation_mutex.unlock();
+    const expected = observed orelse return null;
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (client_slot_registry) |entry| {
+        if (entry.live and entry.ready and entry.slot_addr == expected.slot_addr and
+            entry.slot_incarnation == expected.slot_incarnation and
+            entry.node_addr == expected.node_addr and entry.node_incarnation == expected.node_incarnation and
+            entry.owner_thread_incarnation == expected.owner_thread_incarnation)
+            return @ptrFromInt(expected.node_addr);
+    }
+    return null;
+}
 
 fn beginRegisteredNodeOperation(
     lookup: RegisteredNodeLookup,
 ) error{ InvalidOwner, Busy }!RegisteredNodeOperation {
-    if (lookup.slot_addr == 0 or lookup.slot_incarnation == 0 or switch (lookup.node) {
+    const pid = currentPid();
+    if (pid == 0 or process_runtime_pid.load(.acquire) != pid or
+        lookup.slot_addr == 0 or lookup.slot_incarnation == 0 or switch (lookup.node) {
         .incarnation => |value| value == 0,
         .address => |value| value == 0,
     })
         return error.InvalidOwner;
+    const reservation = reserveRegisteredNodeOperation(lookup) catch return error.Busy;
+    errdefer abortRegisteredNodeOperationReservation(reservation);
+    // The sole nested order is ClientSlot registry -> operation registry publication.
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer client_slot_registry_mutex.unlock();
     for (client_slot_registry) |entry| {
@@ -823,14 +1002,61 @@ fn beginRegisteredNodeOperation(
             error.AdminBusy => error.Busy,
             else => error.InvalidOwner,
         };
-        return .{ .node = node };
+        return publishRegisteredNodeOperation(reservation, entry);
     }
     return error.InvalidOwner;
 }
 
 fn endRegisteredNodeOperation(operation: RegisteredNodeOperation) void {
-    if (!operation.node.client.endClientSlotOperation())
+    const pid = currentPid();
+    const index: usize = operation.registry_index;
+    if (pid == 0 or operation.pid != pid or process_runtime_pid.load(.acquire) != pid or
+        index >= registered_node_operations.len or operation.operation_id == 0 or
+        @intFromPtr(operation.node) == 0)
+        @panic("invalid registered node operation process domain");
+    var node_addr: usize = 0;
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    const candidate = &registered_node_operations[index];
+    if (candidate.state == .live and candidate.operation_id == operation.operation_id and
+        candidate.node_addr == @intFromPtr(operation.node) and candidate.pid == pid and
+        operationThreadMatches(candidate.owner_thread_incarnation))
+    {
+        candidate.state = .releasing;
+        node_addr = candidate.node_addr;
+    }
+    registered_node_operation_mutex.unlock();
+    if (node_addr == 0) @panic("invalid registered node operation release");
+    const node: *ClientNode = @ptrFromInt(node_addr);
+    if (builtin.is_test) {
+        const observer = &node.guarded_allocator.request_free_test_observer;
+        const receipt = (@as(u128, operation.operation_id) << 64) |
+            @as(u128, operation.registry_index + 1);
+        if (observer.registered_operation_active_receipt != receipt or
+            observer.registered_operation_begin_count == 0 or
+            observer.registered_operation_end_count == std.math.maxInt(usize) or
+            observer.registered_operation_begin_count != observer.registered_operation_end_count + 1 or
+            observer.registered_operation_end_count >= observer.registered_operation_end_receipts.len or
+            observer.registered_operation_begin_receipts[observer.registered_operation_end_count] != receipt)
+            observer.registered_operation_receipt_drift = true;
+        if (observer.registered_operation_end_count < observer.registered_operation_end_receipts.len)
+            observer.registered_operation_end_receipts[observer.registered_operation_end_count] = receipt;
+        observer.registered_operation_end_count +|= 1;
+        observer.registered_operation_active_receipt = 0;
+    }
+    if (!node.client.endClientSlotOperation())
         @panic("ClientSlot registered node operation fence release failed");
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = &registered_node_operations[index];
+    if (entry.state != .releasing or entry.operation_id != operation.operation_id or
+        entry.node_addr != node_addr)
+        @panic("registered node operation release publication drifted");
+    entry.* = .{};
+    if (registered_node_operation_free_count >= registered_node_operation_free_stack.len)
+        @panic("registered node operation free stack overflow");
+    registered_node_operation_free_stack[registered_node_operation_free_count] =
+        operation.registry_index;
+    registered_node_operation_free_count += 1;
 }
 
 const GenerationRequestOwner = struct {
@@ -863,6 +1089,19 @@ fn beginGenerationRequestOwner(
     };
     errdefer endRegisteredNodeOperation(operation);
     const node = operation.node;
+    if (builtin.is_test) {
+        const observer = &node.guarded_allocator.request_free_test_observer;
+        const receipt = (@as(u128, operation.operation_id) << 64) |
+            @as(u128, operation.registry_index + 1);
+        if (observer.registered_operation_active_receipt != 0 or
+            observer.registered_operation_begin_count != observer.registered_operation_end_count or
+            observer.registered_operation_begin_count >= observer.registered_operation_begin_receipts.len)
+            observer.registered_operation_receipt_drift = true;
+        if (observer.registered_operation_begin_count < observer.registered_operation_begin_receipts.len)
+            observer.registered_operation_begin_receipts[observer.registered_operation_begin_count] = receipt;
+        observer.registered_operation_begin_count +|= 1;
+        observer.registered_operation_active_receipt = receipt;
+    }
     if (!streamOperationNodeIdle(node) or
         (node.pin_owner.active_cleanup != 0 and
             !(allow_active_cleanup and node.pin_owner.active_cleanup == 1)))
@@ -1275,10 +1514,596 @@ pub fn abortGenerationRequest(request: GenerationRequestAbort) GenerationRequest
     }
 }
 
-const ExecuteDisposition = enum { reusable, terminal, settled };
+const PreparedExecutionPhase = enum(u8) {
+    prepared_unbegun,
+    pre_wire_backing_live,
+    post_execute_backing_settled,
+    settled,
+};
+
+const FailStopReason = enum(u8) {
+    authority_drift,
+    backing_ambiguous,
+    duplicate_settlement,
+    cleanup_failure,
+};
+
+const PreparedExecutionSettlementTag = enum(u8) {
+    pending,
+    reusable,
+    terminal,
+    fail_stop_required,
+};
+
+const PreparedExecutionSettlement = struct {
+    tag: PreparedExecutionSettlementTag = .pending,
+    reason_raw: u8 = 0,
+
+    fn rawValid(self: *const @This()) bool {
+        const tag_raw = @as(*const u8, @ptrCast(&self.tag)).*;
+        if (tag_raw > @intFromEnum(PreparedExecutionSettlementTag.fail_stop_required)) return false;
+        return switch (self.tag) {
+            .pending, .reusable => self.reason_raw == 0,
+            .terminal => self.reason_raw < std.meta.fields(client_poison.ConnectionReason).len,
+            .fail_stop_required => self.reason_raw < std.meta.fields(FailStopReason).len,
+        };
+    }
+
+    fn pendingExact(self: *const @This()) bool {
+        return self.rawValid() and self.tag == .pending;
+    }
+
+    fn terminalReason(self: *const @This()) ?client_poison.ConnectionReason {
+        if (!self.rawValid() or self.tag != .terminal) return null;
+        return @enumFromInt(self.reason_raw);
+    }
+
+    fn failStopReason(self: *const @This()) ?FailStopReason {
+        if (!self.rawValid() or self.tag != .fail_stop_required) return null;
+        return @enumFromInt(self.reason_raw);
+    }
+
+    fn reusable() @This() {
+        return .{ .tag = .reusable };
+    }
+
+    fn terminal(reason: client_poison.ConnectionReason) @This() {
+        return .{ .tag = .terminal, .reason_raw = @intFromEnum(reason) };
+    }
+
+    fn failStop(reason: FailStopReason) @This() {
+        return .{ .tag = .fail_stop_required, .reason_raw = @intFromEnum(reason) };
+    }
+};
+
+const SettlementOutcome = union(enum) {
+    reusable,
+    terminal: client_poison.ConnectionReason,
+    fail_stop_required: FailStopReason,
+};
+
+const PreparedExecutionSnapshot = struct {
+    txn_addr: usize,
+    node_addr: usize,
+    operation_id: u64,
+    reservation: AttachmentBindingReservation,
+    binding_identity: contract.BindingIdentity,
+    canonical_prepared: prepared_request_authority.Prepared,
+    prepared_identity: client_mod.PreparedBlockingRpcIdentity,
+    phase: PreparedExecutionPhase,
+    settlement: PreparedExecutionSettlement,
+};
+
+const PreparedExecutionCanonical = struct {
+    node: *ClientNode,
+    snapshot: PreparedExecutionSnapshot,
+    canonical: prepared_request_authority.Prepared,
+};
+
+const PreparedExecutionTxn = struct {
+    self_addr: usize = 0,
+    node_addr: usize = 0,
+    operation_id: u64 = 0,
+    reservation: AttachmentBindingReservation = std.mem.zeroes(AttachmentBindingReservation),
+    binding_identity: contract.BindingIdentity = std.mem.zeroes(contract.BindingIdentity),
+    canonical_prepared: prepared_request_authority.Prepared = std.mem.zeroes(prepared_request_authority.Prepared),
+    prepared_identity: client_mod.PreparedBlockingRpcIdentity = std.mem.zeroes(client_mod.PreparedBlockingRpcIdentity),
+    phase: PreparedExecutionPhase = .prepared_unbegun,
+    settlement: PreparedExecutionSettlement = .{},
+
+    const InitError = error{ InvalidOwner, InvalidReceipt, ProtocolError };
+    const SettlementError = error{ProtocolError};
+
+    fn initBeforeBeginExecute(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        request: GenerationRequestAbort,
+        identity: contract.BindingIdentity,
+        canonical: prepared_request_authority.Prepared,
+    ) PreparedExecutionTxn.InitError!void {
+        if (!self.semanticPristine()) return error.InvalidOwner;
+        const node = resolveRegisteredNodeOperation(operation) orelse return error.InvalidOwner;
+        if (!identity.valid() or !canonical.valid() or
+            !std.meta.eql(request.reservation.identity, identity) or
+            !std.meta.eql(canonical.binding, identity) or
+            canonical.transport_addr != request.transport_addr or
+            canonical.transport_incarnation != request.transport_incarnation or
+            !canonical.receipt.matches(request.receipt) or
+            canonical.descriptor.storage_addr != request.prepared_storage_addr or
+            canonical.descriptor.client_addr != @intFromPtr(&node.client))
+            return error.InvalidOwner;
+        const present = node.cleanup_registry.preparedRequestForReceipt(
+            request.reservation.cleanup,
+            identity,
+            request.transport_addr,
+            request.transport_incarnation,
+            request.receipt,
+        ) catch return error.InvalidOwner;
+        if (present == null or !std.meta.eql(present.?, canonical)) return error.InvalidReceipt;
+        const prepared_identity = identityFromCanonical(canonical);
+        const request_storage: *client_mod.PreparedBlockingRpcStorage =
+            @ptrFromInt(canonical.descriptor.storage_addr);
+        if (!node.client.preparedBlockingRpcStorageMatches(request_storage, prepared_identity))
+            return error.ProtocolError;
+        self.node_addr = @intFromPtr(node);
+        self.operation_id = operation.operation_id;
+        self.reservation = request.reservation;
+        self.binding_identity = identity;
+        self.canonical_prepared = canonical;
+        self.prepared_identity = prepared_identity;
+        self.phase = .prepared_unbegun;
+        self.settlement = .{};
+        self.self_addr = @intFromPtr(self);
+    }
+
+    fn commitBeginExecute(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) void {
+        const node = self.ownerNode(operation) orelse
+            @panic("prepared execution transaction begin owner drifted");
+        if (self.phase != .prepared_unbegun or !self.settlement.pendingExact())
+            @panic("prepared execution transaction begin drifted");
+        node.cleanup_registry.beginPreparedRequestExecute(
+            self.reservation.cleanup,
+            self.binding_identity,
+            self.canonical_prepared,
+        ) catch {
+            node.cleanup_registry.settlePreparedRequest(
+                self.reservation.cleanup,
+                self.binding_identity,
+                self.canonical_prepared,
+                true,
+            ) catch {};
+            node.client.poison(.local_invariant_violation);
+            self.settlement = PreparedExecutionSettlement.failStop(.authority_drift);
+            self.phase = .settled;
+            failStopPreparedExecution(.authority_drift);
+        };
+        self.phase = .pre_wire_backing_live;
+    }
+
+    fn revalidatePreWire(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+    ) error{ InvalidOwner, InvalidReceipt }!void {
+        if (self.ownerNode(operation) == null) return error.InvalidOwner;
+        const expected = self.canonicalExecuting(operation) orelse return error.InvalidReceipt;
+        if (!expected.node.client.preparedBlockingRpcStorageMatches(
+            canonicalStorage(expected),
+            expected.snapshot.prepared_identity,
+        ))
+            return error.InvalidReceipt;
+    }
+
+    fn rollbackPreWire(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {
+        try self.requireCleanupClosed(operation);
+        const expected = self.canonicalExecuting(operation) orelse return error.ProtocolError;
+        const abort_outcome = expected.node.client.abortPreparedBlockingRpcStorageCanonical(
+            canonicalStorage(expected),
+            expected.snapshot.prepared_identity,
+        ) catch {
+            self.failStopAfterCallbackDrift(operation, expected, .backing_ambiguous);
+            return error.ProtocolError;
+        };
+        const node = self.canonicalStillExact(operation, expected) orelse {
+            self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
+            return error.ProtocolError;
+        };
+        self.phase = .post_execute_backing_settled;
+        const terminal = abort_outcome == .terminal;
+        node.cleanup_registry.settlePreparedRequest(
+            expected.snapshot.reservation.cleanup,
+            expected.snapshot.binding_identity,
+            expected.canonical,
+            terminal,
+        ) catch {
+            self.failStopSettlement(node, .authority_drift);
+            return error.ProtocolError;
+        };
+        if (terminal) {
+            node.client.poison(.local_invariant_violation);
+            return self.publishTerminal(node.client.firstPoisonReason().?);
+        }
+        return self.publishReusable();
+    }
+
+    fn retireIssuerExhausted(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {
+        try self.requireCleanupClosed(operation);
+        const expected = self.canonicalExecuting(operation) orelse return error.ProtocolError;
+        const abort_outcome = expected.node.client.abortPreparedBlockingRpcStorageCanonical(
+            canonicalStorage(expected),
+            expected.snapshot.prepared_identity,
+        ) catch {
+            self.failStopAfterCallbackDrift(operation, expected, .backing_ambiguous);
+            return error.ProtocolError;
+        };
+        const node = self.canonicalStillExact(operation, expected) orelse {
+            self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
+            return error.ProtocolError;
+        };
+        self.phase = .post_execute_backing_settled;
+        node.cleanup_registry.settlePreparedRequest(
+            expected.snapshot.reservation.cleanup,
+            expected.snapshot.binding_identity,
+            expected.canonical,
+            true,
+        ) catch {
+            self.failStopSettlement(node, .authority_drift);
+            return error.ProtocolError;
+        };
+        node.client.poison(.local_invariant_violation);
+        const outcome = self.publishTerminal(node.client.firstPoisonReason().?);
+        if (abort_outcome == .terminal) return error.ProtocolError;
+        return outcome;
+    }
+
+    fn settlePostExecuteReusable(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {
+        try self.requireCleanupClosed(operation);
+        const expected = self.postExecuteReady(operation) orelse return error.ProtocolError;
+        const node = expected.node;
+        self.phase = .post_execute_backing_settled;
+        node.cleanup_registry.settlePreparedRequest(
+            expected.snapshot.reservation.cleanup,
+            expected.snapshot.binding_identity,
+            expected.canonical,
+            false,
+        ) catch {
+            self.failStopSettlement(node, .authority_drift);
+            return error.ProtocolError;
+        };
+        return self.publishReusable();
+    }
+
+    fn settlePostExecuteTerminal(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        fallback_reason: client_poison.ConnectionReason,
+    ) SettlementError!SettlementOutcome {
+        try self.requireCleanupClosed(operation);
+        const expected = self.postExecuteReady(operation) orelse return error.ProtocolError;
+        expected.node.client.poison(fallback_reason);
+        const node = self.canonicalStillExact(operation, expected) orelse {
+            self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
+            return error.ProtocolError;
+        };
+        const canonical_reason = node.client.firstPoisonReason() orelse {
+            self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
+            return error.ProtocolError;
+        };
+        self.phase = .post_execute_backing_settled;
+        node.cleanup_registry.settlePreparedRequest(
+            expected.snapshot.reservation.cleanup,
+            expected.snapshot.binding_identity,
+            expected.canonical,
+            true,
+        ) catch {
+            self.failStopSettlement(node, .authority_drift);
+            return error.ProtocolError;
+        };
+        return self.publishTerminal(canonical_reason);
+    }
+
+    /// Cleanup failure is process-fatal, so do not touch possibly ambiguous request backing.
+    /// Retire only the canonical registry authority, poison the connection, and publish a closed
+    /// fail-stop settlement before the caller panics.
+    fn failStopCleanupFailure(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+    ) SettlementOutcome {
+        const node = self.ownerNode(operation) orelse
+            failStopPreparedExecution(.authority_drift);
+        var authority_terminal = false;
+        if (self.phase == .pre_wire_backing_live) {
+            const canonical = node.cleanup_registry.executingRequestForReceipt(
+                self.reservation.cleanup,
+                self.binding_identity,
+                self.canonical_prepared.transport_addr,
+                self.canonical_prepared.transport_incarnation,
+                self.canonical_prepared.receipt,
+            ) catch null;
+            if (canonical != null and std.meta.eql(canonical.?, self.canonical_prepared)) {
+                authority_terminal = blk: {
+                    node.cleanup_registry.settlePreparedRequest(
+                        self.reservation.cleanup,
+                        self.binding_identity,
+                        self.canonical_prepared,
+                        true,
+                    ) catch break :blk false;
+                    break :blk true;
+                };
+            }
+        }
+        node.client.poison(.local_invariant_violation);
+        self.settlement = PreparedExecutionSettlement.failStop(.cleanup_failure);
+        self.phase = .settled;
+        if (builtin.is_test and c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC") != null and
+            c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_CASE") != null)
+        {
+            if (!authority_terminal or
+                !node.guarded_allocator.request_free_test_observer.cleanup_drift_consumed)
+                @panic("B3 strict cleanup terminal publication was not observed");
+            const marker = "B3_CLEANUP_AUTHORITY_TERMINAL\n";
+            _ = c.write(2, marker.ptr, marker.len);
+        }
+        return .{ .fail_stop_required = .cleanup_failure };
+    }
+
+    fn requireCleanupClosed(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!void {
+        const node = self.ownerNode(operation) orelse return error.ProtocolError;
+        if (node.guarded_allocator.operation_guard_active) {
+            const outcome = self.failStopCleanupFailure(operation);
+            self.finishOrFailStop(operation, outcome);
+        }
+    }
+
+    fn finishOrFailStop(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation, outcome: SettlementOutcome) void {
+        if (self.ownerNode(operation) == null or self.phase != .settled or
+            !settlementMatchesOutcome(self.settlement, outcome))
+            @panic("prepared execution transaction finish drifted");
+        switch (outcome) {
+            .reusable, .terminal => {},
+            .fail_stop_required => |reason| failStopPreparedExecution(reason),
+        }
+    }
+
+    fn ensureSettledOrFailStop(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) void {
+        if (self.self_addr == 0) {
+            if (self.semanticPristine()) return;
+            failStopPreparedExecution(.authority_drift);
+        }
+        if (self.ownerNode(operation) == null) @panic("prepared execution transaction moved, copied, or outlived its operation");
+        if (self.phase == .settled) {
+            if (!self.settlement.rawValid()) @panic("prepared execution transaction settlement corrupt");
+            return switch (self.settlement.tag) {
+                .reusable, .terminal => {},
+                .pending => @panic("prepared execution transaction settled pending"),
+                .fail_stop_required => failStopPreparedExecution(self.settlement.failStopReason().?),
+            };
+        }
+        if (self.phase == .prepared_unbegun) {
+            self.settlement = PreparedExecutionSettlement.reusable();
+            self.phase = .settled;
+            return;
+        }
+        _ = self.retireIssuerExhausted(operation) catch
+            failStopPreparedExecution(.backing_ambiguous);
+        failStopPreparedExecution(.duplicate_settlement);
+    }
+
+    fn rawTagsValid(self: *const PreparedExecutionTxn) bool {
+        const phase_raw = @as(*const u8, @ptrCast(&self.phase)).*;
+        return phase_raw <= @intFromEnum(PreparedExecutionPhase.settled) and
+            self.settlement.rawValid() and self.rawEmbeddedTagsValid();
+    }
+
+    fn rawEmbeddedTagsValid(self: *const PreparedExecutionTxn) bool {
+        return contract.attachmentRoleRawValid(&self.reservation.identity.role) and
+            contract.attachmentRoleRawValid(&self.binding_identity.role) and
+            contract.attachmentRoleRawValid(&self.canonical_prepared.binding.role) and
+            contract.runtimeRequestTagRawValid(&self.canonical_prepared.tag) and
+            contract.requestFamilyRawValid(&self.canonical_prepared.family);
+    }
+
+    fn semanticPristine(self: *const PreparedExecutionTxn) bool {
+        return self.rawTagsValid() and self.self_addr == 0 and self.node_addr == 0 and
+            self.operation_id == 0 and self.phase == .prepared_unbegun and
+            self.settlement.pendingExact() and
+            std.meta.eql(self.reservation, std.mem.zeroes(AttachmentBindingReservation)) and
+            std.meta.eql(self.binding_identity, std.mem.zeroes(contract.BindingIdentity)) and
+            std.meta.eql(self.canonical_prepared, std.mem.zeroes(prepared_request_authority.Prepared)) and
+            std.meta.eql(self.prepared_identity, std.mem.zeroes(client_mod.PreparedBlockingRpcIdentity));
+    }
+
+    fn ownerNode(self: *const PreparedExecutionTxn, operation: RegisteredNodeOperation) ?*ClientNode {
+        if (!self.rawTagsValid() or self.self_addr != @intFromPtr(self) or
+            self.operation_id == 0 or self.operation_id != operation.operation_id)
+            return null;
+        if (!self.binding_identity.valid() or !self.reservation.identity.valid() or
+            !self.canonical_prepared.valid())
+            return null;
+        const node = resolveRegisteredNodeOperation(operation) orelse return null;
+        if (self.node_addr == @intFromPtr(node) and
+            std.meta.eql(self.reservation.identity, self.binding_identity) and
+            std.meta.eql(self.canonical_prepared.binding, self.binding_identity) and
+            std.meta.eql(self.prepared_identity, identityFromCanonical(self.canonical_prepared)))
+            return node;
+        return null;
+    }
+
+    fn snapshot(self: *const PreparedExecutionTxn) PreparedExecutionSnapshot {
+        return .{
+            .txn_addr = @intFromPtr(self),
+            .node_addr = self.node_addr,
+            .operation_id = self.operation_id,
+            .reservation = self.reservation,
+            .binding_identity = self.binding_identity,
+            .canonical_prepared = self.canonical_prepared,
+            .prepared_identity = self.prepared_identity,
+            .phase = self.phase,
+            .settlement = self.settlement,
+        };
+    }
+
+    fn matchesSnapshot(self: *const PreparedExecutionTxn, expected: PreparedExecutionSnapshot) bool {
+        return self.rawTagsValid() and expected.txn_addr == @intFromPtr(self) and
+            self.self_addr == expected.txn_addr and self.node_addr == expected.node_addr and
+            self.operation_id == expected.operation_id and
+            std.meta.eql(self.reservation, expected.reservation) and
+            std.meta.eql(self.binding_identity, expected.binding_identity) and
+            std.meta.eql(self.canonical_prepared, expected.canonical_prepared) and
+            std.meta.eql(self.prepared_identity, expected.prepared_identity) and
+            self.phase == expected.phase and std.meta.eql(self.settlement, expected.settlement);
+    }
+
+    fn canonicalExecuting(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+    ) ?PreparedExecutionCanonical {
+        const node = self.ownerNode(operation) orelse return null;
+        if (self.phase != .pre_wire_backing_live or !self.settlement.pendingExact()) return null;
+        const transcript = self.snapshot();
+        const canonical = node.cleanup_registry.executingRequestForReceipt(
+            transcript.reservation.cleanup,
+            transcript.binding_identity,
+            transcript.canonical_prepared.transport_addr,
+            transcript.canonical_prepared.transport_incarnation,
+            transcript.canonical_prepared.receipt,
+        ) catch return null;
+        const exact = canonical orelse return null;
+        if (!std.meta.eql(exact, transcript.canonical_prepared) or
+            !std.meta.eql(identityFromCanonical(exact), transcript.prepared_identity))
+            return null;
+        return .{ .node = node, .snapshot = transcript, .canonical = exact };
+    }
+
+    fn canonicalStillExact(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        expected: PreparedExecutionCanonical,
+    ) ?*ClientNode {
+        if (!self.matchesSnapshot(expected.snapshot) or
+            operation.operation_id != expected.snapshot.operation_id)
+            return null;
+        const node = resolveRegisteredNodeOperation(operation) orelse return null;
+        if (@intFromPtr(node) != expected.snapshot.node_addr) return null;
+        const canonical = node.cleanup_registry.executingRequestForReceipt(
+            expected.snapshot.reservation.cleanup,
+            expected.snapshot.binding_identity,
+            expected.canonical.transport_addr,
+            expected.canonical.transport_incarnation,
+            expected.canonical.receipt,
+        ) catch return null;
+        if (canonical == null or !std.meta.eql(canonical.?, expected.canonical)) return null;
+        return node;
+    }
+
+    fn canonicalStorage(expected: PreparedExecutionCanonical) *client_mod.PreparedBlockingRpcStorage {
+        return @ptrFromInt(expected.canonical.descriptor.storage_addr);
+    }
+
+    fn postExecuteReady(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) ?PreparedExecutionCanonical {
+        const expected = self.canonicalExecuting(operation) orelse return null;
+        if (!client_mod.Client.preparedBlockingRpcStorageSettled(canonicalStorage(expected))) return null;
+        return expected;
+    }
+
+    fn publishReusable(self: *PreparedExecutionTxn) SettlementOutcome {
+        self.settlement = PreparedExecutionSettlement.reusable();
+        self.phase = .settled;
+        return .reusable;
+    }
+
+    fn publishTerminal(
+        self: *PreparedExecutionTxn,
+        reason: client_poison.ConnectionReason,
+    ) SettlementOutcome {
+        self.settlement = PreparedExecutionSettlement.terminal(reason);
+        self.phase = .settled;
+        return .{ .terminal = reason };
+    }
+
+    fn failStopSettlement(
+        self: *PreparedExecutionTxn,
+        node: *ClientNode,
+        reason: FailStopReason,
+    ) void {
+        node.client.poison(.local_invariant_violation);
+        self.settlement = PreparedExecutionSettlement.failStop(reason);
+        self.phase = .settled;
+    }
+
+    fn failStopAfterCallbackDrift(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        expected: PreparedExecutionCanonical,
+        reason: FailStopReason,
+    ) void {
+        if (operation.operation_id == expected.snapshot.operation_id) {
+            if (resolveRegisteredNodeOperation(operation)) |node| {
+                if (@intFromPtr(node) == expected.snapshot.node_addr) {
+                    const canonical = node.cleanup_registry.executingRequestForReceipt(
+                        expected.snapshot.reservation.cleanup,
+                        expected.snapshot.binding_identity,
+                        expected.canonical.transport_addr,
+                        expected.canonical.transport_incarnation,
+                        expected.canonical.receipt,
+                    ) catch null;
+                    if (canonical != null and std.meta.eql(canonical.?, expected.canonical)) {
+                        node.cleanup_registry.settlePreparedRequest(
+                            expected.snapshot.reservation.cleanup,
+                            expected.snapshot.binding_identity,
+                            expected.canonical,
+                            true,
+                        ) catch {};
+                    }
+                    node.client.poison(.local_invariant_violation);
+                }
+            }
+        }
+        self.settlement = PreparedExecutionSettlement.failStop(reason);
+        self.phase = .settled;
+    }
+};
+
+fn identityFromCanonical(
+    canonical: prepared_request_authority.Prepared,
+) client_mod.PreparedBlockingRpcIdentity {
+    return .{
+        .request_id = canonical.receipt.request_id,
+        .frame_digest = canonical.receipt.request_digest,
+        .descriptor = canonical.descriptor,
+    };
+}
+
+fn settlementMatchesOutcome(
+    settlement: PreparedExecutionSettlement,
+    outcome: SettlementOutcome,
+) bool {
+    if (!settlement.rawValid()) return false;
+    return switch (settlement.tag) {
+        .pending => false,
+        .reusable => outcome == .reusable,
+        .terminal => switch (outcome) {
+            .terminal => |other| settlement.terminalReason().? == other,
+            else => false,
+        },
+        .fail_stop_required => switch (outcome) {
+            .fail_stop_required => |other| settlement.failStopReason().? == other,
+            else => false,
+        },
+    };
+}
+
+fn failStopPreparedExecution(reason: FailStopReason) noreturn {
+    switch (reason) {
+        .authority_drift => @panic("prepared execution transaction authority drift"),
+        .backing_ambiguous => @panic("prepared execution transaction backing ambiguous"),
+        .duplicate_settlement => @panic("prepared execution transaction duplicate settlement"),
+        .cleanup_failure => @panic("prepared execution transaction cleanup failed"),
+    }
+}
 
 const ResponsePayloadObserverBridge = struct {
     ledger: *response_payload_allocation.Ledger,
+    guard: *GenerationGuardedAllocator,
 
     fn observer(self: *@This()) framing.PayloadAllocationObserver {
         return .{
@@ -1312,6 +2137,10 @@ const ResponsePayloadObserverBridge = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.ledger.commitObserved(generation, payload, allocator) catch
             return error.ProtocolError;
+        if (builtin.is_test) {
+            self.guard.request_free_test_observer.response_payload_addr = @intFromPtr(payload.ptr);
+            self.guard.request_free_test_observer.response_payload_len = payload.len;
+        }
     }
 
     fn abort(context: *anyopaque, generation: u64) void {
@@ -1349,6 +2178,218 @@ fn failStopResponsePayloadTransfer(
     }
 }
 
+const PreparedExecutionCleanup = struct {
+    const CleanupStage = enum(u8) { guard, allocator, ledger };
+    const CleanupLifecycle = enum(u8) { pristine, live, finishing, settled, fail_stop };
+    const CleanupFailure = enum(u8) { descriptor_drift, reentry, ledger_end, allocator_restore, guard_end };
+    const CleanupOutcome = union(enum) { clean, deferred_reentry, fail_stop: CleanupFailure };
+
+    self_addr: usize = 0,
+    lifecycle: CleanupLifecycle = .pristine,
+    stage: CleanupStage = .guard,
+    first_failure_raw: u8 = 0,
+
+    fn init(self: *PreparedExecutionCleanup) void {
+        self.* = .{
+            .self_addr = @intFromPtr(self),
+            .lifecycle = .live,
+        };
+    }
+
+    fn advance(self: *PreparedExecutionCleanup, from: CleanupStage, to: CleanupStage) bool {
+        if (!self.rawValid() or self.self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or self.stage != from)
+            return false;
+        self.stage = to;
+        return true;
+    }
+
+    fn finish(
+        self: *PreparedExecutionCleanup,
+        expected_stage: CleanupStage,
+        client: *client_mod.Client,
+        guard: *GenerationGuardedAllocator,
+        allocator_scope: *client_mod.Client.GenerationAllocatorScope,
+        payload_ledger: *response_payload_allocation.Ledger,
+    ) CleanupOutcome {
+        if (builtin.is_test) {
+            const observer = &guard.request_free_test_observer;
+            switch (observer.cleanup_drift_kind) {
+                1 => self.self_addr = 1,
+                2 => self.stage = .guard,
+                3 => allocator_scope.self_addr = 1,
+                4 => guard.operation_guard_active = false,
+                5 => payload_ledger.self_addr = 1,
+                else => {},
+            }
+            if (observer.cleanup_drift_kind >= 1 and observer.cleanup_drift_kind <= 5)
+                observer.cleanup_drift_consumed = true;
+        }
+        if (self.rawValid() and self.self_addr == @intFromPtr(self) and
+            self.lifecycle == .finishing and
+            prepared_execution_cleanup_active_addr == @intFromPtr(self))
+        {
+            if (self.first_failure_raw == 0)
+                self.first_failure_raw = @intFromEnum(CleanupFailure.reentry) + 1;
+            return .deferred_reentry;
+        }
+
+        var first: ?CleanupFailure = null;
+        if (!self.rawValid() or self.self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or self.stage != expected_stage or
+            self.first_failure_raw != 0)
+            first = .descriptor_drift;
+        self.self_addr = @intFromPtr(self);
+        self.lifecycle = .finishing;
+        self.stage = expected_stage;
+        self.first_failure_raw = 0;
+        const prior_active_addr = prepared_execution_cleanup_active_addr;
+        if (prior_active_addr != 0 and first == null) first = .reentry;
+        prepared_execution_cleanup_active_addr = @intFromPtr(self);
+        defer prepared_execution_cleanup_active_addr = prior_active_addr;
+        if (expected_stage == .ledger) {
+            payload_ledger.endOperation() catch {
+                if (first == null) first = .ledger_end;
+            };
+            self.revalidateFinishing(expected_stage, &first);
+        }
+        if (expected_stage == .ledger or expected_stage == .allocator) {
+            client.restoreGenerationAllocatorScope(allocator_scope) catch {
+                if (first == null) first = .allocator_restore;
+            };
+            self.revalidateFinishing(expected_stage, &first);
+        }
+        guard.finishOperationGuard() catch {
+            if (first == null) first = .guard_end;
+        };
+        self.revalidateFinishing(expected_stage, &first);
+        if (first) |failure| {
+            self.first_failure_raw = @intFromEnum(failure) + 1;
+            self.lifecycle = .fail_stop;
+            return .{ .fail_stop = failure };
+        }
+        self.lifecycle = .settled;
+        if (builtin.is_test) {
+            const observer = &guard.request_free_test_observer;
+            observer.cleanup_count += 1;
+            observer.guard_inactive = !guard.operation_guard_active;
+            observer.allocator_scope_restored =
+                allocator_scope.lifecycle == .restored and allocator_scope.self_addr == 0;
+            observer.client_scope_restored = client.active_generation_allocator_scope == null;
+            observer.ledger_ended = payload_ledger.self_addr == 0 and
+                !payload_ledger.active and payload_ledger.entry_count == 0;
+            observer.cleanup_settled = self.lifecycle == .settled and self.first_failure_raw == 0;
+        }
+        return .clean;
+    }
+
+    fn finishOrFailStop(
+        self: *PreparedExecutionCleanup,
+        txn: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        expected_stage: CleanupStage,
+        completion: *u8,
+        client: *client_mod.Client,
+        guard: *GenerationGuardedAllocator,
+        allocator_scope: *client_mod.Client.GenerationAllocatorScope,
+        payload_ledger: *response_payload_allocation.Ledger,
+    ) void {
+        switch (self.finish(expected_stage, client, guard, allocator_scope, payload_ledger)) {
+            .clean => completion.* = 1,
+            .deferred_reentry => return,
+            .fail_stop => {
+                const outcome = txn.failStopCleanupFailure(operation);
+                txn.finishOrFailStop(operation, outcome);
+            },
+        }
+    }
+
+    fn ensureFinishedOrFailStop(
+        self: *PreparedExecutionCleanup,
+        txn: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        expected_stage: CleanupStage,
+        completion: *u8,
+        client: *client_mod.Client,
+        guard: *GenerationGuardedAllocator,
+        allocator_scope: *client_mod.Client.GenerationAllocatorScope,
+        payload_ledger: *response_payload_allocation.Ledger,
+    ) void {
+        if (completion.* == 1 and self.rawValid() and self.self_addr == @intFromPtr(self) and
+            self.lifecycle == .settled and self.stage == expected_stage and self.first_failure_raw == 0)
+            return;
+        self.finishOrFailStop(txn, operation, expected_stage, completion, client, guard, allocator_scope, payload_ledger);
+    }
+
+    fn revalidateFinishing(
+        self: *PreparedExecutionCleanup,
+        expected_stage: CleanupStage,
+        first: *?CleanupFailure,
+    ) void {
+        if (!self.rawValid() or self.self_addr != @intFromPtr(self) or
+            self.lifecycle != .finishing or self.stage != expected_stage)
+        {
+            if (first.* == null) first.* = .descriptor_drift;
+            self.self_addr = @intFromPtr(self);
+            self.lifecycle = .finishing;
+            self.stage = expected_stage;
+        }
+        if (self.first_failure_raw != 0) {
+            const raw = self.first_failure_raw - 1;
+            if (raw < std.meta.fields(CleanupFailure).len and first.* == null)
+                first.* = @enumFromInt(raw);
+            self.first_failure_raw = 0;
+        }
+    }
+
+    fn rawValid(self: *const PreparedExecutionCleanup) bool {
+        const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        const stage_raw = @as(*const u8, @ptrCast(&self.stage)).*;
+        return lifecycle_raw <= @intFromEnum(CleanupLifecycle.fail_stop) and
+            stage_raw <= @intFromEnum(CleanupStage.ledger) and
+            self.first_failure_raw <= std.meta.fields(CleanupFailure).len;
+    }
+};
+
+const ExecutionSettlementIntent = union(enum) {
+    rollback_pre_wire,
+    issuer_exhausted,
+    post_execute_reusable,
+    post_execute_terminal: client_poison.ConnectionReason,
+};
+
+fn settleExecutionAfterCleanup(
+    cleanup: *PreparedExecutionCleanup,
+    txn: *PreparedExecutionTxn,
+    operation: RegisteredNodeOperation,
+    expected_stage: PreparedExecutionCleanup.CleanupStage,
+    completion: *u8,
+    client: *client_mod.Client,
+    guard: *GenerationGuardedAllocator,
+    allocator_scope: *client_mod.Client.GenerationAllocatorScope,
+    payload_ledger: *response_payload_allocation.Ledger,
+    intent: ExecutionSettlementIntent,
+) PreparedExecutionTxn.SettlementError!SettlementOutcome {
+    cleanup.finishOrFailStop(
+        txn,
+        operation,
+        expected_stage,
+        completion,
+        client,
+        guard,
+        allocator_scope,
+        payload_ledger,
+    );
+    const outcome = switch (intent) {
+        .rollback_pre_wire => try txn.rollbackPreWire(operation),
+        .issuer_exhausted => try txn.retireIssuerExhausted(operation),
+        .post_execute_reusable => try txn.settlePostExecuteReusable(operation),
+        .post_execute_terminal => |reason| try txn.settlePostExecuteTerminal(operation, reason),
+    };
+    txn.finishOrFailStop(operation, outcome);
+    return outcome;
+}
+
 /// Executes the attach-compatible request while one registry operation pins the canonical
 /// ClientSlot node. No node, Client, binding, or response-owner address escapes this scope.
 pub fn executeGenerationRequest(
@@ -1360,11 +2401,26 @@ pub fn executeGenerationRequest(
         return error.InvalidOwner;
     _ = std.math.add(usize, execution.owner_addr, execution.owner_size) catch
         return error.InvalidOwner;
+    if (!byteRangeFullyContained(
+        execution.response_out_addr,
+        @sizeOf(executed_response_mod.ExecutedResponse),
+        execution.owner_addr,
+        execution.owner_size,
+    )) return error.InvalidResponseDestination;
 
     const admission = try beginGenerationRequestOwner(request, false);
     defer endRegisteredNodeOperation(admission.operation);
     const node = admission.operation.node;
     const identity = admission.identity;
+    if (execution.owner_addr != admission.owner.owner_addr or
+        execution.owner_size != admission.owner.owner_size)
+        return error.InvalidOwner;
+    if (!byteRangeFullyContained(
+        execution.response_out_addr,
+        @sizeOf(executed_response_mod.ExecutedResponse),
+        admission.owner.owner_addr,
+        admission.owner.owner_size,
+    )) return error.InvalidResponseDestination;
     const maybe_canonical = node.cleanup_registry.preparedRequestForReceipt(
         request.reservation.cleanup,
         identity,
@@ -1381,29 +2437,35 @@ pub fn executeGenerationRequest(
         .descriptor = canonical.descriptor,
     };
     if (!node.client.preparedBlockingRpcStorageMatches(storage, prepared_identity)) {
-        try terminalizeExecutingRequest(node, request, identity, canonical);
+        node.cleanup_registry.settlePreparedRequest(
+            request.reservation.cleanup,
+            identity,
+            canonical,
+            true,
+        ) catch return error.ProtocolError;
+        node.client.poison(.local_invariant_violation);
         return error.ProtocolError;
     }
-    node.cleanup_registry.beginPreparedRequestExecute(
-        request.reservation.cleanup,
+    var execution_txn: PreparedExecutionTxn = .{};
+    defer execution_txn.ensureSettledOrFailStop(admission.operation);
+    try execution_txn.initBeforeBeginExecute(
+        admission.operation,
+        request,
         identity,
         canonical,
-    ) catch return error.InvalidReceipt;
-
-    var disposition: ExecuteDisposition = .terminal;
-    defer if (disposition != .settled) node.cleanup_registry.settlePreparedRequest(
-        request.reservation.cleanup,
-        identity,
-        canonical,
-        disposition == .terminal,
-    ) catch @panic("prepared request execution authority settlement failed");
+    );
+    execution_txn.commitBeginExecute(admission.operation);
 
     const response_out: *executed_response_mod.ExecutedResponse =
         @ptrFromInt(execution.response_out_addr);
     const response_owner = node.cleanup_registry.responseOwnerSeal(
         request.reservation.cleanup,
         identity,
-    ) catch return error.InvalidOwner;
+    ) catch {
+        const outcome = try execution_txn.rollbackPreWire(admission.operation);
+        execution_txn.finishOrFailStop(admission.operation, outcome);
+        return error.InvalidOwner;
+    };
     const binding: *contract.PreparedAttachmentBinding =
         @ptrFromInt(identity.binding_storage_addr);
     if (!responseDestinationValid(
@@ -1416,12 +2478,16 @@ pub fn executeGenerationRequest(
         request.slot_addr,
         node,
     )) {
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        const outcome = try execution_txn.rollbackPreWire(admission.operation);
+        execution_txn.finishOrFailStop(admission.operation, outcome);
         return error.InvalidResponseDestination;
     }
 
     var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
     var payload_ledger: response_payload_allocation.Ledger = .{};
+    var execution_cleanup: PreparedExecutionCleanup = undefined;
+    var cleanup_expected_stage: PreparedExecutionCleanup.CleanupStage = .guard;
+    var cleanup_completion: u8 = 0;
     const response_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
         .{ .start = @intFromPtr(response_out), .len = @sizeOf(executed_response_mod.ExecutedResponse) },
         .{ .start = @intFromPtr(response_owner), .len = @sizeOf(contract.ExecutedResponseOwnerSeal) },
@@ -1431,6 +2497,10 @@ pub fn executeGenerationRequest(
         .{ .start = execution.owner_addr, .len = execution.owner_size },
         .{ .start = @intFromPtr(&allocator_scope), .len = @sizeOf(client_mod.Client.GenerationAllocatorScope) },
         .{ .start = @intFromPtr(&payload_ledger), .len = @sizeOf(response_payload_allocation.Ledger) },
+        .{ .start = @intFromPtr(&execution_txn), .len = @sizeOf(PreparedExecutionTxn) },
+        .{ .start = @intFromPtr(&execution_cleanup), .len = @sizeOf(PreparedExecutionCleanup) },
+        .{ .start = @intFromPtr(&cleanup_expected_stage), .len = @sizeOf(PreparedExecutionCleanup.CleanupStage) },
+        .{ .start = @intFromPtr(&cleanup_completion), .len = @sizeOf(u8) },
     };
     const forbidden_payload_ranges = [_]response_payload_allocation.ForbiddenRange{
         .{ .start = @intFromPtr(response_out), .len = @sizeOf(executed_response_mod.ExecutedResponse) },
@@ -1443,44 +2513,91 @@ pub fn executeGenerationRequest(
         .{ .start = @intFromPtr(&payload_ledger), .len = @sizeOf(response_payload_allocation.Ledger) },
         .{ .start = request.slot_addr, .len = @sizeOf(ClientSlot) },
         .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
+        .{ .start = @intFromPtr(&execution_txn), .len = @sizeOf(PreparedExecutionTxn) },
+        .{ .start = @intFromPtr(&execution_cleanup), .len = @sizeOf(PreparedExecutionCleanup) },
+        .{ .start = @intFromPtr(&cleanup_expected_stage), .len = @sizeOf(PreparedExecutionCleanup.CleanupStage) },
+        .{ .start = @intFromPtr(&cleanup_completion), .len = @sizeOf(u8) },
     };
     const guard = &node.guarded_allocator;
     if (!guard.beginOperationGuard(&response_ranges)) {
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        const outcome = try execution_txn.rollbackPreWire(admission.operation);
+        execution_txn.finishOrFailStop(admission.operation, outcome);
         return error.InvalidOwner;
     }
-    defer guard.endOperationGuard();
+    execution_cleanup.init();
+    defer execution_cleanup.ensureFinishedOrFailStop(
+        &execution_txn,
+        admission.operation,
+        cleanup_expected_stage,
+        &cleanup_completion,
+        &node.client,
+        guard,
+        &allocator_scope,
+        &payload_ledger,
+    );
     node.client.beginGenerationAllocatorScope(
         guard.allocator(),
         .rpc_execute,
         &allocator_scope,
     ) catch |err| {
         if (err == error.IdentityExhausted) {
-            const cleanup_ok = terminalizeExecutingRequestWithStorageCleanup(
-                node,
-                request,
-                identity,
-                canonical,
+            _ = try settleExecutionAfterCleanup(
+                &execution_cleanup,
+                &execution_txn,
+                admission.operation,
+                cleanup_expected_stage,
+                &cleanup_completion,
+                &node.client,
+                guard,
+                &allocator_scope,
+                &payload_ledger,
+                .issuer_exhausted,
             );
-            disposition = .settled;
-            if (!cleanup_ok) return error.ProtocolError;
             return error.IdentityExhausted;
         }
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .rollback_pre_wire,
+        );
         return error.Busy;
     };
-    defer node.client.restoreGenerationAllocatorScope(&allocator_scope) catch
-        @panic("generation allocator scope restore drifted");
+    cleanup_expected_stage = .allocator;
+    if (!execution_cleanup.advance(.guard, cleanup_expected_stage)) {
+        execution_cleanup.finishOrFailStop(
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+        );
+        const outcome = execution_txn.failStopCleanupFailure(admission.operation);
+        execution_txn.finishOrFailStop(admission.operation, outcome);
+    }
 
     const response_incarnation = issueGenerationResponseIncarnation() catch {
-        const cleanup_ok = terminalizeExecutingRequestWithStorageCleanup(
-            node,
-            request,
-            identity,
-            canonical,
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .issuer_exhausted,
         );
-        disposition = .settled;
-        if (!cleanup_ok) return error.ProtocolError;
         return error.IdentityExhausted;
     };
     response_payload_allocation.Ledger.initInPlace(
@@ -1493,34 +2610,88 @@ pub fn executeGenerationRequest(
         },
         1,
     ) catch |err| {
-        const cleanup_ok = terminalizeExecutingRequestWithStorageCleanup(
-            node,
-            request,
-            identity,
-            canonical,
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .issuer_exhausted,
         );
-        disposition = .settled;
-        if (!cleanup_ok) return error.ProtocolError;
         return switch (err) {
             error.IdentityExhausted => error.IdentityExhausted,
             else => error.ProtocolError,
         };
     };
+    cleanup_expected_stage = .ledger;
+    if (!execution_cleanup.advance(.allocator, cleanup_expected_stage)) {
+        execution_cleanup.finishOrFailStop(
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+        );
+        const outcome = execution_txn.failStopCleanupFailure(admission.operation);
+        execution_txn.finishOrFailStop(admission.operation, outcome);
+    }
     payload_ledger.bindForbiddenRanges(&forbidden_payload_ranges) catch {
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .rollback_pre_wire,
+        );
         node.client.poison(.local_invariant_violation);
         @panic("response payload forbidden owner inventory drifted");
     };
-    defer payload_ledger.endOperation() catch
-        @panic("response payload allocation ledger did not settle");
-    var payload_observer = ResponsePayloadObserverBridge{ .ledger = &payload_ledger };
+    var payload_observer = ResponsePayloadObserverBridge{
+        .ledger = &payload_ledger,
+        .guard = guard,
+    };
     const executed = contract.ExecutedCallReceipt.fromPrepared(request.receipt) orelse {
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .rollback_pre_wire,
+        );
         return error.InvalidReceipt;
     };
     const response_allocator = node.client.preflightPreparedBlockingRpcStorageExecution(
         storage,
     ) catch |err| {
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .rollback_pre_wire,
+        );
         return err;
     };
 
@@ -1543,34 +2714,138 @@ pub fn executeGenerationRequest(
             node,
         ))
     {
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .rollback_pre_wire,
+        );
         return error.InvalidResponseDestination;
     }
 
-    const execution_result = node.client.executePreparedBlockingRpcStorageWithAllocatorObserved(
-        storage,
-        response_allocator,
-        payload_observer.observer(),
-    );
+    if (builtin.is_test and guard.request_free_test_observer.inject_pending_before_execute) {
+        const observer = &guard.request_free_test_observer;
+        if (observer.pending_frame_addr == 0 or observer.pending_frame_len == 0 or
+            node.client.pending_outbound != null)
+            @panic("B3 pending injection descriptor drifted");
+        const frame: [*]u8 = @ptrFromInt(observer.pending_frame_addr);
+        node.client.pending_outbound = .{
+            .frame = frame[0..observer.pending_frame_len],
+            .stream_id = 10,
+        };
+        observer.pending_injected = true;
+        if (observer.drift_request_before_execute) {
+            if (observer.target_addr == 0 or observer.target_len == 0)
+                @panic("B3 request drift descriptor missing");
+            const request_frame: [*]u8 = @ptrFromInt(observer.target_addr);
+            request_frame[observer.target_len - 1] ^= 1;
+        }
+        if (observer.poison_before_execute) node.client.poison(.transport_read_failure);
+    }
+    const ExecutionResult = @typeInfo(
+        @TypeOf(client_mod.Client.executePreparedBlockingRpcStorageWithAllocatorObserved),
+    ).@"fn".return_type.?;
+    const execution_result: ExecutionResult =
+        if (builtin.is_test and guard.request_free_test_observer.force_not_executed)
+            .{ .not_executed = error.ConnectionClosed }
+        else
+            node.client.executePreparedBlockingRpcStorageWithAllocatorObserved(
+                storage,
+                response_allocator,
+                payload_observer.observer(),
+            );
     if (guard.operation_alias_rejected) {
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .{ .post_execute_terminal = .local_invariant_violation },
+        );
         node.client.poison(.local_invariant_violation);
+        if (builtin.is_test and c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC") != null and
+            if (c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_CASE")) |raw|
+                std.mem.eql(u8, std.mem.span(raw), "response_alias")
+            else
+                true)
+        {
+            const authority_terminal = if (node.cleanup_registry.publishPreparedRequest(
+                request.reservation.cleanup,
+                identity,
+                canonical,
+            )) false else |err| err == error.InvalidState;
+            if (!client_mod.Client.preparedBlockingRpcStorageSettled(storage))
+                @panic("B3 strict response-alias storage was not settled");
+            if (!authority_terminal)
+                @panic("B3 strict response-alias authority was not terminal");
+            if (node.client.firstPoisonReason() != .local_invariant_violation)
+                @panic("B3 strict response-alias poison drifted");
+            const marker = "B3_STRICT_ROW request=exact_wire storage=settled authority=terminal connection=fail_stop outcome=fail_stop error=fail_stop poison=local_invariant response=terminal_no_free request_free=exact_once payload_free=no_free final_zero=false\n";
+            _ = c.write(2, marker.ptr, marker.len);
+        }
         @panic("response payload allocator returned a canonical owner alias");
     }
     const response = switch (execution_result) {
         .not_executed => |err| {
             return switch (err) {
                 error.PayloadProvenanceRejected => {
+                    _ = try settleExecutionAfterCleanup(
+                        &execution_cleanup,
+                        &execution_txn,
+                        admission.operation,
+                        cleanup_expected_stage,
+                        &cleanup_completion,
+                        &node.client,
+                        guard,
+                        &allocator_scope,
+                        &payload_ledger,
+                        .rollback_pre_wire,
+                    );
                     node.client.poison(.local_invariant_violation);
                     @panic("response payload provenance failed before execution");
                 },
                 else => |execution_err| {
-                    disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+                    _ = try settleExecutionAfterCleanup(
+                        &execution_cleanup,
+                        &execution_txn,
+                        admission.operation,
+                        cleanup_expected_stage,
+                        &cleanup_completion,
+                        &node.client,
+                        guard,
+                        &allocator_scope,
+                        &payload_ledger,
+                        .rollback_pre_wire,
+                    );
                     return execution_err;
                 },
             };
         },
         .uncertain => |err| {
             if (err == error.PayloadProvenanceRejected) {
+                _ = try settleExecutionAfterCleanup(
+                    &execution_cleanup,
+                    &execution_txn,
+                    admission.operation,
+                    cleanup_expected_stage,
+                    &cleanup_completion,
+                    &node.client,
+                    guard,
+                    &allocator_scope,
+                    &payload_ledger,
+                    .{ .post_execute_terminal = .local_invariant_violation },
+                );
                 node.client.poison(.local_invariant_violation);
                 @panic("response payload allocator provenance became ambiguous");
             }
@@ -1583,9 +2858,33 @@ pub fn executeGenerationRequest(
                 response_incarnation,
                 result,
             ) catch {
+                _ = try settleExecutionAfterCleanup(
+                    &execution_cleanup,
+                    &execution_txn,
+                    admission.operation,
+                    cleanup_expected_stage,
+                    &cleanup_completion,
+                    &node.client,
+                    guard,
+                    &allocator_scope,
+                    &payload_ledger,
+                    .{ .post_execute_terminal = .local_invariant_violation },
+                );
                 node.client.poison(.local_invariant_violation);
                 return error.InvalidResponseDestination;
             };
+            _ = try settleExecutionAfterCleanup(
+                &execution_cleanup,
+                &execution_txn,
+                admission.operation,
+                cleanup_expected_stage,
+                &cleanup_completion,
+                &node.client,
+                guard,
+                &allocator_scope,
+                &payload_ledger,
+                .{ .post_execute_terminal = .transport_read_failure },
+            );
             return result;
         },
         .accepted => |value| value,
@@ -1598,6 +2897,18 @@ pub fn executeGenerationRequest(
     )) {
         .promoted => |receipt| receipt,
         .fail_stop_required => |reason| {
+            _ = try settleExecutionAfterCleanup(
+                &execution_cleanup,
+                &execution_txn,
+                admission.operation,
+                cleanup_expected_stage,
+                &cleanup_completion,
+                &node.client,
+                guard,
+                &allocator_scope,
+                &payload_ledger,
+                .{ .post_execute_terminal = .local_invariant_violation },
+            );
             node.client.poison(.local_invariant_violation);
             failStopResponsePayloadProvenance(reason);
         },
@@ -1612,6 +2923,18 @@ pub fn executeGenerationRequest(
         node.client.poison(.local_invariant_violation);
         payload_ledger.releasePromotedResponse(payload_receipt) catch
             @panic("safe response provenance release drifted");
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .{ .post_execute_terminal = .local_invariant_violation },
+        );
         return error.InvalidResponseDestination;
     }
     const correlated = contract.CorrelatedExecutedCall.init(
@@ -1621,12 +2944,36 @@ pub fn executeGenerationRequest(
         node.client.poison(.local_invariant_violation);
         payload_ledger.releasePromotedResponse(payload_receipt) catch
             @panic("safe response provenance release drifted");
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .{ .post_execute_terminal = .local_invariant_violation },
+        );
         return error.InvalidReceipt;
     };
     if (!correlated.responseMatchesPrepared()) {
         node.client.poison(.response_correlation_lost);
         payload_ledger.releasePromotedResponse(payload_receipt) catch
             @panic("safe response provenance release drifted");
+        _ = try settleExecutionAfterCleanup(
+            &execution_cleanup,
+            &execution_txn,
+            admission.operation,
+            cleanup_expected_stage,
+            &cleanup_completion,
+            &node.client,
+            guard,
+            &allocator_scope,
+            &payload_ledger,
+            .{ .post_execute_terminal = .response_correlation_lost },
+        );
         return error.InvalidReceipt;
     }
     const result: contract.ExecuteResult = .{ .accepted = correlated };
@@ -1640,83 +2987,50 @@ pub fn executeGenerationRequest(
         .transferred => {},
         .rejected_safe_released => {
             node.client.poison(.local_invariant_violation);
+            _ = try settleExecutionAfterCleanup(
+                &execution_cleanup,
+                &execution_txn,
+                admission.operation,
+                cleanup_expected_stage,
+                &cleanup_completion,
+                &node.client,
+                guard,
+                &allocator_scope,
+                &payload_ledger,
+                .{ .post_execute_terminal = .local_invariant_violation },
+            );
             return error.InvalidResponseDestination;
         },
         .fail_stop_required => |reason| {
+            _ = try settleExecutionAfterCleanup(
+                &execution_cleanup,
+                &execution_txn,
+                admission.operation,
+                cleanup_expected_stage,
+                &cleanup_completion,
+                &node.client,
+                guard,
+                &allocator_scope,
+                &payload_ledger,
+                .{ .post_execute_terminal = .local_invariant_violation },
+            );
             node.client.poison(.local_invariant_violation);
             failStopResponsePayloadTransfer(reason);
         },
     }
-    disposition = .reusable;
+    _ = try settleExecutionAfterCleanup(
+        &execution_cleanup,
+        &execution_txn,
+        admission.operation,
+        cleanup_expected_stage,
+        &cleanup_completion,
+        &node.client,
+        guard,
+        &allocator_scope,
+        &payload_ledger,
+        .post_execute_reusable,
+    );
     return result;
-}
-
-fn rollbackExecutingRequest(
-    node: *ClientNode,
-    request: GenerationRequestAbort,
-    identity: contract.BindingIdentity,
-    canonical: prepared_request_authority.Prepared,
-) GenerationRequestError!ExecuteDisposition {
-    const storage: *client_mod.PreparedBlockingRpcStorage =
-        @ptrFromInt(request.prepared_storage_addr);
-    const outcome = node.client.abortPreparedBlockingRpcStorageCanonical(storage, .{
-        .request_id = canonical.receipt.request_id,
-        .frame_digest = canonical.receipt.request_digest,
-        .descriptor = canonical.descriptor,
-    }) catch {
-        node.client.poison(.local_invariant_violation);
-        return error.ProtocolError;
-    };
-    const terminal = outcome == .terminal;
-    node.cleanup_registry.settlePreparedRequest(
-        request.reservation.cleanup,
-        identity,
-        canonical,
-        terminal,
-    ) catch @panic("executing request rollback settlement drifted");
-    if (terminal) node.client.poison(.local_invariant_violation);
-    return .settled;
-}
-
-fn terminalizeExecutingRequest(
-    node: *ClientNode,
-    request: GenerationRequestAbort,
-    identity: contract.BindingIdentity,
-    canonical: prepared_request_authority.Prepared,
-) GenerationRequestError!void {
-    node.cleanup_registry.settlePreparedRequest(
-        request.reservation.cleanup,
-        identity,
-        canonical,
-        true,
-    ) catch return error.ProtocolError;
-    node.client.poison(.local_invariant_violation);
-}
-
-/// Pre-wire identity exhaustion still owns a valid canonical request frame. Retire that backing
-/// before terminalizing the registry authority so transport teardown remains allocation-free.
-/// The return value separates an expected exhaustion from unexpected storage corruption while the
-/// caller records `.settled` before propagating either error.
-fn terminalizeExecutingRequestWithStorageCleanup(
-    node: *ClientNode,
-    request: GenerationRequestAbort,
-    identity: contract.BindingIdentity,
-    canonical: prepared_request_authority.Prepared,
-) bool {
-    const storage: *client_mod.PreparedBlockingRpcStorage =
-        @ptrFromInt(request.prepared_storage_addr);
-    const abort_outcome = node.client.abortPreparedBlockingRpcStorageCanonical(storage, .{
-        .request_id = canonical.receipt.request_id,
-        .frame_digest = canonical.receipt.request_digest,
-        .descriptor = canonical.descriptor,
-    }) catch {
-        terminalizeExecutingRequest(node, request, identity, canonical) catch
-            @panic("exhausted request authority terminalization failed");
-        return false;
-    };
-    terminalizeExecutingRequest(node, request, identity, canonical) catch
-        @panic("exhausted request authority terminalization failed");
-    return abort_outcome == .reusable;
 }
 
 fn responseDestinationValid(
@@ -1744,6 +3058,18 @@ fn responseDestinationValid(
         byteRangesOverlap(seal_addr, @sizeOf(contract.ExecutedResponseOwnerSeal), @intFromPtr(storage), @sizeOf(client_mod.PreparedBlockingRpcStorage)))
         return false;
     return response_out.canInitializeWithOwner(response_owner);
+}
+
+fn byteRangeFullyContained(
+    inner_addr: usize,
+    inner_len: usize,
+    outer_addr: usize,
+    outer_len: usize,
+) bool {
+    if (inner_len == 0 or outer_len == 0) return false;
+    const inner_end = std.math.add(usize, inner_addr, inner_len) catch return false;
+    const outer_end = std.math.add(usize, outer_addr, outer_len) catch return false;
+    return inner_addr >= outer_addr and inner_end <= outer_end;
 }
 
 fn responseOwnerStillPristine(
@@ -1939,6 +3265,9 @@ fn productionIssuer() InitError!*lease_mod.IdentityIssuer {
 pub const ClientSlot = struct {
     const RegisteredClientOperation = struct {
         node: *ClientNode,
+        registry_index: u16,
+        operation_id: u64,
+        pid: u32,
     };
 
     const ExclusiveTeardownReservation = struct {
@@ -2213,12 +3542,22 @@ pub const ClientSlot = struct {
             error.Busy => error.AdminBusy,
             error.InvalidOwner => error.MovedOrCopied,
         };
-        return .{ .node = operation.node };
+        return .{
+            .node = operation.node,
+            .registry_index = operation.registry_index,
+            .operation_id = operation.operation_id,
+            .pid = operation.pid,
+        };
     }
 
     fn endRegisteredClientOperation(_: *ClientSlot, operation: RegisteredClientOperation) void {
         // The shared count itself keeps the node alive until this exact decrement.
-        endRegisteredNodeOperation(.{ .node = operation.node });
+        endRegisteredNodeOperation(.{
+            .node = operation.node,
+            .registry_index = operation.registry_index,
+            .operation_id = operation.operation_id,
+            .pid = operation.pid,
+        });
     }
 
     fn beginRegisteredExclusiveTeardown(
@@ -5898,18 +7237,392 @@ test "CR3a-2c2b2 foreign thread teardown cannot race owner preparation" {
     try std.testing.expect(slot.valid());
 }
 
-test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before terminal authority" {
+test "B3-0.3 response destination requires full authenticated owner containment before dereference" {
+    const response_size = @sizeOf(executed_response_mod.ExecutedResponse);
+    const owner_addr: usize = 0x4000;
+    const owner_size = response_size * 2;
+
+    try std.testing.expect(byteRangeFullyContained(
+        owner_addr,
+        response_size,
+        owner_addr,
+        owner_size,
+    ));
+    try std.testing.expect(byteRangeFullyContained(
+        owner_addr + owner_size - response_size,
+        response_size,
+        owner_addr,
+        owner_size,
+    ));
+    try std.testing.expect(!byteRangeFullyContained(
+        owner_addr - 1,
+        response_size,
+        owner_addr,
+        owner_size,
+    ));
+    try std.testing.expect(!byteRangeFullyContained(
+        owner_addr + owner_size - response_size + 1,
+        response_size,
+        owner_addr,
+        owner_size,
+    ));
+    try std.testing.expect(!byteRangeFullyContained(
+        owner_addr + owner_size,
+        response_size,
+        owner_addr,
+        owner_size,
+    ));
+    try std.testing.expect(!byteRangeFullyContained(
+        std.math.maxInt(usize) - response_size + 1,
+        response_size,
+        owner_addr,
+        owner_size,
+    ));
+    try std.testing.expect(!byteRangeFullyContained(
+        owner_addr,
+        response_size,
+        std.math.maxInt(usize) - owner_size + 1,
+        owner_size,
+    ));
+}
+
+test "B3-0.3 public execute rejects forged response destinations before authority mutation" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2C3BD0);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3BD0);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    var outside_response: executed_response_mod.ExecutedResponse = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0x2C3BD1,
+    );
+    const transport_incarnation: u64 = 0x2C3BD2;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const identity = reservation.identity;
+    const prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 0,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.attachController(),
+    });
+    try owner.binding.pairRequest(prepared.receipt);
+    try owner.binding.beginExecute(prepared.receipt);
+    const response_owner = try slot.responseOwnerSeal(reservation);
+    const request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = prepared.receipt,
+    };
+    const owner_addr = @intFromPtr(&owner);
+    const response_size = @sizeOf(executed_response_mod.ExecutedResponse);
+    // The request remains bound to the canonical owner seal while the outer execute wrapper
+    // advertises an attacker-selected range that happens to contain its destination.  The
+    // pre-admission scalar check passes; only the post-admission canonical equality check may
+    // reject it, before pointer materialization or authority mutation.
+    try std.testing.expectError(error.InvalidOwner, executeGenerationRequest(.{
+        .request = request,
+        .response_out_addr = @intFromPtr(&outside_response),
+        .owner_addr = @intFromPtr(&outside_response),
+        .owner_size = @sizeOf(executed_response_mod.ExecutedResponse),
+    }));
+    try std.testing.expect(!client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.busy,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            identity,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(outside_response, std.mem.zeroes(executed_response_mod.ExecutedResponse)));
+    try std.testing.expect(slot.current.client.firstPoisonReason() == null);
+
+    const forged_destinations = [_]usize{
+        @intFromPtr(&outside_response),
+        owner_addr + @sizeOf(Owner),
+        owner_addr + @sizeOf(Owner) - response_size + 1,
+        owner_addr - 1,
+        std.math.maxInt(usize) - response_size + 1,
+    };
+    for (forged_destinations) |response_out_addr| {
+        try std.testing.expectError(error.InvalidResponseDestination, executeGenerationRequest(.{
+            .request = request,
+            .response_out_addr = response_out_addr,
+            .owner_addr = owner_addr,
+            .owner_size = @sizeOf(Owner),
+        }));
+        try std.testing.expect(!client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+        try std.testing.expectEqual(
+            prepared_request_authority.SettlementReadiness.busy,
+            try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+                reservation.cleanup,
+                identity,
+            ),
+        );
+        try std.testing.expect(owner.response.canInitializeWithOwner(response_owner));
+        try std.testing.expect(slot.current.client.firstPoisonReason() == null);
+    }
+    try std.testing.expect(std.meta.eql(outside_response, std.mem.zeroes(executed_response_mod.ExecutedResponse)));
+
+    try abortGenerationRequest(request);
+    try transport_owner_seal.terminalize(transport_incarnation);
+    try slot.abortExecutedAttachmentBinding(
+        &owner.binding,
+        reservation,
+        contract.ExecutedCallReceipt.fromPrepared(prepared.receipt).?,
+    );
+}
+
+test "B3-0.4 guarded allocator rejects exact partial and overflow execution authority aliases" {
+    try ClientSlot.initializeProcessRuntime();
+    const Authority = enum { transaction, cleanup, expected_stage, completion };
+    const Shape = enum { exact, left_partial, right_partial, overflow };
+    inline for (std.enums.values(Authority)) |authority| {
+        inline for (std.enums.values(Shape)) |shape| {
+            const allocator = std.testing.allocator;
+            const case_id: u128 = @as(u128, @intFromEnum(authority)) * 4 + @intFromEnum(shape);
+            var source = fixtureClient(allocator, 0x2C3BD8 + case_id);
+            var slot: ClientSlot = undefined;
+            try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3BD8 + case_id);
+            defer slot.deinit();
+
+            var txn: PreparedExecutionTxn = .{};
+            var cleanup: PreparedExecutionCleanup = undefined;
+            var expected_stage: PreparedExecutionCleanup.CleanupStage = .guard;
+            var completion: u8 = 0;
+            const base, const size = switch (authority) {
+                .transaction => .{ @intFromPtr(&txn), @sizeOf(PreparedExecutionTxn) },
+                .cleanup => .{ @intFromPtr(&cleanup), @sizeOf(PreparedExecutionCleanup) },
+                .expected_stage => .{ @intFromPtr(&expected_stage), @sizeOf(@TypeOf(expected_stage)) },
+                .completion => .{ @intFromPtr(&completion), @sizeOf(@TypeOf(completion)) },
+            };
+            const target_addr, const target_len = switch (shape) {
+                .exact => .{ base, size },
+                .left_partial => .{ base - 1, 2 },
+                .right_partial => .{ base + size - 1, 2 },
+                .overflow => .{ std.math.maxInt(usize), 1 },
+            };
+            const allocation_len: usize = switch (shape) {
+                .left_partial, .right_partial => 2,
+                .exact, .overflow => 1,
+            };
+            const target: [*]u8 = @ptrFromInt(target_addr);
+            var hostile = SnapshotOwnerAliasAllocator{ .target = target[0..target_len] };
+            const guard = &slot.current.guarded_allocator;
+            guard.parent = hostile.allocator();
+            try std.testing.expect(guard.beginOperationGuard(&.{
+                .{ .start = @intFromPtr(&txn), .len = @sizeOf(PreparedExecutionTxn) },
+                .{ .start = @intFromPtr(&cleanup), .len = @sizeOf(PreparedExecutionCleanup) },
+                .{ .start = @intFromPtr(&expected_stage), .len = @sizeOf(@TypeOf(expected_stage)) },
+                .{ .start = @intFromPtr(&completion), .len = @sizeOf(@TypeOf(completion)) },
+            }));
+            defer guard.endOperationGuard();
+
+            const result = guard.allocator().alloc(u8, allocation_len);
+            try std.testing.expectError(error.OutOfMemory, result);
+            try std.testing.expect(guard.operation_alias_rejected);
+            try std.testing.expectEqual(@as(usize, 1), hostile.alloc_calls);
+            try std.testing.expectEqual(@as(usize, 0), hostile.free_calls);
+        }
+    }
+}
+
+test "B3-0.3 forged cleanup completion states cannot skip canonical guard cleanup" {
+    try ClientSlot.initializeProcessRuntime();
+    inline for ([_]PreparedExecutionCleanup.CleanupLifecycle{ .settled, .finishing }) |forged| {
+        const allocator = std.testing.allocator;
+        var source = fixtureClient(allocator, 0x2C3BDC + @as(u128, @intFromEnum(forged)));
+        var slot: ClientSlot = undefined;
+        try ClientSlot.initInPlace(
+            &slot,
+            allocator,
+            &source,
+            0x2C3BDC + @as(u128, @intFromEnum(forged)),
+        );
+        defer slot.deinit();
+
+        var protected_byte: u8 = 0;
+        const guard = &slot.current.guarded_allocator;
+        try std.testing.expect(guard.beginOperationGuard(&.{.{
+            .start = @intFromPtr(&protected_byte),
+            .len = @sizeOf(u8),
+        }}));
+        var cleanup: PreparedExecutionCleanup = undefined;
+        cleanup.init();
+        cleanup.lifecycle = forged;
+        var scope: client_mod.Client.GenerationAllocatorScope = .{};
+        var ledger: response_payload_allocation.Ledger = .{};
+        const outcome = cleanup.finish(.guard, &slot.current.client, guard, &scope, &ledger);
+        switch (outcome) {
+            .fail_stop => |reason| try std.testing.expectEqual(
+                PreparedExecutionCleanup.CleanupFailure.descriptor_drift,
+                reason,
+            ),
+            .clean, .deferred_reentry => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(!guard.operation_guard_active);
+        try std.testing.expectEqual(
+            PreparedExecutionCleanup.CleanupLifecycle.fail_stop,
+            cleanup.lifecycle,
+        );
+    }
+}
+
+test "B3-0.1 pre-wire issuer exhaustion settles request terminal with exact first poison" {
+    const b3_issuer_oracle = @import("b3_issuer_oracle.zig");
     const Case = enum {
         allocator_scope,
         response_incarnation,
         allocator_scope_with_content_drift,
         response_incarnation_with_content_drift,
     };
+    const PreparedRequestFreeProbe = struct {
+        parent: std.mem.Allocator,
+        slot: ?*ClientSlot = null,
+        reservation: ?AttachmentBindingReservation = null,
+        canonical: ?prepared_request_authority.Prepared = null,
+        target_addr: usize = 0,
+        target_len: usize = 0,
+        exact_free_count: usize = 0,
+        authority_was_executing: bool = false,
+        guard_was_closed_before_backing_free: bool = false,
+        allocated_bytes: usize = 0,
+        freed_bytes: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+        fn arm(self: *@This(), slot: *ClientSlot, reservation: AttachmentBindingReservation, canonical: prepared_request_authority.Prepared) void {
+            self.slot = slot;
+            self.reservation = reservation;
+            self.canonical = canonical;
+            self.target_addr = canonical.descriptor.frame_addr;
+            self.target_len = canonical.descriptor.frame_len;
+            slot.current.guarded_allocator.request_free_test_observer = .{
+                .target_addr = canonical.descriptor.frame_addr,
+                .target_len = canonical.descriptor.frame_len,
+                .descriptor_allocator_ptr = canonical.descriptor.allocator_ptr,
+                .descriptor_allocator_vtable = canonical.descriptor.allocator_vtable,
+            };
+        }
+        fn expectExactOnceBeforeAuthoritySettlement(self: *const @This()) !void {
+            try std.testing.expectEqual(@as(usize, 1), self.exact_free_count);
+            try std.testing.expect(self.authority_was_executing);
+            try std.testing.expect(self.guard_was_closed_before_backing_free);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                self.slot.?.current.guarded_allocator.request_free_test_observer.entry_count,
+            );
+            try std.testing.expect(
+                self.slot.?.current.guarded_allocator.request_free_test_observer.descriptor_exact,
+            );
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const result = self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr) orelse
+                return null;
+            self.allocated_bytes += len;
+            return result;
+        }
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr))
+                return false;
+            if (new_len >= memory.len)
+                self.allocated_bytes += new_len - memory.len
+            else
+                self.freed_bytes += memory.len - new_len;
+            return true;
+        }
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const result = self.parent.vtable.remap(
+                self.parent.ptr,
+                memory,
+                alignment,
+                new_len,
+                ret_addr,
+            ) orelse return null;
+            if (new_len >= memory.len)
+                self.allocated_bytes += new_len - memory.len
+            else
+                self.freed_bytes += memory.len - new_len;
+            return result;
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (@intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len) {
+                self.exact_free_count += 1;
+                const reservation = self.reservation.?;
+                self.authority_was_executing = self.slot.?.current.cleanup_registry.executingRequestMatches(
+                    reservation.cleanup,
+                    reservation.identity,
+                    self.canonical.?,
+                ) catch false;
+                self.guard_was_closed_before_backing_free =
+                    !self.slot.?.current.guarded_allocator.operation_guard_active;
+            }
+            self.freed_bytes += memory.len;
+            self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+        }
+    };
     inline for (std.enums.values(Case)) |case| {
         try ClientSlot.initializeProcessRuntime();
         const allocator = std.testing.allocator;
+        var request_free = PreparedRequestFreeProbe{ .parent = allocator };
         const case_offset: u128 = @intFromEnum(case);
-        var source = fixtureClient(allocator, 0x2C3BE0 + case_offset);
+        var wire_fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wire_fds),
+        );
+        defer _ = c.close(wire_fds[1]);
+        var source = fixtureClient(request_free.allocator(), 0x2C3BE0 + case_offset);
+        source.fd = wire_fds[0];
         var slot: ClientSlot = undefined;
         try ClientSlot.initInPlace(
             &slot,
@@ -5917,7 +7630,8 @@ test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before termin
             &source,
             0x2C3BE0 + case_offset,
         );
-        defer slot.deinit();
+        var slot_live = true;
+        defer if (slot_live) slot.deinit();
 
         const Owner = struct {
             transport_marker: u8 = 0,
@@ -5960,6 +7674,7 @@ test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before termin
             .reservation = reservation,
             .request = contract.RuntimeRequest.attachController(),
         });
+        request_free.arm(&slot, reservation, prepared.canonical);
         try owner.binding.pairRequest(prepared.receipt);
         try owner.binding.beginExecute(prepared.receipt);
 
@@ -5979,11 +7694,8 @@ test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before termin
             const frame: [*]u8 = @ptrFromInt(prepared.canonical.descriptor.frame_addr);
             frame[prepared.canonical.descriptor.frame_len - 1] ^= 1;
         }
-        const expected_error: GenerationExecuteError = if (content_drifted)
-            error.ProtocolError
-        else
-            error.IdentityExhausted;
-        try std.testing.expectError(expected_error, executeGenerationRequest(.{
+        var actual_error: ?GenerationExecuteError = null;
+        if (executeGenerationRequest(.{
             .request = .{
                 .slot_addr = @intFromPtr(&slot),
                 .slot_incarnation = identity.slot_incarnation,
@@ -6001,7 +7713,22 @@ test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before termin
             .response_out_addr = @intFromPtr(&owner.response),
             .owner_addr = @intFromPtr(&owner),
             .owner_size = @sizeOf(Owner),
-        }));
+        })) |_| return error.TestUnexpectedResult else |err| actual_error = err;
+        const expected_error: GenerationExecuteError = if (content_drifted)
+            error.ProtocolError
+        else
+            error.IdentityExhausted;
+        try std.testing.expect(actual_error.? == expected_error);
+        var unexpected_wire: [1]u8 = undefined;
+        const wire_read = c.recv(
+            wire_fds[1],
+            &unexpected_wire,
+            unexpected_wire.len,
+            std.posix.MSG.DONTWAIT,
+        );
+        const wire_empty = wire_read == 0 or
+            (wire_read == -1 and std.posix.errno(wire_read) == .AGAIN);
+        try std.testing.expect(wire_empty);
         try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
         try std.testing.expectEqual(
             prepared_request_authority.SettlementReadiness.settled,
@@ -6010,13 +7737,854 @@ test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before termin
                 identity,
             ),
         );
+        const authority_terminal = if (slot.current.cleanup_registry.publishPreparedRequest(
+            reservation.cleanup,
+            identity,
+            prepared.canonical,
+        )) false else |err| err == error.InvalidState;
+        try std.testing.expect(authority_terminal);
         try std.testing.expect(slot.current.client.unusable);
+        try std.testing.expectEqual(
+            @import("client_poison.zig").ConnectionReason.local_invariant_violation,
+            slot.current.client.firstPoisonReason().?,
+        );
+        try request_free.expectExactOnceBeforeAuthoritySettlement();
         try transport_owner_seal.terminalize(transport_incarnation);
         try slot.abortExecutedAttachmentBinding(
             &owner.binding,
             reservation,
             contract.ExecutedCallReceipt.fromPrepared(prepared.receipt).?,
         );
+        const observer = slot.current.guarded_allocator.request_free_test_observer;
+        var operation_receipts_exact = observer.registered_operation_begin_count != 0 and
+            observer.registered_operation_begin_count == observer.registered_operation_end_count and
+            observer.registered_operation_begin_count <= observer.registered_operation_begin_receipts.len and
+            observer.registered_operation_active_receipt == 0 and
+            !observer.registered_operation_receipt_drift;
+        if (operation_receipts_exact) {
+            for (0..observer.registered_operation_begin_count) |index| {
+                if (observer.registered_operation_begin_receipts[index] == 0 or
+                    observer.registered_operation_begin_receipts[index] !=
+                        observer.registered_operation_end_receipts[index])
+                {
+                    operation_receipts_exact = false;
+                    break;
+                }
+            }
+        }
+        const connection_local_invariant = slot.current.client.unusable;
+        const first_poison_local_invariant = slot.current.client.firstPoisonReason() ==
+            .local_invariant_violation;
+        const allocator_scope_final = observer.allocator_scope_restored or
+            case == .allocator_scope or case == .allocator_scope_with_content_drift;
+        slot.deinit();
+        slot_live = false;
+        try std.testing.expectEqual(@as(usize, 1), observer.cleanup_count);
+        try std.testing.expect(observer.guard_inactive);
+        try std.testing.expect(allocator_scope_final);
+        try std.testing.expect(observer.client_scope_restored);
+        try std.testing.expect(observer.ledger_ended);
+        try std.testing.expect(observer.cleanup_settled);
+        try std.testing.expect(operation_receipts_exact);
+        try std.testing.expectEqual(request_free.allocated_bytes, request_free.freed_bytes);
+        const scenario: b3_issuer_oracle.Scenario = if (content_drifted)
+            .cleanup_drift
+        else
+            .clean;
+        try std.testing.expectEqualDeep(
+            b3_issuer_oracle.expected(scenario),
+            b3_issuer_oracle.Observation{
+                .scenario = scenario,
+                .request_prepared_only = wire_empty,
+                .storage_settled = client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage),
+                .authority_terminal = authority_terminal,
+                .connection_local_invariant = connection_local_invariant,
+                .public_error = if (actual_error.? == error.IdentityExhausted)
+                    .identity_exhausted
+                else
+                    .protocol_error,
+                .first_poison_local_invariant = first_poison_local_invariant,
+                .response_pristine = owner.response.pristine(),
+                .request_free_exact_once = request_free.exact_free_count == 1,
+                .payload_never_observed = observer.response_payload_addr == 0 and
+                    observer.response_payload_len == 0,
+                .final_zero = observer.cleanup_count == 1 and observer.guard_inactive and
+                    allocator_scope_final and observer.client_scope_restored and
+                    observer.ledger_ended and observer.cleanup_settled and
+                    operation_receipts_exact and request_free.allocated_bytes == request_free.freed_bytes,
+            },
+        );
+    }
+}
+
+test "B3-0.2 prepared execution transaction is final-address linear and rolls back once" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2C3B20);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B20);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0x2C3B21,
+    );
+    const transport_incarnation: u64 = 0x2C3B22;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const identity = reservation.identity;
+    const prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 0,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.attachController(),
+    });
+    const request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = prepared.receipt,
+    };
+
+    const stale_admission = try beginGenerationRequestOwner(request, false);
+    var stale_txn: PreparedExecutionTxn = .{};
+    try stale_txn.initBeforeBeginExecute(
+        stale_admission.operation,
+        request,
+        identity,
+        prepared.canonical,
+    );
+    endRegisteredNodeOperation(stale_admission.operation);
+    try std.testing.expectError(
+        error.InvalidOwner,
+        stale_txn.revalidatePreWire(stale_admission.operation),
+    );
+    try std.testing.expect(std.meta.eql(
+        prepared.canonical,
+        (try slot.current.cleanup_registry.preparedRequestForReceipt(
+            reservation.cleanup,
+            identity,
+            request.transport_addr,
+            request.transport_incarnation,
+            request.receipt,
+        )).?,
+    ));
+
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const operation = admission.operation;
+
+    var occupied_phase: PreparedExecutionTxn = .{};
+    occupied_phase.phase = .settled;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        occupied_phase.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
+    );
+    var occupied_settlement: PreparedExecutionTxn = .{};
+    occupied_settlement.settlement = PreparedExecutionSettlement.reusable();
+    try std.testing.expectError(
+        error.InvalidOwner,
+        occupied_settlement.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
+    );
+    var raw_value: u16 = @intFromEnum(PreparedExecutionPhase.settled) + 1;
+    while (raw_value <= std.math.maxInt(u8)) : (raw_value += 1) {
+        var invalid_phase: PreparedExecutionTxn = .{};
+        @as(*u8, @ptrCast(&invalid_phase.phase)).* = @intCast(raw_value);
+        try std.testing.expectError(
+            error.InvalidOwner,
+            invalid_phase.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
+        );
+    }
+    raw_value = @intFromEnum(PreparedExecutionSettlementTag.fail_stop_required) + 1;
+    while (raw_value <= std.math.maxInt(u8)) : (raw_value += 1) {
+        var invalid_settlement: PreparedExecutionTxn = .{};
+        @as(*u8, @ptrCast(&invalid_settlement.settlement.tag)).* = @intCast(raw_value);
+        try std.testing.expectError(
+            error.InvalidOwner,
+            invalid_settlement.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
+        );
+    }
+    inline for (.{ PreparedExecutionSettlementTag.pending, .reusable }) |tag| {
+        var reason: u16 = 1;
+        while (reason <= std.math.maxInt(u8)) : (reason += 1) {
+            var invalid_reason: PreparedExecutionTxn = .{};
+            invalid_reason.settlement = .{ .tag = tag, .reason_raw = @intCast(reason) };
+            try std.testing.expectError(
+                error.InvalidOwner,
+                invalid_reason.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
+            );
+        }
+    }
+    inline for (.{
+        .{ PreparedExecutionSettlementTag.terminal, std.meta.fields(client_poison.ConnectionReason).len },
+        .{ PreparedExecutionSettlementTag.fail_stop_required, std.meta.fields(FailStopReason).len },
+    }) |case| {
+        var reason: u16 = case[1];
+        while (reason <= std.math.maxInt(u8)) : (reason += 1) {
+            var invalid_reason: PreparedExecutionTxn = .{};
+            invalid_reason.settlement = .{ .tag = case[0], .reason_raw = @intCast(reason) };
+            try std.testing.expectError(
+                error.InvalidOwner,
+                invalid_reason.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
+            );
+        }
+    }
+    var txn: PreparedExecutionTxn = .{};
+    try txn.initBeforeBeginExecute(operation, request, identity, prepared.canonical);
+    var copied = txn;
+    try std.testing.expectError(error.InvalidOwner, copied.revalidatePreWire(operation));
+    var foreign_operation = operation;
+    foreign_operation.operation_id +%= 1;
+    try std.testing.expectError(error.InvalidOwner, txn.revalidatePreWire(foreign_operation));
+    txn.commitBeginExecute(operation);
+    if (builtin.os.tag == .macos) {
+        const child = std.c.fork();
+        if (child < 0) return error.TestUnexpectedResult;
+        if (child == 0) {
+            _ = std.c.close(2);
+            var corrupt = txn;
+            corrupt.self_addr = 0;
+            corrupt.ensureSettledOrFailStop(operation);
+            std.c._exit(3);
+        }
+        var child_status: c_int = 0;
+        while (true) {
+            const waited = std.c.waitpid(child, &child_status, 0);
+            if (waited == child) break;
+            if (waited < 0 and std.posix.errno(waited) == .INTR) continue;
+            return error.TestUnexpectedResult;
+        }
+        const wait_status: u32 = @bitCast(child_status);
+        try std.testing.expect(std.c.W.IFSIGNALED(wait_status));
+    }
+    try std.testing.expectError(error.ProtocolError, copied.rollbackPreWire(operation));
+    try std.testing.expectEqual(
+        SettlementOutcome.reusable,
+        try txn.rollbackPreWire(operation),
+    );
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectError(error.ProtocolError, txn.rollbackPreWire(operation));
+    txn.ensureSettledOrFailStop(operation);
+
+    try transport_owner_seal.terminalize(transport_incarnation);
+    try slot.abortAttachmentBinding(&owner.binding, reservation);
+}
+
+test "B3-0.2 registered node operation registry bounds capacity and normalizes permanent identity exhaustion before publication" {
+    try ClientSlot.initializeProcessRuntime();
+    const saved_next = next_registered_node_operation_id;
+    defer next_registered_node_operation_id = saved_next;
+    const lookup: RegisteredNodeLookup = .{
+        .slot_addr = 1,
+        .slot_incarnation = 1,
+        .node = .{ .address = 1 },
+    };
+    var reservations: [max_registered_node_operations]RegisteredNodeOperationReservation = undefined;
+    var reserved_count: usize = 0;
+    defer while (reserved_count > 0) {
+        reserved_count -= 1;
+        abortRegisteredNodeOperationReservation(reservations[reserved_count]);
+    };
+    for (&reservations) |*reservation| {
+        reservation.* = try reserveRegisteredNodeOperation(lookup);
+        reserved_count += 1;
+    }
+    try std.testing.expectError(error.Busy, reserveRegisteredNodeOperation(lookup));
+    while (reserved_count > 0) {
+        reserved_count -= 1;
+        abortRegisteredNodeOperationReservation(reservations[reserved_count]);
+    }
+
+    next_registered_node_operation_id = std.math.maxInt(u64);
+    try std.testing.expectError(error.Busy, reserveRegisteredNodeOperation(lookup));
+    for (registered_node_operations) |entry|
+        try std.testing.expectEqual(RegisteredNodeOperationEntry.State.empty, entry.state);
+}
+
+test "B3-0.2 fork child rejects an inherited operation receipt before the inherited mutex" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    const inherited: RegisteredNodeOperation = .{
+        .node = @ptrFromInt(@alignOf(ClientNode)),
+        .registry_index = 0,
+        .operation_id = 1,
+        .pid = currentPid(),
+    };
+    const Case = enum { begin, resolve, end };
+    inline for (std.enums.values(Case)) |case| {
+        while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+        const child = std.c.fork();
+        if (child < 0) {
+            registered_node_operation_mutex.unlock();
+            return error.TestUnexpectedResult;
+        }
+        if (child == 0) switch (case) {
+            .begin => {
+                _ = beginRegisteredNodeOperation(.{
+                    .slot_addr = 1,
+                    .slot_incarnation = 1,
+                    .node = .{ .address = @alignOf(ClientNode) },
+                }) catch |err| std.c._exit(if (err == error.InvalidOwner) 0 else 2);
+                std.c._exit(3);
+            },
+            .resolve => std.c._exit(if (resolveRegisteredNodeOperation(inherited) == null) 0 else 2),
+            .end => {
+                _ = std.c.close(2);
+                endRegisteredNodeOperation(inherited);
+                std.c._exit(3);
+            },
+        };
+        registered_node_operation_mutex.unlock();
+
+        var status: c_int = 0;
+        var attempts: usize = 0;
+        var reaped = false;
+        while (attempts < 2000) : (attempts += 1) {
+            const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
+            if (waited == child) {
+                reaped = true;
+                break;
+            }
+            if (waited < 0 and std.posix.errno(waited) != .INTR)
+                return error.TestUnexpectedResult;
+            var delay_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+            _ = std.c.poll(@ptrCast(&delay_fd), 0, 1);
+        }
+        if (!reaped) {
+            _ = std.c.kill(child, std.c.SIG.KILL);
+            _ = std.c.waitpid(child, &status, 0);
+            return error.TestUnexpectedResult;
+        }
+        const wait_status: u32 = @bitCast(status);
+        switch (case) {
+            .begin, .resolve => {
+                try std.testing.expect(std.c.W.IFEXITED(wait_status));
+                try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(wait_status));
+            },
+            .end => try std.testing.expect(std.c.W.IFSIGNALED(wait_status)),
+        }
+    }
+}
+
+test "B3-0.2 registered operations contend across slots while sibling teardown converges" {
+    try ClientSlot.initializeProcessRuntime();
+    var failed: std.atomic.Value(bool) = .init(false);
+    var live_receipt_held: std.atomic.Value(bool) = .init(false);
+    var sibling_teardown_done: std.atomic.Value(bool) = .init(false);
+    var teardown_observed_live_receipt: std.atomic.Value(bool) = .init(false);
+    const Worker = struct {
+        fn waitFor(
+            condition: *std.atomic.Value(bool),
+            failure: *std.atomic.Value(bool),
+        ) bool {
+            var attempts: usize = 0;
+            while (!condition.load(.acquire) and !failure.load(.acquire) and attempts < 2000) : (attempts += 1) {
+                var delay_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+                _ = std.c.poll(@ptrCast(&delay_fd), 0, 1);
+            }
+            if (!condition.load(.acquire)) {
+                failure.store(true, .release);
+                return false;
+            }
+            return true;
+        }
+
+        fn run(
+            index: usize,
+            failure: *std.atomic.Value(bool),
+            live_receipt: *std.atomic.Value(bool),
+            teardown_done: *std.atomic.Value(bool),
+            teardown_observed_live: *std.atomic.Value(bool),
+        ) void {
+            var source = fixtureClient(std.testing.allocator, 0x2C3C00 + index);
+            var slot: ClientSlot = undefined;
+            ClientSlot.initInPlace(
+                &slot,
+                std.testing.allocator,
+                &source,
+                0x2C3C00 + index,
+            ) catch {
+                failure.store(true, .release);
+                return;
+            };
+            var slot_live = true;
+            defer if (slot_live) slot.deinit();
+
+            if (index == 0) {
+                const operation = slot.beginRegisteredClientOperation() catch {
+                    failure.store(true, .release);
+                    return;
+                };
+                const receipt: RegisteredNodeOperation = .{
+                    .node = operation.node,
+                    .registry_index = operation.registry_index,
+                    .operation_id = operation.operation_id,
+                    .pid = operation.pid,
+                };
+                live_receipt.store(true, .release);
+                if (!waitFor(teardown_done, failure)) {
+                    slot.endRegisteredClientOperation(operation);
+                    live_receipt.store(false, .release);
+                    return;
+                }
+                if (resolveRegisteredNodeOperation(receipt) != operation.node)
+                    failure.store(true, .release);
+                slot.endRegisteredClientOperation(operation);
+                live_receipt.store(false, .release);
+                return;
+            }
+
+            if (index == 1) {
+                if (!waitFor(live_receipt, failure)) return;
+                slot.deinit();
+                slot_live = false;
+                teardown_observed_live.store(live_receipt.load(.acquire), .release);
+                teardown_done.store(true, .release);
+                return;
+            }
+
+            for (0..64) |_| {
+                const operation = slot.beginRegisteredClientOperation() catch {
+                    failure.store(true, .release);
+                    return;
+                };
+                const receipt: RegisteredNodeOperation = .{
+                    .node = operation.node,
+                    .registry_index = operation.registry_index,
+                    .operation_id = operation.operation_id,
+                    .pid = operation.pid,
+                };
+                if (resolveRegisteredNodeOperation(receipt) != operation.node) {
+                    failure.store(true, .release);
+                    slot.endRegisteredClientOperation(operation);
+                    return;
+                }
+                slot.endRegisteredClientOperation(operation);
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{
+            index,
+            &failed,
+            &live_receipt_held,
+            &sibling_teardown_done,
+            &teardown_observed_live_receipt,
+        });
+    for (threads) |thread| thread.join();
+    try std.testing.expect(!failed.load(.acquire));
+    try std.testing.expect(sibling_teardown_done.load(.acquire));
+    try std.testing.expect(teardown_observed_live_receipt.load(.acquire));
+    try std.testing.expect(!live_receipt_held.load(.acquire));
+}
+
+test "B3-0.2 callback cannot redirect prepared execution cleanup through a spliced descriptor" {
+    const MutatingAllocator = struct {
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+
+        parent: std.mem.Allocator,
+        txn_addr: usize = 0,
+        target_addr: usize = 0,
+        target_len: usize = 0,
+        exact_free_count: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+        }
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        }
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (@intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len) {
+                self.exact_free_count += 1;
+                const txn: *PreparedExecutionTxn = @ptrFromInt(self.txn_addr);
+                txn.canonical_prepared.descriptor.storage_addr = 0x1000;
+                txn.prepared_identity.descriptor.storage_addr = 0x1000;
+            }
+            self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+        }
+    };
+
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var mutating_allocator = MutatingAllocator{ .parent = allocator };
+    var source = fixtureClient(mutating_allocator.allocator(), 0x2C3B28);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B28);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0x2C3B29,
+    );
+    const transport_incarnation: u64 = 0x2C3B2A;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const identity = reservation.identity;
+    const prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 0,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.attachController(),
+    });
+    const request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = prepared.receipt,
+    };
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    var txn: PreparedExecutionTxn = .{};
+    try txn.initBeforeBeginExecute(admission.operation, request, identity, prepared.canonical);
+    txn.commitBeginExecute(admission.operation);
+    mutating_allocator.txn_addr = @intFromPtr(&txn);
+    mutating_allocator.target_addr = prepared.canonical.descriptor.frame_addr;
+    mutating_allocator.target_len = prepared.canonical.descriptor.frame_len;
+
+    try std.testing.expectError(error.ProtocolError, txn.rollbackPreWire(admission.operation));
+    try std.testing.expectEqual(@as(usize, 1), mutating_allocator.exact_free_count);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            identity,
+        ),
+    );
+    try std.testing.expectEqual(PreparedExecutionPhase.settled, txn.phase);
+    try std.testing.expectEqual(
+        FailStopReason.authority_drift,
+        txn.settlement.failStopReason() orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.local_invariant_violation,
+        slot.current.client.firstPoisonReason().?,
+    );
+
+    try transport_owner_seal.terminalize(transport_incarnation);
+    try slot.abortAttachmentBinding(&owner.binding, reservation);
+}
+
+test "B3-0.2 terminal settlement preserves the canonical first poison" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2C3B30);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B30);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0x2C3B31,
+    );
+    const transport_incarnation: u64 = 0x2C3B32;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const identity = reservation.identity;
+    const prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 0,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.attachController(),
+    });
+    const request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = prepared.receipt,
+    };
+
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const operation = admission.operation;
+    var txn: PreparedExecutionTxn = .{};
+    try txn.initBeforeBeginExecute(operation, request, identity, prepared.canonical);
+    txn.commitBeginExecute(operation);
+    slot.current.client.poison(.outbound_write_ambiguous);
+    try std.testing.expectEqual(
+        client_mod.Client.CanonicalPreparedAbortOutcome.reusable,
+        try slot.current.client.abortPreparedBlockingRpcStorageCanonical(
+            &owner.storage,
+            identityFromCanonical(prepared.canonical),
+        ),
+    );
+    const outcome = try txn.settlePostExecuteTerminal(
+        operation,
+        .transport_read_failure,
+    );
+    switch (outcome) {
+        .terminal => |reason| try std.testing.expectEqual(
+            client_poison.ConnectionReason.outbound_write_ambiguous,
+            reason,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    txn.finishOrFailStop(operation, outcome);
+    try std.testing.expectError(error.ProtocolError, txn.settlePostExecuteReusable(operation));
+    try std.testing.expectError(
+        error.InvalidState,
+        slot.current.cleanup_registry.publishPreparedRequest(
+            reservation.cleanup,
+            identity,
+            prepared.canonical,
+        ),
+    );
+
+    try transport_owner_seal.terminalize(transport_incarnation);
+    try slot.abortAttachmentBinding(&owner.binding, reservation);
+}
+
+test "B3-0.2 every explicit settlement method closes one exact lifecycle" {
+    const Case = enum { unbegun_guard, post_execute_reusable, issuer_terminal };
+    inline for (std.enums.values(Case)) |case| {
+        try ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        const offset: u128 = @intFromEnum(case);
+        var source = fixtureClient(allocator, 0x2C3B40 + offset);
+        var slot: ClientSlot = undefined;
+        try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B40 + offset);
+        defer slot.deinit();
+
+        const Owner = struct {
+            transport_marker: u8 = 0,
+            storage: client_mod.PreparedBlockingRpcStorage = .{},
+            binding: contract.PreparedAttachmentBinding = .{},
+            lease: lease_mod.ConnectionLease = .{},
+        };
+        var owner: Owner = .{};
+        const reservation = try slot.reserveAttachmentBindingForTest(
+            &owner.binding,
+            &owner.lease,
+            0x2C3B50 + offset,
+        );
+        const transport_incarnation: u64 = 0x2C3B60 + @as(u64, @intCast(offset));
+        const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+        try contract.TransportOwnerSeal.initInPlace(
+            transport_owner_seal,
+            transport_incarnation,
+            @intFromPtr(&owner),
+            @sizeOf(Owner),
+            @intFromPtr(&owner.transport_marker),
+            @intFromPtr(&owner.storage),
+        );
+        const identity = reservation.identity;
+        const prepared = try prepareGenerationRequest(.{
+            .slot_addr = @intFromPtr(&slot),
+            .slot_incarnation = identity.slot_incarnation,
+            .node_incarnation = identity.node_incarnation,
+            .host_id = identity.host_id,
+            .pid = identity.pid,
+            .process_nonce = identity.process_nonce,
+            .transport_addr = @intFromPtr(&owner.transport_marker),
+            .owner_addr = @intFromPtr(&owner),
+            .owner_size = @sizeOf(Owner),
+            .transport_incarnation = transport_incarnation,
+            .owner_seal_addr = @intFromPtr(transport_owner_seal),
+            .prepared_storage_addr = @intFromPtr(&owner.storage),
+            .bound_stream_id = 0,
+            .reservation = reservation,
+            .request = contract.RuntimeRequest.attachController(),
+        });
+        const request: GenerationRequestAbort = .{
+            .slot_addr = @intFromPtr(&slot),
+            .slot_incarnation = identity.slot_incarnation,
+            .node_incarnation = identity.node_incarnation,
+            .host_id = identity.host_id,
+            .pid = identity.pid,
+            .process_nonce = identity.process_nonce,
+            .transport_addr = @intFromPtr(&owner.transport_marker),
+            .transport_incarnation = transport_incarnation,
+            .owner_seal_addr = @intFromPtr(transport_owner_seal),
+            .prepared_storage_addr = @intFromPtr(&owner.storage),
+            .reservation = reservation,
+            .receipt = prepared.receipt,
+        };
+        const admission = try beginGenerationRequestOwner(request, false);
+        defer endRegisteredNodeOperation(admission.operation);
+        const operation = admission.operation;
+        var txn: PreparedExecutionTxn = .{};
+        try txn.initBeforeBeginExecute(operation, request, identity, prepared.canonical);
+
+        switch (case) {
+            .unbegun_guard => {
+                txn.ensureSettledOrFailStop(operation);
+                txn.finishOrFailStop(operation, .reusable);
+                try std.testing.expect((try slot.current.cleanup_registry.preparedRequestForReceipt(
+                    reservation.cleanup,
+                    identity,
+                    request.transport_addr,
+                    request.transport_incarnation,
+                    request.receipt,
+                )) != null);
+                try abortGenerationRequest(request);
+            },
+            .post_execute_reusable => {
+                txn.commitBeginExecute(operation);
+                try std.testing.expectEqual(
+                    client_mod.Client.CanonicalPreparedAbortOutcome.reusable,
+                    try slot.current.client.abortPreparedBlockingRpcStorageCanonical(
+                        &owner.storage,
+                        identityFromCanonical(prepared.canonical),
+                    ),
+                );
+                const outcome = try txn.settlePostExecuteReusable(operation);
+                try std.testing.expect(outcome == .reusable);
+                txn.finishOrFailStop(operation, outcome);
+                try slot.current.cleanup_registry.publishPreparedRequest(
+                    reservation.cleanup,
+                    identity,
+                    prepared.canonical,
+                );
+                try slot.current.cleanup_registry.settlePreparedRequest(
+                    reservation.cleanup,
+                    identity,
+                    prepared.canonical,
+                    false,
+                );
+            },
+            .issuer_terminal => {
+                txn.commitBeginExecute(operation);
+                const outcome = try txn.retireIssuerExhausted(operation);
+                switch (outcome) {
+                    .terminal => |reason| try std.testing.expectEqual(
+                        client_poison.ConnectionReason.local_invariant_violation,
+                        reason,
+                    ),
+                    else => return error.TestUnexpectedResult,
+                }
+                txn.finishOrFailStop(operation, outcome);
+                try std.testing.expectError(
+                    error.InvalidState,
+                    slot.current.cleanup_registry.publishPreparedRequest(
+                        reservation.cleanup,
+                        identity,
+                        prepared.canonical,
+                    ),
+                );
+            },
+        }
+
+        try transport_owner_seal.terminalize(transport_incarnation);
+        try slot.abortAttachmentBinding(&owner.binding, reservation);
     }
 }
 

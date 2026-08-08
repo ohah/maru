@@ -495,7 +495,7 @@ Claude의 nested subagent transcript는 discovery 단계에서 재귀하지 않�
 
 ## 4. 스캔·성능·수명
 
-`SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot`만 건넨다. **이전 완료본이 있으면 새 완료본 하나로만 교체**하며, 첫 진입처럼 이전 완료본이 없을 때만 부분 snapshot을 점진 publish한다(§4.1). main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
+`SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot`만 건넨다. **보여 줄 목록이 있으면 새 완료본 하나로만 교체**하며, 첫 진입처럼 보여 줄 목록이 없을 때만 부분 snapshot을 점진 publish한다(§4.1). main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
 
 `SessionDock`의 비례 system-UI text는 이와 **다른** 규율을 따른다. provider JSONL은 worker의 일이지만
 텍스트 셰이핑은 아니다. render tick은 rich-text artifact cache가 miss하면 **그 자리에서 CoreText로 셰이핑해
@@ -586,21 +586,25 @@ backend, 351개/8.1 GB, `ReleaseSafe`·제품 allocator):
 (캐시 히트가 budget을 아껴 주므로 결과가 캐시 상태에 좌우됐다). 비용의 97.5%는 JSON parse이며 I/O는
 1.2초다.
 
-그래서 **이전 snapshot이 없을 때만** 완료를 기다리지 않고 부분 snapshot을 주기적으로 publish한다.
+그래서 **보여 줄 목록이 하나도 없을 때만** 완료를 기다리지 않고 부분 snapshot을 주기적으로 publish한다.
 
-- **이전 완료 snapshot이 있으면**: 지금과 같다. 완료본 하나로 원자 교체하고 scroll/selection anchor를
+- **보여 줄 목록이 있으면**: 지금과 같다. 완료본 하나로 원자 교체하고 scroll/selection anchor를
   보존한다. refresh가 목록을 흔들지 않는다는 계약은 그대로다.
 - **없으면**(첫 진입): 정렬 순서대로 분석하며 부분 snapshot을 발행해 목록이 위에서부터 찬다.
   구현 후 실측: 첫 발행 **1.3초**, 20개 **4.1초**, 전체 24.0초(총 61회 발행). 첫 카드가 즉시 뜨지 않는
   것은 이 머신의 최신 파일이 **439 MB**여서다 — budget이 있던 때는 그 파일을 아예 건너뛰어 작은 것만
   빨리 쌓였다(그 대신 목록이 잘렸다). 잘린 목록을 빨리 보여 주는 것보다 완전한 목록을 정직하게
   채우는 쪽을 택한다.
-- 진행 요청 여부는 **"완료 스냅샷을 한 번이라도 받았는가"**로 판정한다. 목록에 항목이 있는지로
-  판정하면 안 된다 — 부분 진행도 목록을 채우므로, 부분만 받은 채 스캔이 취소되면 그 불완전한 목록이
-  "이전 목록 있음"으로 오인돼 다음 진입이 점진 경로를 타지 않는다.
+- 진행 요청 여부는 **"지금 보여 줄 목록이 있는가"**로 판정한다. 점진 publish의 목적이 빈 화면을 피하는
+  것이기 때문이다. 부분 snapshot도 목록을 통째로 교체하므로, 목록이 이미 있는데 점진 경로를 타면 첫
+  발행이 그 목록을 **더 짧은 목록으로 덮어** 줄었다가 다시 차오르는 것처럼 보인다. 부분만 받고 취소된
+  뒤 재진입하는 경우가 정확히 그 상황이며, 이럴 때는 완성본 하나로 교체하는 편이 조용하다.
 - 부분 snapshot은 **완료로 취급하지 않는다.** TTL 갱신에 쓰지 않으며(쓰면 재스캔이 막혀 목록이
-  불완전한 채 고정된다), "이전 snapshot이 있다"는 판정에도 쓰지 않는다(취소로 남은 부분 목록을
-  완성본으로 오인하면 다음 진입이 점진 경로를 타지 않는다).
+  불완전한 채 고정된다) spinner도 끄지 않는다. "완주했는가"는 완료 snapshot에서만 세우는 별개의 신호다.
+- 미수령 부분 snapshot은 **쌓지 않고 최신 것으로 대체한다.** 부분 진행은 최신 하나만 의미가 있고,
+  쌓이면 main actor가 낡은 목록마다 filter/projection/anchor 복원을 다시 한다. 캐시가 따뜻한 채 첫
+  진입하는 경로(도크를 열자마자 닫고 다시 열면 그렇게 된다)에서는 발행 조건이 수 ms 안에 수십 번
+  걸리므로 가정이 아니라 실제로 도달한다.
 - 발행 간격은 초반을 촘촘히 하고 이후 넓힌다. main actor가 발행마다 filter/projection/anchor 복원을
   다시 하므로 너무 잦으면 그 자체가 비용이다.
 

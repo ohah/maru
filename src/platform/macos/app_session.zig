@@ -716,6 +716,16 @@ test "archive scope admits only canonical cwd beneath the exact root boundary" {
     try std.testing.expect(!agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
 }
 
+// 점진 발행은 빈 화면을 피하려는 것이므로, 보여 줄 목록이 이미 있으면 켜지 않는다. 특히 이전 스캔이
+// 부분만 받고 취소된 뒤 재진입하는 경우 — 여기서 점진 경로를 타면 화면의 목록이 첫 부분 발행(12개)으로
+// 덮여 **줄었다가 다시 차오른다**.
+test "점진 발행은 보여 줄 목록이 하나도 없을 때만 요청한다" {
+    try std.testing.expect(AppSession.shouldRequestArchiveProgress(0));
+    try std.testing.expect(!AppSession.shouldRequestArchiveProgress(1));
+    // 취소로 남은 부분 목록도 "보여 줄 목록"이다.
+    try std.testing.expect(!AppSession.shouldRequestArchiveProgress(12));
+}
+
 test "archive snapshot replacement preserves selection only for the exact source identity" {
     const base = maru.session.agent_session_archive.Parsed{
         .provider = .codex,
@@ -4140,6 +4150,14 @@ pub const AppSession = struct {
         return dock_visible and view == .agent_sessions;
     }
 
+    /// 점진 발행을 요청할지. 순수 판정이라 부작용 없이 테스트로 고정한다.
+    ///
+    /// 기준은 "완주한 적이 있는가"가 아니라 **"지금 보여 줄 목록이 있는가"**다. 부분 진행 결과도 목록을
+    /// 통째로 교체하므로, 이미 목록이 있는데 점진 경로를 타면 첫 발행이 그 목록을 더 짧은 목록으로 덮는다.
+    fn shouldRequestArchiveProgress(visible_record_count: usize) bool {
+        return visible_record_count == 0;
+    }
+
     /// 도크에서 **이 뷰를 보여 준다**. 도크를 여는 모든 경로가 여기를 지난다.
     ///
     /// `setDockView`(전환)와 `onDockViewPresented`(진입)를 나누는 이유: 전환 함수는 "같은 뷰면 no-op"이
@@ -4215,15 +4233,13 @@ pub const AppSession = struct {
         const home = std.mem.span(home_z);
         if (home.len == 0) return;
         const owned = self.allocator.dupe(u8, home) catch return;
-        // 보여 줄 이전 **완료** 목록이 없을 때만 부분 진행을 요청한다 — 첫 진입에서 목록이 위에서부터
-        // 차오르게 한다(docs/agent-session-list.md §4.1). 이미 완료 목록이 있으면 완성본 하나로 교체해야
-        // refresh가 목록을 흔들지 않는다.
+        // 점진 발행은 **빈 화면을 피하기 위한 것**이다(docs/agent-session-list.md §4.1). 그러므로 판정
+        // 기준은 "완주한 적이 있는가"가 아니라 "지금 보여 줄 목록이 있는가"다.
         //
-        // 판정에 `records.len`을 쓰면 안 된다. **부분 진행도 records를 채우기 때문**이다 — 부분만 받은
-        // 채 스캔이 취소되면(도크를 닫으면) 그 불완전한 목록이 "이전 목록 있음"으로 오인돼 다음 진입이
-        // 점진 경로를 타지 않고, 완료까지 그 상태로 머문다. `completed_ns`는 완료 스냅샷에서만 세워지므로
-        // "한 번이라도 완주했는가"의 정확한 신호다.
-        const wants_progress = self.agent_session_archive_completed_ns == 0;
+        // 부분 진행 결과도 목록을 통째로 교체하므로, 화면에 이미 목록이 있는데 점진 경로를 타면 첫 발행
+        // (12개)이 그 목록을 덮어 **줄었다가 다시 차오르는** 것처럼 보인다. 이전 스캔이 부분만 받고
+        // 취소된 뒤 재진입하는 경우가 정확히 그 상황이다. 이럴 때는 완성본 하나로 교체하는 편이 조용하다.
+        const wants_progress = shouldRequestArchiveProgress(self.agent_session_archive_records.items.len);
         if (!self.agent_session_archive_backend.submit(owned, wants_progress)) {
             self.allocator.free(owned);
             return;

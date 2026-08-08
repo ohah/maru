@@ -12,8 +12,14 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     defer allocator.free(slot);
     const transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport);
+    const owner = try readSource(allocator, "src/platform/macos/session_host/rpc_executed_response.zig");
+    defer allocator.free(owner);
+    const ledger = try readSource(allocator, "src/platform/macos/session_host/response_payload_allocation.zig");
+    defer allocator.free(ledger);
     const leaf_product = productPrefix(leaf);
     const registry_product = productPrefix(registry);
+    const owner_product = productPrefix(owner);
+    const ledger_product = productPrefix(ledger);
 
     try std.testing.expectEqual(@as(usize, 1), count(leaf_product, "pub const PreparedRpcTransitionPermit = struct"));
     inline for (.{
@@ -64,6 +70,37 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     inline for (.{ "client.zig", "client_slot.zig", "socket", "Allocator", "RemoteRuntime", "reconnect" }) |forbidden| {
         try std.testing.expectEqual(@as(usize, 0), countCodeTokens(leaf_product, forbidden));
     }
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(ledger_product, "@import(\"rpc_executed_response.zig\")"),
+    );
+    inline for (.{
+        "response_payload_allocation.zig",
+        "rpc_response_authority.zig",
+        "attachment_cleanup_registry.zig",
+        "client.zig",
+        "client_slot.zig",
+        "socket",
+        "RemoteRuntime",
+    }) |forbidden| try std.testing.expectEqual(
+        @as(usize, 0),
+        countCodeTokens(owner_product, forbidden),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(owner_product, "pub fn withBorrowedRpcResponseBytesForTest("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(owner_product, "@import(\"builtin\").is_test"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(ledger_product, "pub fn transferPromotedRpcResponse("),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(slot, "withBorrowedRpcResponseBytesForTest"));
+    try std.testing.expectEqual(@as(usize, 0), count(ledger_product, "withBorrowedRpcResponseBytesForTest"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

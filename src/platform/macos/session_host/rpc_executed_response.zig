@@ -1,0 +1,645 @@
+//! Final-address byte owner for one correlated blocking RPC response.
+//!
+//! Protocol lifecycle remains in `rpc_response_authority.zig`. This leaf owns only immutable
+//! response identity, allocation provenance, lexical borrow evidence, and exact-once byte
+//! settlement. It deliberately has no dependency on the registry, ledger, Client, or decoder.
+
+const std = @import("std");
+const contract = @import("generation_attachment_contract.zig");
+const owner_seal = @import("external_owner_seal.zig");
+
+pub const max_owned_response_bytes: usize = 256 * 1024;
+
+pub const ByteSettlement = enum(u8) {
+    pristine,
+    live,
+    free_committed,
+    terminal_clean,
+    terminal_no_free,
+};
+
+pub const AllocationProvenance = struct {
+    ledger_addr: usize,
+    guard_addr: usize,
+    node_addr: usize,
+    operation_incarnation: u64,
+    index: u16,
+    generation: u64,
+
+    pub fn valid(self: @This()) bool {
+        return self.ledger_addr != 0 and self.guard_addr != 0 and self.node_addr != 0 and
+            self.operation_incarnation != 0 and self.generation != 0;
+    }
+};
+
+/// Scalar copy of the RPC authority canonical. It is evidence only: no authority pointer is
+/// dereferenced by this module.
+pub const Identity = struct {
+    registry_incarnation: u64,
+    binding: contract.BindingIdentity,
+    transport_addr: usize,
+    transport_incarnation: u64,
+    family: contract.RequestFamily,
+    tag: contract.RuntimeRequestTag,
+    request_id: u64,
+    request_digest: u64,
+    response_epoch: u64,
+    destination_addr: usize,
+
+    pub fn valid(self: @This()) bool {
+        return self.registry_incarnation != 0 and self.binding.valid() and
+            self.transport_addr != 0 and self.transport_incarnation != 0 and
+            contract.requestFamilyRawValid(&self.family) and
+            contract.runtimeRequestTagRawValid(&self.tag) and
+            contract.requestFamilyAllowed(self.tag, self.family) and self.request_id != 0 and
+            self.request_digest != 0 and self.response_epoch != 0 and self.destination_addr != 0;
+    }
+};
+
+pub const RpcExecutedResponse = struct {
+    self_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    identity: Identity = std.mem.zeroes(Identity),
+    provenance: AllocationProvenance = std.mem.zeroes(AllocationProvenance),
+    allocator_present: u8 = 0,
+    allocator_ptr: usize = 0,
+    allocator_vtable: usize = 0,
+    payload_addr: usize = 0,
+    payload_len: usize = 0,
+    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    settlement: ByteSettlement = .pristine,
+    terminal_evidence: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    pub const Error = error{
+        DestinationOccupied,
+        InvalidIdentity,
+        InvalidPayload,
+        InvalidOwner,
+        InvalidReceipt,
+        InvalidTransaction,
+        AliasedStorage,
+    };
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&RpcExecutedResponse{}));
+    }
+
+    pub fn initLiveInPlace(
+        out: *RpcExecutedResponse,
+        identity: Identity,
+        allocator: std.mem.Allocator,
+        payload: []u8,
+        provenance: AllocationProvenance,
+    ) Error!void {
+        if (!out.pristineExact()) return error.DestinationOccupied;
+        if (!identity.valid() or identity.destination_addr != @intFromPtr(out) or
+            identity.response_epoch == std.math.maxInt(u64))
+            return error.InvalidIdentity;
+        if (!provenance.valid() or payload.len == 0 or payload.len > max_owned_response_bytes)
+            return error.InvalidPayload;
+        const payload_range = byteRange(@intFromPtr(payload.ptr), payload.len) orelse
+            return error.InvalidPayload;
+        const owner_range = byteRange(@intFromPtr(out), @sizeOf(RpcExecutedResponse)).?;
+        if (rangesOverlap(payload_range, owner_range)) return error.AliasedStorage;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .owner_incarnation = identity.response_epoch,
+            .identity = identity,
+            .provenance = provenance,
+            .allocator_present = 1,
+            .allocator_ptr = @intFromPtr(allocator.ptr),
+            .allocator_vtable = @intFromPtr(allocator.vtable),
+            .payload_addr = @intFromPtr(payload.ptr),
+            .payload_len = payload.len,
+            .payload_digest = digestBytes("maru.rpc-response-payload.v1", payload),
+            .settlement = .live,
+        };
+        out.seal = responseSeal(out);
+    }
+
+    pub fn prepareBorrow(
+        self: *const RpcExecutedResponse,
+        identity: Identity,
+        out: *RpcResponseBorrow,
+    ) Error!void {
+        if (!out.pristineExact()) return error.InvalidReceipt;
+        if (!self.liveExact(identity)) return error.InvalidOwner;
+        if (rangesOverlap(byteRange(self.payload_addr, self.payload_len).?, byteRange(@intFromPtr(out), @sizeOf(RpcResponseBorrow)).?))
+            return error.AliasedStorage;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .response_addr = @intFromPtr(self),
+            .registry_incarnation = identity.registry_incarnation,
+            .binding = identity.binding,
+            .transport_addr = identity.transport_addr,
+            .transport_incarnation = identity.transport_incarnation,
+            .request_id = identity.request_id,
+            .request_digest = identity.request_digest,
+            .response_epoch = identity.response_epoch,
+            .payload_digest = self.payload_digest,
+            .live = 1,
+        };
+        out.seal = borrowSeal(out);
+    }
+
+    pub fn prepareFinish(
+        self: *const RpcExecutedResponse,
+        identity: Identity,
+        borrow: *const RpcResponseBorrow,
+        out: *RpcResponseFinishTxn,
+    ) Error!void {
+        if (!out.pristineExact()) return error.InvalidTransaction;
+        if (!self.liveExact(identity) or !borrow.exactFor(self, identity))
+            return error.InvalidReceipt;
+        const payload_range = byteRange(self.payload_addr, self.payload_len).?;
+        inline for (.{
+            byteRange(@intFromPtr(borrow), @sizeOf(RpcResponseBorrow)).?,
+            byteRange(@intFromPtr(out), @sizeOf(RpcResponseFinishTxn)).?,
+        }) |range| if (rangesOverlap(payload_range, range)) return error.AliasedStorage;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .response_addr = @intFromPtr(self),
+            .response_epoch = identity.response_epoch,
+            .allocator_present = 1,
+            .allocator_ptr = self.allocator_ptr,
+            .allocator_vtable = self.allocator_vtable,
+            .payload_addr = self.payload_addr,
+            .payload_len = self.payload_len,
+            .payload_digest = self.payload_digest,
+            .stage = .prepared,
+        };
+        out.seal = finishSeal(out);
+    }
+
+    /// Moves the only cleanup capability into the final-address finish transaction. No callback
+    /// occurs here; callers may publish external free evidence before invoking `freeCaptured`.
+    pub fn commitFreeNoFail(
+        self: *RpcExecutedResponse,
+        identity: Identity,
+        borrow: *RpcResponseBorrow,
+        txn: *RpcResponseFinishTxn,
+    ) void {
+        if (!self.liveExact(identity) or !borrow.exactFor(self, identity) or
+            !txn.preparedExactFor(self, identity))
+            @panic("RPC response free commit authority mismatch");
+        self.allocator_present = 0;
+        self.allocator_ptr = 0;
+        self.allocator_vtable = 0;
+        self.payload_addr = 0;
+        self.payload_len = 0;
+        self.provenance = std.mem.zeroes(AllocationProvenance);
+        self.settlement = .free_committed;
+        self.seal = responseSeal(self);
+        borrow.live = 0;
+        borrow.seal = borrowSeal(borrow);
+        txn.stage = .free_committed;
+        txn.seal = finishSeal(txn);
+    }
+
+    pub fn finishCleanNoFail(self: *RpcExecutedResponse, txn: *RpcResponseFinishTxn) void {
+        if (!self.freeCommittedExact(txn.response_epoch) or !txn.freedOnceExactFor(self))
+            @panic("RPC response clean finish authority mismatch");
+        self.terminal_evidence = txn.terminal_evidence;
+        self.settlement = .terminal_clean;
+        self.seal = responseSeal(self);
+        txn.stage = .consumed;
+        txn.seal = finishSeal(txn);
+    }
+
+    pub fn terminalNoFreeInPlace(
+        out: *RpcExecutedResponse,
+        identity: Identity,
+        evidence: owner_seal.Digest,
+    ) Error!void {
+        if (!out.pristineExact()) return error.DestinationOccupied;
+        if (!identity.valid() or identity.destination_addr != @intFromPtr(out) or
+            std.mem.allEqual(u8, &evidence, 0))
+            return error.InvalidIdentity;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .owner_incarnation = identity.response_epoch,
+            .identity = identity,
+            .settlement = .terminal_no_free,
+            .terminal_evidence = evidence,
+        };
+        out.seal = responseSeal(out);
+    }
+
+    pub fn terminalExact(self: *const @This()) bool {
+        return self.finalAddressExact() and
+            (self.settlement == .terminal_clean or self.settlement == .terminal_no_free) and
+            self.allocator_present == 0 and self.allocator_ptr == 0 and
+            self.allocator_vtable == 0 and self.payload_addr == 0 and self.payload_len == 0 and
+            !std.mem.allEqual(u8, &self.terminal_evidence, 0) and
+            std.mem.eql(u8, &self.seal, &responseSeal(self));
+    }
+
+    fn finalAddressExact(self: *const @This()) bool {
+        return self.self_addr == @intFromPtr(self) and self.owner_incarnation != 0 and
+            self.owner_incarnation == self.identity.response_epoch and self.identity.valid();
+    }
+
+    fn liveExact(self: *const @This(), identity: Identity) bool {
+        if (!self.finalAddressExact() or !std.meta.eql(self.identity, identity) or
+            self.settlement != .live or self.allocator_present != 1 or
+            self.allocator_ptr == 0 or self.allocator_vtable == 0 or self.payload_addr == 0 or
+            self.payload_len == 0 or self.payload_len > max_owned_response_bytes or
+            !self.provenance.valid() or std.mem.allEqual(u8, &self.payload_digest, 0) or
+            !std.mem.allEqual(u8, &self.terminal_evidence, 0) or
+            !std.mem.eql(u8, &self.seal, &responseSeal(self))) return false;
+        const payload = payloadSlice(self.payload_addr, self.payload_len) orelse return false;
+        return std.mem.eql(u8, &self.payload_digest, &digestBytes("maru.rpc-response-payload.v1", payload));
+    }
+
+    fn freeCommittedExact(self: *const @This(), epoch: u64) bool {
+        return self.finalAddressExact() and self.owner_incarnation == epoch and
+            self.settlement == .free_committed and self.allocator_present == 0 and
+            self.allocator_ptr == 0 and self.allocator_vtable == 0 and
+            self.payload_addr == 0 and self.payload_len == 0 and
+            !std.mem.allEqual(u8, &self.payload_digest, 0) and
+            std.mem.eql(u8, &self.seal, &responseSeal(self));
+    }
+};
+
+pub const RpcResponseBorrow = struct {
+    self_addr: usize = 0,
+    response_addr: usize = 0,
+    registry_incarnation: u64 = 0,
+    binding: contract.BindingIdentity = std.mem.zeroes(contract.BindingIdentity),
+    transport_addr: usize = 0,
+    transport_incarnation: u64 = 0,
+    request_id: u64 = 0,
+    request_digest: u64 = 0,
+    response_epoch: u64 = 0,
+    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    live: u8 = 0,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&RpcResponseBorrow{}));
+    }
+
+    fn exactFor(self: *const @This(), response: *const RpcExecutedResponse, identity: Identity) bool {
+        return self.self_addr == @intFromPtr(self) and self.response_addr == @intFromPtr(response) and
+            self.registry_incarnation == identity.registry_incarnation and
+            std.meta.eql(self.binding, identity.binding) and self.transport_addr == identity.transport_addr and
+            self.transport_incarnation == identity.transport_incarnation and
+            self.request_id == identity.request_id and self.request_digest == identity.request_digest and
+            self.response_epoch == identity.response_epoch and self.live == 1 and
+            std.mem.eql(u8, &self.payload_digest, &response.payload_digest) and
+            std.mem.eql(u8, &self.seal, &borrowSeal(self));
+    }
+};
+
+const FinishStage = enum(u8) { pristine, prepared, free_committed, terminal_freed_once, consumed };
+
+pub const RpcResponseFinishTxn = struct {
+    self_addr: usize = 0,
+    response_addr: usize = 0,
+    response_epoch: u64 = 0,
+    allocator_present: u8 = 0,
+    allocator_ptr: usize = 0,
+    allocator_vtable: usize = 0,
+    payload_addr: usize = 0,
+    payload_len: usize = 0,
+    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    stage: FinishStage = .pristine,
+    terminal_evidence: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&RpcResponseFinishTxn{}));
+    }
+
+    pub fn freeCaptured(self: *RpcResponseFinishTxn) bool {
+        if (!self.freeCommittedExact()) return false;
+        const allocator = std.mem.Allocator{
+            .ptr = @ptrFromInt(self.allocator_ptr),
+            .vtable = @ptrFromInt(self.allocator_vtable),
+        };
+        const payload = payloadSliceMut(self.payload_addr, self.payload_len) orelse return false;
+        const evidence = finishEvidence(self);
+        self.allocator_present = 0;
+        self.allocator_ptr = 0;
+        self.allocator_vtable = 0;
+        self.payload_addr = 0;
+        self.payload_len = 0;
+        self.stage = .terminal_freed_once;
+        self.terminal_evidence = evidence;
+        self.seal = finishSeal(self);
+        allocator.free(payload);
+        return self.freedOnceRawExact();
+    }
+
+    fn preparedExactFor(self: *const @This(), response: *const RpcExecutedResponse, identity: Identity) bool {
+        return self.self_addr == @intFromPtr(self) and self.response_addr == @intFromPtr(response) and
+            self.response_epoch == identity.response_epoch and self.allocator_present == 1 and
+            self.allocator_ptr == response.allocator_ptr and self.allocator_vtable == response.allocator_vtable and
+            self.payload_addr == response.payload_addr and self.payload_len == response.payload_len and
+            std.mem.eql(u8, &self.payload_digest, &response.payload_digest) and self.stage == .prepared and
+            std.mem.allEqual(u8, &self.terminal_evidence, 0) and
+            std.mem.eql(u8, &self.seal, &finishSeal(self));
+    }
+
+    fn freeCommittedExact(self: *const @This()) bool {
+        return self.self_addr == @intFromPtr(self) and self.response_addr != 0 and
+            self.response_epoch != 0 and self.allocator_present == 1 and self.allocator_ptr != 0 and
+            self.allocator_vtable != 0 and self.payload_addr != 0 and self.payload_len != 0 and
+            self.stage == .free_committed and std.mem.allEqual(u8, &self.terminal_evidence, 0) and
+            std.mem.eql(u8, &self.seal, &finishSeal(self));
+    }
+
+    fn freedOnceRawExact(self: *const @This()) bool {
+        return self.self_addr == @intFromPtr(self) and self.response_addr != 0 and
+            self.response_epoch != 0 and self.allocator_present == 0 and self.allocator_ptr == 0 and
+            self.allocator_vtable == 0 and self.payload_addr == 0 and self.payload_len == 0 and
+            self.stage == .terminal_freed_once and
+            !std.mem.allEqual(u8, &self.terminal_evidence, 0) and
+            std.mem.eql(u8, &self.seal, &finishSeal(self));
+    }
+
+    fn freedOnceExactFor(self: *const @This(), response: *const RpcExecutedResponse) bool {
+        return self.response_addr == @intFromPtr(response) and
+            self.response_epoch == response.owner_incarnation and self.freedOnceRawExact();
+    }
+};
+
+pub fn withBorrowedRpcResponseBytesForTest(
+    response: *const RpcExecutedResponse,
+    borrow: *const RpcResponseBorrow,
+    context: *anyopaque,
+    callback: *const fn (*anyopaque, []const u8) void,
+) RpcExecutedResponse.Error!void {
+    if (!@import("builtin").is_test) @compileError("test-only RPC response byte bridge");
+    if (!response.liveExact(response.identity) or !borrow.exactFor(response, response.identity))
+        return error.InvalidReceipt;
+    callback(context, payloadSlice(response.payload_addr, response.payload_len).?);
+    if (!response.liveExact(response.identity) or !borrow.exactFor(response, response.identity))
+        return error.InvalidReceipt;
+}
+
+fn responseSeal(response: *const RpcExecutedResponse) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-executed-response.v1");
+    writer.writeUsize(response.self_addr);
+    writer.writeU64(response.owner_incarnation);
+    writeIdentity(&writer, response.identity);
+    writer.writeUsize(response.provenance.ledger_addr);
+    writer.writeUsize(response.provenance.guard_addr);
+    writer.writeUsize(response.provenance.node_addr);
+    writer.writeU64(response.provenance.operation_incarnation);
+    writer.writeU16(response.provenance.index);
+    writer.writeU64(response.provenance.generation);
+    writer.writeU8(response.allocator_present);
+    writer.writeUsize(response.allocator_ptr);
+    writer.writeUsize(response.allocator_vtable);
+    writer.writeUsize(response.payload_addr);
+    writer.writeUsize(response.payload_len);
+    writer.writeBytes(&response.payload_digest);
+    writer.writeU8(@intFromEnum(response.settlement));
+    writer.writeBytes(&response.terminal_evidence);
+    return writer.finish();
+}
+
+fn borrowSeal(borrow: *const RpcResponseBorrow) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-response-borrow.v1");
+    writer.writeUsize(borrow.self_addr);
+    writer.writeUsize(borrow.response_addr);
+    writer.writeU64(borrow.registry_incarnation);
+    writeBinding(&writer, borrow.binding);
+    writer.writeUsize(borrow.transport_addr);
+    writer.writeU64(borrow.transport_incarnation);
+    writer.writeU64(borrow.request_id);
+    writer.writeU64(borrow.request_digest);
+    writer.writeU64(borrow.response_epoch);
+    writer.writeBytes(&borrow.payload_digest);
+    writer.writeU8(borrow.live);
+    return writer.finish();
+}
+
+fn finishSeal(txn: *const RpcResponseFinishTxn) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-response-finish.v1");
+    writer.writeUsize(txn.self_addr);
+    writer.writeUsize(txn.response_addr);
+    writer.writeU64(txn.response_epoch);
+    writer.writeU8(txn.allocator_present);
+    writer.writeUsize(txn.allocator_ptr);
+    writer.writeUsize(txn.allocator_vtable);
+    writer.writeUsize(txn.payload_addr);
+    writer.writeUsize(txn.payload_len);
+    writer.writeBytes(&txn.payload_digest);
+    writer.writeU8(@intFromEnum(txn.stage));
+    writer.writeBytes(&txn.terminal_evidence);
+    return writer.finish();
+}
+
+fn finishEvidence(txn: *const RpcResponseFinishTxn) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-response-free-evidence.v1");
+    writer.writeUsize(txn.response_addr);
+    writer.writeU64(txn.response_epoch);
+    writer.writeUsize(txn.payload_addr);
+    writer.writeUsize(txn.payload_len);
+    writer.writeBytes(&txn.payload_digest);
+    return writer.finish();
+}
+
+fn writeIdentity(writer: *owner_seal.Writer, identity: Identity) void {
+    writer.writeU64(identity.registry_incarnation);
+    writeBinding(writer, identity.binding);
+    writer.writeUsize(identity.transport_addr);
+    writer.writeU64(identity.transport_incarnation);
+    writer.writeU8(@intFromEnum(identity.family));
+    writer.writeU8(@intFromEnum(identity.tag));
+    writer.writeU64(identity.request_id);
+    writer.writeU64(identity.request_digest);
+    writer.writeU64(identity.response_epoch);
+    writer.writeUsize(identity.destination_addr);
+}
+
+fn writeBinding(writer: *owner_seal.Writer, binding: contract.BindingIdentity) void {
+    writer.writeU64(binding.binding_incarnation);
+    writer.writeUsize(binding.binding_storage_addr);
+    writer.writeUsize(binding.destination_addr);
+    writer.writeU64(binding.binding_reservation_id);
+    writer.writeU64(binding.slot_incarnation);
+    writer.writeU64(binding.node_incarnation);
+    writer.writeU128(binding.host_id);
+    writer.writeU64(binding.connection_generation);
+    writer.writeU128(binding.runtime_id);
+    writer.writeU8(@intFromEnum(binding.role));
+    writer.writeU64(binding.pid);
+    writer.writeU64(binding.process_nonce);
+}
+
+const Range = struct { start: usize, end: usize };
+
+fn byteRange(start: usize, len: usize) ?Range {
+    if (start == 0 or len == 0) return null;
+    return .{ .start = start, .end = std.math.add(usize, start, len) catch return null };
+}
+
+fn rangesOverlap(a: Range, b: Range) bool {
+    return a.start < b.end and b.start < a.end;
+}
+
+fn payloadSlice(addr: usize, len: usize) ?[]const u8 {
+    _ = byteRange(addr, len) orelse return null;
+    return @as([*]const u8, @ptrFromInt(addr))[0..len];
+}
+
+fn payloadSliceMut(addr: usize, len: usize) ?[]u8 {
+    _ = byteRange(addr, len) orelse return null;
+    return @as([*]u8, @ptrFromInt(addr))[0..len];
+}
+
+fn digestBytes(domain: []const u8, bytes: []const u8) owner_seal.Digest {
+    var writer = owner_seal.Writer.init(domain);
+    writer.writeBytes(bytes);
+    return writer.finish();
+}
+
+fn fixtureBinding(destination_addr: usize) contract.BindingIdentity {
+    return contract.BindingIdentity.init(.{
+        .binding_incarnation = 3,
+        .binding_storage_addr = 0x1000,
+        .destination_addr = destination_addr,
+        .binding_reservation_id = 5,
+        .slot_incarnation = 7,
+        .node_incarnation = 11,
+        .host_id = 13,
+        .connection_generation = 1,
+        .runtime_id = 17,
+        .role = .controller,
+        .pid = 19,
+        .process_nonce = 23,
+    }).?;
+}
+
+fn fixtureIdentity(destination_addr: usize, epoch: u64) Identity {
+    return .{
+        .registry_incarnation = 29,
+        .binding = fixtureBinding(destination_addr),
+        .transport_addr = 0x3000,
+        .transport_incarnation = 31,
+        .family = .bound_observation,
+        .tag = .observation,
+        .request_id = 37,
+        .request_digest = 41,
+        .response_epoch = epoch,
+        .destination_addr = destination_addr,
+    };
+}
+
+fn fixtureProvenance() AllocationProvenance {
+    return .{
+        .ledger_addr = 0x4000,
+        .guard_addr = 0x5000,
+        .node_addr = 0x6000,
+        .operation_incarnation = 43,
+        .index = 2,
+        .generation = 47,
+    };
+}
+
+const ByteProbe = struct {
+    expected: []const u8,
+    called: bool = false,
+
+    fn inspect(context: *anyopaque, bytes: []const u8) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.called = std.mem.eql(u8, self.expected, bytes);
+    }
+};
+
+test "B3-4/5 RPC owner publishes borrows and frees exact once" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 1);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try response.prepareBorrow(identity, &borrow);
+    var probe: ByteProbe = .{ .expected = "response" };
+    try withBorrowedRpcResponseBytesForTest(&response, &borrow, &probe, ByteProbe.inspect);
+    try std.testing.expect(probe.called);
+    var finish: RpcResponseFinishTxn = .{};
+    try response.prepareFinish(identity, &borrow, &finish);
+    response.commitFreeNoFail(identity, &borrow, &finish);
+    try std.testing.expect(finish.freeCaptured());
+    response.finishCleanNoFail(&finish);
+    try std.testing.expect(response.terminalExact());
+    try std.testing.expect(!finish.freeCaptured());
+}
+
+test "B3-4/5 RPC owner rejects occupied destination and invalid payload bounds mutation zero" {
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 1);
+    const before = response;
+    var empty: [0]u8 = .{};
+    try std.testing.expectError(
+        error.InvalidPayload,
+        response.initLiveInPlace(identity, std.testing.allocator, &empty, fixtureProvenance()),
+    );
+    try std.testing.expectEqualDeep(before, response);
+    response.self_addr = 1;
+    var byte: [1]u8 = .{1};
+    try std.testing.expectError(
+        error.DestinationOccupied,
+        response.initLiveInPlace(identity, std.testing.allocator, &byte, fixtureProvenance()),
+    );
+}
+
+test "B3-4/5 RPC owner rejects copied borrow and finish receipts" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    defer std.testing.allocator.free(bytes);
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 1);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try response.prepareBorrow(identity, &borrow);
+    var copied_borrow = borrow;
+    var finish: RpcResponseFinishTxn = .{};
+    try std.testing.expectError(error.InvalidReceipt, response.prepareFinish(identity, &copied_borrow, &finish));
+    try response.prepareFinish(identity, &borrow, &finish);
+    var copied_finish = finish;
+    try std.testing.expect(!copied_finish.freeCaptured());
+}
+
+test "B3-4/5 RPC owner detects payload drift before lexical borrow" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    defer std.testing.allocator.free(bytes);
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 1);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try response.prepareBorrow(identity, &borrow);
+    bytes[0] = 'R';
+    var probe: ByteProbe = .{ .expected = "Response" };
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        withBorrowedRpcResponseBytesForTest(&response, &borrow, &probe, ByteProbe.inspect),
+    );
+    try std.testing.expect(!probe.called);
+}
+
+test "B3-4/5 RPC owner terminal no-free keeps pointer-free absorbing evidence" {
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 1);
+    const evidence = digestBytes("test.ambiguous", "evidence");
+    try response.terminalNoFreeInPlace(identity, evidence);
+    try std.testing.expect(response.terminalExact());
+    var borrow: RpcResponseBorrow = .{};
+    try std.testing.expectError(error.InvalidOwner, response.prepareBorrow(identity, &borrow));
+}
+
+test "B3-4/5 RPC owner rejects same-address epoch replay" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    defer std.testing.allocator.free(bytes);
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 1);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        response.prepareBorrow(fixtureIdentity(@intFromPtr(&response), 2), &borrow),
+    );
+}

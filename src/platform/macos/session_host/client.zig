@@ -215,6 +215,7 @@ pub const PreparedRequestExecutionLease = struct {
     fence_held: u8 = 0,
     fence_mode: PreparedRequestExecutionFenceMode = .unbound,
     cleanup_active: u8 = 0,
+    response_read_started: u8 = 0,
     seal: u64 = 0,
 
     pub fn pristineExact(self: *const @This()) bool {
@@ -228,7 +229,7 @@ pub const PreparedRequestExecutionLease = struct {
             self.ownership_raw == 0 and self.io_mode_raw == 0 and
             self.progress == .request_zero_clean and self.lifecycle == .pristine and
             self.fence_held == 0 and self.fence_mode == .unbound and
-            self.cleanup_active == 0 and self.seal == 0;
+            self.cleanup_active == 0 and self.response_read_started == 0 and self.seal == 0;
     }
 
     pub fn wireProgress(self: *const @This()) ?PreparedRequestWireProgress {
@@ -269,6 +270,7 @@ fn preparedExecutionLeaseSeal(lease: *const PreparedRequestExecutionLease) u64 {
         @as(usize, lease.fence_held),
         @as(usize, @intFromEnum(lease.fence_mode)),
         @as(usize, lease.cleanup_active),
+        @as(usize, lease.response_read_started),
     }) |value| hash.update(std.mem.asBytes(&value));
     const seal = hash.final();
     return if (seal == 0) 1 else seal;
@@ -281,7 +283,7 @@ fn preparedExecutionLeaseRawValid(lease: *const PreparedRequestExecutionLease) b
     return progress_raw <= @intFromEnum(PreparedRequestWireProgress.request_maybe_written) and
         lifecycle_raw <= @intFromEnum(PreparedRequestExecutionLeaseLifecycle.active) and
         fence_mode_raw <= @intFromEnum(PreparedRequestExecutionFenceMode.upgraded_shared) and
-        lease.fence_held <= 1 and lease.cleanup_active <= 1;
+        lease.fence_held <= 1 and lease.cleanup_active <= 1 and lease.response_read_started <= 1;
 }
 
 fn preparedExecutionFenceLeaseIdentity(
@@ -8470,15 +8472,77 @@ pub const Client = struct {
         prepared.settleCaptured(frame_allocator, frame_bytes);
         request_settled = true;
 
+        return self.readCorrelatedPreparedResponse(
+            request_id,
+            io,
+            expected_payload_allocator,
+            payload_observer,
+            false,
+        );
+    }
+
+    /// Reads only the blocking response half for a request already written under `lease`.
+    /// The lease seals the consumed request id and allocator domain, so this path cannot replay
+    /// request bytes or advance `next_request_id` a second time.
+    pub fn readPreparedResponseUnderExecutionLease(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+        expected_payload_allocator: std.mem.Allocator,
+        payload_observer: ?framing.PayloadAllocationObserver,
+    ) (ClientError || error{ InvalidPreparedRpc, PayloadProvenanceRejected })!ExecutedBlockingRpcResponse {
+        if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease) or
+            lease.progress != .request_maybe_written or lease.response_read_started != 0 or
+            !std.meta.eql(expected_payload_allocator, self.allocator) or
+            !self.parser.usesAllocator(expected_payload_allocator) or
+            lease.identity.request_id == std.math.maxInt(u64) or
+            self.next_request_id != lease.identity.request_id + 1)
+            return error.InvalidPreparedRpc;
+        lease.response_read_started = 1;
+        lease.seal = preparedExecutionLeaseSeal(lease);
+        return self.readCorrelatedPreparedResponse(
+            lease.identity.request_id,
+            .blocking,
+            expected_payload_allocator,
+            payload_observer,
+            true,
+        ) catch |err| {
+            if (self.first_poison_reason == null) self.poisonWhilePreparedExecutionHeld(switch (err) {
+                error.ConnectionClosed => .connection_eof,
+                error.OutOfMemory => .local_resource_exhausted,
+                error.PayloadProvenanceRejected => .local_invariant_violation,
+                error.ProtocolError => .frame_malformed,
+                else => .local_invariant_violation,
+            });
+            return switch (err) {
+                error.DeadlineExceeded => unreachable,
+                else => |read_err| read_err,
+            };
+        };
+    }
+
+    fn readCorrelatedPreparedResponse(
+        self: *Client,
+        request_id: u64,
+        io: RpcIo,
+        expected_payload_allocator: ?std.mem.Allocator,
+        payload_observer: ?framing.PayloadAllocationObserver,
+        execution_lease_held: bool,
+    ) (DeadlineClientError || error{PayloadProvenanceRejected})!ExecutedBlockingRpcResponse {
         // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 **버퍼에 쌓는다** — 드롭하면
         // 그 사이 화면 갱신이 유실된다(§9 delta는 증분이라 한 배치만 놓쳐도 desync). 다음 `readStreamBatch`가 이 버퍼부터 소비한다.
         while (true) {
             var actual_payload_allocator = self.allocator;
             const resp = switch (io) {
-                .blocking => try self.readFrameWithAllocatorObserved(
-                    &actual_payload_allocator,
-                    payload_observer,
-                ),
+                .blocking => if (execution_lease_held)
+                    try self.readFrameWithAllocatorObservedUnderExecutionLease(
+                        &actual_payload_allocator,
+                        payload_observer,
+                    )
+                else
+                    try self.readFrameWithAllocatorObserved(
+                        &actual_payload_allocator,
+                        payload_observer,
+                    ),
                 .deadline => |bounded| try self.readFrameUntilEstablished(
                     bounded.absolute,
                     bounded.ops,
@@ -8492,7 +8556,10 @@ pub const Client = struct {
                     // The allocation callback changed the Client/parser allocator domain. The
                     // frame's actual owner is now outside this request's sealed domain: do not
                     // publish, queue, classify, or free the bounded payload.
-                    self.poison(.local_invariant_violation);
+                    if (execution_lease_held)
+                        self.poisonWhilePreparedExecutionHeld(.local_invariant_violation)
+                    else
+                        self.poison(.local_invariant_violation);
                     return error.PayloadProvenanceRejected;
                 }
             }
@@ -8504,7 +8571,10 @@ pub const Client = struct {
             if (buffered_out_of_band) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) {
-                self.poison(.response_correlation_lost);
+                if (execution_lease_held)
+                    self.poisonWhilePreparedExecutionHeld(.response_correlation_lost)
+                else
+                    self.poison(.response_correlation_lost);
                 discardFramePayloadObservation(payload_observer, resp);
                 resp.deinit(self.allocator);
                 return error.ProtocolError;
@@ -11376,6 +11446,31 @@ pub const Client = struct {
     ) ClientError!framing.Frame {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.readFrameWithAllocatorObservedUnchecked(
+            payload_allocator_out,
+            observer,
+            false,
+        );
+    }
+
+    fn readFrameWithAllocatorObservedUnderExecutionLease(
+        self: *Client,
+        payload_allocator_out: ?*std.mem.Allocator,
+        observer: ?framing.PayloadAllocationObserver,
+    ) ClientError!framing.Frame {
+        return self.readFrameWithAllocatorObservedUnchecked(
+            payload_allocator_out,
+            observer,
+            true,
+        );
+    }
+
+    fn readFrameWithAllocatorObservedUnchecked(
+        self: *Client,
+        payload_allocator_out: ?*std.mem.Allocator,
+        observer: ?framing.PayloadAllocationObserver,
+        execution_lease_held: bool,
+    ) ClientError!framing.Frame {
         var buf: [4096]u8 = undefined;
         while (true) {
             const maybe_frame = if (observer) |active|
@@ -11383,28 +11478,28 @@ pub const Client = struct {
             else
                 self.parser.nextWithAllocator(payload_allocator_out);
             if (maybe_frame catch |err| {
-                self.poison(switch (err) {
+                self.poisonFrameRead(switch (err) {
                     error.OutOfMemory => .local_resource_exhausted,
                     error.PayloadIdentityExhausted, error.PayloadProvenanceRejected => .local_invariant_violation,
                     else => .frame_malformed,
-                });
+                }, execution_lease_held);
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => error.ProtocolError,
                 };
             }) |frame|
                 return self.requireWireMajor(frame) catch |err| {
-                    self.poison(.peer_contract_violation);
+                    self.poisonFrameRead(.peer_contract_violation, execution_lease_held);
                     return err;
                 };
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
                 const read_errno = posix.errno(n);
                 if (read_errno == .INTR) continue;
-                self.poison(if (read_errno == .AGAIN or read_errno == .TIMEDOUT)
+                self.poisonFrameRead(if (read_errno == .AGAIN or read_errno == .TIMEDOUT)
                     .read_timeout
                 else
-                    .transport_read_failure);
+                    .transport_read_failure, execution_lease_held);
                 return if (read_errno == .AGAIN or read_errno == .TIMEDOUT)
                     error.EndpointTransient
                 else
@@ -11412,15 +11507,29 @@ pub const Client = struct {
             }
             if (n == 0) {
                 const partial = self.parser.bufferedBytes() != 0;
-                self.poison(if (partial) .frame_malformed else .connection_eof);
+                self.poisonFrameRead(
+                    if (partial) .frame_malformed else .connection_eof,
+                    execution_lease_held,
+                );
                 return if (partial) error.ProtocolError else error.ConnectionClosed;
             }
             self.parser.push(buf[0..@intCast(n)]) catch {
                 // 이미 socket에서 소비한 바이트를 parser에 보존하지 못했다. 다음 frame 경계를 복구할 수 없다.
-                self.poison(.local_resource_exhausted);
+                self.poisonFrameRead(.local_resource_exhausted, execution_lease_held);
                 return error.OutOfMemory;
             };
         }
+    }
+
+    fn poisonFrameRead(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+        execution_lease_held: bool,
+    ) void {
+        if (execution_lease_held)
+            self.poisonWhilePreparedExecutionHeld(reason)
+        else
+            self.poison(reason);
     }
 
     /// Handshake-only incremental read. The socket remains nonblocking and every retry consumes
@@ -12834,6 +12943,165 @@ test "B3-3 actual nonblocking request partial write publishes maybe-written" {
     );
     try std.testing.expectEqual(PreparedRequestWireProgress.request_maybe_written, lease.wireProgress().?);
     try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-4/5 response-only lease read correlates without request replay or id advance" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB345,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    const expected_allocator = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try client.writePreparedRequestExecution(&storage, identity, &lease);
+    const observed = try readTestRequest(fds[1], allocator);
+    try std.testing.expectEqual(identity.request_id, observed.request_id);
+    try writeTestResponse(fds[1], allocator, identity.request_id, "{\"result\":true}");
+    const next_after_write = client.next_request_id;
+
+    const response = try client.readPreparedResponseUnderExecutionLease(
+        &lease,
+        expected_allocator,
+        null,
+    );
+    defer response.payload_allocator.free(response.payload);
+    try std.testing.expectEqualStrings("{\"result\":true}", response.payload);
+    try std.testing.expectEqual(identity.request_id, response.response_request_id);
+    try std.testing.expectEqual(next_after_write, client.next_request_id);
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.readPreparedResponseUnderExecutionLease(&lease, expected_allocator, null),
+    );
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-4/5 response-only lease read reassembles fragmented response after stream frame" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB346,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    const expected_allocator = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try client.writePreparedRequestExecution(&storage, identity, &lease);
+    _ = try readTestRequest(fds[1], allocator);
+
+    const stream = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7 },
+        "delta",
+    );
+    defer allocator.free(stream);
+    try socket_server.writeAll(fds[1], stream);
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = identity.request_id },
+        "{\"result\":true}",
+    );
+    defer allocator.free(response_wire);
+    const split = protocol.header_size + 2;
+    try socket_server.writeAll(fds[1], response_wire[0..split]);
+    try socket_server.writeAll(fds[1], response_wire[split..]);
+
+    const response = try client.readPreparedResponseUnderExecutionLease(&lease, expected_allocator, null);
+    defer response.payload_allocator.free(response.payload);
+    try std.testing.expectEqualStrings("{\"result\":true}", response.payload);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_stream.items.len);
+    try std.testing.expectEqualStrings("delta", client.pending_stream.items[0].payload);
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-4/5 response-only lease read rejects wrong correlation and closes connection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB347,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    const expected_allocator = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try client.writePreparedRequestExecution(&storage, identity, &lease);
+    _ = try readTestRequest(fds[1], allocator);
+    try writeTestResponse(fds[1], allocator, identity.request_id + 1, "{}");
+
+    try std.testing.expectError(
+        error.ProtocolError,
+        client.readPreparedResponseUnderExecutionLease(&lease, expected_allocator, null),
+    );
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.response_correlation_lost,
+        client.first_poison_reason.?,
+    );
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-4/5 response-only lease read classifies partial EOF as malformed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB348,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    const expected_allocator = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try client.writePreparedRequestExecution(&storage, identity, &lease);
+    _ = try readTestRequest(fds[1], allocator);
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = identity.request_id },
+        "{}",
+    );
+    defer allocator.free(response_wire);
+    try socket_server.writeAll(fds[1], response_wire[0 .. protocol.header_size + 1]);
+    _ = c.close(fds[1]);
+
+    try std.testing.expectError(
+        error.ProtocolError,
+        client.readPreparedResponseUnderExecutionLease(&lease, expected_allocator, null),
+    );
+    try std.testing.expectEqual(client_poison.ConnectionReason.frame_malformed, client.first_poison_reason.?);
     try client.finishPreparedRequestExecution(&lease);
 }
 

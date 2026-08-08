@@ -84,6 +84,41 @@ pub const Canonical = struct {
     }
 };
 
+const PermitKind = enum(u8) {
+    publish = 1,
+    borrow,
+    begin_release,
+    finish_reusable,
+    finish_terminal,
+    published_terminal,
+};
+
+/// Fallible transition validation is frozen here before a caller mutates a separate byte owner.
+/// The permit is final-address and single-use so the following commit can be a callback-free,
+/// allocation-free suffix instead of reopening validation after ownership has moved.
+pub const PreparedRpcTransitionPermit = struct {
+    self_addr: usize = 0,
+    authority_addr: usize = 0,
+    registry_incarnation: u64 = 0,
+    binding: contract.BindingIdentity = std.mem.zeroes(contract.BindingIdentity),
+    canonical_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    kind_raw: u8 = 0,
+    from_raw: u8 = 0,
+    to_raw: u8 = 0,
+    consumed: u8 = 0,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return self.self_addr == 0 and self.authority_addr == 0 and
+            self.registry_incarnation == 0 and bindingZero(&self.binding) and
+            std.mem.allEqual(u8, &self.canonical_digest, 0) and
+            std.mem.allEqual(u8, &self.authority_seal, 0) and self.kind_raw == 0 and
+            self.from_raw == 0 and self.to_raw == 0 and self.consumed == 0 and
+            std.mem.allEqual(u8, &self.seal, 0);
+    }
+};
+
 const Active = struct {
     transport_addr: usize,
     transport_incarnation: u64,
@@ -281,6 +316,114 @@ pub const Authority = struct {
         try self.transition(canonical, current_registry_incarnation, current_binding, .executing, .idle, true);
     }
 
+    pub fn preparePublish(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+    ) Error!void {
+        try self.prepareTransition(canonical, current_registry_incarnation, current_binding, out, .publish, .executing, .published);
+    }
+
+    pub fn commitPublishedNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+    ) void {
+        self.commitTransitionNoFail(canonical, permit, .publish, .executing, .published);
+    }
+
+    pub fn prepareBorrow(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+    ) Error!void {
+        try self.prepareTransition(canonical, current_registry_incarnation, current_binding, out, .borrow, .published, .borrowed);
+    }
+
+    pub fn commitBorrowedNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+    ) void {
+        self.commitTransitionNoFail(canonical, permit, .borrow, .published, .borrowed);
+    }
+
+    pub fn prepareBeginRelease(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+    ) Error!void {
+        try self.prepareTransition(canonical, current_registry_incarnation, current_binding, out, .begin_release, .borrowed, .releasing);
+    }
+
+    pub fn commitReleasingNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+    ) void {
+        self.commitTransitionNoFail(canonical, permit, .begin_release, .borrowed, .releasing);
+    }
+
+    pub fn prepareFinishReusable(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+    ) Error!void {
+        try self.prepareTransition(canonical, current_registry_incarnation, current_binding, out, .finish_reusable, .releasing, .idle);
+    }
+
+    pub fn commitReusableNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+    ) void {
+        self.commitTransitionNoFail(canonical, permit, .finish_reusable, .releasing, .idle);
+    }
+
+    pub fn prepareFinishTerminal(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+    ) Error!void {
+        try self.prepareTransition(canonical, current_registry_incarnation, current_binding, out, .finish_terminal, .releasing, .terminal);
+    }
+
+    pub fn commitTerminalNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+    ) void {
+        self.commitTransitionNoFail(canonical, permit, .finish_terminal, .releasing, .terminal);
+    }
+
+    pub fn preparePublishedTerminal(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+    ) Error!void {
+        try self.prepareTransition(canonical, current_registry_incarnation, current_binding, out, .published_terminal, .published, .terminal);
+    }
+
+    pub fn commitPublishedTerminalNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+    ) void {
+        self.commitTransitionNoFail(canonical, permit, .published_terminal, .published, .terminal);
+    }
+
     fn publish(
         self: *Authority,
         canonical: Canonical,
@@ -325,6 +468,58 @@ pub const Authority = struct {
     ) Error!void {
         try self.requireFinalAddress();
         try self.transition(canonical, current_registry_incarnation, current_binding, .executing, .terminal, true);
+    }
+
+    fn prepareTransition(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+        out: *PreparedRpcTransitionPermit,
+        kind: PermitKind,
+        from: Lifecycle,
+        to: Lifecycle,
+    ) Error!void {
+        try self.requireFinalAddress();
+        if (rangesOverlap(@intFromPtr(self), @sizeOf(Authority), @intFromPtr(out), @sizeOf(PreparedRpcTransitionPermit)) or
+            !out.pristineExact()) return error.InvalidState;
+        if (self.lifecycle == .terminal or self.lifecycle != from) return error.InvalidState;
+        if (!self.matches(canonical, from, current_registry_incarnation, current_binding))
+            return error.InvalidCanonical;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .authority_addr = @intFromPtr(self),
+            .registry_incarnation = current_registry_incarnation,
+            .binding = current_binding,
+            .canonical_digest = canonicalDigest(canonical),
+            .authority_seal = self.seal,
+            .kind_raw = @intFromEnum(kind),
+            .from_raw = @intFromEnum(from),
+            .to_raw = @intFromEnum(to),
+        };
+        out.seal = permitSeal(out);
+    }
+
+    fn commitTransitionNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        permit: *PreparedRpcTransitionPermit,
+        kind: PermitKind,
+        from: Lifecycle,
+        to: Lifecycle,
+    ) void {
+        if (!permitExactFor(permit, self, canonical, kind, from, to))
+            @panic("invalid RPC response transition permit");
+        self.transition(
+            canonical,
+            permit.registry_incarnation,
+            permit.binding,
+            from,
+            to,
+            to == .idle or to == .terminal,
+        ) catch @panic("prepared RPC response transition drifted");
+        permit.consumed = 1;
+        permit.seal = permitSeal(permit);
     }
 
     fn transition(
@@ -447,6 +642,57 @@ fn activeFromCanonical(canonical: Canonical) Active {
         .response_epoch = canonical.response_epoch,
         .destination_addr = canonical.destination_addr,
     };
+}
+
+fn canonicalDigest(canonical: Canonical) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-response-canonical.v1");
+    writer.writeUsize(canonical.authority_addr);
+    writer.writeU64(canonical.registry_incarnation);
+    writeBinding(&writer, canonical.binding);
+    writeActive(&writer, activeFromCanonical(canonical));
+    return writer.finish();
+}
+
+fn permitSeal(permit: *const PreparedRpcTransitionPermit) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-response-transition-permit.v1");
+    writer.writeUsize(permit.self_addr);
+    writer.writeUsize(permit.authority_addr);
+    writer.writeU64(permit.registry_incarnation);
+    writeBinding(&writer, permit.binding);
+    writer.writeBytes(&permit.canonical_digest);
+    writer.writeBytes(&permit.authority_seal);
+    writer.writeU8(permit.kind_raw);
+    writer.writeU8(permit.from_raw);
+    writer.writeU8(permit.to_raw);
+    writer.writeU8(permit.consumed);
+    return writer.finish();
+}
+
+fn permitExactFor(
+    permit: *const PreparedRpcTransitionPermit,
+    authority: *const Authority,
+    canonical: Canonical,
+    kind: PermitKind,
+    from: Lifecycle,
+    to: Lifecycle,
+) bool {
+    return permit.self_addr == @intFromPtr(permit) and
+        permit.authority_addr == @intFromPtr(authority) and permit.registry_incarnation != 0 and
+        permit.registry_incarnation == canonical.registry_incarnation and
+        std.meta.eql(permit.binding, canonical.binding) and
+        std.mem.eql(u8, &permit.canonical_digest, &canonicalDigest(canonical)) and
+        std.mem.eql(u8, &permit.authority_seal, &authority.seal) and
+        permit.kind_raw == @intFromEnum(kind) and permit.from_raw == @intFromEnum(from) and
+        permit.to_raw == @intFromEnum(to) and permit.consumed == 0 and
+        std.mem.eql(u8, &permit.seal, &permitSeal(permit)) and
+        authority.matches(canonical, from, permit.registry_incarnation, permit.binding);
+}
+
+fn rangesOverlap(a_addr: usize, a_len: usize, b_addr: usize, b_len: usize) bool {
+    if (a_addr == 0 or b_addr == 0 or a_len == 0 or b_len == 0) return true;
+    const a_end = std.math.add(usize, a_addr, a_len) catch return true;
+    const b_end = std.math.add(usize, b_addr, b_len) catch return true;
+    return a_addr < b_end and b_addr < a_end;
 }
 
 fn fixtureBinding(reservation_id: u64) contract.BindingIdentity {
@@ -637,4 +883,111 @@ test "B3-1 RPC response authority admits only structurally coherent bound RPC fa
             }
         }
     }
+}
+
+test "B3-4/5 RPC transition permits keep prepare fallible and commit exact once" {
+    var authority: Authority = .{};
+    const binding = fixtureBinding(59);
+    try authority.initInPlace(fixture_registry_incarnation, binding);
+
+    const reusable = try authority.reserveExecuting(fixtureInput(binding));
+    var publish_permit: PreparedRpcTransitionPermit = .{};
+    try authority.preparePublish(reusable, fixture_registry_incarnation, binding, &publish_permit);
+    try std.testing.expectEqual(Lifecycle.executing, authority.lifecycle);
+    authority.commitPublishedNoFail(reusable, &publish_permit);
+    try std.testing.expectEqual(Lifecycle.published, authority.lifecycle);
+
+    var borrow_permit: PreparedRpcTransitionPermit = .{};
+    try authority.prepareBorrow(reusable, fixture_registry_incarnation, binding, &borrow_permit);
+    authority.commitBorrowedNoFail(reusable, &borrow_permit);
+    try std.testing.expectEqual(Lifecycle.borrowed, authority.lifecycle);
+
+    var releasing_permit: PreparedRpcTransitionPermit = .{};
+    try authority.prepareBeginRelease(reusable, fixture_registry_incarnation, binding, &releasing_permit);
+    authority.commitReleasingNoFail(reusable, &releasing_permit);
+    try std.testing.expectEqual(Lifecycle.releasing, authority.lifecycle);
+
+    var reusable_permit: PreparedRpcTransitionPermit = .{};
+    try authority.prepareFinishReusable(reusable, fixture_registry_incarnation, binding, &reusable_permit);
+    authority.commitReusableNoFail(reusable, &reusable_permit);
+    try std.testing.expectEqual(Lifecycle.idle, authority.lifecycle);
+    try std.testing.expect(authority.settledExact());
+
+    const terminal = try authority.reserveExecuting(fixtureInput(binding));
+    var terminal_publish: PreparedRpcTransitionPermit = .{};
+    try authority.preparePublish(terminal, fixture_registry_incarnation, binding, &terminal_publish);
+    authority.commitPublishedNoFail(terminal, &terminal_publish);
+    var published_terminal: PreparedRpcTransitionPermit = .{};
+    try authority.preparePublishedTerminal(terminal, fixture_registry_incarnation, binding, &published_terminal);
+    authority.commitPublishedTerminalNoFail(terminal, &published_terminal);
+    try std.testing.expectEqual(Lifecycle.terminal, authority.lifecycle);
+    try std.testing.expect(authority.settledExact());
+}
+
+test "B3-4/5 RPC transition permit preflight rejects stale phase without mutation" {
+    var authority: Authority = .{};
+    const binding = fixtureBinding(61);
+    try authority.initInPlace(fixture_registry_incarnation, binding);
+    const canonical = try authority.reserveExecuting(fixtureInput(binding));
+    var permit: PreparedRpcTransitionPermit = .{};
+    try std.testing.expectError(
+        error.InvalidState,
+        authority.prepareBorrow(canonical, fixture_registry_incarnation, binding, &permit),
+    );
+    try std.testing.expect(permit.pristineExact());
+    try std.testing.expect(authority.matches(
+        canonical,
+        .executing,
+        fixture_registry_incarnation,
+        binding,
+    ));
+    try authority.rollbackExecuting(canonical, fixture_registry_incarnation, binding);
+}
+
+test "B3-4/5 RPC transition permit validator rejects copy splice replay and seal drift" {
+    var authority: Authority = .{};
+    const binding = fixtureBinding(67);
+    try authority.initInPlace(fixture_registry_incarnation, binding);
+    const canonical = try authority.reserveExecuting(fixtureInput(binding));
+    var permit: PreparedRpcTransitionPermit = .{};
+    try authority.preparePublish(canonical, fixture_registry_incarnation, binding, &permit);
+    try std.testing.expect(permitExactFor(&permit, &authority, canonical, .publish, .executing, .published));
+
+    var copied = permit;
+    try std.testing.expect(!permitExactFor(&copied, &authority, canonical, .publish, .executing, .published));
+    var spliced = permit;
+    spliced.canonical_digest[0] ^= 1;
+    try std.testing.expect(!permitExactFor(&spliced, &authority, canonical, .publish, .executing, .published));
+    authority.seal[0] ^= 1;
+    try std.testing.expect(!permitExactFor(&permit, &authority, canonical, .publish, .executing, .published));
+    authority.seal[0] ^= 1;
+
+    authority.commitPublishedNoFail(canonical, &permit);
+    try std.testing.expect(!permitExactFor(&permit, &authority, canonical, .publish, .executing, .published));
+    try std.testing.expectEqual(@as(u8, 1), permit.consumed);
+}
+
+test "B3-4/5 RPC transition terminal commit clears canonical and stays absorbing" {
+    var authority: Authority = .{};
+    const binding = fixtureBinding(71);
+    try authority.initInPlace(fixture_registry_incarnation, binding);
+    const canonical = try authority.reserveExecuting(fixtureInput(binding));
+
+    var publish_permit: PreparedRpcTransitionPermit = .{};
+    try authority.preparePublish(canonical, fixture_registry_incarnation, binding, &publish_permit);
+    authority.commitPublishedNoFail(canonical, &publish_permit);
+    var borrow_permit: PreparedRpcTransitionPermit = .{};
+    try authority.prepareBorrow(canonical, fixture_registry_incarnation, binding, &borrow_permit);
+    authority.commitBorrowedNoFail(canonical, &borrow_permit);
+    var release_permit: PreparedRpcTransitionPermit = .{};
+    try authority.prepareBeginRelease(canonical, fixture_registry_incarnation, binding, &release_permit);
+    authority.commitReleasingNoFail(canonical, &release_permit);
+    var terminal_permit: PreparedRpcTransitionPermit = .{};
+    try authority.prepareFinishTerminal(canonical, fixture_registry_incarnation, binding, &terminal_permit);
+    authority.commitTerminalNoFail(canonical, &terminal_permit);
+
+    try std.testing.expect(authority.terminalExactFor(fixture_registry_incarnation, binding));
+    try std.testing.expectEqual(@as(u8, 0), authority.canonical_present);
+    try std.testing.expect(activeZero(&authority.active));
+    try std.testing.expectError(error.InvalidState, authority.reserveExecuting(fixtureInput(binding)));
 }

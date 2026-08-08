@@ -33782,7 +33782,15 @@ pub const AppSession = struct {
                     var age_buf: [32]u8 = undefined;
                     const age = formatAgentSessionArchiveRelativeAge(now_ns, record.mtime_ns, &age_buf);
                     const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
-                    const metadata = try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model });
+                    // 서브에이전트를 돌린 세션만 그 개수를 덧붙인다. 0이면 아무것도 그리지 않아 평범한
+                    // 세션의 메타 줄이 길어지지 않는다(docs/agent-session-list.md §2.3). 상한 초과는
+                    // `999+`로 — 스캐너가 그 값에서 세기를 멈추므로 정확한 수를 주장하지 않는다.
+                    const metadata = if (record.subagent_count == 0)
+                        try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model })
+                    else if (record.subagent_count >= agent_session_archive_backend.max_subagent_count)
+                        try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s} · 서브에이전트 {d}+", .{ parsed.message_count, age, model, agent_session_archive_backend.max_subagent_count })
+                    else
+                        try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s} · 서브에이전트 {d}", .{ parsed.message_count, age, model, record.subagent_count });
                     var expanded: ?chrome.components.session_dock.types.Expanded = null;
                     if (self.agent_session_inline_detail) |detail| if (inlineArchiveDetailMatchesRecord(&detail, &record)) {
                         const detail_state: chrome.components.session_dock.types.DetailState = switch (detail.state) {

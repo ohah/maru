@@ -17,6 +17,10 @@ pub const max_file_bytes: usize = 128 * 1024 * 1024;
 /// 한 refresh가 사용자 history를 전부 다시 해석해 UI를 장시간 막지 않게 하는 누적 read 상한.
 pub const max_total_bytes: usize = 512 * 1024 * 1024;
 
+/// Claude 세션이 돌린 서브에이전트 transcript 수의 상한. 디렉터리 항목만 세므로 비용은 순회뿐이지만,
+/// 손상되거나 비정상적으로 많은 디렉터리에서 무한히 세지 않도록 끊는다. UI는 초과를 `999+`로 보인다.
+pub const max_subagent_count: u32 = 999;
+
 pub const Record = struct {
     parsed: archive.Parsed,
     /// Absolute provider-log pathname kept only in the in-process snapshot.
@@ -26,6 +30,11 @@ pub const Record = struct {
     mtime_ns: i96,
     inode: std.Io.File.INode,
     device: u64,
+    /// 이 세션이 돌린 서브에이전트 transcript 수(Claude 전용, 없으면 0). **파일을 열지 않고 디렉터리
+    /// 항목만 세므로** parse 결과가 아니라 스캔 메타데이터다 — 그래서 `Parsed`가 아니라 여기 있고,
+    /// 파싱 방식이 바뀌어도 값이 정확하다. Codex는 worker가 별도 파일이 아니라 같은 rollout 트리에
+    /// 섞여 있어 부모와 연결할 규칙이 없으므로 항상 0이다(docs/agent-session-list.md §2.3).
+    subagent_count: u32 = 0,
 
     pub fn deinit(self: *Record, allocator: std.mem.Allocator) void {
         self.parsed.deinit(allocator);
@@ -102,6 +111,7 @@ const Candidate = struct {
     size: usize,
     inode: std.Io.File.INode,
     device: u64,
+    subagent_count: u32 = 0,
 
     fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
         allocator.free(self.open_path);
@@ -317,7 +327,7 @@ fn cachedRecord(state: *State, candidate: Candidate) ?Record {
             owned.deinit(state.allocator);
             return null;
         };
-        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device };
+        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device, .subagent_count = candidate.subagent_count };
     }
     return null;
 }
@@ -456,7 +466,15 @@ fn scanClaude(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candid
                 allocator.free(relative);
                 continue;
             };
+            const before = candidates.items.len;
             appendCandidate(allocator, io, &dir, entry.name, .claude, open_path, relative, candidates, partial);
+            // 세션 파일 `<uuid>.jsonl`과 **같은 이름의 디렉터리** 아래 `subagents/`가 그 세션이 돌린
+            // 서브에이전트 transcript다. 목록에는 넣지 않지만(§3 표: 하위 계층 재귀 금지) 개수는
+            // 부모 세션의 정보이므로 카드에 보인다. 파일을 열지 않고 항목만 센다.
+            if (candidates.items.len > before) {
+                candidates.items[candidates.items.len - 1].subagent_count =
+                    countClaudeSubagents(io, &dir, entry.name);
+            }
         }
     }
 }
@@ -498,6 +516,26 @@ fn scanCodex(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candida
             }
         }
     }
+}
+
+/// `<project>/<session>.jsonl`의 형제 디렉터리 `<session>/subagents/`에 있는 transcript 수를 센다.
+/// 파일을 열지 않고 디렉터리 항목만 세므로 read budget과 무관하고, 순회 비용은 이미 지불한 것이다.
+/// 디렉터리가 없으면 0이며, 그것이 정상이다(실측: 95개 세션 중 37개만 보유).
+fn countClaudeSubagents(io: std.Io, project_dir: *std.Io.Dir, file_name: []const u8) u32 {
+    const stem = if (std.mem.lastIndexOfScalar(u8, file_name, '.')) |dot| file_name[0..dot] else file_name;
+    if (stem.len == 0) return 0;
+    var session_dir = openChildDirectoryNoFollow(io, project_dir.*, stem) orelse return 0;
+    defer session_dir.close(io);
+    var subagents = openChildDirectoryNoFollow(io, session_dir, "subagents") orelse return 0;
+    defer subagents.close(io);
+    var count: u32 = 0;
+    var it = subagents.iterate();
+    while (count < max_subagent_count) {
+        const entry = (it.next(io) catch break) orelse break;
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+        count += 1;
+    }
+    return count;
 }
 
 /// Each history-path component is opened from the preceding directory handle.
@@ -588,7 +626,7 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
     canonicalizeParsedCwd(state, &parsed);
     cacheParsed(state, candidate, &parsed);
     const path = allocator.dupe(u8, candidate.open_path) catch return;
-    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device }) catch {
+    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device, .subagent_count = candidate.subagent_count }) catch {
         allocator.free(path);
         return;
     };
@@ -755,6 +793,41 @@ test "cancelled archive generation cannot publish a replacement snapshot" {
     var latest_result = Result{ .complete = true };
     try std.testing.expect(publish(&state, 10, &latest_result));
     try std.testing.expectEqual(@as(usize, 1), state.results.items.len);
+}
+
+// 세션 카드가 보이는 `서브에이전트 N`의 출처. 목록에는 서브에이전트 transcript를 넣지 않지만
+// (§3 표: 하위 계층 재귀 금지) 그 개수는 부모 세션의 정보라 카드에 싣는다. **파일을 열지 않고
+// 디렉터리 항목만 세므로** read budget과 무관하고, 파싱 방식이 바뀌어도 값이 정확하다.
+test "Claude 서브에이전트 개수: 형제 디렉터리 항목만 세고 없으면 0" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // <project>/<uuid>.jsonl 과 그 형제 <project>/<uuid>/subagents/*.jsonl
+    try tmp.dir.createDirPath(io, "project/sess-a/subagents");
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/sess-a.jsonl", .data = "{}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/sess-a/subagents/w1.jsonl", .data = "{}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/sess-a/subagents/w2.jsonl", .data = "{}\n" });
+    // .jsonl이 아닌 항목과 디렉터리는 세지 않는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/sess-a/subagents/notes.txt", .data = "x" });
+    try tmp.dir.createDirPath(io, "project/sess-a/subagents/nested");
+    // 서브에이전트를 안 돌린 세션.
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/sess-b.jsonl", .data = "{}\n" });
+    // subagents 디렉터리가 비어 있는 세션.
+    try tmp.dir.createDirPath(io, "project/sess-c/subagents");
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/sess-c.jsonl", .data = "{}\n" });
+
+    var project = try tmp.dir.openDir(io, "project", .{ .iterate = true, .follow_symlinks = false });
+    defer project.close(io);
+
+    try std.testing.expectEqual(@as(u32, 2), countClaudeSubagents(io, &project, "sess-a.jsonl"));
+    try std.testing.expectEqual(@as(u32, 0), countClaudeSubagents(io, &project, "sess-b.jsonl"));
+    try std.testing.expectEqual(@as(u32, 0), countClaudeSubagents(io, &project, "sess-c.jsonl"));
+    // 없는 세션과 stem이 빈 이름은 찾을 디렉터리가 없다. (호출자는 `.jsonl`로 끝나는 이름만 넘기므로
+    // 확장자 없는 입력은 제품 경로에 없다 — `sess-a`를 그대로 stem으로 보는 것이 자연스러운 동작이다.)
+    try std.testing.expectEqual(@as(u32, 0), countClaudeSubagents(io, &project, "missing.jsonl"));
+    try std.testing.expectEqual(@as(u32, 0), countClaudeSubagents(io, &project, ".jsonl"));
 }
 
 test "archive scanner refuses a symlinked history directory" {

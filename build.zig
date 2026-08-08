@@ -1992,6 +1992,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-b3-4-5",
         "B3-4/5 RPC response publication ownership focused Debug and ReleaseFast gates",
     );
+    const session_host_b3_6_step = b.step(
+        "test-session-host-b3-6",
+        "B3-6 internal RPC substrate strict completion Debug and ReleaseFast gates",
+    );
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2045,6 +2049,39 @@ pub fn build(b: *std.Build) void {
     session_host_b3_4_5_step.dependOn(&run_b3_4_5_boundary_tests.step);
     boundary_step.dependOn(&run_b3_4_5_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
+        const b3_6_generation_transport_mod = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/generation_transport.zig",
+            ),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const b3_6_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_b3_6_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "generation_transport_tests", .module = b3_6_generation_transport_mod },
+                },
+            }),
+            .filters = &.{"CR3a-2c3b internal rpc substrate"},
+        });
+        const run_b3_6_tests = b.addSystemCommand(&.{
+            "/usr/bin/env",
+            "-i",
+            "MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC=run-isolated-v1",
+        });
+        run_b3_6_tests.addArtifactArg(b3_6_tests);
+        run_b3_6_tests.addArg("--maru-expect-tests=3");
+        run_b3_6_tests.setCwd(b.path("."));
+        session_host_b3_6_step.dependOn(&run_b3_6_tests.step);
+        boundary_step.dependOn(&run_b3_6_tests.step);
+
         const b3_1_leaf_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
@@ -2533,6 +2570,10 @@ pub fn build(b: *std.Build) void {
     );
     run_session_host_tests.setEnvironmentVariable(
         "MARU_SESSION_HOST_RPC_REUSE_EXEC",
+        "skip-in-aggregate-v1",
+    );
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC",
         "skip-in-aggregate-v1",
     );
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만

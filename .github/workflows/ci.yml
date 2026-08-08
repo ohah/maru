@@ -72,6 +72,16 @@ jobs:
           # 저장된 툴체인 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 영영 못 읽으면서 한도(10GB)만 먹는다.
           # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-check-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-check-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-check-
       - name: Run the checks the change needs
         env:
           CODE: ${{ needs.changes.outputs.code }}
@@ -100,6 +110,14 @@ jobs:
   # 이 PR job에서 provider 파일 무변경 계약과 16,384-row/1,000-event 탐색기 artifact를 실행한다.
   # session-host 스위트는 컴파일이 압도적으로 무거워(아래 session-host-macos-debug·-releasefast)
   # 별도 job이 병렬로 소유한다.
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-check-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes
@@ -115,6 +133,16 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-file-explorer-
       # 제품 셰이더는 런타임 컴파일(`newLibraryWithSource:`)이라 MSL 문법이 깨져도 빌드·단위 테스트·Metal
       # 계약 테스트가 전부 통과하고 앱을 띄워야만 드러난다. 수 초짜리 컴파일 스모크로 그 사각지대를 닫는다.
       - name: Compile product Metal shaders
@@ -157,6 +185,14 @@ jobs:
   # 두 컨텍스트 pending으로 영구 BLOCKED된다(2026-08-03 PR #1823에서 실측). 이름을 리터럴로 고정하면
   # skip될 때도 그 이름 그대로 conclusion=skipped가 보고돼 branch protection이 통과로 본다.
   # 두 job의 유일한 차이는 `-Doptimize`다 — 한쪽을 고치면 다른 쪽도 같이 고친다.
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes
@@ -268,6 +304,16 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-mermaid-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-mermaid-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-mermaid-
       - run: bun install --cwd web --frozen-lockfile
       - run: mise run macos-mermaid-perf
       - name: Upload native Mermaid performance artifact
@@ -283,6 +329,14 @@ jobs:
 
   # P5b2b2: Debug test runner나 ru_maxrss가 아니라 독립 ReleaseFast session-host PID의
   # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-mermaid-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
   session-host-slow-observer-macos:
     name: session host slow observer macOS
     needs: changes
@@ -298,6 +352,16 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-slow-observer-
       - name: Verify real PTY slow-observer isolation and host RSS
         run: zig build test-session-host-slow-observer-macos
       - name: Upload session-host slow-observer artifact
@@ -313,6 +377,14 @@ jobs:
   # CI에서는 설치가 가벼운 libvterm(apt)과 Alacritty(runner 기본 Rust)만 돌린다.
   # Ghostty libghostty-vt 오라클은 Zig 0.15.2 + 무거운 Ghostty 빌드가 필요해
   # 기본 CI에서 제외한다(로컬에서 `mise run oracle-ghostty`).
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-slow-observer-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
   oracles:
     name: external oracles (libvterm, Alacritty)
     needs: changes
@@ -327,6 +399,19 @@ jobs:
           version: 2026.2.7
           sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            ~/.cargo/registry
+            ~/.cargo/git
+            tests/oracle/alacritty-dumper/target
+          key: zig-${{ runner.os }}-oracles-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-oracles-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-oracles-
 
       - name: Install libvterm
         run: sudo apt-get update && sudo apt-get install -y libvterm-dev
@@ -347,3 +432,14 @@ jobs:
           path: tests/artifacts/**
           if-no-files-found: warn
           retention-days: 14
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            ~/.cargo/registry
+            ~/.cargo/git
+            tests/oracle/alacritty-dumper/target
+          key: zig-${{ runner.os }}-oracles-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}

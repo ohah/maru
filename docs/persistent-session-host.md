@@ -1421,13 +1421,59 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `spawn_full`은 attachment-bound transport에서 항상 wire 0으로 거부하며 union에서 제거할지는 위 구조 결정 뒤 확정한다. attach 성공
    뒤 두 번째 `attach_controller`, attach 전 observation/mutation/terminal과 observer mutation은 모두 wire 0이다.
 
-   execute의 최초 검사는 mutation 0이다. 그 뒤 authority를 `executing`으로 reserve하고 Client의 pending-wire flush/allocator capture가
-   반환하면 canonical owner를 다시 resolve해 destination pristine/final address, tag/receipt/epoch, allocator/parser provenance와
-   attachment/transport/binding/prepared storage/slot/node/Client/authority range-disjoint를 **첫 request byte 직전에 다시 검증**한다.
-   mutation-zero local/AdminBusy/OOM-before-any-write와 coherent post-flush 재검증 실패만 prepared owner abort+authority idle로 돌아간다.
-   기존 pending frame을 일부라도 썼거나 flush 결과가 ambiguous/poisoned인 preflight 실패는 새 RPC request byte가 0이어도 response
-   authority terminal+connection fail-close다. 첫 request byte 이후 실패도 prepared abort로 되돌리지 않고 uncertain/terminal cleanup만
-   사용한다.
+   B3-3의 wire progress SSOT는 caller-final storage에 Client가 in-place 초기화·seal하는 `PreparedRequestExecutionLease`와
+   `PreparedRequestWireProgress` 하나다. progress의 closed 값은
+   `request_zero_clean|prior_pending_ambiguous|request_maybe_written`이며 error와 직교한다. 최초 값은 `request_zero_clean`, 기존 pending
+   frame의 positive prefix 뒤 실패만 `prior_pending_ambiguous`, 새 request의 첫 positive write가 `request_maybe_written`로 단조
+   전이한다. correlated response 수신/publication은 B3-4/5 response owner의 상태이며 B3-3 wire progress에 미리 넣지 않는다.
+   EINTR은 progress를 바꾸지 않고 재시도하며 EAGAIN/zero/hard error는 실제 positive write
+   전후 상태를 보존한다. lease는 caller가 제공한 pristine stack storage에 Client가 in-place 초기화·seal·전이하는 유일한
+   final-address owner다. 숫자 byte count·prepared lifecycle·error tag로 progress를 재구성하는 경로와 progress를 lease의 단일 field/
+   즉시 반환 outcome 밖의 struct·global·queue·return copy에 저장하거나 caller가 다시 입력하는 경로는 0이다. pending frame이 완전히 flush되면 framing 경계가 닫혔으므로 새 request 기준
+   `request_zero_clean`을 유지하고, partial 뒤 실패만 ambiguity다. pending owner는 callback 전에 descriptor를 tombstone한 뒤 frozen
+   local allocator/frame을 free하며 same-Client 재진입은 held lease로 Busy, foreign Client 재진입은 이 lease를 바꾸지 못한다.
+
+   exact 실행 순서는 다음 하나다.
+
+   1. cleanup registry `preparedRpcAdmission`이 expected `.prepared` transcript를 같은 B3-2 classifier로 새로 resolve한다.
+   2. caller-final pristine `RpcExecutedResponse` destination의 self address/range/disjoint를 검사하고 `PreparedRpcExecutionTxn`을 mutation
+      0으로 in-place 초기화해 defer fail-stop 보호를 설치한다. B3-3에서는 이 destination에 payload를 publish하지 않는다.
+   3. registry `reserveRpcResponseExecution`이 entry-local `RpcResponseAuthority`의 checked epoch를 발급하고 canonical receipt를 반환하면
+      txn이 즉시 `.response_reserved`를 게시한다.
+   4. `beginPreparedRequestExecute`가 request authority를 `.executing`으로 옮긴다.
+   5. Client `beginPreparedRequestExecution`이 mutation fence를 잡은 final-address lease 안에서 기존 pending wire를 flush하고 allocator/parser
+      provenance와 progress를 봉인한다. lease 종료 전에는 다른 Client public mutation이 같은 Client를 통과하지 못한다.
+   6. cleanup registry `executingRpcAdmission`이 expected `.executing` transcript, current stream/role/controller state, exact RPC canonical과
+      response destination을 같은 classifier로 다시 resolve한다. caller tag/family/Entry snapshot과 cached B3-2 verdict는 입력하지 않는다.
+   7. 성공 verdict를 저장하지 않고 같은 stack의 callback/allocation/syscall-free suffix가 lease·canonical final address를 검사해 request
+      lifecycle/ID를 게시한 뒤 첫 tracked write syscall을 실행한다. 이 첫 positive write가 `request_maybe_written` linearization이다.
+
+   두 admission facade는 private registry API이며 제품-shaped B3-3 wrapper caller가 각각 exact 1회 사용한다. leaf authority pointer는
+   registry 밖으로 escape하지 않고 rollback/terminal도 registry-owned `rollbackRpcResponseExecution`과
+   `settleRpcResponseExecutionTerminal`만 수행한다. response reserve가 epoch 소진으로 authority를 terminalize하면 request begin/wire는
+   0이고 prepared backing을 exact abort한 뒤 Client를 poison한다. 두 reserve 사이의 모든 실패는 이미 얻은 권위를 위 progress와
+   Client usability에 따라 함께 정산한다.
+
+   두 authority의 cleanup 순서는 private final-address `PreparedRpcExecutionTxn` 하나가 소유한다. 이 합성 transaction은 기존
+   `PreparedExecutionTxn`을 내장하고 RPC canonical capability 하나만 더 봉인하며 phase는
+   `pristine|response_reserved|settled`의 closed enum이다. request phase는 내장 transaction, wire phase는 lease progress에서만 읽고
+   합성 phase에 중복하지 않는다. request backing/
+   `PreparedRequestAuthority` 정산을 기존 transaction에 위임한 뒤에만 `RpcResponseAuthority`를 rollback 또는 terminalize한다. 별도
+   request-free 구현, progress bool, cached admission verdict는 두지 않는다. callback 중 response authority가 executing으로 남아 새 RPC를
+   Busy로 막고, callback 복귀 뒤 canonical이 exact할 때만 response 전이를 게시한다. B3-3 구현은 production 타입과 private wrapper를
+   사용하지만 테스트 fixture 밖 제품 caller는 0이며 public destination/ABI와 사용자 가시 동작은 B3-6까지 열지 않는다.
+
+   reusable rollback의 유일한 조건은 `progress == request_zero_clean && Client remains usable`이다. `request_zero_clean` 자체가 prior
+   pending ambiguity 0을 포함하므로 별도 sticky bool은 두지 않는다.
+   이때만 request backing을 abort하고 `PreparedRequestAuthority`를 settled reusable로, `RpcResponseAuthority`를 `executing→idle`로
+   함께 게시한다. coherent local/AdminBusy/OOM과 post-flush admission 실패라도 Client가 이미 closed/poisoned면 reusable이 아니다.
+   prior pending partial/ambiguous는 새 request byte 0이어도 두 authority를 terminal 정산하고 connection을 fail-close한다. 첫 request
+   positive write 뒤의 오류/EOF/correlation failure도 uncertain/terminal cleanup만 사용한다. B3-3은 B3-4/5의 owner가 생기기 전
+   correlated response를 제품에 publish하지 않는다. socketpair peer는 request prefix/full frame을 관측한 뒤 EOF를 내는 test-private
+   terminal sink만 사용하며 response payload owner/publish/borrow 제품 callsite는 계속 0이다.
+   pending owner cleanup callback 뒤 allocator/parser, lease seal, prepared/RPC canonical 또는 poison state가 한 필드라도 drift하면 frozen
+   descriptor의 exact-one free 증거만 유지하고 request write 0, 두 authority terminal, connection fail-close로 닫는다. current callback
+   결과를 새 cleanup authority로 재채택하지 않고 second free/write는 0이다.
 
    wire/correlation success는 host application success/error JSON을 구분하지 않고 모두 stack-final `RpcExecutedResponse`에 bounded
    owned payload로 publish하며 authority를 `published`로 둔다. JSON decode와 typed application error 분류는 계속 `RemoteRuntime`의
@@ -1466,26 +1512,26 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    검증하고, subprocess product test는 비정상 종료를 자동 단언한다. registry attach owner/pin을 response payload cleanup의 대리 SSOT로
    쓰지 않는다.
 
-   | 시작 | 사건 | 반환 | response/payload owner | authority 끝 | 다음 RPC | teardown/connection |
-   | --- | --- | --- | --- | --- | --- | --- |
-   | idle | operation/response-live 충돌 | `error.Busy` | 없음 | idle 또는 기존 state | 조건 해소 뒤 허용 | connection 유지 |
-   | idle | copied/moved/stale phase/owner | `error.InvalidOwner` | 없음 | idle | 허용 | connection 유지 |
-   | idle | valid role의 family 권한 없음 | `error.Unauthorized` | 없음 | idle | 허용 | connection 유지 |
-   | idle | receipt/transcript mismatch | `error.InvalidReceipt` | 없음 | idle | 허용 | connection 유지 |
-   | idle | destination tag/pristine/range mismatch | `error.InvalidResponseDestination` | 없음 | idle | 허용 | connection 유지 |
-   | executing | allocator OOM before any write | `error.ResourceExhausted` | 없음, prepared abort | idle | 허용 | connection 유지 |
-   | executing | coherent post-flush destination/receipt 재검증 실패 | `error.InvalidOwner|InvalidReceipt|InvalidResponseDestination` | 없음, prepared abort | idle | 허용 | connection 유지 |
-   | executing | pre-existing closed peer, request byte와 prior pending write 모두 0 | `error.ConnectionClosed` | 없음, prepared abort | terminal | 거부 | fail-close |
-   | executing | prior pending wire partial/ambiguous preflight | `error.ConnectionClosed|ProtocolError` | 없음, prepared abort | terminal | 거부 | poison+fail-close |
-   | executing | request partial/timeout, response EOF/truncation, correlation loss | `.uncertain_or_connection_failure` | 없음 또는 terminal evidence | terminal | 거부 | poison+fail-close |
-   | executing | correlated response publish | `.accepted` | `RpcExecutedResponse` | published | Busy | Busy |
-   | published | borrow 시작 | 기존 `.accepted`+private borrow receipt | 같은 owner 유지 | borrowed | Busy | Busy |
-   | borrowed | decode | private immutable slice | 같은 owner 유지 | borrowed | Busy | Busy |
-   | borrowed | finish reusable | finish outcome `reusable` | owner tombstone, exact payload free | releasing→idle | callback 뒤 허용 | callback 동안 Busy |
-   | borrowed | finish protocol failure | finish outcome `terminal` | owner tombstone, exact payload free | releasing→terminal | 거부 | poison+fail-close |
-   | published | owner/epoch/digest/allocator/alias drift | `fail_stop_required` | safe-free 또는 no-free evidence | terminal | 거부 | strict process fail-stop |
-   | borrowed | owner/epoch/digest/allocator/borrow receipt drift | `fail_stop_required` | second read/free 0 | terminal | 거부 | strict process fail-stop |
-   | idle | epoch 소진 | `error.IdentityExhausted` | 없음 | terminal | 거부 | poison+fail-close |
+   | 시작 | 사건/progress | 반환 | prepared request/backing 끝 | response/payload owner | RPC authority 끝 | 다음 RPC | teardown/connection |
+   | --- | --- | --- | --- | --- | --- | --- | --- |
+   | idle | operation/response-live 충돌 | `error.Busy` | untouched | 없음 | idle 또는 기존 state | 조건 해소 뒤 허용 | connection 유지 |
+   | idle | copied/moved/stale phase/owner | `error.InvalidOwner` | untouched | 없음 | idle | 허용 | connection 유지 |
+   | idle | valid role의 family 권한 없음 | `error.Unauthorized` | untouched | 없음 | idle | 허용 | connection 유지 |
+   | idle | receipt/transcript mismatch | `error.InvalidReceipt` | untouched | 없음 | idle | 허용 | connection 유지 |
+   | idle | destination tag/pristine/range mismatch | `error.InvalidResponseDestination` | untouched | 없음 | idle | 허용 | connection 유지 |
+   | executing | local failure, `request_zero_clean`, Client usable | typed 기존 error | reusable settle+backing exact free | 없음 | idle, epoch burn | 허용 | connection 유지 |
+   | executing | coherent post-flush admission 실패, `request_zero_clean`, Client usable | `error.InvalidOwner|InvalidReceipt|InvalidResponseDestination` | reusable settle+backing exact free | 없음 | idle, epoch burn | 허용 | connection 유지 |
+   | executing | closed/poisoned Client, request/prior pending positive 0 | `error.ConnectionClosed` | terminal settle+backing exact free | 없음 | terminal | 거부 | fail-close |
+   | executing | `prior_pending_ambiguous`, 새 request byte 0 | `error.ConnectionClosed|ProtocolError` | terminal settle+backing exact free | 없음 | terminal | 거부 | poison+fail-close |
+   | executing | `request_maybe_written`, write/response EOF/truncation/correlation loss | `.uncertain_or_connection_failure` | terminal settle+backing exact free | 없음 또는 terminal evidence | terminal | 거부 | poison+fail-close |
+   | executing | correlated response publish(B3-4/5) | `.accepted` | reusable settle+backing exact free | `RpcExecutedResponse` | published | Busy | Busy |
+   | published | borrow 시작 | 기존 `.accepted`+private borrow receipt | settled | 같은 owner 유지 | borrowed | Busy | Busy |
+   | borrowed | decode | private immutable slice | settled | 같은 owner 유지 | borrowed | Busy | Busy |
+   | borrowed | finish reusable | finish outcome `reusable` | settled | owner tombstone, exact payload free | releasing→idle | callback 뒤 허용 | callback 동안 Busy |
+   | borrowed | finish protocol failure | finish outcome `terminal` | settled | owner tombstone, exact payload free | releasing→terminal | 거부 | poison+fail-close |
+   | published | owner/epoch/digest/allocator/alias drift | `fail_stop_required` | settled | safe-free 또는 no-free evidence | terminal | 거부 | strict process fail-stop |
+   | borrowed | owner/epoch/digest/allocator/borrow receipt drift | `fail_stop_required` | settled | second read/free 0 | terminal | 거부 | strict process fail-stop |
+   | idle | epoch 소진 | `error.IdentityExhausted` | prepared abort+backing exact free, wire 0 | 없음 | terminal | 거부 | poison+fail-close |
 
    `RpcExecutedResponse`의 copy/move/same-address reincarnation, stale epoch, 다른 transport/binding/request/tag/digest/destination splice,
    duplicate borrow/finish는 payload를 읽거나 free하기 전에 typed reject한다. `abortPreparedRequest`는 wire 전 prepared request만 취소하며

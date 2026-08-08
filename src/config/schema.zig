@@ -1029,6 +1029,17 @@ test "schema appendBoolFields/setBool: bool 필드만 열거하고 키로 설정
     }
     try std.testing.expect(saw_keep_alive);
 
+    // status-bar.show도 설정 GUI(workspace 섹션 토글)에 노출된다 — 바가 창 높이를 먹으므로 끄는 수단이
+    // GUI에 있어야 한다. 스키마에 적어 두는 것만으로는 행이 실제로 나오는지 알 수 없어 여기서 확인한다.
+    var saw_status_bar = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "status-bar.show")) {
+            saw_status_bar = true;
+            try std.testing.expect(f.doc.len > 0); // GUI 라벨
+        }
+    }
+    try std.testing.expect(saw_status_bar);
+
     // setBool: 키로 flip.
     try std.testing.expect(setBool(&cfg, "cursor.blink", false));
     try std.testing.expectEqual(false, cfg.cursor.blink);

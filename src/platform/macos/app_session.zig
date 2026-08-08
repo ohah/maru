@@ -1075,6 +1075,19 @@ const sidebar_scroll_ids = struct {
 };
 const sidebar_scroll_max_entries: usize = 3;
 
+/// 오버레이(팔레트·세팅·알림) 스크롤바가 쓰는 id·저장소(SV5b). 오버레이는 **한 번에 하나만 열리므로**
+/// 발행 저장소를 셋이 공유한다 — SV3b가 탐색기↔소스 컨트롤에서 쓴 것과 같은 근거다(도크·사이드바와는
+/// 조건이 다르다. 그 둘은 동시에 화면에 있어 저장소를 나눠야 했다).
+const overlay_scroll_ids = struct {
+    const area: chrome.ui.tree.UiId = 0x4F56_0001;
+    const track: chrome.ui.tree.UiId = 0x4F56_0002;
+    const thumb: chrome.ui.tree.UiId = 0x4F56_0003;
+};
+const overlay_scroll_max_entries: usize = 3;
+const overlay_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
+const overlay_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
+const overlay_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
+
 /// 이번 tick에 활성 surface frame을 (재)투영할지 결정한다 — 순수 함수라 게이트 규칙을 헤드리스로 고정한다.
 /// 베이스/결정(docs/io-render-threading.md): synchronized output(DECSET 2026)은 **라이브 화면**이 half-drawn
 /// 상태로 tearing되는 것만 막는다(BSU~ESU 사이 투영 보류, ESU 누락 freeze는 sync_timeout으로 강제 해제 — Ghostty
@@ -3639,6 +3652,10 @@ pub const AppSession = struct {
     dock_list_scroll_generation: u64 = 0,
     /// 사이드바 스크롤바의 발행 저장소(SV4a). 도크 목록과 **따로** 둔다 — 둘은 동시에 화면에 있으므로
     /// 하나를 발행하면 다른 하나가 지워지는 자리를 만들면 안 된다(뷰를 갈아끼우는 도크와 다른 조건이다).
+    /// 오버레이 스크롤바 발행 저장소(SV5b). 팔레트·세팅·알림이 공유한다(한 번에 하나만 열린다).
+    overlay_scroll_entries: [overlay_scroll_max_entries]chrome.ui.tree.RectEntry = undefined,
+    overlay_scroll_entry_count: usize = 0,
+    overlay_scroll_generation: u64 = 0,
     sidebar_scroll_entries: [sidebar_scroll_max_entries]chrome.ui.tree.RectEntry = undefined,
     sidebar_scroll_entry_count: usize = 0,
     sidebar_scroll_generation: u64 = 0,
@@ -30579,6 +30596,10 @@ pub const AppSession = struct {
                     if (self.buildChromeOverlayPrep()) |maybe| {
                         if (maybe) |prep| self.collectShaped(&collected, prep.dl, prep.builder, .{ .overlay = prep.placement });
                     } else |_| {}
+                    // SV5b: 팔레트 결과 목록 우측 막대. **오버레이 lowering 뒤에** 낸다 — 팔레트 배경도
+                    // 같은 over 버킷이고 그 안에서는 배열 순서가 painter 순서라, 앞에 내면 배경이 막대를
+                    // 덮어 화면에서 사라진다(실측). 버킷이 다른 도크·사이드바 막대와 다른 점이다.
+                    self.appendPaletteScrollbar();
                 }
             }
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
@@ -33235,6 +33256,97 @@ pub const AppSession = struct {
         };
     }
 
+    /// 팔레트 스크롤바를 **공용 발행 경로**로 낸다(SV5b). 컴포넌트가 자기 막대를 그리는 대신 host가
+    /// `tree.scrollArea`를 선언하고 `ui_paint`+`chrome_draw_lowering`이 quad로 내린다 — 도크·탐색기·
+    /// 소스 컨트롤·사이드바와 같은 막대가 된다.
+    ///
+    /// **offset은 저장된 값이 아니다.** 팔레트는 창을 selected에서 매번 재파생하므로 그 파생값을 픽셀로
+    /// 환산해 쓴다(`win_start × ch`). 그래서 이 슬라이스는 스크롤 상태를 만들지 않는다.
+    fn appendPaletteScrollbar(self: *AppSession) void {
+        if (!self.chrome_host.palette.open) return;
+        // **창을 여기서 직접 파생한다.** 앞서 `buildPaletteRows`가 캐시한 값을 읽게 했더니 그 함수가 이
+        // 지점 **뒤**에 불려 막대가 화면에서 사라졌다(실측). 파생값은 어디서 계산해도 같은 답이므로
+        // 순서에 기대지 않는 편이 옳다 — 저장하지 않는다는 이 슬라이스의 계약과도 맞는다.
+        const max_visible = chrome.components.palette.max_visible;
+        const total = self.palette_filtered.items.len;
+        const visible = @min(total, max_visible);
+        if (total <= visible or visible == 0) return; // 안 넘침 — 막대 없음
+        const view = .{
+            .total = total,
+            .visible = visible,
+            .win_start = chrome.components.overlay_input.windowStart(total, max_visible, self.chrome_host.palette.selected, 0),
+        };
+        const ch = self.cell_height_px;
+        if (ch == 0) return;
+        const lay = chrome.components.overlay_input.panelLayout(self.buildChromeProps()) orelse return;
+
+        // 목록 영역은 프롬프트 줄(row0) **아래**다 — 그 줄은 스크롤에서 고정이므로 트랙도 그 아래에서 시작한다.
+        const list_y: i32 = lay.y + @as(i32, @intCast(lay.ch));
+        const rect_w: u32 = lay.panel_cols * lay.cw;
+        const rect_h: u32 = @as(u32, @intCast(view.visible)) * lay.ch;
+        if (rect_h == 0 or rect_w == 0) return;
+
+        var entries: [overlay_scroll_max_entries]chrome.ui.tree.RectEntry = undefined;
+        var items: [overlay_scroll_max_entries]chrome.ui.layout.Item = undefined;
+        var flex: [overlay_scroll_max_entries]chrome.ui.layout.FlexScratch = undefined;
+        var child_rects: [overlay_scroll_max_entries]chrome.ui.layout.UiRect = undefined;
+
+        const metrics: chrome.ui.scroll_area.ScrollbarMetrics = .{
+            .width_px = overlay_scrollbar_width_px,
+            .inset_x_px = overlay_scrollbar_inset_px,
+            .min_thumb_px = overlay_scrollbar_min_thumb_px,
+        };
+        const node = chrome.ui.tree.scrollArea(.{
+            .id = overlay_scroll_ids.area,
+            .scroll = .{
+                .offset_px = @as(u32, @intCast(view.win_start)) * lay.ch,
+                .content_h_px = @as(u32, @intCast(view.total)) * lay.ch,
+                .gutter_px = @floatFromInt(metrics.width_px + metrics.inset_x_px),
+                .metrics = metrics,
+                .track = .{ .id = overlay_scroll_ids.track, .action = .{ .id = overlay_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
+                .thumb = .{ .id = overlay_scroll_ids.thumb, .action = .{ .id = overlay_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2 } } },
+            },
+        }, &.{});
+
+        const built = chrome.ui.tree.build(node, .{
+            .root_size = .{ .width = @floatFromInt(rect_w), .height = @floatFromInt(rect_h) },
+            .max_entries = overlay_scroll_max_entries,
+            .max_depth = 2,
+        }, .{
+            .entries = &entries,
+            .items = &items,
+            .flex_scratch = &flex,
+            .child_rects = &child_rects,
+        }) catch return;
+
+        self.overlay_scroll_generation +|= 1;
+        for (built.entries, 0..) |entry, i| {
+            var moved = entry;
+            moved.rect.x += @floatFromInt(lay.x);
+            moved.rect.y += @floatFromInt(list_y);
+            if (moved.effective_clip) |*clip| {
+                clip.x += @floatFromInt(lay.x);
+                clip.y += @floatFromInt(list_y);
+            }
+            self.overlay_scroll_entries[i] = moved;
+        }
+        self.overlay_scroll_entry_count = built.entries.len;
+
+        const snapshot: chrome.ui.tree.UiRectTree = .{
+            .entries = self.overlay_scroll_entries[0..self.overlay_scroll_entry_count],
+            .generation = self.overlay_scroll_generation,
+        };
+        var ops: [overlay_scroll_max_entries]chrome.draw.Op = undefined;
+        const tokens = self.buildChromeTokens();
+        const draws = chrome.ui.paint.paint(snapshot, .{}, &tokens, .sidebar, .{ .ops = &ops }) catch return;
+        const before = self.gpu_quads.items.len;
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
+        // **layer를 over로 되돌린다.** 공용 lowering은 layer 2로 내리는데 렌더러는 그것을 터미널 pass
+        // 맨 처음에 그리고, 오버레이 pass가 그 위에 모달 배경 quad를 통째로 덮는다 — 막대가 사라진다.
+        // 사이드바(SV4)에서는 렌더러 소유 배경 strip이 덮었다. 원인은 달라도 처방은 같다.
+        for (self.gpu_quads.items[before..]) |*q| q.layer = 3;
+    }
+
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
         const slot_h = self.sidebarMetrics().line_h; // 렌더 전 degenerate 판정(카드 높이는 줄 기하에서 나온다)
         if (slot_h == 0) return;
@@ -35813,6 +35925,7 @@ pub const AppSession = struct {
             .sidebar_slot_height_px = self.sidebar_slot_height_px,
             .sidebar_header_row_h_px = self.sidebar_header_row_h_px,
             .sidebar_scroll_gutter_px = self.sidebarScrollGutterPx(),
+            .overlay_scroll_gutter_px = overlay_scrollbar_width_px + overlay_scrollbar_inset_px,
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
             .workspace_x_px = workspace.x,
@@ -55433,6 +55546,54 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
 
 // SV4b — 사이드바 스크롤바를 **잡아 끌 수 있다**(그 전까지는 휠 전용이었다). capture와 드래그 기하는
 // 도크 목록과 공유하므로, 어느 쪽을 잡았는지 태그가 갈리면 **보이지 않는 목록**이 스크롤된다.
+// SV5b — 팔레트 결과 목록에 스크롤바가 생겼다(없던 것). **상태를 만들지 않는 것**이 이 슬라이스의 계약이라,
+// 막대의 위치는 selected에서 파생된 창을 그대로 따라간다.
+test "palette gets a scrollbar derived from selection, without adding scroll state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.togglePalette();
+    if (!session.chrome_host.palette.open) return error.PaletteDidNotOpen;
+    // 카탈로그 전체가 보이도록 쿼리를 비운다 — 결과가 창(max_visible)을 넘쳐야 막대가 나온다.
+    const max_visible = chrome.components.palette.max_visible;
+    if (session.palette_filtered.items.len <= max_visible) return error.PaletteFixtureDoesNotOverflow;
+
+    // ① 맨 위 선택 — 막대가 트랙 위쪽에 선다.
+    session.chrome_host.palette.selected = 0;
+    session.gpu_quads.clearRetainingCapacity();
+    session.appendPaletteScrollbar();
+    const at_top = session.gpu_quads.items.len;
+    try std.testing.expect(at_top >= 2); // track + thumb
+    // **layer는 over다.** 공용 lowering이 내는 layer 2는 모달 배경 quad에 통째로 덮여 막대가 사라진다.
+    for (session.gpu_quads.items) |q| try std.testing.expectEqual(@as(u32, 3), q.layer);
+    var top_thumb_y: f32 = 0;
+    for (session.gpu_quads.items) |q| {
+        if (q.h > 0 and q.h < @as(f32, @floatFromInt(session.backing_height_px))) top_thumb_y = @max(top_thumb_y, q.y);
+    }
+
+    // ② 마지막 항목을 선택하면 창이 끝으로 가고 **막대도 따라 내려간다** — offset이 selected에서 파생되기
+    //    때문이다. 저장된 스크롤 값이 있었다면 선택만 옮겨도 막대가 그대로였을 것이다.
+    session.chrome_host.palette.selected = session.palette_filtered.items.len - 1;
+    session.gpu_quads.clearRetainingCapacity();
+    session.appendPaletteScrollbar();
+    var bottom_thumb_y: f32 = 0;
+    for (session.gpu_quads.items) |q| {
+        if (q.h > 0 and q.h < @as(f32, @floatFromInt(session.backing_height_px))) bottom_thumb_y = @max(bottom_thumb_y, q.y);
+    }
+    try std.testing.expect(bottom_thumb_y > top_thumb_y);
+
+    // ③ **`buildPaletteRows`를 부르지 않아도** 막대가 나온다. 창을 캐시에서 읽게 했더니 그 함수가 프레임
+    //    뒤에 불려 막대가 화면에서 사라졌다 — 파생값은 호출 순서에 기대면 안 된다.
+    // ④ 팔레트가 닫히면 막대도 없다 — 다른 오버레이가 열렸을 때 stale 막대가 남으면 안 된다.
+    session.chrome_host.palette.hide();
+    session.gpu_quads.clearRetainingCapacity();
+    session.appendPaletteScrollbar();
+    try std.testing.expectEqual(@as(usize, 0), session.gpu_quads.items.len);
+}
+
 test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock list alone" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -19,6 +19,9 @@ pub const CellMetrics = struct {
     /// 좁아진다 — 스크롤바가 나타나고 사라져도 폭이 안 변해야 목록이 reflow하지 않는다
     /// (docs/scroll-area.md §4). 0이면 예약 없음(스크롤바가 카드 위에 뜨던 옛 동작).
     sidebar_scroll_gutter_px: u32 = 0,
+    /// 오버레이(팔레트·세팅) 목록 우측에서 스크롤바가 **상시** 예약하는 폭. 사이드바 gutter와 같은
+    /// 규율이다 — 막대가 나타나고 사라져도 폭이 안 변해야 목록이 reflow하지 않는다. 0이면 예약 없음.
+    overlay_scroll_gutter_px: u32 = 0,
     backing_width_px: u32,
     backing_height_px: u32,
     // 사이드바·titlebar만 뺀 전체 workspace rect. terminal·divider·전역 파일 도크를 모두 포함하며,

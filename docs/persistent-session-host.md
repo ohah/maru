@@ -924,6 +924,65 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    실제 latch를 조회하고, `Client`의 blocking/deadline RPC는 pending outbound flush 전에 같은 latch를 재검증한다.
    따라서 sibling RPC와 detach가 revoke 이전 input/control frame을 우회 flush할 수 없다. teardown 시 latch를 소비할
    retry owner가 없으면 detach RPC를 보내지 않고 connection fail-close로 host EOF lease 회수를 선택한다.
+
+   2c3c의 control은 응답 없는 stream mutation 두 종류로만 닫힌 raw-discriminator-safe `RuntimeControl` DTO다. 공개 DTO는
+   `extern struct { tag:u8, payload:RawRuntimeControlPayload }`와 `scrollToBottom|coreCommand` constructor, raw-first `decode()`만 제공한다.
+   `RawRuntimeControlPayload`는 `empty:u8|core_command:RawCoreCommand`의 extern union이고 constructor는 전체 DTO를 zero-init한 뒤 active
+   member만 쓴다. decode는 outer tag를 먼저 검사한 뒤 active member만 읽으며 inactive union bytes는 semantic seal/authority가 아니다.
+   기존 private `RawCoreCommand`와 encode/decode를 같은 leaf의 module-private 공통 substrate로 승격해 request/control이 공유하고,
+   raw codec 자체는 public API로 노출하지 않는다.
+   decode 뒤 내부 `ValidatedRuntimeControl = scroll_to_bottom|core_command:CoreCommandRequest`만 switch한다. resize·observation·selected text·link·clipboard·find·selection·mouse·notification·
+   terminate·detach처럼 response correlation이 필요한 동작은 `RuntimeRequest`와 2c3b/2c3e가 소유하며, recovery 전용
+   `resync`도 2c3c control에 섞지 않는다. `RuntimeControl`은 기존 typed `CoreCommandRequest`를 재사용하고 raw method,
+   encoded JSON, stream ID, allocator, pointer를 노출하지 않는다. exact signature는
+   `sendControl(control: RuntimeControl) -> ControlError!void`,
+   `sendControlNonBlocking(control: RuntimeControl) -> ControlError!bool`이다. `ControlError`는
+   `Busy|InvalidOwner|Unauthorized|Unsupported|ResourceExhausted|ConnectionClosed|ProtocolError`의 닫힌 집합이다.
+   `Unsupported`는 canonical capability가 해당 frame을 지원하지 않는다는 non-retryable typed reject다. connection은 live이고
+   allocator·pending owner·wire mutation은 0이다. `scroll_to_bottom`은 `async_scroll_to_bottom`, `core_command`는
+   `runtime_core_command` capability를 요구한다. nonblocking의 `false`는 오직 기존 outbound owner의 backpressure라 caller가 typed
+   control 소유권을 그대로 유지한다는 뜻이다. `true` 뒤에는 Client가
+   encoded frame의 남은 bytes를 소유하므로 partial write 뒤 자동 replay하지 않는다. blocking 성공은 앞선 pending frame을 먼저
+   flush한 뒤 새 frame을 끝까지 썼다는 뜻이며 partial/ambiguous write는 connection을 poison해 fail-close한다.
+
+   | validated control | required capability | wire kind·payload | nested policy |
+   | --- | --- | --- | --- |
+   | `scroll_to_bottom` | `async_scroll_to_bottom` | `scroll_to_bottom`, empty payload | dedicated viewport control |
+   | `core_command(command)` | `runtime_core_command` | `core_command`, canonical typed JSON | `command=.scroll_to_bottom`도 허용하며 core-command frame을 유지 |
+
+   두 형태는 wire kind를 자동 전환하거나 RPC로 fallback하지 않는다. capability에 따른 legacy fallback 선택은 `RemoteRuntime`만
+   소유한다. raw-first decode는 기존 `RawCoreCommand` encode/decode 표현을 재사용하거나 control leaf로 이동해 nested command의
+   invalid tag도 semantic union switch 전에 거부하며, 같은 command codec을 복제하지 않는다.
+
+   두 control은 canonical binding의 live controller만 허용한다. observer·revoked는 `Unauthorized`, revoke-pending 또는 active
+   cleanup/stream operation은 `Busy`이고, copied/moved/fork/foreign-thread, stale slot/node/binding과 raw lifecycle/control tag 손상은
+   Client·allocator·wire·registry mutation 전에 `InvalidOwner`로 닫는다. capability와 stream ID는 caller가 아니라 registered node
+   operation 아래 canonical Client/binding에서 읽는다. encoder allocation 실패는 새 control authority/payload owner와 queue dequeue를
+   바꾸지 않고 새 control wire를 0으로 유지한다. 다만 blocking은 ordering 때문에 encode 전에 기존 pending frame을 flush하므로 그
+   기존 owner의 offset 진전은 허용하며 재시도 때 duplicate를 만들지 않는다. blocking temporary frame은 full write 뒤 exact once free,
+   nonblocking accepted frame은 Client owner로 exact once 이전한다. 기존 `RemoteRuntime`의
+   `direct_input_offset`와 `PendingControl.barrier`가 ordering SSOT이며 facade는 별도 queue나 control authority를 만들지 않는다.
+   wire 순서는 `input prefix -> control -> input suffix`이고 buffered revoke를 sibling RPC·detach가 추월하지 못한다.
+   nonblocking encoder의 `ResourceExhausted`에서는 `RemoteRuntime`이 typed queue entry를 유지하고 dequeue·connection poison·새 control
+   wire를 모두 0으로 둬 다음 pump에서 재시도한다. 이때도 encode 전 기존 pending owner를 pump한 progress는 허용한다. blocking OOM도
+   queue를 유지하고 prior pending progress만 허용하며 새 control wire 0과 재시도 duplicate 0을 검증한다. 그 밖의 typed error를
+   backpressure로 접지 않는다.
+   facade의 `Unsupported`는 `RemoteRuntime` generation adapter 한 곳에서 기존 제품 동작인 consumed no-op으로 normalize한다.
+   nonblocking queue entry는 dequeue하고 blocking 호출은 성공 no-op으로 반환하며, 두 경우 모두 poison·wire·legacy fallback은 0이다.
+   이 adapter 밖에서는 `Unsupported`를 숨기지 않고 legacy arm은 기존 capability precheck/no-op을 유지한다. 따라서 facade의
+   unsupported/backpressure 구분은 보존하면서 사용자 가시 parity도 바뀌지 않는다.
+   C3의 blocking flush는 queue의 control을 응답 없는 stream frame으로만 보내며 `RuntimeRequest.core_command` prepare/execute로
+   fallback하지 않는다. 별도 제품 API `sendCoreCommandBlocking`의 response-bearing RPC 전환은 2c3e가 소유한다.
+
+   2c3c는 C1 facade substrate, C2 nonblocking queue 배선, C3 blocking flush 배선의 TDD gate로 나눈다. C1은 public facade와
+   `ClientSlot` canonical adapter만 열어 제품 callsite 0을 유지한다. C2/C3은 generation arm의 scroll/core direct Client 호출을
+   각각 제거하되 legacy arm의 기존 동작과 recovery-owned resync 경로는 유지한다. focused Debug·ReleaseFast gate는 control/raw nested
+   tag 0...255, controller/observer/revoke 상태, copy/move/fork/thread/stale/busy, supported/unsupported, encode OOM, zero/partial/full
+   pending write, socket failure, 1/64/65 queue, coalescing과 input-control-input ordering을 production type과 Darwin socketpair로
+   검증한다. boundary oracle은 `RuntimeControl` exact 2 variants, facade public declaration 10→12, raw method/JSON/stream/Client escape 0,
+   generation scroll/core direct Client call 0, recovery resync direct Client baseline exact 1, legacy allowlist와 registry layout delta 0을
+   고정한다. 이 gate는 event/RPC decoder,
+   `RemoteRuntime.client` 제거, resync 재설계를 완료로 주장하지 않는다.
    controller mutation authority는 caller-writable transport bool이 아니라 node-local cleanup registry의 raw-tag-guarded
    `unavailable|live|revoke_pending|revoked` 상태가 SSOT다. validated revoke는 canonical stream operation permit을 잡고
    `live -> revoke_pending`으로 input을 먼저 닫은 뒤 payload demotion과 zero/partial pending-wire fence를 수행하고, 모든 반환에서
@@ -1308,8 +1367,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    green이어야 transaction refactor를 병합한다. B3-1은 inert
    authority, B3-2는 private destination classifier, B3-3은 progress/execute, B3-4/5는 published payload의 생성과 정리 primitive,
    B3-4/5 correction은 canonical inline single-slot reusable suffix와 private substrate ownership-only settlement path를 구현·검증 완료했고,
-   B3-6은 internal aggregate strict completion을 소유한다. B3-6 전에는
-   `2c3b-3 완료`를 주장하지 않는다.
+   B3-6 internal aggregate strict completion은 별도 focused runtime 2+boundary 1 gate로 완료됐으며, 그 병합 뒤
+   `2c3b-3`을 완료로 승격했다.
 
    B3-0.4 완료 증거는 final-address harness를 공유하는 actual EOF/partial-frame와 alloc/resize ordinal, 별도 request-prepare
    ordinal, 13행 exact-field 표와 13행 전부의 제품 dispatch 또는 strict child 연결이다. pending backing drift는 실제 이전 frame flush

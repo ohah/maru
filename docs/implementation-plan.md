@@ -1306,8 +1306,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       second free 0이고 local seal/allocator/authority/rearm drift만 abnormal exit다. parent-minted stage sentinel은 free exact once,
       authority idle, evidence retire, rearm precondition을 구분하며 reset 전 fail-stop과 rearm 뒤 operation release 외 동작 0을 증명한다.
       bounded nonempty correct-id payload의 JSON/application semantic 오류는 2c3e decoder가 소유한다.
-      여기서 `empty`는 response header를 한 byte도 받기 전의 zero-byte EOF다. correct-id response의 payload 길이 0은 ownership
-      성공으로 정산·rearm하고 의미 판정은 하지 않는다. peer 행렬은 bad magic, wrong major, invalid kind, wrong request id,
+      여기서 `empty`는 response header를 한 byte도 받기 전의 zero-byte EOF다. correct-id response의 payload 길이 0도 canonical
+      accepted owner가 아니므로 process-alive protocol terminal로 정산하며 permanent tombstone, semantic read 0, rearm 0이다. peer 행렬은 bad magic, wrong major, invalid kind, wrong request id,
       header cap+1, header truncation, payload truncation, zero-byte EOF, allocation fail-index와 correct-id empty payload를 exact case로
       갖는다. correct response 뒤 같은 write에 붙은 duplicate old-id response는 첫 cycle을 정상 정산한 뒤 다음 cycle에서 correlation
       loss로 terminal되며 두 번째 payload를 RPC slot에 게시하지 않는다. host가 미래 request id와 올바른 response frame을 미리 위조하는
@@ -1315,8 +1315,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       OOM은 parser frame backing과 payload allocation/promotion까지 observer가 실제로 도달한 모든 ordinal을 최초 성공까지 전수하고,
       publication 이후에는 recoverable allocation 지점을 새로 만들지 않는다.
       isolated child 증거는 단순 panic 문자열을 성공으로 세지 않는다. parent가 별도 capability/stage pipe로 민트한
-      `{version,case_id,nonce,stage}` fixed record의 `free_once -> authority_idle -> evidence_retired -> rearm_precondition` exact prefix와
-      case별 final sentinel, 예상 abnormal termination을 함께 검증한다. exec 126/127, capability/nonce mismatch, generic panic, stage
+      `{version,case_id,nonce,stage}` fixed record의 case별 exact prefix와 final sentinel, 예상 abnormal termination을 함께 검증한다.
+      response seal/allocator drift는 `free_once` 뒤, authority drift는 permit 준비 뒤, rearm drift는
+      `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. exec 126/127, capability/nonce mismatch, generic panic, stage
       누락·중복·역전은 실패다. parent는 stderr와 stage pipe를 child 종료 전 nonblocking으로 함께 drain하고 capture cap 뒤에도 EOF까지
       discard-drain하며 truncation은 실패 처리한다. absolute timeout은 kill 뒤 waitpid exact once로 닫는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는

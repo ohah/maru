@@ -1187,13 +1187,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `/usr/bin/env -i`, 독립 parent-minted pipe capability, inert collector, exact-count zero-test 방지를 적용하고
   `MARU_SESSION_HOST_RPC_REUSE_EXEC|MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC`의 closed 3-mode를 교차 수용하지 않는다.
   bounded nonempty correct-id payload의 JSON/application semantic 오류는 payload semantic read 0인 이 gate가 아니라 2c3e decoder가 소유한다.
-  peer matrix의 `empty`는 header 전 zero-byte EOF이며 correct-id zero-length payload는 ownership-only success+rearm이다. exact cases는
+  peer matrix의 `empty`는 header 전 zero-byte EOF이며 correct-id zero-length payload도 canonical accepted owner가 아니므로
+  process-alive protocol terminal+permanent tombstone+semantic read 0+rearm 0이다. exact cases는
   bad magic, wrong major, invalid kind, wrong request id, declared cap+1, truncated header, truncated payload, zero-byte EOF, 실제 response
   allocation ordinal 전수, correct-id empty payload와 correct response 뒤 coalesced duplicate old-id다. duplicate는 첫 cycle 뒤 다음
   cycle correlation loss로 terminal되고 두 번째 publication/free/rearm 0을 검증한다. 미래 request id의 완전한 response 선송신은
   정상 future response와 wire상 구분 불가능한 compromised-peer 비목표다.
-  isolated child는 parent-minted `{version,case_id,nonce,stage}` fixed record의 `free_once -> authority_idle -> evidence_retired ->
-  rearm_precondition -> case_final` exact 순서와 예상 abnormal termination이 함께 맞아야 한다. stderr marker 단독, exec 126/127,
+  isolated child는 parent-minted `{version,case_id,nonce,stage}` fixed record의 case별 exact prefix+final sentinel과 예상 abnormal termination이
+  함께 맞아야 한다. response seal/allocator drift는 `free_once` 뒤, authority drift는 permit 준비 뒤, rearm drift는
+  `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. stderr marker 단독, exec 126/127,
   capability/nonce mismatch, generic panic, stage 누락·중복·역전은 실패다. stderr/stage pipe는 child 종료 전 동시에 nonblocking drain하며
   capture cap 이후에도 discard-drain하고 overflow/truncation은 실패, absolute timeout 뒤 kill+waitpid exact once를 검증한다.
   B3-0a·B3-0·B3-1·B3-2·B3-3·B3-4/5 correction은 완료됐고 B3-6 internal aggregate strict completion은

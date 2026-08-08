@@ -19,9 +19,27 @@ const budgets = struct {
     // 구조 회귀(2배+)는 잡는다 — perf는 머신 의존이라 budget 여유가 원칙(opt-in/required 양쪽).
     const core_resize_loop_ns = 2 * std.time.ns_per_s;
     const snapshot_serialize_ns = 1 * std.time.ns_per_s;
-    // 재-wrap은 "resize 후 처음 과거를 보는 순간" 1회 비용이다(지연 마크). cap(1000행) 기준
-    // 회당 ~30ms(행당 free+alloc+복사) — 60fps 두 프레임으로 사용자 체감이 없는 수준이고, 50회
-    // 예산 2s는 회당 40ms를 상한으로 고정한다(행 버퍼 풀링 등 구조 변경으로 더 줄이는 건 후속).
+    // 재-wrap은 "resize 후 처음 과거를 보는 순간" 1회 비용이다(지연 마크). 50회 예산 2s는 회당
+    // 40ms를 상한으로 고정한다. 실측(2026-08, cap 1000행)은 **빌드 모드마다 두 자릿수 배 다르므로**
+    // 모드를 함께 적는다: 제품 빌드(ReleaseFast, macOS)는 회당 **0.16ms**라 사용자 체감이 없고,
+    // 이 게이트가 실제로 도는 CI Debug(ubuntu-latest)는 회당 ~10.5ms로 예산의 26%(12 run max 기준
+    // 30%)를 쓴다. 같은 Debug라도 macOS 로컬은 회당 ~38ms다.
+    //
+    // 위 "회당 ~30ms"는 원래 빌드 모드 표기 없이 적혀 있었다. 그 값이 어느 모드였는지 확인하려고
+    // 스크롤백 저장 구조 개선 직전 커밋(ff76af1c^ = d8700899)에서 같은 벤치를 돌려 봤더니 Debug
+    // 1795ms/50 = 회당 35.9ms, ReleaseFast 8ms/50 = 회당 0.16ms였다. 즉 옛 값은 **Debug 실측**이고
+    // 지금도 그 대역(38.9ms)이다 — 옛 숫자 자체는 stale이 아니었고, 모드를 안 적어 "60fps 두 프레임"
+    // 이라는 제품 체감 해석에 Debug 숫자가 쓰인 것이 문제였다(결론은 맞지만 근거가 어긋났다).
+    //
+    // 같은 측정이 부수적으로 확인해 준 것: page+pool -> per-row-descriptor arena -> mmap page_allocator
+    // backing(§11 A1·A2·P4, 2026-06-23)은 rewrap **속도**를 바꾸지 않았다(ReleaseFast 0.16ms 전후 동일,
+    // Debug는 35.9 -> 38.9ms). 그 슬라이스들의 목적은 메모리 구조였으므로 모순은 아니다. 속도 개선을
+    // 이 게이트의 공로로 적지 않는다.
+    //
+    // Debug에서 macOS가 Linux보다 3.6배 느린 것은 다른 벤치(대개 Linux 쪽이 1.4~1.8배 느리다)와
+    // 반대 방향이다. 행마다 free+alloc하고 페이지를 pool로 회수/재할당하는 경로라 allocator 차이가
+    // 의심되지만 확증하지 않았다. Maru는 macOS-first인데 이 게이트는 Linux에서만 도므로, 제품
+    // 플랫폼의 Debug 비용은 CI가 보는 값보다 크다는 사실만 기록해 둔다(원인 규명은 별건).
     const scrollback_rewrap_ns = 2 * std.time.ns_per_s;
     // 스크롤백 Find(findMatches)는 검색어 키 입력마다, 그리고 Find가 열린 채 출력이 있는 매 tick마다
     // core lock 아래에서 스크롤백 전체를 재스캔한다(app_session/find.zig `recomputeFind`,

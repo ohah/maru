@@ -1052,7 +1052,30 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   allocator·payload·response publication·RPC epoch mint가 없으며 Debug·ReleaseFast exact-count focused gate와 boundary/source oracle이 이를
   고정한다. verdict는 permit이 아니며 B3-3은 pre-flush `.prepared`, begin-execute 뒤 post-flush `.executing` transcript를 같은 receipt로
   각각 새로 resolve해 동일 classifier를 재호출한다.
-  B3-3은 Darwin socketpair, B3-4/5는 published payload의 생성·정리 경로를 같은 merge gate로 여는 production-type+source oracle,
+  B3-3의 완료 증거는 caller-final storage에 Client가 in-place 초기화·seal하는 `PreparedRequestExecutionLease`와 closed
+  `PreparedRequestWireProgress{request_zero_clean,prior_pending_ambiguous,request_maybe_written}`가 lifecycle/error/byte-count
+  추론 없이 pending flush와 새 request의 positive write에서만 단조 전이하는지 검증한다. exact 제품-shaped 순서는
+  `preparedRpcAdmission→initPreparedRpcExecutionTxn+defer→reserveRpcResponseExecution→beginPreparedRequestExecute→beginPreparedRequestExecution→executingRpcAdmission→
+  first tracked write`이며 pre/post classifier는 같은 canonical resolver를 exact 1회씩 사용하고 post verdict 저장은 0이다.
+  reusable rollback은 prior ambiguity 0을 포함한 `request_zero_clean && Client usable`의 교집합에서만 prepared backing exact free와 RPC
+  authority `executing→idle`을 함께 게시한다. prior pending partial, request positive write, closed/poisoned Client와 epoch 소진은 terminal이다.
+  Debug·ReleaseFast focused gate는 progress raw/monotonic 전수, 두 authority의 reserve/rollback/terminal, receipt/stream/role/controller/
+  destination/registry ABA post-flush drift와 pending-free callback의 same/foreign reentry를 고정한다. callback 뒤 allocator/parser/
+  lease/prepared/RPC/poison one-field drift는 frozen exact-one free 뒤 request write·second free 0, 양 authority terminal, fail-close를
+  검증한다. Darwin socketpair는 작은 `SO_SNDBUF`와 peer drain/close로 actual kernel의 pending/request zero·positive partial·full 및
+  EOF/EPIPE를 관측하고 peer parser가 prior frame과 새 request prefix/full을 분리한다. exact 1/len-1, EINTR retry, EAGAIN/zero/hard
+  error 조합은 injected write ops로 결정적으로 전수한다. boundary는 legacy `writeAll` request call 0, pre/post admission과 RPC
+  authority 전이 allowlist, post-classifier 뒤 first-write adjacency, public RPC destination·response publish/borrow 0을 고정한다.
+  B3-3에서는 correlated response를 제품 publish하지 않고 peer가 exact request를 읽은 뒤 EOF를 내는 test-private terminal sink만 쓴다.
+  caller-final pristine `RpcExecutedResponse`의 exact address/range/disjoint를 response reserve 전에 txn이 봉인하고 payload/publication
+  API 0을 유지하는지 검증한다. final-address `PreparedRpcExecutionTxn`이 reserve 전에 mutation 0으로 초기화+defer 설치되고 기존 request
+  transaction을 재사용하며 response canonical과 `pristine|response_reserved|settled` phase만 합성하는지,
+  모든 실패에서 request cleanup이 response rollback/terminal보다 먼저 끝나는지, 별도 request-free 구현과 progress bool/cached verdict가
+  0인지도 source oracle과 callback reentry로 검증한다. B3-3 private production wrapper의 fixture caller는 exact-count하되 테스트 밖 제품
+  caller와 public ABI delta는 0이다. Darwin fixture는 exact private product wrapper만 1회 호출하고 Client lease/raw write leaf 직접
+  호출은 0이며, wrapper 결과로 prepared/RPC authority terminal, epoch burn, connection poison, request backing final-zero를 단언한다.
+  lease 내부 신규 mutex/atomic/TLS는 0이고 기존 Client mutation fence를 exact once 획득·해제한다.
+  B3-4/5는 published payload의 생성·정리 경로를 같은 merge gate로 여는 production-type+source oracle,
   B3-6은 production strict-wrapper subprocess까지 증거 수준을
   높인다. B3-4/5는 `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift, decoder raw-slice exact allowlist를
   추가로 닫는다. B3-0a·B3-0·B3-1·B3-2는 완료됐고 B3-3~B3-4/5는 후속이며, 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. B3-1은

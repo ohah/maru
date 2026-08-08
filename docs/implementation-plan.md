@@ -1190,8 +1190,29 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       expected lifecycle `.prepared`, `beginPreparedRequestExecute` 뒤 flush 후 `.executing`으로 같은 receipt의 canonical transcript와
       current entry를 각각 새로 resolve해 동일 classifier를 다시 호출하며 post-flush 결과만 first-byte 권위로 쓴다. Debug·ReleaseFast
       registry 3개와 product 2개, boundary 1개를 합친 exact 11-test focused gate와 전체 session-host 회귀가 완료 증거이며 다음 단계는 B3-3이다.
-   5. **B3-3 progress/execute integration:** closed wire-progress evidence, RPC authority reserve, pending flush 뒤 재검증과 first-byte
-      경계를 Darwin socketpair로 닫는다. request bytes 0이고 prior pending ambiguity도 0인 경우만 reusable rollback한다.
+   5. **B3-3 progress/execute integration:** caller-final storage에 Client가 in-place 초기화·seal하는
+      `PreparedRequestExecutionLease`와 closed
+      `PreparedRequestWireProgress{request_zero_clean,prior_pending_ambiguous,request_maybe_written}`의 유일한 생산자가
+      된다. error/lifecycle에서 progress를 추론하거나 byte count·bool을 caller가 permit처럼 재주입하지 않는다. exact 순서는
+      registry `preparedRpcAdmission(.prepared)` → `initPreparedRpcExecutionTxn`+defer 설치 → registry-owned `reserveRpcResponseExecution` →
+      `beginPreparedRequestExecute` → Client `beginPreparedRequestExecution`의 pending flush+lease → registry
+      `executingRpcAdmission(.executing)` → callback/allocation 없는 lease consume+첫 request write다. post-flush verdict는 저장하지 않고
+      first-byte 직전에 같은 classifier로 canonical transcript를 새로 resolve한다. reusable rollback은 오직
+      `request_zero_clean && Client usable`에서 request backing abort와 RPC authority `executing→idle`을
+      함께 끝낼 때 허용한다. prior pending partial/ambiguous, 첫 request positive write, closed/poisoned Client, epoch 소진은
+      RPC authority terminal+connection fail-close로 닫는다. B3-3에서는 correlated response publication을 열지 않고 Darwin
+      socketpair peer가 exact request를 관측한 뒤 EOF를 내는 terminal sink로 first-byte/complete-write 경계만 증명한다.
+      private caller-final pristine `RpcExecutedResponse` destination을 txn이 봉인하되 payload/publication API는 0으로 유지한다.
+      focused Debug·ReleaseFast gate는 progress raw/monotonic 전수, pre/post classifier와 authority reserve/rollback/terminal,
+      pending cleanup callback 재진입을 고정한다. macOS socketpair gate는 pending 0/partial/full, request 0/1/len-1/full,
+      actual kernel의 zero/positive-partial/full과 EOF/EPIPE를 관측한다. exact 1/len-1·EINTR/EAGAIN/zero/hard error는 injected write ops가
+      결정적으로 전수한다. boundary는 pre/post classifier exact 1회, first-write adjacency,
+      legacy writeAll·public RPC destination·response publish/borrow 0을 강제한다. private final-address
+      `PreparedRpcExecutionTxn` 하나가 기존 `PreparedExecutionTxn`과 RPC canonical을 합성해
+      `pristine→response_reserved→settled`의 닫힌 phase와 request-cleanup 선행 뒤 response rollback/terminal 순서만 소유한다. request
+      phase는 내장 txn, wire phase는 lease progress만 조회하며 중복 저장하지 않는다. 합성 txn은 response reserve 전에 mutation 0으로
+      초기화되고 즉시 defer 보호를 얻는다. request backing 정리 구현을 복제하지 않는다. B3-3 내부 production 타입/함수는 test
+      fixture가 exact private wrapper를 호출하지만 테스트 밖 제품 caller는 B3-6 전까지 0이다.
    6. **B3-4/5 원자적 publication+borrow/finish:** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
       stack-final response publish, exact safe-free/ambiguous no-free,
       `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다.

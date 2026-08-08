@@ -196,7 +196,15 @@ jobs:
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    # **PR에서는 안 돈다 — main push에서만.** Debug와 같은 테스트를 도는 게 아니라 *다른 실행 체제*다:
+    # ReleaseFast는 런타임 안전 검사가 꺼져 Debug가 트랩하던 UB가 진짜 UB가 되고, 코드가 빨라져
+    # fork/exec·소켓·스레딩의 인터리빙도 달라진다. 그래서 없앨 수 없고 **시점만 뒤로 옮긴다**.
+    #
+    # 대가는 명시적이다: PR이 초록이어도 머지 뒤 이 잡이 빨개질 수 있다. 대신 PR마다 8분을 돌려받는다
+    # (실측: 잡 8개 합계 24분 46초 중 이 잡 하나가 8분 14초).
+    # ⚠️ 이 잡은 branch protection의 **필수 체크**였다 — PR에서 안 돌게 하려면 그 목록에서도 빼야 한다
+    # (필수인데 실행되지 않으면 PR이 영영 pending으로 막힌다). 이 PR과 함께 설정을 바꾼다.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:

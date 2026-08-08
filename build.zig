@@ -2173,6 +2173,23 @@ pub fn build(b: *std.Build) void {
         run_b3_4_5_registry_tests.addArg("--maru-expect-tests=3");
         run_b3_4_5_registry_tests.setCwd(b.path("."));
         session_host_b3_4_5_step.dependOn(&run_b3_4_5_registry_tests.step);
+
+        const b3_4_5_client_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3-4/5 response-only"},
+        });
+        const run_b3_4_5_client_tests = b.addRunArtifact(b3_4_5_client_tests);
+        run_b3_4_5_client_tests.addArg("--maru-expect-tests=4");
+        run_b3_4_5_client_tests.setCwd(b.path("."));
+        session_host_b3_4_5_step.dependOn(&run_b3_4_5_client_tests.step);
     }
     if (target.result.os.tag == .macos) {
         const ended_purge_orchestration_drift_test = addProjectTest(b, .{

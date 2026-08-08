@@ -191,6 +191,7 @@ pub const GenerationTransport = struct {
         if (!self.requestIdentityValid()) return error.MovedOrCopied;
         return client_slot_mod.executeGenerationRequest(.{
             .request = self.requestOperation(receipt),
+            .bound_stream_id = self.bound_stream_id,
             .response_out_addr = @intFromPtr(response_out),
             .owner_addr = self.owner_addr,
             .owner_size = self.owner_size,

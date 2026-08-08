@@ -32,6 +32,38 @@ const ControllerAuthority = enum(u8) {
     revoked,
 };
 
+const AdmissionContext = enum(u8) {
+    prepare,
+    execute_attach,
+    execute_rpc,
+};
+
+pub const AdmissionDecision = enum {
+    allowed,
+    unauthorized,
+    busy,
+};
+
+pub const AdmissionError = error{
+    InvalidOwner,
+    InvalidReceipt,
+    InvalidResponseDestination,
+};
+
+pub const PreparedAdmission = struct {
+    canonical: prepared_request_authority.Prepared,
+    decision: AdmissionDecision,
+};
+
+const PolicyResult = enum {
+    allowed,
+    unauthorized,
+    busy,
+    invalid_owner,
+    invalid_receipt,
+    invalid_destination,
+};
+
 fn registryLifecycleRawValid(value: *const RegistryLifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
     return raw <= @intFromEnum(RegistryLifecycle.dead);
@@ -320,7 +352,24 @@ pub const AttachmentCleanupRegistry = struct {
         receipt: contract.PreparedCallReceipt,
         expected_lifecycle: prepared_request_authority.Lifecycle,
     ) Error!?prepared_request_authority.Prepared {
-        const authority = &(try self.exactEntry(reservation, identity)).prepared_request;
+        const entry = try self.exactEntry(reservation, identity);
+        return requestForReceiptInEntry(
+            entry,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            expected_lifecycle,
+        );
+    }
+
+    fn requestForReceiptInEntry(
+        entry: *const Entry,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+        expected_lifecycle: prepared_request_authority.Lifecycle,
+    ) ?prepared_request_authority.Prepared {
+        const authority = &entry.prepared_request;
         if (!authority.rawLifecycleValid() or authority.lifecycle != expected_lifecycle or
             authority.prepared_present != 1)
             return null;
@@ -360,33 +409,82 @@ pub const AttachmentCleanupRegistry = struct {
             entry.prepared_request.settleReusable(prepared) catch return error.InvalidState;
     }
 
-    pub fn requestAuthorized(
+    pub fn requestDecision(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
         identity: contract.BindingIdentity,
         family: contract.RequestFamily,
         tag: contract.RuntimeRequestTag,
         bound_stream_id: u64,
-    ) Error!bool {
+    ) Error!AdmissionDecision {
         const entry = try self.exactEntry(reservation, identity);
-        if (!contract.requestFamilyRawValid(&family) or
-            !contract.runtimeRequestTagRawValid(&tag) or
-            !contract.requestFamilyAllowed(tag, family) or
-            !controllerAuthorityRawValid(&entry.controller_authority))
-            return error.InvalidState;
-        return switch (family) {
-            .connection_only_denied => false,
-            .attach_only => tag == .attach_controller and entry.lifecycle == .reserved and
-                entry.stream_id == 0 and bound_stream_id == 0 and identity.role == .controller,
-            .bound_observation => entry.lifecycle == .bound and entry.stream_id != 0 and
-                entry.stream_id == bound_stream_id,
-            .bound_controller_mutation => entry.lifecycle == .bound and entry.stream_id != 0 and
-                entry.stream_id == bound_stream_id and identity.role == .controller and
-                entry.controller_authority == .live,
-            .bound_terminal => entry.lifecycle == .bound and entry.stream_id != 0 and
-                entry.stream_id == bound_stream_id and
-                (tag == .detach or (tag == .terminate and identity.role == .controller and
-                    entry.controller_authority == .live)),
+        return switch (classifyEntryPolicy(
+            entry,
+            identity,
+            family,
+            tag,
+            bound_stream_id,
+            .prepare,
+        )) {
+            .allowed => .allowed,
+            .unauthorized => .unauthorized,
+            .busy => .busy,
+            .invalid_owner, .invalid_receipt, .invalid_destination => error.InvalidState,
+        };
+    }
+
+    pub fn preparedAttachAdmission(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+        bound_stream_id: u64,
+    ) AdmissionError!PreparedAdmission {
+        return self.classifyRequestAdmission(
+            reservation,
+            identity,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            bound_stream_id,
+            .prepared,
+            .execute_attach,
+        );
+    }
+
+    fn classifyRequestAdmission(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+        bound_stream_id: u64,
+        expected_lifecycle: prepared_request_authority.Lifecycle,
+        context: AdmissionContext,
+    ) AdmissionError!PreparedAdmission {
+        if (!admissionContextRawValid(&context)) return error.InvalidResponseDestination;
+        const entry = self.exactEntry(reservation, identity) catch return error.InvalidOwner;
+        const maybe_canonical = requestForReceiptInEntry(
+            entry,
+            transport_addr,
+            transport_incarnation,
+            receipt,
+            expected_lifecycle,
+        );
+        const canonical = maybe_canonical orelse return error.InvalidReceipt;
+        return .{
+            .canonical = canonical,
+            .decision = try policyDecision(classifyEntryPolicy(
+                entry,
+                identity,
+                canonical.family,
+                canonical.tag,
+                bound_stream_id,
+                context,
+            )),
         };
     }
 
@@ -572,6 +670,86 @@ pub const AttachmentCleanupRegistry = struct {
     }
 };
 
+fn admissionContextRawValid(value: *const AdmissionContext) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(AdmissionContext.execute_rpc);
+}
+
+fn policyDecision(result: PolicyResult) AdmissionError!AdmissionDecision {
+    return switch (result) {
+        .allowed => .allowed,
+        .unauthorized => .unauthorized,
+        .busy => .busy,
+        .invalid_owner => error.InvalidOwner,
+        .invalid_receipt => error.InvalidReceipt,
+        .invalid_destination => error.InvalidResponseDestination,
+    };
+}
+
+fn classifyEntryPolicy(
+    entry: *const Entry,
+    identity: contract.BindingIdentity,
+    family: contract.RequestFamily,
+    tag: contract.RuntimeRequestTag,
+    bound_stream_id: u64,
+    context: AdmissionContext,
+) PolicyResult {
+    if (!admissionContextRawValid(&context)) return .invalid_destination;
+    if (!entryLifecycleRawValid(&entry.lifecycle) or
+        !controllerAuthorityRawValid(&entry.controller_authority) or
+        !contract.attachmentRoleRawValid(&identity.role))
+        return .invalid_owner;
+    if (!contract.requestFamilyRawValid(&family) or
+        !contract.runtimeRequestTagRawValid(&tag) or
+        !contract.requestFamilyAllowed(tag, family))
+        return .invalid_receipt;
+    if (family == .connection_only_denied) return .unauthorized;
+
+    const destination_matches = switch (context) {
+        .prepare => true,
+        .execute_attach => family == .attach_only,
+        .execute_rpc => family != .attach_only,
+    };
+    if (!destination_matches) return .invalid_destination;
+
+    return switch (family) {
+        .connection_only_denied => .unauthorized,
+        .attach_only => if (tag == .attach_controller and entry.lifecycle == .reserved and
+            entry.stream_id == 0 and bound_stream_id == 0 and identity.role == .controller and
+            entry.controller_authority == .unavailable)
+            .allowed
+        else
+            .unauthorized,
+        .bound_observation => if (entry.lifecycle == .bound and entry.stream_id != 0 and
+            entry.stream_id == bound_stream_id and
+            ((identity.role == .observer and entry.controller_authority == .unavailable) or
+                (identity.role == .controller and entry.controller_authority != .unavailable)))
+            .allowed
+        else
+            .unauthorized,
+        .bound_controller_mutation => if (entry.lifecycle == .bound and entry.stream_id != 0 and
+            entry.stream_id == bound_stream_id and identity.role == .controller and
+            entry.controller_authority == .live)
+            .allowed
+        else
+            .unauthorized,
+        .bound_terminal => if (tag == .detach and entry.lifecycle == .bound and
+            entry.stream_id != 0 and entry.stream_id == bound_stream_id and
+            identity.role == .controller and entry.controller_authority == .revoke_pending)
+            .busy
+        else if (entry.lifecycle == .bound and entry.stream_id != 0 and
+            entry.stream_id == bound_stream_id and
+            ((tag == .detach and identity.role == .observer and
+                entry.controller_authority == .unavailable) or
+                (identity.role == .controller and entry.controller_authority == .live) or
+                (tag == .detach and identity.role == .controller and
+                    entry.controller_authority == .revoked)))
+            .allowed
+        else
+            .unauthorized,
+    };
+}
+
 fn childAuthoritiesSettled(entry: *const Entry, registry_incarnation: u64) bool {
     const identity = currentEntryBinding(entry, registry_incarnation) orelse return false;
     return entry.transport_owner.settledExact() and entry.response_owner.settledExact() and
@@ -624,6 +802,40 @@ fn fixtureSeed(destination_addr: usize, binding_incarnation: u64) ReserveIdentit
         .role = .controller,
         .pid = 17,
         .process_nonce = 19,
+    };
+}
+
+fn fixturePrepared(
+    binding: contract.BindingIdentity,
+    tag: contract.RuntimeRequestTag,
+    family: contract.RequestFamily,
+    transport_addr: usize,
+    transport_incarnation: u64,
+    request_id: u64,
+) prepared_request_authority.Prepared {
+    const receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = transport_incarnation,
+        .request_id = request_id,
+        .request_digest = request_id + 1,
+    }).?;
+    return .{
+        .transport_addr = transport_addr,
+        .transport_incarnation = transport_incarnation,
+        .binding = binding,
+        .tag = tag,
+        .family = family,
+        .receipt = receipt,
+        .descriptor = .{
+            .storage_addr = request_id + 2,
+            .prepared_incarnation = request_id + 3,
+            .client_addr = request_id + 4,
+            .request_id = request_id,
+            .request_digest = request_id + 1,
+            .frame_addr = request_id + 5,
+            .frame_len = 1,
+            .allocator_ptr = request_id + 6,
+            .allocator_vtable = request_id + 7,
+        },
     };
 }
 
@@ -857,6 +1069,431 @@ test "B3-1 registry footprint drop and empty corruption gates are bounded" {
     corrupt.entries[0].rpc_response_authority.next_epoch = 1;
     try std.testing.expectEqual(DeinitOutcome.corrupt, corrupt.preflightDeinit());
 }
+
+test "B3-2 private destination admission resolves canonical receipt and never mutates authority" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB320);
+    const reserved = try registry.reserve(fixtureSeed(0xB321, 0xB322));
+    const attach = fixturePrepared(
+        reserved.identity,
+        .attach_controller,
+        .attach_only,
+        0xB323,
+        0xB324,
+        0xB325,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, attach);
+    const before_attach = registry;
+    try std.testing.expectEqual(AdmissionDecision.allowed, (try registry.preparedAttachAdmission(
+        reserved.reservation,
+        reserved.identity,
+        attach.transport_addr,
+        attach.transport_incarnation,
+        attach.receipt,
+        0,
+    )).decision);
+    try std.testing.expectError(error.InvalidResponseDestination, registry.classifyRequestAdmission(
+        reserved.reservation,
+        reserved.identity,
+        attach.transport_addr,
+        attach.transport_incarnation,
+        attach.receipt,
+        0,
+        .prepared,
+        .execute_rpc,
+    ));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&before_attach),
+        std.mem.asBytes(&registry),
+    ));
+    try registry.beginPreparedRequestExecute(reserved.reservation, reserved.identity, attach);
+    try std.testing.expectEqual(AdmissionDecision.allowed, (try registry.classifyRequestAdmission(
+        reserved.reservation,
+        reserved.identity,
+        attach.transport_addr,
+        attach.transport_incarnation,
+        attach.receipt,
+        0,
+        .executing,
+        .execute_attach,
+    )).decision);
+    try registry.settlePreparedRequest(reserved.reservation, reserved.identity, attach, false);
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB326);
+
+    const observation = fixturePrepared(
+        reserved.identity,
+        .observation,
+        .bound_observation,
+        attach.transport_addr,
+        attach.transport_incarnation,
+        0xB327,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, observation);
+    const before_observation = registry;
+    try std.testing.expectError(error.InvalidResponseDestination, registry.preparedAttachAdmission(
+        reserved.reservation,
+        reserved.identity,
+        observation.transport_addr,
+        observation.transport_incarnation,
+        observation.receipt,
+        0xB326,
+    ));
+    try std.testing.expectEqual(AdmissionDecision.allowed, (try registry.classifyRequestAdmission(
+        reserved.reservation,
+        reserved.identity,
+        observation.transport_addr,
+        observation.transport_incarnation,
+        observation.receipt,
+        0xB326,
+        .prepared,
+        .execute_rpc,
+    )).decision);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        std.mem.asBytes(&before_observation),
+        std.mem.asBytes(&registry),
+    ));
+    try registry.settlePreparedRequest(reserved.reservation, reserved.identity, observation, false);
+
+    const detach = fixturePrepared(
+        reserved.identity,
+        .detach,
+        .bound_terminal,
+        attach.transport_addr,
+        attach.transport_incarnation,
+        0xB328,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, detach);
+    try registry.beginControllerRevoke(reserved.reservation, reserved.identity, 0xB326);
+    try std.testing.expectEqual(AdmissionDecision.busy, try registry.requestDecision(
+        reserved.reservation,
+        reserved.identity,
+        .bound_terminal,
+        .detach,
+        0xB326,
+    ));
+    try std.testing.expectEqual(AdmissionDecision.busy, (try registry.classifyRequestAdmission(
+        reserved.reservation,
+        reserved.identity,
+        detach.transport_addr,
+        detach.transport_incarnation,
+        detach.receipt,
+        0xB326,
+        .prepared,
+        .execute_rpc,
+    )).decision);
+    try registry.finishControllerRevoke(reserved.reservation, reserved.identity, 0xB326);
+    try std.testing.expectEqual(AdmissionDecision.allowed, (try registry.classifyRequestAdmission(
+        reserved.reservation,
+        reserved.identity,
+        detach.transport_addr,
+        detach.transport_incarnation,
+        detach.receipt,
+        0xB326,
+        .prepared,
+        .execute_rpc,
+    )).decision);
+    try registry.settlePreparedRequest(reserved.reservation, reserved.identity, detach, false);
+    try registry.beginBoundDrop(reserved.reservation, reserved.identity, 0xB326);
+    try registry.completeActiveDrop(reserved.reservation, reserved.identity, 0xB326);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "B3-2 private destination admission exhausts context policy and raw discriminants" {
+    const tags = std.enums.values(contract.RuntimeRequestTag);
+    const families = std.enums.values(contract.RequestFamily);
+    const contexts = std.enums.values(AdmissionContext);
+    const lifecycles = std.enums.values(EntryLifecycle);
+    const roles = std.enums.values(contract.AttachmentRole);
+    const authorities = std.enums.values(ControllerAuthority);
+    const streams = [_]u64{ 0, 0xA, 0xB };
+
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB330);
+    const reserved = try registry.reserve(fixtureSeed(0xB331, 0xB332));
+    const entry = &registry.entries[reserved.reservation.entry_index];
+    for (tags) |tag| for (families) |family| for (contexts) |context| for (lifecycles) |lifecycle| for (roles) |role| for (authorities) |authority| for (streams) |entry_stream| for (streams) |current_stream| {
+        var identity = reserved.identity;
+        identity.role = role;
+        entry.lifecycle = lifecycle;
+        entry.stream_id = entry_stream;
+        entry.controller_authority = authority;
+        const before = entry.*;
+        const actual = classifyEntryPolicy(entry, identity, family, tag, current_stream, context);
+        const expected = expectedAdmission(lifecycle, role, authority, family, tag, entry_stream, current_stream, context);
+        try std.testing.expectEqual(expected, actual);
+        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(entry)));
+    };
+
+    var context: AdmissionContext = .prepare;
+    const context_raw: *u8 = @ptrCast(&context);
+    var raw: u16 = @intFromEnum(AdmissionContext.execute_rpc) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        context_raw.* = @intCast(raw);
+        try std.testing.expectEqual(PolicyResult.invalid_destination, classifyEntryPolicy(
+            entry,
+            reserved.identity,
+            .attach_only,
+            .attach_controller,
+            0,
+            context,
+        ));
+    }
+
+    entry.lifecycle = .reserved;
+    entry.stream_id = 0;
+    entry.controller_authority = .unavailable;
+    var invalid_lifecycle: EntryLifecycle = .reserved;
+    raw = @intFromEnum(EntryLifecycle.drop_active) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        @as(*u8, @ptrCast(&invalid_lifecycle)).* = @intCast(raw);
+        entry.lifecycle = invalid_lifecycle;
+        try std.testing.expectEqual(PolicyResult.invalid_owner, classifyEntryPolicy(
+            entry,
+            reserved.identity,
+            .attach_only,
+            .attach_controller,
+            0,
+            .prepare,
+        ));
+    }
+
+    entry.lifecycle = .reserved;
+    var invalid_authority: ControllerAuthority = .unavailable;
+    raw = @intFromEnum(ControllerAuthority.revoked) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        @as(*u8, @ptrCast(&invalid_authority)).* = @intCast(raw);
+        entry.controller_authority = invalid_authority;
+        try std.testing.expectEqual(PolicyResult.invalid_owner, classifyEntryPolicy(
+            entry,
+            reserved.identity,
+            .attach_only,
+            .attach_controller,
+            0,
+            .prepare,
+        ));
+    }
+
+    entry.controller_authority = .unavailable;
+    var invalid_role: contract.AttachmentRole = .controller;
+    raw = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        @as(*u8, @ptrCast(&invalid_role)).* = @intCast(raw);
+        var identity = reserved.identity;
+        identity.role = invalid_role;
+        try std.testing.expectEqual(PolicyResult.invalid_owner, classifyEntryPolicy(
+            entry,
+            identity,
+            .attach_only,
+            .attach_controller,
+            0,
+            .prepare,
+        ));
+    }
+
+    var invalid_tag: contract.RuntimeRequestTag = .attach_controller;
+    raw = @intFromEnum(contract.RuntimeRequestTag.detach) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        @as(*u8, @ptrCast(&invalid_tag)).* = @intCast(raw);
+        try std.testing.expectEqual(PolicyResult.invalid_receipt, classifyEntryPolicy(
+            entry,
+            reserved.identity,
+            .attach_only,
+            invalid_tag,
+            0,
+            .prepare,
+        ));
+    }
+
+    var invalid_family: contract.RequestFamily = .attach_only;
+    raw = @intFromEnum(contract.RequestFamily.bound_terminal) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        @as(*u8, @ptrCast(&invalid_family)).* = @intCast(raw);
+        try std.testing.expectEqual(PolicyResult.invalid_receipt, classifyEntryPolicy(
+            entry,
+            reserved.identity,
+            invalid_family,
+            .attach_controller,
+            0,
+            .prepare,
+        ));
+    }
+
+    entry.lifecycle = .reserved;
+    entry.stream_id = 0;
+    entry.controller_authority = .unavailable;
+    try registry.abort(reserved.reservation, reserved.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "B3-2 private destination admission rejects canonical splice and same-address ABA without mutation" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB340);
+    const reserved = try registry.reserve(fixtureSeed(0xB341, 0xB342));
+    const prepared = fixturePrepared(
+        reserved.identity,
+        .attach_controller,
+        .attach_only,
+        0xB343,
+        0xB344,
+        0xB345,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+
+    const before = registry;
+    inline for (std.meta.fields(contract.BindingIdentity)) |field| {
+        var foreign_identity = reserved.identity;
+        if (field.type == contract.AttachmentRole)
+            @field(foreign_identity, field.name) = .observer
+        else
+            @field(foreign_identity, field.name) +%= 1;
+        try std.testing.expectError(error.InvalidOwner, registry.preparedAttachAdmission(
+            reserved.reservation,
+            foreign_identity,
+            prepared.transport_addr,
+            prepared.transport_incarnation,
+            prepared.receipt,
+            0,
+        ));
+    }
+    inline for (std.meta.fields(Reservation)) |field| {
+        var foreign_reservation = reserved.reservation;
+        @field(foreign_reservation, field.name) +%= 1;
+        try std.testing.expectError(error.InvalidOwner, registry.preparedAttachAdmission(
+            foreign_reservation,
+            reserved.identity,
+            prepared.transport_addr,
+            prepared.transport_incarnation,
+            prepared.receipt,
+            0,
+        ));
+    }
+    try std.testing.expectError(error.InvalidReceipt, registry.preparedAttachAdmission(
+        reserved.reservation,
+        reserved.identity,
+        prepared.transport_addr + 1,
+        prepared.transport_incarnation,
+        prepared.receipt,
+        0,
+    ));
+    try std.testing.expectError(error.InvalidReceipt, registry.preparedAttachAdmission(
+        reserved.reservation,
+        reserved.identity,
+        prepared.transport_addr,
+        prepared.transport_incarnation + 1,
+        prepared.receipt,
+        0,
+    ));
+    inline for (std.meta.fields(contract.PreparedCallReceipt)) |field| {
+        var foreign_receipt = prepared.receipt;
+        @field(foreign_receipt, field.name) +%= 1;
+        try std.testing.expectError(error.InvalidReceipt, registry.preparedAttachAdmission(
+            reserved.reservation,
+            reserved.identity,
+            prepared.transport_addr,
+            prepared.transport_incarnation,
+            foreign_receipt,
+            0,
+        ));
+    }
+    try std.testing.expectEqual(AdmissionDecision.unauthorized, (try registry.preparedAttachAdmission(
+        reserved.reservation,
+        reserved.identity,
+        prepared.transport_addr,
+        prepared.transport_incarnation,
+        prepared.receipt,
+        0xB34C,
+    )).decision);
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&before), std.mem.asBytes(&registry)));
+
+    try registry.settlePreparedRequest(reserved.reservation, reserved.identity, prepared, false);
+    try registry.abort(reserved.reservation, reserved.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB346);
+    const current = try registry.reserve(fixtureSeed(0xB347, 0xB348));
+    const current_prepared = fixturePrepared(
+        current.identity,
+        .attach_controller,
+        .attach_only,
+        0xB349,
+        0xB34A,
+        0xB34B,
+    );
+    try registry.publishPreparedRequest(current.reservation, current.identity, current_prepared);
+    const before_aba = registry;
+    try std.testing.expectError(error.InvalidOwner, registry.preparedAttachAdmission(
+        reserved.reservation,
+        reserved.identity,
+        prepared.transport_addr,
+        prepared.transport_incarnation,
+        prepared.receipt,
+        0,
+    ));
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&before_aba), std.mem.asBytes(&registry)));
+    try registry.settlePreparedRequest(current.reservation, current.identity, current_prepared, false);
+    try registry.abort(current.reservation, current.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+fn expectedAdmission(
+    lifecycle: EntryLifecycle,
+    role: contract.AttachmentRole,
+    authority: ControllerAuthority,
+    family: contract.RequestFamily,
+    tag: contract.RuntimeRequestTag,
+    entry_stream: u64,
+    current_stream: u64,
+    context: AdmissionContext,
+) PolicyResult {
+    if (!contract.requestFamilyAllowed(tag, family)) return .invalid_receipt;
+    if (family == .connection_only_denied) return .unauthorized;
+    const destination_matches = if (family == .attach_only)
+        context == .prepare or context == .execute_attach
+    else
+        context == .prepare or context == .execute_rpc;
+    if (!destination_matches) return .invalid_destination;
+
+    for (policy_expectations) |row| {
+        if (row.family != family or (row.tag != null and row.tag.? != tag) or
+            row.lifecycle != lifecycle or row.role != role or row.authority != authority)
+            continue;
+        const stream_matches = switch (row.stream) {
+            .zero => entry_stream == 0 and current_stream == 0,
+            .exact_nonzero => entry_stream != 0 and entry_stream == current_stream,
+        };
+        if (stream_matches) return row.result;
+    }
+    return .unauthorized;
+}
+
+const PolicyExpectation = struct {
+    family: contract.RequestFamily,
+    tag: ?contract.RuntimeRequestTag = null,
+    lifecycle: EntryLifecycle,
+    role: contract.AttachmentRole,
+    authority: ControllerAuthority,
+    stream: enum { zero, exact_nonzero },
+    result: PolicyResult = .allowed,
+};
+
+// This declarative oracle is intentionally shaped unlike classifyEntryPolicy. A policy change
+// must update either a reviewed row or the production control flow, so copying one switch cannot
+// make the Cartesian test pass by construction.
+const policy_expectations = [_]PolicyExpectation{
+    .{ .family = .attach_only, .tag = .attach_controller, .lifecycle = .reserved, .role = .controller, .authority = .unavailable, .stream = .zero },
+    .{ .family = .bound_observation, .lifecycle = .bound, .role = .observer, .authority = .unavailable, .stream = .exact_nonzero },
+    .{ .family = .bound_observation, .lifecycle = .bound, .role = .controller, .authority = .live, .stream = .exact_nonzero },
+    .{ .family = .bound_observation, .lifecycle = .bound, .role = .controller, .authority = .revoke_pending, .stream = .exact_nonzero },
+    .{ .family = .bound_observation, .lifecycle = .bound, .role = .controller, .authority = .revoked, .stream = .exact_nonzero },
+    .{ .family = .bound_controller_mutation, .lifecycle = .bound, .role = .controller, .authority = .live, .stream = .exact_nonzero },
+    .{ .family = .bound_terminal, .tag = .detach, .lifecycle = .bound, .role = .observer, .authority = .unavailable, .stream = .exact_nonzero },
+    .{ .family = .bound_terminal, .tag = .detach, .lifecycle = .bound, .role = .controller, .authority = .live, .stream = .exact_nonzero },
+    .{ .family = .bound_terminal, .tag = .detach, .lifecycle = .bound, .role = .controller, .authority = .revoked, .stream = .exact_nonzero },
+    .{ .family = .bound_terminal, .tag = .detach, .lifecycle = .bound, .role = .controller, .authority = .revoke_pending, .stream = .exact_nonzero, .result = .busy },
+    .{ .family = .bound_terminal, .tag = .terminate, .lifecycle = .bound, .role = .controller, .authority = .live, .stream = .exact_nonzero },
+};
 
 test "CR3a-2c3a controller revoke authority is canonical absorbing and raw-tag guarded" {
     var registry: AttachmentCleanupRegistry = .{};

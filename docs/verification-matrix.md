@@ -1034,11 +1034,30 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   authority+stale identity를 현재 reservation에 함께 splice하는 경우, 같은 주소 registry reincarnation 뒤 reservation ID 1 재사용,
   tag-family 전수·bound RPC-only 구조 불변식도 포함한다.
   role/phase/stream/destination admission은 B3-2의 exhaustive classifier가 소유하고,
+  classifier SSOT는 `AttachmentCleanupRegistry` 하나이며 prepare는 decoded request, execute는 exact
+  `{reservation,binding,transport,receipt,stream,AdmissionContext}`로 canonical prepared transcript를 다시 resolve한다. context는 raw-first
+  `prepare|execute_attach|execute_rpc`인 closed enum 하나이며 stage/destination 이중 입력은 없다. public execute wrapper는 execute attach만
+  투영하며 execute rpc 제품 caller와 public destination ABI는 0이다.
+  current stream은 final-address `GenerationTransport.requestOperation`이 제품 callsite에서만 투영하는 non-authoritative drift probe이며
+  canonical entry보다 권한을 넓히지 못한다. source oracle이 그 exact projection을 고정한다. 반환은
+  `Error{InvalidOwner,InvalidReceipt,InvalidResponseDestination}!Decision{allowed,unauthorized,busy}`이고 public structural preflight 뒤
+  outer-operation `Busy` → raw context → owner/raw entry →
+  receipt/raw request → connection-only → destination → semantic authorization의 exact precedence를 검증한다. detach는
+  observer/unavailable과 controller/live·revoked를 허용하고 controller/revoke-pending은 busy다.
+  14 tag×5 family×3 context×entry phase `empty|reserved|bound|drop_active`×role×controller state×
+  `entry_stream {0,A,B}`×`current_stream {0,A,B}`와
+  find 두 family, invalid raw 0..255, identity/receipt/transport/destination splice, same-address registry ABA를 production type으로 전수하고
+  reject 전후 registry/prepared/RPC authority/response owner/stream state byte 동일성과 storage access 0을 검증한다. pure classifier의
+  spawn/invalid-family deny와 product prepare의 publication 0·execute unreachable receipt 오류를 구분한다. B3-2에는 socketpair·Client·flush·
+  allocator·payload·response publication·RPC epoch mint가 없으며 Debug·ReleaseFast exact-count focused gate와 boundary/source oracle이 이를
+  고정한다. verdict는 permit이 아니며 B3-3은 pre-flush `.prepared`, begin-execute 뒤 post-flush `.executing` transcript를 같은 receipt로
+  각각 새로 resolve해 동일 classifier를 재호출한다.
   B3-3은 Darwin socketpair, B3-4/5는 published payload의 생성·정리 경로를 같은 merge gate로 여는 production-type+source oracle,
   B3-6은 production strict-wrapper subprocess까지 증거 수준을
   높인다. B3-4/5는 `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift, decoder raw-slice exact allowlist를
-  추가로 닫는다. B3-0a·B3-0·B3-1은 완료됐고 B3-2~B3-4/5는 후속이며, 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. B3-1은
-  Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. 모든 내부 gate가
+  추가로 닫는다. B3-0a·B3-0·B3-1·B3-2는 완료됐고 B3-3~B3-4/5는 후속이며, 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. B3-1은
+  Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. B3-2는 Debug·ReleaseFast
+  registry 3개와 product 2개, boundary 1개의 exact 11-test artifact를 완료 증거로 소유한다. 모든 내부 gate가
   Debug·ReleaseFast와 boundary에서 함께 green이 되기 전 `2c3b-3 완료`로 세지 않는다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field

@@ -1345,22 +1345,40 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    request classifier는 다음 전수표가 SSOT다. `find`는 encoded JSON의 caller bool을 신뢰하지 않고 closed request variant 안의 typed
    `scroll` 의미를 canonical encoder가 만들며, `scroll=false`만 observer 가능하고 `scroll=true`는 controller mutation으로 검사한다.
 
-   | RuntimeRequestTag | family | 허용 phase/role | method |
-   | --- | --- | --- | --- |
-   | `spawn_full` | `connection_only_denied` | attachment facade에서 항상 거부 | `runtime.spawn_full` |
-   | `attach_controller` | `attach_only` | unbound prepared controller + attach destination | `runtime.attach` |
-   | `observation` | `bound_observation` | committed controller/observer | `runtime.observation` |
-   | `selected_text` | `bound_observation` | committed controller/observer | `runtime.selected_text` |
-   | `link_at` | `bound_observation` | committed controller/observer | `runtime.link_at` |
-   | `select_op` | `bound_observation` | committed controller/observer | `runtime.select_op` |
-   | `find` | `bound_observation|bound_controller_mutation` | `scroll=false`: controller/observer, `scroll=true`: live controller | `runtime.find` |
-   | `resize` | `bound_controller_mutation` | committed live controller | `runtime.resize` |
-   | `clipboard_write` | `bound_controller_mutation` | committed live controller | `runtime.clipboard_write` |
-   | `core_command` | `bound_controller_mutation` | committed live controller | `runtime.core_command` |
-   | `report_mouse` | `bound_controller_mutation` | committed live controller | `runtime.report_mouse` |
-   | `notification` | `bound_controller_mutation` | committed live controller | `runtime.notification` |
-   | `terminate` | `bound_terminal` | committed live controller | `runtime.terminate` |
-   | `detach` | `bound_terminal` | committed controller/observer | `runtime.detach` |
+   | RuntimeRequestTag | family | canonical entry 조건 | prepare | execute attach | execute RPC | method |
+   | --- | --- | --- | --- | --- | --- | --- |
+   | `spawn_full` | `connection_only_denied` | attachment facade에서 항상 거부 | deny | deny | deny | `runtime.spawn_full` |
+   | `attach_controller` | `attach_only` | reserved controller, entry/current stream 모두 0 | allow | allow | wrong destination | `runtime.attach` |
+   | `observation` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.observation` |
+   | `selected_text` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.selected_text` |
+   | `link_at` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.link_at` |
+   | `select_op` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.select_op` |
+   | `find(scroll=false)` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.find` |
+   | `find(scroll=true)` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.find` |
+   | `resize` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.resize` |
+   | `clipboard_write` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.clipboard_write` |
+   | `core_command` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.core_command` |
+   | `report_mouse` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.report_mouse` |
+   | `notification` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.notification` |
+   | `terminate` | `bound_terminal` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.terminate` |
+   | `detach` | `bound_terminal` | bound observer/unavailable 또는 controller/live·revoked, exact nonzero stream | allow; revoke-pending은 busy | wrong destination | allow; revoke-pending은 busy | `runtime.detach` |
+
+   admission의 상태 단일 출처는 node-local `AttachmentCleanupRegistry.Entry`다. context는 raw-first
+   `prepare|execute_attach|execute_rpc`인 closed enum 하나이며 stage와 destination을 별도 scalar로 중복 저장하지 않는다. prepare는 canonical `RuntimeRequest.decode()`의
+   tag/family를 같은 closed 표에 넣고, execute destination 판정은 caller가 전달한 tag/family를 받지 않는다. 대신 exact
+   reservation/binding/transport/receipt로 registry의 `PreparedRequestAuthority` transcript를 다시 resolve한 뒤 표를 적용한다.
+   current stream scalar는 별도 authority가 아니라 final-address `GenerationTransport.requestOperation`이 매 호출 canonical transport
+   field에서 투영하는 drift probe다. lower wrapper의 위조 scalar는 registry entry stream보다 권한을 넓히지 못하며 제품 callsite의
+   exact projection은 source oracle이 고정한다.
+   이 context는 public response ABI가 아니다. 반환은 `Error!Decision`이며 decision은 `allowed|unauthorized|busy`, error는
+   `InvalidOwner|InvalidReceipt|InvalidResponseDestination`이다. public wrapper의 비역참조 zero/overflow/response-owner containment
+   preflight가 먼저이며, 이를 통과한 뒤 exact precedence는 outer operation conflict → raw context →
+   owner/ABA와 raw entry/controller/role → canonical receipt/transport와 raw tag/family → structurally denied connection-only request →
+   destination pairing → semantic authorization 순이다. 각각 `Busy`, `InvalidResponseDestination`, `InvalidOwner`, `InvalidReceipt`,
+   `Unauthorized`, `InvalidResponseDestination`, decision으로 투영한다. `revoke_pending` controller의 detach는 local `beginBoundDrop`이
+   같은 상태를 소비할 수 없으므로 busy이고,
+   `revoked` controller는 남은 subscription cleanup을 위해 detach할 수 있다. 판정값은 저장 가능한 permit이 아니며 다음 wire 경계는
+   registry와 canonical transcript를 다시 검증한다.
 
    `RpcResponseAuthority.lifecycle`은 raw tag를 먼저 검사하는 `idle|executing|published|borrowed|releasing|terminal`이다. `terminal`만 absorbing이고,
    `idle`에서만 checked-monotonic nonzero epoch를 발급해 transport당 blocking RPC를 정확히 하나만 in-flight로 둔다. epoch 소진은
@@ -1397,7 +1415,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    role·binding phase·stream·destination 권한을 결정하는 B3-2 admission classifier가 아니라, authority 내부 표현의 closed invariant다.
    request tag는 `attach_only|bound_observation|bound_controller_mutation|bound_terminal` family로 exhaustive 분류한다. execute는
    destination뿐 아니라 canonical binding phase, nonzero bound stream, controller/observer authority와 terminal state를 pre-flush와
-   post-flush에 모두 검사한다. `attach_only`는 unbound prepared attachment+attach destination만, observation family는 committed controller/
+   post-flush에 모두 검사한다. pre-flush는 expected prepared transcript를, `beginPreparedRequestExecute` 뒤 post-flush는 expected
+   executing transcript를 같은 receipt로 각각 새로 resolve하며 post-flush 결과만 first-byte를 허가한다. `attach_only`는 unbound prepared attachment+attach destination만, observation family는 committed controller/
    observer+rpc, controller mutation은 committed live controller+rpc, terminal family는 현재 role에 허용된 committed binding+rpc다.
    `spawn_full`은 attachment-bound transport에서 항상 wire 0으로 거부하며 union에서 제거할지는 위 구조 결정 뒤 확정한다. attach 성공
    뒤 두 번째 `attach_controller`, attach 전 observation/mutation/terminal과 observer mutation은 모두 wire 0이다.

@@ -1150,10 +1150,46 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `@sizeOf(Authority)<=256`, 4,096-entry registry의 기존 Entry 대비 증가량 `<=512 KiB`를 제품 타입 gate로 고정한다.
       registry incarnation과 Entry의 현재 reservation ID를 authority seal/receipt에 함께 결속해 stale authority+stale identity의
       동시 splice 및 같은 주소 registry reincarnation 뒤 reservation ID 재사용도 거부한다. leaf는 tag-family 구조 일치와 bound RPC family만 canonical로 만들며, role/phase/stream/
-      destination admission은 예정대로 B3-2가 소유한다. Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count
-      focused gate와 전체 session-host gate를 완료 증거로 삼으며, 다음 단계는 B3-2다.
-   4. **B3-2 private destination admission:** public wrapper는 attach signature를 유지한 채 내부 `.attach`로 투영하고 test-private
-      `.rpc` classifier가 family/role/phase/destination mismatch를 wire·owner·epoch mutation 0으로 거부함을 전수한다.
+      destination admission은 B3-2가 소유한다. Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count
+      focused gate와 전체 session-host gate가 B3-1 완료 증거다.
+   4. **B3-2 private destination admission(완료):** classifier SSOT는 private `EntryLifecycle`·`ControllerAuthority`와 canonical
+      `PreparedRequestAuthority`를 함께 소유한 `AttachmentCleanupRegistry` 하나다. 기존 prepare admission과 새 execute destination
+      admission은 하나의 private closed decision table을 공유하되, prepare는 `RuntimeRequest.decode()`가 만든 tag/family를 소비하고
+      execute는 `{Reservation, exact BindingIdentity, transport address/incarnation, PreparedCallReceipt, current bound_stream_id,
+      AdmissionContext}`만 받아 registry의 canonical prepared transcript에서 tag/family를 다시 resolve한다. `AdmissionContext`는
+      raw-first `prepare|execute_attach|execute_rpc`인 closed enum 하나이며 stage와 destination을 별도 입력으로 두지 않는다. execute caller가
+      tag/family/role/phase/controller 상태를 별도 scalar로 주입하거나, registry `Entry` snapshot을 외부로 투영하는 API는 금지한다.
+      이 context는 session-host 내부 분류일 뿐 public contract/response union이 아니다.
+      `current bound_stream_id`는 authority가 아니라 final-address `GenerationTransport.requestOperation`이 매 호출 투영하는
+      drift probe다. lower wrapper에 임의 scalar를 넣어도 canonical entry stream보다 권한을 넓힐 수 없고, source oracle은 제품
+      execute callsite가 이 필드를 `self.bound_stream_id`에서만 채우는지 고정한다.
+      현재 public `GenerationTransport.executePreparedRequest(receipt,*ExecutedResponse)`와 `client_slot.executeGenerationRequest` signature는
+      그대로 두고 public wrapper는 pointer/owner preflight 뒤 내부 `.attach`만 선택한다. `.rpc`는 B3-2 focused test-private caller만
+      사용하며 제품 constructor/callsite는 0이다. `attach_only`는 attach destination, 세 bound family는 rpc destination에서만
+      허용하고 destination mismatch를 role/phase/stream authorization보다 먼저 판정한다.
+      반환은 `Error!Decision`으로 분리한다. `Decision`은 저장·재생 가능한 permit이 아닌 즉시 read-only
+      `allowed|unauthorized|busy`, `Error`는 `InvalidOwner|InvalidReceipt|InvalidResponseDestination`의 닫힌 집합이다. public wrapper의
+      zero/overflow/response-owner containment 같은 비역참조 structural preflight가 먼저이고, 그 뒤 classifier exact precedence는
+      outer operation conflict `Busy` → raw context `InvalidResponseDestination` → registry/reservation/binding 및 raw
+      entry/controller/role drift `InvalidOwner` → canonical transcript 부재·transport/receipt 또는 raw tag/family 불일치
+      `InvalidReceipt` → structurally denied `spawn_full`의 `Unauthorized` → family/context mismatch `InvalidResponseDestination` →
+      semantic `busy|unauthorized|allowed`다. 따라서 structural preflight가 통과했다는 전제에서 invalid context+receipt mismatch는 destination error, invalid tag/family+outer
+      conflict는 Busy, spawn_full+wrong execute context는 Unauthorized, revoke-pending detach+wrong execute context는 destination error가 이긴다.
+      controller `detach`는 `live|revoked`에서 허용하고 `revoke_pending`은 `beginBoundDrop`과 동시에 진행할 수 없으므로
+      `Busy`; observer는 canonical `unavailable`에서 허용한다. `spawn_full`은 모든 stage/destination에서 거부한다.
+      invalid raw context/entry/controller/role/tag/family, 14 tag×5 family×3 context×phase `empty|reserved|bound|drop_active`×role×
+      controller-state×`entry_stream {0,A,B}`×`current_stream {0,A,B}`, `find(scroll=false|true)`, 모든 identity/receipt/transport/
+      context splice와 same-address registry ABA를
+      production registry type으로 전수한다. 각 verdict 전후 registry entry, prepared/RPC authority lifecycle·epoch, response owner,
+      stream/controller state는 byte-identical이어야 한다. storage는 classifier 입력이 아니므로 접근/callsite 0을 source oracle로
+      고정한다. Client·socket·pending flush·wire·allocator·payload·response
+      publication과 `RpcResponseAuthority.reserveExecuting` call은 0이며 public facade/signature delta 0 source oracle, Debug·ReleaseFast
+      exact-count focused gate와 boundary gate를 통과한다. pure table은 `spawn_full`과 invalid tag-family를 structurally deny하지만 실제
+      product prepare는 canonical publication 전에 spawn을 `Unauthorized`로 끝내고, execute fixture에는 그런 canonical receipt가 없어
+      `InvalidReceipt|InvalidOwner`에서 닫힘을 별도로 검증한다. B3-2 verdict를 cache/permit화하지 않는다. B3-3은 flush 전
+      expected lifecycle `.prepared`, `beginPreparedRequestExecute` 뒤 flush 후 `.executing`으로 같은 receipt의 canonical transcript와
+      current entry를 각각 새로 resolve해 동일 classifier를 다시 호출하며 post-flush 결과만 first-byte 권위로 쓴다. Debug·ReleaseFast
+      registry 3개와 product 2개, boundary 1개를 합친 exact 11-test focused gate와 전체 session-host 회귀가 완료 증거이며 다음 단계는 B3-3이다.
    5. **B3-3 progress/execute integration:** closed wire-progress evidence, RPC authority reserve, pending flush 뒤 재검증과 first-byte
       경계를 Darwin socketpair로 닫는다. request bytes 0이고 prior pending ambiguity도 0인 경우만 reusable rollback한다.
    6. **B3-4/5 원자적 publication+borrow/finish:** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.

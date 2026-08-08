@@ -82,9 +82,17 @@ pub const NativeChromeTextGlyphRecord = extern struct {
     font_name: [128]u8 = [_]u8{0} ** 128,
 };
 
+/// `font_family`가 빈 슬라이스면 system UI face(레거시 동작 — resolved appearance가 없는 Lab/테스트 호출자).
+/// 비어 있지 않으면 그 family를 쓰고, 실제로 그 폰트가 아니면 system UI face로 물러나며 그 사실이
+/// `primary_font_found=0`으로 돌아온다. `font_fallback`은 터미널과 같은 cascade CSV다.
+/// 단일 출처: docs/font-strategy.md "Chrome 텍스트 face".
 pub extern fn maru_macos_coretext_shape_chrome_text(
     utf8: [*]const u8,
     utf8_len: usize,
+    font_family: [*]const u8,
+    font_family_len: usize,
+    font_fallback: [*]const u8,
+    font_fallback_len: usize,
     font_size_px: f64,
     weight: u32,
     max_width_px: f64,

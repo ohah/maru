@@ -211,6 +211,61 @@ locale hint later
 
 fallback cache가 필요한 이유는 대량 로그와 emoji가 섞일 때 CoreText 조회 비용이 hot path로 들어오는 것을 막기 위해서다.
 
+## Chrome 텍스트 face (measured chrome이 어떤 폰트로 그려지는가)
+
+Chrome에는 텍스트를 그리는 경로가 **둘**이고, 이 절은 그중 measured 경로의 face 단일 출처다.
+
+| 경로 | 누가 쓰나 | face |
+| --- | --- | --- |
+| cell lowering | 사이드바 카드·파일 트리·SCM·notice·palette·find | 터미널과 같은 셀 그리드라 `font.family`를 그대로 쓴다 |
+| measured chrome text | Session Dock·archive detail (`platform/macos/chrome/system_text.zig`) | **이 절이 정한다** |
+
+measured 경로도 `font.family`(+`font.fallback` cascade)를 쓴다. 근거는 두 경로가 **한 화면에
+동시에 보인다**는 것이다. 도크가 시스템 UI face(SF)로, 바로 옆 사이드바가 사용자 monospace로
+그려지면 사용자가 고른 폰트를 앱이 절반만 따르는 셈이 된다(사용자 결정 2026-08-08).
+
+**이 결정이 바꾸지 않는 것 — Chrome scale의 독립성은 그대로다.**
+
+- `chrome/ui/typography.zig`의 role→pt/weight 토큰은 `font.size`와 무관하게 고정이다.
+- `DockMetrics`의 카드 높이·여백·hit rect는 `lineHeightPx(role)` 파생이라 face와 직교다.
+- 중립 chrome 레이어(`src/chrome/**`)는 여전히 face를 모른다. face 해석이 platform adapter
+  책임이라는 `typography.zig` 헤더의 기존 계약을 그대로 따른다 — 바뀐 것은 그 adapter가
+  해석 결과를 **어디서 얻는가**뿐이다(하드코딩된 `kCTFontUIFontSystem` → resolved appearance).
+
+**face 해석 규칙**(`maru_chrome_font_for`, `coretext_smoke.m`):
+
+1. family가 비어 있으면 시스템 UI face(`kCTFontUIFontSystem`). 이 경로가 남아 있는 이유는
+   Chrome Lab·단위 테스트처럼 resolved appearance가 없는 호출자 때문이다.
+2. family가 있으면 `CTFontCreateWithName` 뒤 **PostScript 이름을 대조**한다. CoreText는 없는
+   폰트에 Helvetica 같은 대체 face를 조용히 돌려주므로, 대조 없이 쓰면 "설정한 폰트가 아닌데
+   설정한 폰트인 척"하는 face가 캐시에 눌러앉는다. 대조 실패는 시스템 UI face로 폴백하고
+   `primary_font_found=0`으로 관측 가능하게 남긴다. 이 대조 규칙은 터미널 경로의
+   `maru_create_primary_font`와 같은 근거·같은 헬퍼(`maru_font_matches_requested`)다.
+3. `font.fallback` CSV가 있으면 터미널과 **같은** `maru_apply_cascade_list`로 cascade를 박는다.
+   같은 헬퍼를 쓰는 이유는 한글·이모지가 두 경로에서 다른 폰트로 떨어지면 face를 맞춘 의미가
+   없어지기 때문이다. cascade는 face 캐시 **안에서** 한 번만 만든다(run마다 만들면 아래 성능
+   계약이 깨진다).
+4. weight는 지금처럼 symbolic bold trait로 얻는다.
+
+**한계 (v1 범위 밖, 의도적)**
+
+- `font.family-bold`/`family-italic`은 measured chrome에 전달하지 않는다. 터미널은 bold가 1단계인데
+  chrome role weight는 regular/medium/semibold 3단계라 1:1 매핑이 없다. 사용자가 별도 bold family를
+  설정하면 사이드바 활성 카드의 bold와 도크의 semibold가 다른 face가 될 수 있다. 매핑 축을 새로
+  만들 이유가 생기면(두 번째 소비처) 그때 정한다.
+- monospace는 같은 폭에 들어가는 글자 수가 시스템 UI face보다 적다. 도크 폭은 고정이므로 카드
+  제목/요약의 `…` 잘림이 늘어난다. **기하는 불변이고 표시 정보량만 준다** — 이건 face 선택의
+  대가이지 결함이 아니다.
+
+**성능 계약 유지**: face 캐시 키가 `(size, weight)`에서 `(size, weight, family, fallback)`으로
+넓어지지만, 한 프레임의 모든 run이 같은 family를 쓰므로 "run마다 face를 다시 만들지 않는다"는
+기존 테스트의 전제는 그대로다. 캐시 항목 수도 늘지 않는다(같은 family 안에서 role×weight 조합).
+
+**무효화**: family가 바뀌는 경로는 `applyAppearance` 하나뿐이고, 그것이 부르는
+`applyMetricsPipeline`이 이미 measured chrome 캐시를 버린다. 셰이핑 fingerprint에는 face가 없으므로
+이 무효화가 유일한 안전장치다 — 새 face 경로를 추가할 때 이 초크포인트를 우회하면 옛 face의
+glyph가 재생된다.
+
 ## Glyph Atlas Cache Key
 
 `GlyphAtlas`는 glyph bitmap을 다시 굽지 않기 위해 cache key를 명확히 가져야 한다.

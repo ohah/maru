@@ -1340,6 +1340,14 @@ static bool maru_font_is_color(CTFontRef font) {
 typedef struct {
     double size;
     uint32_t weight;
+    // 요청 face의 **원본 바이트**를 키로 든다(CFString이 아니라). 캐시 조회는 프레임당 run 수만큼
+    // 일어나므로, 매 조회에서 CFStringCreateWithBytes를 하면 캐시가 막으려던 비용이 조회 쪽으로
+    // 옮겨갈 뿐이다. CFString은 miss일 때 한 번만 만든다. 길이 제한을 두지 않으려고 복사본을 든다 —
+    // 고정 버퍼로 자르면 긴 fallback CSV 두 개가 같은 접두사에서 잘못 hit할 수 있다.
+    char *family;
+    size_t family_len;
+    char *fallback;
+    size_t fallback_len;
     CTFontRef font;
     CFStringRef postscript_name;
 } MaruChromeFontCacheEntry;
@@ -1348,25 +1356,91 @@ static MaruChromeFontCacheEntry maru_chrome_font_cache[MARU_CHROME_FONT_CACHE_CA
 static size_t maru_chrome_font_cache_count = 0;
 static size_t maru_chrome_font_cache_cursor = 0;
 
-/// (size, weight)에 해당하는 system UI face와 그 PostScript 이름을 돌려준다. 반환값은 **항상 캐시 소유**라
-/// 호출자가 release하지 않는다. 가득 차면 가장 오래된 항목을 축출한다 — 상한만 두고 축출을 안 하면
-/// 폰트 zoom 몇 번에 캐시가 막힌다.
-static CTFontRef maru_chrome_font_for(double size, uint32_t weight, CFStringRef *out_name) {
-    for (size_t i = 0; i < maru_chrome_font_cache_count; i++) {
-        if (maru_chrome_font_cache[i].size == size && maru_chrome_font_cache[i].weight == weight) {
-            *out_name = maru_chrome_font_cache[i].postscript_name;
-            return maru_chrome_font_cache[i].font;
+static bool maru_chrome_font_key_bytes_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
+    if (a_len != b_len) return false;
+    if (a_len == 0) return true;
+    if (a == NULL || b == NULL) return false;
+    return memcmp(a, b, a_len) == 0;
+}
+
+/// 요청 family(+fallback cascade)로 face를 만든다. family가 비었거나 실제로 그 폰트가 아니면 system UI
+/// face로 물러난다 — CoreText는 없는 폰트에 Helvetica 같은 대체 face를 조용히 돌려주므로, 대조 없이 쓰면
+/// "설정한 폰트가 아닌데 설정한 폰트인 척"하는 face가 캐시에 눌러앉는다. 대조 규칙은 터미널 경로
+/// (`maru_create_primary_font`)와 같은 헬퍼를 쓴다 — 두 경로가 다른 기준으로 폰트를 고르면 같은 설정에서
+/// 사이드바와 도크의 face가 갈린다(docs/font-strategy.md "Chrome 텍스트 face").
+static CTFontRef maru_chrome_font_create(
+    double size,
+    uint32_t weight,
+    const char *family,
+    size_t family_len,
+    const char *fallback,
+    size_t fallback_len,
+    uint32_t *out_requested_matched
+) {
+    CTFontRef font = NULL;
+    if (out_requested_matched != NULL) *out_requested_matched = 0;
+    if (family != NULL && family_len > 0) {
+        CFStringRef requested = maru_create_font_name(family, family_len);
+        if (requested != NULL) {
+            CTFontRef requested_font = CTFontCreateWithName(requested, (CGFloat)size, NULL);
+            if (requested_font != NULL) {
+                if (maru_font_matches_requested(requested_font, requested)) {
+                    font = requested_font;
+                    if (out_requested_matched != NULL) *out_requested_matched = 1;
+                } else {
+                    CFRelease(requested_font);
+                }
+            }
+            CFRelease(requested);
         }
     }
-    CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, (CGFloat)size, NULL);
-    if (font == NULL) { *out_name = NULL; return NULL; }
-    // Role weights are closed in Zig.  CoreText's symbolic bold gives the system UI
-    // emphasized face without exposing an arbitrary family string at the Chrome boundary.
+    if (font == NULL) font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, (CGFloat)size, NULL);
+    if (font == NULL) return NULL;
+    // Role weights are closed in Zig.  CoreText's symbolic bold gives the emphasized face of
+    // whichever family we resolved, without exposing an arbitrary family string at the Chrome
+    // boundary.  `font.family-bold`는 의도적으로 전달하지 않는다(터미널 bold 1단계 ↔ chrome role
+    // weight 3단계의 매핑이 없다 — docs/font-strategy.md "한계").
     if (weight != 0) {
         CTFontRef emphasized = CTFontCreateCopyWithSymbolicTraits(font, 0.0, NULL, kCTFontBoldTrait, kCTFontBoldTrait);
         if (emphasized != NULL) { CFRelease(font); font = emphasized; }
     }
+    // cascade는 face 캐시 **안에서** 한 번만 만든다. run마다 만들면 face 재사용으로 지킨 프레임 예산이
+    // 그대로 무너진다(아래 캐시 주석의 1.4ms → 6.3ms와 같은 성질의 회귀).
+    if (fallback != NULL && fallback_len > 0) {
+        CTFontRef cascaded = maru_apply_cascade_list(font, fallback, fallback_len, size);
+        if (cascaded != NULL) { CFRelease(font); font = cascaded; }
+    }
+    return font;
+}
+
+/// (size, weight, family, fallback)에 해당하는 face와 그 PostScript 이름을 돌려준다. 반환값은 **항상 캐시
+/// 소유**라 호출자가 release하지 않는다. 가득 차면 가장 오래된 항목을 축출한다 — 상한만 두고 축출을 안 하면
+/// 폰트 zoom 몇 번에 캐시가 막힌다.
+static CTFontRef maru_chrome_font_for(
+    double size,
+    uint32_t weight,
+    const char *family,
+    size_t family_len,
+    const char *fallback,
+    size_t fallback_len,
+    CFStringRef *out_name,
+    uint32_t *out_requested_matched
+) {
+    for (size_t i = 0; i < maru_chrome_font_cache_count; i++) {
+        if (maru_chrome_font_cache[i].size != size || maru_chrome_font_cache[i].weight != weight) continue;
+        if (!maru_chrome_font_key_bytes_equal(maru_chrome_font_cache[i].family, maru_chrome_font_cache[i].family_len, family, family_len)) continue;
+        if (!maru_chrome_font_key_bytes_equal(maru_chrome_font_cache[i].fallback, maru_chrome_font_cache[i].fallback_len, fallback, fallback_len)) continue;
+        *out_name = maru_chrome_font_cache[i].postscript_name;
+        // hit에서는 요청 face를 실제로 얻었는지 다시 판정하지 않는다(그 판정이 CTFont 생성이라 캐시의
+        // 목적을 무너뜨린다). 캐시에 있다는 것은 이미 한 번 해석에 성공했다는 뜻이므로 매치로 본다.
+        if (out_requested_matched != NULL) *out_requested_matched = 1;
+        return maru_chrome_font_cache[i].font;
+    }
+    CTFontRef font = maru_chrome_font_create(size, weight, family, family_len, fallback, fallback_len, out_requested_matched);
+    if (font == NULL) { *out_name = NULL; return NULL; }
     CFStringRef name = CTFontCopyPostScriptName(font);
+    char *family_key = (family != NULL && family_len > 0) ? strndup(family, family_len) : NULL;
+    char *fallback_key = (fallback != NULL && fallback_len > 0) ? strndup(fallback, fallback_len) : NULL;
     if (maru_chrome_font_cache_count < MARU_CHROME_FONT_CACHE_CAPACITY) {
         maru_chrome_font_cache_count += 1;
     } else {
@@ -1376,9 +1450,18 @@ static CTFontRef maru_chrome_font_for(double size, uint32_t weight, CFStringRef 
         if (maru_chrome_font_cache[maru_chrome_font_cache_cursor].postscript_name) {
             CFRelease(maru_chrome_font_cache[maru_chrome_font_cache_cursor].postscript_name);
         }
+        free(maru_chrome_font_cache[maru_chrome_font_cache_cursor].family);
+        free(maru_chrome_font_cache[maru_chrome_font_cache_cursor].fallback);
     }
     maru_chrome_font_cache[maru_chrome_font_cache_cursor] = (MaruChromeFontCacheEntry){
-        .size = size, .weight = weight, .font = font, .postscript_name = name,
+        .size = size,
+        .weight = weight,
+        .family = family_key,
+        .family_len = family_key != NULL ? family_len : 0,
+        .fallback = fallback_key,
+        .fallback_len = fallback_key != NULL ? fallback_len : 0,
+        .font = font,
+        .postscript_name = name,
     };
     maru_chrome_font_cache_cursor = (maru_chrome_font_cache_cursor + 1) % MARU_CHROME_FONT_CACHE_CAPACITY;
     *out_name = name;
@@ -1391,6 +1474,10 @@ static CTFontRef maru_chrome_font_for(double size, uint32_t weight, CFStringRef 
 void maru_macos_coretext_shape_chrome_text(
     const uint8_t *utf8,
     size_t utf8_len,
+    const char *font_family,
+    size_t font_family_len,
+    const char *font_fallback,
+    size_t font_fallback_len,
     double font_size_px,
     uint32_t weight,
     double max_width_px,
@@ -1412,9 +1499,17 @@ void maru_macos_coretext_shape_chrome_text(
         CFStringRef string = CFStringCreateWithBytes(kCFAllocatorDefault, utf8, (CFIndex)utf8_len, kCFStringEncodingUTF8, false);
         if (string == NULL) { result->status = 2; return; }
         CFStringRef primary_name = NULL;
-        CTFontRef primary = maru_chrome_font_for(font_size_px, weight, &primary_name);
+        uint32_t requested_matched = 0;
+        CTFontRef primary = maru_chrome_font_for(
+            font_size_px, weight,
+            font_family, font_family_len,
+            font_fallback, font_fallback_len,
+            &primary_name, &requested_matched
+        );
         if (primary == NULL) { CFRelease(string); result->status = 3; return; }
-        result->primary_font_found = 1;
+        // 요청 family를 실제로 얻었는지 그대로 싣는다. 빈 family(시스템 UI face 요청)와 "요청했지만 없어서
+        // 물러났다"를 호출자가 구분할 수 있어야 폰트 오타를 조용히 삼키지 않는다.
+        result->primary_font_found = (font_family != NULL && font_family_len > 0) ? requested_matched : 1;
         const void *keys[] = { kCTFontAttributeName };
         const void *values[] = { primary };
         CFDictionaryRef attributes = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1,

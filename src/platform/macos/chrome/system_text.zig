@@ -1,8 +1,12 @@
-//! Session Dock measured system-UI text adapter.
+//! Session Dock measured chrome text adapter.
 //!
 //! CoreText owns CTLine/CTRun and returns only scalar glyph facts.  This module owns the
 //! conversion to renderer-neutral records plus final local pixel positions; it deliberately
 //! does not know about AppSession, Metal DTOs, or terminal `ResolvedAppearance`.
+//!
+//! face는 이 모듈이 고르지 않고 `Face`로 **받는다**(빈 값이면 system UI face). 그래서 도크가 사용자
+//! `font.family`를 따라가면서도 이 파일은 config 타입을 여전히 모른다 — 채우는 쪽은 platform
+//! (`app_session`)이다. 근거와 폴백 규칙은 docs/font-strategy.md "Chrome 텍스트 face"가 단일 출처다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -34,6 +38,14 @@ pub const Placement = struct {
 pub const Request = struct {
     fingerprint: u64,
     runs: []Run,
+    /// 이 요청 전체가 쓸 face. run이 아니라 요청 단위인 이유는 한 프레임의 모든 chrome 텍스트가 같은
+    /// 폰트를 쓰기 때문이다 — run마다 들면 같은 문자열이 run 수만큼 복사될 뿐이고, 브리지의 face 캐시도
+    /// run마다 키를 다시 만들게 된다. 빈 슬라이스면 system UI face(레거시 경로).
+    /// 소유권은 `Request`에 있다(worker 이송 가능성을 유지하려면 borrow가 아니어야 한다).
+    font_family: []u8 = &.{},
+    /// 터미널과 같은 `font.fallback` CSV. 이걸 함께 넘기지 않으면 주 폰트에 없는 글리프(한글·이모지)가
+    /// 사이드바와 다른 폰트로 떨어져 face를 맞춘 의미가 사라진다.
+    font_fallback: []u8 = &.{},
 
     pub const Run = struct {
         text: []u8,
@@ -49,6 +61,8 @@ pub const Request = struct {
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
         for (self.runs) |run| allocator.free(run.text);
         allocator.free(self.runs);
+        allocator.free(self.font_family);
+        allocator.free(self.font_fallback);
         self.* = undefined;
     }
 };
@@ -280,9 +294,10 @@ pub fn shapeOps(
     ops: []const chrome.draw.Op,
     tk: *const chrome.Tokens,
     cell_width_px: u32,
+    face: Face,
     scale_milli: u32,
 ) !Artifact {
-    var request = try prepareRequest(allocator, 0, ops, tk, cell_width_px);
+    var request = try prepareRequest(allocator, 0, ops, tk, cell_width_px, face);
     defer request.deinit(allocator);
     var unresolved = try shapeRequest(allocator, &request, scale_milli);
     defer unresolved.deinit(allocator);
@@ -366,6 +381,15 @@ pub fn opMaxWidthPx(text: chrome.draw.Op.Text, cell_width_px: u32) ?u32 {
     return text.max_width_px orelse (std.math.mul(u32, text.max_cols, cell_width_px) catch null);
 }
 
+/// 이 요청이 쓸 face. platform이 resolved appearance에서 채운다 — chrome 컴포넌트는 여전히 face를 모르고
+/// role만 고른다(`chrome/ui/typography.zig` 헤더 계약). 기본값(빈 family)은 system UI face라, resolved
+/// appearance가 없는 호출자(Chrome Lab·단위 테스트)가 예전 동작을 그대로 얻는다.
+/// 단일 출처: docs/font-strategy.md "Chrome 텍스트 face".
+pub const Face = struct {
+    family: []const u8 = &.{},
+    fallback: []const u8 = &.{},
+};
+
 /// Copies only non-icon semantic text out of the frame-local draw list.  This is intentionally
 /// cheap enough for the frame path; CoreText shaping is performed only by `shapeRequest`.
 pub fn prepareRequest(
@@ -374,6 +398,7 @@ pub fn prepareRequest(
     ops: []const chrome.draw.Op,
     tk: *const chrome.Tokens,
     cell_width_px: u32,
+    face: Face,
 ) !Request {
     var runs: std.ArrayList(Request.Run) = .empty;
     errdefer {
@@ -403,7 +428,16 @@ pub fn prepareRequest(
         },
         else => {},
     };
-    return .{ .fingerprint = fingerprint, .runs = try runs.toOwnedSlice(allocator) };
+    const family = try allocator.dupe(u8, face.family);
+    errdefer allocator.free(family);
+    const fallback = try allocator.dupe(u8, face.fallback);
+    errdefer allocator.free(fallback);
+    return .{
+        .fingerprint = fingerprint,
+        .runs = try runs.toOwnedSlice(allocator),
+        .font_family = family,
+        .font_fallback = fallback,
+    };
 }
 
 test "prepareRequest keeps a Korean button label and an icon-in-rect on the measured path" {
@@ -452,7 +486,7 @@ test "prepareRequest keeps a Korean button label and an icon-in-rect on the meas
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
-    var request = try prepareRequest(allocator, 17, &ops, &tk, 8);
+    var request = try prepareRequest(allocator, 17, &ops, &tk, 8, .{});
     defer request.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), request.runs.len);
     try std.testing.expectEqualStrings("터미널에서 이어하기", request.runs[0].text);
@@ -486,11 +520,122 @@ test "prepareRequest keeps runs scrolled above the pane so a translated cache st
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
-    var request = try prepareRequest(allocator, 5, &ops, &tk, 8);
+    var request = try prepareRequest(allocator, 5, &ops, &tk, 8, .{});
     defer request.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), request.runs.len);
     try std.testing.expectEqualStrings("scrolled-above", request.runs[0].text);
     try std.testing.expectEqual(@as(i32, -48), request.runs[0].origin.y);
+}
+
+// 이 테스트가 증명하는 것: face 바이트를 `Request`가 **소유**한다.
+//
+// 왜 터미널에서 중요한가 — `Request`는 detached worker로 건널 수 있다는 전제로 설계돼 있고(위 타입
+// 주석), 지금도 셰이핑은 호출자의 `ResolvedAppearance`가 config arena에 살아 있는지와 무관하게
+// 끝나야 한다. face만 borrow로 두면 config 재로드가 arena를 갈아끼운 프레임에서 해제된 문자열로
+// CTFont를 만들게 된다. 소유 여부는 "원본을 덮어써도 request가 그대로인가"로만 증명할 수 있다.
+test "prepareRequest owns the face bytes instead of borrowing the caller's appearance" {
+    const allocator = std.testing.allocator;
+    const runs = [_]chrome.draw.Run{.{ .text = "owned" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .text_role = .body, .max_cols = 20 } },
+    };
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var family_buf = "JetBrains Mono".*;
+    var fallback_buf = "Jetendard".*;
+    var request = try prepareRequest(allocator, 7, &ops, &tk, 8, .{ .family = &family_buf, .fallback = &fallback_buf });
+    defer request.deinit(allocator);
+    @memset(&family_buf, 'x');
+    @memset(&fallback_buf, 'x');
+    try std.testing.expectEqualStrings("JetBrains Mono", request.font_family);
+    try std.testing.expectEqualStrings("Jetendard", request.font_fallback);
+}
+
+// 이 테스트가 증명하는 것: chrome 텍스트가 **요청한 family로** 셰이핑되고, family를 안 주면 예전처럼
+// system UI face로 셰이핑된다.
+//
+// 왜 터미널에서 중요한가 — 도크와 사이드바가 한 화면에 보이므로 face가 갈리면 사용자가 고른 폰트를
+// 앱이 절반만 따르게 된다(docs/font-strategy.md "Chrome 텍스트 face"). 판정을 PostScript 이름으로 두는
+// 이유는 그것이 실제로 래스터에 쓰일 face의 identity이기 때문이다 — 요청만 흘려보내고 CoreText가
+// 다른 face를 돌려주는 회귀는 요청 문자열로는 잡히지 않는다. Menlo를 쓰는 것은 macOS 기본 설치라
+// 번들 폰트 등록 여부에 흔들리지 않기 때문이다.
+test "chrome text shapes with the requested family and keeps the system face when none is given" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const runs = [_]chrome.draw.Run{.{ .text = "Session" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .text_role = .body, .max_cols = 40 } },
+    };
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+
+    var system_request = try prepareRequest(allocator, 1, &ops, &tk, 8, .{});
+    defer system_request.deinit(allocator);
+    var system_artifact = try shapeRequest(allocator, &system_request, 1000);
+    defer system_artifact.deinit(allocator);
+
+    var menlo_request = try prepareRequest(allocator, 2, &ops, &tk, 8, .{ .family = "Menlo" });
+    defer menlo_request.deinit(allocator);
+    var menlo_artifact = try shapeRequest(allocator, &menlo_request, 1000);
+    defer menlo_artifact.deinit(allocator);
+
+    try std.testing.expect(system_artifact.glyphs.len > 0);
+    try std.testing.expect(menlo_artifact.glyphs.len > 0);
+    const menlo_name = std.mem.sliceTo(&menlo_artifact.glyphs[0].font_name, 0);
+    const system_name = std.mem.sliceTo(&system_artifact.glyphs[0].font_name, 0);
+    try std.testing.expect(std.mem.startsWith(u8, menlo_name, "Menlo"));
+    try std.testing.expect(!std.mem.startsWith(u8, system_name, "Menlo"));
+}
+
+// 이 테스트가 증명하는 것: 설치되지 않은 family를 요청해도 프레임이 죽지 않고 system face로 물러난다.
+//
+// 왜 터미널에서 중요한가 — `font.family`는 사용자가 직접 타이핑할 수 있는 값이라(세팅의 "직접 입력…")
+// 오타가 정상 입력이다. 그때 도크 텍스트가 통째로 사라지면 사용자는 원인을 폰트 이름과 연결하지
+// 못한다. CoreText가 없는 폰트에 대체 face를 조용히 돌려주는 성질이 있으므로, 폴백이 실제로 요청한
+// 그 폰트가 **아님**도 함께 고정한다.
+test "an unknown chrome family falls back to the system face instead of blanking the dock" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const runs = [_]chrome.draw.Run{.{ .text = "Session" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .text_role = .body, .max_cols = 40 } },
+    };
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var request = try prepareRequest(allocator, 3, &ops, &tk, 8, .{ .family = "MaruNoSuchFamily12345" });
+    defer request.deinit(allocator);
+    var artifact = try shapeRequest(allocator, &request, 1000);
+    defer artifact.deinit(allocator);
+    try std.testing.expect(artifact.glyphs.len > 0);
+    const name = std.mem.sliceTo(&artifact.glyphs[0].font_name, 0);
+    try std.testing.expect(!std.mem.startsWith(u8, name, "MaruNoSuchFamily"));
 }
 
 /// Calls CoreText without touching the renderer.  `Request` owns every input byte, so this is
@@ -513,7 +658,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
         scroll_flags[index] = run.scroll_clipped;
         above_clips[index] = run.above_clip;
         if (run.placement == .icon_in_rect) continue;
-        const shaped = shapeUnresolvedRun(allocator, run, scale_milli) catch |err| switch (run.placement) {
+        const shaped = shapeUnresolvedRun(allocator, run, .{ .family = request.font_family, .fallback = request.font_fallback }, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
             // icon would make an enabled command look corrupt while hiding the failed label.
             .origin => continue,
@@ -763,17 +908,25 @@ pub fn shapeRun(
     origin: chrome.draw.Px,
     max_width_px: u32,
     foreground: u32,
+    face: Face,
     scale_milli: u32,
 ) !Artifact {
     const owned = try allocator.dupe(u8, text);
-    var request = Request{ .fingerprint = 0, .runs = &.{.{ .text = owned, .role = role, .origin = origin, .max_width_px = max_width_px, .foreground = foreground }} };
+    const family = try allocator.dupe(u8, face.family);
+    const fallback = try allocator.dupe(u8, face.fallback);
+    var request = Request{
+        .fingerprint = 0,
+        .runs = &.{.{ .text = owned, .role = role, .origin = origin, .max_width_px = max_width_px, .foreground = foreground }},
+        .font_family = family,
+        .font_fallback = fallback,
+    };
     defer request.deinit(allocator);
     var unresolved = try shapeRequest(allocator, &request, scale_milli);
     defer unresolved.deinit(allocator);
     return resolveArtifact(allocator, registry, unresolved);
 }
 
-fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, scale_milli: u32) ![]UnresolvedGlyph {
+fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face, scale_milli: u32) ![]UnresolvedGlyph {
     // The boundary/portable test targets link this module without the macOS CoreText object
     // file. Keep the product-only bridge unreachable there instead of leaving an undefined
     // native symbol merely because a detached-worker test imports its type.
@@ -784,7 +937,20 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, scale_mill
     const capacity = @max(@as(usize, 16), run.text.len * 2);
     var glyphs = try allocator.alloc(bridge.NativeChromeTextGlyphRecord, capacity);
     defer allocator.free(glyphs);
-    bridge.maru_macos_coretext_shape_chrome_text(run.text.ptr, run.text.len, scaled_size, weight(run.role), @floatFromInt(run.max_width_px), &native, glyphs.ptr, glyphs.len);
+    bridge.maru_macos_coretext_shape_chrome_text(
+        run.text.ptr,
+        run.text.len,
+        face.family.ptr,
+        face.family.len,
+        face.fallback.ptr,
+        face.fallback.len,
+        scaled_size,
+        weight(run.role),
+        @floatFromInt(run.max_width_px),
+        &native,
+        glyphs.ptr,
+        glyphs.len,
+    );
     if (native.status != 0 or native.glyph_record_overflow != 0) return error.CoreTextChromeTextShapeFailed;
     const count = @min(@as(usize, native.glyph_record_count), glyphs.len);
     const out = try allocator.alloc(UnresolvedGlyph, count);
@@ -829,7 +995,7 @@ test "owned request shapes proportional text before renderer registry resolution
         .cursor = .{ .r = 255, .g = 255, .b = 255 },
         .accent = .{ .r = 20, .g = 120, .b = 255 },
     });
-    var request = try prepareRequest(allocator, 44, &ops, &tokens, 16);
+    var request = try prepareRequest(allocator, 44, &ops, &tokens, 16, .{});
     defer request.deinit(allocator);
     var artifact = try shapeRequest(allocator, &request, 2000);
     defer artifact.deinit(allocator);

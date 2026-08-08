@@ -982,7 +982,10 @@ const max_status_bar_right_items: usize = 3;
 // theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
-// Session Dock은 terminal font family/line spacing과 별도 Chrome typography를 유지한다. 다만 사용자가
+// Session Dock은 terminal line spacing·font size와 별도 Chrome typography(role별 고정 pt)를 유지한다.
+// **face는 예외로 terminal `font.family`를 따른다** — 사이드바와 한 화면에 보이므로 face까지 독립이면
+// 사용자 폰트 설정을 앱이 절반만 따르게 된다(docs/font-strategy.md "Chrome 텍스트 face"). 크기 위계가
+// 독립이라 face를 바꿔도 도크 기하는 불변이다. 다만 사용자가
 // Cmd+/−/0으로 요청한 font-size zoom은 Dock 전체의 명시적 UI zoom으로 반영한다. 범위는 좁은 dock에서
 // 48pt action target과 최소 읽기 밀도를 보존하도록 [75%, 150%]로 제한한다.
 const session_dock_ui_zoom_min_milli: u32 = 750;
@@ -22216,7 +22219,13 @@ pub const AppSession = struct {
         dock_scale_milli: u32,
         scroll_origin_y_px: i32,
     ) void {
-        var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops, tokens, self.cell_width_px) catch return;
+        // face는 터미널과 같은 resolved appearance에서 온다 — 같은 화면의 사이드바가 사용자 monospace인데
+        // 도크만 시스템 UI face면 앱이 폰트 설정을 절반만 따르는 셈이다(docs/font-strategy.md "Chrome 텍스트
+        // face"). 크기 위계(role 토큰)는 여전히 `font.size`와 독립이라 도크 기하는 이 값에 흔들리지 않는다.
+        var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops, tokens, self.cell_width_px, .{
+            .family = self.appearance.font.family,
+            .fallback = self.appearance.font.fallback,
+        }) catch return;
         defer request.deinit(self.allocator);
         var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, dock_scale_milli) catch return;
         defer unresolved.deinit(self.allocator);

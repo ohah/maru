@@ -1025,11 +1025,20 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   alias·overflow·allocator drift no-free와 free callback 뒤 ledger descriptor scalar-first 검증을 검증한다. private component의 `fail_stop_required`는 exact production consumer
   `client_slot.executeGenerationRequest` 밖 callsite/return/store 0이고 subprocess abnormal exit여야 한다. B3-0은
   `PreparedExecutionTxn` in-place init, phase×method, copy/move/duplicate와 decision table 각 행의 storage/authority/poison/free를
-  Debug·ReleaseFast production type으로 전수한다. B3-1은 pure leaf/production-type unit, B3-2는 exhaustive classifier,
+  Debug·ReleaseFast production type으로 전수한다. B3-1은 final-address `RpcResponseAuthority` leaf와 cleanup-registry의 exact
+  `rpc_response_authority` idle field를 production-type unit으로 검증한다. raw lifecycle 전수, checked epoch 0/max, copy/move,
+  same-address reservation ABA, cross-binding/transport/request/destination splice와 idle/terminal-settled 대 busy/corrupt teardown을
+  payload read/free·wire·제품 execute callsite 0으로 고정한다. full-authority same-address restore는 registry current binding으로
+  거부하고 nested binding 전 필드와 epoch 0/max를 전수한다. module-public 전이는 executing reserve/rollback/terminalize만 허용하며
+  이후 lifecycle은 leaf test-private다. authority `<=256 B`, registry 4,096-entry 증가량 `<=512 KiB`도 고정한다. stale
+  authority+stale identity를 현재 reservation에 함께 splice하는 경우, 같은 주소 registry reincarnation 뒤 reservation ID 1 재사용,
+  tag-family 전수·bound RPC-only 구조 불변식도 포함한다.
+  role/phase/stream/destination admission은 B3-2의 exhaustive classifier가 소유하고,
   B3-3은 Darwin socketpair, B3-4/5는 published payload의 생성·정리 경로를 같은 merge gate로 여는 production-type+source oracle,
   B3-6은 production strict-wrapper subprocess까지 증거 수준을
   높인다. B3-4/5는 `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift, decoder raw-slice exact allowlist를
-  추가로 닫는다. B3-0a와 B3-0은 완료됐고 B3-1~B3-4/5는 후속이며, 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. 모든 내부 gate가
+  추가로 닫는다. B3-0a·B3-0·B3-1은 완료됐고 B3-2~B3-4/5는 후속이며, 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. B3-1은
+  Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. 모든 내부 gate가
   Debug·ReleaseFast와 boundary에서 함께 green이 되기 전 `2c3b-3 완료`로 세지 않는다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field

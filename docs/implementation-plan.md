@@ -1129,9 +1129,29 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `b3_issuer_oracle`을 공유하며 socket wire byte 0, payload 미관측, cleanup·operation receipt·allocator final-zero를 비교한다.
       response-alias child는 실제 exact request peer와 제품 상태에서 낸 transcript를 표로부터 생성한 문자열과 비교한다. 여섯 strict
       child는 canonical request free exact 1, noncanonical backing free 0, response payload free 0을 독립 marker로 고정하고 cleanup
-      5개는 terminal publication marker가 panic보다 앞서는지 검증한다. 이 증거로 B3-0.4와 B3-0을 완료했으며 다음 단계는 B3-1이다.
-   3. **B3-1 inert RPC authority:** production execute callsite 0인 node-local authority leaf와 registry idle field를 넣고 lifecycle,
-      epoch, copy·ABA·splice와 teardown 상태를 pure leaf/production-type unit으로 닫는다.
+      5개는 terminal publication marker가 panic보다 앞서는지 검증한다. 이 증거로 B3-0.4와 B3-0을 완료했다.
+   3. **B3-1 inert RPC authority (완료):** production execute callsite 0인 node-local `RpcResponseAuthority` leaf와 같은 cleanup-registry
+      binding entry의 `rpc_response_authority` field를 넣는다. reserve가 final address에서 exact binding identity로 authority를
+      초기화하고 clear 뒤에는 다시 pristine zero가 된다. leaf는 raw-first
+      `idle|executing|published|borrowed|releasing|terminal`, checked-monotonic nonzero epoch, exact
+      `{authority address,registry incarnation,binding,transport incarnation,request family/tag,id,digest,destination}` receipt를 소유한다. 이 PR에서는
+      test/leaf 전이만 존재하고 Client·socket·allocator·payload·decoder·reconnect 제품 callsite는 0이다. production-type unit은
+      copy/move, 같은 주소의 entry 재예약 ABA, cross-binding/transport/request/destination splice, epoch 0/max 소진, 모든 invalid raw
+      lifecycle을 역참조·I/O 없이 거부하고, registry abort/drop/deinit이 idle/terminal-settled만 허용하며
+      executing/published/borrowed/releasing은 busy, incoherent 상태는 corrupt로 분류함을 고정한다.
+      authority가 payload를 소유하지 않으므로 coherent terminal이 곧 terminal-settled이며 별도 settlement bit는 두지 않는다.
+      authority-owned issuer의 module-public 전이는 `reserveExecuting→rollbackExecuting|settleExecutingTerminal`로 제한한다.
+      publish/borrow/release/finish는 leaf test-private이며 B3-4/5 payload-aware capability 전에는 제품에서 호출할 수 없다. 모든
+      전이는 registry current binding+exact receipt/final-address를 요구한다. registry만 reserve suffix의 init, settled 확인, zero
+      clear를 소유하고 authority pointer accessor/forwarding execute API는 이 단계에 없다.
+      same-address 과거 authority 전체 복원은 leaf seal만 신뢰하지 않고 registry의 현재 exact binding identity와 재비교해 clear를
+      거부한다. registry incarnation+reservation ID가 재사용되지 않는 freshness anchor다.
+      기존 Entry의 exact identity 저장소는 authority binding 하나로 통합하고 active transcript는 binding을 중복 저장하지 않는다.
+      `@sizeOf(Authority)<=256`, 4,096-entry registry의 기존 Entry 대비 증가량 `<=512 KiB`를 제품 타입 gate로 고정한다.
+      registry incarnation과 Entry의 현재 reservation ID를 authority seal/receipt에 함께 결속해 stale authority+stale identity의
+      동시 splice 및 같은 주소 registry reincarnation 뒤 reservation ID 재사용도 거부한다. leaf는 tag-family 구조 일치와 bound RPC family만 canonical로 만들며, role/phase/stream/
+      destination admission은 예정대로 B3-2가 소유한다. Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count
+      focused gate와 전체 session-host gate를 완료 증거로 삼으며, 다음 단계는 B3-2다.
    4. **B3-2 private destination admission:** public wrapper는 attach signature를 유지한 채 내부 `.attach`로 투영하고 test-private
       `.rpc` classifier가 family/role/phase/destination mismatch를 wire·owner·epoch mutation 0으로 거부함을 전수한다.
    5. **B3-3 progress/execute integration:** closed wire-progress evidence, RPC authority reserve, pending flush 뒤 재검증과 first-byte

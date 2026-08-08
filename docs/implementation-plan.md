@@ -1034,7 +1034,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
    shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
    **2c3b-2 request-side canonical authority는 구현·검증 완료했고 2c3b-3은 B3-4/5 private response-side
-   execution/ownership까지 완료했지만 B3-6 public aggregate exposure 전이라 전체 구현 중**이며 두 merge gate를 섞지 않는다.
+   execution/ownership까지 구현했지만 single-slot reusable-finish correction과 B3-6 internal aggregate strict completion 전이라 전체 구현 중**이며
+   두 merge gate를 섞지 않는다.
    2c3b-2는 `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error,
    같은 binding entry의 node-sealed `PreparedRequestAuthority`가 opaque `PreparedBlockingRpcStorage`의 frame descriptor·allocator
    provenance·incarnation·tag/id/digest를 한 transaction으로 pair-seal하는 경로까지 구현했다. 기존 attach-compatible execute도 이
@@ -1052,12 +1053,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    issuer의 preflight 소진은 mutation 없는 `IdentityExhausted`다. declared attachment owner range는 transport와 opaque
    prepared storage를 완전히 포함하면서 canonical slot/node/Client/owner-seal range와 겹치지 않아야 한다.
 
-   **2c3b-3은 response-side execution/ownership**을 구현한다. public `ResponseDestination = attach|rpc` 전환, 별도 node-sealed
-   checked-monotonic RPC epoch authority, Client의 zero-write/ambiguous-write closed progress evidence, stack-final-address
-   `RpcExecutedResponse` publish·private lexical borrow·owner-only finish와 strict fail-stop을 한 gate로 닫는다. production
+   **2c3b-3은 response-side execution/ownership**을 구현한다. client-slot-internal
+   `ResponseDestination = attach:*ExecutedResponse|rpc:void` 전환, 별도 node-sealed
+   checked-monotonic RPC epoch authority, Client의 zero-write/ambiguous-write closed progress evidence, canonical `GenerationTransport`
+   inline single-slot `RpcExecutedResponse` publish·private lexical borrow·owner-only finish와 strict fail-stop을 한 gate로 닫는다. production
    `RemoteRuntime` decoder 전환과 legacy/generation observable parity는 2c3e가 소유하며, 2c3b-3은 private borrow bridge와 production
    callsite 0 baseline까지만 고정한다. attach는 기존 registry의 one-shot `ExecutedResponse`를 유지하고 반복 RPC는 독립 authority로
-   분리한다. 독립 movable payload, terminal seal reset과 fixed response pool은 두지 않는다. red gate는
+   분리한다. 독립 movable payload, 호출 수에 비례하는 one-shot destination collection/fixed response pool과 임의·public reset은 두지 않는다.
+   오직 성공한 `.reusable` finish의 같은 registered operation no-fail suffix만 clean terminal을 bytewise pristine single slot으로 rearm한다. red gate는
    2회·64회 순차 RPC, attach/RPC destination tag mismatch wire 0, copy/move/same-address ABA, cross transport/binding/request/
    digest/epoch splice, pre-wire typed reject 뒤 재사용, uncertain·accepted 미소비 뒤 terminal, allocator drift·alias·free callback 재진입,
    node-sealed authority/whole-transport restore, exact safe-free와 ambiguous no-free product fail-stop, epoch 소진,
@@ -1203,7 +1206,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       함께 끝낼 때 허용한다. prior pending partial/ambiguous, 첫 request positive write, closed/poisoned Client, epoch 소진은
       RPC authority terminal+connection fail-close로 닫는다. B3-3에서는 correlated response publication을 열지 않고 Darwin
       socketpair peer가 exact request를 관측한 뒤 EOF를 내는 terminal sink로 first-byte/complete-write 경계만 증명한다.
-      private caller-final pristine `RpcExecutedResponse` destination을 txn이 봉인하되 payload/publication API는 0으로 유지한다.
+      private pristine `RpcExecutedResponse` destination을 txn이 봉인하되 payload/publication API는 0으로 유지한다. B3-4/5 correction은
+      이 fixture-owned destination을 canonical `GenerationTransport` inline slot exact address 하나로 수렴시킨다.
       focused Debug·ReleaseFast gate는 progress raw/monotonic 전수, pre/post classifier와 authority reserve/rollback/terminal,
       pending cleanup callback 재진입을 고정한다. macOS socketpair gate는 pending 0/partial/full, request 0/1/len-1/full,
       actual kernel의 zero/positive-partial/full과 EOF/EPIPE를 관측한다. exact 1/len-1·EINTR/EAGAIN/zero/hard error는 injected write ops가
@@ -1218,8 +1222,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       lease를 얻은 뒤에는 request backing과 두 authority를 모두 정산한 다음 fence를 마지막에 해제한다. 테스트 밖 제품 caller는
       B3-6 전까지 0이다. execution fence는 주소·generation 외 process-local checked-monotonic incarnation을 lease와 Client latch에
       함께 봉인하며 same-address reincarnation은 새 fence를 release하지 않고 fail-closed한다.
-   6. **B3-4/5 원자적 publication+borrow/finish (완료):** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
-      stack-final response publish, exact safe-free/ambiguous no-free,
+   6. **B3-4/5 원자적 publication+borrow/finish (single-slot correction 필요):** published payload의 생성·정리 primitive는 구현·검증했지만,
+      현재 64회 fixture가 owner 안의 one-shot response 배열을 소비하므로 fixed-pool 비목표와 무제한 순차 RPC 저장 모델을 증명하지 못한다.
+      B3-6 전에 배열을 제거하고 canonical `GenerationTransport` inline single slot 하나로 correction한다. exact safe-free/ambiguous no-free,
       `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다. `client.zig`는 기존 response
       loop를 request 재전송·request-id 증가 없는 `readPreparedResponseUnderExecutionLease`로 추출하고, 새
       `rpc_executed_response.zig`가 반복 RPC byte owner/borrow receipt를 소유한다. 기존 attach `executed_response.zig`와 owner seal은
@@ -1246,26 +1251,58 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       않는다. finish는 `prepareReleasing→owner free_committed→commitReleasingNoFail` 순서를 지킨다. node-local
       `RpcFreeEvidenceRecord{empty|free_call_committed|terminal_freed_once,response_epoch,digest}`는 정상 callback/authority commit 뒤 operation
       release 전에 exact epoch로 empty retire하고 fail-stop evidence는 재사용하지 않는다. private strict
-      wrapper는 byte-owner tombstone/free를 먼저 끝내고 authority terminal을 게시한 뒤 fail-stop outcome을 즉시 소비한다. B3-4/5는
-      terminal-before-return source oracle과 private noreturn sink까지만 소유하며 public production callsite·isolated subprocess는 B3-6이
-      소유한다. Debug·ReleaseFast exact-count leaf/registry/product/
+      wrapper는 byte-owner tombstone/free를 먼저 끝내고 authority terminal을 게시한 뒤 fail-stop outcome을 즉시 소비한다. 원 B3-4/5
+      slice는 terminal-before-return source oracle과 private noreturn sink까지만 소유한다. single-slot correction이 internal normal strict
+      callsite와 module-public entry의 immediate consumption을 소유하고, B3-6은 dedicated isolated subprocess/source 증거만 소유한다.
+      correction boundary는 `fail_stop_required` return/store 0과 private noreturn sink adjacency를 고정한다. Debug·ReleaseFast exact-count leaf/registry/product/
       boundary, actual socketpair fragmented response·OOB-before-response·wrong kind/id·EOF, allocation fail-index, publish/transition permit
       preflight mutation 0·copy/move/replay 거부,
-      reusable 2/64회와 매회 evidence empty retire, stale epoch retire/replay mutation 0, copy/move/cross-binding/same-address ABA, callback
-      reentry Busy와 두 선형화 순서 source oracle이 merge gate다.
-   7. **B3-6 aggregate exposure:** exact public destination/signature를 열고 B3-0a의 attach-only
-      `client_slot.executeGenerationRequest` strict wrapper를 RPC
-      destination까지 확장한다. component의 `fail_stop_required`를 절대 반환하지 않고 즉시 종료하는 subprocess/source oracle까지
-      통과한 뒤에만 `2c3b-3 완료`로 승격한다. decoder 제품
+      correction의 정상 suffix는 fresh finish registered operation에서 callback 복귀 뒤 owner/finish/evidence를 재검증하고
+      reusable-authority, evidence-retire, owner-rearm permit을 모두 fallible prepare한 다음
+      `finishCleanNoFail→commitReusableNoFail→commitEvidenceRetireNoFail→commitReusableRearmNoFail→operation release` 순서다.
+      evidence-retire는 `client_slot.zig` 소유 final-address `PreparedRpcFreeEvidenceRetirePermit`이며 record address, epoch/digest,
+      `free_call_committed` seal, consumed bit를 봉인하고 authority idle commit 직후 callback/lookup 없이 exact record를 empty로 소비한다.
+      owner-rearm은 `rpc_executed_response.zig` 소유 final-address `PreparedReusableRearmPermit`이며 response/self address, old identity/epoch,
+      current `free_committed` owner+freed-once finish transcript에서 계산한 expected `terminal_clean` owner seal, expected consumed finish digest,
+      consumed bit만 봉인한다. owner leaf는 registry/authority/evidence를 import하거나 caller bool을 받지 않는다. held operation/current binding과
+      세 permit의 exact lineage를 `client_slot.zig` private reusable-finish suffix 진입 전에 한 번에 검증하고 이후 commit 사이
+      registry lookup/fallible validation 0으로 인접 소비한다. copy/move/replay/wrong-order/drift는
+      reset 0 isolated fail-stop이다. prepare/commit rearm leaf의 production direct caller는 그 suffix에서 각각 exact 1이고,
+      다른 module과 `generation_transport.zig`의 direct caller, public reset/rearm 노출은 0이다. owner-file test caller는 별도 allowlist다.
+      rearm 뒤 recoverable error·callback·allocation·lookup·추가 semantic mutation은 0이고 canonical operation release만 허용한다.
+      protocol failure·terminal-no-free·terminal-freed-once·authority terminal은 영구 tombstone이며 rearm 0이다. prepare/abort/pre-wire reject는
+      slot bytes·epoch·rearm mutation 0이다. 동일 inline slot exact address의 reusable 2/64회와 매회 fresh epoch·payload free exact 1·finish 반환
+      `pristine+authority idle+evidence empty`, stale owner/borrow/finish/permit replay의 read/free/mutation 0, callback reentry Busy와 두 선형화
+      순서 source oracle이 correction merge gate다. 이 correction은 import cycle 없이 actual transport slot 2/64회를 증명하도록
+      `GenerationTransport.rpc_response` inline field와 generation-transport-file-private `executePreparedRpcSubstrate(receipt)`의
+      ownership-only private settlement `.rpc` path exact-one callsite까지 함께 소유한다. payload semantic read와 normal `RemoteRuntime`
+      product caller는 0이고 2c3e가 typed decoder path로 교체한다. finish function entry에는 releasing authority, finish reusable|terminal
+      authority, evidence-retire, rearm의 네 permit storage를 client-slot-private `FinishPermitRawStorage` 하나가 aligned `undefined` raw
+      storage로 먼저 예약한다. sealed response identity와 stored addr/len/digest scalar의 checked-add만으로 typed/payload read·hash·allocator
+      access 0 상태에서 allocator capability capture 전에
+      payload/finish/borrow/response/operation/node/outer-owner 및 서로 간 exact/partial/overflow alias closed set을 통과한다. alias면
+      capability copy·free·permit init/prepare/commit·owner/authority/connection mutation 0이다. 새 recovery facade 없이 parent-minted
+      `permit-alias-preflight-rejected` sentinel 뒤 즉시 strict fail-stop하며, disjoint branch만 bytewise pristine init→permit prepare를 진행한다. process가
+      종료되는 이 exact local-invariant branch는 terminal-before-panic graph 게시 요구의 명시적 예외다. caller/GUI만 종료하고 daemon/PTY
+      direct terminate/kill/control frame은 0이다. fd close에 따른 EOF-driven client detach/revoke는 exact once이며 daemon PID/runtime/PTY
+      child는 생존해 fresh reattach와 output 연속성을 유지한다. disjoint 뒤에만 full payload live/digest 검증을 허용하며 이후 generic terminal-no-free
+      alias 문구는 raw permit-reservation alias를 제외한다.
+   7. **B3-6 internal aggregate strict completion:** 기존 public attach facade
+      `executePreparedRequest(receipt,*ExecutedResponse)`의 signature/behavior를 유지한다. correction에서 연 private
+      `executePreparedRpcSubstrate(receipt)` ownership-only private settlement path는 correction부터 client-slot module-public entry에서 `fail_stop_required`를 반환형에
+      노출하거나 저장하지 않고 기존 private noreturn sink로 즉시 소비한다. B3-6은 동작을 뒤늦게 바꾸지 않고 이 동일 strict behavior를
+      dedicated subprocess/source oracle로 증명한 뒤에만 `2c3b-3 완료`로 승격한다. public RPC execute·`*RpcExecutedResponse`·borrow·finish·reset,
+      normal `RemoteRuntime` family callsite와 사용자 가시 동작은 0이다. decoder 제품
       전환은 계속 2c3e 소유다.
-      파괴적 strict fail-stop subprocess는 전체 test binary를 재실행하지 않는다. compile filter
-      `CR3a-2c3b response allocation alias`를 가진 전용 artifact만 parent/child fixture와 process-local completion sentinel을
-      함께 실행하며 project test runner의 `--maru-expect-tests=4`가 선택된 함수 수를 실행 전에 강제한다.
-      전용 parent artifact 자체도 `/usr/bin/env -i`로 ambient loader/runtime 환경을 제거한 뒤 시작한다.
-      `MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC`는 전용 parent의 `run-isolated-v1`, 정리된 `execve` 환경과
-      parent-minted pipe capability를 받은 child의 `execute-fixture-v1`, focused aggregate의 `skip-in-aggregate-v1`만 허용한다.
-      marker가 없는 다른 collector는 inert하며 실행 또는 명시적 제외 증거로 세지 않는다. 따라서 이름 drift의 zero-test green,
-      ambient child-mode 위조, 증거의 aggregate test 수·순서 의존을 허용하지 않는다.
+      기존 B3-0a response-alias count 4 artifact를 이 완료 증거로 재사용하지 않는다. correction은 별도
+      `CR3a-2c3b reusable response correction` count 5 artifact로 same-slot 2/64, evidence-retire, rearm permit drift/replay,
+      post-rearm 금지 동작을 고정한다. B3-6은 별도 `CR3a-2c3b internal rpc substrate` count 3 artifact로 private wrapper의
+      peer-error non-crash actual-socket matrix, local invariant isolated fail-stop matrix, public/private boundary+exact-one callsite를
+      고정한다. peer wire frame/header/envelope malformed·wrong-id·truncated·empty·cap+1·OOM은 process alive+connection terminal+
+      permanent tombstone+rearm 0+
+      second free 0이고 local seal/allocator/authority/rearm drift만 abnormal exit다. parent-minted stage sentinel은 free exact once,
+      authority idle, evidence retire, rearm precondition을 구분하며 reset 전 fail-stop과 rearm 뒤 operation release 외 동작 0을 증명한다.
+      bounded nonempty correct-id payload의 JSON/application semantic 오류는 2c3e decoder가 소유한다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

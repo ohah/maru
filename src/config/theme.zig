@@ -899,6 +899,20 @@ pub const SidebarConfig = struct {
     };
 };
 
+/// 하단 상태표시줄 표시 옵션. loader가 `status-bar.*` 키로 파싱.
+///
+/// **왜 끌 수 있어야 하나**: 바는 창 높이를 실제로 먹어 터미널 행이 줄어든다(docs/status-bar.md §1).
+/// 정보보다 행 수가 중요한 사용자에게 되돌릴 길이 없으면 안 된다. 끄면 높이가 0이 되어 작업영역·도크·
+/// 사이드바 뷰포트가 그만큼 되돌아온다 — 게이트가 `statusBarHeightPx` 하나라 소비처가 자동으로 따라온다.
+pub const StatusBarConfig = struct {
+    /// 하단 상태표시줄을 표시할지(기본 true — 현행 동작).
+    show: bool = true,
+
+    pub const schema = .{ // 키: status-bar.show
+        .show = Meta{ .doc = "하단 상태표시줄 표시", .widget = .toggle, .section = .workspace },
+    };
+};
+
 /// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·위치·
 /// 화면·자동 숨김 동작에 쓴다.
 pub const QuickTerminalConfig = struct {
@@ -962,6 +976,8 @@ pub const Config = struct {
     theme_preset_dark: ThemePreset = .maru,
     /// 사이드바 카드 표시 옵션(git 브랜치·폴더). view options 메뉴(앱)와 양방향 공유. loader가 `sidebar.*` 키로 파싱.
     sidebar: SidebarConfig = .{},
+    /// 하단 상태표시줄 표시 옵션. loader가 `status-bar.*` 키로 파싱(스키마-주도).
+    status_bar: StatusBarConfig = .{},
     /// 단축키 힌트 HUD(모디파이어 홀드 시 활성 pane 우상단에 현재 단축키 표시). loader가 `keyhint.*` 키로 파싱(스키마-주도).
     keyhint: KeyHintConfig = .{},
     /// 영속 터미널 세션(GUI 종료 후 host에서 유지) 설정. loader가 `session.*` 키로 파싱(스키마-주도).

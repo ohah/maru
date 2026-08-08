@@ -1,0 +1,120 @@
+name: Cache cleanup
+
+# Actions 캐시가 저장소 한도(10GB)를 밀어 올리는 것을 막는다.
+#
+# **왜 필요한가.** 두 가지가 계속 쌓인다:
+#  1) 빌드 캐시 키에 `github.sha`가 들어가 **main push마다 새 항목**이 생긴다. 최신 하나면 충분한데
+#     같은 잡의 옛 항목이 만료(7일)까지 남는다. 실측: 확대 직후 Zig 캐시가 11개 1752MB까지 갔다.
+#  2) 액션이 PR ref(`refs/pull/N/merge`)에 저장하는 캐시가 있다. GitHub 캐시는 **ref 스코프**라
+#     그 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 **아무도 못 읽으면서** 한도만 먹는다.
+#     실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB.
+#
+# 한도에 닿으면 GitHub이 LRU로 밀어내므로, 그대로 두면 **살아 있는 캐시가 죽은 캐시에 밀려난다**.
+# 실제로 88%까지 찼던 적이 있고 그 상태에서 적중률이 떨어졌다.
+#
+# **무엇을 지우나.** 보수적으로 둘만 지운다:
+#  - 닫히거나 머지된 PR ref의 캐시 (아무도 못 읽는다)
+#  - main의 같은 그룹에서 **최신 2개를 넘는** 옛 항목
+#    (1개만 남기면 직전 커밋을 재실행할 때 미스가 난다. 그래서 2개다.)
+# 열린 PR의 캐시는 그 PR 재실행에 쓰일 수 있으므로 **건드리지 않는다**.
+
+on:
+  schedule:
+    # 매일 한 번. 하루치 머지가 만드는 잉여를 그날 안에 걷어내면 한도에 닿지 않는다.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "지우지 않고 대상만 출력한다"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write # 캐시 삭제에 필요
+
+concurrency:
+  group: cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: prune stale caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # 스케줄 실행은 실제로 지운다. 수동 실행은 기본이 dry-run이라 목록만 본다.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from collections import defaultdict
+
+          repo = os.environ["REPO"]
+          dry = os.environ.get("DRY_RUN", "false") == "true"
+
+          def api(*args):
+              out = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+              return out.stdout
+
+          caches = []
+          page = 1
+          while True:
+              raw = api(f"repos/{repo}/actions/caches?per_page=100&page={page}")
+              if not raw.strip():
+                  break
+              items = json.loads(raw).get("actions_caches", [])
+              if not items:
+                  break
+              caches.extend(items)
+              page += 1
+              if page > 20:
+                  break
+
+          total = sum(c["size_in_bytes"] for c in caches)
+          print(f"현재 캐시 {len(caches)}개 / {total // 1048576}MB")
+
+          doomed = []
+
+          # ① 닫힌/머지된 PR ref
+          pr_state = {}
+          for c in caches:
+              m = re.match(r"^refs/pull/(\d+)/merge$", c.get("ref", ""))
+              if not m:
+                  continue
+              num = m.group(1)
+              if num not in pr_state:
+                  raw = api(f"repos/{repo}/pulls/{num}", "--jq", ".state")
+                  pr_state[num] = raw.strip() or "unknown"
+              if pr_state[num] == "closed":  # GitHub은 머지도 closed로 준다
+                  doomed.append((c, f"PR #{num} 닫힘"))
+
+          # ② main의 그룹별 최신 2개 초과분
+          groups = defaultdict(list)
+          for c in caches:
+              if c.get("ref") != "refs/heads/main":
+                  continue
+              group = re.sub(r"-[0-9a-f]{16,}.*$", "", c["key"])
+              groups[group].append(c)
+          for group, items in groups.items():
+              items.sort(key=lambda c: c["created_at"], reverse=True)
+              for c in items[2:]:
+                  doomed.append((c, f"{group} 최신 2개 초과"))
+
+          freed = sum(c["size_in_bytes"] for c, _ in doomed)
+          print(f"대상 {len(doomed)}개 / {freed // 1048576}MB 회수 예정 (dry_run={dry})")
+          for c, why in doomed:
+              print(f"  - {c['size_in_bytes'] // 1048576:>4}MB  {c['key'][:60]}  ({why})")
+              if not dry:
+                  subprocess.run(["gh", "api", "-X", "DELETE",
+                                  f"repos/{repo}/actions/caches/{c['id']}"],
+                                 capture_output=True, text=True)
+          PY

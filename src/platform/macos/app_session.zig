@@ -3683,6 +3683,21 @@ pub const AppSession = struct {
     /// 세팅 폼의 스크롤 창 — `buildChromeOverlayPrep`이 컴포넌트에서 받아 두고 발행 지점이 읽는다.
     /// 저장하는 상태가 아니라 같은 프레임 안에서 넘기는 값이다(팔레트와 같은 규율 — SV5b).
     settings_scroll_view: ?chrome.components.settings.ScrollView = null,
+    /// 팔레트 결과 목록의 세로 스크롤(**backing px**, SV5d). 휠·드래그가 선택과 무관하게 목록을
+    /// 움직이므로 저장한다 — SV5b까지는 selected에서 매번 재파생해 상태가 없었다.
+    ///
+    /// **창을 계산하는 쪽이 offset을 소유한다**가 규칙이다. 팔레트는 host(`buildPaletteRows`)가 창을
+    /// 계산해 가시 행만 컴포넌트에 넘기므로 여기에 두고, 세팅·알림은 컴포넌트가 창을 계산하므로 각자
+    /// `State.scroll`에 둔다. 소유자가 갈리면 렌더와 스크롤이 서로 다른 값을 보게 된다.
+    palette_scroll: chrome.ui.scroll_area.State = .{},
+    /// follow가 마지막으로 반영한 선택 — 렌더 직전 매 프레임 도는 follow가 **값 비교**로 "선택이
+    /// 바뀌었나"를 판정하는 데 쓴다.
+    ///
+    /// **왜 사건이 아니라 값 비교인가.** 선택은 `.selection_changed` 말고도 쿼리 필터(`recomputePalette`가
+    /// `selected = 0`으로 되돌린다) 등 여러 경로에서 바뀐다. 그 경로들을 열거해 각자 follow를 부르게 하면
+    /// 새 경로가 생길 때 조용히 빠지고, 그때 증상은 "휠로 굴린 뒤 검색어를 고치면 창이 안 따라온다"처럼
+    /// 재현 조건이 좁아 늦게 발견된다. 값 비교는 경로를 묻지 않는다.
+    palette_followed_selected: ?usize = null,
     /// 오버레이 스크롤바 발행 저장소(SV5b). 팔레트·세팅·알림이 공유한다(한 번에 하나만 열린다).
     overlay_scroll_entries: [overlay_scroll_max_entries]chrome.ui.tree.RectEntry = undefined,
     overlay_scroll_entry_count: usize = 0,
@@ -3703,7 +3718,7 @@ pub const AppSession = struct {
     /// `dock_list_scroll_drag`(기하·coalescing)는 하나로 두고 대상만 여기서 가른다. 발행 저장소를
     /// 나눈 것과는 이유가 다르다 — 저장소는 둘이 동시에 화면에 있어서 나눴고, 이건 동시에 잡히지
     /// 않아서 합쳤다.
-    scrollbar_drag_target: enum { none, dock_list, sidebar } = .none,
+    scrollbar_drag_target: enum { none, dock_list, sidebar, overlay } = .none,
     // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가
     // 아니라 tick 수임을 제품 경로에서 보이려면 그 둘이 달라야 하고, 행 값만 보는 fixture는
     // 한 프레임에 몇 번 적용됐는지를 구분하지 못한다.
@@ -15081,6 +15096,7 @@ pub const AppSession = struct {
 
     /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
     fn routeScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
+        if (self.scrollbar_drag_target == .overlay) return self.routeOverlayScrollbarCapture(kind, y_px);
         if (self.scrollbar_drag_target == .sidebar) return self.routeSidebarScrollbarCapture(kind, y_px);
         const owner = self.dock_list_scroll_drag_owner orelse return false;
         if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
@@ -15168,6 +15184,7 @@ pub const AppSession = struct {
         // 어느 스크롤바를 잡았느냐가 offset이 갈 곳을 정한다. 태그를 안 보면 사이드바를 끄는데
         // **보이지 않는 도크 목록**이 스크롤된다(SV3b가 뷰 라우팅에서 세운 것과 같은 위험이다).
         switch (self.scrollbar_drag_target) {
+            .overlay => self.setOverlayScrollOffsetPx(offset_px),
             .sidebar => self.setSidebarScrollOffsetPx(offset_px),
             .dock_list, .none => self.setDockListScrollOffsetPx(offset_px),
         }
@@ -21799,7 +21816,10 @@ pub const AppSession = struct {
             .find_query_changed => self.recomputeFind(),
             .palette_close => {}, // palette.hide는 컴포넌트가 이미 — platform 부수효과 없음
             .palette_query_changed => self.recomputePalette(), // 재필터 + result_count 동기화
-            .palette_selection_changed => {}, // 선택만 이동 — 스크롤 윈도우는 buildChromeOverlayFrame이 파생, 부수효과 없음
+            // 창 갱신은 여기서 하지 않는다 — 선택은 이 액션 말고도 **쿼리 필터**(recomputePalette가
+            // selected=0으로 되돌린다) 등 여러 경로에서 바뀐다. 그 목록을 여기 열거하면 새 경로가
+            // 생길 때 조용히 빠진다. 대신 렌더 직전 `followPaletteSelection`이 **값 비교**로 잡는다.
+            .palette_selection_changed => {},
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
             .context_menu_accept => self.acceptContextMenu(), // selected 항목 실행(현재 "Rename" → 대상 rename)
             .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
@@ -21887,7 +21907,7 @@ pub const AppSession = struct {
             .settings_dropdown_preview => self.applyDropdownPreview(), // 드롭다운 ↑↓ — highlighted 라이브 적용(팝업 유지 — 바로 반영)
             .settings_dropdown_cancel => self.cancelDropdownSelection(), // 드롭다운 Esc/바깥 클릭 — original로 복원(프리뷰 되돌림)
             .settings_slider_set, .settings_adjust_left, .settings_adjust_right => {}, // (deprecated) 슬라이더 제거로 미방출
-            .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더
+            .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더(창은 아래 follow가 잡는다)
             .settings_section_changed => {
                 // 좌측 네비 클릭 — 컴포넌트가 section·selected 갱신, platform은 새 섹션 필드 수 주입 + 재렌더.
                 self.refreshSettingsFieldCount();
@@ -23354,8 +23374,16 @@ pub const AppSession = struct {
             return;
         }
         // 그 외 오버레이(notice·context_menu·find·palette·settings)가 열려 있으면 휠을 **소비**한다 — 터미널/스크롤백으로
-        // 안 흘린다(클릭이 mouse()에서 막히는 것과 짝, 오버레이는 배타적이라 한 번에 하나). 자체 스크롤은 아직 없다(후속).
-        if (self.anyOverlayOpen()) return;
+        // 안 흘린다(클릭이 mouse()에서 막히는 것과 짝, 오버레이는 배타적이라 한 번에 하나).
+        //
+        // **SV5d: 팔레트·세팅은 여기서 자기 목록을 굴린다**(위 주석이 "자체 스크롤은 아직 없다(후속)"이라
+        // 적어 둔 그 후속이다). 소비 게이트가 이 자리에 있으므로 스크롤도 **여기서** 해야 한다 — 뒤에
+        // 두면 이 return에 먼저 걸려 도달하지 못한다(실제로 그렇게 나갔다).
+        if (self.anyOverlayOpen()) {
+            const lines_overlay = wheelDeltaToLines(&self.wheel_accum, delta_y * @as(f64, self.appearance.scroll_multiplier), precise, self.cell_height_px, self.scale_milli);
+            _ = self.scrollOverlayByLines(lines_overlay);
+            return;
+        }
         const session_dock_wheel_target = self.dockVisible() and self.dock.view == .agent_sessions and
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content);
         // Do not carry a sub-pixel trackpad remainder from the dock into a later re-entry. The
@@ -24172,10 +24200,17 @@ pub const AppSession = struct {
             }
             return;
         }
+        // 팔레트는 마우스 클릭 처리가 없다(키보드 전용 오버레이) — 스크롤바 드래그만 받는다(SV5d).
+        if (self.chrome_host.palette.open and kind == 1) {
+            if (self.beginOverlayScrollbarGesture(x_px, y_px)) return;
+        }
         // 세팅 모달이 열려 있으면 포인터를 settings 컴포넌트에 라우팅한다(confirm/context_menu처럼 전용 hit-test —
         // 아래 generic handlePointer 게이트는 settings를 모르므로 여기서 먼저 처리·return해 클릭이 뒤로 안 샌다). 행은
         // config 스키마에서 빌드해 주입(hit-test에 행 수·control rect 필요). 바깥 클릭=닫기·toggle=flip은 dispatchChromeAction.
         if (self.chrome_host.settings.open) {
+            // 스크롤바가 먼저다(SV5d) — 막대는 gutter 안이라 폼 행과 안 겹치지만, 순서를 뒤로 두면
+            // 트랙 위 클릭이 **행 선택**으로 샌다(탐색기·사이드바가 세운 규율 그대로).
+            if (kind == 1 and self.beginOverlayScrollbarGesture(x_px, y_px)) return;
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             const fields = self.buildSettingsFields(arena_state.allocator()) catch return;
@@ -33402,6 +33437,9 @@ pub const AppSession = struct {
                 .content_h_px = extent.content_h_px,
                 .gutter_px = @floatFromInt(metrics.width_px + metrics.inset_x_px),
                 .metrics = metrics,
+                // thumb을 누른 것 자체가 스크롤 의사라 threshold는 0이다. track도 같은 payload를 선언해
+                // 눌러 점프한 뒤 손을 떼지 않고 이어 끌 수 있다(도크·사이드바와 같은 규율).
+                .drag = .{ .payload = dock_list_scroll_drag_payload, .axis = .vertical, .threshold_px = 0 },
                 .track = .{ .id = overlay_scroll_ids.track, .action = .{ .id = overlay_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
                 .thumb = .{ .id = overlay_scroll_ids.thumb, .action = .{ .id = overlay_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2 } } },
             },
@@ -33444,33 +33482,208 @@ pub const AppSession = struct {
         for (self.gpu_quads.items[before..]) |*q| q.layer = 3;
     }
 
+    /// 팔레트 선택이 창 밖이면 **최소로** 당긴다. 창 안이면 움직이지 않는다 — 휠·드래그로 굴린 자리를
+    /// 존중하는 것이 offset을 저장하게 된 이유다(SV5d).
+    fn followPaletteSelection(self: *AppSession) void {
+        // 선택이 그대로면 아무것도 하지 않는다 — 휠·드래그로 굴린 자리를 지킨다. 이 한 줄이 없으면
+        // 매 프레임 당겨 휠이 무효화된다(제품에서 실측).
+        const selected_now = self.chrome_host.palette.selected;
+        if (self.palette_followed_selected) |seen| {
+            if (seen == selected_now) return;
+        }
+        self.palette_followed_selected = selected_now;
+        const ch = @max(self.cell_height_px, 1);
+        const total = self.palette_filtered.items.len;
+        const visible = @min(total, chrome.components.palette.max_visible);
+        if (total <= visible or visible == 0) {
+            self.palette_scroll = .{};
+            return;
+        }
+        const max_offset: u32 = @intCast((total - visible) * ch);
+        const top: u32 = @intCast(@min(self.chrome_host.palette.selected, total -| 1) * ch);
+        const bottom = top + ch;
+        var offset = @min(self.palette_scroll.offset_y_px, max_offset);
+        const viewport_h: u32 = @intCast(visible * ch);
+        if (top < offset) {
+            offset = top;
+        } else if (bottom > offset + viewport_h) {
+            offset = bottom - viewport_h;
+        }
+        self.palette_scroll.offset_y_px = @min(offset, max_offset);
+    }
+
+    /// 오버레이 위 휠(SV5d). 팔레트·세팅은 원래 휠이 **없었다** — 목록이 열려 있는데 뒤 터미널이 굴러
+    /// 가는 것이 위화감이라, 축이 있으면 델타가 0이어도 소비한다(사이드바 휠과 같은 규율).
+    fn scrollOverlayByLines(self: *AppSession, lines: i64) bool {
+        if (self.chrome_host.palette.open) {
+            const ch = @max(self.cell_height_px, 1);
+            const total = self.palette_filtered.items.len;
+            const visible = @min(total, chrome.components.palette.max_visible);
+            if (total <= visible or visible == 0) return true; // 안 넘침 — 소비만
+            const max_offset: u32 = @intCast((total - visible) * ch);
+            if (self.palette_scroll.scrollByPx(-lines * @as(i64, ch), max_offset)) self.metal_dirty = true;
+            return true;
+        }
+        if (self.chrome_host.settings.open) {
+            // 상한은 **직전 프레임이 캐시한 창**에서 얻는다 — 여기서 labels·fields를 다시 빌드하면 휠
+            // 한 틱마다 arena 작업이 붙는다. 한 프레임 늦은 상한은 다음 layout이 clamp하므로 안전하다.
+            const sv = self.settings_scroll_view orelse return true; // 안 넘침 — 소비만
+            const ch = @max(self.cell_height_px, 1);
+            const max_offset: u32 = @intCast((sv.total -| sv.visible) * ch);
+            if (self.chrome_host.settings.scroll.scrollByPx(-lines * @as(i64, ch), max_offset)) self.metal_dirty = true;
+            return true;
+        }
+        return false;
+    }
+
+    fn overlayScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
+        var track: ?chrome.ui.layout.UiRect = null;
+        var thumb: ?chrome.ui.layout.UiRect = null;
+        for (self.overlay_scroll_entries[0..self.overlay_scroll_entry_count]) |entry| {
+            if (entry.id == overlay_scroll_ids.track) track = entry.rect;
+            if (entry.id == overlay_scroll_ids.thumb) thumb = entry.rect;
+        }
+        const t = track orelse return null;
+        const h = thumb orelse return null;
+        return .{
+            .track_x = t.x,
+            .track_y = t.y,
+            .track_w = t.width,
+            .track_h = t.height,
+            .thumb_y = h.y,
+            .thumb_h = h.height,
+            .max_offset_px = self.overlayMaxOffsetPx(),
+        };
+    }
+
+    /// 지금 열린 오버레이의 스크롤 상한(px). 발행된 막대와 **같은 시점의 값**이라야 드래그가 손가락과 안 어긋난다.
+    fn overlayMaxOffsetPx(self: *const AppSession) u32 {
+        const ch = @max(self.cell_height_px, 1);
+        if (self.chrome_host.palette.open) {
+            const total = self.palette_filtered.items.len;
+            const visible = @min(total, chrome.components.palette.max_visible);
+            return @intCast((total -| visible) * ch);
+        }
+        if (self.settings_scroll_view) |sv| return @intCast((sv.total -| sv.visible) * ch);
+        return 0;
+    }
+
+    /// 드래그가 낸 offset을 **지금 열린 오버레이**에 적용한다. 소유자가 갈리면 보이지 않는 목록이 스크롤된다.
+    fn setOverlayScrollOffsetPx(self: *AppSession, offset_px: u32) void {
+        const clamped = @min(offset_px, self.overlayMaxOffsetPx());
+        if (self.chrome_host.palette.open) {
+            if (clamped == self.palette_scroll.offset_y_px) return;
+            self.palette_scroll.offset_y_px = clamped;
+        } else if (self.chrome_host.settings.open) {
+            if (clamped == self.chrome_host.settings.scroll.offset_y_px) return;
+            self.chrome_host.settings.scroll.offset_y_px = clamped;
+        } else return;
+        self.metal_dirty = true;
+    }
+
+    /// 오버레이 스크롤바를 잡는다(SV5d). 도크·사이드바와 **같은 타입**(`scroll_area.Drag`)을 쓰고 태그만 다르다.
+    fn beginOverlayScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
+        const geometry = self.overlayScrollbarGeometry() orelse return false;
+        if (!geometry.trackContains(x_px, y_px)) return false;
+        if (self.dock_list_scroll_drag.begin(geometry, x_px, y_px)) |jumped| self.setOverlayScrollOffsetPx(jumped);
+        const snapshot: chrome.ui.tree.UiRectTree = .{
+            .entries = self.overlay_scroll_entries[0..self.overlay_scroll_entry_count],
+            .generation = self.overlay_scroll_generation,
+        };
+        if (snapshot.entries.len == 0) return false;
+        _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
+            .phase = .down,
+            .x_px = x_px,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .generation = snapshot.generation,
+        }) catch return false;
+        if (self.scrollbar_interaction.capture == null) {
+            self.dock_list_scroll_drag.end();
+            return false;
+        }
+        self.pointer_gesture_owner = .none;
+        self.scrollbar_drag_target = .overlay;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    /// capture가 살아 있는 동안의 move/up(오버레이). 사이드바 경로와 같은 형태 — carry key는 고정값이고
+    /// "같은 막대를 계속 잡고 있는가"는 기하 비교가 판정한다(오버레이는 한 번에 하나만 열린다).
+    fn routeOverlayScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
+        const snapshot: chrome.ui.tree.UiRectTree = .{
+            .entries = self.overlay_scroll_entries[0..self.overlay_scroll_entry_count],
+            .generation = self.overlay_scroll_generation,
+        };
+        if (snapshot.entries.len == 0) {
+            self.endScrollbarCapture();
+            return true;
+        }
+        const live = self.overlayScrollbarGeometry() orelse {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (!fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
+            self.endScrollbarCapture();
+            return true;
+        }
+        const key = chrome.ui.interaction.GestureCompatibility{
+            .kind = dock_list_scroll_drag_payload,
+            .enabled = true,
+            .owner_epoch = 0,
+            .domain_identity = 0,
+        };
+        _ = chrome.ui.interaction.reconcileCarryingCapture(&self.scrollbar_interaction, snapshot, key, key) catch {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (self.scrollbar_interaction.capture == null) {
+            self.endScrollbarCapture();
+            return true;
+        }
+        const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
+            .phase = if (kind == 2) .move else .up,
+            .x_px = @as(f64, self.dock_list_scroll_drag.geometry.track_x) + @as(f64, self.dock_list_scroll_drag.geometry.track_w) / 2,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .button = .left,
+            .generation = snapshot.generation,
+        }) catch {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (dispatched.drag) |event| switch (event) {
+            .began, .moved => |update| {
+                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
+                self.scrollbar_move_events +|= 1;
+            },
+            .dropped => |update| {
+                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
+                self.applyPendingScrollbarScroll();
+                self.endScrollbarCapture();
+            },
+            .cancelled => self.endScrollbarCapture(),
+        };
+        if (kind == 3) self.endScrollbarCapture();
+        return true;
+    }
+
     fn appendPaletteScrollbar(self: *AppSession) void {
         if (!self.chrome_host.palette.open) return;
-        // **창을 여기서 직접 파생한다.** 앞서 `buildPaletteRows`가 캐시한 값을 읽게 했더니 그 함수가 이
-        // 지점 **뒤**에 불려 막대가 화면에서 사라졌다(실측). 파생값은 어디서 계산해도 같은 답이므로
-        // 순서에 기대지 않는 편이 옳다 — 저장하지 않는다는 이 슬라이스의 계약과도 맞는다.
-        const max_visible = chrome.components.palette.max_visible;
-        const total = self.palette_filtered.items.len;
-        const visible = @min(total, max_visible);
-        if (total <= visible or visible == 0) return; // 안 넘침 — 막대 없음
-        const view = .{
-            .total = total,
-            .visible = visible,
-            .win_start = chrome.components.overlay_input.windowStart(total, max_visible, self.chrome_host.palette.selected, 0),
-        };
-        const ch = self.cell_height_px;
-        if (ch == 0) return;
         const lay = chrome.components.overlay_input.panelLayout(self.buildChromeProps()) orelse return;
-
+        const total = self.palette_filtered.items.len;
+        const visible = @min(total, chrome.components.palette.max_visible);
+        if (total <= visible or visible == 0) return; // 안 넘침 — 막대 없음
+        const max_offset: u32 = @intCast((total - visible) * lay.ch);
         // 목록 영역은 프롬프트 줄(row0) **아래**다 — 그 줄은 스크롤에서 고정이므로 트랙도 그 아래에서 시작한다.
         self.appendOverlayScrollbar(.{
             .x = lay.x,
             .y = lay.y + @as(i32, @intCast(lay.ch)),
             .w = lay.panel_cols * lay.cw,
-            .h = @as(u32, @intCast(view.visible)) * lay.ch,
+            .h = @as(u32, @intCast(visible)) * lay.ch,
         }, .{
-            .offset_px = @as(u32, @intCast(view.win_start)) * lay.ch,
-            .content_h_px = @as(u32, @intCast(view.total)) * lay.ch,
+            .offset_px = @min(self.palette_scroll.offset_y_px, max_offset),
+            .content_h_px = @as(u32, @intCast(total)) * lay.ch,
         });
     }
 
@@ -36138,10 +36351,13 @@ pub const AppSession = struct {
         const Row = chrome.components.palette.Row;
         const max_visible = chrome.components.palette.max_visible;
         const total = self.palette_filtered.items.len;
-        const selected = self.chrome_host.palette.selected;
         const visible_count = @min(total, max_visible);
         // 공유 윈도잉(prev=0 재파생) — selected가 창 아래로 나가면 끝맞춤 + clamp. settings·notifications와 단일 출처.
-        const win_start = chrome.components.overlay_input.windowStart(total, max_visible, selected, 0);
+        // 창은 **저장된 offset**에서 나온다(SV5d). 선택이 창 밖이면 `followPaletteSelection`이 미리
+        // 당겨 두므로 여기서 selected를 다시 보지 않는다 — 두 축을 함께 풀면 휠로 굴린 자리가 매
+        // 프레임 선택 쪽으로 되돌아간다.
+        const ch = @max(self.cell_height_px, 1);
+        const win_start = @min(self.palette_scroll.offset_y_px / ch, total -| visible_count);
         const rows = try arena.alloc(Row, visible_count);
         var i: usize = 0;
         while (i < visible_count) : (i += 1) {
@@ -36154,7 +36370,7 @@ pub const AppSession = struct {
             rows[i] = .{
                 .title = command_catalog.entries[entry_idx].title,
                 .binding = binding,
-                .selected = (fi == selected),
+                .selected = (fi == self.chrome_host.palette.selected),
             };
         }
         return rows;
@@ -36268,6 +36484,7 @@ pub const AppSession = struct {
         var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
         try self.chrome_host.collectDraws(props, &tokens, arena, &draws); // Notice·Find
         if (self.chrome_host.palette.open) {
+            self.followPaletteSelection(); // 선택이 바뀌었으면 창을 당긴다(값 비교 — 위 필드 주석)
             const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
         }
@@ -36289,6 +36506,7 @@ pub const AppSession = struct {
             const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
             const items = try self.buildSettingsDropdownItems(arena); // 드롭다운 팝업 열림 시 변형 목록(닫혔으면 빈)
+            chrome.components.settings.ensureSelectedVisible(&self.chrome_host.settings, labels, fields, props, &tokens); // 값 비교 follow(팔레트와 같은 규율)
             try self.chrome_host.collectSettingsDraws(labels, fields, items, props, &tokens, arena, &draws);
             // 검색줄 caret을 캐시한다(sections/rows/props가 여기 있으니 추가 비용 없음) — imeCursorRect가 IME 후보창을
             // 검색줄 옆에 띄우는 데 쓴다(검색 중이 아니면 searchCaretRect가 null). notif_panel_rect 캐시 선례.
@@ -55683,7 +55901,11 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
 // 도크 목록과 공유하므로, 어느 쪽을 잡았는지 태그가 갈리면 **보이지 않는 목록**이 스크롤된다.
 // SV5b — 팔레트 결과 목록에 스크롤바가 생겼다(없던 것). **상태를 만들지 않는 것**이 이 슬라이스의 계약이라,
 // 막대의 위치는 selected에서 파생된 창을 그대로 따라간다.
-test "palette gets a scrollbar derived from selection, without adding scroll state" {
+// SV5d — 팔레트 막대가 **저장된 offset**을 따른다. SV5b는 selected에서 매번 재파생했는데, 휠·드래그가
+// 선택과 무관하게 목록을 움직이므로 그 방식으로는 표현할 수 없다. 대신 선택이 창 밖으로 나가면
+// `followPaletteSelection`이 **미리** 당긴다 — 두 축을 렌더에서 함께 풀면 굴린 자리가 매 프레임
+// 선택 쪽으로 되돌아간다.
+test "palette scrollbar follows stored offset and the wheel, and selection pulls only when out of view" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -55692,41 +55914,86 @@ test "palette gets a scrollbar derived from selection, without adding scroll sta
 
     session.togglePalette();
     if (!session.chrome_host.palette.open) return error.PaletteDidNotOpen;
-    // 카탈로그 전체가 보이도록 쿼리를 비운다 — 결과가 창(max_visible)을 넘쳐야 막대가 나온다.
     const max_visible = chrome.components.palette.max_visible;
-    if (session.palette_filtered.items.len <= max_visible) return error.PaletteFixtureDoesNotOverflow;
+    const total = session.palette_filtered.items.len;
+    if (total <= max_visible) return error.PaletteFixtureDoesNotOverflow;
+    const ch = session.cell_height_px;
+    const max_offset: u32 = @intCast((total - max_visible) * ch);
 
-    // ① 맨 위 선택 — 막대가 트랙 위쪽에 선다.
+    // ① 맨 위에서 막대가 나온다. layer는 over여야 한다 — layer 2는 모달 배경 quad에 통째로 덮인다.
     session.chrome_host.palette.selected = 0;
+    session.palette_scroll = .{};
     session.gpu_quads.clearRetainingCapacity();
     session.appendPaletteScrollbar();
-    const at_top = session.gpu_quads.items.len;
-    try std.testing.expect(at_top >= 2); // track + thumb
-    // **layer는 over다.** 공용 lowering이 내는 layer 2는 모달 배경 quad에 통째로 덮여 막대가 사라진다.
+    try std.testing.expect(session.gpu_quads.items.len >= 2); // track + thumb
     for (session.gpu_quads.items) |q| try std.testing.expectEqual(@as(u32, 3), q.layer);
-    var top_thumb_y: f32 = 0;
-    for (session.gpu_quads.items) |q| {
-        if (q.h > 0 and q.h < @as(f32, @floatFromInt(session.backing_height_px))) top_thumb_y = @max(top_thumb_y, q.y);
-    }
 
-    // ② 마지막 항목을 선택하면 창이 끝으로 가고 **막대도 따라 내려간다** — offset이 selected에서 파생되기
-    //    때문이다. 저장된 스크롤 값이 있었다면 선택만 옮겨도 막대가 그대로였을 것이다.
-    session.chrome_host.palette.selected = session.palette_filtered.items.len - 1;
+    // ② **휠이 선택과 무관하게** 목록을 움직인다(SV5d의 이유). 한 틱 = 한 줄.
+    try std.testing.expect(session.scrollOverlayByLines(-1));
+    try std.testing.expectEqual(ch, session.palette_scroll.offset_y_px);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.selected); // 선택은 그대로
+
+    // ③ 상한에서 멈춘다.
+    _ = session.scrollOverlayByLines(-10_000);
+    try std.testing.expectEqual(max_offset, session.palette_scroll.offset_y_px);
+
+    // ④ 선택이 **창 안**이면 follow가 움직이지 않는다 — 굴린 자리를 존중한다.
+    session.chrome_host.palette.selected = total - 1; // 맨 아래 = 지금 창 안
+    const held = session.palette_scroll.offset_y_px;
+    session.followPaletteSelection();
+    try std.testing.expectEqual(held, session.palette_scroll.offset_y_px);
+
+    // ⑤ 선택이 창 **밖**이면 최소로 당긴다. 단 **선택이 바뀐 순간에만** 돈다 — 같은 선택으로 다시
+    //    불러도 움직이지 않는다(그래야 휠로 굴린 자리가 살아남는다).
+    session.chrome_host.palette.selected = 0;
+    session.followPaletteSelection();
+    try std.testing.expectEqual(@as(u32, 0), session.palette_scroll.offset_y_px);
+
+    // ⑥ **막대를 잡아 끌 수 있다.** 트랙 바닥까지 끌면 상한까지 간다 — 휠과 같은 상한을 쓰지 않으면
+    //    막대 끝과 목록 끝이 어긋난다.
+    session.chrome_host.palette.selected = 0;
+    session.palette_scroll = .{};
     session.gpu_quads.clearRetainingCapacity();
     session.appendPaletteScrollbar();
-    var bottom_thumb_y: f32 = 0;
-    for (session.gpu_quads.items) |q| {
-        if (q.h > 0 and q.h < @as(f32, @floatFromInt(session.backing_height_px))) bottom_thumb_y = @max(bottom_thumb_y, q.y);
+    if (session.overlayScrollbarGeometry()) |geometry| {
+        try std.testing.expect(session.beginOverlayScrollbarGesture(
+            @as(f64, geometry.track_x) + @as(f64, geometry.track_w) / 2,
+            @as(f64, geometry.thumb_y) + @as(f64, geometry.thumb_h) / 2,
+        ));
+        try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .overlay), session.scrollbar_drag_target);
+        _ = session.routeOverlayScrollbarCapture(2, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+        session.applyPendingScrollbarScroll();
+        try std.testing.expectEqual(max_offset, session.palette_scroll.offset_y_px);
+        // up이 capture와 태그를 함께 놓는다 — 태그가 남으면 다음 도크 드래그가 팔레트를 움직인다.
+        _ = session.routeOverlayScrollbarCapture(3, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+        try std.testing.expect(!session.scrollbarCaptureActive());
+        try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .none), session.scrollbar_drag_target);
+        // 트랙 **밖**을 누르면 안 잡힌다.
+        try std.testing.expect(!session.beginOverlayScrollbarGesture(0, @as(f64, geometry.track_y) + 1));
     }
-    try std.testing.expect(bottom_thumb_y > top_thumb_y);
 
-    // ③ **`buildPaletteRows`를 부르지 않아도** 막대가 나온다. 창을 캐시에서 읽게 했더니 그 함수가 프레임
-    //    뒤에 불려 막대가 화면에서 사라졌다 — 파생값은 호출 순서에 기대면 안 된다.
-    // ④ 팔레트가 닫히면 막대도 없다 — 다른 오버레이가 열렸을 때 stale 막대가 남으면 안 된다.
+    // ⑦ **휠로 굴린 자리가 다음 프레임에 되돌아가지 않는다.** 이것이 SV5d의 전제이고, 실제로 여기서
+    //    한 번 깨졌다 — follow를 매 프레임 부르게 했더니 선택이 맨 위(0)일 때 offset이 즉시 0으로
+    //    당겨져 휠이 무효화됐다(제품에서 실측). 그래서 follow는 **선택이 바뀐 순간에만** 돈다.
+    session.chrome_host.palette.selected = 0;
+    session.followPaletteSelection(); // 현재 선택을 먼저 반영해 둔다(제품에서도 매 프레임 불린다)
+    session.palette_scroll = .{};
+    _ = session.scrollOverlayByLines(-2);
+    const after_wheel = session.palette_scroll.offset_y_px;
+    try std.testing.expect(after_wheel > 0);
+    session.followPaletteSelection(); // 선택이 그대로다 → 굴린 자리를 지킨다
+    try std.testing.expectEqual(after_wheel, session.palette_scroll.offset_y_px);
+    // 선택이 **바뀌면** 그때 당긴다.
+    session.chrome_host.palette.selected = 1;
+    session.followPaletteSelection();
+    try std.testing.expectEqual(ch, session.palette_scroll.offset_y_px);
+
+    // ⑧ 팔레트가 닫히면 막대도 없고 휠도 안 먹는다 — 뒤 터미널이 굴러야 한다.
     session.chrome_host.palette.hide();
     session.gpu_quads.clearRetainingCapacity();
     session.appendPaletteScrollbar();
     try std.testing.expectEqual(@as(usize, 0), session.gpu_quads.items.len);
+    if (!session.chrome_host.settings.open) try std.testing.expect(!session.scrollOverlayByLines(-1));
 }
 
 test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock list alone" {

@@ -15896,6 +15896,62 @@ test "CR3a-2c2b3b allocator drift tombstones then consumed proof finalizes termi
     ));
 
     const FinalizerRejectRunner = struct {
+        fn waitAndCapture(
+            child: c.pid_t,
+            stderr_fd: c.fd_t,
+            captured: []u8,
+            captured_len: *usize,
+        ) !c_int {
+            const flags = c.fcntl(stderr_fd, c.F.GETFL, @as(c_int, 0));
+            if (flags < 0) return error.TestUnexpectedResult;
+            const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+            if (c.fcntl(stderr_fd, c.F.SETFL, flags | nonblocking) < 0)
+                return error.TestUnexpectedResult;
+
+            var status: c_int = 0;
+            var reaped = false;
+            var stderr_eof = false;
+            var discard: [4096]u8 = undefined;
+            var attempts: usize = 0;
+            while (attempts < 10_000) : (attempts += 1) {
+                while (!stderr_eof) {
+                    const target = if (captured_len.* < captured.len)
+                        captured[captured_len.*..]
+                    else
+                        &discard;
+                    const count = c.read(stderr_fd, target.ptr, target.len);
+                    if (count > 0) {
+                        if (captured_len.* < captured.len)
+                            captured_len.* += @intCast(count);
+                        continue;
+                    }
+                    if (count == 0) {
+                        stderr_eof = true;
+                        break;
+                    }
+                    switch (posix.errno(count)) {
+                        .INTR => continue,
+                        .AGAIN => break,
+                        else => return error.TestUnexpectedResult,
+                    }
+                }
+                if (!reaped) {
+                    const waited = c.waitpid(child, &status, c.W.NOHANG);
+                    if (waited == child) {
+                        reaped = true;
+                    } else if (waited < 0 and posix.errno(waited) != .INTR) {
+                        return error.TestUnexpectedResult;
+                    }
+                }
+                if (reaped and stderr_eof) return status;
+                var wait_fd = c.pollfd{ .fd = stderr_fd, .events = c.POLL.IN, .revents = 0 };
+                _ = c.poll(@ptrCast(&wait_fd), 1, 1);
+            }
+            _ = c.kill(child, c.SIG.KILL);
+            if (!reaped) _ = c.waitpid(child, &status, 0);
+            return error.TestUnexpectedResult;
+        }
+
         fn run(
             rejected_client: *Client,
             rejected_prepared: *PreparedEndedPurgeCommit,
@@ -15931,31 +15987,22 @@ test "CR3a-2c2b3b allocator drift tombstones then consumed proof finalizes termi
                 c._exit(0);
             }
             _ = c.close(stderr_pipe[1]);
-            var rejected_status: c_int = 0;
-            var rejected_attempts: usize = 0;
-            while (rejected_attempts < 2_000) : (rejected_attempts += 1) {
-                const waited = c.waitpid(rejected_child, &rejected_status, c.W.NOHANG);
-                if (waited == rejected_child) break;
-                if (waited < 0 and posix.errno(waited) != .INTR)
-                    return error.TestUnexpectedResult;
-                var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
-                _ = c.poll(@ptrCast(&delay_fd), 0, 1);
-            }
-            if (rejected_attempts == 2_000) {
-                _ = c.kill(rejected_child, c.SIG.KILL);
-                _ = c.waitpid(rejected_child, &rejected_status, 0);
-                return error.TestUnexpectedResult;
-            }
+            var stderr_output: [4096]u8 = undefined;
+            var stderr_len: usize = 0;
+            const rejected_status = try waitAndCapture(
+                rejected_child,
+                stderr_pipe[0],
+                &stderr_output,
+                &stderr_len,
+            );
             const wait_status: u32 = @bitCast(rejected_status);
             try std.testing.expect(
                 !c.W.IFEXITED(wait_status) or c.W.EXITSTATUS(wait_status) != 0,
             );
-            var stderr_output: [4096]u8 = undefined;
-            const stderr_len = c.read(stderr_pipe[0], &stderr_output, stderr_output.len);
             try std.testing.expect(stderr_len > 0);
             try std.testing.expect(std.mem.indexOf(
                 u8,
-                stderr_output[0..@intCast(stderr_len)],
+                stderr_output[0..stderr_len],
                 expected_marker,
             ) != null);
         }
@@ -16031,31 +16078,22 @@ test "CR3a-2c2b3b allocator drift tombstones then consumed proof finalizes termi
         c._exit(0);
     }
     _ = c.close(panic_pipe[1]);
-    var child_status: c_int = 0;
-    var attempts: usize = 0;
-    while (attempts < 2_000) : (attempts += 1) {
-        const waited = c.waitpid(child, &child_status, c.W.NOHANG);
-        if (waited == child) break;
-        if (waited < 0 and posix.errno(waited) != .INTR)
-            return error.TestUnexpectedResult;
-        var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
-        _ = c.poll(@ptrCast(&delay_fd), 0, 1);
-    }
-    if (attempts == 2_000) {
-        _ = c.kill(child, c.SIG.KILL);
-        _ = c.waitpid(child, &child_status, 0);
-        return error.TestUnexpectedResult;
-    }
+    var panic_output: [4096]u8 = undefined;
+    var panic_len: usize = 0;
+    const child_status = try FinalizerRejectRunner.waitAndCapture(
+        child,
+        panic_pipe[0],
+        &panic_output,
+        &panic_len,
+    );
     const child_wait_status: u32 = @bitCast(child_status);
     try std.testing.expect(
         !c.W.IFEXITED(child_wait_status) or c.W.EXITSTATUS(child_wait_status) != 0,
     );
-    var panic_output: [4096]u8 = undefined;
-    const panic_len = c.read(panic_pipe[0], &panic_output, panic_output.len);
     try std.testing.expect(panic_len > 0);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        panic_output[0..@intCast(panic_len)],
+        panic_output[0..panic_len],
         "ended purge finalizer authority mismatch",
     ) != null);
     try std.testing.expectEqual(PreparedEndedPurgeCommit.Lifecycle.finalization_pending, prepared.lifecycle);

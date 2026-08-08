@@ -513,7 +513,10 @@ pub fn buildSidebarDrawList(
         // 폭이 좁아 핀이 text_col을 침범하면 생략(degrade).
         const pinned_here = i < pinned.len and pinned[i];
         const close_here = i < close_rows.len and close_rows[i];
-        const pin_col: u16 = if (close_here) (cols -| 6) else (cols -| 3); // ✕가 cols-3이라 핀은 그 왼쪽
+        // ✕ 열은 chrome이 단일 출처(`close_col_from_end`)이고 핀은 그 기준으로 자리를 잡는다 — 리터럴을 따로
+        // 두면 ✕만 옮겨졌을 때 핀이 그 위에 겹친다.
+        const close_from_end = sidebar_component.close_col_from_end;
+        const pin_col: u16 = if (close_here) (cols -| (close_from_end + 3)) else (cols -| close_from_end);
         const draw_pin = pinned_here and cols >= 2 and pin_col > text_col;
         const name_row = sidebarGlyphRow(i, 0, n); // 이름줄(line 0) — j==0 줄과 핀이 공유(중복 계산 제거)
         // 활동 시각은 이름줄 우측(✕ 왼쪽)에 고정 폭으로 앉는다. 폭이 0이면 자리를 잡지 않아 제목이 끝까지 간다.
@@ -585,7 +588,9 @@ pub fn buildSidebarDrawList(
             const x_row = sidebarGlyphRow(cr, 0, n);
             try cells.append(allocator, .{
                 .row = x_row,
-                .col = cols -| 3, // 우측에서 **두 칸** 안쪽 — 한 칸이면 경계에 붙어 답답하다(사용자 피드백)
+                // 열 위치는 chrome `close_col_from_end` 단일 출처다. hit-test(`sidebar.closeButton`)가 같은
+                // 값에서 x 구간을 내므로 "보이는 칸 = 눌리는 칸"이 구조적으로 보장된다.
+                .col = cols -| sidebar_component.close_col_from_end,
                 .codepoint = sidebar_close_glyph,
                 .width = 1,
                 .style = style,

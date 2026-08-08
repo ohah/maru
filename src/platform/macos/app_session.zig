@@ -21120,7 +21120,7 @@ pub const AppSession = struct {
                     if (gh.tab < self.tabs.items.len) return .{ .group = self.tabs.items[gh.tab] };
                     return null;
                 }
-                if (chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px)) return null;
+                if (self.sidebarCloseButtonAt(x_px)) return null;
                 if (self.visibleTab(slot)) |tab_idx| return .{ .workspace = self.tabs.items[tab_idx] }; // 표시 슬롯 → 원본(검색 필터)
             }
             return null;
@@ -24385,7 +24385,7 @@ pub const AppSession = struct {
                         } else if (chrome.components.sidebar.agentAt(self.sidebar_rows.items, slot)) |ag| {
                             // 에이전트 행: 우측 ✕ zone이면 **그 Term만 닫고**, 아니면 그 에이전트가 도는 자리로 이동한다
                             // (워크스페이스 → Pane → Term, §5). ✕는 호버 없이 고정 표시라 zone 판정만으로 가른다.
-                            if (chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px)) {
+                            if (self.sidebarCloseButtonAt(x_px)) {
                                 self.closeAgentRow(ag.tab, ag.pane, ag.term);
                             } else {
                                 self.focusAgentRow(ag.tab, ag.pane, ag.term);
@@ -24404,7 +24404,7 @@ pub const AppSession = struct {
                             // slot=표시 슬롯, tab_idx=원본 탭(검색 필터 역매핑). 닫기/전환/드래그는 원본 인덱스로 한다.
                             // ✕는 이제 **호버 없이 고정 표시**라(사용자 요청) 호버 일치 조건을 걸지 않는다 — 보이는 자리를
                             // 누르면 언제나 닫힌다("보이는 것 = 눌리는 것").
-                            const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px);
+                            const on_close = self.sidebarCloseButtonAt(x_px);
                             if (on_close) {
                                 self.requestClose(.{ .tab_index = tab_idx }); // 실행 중 명령 있으면 확인 모달(없으면 즉시 closeTab)
                             } else {
@@ -33100,6 +33100,26 @@ pub const AppSession = struct {
         };
     }
 
+    /// 사이드바 카드 줄의 열 배치. **그리는 자리와 눌리는 자리의 단일 출처**(`chrome.components.sidebar.columns`)에
+    /// 토큰·gutter 값만 주입한다 — 산술은 chrome이 갖고 platform은 값만 안다. `buildSidebarTitleDrawList`(렌더)와
+    /// `sidebarCloseButtonAt`(hit-test)이 둘 다 이걸 부르므로 gutter·inset이 바뀌어도 한쪽만 움직일 수 없다.
+    fn sidebarColumns(self: *const AppSession) ?chrome.components.sidebar.Columns {
+        const sp = self.buildChromeTokens().space;
+        return chrome.components.sidebar.columns(
+            self.sidebar_width_px,
+            self.cell_width_px,
+            self.sidebarScrollGutterPx(),
+            sp.card_gap_px + sp.accent_bar_width_px, // 좌측 accent 막대 + 카드 패딩
+            sp.card_gap_px, // 우측 카드 패딩
+        );
+    }
+
+    /// x가 카드 줄의 ✕ 칸 안인가. 배치를 못 내는 폭이면 false(그 폭에서는 ✕를 그리지도 않는다).
+    fn sidebarCloseButtonAt(self: *const AppSession, x_px: f64) bool {
+        const cols_layout = self.sidebarColumns() orelse return false;
+        return chrome.components.sidebar.closeButton(x_px, cols_layout, self.cell_width_px);
+    }
+
     /// 밴드·카드 텍스트가 스크롤바에 내주는 폭. **스크롤 여부와 무관하게 상시**다 — 넘칠 때만 떼면
     /// 목록이 마지막 카드 하나에 reflow한다(docs/scroll-area.md §4).
     fn sidebarScrollGutterPx(self: *const AppSession) u32 {
@@ -34681,18 +34701,13 @@ pub const AppSession = struct {
         // U2/B2: 제목 영역 = 슬롯 폭에서 좌측(카드 패딩 + accent 막대)·우측(카드 패딩)을 inset한 content rect(선언적
         // 패딩, Rect.inset). 그 좌단을 셀 col로 ceil 환산(indent_cols)해 제목을 좌측 막대 우측·카드 안에 둔다(rich).
         // tui(0)면 left=right=0이라 전체 폭·indent 0(기존과 동일).
-        const sp = self.buildChromeTokens().space;
-        // 카드 텍스트도 스크롤바 gutter를 뗀 폭을 쓴다(SV4a). 사이드바 셀은 layer 2 quad **위**에 그려지므로,
-        // 폭을 안 줄이면 긴 제목이 스크롤바를 덮는다 — 밴드만 좁히는 것으로는 부족하다.
-        const row = chrome.draw.Rect{ .x = 0, .y = 0, .w = self.sidebar_width_px -| self.sidebarScrollGutterPx(), .h = cw }; // h는 가로 환산에 무관
-        const text_area = row.inset(.{ .left = sp.card_gap_px + sp.accent_bar_width_px, .right = sp.card_gap_px });
-        const indent_px: u32 = @intCast(text_area.x);
-        const indent_cols: u16 = if (indent_px > 0) @intCast(@min((indent_px + cw - 1) / cw, @as(u32, std.math.maxInt(u16)))) else 0;
-        // B2 리뷰(e): indent_cols=ceil(left/cw)와 text_area.w/cw=floor의 합이 full_cols를 1 넘어 제목 우단이 터미널 영역을
-        // 침범할 수 있어, sidebar_cols를 full_cols-indent_cols로도 clamp한다 → indent_cols+sidebar_cols <= full_cols 보장.
-        const full_cols: u32 = (self.sidebar_width_px -| self.sidebarScrollGutterPx()) / cw;
-        const sidebar_cols: u16 = @intCast(@min(@min(text_area.w / cw, full_cols -| indent_cols), @as(u32, std.math.maxInt(u16))));
-        if (sidebar_cols == 0) return error.NoSidebar;
+        const sp = self.buildChromeTokens().space; // 아래 그룹 들여쓰기 등 다른 토큰 소비자가 계속 쓴다
+        // 열 배치는 **chrome이 단일 출처**다(`sidebar.columns`). 예전에는 이 함수가 gutter·inset·indent를 직접
+        // 유도하고 hit-test(`closeButton`)는 `w - 3cw`로 따로 유도해, gutter가 상시 예약된 뒤 ✕의 보이는 자리와
+        // 눌리는 자리가 아예 갈렸다(사용자 보고). 이제 그리는 쪽도 누르는 쪽도 이 한 값을 본다.
+        const cols_layout = self.sidebarColumns() orelse return error.NoSidebar;
+        const indent_cols: u16 = cols_layout.indent_cols;
+        const sidebar_cols: u16 = cols_layout.cols;
 
         // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(동작/활성 마커 ·/* prefix,
         // 번호 없음), branch_lines=octocat() 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄).
@@ -35017,7 +35032,7 @@ pub const AppSession = struct {
             // 시프트로 셀이 [indent_cols, sidebar_cols+indent_cols)로 가므로 surface 폭도 full_cols로 넓힌다 — 안 그러면
             // 폭을 꽉 채운 긴 경로줄이 size.cols(=sidebar_cols)를 넘어 ShapedRecordOutsideSurface로 프레임이 통째로 실패
             // (짧은 이름은 안 걸리던 잠재 버그를 경로줄이 깨움). full_cols ≥ sidebar_cols+indent_cols라 항상 수용한다.
-            draw_list.size.cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16))));
+            draw_list.size.cols = cols_layout.full_cols;
         }
         // SG8d: 고스트 카드 glyph를 살짝만 dim한 muted 색으로(반투명 밴드+삽입선과 짝 — "떠 있는" 카드로 읽히되 무슨
         // 카드인지는 또렷이 읽히게). slot = c.row/sidebar_line_base = 표시 row 인덱스라 preview_rows[ghost_lo,hi) 셀만 고른다.
@@ -49830,9 +49845,11 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     try std.testing.expect(session.rename == null);
     try std.testing.expectEqualStrings("z", term0.surface.custom_name.?);
 
-    // (#8) 사이드바 슬롯 ✕(close) zone은 renameTargetAt가 null(닫기 자리에서 rename 방지), 좌측은 워크스페이스.
+    // (#8) 사이드바 슬롯 ✕(close) 칸은 renameTargetAt가 null(닫기 자리에서 rename 방지), 좌측은 워크스페이스.
+    // 좌표는 **그려진 ✕ 칸**에서 얻는다 — 폭 역산(`w - cw`)은 gutter만큼 어긋나 실제 ✕가 아닌 자리를 짚는다.
     const slot_y = session.testSidebarRowCenterY(0); // 슬롯 0 중앙(상단 헤더 아래)
-    const close_x = @as(f64, @floatFromInt(session.sidebar_width_px - session.cell_width_px)); // 우측 ✕ 영역
+    const rename_close_range = session.sidebarColumns().?.closeXRange(session.cell_width_px);
+    const close_x = rename_close_range.start + (rename_close_range.end - rename_close_range.start) / 2;
     try std.testing.expect(session.renameTargetAt(close_x, slot_y) == null);
     try std.testing.expect(session.renameTargetAt(@floatFromInt(session.cell_width_px), slot_y) != null); // 좌측=워크스페이스
 
@@ -61561,8 +61578,12 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     markAllTermsAtPrompt(session); // idle 셸 흉내 — 슬롯 ✕ 닫기가 확인 모달 없이 즉시 탭을 닫게
 
     const w: f64 = @floatFromInt(session.sidebar_width_px);
-    const cw: f64 = @floatFromInt(session.cell_width_px);
-    const close_x = w - cw; // ✕ zone(우측 2칸) 안
+    // ✕는 **그려진 그 칸**에서만 닫는다(`sidebar.columns`가 그리는 자리와 누르는 자리의 단일 출처).
+    // 예전에는 "우측 3칸"을 폭에서 역산해 스크롤바 gutter 위 빈칸도 닫았고, 정작 gutter만큼 왼쪽으로 밀린
+    // 실제 ✕는 안 눌렸다(사용자 보고). 그래서 이 좌표도 폭 역산이 아니라 배치에서 얻는다.
+    const cols_layout = session.sidebarColumns().?;
+    const close_range = cols_layout.closeXRange(session.cell_width_px);
+    const close_x = close_range.start + (close_range.end - close_range.start) / 2; // ✕ 칸 중앙
     const slot0_y: f64 = session.testSidebarRowCenterY(0); // 슬롯 0 중앙(목록 위 여백이 있어 header+1은 카드 밖)
 
     // 슬롯 0 좌측(✕ zone 밖) 클릭 → 닫지 않고 전환(active 0). 닫기 전 전환 동작 가드.
@@ -61575,6 +61596,13 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     session.mouse(1, close_x, slot0_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+
+    // 그리고 **우측 끝(gutter 자리)은 더 이상 닫지 않는다.** 옛 구현은 여기서 닫혔는데, 그건 보이는 ✕가
+    // 아니라 스크롤바가 서는 빈칸이었다 — 그 관대함이 정확히 이번 회귀의 반대편이다.
+    try std.testing.expect(w - 1 >= close_range.end);
+    const before = session.tabs.items.len;
+    session.mouse(1, w - 1, session.testSidebarRowCenterY(0), 0, 0);
+    try std.testing.expectEqual(before, session.tabs.items.len);
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

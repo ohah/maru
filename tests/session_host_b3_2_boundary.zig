@@ -17,10 +17,9 @@ test "B3-2 private destination admission keeps RPC test-only and public execute 
     try std.testing.expectEqual(@as(usize, 1), count(registry, "const AdmissionContext = enum(u8)"));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn preparedAttachAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, ".preparedAttachAdmission("));
-    try std.testing.expectEqual(@as(usize, 2), count(registry_product, "classifyRequestAdmission("));
-    // The enum declaration and classifier switch are the only product-prefix occurrences.
-    // Any third occurrence would create an RPC destination caller before B3-3 owns it.
-    try std.testing.expectEqual(@as(usize, 2), count(registry_product, ".execute_rpc"));
+    try std.testing.expectEqual(@as(usize, 4), count(registry_product, "classifyRequestAdmission("));
+    // B3-3 adds the prepared/executing RPC facades while preserving the same classifier SSOT.
+    try std.testing.expectEqual(@as(usize, 4), count(registry_product, ".execute_rpc"));
     try std.testing.expectEqual(@as(usize, 0), count(client_slot, ".execute_rpc"));
     try std.testing.expectEqual(@as(usize, 0), count(transport, ".execute_rpc"));
     try std.testing.expectEqual(@as(usize, 0), count(client_slot, "rpc_response_authority.reserveExecuting("));

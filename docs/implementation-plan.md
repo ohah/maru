@@ -1190,7 +1190,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       expected lifecycle `.prepared`, `beginPreparedRequestExecute` 뒤 flush 후 `.executing`으로 같은 receipt의 canonical transcript와
       current entry를 각각 새로 resolve해 동일 classifier를 다시 호출하며 post-flush 결과만 first-byte 권위로 쓴다. Debug·ReleaseFast
       registry 3개와 product 2개, boundary 1개를 합친 exact 11-test focused gate와 전체 session-host 회귀가 완료 증거이며 다음 단계는 B3-3이다.
-   5. **B3-3 progress/execute integration:** caller-final storage에 Client가 in-place 초기화·seal하는
+   5. **B3-3 progress/execute integration (완료):** caller-final storage에 Client가 in-place 초기화·seal하는
       `PreparedRequestExecutionLease`와 closed
       `PreparedRequestWireProgress{request_zero_clean,prior_pending_ambiguous,request_maybe_written}`의 유일한 생산자가
       된다. error/lifecycle에서 progress를 추론하거나 byte count·bool을 caller가 permit처럼 재주입하지 않는다. exact 순서는
@@ -1212,7 +1212,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `pristine→response_reserved→settled`의 닫힌 phase와 request-cleanup 선행 뒤 response rollback/terminal 순서만 소유한다. request
       phase는 내장 txn, wire phase는 lease progress만 조회하며 중복 저장하지 않는다. 합성 txn은 response reserve 전에 mutation 0으로
       초기화되고 즉시 defer 보호를 얻는다. request backing 정리 구현을 복제하지 않는다. B3-3 내부 production 타입/함수는 test
-      fixture가 exact private wrapper를 호출하지만 테스트 밖 제품 caller는 B3-6 전까지 0이다.
+      fixture 3개가 exact private wrapper를 8회 호출해 reserve 뒤 rollback, lease 뒤 rollback, response epoch 소진의 wire 0·fail-close,
+      pending ambiguity, request hard failure, frame alias, full-write+EOF, pending-free callback destination 점유를 검증한다. execution
+      lease를 얻은 뒤에는 request backing과 두 authority를 모두 정산한 다음 fence를 마지막에 해제한다. 테스트 밖 제품 caller는
+      B3-6 전까지 0이다. execution fence는 주소·generation 외 process-local checked-monotonic incarnation을 lease와 Client latch에
+      함께 봉인하며 same-address reincarnation은 새 fence를 release하지 않고 fail-closed한다.
    6. **B3-4/5 원자적 publication+borrow/finish:** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
       stack-final response publish, exact safe-free/ambiguous no-free,
       `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다.

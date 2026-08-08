@@ -5,6 +5,7 @@
 //! later gate; the closed transitions live here so that exact ownership can be tested first.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const contract = @import("generation_attachment_contract.zig");
 const owner_seal = @import("external_owner_seal.zig");
 
@@ -197,6 +198,17 @@ pub const Authority = struct {
         return self.settlementReadiness();
     }
 
+    pub fn terminalExactFor(
+        self: *const Authority,
+        registry_incarnation: u64,
+        binding: contract.BindingIdentity,
+    ) bool {
+        return registry_incarnation != 0 and self.registry_incarnation == registry_incarnation and
+            binding.valid() and self.binding.matches(binding) and self.lifecycle == .terminal and
+            self.canonical_present == 0 and activeZero(&self.active) and
+            std.mem.eql(u8, &self.seal, &sealFor(self));
+    }
+
     pub fn reserveExecuting(self: *Authority, input: ReserveInput) Error!Canonical {
         try self.requireFinalAddress();
         if (self.lifecycle == .terminal) return error.InvalidState;
@@ -231,6 +243,15 @@ pub const Authority = struct {
         self.lifecycle = .executing;
         self.seal = sealFor(self);
         return canonical;
+    }
+
+    pub fn exhaustNextEpochForTest(self: *Authority) Error!void {
+        if (!builtin.is_test) unreachable;
+        try self.requireFinalAddress();
+        if (self.lifecycle != .idle or self.canonical_present != 0 or
+            !activeZero(&self.active)) return error.InvalidState;
+        self.next_epoch = std.math.maxInt(u64);
+        self.seal = sealFor(self);
     }
 
     pub fn matches(

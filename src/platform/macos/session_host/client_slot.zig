@@ -20,6 +20,7 @@ const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
 const client_poison = @import("client_poison.zig");
 const executed_response_mod = @import("executed_response.zig");
+const rpc_response_authority = @import("rpc_response_authority.zig");
 const response_payload_allocation = @import("response_payload_allocation.zig");
 
 const c = std.c;
@@ -973,6 +974,25 @@ fn resolveRegisteredNodeOperation(operation: RegisteredNodeOperation) ?*ClientNo
     return null;
 }
 
+fn registeredNodeOperationOwnerEntry(
+    operation: RegisteredNodeOperation,
+) ?RegisteredNodeOperationEntry {
+    const pid = currentPid();
+    const index: usize = operation.registry_index;
+    if (pid == 0 or operation.pid != pid or process_runtime_pid.load(.acquire) != pid or
+        index >= registered_node_operations.len or operation.operation_id == 0 or
+        @intFromPtr(operation.node) == 0)
+        return null;
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = registered_node_operations[index];
+    if (entry.state != .live or entry.operation_id != operation.operation_id or
+        entry.node_addr != @intFromPtr(operation.node) or entry.pid != pid or
+        !operationThreadMatches(entry.owner_thread_incarnation))
+        return null;
+    return entry;
+}
+
 fn beginRegisteredNodeOperation(
     lookup: RegisteredNodeLookup,
 ) error{ InvalidOwner, Busy }!RegisteredNodeOperation {
@@ -1687,6 +1707,42 @@ const PreparedExecutionTxn = struct {
         self.phase = .pre_wire_backing_live;
     }
 
+    fn settleUnbegun(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        terminal: bool,
+    ) SettlementError!SettlementOutcome {
+        const node = self.ownerNode(operation) orelse return error.ProtocolError;
+        if (self.phase != .prepared_unbegun or !self.settlement.pendingExact())
+            return error.ProtocolError;
+        const present = node.cleanup_registry.preparedRequestForReceipt(
+            self.reservation.cleanup,
+            self.binding_identity,
+            self.canonical_prepared.transport_addr,
+            self.canonical_prepared.transport_incarnation,
+            self.canonical_prepared.receipt,
+        ) catch return error.ProtocolError;
+        if (present == null or !std.meta.eql(present.?, self.canonical_prepared))
+            return error.ProtocolError;
+        const outcome = node.client.abortPreparedBlockingRpcStorageCanonical(
+            @ptrFromInt(self.canonical_prepared.descriptor.storage_addr),
+            self.prepared_identity,
+        ) catch return error.ProtocolError;
+        const must_terminal = terminal or outcome == .terminal;
+        node.cleanup_registry.settlePreparedRequest(
+            self.reservation.cleanup,
+            self.binding_identity,
+            self.canonical_prepared,
+            must_terminal,
+        ) catch return error.ProtocolError;
+        self.phase = .post_execute_backing_settled;
+        if (must_terminal) {
+            node.client.poison(.local_invariant_violation);
+            return self.publishTerminal(node.client.firstPoisonReason().?);
+        }
+        return self.publishReusable();
+    }
+
     fn revalidatePreWire(
         self: *PreparedExecutionTxn,
         operation: RegisteredNodeOperation,
@@ -1700,13 +1756,32 @@ const PreparedExecutionTxn = struct {
             return error.InvalidReceipt;
     }
 
-    fn rollbackPreWire(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {
+    fn rollbackPreWire(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+    ) SettlementError!SettlementOutcome {
+        return self.rollbackPreWireWithLease(operation, null);
+    }
+
+    fn rollbackPreWireWithLease(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+    ) SettlementError!SettlementOutcome {
         try self.requireCleanupClosed(operation);
         const expected = self.canonicalExecuting(operation) orelse return error.ProtocolError;
-        const abort_outcome = expected.node.client.abortPreparedBlockingRpcStorageCanonical(
-            canonicalStorage(expected),
-            expected.snapshot.prepared_identity,
-        ) catch {
+        const abort_outcome = if (lease) |held|
+            expected.node.client.abortPreparedBlockingRpcStorageUnderExecutionLease(
+                canonicalStorage(expected),
+                expected.snapshot.prepared_identity,
+                held,
+            )
+        else
+            expected.node.client.abortPreparedBlockingRpcStorageCanonical(
+                canonicalStorage(expected),
+                expected.snapshot.prepared_identity,
+            );
+        const settled = abort_outcome catch {
             self.failStopAfterCallbackDrift(operation, expected, .backing_ambiguous);
             return error.ProtocolError;
         };
@@ -1715,7 +1790,7 @@ const PreparedExecutionTxn = struct {
             return error.ProtocolError;
         };
         self.phase = .post_execute_backing_settled;
-        const terminal = abort_outcome == .terminal;
+        const terminal = settled == .terminal;
         node.cleanup_registry.settlePreparedRequest(
             expected.snapshot.reservation.cleanup,
             expected.snapshot.binding_identity,
@@ -1726,10 +1801,82 @@ const PreparedExecutionTxn = struct {
             return error.ProtocolError;
         };
         if (terminal) {
-            node.client.poison(.local_invariant_violation);
-            return self.publishTerminal(node.client.firstPoisonReason().?);
+            const reason: client_poison.ConnectionReason = .local_invariant_violation;
+            if (lease) |held|
+                node.client.poisonPreparedRequestExecution(held, reason) catch {
+                    self.failStopSettlement(node, .authority_drift);
+                    return error.ProtocolError;
+                }
+            else
+                node.client.poison(reason);
+            const published_reason = if (lease) |held|
+                node.client.preparedRequestExecutionPoisonReason(held) catch
+                    return error.ProtocolError
+            else
+                node.client.firstPoisonReason();
+            return self.publishTerminal(published_reason orelse reason);
         }
         return self.publishReusable();
+    }
+
+    fn settlePreWireTerminal(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+    ) SettlementError!SettlementOutcome {
+        return self.settlePreWireTerminalWithLease(operation, reason, null);
+    }
+
+    fn settlePreWireTerminalWithLease(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+    ) SettlementError!SettlementOutcome {
+        try self.requireCleanupClosed(operation);
+        const expected = self.canonicalExecuting(operation) orelse return error.ProtocolError;
+        const abort_result = if (lease) |held|
+            expected.node.client.abortPreparedBlockingRpcStorageUnderExecutionLease(
+                canonicalStorage(expected),
+                expected.snapshot.prepared_identity,
+                held,
+            )
+        else
+            expected.node.client.abortPreparedBlockingRpcStorageCanonical(
+                canonicalStorage(expected),
+                expected.snapshot.prepared_identity,
+            );
+        _ = abort_result catch {
+            self.failStopAfterCallbackDrift(operation, expected, .backing_ambiguous);
+            return error.ProtocolError;
+        };
+        const node = self.canonicalStillExact(operation, expected) orelse {
+            self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
+            return error.ProtocolError;
+        };
+        self.phase = .post_execute_backing_settled;
+        node.cleanup_registry.settlePreparedRequest(
+            expected.snapshot.reservation.cleanup,
+            expected.snapshot.binding_identity,
+            expected.canonical,
+            true,
+        ) catch {
+            self.failStopSettlement(node, .authority_drift);
+            return error.ProtocolError;
+        };
+        if (lease) |held|
+            node.client.poisonPreparedRequestExecution(held, reason) catch {
+                self.failStopSettlement(node, .authority_drift);
+                return error.ProtocolError;
+            }
+        else
+            node.client.poison(reason);
+        const published_reason = if (lease) |held|
+            node.client.preparedRequestExecutionPoisonReason(held) catch
+                return error.ProtocolError
+        else
+            node.client.firstPoisonReason();
+        return self.publishTerminal(published_reason orelse reason);
     }
 
     fn retireIssuerExhausted(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {
@@ -1784,14 +1931,32 @@ const PreparedExecutionTxn = struct {
         operation: RegisteredNodeOperation,
         fallback_reason: client_poison.ConnectionReason,
     ) SettlementError!SettlementOutcome {
+        return self.settlePostExecuteTerminalWithLease(operation, fallback_reason, null);
+    }
+
+    fn settlePostExecuteTerminalWithLease(
+        self: *PreparedExecutionTxn,
+        operation: RegisteredNodeOperation,
+        fallback_reason: client_poison.ConnectionReason,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+    ) SettlementError!SettlementOutcome {
         try self.requireCleanupClosed(operation);
         const expected = self.postExecuteReady(operation) orelse return error.ProtocolError;
-        expected.node.client.poison(fallback_reason);
+        if (lease) |held|
+            expected.node.client.poisonPreparedRequestExecution(held, fallback_reason) catch
+                return error.ProtocolError
+        else
+            expected.node.client.poison(fallback_reason);
         const node = self.canonicalStillExact(operation, expected) orelse {
             self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
             return error.ProtocolError;
         };
-        const canonical_reason = node.client.firstPoisonReason() orelse {
+        const observed_reason = if (lease) |held|
+            node.client.preparedRequestExecutionPoisonReason(held) catch
+                return error.ProtocolError
+        else
+            node.client.firstPoisonReason();
+        const canonical_reason = observed_reason orelse {
             self.failStopAfterCallbackDrift(operation, expected, .authority_drift);
             return error.ProtocolError;
         };
@@ -2067,6 +2232,252 @@ const PreparedExecutionTxn = struct {
         }
         self.settlement = PreparedExecutionSettlement.failStop(reason);
         self.phase = .settled;
+    }
+};
+
+const PreparedRpcExecutionPhase = enum(u8) {
+    pristine,
+    response_reserved,
+    settled,
+};
+
+const RpcExecutedResponse = struct {
+    self_addr: usize = 0,
+    terminal: u8 = 0,
+
+    fn pristineExact(self: *const @This()) bool {
+        return self.self_addr == 0 and self.terminal == 0;
+    }
+};
+
+fn responseDestinationSeal(destination_addr: usize) u64 {
+    var hash = std.hash.Wyhash.init(0xB303_D357);
+    hash.update(std.mem.asBytes(&destination_addr));
+    const seal = hash.final();
+    return if (seal == 0) 1 else seal;
+}
+
+/// B3-3-only composition owner. It adds only the response authority capability; request backing
+/// and request-authority settlement remain delegated to PreparedExecutionTxn.
+const PreparedRpcExecutionTxn = struct {
+    self_addr: usize = 0,
+    request: PreparedExecutionTxn = .{},
+    response: rpc_response_authority.Canonical = std.mem.zeroes(rpc_response_authority.Canonical),
+    response_destination_addr: usize = 0,
+    response_destination_seal: u64 = 0,
+    phase: PreparedRpcExecutionPhase = .pristine,
+
+    fn initBeforeReserve(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        request: GenerationRequestAbort,
+        identity: contract.BindingIdentity,
+        canonical: prepared_request_authority.Prepared,
+        destination: *RpcExecutedResponse,
+    ) PreparedExecutionTxn.InitError!void {
+        if (self.self_addr != 0 or self.phase != .pristine) return error.InvalidOwner;
+        const node = resolveRegisteredNodeOperation(operation) orelse return error.InvalidOwner;
+        const owner_entry = registeredNodeOperationOwnerEntry(operation) orelse return error.InvalidOwner;
+        const destination_addr = @intFromPtr(destination);
+        const destination_len = @sizeOf(RpcExecutedResponse);
+        if (byteRangesOverlap(destination_addr, destination_len, @intFromPtr(self), @sizeOf(@This())) or
+            byteRangesOverlap(destination_addr, destination_len, @intFromPtr(&operation), @sizeOf(RegisteredNodeOperation)) or
+            byteRangesOverlap(destination_addr, destination_len, @intFromPtr(&request), @sizeOf(GenerationRequestAbort)) or
+            byteRangesOverlap(destination_addr, destination_len, owner_entry.slot_addr, @sizeOf(ClientSlot)) or
+            byteRangesOverlap(destination_addr, destination_len, @intFromPtr(&registered_node_operations[operation.registry_index]), @sizeOf(RegisteredNodeOperationEntry)) or
+            byteRangesOverlap(destination_addr, destination_len, @intFromPtr(node), @sizeOf(ClientNode)) or
+            byteRangesOverlap(destination_addr, destination_len, canonical.descriptor.storage_addr, @sizeOf(client_mod.PreparedBlockingRpcStorage)) or
+            byteRangesOverlap(destination_addr, destination_len, canonical.descriptor.frame_addr, canonical.descriptor.frame_len) or
+            byteRangesOverlap(destination_addr, destination_len, canonical.binding.binding_storage_addr, @sizeOf(contract.PreparedAttachmentBinding)) or
+            byteRangesOverlap(destination_addr, destination_len, canonical.transport_addr, 1) or
+            !destination.pristineExact()) return error.InvalidOwner;
+        try self.request.initBeforeBeginExecute(operation, request, identity, canonical);
+        self.self_addr = @intFromPtr(self);
+        self.response_destination_addr = destination_addr;
+        self.response_destination_seal = responseDestinationSeal(destination_addr);
+    }
+
+    fn responseDestinationStillPristine(self: *const @This()) bool {
+        if (self.self_addr != @intFromPtr(self) or self.response_destination_addr == 0 or
+            self.response_destination_seal != responseDestinationSeal(self.response_destination_addr))
+            return false;
+        const destination: *const RpcExecutedResponse = @ptrFromInt(self.response_destination_addr);
+        return destination.pristineExact();
+    }
+
+    fn reserveResponse(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+    ) !void {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .pristine)
+            return error.InvalidOwner;
+        const node = self.request.ownerNode(operation) orelse return error.InvalidOwner;
+        self.response = try node.cleanup_registry.reserveRpcResponseExecution(
+            self.request.reservation.cleanup,
+            self.request.binding_identity,
+            self.request.canonical_prepared,
+            self.response_destination_addr,
+        );
+        self.phase = .response_reserved;
+    }
+
+    fn settleReserveFailure(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        terminal: bool,
+    ) !SettlementOutcome {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .pristine)
+            return error.ProtocolError;
+        const outcome = try self.request.settleUnbegun(operation, terminal);
+        self.phase = .settled;
+        return outcome;
+    }
+
+    fn settleReservedUnbegun(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        terminal: bool,
+    ) !SettlementOutcome {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .response_reserved or
+            self.request.phase != .prepared_unbegun)
+            return error.ProtocolError;
+        const outcome = try self.request.settleUnbegun(operation, terminal);
+        const node = self.request.ownerNode(operation) orelse return error.ProtocolError;
+        switch (outcome) {
+            .reusable => try node.cleanup_registry.rollbackRpcResponseExecution(
+                self.request.reservation.cleanup,
+                self.request.binding_identity,
+                self.response,
+            ),
+            .terminal => try node.cleanup_registry.settleRpcResponseExecutionTerminal(
+                self.request.reservation.cleanup,
+                self.request.binding_identity,
+                self.response,
+            ),
+            .fail_stop_required => return error.ProtocolError,
+        }
+        self.phase = .settled;
+        return outcome;
+    }
+
+    fn settlePreWire(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+    ) !SettlementOutcome {
+        return self.settlePreWireWithLease(operation, null);
+    }
+
+    fn settlePreWireWithLease(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+    ) !SettlementOutcome {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .response_reserved)
+            return error.ProtocolError;
+        const node_before = self.request.ownerNode(operation) orelse return error.ProtocolError;
+        const poison_reason = if (lease) |held|
+            try node_before.client.preparedRequestExecutionPoisonReason(held)
+        else
+            node_before.client.firstPoisonReason();
+        const outcome = if (poison_reason) |reason|
+            try self.request.settlePreWireTerminalWithLease(operation, reason, lease)
+        else
+            try self.request.rollbackPreWireWithLease(operation, lease);
+        const node = self.request.ownerNode(operation) orelse return error.ProtocolError;
+        switch (outcome) {
+            .reusable => try node.cleanup_registry.rollbackRpcResponseExecution(
+                self.request.reservation.cleanup,
+                self.request.binding_identity,
+                self.response,
+            ),
+            .terminal => try node.cleanup_registry.settleRpcResponseExecutionTerminal(
+                self.request.reservation.cleanup,
+                self.request.binding_identity,
+                self.response,
+            ),
+            .fail_stop_required => return error.ProtocolError,
+        }
+        self.phase = .settled;
+        return outcome;
+    }
+
+    fn settlePostWriteTerminal(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+    ) !SettlementOutcome {
+        return self.settlePostWriteTerminalWithLease(operation, reason, null);
+    }
+
+    fn settlePostWriteTerminalWithLease(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+        reason: client_poison.ConnectionReason,
+        lease: ?*client_mod.PreparedRequestExecutionLease,
+    ) !SettlementOutcome {
+        if (self.self_addr != @intFromPtr(self) or self.phase != .response_reserved)
+            return error.ProtocolError;
+        const destination_pristine_before = self.responseDestinationStillPristine();
+        const outcome = try self.request.settlePostExecuteTerminalWithLease(
+            operation,
+            reason,
+            lease,
+        );
+        const node = self.request.ownerNode(operation) orelse return error.ProtocolError;
+        try node.cleanup_registry.settleRpcResponseExecutionTerminal(
+            self.request.reservation.cleanup,
+            self.request.binding_identity,
+            self.response,
+        );
+        self.phase = .settled;
+        if (!destination_pristine_before or !self.responseDestinationStillPristine()) {
+            node.client.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        }
+        const destination: *RpcExecutedResponse = @ptrFromInt(self.response_destination_addr);
+        destination.* = .{ .self_addr = self.response_destination_addr, .terminal = 1 };
+        return outcome;
+    }
+
+    fn ensureSettledOrFailStop(
+        self: *@This(),
+        operation: RegisteredNodeOperation,
+    ) void {
+        if (self.self_addr == 0) {
+            if (self.phase == .pristine and self.request.semanticPristine() and
+                self.response_destination_addr == 0 and self.response_destination_seal == 0)
+                return;
+            failStopPreparedExecution(.authority_drift);
+        }
+        if (self.self_addr != @intFromPtr(self) or self.request.ownerNode(operation) == null)
+            failStopPreparedExecution(.authority_drift);
+        if (self.phase == .settled) {
+            self.request.ensureSettledOrFailStop(operation);
+            return;
+        }
+        const outcome = switch (self.phase) {
+            .pristine => self.settleReserveFailure(operation, false) catch
+                failStopPreparedExecution(.cleanup_failure),
+            .response_reserved => switch (self.request.phase) {
+                .prepared_unbegun => self.settleReservedUnbegun(operation, false) catch
+                    failStopPreparedExecution(.cleanup_failure),
+                .pre_wire_backing_live => blk: {
+                    const storage: *const client_mod.PreparedBlockingRpcStorage =
+                        @ptrFromInt(self.request.canonical_prepared.descriptor.storage_addr);
+                    if (client_mod.Client.preparedBlockingRpcStorageSettled(storage))
+                        break :blk self.settlePostWriteTerminal(
+                            operation,
+                            self.request.ownerNode(operation).?.client.firstPoisonReason() orelse
+                                .local_invariant_violation,
+                        ) catch failStopPreparedExecution(.cleanup_failure);
+                    break :blk self.settlePreWire(operation) catch
+                        failStopPreparedExecution(.cleanup_failure);
+                },
+                .post_execute_backing_settled, .settled => failStopPreparedExecution(.duplicate_settlement),
+            },
+            .settled => unreachable,
+        };
+        self.request.finishOrFailStop(operation, outcome);
     }
 };
 
@@ -2395,6 +2806,184 @@ fn settleExecutionAfterCleanup(
     };
     txn.finishOrFailStop(operation, outcome);
     return outcome;
+}
+
+fn finishPreparedRpcLeaseOrFailStop(
+    node: *ClientNode,
+    lease: *client_mod.PreparedRequestExecutionLease,
+    txn: *PreparedRpcExecutionTxn,
+    operation: RegisteredNodeOperation,
+) void {
+    node.client.finishPreparedRequestExecution(lease) catch {
+        node.client.poison(.local_invariant_violation);
+        txn.ensureSettledOrFailStop(operation);
+        failStopPreparedExecution(.cleanup_failure);
+    };
+}
+
+fn settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
+    node: *ClientNode,
+    lease: *client_mod.PreparedRequestExecutionLease,
+    txn: *PreparedRpcExecutionTxn,
+    operation: RegisteredNodeOperation,
+) void {
+    const storage: *const client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(txn.request.canonical_prepared.descriptor.storage_addr);
+    const poison_reason = node.client.preparedRequestExecutionPoisonReason(lease) catch
+        failStopPreparedExecution(.authority_drift);
+    const outcome = if (client_mod.Client.preparedBlockingRpcStorageSettled(storage))
+        txn.settlePostWriteTerminalWithLease(
+            operation,
+            poison_reason orelse .local_invariant_violation,
+            lease,
+        ) catch failStopPreparedExecution(.cleanup_failure)
+    else
+        txn.settlePreWireWithLease(operation, lease) catch
+            failStopPreparedExecution(.cleanup_failure);
+    txn.request.finishOrFailStop(operation, outcome);
+    finishPreparedRpcLeaseOrFailStop(node, lease, txn, operation);
+}
+
+/// B3-3 product-shaped private caller. It deliberately has no public facade and publishes no
+/// response payload; tests provide a peer that consumes the exact request and closes.
+const PreparedRpcExecutionTestFailure = enum {
+    none,
+    after_response_reserve,
+    after_execution_lease,
+    response_epoch_exhausted,
+};
+
+fn executePreparedRpcTerminalSink(
+    request: GenerationRequestAbort,
+    bound_stream_id: u64,
+    destination: *RpcExecutedResponse,
+    test_failure: PreparedRpcExecutionTestFailure,
+) !void {
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const node = admission.operation.node;
+    const identity = admission.identity;
+    const prepared_admission = try node.cleanup_registry.preparedRpcAdmission(
+        request.reservation.cleanup,
+        identity,
+        request.transport_addr,
+        request.transport_incarnation,
+        request.receipt,
+        bound_stream_id,
+    );
+    if (prepared_admission.decision != .allowed) return error.Unauthorized;
+    if (test_failure == .response_epoch_exhausted) {
+        if (!builtin.is_test) unreachable;
+        try node.cleanup_registry.exhaustRpcResponseEpochForTest(
+            request.reservation.cleanup,
+            identity,
+        );
+    }
+
+    var txn: PreparedRpcExecutionTxn = .{};
+    try txn.initBeforeReserve(
+        admission.operation,
+        request,
+        identity,
+        prepared_admission.canonical,
+        destination,
+    );
+    defer txn.ensureSettledOrFailStop(admission.operation);
+    txn.reserveResponse(admission.operation) catch |err| {
+        const outcome = try txn.settleReserveFailure(
+            admission.operation,
+            err == error.IdentityExhausted,
+        );
+        txn.request.finishOrFailStop(admission.operation, outcome);
+        return err;
+    };
+    if (test_failure == .after_response_reserve) return error.InjectedFailure;
+    txn.request.commitBeginExecute(admission.operation);
+
+    const storage: *client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(request.prepared_storage_addr);
+    var lease: client_mod.PreparedRequestExecutionLease = .{};
+    _ = node.client.beginPreparedRequestExecutionFromRegisteredOperation(
+        storage,
+        txn.request.prepared_identity,
+        &lease,
+    ) catch |err| {
+        if (lease.wireProgress() != null) {
+            settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
+                node,
+                &lease,
+                &txn,
+                admission.operation,
+            );
+        } else {
+            const outcome = try txn.settlePreWire(admission.operation);
+            txn.request.finishOrFailStop(admission.operation, outcome);
+        }
+        return err;
+    };
+    var lease_active = true;
+    defer if (lease_active)
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(
+            node,
+            &lease,
+            &txn,
+            admission.operation,
+        );
+
+    if (test_failure == .after_execution_lease) {
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+        lease_active = false;
+        return error.InjectedFailure;
+    }
+
+    if (!txn.responseDestinationStillPristine()) {
+        node.client.poison(.local_invariant_violation);
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+        lease_active = false;
+        return error.InvalidOwner;
+    }
+
+    const executing_admission = node.cleanup_registry.executingRpcAdmission(
+        request.reservation.cleanup,
+        identity,
+        request.transport_addr,
+        request.transport_incarnation,
+        request.receipt,
+        bound_stream_id,
+    ) catch |err| {
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+        lease_active = false;
+        return err;
+    };
+    if (executing_admission.decision != .allowed or
+        !std.meta.eql(executing_admission.canonical, prepared_admission.canonical))
+    {
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+        lease_active = false;
+        return error.Unauthorized;
+    }
+    if (!txn.responseDestinationStillPristine()) {
+        node.client.poison(.local_invariant_violation);
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+        lease_active = false;
+        return error.InvalidOwner;
+    }
+
+    node.client.writePreparedRequestExecution(
+        storage,
+        txn.request.prepared_identity,
+        &lease,
+    ) catch |err| {
+        settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+        lease_active = false;
+        return err;
+    };
+    node.client.observePreparedRequestTerminalSinkEof(&lease) catch |err| switch (err) {
+        error.ConnectionClosed, error.ProtocolError => {},
+        else => @panic("B3-3 terminal sink returned an unclassified failure"),
+    };
+    settlePreparedRpcLeaseOwnedAndReleaseOrFailStop(node, &lease, &txn, admission.operation);
+    lease_active = false;
 }
 
 /// Executes the attach-compatible request while one registry operation pins the canonical
@@ -5759,6 +6348,49 @@ fn fixtureClient(allocator: std.mem.Allocator, host_id: u128) client_mod.Client 
     };
 }
 
+const B33DestinationOccupyingAllocator = struct {
+    parent: std.mem.Allocator,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    destination: ?*RpcExecutedResponse = null,
+    armed: bool = false,
+    fired: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ra);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed and @intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len) {
+            const destination = self.destination orelse @panic("B3-3 destination callback missing");
+            destination.* = .{ .self_addr = @intFromPtr(destination), .terminal = 0xA5 };
+            self.fired = true;
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ra);
+    }
+};
+
 const ReentrantNodeAllocator = struct {
     parent: std.mem.Allocator,
     issuer: ?*lease_mod.IdentityIssuer = null,
@@ -7455,6 +8087,451 @@ test "B3-0.3 public execute rejects forged response destinations before authorit
         reservation,
         contract.ExecutedCallReceipt.fromPrepared(prepared.receipt).?,
     );
+}
+
+test "B3-3 private product wrapper composite failures settle both authorities" {
+    const Harness = struct {
+        const Scenario = enum {
+            reserve_rollback,
+            lease_rollback,
+            response_epoch_exhausted,
+            pending_ambiguity,
+            request_hard_failure,
+        };
+
+        fn run(scenario: Scenario) !void {
+            try ClientSlot.initializeProcessRuntime();
+            const allocator = std.testing.allocator;
+            var wire_fds: [2]c.fd_t = undefined;
+            try std.testing.expectEqual(
+                @as(c_int, 0),
+                c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wire_fds),
+            );
+            var peer_open = true;
+            defer {
+                if (peer_open) _ = c.close(wire_fds[1]);
+            }
+            const ordinal: u64 = @as(u64, @intFromEnum(scenario)) + 1;
+            var source = fixtureClient(allocator, 0xB33C0 + ordinal);
+            source.fd = wire_fds[0];
+            var slot: ClientSlot = undefined;
+            try ClientSlot.initInPlace(&slot, allocator, &source, 0xB33C0 + ordinal);
+            defer slot.deinit();
+            const Owner = struct {
+                transport_marker: u8 = 0,
+                storage: client_mod.PreparedBlockingRpcStorage = .{},
+                response: RpcExecutedResponse = .{},
+                binding: contract.PreparedAttachmentBinding = .{},
+                lease: lease_mod.ConnectionLease = .{},
+            };
+            var owner: Owner = .{};
+            const reservation = try slot.reserveAttachmentBindingForTest(
+                &owner.binding,
+                &owner.lease,
+                0xB33D0 + ordinal,
+            );
+            const identity = reservation.identity;
+            const attach_receipt = contract.PreparedCallReceipt.init(.{
+                .transport_incarnation = 0xB33E0 + ordinal,
+                .request_id = 0xB33F0 + ordinal,
+                .request_digest = 0xB3400 + ordinal,
+            }).?;
+            try owner.binding.pairRequest(attach_receipt);
+            try owner.binding.beginExecute(attach_receipt);
+            const attach_executed = contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?;
+            const stream_id = 80 + ordinal;
+            try slot.commitAttachmentBinding(
+                &owner.binding,
+                reservation,
+                contract.CorrelatedExecutedCall.init(attach_executed, attach_receipt.request_id).?,
+                stream_id,
+                &owner.lease,
+            );
+            const transport_incarnation = 0xB3410 + ordinal;
+            const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+            try contract.TransportOwnerSeal.initInPlace(
+                transport_owner_seal,
+                transport_incarnation,
+                @intFromPtr(&owner),
+                @sizeOf(Owner),
+                @intFromPtr(&owner.transport_marker),
+                @intFromPtr(&owner.storage),
+            );
+            const prepared = try prepareGenerationRequest(.{
+                .slot_addr = @intFromPtr(&slot),
+                .slot_incarnation = identity.slot_incarnation,
+                .node_incarnation = identity.node_incarnation,
+                .host_id = identity.host_id,
+                .pid = identity.pid,
+                .process_nonce = identity.process_nonce,
+                .transport_addr = @intFromPtr(&owner.transport_marker),
+                .owner_addr = @intFromPtr(&owner),
+                .owner_size = @sizeOf(Owner),
+                .transport_incarnation = transport_incarnation,
+                .owner_seal_addr = @intFromPtr(transport_owner_seal),
+                .prepared_storage_addr = @intFromPtr(&owner.storage),
+                .bound_stream_id = stream_id,
+                .reservation = reservation,
+                .request = contract.RuntimeRequest.observation(),
+            });
+            const request: GenerationRequestAbort = .{
+                .slot_addr = @intFromPtr(&slot),
+                .slot_incarnation = identity.slot_incarnation,
+                .node_incarnation = identity.node_incarnation,
+                .host_id = identity.host_id,
+                .pid = identity.pid,
+                .process_nonce = identity.process_nonce,
+                .transport_addr = @intFromPtr(&owner.transport_marker),
+                .transport_incarnation = transport_incarnation,
+                .owner_seal_addr = @intFromPtr(transport_owner_seal),
+                .prepared_storage_addr = @intFromPtr(&owner.storage),
+                .reservation = reservation,
+                .receipt = prepared.receipt,
+            };
+
+            switch (scenario) {
+                .reserve_rollback => try std.testing.expectError(
+                    error.InjectedFailure,
+                    executePreparedRpcTerminalSink(request, stream_id, &owner.response, .after_response_reserve),
+                ),
+                .lease_rollback => try std.testing.expectError(
+                    error.InjectedFailure,
+                    executePreparedRpcTerminalSink(request, stream_id, &owner.response, .after_execution_lease),
+                ),
+                .response_epoch_exhausted => try std.testing.expectError(
+                    error.IdentityExhausted,
+                    executePreparedRpcTerminalSink(request, stream_id, &owner.response, .response_epoch_exhausted),
+                ),
+                .pending_ambiguity => {
+                    const flags = c.fcntl(slot.current.client.fd, c.F.GETFL, @as(c_int, 0));
+                    try std.testing.expect(flags >= 0);
+                    const nonblocking: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
+                    try std.testing.expectEqual(
+                        @as(c_int, 0),
+                        c.fcntl(slot.current.client.fd, c.F.SETFL, flags | nonblocking),
+                    );
+                    slot.current.client.pending_outbound = .{
+                        .frame = try slot.current.client.allocator.alloc(u8, 1024 * 1024),
+                        .stream_id = stream_id,
+                    };
+                    @memset(slot.current.client.pending_outbound.?.frame, 0xA5);
+                    try std.testing.expectError(
+                        error.WriteFailed,
+                        executePreparedRpcTerminalSink(request, stream_id, &owner.response, .none),
+                    );
+                },
+                .request_hard_failure => {
+                    _ = c.close(wire_fds[1]);
+                    peer_open = false;
+                    socket_server.setNoSigPipe(slot.current.client.fd);
+                    try std.testing.expectError(
+                        error.WriteFailed,
+                        executePreparedRpcTerminalSink(request, stream_id, &owner.response, .none),
+                    );
+                },
+            }
+
+            try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+            try std.testing.expectEqual(
+                prepared_request_authority.SettlementReadiness.settled,
+                try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+                    reservation.cleanup,
+                    identity,
+                ),
+            );
+            switch (scenario) {
+                .reserve_rollback, .lease_rollback => {
+                    try std.testing.expect(slot.current.client.firstPoisonReason() == null);
+                    try std.testing.expect(owner.response.pristineExact());
+                },
+                .response_epoch_exhausted => {
+                    try std.testing.expectEqual(
+                        client_poison.ConnectionReason.local_invariant_violation,
+                        slot.current.client.firstPoisonReason().?,
+                    );
+                    try std.testing.expect(owner.response.pristineExact());
+                    try std.testing.expect(try slot.current.cleanup_registry.rpcExecutionAuthoritiesTerminalForTest(
+                        reservation.cleanup,
+                        identity,
+                    ));
+                    var byte: [1]u8 = undefined;
+                    // Exhaustion terminalizes before request execution: peer observes EOF with no
+                    // request byte rather than a readable prefix.
+                    try std.testing.expectEqual(@as(isize, 0), c.read(wire_fds[1], &byte, byte.len));
+                },
+                .pending_ambiguity, .request_hard_failure => try std.testing.expect(slot.current.client.firstPoisonReason() != null),
+            }
+            try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
+            try transport_owner_seal.terminalize(transport_incarnation);
+            slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
+        }
+    };
+    inline for (.{
+        Harness.Scenario.reserve_rollback,
+        Harness.Scenario.lease_rollback,
+        Harness.Scenario.response_epoch_exhausted,
+        Harness.Scenario.pending_ambiguity,
+        Harness.Scenario.request_hard_failure,
+    }) |scenario| try Harness.run(scenario);
+}
+
+test "B3-3 private product wrapper writes exact request then terminal-settles both authorities" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var wire_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wire_fds),
+    );
+    var source = fixtureClient(allocator, 0xB33A0);
+    source.fd = wire_fds[0];
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB33A0);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        response: RpcExecutedResponse = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0xB33A1,
+    );
+    const identity = reservation.identity;
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0xB33A2,
+        .request_id = 0xB33A3,
+        .request_digest = 0xB33A4,
+    }).?;
+    try owner.binding.pairRequest(attach_receipt);
+    try owner.binding.beginExecute(attach_receipt);
+    const attach_executed = contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?;
+    const attach_accepted = contract.CorrelatedExecutedCall.init(
+        attach_executed,
+        attach_receipt.request_id,
+    ).?;
+    try slot.commitAttachmentBinding(
+        &owner.binding,
+        reservation,
+        attach_accepted,
+        77,
+        &owner.lease,
+    );
+
+    const transport_incarnation: u64 = 0xB33A5;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 77,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.observation(),
+    });
+    const request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = prepared.receipt,
+    };
+
+    const frame_alias: *RpcExecutedResponse = @ptrFromInt(prepared.canonical.descriptor.frame_addr);
+    try std.testing.expectError(
+        error.InvalidOwner,
+        executePreparedRpcTerminalSink(request, 77, frame_alias, .none),
+    );
+    try std.testing.expect(!client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.busy,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            identity,
+        ),
+    );
+
+    const Peer = struct {
+        fn run(fd: c.fd_t, expected: usize, observed: *usize) void {
+            var buffer: [256]u8 = undefined;
+            while (observed.* < expected) {
+                const want = @min(buffer.len, expected - observed.*);
+                const rc = c.read(fd, &buffer, want);
+                if (rc < 0 and std.posix.errno(rc) == .INTR) continue;
+                if (rc <= 0) break;
+                observed.* += @intCast(rc);
+            }
+            _ = c.close(fd);
+        }
+    };
+    var observed: usize = 0;
+    const peer = try std.Thread.spawn(
+        .{},
+        Peer.run,
+        .{ wire_fds[1], prepared.canonical.descriptor.frame_len, &observed },
+    );
+    try executePreparedRpcTerminalSink(request, 77, &owner.response, .none);
+    peer.join();
+    try std.testing.expectEqual(prepared.canonical.descriptor.frame_len, observed);
+    try std.testing.expectEqual(@intFromPtr(&owner.response), owner.response.self_addr);
+    try std.testing.expectEqual(@as(u8, 1), owner.response.terminal);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            identity,
+        ),
+    );
+
+    try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
+    try transport_owner_seal.terminalize(transport_incarnation);
+    slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
+}
+
+test "B3-3 private product wrapper rejects pending callback response occupation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var wire_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wire_fds),
+    );
+    defer _ = c.close(wire_fds[1]);
+    var callback_allocator = B33DestinationOccupyingAllocator{ .parent = allocator };
+    var source = fixtureClient(callback_allocator.allocator(), 0xB33B0);
+    source.fd = wire_fds[0];
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB33B0);
+    defer slot.deinit();
+
+    const Owner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        response: RpcExecutedResponse = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        0xB33B1,
+    );
+    const identity = reservation.identity;
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0xB33B2,
+        .request_id = 0xB33B3,
+        .request_digest = 0xB33B4,
+    }).?;
+    try owner.binding.pairRequest(attach_receipt);
+    try owner.binding.beginExecute(attach_receipt);
+    const attach_executed = contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?;
+    try slot.commitAttachmentBinding(
+        &owner.binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(attach_executed, attach_receipt.request_id).?,
+        78,
+        &owner.lease,
+    );
+
+    const transport_incarnation: u64 = 0xB33B5;
+    const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        transport_owner_seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&owner.transport_marker),
+        @intFromPtr(&owner.storage),
+    );
+    const prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 78,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.observation(),
+    });
+    const request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = prepared.receipt,
+    };
+
+    const pending = try slot.current.client.allocator.dupe(u8, "older-frame");
+    slot.current.client.pending_outbound = .{ .frame = pending, .stream_id = 78 };
+    callback_allocator.target_addr = @intFromPtr(pending.ptr);
+    callback_allocator.target_len = pending.len;
+    callback_allocator.destination = &owner.response;
+    callback_allocator.armed = true;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        executePreparedRpcTerminalSink(request, 78, &owner.response, .none),
+    );
+    callback_allocator.armed = false;
+    try std.testing.expect(callback_allocator.fired);
+    try std.testing.expectEqual(@as(u8, 0xA5), owner.response.terminal);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+    try std.testing.expectEqual(
+        prepared_request_authority.SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            identity,
+        ),
+    );
+
+    try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
+    try transport_owner_seal.terminalize(transport_incarnation);
+    slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
 }
 
 test "B3-2 product prepare rejects spawn before request publication" {

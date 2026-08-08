@@ -543,8 +543,17 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "enterGenerationAllocatorCallback", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "rejectGenerationAllocatorCallbackReentry", .receiver_type = immutable, .class = .unchecked },
         .{ .name = "leaveGenerationAllocatorCallbackUnchecked", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "beginPreparedRequestExecution", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "beginPreparedRequestExecutionFromRegisteredOperation", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "abortPreparedBlockingRpcStorageUnderExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "poisonPreparedRequestExecution", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "writePreparedRequestExecution", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "observePreparedRequestTerminalSinkEof", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "finishPreparedRequestExecution", .receiver_type = mutable, .class = .unchecked },
 
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
+        .{ .name = "preparedRequestExecutionLeaseMatches", .receiver_type = immutable, .class = .observation },
+        .{ .name = "preparedRequestExecutionPoisonReason", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -1378,6 +1387,48 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "allocatorEql" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "generation_allocator_scope_epoch" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "active_generation_allocator_scope" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedRequestWireProgress" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRequestExecutionLeaseLifecycle" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRequestExecutionFenceMode" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedRequestExecutionLease" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedExecutionLeaseSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedExecutionLeaseRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedExecutionFenceLeaseIdentity" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "externalRangeOverlapsClient" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionWriteResult" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionWriteOps" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionWriteProbe" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "next_client_operation_fence_incarnation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueClientOperationFenceIncarnation" },
+                .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "execution_lease_bit" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "fence_incarnation" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "tryAcquireExecutionLease" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "releaseExecutionLease" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "upgradeSingleSharedToExecutionLease" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "downgradeExecutionLeaseToSingleShared" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_lease_addr" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_addr" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_incarnation" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_lease_identity" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_mode" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginPreparedRequestExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginPreparedRequestExecutionFromRegisteredOperation" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginPreparedRequestExecutionMode" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preparedRequestExecutionLeaseMatches" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedRequestExecutionLeaseAuthorityMatches" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preparedRequestExecutionPoisonReason" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonPreparedRequestExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "writePreparedRequestExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "writePreparedRequestExecutionWithOps" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "setPreparedExecutionProgress" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonWhilePreparedExecutionHeld" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortPreparedBlockingRpcStorageUnderExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "abortPreparedBlockingRpcStorageCanonicalUnchecked" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "observePreparedRequestTerminalSinkEof" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishPreparedRequestExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "releasePreparedRequestExecutionLeaseCanonical" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "flushPendingOutboundForPreparedExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "flushPendingOutboundBlockingWithOps" },
             },
         },
         .{
@@ -1390,6 +1441,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_poison" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "rpc_response_authority" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionRequest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestError" },
@@ -1520,11 +1572,16 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "settlement" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "initBeforeBeginExecute" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "commitBeginExecute" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settleUnbegun" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "revalidatePreWire" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackPreWire" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePreWireTerminal" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "retireIssuerExhausted" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusable" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteTerminal" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteTerminalWithLease" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackPreWireWithLease" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePreWireTerminalWithLease" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopCleanupFailure" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "requireCleanupClosed" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishOrFailStop" },
@@ -1543,6 +1600,18 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishTerminal" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopSettlement" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopAfterCallbackDrift" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcExecutionPhase" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcExecutedResponse" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseDestinationSeal" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcExecutionTxn" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registeredNodeOperationOwnerEntry" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishPreparedRpcLeaseOrFailStop" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePreparedRpcLeaseOwnedAndReleaseOrFailStop" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcExecutionTestFailure" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executePreparedRpcTerminalSink" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "B33DestinationOccupyingAllocator" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "B33CompositeScenario" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "runB33CompositeScenario" },
             },
         },
     };
@@ -2007,7 +2076,9 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(source);
-    try std.testing.expectEqual(@as(usize, 4), countOccurrences(source, "@import("));
+    // The fifth import is `builtin`, used only to make the destructive B3-3 epoch-exhaustion hook
+    // unreachable in production builds at the API boundary itself.
+    try std.testing.expectEqual(@as(usize, 5), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -2263,16 +2334,16 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countOccurrences(slot_product, ".transferPromotedResponse("),
     );
     try std.testing.expectEqual(
-        // Two response-provenance occurrences plus the B3-0 request transaction's closed
-        // settlement tag and projections. The response-specific entrypoint counts below remain 2.
-        @as(usize, 13),
+        // B3-3 adds the composite request/response transaction's two closed fail-stop branches;
+        // response-specific public entrypoint counts below remain unchanged.
+        @as(usize, 15),
         countIdentifierOutsideTopLevelTests(slot_product, "fail_stop_required"),
     );
     const prepared_execution_signatures = [_][]const u8{
         "fn initBeforeBeginExecute(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n        request: GenerationRequestAbort,\n        identity: contract.BindingIdentity,\n        canonical: prepared_request_authority.Prepared,\n    ) PreparedExecutionTxn.InitError!void {",
         "fn commitBeginExecute(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) void {",
         "fn revalidatePreWire(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n    ) error{ InvalidOwner, InvalidReceipt }!void {",
-        "fn rollbackPreWire(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {",
+        "fn rollbackPreWire(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n    ) SettlementError!SettlementOutcome {",
         "fn retireIssuerExhausted(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {",
         "fn settlePostExecuteReusable(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {",
         "fn settlePostExecuteTerminal(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n        fallback_reason: client_poison.ConnectionReason,\n    ) SettlementError!SettlementOutcome {",
@@ -2368,7 +2439,7 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "execution_txn.settlePostExecuteTerminal"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "execution_txn.settlePostExecuteReusable"));
     try std.testing.expectEqual(
-        @as(usize, 4),
+        @as(usize, 5),
         countOccurrences(slot_product, "try self.requireCleanupClosed(operation);"),
     );
     try std.testing.expectEqual(
@@ -2427,9 +2498,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         ),
     );
     try std.testing.expectEqual(
-        // One declaration plus the nine direct-index expressions sealed below. Any alias,
-        // helper handoff, for/while scan, or extra lookup adds an unreviewed product use.
-        @as(usize, 10),
+        // One declaration plus the twelve reviewed direct-index expressions sealed below. B3-3
+        // adds one exact owner-entry lookup and one destination disjoint range reference.
+        @as(usize, 13),
         countIdentifierOutsideTopLevelTests(slot_product, "registered_node_operations"),
     );
     const registered_operation_direct_accesses = [_]struct {
@@ -2440,10 +2511,12 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         .{ .expected = 1, .source = "registered_node_operations[index].state" },
         .{ .expected = 1, .source = "registered_node_operations[index] = entry" },
         .{ .expected = 2, .source = "&registered_node_operations[reservation.index]" },
-        .{ .expected = 2, .source = "registered_node_operations.len" },
+        .{ .expected = 3, .source = "registered_node_operations.len" },
         .{ .expected = 1, .source = "const candidate = registered_node_operations[index];" },
         .{ .expected = 1, .source = "const candidate = &registered_node_operations[index];" },
         .{ .expected = 1, .source = "const entry = &registered_node_operations[index];" },
+        .{ .expected = 1, .source = "const entry = registered_node_operations[index];" },
+        .{ .expected = 1, .source = "&registered_node_operations[operation.registry_index]" },
     };
     for (registered_operation_direct_accesses) |access|
         try std.testing.expectEqual(access.expected, countOccurrences(slot_product, access.source));
@@ -8069,9 +8142,10 @@ fn expectClientOperationFenceSchema(
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "ClientOperationFence") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 24), members.len);
+    try std.testing.expectEqual(@as(usize, 30), members.len);
     const constants = [_][]const u8{
         "shared_count_mask",
+        "execution_lease_bit",
         "reserved_mask",
         "publication_bit",
         "terminal_bit",
@@ -8083,16 +8157,17 @@ fn expectClientOperationFenceSchema(
         try std.testing.expectEqualStrings("const", tuple.kind);
         try std.testing.expectEqualStrings(name, tuple.name);
     }
-    try expectTypedFieldWithDefault(&tree, source, members[6], "self_addr", "usize", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[7], "client_addr", "usize", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[8], "owner_process_id", "u32", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[9], "slot_incarnation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[10], "node_incarnation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[11], "fence_generation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[7], "self_addr", "usize", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[8], "client_addr", "usize", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[9], "owner_process_id", "u32", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[10], "slot_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[11], "node_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[12], "fence_generation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[13], "fence_incarnation", "u64", "0");
     try expectTypedFieldWithDefault(
         &tree,
         source,
-        members[12],
+        members[14],
         "state",
         "std.atomic.Value(u64)",
         ".init(0)",
@@ -8102,6 +8177,10 @@ fn expectClientOperationFenceSchema(
         "tryEnterShared",
         "leaveShared",
         "tryAcquireExclusive",
+        "tryAcquireExecutionLease",
+        "releaseExecutionLease",
+        "upgradeSingleSharedToExecutionLease",
+        "downgradeExecutionLeaseToSingleShared",
         "recordIntrusionIfExactExclusive",
         "sealExclusiveForPublication",
         "intruded",
@@ -8111,7 +8190,7 @@ fn expectClientOperationFenceSchema(
         "identityMatches",
     };
     for (methods, 0..) |name, index| {
-        const tuple = declarationTuple(&tree, "ClientOperationFence", members[index + 13]);
+        const tuple = declarationTuple(&tree, "ClientOperationFence", members[index + 15]);
         try std.testing.expectEqualStrings("fn", tuple.kind);
         try std.testing.expectEqualStrings(name, tuple.name);
     }
@@ -9756,10 +9835,14 @@ fn expectTrustedBeginPublicMutation(
     try std.testing.expectEqual(@as(usize, 1), tokenBraceDepthAt(tree, node, gate));
     const body_start = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
     const prefix = [_][]const u8{
-        "const",  "fence", "=",    "self",             ".",                          "operation_fence", "orelse", "{",
-        "if",     "(",     "self", ".",                "operation_fence_generation", "!=",              "0",      ")",
-        "return", "error", ".",    "ConnectionClosed", ";",                          "return",          "false",  ";",
-        "}",      ";",
+        "if",                                           "(",                "self",                                  ".",               "prepared_request_execution_lease_addr", "!=", "0",                                               "or",
+        "self",                                         ".",                "prepared_request_execution_fence_addr", "!=",              "0",                                     "or", "self",                                            ".",
+        "prepared_request_execution_fence_incarnation", "!=",               "0",                                     "or",              "self",                                  ".",  "prepared_request_execution_fence_lease_identity", "!=",
+        "0",                                            "or",               "self",                                  ".",               "prepared_request_execution_fence_mode", "!=", ".",                                               "unbound",
+        ")",                                            "return",           "error",                                 ".",               "AdminBusy",                             ";",  "const",                                           "fence",
+        "=",                                            "self",             ".",                                     "operation_fence", "orelse",                                "{",  "if",                                              "(",
+        "self",                                         ".",                "operation_fence_generation",            "!=",              "0",                                     ")",  "return",                                          "error",
+        ".",                                            "ConnectionClosed", ";",                                     "return",          "false",                                 ";",  "}",                                               ";",
     };
     try expectTokensAt(tree, body_start + 1, &prefix);
     try std.testing.expectEqual(body_start + 1 + prefix.len, gate);

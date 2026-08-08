@@ -176,6 +176,155 @@ pub const PreparedBlockingRpcStorage = struct {
         [_]u8{0} ** @sizeOf(PreparedBlockingRpc),
 };
 
+pub const PreparedRequestWireProgress = enum(u8) {
+    request_zero_clean,
+    prior_pending_ambiguous,
+    request_maybe_written,
+};
+
+const PreparedRequestExecutionLeaseLifecycle = enum(u8) {
+    pristine,
+    active,
+};
+
+const PreparedRequestExecutionFenceMode = enum(u8) {
+    unbound,
+    acquired,
+    upgraded_shared,
+};
+
+/// Caller-final lease that keeps the existing Client mutation fence held across the post-flush
+/// registry revalidation and the first prepared-request write. Client is the only producer and
+/// transition authority; callers may only pass the exact final address back to Client methods.
+pub const PreparedRequestExecutionLease = struct {
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    storage_addr: usize = 0,
+    identity: PreparedBlockingRpcIdentity = std.mem.zeroes(PreparedBlockingRpcIdentity),
+    allocator_ptr: usize = 0,
+    allocator_vtable: usize = 0,
+    fd: c.fd_t = -1,
+    operation_fence_addr: usize = 0,
+    operation_fence_generation: u64 = 0,
+    operation_fence_incarnation: u64 = 0,
+    operation_fence_lease_identity: u64 = 0,
+    ownership_raw: u8 = 0,
+    io_mode_raw: u8 = 0,
+    progress: PreparedRequestWireProgress = .request_zero_clean,
+    lifecycle: PreparedRequestExecutionLeaseLifecycle = .pristine,
+    fence_held: u8 = 0,
+    fence_mode: PreparedRequestExecutionFenceMode = .unbound,
+    cleanup_active: u8 = 0,
+    seal: u64 = 0,
+
+    pub fn pristineExact(self: *const @This()) bool {
+        if (!preparedExecutionLeaseRawValid(self)) return false;
+        return self.self_addr == 0 and self.client_addr == 0 and self.storage_addr == 0 and
+            std.meta.eql(self.identity, std.mem.zeroes(PreparedBlockingRpcIdentity)) and
+            self.allocator_ptr == 0 and self.allocator_vtable == 0 and
+            self.fd == -1 and self.operation_fence_addr == 0 and
+            self.operation_fence_generation == 0 and self.operation_fence_incarnation == 0 and
+            self.operation_fence_lease_identity == 0 and
+            self.ownership_raw == 0 and self.io_mode_raw == 0 and
+            self.progress == .request_zero_clean and self.lifecycle == .pristine and
+            self.fence_held == 0 and self.fence_mode == .unbound and
+            self.cleanup_active == 0 and self.seal == 0;
+    }
+
+    pub fn wireProgress(self: *const @This()) ?PreparedRequestWireProgress {
+        if (!preparedExecutionLeaseRawValid(self) or self.self_addr != @intFromPtr(self) or
+            self.lifecycle != .active or self.seal != preparedExecutionLeaseSeal(self)) return null;
+        return self.progress;
+    }
+};
+
+fn preparedExecutionLeaseSeal(lease: *const PreparedRequestExecutionLease) u64 {
+    var hash = std.hash.Wyhash.init(0xB303);
+    inline for (.{
+        lease.self_addr,
+        lease.client_addr,
+        lease.storage_addr,
+        lease.identity.request_id,
+        lease.identity.frame_digest,
+        lease.identity.descriptor.storage_addr,
+        lease.identity.descriptor.prepared_incarnation,
+        lease.identity.descriptor.client_addr,
+        lease.identity.descriptor.request_id,
+        lease.identity.descriptor.request_digest,
+        lease.identity.descriptor.frame_addr,
+        lease.identity.descriptor.frame_len,
+        lease.identity.descriptor.allocator_ptr,
+        lease.identity.descriptor.allocator_vtable,
+        lease.allocator_ptr,
+        lease.allocator_vtable,
+        lease.fd,
+        lease.operation_fence_addr,
+        lease.operation_fence_generation,
+        lease.operation_fence_incarnation,
+        lease.operation_fence_lease_identity,
+        lease.ownership_raw,
+        lease.io_mode_raw,
+        @as(usize, @intFromEnum(lease.progress)),
+        @as(usize, @intFromEnum(lease.lifecycle)),
+        @as(usize, lease.fence_held),
+        @as(usize, @intFromEnum(lease.fence_mode)),
+        @as(usize, lease.cleanup_active),
+    }) |value| hash.update(std.mem.asBytes(&value));
+    const seal = hash.final();
+    return if (seal == 0) 1 else seal;
+}
+
+fn preparedExecutionLeaseRawValid(lease: *const PreparedRequestExecutionLease) bool {
+    const progress_raw = @as(*const u8, @ptrCast(&lease.progress)).*;
+    const lifecycle_raw = @as(*const u8, @ptrCast(&lease.lifecycle)).*;
+    const fence_mode_raw = @as(*const u8, @ptrCast(&lease.fence_mode)).*;
+    return progress_raw <= @intFromEnum(PreparedRequestWireProgress.request_maybe_written) and
+        lifecycle_raw <= @intFromEnum(PreparedRequestExecutionLeaseLifecycle.active) and
+        fence_mode_raw <= @intFromEnum(PreparedRequestExecutionFenceMode.upgraded_shared) and
+        lease.fence_held <= 1 and lease.cleanup_active <= 1;
+}
+
+fn preparedExecutionFenceLeaseIdentity(
+    client_addr: usize,
+    fence_addr: usize,
+    generation: u64,
+    incarnation: u64,
+    lease_addr: usize,
+) u64 {
+    if (fence_addr == 0) return 0;
+    var hash = std.hash.Wyhash.init(0xB303_FEC3);
+    inline for (.{ client_addr, fence_addr, generation, incarnation, lease_addr }) |value|
+        hash.update(std.mem.asBytes(&value));
+    const identity = hash.final();
+    return if (identity == 0) 1 else identity;
+}
+
+const PreparedExecutionWriteResult = union(enum) {
+    interrupted,
+    would_block,
+    zero,
+    failed,
+    written: usize,
+};
+
+const PreparedExecutionWriteOps = struct {
+    context: ?*anyopaque = null,
+    writeFn: *const fn (?*anyopaque, c.fd_t, []const u8) PreparedExecutionWriteResult,
+
+    const posix_ops: @This() = .{ .writeFn = posixWrite };
+
+    fn posixWrite(_: ?*anyopaque, fd: c.fd_t, bytes: []const u8) PreparedExecutionWriteResult {
+        const rc = c.write(fd, bytes.ptr, bytes.len);
+        if (rc < 0) return switch (posix.errno(rc)) {
+            .INTR => .interrupted,
+            .AGAIN => .would_block,
+            else => .failed,
+        };
+        if (rc == 0) return .zero;
+        return .{ .written = @intCast(rc) };
+    }
+};
+
 pub const PreparedBlockingRpcIdentity = struct {
     request_id: u64,
     frame_digest: u64,
@@ -4659,7 +4808,13 @@ fn externalPlanRangeOverlapsClient(
     self: *const Client,
     out: *const PreparedClientDisarm,
 ) ExternalAdoptionInspectError!bool {
-    const target = externalRangeOfValue(out);
+    return externalRangeOverlapsClient(self, externalRangeOfValue(out));
+}
+
+fn externalRangeOverlapsClient(
+    self: *const Client,
+    target: ExternalRange,
+) ExternalAdoptionInspectError!bool {
     if (externalRangesOverlap(target, externalRangeOfValue(self))) return true;
     if (self.build_id) |bytes|
         if (externalRangesOverlap(target, (try externalRangeForSlice(bytes, bytes.len)).?))
@@ -4691,6 +4846,9 @@ fn externalPlanRangeOverlapsClient(
             if (externalRangesOverlap(target, range)) return true;
     for (self.pending_events.items) |frame|
         if (try externalRangeForSlice(frame.payload, frame.payload.len)) |range|
+            if (externalRangesOverlap(target, range)) return true;
+    if (self.pending_outbound) |pending|
+        if (try externalRangeForSlice(pending.frame, pending.frame.len)) |range|
             if (externalRangesOverlap(target, range)) return true;
     return false;
 }
@@ -4732,8 +4890,29 @@ pub fn commitExternalAdoptionTakeFrozenCleanupUnchecked(
 ///
 /// Stream/attachment 의미 권위는 계속 ClientSlot의 StreamOperationPermit가 소유한다. 이 작은
 /// substrate는 direct Client API가 다른 thread에서 callback cleanup과 겹치는 것만 막는다.
+var next_client_operation_fence_incarnation: std.atomic.Value(u64) = .init(1);
+
+fn issueClientOperationFenceIncarnation() u64 {
+    var observed = next_client_operation_fence_incarnation.load(.acquire);
+    while (true) {
+        if (observed == 0 or observed == std.math.maxInt(u64))
+            @panic("Client operation fence incarnation exhausted");
+        if (next_client_operation_fence_incarnation.cmpxchgWeak(
+            observed,
+            observed + 1,
+            .acq_rel,
+            .acquire,
+        )) |actual| {
+            observed = actual;
+            continue;
+        }
+        return observed;
+    }
+}
+
 pub const ClientOperationFence = struct {
     const shared_count_mask: u64 = (@as(u64, 1) << 31) - 1;
+    const execution_lease_bit: u64 = @as(u64, 1) << 59;
     const reserved_mask: u64 = ((@as(u64, 1) << 60) - 1) & ~shared_count_mask;
     const publication_bit: u64 = @as(u64, 1) << 60;
     const terminal_bit: u64 = @as(u64, 1) << 61;
@@ -4746,6 +4925,7 @@ pub const ClientOperationFence = struct {
     slot_incarnation: u64 = 0,
     node_incarnation: u64 = 0,
     fence_generation: u64 = 0,
+    fence_incarnation: u64 = 0,
     state: std.atomic.Value(u64) = .init(0),
 
     pub fn initInPlace(
@@ -4766,6 +4946,7 @@ pub const ClientOperationFence = struct {
             .slot_incarnation = slot_incarnation,
             .node_incarnation = node_incarnation,
             .fence_generation = fence_generation,
+            .fence_incarnation = issueClientOperationFenceIncarnation(),
         };
     }
 
@@ -4777,6 +4958,7 @@ pub const ClientOperationFence = struct {
         if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
         var observed = self.state.load(.acquire);
         while (true) {
+            if (observed & execution_lease_bit != 0) return error.AdminBusy;
             if (observed & reserved_mask != 0 or observed & terminal_bit != 0)
                 return error.InvalidState;
             if (observed & publication_bit != 0) return error.AdminBusy;
@@ -4819,12 +5001,69 @@ pub const ClientOperationFence = struct {
     ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
         if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
         if (self.state.cmpxchgStrong(0, exclusive_bit, .acq_rel, .acquire)) |observed| {
+            if (observed & execution_lease_bit != 0) return error.AdminBusy;
             if (observed & (reserved_mask | publication_bit | terminal_bit) != 0)
                 return error.InvalidState;
             if (observed & exclusive_bit != 0)
                 self.recordIntrusionIfExactExclusive(observed);
             return error.AdminBusy;
         }
+    }
+
+    fn tryAcquireExecutionLease(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
+        if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
+        if (self.state.cmpxchgStrong(0, execution_lease_bit, .acq_rel, .acquire)) |observed| {
+            if (observed & (reserved_mask & ~execution_lease_bit) != 0 or
+                observed & (publication_bit | terminal_bit) != 0)
+                return error.InvalidState;
+            return error.AdminBusy;
+        }
+    }
+
+    fn releaseExecutionLease(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        return self.state.cmpxchgStrong(
+            execution_lease_bit,
+            0,
+            .acq_rel,
+            .acquire,
+        ) == null;
+    }
+
+    fn upgradeSingleSharedToExecutionLease(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
+        if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
+        if (self.state.cmpxchgStrong(1, execution_lease_bit, .acq_rel, .acquire)) |observed| {
+            if (observed & (reserved_mask & ~execution_lease_bit) != 0 or
+                observed & (publication_bit | terminal_bit) != 0)
+                return error.InvalidState;
+            return error.AdminBusy;
+        }
+    }
+
+    fn downgradeExecutionLeaseToSingleShared(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        return self.state.cmpxchgStrong(
+            execution_lease_bit,
+            1,
+            .acq_rel,
+            .acquire,
+        ) == null;
     }
 
     fn recordIntrusionIfExactExclusive(self: *ClientOperationFence, observed: u64) void {
@@ -4973,6 +5212,45 @@ test "CR3a B3b-F operation fence rejects copied and stale identities before stat
         fence.tryEnterShared(@intFromPtr(&client_storage), 31),
     );
     try std.testing.expectEqual(@as(u64, 0), fence.state.load(.acquire));
+}
+
+test "B3-3 operation execution lease atomically blocks shared and teardown entry" {
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 31, 37, 41);
+
+    try fence.tryAcquireExecutionLease(@intFromPtr(&client_storage), 41);
+    try std.testing.expectError(
+        error.AdminBusy,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 41),
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        fence.tryAcquireExclusive(@intFromPtr(&client_storage), 41),
+    );
+    try std.testing.expect(fence.releaseExecutionLease(@intFromPtr(&client_storage), 41));
+    try fence.tryEnterShared(@intFromPtr(&client_storage), 41);
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client_storage), 41));
+    try std.testing.expect(!fence.releaseExecutionLease(@intFromPtr(&client_storage), 41));
+}
+
+test "B3-3 operation execution lease upgrades and restores one registered shared pin" {
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 71, 73, 79);
+    try fence.tryEnterShared(@intFromPtr(&client_storage), 79);
+    try fence.upgradeSingleSharedToExecutionLease(@intFromPtr(&client_storage), 79);
+    try std.testing.expectError(
+        error.AdminBusy,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 79),
+    );
+    try std.testing.expect(fence.downgradeExecutionLeaseToSingleShared(
+        @intFromPtr(&client_storage),
+        79,
+    ));
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client_storage), 79));
 }
 
 test "CR3a B3b-F nested count overflow and reserved states fail closed" {
@@ -5411,6 +5689,11 @@ pub const Client = struct {
     io_mode: client_external_mode.Mode = .blocking,
     operation_fence: ?*ClientOperationFence = null,
     operation_fence_generation: u64 = 0,
+    prepared_request_execution_lease_addr: usize = 0,
+    prepared_request_execution_fence_addr: usize = 0,
+    prepared_request_execution_fence_incarnation: u64 = 0,
+    prepared_request_execution_fence_lease_identity: u64 = 0,
+    prepared_request_execution_fence_mode: PreparedRequestExecutionFenceMode = .unbound,
     generation_allocator_scope_epoch: u64 = 0,
     active_generation_allocator_scope: ?GenerationAllocatorScopeIdentity = null,
 
@@ -5712,6 +5995,11 @@ pub const Client = struct {
     fn prepareDeinitGraph(self: *Client, bound_client: bool) bool {
         if (checkedAllocatorReentry(self)) return false;
         if (self.ownership == .moved) return false;
+        if (self.prepared_request_execution_lease_addr != 0 or
+            self.prepared_request_execution_fence_addr != 0 or
+            self.prepared_request_execution_fence_incarnation != 0 or
+            self.prepared_request_execution_fence_lease_identity != 0 or
+            self.prepared_request_execution_fence_mode != .unbound) return false;
         if (self.active_generation_allocator_scope != null) return false;
         if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
             (self.generation_batch_accounting.ledger != null and
@@ -5750,6 +6038,11 @@ pub const Client = struct {
     /// suffix, so a failed HostAdapter initialization never partially moves socket ownership.
     pub fn canMoveToGenerationNode(self: *const Client) bool {
         if (self.operation_fence != null or self.operation_fence_generation != 0) return false;
+        if (self.prepared_request_execution_lease_addr != 0 or
+            self.prepared_request_execution_fence_addr != 0 or
+            self.prepared_request_execution_fence_incarnation != 0 or
+            self.prepared_request_execution_fence_lease_identity != 0 or
+            self.prepared_request_execution_fence_mode != .unbound) return false;
         if (self.active_generation_allocator_scope != null) return false;
         return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
             self.generation_batch_accounting.valid(@intFromPtr(self)) and
@@ -7511,6 +7804,29 @@ pub const Client = struct {
         const operation_fence_held = try self.beginPublicMutation();
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        return self.abortPreparedBlockingRpcStorageCanonicalUnchecked(storage, identity);
+    }
+
+    /// B3-3 cleanup leaf for the exact backing already protected by `lease`. It deliberately does
+    /// not reacquire the public mutation fence: the execution lease must remain exclusive until
+    /// both request and response authorities have settled.
+    pub fn abortPreparedBlockingRpcStorageUnderExecutionLease(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *PreparedRequestExecutionLease,
+    ) PreparedBlockingRpcError!CanonicalPreparedAbortOutcome {
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        if (!self.preparedRequestExecutionLeaseMatches(storage, identity, lease))
+            return error.InvalidPreparedRpc;
+        return self.abortPreparedBlockingRpcStorageCanonicalUnchecked(storage, identity);
+    }
+
+    fn abortPreparedBlockingRpcStorageCanonicalUnchecked(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+    ) PreparedBlockingRpcError!CanonicalPreparedAbortOutcome {
         const prepared = preparedRpcFromStorage(storage);
         if (!preparedDescriptorRawMatches(prepared, storage, identity.descriptor) or
             !prepared.validFor(self) or prepared.request_id != identity.request_id or
@@ -7549,6 +7865,467 @@ pub const Client = struct {
             return error.InvalidPreparedRpc;
         }
         return allocator;
+    }
+
+    /// Begins the B3-3 no-interleave window. A bound Client uses the existing operation fence's
+    /// atomic execution-lease state; the address latch binds it to this caller-final value.
+    pub fn beginPreparedRequestExecution(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *PreparedRequestExecutionLease,
+    ) PreparedBlockingRpcError!std.mem.Allocator {
+        return self.beginPreparedRequestExecutionMode(storage, identity, lease, false);
+    }
+
+    pub fn beginPreparedRequestExecutionFromRegisteredOperation(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *PreparedRequestExecutionLease,
+    ) PreparedBlockingRpcError!std.mem.Allocator {
+        return self.beginPreparedRequestExecutionMode(storage, identity, lease, true);
+    }
+
+    fn beginPreparedRequestExecutionMode(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *PreparedRequestExecutionLease,
+        upgrade_registered_shared: bool,
+    ) PreparedBlockingRpcError!std.mem.Allocator {
+        const lease_range = checkedExternalRange(
+            @intFromPtr(lease),
+            @sizeOf(PreparedRequestExecutionLease),
+        ) catch return error.InvalidPreparedRpc;
+        const storage_range = checkedExternalRange(
+            @intFromPtr(storage),
+            @sizeOf(PreparedBlockingRpcStorage),
+        ) catch return error.InvalidPreparedRpc;
+        if (lease_range == null or storage_range == null or
+            externalRangesOverlap(lease_range.?, storage_range.?) or
+            (externalRangeOverlapsClient(self, lease_range.?) catch return error.InvalidPreparedRpc))
+            return error.InvalidPreparedRpc;
+        if (!identity.descriptor.valid()) return error.InvalidPreparedRpc;
+        const frame_range = checkedExternalRange(
+            identity.descriptor.frame_addr,
+            identity.descriptor.frame_len,
+        ) catch return error.InvalidPreparedRpc;
+        if (frame_range == null or externalRangesOverlap(lease_range.?, frame_range.?))
+            return error.InvalidPreparedRpc;
+        if (!lease.pristineExact()) return error.DestinationOccupied;
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        if (self.ownership == .moved or self.unusable) return error.ConnectionClosed;
+        const frozen_fence = self.operation_fence;
+        const frozen_fence_addr = if (frozen_fence) |fence| @intFromPtr(fence) else 0;
+        const frozen_fence_generation = self.operation_fence_generation;
+        const frozen_fence_incarnation = if (frozen_fence) |fence| fence.fence_incarnation else 0;
+        const fence_lease_identity = preparedExecutionFenceLeaseIdentity(
+            @intFromPtr(self),
+            frozen_fence_addr,
+            frozen_fence_generation,
+            frozen_fence_incarnation,
+            @intFromPtr(lease),
+        );
+        const fence_mode: PreparedRequestExecutionFenceMode = if (frozen_fence) |fence| held: {
+            if (upgrade_registered_shared)
+                fence.upgradeSingleSharedToExecutionLease(
+                    @intFromPtr(self),
+                    frozen_fence_generation,
+                ) catch |err| return switch (err) {
+                    error.AdminBusy => error.AdminBusy,
+                    error.InvalidOwner, error.InvalidState => error.ConnectionClosed,
+                }
+            else
+                fence.tryAcquireExecutionLease(
+                    @intFromPtr(self),
+                    frozen_fence_generation,
+                ) catch |err| return switch (err) {
+                    error.AdminBusy => error.AdminBusy,
+                    error.InvalidOwner, error.InvalidState => error.ConnectionClosed,
+                };
+            break :held if (upgrade_registered_shared) .upgraded_shared else .acquired;
+        } else held: {
+            if (upgrade_registered_shared or frozen_fence_generation != 0)
+                return error.ConnectionClosed;
+            break :held .unbound;
+        };
+        var release_fence = fence_mode != .unbound;
+        errdefer if (release_fence) {
+            const fence = frozen_fence orelse unreachable;
+            const released = switch (fence_mode) {
+                .unbound => unreachable,
+                .acquired => fence.releaseExecutionLease(
+                    @intFromPtr(self),
+                    frozen_fence_generation,
+                ),
+                .upgraded_shared => fence.downgradeExecutionLeaseToSingleShared(
+                    @intFromPtr(self),
+                    frozen_fence_generation,
+                ),
+            };
+            if (!released)
+                @panic("prepared request execution fence release failed");
+        };
+        if (self.prepared_request_execution_lease_addr != 0 or
+            self.prepared_request_execution_fence_addr != 0 or
+            self.prepared_request_execution_fence_incarnation != 0 or
+            self.prepared_request_execution_fence_lease_identity != 0 or
+            self.prepared_request_execution_fence_mode != .unbound or
+            self.ownership == .moved or self.unusable)
+            return error.AdminBusy;
+        const prepared = preparedRpcFromStorage(storage);
+        if (!preparedDescriptorRawMatches(prepared, storage, identity.descriptor) or
+            !prepared.validFor(self) or prepared.request_id != identity.request_id or
+            prepared.frame_digest != identity.frame_digest or
+            !prepared.frameIntact() or prepared.request_id != self.next_request_id)
+            return error.InvalidPreparedRpc;
+        if (self.bufferedControllerRevokeForStreamUnchecked(null)) return error.AdminBusy;
+        const allocator = self.allocator;
+        lease.* = .{
+            .self_addr = @intFromPtr(lease),
+            .client_addr = @intFromPtr(self),
+            .storage_addr = @intFromPtr(storage),
+            .identity = identity,
+            .allocator_ptr = @intFromPtr(allocator.ptr),
+            .allocator_vtable = @intFromPtr(allocator.vtable),
+            .fd = self.fd,
+            .operation_fence_addr = frozen_fence_addr,
+            .operation_fence_generation = frozen_fence_generation,
+            .operation_fence_incarnation = frozen_fence_incarnation,
+            .operation_fence_lease_identity = fence_lease_identity,
+            .ownership_raw = @intFromEnum(self.ownership),
+            .io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode)),
+            .progress = .request_zero_clean,
+            .lifecycle = .active,
+            .fence_held = @intFromBool(fence_mode != .unbound),
+            .fence_mode = fence_mode,
+        };
+        lease.seal = preparedExecutionLeaseSeal(lease);
+        self.prepared_request_execution_lease_addr = @intFromPtr(lease);
+        self.prepared_request_execution_fence_addr = frozen_fence_addr;
+        self.prepared_request_execution_fence_incarnation = frozen_fence_incarnation;
+        self.prepared_request_execution_fence_lease_identity = fence_lease_identity;
+        self.prepared_request_execution_fence_mode = fence_mode;
+        release_fence = false;
+
+        self.flushPendingOutboundForPreparedExecution(lease) catch |err| return err;
+        if (!self.preparedRequestExecutionLeaseMatches(storage, identity, lease) or
+            !std.meta.eql(self.allocator, allocator) or !self.parser.usesAllocator(allocator) or
+            self.pending_outbound != null or self.unusable or self.first_poison_reason != null)
+        {
+            self.poisonWhilePreparedExecutionHeld(.local_invariant_violation);
+            return error.InvalidPreparedRpc;
+        }
+        return allocator;
+    }
+
+    pub fn preparedRequestExecutionLeaseMatches(
+        self: *const Client,
+        storage: *const PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *const PreparedRequestExecutionLease,
+    ) bool {
+        if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease) or
+            lease.storage_addr != @intFromPtr(storage) or !std.meta.eql(lease.identity, identity))
+            return false;
+        const prepared = preparedRpcFromStorageConst(storage);
+        return preparedDescriptorRawMatches(prepared, storage, identity.descriptor) and
+            prepared.validFor(self) and prepared.request_id == identity.request_id and
+            prepared.frame_digest == identity.frame_digest and prepared.frameIntact() and
+            prepared.request_id == self.next_request_id;
+    }
+
+    fn preparedRequestExecutionLeaseAuthorityMatches(
+        self: *const Client,
+        lease: *const PreparedRequestExecutionLease,
+    ) bool {
+        if (!preparedExecutionLeaseRawValid(lease) or lease.self_addr != @intFromPtr(lease) or
+            lease.lifecycle != .active or lease.client_addr != @intFromPtr(self) or
+            lease.allocator_ptr != @intFromPtr(self.allocator.ptr) or
+            lease.allocator_vtable != @intFromPtr(self.allocator.vtable) or
+            (lease.fd != self.fd and
+                !(self.fd == -1 and self.unusable and self.first_poison_reason != null)) or
+            lease.operation_fence_addr != self.prepared_request_execution_fence_addr or
+            lease.operation_fence_generation != self.operation_fence_generation or
+            lease.operation_fence_incarnation != self.prepared_request_execution_fence_incarnation or
+            lease.operation_fence_lease_identity != self.prepared_request_execution_fence_lease_identity or
+            lease.operation_fence_lease_identity != preparedExecutionFenceLeaseIdentity(
+                @intFromPtr(self),
+                lease.operation_fence_addr,
+                lease.operation_fence_generation,
+                lease.operation_fence_incarnation,
+                @intFromPtr(lease),
+            ) or
+            (if (self.operation_fence) |fence| @intFromPtr(fence) else 0) != lease.operation_fence_addr or
+            (if (self.operation_fence) |fence| fence.fence_incarnation else 0) != lease.operation_fence_incarnation or
+            lease.ownership_raw != @intFromEnum(self.ownership) or
+            lease.io_mode_raw != @intFromEnum(std.meta.activeTag(self.io_mode)) or
+            lease.fence_mode != self.prepared_request_execution_fence_mode or
+            lease.seal != preparedExecutionLeaseSeal(lease) or
+            self.prepared_request_execution_lease_addr != @intFromPtr(lease)) return false;
+        return true;
+    }
+
+    pub fn preparedRequestExecutionPoisonReason(
+        self: *const Client,
+        lease: *const PreparedRequestExecutionLease,
+    ) PreparedBlockingRpcError!?client_poison.ConnectionReason {
+        if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease))
+            return error.InvalidPreparedRpc;
+        return self.first_poison_reason;
+    }
+
+    pub fn poisonPreparedRequestExecution(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+        reason: client_poison.ConnectionReason,
+    ) PreparedBlockingRpcError!void {
+        if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease))
+            return error.InvalidPreparedRpc;
+        self.poisonWhilePreparedExecutionHeld(reason);
+    }
+
+    /// Executes only the request-write half of B3-3. Response correlation/publication remains
+    /// closed until B3-4/5; every exit retires the authenticated request backing exactly once.
+    pub fn writePreparedRequestExecution(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *PreparedRequestExecutionLease,
+    ) PreparedBlockingRpcError!void {
+        return self.writePreparedRequestExecutionWithOps(storage, identity, lease, .posix_ops);
+    }
+
+    fn writePreparedRequestExecutionWithOps(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+        lease: *PreparedRequestExecutionLease,
+        ops: PreparedExecutionWriteOps,
+    ) PreparedBlockingRpcError!void {
+        if (!self.preparedRequestExecutionLeaseMatches(storage, identity, lease))
+            return error.InvalidPreparedRpc;
+        const prepared = preparedRpcFromStorage(storage);
+        const frame = prepared.frame;
+        const allocator = prepared.allocator;
+        prepared.lifecycle = .executing;
+        self.next_request_id += 1;
+        defer prepared.settleCaptured(allocator, frame);
+
+        var offset: usize = 0;
+        while (offset < frame.len) {
+            switch (ops.writeFn(ops.context, self.fd, frame[offset..])) {
+                .interrupted => continue,
+                .would_block, .zero, .failed => {
+                    self.poisonWhilePreparedExecutionHeld(.outbound_write_ambiguous);
+                    return error.WriteFailed;
+                },
+                .written => |written| {
+                    if (written == 0 or written > frame.len - offset) {
+                        self.poisonWhilePreparedExecutionHeld(.local_invariant_violation);
+                        return error.WriteFailed;
+                    }
+                    offset += written;
+                    if (!self.setPreparedExecutionProgress(lease, .request_maybe_written))
+                        return error.InvalidPreparedRpc;
+                },
+            }
+        }
+    }
+
+    /// B3-3 test-private terminal sink: no response payload is accepted or published. The peer
+    /// closes after consuming the request, proving the post-write terminal cleanup boundary.
+    pub fn observePreparedRequestTerminalSinkEof(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+    ) ClientError!void {
+        if (!preparedExecutionLeaseRawValid(lease) or lease.self_addr != @intFromPtr(lease) or
+            lease.client_addr != @intFromPtr(self) or lease.lifecycle != .active or
+            lease.seal != preparedExecutionLeaseSeal(lease) or
+            self.prepared_request_execution_lease_addr != @intFromPtr(lease))
+            return error.ProtocolError;
+        var byte: [1]u8 = undefined;
+        while (true) {
+            const rc = c.read(self.fd, &byte, byte.len);
+            if (rc < 0 and posix.errno(rc) == .INTR) continue;
+            if (rc == 0) {
+                self.poisonWhilePreparedExecutionHeld(.connection_eof);
+                return error.ConnectionClosed;
+            }
+            self.poisonWhilePreparedExecutionHeld(if (rc < 0)
+                .transport_read_failure
+            else
+                .peer_contract_violation);
+            return if (rc < 0) error.ConnectionClosed else error.ProtocolError;
+        }
+    }
+
+    pub fn finishPreparedRequestExecution(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+    ) PreparedBlockingRpcError!void {
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        if (preparedExecutionLeaseRawValid(lease) and
+            self.prepared_request_execution_lease_addr == @intFromPtr(lease) and
+            lease.self_addr == @intFromPtr(lease) and lease.client_addr == @intFromPtr(self) and
+            lease.lifecycle == .active and lease.seal == preparedExecutionLeaseSeal(lease) and
+            lease.cleanup_active == 1)
+            return error.AdminBusy;
+        if (!preparedExecutionLeaseRawValid(lease) or lease.self_addr != @intFromPtr(lease) or
+            lease.lifecycle != .active or lease.client_addr != @intFromPtr(self) or
+            lease.seal != preparedExecutionLeaseSeal(lease) or
+            lease.operation_fence_addr != self.prepared_request_execution_fence_addr or
+            lease.operation_fence_generation != self.operation_fence_generation or
+            lease.operation_fence_incarnation != self.prepared_request_execution_fence_incarnation or
+            lease.operation_fence_lease_identity != self.prepared_request_execution_fence_lease_identity or
+            (if (self.operation_fence) |fence| @intFromPtr(fence) else 0) != lease.operation_fence_addr or
+            (if (self.operation_fence) |fence| fence.fence_incarnation else 0) != lease.operation_fence_incarnation or
+            self.prepared_request_execution_lease_addr != @intFromPtr(lease))
+        {
+            if (self.prepared_request_execution_lease_addr == @intFromPtr(lease)) {
+                self.poisonWhilePreparedExecutionHeld(.local_invariant_violation);
+                self.releasePreparedRequestExecutionLeaseCanonical(lease);
+            }
+            return error.InvalidPreparedRpc;
+        }
+        self.releasePreparedRequestExecutionLeaseCanonical(lease);
+    }
+
+    fn releasePreparedRequestExecutionLeaseCanonical(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+    ) void {
+        const fence_mode = self.prepared_request_execution_fence_mode;
+        const fence_addr = self.prepared_request_execution_fence_addr;
+        const fence_generation = lease.operation_fence_generation;
+        const fence_incarnation = self.prepared_request_execution_fence_incarnation;
+        const fence_lease_identity = self.prepared_request_execution_fence_lease_identity;
+        if (fence_lease_identity != preparedExecutionFenceLeaseIdentity(
+            @intFromPtr(self),
+            fence_addr,
+            fence_generation,
+            fence_incarnation,
+            @intFromPtr(lease),
+        )) @panic("prepared request execution fence identity drifted");
+        self.prepared_request_execution_lease_addr = 0;
+        self.prepared_request_execution_fence_addr = 0;
+        self.prepared_request_execution_fence_incarnation = 0;
+        self.prepared_request_execution_fence_lease_identity = 0;
+        self.prepared_request_execution_fence_mode = .unbound;
+        lease.* = .{};
+        if (fence_mode != .unbound) {
+            if (fence_addr == 0) @panic("prepared request execution fence address missing");
+            const fence: *ClientOperationFence = @ptrFromInt(fence_addr);
+            if (fence.fence_incarnation != fence_incarnation) return;
+            const released = switch (fence_mode) {
+                .unbound => unreachable,
+                .acquired => fence.releaseExecutionLease(
+                    @intFromPtr(self),
+                    fence_generation,
+                ),
+                .upgraded_shared => fence.downgradeExecutionLeaseToSingleShared(
+                    @intFromPtr(self),
+                    fence_generation,
+                ),
+            };
+            if (!released)
+                @panic("prepared request execution fence release failed");
+        }
+    }
+
+    fn flushPendingOutboundForPreparedExecution(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+    ) ClientError!void {
+        return self.flushPendingOutboundBlockingWithOps(lease, .posix_ops);
+    }
+
+    fn flushPendingOutboundBlockingWithOps(
+        self: *Client,
+        lease: ?*PreparedRequestExecutionLease,
+        ops: PreparedExecutionWriteOps,
+    ) ClientError!void {
+        while (self.pending_outbound) |*pending| {
+            const ambiguous_before = pending.offset != 0;
+            const remaining = pending.frame[pending.offset..];
+            const result = ops.writeFn(ops.context, self.fd, remaining);
+            switch (result) {
+                .interrupted => continue,
+                .would_block, .zero, .failed => {
+                    if (ambiguous_before) {
+                        if (lease) |active|
+                            _ = self.setPreparedExecutionProgress(active, .prior_pending_ambiguous);
+                    }
+                    if (lease != null)
+                        self.poisonWhilePreparedExecutionHeld(.outbound_write_ambiguous)
+                    else
+                        self.poison(.outbound_write_ambiguous);
+                    return error.WriteFailed;
+                },
+                .written => |written| {
+                    if (written == 0 or written > remaining.len) {
+                        if (ambiguous_before) {
+                            if (lease) |active|
+                                _ = self.setPreparedExecutionProgress(active, .prior_pending_ambiguous);
+                        }
+                        if (lease != null)
+                            self.poisonWhilePreparedExecutionHeld(.local_invariant_violation)
+                        else
+                            self.poison(.local_invariant_violation);
+                        return error.WriteFailed;
+                    }
+                    pending.offset += written;
+                },
+            }
+            if (pending.offset != pending.frame.len) continue;
+            if (lease) |active| {
+                active.cleanup_active = 1;
+                active.seal = preparedExecutionLeaseSeal(active);
+                self.clearPendingOutbound();
+                if (self.prepared_request_execution_lease_addr != @intFromPtr(active) or
+                    !preparedExecutionLeaseRawValid(active) or active.self_addr != @intFromPtr(active) or
+                    active.client_addr != @intFromPtr(self) or active.lifecycle != .active or
+                    active.cleanup_active != 1 or active.seal != preparedExecutionLeaseSeal(active))
+                {
+                    self.poisonWhilePreparedExecutionHeld(.local_invariant_violation);
+                    return error.WriteFailed;
+                }
+                active.cleanup_active = 0;
+                active.seal = preparedExecutionLeaseSeal(active);
+            } else {
+                self.clearPendingOutbound();
+            }
+        }
+    }
+
+    fn setPreparedExecutionProgress(
+        self: *Client,
+        lease: *PreparedRequestExecutionLease,
+        progress: PreparedRequestWireProgress,
+    ) bool {
+        if (self.prepared_request_execution_lease_addr != @intFromPtr(lease) or
+            !preparedExecutionLeaseRawValid(lease) or lease.self_addr != @intFromPtr(lease) or
+            lease.client_addr != @intFromPtr(self) or lease.lifecycle != .active or
+            lease.seal != preparedExecutionLeaseSeal(lease))
+            return false;
+        const allowed = lease.progress == progress or
+            (lease.progress == .request_zero_clean and progress != .request_zero_clean);
+        if (!allowed) {
+            self.poisonWhilePreparedExecutionHeld(.local_invariant_violation);
+            return false;
+        }
+        lease.progress = progress;
+        lease.seal = preparedExecutionLeaseSeal(lease);
+        return true;
+    }
+
+    fn poisonWhilePreparedExecutionHeld(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) void {
+        self.latchFirstPoisonReason(reason);
+        if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
     }
 
     pub fn executePreparedBlockingRpcStorageWithAllocator(
@@ -10445,21 +11222,7 @@ pub const Client = struct {
     /// pending outbound frame의 남은 wire bytes를 blocking으로 전량 보낸다. 부분 write마다 offset을 진전시켜 오류 뒤 같은 prefix를
     /// 다시 보낼 가능성을 없앤다. hard error면 이 socket은 framing 경계를 복구할 수 없으므로 connection을 닫는다.
     fn flushPendingOutboundBlocking(self: *Client) ClientError!void {
-        while (self.pending_outbound) |*pending| {
-            const remaining = pending.frame[pending.offset..];
-            const rc = c.write(self.fd, remaining.ptr, remaining.len);
-            if (rc < 0) {
-                if (posix.errno(rc) == .INTR) continue;
-                self.poison(.outbound_write_ambiguous);
-                return error.WriteFailed;
-            }
-            if (rc == 0) {
-                self.poison(.outbound_write_ambiguous);
-                return error.WriteFailed;
-            }
-            pending.offset += @intCast(rc);
-            if (pending.offset == pending.frame.len) self.clearPendingOutbound();
-        }
+        return self.flushPendingOutboundBlockingWithOps(null, .posix_ops);
     }
 
     /// MSG_DONTWAIT로 pending frame을 가능한 만큼 민다. true면 슬롯이 비었고 새 payload를 받을 수 있다. EAGAIN은 정상
@@ -10588,8 +11351,10 @@ pub const Client = struct {
     }
 
     fn clearPendingOutbound(self: *Client) void {
-        if (self.pending_outbound) |pending| self.allocator.free(pending.frame);
+        const pending = self.pending_outbound orelse return;
+        const allocator = self.allocator;
         self.pending_outbound = null;
+        allocator.free(pending.frame);
     }
 
     /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
@@ -10830,6 +11595,11 @@ pub const Client = struct {
     }
 
     fn beginPublicMutation(self: *const Client) ClientError!bool {
+        if (self.prepared_request_execution_lease_addr != 0 or
+            self.prepared_request_execution_fence_addr != 0 or
+            self.prepared_request_execution_fence_incarnation != 0 or
+            self.prepared_request_execution_fence_lease_identity != 0 or
+            self.prepared_request_execution_fence_mode != .unbound) return error.AdminBusy;
         const fence = self.operation_fence orelse {
             if (self.operation_fence_generation != 0) return error.ConnectionClosed;
             return false;
@@ -10990,10 +11760,16 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "io_mode",
     "operation_fence",
     "operation_fence_generation",
+    "prepared_request_execution_lease_addr",
+    "prepared_request_execution_fence_addr",
+    "prepared_request_execution_fence_incarnation",
+    "prepared_request_execution_fence_lease_identity",
+    "prepared_request_execution_fence_mode",
     "generation_allocator_scope_epoch",
     "active_generation_allocator_scope",
 };
 comptime {
+    @setEvalBranchQuota(2_000);
     const fields = std.meta.fields(Client);
     if (fields.len != client_source_schema_field_allowlist.len)
         @compileError("update ClientSourceSealSchema.v1 for every Client field change");
@@ -11284,6 +12060,9 @@ const PreparedRpcAllocatorDriftProbe = struct {
     replacement: std.mem.Allocator,
     armed: bool = false,
     drifted: bool = false,
+    pending_was_null_during_free: bool = false,
+    execution_lease: ?*PreparedRequestExecutionLease = null,
+    finish_error: ?PreparedBlockingRpcError = null,
 
     fn allocator(self: *@This()) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -11313,9 +12092,36 @@ const PreparedRpcAllocatorDriftProbe = struct {
         const self: *@This() = @ptrCast(@alignCast(ctx));
         if (self.armed and !self.drifted) {
             self.drifted = true;
+            self.pending_was_null_during_free = self.client.?.pending_outbound == null;
+            if (self.execution_lease) |lease|
+                self.client.?.finishPreparedRequestExecution(lease) catch |err| {
+                    self.finish_error = err;
+                };
             self.client.?.allocator = self.replacement;
         }
         self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const PreparedExecutionWriteProbe = struct {
+    results: []const PreparedExecutionWriteResult,
+    index: usize = 0,
+    calls: usize = 0,
+
+    fn ops(self: *@This()) PreparedExecutionWriteOps {
+        return .{ .context = self, .writeFn = write };
+    }
+
+    fn write(ctx: ?*anyopaque, _: c.fd_t, bytes: []const u8) PreparedExecutionWriteResult {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.calls += 1;
+        if (self.index >= self.results.len) return .failed;
+        const result = self.results[self.index];
+        self.index += 1;
+        return switch (result) {
+            .written => |count| if (count <= bytes.len) result else .{ .written = count },
+            else => result,
+        };
     }
 };
 
@@ -11438,6 +12244,597 @@ test "CR3a-2a prepared execution rejects allocator drift while flushing older ou
     try std.testing.expect(client.unusable);
     try std.testing.expect(client.pending_outbound == null);
     try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 caller-final execution lease blocks mutation and preserves clean zero progress" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB330,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = @intCast(c.getpid());
+    fence.initInPlace(@intFromPtr(&client), pid, 43, 47, 53);
+    try std.testing.expect(client.bindOperationFence(&fence, 53));
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    const captured = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try std.testing.expect(std.meta.eql(captured, allocator));
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.request_zero_clean,
+        lease.wireProgress().?,
+    );
+    try std.testing.expect(client.preparedRequestExecutionLeaseMatches(&storage, identity, &lease));
+    var sibling: PreparedBlockingRpcStorage = .{};
+    try std.testing.expectError(
+        error.AdminBusy,
+        client.prepareBlockingRpcStorage(&sibling, "host.info", null),
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        client.tryAcquireClientSlotTeardownExclusive(),
+    );
+    try std.testing.expectEqual(
+        Client.CanonicalPreparedAbortOutcome.reusable,
+        try client.abortPreparedBlockingRpcStorageUnderExecutionLease(&storage, identity, &lease),
+    );
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+    // Backing settlement is not the release point: sibling mutation remains fenced until the
+    // composite owner has also settled its response authority and explicitly releases the lease.
+    try std.testing.expectError(
+        error.AdminBusy,
+        client.prepareBlockingRpcStorage(&sibling, "host.info", null),
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        client.tryAcquireClientSlotTeardownExclusive(),
+    );
+    try client.finishPreparedRequestExecution(&lease);
+    try std.testing.expect(lease.pristineExact());
+    try std.testing.expectError(error.InvalidPreparedRpc, client.finishPreparedRequestExecution(&lease));
+    _ = try client.prepareBlockingRpcStorage(&sibling, "host.info", null);
+    try client.abortPreparedBlockingRpcStorage(&sibling);
+}
+
+test "B3-3 execution lease pristine check rejects every invalid raw tag" {
+    var lease: PreparedRequestExecutionLease = .{};
+    const progress_raw: *u8 = @ptrCast(&lease.progress);
+    var raw: usize = 0;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        progress_raw.* = @intCast(raw);
+        try std.testing.expectEqual(raw == 0, lease.pristineExact());
+    }
+    lease = .{};
+    const lifecycle_raw: *u8 = @ptrCast(&lease.lifecycle);
+    raw = 0;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        lifecycle_raw.* = @intCast(raw);
+        try std.testing.expectEqual(raw == 0, lease.pristineExact());
+    }
+}
+
+test "B3-3 execution lease rejects Client storage and sealed-frame aliases before mutation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB336,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    const client_alias: *PreparedRequestExecutionLease = @ptrCast(@alignCast(&client));
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.beginPreparedRequestExecution(&storage, identity, client_alias),
+    );
+    const storage_alias: *PreparedRequestExecutionLease = @ptrCast(@alignCast(&storage));
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.beginPreparedRequestExecution(&storage, identity, storage_alias),
+    );
+    var lease: PreparedRequestExecutionLease = .{};
+    var forged = identity;
+    forged.descriptor.frame_addr = @intFromPtr(&lease);
+    forged.descriptor.frame_len = @sizeOf(PreparedRequestExecutionLease);
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.beginPreparedRequestExecution(&storage, forged, &lease),
+    );
+    try std.testing.expect(lease.pristineExact());
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 drifted active lease poisons and releases the canonical execution fence" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB332,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = @intCast(c.getpid());
+    fence.initInPlace(@intFromPtr(&client), pid, 59, 61, 67);
+    try std.testing.expect(client.bindOperationFence(&fence, 67));
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    lease.allocator_ptr +%= 1;
+    try std.testing.expectError(error.InvalidPreparedRpc, client.finishPreparedRequestExecution(&lease));
+    try std.testing.expect(client.unusable);
+    try std.testing.expect(lease.pristineExact());
+    try fence.tryEnterShared(@intFromPtr(&client), 67);
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client), 67));
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 execution lease releases only its frozen fence across pointer ABA" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Case = enum { null_pointer, foreign_same_generation, generation_drift, same_address_reincarnation };
+    inline for (.{
+        Case.null_pointer,
+        Case.foreign_same_generation,
+        Case.generation_drift,
+        Case.same_address_reincarnation,
+    }) |case| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var client: Client = .{
+            .allocator = std.testing.allocator,
+            .fd = fds[0],
+            .host_id = 0xB33A,
+            .parser = framing.FrameParser.init(std.testing.allocator),
+        };
+        var canonical_fence: ClientOperationFence = undefined;
+        var foreign_fence: ClientOperationFence = undefined;
+        const pid: u32 = @intCast(c.getpid());
+        canonical_fence.initInPlace(@intFromPtr(&client), pid, 71, 73, 79);
+        foreign_fence.initInPlace(@intFromPtr(&client), pid, 83, 89, 79);
+        try std.testing.expect(client.bindOperationFence(&canonical_fence, 79));
+        var storage: PreparedBlockingRpcStorage = .{};
+        const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+        var lease: PreparedRequestExecutionLease = .{};
+        _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+        switch (case) {
+            .null_pointer => client.operation_fence = null,
+            .foreign_same_generation => client.operation_fence = &foreign_fence,
+            .generation_drift => client.operation_fence_generation = 97,
+            .same_address_reincarnation => {
+                canonical_fence.initInPlace(@intFromPtr(&client), pid, 71, 73, 79);
+                canonical_fence.state.store(ClientOperationFence.execution_lease_bit, .release);
+            },
+        }
+        try std.testing.expectError(error.InvalidPreparedRpc, client.finishPreparedRequestExecution(&lease));
+        if (case == .same_address_reincarnation) {
+            try std.testing.expectEqual(
+                ClientOperationFence.execution_lease_bit,
+                canonical_fence.state.load(.acquire),
+            );
+            canonical_fence.state.store(0, .release);
+        } else try std.testing.expectEqual(@as(u64, 0), canonical_fence.state.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 0), foreign_fence.state.load(.acquire));
+        client.operation_fence = &canonical_fence;
+        client.operation_fence_generation = 79;
+        try client.abortPreparedBlockingRpcStorage(&storage);
+        client.deinit();
+    }
+}
+
+test "B3-3 pending flush tombstones before callback and drift keeps lease owned" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var probe = PreparedRpcAllocatorDriftProbe{
+        .parent = allocator,
+        .replacement = allocator,
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = probe.allocator(),
+        .fd = fds[0],
+        .host_id = 0xB331,
+        .parser = framing.FrameParser.init(probe.allocator()),
+    };
+    probe.client = &client;
+    defer {
+        client.allocator = probe.allocator();
+        client.deinit();
+    }
+    client.pending_outbound = .{
+        .frame = try probe.allocator().dupe(u8, "older-frame"),
+        .stream_id = 7,
+    };
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    probe.execution_lease = &lease;
+    probe.armed = true;
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.beginPreparedRequestExecution(&storage, identity, &lease),
+    );
+    probe.armed = false;
+    try std.testing.expect(probe.drifted);
+    try std.testing.expect(probe.pending_was_null_during_free);
+    try std.testing.expectEqual(error.AdminBusy, probe.finish_error.?);
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.request_zero_clean,
+        lease.wireProgress().?,
+    );
+    try client.finishPreparedRequestExecution(&lease);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 injected pending partial then failure preserves prior ambiguity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB333,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    client.pending_outbound = .{
+        .frame = try allocator.dupe(u8, "pending"),
+        .stream_id = 9,
+    };
+    const results = [_]PreparedExecutionWriteResult{
+        .interrupted,
+        .{ .written = 1 },
+        .would_block,
+    };
+    var probe = PreparedExecutionWriteProbe{ .results = &results };
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.flushPendingOutboundBlockingWithOps(&lease, probe.ops()),
+    );
+    try std.testing.expectEqual(@as(usize, 3), probe.calls);
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.prior_pending_ambiguous,
+        lease.wireProgress().?,
+    );
+    try std.testing.expect(client.unusable);
+    try client.finishPreparedRequestExecution(&lease);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 injected request exact one and len minus one publishes maybe-written" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB334,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    const frame_len = identity.descriptor.frame_len;
+    try std.testing.expect(frame_len > 1);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    const results = [_]PreparedExecutionWriteResult{
+        .interrupted,
+        .{ .written = 1 },
+        .{ .written = frame_len - 1 },
+    };
+    var probe = PreparedExecutionWriteProbe{ .results = &results };
+    try client.writePreparedRequestExecutionWithOps(&storage, identity, &lease, probe.ops());
+    try std.testing.expectEqual(@as(usize, 3), probe.calls);
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.request_maybe_written,
+        lease.wireProgress().?,
+    );
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+    try std.testing.expectEqual(@as(u64, 2), client.next_request_id);
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-3 injected zero request write keeps zero progress but closes Client" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB335,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    const results = [_]PreparedExecutionWriteResult{.zero};
+    var probe = PreparedExecutionWriteProbe{ .results = &results };
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.writePreparedRequestExecutionWithOps(&storage, identity, &lease, probe.ops()),
+    );
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.request_zero_clean,
+        lease.wireProgress().?,
+    );
+    try std.testing.expect(client.unusable);
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-3 injected hard request failure keeps zero progress and retires backing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xB3351,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    const results = [_]PreparedExecutionWriteResult{.failed};
+    var probe = PreparedExecutionWriteProbe{ .results = &results };
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.writePreparedRequestExecutionWithOps(&storage, identity, &lease, probe.ops()),
+    );
+    try std.testing.expectEqual(PreparedRequestWireProgress.request_zero_clean, lease.wireProgress().?);
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+    try std.testing.expect(client.unusable);
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-3 progress cannot downgrade after a request prefix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB337,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try std.testing.expect(client.setPreparedExecutionProgress(&lease, .request_maybe_written));
+    try std.testing.expect(!client.setPreparedExecutionProgress(&lease, .prior_pending_ambiguous));
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.request_maybe_written,
+        lease.wireProgress().?,
+    );
+    try std.testing.expect(client.unusable);
+    try client.finishPreparedRequestExecution(&lease);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 actual EPIPE after prior pending prefix preserves ambiguity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB338,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    client.pending_outbound = .{
+        .frame = try allocator.dupe(u8, "prior"),
+        .stream_id = 11,
+        .offset = 1,
+    };
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.beginPreparedRequestExecution(&storage, identity, &lease),
+    );
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.prior_pending_ambiguous,
+        lease.wireProgress().?,
+    );
+    try std.testing.expect(client.unusable);
+    try client.finishPreparedRequestExecution(&lease);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 actual pending full write is retired before request execution" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB3381,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const pending_bytes = "prior-full";
+    client.pending_outbound = .{
+        .frame = try allocator.dupe(u8, pending_bytes),
+        .stream_id = 12,
+    };
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try std.testing.expect(client.pending_outbound == null);
+    var observed: [pending_bytes.len]u8 = undefined;
+    var observed_len: usize = 0;
+    while (observed_len < observed.len) {
+        const rc = c.read(fds[1], observed[observed_len..].ptr, observed.len - observed_len);
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        try std.testing.expect(rc > 0);
+        observed_len += @intCast(rc);
+    }
+    try std.testing.expectEqualStrings(pending_bytes, &observed);
+    try std.testing.expectEqual(PreparedRequestWireProgress.request_zero_clean, lease.wireProgress().?);
+    try client.finishPreparedRequestExecution(&lease);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 actual nonblocking kernel partial pending write records ambiguity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    const flags = c.fcntl(fds[0], c.F.GETFL, @as(c_int, 0));
+    try std.testing.expect(flags >= 0);
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try std.testing.expectEqual(@as(c_int, 0), c.fcntl(fds[0], c.F.SETFL, flags | nonblocking));
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB339,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    client.pending_outbound = .{
+        .frame = try allocator.alloc(u8, 1024 * 1024),
+        .stream_id = 13,
+    };
+    @memset(client.pending_outbound.?.frame, 0xA5);
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.beginPreparedRequestExecution(&storage, identity, &lease),
+    );
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.prior_pending_ambiguous,
+        lease.wireProgress().?,
+    );
+    try client.finishPreparedRequestExecution(&lease);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "B3-3 actual request EPIPE retains zero request progress" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB33A,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.writePreparedRequestExecution(&storage, identity, &lease),
+    );
+    try std.testing.expectEqual(
+        PreparedRequestWireProgress.request_zero_clean,
+        lease.wireProgress().?,
+    );
+    try client.finishPreparedRequestExecution(&lease);
+}
+
+test "B3-3 actual nonblocking request partial write publishes maybe-written" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    socket_server.setNoSigPipe(fds[0]);
+    var requested_send_buffer: c_int = 4096;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.setsockopt(
+            fds[0],
+            posix.SOL.SOCKET,
+            posix.SO.SNDBUF,
+            &requested_send_buffer,
+            @sizeOf(c_int),
+        ),
+    );
+    const flags = c.fcntl(fds[0], c.F.GETFL, @as(c_int, 0));
+    try std.testing.expect(flags >= 0);
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try std.testing.expectEqual(@as(c_int, 0), c.fcntl(fds[0], c.F.SETFL, flags | nonblocking));
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xB33B,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const params = try allocator.alloc(u8, 128 * 1024);
+    defer allocator.free(params);
+    @memset(params, 'a');
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", params);
+    var lease: PreparedRequestExecutionLease = .{};
+    _ = try client.beginPreparedRequestExecution(&storage, identity, &lease);
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.writePreparedRequestExecution(&storage, identity, &lease),
+    );
+    try std.testing.expectEqual(PreparedRequestWireProgress.request_maybe_written, lease.wireProgress().?);
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+    try client.finishPreparedRequestExecution(&lease);
 }
 
 test "prepared blocking RPC tombstones before allocator free callback reentry" {

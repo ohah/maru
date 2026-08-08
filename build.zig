@@ -1965,11 +1965,15 @@ pub fn build(b: *std.Build) void {
     };
     const session_host_b3_1_step = b.step(
         "test-session-host-b3-1",
-        "B3-1 inert RPC response authority focused Debug and ReleaseFast gates",
+        "B3-1 RPC response authority ownership focused Debug and ReleaseFast gates",
     );
     const session_host_b3_2_step = b.step(
         "test-session-host-b3-2",
         "B3-2 private destination admission focused Debug and ReleaseFast gates",
+    );
+    const session_host_b3_3_step = b.step(
+        "test-session-host-b3-3",
+        "B3-3 prepared request progress and write focused Debug and ReleaseFast gates",
     );
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -1977,7 +1981,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        .filters = &.{"B3-1 inert RPC authority"},
+        .filters = &.{"B3-1 RPC authority remains leaf-owned"},
     });
     const run_b3_1_boundary_tests = b.addRunArtifact(b3_1_boundary_tests);
     run_b3_1_boundary_tests.addArg("--maru-expect-tests=1");
@@ -1997,6 +2001,19 @@ pub fn build(b: *std.Build) void {
     run_b3_2_boundary_tests.setCwd(b.path("."));
     session_host_b3_2_step.dependOn(&run_b3_2_boundary_tests.step);
     boundary_step.dependOn(&run_b3_2_boundary_tests.step);
+    const b3_3_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_b3_3_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"B3-3 private wrapper"},
+    });
+    const run_b3_3_boundary_tests = b.addRunArtifact(b3_3_boundary_tests);
+    run_b3_3_boundary_tests.addArg("--maru-expect-tests=1");
+    run_b3_3_boundary_tests.setCwd(b.path("."));
+    session_host_b3_3_step.dependOn(&run_b3_3_boundary_tests.step);
+    boundary_step.dependOn(&run_b3_3_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
         const b3_1_leaf_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -2060,6 +2077,55 @@ pub fn build(b: *std.Build) void {
         run_b3_2_product_tests.addArg("--maru-expect-tests=2");
         run_b3_2_product_tests.setCwd(b.path("."));
         session_host_b3_2_step.dependOn(&run_b3_2_product_tests.step);
+
+        const b3_3_client_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3-3"},
+        });
+        const run_b3_3_client_tests = b.addRunArtifact(b3_3_client_tests);
+        run_b3_3_client_tests.addArg("--maru-expect-tests=18");
+        run_b3_3_client_tests.setCwd(b.path("."));
+        session_host_b3_3_step.dependOn(&run_b3_3_client_tests.step);
+
+        const b3_3_registry_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/attachment_cleanup_registry.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"B3-3 registry"},
+        });
+        const run_b3_3_registry_tests = b.addRunArtifact(b3_3_registry_tests);
+        run_b3_3_registry_tests.addArg("--maru-expect-tests=2");
+        run_b3_3_registry_tests.setCwd(b.path("."));
+        session_host_b3_3_step.dependOn(&run_b3_3_registry_tests.step);
+
+        const b3_3_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_slot.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3-3 private product wrapper"},
+        });
+        const run_b3_3_product_tests = b.addRunArtifact(b3_3_product_tests);
+        run_b3_3_product_tests.addArg("--maru-expect-tests=3");
+        run_b3_3_product_tests.setCwd(b.path("."));
+        session_host_b3_3_step.dependOn(&run_b3_3_product_tests.step);
     }
     if (target.result.os.tag == .macos) {
         const ended_purge_orchestration_drift_test = addProjectTest(b, .{

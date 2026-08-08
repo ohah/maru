@@ -66,7 +66,7 @@
   2. **터미널 IME 무회귀**: 웹 래퍼(`MaruWebPanelView`)의 override는 **웹이 포커스일 때만** 동작하고(그 외엔 `false`만 반환) 터미널 뷰의 keyDown/`NSTextInputClient`/`performKeyEquivalent`를 **한 줄도 건드리지 않는다**. local event monitor는 매 keystroke(한글 조합 포함)를 앱 전역에서 가로채는 병렬 경로라 터미널 IME 폭발반경이 크고, 현행 performKeyEquivalent+`anyOverlayOpen` 패턴과도 이질적이라 기각.
   3. **모달 responder 전이**: 웹 포커스 중 모달이 열리면(`anyOverlayOpen` false→true 엣지) `makeFirstResponder(터미널 뷰)`로 전이해 모달 입력·IME preedit가 터미널 `NSTextInputClient`로 흐르고, 닫히면(true→false) 직전 웹뷰로 복원한다. 전이는 **기존** `becomeFirstResponder`(imeFocus true)/`resignFirstResponder`(commitComposition)를 그대로 태운다 — 새 IME 로직 없음. 엣지는 매 tick + 모달 여는 조합 직후 동기로 조정한다(조합 직후 타이핑이 웹뷰로 새지 않게).
   - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
-  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 구현 완료(2026-07-21)** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find(§8)의 포커스 분기는 **후속**. 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
+  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 구현 완료(2026-07-21)** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find는 **§8에 설계가 확정**됐고 아직 미구현이다(라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind` — §8이 그 이유를 적는다). 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
 
 ### 4.1 웹↔터미널 포커스 동기 불변식 (4g — 흩어진 포커스 패치 통합)
 
@@ -204,7 +204,24 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 - **파일 패널(마크다운·HTML 뷰어/편집기)**: 로컬 `.md`/`.html`을 여는 파일 패널 — 파일 탭·헤더 밴드·파일 트리 = GPU chrome, 브리지 `file.read/write`, CodeMirror 6 편집 — 은 [file-panel.md](file-panel.md)를 단일 출처로 둔다(§7 브리지 origin 격리·§4 포커스 불변식과 상호작용). **현행(FP1~FP15)**은 창 레벨 전역 도크 슬롯(우측|하단)이라 워크스페이스 pane 트리 밖이고 §2 destroy 규칙의 비대상이다. **FP16 목표**는 파일을 워크스페이스 Term(`web_panel_kind = .file`)으로 옮기고 도크를 탐색기 전용으로 축소하는 것이며, 그 때 파일 패널은 §2 규칙의 **정상 대상이 되고 대신 그 규칙의 destroy가 hidden 보존으로 바뀐다**(§2 FP16 항목). 웹 브라우저(`browser` kind)는 이 문서 그대로 워크스페이스 term이고, 전환 시 흰 페이지가 되던 문제는 FP16 §4가 함께 해소한다(별도 URL 기억·재로드 백로그는 폐기).
 - **배경 정합**: 신뢰 Markdown 파일 패널의 **초기 paint**는 [file-panel.md](file-panel.md) §1 계약대로 생성 시 공개 API `underPageBackgroundColor`와 hash-pinned critical CSS를 함께 써 기본 흰 backing을 노출하지 않는다. 반면 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 임의 browser/로컬 HTML 본문까지 투명화할지는 여전히 별도 결정이다. 그 경우에도 공개 API `underPageBackgroundColor`(macOS 12+)만 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
-- **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.
+- **⌘F 분기(설계 확정 — 미구현)**: 지금은 **웹/마크다운 탭에서도 ⌘F가 터미널 스크롤백 find를 연다**(우상단 오버레이).
+  `toggleFind`가 활성 서페이스 종류를 보지 않기 때문이고, 그 오버레이는 웹 콘텐츠를 검색하지 못한다(사용자 제보).
+
+  - **라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind`(활성 pane의 web 탭, browser·markdown 모두)다.**
+    ⚠️ `activeWebSurfaceId`가 **아니다** — 그건 browser 전용이라 **마크다운 뷰어 탭에서 0을 돌려주고**, 제보된 그 버그가
+    그대로 남는다(제보는 마크다운 탭이었다). 위 §8의 원래 서술("포커스 기준")을
+    **정정한다** — §7e-4가 ⌘R에서 같은 함정을 이미 겪었다: 브라우저 탭을 활성화해도 webView에 자동 포커스를 주지
+    않으므로 `isWebPanelFocused`로 게이트하면 **"탭 열어 보기만 하면 안 됨"**이 된다(제보로 드러났다). ⌘F도 같다.
+  - **UI는 기존 find 오버레이를 재사용한다.** 새 검색 UI를 만들지 않는다 — 사용자가 아는 입력·⌘G 네비게이션·매치
+    카운트를 그대로 쓰고, **질의를 어디로 보낼지만** 활성 서페이스가 정한다(상태바 브랜치 메뉴가 "이미 있는 표면을
+    재사용"한 것과 같은 규율).
+  - **검색·하이라이트는 WebKit이 한다**(`WKWebView.findString(_:configuration:completionHandler:)`).
+    **페이지에 스크립트를 주입하지 않는다** — 이 문서 §7과 §8의 "markdown/browser에서 bridge 부재" 원칙이
+    JS 기반 검색을 막는다. browser 탭(외부 콘텐츠)은 애초에 브리지가 없어 그 길이 존재하지도 않는다.
+  - **슬라이스**: ① Zig 라우팅(웹 탭이면 터미널 find를 열지 않고 web-find 질의를 pending으로) → ② ABI+Swift 배선
+    (`findString` 호출·결과 카운트 회신) → ③ 오버레이에 웹 매치 수·⌘G 네비 연결.
+  - **범위 밖**: 편집기(CM6) 표면의 find는 [editor-surface.md] Phase 0.5A가 소유한다(CM6 자체 검색). 이 항목은
+    **뷰어(markdown)·browser 탭**만 다룬다.
 - **컨텍스트 메뉴(구현 완료)**: WKWebView 기본 우클릭 메뉴(Inspect Element·**Reload** 포함)는 "chrome는 Zig" 원칙·보안과 충돌하고, 특히 Reload는 편집 중 WebContent를 재시작해 editor recovery latch로 파일 작업을 차단한다 → **신뢰 maru-app 콘텐츠(파일 패널 셸+렌더 iframe)의 셸 entry(`main.ts`)에서 `contextmenu` preventDefault로 억제**한다(브라우저 패널=외부 콘텐츠는 `main.ts`를 로드하지 않아 무영향). 복사·붙여넣기는 메뉴바/⌘ 단축키(§4.2)가 소유한다. maru 자체 메뉴로 대체는 후속.
 - **접근성(AX)**: WKWebView는 네이티브 AX 트리, 터미널·모달(Metal)은 없음 → 혼합 상태. 마크다운 편집기에 AX 필요.
 - **콘텐츠 프로세스 크래시 복구**: `webContentProcessDidTerminate` 시 reload·에러 상태.

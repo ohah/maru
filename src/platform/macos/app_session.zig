@@ -12376,7 +12376,21 @@ pub const AppSession = struct {
             .toggle_settings => self.toggleSettings(),
             .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
-            .toggle_find => self.toggleFind(),
+            // **웹 탭에서는 스크롤백 find를 열지 않는다.** 이 오버레이는 터미널 스크롤백만 검색하므로,
+            // 마크다운 뷰어·browser 탭에서 열리면 우상단에 검색창이 뜨는데 페이지는 검색되지 않는다(사용자 제보).
+            //
+            // 판정은 **포커스가 아니라 활성 pane의 web 탭**이다(`activeWebSurfaceIdAnyKind`) — §7e-4가 ⌘R에서
+            // 같은 함정을 겪었다(포커스로 게이트하면 "탭 열어 보기만 하면 안 됨"). browser 전용
+            // `activeWebSurfaceId`도 아니다 — 마크다운이 빠져 제보된 버그가 그대로 남는다(docs/web-panel.md §8).
+            //
+            // 게이트를 `toggleFind`가 아니라 **여기(사용자 액션 경로)** 에 둔다: 막으려는 것은 "⌘F라는 행위의
+            // 라우팅"이지 토글 원시연산이 아니고, `toggleFind`에 두면 pane 접근이 생겨 경량 세션 테스트가 깨진다.
+            //
+            // 페이지 내 find(WebKit `findString`)는 후속 슬라이스다(docs/web-panel.md §8 ②③).
+            .toggle_find => if (self.activeWebSurfaceIdAnyKind() != 0)
+                self.showNotice("이 탭에서는 페이지 내 찾기가 아직 지원되지 않습니다")
+            else
+                self.toggleFind(),
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비).
             .find_next => self.findNavigate(true),
             .find_previous => self.findNavigate(false),
@@ -30228,6 +30242,16 @@ pub const AppSession = struct {
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
+        // **웹이 활성이면 스크롤백 find는 떠 있을 수 없다**(불변식). ⌘F 게이트는 "여는 순간"만 보는데
+        // 활성 서페이스는 탭 전환·pane 전환·창 전환·탭 닫기로도 바뀐다 — 경로마다 막으면 반드시 새는 문이
+        // 남는다(실측: focusTerm만 막았더니 pane 전환으로 샜다). 렌더 전에 한 번 정리해 그 부류를 통째로 없앤다.
+        // 오버레이가 웹 콘텐츠 위에 남으면 타이핑이 **보이지도 않는** 스크롤백을 검색한다(docs/web-panel.md §8).
+        if (self.chrome_host.find.open and self.activeWebSurfaceIdAnyKind() != 0) {
+            self.chrome_host.find.hide();
+            self.find_matches.clearRetainingCapacity();
+            self.find_nav = false;
+            self.metal_dirty = true;
+        }
         // MARU_FORCE_BRANCH_MENU=1 — 상태바 브랜치 항목을 누른 것처럼 목록을 요청해 헤드리스로 찍는다.
         // **열릴 때까지 재시도한다**: 저장소 판정이 cwd 관측(OSC 7)에 달려 있어 첫 tick에는 아직 없다.
         // 가짜 목록을 심지 않는다 — 실제 `for-each-ref` 결과로 열린다(requestBranchMenu가 연타를 막는다).
@@ -64622,6 +64646,223 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
         }
     }
     try std.testing.expect(found);
+}
+
+// WP-F1 적대적 5R: **불변식이 과잉 차단하면 안 된다.** 매 tick 도는 코드라 두 가지를 확인한다 —
+// ⑴ 웹 탭을 **거쳐 갔다가** 터미널로 돌아오면 다시 열 수 있어야 하고(닫힌 게 영구 상태로 굳으면 안 된다),
+// ⑵ 웹이 활성이 **아닌** 동안에는 매 tick 돌아도 열린 find를 건드리지 않아야 한다(깜빡임·검색어 유실).
+test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌아오면 다시 열린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+
+    // ⑵ 터미널 활성 — 여러 tick을 돌려도 find가 살아 있고 검색어도 남는다.
+    session.dispatchAppAction(.toggle_find);
+    try session.chrome_host.find.input.appendChar(allocator, 'x');
+    _ = try session.tick();
+    _ = try session.tick();
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqualStrings("x", session.chrome_host.find.input.query.items);
+
+    // 웹 탭에 갔다가
+    session.focusTerm(pane.terms.items.len - 1);
+    _ = try session.tick();
+    try std.testing.expect(!session.chrome_host.find.open);
+
+    // ⑴ 터미널로 돌아오면 다시 열린다(영구 차단이 아니다).
+    session.chrome_host.notice.dismiss();
+    session.focusTerm(0);
+    _ = try session.tick();
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+}
+
+// WP-F1 적대적 4R: **탭 전환만 막으면 새는 곳이 남는다.** 활성 서페이스는 pane 전환·탭(창) 전환으로도
+// 바뀐다. `focusTerm` 한 곳만 닫으면 그 경로들로 오버레이가 웹 위에 남는다 — 3라운드와 같은 결함이
+// 다른 문으로 들어오는 것이다. 그래서 **경로마다 막지 않고 tick 불변식으로** 잡는지 확인한다.
+test "WP-F1: pane 전환으로 웹이 활성이 돼도 find가 남지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 두 번째 pane을 만들고 거기에 웹 탭을 둔다.
+    session.dispatchAppAction(.split_vertical);
+    const panes = session.tabs.items[session.app_window.active_tab].panes.items;
+    if (panes.len < 2) return error.SkipZigTest; // split 불가 환경
+    const web_pane = panes[1];
+    const md = try session.createWebTerm(.markdown);
+    try web_pane.terms.append(allocator, md);
+    web_pane.active_term = web_pane.terms.items.len - 1;
+
+    // 첫 pane(터미널)에서 find를 연다.
+    _ = session.focusPaneByPtr(panes[0]);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+
+    // pane을 웹 쪽으로 옮긴다 — 여기서도 닫혀야 한다.
+    _ = session.focusPaneByPtr(web_pane);
+    _ = try session.tick();
+    try std.testing.expect(!session.chrome_host.find.open);
+}
+
+// WP-F1 적대적: **열어 둔 채 웹 탭으로 옮기면?** 게이트는 "여는 순간"만 본다. 터미널에서 find를 연 뒤
+// 웹 탭으로 전환하면 오버레이가 **웹 콘텐츠 위에 뜬 채 남고**, 그 상태로 타이핑하면 보이지도 않는
+// 터미널 스크롤백을 검색한다 — 처음 제보와 같은 혼란이다.
+test "WP-F1: find를 연 채 웹 탭으로 전환하면 오버레이가 남지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open); // 터미널에서 열었다
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1); // 웹 탭으로 전환
+    _ = try session.tick(); // 불변식은 렌더 전에 돈다 — 한 프레임도 웹 위에 그려지지 않는다
+
+    try std.testing.expect(!session.chrome_host.find.open);
+}
+
+// WP-F1 적대적: **게이트가 종류를 빠뜨리거나 남의 탭을 보면 안 된다.** 판정이 `activeWebSurfaceIdAnyKind`라
+// browser도 막혀야 하고(제보는 마크다운이었지만 같은 문제다), **웹 탭이 열려 있어도 활성이 터미널이면**
+// 평소처럼 열려야 한다 — 후자를 놓치면 "웹 탭 하나 열어 두면 터미널에서 ⌘F가 죽는" 더 나쁜 회귀가 된다.
+test "WP-F1: browser 탭도 막고, 활성이 터미널이면 웹 탭이 있어도 연다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const br = try session.createWebTerm(.browser);
+    try pane.terms.append(allocator, br);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(!session.chrome_host.find.open); // browser도 막힌다
+
+    // 웹 탭은 그대로 두고 활성만 터미널(0번)로 되돌린다.
+    session.chrome_host.notice.dismiss();
+    session.focusTerm(0);
+    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceIdAnyKind()); // 전제
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open); // 터미널에서는 평소대로 열린다
+}
+
+// WP-F1 적대적: **⌘G(find_next)는 게이트가 없다.** ⌘F만 막고 ⌘G를 두면, 터미널에서 검색어를 남긴 뒤
+// 웹 탭으로 옮겨 ⌘G를 누르는 경로가 남는다 — 그때 `findNavigate`가 **웹 term의 core**를 검색한다.
+// 잘못된 UI를 열지는 않지만(무동작), 그 경로가 안전한지(크래시·엉뚱한 스크롤 없음)는 밟아 봐야 안다.
+test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 터미널에서 검색어를 남긴다(⌘G가 보존 검색어로 재검색하는 경로).
+    session.dispatchAppAction(.toggle_find);
+    try session.chrome_host.find.input.appendChar(allocator, 'a');
+    session.dispatchAppAction(.toggle_find); // 닫아도 검색어는 남는다
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    // 크래시하지 않고, find 오버레이가 열리지도 않는다.
+    session.dispatchAppAction(.find_next);
+    session.dispatchAppAction(.find_previous);
+    try std.testing.expect(!session.chrome_host.find.open);
+}
+
+// WP-F1: **웹 탭에서 ⌘F가 스크롤백 find를 열면 안 된다.** 그 오버레이는 터미널 스크롤백만 검색하므로,
+// 마크다운 뷰어에서 열리면 우상단에 검색창이 뜨는데 페이지는 검색되지 않는다(사용자 제보).
+// 판정 기준이 `activeWebSurfaceIdAnyKind`인 것이 핵심이다 — browser 전용 함수를 쓰면 **마크다운이 빠져**
+// 제보된 그 버그가 그대로 남는다(docs/web-panel.md §8).
+test "WP-F1: 마크다운 웹 탭에서 ⌘F는 스크롤백 find를 열지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 터미널 탭에서는 그대로 열린다(회귀 방지 — 이 수정이 기존 동작을 깨면 안 된다).
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(!session.chrome_host.find.open);
+
+    // 마크다운 웹 탭으로 옮기면 열리지 않고 안내가 뜬다.
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+    try std.testing.expect(session.activeWebSurfaceIdAnyKind() != 0); // 전제
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(!session.chrome_host.find.open);
+    try std.testing.expect(session.chrome_host.notice.open); // 조용히 무시하지 않는다
 }
 
 // SB1: **요청 중에 상태바가 사라지면 메뉴를 띄우면 안 된다.** 목록 읽기는 비동기라, 그 사이 사용자가

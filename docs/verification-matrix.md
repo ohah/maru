@@ -1082,8 +1082,45 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   registry operation이 이미 가진 single shared pin은 `shared(1)→execution→shared(1)` CAS 승격·강등으로 node pin을 잃지 않는다.
   B3-4/5는 published payload의 생성·정리 경로를 같은 merge gate로 여는 production-type+source oracle,
   B3-6은 production strict-wrapper subprocess까지 증거 수준을
-  높인다. B3-4/5는 `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift, decoder raw-slice exact allowlist를
-  추가로 닫는다. B3-0a·B3-0·B3-1·B3-2·B3-3은 완료됐고 B3-4/5는 후속이다. 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. B3-1은
+  높인다. B3-4/5는 기존 response loop의 response-only 추출, 별도 `rpc_executed_response.zig` byte owner, registry-owned facade와
+  `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift를 추가로 닫는다. raw bytes는 owner 파일 내부
+  `builtin.is_test` helper exact 1곳에서만 읽고 production raw-byte bridge/family decoder caller는 0이며 실제 cross-module decoder allowlist와
+  default protocol-failure guard/error·early-return integrated finish는 2c3e가 소유한다. B3-4/5 product-shaped test는 begin-borrow/finish를
+  fresh operation 아래 명시적으로 호출한다. 별도 borrow txn type은 0이고 성공 뒤 borrow lifetime은 `RpcResponseBorrow` receipt 하나다.
+  ledger→RPC owner만 import하고 owner의 ledger module/type import는 0이며 owner-local neutral
+  `AllocationProvenance` scalar로 receipt를 동결한다.
+  response-only primitive와 제품 caller는 `.blocking` exact 1 mode만 허용하고 deadline/clock 인자와 무응답 stall fixture는 0이다. socketpair
+  peer는 bounded response 또는 EOF를 반드시 발생시키며 deadline SSOT는 2c3e 전에는 열지 않는다.
+  완료 증거는 Debug·ReleaseFast exact-count leaf/registry/product/boundary, actual socketpair fragmented response·OOB-before-response·wrong
+  kind/id·EOF/truncation, control cap `1/cap/cap+1`·empty와 allocation fail-index, full alias closed set, publish preflight mutation 0,
+  accepted owner→borrow→finish reusable 2/64회, copy/move/cross-binding/same-address ABA, finish callback reentry Busy, safe-free/no-free와
+  freed-once drift, `ledger promote→publication preflight+publish permit→ledger-owned RPC transfer(owner seal+entry transferred)→no-fail permit
+  consume/authority publish→request
+  settle→ledger end→lease release` 및
+  정상 경로의
+  `finish preflight+txn capture+prepareReleasing permit→owner free_committed→commitReleasingNoFail→node free_call_committed→free→prepareFinish
+  permit→terminal_clean→commit idle|terminal→evidence
+  empty retire(exact epoch)→operation release`와 drift 경로의
+  `...→terminal_freed_once→authority terminal/fail-stop`(evidence retire 0) source order다. raw authority pointer escape, 기존 attach owner
+  변경, production family decoder caller, public generation RPC callsite와 정상 observable product behavior는 모두 0이어야 한다.
+  allocation callback/ledger promote 뒤 owner write 전에는 frozen receipt·destination·txn/lease/fence·registry/binding/canonical·authority·
+  Client parser/allocator/fd/poison의 exact revalidation을 별도 gate로 고정한다. byte owner의
+  `free_committed|terminal_clean|terminal_no_free`와 node/finish-txn의 `terminal_freed_once`는 pointer/allocator zero와 서로 다른
+  one-way evidence digest를 직접 검증한다. source order는
+  `finish preflight+txn capture+prepareReleasing permit→owner free_committed(pointer zero)→commitReleasingNoFail→node free_call_committed(epoch)→allocator
+  callback→prepareFinish permit→owner terminal_clean→commit idle|terminal no-fail→evidence empty retire(exact epoch)→operation release` 또는 callback drift의
+  `owner write 0+node/txn terminal_freed_once→authority terminal/fail-stop`이다. begin-borrow preflight는 payload와 그 scope의 fresh
+  operation/borrow permit/output receipt storage를 검사하고, finish preflight는 현재 borrow receipt, fresh finish txn, releasing/finish permit과
+  operation storage의 exact/partial alias를 전수한다. 종료된 begin-borrow stack 주소의 저장·재검사는 0이며 실패는 capability copy 0·free 0 terminal-no-free다.
+  destination까지 invalid한 no-free는 owner write 0, node record `empty`, authority terminal+connection poison으로 닫는다. node
+  `RpcFreeEvidenceRecord`는 정상 callback과 authority commit 뒤 operation release 전 exact epoch로 `empty` retire하며 64회 모두 empty를
+  재확인하고 stale epoch retire/replay는 mutation 0이다. fail-stop `terminal_freed_once`는 clear/reuse하지 않는다. no-free와 freed-once replay 모두 second free
+  0이어야 한다. publication execution txn의 수명은 ledger/lease 정산에서 끝나며 borrow/finish가 이를 재사용하는 callsite는 0이다. RPC
+  transfer 뒤 owner/finish의 ledger 역참조는 0이고 frozen receipt
+  scalar만 남으며, 기존 attach `transferPromotedResponse`의 signature·결과·free count 변화 0을 differential test로 고정한다. authority의
+  named prepare/no-fail consume permit은 final-address·copy/move/replay·wrong-phase를 전수하고 registry 밖 callsite 0을 source oracle로
+  고정한다. destination/payload 검증 실패의 4-cell matrix는 destination-invalid owner write 0과 payload-exact safe-free를 독립 단언한다.
+  B3-0a·B3-0·B3-1·B3-2·B3-3은 완료됐고 B3-4/5는 후속이다. B3-1은
   Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. B3-2는 Debug·ReleaseFast
   registry 3개와 product 2개, boundary 1개의 exact 11-test artifact를 완료 증거로 소유한다. 모든 내부 gate가
   Debug·ReleaseFast와 boundary에서 함께 green이 되기 전 `2c3b-3 완료`로 세지 않는다.

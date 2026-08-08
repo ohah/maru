@@ -1219,7 +1219,39 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       함께 봉인하며 same-address reincarnation은 새 fence를 release하지 않고 fail-closed한다.
    6. **B3-4/5 원자적 publication+borrow/finish:** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
       stack-final response publish, exact safe-free/ambiguous no-free,
-      `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다.
+      `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다. `client.zig`는 기존 response
+      loop를 request 재전송·request-id 증가 없는 `readPreparedResponseUnderExecutionLease`로 추출하고, 새
+      `rpc_executed_response.zig`가 반복 RPC byte owner/borrow receipt를 소유한다. 기존 attach `executed_response.zig`와 owner seal은
+      변경하지 않는다. response primitive는 B3-3과 동일한 `.blocking` only이고 새 deadline/clock SSOT는 0이다. socketpair fixture는
+      bounded peer response/EOF로 종료하며 deadline mode는 2c3e가 결정한다. authority protocol lifecycle과 byte owner lifecycle은 분리된
+      SSOT이며 registry raw authority pointer escape는 0,
+      `client_slot.zig`만 product orchestration을 소유하되 `PreparedRpcExecutionTxn`은 publication/정산까지만 소유한다. borrow begin은
+      fresh-operation preflight/permit 뒤 종료되고 lifetime은 `RpcResponseBorrow` receipt만 소유하며, final-address
+      `RpcResponseFinishTxn`은 finish만 소유한다. 기존 payload ledger의 새
+      `transferPromotedRpcResponse`가 publication preflight 뒤 owner를
+      in-place seal하면서 promoted entry를 atomically `transferred_response`로 소비하고, 그 다음 authority의 final-address
+      `PreparedRpcTransitionPermit`을 `commitPublishedNoFail`로 exact once 소비한다. authority는 named prepare/no-fail consume 쌍만
+      module-public으로 열고 registry 외 callsite와 raw pointer escape는 0이다.
+      import는 `response_payload_allocation -> rpc_executed_response` 단방향이고 owner는 ledger type 대신 owner-local neutral
+      `AllocationProvenance` scalar만 받는다.
+      attach `transferPromotedResponse` 의미 변화 0을 differential gate로 고정한다. publish 후 request/backing 정산, ledger operation end,
+      마지막 lease release를 고정하고 borrow/finish는 fresh registered operation pin을 callback suffix까지 유지한다. raw bytes는 owner 파일
+      내부 `builtin.is_test` lexical helper 1곳에만 노출하고 production raw-byte bridge와 family decoder callsite는 0이다. 실제 cross-module
+      decoder API와 default protocol-failure cleanup guard/error·early-return integrated finish는 2c3e doc-first가 소유한다. B3-4/5
+      product-shaped test는 begin-borrow/finish를 fresh operation 아래 명시적으로 호출한다. 기존 payload ledger를 재사용하며 1..control cap,
+      empty/cap+1/OOM/truncation, 전체 owner-range alias, pre-free terminal-no-free와 `free_committed→terminal_clean|node/txn
+      terminal_freed_once` callback drift를 전수한다. begin-borrow는 현재 operation/borrow permit/output receipt, finish는 현재 borrow receipt와
+      fresh finish txn/operation/releasing·finish permit 각각에 대해 payload disjoint를 검사하며 종료된 begin stack 주소는 저장·재검사하지
+      않는다. finish는 `prepareReleasing→owner free_committed→commitReleasingNoFail` 순서를 지킨다. node-local
+      `RpcFreeEvidenceRecord{empty|free_call_committed|terminal_freed_once,response_epoch,digest}`는 정상 callback/authority commit 뒤 operation
+      release 전에 exact epoch로 empty retire하고 fail-stop evidence는 재사용하지 않는다. private strict
+      wrapper는 byte-owner tombstone/free를 먼저 끝내고 authority terminal을 게시한 뒤 fail-stop outcome을 즉시 소비한다. B3-4/5는
+      terminal-before-return source oracle과 private noreturn sink까지만 소유하며 public production callsite·isolated subprocess는 B3-6이
+      소유한다. Debug·ReleaseFast exact-count leaf/registry/product/
+      boundary, actual socketpair fragmented response·OOB-before-response·wrong kind/id·EOF, allocation fail-index, publish/transition permit
+      preflight mutation 0·copy/move/replay 거부,
+      reusable 2/64회와 매회 evidence empty retire, stale epoch retire/replay mutation 0, copy/move/cross-binding/same-address ABA, callback
+      reentry Busy와 두 선형화 순서 source oracle이 merge gate다.
    7. **B3-6 aggregate exposure:** exact public destination/signature를 열고 B3-0a의 attach-only
       `client_slot.executeGenerationRequest` strict wrapper를 RPC
       destination까지 확장한다. component의 `fail_stop_required`를 절대 반환하지 않고 즉시 종료하는 subprocess/source oracle까지

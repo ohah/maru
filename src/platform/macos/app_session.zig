@@ -21842,9 +21842,15 @@ pub const AppSession = struct {
         self.sidebar_width_pt = new_parsed.config.sidebar.width_pt;
         // appearance 통째 교체 — 옛 family를 더는 안 읽는다. 줌 보존(GUI 토글과 일치 — code-review high #2)은
         // 옛 appearance.font.size·base_font_size(둘 다 스칼라 f32)만 읽으므로 옛 arena family slice를 deref하지 않아 UAF 없음.
-        self.applyAppearancePreservingZoom(new_appearance);
-        self.loaded_config.deinit(); // 이제 옛 loaded_config(arena)를 버려도 안전
+        // **새 config를 먼저 세운다.** `applyAppearancePreservingZoom`이 타는 메트릭 파이프라인은 pane/PTY
+        // 크기를 다시 재는데, 그 계산이 `gridPadding` → `statusBarHeightPx` → `loaded_config`를 읽는다.
+        // 교체가 뒤에 오면 **옛 값으로 재고 새 값으로 그리게** 되어, 예컨대 `status-bar.show`를 끈 reload에서
+        // 바는 사라졌는데 셸은 늘어난 행을 못 받는다(실측 36행이어야 할 것이 35행). 옛 arena는 appearance를
+        // 통째로 바꾼 뒤에 버려야 UAF가 없으므로 deinit만 마지막에 남긴다.
+        var old_loaded = self.loaded_config;
         self.loaded_config = new_parsed;
+        self.applyAppearancePreservingZoom(new_appearance);
+        old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
         setAppKeepAlivePolicy(self.loaded_config.config.session.keep_alive_after_quit);
         // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
         // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
@@ -63504,6 +63510,49 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
     const pad = layout_math.ptToPx(status_bar_item_pad_pt, session.scale_milli);
     const published_w: u32 = @as(u32, @intFromFloat(entry.rect.width)) -| (2 * pad);
     try std.testing.expect(published_w < plain_w);
+}
+
+// SB1: **reload로 껐을 때 pane까지 새 높이로 다시 재야 한다.** `statusBarHeightPx`를 읽는 것은 그리기만이
+// 아니다 — `gridPadding`을 타고 pane/PTY 크기 계산에도 들어간다. 그래서 reload가 pane을 **옛 config로 재고**
+// 새 config로 그리면, 바는 사라졌는데 셸은 늘어난 행을 못 받는다(빈 띠가 남는 것과 같은 부류의 반쪽 적용).
+test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다시 잰다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "status-bar.show = false\n" });
+    var cfg_path_buf: [256]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrintZ(&cfg_path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    const bar_on = session.statusBarHeightPx();
+    try std.testing.expect(bar_on > 0); // 전제: 기본은 켜짐
+    const pad_on = session.gridPadding().bottom;
+
+    _ = setenv("MARU_CONFIG", cfg_path.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    session.reloadConfig();
+    _ = try session.tick();
+
+    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 껐다
+    // pane 재측정이 **새** 값을 썼는지: bottom padding이 바 높이만큼 줄었어야 한다.
+    try std.testing.expectEqual(pad_on - bar_on, session.gridPadding().bottom);
+    // 그리고 grid도 그만큼 늘었다(셸이 실제로 행을 받는다).
+    const grid = layout_math.gridFromBacking(session.backing_width_px, session.backing_height_px, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.gridPadding());
+    try std.testing.expectEqual(grid.rows, session.last_resize_size.?.rows);
 }
 
 // SB1: **끄면 바가 사라지고 먹었던 높이가 되돌아온다.** 바는 창 높이를 실제로 깎으므로(§1), 끄는 것이

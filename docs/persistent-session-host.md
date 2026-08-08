@@ -1318,8 +1318,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `B3Observed` 전체를 표와 비교한다. issuer 4-case fixture와 두 행은 중립 `b3_issuer_oracle`을 공유하고 실제 socket의 wire byte 0,
    payload 미관측, cleanup·operation receipt·allocator final-zero를 고정한다. response-alias child는 exact request peer 뒤 제품 상태에서
    낸 transcript를 표에서 생성한 문자열과 비교한다. 여섯 strict child는 canonical backing exact free 1, noncanonical backing free 0,
-   response payload free 0 marker를 각각 검사하고 cleanup 5개는 terminal marker가 panic보다 앞선다. 따라서 B3-0.4와 B3-0은
-   완료이며 다음 merge gate는 B3-1이다.
+   response payload free 0 marker를 각각 검사하고 cleanup 5개는 terminal marker가 panic보다 앞선다. 이 증거가 B3-0.4와
+   B3-0 계약을 고정한다.
 
    B3-0a의 파괴적 strict fail-stop subprocess는 전체 test binary를 재실행하지 않는다. compile filter
    `CR3a-2c3b response allocation alias`를 가진 전용 artifact만 parent/child fixture와 process-local completion sentinel을
@@ -1365,6 +1365,36 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `RpcResponseAuthority.lifecycle`은 raw tag를 먼저 검사하는 `idle|executing|published|borrowed|releasing|terminal`이다. `terminal`만 absorbing이고,
    `idle`에서만 checked-monotonic nonzero epoch를 발급해 transport당 blocking RPC를 정확히 하나만 in-flight로 둔다. epoch 소진은
    response authority terminal+connection poison으로 닫고 attachment transport 자체를 teardown 순서 밖에서 임의 terminalize하지 않는다.
+   B3-1은 이 계약 중 node-local leaf와 registry 소유권만 먼저 연다. cleanup registry가 binding entry를 reserve한 no-fail suffix에서
+   `rpc_response_authority`를 그 field의 final address와 exact binding identity로 초기화하고, entry clear 뒤에는 pristine zero로 되돌린다.
+   leaf가 발급하는 pointer-free receipt는
+   `{authority address,registry incarnation,binding identity,transport address/incarnation,request family/tag,id,digest,response epoch,destination address}`를
+   모두 봉인한다. copy/move, 같은 entry 주소의 새 reservation, 다른 live binding/transport/request/destination과의 splice는 raw lifecycle
+   검사 뒤 typed reject하며 epoch나 lifecycle을 바꾸지 않는다. epoch 0은 발급하지 않고 max 소진은 authority를 terminal-settled로
+   봉인한다. B3-1의 lifecycle 전이는 leaf/production-type test에서만 호출하며 Client·socket·allocator·payload·decoder·reconnect 제품
+   callsite는 0이다. B3-2가 destination admission을, B3-3이 실제 reserve/progress/execute callsite를, B3-4/5가 payload
+   publication·borrow·finish를 연다.
+   authority-owned `next_epoch`만 epoch를 발급하며 caller가 epoch를 주입하지 않는다. initialized idle seal은
+   `{self_addr,exact binding,next_epoch}`만 소유하고 per-call transport/request/destination scalar는 reusable idle 복귀 때 모두 지운다.
+   B3-1의 module-public named 전이는 `reserveExecuting(idle->executing)`, `rollbackExecuting(executing->idle)`,
+   `settleExecutingTerminal(executing->terminal)`뿐이다. leaf test-private 전이로
+   `publish(executing->published)`, `borrow(published->borrowed)`, `beginRelease(borrowed->releasing)`,
+   `finishReusable(releasing->idle)`의 readiness 규율만 고정하며 B3-4/5 payload owner capability 전에는 제품 caller가 접근할 수 없다.
+   각 전이는 registry가 제공한 current binding과 exact receipt가 아니면
+   `InvalidCanonical`, 잘못된 phase/terminal이면 `InvalidState`, final-address copy/move면 `MovedOrCopied`로 mutation 0 거부한다.
+   epoch max는 새 receipt를 발급하지 않고 coherent terminal로 흡수되며 B3-1에는 Client callsite가 없으므로 connection poison side
+   effect도 아직 없다. B3-3 wrapper가 그 terminal 결과를 connection poison과 결합한다.
+   같은 final address에 과거 authority 전체 바이트를 복원하면 leaf의 과거 seal만으로 현재 lifetime을 알 수 없으므로, registry clear와
+   이후 wrapper는 반드시 entry의 현재 exact binding identity를 authority binding과 다시 비교한다. registry incarnation과 단조
+   reservation ID가 이 외부 freshness anchor이며 둘 다 authority seal과 receipt에 들어간다. 이 비교 없는 leaf seal만으로
+   same-address ABA 방지를 주장하지 않는다.
+   구체적으로 registry의 현재 `incarnation`, Entry의 현재 `reservation_id`, authority가 봉인한 registry/binding incarnation이 먼저
+   같아야 하며, 그 뒤 caller의 exact binding 전 필드를 비교한다. stale authority와 stale caller identity를 현재 Reservation에 함께
+   splice하거나 같은 registry 주소를 새 incarnation으로 초기화해 reservation ID 1을 재발급해도 첫 비교에서 거부한다.
+   기존 Entry의 exact identity 저장소는 authority binding 하나로 통합하고 active transcript는 binding을 중복 저장하지 않는다.
+   `@sizeOf(Authority)<=256`, 4,096-entry registry의 기존 Entry 대비 증가량 `<=512 KiB`를 제품 타입 gate로 고정한다.
+   B3-1 leaf는 canonical RPC identity가 될 수 없는 attach/connection-only family와 tag-family 불일치를 구조적으로 거부한다. 이는
+   role·binding phase·stream·destination 권한을 결정하는 B3-2 admission classifier가 아니라, authority 내부 표현의 closed invariant다.
    request tag는 `attach_only|bound_observation|bound_controller_mutation|bound_terminal` family로 exhaustive 분류한다. execute는
    destination뿐 아니라 canonical binding phase, nonzero bound stream, controller/observer authority와 terminal state를 pre-flush와
    post-flush에 모두 검사한다. `attach_only`는 unbound prepared attachment+attach destination만, observation family는 committed controller/
@@ -1445,6 +1475,18 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    fail-close graph로 수렴한다. `GenerationAttachment.response`와 registry `responseOwnerSeal`은 attach-only exact caller allowlist로
    고정하고 반복 RPC module의 cleanup-registry import/call은 0이다. 이 구조는 현재 `PreparedBlockingRpcStorage`의 단일 in-flight
    제약과 일치하며 fixed response pool이나 terminal seal reset을 도입하지 않는다.
+
+   B3-1 teardown 분류는 이후 payload API 없이도 같은 상태 규율을 먼저 고정한다. coherent `idle`과 payload owner가 없는
+   `terminal-settled`만 entry clear가 가능하고, coherent `executing|published|borrowed|releasing`은 `Busy`, raw tag·seal·binding·final
+   address가 어긋난 상태는 `corrupt`다. `published|borrowed|releasing`을 B3-1에서 제품이 만들지는 않지만 raw 상태 전수 fixture가
+   teardown의 fail-closed 분류를 고정한다. terminal은 재활성화되지 않으며 새 binding은 registry reservation ABA identity를 가진 새
+   final-address authority로만 시작한다.
+   B3-1에서 authority는 payload pointer/allocator를 전혀 저장하지 않으므로 coherent `terminal` 자체가
+   `terminal-settled`의 정확한 표현이다. B3-4/5에서도 payload owner를 먼저 tombstone/free한 뒤에만 authority를 terminal로 만드는
+   wrapper 순서를 강제하며 authority에 별도 payload-settled bit를 중복 저장하지 않는다. registry `reserve`만 entry field assignment 뒤
+   final address에서 authority를 초기화하고, `abort|completeActiveDrop`은 authority readiness가 `settled`일 때만 clear하며 active는 기존
+   `InvalidState`로 mutation 0 거부한다. invalid raw/seal/final-address 상태도 `InvalidState`로 보존하여 strict caller가 corrupt로
+   수렴시킨다. `preflightDeinit`은 empty entry의 authority가 pristine zero인지까지 검사한다.
 
    valid accepted response면 `PreparedAttachmentBinding.commit(stream_id,response_request_id,lease_out)`이 exact prepared identity와
    response를 검증하고 reserved pin을 pristine `ConnectionLease` storage로 allocation 0·pin-count 변화 0으로 이전한다. attachment

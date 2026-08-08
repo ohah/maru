@@ -1959,6 +1959,58 @@ pub fn build(b: *std.Build) void {
         "test-session-host-b3-0-4",
         "B3-0.4 attach execution transaction focused Debug and ReleaseFast gates",
     );
+    const b3_debug_release_modes = .{
+        std.builtin.OptimizeMode.Debug,
+        std.builtin.OptimizeMode.ReleaseFast,
+    };
+    const session_host_b3_1_step = b.step(
+        "test-session-host-b3-1",
+        "B3-1 inert RPC response authority focused Debug and ReleaseFast gates",
+    );
+    const b3_1_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"B3-1 inert RPC authority"},
+    });
+    const run_b3_1_boundary_tests = b.addRunArtifact(b3_1_boundary_tests);
+    run_b3_1_boundary_tests.addArg("--maru-expect-tests=1");
+    run_b3_1_boundary_tests.setCwd(b.path("."));
+    session_host_b3_1_step.dependOn(&run_b3_1_boundary_tests.step);
+    boundary_step.dependOn(&run_b3_1_boundary_tests.step);
+    inline for (b3_debug_release_modes) |b3_optimize| {
+        const b3_1_leaf_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/rpc_response_authority.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"B3-1 RPC response authority"},
+        });
+        const run_b3_1_leaf_tests = b.addRunArtifact(b3_1_leaf_tests);
+        run_b3_1_leaf_tests.addArg("--maru-expect-tests=4");
+        run_b3_1_leaf_tests.setCwd(b.path("."));
+
+        const b3_1_registry_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/attachment_cleanup_registry.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"B3-1 registry"},
+        });
+        const run_b3_1_registry_tests = b.addRunArtifact(b3_1_registry_tests);
+        run_b3_1_registry_tests.addArg("--maru-expect-tests=2");
+        run_b3_1_registry_tests.setCwd(b.path("."));
+        session_host_b3_1_step.dependOn(&run_b3_1_leaf_tests.step);
+        session_host_b3_1_step.dependOn(&run_b3_1_registry_tests.step);
+    }
     if (target.result.os.tag == .macos) {
         const ended_purge_orchestration_drift_test = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -2022,10 +2074,7 @@ pub fn build(b: *std.Build) void {
 
         // B3-0.4 is a Darwin product-path gate. Compile the exact same non-empty test inventory
         // in both safety modes so a caller's top-level optimize flag cannot silently omit one.
-        inline for (.{
-            std.builtin.OptimizeMode.Debug,
-            std.builtin.OptimizeMode.ReleaseFast,
-        }) |b3_optimize| {
+        inline for (b3_debug_release_modes) |b3_optimize| {
             const b3_strict_cleanup_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path(

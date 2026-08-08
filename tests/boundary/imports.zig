@@ -1994,7 +1994,7 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(source);
-    try std.testing.expectEqual(@as(usize, 3), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 4), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -2003,6 +2003,10 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(source, "@import(\"prepared_request_authority.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"rpc_response_authority.zig\")"),
     );
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",

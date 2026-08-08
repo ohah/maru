@@ -8,6 +8,7 @@
 const std = @import("std");
 const contract = @import("generation_attachment_contract.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
+const rpc_response_authority = @import("rpc_response_authority.zig");
 
 pub const max_entries: usize = 4096;
 
@@ -99,12 +100,12 @@ pub const Reserved = struct {
 const Entry = struct {
     lifecycle: EntryLifecycle = .empty,
     reservation_id: u64 = 0,
-    identity: ?contract.BindingIdentity = null,
     stream_id: u64 = 0,
     controller_authority: ControllerAuthority = .unavailable,
     transport_owner: contract.TransportOwnerSeal = .{},
     response_owner: contract.ExecutedResponseOwnerSeal = .{},
     prepared_request: prepared_request_authority.Authority = .{},
+    rpc_response_authority: rpc_response_authority.Authority = .{},
 
     fn clear(self: *Entry) void {
         self.* = .{};
@@ -195,8 +196,8 @@ pub const AttachmentCleanupRegistry = struct {
         self.entries[index] = .{
             .lifecycle = .reserved,
             .reservation_id = reservation_id,
-            .identity = identity,
         };
+        self.entries[index].rpc_response_authority.initInPlace(self.incarnation, identity) catch unreachable;
         self.live_count += 1;
         return .{
             .reservation = .{
@@ -223,7 +224,8 @@ pub const AttachmentCleanupRegistry = struct {
         if (entry.lifecycle == .empty or
             entry.reservation_id != reservation.reservation_id)
             return error.InvalidReservation;
-        const canonical = entry.identity orelse return error.InvalidState;
+        const canonical = currentEntryBinding(entry, self.incarnation) orelse
+            return error.InvalidState;
         if (!canonical.matches(identity)) return error.InvalidIdentity;
         return entry;
     }
@@ -418,7 +420,7 @@ pub const AttachmentCleanupRegistry = struct {
             return error.InvalidState;
         // Clearing the canonical entry while either child authority is live would make a stale
         // parent appear harmless while leaving the actual transport/response owner unretired.
-        if (!childAuthoritiesSettled(entry))
+        if (!childAuthoritiesSettled(entry, self.incarnation))
             return error.InvalidState;
         if (self.live_count == 0) return error.InvalidState;
         entry.clear();
@@ -506,7 +508,7 @@ pub const AttachmentCleanupRegistry = struct {
         if (stream_id == 0) return error.InvalidStream;
         const entry = try self.exactEntry(reservation, identity);
         if (entry.lifecycle != .bound or entry.stream_id != stream_id or
-            self.live_count == 0 or !dropAuthorityCanBegin(entry))
+            self.live_count == 0 or !dropAuthorityCanBegin(entry, self.incarnation))
             return error.InvalidState;
     }
 
@@ -535,7 +537,8 @@ pub const AttachmentCleanupRegistry = struct {
         // Pristine means this neutral registry entry never minted that optional authority;
         // terminal means it was minted and explicitly fenced. Only live is forbidden to erase.
         if (entry.lifecycle != .drop_active or entry.stream_id != stream_id or
-            !dropAuthoritySettled(entry) or !childAuthoritiesSettled(entry) or
+            !dropAuthoritySettled(entry, self.incarnation) or
+            !childAuthoritiesSettled(entry, self.incarnation) or
             self.live_count == 0)
             return error.InvalidState;
         entry.clear();
@@ -553,10 +556,10 @@ pub const AttachmentCleanupRegistry = struct {
             if (!entryLifecycleRawValid(&entry.lifecycle) or
                 !controllerAuthorityRawValid(&entry.controller_authority) or
                 entry.lifecycle != .empty or entry.reservation_id != 0 or
-                entry.identity != null or entry.stream_id != 0 or
-                entry.controller_authority != .unavailable or
+                entry.stream_id != 0 or entry.controller_authority != .unavailable or
                 entry.transport_owner.lifecycle != .pristine or
-                entry.response_owner.lifecycle != .pristine)
+                entry.response_owner.lifecycle != .pristine or
+                !entry.rpc_response_authority.pristineExact())
                 return .corrupt;
         }
         return .cleaned;
@@ -569,14 +572,16 @@ pub const AttachmentCleanupRegistry = struct {
     }
 };
 
-fn childAuthoritiesSettled(entry: *const Entry) bool {
+fn childAuthoritiesSettled(entry: *const Entry, registry_incarnation: u64) bool {
+    const identity = currentEntryBinding(entry, registry_incarnation) orelse return false;
     return entry.transport_owner.settledExact() and entry.response_owner.settledExact() and
-        entry.prepared_request.settledExact();
+        entry.prepared_request.settledExact() and
+        entry.rpc_response_authority.settledExactFor(registry_incarnation, identity);
 }
 
-fn dropAuthorityCanBegin(entry: *const Entry) bool {
+fn dropAuthorityCanBegin(entry: *const Entry, registry_incarnation: u64) bool {
     if (!controllerAuthorityRawValid(&entry.controller_authority)) return false;
-    const identity = entry.identity orelse return false;
+    const identity = currentEntryBinding(entry, registry_incarnation) orelse return false;
     if (!contract.attachmentRoleRawValid(&identity.role)) return false;
     return switch (identity.role) {
         .controller => entry.controller_authority == .live or
@@ -585,14 +590,25 @@ fn dropAuthorityCanBegin(entry: *const Entry) bool {
     };
 }
 
-fn dropAuthoritySettled(entry: *const Entry) bool {
+fn dropAuthoritySettled(entry: *const Entry, registry_incarnation: u64) bool {
     if (!controllerAuthorityRawValid(&entry.controller_authority)) return false;
-    const identity = entry.identity orelse return false;
+    const identity = currentEntryBinding(entry, registry_incarnation) orelse return false;
     if (!contract.attachmentRoleRawValid(&identity.role)) return false;
     return switch (identity.role) {
         .controller => entry.controller_authority == .revoked,
         .observer => entry.controller_authority == .unavailable,
     };
+}
+
+fn currentEntryBinding(
+    entry: *const Entry,
+    registry_incarnation: u64,
+) ?contract.BindingIdentity {
+    if (registry_incarnation == 0 or entry.reservation_id == 0) return null;
+    const identity = entry.rpc_response_authority.bindingExactForRegistry(
+        registry_incarnation,
+    ) orelse return null;
+    return if (identity.binding_reservation_id == entry.reservation_id) identity else null;
 }
 
 fn fixtureSeed(destination_addr: usize, binding_incarnation: u64) ReserveIdentity {
@@ -663,6 +679,183 @@ test "stream-drop registry reserves, aborts, binds, and gates final-zero deinit"
     );
     try std.testing.expectEqual(@as(usize, 0), try registry.count());
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "B3-1 registry owns final-address RPC authority init settle and zero clear" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB301);
+    const first = try registry.reserve(fixtureSeed(0xB302, 0xB303));
+    const first_entry = &registry.entries[first.reservation.entry_index];
+    try std.testing.expectEqual(
+        @intFromPtr(&first_entry.rpc_response_authority),
+        first_entry.rpc_response_authority.self_addr,
+    );
+    try std.testing.expect(first_entry.rpc_response_authority.binding.matches(first.identity));
+    try std.testing.expectEqual(
+        rpc_response_authority.SettlementReadiness.settled,
+        first_entry.rpc_response_authority.settlementReadiness(),
+    );
+
+    const input: rpc_response_authority.ReserveInput = .{
+        .registry_incarnation = registry.incarnation,
+        .binding = first.identity,
+        .transport_addr = 0xB304,
+        .transport_incarnation = 0xB305,
+        .family = .bound_observation,
+        .tag = .observation,
+        .request_id = 0xB306,
+        .request_digest = 0xB307,
+        .destination_addr = 0xB308,
+    };
+    const active = try first_entry.rpc_response_authority.reserveExecuting(input);
+    const stale_active_authority = first_entry.rpc_response_authority;
+    try std.testing.expectError(error.InvalidState, registry.abort(first.reservation, first.identity));
+    try std.testing.expect(first_entry.rpc_response_authority.matches(
+        active,
+        .executing,
+        registry.incarnation,
+        first.identity,
+    ));
+    try first_entry.rpc_response_authority.settleExecutingTerminal(
+        active,
+        registry.incarnation,
+        first.identity,
+    );
+    const stale_terminal_authority = first_entry.rpc_response_authority;
+    try registry.abort(first.reservation, first.identity);
+    try std.testing.expect(first_entry.rpc_response_authority.pristineExact());
+
+    const second = try registry.reserve(fixtureSeed(0xB309, 0xB30A));
+    try std.testing.expectEqual(first.reservation.entry_index, second.reservation.entry_index);
+    const second_entry = &registry.entries[second.reservation.entry_index];
+    const current_idle_authority = second_entry.rpc_response_authority;
+    second_entry.rpc_response_authority = stale_terminal_authority;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.abort(second.reservation, first.identity),
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.abort(second.reservation, second.identity),
+    );
+    second_entry.rpc_response_authority = stale_active_authority;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.abort(second.reservation, first.identity),
+    );
+    try std.testing.expectError(
+        error.InvalidCanonical,
+        second_entry.rpc_response_authority.settleExecutingTerminal(
+            active,
+            registry.incarnation,
+            second.identity,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.abort(second.reservation, second.identity),
+    );
+    second_entry.rpc_response_authority = current_idle_authority;
+    const second_input: rpc_response_authority.ReserveInput = .{
+        .registry_incarnation = registry.incarnation,
+        .binding = second.identity,
+        .transport_addr = input.transport_addr,
+        .transport_incarnation = input.transport_incarnation,
+        .family = input.family,
+        .tag = input.tag,
+        .request_id = input.request_id,
+        .request_digest = input.request_digest,
+        .destination_addr = input.destination_addr,
+    };
+    const current = try second_entry.rpc_response_authority.reserveExecuting(second_input);
+    try std.testing.expectError(
+        error.InvalidCanonical,
+        second_entry.rpc_response_authority.settleExecutingTerminal(
+            active,
+            registry.incarnation,
+            second.identity,
+        ),
+    );
+    try std.testing.expect(second_entry.rpc_response_authority.matches(
+        current,
+        .executing,
+        registry.incarnation,
+        second.identity,
+    ));
+    try second_entry.rpc_response_authority.rollbackExecuting(
+        current,
+        registry.incarnation,
+        second.identity,
+    );
+    try registry.abort(second.reservation, second.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB30B);
+    const reincarnated = try registry.reserve(fixtureSeed(0xB302, 0xB303));
+    try std.testing.expect(reincarnated.identity.matches(first.identity));
+    const reincarnated_entry = &registry.entries[reincarnated.reservation.entry_index];
+    const reincarnated_idle_authority = reincarnated_entry.rpc_response_authority;
+    reincarnated_entry.rpc_response_authority = stale_terminal_authority;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.abort(reincarnated.reservation, first.identity),
+    );
+    try std.testing.expectEqual(@as(usize, 1), try registry.count());
+    reincarnated_entry.rpc_response_authority = reincarnated_idle_authority;
+    try registry.abort(reincarnated.reservation, reincarnated.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "B3-1 registry footprint drop and empty corruption gates are bounded" {
+    const LegacyEntry = struct {
+        lifecycle: EntryLifecycle = .empty,
+        reservation_id: u64 = 0,
+        identity: ?contract.BindingIdentity = null,
+        stream_id: u64 = 0,
+        controller_authority: ControllerAuthority = .unavailable,
+        transport_owner: contract.TransportOwnerSeal = .{},
+        response_owner: contract.ExecutedResponseOwnerSeal = .{},
+        prepared_request: prepared_request_authority.Authority = .{},
+    };
+    const per_entry_delta = @sizeOf(Entry) - @sizeOf(LegacyEntry);
+    try std.testing.expect(@sizeOf(rpc_response_authority.Authority) <= 256);
+    try std.testing.expect(per_entry_delta <= 128);
+    try std.testing.expect(per_entry_delta * max_entries <= 512 * 1024);
+
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB311);
+    const reserved = try registry.reserve(fixtureSeed(0xB312, 0xB313));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB314);
+    try registry.beginBoundDrop(reserved.reservation, reserved.identity, 0xB314);
+    const entry = &registry.entries[reserved.reservation.entry_index];
+    const input: rpc_response_authority.ReserveInput = .{
+        .registry_incarnation = registry.incarnation,
+        .binding = reserved.identity,
+        .transport_addr = 0xB315,
+        .transport_incarnation = 0xB316,
+        .family = .bound_observation,
+        .tag = .observation,
+        .request_id = 0xB317,
+        .request_digest = 0xB318,
+        .destination_addr = 0xB319,
+    };
+    const active = try entry.rpc_response_authority.reserveExecuting(input);
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.completeActiveDrop(reserved.reservation, reserved.identity, 0xB314),
+    );
+    try entry.rpc_response_authority.rollbackExecuting(
+        active,
+        registry.incarnation,
+        reserved.identity,
+    );
+    try registry.completeActiveDrop(reserved.reservation, reserved.identity, 0xB314);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+
+    var corrupt: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&corrupt, 0xB31A);
+    corrupt.entries[0].rpc_response_authority.next_epoch = 1;
+    try std.testing.expectEqual(DeinitOutcome.corrupt, corrupt.preflightDeinit());
 }
 
 test "CR3a-2c3a controller revoke authority is canonical absorbing and raw-tag guarded" {

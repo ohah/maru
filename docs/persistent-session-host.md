@@ -957,7 +957,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    두 control은 canonical binding의 live controller만 허용한다. observer·revoked는 `Unauthorized`, revoke-pending 또는 active
    cleanup/stream operation은 `Busy`이고, copied/moved/fork/foreign-thread, stale slot/node/binding과 raw lifecycle/control tag 손상은
    Client·allocator·wire·registry mutation 전에 `InvalidOwner`로 닫는다. capability와 stream ID는 caller가 아니라 registered node
-   operation 아래 canonical Client/binding에서 읽는다. encoder allocation 실패는 새 control authority/payload owner와 queue dequeue를
+   operation 아래 canonical Client/binding에서 읽는다. C1 adapter는 capability read부터 frame encode allocator callback과 Client
+   admission 종료까지 node-local `.control` stream-operation permit을 잡는다. callback의 input/control/pump/poison 재진입은 `Busy`이고
+   permit은 모든 반환에서 exact once 해제된다. encoder allocation 실패는 새 control authority/payload owner와 queue dequeue를
    바꾸지 않고 새 control wire를 0으로 유지한다. 다만 blocking은 ordering 때문에 encode 전에 기존 pending frame을 flush하므로 그
    기존 owner의 offset 진전은 허용하며 재시도 때 duplicate를 만들지 않는다. blocking temporary frame은 full write 뒤 exact once free,
    nonblocking accepted frame은 Client owner로 exact once 이전한다. 기존 `RemoteRuntime`의

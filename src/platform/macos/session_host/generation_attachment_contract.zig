@@ -621,6 +621,47 @@ const RawCorePayload = extern union {
     direction: i8,
 };
 const RawCoreCommand = extern struct { tag: u8, payload: RawCorePayload };
+pub const RuntimeControlTag = enum(u8) { scroll_to_bottom, core_command };
+const RawRuntimeControlPayload = extern union {
+    empty: u8,
+    core_command: RawCoreCommand,
+};
+
+/// Raw-first boundary for response-free stream controls.  The explicit byte tag lets the
+/// canonical adapter reject corrupted storage before switching a Zig tagged union.
+pub const RuntimeControl = extern struct {
+    tag: u8,
+    payload: RawRuntimeControlPayload,
+
+    pub fn scrollToBottom() RuntimeControl {
+        var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
+        result.tag = @intFromEnum(RuntimeControlTag.scroll_to_bottom);
+        result.payload.empty = 0;
+        return result;
+    }
+
+    pub fn coreCommand(command: CoreCommandRequest) RuntimeControl {
+        var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
+        result.tag = @intFromEnum(RuntimeControlTag.core_command);
+        encodeRawCoreCommandInto(&result.payload.core_command, command);
+        return result;
+    }
+
+    pub fn decode(self: *const RuntimeControl) ?ValidatedRuntimeControl {
+        return switch (self.tag) {
+            @intFromEnum(RuntimeControlTag.scroll_to_bottom) => .scroll_to_bottom,
+            @intFromEnum(RuntimeControlTag.core_command) => .{
+                .core_command = decodeRawCoreCommand(&self.payload.core_command) orelse return null,
+            },
+            else => null,
+        };
+    }
+};
+
+pub const ValidatedRuntimeControl = union(RuntimeControlTag) {
+    scroll_to_bottom,
+    core_command: CoreCommandRequest,
+};
 const RuntimeRequestPayload = extern union {
     empty: u8,
     resize: ResizeRequest,
@@ -830,41 +871,81 @@ fn decodeRawPalette(values: *const [16]RawOptionalU32) ?[16]?u32 {
     return result;
 }
 
-fn encodeRawCoreCommand(value: CoreCommandRequest) RawCoreCommand {
+fn encodeRawCoreCommandInto(out: *RawCoreCommand, value: CoreCommandRequest) void {
+    out.* = std.mem.zeroes(RawCoreCommand);
     const Tag = std.meta.Tag(CoreCommandRequest);
-    return switch (value) {
-        .scroll => |arg| .{ .tag = @intFromEnum(Tag.scroll), .payload = .{ .scroll = arg } },
-        .scroll_to_bottom => .{ .tag = @intFromEnum(Tag.scroll_to_bottom), .payload = .{ .empty = 0 } },
-        .scroll_to_abs => |arg| .{ .tag = @intFromEnum(Tag.scroll_to_abs), .payload = .{ .unsigned = arg } },
-        .scroll_to_offset => |arg| .{ .tag = @intFromEnum(Tag.scroll_to_offset), .payload = .{ .unsigned = arg } },
-        .report_focus => |flag| .{ .tag = @intFromEnum(Tag.report_focus), .payload = .{ .flag = @intFromBool(flag) } },
-        .set_cell_metrics => |metrics| .{ .tag = @intFromEnum(Tag.set_cell_metrics), .payload = .{ .cell_metrics = .{
-            .width = metrics.width,
-            .height = metrics.height,
-        } } },
-        .set_default_colors => |colors| .{ .tag = @intFromEnum(Tag.set_default_colors), .payload = .{ .colors = .{
-            .foreground = colors.foreground,
-            .background = colors.background,
-        } } },
-        .set_config_palette => |palette| .{ .tag = @intFromEnum(Tag.set_config_palette), .payload = .{ .palette = encodeRawPalette(palette) } },
-        .set_max_scrollback => |lines| .{ .tag = @intFromEnum(Tag.set_max_scrollback), .payload = .{ .unsigned = lines } },
-        .set_ambiguous_wide => |flag| .{ .tag = @intFromEnum(Tag.set_ambiguous_wide), .payload = .{ .flag = @intFromBool(flag) } },
-        .set_emoji_wide => |flag| .{ .tag = @intFromEnum(Tag.set_emoji_wide), .payload = .{ .flag = @intFromBool(flag) } },
-        .set_default_cursor_shape => |shape| .{ .tag = @intFromEnum(Tag.set_default_cursor_shape), .payload = .{ .shape = shape } },
-        .set_runtime_config => |config| .{ .tag = @intFromEnum(Tag.set_runtime_config), .payload = .{ .runtime_config = .{
-            .max_scrollback = config.max_scrollback,
-            .ambiguous_wide = @intFromBool(config.ambiguous_wide),
-            .emoji_wide = @intFromBool(config.emoji_wide),
-            .palette = encodeRawPalette(config.palette),
-            .foreground = config.foreground,
-            .background = config.background,
-            .cell_width = config.cell_width,
-            .cell_height = config.cell_height,
-            .cursor_shape = config.cursor_shape,
-        } } },
-        .jump_to_prompt => |direction| .{ .tag = @intFromEnum(Tag.jump_to_prompt), .payload = .{ .direction = direction } },
-        .reset_input_modes => .{ .tag = @intFromEnum(Tag.reset_input_modes), .payload = .{ .empty = 0 } },
-    };
+    switch (value) {
+        .scroll => |arg| {
+            out.tag = @intFromEnum(Tag.scroll);
+            out.payload.scroll = arg;
+        },
+        .scroll_to_bottom => out.tag = @intFromEnum(Tag.scroll_to_bottom),
+        .scroll_to_abs => |arg| {
+            out.tag = @intFromEnum(Tag.scroll_to_abs);
+            out.payload.unsigned = arg;
+        },
+        .scroll_to_offset => |arg| {
+            out.tag = @intFromEnum(Tag.scroll_to_offset);
+            out.payload.unsigned = arg;
+        },
+        .report_focus => |flag| {
+            out.tag = @intFromEnum(Tag.report_focus);
+            out.payload.flag = @intFromBool(flag);
+        },
+        .set_cell_metrics => |metrics| {
+            out.tag = @intFromEnum(Tag.set_cell_metrics);
+            out.payload.cell_metrics = .{ .width = metrics.width, .height = metrics.height };
+        },
+        .set_default_colors => |colors| {
+            out.tag = @intFromEnum(Tag.set_default_colors);
+            out.payload.colors = .{ .foreground = colors.foreground, .background = colors.background };
+        },
+        .set_config_palette => |palette| {
+            out.tag = @intFromEnum(Tag.set_config_palette);
+            out.payload.palette = encodeRawPalette(palette);
+        },
+        .set_max_scrollback => |lines| {
+            out.tag = @intFromEnum(Tag.set_max_scrollback);
+            out.payload.unsigned = lines;
+        },
+        .set_ambiguous_wide => |flag| {
+            out.tag = @intFromEnum(Tag.set_ambiguous_wide);
+            out.payload.flag = @intFromBool(flag);
+        },
+        .set_emoji_wide => |flag| {
+            out.tag = @intFromEnum(Tag.set_emoji_wide);
+            out.payload.flag = @intFromBool(flag);
+        },
+        .set_default_cursor_shape => |shape| {
+            out.tag = @intFromEnum(Tag.set_default_cursor_shape);
+            out.payload.shape = shape;
+        },
+        .set_runtime_config => |config| {
+            out.tag = @intFromEnum(Tag.set_runtime_config);
+            out.payload.runtime_config = .{
+                .max_scrollback = config.max_scrollback,
+                .ambiguous_wide = @intFromBool(config.ambiguous_wide),
+                .emoji_wide = @intFromBool(config.emoji_wide),
+                .palette = encodeRawPalette(config.palette),
+                .foreground = config.foreground,
+                .background = config.background,
+                .cell_width = config.cell_width,
+                .cell_height = config.cell_height,
+                .cursor_shape = config.cursor_shape,
+            };
+        },
+        .jump_to_prompt => |direction| {
+            out.tag = @intFromEnum(Tag.jump_to_prompt);
+            out.payload.direction = direction;
+        },
+        .reset_input_modes => out.tag = @intFromEnum(Tag.reset_input_modes),
+    }
+}
+
+fn encodeRawCoreCommand(value: CoreCommandRequest) RawCoreCommand {
+    var result: RawCoreCommand = undefined;
+    encodeRawCoreCommandInto(&result, value);
+    return result;
 }
 
 fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
@@ -1169,6 +1250,40 @@ test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {
     );
 }
 
+test "CR3a-2c3c control raw discriminators fail closed before semantic reads" {
+    try std.testing.expect(!containsPointer(RuntimeControl));
+    try std.testing.expect(!containsPointer(ValidatedRuntimeControl));
+    var outer = RuntimeControl.scrollToBottom();
+    var valid_outer: usize = 0;
+    for (0..256) |raw| {
+        outer.tag = @intCast(raw);
+        if (outer.decode() != null) valid_outer += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), valid_outer);
+
+    var nested = RuntimeControl.coreCommand(.scroll_to_bottom);
+    var valid_nested: usize = 0;
+    for (0..256) |raw| {
+        nested.payload.core_command.tag = @intCast(raw);
+        if (nested.decode() != null) valid_nested += 1;
+    }
+    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len), valid_nested);
+
+    const dedicated = RuntimeControl.scrollToBottom().decode().?;
+    try std.testing.expectEqual(RuntimeControlTag.scroll_to_bottom, std.meta.activeTag(dedicated));
+    const core = RuntimeControl.coreCommand(.{ .scroll = -7 }).decode().?;
+    try std.testing.expectEqual(@as(i64, -7), core.core_command.scroll);
+
+    const zeroed_core = RuntimeControl.coreCommand(.scroll_to_bottom);
+    const bytes = std.mem.asBytes(&zeroed_core);
+    const outer_tag_offset = @offsetOf(RuntimeControl, "tag");
+    const nested_tag_offset = @offsetOf(RuntimeControl, "payload") + @offsetOf(RawCoreCommand, "tag");
+    for (bytes, 0..) |byte, index| {
+        if (index == outer_tag_offset or index == nested_tag_offset) continue;
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+}
+
 test "CR3a-2a neutral identities and capabilities recursively contain no pointers" {
     try std.testing.expect(!containsPointer(PreparedCallReceipt));
     try std.testing.expect(!containsPointer(ExecutedCallReceipt));
@@ -1176,6 +1291,8 @@ test "CR3a-2a neutral identities and capabilities recursively contain no pointer
     try std.testing.expect(!containsPointer(ExecuteResult));
     try std.testing.expect(!containsPointer(BindingIdentity));
     try std.testing.expect(!containsPointer(RuntimeRequest));
+    try std.testing.expect(!containsPointer(RuntimeControl));
+    try std.testing.expect(!containsPointer(ValidatedRuntimeControl));
     try std.testing.expect(!containsPointer(GenerationCapabilities));
 }
 

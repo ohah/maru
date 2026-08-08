@@ -1477,6 +1477,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionRequest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationControlError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationControlSend" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationControl" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationControlNonBlocking" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginGenerationControlOwner" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "mapGenerationControlClientError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestPrepare" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationPreparedRequest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestAbort" },
@@ -2252,6 +2258,8 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
         "    pub fn abortPreparedRequest(",
         "    pub fn sendInput(",
         "    pub fn sendInputNonBlocking(",
+        "    pub fn sendControl(",
+        "    pub fn sendControlNonBlocking(",
         "    pub fn pumpPendingOutput(",
         "    pub fn fenceRevoke(",
         "    pub fn readInitialSnapshot(",
@@ -2854,7 +2862,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 5),
+        @as(usize, 6),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }

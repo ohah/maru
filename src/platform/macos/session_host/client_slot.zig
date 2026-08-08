@@ -949,6 +949,7 @@ pub const StreamOperationKind = enum(u8) {
     initial_snapshot,
     controller_revoke,
     ended_purge,
+    control,
 };
 
 pub const StreamOperationPermit = struct {
@@ -1188,6 +1189,32 @@ pub const GenerationRequestError = error{
     ResourceExhausted,
     ConnectionClosed,
     ProtocolError,
+};
+
+pub const GenerationControlError = error{
+    Busy,
+    InvalidOwner,
+    Unauthorized,
+    Unsupported,
+    ResourceExhausted,
+    ConnectionClosed,
+    ProtocolError,
+};
+
+pub const GenerationControlSend = struct {
+    slot_addr: usize,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    host_id: u128,
+    pid: u32,
+    process_nonce: u64,
+    transport_addr: usize,
+    transport_incarnation: u64,
+    owner_seal_addr: usize,
+    prepared_storage_addr: usize,
+    reservation: AttachmentBindingReservation,
+    bound_stream_id: u64,
+    control: contract.RuntimeControl,
 };
 
 pub const GenerationRequestPrepare = struct {
@@ -1445,7 +1472,7 @@ fn currentPid() u32 {
 
 fn streamOperationNodeIdle(node: *const ClientNode) bool {
     const kind_raw = @as(*const u8, @ptrCast(&node.active_operation_kind)).*;
-    return kind_raw <= @intFromEnum(StreamOperationKind.ended_purge) and
+    return kind_raw <= @intFromEnum(StreamOperationKind.control) and
         node.active_operation_generation == 0 and node.active_operation_kind == .none and
         node.active_operation_owner_thread_incarnation == 0 and
         node.active_operation_owner_addr == 0 and
@@ -1961,6 +1988,127 @@ fn encodeGenerationCoreCommand(
     };
 }
 
+/// Canonical generation adapter for one response-free stream control.  It resolves the sealed
+/// controller binding before reading capabilities, deriving the stream id, or touching Client.
+pub fn sendGenerationControl(
+    request: GenerationControlSend,
+) GenerationControlError!void {
+    const admission = try beginGenerationControlOwner(request);
+    defer endRegisteredNodeOperation(admission.operation);
+    const node = admission.operation.node;
+    const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
+    const permit = slot.prepareStreamOperationPermit(
+        .control,
+        request.transport_addr,
+        request.transport_incarnation,
+        admission.identity,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.InvalidStreamOperationPermit => error.InvalidOwner,
+        error.IdentityExhausted => error.ProtocolError,
+    };
+    defer slot.abortStreamOperationPermit(permit) catch
+        @panic("generation control stream-operation permit release drifted");
+    const control = request.control.decode() orelse return error.InvalidOwner;
+    switch (control) {
+        .scroll_to_bottom => {
+            if (!node.client.async_scroll_to_bottom_v1) return error.Unsupported;
+            node.client.sendScrollToBottom(request.bound_stream_id) catch |err|
+                return mapGenerationControlClientError(err);
+        },
+        .core_command => |command| {
+            if (!node.client.runtime_core_command_v1) return error.Unsupported;
+            var params: [4096]u8 = undefined;
+            const encoded = encodeGenerationCoreCommand(&params, request.bound_stream_id, command) orelse
+                return error.ResourceExhausted;
+            node.client.sendCoreCommand(request.bound_stream_id, encoded) catch |err|
+                return mapGenerationControlClientError(err);
+        },
+    }
+}
+
+/// Nonblocking admission returns false only while an older outbound frame retains the Client
+/// slot. Unsupported capability is a distinct typed result so callers cannot spin forever.
+pub fn sendGenerationControlNonBlocking(
+    request: GenerationControlSend,
+) GenerationControlError!bool {
+    const admission = try beginGenerationControlOwner(request);
+    defer endRegisteredNodeOperation(admission.operation);
+    const node = admission.operation.node;
+    const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
+    const permit = slot.prepareStreamOperationPermit(
+        .control,
+        request.transport_addr,
+        request.transport_incarnation,
+        admission.identity,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.InvalidStreamOperationPermit => error.InvalidOwner,
+        error.IdentityExhausted => error.ProtocolError,
+    };
+    defer slot.abortStreamOperationPermit(permit) catch
+        @panic("generation control stream-operation permit release drifted");
+    const control = request.control.decode() orelse return error.InvalidOwner;
+    return switch (control) {
+        .scroll_to_bottom => blk: {
+            if (!node.client.async_scroll_to_bottom_v1) return error.Unsupported;
+            break :blk node.client.sendScrollToBottomNonBlocking(request.bound_stream_id) catch |err|
+                return mapGenerationControlClientError(err);
+        },
+        .core_command => |command| blk: {
+            if (!node.client.runtime_core_command_v1) return error.Unsupported;
+            var params: [4096]u8 = undefined;
+            const encoded = encodeGenerationCoreCommand(&params, request.bound_stream_id, command) orelse
+                return error.ResourceExhausted;
+            break :blk node.client.sendCoreCommandNonBlocking(request.bound_stream_id, encoded) catch |err|
+                return mapGenerationControlClientError(err);
+        },
+    };
+}
+
+fn beginGenerationControlOwner(
+    request: GenerationControlSend,
+) GenerationControlError!GenerationRequestOwner {
+    // Decode before registry resolution so corrupt outer/nested tags cannot authorize a Client read.
+    _ = request.control.decode() orelse return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(request, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.Unauthorized => error.Unauthorized,
+        else => error.ProtocolError,
+    };
+    errdefer endRegisteredNodeOperation(admission.operation);
+    const decision = admission.operation.node.cleanup_registry.requestDecision(
+        request.reservation.cleanup,
+        admission.identity,
+        .bound_controller_mutation,
+        .core_command,
+        request.bound_stream_id,
+    ) catch return error.InvalidOwner;
+    switch (decision) {
+        .allowed => return admission,
+        .unauthorized => return error.Unauthorized,
+        .busy => return error.Busy,
+    }
+}
+
+fn mapGenerationControlClientError(err: client_mod.ClientError) GenerationControlError {
+    return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.Unauthorized => error.Unauthorized,
+        error.OutOfMemory, error.EventQueueFull => error.ResourceExhausted,
+        error.ConnectionClosed, error.WriteFailed => error.ConnectionClosed,
+        error.EndpointAbsent,
+        error.EndpointDenied,
+        error.EndpointTransient,
+        error.HandshakeFailed,
+        error.IncompatibleVersion,
+        error.ProtocolError,
+        error.ExternalMode,
+        => error.ProtocolError,
+    };
+}
+
 test "CR3a-2c3b typed request encoder injects only canonical binding identities" {
     const identity: contract.BindingIdentity = .{
         .binding_incarnation = 1,
@@ -1997,6 +2145,48 @@ test "CR3a-2c3b typed request encoder injects only canonical binding identities"
         77,
         .spawn_full,
     ) == null);
+}
+
+test "CR3a-2c3c every valid core command fits the bounded canonical encoder" {
+    const palette = [_]?u32{@as(?u32, 0xFFFFFF)} ** 16;
+    const commands = [_]contract.CoreCommandRequest{
+        .{ .scroll = std.math.maxInt(i64) },
+        .scroll_to_bottom,
+        .{ .scroll_to_abs = std.math.maxInt(u64) },
+        .{ .scroll_to_offset = std.math.maxInt(u64) },
+        .{ .report_focus = true },
+        .{ .set_cell_metrics = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) } },
+        .{ .set_default_colors = .{ .foreground = 0xFFFFFF, .background = 0xFFFFFF } },
+        .{ .set_config_palette = palette },
+        .{ .set_max_scrollback = std.math.maxInt(u64) },
+        .{ .set_ambiguous_wide = true },
+        .{ .set_emoji_wide = true },
+        .{ .set_default_cursor_shape = std.math.maxInt(u8) },
+        .{ .set_runtime_config = .{
+            .max_scrollback = std.math.maxInt(u64),
+            .ambiguous_wide = true,
+            .emoji_wide = true,
+            .palette = palette,
+            .foreground = 0xFFFFFF,
+            .background = 0xFFFFFF,
+            .cell_width = std.math.maxInt(u32),
+            .cell_height = std.math.maxInt(u32),
+            .cursor_shape = std.math.maxInt(u8),
+        } },
+        .{ .jump_to_prompt = std.math.maxInt(i8) },
+        .reset_input_modes,
+    };
+    try std.testing.expectEqual(
+        @as(usize, @typeInfo(contract.CoreCommandRequest).@"union".fields.len),
+        commands.len,
+    );
+    var buffer: [4096]u8 = undefined;
+    for (commands) |command| {
+        const encoded = encodeGenerationCoreCommand(&buffer, std.math.maxInt(u64), command) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(encoded.len > 0);
+        try std.testing.expect(encoded.len <= buffer.len);
+    }
 }
 
 /// All-or-none request-side transaction. Untrusted transport addresses remain scalars until the
@@ -5903,7 +6093,7 @@ pub const ClientSlot = struct {
     fn streamOperationPermitRawTagsValid(permit: *const StreamOperationPermit) bool {
         const kind_raw = @as(*const u8, @ptrCast(&permit.kind)).*;
         const role_raw = @as(*const u8, @ptrCast(&permit.binding.role)).*;
-        return kind_raw <= @intFromEnum(StreamOperationKind.ended_purge) and
+        return kind_raw <= @intFromEnum(StreamOperationKind.control) and
             role_raw <= @intFromEnum(contract.AttachmentRole.observer);
     }
 
@@ -9184,7 +9374,7 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
     preparation_lifecycle_raw.* = @intFromEnum(EndedPurgePreparationLifecycle.prepared);
 
     const permit_kind_raw: *u8 = @ptrCast(&preparation.permit.kind);
-    raw_tag = @intFromEnum(StreamOperationKind.ended_purge) + 1;
+    raw_tag = @intFromEnum(StreamOperationKind.control) + 1;
     while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
         permit_kind_raw.* = @intCast(raw_tag);
         try std.testing.expect(!preparation.sealForCommit(&slot));

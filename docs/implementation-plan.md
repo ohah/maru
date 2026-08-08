@@ -1323,7 +1323,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. exec 126/127, capability/nonce mismatch, generic panic, stage
       누락·중복·역전은 실패다. parent는 stderr와 stage pipe를 child 종료 전 nonblocking으로 함께 drain하고 capture cap 뒤에도 EOF까지
       discard-drain하며 truncation은 실패 처리한다. absolute timeout은 kill 뒤 waitpid exact once로 닫는다.
-   8. **2c3c control facade (미착수):** C1은 별도 raw-discriminator-safe `RuntimeControl` DTO와 exact
+   8. **2c3c control facade (C1 완료, C2/C3 미착수):** C1은 별도 raw-discriminator-safe `RuntimeControl` DTO와 exact
       `ValidatedRuntimeControl=scroll_to_bottom|core_command`를 두고 `sendControl|sendControlNonBlocking` substrate를
       `ClientSlot` canonical operation 아래 추가한다. unsupported capability는
       `ControlError.Unsupported`, nonblocking `false`는 backpressure만 뜻하며 raw method/JSON/stream ID escape는 0이다. C2는 기존
@@ -1336,6 +1336,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       facade `Unsupported`는 generation adapter 한 곳에서 consumed no-op으로 normalize해 기존 사용자 가시 동작을 보존하고,
       backpressure만 queue를 유지한다. public raw DTO는 zero-init outer tag+module-private shared `RawCoreCommand` representation을 쓰며
       decode가 검증한 active member만 semantic authority로 삼는다.
+      C1은 `test-session-host-2c3c-c1`의 Debug·ReleaseFast runtime 7+boundary 1 exact-count로 구현·검증 완료했다.
       queue·registry authority는 새로 만들지 않고 legacy arm과 recovery-owned resync는 유지한다. 각 slice는 Debug·ReleaseFast focused
       test와 boundary oracle을 통과하며 C3 종료 시 generation scroll/core direct Client callsite 0과 recovery resync baseline 1을 고정한다. event는 2c3d,
       response-bearing RPC decoder와 실제 socket parity는 2c3e, `RemoteRuntime.client` 필드 제거는 2c4가 소유한다.

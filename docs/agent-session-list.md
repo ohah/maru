@@ -589,8 +589,9 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
   - 셸을 `-l -i -c "exec <provider> --resume <id>"` 형태로 부른다. `-i`가 필요한 이유는 PATH를
     `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지 않기 때문이다. 일반 새 탭은 이미
     대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을 일치시킨다.
-  - 셸 basename이 `zsh`·`bash`·`sh`일 때만 이 형태를 쓰고, 그 외(fish·nushell 등)는 문법이 다르므로
-    직접 exec으로 폴백한다.
+  - **셸 종류로 분기하지 않는다.** 분기해 직접 exec으로 폴백해 봐야 그건 이 계약이 고치는 바로 그
+    실패(GUI 실행에서 PATH를 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만 는다. 셸이
+    이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 뜨므로 실패가 조용하지 않다.
   - 명령 문자열에 들어가는 각 인자는 예외 없이 single-quote escape한다. **cwd는 명령 문자열에 넣지
     않고 spawn request의 작업 디렉터리로만 전달한다.** parse한 prompt는 실행 인자로 절대 넣지 않는다.
   - session id/provider는 UI text나 log에서 명령으로 재해석되지 않는다.

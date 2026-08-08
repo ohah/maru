@@ -7267,19 +7267,41 @@ pub const AppSession = struct {
             .claude => [_][]const u8{ "claude", "--resume", record.parsed.session_id },
             .codex => [_][]const u8{ "codex", "resume", record.parsed.session_id },
         };
-        // Production intentionally resolves the provider from the user's PATH through env.  The
-        // isolated AppKit fixture instead supplies one absolute fake executable, so it can prove
-        // the provider-native argv without starting a real account session or depending on the
-        // build runner's inherited PATH.  This branch is unreachable outside the explicit smoke
-        // environment and still has no shell wrapper.
+        // The isolated AppKit fixture supplies one absolute fake executable so it can prove the
+        // provider-native argv without starting a real account session or depending on the build
+        // runner's inherited PATH.  That seam stays a direct exec with no shell wrapper.
+        var shell_command: ?[]u8 = null;
+        defer if (shell_command) |owned| self.allocator.free(owned);
         if (archiveSmokeFakeProviderExecutable(record.parsed.provider)) |fake_executable| {
             req.command = fake_executable;
             req.args = args[1..];
+            req.login = false;
         } else {
-            req.command = "/usr/bin/env";
-            req.args = &args;
+            // 제품 경로는 **사용자 로그인 셸을 거쳐** provider를 찾는다. 예전에는 `/usr/bin/env claude`를
+            // 직접 exec했는데, 그러면 provider를 **부모 프로세스의 PATH에서만** 찾는다. 터미널에서 띄운
+            // 앱은 셸 PATH를 상속해 우연히 동작했지만 Dock/Finder에서 띄운 앱은 실패했다 — GUI 앱이
+            // 물려받는 PATH에는 `~/.local/bin`이나 버전 매니저 shim이 없다(실측: `launchctl getenv PATH`
+            // 미설정, `env -i … zsh -lc 'command -v claude'` 실패, `-lic`는 성공).
+            //
+            // `login = true`만 켜는 것으로는 안 된다. login(1) 래핑은 최종적으로
+            // `… -c "exec -l '<command>' '<args>'"`를 만드는데, `<command>`가 `/usr/bin/env`면 exec 대상이
+            // 셸이 아니라 **dotfile을 읽는 주체가 없다**. 그래서 exec 대상 자체를 셸로 만든다.
+            //
+            // 셸 종류로 분기하지 않는다. 분기해서 직접 exec으로 폴백해 봐야 그건 **이 커밋이 고치는
+            // 바로 그 실패**(Dock에서 PATH 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만
+            // 는다. 셸이 이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 그대로 뜬다 — 조용히
+            // 실패하지 않으므로 사용자가 원인을 본다.
+            shell_command = try buildResumeShellCommand(self.allocator, &args);
+            req.command = resolveConfiguredShell(self.loaded_config.config.shell.command);
+            // `-i`가 필요하다: PATH를 `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지
+            // 않는다. 일반 새 탭은 이미 대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을
+            // 일치시킨다. `exec`로 중간 셸을 남기지 않아 실행 중 판정(foreground process group 열거)도
+            // 그대로 성립한다.
+            req.args = &[_][]const u8{ "-l", "-i", "-c", shell_command.? };
+            req.login = true;
         }
-        req.login = false;
+        // cwd는 **명령 문자열에 넣지 않고** spawn 작업 디렉터리로만 전달한다 — 셸 메타문자가 명령으로
+        // 재해석될 여지를 두지 않는다.
         if (usableRestoreCwd(record.parsed.cwd)) |cwd| req.cwd = cwd;
         const term = try self.createTerm(req, size, cfg.queue_capacity, provider_command, args[0]);
         errdefer self.destroyTerm(term);
@@ -36633,6 +36655,22 @@ fn isExecutablePath(path: []const u8) bool {
 /// 이나 셸을 종료시키는 shell.args는 못 막아, 그 경우 여전히 세션이 끝나 유일 창이면 앱이 종료된다 — 그건 별개의
 /// 루트커즈("시작 시 유일 surface 즉시 사망 → 앱 종료" lifecycle)로, 후속 과제다(project-rules.md §루트커즈). 반환
 /// 슬라이스는 `command`(config arena) 또는 environ/정적 리터럴을 가리켜 caller가 소유/해제하지 않는다(spawn 시 dupeZ 복사).
+/// `exec <provider> <args…>` 문자열을 만든다. 각 토큰을 작은따옴표로 감싸 셸이 어떤 확장도 하지
+/// 않게 한다(메커니즘 단일 출처: `maru.pty.types.appendSingleQuoted`).
+///
+/// `exec`를 붙이는 이유: 중간 셸이 남지 않아 프로세스 트리가 직접 exec일 때와 같아지고, 실행 중
+/// 판정(foreground process group 열거)이 그대로 성립한다. 호출자가 반환 슬라이스를 free한다.
+fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "exec");
+    for (argv) |token| {
+        try out.append(allocator, ' ');
+        try maru.pty.types.appendSingleQuoted(allocator, &out, token);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn resolveConfiguredShell(command: []const u8) []const u8 {
     if (isExecutablePath(command)) return command;
     const fallback = maru.pty.resolveInteractiveShell();
@@ -60190,6 +60228,34 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
 // input.url-click-modifier(F1-5): URL hover 밑줄·클릭 열기의 수식키 판정을 Zig가 config로 한다. urlModifierHeld가
 // 마우스 mods 비트(xterm: shift=4·alt=8·ctrl=16·cmd=32)를 config 키와 비교한다. Swift는 NSEvent 수식키를 이 비트로
 // 변환만(네이티브 최소). undefined 테스트는 url_click_modifier만 읽으므로 그 필드만 초기화.
+// 세션 재개가 Dock에서 띄운 앱에서 실패하던 원인은 `/usr/bin/env <provider>`가 provider를 **부모
+// 프로세스의 PATH에서만** 찾기 때문이었다(GUI 앱의 PATH에는 ~/.local/bin이나 버전 매니저 shim이 없다).
+// 이제 사용자 로그인 셸에 `-l -i -c "exec …"`를 넘긴다. 그 명령 문자열 조립을 순수 함수로 고정한다 —
+// 인용이 틀리면 세션 id나 경로가 셸 명령으로 재해석될 수 있다.
+test "resume 셸 명령: exec 접두와 토큰별 작은따옴표 인용" {
+    const a = std.testing.allocator;
+
+    const claude = try buildResumeShellCommand(a, &.{ "claude", "--resume", "0c803aaf-505b-4c7a" });
+    defer a.free(claude);
+    try std.testing.expectEqualStrings("exec 'claude' '--resume' '0c803aaf-505b-4c7a'", claude);
+
+    const codex = try buildResumeShellCommand(a, &.{ "codex", "resume", "019fc0e4-5594" });
+    defer a.free(codex);
+    try std.testing.expectEqualStrings("exec 'codex' 'resume' '019fc0e4-5594'", codex);
+
+    // 작은따옴표가 든 토큰은 따옴표를 닫고 이어 붙이는 형태로 감싼다 — 따옴표를 닫고 명령을
+    // 이어 쓰는 주입을 막는다. 세션 id는 UUID라 실제로 이런 값이 오지 않지만, 인용 메커니즘이
+    // 값에 의존하지 않는다는 것을 고정한다.
+    const tricky = try buildResumeShellCommand(a, &.{ "claude", "x'y" });
+    defer a.free(tricky);
+    try std.testing.expectEqualStrings("exec 'claude' 'x'\\''y'", tricky);
+
+    // 공백·메타문자도 따옴표 안에서는 확장되지 않는다.
+    const spaced = try buildResumeShellCommand(a, &.{ "my provider", "$HOME && ls" });
+    defer a.free(spaced);
+    try std.testing.expectEqualStrings("exec 'my provider' '$HOME && ls'", spaced);
+}
+
 test "urlModifierHeld: config url-click-modifier가 mods 비트와 매칭 (F1-5)" {
     var session: AppSession = undefined;
     // command(기본): cmd 비트(32)만 활성. 다른 수식키 동반(cmd+shift)도 cmd 포함이면 활성.

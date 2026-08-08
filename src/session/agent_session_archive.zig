@@ -53,126 +53,161 @@ pub const Parsed = struct {
 
 /// Claude 직속 transcript 혹은 Codex rollout 한 파일의 bounded bytes를 분석한다.
 /// `null`은 손상/worker/legacy-unknown/무식별 세션으로, 호출자가 목록에 넣지 않아야 한다.
-pub fn parse(allocator: std.mem.Allocator, provider: Provider, bytes: []const u8) !?Parsed {
-    return switch (provider) {
-        .claude => parseClaude(allocator, bytes),
-        .codex => parseCodex(allocator, bytes),
-    };
-}
+/// 한 파일을 **줄 단위로** 소비해 요약을 만드는 파서.
+///
+/// 호출자가 파일 전체를 메모리에 올릴 필요가 없다는 것이 요점이다. 예전에는 스캐너가
+/// `allocator.alloc(u8, size)`로 파일을 통째로 읽어 넘겼고(피크 463 MB 실측), 그 할당을 방어하려고
+/// 파일당·refresh당 read cap이 존재했다. 파서 자체는 처음부터 `splitScalar`로 줄을 훑고 있었으므로
+/// 전체 버퍼를 요구한 것은 파서가 아니라 호출자였다 — 이 인터페이스가 그 요구를 없앤다.
+///
+/// 상태는 고정 버퍼뿐이라 파일 크기와 무관하게 일정하다(약 3 KB).
+pub const Parser = struct {
+    allocator: std.mem.Allocator,
+    provider: Provider,
 
-fn parseClaude(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
-    var session_id_buf: [max_cwd_bytes]u8 = undefined;
-    var cwd_buf: [max_cwd_bytes]u8 = undefined;
-    var model_buf: [max_title_bytes]u8 = undefined;
-    var title_buf: [max_title_bytes]u8 = undefined;
-    var first_user_buf: [max_summary_bytes]u8 = undefined;
-    var last_user_buf: [max_summary_bytes]u8 = undefined;
-    var last_assistant_buf: [max_summary_bytes]u8 = undefined;
-    var session_id: []const u8 = "";
-    var cwd: []const u8 = "";
-    var model: []const u8 = "";
-    var title: []const u8 = "";
-    var first_user: []const u8 = "";
-    var last_user: []const u8 = "";
-    var last_assistant: []const u8 = "";
-    var count: u32 = 0;
+    session_id_buf: [max_cwd_bytes]u8 = undefined,
+    cwd_buf: [max_cwd_bytes]u8 = undefined,
+    model_buf: [max_title_bytes]u8 = undefined,
+    title_buf: [max_title_bytes]u8 = undefined,
+    first_user_buf: [max_summary_bytes]u8 = undefined,
+    last_user_buf: [max_summary_bytes]u8 = undefined,
+    last_assistant_buf: [max_summary_bytes]u8 = undefined,
 
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |line| {
-        const root = parseObject(allocator, line) orelse continue;
+    session_id: []const u8 = "",
+    cwd: []const u8 = "",
+    model: []const u8 = "",
+    title: []const u8 = "",
+    first_user: []const u8 = "",
+    last_user: []const u8 = "",
+    last_assistant: []const u8 = "",
+    count: u32 = 0,
+
+    // Codex 전용 판정 상태. `is_user`는 `session_meta`를 만날 때마다 갱신되며 **마지막 값이 이긴다**
+    // (docs/agent-session-list.md §3.1).
+    saw_meta: bool = false,
+    is_user: bool = false,
+    /// 이 파일에서 `user` 신호를 한 번이라도 봤는가. 조기 중단 판정에만 쓴다 — 한 번 본 뒤에는 뒤에
+    /// 오는 worker 메타로 뒤집어 중단하지 않는다.
+    saw_user_signal: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, provider: Provider) Parser {
+        return .{ .allocator = allocator, .provider = provider };
+    }
+
+    /// 줄 하나를 소비한다. 손상된 줄은 그 줄만 버리고 record를 추측해 만들지 않는다.
+    pub fn consumeLine(self: *Parser, line: []const u8) void {
+        switch (self.provider) {
+            .claude => self.consumeClaudeLine(line),
+            .codex => self.consumeCodexLine(line),
+        }
+    }
+
+    /// Codex worker로 **확정**됐는가. 확정은 "앞부분을 충분히 읽고도 `user` 신호를 한 번도 못 봤을 때"만
+    /// 성립하므로, 호출자가 그 경계(§4-3)에서 한 번만 묻는다. 그 전에 물으면 `첫=subagent 마지막=user`인
+    /// 정상 세션(실측 256개 중 118개)을 잘못 버린다.
+    pub fn isWorkerSoFar(self: *const Parser) bool {
+        return self.provider == .codex and self.saw_meta and !self.saw_user_signal;
+    }
+
+    pub fn finish(self: *Parser) !?Parsed {
+        return switch (self.provider) {
+            .claude => self.finishClaude(),
+            .codex => self.finishCodex(),
+        };
+    }
+
+    fn consumeClaudeLine(self: *Parser, line: []const u8) void {
+        const root = parseObject(self.allocator, line) orelse return;
         defer root.deinit();
         const obj = root.value.object;
-        if (string(obj.get("sessionId"))) |value| session_id = copyInto(&session_id_buf, value);
-        if (string(obj.get("cwd"))) |value| cwd = copyInto(&cwd_buf, value);
+        if (string(obj.get("sessionId"))) |value| self.session_id = copyInto(&self.session_id_buf, value);
+        if (string(obj.get("cwd"))) |value| self.cwd = copyInto(&self.cwd_buf, value);
         if (string(obj.get("custom-title")) orelse string(obj.get("customTitle")) orelse string(obj.get("title"))) |value| {
-            if (value.len > 0) title = copyInto(&title_buf, value);
+            if (value.len > 0) self.title = copyInto(&self.title_buf, value);
         }
         const kind = string(obj.get("type")) orelse "";
         if (std.mem.eql(u8, kind, "ai-title")) {
             if (string(obj.get("aiTitle")) orelse string(obj.get("title")) orelse nestedString(obj, "message", "text")) |value| {
-                if (value.len > 0) title = copyInto(&title_buf, value);
+                if (value.len > 0) self.title = copyInto(&self.title_buf, value);
             }
         }
         const message = object(obj.get("message"));
         // Current Claude Code writes the invoked model on assistant
         // `message.model`; a top-level model is only a compatibility fallback.
         if ((if (message) |m| string(m.get("model")) else null) orelse string(obj.get("model"))) |value|
-            model = copyInto(&model_buf, value);
+            self.model = copyInto(&self.model_buf, value);
         const role = if (message) |m| string(m.get("role")) orelse "" else string(obj.get("role")) orelse "";
         const text = if (message) |m| string(m.get("text")) orelse contentText(m) else string(obj.get("text"));
         if (text) |value| {
-            if (value.len == 0) continue;
-            count +|= 1;
+            if (value.len == 0) return;
+            self.count +|= 1;
             if (std.mem.eql(u8, role, "user")) {
-                if (first_user.len == 0) first_user = copyInto(&first_user_buf, value);
-                last_user = copyInto(&last_user_buf, value);
-            } else if (std.mem.eql(u8, role, "assistant")) last_assistant = copyInto(&last_assistant_buf, value);
+                if (self.first_user.len == 0) self.first_user = copyInto(&self.first_user_buf, value);
+                self.last_user = copyInto(&self.last_user_buf, value);
+            } else if (std.mem.eql(u8, role, "assistant")) self.last_assistant = copyInto(&self.last_assistant_buf, value);
         }
     }
-    if (session_id.len == 0) return null;
-    const display_title = if (title.len > 0) title else if (first_user.len > 0) first_user else "제목 없는 세션";
-    const summary = if (last_user.len > 0) last_user else last_assistant;
-    return try duplicateParsed(allocator, .claude, session_id, display_title, summary, cwd, false, model, count, true);
-}
 
-fn parseCodex(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
-    var session_id_buf: [max_cwd_bytes]u8 = undefined;
-    var cwd_buf: [max_cwd_bytes]u8 = undefined;
-    var model_buf: [max_title_bytes]u8 = undefined;
-    var first_user_buf: [max_summary_bytes]u8 = undefined;
-    var last_user_buf: [max_summary_bytes]u8 = undefined;
-    var last_assistant_buf: [max_summary_bytes]u8 = undefined;
-    var session_id: []const u8 = "";
-    var cwd: []const u8 = "";
-    var model: []const u8 = "";
-    var first_user: []const u8 = "";
-    var last_user: []const u8 = "";
-    var last_assistant: []const u8 = "";
-    var is_user = false;
-    var saw_meta = false;
-    var count: u32 = 0;
-
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |line| {
-        const root = parseObject(allocator, line) orelse continue;
+    fn consumeCodexLine(self: *Parser, line: []const u8) void {
+        const root = parseObject(self.allocator, line) orelse return;
         defer root.deinit();
         const obj = root.value.object;
         const kind = string(obj.get("type")) orelse "";
         const payload = object(obj.get("payload"));
         if (std.mem.eql(u8, kind, "session_meta")) {
-            const p = payload orelse continue;
-            saw_meta = true;
-            if (string(p.get("id"))) |value| session_id = copyInto(&session_id_buf, value);
-            if (string(p.get("cwd"))) |value| cwd = copyInto(&cwd_buf, value);
-            is_user = codexIsUserThread(p);
-            continue;
+            const p = payload orelse return;
+            self.saw_meta = true;
+            if (string(p.get("id"))) |value| self.session_id = copyInto(&self.session_id_buf, value);
+            if (string(p.get("cwd"))) |value| self.cwd = copyInto(&self.cwd_buf, value);
+            self.is_user = codexIsUserThread(p);
+            if (self.is_user) self.saw_user_signal = true;
+            return;
         }
         if (std.mem.eql(u8, kind, "turn_context")) {
             if (payload) |p| {
-                if (string(p.get("model"))) |value| model = copyInto(&model_buf, value);
+                if (string(p.get("model"))) |value| self.model = copyInto(&self.model_buf, value);
             }
-            continue;
+            return;
         }
-        if (!std.mem.eql(u8, kind, "event_msg")) continue;
-        const p = payload orelse continue;
+        if (!std.mem.eql(u8, kind, "event_msg")) return;
+        const p = payload orelse return;
         const event_kind = string(p.get("type")) orelse "";
-        const text = string(p.get("message")) orelse continue;
-        if (text.len == 0) continue;
+        const text = string(p.get("message")) orelse return;
+        if (text.len == 0) return;
         if (std.mem.eql(u8, event_kind, "user_message")) {
             const clean = stripCodexPrefix(text);
-            if (clean.len == 0) continue;
-            count +|= 1;
-            if (first_user.len == 0) first_user = copyInto(&first_user_buf, clean);
-            last_user = copyInto(&last_user_buf, clean);
+            if (clean.len == 0) return;
+            self.count +|= 1;
+            if (self.first_user.len == 0) self.first_user = copyInto(&self.first_user_buf, clean);
+            self.last_user = copyInto(&self.last_user_buf, clean);
         } else if (std.mem.eql(u8, event_kind, "agent_message")) {
-            count +|= 1;
-            last_assistant = copyInto(&last_assistant_buf, text);
+            self.count +|= 1;
+            self.last_assistant = copyInto(&self.last_assistant_buf, text);
         }
     }
-    if (!saw_meta or !is_user or session_id.len == 0) return null;
-    const title = if (first_user.len > 0) first_user else "제목 없는 세션";
-    const summary = if (last_user.len > 0) last_user else last_assistant;
-    return try duplicateParsed(allocator, .codex, session_id, title, summary, cwd, false, model, count, true);
+
+    fn finishClaude(self: *Parser) !?Parsed {
+        if (self.session_id.len == 0) return null;
+        const display_title = if (self.title.len > 0) self.title else if (self.first_user.len > 0) self.first_user else "제목 없는 세션";
+        const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
+        return try duplicateParsed(self.allocator, .claude, self.session_id, display_title, summary, self.cwd, false, self.model, self.count, true);
+    }
+
+    fn finishCodex(self: *Parser) !?Parsed {
+        if (!self.saw_meta or !self.is_user or self.session_id.len == 0) return null;
+        const title = if (self.first_user.len > 0) self.first_user else "제목 없는 세션";
+        const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
+        return try duplicateParsed(self.allocator, .codex, self.session_id, title, summary, self.cwd, false, self.model, self.count, true);
+    }
+};
+
+/// 버퍼 하나를 통째로 받는 진입점. `Parser`를 줄 단위로 돌린 것과 **결과가 같다** — fixture·테스트와
+/// 부분 입력 비교가 이 등가성에 의존한다.
+pub fn parse(allocator: std.mem.Allocator, provider: Provider, bytes: []const u8) !?Parsed {
+    var parser = Parser.init(allocator, provider);
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| parser.consumeLine(line);
+    return parser.finish();
 }
 
 fn duplicateParsed(allocator: std.mem.Allocator, provider: Provider, session_id: []const u8, title: []const u8, summary: []const u8, cwd: []const u8, cwd_canonical: bool, model: []const u8, message_count: u32, verified_user: bool) !Parsed {
@@ -271,6 +306,107 @@ fn codexIsUserThread(payload: std.json.ObjectMap) bool {
     }
     if (object(payload.get("source"))) |source| return object(source.get("subagent")) == null;
     return true;
+}
+
+// 스트리밍 소비가 **전체 버퍼 파싱과 같은 결과**를 내는가. 스캐너가 파일을 64 KiB 청크로 읽어
+// `consumeLine`에 넘기므로, 줄이 청크 경계에 걸치거나 마지막 줄에 개행이 없어도 값을 잃으면 안 된다.
+// 이 등가성이 깨지면 목록이 조용히 틀린 요약을 보인다.
+test "Parser 스트리밍: 어떤 청크 경계로 잘라도 전체 파싱과 같다" {
+    const a = std.testing.allocator;
+    const fixtures = [_]struct { provider: Provider, bytes: []const u8 }{
+        .{ .provider = .claude, .bytes =
+        \\{"sessionId":"c-1","cwd":"/repo","type":"user","message":{"role":"user","content":[{"type":"text","text":"첫 요청"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","model":"m-old","content":[{"type":"text","text":"응답1"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","model":"m-new","content":[{"type":"text","text":"응답2"}]}}
+        \\{"type":"user","message":{"role":"user","content":[{"type":"text","text":"마지막 요청"}]}}
+        },
+        .{ .provider = .codex, .bytes =
+        \\{"type":"session_meta","payload":{"id":"x-1","thread_source":"subagent"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"worker turn"}}
+        \\{"type":"session_meta","payload":{"id":"x-1","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"turn_context","payload":{"model":"gpt-x"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"사용자 요청"}}
+        \\{"type":"event_msg","payload":{"type":"agent_message","message":"응답"}}
+        },
+    };
+
+    for (fixtures) |fx| {
+        var whole = (try parse(a, fx.provider, fx.bytes)).?;
+        defer whole.deinit(a);
+
+        // 1바이트부터 전체 길이까지 모든 청크 크기로 잘라 넣어도 결과가 같아야 한다. 줄 중간, 개행
+        // 직전/직후 등 모든 경계가 이 스윕에 포함된다.
+        var chunk: usize = 1;
+        while (chunk <= fx.bytes.len) : (chunk += 1) {
+            var parser = Parser.init(a, fx.provider);
+            var pending: std.ArrayList(u8) = .empty;
+            defer pending.deinit(a);
+            var offset: usize = 0;
+            while (offset < fx.bytes.len) {
+                const end = @min(offset + chunk, fx.bytes.len);
+                var rest: []const u8 = fx.bytes[offset..end];
+                offset = end;
+                while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+                    const piece = rest[0..nl];
+                    rest = rest[nl + 1 ..];
+                    if (pending.items.len == 0) {
+                        parser.consumeLine(piece);
+                    } else {
+                        try pending.appendSlice(a, piece);
+                        parser.consumeLine(pending.items);
+                        pending.clearRetainingCapacity();
+                    }
+                }
+                if (rest.len > 0) try pending.appendSlice(a, rest);
+            }
+            if (pending.items.len > 0) parser.consumeLine(pending.items); // 개행 없는 마지막 줄
+            var streamed = (try parser.finish()).?;
+            defer streamed.deinit(a);
+
+            try std.testing.expectEqualStrings(whole.session_id, streamed.session_id);
+            try std.testing.expectEqualStrings(whole.title, streamed.title);
+            try std.testing.expectEqualStrings(whole.summary, streamed.summary);
+            try std.testing.expectEqualStrings(whole.cwd, streamed.cwd);
+            try std.testing.expectEqualStrings(whole.model, streamed.model);
+            try std.testing.expectEqual(whole.message_count, streamed.message_count);
+        }
+    }
+}
+
+// Codex worker 조기 중단 판정. 스캐너는 앞부분을 충분히 읽은 **뒤 한 번만** 이 값을 묻는다 — 그 전에
+// 물으면 `첫=subagent 마지막=user`인 정상 세션(실측 256개 중 118개)을 잘못 버린다.
+test "Parser: worker 확정은 user 신호를 한 번도 못 봤을 때만" {
+    const a = std.testing.allocator;
+
+    // 첫 메타가 subagent여도, user 신호를 본 뒤에는 worker로 확정하지 않는다.
+    var flip = Parser.init(a, .codex);
+    flip.consumeLine(
+        \\{"type":"session_meta","payload":{"id":"f","thread_source":"subagent"}}
+    );
+    try std.testing.expect(flip.isWorkerSoFar()); // 아직 user를 못 봤다
+    flip.consumeLine(
+        \\{"type":"session_meta","payload":{"id":"f","thread_source":"user"}}
+    );
+    try std.testing.expect(!flip.isWorkerSoFar()); // user를 봤으니 확정하지 않는다
+    // 뒤에 다시 worker 메타가 와도 뒤집어 중단하지 않는다(읽기를 끝까지 하고 finish가 판정한다).
+    flip.consumeLine(
+        \\{"type":"session_meta","payload":{"id":"f","thread_source":"subagent"}}
+    );
+    try std.testing.expect(!flip.isWorkerSoFar());
+
+    // 메타를 아직 못 본 파일은 worker로 확정하지 않는다 — 판정 불가는 제외가 아니다.
+    var none = Parser.init(a, .codex);
+    none.consumeLine(
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}
+    );
+    try std.testing.expect(!none.isWorkerSoFar());
+
+    // Claude는 이 판정의 대상이 아니다.
+    var claude = Parser.init(a, .claude);
+    claude.consumeLine(
+        \\{"sessionId":"c","type":"user","message":{"role":"user","text":"x"}}
+    );
+    try std.testing.expect(!claude.isWorkerSoFar());
 }
 
 test "Codex user session parses and worker is rejected" {

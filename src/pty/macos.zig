@@ -1069,10 +1069,10 @@ const MacosLogin = struct {
         var cmd_buf: std.ArrayList(u8) = .empty;
         defer cmd_buf.deinit(allocator);
         try cmd_buf.appendSlice(allocator, "exec -l ");
-        try appendSingleQuoted(allocator, &cmd_buf, request.command);
+        try types.appendSingleQuoted(allocator, &cmd_buf, request.command);
         for (request.args) |a| {
             try cmd_buf.append(allocator, ' ');
-            try appendSingleQuoted(allocator, &cmd_buf, a);
+            try types.appendSingleQuoted(allocator, &cmd_buf, a);
         }
         const exec_cmd = try cmd_buf.toOwnedSlice(allocator);
         errdefer allocator.free(exec_cmd);
@@ -1111,17 +1111,6 @@ const MacosLogin = struct {
 /// bash `-c "exec -l ..."`에 토큰 하나를 **작은따옴표로 감싸** 붙인다 — 셸 경로/인자에 공백·셸 메타문자(`$`·`;`·`&`·
 /// 따옴표 등)가 있어도 bash가 word-split·해석하지 않고 문자 그대로 넘기게 한다. POSIX 규칙: 토큰을 `'...'`로 감싸고
 /// 내부의 `'`는 `'\''`(따옴표 닫기 → 이스케이프된 `'` → 다시 열기)로 끊는다. 빈 토큰은 `''`가 돼 안전하다.
-fn appendSingleQuoted(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), token: []const u8) !void {
-    try buf.append(allocator, '\'');
-    for (token) |c| {
-        if (c == '\'') {
-            try buf.appendSlice(allocator, "'\\''");
-        } else {
-            try buf.append(allocator, c);
-        }
-    }
-    try buf.append(allocator, '\'');
-}
 
 // `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(setenv/unsetenv와 같은 결).
 extern "c" fn system(command: [*:0]const u8) c_int;

@@ -100,6 +100,23 @@ pub const SpawnRequest = struct {
     size: terminal.Size = terminal.Size.default,
 };
 
+/// 토큰 하나를 POSIX 셸의 작은따옴표로 감싸 `buf`에 붙인다. 안의 `'`는 `'\''`로 끊어 잇는다.
+///
+/// 셸 문자열에 사용자 데이터(경로·세션 id)를 넣는 곳이 둘 이상이라(login(1) 래핑, 아카이브 resume)
+/// **메커니즘을 한 곳에 둔다**. 백슬래시 이스케이프(`shellEscapeJoin`)와 달리 따옴표 안에서는 셸이
+/// 어떤 확장도 하지 않으므로, 명령 문자열을 조립할 때는 이 형태를 쓴다.
+pub fn appendSingleQuoted(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), token: []const u8) !void {
+    try buf.append(allocator, '\'');
+    for (token) |c| {
+        if (c == '\'') {
+            try buf.appendSlice(allocator, "'\\''");
+        } else {
+            try buf.append(allocator, c);
+        }
+    }
+    try buf.append(allocator, '\'');
+}
+
 pub fn plannedBackendForMacOS() Backend {
     return .macos_openpty;
 }

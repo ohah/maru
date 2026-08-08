@@ -1058,6 +1058,22 @@ const dock_list_scroll_drag_payload: u64 = 1;
 /// scrollArea 자신 + track + thumb. 자식이 없으므로 이보다 커질 수 없다.
 const dock_list_scroll_max_entries: usize = 3;
 
+/// 사이드바 스크롤바 치수(SV4a). 도크 목록과 **같은 값**을 쓴다 — 한 창에 두 스크롤바가 나란히 서므로
+/// 굵기가 다르면 그 자체가 결함으로 보인다. 별도 상수로 두는 것은 사이드바 폭이 사용자 드래그로
+/// 변하는 값이라 나중에 갈릴 여지를 남겨 두기 위해서다.
+const sidebar_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
+const sidebar_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
+const sidebar_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
+
+/// 사이드바가 내는 tree의 노드 id. 도크 목록과 **다른 값**이어야 한다 — 둘은 동시에 발행돼 있고,
+/// id가 겹치면 hit-test·capture가 어느 스크롤바인지 구분하지 못한다.
+const sidebar_scroll_ids = struct {
+    const area: chrome.ui.tree.UiId = 0x5342_0001;
+    const track: chrome.ui.tree.UiId = 0x5342_0002;
+    const thumb: chrome.ui.tree.UiId = 0x5342_0003;
+};
+const sidebar_scroll_max_entries: usize = 3;
+
 /// 이번 tick에 활성 surface frame을 (재)투영할지 결정한다 — 순수 함수라 게이트 규칙을 헤드리스로 고정한다.
 /// 베이스/결정(docs/io-render-threading.md): synchronized output(DECSET 2026)은 **라이브 화면**이 half-drawn
 /// 상태로 tearing되는 것만 막는다(BSU~ESU 사이 투영 보류, ESU 누락 freeze는 sync_timeout으로 강제 해제 — Ghostty
@@ -3605,6 +3621,12 @@ pub const AppSession = struct {
     dock_list_scroll_entries: [dock_list_scroll_max_entries]chrome.ui.tree.RectEntry = undefined,
     dock_list_scroll_entry_count: usize = 0,
     dock_list_scroll_generation: u64 = 0,
+    /// 사이드바 스크롤바의 발행 저장소(SV4a). 도크 목록과 **따로** 둔다 — 둘은 동시에 화면에 있으므로
+    /// 하나를 발행하면 다른 하나가 지워지는 자리를 만들면 안 된다(뷰를 갈아끼우는 도크와 다른 조건이다).
+    sidebar_scroll_entries: [sidebar_scroll_max_entries]chrome.ui.tree.RectEntry = undefined,
+    sidebar_scroll_entry_count: usize = 0,
+    sidebar_scroll_generation: u64 = 0,
+    sidebar_scroll_max_offset_px: u32 = 0,
     /// 발행된 tree가 서 있는 스크롤 상한. **그 tree와 같은 시점의 값**이라야 thumb 비율과 드래그 매핑이
     /// 맞는다 — 나중에 뷰가 바뀐 뒤 다시 계산하면 발행된 막대와 다른 상한을 쓰게 된다.
     dock_list_scroll_max_offset_px: u32 = 0,
@@ -32564,49 +32586,29 @@ pub const AppSession = struct {
         }) catch {};
     }
 
-    /// 사이드바 우측에 세로 스크롤바 thumb(layer 3 over)를 그린다 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘을 때만.
-    /// pane 스크롤바와 같은 pill 모양·muted 색·fade(sidebar_scrollbar_idle_ticks)를 쓰되, 단일 트랙이라 per-frame
-    /// (appendPaneScrollbars 옆에서) 호출한다. 트랙 = [헤더 하단, backing 하단], thumb 위치는 offset/maxScroll.
-    /// 접힘(폭 0)·헤더 없음·스크롤 불필요면 무동작. dropQuadsByLayer(3)가 매 프레임 비우므로 누적 안 됨.
+    /// 사이드바 스크롤바를 **공용 paint 경로**로 그린다(SV4a). 발행된 tree를 `ui_paint`가 quad op으로
+    /// 옮기고 `chrome_draw_lowering`이 GpuQuad로 내린다 — 탐색기·소스 컨트롤과 같은 경로다.
+    ///
+    /// 옛 코드는 여기서 pill 모양·반지름·색·트랙 산술을 손으로 다시 만들고 layer 3(카드 **위**)에
+    /// 얹었다. 이제 layer 2로 내려오므로 밴드가 이 자리를 덮지 않도록 `sidebar.view`가 gutter를 자기
+    /// 폭에서 뗀다(§4) — 그것이 이 슬라이스에서 카드가 좁아지는 이유다.
+    ///
+    /// **fade alpha만 여기서 얹는다.** 선언에 실으면 매 프레임 tree가 달라져 reconcile을 다시 돈다(§7).
     fn appendSidebarScrollbar(self: *AppSession) void {
-        if (self.sidebar_width_px == 0 or self.cell_width_px == 0) return;
-        const slot_h = self.sidebarMetrics().line_h; // 렌더 전 degenerate 판정(카드 높이는 줄 기하에서 나온다)
-        if (slot_h == 0) return;
-        const header = self.sidebar_header_height_px;
-        // 가드도 상태바를 뺀 높이로 본다 — 안 그러면 헤더+상태바가 창을 다 먹은 창에서 viewport_h가 0이 되고,
-        // thumb이 0 높이로 계산돼 트랙만 남는다(크래시는 아니나 의미 없는 그림).
-        if (self.backing_height_px -| self.statusBarHeightPx() <= header) return;
-        // thumb 비율의 분모도 같은 뷰포트를 써야 한다(sidebarMaxScrollPx와 한 쌍) — 갈리면 thumb이 트랙
-        // 끝에 도달해도 스크롤이 남거나 그 반대가 된다.
-        const viewport_h: u32 = (self.backing_height_px -| self.statusBarHeightPx()) -| header;
-        const max_scroll = self.sidebarMaxScroll();
-        if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
-        const view_px: f32 = @floatFromInt(viewport_h);
-        const content_px: f32 = @floatFromInt(chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebarMetrics())); // 가변 높이(code-review #7)·드래그 중 preview_rows(SG8, sidebarMaxScroll과 같은 도메인)
-        const min_thumb: f32 = @max(view_px * 0.04, 18.0);
-        var thumb_h: f32 = if (content_px > 0) view_px * view_px / content_px else view_px;
-        if (thumb_h < min_thumb) thumb_h = min_thumb;
-        if (thumb_h > view_px) thumb_h = view_px;
-        const t: f32 = @as(f32, @floatFromInt(self.sidebar_scroll_offset_px)) / @as(f32, @floatFromInt(max_scroll)); // 0(맨 위)..1(맨 아래)
-        const thumb_y: f32 = @as(f32, @floatFromInt(header)) + (view_px - thumb_h) * t;
-        const bar_w: f32 = scrollbarBarWidthPx(self.cell_width_px, false);
-        const x: f32 = @as(f32, @floatFromInt(self.sidebar_width_px)) - bar_w - 2.0; // 사이드바 우측 가장자리에서 2px 안쪽
+        self.buildSidebarScrollTree();
+        const snapshot = self.sidebarScrollTree();
+        if (snapshot.entries.len == 0) return;
         const alpha: u8 = self.scrollbarAlpha(self.sidebar_scrollbar_idle_ticks); // pane과 같은 fade 곡선
-        const color: u32 = packRgbAlpha(self.mutedForeground(), alpha); // muted 전경(비활성 탭과 같은 톤), 셰이더 rgb*=a
-        const r = bar_w * 0.5; // pill(반지름 = 폭 절반)
-        self.gpu_quads.append(self.allocator, .{
-            .x = x,
-            .y = thumb_y,
-            .w = bar_w,
-            .h = thumb_h,
-            .corner_radii = .{ r, r, r, r },
-            .border_widths = .{ 0, 0, 0, 0 },
-            .fill_color0 = color,
-            .fill_color1 = color,
-            .border_color = 0,
-            .gradient_kind = 0,
-            .layer = 3, // over — 셀·밴드 위. dropQuadsByLayer(3)가 per-frame 비움(pane 스크롤바와 짝).
-        }) catch {};
+
+        var ops: [sidebar_scroll_max_entries]chrome.draw.Op = undefined;
+        const tokens = self.buildChromeTokens();
+        const draws = chrome.ui.paint.paint(snapshot, .{}, &tokens, .sidebar, .{ .ops = &ops }) catch return;
+        for (ops[0..draws.ops.len]) |*op| switch (op.*) {
+            .quad => |*q| q.alpha = alpha,
+            else => {},
+        };
+        // rect는 이미 backing 좌표다(`buildSidebarScrollTree`가 옮겼다) — origin을 다시 더하지 않는다.
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
     }
 
     /// 탐색기 스크롤바를 **공용 paint 경로**로 그린다(SV2b). 발행된 tree를 `ui_paint`가 quad op으로
@@ -32716,6 +32718,99 @@ pub const AppSession = struct {
             acc +|= rh;
         }
         return null; // 콘텐츠 아래(목록 끝 행 = 새 워크스페이스 드롭) — tint 없음
+    }
+
+    fn sidebarScrollbarMetrics(self: *const AppSession) chrome.ui.scroll_area.ScrollbarMetrics {
+        _ = self;
+        return .{
+            .width_px = sidebar_scrollbar_width_px,
+            .inset_x_px = sidebar_scrollbar_inset_px,
+            .min_thumb_px = sidebar_scrollbar_min_thumb_px,
+        };
+    }
+
+    /// 밴드·카드 텍스트가 스크롤바에 내주는 폭. **스크롤 여부와 무관하게 상시**다 — 넘칠 때만 떼면
+    /// 목록이 마지막 카드 하나에 reflow한다(docs/scroll-area.md §4).
+    fn sidebarScrollGutterPx(self: *const AppSession) u32 {
+        if (self.sidebar_width_px == 0) return 0;
+        const m = self.sidebarScrollbarMetrics();
+        return m.width_px + m.inset_x_px;
+    }
+
+    /// 사이드바 스크롤 뷰포트(backing px). 헤더 아래에서 시작해 상태바 위에서 끝난다 — `sidebarMaxScroll`과
+    /// **같은 도메인**이어야 thumb이 트랙 끝에 닿는 순간 스크롤도 끝난다.
+    const SidebarScrollExtent = struct { rect: maru.session.SplitRect, content_h_px: u32, max_offset_px: u32 };
+
+    fn sidebarScrollExtent(self: *const AppSession) ?SidebarScrollExtent {
+        if (self.sidebar_width_px == 0) return null;
+        const header = self.sidebar_header_height_px;
+        const bottom = self.backing_height_px -| self.statusBarHeightPx();
+        if (bottom <= header) return null;
+        const max_offset = self.sidebarMaxScroll();
+        if (max_offset == 0) return null; // 안 넘침 — 스크롤바 없음
+        return .{
+            .rect = .{ .x = 0, .y = header, .w = self.sidebar_width_px, .h = bottom - header },
+            .content_h_px = chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebarMetrics()),
+            .max_offset_px = max_offset,
+        };
+    }
+
+    /// 사이드바 스크롤바를 **선언**한다(SV4a). 도크·탐색기·소스 컨트롤과 같은 `scrollArea` 노드이며,
+    /// 모양·최소 thumb·트랙 배치를 host가 손으로 다시 만들지 않는다.
+    fn buildSidebarScrollTree(self: *AppSession) void {
+        self.sidebar_scroll_entry_count = 0;
+        self.sidebar_scroll_max_offset_px = 0;
+        const extent = self.sidebarScrollExtent() orelse return;
+
+        var entries: [sidebar_scroll_max_entries]chrome.ui.tree.RectEntry = undefined;
+        var items: [sidebar_scroll_max_entries]chrome.ui.layout.Item = undefined;
+        var flex: [sidebar_scroll_max_entries]chrome.ui.layout.FlexScratch = undefined;
+        var child_rects: [sidebar_scroll_max_entries]chrome.ui.layout.UiRect = undefined;
+
+        const node = chrome.ui.tree.scrollArea(.{
+            .id = sidebar_scroll_ids.area,
+            .scroll = .{
+                .offset_px = self.sidebar_scroll_offset_px,
+                .content_h_px = extent.content_h_px,
+                .gutter_px = @floatFromInt(self.sidebarScrollGutterPx()),
+                .metrics = self.sidebarScrollbarMetrics(),
+                // fade alpha는 선언에 싣지 않는다 — 매 프레임 달라져 reconcile을 다시 돌게 한다(§7).
+                .track = .{ .id = sidebar_scroll_ids.track, .action = .{ .id = sidebar_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
+                .thumb = .{ .id = sidebar_scroll_ids.thumb, .action = .{ .id = sidebar_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ sidebar_scrollbar_width_px / 2, sidebar_scrollbar_width_px / 2, sidebar_scrollbar_width_px / 2, sidebar_scrollbar_width_px / 2 } } },
+            },
+        }, &.{});
+
+        const built = chrome.ui.tree.build(node, .{
+            .root_size = .{ .width = @floatFromInt(extent.rect.w), .height = @floatFromInt(extent.rect.h) },
+            .max_entries = sidebar_scroll_max_entries,
+            .max_depth = 2,
+        }, .{
+            .entries = &entries,
+            .items = &items,
+            .flex_scratch = &flex,
+            .child_rects = &child_rects,
+        }) catch return;
+
+        self.sidebar_scroll_generation +|= 1;
+        for (built.entries, 0..) |entry, i| {
+            var moved = entry;
+            moved.rect.x += @floatFromInt(extent.rect.x);
+            moved.rect.y += @floatFromInt(extent.rect.y);
+            if (moved.effective_clip) |*clip| {
+                clip.x += @floatFromInt(extent.rect.x);
+                clip.y += @floatFromInt(extent.rect.y);
+            }
+            self.sidebar_scroll_entries[i] = moved;
+        }
+        self.sidebar_scroll_entry_count = built.entries.len;
+        self.sidebar_scroll_max_offset_px = extent.max_offset_px;
+    }
+
+    fn sidebarScrollTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
+        return .{
+            .entries = self.sidebar_scroll_entries[0..self.sidebar_scroll_entry_count],
+            .generation = self.sidebar_scroll_generation,
+        };
     }
 
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
@@ -34176,13 +34271,15 @@ pub const AppSession = struct {
         // 패딩, Rect.inset). 그 좌단을 셀 col로 ceil 환산(indent_cols)해 제목을 좌측 막대 우측·카드 안에 둔다(rich).
         // tui(0)면 left=right=0이라 전체 폭·indent 0(기존과 동일).
         const sp = self.buildChromeTokens().space;
-        const row = chrome.draw.Rect{ .x = 0, .y = 0, .w = self.sidebar_width_px, .h = cw }; // h는 가로 환산에 무관
+        // 카드 텍스트도 스크롤바 gutter를 뗀 폭을 쓴다(SV4a). 사이드바 셀은 layer 2 quad **위**에 그려지므로,
+        // 폭을 안 줄이면 긴 제목이 스크롤바를 덮는다 — 밴드만 좁히는 것으로는 부족하다.
+        const row = chrome.draw.Rect{ .x = 0, .y = 0, .w = self.sidebar_width_px -| self.sidebarScrollGutterPx(), .h = cw }; // h는 가로 환산에 무관
         const text_area = row.inset(.{ .left = sp.card_gap_px + sp.accent_bar_width_px, .right = sp.card_gap_px });
         const indent_px: u32 = @intCast(text_area.x);
         const indent_cols: u16 = if (indent_px > 0) @intCast(@min((indent_px + cw - 1) / cw, @as(u32, std.math.maxInt(u16)))) else 0;
         // B2 리뷰(e): indent_cols=ceil(left/cw)와 text_area.w/cw=floor의 합이 full_cols를 1 넘어 제목 우단이 터미널 영역을
         // 침범할 수 있어, sidebar_cols를 full_cols-indent_cols로도 clamp한다 → indent_cols+sidebar_cols <= full_cols 보장.
-        const full_cols: u32 = self.sidebar_width_px / cw;
+        const full_cols: u32 = (self.sidebar_width_px -| self.sidebarScrollGutterPx()) / cw;
         const sidebar_cols: u16 = @intCast(@min(@min(text_area.w / cw, full_cols -| indent_cols), @as(u32, std.math.maxInt(u16))));
         if (sidebar_cols == 0) return error.NoSidebar;
 
@@ -35289,6 +35386,7 @@ pub const AppSession = struct {
             .sidebar_width_px = self.sidebar_width_px,
             .sidebar_slot_height_px = self.sidebar_slot_height_px,
             .sidebar_header_row_h_px = self.sidebar_header_row_h_px,
+            .sidebar_scroll_gutter_px = self.sidebarScrollGutterPx(),
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
             .workspace_x_px = workspace.x,
@@ -54825,6 +54923,65 @@ test "sidebarBandCell sizes the active band to the sidebar width and emits a sen
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
 // CoreText 메트릭과 사이드바 폭을 채우는 macOS 경로라 게이트한다. metalFrame()이 그 밴드를 사이드바
 // 셀로 노출하는 것도 함께 본다(렌더러가 origin 0에 그릴 입력).
+// SV4a — 사이드바 스크롤바가 host의 손수 만든 GpuQuad에서 **선언된 tree**로 옮겨 왔다. 옮기면서 스크롤바가
+// 카드 위(layer 3)가 아니라 같은 층으로 내려오므로, 밴드·텍스트가 그 자리를 비켜 줬는지가 이 슬라이스의 계약이다.
+test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a declared tree" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // ① gutter는 **상시**다. 스크롤 여부와 무관하게 밴드 폭에서 떼어 놓지 않으면, 스크롤바가 나타나는
+    //    순간 카드가 좁아지며 목록이 통째로 reflow한다(§4).
+    const gutter = session.sidebarScrollGutterPx();
+    try std.testing.expect(gutter > 0);
+    try std.testing.expectEqual(gutter, session.buildChromeProps().metrics.sidebar_scroll_gutter_px);
+
+    // ② 안 넘치면 스크롤바가 없다 — 트랙만 남은 막대를 그리지 않는다.
+    if (session.sidebarMaxScroll() == 0) {
+        session.buildSidebarScrollTree();
+        try std.testing.expectEqual(@as(usize, 0), session.sidebarScrollTree().entries.len);
+    }
+
+    // ③ 넘치게 만들면 track과 thumb이 **선언된 tree로** 나온다(host가 quad를 손으로 만들지 않는다).
+    //    뷰포트를 줄이는 쪽이 확실하다 — 탭을 늘리면 fixture 사정에 기대게 된다.
+    session.backing_height_px = session.sidebar_header_height_px + session.statusBarHeightPx() + session.sidebarMetrics().line_h;
+    if (session.sidebarMaxScroll() == 0) return error.SidebarFixtureDoesNotOverflow;
+    session.buildSidebarScrollTree();
+    const snapshot = session.sidebarScrollTree();
+    try std.testing.expect(snapshot.entries.len >= 2);
+
+    var track: ?chrome.ui.layout.UiRect = null;
+    var thumb: ?chrome.ui.layout.UiRect = null;
+    for (snapshot.entries) |entry| {
+        if (entry.id == sidebar_scroll_ids.track) track = entry.rect;
+        if (entry.id == sidebar_scroll_ids.thumb) thumb = entry.rect;
+    }
+    const t = track orelse return error.NoTrack;
+    const h = thumb orelse return error.NoThumb;
+
+    // ④ 트랙은 **헤더 아래**에서 시작한다. 헤더는 스크롤 밖이라 그 옆에 막대가 서면 안 된다.
+    try std.testing.expect(t.y >= @as(f32, @floatFromInt(session.sidebar_header_height_px)));
+    // ⑤ 트랙은 사이드바 안에 있고, gutter가 예약한 폭 안에 든다 — 밴드를 침범하지도, 터미널로 새지도 않는다.
+    try std.testing.expect(t.x >= @as(f32, @floatFromInt(session.sidebar_width_px -| gutter)));
+    try std.testing.expect(t.x + t.width <= @as(f32, @floatFromInt(session.sidebar_width_px)));
+    // ⑥ thumb은 트랙 안이고 최소 크기를 지킨다(뷰포트가 아주 작아도 잡을 수 있어야 한다).
+    try std.testing.expect(h.y >= t.y and h.y + h.height <= t.y + t.height);
+    try std.testing.expect(h.height >= @as(f32, @floatFromInt(sidebar_scrollbar_min_thumb_px)) or h.height >= t.height);
+
+    // ⑦ **도크 목록과 동시에 살아 있다.** 둘은 한 화면에 함께 있으므로 한쪽 발행이 다른 쪽을 지우면 안 된다
+    //    — 도크가 뷰를 갈아끼우며 저장소를 공유하는 것(SV3b)과 조건이 다르다.
+    session.activateFilePanelDockControl();
+    session.buildDockListScrollTree();
+    session.buildSidebarScrollTree();
+    try std.testing.expect(session.sidebarScrollTree().entries.len >= 2);
+    for (session.sidebarScrollTree().entries) |entry| {
+        try std.testing.expect(entry.id != dock_list_scroll_ids.track);
+        try std.testing.expect(entry.id != dock_list_scroll_ids.thumb);
+    }
+}
+
 test "sidebar gets an active-tab highlight band that follows tab create and switch" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

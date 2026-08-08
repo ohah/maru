@@ -3635,6 +3635,11 @@ pub const AppSession = struct {
     dock_list_scroll_drag: chrome.ui.scroll_area.Drag = .{},
     /// carry 판정에 쓰는 down 시점 domain 신원. 기하는 `dock_list_scroll_drag`가 든다.
     dock_list_scroll_drag_owner: ?struct { root_generation: u64, projection_generation: u64 } = null,
+    /// 지금 잡고 있는 스크롤바가 어느 것인가(SV4b). **포인터는 한 번에 하나만 잡으므로** capture와
+    /// `dock_list_scroll_drag`(기하·coalescing)는 하나로 두고 대상만 여기서 가른다. 발행 저장소를
+    /// 나눈 것과는 이유가 다르다 — 저장소는 둘이 동시에 화면에 있어서 나눴고, 이건 동시에 잡히지
+    /// 않아서 합쳤다.
+    scrollbar_drag_target: enum { none, dock_list, sidebar } = .none,
     // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가
     // 아니라 tick 수임을 제품 경로에서 보이려면 그 둘이 달라야 하고, 행 값만 보는 fixture는
     // 한 프레임에 몇 번 적용됐는지를 구분하지 못한다.
@@ -14830,10 +14835,12 @@ pub const AppSession = struct {
         self.scrollbar_interaction.capture = null;
         self.dock_list_scroll_drag.end();
         self.dock_list_scroll_drag_owner = null;
+        self.scrollbar_drag_target = .none;
     }
 
     /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
     fn routeScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
+        if (self.scrollbar_drag_target == .sidebar) return self.routeSidebarScrollbarCapture(kind, y_px);
         const owner = self.dock_list_scroll_drag_owner orelse return false;
         if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
 
@@ -14917,7 +14924,113 @@ pub const AppSession = struct {
     fn applyPendingScrollbarScroll(self: *AppSession) void {
         const offset_px = self.dock_list_scroll_drag.takeOffset() orelse return;
         self.scrollbar_scroll_applications +|= 1;
-        self.setDockListScrollOffsetPx(offset_px);
+        // 어느 스크롤바를 잡았느냐가 offset이 갈 곳을 정한다. 태그를 안 보면 사이드바를 끄는데
+        // **보이지 않는 도크 목록**이 스크롤된다(SV3b가 뷰 라우팅에서 세운 것과 같은 위험이다).
+        switch (self.scrollbar_drag_target) {
+            .sidebar => self.setSidebarScrollOffsetPx(offset_px),
+            .dock_list, .none => self.setDockListScrollOffsetPx(offset_px),
+        }
+    }
+
+    /// 사이드바 스크롤 offset을 적용한다. clamp·재배치·재드로우는 휠 경로와 같은 자리를 쓴다 —
+    /// 드래그가 휠과 다른 상한을 갖게 되면 막대 끝과 목록 끝이 어긋난다.
+    fn setSidebarScrollOffsetPx(self: *AppSession, offset_px: u32) void {
+        const clamped = @min(offset_px, self.sidebarMaxScroll());
+        if (clamped == self.sidebar_scroll_offset_px) return;
+        self.sidebar_scroll_offset_px = clamped;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 사이드바 스크롤바를 잡는다. 도크 목록과 **같은 타입**(`scroll_area.Drag`)을 쓰고 태그만 다르다.
+    fn beginSidebarScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
+        self.buildSidebarScrollTree();
+        const geometry = self.sidebarScrollbarGeometry() orelse return false;
+        if (!geometry.trackContains(x_px, y_px)) return false;
+        if (self.dock_list_scroll_drag.begin(geometry, x_px, y_px)) |jumped| self.setSidebarScrollOffsetPx(jumped);
+        const snapshot = self.sidebarScrollTree();
+        if (snapshot.entries.len == 0) return false;
+        _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
+            .phase = .down,
+            .x_px = x_px,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .generation = snapshot.generation,
+        }) catch return false;
+        if (self.scrollbar_interaction.capture == null) {
+            self.dock_list_scroll_drag.end();
+            return false;
+        }
+        // 사이드바 카드 드래그·일반 포인터 gesture와 동시에 살 수 없다 — 도크 경로와 같은 규율이다.
+        self.clearSidebarDragPreview();
+        self.pointer_gesture_owner = .none;
+        self.scrollbar_drag_target = .sidebar;
+        self.sidebar_scrollbar_idle_ticks = 0;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    /// capture가 살아 있는 동안의 move/up(사이드바). 도크 경로와 같은 형태이되 **carry key가 없다** —
+    /// 사이드바는 목록이 하나뿐이라 "다른 목록으로 바뀌었는가"를 물을 대상이 없고, 대신 아래
+    /// 기하 비교가 "같은 막대를 계속 잡고 있는가"를 판정한다(도크에서도 그 축은 기하가 지킨다).
+    fn routeSidebarScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
+        self.buildSidebarScrollTree();
+        const snapshot = self.sidebarScrollTree();
+        if (snapshot.entries.len == 0) {
+            self.endScrollbarCapture();
+            return true;
+        }
+        const live = self.sidebarScrollbarGeometry() orelse {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (!fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
+            self.endScrollbarCapture();
+            return true;
+        }
+        // 매 move마다 tree를 다시 발행하므로(thumb이 움직인다) capture를 **넘겨야** 한다 — 평범한
+        // `reconcile`은 그것을 버려 드래그가 첫 move에서 끊긴다. carry key는 사이드바에 고정값을 쓴다:
+        // 도크와 달리 "다른 목록으로 바뀌었는가"를 물을 대상이 없고(목록이 하나다), 그 축은 위의 기하
+        // 비교가 이미 지킨다.
+        const key = chrome.ui.interaction.GestureCompatibility{
+            .kind = dock_list_scroll_drag_payload,
+            .enabled = true,
+            .owner_epoch = 0,
+            .domain_identity = 0,
+        };
+        _ = chrome.ui.interaction.reconcileCarryingCapture(&self.scrollbar_interaction, snapshot, key, key) catch {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (self.scrollbar_interaction.capture == null) {
+            self.endScrollbarCapture();
+            return true;
+        }
+        const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
+            .phase = if (kind == 2) .move else .up,
+            .x_px = @as(f64, self.dock_list_scroll_drag.geometry.track_x) + @as(f64, self.dock_list_scroll_drag.geometry.track_w) / 2,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .button = .left,
+            .generation = snapshot.generation,
+        }) catch {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (dispatched.drag) |event| switch (event) {
+            .began, .moved => |update| {
+                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
+                self.scrollbar_move_events +|= 1;
+            },
+            .dropped => |update| {
+                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
+                self.applyPendingScrollbarScroll();
+                self.endScrollbarCapture();
+            },
+            .cancelled => self.endScrollbarCapture(),
+        };
+        if (kind == 3) self.endScrollbarCapture();
+        return true;
     }
 
     /// 드래그 중에 잡은 thumb을 **계속 잡고 있어도 되는가**. 스크롤 위치(`thumb_y`)는 드래그가 바꾸는
@@ -14958,6 +15071,7 @@ pub const AppSession = struct {
             .root_generation = self.file_tree.rootGeneration(),
             .projection_generation = self.file_tree_projection_generation,
         };
+        self.scrollbar_drag_target = .dock_list;
         self.dock_list_scrollbar_idle_ticks = 0;
         self.metal_dirty = true;
         return true;
@@ -24010,6 +24124,9 @@ pub const AppSession = struct {
         // (빈 영역)은 무시. 진행 중이던 터미널 드래그 선택은 멈춘다. 사이드바 클릭은 터미널에 안 닿는다.
         if (self.inSidebar(x_px)) {
             if (kind == 1) {
+                // 스크롤바가 먼저다(SV4b). 막대는 카드 위가 아니라 gutter 안에 서므로 슬롯 hit-test와
+                // 겹치지 않지만, 순서를 뒤로 두면 트랙 위 클릭이 **카드 전환**으로 새 나간다.
+                if (self.beginSidebarScrollbarGesture(x_px, y_px)) return;
                 // 상단 헤더: 새 워크스페이스 아이콘 → 새 탭(하단 "+"를 헤더로 이동), view options 아이콘 → 메뉴(P4),
                 // 검색 영역 → 검색 활성(P3). 헤더 밖(none)이면 카드 슬롯 hit-test(✕ 닫기 / 전환 + 드래그 재정렬).
                 const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
@@ -32775,6 +32892,9 @@ pub const AppSession = struct {
                 .gutter_px = @floatFromInt(self.sidebarScrollGutterPx()),
                 .metrics = self.sidebarScrollbarMetrics(),
                 // fade alpha는 선언에 싣지 않는다 — 매 프레임 달라져 reconcile을 다시 돌게 한다(§7).
+                // thumb을 누른 것 자체가 스크롤 의사라 threshold는 0이다. track도 같은 payload를 선언해
+                // 눌러 점프한 뒤 손을 떼지 않고 이어 끌 수 있다(도크·탐색기와 같은 규율).
+                .drag = .{ .payload = dock_list_scroll_drag_payload, .axis = .vertical, .threshold_px = 0 },
                 .track = .{ .id = sidebar_scroll_ids.track, .action = .{ .id = sidebar_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
                 .thumb = .{ .id = sidebar_scroll_ids.thumb, .action = .{ .id = sidebar_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ sidebar_scrollbar_width_px / 2, sidebar_scrollbar_width_px / 2, sidebar_scrollbar_width_px / 2, sidebar_scrollbar_width_px / 2 } } },
             },
@@ -32804,6 +32924,26 @@ pub const AppSession = struct {
         }
         self.sidebar_scroll_entry_count = built.entries.len;
         self.sidebar_scroll_max_offset_px = extent.max_offset_px;
+    }
+
+    fn sidebarScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
+        var track: ?chrome.ui.layout.UiRect = null;
+        var thumb: ?chrome.ui.layout.UiRect = null;
+        for (self.sidebar_scroll_entries[0..self.sidebar_scroll_entry_count]) |entry| {
+            if (entry.id == sidebar_scroll_ids.track) track = entry.rect;
+            if (entry.id == sidebar_scroll_ids.thumb) thumb = entry.rect;
+        }
+        const t = track orelse return null;
+        const h = thumb orelse return null;
+        return .{
+            .track_x = t.x,
+            .track_y = t.y,
+            .track_w = t.width,
+            .track_h = t.height,
+            .thumb_y = h.y,
+            .thumb_h = h.height,
+            .max_offset_px = self.sidebar_scroll_max_offset_px,
+        };
     }
 
     fn sidebarScrollTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
@@ -54980,6 +55120,58 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
         try std.testing.expect(entry.id != dock_list_scroll_ids.track);
         try std.testing.expect(entry.id != dock_list_scroll_ids.thumb);
     }
+}
+
+// SV4b — 사이드바 스크롤바를 **잡아 끌 수 있다**(그 전까지는 휠 전용이었다). capture와 드래그 기하는
+// 도크 목록과 공유하므로, 어느 쪽을 잡았는지 태그가 갈리면 **보이지 않는 목록**이 스크롤된다.
+test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock list alone" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 넘치되 **thumb이 움직일 자리가 남는** 뷰포트를 만든다. 뷰포트를 한 줄까지 줄이면 thumb이
+    // 최소 크기에 걸려 트랙을 꽉 채우고, 그러면 아무리 끌어도 offset이 0이라 이 테스트가 드래그를
+    // 판정하지 못한다(§10.1 "단언이 판정할 수 있는 상태인지 본다").
+    // 카드를 늘려 콘텐츠를 키운다 — 뷰포트를 절반으로 잡아도 thumb이 최소 크기에 안 걸리려면
+    // 콘텐츠가 그만큼 길어야 한다.
+    for (0..8) |_| _ = session.newTab() catch {};
+    try session.rebuildSidebar();
+    const content_h = chrome.components.sidebar.contentHeight(session.sidebarRenderRows(), session.sidebarMetrics());
+    const viewport_h = content_h / 2;
+    if (viewport_h <= sidebar_scrollbar_min_thumb_px * 2) return error.SidebarFixtureTooShort;
+    session.backing_height_px = session.sidebar_header_height_px + session.statusBarHeightPx() + viewport_h;
+    if (session.sidebarMaxScroll() == 0) return error.SidebarFixtureDoesNotOverflow;
+
+    session.buildSidebarScrollTree();
+    const geometry = session.sidebarScrollbarGeometry() orelse return error.NoSidebarScrollbar;
+    const dock_before = session.file_tree_scroll.offset_y_px;
+
+    // ① thumb을 누르면 capture가 서고 대상이 사이드바로 태그된다.
+    try std.testing.expect(session.beginSidebarScrollbarGesture(
+        @as(f64, geometry.track_x) + @as(f64, geometry.track_w) / 2,
+        @as(f64, geometry.thumb_y) + @as(f64, geometry.thumb_h) / 2,
+    ));
+    try std.testing.expect(session.scrollbarCaptureActive());
+    try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .sidebar), session.scrollbar_drag_target);
+
+    // ② 트랙 바닥까지 끌면 사이드바가 상한까지 간다. move는 흡수만 하고 tick이 소비한다(§4.3).
+    _ = session.routeScrollbarCapture(2, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+    session.applyPendingScrollbarScroll();
+    try std.testing.expectEqual(session.sidebarMaxScroll(), session.sidebar_scroll_offset_px);
+    try std.testing.expect(session.sidebar_scroll_offset_px > 0);
+
+    // ③ **도크 목록은 그대로다.** 태그를 안 보면 offset이 그쪽으로 갔을 것이다.
+    try std.testing.expectEqual(dock_before, session.file_tree_scroll.offset_y_px);
+
+    // ④ up이 capture와 태그를 함께 놓는다 — 태그가 남으면 다음 도크 드래그가 사이드바를 움직인다.
+    _ = session.routeScrollbarCapture(3, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+    try std.testing.expect(!session.scrollbarCaptureActive());
+    try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .none), session.scrollbar_drag_target);
+
+    // ⑤ 트랙 **밖**을 누르면 스크롤바가 잡히지 않는다 — 카드 클릭이 스크롤로 새면 안 된다.
+    try std.testing.expect(!session.beginSidebarScrollbarGesture(0, @as(f64, geometry.track_y) + 1));
 }
 
 test "sidebar gets an active-tab highlight band that follows tab create and switch" {

@@ -756,6 +756,16 @@ pub const AttachmentCleanupRegistry = struct {
         return entry.prepared_request.settlementReadiness();
     }
 
+    pub fn rpcResponseSettlementReadinessForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) Error!rpc_response_authority.SettlementReadiness {
+        if (!@import("builtin").is_test) @compileError("test-only RPC response readiness");
+        const entry = try self.exactEntry(reservation, identity);
+        return entry.rpc_response_authority.settlementReadiness();
+    }
+
     pub fn transportTerminalizeReadiness(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,

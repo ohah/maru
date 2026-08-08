@@ -23914,42 +23914,14 @@ pub const AppSession = struct {
     /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
     /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
-    pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
-        if (!self.surface_initialized) return;
-        // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
-        // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
-        // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
-        // 위로 지나갈 때 끊기면 안 된다(capture 소유자가 계속 받아야 한다).
-        // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 모달은 결정 게이트라(아래 confirm/notice 처리가
-        // 그 계약을 갖는다) 상태바 항목이 그 뒤에서 도크·패널을 여는 것은 단일-오버레이 불변식 위반이다.
-        // 이 가드가 그 처리보다 **앞에** 있으므로 여기서 직접 비켜 줘야 한다(scrollWheel은 모달 검사 뒤라 무관).
-        if (kind == 1 and !self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) {
-            // 바 위 down은 여전히 삼킨다(터미널 선택이 시작되면 안 된다). 다만 클릭 가능한 항목 위라면
-            // 삼키기 **전에** 실행한다 — 상태바가 조작 지점이 되는 지점이다.
-            if (self.statusBarItemAt(x_px, y_px)) |id| {
-                if (statusBarItemClickable(id)) self.activateStatusBarItem(id);
-            }
-            return;
-        }
-        // 새 primary down은 이전 capture의 mouse-up이 유실됐더라도 먼저 단일 owner를 exhaustive 취소한다.
-        // 이후 실제 hit target만 새 owner를 arm하므로 terminal/dock/sidebar/divider가 동시에 살아남지 않는다.
-        // **취소 직전의 "보이던 탭 순서"는 기억해 둔다** — 이 down이 겨냥한 것은 화면에 그려져 있던 preview
-        // 순서이고, 취소가 먼저 돌면 아래 탭 hit-test는 이미 model 순서를 보게 된다(§4.4 "보이는 것이 눌린다").
-        // 버퍼는 취소가 지우지 않으므로(유효성의 출처는 union 태그) 슬라이스는 이 이벤트 동안 그대로 유효하다.
-        //
-        // **캡처는 `kind == 1` 전체**다(취소는 primary만). 탭 바 hit-test(아래 `if (kind == 1)`)에는 버튼
-        // 게이트가 없어 중/우클릭 down도 같은 슬롯 판정을 타는데, 그쪽은 제스처를 취소하지 않으므로 preview가
-        // 여전히 화면에 있다 — 캡처를 primary로 좁히면 그 버튼들에서만 슬롯이 model 인덱스로 오독돼 ✕가 다른
-        // 터미널을 닫는다(1차 리뷰가 닫은 결함이 버튼 축으로 되살아난다).
-        var shown_tab_pane: ?*Pane = null;
-        if (kind == 1) {
-            if (self.pointerGestureIs(.terminal_tab)) shown_tab_pane = self.pointer_gesture_owner.terminal_tab.pane;
-            if (button == 0) self.cancelPointerGesture();
-        }
-        // command(⌘, xterm 비트 32) 눌림 — 사이드바 그룹 드래그의 "Cmd=중첩 / 없으면 형제" 판정에 쓴다(groupDragPreviewFrame).
-        // 터미널 마우스 리포트로 갈 때는 아래 report_mouse 경로에서 32비트를 마스킹해 뺀다(command=32이 input_report.zig
-        // reportMouse의 SGR motion 비트 32와 충돌 — cb=button+mods+motion이라 섞이면 리포트가 오염된다). shift/option 게이트는 불변.
-        const cmd_held = (mods & 32) != 0;
+    /// 진행 중인 포인터 제스처(사이드바 탭·그룹, 터미널 탭, pane, 각종 divider, 스크롤바 드래그)가
+    /// 이 이벤트를 캡처하는지 판정하고, 캡처하면 처리까지 마친다. 반환 true = 이벤트 소비됨.
+    ///
+    /// `mouse`에서 떼어낸 이유는 순서 자체가 계약이기 때문이다 — 이 블록은 어떤 오버레이 라우팅보다
+    /// **먼저** 와야 하고(아래 본문 주석), 아홉 개 제스처가 모두 같은 모양(`pointerGestureIs(...) and
+    /// (kind == 2 or kind == 3)`)으로 늘어서 있어 한 덩어리로 읽고 한 덩어리로 옮겨야 한다.
+    /// down(1)은 여기서 처리하지 않고 호출자의 일반 라우팅으로 흘려 새 제스처를 시작하게 둔다.
+    fn routeActivePointerGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, cmd_held: bool) bool {
         // ── 진행 중인 포인터 제스처 라우팅(오버레이보다 먼저) ─────────────────────────────
         // **살아 있는 제스처는 어떤 오버레이보다 먼저 자기 이벤트(move·up)를 받는다.** 오버레이 블록이
         // 앞에 있으면 드래그 도중 비동기로 뜬 것(알림 토스트·패널)이 up을 삼켜 제스처가 영영 끝나지
@@ -23997,7 +23969,7 @@ pub const AppSession = struct {
                 self.commitSidebarDragPreview();
                 self.finishPointerGesture();
             }
-            return;
+            return true;
         }
         // 그룹 헤더 드래그(SG5-1)가 arm됐으면 drag(2)/up(3)을 캡처한다 — down에선 접기 토글 후보로만 arm하고(현 동작 보존),
         // 여기서 클릭 vs 드래그를 threshold로 가른다: drag y 이동이 threshold(헤더 한 줄 절반)를 넘으면 active로 승격해 그룹
@@ -24036,7 +24008,7 @@ pub const AppSession = struct {
                 }
                 self.finishPointerGesture();
             }
-            return;
+            return true;
         }
         // Term 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 소스 pane 바 안에서 x로 타겟 탭을 잡아
         // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
@@ -24059,7 +24031,7 @@ pub const AppSession = struct {
                 // 리페인트를 안 걸면 손을 뗀 뒤에도 그 잔상이 화면에 남는다(effect 0은 model 축이지 화면 축이 아니다).
                 self.metal_dirty = true;
             }
-            return;
+            return true;
         }
         // pane(분할 영역) 통째 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 커서 좌표만 갱신(floating
         // 미리보기가 따라가게), up이 사이드바면 새 워크스페이스 분리/합치기(dropPaneAt). 사이드바 밖이면 no-op.
@@ -24085,7 +24057,7 @@ pub const AppSession = struct {
                 if (was_highlighting) self.rebuildSidebar() catch {};
                 self.metal_dirty = true;
             }
-            return;
+            return true;
         }
         // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. mouse-down을 Metal view가 받았으므로 AppKit이
         // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
@@ -24096,14 +24068,14 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
                 self.finishPointerGesture();
             }
-            return;
+            return true;
         }
         // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — 이제 그 capture는 chrome
         // `InteractionState`가 든다(CIM2). move는 좌표를 모으기만 하고 tick이 최종 하나를 적용하며,
         // 매 move의 재발행에서 capture를 넘길지는 §5 carry verdict가 판정한다. 새 down(1)은 아래
         // 일반 처리로 흘려 새 드래그를 시작한다.
         if (self.dividerCaptureActive() and (kind == 2 or kind == 3)) {
-            if (self.routeDividerCapture(kind, x_px, y_px)) return;
+            if (self.routeDividerCapture(kind, x_px, y_px)) return true;
         }
         // 사이드바 폭 조절 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(③a) — drag는 경계를 x로 잡아 폭을 live
         // 갱신, up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그를 시작한다.
@@ -24121,20 +24093,60 @@ pub const AppSession = struct {
                 }
                 self.finishPointerGesture();
             }
-            return;
+            return true;
         }
         // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
         // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
         // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
         if (self.scrollbarCaptureActive() and (kind == 2 or kind == 3)) {
-            if (self.routeScrollbarCapture(kind, y_px)) return;
+            if (self.routeScrollbarCapture(kind, y_px)) return true;
         }
         if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
             if (kind == 2) self.dragScrollbarTo(y_px) else {
                 self.finishPointerGesture();
             }
+            return true;
+        }
+        return false;
+    }
+
+    pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
+        if (!self.surface_initialized) return;
+        // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
+        // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
+        // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
+        // 위로 지나갈 때 끊기면 안 된다(capture 소유자가 계속 받아야 한다).
+        // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 모달은 결정 게이트라(아래 confirm/notice 처리가
+        // 그 계약을 갖는다) 상태바 항목이 그 뒤에서 도크·패널을 여는 것은 단일-오버레이 불변식 위반이다.
+        // 이 가드가 그 처리보다 **앞에** 있으므로 여기서 직접 비켜 줘야 한다(scrollWheel은 모달 검사 뒤라 무관).
+        if (kind == 1 and !self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) {
+            // 바 위 down은 여전히 삼킨다(터미널 선택이 시작되면 안 된다). 다만 클릭 가능한 항목 위라면
+            // 삼키기 **전에** 실행한다 — 상태바가 조작 지점이 되는 지점이다.
+            if (self.statusBarItemAt(x_px, y_px)) |id| {
+                if (statusBarItemClickable(id)) self.activateStatusBarItem(id);
+            }
             return;
         }
+        // 새 primary down은 이전 capture의 mouse-up이 유실됐더라도 먼저 단일 owner를 exhaustive 취소한다.
+        // 이후 실제 hit target만 새 owner를 arm하므로 terminal/dock/sidebar/divider가 동시에 살아남지 않는다.
+        // **취소 직전의 "보이던 탭 순서"는 기억해 둔다** — 이 down이 겨냥한 것은 화면에 그려져 있던 preview
+        // 순서이고, 취소가 먼저 돌면 아래 탭 hit-test는 이미 model 순서를 보게 된다(§4.4 "보이는 것이 눌린다").
+        // 버퍼는 취소가 지우지 않으므로(유효성의 출처는 union 태그) 슬라이스는 이 이벤트 동안 그대로 유효하다.
+        //
+        // **캡처는 `kind == 1` 전체**다(취소는 primary만). 탭 바 hit-test(아래 `if (kind == 1)`)에는 버튼
+        // 게이트가 없어 중/우클릭 down도 같은 슬롯 판정을 타는데, 그쪽은 제스처를 취소하지 않으므로 preview가
+        // 여전히 화면에 있다 — 캡처를 primary로 좁히면 그 버튼들에서만 슬롯이 model 인덱스로 오독돼 ✕가 다른
+        // 터미널을 닫는다(1차 리뷰가 닫은 결함이 버튼 축으로 되살아난다).
+        var shown_tab_pane: ?*Pane = null;
+        if (kind == 1) {
+            if (self.pointerGestureIs(.terminal_tab)) shown_tab_pane = self.pointer_gesture_owner.terminal_tab.pane;
+            if (button == 0) self.cancelPointerGesture();
+        }
+        // command(⌘, xterm 비트 32) 눌림 — 사이드바 그룹 드래그의 "Cmd=중첩 / 없으면 형제" 판정에 쓴다(groupDragPreviewFrame).
+        // 터미널 마우스 리포트로 갈 때는 아래 report_mouse 경로에서 32비트를 마스킹해 뺀다(command=32이 input_report.zig
+        // reportMouse의 SGR motion 비트 32와 충돌 — cb=button+mods+motion이라 섞이면 리포트가 오염된다). shift/option 게이트는 불변.
+        const cmd_held = (mods & 32) != 0;
+        if (self.routeActivePointerGesture(kind, x_px, y_px, cmd_held)) return;
         // 닫기 확인 모달이 열려 있으면 마우스는 **버튼 클릭만** 처리하고 나머지는 삼킨다 — 파괴적 게이트라 뒤
         // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다. down(kind 1)이면
         // confirm.buttonAtPoint로 hit-test(view와 같은 buttonGeom 단일 레이아웃): 확인 버튼=confirmed, 취소 버튼·

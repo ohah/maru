@@ -907,6 +907,24 @@ enum BrowserControl {
     @MainActor static func goForward(_ webView: WKWebView) { webView.goForward() }
     @MainActor static func reload(_ webView: WKWebView) { webView.reload() }
 
+    // §8 슬라이스 ②: 페이지 내 찾기. WebKit이 검색·하이라이트·스크롤을 다 하고, 우리는 찾았는지만 되돌린다.
+    // **JS를 주입하지 않는다** — markdown/browser 패널에는 bridge가 없다는 §7·§8 원칙 때문이다.
+    // WKFindResult는 `matchFound`뿐이라 **매치 개수를 알 수 없다**(오버레이가 "n/m"을 못 쓰는 이유).
+    @MainActor static func find(
+        _ webView: WKWebView,
+        query: String,
+        backwards: Bool,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let cfg = WKFindConfiguration()
+        cfg.backwards = backwards
+        cfg.caseSensitive = false // 터미널 find와 같은 대소문자 무시 규칙
+        cfg.wraps = true          // 끝에서 처음으로 — ⌘G 반복이 막히지 않게
+        webView.find(query, configuration: cfg) { result in
+            completion(result.matchFound)
+        }
+    }
+
     // 5f-1: browser.screenshot → takeSnapshot으로 현재 표시 영역을 NSImage로 캡처한 뒤 **PNG Data**로 인코딩해 돌려준다
     // (async 콜백 — getCookies/executeScript와 동형). 실패(스냅샷 에러·비트맵/PNG 변환 실패)면 nil. 라우팅·chunk 분할·
     // metadata(IHDR)는 Zig, 여긴 WKWebView 스냅샷 API + PNG 인코딩 어댑터만(네이티브 최소). PNG 변환은 clipboardImagePng과
@@ -3799,6 +3817,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 시에만이라, tick마다 4KB 새로 할당·zero-fill하지 않고 이 버퍼를 재사용한다(리뷰 [9]). Zig가 navLen만 쓰고 반환 길이로
     // 슬라이스하므로 zero-fill 불필요. addr_nav_url_cap(4096, app_scheme)과 정합.
     private var webNavigateUrlBuf = [UInt8](repeating: 0, count: 4096)
+    // 페이지 찾기 질의 버퍼(Zig web_find_query_cap=512와 짝). 넘치면 Zig가 아예 제출하지 않는다.
+    private var webFindQueryBuf = [UInt8](repeating: 0, count: 512)
     private var fileTreePathBuf = [UInt8](repeating: 0, count: Int(MARU_FILE_TREE_PATH_CAPACITY))
     // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
@@ -7254,6 +7274,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 1: BrowserControl.goForward(wp.webView)
             case 2: BrowserControl.reload(wp.webView)
             default: break
+            }
+        }
+
+        // §8 슬라이스 ②: 페이지 찾기 질의 drain. 오버레이·검색어·라우팅은 Zig, 여긴 WKWebView.find 어댑터만.
+        // 결과는 completion에서 seq와 함께 돌려주고, 늦은 회신은 Zig가 버린다(우리는 판단하지 않는다).
+        var findSid: UInt64 = 0
+        var findBackwards: UInt32 = 0
+        var findLen = 0
+        let findSeq = webFindQueryBuf.withUnsafeMutableBufferPointer { p in
+            maru_macos_app_session_take_web_find_query(
+                session, p.baseAddress, p.count, &findLen, &findSid, &findBackwards
+            )
+        }
+        if findSeq != 0, surface.webPanels[findSid] == nil {
+            // 아직 WKWebView가 없다(방금 만든 탭). 그냥 버리면 Zig가 "보냈다"로 남겨 재시도하지 않으므로 신고한다.
+            maru_macos_app_session_web_find_undeliverable(session, findSeq)
+        }
+        if findSeq != 0, let wp = surface.webPanels[findSid] {
+            let query = String(decoding: webFindQueryBuf[0 ..< findLen], as: UTF8.self)
+            // **제출한 그 surface의 세션**으로만 돌려준다(weak surface). 활성 창이 바뀐 뒤 `activeSurface`로 다시
+            // 찾으면 남의 세션에 결과를 주게 되고, seq는 세션마다 0에서 시작하므로 우연히 맞아떨어질 수 있다.
+            BrowserControl.find(wp.webView, query: query, backwards: findBackwards != 0) { [weak surface] found in
+                MainActor.assumeIsolated {
+                    guard let s = surface?.appSession else { return }
+                    maru_macos_app_session_provide_web_find_result(s, findSeq, found ? 1 : 0)
+                }
             }
         }
 

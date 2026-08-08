@@ -1424,6 +1424,20 @@ int64_t maru_macos_app_session_web_nav_url_at(
 /* Phase 7e-2b: 주소창 편집 신호 drain(tick마다). (1) focus-pull: 편집 진입 시 "포커스를 터미널 뷰로"(1=있음, keyDown이
    Zig로 흐르게). (2) navigate: Enter 시 로드 요청 — url을 out에, surface_id를 out-ptr에, url 길이 반환(없으면 -1) →
    BrowserControl.navigate. (3) focus-restore: commit/cancel 후 웹뷰로 포커스 복원 대상 surface_id(out-ptr, 1=있음). */
+/* §8 슬라이스 ②: 웹 탭 페이지 찾기(⌘F). (1) take: 1회성 질의를 걷어 간다 — query를 out에, 길이·surface_id·backwards를
+   out-ptr에 싣고 seq 반환(0=없음) → BrowserControl.find. (2) provide: WKWebView.find completion 결과(찾음 여부)를 seq와
+   함께 되돌린다(늦은 회신은 Zig가 버린다). */
+uint64_t maru_macos_app_session_take_web_find_query(
+    MaruAppHostSession *session,
+    uint8_t *query_out,
+    size_t query_cap,
+    size_t *query_len_out,
+    uint64_t *surface_id_out,
+    uint32_t *backwards_out
+);
+void maru_macos_app_session_provide_web_find_result(MaruAppHostSession *session, uint64_t seq, uint32_t found);
+void maru_macos_app_session_web_find_undeliverable(MaruAppHostSession *session, uint64_t seq);
+
 uint32_t maru_macos_app_session_take_web_addr_focus_pull(MaruAppHostSession *session);
 int64_t maru_macos_app_session_take_web_addr_navigate(
     MaruAppHostSession *session,

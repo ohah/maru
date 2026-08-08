@@ -66,7 +66,7 @@
   2. **터미널 IME 무회귀**: 웹 래퍼(`MaruWebPanelView`)의 override는 **웹이 포커스일 때만** 동작하고(그 외엔 `false`만 반환) 터미널 뷰의 keyDown/`NSTextInputClient`/`performKeyEquivalent`를 **한 줄도 건드리지 않는다**. local event monitor는 매 keystroke(한글 조합 포함)를 앱 전역에서 가로채는 병렬 경로라 터미널 IME 폭발반경이 크고, 현행 performKeyEquivalent+`anyOverlayOpen` 패턴과도 이질적이라 기각.
   3. **모달 responder 전이**: 웹 포커스 중 모달이 열리면(`anyOverlayOpen` false→true 엣지) `makeFirstResponder(터미널 뷰)`로 전이해 모달 입력·IME preedit가 터미널 `NSTextInputClient`로 흐르고, 닫히면(true→false) 직전 웹뷰로 복원한다. 전이는 **기존** `becomeFirstResponder`(imeFocus true)/`resignFirstResponder`(commitComposition)를 그대로 태운다 — 새 IME 로직 없음. 엣지는 매 tick + 모달 여는 조합 직후 동기로 조정한다(조합 직후 타이핑이 웹뷰로 새지 않게).
   - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
-  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 구현 완료(2026-07-21)** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find는 **§8에 설계가 확정**됐고 아직 미구현이다(라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind` — §8이 그 이유를 적는다). 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
+  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 구현 완료(2026-07-21)** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find는 **§8 슬라이스 ①②로 구현 완료**다(라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind` — §8이 그 이유를 적는다). 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
 
 ### 4.1 웹↔터미널 포커스 동기 불변식 (4g — 흩어진 포커스 패치 통합)
 
@@ -110,7 +110,7 @@
 
 **모드별 결과**: `live`·`source` 마크다운은 CM6가 복사·붙여넣기·전체 선택을 모두 처리한다. `read` 마크다운·`html`은 편집기가 아니므로 **선택 텍스트 복사(⌘C)와 전체 선택(⌘A)만** WebKit이 수행하고 붙여넣기(⌘V)는 삽입 대상이 없어 no-op이다. 이는 [key-input-and-shortcuts.md](key-input-and-shortcuts.md)의 `web_editor`/`pass_through` "WebKit에 양보" 계약을 **메뉴바 축에서 실제로 성립**시키는 보완이다.
 
-**베이스·결정**: responder chain 표준 셀렉터 dispatch(macOS 관용 — WKWebView는 `copy:`/`paste:`/`selectAll:`을 이미 지원). 대안인 "터미널 Metal 뷰에 `copy:`/`paste:`/`selectAll:` NSResponder 구현 + 메뉴 `target=nil` 표준 체인 전환"은 가장 관용적이나 **가장 민감한 터미널 입력·IME 경로**를 건드려 블라스트 반경이 커 기각(사용자 결정 2026-07-21). `⌘F` 페이지 내 find 포커스 분기는 §8 후속으로 남긴다.
+**베이스·결정**: responder chain 표준 셀렉터 dispatch(macOS 관용 — WKWebView는 `copy:`/`paste:`/`selectAll:`을 이미 지원). 대안인 "터미널 Metal 뷰에 `copy:`/`paste:`/`selectAll:` NSResponder 구현 + 메뉴 `target=nil` 표준 체인 전환"은 가장 관용적이나 **가장 민감한 터미널 입력·IME 경로**를 건드려 블라스트 반경이 커 기각(사용자 결정 2026-07-21). `⌘F` 페이지 내 find는 §8이 소유한다(포커스가 아니라 `activeWebSurfaceIdAnyKind` 기준 — 구현 완료).
 
 **검증**: firstResponder는 AppKit이라 헤드리스 불가 — **GUI 손 테스트가 유일 안전망**(§11). ⑴ 도크 `read` `.md`·`.html`에서 텍스트 선택 후 `⌘C`→외부 앱 붙여넣기로 확인, ⑵ `live`/`source`에서 `⌘C`/`⌘V`/`⌘A`가 CM6에 작용, ⑶ 터미널 포커스에서 `⌘C`/`⌘V`/`⌘A`가 기존대로 터미널에 동작(무회귀), ⑷ 모달 열림·`.dock_group` publish 대기 중에는 터미널 경로.
 
@@ -204,22 +204,66 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 - **파일 패널(마크다운·HTML 뷰어/편집기)**: 로컬 `.md`/`.html`을 여는 파일 패널 — 파일 탭·헤더 밴드·파일 트리 = GPU chrome, 브리지 `file.read/write`, CodeMirror 6 편집 — 은 [file-panel.md](file-panel.md)를 단일 출처로 둔다(§7 브리지 origin 격리·§4 포커스 불변식과 상호작용). **현행(FP1~FP15)**은 창 레벨 전역 도크 슬롯(우측|하단)이라 워크스페이스 pane 트리 밖이고 §2 destroy 규칙의 비대상이다. **FP16 목표**는 파일을 워크스페이스 Term(`web_panel_kind = .file`)으로 옮기고 도크를 탐색기 전용으로 축소하는 것이며, 그 때 파일 패널은 §2 규칙의 **정상 대상이 되고 대신 그 규칙의 destroy가 hidden 보존으로 바뀐다**(§2 FP16 항목). 웹 브라우저(`browser` kind)는 이 문서 그대로 워크스페이스 term이고, 전환 시 흰 페이지가 되던 문제는 FP16 §4가 함께 해소한다(별도 URL 기억·재로드 백로그는 폐기).
 - **배경 정합**: 신뢰 Markdown 파일 패널의 **초기 paint**는 [file-panel.md](file-panel.md) §1 계약대로 생성 시 공개 API `underPageBackgroundColor`와 hash-pinned critical CSS를 함께 써 기본 흰 backing을 노출하지 않는다. 반면 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 임의 browser/로컬 HTML 본문까지 투명화할지는 여전히 별도 결정이다. 그 경우에도 공개 API `underPageBackgroundColor`(macOS 12+)만 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
-- **⌘F 분기(설계 확정 — 미구현)**: 지금은 **웹/마크다운 탭에서도 ⌘F가 터미널 스크롤백 find를 연다**(우상단 오버레이).
-  `toggleFind`가 활성 서페이스 종류를 보지 않기 때문이고, 그 오버레이는 웹 콘텐츠를 검색하지 못한다(사용자 제보).
+- **⌘F 분기(구현 완료 — 슬라이스 ①②)**: 예전에는 **웹/마크다운 탭에서도 ⌘F가 터미널 스크롤백 find를 열었다**
+  (우상단 오버레이). `toggleFind`가 활성 서페이스 종류를 보지 않았고, 그 오버레이는 웹 콘텐츠를 검색하지 못했다
+  (사용자 제보). 지금은 **같은 오버레이가 대상만 바꾼다** — 활성 탭이 웹이면 질의가 그 페이지로 나간다.
 
   - **라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind`(활성 pane의 web 탭, browser·markdown 모두)다.**
     ⚠️ `activeWebSurfaceId`가 **아니다** — 그건 browser 전용이라 **마크다운 뷰어 탭에서 0을 돌려주고**, 제보된 그 버그가
     그대로 남는다(제보는 마크다운 탭이었다). 위 §8의 원래 서술("포커스 기준")을
     **정정한다** — §7e-4가 ⌘R에서 같은 함정을 이미 겪었다: 브라우저 탭을 활성화해도 webView에 자동 포커스를 주지
     않으므로 `isWebPanelFocused`로 게이트하면 **"탭 열어 보기만 하면 안 됨"**이 된다(제보로 드러났다). ⌘F도 같다.
-  - **UI는 기존 find 오버레이를 재사용한다.** 새 검색 UI를 만들지 않는다 — 사용자가 아는 입력·⌘G 네비게이션·매치
-    카운트를 그대로 쓰고, **질의를 어디로 보낼지만** 활성 서페이스가 정한다(상태바 브랜치 메뉴가 "이미 있는 표면을
-    재사용"한 것과 같은 규율).
+  - **UI는 기존 find 오버레이를 재사용한다.** 새 검색 UI를 만들지 않는다 — 사용자가 아는 입력·Enter/Shift+Enter·⌘G
+    네비게이션을 그대로 쓰고, **질의를 어디로 보낼지만** 활성 서페이스가 정한다(상태바 브랜치 메뉴가 "이미 있는
+    표면을 재사용"한 것과 같은 규율). 대상은 `find.State.target`(scrollback|page)이 들고, **tick이 매 프레임
+    동기화한다** — 전환 경로(탭·pane·창·탭 닫기)마다 세우면 반드시 빠뜨리는 문이 남기 때문이다. **열림 여부로
+    게이트하지 않는다**: 닫힌 동안 탭이 바뀌면 대상이 굳어, 다시 열자마자 그리는 첫 프레임이 지난 탭 모드로 나간다.
+    - 대상이 페이지로 바뀌면 스크롤백 매치를 버리고(그 화면 것이 아니다), **터미널로 돌아오면 다시 찾는다**.
+      단 재검색은 **하이라이트를 실제로 그리는 상태**(오버레이가 열렸거나 ⌘G 네비 중)에서만 한다 —
+      `recomputeFind`가 `scrollToCurrentMatch`까지 부르므로, 닫아 둔 find에서 돌리면 탭 복귀만으로 화면이 점프한다.
   - **검색·하이라이트는 WebKit이 한다**(`WKWebView.findString(_:configuration:completionHandler:)`).
-    **페이지에 스크립트를 주입하지 않는다** — 이 문서 §7과 §8의 "markdown/browser에서 bridge 부재" 원칙이
-    JS 기반 검색을 막는다. browser 탭(외부 콘텐츠)은 애초에 브리지가 없어 그 길이 존재하지도 않는다.
-  - **슬라이스**: ① Zig 라우팅(웹 탭이면 터미널 find를 열지 않고 web-find 질의를 pending으로) → ② ABI+Swift 배선
-    (`findString` 호출·결과 카운트 회신) → ③ 오버레이에 웹 매치 수·⌘G 네비 연결.
+    **페이지에 스크립트를 주입하지 않는다.**
+    > ⚠️ 앞선 초안은 그 근거를 "markdown/browser에서 bridge 부재"로 적었는데 **오독이었다** — 그 문장은
+    > [editor-surface.md]의 **CM6 page-world 브리지**가 없다는 뜻이지 우리 코드가 없다는 뜻이 아니다.
+    > 마크다운 뷰어는 **우리가 만든 페이지**(`web/src/main.ts`, 거기서 `contextmenu`를 이미 가로챈다)라
+    > JS 검색이 기술적으로 **가능하다**. 주입하지 않는 진짜 이유는 아래 "왜 네이티브 단일 경로인가"다.
+
+  - **왜 네이티브 단일 경로인가**: JS 검색은 **마크다운에서만** 되고 browser 탭(외부 콘텐츠)에서는 안 된다.
+    거기서 갈라 놓으면 같은 ⌘F가 탭 종류에 따라 다르게 동작해 **한 기능에 규약이 둘**이 된다.
+    네이티브 `find`는 두 종류가 **똑같이** 동작하고 페이지에 아무것도 넣지 않는다.
+
+  - **매치 개수는 넣지 않는다(제약).** `WKFindResult`에는 `matchFound: Bool`뿐이고 **개수 필드가 없다**.
+    배포 하한이 macOS 11(`build.zig`)이라 더 새 API도 쓸 수 없다. 반복 호출로 세는 우회는 매치마다 선택·스크롤이
+    움직여 화면이 튀므로 하지 않는다. 웹 탭은 **찾음/없음**만 표시한다.
+    - **"cur/total" 자리를 비워 두지 않고 찾음/없음을 그린다.** 그 자리에 `0/0`을 남기면 WebKit이 노랗게
+      하이라이트한 화면과 정면으로 모순돼 "못 찾았다"로 읽힌다. 결과가 오기 전에는 아무것도 그리지 않는다
+      (빈 자리 < 틀린 숫자). 나중에 마크다운 한정 JS 카운트를 붙이면 **덧붙이기**로 끝나고 재설계가 아니다.
+
+  - **비동기 수명이 핵심 위험이다.** `find`는 completion handler다 — 질의를 보낸 뒤 결과가 오기 전에 사용자가
+    **탭을 바꾸거나 오버레이를 닫을 수 있다**. 늦게 온 결과를 그대로 반영하면 "누른 적 없는 상태"가 화면에 뜬다.
+    상태바 브랜치 메뉴에서 **실제로 그 결함이 났다**(요청 중 상태바가 사라져도 메뉴가 떴다) — 같은 규율을 쓴다:
+    - 질의마다 **request id**를 싣고, 회신이 그 id와 다르면 **버린다**.
+    - 오버레이가 닫혔으면 반영하지 않는다.
+    - **id만으로는 부족하다**: A에서 제출한 뒤 결과가 오기 전에 B로 옮기면 id는 아직 유효한데 그 답은 A의 것이다.
+      그대로 붙이면 B 화면이 A의 찾음/없음을 말한다(실측). **제출 대상과 지금 보이는 탭이 같을 때만** 반영한다.
+    - Swift도 **제출한 그 surface의 세션**으로만 돌려준다(weak surface). 활성 창으로 다시 찾으면 남의 세션에
+      결과를 주게 되고, id는 세션마다 0에서 시작하므로 우연히 맞아떨어질 수 있다.
+
+  - **재제출 판정은 "대상 탭 + 검색어"다.** "결과를 아직 못 받았는가"로 게이트하면 같은 검색어로 다른 웹 탭에
+    갔을 때 그 탭은 **영영 검색되지 않는다**(실측). 반대로 조건이 없으면 tick마다 재제출해 WebKit 하이라이트가
+    매 프레임 첫 매치로 튄다.
+
+  - **전달 실패는 신고해야 한다.** 방금 만든 웹 탭은 WKWebView가 아직 없어 drain이 질의를 걸지 못한다. 그때 그냥
+    버리면 Zig의 제출 마커가 "보냈다"로 남아 tick이 재시도하지 않고 그 탭의 검색은 **조용히 죽는다**. Swift가
+    `web_find_undeliverable(seq)`로 신고하면 마커가 지워져 다음 tick이 다시 낸다(주소창 navigate가 "아직
+    WKWebView가 없는 Term은 다음 tick에 다시 본다"로 푸는 것과 같은 문제·같은 답).
+
+  - **하이라이트 해제는 열린 질문이다(슬라이스 ③).** WebKit에 명시적 clear API가 없어 오버레이를 닫아도
+    페이지 하이라이트가 남는다. 새 검색은 이전 하이라이트를 대체하므로 실질 영향은 **닫은 뒤 잔상**뿐이다.
+    빈 질의 재호출이 먹는지는 실기기 확인이 필요해 아직 넣지 않았다(추측으로 코드를 넣지 않는다).
+
+  - **슬라이스**: ① Zig 라우팅(**완료**) → ② ABI+Swift 배선 + 찾음/없음 표시 + Enter/⌘G 양방향(**완료**)
+    → ③ 닫을 때 하이라이트 정리(열린 질문 — 위).
   - **범위 밖**: 편집기(CM6) 표면의 find는 [editor-surface.md] Phase 0.5A가 소유한다(CM6 자체 검색). 이 항목은
     **뷰어(markdown)·browser 탭**만 다룬다.
 - **컨텍스트 메뉴(구현 완료)**: WKWebView 기본 우클릭 메뉴(Inspect Element·**Reload** 포함)는 "chrome는 Zig" 원칙·보안과 충돌하고, 특히 Reload는 편집 중 WebContent를 재시작해 editor recovery latch로 파일 작업을 차단한다 → **신뢰 maru-app 콘텐츠(파일 패널 셸+렌더 iframe)의 셸 entry(`main.ts`)에서 `contextmenu` preventDefault로 억제**한다(브라우저 패널=외부 콘텐츠는 `main.ts`를 로드하지 않아 무영향). 복사·붙여넣기는 메뉴바/⌘ 단축키(§4.2)가 소유한다. maru 자체 메뉴로 대체는 후속.

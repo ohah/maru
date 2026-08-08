@@ -178,7 +178,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // SV5c(세팅 스크롤바 + 오버레이 발행 공통화)로 또 바뀐다. count는 4 그대로다.
     // SV5d(오버레이 휠·드래그 + offset 상태 도입)로 또 바뀐다. count는 4 그대로다.
     // SV5d(오버레이 휠·드래그 + offset 상태 + 값 비교 selection follow)로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "b8cc77337fc4dc293575f2b3f8810fe878fdcbbf8f136bfa9739988caada4fb0" },
+    // 웹 탭 페이지 찾기(§8 슬라이스 ② — take/provide/undeliverable 3종)로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "0cb4384beb489e6d01f78ac270bd09666847ca19d9896b982595455b9ec05e42" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

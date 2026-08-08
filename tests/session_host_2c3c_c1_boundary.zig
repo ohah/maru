@@ -2,12 +2,14 @@ const std = @import("std");
 
 const max_source_bytes = 8 * 1024 * 1024;
 
-test "CR3a-2c3c C1 control facade stays typed canonical and product inert" {
+test "CR3a-2c3c C1 control facade stays typed canonical through C2 wiring" {
     const allocator = std.testing.allocator;
     const contract = try readSource(allocator, "src/platform/macos/session_host/generation_attachment_contract.zig");
     defer allocator.free(contract);
     const transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport);
+    const attachment = try readSource(allocator, "src/platform/macos/session_host/generation_attachment.zig");
+    defer allocator.free(attachment);
     const slot = try readSource(allocator, "src/platform/macos/session_host/client_slot.zig");
     defer allocator.free(slot);
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
@@ -43,10 +45,37 @@ test "CR3a-2c3c C1 control facade stays typed canonical and product inert" {
     try std.testing.expectEqual(@as(usize, 12), count(transport_facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn sendControl("));
     try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn sendControlNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(attachment, "    pub fn sendControlNonBlocking("));
+    const attachment_control = between(
+        attachment,
+        "    pub fn sendControlNonBlocking(",
+        "    pub fn tryDeinit(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(attachment_control, "control: contract.RuntimeControl,"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(attachment_control, ") generation_transport_mod.ControlError!bool"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(attachment_control, "self.transport.sendControlNonBlocking(control)"),
+    );
+    inline for (.{ "client", "stream_id", "params", "json", "allocator" }) |forbidden|
+        try std.testing.expectEqual(@as(usize, 0), count(attachment_control, forbidden));
 
-    // C1 opens substrate only. Product callsites move in C2/C3 and recovery resync remains separate.
+    // C2 opens exactly one generation nonblocking adapter. C3 blocking wiring and recovery
+    // resync remain separate, while legacy direct Client callsites stay explicit.
     try std.testing.expectEqual(@as(usize, 0), count(runtime, ".sendControl("));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, ".sendControlNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".sendControlNonBlocking("));
+    const admission = between(runtime, "    fn admitControl(", "    fn normalizeGenerationControlError(") orelse
+        return error.TestExpectedEqual;
+    const generation_arm = between(admission, "if (self.attachment == .generation)", "        return switch (control.op)") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(generation_arm, ".sendControlNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 0), count(generation_arm, "self.client.send"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottomNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommandNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottom("));

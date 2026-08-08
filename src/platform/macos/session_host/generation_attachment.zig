@@ -258,6 +258,14 @@ pub const GenerationAttachment = struct {
             .peer_contract_violation);
     }
 
+    pub fn sendControlNonBlocking(
+        self: *GenerationAttachment,
+        control: contract.RuntimeControl,
+    ) generation_transport_mod.ControlError!bool {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return self.transport.sendControlNonBlocking(control);
+    }
+
     pub fn tryDeinit(
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,

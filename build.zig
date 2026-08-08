@@ -2000,6 +2000,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-2c3c-c1",
         "2c3c C1 typed control facade Debug and ReleaseFast gates",
     );
+    const session_host_2c3c_c2_step = b.step(
+        "test-session-host-2c3c-c2",
+        "2c3c C2 generation nonblocking control wiring Debug and ReleaseFast gates",
+    );
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2083,6 +2087,25 @@ pub fn build(b: *std.Build) void {
         run_control_c1_boundary_tests.setCwd(b.path("."));
         session_host_2c3c_c1_step.dependOn(&run_control_c1_boundary_tests.step);
         boundary_step.dependOn(&run_control_c1_boundary_tests.step);
+
+        const control_c2_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/remote_runtime.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3a-2c3c C2"},
+        });
+        const run_control_c2_runtime_tests = b.addRunArtifact(control_c2_runtime_tests);
+        run_control_c2_runtime_tests.addArg("--maru-expect-tests=5");
+        run_control_c2_runtime_tests.setCwd(b.path("."));
+        session_host_2c3c_c2_step.dependOn(&run_control_c2_runtime_tests.step);
+        session_host_2c3c_c2_step.dependOn(&run_control_c1_runtime_tests.step);
+        session_host_2c3c_c2_step.dependOn(&run_control_c1_boundary_tests.step);
 
         const b3_6_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

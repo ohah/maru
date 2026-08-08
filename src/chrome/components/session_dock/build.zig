@@ -63,6 +63,7 @@ pub const NodeIds = struct {
     /// 상단에 고정된 그룹 헤더. 이것도 평행이동을 안 받으므로 item lane 밖이다. 이 헤더가 가리키는
     /// 그룹은 virtualization 창 밖일 수 있어 `item(index)`로는 부를 수 없다.
     pub const sticky_group: u64 = 0x5344_000A;
+    pub const sort_toggle: u64 = 0x5344_000B;
 };
 
 pub const Buffers = struct {
@@ -132,7 +133,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
             expanded_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
         },
     };
-    const node_count = items.len + expanded_nodes + 7;
+    // +7은 scope 3 + header/scope-row/search/content, +1은 header 안의 정렬 토글이다.
+    const node_count = items.len + expanded_nodes + 8;
     return .{
         .nodes = node_count,
         // +1은 root, +2는 목록이 넘칠 때 `scrollArea`가 preorder 안에서 내는 track/thumb, +1은 sticky다.
@@ -144,8 +146,8 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
         .layout_items = node_count + 4,
         .flex_scratch = node_count + 4,
         .child_rects = node_count + 4,
-        // +2는 scrollbar track/thumb action, +1은 고정 헤더의 toggle_group이다.
-        .actions = items.len + 8 + expanded_actions,
+        // +2는 scrollbar track/thumb action, +1은 고정 헤더의 toggle_group, +1은 정렬 토글이다.
+        .actions = items.len + 9 + expanded_actions,
     };
 }
 
@@ -161,7 +163,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             if (expanded.turns.len > 3) return error.TooManyTurns;
         },
     };
-    // item roots + nested expansion + 3 scopes + header/scope-row/search/content.
+    // item roots + nested expansion + 3 scopes + header/scope-row/search/content + 정렬 토글.
     const needed_nodes = bufferSizes(props.items).nodes;
     if (buffers.nodes.len < needed_nodes) return error.InsufficientNodeBuffer;
 
@@ -172,6 +174,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const project = table.append(props.snapshot_generation, .{ .scope = .project }, true) catch return error.InsufficientActionBuffer;
     const all = table.append(props.snapshot_generation, .{ .scope = .all }, true) catch return error.InsufficientActionBuffer;
     const search = table.append(props.snapshot_generation, .focus_search, true) catch return error.InsufficientActionBuffer;
+    const sort = table.append(props.snapshot_generation, .toggle_sort, true) catch return error.InsufficientActionBuffer;
 
     // Children are stored first, then parent slices borrow these stable ranges. `UiNode` is a
     // value tree, so this avoids heap allocation and makes the buffer cap part of the contract.
@@ -239,10 +242,30 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     scope_nodes[1] = scopeNode(NodeIds.scope_project, project, props.project_scope_enabled, props.scope == .project);
     scope_nodes[2] = scopeNode(NodeIds.scope_all, all, true, props.scope == .all);
 
+    // 정렬 토글은 header의 유일한 자식이다. `justify = .end`라 오른쪽 끝에 붙고, refresh 자리만큼
+    // right margin을 두어 그 **왼쪽**에 앉는다. hit-test가 entry를 역순으로 훑으므로 이 자식이 header
+    // 전체에 걸린 refresh action보다 먼저 잡힌다.
+    const sort_nodes = buffers.nodes[nested_cursor + 3 + 4 ..][0..1];
+    sort_nodes[0] = tree.card(.{
+        .id = NodeIds.sort_toggle,
+        .style = .{
+            .width = .{ .px = @floatFromInt(m.header_sort_extent) },
+            // 세로는 지정하지 않는다. header의 `align_items = .stretch`가 채우며, cross axis에 fill을
+            // 쓰면 layout이 `FillOnCrossAxis`로 fail-close한다.
+            .margin = .{ .right = @floatFromInt(m.header_trailing_inset + m.header_refresh_extent + m.header_utility_gap) },
+        },
+        .variant = .surface,
+        .paint = .{},
+        .action = sort,
+        .overflow = .clip,
+    }, &.{});
+
     const top = buffers.nodes[nested_cursor + 3 ..][0..4];
     top[0] = tree.card(.{
         .id = NodeIds.header,
         .style = .{ .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .right = @floatFromInt(m.root_inset) } },
+        .direction = .row,
+        .justify = .end,
         // Header text has no enclosing card in the dock reference. It remains a Card only so
         // refresh retains one completed action rect.  Its bottom rule is deliberately explicit:
         // a borderless header must not make the fixed chrome merge into the control/list area.
@@ -250,7 +273,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .action = refresh,
         .overflow = .clip,
-    }, &.{});
+    }, sort_nodes);
     top[1] = tree.card(.{
         .id = NodeIds.scope_row,
         .style = .{ .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .right = @floatFromInt(m.root_inset) }, .gap = @floatFromInt(m.item_gap) },
@@ -479,7 +502,9 @@ test "SessionDock build shares action rects with the completed tree" {
     try @import("std").testing.expectEqual(@as(?[4]u16, .{ 0, 0, 1, 0 }), header_visual.paint.border_widths_px);
     var table = ids.Table.init(@constCast(frame.actions));
     table.count = frame.actions.len;
-    try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(7, 9));
+    // action id는 발급 순서다: refresh 1 · scope 2~4 · search 5 · 정렬 토글 6 · 그다음 item action.
+    // 첫 item이 group이라 7이 그 toggle_group이고, 카드의 select_card는 8이다.
+    try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(8, 9));
 }
 
 test "SessionDock shares one bounded content rect while group disclosure avoids double inset" {

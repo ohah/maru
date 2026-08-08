@@ -372,7 +372,9 @@ test "Chrome Lab builds a deterministic font specimen card and records only its 
         .y_px = card_y,
         .timestamp_ns = 1,
     }));
-    try std.testing.expectEqual(@as(?chrome.ui.tree.UiActionId, 7), try dispatchRecordedAction(&state, frame, .{
+    // 8은 첫 카드의 select_card다. header가 정렬 토글 action을 하나 더 발급하면서 item action의 시작이
+    // 한 칸 밀렸다(refresh 1 · scope 2~4 · search 5 · 정렬 6 · 첫 item 7~).
+    try std.testing.expectEqual(@as(?chrome.ui.tree.UiActionId, 8), try dispatchRecordedAction(&state, frame, .{
         .phase = .up,
         .x_px = 1000,
         .y_px = 1000,

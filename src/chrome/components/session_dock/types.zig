@@ -291,12 +291,24 @@ pub const DockMetrics = struct {
         };
     }
 
-    pub fn headerUtilityWidth(self: DockMetrics) u32 {
+    /// `include_sort`는 published tree가 정렬 토글을 실제로 냈는지다. 좁은 도크에서는 토글을 빼므로
+    /// 예약 폭도 함께 줄어야 한다 — 두 값이 어긋나면 `로컬`이 refresh 위로 겹치거나 제목이 필요 이상으로
+    /// 잘린다.
+    /// 정렬 토글을 발행해도 되는가. 최소 도크 폭이 120pt라(session/dock_layout.zig) utility control이
+    /// 제목을 통째로 밀어내는 폭이 실제로 존재한다. 그 구간에서는 토글보다 "무엇을 보고 있는지"가
+    /// 먼저다 — 토글을 빼고 제목에 자리를 준다.
+    pub fn headerFitsSortToggle(self: DockMetrics, header_width_px: u32) bool {
+        return header_width_px >= saturatedAdd(self.headerUtilityWidth(true), self.header_content_inset_x);
+    }
+
+    pub fn headerUtilityWidth(self: DockMetrics, include_sort: bool) u32 {
         // host label · gap · 정렬 토글 · gap · refresh · trailing inset. heading stack이 이 폭만큼
         // 자리를 비워야 제목이 utility control 밑으로 들어가지 않는다.
         var total = saturatedAdd(self.header_host_label_w, self.header_utility_gap);
-        total = saturatedAdd(total, self.header_sort_extent);
-        total = saturatedAdd(total, self.header_utility_gap);
+        if (include_sort) {
+            total = saturatedAdd(total, self.header_sort_extent);
+            total = saturatedAdd(total, self.header_utility_gap);
+        }
         total = saturatedAdd(total, self.header_refresh_extent);
         return geometryPx(saturatedAdd(total, self.header_trailing_inset));
     }
@@ -373,7 +385,11 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
     // host label 72 + gap 12 + 정렬 토글 72 + gap 12 + refresh 24 + trailing inset 20.
-    try std.testing.expectEqual(@as(u32, 212), m.headerUtilityWidth());
+    try std.testing.expectEqual(@as(u32, 212), m.headerUtilityWidth(true));
+    // 좁은 도크에서 토글을 빼면 예전 폭으로 돌아간다.
+    try std.testing.expectEqual(@as(u32, 128), m.headerUtilityWidth(false));
+    try std.testing.expect(m.headerFitsSortToggle(240));
+    try std.testing.expect(!m.headerFitsSortToggle(160));
     try std.testing.expect(m.card_metadata_y < m.card_h);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
 }

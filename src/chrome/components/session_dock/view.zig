@@ -74,8 +74,11 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         std.fmt.bufPrint(&count_buf, "{d}개 표시 · 일부만 분석함", .{props.displayed_count}) catch ""
     else
         std.fmt.bufPrint(&count_buf, "{d}개 표시", .{props.displayed_count}) catch "";
-    try writer.headerStack(header, "Agent 세션 기록", count);
-    try writer.headerProvenance(header, host_label);
+    // 정렬 토글은 좁은 도크에서 발행되지 않는다. published tree의 유무가 단일 출처다 — view가 폭을
+    // 다시 판정하면 두 곳의 규칙이 어긋난다.
+    const sort_rect = find(frame.tree, build.NodeIds.sort_toggle);
+    try writer.headerStack(header, "Agent 세션 기록", count, sort_rect != null);
+    try writer.headerProvenance(header, host_label, sort_rect != null);
     // The in-flight state deliberately keeps the registered SVG at its idle optical size.  The
     // old Unicode clock frames were one terminal-cell glyphs, so clicking refresh made the
     // control visibly shrink even though its hit rect stayed 24pt.  Until component transforms
@@ -84,7 +87,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
 
     // 정렬 토글. published 자식 rect 안에 label을 중앙 정렬해 그린다 — 방향이 바뀌어도 slot 폭이
     // 고정이라 옆의 `로컬`과 refresh가 움직이지 않는다.
-    try writer.text(find(frame.tree, build.NodeIds.sort_toggle) orelse return error.MissingRect, 0, props.sort_order.label(), .surface_fg, .control, 4, false, true);
+    if (sort_rect) |rect| try writer.text(rect, 0, props.sort_order.label(), .surface_fg, .control, 4, false, true);
 
     try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, .control, 1, false, true);
     try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, .control, 1, false, true);
@@ -196,11 +199,11 @@ const Writer = struct {
     /// The dock header is a real two-role typographic stack, not two terminal cells.  Centre
     /// its heading/supporting line boxes together so point-size changes or a 2x backing scale
     /// cannot make the count cling to the heading as in the legacy cell path.
-    fn headerStack(self: *Writer, rect: tree.RectEntry, heading: []const u8, supporting: []const u8) ViewError!void {
+    fn headerStack(self: *Writer, rect: tree.RectEntry, heading: []const u8, supporting: []const u8, has_sort: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
-        const reserved_utility = metrics.headerUtilityWidth();
+        const reserved_utility = metrics.headerUtilityWidth(has_sort);
         const available_px = rect.rect.width - @as(f32, @floatFromInt(metrics.header_content_inset_x + reserved_utility));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
@@ -279,15 +282,16 @@ const Writer = struct {
     /// Provenance is a measured host-SVG + label group. Its content rect, the refresh sibling,
     /// and header title reserve use one `DockMetrics` snapshot; terminal cells only cap text
     /// truncation after the real worker has measured the Korean label.
-    fn headerProvenance(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
+    fn headerProvenance(self: *Writer, rect: tree.RectEntry, source: []const u8, has_sort: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
-        const utility_width = metrics.headerUtilityWidth();
+        const utility_width = metrics.headerUtilityWidth(has_sort);
         if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + utility_width))) return;
         // 오른쪽에서부터: trailing inset · refresh · gap · 정렬 토글 · gap · host label.
-        const from_right = metrics.header_trailing_inset + metrics.header_refresh_extent + metrics.header_utility_gap +
-            metrics.header_sort_extent + metrics.header_utility_gap + metrics.header_host_label_w;
+        var from_right = metrics.header_trailing_inset + metrics.header_refresh_extent + metrics.header_utility_gap;
+        if (has_sort) from_right += metrics.header_sort_extent + metrics.header_utility_gap;
+        from_right += metrics.header_host_label_w;
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(from_right));
         const control_h = typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli));
         if (rect.rect.height < @as(f32, @floatFromInt(control_h))) return;
@@ -317,7 +321,7 @@ const Writer = struct {
     /// cannot pull this header control away from the provenance group or shrink it in-flight.
     fn headerRefresh(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
-        if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + metrics.headerUtilityWidth()))) return;
+        if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + metrics.headerUtilityWidth(false)))) return;
         const slot = draw.Rect{
             .x = @intFromFloat(@floor(rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent)))),
             .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(metrics.header_refresh_extent))) / 2)),

@@ -64560,13 +64560,20 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
     _ = try session.tick();
 
     // 이 테스트는 **앵커가 실제로 있을 때의 기하**를 보므로 상태바에 브랜치 항목을 세운다.
-    // (cwd 관측이 있어야 `termGitBranch`가 값을 낸다 — 테스트 실행 디렉터리가 git 저장소다.)
+    // 실행 디렉터리의 저장소 형태에 기대지 않고 cache를 직접 구성한다. linked worktree의 `.git`은
+    // 디렉터리가 아닌 gitdir 파일이라 `readGitBranch`의 best-effort 범위 밖이고, 그 차이는 메뉴 기하와 무관하다.
     const term = session.activePane().activeTerm();
     term.rt.observation.availability = .current;
     term.rt.observation.cwd.clearRetainingCapacity();
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
     try term.rt.observation.cwd.appendSlice(allocator, std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr))));
+    if (term.git_branch) |branch| allocator.free(branch);
+    term.git_branch = null;
+    if (term.git_branch_cwd) |branch_cwd| allocator.free(branch_cwd);
+    term.git_branch_cwd = null;
+    term.git_branch = try allocator.dupe(u8, "fixture");
+    term.git_branch_cwd = try allocator.dupe(u8, term.rt.observation.cwd.items);
     session.metal_dirty = true;
     _ = try session.tick();
 

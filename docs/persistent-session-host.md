@@ -1307,8 +1307,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    강제하고 같은 artifact를 Debug·ReleaseFast에서 실행한다. public declaration/callsite/frame/registry-layout delta 0 source oracle까지 모두
    green이어야 transaction refactor를 병합한다. B3-1은 inert
    authority, B3-2는 private destination classifier, B3-3은 progress/execute, B3-4/5는 published payload의 생성과 정리 primitive,
-   B3-4/5 correction은 canonical inline single-slot reusable suffix와 private substrate ownership-only settlement path, B3-6은 internal aggregate strict
-   completion을 소유한다. correction과 B3-6 전에는
+   B3-4/5 correction은 canonical inline single-slot reusable suffix와 private substrate ownership-only settlement path를 구현·검증 완료했고,
+   B3-6은 internal aggregate strict completion을 소유한다. B3-6 전에는
    `2c3b-3 완료`를 주장하지 않는다.
 
    B3-0.4 완료 증거는 final-address harness를 공유하는 actual EOF/partial-frame와 alloc/resize ordinal, 별도 request-prepare
@@ -1773,6 +1773,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `RpcExecutedResponse`의 copy/move/same-address reincarnation, stale epoch, 다른 transport/binding/request/tag/digest/destination splice,
    duplicate borrow/finish는 payload를 읽거나 free하기 전에 typed reject한다. `abortPreparedRequest`는 wire 전 prepared request만 취소하며
    published/borrowed/releasing response를 abort하지 않는다. prepare/abort/pre-wire reject는 inline slot bytes·epoch·rearm mutation 0이다.
+   attachment drop preflight는 같은 canonical entry의 prepared-request/RPC-response readiness와 node free evidence를 함께 확인한다.
+   published·borrowed·releasing 또는 nonempty evidence면 drop graph mutation 0의 `AdminBusy`이고, reusable finish가
+   `authority idle+evidence empty+slot pristine`을 만든 뒤에만 drop을 다시 허용한다.
    attachment teardown은 registry attach owner가 settled이고 inline slot이 `pristine`, response authority가 `idle`, free evidence가 `empty`일
    때만 정상 진행한다. `executing|published|borrowed|releasing`이면 `Busy`, permanent `terminal`이면 기존 connection
    fail-close graph로 수렴한다. `GenerationAttachment.response`와 registry `responseOwnerSeal`은 attach-only exact caller allowlist로

@@ -237,6 +237,42 @@ pub const RpcExecutedResponse = struct {
         txn.seal = finishSeal(txn);
     }
 
+    pub fn prepareReusableRearm(
+        self: *const RpcExecutedResponse,
+        txn: *const RpcResponseFinishTxn,
+        out: *PreparedReusableRearmPermit,
+    ) Error!void {
+        if (!out.pristineExact()) return error.InvalidTransaction;
+        if (!self.freeCommittedExact(txn.response_epoch) or !txn.freedOnceExactFor(self))
+            return error.InvalidTransaction;
+        var projected_response = self.*;
+        var projected_txn = txn.*;
+        projected_response.terminal_evidence = projected_txn.terminal_evidence;
+        projected_response.settlement = .terminal_clean;
+        projected_response.seal = responseSeal(&projected_response);
+        projected_txn.stage = .consumed;
+        projected_txn.seal = finishSeal(&projected_txn);
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .response_addr = @intFromPtr(self),
+            .old_identity = self.identity,
+            .old_epoch = self.owner_incarnation,
+            .expected_terminal_clean_owner_seal = projected_response.seal,
+            .expected_consumed_finish_digest = projected_txn.seal,
+        };
+    }
+
+    pub fn commitReusableRearmNoFail(
+        self: *RpcExecutedResponse,
+        txn: *const RpcResponseFinishTxn,
+        permit: *PreparedReusableRearmPermit,
+    ) void {
+        if (!permit.exactFor(self, txn))
+            @panic("RPC response reusable rearm permit mismatch");
+        permit.consumed_raw = 1;
+        self.* = .{};
+    }
+
     /// Closes a live owner without dereferencing or freeing its payload when lexical alias
     /// preflight cannot prove that the captured allocation is safe to call back into.
     pub fn abandonLiveNoFree(
@@ -337,6 +373,73 @@ pub const RpcExecutedResponse = struct {
             std.mem.eql(u8, &self.seal, &responseSeal(self));
     }
 };
+
+pub const PreparedReusableRearmPermit = struct {
+    self_addr: usize = 0,
+    response_addr: usize = 0,
+    old_identity: Identity = std.mem.zeroes(Identity),
+    old_epoch: u64 = 0,
+    expected_terminal_clean_owner_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_consumed_finish_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    consumed_raw: u8 = 0,
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&PreparedReusableRearmPermit{}));
+    }
+
+    fn exactFor(
+        self: *const @This(),
+        response: *const RpcExecutedResponse,
+        txn: *const RpcResponseFinishTxn,
+    ) bool {
+        return self.self_addr == @intFromPtr(self) and self.response_addr == @intFromPtr(response) and
+            self.old_epoch != 0 and self.old_epoch == response.owner_incarnation and
+            std.meta.eql(self.old_identity, response.identity) and self.consumed_raw == 0 and
+            response.settlement == .terminal_clean and txn.stage == .consumed and
+            std.mem.eql(u8, &self.expected_terminal_clean_owner_seal, &response.seal) and
+            std.mem.eql(u8, &self.expected_consumed_finish_digest, &txn.seal) and
+            std.mem.eql(u8, &response.seal, &responseSeal(response)) and
+            std.mem.eql(u8, &txn.seal, &finishSeal(txn));
+    }
+};
+
+pub fn triggerReusableRearmCommitForTest(hostile_case: u8) noreturn {
+    if (!@import("builtin").is_test) @compileError("test-only reusable rearm trigger");
+    const bytes = std.testing.allocator.dupe(u8, "response") catch @panic("test allocation failed");
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 0xEE);
+    response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance()) catch
+        @panic("test response init failed");
+    var borrow: RpcResponseBorrow = .{};
+    beginBorrowForTest(&response, identity, &borrow) catch @panic("test borrow failed");
+    var finish: RpcResponseFinishTxn = .{};
+    response.prepareFinish(identity, &borrow, &finish) catch @panic("test finish prepare failed");
+    response.commitFreeNoFail(identity, &borrow, &finish);
+    if (!finish.freeCaptured()) @panic("test captured free failed");
+    var permit: PreparedReusableRearmPermit = .{};
+    response.prepareReusableRearm(&finish, &permit) catch @panic("test rearm prepare failed");
+    switch (hostile_case) {
+        0 => response.commitReusableRearmNoFail(&finish, &permit),
+        1 => {
+            response.finishCleanNoFail(&finish);
+            var copied = permit;
+            response.commitReusableRearmNoFail(&finish, &copied);
+        },
+        2 => {
+            response.finishCleanNoFail(&finish);
+            var moved = permit;
+            permit = .{};
+            response.commitReusableRearmNoFail(&finish, &moved);
+        },
+        3 => {
+            response.finishCleanNoFail(&finish);
+            response.commitReusableRearmNoFail(&finish, &permit);
+            response.commitReusableRearmNoFail(&finish, &permit);
+        },
+        else => @panic("invalid reusable rearm hostile case"),
+    }
+    @panic("hostile reusable rearm commit unexpectedly returned");
+}
 
 pub const PreparedBorrowInit = struct {
     self_addr: usize = 0,
@@ -726,6 +829,84 @@ test "B3-4/5 RPC owner publishes borrows and frees exact once" {
     response.finishCleanNoFail(&finish);
     try std.testing.expect(response.terminalExact());
     try std.testing.expect(!finish.freeCaptured());
+}
+
+test "B3-4/5 RPC owner reusable rearm permit consumes clean finish into pristine" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 7);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try beginBorrowForTest(&response, identity, &borrow);
+    var finish: RpcResponseFinishTxn = .{};
+    try response.prepareFinish(identity, &borrow, &finish);
+    response.commitFreeNoFail(identity, &borrow, &finish);
+    try std.testing.expect(finish.freeCaptured());
+    var permit: PreparedReusableRearmPermit = .{};
+    try response.prepareReusableRearm(&finish, &permit);
+    response.finishCleanNoFail(&finish);
+    response.commitReusableRearmNoFail(&finish, &permit);
+    try std.testing.expect(response.pristineExact());
+    try std.testing.expectEqual(@as(u8, 1), permit.consumed_raw);
+}
+
+test "CR3a-2c3b reusable response correction rearm permit rejects wrong-order copy move and replay" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 8);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try beginBorrowForTest(&response, identity, &borrow);
+    var finish: RpcResponseFinishTxn = .{};
+    try response.prepareFinish(identity, &borrow, &finish);
+    response.commitFreeNoFail(identity, &borrow, &finish);
+    try std.testing.expect(finish.freeCaptured());
+    var permit: PreparedReusableRearmPermit = .{};
+    try response.prepareReusableRearm(&finish, &permit);
+    try std.testing.expect(!permit.exactFor(&response, &finish));
+    response.finishCleanNoFail(&finish);
+    var copied = permit;
+    const before = response;
+    try std.testing.expect(!copied.exactFor(&response, &finish));
+    try std.testing.expectEqualDeep(before, response);
+    response.commitReusableRearmNoFail(&finish, &permit);
+    try std.testing.expect(!permit.exactFor(&response, &finish));
+}
+
+test "B3-4/5 RPC owner reusable rearm permit rejects identity epoch finish and owner seal drift mutation zero" {
+    const bytes = try std.testing.allocator.dupe(u8, "response");
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 9);
+    try response.initLiveInPlace(identity, std.testing.allocator, bytes, fixtureProvenance());
+    var borrow: RpcResponseBorrow = .{};
+    try beginBorrowForTest(&response, identity, &borrow);
+    var finish: RpcResponseFinishTxn = .{};
+    try response.prepareFinish(identity, &borrow, &finish);
+    response.commitFreeNoFail(identity, &borrow, &finish);
+    try std.testing.expect(finish.freeCaptured());
+    var permit: PreparedReusableRearmPermit = .{};
+    try response.prepareReusableRearm(&finish, &permit);
+    response.finishCleanNoFail(&finish);
+    const before = response;
+    permit.old_epoch +%= 1;
+    try std.testing.expect(!permit.exactFor(&response, &finish));
+    try std.testing.expectEqualDeep(before, response);
+}
+
+test "B3-4/5 RPC owner reusable rearm permit rejects permanent and publication terminal owners mutation zero" {
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 10);
+    const evidence = digestBytes("test.permanent", "evidence");
+    try response.terminalCleanAfterPublicationFailureInPlace(identity, evidence);
+    var finish: RpcResponseFinishTxn = .{};
+    var permit: PreparedReusableRearmPermit = .{};
+    const before = response;
+    try std.testing.expectError(
+        error.InvalidTransaction,
+        response.prepareReusableRearm(&finish, &permit),
+    );
+    try std.testing.expectEqualDeep(before, response);
+    try std.testing.expect(permit.pristineExact());
 }
 
 test "B3-4/5 RPC owner rejects occupied destination and invalid payload bounds mutation zero" {

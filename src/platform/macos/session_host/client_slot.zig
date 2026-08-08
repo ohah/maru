@@ -28,6 +28,7 @@ const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
 var process_runtime_pid: std.atomic.Value(u32) = .init(0);
 threadlocal var prepared_execution_cleanup_active_addr: usize = 0;
+threadlocal var finish_permit_alias_case_for_test: u8 = 0;
 
 test "CR3a-2c2b3b quarantine leaf participates in the session-host gate" {
     _ = ended_purge_quarantine;
@@ -399,6 +400,33 @@ pub const RpcFreeEvidenceRecord = struct {
         return true;
     }
 
+    pub fn prepareRetireFreeCall(
+        self: *const @This(),
+        response_epoch: u64,
+        digest: owner_seal.Digest,
+        out: *PreparedRpcFreeEvidenceRetirePermit,
+    ) bool {
+        if (!out.pristineExact() or !self.exact(.free_call_committed, response_epoch, digest))
+            return false;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .record_addr = @intFromPtr(self),
+            .response_epoch = response_epoch,
+            .evidence_digest = digest,
+            .free_call_committed_record_seal = self.seal,
+        };
+        return true;
+    }
+
+    pub fn commitEvidenceRetireNoFail(
+        self: *@This(),
+        permit: *PreparedRpcFreeEvidenceRetirePermit,
+    ) void {
+        if (!permit.exactFor(self)) @panic("RPC response free evidence retire permit mismatch");
+        permit.consumed_raw = 1;
+        self.* = .{};
+    }
+
     pub fn exact(
         self: *const @This(),
         state: RpcFreeEvidenceState,
@@ -409,6 +437,26 @@ pub const RpcFreeEvidenceRecord = struct {
             self.state == state and self.response_epoch == response_epoch and
             response_epoch != 0 and std.mem.eql(u8, &self.evidence_digest, &digest) and
             std.mem.eql(u8, &self.seal, &rpcFreeEvidenceSeal(self));
+    }
+};
+
+const PreparedRpcFreeEvidenceRetirePermit = struct {
+    self_addr: usize = 0,
+    record_addr: usize = 0,
+    response_epoch: u64 = 0,
+    evidence_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    free_call_committed_record_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    consumed_raw: u8 = 0,
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&PreparedRpcFreeEvidenceRetirePermit{}));
+    }
+
+    fn exactFor(self: *const @This(), record: *const RpcFreeEvidenceRecord) bool {
+        return self.self_addr == @intFromPtr(self) and self.record_addr == @intFromPtr(record) and
+            self.response_epoch != 0 and self.consumed_raw == 0 and
+            std.mem.eql(u8, &self.free_call_committed_record_seal, &record.seal) and
+            record.exact(.free_call_committed, self.response_epoch, self.evidence_digest);
     }
 };
 
@@ -457,6 +505,33 @@ test "B3-4/5 RPC free evidence commits and retires one exact epoch" {
     try std.testing.expect(record.exact(.free_call_committed, 7, digest));
     try std.testing.expect(record.retireFreeCall(7, digest));
     try std.testing.expect(record.emptyExact());
+}
+
+test "B3-4/5 RPC free evidence retire permit consumes exact committed record" {
+    var record: RpcFreeEvidenceRecord = .{};
+    const digest = rpcFreeEvidenceFixture(0xE1);
+    try std.testing.expect(record.commitFreeCall(17, digest));
+    var permit: PreparedRpcFreeEvidenceRetirePermit = .{};
+    try std.testing.expect(record.prepareRetireFreeCall(17, digest, &permit));
+    record.commitEvidenceRetireNoFail(&permit);
+    try std.testing.expect(record.emptyExact());
+    try std.testing.expectEqual(@as(u8, 1), permit.consumed_raw);
+}
+
+test "CR3a-2c3b reusable response correction evidence-retire prepare drift and replay" {
+    var record: RpcFreeEvidenceRecord = .{};
+    const digest = rpcFreeEvidenceFixture(0xE2);
+    try std.testing.expect(record.commitFreeCall(18, digest));
+    var permit: PreparedRpcFreeEvidenceRetirePermit = .{};
+    try std.testing.expect(record.prepareRetireFreeCall(18, digest, &permit));
+    var copied = permit;
+    try std.testing.expect(!copied.exactFor(&record));
+    const before = record;
+    copied.response_epoch +%= 1;
+    try std.testing.expect(!copied.exactFor(&record));
+    try std.testing.expectEqualDeep(before, record);
+    record.commitEvidenceRetireNoFail(&permit);
+    try std.testing.expect(!permit.exactFor(&record));
 }
 
 test "B3-4/5 RPC free evidence stale epoch and digest are mutation zero" {
@@ -1116,6 +1191,14 @@ pub const GenerationRequestExecute = struct {
     response_out_addr: usize,
     owner_addr: usize,
     owner_size: usize,
+};
+
+/// Internal-only aggregate for the GenerationTransport-owned RPC response slot. Keeping the
+/// destination as a scalar here prevents the response owner type from escaping into the public
+/// transport facade while still forcing containment before the first destination dereference.
+pub const GenerationRpcSubstrateExecute = struct {
+    request: GenerationRequestAbort,
+    bound_stream_id: u64,
 };
 
 pub const GenerationExecuteError = GenerationRequestError ||
@@ -3788,10 +3871,49 @@ const PreparedRpcExecutionTestFailure = enum {
 
 const PreparedRpcExecutionMode = enum { terminal_sink, correlated_response };
 
+const ResponseDestination = union(enum) {
+    attach: *executed_response_mod.ExecutedResponse,
+    rpc: void,
+};
+
+const RpcExecutionDestination = union(enum) {
+    canonical: void,
+    test_explicit: *RpcExecutedResponse,
+};
+
+fn resolveResponseDestination(
+    owner: *const contract.TransportOwnerSeal,
+    requested: ResponseDestination,
+) error{InvalidResponseDestination}!ResponseDestination {
+    return switch (requested) {
+        .attach => |destination| blk: {
+            const destination_addr = @intFromPtr(destination);
+            if (!byteRangeFullyContained(
+                destination_addr,
+                @sizeOf(executed_response_mod.ExecutedResponse),
+                owner.owner_addr,
+                owner.owner_size,
+            )) return error.InvalidResponseDestination;
+            break :blk .{ .attach = destination };
+        },
+        .rpc => blk: {
+            const response_addr = owner.rpc_response_addr;
+            if (response_addr == 0 or response_addr % @alignOf(RpcExecutedResponse) != 0 or
+                !byteRangeFullyContained(
+                    response_addr,
+                    @sizeOf(RpcExecutedResponse),
+                    owner.owner_addr,
+                    owner.owner_size,
+                )) return error.InvalidResponseDestination;
+            break :blk .{ .rpc = {} };
+        },
+    };
+}
+
 fn executePreparedRpcPrivate(
     request: GenerationRequestAbort,
     bound_stream_id: u64,
-    destination: *RpcExecutedResponse,
+    requested_destination: RpcExecutionDestination,
     mode: PreparedRpcExecutionMode,
     test_failure: PreparedRpcExecutionTestFailure,
 ) !void {
@@ -3799,6 +3921,13 @@ fn executePreparedRpcPrivate(
     defer endRegisteredNodeOperation(admission.operation);
     const node = admission.operation.node;
     const identity = admission.identity;
+    const destination: *RpcExecutedResponse = switch (requested_destination) {
+        .test_explicit => |explicit| explicit,
+        .canonical => switch (try resolveResponseDestination(admission.owner, .{ .rpc = {} })) {
+            .rpc => @ptrFromInt(admission.owner.rpc_response_addr),
+            .attach => unreachable,
+        },
+    };
     const prepared_admission = try node.cleanup_registry.preparedRpcAdmission(
         request.reservation.cleanup,
         identity,
@@ -4153,7 +4282,7 @@ fn executePreparedRpcTerminalSink(
     return executePreparedRpcPrivate(
         request,
         bound_stream_id,
-        destination,
+        .{ .test_explicit = destination },
         .terminal_sink,
         test_failure,
     );
@@ -4167,15 +4296,196 @@ fn executePreparedRpcCorrelatedResponseForTest(
     return executePreparedRpcPrivate(
         request,
         bound_stream_id,
-        destination,
+        .{ .test_explicit = destination },
         .correlated_response,
         .none,
     );
 }
 
+/// One ownership-only RPC cycle for GenerationTransport's canonical inline slot. Semantic
+/// response bytes deliberately remain unread until the decoder slice owns that contract.
+pub fn executeGenerationRpcSubstrate(execution: GenerationRpcSubstrateExecute) GenerationExecuteError!void {
+    executePreparedRpcPrivate(
+        execution.request,
+        execution.bound_stream_id,
+        .{ .canonical = {} },
+        .correlated_response,
+        .none,
+    ) catch |err| {
+        return switch (err) {
+            error.CapacityExhausted,
+            error.InvalidIdentity,
+            error.InvalidReservation,
+            error.InvalidState,
+            error.InvalidStream,
+            error.InvalidCanonical,
+            error.InjectedFailure,
+            error.InvalidDescriptor,
+            error.ObservationBusy,
+            => @panic("RPC substrate returned an internal-only execution error"),
+            else => @errorCast(err),
+        };
+    };
+    const response_addr = canonicalRpcResponseAddress(execution.request) catch
+        @panic("RPC substrate lost its canonical response address after publication");
+    const response: *RpcExecutedResponse = @ptrFromInt(response_addr);
+    var borrow: rpc_executed_response.RpcResponseBorrow = .{};
+    beginRpcResponseBorrow(execution.request, response, &borrow) catch
+        @panic("RPC substrate borrow settlement drifted");
+    finishRpcResponseOwned(execution.request, response, &borrow, .reusable) catch
+        @panic("RPC substrate reusable settlement drifted");
+    if (!response.pristineExact()) @panic("RPC substrate reusable slot did not rearm");
+}
+
+fn canonicalRpcResponseAddress(request: GenerationRequestAbort) GenerationRequestError!usize {
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const response_addr = admission.owner.rpc_response_addr;
+    if (response_addr == 0 or response_addr % @alignOf(RpcExecutedResponse) != 0 or
+        !byteRangeFullyContained(
+            response_addr,
+            @sizeOf(RpcExecutedResponse),
+            admission.owner.owner_addr,
+            admission.owner.owner_size,
+        )) return error.InvalidOwner;
+    return response_addr;
+}
+
+test "B3-4/5 RPC substrate rejects uncontained destination before request admission" {
+    var invalid_request: GenerationRequestAbort = undefined;
+    @memset(std.mem.asBytes(&invalid_request), 0);
+    try std.testing.expectError(error.InvalidOwner, executeGenerationRpcSubstrate(.{
+        .request = invalid_request,
+        .bound_stream_id = 1,
+    }));
+}
+
 const RpcResponseDisposition = enum { reusable, protocol_failure };
 
-fn beginRpcResponseBorrowForTest(
+fn failStopPermitAliasPreflight() noreturn {
+    // This fixed, allocation-free write is the parent-observable sentinel. A subprocess gate can
+    // bind stderr before entry without requiring env lookup or capability resolution here.
+    const marker = "permit-alias-preflight-rejected\n";
+    _ = c.write(2, marker.ptr, marker.len);
+    @panic("permit-alias-preflight-rejected");
+}
+
+const FinishPermitRawStorage = struct {
+    const TransitionPermit = rpc_response_authority.PreparedRpcTransitionPermit;
+    const EvidencePermit = PreparedRpcFreeEvidenceRetirePermit;
+    const RearmPermit = rpc_executed_response.PreparedReusableRearmPermit;
+
+    const Range = struct {
+        start: usize,
+        len: usize,
+    };
+
+    releasing: [@sizeOf(TransitionPermit)]u8 align(@alignOf(TransitionPermit)) = undefined,
+    finish_authority: [@sizeOf(TransitionPermit)]u8 align(@alignOf(TransitionPermit)) = undefined,
+    evidence_retire: [@sizeOf(EvidencePermit)]u8 align(@alignOf(EvidencePermit)) = undefined,
+    rearm: [@sizeOf(RearmPermit)]u8 align(@alignOf(RearmPermit)) = undefined,
+
+    const Typed = struct {
+        releasing: *TransitionPermit,
+        finish_authority: *TransitionPermit,
+        evidence_retire: *EvidencePermit,
+        rearm: *RearmPermit,
+    };
+
+    fn ranges(self: *@This()) [4]Range {
+        return .{
+            .{ .start = @intFromPtr(&self.releasing), .len = @sizeOf(TransitionPermit) },
+            .{ .start = @intFromPtr(&self.finish_authority), .len = @sizeOf(TransitionPermit) },
+            .{ .start = @intFromPtr(&self.evidence_retire), .len = @sizeOf(EvidencePermit) },
+            .{ .start = @intFromPtr(&self.rearm), .len = @sizeOf(RearmPermit) },
+        };
+    }
+
+    /// This preflight reads only scalar addresses and extents. The four raw reservations remain
+    /// undefined until every pair and every caller-owned range has proved disjoint.
+    fn disjointFrom(self: *@This(), payload: Range, forbidden: []const Range) bool {
+        _ = std.math.add(usize, payload.start, payload.len) catch return false;
+        const permit_ranges = self.ranges();
+        for (permit_ranges, 0..) |permit_range, index| {
+            _ = std.math.add(usize, permit_range.start, permit_range.len) catch return false;
+            if (byteRangesOverlap(payload.start, payload.len, permit_range.start, permit_range.len))
+                return false;
+            for (forbidden) |range| {
+                if (byteRangesOverlap(permit_range.start, permit_range.len, range.start, range.len))
+                    return false;
+            }
+            for (permit_ranges[index + 1 ..]) |other| {
+                if (byteRangesOverlap(permit_range.start, permit_range.len, other.start, other.len))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    fn initializeDisjoint(self: *@This()) Typed {
+        @memset(&self.releasing, 0);
+        @memset(&self.finish_authority, 0);
+        @memset(&self.evidence_retire, 0);
+        @memset(&self.rearm, 0);
+        return .{
+            .releasing = @ptrCast(&self.releasing),
+            .finish_authority = @ptrCast(&self.finish_authority),
+            .evidence_retire = @ptrCast(&self.evidence_retire),
+            .rearm = @ptrCast(&self.rearm),
+        };
+    }
+
+    fn initializeAfterPreflightOrFail(
+        self: *@This(),
+        payload: Range,
+        forbidden: []const Range,
+    ) Typed {
+        if (!self.disjointFrom(payload, forbidden)) failStopPermitAliasPreflight();
+        return self.initializeDisjoint();
+    }
+};
+
+pub fn armFinishPermitAliasForTest(range_index: u8) void {
+    if (!builtin.is_test) @compileError("test-only finish permit alias trigger");
+    if (range_index >= 4 or finish_permit_alias_case_for_test != 0)
+        @panic("invalid finish permit alias test range");
+    finish_permit_alias_case_for_test = range_index + 1;
+}
+
+test "B3-4/5 finish permit raw storage rejects alias and overflow before typed init" {
+    var storage: FinishPermitRawStorage = undefined;
+    const ranges = storage.ranges();
+    const first = ranges[0];
+    try std.testing.expect(!storage.disjointFrom(
+        .{ .start = first.start, .len = first.len },
+        &.{},
+    ));
+    try std.testing.expect(!storage.disjointFrom(
+        .{ .start = first.start - 1, .len = 2 },
+        &.{},
+    ));
+    try std.testing.expect(!storage.disjointFrom(
+        .{ .start = first.start + first.len - 1, .len = 2 },
+        &.{},
+    ));
+    try std.testing.expect(!storage.disjointFrom(
+        .{ .start = std.math.maxInt(usize), .len = 2 },
+        &.{},
+    ));
+    try std.testing.expect(!storage.disjointFrom(
+        .{ .start = 1, .len = 1 },
+        &.{.{ .start = first.start, .len = first.len }},
+    ));
+    try std.testing.expect(storage.disjointFrom(.{ .start = 1, .len = 1 }, &.{}));
+
+    const typed = storage.initializeDisjoint();
+    try std.testing.expect(typed.releasing.pristineExact());
+    try std.testing.expect(typed.finish_authority.pristineExact());
+    try std.testing.expect(typed.evidence_retire.pristineExact());
+    try std.testing.expect(typed.rearm.pristineExact());
+}
+
+fn beginRpcResponseBorrow(
     request: GenerationRequestAbort,
     response: *RpcExecutedResponse,
     out: *rpc_executed_response.RpcResponseBorrow,
@@ -4215,7 +4525,7 @@ fn beginRpcResponseBorrowForTest(
     response.commitBorrowReceiptNoFail(identity, out, &borrow_init);
 }
 
-fn finishRpcResponseOwnedForTest(
+fn finishRpcResponseOwned(
     request: GenerationRequestAbort,
     response: *RpcExecutedResponse,
     borrow: *rpc_executed_response.RpcResponseBorrow,
@@ -4229,32 +4539,40 @@ fn finishRpcResponseOwnedForTest(
     if (!std.meta.eql(identity.binding, admission.identity) or
         canonical.destination_addr != @intFromPtr(response) or
         !node.rpc_free_evidence.emptyExact()) return error.InvalidOwner;
-    var finish: rpc_executed_response.RpcResponseFinishTxn = .{};
-    var releasing: rpc_response_authority.PreparedRpcTransitionPermit = .{};
-    var terminal: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    var finish: rpc_executed_response.RpcResponseFinishTxn = undefined;
+    var permit_storage: FinishPermitRawStorage = undefined;
     const payload_addr = response.payload_addr;
     const payload_len = response.payload_len;
-    var aliases_finish_storage = false;
-    inline for (.{
-        .{ @intFromPtr(&admission.operation), @sizeOf(RegisteredNodeOperation) },
-        .{ @intFromPtr(&finish), @sizeOf(rpc_executed_response.RpcResponseFinishTxn) },
-        .{ @intFromPtr(&releasing), @sizeOf(rpc_response_authority.PreparedRpcTransitionPermit) },
-        .{ @intFromPtr(&terminal), @sizeOf(rpc_response_authority.PreparedRpcTransitionPermit) },
-        .{ @intFromPtr(borrow), @sizeOf(rpc_executed_response.RpcResponseBorrow) },
-        .{ @intFromPtr(node), @sizeOf(ClientNode) },
-    }) |range| if (byteRangesOverlap(payload_addr, payload_len, range[0], range[1])) {
-        aliases_finish_storage = true;
+    const forbidden = [_]FinishPermitRawStorage.Range{
+        .{ .start = @intFromPtr(&admission.operation), .len = @sizeOf(RegisteredNodeOperation) },
+        .{ .start = @intFromPtr(&finish), .len = @sizeOf(rpc_executed_response.RpcResponseFinishTxn) },
+        .{ .start = @intFromPtr(borrow), .len = @sizeOf(rpc_executed_response.RpcResponseBorrow) },
+        .{ .start = @intFromPtr(response), .len = @sizeOf(RpcExecutedResponse) },
+        .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
+        .{ .start = admission.owner.owner_addr, .len = admission.owner.owner_size },
     };
-    if (aliases_finish_storage) {
-        terminalizeBorrowedRpcResponseNoFree(
-            node,
-            request.reservation.cleanup,
-            admission.identity,
-            canonical,
-            response,
-            identity,
-        );
+    const payload_range = if (builtin.is_test and finish_permit_alias_case_for_test != 0) blk: {
+        const range_index = finish_permit_alias_case_for_test - 1;
+        finish_permit_alias_case_for_test = 0;
+        break :blk permit_storage.ranges()[range_index];
+    } else FinishPermitRawStorage.Range{ .start = payload_addr, .len = payload_len };
+    const permits = permit_storage.initializeAfterPreflightOrFail(
+        payload_range,
+        &forbidden,
+    );
+    for (forbidden) |range| {
+        if (byteRangesOverlap(payload_addr, payload_len, range.start, range.len)) {
+            terminalizeBorrowedRpcResponseNoFree(
+                node,
+                request.reservation.cleanup,
+                admission.identity,
+                canonical,
+                response,
+                identity,
+            );
+        }
     }
+    finish = .{};
     response.prepareFinish(identity, borrow, &finish) catch {
         terminalizeBorrowedRpcResponseNoFree(
             node,
@@ -4269,14 +4587,14 @@ fn finishRpcResponseOwnedForTest(
         request.reservation.cleanup,
         admission.identity,
         canonical,
-        &releasing,
+        permits.releasing,
     );
     response.commitFreeNoFail(identity, borrow, &finish);
     node.cleanup_registry.commitRpcResponseReleasing(
         request.reservation.cleanup,
         admission.identity,
         canonical,
-        &releasing,
+        permits.releasing,
     );
     const evidence = finish.freeEvidenceDigest() orelse
         @panic("RPC response finish lost free evidence");
@@ -4296,7 +4614,7 @@ fn finishRpcResponseOwnedForTest(
             request.reservation.cleanup,
             admission.identity,
             canonical,
-            &terminal,
+            permits.finish_authority,
         ) catch failStopFreedRpcResponse(
             node,
             request.reservation.cleanup,
@@ -4309,7 +4627,7 @@ fn finishRpcResponseOwnedForTest(
             request.reservation.cleanup,
             admission.identity,
             canonical,
-            &terminal,
+            permits.finish_authority,
         ) catch failStopFreedRpcResponse(
             node,
             request.reservation.cleanup,
@@ -4319,25 +4637,47 @@ fn finishRpcResponseOwnedForTest(
             "RPC response terminal finish preflight drifted",
         ),
     }
+    if (!node.rpc_free_evidence.prepareRetireFreeCall(
+        identity.response_epoch,
+        evidence,
+        permits.evidence_retire,
+    )) failStopFreedRpcResponse(
+        node,
+        request.reservation.cleanup,
+        admission.identity,
+        canonical,
+        evidence,
+        "RPC response evidence retire preflight drifted",
+    );
+    if (disposition == .reusable) response.prepareReusableRearm(&finish, permits.rearm) catch
+        failStopFreedRpcResponse(
+            node,
+            request.reservation.cleanup,
+            admission.identity,
+            canonical,
+            evidence,
+            "RPC response reusable rearm preflight drifted",
+        );
     response.finishCleanNoFail(&finish);
     switch (disposition) {
         .reusable => node.cleanup_registry.commitRpcResponseReusable(
             request.reservation.cleanup,
             admission.identity,
             canonical,
-            &terminal,
+            permits.finish_authority,
         ),
         .protocol_failure => node.cleanup_registry.commitRpcResponseTerminal(
             request.reservation.cleanup,
             admission.identity,
             canonical,
-            &terminal,
+            permits.finish_authority,
         ),
     }
-    if (!node.rpc_free_evidence.retireFreeCall(identity.response_epoch, evidence))
-        @panic("RPC response free evidence retire drifted");
+    node.rpc_free_evidence.commitEvidenceRetireNoFail(permits.evidence_retire);
     if (disposition == .protocol_failure)
         node.client.poison(.peer_contract_violation);
+    if (disposition == .reusable)
+        response.commitReusableRearmNoFail(&finish, permits.rearm);
 }
 
 fn terminalizeBorrowedRpcResponseNoFree(
@@ -4435,12 +4775,13 @@ pub fn executeGenerationRequest(
     if (execution.owner_addr != admission.owner.owner_addr or
         execution.owner_size != admission.owner.owner_size)
         return error.InvalidOwner;
-    if (!byteRangeFullyContained(
+    const response_out: *executed_response_mod.ExecutedResponse = @ptrFromInt(
         execution.response_out_addr,
-        @sizeOf(executed_response_mod.ExecutedResponse),
-        admission.owner.owner_addr,
-        admission.owner.owner_size,
-    )) return error.InvalidResponseDestination;
+    );
+    _ = switch (try resolveResponseDestination(admission.owner, .{ .attach = response_out })) {
+        .attach => |destination| destination,
+        .rpc => unreachable,
+    };
     const prepared_admission = node.cleanup_registry.preparedAttachAdmission(
         request.reservation.cleanup,
         identity,
@@ -4486,8 +4827,6 @@ pub fn executeGenerationRequest(
     );
     execution_txn.commitBeginExecute(admission.operation);
 
-    const response_out: *executed_response_mod.ExecutedResponse =
-        @ptrFromInt(execution.response_out_addr);
     const response_owner = node.cleanup_registry.responseOwnerSeal(
         request.reservation.cleanup,
         identity,
@@ -5827,6 +6166,22 @@ pub const ClientSlot = struct {
             binding.lifecycle != .committed or
             lease.stream_id == 0 or !lease.canRelease(self.pid))
             return error.InvalidLease;
+        switch (try operation.node.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            canonical,
+        )) {
+            .settled => {},
+            .busy => return error.AdminBusy,
+            .invalid => return error.InvalidState,
+        }
+        switch (try operation.node.cleanup_registry.rpcResponseSettlementReadiness(
+            reservation.cleanup,
+            canonical,
+        )) {
+            .settled => {},
+            .busy => return error.AdminBusy,
+            .invalid => return error.InvalidState,
+        }
         try operation.node.cleanup_registry.preflightBoundDrop(
             reservation.cleanup,
             canonical,
@@ -8759,6 +9114,9 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
         @intFromEnum(StreamOperationRegistryEntry.State.consumed),
         entry.state.load(.acquire),
     );
+    // This hostile test consumes the raw permit without the production preparation
+    // completion path, so it must retire the matching node operation before fixture drop.
+    slot.clearStreamOperationPermit();
     entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
 }
 
@@ -9389,13 +9747,14 @@ test "B3-0.3 public execute rejects forged response destinations before authorit
     );
     const transport_incarnation: u64 = 0x2C3BD2;
     const transport_owner_seal = try slot.transportOwnerSeal(reservation);
-    try contract.TransportOwnerSeal.initInPlace(
+    try contract.TransportOwnerSeal.initWithRpcResponseInPlace(
         transport_owner_seal,
         transport_incarnation,
         @intFromPtr(&owner),
         @sizeOf(Owner),
         @intFromPtr(&owner.transport_marker),
         @intFromPtr(&owner.storage),
+        @intFromPtr(&owner.response),
     );
     const identity = reservation.identity;
     const prepared = try prepareGenerationRequest(.{
@@ -9866,7 +10225,6 @@ fn runB345RpcProduct(drift_kind: u8) !void {
         transport_marker: u8 = 0,
         storage: client_mod.PreparedBlockingRpcStorage = .{},
         response: RpcExecutedResponse = .{},
-        repeated_responses: [63]RpcExecutedResponse = @splat(.{}),
         terminal_response: RpcExecutedResponse = .{},
         binding: contract.PreparedAttachmentBinding = .{},
         lease: lease_mod.ConnectionLease = .{},
@@ -9897,13 +10255,14 @@ fn runB345RpcProduct(drift_kind: u8) !void {
     );
     const transport_incarnation: u64 = 0xB3455;
     const transport_owner_seal = try slot.transportOwnerSeal(reservation);
-    try contract.TransportOwnerSeal.initInPlace(
+    try contract.TransportOwnerSeal.initWithRpcResponseInPlace(
         transport_owner_seal,
         transport_incarnation,
         @intFromPtr(&owner),
         @sizeOf(Owner),
         @intFromPtr(&owner.transport_marker),
         @intFromPtr(&owner.storage),
+        @intFromPtr(&owner.response),
     );
     const prepared = try prepareGenerationRequest(.{
         .slot_addr = @intFromPtr(&slot),
@@ -10055,6 +10414,10 @@ fn runB345RpcProduct(drift_kind: u8) !void {
     slot.current.guarded_allocator.request_free_test_observer.rpc_publication_drift_kind = drift_kind;
     try executePreparedRpcCorrelatedResponseForTest(request, 91, &owner.response);
     try std.testing.expectEqual(rpc_executed_response.ByteSettlement.live, owner.response.settlement);
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease),
+    );
     const RpcFreeReentryProbe = struct {
         slot: *ClientSlot,
         same_request: GenerationRequestAbort,
@@ -10105,8 +10468,12 @@ fn runB345RpcProduct(drift_kind: u8) !void {
     free_observer.rpc_free_reentry_context = &reentry_probe;
     free_observer.rpc_free_reentry_fn = RpcFreeReentryProbe.run;
     var borrow: rpc_executed_response.RpcResponseBorrow = .{};
-    try beginRpcResponseBorrowForTest(request, &owner.response, &borrow);
-    try finishRpcResponseOwnedForTest(request, &owner.response, &borrow, .reusable);
+    try beginRpcResponseBorrow(request, &owner.response, &borrow);
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease),
+    );
+    try finishRpcResponseOwned(request, &owner.response, &borrow, .reusable);
     try std.testing.expect(free_observer.rpc_free_reentry_fired);
     try std.testing.expectEqual(@as(usize, 1), free_observer.entry_count);
     try std.testing.expect(free_observer.descriptor_exact);
@@ -10130,9 +10497,10 @@ fn runB345RpcProduct(drift_kind: u8) !void {
         foreign_reservation,
         &foreign_owner.lease,
     );
-    try std.testing.expect(owner.response.terminalExact());
+    try std.testing.expect(owner.response.pristineExact());
     try std.testing.expect(slot.current.rpc_free_evidence.emptyExact());
-    for (&owner.repeated_responses) |*response_destination| {
+    var repeated_index: usize = 0;
+    while (repeated_index < 63) : (repeated_index += 1) {
         const repeated_prepared = try prepareGenerationRequest(.{
             .slot_addr = @intFromPtr(&slot),
             .slot_incarnation = identity.slot_incarnation,
@@ -10164,24 +10532,11 @@ fn runB345RpcProduct(drift_kind: u8) !void {
             .reservation = reservation,
             .receipt = repeated_prepared.receipt,
         };
-        try executePreparedRpcCorrelatedResponseForTest(
-            repeated_request,
-            91,
-            response_destination,
-        );
-        var repeated_borrow: rpc_executed_response.RpcResponseBorrow = .{};
-        try beginRpcResponseBorrowForTest(
-            repeated_request,
-            response_destination,
-            &repeated_borrow,
-        );
-        try finishRpcResponseOwnedForTest(
-            repeated_request,
-            response_destination,
-            &repeated_borrow,
-            .reusable,
-        );
-        try std.testing.expect(response_destination.terminalExact());
+        try executeGenerationRpcSubstrate(.{
+            .request = repeated_request,
+            .bound_stream_id = 91,
+        });
+        try std.testing.expect(owner.response.pristineExact());
         try std.testing.expect(slot.current.rpc_free_evidence.emptyExact());
     }
     const terminal_prepared = try prepareGenerationRequest(.{
@@ -10221,12 +10576,12 @@ fn runB345RpcProduct(drift_kind: u8) !void {
         &owner.terminal_response,
     );
     var terminal_borrow: rpc_executed_response.RpcResponseBorrow = .{};
-    try beginRpcResponseBorrowForTest(
+    try beginRpcResponseBorrow(
         terminal_request,
         &owner.terminal_response,
         &terminal_borrow,
     );
-    try finishRpcResponseOwnedForTest(
+    try finishRpcResponseOwned(
         terminal_request,
         &owner.terminal_response,
         &terminal_borrow,
@@ -10238,7 +10593,7 @@ fn runB345RpcProduct(drift_kind: u8) !void {
     try std.testing.expect(peer_ok);
     try std.testing.expectEqual(
         rpc_response_authority.SettlementReadiness.settled,
-        try slot.current.cleanup_registry.rpcResponseSettlementReadinessForTest(
+        try slot.current.cleanup_registry.rpcResponseSettlementReadiness(
             reservation.cleanup,
             identity,
         ),

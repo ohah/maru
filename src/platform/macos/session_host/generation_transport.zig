@@ -10,6 +10,7 @@ const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
+const rpc_executed_response = @import("rpc_executed_response.zig");
 const client_poison = @import("client_poison.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -106,6 +107,7 @@ const Lifecycle = enum(u8) {
 };
 
 var transport_incarnation_issuer: std.atomic.Value(u64) = .init(1);
+const generation_transport_size_budget: usize = 2048;
 
 pub const GenerationTransport = struct {
     self_addr: usize = 0,
@@ -126,6 +128,7 @@ pub const GenerationTransport = struct {
     bound_stream_id: u64 = 0,
     snapshot_authority: initial_snapshot_owner_mod.Authority = .{},
     prepared_storage: client_mod.PreparedBlockingRpcStorage = .{},
+    rpc_response: rpc_executed_response.RpcExecutedResponse = .{},
 
     pub fn capabilities(
         self: *const GenerationTransport,
@@ -261,7 +264,8 @@ pub const GenerationTransport = struct {
     ) (client_mod.ClientError || error{ InvalidSnapshotOwner, MovedOrCopied })!void {
         const client = self.borrowClient() orelse return error.MovedOrCopied;
         if (self.bound_stream_id == 0 or !out.canInitialize() or
-            rangesOverlapTyped(out, self) or rangesOverlapTyped(out, &self.prepared_storage))
+            rangesOverlapTyped(out, self) or rangesOverlapTyped(out, &self.prepared_storage) or
+            rangesOverlapTyped(out, &self.rpc_response))
             return error.InvalidSnapshotOwner;
         const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
         if (rangesOverlapTyped(out, slot) or rangesOverlapTyped(out, slot.current) or
@@ -320,6 +324,7 @@ pub const GenerationTransport = struct {
             out,
             self,
             &self.prepared_storage,
+            &self.rpc_response,
             slot,
             slot.current,
             client,
@@ -567,8 +572,15 @@ pub fn mintInPlace(
         storage_start,
         @sizeOf(client_mod.PreparedBlockingRpcStorage),
     ) catch return error.InvalidTransport;
+    const response_start = @intFromPtr(&out.rpc_response);
+    const response_end = std.math.add(
+        usize,
+        response_start,
+        @sizeOf(rpc_executed_response.RpcExecutedResponse),
+    ) catch return error.InvalidTransport;
     if (owner_addr > transport_start or transport_end > owner_end or
-        owner_addr > storage_start or storage_end > owner_end)
+        owner_addr > storage_start or storage_end > owner_end or
+        owner_addr > response_start or response_end > owner_end)
         return error.InvalidTransport;
     const owner_seal = slot.transportOwnerSeal(binding_reservation) catch
         return error.InvalidTransport;
@@ -580,19 +592,25 @@ pub fn mintInPlace(
         rangesOverlapTyped(out, slot.current) or
         rangesOverlapTyped(out, &slot.current.client))
         return error.InvalidTransport;
+    if (rangesOverlapTyped(&out.rpc_response, &out.prepared_storage) or
+        rangesOverlapTyped(&out.rpc_response, &out.snapshot_authority) or
+        rangesOverlapTyped(&out.rpc_response, &out.binding_reservation))
+        return error.InvalidTransport;
     if (!rawLifecycleValid(&out.lifecycle) or out.self_addr != 0 or out.lifecycle != .pristine or
+        !out.rpc_response.pristineExact() or
         owner_seal.self_addr != 0 or owner_seal.lifecycle != .pristine)
         return error.DestinationOccupied;
     if (!slot.valid() or owner_addr == 0) return error.InvalidTransport;
     const incarnation = issueIncarnation(&transport_incarnation_issuer) catch
         return error.IdentityExhausted;
-    contract.TransportOwnerSeal.initInPlace(
+    contract.TransportOwnerSeal.initWithRpcResponseInPlace(
         owner_seal,
         incarnation,
         owner_addr,
         owner_size,
         @intFromPtr(out),
         @intFromPtr(&out.prepared_storage),
+        @intFromPtr(&out.rpc_response),
     ) catch
         return error.InvalidTransport;
     out.* = .{
@@ -792,7 +810,8 @@ pub fn preflightTerminalizeOwned(
     if (!rawLifecycleValid(&transport.lifecycle) or
         transport.self_addr != @intFromPtr(transport) or transport.lifecycle != .live or
         transport.owner_addr == 0 or transport.owner_addr != owner_addr or transport.owner_seal_addr == 0 or
-        !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage))
+        !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage) or
+        !transport.rpc_response.pristineExact())
         return .invalid;
     if (!transport.snapshot_authority.canTerminalize(transport.transport_incarnation))
         return .busy;
@@ -849,6 +868,371 @@ test "CR3a-2a response payload range rejects exact partial and overflow owner al
     try std.testing.expect(!payloadOverlaps((&separate)[0..1], .{&owner}));
 }
 
+test "CR3a-2c3b generation transport owns one disjoint pristine RPC response slot" {
+    var transport: GenerationTransport = .{};
+    try std.testing.expect(@sizeOf(GenerationTransport) <= generation_transport_size_budget);
+    try std.testing.expect(transport.rpc_response.pristineExact());
+    try std.testing.expect(!rangesOverlapTyped(&transport.rpc_response, &transport.prepared_storage));
+    try std.testing.expect(!rangesOverlapTyped(&transport.rpc_response, &transport.snapshot_authority));
+    try std.testing.expect(!rangesOverlapTyped(&transport.rpc_response, &transport.binding_reservation));
+    const transport_start = @intFromPtr(&transport);
+    const transport_end = transport_start + @sizeOf(GenerationTransport);
+    const response_start = @intFromPtr(&transport.rpc_response);
+    const response_end = response_start + @sizeOf(rpc_executed_response.RpcExecutedResponse);
+    try std.testing.expect(transport_start <= response_start);
+    try std.testing.expect(response_end <= transport_end);
+}
+
+test "CR3a-2c3b generation transport rejects occupied RPC slot at mint" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3B61,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B61);
+    defer slot.deinit();
+
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&transport),
+    );
+    transport.rpc_response.settlement = .terminal_no_free;
+    try std.testing.expectError(error.DestinationOccupied, mintInPlace(
+        &transport,
+        &slot,
+        @intFromPtr(&transport),
+        @sizeOf(GenerationTransport),
+        reservation,
+    ));
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+fn runReusableResponseCorrection(cycles: usize, hostile_alias_case: ?u8) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3B64,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B64);
+    defer slot.deinit();
+
+    const Lease = @typeInfo(
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+    ).pointer.child;
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: Lease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        @intFromPtr(&owner.transport),
+    );
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0x2C3B65,
+        .request_id = 0x2C3B66,
+        .request_digest = 0x2C3B67,
+    }).?;
+    try owner.binding.pairRequest(attach_receipt);
+    try owner.binding.beginExecute(attach_receipt);
+    try slot.commitAttachmentBinding(
+        &owner.binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?,
+            attach_receipt.request_id,
+        ).?,
+        91,
+        &owner.lease,
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 91);
+
+    const Peer = struct {
+        fn readExact(fd: c.fd_t, bytes: []u8) bool {
+            var offset: usize = 0;
+            while (offset < bytes.len) {
+                const read_count = c.read(fd, bytes.ptr + offset, bytes.len - offset);
+                if (read_count < 0 and posix.errno(read_count) == .INTR) continue;
+                if (read_count <= 0) return false;
+                offset += @intCast(read_count);
+            }
+            return true;
+        }
+
+        fn run(fd: c.fd_t, expected_cycles: usize, complete: *bool) void {
+            defer _ = c.close(fd);
+            var index: usize = 0;
+            while (index < expected_cycles) : (index += 1) {
+                var raw_header: [protocol.header_size]u8 = undefined;
+                if (!readExact(fd, &raw_header)) return;
+                const header = protocol.Header.decode(&raw_header) catch return;
+                if (header.kind != .request or header.request_id == 0 or
+                    header.payload_len > protocol.max_control_json) return;
+                const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+                defer std.heap.page_allocator.free(payload);
+                if (!readExact(fd, payload)) return;
+                const response = framing.encodeFrame(
+                    std.heap.page_allocator,
+                    .{ .kind = .response, .request_id = header.request_id },
+                    "{\"result\":true}",
+                ) catch return;
+                defer std.heap.page_allocator.free(response);
+                socket_server.writeAll(fd, response) catch return;
+            }
+            complete.* = true;
+        }
+    };
+    var peer_complete = false;
+    const peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], cycles, &peer_complete });
+    const slot_addr = @intFromPtr(&owner.transport.rpc_response);
+    var index: usize = 0;
+    while (index < cycles) : (index += 1) {
+        const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.observation());
+        if (hostile_alias_case) |range_index|
+            client_slot_mod.armFinishPermitAliasForTest(range_index);
+        try executePreparedRpcSubstrate(&owner.transport, receipt);
+        try std.testing.expectEqual(slot_addr, @intFromPtr(&owner.transport.rpc_response));
+        try std.testing.expect(owner.transport.rpc_response.pristineExact());
+    }
+    peer.join();
+    try std.testing.expect(peer_complete);
+    try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+    slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
+}
+
+test "CR3a-2c3b reusable response correction uses transport inline slot twice" {
+    const mode_ptr = c.getenv("MARU_SESSION_HOST_RPC_REUSE_EXEC");
+    if (mode_ptr == null) return;
+    if (mode_ptr) |raw_mode| {
+        const mode = std.mem.span(raw_mode);
+        if (std.mem.eql(u8, mode, "execute-fixture-v1") or
+            std.mem.eql(u8, mode, "skip-in-aggregate-v1")) return;
+        if (!std.mem.eql(u8, mode, "run-isolated-v1"))
+            return error.InvalidReuseCorrectionSubprocessMode;
+    }
+    try runReusableResponseCorrection(2, null);
+}
+
+test "CR3a-2c3b reusable response correction uses transport inline slot 64 times" {
+    const mode_ptr = c.getenv("MARU_SESSION_HOST_RPC_REUSE_EXEC");
+    if (mode_ptr == null) return;
+    if (mode_ptr) |raw_mode| {
+        const mode = std.mem.span(raw_mode);
+        if (std.mem.eql(u8, mode, "execute-fixture-v1") or
+            std.mem.eql(u8, mode, "skip-in-aggregate-v1")) return;
+        if (!std.mem.eql(u8, mode, "run-isolated-v1"))
+            return error.InvalidReuseCorrectionSubprocessMode;
+    }
+    try runReusableResponseCorrection(64, null);
+}
+
+test "CR3a-2c3b reusable response correction forbids work after rearm before operation release" {
+    const mode_ptr = c.getenv("MARU_SESSION_HOST_RPC_REUSE_EXEC");
+    if (mode_ptr == null) return;
+    if (mode_ptr) |raw_mode| {
+        const mode = std.mem.span(raw_mode);
+        if (std.mem.eql(u8, mode, "skip-in-aggregate-v1")) return;
+        if (!std.mem.eql(u8, mode, "execute-fixture-v1") and
+            !std.mem.eql(u8, mode, "run-isolated-v1"))
+            return error.InvalidReuseCorrectionSubprocessMode;
+        if (std.mem.eql(u8, mode, "execute-fixture-v1")) {
+            const fd_raw = c.getenv("MARU_SESSION_HOST_RPC_REUSE_CAP_FD") orelse
+                return error.InvalidReuseCorrectionCapability;
+            const cap_raw = c.getenv("MARU_SESSION_HOST_RPC_REUSE_CAP") orelse
+                return error.InvalidReuseCorrectionCapability;
+            const case_raw = c.getenv("MARU_SESSION_HOST_RPC_REUSE_CASE") orelse
+                return error.InvalidReuseCorrectionCapability;
+            const capability_fd = std.fmt.parseInt(c.fd_t, std.mem.span(fd_raw), 10) catch
+                return error.InvalidReuseCorrectionCapability;
+            const expected_capability = std.fmt.parseInt(u64, std.mem.span(cap_raw), 16) catch
+                return error.InvalidReuseCorrectionCapability;
+            const hostile_case = std.fmt.parseInt(u8, std.mem.span(case_raw), 10) catch
+                return error.InvalidReuseCorrectionCapability;
+            var capability_bytes: [@sizeOf(u64)]u8 = undefined;
+            if (c.read(capability_fd, &capability_bytes, capability_bytes.len) != capability_bytes.len or
+                std.mem.bytesToValue(u64, &capability_bytes) != expected_capability)
+                return error.InvalidReuseCorrectionCapability;
+            _ = c.close(capability_fd);
+            if (hostile_case < 4) {
+                runReusableResponseCorrection(1, hostile_case) catch
+                    @panic("hostile finish permit alias fixture failed before preflight");
+                @panic("hostile finish permit alias fixture unexpectedly returned");
+            }
+            rpc_executed_response.triggerReusableRearmCommitForTest(hostile_case - 4);
+        }
+    }
+
+    const self_path_z = try std.process.executablePathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(self_path_z);
+    var hostile_case: u8 = 0;
+    while (hostile_case < 8) : (hostile_case += 1) {
+        var capability_pipe: [2]c.fd_t = undefined;
+        var stderr_pipe: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&capability_pipe));
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
+        var capability: u64 = 0xC345_0000 + @as(u64, hostile_case);
+        const capability_bytes = std.mem.asBytes(&capability);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(capability_bytes.len)),
+            c.write(capability_pipe[1], capability_bytes.ptr, capability_bytes.len),
+        );
+        const child = c.fork();
+        if (child < 0) return error.TestUnexpectedResult;
+        if (child == 0) {
+            _ = c.close(capability_pipe[1]);
+            _ = c.close(stderr_pipe[0]);
+            if (c.dup2(stderr_pipe[1], 2) < 0) c._exit(126);
+            _ = c.close(stderr_pipe[1]);
+            var inherited_fd: c.fd_t = 3;
+            while (inherited_fd < getdtablesize()) : (inherited_fd += 1) {
+                if (inherited_fd != capability_pipe[0]) _ = c.close(inherited_fd);
+            }
+            var fd_env_buf: [96]u8 = undefined;
+            const fd_env = std.fmt.bufPrintZ(
+                &fd_env_buf,
+                "MARU_SESSION_HOST_RPC_REUSE_CAP_FD={d}",
+                .{capability_pipe[0]},
+            ) catch c._exit(126);
+            var cap_env_buf: [96]u8 = undefined;
+            const cap_env = std.fmt.bufPrintZ(
+                &cap_env_buf,
+                "MARU_SESSION_HOST_RPC_REUSE_CAP={x}",
+                .{capability},
+            ) catch c._exit(126);
+            var case_env_buf: [96]u8 = undefined;
+            const case_env = std.fmt.bufPrintZ(
+                &case_env_buf,
+                "MARU_SESSION_HOST_RPC_REUSE_CASE={d}",
+                .{hostile_case},
+            ) catch c._exit(126);
+            const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
+            const child_env = [_:null]?[*:0]const u8{
+                "MARU_SESSION_HOST_RPC_REUSE_EXEC=execute-fixture-v1",
+                fd_env.ptr,
+                cap_env.ptr,
+                case_env.ptr,
+            };
+            _ = c.execve(self_path_z.ptr, &argv, &child_env);
+            c._exit(127);
+        }
+        _ = c.close(capability_pipe[0]);
+        _ = c.close(capability_pipe[1]);
+        _ = c.close(stderr_pipe[1]);
+        const stderr_flags = c.fcntl(stderr_pipe[0], c.F.GETFL, @as(c_int, 0));
+        if (stderr_flags < 0 or c.fcntl(
+            stderr_pipe[0],
+            c.F.SETFL,
+            stderr_flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })),
+        ) < 0) return error.TestUnexpectedResult;
+        var status: c_int = 0;
+        var stderr_bytes: [64 * 1024]u8 = undefined;
+        var stderr_len: usize = 0;
+        var attempts: usize = 0;
+        while (attempts < 2_000) : (attempts += 1) {
+            if (stderr_len < stderr_bytes.len) {
+                const read_len = c.read(
+                    stderr_pipe[0],
+                    stderr_bytes[stderr_len..].ptr,
+                    stderr_bytes.len - stderr_len,
+                );
+                if (read_len > 0) stderr_len += @intCast(read_len);
+            }
+            const waited = c.waitpid(child, &status, c.W.NOHANG);
+            if (waited == child) break;
+            if (waited < 0 and std.posix.errno(waited) != .INTR) return error.TestUnexpectedResult;
+            var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+            _ = c.poll(@ptrCast(&delay_fd), 0, 1);
+        }
+        if (attempts == 2_000) {
+            _ = c.kill(child, c.SIG.KILL);
+            _ = c.waitpid(child, &status, 0);
+            return error.TestUnexpectedResult;
+        }
+        if (stderr_len < stderr_bytes.len) {
+            const read_len = c.read(
+                stderr_pipe[0],
+                stderr_bytes[stderr_len..].ptr,
+                stderr_bytes.len - stderr_len,
+            );
+            if (read_len > 0) stderr_len += @intCast(read_len);
+        }
+        _ = c.close(stderr_pipe[0]);
+        try std.testing.expect(stderr_len > 0);
+        try std.testing.expect(status != 0);
+        const stderr_bytes_read = stderr_bytes[0..stderr_len];
+        const expected = if (hostile_case < 4)
+            "permit-alias-preflight-rejected"
+        else
+            "RPC response reusable rearm permit mismatch";
+        if (std.mem.indexOf(u8, stderr_bytes_read, expected) == null) {
+            std.debug.print("reuse correction hostile case {d} stderr: {s}\n", .{
+                hostile_case,
+                stderr_bytes_read,
+            });
+        }
+        try std.testing.expect(std.mem.indexOf(u8, stderr_bytes_read, expected) != null);
+    }
+
+    const allocator = std.testing.allocator;
+    const source = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "src/platform/macos/session_host/client_slot.zig",
+        allocator,
+        .limited(8 * 1024 * 1024),
+    );
+    defer allocator.free(source);
+    const function_start = std.mem.indexOf(u8, source, "fn finishRpcResponseOwned(") orelse
+        return error.TestExpectedEqual;
+    const function_tail = source[function_start..];
+    const rearm_start = std.mem.indexOf(
+        u8,
+        function_tail,
+        "response.commitReusableRearmNoFail(&finish, permits.rearm);",
+    ) orelse return error.TestExpectedEqual;
+    const after_rearm = function_tail[rearm_start..];
+    const function_end = std.mem.indexOf(u8, after_rearm, "\n}\n\nfn terminalizeBorrowed") orelse
+        return error.TestExpectedEqual;
+    const suffix = after_rearm[0..function_end];
+    inline for (.{
+        "prepare",
+        "lookup",
+        "freeCaptured",
+        "commitFreeCall",
+        "finishCleanNoFail",
+        "allocator",
+        "poison",
+        "disposition",
+    }) |forbidden| try std.testing.expect(std.mem.indexOf(u8, suffix, forbidden) == null);
+}
+
 fn currentPid() u32 {
     return if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
 }
@@ -867,7 +1251,11 @@ fn issueIncarnation(issuer: *std.atomic.Value(u64)) error{IdentityExhausted}!u64
 }
 
 fn isForbiddenFacadeType(comptime T: type) bool {
-    if (T == client_mod.Client) return true;
+    if (T == client_mod.Client or
+        T == rpc_executed_response.RpcExecutedResponse or
+        T == rpc_executed_response.RpcResponseBorrow or
+        T == rpc_executed_response.RpcResponseFinishTxn)
+        return true;
     return switch (@typeInfo(T)) {
         .pointer => |info| isForbiddenFacadeType(info.child),
         .optional => |info| isForbiddenFacadeType(info.child),
@@ -883,6 +1271,20 @@ fn isForbiddenFacadeType(comptime T: type) bool {
         },
         else => false,
     };
+}
+
+/// Private ownership-only bridge for the canonical inline RPC slot. It intentionally returns no
+/// payload or borrow capability; decoder-facing product behavior belongs to the later decoder
+/// slice, while this bridge proves that the transport-owned slot can settle and rearm in place.
+fn executePreparedRpcSubstrate(
+    self: *GenerationTransport,
+    receipt: contract.PreparedCallReceipt,
+) Error!void {
+    if (!self.requestIdentityValid()) return error.MovedOrCopied;
+    client_slot_mod.executeGenerationRpcSubstrate(.{
+        .request = self.requestOperation(receipt),
+        .bound_stream_id = self.bound_stream_id,
+    }) catch |err| return mapGenerationExecuteToLegacyError(err);
 }
 
 comptime {

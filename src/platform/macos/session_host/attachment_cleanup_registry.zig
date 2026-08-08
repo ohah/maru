@@ -575,6 +575,144 @@ pub const AttachmentCleanupRegistry = struct {
         );
     }
 
+    pub fn prepareRpcResponsePublished(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        out: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.preparePublish(canonical, self.incarnation, identity, out);
+    }
+
+    pub fn commitRpcResponsePublished(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        permit: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("prepared RPC publish registry drifted");
+        entry.rpc_response_authority.commitPublishedNoFail(canonical, permit);
+    }
+
+    pub fn prepareRpcResponseBorrowed(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        out: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.prepareBorrow(canonical, self.incarnation, identity, out);
+    }
+
+    pub fn commitRpcResponseBorrowed(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        permit: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("prepared RPC borrow registry drifted");
+        entry.rpc_response_authority.commitBorrowedNoFail(canonical, permit);
+    }
+
+    pub fn prepareRpcResponseReleasing(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        out: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.prepareBeginRelease(canonical, self.incarnation, identity, out);
+    }
+
+    pub fn commitRpcResponseReleasing(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        permit: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("prepared RPC release registry drifted");
+        entry.rpc_response_authority.commitReleasingNoFail(canonical, permit);
+    }
+
+    pub fn prepareRpcResponseReusable(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        out: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.prepareFinishReusable(canonical, self.incarnation, identity, out);
+    }
+
+    pub fn commitRpcResponseReusable(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        permit: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("prepared RPC reusable registry drifted");
+        entry.rpc_response_authority.commitReusableNoFail(canonical, permit);
+    }
+
+    pub fn prepareRpcResponseTerminal(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        out: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.prepareFinishTerminal(canonical, self.incarnation, identity, out);
+    }
+
+    pub fn commitRpcResponseTerminal(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        permit: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("prepared RPC terminal registry drifted");
+        entry.rpc_response_authority.commitTerminalNoFail(canonical, permit);
+    }
+
+    pub fn preparePublishedRpcResponseTerminal(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        out: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) (Error || rpc_response_authority.Authority.Error)!void {
+        const entry = try self.exactEntry(reservation, identity);
+        try entry.rpc_response_authority.preparePublishedTerminal(canonical, self.incarnation, identity, out);
+    }
+
+    pub fn commitPublishedRpcResponseTerminal(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        canonical: rpc_response_authority.Canonical,
+        permit: *rpc_response_authority.PreparedRpcTransitionPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("prepared published RPC terminal registry drifted");
+        entry.rpc_response_authority.commitPublishedTerminalNoFail(canonical, permit);
+    }
+
     fn classifyRequestAdmission(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
@@ -1405,6 +1543,70 @@ test "B3-3 registry terminal settlement rejects copied response canonical" {
         reserved.identity,
         response,
     );
+}
+
+test "B3-4/5 registry transition facade closes reusable response lifecycle" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB340);
+    const reserved = try registry.reserve(fixtureSeed(0xB341, 0xB342));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB343);
+    const prepared = fixturePrepared(reserved.identity, .observation, .bound_observation, 0xB344, 0xB345, 0xB346);
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+    const response = try registry.reserveRpcResponseExecution(reserved.reservation, reserved.identity, prepared, 0xB347);
+
+    var publish: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try registry.prepareRpcResponsePublished(reserved.reservation, reserved.identity, response, &publish);
+    registry.commitRpcResponsePublished(reserved.reservation, reserved.identity, response, &publish);
+    var borrow: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try registry.prepareRpcResponseBorrowed(reserved.reservation, reserved.identity, response, &borrow);
+    registry.commitRpcResponseBorrowed(reserved.reservation, reserved.identity, response, &borrow);
+    var releasing: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try registry.prepareRpcResponseReleasing(reserved.reservation, reserved.identity, response, &releasing);
+    registry.commitRpcResponseReleasing(reserved.reservation, reserved.identity, response, &releasing);
+    var reusable: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try registry.prepareRpcResponseReusable(reserved.reservation, reserved.identity, response, &reusable);
+    registry.commitRpcResponseReusable(reserved.reservation, reserved.identity, response, &reusable);
+    try std.testing.expectEqual(
+        rpc_response_authority.SettlementReadiness.settled,
+        registry.entries[reserved.reservation.entry_index].rpc_response_authority.settlementReadiness(),
+    );
+}
+
+test "B3-4/5 registry transition facade closes published and releasing terminal paths" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB348);
+    const reserved = try registry.reserve(fixtureSeed(0xB349, 0xB34A));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB34B);
+    const prepared = fixturePrepared(reserved.identity, .observation, .bound_observation, 0xB34C, 0xB34D, 0xB34E);
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+    const response = try registry.reserveRpcResponseExecution(reserved.reservation, reserved.identity, prepared, 0xB34F);
+    var publish: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try registry.prepareRpcResponsePublished(reserved.reservation, reserved.identity, response, &publish);
+    registry.commitRpcResponsePublished(reserved.reservation, reserved.identity, response, &publish);
+    var terminal: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try registry.preparePublishedRpcResponseTerminal(reserved.reservation, reserved.identity, response, &terminal);
+    registry.commitPublishedRpcResponseTerminal(reserved.reservation, reserved.identity, response, &terminal);
+    try std.testing.expect(try registry.rpcExecutionAuthoritiesTerminalForTest(reserved.reservation, reserved.identity) == false);
+    try std.testing.expect(
+        registry.entries[reserved.reservation.entry_index].rpc_response_authority.terminalExactFor(registry.incarnation, reserved.identity),
+    );
+}
+
+test "B3-4/5 registry transition prepare rejects stale phase without permit mutation" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB350);
+    const reserved = try registry.reserve(fixtureSeed(0xB351, 0xB352));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB353);
+    const prepared = fixturePrepared(reserved.identity, .observation, .bound_observation, 0xB354, 0xB355, 0xB356);
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+    const response = try registry.reserveRpcResponseExecution(reserved.reservation, reserved.identity, prepared, 0xB357);
+    var permit: rpc_response_authority.PreparedRpcTransitionPermit = .{};
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.prepareRpcResponseBorrowed(reserved.reservation, reserved.identity, response, &permit),
+    );
+    try std.testing.expect(permit.pristineExact());
+    try registry.settleRpcResponseExecutionTerminal(reserved.reservation, reserved.identity, response);
 }
 
 test "B3-2 private destination admission exhausts context policy and raw discriminants" {

@@ -1988,6 +1988,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-b3-3",
         "B3-3 prepared request progress and write focused Debug and ReleaseFast gates",
     );
+    const session_host_b3_4_5_step = b.step(
+        "test-session-host-b3-4-5",
+        "B3-4/5 RPC response publication ownership focused Debug and ReleaseFast gates",
+    );
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2027,6 +2031,19 @@ pub fn build(b: *std.Build) void {
     run_b3_3_boundary_tests.setCwd(b.path("."));
     session_host_b3_3_step.dependOn(&run_b3_3_boundary_tests.step);
     boundary_step.dependOn(&run_b3_3_boundary_tests.step);
+    const b3_4_5_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_b3_4_5_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"B3-4/5 transition permits"},
+    });
+    const run_b3_4_5_boundary_tests = b.addRunArtifact(b3_4_5_boundary_tests);
+    run_b3_4_5_boundary_tests.addArg("--maru-expect-tests=1");
+    run_b3_4_5_boundary_tests.setCwd(b.path("."));
+    session_host_b3_4_5_step.dependOn(&run_b3_4_5_boundary_tests.step);
+    boundary_step.dependOn(&run_b3_4_5_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
         const b3_1_leaf_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -2139,6 +2156,36 @@ pub fn build(b: *std.Build) void {
         run_b3_3_product_tests.addArg("--maru-expect-tests=3");
         run_b3_3_product_tests.setCwd(b.path("."));
         session_host_b3_3_step.dependOn(&run_b3_3_product_tests.step);
+
+        const b3_4_5_leaf_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/rpc_response_authority.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"B3-4/5 RPC transition"},
+        });
+        const run_b3_4_5_leaf_tests = b.addRunArtifact(b3_4_5_leaf_tests);
+        run_b3_4_5_leaf_tests.addArg("--maru-expect-tests=4");
+        run_b3_4_5_leaf_tests.setCwd(b.path("."));
+        session_host_b3_4_5_step.dependOn(&run_b3_4_5_leaf_tests.step);
+
+        const b3_4_5_registry_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/attachment_cleanup_registry.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"B3-4/5 registry transition"},
+        });
+        const run_b3_4_5_registry_tests = b.addRunArtifact(b3_4_5_registry_tests);
+        run_b3_4_5_registry_tests.addArg("--maru-expect-tests=3");
+        run_b3_4_5_registry_tests.setCwd(b.path("."));
+        session_host_b3_4_5_step.dependOn(&run_b3_4_5_registry_tests.step);
     }
     if (target.result.os.tag == .macos) {
         const ended_purge_orchestration_drift_test = addProjectTest(b, .{

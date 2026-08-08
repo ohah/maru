@@ -166,7 +166,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 사이드바 카드 ✕의 열 배치를 chrome 단일 출처(`sidebar.columns`)로 올리며 또 바뀐다. count는 4 그대로다 —
     // 새 헬퍼(`sidebarColumns`·`sidebarCloseButtonAt`)는 토큰 값을 chrome 함수에 넘기고 그 결과로 산술만 하며,
     // 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "4f63d920b65e9282f96a13edfeb502a3685c21c54b51ed285bbc994fd017fe69" },
+    // SV5b(팔레트 스크롤바를 공용 발행 경로로 — 상태는 안 만든다)로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "98096d777e68e5d66d215dba796168ad522530e398190fae00a62c10f4493be1" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

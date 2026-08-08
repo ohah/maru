@@ -161,11 +161,18 @@ pub fn view(
     // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
     try out.append(arena, .{ .quad = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
 
+    // 스크롤바 gutter는 **상시** 예약한다(SV5b) — 선택 밴드와 단축키가 함께 이만큼 비켜 준다. 밴드가
+    // 패널 폭을 다 먹으면 막대를 덮어 첫 행에서만 막대가 사라지는 그림이 된다(실측). 탐색기(SV2b)가
+    // "밴드가 gutter를 넘으면 스크롤바를 덮는다"로 세운 규율과 같다.
+    const gutter_cols: u32 = if (cw > 0) (p.metrics.overlay_scroll_gutter_px + cw - 1) / cw else 0;
+    const usable_cols = lay.panel_cols -| gutter_cols;
+    const band_w = usable_cols * cw;
+
     // 선택 행 강조: 선택된 결과 행의 bg를 tab_active_bg로(레거시 sidebar_active와 같은 색). 텍스트가 그 위에 그려진다.
     for (rows, 0..) |row, i| {
         if (!row.selected) continue;
         const row_y = y + @as(i32, @intCast((1 + i) * @as(usize, ch)));
-        try out.append(arena, .{ .fill = .{ .rect = .{ .x = x, .y = row_y, .w = panel_w, .h = ch }, .role = .tab_active_bg } });
+        try out.append(arena, .{ .fill = .{ .rect = .{ .x = x, .y = row_y, .w = band_w, .h = ch }, .role = .tab_active_bg } });
     }
 
     // row0: "> " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는 query
@@ -185,10 +192,10 @@ pub fn view(
         if (row.binding.len > 0) {
             const bind_cols = overlay_input.displayCols(row.binding);
             // 패널 우측에서 한 칸 안쪽. 제목과 안 겹치게 패널에 들어갈 때만 그린다.
-            if (bind_cols + prompt_cols + 1 < lay.panel_cols) {
+            if (bind_cols + prompt_cols + 1 < usable_cols) {
                 const bind_runs = try arena.alloc(draw.Run, 1);
                 bind_runs[0] = .{ .text = row.binding };
-                const bx = x + @as(i32, @intCast((lay.panel_cols - bind_cols - 1) * cw));
+                const bx = x + @as(i32, @intCast((usable_cols - bind_cols - 1) * cw));
                 try out.append(arena, .{ .text = .{ .origin = .{ .x = bx, .y = row_y }, .runs = bind_runs, .role = .surface_fg } });
             }
         }
@@ -403,4 +410,54 @@ test "palette view/caret: 긴 검색어는 tail 창(선두 …)으로 오른쪽 
     const cr = caretRect(&s, p) orelse return error.CaretHidden;
     try std.testing.expect(cr.x >= lay.x);
     try std.testing.expect(cr.x < lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw)));
+}
+
+// SV5b — 스크롤바 gutter는 **밴드와 단축키가 함께** 비켜 준다. 하나만 빼면 그 요소만 막대를 덮는데,
+// 실제로 두 번 그렇게 나갔다(먼저 단축키가, 고친 뒤엔 선택 밴드가). gutter를 손으로 빼는 구조가 남아
+// 있는 한 이 판정자가 그 자리를 지킨다 — 장기 답은 레이아웃 엔진이 빼는 것이다(implementation-plan SV5b).
+test "palette reserves the scrollbar gutter for both the selection band and the binding column" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const gutter: u32 = 11;
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 1200,
+        .backing_height_px = 800,
+        .overlay_scroll_gutter_px = gutter,
+    } };
+    var s: State = .{};
+    s.show();
+    s.selected = 0;
+    const rows = [_]Row{
+        .{ .title = "New Terminal", .binding = "\u{2318}T", .selected = true },
+        .{ .title = "Close", .binding = "\u{2318}W", .selected = false },
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &rows, p, &tk, arena_state.allocator(), &out);
+
+    const lay = overlay_input.panelLayout(p).?;
+    const panel_right = lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw));
+    const gutter_left = panel_right - @as(i32, @intCast(gutter));
+
+    var saw_band = false;
+    for (out.items) |op| switch (op) {
+        // ① 선택 밴드가 gutter를 침범하지 않는다 — 침범하면 **선택된 행에서만** 막대가 사라진다.
+        .fill => |f| if (f.role == .tab_active_bg) {
+            saw_band = true;
+            try std.testing.expect(f.rect.x + @as(i32, @intCast(f.rect.w)) <= gutter_left);
+        },
+        // ② 우측 정렬 단축키도 gutter 왼쪽에서 끝난다.
+        .text => |t| {
+            var w: u32 = 0;
+            for (t.runs) |r| w += overlay_input.displayCols(r.text) * lay.cw;
+            try std.testing.expect(t.origin.x + @as(i32, @intCast(w)) <= gutter_left);
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_band); // 밴드가 아예 없으면 ①이 아무것도 판정하지 못한다
 }

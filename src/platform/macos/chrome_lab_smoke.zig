@@ -184,6 +184,9 @@ pub fn main(init: std.process.Init) !void {
         frame.draws.ops,
         &tokens,
         cell_width_px,
+        // Lab fixture에는 resolved appearance가 없다. 빈 face = system UI face라, 제품이 사용자 폰트를
+        // 따라가도 이 시각 골든은 설치 폰트에 흔들리지 않는다(docs/font-strategy.md "Chrome 텍스트 face").
+        .{},
         // Lab fixture는 1× 논리 스케일로 고정한다(viewport·cell 크기가 그 전제로 잡혀 있다).
         1000,
     );

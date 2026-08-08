@@ -735,9 +735,9 @@ test "rich text fingerprint and the shaping request share one filter" {
         richTextFingerprint(&with_inert, &tk, 8, 16, 20, 10, 0),
     );
     // 그리고 request도 같은 개수를 만들어야 한다(= 같은 필터).
-    var base_request = try system_text.prepareRequest(allocator, 1, &baseline, &tk, 8);
+    var base_request = try system_text.prepareRequest(allocator, 1, &baseline, &tk, 8, .{});
     defer base_request.deinit(allocator);
-    var inert_request = try system_text.prepareRequest(allocator, 1, &with_inert, &tk, 8);
+    var inert_request = try system_text.prepareRequest(allocator, 1, &with_inert, &tk, 8, .{});
     defer inert_request.deinit(allocator);
     try std.testing.expectEqual(base_request.runs.len, inert_request.runs.len);
     try std.testing.expectEqual(@as(usize, 1), inert_request.runs.len);

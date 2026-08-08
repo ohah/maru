@@ -172,7 +172,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // AS6(정렬 키·방향 토글)로 또 바뀐다. count는 4 그대로다.
     // 아카이브 스캔 스트리밍 이관(점진 publish 요청 플래그)으로 또 바뀐다. count는 4 그대로다.
     // 웹 탭 ⌘F 라우팅 게이트로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "7fafe7c9abe06ea83595428bbe03ccf49a918d66b9d87ce49bae096c8d2fea5b" },
+    // Chrome 텍스트 face를 사용자 `font.family`로 넘기며 또 바뀐다(docs/font-strategy.md "Chrome 텍스트
+    // face"). count는 4 그대로다 — resolved appearance의 두 문자열을 셰이핑 요청에 실어 보낼 뿐이고,
+    // Client 구성이나 receiver 집합과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "d43f3ed8f82e697943d4042398f583aa769f2849340dc51aae567e8b6bb8d72a" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

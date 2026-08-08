@@ -112,6 +112,19 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   바꿔도 도크의 버튼 여백·목록 밀도·hit rect가 바뀌어서는 안 된다. 단, `Cmd`+`+`/`-`/`0`의 font-size
   비율은 750–1500 milli로 clamp된 `SessionDockUiZoom`이므로, 이 명시적 zoom에는 모든 dock rect와 hit rect가
   함께 확대·축소된다.
+
+  **이 불변식은 기하에만 걸린다 — face는 명시적으로 예외다.** 도크 텍스트는 `font.family`(+`font.fallback`
+  cascade)로 그린다. 같은 화면의 사이드바가 사용자 monospace인데 도크만 시스템 UI face면 앱이 사용자
+  폰트 설정을 절반만 따르기 때문이다(사용자 결정 2026-08-08). 규칙과 폴백은 [폰트 전략](font-strategy.md)의
+  "Chrome 텍스트 face"가 단일 출처다. face가 바뀌어도 위 기하는 불변이다 — 카드 높이·여백·hit rect는
+  `lineHeightPx(role)` 파생이고 role 토큰은 `font.size`와 독립이다. 바뀌는 것은 같은 rect 안에 들어가는
+  **글자 수**뿐이다(monospace는 덜 들어가므로 `…` 잘림이 는다).
+
+  다만 이 불변식에는 **알려진 예외**가 하나 더 있다: `Writer.textInsetStyled`가 텍스트 폭 예산을
+  `floor(available_px / cell_width_px)` cols로 양자화하고 `opMaxWidthPx`가 그것을 다시 px로 되돌린다.
+  그래서 터미널 폰트 **크기**를 바꾸면 잘림 경계가 최대 1 cell 폭만큼 움직인다. rect·여백·hit rect는
+  영향을 받지 않으므로 위 계약의 핵심(밀도·hit rect 불변)은 유지되지만, "terminal font를 바꿔도 아무것도
+  안 움직인다"는 아니다. 폭 예산을 logical pt로 옮기는 것은 별도 작업이다.
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 Maru 등록 host SVG + `로컬`/refresh의 우측
   utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
   prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 **24pt trailing slot**,

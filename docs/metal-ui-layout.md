@@ -775,7 +775,9 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 **새 표면은 예외를 만들지 않는다.** 기하가 필요하면 `session/dock_layout.zig`가 정하고 `GpuQuad`로 내며, `.m`에 새 인자를 더해 **그쪽이 rect를 계산하게** 하지 않는다. ABI 인자 추가가 더 작아 보여도, 그건 "배치를 아는 곳"을 하나 더 만드는 선택이다.
 
-**단 `.m`이 이미 소유한 표면을 새 표면에 맞춰 끊는 것은 다른 문제다.** 하단 상태표시줄이 실제로 그랬다: 바 자체는 Zig가 `GpuQuad`로 그리지만, 사이드바 배경 strip과 셀 scissor는 `.m`이 바닥을 직접 정하는 승인 예외(위 표)라 **Zig가 값을 실어 주는 것 말고는 그 바닥을 옮길 방법이 없다**. 그래서 `MetalFrame.status_bar_height_px`(ABI v167)를 냈다 — `.m`은 그 값으로 **자기 표면을 자르기만** 하고 상태바의 rect는 계산하지 않는다([status-bar.md](status-bar.md) §5.2·§5.3). 판단 기준은 "인자를 더하느냐"가 아니라 **"배치를 아는 곳이 늘어나느냐"**다.
+**단 `.m`이 이미 소유한 표면을 새 표면에 맞춰 끊는 것은 다른 문제다.** 하단 상태표시줄이 실제로 그랬다: 바 자체는 Zig가 `GpuQuad`로 그리지만, 사이드바 배경 strip과 셀 scissor는 `.m`이 바닥을 직접 정하는 승인 예외(위 표)라 **Zig가 값을 실어 주는 것 말고는 그 바닥을 옮길 방법이 없다**. 그래서 `MetalFrame.status_bar_height_px`(ABI v167)를 냈다 — `.m`은 그 값으로 **자기 표면을 자르기만** 하고 상태바의 rect는 계산하지 않는다([status-bar.md](status-bar.md) §5.2). 판단 기준은 "인자를 더하느냐"가 아니라 **"배치를 아는 곳이 늘어나느냐"**다.
+
+> **셀 scissor는 그 뒤 예외에서 빠졌다**(ABI v168). 게이트·클램프·뒤집힘 방지를 전부 Zig(`sidebarScissorPx`)로 옮기고 `.m`은 받은 `[top, bottom)` 구간을 **그대로** 쓴다([status-bar.md](status-bar.md) §5.3). 즉 위 문단에서 `.m`이 바닥을 직접 정하는 표면으로 남은 것은 **사이드바 배경 strip 하나**다. 그 strip도 지금은 높이를 받아 `drawable_h - height`를 스스로 빼는데, **가장자리를 받는 쪽으로 정리하는 방향**이 정해져 있다(status-bar.md §6 — 트리거 대기).
 
 ### 입력 dispatch와 interaction state
 

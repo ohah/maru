@@ -114,7 +114,10 @@ dirty tree·충돌·hook 출력이 **평소처럼 사용자에게 보인다**는
 
 ### 5.1 배경 quad는 layer 2(bottom)여야 한다
 
-항목 텍스트는 `pane_frames`를 타고 **터미널 레이어**의 셀 패스로 그려진다. `.m`의 버킷팅은 `2=bottom · 0=under · 4=header · 그 밖=over`인데, **over는 별도 오버레이 CAMetalLayer**라 터미널 레이어 **전체 위에** 합성된다 — 배경을 거기 두면 **자기 텍스트를 덮는다**(실제로 그 상태로 두 조각이 머지됐다).
+항목 텍스트는 `pane_frames`를 타고 **터미널 레이어**의 셀 패스로 그려진다. 그래서 **아이콘과 라벨이 서로 다른 색을**
+가질 수 있다(셀마다 `style.foreground`가 따로다 — blocked 항목이 accent 아이콘을 쓰는 근거). chrome draw-op 경로는
+`Op.Text.role`이 op당 하나라 그게 안 되는데, 상태바는 그 제약을 **경로가 달라서** 비껴갔다
+([chrome-strategy.md](chrome-strategy.md) 아이콘 절). `.m`의 버킷팅은 `2=bottom · 0=under · 4=header · 그 밖=over`인데, **over는 별도 오버레이 CAMetalLayer**라 터미널 레이어 **전체 위에** 합성된다 — 배경을 거기 두면 **자기 텍스트를 덮는다**(실제로 그 상태로 두 조각이 머지됐다).
 
 bottom은 터미널 레이어 맨 처음이라 그 뒤의 모든 것이 위에 그려진다. 띠를 침범할 수 있는 것들은 이미 막혀 있다 — 터미널 grid는 짧아졌고(§1), 사이드바 배경 strip은 §5.2가 끊고, 사이드바 셀은 §5.3이 자른다.
 

@@ -36,6 +36,12 @@ pub const Parsed = struct {
     model: []u8,
     message_count: u32,
     verified_user: bool,
+    /// transcript가 스스로 말하는 마지막 활동 시각(Unix epoch 나노초). 0이면 이 파일에서 하나도 읽지
+    /// 못했다는 뜻이고, 호출자가 파일 mtime으로 폴백한다.
+    ///
+    /// mtime은 대화 외의 이유(복사·도구의 메타 갱신·백업 복원)로도 밀린다. 실측(2026-08-08, 로컬 이력
+    /// 362개)에서 mtime으로 정렬하면 257개(70%)가 제자리가 아니었고 Claude 쪽 최대 차이는 144시간이었다.
+    last_activity_ns: i96 = 0,
 
     pub fn deinit(self: *Parsed, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
@@ -47,7 +53,12 @@ pub const Parsed = struct {
     }
 
     pub fn clone(self: *const Parsed, allocator: std.mem.Allocator) !Parsed {
-        return duplicateParsed(allocator, self.provider, self.session_id, self.title, self.summary, self.cwd, self.cwd_canonical, self.model, self.message_count, self.verified_user);
+        var out = try duplicateParsed(allocator, self.provider, self.session_id, self.title, self.summary, self.cwd, self.cwd_canonical, self.model, self.message_count, self.verified_user);
+        // `duplicateParsed`는 **인자로 받은 것만** 세운다. Parsed에 스칼라를 더하면 여기에도 더해야
+        // 한다 — 캐시 히트와 부분 진행 발행이 모두 이 clone을 지나므로, 빠뜨리면 그 값만 조용히 0이
+        // 된다. 아래 "clone은 모든 필드를 보존한다" 테스트가 comptime으로 전 필드를 훑어 막는다.
+        out.last_activity_ns = self.last_activity_ns;
+        return out;
     }
 };
 
@@ -89,6 +100,10 @@ pub const Parser = struct {
     /// 이 파일에서 `user` 신호를 한 번이라도 봤는가. 조기 중단 판정에만 쓴다 — 한 번 본 뒤에는 뒤에
     /// 오는 worker 메타로 뒤집어 중단하지 않는다.
     saw_user_signal: bool = false,
+    /// 이 파일에서 본 **가장 늦은** timestamp. 마지막으로 본 값이 아니라 최댓값을 쓴다 — 줄 순서가
+    /// 시간 순이라는 보장이 없고(요약·메타 줄이 뒤에 붙는 형식이 있다), "마지막 활동"은 순서가 아니라
+    /// 시각으로 정해야 한다.
+    last_activity_ns: i96 = 0,
 
     pub fn init(allocator: std.mem.Allocator, provider: Provider) Parser {
         return .{ .allocator = allocator, .provider = provider };
@@ -100,6 +115,14 @@ pub const Parser = struct {
             .claude => self.consumeClaudeLine(line),
             .codex => self.consumeCodexLine(line),
         }
+    }
+
+    /// 두 provider 모두 각 줄 최상위에 `timestamp`를 싣는다. provider별 소비 함수가 이미 JSON을 열었으므로
+    /// 거기서 이 값을 함께 넘긴다 — 정렬 하나 때문에 같은 줄을 두 번 파싱하지 않는다.
+    fn observeTimestamp(self: *Parser, obj: std.json.ObjectMap) void {
+        const text = string(obj.get("timestamp")) orelse return;
+        const ns = parseRfc3339Utc(text) orelse return;
+        if (ns > self.last_activity_ns) self.last_activity_ns = ns;
     }
 
     /// Codex worker로 **확정**됐는가. 확정은 "앞부분을 충분히 읽고도 `user` 신호를 한 번도 못 봤을 때"만
@@ -120,6 +143,7 @@ pub const Parser = struct {
         const root = parseObject(self.allocator, line) orelse return;
         defer root.deinit();
         const obj = root.value.object;
+        self.observeTimestamp(obj);
         if (string(obj.get("sessionId"))) |value| self.session_id = copyInto(&self.session_id_buf, value);
         if (string(obj.get("cwd"))) |value| self.cwd = copyInto(&self.cwd_buf, value);
         if (string(obj.get("custom-title")) orelse string(obj.get("customTitle")) orelse string(obj.get("title"))) |value| {
@@ -152,6 +176,7 @@ pub const Parser = struct {
         const root = parseObject(self.allocator, line) orelse return;
         defer root.deinit();
         const obj = root.value.object;
+        self.observeTimestamp(obj);
         const kind = string(obj.get("type")) orelse "";
         const payload = object(obj.get("payload"));
         if (std.mem.eql(u8, kind, "session_meta")) {
@@ -190,16 +215,80 @@ pub const Parser = struct {
         if (self.session_id.len == 0) return null;
         const display_title = if (self.title.len > 0) self.title else if (self.first_user.len > 0) self.first_user else "제목 없는 세션";
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
-        return try duplicateParsed(self.allocator, .claude, self.session_id, display_title, summary, self.cwd, false, self.model, self.count, true);
+        var parsed = try duplicateParsed(self.allocator, .claude, self.session_id, display_title, summary, self.cwd, false, self.model, self.count, true);
+        parsed.last_activity_ns = self.last_activity_ns;
+        return parsed;
     }
 
     fn finishCodex(self: *Parser) !?Parsed {
         if (!self.saw_meta or !self.is_user or self.session_id.len == 0) return null;
         const title = if (self.first_user.len > 0) self.first_user else "제목 없는 세션";
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
-        return try duplicateParsed(self.allocator, .codex, self.session_id, title, summary, self.cwd, false, self.model, self.count, true);
+        var parsed = try duplicateParsed(self.allocator, .codex, self.session_id, title, summary, self.cwd, false, self.model, self.count, true);
+        parsed.last_activity_ns = self.last_activity_ns;
+        return parsed;
     }
 };
+
+/// RFC 3339 UTC 시각(`YYYY-MM-DDTHH:MM:SS[.fff]Z`)을 Unix epoch 나노초로 바꾼다. 형태가 조금이라도
+/// 다르면 **추측하지 않고** null을 돌려 호출자가 mtime으로 폴백하게 한다 — 틀린 시각으로 정렬하느니
+/// 파일 시각이 낫다.
+///
+/// 실측(2026-08-08): 두 provider의 timestamp 200,025건이 모두 밀리초 3자리 `Z` 한 형태였다. 그래도
+/// 소수부는 없거나 최대 9자리까지 받는다. 형태가 하나뿐이라고 파서를 그 하나에 못 박으면 provider가
+/// 자릿수를 바꾸는 날 목록 순서가 조용히 mtime으로 돌아간다.
+pub fn parseRfc3339Utc(text: []const u8) ?i96 {
+    // `YYYY-MM-DDTHH:MM:SSZ`가 최소 형태다.
+    if (text.len < 20 or text[text.len - 1] != 'Z') return null;
+    if (text[4] != '-' or text[7] != '-' or text[13] != ':' or text[16] != ':') return null;
+    if (text[10] != 'T' and text[10] != 't' and text[10] != ' ') return null;
+
+    const year = twoWayInt(text[0..4]) orelse return null;
+    const month = twoWayInt(text[5..7]) orelse return null;
+    const day = twoWayInt(text[8..10]) orelse return null;
+    const hour = twoWayInt(text[11..13]) orelse return null;
+    const minute = twoWayInt(text[14..16]) orelse return null;
+    // 윤초(60)를 허용한다. 거부하면 그 한 줄 때문에 파일 전체가 mtime으로 떨어진다.
+    const second = twoWayInt(text[17..19]) orelse return null;
+    if (month < 1 or month > 12 or day < 1 or day > 31) return null;
+    if (hour > 23 or minute > 59 or second > 60) return null;
+
+    var nanos: i96 = 0;
+    const fraction = text[19 .. text.len - 1];
+    if (fraction.len > 0) {
+        if (fraction[0] != '.' or fraction.len > 10) return null;
+        var scale: i96 = std.time.ns_per_s;
+        for (fraction[1..]) |digit| {
+            if (digit < '0' or digit > '9') return null;
+            scale = @divTrunc(scale, 10);
+            nanos += @as(i96, digit - '0') * scale;
+        }
+    }
+
+    const days = daysFromCivil(year, month, day);
+    const secs: i96 = days * std.time.s_per_day + @as(i96, hour) * 3600 + @as(i96, minute) * 60 + second;
+    return secs * std.time.ns_per_s + nanos;
+}
+
+fn twoWayInt(text: []const u8) ?i32 {
+    var value: i32 = 0;
+    for (text) |digit| {
+        if (digit < '0' or digit > '9') return null;
+        value = value * 10 + (digit - '0');
+    }
+    return value;
+}
+
+/// 그레고리력 날짜를 1970-01-01 기준 일수로. Howard Hinnant의 `days_from_civil`이며 윤년·세기 규칙을
+/// 분기 없이 처리한다.
+fn daysFromCivil(year: i32, month: i32, day: i32) i96 {
+    const y: i96 = @as(i96, year) - @intFromBool(month <= 2);
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400; // [0, 399]
+    const doy = @divTrunc(153 * (@as(i96, month) + (if (month > 2) @as(i96, -3) else 9)) + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
 
 /// 버퍼 하나를 통째로 받는 진입점. `Parser`를 줄 단위로 돌린 것과 **결과가 같다** — fixture·테스트와
 /// 부분 입력 비교가 이 등가성에 의존한다.
@@ -417,6 +506,86 @@ test "Parser: worker 확정은 user 신호를 한 번도 못 봤을 때만" {
         \\{"sessionId":"c","type":"user","message":{"role":"user","text":"x"}}
     );
     try std.testing.expect(!claude.isWorkerSoFar());
+}
+
+// 정렬 키가 여기서 나온다. 형태를 잘못 읽으면 목록 순서가 조용히 틀리고, 거부해야 할 것을 받아들이면
+// 엉뚱한 시각으로 정렬된다 — 둘 다 눈에 잘 띄지 않으므로 경계를 고정한다.
+test "parseRfc3339Utc: epoch 변환과 거부 경계" {
+    // 기준점들. epoch, 윤년(2000은 400의 배수라 윤년), 세기 비윤년(1900), 실측 형태.
+    try std.testing.expectEqual(@as(?i96, 0), parseRfc3339Utc("1970-01-01T00:00:00Z"));
+    try std.testing.expectEqual(@as(?i96, 1_000_000_000 * std.time.ns_per_s), parseRfc3339Utc("2001-09-09T01:46:40Z"));
+    try std.testing.expectEqual(@as(?i96, 951_782_400 * std.time.ns_per_s), parseRfc3339Utc("2000-02-29T00:00:00Z"));
+    // 1900-03-01은 1900이 윤년이 아니어야 나오는 값이다(400 규칙).
+    try std.testing.expectEqual(@as(?i96, -2_203_891_200 * std.time.ns_per_s), parseRfc3339Utc("1900-03-01T00:00:00Z"));
+
+    // 실측 형태: 밀리초 3자리.
+    try std.testing.expectEqual(
+        @as(?i96, 1_754_652_783 * std.time.ns_per_s + 657 * std.time.ns_per_ms),
+        parseRfc3339Utc("2025-08-08T11:33:03.657Z"),
+    );
+    // 소수부 자릿수는 provider가 바꿀 수 있다. 없는 것부터 나노초 9자리까지 받는다.
+    try std.testing.expectEqual(@as(?i96, 1 * std.time.ns_per_s + 5 * std.time.ns_per_ms), parseRfc3339Utc("1970-01-01T00:00:01.005Z"));
+    try std.testing.expectEqual(@as(?i96, 1 * std.time.ns_per_s + 123_456_789), parseRfc3339Utc("1970-01-01T00:00:01.123456789Z"));
+    // 윤초를 거부하면 그 한 줄 때문에 파일 전체가 mtime으로 떨어진다.
+    try std.testing.expect(parseRfc3339Utc("2016-12-31T23:59:60Z") != null);
+
+    // 거부: 추측하지 않는다. 잘못 읽은 시각으로 정렬하느니 mtime이 낫다.
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("2025-08-08T11:33:03")); // Z 없음
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("2025-08-08T11:33:03+09:00")); // 오프셋
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("2025-08-08 11:33Z")); // 짧음
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("2025-13-08T11:33:03Z")); // 13월
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("2025-08-08T24:33:03Z")); // 24시
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("20xx-08-08T11:33:03Z")); // 숫자 아님
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc("2025-08-08T11:33:03.1234567890Z")); // 소수 10자리
+    try std.testing.expectEqual(@as(?i96, null), parseRfc3339Utc(""));
+}
+
+// 정렬 키는 "마지막으로 본 줄"이 아니라 **가장 늦은 시각**이다. 요약·메타 줄이 뒤에 붙는 형식에서
+// 마지막 줄의 시각이 더 이르면 세션이 목록 아래로 잘못 밀린다.
+test "Parser: last_activity_ns는 줄 순서가 아니라 최댓값을 따른다" {
+    const a = std.testing.allocator;
+    var parsed = (try parse(a, .claude,
+        \\{"sessionId":"s-1","cwd":"/repo","type":"user","timestamp":"2025-08-08T10:00:00Z","message":{"role":"user","text":"첫"}}
+        \\{"type":"assistant","timestamp":"2025-08-08T12:00:00Z","message":{"role":"assistant","text":"응답"}}
+        \\{"type":"summary","timestamp":"2025-08-08T11:00:00Z"}
+        \\{"type":"assistant","message":{"role":"assistant","text":"시각 없는 줄"}}
+    )).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqual(parseRfc3339Utc("2025-08-08T12:00:00Z").?, parsed.last_activity_ns);
+
+    // 하나도 읽지 못하면 0으로 남아 호출자가 mtime으로 폴백한다.
+    var none = (try parse(a, .claude,
+        \\{"sessionId":"s-2","type":"user","message":{"role":"user","text":"시각 없음"}}
+    )).?;
+    defer none.deinit(a);
+    try std.testing.expectEqual(@as(i96, 0), none.last_activity_ns);
+}
+
+// clone이 필드 하나를 빠뜨리면 캐시 히트와 부분 진행 발행에서만 값이 사라진다 — 첫 스캔은 멀쩡하고
+// 두 번째부터 틀리므로 눈으로 잡기 어렵다. 필드 목록을 comptime으로 훑어 새 필드가 자동으로 검사에
+// 들어오게 한다.
+test "clone은 Parsed의 모든 필드를 보존한다" {
+    const a = std.testing.allocator;
+    var origin = try duplicateParsed(a, .codex, "s-1", "제목", "요약", "/repo", true, "gpt-x", 42, true);
+    defer origin.deinit(a);
+    origin.last_activity_ns = 1_234_567_890_123_456_789;
+
+    var copy = try origin.clone(a);
+    defer copy.deinit(a);
+
+    inline for (@typeInfo(Parsed).@"struct".fields) |field| {
+        const lhs = @field(origin, field.name);
+        const rhs = @field(copy, field.name);
+        const is_text = comptime blk: {
+            const info = @typeInfo(field.type);
+            break :blk info == .pointer and info.pointer.size == .slice and info.pointer.child == u8;
+        };
+        if (comptime is_text) {
+            try std.testing.expectEqualStrings(lhs, rhs);
+        } else {
+            try std.testing.expectEqual(lhs, rhs);
+        }
+    }
 }
 
 test "Codex user session parses and worker is rejected" {

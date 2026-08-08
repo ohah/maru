@@ -512,11 +512,13 @@ fn agentSessionArchiveMatches(record: agent_session_archive_backend.Record, quer
         asciiContainsIgnoreCase(record.parsed.model, query);
 }
 
-/// Archive file mtime is already part of the immutable worker snapshot, so a
-/// card can show relative age without touching the filesystem. Clock rollback
-/// and future mtimes are intentionally rendered as "방금".
-fn formatAgentSessionArchiveRelativeAge(now_ns: i128, mtime_ns: i96, buf: []u8) []const u8 {
-    const then: i128 = mtime_ns;
+/// 마지막 활동 시각은 이미 immutable worker snapshot 안에 있으므로 카드가 filesystem을 건드리지 않고
+/// 상대 시간을 보인다. 시계 되감기와 미래 시각은 의도적으로 "방금"으로 그린다.
+///
+/// 넘기는 값은 **정렬 키와 같은 것**이어야 한다(`lastActivityNs`). 다르면 목록 순서와 카드가 말하는
+/// 시간이 어긋나 "3일 전" 카드가 맨 위에 앉는다.
+fn formatAgentSessionArchiveRelativeAge(now_ns: i128, activity_ns: i96, buf: []u8) []const u8 {
+    const then: i128 = activity_ns;
     const delta_ns = if (now_ns > then) now_ns - then else 0;
     const minutes = @divFloor(delta_ns, 60 * std.time.ns_per_s);
     if (minutes == 0) return "방금";
@@ -34039,7 +34041,7 @@ pub const AppSession = struct {
                     const record = self.agent_session_archive_records.items[record_index];
                     const parsed = record.parsed;
                     var age_buf: [32]u8 = undefined;
-                    const age = formatAgentSessionArchiveRelativeAge(now_ns, record.mtime_ns, &age_buf);
+                    const age = formatAgentSessionArchiveRelativeAge(now_ns, agent_session_archive_backend.lastActivityNs(record), &age_buf);
                     const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
                     // 서브에이전트를 돌린 세션만 그 개수를 덧붙인다. 0이면 아무것도 그리지 않아 평범한
                     // 세션의 메타 줄이 길어지지 않는다(docs/agent-session-list.md §2.3). 상한 초과는

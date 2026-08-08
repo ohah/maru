@@ -357,6 +357,9 @@ fn publishProgress(state: *State, generation: u64, result: *const Result) void {
             .subagent_count = record.subagent_count,
         });
     }
+    // 후보는 mtime 순으로 처리되지만 목록의 순서는 활동 시각이 정한다. 부분 목록도 같은 키로 정렬해야
+    // 완성본으로 바뀔 때 카드가 재배치되지 않는다.
+    std.mem.sort(Record, snapshot.records.items, {}, newestFirst);
     state.mutex.lockUncancelable(state.io);
     defer state.mutex.unlock(state.io);
     if (state.shutting_down or state.cancelled_generation == generation) {
@@ -393,6 +396,19 @@ fn publish(state: *State, generation: u64, result: *Result) bool {
     };
     result.* = .{};
     return true;
+}
+
+/// 이 세션의 마지막 활동 시각. transcript가 스스로 말하는 값을 쓰고, 그 값을 못 읽은 파일만 mtime으로
+/// 폴백한다(docs/agent-session-list.md §2.3). mtime은 복사·도구의 메타 갱신으로도 밀리므로 실측 362개
+/// 중 257개(70%)가 mtime 정렬에서 제자리가 아니었다.
+///
+/// **정렬과 카드의 "N분 전"이 같은 값을 써야 한다.** 다르면 "3일 전" 카드가 목록 맨 위에 앉는다.
+pub fn lastActivityNs(record: Record) i96 {
+    return if (record.parsed.last_activity_ns != 0) record.parsed.last_activity_ns else record.mtime_ns;
+}
+
+fn newestFirst(_: void, a: Record, b: Record) bool {
+    return lastActivityNs(a) > lastActivityNs(b);
 }
 
 fn cachedRecord(state: *State, candidate: Candidate) ?Record {
@@ -490,6 +506,8 @@ fn scan(state: *State, home: []const u8, generation: u64) bool {
     if (cancelled(state, generation)) return false;
     claude_candidates.appendSlice(allocator, codex_candidates.items) catch return false;
     codex_candidates.clearRetainingCapacity(); // ownership moved into claude_candidates
+    // **스캔 순서**는 mtime이다. 활동 시각은 파일을 열어 봐야 알 수 있으므로 여기서는 쓸 수 없고,
+    // 목록 순서는 파싱을 마친 뒤 `newestFirst`가 다시 정한다(docs/agent-session-list.md §2.3).
     std.mem.sort(Candidate, claude_candidates.items, {}, struct {
         fn lessThan(_: void, a: Candidate, b: Candidate) bool {
             return a.mtime_ns > b.mtime_ns;
@@ -526,11 +544,7 @@ fn scan(state: *State, home: []const u8, generation: u64) bool {
             last_publish_ns = now_ns;
         }
     }
-    std.mem.sort(Record, result.records.items, {}, struct {
-        fn lessThan(_: void, a: Record, b: Record) bool {
-            return a.mtime_ns > b.mtime_ns;
-        }
-    }.lessThan);
+    std.mem.sort(Record, result.records.items, {}, newestFirst);
     if (result.records.items.len > max_records) {
         for (result.records.items[max_records..]) |*record| record.deinit(allocator);
         result.records.shrinkRetainingCapacity(max_records);

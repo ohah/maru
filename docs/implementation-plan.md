@@ -1388,9 +1388,15 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
 
   **앞의 셋과 성격이 다르다.** 탐색기·소스 컨트롤은 목록 렌더가 `app_session`에 있어 host 안에서
   gutter를 뗄 수 있었다. 사이드바는 이미 제품 컴포넌트(`chrome/components/sidebar.zig`)가 밴드 op을
-  내고 그 폭을 `p.metrics.sidebar_width_px` 하나로 정한다 — 스크롤바를 카드 **위**(layer 3)에서 공용
-  paint 경로(layer 2, 카드 **아래**)로 내리면 gutter 예약이 **그 컴포넌트의 계약 변경**이 된다.
-  그래서 둘로 나눈다.
+  내고 그 폭을 `p.metrics.sidebar_width_px` 하나로 정한다 — gutter 예약이 host 안의 산술이 아니라
+  **그 컴포넌트의 계약 변경**이 된다. 그래서 둘로 나눈다.
+
+  **layer는 3(over)으로 남는다(2026-08-08 실측 정정).** 처음에는 탐색기처럼 공용 lowering이 내는
+  layer 2를 그대로 쓰려 했는데, 그러면 막대가 **화면에서 사라진다** — 렌더러가 layer 2 버킷을 맨 처음
+  그리고 그 위에 자기가 소유한 사이드바 배경 strip을 덮기 때문이다(`docs/metal-ui-layout.md` §5의
+  승인된 예외). 도크·탐색기 스크롤바가 layer 2로 살아남는 것은 그 자리에 strip이 없어서지 layer 2가
+  안전해서가 아니다. 그래서 lowering 뒤에 fade alpha와 함께 layer도 되돌린다. gutter는 그래도
+  유지한다 — 막대가 카드 텍스트와 겹치지 않는 것은 별개의 이득이다.
 
   - **SV4a — 발행 경로(완료).** `appendSidebarScrollbar()`가 손으로 만드는 GpuQuad를 `tree.scrollArea` 선언
     + `ui_paint` + `chrome_draw_lowering`으로 교체하고, `sidebar.view`가 밴드 폭에서 gutter를 예약한다.

@@ -2,17 +2,25 @@
 
 > L4 macOS 어댑터의 거대 단일 파일(`src/platform/macos/app_session.zig`)을 목적별 파일로 가르는 **실행 플랜**이다. 위상 골격의 단일 출처는 [레이어링과 이식성](layering-and-portability.md)이고, 분해 패턴의 검증된 선례는 [terminal core 분해](terminal-core-decomposition.md)다(`core.zig` 9962→6166, 방향 A, 누적 `/code-review max` 정확성 버그 0). 이 문서는 그 패턴을 `app_session`에 적용하는 단계·선결을 담는다.
 
-## 1. 배경 (측정 — 2026-06)
+## 1. 배경 (측정 — 2026-08-08)
 
-`src/platform/macos/app_session.zig`는 측정 시점 기준 **20,183줄·`AppSession` 단일 struct**다(이후에도 계속 커져 2026-07 실측 35,134줄 — 아래 구획 수치는 2026-06 스냅샷). 실측 구성:
+`src/platform/macos/app_session.zig`는 **72,317줄·`AppSession` 단일 struct**다. 실측 구성:
 
 | 구획 | 라인 | 비고 |
 |---|---|---|
-| **test 블록(파일 레벨)** | **7,958 (39%)** | private 메서드를 광범위 호출(아래 §2-c) |
-| `AppSession` struct 메서드 | ~10,900 (403개) | 그룹 분산 대상 |
-| 파일 레벨 free 헬퍼 | ~300 | `spawnRequest`·`normalizeConfig`·`sidebarBandCell` 등(이미 free) |
+| **test 블록(파일 레벨)** | **32,762 (45%)** | 755개. private 메서드를 광범위 호출(아래 §2-c) |
+| `AppSession` struct 메서드 | 27,729 (1,244개) | 그룹 분산 대상 |
+| 나머지(파일 레벨 free 헬퍼·struct 정의) | ~11,800 | `spawnRequest`·`normalizeConfig`·`sidebarBandCell` 등(이미 free) |
 
-**거대 메서드 top**: `tick`(멀티 페인 통합 빌드 합류로 590보다 증가)·`mouse`(524)·`rasterizeOverlayCells`(201)·`handleKeyEvent`(145)·`init`(144)·`deinit`(136)·`hoverCursor`(129)·`rebuildSidebar`(123). `tick`/`mouse`/`handleKeyEvent`는 **오케스트레이션 허브**(프레임 루프·입력 라우터)다 — `tick`은 멀티 페인 통합 빌드(`collectShaped`→`placeMultiPane`→`placeAndDistribute`, 활성 panel `shapeOnlyBuild` 합류)를 품는다. (`buildSidebarTitleFrame`/`buildChromeOverlayFrame`/`buildFloatingTabFrame`은 통합 후 production 미사용이라 test 전용 free 헬퍼로 분리했다.)
+**성장 이력** — 분해 판단 기준을 다시 잡게 된 실측 근거다(§4 (c)):
+
+| 시점 | 라인 | 비고 |
+|---|---|---|
+| 2026-06 | 20,183 | 이 문서 최초 측정 · (b) 결정 시점 |
+| 2026-07 | 35,134 | (b) "일단락" 이후 |
+| 2026-08-08 | **72,317** | (b) 결정 대비 3.6배 |
+
+**거대 메서드 top(2026-08-08)**: `tick`(1,484)·`mouse`(978)·`maybeDebugOpenSettings`(568)·`handleKeyEvent`(401)·`buildSidebarTitleDrawList`(363)·`deinit`(322)·`rebuildSidebar`(320)·`hoverCursor`(256)·`updateFileTree`(217)·`init`(205). `tick`/`mouse`/`handleKeyEvent`는 **오케스트레이션 허브**(프레임 루프·입력 라우터)다 — `tick`은 멀티 페인 통합 빌드(`collectShaped`→`placeMultiPane`→`placeAndDistribute`, 활성 panel `shapeOnlyBuild` 합류)를 품는다. (`buildSidebarTitleFrame`/`buildChromeOverlayFrame`/`buildFloatingTabFrame`은 통합 후 production 미사용이라 test 전용 free 헬퍼로 분리했다.)
 
 ## 2. 성격 규정 (정직 — 선결)
 
@@ -21,8 +29,8 @@
   > **실측 정정(E1 착수):** Explore 사전조사가 "find 매치선택 순수 90%"로 추정했으나, 실제 Find(⌘F)는 `chrome_host.find`(UI 상태)·`activeSurface().core`(검색 락)·`runtime`(뷰 스크롤)·`metal_dirty`에 전부 결합한 **orchestration이라 순수분 0**(매치 선택조차 chrome 컴포넌트의 `next`/`prev` 소관)이다. 따라서 E1은 session 이동이 아니라 `app_session/find.zig` 가독성 분리다. 사전 추정 순수도는 착수 시 코드로 재검증한다([[roadmap-docs-stale-verify-with-code]]).
 - **(c) core.zig보다 어려운 3가지 난점:**
   1. **허브 횡단**: `tick`/`mouse`/`handleKeyEvent`가 모든 그룹을 횡단한다 → **잔류**(분해 대상 아님, 내부 가독성은 소함수·주석으로).
-  2. **cross-group accessor pub화**: 그룹을 free fn 파일로 빼면, 그 함수가 부르는 공용 accessor(`activePane`·`activeTab`·`activeSurface`·`termRect`·`activeTabLeafRects`)가 **다른 파일에서 호출되므로 pub이어야 한다**. core.zig의 accessor 분리(`absRow` 등, [[core-zig-decomposition-initiative]])와 동형이며, 캡슐화를 약간 양보한다(필드는 Zig가 privacy 없어 무관, 메서드만).
-  3. **test는 통째 분리 불가**: 파일 레벨 test 7,958줄이 `splitActivePane`·`mouse`·`handleKeyEvent`·`tick` 등 **private 메서드를 직접 호출**한다. 통째 옮기면 수십 개를 pub화해야 해 캡슐화가 깨진다 → test는 **자신이 검증하는 그룹 함수와 동반 이동**(그룹 함수가 pub free fn이 되므로 호출 OK).
+  2. **가시성(pub) 표면 확대**: 그룹을 free fn 파일로 빼면, 그 함수가 **파일 경계를 넘어 이름으로 참조하는 모든 선언**이 pub이어야 한다. Zig의 privacy는 필드가 아니라 **선언 단위 + 파일 경계**이므로 대상이 accessor에 그치지 않는다 — 메서드(`^    fn ` 1,042개 vs `^    pub fn ` 185개, **84%가 non-pub**), 시그니처·지역에서 이름을 쓰는 타입(`Model`/`Term`/`Pane`/`PaneTree`/`Tab` 등 파일 스코프 `const`), 모듈 전역 `var`(`app_runtime` — 한 번 `pub var`가 되면 다시 좁힐 수단이 없다)가 모두 포함된다. core.zig의 accessor 분리(`absRow` 등, [[core-zig-decomposition-initiative]])와 동형이나 **규모가 다르다**. 실측 예: F1(archive) 하나가 그룹 밖 non-pub 메서드 19개 pub화를 강제하고 그중 12개는 F3(agent dock) 소유다 → 단계 순서가 pub화 소유권과 어긋나면 되돌리는 PR이 생긴다.
+  3. **test는 통째 분리 불가**: 파일 레벨 test 32,762줄(755개)이 `splitActivePane`·`mouse`·`handleKeyEvent`·`tick` 등 **private 메서드를 직접 호출**한다. 통째 옮기면 수십 개를 pub화해야 해 캡슐화가 깨진다 → test는 **자신이 검증하는 그룹 함수와 동반 이동**한다. 단 **동반 이동이 가능한 test는 일부다** — 실측상 2개 이상 그룹을 호출하는 test 275개(14,561줄) + 어느 그룹도 안 부르는 test 214개(7,271줄)는 어느 그룹 파일로도 자연히 갈 수 없어 잔류가 기본값이다. 또 파일 스코프 test 헬퍼 63개가 전부 non-pub이고 그룹을 횡단하므로(`initSmokeSessionSized` 184회 호출), **공용 헬퍼의 소유처를 F 시리즈 착수 전에 정해야 한다**.
 
 ## 3. 패턴 (core.zig 방향 A)
 
@@ -45,6 +53,18 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 점진 스택 PR. 각 단계 green(`zig build test`·`check-boundaries`·`macos-app-build`) + 머지 전 실앱(`zig build macos-app`, [[run-macos-app-before-merge]]) + 누적 `/code-review max`(순수 이동이라 정확성 버그 0 기대, [[cumulative-review-branch-false-compile-findings]] 유의).
 
+> **방향 재확정(사용자 합의 2026-08-08): (c) 판단 기준에 "읽기·편집 비용"을 추가하고 (b)의 "일단락"을 해제한다.**
+>
+> (b)는 분해 여부를 **이식 기여** 하나로 판정했다. 그 기준에서는 순수分이 `layout_math`뿐이라 "일단락"이 정확한 결론이었다. 그러나 그 뒤 파일이 35,134 → 72,317줄로 커지면서, **이식과 무관한 비용이 실측으로 드러났다**:
+>
+> - **다른 기능의 설계 상한을 밀어 올렸다.** [editor-surface.md](editor-surface.md) §6이 파일 뷰어의 바이트 상한을 1 MiB → 8 MiB로 올린 직접 원인이 이 파일이다("이 저장소의 `app_session.zig`가 4.0 MB(60,965줄)라 못 열렸다"). 즉 한 파일의 크기가 이미 제품 다른 축의 결정을 바꿨다.
+> - **한 번에 볼 수 없다.** 72,317줄은 사람도 에이전트도 통독 대상이 아니다(2,000줄 단위로 36회). 한 그룹의 버그를 고치려 무관한 그룹을 계속 지나치고, 도메인 하나를 파악하는 데 파일 전체가 후보가 된다.
+> - **(b) 자신의 ROI 판정이 뒤집혔다.** §6 "그룹당 100~400줄이라 감소폭이 작다"는 20,183줄 시점 관측이다. 실측 그룹은 수백~4,000줄이고, 동반 test까지 합치면 그 2배다.
+>
+> 따라서 **(b)의 이식 기준은 그대로 유지하고**(순수分은 여전히 `src/session`(L2)으로), **읽기·편집 비용을 두 번째 기준으로 추가**한다. orchestration 그룹도 `app_session/<group>.zig`로 분해한다 — **이식 기여는 여전히 0**이며(§2 첫 항목은 정정 대상이 아니다), 얻는 것은 가독성·리뷰 가능성·도구 접근성이다. 이 점을 부풀리지 않는다.
+>
+> 아래는 그 이전 (b) 결정의 기록이며, 근거로 보존한다.
+
 > **방향 확정(사용자 합의 2026-06): (b) 순수→session 이식 기여分만.** E1(find) 착수로 app_session 대부분이 orchestration(이식 무관 가독성)임이 실측돼, **orchestration 가독성 분리(E2 ime·E3 tab UI·E6 scroll 등)는 스킵**하고 **OS-중립 순수 로직을 `src/session`(L2)으로 빼는 그룹만** 진행한다(이식 기여 + 헤드리스 단위 test). E1은 이미 완료(orchestration이었으나 패턴 확립). **순수分은 `layout_math`(b1·b2 — grid·hit-test·drop-zone·pt→px·px↔cell)가 전부였고, (b)는 이로써 일단락한다.** E4 sidebar(`metal_frame`·색·렌더 결합)·E5 workspace(캡처=agent PTY·복원=`createPane` spawn·직렬화=이미 session) 모두 실측 결과 orchestration 결합이라 순수分이 미미해 (b) 대상이 아니다.
 
 | 단계 | 그룹 | 목적지 | 성격 | 대략 라인 | 위험 |
@@ -55,10 +75,32 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **b2** ✅ | 픽셀↔셀 hit-test 기하(`pxToCell`+`CellHit`) — self/surface에서 cell·grid 크기만 뽑아 위임 | **`session/layout_math.zig`** | **순수(이식 기여)** | ~35(+단위 test) | 낮음 |
 | ~~E4~~ | sidebar 레이아웃 수학 — 실측 결과 **순수 극소**(`sidebarMinPt` 4줄·self 의존, 나머지는 `metal_frame` 셀·색·hit-test·렌더 orchestration) → (b)서 **축소/스킵** | — | 거의 orchestration | — | 낮음 |
 | ~~E5~~ | workspace — 실측 결과 캡처=`captureAgentForRestore`(`term.rt.live_pty` PTY)·복원=`buildWorkspaceTab`(`createPane` spawn)·직렬화=이미 `session.workspace.serializeWindow`. 순수分 미미(surface 메타뿐, agent 콜백 필요) → (b)서 **축소/스킵** | — | 거의 orchestration | — | — |
-| ~~E2 ime·E3 tab UI·E6 scroll·clipboard·command·notification~~ | (b)서 **스킵** — orchestration 가독성 분리라 이식 무관 | — | orchestration | — | — |
-| (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·split(PTY spawn)·**모든 orchestration** | `app_session.zig` | L4 허브·어댑터 | — | — |
+| ~~E2 ime·E3 tab UI·E6 scroll·clipboard·command·notification~~ | (b)서 스킵했으나 **(c)에서 부활** — 아래 F 시리즈에 흡수 | — | orchestration | — | — |
 
-(b) 방향은 **b1·b2(`layout_math`)로 일단락**한다 — 좌표 변환 기하(grid·hit-test·drop-zone·pt→px·px↔cell)가 session(L2)으로 가 이식 시 통째 재사용된다. 나머지 후보(E4 sidebar·E5 workspace)는 실측 결과 각각 `metal_frame`·PTY agent·spawn 결합이라 순수分이 미미해 (b) 대상이 아니다. orchestration 그룹(E2·E3·E6)도 이식 무관이라 스킵하고 app_session에 잔류(필요 시 별도 가독성 정리로). 순수 그룹은 헤드리스 단위 test 동반(이식성 증거). accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
+### 4.1 F 시리즈 — (c) orchestration 그룹 분해 (2026-08-08~)
+
+목적지는 전부 `src/platform/macos/app_session/<group>.zig`, 패턴은 §3(E1 `find.zig` 선례)과 동일하다. "메서드 라인"은 `AppSession` 메서드 이름 기준 실측이고, **동반 이동할 test를 합치면 대략 2배**다(§2-c-3).
+
+| 단계 | 그룹 | 메서드 라인 | 위험 | 비고 |
+|---|---|---|---|---|
+| **F1** | agent session archive | ~570 | 낮음 | backend 3파일이 이미 분리돼 orchestration만 남음 — 패턴 재확인용 첫 슬라이스 |
+| **F2** | file tree · file panel | ~4,090 | 중 | 최대 그룹. `file_tree.zig`/`file_panel.zig`로 **반드시 2개 이상 분할** |
+| **F3** | agent dock | ~2,145 | 중 | |
+| **F4** | pane · split | ~2,350 | 중 | PTY spawn 결합 — 허브 경계 주의 |
+| **F5** | dock | ~1,660 | 낮음 | |
+| **F6** | tab | ~1,590 | 낮음 | |
+| **F7** | sidebar | ~1,620 | 중 | `metal_frame` 셀·색 결합(옛 E4 실측) |
+| **F8** | scroll | ~1,440 | 낮음 | |
+| **F9** | settings · context menu · rename | ~1,830 | 낮음 | |
+| **F10** | workspace capture/restore | ~810 | 중 | 캡처=agent PTY·복원=`createPane` spawn(옛 E5 실측) |
+
+라인 수치는 **메서드 이름 기준 근사치**다. 각 단계 착수 시 실제 응집도(허브 결합·cross-group accessor)를 코드로 재검증하고 그 결과로 범위를 정정한다 — 이 문서의 사전 추정은 E1·E4·E5에서 세 번 빗나갔다([[roadmap-docs-stale-verify-with-code]]).
+
+| 단계 | 그룹 | 목적지 | 성격 | 대략 라인 | 위험 |
+|---|---|---|---|---|---|
+| (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·ABI 진입 facade | `app_session.zig` | L4 허브·어댑터 | — | — |
+
+**(b) 축(이식 기여)은 b1·b2(`layout_math`)로 일단락된 상태 그대로다** — 좌표 변환 기하(grid·hit-test·drop-zone·pt→px·px↔cell)가 session(L2)으로 가 이식 시 통째 재사용된다. E4 sidebar·E5 workspace는 실측 결과 각각 `metal_frame`·PTY agent·spawn 결합이라 순수分이 미미해 (b) 대상이 아니었고, 그 판정은 유지된다. 새로 열린 건 **(c) 축**이다 — 같은 그룹들을 이번엔 이식이 아니라 읽기·편집 비용을 근거로 `app_session/<group>.zig`로 옮긴다(§4.1 F 시리즈). 순수 그룹은 헤드리스 단위 test 동반(이식성 증거), orchestration 그룹은 동반 test가 그대로 회귀 그물이다. accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
 
 ## 5. 검증
 
@@ -69,7 +111,25 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 ## 6. 리스크 / 한계 (정직)
 
-- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 이식 기여 0. **순수 그룹(b1·b2 `layout_math`)만** session으로 가 이식에 기여했고, (b)는 이로써 일단락한다(좌표 변환 기하 = 이식 핵심). E1 find·E4 sidebar·E5 workspace는 실측 결과 모두 orchestration 결합이라 (b) 대상이 아니었다 — Explore 사전 추정(순수 85~95%)은 셋 다 빗나갔고, 착수 코드 재검증이 정정했다([[roadmap-docs-stale-verify-with-code]]).
-- **cross-group accessor pub화**: 캡슐화 일부 양보(§2-c-2). core.zig 선례가 있고, accessor는 어차피 안정 표면이라 수용.
-- **허브 잔류**: `tick`/`mouse`/`handleKeyEvent`는 본질적 횡단이라 파일 분해 비대상. 거대 메서드의 가독성은 소함수 추출·주석으로(별 PR).
-- **ROI 분산**: 그룹당 100~400줄 + test라 단일 PR 감소폭은 작다. 누적으로 `app_session.zig`가 그룹 facade + 허브만 남는 게 종착.
+- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 **이식 기여 0**이다. (c)로 F 시리즈를 열어도 이 사실은 바뀌지 않는다 — (c)가 사는 것은 이식이 아니라 읽기·편집 비용이며, 이를 이식 성과로 포장하지 않는다. 이식에 기여한 건 **순수 그룹(b1·b2 `layout_math`)뿐**이고 그 축은 일단락 상태다(좌표 변환 기하 = 이식 핵심). E1 find·E4 sidebar·E5 workspace는 실측 결과 모두 orchestration 결합이라 (b) 대상이 아니었다 — Explore 사전 추정(순수 85~95%)은 셋 다 빗나갔고, 착수 코드 재검증이 정정했다([[roadmap-docs-stale-verify-with-code]]).
+- **cross-group accessor pub화**: 캡슐화 일부 양보(§2-c-2). core.zig 선례가 있고, accessor는 어차피 안정 표면이라 수용. F 시리즈는 그룹 수가 많아 pub 표면이 E1보다 넓어지므로, **PR마다 pub화한 accessor를 명시**하고 누적 목록을 §5 검증에서 본다.
+- **허브 잔류**: `tick`(1,484줄)·`mouse`(978)·`handleKeyEvent`(401)는 본질적 횡단이라 파일 분해 비대상. 거대 메서드의 가독성은 소함수 추출·주석으로(별 PR). **F 시리즈가 끝나도 이 셋은 남으므로 `app_session.zig`가 "작은 파일"이 되지는 않는다** — 종착지는 허브 + 그룹 facade + ABI 진입이다.
+- **파일 수 증가**: 그룹 10개 + 동반 test가 새 파일로 늘어난다. 총 읽을 양이 주는 게 아니라 **무관한 것까지 읽는 비용**이 주는 것이므로, 그룹 경계가 도메인과 어긋나면 이득이 사라진다. 그래서 각 단계 착수 시 응집도를 코드로 재검증한다(§4.1).
+- **ROI**: (b) 시점의 "그룹당 100~400줄이라 감소폭이 작다"는 20,183줄 시점 관측이라 **폐기**한다. F 시리즈 실측은 그룹당 570~4,090줄(메서드) + 동반 test로 그 2배다. 누적으로 `app_session.zig`가 그룹 facade + 허브만 남는 게 종착.
+
+## 7. 다른 문서와의 경계 (단일 출처)
+
+`app_session.zig`의 **크기와 분해**는 이 문서가 단일 출처다. 인접 문서는 각자 다른 축을 소유하며, 이 파일의 감소 목표·단계를 따로 정하지 않는다.
+
+| 문서 | 소유하는 축 | 이 문서와의 관계 |
+|---|---|---|
+| [chrome-strategy.md](chrome-strategy.md) · [metal-ui-layout.md](metal-ui-layout.md) §8 ML6 | chrome 컴포넌트의 **형태**(rect 직접 계산 + 짝 `hitTest` → `chrome/ui/` typed tree 이주) | app_session 축소는 그 이주의 **부수효과**다. 무엇을 언제 얼마나 줄일지는 이 문서가 정한다 |
+| [layering-and-portability.md](layering-and-portability.md) §3.3 | L1~L3 **이식** 위상 | L4 내부 분해는 위상 밖이라 이 문서로 위임(원래부터 그렇게 서술) |
+| [app-layer-decomposition.md](app-layer-decomposition.md) | `src/app`(L4 공통 런타임)의 분해 | 대상 파일이 다르다 |
+
+### 두 경로는 배타적이지 않다
+
+- **경로 A (이 문서 §4.1 F 시리즈)** — orchestration을 `app_session/<group>.zig`로. 즉시 착수 가능, 이식 기여 0, 감소폭 큼.
+- **경로 B (chrome ML6)** — 순수 chrome 부분을 `src/chrome/`로. 이미 승인된 전략이고 이득이 구조적이다(hit-test가 published rect에서 파생돼 "보이는 것 ≠ 눌리는 것" 드리프트가 불가능해진다). 다만 ML6가 코드로 확인한 **선행 블로커**가 있다 — 텍스트 모델 전환(셀 격자 ↔ measured 비례), ScrollArea 프리미티브, sticky 헤더 밴드, 부분 행 클리핑용 `draw.Op.clip` 경계 screenshot gate.
+
+**순서는 A 먼저**다. B는 지금 블로커에 막혀 있고, A로 orchestration을 걷어낸 뒤 남는 순수 chrome分을 B로 보내면 같은 그룹을 두 번 만지지 않는다. A가 B를 막지도 않는다 — F5 dock·F6 tab·F7 sidebar가 옮겨 가도 chrome 컴포넌트의 형태는 그대로이므로 ML6는 그 위에서 계속 진행할 수 있다.

@@ -119,7 +119,10 @@ flowchart TD
 
 ### 3.3 L4 내부 분해 (별개 — 이식 무관)
 
-위 S2·3차는 **L1~L3을 이식 가능하게** 정리하는 추출이다. 반면 L4 어댑터 자체의 거대 단일 파일(`platform/macos/app_session.zig`, 20k줄)을 목적별로 가르는 정리는 **이식과 무관한 가독성·테스트 격리** 작업이라 별도 문서 [app-session-decomposition.md](app-session-decomposition.md)를 단일 출처로 둔다(L4는 재작성 대상이라 위상엔 영향 없음). 단 그 안에 섞인 OS-중립 순수 로직(좌표 변환 기하)은 `src/session`(L2)으로 빼 이식에 기여한다 — 이게 (b) 방향이고, **b1·b2 `session/layout_math.zig`(grid·hit-test·drop-zone·pt→px·px↔cell)로 일단락**했다(find·sidebar·workspace는 실측 결과 각각 `chrome`·`metal_frame`·PTY 결합 orchestration이라 제외).
+위 S2·3차는 **L1~L3을 이식 가능하게** 정리하는 추출이다. 반면 L4 어댑터 자체의 거대 단일 파일(`platform/macos/app_session.zig` — 2026-08-08 실측 **72,317줄**)을 목적별로 가르는 정리는 **이식과 무관한 가독성·테스트 격리** 작업이라 별도 문서 [app-session-decomposition.md](app-session-decomposition.md)를 단일 출처로 둔다(L4는 재작성 대상이라 위상엔 영향 없음). 그 문서의 두 축을 구분한다:
+
+- **(b) 이식 기여 축** — 안에 섞인 OS-중립 순수 로직(좌표 변환 기하)을 `src/session`(L2)으로 뺀다. **b1·b2 `session/layout_math.zig`(grid·hit-test·drop-zone·pt→px·px↔cell)로 일단락**했고, 이 축이 위상에 영향을 주는 유일한 부분이다(find·sidebar·workspace는 실측 결과 각각 `chrome`·`metal_frame`·PTY 결합 orchestration이라 제외).
+- **(c) 읽기·편집 비용 축(2026-08-08 추가)** — 남은 orchestration을 `platform/macos/app_session/<group>.zig`로 가른다. **위상 기여 0**이며(L4 안에서만 이동), 근거·단계·리스크는 전적으로 위 문서가 소유한다. 이 문서는 그것을 이식 성과로 계상하지 않는다.
 
 ## 4. 렌더 백엔드 + 호스트 이식 (검증된 현실)
 

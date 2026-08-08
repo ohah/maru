@@ -685,6 +685,20 @@ pub const AttachmentCleanupRegistry = struct {
         self.active_rpc_recovery_entry_plus_one = 0;
     }
 
+    /// Verifies the allocation-free terminal state published by the recovery commit. This lets the
+    /// outer transaction mirror canonical settlement without attempting a second authority write.
+    pub fn rpcExecutionRecoveryTerminalExact(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) bool {
+        const entry = self.exactEntry(reservation, identity) catch return false;
+        return self.active_rpc_recovery_entry_plus_one == 0 and
+            entry.rpc_execution_recovery.emptyExact() and
+            entry.prepared_request.terminalExact() and
+            entry.rpc_response_authority.terminalExactFor(self.incarnation, identity);
+    }
+
     pub fn rollbackRpcResponseExecution(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,

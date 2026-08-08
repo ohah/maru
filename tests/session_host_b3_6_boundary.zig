@@ -1,13 +1,8 @@
 const std = @import("std");
 
-// The focused artifact deliberately collects the two runtime tests owned by
-// generation_transport.zig beside this independent source-boundary oracle.
-const generation_transport_tests = @import("generation_transport_tests");
-
 const max_source_bytes = 8 * 1024 * 1024;
 
 test "CR3a-2c3b internal rpc substrate keeps the strict path private" {
-    _ = generation_transport_tests;
     const allocator = std.testing.allocator;
     const transport = try readSource(
         allocator,
@@ -24,10 +19,12 @@ test "CR3a-2c3b internal rpc substrate keeps the strict path private" {
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(remote_runtime);
+    const session_host = try readSource(allocator, "src/platform/macos/session_host.zig");
+    defer allocator.free(session_host);
 
-    const transport_product = productPrefix(transport);
-    const slot_product = productPrefix(slot);
-    const remote_runtime_product = productPrefix(remote_runtime);
+    const transport_product = transport;
+    const slot_product = slot;
+    const remote_runtime_product = remote_runtime;
 
     // The shipped attach facade remains byte-for-byte typed around ExecutedResponse.
     try std.testing.expectEqual(
@@ -65,6 +62,36 @@ test "CR3a-2c3b internal rpc substrate keeps the strict path private" {
         @as(usize, 1),
         count(transport_product, "client_slot_mod.executeGenerationRpcSubstrate("),
     );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(slot_product, "pub fn armRpcSubstrateFailStopForTest("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(transport, "client_slot_mod.armRpcSubstrateFailStopForTest("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        count(session_host, "armRpcSubstrateFailStopForTest"),
+    );
+
+    const publication = between(
+        slot,
+        "fn publishPreparedRpcResponse(",
+        "fn failStopRpcPublication(",
+    ) orelse return error.TestExpectedEqual;
+    const lease_auth = std.mem.indexOf(
+        u8,
+        publication,
+        "preparedRequestExecutionPoisonReason(lease)",
+    ) orelse return error.TestExpectedEqual;
+    const recovery_commit = std.mem.indexOf(
+        u8,
+        publication,
+        "commitRpcExecutionRecoveryTerminalNoFail()",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(lease_auth < recovery_commit);
+    try std.testing.expectEqual(@as(usize, 0), count(publication, "else => failStopRpcPublication"));
 
     const strict_entry = between(
         slot_product,
@@ -111,10 +138,6 @@ fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         allocator,
         .limited(max_source_bytes),
     );
-}
-
-fn productPrefix(source: []const u8) []const u8 {
-    return source[0 .. std.mem.indexOf(u8, source, "\ntest \"") orelse source.len];
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

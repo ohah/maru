@@ -1293,16 +1293,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    7. **B3-6 internal aggregate strict completion:** 기존 public attach facade
       `executePreparedRequest(receipt,*ExecutedResponse)`의 signature/behavior를 유지한다. correction에서 연 private
       `executePreparedRpcSubstrate(receipt)` ownership-only private settlement path는 correction부터 client-slot module-public entry에서 `fail_stop_required`를 반환형에
-      노출하거나 저장하지 않고 기존 private noreturn sink로 즉시 소비한다. B3-6은 동작을 뒤늦게 바꾸지 않고 이 동일 strict behavior를
+      노출하거나 저장하지 않고 기존 private noreturn sink로 즉시 소비한다. B3-6은 public facade와 semantic decode를 바꾸지 않되,
+      peer/resource read 실패를 local invariant fail-stop으로 오분류하던 내부 settlement를 process-alive terminal로 교정하고 나머지 strict behavior를
       dedicated subprocess/source oracle로 증명한 뒤에만 `2c3b-3 완료`로 승격한다. public RPC execute·`*RpcExecutedResponse`·borrow·finish·reset,
       normal `RemoteRuntime` family callsite와 사용자 가시 동작은 0이다. decoder 제품
       전환은 계속 2c3e 소유다.
       기존 B3-0a response-alias count 4 artifact를 이 완료 증거로 재사용하지 않는다. correction은 별도
       `CR3a-2c3b reusable response correction` count 5 artifact로 same-slot 2/64, evidence-retire, rearm permit drift/replay,
-      post-rearm 금지 동작을 고정한다. B3-6은 별도 `CR3a-2c3b internal rpc substrate` count 3 artifact로 private wrapper의
+      post-rearm 금지 동작을 고정한다. B3-6은 별도 `CR3a-2c3b internal rpc substrate` focused gate의 runtime 2+boundary 1,
+      total count 3으로 private wrapper의
       peer-error non-crash actual-socket matrix, local invariant isolated fail-stop matrix, public/private boundary+exact-one callsite를
       고정한다. peer wire frame/header/envelope malformed·wrong-id·truncated·empty·cap+1·OOM은 process alive+connection terminal+
-      permanent tombstone+rearm 0+
+      registry response authority permanent tombstone+payload owner pristine+rearm 0+
       second free 0이고 local seal/allocator/authority/rearm drift만 abnormal exit다. parent-minted stage sentinel은 free exact once,
       authority idle, evidence retire, rearm precondition을 구분하며 reset 전 fail-stop과 rearm 뒤 operation release 외 동작 0을 증명한다.
       bounded nonempty correct-id payload의 JSON/application semantic 오류는 2c3e decoder가 소유한다.
@@ -1310,12 +1312,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       accepted owner가 아니므로 process-alive protocol terminal로 정산하며 permanent tombstone, semantic read 0, rearm 0이다. peer 행렬은 bad magic, wrong major, invalid kind, wrong request id,
       header cap+1, header truncation, payload truncation, zero-byte EOF, allocation fail-index와 correct-id empty payload를 exact case로
       갖는다. correct response 뒤 같은 write에 붙은 duplicate old-id response는 첫 cycle을 정상 정산한 뒤 다음 cycle에서 correlation
-      loss로 terminal되며 두 번째 payload를 RPC slot에 게시하지 않는다. host가 미래 request id와 올바른 response frame을 미리 위조하는
-      경우는 wire만으로 정상 future response와 구분할 수 없는 compromised-peer 범위이며 이 gate의 local memory-safety 증거가 아니다.
+      loss로 terminal된다. 이때 두 번째 RPC-slot publication/owner-free/rearm은 0이고 parser discard payload free는 정확히 1회다.
+      host가 미래 request id와 올바른 response frame을 미리 위조하는 경우는 wire만으로 정상 future response와 구분할 수 없는
+      compromised-peer 범위이며 이 gate의 local memory-safety 증거가 아니다.
       OOM은 parser frame backing과 payload allocation/promotion까지 observer가 실제로 도달한 모든 ordinal을 최초 성공까지 전수하고,
       publication 이후에는 recoverable allocation 지점을 새로 만들지 않는다.
       isolated child 증거는 단순 panic 문자열을 성공으로 세지 않는다. parent가 별도 capability/stage pipe로 민트한
-      `{version,case_id,nonce,stage}` fixed record의 case별 exact prefix와 final sentinel, 예상 abnormal termination을 함께 검증한다.
+      `{version,case_id,nonce,stage}` 11-byte record(`nonce` little-endian)의 case별 exact prefix와 final sentinel, 예상 abnormal termination을 함께 검증한다.
       response seal/allocator drift는 `free_once` 뒤, authority drift는 permit 준비 뒤, rearm drift는
       `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. exec 126/127, capability/nonce mismatch, generic panic, stage
       누락·중복·역전은 실패다. parent는 stderr와 stage pipe를 child 종료 전 nonblocking으로 함께 drain하고 capture cap 뒤에도 EOF까지

@@ -1323,7 +1323,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. exec 126/127, capability/nonce mismatch, generic panic, stage
       누락·중복·역전은 실패다. parent는 stderr와 stage pipe를 child 종료 전 nonblocking으로 함께 drain하고 capture cap 뒤에도 EOF까지
       discard-drain하며 truncation은 실패 처리한다. absolute timeout은 kill 뒤 waitpid exact once로 닫는다.
-   8. **2c3c control facade (C1·C2 완료, C3 미착수):** C1은 별도 raw-discriminator-safe `RuntimeControl` DTO와 exact
+   8. **2c3c control facade (C1·C2·C3 완료):** C1은 별도 raw-discriminator-safe `RuntimeControl` DTO와 exact
       `ValidatedRuntimeControl=scroll_to_bottom|core_command`를 두고 `sendControl|sendControlNonBlocking` substrate를
       `ClientSlot` canonical operation 아래 추가한다. unsupported capability는
       `ControlError.Unsupported`, nonblocking `false`는 backpressure만 뜻하며 raw method/JSON/stream ID escape는 0이다. C2는 기존
@@ -1344,8 +1344,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       C2의 Debug·ReleaseFast gate는 runtime 5+C1 runtime 7+boundary 1의 exact inventory로 모든 15개 command projection,
       canonical frame allocation OOM 뒤 retain·무독성·exact-once retry, zero/partial/full pending progress, peer close의 hard-error retain,
       1/64/65 queue와 allocation fail-close, unsupported wire 0, coalescing과 `input prefix -> control -> input suffix` 순서를 검증한다.
+      C3는 같은 closed projection을 재사용해 `flushQueuedInputBlocking`의 generation arm만
+      `GenerationAttachment.sendControl`로 전환한다. 성공과 `Unsupported` no-op만 dequeue하고,
+      `ResourceExhausted`는 `OutOfMemory`, `Busy`는 `AdminBusy`, authority/protocol/close 오류는 기존 `ClientError` 의미로 전파해
+      queue를 유지한다. encode OOM 전 기존 pending frame offset 진전은 허용하지만 새 control wire와 duplicate는 0이며,
+      legacy blocking direct Client 두 호출과 recovery resync baseline은 변경하지 않는다.
+      일반 RPC는 retained queue를 추월하지 않는다. `terminateBestEffort`만 blocking flush OOM에서 runtime 파괴가 queue를 대체하는
+      명시적 예외로 retained mutation을 폐기한 뒤 terminate를 시도한다. `detachBestEffort`는 flush 오류에서 detach RPC 0을 유지하고,
+      `ConnectionClosed` 외의 OOM/Busy/authority/protocol 오류는 connection fail-close→host EOF lease 회수로 수렴한다.
       queue·registry authority는 새로 만들지 않고 legacy arm과 recovery-owned resync는 유지한다. 각 slice는 Debug·ReleaseFast focused
-      test와 boundary oracle을 통과하며 C3 종료 시 generation scroll/core direct Client callsite 0과 recovery resync baseline 1을 고정한다. event는 2c3d,
+      test와 boundary oracle을 통과한다. C3 RemoteRuntime 5+slice-exclusive Client write 1은 blocking drain 단일-owner 재진입 방지, 새 scroll/core frame의
+      injected zero/1/len-1/full·EINTR 분류, ambiguous partial fail-close, generation teardown actual RPC를 고정하고 generation scroll/core
+      direct Client callsite 0과 recovery resync baseline 1을 유지한다. event는 2c3d,
       response-bearing RPC decoder와 실제 socket parity는 2c3e, `RemoteRuntime.client` 필드 제거는 2c4가 소유한다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는

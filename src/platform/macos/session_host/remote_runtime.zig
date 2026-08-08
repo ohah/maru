@@ -300,6 +300,10 @@ pub const RemoteRuntime = struct {
     direct_input: std.ArrayListUnmanaged(u8),
     direct_input_offset: usize,
     pending_controls: std.ArrayListUnmanaged(PendingControl),
+    // A blocking drain owns both mutation queues until it either commits or returns an error.
+    // Allocator callbacks and other same-thread callbacks must not recursively consume the
+    // front item while the outer drain still holds a copied value for that item.
+    blocking_flush_active: bool = false,
     // shared transport hard failure를 이 runtime surface에 한 번만 투영한다. connection 하나를 여러 runtime이
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
     pump_ended: bool,
@@ -390,6 +394,7 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
+        self.blocking_flush_active = false;
         self.pump_ended = false;
         self.resync_needed = false;
         self.observation = .{};
@@ -479,6 +484,7 @@ pub const RemoteRuntime = struct {
         self.direct_input = .empty;
         self.direct_input_offset = 0;
         self.pending_controls = .empty;
+        self.blocking_flush_active = false;
         self.pump_ended = false;
         self.resync_needed = false;
         self.observation = .{};
@@ -814,13 +820,7 @@ pub const RemoteRuntime = struct {
     fn admitControl(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!bool {
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (self.attachment == .generation) {
-            const typed = switch (control.op) {
-                .scroll_to_bottom => generation_contract.RuntimeControl.scrollToBottom(),
-                .core_command => |command| generation_contract.RuntimeControl.coreCommand(
-                    projectGenerationCoreCommand(command),
-                ),
-            };
-            return self.attachment.generation.sendControlNonBlocking(typed) catch |err|
+            return self.attachment.generation.sendControlNonBlocking(projectGenerationControl(control)) catch |err|
                 return normalizeGenerationControlError(err);
         }
         return switch (control.op) {
@@ -850,6 +850,28 @@ pub const RemoteRuntime = struct {
             error.InvalidOwner, error.ProtocolError => error.ProtocolError,
             error.Unauthorized => error.Unauthorized,
             error.ConnectionClosed => error.ConnectionClosed,
+        };
+    }
+
+    fn normalizeGenerationBlockingControlError(
+        err: @import("generation_transport.zig").ControlError,
+    ) client_mod.ClientError!void {
+        return switch (err) {
+            error.Unsupported => {},
+            error.ResourceExhausted => error.OutOfMemory,
+            error.Busy => error.AdminBusy,
+            error.InvalidOwner, error.ProtocolError => error.ProtocolError,
+            error.Unauthorized => error.Unauthorized,
+            error.ConnectionClosed => error.ConnectionClosed,
+        };
+    }
+
+    fn projectGenerationControl(control: PendingControl) generation_contract.RuntimeControl {
+        return switch (control.op) {
+            .scroll_to_bottom => generation_contract.RuntimeControl.scrollToBottom(),
+            .core_command => |command| generation_contract.RuntimeControl.coreCommand(
+                projectGenerationCoreCommand(command),
+            ),
         };
     }
 
@@ -909,6 +931,9 @@ pub const RemoteRuntime = struct {
     /// 직접 key FIFO와 control FIFO를 단일 시간 순서로 Client outbound에 넘긴다.
     /// 반환 false는 socket backpressure로 아직 queue/barrier가 남았다는 뜻이며 데이터 소유권은 유지된다.
     fn pumpQueuedInput(self: *RemoteRuntime) client_mod.ClientError!bool {
+        // Blocking drain이 front item의 copied value를 들고 있는 동안 callback이 public queue API를
+        // 재진입해 같은 item을 소비하지 못하게 한다. false는 기존 backpressure와 같은 retained-owner 결과다.
+        if (self.blocking_flush_active) return false;
         if (!self.attachment.allowsMutation()) {
             self.discardQueuedMutations();
             return true;
@@ -956,6 +981,9 @@ pub const RemoteRuntime = struct {
     /// Client의 connection-level pending frame이라는 두 ownership 층 사이에서 mouse/core/resize RPC가 key를
     /// 추월하지 않게 하는 단일 경계다. 각 blocking RPC는 원래도 Client.call에서 pending socket write를 기다린다.
     fn flushQueuedInputBlocking(self: *RemoteRuntime) client_mod.ClientError!void {
+        if (self.blocking_flush_active) return error.AdminBusy;
+        self.blocking_flush_active = true;
+        defer self.blocking_flush_active = false;
         if (!self.attachment.allowsMutation()) {
             self.discardQueuedMutations();
             return;
@@ -973,15 +1001,7 @@ pub const RemoteRuntime = struct {
                     self.direct_input_offset = barrier;
                     continue;
                 }
-                switch (control.op) {
-                    .scroll_to_bottom => try self.client.sendScrollToBottom(self.attachment.streamId()),
-                    .core_command => |command| {
-                        const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch
-                            return error.OutOfMemory;
-                        defer self.allocator.free(params);
-                        try self.client.sendCoreCommand(self.attachment.streamId(), params);
-                    },
-                }
+                try self.flushControlBlocking(control);
                 _ = self.pending_controls.orderedRemove(0);
                 continue;
             }
@@ -996,6 +1016,23 @@ pub const RemoteRuntime = struct {
             self.direct_input.clearRetainingCapacity();
             self.direct_input_offset = 0;
             return;
+        }
+    }
+
+    fn flushControlBlocking(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!void {
+        if (self.attachment == .generation) {
+            self.attachment.generation.sendControl(projectGenerationControl(control)) catch |err|
+                return normalizeGenerationBlockingControlError(err);
+            return;
+        }
+        switch (control.op) {
+            .scroll_to_bottom => try self.client.sendScrollToBottom(self.attachment.streamId()),
+            .core_command => |command| {
+                const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch
+                    return error.OutOfMemory;
+                defer self.allocator.free(params);
+                try self.client.sendCoreCommand(self.attachment.streamId(), params);
+            },
         }
     }
 
@@ -1917,9 +1954,16 @@ pub const RemoteRuntime = struct {
     fn terminateBestEffort(self: *RemoteRuntime) void {
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return;
-        // lifecycle cleanup은 transient input-frame OOM 때문에 생략하면 안 된다. 가능한 경우 accepted input을 먼저
-        // flush하되, 준비 OOM이면 terminate 자체는 계속 시도한다.
-        self.flushQueuedInputBlocking() catch |err| if (err != error.OutOfMemory) return;
+        // terminate는 runtime 자체를 파괴하므로 input/control blocking flush OOM에서 retained mutation을 의미상 대체하는
+        // 유일한 ordering 예외다. 재시도 owner를 남기지 않고 queue를 폐기한 뒤 terminate를 시도한다.
+        self.flushQueuedInputBlocking() catch |err| {
+            if (err == error.OutOfMemory) {
+                self.discardQueuedMutations();
+            } else {
+                self.failCloseTeardownFlush(err);
+                return;
+            }
+        };
         const resp = self.client.call("runtime.terminate", params) catch |err| {
             // cleanup request를 만들거나 응답을 추적할 메모리조차 없으면 shared connection을 닫아 host EOF 경로가
             // 모든 attachment/controller lease를 회수하게 한다.
@@ -1945,21 +1989,10 @@ pub const RemoteRuntime = struct {
         if (self.attachment.streamId() == 0) return;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return;
-        // controller lease 해제는 큐에 남은 입력보다 **우선한다**. 그래서 flush가 실패해도 detach를 건너뛰지 않는다.
-        //
-        // 이전에는 OOM이 아닌 실패(예: `AdminBusy`)면 곧바로 return해 detach RPC를 보내지 않았는데, 근거였던
-        // "hard connection error면 어차피 EOF detach된다"가 **shared connection에서는 성립하지 않는다**
-        // (`detachClientSide` 주석: 앱 종료 전까지 EOF가 오지 않는다). 그래서 lease가 host에 그대로 남아 다음
-        // attach가 `controller_busy`가 되고, 사용자는 입력이 안 되는 터미널을 보게 된다. connection이 이미
-        // 죽었다면 아래 detach도 실패할 뿐이라 시도 자체는 무해하다.
+        // detach는 retained mutation을 추월하지 않는다. flush 실패에서 detach RPC는 0이고, 아직 live일 수 있는
+        // local OOM/Busy는 connection EOF로 모든 controller lease를 회수하도록 fail-close한다.
         self.flushQueuedInputBlocking() catch |err| {
-            if (err == error.OutOfMemory) {
-                self.client.poison(.local_resource_exhausted);
-            } else if (err == error.AdminBusy) {
-                // No retry owner remains after teardown. Closing the shared connection lets host
-                // EOF release every lease without sending pre-revoke mutation wire.
-                self.client.poison(.attachment_cleanup_failed);
-            }
+            self.failCloseTeardownFlush(err);
             logDetachIncomplete("flush", err);
             return;
         };
@@ -1975,6 +2008,14 @@ pub const RemoteRuntime = struct {
             return;
         };
         self.allocator.free(resp);
+    }
+
+    fn failCloseTeardownFlush(self: *RemoteRuntime, err: client_mod.ClientError) void {
+        if (err == error.ConnectionClosed) return;
+        self.client.poison(if (err == error.OutOfMemory)
+            .local_resource_exhausted
+        else
+            .attachment_cleanup_failed);
     }
 };
 
@@ -2269,6 +2310,34 @@ test "CR3a-2c3c C2 normalizes only unsupported and retryable generation control 
     try testing.expectError(
         error.ConnectionClosed,
         RemoteRuntime.normalizeGenerationControlError(error.ConnectionClosed),
+    );
+}
+
+test "CR3a-2c3c C3 preserves blocking generation control error semantics" {
+    try RemoteRuntime.normalizeGenerationBlockingControlError(error.Unsupported);
+    try testing.expectError(
+        error.OutOfMemory,
+        RemoteRuntime.normalizeGenerationBlockingControlError(error.ResourceExhausted),
+    );
+    try testing.expectError(
+        error.AdminBusy,
+        RemoteRuntime.normalizeGenerationBlockingControlError(error.Busy),
+    );
+    try testing.expectError(
+        error.ProtocolError,
+        RemoteRuntime.normalizeGenerationBlockingControlError(error.InvalidOwner),
+    );
+    try testing.expectError(
+        error.ProtocolError,
+        RemoteRuntime.normalizeGenerationBlockingControlError(error.ProtocolError),
+    );
+    try testing.expectError(
+        error.Unauthorized,
+        RemoteRuntime.normalizeGenerationBlockingControlError(error.Unauthorized),
+    );
+    try testing.expectError(
+        error.ConnectionClosed,
+        RemoteRuntime.normalizeGenerationBlockingControlError(error.ConnectionClosed),
     );
 }
 
@@ -2802,6 +2871,7 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
@@ -2889,6 +2959,7 @@ test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
@@ -2970,7 +3041,130 @@ const SnapshotFreeReentryProbe = struct {
     }
 };
 
-test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed control" {
+const OneShotFailAllocator = struct {
+    parent: std.mem.Allocator,
+    failed: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (!self.failed) {
+            self.failed = true;
+            return null;
+        }
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ra);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ra: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ra);
+    }
+};
+
+const BlockingControlReentryAllocator = struct {
+    parent: std.mem.Allocator,
+    runtime: *RemoteRuntime,
+    fired: bool = false,
+    observed_admin_busy: bool = false,
+    observed_pump_blocked: bool = false,
+    observed_pump_error: ?client_mod.ClientError = null,
+    observed_queue_len: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (!self.fired) {
+            self.fired = true;
+            self.observed_queue_len = self.runtime.pending_controls.items.len;
+            if (self.runtime.pumpQueuedInput()) |drained| {
+                self.observed_pump_blocked = !drained;
+            } else |err| {
+                self.observed_pump_error = err;
+            }
+            self.runtime.flushQueuedInputBlocking() catch |err| {
+                self.observed_admin_busy = err == error.AdminBusy;
+            };
+        }
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ra);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ra: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ra);
+    }
+};
+
+test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking and blocking typed control" {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -3011,16 +3205,40 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
         records.items,
     );
     defer allocator.free(snapshot);
+    const terminate_response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 2 },
+        "{\"result\":{\"ok\":true}}",
+    );
+    defer allocator.free(terminate_response);
+    const input_oom_terminate_response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 3 },
+        "{\"result\":{\"ok\":true}}",
+    );
+    defer allocator.free(input_oom_terminate_response);
     const Peer = struct {
         fn run(
             fd: c.fd_t,
             response_wire: []const u8,
             snapshot_wire: []const u8,
+            terminate_response_wire: []const u8,
+            input_oom_terminate_response_wire: []const u8,
             control_ok: *bool,
             oom_retry_ok: *bool,
             retry_control_ok: *bool,
+            blocking_order_ok: *bool,
+            blocking_busy_ok: *bool,
+            blocking_oom_retry_ok: *bool,
+            terminate_oom_rpc_ok: *bool,
+            input_oom_terminate_rpc_ok: *bool,
             scroll_and_suffix_ok: *bool,
             unsupported_wire_zero: *bool,
+            blocking_unsupported_wire_zero: *bool,
+            blocking_unsupported_ready: *std.atomic.Value(u8),
+            blocking_unsupported_checked: *std.atomic.Value(u8),
+            blocking_oom_ready: *std.atomic.Value(u8),
+            blocking_oom_retry_checked: *std.atomic.Value(u8),
             release_filler: *std.atomic.Value(u8),
             filler_drained: *std.atomic.Value(u8),
             filler_len: *usize,
@@ -3052,7 +3270,58 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
             oom_retry_ok.* = oom_retry.header.kind == .core_command and
                 oom_retry.header.stream_id == 7 and
                 std.mem.indexOf(u8, oom_retry.payload, "\"direction\":1") != null;
-            while (release_filler.load(.acquire) == 0) std.atomic.spinLoopHint();
+            const blocking_prefix = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(blocking_prefix.payload);
+            const blocking_control = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(blocking_control.payload);
+            const blocking_suffix = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(blocking_suffix.payload);
+            blocking_order_ok.* = blocking_prefix.header.kind == .input_bytes and
+                blocking_prefix.header.stream_id == 7 and std.mem.eql(u8, blocking_prefix.payload, "C") and
+                blocking_control.header.kind == .core_command and
+                blocking_control.header.stream_id == 7 and
+                std.mem.indexOf(u8, blocking_control.payload, "\"gained\":true") != null and
+                blocking_suffix.header.kind == .input_bytes and
+                blocking_suffix.header.stream_id == 7 and std.mem.eql(u8, blocking_suffix.payload, "D");
+            const blocking_busy_outer = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(blocking_busy_outer.payload);
+            blocking_busy_ok.* = blocking_busy_outer.header.kind == .scroll_to_bottom and
+                blocking_busy_outer.header.stream_id == 7 and blocking_busy_outer.payload.len == 0;
+            waitRemoteTestFlag(blocking_unsupported_ready) catch return;
+            var unsupported_poll = posix.pollfd{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
+            blocking_unsupported_wire_zero.* = c.poll(@ptrCast(&unsupported_poll), 1, 100) == 0;
+            blocking_unsupported_checked.store(1, .release);
+            waitRemoteTestFlag(blocking_oom_ready) catch return;
+            const blocking_filler = peer_allocator.alloc(u8, filler_len.*) catch return;
+            defer peer_allocator.free(blocking_filler);
+            readRemoteTestExact(fd, blocking_filler) catch return;
+            const prior_input = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(prior_input.payload);
+            const blocking_oom_retry = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(blocking_oom_retry.payload);
+            const blocking_oom_suffix = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(blocking_oom_suffix.payload);
+            blocking_oom_retry_ok.* = prior_input.header.kind == .input_bytes and
+                prior_input.header.stream_id == 7 and std.mem.eql(u8, prior_input.payload, "E") and
+                blocking_oom_retry.header.kind == .core_command and
+                blocking_oom_retry.header.stream_id == 7 and
+                std.mem.indexOf(u8, blocking_oom_retry.payload, "\"direction\":-1") != null and
+                blocking_oom_suffix.header.kind == .input_bytes and
+                blocking_oom_suffix.header.stream_id == 7 and std.mem.eql(u8, blocking_oom_suffix.payload, "F");
+            const terminate_request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(terminate_request.payload);
+            terminate_oom_rpc_ok.* = terminate_request.header.kind == .request and
+                terminate_request.header.request_id == 2 and
+                std.mem.indexOf(u8, terminate_request.payload, "\"method\":\"runtime.terminate\"") != null;
+            socket_server.writeAll(fd, terminate_response_wire) catch return;
+            const input_oom_terminate_request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(input_oom_terminate_request.payload);
+            input_oom_terminate_rpc_ok.* = input_oom_terminate_request.header.kind == .request and
+                input_oom_terminate_request.header.request_id == 3 and
+                std.mem.indexOf(u8, input_oom_terminate_request.payload, "\"method\":\"runtime.terminate\"") != null;
+            socket_server.writeAll(fd, input_oom_terminate_response_wire) catch return;
+            blocking_oom_retry_checked.store(1, .release);
+            waitRemoteTestFlag(release_filler) catch return;
             const filler = peer_allocator.alloc(u8, filler_len.*) catch return;
             defer peer_allocator.free(filler);
             readRemoteTestExact(fd, filler) catch return;
@@ -3094,18 +3363,36 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
     var control_ok = false;
     var oom_retry_ok = false;
     var retry_control_ok = false;
+    var blocking_order_ok = false;
+    var blocking_busy_ok = false;
+    var blocking_oom_retry_ok = false;
+    var terminate_oom_rpc_ok = false;
+    var input_oom_terminate_rpc_ok = false;
     var scroll_and_suffix_ok = false;
     var unsupported_wire_zero = false;
+    var blocking_unsupported_wire_zero = false;
+    var blocking_unsupported_ready = std.atomic.Value(u8).init(0);
+    var blocking_unsupported_checked = std.atomic.Value(u8).init(0);
+    var blocking_oom_ready = std.atomic.Value(u8).init(0);
+    var blocking_oom_retry_checked = std.atomic.Value(u8).init(0);
     var release_filler = std.atomic.Value(u8).init(0);
     var filler_drained = std.atomic.Value(u8).init(0);
     var filler_len: usize = 0;
     var peer = try std.Thread.spawn(.{}, Peer.run, .{
-        fds[1],                 response,        snapshot,        &control_ok, &oom_retry_ok, &retry_control_ok, &scroll_and_suffix_ok,
-        &unsupported_wire_zero, &release_filler, &filler_drained, &filler_len,
+        fds[1],                          response,                     snapshot,
+        terminate_response,              input_oom_terminate_response, &control_ok,
+        &oom_retry_ok,                   &retry_control_ok,            &blocking_order_ok,
+        &blocking_busy_ok,               &blocking_oom_retry_ok,       &terminate_oom_rpc_ok,
+        &input_oom_terminate_rpc_ok,     &scroll_and_suffix_ok,        &unsupported_wire_zero,
+        &blocking_unsupported_wire_zero, &blocking_unsupported_ready,  &blocking_unsupported_checked,
+        &blocking_oom_ready,             &blocking_oom_retry_checked,  &release_filler,
+        &filler_drained,                 &filler_len,
     });
     peer_fd_owned_by_thread = true;
     var peer_joined = false;
     defer {
+        blocking_unsupported_ready.store(1, .release);
+        blocking_oom_ready.store(1, .release);
         release_filler.store(1, .release);
         _ = c.shutdown(fds[0], c.SHUT.RDWR);
         if (!peer_joined) peer.join();
@@ -3139,6 +3426,7 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
@@ -3177,6 +3465,85 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
     try std.testing.expect(adapter.logicalClient().pending_outbound == null);
     try std.testing.expect(!adapter.logicalClient().unusable);
     while (!(try rr.pumpQueuedInput())) {}
+    try rr.direct_input.appendSlice(allocator, "CD");
+    try rr.pending_controls.append(allocator, .{
+        .barrier = 1,
+        .op = .{ .core_command = .{ .report_focus = true } },
+    });
+    try rr.flushQueuedInputBlocking();
+    try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    try rr.pending_controls.append(allocator, .{ .barrier = 0, .op = .scroll_to_bottom });
+    var blocking_reentry = BlockingControlReentryAllocator{
+        .parent = allocator,
+        .runtime = &rr,
+    };
+    const blocking_reentry_saved_allocator = adapter.logicalClient().allocator;
+    adapter.logicalClient().allocator = blocking_reentry.allocator();
+    const blocking_reentry_result = rr.flushQueuedInputBlocking();
+    adapter.logicalClient().allocator = blocking_reentry_saved_allocator;
+    try blocking_reentry_result;
+    try std.testing.expect(blocking_reentry.fired);
+    try std.testing.expect(blocking_reentry.observed_admin_busy);
+    try std.testing.expect(blocking_reentry.observed_pump_blocked);
+    try std.testing.expect(blocking_reentry.observed_pump_error == null);
+    try std.testing.expectEqual(@as(usize, 1), blocking_reentry.observed_queue_len);
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    adapter.logicalClient().async_scroll_to_bottom_v1 = false;
+    try rr.pending_controls.append(allocator, .{ .barrier = 0, .op = .scroll_to_bottom });
+    try rr.flushQueuedInputBlocking();
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    blocking_unsupported_ready.store(1, .release);
+    try waitRemoteTestFlag(&blocking_unsupported_checked);
+    adapter.logicalClient().async_scroll_to_bottom_v1 = true;
+    filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try adapter.logicalClient().sendInputNonBlocking(7, "E"),
+    );
+    try rr.direct_input.appendSlice(allocator, "F");
+    try rr.pending_controls.append(allocator, .{
+        .barrier = 0,
+        .op = .{ .core_command = .{ .jump_to_prompt = -1 } },
+    });
+    var blocking_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const blocking_saved_allocator = adapter.logicalClient().allocator;
+    adapter.logicalClient().allocator = blocking_failing.allocator();
+    blocking_oom_ready.store(1, .release);
+    const blocking_oom_result = rr.flushQueuedInputBlocking();
+    adapter.logicalClient().allocator = blocking_saved_allocator;
+    try std.testing.expectError(error.OutOfMemory, blocking_oom_result);
+    try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
+    try std.testing.expectEqualStrings("F", rr.direct_input.items[rr.direct_input_offset..]);
+    try std.testing.expect(adapter.logicalClient().pending_outbound == null);
+    try std.testing.expect(!adapter.logicalClient().unusable);
+    try rr.flushQueuedInputBlocking();
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try rr.direct_input.appendSlice(allocator, "G");
+    try rr.pending_controls.append(allocator, .{
+        .barrier = 0,
+        .op = .{ .core_command = .{ .report_focus = true } },
+    });
+    var terminate_failing = OneShotFailAllocator{ .parent = allocator };
+    const terminate_saved_allocator = adapter.logicalClient().allocator;
+    adapter.logicalClient().allocator = terminate_failing.allocator();
+    rr.terminateBestEffort();
+    adapter.logicalClient().allocator = terminate_saved_allocator;
+    try std.testing.expect(terminate_failing.failed);
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try std.testing.expect(!adapter.logicalClient().unusable);
+    try rr.direct_input.appendSlice(allocator, "H");
+    var input_terminate_failing = OneShotFailAllocator{ .parent = allocator };
+    adapter.logicalClient().allocator = input_terminate_failing.allocator();
+    rr.terminateBestEffort();
+    adapter.logicalClient().allocator = terminate_saved_allocator;
+    try std.testing.expect(input_terminate_failing.failed);
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try std.testing.expect(!adapter.logicalClient().unusable);
+    try waitRemoteTestFlag(&blocking_oom_retry_checked);
     filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
     try std.testing.expectEqual(@as(usize, 1), try rr.sendInputNonBlocking("A"));
     try rr.queueCoreCommand(.{ .report_focus = false });
@@ -3189,17 +3556,7 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
     try std.testing.expect(rr.pending_controls.items.len <= 2);
     try std.testing.expect(adapter.logicalClient().pending_outbound != null);
     release_filler.store(1, .release);
-    const drain_deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
-        10 * std.time.ns_per_s;
-    while (filler_drained.load(.acquire) == 0) {
-        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= drain_deadline)
-            return error.PeerDrainTimedOut;
-        try std.Io.sleep(
-            std.testing.io,
-            std.Io.Duration.fromMilliseconds(1),
-            .awake,
-        );
-    }
+    try waitRemoteTestFlag(&filler_drained);
     const pending = &adapter.logicalClient().pending_outbound.?;
     if (pending.offset == 0) {
         try std.testing.expectEqual(
@@ -3217,14 +3574,27 @@ test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed
     try std.testing.expect(control_ok);
     try std.testing.expect(oom_retry_ok);
     try std.testing.expect(retry_control_ok);
+    try std.testing.expect(blocking_order_ok);
+    try std.testing.expect(blocking_busy_ok);
+    try std.testing.expect(blocking_oom_retry_ok);
+    try std.testing.expect(terminate_oom_rpc_ok);
+    try std.testing.expect(input_oom_terminate_rpc_ok);
     try std.testing.expect(scroll_and_suffix_ok);
     try std.testing.expect(unsupported_wire_zero);
-    try std.testing.expectError(
-        error.ConnectionClosed,
-        rr.queueCoreCommand(.{ .report_focus = true }),
-    );
+    try std.testing.expect(blocking_unsupported_wire_zero);
+    try rr.pending_controls.append(allocator, .{
+        .barrier = 0,
+        .op = .{ .core_command = .{ .report_focus = true } },
+    });
+    try std.testing.expectError(error.ConnectionClosed, rr.flushQueuedInputBlocking());
     try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
     try std.testing.expect(adapter.logicalClient().unusable);
+    try std.testing.expectEqual(
+        @import("client_poison.zig").ConnectionReason.outbound_write_ambiguous,
+        adapter.logicalClient().firstPoisonReason().?,
+    );
+    try std.testing.expectError(error.ConnectionClosed, rr.flushQueuedInputBlocking());
+    try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
     try std.testing.expect(free_probe.fired);
     try std.testing.expectEqual(generation_attachment_mod.DeinitOutcome.busy, free_probe.outcome.?);
     try std.testing.expectEqual(
@@ -3320,6 +3690,7 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
@@ -3427,6 +3798,7 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
@@ -3598,6 +3970,7 @@ fn expectObservationBarrierDisposition(
     defer rr.direct_input.deinit(allocator);
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.pending_controls.deinit(allocator);
     rr.observation = .{};
     defer rr.observation.deinit(allocator);
@@ -4306,6 +4679,7 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
     try runtime.direct_input.appendSlice(allocator, "queued");
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
+    runtime.blocking_flush_active = false;
     defer runtime.pending_controls.deinit(allocator);
     try runtime.pending_controls.append(allocator, .{
         .barrier = 6,
@@ -4396,6 +4770,7 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
     defer runtime.direct_input.deinit(allocator);
     runtime.direct_input_offset = 0;
     runtime.pending_controls = .empty;
+    runtime.blocking_flush_active = false;
     defer runtime.pending_controls.deinit(allocator);
 
     // Role cache는 아직 controller지만 own-stream revoke가 먼저 도착했으므로 SurfaceRuntime가
@@ -4449,6 +4824,7 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
     try sibling.direct_input.appendSlice(allocator, "preserve-me");
     sibling.direct_input_offset = 0;
     sibling.pending_controls = .empty;
+    sibling.blocking_flush_active = false;
     defer sibling.pending_controls.deinit(allocator);
     sibling.resync_needed = false;
     sibling.observation = .{};
@@ -4502,6 +4878,20 @@ fn readRemoteTestExact(fd: c.fd_t, out: []u8) !void {
     }
 }
 
+fn waitRemoteTestFlag(flag: *std.atomic.Value(u8)) !void {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
+        10 * std.time.ns_per_s;
+    while (flag.load(.acquire) == 0) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline)
+            return error.RemoteTestDeadlineExceeded;
+        try std.Io.sleep(
+            std.testing.io,
+            std.Io.Duration.fromMilliseconds(1),
+            .awake,
+        );
+    }
+}
+
 fn remoteOrderingPeer(fd: c.fd_t, expected: []const u8, response: []const u8, ok: *bool) void {
     const received = std.heap.page_allocator.alloc(u8, expected.len) catch return;
     defer std.heap.page_allocator.free(received);
@@ -4533,6 +4923,7 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
 
@@ -4595,6 +4986,7 @@ test "remote runtime preserves input core-command input order under socket backp
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
 
@@ -4651,6 +5043,7 @@ test "CR3a-2c3c C2 remote runtime control cap overflow fail-closes instead of si
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
     for (0..RemoteRuntime.max_pending_controls) |_| {
@@ -4687,6 +5080,7 @@ test "CR3a-2c3c C2 remote runtime control allocation failure also fail-closes in
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     defer rr.pending_controls.deinit(rr.allocator);
 
@@ -4719,6 +5113,7 @@ test "remote runtime owns exact-cap key after client encode OOM and rejects cap 
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
     try rr.direct_input.ensureTotalCapacity(allocator, RemoteRuntime.max_direct_input_bytes);
@@ -4755,6 +5150,7 @@ test "remote runtime compaction rebases a pending scroll barrier" {
     rr.direct_input = .empty;
     defer rr.direct_input.deinit(allocator);
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.pending_controls.deinit(allocator);
     try rr.direct_input.appendSlice(allocator, "ABC");
     rr.direct_input_offset = 1;
@@ -4788,6 +5184,7 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
 
@@ -4855,7 +5252,7 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
 }
 
-test "remote runtime lifecycle cleanup fail-closes the connection on persistent allocator OOM" {
+test "CR3a-2c3c C3 detach OOM sends no RPC and fail-closes for host lease cleanup" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fds: [2]c.fd_t = undefined;
@@ -4878,6 +5275,7 @@ test "remote runtime lifecycle cleanup fail-closes the connection on persistent 
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
 
@@ -4890,7 +5288,53 @@ test "remote runtime lifecycle cleanup fail-closes the connection on persistent 
     try testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }
 
-test "CR3a-2c3a detach fail-closes buffered revoke without flushing pending mutation wire" {
+test "CR3a-2c3c C3 terminate OOM discards superseded queued mutation before cleanup attempt" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var client = client_mod.Client{
+        .allocator = failing.allocator(),
+        .fd = fds[0],
+        .host_id = 1,
+        .runtime_core_command_v1 = true,
+        .parser = framing.FrameParser.init(failing.allocator()),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = failing.allocator();
+    rr.runtime_id_hex = "00000000000000000000000000000001".*;
+    rr.attachment = .init(testing.allocator, .{
+        .runtime_id = 1,
+        .stream_id = 17,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    try rr.direct_input.appendSlice(allocator, "superseded");
+    try rr.pending_controls.append(allocator, .{
+        .barrier = 0,
+        .op = .{ .core_command = .{ .report_focus = true } },
+    });
+
+    rr.terminateBestEffort();
+    try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
+    try testing.expectEqual(@as(usize, 0), rr.direct_input_offset);
+    try testing.expect(client.unusable);
+}
+
+test "CR3a-2c3a CR3a-2c3c C3 detach Busy fail-closes without mutation or RPC wire" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fds: [2]c.fd_t = undefined;
@@ -4930,6 +5374,7 @@ test "CR3a-2c3a detach fail-closes buffered revoke without flushing pending muta
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
 
@@ -5526,6 +5971,7 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.resync_needed = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
@@ -5587,6 +6033,7 @@ test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.resync_needed = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
@@ -5646,6 +6093,7 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.pump_ended = false;
     rr.resync_needed = false;
     defer rr.direct_input.deinit(allocator);
@@ -5696,6 +6144,7 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
     rr.direct_input = .empty;
     rr.direct_input_offset = 0;
     rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
     rr.resync_needed = false;
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);

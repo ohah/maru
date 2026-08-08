@@ -2949,6 +2949,26 @@ const PreparedRpcPublicationScope = struct {
         self.guard_active = false;
         self.self_addr = 0;
     }
+
+    fn finishFailedTransfer(
+        self: *@This(),
+        node: *ClientNode,
+        lease: *client_mod.PreparedRequestExecutionLease,
+        reason: response_payload_allocation.PayloadFailStopReason,
+    ) void {
+        if (!self.liveExact(node)) @panic("RPC publication failed scope drifted");
+        self.ledger.endFailedRpcTransfer(reason) catch
+            @panic("RPC publication failed ledger settlement drifted");
+        self.ledger_active = false;
+        node.client.restoreGenerationAllocatorScopeUnderExecutionLease(
+            &self.allocator_scope,
+            lease,
+        ) catch @panic("RPC publication failed allocator restore drifted");
+        self.allocator_active = false;
+        node.guarded_allocator.endOperationGuard();
+        self.guard_active = false;
+        self.self_addr = 0;
+    }
 };
 
 fn failStopResponsePayloadProvenance(
@@ -3430,7 +3450,14 @@ fn publishPreparedRpcResponse(
         response_allocator,
     )) {
         .promoted => |receipt| receipt,
-        .fail_stop_required => |reason| failStopResponsePayloadProvenance(reason),
+        .fail_stop_required => |reason| failStopRpcPublication(
+            operation,
+            node,
+            txn,
+            lease,
+            publication,
+            reason,
+        ),
     };
     const executing_admission = node.cleanup_registry.executingRpcAdmission(
         request.reservation.cleanup,
@@ -3439,19 +3466,29 @@ fn publishPreparedRpcResponse(
         request.transport_incarnation,
         request.receipt,
         bound_stream_id,
-    ) catch |err| {
+    ) catch {
         publication.ledger.releasePromotedResponse(payload_receipt) catch
             failStopResponsePayloadTransfer(.ledger_drift);
-        node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
-            failStopResponsePayloadTransfer(.ledger_drift);
-        return err;
+        failStopRpcPublication(
+            operation,
+            node,
+            txn,
+            lease,
+            publication,
+            .ledger_drift,
+        );
     };
     node.client.revalidatePreparedResponsePublication(lease, response_allocator) catch {
         publication.ledger.releasePromotedResponse(payload_receipt) catch
             failStopResponsePayloadTransfer(.ledger_drift);
-        node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
-            failStopResponsePayloadTransfer(.ledger_drift);
-        return error.InvalidOwner;
+        failStopRpcPublication(
+            operation,
+            node,
+            txn,
+            lease,
+            publication,
+            .ledger_drift,
+        );
     };
     if (!publication.liveExact(node) or !txn.responseDestinationStillPristine() or
         txn.request.postExecuteReady(operation) == null or executing_admission.decision != .allowed or
@@ -3459,9 +3496,14 @@ fn publishPreparedRpcResponse(
     {
         publication.ledger.releasePromotedResponse(payload_receipt) catch
             failStopResponsePayloadTransfer(.ledger_drift);
-        node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
-            failStopResponsePayloadTransfer(.ledger_drift);
-        return error.InvalidOwner;
+        failStopRpcPublication(
+            operation,
+            node,
+            txn,
+            lease,
+            publication,
+            .ledger_drift,
+        );
     }
     node.cleanup_registry.prepareRpcResponsePublished(
         request.reservation.cleanup,
@@ -3475,12 +3517,22 @@ fn publishPreparedRpcResponse(
         rpcOwnerIdentity(txn.response),
     )) {
         .transferred => {},
-        .rejected_safe_released => {
-            node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
-                failStopResponsePayloadTransfer(.ledger_drift);
-            return error.InvalidOwner;
-        },
-        .fail_stop_required => |reason| failStopResponsePayloadTransfer(reason),
+        .rejected_safe_released => failStopRpcPublication(
+            operation,
+            node,
+            txn,
+            lease,
+            publication,
+            .ledger_drift,
+        ),
+        .fail_stop_required => |reason| failStopRpcPublication(
+            operation,
+            node,
+            txn,
+            lease,
+            publication,
+            reason,
+        ),
     }
     node.cleanup_registry.commitRpcResponsePublished(
         request.reservation.cleanup,
@@ -3494,6 +3546,27 @@ fn publishPreparedRpcResponse(
     publication.finish(node, lease);
     txn.phase = .settled;
     finishPreparedRpcLeaseOrFailStop(node, lease, txn, operation);
+}
+
+fn failStopRpcPublication(
+    operation: RegisteredNodeOperation,
+    node: *ClientNode,
+    txn: *PreparedRpcExecutionTxn,
+    lease: *client_mod.PreparedRequestExecutionLease,
+    publication: *PreparedRpcPublicationScope,
+    reason: response_payload_allocation.PayloadFailStopReason,
+) noreturn {
+    publication.finishFailedTransfer(node, lease, reason);
+    node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
+        @panic("RPC publication fail-stop poison drifted");
+    const outcome = txn.settlePostWriteTerminalWithLease(
+        operation,
+        .local_invariant_violation,
+        lease,
+    ) catch @panic("RPC publication fail-stop authority settlement drifted");
+    txn.request.finishOrFailStop(operation, outcome);
+    finishPreparedRpcLeaseOrFailStop(node, lease, txn, operation);
+    @panic("RPC publication failed after terminal settlement");
 }
 
 fn executePreparedRpcTerminalSink(
@@ -9219,6 +9292,7 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
         storage: client_mod.PreparedBlockingRpcStorage = .{},
         response: RpcExecutedResponse = .{},
         repeated_responses: [63]RpcExecutedResponse = @splat(.{}),
+        terminal_response: RpcExecutedResponse = .{},
         binding: contract.PreparedAttachmentBinding = .{},
         lease: lease_mod.ConnectionLease = .{},
     };
@@ -9302,7 +9376,7 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
         fn run(fd: c.fd_t, ok: *bool) void {
             defer _ = c.close(fd);
             var iteration: usize = 0;
-            while (iteration < 64) : (iteration += 1) {
+            while (iteration < 65) : (iteration += 1) {
                 var raw_header: [protocol.header_size]u8 = undefined;
                 if (!readExact(fd, &raw_header)) return;
                 const header = protocol.Header.decode(&raw_header) catch return;
@@ -9387,6 +9461,56 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
         try std.testing.expect(response_destination.terminalExact());
         try std.testing.expect(slot.current.rpc_free_evidence.emptyExact());
     }
+    const terminal_prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .bound_stream_id = 91,
+        .reservation = reservation,
+        .request = contract.RuntimeRequest.observation(),
+    });
+    const terminal_request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = identity.slot_incarnation,
+        .node_incarnation = identity.node_incarnation,
+        .host_id = identity.host_id,
+        .pid = identity.pid,
+        .process_nonce = identity.process_nonce,
+        .transport_addr = @intFromPtr(&owner.transport_marker),
+        .transport_incarnation = transport_incarnation,
+        .owner_seal_addr = @intFromPtr(transport_owner_seal),
+        .prepared_storage_addr = @intFromPtr(&owner.storage),
+        .reservation = reservation,
+        .receipt = terminal_prepared.receipt,
+    };
+    try executePreparedRpcCorrelatedResponseForTest(
+        terminal_request,
+        91,
+        &owner.terminal_response,
+    );
+    var terminal_borrow: rpc_executed_response.RpcResponseBorrow = .{};
+    try beginRpcResponseBorrowForTest(
+        terminal_request,
+        &owner.terminal_response,
+        &terminal_borrow,
+    );
+    try finishRpcResponseOwnedForTest(
+        terminal_request,
+        &owner.terminal_response,
+        &terminal_borrow,
+        .protocol_failure,
+    );
+    try std.testing.expect(owner.terminal_response.terminalExact());
+    try std.testing.expect(slot.current.client.firstPoisonReason() != null);
     peer.join();
     try std.testing.expect(peer_ok);
     try std.testing.expectEqual(

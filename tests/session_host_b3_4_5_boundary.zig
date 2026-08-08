@@ -180,25 +180,18 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     const finish_product = between(
         slot,
         "fn finishRpcResponseOwnedForTest(",
-        "/// Executes the attach-compatible request",
+        "fn terminalizeBorrowedRpcResponseNoFree(",
     ) orelse return error.TestExpectedEqual;
     inline for (.{
         ".prepareFinish(",
         ".commitFreeNoFail(",
         ".commitFreeCall(",
         ".freeCaptured(",
-        ".commitTerminalFreedOnce(",
         ".finishCleanNoFail(",
         ".retireFreeCall(",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), count(finish_product, needle));
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        count(finish_product, ".prepareRpcResponseReleasing("),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        count(finish_product, ".commitRpcResponseReleasing("),
-    );
+    try std.testing.expectEqual(@as(usize, 1), count(finish_product, ".prepareRpcResponseReleasing("));
+    try std.testing.expectEqual(@as(usize, 1), count(finish_product, ".commitRpcResponseReleasing("));
     try expectOrdered(finish_product, &.{
         ".prepareFinish(",
         ".prepareRpcResponseReleasing(",
@@ -211,6 +204,35 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
         ".commitRpcResponseReusable(",
         ".retireFreeCall(",
     });
+    const no_free = between(
+        slot,
+        "fn terminalizeBorrowedRpcResponseNoFree(",
+        "fn failStopFreedRpcResponse(",
+    ) orelse return error.TestExpectedEqual;
+    try expectOrdered(no_free, &.{
+        ".prepareRpcResponseReleasing(",
+        ".abandonLiveNoFree(",
+        ".commitRpcResponseReleasing(",
+        ".prepareRpcResponseTerminal(",
+        ".commitRpcResponseTerminal(",
+        ".poison(",
+        "@panic(",
+    });
+    try std.testing.expectEqual(@as(usize, 0), count(no_free, ".freeCaptured("));
+    try std.testing.expectEqual(@as(usize, 0), count(no_free, ".commitFreeCall("));
+    const freed_once = between(
+        slot,
+        "fn failStopFreedRpcResponse(",
+        "/// Executes the attach-compatible request",
+    ) orelse return error.TestExpectedEqual;
+    try expectOrdered(freed_once, &.{
+        ".commitTerminalFreedOnce(",
+        ".prepareRpcResponseTerminal(",
+        ".commitRpcResponseTerminal(",
+        ".poison(",
+        "@panic(",
+    });
+    try std.testing.expectEqual(@as(usize, 0), count(freed_once, ".freeCaptured("));
     const evidence = between(
         slot,
         "pub const RpcFreeEvidenceRecord = struct",

@@ -424,7 +424,7 @@ pub const Ledger = struct {
                 self.sealLedgerTerminalNoFree(.ledger_drift);
                 return .{ .fail_stop_required = .ledger_drift };
             };
-            return .{ .rejected_safe_released = err };
+            return .{ .fail_stop_required = .ledger_drift };
         };
         entry.lifecycle = .transferred_response;
         return .transferred;
@@ -440,6 +440,31 @@ pub const Ledger = struct {
                 .terminal_no_free => return error.InvalidOwner,
             }
         }
+        self.* = .{};
+    }
+
+    /// Consumes only a failed RPC-transfer residue after its byte disposition is already fixed.
+    /// Retired entries were safe-freed by the transfer attempt; terminal-no-free entries retain
+    /// no callable cleanup capability. Any live/promoted/transferred entry is a caller bug.
+    pub fn endFailedRpcTransfer(
+        self: *Ledger,
+        reason: PayloadFailStopReason,
+    ) Error!void {
+        if (!self.active or self.self_addr != @intFromPtr(self) or !self.authority.valid() or
+            !std.meta.eql(self.authority, self.authority_seal) or
+            !std.meta.eql(AllocatorIdentity.from(self.allocator), self.allocator_seal) or
+            self.entries.len != max_entries or
+            @intFromPtr(self.entries.ptr) != @intFromPtr(&self.entry_storage[0]) or
+            self.entry_count > max_entries)
+            return error.InvalidOwner;
+        if (self.ledger_terminal_no_free) {
+            if (self.ledger_terminal_reason != reason) return error.InvalidOwner;
+        } else for (self.entries[0..self.entry_count]) |entry| switch (entry.lifecycle) {
+            .retired => {},
+            .terminal_no_free => if (entry.terminal_reason != reason)
+                return error.InvalidOwner,
+            .reserved, .live, .promoted_response, .transferred_response => return error.Busy,
+        };
         self.* = .{};
     }
 
@@ -962,7 +987,7 @@ test "B3-4/5 RPC ledger transfer publishes owner and consumes promoted entry" {
     try ledger.endOperation();
 }
 
-test "B3-4/5 RPC ledger transfer safely releases empty promoted payload" {
+test "B3-4/5 RPC ledger transfer safe-frees empty payload and requires fail-stop" {
     const allocator = std.testing.allocator;
     var ledger: Ledger = .{};
     try Ledger.initInPlace(&ledger, allocator, .{
@@ -988,13 +1013,9 @@ test "B3-4/5 RPC ledger transfer safely releases empty promoted payload" {
         &response,
         rpcFixtureIdentity(@intFromPtr(&response)),
     );
-    try std.testing.expect(outcome == .rejected_safe_released);
-    try std.testing.expectEqual(
-        rpc_executed_response.RpcExecutedResponse.Error.InvalidPayload,
-        outcome.rejected_safe_released,
-    );
+    try std.testing.expectEqual(PayloadFailStopReason.ledger_drift, outcome.fail_stop_required);
     try std.testing.expect(response.pristineExact());
-    try ledger.endOperation();
+    try ledger.endFailedRpcTransfer(.ledger_drift);
 }
 
 test "B3-4/5 RPC ledger transfer rejects copied receipt without owner mutation" {
@@ -1027,6 +1048,7 @@ test "B3-4/5 RPC ledger transfer rejects copied receipt without owner mutation" 
         rpcFixtureIdentity(@intFromPtr(&response)),
     ) == .fail_stop_required);
     try std.testing.expect(response.pristineExact());
+    try ledger.endFailedRpcTransfer(.ledger_drift);
 }
 
 test "B3-0a provenance classification uses exact generation and seals no-free reason" {

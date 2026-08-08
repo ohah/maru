@@ -176,6 +176,20 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
   **이 화면은 composer와 사용자 statusLine을 대체한다** — 다이얼로그 아래에는 아무것도 없고 힌트 줄이 화면 마지막이다.
   따라서 질문의 하단 거리는 옵션 3개일 때 5이고 옵션마다 1씩 늘어난다(거리 상한 유도의 근거).
 
+**claude (2.1.226 추가 관측 — 플랜 승인과 도구별 권한 질문)**
+
+- **플랜 승인 화면**은 위 권한 다이얼로그와 **문구가 다르다**. 안내 줄이 `Claude has written up a plan and is ready to
+  execute. Would you like to proceed?`이고(`Do you want to proceed?`가 **아니다**), 선택지는
+  `❯ 1. Yes, and use auto mode` / `2. Yes, manually approve edits` / `3. Tell Claude what to change` +
+  `shift+tab to approve with this feedback`, 마지막 줄은 `ctrl+g to edit in Vim · ~/.claude/plans/<이름>.md`다.
+  **`Esc to cancel`·`Enter to confirm`·`Enter to select` 힌트가 하나도 없다.**
+- **권한 다이얼로그의 질문은 도구마다 다르다.** Write 도구는 `Do you want to create hello.txt?`를 쓴다. 고정된 것은
+  질문이 아니라 footer 힌트(`Esc to cancel · Tab to amend`)다 — 규칙은 질문이 아니라 이 footer를 앵커로 삼는다.
+- **좁은 창에서 안내 문장은 줄바꿈된다.** 72칸 pane 실측에서 `… Would you` / `like to proceed?`로 끊겼고, 하단 힌트도
+  `ctrl+g to edit in Vim ·` / `~/.claude/plans/….md` 두 줄이 됐다. 긴 문장 하나만 앵커로 쓰면 좁은 창에서 미스한다.
+- 이 화면들에서 OSC 타이틀은 여전히 `✳ <요약>`(idle 근거)이므로, blocker 규칙이 미스하면 `idle_title`이 이겨
+  **승인 대기가 유휴로 표시된다**. 실제로 그랬고 `plan_approval`·`permission_footer` 규칙으로 고쳤다.
+
 **codex (0.145.0 관측)**
 
 - 타이틀: idle은 마커 없는 사용자명, running은 브라유 스피너 + 사용자명, blocked는 `[ ! ] Action Required | <이름>`.
@@ -203,8 +217,17 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
 
 - **OSC `9;4`(progress)는 두 provider 모두 emit하지 않았다.** 따라서 `progress_*` 규칙은 현재 두 provider에서 발화하지
   않는다. 표준(ConEmu) 기반 데이터라 존치하되 근거 없는 값으로 오해하지 않도록 여기 기록한다.
-- 두 provider 모두 **작업 완료·입력 대기를 자체 데스크톱 알림(OSC 9 본문)으로 보낸다.** 예: claude의
+- 두 provider 모두 **작업 완료·입력 대기를 자체 데스크톱 알림으로 보낸다.** 예: claude의
   `Claude is waiting for your input`. Maru는 이를 가공 없이 인앱 알림 센터와 OS 배너로 전달한다(제목이 비면 팬 라벨로 채운다).
+  **다만 시퀀스와 활성화 조건이 서로 다르다**(2.1.226 / 0.146.1 raw PTY 실측):
+  - **claude는 OSC 777**(`notify;<title>;<body>`)을 쓴다. 알림 채널을 `TERM_PROGRAM` 화이트리스트로 **자동 선택**하므로
+    사용자 설정 없이 켜진다 — Maru가 `TERM_PROGRAM=ghostty`를 심는 것(`src/pty/macos.zig`)이 이 경로를 여는 조건이다.
+    본문으로 종류를 구분한다: 플랜 승인은 `Claude Code needs your approval for the plan`, 도구 권한은
+    `Claude needs your permission`. 종결자는 ST가 아니라 **BEL**이다.
+  - **codex는 OSC 9**이며 `[tui] notifications`가 **opt-in**이다. 설정이 없는 기본값에서는 승인·플랜 승인 화면이 떠 있어도
+    **한 건도 발화하지 않았다**. 켜면 본문에 종류가 접두사로 붙는다: `Approval requested: …`, `Plan mode prompt: …`.
+  - 따라서 "두 provider 모두 알림이 온다"는 **codex에 config가 있을 때만** 참이다. observer 주도 알림은 이 비대칭을
+    없앤다(provider 설정과 무관하게 화면으로 판정하므로).
   **본문 뒤에는 그 Term의 마지막 대화가 붙는다** — provider 문구만으로는 에이전트를 여럿 돌릴 때 어느 세션인지 알 수
   없기 때문이다. provider 문구 자체는 고치지 않는다. 단일 출처는 [사이드바 에이전트 목록](sidebar-agent-list.md) §7.6.
   즉 **알림 자체는 이미 동작하며**, observer 주도 알림의 목적은 아래 절에 다시 적는다. OS 배너는 별도로 macOS 알림 권한이

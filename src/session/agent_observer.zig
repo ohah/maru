@@ -108,6 +108,24 @@ const claude_rules = [_]Rule{
     // 줄이 `Esc to cancel · Tab to amend · …` 힌트다. 옵션 3개일 때 `Do you want to proceed?`가 하단에서 5행이고 옵션이
     // 하나 늘 때마다 1행씩 밀리므로, 6으로 두면 옵션 4개부터 다이얼로그를 놓친다. 10이면 옵션 8개까지 덮는다.
     .{ .id = "permission_prompt", .state = .blocked, .priority = 1000, .region = .screen, .all = &.{"do you want to proceed?"}, .any = &.{ "esc to cancel", "1. yes", "tab to amend" }, .max_lines_from_bottom = 10, .visible_blocker = true },
+    // 플랜 승인 화면(실측 claude 2.1.226). 위 `permission_prompt`가 요구하는 `Do you want to proceed?`가 **없고**
+    // (`Would you like to proceed?`를 쓴다) `Esc to cancel`·`Enter to confirm`·`Enter to select` 힌트도 하나도 없어서,
+    // 기존 blocker 세 규칙이 전부 미스했다. 그 상태에서 OSC 타이틀의 `✳`가 `idle_title`로 이겨 **승인 대기가 유휴로**
+    // 표시됐다(사용자 리포트 경로: 사이드바 카드·워크스페이스 대표 상태까지 유휴).
+    //
+    // region이 `.footer`인 것이 이 규칙의 핵심이다. 승인 화면은 composer를 **대체**해 프롬프트 줄이 없으므로 footer가
+    // "마지막 수평선 아래 전부"로 열려 승인 UI 블록을 정확히 덮는다. 반대로 평소 화면에는 composer 프롬프트가 있어
+    // footer가 상태줄만 되므로, 같은 문구가 **대화 본문이나 composer 입력에 있으면 애초에 region 밖**이라 매치하지
+    // 않는다. `.screen`으로 두면 사용자가 그 문구를 타이핑하거나 모델이 답변에서 언급할 때 거짓 blocked가 섰다(재현).
+    //
+    // 앵커를 여럿 둔 이유는 **wrap 내성**이다. 좁은 창에서는 안내 문장이 줄바꿈되어 조각난다(실측 72칸에서
+    // `… Would you` / `like to proceed?`로 끊겼다). 옵션 라벨처럼 짧은 앵커가 함께 있어야 45칸급에서도 하나는 살아남는다.
+    // `all`+`any` 조합이 아니라 **단독 매치되는 `any`**라 떨어진 조각이 조합돼 오탐을 만들지 않는다.
+    .{ .id = "plan_approval", .state = .blocked, .priority = 1000, .region = .footer, .any = &.{ "written up a plan and is ready", "would you like to proceed?", "tell claude what to change", "no, keep planning", "shift+tab to approve" }, .visible_blocker = true },
+    // 도구 권한 다이얼로그의 본문 질문은 도구마다 달라진다(실측: `Do you want to create hello.txt?` — `proceed?`가 아니다).
+    // 그래서 질문 문구가 아니라 **고정 footer 힌트**(`Esc to cancel · Tab to amend`)로 집는다. 위 `permission_prompt`는
+    // `proceed?` 화면만 덮으므로 이 규칙이 나머지 도구를 덮는다(둘 다 blocker라 어느 쪽이 이겨도 결과는 같다).
+    .{ .id = "permission_footer", .state = .blocked, .priority = 999, .region = .footer, .all = &.{ "esc to cancel", "tab to amend" }, .visible_blocker = true },
     .{ .id = "selection_prompt", .state = .blocked, .priority = 990, .region = .screen, .all = &.{ "enter to select", "esc to cancel" }, .max_lines_from_bottom = 10, .visible_blocker = true },
     // 폴더 신뢰 확인 등 확정형 선택 화면(실측: `❯ 1. Yes…` + `Enter to confirm · Esc to cancel`).
     .{ .id = "confirm_prompt", .state = .blocked, .priority = 985, .region = .screen, .all = &.{ "enter to confirm", "esc to cancel" }, .max_lines_from_bottom = 10, .visible_blocker = true },
@@ -1244,4 +1262,87 @@ test "claude 실측: 폴더 신뢰 확인 화면은 blocked이고 선택지를 �
     const d = detect(.claude, .{ .screen = screen });
     try std.testing.expectEqual(State.blocked, d.state);
     try std.testing.expect(d.visible_blocker);
+}
+
+// 아래 세 테스트는 **플랜 승인·도구 권한 대기가 유휴로 보이던 회귀**를 막는다. 화면 텍스트는 tmux 120칸/72칸 pane에서
+// 실제 claude 2.1.226을 plan mode로 돌려 캡처한 것을 발췌했다(추측 문구가 아니다). 터미널에서 중요한 이유: blocked는
+// 절대 우선이라 이 판정이 틀리면 사이드바 카드와 워크스페이스 대표 상태가 "입력을 기다리는 중"을 유휴로 표시하고,
+// 관측 주도 attention 알림(docs/agent-session.md)이 발화할 근거 자체가 사라진다.
+
+test "claude 실측: 플랜 승인 대기는 blocked다(Would you like to proceed? — proceed 규칙과 다른 문구)" {
+    // 실측 발췌: 승인 UI가 composer를 대체해 프롬프트 줄이 없고, esc/enter 힌트도 없다.
+    const screen =
+        "   - 내용: Hello, world! 한 줄\n" ++
+        "  ────────────────────────────────────────\n" ++
+        "   Claude has written up a plan and is ready to execute. Would you like to proceed?\n" ++
+        "\n" ++
+        "   ❯ 1. Yes, and use auto mode\n" ++
+        "     2. Yes, manually approve edits\n" ++
+        "     3. Tell Claude what to change\n" ++
+        "        shift+tab to approve with this feedback\n" ++
+        "\n" ++
+        "   ctrl+g to edit in Vim · ~/.claude/plans/hello-txt-calm-nebula.md";
+    // OSC 타이틀의 `✳`는 idle 근거(`idle_title`)다. blocker가 절대 우선이므로 승인 대기가 유휴로 뒤집히면 안 된다.
+    const d = detect(.claude, .{ .screen = screen, .osc_title = "✳ Create hello.txt file planning" });
+    try std.testing.expectEqual(State.blocked, d.state);
+    try std.testing.expect(d.visible_blocker);
+
+    // 좁은 창(실측 72칸): 안내 문장이 `… Would you` / `like to proceed?`로 끊겨도 짧은 앵커가 살아남아야 한다.
+    const narrow =
+        "  ────────────────────────────────────────────────────────────────────\n" ++
+        "   Claude has written up a plan and is ready to execute. Would you\n" ++
+        "   like to proceed?\n" ++
+        "\n" ++
+        "   ❯ 1. Yes, and use auto mode\n" ++
+        "     2. Yes, manually approve edits\n" ++
+        "     3. Tell Claude what to change\n" ++
+        "        shift+tab to approve with this feedback\n" ++
+        "\n" ++
+        "   ctrl+g to edit in Vim ·\n" ++
+        "   ~/.claude/plans/hello-txt-memoized-origami.md";
+    try std.testing.expectEqual(State.blocked, detect(.claude, .{ .screen = narrow, .osc_title = "✳ 계획" }).state);
+}
+
+test "claude 실측: 권한 다이얼로그는 질문 문구가 도구마다 달라도 blocked다" {
+    // 실측: Write 도구는 `Do you want to create hello.txt?`를 쓴다 — `proceed?`가 아니라 permission_prompt가 미스했다.
+    const screen =
+        "⏺ Write(hello.txt)\n" ++
+        " ────────────────────────────────────────\n" ++
+        " Create file\n" ++
+        " hello.txt\n" ++
+        " Do you want to create hello.txt?\n" ++
+        " ❯ 1. Yes\n" ++
+        "   2. Yes, allow all edits during this session (shift+tab)\n" ++
+        "   3. No\n" ++
+        "\n" ++
+        " Esc to cancel · Tab to amend";
+    const d = detect(.claude, .{ .screen = screen, .osc_title = "✳ Claude Code" });
+    try std.testing.expectEqual(State.blocked, d.state);
+    try std.testing.expect(d.visible_blocker);
+}
+
+test "claude: 승인 문구가 대화 본문·composer에 있으면 blocked가 아니다(footer region 경계)" {
+    // 실제 TUI는 composer를 늘 수평선 사이에 두므로, footer는 상태줄만 된다 → 같은 문구가 있어도 region 밖이다.
+    // `.screen` 기반 규칙이었을 때 이 세 화면이 전부 거짓 blocked였다(재현 후 이 테스트로 고정).
+    const typed_anchor =
+        "⏺ 알겠습니다.\n" ++
+        "────────────────────────\n" ++
+        " ❯ Would you like to proceed? 문구를 찾아 1. yes 옵션을 추가해줘\n" ++
+        "────────────────────────\n" ++
+        "  maru │ main";
+    const spoken_anchor =
+        "⏺ 플랜 UI는 written up a plan and is ready 문구를 씁니다.\n" ++
+        "────────────────────────\n" ++
+        " ❯ \n" ++
+        "────────────────────────\n" ++
+        "  maru │ main";
+    const typed_footer_hint =
+        "⏺ 승인 화면에는 esc to cancel 과 tab to amend 가 뜹니다.\n" ++
+        "────────────────────────\n" ++
+        " ❯ \n" ++
+        "────────────────────────\n" ++
+        "  maru │ main";
+    try std.testing.expect(detect(.claude, .{ .screen = typed_anchor }).state != .blocked);
+    try std.testing.expect(detect(.claude, .{ .screen = spoken_anchor }).state != .blocked);
+    try std.testing.expect(detect(.claude, .{ .screen = typed_footer_hint }).state != .blocked);
 }

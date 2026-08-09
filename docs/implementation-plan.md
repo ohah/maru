@@ -1387,8 +1387,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       transport가 canonical take 결과에서 generation을 함께 투영한 뒤에만 mirror를 게시하며 public owner bytes나 payload를
       재해석하지 않는다. clean release는 mirror를 0으로 만들고, `Busy|InvalidOwner`는 owner/mirror를 보존하며, corrupt
       release는 C2 trusted no-free handoff와 poison을 끝낸 뒤 owner terminal·mirror 0을 게시하고 `Corrupt`를 반환한다.
-      `Terminal`은 registry가 owner settlement를 재확인한 경우에만 mirror를 0으로 동기화한다. mirror 단독 terminal/idle 값은
-      teardown 권위가 아니며 registry와 불일치하면 mutation 0 `Corrupt`다. `tryDeinit`은 allocator callback이나 release를
+      explicit release는 mirror를 cleanup 권위로 쓰지 않으므로 mirror drift가 있어도 C2 canonical cleanup 결과를 우선한다.
+      clean/`Corrupt` settlement만 mirror를 0으로 동기화한다. stream-operation identity 소진은 live event를 재시도 불가능한
+      `Terminal`로 고립시키지 않고 registered-node operation 아래 C2 trusted no-free handoff로 수렴해 `Corrupt`를 반환한다.
+      `Terminal`은 callback 중 live/releasing뿐 아니라 canonical already-settled/terminal을 포함하므로 이 결과만으로 settlement를
+      추론하지 않고 mirror를 보존한다. mirror 단독 terminal/idle 값은 teardown 권위가 아니며 release 밖의 registry 불일치는 mutation 0
+      `Corrupt`다. `tryDeinit`은 allocator callback이나 release를
       내부 실행하지 않고 canonical owner가 live/releasing이면 `Busy`; explicit `releaseEvent` 뒤 재호출만 기존 drop을 시작한다.
       construction은 binding reserve → transport mint → inline owner exact-address reserve → request prepare 순서이고, 실패는
       transport terminalize → binding abort의 기존 역순 rollback으로 request/pin/queue/quarantine leak 0을 보장한다.

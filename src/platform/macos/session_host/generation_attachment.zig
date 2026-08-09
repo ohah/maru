@@ -62,7 +62,9 @@ pub const GenerationAttachment = struct {
         adapter: *host_adapter_mod.HostAdapter,
     ) generation_transport_mod.Error!void {
         if (!rawLifecycleValid(&out.lifecycle) or out.self_addr != 0 or
-            out.lifecycle != .pristine or out.payload != null)
+            out.lifecycle != .pristine or out.payload != null or
+            !@import("generation_event_contract.zig").pristineExact(&out.event_owner) or
+            out.event_generation_mirror != 0)
             return error.DestinationOccupied;
         _ = adapter;
         out.self_addr = @intFromPtr(out);
@@ -81,8 +83,11 @@ pub const GenerationAttachment = struct {
             runtime_id,
             .controller,
         );
-        errdefer adapter.abortAttachmentBinding(&self.binding, reservation) catch
-            @panic("generation attachment binding rollback failed");
+        errdefer {
+            self.lifecycle = .terminal;
+            adapter.abortAttachmentBinding(&self.binding, reservation) catch
+                @panic("generation attachment binding rollback failed");
+        }
         try adapter.mintGenerationTransport(
             &self.transport,
             @intFromPtr(self),
@@ -283,8 +288,21 @@ pub const GenerationAttachment = struct {
     pub fn takeEvent(
         self: *GenerationAttachment,
     ) generation_transport_mod.EventError!generation_transport_mod.EventTakeOutcome {
-        if (!self.valid() or self.lifecycle != .attached or self.event_generation_mirror != 0)
+        if (!self.valid() or self.lifecycle != .attached)
             return error.InvalidOwner;
+        const readiness = generation_transport_mod.eventReadinessOwned(
+            &self.transport,
+            @intFromPtr(self),
+            &self.event_owner,
+            self.event_generation_mirror,
+        );
+        if (self.event_generation_mirror != 0) {
+            return switch (readiness) {
+                .busy => error.Busy,
+                .ready, .invalid => error.Corrupt,
+            };
+        }
+        if (readiness == .invalid) return error.Corrupt;
         const projected = try generation_transport_mod.takeEventProjected(
             &self.transport,
             &self.event_owner,
@@ -311,14 +329,14 @@ pub const GenerationAttachment = struct {
     }
 
     pub fn releaseEvent(self: *GenerationAttachment) generation_transport_mod.EventError!void {
-        if (!self.valid() or self.lifecycle != .attached or self.event_generation_mirror == 0)
+        if (!self.valid() or self.lifecycle != .attached)
             return error.InvalidOwner;
         self.transport.releaseEvent(&self.event_owner) catch |err| switch (err) {
-            error.Corrupt, error.Terminal => {
+            error.Corrupt => {
                 self.event_generation_mirror = 0;
                 return err;
             },
-            error.Busy, error.InvalidOwner => return err,
+            error.Busy, error.InvalidOwner, error.Terminal => return err,
         };
         self.event_generation_mirror = 0;
     }
@@ -512,6 +530,38 @@ fn rawLifecycleValid(value: *const Lifecycle) bool {
     return raw <= @intFromEnum(Lifecycle.terminal);
 }
 
+fn initAttachedForEventTest(
+    attachment: *GenerationAttachment,
+    adapter: *host_adapter_mod.HostAdapter,
+    allocator: std.mem.Allocator,
+    runtime_id: u128,
+    stream_id: u64,
+) !void {
+    try GenerationAttachment.initInPlace(attachment, adapter);
+    const receipt = try attachment.prepareControllerAttach(adapter, runtime_id);
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedFromPromotedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        stream_id + 1,
+        accepted,
+        response_bytes,
+        testAllocationProvenance(stream_id + 1),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(adapter));
+    try attachment.commitAccepted(adapter, accepted, .{
+        .runtime_id = runtime_id,
+        .stream_id = stream_id,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+}
+
 test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseFast" {
     var attachment: GenerationAttachment = .{};
     const lifecycle_raw: *u8 = @ptrCast(&attachment.lifecycle);
@@ -540,29 +590,7 @@ test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" 
     defer adapter.deinit();
 
     var attachment: GenerationAttachment = .{};
-    try GenerationAttachment.initInPlace(&attachment, &adapter);
-    const receipt = try attachment.prepareControllerAttach(&adapter, 0x2C3D32);
-    try attachment.binding.beginExecute(receipt);
-    attachment.lifecycle = .executing;
-    try attachment.transport.abortPreparedRequest(receipt);
-    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
-    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
-    const response_bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedFromPromotedInPlace(
-        allocator,
-        try adapter.responseOwnerSeal(attachment.reservation.?),
-        0x2C3D33,
-        accepted,
-        response_bytes,
-        testAllocationProvenance(0x2C3D33),
-    );
-    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
-    try attachment.commitAccepted(&adapter, accepted, .{
-        .runtime_id = 0x2C3D32,
-        .stream_id = 0x2C3D34,
-        .role = .controller,
-        .controller_generation = 1,
-    }, allocator);
+    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D32, 0x2C3D34);
 
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D34,
@@ -573,6 +601,7 @@ test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" 
         try attachment.takeEvent(),
     );
     try std.testing.expect(attachment.event_generation_mirror != 0);
+    try std.testing.expectError(error.Busy, attachment.takeEvent());
     _ = try attachment.viewEvent();
     try std.testing.expectEqual(DeinitOutcome.busy, attachment.tryDeinit(&adapter));
     try attachment.releaseEvent();
@@ -581,39 +610,6 @@ test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" 
 }
 
 test "CR3a-2c3d C3-1 mirror drift and copied attachment cannot settle canonical event" {
-    const Harness = struct {
-        fn initAttached(
-            attachment: *GenerationAttachment,
-            adapter: *host_adapter_mod.HostAdapter,
-            allocator: std.mem.Allocator,
-            runtime_id: u128,
-            stream_id: u64,
-        ) !void {
-            try GenerationAttachment.initInPlace(attachment, adapter);
-            const receipt = try attachment.prepareControllerAttach(adapter, runtime_id);
-            try attachment.binding.beginExecute(receipt);
-            attachment.lifecycle = .executing;
-            try attachment.transport.abortPreparedRequest(receipt);
-            const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
-            const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
-            const response_bytes = try allocator.dupe(u8, "accepted");
-            try attachment.response.initAcceptedFromPromotedInPlace(
-                allocator,
-                try adapter.responseOwnerSeal(attachment.reservation.?),
-                stream_id + 1,
-                accepted,
-                response_bytes,
-                testAllocationProvenance(stream_id + 1),
-            );
-            try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(adapter));
-            try attachment.commitAccepted(adapter, accepted, .{
-                .runtime_id = runtime_id,
-                .stream_id = stream_id,
-                .role = .controller,
-                .controller_generation = 1,
-            }, allocator);
-        }
-    };
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -626,7 +622,7 @@ test "CR3a-2c3d C3-1 mirror drift and copied attachment cannot settle canonical 
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
-    try Harness.initAttached(&attachment, &adapter, allocator, 0x2C3D42, 0x2C3D43);
+    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D42, 0x2C3D43);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D43,
         "{\"event\":\"future.event\"}",
@@ -637,18 +633,56 @@ test "CR3a-2c3d C3-1 mirror drift and copied attachment cannot settle canonical 
     );
     const canonical_generation = attachment.event_generation_mirror;
     const canonical_pin_count = adapter.slot.current.pin_owner.cleanup_pin_count;
+    const canonical_owner = attachment.event_owner;
+
+    const ThreadProbe = struct {
+        attachment: *GenerationAttachment,
+        rejected: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.attachment.releaseEvent() catch |err| {
+                self.rejected.store(err == error.InvalidOwner, .release);
+            };
+        }
+    };
+    var thread_probe = ThreadProbe{ .attachment = &attachment };
+    const thread = try std.Thread.spawn(.{}, ThreadProbe.run, .{&thread_probe});
+    thread.join();
+    try std.testing.expect(thread_probe.rejected.load(.acquire));
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&canonical_owner),
+        std.mem.asBytes(&attachment.event_owner),
+    );
+    try std.testing.expectEqual(canonical_generation, attachment.event_generation_mirror);
+    try std.testing.expectEqual(canonical_pin_count, adapter.slot.current.pin_owner.cleanup_pin_count);
+
+    if (@import("builtin").os.tag == .macos) {
+        const child = std.c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            const take_rejected = if (attachment.takeEvent()) |_| false else |_| true;
+            const view_rejected = if (attachment.viewEvent()) |_| false else |_| true;
+            const release_rejected = if (attachment.releaseEvent()) |_| false else |err| err == error.InvalidOwner;
+            const deinit_rejected = attachment.tryDeinit(&adapter) == .corrupt;
+            std.c._exit(if (take_rejected and view_rejected and release_rejected and deinit_rejected) 0 else 1);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        try std.testing.expectEqual(@as(c_int, 0), status);
+        try std.testing.expectEqual(canonical_pin_count, adapter.slot.current.pin_owner.cleanup_pin_count);
+    }
 
     attachment.event_generation_mirror +%= 1;
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
     try std.testing.expectEqual(canonical_pin_count, adapter.slot.current.pin_owner.cleanup_pin_count);
-    attachment.event_generation_mirror = canonical_generation;
 
     var copied = attachment;
     try std.testing.expectEqual(DeinitOutcome.corrupt, copied.tryDeinit(&adapter));
     try std.testing.expectError(error.InvalidOwner, copied.releaseEvent());
     try std.testing.expectEqual(canonical_pin_count, adapter.slot.current.pin_owner.cleanup_pin_count);
-    try std.testing.expectEqual(DeinitOutcome.busy, attachment.tryDeinit(&adapter));
     try attachment.releaseEvent();
+    try std.testing.expectEqual(@as(u64, 0), attachment.event_generation_mirror);
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
 
@@ -674,12 +708,302 @@ test "CR3a-2c3d C3-1 construction seals the exact inline owner and stays in budg
             @intFromPtr(&attachment) + @sizeOf(GenerationAttachment),
     );
     try std.testing.expectEqual(@as(usize, 512), @sizeOf(generation_transport_mod.EventOwner));
-    try std.testing.expect(@sizeOf(GenerationAttachment) <= 16 * 1024);
+    try std.testing.expect(@sizeOf(GenerationAttachment) <= 8 * 1024);
+    try std.testing.expectEqual(
+        @as(usize, 2 * 1024 * 1024),
+        @sizeOf(generation_transport_mod.EventOwner) * @import("protocol.zig").max_inventory_runtimes,
+    );
     try attachment.transport.abortPreparedRequest(receipt);
     attachment.terminalizeTransport();
     try adapter.abortAttachmentBinding(&attachment.binding, attachment.reservation.?);
     attachment.lifecycle = .terminal;
 }
+
+test "CR3a-2c3d C3-1 release callback preserves mirror and teardown stays busy" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var reentrant = EventReleaseReentrantAllocator{ .parent = std.testing.allocator };
+    const allocator = reentrant.allocator();
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D61,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D62, 0x2C3D63);
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3D63,
+        "{\"event\":\"future.event\"}",
+    );
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.taken,
+        try attachment.takeEvent(),
+    );
+    const generation = attachment.event_generation_mirror;
+    reentrant.target = &attachment;
+    reentrant.adapter = &adapter;
+    reentrant.armed = true;
+    try attachment.releaseEvent();
+    reentrant.armed = false;
+    try std.testing.expect(reentrant.reentered);
+    try std.testing.expect(reentrant.nested_release_terminal);
+    try std.testing.expectEqual(DeinitOutcome.busy, reentrant.nested_deinit.?);
+    try std.testing.expectEqual(generation, reentrant.mirror_during_callback);
+    try std.testing.expectEqual(@as(u64, 0), attachment.event_generation_mirror);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-1 event reserve failure rolls construction back to terminal" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D71,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    attachment.event_owner.storage[0] = 1;
+    try std.testing.expectError(
+        error.InvalidTransport,
+        attachment.prepareControllerAttach(&adapter, 0x2C3D72),
+    );
+    try std.testing.expectEqual(Lifecycle.terminal, attachment.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectError(
+        error.InvalidOwner,
+        attachment.transport.prepareRequest(contract.RuntimeRequest.detach()),
+    );
+
+    var request_exhausted: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&request_exhausted, &adapter);
+    adapter.logicalClient().next_request_id = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.ProtocolError,
+        request_exhausted.prepareControllerAttach(&adapter, 0x2C3D73),
+    );
+    try std.testing.expectEqual(Lifecycle.terminal, request_exhausted.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectError(
+        error.InvalidOwner,
+        request_exhausted.transport.prepareRequest(contract.RuntimeRequest.detach()),
+    );
+}
+
+test "CR3a-2c3d C3-1 same-address stale owner hands current event off without free" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var no_free_allocator: AttachmentEventNoFreeAllocator = .{ .parent = arena.allocator() };
+    const allocator = no_free_allocator.allocator();
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D81,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D82, 0x2C3D83);
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3D83,
+        "{\"event\":\"future.event.one\"}",
+    );
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.taken,
+        try attachment.takeEvent(),
+    );
+    const stale_owner = attachment.event_owner;
+    const stale_generation = attachment.event_generation_mirror;
+    try attachment.releaseEvent();
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3D83,
+        "{\"event\":\"future.event.two\"}",
+    );
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.taken,
+        try attachment.takeEvent(),
+    );
+    try std.testing.expect(attachment.event_generation_mirror > stale_generation);
+    const current_view = try attachment.viewEvent();
+    no_free_allocator.target_addr = @intFromPtr(current_view.payload.ptr);
+    no_free_allocator.target_len = current_view.payload.len;
+    no_free_allocator.armed = true;
+    attachment.event_owner = stale_owner;
+    attachment.event_generation_mirror = stale_generation;
+    try std.testing.expectError(error.Corrupt, attachment.releaseEvent());
+    try std.testing.expectEqual(@as(usize, 0), no_free_allocator.armed_free_count);
+    try std.testing.expectEqual(@as(usize, 0), no_free_allocator.target_free_count);
+    no_free_allocator.armed = false;
+    try std.testing.expectEqual(@as(u64, 0), attachment.event_generation_mirror);
+    try std.testing.expectEqual(@as(usize, 1), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+}
+
+test "CR3a-2c3d C3-1 mirror drift and permit exhaustion converge through canonical cleanup" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var no_free_allocator: AttachmentEventNoFreeAllocator = .{ .parent = arena.allocator() };
+    const allocator = no_free_allocator.allocator();
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D91,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    // A zeroed non-authoritative mirror must not prevent the canonical C2 owner from releasing.
+    var zero_drift: GenerationAttachment = .{};
+    try initAttachedForEventTest(&zero_drift, &adapter, allocator, 0x2C3D92, 0x2C3D93);
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3D93,
+        "{\"event\":\"future.event.zero-drift\"}",
+    );
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.taken,
+        try zero_drift.takeEvent(),
+    );
+    zero_drift.event_generation_mirror = 0;
+    try std.testing.expectError(error.Corrupt, zero_drift.takeEvent());
+    try zero_drift.releaseEvent();
+    try std.testing.expectEqual(@as(usize, 1), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, zero_drift.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+
+    // Once operation identities are exhausted, release cannot retry. It must perform a trusted
+    // no-free transfer under the registered-node operation and leave teardown convergent.
+    var exhausted: GenerationAttachment = .{};
+    try initAttachedForEventTest(&exhausted, &adapter, allocator, 0x2C3D94, 0x2C3D95);
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3D95,
+        "{\"event\":\"future.event.exhausted\"}",
+    );
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.taken,
+        try exhausted.takeEvent(),
+    );
+    const exhausted_view = try exhausted.viewEvent();
+    no_free_allocator.target_addr = @intFromPtr(exhausted_view.payload.ptr);
+    no_free_allocator.target_len = exhausted_view.payload.len;
+    no_free_allocator.armed = true;
+    adapter.slot.current.next_operation_generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.Corrupt, exhausted.releaseEvent());
+    try std.testing.expectEqual(@as(usize, 0), no_free_allocator.armed_free_count);
+    try std.testing.expectEqual(@as(usize, 0), no_free_allocator.target_free_count);
+    no_free_allocator.armed = false;
+    try std.testing.expectEqual(@as(u64, 0), exhausted.event_generation_mirror);
+    try std.testing.expectEqual(@as(u64, 0), adapter.slot.current.active_operation_generation);
+    try std.testing.expectEqual(@as(usize, 1), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, exhausted.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+}
+
+const AttachmentEventNoFreeAllocator = struct {
+    parent: std.mem.Allocator,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    armed: bool = false,
+    armed_free_count: usize = 0,
+    target_free_count: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed) self.armed_free_count += 1;
+        if (self.armed and @intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len)
+            self.target_free_count += 1;
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const EventReleaseReentrantAllocator = struct {
+    parent: std.mem.Allocator,
+    target: ?*GenerationAttachment = null,
+    adapter: ?*host_adapter_mod.HostAdapter = null,
+    armed: bool = false,
+    in_callback: bool = false,
+    reentered: bool = false,
+    nested_release_terminal: bool = false,
+    nested_deinit: ?DeinitOutcome = null,
+    mirror_during_callback: u64 = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed and !self.in_callback) {
+            self.in_callback = true;
+            self.reentered = true;
+            const target = self.target.?;
+            _ = target.releaseEvent() catch |err| {
+                self.nested_release_terminal = err == error.Terminal;
+            };
+            self.mirror_during_callback = target.event_generation_mirror;
+            self.nested_deinit = target.tryDeinit(self.adapter.?);
+            self.in_callback = false;
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
 
 const AttachmentReentrantFreeAllocator = struct {
     parent: std.mem.Allocator,

@@ -1115,8 +1115,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `live|releasing`이면 `Busy`이고 owner cleanup 뒤에만 attachment lease/drop을 시작한다. 이 mirror는 별도 lifecycle 복제가
    아닌 `event_generation_mirror:u64` 하나이며 0은 idle/settled, nonzero는 transport가 canonical registry take 결과에서 게시한
    live generation projection이다. ClientNode binding registry만 generation/cleanup readiness의 SSOT이고 mirror는
-   free/drop/release 권위가 아니다. owner bytes나 payload를 읽어 mirror를 만들지 않으며 registry와의 불일치는 mutation 0
-   `Corrupt`다. copied/stale `InvalidOwner`는
+   free/drop/release 권위가 아니다. owner bytes나 payload를 읽어 mirror를 만들지 않으며 teardown/take의 registry 불일치는
+   mutation 0 `Corrupt`다. explicit release는 mirror drift보다 C2 canonical cleanup 결과를 우선한다. copied/stale `InvalidOwner`는
    canonical inline owner가 아니므로 canonical owner/pin을 바꾸지 않는다. projection/classification 오류가 있어도 release 결과를
    버리지 않으며 release의 `Corrupt|Terminal`이 projection 오류보다 우선한다.
 
@@ -1135,9 +1135,11 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    C2는 transport terminalize/ClientSlot node teardown이 live cleanup pin에서 `Busy`, corrupt mirror에서 trusted handoff로
    수렴하는 것을 고정한다. `GenerationAttachment` inline lifecycle과 attachment teardown `Busy -> release -> success`는 C3-1이 고정한다.
    C3-1 wrapper는 owner pointer를 escape하지 않는 `takeEvent/viewEvent/releaseEvent`이며 take `.taken`만 trusted generation을
-   mirror에 게시한다. clean release는 mirror를 0으로 만들고 `Busy|InvalidOwner`는 그대로 보존한다. corrupt release는 C2
-   no-free handoff·pin consume·poison을 끝낸 뒤 owner terminal·mirror 0을 게시하고 `Corrupt`를 반환한다. `Terminal`은 canonical
-   registry가 settlement를 재확인한 경우만 mirror를 0으로 동기화한다. mirror 단독 terminal/idle은 teardown 권위가 아니다.
+   mirror에 게시한다. clean release는 mirror를 0으로 만들고 `Busy|InvalidOwner|Terminal`은 그대로 보존한다. corrupt release는 C2
+   no-free handoff·pin consume·poison을 끝낸 뒤 owner terminal·mirror 0을 게시하고 `Corrupt`를 반환한다. stream-operation identity
+   소진도 registered-node operation 아래 같은 trusted no-free handoff로 수렴해 live pin을 고립시키지 않는다. `Terminal`은 callback
+   중 releasing과 canonical already-settled/terminal을 모두 포함하므로 이 결과만으로 settlement를 추측하지 않고 mirror를 보존한다.
+   mirror 단독 terminal/idle은 teardown 권위가 아니다.
    `tryDeinit`은 release/free callback을 실행하지 않고 live/releasing에서 `Busy`를 반환하며 explicit release 뒤 재호출만 기존
    attachment drop을 시작한다. 제품 socket fixture는
    `take revoked -> borrow/classify -> fenceRevoke success while owner live -> release`, release callback 안의 fence `Busy`,
@@ -1159,7 +1161,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    allocation-free 재구성 결과가 그 projection과 exact 일치할 때만 반환한다. 따라서 payload 재파싱은 두 번째 SSOT가 아니다. 내부 상태가 이 envelope를
    넘거나 주소가 봉인된 canonical slot과 exact 일치하지 않으면 compile/admission 단계에서 거부한다.
    public release·cleanup pin·quarantine까지 C2로 구현 완료했다. C3-1의 `GenerationAttachment` inline owner/mirror/wrapper와
-   teardown 합성, C3-2의 purge-first 제품 drain, C3-3의 actual socket/source-zero는 아직 미구현이다.
+   teardown 합성은 C3-1로 구현 완료했다. C3-2의 purge-first 제품 drain과 C3-3의 actual socket/source-zero는 아직 미구현이다.
    C2는 `GenerationTransport.releaseEvent(owner:*EventOwner) EventError!void` 하나만 public facade에 추가해
    transport declaration을 exact 14로 만든다. C2의 production-type facade take/release는 test-only settlement를 호출하지 않으며,
    C3가 소유하는 `GenerationAttachment` 제품 drain·purge orchestration도 선취하지 않는다. C2의 private 구현 경계는
@@ -1172,8 +1174,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    terminalize 뒤 binding abort로 역순 rollback한다. partial init은 pristine owner를 읽어 cleanup 권위로 쓰지 않고 request,
    event pin, queue, quarantine를 만들지 않는다. C3-1 focused gate 이름은 `test-session-host-2c3d-c3-1`이며
    Debug·ReleaseFast에서 inline address/range·construction rollback, take/mirror, live teardown mutation 0, explicit clean/corrupt
-   release 뒤 teardown, copy/move/ABA·reentry와 size budget을 고정한다. C3-1 boundary는 attachment wrapper 외
-   `EventOwner*` escape 0, 제품 pump/socket consumer 0, purge delta 0, raw Client event direct call 0을 고정한다. C3-2와 C3-3은
+   release 뒤 teardown, copy/move/ABA·reentry와 size budget을 고정한다. C3-1 boundary는 whole `src/**/*.zig`에서 raw Client
+   event call, `EventOwner*` pointer surface, attachment helper의 exact reviewed inventory를 고정하고 제품 pump/socket consumer 및
+   purge facade delta 0을 고정한다. C3-2와 C3-3은
    각각 별도 gate를 만들며 C3-1 증거로 drain/socket 완료를 주장하지 않는다.
 
    `client_slot`은 node/binding/pin/quarantine/payload free의 canonical resource transaction을 조정하는 유일한 owner다.

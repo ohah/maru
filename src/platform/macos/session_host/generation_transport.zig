@@ -879,17 +879,16 @@ pub fn eventReadinessOwned(
         error.Busy => .busy,
         else => .invalid,
     };
-    if (generation_mirror == 0) {
-        if (!generation_event.settledForAttachment(owner)) return .invalid;
-    } else if (!generation_event.liveGenerationMatches(owner, generation_mirror)) {
-        return .invalid;
-    }
     return switch (canonical) {
-        .ready => switch (preflightTerminalizeOwned(transport, owner_addr)) {
-            .ready => .ready,
-            .busy, .invalid => .invalid,
-        },
-        .busy => .busy,
+        .ready => if (generation_mirror == 0 and generation_event.settledForAttachment(owner))
+            .ready
+        else
+            .invalid,
+        .busy => if ((generation_mirror == 0 and generation_event.pristineExact(owner)) or
+            generation_event.activeGenerationMatches(owner, generation_mirror))
+            .busy
+        else
+            .invalid,
         .invalid => .invalid,
     };
 }

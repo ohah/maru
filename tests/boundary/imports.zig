@@ -1404,6 +1404,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "generation_event_quarantine_registry" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleaseLifecycle" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleaseDisposition" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleasePermitState" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleaseInternal" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedEventRelease" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
@@ -2626,12 +2627,19 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
             "initAcceptedFromPromotedInPlace",
         ),
     );
+    // C3-1 shares one private unit-fixture constructor across its adversarial cases. The helper is
+    // source-counted below by its ForEventTest name and has no product caller; any second low-level
+    // response assembly still fails this inventory.
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         countIdentifierOutsideTopLevelTests(
             attachment_source,
             "initAcceptedFromPromotedInPlace",
         ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(attachment_source, "fn initAttachedForEventTest("),
     );
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(slot_product, ".promoteObserved("));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(ledger_product, "promoteExact"));
@@ -2685,8 +2693,14 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
             entry.path,
             "platform/macos/session_host/framing.zig",
         );
+        const is_attachment = std.mem.endsWith(
+            u8,
+            entry.path,
+            "platform/macos/session_host/generation_attachment.zig",
+        );
         try std.testing.expectEqual(
-            @as(usize, @intFromBool(is_response)) + @as(usize, @intFromBool(is_ledger)),
+            @as(usize, @intFromBool(is_response)) + @as(usize, @intFromBool(is_ledger)) +
+                @as(usize, @intFromBool(is_attachment)),
             countIdentifierOutsideTopLevelTests(source, "initAcceptedFromPromotedInPlace"),
         );
         try std.testing.expectEqual(
@@ -7026,9 +7040,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
-            // Shell and attached teardown retain their direct fences; C3-1 adds one transport-local
-            // event-readiness composition fence without opening another product owner.
-            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 2 },
+            // Shell and attached teardown each own one terminalization fence.
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 2, .attachment_count = 2 },
         };
         for (owned_helpers) |helper| {
             const expected: usize = if (is_generation_transport)

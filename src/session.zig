@@ -93,6 +93,7 @@ pub const editor = struct {
     pub const line_index = @import("session/editor/line_index.zig");
     pub const selection = @import("session/editor/selection.zig");
     pub const document = @import("session/editor/document.zig");
+    pub const hazard = @import("session/editor/hazard.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

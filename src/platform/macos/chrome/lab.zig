@@ -51,6 +51,10 @@ pub const ScenarioId = enum {
     /// 이 시나리오는 실제로 1.5배 큰 글자를 그린다. gutter가 함께 커지는지가 계약의 핵심 근거인데
     /// (§4.1 — 그래서 measured가 아니라 셀 경로다), 기본 크기 캡처만으로는 그것이 증명되지 않는다.
     editor_font_large,
+    /// N1 §3.8 — **적대적 입력**. 화면에 보이는 것과 파일 내용이 달라지게 만드는 문자들이
+    /// 실제로 가시화되는지 픽셀로 본다. 가시화가 꺼지면 그 줄들이 멀쩡해 보이므로(그것이 공격의
+    /// 목적이다) 골든이 유일한 자동 가드다.
+    editor_hazard,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -119,7 +123,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -174,6 +178,21 @@ const editor_fixture_lines = [_][]const u8{
     "}",
 };
 
+/// §3.8 적대적 입력 fixture. **실제 Trojan Source 패턴을 담는다.**
+///
+/// 각 줄이 하나씩 맡는다 — BiDi override(주석이 코드처럼 보이게 하는 수단), 폭 0 문자(식별자를
+/// 같아 보이게), C0 제어 문자(파일에 든 ESC), 비표준 공백(문법 오류가 안 보임). 가시화가 없으면
+/// 이 줄들이 **평범해 보이는 것**이 요점이라, 캡처를 눈으로 봐도 "정상"으로 읽힌다.
+const editor_hazard_lines = [_][]const u8{
+    "// 아래는 겉보기와 다르다",
+    "if (level == \u{202E}admin) {",
+    "const user\u{200B}Name = 1;",
+    "const esc = \"\x1b[31m\";",
+    "const a\u{00A0}= 1;",
+    "",
+    "// 위 네 줄에 숨은 문자가 있다",
+};
+
 /// N1 §4.1 — 편집기 gutter와 본문을 실제 draw op으로 내려 픽셀까지 보낸다.
 ///
 /// 이 시나리오가 증명하려는 것은 문서 내용이 아니라 **기하**다 — 줄 번호가 우측 정렬로 같은 오른쪽
@@ -187,7 +206,11 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
     const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
     const total_cols: u16 = @intCast(viewport_w / cell_w_px);
-    const line_count: usize = editor_fixture_lines.len;
+    const lines: []const []const u8 = if (scenario.id == .editor_hazard)
+        &editor_hazard_lines
+    else
+        &editor_fixture_lines;
+    const line_count: usize = lines.len;
 
     // 스크롤 시나리오는 **화면을 일부러 좁힌다.** fixture를 화면보다 길게 늘리는 것보다 이쪽이
     // 낫다 — 줄을 60개 손으로 쓰면 골든이 무엇을 보는지 흐려지고, 좁은 화면은 실제 분할 pane에서
@@ -220,7 +243,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var content_rows: [row_capacity]editor_view.content.Row = undefined;
     var n: u16 = 0;
     while (n < visible) : (n += 1) {
-        content_rows[n] = .{ .bytes = editor_fixture_lines[vp.first_row + n], .visual_row = n };
+        content_rows[n] = .{ .bytes = lines[vp.first_row + n], .visual_row = n };
     }
 
     const cw = try editor_view.content.build(.{
@@ -335,7 +358,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

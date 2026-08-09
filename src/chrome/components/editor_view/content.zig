@@ -12,6 +12,7 @@ const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
 const text_layout = @import("../../text_layout.zig"); // 텍스트 셀 배치 단일 출처(cluster 분절·폭)
+const hazard = @import("../../../session/editor/hazard.zig"); // §3.8 적대적 입력 판정(L2 순수)
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -118,9 +119,11 @@ pub const Expanded = struct {
 };
 
 pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8) !Expanded {
-    // 탭이 없으면 원본을 그대로 빌려준다 — 복사도 저장소도 쓰지 않는다(흔한 경우다).
+    // 탭도 위험 문자도 없으면 원본을 그대로 빌려준다 — 복사도 저장소도 쓰지 않는다(흔한 경우다).
     // `[]const u8`로 돌려주므로 호출자가 쓸 수 있다고 착각하지 않는다(원본은 rodata일 수 있다).
-    if (std.mem.indexOfScalar(u8, bytes, '\t') == null) return .{ .text = bytes, .scratch_used = 0 };
+    if (std.mem.indexOfScalar(u8, bytes, '\t') == null and !hazard.containsAny(bytes)) {
+        return .{ .text = bytes, .scratch_used = 0 };
+    }
 
     const stop_width = if (tab_width == 0) 1 else tab_width;
     var used: usize = 0;
@@ -144,6 +147,24 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8) !Expanded {
         const base = text_layout.decodeCodepoint(bytes, i);
         const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
         const n = @max(1, end - i);
+
+        // **위험 문자는 보이는 표기로 바꿔 그린다**(§3.8). 지우거나 문서를 고치는 것이 아니라
+        // **표시만** 바꾸는 것이다 — 버퍼의 바이트는 그대로이고, 저장하면 원본이 나간다.
+        //
+        // BiDi 제어 문자가 대표적인데, 폭 0이라 보이지 않으면서 주변 텍스트의 표시 순서를 바꾼다
+        // (Trojan Source). 그리지 않으면 화면과 실제 내용이 달라져 §3.8의 불변식이 깨진다.
+        if (hazard.classify(base.cp) != null) {
+            var mark: [hazard.max_display_len]u8 = undefined;
+            const shown = hazard.displayText(base.cp, &mark);
+            if (used + shown.len > out.len) return error.OutOfSpace;
+            @memcpy(out[used..][0..shown.len], shown);
+            used += shown.len;
+            // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
+            col += shown.len;
+            i += n;
+            continue;
+        }
+
         if (used + n > out.len) return error.OutOfSpace;
         @memcpy(out[used..][0..n], bytes[i..][0..n]);
         used += n;
@@ -387,4 +408,39 @@ test "expandTabs: 지역표시자 국기는 한 cluster다" {
     // codepoint로 세면 4칸으로 계산돼 탭 위치가 어긋난다.
     const r = try expandTabs("\u{1F1F0}\u{1F1F7}\tx", 4, &out);
     try testing.expectEqualStrings("\u{1F1F0}\u{1F1F7}  x", r.text);
+}
+
+test "expandTabs: BiDi 제어 문자를 보이는 표기로 바꾼다 — Trojan Source 방어" {
+    var out: [128]u8 = undefined;
+    // U+202E(RLO)는 폭 0이라 보이지 않으면서 뒤 텍스트를 역순으로 보이게 한다.
+    const r = try expandTabs("// \u{202E}x", 4, &out);
+    try testing.expectEqualStrings("// <U+202E>x", r.text);
+}
+
+test "expandTabs: 제어 문자도 보이게 한다 — 편집기에 온 ESC는 파일의 바이트다" {
+    var out: [128]u8 = undefined;
+    const r = try expandTabs("a\x1bb", 4, &out);
+    try testing.expectEqualStrings("a<U+001B>b", r.text);
+}
+
+test "expandTabs: 위험 문자만 있고 탭이 없어도 전개된다" {
+    var out: [128]u8 = undefined;
+    // 탭 유무로만 판단하면 이 줄이 원본 그대로 나가 숨은 문자가 안 보인다.
+    const r = try expandTabs("\u{200B}", 4, &out);
+    try testing.expectEqualStrings("<U+200B>", r.text);
+    try testing.expect(r.scratch_used > 0);
+}
+
+test "expandTabs: 표기 폭이 열 계산에 반영된다 — 뒤따르는 탭이 어긋나지 않는다" {
+    var out: [128]u8 = undefined;
+    // "<U+200B>"는 8칸이다. 그 뒤 탭은 열 8에서 시작하므로 다음 탭스톱(12)까지 4칸.
+    const r = try expandTabs("\u{200B}\tx", 4, &out);
+    try testing.expectEqualStrings("<U+200B>    x", r.text);
+}
+
+test "expandTabs: 평범한 줄은 여전히 원본을 빌려준다 — 저장소를 쓰지 않는다" {
+    var out: [8]u8 = undefined;
+    const r = try expandTabs("const x = 1;", 4, &out);
+    try testing.expectEqualStrings("const x = 1;", r.text);
+    try testing.expectEqual(@as(usize, 0), r.scratch_used);
 }

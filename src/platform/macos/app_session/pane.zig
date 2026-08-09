@@ -26,6 +26,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
 const tab_ops = @import("tab.zig");
@@ -308,7 +309,7 @@ pub fn dividerTargetRect(rect: maru.session.SplitRect) web_panel_layout.RectF64 
 /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
 /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
 pub fn renameDisplayWidth(self: *const AppSession) usize {
-    return self.renameQueryCols() + chrome.text_layout.displayCols(self.rename_input.preedit.items, null) + 1;
+    return settings_ops.renameQueryCols(self) + chrome.text_layout.displayCols(self.rename_input.preedit.items, null) + 1;
 }
 
 /// 주어진 탭(활성/배경)의 각 panel을 자기 leaf rect grid로 resize한다 — reap collapse 후 형제가 빈자리
@@ -1865,7 +1866,7 @@ pub fn createEndedPlaceholderTerm(
     term.surface.core.setConfigPalette(self.appearance.theme.palette);
     term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
     term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
-    term.surface.core.setDefaultCursorShape(self.configCursorShape());
+    term.surface.core.setDefaultCursorShape(settings_ops.configCursorShape(self));
     // 읽기 전용. 정확히는 이 surface가 `SurfaceRuntime`에 **attach되지 않으므로**(link 없음 — PTY도 backend 슬롯도
     // 없다) writeInput·enqueueCoreCommand·resize는 process_state 가드에 닿기 전에 `UnknownSurface`로 먼저 실패한다
     // (runtime.zig의 `linkBySurface orelse return error.UnknownSurface`). `process_state = .exited`를 함께 세우는 것은

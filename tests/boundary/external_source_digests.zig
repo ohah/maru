@@ -177,7 +177,16 @@ pub const inventory = [_]Proof{
     // 스크롤 기구(휠·페이지 라우팅, 스크롤바 위젯, 오버레이)를 `app_session/scroll.zig`로 떼어내며 또
     // 바뀐다(F8). count는 4 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor를 열고(25) 옮겨간
     // 스크롤 함수 pub을 닫은 것뿐이다. ABI가 부르는 scrollPage·scrollWheel은 얇은 facade로 남겼다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "50e11f48086f04464ba606bc3fd82a640e71e155b508ff4fdae726d8cb668085" },
+    // 세팅·컨텍스트 메뉴·이름 변경·config 적용을 `app_session/settings.zig`로 떼어내며 또 바뀐다(F9).
+    // **여기서 처음으로 count가 움직인다(4 → 2).** F1~F8은 옮긴 블록에 `@field`가 없어 count가 4로
+    // 고정이었는데, F9는 `pending_writeback_lists`를 이름으로 도는 반사 접근 둘(config write-back 목록의
+    // 비우기·비어있음 판정)을 함께 데려갔다. 반사가 늘거나 준 것이 아니라 **소유 파일이 바뀐 것**이라
+    // 아래에 `app_session/settings.zig` 항목을 같은 수(2)로 새로 등재한다 — 합은 4로 보존된다.
+    // 남은 둘은 `@field(self.chrome_host, field.name)`(모달 오버레이 역할표)과 같은 목록의 deinit이다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3e772e8f7671d914fa0344d081da93ee8ed0f09df5738fafcdd070c70fbdf817" },
+    // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
+    // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "e21c049953ebfba9323cba4a633efab92512e31e28ec683d8ea055a01956a8f2" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

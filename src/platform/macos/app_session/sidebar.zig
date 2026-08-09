@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
@@ -1759,7 +1760,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 const header_text = if (gtab != null and self.renamingGroup(gtab.?)) blk: {
                     // 이 그룹 이름 rename 중 → 삼각 뒤에 편집 텍스트(+caret). 접힘 배지는 편집 집중 위해 숨긴다.
                     editing_row = row_i; // 이 헤더 이름줄을 tail 앵커로(긴 이름 caret 유지)
-                    const edit = try self.renameEditText(self.allocator);
+                    const edit = try settings_ops.renameEditText(self, self.allocator);
                     defer self.allocator.free(edit);
                     break :blk try std.fmt.allocPrint(self.allocator, "{s}{s} {s}", .{ hindent, tri, edit });
                 } else blk: {
@@ -1815,7 +1816,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         if (renaming) {
             // rename 중엔 마커·핀을 안 붙인다 — 마커 prefix를 붙이면 편집 텍스트가 2칸 밀려 renameCaretRect(이름줄
             // 좌단=indent 가정)의 caret/IME 후보창과 어긋나고, 핀은 편집 폭을 잡아먹는다. 편집 동안만 전체 폭 사용.
-            try names.append(self.allocator, try self.renameEditText(self.allocator)); // owned → names가 소유
+            try names.append(self.allocator, try settings_ops.renameEditText(self, self.allocator)); // owned → names가 소유
             try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
             try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
             // **상태줄은 rename 중에도 표시** — 편집하는 워크스페이스가 running이면 파형 스피너를 보여준다(사용자 요청:

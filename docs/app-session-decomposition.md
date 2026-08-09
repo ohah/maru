@@ -19,9 +19,9 @@
 | 2026-06 | 20,183 | 이 문서 최초 측정 · (b) 결정 시점 |
 | 2026-07 | 35,134 | (b) "일단락" 이후 |
 | 2026-08-08 | **72,317** | (b) 결정 대비 3.6배 |
-| 2026-08-09 (F8까지) | **61,726** | F1·F2·F4·F5·F6·F7·F8로. 그룹 파일 8개 합계 13,169줄 |
+| 2026-08-09 (F9까지) | **59,617** | F1·F2·F4·F5·F6·F7·F8·F9로. 그룹 파일 9개 합계 15,394줄 |
 
-> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). 남은 F9·F10을 이름 기준으로 다 옮겨도
+> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). 남은 F10을 이름 기준으로 다 옮겨도
 > `app_session.zig`에는 test 블록 33,000줄대와 허브(`tick`·`mouse`·`handleKeyEvent`)가 남으므로
 > **56,000줄대**가 착지점이다. 그보다 더 줄이려면 test 소유처를 따로 정해야 하고, 그 값은 §2-c-3 실측대로
 > pub화 6배다.
@@ -113,7 +113,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F6** ✅ | tab(생성·전환·이동·고정·그룹·제목) | 1,254(메서드) | 낮음 | 2026-08-09 완료 → `app_session/tab.zig`, pub화 41 |
 | **F7** ✅ | 사이드바(행 모델·스크롤·드래그 프리뷰·카드·헤더) | 1,812(메서드) | 중 | 2026-08-09 완료 → `app_session/sidebar.zig`, pub화 44 |
 | **F8** ✅ | 스크롤(휠·페이지 라우팅, 스크롤바 위젯, 오버레이) | 861(메서드) | 낮음 | 2026-08-09 완료 → `app_session/scroll.zig`. 표면별 스크롤은 이미 각 그룹이 가져가 예상보다 작다 |
-| **F9** | settings · context menu · rename | ~1,830 | 낮음 | |
+| **F9** ✅ | 세팅 · 컨텍스트 메뉴 · 이름 변경 · config 적용 | 1,850(메서드) | 낮음 | 2026-08-09 완료 → `app_session/settings.zig`, ABI facade 8 |
 | **F10** | workspace capture/restore | ~810 | 중 | 캡처=agent PTY·복원=`createPane` spawn(옛 E5 실측) |
 
 > **F1과 F3를 합친 이유(2026-08-09 실측).** 문서가 둘을 나눈 기준은 **이름**이었는데 호출 관계는 한 덩어리다.
@@ -167,6 +167,39 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > 그 결과 F5는 **pub화 4개가 예측과 정확히 일치**한 첫 그룹이 됐다(F2 26→50, F4 35→43). 그룹이 작고
 > 경계가 깨끗하면 추정이 맞는다는 뜻이지, 추정 방법이 나아진 것은 아니다 — §2-c-2의 규칙은 그대로다.
+
+> **F9는 config 재적용을 함께 가진다.** 세팅 UI가 값을 바꾸고 `applyLoadedConfig`·`reapplyConfigPalette`·
+> `reapplyScrollback`·`reapplyAmbiguousWidth`·`reapplyEmojiWidth`·`reapplyDefaultCursorShape`·
+> `applyThemePreset`이 그것을 살아 있는 세션에 반영한다. 편집과 적용이 한 덩어리라 나누면 pub화만 는다.
+> F8이 `reapplyScrollback`을 여기로 미룬 것도 같은 이유다(이름은 scroll이지만 하는 일은 config 재적용이다).
+>
+> **`palette`는 두 도메인이 같은 이름을 쓴다(F9).** `theme.palette`(색 팔레트)와 명령 팔레트(⌘K)가 그렇다.
+> F9는 색 팔레트 쪽(`reapplyConfigPalette`·`paletteCellHex`)만 가져오고 `togglePalette`·`acceptPalette`·
+> `buildPaletteRows`는 두고 왔다. 부분 문자열 함정이 아니라 **동음이의 함정**이다.
+>
+> **디버그 픽스처 하네스를 별도로 뺐다(F9 → 후속).** `maybeDebugOpenSettings`는 568줄로 이 파일에서
+> 손꼽히게 큰데, 이름만 settings이고 본문은 `MARU_*` 환경변수 게이트 **39개**로 사이드바 접힘·가짜
+> 브랜치·그룹 상태·드래그 고스트를 강제하는 **디버그/스모크 픽스처**다. 세팅 로직이 아니므로 F9가 갖지
+> 않는다. `app_session/debug_fixtures.zig`로 빼는 것을 후속으로 등록한다 — 제품 코드와 섞여 있는 것이
+> 그 자체로 문제이기도 하다.
+>
+> **F6 보정 목록에 둘을 더한다.** `togglePin`·`cardPinRole`은 컨텍스트 메뉴가 부르지만 본문은
+> `self.tabs`의 고정 구획을 수술하므로 소유가 tab이다. 같은 이유로 `webSurfaceRect`(web-panel 기하)와
+> `termBarLocation`(chrome/pane 기하)도 F9가 갖지 않았다.
+>
+> 실제 결과(F9): `app_session.zig` 61,726 → 59,617(−2,109), `settings.zig` 2,225줄(메서드 68 + 인자만
+> 보는 순수 판정 10). ABI가 직접 부르는 8개(`configPath`·`keyHintConfig`·`openFileContentMenu`·
+> `quickTerminalConfig`·`reloadConfig`·`serializeConfig`·`takeConfigDirty`·`takeFileMenuAction`)는 얇은
+> facade로 남겼다 — F 시리즈 중 facade가 가장 많다. test 776개 전원 잔류,
+> `test-macos-app-host-abi` 2,849 passed / 0 failed.
+>
+> **pub 순증 60개로 F 시리즈 최대다**(65 신설 − 5 소멸, 그중 함수 35개). 세팅이 거의 모든 도메인의
+> 값을 읽고 쓰기 때문이다 — 색 상수·키바인딩 카탈로그·컨텍스트 메뉴 문자열 상수(`ctx_menu_*` 등)가
+> 대량으로 열렸다. F8(+14)과 정반대다. 이 비용은 §7대로 분해가 끝날 때까지의 과도기이고, 열린 것
+> 상당수가 상수라 F10 이후 그룹이 가져가면 다시 닫힌다.
+>
+> **분류 함정(F9).** 첫 인자가 `_: *AppSession`인 메서드(`themePresetVariants`)를 "메서드가 아니다"로
+> 분류해 호출부를 잘못 바꿨다. 인자 이름이 `self`/`session`이 아니어도 메서드다 — 타입으로 판정해야 한다.
 
 > **F8은 예상보다 작다 — 앞선 그룹이 이미 가져갔기 때문이다.** 문서 추정은 1,440줄이었는데 실제
 > 이동은 **861줄**이다. 표면별 스크롤 상태가 이미 각자의 그룹으로 갔기 때문이다 — 사이드바 스크롤은

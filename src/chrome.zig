@@ -75,4 +75,5 @@ test {
     const testing = @import("std").testing;
     testing.refAllDecls(@This());
     testing.refAllDecls(components);
+    testing.refAllDecls(components.editor_view);
 }

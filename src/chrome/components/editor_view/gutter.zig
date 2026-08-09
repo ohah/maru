@@ -77,9 +77,12 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         scratch_used += text.len;
 
         // 우측 정렬: 영역 오른쪽 끝에서 글자 수만큼 왼쪽으로 민다.
-        const width = props.layout.line_numbers.width;
-        const len: u16 = @intCast(@min(text.len, width));
-        const col = props.layout.line_numbers.start + (width - len);
+        //
+        // **여기서는 byte 수가 곧 셀 수다** — 줄 번호는 언제나 ASCII 숫자이므로 전각·결합 문자가
+        // 없다. 본문은 그렇지 않아 `content.expandTabs`가 `width.cellWidth`로 센다.
+        const field_cols = props.layout.line_numbers.width;
+        const len: u16 = @intCast(@min(text.len, field_cols));
+        const col = props.layout.line_numbers.start + (field_cols - len);
 
         if (run_used >= runs.len) return error.OutOfSpace;
         runs[run_used] = .{ .text = text };
@@ -94,7 +97,7 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
             },
             .runs = run_slice,
             .role = line_number_role,
-            .max_cols = width,
+            .max_cols = field_cols,
         } };
         op_count += 1;
     }

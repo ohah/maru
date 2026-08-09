@@ -35,6 +35,10 @@
 
 **웹 스택은 제거 대상이 아니다.** 인앱 브라우저·trace inspector·CEF 백엔드 plugin 후보([web-panel.md](web-panel.md) §1)·마크다운 렌더가 남으므로 WKWebView 합성·CSP·브리지 복잡도는 계속 지불된다. **따라서 이 이관의 비용은 "두 스택을 새로 떠안는 것"이 아니라 "이미 지불 중인 웹 비용에 네이티브 스택 하나를 더하는 것"이다.** 웹 유지비 절감은 이 결정의 근거가 아니며, 근거로 쓰지 않는다.
 
+**이미 작성된 CM6 diff 코드를 버리는 비용이 있다(정직한 명시).** `web/src/diff-view.ts`·`diff-layout.ts`·`diff-theme.ts`가 존재하고 `main.ts`가 `bootDiff`를 import하므로 **번들에 이미 들어가 있다.** 이 이관은 그것을 대체한다. 다만 그 비용은 보이는 것보다 작다 — [검증 매트릭스](verification-matrix.md)가 *"`@codemirror/merge`(MergeView)는 번들·WebKit·CSP 어느 것도 확인된 적이 없다"*고 적듯 **제품 WebKit에서 도는 것이 확인된 적 없는 코드**이고, 함께 계획된 도크 소스 컨트롤 뷰는 애초에 GPU chrome이라 이관 대상이 아니며 아직 미구현이다.
+
+**오히려 그 미검증이 이관 근거를 보탠다.** Monaco를 기각한 이유가 정확히 "view-line 렌더가 제품 WKWebView에서 RED"였고([editor-surface.md](editor-surface.md) §1) CM6를 그 대안으로 골랐는데, **CM6 diff는 아직 같은 관문을 지나지 않았다.** 네이티브 경로는 그 관문 자체가 없다.
+
 ### 1.1 결정
 
 - **편집 경로의 정본은 네이티브 GPU다.** 사용자가 코드를 보고 고치는 실제 경로(텍스트/코드 편집기·git diff 본문·그 위의 토큰·LSP 표시·미니맵)는 Zig + Metal이 그린다. **웹은 보조 수단**이다 — 테스트·미리보기 피드백·디버깅(CEF 백엔드 plugin 후보 — [web-panel.md](web-panel.md) §1)·인앱 브라우저·trace inspector·마크다운 렌더가 그 자리다(§1.0의 목록과 같다). 이 결정은 [file-panel.md](file-panel.md) §1의 "소스 편집기 = CodeMirror 6"와 [editor-surface.md](editor-surface.md) §1.1의 "엔진 = CM6 확정"을 대체하되, **범위는 `text` kind**([file-panel.md](file-panel.md) §2.2 — `.md`/`.html`과 바이너리를 뺀 모든 파일)**와 diff까지다.** `.md`의 소스 모드는 대체 대상이 **아니라 미결**이고(§12), 마크다운 읽기·리치 렌더는 계속 웹이다. 두 문서의 해당 항목은 이 범위 구분과 함께 이 문서를 가리킨다.

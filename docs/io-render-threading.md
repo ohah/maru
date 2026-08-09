@@ -393,7 +393,7 @@ sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 �
 | **A** | `syncAutoTitles` | `windowTitle()`→`auto_title` 복사 | **모든 Term**(N개) | 매 tick | read |
 | **B** | `updateCursorBlink` | `cursor_blink`·`cursor_visible`·`preedit`·`viewportHasBlink()` | 활성 | idle tick만 | read |
 | **D** | sync 게이트 `blk` | `sync_output`·`view_offset`·`sync_bsu/esu_count` | 활성 | 매 tick | read |
-| **E** | Find 재검색·`matchViewportSpan` | `alt_active`·`matchViewportSpan`; **`findMatches`가 스크롤백 rewrap** | 활성 | find 활성 시 | **write** |
+| **E** | `collectFindViewSpans`(Find 재검색·`matchViewportSpan`) | `alt_active`·`matchViewportSpan`; **`findMatches`가 스크롤백 rewrap** | 활성 | find 활성 시 | **write** |
 | **F** | `cell_colors` | `paletteOverride().*`(복사)·`defaultFg/BgOverride`·`reverseScreen`·`selectionViewportSpan` | 활성 | 투영 tick | read |
 | **G** | 활성 build(`shapeOnlyBuild`) | `renderSnapshot()`→DrawList 딥카피·`view_offset` | 활성 | 투영 tick | read(단 rewrap) |
 | **H** | 비활성 pane 루프 | `renderSnapshot()`→DrawList·palette·reverse·fg/bg | 각 비활성 pane | 투영+split tick | read |
@@ -460,7 +460,7 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 
 - **P4-1 — title-generation** ✅(구현): `core.title_generation` atomic + `setWindowTitle`/`dispatchCwd`/RIS bump + `syncAutoTitles` 조건부 lock. **독립적·측정 가능**(`.frametime` `titles%` 전후). A의 N-lock 제거.
 - **P4-2 — CoreSnapshot(활성 state D·B 통합) + imeCursorRect race 정정** ✅(구현): `readActiveSnapshot`이 활성 코어를 한 lock 아래 값 스냅샷으로 복사(sync D + 커서/blink B). tick의 옛 `sync_view` blk와 `updateCursorBlink`의 자체 lock을 이 단일 lock으로 통합(idle tick 2 lock→1). **imeCursorRect**(P4-3 imeCursorRect 항을 여기로 합침)는 무락 직접 `core.screen.cursor` 읽기(torn read 잠재 race)를 **`lockCore` 아래 live 읽기**로 정정한다 — event-driven 경로(조합 중만)라 per-tick 아니어서 lock 비용 무관하고 캐시 시점 차도 없다(스냅샷 캐시안은 active_pane_rect와 per-tick 캐시의 전환 시점 차로 폐기, code-review [2]). **구현 정정**: 원래 P4-2에 넣으려던 F(cell_colors)·J(sticky)는 **project 블록**(투영 tick만)이라 매-tick B·D와 빈도가 달라 함께 접으면 비투영 tick에 헛 read라, 아래 P4-3으로 이동.
-- **P4-3 — project 블록 lock 통합(F·G·I·J)**: `cell_colors`(F)·활성 build renderSnapshot(G)·kitty images+메트릭 주입(I write)·sticky(J)를 **투영 tick의 단일 lock 스코프**로 수렴. **higher-risk**: G(build)는 `coretext_frame_builder`의 per-pane 락 기계와 얽혀 있고, 활성 render 경로 변경은 헤드리스로 완전 검증 불가([[active-surface-render-path-trap]]) — **실기기 스크린샷/실행 검증 필수**라 별개 트랙으로 신중히 착수한다. E(findMatches write)는 이미 그 lock에 있으므로 명시만.
+- **P4-3 — project 블록 lock 통합(F·G·I·J)**: `cell_colors`(F)·활성 build renderSnapshot(G)·kitty images+메트릭 주입(I write)·sticky(J)를 **투영 tick의 단일 lock 스코프**로 수렴. **higher-risk**: G(build)는 `coretext_frame_builder`의 per-pane 락 기계와 얽혀 있고, 활성 render 경로 변경은 헤드리스로 완전 검증 불가([[active-surface-render-path-trap]]) — **실기기 스크린샷/실행 검증 필수**라 별개 트랙으로 신중히 착수한다. E(findMatches write)는 이미 그 lock에 있으므로 명시만 — 다만 **E는 `tick` 본문이 아니라 `collectFindViewSpans`라는 별 함수로 나갔고 자체 `lockCore`/`defer unlockCore`를 든다**(app_session.zig, 2026-08-09 허브 소함수 추출). 통합할 때 그 함수 경계를 먼저 되돌리거나 호출자가 락을 쥔 채 부르는 형태로 바꿔야 한다 — `core_mutex`는 비재진입이라 그냥 감싸면 panic이다.
 - 각 PR: `.frametime`으로 활성 코어 tick당 lock 수·`titles`/대기 비중 전후 실측.
 
 ### 12.7 테스트 전략 (§6 선례)

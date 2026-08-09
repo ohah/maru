@@ -24,12 +24,21 @@ const rpc_response_authority = @import("rpc_response_authority.zig");
 const rpc_executed_response = @import("rpc_executed_response.zig");
 const response_payload_allocation = @import("response_payload_allocation.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
+const generation_event_quarantine = @import("generation_event_quarantine.zig");
 
 const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
+const GenerationEventQuarantine = generation_event_quarantine.Registry(
+    protocol.max_inventory_runtimes,
+    protocol.max_control_json,
+);
+pub const GenerationEventQuarantineReservation = GenerationEventQuarantine.Reservation;
+pub const GenerationEventQuarantineIdentity = GenerationEventQuarantine.Identity;
+var generation_event_quarantine_registry: ?GenerationEventQuarantine = null;
 var process_runtime_pid: std.atomic.Value(u32) = .init(0);
 threadlocal var prepared_execution_cleanup_active_addr: usize = 0;
 threadlocal var finish_permit_alias_case_for_test: u8 = 0;
+threadlocal var generation_event_release_callback_active_addr: usize = 0;
 
 const RpcSubstrateFailStopTestHook = struct {
     const version: u8 = 1;
@@ -1288,6 +1297,7 @@ pub const GenerationEventTakeRequest = struct {
     owner: GenerationTransportOwnerQuery,
     bound_stream_id: u64,
     event_owner_addr: usize,
+    event_lease_addr: usize,
 };
 
 pub const GenerationEventIdentity = struct {
@@ -1300,6 +1310,9 @@ pub const GenerationEventPublication = struct {
     header: protocol.Header,
     payload: []u8,
     admission: runtime_event_wire.Verdict,
+    quarantine_reservation: GenerationEventQuarantine.Reservation,
+    quarantine_identity: GenerationEventQuarantine.Identity,
+    pin_projection: lease_mod.CanonicalPinProjection,
 };
 
 pub const GenerationEventTakeOutcome = union(enum) {
@@ -1309,6 +1322,82 @@ pub const GenerationEventTakeOutcome = union(enum) {
 };
 
 pub const GenerationEventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
+
+pub const GenerationEventTrustedView = struct {
+    payload_digest: runtime_event_wire.Digest,
+    admission_projection_digest: runtime_event_wire.Digest,
+    wire_major: u16,
+    admission_tag: u8,
+};
+
+pub const GenerationEventReleaseProjection = struct {
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+    self_addr: usize,
+    lease_projection: ?lease_mod.CanonicalPinProjection,
+    payload_addr: usize,
+    payload_len: usize,
+    wire_major: u16,
+    admission_tag: u8,
+    owner_seal: owner_seal.Digest,
+    valid: bool,
+};
+
+pub const GenerationEventReleaseRequest = struct {
+    owner: GenerationTransportOwnerQuery,
+    bound_stream_id: u64,
+    event_owner_addr: usize,
+};
+
+pub const GenerationEventReleasePrepared = union(enum) {
+    clean: struct { owner_seal: owner_seal.Digest },
+    corrupt,
+};
+
+const PreparedEventReleaseLifecycle = enum(u8) {
+    pristine,
+    prepared,
+    callback_active,
+    consumed,
+    terminal,
+};
+
+const PreparedEventReleaseDisposition = enum(u8) { clean, corrupt };
+
+const PreparedEventReleaseInternal = struct {
+    self_addr: usize = 0,
+    operation: RegisteredNodeOperation = undefined,
+    permit: StreamOperationPermit = undefined,
+    permit_consume: ClientSlot.PreparedStreamOperationPermitConsume = .{},
+    request: GenerationEventReleaseRequest = undefined,
+    trusted: cleanup_registry_mod.EventTrustedCleanup = undefined,
+    quarantine_reservation: GenerationEventQuarantine.Reservation = undefined,
+    quarantine_identity: GenerationEventQuarantine.Identity = undefined,
+    mirror: GenerationEventQuarantine.CleanupMirror = undefined,
+    continuation: cleanup_registry_mod.EventReleaseContinuation = undefined,
+    pin_release: lease_mod.PreparedPinRelease = .{},
+    recovery_permit: cleanup_registry_mod.EventPinRecoveryPermit = undefined,
+    disposition: PreparedEventReleaseDisposition = .clean,
+    lifecycle: PreparedEventReleaseLifecycle = .pristine,
+};
+
+pub const prepared_event_release_storage_size = 1280;
+pub const PreparedGenerationEventRelease = extern struct {
+    storage: [prepared_event_release_storage_size]u8 align(@alignOf(PreparedEventReleaseInternal)) =
+        [_]u8{0} ** prepared_event_release_storage_size,
+
+    pub fn pristineExact(self: *const PreparedGenerationEventRelease) bool {
+        return std.mem.allEqual(u8, &self.storage, 0);
+    }
+};
+
+fn preparedEventRelease(out: *PreparedGenerationEventRelease) *PreparedEventReleaseInternal {
+    if (comptime @sizeOf(PreparedEventReleaseInternal) > prepared_event_release_storage_size)
+        @compileError("prepared generation event release storage budget exhausted");
+    if (comptime @alignOf(PreparedGenerationEventRelease) < @alignOf(PreparedEventReleaseInternal))
+        @compileError("prepared generation event release storage alignment drifted");
+    return @ptrCast(@alignCast(&out.storage));
+}
 
 pub const GenerationRequestExecute = struct {
     request: GenerationRequestAbort,
@@ -1779,7 +1868,8 @@ fn beginGenerationRequestOwner(
     request: anytype,
     comptime allow_active_cleanup: bool,
 ) GenerationRequestError!GenerationRequestOwner {
-    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active)
+    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
+        generation_event_release_callback_active_addr != 0)
         return error.Busy;
     if (request.slot_addr == 0 or request.slot_incarnation == 0 or
         request.node_incarnation == 0 or request.host_id == 0 or request.pid != currentPid() or
@@ -5926,7 +6016,14 @@ fn generationEventCorrupt(slot: *ClientSlot) GenerationEventError {
 pub fn takeGenerationEvent(
     request: GenerationEventTakeRequest,
 ) GenerationEventError!GenerationEventTakeOutcome {
-    if (request.bound_stream_id == 0 or request.event_owner_addr == 0)
+    if (request.bound_stream_id == 0 or request.event_owner_addr == 0 or
+        request.event_lease_addr == 0 or
+        !byteRangeFullyContained(
+            request.event_lease_addr,
+            @sizeOf(lease_mod.ConnectionLease),
+            request.owner.owner_addr,
+            request.owner.owner_size,
+        ))
         return error.InvalidOwner;
     const admission = beginGenerationRequestOwner(request.owner, false) catch |err| return switch (err) {
         error.Busy => error.Busy,
@@ -5989,6 +6086,12 @@ pub fn takeGenerationEvent(
             prepared.payload_len,
             @intFromPtr(slot.current),
             @sizeOf(ClientNode),
+        ) or
+        byteRangesOverlap(
+            prepared.payload_addr,
+            prepared.payload_len,
+            request.event_lease_addr,
+            @sizeOf(lease_mod.ConnectionLease),
         ))
         return generationEventCorrupt(slot);
 
@@ -6005,6 +6108,89 @@ pub fn takeGenerationEvent(
         endRegisteredNodeOperation(operation);
         return error.Busy;
     }
+    const trusted_admission = runtime_event_wire.preflightEvent(
+        @as([*]const u8, @ptrFromInt(prepared.payload_addr))[0..prepared.payload_len],
+        .{},
+    );
+    const TrustedAdmission = struct { tag: u8, digest: runtime_event_wire.Digest };
+    const trusted_admission_projection: TrustedAdmission = switch (trusted_admission) {
+        .accepted => |accepted| .{
+            .tag = 1,
+            .digest = runtime_event_wire.eventPreflightProjectionDigest(accepted),
+        },
+        .unknown => .{ .tag = 0, .digest = [_]u8{0} ** 32 },
+        else => {
+            endRegisteredNodeOperation(operation);
+            return generationEventCorrupt(slot);
+        },
+    };
+    const quarantine = &(generation_event_quarantine_registry orelse {
+        endRegisteredNodeOperation(operation);
+        return error.InvalidOwner;
+    });
+    const thread_id: u64 = @intCast(std.Thread.getCurrentId());
+    const quarantine_reservation = quarantine.reserveUnbound(
+        currentPid(),
+        thread_id,
+        request.owner.node_incarnation,
+        request.event_owner_addr,
+        .{
+            .payload_addr = prepared.payload_addr,
+            .payload_len = prepared.payload_len,
+            .payload_digest = prepared.payload_digest,
+            .admission_projection_digest = trusted_admission_projection.digest,
+            .wire_major = prepared.header.major,
+            .admission_tag = trusted_admission_projection.tag,
+            .allocator_ptr = @intFromPtr(slot.current.client.allocator.ptr),
+            .allocator_vtable = @intFromPtr(slot.current.client.allocator.vtable),
+            .pin_owner_addr = @intFromPtr(&slot.current.pin_owner),
+            .lease_addr = request.event_lease_addr,
+            .slot_addr = request.owner.slot_addr,
+            .slot_incarnation = request.owner.slot_incarnation,
+            .node_addr = @intFromPtr(slot.current),
+            .node_incarnation = request.owner.node_incarnation,
+            .host_id = request.owner.host_id,
+            .connection_generation = request.owner.reservation.identity.connection_generation,
+            .stream_id = request.bound_stream_id,
+            .process_nonce = request.owner.process_nonce,
+            .owner_thread_id = thread_id,
+        },
+    ) catch |err| {
+        endRegisteredNodeOperation(operation);
+        return switch (err) {
+            error.CapacityExhausted, error.ByteCapacityExhausted, error.Busy => error.Busy,
+            error.ProcessDomainMismatch,
+            error.ThreadDomainMismatch,
+            error.InvalidIdentity,
+            error.InvalidState,
+            => generationEventCorrupt(slot),
+        };
+    };
+    var quarantine_live = true;
+    defer if (quarantine_live) quarantine.rollback(
+        currentPid(),
+        thread_id,
+        quarantine_reservation,
+    ) catch @panic("event quarantine rollback failed");
+
+    const pin_projection = lease_mod.reserveCanonicalPin(
+        &slot.current.pin_owner,
+        request.event_lease_addr,
+        request.bound_stream_id,
+        currentPid(),
+    ) catch |err| {
+        endRegisteredNodeOperation(operation);
+        return switch (err) {
+            error.PinOverflow => error.Terminal,
+            error.InvalidOwner, error.InvalidStream => generationEventCorrupt(slot),
+        };
+    };
+    var pin_live = true;
+    defer if (pin_live) lease_mod.rollbackCanonicalPinUnchecked(
+        pin_projection,
+        &slot.current.pin_owner,
+        currentPid(),
+    );
     const receipt = node.cleanup_registry.reserveEventGeneration(
         request.owner.reservation.cleanup,
         request.owner.reservation.identity,
@@ -6018,6 +6204,30 @@ pub fn takeGenerationEvent(
             else => error.InvalidOwner,
         };
     };
+    const quarantine_identity = quarantine.bind(
+        currentPid(),
+        thread_id,
+        quarantine_reservation,
+        receipt.event_generation,
+    ) catch |err| {
+        node.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
+            request.owner.reservation.cleanup,
+            request.owner.reservation.identity,
+            receipt,
+        );
+        endRegisteredNodeOperation(operation);
+        return switch (err) {
+            error.CapacityExhausted, error.ByteCapacityExhausted, error.Busy => error.Busy,
+            else => generationEventCorrupt(slot),
+        };
+    };
+    node.cleanup_registry.bindEventCleanupNoFail(
+        request.owner.reservation.cleanup,
+        request.owner.reservation.identity,
+        receipt,
+        quarantine_reservation.slot_index,
+        quarantine_reservation.reservation_generation,
+    );
     endRegisteredNodeOperation(operation);
     var reservation_live = true;
     defer if (reservation_live) {
@@ -6043,11 +6253,16 @@ pub fn takeGenerationEvent(
     slot.consumeStreamOperationPermit(permit) catch unreachable;
     permit_live = false;
     reservation_live = false;
+    quarantine_live = false;
+    pin_live = false;
     return .{ .taken = .{
         .identity = .{ .owner = request.owner, .receipt = receipt },
         .header = event.header,
         .payload = event.payload,
         .admission = event.preflight,
+        .quarantine_reservation = quarantine_reservation,
+        .quarantine_identity = quarantine_identity,
+        .pin_projection = pin_projection,
     } };
 }
 
@@ -6070,23 +6285,369 @@ pub fn generationEventOwnerCurrent(
     if (!current) return error.Terminal;
 }
 
+pub fn generationEventTrustedView(
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+) GenerationEventError!GenerationEventTrustedView {
+    if (owner_addr == 0 or identity.receipt.owner_addr != owner_addr)
+        return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(identity.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    const trusted = admission.operation.node.cleanup_registry.trustedEventCleanup(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        owner_addr,
+    ) catch return error.Corrupt;
+    if (!std.meta.eql(trusted.event, identity.receipt)) return error.Corrupt;
+    const reservation: GenerationEventQuarantine.Reservation = .{
+        .slot_index = trusted.quarantine_slot_index,
+        .reservation_generation = trusted.quarantine_reservation_generation,
+        .node_incarnation = trusted.event.node_incarnation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine_identity: GenerationEventQuarantine.Identity = .{
+        .node_incarnation = trusted.event.node_incarnation,
+        .event_generation = trusted.event.event_generation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
+    const mirror = quarantine.trustedMirror(
+        currentPid(),
+        @intCast(std.Thread.getCurrentId()),
+        reservation,
+        quarantine_identity,
+    ) catch return error.Corrupt;
+    return .{
+        .payload_digest = mirror.payload_digest,
+        .admission_projection_digest = mirror.admission_projection_digest,
+        .wire_major = mirror.wire_major,
+        .admission_tag = mirror.admission_tag,
+    };
+}
+
+pub fn prepareGenerationEventRelease(
+    request: GenerationEventReleaseRequest,
+    projection: GenerationEventReleaseProjection,
+    out: *PreparedGenerationEventRelease,
+) GenerationEventError!GenerationEventReleasePrepared {
+    if (request.bound_stream_id == 0 or request.event_owner_addr == 0 or
+        projection.owner_addr != request.event_owner_addr or
+        !out.pristineExact())
+        return error.InvalidOwner;
+    if (generation_event_release_callback_active_addr != 0) {
+        const active_out: *PreparedGenerationEventRelease =
+            @ptrFromInt(generation_event_release_callback_active_addr);
+        const active = preparedEventRelease(active_out);
+        if (active.self_addr == generation_event_release_callback_active_addr and
+            active.lifecycle == .callback_active and
+            active.request.event_owner_addr == request.event_owner_addr and
+            active.request.bound_stream_id == request.bound_stream_id and
+            std.meta.eql(active.request.owner, request.owner))
+            return error.Terminal;
+        return error.Busy;
+    }
+    const admission = beginGenerationRequestOwner(request.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    var operation_live = true;
+    defer if (operation_live) endRegisteredNodeOperation(admission.operation);
+    const slot: *ClientSlot = @ptrFromInt(request.owner.slot_addr);
+    switch (admission.operation.node.cleanup_registry.eventReleaseReadiness(
+        request.owner.reservation.cleanup,
+        request.owner.reservation.identity,
+    ) catch return error.InvalidOwner) {
+        .live => {},
+        .busy => return error.Busy,
+        .terminal => return error.Terminal,
+    }
+    const permit = slot.prepareStreamOperationPermit(
+        .event,
+        request.event_owner_addr,
+        request.owner.transport_incarnation,
+        request.owner.reservation.identity,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.IdentityExhausted => error.Terminal,
+        error.InvalidStreamOperationPermit => error.InvalidOwner,
+    };
+    var permit_live = true;
+    defer if (permit_live) slot.abortStreamOperationPermit(permit) catch unreachable;
+
+    const trusted = admission.operation.node.cleanup_registry.trustedEventCleanup(
+        request.owner.reservation.cleanup,
+        request.owner.reservation.identity,
+        request.event_owner_addr,
+    ) catch return error.InvalidOwner;
+    if (trusted.state != .live) @panic("live event readiness drifted before trusted cleanup");
+    const quarantine_reservation: GenerationEventQuarantine.Reservation = .{
+        .slot_index = trusted.quarantine_slot_index,
+        .reservation_generation = trusted.quarantine_reservation_generation,
+        .node_incarnation = trusted.event.node_incarnation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine_identity: GenerationEventQuarantine.Identity = .{
+        .node_incarnation = trusted.event.node_incarnation,
+        .event_generation = trusted.event.event_generation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
+    const thread_id: u64 = @intCast(std.Thread.getCurrentId());
+    const mirror = quarantine.trustedMirror(
+        currentPid(),
+        thread_id,
+        quarantine_reservation,
+        quarantine_identity,
+    ) catch @panic("canonical event quarantine mirror drifted");
+    var corrupt = !projection.valid or
+        !std.meta.eql(trusted.event, projection.identity.receipt) or
+        !std.meta.eql(projection.identity.owner, request.owner) or
+        projection.self_addr != request.event_owner_addr or
+        projection.lease_projection == null or
+        projection.payload_addr != mirror.payload_addr or projection.payload_len != mirror.payload_len or
+        projection.wire_major != mirror.wire_major or projection.admission_tag != mirror.admission_tag or
+        projection.payload_len == 0;
+    if (!corrupt) {
+        const payload = @as([*]const u8, @ptrFromInt(mirror.payload_addr))[0..mirror.payload_len];
+        const payload_digest = runtime_event_wire.payloadDigest(payload);
+        corrupt = !std.mem.eql(u8, &payload_digest, &mirror.payload_digest);
+    }
+    const pin_projection = pinProjectionFromMirror(mirror);
+    if (!corrupt)
+        corrupt = !std.meta.eql(projection.lease_projection.?, pin_projection);
+    const state = preparedEventRelease(out);
+    state.* = .{
+        .self_addr = @intFromPtr(out),
+        .operation = admission.operation,
+        .permit = permit,
+        .request = request,
+        .trusted = trusted,
+        .quarantine_reservation = quarantine_reservation,
+        .quarantine_identity = quarantine_identity,
+        .mirror = mirror,
+        .lifecycle = .pristine,
+    };
+    @memset(out.storage[@sizeOf(PreparedEventReleaseInternal)..], 0);
+    slot.prepareStreamOperationPermitConsume(permit, &state.permit_consume) catch
+        @panic("preflighted event release permit consume drifted");
+    permit_live = false;
+    if (corrupt) {
+        _ = quarantine.beginTransfer(
+            currentPid(),
+            thread_id,
+            quarantine_reservation,
+            quarantine_identity,
+        ) catch @panic("preflighted event quarantine transfer drifted");
+        state.recovery_permit = admission.operation.node.cleanup_registry
+            .terminalizeLiveEventForRecoveryNoFail(
+            request.owner.reservation.cleanup,
+            request.owner.reservation.identity,
+            trusted.event,
+            @intFromPtr(out),
+            admission.operation.operation_id,
+        );
+        if (!std.meta.eql(state.recovery_permit.event, trusted.event) or
+            state.recovery_permit.permit_generation != trusted.event.event_generation)
+            @panic("generation event recovery permit drifted");
+        state.disposition = .corrupt;
+    } else {
+        const lease: *lease_mod.ConnectionLease = @ptrFromInt(mirror.lease_addr);
+        if (!lease_mod.prepareCanonicalPinRelease(
+            lease,
+            pin_projection,
+            &admission.operation.node.pin_owner,
+            &state.pin_release,
+            currentPid(),
+        )) @panic("validated event pin release preparation drifted");
+        var pin_prepared = true;
+        defer if (pin_prepared) lease_mod.abortPreparedPinReleaseUnchecked(
+            &state.pin_release,
+            &admission.operation.node.pin_owner,
+            currentPid(),
+        );
+        _ = quarantine.beginRelease(
+            currentPid(),
+            thread_id,
+            quarantine_reservation,
+            quarantine_identity,
+        ) catch @panic("preflighted event quarantine release drifted");
+        state.continuation = admission.operation.node.cleanup_registry.beginEventReleaseNoFail(
+            request.owner.reservation.cleanup,
+            request.owner.reservation.identity,
+            trusted.event,
+            @intFromPtr(out),
+            admission.operation.operation_id,
+        );
+        pin_prepared = false;
+    }
+    state.lifecycle = .prepared;
+    operation_live = false;
+    return if (corrupt)
+        .corrupt
+    else
+        .{ .clean = .{ .owner_seal = projection.owner_seal } };
+}
+
+pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
+    const state = preparedEventRelease(out);
+    if (state.self_addr != @intFromPtr(out) or state.lifecycle != .prepared or
+        generation_event_release_callback_active_addr != 0)
+        @panic("generation event release continuation drifted");
+    const quarantine = &(generation_event_quarantine_registry orelse
+        @panic("generation event quarantine disappeared"));
+    switch (state.disposition) {
+        .clean => {
+            state.operation.node.cleanup_registry.consumeEventReleaseContinuationNoFail(
+                state.request.owner.reservation.cleanup,
+                state.request.owner.reservation.identity,
+                state.continuation,
+            );
+            state.lifecycle = .callback_active;
+            generation_event_release_callback_active_addr = @intFromPtr(out);
+            const allocator: std.mem.Allocator = .{
+                .ptr = @ptrFromInt(state.mirror.allocator_ptr),
+                .vtable = @ptrFromInt(state.mirror.allocator_vtable),
+            };
+            const payload = @as([*]u8, @ptrFromInt(state.mirror.payload_addr))[0..state.mirror.payload_len];
+            allocator.free(payload);
+            generation_event_release_callback_active_addr = 0;
+            quarantine.settleRelease(
+                currentPid(),
+                @intCast(std.Thread.getCurrentId()),
+                state.quarantine_reservation,
+                state.quarantine_identity,
+            ) catch @panic("generation event quarantine release settlement drifted");
+            state.operation.node.cleanup_registry.finishEventReleaseNoFail(
+                state.request.owner.reservation.cleanup,
+                state.request.owner.reservation.identity,
+                state.continuation,
+            );
+        },
+        .corrupt => {
+            if (!std.meta.eql(state.recovery_permit.event, state.trusted.event) or
+                state.recovery_permit.permit_generation != state.trusted.event.event_generation)
+                @panic("generation event recovery permit replayed or drifted");
+            state.operation.node.cleanup_registry.consumeEventPinRecoveryPermitNoFail(
+                state.request.owner.reservation.cleanup,
+                state.request.owner.reservation.identity,
+                state.recovery_permit,
+            );
+            lease_mod.consumeCanonicalPinUnchecked(
+                pinProjectionFromMirror(state.mirror),
+                &state.operation.node.pin_owner,
+                currentPid(),
+            );
+            quarantine.settleTransfer(
+                currentPid(),
+                @intCast(std.Thread.getCurrentId()),
+                state.quarantine_reservation,
+                state.quarantine_identity,
+            ) catch @panic("generation event quarantine transfer settlement drifted");
+            state.operation.node.client.poisonDuringClientSlotOperationNoFail(
+                .local_invariant_violation,
+            );
+            state.recovery_permit = undefined;
+        },
+    }
+    const slot: *ClientSlot = @ptrFromInt(state.request.owner.slot_addr);
+    if (!slot.consumeStreamOperationPermitUnchecked(&state.permit_consume))
+        @panic("generation event release permit drifted");
+    if (state.disposition == .clean)
+        lease_mod.commitPreparedPinReleaseUnchecked(
+            &state.pin_release,
+            &state.operation.node.pin_owner,
+            currentPid(),
+        );
+    endRegisteredNodeOperation(state.operation);
+    state.lifecycle = if (state.disposition == .clean) .consumed else .terminal;
+}
+
 pub fn discardGenerationEventForTest(
-    publication: GenerationEventPublication,
+    identity: GenerationEventIdentity,
+    payload: []u8,
 ) GenerationEventError!void {
     if (!builtin.is_test) return error.InvalidOwner;
-    try generationEventOwnerCurrent(publication.identity, publication.identity.receipt.owner_addr);
+    try generationEventOwnerCurrent(identity, identity.receipt.owner_addr);
     const operation = beginRegisteredNodeOperation(.{
-        .slot_addr = publication.identity.owner.slot_addr,
-        .slot_incarnation = publication.identity.owner.slot_incarnation,
-        .node = .{ .incarnation = publication.identity.owner.node_incarnation },
+        .slot_addr = identity.owner.slot_addr,
+        .slot_incarnation = identity.owner.slot_incarnation,
+        .node = .{ .incarnation = identity.owner.node_incarnation },
     }) catch return error.InvalidOwner;
     defer endRegisteredNodeOperation(operation);
-    operation.node.cleanup_registry.settleEventGenerationForTest(
-        publication.identity.owner.reservation.cleanup,
-        publication.identity.owner.reservation.identity,
-        publication.identity.receipt,
+    const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
+    const thread_id: u64 = @intCast(std.Thread.getCurrentId());
+    const trusted = operation.node.cleanup_registry.trustedEventCleanup(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        identity.receipt.owner_addr,
     ) catch return error.Corrupt;
-    operation.node.client.allocator.free(publication.payload);
+    const quarantine_reservation: GenerationEventQuarantine.Reservation = .{
+        .slot_index = trusted.quarantine_slot_index,
+        .reservation_generation = trusted.quarantine_reservation_generation,
+        .node_incarnation = trusted.event.node_incarnation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine_identity: GenerationEventQuarantine.Identity = .{
+        .node_incarnation = trusted.event.node_incarnation,
+        .event_generation = trusted.event.event_generation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const mirror = quarantine.beginRelease(
+        currentPid(),
+        thread_id,
+        quarantine_reservation,
+        quarantine_identity,
+    ) catch return error.Corrupt;
+    const continuation = operation.node.cleanup_registry.beginEventReleaseNoFail(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        trusted.event,
+        @intFromPtr(&identity),
+        operation.operation_id,
+    );
+    operation.node.cleanup_registry.consumeEventReleaseContinuationNoFail(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        continuation,
+    );
+    operation.node.client.allocator.free(payload);
+    quarantine.settleRelease(
+        currentPid(),
+        thread_id,
+        quarantine_reservation,
+        quarantine_identity,
+    ) catch @panic("test event quarantine settlement failed");
+    operation.node.cleanup_registry.finishEventReleaseNoFail(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        continuation,
+    );
+    lease_mod.consumeCanonicalPinUnchecked(
+        pinProjectionFromMirror(mirror),
+        &operation.node.pin_owner,
+        currentPid(),
+    );
+}
+
+fn pinProjectionFromMirror(
+    mirror: GenerationEventQuarantine.CleanupMirror,
+) lease_mod.CanonicalPinProjection {
+    return .{
+        .pin_owner_addr = mirror.pin_owner_addr,
+        .lease_addr = mirror.lease_addr,
+        .slot_addr = mirror.slot_addr,
+        .node_addr = mirror.node_addr,
+        .slot_incarnation = mirror.slot_incarnation,
+        .node_incarnation = mirror.node_incarnation,
+        .host_id = mirror.host_id,
+        .connection_generation = mirror.connection_generation,
+        .stream_id = mirror.stream_id,
+        .pid = currentPid(),
+        .process_nonce = mirror.process_nonce,
+    };
 }
 
 pub fn preflightGenerationTransportTerminalize(
@@ -6349,8 +6910,9 @@ pub const ClientSlot = struct {
         while (!issuer_mutex.tryLock()) std.atomic.spinLoopHint();
         defer issuer_mutex.unlock();
         if (process_runtime_pid.load(.acquire) != pid) return error.ProcessDomainMismatch;
-        if ((process_issuer == null) != (ended_purge_quarantine_registry == null))
-            @panic("process issuer and ended purge quarantine registry initialization diverged");
+        if ((process_issuer == null) != (ended_purge_quarantine_registry == null) or
+            (process_issuer == null) != (generation_event_quarantine_registry == null))
+            @panic("process issuer and quarantine registry initialization diverged");
         if (process_issuer == null) {
             var nonce: u64 = 0;
             if (builtin.os.tag == .macos) {
@@ -6362,6 +6924,12 @@ pub const ClientSlot = struct {
             }
             if (nonce == 0) nonce = 1;
             ended_purge_quarantine_registry = ended_purge_quarantine.Registry.init();
+            generation_event_quarantine_registry = .{};
+            GenerationEventQuarantine.initInPlace(
+                &generation_event_quarantine_registry.?,
+                pid,
+                @intCast(std.Thread.getCurrentId()),
+            ) catch unreachable;
             process_issuer = lease_mod.IdentityIssuer.init(pid, nonce);
         }
     }

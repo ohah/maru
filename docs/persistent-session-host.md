@@ -1117,7 +1117,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    버리지 않으며 release의 `Corrupt|Terminal`이 projection 오류보다 우선한다.
 
    2c3d focused gate는 Debug·ReleaseFast에서 final-address lifecycle/raw tag 0...255, copy/move/replay/double release,
-   fork/foreign-thread/stale slot·node·binding·receipt, same-address old-generation restore, attachment의 sibling pin 불변,
+   fork/foreign-thread/stale slot·node·binding·receipt, public `EventOwner` same-address old-generation restore의 current no-free handoff,
+   private prepared receipt same-address old-generation replay의 mutation 0 fail-stop, attachment의 sibling pin 불변,
    idle/ordinary/ended_pending, sibling preservation, exact counter decrement,
    queue/header/admission/allocator/range corruption, connection poison 뒤 release, pre-reserved quarantine transfer,
    take/release callback reentry와 free exact once, canonical releasing/empty double release `Terminal` 대 stale copy/replay

@@ -12822,6 +12822,17 @@ pub const Client = struct {
         self.unusable = true;
     }
 
+    /// ClientSlot-only fail-closed publication while its registered shared operation keeps the
+    /// canonical node alive. The final owner closes the fd after that operation is released.
+    pub fn poisonDuringClientSlotOperationNoFail(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) void {
+        if (self.operation_fence == null)
+            @panic("ClientSlot deferred poison requires an operation fence");
+        self.markPoisonedForDeferredCleanup(reason);
+    }
+
     pub fn terminalReasonInvariant(self: *const Client) bool {
         const operation_fence_held = self.beginPublicMutation() catch return false;
         defer if (operation_fence_held) self.endPublicMutation();

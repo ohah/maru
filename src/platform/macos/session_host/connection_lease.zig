@@ -150,6 +150,140 @@ pub const ReleaseOutcome = enum {
     corrupt,
 };
 
+pub const CanonicalPinProjection = struct {
+    pin_owner_addr: usize,
+    lease_addr: usize,
+    slot_addr: usize,
+    node_addr: usize,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    host_id: u128,
+    connection_generation: u64,
+    stream_id: u64,
+    pid: u32,
+    process_nonce: u64,
+};
+
+pub const PreparedPinRelease = struct {
+    self_addr: usize = 0,
+    projection: CanonicalPinProjection = undefined,
+    consumed: bool = false,
+};
+
+pub fn reserveCanonicalPin(
+    pin_owner: *PinOwner,
+    lease_addr: usize,
+    stream_id: u64,
+    current_pid: u32,
+) error{ InvalidOwner, InvalidStream, PinOverflow }!CanonicalPinProjection {
+    if (lease_addr == 0 or stream_id == 0) return error.InvalidStream;
+    if (!pin_owner.valid(current_pid) or pin_owner.state != .live) return error.InvalidOwner;
+    if (pin_owner.cleanup_pin_count == std.math.maxInt(usize)) return error.PinOverflow;
+    pin_owner.cleanup_pin_count += 1;
+    return projectionFor(pin_owner, lease_addr, stream_id);
+}
+
+pub fn rollbackCanonicalPinUnchecked(
+    projection: CanonicalPinProjection,
+    pin_owner: *PinOwner,
+    current_pid: u32,
+) void {
+    if (!projectionMatches(projection, pin_owner, current_pid) or
+        pin_owner.active_cleanup != 0 or pin_owner.cleanup_pin_count == 0)
+        @panic("canonical event pin rollback drifted");
+    pin_owner.cleanup_pin_count -= 1;
+}
+
+pub fn prepareCanonicalPinRelease(
+    lease: *ConnectionLease,
+    projection: CanonicalPinProjection,
+    pin_owner: *PinOwner,
+    out: *PreparedPinRelease,
+    current_pid: u32,
+) bool {
+    if (out.self_addr != 0 or out.consumed or !projectionMatches(projection, pin_owner, current_pid) or
+        projection.lease_addr != @intFromPtr(lease) or !lease.canRelease(current_pid) or
+        pin_owner.active_cleanup != 0)
+        return false;
+    pin_owner.active_cleanup = 1;
+    out.* = .{ .self_addr = @intFromPtr(out), .projection = projection };
+    return true;
+}
+
+pub fn commitPreparedPinReleaseUnchecked(
+    prepared: *PreparedPinRelease,
+    pin_owner: *PinOwner,
+    current_pid: u32,
+) void {
+    if (prepared.self_addr != @intFromPtr(prepared) or prepared.consumed or
+        !projectionMatches(prepared.projection, pin_owner, current_pid) or
+        pin_owner.active_cleanup != 1 or pin_owner.cleanup_pin_count == 0)
+        @panic("prepared canonical event pin release drifted");
+    pin_owner.cleanup_pin_count -= 1;
+    pin_owner.active_cleanup = 0;
+    prepared.consumed = true;
+}
+
+pub fn abortPreparedPinReleaseUnchecked(
+    prepared: *PreparedPinRelease,
+    pin_owner: *PinOwner,
+    current_pid: u32,
+) void {
+    if (prepared.self_addr != @intFromPtr(prepared) or prepared.consumed or
+        !projectionMatches(prepared.projection, pin_owner, current_pid) or
+        pin_owner.active_cleanup != 1)
+        @panic("prepared canonical event pin abort drifted");
+    pin_owner.active_cleanup = 0;
+    prepared.* = .{};
+}
+
+pub fn consumeCanonicalPinUnchecked(
+    projection: CanonicalPinProjection,
+    pin_owner: *PinOwner,
+    current_pid: u32,
+) void {
+    if (!projectionMatches(projection, pin_owner, current_pid) or
+        pin_owner.active_cleanup != 0 or pin_owner.cleanup_pin_count == 0)
+        @panic("canonical event pin recovery drifted");
+    pin_owner.cleanup_pin_count -= 1;
+}
+
+fn projectionFor(
+    pin_owner: *const PinOwner,
+    lease_addr: usize,
+    stream_id: u64,
+) CanonicalPinProjection {
+    return .{
+        .pin_owner_addr = @intFromPtr(pin_owner),
+        .lease_addr = lease_addr,
+        .slot_addr = pin_owner.slot_addr,
+        .node_addr = pin_owner.node_addr,
+        .slot_incarnation = pin_owner.slot_incarnation,
+        .node_incarnation = pin_owner.node_incarnation,
+        .host_id = pin_owner.host_id,
+        .connection_generation = pin_owner.connection_generation,
+        .stream_id = stream_id,
+        .pid = pin_owner.pid,
+        .process_nonce = pin_owner.process_nonce,
+    };
+}
+
+fn projectionMatches(
+    projection: CanonicalPinProjection,
+    pin_owner: *const PinOwner,
+    current_pid: u32,
+) bool {
+    return pin_owner.valid(current_pid) and pin_owner.state == .live and
+        projection.pin_owner_addr == @intFromPtr(pin_owner) and projection.lease_addr != 0 and
+        projection.slot_addr == pin_owner.slot_addr and projection.node_addr == pin_owner.node_addr and
+        projection.slot_incarnation == pin_owner.slot_incarnation and
+        projection.node_incarnation == pin_owner.node_incarnation and
+        projection.host_id == pin_owner.host_id and
+        projection.connection_generation == pin_owner.connection_generation and
+        projection.stream_id != 0 and projection.pid == current_pid and
+        projection.pid == pin_owner.pid and projection.process_nonce == pin_owner.process_nonce;
+}
+
 pub const ConnectionLease = struct {
     self_addr: usize = 0,
     owner_addr: usize = 0,
@@ -177,6 +311,38 @@ pub const ConnectionLease = struct {
             self.* = .{};
         }
     };
+
+    /// Reads only the embedded lease's scalar bytes. It deliberately does not follow owner_addr or
+    /// canonical_owner_addr: callers must compare the result with a separately authenticated
+    /// PinOwner projection before treating the lease as valid cleanup input.
+    pub fn scalarProjectionForValidation(
+        self: *const ConnectionLease,
+        current_pid: u32,
+    ) ?CanonicalPinProjection {
+        const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        if (lifecycle_raw > @intFromEnum(LeaseLifecycle.terminal) or
+            self.lifecycle != .live or self.self_addr != @intFromPtr(self) or
+            self.owner_addr == 0 or self.owner_addr != self.canonical_owner_addr or
+            self.slot_addr == 0 or self.node_addr == 0 or
+            self.slot_incarnation == 0 or self.node_incarnation == 0 or
+            self.host_id == 0 or self.connection_generation == 0 or self.stream_id == 0 or
+            self.pid != current_pid or self.process_nonce == 0 or
+            !std.mem.allEqual(u8, std.mem.asBytes(&self.active_cleanup), 0))
+            return null;
+        return .{
+            .pin_owner_addr = self.canonical_owner_addr,
+            .lease_addr = @intFromPtr(self),
+            .slot_addr = self.slot_addr,
+            .node_addr = self.node_addr,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .connection_generation = self.connection_generation,
+            .stream_id = self.stream_id,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+        };
+    }
 
     pub fn initInPlace(
         out: *ConnectionLease,

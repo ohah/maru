@@ -19,9 +19,10 @@ test "CR3a-2c3d C1 event facade remains closed and product-unwired" {
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 13), count(facade, "    pub fn "));
+    // C1's take contract remains present after C2 adds the paired release facade.
+    try std.testing.expectEqual(@as(usize, 14), count(facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn takeEvent("));
-    try std.testing.expectEqual(@as(usize, 0), count(facade, "    pub fn releaseEvent("));
+    try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn releaseEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(facade, "    pub fn purgeEndedStream("));
 
     const owner = between(event_contract, "pub const EventOwner = extern struct", "fn internal(") orelse

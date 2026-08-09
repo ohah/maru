@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const client_slot = @import("client_slot.zig");
+const connection_lease = @import("connection_lease.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const protocol = @import("protocol.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
@@ -31,8 +32,7 @@ const Internal = struct {
     wire_major: u16 = 0,
     payload: []u8 = undefined,
     admission_tag: AdmissionTag = .unknown,
-    admission_projection_digest: runtime_event_wire.Digest = [_]u8{0} ** 32,
-    payload_digest: runtime_event_wire.Digest = [_]u8{0} ** 32,
+    lease: connection_lease.ConnectionLease = .{},
     seal: owner_seal.Digest = [_]u8{0} ** 32,
     lifecycle: Lifecycle = .pristine,
 };
@@ -68,6 +68,80 @@ pub fn pristineExact(owner: *const EventOwner) bool {
     return std.mem.allEqual(u8, &owner.storage, 0);
 }
 
+fn terminalExact(owner: *const EventOwner) bool {
+    const state = internalConst(owner);
+    if (!lifecycleRawValid(&state.lifecycle) or state.lifecycle != .terminal or
+        state.self_addr != @intFromPtr(owner) or state.wire_major != 0 or
+        state.payload.len != 0 or state.identity.receipt.event_generation != 0 or
+        !admissionRawValid(&state.admission_tag) or state.admission_tag != .unknown or
+        !std.mem.eql(u8, &state.seal, &sealFor(state)))
+        return false;
+    return std.mem.allEqual(u8, owner.storage[@sizeOf(Internal)..], 0);
+}
+
+pub fn leaseAddress(owner: *EventOwner) usize {
+    return @intFromPtr(&internal(owner).lease);
+}
+
+pub fn releaseProjection(
+    owner: *EventOwner,
+) EventError!client_slot.GenerationEventReleaseProjection {
+    const state = internal(owner);
+    const valid = lifecycleRawValid(&state.lifecycle) and state.lifecycle == .live and
+        admissionRawValid(&state.admission_tag) and
+        state.self_addr == @intFromPtr(owner) and
+        state.identity.receipt.owner_addr == @intFromPtr(owner) and
+        state.identity.receipt.event_generation != 0 and state.wire_major != 0 and
+        state.payload.len != 0 and @intFromPtr(&state.lease) != 0 and
+        std.mem.eql(u8, &state.seal, &sealFor(state));
+    return .{
+        .identity = state.identity,
+        .owner_addr = @intFromPtr(owner),
+        .self_addr = state.self_addr,
+        .lease_projection = state.lease.scalarProjectionForValidation(state.identity.owner.pid),
+        .payload_addr = @intFromPtr(state.payload.ptr),
+        .payload_len = state.payload.len,
+        .wire_major = state.wire_major,
+        .admission_tag = if (admissionRawValid(&state.admission_tag))
+            @as(*const u8, @ptrCast(&state.admission_tag)).*
+        else
+            std.math.maxInt(u8),
+        .owner_seal = state.seal,
+        .valid = valid,
+    };
+}
+
+pub fn publishTerminal(owner: *EventOwner) void {
+    owner.* = .{};
+    const state = internal(owner);
+    state.self_addr = @intFromPtr(owner);
+    state.lifecycle = .terminal;
+    state.seal = sealFor(state);
+}
+
+pub fn finalizeTerminal(owner: *EventOwner) void {
+    const state = internal(owner);
+    if (!lifecycleRawValid(&state.lifecycle) or state.lifecycle != .terminal or
+        state.self_addr != @intFromPtr(owner) or !std.mem.eql(u8, &state.seal, &sealFor(state)))
+        @panic("generation event owner terminal finalization drifted");
+}
+
+pub fn publishReleasing(owner: *EventOwner, expected_seal: owner_seal.Digest) void {
+    const state = internal(owner);
+    if (!lifecycleRawValid(&state.lifecycle) or state.lifecycle != .live or
+        !std.mem.eql(u8, &state.seal, &expected_seal) or
+        !std.mem.eql(u8, &state.seal, &sealFor(state)))
+        @panic("generation event owner release publication drifted");
+    state.lifecycle = .releasing;
+    state.seal = sealFor(state);
+}
+
+pub fn finalizeRelease(owner: *EventOwner) void {
+    // Canonical completion was consumed by client_slot before the allocator callback. The callback
+    // may legally mutate public owner bytes, so the no-fail local suffix must not read them again.
+    owner.* = .{};
+}
+
 pub fn publish(owner: *EventOwner, publication: client_slot.GenerationEventPublication) void {
     const state = internal(owner);
     state.* = .{
@@ -80,22 +154,29 @@ pub fn publish(owner: *EventOwner, publication: client_slot.GenerationEventPubli
             .unknown => .unknown,
             else => unreachable,
         },
-        .payload_digest = runtime_event_wire.payloadDigest(publication.payload),
-        .admission_projection_digest = switch (publication.admission) {
-            .accepted => |accepted| runtime_event_wire.eventPreflightProjectionDigest(accepted),
-            .unknown => [_]u8{0} ** 32,
-            else => unreachable,
-        },
         .lifecycle = .live,
     };
+    state.seal = sealFor(state);
+    const pin_owner: *connection_lease.PinOwner =
+        @ptrFromInt(publication.pin_projection.pin_owner_addr);
+    connection_lease.ConnectionLease.initFromReservedPinUnchecked(
+        &state.lease,
+        pin_owner,
+        publication.pin_projection.stream_id,
+        publication.pin_projection.pid,
+    );
     state.seal = sealFor(state);
     @memset(owner.storage[@sizeOf(Internal)..], 0);
 }
 
 fn viewOwner(owner: *const EventOwner) EventViewError!EventView {
     const state = internalConst(owner);
+    if (terminalExact(owner)) return error.Terminal;
     // Only scalar registry credentials are read before the registry confirms this exact address.
-    client_slot.generationEventOwnerCurrent(state.identity, @intFromPtr(owner)) catch |err|
+    const trusted = client_slot.generationEventTrustedView(
+        state.identity,
+        @intFromPtr(owner),
+    ) catch |err|
         return switch (err) {
             error.InvalidOwner, error.Busy => error.InvalidOwner,
             error.Corrupt, error.Terminal => error.Terminal,
@@ -104,10 +185,15 @@ fn viewOwner(owner: *const EventOwner) EventViewError!EventView {
         state.self_addr != @intFromPtr(owner) or state.lifecycle != .live or
         state.identity.receipt.owner_addr != @intFromPtr(owner) or
         state.identity.receipt.event_generation == 0 or state.wire_major == 0 or
-        state.payload.len == 0 or !std.mem.eql(u8, &state.seal, &sealFor(state)))
+        state.payload.len == 0 or
+        !state.lease.canRelease(state.identity.owner.pid) or
+        !std.mem.eql(u8, &state.seal, &sealFor(state)))
         return error.Terminal;
     const digest = runtime_event_wire.payloadDigest(state.payload);
-    if (!std.mem.eql(u8, &digest, &state.payload_digest)) return error.Terminal;
+    if (!std.mem.eql(u8, &digest, &trusted.payload_digest) or
+        trusted.wire_major != state.wire_major or
+        trusted.admission_tag != @intFromEnum(state.admission_tag))
+        return error.Terminal;
     const admission: EventAdmission = switch (state.admission_tag) {
         // Admission identity was sealed at ingress; replay only reconstructs the allocation-free
         // structural DTO from the unchanged payload. Binding identity is independently registry-
@@ -116,7 +202,7 @@ fn viewOwner(owner: *const EventOwner) EventViewError!EventView {
             .accepted => |accepted| if (std.mem.eql(
                 u8,
                 &runtime_event_wire.eventPreflightProjectionDigest(accepted),
-                &state.admission_projection_digest,
+                &trusted.admission_projection_digest,
             ))
                 .{ .accepted = accepted }
             else
@@ -144,25 +230,22 @@ fn sealFor(state: *const Internal) owner_seal.Digest {
     writer.writeU16(state.wire_major);
     writer.writeUsize(@intFromPtr(state.payload.ptr));
     writer.writeUsize(state.payload.len);
-    writer.writeBytes(&state.payload_digest);
     writer.writeU8(@as(*const u8, @ptrCast(&state.admission_tag)).*);
-    writer.writeBytes(&state.admission_projection_digest);
+    writer.writeUsize(@intFromPtr(&state.lease));
     writer.writeU8(@as(*const u8, @ptrCast(&state.lifecycle)).*);
     return writer.finish();
 }
 
-pub fn publicationForTest(owner: *const EventOwner) client_slot.GenerationEventPublication {
+pub fn discardForTest(owner: *EventOwner) client_slot.GenerationEventError!void {
     if (!builtin.is_test) unreachable;
-    const state = internalConst(owner);
-    return .{
-        .identity = state.identity,
-        .header = .{ .kind = .event, .major = state.wire_major },
-        .payload = state.payload,
-        .admission = switch (state.admission_tag) {
-            .accepted => runtime_event_wire.preflightEvent(state.payload, .{}),
-            .unknown => .unknown,
-        },
-    };
+    const state = internal(owner);
+    try client_slot.discardGenerationEventForTest(state.identity, state.payload);
+    owner.* = .{};
+}
+
+pub fn eventGenerationForTest(owner: *const EventOwner) u64 {
+    if (!builtin.is_test) unreachable;
+    return internalConst(owner).identity.receipt.event_generation;
 }
 
 pub fn corruptAdmissionTagForTest(owner: *EventOwner, raw: u8) void {
@@ -170,11 +253,65 @@ pub fn corruptAdmissionTagForTest(owner: *EventOwner, raw: u8) void {
     @as(*u8, @ptrCast(&internal(owner).admission_tag)).* = raw;
 }
 
+pub fn corruptToPristineForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    owner.* = .{};
+}
+
+pub fn corruptLeaseForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    const bytes = std.mem.asBytes(&internal(owner).lease);
+    bytes[0] ^= 1;
+}
+
+pub fn corruptLeaseOwnerPointerCoherentlyForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    const state = internal(owner);
+    state.lease.owner_addr = 1;
+    state.lease.canonical_owner_addr = 1;
+    state.seal = sealFor(state);
+}
+
+pub fn corruptPayloadLengthForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    internal(owner).payload.len +%= 1;
+}
+
+pub fn corruptPayloadPointerCoherentlyForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    const state = internal(owner);
+    state.payload.ptr = @ptrFromInt(1);
+    state.seal = sealFor(state);
+}
+
+pub fn corruptEventGenerationCoherentlyForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    const state = internal(owner);
+    state.identity.receipt.event_generation +%= 1;
+    state.seal = sealFor(state);
+}
+
+pub fn corruptLifecycleForTest(owner: *EventOwner, raw: u8) void {
+    if (!builtin.is_test) unreachable;
+    @as(*u8, @ptrCast(&internal(owner).lifecycle)).* = raw;
+}
+
+pub fn corruptSealForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    internal(owner).seal[0] ^= 1;
+}
+
+pub fn corruptPayloadCoherentlyForTest(owner: *EventOwner) void {
+    if (!builtin.is_test) unreachable;
+    const state = internal(owner);
+    state.payload[0] ^= 1;
+    state.seal = sealFor(state);
+}
+
 pub fn corruptAdmissionProjectionForTest(owner: *EventOwner) void {
     if (!builtin.is_test) unreachable;
     const state = internal(owner);
-    state.admission_projection_digest[0] ^= 1;
-    // Preserve the outer owner seal so the test reaches the independent replay-projection check.
+    state.admission_tag = .unknown;
     state.seal = sealFor(state);
 }
 

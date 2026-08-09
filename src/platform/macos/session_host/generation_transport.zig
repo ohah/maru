@@ -23,6 +23,7 @@ const c = std.c;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 extern "c" fn getdtablesize() c_int;
+extern "c" fn alarm(seconds: c_uint) c_uint;
 
 var response_alias_fail_stop_completed = false;
 
@@ -294,6 +295,7 @@ pub const GenerationTransport = struct {
             .owner = self.ownerQuery(),
             .bound_stream_id = self.bound_stream_id,
             .event_owner_addr = @intFromPtr(out),
+            .event_lease_addr = generation_event.leaseAddress(out),
         }) catch |err| return switch (err) {
             error.Busy => error.Busy,
             error.InvalidOwner => error.InvalidOwner,
@@ -308,6 +310,39 @@ pub const GenerationTransport = struct {
                 break :blk .taken;
             },
         };
+    }
+
+    pub fn releaseEvent(self: *GenerationTransport, owner: *EventOwner) EventError!void {
+        if (!self.requestIdentityValid() or !eventDestinationValid(self, owner))
+            return error.InvalidOwner;
+        const projection = generation_event.releaseProjection(owner) catch |err| return err;
+        var prepared: client_slot_mod.PreparedGenerationEventRelease = .{};
+        const release = client_slot_mod.prepareGenerationEventRelease(.{
+            .owner = self.ownerQuery(),
+            .bound_stream_id = self.bound_stream_id,
+            .event_owner_addr = @intFromPtr(owner),
+        }, projection, &prepared) catch |err| return switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+            error.Corrupt => error.Corrupt,
+            error.Terminal => error.Terminal,
+        };
+        switch (release) {
+            .clean => |clean| {
+                generation_event.publishReleasing(owner, clean.owner_seal);
+            },
+            .corrupt => {
+                generation_event.publishTerminal(owner);
+            },
+        }
+        client_slot_mod.commitGenerationEventRelease(&prepared);
+        switch (release) {
+            .clean => generation_event.finalizeRelease(owner),
+            .corrupt => {
+                generation_event.finalizeTerminal(owner);
+                return error.Corrupt;
+            },
+        }
     }
 
     pub fn fenceRevoke(self: *GenerationTransport) InputError!RevokeFence {
@@ -1911,6 +1946,8 @@ comptime {
         EventViewError != error{ InvalidOwner, Terminal } or
         @TypeOf(GenerationTransport.takeEvent) !=
             fn (*GenerationTransport, *EventOwner) EventError!EventTakeOutcome or
+        @TypeOf(GenerationTransport.releaseEvent) !=
+            fn (*GenerationTransport, *EventOwner) EventError!void or
         @TypeOf(EventOwner.view) != fn (*const EventOwner) EventViewError!EventView)
         @compileError("GenerationTransport C1 event facade signature drifted");
     const expected_revoke_fields = [_][]const u8{
@@ -1936,6 +1973,7 @@ comptime {
         GenerationTransport.pumpPendingOutput,
         GenerationTransport.fenceRevoke,
         GenerationTransport.takeEvent,
+        GenerationTransport.releaseEvent,
         GenerationTransport.poison,
     };
     for (methods) |method| {
@@ -2056,21 +2094,20 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     generation_event.corruptAdmissionTagForTest(&owner.event, 0xFF);
     try std.testing.expectError(error.Terminal, owner.event.view());
     owner.event = first;
-    const first_publication = generation_event.publicationForTest(&first);
-    try client_slot_mod.discardGenerationEventForTest(first_publication);
+    const first_generation = generation_event.eventGenerationForTest(&first);
+    owner.event = first;
+    try generation_event.discardForTest(&owner.event);
     owner.event = .{};
     try slot.current.client.bufferGenerationEventForTest(91, "{\"event\":\"future.event\"}");
     try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
     const second = owner.event;
-    const second_publication = generation_event.publicationForTest(&second);
-    try std.testing.expect(second_publication.identity.receipt.event_generation >
-        first_publication.identity.receipt.event_generation);
+    const second_generation = generation_event.eventGenerationForTest(&second);
+    try std.testing.expect(second_generation > first_generation);
     owner.event = first;
     try std.testing.expectError(error.Terminal, owner.event.view());
     owner.event = second;
     _ = try owner.event.view();
-    try client_slot_mod.discardGenerationEventForTest(second_publication);
-    owner.event = .{};
+    try generation_event.discardForTest(&owner.event);
 
     try slot.current.client.bufferGenerationEventForTest(
         91,
@@ -2083,10 +2120,7 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     generation_event.corruptAdmissionProjectionForTest(&owner.event);
     try std.testing.expectError(error.Terminal, owner.event.view());
     owner.event = accepted_owner;
-    try client_slot_mod.discardGenerationEventForTest(
-        generation_event.publicationForTest(&owner.event),
-    );
-    owner.event = .{};
+    try generation_event.discardForTest(&owner.event);
 
     try slot.current.client.bufferGenerationEventForTest(
         91,
@@ -2099,10 +2133,8 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     try std.testing.expect(generation_event.pristineExact(&owner.event));
     slot.current.client.dropBufferedStream(91);
     slot.current.client.dropBufferedStream(92);
-    try std.testing.expectEqual(
-        @import("connection_lease.zig").ReleaseOutcome.released,
-        owner.lease.release(slot.pid),
-    );
+    const release_outcome = owner.lease.release(slot.pid);
+    try std.testing.expectEqual(@TypeOf(release_outcome).released, release_outcome);
     try slot.current.cleanup_registry.beginBoundDrop(
         reservation.cleanup,
         reservation.identity,
@@ -2115,6 +2147,504 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
         91,
     );
     owner.binding.lifecycle = .terminal;
+}
+
+const EventReleaseReentryAllocator = struct {
+    parent: std.mem.Allocator,
+    transport: ?*GenerationTransport = null,
+    event: ?*EventOwner = null,
+    armed: bool = false,
+    callback_count: usize = 0,
+    same_owner_terminal: bool = false,
+    other_operation_busy: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed) {
+            self.armed = false;
+            self.callback_count += 1;
+            self.transport.?.releaseEvent(self.event.?) catch |err| {
+                self.same_owner_terminal = err == error.Terminal;
+            };
+            _ = self.transport.?.sendInputNonBlocking("event-free-reentry") catch |err| {
+                self.other_operation_busy = err == error.Busy;
+            };
+            @memset(&self.event.?.storage, 0xA5);
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const EventNoFreeAllocator = struct {
+    parent: std.mem.Allocator,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    armed: bool = false,
+    armed_free_count: usize = 0,
+    target_free_count: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed) self.armed_free_count += 1;
+        if (self.armed and @intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len)
+            self.target_free_count += 1;
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const EventForeignThreadReleaseProbe = struct {
+    transport: *GenerationTransport,
+    event: *EventOwner,
+    rejected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *@This()) void {
+        self.transport.releaseEvent(self.event) catch |err| {
+            self.rejected.store(err == error.InvalidOwner, .release);
+        };
+    }
+};
+
+test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the owner" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var reentry_allocator: EventReleaseReentryAllocator = .{ .parent = std.testing.allocator };
+    const allocator = reentry_allocator.allocator();
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D21,
+        .wire_major = protocol.version_major,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D21);
+    defer slot.deinit();
+    const Lease = @typeInfo(
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+    ).pointer.child;
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: Lease = .{},
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        @intFromPtr(&owner.transport),
+    );
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0x2C3D22,
+        .request_id = 0x2C3D23,
+        .request_digest = 0x2C3D24,
+    }).?;
+    try owner.binding.pairRequest(attach_receipt);
+    try owner.binding.beginExecute(attach_receipt);
+    try slot.commitAttachmentBinding(
+        &owner.binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?,
+            attach_receipt.request_id,
+        ).?,
+        121,
+        &owner.lease,
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try reserveEventOwnerInPlace(&owner.transport, &owner.event);
+    try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 121);
+
+    reentry_allocator.transport = &owner.transport;
+    reentry_allocator.event = &owner.event;
+    var first_prepared: client_slot_mod.PreparedGenerationEventRelease = .{};
+    var first_prepared_snapshot: client_slot_mod.PreparedGenerationEventRelease = undefined;
+    var first_prepared_snapshot_valid = false;
+    var first_event_generation: u64 = 0;
+
+    inline for (0..2) |iteration| {
+        try slot.current.client.bufferGenerationEventForTest(121, "{\"event\":\"future.event\"}");
+        try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
+        const event_generation = generation_event.eventGenerationForTest(&owner.event);
+        if (iteration == 0) {
+            first_event_generation = event_generation;
+        } else {
+            try std.testing.expect(event_generation > first_event_generation);
+        }
+        try std.testing.expectEqual(@as(usize, 2), slot.current.pin_owner.cleanup_pin_count);
+        try std.testing.expectEqual(
+            TerminalizeReadiness.busy,
+            preflightTerminalizeOwned(&owner.transport, @intFromPtr(&owner)),
+        );
+        if (iteration == 0) {
+            var copied_event = owner.event;
+            try std.testing.expectError(
+                error.InvalidOwner,
+                owner.transport.releaseEvent(&copied_event),
+            );
+            try std.testing.expectEqual(@as(usize, 2), slot.current.pin_owner.cleanup_pin_count);
+            var thread_probe: EventForeignThreadReleaseProbe = .{
+                .transport = &owner.transport,
+                .event = &owner.event,
+            };
+            const thread = try std.Thread.spawn(.{}, EventForeignThreadReleaseProbe.run, .{&thread_probe});
+            thread.join();
+            try std.testing.expect(thread_probe.rejected.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 2), slot.current.pin_owner.cleanup_pin_count);
+            if (builtin.os.tag == .macos) {
+                const child = c.fork();
+                try std.testing.expect(child >= 0);
+                if (child == 0) {
+                    _ = alarm(5);
+                    const rejected = if (owner.transport.releaseEvent(&owner.event)) |_| false else |err| err == error.InvalidOwner;
+                    std.c._exit(if (rejected) 0 else 1);
+                }
+                var status: c_int = 0;
+                try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+                try std.testing.expectEqual(@as(c_int, 0), status);
+                try std.testing.expectEqual(@as(usize, 2), slot.current.pin_owner.cleanup_pin_count);
+            }
+        }
+        const view = try owner.event.view();
+        if (iteration == 0) {
+            _ = view;
+            reentry_allocator.armed = true;
+        }
+        if (iteration == 1) slot.current.client.poison(.local_invariant_violation);
+        if (iteration == 0) {
+            const projection = try generation_event.releaseProjection(&owner.event);
+            const release = try client_slot_mod.prepareGenerationEventRelease(.{
+                .owner = owner.transport.ownerQuery(),
+                .bound_stream_id = owner.transport.bound_stream_id,
+                .event_owner_addr = @intFromPtr(&owner.event),
+            }, projection, &first_prepared);
+            const clean = switch (release) {
+                .clean => |clean| clean,
+                .corrupt => return error.TestUnexpectedResult,
+            };
+            first_prepared_snapshot = first_prepared;
+            first_prepared_snapshot_valid = true;
+            generation_event.publishReleasing(&owner.event, clean.owner_seal);
+            client_slot_mod.commitGenerationEventRelease(&first_prepared);
+            generation_event.finalizeRelease(&owner.event);
+        } else {
+            try owner.transport.releaseEvent(&owner.event);
+        }
+        try std.testing.expect(generation_event.pristineExact(&owner.event));
+        try std.testing.expectEqual(@as(usize, 1), slot.current.pin_owner.cleanup_pin_count);
+    }
+    try std.testing.expectEqual(@as(usize, 1), reentry_allocator.callback_count);
+    try std.testing.expect(reentry_allocator.same_owner_terminal);
+    try std.testing.expect(reentry_allocator.other_operation_busy);
+    try std.testing.expect(slot.current.client.firstPoisonReason() != null);
+    try std.testing.expect(first_prepared_snapshot_valid);
+
+    if (builtin.os.tag == .macos) {
+        var stderr_pipe: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
+        const child = c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            _ = alarm(5);
+            _ = c.close(stderr_pipe[0]);
+            _ = c.dup2(stderr_pipe[1], 2);
+            _ = c.close(stderr_pipe[1]);
+            first_prepared = first_prepared_snapshot;
+            client_slot_mod.commitGenerationEventRelease(&first_prepared);
+            std.c._exit(0);
+        }
+        _ = c.close(stderr_pipe[1]);
+        defer _ = c.close(stderr_pipe[0]);
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+        const unsigned_status: u32 = @bitCast(status);
+        try std.testing.expect(c.W.IFSIGNALED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0);
+        try std.testing.expect(!(c.W.IFSIGNALED(unsigned_status) and c.W.TERMSIG(unsigned_status) == c.SIG.ALRM));
+        var panic_bytes: [4096]u8 = undefined;
+        var panic_len: usize = 0;
+        while (panic_len < panic_bytes.len) {
+            const count_read = try posix.read(stderr_pipe[0], panic_bytes[panic_len..]);
+            if (count_read == 0) break;
+            panic_len += count_read;
+        }
+        const replay_panic_found = std.mem.indexOf(
+            u8,
+            panic_bytes[0..panic_len],
+            "event release continuation replayed or drifted",
+        ) != null;
+        try std.testing.expect(replay_panic_found);
+    }
+
+    try std.testing.expectEqual(
+        @import("connection_lease.zig").ReleaseOutcome.released,
+        owner.lease.release(slot.pid),
+    );
+    try slot.current.cleanup_registry.beginBoundDrop(
+        reservation.cleanup,
+        reservation.identity,
+        121,
+    );
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+    try slot.current.cleanup_registry.completeActiveDrop(
+        reservation.cleanup,
+        reservation.identity,
+        121,
+    );
+    owner.binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3d C2 owner lease payload seal and same-address stale owner transfer without free" {
+    const EventCorruptionCase = enum {
+        byte_pristine,
+        lease,
+        coherent_lease_owner_pointer,
+        payload_length,
+        coherent_payload_pointer,
+        coherent_event_generation,
+        same_address_stale_public_owner,
+        invalid_lifecycle,
+        invalid_admission,
+        seal,
+        coherent_payload,
+    };
+    const Fixture = struct {
+        fn run(corruption: EventCorruptionCase) !void {
+            try client_slot_mod.ClientSlot.initializeProcessRuntime();
+            // Corrupt handoff intentionally retains the untrusted payload. The arena keeps a non-null
+            // allocator identity for the mirror while allowing fixture teardown to reclaim the backing.
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            var no_free_allocator: EventNoFreeAllocator = .{ .parent = arena.allocator() };
+            const allocator = no_free_allocator.allocator();
+            var client: client_mod.Client = .{
+                .allocator = allocator,
+                .fd = -1,
+                .host_id = 0x2C3D31,
+                .wire_major = protocol.version_major,
+                .connection_profile = .gui,
+                .parser = framing.FrameParser.init(allocator),
+            };
+            var slot: client_slot_mod.ClientSlot = undefined;
+            try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D31);
+            defer slot.deinit();
+            const Lease = @typeInfo(
+                @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+            ).pointer.child;
+            const Owner = struct {
+                transport: GenerationTransport = .{},
+                binding: contract.PreparedAttachmentBinding = .{},
+                lease: Lease = .{},
+                event: EventOwner = .{},
+            };
+            var owner: Owner = .{};
+            const reservation = try slot.reserveAttachmentBindingForTest(
+                &owner.binding,
+                &owner.lease,
+                @intFromPtr(&owner.transport),
+            );
+            const attach_receipt = contract.PreparedCallReceipt.init(.{
+                .transport_incarnation = 0x2C3D32,
+                .request_id = 0x2C3D33,
+                .request_digest = 0x2C3D34,
+            }).?;
+            try owner.binding.pairRequest(attach_receipt);
+            try owner.binding.beginExecute(attach_receipt);
+            try slot.commitAttachmentBinding(
+                &owner.binding,
+                reservation,
+                contract.CorrelatedExecutedCall.init(
+                    contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?,
+                    attach_receipt.request_id,
+                ).?,
+                131,
+                &owner.lease,
+            );
+            try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+            try reserveEventOwnerInPlace(&owner.transport, &owner.event);
+            try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 131);
+            try slot.current.client.bufferGenerationEventForTest(131, "{\"event\":\"future.event\"}");
+            try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
+            try std.testing.expectEqual(@as(usize, 2), slot.current.pin_owner.cleanup_pin_count);
+
+            var live_view = try owner.event.view();
+            if (corruption == .same_address_stale_public_owner) {
+                var stale_owner = owner.event;
+                const stale_generation = generation_event.eventGenerationForTest(&owner.event);
+                try owner.transport.releaseEvent(&owner.event);
+                try std.testing.expectEqual(@as(usize, 1), slot.current.pin_owner.cleanup_pin_count);
+                try slot.current.client.bufferGenerationEventForTest(131, "{\"event\":\"future.event.next\"}");
+                try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
+                try std.testing.expect(generation_event.eventGenerationForTest(&owner.event) > stale_generation);
+                try std.testing.expectEqual(@as(usize, 2), slot.current.pin_owner.cleanup_pin_count);
+                live_view = try owner.event.view();
+                // C2 is the cleanup oracle: even a coherently forged dangling gen1 payload pointer
+                // must not be followed after the trusted registry identifies the live gen2 owner.
+                generation_event.corruptPayloadPointerCoherentlyForTest(&stale_owner);
+                owner.event = stale_owner;
+            }
+
+            no_free_allocator.target_addr = @intFromPtr(live_view.payload.ptr);
+            no_free_allocator.target_len = live_view.payload.len;
+            no_free_allocator.armed = true;
+            if (corruption == .byte_pristine)
+                slot.current.client.poison(.capability_incompatible);
+            switch (corruption) {
+                .byte_pristine => generation_event.corruptToPristineForTest(&owner.event),
+                .lease => generation_event.corruptLeaseForTest(&owner.event),
+                .coherent_lease_owner_pointer => generation_event.corruptLeaseOwnerPointerCoherentlyForTest(&owner.event),
+                .payload_length => generation_event.corruptPayloadLengthForTest(&owner.event),
+                .coherent_payload_pointer => generation_event.corruptPayloadPointerCoherentlyForTest(&owner.event),
+                .coherent_event_generation => generation_event.corruptEventGenerationCoherentlyForTest(&owner.event),
+                .same_address_stale_public_owner => {},
+                .invalid_lifecycle => generation_event.corruptLifecycleForTest(&owner.event, 0xFF),
+                .invalid_admission => generation_event.corruptAdmissionTagForTest(&owner.event, 0xFF),
+                .seal => generation_event.corruptSealForTest(&owner.event),
+                .coherent_payload => generation_event.corruptPayloadCoherentlyForTest(&owner.event),
+            }
+            if (corruption == .seal) {
+                const projection = try generation_event.releaseProjection(&owner.event);
+                var prepared: client_slot_mod.PreparedGenerationEventRelease = .{};
+                const release = try client_slot_mod.prepareGenerationEventRelease(.{
+                    .owner = owner.transport.ownerQuery(),
+                    .bound_stream_id = owner.transport.bound_stream_id,
+                    .event_owner_addr = @intFromPtr(&owner.event),
+                }, projection, &prepared);
+                switch (release) {
+                    .clean => return error.TestUnexpectedResult,
+                    .corrupt => {},
+                }
+                const prepared_snapshot = prepared;
+                generation_event.publishTerminal(&owner.event);
+                client_slot_mod.commitGenerationEventRelease(&prepared);
+                generation_event.finalizeTerminal(&owner.event);
+
+                if (builtin.os.tag == .macos) {
+                    var stderr_pipe: [2]c_int = undefined;
+                    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
+                    const child = c.fork();
+                    try std.testing.expect(child >= 0);
+                    if (child == 0) {
+                        _ = alarm(5);
+                        _ = c.close(stderr_pipe[0]);
+                        if (c.dup2(stderr_pipe[1], 2) < 0) std.c._exit(126);
+                        _ = c.close(stderr_pipe[1]);
+                        prepared = prepared_snapshot;
+                        client_slot_mod.commitGenerationEventRelease(&prepared);
+                        std.c._exit(0);
+                    }
+                    _ = c.close(stderr_pipe[1]);
+                    defer _ = c.close(stderr_pipe[0]);
+                    var status: c_int = 0;
+                    try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+                    const unsigned_status: u32 = @bitCast(status);
+                    try std.testing.expect(c.W.IFSIGNALED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0);
+                    try std.testing.expect(!(c.W.IFSIGNALED(unsigned_status) and c.W.TERMSIG(unsigned_status) == c.SIG.ALRM));
+                    var panic_bytes: [4096]u8 = undefined;
+                    var panic_len: usize = 0;
+                    while (panic_len < panic_bytes.len) {
+                        const count_read = try posix.read(stderr_pipe[0], panic_bytes[panic_len..]);
+                        if (count_read == 0) break;
+                        panic_len += count_read;
+                    }
+                    try std.testing.expect(std.mem.indexOf(
+                        u8,
+                        panic_bytes[0..panic_len],
+                        "event recovery permit replayed or drifted",
+                    ) != null);
+                }
+            } else {
+                try std.testing.expectError(error.Corrupt, owner.transport.releaseEvent(&owner.event));
+            }
+            try std.testing.expectEqual(@as(usize, 0), no_free_allocator.armed_free_count);
+            try std.testing.expectEqual(@as(usize, 0), no_free_allocator.target_free_count);
+            no_free_allocator.armed = false;
+            try std.testing.expectEqual(@as(usize, 1), slot.current.pin_owner.cleanup_pin_count);
+            try std.testing.expectEqual(
+                if (corruption == .byte_pristine)
+                    client_poison.ConnectionReason.capability_incompatible
+                else
+                    client_poison.ConnectionReason.local_invariant_violation,
+                slot.current.client.firstPoisonReason().?,
+            );
+            try std.testing.expect(slot.current.client.unusable);
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                owner.transport.sendInputNonBlocking("after-corrupt-event"),
+            );
+            try std.testing.expectError(error.Terminal, owner.transport.releaseEvent(&owner.event));
+            try std.testing.expectError(error.Terminal, owner.event.view());
+            const release_outcome = owner.lease.release(slot.pid);
+            try std.testing.expectEqual(@TypeOf(release_outcome).released, release_outcome);
+            try slot.current.cleanup_registry.beginBoundDrop(
+                reservation.cleanup,
+                reservation.identity,
+                131,
+            );
+            try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+            try slot.current.cleanup_registry.completeActiveDrop(
+                reservation.cleanup,
+                reservation.identity,
+                131,
+            );
+            owner.binding.lifecycle = .terminal;
+        }
+    };
+    inline for (std.meta.tags(EventCorruptionCase)) |corruption|
+        try Fixture.run(corruption);
 }
 
 test "CR3a-2c3d C1 event destination rejects canonical owner aliases and overflow" {

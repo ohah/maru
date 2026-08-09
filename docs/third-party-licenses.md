@@ -4,6 +4,19 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 > 빌드/실행에만 쓰고 산출물에 **포함하지 않는** dev/test 의존성(libvterm·libghostty-vt 등)은 여기 대상이 아니다 — [project-rules.md](project-rules.md) §의존성, [references.md](references.md) 참고. 이 문서는 **배포물(`.app`/`.dmg`)에 실제로 들어가는** 자산만 다룬다.
 
+## 번들 코드 라이브러리
+
+바이너리에 링크되어 배포물에 포함되는 제3자 코드다. **폰트와 달리 원본 무수정 재배포가 아니라 컴파일 산출물이 들어가므로**, 라이선스 전문을 앱 리소스에 동봉하고 attribution을 유지한다.
+
+| 라이브러리 | 용도 | 라이선스 | 출처 |
+| --- | --- | --- | --- |
+| tree-sitter (core) | 편집기 syntax 1층 — 증분 파싱 런타임([native-editor.md](native-editor.md) §5.3) | MIT | <https://github.com/tree-sitter/tree-sitter> |
+| tree-sitter grammar (언어별) | 각 언어의 생성 파서(`parser.c`) | **개별 확인** — permissive(MIT·Apache-2.0·BSD·ISC)만 채택하고 copyleft는 받지 않는다 | 언어별 저장소 |
+
+- **번들 언어는 명시 목록으로 관리한다** — grammar마다 `parser.c`가 붙어 배포물이 커지므로 열린 집합으로 두지 않는다. 목록과 추가 절차는 [implementation-plan.md](implementation-plan.md)가 소유한다.
+- **grammar를 추가하는 PR은 이 표에 행을 더한다.** 라이선스 확인 없이 grammar를 넣지 않는다.
+- 이것이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **첫 예외**이며, 그 문서가 요구한 사용자 논의를 거쳤다(2026-08-09).
+
 ## 번들 폰트
 
 `assets/fonts/<Family>/`의 폰트를 `build.zig`가 `Maru.app/Contents/Resources/Fonts/`로 복사하고, `MaruAppHost-Info.plist`의 `ATSApplicationFontsPath`가 실행 시 등록한다(메커니즘 단일 출처: [font-strategy.md](font-strategy.md) §번들 폰트). 동봉 폰트는 모두 **원본 무수정**으로 재배포한다.

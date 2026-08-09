@@ -891,9 +891,11 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 1. **`PanelKind.editor`·ABI/wire 확장은 만들지 않는다(2026-07-31).** (a′)의 직접 귀결이다 — 0을 뒤집을 때만 되살아난다.
 
-2. ~~**`@codemirror/merge`를 쓴다(2026-07-31).** 번들 가능성과 제품 WebKit 런타임이 모두 실증됐다(§7.4). 제품 번들 편입은
-   E1에서 하고, 그때 번들 크기를 다시 잰다.~~ → **소멸(2026-08-09 엔진 개정, §1.1).** diff 본문이 네이티브라 이 의존을
-   도입하지 않는다. 실증 결과 자체는 유효하나 소비처가 없어졌다.
+2. ~~**`@codemirror/merge`를 쓴다(2026-07-31).**~~ → **소멸(2026-08-09 엔진 개정, §1.1).** diff 본문이 네이티브로 가므로
+   이 의존을 유지하지 않는다. **정정**: 이 항목은 "제품 번들 편입은 E1에서"라고 적었으나 실제로는 `web/src/diff-view.ts`가
+   작성돼 `main.ts`가 `bootDiff`를 import하므로 **이미 번들에 들어가 있다**. 다만 [검증 매트릭스](verification-matrix.md)가
+   "MergeView는 번들·WebKit·CSP 어느 것도 확인된 적이 없다"고 적듯 **제품 WebKit 검증은 통과한 적이 없고**(§7.4 gate RED),
+   그 미검증이 오히려 네이티브 이관의 근거를 보탠다 — Monaco를 기각한 이유가 같은 관문이었다(§1).
 
 3. ~~editor origin 한정 `style-src 'unsafe-inline'` 허용 여부~~ → **소멸(FP12b, 2026-07-22 사용자 결정으로 이미 닫힘).**
    app origin은 `'unsafe-inline'`, render origin은 hash 핀이며 그 완화 이유가 CM6 style-mod다(§2·§7.2). editor는 그 위에

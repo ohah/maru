@@ -33,6 +33,7 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `font` | 폰트 로딩·셰이핑·글리프 atlas | `font` `glyph` |
 | `chrome` | Zig+GPU UI — 사이드바·탭·모달·팔레트·세팅 GUI·주소창 필드 | `chrome` `sidebar` `settings` `palette` `text-field` |
 | `file-panel` | 파일 패널·뷰어/편집기·파일 트리·도크 | `file-panel` `file-tree` `mermaid` |
+| `editor` | 네이티브 편집기 — 문서 모델(버퍼·selection·undo)·시각 매핑·syntax·diff 본문 | `editor` `diff` `syntax` |
 | `web-panel` | WKWebView 합성·인앱 브라우저·`web/` 콘텐츠 | `web-panel` `browser` |
 | `control-plane` | CLI·IPC·`browser.*` 제어·capability | `control` `cli` |
 | `session-host` | 영속 host·runtime 이관·host 업그레이드 | `session-host` |

@@ -17,6 +17,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const collapsed_toggle_gap_cells = app_session_mod.collapsed_toggle_gap_cells;
 const notificationLocation = app_session_mod.notificationLocation;
 const is_macos = app_session_mod.is_macos;
@@ -47,7 +48,7 @@ pub fn buildNotificationItems(self: *AppSession, arena: std.mem.Allocator) ![]ch
     const now: i128 = std.Io.Clock.awake.now(self.io).nanoseconds;
     for (items, 0..) |*it, i| {
         const h = self.notification_history.items[len - 1 - i]; // 역순: 최신이 먼저
-        const alive = self.findTermWhere(h.surface_id, struct {
+        const alive = term_ops.findTermWhere(self, h.surface_id, struct {
             fn pred(want: u64, term: *Term) bool {
                 return term.surface.id == want;
             }

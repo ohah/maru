@@ -20,6 +20,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const barMetrics = app_session_mod.barMetrics;
 const pane_ops = @import("pane.zig");
 const settings_ops = @import("settings.zig");
@@ -436,7 +437,7 @@ pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
     if (!self.surface_initialized or bytes.len == 0) return true;
     // imeBegin/첫 marked update가 고정한 대상이 있으면 그 surface로 보낸다. AppKit 콜백 사이에
     // 활성 pane/tab이 바뀌어도 확정 바이트가 새 터미널로 새지 않는다.
-    const target_id = self.ime_terminal_target_id orelse self.activeSurface().id;
+    const target_id = self.ime_terminal_target_id orelse term_ops.activeSurface(self).id;
     return sendCommittedTextTo(self, target_id, bytes);
 }
 
@@ -452,7 +453,7 @@ pub fn sendCommittedTextTo(self: *AppSession, target_id: u64, bytes: []const u8)
     // 선택 해제도 같은 이유로 여기가 사이트다 — macOS는 평범한 글자 입력을 IME 확정으로 커밋해
     // handleKeyEvent를 우회하므로(mouse-hide-while-typing과 같은 사정), 키 경로에만 걸면 실제 타이핑에
     // 반응하지 않는다. 바이트가 **실제로 큐에 수락된 뒤에만** 해제해 폐기된 확정이 하이라이트를 지우지 않게 한다.
-    if (self.loaded_config.config.input.selection_clear_on_typing) self.clearSurfaceSelection(target_id);
+    if (self.loaded_config.config.input.selection_clear_on_typing) term_ops.clearSurfaceSelection(self, target_id);
     return true;
 }
 
@@ -504,7 +505,7 @@ pub fn routeTerminalCommittedWithReplay(self: *AppSession, target_id: u64, text:
     self.total_terminal_input_events += 2;
     self.total_terminal_input_bytes += text.len + replay.len;
     // 확정+replay 쌍도 타이핑이다 — sendCommittedTextTo와 같은 규율로 수락 후에만 선택을 해제한다.
-    if (self.loaded_config.config.input.selection_clear_on_typing) self.clearSurfaceSelection(target_id);
+    if (self.loaded_config.config.input.selection_clear_on_typing) term_ops.clearSurfaceSelection(self, target_id);
     self.flushPendingPaste();
     return true;
 }
@@ -529,7 +530,7 @@ pub fn encodeImeReplayKeyTo(
     if (surface.remote != null) {
         // RemoteRuntime observation이 현재 wire로 노출하는 입력 모드는 DECCKM뿐이다. 나머지는
         // 기존 remote key path와 같은 placeholder 기본값을 쓰며, protocol 확장은 별도 범위다.
-        if (self.findTermWhere(target_id, struct {
+        if (term_ops.findTermWhere(self, target_id, struct {
             fn pred(id: u64, term: *Term) bool {
                 return term.kind == .terminal and term.surface.id == id;
             }
@@ -553,7 +554,7 @@ pub fn imeTerminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface
     // 정상 입력 중인 target은 대부분 app_window.active와 같다. 이 fast path는 전체 Term 순회를
     // 피하고, 최소 fixture가 app_window만 세운 기존 IME 계약 테스트도 같은 제품 경로를 탄다.
     if (self.app_window.active()) |active| if (active.id == id) return active;
-    return self.terminalSurfaceById(id);
+    return term_ops.terminalSurfaceById(self, id);
 }
 
 /// first+second를 한 capacity reservation 뒤에 append한다. first는 IME 확정 문자열이라 선택적으로

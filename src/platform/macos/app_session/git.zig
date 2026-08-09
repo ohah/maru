@@ -17,6 +17,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const scroll_ops = @import("scroll.zig");
 const diag_gate = app_session_mod.diag_gate;
 const git_command = app_session_mod.git_command;
@@ -202,7 +203,7 @@ pub fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
         if (repoRootFor(root.path, buf)) |found| return found;
     }
     const term = tab_ops.activeTab(self).activeTerm();
-    self.refreshTermObservation(term, false, false);
+    term_ops.refreshTermObservation(self, term, false, false);
     const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     return repoRootFor(cwd, buf);
 }
@@ -350,7 +351,7 @@ pub fn diffTermFor(self: *AppSession, abs_path: []const u8, base: dock_panel.Dif
 /// (사이드바는 매 프레임 빌드되므로 fs 읽기를 cwd 변경으로 게이트). 없으면 null. 반환은 term 소유(다음 cwd 변경/
 /// teardown까지 유효). 파생값이라 영속 안 함 — restore가 cwd에서 재도출.
 pub fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
-    self.refreshTermObservation(term, false, false);
+    term_ops.refreshTermObservation(self, term, false, false);
     const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     return termGitBranchForCwd(self, term, cwd);
 }

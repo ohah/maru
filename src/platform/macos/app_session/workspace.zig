@@ -24,6 +24,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
 const assertPinnedPrefixRuntime = AppSession.assertPinnedPrefixRuntime;
 const file_tree_backend = app_session_mod.file_tree_backend;
@@ -310,9 +311,9 @@ pub fn windowTitle(self: *AppSession) []const u8 {
     if (!self.surface_initialized) return &.{};
     // 4e: 활성 Term이 web이면 sentinel core엔 OSC 제목이 없어 빈값이 나온다 — kind 파생 라벨("Browser"/
     // "Markdown", custom_name 우선)을 창 제목으로 쓴다(termLabel 단일 해석). terminal 경로는 그대로.
-    if (!self.activeTermIsTerminal()) return termLabel(pane_ops.activePane(self).activeTerm());
+    if (!term_ops.activeTermIsTerminal(self)) return termLabel(pane_ops.activePane(self).activeTerm());
     const term = pane_ops.activePane(self).activeTerm();
-    self.refreshTermObservation(term, false, false);
+    term_ops.refreshTermObservation(self, term, false, false);
     if (term.rt.observation.availability == .unavailable) return &.{};
     return term.rt.observation.window_title.items;
 }
@@ -479,7 +480,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
     // deferred restore 세션은 이 publish 지점까지 PTY/surface/frame loop가 0개였다. 저장 모델의 Term들이 모두
     // stage된 뒤에만 첫 surface를 활성화하므로 성공 복원은 throwaway fresh shell을 만들지 않는다.
-    self.finishInitialSurface();
+    term_ops.finishInitialSurface(self);
     file_panel_ops.resetFilePanelTransientStateForDockReplacement(self);
     if (self.dock_initialized) self.dock.deinit();
     self.dock = new_dock;

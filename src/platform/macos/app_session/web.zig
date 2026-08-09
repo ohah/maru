@@ -26,6 +26,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const input_ops = @import("input.zig");
 const dock_layout = app_session_mod.dock_layout;
 const nav_button_w = app_session_mod.nav_button_w;
@@ -91,7 +92,7 @@ pub fn addrEditCaretRect(self: *AppSession) ?chrome.draw.Rect {
 /// 판정용 — Swift가 원본 창 web surface destroy 전이 시 "이 surface가 **다른 창** 세션에 아직 live인가"로 이동↔닫기를
 /// 구분한다(live=이동→WKWebView 재부모화·`browser.closed` 억제, 부재=진짜 닫힘→파괴). 순수 트리 조회(할당 없음).
 pub fn hasWebSurface(self: *AppSession, surface_id: u64) bool {
-    if (self.findTermWhere(surface_id, struct {
+    if (term_ops.findTermWhere(self, surface_id, struct {
         fn pred(id: u64, term: *Term) bool {
             return term.kind == .web and term.surfaceId() == id;
         }
@@ -111,7 +112,7 @@ pub fn hasWebSurface(self: *AppSession, surface_id: u64) bool {
 pub fn createAdoptedWebTermInActivePane(self: *AppSession) !u64 {
     const pane = pane_ops.activePane(self);
     const term = try createWebTerm(self, .browser); // 팝업 = untrusted browser 고정(§7 격리)
-    errdefer self.destroyTerm(term); // append 실패 시 방금 만든 term 롤백(newWebTermInActivePane과 동형)
+    errdefer term_ops.destroyTerm(self, term); // append 실패 시 방금 만든 term 롤백(newWebTermInActivePane과 동형)
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1); // 새 탭으로 포커스(사용자가 연 새 창 = 활성)
     self.metal_dirty = true;
@@ -797,7 +798,7 @@ pub fn webAppActionSource(self: *AppSession, surface_id: u64) ?WebAppActionSourc
     if (!self.surface_initialized) return null;
     const term = pane_ops.activePane(self).activeTerm();
     if (!termIsWebBrowser(term) or term.surfaceId() != surface_id) return null;
-    if (self.activeSurface().id != surface_id or !self.ownsSurface(surface_id)) return null;
+    if (term_ops.activeSurface(self).id != surface_id or !self.ownsSurface(surface_id)) return null;
     return .workspace_browser;
 }
 

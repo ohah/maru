@@ -14,6 +14,7 @@
 const builtin = @import("builtin");
 
 const AppSession = @import("../app_session.zig").AppSession;
+const term_ops = @import("term.zig");
 
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
 /// 닫혀 있으면 다른 배타 오버레이(notice·palette)를 먼저 닫고 연다(검색어 초기화는 컴포넌트의 show가).
@@ -43,7 +44,7 @@ pub fn findNavigate(self: *AppSession, forward: bool) void {
     if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
     if (self.find_matches.items.len == 0) {
         // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
-        const s = self.activeSurface();
+        const s = term_ops.activeSurface(self);
         s.lockCore(self.io);
         s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
         s.unlockCore(self.io);
@@ -64,7 +65,7 @@ pub fn recomputeFind(self: *AppSession) void {
     {
         // findMatches는 코어 mutate(ensureScrollbackRewrapped로 스크롤백 realloc)+읽기 — 락 아래
         // (docs/io-render-threading.md PR3 — 리더 core.write와 경합 시 UAF/크래시 방지).
-        const s = self.activeSurface();
+        const s = term_ops.activeSurface(self);
         s.lockCore(self.io);
         defer s.unlockCore(self.io);
         s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
@@ -85,14 +86,14 @@ pub fn recomputeFind(self: *AppSession) void {
 /// `recomputeFind`(증분 검색)가 분기를 우회했다 — 원격에서만 타이핑 중 매치로 스크롤이 안 되던 원인이다.
 pub fn scrollToCurrentMatch(self: *AppSession) void {
     if (!self.surface_initialized) return;
-    if (builtin.os.tag == .macos and self.activeSurface().remote != null) {
+    if (builtin.os.tag == .macos and term_ops.activeSurface(self).remote != null) {
         self.remote_find_scroll_pending = true;
         self.remote_find_dirty = true;
         return;
     }
     const cur = self.chrome_host.find.current;
     if (cur >= self.find_matches.items.len) return;
-    const surface = self.activeSurface();
+    const surface = term_ops.activeSurface(self);
     // scrollToAbs는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
     self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_abs = self.find_matches.items[cur].start.row }, self.io) catch {};
 }

@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
@@ -428,13 +429,13 @@ pub fn closeFileTermForEntry(self: *AppSession, entry: *const dock_panel.Entry) 
                         return false;
                     }
                     self.ended_seen = true;
-                    self.activeSurface().process_state = .exited;
+                    term_ops.activeSurface(self).process_state = .exited;
                     self.metal_dirty = true;
                     return true;
                 }
                 // 정규 경로에 위임한다 — 직접 orderedRemove하면 배경 탭의 surface_ptrs 재바인딩과 active
                 // 시프트 보정, pane collapse, 마지막 탭의 종료 latch를 빠뜨린다(전부 closeTermAt이 소유).
-                self.closeTermAt(tab_index, pane, term_index);
+                term_ops.closeTermAt(self, tab_index, pane, term_index);
                 self.metal_dirty = true;
                 return true;
             }
@@ -805,7 +806,7 @@ pub fn rebuildFileTermSurface(self: *AppSession, entry: *dock_panel.Entry) !void
                 const replacement = try web_ops.createWebTerm(self, panelKindForEntryKind(entry.kind));
                 // 소유를 먼저 떼어 destroyTerm이 entry·path까지 해제하지 않게 한다.
                 term.file_entry = null;
-                self.destroyTerm(term);
+                term_ops.destroyTerm(self, term);
                 replacement.file_entry = entry;
                 entry.surface_id = replacement.surfaceId();
                 pane.terms.items[term_index] = replacement;
@@ -913,7 +914,7 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
     // updateFileTree는 renderer보다 먼저 tick에서 돈다. 여기서 observation을 새로 읽지 않으면 OSC 7의
     // cwd 변경을 아직 보지 못해 한 번도 reveal하지 않는 frame이 생긴다. readObservation은 runtime cache만
     // 갱신하며 filesystem scan은 worker 경계에 그대로 남는다.
-    self.refreshTermObservation(term, false, false);
+    term_ops.refreshTermObservation(self, term, false, false);
     // 파일·브라우저 탭은 cwd가 없다 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
     if (term.rt.observation.availability == .unavailable) return;
     const cwd = term.rt.observation.cwd.items;
@@ -1158,7 +1159,7 @@ pub fn retireFilePanelSurface(self: *AppSession, entry: *dock_panel.Entry, retir
     if (surface_id == 0) return;
     retired_focus.* = retired_focus.* or fileSurfaceOwnsInput(self, surface_id);
     removeFilePanelQueuedActions(self, surface_id);
-    self.notifySurfaceClosed(surface_id);
+    term_ops.notifySurfaceClosed(self, surface_id);
     entry.surface_id = 0;
 }
 
@@ -3223,7 +3224,7 @@ pub fn transferRestoredFileEntries(
     defer pending.deinit(self.allocator);
     try pending.ensureTotalCapacity(self.allocator, count);
     errdefer for (pending.items) |p| {
-        self.destroyTerm(p.term); // term.file_entry는 아직 null이라 heap을 건드리지 않는다
+        term_ops.destroyTerm(self, p.term); // term.file_entry는 아직 null이라 heap을 건드리지 않는다
         self.allocator.destroy(p.heap);
     };
     try pane.terms.ensureUnusedCapacity(self.allocator, count);

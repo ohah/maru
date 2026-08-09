@@ -204,7 +204,10 @@ pub const inventory = [_]Proof{
     // 옮긴 블록에 `@field`가 없다. 세션 기록 도크(F1)의 ABI facade 10개는 이름이 agent여도 두고 왔다.
     // git·SCM을 `app_session/git.zig`로 떼어내며 또 바뀐다(F15). count는 2 그대로다 — 옮긴 블록에
     // `@field`가 없다. `scmDrawWindow`는 이름만 SCM이고 dock(F5)의 facade라 두고 왔다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "171c736f31487e1f24951ff4d9616c0c40c8b1a8eeb748ed60455f476f485e23" },
+    // term·surface를 `app_session/term.zig`로 떼어내며 또 바뀐다(F16). count는 2 그대로다 — 옮긴
+    // 블록에 `@field`가 없다. 소유권 게이트(CR3a-1)가 파일 단위로 고정한 `RemoteSessionAdapter.initInPlace`
+    // 호출자 3개는 게이트를 느슨하게 하는 대신 허브에 남겼다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d5ffd5b1ce33e621b8904c5f58d4bc310867ad1c0d699630a5141c7e27492600" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -214,15 +217,13 @@ pub const inventory = [_]Proof{
     // F14에서 agent 함수 alias를 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
     // F15에서 git 함수 alias를 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
     // 리소스 팝오버(탭별 행 조립·앵커·클릭 점프)가 붙어 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "40c09c39e72fc49f13eef065859e863b3f7252f649165e75b14b0eab6580dbb7" },
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝) — 위 주석이 "등재한다"고
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "e506890dfe1cd287463f4afb4b6027a94d749668da6e7567f51b91ac0577499d" },
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 이 항목이 **빠져 있어**
     // 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다 — 이사한 반사를 여기 등재해 짝을 맞춘다.
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 위 주석이 "등재한다"고
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "e506890dfe1cd287463f4afb4b6027a94d749668da6e7567f51b91ac0577499d" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "a1a9abc148e73de0dc4307f0a19598c54961be53caf78d7551e2a236f5090bcd" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

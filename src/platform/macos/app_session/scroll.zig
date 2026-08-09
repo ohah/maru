@@ -21,6 +21,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const overlay_scrollbar_min_thumb_px = app_session_mod.overlay_scrollbar_min_thumb_px;
@@ -196,8 +197,8 @@ pub fn clampScmScroll(self: *AppSession) void {
 /// 이 함수로 넘기는 얇은 글루다).
 pub fn scroll(self: *AppSession, delta_up: i32) void {
     // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상(스크롤백)이 없다(sentinel) — no-op(웹 스크롤은 WKWebView 소유).
-    if (!self.surface_initialized or !self.activeTermIsTerminal()) return;
-    const surface = self.activeSurface();
+    if (!self.surface_initialized or !term_ops.activeTermIsTerminal(self)) return;
+    const surface = term_ops.activeSurface(self);
     // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
     self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, delta_up) }, self.io) catch {};
     self.metal_dirty = true;
@@ -356,7 +357,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // surface와 rect는 한 leaf에서 온 한 쌍이라 함께 unwrap한다 — 둘을 따로 풀면 다른 분기에서 와 pane↔좌표가
     // 어긋날 수 있다(이 rework가 막으려는 것). rect는 트래킹 리포트 좌표용(pxToCellIn).
     const hit = pane_ops.paneTargetAt(self, x_px, y_px);
-    const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ self.activeSurface(), self.active_pane_rect };
+    const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ term_ops.activeSurface(self), self.active_pane_rect };
     // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
     // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
     // mouse_tracking 읽기는 메인 락-아래(읽기 위임 안 함, §9.1). reportMouse(코어 mutate+응답)는 full (a)
@@ -379,7 +380,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
             // 트래킹 앱이 휠을 소비하면 그 앱이 화면을 굴린다 — 남은 선택은 옛 좌표를 가리키는 유령이라
             // 먼저 해제한다(Ghostty: 리포팅 중 스크롤이면 setSelection(null)). lines 반복 리포트와 달리
             // 해제는 이벤트당 한 번이면 충분하다(lines만큼 반복할 이유가 없다).
-            self.clearSurfaceSelection(target.id);
+            term_ops.clearSurfaceSelection(self, target.id);
             if (self.pxToCellIn(target, rect, x_px, y_px)) |cell| {
                 const wb: u8 = if (lines > 0) 64 else 65;
                 var n: i32 = if (lines > 0) lines else -lines;
@@ -406,7 +407,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
 /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
 /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 paneTargetAt으로 고른 surface에 직접 쓴다.
 pub fn scrollLines(self: *AppSession, lines: i32) void {
-    scrollSurfaceLines(self, self.activeSurface(), lines);
+    scrollSurfaceLines(self, term_ops.activeSurface(self), lines);
 }
 
 /// 주어진 surface를 줄 수만큼 스크롤한다 — 휠은 커서 아래 panel(비활성 가능), 키보드는 활성. alt screen +
@@ -419,7 +420,7 @@ pub fn scrollSurfaceLines(self: *AppSession, surface: *maru.session.Surface, lin
     var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     var alt_len: usize = 0;
     if (surface.remote != null) {
-        const loc = self.findTermWhere(surface.id, struct {
+        const loc = term_ops.findTermWhere(self, surface.id, struct {
             fn pred(id: u64, term: *Term) bool {
                 return term.kind == .terminal and term.surface.id == id;
             }
@@ -452,7 +453,7 @@ pub fn scrollSurfaceLines(self: *AppSession, surface: *maru.session.Surface, lin
     if (is_alt) {
         // 휠을 화살표 키로 바꿔 프로그램에 보내는 순간 그 화면은 프로그램이 다시 그린다 — 남은 선택은
         // 좌표가 어긋난 유령이 되므로 해제한다(Ghostty도 이 변환 경로에서 항상 setSelection(null)).
-        self.clearSurfaceSelection(surface.id);
+        term_ops.clearSurfaceSelection(self, surface.id);
         // alt screen + alternate scroll(DECSET 1007): 프로그램에 화살표 키를 보낸다(PTY write — core mutate 아님).
         // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput을 하면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍.
         const bytes = key_buffer[0..alt_len];
@@ -502,7 +503,7 @@ pub fn applyDragAutoscroll(self: *AppSession) void {
     self.drag_autoscroll_accum_ms += self.msPerTick();
     if (self.drag_autoscroll_accum_ms < drag_autoscroll_step_ms) return;
     self.drag_autoscroll_accum_ms -= drag_autoscroll_step_ms;
-    const surface = self.activeSurface();
+    const surface = term_ops.activeSurface(self);
     const core = &surface.core;
     // selection_anchor/view_offset/selection_head 읽기 + scrollViewport/selectionExtend(코어 변경)는 리더
     // core.write와 경합 — 메서드 전체를 락 아래(docs/io-render-threading.md PR3). 짧은 메서드라 락 비용 무시 가능;
@@ -525,8 +526,8 @@ pub fn applyDragAutoscroll(self: *AppSession) void {
 
 pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
     // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상 없음(sentinel) — no-op(scroll과 동형).
-    if (!self.surface_initialized or !self.activeTermIsTerminal()) return;
-    const rows = self.activeSurface().core.size.rows;
+    if (!self.surface_initialized or !term_ops.activeTermIsTerminal(self)) return;
+    const rows = term_ops.activeSurface(self).core.size.rows;
     const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
     scrollLines(self, delta_pages *| page);
 }
@@ -695,7 +696,9 @@ pub fn scrollbarGrabAt(self: *const AppSession, x_px: f64, y_px: f64) ?f32 {
     // 호출자(hoverCursor·mouse)가 락 밖에서 부르는 hit-test라 **여기서 잡는다** — `scrollStateOf`의 계약이
     // "호출자가 lockCore 보유"다. 옛 주석은 "스칼라 두 개뿐이라 괜찮다"고 적었지만 그 판단은 계약이 할 몫이고,
     // 원격 backing이면 이 락이 곧 RemoteScreen mutex라 delta-apply와의 직렬화가 실제로 필요하다.
-    const grab_surface = @constCast(self).activeSurface();
+    const grab_surface = term_ops.activeSurface(
+        @constCast(self),
+    );
     const scroll_state = blk: {
         grab_surface.lockCore(self.io);
         defer grab_surface.unlockCore(self.io);
@@ -732,7 +735,7 @@ pub fn dragScrollbarTo(self: *AppSession, y_px: f64) void {
     // 코어 읽기(scrollbackLen·viewOffset)는 락 아래(§9.1). scrollViewport mutate는 **락 밖에서** reader에 위임
     // (full (a)) — 락을 잡은 채 enqueueCoreCommand하면 non-interactive 폴백이 같은 core_mutex를 재취득해 재진입
     // (panic/deadlock). 그래서 읽기만 락에 가두고, enqueue는 락 해제 후 한다(다른 위임 사이트와 같은 규율).
-    const surface = self.activeSurface();
+    const surface = term_ops.activeSurface(self);
     const snap = blk: {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);

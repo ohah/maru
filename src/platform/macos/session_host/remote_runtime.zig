@@ -5206,6 +5206,10 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
     sibling.pending_controls = .empty;
     sibling.blocking_flush_active = false;
     defer sibling.pending_controls.deinit(allocator);
+    try sibling.pending_controls.append(allocator, .{
+        .barrier = "preserve-me-new".len,
+        .op = .scroll_to_bottom,
+    });
     sibling.resync_needed = false;
     sibling.observation = .{};
 
@@ -5214,6 +5218,8 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
     try sibling.sendInput("-new");
     try testing.expectEqual(RemoteRuntime.PumpResult.idle, try sibling.pumpDelta());
     try testing.expectEqualStrings("preserve-me-new", sibling.direct_input.items);
+    try testing.expectEqual(@as(usize, 1), sibling.pending_controls.items.len);
+    try testing.expectEqual(@as(usize, "preserve-me-new".len), sibling.pending_controls.items[0].barrier);
     try testing.expect(client.pending_outbound != null);
     try testing.expectEqual(@as(usize, 0), client.pending_outbound.?.offset);
     try testing.expect(client.hasBufferedControllerRevoke());

@@ -1299,7 +1299,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `error{InvalidOwner, Busy}!Decision`이고 canonical active-owner 실행의 `Decision` payload만 `blocked|admitted`다. pre-acquire
    invalid/copy/stale/already-consumed replay는 `InvalidOwner`, operation/lease contention은 `Busy`의 기존 typed error channel을
    재사용하며 각 facade가 위 표의 결과로 map한다. blocker는 표의 owner/state를 하나도 바꾸지 않는다.
-   C3-3a1 authority substrate는 product caller exact 0인 dormant gate로 구현됐다. C3-3a2 final-admission substrate와 C3-3a3
+   C3-3a1 authority substrate와 C3-3a2 final-admission substrate는 product caller exact 0인 dormant gate로 구현됐다. C3-3a3
    product activation은 아직 미구현이다. C3-3a3에서
    product take/release와 현재 mutation consumer를 동시에 배선하기 전에는 보호 기능 활성화나 C3-3a 완료를 주장하지 않는다.
    각 mutation family는 ClientSlot owner-thread operation의 single shared pin을 기존 `ClientOperationFence`의 execution lease로
@@ -1309,9 +1309,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    leaf 완료 또는 blocked 판정 -> execution lease를 single shared로 downgrade -> final-address transaction lifecycle consume ->
    `endRegisteredNodeOperation`의 마지막 shared pin release다. canonical owner는 lease-held 상태에서 lifecycle/receipt 검증과 no-fail
    settlement plan을 모두 끝내므로 downgrade 이후 suffix는 실패하지 않는다. 반면 pre-acquire invalid/copy/stale/already-consumed
-   replay는 canonical lease·transaction·pin mutation 0의 typed reject이며, canonical active owner만 위 정산 순서를 수행한다. 새 mutex, fence, generation을
-   만들지 않는다. event handoff 자체는 별도로 위 `StreamOperationPermit`이 소유한다. allocator callback 재진입과 foreign thread는
-   검사 전 mutation 0의 `Busy`다. gate 실패는 allocation, local/wire queue offset,
+   replay는 canonical lease·transaction·pin mutation 0의 typed reject이며, canonical active owner만 위 정산 순서를 수행한다. output이
+   slot/node/operation registry/request owner/binding storage와 겹치는 경우도 execution lease 전에 `InvalidOwner`로 거부한다. 새 mutex, fence, generation을
+   만들지 않는다. event handoff 자체는 별도로 위 `StreamOperationPermit`이 소유한다. allocator callback 재진입과 valid facade authority의
+   foreign-thread 경합은 검사 전 mutation 0의 `Busy`다. 이미 발급된 registered-operation receipt를 다른 thread로 복사한 호출과
+   active transaction의 foreign-thread settlement는 pre-acquire owner 불일치이므로 `InvalidOwner`다. held-operation wrapper는 operation
+   exact extent를 pointer로 직접 선검증하고, caller는 추가 control/prepared authority만 최대 4개 protected-range descriptor로 제공한다.
+   output overlap, overflow 또는 cap 초과는 `InvalidOwner`다. active transaction의 self/ownership/content drift는 raw `u8` tag 선검증,
+   registry-bound ownership mode와 scalar seal로 검출해 fail-stop한다.
+   gate 실패는 allocation, local/wire queue offset,
    callback과 syscall이 모두 0이고, facade 결과는 위 closed 표의 `Busy|AdminBusy|false|observer success no-op`를 그대로 따른다.
    target pending outbound는 offset 0만 취소하고 partial은 connection fail-close하며 sibling
    pending owner는 aggregate 동안 보존·flush 0, aggregate zero 뒤 재개한다.
@@ -1335,9 +1341,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `0 -> 1 -> 2 -> 1 -> 0`, pre-reserve `0 -> 0`, post-reserve abort `0 -> 1 -> 0`, copied registry 거부,
    same-address generation ABA와 typed stale/double settlement delta 0, invalid raw class, counter bound 및 bounded scan/cache 일치를
    검증하며 whole-session-host product take/query caller는 exact 0이다. no-fail continuation/recovery replay와 unauthorized underflow의
-   격리 subprocess 증거는 실제 product activation과 함께 C3-3a3 gate가 소유한다. C3-3a2
-   `test-session-host-2c3d-c3-3a2`는 Debug·ReleaseFast final-admission runtime 7+boundary 1로 다음을 고정한다. final-address
-   admission owner/copy/replay, clear admit와 teardown fence, queued blocker, injected aggregate blocker와 sibling count projection,
+   격리 subprocess 증거는 실제 product activation과 함께 C3-3a3 gate가 소유한다. 구현된 C3-3a2
+   `test-session-host-2c3d-c3-3a2`는 Debug·ReleaseFast final-admission runtime 7+current-family regression 5+boundary 1로 다음을 고정한다. final-address
+   admission owner/copy/replay, active self/ownership drift fail-stop, 두 ownership mode의 foreign settlement 거부, held-owner alias 거부,
+   clear admit와 teardown fence, queued blocker, injected aggregate blocker와 sibling count projection,
    callback/foreign/active-permit contention, API별 closed error/progress/owner-retention 표, 그리고 product caller 0이다. transaction은
    `client_slot.zig`의 기존 `RegisteredNodeOperation`과 `ClientOperationFence` execution lease를 보유하며 새 mutex·fence·aggregate
    generation을 만들지 않는다. 이미 operation을 보유한 control과 a2 test harness는 같은 core predicate를 호출하고 새 registered

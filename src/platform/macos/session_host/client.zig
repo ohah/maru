@@ -5684,6 +5684,15 @@ pub const ClientOperationFence = struct {
         ) == null;
     }
 
+    fn executionLeaseHeld(
+        self: *const ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        return self.identityMatches(client_addr, fence_generation) and
+            self.state.load(.acquire) == execution_lease_bit;
+    }
+
     fn recordIntrusionIfExactExclusive(self: *ClientOperationFence, observed: u64) void {
         if (observed != exclusive_bit) return;
         _ = self.state.cmpxchgStrong(
@@ -12777,10 +12786,7 @@ pub const Client = struct {
         return true;
     }
 
-    /// ClientSlot confirmed-poison owner only. The registered shared pin is upgraded to an
-    /// execution lease so allocator callbacks and foreign-thread raw Client aliases cannot enter
-    /// any public wire mutation until fd and pending-owner disposition are complete.
-    pub fn beginConfirmedGenerationPoisonExclusive(self: *Client) ClientError!void {
+    pub fn beginRegisteredOperationExecutionLease(self: *Client) ClientError!void {
         const fence = self.operation_fence orelse return error.ConnectionClosed;
         fence.upgradeSingleSharedToExecutionLease(
             @intFromPtr(self),
@@ -12791,13 +12797,33 @@ pub const Client = struct {
         };
     }
 
-    pub fn endConfirmedGenerationPoisonExclusive(self: *Client) void {
+    pub fn endRegisteredOperationExecutionLease(self: *Client) void {
         const fence = self.operation_fence orelse
-            @panic("confirmed generation poison fence disappeared");
+            @panic("registered operation execution fence disappeared");
         if (!fence.downgradeExecutionLeaseToSingleShared(
             @intFromPtr(self),
             self.operation_fence_generation,
-        )) @panic("confirmed generation poison fence release failed");
+        )) @panic("registered operation execution fence release failed");
+    }
+
+    pub fn bufferedControllerRevokeUnderRegisteredOperationExecutionLease(
+        self: *const Client,
+    ) ClientError!bool {
+        const fence = self.operation_fence orelse return error.ConnectionClosed;
+        if (!fence.executionLeaseHeld(@intFromPtr(self), self.operation_fence_generation))
+            return error.ConnectionClosed;
+        return self.bufferedControllerRevokeForStreamUnchecked(null);
+    }
+
+    /// ClientSlot confirmed-poison owner only. The registered shared pin is upgraded to an
+    /// execution lease so allocator callbacks and foreign-thread raw Client aliases cannot enter
+    /// any public wire mutation until fd and pending-owner disposition are complete.
+    pub fn beginConfirmedGenerationPoisonExclusive(self: *Client) ClientError!void {
+        return self.beginRegisteredOperationExecutionLease();
+    }
+
+    pub fn endConfirmedGenerationPoisonExclusive(self: *Client) void {
+        self.endRegisteredOperationExecutionLease();
     }
 
     pub fn releaseEndedPurgeExclusiveClean(self: *Client) bool {

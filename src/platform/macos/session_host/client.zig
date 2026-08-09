@@ -12777,6 +12777,29 @@ pub const Client = struct {
         return true;
     }
 
+    /// ClientSlot confirmed-poison owner only. The registered shared pin is upgraded to an
+    /// execution lease so allocator callbacks and foreign-thread raw Client aliases cannot enter
+    /// any public wire mutation until fd and pending-owner disposition are complete.
+    pub fn beginConfirmedGenerationPoisonExclusive(self: *Client) ClientError!void {
+        const fence = self.operation_fence orelse return error.ConnectionClosed;
+        fence.upgradeSingleSharedToExecutionLease(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+        ) catch |err| return switch (err) {
+            error.AdminBusy => error.AdminBusy,
+            error.InvalidOwner, error.InvalidState => error.ConnectionClosed,
+        };
+    }
+
+    pub fn endConfirmedGenerationPoisonExclusive(self: *Client) void {
+        const fence = self.operation_fence orelse
+            @panic("confirmed generation poison fence disappeared");
+        if (!fence.downgradeExecutionLeaseToSingleShared(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+        )) @panic("confirmed generation poison fence release failed");
+    }
+
     pub fn releaseEndedPurgeExclusiveClean(self: *Client) bool {
         const fence = self.operation_fence orelse return false;
         return fence.releaseExclusiveClean(@intFromPtr(self), self.operation_fence_generation);
@@ -12876,6 +12899,16 @@ pub const Client = struct {
     ) void {
         self.latchFirstPoisonReason(reason);
         self.unusable = true;
+    }
+
+    pub fn markDeferredPoisonForTest(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) ClientError!void {
+        if (!builtin.is_test) return error.ConnectionClosed;
+        const operation_fence_held = try self.beginPublicMutation();
+        defer if (operation_fence_held) self.endPublicMutation();
+        self.markPoisonedForDeferredCleanup(reason);
     }
 
     /// ClientSlot-only fail-closed publication while its registered shared operation keeps the

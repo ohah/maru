@@ -499,10 +499,13 @@ pub const GenerationTransport = struct {
         self: *GenerationTransport,
         reason: client_poison.ConnectionReason,
     ) Error!void {
-        const client = self.borrowClient() orelse return error.MovedOrCopied;
-        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
-        if (!slot.streamOperationPermitIdle()) return error.AdminBusy;
-        client.poison(reason);
+        if (!self.requestIdentityValid()) return error.MovedOrCopied;
+        client_slot_mod.poisonGenerationConnection(self.ownerQuery(), reason) catch |err|
+            return switch (err) {
+                error.Busy => error.AdminBusy,
+                error.InvalidOwner => error.MovedOrCopied,
+                error.ConnectionClosed => error.ConnectionClosed,
+            };
     }
 
     fn borrowClient(self: *GenerationTransport) ?*client_mod.Client {
@@ -528,6 +531,7 @@ pub const GenerationTransport = struct {
     }
 
     fn borrowInputClient(self: *GenerationTransport) InputError!*client_mod.Client {
+        if (client_mod.generationAllocatorCallbackActive()) return error.Busy;
         const client = self.borrowClient() orelse return error.InvalidOwner;
         if (!self.controllerBindingValid()) return error.Unauthorized;
         const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
@@ -2321,6 +2325,84 @@ const EventNoFreeAllocator = struct {
     }
 };
 
+const ConfirmedPoisonReentryAllocator = struct {
+    parent: std.mem.Allocator,
+    transport: ?*GenerationTransport = null,
+    client: ?*client_mod.Client = null,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    armed: bool = false,
+    target_free_count: usize = 0,
+    poison_busy: bool = false,
+    input_busy: bool = false,
+    control_busy: bool = false,
+    foreign_raw_busy: bool = false,
+    foreign_teardown_busy: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed and @intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len) {
+            self.armed = false;
+            self.target_free_count += 1;
+            self.transport.?.poison(.peer_contract_violation) catch |err| {
+                self.poison_busy = err == error.AdminBusy;
+            };
+            _ = self.transport.?.sendInputNonBlocking("poison-free-reentry") catch |err| blk: {
+                self.input_busy = err == error.Busy;
+                break :blk 0;
+            };
+            _ = self.transport.?.sendControlNonBlocking(contract.RuntimeControl.scrollToBottom()) catch |err| blk: {
+                self.control_busy = err == error.Busy;
+                break :blk false;
+            };
+            const ForeignProbe = struct {
+                fn run(target: *client_mod.Client, input_busy: *bool, teardown_busy: *bool) void {
+                    _ = target.sendInputNonBlocking(17, "foreign-poison-reentry") catch |err| blk: {
+                        input_busy.* = err == error.AdminBusy;
+                        break :blk 0;
+                    };
+                    target.tryAcquireClientSlotTeardownExclusive() catch |err| {
+                        teardown_busy.* = err == error.AdminBusy;
+                        return;
+                    };
+                    _ = target.abortClientSlotTeardownExclusive();
+                }
+            };
+            var thread = std.Thread.spawn(.{}, ForeignProbe.run, .{
+                self.client.?,
+                &self.foreign_raw_busy,
+                &self.foreign_teardown_busy,
+            }) catch @panic("confirmed poison foreign reentry thread spawn failed");
+            thread.join();
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
 const EventForeignThreadReleaseProbe = struct {
     transport: *GenerationTransport,
     event: *EventOwner,
@@ -3337,6 +3419,22 @@ test "CR3a-2c3a CR3a-2c3c facade rejects every invalid lifecycle and role byte b
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
     try slot.abortStreamOperationPermit(permit);
 
+    // C3-3: a successful facade poison must mean that the canonical connection was actually
+    // terminalized. An exclusive teardown fence used to make Client.poison return silently while
+    // GenerationTransport reported success, so the event consumer could release its only retry
+    // owner and leave sibling mutation usable.
+    try slot.logicalClient().tryAcquireClientSlotTeardownExclusive();
+    var teardown_exclusive_live = true;
+    defer if (teardown_exclusive_live)
+        std.debug.assert(slot.logicalClient().abortClientSlotTeardownExclusive());
+    try std.testing.expectError(
+        error.AdminBusy,
+        transport.poison(.local_invariant_violation),
+    );
+    try std.testing.expect(!slot.logicalClient().unusable);
+    try std.testing.expect(slot.logicalClient().abortClientSlotTeardownExclusive());
+    teardown_exclusive_live = false;
+
     if (builtin.os.tag == .macos) {
         const child = c.fork();
         try std.testing.expect(child >= 0);
@@ -3353,6 +3451,141 @@ test "CR3a-2c3a CR3a-2c3c facade rejects every invalid lifecycle and role byte b
     try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 17);
     slot.current.pin_owner.cleanup_pin_count -= 1;
     binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3d C3-3 confirmed poison closes once and blocks allocator callback reentry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe = ConfirmedPoisonReentryAllocator{ .parent = allocator };
+    const guarded_allocator = probe.allocator();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = guarded_allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3D33,
+        .parser = framing.FrameParser.init(guarded_allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D33);
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&transport),
+    );
+    try mintInPlace(
+        &transport,
+        &slot,
+        @intFromPtr(&transport),
+        @sizeOf(GenerationTransport),
+        reservation,
+    );
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 17);
+    try bindCommittedStreamOwned(&transport, @intFromPtr(&transport), 17);
+    probe.transport = &transport;
+    probe.client = slot.logicalClient();
+
+    const pending = try guarded_allocator.dupe(u8, "partially-written-frame");
+    slot.logicalClient().pending_outbound = .{
+        .frame = pending,
+        .stream_id = 7,
+        .offset = 3,
+    };
+    probe.target_addr = @intFromPtr(pending.ptr);
+    probe.target_len = pending.len;
+    const original_fd = slot.logicalClient().fd;
+    var copied_transport = transport;
+    try std.testing.expectError(
+        error.MovedOrCopied,
+        copied_transport.poison(.local_invariant_violation),
+    );
+    const ForeignPoison = struct {
+        fn run(target: *GenerationTransport, rejected: *bool) void {
+            target.poison(.local_invariant_violation) catch |err| {
+                rejected.* = err == error.MovedOrCopied;
+            };
+        }
+    };
+    var foreign_rejected = false;
+    var foreign_thread = try std.Thread.spawn(.{}, ForeignPoison.run, .{
+        &transport,
+        &foreign_rejected,
+    });
+    foreign_thread.join();
+    try std.testing.expect(foreign_rejected);
+    try std.testing.expect(!slot.logicalClient().unusable);
+    try std.testing.expect(slot.logicalClient().first_poison_reason == null);
+    try std.testing.expectEqual(original_fd, slot.logicalClient().fd);
+    try std.testing.expectEqual(@intFromPtr(pending.ptr), @intFromPtr(slot.logicalClient().pending_outbound.?.frame.ptr));
+
+    slot.logicalClient().io_mode = .{ .external = .{ .saved_flags = 0 } };
+    try std.testing.expectError(error.MovedOrCopied, transport.poison(.local_invariant_violation));
+    try std.testing.expect(!slot.logicalClient().unusable);
+    try std.testing.expect(slot.logicalClient().first_poison_reason == null);
+    try std.testing.expectEqual(original_fd, slot.logicalClient().fd);
+    try std.testing.expectEqual(@intFromPtr(pending.ptr), @intFromPtr(slot.logicalClient().pending_outbound.?.frame.ptr));
+    try std.testing.expectEqual(@as(usize, 3), slot.logicalClient().pending_outbound.?.offset);
+    try std.testing.expectEqualStrings("partially-written-frame", slot.logicalClient().pending_outbound.?.frame);
+    slot.logicalClient().io_mode = .blocking;
+
+    try slot.logicalClient().tryAcquireClientSlotTeardownExclusive();
+    try std.testing.expectError(error.AdminBusy, transport.poison(.local_invariant_violation));
+    try std.testing.expect(!slot.logicalClient().unusable);
+    try std.testing.expect(slot.logicalClient().first_poison_reason == null);
+    try std.testing.expectEqual(original_fd, slot.logicalClient().fd);
+    try std.testing.expectEqual(@intFromPtr(pending.ptr), @intFromPtr(slot.logicalClient().pending_outbound.?.frame.ptr));
+    try std.testing.expectEqual(@as(usize, 3), slot.logicalClient().pending_outbound.?.offset);
+    try std.testing.expectEqualStrings("partially-written-frame", slot.logicalClient().pending_outbound.?.frame);
+    try std.testing.expect(slot.logicalClient().abortClientSlotTeardownExclusive());
+
+    // A legacy deferred poison may already have made the Client unusable while its blocking fd
+    // remained owned. The confirmed effect must converge that state instead of returning Busy
+    // forever, while preserving the original fatal reason.
+    try slot.logicalClient().markDeferredPoisonForTest(.connection_eof);
+    probe.armed = true;
+
+    try transport.poison(.local_invariant_violation);
+    try std.testing.expectEqual(@as(usize, 1), probe.target_free_count);
+    try std.testing.expect(probe.poison_busy);
+    try std.testing.expect(probe.input_busy);
+    try std.testing.expect(probe.control_busy);
+    try std.testing.expect(probe.foreign_raw_busy);
+    try std.testing.expect(probe.foreign_teardown_busy);
+    try std.testing.expect(slot.logicalClient().unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), slot.logicalClient().fd);
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.connection_eof,
+        slot.logicalClient().first_poison_reason.?,
+    );
+    var eof_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &eof_byte, 1));
+    try std.testing.expectError(error.ConnectionClosed, transport.sendInput("closed"));
+
+    // Confirmed terminal state is idempotent and preserves the first reason.
+    try transport.poison(.peer_contract_violation);
+    try std.testing.expectEqual(@as(usize, 1), probe.target_free_count);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.connection_eof,
+        slot.logicalClient().first_poison_reason.?,
+    );
+    try slot.logicalClient().tryAcquireClientSlotTeardownExclusive();
+    try std.testing.expect(slot.logicalClient().abortClientSlotTeardownExclusive());
+
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 17);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 17);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+    slot.deinit();
 }
 
 test "CR3a-2c3a CR3a-2c3c observer binding rejects mutation but permits shared output progress" {

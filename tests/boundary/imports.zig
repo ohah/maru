@@ -377,6 +377,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "hasBufferedControllerRevokeForStream", .receiver_type = immutable, .class = .guarded },
         .{ .name = "terminalReasonInvariant", .receiver_type = immutable, .class = .guarded },
         .{ .name = "poison", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "markDeferredPoisonForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "firstPoisonReason", .receiver_type = immutable, .class = .guarded },
 
         .{ .name = "canMoveToGenerationNode", .receiver_type = immutable, .class = .construction },
@@ -428,6 +429,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "tryDeinitClientSlotExclusiveHeld", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "beginClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "endClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "beginConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "endConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "releaseEndedPurgeExclusiveClean", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "commitEndedPurgeExclusiveTerminal", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "enterGenerationAllocatorCallback", .receiver_type = mutable, .class = .unchecked },
@@ -501,6 +504,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "hasBufferedControllerRevokeForStream", .funnel = "hasBufferedControllerRevokeForStream", .gate = "beginPublicMutation" },
         .{ .receiver = "terminalReasonInvariant", .funnel = "terminalReasonInvariant", .gate = "beginPublicMutation" },
         .{ .receiver = "poison", .funnel = "poison", .gate = "beginPublicMutation" },
+        .{ .receiver = "markDeferredPoisonForTest", .funnel = "markDeferredPoisonForTest", .gate = "beginPublicMutation" },
         .{ .receiver = "firstPoisonReason", .funnel = "firstPoisonReason", .gate = "beginPublicMutation" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
@@ -1231,6 +1235,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "endedPurgeFenceIntruded" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginClientSlotOperation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "endClientSlotOperation" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginConfirmedGenerationPoisonExclusive" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "endConfirmedGenerationPoisonExclusive" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "releaseEndedPurgeExclusiveClean" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurgeExclusiveTerminal" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginPublicMutation" },
@@ -1363,6 +1369,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnchecked" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonDuringClientSlotOperationNoFail" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markDeferredPoisonForTest" },
             },
         },
         .{
@@ -1384,10 +1391,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPublication" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeOutcome" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationPoisonError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventAttachmentReadiness" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEndedPurgeOutcome" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEndedPurgeError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "purgeGenerationEndedStream" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonGenerationConnection" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "generationEventCorrupt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "takeGenerationEvent" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventAttachmentReadiness" },
@@ -2822,7 +2831,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 8),
+        @as(usize, 9),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -4177,8 +4186,9 @@ test "generation batch Client ownership mutations have one node-bound production
     // allocator scope를 공유하며, 그 밖의 파일에는 raw allocator authority가 없다.
     try std.testing.expectEqual(@as(usize, 5), begin_allocator_references);
     try std.testing.expectEqual(@as(usize, 6), restore_allocator_references);
-    try std.testing.expectEqual(@as(usize, 4), enter_callback_references);
-    try std.testing.expectEqual(@as(usize, 4), leave_callback_references);
+    // Confirmed generation poison is the fifth guarded cleanup callback owner.
+    try std.testing.expectEqual(@as(usize, 5), enter_callback_references);
+    try std.testing.expectEqual(@as(usize, 5), leave_callback_references);
     // 모든 node-local mutation은 callback TLS를 한 공통 guard에서만 읽는다.
     try std.testing.expectEqual(@as(usize, 1), reject_callback_references);
     try std.testing.expectEqual(@as(usize, 1), require_buffered_references);
@@ -6676,6 +6686,18 @@ test "session host has zero raw untyped Client invalidation callsites" {
         try std.testing.expect(std.mem.indexOf(u8, source, ".invalidateConnectionWithOps(") == null);
         if (std.mem.eql(u8, entry.path, "client.zig")) {
             client_source = source;
+        } else if (std.mem.eql(u8, entry.path, "client_slot.zig")) {
+            const confirmed = betweenMarkers(
+                source,
+                "pub fn poisonGenerationConnection(",
+                "fn mapGenerationRequestClientError(",
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(source, "unusable"));
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(source, "first_poison_reason"));
+            const confirmed_z = try allocator.dupeZ(u8, confirmed);
+            defer allocator.free(confirmed_z);
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "unusable"));
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "first_poison_reason"));
         } else {
             try std.testing.expectEqual(
                 @as(usize, 0),

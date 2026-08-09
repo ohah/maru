@@ -1322,6 +1322,7 @@ pub const GenerationEventTakeOutcome = union(enum) {
 };
 
 pub const GenerationEventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
+pub const GenerationPoisonError = error{ Busy, InvalidOwner, ConnectionClosed };
 pub const GenerationEventAttachmentReadiness = cleanup_registry_mod.EventAttachmentReadiness;
 pub const GenerationEndedPurgeOutcome = enum { not_ended, purged };
 pub const GenerationEndedPurgeError = error{ Busy, InvalidOwner, Corrupt, Terminal };
@@ -6800,6 +6801,47 @@ pub fn terminalizeGenerationTransportOwner(
     }
     admission.owner.terminalize(request.transport_incarnation) catch
         return error.InvalidOwner;
+}
+
+/// Confirmed generation poison is admitted through the registered node owner, rather than a raw
+/// Client receiver. Before admission every rejection is mutation-free. After admission, pending
+/// outbound ownership is disposed under the Client-wide allocator callback latch and the blocking
+/// descriptor is detached exactly once; therefore success proves that later generation I/O cannot
+/// use this connection. A previously deferred blocking poison converges through the same suffix.
+pub fn poisonGenerationConnection(
+    request: GenerationTransportOwnerQuery,
+    reason: client_poison.ConnectionReason,
+) GenerationPoisonError!void {
+    const admission = beginGenerationRequestOwner(request, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    const client = &admission.operation.node.client;
+    if (client.ownership == .moved) return error.ConnectionClosed;
+    if (client.io_mode != .blocking) return error.InvalidOwner;
+    client.beginConfirmedGenerationPoisonExclusive() catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        else => error.ConnectionClosed,
+    };
+    defer client.endConfirmedGenerationPoisonExclusive();
+
+    if (client.first_poison_reason == null) client.first_poison_reason = reason;
+    if (client.pending_outbound) |pending| {
+        const allocator = client.allocator;
+        client.pending_outbound = null;
+        if (!client.enterGenerationAllocatorCallback())
+            @panic("confirmed generation poison callback latch admission drifted");
+        defer client.leaveGenerationAllocatorCallbackUnchecked();
+        allocator.free(pending.frame);
+    }
+    client.unusable = true;
+    const fd = client.fd;
+    client.fd = -1;
+    if (fd >= 0) _ = c.close(fd);
+    if (client.first_poison_reason == null or !client.unusable or client.fd != -1 or
+        client.pending_outbound != null or client.io_mode != .blocking)
+        @panic("confirmed generation poison postcondition drifted");
 }
 
 fn mapGenerationRequestClientError(err: client_mod.PreparedBlockingRpcError) GenerationRequestError {

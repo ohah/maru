@@ -12,6 +12,7 @@
 //!  - 첫 표본과 **긴 공백 뒤**에는 값을 내지 않는다(0%는 거짓말이고, 분 단위 평균은 "지금"이 아니다).
 
 const std = @import("std");
+const width = @import("../width.zig"); // EAW 셀 폭 — 한글 열 이름을 값과 같은 칸에 맞추려면 필요하다
 
 /// 한 프로세스의 한 시점 표본. 어댑터가 채운다(footprint = macOS `ri_phys_footprint`, cpu_ns = user+system).
 pub const Sample = struct {
@@ -291,6 +292,59 @@ test "Meter: 메모리는 트리 전체의 합이다" {
         .{ .pid = 2, .footprint_bytes = 700 * 1024 * 1024, .cpu_ns = 0 },
     }, 2_000);
     try std.testing.expectEqual(@as(u64, 1000 * 1024 * 1024), r.?.footprint_bytes);
+}
+
+/// 값 줄과 **같은 폭·같은 자리**의 열 이름(`  메모리  CPU`). 머리글이 값과 다른 칸에서 시작하면 표로
+/// 안 읽힌다 — 그래서 폭 규약(`text_cols`)을 여기서도 같이 쓴다.
+/// 열 이름 줄의 **바이트** 상한. 값 줄(`text_max_bytes`)보다 크다 — 한글 한 자가 3바이트라
+/// "메모리"만 9바이트다. 이 둘을 같은 값으로 두면 헤더가 조용히 잘린다(실측: 16칸이 14칸으로).
+pub const header_max_bytes: usize = text_max_bytes + 16;
+
+pub fn formatHeader(out: []u8) []const u8 {
+    std.debug.assert(out.len >= header_max_bytes);
+    // ⚠️ `{s:>8}` 같은 std 패딩은 **칸이 아니라 코드포인트**를 센다 — "메모리"는 3코드포인트지만 6칸이라
+    // 그대로 쓰면 값 줄과 어긋난다(실측으로 13칸이 나왔다, 목표 16). 그래서 칸으로 직접 채운다.
+    var used: usize = 0;
+    used += padRightAligned(out[used..], "메모리", 8); // 메모리 열(값 줄의 "NNN.N GB"와 같은 8칸)
+    used += copyInto(out[used..], "   "); // " · " 자리(3칸)
+    used += padRightAligned(out[used..], "CPU", 5); // CPU 열(값 줄의 "NNNN%"와 같은 5칸)
+    return out[0..used];
+}
+
+/// `text`를 `cols`칸에 **오른쪽 정렬**해 쓴다(EAW 기준). 넘치면 그대로 쓴다(자르지 않는다 — 열 이름은 짧다).
+fn padRightAligned(out: []u8, text: []const u8, cols: u32) usize {
+    var used: usize = 0;
+    var pad = cols -| displayCols(text);
+    while (pad > 0 and used < out.len) : (pad -= 1) {
+        out[used] = ' ';
+        used += 1;
+    }
+    return used + copyInto(out[used..], text);
+}
+
+fn copyInto(out: []u8, text: []const u8) usize {
+    const n = @min(out.len, text.len);
+    @memcpy(out[0..n], text[0..n]);
+    return n;
+}
+
+/// 표시 칸 수(EAW) — 한글 한 자는 2칸이다. `chrome`의 같은 계산과 출처(`width.cellWidth`)를 공유한다.
+pub fn displayCols(text: []const u8) u32 {
+    const view = std.unicode.Utf8View.init(text) catch return @intCast(text.len);
+    var it = view.iterator();
+    var cols: u32 = 0;
+    while (it.nextCodepoint()) |cp| cols += @max(1, width.cellWidth(cp));
+    return cols;
+}
+
+test "formatHeader: 값 줄과 같은 칸에서 끝난다(표로 읽히게)" {
+    var head: [header_max_bytes]u8 = undefined;
+    var value: [text_max_bytes]u8 = undefined;
+    const h = formatHeader(&head);
+    const v = format(&value, .{ .footprint_bytes = 512 * 1024 * 1024, .cpu_permille = 260 });
+    // 한글 "메모리"는 6칸이라 바이트로 재면 다르다 — **칸**으로 견준다.
+    try std.testing.expectEqual(@as(u32, text_cols), displayCols(h));
+    try std.testing.expectEqual(text_cols, try std.unicode.utf8CountCodepoints(v));
 }
 
 test "updateGrouped: 탭별 합계가 창 전체 합계와 앞뒤가 맞는다" {

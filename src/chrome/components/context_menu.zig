@@ -22,14 +22,32 @@ pub const State = struct {
     anchor_y: i32 = 0,
     selected: usize = 0,
     item_count: usize = 0,
+    /// **앞에서부터 이만큼은 머리글**이다 — 제목·요약·열 이름처럼 **고를 수 없는 줄**(리소스 팝오버 §4.2).
+    /// 0이면 기존 메뉴와 완전히 같다(우클릭·브랜치 메뉴는 이 값을 안 쓴다 — byte-identical).
+    ///
+    /// 왜 별도 필드인가: 이 컴포넌트는 "행 목록"만 알고 각 행이 무엇인지 모른다. 머리글을 항목처럼 두면
+    /// 키보드가 그 위에 멈추고 Enter가 **없는 동작**을 부른다 — 눌리는 것처럼 보이는데 아무 일도 안 하는
+    /// 상태를 이 저장소는 금지한다. 그래서 선택·hit-test·강조가 모두 이 경계를 존중한다.
+    header_count: usize = 0,
 
     /// 우클릭 위치(x,y px)와 항목 수로 연다 — 선택은 첫 항목. platform이 항목/대상을 세팅한 뒤 부른다.
     pub fn show(self: *State, x: i32, y: i32, item_count: usize) void {
+        self.showWithHeaders(x, y, item_count, 0);
+    }
+
+    /// 앞 `header_count`줄이 머리글인 메뉴를 연다. 선택은 **첫 고를 수 있는 줄**에서 시작한다.
+    pub fn showWithHeaders(self: *State, x: i32, y: i32, item_count: usize, header_count: usize) void {
         self.anchor_x = x;
         self.anchor_y = y;
-        self.selected = 0;
+        self.header_count = @min(header_count, item_count);
+        self.selected = self.header_count;
         self.item_count = item_count;
         self.open = true;
+    }
+
+    /// 이 행이 고를 수 있는가(머리글이 아닌가).
+    pub fn selectable(self: *const State, index: usize) bool {
+        return index >= self.header_count and index < self.item_count;
     }
 
     pub fn hide(self: *State) void {
@@ -38,10 +56,11 @@ pub const State = struct {
 
     /// 선택을 delta만큼 이동(clamp, wrap 없음 — 짧은 메뉴라 끝에서 멈춘다). item_count 0이면 무동작.
     pub fn moveSelection(self: *State, delta: i64) void {
-        if (self.item_count == 0) return;
+        if (self.item_count == 0 or self.header_count >= self.item_count) return;
+        const first: i64 = @intCast(self.header_count); // 머리글 위로는 못 올라간다
         const last: i64 = @intCast(self.item_count - 1);
         const cur: i64 = @intCast(self.selected);
-        self.selected = @intCast(std.math.clamp(cur + delta, 0, last));
+        self.selected = @intCast(std.math.clamp(cur + delta, first, last));
     }
 };
 
@@ -98,7 +117,10 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     // 우단에 정확히 붙었다). 한 칸이면 테두리가 드러나기에 충분하다.
     const edge_gap: i32 = @intCast(cw);
     if (x + @as(i32, @intCast(box_w)) > bw_px - edge_gap) x = bw_px - edge_gap - @as(i32, @intCast(box_w)); // 우단
-    if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
+    // 세로도 같은 이유로 띄운다. 상태바 항목에 앵커하면 상자 아래끝이 **작업영역 바닥 = 상태바 위**에
+    // 정확히 붙는데, 그러면 둘이 맞닿아 상태바 글자가 상자에 먹힌 것처럼 보인다(실측 캡처).
+    const edge_gap_y: i32 = @intCast(ch);
+    if (y + @as(i32, @intCast(box_h)) > bh_px - edge_gap_y) y = bh_px - edge_gap_y - @as(i32, @intCast(box_h));
     // 좌단은 사이드바 오른쪽으로 — 메뉴는 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다(좁은 창에서
     // anchor가 작거나 box가 클 때). 사이드바 슬롯 우클릭이면 anchor가 사이드바 안이라 메뉴가 그 오른쪽 가장자리에 붙는다.
     const sidebar: i32 = @intCast(workspace.x);
@@ -117,8 +139,10 @@ pub fn itemAt(state: *const State, items: []const []const u8, p: props.ChromePro
     if (x_px < x0 or x_px >= x0 + @as(f64, @floatFromInt(rect.w))) return null;
     if (y_px < y0 or y_px >= y0 + @as(f64, @floatFromInt(rect.h))) return null;
     const ch: f64 = @floatFromInt(@max(p.metrics.cell_height_px, 1));
-    const row: usize = @intFromFloat((y_px - y0) / ch);
-    return @min(row, items.len - 1);
+    const row: usize = @min(@as(usize, @intFromFloat((y_px - y0) / ch)), items.len - 1);
+    // 머리글 줄은 **눌리지 않는다** — 클릭이 없는 동작을 부르지 않게 한다(hover 강조도 여기서 갈린다).
+    if (!state.selectable(row)) return null;
+    return row;
 }
 
 /// 메뉴 박스(배경 quad + 테두리 + 항목 텍스트, selected 행 강조)를 `out`에 append한다. 안 열렸거나 항목 0이면
@@ -142,13 +166,16 @@ pub fn view(
     try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
     for (items, 0..) |it, i| {
         const row_y = rect.y + @as(i32, @intCast(i)) * @as(i32, @intCast(ch));
-        if (i == state.selected) {
+        if (i == state.selected and state.selectable(i)) {
             // 선택 행 강조 — palette 선택행과 같은 tab_active_bg. 텍스트가 그 위에 그려진다.
+            // 머리글은 강조하지 않는다(고를 수 없는 줄이 선택된 것처럼 보이면 안 된다).
             try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = row_y, .w = rect.w, .h = ch }, .role = .tab_active_bg } });
         }
         const runs = try arena.alloc(draw.Run, 1);
         runs[0] = .{ .text = it };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(cw)), .y = row_y }, .runs = runs, .role = .surface_fg } }); // 좌패딩 1칸
+        // 머리글은 **약한 색**으로 — 항목과 같은 색이면 고를 수 있는 줄로 읽힌다.
+        const role: tokens.ColorRole = if (state.selectable(i)) .surface_fg else .muted_fg;
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(cw)), .y = row_y }, .runs = runs, .role = role } }); // 좌패딩 1칸
     }
 }
 
@@ -227,6 +254,52 @@ test "context_menu itemAt/view: anchor 박스 안 항목 행, 화면 밖이면 c
     try std.testing.expect(out.items[1] == .fill and out.items[1].fill.role == .tab_active_bg);
     try std.testing.expect(out.items[2] == .text);
     try std.testing.expectEqualStrings("Rename", out.items[2].text.runs[0].text);
+}
+
+test "context_menu 머리글: 고를 수 없고 눌리지 않으며 강조되지 않는다" {
+    var state: State = .{};
+    state.showWithHeaders(100, 100, 5, 2); // 앞 2줄이 머리글(제목·열 이름)
+
+    // 선택은 **첫 고를 수 있는 줄**에서 시작한다(0이 아니라 2).
+    try std.testing.expectEqual(@as(usize, 2), state.selected);
+    try std.testing.expect(!state.selectable(0));
+    try std.testing.expect(!state.selectable(1));
+    try std.testing.expect(state.selectable(2));
+
+    // ↑로 머리글 위로 못 올라간다 — 올라가면 Enter가 없는 동작을 부른다.
+    state.moveSelection(-1);
+    try std.testing.expectEqual(@as(usize, 2), state.selected);
+    state.moveSelection(-5);
+    try std.testing.expectEqual(@as(usize, 2), state.selected);
+    // ↓는 평소대로.
+    state.moveSelection(1);
+    try std.testing.expectEqual(@as(usize, 3), state.selected);
+
+    // 클릭도 머리글에선 안 잡힌다.
+    const p: props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    const items = [_][]const u8{ "리소스", "이름   메모리  CPU", "a", "b", "c" };
+    const rect = menuRect(&state, &items, p) orelse return error.TestUnexpectedResult;
+    const cx: f64 = @floatFromInt(rect.x + 4);
+    const y_header: f64 = @floatFromInt(rect.y + 4); // 0번 줄
+    const y_item: f64 = @floatFromInt(rect.y + 2 * 16 + 4); // 2번 줄
+    try std.testing.expect(itemAt(&state, &items, p, cx, y_header) == null);
+    try std.testing.expectEqual(@as(?usize, 2), itemAt(&state, &items, p, cx, y_item));
+}
+
+test "context_menu 머리글 없는 메뉴는 예전과 완전히 같다" {
+    // 우클릭·브랜치 메뉴가 쓰는 경로 — header_count=0이면 0번이 선택되고 0번이 눌린다.
+    var state: State = .{};
+    state.show(100, 100, 3);
+    try std.testing.expectEqual(@as(usize, 0), state.selected);
+    try std.testing.expect(state.selectable(0));
+    state.moveSelection(-1);
+    try std.testing.expectEqual(@as(usize, 0), state.selected); // 위 경계는 그대로 0
 }
 
 test "context_menu menuRect: 우단에 딱 붙이지 않는다(테두리가 창 경계에 먹히지 않게)" {

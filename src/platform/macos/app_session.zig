@@ -848,6 +848,9 @@ const max_resource_rows: usize = 12;
 const resource_row_max_bytes: usize = 256;
 /// 행에서 **이름이 쓸 수 있는 표시 칸**. 숫자 열은 고정 폭이라(§4.1) 이름만 예산을 먹는다. 넘치면 EAW 절단.
 const resource_row_name_cols: u32 = 28;
+/// 팝오버 앞머리의 **고를 수 없는** 줄 수: ⓪ 제목+합계 ① 열 이름. 레퍼런스 화면이 그 둘을 가졌고,
+/// 없으면 우클릭 메뉴 한 줄과 구별되지 않는다(사용자 지적). 선택·클릭·강조가 이 줄들을 건너뛴다.
+pub const resource_header_rows: usize = 2;
 
 /// `bytes`를 표시 칸 `max_cols` 안으로 줄여 `buf`에 쓴다(EAW 기준 — 한글 한 자 2칸). 넘치면 끝에 `…`.
 /// `overlay_input.truncateToCols`는 arena를 받는데 여기는 tick 경로라 할당을 피한다 — 같은 규칙을 버퍼에 쓴다.
@@ -4090,7 +4093,7 @@ pub const AppSession = struct {
     resource_menu_keys: [max_resource_rows]u64 = undefined,
     resource_menu_len: usize = 0,
     /// 행 문자열 저장소. `context_menu_items_buf`는 슬라이스만 들므로 실제 바이트는 여기 산다.
-    resource_menu_text: [max_resource_rows][resource_row_max_bytes]u8 = undefined,
+    resource_menu_text: [max_resource_rows + resource_header_rows][resource_row_max_bytes]u8 = undefined,
     /// 활동 시각 재렌더 tick 카운터(agent_age_repaint_interval_ms).
     agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
@@ -15622,13 +15625,19 @@ pub const AppSession = struct {
         }
         self.resource_menu_open = true;
         self.refreshResourceMenuRows();
-        self.chrome_host.context_menu.show(@intFromFloat(anchor_x), @intFromFloat(anchor_y), self.resource_menu_len);
+        self.chrome_host.context_menu.showWithHeaders(
+            @intFromFloat(anchor_x),
+            @intFromFloat(anchor_y),
+            resource_header_rows + self.resource_menu_len,
+            resource_header_rows,
+        );
         self.metal_dirty = true;
     }
 
     /// 얼린 행 순서 그대로 **값만** 다시 조립한다(`show`를 다시 부르지 않는다 — 선택이 리셋된다).
     fn refreshResourceMenuRows(self: *AppSession) void {
         const ru = maru.session.resource_usage;
+        self.buildResourceHeaderRows();
         for (0..self.resource_menu_len) |i| {
             const key = self.resource_menu_keys[i];
             // 이 행의 최신 값을 키로 찾는다. 그 사이 탭이 죽었으면 못 찾는다 → `—`(갈 곳이 아님을 보인다).
@@ -15639,9 +15648,42 @@ pub const AppSession = struct {
                     break;
                 }
             }
-            self.context_menu_items_buf[i] = self.formatResourceRow(i, key, reading);
+            self.context_menu_items_buf[resource_header_rows + i] = self.formatResourceRow(i, key, reading);
         }
-        self.context_menu_items_len = self.resource_menu_len;
+        self.context_menu_items_len = resource_header_rows + self.resource_menu_len;
+    }
+
+    /// 앞머리 두 줄 — ⓪ `리소스  <창 합계>` ① `이름 … 메모리   CPU`. 합계는 상태바 항목과 **같은 값**을
+    /// 쓴다(다른 숫자를 두 곳에 두면 어느 쪽이 맞는지 물어야 한다).
+    fn buildResourceHeaderRows(self: *AppSession) void {
+        const ru = maru.session.resource_usage;
+        const cols = chrome.components.overlay_input.displayCols;
+
+        const title = &self.resource_menu_text[max_resource_rows];
+        var used: usize = copyClamped(title[0..], "리소스");
+        if (self.resource_text_len > 0) {
+            var pad = resource_row_name_cols -| cols("리소스");
+            while (pad > 0 and used < title.len) : (pad -= 1) {
+                title[used] = ' ';
+                used += 1;
+            }
+            used += copyClamped(title[used..], "  ");
+            used += copyClamped(title[used..], self.resource_text_buf[0..self.resource_text_len]);
+        }
+        self.context_menu_items_buf[0] = title[0..used];
+
+        const head = &self.resource_menu_text[max_resource_rows + 1];
+        var n: usize = copyClamped(head[0..], "이름");
+        var pad2 = resource_row_name_cols -| cols("이름");
+        while (pad2 > 0 and n < head.len) : (pad2 -= 1) {
+            head[n] = ' ';
+            n += 1;
+        }
+        n += copyClamped(head[n..], "  ");
+        // 값 줄과 **같은 칸**에서 끝나는 열 이름(순수 모듈이 폭 규약을 함께 소유한다).
+        var head_buf: [ru.header_max_bytes]u8 = undefined;
+        n += copyClamped(head[n..], ru.formatHeader(&head_buf));
+        self.context_menu_items_buf[1] = head[0..n];
     }
 
     /// 한 행 = `탭 › 팬` + 고정 폭 숫자. 라벨 조립은 **알림과 같은 함수**(`notificationLocation`)를 쓴다 —
@@ -48496,6 +48538,11 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
     session.openResourceMenu();
     try std.testing.expect(session.resource_menu_open);
     try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
+    // 머리글 2줄(제목·열 이름)이 앞에 붙는다 — 행 인덱스는 그만큼 밀린다.
+    try std.testing.expectEqual(resource_header_rows + 2, session.context_menu_items_len);
+    try std.testing.expectEqual(resource_header_rows, session.chrome_host.context_menu.header_count);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "리소스") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[1], "메모리") != null);
     // 무거운 순 — 900이 먼저다.
     try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
     try std.testing.expectEqual(@as(u64, 111), session.resource_menu_keys[1]);
@@ -48505,7 +48552,53 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
     session.refreshResourceMenuRows();
     try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
     try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
-    try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
+    try std.testing.expectEqual(resource_header_rows + 2, session.context_menu_items_len);
+}
+
+// SB-P 적대적: **머리글만큼 인덱스를 빼야 한다.** 선택 인덱스는 머리글을 포함한 행 번호라, 안 빼면
+// 고른 것보다 두 칸 앞선 탭으로 점프한다(또는 범위를 넘어 아무 데도 못 간다).
+test "SB-P: 두 번째 행을 고르면 그 탭으로 간다(머리글만큼 밀리지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 실제 Term 둘을 만든다 — 점프 대상이 살아 있어야 계약을 볼 수 있다.
+    const pane = pane_ops.activePane(session);
+    const first_id = pane.terms.items[0].surfaceId();
+    try pane_ops.newTermInActivePane(session);
+    const second_id = pane.activeTerm().surfaceId();
+    try std.testing.expect(first_id != second_id);
+
+    session.resource_rows[0] = .{ .key = first_id, .reading = .{ .footprint_bytes = 900, .cpu_permille = 0 } };
+    session.resource_rows[1] = .{ .key = second_id, .reading = .{ .footprint_bytes = 10, .cpu_permille = 0 } };
+    session.resource_rows_len = 2;
+    const text = "  512 MB ·   10%";
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+
+    // **활성을 first_id로 돌려 둔다.** 새로 만든 탭이 활성인 채로 두면 점프가 안 일어나도 단언이
+    // 통과한다(실제로 그렇게 무의미했다 — 인덱스 보정을 없애는 뮤테이션이 살아남았다).
+    session.focusTerm(0);
+    try std.testing.expectEqual(first_id, pane.activeTerm().surfaceId()); // 전제
+
+    session.openResourceMenu();
+    // 무거운 순이라 0번 행 = first_id, 1번 행 = second_id. 그 **1번 행**을 고른다.
+    session.chrome_host.context_menu.selected = resource_header_rows + 1;
+    settings_ops.acceptContextMenu(session);
+
+    // second_id로 **옮겨 갔어야** 한다. 머리글을 안 뺐다면 범위를 넘어 아무 일도 안 일어나 first_id에 남는다.
+    try std.testing.expectEqual(second_id, pane.activeTerm().surfaceId());
 }
 
 // SB-P: 그 사이 죽은 탭은 **값이 `—`**다. 값이 멈춘 채 두면 살아 있는 것처럼 보이는데, 눌러도 아무 일도
@@ -48533,14 +48626,14 @@ test "SB-P: 사라진 탭 행은 숫자 대신 값 없음으로 바뀐다" {
     try std.testing.expect(try statusBarHasText(allocator, session, "512"));
     session.openResourceMenu();
     try std.testing.expect(session.resource_menu_open); // 앵커를 못 얻으면 아래 버퍼는 미초기화다(전제)
-    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "100 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[resource_header_rows], "100 MB") != null);
 
     // 그 Term이 사라진다(표본에서 빠짐) — 행은 남되 값이 없어야 한다.
     session.resource_rows_len = 0;
     session.refreshResourceMenuRows();
-    try std.testing.expectEqual(@as(usize, 1), session.context_menu_items_len); // 행은 유지(인덱스가 밀리면 안 된다)
-    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "—") != null);
-    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "100 MB") == null);
+    try std.testing.expectEqual(resource_header_rows + 1, session.context_menu_items_len); // 행은 유지(인덱스가 밀리면 안 된다)
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[resource_header_rows], "—") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[resource_header_rows], "100 MB") == null);
 }
 
 // SB-P 적대적: **한글 탭 이름에서 열이 어긋나면 안 된다.** 패딩을 글자 수로 하면 한글 한 자가 2칸이라

@@ -11,6 +11,7 @@
 //! 그것을 어떻게 그릴지(색·스팬 role)는 L3와 §5가 정한다.
 
 const std = @import("std");
+const width = @import("../../width.zig"); // 이모지 판정 단일 출처(§3.8 ZWJ 문맥)
 
 /// 위험한 codepoint의 종류. 왜 위험한지가 곧 분류다.
 pub const Hazard = enum {
@@ -25,9 +26,14 @@ pub const Hazard = enum {
     /// 비표준 공백(`U+00A0` NBSP 등). 공백처럼 보이지만 다른 바이트라, 문법 오류의 원인이 눈에
     /// 안 보인다.
     exotic_space,
+    /// **이모지를 잇지 않는 ZWJ**(`U+200D`). 폭 0이라 보이지 않으면서 식별자를 쪼갠다 —
+    /// `admin`과 `ad<ZWJ>min`이 같아 보이는데 다른 이름이다. 이모지 가족(👨‍👩‍👧)을 잇는 ZWJ는
+    /// 정상이므로 **앞뒤 문맥으로 가른다**(`classifyInText`).
+    zwj_outside_emoji,
 };
 
-/// 이 codepoint가 위험한가. 아니면 null.
+/// 이 codepoint가 **그 자체로** 위험한가. 문맥이 필요한 것(ZWJ)은 여기서 판정하지 않는다 —
+/// `classifyInText`를 쓴다.
 ///
 /// **탭(`U+0009`)과 줄바꿈(`U+000A`/`U+000D`)은 제외한다.** 편집기가 그 셋에 의미를 부여하므로
 /// (탭스톱 전개·줄 경계) 여기서 위험으로 잡으면 정상 텍스트가 전부 경고가 된다.
@@ -46,13 +52,58 @@ pub fn classify(cp: u21) ?Hazard {
     switch (cp) {
         // ZWSP·ZWNJ·ZWJ·word joiner·BOM(문서 중간에 나오면 폭 0 문자다).
         //
-        // **U+200D(ZWJ)를 여기 넣지 않는다** — 이모지 가족(👨‍👩‍👧)을 잇는 정상 문자라, 잡으면
-        // 평범한 이모지가 전부 경고가 된다. 식별자 안의 ZWJ는 §5 진단이 볼 문제이지 표시의 문제가 아니다.
+        // **U+200D(ZWJ)를 여기 넣지 않는다** — 이모지를 잇는지 식별자를 쪼개는지는 **앞뒤 문맥**이
+        // 정하므로 `classifyInText`가 판정한다. codepoint 하나만 보면 둘을 가를 수 없다.
         0x200B, 0x200C, 0x2060, 0xFEFF => return .zero_width,
         // NBSP·narrow NBSP·ideographic space. 공백처럼 보이지만 다른 바이트다.
         0x00A0, 0x202F, 0x3000 => return .exotic_space,
         else => return null,
     }
+}
+
+/// **문맥까지 보고** 판정한다. `text` 안 `index` 위치의 codepoint가 대상이다.
+///
+/// `classify`가 못 가르는 것은 ZWJ 하나다 — 이모지를 잇는 ZWJ(👨‍👩‍👧)는 정상이고 그 밖은
+/// 식별자를 쪼개는 공격 수단이다. **앞뒤 중 한쪽이라도 이모지가 아니면 위험으로 본다.**
+///
+/// 왜 "양쪽 다 이모지"가 아니라 "한쪽이라도 아니면"인가: 이모지 ZWJ 시퀀스는 정의상 양쪽이
+/// 그림문자다(UTS #51). 한쪽이 글자면 그것은 시퀀스가 아니라 **글자 사이에 끼운 ZWJ**이고,
+/// 그게 정확히 `ad<ZWJ>min`을 `admin`처럼 보이게 하는 수법이다.
+pub fn classifyInText(text: []const u8, index: usize) ?Hazard {
+    if (index >= text.len) return null;
+    const len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
+    if (index + len > text.len) return null;
+    const cp = std.unicode.utf8Decode(text[index .. index + len]) catch return null;
+
+    if (cp == 0x200D) {
+        return if (zwjJoinsEmoji(text, index, len)) null else .zwj_outside_emoji;
+    }
+    return classify(cp);
+}
+
+/// ZWJ가 양쪽 그림문자를 잇고 있는가. 한쪽이라도 이모지가 아니거나 줄 끝/처음이면 false.
+fn zwjJoinsEmoji(text: []const u8, index: usize, zwj_len: usize) bool {
+    const before = prevCodepoint(text, index) orelse return false;
+    const after_start = index + zwj_len;
+    if (after_start >= text.len) return false;
+    const after_len = std.unicode.utf8ByteSequenceLength(text[after_start]) catch return false;
+    if (after_start + after_len > text.len) return false;
+    const after = std.unicode.utf8Decode(text[after_start .. after_start + after_len]) catch return false;
+
+    // 스킨톤 modifier(U+1F3FB~U+1F3FF)와 VS16은 이모지 시퀀스의 일부라 `isEmojiPresentation`이
+    // 이미 포함하거나(전자) 앞 글자에 붙는다(후자). 여기서는 양끝 base만 본다.
+    return width.isEmojiPresentation(before) and width.isEmojiPresentation(after);
+}
+
+/// `index` 바로 앞 codepoint. UTF-8 continuation byte를 거슬러 올라간다.
+fn prevCodepoint(text: []const u8, index: usize) ?u21 {
+    if (index == 0) return null;
+    var start = index - 1;
+    // continuation byte(0b10xxxxxx)를 지나 선두 byte까지.
+    while (start > 0 and text[start] & 0xC0 == 0x80) start -= 1;
+    const len = std.unicode.utf8ByteSequenceLength(text[start]) catch return null;
+    if (start + len > text.len) return null;
+    return std.unicode.utf8Decode(text[start .. start + len]) catch null;
 }
 
 /// 이 문서에 위험한 문자가 하나라도 있는가. 상태바 경고 같은 요약에 쓴다.
@@ -71,7 +122,8 @@ pub fn containsAny(bytes: []const u8) bool {
             i += len;
             continue;
         };
-        if (classify(cp) != null) return true;
+        _ = cp;
+        if (classifyInText(bytes, i) != null) return true;
         i += len;
     }
     return false;
@@ -133,9 +185,8 @@ test "폭 0 문자를 잡는다 — 식별자가 같아 보이게 만든다" {
     try testing.expectEqual(Hazard.zero_width, classify(0x2060).?); // word joiner
 }
 
-test "ZWJ는 잡지 않는다 — 이모지 가족이 전부 경고가 된다" {
-    // 👨‍👩‍👧 같은 가족 이모지가 U+200D로 이어진다. 이것을 위험으로 잡으면 평범한 이모지가
-    // 경고 표시로 도배된다.
+test "classify는 ZWJ를 판정하지 않는다 — 문맥이 필요해 classifyInText가 맡는다" {
+    // codepoint 하나만 보면 이모지를 잇는 정상 ZWJ와 식별자를 쪼개는 ZWJ를 가를 수 없다.
     try testing.expectEqual(@as(?Hazard, null), classify(0x200D));
 }
 
@@ -180,4 +231,42 @@ test "displayText: 최대 길이가 max_display_len을 넘지 않는다" {
     const r = displayText(0x10FFFF, &buf);
     try testing.expect(r.len <= max_display_len);
     try testing.expectEqualStrings("<U+10FFFF>", r);
+}
+
+test "ZWJ: 이모지를 이으면 정상이다 — 가족 이모지가 경고로 도배되면 안 된다" {
+    // 👨‍👩‍👧 = U+1F468 ZWJ U+1F469 ZWJ U+1F467
+    const family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    try testing.expect(!containsAny(family));
+
+    // 첫 ZWJ 위치(U+1F468은 4 byte)에서 직접 확인.
+    try testing.expectEqual(@as(?Hazard, null), classifyInText(family, 4));
+}
+
+test "ZWJ: 글자 사이에 끼면 위험이다 — 식별자를 쪼개 같아 보이게 한다" {
+    // `ad<ZWJ>min`은 화면에서 `admin`과 같아 보이지만 다른 이름이다.
+    const sneaky = "ad\u{200D}min";
+    try testing.expect(containsAny(sneaky));
+    try testing.expectEqual(Hazard.zwj_outside_emoji, classifyInText(sneaky, 2).?);
+}
+
+test "ZWJ: 한쪽만 이모지여도 위험이다" {
+    // 이모지 ZWJ 시퀀스는 정의상 양쪽이 그림문자다(UTS #51). 한쪽이 글자면 시퀀스가 아니다.
+    const half = "\u{1F468}\u{200D}x";
+    try testing.expectEqual(Hazard.zwj_outside_emoji, classifyInText(half, 4).?);
+}
+
+test "ZWJ: 줄 처음이나 끝에 홀로 있으면 위험이다" {
+    try testing.expectEqual(Hazard.zwj_outside_emoji, classifyInText("\u{200D}a", 0).?);
+    try testing.expectEqual(Hazard.zwj_outside_emoji, classifyInText("a\u{200D}", 1).?);
+}
+
+test "classifyInText: 문맥이 필요 없는 것은 classify와 같게 답한다" {
+    const s = "a\u{202E}b";
+    try testing.expectEqual(Hazard.bidi_control, classifyInText(s, 1).?);
+    try testing.expectEqual(@as(?Hazard, null), classifyInText(s, 0));
+}
+
+test "classifyInText: 범위 밖·잘린 시퀀스에서 죽지 않는다" {
+    try testing.expectEqual(@as(?Hazard, null), classifyInText("ab", 99));
+    try testing.expectEqual(@as(?Hazard, null), classifyInText("\xEA\xB0", 0));
 }

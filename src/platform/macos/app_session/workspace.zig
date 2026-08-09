@@ -24,6 +24,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const notification_ops = @import("notification.zig");
 const assertPinnedPrefixRuntime = AppSession.assertPinnedPrefixRuntime;
 const file_tree_backend = app_session_mod.file_tree_backend;
 const file_tree = app_session_mod.file_tree;
@@ -574,7 +575,7 @@ pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
             const rx: f64 = @floatFromInt(r.x);
             if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false;
         }
-        if (self.collapsedNotificationRect()) |r| {
+        if (notification_ops.collapsedNotificationRect(self)) |r| {
             const rx: f64 = @floatFromInt(r.x);
             if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 접힘 종 클릭 영역 — 창 드래그 아님
         }

@@ -22,6 +22,7 @@
 | 2026-08-09 (F10까지) | **59,124** | 이름 기준 F 시리즈 전부. 그룹 파일 10개 합계 15,989줄 |
 | 2026-08-09 (F11) | **58,479** | web panel·인앱 브라우저. 그룹 파일 11개 |
 | 2026-08-09 (F12) | **57,701** | 키 입력·IME·키바인딩. 그룹 파일 12개 |
+| 2026-08-09 (F13) | **57,169** | 알림·벨. 그룹 파일 13개 |
 
 > F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). F10으로 이름 기준 그룹은 전부
 > 끝났고 `app_session.zig`는 **59,124줄**이다. 예측했던 56,000줄대에 닿지 못한 이유는 F8·F10에서
@@ -123,6 +124,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F10** ✅ | workspace · window(캡처/복원/이동, 창 속성) | 491(메서드) | 중 | 2026-08-09 완료 → `app_session/workspace.zig`. **ABI facade 12개**로 비중 최고 |
 | **F11** ✅ | web panel · 인앱 브라우저(surface 수명·주소창·내비·web term) | 843(메서드) | 낮음 | 2026-08-09 완료 → `app_session/web.zig`. **pub 순증 1개**로 F 시리즈 최저, ABI facade 20 |
 | **F12** ✅ | 키 입력 · IME · 키바인딩(라우팅·조합 수명·커밋 텍스트·키 힌트·전역 핫키) | 745(메서드) | 낮음 | 2026-08-09 완료 → `app_session/input.zig`, pub 순증 6, ABI facade 11 |
+| **F13** ✅ | 알림 · 벨(OSC 9/777·이력·패널·배지·벨 플래시·원격 폴링) | 434(메서드) | 낮음 | 2026-08-09 완료 → `app_session/notification.zig`, pub 순증 8, ABI facade 5. **이름 함정이 없던 첫 그룹** |
 
 > **F1과 F3를 합친 이유(2026-08-09 실측).** 문서가 둘을 나눈 기준은 **이름**이었는데 호출 관계는 한 덩어리다.
 > archive 메서드가 도크의 스크롤 앵커·인라인 상세·스모크 프로브를 부르므로, F1만 떼면 그룹 밖 non-pub
@@ -198,6 +200,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > | F11 web | 573 | +1 |
 > | F12 input | 579 | +6 |
+> | F13 notification | 587 | +8 |
 >
 > **원인은 test 잔류가 아니다(2026-08-09 시범 이동으로 기각).** 한때 "test가 허브에 남아 비공개
 > 헬퍼를 부르니 pub이 못 닫힌다"고 적었으나, `pane` test 101개(3,833줄)를 실제로 `pane.zig`로 옮겨
@@ -219,6 +222,14 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > 단위다.** 그룹 파일이 존재하는 것 자체의 비용이다. 다만 그 비용은 그룹마다 크게 다르다 — F9
 > settings는 +60, F11 web은 **+1**이다. 차이는 **도메인 상태가 자기 필드 안에서 닫혀 있는가**다.
 > web은 `web_panel_*`·`addr_*` 필드로 닫혀 있고, settings는 거의 모든 도메인의 값을 읽고 쓴다.
+>
+> **이름 함정이 없는 도메인도 있다(F13).** `notification`·`bell`·`badge`는 이 저장소에서 다른 뜻으로
+> 쓰이지 않아 걸러 낼 것이 하나도 없었다 — F4 `pane`↔`filePanel`, F6 `tab`↔`stable`, F12 `ime`↔`Time`과
+> 대비된다. 함정은 **단어가 짧거나 다른 단어의 부분 문자열일 때** 생긴다. 긴 복합어(`notification`)나
+> 이 저장소 고유어는 안전하다.
+>
+> 부수로 `formatRelativeTime`이 제 자리를 찾았다 — F12에서 `ime` 부분 문자열로 잘못 딸려왔던 함수인데,
+> 실제 호출자는 알림 목록의 상대 시각 표시뿐이라 F13 소유다. **함정을 걸러 내면 다음 그룹이 주워 간다.**
 >
 > **익명 struct 반환은 facade로 감쌀 수 없다(F11·F12에서 각각 한 건).** `takeWebNavAction`(F11)과
 > `imeCursorRect`(F12)는 `?struct { ... }`를 반환한다. 허브에 facade를 두면 `AppSession`이 만든 타입과

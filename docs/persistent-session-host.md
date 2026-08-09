@@ -1037,8 +1037,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    operation은 막지 않는다. 따라서 `controller.revoked`를 borrow한 뒤 release 전에 기존 `fenceRevoke`를 호출할 수 있다.
    release는 owner/lease/binding/allocator provenance를 검증한 뒤 새 짧은 `.event` release permit을 잡고, owner를
    `releasing`으로 먼저 tombstone한 다음 pinned canonical Client allocator로 payload를 exact once free한다. GUI generation
-   ingress는 parser/frame allocator가 canonical Client allocator와 exact 같음을 queue publication 전에 검증하고 그 identity를
-   admission/queue seal에 포함한다. `BufferedEvent`에 별도 allocator field를 추가하지 않으며 strict external adoption의 임시 allocator
+   ingress의 canonical event allocator는 generation RPC scope가 바꾸지 않는 stable Client allocator다. parser/frame이
+   blocking generation RPC의 임시 allocator로 payload를 만들었으면 demux는 queue publication 전에 stable allocator로 exact-once
+   복사하고 임시 backing을 회수한 뒤 그 stable identity를 admission/queue seal에 포함한다. 임시 scope와 무관한 foreign allocator는
+   publication 전에 거부한다. stable selector는 active scope의 token/client/epoch/purpose와 previous/installed allocator를 하나의
+   callback이 소유하지 않는 고정 용량 private registry가 process identity와 ledger final address에 봉인한 독립 authority와 exact 비교하고 current parser/Client가 installed allocator를
+   유지하는지도 확인한다. 검증 실패는 foreign/stable allocator callback과 queue mutation 0으로 fail-close하되 이미 소유한 parser
+   backing은 그 captured parser allocator로 exact once 회수한다. scope purpose는 registry의 closed enum 하나를 Client가 alias하며 fork child는 inherited mutex에 접근하기 전에 process mismatch로 거부된다. `BufferedEvent`에 별도 allocator field를 추가하지 않으며 strict external adoption의 임시 allocator
    event는 2c3d generation facade 대상이 아니다. replacement, ended purge, generic Client teardown도 이 identity를 검증해 같은
    allocator만 쓴다. allocator callback 동안
    같은 canonical `.releasing` owner의 recursive release는 `Terminal`, stale copy/replay release는 `InvalidOwner`이고,

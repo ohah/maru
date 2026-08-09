@@ -21,9 +21,9 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.reserveEventOwnerInPlace("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.takeEventProjected("));
     try std.testing.expectEqual(@as(usize, 3), count(attachment, "generation_transport_mod.eventReadinessOwned("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".takeEvent("));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".takeEvent("));
     // C3-2 adds the generation product drain while preserving the legacy owner path.
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".releaseEvent("));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".releaseEvent("));
     try std.testing.expectEqual(@as(usize, 3), count(runtime, "dropBufferedStream("));
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
@@ -55,13 +55,13 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/attach_product_resolver.zig", .product = 0, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 14 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 5, .top_level_test = 6 },
-        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 5, .top_level_test = 7 },
+        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 2 },
     });
     try expectSourceIdentifierInventory(allocator, "EventOwner", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 3 },
         .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 31, .top_level_test = 1 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 22, .top_level_test = 11 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 22, .top_level_test = 12 },
     });
     try expectEventOwnerPointerInventory(allocator, &.{
         .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 20, .mutable_test = 0, .const_product = 9, .const_test = 0 },
@@ -69,7 +69,7 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     });
     try expectSourceIdentifierInventory(allocator, "takeEventProjected", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 0 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 1 },
     });
     try expectSourceIdentifierInventory(allocator, "eventReadinessOwned", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 3, .top_level_test = 0 },

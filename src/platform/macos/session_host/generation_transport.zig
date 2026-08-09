@@ -249,17 +249,21 @@ pub const GenerationTransport = struct {
     }
 
     pub fn sendInput(self: *GenerationTransport, bytes: []const u8) InputError!void {
-        const client = try self.borrowInputClient();
-        client.sendInput(self.bound_stream_id, bytes) catch |err| return mapInputError(err);
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        client_slot_mod.sendGenerationInput(self.ownerQuery(), self.bound_stream_id, bytes) catch |err|
+            return mapGenerationInputError(err);
     }
 
     pub fn sendInputNonBlocking(
         self: *GenerationTransport,
         bytes: []const u8,
     ) InputError!usize {
-        const client = try self.borrowInputClient();
-        return client.sendInputNonBlocking(self.bound_stream_id, bytes) catch |err|
-            return mapInputError(err);
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        return client_slot_mod.sendGenerationInputNonBlocking(
+            self.ownerQuery(),
+            self.bound_stream_id,
+            bytes,
+        ) catch |err| return mapGenerationInputError(err);
     }
 
     pub fn sendControl(
@@ -281,13 +285,13 @@ pub const GenerationTransport = struct {
     }
 
     pub fn pumpPendingOutput(self: *GenerationTransport) InputError!bool {
-        const client = self.borrowClient() orelse return error.InvalidOwner;
-        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
-        if (!slot.streamOperationPermitIdle()) return error.Busy;
-        // Output progress is connection-wide and observer-safe, but a buffered controller revoke
-        // must win before any sibling flushes an already admitted mutation frame.
-        if (client.hasBufferedControllerRevoke()) return false;
-        return client.pumpPendingOutput() catch |err| return mapInputError(err);
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        return client_slot_mod.pumpGenerationPendingOutput(self.ownerQuery()) catch |err| return switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+            error.Corrupt => error.ProtocolError,
+            error.Terminal => error.ConnectionClosed,
+        };
     }
 
     pub fn takeEvent(
@@ -638,6 +642,31 @@ pub const GenerationTransport = struct {
     }
 };
 
+pub fn sendResyncNonBlockingOwned(
+    transport: *GenerationTransport,
+    attachment_owner_addr: usize,
+) InputError!bool {
+    if (!transport.requestIdentityValid() or attachment_owner_addr == 0 or
+        transport.owner_addr != attachment_owner_addr)
+        return error.InvalidOwner;
+    return client_slot_mod.sendGenerationResyncNonBlocking(
+        transport.ownerQuery(),
+        transport.bound_stream_id,
+    ) catch |err| return mapGenerationInputError(err);
+}
+
+pub fn callOwned(
+    transport: *GenerationTransport,
+    attachment_owner_addr: usize,
+    method: []const u8,
+    params_json: ?[]const u8,
+) client_mod.ClientError![]u8 {
+    if (!transport.requestIdentityValid() or attachment_owner_addr == 0 or
+        transport.owner_addr != attachment_owner_addr)
+        return error.ProtocolError;
+    return client_slot_mod.callGenerationRpc(transport.ownerQuery(), method, params_json);
+}
+
 /// Package-level attachment seam. It publishes the mirror only from the canonical registry
 /// publication returned by the same take transaction; EventOwner bytes are not re-read.
 pub fn takeEventProjected(
@@ -722,6 +751,14 @@ fn mapInputError(err: client_mod.ClientError) InputError {
         error.ProtocolError,
         error.ExternalMode,
         => error.ProtocolError,
+    };
+}
+
+fn mapGenerationInputError(err: client_slot_mod.GenerationInputError) InputError {
+    return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        else => |client_err| mapInputError(client_err),
     };
 }
 
@@ -3588,7 +3625,7 @@ test "CR3a-2c3d C3-3 confirmed poison closes once and blocks allocator callback 
     slot.deinit();
 }
 
-test "CR3a-2c3a CR3a-2c3c observer binding rejects mutation but permits shared output progress" {
+test "C3-3a3 product generation transport CR3a-2c3a CR3a-2c3c observer binding rejects mutation but permits shared output progress" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: client_mod.Client = .{
@@ -3625,7 +3662,7 @@ test "CR3a-2c3a CR3a-2c3c observer binding rejects mutation but permits shared o
     binding.lifecycle = .terminal;
 }
 
-test "CR3a-2c3a CR3a-2c3c revoke fence rejects later input and control" {
+test "C3-3a3 product generation transport CR3a-2c3a CR3a-2c3c revoke fence rejects later input and control" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
@@ -3684,7 +3721,7 @@ test "CR3a-2c3a CR3a-2c3c revoke fence rejects later input and control" {
         .stream_id = 23,
     };
     const revoke_permit = try beginControllerRevokeOwned(&transport, @intFromPtr(&transport));
-    try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("late"));
+    try std.testing.expectError(error.Busy, transport.sendInputNonBlocking("late"));
     try std.testing.expectError(error.Busy, transport.sendControlNonBlocking(contract.RuntimeControl.scrollToBottom()));
     try std.testing.expectEqual(
         RevokeFence.partial_frame_requires_close,
@@ -3819,6 +3856,91 @@ test "CR3a-2c3c control facade derives capability stream and wire kind canonical
     binding.lifecycle = .terminal;
 }
 
+test "C3-3a3 product generation transport aggregate blocks every mutation facade and zero reopens admission" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xC33A3001,
+        .parser = framing.FrameParser.init(allocator),
+        .async_scroll_to_bottom_v1 = true,
+        .runtime_core_command_v1 = true,
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xC33A3001);
+    defer slot.deinit();
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    const transport = &owner.transport;
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(transport),
+    );
+    try mintInPlace(
+        transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 73);
+    try reserveEventOwnerInPlace(transport, &owner.event);
+    try bindCommittedStreamOwned(transport, @intFromPtr(&owner), 73);
+    try slot.current.client.bufferGenerationEventForTest(
+        73,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"00000000000000000000000000000073\",\"stream_id\":73,\"controller_generation\":1,\"reason\":\"takeover\"}}",
+    );
+    try std.testing.expectEqual(
+        EventTakeOutcome.taken,
+        (try takeEventProjected(transport, &owner.event)).outcome,
+    );
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.cleanup_registry.revokeBlockerCount());
+
+    try std.testing.expectError(error.Busy, transport.sendInput("blocked-input"));
+    try std.testing.expectEqual(@as(usize, 0), try transport.sendInputNonBlocking("blocked-input-nb"));
+    try std.testing.expectError(
+        error.Busy,
+        transport.sendControl(contract.RuntimeControl.coreCommand(.scroll_to_bottom)),
+    );
+    try std.testing.expect(!(try transport.sendControlNonBlocking(
+        contract.RuntimeControl.scrollToBottom(),
+    )));
+    try std.testing.expect(!(try transport.pumpPendingOutput()));
+    try std.testing.expect(!(try sendResyncNonBlockingOwned(transport, @intFromPtr(&owner))));
+    try std.testing.expectError(
+        error.AdminBusy,
+        callOwned(transport, @intFromPtr(&owner), "runtime.snapshot", "{}"),
+    );
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+
+    try transport.releaseEvent(&owner.event);
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.cleanup_registry.revokeBlockerCount());
+    try std.testing.expectEqual(
+        @as(usize, "reopened".len),
+        try transport.sendInputNonBlocking("reopened"),
+    );
+    while (!(try transport.pumpPendingOutput())) {}
+
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 73);
+    try terminalizeOwned(transport, @intFromPtr(&owner));
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 73);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+}
+
 test "CR3a-2c3c control permit rejects allocator callback reentry in both send modes" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
@@ -3852,10 +3974,10 @@ test "CR3a-2c3c control permit rejects allocator callback reentry in both send m
     try std.testing.expect(try transport.sendControlNonBlocking(contract.RuntimeControl.scrollToBottom()));
     while (!(try transport.pumpPendingOutput())) {}
     try std.testing.expectEqual(@as(usize, 1), probe.callback_count);
-    try std.testing.expect(probe.input_busy);
-    try std.testing.expect(probe.control_busy);
-    try std.testing.expect(probe.pump_busy);
-    try std.testing.expect(probe.poison_busy);
+    if (!probe.input_busy) return error.InputReentryWasNotBusy;
+    if (!probe.control_busy) return error.ControlReentryWasNotBusy;
+    if (!probe.pump_busy) return error.PumpReentryWasNotBusy;
+    if (!probe.poison_busy) return error.PoisonReentryWasNotBusy;
     probe.input_busy = false;
     probe.control_busy = false;
     probe.pump_busy = false;
@@ -3863,10 +3985,10 @@ test "CR3a-2c3c control permit rejects allocator callback reentry in both send m
     probe.armed = true;
     try transport.sendControl(contract.RuntimeControl.coreCommand(.scroll_to_bottom));
     try std.testing.expectEqual(@as(usize, 2), probe.callback_count);
-    try std.testing.expect(probe.input_busy);
-    try std.testing.expect(probe.control_busy);
-    try std.testing.expect(probe.pump_busy);
-    try std.testing.expect(probe.poison_busy);
+    if (!probe.input_busy) return error.InputReentryWasNotBusy;
+    if (!probe.control_busy) return error.ControlReentryWasNotBusy;
+    if (!probe.pump_busy) return error.PumpReentryWasNotBusy;
+    if (!probe.poison_busy) return error.PoisonReentryWasNotBusy;
     try std.testing.expect(!slot.logicalClient().unusable);
     try std.testing.expect(slot.streamOperationPermitIdle());
 

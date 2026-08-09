@@ -35,7 +35,8 @@ test "CR3a-2c3d C1 event facade remains closed and product-unwired" {
 
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.takeGenerationEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn takeGenerationEvent("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".takeEvent("));
+    // C3-1 activates the generation drain beside the retained legacy drain.
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".takeEvent("));
     const attachment_product = between(
         attachment,
         "pub const GenerationAttachment = struct",

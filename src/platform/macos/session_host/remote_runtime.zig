@@ -169,6 +169,29 @@ const RuntimeAttachment = union(enum) {
         };
     }
 
+    fn sendResyncNonBlocking(
+        self: *RuntimeAttachment,
+        client: *client_mod.Client,
+    ) client_mod.ClientError!bool {
+        return switch (self.*) {
+            .legacy => |*value| client.sendResyncNonBlocking(value.streamId()),
+            .generation => |*value| value.sendResyncNonBlocking() catch |err|
+                return mapGenerationInputError(err),
+        };
+    }
+
+    fn callOrdered(
+        self: *RuntimeAttachment,
+        client: *client_mod.Client,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) client_mod.ClientError![]u8 {
+        return switch (self.*) {
+            .legacy => client.call(method, params_json),
+            .generation => |*value| value.callOrdered(method, params_json),
+        };
+    }
+
     fn hasBufferedControllerRevoke(
         self: *const RuntimeAttachment,
         client: *const client_mod.Client,
@@ -1066,7 +1089,7 @@ pub const RemoteRuntime = struct {
 
     fn callOrdered(self: *RemoteRuntime, method: []const u8, params_json: ?[]const u8) client_mod.ClientError![]u8 {
         try self.flushQueuedInputBlocking();
-        return self.client.call(method, params_json);
+        return self.attachment.callOrdered(self.client, method, params_json);
     }
 
     fn discardQueuedMutations(self: *RemoteRuntime) void {
@@ -1436,7 +1459,7 @@ pub const RemoteRuntime = struct {
 
     fn pumpResyncIntent(self: *RemoteRuntime) client_mod.ClientError!void {
         if (!self.resync_needed) return;
-        const accepted = self.client.sendResyncNonBlocking(self.attachment.streamId()) catch |err| switch (err) {
+        const accepted = self.attachment.sendResyncNonBlocking(self.client) catch |err| switch (err) {
             error.OutOfMemory => return,
             else => return err,
         };
@@ -5170,6 +5193,250 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
     try testing.expect(client.pending_outbound == null);
 }
 
+fn initGenerationRuntimeAggregateFixture(
+    runtime: *RemoteRuntime,
+    adapter: *host_adapter_mod.HostAdapter,
+    client: *client_mod.Client,
+) !void {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    try host_adapter_mod.HostAdapter.initInPlace(adapter, testing.allocator, client);
+    runtime.client = adapter.logicalClient();
+    runtime.generation_adapter = adapter;
+    runtime.allocator = testing.allocator;
+    runtime.io = testing.io;
+    runtime.attachment = undefined;
+    runtime.attachment = .{ .generation = .{} };
+    try generation_attachment_mod.testing_api.initAttached(
+        &runtime.attachment.generation,
+        adapter,
+        testing.allocator,
+        0xaa,
+        7,
+    );
+    runtime.direct_input = .empty;
+    runtime.direct_input_offset = 0;
+    runtime.pending_controls = .empty;
+    runtime.blocking_flush_active = false;
+    runtime.resync_needed = false;
+    runtime.observation = .{};
+    runtime.event_generation_tracking = .tracked;
+    runtime.pending_generation_event_outcome = .none;
+    runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    runtime.resize_generation = 0;
+    runtime.resize_baseline_present = false;
+}
+
+fn deinitGenerationRuntimeAggregateFixture(
+    runtime: *RemoteRuntime,
+    adapter: *host_adapter_mod.HostAdapter,
+) void {
+    runtime.observation.deinit(testing.allocator);
+    runtime.direct_input.deinit(testing.allocator);
+    runtime.pending_controls.deinit(testing.allocator);
+    runtime.attachment.deinitWithAdapter(adapter);
+    adapter.deinit();
+}
+
+fn deinitGenerationAttachmentFixture(
+    attachment: *generation_attachment_mod.GenerationAttachment,
+    adapter: *host_adapter_mod.HostAdapter,
+) void {
+    testing.expectEqual(
+        generation_attachment_mod.DeinitOutcome.cleaned,
+        attachment.tryDeinit(adapter),
+    ) catch @panic("generation attachment fixture cleanup failed");
+}
+
+fn takeAggregateRevokeForFixture(runtime: *RemoteRuntime) !void {
+    try testing.expectEqual(
+        @import("generation_transport.zig").EventTakeOutcome.taken,
+        try runtime.attachment.generation.takeEvent(),
+    );
+}
+
+test "C3-3a3 product remote runtime aggregate rejects central RPC and retains queued mutation" {
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 0xC333,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
+    defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+    try adapter.logicalClient().bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
+    try takeAggregateRevokeForFixture(&runtime);
+    try runtime.direct_input.appendSlice(testing.allocator, "retained");
+    try testing.expect(!(try runtime.pumpQueuedInput()));
+    try testing.expectEqualStrings("retained", runtime.direct_input.items);
+    try testing.expectError(error.AdminBusy, runtime.callOrdered("runtime.snapshot", "{}"));
+    try testing.expect(adapter.logicalClient().pending_outbound == null);
+    try runtime.attachment.generation.releaseEvent();
+}
+
+test "C3-3a3 product remote runtime observer remains a local no-op while aggregate is live" {
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 0xC334,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
+    defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+    try adapter.logicalClient().bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
+    try takeAggregateRevokeForFixture(&runtime);
+    try testing.expectEqual(@as(usize, 1), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    try runtime.direct_input.appendSlice(testing.allocator, "observer-retained");
+    runtime.attachment.statePtr().role = .observer;
+    try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
+    try runtime.resize(80, 24);
+    try testing.expectEqualStrings("observer-retained", runtime.direct_input.items);
+    try testing.expect(adapter.logicalClient().pending_outbound == null);
+    try runtime.attachment.generation.releaseEvent();
+    try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    try testing.expectEqualStrings("observer-retained", runtime.direct_input.items);
+}
+
+fn writeAggregateRevokeWire(fd: c.fd_t) !void {
+    const payload =
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}";
+    const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .event, .stream_id = 7 }, payload);
+    defer testing.allocator.free(wire);
+    try socket_server.writeAll(fd, wire);
+}
+
+fn expectActualSocketWireZero(fd: c.fd_t) !void {
+    var poll_fd = posix.pollfd{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
+    try testing.expectEqual(@as(c_int, 0), c.poll(@ptrCast(&poll_fd), 1, 50));
+}
+
+test "C3-3a3 actual socket target offset zero is cancelled and aggregate settles to zero" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC335,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
+    defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+    const filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+    try testing.expectEqual(
+        @as(usize, "target-owned-frame".len),
+        try runtime.attachment.generation.sendInputNonBlocking("target-owned-frame"),
+    );
+    try testing.expectEqual(@as(u64, 7), adapter.logicalClient().pending_outbound.?.stream_id);
+    try testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_outbound.?.offset);
+    try writeAggregateRevokeWire(fds[1]);
+    try testing.expect((try adapter.logicalClient().readStreamBatch(7)) == null);
+    const drained = try runtime.drainObservationEvents();
+    try testing.expect(drained.metadata);
+    try testing.expect(adapter.logicalClient().pending_outbound == null);
+    try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    const filler = try testing.allocator.alloc(u8, filler_len);
+    defer testing.allocator.free(filler);
+    try readRemoteTestExact(fds[1], filler);
+    try expectActualSocketWireZero(fds[1]);
+}
+
+test "C3-3a3 actual socket partial target fails closed and sibling owner resumes after aggregate zero" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    {
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var client: client_mod.Client = .{
+            .allocator = testing.allocator,
+            .fd = fds[0],
+            .host_id = 0xC336,
+            .parser = framing.FrameParser.init(testing.allocator),
+        };
+        var adapter: host_adapter_mod.HostAdapter = undefined;
+        var runtime: RemoteRuntime = undefined;
+        try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
+        defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+        const filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+        const payload = try testing.allocator.alloc(u8, 64 * 1024);
+        defer testing.allocator.free(payload);
+        @memset(payload, 'p');
+        try testing.expectEqual(payload.len, try runtime.attachment.generation.sendInputNonBlocking(payload));
+        try testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_outbound.?.offset);
+        var filler_prefix: [4096]u8 = undefined;
+        try readRemoteTestExact(fds[1], &filler_prefix);
+        try testing.expect(filler_len >= filler_prefix.len);
+        _ = try runtime.attachment.generation.pumpPendingOutput();
+        try testing.expect(adapter.logicalClient().pending_outbound.?.offset > 0);
+        try testing.expect(adapter.logicalClient().pending_outbound.?.offset <
+            adapter.logicalClient().pending_outbound.?.frame.len);
+        try writeAggregateRevokeWire(fds[1]);
+        try testing.expect((try adapter.logicalClient().readStreamBatch(7)) == null);
+        try testing.expectError(error.ConnectionClosed, runtime.drainObservationEvents());
+        try testing.expect(adapter.logicalClient().unusable);
+        try testing.expect(adapter.logicalClient().pending_outbound == null);
+        try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    }
+    {
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var client: client_mod.Client = .{
+            .allocator = testing.allocator,
+            .fd = fds[0],
+            .host_id = 0xC337,
+            .parser = framing.FrameParser.init(testing.allocator),
+        };
+        var adapter: host_adapter_mod.HostAdapter = undefined;
+        var runtime: RemoteRuntime = undefined;
+        try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
+        defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+        var sibling: generation_attachment_mod.GenerationAttachment = .{};
+        try generation_attachment_mod.testing_api.initAttached(
+            &sibling,
+            &adapter,
+            testing.allocator,
+            0xbb,
+            8,
+        );
+        defer deinitGenerationAttachmentFixture(&sibling, &adapter);
+        const filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+        try testing.expectEqual(
+            @as(usize, "sibling-owned-frame".len),
+            try sibling.sendInputNonBlocking("sibling-owned-frame"),
+        );
+        const sibling_addr = @intFromPtr(adapter.logicalClient().pending_outbound.?.frame.ptr);
+        try writeAggregateRevokeWire(fds[1]);
+        try testing.expect((try adapter.logicalClient().readStreamBatch(7)) == null);
+        _ = try runtime.drainObservationEvents();
+        const preserved = adapter.logicalClient().pending_outbound.?;
+        try testing.expectEqual(@as(u64, 8), preserved.stream_id);
+        try testing.expectEqual(@as(usize, 0), preserved.offset);
+        try testing.expectEqual(sibling_addr, @intFromPtr(preserved.frame.ptr));
+        try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+        const filler = try testing.allocator.alloc(u8, filler_len);
+        defer testing.allocator.free(filler);
+        try readRemoteTestExact(fds[1], filler);
+        try testing.expect(try runtime.attachment.generation.pumpPendingOutput());
+        try testing.expect(adapter.logicalClient().pending_outbound == null);
+        const frame = try framing.encodeFrame(testing.allocator, .{
+            .kind = .input_bytes,
+            .stream_id = 8,
+        }, "sibling-owned-frame");
+        defer testing.allocator.free(frame);
+        const received = try testing.allocator.alloc(u8, frame.len);
+        defer testing.allocator.free(received);
+        try readRemoteTestExact(fds[1], received);
+        try testing.expectEqualSlices(u8, frame, received);
+    }
+}
+
 test "sibling runtime cannot flush a stream whose buffered revoke is not consumed yet" {
     const allocator = testing.allocator;
     var client: client_mod.Client = .{
@@ -5252,8 +5519,21 @@ fn fillRemoteTestSendBuffer(fd: c.fd_t) !usize {
 }
 
 fn readRemoteTestExact(fd: c.fd_t, out: []u8) !void {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
+        10 * std.time.ns_per_s;
     var offset: usize = 0;
     while (offset < out.len) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline)
+            return error.RemoteTestDeadlineExceeded;
+        var poll_fd = posix.pollfd{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
+        const ready = c.poll(@ptrCast(&poll_fd), 1, 50);
+        if (ready == 0) continue;
+        if (ready < 0) {
+            if (posix.errno(ready) == .INTR) continue;
+            return error.TestUnexpectedResult;
+        }
+        if (poll_fd.revents & (c.POLL.ERR | c.POLL.NVAL) != 0)
+            return error.TestUnexpectedResult;
         const rc = c.read(fd, out[offset..].ptr, out.len - offset);
         if (rc > 0) {
             offset += @intCast(rc);

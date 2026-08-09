@@ -29,6 +29,7 @@ const framing = @import("framing.zig");
 const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
 const owner_range = @import("external_owner_range.zig");
 const owner_seal = @import("external_owner_seal.zig");
+const operation_thread_identity = @import("operation_thread_identity.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_poison = @import("client_poison.zig");
@@ -1595,8 +1596,16 @@ pub const OwnedGenerationEvent = struct {
     preflight: runtime_event_wire.Verdict,
 };
 
+pub const ValidatedGenerationEventTake = struct {
+    event_index: u32,
+    payload: []const u8,
+    preflight: runtime_event_wire.Verdict,
+    payload_digest: runtime_event_wire.Digest,
+};
+
 pub const GenerationEventPrepareError = error{ Busy, Corrupt, Terminal, DestinationOccupied };
 pub const GenerationEventCommitError = error{ Busy, Corrupt, Terminal, InvalidPrepared };
+pub const GenerationEventHeldError = error{ Corrupt, Terminal, InvalidPrepared };
 
 const buffered_event_source_schema_field_allowlist = [_][]const u8{
     "header",
@@ -5528,6 +5537,123 @@ fn issueClientOperationFenceIncarnation() u64 {
     }
 }
 
+pub const RegisteredOperationExecutionMintReceipt = operation_thread_identity.MintReceipt;
+
+pub const RegisteredOperationExecutionCapability = struct {
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    fence_generation: u64 = 0,
+    fence_incarnation: u64 = 0,
+    lease_identity: u64 = 0,
+    owner_process_id: u32 = 0,
+    owner_process_nonce: u64 = 0,
+    owner_thread_id: u64 = 0,
+    owner_thread_incarnation: u64 = 0,
+    operation_identity: u64 = 0,
+    live: bool = false,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    publication_identity: std.atomic.Value(u64) = .init(0),
+
+    fn digest(self: *const @This()) owner_seal.Digest {
+        var writer = owner_seal.Writer.init("maru.registered-operation-execution-capability.v1");
+        writer.writeUsize(self.self_addr);
+        writer.writeUsize(self.client_addr);
+        writer.writeU64(self.fence_generation);
+        writer.writeU64(self.fence_incarnation);
+        writer.writeU64(self.lease_identity);
+        writer.writeU64(self.owner_process_id);
+        writer.writeU64(self.owner_process_nonce);
+        writer.writeU64(self.owner_thread_id);
+        writer.writeU64(self.owner_thread_incarnation);
+        writer.writeU64(self.operation_identity);
+        writer.writeU8(@intFromBool(self.live));
+        return writer.finish();
+    }
+
+    pub fn pristineExact(self: *const @This()) bool {
+        return self.self_addr == 0 and self.client_addr == 0 and self.fence_generation == 0 and
+            self.fence_incarnation == 0 and self.lease_identity == 0 and
+            self.owner_process_id == 0 and self.owner_process_nonce == 0 and
+            self.owner_thread_id == 0 and self.owner_thread_incarnation == 0 and
+            self.operation_identity == 0 and !self.live and
+            std.mem.allEqual(u8, &self.seal, 0) and
+            self.publication_identity.load(.acquire) == 0;
+    }
+
+    fn resetPristine(self: *@This()) void {
+        self.self_addr = 0;
+        self.client_addr = 0;
+        self.fence_generation = 0;
+        self.fence_incarnation = 0;
+        self.lease_identity = 0;
+        self.owner_process_id = 0;
+        self.owner_process_nonce = 0;
+        self.owner_thread_id = 0;
+        self.owner_thread_incarnation = 0;
+        self.operation_identity = 0;
+        self.live = false;
+        self.seal = [_]u8{0} ** 32;
+        self.publication_identity.store(0, .release);
+    }
+};
+
+pub const RegisteredOperationExecutionHandle = operation_thread_identity.CapabilityHandle;
+
+const PinnedExecutionCapabilityGuard = struct {
+    capability: ?*const RegisteredOperationExecutionCapability = null,
+    pin: operation_thread_identity.CapabilityPin = .{},
+
+    fn deinit(self: *@This()) void {
+        if (!self.pin.live) return;
+        if (!operation_thread_identity.unpinCapability(&self.pin))
+            @panic("execution capability registry unpin failed");
+    }
+
+    fn close(self: *@This()) bool {
+        return operation_thread_identity.closeCapability(&self.pin);
+    }
+};
+
+fn initRegisteredOperationExecutionCapabilityGuard(
+    out: *PinnedExecutionCapabilityGuard,
+    handle: RegisteredOperationExecutionHandle,
+    expected_client_addr: usize,
+) bool {
+    out.* = .{};
+    if (!operation_thread_identity.pinCapability(handle, &out.pin)) return false;
+    out.capability = @ptrFromInt(out.pin.fields.capability_addr);
+    var transfer_pin = false;
+    defer if (!transfer_pin) out.deinit();
+    const capability = out.capability.?;
+    const published_identity = capability.publication_identity.load(.acquire);
+    if (published_identity == 0 or published_identity != out.pin.fields.publication_identity) return false;
+    if (builtin.is_test and execution_capability_read_test_hook.armed.swap(false, .acq_rel)) {
+        execution_capability_read_test_hook.reached.store(true, .release);
+        if (!ExecutionCapabilityPublicationTestHook.waitUntil(
+            &execution_capability_read_test_hook.proceed,
+        )) @panic("execution capability reader test hook timed out");
+    }
+    const current_pid = operation_thread_identity.currentProcessId();
+    const owner_thread_id: u64 = @intCast(std.Thread.getCurrentId());
+    if (!(capability.self_addr == @intFromPtr(capability) and capability.live and
+        capability.client_addr == expected_client_addr and
+        capability.client_addr == out.pin.fields.client_addr and
+        capability.fence_generation == out.pin.fields.fence_generation and
+        capability.fence_incarnation == out.pin.fields.fence_incarnation and
+        current_pid != 0 and capability.owner_process_id == current_pid and
+        capability.owner_process_id == out.pin.fields.owner_process_id and
+        capability.owner_process_nonce == out.pin.fields.owner_process_nonce and
+        capability.lease_identity == published_identity and
+        capability.owner_thread_id == owner_thread_id and
+        capability.owner_thread_id == out.pin.fields.owner_thread_id and
+        capability.owner_thread_incarnation == out.pin.fields.owner_thread_incarnation and
+        operation_thread_identity.matches(capability.owner_thread_incarnation) and
+        capability.operation_identity == out.pin.fields.operation_identity and
+        std.mem.eql(u8, &capability.seal, &capability.digest()))) return false;
+    transfer_pin = true;
+    return true;
+}
+
 pub const ClientOperationFence = struct {
     const shared_count_mask: u64 = (@as(u64, 1) << 31) - 1;
     const execution_lease_bit: u64 = @as(u64, 1) << 59;
@@ -5540,27 +5666,35 @@ pub const ClientOperationFence = struct {
     self_addr: usize = 0,
     client_addr: usize = 0,
     owner_process_id: u32 = 0,
+    owner_process_nonce: u64 = 0,
     slot_incarnation: u64 = 0,
     node_incarnation: u64 = 0,
     fence_generation: u64 = 0,
     fence_incarnation: u64 = 0,
     state: std.atomic.Value(u64) = .init(0),
+    execution_capability_addr: std.atomic.Value(usize) = .init(0),
+    execution_capability_identity: std.atomic.Value(u64) = .init(0),
+    execution_owner_thread_id: std.atomic.Value(u64) = .init(0),
+    execution_owner_thread_incarnation: std.atomic.Value(u64) = .init(0),
+    next_execution_capability_identity: std.atomic.Value(u64) = .init(1),
 
     pub fn initInPlace(
         self: *ClientOperationFence,
         client_addr: usize,
         owner_process_id: u32,
+        owner_process_nonce: u64,
         slot_incarnation: u64,
         node_incarnation: u64,
         fence_generation: u64,
     ) void {
-        if (client_addr == 0 or owner_process_id == 0 or slot_incarnation == 0 or
+        if (client_addr == 0 or owner_process_id == 0 or owner_process_nonce == 0 or slot_incarnation == 0 or
             node_incarnation == 0 or fence_generation == 0)
             @panic("invalid Client operation fence identity");
         self.* = .{
             .self_addr = @intFromPtr(self),
             .client_addr = client_addr,
             .owner_process_id = owner_process_id,
+            .owner_process_nonce = owner_process_nonce,
             .slot_incarnation = slot_incarnation,
             .node_incarnation = node_incarnation,
             .fence_generation = fence_generation,
@@ -5693,6 +5827,52 @@ pub const ClientOperationFence = struct {
             self.state.load(.acquire) == execution_lease_bit;
     }
 
+    fn issueExecutionCapabilityIdentity(self: *ClientOperationFence) ?u64 {
+        var observed = self.next_execution_capability_identity.load(.acquire);
+        while (true) {
+            if (observed == 0 or observed == std.math.maxInt(u64)) return null;
+            if (self.next_execution_capability_identity.cmpxchgWeak(
+                observed,
+                observed + 1,
+                .acq_rel,
+                .acquire,
+            )) |actual| {
+                observed = actual;
+                continue;
+            }
+            return observed;
+        }
+    }
+
+    fn executionCapabilityMatches(
+        self: *const ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+        capability: *const RegisteredOperationExecutionCapability,
+    ) bool {
+        if (generationAllocatorCallbackActive()) return false;
+        const published_identity = capability.publication_identity.load(.acquire);
+        if (published_identity == 0) return false;
+        const thread_id: u64 = @intCast(std.Thread.getCurrentId());
+        return capability.self_addr == @intFromPtr(capability) and capability.live and
+            capability.client_addr == client_addr and
+            capability.owner_process_id == self.owner_process_id and
+            capability.owner_process_nonce == self.owner_process_nonce and
+            capability.fence_generation == fence_generation and
+            capability.fence_incarnation == self.fence_incarnation and
+            capability.lease_identity != 0 and capability.owner_thread_id == thread_id and
+            capability.owner_thread_incarnation != 0 and capability.operation_identity != 0 and
+            operation_thread_identity.matches(capability.owner_thread_incarnation) and
+            std.mem.eql(u8, &capability.seal, &capability.digest()) and
+            self.executionLeaseHeld(client_addr, fence_generation) and
+            self.execution_capability_addr.load(.acquire) == @intFromPtr(capability) and
+            published_identity == capability.lease_identity and
+            self.execution_capability_identity.load(.acquire) == published_identity and
+            self.execution_owner_thread_id.load(.acquire) == thread_id and
+            self.execution_owner_thread_incarnation.load(.acquire) ==
+                capability.owner_thread_incarnation;
+    }
+
     fn recordIntrusionIfExactExclusive(self: *ClientOperationFence, observed: u64) void {
         if (observed != exclusive_bit) return;
         _ = self.state.cmpxchgStrong(
@@ -5796,11 +5976,35 @@ pub const ClientOperationFence = struct {
     }
 };
 
+pub const ExecutionCapabilityPublicationTestHook = struct {
+    armed: std.atomic.Value(bool) = .init(false),
+    reached: std.atomic.Value(bool) = .init(false),
+    proceed: std.atomic.Value(bool) = .init(false),
+
+    pub fn waitUntil(flag: *const std.atomic.Value(bool)) bool {
+        const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
+            10 * std.time.ns_per_s;
+        while (!flag.load(.acquire)) {
+            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return false;
+            std.Thread.yield() catch {};
+        }
+        return true;
+    }
+};
+pub var execution_capability_publication_test_hook: if (builtin.is_test)
+    ExecutionCapabilityPublicationTestHook
+else
+    void = if (builtin.is_test) .{} else {};
+pub var execution_capability_read_test_hook: if (builtin.is_test)
+    ExecutionCapabilityPublicationTestHook
+else
+    void = if (builtin.is_test) .{} else {};
+
 test "CR3a B3b-F operation fence linearizes shared and exclusive ownership" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 11, 13, 17);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 11, 13, 17);
 
     try fence.tryEnterShared(@intFromPtr(&client_storage), 17);
     try std.testing.expectError(
@@ -5827,7 +6031,7 @@ test "CR3a B3b-F operation fence rejects copied and stale identities before stat
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 19, 23, 29);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 19, 23, 29);
     var copied = fence;
 
     try std.testing.expectError(
@@ -5845,7 +6049,7 @@ test "B3-3 operation execution lease atomically blocks shared and teardown entry
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 31, 37, 41);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 31, 37, 41);
 
     try fence.tryAcquireExecutionLease(@intFromPtr(&client_storage), 41);
     try std.testing.expectError(
@@ -5866,7 +6070,7 @@ test "B3-3 operation execution lease upgrades and restores one registered shared
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 71, 73, 79);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 71, 73, 79);
     try fence.tryEnterShared(@intFromPtr(&client_storage), 79);
     try fence.upgradeSingleSharedToExecutionLease(@intFromPtr(&client_storage), 79);
     try std.testing.expectError(
@@ -5884,7 +6088,7 @@ test "CR3a B3b-F nested count overflow and reserved states fail closed" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 32, 33, 34);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 32, 33, 34);
 
     try fence.tryEnterShared(@intFromPtr(&client_storage), 34);
     try fence.tryEnterShared(@intFromPtr(&client_storage), 34);
@@ -5915,12 +6119,12 @@ test "CR3a B3b-F Client rejects rebind and same-address generation ABA" {
     defer client.parser.deinit();
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 36, 37, 38);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 36, 37, 38);
     try std.testing.expect(client.bindOperationFence(&fence, 38));
     try std.testing.expect(!client.bindOperationFence(&fence, 38));
 
     // Reincarnating the same storage cannot make the old Client generation authoritative.
-    fence.initInPlace(@intFromPtr(&client), pid, 39, 40, 41);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 39, 40, 41);
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
     try std.testing.expectEqual(@as(u64, 0), fence.state.load(.acquire));
 }
@@ -5934,7 +6138,7 @@ test "CR3a B3b-F exclusive fence rejects public Client mutation before graph acc
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 41, 43, 47);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 41, 43, 47);
     try std.testing.expect(client.bindOperationFence(&fence, 47));
     try client.tryAcquireEndedPurgeExclusive();
 
@@ -5970,7 +6174,7 @@ test "CR3a B3b-F exclusive fence rejects a foreign thread Client mutation" {
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 59, 61, 67);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 59, 61, 67);
     try std.testing.expect(client.bindOperationFence(&fence, 67));
     try client.tryAcquireEndedPurgeExclusive();
 
@@ -5995,7 +6199,7 @@ test "CR3a B3b-S publication seal atomically excludes a late intrusion" {
     defer client.parser.deinit();
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 68, 69, 70);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 68, 69, 70);
     try std.testing.expect(client.bindOperationFence(&fence, 70));
     try client.tryAcquireEndedPurgeExclusive();
     const stale_public_observation = ClientOperationFence.exclusive_bit;
@@ -6021,7 +6225,7 @@ test "CR3a B3b-S mutable terminal observations fail closed behind exclusive fenc
     client.latchFirstPoisonReason(.local_invariant_violation);
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 69, 70, 71);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 69, 70, 71);
     try std.testing.expect(client.bindOperationFence(&fence, 71));
     try client.tryAcquireEndedPurgeExclusive();
 
@@ -6043,7 +6247,7 @@ test "CR3a B3b-F allocator reentry poison defers to exclusive fence" {
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 70, 71, 72);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 70, 71, 72);
     try std.testing.expect(client.bindOperationFence(&fence, 72));
     try std.testing.expect(client.enterGenerationAllocatorCallback());
     defer client.leaveGenerationAllocatorCallbackUnchecked();
@@ -6066,7 +6270,7 @@ test "CR3a B3b-F deinit-only reentry records exclusive intrusion" {
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 74, 75, 76);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 74, 75, 76);
     try std.testing.expect(client.bindOperationFence(&fence, 76));
     try client.tryAcquireEndedPurgeExclusive();
     try std.testing.expect(client.enterGenerationAllocatorCallback());
@@ -6097,7 +6301,7 @@ test "CR3a B3b-F foreign shared entry makes exclusive commit fail without waitin
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 71, 72, 73);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 71, 72, 73);
     var entered = std.atomic.Value(bool).init(false);
     var release = std.atomic.Value(bool).init(false);
     var released = std.atomic.Value(bool).init(false);
@@ -6128,7 +6332,7 @@ test "CR3a B3b-F deinit retries only after a shared operation leaves" {
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 75, 76, 77);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 75, 76, 77);
     try std.testing.expect(client.bindOperationFence(&fence, 77));
 
     try fence.tryEnterShared(@intFromPtr(&client), 77);
@@ -6150,7 +6354,7 @@ test "CR3a B3b-S bound generation Client cannot enter external mode" {
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
-    fence.initInPlace(@intFromPtr(&client), pid, 76, 77, 78);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 76, 77, 78);
     try std.testing.expect(client.bindOperationFence(&fence, 78));
 
     try std.testing.expectError(error.Busy, client.enterExternalMode());
@@ -6180,7 +6384,7 @@ test "CR3a B3b-F fork child rejects an inherited fence before atomic state acces
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
     const pid: u32 = @intCast(c.getpid());
-    fence.initInPlace(@intFromPtr(&client_storage), pid, 79, 83, 89);
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 79, 83, 89);
     try fence.tryAcquireExclusive(@intFromPtr(&client_storage), 89);
 
     const child = c.fork();
@@ -8291,21 +8495,51 @@ pub const Client = struct {
     ) DeadlineClientError![]u8 {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.callGuardedWithIo(method, params_json, io, false);
+    }
+
+    fn callGuardedWithIo(
+        self: *Client,
+        method: []const u8,
+        params_json: ?[]const u8,
+        io: RpcIo,
+        execution_lease_held: bool,
+    ) DeadlineClientError![]u8 {
         // A buffered controller revoke is a connection-wide ordering latch. No sibling RPC may
         // flush an older admitted mutation frame before the owning runtime consumes and fences it.
         if (self.bufferedControllerRevokeForStreamUnchecked(null)) return error.AdminBusy;
         // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
-        try self.flushPendingOutboundBlocking();
+        try self.flushPendingOutboundBlockingMode(execution_lease_held);
         var prepared: PreparedBlockingRpc = .{};
-        self.prepareBlockingRpc(&prepared, method, params_json) catch |err| return switch (err) {
+        self.prepareBlockingRpcGuarded(&prepared, method, params_json) catch |err| return switch (err) {
             error.DestinationOccupied, error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
             else => |client_err| client_err,
         };
-        const executed = self.executePreparedWithIo(&prepared, io, false, null, null) catch |err| return switch (err) {
+        const executed = self.executePreparedWithIo(
+            &prepared,
+            io,
+            false,
+            null,
+            null,
+            execution_lease_held,
+        ) catch |err| return switch (err) {
             error.InvalidPreparedRpc, error.MovedOrCopied, error.PayloadProvenanceRejected => error.ProtocolError,
             else => |client_err| client_err,
         };
         return executed.payload;
+    }
+
+    pub fn callUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) ClientError![]u8 {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.callGuardedWithIo(method, params_json, .blocking, true) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
     }
 
     fn callUntilWithOps(
@@ -8356,6 +8590,7 @@ pub const Client = struct {
             false,
             null,
             null,
+            false,
         ) catch |err| {
             self.poisonWithOps(.response_correlation_lost, ops);
             return switch (err) {
@@ -8399,6 +8634,15 @@ pub const Client = struct {
     ) PreparedBlockingRpcError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.prepareBlockingRpcGuarded(out, method, params_json);
+    }
+
+    fn prepareBlockingRpcGuarded(
+        self: *Client,
+        out: *PreparedBlockingRpc,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) PreparedBlockingRpcError!void {
         const pristine = out.self_addr == 0 and out.lifecycle == .pristine and out.frame.len == 0;
         if (!pristine and !out.reusableTerminalFor(self))
             return error.DestinationOccupied;
@@ -8446,7 +8690,7 @@ pub const Client = struct {
         self: *Client,
         prepared: *PreparedBlockingRpc,
     ) PreparedBlockingRpcExecution {
-        const response = self.executePreparedWithIo(prepared, .blocking, true, null, null) catch |err| {
+        const response = self.executePreparedWithIo(prepared, .blocking, true, null, null, false) catch |err| {
             const classified: PreparedBlockingRpcError = switch (err) {
                 error.DeadlineExceeded, error.PayloadProvenanceRejected => unreachable,
                 else => |client_err| client_err,
@@ -9024,13 +9268,14 @@ pub const Client = struct {
         self: *Client,
         lease: *PreparedRequestExecutionLease,
     ) ClientError!void {
-        return self.flushPendingOutboundBlockingWithOps(lease, .posix_ops);
+        return self.flushPendingOutboundBlockingWithOps(lease, .posix_ops, true);
     }
 
     fn flushPendingOutboundBlockingWithOps(
         self: *Client,
         lease: ?*PreparedRequestExecutionLease,
         ops: PreparedExecutionWriteOps,
+        execution_lease_held: bool,
     ) ClientError!void {
         while (self.pending_outbound) |*pending| {
             const ambiguous_before = pending.offset != 0;
@@ -9043,7 +9288,7 @@ pub const Client = struct {
                         if (lease) |active|
                             _ = self.setPreparedExecutionProgress(active, .prior_pending_ambiguous);
                     }
-                    if (lease != null)
+                    if (lease != null or execution_lease_held)
                         self.poisonWhilePreparedExecutionHeld(.outbound_write_ambiguous)
                     else
                         self.poison(.outbound_write_ambiguous);
@@ -9055,7 +9300,7 @@ pub const Client = struct {
                             if (lease) |active|
                                 _ = self.setPreparedExecutionProgress(active, .prior_pending_ambiguous);
                         }
-                        if (lease != null)
+                        if (lease != null or execution_lease_held)
                             self.poisonWhilePreparedExecutionHeld(.local_invariant_violation)
                         else
                             self.poison(.local_invariant_violation);
@@ -9112,6 +9357,17 @@ pub const Client = struct {
     ) void {
         self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
+    }
+
+    fn poisonMutationIo(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+        execution_lease_held: bool,
+    ) void {
+        if (execution_lease_held)
+            self.poisonWhilePreparedExecutionHeld(reason)
+        else
+            self.poison(reason);
     }
 
     pub fn executePreparedBlockingRpcStorageWithAllocator(
@@ -9176,6 +9432,7 @@ pub const Client = struct {
             false,
             allocator,
             observer,
+            false,
         ) catch |err| {
             const classified: ObservedPreparedBlockingRpcExecutionError = switch (err) {
                 error.DeadlineExceeded => unreachable,
@@ -9218,12 +9475,13 @@ pub const Client = struct {
         flush_pending: bool,
         expected_payload_allocator: ?std.mem.Allocator,
         payload_observer: ?framing.PayloadAllocationObserver,
+        execution_lease_held: bool,
     ) (DeadlineClientError || error{ InvalidPreparedRpc, MovedOrCopied, PayloadProvenanceRejected })!ExecutedBlockingRpcResponse {
         if (prepared.self_addr != @intFromPtr(prepared)) return error.MovedOrCopied;
         if (!prepared.validFor(self) or !prepared.frameIntact() or
             prepared.request_id != self.next_request_id)
             return error.InvalidPreparedRpc;
-        if (flush_pending) try self.flushPendingOutboundBlocking();
+        if (flush_pending) try self.flushPendingOutboundBlockingMode(execution_lease_held);
 
         prepared.lifecycle = .executing;
         const request_id = prepared.request_id;
@@ -9236,7 +9494,10 @@ pub const Client = struct {
             .blocking => socket_server.writeAll(self.fd, frame_bytes) catch {
                 // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
                 // 이후 RPC를 허용하지 않고 EOF로 모든 host-side attachment를 정리한다.
-                self.poison(.outbound_write_ambiguous);
+                if (execution_lease_held)
+                    self.poisonWhilePreparedExecutionHeld(.outbound_write_ambiguous)
+                else
+                    self.poison(.outbound_write_ambiguous);
                 return error.WriteFailed;
             },
             .deadline => |bounded| client_deadline.writeAllUntil(
@@ -9261,7 +9522,7 @@ pub const Client = struct {
             io,
             expected_payload_allocator,
             payload_observer,
-            false,
+            execution_lease_held,
         );
     }
 
@@ -9394,6 +9655,7 @@ pub const Client = struct {
                 resp,
                 expected_payload_allocator,
                 payload_observer,
+                execution_lease_held,
             ) catch |err| return err;
             if (buffered_out_of_band) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
@@ -9445,6 +9707,7 @@ pub const Client = struct {
         frame: framing.Frame,
         expected_allocator: ?std.mem.Allocator,
         payload_observer: ?framing.PayloadAllocationObserver,
+        execution_lease_held: bool,
     ) ClientError!bool {
         const allocator = expected_allocator orelse self.allocator;
         defer if (expected_allocator != null and
@@ -9452,7 +9715,7 @@ pub const Client = struct {
         {
             self.allocator = allocator;
             self.parser.restoreAllocatorAfterDrift(allocator);
-            self.poison(.local_invariant_violation);
+            self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
         };
         if (frame.header.kind == .delta_chunk or frame.header.kind == .snapshot_chunk) {
             const manual_allocator_guard = expected_allocator != null and
@@ -9466,7 +9729,7 @@ pub const Client = struct {
                 self.screenInboxBytes() +| frame.payload.len > protocol.max_client_screen_inbox)
             {
                 frame.deinit(allocator);
-                self.poison(.event_queue_overflow);
+                self.poisonMutationIo(.event_queue_overflow, execution_lease_held);
                 return error.EventQueueFull;
             }
             var durable_frame = frame;
@@ -9475,7 +9738,7 @@ pub const Client = struct {
                 frame.deinit(allocator);
                 // The frame is already consumed from the socket. Losing it would break the next
                 // stream delta base, so the whole shared connection must fail closed.
-                self.poison(.local_resource_exhausted);
+                self.poisonMutationIo(.local_resource_exhausted, execution_lease_held);
                 return error.OutOfMemory;
             };
             self.pending_stream_bytes += frame.payload.len;
@@ -9489,7 +9752,15 @@ pub const Client = struct {
             defer if (manual_allocator_guard)
                 self.leaveGenerationAllocatorCallbackUnchecked();
             discardFramePayloadObservation(payload_observer, frame);
-            try self.bufferEventWithAllocator(frame, allocator);
+            self.bufferEventWithAllocator(frame, allocator) catch |err| {
+                if (execution_lease_held and self.first_poison_reason == null)
+                    self.poisonMutationIo(switch (err) {
+                        error.OutOfMemory => .local_resource_exhausted,
+                        error.EventQueueFull => .event_queue_overflow,
+                        else => .peer_contract_violation,
+                    }, true);
+                return err;
+            };
             return true;
         }
         return false;
@@ -9514,7 +9785,7 @@ pub const Client = struct {
             };
             const owned = maybe orelse continue;
             const frame = try self.requireWireMajor(owned);
-            if (try self.bufferOutOfBandFrame(frame, null, null)) continue;
+            if (try self.bufferOutOfBandFrame(frame, null, null, false)) continue;
             frame.deinit(self.allocator);
             self.poison(.peer_contract_violation);
             return error.ProtocolError;
@@ -10341,6 +10612,15 @@ pub const Client = struct {
         const operation_fence_held = self.beginPublicMutation() catch return error.Busy;
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.Busy;
+        const validated = try self.validateGenerationEventTakeCore(prepared, out);
+        self.commitValidatedGenerationEventTakeCore(prepared, out, validated);
+    }
+
+    fn validateGenerationEventTakeCore(
+        self: *Client,
+        prepared: *PreparedGenerationEventTake,
+        out: *?OwnedGenerationEvent,
+    ) GenerationEventHeldError!ValidatedGenerationEventTake {
         if (out.* != null or prepared.self_addr != @intFromPtr(prepared) or
             prepared.client_addr != @intFromPtr(self) or prepared.stream_id == 0 or
             prepared.lifecycle != .prepared or prepared.kind != .ordinary)
@@ -10364,6 +10644,26 @@ pub const Client = struct {
         if (!std.mem.eql(u8, &digest, &prepared.payload_digest)) return error.Corrupt;
         for (self.pending_events.items[0..index]) |prior|
             if (prior.header.stream_id == prepared.stream_id) return error.Corrupt;
+        return .{
+            .event_index = prepared.event_index,
+            .payload = event.payload,
+            .preflight = event.preflight.?,
+            .payload_digest = digest,
+        };
+    }
+
+    fn commitValidatedGenerationEventTakeCore(
+        self: *Client,
+        prepared: *PreparedGenerationEventTake,
+        out: *?OwnedGenerationEvent,
+        validated: ValidatedGenerationEventTake,
+    ) void {
+        const index: usize = validated.event_index;
+        const event = self.pending_events.items[index];
+        if (@intFromPtr(event.payload.ptr) != @intFromPtr(validated.payload.ptr) or
+            event.payload.len != validated.payload.len or
+            !std.mem.eql(u8, &validated.payload_digest, &prepared.payload_digest))
+            @panic("validated generation event changed under mutation fence");
         const owned = self.pending_events.orderedRemove(index);
         self.pending_event_bytes -= owned.payload.len;
         prepared.lifecycle = .consumed;
@@ -10372,6 +10672,56 @@ pub const Client = struct {
             .payload = owned.payload,
             .preflight = owned.preflight.?,
         };
+    }
+
+    pub fn validateGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        prepared: *PreparedGenerationEventTake,
+        out: *?OwnedGenerationEvent,
+    ) GenerationEventHeldError!ValidatedGenerationEventTake {
+        self.requireRegisteredOperationExecutionCapability(capability) catch
+            return error.InvalidPrepared;
+        return self.validateGenerationEventTakeCore(prepared, out);
+    }
+
+    pub fn commitGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        prepared: *PreparedGenerationEventTake,
+        out: *?OwnedGenerationEvent,
+        validated: ValidatedGenerationEventTake,
+    ) GenerationEventHeldError!void {
+        const current = try self.validateGenerationEventTakeUnderRegisteredOperationExecutionLease(
+            capability,
+            prepared,
+            out,
+        );
+        if (current.event_index != validated.event_index or
+            @intFromPtr(current.payload.ptr) != @intFromPtr(validated.payload.ptr) or
+            current.payload.len != validated.payload.len or
+            !std.mem.eql(u8, &current.payload_digest, &validated.payload_digest))
+            return error.Corrupt;
+        self.commitValidatedGenerationEventTakeCore(prepared, out, current);
+    }
+
+    pub fn abortGenerationEventTakeDuringRegisteredOperation(
+        self: *const Client,
+        prepared: *PreparedGenerationEventTake,
+    ) void {
+        self.abortGenerationEventTake(prepared);
+    }
+
+    pub fn abortGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        prepared: *PreparedGenerationEventTake,
+    ) void {
+        self.requireRegisteredOperationExecutionCapability(capability) catch
+            @panic("generation event held abort requires exact execution capability");
+        if (prepared.self_addr == @intFromPtr(prepared) and
+            prepared.client_addr == @intFromPtr(self) and prepared.lifecycle == .prepared)
+            prepared.* = .{};
     }
 
     pub fn abortGenerationEventTake(
@@ -12183,9 +12533,13 @@ pub const Client = struct {
     pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendInputGuarded(stream_id, bytes, false);
+    }
+
+    fn sendInputGuarded(self: *Client, stream_id: u64, bytes: []const u8, execution_lease_held: bool) ClientError!void {
         // 앞 tick의 non-blocking frame부터 끝낸 뒤 새 blocking input을 쓴다. 같은 stream뿐 아니라 connection을 공유하는
         // 여러 runtime 사이에서도 실제 socket write 순서를 보존한다.
-        try self.flushPendingOutboundBlocking();
+        try self.flushPendingOutboundBlockingMode(execution_lease_held);
         // input frame의 wire cap은 1 MiB다. paste가 이를 넘는 것은 정상 입력이므로 encode 실패/드롭하지 않고 순서대로
         // 여러 frame으로 나눈다. 빈 입력은 전송할 것이 없다.
         var offset: usize = 0;
@@ -12200,12 +12554,22 @@ pub const Client = struct {
             socket_server.writeAll(self.fd, frame_bytes) catch {
                 self.allocator.free(frame_bytes);
                 // frame prefix가 이미 kernel에 들어갔을 수 있어 같은 connection에서 재시도하면 framing/입력이 중복된다.
-                self.poison(.outbound_write_ambiguous);
+                self.poisonMutationIo(.outbound_write_ambiguous, execution_lease_held);
                 return error.WriteFailed;
             };
             self.allocator.free(frame_bytes);
             offset = end;
         }
+    }
+
+    pub fn sendInputUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+        bytes: []const u8,
+    ) ClientError!void {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendInputGuarded(stream_id, bytes, true);
     }
 
     /// terminal input을 UI thread에서 **실제로 논블로킹** 전송한다. 반환값은 socket에 즉시 쓴 바이트가 아니라 이 connection이
@@ -12214,9 +12578,12 @@ pub const Client = struct {
     pub fn sendInputNonBlocking(self: *Client, stream_id: u64, bytes: []const u8) ClientError!usize {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendInputNonBlockingGuarded(stream_id, bytes, false);
+    }
 
+    fn sendInputNonBlockingGuarded(self: *Client, stream_id: u64, bytes: []const u8, execution_lease_held: bool) ClientError!usize {
         // 기존 frame을 먼저 밀어 FIFO를 지킨다. 여전히 막혔으면 새 payload는 caller가 계속 소유한다.
-        if (!(try self.pumpPendingOutput())) return 0;
+        if (!(try self.pumpPendingOutputGuarded(execution_lease_held))) return 0;
         if (bytes.len == 0) return 0;
 
         const accepted = inputChunkEnd(0, bytes.len);
@@ -12229,8 +12596,18 @@ pub const Client = struct {
         self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
 
         // EAGAIN/partial write여도 frame 소유권은 이미 client로 넘어왔다. hard error만 connection을 fail-closed한다.
-        _ = try self.pumpPendingOutput();
+        _ = try self.pumpPendingOutputGuarded(execution_lease_held);
         return accepted;
+    }
+
+    pub fn sendInputNonBlockingUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+        bytes: []const u8,
+    ) ClientError!usize {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendInputNonBlockingGuarded(stream_id, bytes, true);
     }
 
     /// AppKit callback에서 host viewport를 live bottom으로 되돌리는 fire-and-forget frame을 bounded
@@ -12239,8 +12616,12 @@ pub const Client = struct {
     pub fn sendScrollToBottomNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendScrollToBottomNonBlockingGuarded(stream_id, false);
+    }
+
+    fn sendScrollToBottomNonBlockingGuarded(self: *Client, stream_id: u64, execution_lease_held: bool) ClientError!bool {
         if (!self.async_scroll_to_bottom_v1) return false;
-        if (!(try self.pumpPendingOutput())) return false;
+        if (!(try self.pumpPendingOutputGuarded(execution_lease_held))) return false;
         const frame = framing.encodeFrame(
             self.allocator,
             .{ .kind = .scroll_to_bottom, .stream_id = stream_id, .major = self.wire_major },
@@ -12248,8 +12629,17 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
         self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
-        _ = try self.pumpPendingOutput();
+        _ = try self.pumpPendingOutputGuarded(execution_lease_held);
         return true;
+    }
+
+    pub fn sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+    ) ClientError!bool {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendScrollToBottomNonBlockingGuarded(stream_id, true);
     }
 
     /// Coalesced invalidation recovery control for the UI frame pump. It shares the one bounded
@@ -12257,7 +12647,11 @@ pub const Client = struct {
     pub fn sendResyncNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
-        if (!(try self.pumpPendingOutput())) return false;
+        return self.sendResyncNonBlockingGuarded(stream_id, false);
+    }
+
+    fn sendResyncNonBlockingGuarded(self: *Client, stream_id: u64, execution_lease_held: bool) ClientError!bool {
+        if (!(try self.pumpPendingOutputGuarded(execution_lease_held))) return false;
         const frame = framing.encodeFrame(
             self.allocator,
             .{ .kind = .stream_ack, .stream_id = stream_id, .major = self.wire_major },
@@ -12265,8 +12659,17 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
         self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
-        _ = try self.pumpPendingOutput();
+        _ = try self.pumpPendingOutputGuarded(execution_lease_held);
         return true;
+    }
+
+    pub fn sendResyncNonBlockingUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+    ) ClientError!bool {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendResyncNonBlockingGuarded(stream_id, true);
     }
 
     /// host core command JSON을 응답 없는 stream frame으로 admission한다. true면 Client가 frame 소유권을
@@ -12274,8 +12677,12 @@ pub const Client = struct {
     pub fn sendCoreCommandNonBlocking(self: *Client, stream_id: u64, payload: []const u8) ClientError!bool {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendCoreCommandNonBlockingGuarded(stream_id, payload, false);
+    }
+
+    fn sendCoreCommandNonBlockingGuarded(self: *Client, stream_id: u64, payload: []const u8, execution_lease_held: bool) ClientError!bool {
         if (!self.runtime_core_command_v1) return false;
-        if (!(try self.pumpPendingOutput())) return false;
+        if (!(try self.pumpPendingOutputGuarded(execution_lease_held))) return false;
         const frame = framing.encodeFrame(
             self.allocator,
             .{ .kind = .core_command, .stream_id = stream_id, .major = self.wire_major },
@@ -12283,8 +12690,18 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
         self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
-        _ = try self.pumpPendingOutput();
+        _ = try self.pumpPendingOutputGuarded(execution_lease_held);
         return true;
+    }
+
+    pub fn sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+        payload: []const u8,
+    ) ClientError!bool {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendCoreCommandNonBlockingGuarded(stream_id, payload, true);
     }
 
     /// 이미 RemoteRuntime의 ordered input FIFO가 소유한 scroll barrier를 후속 blocking RPC보다 먼저 보낸다.
@@ -12292,7 +12709,7 @@ pub const Client = struct {
     pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
-        return self.sendScrollToBottomGuardedWithOps(stream_id, .posix_ops);
+        return self.sendScrollToBottomGuardedWithOps(stream_id, .posix_ops, false);
     }
 
     fn sendScrollToBottomWithOps(
@@ -12302,23 +12719,33 @@ pub const Client = struct {
     ) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
-        return self.sendScrollToBottomGuardedWithOps(stream_id, ops);
+        return self.sendScrollToBottomGuardedWithOps(stream_id, ops, false);
     }
 
     fn sendScrollToBottomGuardedWithOps(
         self: *Client,
         stream_id: u64,
         ops: PreparedExecutionWriteOps,
+        execution_lease_held: bool,
     ) ClientError!void {
         if (!self.async_scroll_to_bottom_v1) return;
-        try self.flushPendingOutboundBlocking();
+        try self.flushPendingOutboundBlockingMode(execution_lease_held);
         const frame = framing.encodeFrame(
             self.allocator,
             .{ .kind = .scroll_to_bottom, .stream_id = stream_id, .major = self.wire_major },
             "",
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
-        try self.writeBlockingStreamFrameWithOps(frame, ops);
+        try self.writeBlockingStreamFrameWithOps(frame, ops, execution_lease_held);
+    }
+
+    pub fn sendScrollToBottomUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+    ) ClientError!void {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendScrollToBottomGuardedWithOps(stream_id, .posix_ops, true);
     }
 
     /// RemoteRuntime의 ordered queue를 뒤따르는 blocking RPC 직전에 남은 core frame을 전량 보낸다. 응답은 없지만
@@ -12326,7 +12753,7 @@ pub const Client = struct {
     pub fn sendCoreCommand(self: *Client, stream_id: u64, payload: []const u8) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
-        return self.sendCoreCommandGuardedWithOps(stream_id, payload, .posix_ops);
+        return self.sendCoreCommandGuardedWithOps(stream_id, payload, .posix_ops, false);
     }
 
     fn sendCoreCommandWithOps(
@@ -12337,7 +12764,7 @@ pub const Client = struct {
     ) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
-        return self.sendCoreCommandGuardedWithOps(stream_id, payload, ops);
+        return self.sendCoreCommandGuardedWithOps(stream_id, payload, ops, false);
     }
 
     fn sendCoreCommandGuardedWithOps(
@@ -12345,34 +12772,46 @@ pub const Client = struct {
         stream_id: u64,
         payload: []const u8,
         ops: PreparedExecutionWriteOps,
+        execution_lease_held: bool,
     ) ClientError!void {
         if (!self.runtime_core_command_v1) return;
-        try self.flushPendingOutboundBlocking();
+        try self.flushPendingOutboundBlockingMode(execution_lease_held);
         const frame = framing.encodeFrame(
             self.allocator,
             .{ .kind = .core_command, .stream_id = stream_id, .major = self.wire_major },
             payload,
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
-        try self.writeBlockingStreamFrameWithOps(frame, ops);
+        try self.writeBlockingStreamFrameWithOps(frame, ops, execution_lease_held);
+    }
+
+    pub fn sendCoreCommandUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+        payload: []const u8,
+    ) ClientError!void {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.sendCoreCommandGuardedWithOps(stream_id, payload, .posix_ops, true);
     }
 
     fn writeBlockingStreamFrameWithOps(
         self: *Client,
         frame: []const u8,
         ops: PreparedExecutionWriteOps,
+        execution_lease_held: bool,
     ) ClientError!void {
         var offset: usize = 0;
         while (offset < frame.len) {
             switch (ops.writeFn(ops.context, self.fd, frame[offset..])) {
                 .interrupted => continue,
                 .would_block, .zero, .failed => {
-                    self.poison(.outbound_write_ambiguous);
+                    self.poisonMutationIo(.outbound_write_ambiguous, execution_lease_held);
                     return error.WriteFailed;
                 },
                 .written => |written| {
                     if (written == 0 or written > frame.len - offset) {
-                        self.poison(.local_invariant_violation);
+                        self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
                         return error.WriteFailed;
                     }
                     offset += written;
@@ -12384,7 +12823,14 @@ pub const Client = struct {
     /// pending outbound frame의 남은 wire bytes를 blocking으로 전량 보낸다. 부분 write마다 offset을 진전시켜 오류 뒤 같은 prefix를
     /// 다시 보낼 가능성을 없앤다. hard error면 이 socket은 framing 경계를 복구할 수 없으므로 connection을 닫는다.
     fn flushPendingOutboundBlocking(self: *Client) ClientError!void {
-        return self.flushPendingOutboundBlockingWithOps(null, .posix_ops);
+        return self.flushPendingOutboundBlockingMode(false);
+    }
+
+    fn flushPendingOutboundBlockingMode(
+        self: *Client,
+        execution_lease_held: bool,
+    ) ClientError!void {
+        return self.flushPendingOutboundBlockingWithOps(null, .posix_ops, execution_lease_held);
     }
 
     /// MSG_DONTWAIT로 pending frame을 가능한 만큼 민다. true면 슬롯이 비었고 새 payload를 받을 수 있다. EAGAIN은 정상
@@ -12393,9 +12839,13 @@ pub const Client = struct {
     pub fn pumpPendingOutput(self: *Client) ClientError!bool {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.pumpPendingOutputGuarded(false);
+    }
+
+    fn pumpPendingOutputGuarded(self: *Client, execution_lease_held: bool) ClientError!bool {
         while (self.pending_outbound) |*pending| {
             const remaining = pending.frame[pending.offset..];
-            switch (try self.sendDontWait(remaining)) {
+            switch (try self.sendDontWait(remaining, execution_lease_held)) {
                 .would_block => return false,
                 .written => |written| {
                     pending.offset += written;
@@ -12404,6 +12854,14 @@ pub const Client = struct {
             }
         }
         return true;
+    }
+
+    pub fn pumpPendingOutputUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+    ) ClientError!bool {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        return self.pumpPendingOutputGuarded(true);
     }
 
     pub const RevokeFence = enum {
@@ -12480,16 +12938,16 @@ pub const Client = struct {
     /// macOS에서 실 non-blocking을 보장하기 위해 send 구간에만 descriptor O_NONBLOCK을 켰다가 원 flags로 되돌린다.
     /// Client outbound/read는 GUI frame thread에서 직렬 호출한다는 현재 계약에 기대며, flags 복원 실패 시 이후 blocking
     /// call의 의미가 바뀌므로 같은 connection을 계속 쓰지 않고 fail-closed한다.
-    fn sendDontWait(self: *Client, bytes: []const u8) ClientError!NonblockingSend {
+    fn sendDontWait(self: *Client, bytes: []const u8, execution_lease_held: bool) ClientError!NonblockingSend {
         const flags = c.fcntl(self.fd, c.F.GETFL, @as(c_int, 0));
         if (flags < 0) {
-            self.poison(.local_invariant_violation);
+            self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
             return error.WriteFailed;
         }
         const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
         const changed = flags & nonblock_flag == 0;
         if (changed and c.fcntl(self.fd, c.F.SETFL, flags | nonblock_flag) < 0) {
-            self.poison(.local_invariant_violation);
+            self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
             return error.WriteFailed;
         }
 
@@ -12504,12 +12962,12 @@ pub const Client = struct {
         }
 
         if (changed and c.fcntl(self.fd, c.F.SETFL, flags) < 0) {
-            self.poison(.local_invariant_violation);
+            self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
             return error.WriteFailed;
         }
         if (rc > 0) return .{ .written = @intCast(rc) };
         if (rc < 0 and send_errno.? == .AGAIN) return .would_block;
-        self.poison(.outbound_write_ambiguous);
+        self.poisonMutationIo(.outbound_write_ambiguous, execution_lease_held);
         return error.WriteFailed;
     }
 
@@ -12786,7 +13244,41 @@ pub const Client = struct {
         return true;
     }
 
-    pub fn beginRegisteredOperationExecutionLease(self: *Client) ClientError!void {
+    fn requireRegisteredOperationExecutionCapability(
+        self: *const Client,
+        handle: RegisteredOperationExecutionHandle,
+    ) ClientError!void {
+        // TLS and caller-final token checks precede every mutable Client graph read. The fence
+        // then proves that this exact address/thread/identity owns the active execution lease.
+        if (generationAllocatorCallbackActive()) return error.AdminBusy;
+        var guard: PinnedExecutionCapabilityGuard = .{};
+        if (!initRegisteredOperationExecutionCapabilityGuard(
+            &guard,
+            handle,
+            @intFromPtr(self),
+        )) return error.ConnectionClosed;
+        defer guard.deinit();
+        const capability = guard.capability.?;
+        const fence = self.operation_fence orelse return error.ConnectionClosed;
+        if (!fence.executionCapabilityMatches(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+            capability,
+        )) return error.ConnectionClosed;
+    }
+
+    pub fn beginRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: *RegisteredOperationExecutionCapability,
+        receipt: *RegisteredOperationExecutionMintReceipt,
+    ) ClientError!RegisteredOperationExecutionHandle {
+        const owner_thread_id: u64 = @intCast(std.Thread.getCurrentId());
+        if (generationAllocatorCallbackActive() or !capability.pristineExact())
+            return error.AdminBusy;
+        const authorization = operation_thread_identity.consumeMintReceipt(
+            receipt,
+            @intFromPtr(self),
+        ) orelse return error.AdminBusy;
         const fence = self.operation_fence orelse return error.ConnectionClosed;
         fence.upgradeSingleSharedToExecutionLease(
             @intFromPtr(self),
@@ -12795,11 +13287,111 @@ pub const Client = struct {
             error.AdminBusy => error.AdminBusy,
             error.InvalidOwner, error.InvalidState => error.ConnectionClosed,
         };
+        errdefer if (!fence.downgradeExecutionLeaseToSingleShared(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+        )) @panic("registered operation execution fence rollback failed");
+        const lease_identity = fence.issueExecutionCapabilityIdentity() orelse
+            return error.ConnectionClosed;
+        if (owner_thread_id == 0 or fence.execution_capability_addr.load(.acquire) != 0)
+            return error.ConnectionClosed;
+        capability.self_addr = @intFromPtr(capability);
+        capability.client_addr = @intFromPtr(self);
+        capability.fence_generation = self.operation_fence_generation;
+        capability.fence_incarnation = fence.fence_incarnation;
+        capability.lease_identity = lease_identity;
+        capability.owner_process_id = authorization.owner_process_id;
+        capability.owner_process_nonce = authorization.owner_process_nonce;
+        capability.owner_thread_id = owner_thread_id;
+        capability.owner_thread_incarnation = authorization.owner_thread_incarnation;
+        capability.operation_identity = authorization.operation_identity;
+        capability.live = true;
+        capability.seal = capability.digest();
+        var capability_committed = false;
+        errdefer if (!capability_committed) capability.resetPristine();
+        fence.execution_capability_identity.store(lease_identity, .monotonic);
+        fence.execution_owner_thread_id.store(owner_thread_id, .monotonic);
+        fence.execution_owner_thread_incarnation.store(authorization.owner_thread_incarnation, .monotonic);
+        fence.execution_capability_addr.store(@intFromPtr(capability), .monotonic);
+        var publication_committed = false;
+        errdefer if (!publication_committed) {
+            capability.publication_identity.store(0, .release);
+            fence.execution_owner_thread_incarnation.store(0, .release);
+            fence.execution_owner_thread_id.store(0, .release);
+            fence.execution_capability_identity.store(0, .release);
+            fence.execution_capability_addr.store(0, .release);
+        };
+        if (builtin.is_test and
+            execution_capability_publication_test_hook.armed.swap(false, .acq_rel))
+        {
+            execution_capability_publication_test_hook.reached.store(true, .release);
+            if (!ExecutionCapabilityPublicationTestHook.waitUntil(
+                &execution_capability_publication_test_hook.proceed,
+            )) @panic("execution capability publication test hook timed out");
+        }
+        capability.publication_identity.store(lease_identity, .release);
+        const handle = operation_thread_identity.publishCapability(.{
+            .capability_addr = @intFromPtr(capability),
+            .publication_identity = lease_identity,
+            .operation_identity = authorization.operation_identity,
+            .client_addr = @intFromPtr(self),
+            .fence_generation = self.operation_fence_generation,
+            .fence_incarnation = fence.fence_incarnation,
+            .owner_process_id = authorization.owner_process_id,
+            .owner_process_nonce = authorization.owner_process_nonce,
+            .owner_thread_id = owner_thread_id,
+            .owner_thread_incarnation = authorization.owner_thread_incarnation,
+        }) catch return error.AdminBusy;
+        publication_committed = true;
+        capability_committed = true;
+        return handle;
     }
 
-    pub fn endRegisteredOperationExecutionLease(self: *Client) void {
+    pub fn setNextExecutionCapabilityIdentityForTest(self: *Client, value: u64) void {
+        if (!builtin.is_test) unreachable;
+        const fence = self.operation_fence orelse @panic("missing operation fence");
+        fence.next_execution_capability_identity.store(value, .release);
+    }
+
+    pub fn nextExecutionCapabilityIdentityForTest(self: *const Client) u64 {
+        if (!builtin.is_test) unreachable;
+        const fence = self.operation_fence orelse @panic("missing operation fence");
+        return fence.next_execution_capability_identity.load(.acquire);
+    }
+
+    pub fn endRegisteredOperationExecutionLease(
+        self: *Client,
+        handle: RegisteredOperationExecutionHandle,
+    ) void {
+        var guard: PinnedExecutionCapabilityGuard = .{};
+        if (!initRegisteredOperationExecutionCapabilityGuard(
+            &guard,
+            handle,
+            @intFromPtr(self),
+        )) @panic("registered operation execution capability unpublished or foreign");
+        defer guard.deinit();
+        const capability = @constCast(guard.capability.?);
         const fence = self.operation_fence orelse
             @panic("registered operation execution fence disappeared");
+        if (!fence.executionCapabilityMatches(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+            capability,
+        )) @panic("registered operation execution capability drifted");
+        if (!guard.close())
+            @panic("registered operation execution capability close failed");
+        if (capability.publication_identity.cmpxchgStrong(
+            capability.lease_identity,
+            0,
+            .acq_rel,
+            .acquire,
+        ) != null) @panic("registered operation execution capability consume failed");
+        fence.execution_owner_thread_incarnation.store(0, .release);
+        fence.execution_owner_thread_id.store(0, .release);
+        fence.execution_capability_identity.store(0, .release);
+        fence.execution_capability_addr.store(0, .release);
+        // The registry has retired this publication and drained all pinned readers. The body may
+        // now leave scope; publication_identity == 0 remains the local consumed marker.
         if (!fence.downgradeExecutionLeaseToSingleShared(
             @intFromPtr(self),
             self.operation_fence_generation,
@@ -12808,10 +13400,9 @@ pub const Client = struct {
 
     pub fn bufferedControllerRevokeUnderRegisteredOperationExecutionLease(
         self: *const Client,
+        capability: RegisteredOperationExecutionHandle,
     ) ClientError!bool {
-        const fence = self.operation_fence orelse return error.ConnectionClosed;
-        if (!fence.executionLeaseHeld(@intFromPtr(self), self.operation_fence_generation))
-            return error.ConnectionClosed;
+        try self.requireRegisteredOperationExecutionCapability(capability);
         return self.bufferedControllerRevokeForStreamUnchecked(null);
     }
 
@@ -12819,11 +13410,23 @@ pub const Client = struct {
     /// execution lease so allocator callbacks and foreign-thread raw Client aliases cannot enter
     /// any public wire mutation until fd and pending-owner disposition are complete.
     pub fn beginConfirmedGenerationPoisonExclusive(self: *Client) ClientError!void {
-        return self.beginRegisteredOperationExecutionLease();
+        const fence = self.operation_fence orelse return error.ConnectionClosed;
+        return fence.upgradeSingleSharedToExecutionLease(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+        ) catch |err| switch (err) {
+            error.AdminBusy => error.AdminBusy,
+            error.InvalidOwner, error.InvalidState => error.ConnectionClosed,
+        };
     }
 
     pub fn endConfirmedGenerationPoisonExclusive(self: *Client) void {
-        self.endRegisteredOperationExecutionLease();
+        const fence = self.operation_fence orelse
+            @panic("confirmed poison execution fence disappeared");
+        if (!fence.downgradeExecutionLeaseToSingleShared(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+        )) @panic("confirmed poison execution fence release failed");
     }
 
     pub fn releaseEndedPurgeExclusiveClean(self: *Client) bool {
@@ -13468,7 +14071,7 @@ test "CR3a-2a checked OOB allocator callback fences a foreign Client before wire
     try std.testing.expect(try owner.bufferOutOfBandFrame(.{
         .header = .{ .kind = .delta_chunk, .stream_id = 7 },
         .payload = payload,
-    }, checked_allocator, null));
+    }, checked_allocator, null, false));
     probe.armed = false;
 
     try std.testing.expect(probe.reentered);
@@ -13529,7 +14132,7 @@ test "B3-3 caller-final execution lease blocks mutation and preserves clean zero
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = @intCast(c.getpid());
-    fence.initInPlace(@intFromPtr(&client), pid, 43, 47, 53);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 43, 47, 53);
     try std.testing.expect(client.bindOperationFence(&fence, 53));
     defer client.deinit();
     var storage: PreparedBlockingRpcStorage = .{};
@@ -13641,7 +14244,7 @@ test "B3-3 drifted active lease poisons and releases the canonical execution fen
     };
     var fence: ClientOperationFence = undefined;
     const pid: u32 = @intCast(c.getpid());
-    fence.initInPlace(@intFromPtr(&client), pid, 59, 61, 67);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 59, 61, 67);
     try std.testing.expect(client.bindOperationFence(&fence, 67));
     defer client.deinit();
     var storage: PreparedBlockingRpcStorage = .{};
@@ -13678,8 +14281,8 @@ test "B3-3 execution lease releases only its frozen fence across pointer ABA" {
         var canonical_fence: ClientOperationFence = undefined;
         var foreign_fence: ClientOperationFence = undefined;
         const pid: u32 = @intCast(c.getpid());
-        canonical_fence.initInPlace(@intFromPtr(&client), pid, 71, 73, 79);
-        foreign_fence.initInPlace(@intFromPtr(&client), pid, 83, 89, 79);
+        canonical_fence.initInPlace(@intFromPtr(&client), pid, 5, 71, 73, 79);
+        foreign_fence.initInPlace(@intFromPtr(&client), pid, 5, 83, 89, 79);
         try std.testing.expect(client.bindOperationFence(&canonical_fence, 79));
         var storage: PreparedBlockingRpcStorage = .{};
         const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
@@ -13690,7 +14293,7 @@ test "B3-3 execution lease releases only its frozen fence across pointer ABA" {
             .foreign_same_generation => client.operation_fence = &foreign_fence,
             .generation_drift => client.operation_fence_generation = 97,
             .same_address_reincarnation => {
-                canonical_fence.initInPlace(@intFromPtr(&client), pid, 71, 73, 79);
+                canonical_fence.initInPlace(@intFromPtr(&client), pid, 5, 71, 73, 79);
                 canonical_fence.state.store(ClientOperationFence.execution_lease_bit, .release);
             },
         }
@@ -13786,7 +14389,7 @@ test "B3-3 injected pending partial then failure preserves prior ambiguity" {
     var probe = PreparedExecutionWriteProbe{ .results = &results };
     try std.testing.expectError(
         error.WriteFailed,
-        client.flushPendingOutboundBlockingWithOps(&lease, probe.ops()),
+        client.flushPendingOutboundBlockingWithOps(&lease, probe.ops(), true),
     );
     try std.testing.expectEqual(@as(usize, 3), probe.calls);
     try std.testing.expectEqual(
@@ -16688,7 +17291,7 @@ test "CR3a-2c2b3b prepare commit freezes a final-address blocking owner graph" {
 
     var fence: ClientOperationFence = undefined;
     const pid: u32 = @intCast(c.getpid());
-    fence.initInPlace(@intFromPtr(&client), pid, 101, 103, 107);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 101, 103, 107);
     try std.testing.expect(client.bindOperationFence(&fence, 107));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};
@@ -16806,7 +17409,7 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 139, 149, 151);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 139, 149, 151);
     try std.testing.expect(client.bindOperationFence(&fence, 151));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};
@@ -16876,7 +17479,7 @@ test "CR3a-2c2b3b allocator drift tombstones then consumed proof finalizes termi
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
     const pid: u32 = @intCast(c.getpid());
-    fence.initInPlace(@intFromPtr(&client), pid, 163, 167, 173);
+    fence.initInPlace(@intFromPtr(&client), pid, 5, 163, 167, 173);
     try std.testing.expect(client.bindOperationFence(&fence, 173));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};
@@ -17246,7 +17849,7 @@ test "CR3a-2c2b3b prepare commit requires exclusive and preserves destinations" 
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 113, 127, 131);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 113, 127, 131);
     try std.testing.expect(client.bindOperationFence(&fence, 131));
     var prepared: PreparedEndedPurgeCommit = .{};
     const inventory_before = inventory;
@@ -17290,7 +17893,7 @@ test "CR3a-2c2b3b prepare commit rejects a non-stream fd without publication" {
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 139, 149, 151);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 139, 149, 151);
     try std.testing.expect(client.bindOperationFence(&fence, 151));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};
@@ -17342,7 +17945,7 @@ test "CR3a-2c2b3b complete owner extent accepts exact cap and rejects cap plus o
             var inventory: PreparedEndedPurgeInventory = .{};
             try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
             var fence: ClientOperationFence = undefined;
-            fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 277, 281, 283);
+            fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 277, 281, 283);
             try std.testing.expect(client.bindOperationFence(&fence, 283));
             try client.tryAcquireEndedPurgeExclusive();
             var prepared: PreparedEndedPurgeCommit = .{};
@@ -17393,7 +17996,7 @@ test "CR3a-2c2b3b prepare commit rejects occupied forged and aliased evidence" {
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 163, 167, 173);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 163, 167, 173);
     try std.testing.expect(client.bindOperationFence(&fence, 173));
     try client.tryAcquireEndedPurgeExclusive();
 
@@ -17459,7 +18062,7 @@ test "CR3a-2c2b3b allocator callback reentry rejects prepare before graph traver
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 229, 233, 239);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 229, 233, 239);
     try std.testing.expect(client.bindOperationFence(&fence, 239));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};
@@ -17496,7 +18099,7 @@ test "CR3a-2c2b3b fence intrusion prevents prepare authority publication" {
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 251, 257, 263);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 251, 257, 263);
     try std.testing.expect(client.bindOperationFence(&fence, 263));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};
@@ -17533,7 +18136,7 @@ test "CR3a-2c2b3b fork child rejects prepare commit before inherited state mutat
     var inventory: PreparedEndedPurgeInventory = .{};
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
     var fence: ClientOperationFence = undefined;
-    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 199, 211, 223);
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 5, 199, 211, 223);
     try std.testing.expect(client.bindOperationFence(&fence, 223));
     try client.tryAcquireEndedPurgeExclusive();
     var prepared: PreparedEndedPurgeCommit = .{};

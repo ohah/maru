@@ -118,6 +118,8 @@ pub const EventTakeOutcome = generation_event.EventTakeOutcome;
 pub const EventAdmission = generation_event.EventAdmission;
 pub const EventError = generation_event.EventError;
 pub const EventViewError = generation_event.EventViewError;
+pub const PurgeEndedOutcome = client_slot_mod.GenerationEndedPurgeOutcome;
+pub const PurgeEndedError = client_slot_mod.GenerationEndedPurgeError;
 pub const ProjectedEventTake = struct {
     outcome: EventTakeOutcome,
     generation: u64,
@@ -297,6 +299,14 @@ pub const GenerationTransport = struct {
 
     pub fn releaseEvent(self: *GenerationTransport, owner: *EventOwner) EventError!void {
         return releaseEventOwned(self, owner);
+    }
+
+    pub fn purgeEndedStream(self: *GenerationTransport) PurgeEndedError!PurgeEndedOutcome {
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        return client_slot_mod.purgeGenerationEndedStream(
+            self.ownerQuery(),
+            self.bound_stream_id,
+        ) catch |err| return err;
     }
 
     fn takeEventProjectedInternal(

@@ -341,6 +341,14 @@ pub const GenerationAttachment = struct {
         self.event_generation_mirror = 0;
     }
 
+    pub fn purgeEndedStream(
+        self: *GenerationAttachment,
+    ) generation_transport_mod.PurgeEndedError!generation_transport_mod.PurgeEndedOutcome {
+        if (!self.valid() or self.lifecycle != .attached)
+            return error.InvalidOwner;
+        return self.transport.purgeEndedStream();
+    }
+
     pub fn tryDeinit(
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
@@ -910,6 +918,204 @@ test "CR3a-2c3d C3-1 mirror drift and permit exhaustion converge through canonic
     try std.testing.expectEqual(@as(usize, 1), adapter.slot.current.pin_owner.cleanup_pin_count);
     try std.testing.expectEqual(DeinitOutcome.cleaned, exhausted.tryDeinit(&adapter));
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+}
+
+test "CR3a-2c3d C3-2 ended event purges before ordinary event ownership" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = std.c.close(fds[1]);
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3DA1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3DA2, 0x2C3DA3);
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3DA3,
+        "{\"event\":\"runtime.ended\"}",
+    );
+
+    try std.testing.expectEqual(
+        generation_transport_mod.PurgeEndedOutcome.purged,
+        try attachment.purgeEndedStream(),
+    );
+    try std.testing.expectEqual(@as(u64, 0), attachment.event_generation_mirror);
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.idle,
+        try attachment.takeEvent(),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+fn initPurgeTest(
+    client: *@import("client.zig").Client,
+    adapter: *host_adapter_mod.HostAdapter,
+    attachment: *GenerationAttachment,
+    host_id: u128,
+    runtime_id: u128,
+    stream_id: u64,
+) !std.c.fd_t {
+    const allocator = std.testing.allocator;
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0)
+        return error.SocketPairFailed;
+    client.* = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = host_id,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    try host_adapter_mod.HostAdapter.initInPlace(adapter, allocator, client);
+    try initAttachedForEventTest(attachment, adapter, allocator, runtime_id, stream_id);
+    return fds[1];
+}
+
+test "CR3a-2c3d C3-2 empty target is a mutation-free not-ended result" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DB1, 0x2C3DB2, 0x2C3DB3);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    try std.testing.expectEqual(
+        generation_transport_mod.PurgeEndedOutcome.not_ended,
+        try attachment.purgeEndedStream(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_events.items.len);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-2 ordinary owner blocks purge until exact release" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DC1, 0x2C3DC2, 0x2C3DC3);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DC3, "{\"event\":\"future.event\"}");
+    try std.testing.expectEqual(generation_transport_mod.EventTakeOutcome.taken, try attachment.takeEvent());
+    try std.testing.expectError(error.Busy, attachment.purgeEndedStream());
+    try attachment.releaseEvent();
+    try std.testing.expectEqual(
+        generation_transport_mod.PurgeEndedOutcome.not_ended,
+        try attachment.purgeEndedStream(),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-2 sibling ended cannot purge the bound stream" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DD1, 0x2C3DD2, 0x2C3DD3);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DD4, "{\"event\":\"runtime.ended\"}");
+    try std.testing.expectEqual(
+        generation_transport_mod.PurgeEndedOutcome.not_ended,
+        try attachment.purgeEndedStream(),
+    );
+    const sibling = (try adapter.logicalClient().takeEventForStream(0x2C3DD4)).?;
+    try std.testing.expectEqualStrings("{\"event\":\"runtime.ended\"}", sibling.payload);
+    adapter.logicalClient().releaseEvent(sibling);
+    try std.testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_events.items.len);
+    _ = allocator;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-2 target purge preserves sibling byte order" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DE1, 0x2C3DE2, 0x2C3DE3);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    const sibling_one = "{\"event\":\"runtime.ended\"}";
+    const sibling_two = "{\"event\":\"runtime.resized\",\"data\":{\"runtime_id\":\"000000000000000000000000000000bb\",\"cols\":140,\"rows\":50,\"resize_generation\":10,\"reason\":\"controller\"}}";
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DE4, sibling_one);
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DE3, "{\"event\":\"runtime.ended\"}");
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DE4, sibling_two);
+    try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
+    const first = (try adapter.logicalClient().takeEventForStream(0x2C3DE4)).?;
+    try std.testing.expectEqualStrings(sibling_one, first.payload);
+    adapter.logicalClient().releaseEvent(first);
+    const second = (try adapter.logicalClient().takeEventForStream(0x2C3DE4)).?;
+    try std.testing.expectEqualStrings(sibling_two, second.payload);
+    adapter.logicalClient().releaseEvent(second);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-2 copied attachment cannot purge canonical queue" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DF1, 0x2C3DF2, 0x2C3DF3);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DF3, "{\"event\":\"runtime.ended\"}");
+    var copied = attachment;
+    try std.testing.expectError(error.InvalidOwner, copied.purgeEndedStream());
+    try std.testing.expectEqual(@as(usize, 1), adapter.logicalClient().pending_events.items.len);
+    try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-2 foreign thread purge is rejected before mutation" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3E01, 0x2C3E02, 0x2C3E03);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3E03, "{\"event\":\"runtime.ended\"}");
+    const Probe = struct {
+        attachment: *GenerationAttachment,
+        rejected: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            _ = self.attachment.purgeEndedStream() catch |err| {
+                self.rejected.store(err == error.InvalidOwner, .release);
+                return;
+            };
+        }
+    };
+    var probe = Probe{ .attachment = &attachment };
+    const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    thread.join();
+    try std.testing.expect(probe.rejected.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), adapter.logicalClient().pending_events.items.len);
+    try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2c3d C3-2 repeated purge is one-shot then not-ended" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    var client: @import("client.zig").Client = undefined;
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var attachment: GenerationAttachment = .{};
+    const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3E11, 0x2C3E12, 0x2C3E13);
+    defer _ = std.c.close(peer);
+    defer adapter.deinit();
+    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3E13, "{\"event\":\"runtime.ended\"}");
+    try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
+    try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.not_ended, try attachment.purgeEndedStream());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
 
 const AttachmentEventNoFreeAllocator = struct {

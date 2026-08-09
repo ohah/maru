@@ -1437,13 +1437,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `reserved|live|releasing` revoke 수의 O(1) projection일 뿐이다. production은 affected row의 exact lifecycle/receipt와 checked
       counter bound/transition만 O(1)으로 검증한다. Debug·ReleaseFast test-only invariant oracle만 bounded full scan으로 cache 일치를 확인한다.
       trusted class 인자는 기존 ClientSlot take가 canonical payload를 재검증해 얻은 preflight 결과에서만 만든다. aggregate query는
-      payload를 다시 파싱하지 않는다. revoke reserve의 no-fail suffix가 `0 -> 1`, pre-reserve 실패는 `0 -> 0`, reserve 뒤 abort는
+      payload를 다시 파싱하지 않는다. 성공한 revoke reserve가 `0 -> 1`, pre-reserve 실패는 `0 -> 0`, reserve 뒤 abort는
       `0 -> 1 -> 0`이다. live publication과 releasing 시작은 delta 0이다. 정상 release는 allocator callback/quarantine settlement 뒤
       `finishEventReleaseNoFail`에서 감소하고, live `StreamOperationPermit`이 그 뒤 permit consume까지 mutation을 계속 막는다. corrupt는
       terminalize 때 감소하지 않고 recovery permit 최종 consume 뒤 감소한다. teardown은 live/releasing owner를 정산하지 않고 explicit
       release까지 `Busy`다. stale/copy/ABA/double consume과 unauthorized underflow는 delta 0으로 fail-stop하며 production은 invalid raw
-      lifecycle/receipt나 counter bound 위반을 fail-closed한다. 임의 row/cache bit drift의 전수 복구·탐지는 주장하지 않는다. a1은 product take/release caller exact 0인 dormant component이고
-      Debug·ReleaseFast registry runtime 7+boundary 1을 통과해야 한다.
+      lifecycle/receipt나 counter bound 위반을 fail-closed한다. 임의 row/cache bit drift의 전수 복구·탐지는 주장하지 않는다. a1은 product take/release caller exact 0인 dormant component로 구현됐고
+      `test-session-host-2c3d-c3-3a1`의 Debug·ReleaseFast registry runtime 7+boundary 1을 통과한다. copied registry, same-address
+      generation ABA, typed stale/double settlement까지 a1이 소유하고 no-fail continuation/recovery replay와 unauthorized underflow의
+      격리 subprocess는 실제 활성화와 함께 a3가 소유한다. 따라서 이 시점의 제품 동작은 C3-3과 동일하며 revoke ordering 활성화는 주장하지 않는다.
       **C3-3a2 dormant final-admission substrate**는 ClientSlot owner-thread/Client operation fence 아래 사용할 단일 internal transaction을
       만들되 product caller를 exact 0으로 유지한다. 현재 존재하는 blocking/nonblocking input, control, pending output,
       prepared request/RPC와 resize·mouse·core·scroll·resync family의 error/progress·owner-retention 표를 Debug·ReleaseFast runtime

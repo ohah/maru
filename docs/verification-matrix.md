@@ -1210,7 +1210,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. B3-2는 Debug·ReleaseFast
   registry 3개와 product 2개, boundary 1개의 exact 11-test artifact를 완료 증거로 소유한다. 모든 내부 gate가
   각 내부 gate가 Debug·ReleaseFast와 boundary에서 함께 green인 상태로 `2c3b-3 완료`로 승격했다.
-  `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
+  다음 문단은 **C3-2 종료 계약**이며 현재 구현 상태를 서술하지 않는다. 현재 구현은 C3-1의 exact 14 facade와
+  `ClientSlot` ended-purge substrate까지이고 `purgeEndedStream` transport/attachment wrapper와 generation 제품 drain은 0이다.
+  C3-2의 `test-session-host-2c3d-c3-2`가 C3-1 전체와 Debug·ReleaseFast product runtime sentinel 8+boundary 1을
+  exact-count로 통과하기 전에는 아래 계약을 구현 완료로 세지 않는다.
+
+  C3-2 종료 시 `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,
   `*Client|*anyopaque` escape는 0이다. generation의 post-initial batch owner는 2b2 `GenerationBatchAdapter` 하나뿐이며,

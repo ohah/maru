@@ -103,4 +103,5 @@ pub const AppWindow = window.AppWindow;
 
 test {
     @import("std").testing.refAllDecls(@This());
+    @import("std").testing.refAllDecls(editor);
 }

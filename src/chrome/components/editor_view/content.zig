@@ -11,6 +11,7 @@
 const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
+const width = @import("../../../width.zig"); // Unicode 셀 폭(EAW) — 한글/CJK/이모지=2칸
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -93,10 +94,13 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
 ///
-/// **UTF-8을 해석하지 않는다.** 탭스톱은 화면 열 기준이고 다중 byte 문자는 열 수가 byte 수와 다르지만,
-/// N1에서는 그 차이가 탭 정렬에만 영향을 준다. 정확한 열 계산은 §4의 폭 합(L2 캐시)이 붙을 때
-/// 함께 온다 — 지금 어설픈 근사를 넣으면 나중에 두 곳을 고쳐야 한다. **ASCII 들여쓰기는 정확하고**,
-/// 그것이 코드 파일에서 탭이 쓰이는 거의 모든 경우다.
+/// **열은 byte가 아니라 셀 폭으로 센다** — 한글·CJK·이모지는 두 칸이고 결합 문자는 0칸이다
+/// (`width.cellWidth`, 터미널과 같은 판정). VSCode도 같은 규칙을 쓴다: `cursorColumns.ts`의
+/// `_nextVisibleColumn`이 탭이면 탭스톱, 전각·이모지면 `+2`, 나머지는 `+1`이다.
+///
+/// 이것이 없으면 `가\tx`에서 탭이 세 칸으로 계산되는데 화면에서 "가"가 두 칸을 먹으므로 **정렬이
+/// 한 칸 어긋난다.** 렌더는 이미 옳다(`chrome/text_layout.zig`가 같은 폭 규칙을 쓴다) — 어긋나는
+/// 것은 이 전개의 탭 위치뿐이라, 한글 주석이 든 코드에서만 드러나는 종류의 결함이었다.
 /// 전개 결과와 **그것이 저장소를 얼마나 썼는지**. 둘을 함께 돌려주는 이유는 탭이 없을 때 원본을
 /// 빌려주기 때문이다 — 그 경우 `text.len > 0`이지만 `scratch_used == 0`이라, 호출자가 길이로
 /// 저장소 소비를 추정하면 틀린다.
@@ -110,26 +114,34 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8) !Expanded {
     // `[]const u8`로 돌려주므로 호출자가 쓸 수 있다고 착각하지 않는다(원본은 rodata일 수 있다).
     if (std.mem.indexOfScalar(u8, bytes, '\t') == null) return .{ .text = bytes, .scratch_used = 0 };
 
-    const width = if (tab_width == 0) 1 else tab_width;
+    const stop_width = if (tab_width == 0) 1 else tab_width;
     var used: usize = 0;
     var col: usize = 0;
 
-    for (bytes) |b| {
-        if (b == '\t') {
-            const stop = ((col / width) + 1) * width;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (bytes[i] == '\t') {
+            const stop = ((col / stop_width) + 1) * stop_width;
             const pad = stop - col;
             if (used + pad > out.len) return error.OutOfSpace;
             @memset(out[used..][0..pad], ' ');
             used += pad;
             col = stop;
-        } else {
-            if (used + 1 > out.len) return error.OutOfSpace;
-            out[used] = b;
-            used += 1;
-            // continuation byte(0b10xxxxxx)는 새 글자가 아니므로 열을 세지 않는다. 이것만으로도
-            // 한글이 섞인 줄의 탭 정렬이 byte 수 기준보다 훨씬 낫다.
-            if (b & 0xC0 != 0x80) col += 1;
+            i += 1;
+            continue;
         }
+
+        // 한 codepoint를 통째로 옮기고 그 **셀 폭**만큼 열을 센다. 잘린 UTF-8은 여기까지 오지 않지만
+        // (§3.5가 열 때 거부한다) 방어적으로 1 byte씩 넘긴다 — 여기서 죽으면 화면이 통째로 빈다.
+        const seq_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+        const n = @min(seq_len, bytes.len - i);
+        if (used + n > out.len) return error.OutOfSpace;
+        @memcpy(out[used..][0..n], bytes[i..][0..n]);
+        used += n;
+
+        const cp = std.unicode.utf8Decode(bytes[i..][0..n]) catch null;
+        col += if (cp) |c| width.cellWidth(c) else 1;
+        i += n;
     }
     return .{ .text = out[0..used], .scratch_used = used };
 }
@@ -169,12 +181,33 @@ test "expandTabs: 탭 폭 0은 1로 본다 — 0으로 나누지 않는다" {
     try testing.expectEqualStrings(" x", (try expandTabs("\tx", 0, &out)).text);
 }
 
-test "expandTabs: UTF-8 continuation byte는 열로 세지 않는다" {
+test "expandTabs: 한글은 두 칸이다 — 글자 수로 세면 정렬이 한 칸 어긋난다" {
     var out: [64]u8 = undefined;
-    // "가"는 3 byte지만 글자 하나다. byte 수로 세면 탭이 열 3에서 시작해 1칸만 나오는데,
-    // 글자 수로 세면 열 1이라 3칸이 나온다.
+    // "가"는 3 byte, 1글자, **2칸**이다. 탭은 열 2에서 시작하므로 다음 탭스톱(4)까지 2칸.
+    // byte 수로 세면 3칸을 건너뛰고, 글자 수로 세면 3칸을 넣는다 — 둘 다 틀린다.
     const r = try expandTabs("가\tx", 4, &out);
-    try testing.expectEqualStrings("가   x", r.text);
+    try testing.expectEqualStrings("가  x", r.text);
+}
+
+test "expandTabs: 전각 둘이면 탭스톱을 이미 채운다" {
+    var out: [64]u8 = undefined;
+    // "가나"는 4칸이라 열 4 = 탭스톱 경계. 탭은 다음 스톱(8)까지 4칸을 넣는다.
+    const r = try expandTabs("가나\tx", 4, &out);
+    try testing.expectEqualStrings("가나    x", r.text);
+}
+
+test "expandTabs: 결합 문자는 0칸이다" {
+    var out: [64]u8 = undefined;
+    // U+0301(combining acute)은 앞 글자에 붙으므로 열을 차지하지 않는다. "e" 1칸 + 결합 0칸 = 열 1.
+    const r = try expandTabs("e\u{0301}\tx", 4, &out);
+    try testing.expectEqualStrings("e\u{0301}   x", r.text);
+}
+
+test "expandTabs: 잘린 UTF-8에서도 죽지 않는다 — 화면이 통째로 비면 안 된다" {
+    var out: [64]u8 = undefined;
+    // "가"의 첫 두 byte만. §3.5가 열 때 거부하므로 정상 경로엔 없지만 여기서 죽으면 안 된다.
+    const r = try expandTabs("\xEA\xB0\tx", 4, &out);
+    try testing.expect(r.text.len > 0);
 }
 
 test "expandTabs: 저장소가 모자라면 실패한다" {

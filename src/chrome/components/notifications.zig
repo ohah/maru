@@ -378,7 +378,30 @@ pub fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps)
     return l.rect;
 }
 
-/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖이면 null → 호출자가 닫기). view와 같은 layout을 써서 "보이는 ==
+/// 카드 목록의 스크롤 창과 뷰포트 rect(SV5a-2) — host가 스크롤바를 발행하는 데 쓴다.
+///
+/// **컴포넌트는 막대를 그리지 않는다.** 예전에는 여기서 2px 직사각 `.fill`을 손수 그렸는데, 그 복제본
+/// 안에서 thumb 비율 버그가 났다(카드 개수로 재다 부분 카드까지 세어 트랙 밖으로 나갔다 — SV5a에서
+/// 고쳤다). 모양·기하는 공용 경로(`chrome/ui/scroll_area.zig`)가 소유하고 여기서는 "어디에 얼마만큼"만
+/// 알려 준다. `panelRect`가 박스만 알려 주는 것과 같은 형태다.
+pub const ScrollView = struct { viewport: draw.Rect, content_h_px: u32, offset_px: u32 };
+
+pub fn scrollView(state: *const State, items: []const Item, p: props.ChromeProps) ?ScrollView {
+    const l = layout(state, items, p) orelse return null;
+    if (!l.scrollable) return null; // 안 넘침 — 막대 없음
+    return .{
+        .viewport = .{
+            .x = l.rect.x,
+            .y = l.rect.y + @as(i32, @intCast(l.header_h)), // 헤더는 sticky — 트랙도 그 아래에서 시작한다
+            .w = l.rect.w,
+            .h = l.viewport_h_px,
+        },
+        .content_h_px = @intCast(l.total * l.card_h),
+        .offset_px = @intCast(l.first * l.card_h + l.origin_shift_px),
+    };
+}
+
+/// 마우스 px를 패널 안의 동작으로 해석한다/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖이면 null → 호출자가 닫기). view와 같은 layout을 써서 "보이는 ==
 /// 클릭되는". 세로: 상단 헤더(액션)·그 아래 카드 영역(visible × 2행). 헤더 우측은 모두읽음/지우기, 헤더 좌측(제목)·
 /// 카드 영역 아래 빈 여백·빈 상태 본문은 background(닫지 않음). 카드 안에서 본문줄(line 1) 우측 끝 1칸은 ✕(삭제) zone.
 pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x_px: f64, y_px: f64) ?Hit {
@@ -506,8 +529,13 @@ pub fn view(
     const has_gap_below = card_area_bottom < rect.y + @as(i32, @intCast(rect.h));
     // 카드가 픽셀로 흐른다(SV5a): 창 첫 카드는 `origin_shift_px`만큼 위로 밀려 부분만 보이고, 그 몫과
     // 바닥에 걸친 카드는 이 clip이 자른다. clip은 **그리지 않으므로** 카드 op보다 먼저 한 번만 낸다.
+    // 스크롤바 gutter를 **상시** 예약한다(SV5a-2). 막대가 공용 경로로 옮겨 오면서 8px pill이 됐는데,
+    // 카드 밴드가 패널 폭을 다 먹으면 그 위를 덮어 **안 읽은 카드의 밝은 배경에 막대가 묻힌다**(실측).
+    // 사이드바·팔레트가 세운 것과 같은 규율이고, 여기서도 밴드와 우측 요소가 이 폭 하나를 함께 쓴다.
+    const gutter_px: u32 = if (l.scrollable) p.metrics.overlay_scroll_gutter_px else 0;
+    const card_w: u32 = rect.w -| gutter_px;
     if (l.scrollable) {
-        try out.append(arena, .{ .clip = .{ .x = rect.x, .y = body_top, .w = rect.w, .h = l.viewport_h_px } });
+        try out.append(arena, .{ .clip = .{ .x = rect.x, .y = body_top, .w = card_w, .h = l.viewport_h_px } });
     }
     // 카드 글자를 자를 뷰포트(SV5a). **텍스트는 `Op.Text.clip` 필드로 자른다** — 위에서 낸 `.clip` op은
     // 오버레이 **셀 전체**의 프레임 clip이고, 셀 격자로 lowering하는 모달 경로(`metal_lowering.placeText`)가
@@ -530,7 +558,7 @@ pub fn view(
         // 생략한다(같은 칸에 두 번 칠하지 않음). 두 강조의 rect는 role만 다르므로 역할만 고르고 fill은 한 번만 낸다(중복 제거).
         const bg_role: ?tokens.ColorRole = if (i == state.selected) .tab_active_bg else if (state.hovered == i) .tab_hover_bg else null;
         if (bg_role) |role| {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = rect.w, .h = l.card_h }, .role = role } });
+            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = card_w, .h = l.card_h }, .role = role } });
         }
         // 제목줄: 안읽음 점(●) + 제목(말줄임) + 우측정렬 상대시간.
         if (!it.is_read) {
@@ -572,22 +600,6 @@ pub fn view(
         if (vis + 1 < l.visible or has_gap_below) {
             try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
         }
-    }
-
-    // 스크롤바 thumb(스크롤 가능할 때만) — 카드 영역(헤더 아래) 우측 가장자리에 얇은 막대. 위치/크기 = 보이는 비율.
-    if (l.scrollable) {
-        // 비율은 **픽셀**로 잰다(SV5a). 옛 코드는 보이는 카드 수/전체 카드 수를 썼는데, 픽셀 창에서는
-        // 창에 걸친 부분 카드까지 `visible`에 세므로 그 분수가 1을 넘어 thumb이 트랙 밖으로 나간다.
-        const card_area_h: i32 = @intCast(l.viewport_h_px);
-        const content_i: i32 = @intCast(@max(l.total * l.card_h, 1));
-        const offset_i: i32 = @intCast(l.first * l.card_h + l.origin_shift_px);
-        const thumb_h = @max(ch, @divFloor(card_area_h * card_area_h, content_i)); // 최소 1줄
-        // thumb을 카드 영역 안에 가둔다(헤더 아래) — 최소 높이로 키운 thumb이 max 스크롤에서 카드 영역 밖으로 삐져나가지 않게 clamp.
-        const thumb_max_y = body_top + card_area_h - thumb_h;
-        const thumb_y = @min(body_top + @divFloor(card_area_h * offset_i, content_i), thumb_max_y);
-        const thumb_w: i32 = 2; // 얇은 막대
-        const sb_x = rect.x + @as(i32, @intCast(rect.w)) - thumb_w;
-        try out.append(arena, .{ .fill = .{ .rect = .{ .x = sb_x, .y = thumb_y, .w = @intCast(thumb_w), .h = @intCast(thumb_h) }, .role = .muted_fg } });
     }
 }
 
@@ -909,36 +921,25 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우(헤더 예약) 
         if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "t")) card_titles += 1;
         if (op == .fill and op.fill.role == .divider) dividers += 1;
     }
-    try std.testing.expect(saw_scrollbar); // 스크롤 가능 → thumb 표시
+    // 막대는 **컴포넌트가 그리지 않는다**(SV5a-2) — host가 공용 경로로 발행한다. 여기서는 그 재료를
+    // 내주는지만 본다.
+    try std.testing.expect(!saw_scrollbar);
+    {
+        const sv = scrollView(&s, items, p) orelse return error.NoScrollView;
+        try std.testing.expect(sv.viewport.h > 0 and sv.viewport.w > 0);
+        try std.testing.expect(sv.content_h_px > sv.viewport.h); // 넘치니까 막대가 필요하다
+        try std.testing.expectEqual(s.scroll.offset_y_px, sv.offset_px); // 상태와 같은 값을 내준다
+    }
     // 픽셀 창이라 창 경계에 걸친 카드가 한 장 더 그려질 수 있다 — 그 몫은 clip이 자른다(SV5a).
     try std.testing.expect(card_titles >= 1);
     try std.testing.expect(dividers >= 1);
 
-    // 최대 스크롤에서도 thumb이 카드 영역(헤더 아래)을 넘지 않는다.
+    // 최대 스크롤에서도 창이 콘텐츠를 넘지 않는다 — 옛 코드는 이 자리에서 thumb rect를 직접 봤다.
     s.scroll.offset_y_px = max_px;
-    out.clearRetainingCapacity();
-    try view(&s, items, p, &tk, arena_state.allocator(), &out);
-    const rect2 = panelRect(&s, items, p).?;
-    const card_area_bottom = rect2.y + 16 + @as(i32, @intCast(l_any.viewport_h_px)); // header(16) + 뷰포트(픽셀 고정)
-    var saw_thumb = false;
-    for (out.items) |op| {
-        if (op == .fill and op.fill.rect.w == 2) { // 스크롤바 thumb
-            saw_thumb = true;
-            try std.testing.expect(op.fill.rect.y + @as(i32, @intCast(op.fill.rect.h)) <= card_area_bottom);
-        }
-    }
-    try std.testing.expect(saw_thumb);
-
-    // **보이는 카드 == 클릭되는 카드**가 부분 카드에서도 유지된다. 창이 반 장 밀린 상태에서 뷰포트 첫
-    // 픽셀은 여전히 그 밀린 카드다 — 클릭 y에 밀린 몫을 되더하지 않으면 여기서 한 장씩 어긋난다.
     {
-        s.scroll.offset_y_px = card_px + card_px / 2; // 카드 1장 + 반 장
-        const l_part = layout(&s, items, p).?;
-        try std.testing.expectEqual(@as(usize, 1), l_part.first);
-        try std.testing.expectEqual(card_px / 2, l_part.origin_shift_px);
-        const r_part = panelRect(&s, items, p).?;
-        const top_hit = hitTest(&s, items, p, @floatFromInt(r_part.x + 8), @floatFromInt(r_part.y + 16 + 1));
-        try std.testing.expectEqual(Hit{ .card = 1 }, top_hit.?); // 반쯤 잘린 1번 카드
+        const sv = scrollView(&s, items, p) orelse return error.NoScrollView;
+        try std.testing.expectEqual(max_px, sv.offset_px);
+        try std.testing.expect(sv.offset_px + sv.viewport.h <= sv.content_h_px);
     }
 
     // **카드 글자가 자기 clip을 들고 나간다.** 셀 격자로 lowering하는 모달 경로는 `Op.Text.clip` 필드로

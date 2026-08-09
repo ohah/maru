@@ -1181,6 +1181,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdStatIdentity" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdSocketIdentity" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "fdStatIdentity" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "fdSocketIdentity" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeKind" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventTakeLifecycle" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedGenerationEventTake" },

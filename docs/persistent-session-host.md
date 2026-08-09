@@ -1118,9 +1118,22 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    다른 attachment가 마지막 quarantine slot을 보유해도 target ended purge는 성공하는 것,
    purge-first ended와 sibling 보존을 실행한다. boundary는 generation arm의 direct
    `Client.takeEventForStream|releaseEvent|dropBufferedStream` callsite 0, legacy baseline, arbitrary stream/allocator/raw Client escape 0을
-   고정한다. public declaration oracle은 transport의 기존 exact 15 메서드에 `takeEvent|releaseEvent`를 포함한 수를 유지하고
+   고정한다. public declaration oracle은 C1 transport의 transitional exact 13, C2의 exact 14,
+   C3/final의 exact 15 메서드를 단계별로 유지한다. final count에는 `takeEvent|releaseEvent`가 포함되며
    `EventOwner.view` exact 1 및 DTO/error field set을 별도로 고정한다. 유효한 GUI queue에 same-stream ordinary+ended를 합성해
    성공시키는 테스트는 금지하며 그런 모양은 corruption fixture다.
+
+   구현 상태: C1은 accepted/unknown admission과 canonical allocator seal, binding-entry event generation,
+   `.event` short permit, reusable final-address `EventOwner.view` 및 ordinary/idle/`ended_pending` take까지 구현했다.
+   C1 transport facade는 transitional exact 13 methods이고 제품 callsite 0을 유지하며 test-only settlement로만 live owner를 회수한다.
+   final-address 규칙은 complete product owner가 지정한 single typed `EventOwner` 주소를 canonical transport-owner seal에
+   mint-time exact once 봉인하고, take는 그 exact 주소만 허용한다. C1 opaque
+   envelope는 attachment당 exact 512 bytes이고 `protocol.max_inventory_runtimes`에서 파생한 최대 4,096 attachment의 inline
+   상한은 2 MiB다. accepted admission은 ingress 결과의 canonical projection digest를 owner seal에 보존하고, `view`의
+   allocation-free 재구성 결과가 그 projection과 exact 일치할 때만 반환한다. 따라서 payload 재파싱은 두 번째 SSOT가 아니다. 내부 상태가 이 envelope를
+   넘거나 주소가 봉인된 canonical slot과 exact 일치하지 않으면 compile/admission 단계에서 거부한다.
+   public release·cleanup pin·quarantine은 C2,
+   `GenerationAttachment` inline owner와 purge-first 제품 drain·actual socket/source-zero는 C3 미구현 범위다.
    controller mutation authority는 caller-writable transport bool이 아니라 node-local cleanup registry의 raw-tag-guarded
    `unavailable|live|revoke_pending|revoked` 상태가 SSOT다. validated revoke는 canonical stream operation permit을 잡고
    `live -> revoke_pending`으로 input을 먼저 닫은 뒤 payload demotion과 zero/partial pending-wire fence를 수행하고, 모든 반환에서

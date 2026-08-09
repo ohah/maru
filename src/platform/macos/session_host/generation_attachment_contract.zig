@@ -222,6 +222,7 @@ pub const TransportOwnerSeal = struct {
     transport_addr: usize = 0,
     prepared_storage_addr: usize = 0,
     rpc_response_addr: usize = 0,
+    event_owner_addr: usize = 0,
     lifecycle: TransportOwnerLifecycle = .pristine,
 
     fn lifecycleRawValid(self: *const TransportOwnerSeal) bool {
@@ -287,6 +288,7 @@ pub const TransportOwnerSeal = struct {
         if (!out.lifecycleRawValid() or out.self_addr != 0 or out.incarnation != 0 or
             out.owner_addr != 0 or out.owner_size != 0 or out.transport_addr != 0 or
             out.prepared_storage_addr != 0 or out.rpc_response_addr != 0 or
+            out.event_owner_addr != 0 or
             out.lifecycle != .pristine)
             return error.InvalidState;
         if (incarnation == 0 or owner_addr == 0 or owner_size == 0 or transport_addr == 0 or
@@ -313,6 +315,16 @@ pub const TransportOwnerSeal = struct {
             self.lifecycle == .live;
     }
 
+    pub fn reserveEventOwner(
+        self: *TransportOwnerSeal,
+        incarnation: u64,
+        event_owner_addr: usize,
+    ) error{InvalidState}!void {
+        if (!self.valid(incarnation) or self.event_owner_addr != 0 or event_owner_addr == 0)
+            return error.InvalidState;
+        self.event_owner_addr = event_owner_addr;
+    }
+
     pub fn terminalize(self: *TransportOwnerSeal, incarnation: u64) error{InvalidState}!void {
         if (!self.valid(incarnation)) return error.InvalidState;
         self.lifecycle = .terminal;
@@ -323,7 +335,8 @@ pub const TransportOwnerSeal = struct {
         return switch (self.lifecycle) {
             .pristine => self.self_addr == 0 and self.incarnation == 0 and
                 self.owner_addr == 0 and self.owner_size == 0 and self.transport_addr == 0 and
-                self.prepared_storage_addr == 0 and self.rpc_response_addr == 0,
+                self.prepared_storage_addr == 0 and self.rpc_response_addr == 0 and
+                self.event_owner_addr == 0,
             .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0 and
                 self.ownerRangeValid() and
                 self.transport_addr != 0 and self.prepared_storage_addr != 0 and

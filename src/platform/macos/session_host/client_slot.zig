@@ -23,6 +23,7 @@ const executed_response_mod = @import("executed_response.zig");
 const rpc_response_authority = @import("rpc_response_authority.zig");
 const rpc_executed_response = @import("rpc_executed_response.zig");
 const response_payload_allocation = @import("response_payload_allocation.zig");
+const runtime_event_wire = @import("runtime_event_wire.zig");
 
 const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
@@ -961,6 +962,7 @@ pub const StreamOperationKind = enum(u8) {
     controller_revoke,
     ended_purge,
     control,
+    event,
 };
 
 pub const StreamOperationPermit = struct {
@@ -1275,10 +1277,38 @@ pub const GenerationTransportOwnerQuery = struct {
     process_nonce: u64,
     transport_addr: usize,
     transport_incarnation: u64,
+    owner_addr: usize,
+    owner_size: usize,
     owner_seal_addr: usize,
     prepared_storage_addr: usize,
     reservation: AttachmentBindingReservation,
 };
+
+pub const GenerationEventTakeRequest = struct {
+    owner: GenerationTransportOwnerQuery,
+    bound_stream_id: u64,
+    event_owner_addr: usize,
+};
+
+pub const GenerationEventIdentity = struct {
+    owner: GenerationTransportOwnerQuery,
+    receipt: cleanup_registry_mod.EventGenerationReceipt,
+};
+
+pub const GenerationEventPublication = struct {
+    identity: GenerationEventIdentity,
+    header: protocol.Header,
+    payload: []u8,
+    admission: runtime_event_wire.Verdict,
+};
+
+pub const GenerationEventTakeOutcome = union(enum) {
+    idle,
+    ended_pending,
+    taken: GenerationEventPublication,
+};
+
+pub const GenerationEventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
 
 pub const GenerationRequestExecute = struct {
     request: GenerationRequestAbort,
@@ -1483,7 +1513,7 @@ fn currentPid() u32 {
 
 fn streamOperationNodeIdle(node: *const ClientNode) bool {
     const kind_raw = @as(*const u8, @ptrCast(&node.active_operation_kind)).*;
-    return kind_raw <= @intFromEnum(StreamOperationKind.control) and
+    return kind_raw <= @intFromEnum(StreamOperationKind.event) and
         node.active_operation_generation == 0 and node.active_operation_kind == .none and
         node.active_operation_owner_thread_incarnation == 0 and
         node.active_operation_owner_addr == 0 and
@@ -5888,6 +5918,177 @@ fn issueGenerationResponseIncarnation() error{IdentityExhausted}!u64 {
     }
 }
 
+fn generationEventCorrupt(slot: *ClientSlot) GenerationEventError {
+    slot.current.client.poison(.local_invariant_violation);
+    return error.Corrupt;
+}
+
+pub fn takeGenerationEvent(
+    request: GenerationEventTakeRequest,
+) GenerationEventError!GenerationEventTakeOutcome {
+    if (request.bound_stream_id == 0 or request.event_owner_addr == 0)
+        return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(request.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    const slot: *ClientSlot = @ptrFromInt(request.owner.slot_addr);
+    endRegisteredNodeOperation(admission.operation);
+
+    const permit = slot.prepareStreamOperationPermit(
+        .event,
+        request.event_owner_addr,
+        request.owner.transport_incarnation,
+        request.owner.reservation.identity,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.IdentityExhausted => error.Terminal,
+        error.InvalidStreamOperationPermit => error.InvalidOwner,
+    };
+    var permit_live = true;
+    defer if (permit_live) slot.abortStreamOperationPermit(permit) catch unreachable;
+
+    var prepared: client_mod.PreparedGenerationEventTake = .{};
+    const kind = slot.current.client.prepareGenerationEventTake(
+        request.bound_stream_id,
+        &prepared,
+    ) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.Terminal => error.Terminal,
+        error.Corrupt, error.DestinationOccupied => generationEventCorrupt(slot),
+    };
+    defer slot.current.client.abortGenerationEventTake(&prepared);
+    switch (kind) {
+        .idle => {
+            slot.consumeStreamOperationPermit(permit) catch unreachable;
+            permit_live = false;
+            return .idle;
+        },
+        .ended_pending => {
+            slot.consumeStreamOperationPermit(permit) catch unreachable;
+            permit_live = false;
+            return .ended_pending;
+        },
+        .ordinary => {},
+    }
+    if (prepared.payload_len == 0 or
+        byteRangesOverlap(
+            prepared.payload_addr,
+            prepared.payload_len,
+            request.owner.owner_addr,
+            request.owner.owner_size,
+        ) or
+        byteRangesOverlap(
+            prepared.payload_addr,
+            prepared.payload_len,
+            request.owner.slot_addr,
+            @sizeOf(ClientSlot),
+        ) or
+        byteRangesOverlap(
+            prepared.payload_addr,
+            prepared.payload_len,
+            @intFromPtr(slot.current),
+            @sizeOf(ClientNode),
+        ))
+        return generationEventCorrupt(slot);
+
+    const operation = beginRegisteredNodeOperation(.{
+        .slot_addr = request.owner.slot_addr,
+        .slot_incarnation = request.owner.slot_incarnation,
+        .node = .{ .incarnation = request.owner.node_incarnation },
+    }) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+    };
+    const node = operation.node;
+    if (!slot.streamOperationPermitLive(permit)) {
+        endRegisteredNodeOperation(operation);
+        return error.Busy;
+    }
+    const receipt = node.cleanup_registry.reserveEventGeneration(
+        request.owner.reservation.cleanup,
+        request.owner.reservation.identity,
+        request.bound_stream_id,
+        request.event_owner_addr,
+    ) catch |err| {
+        endRegisteredNodeOperation(operation);
+        return switch (err) {
+            error.IdentityExhausted => error.Terminal,
+            error.InvalidState => error.Busy,
+            else => error.InvalidOwner,
+        };
+    };
+    endRegisteredNodeOperation(operation);
+    var reservation_live = true;
+    defer if (reservation_live) {
+        slot.current.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
+            request.owner.reservation.cleanup,
+            request.owner.reservation.identity,
+            receipt,
+        );
+    };
+
+    var owned: ?client_mod.OwnedGenerationEvent = null;
+    slot.current.client.commitGenerationEventTake(&prepared, &owned) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.Terminal => error.Terminal,
+        error.Corrupt, error.InvalidPrepared => generationEventCorrupt(slot),
+    };
+    const event = owned orelse unreachable;
+    slot.current.cleanup_registry.commitEventGenerationPublicationNoFail(
+        request.owner.reservation.cleanup,
+        request.owner.reservation.identity,
+        receipt,
+    );
+    slot.consumeStreamOperationPermit(permit) catch unreachable;
+    permit_live = false;
+    reservation_live = false;
+    return .{ .taken = .{
+        .identity = .{ .owner = request.owner, .receipt = receipt },
+        .header = event.header,
+        .payload = event.payload,
+        .admission = event.preflight,
+    } };
+}
+
+pub fn generationEventOwnerCurrent(
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+) GenerationEventError!void {
+    if (owner_addr == 0 or identity.receipt.owner_addr != owner_addr)
+        return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(identity.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    const current = admission.operation.node.cleanup_registry.eventGenerationCurrent(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        identity.receipt,
+    ) catch return error.Corrupt;
+    if (!current) return error.Terminal;
+}
+
+pub fn discardGenerationEventForTest(
+    publication: GenerationEventPublication,
+) GenerationEventError!void {
+    if (!builtin.is_test) return error.InvalidOwner;
+    try generationEventOwnerCurrent(publication.identity, publication.identity.receipt.owner_addr);
+    const operation = beginRegisteredNodeOperation(.{
+        .slot_addr = publication.identity.owner.slot_addr,
+        .slot_incarnation = publication.identity.owner.slot_incarnation,
+        .node = .{ .incarnation = publication.identity.owner.node_incarnation },
+    }) catch return error.InvalidOwner;
+    defer endRegisteredNodeOperation(operation);
+    operation.node.cleanup_registry.settleEventGenerationForTest(
+        publication.identity.owner.reservation.cleanup,
+        publication.identity.owner.reservation.identity,
+        publication.identity.receipt,
+    ) catch return error.Corrupt;
+    operation.node.client.allocator.free(publication.payload);
+}
+
 pub fn preflightGenerationTransportTerminalize(
     request: GenerationTransportOwnerQuery,
 ) error{ Busy, InvalidOwner }!void {
@@ -6104,7 +6305,7 @@ pub const ClientSlot = struct {
     fn streamOperationPermitRawTagsValid(permit: *const StreamOperationPermit) bool {
         const kind_raw = @as(*const u8, @ptrCast(&permit.kind)).*;
         const role_raw = @as(*const u8, @ptrCast(&permit.binding.role)).*;
-        return kind_raw <= @intFromEnum(StreamOperationKind.control) and
+        return kind_raw <= @intFromEnum(StreamOperationKind.event) and
             role_raw <= @intFromEnum(contract.AttachmentRole.observer);
     }
 
@@ -9385,7 +9586,7 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
     preparation_lifecycle_raw.* = @intFromEnum(EndedPurgePreparationLifecycle.prepared);
 
     const permit_kind_raw: *u8 = @ptrCast(&preparation.permit.kind);
-    raw_tag = @intFromEnum(StreamOperationKind.control) + 1;
+    raw_tag = @intFromEnum(StreamOperationKind.event) + 1;
     while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
         permit_kind_raw.* = @intCast(raw_tag);
         try std.testing.expect(!preparation.sealForCommit(&slot));

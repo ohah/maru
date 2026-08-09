@@ -1370,7 +1370,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       owner bytes와 독립 봉인한 `max_gui_attachments=4,096`, retained byte 1 GiB bounded no-free quarantine으로 transfer한다.
       별도 issuer 없이 `{node incarnation,event generation,owner address}`를 reservation identity로 쓰며 정상 release는 slot을 empty로
       재사용한다. ended 판정은 예약보다 먼저다.
-      generation pump는 purge-first이고 ordinary take도 ended를 반환하지 않는다. C1 admission/allocator seal·node-canonical reusable owner/generation·ordinary take,
+      generation pump는 purge-first이고 ordinary take도 ended를 반환하지 않는다. C1 admission/allocator seal·node-canonical reusable owner/generation·ordinary take는 구현됐고,
       C2 release/pin/quarantine/callback closure, C3 generation 제품 drain·ended priority·actual socket/source-zero의 세 PR-size gate로 나누며 각 gate가
       Debug·ReleaseFast focused sentinel과 boundary를 가진다. 2c3d 완료 전에는 generation event source-zero를 주장하지 않는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는

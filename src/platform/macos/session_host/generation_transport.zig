@@ -11,6 +11,7 @@ const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const rpc_executed_response = @import("rpc_executed_response.zig");
+const generation_event = @import("generation_event_contract.zig");
 const client_poison = @import("client_poison.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -110,6 +111,13 @@ pub const RevokeFence = enum {
     partial_frame_requires_close,
 };
 
+pub const EventOwner = generation_event.EventOwner;
+pub const EventView = generation_event.EventView;
+pub const EventTakeOutcome = generation_event.EventTakeOutcome;
+pub const EventAdmission = generation_event.EventAdmission;
+pub const EventError = generation_event.EventError;
+pub const EventViewError = generation_event.EventViewError;
+
 const Lifecycle = enum(u8) {
     pristine,
     live,
@@ -123,6 +131,7 @@ pub const GenerationTransport = struct {
     self_addr: usize = 0,
     owner_addr: usize = 0,
     owner_size: usize = 0,
+    event_owner_addr: usize = 0,
     owner_seal_addr: usize = 0,
     slot_addr: usize = 0,
     slot_incarnation: u64 = 0,
@@ -272,6 +281,33 @@ pub const GenerationTransport = struct {
         // must win before any sibling flushes an already admitted mutation frame.
         if (client.hasBufferedControllerRevoke()) return false;
         return client.pumpPendingOutput() catch |err| return mapInputError(err);
+    }
+
+    pub fn takeEvent(
+        self: *GenerationTransport,
+        out: *EventOwner,
+    ) EventError!EventTakeOutcome {
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        if (!eventDestinationValid(self, out) or !generation_event.pristineExact(out))
+            return error.InvalidOwner;
+        const outcome = client_slot_mod.takeGenerationEvent(.{
+            .owner = self.ownerQuery(),
+            .bound_stream_id = self.bound_stream_id,
+            .event_owner_addr = @intFromPtr(out),
+        }) catch |err| return switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+            error.Corrupt => error.Corrupt,
+            error.Terminal => error.Terminal,
+        };
+        return switch (outcome) {
+            .idle => .idle,
+            .ended_pending => .ended_pending,
+            .taken => |publication| blk: {
+                generation_event.publish(out, publication);
+                break :blk .taken;
+            },
+        };
     }
 
     pub fn fenceRevoke(self: *GenerationTransport) InputError!RevokeFence {
@@ -498,6 +534,8 @@ pub const GenerationTransport = struct {
             .process_nonce = self.process_nonce,
             .transport_addr = @intFromPtr(self),
             .transport_incarnation = self.transport_incarnation,
+            .owner_addr = self.owner_addr,
+            .owner_size = self.owner_size,
             .owner_seal_addr = self.owner_seal_addr,
             .prepared_storage_addr = @intFromPtr(&self.prepared_storage),
             .reservation = self.binding_reservation,
@@ -697,6 +735,24 @@ pub fn mintInPlace(
         &out.snapshot_authority,
         incarnation,
     ) catch unreachable;
+}
+
+/// C1 setup seam: the complete final owner reserves its one typed event slot before publication.
+/// C3 folds this address into GenerationAttachment construction; no product caller uses it yet.
+pub fn reserveEventOwnerInPlace(
+    transport: *GenerationTransport,
+    out: *EventOwner,
+) Error!void {
+    if (!transport.requestIdentityValid() or transport.event_owner_addr != 0 or
+        !eventDestinationContainedAndDisjoint(transport, out) or
+        !generation_event.pristineExact(out))
+        return error.InvalidTransport;
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    const seal = slot.transportOwnerSeal(transport.binding_reservation) catch
+        return error.InvalidTransport;
+    seal.reserveEventOwner(transport.transport_incarnation, @intFromPtr(out)) catch
+        return error.InvalidTransport;
+    transport.event_owner_addr = @intFromPtr(out);
 }
 
 test "CR3a-2c3b transport mint rejects every non-containing declared owner range" {
@@ -917,6 +973,31 @@ fn rangeOverlaps(a_start: usize, a_len: usize, b_start: usize, b_len: usize) boo
     const a_end = std.math.add(usize, a_start, a_len) catch return true;
     const b_end = std.math.add(usize, b_start, b_len) catch return true;
     return a_start < b_end and b_start < a_end;
+}
+
+fn eventDestinationValid(self: *const GenerationTransport, out: *const EventOwner) bool {
+    if (self.owner_seal_addr == 0) return false;
+    const seal: *const contract.TransportOwnerSeal = @ptrFromInt(self.owner_seal_addr);
+    return self.event_owner_addr != 0 and self.event_owner_addr == @intFromPtr(out) and
+        seal.event_owner_addr == self.event_owner_addr and
+        eventDestinationContainedAndDisjoint(self, out);
+}
+
+fn eventDestinationContainedAndDisjoint(
+    self: *const GenerationTransport,
+    out: *const EventOwner,
+) bool {
+    const out_start = @intFromPtr(out);
+    const out_end = std.math.add(usize, out_start, @sizeOf(EventOwner)) catch return false;
+    const owner_end = std.math.add(usize, self.owner_addr, self.owner_size) catch return false;
+    if (self.owner_addr == 0 or self.owner_size < @sizeOf(EventOwner) or
+        out_start < self.owner_addr or out_end > owner_end)
+        return false;
+    if (rangeOverlaps(out_start, @sizeOf(EventOwner), @intFromPtr(self), @sizeOf(GenerationTransport)) or
+        rangeOverlaps(out_start, @sizeOf(EventOwner), self.slot_addr, @sizeOf(client_slot_mod.ClientSlot)) or
+        rangeOverlaps(out_start, @sizeOf(EventOwner), self.owner_seal_addr, @sizeOf(contract.TransportOwnerSeal)))
+        return false;
+    return true;
 }
 
 test "CR3a-2a response payload range rejects exact partial and overflow owner aliases" {
@@ -1826,6 +1907,12 @@ comptime {
         @TypeOf(GenerationTransport.sendControlNonBlocking) !=
             fn (*GenerationTransport, contract.RuntimeControl) ControlError!bool)
         @compileError("GenerationTransport control facade signature drifted");
+    if (EventError != error{ Busy, InvalidOwner, Corrupt, Terminal } or
+        EventViewError != error{ InvalidOwner, Terminal } or
+        @TypeOf(GenerationTransport.takeEvent) !=
+            fn (*GenerationTransport, *EventOwner) EventError!EventTakeOutcome or
+        @TypeOf(EventOwner.view) != fn (*const EventOwner) EventViewError!EventView)
+        @compileError("GenerationTransport C1 event facade signature drifted");
     const expected_revoke_fields = [_][]const u8{
         "no_pending_stream_frame",
         "cancelled_before_write",
@@ -1848,6 +1935,7 @@ comptime {
         GenerationTransport.sendControlNonBlocking,
         GenerationTransport.pumpPendingOutput,
         GenerationTransport.fenceRevoke,
+        GenerationTransport.takeEvent,
         GenerationTransport.poison,
     };
     for (methods) |method| {
@@ -1885,6 +1973,178 @@ test "CR3a-2a generation transport prepares and aborts a closed attach request" 
     try transport.abortPreparedRequest(receipt);
     try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D01,
+        .wire_major = protocol.version_major,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D01);
+    defer slot.deinit();
+
+    const Lease = @typeInfo(
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+    ).pointer.child;
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: Lease = .{},
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        @intFromPtr(&owner.transport),
+    );
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0x2C3D02,
+        .request_id = 0x2C3D03,
+        .request_digest = 0x2C3D04,
+    }).?;
+    try owner.binding.pairRequest(attach_receipt);
+    try owner.binding.beginExecute(attach_receipt);
+    try slot.commitAttachmentBinding(
+        &owner.binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?,
+            attach_receipt.request_id,
+        ).?,
+        91,
+        &owner.lease,
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try reserveEventOwnerInPlace(&owner.transport, &owner.event);
+    try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 91);
+
+    try std.testing.expectEqual(EventTakeOutcome.idle, try owner.transport.takeEvent(&owner.event));
+    try slot.current.client.bufferGenerationEventForTest(92, "{\"event\":\"future.event\"}");
+    try slot.current.client.bufferGenerationEventForTest(91, "{\"event\":\"future.event\"}");
+    try std.testing.expectEqual(@as(u64, 91), owner.transport.bound_stream_id);
+    try std.testing.expectEqual(@as(usize, 2), slot.current.client.pending_events.items.len);
+    try std.testing.expectEqual(@as(u64, 91), slot.current.client.pending_events.items[1].header.stream_id);
+    try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
+    const first_view = try owner.event.view();
+    try std.testing.expectEqual(@as(u16, protocol.version_major), first_view.wire_major);
+    try std.testing.expectEqualStrings("{\"event\":\"future.event\"}", first_view.payload);
+    try std.testing.expect(first_view.admission == .unknown);
+    try std.testing.expectEqual(@as(usize, 1), slot.current.client.pending_events.items.len);
+    try std.testing.expectEqual(@as(u64, 92), slot.current.client.pending_events.items[0].header.stream_id);
+    try std.testing.expectEqual(
+        slot.current.client.pending_events.items[0].payload.len,
+        slot.current.client.pending_event_bytes,
+    );
+    var copied = owner.event;
+    try std.testing.expectError(error.InvalidOwner, copied.view());
+
+    const first = owner.event;
+    generation_event.corruptAdmissionTagForTest(&owner.event, 0xFF);
+    try std.testing.expectError(error.Terminal, owner.event.view());
+    owner.event = first;
+    const first_publication = generation_event.publicationForTest(&first);
+    try client_slot_mod.discardGenerationEventForTest(first_publication);
+    owner.event = .{};
+    try slot.current.client.bufferGenerationEventForTest(91, "{\"event\":\"future.event\"}");
+    try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
+    const second = owner.event;
+    const second_publication = generation_event.publicationForTest(&second);
+    try std.testing.expect(second_publication.identity.receipt.event_generation >
+        first_publication.identity.receipt.event_generation);
+    owner.event = first;
+    try std.testing.expectError(error.Terminal, owner.event.view());
+    owner.event = second;
+    _ = try owner.event.view();
+    try client_slot_mod.discardGenerationEventForTest(second_publication);
+    owner.event = .{};
+
+    try slot.current.client.bufferGenerationEventForTest(
+        91,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":91,\"controller_generation\":2,\"reason\":\"takeover\"}}",
+    );
+    try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
+    const accepted_view = try owner.event.view();
+    try std.testing.expect(accepted_view.admission == .accepted);
+    const accepted_owner = owner.event;
+    generation_event.corruptAdmissionProjectionForTest(&owner.event);
+    try std.testing.expectError(error.Terminal, owner.event.view());
+    owner.event = accepted_owner;
+    try client_slot_mod.discardGenerationEventForTest(
+        generation_event.publicationForTest(&owner.event),
+    );
+    owner.event = .{};
+
+    try slot.current.client.bufferGenerationEventForTest(
+        91,
+        "{\"event\":\"runtime.ended\"}",
+    );
+    try std.testing.expectEqual(
+        EventTakeOutcome.ended_pending,
+        try owner.transport.takeEvent(&owner.event),
+    );
+    try std.testing.expect(generation_event.pristineExact(&owner.event));
+    slot.current.client.dropBufferedStream(91);
+    slot.current.client.dropBufferedStream(92);
+    try std.testing.expectEqual(
+        @import("connection_lease.zig").ReleaseOutcome.released,
+        owner.lease.release(slot.pid),
+    );
+    try slot.current.cleanup_registry.beginBoundDrop(
+        reservation.cleanup,
+        reservation.identity,
+        91,
+    );
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+    try slot.current.cleanup_registry.completeActiveDrop(
+        reservation.cleanup,
+        reservation.identity,
+        91,
+    );
+    owner.binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3d C1 event destination rejects canonical owner aliases and overflow" {
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        sibling: [@sizeOf(EventOwner)]u8 = [_]u8{0} ** @sizeOf(EventOwner),
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    var seal: contract.TransportOwnerSeal = .{};
+    owner.transport.owner_addr = @intFromPtr(&owner);
+    owner.transport.owner_size = @sizeOf(Owner);
+    owner.transport.slot_addr = 1;
+    owner.transport.owner_seal_addr = @intFromPtr(&seal);
+    owner.transport.event_owner_addr = @intFromPtr(&owner.event);
+    seal.event_owner_addr = @intFromPtr(&owner.event);
+    try std.testing.expect(eventDestinationValid(&owner.transport, &owner.event));
+    const exact_transport: *const EventOwner = @ptrCast(@alignCast(&owner.transport));
+    try std.testing.expect(!eventDestinationValid(&owner.transport, exact_transport));
+    const exact_sibling: *const EventOwner = @ptrCast(@alignCast(&owner.sibling));
+    try std.testing.expect(!eventDestinationValid(&owner.transport, exact_sibling));
+    const partial_sibling: *const EventOwner = @ptrFromInt(
+        @intFromPtr(&owner.event) - @alignOf(EventOwner),
+    );
+    try std.testing.expect(!eventDestinationValid(&owner.transport, partial_sibling));
+    const adjacent: *const EventOwner = @ptrFromInt(@intFromPtr(&owner) + @sizeOf(Owner));
+    try std.testing.expect(!eventDestinationValid(&owner.transport, adjacent));
+    owner.transport.owner_addr = std.math.maxInt(usize) - 7;
+    owner.transport.owner_size = 16;
+    try std.testing.expect(!eventDestinationValid(&owner.transport, &owner.event));
 }
 
 test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
@@ -2259,7 +2519,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     slot.current.active_operation_transport_incarnation = 0;
     const operation_kind_raw: *u8 = @ptrCast(&slot.current.active_operation_kind);
     var operation_kind_value: u16 =
-        @as(u16, @intFromEnum(client_slot_mod.StreamOperationKind.ended_purge)) + 1;
+        @as(u16, @intFromEnum(client_slot_mod.StreamOperationKind.event)) + 1;
     while (operation_kind_value <= std.math.maxInt(u8)) : (operation_kind_value += 1) {
         operation_kind_raw.* = @intCast(operation_kind_value);
         try std.testing.expectError(error.Busy, transport.capabilities());

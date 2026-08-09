@@ -944,8 +944,16 @@ pub const BufferedEvent = struct {
 
     const AdmissionSeal = struct {
         header: protocol.Header,
-        preflight: runtime_event_wire.EventPreflight,
+        admission: Admission,
         payload_digest: runtime_event_wire.Digest,
+        payload_addr: usize,
+        payload_len: usize,
+        allocator: std.mem.Allocator,
+    };
+
+    const Admission = union(enum) {
+        accepted: runtime_event_wire.EventPreflight,
+        unknown,
     };
 
     fn deinit(self: BufferedEvent, allocator: std.mem.Allocator) void {
@@ -955,28 +963,203 @@ pub const BufferedEvent = struct {
     fn seal(
         header: protocol.Header,
         payload: []const u8,
-        preflight: runtime_event_wire.EventPreflight,
+        admission: Admission,
+        allocator: std.mem.Allocator,
     ) AdmissionSeal {
         return .{
             .header = header,
-            .preflight = preflight,
+            .admission = admission,
             .payload_digest = runtime_event_wire.payloadDigest(payload),
+            .payload_addr = @intFromPtr(payload.ptr),
+            .payload_len = payload.len,
+            .allocator = allocator,
         };
     }
 
-    fn sealMatches(self: BufferedEvent) bool {
+    fn sealMatches(self: BufferedEvent, canonical_allocator: std.mem.Allocator) bool {
         const preflight = self.preflight orelse return self.admission_seal == null;
-        const accepted = switch (preflight) {
-            .accepted => |value| value,
-            else => return self.admission_seal == null,
+        const admission: Admission = switch (preflight) {
+            .accepted => |value| .{ .accepted = value },
+            .unknown => .unknown,
+            .foreign, .malformed, .resource_exhausted => return false,
         };
         const seal_value = self.admission_seal orelse return false;
         if (!std.meta.eql(seal_value.header, self.header)) return false;
+        if (!std.meta.eql(seal_value.allocator, canonical_allocator)) return false;
+        if (seal_value.payload_addr != @intFromPtr(self.payload.ptr) or
+            seal_value.payload_len != self.payload.len)
+            return false;
         const digest = runtime_event_wire.payloadDigest(self.payload);
         if (!std.mem.eql(u8, &seal_value.payload_digest, &digest)) return false;
-        return runtime_event_wire.eventPreflightEql(seal_value.preflight, accepted);
+        if (std.meta.activeTag(seal_value.admission) != std.meta.activeTag(admission)) return false;
+        return switch (admission) {
+            .accepted => |accepted| runtime_event_wire.eventPreflightEql(
+                seal_value.admission.accepted,
+                accepted,
+            ),
+            .unknown => true,
+        };
+    }
+
+    /// Fast ended classification intentionally validates only the independently sealed metadata.
+    /// Payload bytes are covered by the slow all-owner transaction so a drift is reported as
+    /// source corruption rather than changing the preflight hint contract.
+    fn acceptedSealMetadataMatches(
+        self: BufferedEvent,
+        accepted: runtime_event_wire.EventPreflight,
+        canonical_allocator: std.mem.Allocator,
+    ) bool {
+        const seal_value = self.admission_seal orelse return false;
+        if (!std.meta.eql(seal_value.header, self.header) or
+            !std.meta.eql(seal_value.allocator, canonical_allocator) or
+            seal_value.payload_addr != @intFromPtr(self.payload.ptr) or
+            seal_value.payload_len != self.payload.len or
+            !std.mem.eql(u8, &seal_value.payload_digest, &accepted.raw_digest) or
+            std.meta.activeTag(seal_value.admission) != .accepted)
+            return false;
+        return runtime_event_wire.eventPreflightEql(
+            seal_value.admission.accepted,
+            accepted,
+        );
     }
 };
+
+test "CR3a-2c3d C1 event admission seal closes verdict and allocator provenance" {
+    const accepted_payload = "{\"event\":\"runtime.ended\"}";
+    const accepted = switch (runtime_event_wire.preflightEvent(accepted_payload, .{})) {
+        .accepted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const accepted_header: protocol.Header = .{
+        .kind = .event,
+        .stream_id = 41,
+        .payload_len = accepted_payload.len,
+    };
+    var event: BufferedEvent = .{
+        .header = accepted_header,
+        .payload = @constCast(accepted_payload),
+        .preflight = .{ .accepted = accepted },
+        .admission_seal = BufferedEvent.seal(
+            accepted_header,
+            accepted_payload,
+            .{ .accepted = accepted },
+            std.testing.allocator,
+        ),
+    };
+    try std.testing.expect(event.sealMatches(std.testing.allocator));
+    try std.testing.expect(!event.sealMatches(std.heap.page_allocator));
+
+    event.preflight = .unknown;
+    try std.testing.expect(!event.sealMatches(std.testing.allocator));
+    event.admission_seal = BufferedEvent.seal(
+        accepted_header,
+        accepted_payload,
+        .unknown,
+        std.testing.allocator,
+    );
+    try std.testing.expect(event.sealMatches(std.testing.allocator));
+    event.admission_seal.?.header.stream_id += 1;
+    try std.testing.expect(!event.sealMatches(std.testing.allocator));
+    event.admission_seal.?.header = accepted_header;
+    event.admission_seal.?.payload_digest[0] ^= 1;
+    try std.testing.expect(!event.sealMatches(std.testing.allocator));
+
+    // Strict external adoption deliberately has neither a parsed verdict nor a GUI seal.
+    event.preflight = null;
+    event.admission_seal = null;
+    try std.testing.expect(event.sealMatches(std.testing.allocator));
+    event.admission_seal = BufferedEvent.seal(
+        accepted_header,
+        accepted_payload,
+        .unknown,
+        std.testing.allocator,
+    );
+    try std.testing.expect(!event.sealMatches(std.testing.allocator));
+}
+
+test "CR3a-2c3d C1 GUI ingress rejects a foreign allocator before publication" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0x2C3D11,
+        .wire_major = protocol.version_major,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    const payload = try std.heap.page_allocator.dupe(u8, "{\"event\":\"future.event\"}");
+    try std.testing.expectError(error.ProtocolError, client.bufferEventWithAllocator(.{
+        .header = .{
+            .kind = .event,
+            .stream_id = 7,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    }, std.heap.page_allocator));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.local_invariant_violation,
+        client.first_poison_reason.?,
+    );
+}
+
+test "CR3a-2c3d C1 prepared take rejects allocator drift without queue mutation" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0x2C3D12,
+        .wire_major = protocol.version_major,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    try client.bufferGenerationEventForTest(17, "{\"event\":\"future.event\"}");
+    try std.testing.expect(client.pending_events.items[0].preflight.? == .unknown);
+    try std.testing.expect(client.pending_events.items[0].admission_seal != null);
+    var prepared: PreparedGenerationEventTake = .{};
+    try std.testing.expectEqual(
+        GenerationEventTakeKind.ordinary,
+        try client.prepareGenerationEventTake(17, &prepared),
+    );
+    const saved = client.pending_events.items[0].admission_seal.?.allocator;
+    client.pending_events.items[0].admission_seal.?.allocator = std.heap.page_allocator;
+    var owned: ?OwnedGenerationEvent = null;
+    try std.testing.expectError(
+        error.Corrupt,
+        client.commitGenerationEventTake(&prepared, &owned),
+    );
+    try std.testing.expect(owned == null);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    try std.testing.expectEqual(
+        @as(usize, "{\"event\":\"future.event\"}".len),
+        client.pending_event_bytes,
+    );
+    client.pending_events.items[0].admission_seal.?.allocator = saved;
+    client.abortGenerationEventTake(&prepared);
+    client.dropBufferedStream(17);
+}
+
+test "CR3a-2c3d C1 null-profile drop and deinit validate sealed events" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0x2C3D13,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    try client.bufferGenerationEventForTest(19, "{\"event\":\"future.event\"}");
+    const saved = client.pending_events.items[0].admission_seal.?.allocator;
+    client.pending_events.items[0].admission_seal.?.allocator = std.heap.page_allocator;
+    client.dropBufferedStream(19);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    try std.testing.expect(client.unusable);
+    try std.testing.expect(!client.tryDeinit());
+    try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    client.pending_events.items[0].admission_seal.?.allocator = saved;
+    try std.testing.expect(client.tryDeinit());
+}
 
 /// ended purge의 빠른 판정 결과다. `event_index`는 느린 트랜잭션이 다시 검증할 힌트일 뿐
 /// 소유권이나 commit 권위를 나타내지 않는다.
@@ -988,6 +1171,52 @@ pub const EndedEventPeek = union(enum) {
     not_ended,
     candidate: EndedEventHint,
 };
+
+pub const GenerationEventTakeKind = enum(u8) {
+    idle,
+    ended_pending,
+    ordinary,
+};
+
+const GenerationEventTakeLifecycle = enum(u8) { empty, prepared, consumed };
+
+/// Internal two-phase queue token. The generation adapter reserves node authority between
+/// prepare and commit; commit revalidates this frozen queue head before the no-fail remove.
+pub const PreparedGenerationEventTake = struct {
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    stream_id: u64 = 0,
+    event_index: u32 = 0,
+    queue_addr: usize = 0,
+    queue_len: usize = 0,
+    queue_capacity: usize = 0,
+    queue_bytes: usize = 0,
+    payload_addr: usize = 0,
+    payload_len: usize = 0,
+    header: protocol.Header = .{ .kind = .hello },
+    payload_digest: runtime_event_wire.Digest = [_]u8{0} ** 32,
+    kind: GenerationEventTakeKind = .idle,
+    lifecycle: GenerationEventTakeLifecycle = .empty,
+
+    fn pristine(self: *const PreparedGenerationEventTake) bool {
+        return self.self_addr == 0 and self.client_addr == 0 and self.stream_id == 0 and
+            self.event_index == 0 and self.queue_addr == 0 and self.queue_len == 0 and
+            self.queue_capacity == 0 and self.queue_bytes == 0 and
+            self.payload_addr == 0 and self.payload_len == 0 and
+            std.meta.eql(self.header, protocol.Header{ .kind = .hello }) and
+            std.mem.allEqual(u8, &self.payload_digest, 0) and
+            self.kind == .idle and self.lifecycle == .empty;
+    }
+};
+
+pub const OwnedGenerationEvent = struct {
+    header: protocol.Header,
+    payload: []u8,
+    preflight: runtime_event_wire.Verdict,
+};
+
+pub const GenerationEventPrepareError = error{ Busy, Corrupt, Terminal, DestinationOccupied };
+pub const GenerationEventCommitError = error{ Busy, Corrupt, Terminal, InvalidPrepared };
 
 const buffered_event_source_schema_field_allowlist = [_][]const u8{
     "header",
@@ -6004,6 +6233,14 @@ pub const Client = struct {
     fn prepareDeinitGraph(self: *Client, bound_client: bool) bool {
         if (checkedAllocatorReentry(self)) return false;
         if (self.ownership == .moved) return false;
+        if (self.pending_events.items.len != 0 and
+            !(self.connection_profile != null and
+                self.connection_profile.?.requiresStrictExternalEvents()) and
+            !self.validateGenerationEventQueue())
+        {
+            self.poison(.local_invariant_violation);
+            return false;
+        }
         if (self.prepared_request_execution_lease_addr != 0 or
             self.prepared_request_execution_fence_addr != 0 or
             self.prepared_request_execution_fence_incarnation != 0 or
@@ -9419,7 +9656,7 @@ pub const Client = struct {
                     self.poison(.frame_malformed);
                     return error.ProtocolError;
                 }
-                try self.bufferEvent(frame);
+                try self.bufferCanonicalEvent(frame);
                 continue;
             }
             var frame_live = true;
@@ -9538,6 +9775,16 @@ pub const Client = struct {
         const operation_fence_held = self.beginPublicMutation() catch return;
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return;
+        // Validate every GUI event before changing earlier batch/stream owners. A corrupted event
+        // must not turn a per-stream drop into a mismatched free or a partially mutated graph.
+        if (self.pending_events.items.len != 0 and
+            !(self.connection_profile != null and
+                self.connection_profile.?.requiresStrictExternalEvents()) and
+            !self.validateGenerationEventQueue())
+        {
+            self.poison(.local_invariant_violation);
+            return;
+        }
         var i: usize = 0;
         while (i < self.pending_batches.items.len) {
             if (self.pending_batches.items[i].stream_id == stream_id) {
@@ -9576,6 +9823,125 @@ pub const Client = struct {
             (if (self.generation_batch_accounting.ledger) |ledger| ledger.byte_count else 0) +| partial;
     }
 
+    fn validateGenerationEventQueue(self: *const Client) bool {
+        if (self.pending_events.items.len > self.pending_events.capacity or
+            self.pending_events.items.len > max_pending_event_count or
+            (self.connection_profile != null and
+                self.connection_profile.?.requiresStrictExternalEvents()))
+            return false;
+        var total_bytes: usize = 0;
+        for (self.pending_events.items) |event| {
+            if (event.header.major != self.wire_major or event.header.kind != .event or
+                event.header.request_id != 0 or event.header.stream_id == 0 or
+                event.header.flags != 0 or event.header.payload_len != event.payload.len or
+                event.payload.len > protocol.max_control_json or event.preflight == null or
+                !event.sealMatches(self.allocator))
+                return false;
+            switch (event.preflight.?) {
+                .accepted, .unknown => {},
+                .foreign, .malformed, .resource_exhausted => return false,
+            }
+            total_bytes = std.math.add(usize, total_bytes, event.payload.len) catch return false;
+        }
+        return total_bytes == self.pending_event_bytes;
+    }
+
+    /// Freezes the target stream's first GUI event without changing queue ownership. The caller
+    /// may reserve binding authority after this returns, then commit against the exact same queue.
+    pub fn prepareGenerationEventTake(
+        self: *Client,
+        stream_id: u64,
+        out: *PreparedGenerationEventTake,
+    ) GenerationEventPrepareError!GenerationEventTakeKind {
+        const operation_fence_held = self.beginPublicMutation() catch return error.Busy;
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (checkedAllocatorReentry(self)) return error.Busy;
+        if (!out.pristine()) return error.DestinationOccupied;
+        if (stream_id == 0 or !self.validateGenerationEventQueue()) return error.Corrupt;
+        if (self.unusable) return error.Terminal;
+        for (self.pending_events.items, 0..) |event, index| {
+            if (event.header.stream_id != stream_id) continue;
+            const kind: GenerationEventTakeKind = switch (event.preflight.?) {
+                .accepted => |accepted| if (accepted.event == .ended)
+                    .ended_pending
+                else
+                    .ordinary,
+                .unknown => .ordinary,
+                else => unreachable,
+            };
+            out.* = .{
+                .self_addr = @intFromPtr(out),
+                .client_addr = @intFromPtr(self),
+                .stream_id = stream_id,
+                .event_index = @intCast(index),
+                .queue_addr = @intFromPtr(self.pending_events.items.ptr),
+                .queue_len = self.pending_events.items.len,
+                .queue_capacity = self.pending_events.capacity,
+                .queue_bytes = self.pending_event_bytes,
+                .payload_addr = @intFromPtr(event.payload.ptr),
+                .payload_len = event.payload.len,
+                .header = event.header,
+                .payload_digest = runtime_event_wire.payloadDigest(event.payload),
+                .kind = kind,
+                .lifecycle = .prepared,
+            };
+            return kind;
+        }
+        return .idle;
+    }
+
+    pub fn commitGenerationEventTake(
+        self: *Client,
+        prepared: *PreparedGenerationEventTake,
+        out: *?OwnedGenerationEvent,
+    ) GenerationEventCommitError!void {
+        const operation_fence_held = self.beginPublicMutation() catch return error.Busy;
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (checkedAllocatorReentry(self)) return error.Busy;
+        if (out.* != null or prepared.self_addr != @intFromPtr(prepared) or
+            prepared.client_addr != @intFromPtr(self) or prepared.stream_id == 0 or
+            prepared.lifecycle != .prepared or prepared.kind != .ordinary)
+            return error.InvalidPrepared;
+        if (self.unusable) return error.Terminal;
+        if (!self.validateGenerationEventQueue() or
+            prepared.queue_addr != @intFromPtr(self.pending_events.items.ptr) or
+            prepared.queue_len != self.pending_events.items.len or
+            prepared.queue_capacity != self.pending_events.capacity or
+            prepared.queue_bytes != self.pending_event_bytes)
+            return error.Corrupt;
+        const index: usize = prepared.event_index;
+        if (index >= self.pending_events.items.len) return error.Corrupt;
+        const event = self.pending_events.items[index];
+        if (event.header.stream_id != prepared.stream_id or
+            !std.meta.eql(event.header, prepared.header) or
+            @intFromPtr(event.payload.ptr) != prepared.payload_addr or
+            event.payload.len != prepared.payload_len)
+            return error.Corrupt;
+        const digest = runtime_event_wire.payloadDigest(event.payload);
+        if (!std.mem.eql(u8, &digest, &prepared.payload_digest)) return error.Corrupt;
+        for (self.pending_events.items[0..index]) |prior|
+            if (prior.header.stream_id == prepared.stream_id) return error.Corrupt;
+        const owned = self.pending_events.orderedRemove(index);
+        self.pending_event_bytes -= owned.payload.len;
+        prepared.lifecycle = .consumed;
+        out.* = .{
+            .header = owned.header,
+            .payload = owned.payload,
+            .preflight = owned.preflight.?,
+        };
+    }
+
+    pub fn abortGenerationEventTake(
+        self: *const Client,
+        prepared: *PreparedGenerationEventTake,
+    ) void {
+        const operation_fence_held = self.beginPublicMutation() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (prepared.self_addr == @intFromPtr(prepared) and
+            prepared.client_addr == @intFromPtr(self) and prepared.lifecycle == .prepared)
+            prepared.* = .{};
+    }
+
     /// stream의 다음 full-state/control event를 소유권째 꺼낸다. caller는 적용 뒤
     /// `Client.releaseEvent`로 반환한다. Admission seal 불일치는 손상된 route를 caller에게 넘기지 않고
     /// connection-wide ProtocolError로 닫는다.
@@ -9590,7 +9956,7 @@ pub const Client = struct {
         // ambiguous. Its header is no longer routing evidence, so consume/free it here and report
         // a typed terminal before any runtime can project the corrupted parsed view.
         for (self.pending_events.items, 0..) |frame, i| {
-            if (!frame.sealMatches()) {
+            if (!frame.sealMatches(self.allocator)) {
                 const owned = self.pending_events.orderedRemove(i);
                 self.pending_event_bytes -= owned.payload.len;
                 owned.deinit(self.allocator);
@@ -9636,11 +10002,7 @@ pub const Client = struct {
                 .accepted => |value| value,
                 else => return error.InvalidClientState,
             };
-            const admission = frame.admission_seal orelse
-                return error.InvalidClientState;
-            if (!std.meta.eql(admission.header, frame.header) or
-                !std.mem.eql(u8, &admission.payload_digest, &accepted.raw_digest) or
-                !runtime_event_wire.eventPreflightEql(admission.preflight, accepted))
+            if (!frame.acceptedSealMetadataMatches(accepted, self.allocator))
                 return error.InvalidClientState;
 
             return if (accepted.event == .ended)
@@ -9717,11 +10079,8 @@ pub const Client = struct {
             .accepted => |accepted| accepted,
             else => return error.InvalidHint,
         };
-        const ended_admission = ended.admission_seal orelse return error.InvalidHint;
         if (ended_preflight.event != .ended or
-            !std.meta.eql(ended_admission.header, ended.header) or
-            !std.mem.eql(u8, &ended_admission.payload_digest, &ended_preflight.raw_digest) or
-            !runtime_event_wire.eventPreflightEql(ended_admission.preflight, ended_preflight))
+            !ended.acceptedSealMetadataMatches(ended_preflight, self.allocator))
             return error.InvalidHint;
 
         scratch.batch_targets = .initEmpty();
@@ -9797,15 +10156,11 @@ pub const Client = struct {
                 event.header.flags != 0 or event.header.payload_len != event.payload.len or
                 event.payload.len > protocol.max_control_json)
                 return error.InvalidSource;
-            const accepted = switch (event.preflight orelse return error.InvalidSource) {
+            _ = switch (event.preflight orelse return error.InvalidSource) {
                 .accepted => |value| value,
                 else => return error.InvalidSource,
             };
-            const admission = event.admission_seal orelse return error.InvalidSource;
-            if (!std.meta.eql(admission.header, event.header) or
-                !std.mem.eql(u8, &admission.payload_digest, &accepted.raw_digest) or
-                !runtime_event_wire.eventPreflightEql(admission.preflight, accepted))
-                return error.InvalidSource;
+            if (!event.sealMatches(self.allocator)) return error.InvalidSource;
             const descriptor = externalFrameDescriptor(event);
             try endedPurgeRangeOutsideProtected(
                 try endedPurgeCheckedPayloadRange(descriptor.payload_address, descriptor.payload_len),
@@ -9882,7 +10237,7 @@ pub const Client = struct {
         for (self.pending_stream.items, 0..) |frame, index|
             writeEndedPurgeFrameSeal(&stream_writer, scratch.stream[index], frame.payload);
         for (self.pending_events.items, 0..) |event, index| {
-            if (!event.sealMatches()) return error.InvalidSource;
+            if (!event.sealMatches(self.allocator)) return error.InvalidSource;
             writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
         }
         if (self.partial_batch) |partial|
@@ -10249,7 +10604,7 @@ pub const Client = struct {
                 ) catch return error.ArithmeticOverflow;
         }
         for (self.pending_events.items, 0..) |event, index| {
-            if (!event.sealMatches()) return error.Corrupt;
+            if (!event.sealMatches(self.allocator)) return error.Corrupt;
             writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
             event_bytes = std.math.add(usize, event_bytes, event.payload.len) catch
                 return error.ArithmeticOverflow;
@@ -10563,7 +10918,8 @@ pub const Client = struct {
             if (frozen.event_targets.isSet(source)) continue;
             const event = self.pending_events.items[survivor_ordinal];
             const descriptor = frozen.events[source];
-            if (!std.meta.eql(externalFrameDescriptor(event), descriptor) or !event.sealMatches())
+            if (!std.meta.eql(externalFrameDescriptor(event), descriptor) or
+                !event.sealMatches(self.allocator))
                 return false;
             writeEndedPurgeFrameSeal(&survivors, descriptor, event.payload);
             survivor_ordinal += 1;
@@ -10726,7 +11082,8 @@ pub const Client = struct {
         }
         for (self.pending_events.items, 0..) |event, index| {
             const descriptor = externalFrameDescriptor(event);
-            if (!std.meta.eql(descriptor, frozen.events[index]) or !event.sealMatches())
+            if (!std.meta.eql(descriptor, frozen.events[index]) or
+                !event.sealMatches(self.allocator))
                 @panic("ended purge event descriptor drifted before cleanup");
             writeEndedPurgeFrameSeal(&event_writer, descriptor, event.payload);
         }
@@ -10952,8 +11309,48 @@ pub const Client = struct {
 
     /// full-state event는 같은 stream+종류의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
     /// 쏟아 count/byte cap을 넘기면 oldest를 버리지 않고 shared connection 전체를 poison해 모든 runtime을 fail-closed한다.
-    fn bufferEvent(self: *Client, frame: framing.Frame) ClientError!void {
+    /// Legacy unit-fixture adapter. The product demux never calls this function: malformed
+    /// headers must reach `bufferCanonicalEvent` unchanged so test builds and product builds
+    /// exercise the same ingress contract.
+    fn bufferLegacyEventForTest(self: *Client, frame: framing.Frame) ClientError!void {
+        if (!builtin.is_test) unreachable;
+        var normalized = frame;
+        if (normalized.header.major == 0)
+            normalized.header.major = self.wire_major;
+        if (normalized.header.payload_len == 0)
+            normalized.header.payload_len = @intCast(normalized.payload.len);
+        return self.bufferCanonicalEvent(normalized);
+    }
+
+    fn bufferCanonicalEvent(self: *Client, frame: framing.Frame) ClientError!void {
+        if (frame.header.major != self.wire_major or
+            frame.header.payload_len != frame.payload.len)
+        {
+            frame.deinit(self.allocator);
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        }
         return self.bufferEventWithAllocator(frame, self.allocator);
+    }
+
+    pub fn bufferGenerationEventForTest(
+        self: *Client,
+        stream_id: u64,
+        payload: []const u8,
+    ) ClientError!void {
+        if (!builtin.is_test) return error.ProtocolError;
+        const operation_fence_held = try self.beginPublicMutation();
+        defer if (operation_fence_held) self.endPublicMutation();
+        const owned = self.allocator.dupe(u8, payload) catch return error.OutOfMemory;
+        return self.bufferEventWithAllocator(.{
+            .header = .{
+                .kind = .event,
+                .stream_id = stream_id,
+                .payload_len = @intCast(owned.len),
+                .major = self.wire_major,
+            },
+            .payload = owned,
+        }, self.allocator);
     }
 
     fn bufferEventWithAllocator(
@@ -10972,6 +11369,14 @@ pub const Client = struct {
             self.connection_profile.?.requiresStrictExternalEvents())
         {
             return self.appendRawEvent(frame, allocator);
+        }
+        // GUI-generation events must enter and leave through the canonical Client allocator.
+        // Merely recording a foreign allocator in the seal would publish poisoned ownership and
+        // make replacement or teardown choose between a mismatched free and a leak.
+        if (!std.meta.eql(allocator, self.allocator)) {
+            frame.deinit(allocator);
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
         }
         const verdict = runtime_event_wire.preflightEventObserved(
             frame.payload,
@@ -11035,7 +11440,14 @@ pub const Client = struct {
                 .accepted => |accepted| BufferedEvent.seal(
                     frame.header,
                     frame.payload,
-                    accepted,
+                    .{ .accepted = accepted },
+                    allocator,
+                ),
+                .unknown => BufferedEvent.seal(
+                    frame.header,
+                    frame.payload,
+                    .unknown,
+                    allocator,
                 ),
                 else => null,
             },
@@ -11043,7 +11455,7 @@ pub const Client = struct {
         // No replacement/supersession decision may inspect a previously admitted header or
         // parsed scalar until its independent admission copy has rebound all three components.
         for (self.pending_events.items) |old| {
-            if (!old.sealMatches()) {
+            if (!old.sealMatches(self.allocator)) {
                 buffered.deinit(allocator);
                 self.poison(.local_invariant_violation);
                 return error.ProtocolError;
@@ -11567,7 +11979,7 @@ pub const Client = struct {
         stream_id: ?u64,
     ) bool {
         for (self.pending_events.items) |frame| {
-            if (!frame.sealMatches()) return true;
+            if (!frame.sealMatches(self.allocator)) return true;
             const verdict = frame.preflight orelse
                 runtime_event_wire.preflightEvent(frame.payload, .{});
             switch (verdict) {
@@ -14169,7 +14581,7 @@ test "CR3a-2c3a buffered revoke blocks blocking and deadline RPC before pending 
     client.pending_outbound = .{ .frame = pending, .stream_id = 7 };
     const revoke_payload =
         "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, revoke_payload),
     });
@@ -14215,13 +14627,13 @@ test "client revoke latch uses decoded event semantics for escaped and nested st
     defer client.deinit();
     const escaped =
         "{\"event\":\"controller.\\u0072evoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, escaped),
     });
     const nested_false_positive =
         "{\"event\":\"future.event\",\"data\":{\"note\":\"\\\"event\\\":\\\"controller.revoked\\\"\"}}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 8 },
         .payload = try allocator.dupe(u8, nested_false_positive),
     });
@@ -15007,18 +15419,18 @@ test "client metadata events coalesce by stream and preserve other streams" {
         \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":2,
         \\"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
     ;
-    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev1) });
+    try client.bufferLegacyEventForTest(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev1) });
     const future = "{\"event\":\"future.event\"}";
-    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 8 }, .payload = try allocator.dupe(u8, future) });
-    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev2) });
+    try client.bufferLegacyEventForTest(.{ .header = .{ .kind = .event, .stream_id = 8 }, .payload = try allocator.dupe(u8, future) });
+    try client.bufferLegacyEventForTest(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev2) });
     // stale 또는 consumer가 거부할 bounds 위반 newer event가 정상 pending full-state를 밀어내면 안 된다.
-    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev1) });
+    try client.bufferLegacyEventForTest(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, rev1) });
     const malformed_newer =
         \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/bad","window_title":"bad","ssh_remote_dest":null,
         \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":3,
         \\"title_generation":3,"cols":-1,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
     ;
-    try client.bufferEvent(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, malformed_newer) });
+    try client.bufferLegacyEventForTest(.{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = try allocator.dupe(u8, malformed_newer) });
     try std.testing.expectEqual(@as(usize, 2), client.pending_events.items.len);
     try std.testing.expect(client.pending_event_bytes > 0);
 
@@ -15048,11 +15460,11 @@ test "client metadata coalescing rejects same-revision equivocation and stale pr
             .parser = framing.FrameParser.init(allocator),
         };
         defer client.deinit();
-        try client.bufferEvent(.{
+        try client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, original),
         });
-        try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+        try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, equivocation),
         }));
@@ -15067,13 +15479,15 @@ test "client metadata coalescing rejects same-revision equivocation and stale pr
             .parser = framing.FrameParser.init(allocator),
         };
         defer client.deinit();
-        try client.bufferEvent(.{
+        try client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, original),
         });
         const index = std.mem.indexOf(u8, client.pending_events.items[0].payload, "/one").?;
+        const original_byte = client.pending_events.items[0].payload[index + 1];
+        defer client.pending_events.items[0].payload[index + 1] = original_byte;
         client.pending_events.items[0].payload[index + 1] = 'X';
-        try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+        try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, equivocation),
         }));
@@ -15095,10 +15509,12 @@ test "client admitted event seal rejects parsed scalar and header mutation befor
             .parser = framing.FrameParser.init(allocator),
         };
         defer client.deinit();
-        try client.bufferEvent(.{
+        try client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, metadata),
         });
+        const canonical_event = client.pending_events.items[0];
+        defer client.pending_events.items[0] = canonical_event;
         switch (client.pending_events.items[0].preflight.?) {
             .accepted => |*accepted| switch (accepted.event) {
                 .metadata => |*value| value.revision = std.math.maxInt(u64),
@@ -15106,7 +15522,7 @@ test "client admitted event seal rejects parsed scalar and header mutation befor
             },
             else => unreachable,
         }
-        try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+        try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, metadata),
         }));
@@ -15121,7 +15537,7 @@ test "client admitted event seal rejects parsed scalar and header mutation befor
             .parser = framing.FrameParser.init(allocator),
         };
         defer client.deinit();
-        try client.bufferEvent(.{
+        try client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, metadata),
         });
@@ -15143,7 +15559,7 @@ test "client rejects cross-stream revoke before either authority latch can skip 
     defer client.deinit();
     const mismatch =
         "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}";
-    try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+    try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 8 },
         .payload = try allocator.dupe(u8, mismatch),
     }));
@@ -15162,10 +15578,12 @@ test "client admitted revoke header mutation closes global and both stream latch
     defer client.deinit();
     const revoke =
         "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, revoke),
     });
+    const canonical_event = client.pending_events.items[0];
+    defer client.pending_events.items[0] = canonical_event;
     client.pending_events.items[0].header.stream_id = 8;
     try std.testing.expect(client.hasBufferedControllerRevoke());
     try std.testing.expect(client.hasBufferedControllerRevokeForStream(7));
@@ -15183,7 +15601,7 @@ test "CR3a-2c2b ended peek is allocation-free and does not consume the candidate
     defer client.deinit();
 
     const foreign_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{
             .kind = .event,
             .stream_id = 8,
@@ -15192,7 +15610,7 @@ test "CR3a-2c2b ended peek is allocation-free and does not consume the candidate
         .payload = try allocator.dupe(u8, foreign_payload),
     });
     const target_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{
             .kind = .event,
             .stream_id = 9,
@@ -15224,7 +15642,7 @@ test "CR3a-2c2b ended peek stops at the first target event" {
     defer client.deinit();
 
     const metadata = "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{}}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = metadata.len },
         .payload = try allocator.dupe(u8, metadata),
     });
@@ -15245,11 +15663,13 @@ test "CR3a-2c2b ended peek rejects admission identity drift without mutation" {
     defer client.deinit();
 
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
     const byte_count = client.pending_event_bytes;
+    const canonical_event = client.pending_events.items[0];
+    defer client.pending_events.items[0] = canonical_event;
     client.pending_events.items[0].header.flags = 1;
     try std.testing.expectError(
         error.InvalidClientState,
@@ -15270,10 +15690,12 @@ test "CR3a-2c2b ended peek leaves payload integrity to the slow transaction" {
     defer client.deinit();
 
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
+    const original_byte = client.pending_events.items[0].payload[1];
+    defer client.pending_events.items[0].payload[1] = original_byte;
     client.pending_events.items[0].payload[1] ^= 1;
     const candidate = try client.peekEndedEventForStream(9);
     try std.testing.expectEqual(@as(u32, 0), candidate.candidate.event_index);
@@ -15290,10 +15712,12 @@ test "CR3a-2c2b ended peek rejects stored admission digest drift" {
     defer client.deinit();
 
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
+    const canonical_event = client.pending_events.items[0];
+    defer client.pending_events.items[0] = canonical_event;
     client.pending_events.items[0].admission_seal.?.payload_digest[0] ^= 1;
     try std.testing.expectError(
         error.InvalidClientState,
@@ -15386,7 +15810,7 @@ test "CR3a-2c2b2 prepare inventories mixed target and sibling owners without mut
     try client.partial_batch.?.bytes.appendSlice(allocator, "sibling-partial");
 
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{
             .kind = .event,
             .stream_id = 9,
@@ -15426,7 +15850,7 @@ test "CR3a-2c2b2 prepare rejects payload drift and stale hint without publishing
     };
     defer client.deinit();
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -15475,7 +15899,7 @@ test "CR3a-2c2b2 prepare rejects exact and partial payload owner aliases before 
         .allocator = allocator,
     });
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
         .payload = try allocator.dupe(u8, ended_payload),
     });
@@ -15522,7 +15946,7 @@ test "CR3a-2c2b2 prepare rejects parser and scratch payload aliases before hashi
         .allocator = allocator,
     });
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
         .payload = try allocator.dupe(u8, ended_payload),
     });
@@ -15568,7 +15992,7 @@ test "CR3a-2c2b2 prepare rejects outer list backing aliases before item access" 
     };
     defer client.deinit();
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
         .payload = try allocator.dupe(u8, ended_payload),
     });
@@ -15615,7 +16039,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
     });
     client.pending_batch_bytes = owned.len;
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
         .payload = try allocator.dupe(u8, ended_payload),
     });
@@ -15723,7 +16147,7 @@ test "CR3a-2c2b3b prepare commit freezes a final-address blocking owner graph" {
     client.lifecycle = try allocator.dupe(u8, "running");
 
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -15831,7 +16255,7 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
     try client.partial_batch.?.bytes.appendSlice(allocator, "target-partial");
 
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
         .payload = try allocator.dupe(u8, ended_payload),
     });
@@ -15843,7 +16267,7 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
         \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,
         \\"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
     ;
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 10, .payload_len = sibling_payload.len },
         .payload = try allocator.dupe(u8, sibling_payload),
     });
@@ -15906,13 +16330,13 @@ test "CR3a-2c2b3b allocator drift tombstones then consumed proof finalizes termi
     client.lifecycle = try allocator.dupe(u8, "running");
 
     const ended_payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
         .payload = try allocator.dupe(u8, ended_payload),
     });
     const sibling_payload =
         "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{}}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 10, .payload_len = sibling_payload.len },
         .payload = try allocator.dupe(u8, sibling_payload),
     });
@@ -16283,7 +16707,7 @@ test "CR3a-2c2b3b prepare commit requires exclusive and preserves destinations" 
     var client = makeConnectedTestClient(allocator, fds[0]);
     defer client.deinit();
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -16327,7 +16751,7 @@ test "CR3a-2c2b3b prepare commit rejects a non-stream fd without publication" {
     var client = makeConnectedTestClient(allocator, fds[0]);
     defer client.deinit();
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -16364,7 +16788,7 @@ test "CR3a-2c2b3b complete owner extent accepts exact cap and rejects cap plus o
             var client = makeConnectedTestClient(allocator, fds[0]);
             defer client.deinit();
             const payload = "{\"event\":\"runtime.ended\"}";
-            try client.bufferEvent(.{
+            try client.bufferLegacyEventForTest(.{
                 .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
                 .payload = try allocator.dupe(u8, payload),
             });
@@ -16430,7 +16854,7 @@ test "CR3a-2c2b3b prepare commit rejects occupied forged and aliased evidence" {
     const outbound = try allocator.dupe(u8, "pending-frame");
     client.pending_outbound = .{ .frame = outbound, .stream_id = 9, .offset = 1 };
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -16496,7 +16920,7 @@ test "CR3a-2c2b3b allocator callback reentry rejects prepare before graph traver
     var client = makeConnectedTestClient(allocator, fds[0]);
     defer client.deinit();
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -16533,7 +16957,7 @@ test "CR3a-2c2b3b fence intrusion prevents prepare authority publication" {
     var client = makeConnectedTestClient(allocator, fds[0]);
     defer client.deinit();
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -16570,7 +16994,7 @@ test "CR3a-2c2b3b fork child rejects prepare commit before inherited state mutat
     var client = makeConnectedTestClient(allocator, fds[0]);
     defer client.deinit();
     const payload = "{\"event\":\"runtime.ended\"}";
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
         .payload = try allocator.dupe(u8, payload),
     });
@@ -16731,7 +17155,7 @@ test "client cli attach raw FIFO fails closed at exact count and byte caps" {
         count_client.pending_events.deinit(allocator);
     }
     for (0..max_pending_event_count) |index| {
-        try count_client.bufferEvent(.{
+        try count_client.bufferLegacyEventForTest(.{
             .header = .{
                 .major = protocol.version_major,
                 .kind = .event,
@@ -16742,7 +17166,7 @@ test "client cli attach raw FIFO fails closed at exact count and byte caps" {
         });
     }
     try std.testing.expectEqual(max_pending_event_count, count_client.pending_events.items.len);
-    try std.testing.expectError(error.EventQueueFull, count_client.bufferEvent(.{
+    try std.testing.expectError(error.EventQueueFull, count_client.bufferLegacyEventForTest(.{
         .header = .{
             .major = protocol.version_major,
             .kind = .event,
@@ -16771,7 +17195,7 @@ test "client cli attach raw FIFO fails closed at exact count and byte caps" {
     for (0..frame_count) |index| {
         const payload = try allocator.alloc(u8, protocol.max_control_json);
         @memset(payload, 'x');
-        try bytes_client.bufferEvent(.{
+        try bytes_client.bufferLegacyEventForTest(.{
             .header = .{
                 .major = protocol.version_major,
                 .kind = .event,
@@ -16782,7 +17206,7 @@ test "client cli attach raw FIFO fails closed at exact count and byte caps" {
         });
     }
     try std.testing.expectEqual(protocol.max_client_queue, bytes_client.pending_event_bytes);
-    try std.testing.expectError(error.EventQueueFull, bytes_client.bufferEvent(.{
+    try std.testing.expectError(error.EventQueueFull, bytes_client.bufferLegacyEventForTest(.{
         .header = .{
             .major = protocol.version_major,
             .kind = .event,
@@ -16810,7 +17234,7 @@ test "client gui rejects unnegotiated metadata without publishing or coalescing"
     const payload =
         \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/bad","window_title":"bad","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
     ;
-    try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+    try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
         .header = .{
             .major = protocol.version_major,
             .kind = .event,
@@ -16849,23 +17273,23 @@ test "client resize events coalesce by generation without replacing metadata" {
     const resized9 =
         \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":120,"rows":40,"resize_generation":9,"reason":"controller"}}
     ;
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, metadata),
     });
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, resized4),
     });
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, resized9),
     });
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, resized9),
     });
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, resized4),
     });
@@ -16889,11 +17313,11 @@ test "client same-generation resize equivocation preserves the admitted full sta
     const conflict =
         \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":121,"rows":40,"resize_generation":9,"reason":"controller"}}
     ;
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, admitted),
     });
-    try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+    try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 7 },
         .payload = try allocator.dupe(u8, conflict),
     }));
@@ -16925,11 +17349,11 @@ test "client fails closed when one stream receives resize events for different r
             for (client.pending_events.items) |frame| frame.deinit(allocator);
             client.pending_events.deinit(allocator);
         }
-        try client.bufferEvent(.{
+        try client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, order[0]),
         });
-        try std.testing.expectError(error.ProtocolError, client.bufferEvent(.{
+        try std.testing.expectError(error.ProtocolError, client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = 7 },
             .payload = try allocator.dupe(u8, order[1]),
         }));
@@ -16956,13 +17380,13 @@ test "client event queue overflow poisons every runtime sharing the connection" 
     defer client.pending_batches.deinit(allocator);
 
     for (0..max_pending_event_count) |i| {
-        try client.bufferEvent(.{
+        try client.bufferLegacyEventForTest(.{
             .header = .{ .kind = .event, .stream_id = @intCast(i + 1) },
             .payload = try allocator.dupe(u8, "{\"event\":\"other\"}"),
         });
     }
     const first_payload = client.pending_events.items[0].payload;
-    try std.testing.expectError(error.EventQueueFull, client.bufferEvent(.{
+    try std.testing.expectError(error.EventQueueFull, client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = max_pending_event_count + 1 },
         .payload = try allocator.dupe(u8, "{\"event\":\"overflow\"}"),
     }));
@@ -16999,12 +17423,12 @@ test "client ended event replaces same-stream metadata at exact event cap" {
     }
     defer client.pending_batches.deinit(allocator);
 
-    for (0..256) |i| try client.bufferEvent(.{
+    for (0..256) |i| try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = @intCast(i + 1) },
         .payload = try allocator.dupe(u8, metadata),
     });
     try std.testing.expectEqual(@as(usize, 256), client.pending_events.items.len);
-    try client.bufferEvent(.{
+    try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 1 },
         .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
     });
@@ -19865,7 +20289,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.pending_events.items[0].admission_seal = BufferedEvent.seal(
         client.pending_events.items[0].header,
         client.pending_events.items[0].payload,
-        accepted,
+        .{ .accepted = accepted },
+        client.allocator,
     );
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.pending_events.items[0].admission_seal = null;

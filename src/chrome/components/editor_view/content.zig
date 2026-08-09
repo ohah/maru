@@ -1,6 +1,6 @@
 //! 편집기 **본문 텍스트**를 draw op으로 낸다 — gutter 오른쪽에 파일 내용을 그리는 부분.
 //!
-//! 자리는 [geometry.zig](geometry.zig)의 `content` 영역이고(§4.1), 텍스트 경로는 **셀**이다
+//! 자리는 [geometry.zig](geometry.zig)의 `content` 영역이고(§4.1), 배치는 **셀 격자**다
 //! ([native-editor.md](../../../../docs/native-editor.md) §2.0) — 등폭 고정이 세로 정렬·블록 선택·
 //! goal column의 전제이므로 measured 경로를 쓰지 않는다.
 //!

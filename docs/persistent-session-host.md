@@ -1190,7 +1190,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `{self address,PID,owner thread incarnation,registered operation id/index,slot/node address+incarnation,binding reservation,
    event generation,owner address,quarantine slot identity,prepared pin-release identity}`이고 closed lifecycle은
    `pristine->prepared->callback_active->consumed|terminal`이다. callback 전 binding/quarantine tombstone은 receipt의 exact
-   address와 generation을 봉인한다. copied/moved/replayed/same-address old-generation receipt는 suffix를 시작하지 못하며 ordinary
+   address와 generation을 봉인한다. copied/moved/replayed/same-address old-generation **private prepared receipt**는 suffix를 시작하지 못하며 ordinary
    `beginRegisteredNodeOperation` fallback은 0이다. callback 후 mutex 재획득은 각 기존 row를 settle하기 위한 동일 lock-order의
    infallible wait뿐이고 allocation, 다른 callback, 새 authority 발급은 0이다. mismatch는 외부 typed failure가 아니라 process-fatal
    private invariant violation이다. registered operation은 pin release까지 유지하고 exact once 끝낸다. 그 뒤 transport가 수행하는
@@ -1198,9 +1198,19 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    아니라 이미 `releasing`으로 tombstone된 canonical binding/quarantine row의 exact-one continuation proof뿐이다.
    clean commit은 allocator callback보다 먼저 binding row의 exact completion address/operation id를 one-shot 소비하고,
    callback 뒤에는 그 소비 결과로만 settlement한다. corrupt commit도 pin 감소보다 먼저 terminal binding row의 exact recovery
-   permit을 one-shot 소비한다. 따라서 copied/moved/same-address replay는 free나 pin 변경을 시작하기 전에 private invariant로 중단된다.
+   permit을 one-shot 소비한다. 따라서 copied/moved/same-address **private prepared receipt replay**는 free나 pin 변경을 시작하기 전에
+   private invariant로 중단된다. 이 보장은 caller-writable public `EventOwner` bytes의 same-address restore에는 적용하지 않는다.
+   canonical live owner 주소에 이전 generation의 public bytes를 복원한 상태는 현재 generation field의 coherent corruption과 관측상
+   구분할 수 없다. 별도 public-outside epoch/token SSOT를 추가하지 않는 C2는 이를 현재 canonical event의 corruption으로 분류한다.
+   trusted binding/quarantine mirror의 현재 event를 `terminal`로 no-free handoff하고 그 event cleanup pin을 exact once 소비하며 connection을
+   poison한다. payload는 free하지 않는다. 반대로 다른 주소로 copy/move된 public owner는 canonical owner address 검증에서 `InvalidOwner`이고
+   현재 event/pin/quarantine을 변경하지 않는다.
+   이 두 scalar를 canonical row에 보관하므로 C2 `EventAuthority`의 fixed-table 예산은 entry당 최대 64 bytes,
+   4,096 entries 합계 최대 256 KiB다. 이는 별도 receipt registry를 만들지 않고 기존 binding SSOT 안에서 replay를 막기 위한
+   닫힌 증가분이다. 기존 pre-event entry 대비 response/event authority를 포함한 전체 row 증가분은 정렬을 포함해 최대
+   192 bytes, 4,096 entries 합계 최대 768 KiB이며 C2 focused/전체 session-host gate가 두 상한을 고정한다.
 
-   owner 안의 `ConnectionLease` bytes가 손상됐을 때 그 lease를 receiver로 삼거나 다시 읽어 pin을 소비하지 않는다. C2는
+   owner 안의 `ConnectionLease` bytes가 손상됐을 때 그 lease의 pointer graph를 따라가거나 cleanup authority로 사용해 pin을 소비하지 않는다. C2는
    두 권위를 분리한다. binding registry는 callback 전 corrupt로 판정한 active `live`
    `{node_incarnation,event_generation,owner_addr}`만 `terminal`로 one-shot 소비해 `EventPinRecoveryPermit`을 발급하고,
    `releasing` row에서는 permit을 발급하지 않는다. lease publication은 canonical `PinOwner` 주소와 slot/node incarnation,

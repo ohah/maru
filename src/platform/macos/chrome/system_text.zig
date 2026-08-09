@@ -109,11 +109,10 @@ pub const UnresolvedArtifact = struct {
     foregrounds: []u32,
     scroll_flags: []bool,
     above_clips: []?chrome.draw.Rect,
-    /// run별 폰트 크기(device px, §2.0).
-    font_pxs: []?u16,
-    /// run별 줄 높이(device px, §2.0).
-    line_heights: []?u16,
-    /// run별 셀 폭(device px, §2.0).
+    /// run별 셀 폭(device px, §2.0). 최종 x를 셀 인덱스로 놓을 때 쓴다.
+    ///
+    /// `font_px`·`line_height_px`는 여기 두지 않는다 — 둘은 `shapeUnresolvedRun`이 `Run`에서 직접
+    /// 읽어 shaping 시점에 소비하므로, 결과 구조에 다시 실으면 아무도 읽지 않는 필드가 된다.
     cell_widths: []?u16,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
@@ -122,8 +121,6 @@ pub const UnresolvedArtifact = struct {
         allocator.free(self.foregrounds);
         allocator.free(self.scroll_flags);
         allocator.free(self.above_clips);
-        allocator.free(self.font_pxs);
-        allocator.free(self.line_heights);
         allocator.free(self.cell_widths);
         self.* = undefined;
     }
@@ -738,10 +735,6 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(scroll_flags);
     const above_clips = try allocator.alloc(?chrome.draw.Rect, request.runs.len);
     errdefer allocator.free(above_clips);
-    const font_pxs = try allocator.alloc(?u16, request.runs.len);
-    errdefer allocator.free(font_pxs);
-    const line_heights = try allocator.alloc(?u16, request.runs.len);
-    errdefer allocator.free(line_heights);
     const cell_widths = try allocator.alloc(?u16, request.runs.len);
     errdefer allocator.free(cell_widths);
     for (request.runs, 0..) |run, index| {
@@ -750,8 +743,6 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
         foregrounds[index] = run.foreground;
         scroll_flags[index] = run.scroll_clipped;
         above_clips[index] = run.above_clip;
-        font_pxs[index] = run.font_px;
-        line_heights[index] = run.line_height_px;
         cell_widths[index] = run.cell_w_px;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, .{ .family = request.font_family, .fallback = request.font_fallback }, scale_milli) catch |err| switch (run.placement) {
@@ -771,7 +762,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .font_pxs = font_pxs, .line_heights = line_heights, .cell_widths = cell_widths };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .cell_widths = cell_widths };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -957,7 +948,7 @@ test "leading icon group resolves measured label and SVG to one final-pixel arti
         .gap_px = 10,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0xAABBCC});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();
@@ -981,7 +972,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
         .icon_extent_px = 18,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0x123456});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}), .cell_widths = try allocator.dupe(?u16, &.{null}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();

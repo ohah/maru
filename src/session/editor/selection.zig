@@ -58,6 +58,10 @@ pub const Goal = union(enum) {
 /// 드래그 방향이 바뀔 때 상태를 고쳐 쓸 필요가 없다.
 pub const Selection = struct {
     /// anchor 범위의 시작. 단순 클릭이면 `anchor_end`와 같다.
+    ///
+    /// **순서가 뒤집힌 값이 들어와도 조회는 안전하다** — `anchorLo`/`anchorHi`가 `@min`/`@max`로
+    /// 읽으므로, 잘못된 리터럴이 있어도 선택 범위가 사용자가 본 것과 달라지지 않는다. assert는
+    /// ReleaseFast에서 사라지므로 불변식을 그것에만 맡기지 않는다.
     anchor_start: usize,
     /// anchor 범위의 끝.
     anchor_end: usize,
@@ -94,6 +98,16 @@ pub const Selection = struct {
         return .{ .anchor_start = a_start, .anchor_end = a_end, .focus = focus, .kind = kind };
     }
 
+    /// anchor 범위의 작은 쪽. 필드 순서가 뒤집혀 있어도 옳게 답한다.
+    pub fn anchorLo(self: Selection) usize {
+        return @min(self.anchor_start, self.anchor_end);
+    }
+
+    /// anchor 범위의 큰 쪽.
+    pub fn anchorHi(self: Selection) usize {
+        return @max(self.anchor_start, self.anchor_end);
+    }
+
     /// anchor 범위가 비었는가(점 anchor).
     pub fn anchorIsPoint(self: Selection) bool {
         return self.anchor_start == self.anchor_end;
@@ -104,8 +118,9 @@ pub const Selection = struct {
     /// 드래그 방향이 정한다: 오른쪽으로 끌면 anchor 범위의 **시작**이, 왼쪽으로 끌면 **끝**이 고정된다.
     /// 그래야 잡은 단어가 어느 방향으로 끌어도 통째로 남는다. VSCode `_computeSelection`과 같은 규칙이다.
     pub fn fixedEnd(self: Selection) usize {
-        if (self.anchorIsPoint() or self.focus > self.anchor_start) return self.anchor_start;
-        return self.anchor_end;
+        const lo = self.anchorLo();
+        if (self.anchorIsPoint() or self.focus > lo) return lo;
+        return self.anchorHi();
     }
 
     pub fn start(self: Selection) usize {

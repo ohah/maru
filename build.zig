@@ -2035,6 +2035,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3a1 dormant revoke authority Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3a1_step.dependOn(session_host_2c3d_c3_3_step);
+    const session_host_2c3d_c3_3a2_step = b.step(
+        "test-session-host-2c3d-c3-3a2",
+        "2c3d C3-3a2 dormant final admission Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3a2_step.dependOn(session_host_2c3d_c3_3a1_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2337,6 +2342,75 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3a1_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3a1_step.dependOn(&run_event_c3_3a1_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3a1_boundary_tests.step);
+
+        const event_c3_3a2_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_slot.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3a2"},
+        });
+        const run_event_c3_3a2_runtime_tests = b.addRunArtifact(event_c3_3a2_runtime_tests);
+        run_event_c3_3a2_runtime_tests.addArg("--maru-expect-tests=7");
+        run_event_c3_3a2_runtime_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a2_step.dependOn(&run_event_c3_3a2_runtime_tests.step);
+
+        const event_c3_3a2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3a2_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3d C3-3a2 dormant final admission boundary"},
+        });
+        const run_event_c3_3a2_boundary_tests = b.addRunArtifact(event_c3_3a2_boundary_tests);
+        run_event_c3_3a2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3a2_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a2_step.dependOn(&run_event_c3_3a2_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3a2_boundary_tests.step);
+
+        inline for (.{
+            "own buffered revoke suppresses newly arriving input before role cache catches up",
+            "sibling runtime cannot flush a stream whose buffered revoke is not consumed yet",
+            "remote runtime observer locally consumes input and sends no resize mutation",
+            "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막는다",
+        }) |filter| {
+            const family_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(
+                        "src/platform/macos/session_host/remote_runtime.zig",
+                    ),
+                    .target = target,
+                    .optimize = b3_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{filter},
+            });
+            const run_family_tests = b.addRunArtifact(family_tests);
+            run_family_tests.addArg("--maru-expect-tests=1");
+            run_family_tests.setCwd(b.path("."));
+            session_host_2c3d_c3_3a2_step.dependOn(&run_family_tests.step);
+        }
+        const rpc_family_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3a-2c3a buffered revoke blocks blocking and deadline RPC before pending wire flush"},
+        });
+        const run_rpc_family_tests = b.addRunArtifact(rpc_family_tests);
+        run_rpc_family_tests.addArg("--maru-expect-tests=1");
+        run_rpc_family_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a2_step.dependOn(&run_rpc_family_tests.step);
 
         const control_c2_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

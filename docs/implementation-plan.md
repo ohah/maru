@@ -1446,7 +1446,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `test-session-host-2c3d-c3-3a1`의 Debug·ReleaseFast registry runtime 7+boundary 1을 통과한다. copied registry, same-address
       generation ABA, typed stale/double settlement까지 a1이 소유하고 no-fail continuation/recovery replay와 unauthorized underflow의
       격리 subprocess는 실제 활성화와 함께 a3가 소유한다. 따라서 이 시점의 제품 동작은 C3-3과 동일하며 revoke ordering 활성화는 주장하지 않는다.
-      **C3-3a2 dormant final-admission substrate**는 `client_slot.zig`의 기존 `RegisteredNodeOperation`/`ClientOperationFence` 아래 사용할
+      **C3-3a2 dormant final-admission substrate(구현 완료)**는 `client_slot.zig`의 기존 `RegisteredNodeOperation`/`ClientOperationFence` 아래 사용할
       단일 internal transaction/core predicate를 만들되 product caller를 exact 0으로 유지한다. 새 mutex·fence·aggregate generation은
       만들지 않는다. owner query에서 operation을 여는 wrapper와 이미 operation을 보유한 control/test-harness 경로용 wrapper는
       ownership만 다르고 predicate는 하나다. 후자는 registered operation을 중첩하지 않는다. attach prepared product caller는 a2에서
@@ -1454,14 +1454,17 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       upgrade하고, held-path는 public Client API의 shared pin을 다시 중첩하지 않는 internal leaf를 사용한다. lease는 final 검사부터
       allocation·queue offset·syscall commit까지 유지한다. 정산 순서는 held leaf 완료 또는 blocked 판정 -> single shared로 downgrade ->
       transaction lifecycle consume -> registered operation의 마지막 shared pin release다. canonical owner는 lease-held 상태에서
-      lifecycle/receipt 검증과 no-fail settlement plan을 끝낸다. pre-acquire invalid/copy/stale/already-consumed replay는 canonical
-      lease·transaction·pin mutation 0으로 typed reject하고 canonical active owner만 위 순서를 수행한다. transaction은
+      lifecycle/receipt 검증과 no-fail settlement plan을 끝낸다. pre-acquire invalid/copy/stale/already-consumed replay와 foreign
+      settlement는 canonical lease·transaction·pin mutation 0으로 typed reject하고 canonical active owner만 위 순서를 수행한다.
+      active self/ownership/content drift는 raw `u8` tag 선검증, registry-bound ownership mode와 scalar seal로 fail-stop한다.
+      held-operation wrapper는 operation exact extent를 pointer로 직접 선검증하고 caller의 추가 control/prepared authority는 최대 4개
+      protected range로 받아 output alias·overflow·cap 초과를 pre-acquire 거부한다. transaction은
       `error{InvalidOwner, Busy}!Decision`을 반환하고 `Decision`만 `blocked|admitted`다. invalid/copy/stale/replay는 `InvalidOwner`,
       operation/lease contention은 `Busy`를 재사용한다. a2는 injected closed decision으로 transaction을 검증한다.
       a1 query는 declaration exact 1·production caller exact 0, a2 transaction도 declaration exact 1·production caller exact 0을
       유지하며 실제 queued+a1 query 연결은 a3가 모든 family와 동시에 소유한다.
       현재 존재하는 blocking/nonblocking input, generation control, pending output, 모든 raw `callOrdered` RPC와 두 resync 경로의
-      error/progress·owner-retention 표를 Debug·ReleaseFast runtime 7+boundary 1로 고정한다. attach prepared request/execute는 기존
+      error/progress·owner-retention 표를 Debug·ReleaseFast transaction runtime 7+current-family regression 5+boundary 1로 고정한다. attach prepared request/execute는 기존
       owner/fence 회귀만 상속하며 일반 runtime typed execute가 아니다. `callOrdered`는 read-only처럼 보이는 method도 pending mutation을
       flush할 수 있으므로 현행 queued-revoke 정책처럼 전부 막고, method별 세분화는 2c3e가 소유한다. raw identity/role/corruption,
       capability `Unsupported`, revoke 결과 순서로 현행 결과를 보존한다. generation transport는 typed `Busy`, RemoteRuntime

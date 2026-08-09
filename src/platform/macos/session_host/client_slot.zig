@@ -1643,6 +1643,8 @@ const RegisteredNodeOperationEntry = struct {
     node_incarnation: u64 = 0,
     pid: u32 = 0,
     owner_thread_incarnation: u64 = 0,
+    final_admission_txn_addr: usize = 0,
+    final_admission_owns_registered_operation_raw: u8 = 0,
 };
 var registered_node_operation_mutex: std.atomic.Mutex = .unlocked;
 var registered_node_operations: [max_registered_node_operations]RegisteredNodeOperationEntry =
@@ -1821,7 +1823,9 @@ fn endRegisteredNodeOperation(operation: RegisteredNodeOperation) void {
     const candidate = &registered_node_operations[index];
     if (candidate.state == .live and candidate.operation_id == operation.operation_id and
         candidate.node_addr == @intFromPtr(operation.node) and candidate.pid == pid and
-        operationThreadMatches(candidate.owner_thread_incarnation))
+        operationThreadMatches(candidate.owner_thread_incarnation) and
+        candidate.final_admission_txn_addr == 0 and
+        candidate.final_admission_owns_registered_operation_raw == 0)
     {
         candidate.state = .releasing;
         node_addr = candidate.node_addr;
@@ -1859,6 +1863,292 @@ fn endRegisteredNodeOperation(operation: RegisteredNodeOperation) void {
     registered_node_operation_free_stack[registered_node_operation_free_count] =
         operation.registry_index;
     registered_node_operation_free_count += 1;
+}
+
+fn bindFinalAdmissionTransactionNoFail(
+    operation: RegisteredNodeOperation,
+    transaction_addr: usize,
+    owns_registered_operation: bool,
+) void {
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = &registered_node_operations[operation.registry_index];
+    if (transaction_addr == 0 or entry.state != .live or
+        entry.operation_id != operation.operation_id or
+        entry.node_addr != @intFromPtr(operation.node) or entry.pid != operation.pid or
+        entry.final_admission_txn_addr != 0 or
+        entry.final_admission_owns_registered_operation_raw != 0)
+        @panic("final admission transaction bind drifted");
+    entry.final_admission_txn_addr = transaction_addr;
+    entry.final_admission_owns_registered_operation_raw = @intFromBool(owns_registered_operation);
+}
+
+const FinalAdmissionBindingStatus = enum { missing, foreign, drift, exact };
+
+fn finalAdmissionOwnershipRawValid(raw: u8) bool {
+    return raw <= 1;
+}
+
+fn finalAdmissionLifecycleRawValid(raw: u8) bool {
+    return raw <= @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed);
+}
+
+fn finalAdmissionTransactionBindingStatus(
+    operation: RegisteredNodeOperation,
+    transaction_addr: usize,
+    owns_registered_operation_raw: u8,
+) FinalAdmissionBindingStatus {
+    if (operation.registry_index >= registered_node_operations.len) return .missing;
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = registered_node_operations[operation.registry_index];
+    if (entry.state != .live or entry.operation_id != operation.operation_id or
+        entry.node_addr != @intFromPtr(operation.node) or entry.pid != operation.pid or
+        entry.final_admission_txn_addr != transaction_addr)
+        return .missing;
+    if (operation.pid != currentPid() or
+        !operationThreadMatches(entry.owner_thread_incarnation))
+        return .foreign;
+    if (!finalAdmissionOwnershipRawValid(entry.final_admission_owns_registered_operation_raw) or
+        !finalAdmissionOwnershipRawValid(owns_registered_operation_raw) or
+        entry.final_admission_owns_registered_operation_raw != owns_registered_operation_raw)
+        return .drift;
+    return .exact;
+}
+
+fn finalAdmissionTransactionAddressActive(transaction_addr: usize) bool {
+    if (transaction_addr == 0) return false;
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    for (registered_node_operations) |entry| {
+        if (entry.state == .live and entry.final_admission_txn_addr == transaction_addr)
+            return true;
+    }
+    return false;
+}
+
+fn consumeFinalAdmissionTransactionNoFail(
+    operation: RegisteredNodeOperation,
+    transaction_addr: usize,
+    owns_registered_operation_raw: u8,
+) void {
+    while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer registered_node_operation_mutex.unlock();
+    const entry = &registered_node_operations[operation.registry_index];
+    if (entry.state != .live or entry.operation_id != operation.operation_id or
+        entry.node_addr != @intFromPtr(operation.node) or entry.pid != operation.pid or
+        entry.final_admission_txn_addr != transaction_addr or
+        !finalAdmissionOwnershipRawValid(entry.final_admission_owns_registered_operation_raw) or
+        !finalAdmissionOwnershipRawValid(owns_registered_operation_raw) or
+        entry.final_admission_owns_registered_operation_raw != owns_registered_operation_raw)
+        @panic("final admission transaction consume drifted");
+    entry.final_admission_txn_addr = 0;
+    entry.final_admission_owns_registered_operation_raw = 0;
+}
+
+const FinalAdmissionDecision = enum { blocked, admitted };
+const FinalAdmissionBlockers = struct {
+    queued: bool = false,
+    aggregate_count: usize = 0,
+};
+const FinalAdmissionProtectedRange = struct { start: usize, len: usize };
+const max_final_admission_protected_ranges = 4;
+const FinalAdmissionTransaction = struct {
+    const Lifecycle = enum(u8) { pristine, active, consumed };
+
+    self_addr: usize = 0,
+    operation: RegisteredNodeOperation = undefined,
+    owns_registered_operation_raw: u8 = 0,
+    lifecycle_raw: u8 = @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine),
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    fn pristineExact(self: *const @This()) bool {
+        return self.self_addr == 0 and self.owns_registered_operation_raw == 0 and
+            self.lifecycle_raw == @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine);
+    }
+
+    fn finish(self: *@This()) error{InvalidOwner}!void {
+        if (self.self_addr != @intFromPtr(self)) {
+            if (finalAdmissionTransactionAddressActive(@intFromPtr(self)))
+                @panic("active final admission transaction authority drifted");
+            return error.InvalidOwner;
+        }
+        switch (finalAdmissionTransactionBindingStatus(
+            self.operation,
+            @intFromPtr(self),
+            self.owns_registered_operation_raw,
+        )) {
+            .foreign => return error.InvalidOwner,
+            .drift => @panic("active final admission transaction ownership drifted"),
+            .missing => {
+                if (finalAdmissionTransactionAddressActive(@intFromPtr(self)))
+                    @panic("active final admission transaction authority drifted");
+                return error.InvalidOwner;
+            },
+            .exact => {},
+        }
+        if (!finalAdmissionOwnershipRawValid(self.owns_registered_operation_raw) or
+            !finalAdmissionLifecycleRawValid(self.lifecycle_raw) or
+            self.lifecycle_raw != @intFromEnum(FinalAdmissionTransaction.Lifecycle.active) or
+            !std.mem.eql(u8, &self.seal, &finalAdmissionTransactionSeal(self)))
+            @panic("active final admission transaction content drifted");
+        const operation = self.operation;
+        const owns_registered_operation = self.owns_registered_operation_raw == 1;
+        operation.node.client.endRegisteredOperationExecutionLease();
+        consumeFinalAdmissionTransactionNoFail(
+            operation,
+            @intFromPtr(self),
+            self.owns_registered_operation_raw,
+        );
+        self.lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed);
+        if (owns_registered_operation) endRegisteredNodeOperation(operation);
+    }
+};
+
+fn finalAdmissionTransactionSeal(transaction: *const FinalAdmissionTransaction) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.final-admission.transaction.v1");
+    writer.writeUsize(transaction.self_addr);
+    writer.writeUsize(@intFromPtr(transaction.operation.node));
+    writer.writeU16(transaction.operation.registry_index);
+    writer.writeU64(transaction.operation.operation_id);
+    writer.writeU64(transaction.operation.pid);
+    writer.writeU8(transaction.owns_registered_operation_raw);
+    writer.writeU8(transaction.lifecycle_raw);
+    return writer.finish();
+}
+
+fn finalAdmissionDestinationValid(
+    out: *const FinalAdmissionTransaction,
+    operation: RegisteredNodeOperation,
+    protected_ranges: []const FinalAdmissionProtectedRange,
+) bool {
+    const owner = registeredNodeOperationOwnerEntry(operation) orelse return false;
+    if (protected_ranges.len > max_final_admission_protected_ranges) return false;
+    const out_addr = @intFromPtr(out);
+    const out_len = @sizeOf(FinalAdmissionTransaction);
+    if (byteRangesOverlap(out_addr, out_len, owner.slot_addr, @sizeOf(ClientSlot)) or
+        byteRangesOverlap(out_addr, out_len, owner.node_addr, @sizeOf(ClientNode)) or
+        byteRangesOverlap(
+            out_addr,
+            out_len,
+            @intFromPtr(&registered_node_operations),
+            @sizeOf(@TypeOf(registered_node_operations)),
+        ))
+        return false;
+    for (protected_ranges) |range|
+        if (byteRangesOverlap(out_addr, out_len, range.start, range.len)) return false;
+    return true;
+}
+
+fn beginFinalAdmissionTransactionCore(
+    out: *FinalAdmissionTransaction,
+    operation: RegisteredNodeOperation,
+    owns_registered_operation: bool,
+    blockers: FinalAdmissionBlockers,
+    protected_ranges: []const FinalAdmissionProtectedRange,
+) error{ InvalidOwner, Busy }!FinalAdmissionDecision {
+    const node = resolveRegisteredNodeOperation(operation) orelse return error.InvalidOwner;
+    if (!finalAdmissionDestinationValid(out, operation, protected_ranges) or !out.pristineExact())
+        return error.InvalidOwner;
+    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
+        generation_event_release_callback_active_addr != 0 or !streamOperationNodeIdle(node))
+        return error.Busy;
+    node.client.beginRegisteredOperationExecutionLease() catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    errdefer node.client.endRegisteredOperationExecutionLease();
+    const queued = node.client.bufferedControllerRevokeUnderRegisteredOperationExecutionLease() catch
+        return error.InvalidOwner;
+    bindFinalAdmissionTransactionNoFail(
+        operation,
+        @intFromPtr(out),
+        owns_registered_operation,
+    );
+    out.* = .{
+        .self_addr = @intFromPtr(out),
+        .operation = operation,
+        .owns_registered_operation_raw = @intFromBool(owns_registered_operation),
+        .lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.active),
+    };
+    out.seal = finalAdmissionTransactionSeal(out);
+    if (queued or blockers.queued or blockers.aggregate_count != 0) {
+        out.finish() catch @panic("validated blocked final admission settlement failed");
+        return .blocked;
+    }
+    return .admitted;
+}
+
+fn finalAdmissionTransaction(
+    request: GenerationTransportOwnerQuery,
+    out: *FinalAdmissionTransaction,
+    blockers: FinalAdmissionBlockers,
+) error{ InvalidOwner, Busy }!FinalAdmissionDecision {
+    if (request.slot_addr == 0 or request.slot_incarnation == 0 or
+        request.node_incarnation == 0 or request.host_id == 0 or request.pid != currentPid() or
+        request.process_nonce == 0 or request.owner_seal_addr == 0)
+        return error.InvalidOwner;
+    const operation = beginRegisteredNodeOperation(.{
+        .slot_addr = request.slot_addr,
+        .slot_incarnation = request.slot_incarnation,
+        .node = .{ .incarnation = request.node_incarnation },
+    }) catch |err| return err;
+    errdefer endRegisteredNodeOperation(operation);
+    const identity = request.reservation.identity;
+    if (!identity.valid() or identity.slot_incarnation != request.slot_incarnation or
+        identity.node_incarnation != request.node_incarnation or identity.host_id != request.host_id or
+        identity.pid != request.pid or identity.process_nonce != request.process_nonce or
+        operation.node.client.host_id != request.host_id)
+        return error.InvalidOwner;
+    const owner = operation.node.cleanup_registry.transportOwnerSeal(
+        request.reservation.cleanup,
+        identity,
+    ) catch return error.InvalidOwner;
+    if (@intFromPtr(owner) != request.owner_seal_addr or
+        !owner.valid(request.transport_incarnation) or
+        owner.owner_addr != request.owner_addr or owner.owner_size != request.owner_size or
+        owner.transport_addr != request.transport_addr or
+        owner.prepared_storage_addr != request.prepared_storage_addr)
+        return error.InvalidOwner;
+    const out_addr = @intFromPtr(out);
+    const out_len = @sizeOf(FinalAdmissionTransaction);
+    if (byteRangesOverlap(out_addr, out_len, request.owner_addr, request.owner_size) or
+        byteRangesOverlap(
+            out_addr,
+            out_len,
+            identity.binding_storage_addr,
+            @sizeOf(contract.PreparedAttachmentBinding),
+        ))
+        return error.InvalidOwner;
+    const protected_ranges = [_]FinalAdmissionProtectedRange{
+        .{ .start = request.owner_addr, .len = request.owner_size },
+        .{
+            .start = identity.binding_storage_addr,
+            .len = @sizeOf(contract.PreparedAttachmentBinding),
+        },
+    };
+    return beginFinalAdmissionTransactionCore(out, operation, true, blockers, &protected_ranges);
+}
+
+fn finalAdmissionTransactionWithOperation(
+    operation: *const RegisteredNodeOperation,
+    out: *FinalAdmissionTransaction,
+    blockers: FinalAdmissionBlockers,
+    protected_ranges: []const FinalAdmissionProtectedRange,
+) error{ InvalidOwner, Busy }!FinalAdmissionDecision {
+    if (byteRangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(FinalAdmissionTransaction),
+        @intFromPtr(operation),
+        @sizeOf(RegisteredNodeOperation),
+    )) return error.InvalidOwner;
+    return beginFinalAdmissionTransactionCore(
+        out,
+        operation.*,
+        false,
+        blockers,
+        protected_ranges,
+    );
 }
 
 const GenerationRequestOwner = struct {
@@ -9468,6 +9758,373 @@ fn fixtureClient(allocator: std.mem.Allocator, host_id: u128) client_mod.Client 
         .host_id = host_id,
         .parser = @import("framing.zig").FrameParser.init(allocator),
     };
+}
+
+test "C3-3a2 final-address transaction rejects copy and replay without canonical mutation" {
+    try ClientSlot.initializeProcessRuntime();
+    for (0..256) |raw_value| {
+        const raw: u8 = @intCast(raw_value);
+        try std.testing.expectEqual(raw <= 1, finalAdmissionOwnershipRawValid(raw));
+        try std.testing.expectEqual(
+            raw <= @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed),
+            finalAdmissionLifecycleRawValid(raw),
+        );
+    }
+    var source = fixtureClient(std.testing.allocator, 0xA201);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA201);
+    defer slot.deinit();
+    var operation = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    var transaction: FinalAdmissionTransaction = .{};
+    defer {
+        if (transaction.lifecycle_raw == @intFromEnum(FinalAdmissionTransaction.Lifecycle.active)) transaction.finish() catch
+            @panic("C3-3a2 transaction cleanup failed");
+        endRegisteredNodeOperation(operation);
+    }
+    const operation_aliased: *FinalAdmissionTransaction = @ptrCast(@alignCast(&operation));
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransactionWithOperation(&operation, operation_aliased, .{}, &.{}),
+    );
+    const max_ranges = [_]FinalAdmissionProtectedRange{
+        .{ .start = 0x1000, .len = 1 },
+        .{ .start = 0x2000, .len = 1 },
+        .{ .start = 0x3000, .len = 1 },
+        .{ .start = 0x4000, .len = 1 },
+    };
+    var max_transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.admitted,
+        try finalAdmissionTransactionWithOperation(
+            &operation,
+            &max_transaction,
+            .{},
+            &max_ranges,
+        ),
+    );
+    try max_transaction.finish();
+    const too_many_ranges = max_ranges ++ [_]FinalAdmissionProtectedRange{.{
+        .start = 0x5000,
+        .len = 1,
+    }};
+    var too_many_transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransactionWithOperation(
+            &operation,
+            &too_many_transaction,
+            .{},
+            &too_many_ranges,
+        ),
+    );
+    const overflow_ranges = [_]FinalAdmissionProtectedRange{.{
+        .start = std.math.maxInt(usize),
+        .len = 1,
+    }};
+    var overflow_transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransactionWithOperation(
+            &operation,
+            &overflow_transaction,
+            .{},
+            &overflow_ranges,
+        ),
+    );
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.admitted,
+        try finalAdmissionTransactionWithOperation(&operation, &transaction, .{}, &.{}),
+    );
+    var copied = transaction;
+    try std.testing.expectError(error.InvalidOwner, copied.finish());
+    if (builtin.os.tag == .macos) {
+        inline for (0..4) |drift_case| {
+            const child = std.c.fork();
+            if (child < 0) return error.TestUnexpectedResult;
+            if (child == 0) {
+                _ = std.c.close(2);
+                switch (drift_case) {
+                    0 => transaction.self_addr +%= 1,
+                    1 => transaction.owns_registered_operation_raw = 2,
+                    2 => transaction.lifecycle_raw = 0xff,
+                    3 => registered_node_operations[operation.registry_index].final_admission_owns_registered_operation_raw = 0xff,
+                    else => unreachable,
+                }
+                _ = transaction.finish() catch {};
+                std.c._exit(3);
+            }
+            var status: c_int = 0;
+            try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+            const wait_status: u32 = @bitCast(status);
+            try std.testing.expect(
+                std.c.W.IFSIGNALED(wait_status) or
+                    (std.c.W.IFEXITED(wait_status) and std.c.W.EXITSTATUS(wait_status) != 0),
+            );
+        }
+    }
+    const ForeignFinish = struct {
+        fn run(active: *FinalAdmissionTransaction, rejected: *std.atomic.Value(bool)) void {
+            active.finish() catch |err| {
+                rejected.store(err == error.InvalidOwner, .release);
+                return;
+            };
+            rejected.store(false, .release);
+        }
+    };
+    var foreign_finish_rejected: std.atomic.Value(bool) = .init(false);
+    const foreign_finish = try std.Thread.spawn(.{}, ForeignFinish.run, .{ &transaction, &foreign_finish_rejected });
+    foreign_finish.join();
+    try std.testing.expect(foreign_finish_rejected.load(.acquire));
+    try transaction.finish();
+    try std.testing.expectError(error.InvalidOwner, transaction.finish());
+}
+
+test "C3-3a2 clear admission holds execution lease through canonical settlement" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA202);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA202);
+    defer slot.deinit();
+    const operation = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    var operation_live = true;
+    defer if (operation_live) endRegisteredNodeOperation(operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.admitted,
+        try finalAdmissionTransactionWithOperation(&operation, &transaction, .{}, &.{}),
+    );
+    const ForeignCall = struct {
+        fn run(client: *client_mod.Client, rejected: *std.atomic.Value(bool)) void {
+            const result = client.call("host.info", null);
+            rejected.store(if (result) |_| false else |err| err == error.AdminBusy, .release);
+        }
+    };
+    var foreign_call_rejected: std.atomic.Value(bool) = .init(false);
+    const foreign_call = try std.Thread.spawn(.{}, ForeignCall.run, .{ &slot.current.client, &foreign_call_rejected });
+    foreign_call.join();
+    try std.testing.expect(foreign_call_rejected.load(.acquire));
+    try std.testing.expectError(error.AdminBusy, slot.current.client.tryAcquireClientSlotTeardownExclusive());
+    try transaction.finish();
+    try std.testing.expectError(error.AdminBusy, slot.current.client.tryAcquireClientSlotTeardownExclusive());
+    endRegisteredNodeOperation(operation);
+    operation_live = false;
+    try slot.current.client.tryAcquireClientSlotTeardownExclusive();
+    try std.testing.expect(slot.current.client.abortClientSlotTeardownExclusive());
+}
+
+test "C3-3a2 queued blocker settles without retaining execution authority" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA203);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA203);
+    defer slot.deinit();
+    const operation = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    defer endRegisteredNodeOperation(operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.blocked,
+        try finalAdmissionTransactionWithOperation(&operation, &transaction, .{ .queued = true }, &.{}),
+    );
+    try std.testing.expectEqual(
+        @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed),
+        transaction.lifecycle_raw,
+    );
+    var next: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.admitted,
+        try finalAdmissionTransactionWithOperation(&operation, &next, .{}, &.{}),
+    );
+    try next.finish();
+    try slot.current.client.bufferGenerationEventForTest(
+        7,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
+    var actual: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.blocked,
+        try finalAdmissionTransactionWithOperation(&operation, &actual, .{}, &.{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), slot.current.client.pending_events.items.len);
+}
+
+test "C3-3a2 injected aggregate projects every sibling count without consuming registry state" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA204);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA204);
+    defer slot.deinit();
+    const operation = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    defer endRegisteredNodeOperation(operation);
+    const before = try slot.current.cleanup_registry.count();
+    inline for (.{ @as(usize, 1), @as(usize, 2) }) |count| {
+        var transaction: FinalAdmissionTransaction = .{};
+        try std.testing.expectEqual(
+            FinalAdmissionDecision.blocked,
+            try finalAdmissionTransactionWithOperation(
+                &operation,
+                &transaction,
+                .{ .aggregate_count = count },
+                &.{},
+            ),
+        );
+        try std.testing.expectEqual(before, try slot.current.cleanup_registry.count());
+    }
+}
+
+test "C3-3a2 callback and foreign operation reject before transaction mutation" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA205);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA205);
+    defer slot.deinit();
+    const operation = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    defer endRegisteredNodeOperation(operation);
+    batch_release_callback_active = true;
+    defer batch_release_callback_active = false;
+    var callback_transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectError(
+        error.Busy,
+        finalAdmissionTransactionWithOperation(&operation, &callback_transaction, .{}, &.{}),
+    );
+    batch_release_callback_active = false;
+    const Foreign = struct {
+        fn run(inherited: RegisteredNodeOperation, rejected: *std.atomic.Value(bool)) void {
+            var transaction: FinalAdmissionTransaction = .{};
+            const result = finalAdmissionTransactionWithOperation(&inherited, &transaction, .{}, &.{});
+            rejected.store(if (result) |_| false else |err| err == error.InvalidOwner, .release);
+        }
+    };
+    var rejected: std.atomic.Value(bool) = .init(false);
+    const thread = try std.Thread.spawn(.{}, Foreign.run, .{ operation, &rejected });
+    thread.join();
+    try std.testing.expect(rejected.load(.acquire));
+}
+
+test "C3-3a2 active stream permit and sibling shared pin block execution lease upgrade" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA206);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA206);
+    defer slot.deinit();
+    const first = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    defer endRegisteredNodeOperation(first);
+    slot.current.active_operation_generation = 1;
+    slot.current.active_operation_kind = .event;
+    var active: FinalAdmissionTransaction = .{};
+    try std.testing.expectError(
+        error.Busy,
+        finalAdmissionTransactionWithOperation(&first, &active, .{}, &.{}),
+    );
+    slot.current.active_operation_generation = 0;
+    slot.current.active_operation_kind = .none;
+    const sibling = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
+    defer endRegisteredNodeOperation(sibling);
+    var contended: FinalAdmissionTransaction = .{};
+    try std.testing.expectError(
+        error.Busy,
+        finalAdmissionTransactionWithOperation(&first, &contended, .{}, &.{}),
+    );
+}
+
+test "C3-3a2 owner-query wrapper owns exact operation and validates the canonical transport seal" {
+    comptime {
+        const future_2c3e_signature: *const fn (
+            GenerationTransportOwnerQuery,
+            *FinalAdmissionTransaction,
+            FinalAdmissionBlockers,
+        ) error{ InvalidOwner, Busy }!FinalAdmissionDecision = finalAdmissionTransaction;
+        _ = future_2c3e_signature;
+    }
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA207);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA207);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    var owner_storage: [64]u8 = undefined;
+    var transport_storage: u8 = 0;
+    var prepared_storage: u8 = 0;
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&owner_storage),
+    );
+    const seal = try slot.transportOwnerSeal(reservation);
+    const transport_incarnation: u64 = 77;
+    try contract.TransportOwnerSeal.initInPlace(
+        seal,
+        transport_incarnation,
+        @intFromPtr(&owner_storage),
+        owner_storage.len,
+        @intFromPtr(&transport_storage),
+        @intFromPtr(&prepared_storage),
+    );
+    defer {
+        seal.terminalize(transport_incarnation) catch @panic("C3-3a2 owner seal cleanup failed");
+        slot.abortAttachmentBinding(&binding, reservation) catch
+            @panic("C3-3a2 binding cleanup failed");
+    }
+    const query: GenerationTransportOwnerQuery = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = slot.incarnation.tagged,
+        .node_incarnation = slot.current.incarnation.tagged,
+        .host_id = slot.current.client.host_id,
+        .pid = slot.pid,
+        .process_nonce = slot.process_nonce,
+        .transport_addr = @intFromPtr(&transport_storage),
+        .transport_incarnation = transport_incarnation,
+        .owner_addr = @intFromPtr(&owner_storage),
+        .owner_size = owner_storage.len,
+        .owner_seal_addr = @intFromPtr(seal),
+        .prepared_storage_addr = @intFromPtr(&prepared_storage),
+        .reservation = reservation,
+    };
+    var transaction: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.admitted,
+        try finalAdmissionTransaction(query, &transaction, .{}),
+    );
+    const ForeignFinish = struct {
+        fn run(active: *FinalAdmissionTransaction, rejected: *std.atomic.Value(bool)) void {
+            active.finish() catch |err| {
+                rejected.store(err == error.InvalidOwner, .release);
+                return;
+            };
+            rejected.store(false, .release);
+        }
+    };
+    var foreign_finish_rejected: std.atomic.Value(bool) = .init(false);
+    const foreign_finish = try std.Thread.spawn(.{}, ForeignFinish.run, .{ &transaction, &foreign_finish_rejected });
+    foreign_finish.join();
+    try std.testing.expect(foreign_finish_rejected.load(.acquire));
+    try transaction.finish();
+    const count_before_alias = try slot.current.cleanup_registry.count();
+    const aliased: *FinalAdmissionTransaction = @ptrCast(@alignCast(&slot.current.cleanup_registry));
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransaction(query, aliased, .{}),
+    );
+    try std.testing.expectEqual(count_before_alias, try slot.current.cleanup_registry.count());
+    const owner_aliased: *FinalAdmissionTransaction = @ptrCast(@alignCast(&owner_storage));
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransaction(query, owner_aliased, .{}),
+    );
+    try std.testing.expectEqual(count_before_alias, try slot.current.cleanup_registry.count());
+    const binding_aliased: *FinalAdmissionTransaction = @ptrCast(@alignCast(&binding));
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransaction(query, binding_aliased, .{}),
+    );
+    try std.testing.expectEqual(count_before_alias, try slot.current.cleanup_registry.count());
+    var forged = query;
+    forged.transport_incarnation += 1;
+    var rejected: FinalAdmissionTransaction = .{};
+    try std.testing.expectError(
+        error.InvalidOwner,
+        finalAdmissionTransaction(forged, &rejected, .{}),
+    );
 }
 
 const B33DestinationOccupyingAllocator = struct {

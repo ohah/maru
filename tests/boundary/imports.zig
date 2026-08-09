@@ -429,6 +429,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "tryDeinitClientSlotExclusiveHeld", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "beginClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "endClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "beginRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "endRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "beginConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "endConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "releaseEndedPurgeExclusiveClean", .receiver_type = mutable, .class = .unchecked },
@@ -450,6 +452,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "poisonDuringClientSlotOperationNoFail", .receiver_type = mutable, .class = .unchecked },
 
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
+        .{ .name = "bufferedControllerRevokeUnderRegisteredOperationExecutionLease", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionLeaseMatches", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionPoisonReason", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedExecutionRecoveryPoisonedForTest", .receiver_type = immutable, .class = .observation },
@@ -1334,6 +1337,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "releaseExecutionLease" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "upgradeSingleSharedToExecutionLease" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "downgradeExecutionLeaseToSingleShared" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "executionLeaseHeld" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "endRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bufferedControllerRevokeUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_lease_addr" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_addr" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_incarnation" },
@@ -1476,6 +1483,23 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationNodeIdle" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredNodeOperation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "endRegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinalAdmissionDecision" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinalAdmissionBlockers" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinalAdmissionProtectedRange" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "max_final_admission_protected_ranges" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinalAdmissionTransaction" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinalAdmissionBindingStatus" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionOwnershipRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionLifecycleRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "bindFinalAdmissionTransactionNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransactionBindingStatus" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransactionAddressActive" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeFinalAdmissionTransactionNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransactionSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionDestinationValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginFinalAdmissionTransactionCore" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransaction" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransactionWithOperation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginGenerationRequestOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "projectGenerationCapabilities" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "stringifyGenerationParams" },
@@ -2562,9 +2586,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         ),
     );
     try std.testing.expectEqual(
-        // One declaration plus the twelve reviewed direct-index expressions sealed below. B3-3
-        // adds one exact owner-entry lookup and one destination disjoint range reference.
-        @as(usize, 13),
+        // One declaration plus the reviewed direct accesses sealed below. C3-3a2 adds four
+        // transaction-registry accesses and three whole-registry fail-stop/alias references.
+        @as(usize, 20),
         countIdentifierOutsideTopLevelTests(slot_product, "registered_node_operations"),
     );
     const registered_operation_direct_accesses = [_]struct {
@@ -2575,12 +2599,17 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         .{ .expected = 1, .source = "registered_node_operations[index].state" },
         .{ .expected = 1, .source = "registered_node_operations[index] = entry" },
         .{ .expected = 2, .source = "&registered_node_operations[reservation.index]" },
-        .{ .expected = 3, .source = "registered_node_operations.len" },
+        .{ .expected = 4, .source = "registered_node_operations.len" },
         .{ .expected = 1, .source = "const candidate = registered_node_operations[index];" },
         .{ .expected = 1, .source = "const candidate = &registered_node_operations[index];" },
         .{ .expected = 1, .source = "const entry = &registered_node_operations[index];" },
         .{ .expected = 1, .source = "const entry = registered_node_operations[index];" },
-        .{ .expected = 1, .source = "&registered_node_operations[operation.registry_index]" },
+        .{ .expected = 3, .source = "&registered_node_operations[operation.registry_index]" },
+        .{ .expected = 1, .source = "const entry = registered_node_operations[operation.registry_index];" },
+        // Includes the bounded production fail-stop scan and the existing test oracle scan.
+        .{ .expected = 2, .source = "for (registered_node_operations) |entry|" },
+        .{ .expected = 1, .source = "@intFromPtr(&registered_node_operations)" },
+        .{ .expected = 1, .source = "@sizeOf(@TypeOf(registered_node_operations))" },
     };
     for (registered_operation_direct_accesses) |access|
         try std.testing.expectEqual(access.expected, countOccurrences(slot_product, access.source));
@@ -8282,7 +8311,7 @@ fn expectClientOperationFenceSchema(
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "ClientOperationFence") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 30), members.len);
+    try std.testing.expectEqual(@as(usize, 31), members.len);
     const constants = [_][]const u8{
         "shared_count_mask",
         "execution_lease_bit",
@@ -8321,6 +8350,7 @@ fn expectClientOperationFenceSchema(
         "releaseExecutionLease",
         "upgradeSingleSharedToExecutionLease",
         "downgradeExecutionLeaseToSingleShared",
+        "executionLeaseHeld",
         "recordIntrusionIfExactExclusive",
         "sealExclusiveForPublication",
         "intruded",

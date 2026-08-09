@@ -165,9 +165,14 @@ L3는 L2 캐시를 **복사하지 않고 읽는다** — chrome이 session을 pr
 
 **단, 이 문서가 새로 만드는 넷(본문 렌더·gutter·미니맵·diff 배치)은 처음부터 신규 세대 규약으로 짓는다.** 레거시 형태로 지으면 태어나자마자 이관 부채가 된다. 다만 §2가 적었듯 **`ui/layout.zig`의 flex tree는 쓰지 않는다**(등폭이라 레이아웃이 산술이다) — 따르는 것은 픽셀 rect·clip·hit-test 규약과 `ChromeDraw` 경계이지 flex가 아니다.
 
-**chrome 이관(CIM)을 기다리지 않는다.** [chrome-interaction-migration.md](chrome-interaction-migration.md)는 편집기와 **독립적으로 진행되는 별개 이니셔티브**이고, 그 완료를 선행 조건으로 두면 편집기가 무기한 대기한다. 그럴 필요도 없다 — **첫 제품 가치(diff 본문)까지 필요한 컴포넌트에 레거시가 사실상 없기 때문**이다(`divider`·`find`는 이주 완료, `scroll_area`·`status_bar`는 신규 세대, 본문·diff 배치는 어차피 신규). 레거시 접촉은 `context_menu`(선택적 — 복사는 키로도 된다)와 `dropdown`(자동완성이 붙는 시점)뿐이라 **뒤로 밀려 있다.**
+**chrome 이관(CIM) 전체를 기다리지는 않는다.** [chrome-interaction-migration.md](chrome-interaction-migration.md)는 별개 이니셔티브이고 그 완료를 선행 조건으로 두면 편집기가 무기한 대기한다. 그럴 필요도 없다 — **첫 제품 가치(diff 본문)까지 필요한 컴포넌트에 레거시가 사실상 없다**(`divider`·`find`는 이주 완료, `scroll_area`·`status_bar`는 신규 세대, 본문·diff 배치는 어차피 신규).
 
-**대신 동시 진행의 충돌을 관리한다.** 편집기가 레거시 컴포넌트를 확장하는 시점에 CIM이 같은 컴포넌트를 이관 중이면 **한 파일을 두 이니셔티브가 건드린다.** 규칙은 둘이다 — ⑴ 편집기 쪽 변경은 **확장(값·분기 추가)에 한정**하고 그 컴포넌트의 구조를 바꾸지 않는다(구조 변경은 CIM의 일이다), ⑵ 이관이 먼저 도착하면 편집기는 새 형태에 맞춰 붙고 **옛 형태를 되살리지 않는다.**
+**그러나 편집기가 실제로 쓰는 레거시는 "확장"이 아니라 "이관"으로 처리한다.** 그 둘(`context_menu`·`dropdown`)은 CIM 순서의 마지막(CIM6 Input/overlay composite → `Menu`/`Popover`)에 있는데, **편집기가 그 composite의 first consumer가 되는 것**이 CIM 자신의 방식과 맞다 — 그 문서가 `ScrollArea`에 대해 *"file tree와 Session Dock 중 하나를 first consumer로 삼는다"*고 한 것과 같은 이유다. **consumer 없이 설계한 composite는 요구를 모른다.**
+
+- **한 번만 만진다.** 이관 때 한 번, 편집기 요구를 붙일 때 또 한 번 건드리면 같은 파일을 두 번 여는 것이다. **옮기면서 편집기가 필요한 props를 함께 넣는다** — 메뉴는 대상 종류(text·link·image)와 선택 유무, 팝업 목록은 항목·필터·선택 인덱스가 그 요구다.
+- **시점은 그 기능이 필요한 슬라이스다** — 메뉴는 편집이 서는 단계, 팝업은 자동완성이 붙는 단계. 미리 당겨서 이관만 해 두지 않는다(consumer 없는 이관은 다시 CIM의 문제가 된다).
+- **CIM 문서가 순서의 소유자다.** 편집기가 first consumer로 CIM6 일부를 앞당기는 것이므로 **그 문서와 조율**하고, 편집기가 임의로 composite 계약을 정하지 않는다.
+- **이관이 먼저 도착하면** 편집기는 새 형태에 붙고 옛 형태를 되살리지 않는다.
 
 **`tabbar`의 알려진 리스크를 물려받는다.** [chrome-strategy.md](chrome-strategy.md) §10이 "(높음) rich-layout seam — 탭 분할과 hit-test가 셀-열에 고정 결합"을 등록해 두었고, 파일 Term의 탭도 같은 탭 바가 그린다. 편집기가 그 결합을 **더 굳히지 않도록** 탭 기하에 새 의존을 만들지 않는다.
 
@@ -480,13 +485,19 @@ SyntaxProvider                        // 문서 하나당 하나, 상태를 스�
 - **provider가 상태를 소유한다.** 1층이 tree-sitter로 확정됐으므로(§12) 상태는 줄 경계의 작은 값이 아니라 **문서 구문 트리**다. 따라서 호출자가 상태를 들고 다니지 않고, 대신 **편집을 통지**해야 한다 — 통지가 없으면 증분 파싱이 성립하지 않아 매번 전체 재파싱이 된다.
 - **범위 단위로 조회한다.** 줄 단위가 아니라 byte 범위인 이유는 §4의 뷰포트가 시각행 기준이고 접힘·랩이 그 범위를 결정하기 때문이다. 뷰포트에 보이는 범위만 조회하면 전 문서 스팬을 만들지 않아도 된다(§6 미니맵만 예외).
 
-- **role의 기준 목록은 LSP 명세의 `SemanticTokenTypes`**다(Language Server Protocol Specification, https://microsoft.github.io/language-server-protocol/ — UAX와 같이 공개 명세라 [references.md](references.md) 표의 대상이 아니다). 공개 명세에서 유도하므로 LSP를 붙일 때 변환이 항등에 가까워지고, 1층(구문 트리)은 부분집합만 채운다. 현행 `src/session/syntax_theme.zig`의 `SyntaxColors` 11개 필드는 CM6 하이라이트 태그 기준이라 이름이 어긋나므로, role → 색은 **다대일 매핑**으로 흡수한다. **색 필드를 role 수에 맞춰 늘리지 않는다** — 팔레트가 터미널 ANSI 16색에서 파생되므로(아래) 색을 늘릴수록 서로 구분되지 않고, 구분이 필요한 role이 실제로 겹쳐 보이면 그때 근거와 함께 필드를 더한다.
+- **`Role`은 우리 어휘이고, 두 소스가 각각 그리로 매핑된다.** 어느 한쪽 명세를 기준으로 삼지 않는다 — **두 소스의 어휘가 다른 집합이기 때문**이다:
+  - **tree-sitter 캡처는 구문 중심**이다(`@keyword`·`@string`·`@punctuation.bracket`·`@constructor`·`@attribute`·`@tag` 등, 점으로 세분되는 계층 이름).
+  - **LSP `SemanticTokenTypes`는 의미 중심**이다(`namespace`·`typeParameter`·`enumMember`·`decorator`·`modifier` 등).
+  - 절반쯤 겹치지만(`keyword`·`string`·`comment`·`function`·`type`·`variable`·`operator`·`number`) **각자에만 있는 것이 있어** 한쪽을 기준으로 두면 다른 쪽의 일부가 갈 곳을 잃는다. 초판이 LSP를 기준으로 삼고 "1층은 부분집합만 채운다"고 적은 것은 1층이 lexer였을 때의 서술이고, **1층이 tree-sitter로 확정되면서 성립하지 않는다**(§5.3).
+  - **이것이 실무 방식이기도 하다** — Helix·Neovim은 tree-sitter 캡처를 테마 키로 쓰고 LSP는 별도 매핑하며, VSCode도 TextMate scope와 semantic token을 **각자** 색 규칙으로 보낸다. 두 어휘를 하나로 통합하지 않는다.
+- **`Role`의 크기는 색이 정한다.** 현행 `src/session/syntax_theme.zig`의 `SyntaxColors` 11개(`keyword`·`string`·`number`·`comment`·`property`·`type_name`·`function`·`punctuation`·`tag`·`attribute`·`invalid`)가 이미 **구문 중심 이름**이라 tree-sitter 캡처와 자연히 가깝다. 두 소스의 매핑은 **다대일**이고(`@punctuation.bracket`·`@punctuation.delimiter` → `punctuation`, LSP `typeParameter`·`class`·`interface` → `type_name`), **색 필드를 캡처 수에 맞춰 늘리지 않는다** — 팔레트가 터미널 ANSI 16색에서 파생되므로(아래) 색을 늘릴수록 서로 구분되지 않는다. 구분이 필요한 것이 실제로 겹쳐 보이면 그때 근거와 함께 더한다.
+- **매핑 표는 코드가 소유한다.** 두 소스 × 언어별 캡처 변형까지 문서에 나열하면 즉시 낡는다. 이 문서는 **다대일이라는 규칙과 색이 상한이라는 사실**만 정하고, 실제 표는 `syntax_theme` 옆에 둔다.
 - **색의 단일 출처는 `syntax_theme.zig`**다. 터미널 `ResolvedTheme`의 ANSI 팔레트에서 파생하고 `contrastFloor`로 배경 대비를 보정하는 기존 계약(2026-07-22 사용자 결정)을 그대로 쓴다. 네이티브 뷰는 `writeCssVarsJs` 어댑터를 거치지 않고 `fromTheme()` 결과를 셀 전경색에 직접 넣는다.
 - **토큰 소스는 층으로 쌓이고, 나중 층이 앞 층을 *부분적으로* 덮는다**: 구문 트리(§5.3 — 즉시·항상) → LSP semantic tokens(지연 도착·의미 인식).
   - **"덮는다"는 전면 대체가 아니다.** LSP는 서버가 내보내는 **일부 토큰만** 준다(변수·타입·함수·파라미터 등) — 구두점·괄호·기본 문자열/주석은 그 목록에 없거나 서버마다 다르므로 **1층이 계속 그린다.** 즉 두 층은 겹쳐 그려지고, 같은 범위에 둘 다 있을 때만 LSP가 이긴다.
   - **그래서 LSP 단독으로는 화면이 채워지지 않는다** — 서버 부팅 전·서버 없는 파일·타이핑 중이 무색이 되는 것에 더해, **서버가 있어도 1층 없이는 빈 곳이 남는다.** 이는 VSCode가 TextMate 층 위에 semantic tokens를 얹는 이유와 같다.
   - **1층은 tree-sitter다**(2026-08-09 사용자 결정 — §12에 근거와 대가를 적는다). grammar가 없는 언어·확장자에서는 **1층이 비고 무색으로 그린다.** 자체 lexer를 병행하지 않는다 — 두 근사 경로를 유지하는 비용이 그 이득보다 크고, grammar 추가가 그 상태를 해소하는 정공법이다.
-- **LSP 층은 보이는 범위만 요청한다.** LSP 명세는 문서 전체(`semanticTokens/full`)와 범위(`semanticTokens/range`) 요청을 모두 제공하지만, 이 문서는 **범위 요청을 기본으로 둔다** — 전체 요청은 대형 파일에서 응답이 커지고 편집마다 무효화되는데, 그 결과가 화면 밖에서는 소비되지 않기 때문이다. 이 선택의 직접적 귀결이 §6이다(미니맵은 전 문서가 대상이라 LSP 층을 쓸 수 없다). 서버가 범위 요청을 지원하지 않으면 그 서버에 한해 전체 요청으로 물러난다.
+- **LSP 층은 보이는 범위만 요청한다.** LSP 명세(https://microsoft.github.io/language-server-protocol/)는 문서 전체(`semanticTokens/full`)와 범위(`semanticTokens/range`) 요청을 모두 제공하지만, 이 문서는 **범위 요청을 기본으로 둔다** — 전체 요청은 대형 파일에서 응답이 커지고 편집마다 무효화되는데, 그 결과가 화면 밖에서는 소비되지 않기 때문이다. 이 선택의 직접적 귀결이 §6이다(미니맵은 전 문서가 대상이라 LSP 층을 쓸 수 없다). 서버가 범위 요청을 지원하지 않으면 그 서버에 한해 전체 요청으로 물러난다.
 - **증분 파싱은 tree-sitter가 소유한다.** 편집 통지(`onEdit`)를 받아 **바뀐 부분만 다시 파싱**하므로 줄별 시작 상태 캐시를 우리가 관리하지 않는다. 블록 주석·멀티라인 문자열처럼 상태가 줄을 넘는 경우도 트리가 자연히 표현한다.
   - **문법이 깨져도 트리가 나온다.** tree-sitter의 오류 복구가 이것을 보장하며, **편집 중인 코드는 항상 불완전하므로 이 성질이 필수다.**
   - **전 문서 파싱 비용은 §2.1의 분리 대상**이다 — 파일 open과 대규모 편집이 문서 크기에 비례하므로 렌더 루프에서 하지 않는다.

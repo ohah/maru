@@ -178,6 +178,16 @@ const cases = [_]Case{
         .contract = "스크롤된 뷰포트가 first_row+1부터 visibleRows만큼만 그린다(1번부터 그리지 않는다)",
         .rect = .{ .x = 0, .y = 0, .w = 340, .h = 120 },
     },
+    // N1 §4.1 — **폰트 크기 연동**. 셀 크기가 곧 폰트 크기라(`cellSizeFor`) 이 캡처는 실제로 1.5배 큰
+    // 글자를 그린다. gutter가 함께 커져 본문이 64px가 아니라 96px에서 시작하는 것이 계약의 핵심
+    // 근거다(§4.1 — 그래서 measured가 아니라 셀 경로다). gutter가 상수 픽셀을 쓰기 시작하면 글자만
+    // 커지고 배치는 그대로여서 여기서 바로 드러난다.
+    .{
+        .name = "editor-font-large",
+        .capture = "editor-font-large.ppm",
+        .contract = "폰트를 키우면 gutter도 함께 커진다(본문 시작이 셀 폭에 비례해 밀린다)",
+        .rect = .{ .x = 0, .y = 0, .w = 200, .h = 180 },
+    },
     .{
         .name = "editor-content-text",
         .capture = "editor-gutter.ppm",

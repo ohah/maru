@@ -240,6 +240,9 @@ pub const InProcessTermBackend = struct {
                 (core_dest == null or std.mem.eql(u8, out.ssh_remote_dest.items, core_dest.?));
             if (same_dest and
                 std.mem.eql(u8, out.cwd.items, core.currentCwd()) and
+                // host도 비교한다 — 경로가 우연히 같고 host만 바뀌는 전이(로컬 /Users/me → 원격 /Users/me)에서
+                // 이 skip이 갱신을 통째로 삼키면 원격 세션이 계속 로컬로 보인다.
+                std.mem.eql(u8, out.cwd_host.items, core.currentCwdHost()) and
                 std.mem.eql(u8, out.window_title.items, core.windowTitle()) and
                 out.size.cols == core.size.cols and out.size.rows == core.size.rows and
                 out.semantic_state == core.semantic_state and
@@ -262,6 +265,7 @@ pub const InProcessTermBackend = struct {
             .title_generation = core.title_generation.load(.monotonic),
             .size = core.size,
             .cwd = core.currentCwd(),
+            .cwd_host = core.currentCwdHost(),
             .window_title = core.windowTitle(),
             .ssh_remote_dest = core.sshRemoteDest(),
             .semantic_state = core.semantic_state,

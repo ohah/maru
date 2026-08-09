@@ -754,6 +754,10 @@ pub fn focusedTermCwd(self: *AppSession, buf: []u8) ?[]const u8 {
     const term = cwdSourceTerm(self) orelse return null;
     refreshTermObservation(self, term, false, false);
     if (term.rt.observation.availability == .unavailable) return null;
+    // **원격 cwd는 상속하지 않는다.** 그 경로는 원격 파일시스템의 것이라 로컬 spawn에 넘기면 자식이 chdir에
+    // 실패해 $HOME으로 조용히 폴백한다(pty/macos.zig childExec) — 사용자는 "새 탭이 엉뚱한 데서 열린다"만 본다.
+    // 여기서 null을 내면 호출자가 설정된 workspace.root로 폴백해 **의도한 자리**에서 연다(ssh-integration.md §9.4).
+    if (app_session_mod.termCwdIsRemote(term)) return null;
     const cwd = usableRestoreCwd(term.rt.observation.cwd.items) orelse return null;
     if (cwd.len > buf.len) return null; // 방어(usableRestoreCwd가 이미 max_path_bytes 미만 보장)
     @memcpy(buf[0..cwd.len], cwd); // runtime observation owned cache → spawn용 caller buffer

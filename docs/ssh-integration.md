@@ -31,6 +31,8 @@
 ### 1.1 현재 한계 (이 문서가 다루는 출발점)
 
 - **원격 호스트 식별이 약하다.** OSC 7 cwd 보고는 `file://<host>/<path>`의 **host(authority)를 버리고 path만** 저장한다(`implementation-plan.md` ⑥, 로컬 단일 호스트 가정). 원격/로컬 cwd 구분과 호스트 인식은 후속으로 미뤄져 있다.
+- **원격 셸은 OSC 7을 보내지 않는다.** maru의 셸 통합(`shell_integration.zig`의 `_maru_osc7` precmd 훅)은 로컬 spawn 때 ZDOTDIR 주입으로만 들어가고, `maru ssh`가 원격에 심는 것은 terminfo뿐이다(`remote_install` = `infocmp`/`tic`). 따라서 ssh 세션 동안 `TerminalCore.cwd`는 접속 직전 값에 멈춰 있고, 원격 rc에 보고자가 이미 있는 환경(배포판 `vte.sh` 등)에서만 값이 온다. 원격에 보고자를 심는 것은 원격 rc 수정을 수반하므로 별도 결정 사항이다.
+- **tmux는 OSC를 흡수한다 — passthrough는 옵션에 매인다.** tmux는 안쪽 애플리케이션의 OSC 7을 자기 pane 경로로 흡수하고 바깥 터미널로 전달하지 않는다(`input.c`의 `case 7:` → `screen_set_path`). 타이틀·provider 알림도 같다. DCS passthrough(`ESC P tmux; …`)로 감싼 시퀀스만 통과하며 그것도 **`allow-passthrough`가 기본 off**다(`options-table.c`의 `.default_num = 0`). 즉 아래 §4의 OSC 5379 통지는 tmux 안에서 그 옵션이 켜져 있을 때만 도달하고, 꺼져 있으면 원격 인지와 그에 딸린 드롭 업로드가 함께 조용히 비활성이 된다. 이 전제는 사용자 환경 설정이라 maru가 보장할 수 없다.
 - **control socket이 세션 내내 유지되지 않는다.** `$ctl`은 `mktemp -u`로 만든 **랜덤 경로**라 로컬 Maru(터미널 앱)가 그 경로를 모른다. 게다가 **캐시 hit 경로**(재접속)에서는 control socket을 아예 만들지 않고 `exec ssh "$@"`로 끝난다 — 즉 첫 설치 접속에만 잠깐 존재한다.
 
 이 두 한계가 아래 이미지 전송 설계의 핵심 변경 지점이다.
@@ -149,7 +151,7 @@ flowchart TD
 - **접속 방식 = `maru ssh` 전용.** 이미지/파일 드롭 전송은 `maru ssh`로 접속한 세션에서만 동작한다. control socket이 그 경로에서만 확보되고, 구현이 단순하며, tmux 유무와 무관하기 때문이다. 맨 `ssh`(사용자가 직접 친) 지원은 **비범위** — Maru가 개입할 지점이 없어 control socket을 심을 수 없고, 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하므로 [후속](#8-후속비범위)으로 둔다. 사용자는 접속을 `maru ssh <dest>`로 통일한다(`maru ssh`는 ssh 인자를 그대로 넘기므로 `~/.ssh/config` 호스트 별칭도 동일하게 쓴다).
 - **control socket 경로 규약 = 목적지 기반 결정론적 해시.** `maru ssh`와 로컬 Maru가 같은 규약으로 목적지(dest) 문자열을 해시해 **동일 경로**를 도출한다(`~/.cache/maru/ctl-<dest Wyhash 64bit hex>` — `cli/ssh.zig` `controlSocketPath`). Maru가 경로를 OSC 통지 없이 **계산으로** 알 수 있고, 같은 host 재접속이 같은 master를 공유한다. unix socket 경로 길이 제한(macOS `sun_path` 104바이트, NUL 포함)은 해시를 잘라 맞추는 방식이 아니라 초과 시 `error.ControlPathTooLong` 반환으로 처리한다 — 호출 측이 그때 control socket 없이 폴백한다(홈 경로가 극단적으로 길 때만 발생).
 - **트리거 = 드롭 + paste(클립보드 이미지).** 파일/이미지 드래그앤드롭(3단계)과 Cmd+V 클립보드 이미지(4단계)를 업로드한다.
-- **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 접속 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru 경로에서만), foreground ssh 종료 뒤 `OSC 5379 ; ssh-end BEL`로 clear한다. 두 신호 모두 **`$TMUX`가 있으면 DCS tmux passthrough로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru(`terminal/osc.zig` `dispatchMaru`)는 이를 받아 `ssh_remote_dest`를 설정/해제하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(`ssh;<dest>`, `ssh-end`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
+- **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 접속 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru 경로에서만), foreground ssh 종료 뒤 `OSC 5379 ; ssh-end BEL`로 clear한다. 두 신호 모두 **`$TMUX`가 있으면 DCS tmux passthrough로 감싼다** — 다만 도달은 tmux `allow-passthrough`가 켜져 있을 때뿐이고 그 기본값은 off다(§1.1). 꺼져 있으면 통지가 버려져 그 세션은 로컬로 보이며, 이는 maru가 보장할 수 없는 사용자 환경 전제다. Maru(`terminal/osc.zig` `dispatchMaru`)는 이를 받아 `ssh_remote_dest`를 설정/해제하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(`ssh;<dest>`, `ssh-end`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
   host-backed Term에서는 P3-e4 metadata snapshot/event가 이 값을 GUI로 전달하고, drop/paste 직전
   `runtime.observation` barrier가 100ms periodic event보다 최신인 host 상태를 확인한다. 지원 여부가 불명하거나 barrier가
   실패한 상태를 로컬 세션으로 오판해 로컬 경로를 원격 셸에 붙이지 않도록 fail-closed한다. 현재 barrier는 main thread의
@@ -180,3 +182,55 @@ flowchart TD
 - **bash/fish용 ssh 통합·`.app` 메뉴 진입점**: 선행 작업 의존으로 별도 추적.
 
 **clean-room 근거**: ControlMaster는 OpenSSH 공개 기능, OSC 7은 VTE 정의 사실상 표준, 드래그-업로드 동작은 iTerm2를 **동작 비교**로만 참고한다. 레퍼런스 코드 표현은 옮기지 않는다(`project-rules.md`).
+
+## 9. 원격 cwd 인식(경로 표시)
+
+§0이 이 문서의 범위로 선언한 "원격 cwd 인식"의 계약이다. §1.1이 적은 한계(OSC 7 host를 버림, 원격 셸에 보고자 없음, tmux가 OSC를 흡수)가 만드는 증상을 여기서 끝낸다.
+
+### 9.1 증상과 원인
+
+원격 세션에서 사이드바 카드의 폴더줄이 **사라지거나 틀린 경로로 남는다**. 원인은 세 단계이고 서로 독립이다.
+
+1. **원격 셸이 OSC 7을 안 보낸다**(§1.1). 그러면 `TerminalCore.cwd`는 접속 직전 로컬 값에 멈춘다. maru가 원격 rc를 대신 고치지는 않는다(§9.5).
+2. **보내더라도 host를 버린다.** `dispatchCwd`가 authority를 떼고 path만 저장해 원격 `/home/me/proj`가 로컬 경로와 구분되지 않는다.
+3. **그 구분 상실이 소비처를 어긋내게 한다.** 폴더줄은 git 브랜치가 있을 때만 그리는데(`sidebar.zig`), 브랜치는 로컬 `.git/HEAD` 읽기라 원격 경로에서 항상 null이다 → **줄이 통째로 사라진다.** 새 탭/split cwd 상속과 클릭 경로 resolve도 원격 경로를 로컬 경로로 취급한다.
+
+### 9.2 계약: cwd는 (host, path) 쌍이다
+
+`TerminalCore`는 OSC 7의 authority를 버리지 않고 path와 함께 보관한다. 소비처는 둘을 함께 읽어 **로컬 cwd와 원격 cwd를 구분**한다.
+
+- **로컬 판정**: authority가 비었거나(`file:///path` = VTE 규약의 localhost), `localhost`이거나, 로컬 hostname과 같으면 로컬이다. hostname 비교는 대소문자를 무시하고 FQDN의 첫 `.` 앞 짧은 이름도 함께 본다(원격 셸이 `${HOST}`에 짧은 이름을, 로컬이 FQDN을 쓰는 비대칭이 흔하다).
+- **그 밖은 원격**이며, 그 값은 **로컬 파일시스템 경로가 아니다.**
+- 베이스: OSC 7은 VTE가 정의한 사실상 표준이고 `file://<host>/<path>` 형식이 host를 이미 싣고 있다. 지금까지 버린 것은 "로컬 단일 호스트 가정" 때문이고(§1.1), 그 가정을 여기서 거둔다. iTerm2·WezTerm도 host를 보관해 원격 판정에 쓴다(동작 비교).
+
+### 9.3 표시
+
+- 원격 cwd는 폴더줄에 **`<host>:<path>`**로 그린다 — 로컬 경로처럼 보여 사용자가 로컬에서 그 경로를 열려다 실패하는 것을 막는다.
+- **git 브랜치 조건과 분리한다.** 폴더줄은 브랜치 유무와 무관하게 원격 cwd를 그린다. 브랜치 줄은 로컬 repo 판정이므로 원격에서는 계속 비운다.
+- `~` 축약은 **로컬 cwd에만** 적용한다. 원격 `$HOME`을 로컬이 알 방법이 없으므로 원격 경로는 절대경로 그대로 둔다.
+
+### 9.4 안전: 원격 cwd는 로컬 동작에 쓰지 않는다
+
+원격 cwd를 로컬 경로로 오인해 소비하는 경로를 모두 닫는다. 지금은 형식(절대경로)만 보고 통과시켜, 새 탭이 없는 디렉터리로 spawn을 시도하고 자식이 `chdir` 실패 후 `$HOME`으로 조용히 폴백한다.
+
+| 소비처 | 원격 cwd일 때 |
+|---|---|
+| 새 탭·split cwd 상속(`newSurfaceCwd`) | 쓰지 않는다(설정 `workspace.root`로 폴백) |
+| 클릭 경로 resolve(상대경로 join) | 쓰지 않는다(원격 파일을 로컬에서 열 수 없다) |
+| git 브랜치 조회 | 쓰지 않는다(로컬 `.git` 없음) |
+| 드롭 업로드 대상 경로 | 무관 — 원격이 `$HOME` 기준으로 스스로 정한다(§4) |
+
+### 9.5 원격 보고자는 사용자 몫이다
+
+maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.terminfo`, maru 전용 디렉터리)와 달리 `~/.zshrc`는 사용자 파일이고, 맨 `ssh`로 접속하면 maru가 개입할 지점 자체가 없다(§6 "접속 방식 = `maru ssh` 전용"과 같은 이유). 따라서 이 계약은 **원격에 OSC 7 보고자가 있을 때** 값을 정확히 다루는 것까지를 보장한다.
+
+- 보고자가 없으면 cwd는 접속 직전 로컬 값에 멈춘다. 그 값의 host는 로컬이므로 **원격으로 오인하지 않는다** — 잘못된 `<host>:` 접두가 붙지 않고, 폴더줄은 접속 전 로컬 경로를 계속 보여 준다(현행과 동일).
+- 원격이 **tmux 안**이면 보고자가 OSC 7을 DCS passthrough(`ESC P tmux; …`)로 감싸야 하고, 그 tmux에 `allow-passthrough`가 켜져 있어야 한다(§1.1). 둘 중 하나라도 없으면 tmux가 OSC 7을 흡수해 값이 오지 않는다.
+- maru가 제공하는 것은 **붙여 넣을 스니펫**이다(로컬 셸 통합의 `_maru_osc7`과 같은 percent-encoding 규약, tmux 래핑 포함). 설치는 사용자가 한 번 한다.
+
+### 9.6 검증
+
+- 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host).
+- 소비처: 원격 cwd에서 `newSurfaceCwd`가 null을 내는지, 클릭 resolve가 상대경로를 join하지 않는지, 폴더줄이 브랜치 없이도 `<host>:<path>`를 그리고 `~` 축약이 안 붙는지, 로컬 cwd는 기존 동작이 바이트 그대로인지(회귀).
+- 전달 경로: in-process Term과 host-backed Term **양쪽**에서 host가 GUI observation까지 도달하는지. 한쪽만 배선하면 제품에서 조용히 무동작이 된다(§4.1 2번과 같은 함정).
+- 수동 E2E: 원격 rc에 스니펫을 넣은 뒤 맨 `ssh`와 `maru ssh` 양쪽에서 `cd`가 폴더줄에 반영되는지, 원격 tmux에서 `allow-passthrough` on/off로 값이 오고 끊기는지, ssh를 빠져나오면 로컬 cwd 표시로 복귀하는지.

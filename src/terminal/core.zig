@@ -419,10 +419,15 @@ pub const TerminalCore = struct {
     image_views: []types.KittyImageView = &.{},
     // OSC 7: 셸이 보고한 현재 작업 디렉터리(cwd). VTE(GNOME)가 정의한 사실상 표준 — 형식은
     // `OSC 7 ; file://<host>/<percent-encoded path> ST`이고 iTerm2/Terminal.app/kitty/WezTerm이
-    // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다(host는 현재 무시 — 로컬 단일 호스트
-    // 가정, SSH/원격 구분은 후속). 창 제목 등이 읽는다. 셸 상태라 화면 clear엔 안 지우고 RIS에서만
-    // 지운다. 한 번도 안 받았으면 null(빈 cwd).
+    // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다. 창 제목 등이 읽는다. 셸 상태라 화면
+    // clear엔 안 지우고 RIS에서만 지운다. 한 번도 안 받았으면 null(빈 cwd).
     cwd: ?[]u8 = null,
+    // 같은 OSC 7의 **authority(host)**. 예전엔 버렸으나(로컬 단일 호스트 가정) 그러면 원격 셸이 보고한
+    // 경로가 로컬 경로와 구분되지 않아, 폴더줄이 사라지거나 없는 디렉터리로 spawn을 시도한다
+    // (docs/ssh-integration.md §9). path와 **함께** 갱신해 둘이 어긋나지 않게 한다 — host만 남고 path가
+    // 옛 값이면 로컬 경로에 원격 host가 붙는 최악의 오표시가 된다. 빈 authority(`file:///path`)는 VTE
+    // 규약상 localhost이고 여기서는 null로 둔다(로컬과 같은 취급). 로컬 여부 판정은 hostIsLocal.
+    cwd_host: ?[]u8 = null,
     // maru ssh 전용 OSC(5379)로 받은 원격 세션의 목적지(dest). maru ssh 래퍼가 exec 직전 emit하면
     // (docs/ssh-integration.md §4) Maru가 저장해 "이 세션은 maru ssh 원격, 목적지=dest"임을 안다 — dest로
     // cli.ssh.controlSocketPath를 계산해 드롭 파일을 control socket으로 업로드하는 토대(3단계)다. cwd와
@@ -537,6 +542,10 @@ pub const TerminalCore = struct {
             self.allocator.free(c);
             self.cwd = null;
         }
+        if (self.cwd_host) |h| { // host는 cwd와 한 쌍이라 반드시 함께 지운다(남으면 로컬 경로에 원격 host가 붙는다)
+            self.allocator.free(h);
+            self.cwd_host = null;
+        }
         if (self.title) |t| { // OSC 0/2 창 제목도 공장 초기화(xterm RIS가 제목을 리셋하는 의미론)
             self.allocator.free(t);
             self.title = null;
@@ -600,6 +609,7 @@ pub const TerminalCore = struct {
 
     pub fn deinit(self: *TerminalCore) void {
         if (self.cwd) |c| self.allocator.free(c);
+        if (self.cwd_host) |h| self.allocator.free(h);
         if (self.ssh_remote_dest) |d| self.allocator.free(d);
         if (self.title) |t| self.allocator.free(t);
         self.shell_events.deinit(self.allocator);
@@ -1309,6 +1319,34 @@ pub const TerminalCore = struct {
     /// 창 제목 등 platform layer가 읽는다(facade를 통해 노출).
     pub fn currentCwd(self: *const TerminalCore) []const u8 {
         return self.cwd orelse "";
+    }
+
+    /// 그 cwd를 보고한 호스트(OSC 7 authority). 빈 authority(`file:///path` = VTE 규약 localhost)이거나
+    /// 한 번도 안 받았으면 빈 슬라이스다. **이 값만으로 원격이라 단정하지 않는다** — 로컬 셸도 자기
+    /// hostname을 실어 보내므로(maru 셸 통합의 `${HOST}`가 그렇다), 로컬 여부는 `hostIsLocal`이 로컬
+    /// hostname과 대조해 정한다(docs/ssh-integration.md §9.2).
+    pub fn currentCwdHost(self: *const TerminalCore) []const u8 {
+        return self.cwd_host orelse "";
+    }
+
+    /// OSC 7 authority가 **로컬**을 가리키는지. 순수 판정이라 I/O가 없고(호출자가 로컬 hostname을 넘긴다)
+    /// OS-중립이다. 로컬로 보는 경우는 셋 — 빈 authority(`file:///path`, VTE 규약상 localhost), `localhost`,
+    /// 로컬 hostname과 일치. 비교는 **대소문자를 무시**하고(호스트명은 DNS 규약상 case-insensitive),
+    /// **FQDN의 첫 `.` 앞 짧은 이름도 함께** 본다 — 셸은 `${HOST}`에 짧은 이름을 싣는데 로컬 이름은
+    /// FQDN(`box.local`)으로 잡히는 비대칭이 흔해서, 그대로 비교하면 자기 자신을 원격으로 오인한다.
+    ///
+    /// 로컬 hostname을 못 얻었으면(빈 문자열) **원격으로 본다** — 두 오판의 피해가 대칭이 아니기 때문이다.
+    /// 원격을 로컬로 보면 없는 디렉터리로 spawn하고 상대경로를 엉뚱하게 resolve하지만(지금의 결함),
+    /// 로컬을 원격으로 보면 폴더줄에 host 접두가 붙고 cwd 상속이 꺼질 뿐이다. 단일 출처는
+    /// docs/ssh-integration.md §9.2.
+    pub fn hostIsLocal(host: []const u8, local_hostname: []const u8) bool {
+        if (host.len == 0) return true;
+        if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
+        if (local_hostname.len == 0) return false;
+        if (std.ascii.eqlIgnoreCase(host, local_hostname)) return true;
+        const host_short = host[0 .. std.mem.indexOfScalar(u8, host, '.') orelse host.len];
+        const local_short = local_hostname[0 .. std.mem.indexOfScalar(u8, local_hostname, '.') orelse local_hostname.len];
+        return host_short.len > 0 and std.ascii.eqlIgnoreCase(host_short, local_short);
     }
 
     /// maru ssh 전용 OSC(5379 `ssh;<dest>`)로 받은 원격 세션 목적지. maru ssh로 접속한 세션이 아니면
@@ -2507,16 +2545,65 @@ test "window title: OSC 2 sets it, OSC 1 ignored, empty clears to cwd basename" 
 // OSC 7(VTE 사실상 표준)은 셸이 cwd를 보고하는 채널이다 — 터미널은 PTY 너머라 cwd를 모르므로
 // 창 제목/새 탭 cwd가 이걸 읽는다. 셸 통합과 platform layer 사이의 단일 계약이라, 형식 파싱과
 // percent-decoding이 정확해야 한다. ST(ESC \)·BEL 어느 종결자로 와도 같게 처리돼야 한다.
-test "OSC 7 reports cwd: file://host/path is parsed, host ignored, text not printed" {
+test "OSC 7 reports cwd: file://host/path is parsed into (host, path), text not printed" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
 
     try core.write("\x1b]7;file://myhost/Users/me/proj\x1b\\hi");
 
-    try std.testing.expectEqualStrings("/Users/me/proj", core.currentCwd()); // host(myhost) 무시, path만
+    try std.testing.expectEqualStrings("/Users/me/proj", core.currentCwd());
+    try std.testing.expectEqualStrings("myhost", core.currentCwdHost()); // authority 보존(원격 판정의 근거)
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("hi      ", dump); // OSC 본문은 그리드에 안 보인다
+}
+
+// host와 path는 **한 쌍**이다. 한쪽만 갱신되면 새 경로에 옛 host가 붙어 로컬 경로가 원격으로(또는 그 반대로)
+// 표시되고, 그 판정에 매인 cwd 상속·경로 resolve까지 함께 틀어진다. 쌍이 늘 함께 움직이는지 고정한다.
+test "OSC 7 keeps host and path paired across updates, RIS, and empty authority" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]7;file://box/a\x07");
+    try std.testing.expectEqualStrings("box", core.currentCwdHost());
+
+    // 빈 authority(file:///path = VTE 규약 localhost)는 host를 **지운다** — 옛 host가 남으면 로컬 보고가
+    // 계속 원격으로 보인다.
+    try core.write("\x1b]7;file:///b\x07");
+    try std.testing.expectEqualStrings("/b", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost());
+
+    // 다시 원격 → 로컬로 돌아올 때도 마찬가지.
+    try core.write("\x1b]7;file://other/c\x07");
+    try std.testing.expectEqualStrings("other", core.currentCwdHost());
+
+    // 형식이 깨진 보고는 이전 쌍을 통째로 유지한다(부분 갱신 금지).
+    try core.write("\x1b]7;file://hostonly\x07"); // path 없음
+    try std.testing.expectEqualStrings("/c", core.currentCwd());
+    try std.testing.expectEqualStrings("other", core.currentCwdHost());
+
+    // RIS는 cwd와 host를 함께 공장 초기화한다.
+    try core.write("\x1bc");
+    try std.testing.expectEqualStrings("", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost());
+}
+
+// 로컬 판정은 순수 함수다 — 이 판정 하나가 폴더줄 표시·cwd 상속·경로 resolve를 모두 가른다.
+// 특히 짧은 이름 대 FQDN 비대칭은 실제로 흔해서(셸은 `${HOST}`에 짧은 이름을 싣고 로컬은 `.local`이
+// 붙는다), 그대로 비교하면 **자기 자신을 원격으로 오인**해 로컬 세션의 cwd 상속이 조용히 꺼진다.
+test "hostIsLocal: empty/localhost/self are local, short-vs-FQDN matches, others are remote" {
+    try std.testing.expect(TerminalCore.hostIsLocal("", "box.local")); // file:///path
+    try std.testing.expect(TerminalCore.hostIsLocal("localhost", "box.local"));
+    try std.testing.expect(TerminalCore.hostIsLocal("LocalHost", "box.local")); // 대소문자 무시
+    try std.testing.expect(TerminalCore.hostIsLocal("box.local", "box.local"));
+    try std.testing.expect(TerminalCore.hostIsLocal("BOX.local", "box.local"));
+    try std.testing.expect(TerminalCore.hostIsLocal("box", "box.local")); // 짧은 이름 대 FQDN
+    try std.testing.expect(TerminalCore.hostIsLocal("box.local", "box")); // 반대 방향
+    try std.testing.expect(!TerminalCore.hostIsLocal("server", "box.local"));
+    try std.testing.expect(!TerminalCore.hostIsLocal("boxy", "box.local")); // prefix 일치는 다른 호스트
+    // 로컬 이름을 못 얻으면 보수적으로 원격 — 없는 경로로 spawn하는 쪽이 host 접두가 붙는 쪽보다 나쁘다.
+    try std.testing.expect(!TerminalCore.hostIsLocal("box", ""));
+    try std.testing.expect(TerminalCore.hostIsLocal("", "")); // 단 빈 authority는 여전히 로컬
 }
 
 test "OSC 7 percent-decodes the path (spaces, UTF-8 bytes round-trip)" {

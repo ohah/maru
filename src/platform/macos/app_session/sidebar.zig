@@ -526,6 +526,21 @@ pub fn sidebarHasCwd(term: *Term) bool {
     return term.rt.observation.availability != .unavailable and term.rt.observation.cwd.items.len > 0;
 }
 
+/// 카드가 **폴더줄을 그리는가** — 줄 수 계산(`sidebarCardLines`)과 조립부(`buildSidebarTitleFrame`)가 공유하는
+/// 단일 판정이다. 두 곳이 어긋나면 행 높이와 글자가 갈려 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다(이 파일의
+/// 다른 줄 수 판정과 같은 규율).
+///
+/// 규칙은 "show-folder 토글 + cwd 있음"에 더해 **repo 안이거나 원격**이다. repo 조건만 두던 예전 규칙은 원격
+/// 세션에서 폴더줄을 통째로 지웠다 — 브랜치는 로컬 `.git/HEAD` 읽기라 원격 경로에서는 항상 null이기 때문이다.
+/// 원격에서는 이 줄이 "지금 어느 호스트의 어디에 있나"를 알려 주는 유일한 자리이므로 repo 여부와 무관하게
+/// 그린다(docs/ssh-integration.md §9.3). 로컬 동작은 예전 그대로다.
+pub fn sidebarFolderLineShown(self: *AppSession, term: *Term) bool {
+    if (!self.loaded_config.config.sidebar.show_folder) return false;
+    if (!sidebarHasCwd(term)) return false;
+    if (app_session_mod.termCwdIsRemote(term)) return true;
+    return git_ops.termGitBranch(self, term) != null;
+}
+
 /// 카드가 **실제로 그리는 줄 수**(이름 + 브랜치? + 경로? + 상태?). 카드 높이가 이 값에서 나오므로
 /// (docs/sidebar-agent-list.md §3) 행 높이·hit-test·밴드·glyph 배치와 렌더(빈 줄을 생략하는 카드 조립부)가
 /// **반드시 같은 값**을 봐야 한다 — 어긋나면 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다. 그래서 조건을 카드
@@ -539,7 +554,7 @@ pub fn sidebarCardLines(self: *AppSession, tab: *Tab) u8 {
     if (git_ops.termGitBranch(self, term) != null) {
         if (self.loaded_config.config.sidebar.show_branch) n += 1;
         if (self.loaded_config.config.sidebar.show_folder and sidebarHasCwd(term)) n += 1;
-    }
+    } else if (sidebarFolderLineShown(self, term)) n += 1;
     // 에이전트 상태줄은 카드에서 빠졌다(목록 행이 대체) — 줄 수도 그만큼 줄어 카드가 짧아진다.
     return n;
 }
@@ -1862,7 +1877,8 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
             // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
             // 각 보조줄은 **비어있지 않을 때만** indent를 붙인다(빈 줄은 그대로 "" — 카드 줄 수 계산 정합).
             try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}" ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
-            try path_lines.append(self.allocator, if (show_folder and branch != null) blk: {
+            _ = show_folder; // 폴더줄 조건은 sidebarFolderLineShown이 단일 출처(줄 수 계산과 공유 — 토글도 그 안에서 본다)
+            try path_lines.append(self.allocator, if (sidebarFolderLineShown(self, term)) blk: {
                 const fl = try sidebarFolderLine(self.allocator, term);
                 if (indent.len == 0 or fl.len == 0) break :blk fl; // depth 0 or 빈 줄 — 그대로(빈 줄에 공백 붙이면 4번째 줄이 생긴다)
                 defer self.allocator.free(fl);

@@ -40,6 +40,10 @@ pub const ScenarioId = enum {
     /// SB1 §5.2 — 사이드바 배경 strip이 창 바닥까지 가지 않고 **상태바 위에서 끊기는지**를 픽셀로 본다.
     /// 도크 내용은 필요 없다(strip은 `.m`이 직접 그린다) — 빈 프레임에 사이드바 폭·상태바 높이만 실어 준다.
     sidebar_status_strip,
+    /// N1 §4.1 — 편집기 gutter 기하를 픽셀로 본다. 줄 번호가 **우측 정렬**로 같은 오른쪽 끝에 서는지,
+    /// 자릿수가 늘어도(9→10) 본문 시작 열이 흔들리지 않는지가 단위 테스트로 안 보이는 부분이다.
+    /// 좌표계를 셀↔픽셀로 오갈 때 어긋나는 회귀는 캡처로만 드러난다(탭 제목 이관 때 실제로 그랬다).
+    editor_gutter,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -99,6 +103,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
+        .editor_gutter => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -113,6 +118,104 @@ pub fn buildFrame(
         .sticky_pushed,
         => buildDockFrame(scenario, tokens, buffers),
     };
+}
+
+/// N1 §4.1 — 편집기 gutter를 실제 draw op으로 내려 픽셀까지 보낸다.
+///
+/// **문서를 읽지 않는다.** Lab은 filesystem·session을 import하지 않으므로(이 파일 머리말) 줄 수만
+/// 합성해 넣는다. 이 시나리오가 증명하려는 것은 문서 내용이 아니라 **기하**다 — 줄 번호가 우측
+/// 정렬로 같은 오른쪽 끝에 서는가, 자릿수가 9에서 10으로 넘어가도 본문 시작 열이 그대로인가.
+///
+/// 그래서 줄 수를 **12로 둔다**: 한 화면에 1자리(1~9)와 2자리(10~12)가 함께 나와 우측 정렬이
+/// 실제로 작동하는지 한 캡처에서 보인다. 자릿수가 하나뿐이면 정렬이 틀려도 그림이 같다.
+/// 합성 소스 fixture. **실제 파일을 읽지 않는다**(Lab은 filesystem을 import하지 않는다) — 대신 이
+/// 시나리오가 증명해야 하는 것을 한 화면에 모은다.
+///
+/// 각 줄이 맡은 역할이 있다: 탭 들여쓰기(탭스톱 전개), 한글(다중 byte + 폰트 fallback), 빈 줄(op을
+/// 만들지 않아도 다음 줄이 안 당겨지는지), 긴 줄(본문 폭에서 잘리는지), 그리고 9→10 자릿수 경계를
+/// 넘기는 줄 수.
+const editor_fixture_lines = [_][]const u8{
+    "const std = @import(\"std\");",
+    "",
+    "pub fn main() !void {",
+    "\tconst greeting = \"hello\";",
+    "\tconst 인사말 = \"안녕하세요\";",
+    "",
+    // 줄 **중간** 탭이 있어야 탭스톱과 고정 폭이 갈린다. 그런데 그것만으로는 부족하다 — 탭이 시작하는
+    // 열이 `tab_width`의 배수면 두 방식이 여전히 같은 칸 수를 낸다. 이 줄은 탭이 **열 17**에서 시작해
+    // 탭스톱은 3칸(→20), 고정 폭은 4칸(→21)으로 갈린다. 두 번 다 골든이 회귀를 놓친 뒤 계산해서 고른
+    // 값이므로 `const n = 12;`의 길이를 바꾸면 이 case가 다시 무력해진다.
+    "\tconst n = 12;\t// 정렬용 탭",
+    "\tif (greeting.len > 0) {",
+    "\t\ttry stdout.print(\"{s}\\n\", .{greeting});",
+    "\t}",
+    "",
+    "\treturn;",
+    "}",
+};
+
+/// N1 §4.1 — 편집기 gutter와 본문을 실제 draw op으로 내려 픽셀까지 보낸다.
+///
+/// 이 시나리오가 증명하려는 것은 문서 내용이 아니라 **기하**다 — 줄 번호가 우측 정렬로 같은 오른쪽
+/// 끝에 서는가, 자릿수가 9에서 10으로 넘어가도 본문 시작 열이 그대로인가, 본문이 gutter 오른쪽에서
+/// 시작하며 줄 번호와 **같은 baseline**에 서는가. 마지막 항목이 셀↔픽셀 변환 회귀가 드러나는 자리다.
+fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
+    const editor_view = chrome.components.editor_view;
+
+    const cell_w_px: u16 = 8;
+    const cell_h_px: u16 = 16;
+    const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
+    const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
+    const total_cols: u16 = @intCast(viewport_w / cell_w_px);
+    const line_count: usize = editor_fixture_lines.len;
+
+    const layout = editor_view.geometry.compute(total_cols, line_count, .{});
+    const visible_rows: u16 = @intCast(@min(line_count, viewport_h / cell_h_px));
+
+    // gutter와 본문이 같은 op 배열을 나눠 쓴다. gutter를 먼저 채우고 남은 자리에 본문을 잇는다.
+    var gutter_rows: [64]editor_view.gutter.Row = undefined;
+    const grows = editor_view.gutter.rowsForRange(0, visible_rows, &gutter_rows);
+    const gutter_ops = try editor_view.gutter.build(.{
+        .layout = layout,
+        .rows = grows,
+        .cell_w_px = cell_w_px,
+        .cell_h_px = cell_h_px,
+        .origin_px = .{ .x = 0, .y = 0 },
+    }, buffers.ops, buffers.text_bytes, buffers.text_runs);
+
+    // gutter가 쓴 만큼을 빼고 넘긴다 — 겹쳐 쓰면 줄 번호 문자열이 본문 전개 결과로 덮인다.
+    var text_used: usize = 0;
+    for (grows) |r| {
+        if (r.number != null) text_used += digitsIn(r.number.?);
+    }
+
+    var content_rows: [64]editor_view.content.Row = undefined;
+    var n: u16 = 0;
+    while (n < visible_rows) : (n += 1) {
+        content_rows[n] = .{ .bytes = editor_fixture_lines[n], .visual_row = n };
+    }
+
+    const content_ops = try editor_view.content.build(.{
+        .layout = layout,
+        .rows = content_rows[0..visible_rows],
+        .cell_w_px = cell_w_px,
+        .cell_h_px = cell_h_px,
+        .origin_px = .{ .x = 0, .y = 0 },
+    }, buffers.ops[gutter_ops..], buffers.text_bytes[text_used..], buffers.text_runs[gutter_ops..]);
+
+    return .{
+        // 아직 hit-test 대상이 없다(줄 번호 클릭은 N2의 줄 선택, 본문 클릭은 캐럿 배치다). 빈 트리를 낸다.
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. gutter_ops + content_ops] },
+    };
+}
+
+/// 줄 번호가 scratch에 쓴 byte 수. gutter가 쓴 만큼을 건너뛰기 위해 같은 방식으로 센다.
+fn digitsIn(n: usize) usize {
+    var d: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) d += 1;
+    return d;
 }
 
 fn buildDockFrame(
@@ -210,7 +313,8 @@ fn buildDockFrame(
             .partial_group_scroll, .scrollbar => &retained,
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => unreachable,
+            // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

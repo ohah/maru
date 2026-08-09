@@ -125,8 +125,18 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     if (y + @as(i32, @intCast(box_h)) > bh_px - edge_gap_y) y = bh_px - edge_gap_y - @as(i32, @intCast(box_h));
     // 좌단은 사이드바 오른쪽으로 — 메뉴는 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다(좁은 창에서
     // anchor가 작거나 box가 클 때). 사이드바 슬롯 우클릭이면 anchor가 사이드바 안이라 메뉴가 그 오른쪽 가장자리에 붙는다.
-    const sidebar: i32 = @intCast(workspace.x);
-    if (x < sidebar) x = sidebar;
+    //
+    // **단 앵커가 상태바면 이 규칙을 적용하지 않는다.** 상태바는 창 전폭 띠이고 workspace **밖**에 산다
+    // (docs/status-bar.md §1) — 왼쪽 항목(브랜치·경로)은 사이드바 chrome이 아닌데도 x 범위만 보면 사이드바
+    // 안으로 판정된다. 그대로 밀면 누른 자리(x≈16)와 뜬 자리(사이드바 우단, 실측 ~700px)가 화면 절반만큼
+    // 떨어진다(사용자 제보). 그 항목 위에는 덮을 사이드바 chrome이 애초에 없다 — 상태바가 사이드바 아래를
+    // 지나가고 있기 때문이다.
+    //
+    // 판정은 **세로 clamp가 이미 쓰는 경계**를 그대로 쓴다(`workspace.y + workspace.h` = 상태바 top).
+    // 한 기능 안에서 "상태바인가"를 두 방식으로 묻지 않는다.
+    const anchored_below_workspace = state.anchor_y >= bh_px;
+    const left_bound: i32 = if (anchored_below_workspace) edge_gap else @intCast(workspace.x);
+    if (x < left_bound) x = left_bound;
     if (y < @as(i32, @intCast(workspace.y))) y = @intCast(workspace.y);
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
@@ -354,4 +364,39 @@ test "context_menu menuRect: 좌단을 사이드바 폭으로 clamp(사이드바
     // 사이드바 밖 anchor는 그대로(clamp 무영향).
     s.show(400, 50, items.len);
     try std.testing.expectEqual(@as(i32, 400), menuRect(&s, &items, p).?.x);
+}
+
+test "context_menu menuRect: 상태바 앵커는 사이드바로 밀지 않는다(누른 자리에 뜬다)" {
+    const items = [_][]const u8{ "main", "feat/session-host-reconnect" };
+    // 상태바는 창 전폭이라 workspace 밖에 산다 — workspace는 사이드바 오른쪽·상태바 위 구간이다.
+    const bar_h: u32 = 26;
+    const p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .sidebar_width_px = 200,
+            .backing_width_px = 800,
+            .backing_height_px = 600,
+            .workspace_present = true,
+            .workspace_x_px = 200,
+            .workspace_y_px = 0,
+            .workspace_width_px = 600,
+            .workspace_height_px = 600 - bar_h,
+        },
+    };
+    var s: State = .{};
+
+    // 브랜치 항목: 상태바 왼쪽 가장자리 여백(x=16)에 앵커한다. 상태바는 사이드바 **아래**를 지나가므로
+    // 덮을 사이드바 chrome이 없다 — 사이드바 우단(200)으로 밀면 누른 자리에서 화면 절반만큼 떨어진다.
+    s.show(16, @intCast(600 - bar_h), items.len);
+    const r = menuRect(&s, &items, p).?;
+    try std.testing.expect(r.x < 200);
+    // 창 왼쪽 가장자리에 딱 붙이지도 않는다(우단과 같은 이유 — 테두리가 창 경계에 먹힌다).
+    try std.testing.expect(r.x >= @as(i32, @intCast(p.metrics.cell_width_px)));
+    // 세로는 기존 규칙대로 상태바 위로 밀려 올라간다(띠를 덮지 않는다).
+    try std.testing.expect(r.y + @as(i32, @intCast(r.h)) <= @as(i32, @intCast(600 - bar_h)));
+
+    // **workspace 안 앵커는 종전 그대로** — 사이드바 우클릭 메뉴가 chrome 위로 겹치지 않는 규칙은 산다.
+    s.show(20, 50, items.len);
+    try std.testing.expect(menuRect(&s, &items, p).?.x >= 200);
 }

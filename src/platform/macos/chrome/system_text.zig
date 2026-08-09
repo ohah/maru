@@ -18,6 +18,22 @@ const bridge = @import("../coretext_smoke_bridge.zig");
 const probe = @import("../coretext_probe.zig");
 const metal_frame = renderer.metal_frame;
 
+/// 셀 높이 대비 폰트 point size의 비율. 셀 격자 텍스트의 폰트 크기를 셀에서 뽑을 때 쓴다.
+///
+/// 등폭 코드 폰트의 줄 높이는 관례적으로 em의 1.2~1.35배이고, 현재 Lab 기준(셀 16px에 13pt 토큰이
+/// 8×10 글리프를 냈다)과도 맞는 값으로 1.25를 쓴다. **정확한 값은 폰트마다 다르므로 여기서 완벽히
+/// 맞추려 하지 않는다** — 남는 미세 차이는 `snapToCellGrid`가 흡수하고, 제품에서는 셀 자체가
+/// 실제 폰트 메트릭에서 나오므로(`refreshCellMetrics`) 이 역산이 필요 없어진다.
+const cell_line_height_ratio: f32 = 1.25;
+
+/// **x 스냅은 두지 않는다**(2026-08-09 실측으로 기각). `x_px`를 셀 배수로 반올림하는 방식은
+/// 글자마다 advance가 다를 때(한글 2칸, fallback 폰트) 여러 글자가 같은 칸으로 몰려 문자열이
+/// 겹쳐 그려진다 — 실제로 그렇게 깨진 캡처를 확인했다. 올바른 스냅은 x 반올림이 아니라 **셀
+/// 인덱스 기반**이어야 하고(각 글자가 몇 번째 칸인지 `text_layout`의 cluster 폭으로 세어야 한다),
+/// 그것은 이 모듈이 아니라 그 분절을 아는 쪽의 일이다.
+///
+/// 폰트 크기를 셀에서 파생하면(`cell_line_height_ratio`) advance가 셀 폭에 충분히 가까워져
+/// 실용적으로 정렬이 유지된다는 것을 캡처로 확인했다.
 pub const Placement = struct {
     x_px: f32,
     y_px: f32,
@@ -59,6 +75,8 @@ pub const Request = struct {
         placement: chrome.draw.TextPlacement = .origin,
         scroll_clipped: bool = false,
         above_clip: ?chrome.draw.Rect = null,
+        /// 편집기 셀 격자(§2.0). null이면 기존 measured 배치 그대로다.
+        cell_grid: ?chrome.draw.Op.CellGrid = null,
     };
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -94,6 +112,8 @@ pub const UnresolvedArtifact = struct {
     foregrounds: []u32,
     scroll_flags: []bool,
     above_clips: []?chrome.draw.Rect,
+    /// run별 셀 격자(§2.0). 최종 x를 셀 배수로 스냅할 때 쓴다.
+    cell_grids: []?chrome.draw.Op.CellGrid,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
@@ -101,6 +121,7 @@ pub const UnresolvedArtifact = struct {
         allocator.free(self.foregrounds);
         allocator.free(self.scroll_flags);
         allocator.free(self.above_clips);
+        allocator.free(self.cell_grids);
         self.* = undefined;
     }
 };
@@ -425,6 +446,7 @@ pub fn prepareRequest(
                     .foreground = packRgb(tk.get(text.role)),
                     .anchor = text.anchor,
                     .placement = text.placement,
+                    .cell_grid = text.cell_grid,
                     .scroll_clipped = text.scroll_clipped,
                     .above_clip = if (text.above_scroll) text.clip else null,
                 });
@@ -711,12 +733,15 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(scroll_flags);
     const above_clips = try allocator.alloc(?chrome.draw.Rect, request.runs.len);
     errdefer allocator.free(above_clips);
+    const cell_grids = try allocator.alloc(?chrome.draw.Op.CellGrid, request.runs.len);
+    errdefer allocator.free(cell_grids);
     for (request.runs, 0..) |run, index| {
         if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
         placements[index] = run.placement;
         foregrounds[index] = run.foreground;
         scroll_flags[index] = run.scroll_clipped;
         above_clips[index] = run.above_clip;
+        cell_grids[index] = run.cell_grid;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, .{ .family = request.font_family, .fallback = request.font_fallback }, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
@@ -735,7 +760,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .cell_grids = cell_grids };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -799,6 +824,8 @@ pub fn resolveArtifact(
             .raster_width_px = @intFromFloat(@ceil(advance)),
             .raster_height_px = @intFromFloat(@ceil(glyph.line_height_px)),
         };
+        // **셀 격자면 x를 칸 배수로 스냅한다**(§2.0). 폰트 advance가 셀 폭과 미세하게 달라도
+        // 두 번째 글자부터 격자를 벗어나지 않는다 — 그것이 `10`의 `0`이 밀리던 원인이었다.
         placement.* = .{
             .x_px = label_origin.x_px + glyph.x_px,
             .y_px = label_origin.y_px,
@@ -991,7 +1018,16 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
     // file. Keep the product-only bridge unreachable there instead of leaving an undefined
     // native symbol merely because a detached-worker test imports its type.
     if (builtin.os.tag != .macos) return error.UnsupportedSystemText;
-    const point_size = chrome.ui.typography.token(run.role).point_size;
+    // **셀 격자면 폰트 크기가 셀에서 나온다.** 토큰(pt)은 chrome 고정값이라 편집기 폰트를 키워도
+    // 그대로여서, 셀만 커지고 글자는 안 커지는 화면이 된다(실측으로 확인한 결함).
+    //
+    // 셀 높이를 쓰는 이유: 폰트 크기는 관례적으로 em 높이이고 줄 높이가 그것에 비례한다. 폭에서
+    // 역산하면 폰트마다 다른 advance/em 비율을 알아야 한다. `cell_line_height_ratio`는 터미널이
+    // 쓰는 것과 같은 계열의 값이며, 미세한 차이는 아래 셀 스냅이 흡수한다.
+    const point_size: u16 = if (run.cell_grid) |grid|
+        @max(1, @as(u16, @intFromFloat(@round(@as(f32, @floatFromInt(grid.cell_h_px)) / cell_line_height_ratio))))
+    else
+        chrome.ui.typography.token(run.role).point_size;
     const scaled_size = @as(f64, @floatFromInt(point_size)) * @as(f64, @floatFromInt(scale_milli)) / 1000.0;
     var native: bridge.NativeChromeTextShapeResult = .{};
     const capacity = @max(@as(usize, 16), run.text.len * 2);

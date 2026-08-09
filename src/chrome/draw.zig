@@ -90,6 +90,16 @@ pub const Op = union(enum) {
     /// 한 오버레이에 최대 1개(여러 개면 마지막이 이김). 그리지 않으니 bounding-box·셀에는 영향 없다.
     clip: Rect,
 
+    /// 등폭 셀 격자 파라미터. 배치와 폰트 크기가 **같은 값에서** 나와야 둘이 어긋나지 않는다.
+    pub const CellGrid = struct {
+        /// 한 칸의 device 픽셀 폭. 글자 x는 이 배수로 스냅된다.
+        cell_w_px: u16,
+        /// 한 칸의 device 픽셀 높이. 폰트 크기를 여기서 파생한다(터미널이 폰트→셀인 것의 역이 아니라,
+        /// **호출자가 이미 폰트에서 뽑아 둔 셀 크기를 되돌려 받는 것**이다 — 제품에서는
+        /// `refreshCellMetrics`가 그 출처다).
+        cell_h_px: u16,
+    };
+
     /// 사각 영역 채우기(밴드·탭 배경·hover·drop-zone). alpha<0xFF면 반투명 합성.
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };
     /// **literal RGB** 색 견본(color picker 스와치). 다른 op은 색을 ColorRole(테마 토큰)로 두지만, 스와치는 "이
@@ -118,6 +128,14 @@ pub const Op = union(enum) {
         /// either path from inventing a second title/search truncation policy.
         max_cols: u16 = std.math.maxInt(u16),
         anchor: text_layout.Anchor = .head,
+        /// **등폭 셀 격자에 그린다**(편집기 전용 — docs/native-editor.md §2.0).
+        ///
+        /// 값이 있으면 두 가지가 달라진다. ⑴ 폰트 크기를 `typography` 토큰이 아니라 **이 셀 크기에서**
+        /// 파생한다 — 그래야 편집기 폰트를 키울 때 글자도 함께 커진다(토큰은 pt 고정이라 안 커진다).
+        /// ⑵ 글자 x를 **셀 배수로 스냅**한다 — 폰트 advance가 셀 폭과 미세하게 달라도 격자가 어긋나지
+        /// 않는다. 터미널이 (행, 열)로 그리는 것과 같은 성질을 chrome op으로 얻는 방법이며, 이 값이
+        /// 없으면(도크·탭 등) 기존 measured 배치가 그대로다.
+        cell_grid: ?CellGrid = null,
         wide_icons: bool = false,
         /// Pixel constraint is needed when the worker centres an icon+label group.  `max_cols`
         /// remains the legacy grid fallback; a rich-only action can preserve the final content

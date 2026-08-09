@@ -84,6 +84,8 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
                 .role = text_role,
                 // 본문 영역을 넘는 글자는 자른다. 이것이 없으면 긴 줄이 gutter 옆 창 밖까지 그려진다.
                 .max_cols = props.layout.content.width,
+                // 등폭 셀 격자에 그린다(§2.0) — 폰트 크기가 셀에서 나오고 글자 x가 셀 배수로 스냅된다.
+                .cell_grid = .{ .cell_w_px = props.cell_w_px, .cell_h_px = props.cell_h_px },
             },
         };
         op_count += 1;

@@ -214,6 +214,7 @@ pub const inventory = [_]Proof{
     // F14에서 agent 함수 alias를 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
     // F15에서 git 함수 alias를 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
     // 리소스 팝오버(탭별 행 조립·앵커·클릭 점프)가 붙어 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "bf32eb6a5488536017e02e58e0af3c378f2a3fa949f0e3d04b9ba0f79758adbc" },
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 이 항목이 **빠져 있어**
     // 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다 — 이사한 반사를 여기 등재해 짝을 맞춘다.
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 위 주석이 "등재한다"고

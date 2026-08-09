@@ -15518,6 +15518,9 @@ pub const AppSession = struct {
         self.resource_poll_ticks = 0;
         if (!self.surface_initialized) return;
         if (self.statusBarHeightPx() == 0) { // 단일 게이트: chrome_minimal + status-bar.show
+            // 팝오버는 그 항목에 앵커돼 있다 — 항목이 사라졌는데 목록만 남으면 누른 적 없는 자리에 뜬
+            // 유령이 된다(브랜치 메뉴가 "앵커 없으면 열지 않는다"로 막은 문제의 **열린 뒤** 판).
+            if (self.resource_menu_open) settings_ops.closeContextMenu(self);
             self.clearResourceReading();
             return;
         }
@@ -48553,6 +48556,42 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
     try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
     try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
     try std.testing.expectEqual(resource_header_rows + 2, session.context_menu_items_len);
+}
+
+// SB-P 적대적: **팝오버가 열린 채 상태바가 사라지면** 어떻게 되나. 앵커가 없어졌는데 목록이 남으면
+// 사용자는 누른 적 없는 자리에 뜬 유령 목록을 보게 된다(브랜치 메뉴가 "앵커 없으면 열지 않는다"로
+// 막은 것과 같은 문제의 **열린 뒤** 판이다).
+test "SB-P: 열린 채 상태바가 숨으면 팝오버도 닫힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    session.resource_rows[0] = .{ .key = 42, .reading = .{ .footprint_bytes = 100, .cpu_permille = 0 } };
+    session.resource_rows_len = 1;
+    const text = "  512 MB ·   10%";
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+    session.openResourceMenu();
+    try std.testing.expect(session.resource_menu_open);
+
+    // 설정으로 상태바를 끈다(quick terminal 전환도 같은 게이트).
+    session.chrome_minimal = true;
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+
+    try std.testing.expect(!session.resource_menu_open);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
 }
 
 // SB-P 적대적: **머리글만큼 인덱스를 빼야 한다.** 선택 인덱스는 머리글을 포함한 행 번호라, 안 빼면

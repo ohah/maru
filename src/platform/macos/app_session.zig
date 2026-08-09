@@ -3441,6 +3441,9 @@ pub const AppSession = struct {
     // B1 rich-text artifact. The detached CoreText worker owns only an immutable scalar DTO;
     // this cache owns renderer-neutral records after the main actor resolves its font names.
     agent_session_dock_rich_text_cache: ?MeasuredTextCache = null,
+    /// 사이드바 헤더 검색 줄의 measured 셰이핑 캐시(이관 2단계). 슬롯이 도크와 따로인 이유는 fingerprint가
+    /// 각자의 ops에서 나오기 때문이다 — 한 슬롯을 공유하면 검색어를 칠 때마다 도크 아티팩트가 버려진다.
+    sidebar_search_text_cache: ?MeasuredTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     /// Session Dock가 키보드 owner인가(docs/agent-session-list.md의 `agent_session_list` focus).
     /// **component-local `InteractionState.focused`로 대신할 수 없다**: 그건 published node id라
@@ -21295,22 +21298,22 @@ pub const AppSession = struct {
         return .{ .truncated = line.truncated, .query = line.query, .preedit = line.preedit, .caret_col = caret };
     }
 
-    /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 세로 위치는
-    /// 검색 glyph와 **같은 단일 출처**(sidebarSearchGlyphOriginY — 상단 바 밴드 중앙)에서 온다. 예전에는 셀 row
-    /// (`headerRows - 1`)였는데, 렌더가 밴드로 옮겨 간 뒤에도 그대로 두면 caret만 옛 격자에 남는다.
+    /// 검색 caret rect(헤더 검색 영역) — IME 후보창이 붙는 자리. 렌더가 measured로 옮겨 갔으므로 **셰이핑된
+    /// advance**에서 얻는다(셀 col 환산이 아니라). caret 글리프 자체는 텍스트 run 끝의 `|`라 별도 좌표가 필요 없고,
+    /// 이 rect는 오직 후보창 anchor 용도다.
+    ///
+    /// 캐시에 아티팩트가 없으면(첫 프레임 등) 텍스트 rect의 **시작점**으로 폴백한다 — 후보창이 잠깐 왼쪽에 뜨는 것이
+    /// 아예 안 뜨는 것보다 낫고, 다음 프레임에 정확한 자리로 옮겨간다.
     fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
-        if (!self.sidebar_search_active or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
-        const cols = self.sidebar_width_px / cw;
-        const search_y = self.sidebarSearchGlyphOriginY();
-        // caret 위치는 렌더(buildSidebarHeaderDrawList)의 tail 창 배치와 **같은 단일 출처**(sidebarSearchLine)에서 얻는다 —
-        // 긴 검색어가 넘치면 caret은 tail 창 오른쪽 끝으로 오고, 안 넘치면 text_col+content 폭(기존과 동일). 이렇게 IME
-        // 후보창이 잘린 caret을 따라와 사이드바 밖 터미널 pane 위로 뜨지 않는다(find.caretRect의 panel_cols 가드와 동형).
-        const max_col: u16 = @intCast(cols -| 4);
-        const caret_col = self.sidebarSearchLine(max_col).caret_col;
-        if (caret_col >= max_col) return null; // 극단 좁음
-        return .{ .x = @intCast(@as(u32, caret_col) * cw), .y = @intCast(search_y), .w = cw, .h = ch };
+        if (!self.sidebar_search_active) return null;
+        const rect = self.sidebarSearchTextRect() orelse return null;
+        var advance: f32 = 0;
+        if (self.sidebar_search_text_cache) |cache| {
+            for (cache.placements) |p| advance = @max(advance, p.x_px + p.advance_px);
+        }
+        // 넘치면 CoreText가 앞을 잘라(anchor `.tail`) 내용이 rect 폭 안에 들어오므로, caret은 그 오른쪽 끝이다.
+        const caret_x = rect.x + @as(i32, @intFromFloat(@min(advance, @as(f32, @floatFromInt(rect.w)))));
+        return .{ .x = caret_x, .y = rect.y, .w = @max(self.cell_width_px, 1), .h = rect.h };
     }
 
     /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
@@ -22320,6 +22323,7 @@ pub const AppSession = struct {
     /// 호출부가 자기 슬롯을 기억할 필요가 없다.
     fn clearMeasuredTextCaches(self: *AppSession) void {
         MeasuredTextCache.clear(&self.agent_session_dock_rich_text_cache, self.allocator);
+        MeasuredTextCache.clear(&self.sidebar_search_text_cache, self.allocator);
     }
 
     /// 도크의 비례 텍스트를 **이번 프레임 안에서** 셰이핑해 캐시에 넣는다.
@@ -30928,6 +30932,9 @@ pub const AppSession = struct {
                         .colors = .{ .default_fg = self.appearance.theme.foreground },
                     } });
                 } else |_| {}
+                // 검색 줄 **텍스트**는 measured 경로다(🔍 아이콘만 위 셀 frame에 남는다). 폰트를 키워도 바 밴드를
+                // 넘치지 않게 하려는 것이 이 이관의 목적이다(docs/file-explorer.md §3.5).
+                self.collectSidebarSearchText(&collected, self.paneFrameBuilder());
             }
             // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
             // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
@@ -36267,9 +36274,8 @@ pub const AppSession = struct {
         const muted: terminal.Color = .{ .rgb = self.mutedForeground() };
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 헤더: 줄0(신호등 줄)은 좌측 네이티브 신호등(닫기·최소화·확대) 영역을 비우고 우측에 사이드바 접기(◧)·view
-        // options(⚙)·새 워크스페이스(+) 아이콘. 검색은 신호등 아래 줄(search_row)에 🔍 + 입력/placeholder로 둔다(headerHit과
-        // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 headerRows 단일 소스(headerHit·caretRect과 동일).
-        // 두 파트 모두 자기 frame의 **첫 줄**이다. 검색 줄의 세로 위치는 셀 row가 아니라 frame origin
+        // options(⚙)·새 워크스페이스(+) 아이콘. 검색 줄에는 🔍만 셀로 남고 입력/placeholder/caret은 measured 경로가
+        // 그린다(`collectSidebarSearchText`). 두 파트 모두 자기 frame의 **첫 줄**이다. 검색 줄의 세로 위치는 셀 row가 아니라 frame origin
         // (sidebarSearchGlyphOriginY — 상단 바 밴드 중앙)이 정한다.
         const search_row: u16 = 0;
         // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-8)·view options(⚙ cols-5)·새 워크스페이스(+ cols-2). 3칸 간격,
@@ -36303,45 +36309,9 @@ pub const AppSession = struct {
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
         try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = icons.codepoint(.search), .width = 2, .style = .{ .foreground = muted } });
-        const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
-        const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
-        var caret_col: u16 = sidebar_search_text_col; // 빈 검색이면 입력 시작점에 caret
-        if (has_text) {
-            // 검색어가 입력 영역을 넘치면 tail 창(선두 "…")으로 오른쪽 정렬 — 방금 친 글자·caret이 잘려 안 보이던 문제를
-            // 없앤다(find·palette와 같은 규칙). 렌더와 caret 위치는 sidebarSearchLine 단일 출처(sidebarSearchCaretRect와 공유).
-            const line = self.sidebarSearchLine(max_col);
-            caret_col = line.caret_col;
-            var col: u16 = sidebar_search_text_col;
-            if (line.truncated) { // 앞이 잘렸음 — 선두 "…"(1칸)
-                try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = '…', .style = .{ .foreground = fg } });
-                col += 1;
-            }
-            const texts = [_][]const u8{ line.query, line.preedit };
-            for (texts) |text| {
-                var view = std.unicode.Utf8View.init(text) catch continue;
-                var iter = view.iterator();
-                while (iter.nextCodepoint()) |cp| {
-                    if (col >= max_col) break;
-                    const w: u2 = @intCast(@max(@as(u8, 1), @min(@as(u8, 2), terminal.width.cellWidth(cp))));
-                    try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = cp, .width = w, .style = .{ .foreground = fg } });
-                    col += w;
-                }
-            }
-        } else if (!self.sidebar_search_active) {
-            // placeholder "Search"는 비활성+빈 검색일 때만(활성+빈 검색은 caret만 — Find/팔레트처럼 빈 입력칸에 커서).
-            const placeholder = "Search";
-            for (placeholder, 0..) |ch, i| {
-                const c: u16 = @intCast(sidebar_search_text_col + i);
-                if (c >= max_col) break;
-                try cells.append(self.allocator, .{ .row = search_row, .col = c, .codepoint = ch, .style = .{ .foreground = muted } });
-            }
-        }
-        // 검색 caret — 활성일 때 보이는 입력 텍스트 끝(빈 검색은 col 3)에 깜빡이는 '|'(rename in-place caret과 동형, Find/
-        // 팔레트처럼 커서 표시). blink_visible로 토글(off 위상엔 생략). IME 조합 중엔 blink 핸들러가 위상을 고정해 항상 보인다.
-        if (self.sidebar_search_active and self.blink_visible and caret_col < max_col) {
-            try cells.append(self.allocator, .{ .row = search_row, .col = caret_col, .codepoint = '|', .style = .{ .foreground = fg } });
-        }
-
+        // 검색어·placeholder·caret은 **셀이 아니라 measured 경로**로 그린다(`collectSidebarSearchText`).
+        // 🔍만 셀에 남는 이유는 등록 PUA 합성 아이콘이라 셀 슬롯에 꽉 차게 그려지는 편이 정확하기 때문이다 —
+        // measured로 옮겨야 하는 것은 **폰트 크기가 바 밴드를 넘치는** 텍스트 쪽이다(docs/file-explorer.md §3.5).
         return renderer.DrawList{
             .size = .{ .cols = cols, .rows = 1 },
             .cursor = .{ .row = 0, .col = 0 },
@@ -36349,6 +36319,104 @@ pub const AppSession = struct {
             .cells = try cells.toOwnedSlice(self.allocator),
             .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
         };
+    }
+
+    /// 검색 줄 텍스트가 놓이는 사각형(사이드바 내부 상대 px). 렌더·caret·IME 후보창이 공유하는 단일 출처다.
+    /// 세로는 상단 바 밴드 안에서 **role line box** 기준 중앙이다 — 셀 높이가 아니라 role 토큰(pt)에서 나오므로
+    /// 폰트를 키워도 밴드를 넘치지 않는다(이 이관의 목적).
+    fn sidebarSearchTextRect(self: *const AppSession) ?chrome.draw.Rect {
+        const cw = self.cell_width_px;
+        if (cw == 0 or self.sidebar_header_height_px == 0) return null;
+        const cols = self.sidebar_width_px / cw;
+        if (cols < 13) return null; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList와 정합)
+        const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지(셀 경로와 같은 여백 규칙)
+        if (max_col <= sidebar_search_text_col) return null;
+        const x = @as(u32, sidebar_search_text_col) * cw;
+        const w = (max_col - sidebar_search_text_col) * cw;
+        const bar = self.chromeBarHeightPx();
+        const line_h = chrome.ui.typography.lineHeightPx(.control, self.scale_milli);
+        const y = self.sidebarSearchBandTopPx() +| (if (bar > line_h) (bar - line_h) / 2 else 0);
+        return .{ .x = @intCast(x), .y = @intCast(y), .w = @intCast(w), .h = @intCast(line_h) };
+    }
+
+    /// 검색 줄에 그릴 문자열을 한 버퍼로 합친다(owned). query + IME preedit + caret을 **한 run**으로 두는 이유는
+    /// 셋을 따로 lower하면 각자 자기 원점에서 다시 시작해 겹치기 때문이다(Session Dock 검색과 같은 처방).
+    /// caret이 문자열 **끝**에 오므로, 넘칠 때 앞을 자르는 `.tail` 앵커면 방금 친 글자와 caret이 항상 남는다.
+    /// 빈 검색 + 비활성이면 placeholder를 돌려주고 `muted`를 true로 준다.
+    fn sidebarSearchTextAlloc(self: *AppSession, muted: *bool) ?[]u8 {
+        const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
+        const show_caret = self.sidebar_search_active and self.blink_visible;
+        if (!has_text) {
+            if (show_caret) {
+                muted.* = false;
+                return self.allocator.dupe(u8, "|") catch null;
+            }
+            if (self.sidebar_search_active) return null; // 활성 + 빈 검색 + blink off 위상 = 아무것도 안 그린다
+            muted.* = true;
+            return self.allocator.dupe(u8, "Search") catch null;
+        }
+        muted.* = false;
+        var out: std.ArrayList(u8) = .empty;
+        out.appendSlice(self.allocator, self.sidebar_search_input.query.items) catch return null;
+        out.appendSlice(self.allocator, self.sidebar_search_input.preedit.items) catch {
+            out.deinit(self.allocator);
+            return null;
+        };
+        if (show_caret) out.append(self.allocator, '|') catch {
+            out.deinit(self.allocator);
+            return null;
+        };
+        return out.toOwnedSlice(self.allocator) catch null;
+    }
+
+    /// 사이드바 검색 줄 텍스트를 measured 경로로 수집한다. 캐시가 hit이면 CoreText를 아예 부르지 않는다 —
+    /// 이 함수는 `rebuildSidebar`가 아니라 프레임 조립에서 불리지만, 사이드바는 hover·드래그마다 다시 그려지므로
+    /// 캐시가 없으면 그 이벤트마다 셰이핑이 돈다(docs/file-explorer.md §3.5의 이관 선행 조건).
+    fn collectSidebarSearchText(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+    ) void {
+        if (self.sidebar_collapsed) return;
+        const rect = self.sidebarSearchTextRect() orelse return;
+        var muted = false;
+        const text = self.sidebarSearchTextAlloc(&muted) orelse return;
+        defer self.allocator.free(text);
+
+        const tokens = self.buildChromeTokens();
+        const runs = [_]chrome.draw.Run{.{ .text = text }};
+        const ops = [_]chrome.draw.Op{.{
+            .text = .{
+                .origin = .{ .x = rect.x, .y = rect.y },
+                .runs = &runs,
+                .role = if (muted) .muted_fg else .surface_fg,
+                .text_role = .control,
+                .max_width_px = rect.w,
+                // 넘치면 **앞**을 자른다 — caret과 방금 친 글자가 끝에 있다.
+                .anchor = .tail,
+            },
+        }};
+        const cols: u16 = @intCast(@min(self.sidebar_width_px / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
+        const fingerprint = chrome_draw_lowering.richTextFingerprint(&ops, &tokens, self.cell_width_px, self.cell_height_px, cols, 1, 0);
+        if (!MeasuredTextCache.hit(self.sidebar_search_text_cache, fingerprint)) {
+            var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, &ops, &tokens, self.cell_width_px, .{
+                .family = self.appearance.font.family,
+                .fallback = self.appearance.font.fallback,
+            }) catch return;
+            defer request.deinit(self.allocator);
+            var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, self.scale_milli) catch return;
+            defer unresolved.deinit(self.allocator);
+            const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
+            MeasuredTextCache.store(&self.sidebar_search_text_cache, self.allocator, fingerprint, artifact, 0);
+        }
+        if (self.sidebar_search_text_cache) |*cache| {
+            const dl = chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return;
+            self.collectMeasuredTextFromCache(collected, dl, cache, builder, .{ .sidebar_search = .{
+                .origin_x = 0,
+                .origin_y = 0,
+                .colors = .{ .default_fg = self.appearance.theme.foreground },
+            } });
+        }
     }
 
     /// 사이드바 접힘 시 좌상단 알림 종(🔔) 글리프 col — 신호등 클리어런스 오른쪽 **첫(가장 왼쪽)** 아이콘. 펼침 헤더처럼
@@ -73485,4 +73553,106 @@ test "measured 텍스트 캐시: store가 옛 아티팩트를 해제하고 clear
     MeasuredTextCache.clear(&slot, allocator);
     try std.testing.expect(slot == null);
     MeasuredTextCache.clear(&slot, allocator); // 두 번 비워도 안전(초크포인트가 여러 경로에서 불린다)
+}
+
+// 이 테스트가 증명하는 것: 검색 줄 텍스트가 **폰트 크기와 무관하게** 상단 바 밴드 안에 있다.
+//
+// 왜 터미널에서 중요한가 — 이것이 measured 이관의 목적 그 자체다. 셀 경로였을 때는 글자 높이가 셀에서
+// 나와서, 폰트가 40pt 바를 넘기면(대략 24pt 이상) 검색 글자가 밴드 아래로 삐져나왔다. 앞 PR은 그 한계를
+// "밴드 상단에 붙고 위로는 넘지 않는다"로만 고정할 수 있었다. 이제 높이가 role 토큰(pt)에서 나오므로
+// 두 크기 모두에서 **완전히** 밴드 안이어야 한다(docs/file-explorer.md §3.5).
+test "사이드바 검색 텍스트는 폰트를 키워도 상단 바 밴드를 넘지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1920, 1200, 2000);
+
+    const Probe = struct {
+        fn check(s: *AppSession) !void {
+            const band_top = s.sidebarSearchBandTopPx();
+            const band_bottom = band_top + s.chromeBarHeightPx();
+            const rect = s.sidebarSearchTextRect() orelse return error.TestUnexpectedResult;
+            const top: u32 = @intCast(rect.y);
+            const bottom = top + rect.h;
+            try std.testing.expect(top >= band_top); // 띠(신호등 줄)를 침범하지 않는다
+            try std.testing.expect(bottom <= band_bottom); // **아래로도** 넘치지 않는다 — 셀 경로에서 깨지던 지점
+            // 밴드 안 세로 중앙(정수 나눗셈 ±1).
+            const slack = (band_bottom - band_top) - rect.h;
+            try std.testing.expect(top - band_top <= slack / 2 + 1);
+        }
+    };
+
+    try Probe.check(session);
+
+    // 셀이 바보다 커지는 크기. 셀 경로였다면 여기서 글자가 밴드 아래로 나갔다.
+    const cell_before = session.cell_height_px;
+    session.setFontSize(session.appearance.font.size + 24);
+    try std.testing.expect(session.cell_height_px != cell_before); // 폰트가 실제로 바뀌었다
+    try std.testing.expect(session.cell_height_px > session.chromeBarHeightPx()); // 셀이 바를 넘는 상황이 맞다
+    try Probe.check(session);
+}
+
+// 이 테스트가 증명하는 것: 검색 줄이 query·IME preedit·caret을 **한 문자열**로 합치고, 빈 상태의 세 갈래를
+// 구분한다.
+//
+// 왜 터미널에서 중요한가 — 셋을 따로 lower하면 각자 자기 원점에서 다시 시작해 글자가 겹친다(Session Dock이
+// 같은 이유로 `emitJoined`를 쓴다). 그리고 caret이 문자열 **끝**에 있다는 것이 `.tail` 앵커가 성립하는
+// 전제다 — 넘칠 때 CoreText가 앞을 잘라도 방금 친 글자와 caret은 남는다.
+test "사이드바 검색 줄은 query·preedit·caret을 한 문자열로 합친다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var muted = false;
+    // 비활성 + 빈 검색 = placeholder(흐리게).
+    session.sidebar_search_active = false;
+    {
+        const text = session.sidebarSearchTextAlloc(&muted) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("Search", text);
+        try std.testing.expect(muted);
+    }
+
+    // 활성 + 내용 + caret 위상 on → query + preedit + '|'가 이 순서로 이어진다.
+    session.sidebar_search_active = true;
+    session.blink_visible = true;
+    try session.sidebar_search_input.query.appendSlice(allocator, "maru");
+    try session.sidebar_search_input.preedit.appendSlice(allocator, "한");
+    {
+        const text = session.sidebarSearchTextAlloc(&muted) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("maru한|", text);
+        try std.testing.expect(!muted); // 내용이 있으면 흐리지 않다
+    }
+
+    // blink off 위상에서는 caret만 빠진다(내용은 그대로 — 깜빡임이 글자를 지우면 안 된다).
+    session.blink_visible = false;
+    {
+        const text = session.sidebarSearchTextAlloc(&muted) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("maru한", text);
+    }
+
+    // 활성 + 빈 검색 + blink off = 아무것도 그리지 않는다(placeholder가 caret 자리에서 깜빡이면 안 된다).
+    session.sidebar_search_input.query.clearRetainingCapacity();
+    session.sidebar_search_input.preedit.clearRetainingCapacity();
+    try std.testing.expect(session.sidebarSearchTextAlloc(&muted) == null);
 }

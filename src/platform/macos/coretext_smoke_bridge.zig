@@ -96,6 +96,9 @@ pub extern fn maru_macos_coretext_shape_chrome_text(
     font_size_px: f64,
     weight: u32,
     max_width_px: f64,
+    /// 0=넘치면 뒤를 자른다(`…` 뒤), 1=**앞을** 자른다(`…` 앞). 입력 줄은 caret이 문자열 끝에 있어 1이어야
+    /// 방금 친 글자가 보인다(docs/file-explorer.md §3.5).
+    anchor_tail: u32,
     result: *NativeChromeTextShapeResult,
     glyph_records: [*]NativeChromeTextGlyphRecord,
     glyph_record_capacity: usize,

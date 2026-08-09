@@ -53,6 +53,9 @@ pub const Request = struct {
         origin: chrome.draw.Px,
         max_width_px: u32,
         foreground: u32,
+        /// 넘칠 때 어느 쪽을 자르는가. 입력 줄은 `.tail`이어야 caret과 방금 친 글자가 남는다 —
+        /// 셀 경로가 `overlay_input.inputLineView`(tail 창)로 풀던 규칙을 CoreText truncation이 대신한다.
+        anchor: chrome.text_layout.Anchor = .head,
         placement: chrome.draw.TextPlacement = .origin,
         scroll_clipped: bool = false,
         above_clip: ?chrome.draw.Rect = null,
@@ -420,6 +423,7 @@ pub fn prepareRequest(
                     .origin = text.origin,
                     .max_width_px = max_width,
                     .foreground = packRgb(tk.get(text.role)),
+                    .anchor = text.anchor,
                     .placement = text.placement,
                     .scroll_clipped = text.scroll_clipped,
                     .above_clip = if (text.above_scroll) text.clip else null,
@@ -603,6 +607,62 @@ test "chrome text shapes with the requested family and keeps the system face whe
     const system_name = std.mem.sliceTo(&system_artifact.glyphs[0].font_name, 0);
     try std.testing.expect(std.mem.startsWith(u8, menlo_name, "Menlo"));
     try std.testing.expect(!std.mem.startsWith(u8, system_name, "Menlo"));
+}
+
+// 이 테스트가 증명하는 것: `.tail` 앵커가 넘칠 때 **앞을** 잘라 문자열 끝을 남긴다.
+//
+// 왜 터미널에서 중요한가 — 입력 줄(사이드바 검색)은 caret과 방금 친 글자가 문자열 끝에 있다. 기본 `.head`
+// 처럼 뒤를 자르면 지금 입력하는 자리가 화면 밖으로 나가 타이핑이 보이지 않는다. 셀 경로는 이것을
+// `overlay_input.inputLineView`(tail 창 + 선두 `…`)로 풀었고, measured 경로는 CoreText truncation에 맡긴다
+// (docs/file-explorer.md §3.5). 판정을 codepoint로 두는 이유는 "잘렸다"가 아니라 **어느 쪽이 잘렸는지**가
+// 계약이기 때문이다 — 두 앵커가 같은 결과를 내면 이 이관이 무의미해진다.
+test "tail anchor truncates the head so the caret end survives" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaZ";
+    const runs = [_]chrome.draw.Run{.{ .text = long }};
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+
+    const Shape = struct {
+        fn run(alloc: std.mem.Allocator, tokens: *const chrome.Tokens, text_runs: []const chrome.draw.Run, anchor: chrome.text_layout.Anchor) !UnresolvedArtifact {
+            const ops = [_]chrome.draw.Op{.{
+                .text = .{
+                    .origin = .{ .x = 0, .y = 0 },
+                    .runs = text_runs,
+                    .role = .surface_fg,
+                    .text_role = .control,
+                    .max_width_px = 60, // 원문보다 훨씬 좁다 → 반드시 잘린다
+                    .anchor = anchor,
+                },
+            }};
+            var request = try prepareRequest(alloc, 1, &ops, tokens, 8, .{});
+            defer request.deinit(alloc);
+            return shapeRequest(alloc, &request, 1000);
+        }
+    };
+
+    var head = try Shape.run(allocator, &tk, &runs, .head);
+    defer head.deinit(allocator);
+    var tail = try Shape.run(allocator, &tk, &runs, .tail);
+    defer tail.deinit(allocator);
+    try std.testing.expect(head.glyphs.len > 0 and tail.glyphs.len > 0);
+
+    // 판정은 **끝 글자가 살아남는가**로 한다. 브리지는 codepoint를 원본 문자열의 `string_index`에서 읽으므로
+    // `…` 토큰 glyph가 원본 문자로 보고될 수 있다 — 즉 "앞에 …가 붙었나"는 이 ABI로 신뢰할 수 없다. 반면
+    // 계약의 본질은 "caret이 있는 끝이 남는가"이고, 그건 마지막 glyph로 정확히 판정된다.
+    try std.testing.expectEqual(@as(u32, 'Z'), tail.glyphs[tail.glyphs.len - 1].codepoint);
+    // head 앵커는 반대로 끝을 버린다 — 두 앵커가 같은 결과를 내면 이 이관이 무의미하므로 함께 고정한다.
+    try std.testing.expect(head.glyphs[head.glyphs.len - 1].codepoint != 'Z');
 }
 
 // 이 테스트가 증명하는 것: 설치되지 않은 family를 요청해도 프레임이 죽지 않고 system face로 물러난다.
@@ -947,6 +1007,7 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
         scaled_size,
         weight(run.role),
         @floatFromInt(run.max_width_px),
+        @intFromBool(run.anchor == .tail),
         &native,
         glyphs.ptr,
         glyphs.len,

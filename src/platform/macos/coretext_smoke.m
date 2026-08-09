@@ -1481,6 +1481,7 @@ void maru_macos_coretext_shape_chrome_text(
     double font_size_px,
     uint32_t weight,
     double max_width_px,
+    uint32_t anchor_tail,
     MaruChromeTextShapeResult *result,
     MaruChromeTextGlyphRecord *glyph_records,
     size_t glyph_record_capacity
@@ -1529,7 +1530,12 @@ void maru_macos_coretext_shape_chrome_text(
             CFStringRef ellipsis_string = CFSTR("…");
             CFAttributedStringRef ellipsis = CFAttributedStringCreate(kCFAllocatorDefault, ellipsis_string, attributes);
             CTLineRef token = ellipsis == NULL ? NULL : CTLineCreateWithAttributedString(ellipsis);
-            CTLineRef truncated = token == NULL ? NULL : CTLineCreateTruncatedLine(line, (CGFloat)max_width_px, kCTLineTruncationEnd, token);
+            // 앵커가 tail이면 **앞을** 자른다(`…` 도 앞에 붙는다). 입력 줄은 caret과 방금 친 글자가 문자열
+            // 끝에 있어서, 뒤를 자르면 지금 입력하는 자리가 화면 밖으로 나간다. 셀 경로가
+            // `overlay_input.inputLineView`(tail 창)로 풀던 것을 CoreText가 네이티브로 지원하므로, 그 규칙을
+            // 픽셀 도메인에 다시 구현하지 않는다(docs/file-explorer.md §3.5).
+            const CTLineTruncationType truncation = (anchor_tail != 0u) ? kCTLineTruncationStart : kCTLineTruncationEnd;
+            CTLineRef truncated = token == NULL ? NULL : CTLineCreateTruncatedLine(line, (CGFloat)max_width_px, truncation, token);
             if (truncated != NULL) draw_line = truncated;
             if (token) CFRelease(token);
             if (ellipsis) CFRelease(ellipsis);

@@ -20,6 +20,7 @@ const dock_panel = maru.session.dock_panel;
 const dock_layout = maru.session.dock_layout;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const tab_ops = @import("tab.zig");
 const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;

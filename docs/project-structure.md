@@ -58,8 +58,11 @@ src/
                         패널 — 트리 mutation·패널 생명주기·dock entry, F2. tree↔panel이 순환하므로 한 파일이다), pane.zig(pane·split·divider —
                         분할/합치기·pane 포커스·드래그·divider 히트테스트·pane별 바/스크롤바, F4), dock.zig(도크 일반 —
                         view 전환·레이아웃·리스트 스크롤바·포커스 큐, F5. 도크 *안*의 내용물은 각자
-                        agent_dock/file_panel 소유다). 각 파일은 `*AppSession`을 받는
+                        agent_dock/file_panel 소유다), tab.zig(탭 — 생성·닫기·전환·이동·고정·그룹·제목·표면
+                        집계, F6. `*Tab` 하나만 보는 순수 판정 10개를 함께 가진다). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
+                        그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
+                        `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).
                         **test는 그룹 파일로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측).
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.

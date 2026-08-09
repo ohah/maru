@@ -8,19 +8,19 @@ const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생�
 const config_mod = maru.config;
 const renderer = maru.renderer;
 pub const terminal = maru.terminal;
-const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
+pub const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 pub const dock_layout = maru.session.dock_layout;
 pub const dock_panel = maru.session.dock_panel;
 const git_command = maru.session.git_command; // 브랜치 목록 출력 파서(순수) — argv 조립과 같은 모듈
 const content_menu = maru.session.content_menu;
 pub const file_tree = maru.session.file_tree;
-const file_tree_navigation = maru.session.file_tree_navigation;
-const file_tree_mutation = maru.session.file_tree_mutation;
-const file_tree_icon = chrome.file_tree_icon;
+pub const file_tree_navigation = maru.session.file_tree_navigation;
+pub const file_tree_mutation = maru.session.file_tree_mutation;
+pub const file_tree_icon = chrome.file_tree_icon;
 pub const dock_view_bar = chrome.components.dock_view_bar;
 const git_backend_mod = @import("git_backend.zig");
 const scm_view = maru.session.scm_view;
-const file_panel_bridge = maru.session.file_panel_bridge;
+pub const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
 
@@ -48,8 +48,8 @@ const RemoteHostPool = if (is_macos) session_host.host_pool.HostPool(RemoteSessi
 extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
-const file_tree_backend = @import("file_tree_backend.zig");
-const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
+pub const file_tree_backend = @import("file_tree_backend.zig");
+pub const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 pub const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
 pub const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
@@ -74,7 +74,8 @@ const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인
 const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
-const agent_dock = @import("app_session/agent_dock.zig"); // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+pub const agent_dock = @import("app_session/agent_dock.zig");
+const file_panel_ops = @import("app_session/file_panel.zig"); // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
@@ -87,16 +88,16 @@ const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh cont
 // `TermRuntime`(아래 정의)을 주입해 인스턴스화하고, 별칭으로 기존 Term/*Term/Pane/Tab/PaneTree 참조를 그대로
 // 쓴다. 단일 출처: src/session/session_model.zig, docs/layering-and-portability.md §3.1.
 const Model = maru.session.session_model.Model(TermRuntime);
-const Term = Model.Term;
-const Pane = Model.Pane;
+pub const Term = Model.Term;
+pub const Pane = Model.Pane;
 const PaneTree = Model.PaneTree;
-const Tab = Model.Tab;
+pub const Tab = Model.Tab;
 const group_normalize = maru.session.group_normalize; // M3c: 그룹 정규화 순수 함수(L2 리프트) — 아래 L4 메서드가 self.tabs.items로 위임(재구현 금지)
 const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
 
-const FilePanelTestC = struct {
+pub const FilePanelTestC = struct {
     extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
-    extern "c" fn renameatx_np(
+    pub extern "c" fn renameatx_np(
         from_dir_fd: c_int,
         from: [*:0]const u8,
         to_dir_fd: c_int,
@@ -105,7 +106,7 @@ const FilePanelTestC = struct {
     ) c_int;
 };
 
-const rename_swap: c_uint = 0x00000002;
+pub const rename_swap: c_uint = 0x00000002;
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -732,7 +733,7 @@ const header_icon_scale = chrome.ui.icon;
 
 /// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
 /// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
-fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
+pub fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
     if (cell_height_px == 0) return titlebar_strip_px;
     const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
     const raster_height_px = headerIconRasterExtentPx(cell_height_px);
@@ -1650,7 +1651,7 @@ test "P2-b: TermRuntime는 opaque handle을 들고 *LivePtySession을 직접 참
 /// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
 /// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가
 /// **단일 출처**로 한다 — 실행 중 명령 판정(closeTargetHasRunningJob)과 실제 실행(executeClose)이 그 한 함수를 공유한다.
-const PendingClose = union(enum) {
+pub const PendingClose = union(enum) {
     pane_or_tab, // close_tab 액션(워크스페이스 cascade): split이면 활성 pane, 아니면 탭(마지막이면 창)
     term_or_pane, // close_term 액션(⌘W Term cascade): Term>pane>워크스페이스
     tab_index: usize, // 사이드바 ✕ 클릭 — 특정 탭(마지막이면 창)
@@ -1661,7 +1662,7 @@ const PendingClose = union(enum) {
     window, // macOS 빨간 닫기 버튼 — 창(세션) 전체
 };
 
-const FileTreeFocusOwner = struct { restore_surface: ?u64 };
+pub const FileTreeFocusOwner = struct { restore_surface: ?u64 };
 const FocusOwner = union(enum) {
     workspace,
     /// Entry가 존재하지만 native surface publish를 기다리는 동안만 쓰는 fail-closed 파일 entry identity.
@@ -1705,8 +1706,8 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
 const FilePanelClosePhase = enum { syncing, confirm_dirty, confirm_conflict, saving };
 // JavaScript bridge arguments are IEEE-754 numbers. Keep close request IDs inside the exact integer range so the
 // request echoed by CM6 cannot alias a different native request after conversion through NSNumber/JavaScript.
-const max_file_panel_close_request_id = maru.session.control_bridge.max_js_safe_integer;
-const PendingFilePanelClose = struct {
+pub const max_file_panel_close_request_id = maru.session.control_bridge.max_js_safe_integer;
+pub const PendingFilePanelClose = struct {
     surface_id: u64,
     surface_generation: u64,
     request_id: u64,
@@ -1732,7 +1733,7 @@ pub const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 }
 pub const FilePanelSaveCloseAction = struct { surface_id: u64, request_id: u64 };
 pub const FilePanelCloseUnlockAction = struct { surface_id: u64, request_id: u64 };
 
-const DeletedSurfaceSet = struct {
+pub const DeletedSurfaceSet = struct {
     const slot_count = dock_panel.max_entries * 2;
     keys: [slot_count]u64 = [_]u64{0} ** slot_count,
 
@@ -1740,7 +1741,7 @@ const DeletedSurfaceSet = struct {
         return @as(usize, @truncate(surface_id *% 0x9e3779b97f4a7c15)) & (slot_count - 1);
     }
 
-    fn insert(self: *@This(), surface_id: u64) void {
+    pub fn insert(self: *@This(), surface_id: u64) void {
         std.debug.assert(surface_id != 0);
         var slot = start(surface_id);
         for (0..slot_count) |_| {
@@ -1753,7 +1754,7 @@ const DeletedSurfaceSet = struct {
         unreachable; // 최대 256개를 512-slot table에 넣으므로 full은 모델 cap 위반이다.
     }
 
-    fn contains(self: *const @This(), surface_id: u64) bool {
+    pub fn contains(self: *const @This(), surface_id: u64) bool {
         if (surface_id == 0) return false;
         var slot = start(surface_id);
         for (0..slot_count) |_| {
@@ -1768,9 +1769,9 @@ const DeletedSurfaceSet = struct {
 
 /// `fileEntryForIdCounted`의 방문 수 계측(성능 gate 소비 — docs/performance-budget.md).
 /// FP16 전에는 `DockPanel.EntryLookupCounters`였다 — 조회가 도크에서 Term 창구로 옮겨오며 함께 왔다.
-const EntryLookupCounters = struct { entry_visits: usize = 0 };
+pub const EntryLookupCounters = struct { entry_visits: usize = 0 };
 
-const FileTreeDockRemovalStats = struct {
+pub const FileTreeDockRemovalStats = struct {
     entry_visits: usize = 0,
     dirty_sync_visits: usize = 0,
     unlock_visits: usize = 0,
@@ -1797,7 +1798,7 @@ pub const SurfaceClosedCallback = *const fn (context: ?*anyopaque, surface_id: u
 /// 한 곳에서 풀어 이 값으로 돌려주고, scopeHasRunningJob(실행 중 명령 검사)과 executeClose(실제 닫기)가 같은 값을
 /// 소비한다 — 판정과 실행이 따로 인코딩돼 갈리지 않게 하는 단일 출처. term/pane은 항상 활성 대상(닫기 cascade가
 /// 활성에 동작), tab은 인덱스(활성 탭 또는 사이드바에서 클릭한 탭).
-const CloseScope = union(enum) {
+pub const CloseScope = union(enum) {
     none, // 닫을 게 없음(범위 밖 인덱스)
     term, // 활성 pane의 활성 Term 하나
     pane, // 활성 pane(collapse)
@@ -1982,8 +1983,8 @@ const RenameTarget = union(enum) {
     file_tree: FileTreeEditTarget,
 };
 
-const FileTreeEditKind = enum { create_file, create_directory, rename };
-const FileTreeEditTarget = struct {
+pub const FileTreeEditKind = enum { create_file, create_directory, rename };
+pub const FileTreeEditTarget = struct {
     path_buf: [std.fs.max_path_bytes]u8 = undefined,
     path_len: usize = 0,
     row_kind: file_tree.RowKind,
@@ -1993,12 +1994,12 @@ const FileTreeEditTarget = struct {
     parent_identity: ?file_tree.Identity = null,
     root_identity: ?file_tree.Identity = null,
 
-    fn path(self: *const FileTreeEditTarget) []const u8 {
+    pub fn path(self: *const FileTreeEditTarget) []const u8 {
         return self.path_buf[0..self.path_len];
     }
 };
 
-const PendingFileTreeDelete = struct {
+pub const PendingFileTreeDelete = struct {
     path_buf: [std.fs.max_path_bytes]u8 = undefined,
     path_len: usize = 0,
     row_kind: file_tree.RowKind,
@@ -2008,7 +2009,7 @@ const PendingFileTreeDelete = struct {
     root_identity: ?file_tree.Identity = null,
     root_generation: u64 = 0,
 
-    fn path(self: *const PendingFileTreeDelete) []const u8 {
+    pub fn path(self: *const PendingFileTreeDelete) []const u8 {
         return self.path_buf[0..self.path_len];
     }
 };
@@ -2067,7 +2068,7 @@ const PendingTrash = struct {
     restoring: bool = false,
 };
 const PendingDeleteRoot = struct { id: u64, root: []u8 };
-const FileTreeMutationEditorLock = struct {
+pub const FileTreeMutationEditorLock = struct {
     const Phase = enum { waiting, submitted };
     mutation_id: u64,
     surface_id: u64,
@@ -2075,7 +2076,7 @@ const FileTreeMutationEditorLock = struct {
     acknowledged: bool = false,
     phase: Phase = .waiting,
 };
-const PendingRenameRemap = struct {
+pub const PendingRenameRemap = struct {
     const DockItem = struct {
         // 키는 `expected` 경로 + entry의 `mutation_pending_id` 스탬프다(FP16 §1 ⑷). EntryId는 이 plan의 키가
         // 아니므로 들지 않는다 — 들면 "안정 키가 여기 있다"는 오해를 남긴다.
@@ -2092,7 +2093,7 @@ const PendingRenameRemap = struct {
     recent_len: usize = 0,
     committed: bool = false,
 
-    fn deinit(self: *PendingRenameRemap, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *PendingRenameRemap, allocator: std.mem.Allocator) void {
         for (self.dock_items[0..self.dock_len]) |item| {
             allocator.free(item.expected);
             if (!self.committed) allocator.free(item.replacement);
@@ -2147,7 +2148,7 @@ const PointerGestureOwner = union(enum) {
 };
 const file_tree_trash_capacity: usize = 16;
 
-const FileTreePerfCounters = struct {
+pub const FileTreePerfCounters = struct {
     row_visits: usize = 0,
     classifier_calls: usize = 0,
     pointer_events: usize = 0,
@@ -3989,16 +3990,12 @@ pub const AppSession = struct {
     }
 
     /// 활성 탭의 포커스된 panel. live_pty/pump/surface 접근(입력·커서·frame_loop pump)에 쓴다.
-    fn activePane(self: *AppSession) *Pane {
+    pub fn activePane(self: *AppSession) *Pane {
         return self.activeTab().activePane();
     }
 
     pub fn dockVisible(self: *const AppSession) bool {
         return self.dock_initialized and !self.chrome_minimal and self.dock.presented and !self.dock.collapsed;
-    }
-
-    fn dockHasContent(self: *const AppSession) bool {
-        return self.fileEntryCountConst() > 0 or (self.file_tree_initialized and self.file_tree.hasContent());
     }
 
     /// 현재 뷰가 스위처의 몇 번째 슬롯인지. chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 이 대응은
@@ -4070,7 +4067,7 @@ pub const AppSession = struct {
         // 뷰 전환은 어느 방향이든 도크 키보드 소유권을 놓는다. 들어올 때도 아직 누른 적이 없고,
         // 나갈 때 남겨 두면 다시 돌아왔을 때 클릭 없이 Enter를 가져간다.
         agent_dock.releaseAgentSessionDockKeyFocus(self);
-        if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
+        if (view != .explorer and file_panel_ops.fileTreeFocused(self)) file_panel_ops.restoreFileTreeFocus(self);
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
         if (view == .agent_sessions) {
@@ -4212,7 +4209,7 @@ pub const AppSession = struct {
         // 아직 못 건 diff 요청을 여기서 다시 건다. 백엔드 슬롯이 차 있으면 submit이 false를 주므로(그 경우
         // request_id가 0으로 남는다) 다음 tick에 자연히 재시도된다 — 브리지가 아니라 tick이 이 책임을 진다.
         if (self.git_backend != null) {
-            var it = self.fileEntries();
+            var it = file_panel_ops.fileEntries(self);
             while (it.next()) |entry| {
                 if (entry.kind != .diff or entry.diff_ready or entry.diff_failed) continue;
                 if (entry.diff_request_id == 0) self.requestDiffContent(entry);
@@ -4418,7 +4415,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn cancelPointerGesture(self: *AppSession) void {
+    pub fn cancelPointerGesture(self: *AppSession) void {
         // 탭 드래그 중에는 `ensureActiveTermVisible`이 스크롤을 얼려 둔다(preview 슬롯이 영속 상태
         // `tab_scroll_cols`로 새지 않게). 끝나는 자리에서 한 번 풀어 주지 않으면, 드래그 중 ⌘⌥]로 옮긴
         // 활성 탭이 넘치는 바 밖에 남아 하이라이트가 어디에도 안 보이는 상태로 굳는다.
@@ -4439,25 +4436,12 @@ pub const AppSession = struct {
         self.pointer_gesture_owner = .none;
     }
 
-    fn advanceDockAsyncEpoch(self: *AppSession) void {
-        self.pending_dock_focus = null;
-        self.pending_dock_focus_action = false;
-        if (self.dock_async_epoch != std.math.maxInt(u64)) {
-            self.dock_async_epoch += 1;
-        } else {
-            // Epoch exhaustion must never make an old callback current again. Saturation keeps all
-            // subsequently issued tokens at the terminal epoch while EntryId/surface/revision still
-            // provide independent identity barriers.
-            self.dock_async_epoch = std.math.maxInt(u64);
-        }
-    }
-
-    fn cancelPendingDockFocus(self: *AppSession) void {
+    pub fn cancelPendingDockFocus(self: *AppSession) void {
         self.pending_dock_focus = null;
         self.pending_dock_focus_action = false;
     }
 
-    fn queuePendingDockFocus(self: *AppSession, entry: *const dock_panel.Entry) void {
+    pub fn queuePendingDockFocus(self: *AppSession, entry: *const dock_panel.Entry) void {
         self.pending_dock_focus = .{
             .entry_id = entry.id,
             .expected_surface_id = if (entry.surface_id == 0) null else entry.surface_id,
@@ -4467,7 +4451,7 @@ pub const AppSession = struct {
         self.pending_dock_focus_action = true;
     }
 
-    fn requestDockEntryFocus(self: *AppSession, entry: *const dock_panel.Entry) void {
+    pub fn requestDockEntryFocus(self: *AppSession, entry: *const dock_panel.Entry) void {
         self.cancelPendingDockFocus();
         self.queuePendingDockFocus(entry);
         // Programmatic focus는 surface_id 존재만으로 native WKWebView publish를 추측하지 않는다. typed
@@ -4482,7 +4466,7 @@ pub const AppSession = struct {
     }
 
     fn requeuePendingDockFocus(self: *AppSession, old: PendingDockFocus) void {
-        const entry = (self.fileEntryForId(old.entry_id) orelse return);
+        const entry = (file_panel_ops.fileEntryForId(self, old.entry_id) orelse return);
         const expected_surface_id = old.expected_surface_id orelse return;
         if (entry.surface_id != expected_surface_id or entry.editor_revision != old.request_or_entry_revision) return;
         self.queuePendingDockFocus(entry);
@@ -4495,126 +4479,7 @@ pub const AppSession = struct {
         self.file_tree_restore_surface_pending = null;
     }
 
-    /// 세로 폭이 좁은 창에서는 Artifact의 우측 column 대신 하단 band가 더 읽기 쉽다. 파일 도크의
-    /// tree/entry 상태는 그대로 두고 side만 바꾸며, side별 기본 크기를 다시 쓰도록 명시 크기는 비운다.
-    /// 커맨드 팔릿에서 실행하므로 색/테마와 무관한 구조 전환이고, 모든 terminal pane의 grid를 즉시 갱신한다.
-    fn toggleFilePanelDockSide(self: *AppSession) void {
-        if (!self.dock_initialized or !self.dock.presented) return;
-        self.dock.side = switch (self.dock.side) {
-            .right => .bottom,
-            .bottom => .right,
-        };
-        self.dock.size = 0;
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
-        self.last_resize_size = null;
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-    }
-
-    fn filePanelDockControlRect(self: *const AppSession) ?maru.session.SplitRect {
-        // titlebar 띠의 파일 도크 진입점은 빈 시작 상태에도 유지한다. 내용이 있으면 접기/펴기, 없으면 기존
-        // open_file_panel과 같은 파일 선택 요청을 내므로 사용자가 첫 파일을 열 진입점을 잃지 않는다.
-        if (!self.dock_initialized or self.chrome_minimal or self.cell_width_px == 0) return null;
-        const w = @min(2 * self.cell_width_px, self.backing_width_px);
-        // 렌더러의 1.7× quad가 큰 글꼴에서 titlebar 띠 아래로 보일 수 있으므로 hit/hover rect도 실제
-        // visual bottom까지 포함한다. 가로는 2셀 rect 안에 1.7셀 glyph를 중앙 배치해 이미 전부 포함한다.
-        const h = @min(@max(dockToggleVisualBottomPx(self.cell_height_px, self.titlebar_strip_px), self.titlebar_strip_px), self.backing_height_px);
-        if (w == 0 or h == 0) return null;
-        // 창 우측 상단이 macOS 둥근 코너라, 토글을 코너에 flush로 두면 코너 마스크가 글리프를 자른다(신호등 옆 사이드바
-        // ◧처럼 코너 클리어런스가 필요). 한 셀 여백으론 코너 반경(≈12px)을 못 벗어나 여전히 잘려(사용자 피드백) —
-        // **두 셀** 우측 여백을 둬 라운드가 끝난 직선 구간부터 아이콘이 오게 한다. render·hit·drag-region이 모두 이 rect를
-        // 쓰므로 함께 정합한다.
-        const margin = @min(2 * self.cell_width_px, self.backing_width_px -| w);
-        return .{ .x = self.backing_width_px -| w -| margin, .y = 0, .w = w, .h = h };
-    }
-
-    const FilePanelDockControlAction = enum { open, collapse, expand };
-
-    fn filePanelDockControlAction(self: *const AppSession) ?FilePanelDockControlAction {
-        if (!self.dock_initialized) return null;
-        if (!self.dock.presented) return .open;
-        return if (self.dock.collapsed) .expand else .collapse;
-    }
-
-    fn activateFilePanelDockControl(self: *AppSession) void {
-        const action = self.filePanelDockControlAction() orelse return;
-        // A collapsed right dock has no consumer for archive work.  Withdraw the current
-        // generation before changing geometry so reopening can request a fresh snapshot.
-        if (action == .collapse and self.dock.view == .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
-        // 열기/접기/펴기 어느 것도 도크 **내용**을 누른 게 아니다. 접었다 편 뒤 클릭 없이 Enter가
-        // 도크로 가지 않도록 소유권을 놓는다(게이트의 `dockVisible`만으로는 재표시 때 되살아난다).
-        agent_dock.releaseAgentSessionDockKeyFocus(self);
-        switch (action) {
-            .open => {
-                self.dock.presented = true;
-                self.dock.collapsed = false;
-            },
-            .collapse => self.dock.collapsed = true,
-            .expand => self.dock.collapsed = false,
-        }
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
-        self.last_resize_size = null;
-        self.metal_dirty = true;
-    }
-
-    fn requestFilePanelPick(self: *AppSession) void {
-        self.file_panel_pick_pending = true;
-    }
-
-    fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome, message: ?[]const u8) void {
-        self.file_tree_root_outcome = outcome;
-        if (message) |text| self.showNotice(text);
-    }
-
-    pub fn fileTreeRootOutcome(self: *const AppSession) FileTreeRootOutcome {
-        return self.file_tree_root_outcome;
-    }
-
-    fn requestFileTreeRootPick(self: *AppSession, operation: FileTreeRootOperation) void {
-        if (operation == .none or self.fileTreeNamespaceMutationBusy()) {
-            self.reportFileTreeRootOutcome(.busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
-            return;
-        }
-        self.file_tree_root_pick_pending = operation;
-        self.reportFileTreeRootOutcome(.picker_requested, null);
-    }
-
-    fn removeFileTreeRoot(self: *AppSession, path: []const u8) void {
-        if (self.fileTreeNamespaceMutationBusy()) {
-            self.reportFileTreeRootOutcome(.busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
-            return;
-        }
-        var candidate = self.file_tree.cloneForRootTransaction() catch {
-            self.reportFileTreeRootOutcome(.allocation_failed, "탐색기 루트 제거 상태를 준비할 수 없습니다.");
-            return;
-        };
-        defer candidate.deinit();
-        const removed = candidate.removeExplicitRoot(path) catch {
-            self.reportFileTreeRootOutcome(.model_stage_failed, "탐색기 루트를 제거할 수 없습니다.");
-            return;
-        };
-        if (!removed) {
-            self.reportFileTreeRootOutcome(.root_missing, "선택한 탐색기 루트가 더 이상 존재하지 않습니다.");
-            return;
-        }
-        self.resetFileTreeWatchRootsFor(&candidate, null) catch {
-            self.reportFileTreeRootOutcome(.watcher_stage_failed, "폴더 감시를 갱신할 수 없어 루트 제거를 취소했습니다.");
-            return;
-        };
-        var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
-        defer candidate_rows.deinit(self.allocator);
-        self.prepareFileTreeRowStaging(&candidate_rows, 0) catch {
-            self.reportFileTreeRootOutcome(.row_stage_failed, "탐색기 행 상태를 준비할 수 없어 루트 제거를 취소했습니다.");
-            return;
-        };
-        self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
-        self.commitFileTreeCandidate(&candidate, &candidate_rows);
-        self.reportFileTreeRootOutcome(.committed_remove, null);
-        self.file_tree_scroll.reset();
-        self.metal_dirty = true;
-    }
+    pub const FilePanelDockControlAction = enum { open, collapse, expand };
 
     pub fn takeFileTreeRootPickRequest(self: *AppSession) FileTreeRootOperation {
         const operation = self.file_tree_root_pick_pending;
@@ -4627,19 +4492,19 @@ pub const AppSession = struct {
         const operation = self.file_tree_root_picker_inflight;
         self.file_tree_root_picker_inflight = .none;
         if (operation == .none or path.len == 0) {
-            self.reportFileTreeRootOutcome(.picker_canceled, null);
+            file_panel_ops.reportFileTreeRootOutcome(self, .picker_canceled, null);
             return;
         }
         if (path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) {
-            self.reportFileTreeRootOutcome(.invalid_path, "선택한 폴더 경로가 올바르지 않습니다.");
+            file_panel_ops.reportFileTreeRootOutcome(self, .invalid_path, "선택한 폴더 경로가 올바르지 않습니다.");
             return;
         }
         if (self.file_tree_root_request_id == std.math.maxInt(u64)) {
-            self.reportFileTreeRootOutcome(.request_id_exhausted, "폴더 선택 요청 번호를 더 발급할 수 없습니다.");
+            file_panel_ops.reportFileTreeRootOutcome(self, .request_id_exhausted, "폴더 선택 요청 번호를 더 발급할 수 없습니다.");
             return;
         }
         const owned = self.allocator.dupe(u8, path) catch {
-            self.reportFileTreeRootOutcome(.allocation_failed, "폴더 선택 상태를 준비할 수 없습니다.");
+            file_panel_ops.reportFileTreeRootOutcome(self, .allocation_failed, "폴더 선택 상태를 준비할 수 없습니다.");
             return;
         };
         self.file_tree_root_request_id += 1;
@@ -4656,7 +4521,7 @@ pub const AppSession = struct {
             0,
         )) {
             self.allocator.free(owned);
-            self.reportFileTreeRootOutcome(.backend_busy, "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.");
+            file_panel_ops.reportFileTreeRootOutcome(self, .backend_busy, "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.");
             return;
         }
         self.file_tree_root_validation = pending;
@@ -5135,11 +5000,11 @@ pub const AppSession = struct {
             },
             .file_tree => |edit| {
                 const index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = edit.row_kind, .path = edit.path() }) orelse
-                    self.selectedFileTreeRow() orelse return null;
+                    file_panel_ops.selectedFileTreeRow(self) orelse return null;
                 const dg = self.dockGeometry();
                 // 픽셀 스크롤이라 행의 y는 content 좌표에서 offset을 뺀 값이다. 위·아래로 완전히 벗어난
                 // 행에는 caret을 두지 않는다 — 부분적으로 걸친 행은 pane clip이 자르므로 그대로 둔다.
-                const row_top: i64 = @as(i64, @intCast(index)) * @as(i64, ch) - @as(i64, self.fileTreeEffectiveScrollPx());
+                const row_top: i64 = @as(i64, @intCast(index)) * @as(i64, ch) - @as(i64, file_panel_ops.fileTreeEffectiveScrollPx(self));
                 if (row_top + @as(i64, ch) <= 0 or row_top >= @as(i64, dg.tree_content.h)) return null;
                 const depth = file_tree.rowDepth(self.file_tree_rows.items[index]) orelse 0;
                 const start_col: u32 = @min(@as(u32, 4) + @as(u32, depth) * 2, dg.tree_content.w / cw -| 1);
@@ -5325,7 +5190,7 @@ pub const AppSession = struct {
     /// 확장. best-effort: 임의 탭이라 모든 Term 에러를 무시한다(resizeActiveTabPanes는 활성 Term 에러를 resize()
     /// try 계약대로 전파하지만, 이 경로는 자동 정리라 한 panel 실패가 다른 재배치를 막지 않게 한다). 레이아웃
     /// 실패(OOM)는 무시(다음 resize/tick이 다시 맞춘다).
-    fn resizeTabPanes(self: *AppSession, tab: *Tab) void {
+    pub fn resizeTabPanes(self: *AppSession, tab: *Tab) void {
         if (self.layoutGeometryUnknown()) return; // 기하 미확정 구간의 2×1 오염 방지 — layoutGeometryUnknown 주석
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -5344,7 +5209,7 @@ pub const AppSession = struct {
     /// 단일 panel은 그게 곧 활성 rect라 결과가 같다. 레이아웃/포커스/리사이즈가 바뀔 때(split·switchTab·
     /// resize·focusPane·closeTab·init) 호출해, pxToCell/imeCursorRect가 매 마우스 이벤트마다 재레이아웃
     /// (할당) 없이 캐시된 origin을 읽게 한다.
-    fn recomputeActivePaneRect(self: *AppSession) void {
+    pub fn recomputeActivePaneRect(self: *AppSession) void {
         const active_pane = self.activePane();
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -5665,7 +5530,7 @@ pub const AppSession = struct {
             .scrollbar_capture_active = self.scrollbarCaptureActive(),
             .scrollbar_move_events = self.scrollbar_move_events,
             .scrollbar_scroll_applications = self.scrollbar_scroll_applications,
-            .scrollbar_offset_px = self.fileTreeEffectiveScrollPx(),
+            .scrollbar_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self),
             .move_events = self.divider_move_events,
             .resize_applications = self.divider_resize_applications,
         };
@@ -5936,7 +5801,7 @@ pub const AppSession = struct {
     /// 활성 탭 안에서 포커스를 panel index로 옮긴다(입력/커서/IME/렌더가 따라간다). 활성 panel surface를
     /// 탭 대표(`surface_ptrs[active_tab]` = `app_window.active()`)와 `frame_loop.pump`에 재바인딩하고
     /// 활성 panel rect를 다시 계산한다. 같은 panel이거나 범위 밖이면 무동작. 탭 자체는 안 바꾼다.
-    fn focusPane(self: *AppSession, pane_index: usize) void {
+    pub fn focusPane(self: *AppSession, pane_index: usize) void {
         const tab = self.activeTab();
         if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
         self.commitComposition(); // input owner를 바꾸기 전에 원 surface의 marked text를 확정한다.
@@ -6834,7 +6699,7 @@ pub const AppSession = struct {
             }
         }.pred) != null) return true;
         if (!self.dock_initialized) return false;
-        var entry_it = self.fileEntries();
+        var entry_it = file_panel_ops.fileEntries(self);
         while (entry_it.next()) |entry| if (entry.surface_id == surface_id) return true;
         return false;
     }
@@ -6872,7 +6737,7 @@ pub const AppSession = struct {
     /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
     /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
     /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
-    fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
+    pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
         const tab = self.tabs.items[tab_index];
         self.cancelPointerGestureForTermRemoval(tab_index, pane, term_index);
         const term = pane.terms.orderedRemove(term_index);
@@ -6893,7 +6758,7 @@ pub const AppSession = struct {
     /// reap으로 구조가 바뀐 탭의 대표 surface를 그 탭의 현재 활성 Term으로 재바인딩하고(닫힌 Term을 가리키던
     /// stale/dangling 방지) panel을 새 leaf rect로 resize한다(collapse면 형제가 빈자리 확장 — 배경 탭도 전환
     /// 즉시 올바른 크기). 활성 탭이면 좌표 origin도 재계산하고 redraw를 표시한다(배경 탭 변경은 화면에 안 보임).
-    fn refreshAfterReap(self: *AppSession, tab_index: usize) void {
+    pub fn refreshAfterReap(self: *AppSession, tab_index: usize) void {
         const tab = self.tabs.items[tab_index];
         self.surface_ptrs.items[tab_index] = tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -7110,7 +6975,7 @@ pub const AppSession = struct {
     /// 미러링하되 PTY spawn/셸 없이 `createWebTerm(panel_kind)`로 sentinel surface를 만든다(WKWebView는
     /// computeWebSurfaceTransitions가 walk해 Swift가 붙인다, §6). create→append→focus 3단계 + append 실패 errdefer
     /// 롤백이 web Term 생성의 **단일 출처**다(debug 훅이 이 시퀀스를 재구현하지 않게).
-    fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !u64 {
+    pub fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !u64 {
         const pane = self.activePane();
         const term = try self.createWebTerm(panel_kind);
         errdefer self.destroyTerm(term);
@@ -7867,7 +7732,7 @@ pub const AppSession = struct {
     /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_registry.remove(번들 deinit=reader join + custom_name
     /// 해제 + surface.deinit + 슬롯 해제, M3a) → destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·
     /// split 실패 정리에 쓴다. (deinit은 surface 정리를 config/appearance 해제 앞에 두려 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
-    fn destroyTerm(self: *AppSession, term: *Term) void {
+    pub fn destroyTerm(self: *AppSession, term: *Term) void {
         const surface_id = term.surface.id;
         // 탭 드래그 preview는 `*Term`을 **프레임 간 캐시**하는 유일한 자리라, 다른 Term 포인터 보유 상태
         // (rename·context_menu_target)와 같은 barrier가 여기 필요하다. `cancelPointerGestureForTermRemoval`은
@@ -7947,7 +7812,7 @@ pub const AppSession = struct {
         self.surface_closed_callback = callback;
     }
 
-    fn notifySurfaceClosed(self: *AppSession, surface_id: u64) void {
+    pub fn notifySurfaceClosed(self: *AppSession, surface_id: u64) void {
         if (self.surface_closed_callback) |callback| callback(self.surface_closed_context, surface_id);
     }
 
@@ -7957,7 +7822,7 @@ pub const AppSession = struct {
     /// 앱 전역 `SurfaceIdAllocator` 발급(비재사용) — sentinel surface의 `id`에 실려 `Term.surface.id`가 web에서도 유효하다
     /// (surface_ptrs·activeSurface 계약 불변). `kind`·`web_panel_kind`는 모델 Term에 저장(라벨·후속 trust 단일 출처).
     /// Pane에 거는 건 호출자(maybeDebugOpenWebPanel·후속 command)가 한다. teardown은 `destroyTerm`이 kind로 분기.
-    fn createWebTerm(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !*Term {
+    pub fn createWebTerm(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !*Term {
         const term = try self.allocator.create(Term);
         errdefer self.allocator.destroy(term);
         term.* = .{ .kind = .web, .web_panel_kind = panel_kind };
@@ -8141,8 +8006,8 @@ pub const AppSession = struct {
         const pending = self.pending_dock_focus orelse return;
         // 판정과 **같은 기준**(실제 가시성)을 쓴다 — 옛 탭 단위 기준은 같은 pane의 터미널 탭으로 옮겨간
         // 상태를 "보인다"로 쳐서, 소유는 false인데 취소도 안 되는 orphan owner를 남겼다(code-review max).
-        if (self.fileEntryForIdConst(pending.entry_id)) |entry| {
-            if (self.fileEntryIsFocusTarget(entry)) return;
+        if (file_panel_ops.fileEntryForIdConst(self, pending.entry_id)) |entry| {
+            if (file_panel_ops.fileEntryIsFocusTarget(self, entry)) return;
         }
         self.cancelPendingDockFocus();
         if (self.focus_owner == .dock_pending) {
@@ -8481,58 +8346,6 @@ pub const AppSession = struct {
         for (self.tabs.items) |t| if (tabHasWebBrowser(t)) return true;
         return false;
     }
-    /// 닫힐 scope 안에 **보호 상태의 파일 Term**(dirty·dirty-sync 대기·external conflict·mutation pending·
-    /// 편집 모드)이 있나. FP16 전에는 파일이 pane 트리 밖이라 일반 close cascade가 파일에 닿을 수 없었고
-    /// 보호는 `session` scope(⌘Q·창 닫기)에만 필요했다. 이제 파일이 pane 탭이므로 ⌘W·탭바 ✕·close_tab·
-    /// reap cascade가 전부 파일 Term을 파괴할 수 있어 **모든 scope**가 이 게이트를 지나야 한다 —
-    /// 안 그러면 미저장 버퍼가 프롬프트 없이 사라진다(code-review max).
-    /// 에이전트 행 ✕는 **활성과 다른 Term**을 닫을 수 있다 — `scopeHasProtectedFilePanel`의 .term/.pane 가지는
-    /// 활성 기준이라 그대로 쓰면 "워크스페이스 A의 dirty 파일 때문에 워크스페이스 B의 에이전트 행 ✕가 거부"된다.
-    /// `closeTargetHasRunningJob`이 같은 함정에 이미 인덱스 경로 override를 둔 것과 동형이다(code-review max).
-    fn closeTargetHasProtectedFilePanel(self: *AppSession, target: PendingClose, scope: CloseScope) bool {
-        if (target == .agent_term) {
-            const a = target.agent_term;
-            if (a.tab < self.tabs.items.len) {
-                const t = self.tabs.items[a.tab];
-                if (a.pane < t.panes.items.len) {
-                    const pane = t.panes.items[a.pane];
-                    switch (scope) {
-                        .term => if (a.term < pane.terms.items.len)
-                            return termHasProtectedFilePanel(pane.terms.items[a.term]),
-                        .pane => return paneHasProtectedFilePanel(pane),
-                        else => {},
-                    }
-                }
-            }
-        }
-        return self.scopeHasProtectedFilePanel(scope);
-    }
-
-    fn scopeHasProtectedFilePanel(self: *AppSession, scope: CloseScope) bool {
-        return switch (scope) {
-            .none => false,
-            .term => termHasProtectedFilePanel(self.activePane().activeTerm()),
-            .pane => paneHasProtectedFilePanel(self.activePane()),
-            .tab => |idx| tabHasProtectedFilePanel(self.tabs.items[idx]),
-            // ⌘Q는 복구 기회가 없어 보수적으로 — 편집 가능 mode만으로도 막는다(hasProtectedFilePanelsForExit).
-            .session => self.hasProtectedFilePanelsForExit(),
-        };
-    }
-
-    /// `.pane`/`.tab`처럼 **Term을 통째로 파괴하는** scope가 쓰는 판정. `mode.isEditable()`은 보지 **않는다**
-    /// — `.text`의 기본 mode가 `source_edit`이라, 보면 손도 안 댄 `script.py` 탭 하나가 그 pane과
-    /// 워크스페이스를 영영 닫을 수 없게 만든다(code-review max). 대신 `.pane`/`.tab` 경로는 파괴 전에
-    /// `syncDirtyBeforeScopeClose`로 편집 중 버퍼의 스냅샷을 먼저 요청해, native dirty 지연 때문에
-    /// 잃는 경우를 막는다. `.session`(⌘Q)은 복구 기회가 없어 여전히 넓은 술어를 쓴다.
-    fn termHasProtectedFilePanel(term: *Term) bool {
-        const entry = term.file_entry orelse return false;
-        // `dirty_sync_pending`은 **한 번 물어본 뒤에는** 차단 사유가 아니다. 스냅샷을 요청해 두고 그것이
-        // 영영 안 오면(브릿지 죽음) 그 pane·워크스페이스가 영원히 안 닫히기 때문이다. 답이 왔다면
-        // `entry.dirty`가 서 있어 아래 술어가 정상적으로 막는다(code-review max).
-        if (entry.close_snapshot_requested and entry.dirty_sync_pending and !entry.dirty)
-            return entry.external_change or entry.conflict_reload_pending or entry.mutation_pending_id != 0;
-        return filePanelEntryBlocksClose(entry.*);
-    }
 
     /// `.pane`/`.tab` close가 Term을 파괴하기 전에, 그 범위 안의 **편집 가능한** 파일에 dirty 스냅샷을
     /// 한 번 요청한다. 스냅샷이 돌아오면 `entry.dirty`가 서고 다음 close 시도는 좁은 술어에 걸려 확인
@@ -8567,7 +8380,7 @@ pub const AppSession = struct {
             const entry = term.file_entry orelse continue;
             if (!entry.mode.isEditable() or entry.close_snapshot_requested) continue;
             entry.close_snapshot_requested = true;
-            if (self.markFilePanelDirtySyncPending(entry)) requested = true;
+            if (file_panel_ops.markFilePanelDirtySyncPending(self, entry)) requested = true;
         }
         return requested;
     }
@@ -8583,16 +8396,6 @@ pub const AppSession = struct {
             },
             else => return self.activePane(),
         }
-    }
-
-    fn paneHasProtectedFilePanel(pane: *Pane) bool {
-        for (pane.terms.items) |t| if (termHasProtectedFilePanel(t)) return true;
-        return false;
-    }
-
-    fn tabHasProtectedFilePanel(tab: *Tab) bool {
-        for (tab.panes.items) |pane| if (paneHasProtectedFilePanel(pane)) return true;
-        return false;
     }
 
     fn scopeHasWebBrowser(self: *AppSession, scope: CloseScope) bool {
@@ -8682,7 +8485,7 @@ pub const AppSession = struct {
     /// 창 닫기(빨간 버튼)는 Swift 핸드셰이크가 달라 requestWindowClose가 따로 맡는다.
     fn requestClose(self: *AppSession, target: PendingClose) void {
         const scope = self.resolveCloseScope(target); // cascade 단일 출처(판정·실행 공유). 아래 두 분기가 이 범위를 함께 쓴다.
-        if (scope == .session and self.blockSessionExitForFilePanels()) return;
+        if (scope == .session and file_panel_ops.blockSessionExitForFilePanels(self)) return;
         // FP16: 파일이 pane 탭이 되면서 term/pane/tab scope도 파일 Term을 파괴할 수 있다. 보호 상태 파일이 있으면
         // 여기서 막고 사용자가 저장·닫기를 먼저 하게 한다 — 옛 session 전용 게이트만으로는 ⌘W 한 번에 미저장
         // 버퍼가 사라진다(code-review max).
@@ -8691,11 +8494,11 @@ pub const AppSession = struct {
         if (scope == .term and target != .agent_term) {
             const term = self.activePane().activeTerm();
             if (term.file_entry) |entry| if (entry.surface_id != 0) {
-                self.requestFilePanelClose(entry.surface_id);
+                file_panel_ops.requestFilePanelClose(self, entry.surface_id);
                 return;
             };
         }
-        if (scope != .session and self.closeTargetHasProtectedFilePanel(target, scope)) {
+        if (scope != .session and file_panel_ops.closeTargetHasProtectedFilePanel(self, target, scope)) {
             self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
             return;
         }
@@ -8739,7 +8542,7 @@ pub const AppSession = struct {
             switch (self.resolveCloseScope(target)) {
                 .none => return,
                 .session => {
-                    if (!self.blockSessionExitForFilePanels()) self.latchSessionClose();
+                    if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose();
                     return;
                 },
                 else => {},
@@ -8755,7 +8558,7 @@ pub const AppSession = struct {
             .term => self.closeActiveTerm(),
             .pane => self.closeActivePane(),
             .tab => |idx| self.closeTab(idx),
-            .session => if (!self.blockSessionExitForFilePanels()) self.latchSessionClose(),
+            .session => if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose(),
         }
     }
 
@@ -8763,7 +8566,7 @@ pub const AppSession = struct {
     /// ended_seen + process_state=exited를 세우면, 다음 tick summary.ended를 본 Swift가 closeWindowOrQuit으로 실제 창을
     /// 닫는다(프로그래밍적 close라 windowShouldClose 재호출 없음 — 재확인 루프가 안 생긴다).
     fn latchSessionClose(self: *AppSession) void {
-        if (self.blockSessionExitForFilePanels()) return;
+        if (file_panel_ops.blockSessionExitForFilePanels(self)) return;
         self.ended_seen = true;
         self.activeSurface().process_state = .exited;
         self.metal_dirty = true;
@@ -8854,7 +8657,7 @@ pub const AppSession = struct {
     /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
     /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
     pub fn requestWindowClose(self: *AppSession) bool {
-        if (self.blockSessionExitForFilePanels()) return true;
+        if (file_panel_ops.blockSessionExitForFilePanels(self)) return true;
         if (!self.closeTargetHasRunningJob(.window)) return false;
         self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
         return true;
@@ -8867,7 +8670,7 @@ pub const AppSession = struct {
     /// summary의 quit_decision을 본 Swift가 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다. 단일
     /// 출처: docs/macos-app-host-boundary.md "닫기 확인".
     pub fn requestAppQuit(self: *AppSession) void {
-        if (self.blockSessionExitForFilePanels()) {
+        if (file_panel_ops.blockSessionExitForFilePanels(self)) {
             self.quit_decision = .cancelled;
             return;
         }
@@ -8931,17 +8734,17 @@ pub const AppSession = struct {
             .quit => self.quit_decision = .cancelled,
             .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = false },
             .paste => self.pending_paste_confirm.clearRetainingCapacity(),
-            .file_panel_close => self.cancelFilePanelClose(),
+            .file_panel_close => file_panel_ops.cancelFilePanelClose(self),
             .file_tree_delete => self.pending_file_tree_delete = null,
             .none, .close, .reset, .file_conflict_reload => {},
         }
         self.pending_confirm = .none;
     }
 
-    fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
+    pub fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
         self.cancelPendingConfirm();
         if (owner != .file_panel_close and self.pending_file_panel_close != null) {
-            self.cancelFilePanelClose();
+            file_panel_ops.cancelFilePanelClose(self);
         }
         self.pending_paste_confirm.clearRetainingCapacity();
         self.dismissMessageOverlays();
@@ -8951,7 +8754,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn showConfirmChoices(self: *AppSession, owner: PendingConfirm, message: []const u8, choices: chrome.components.confirm.Choices) void {
+    pub fn showConfirmChoices(self: *AppSession, owner: PendingConfirm, message: []const u8, choices: chrome.components.confirm.Choices) void {
         self.showConfirmButtons(owner, message, .{ .confirm = choices.primary, .cancel = choices.cancel });
         self.chrome_host.confirm.showChoices(self.chrome_host.confirm.message, choices);
     }
@@ -9303,7 +9106,7 @@ pub const AppSession = struct {
     pub fn totalSurfaceCount(self: *AppSession) usize {
         var n: usize = 0;
         for (self.tabs.items) |tab| n += tabSurfaceCount(tab);
-        var entry_it14 = self.fileEntriesConst();
+        var entry_it14 = file_panel_ops.fileEntriesConst(self);
         while (entry_it14.next()) |entry| if (entry.surface_id != 0) {
             n += 1;
         };
@@ -9313,7 +9116,7 @@ pub const AppSession = struct {
     fn appendDockSurfaceIds(self: *AppSession, out: []u64, start: usize) usize {
         var n = start;
         if (!self.dock_initialized) return n;
-        var entry_it2 = self.fileEntries();
+        var entry_it2 = file_panel_ops.fileEntries(self);
         while (entry_it2.next()) |entry| if (entry.surface_id != 0) {
             if (n < out.len) out[n] = entry.surface_id;
             n += 1;
@@ -9321,253 +9124,11 @@ pub const AppSession = struct {
         return @min(n, out.len);
     }
 
-    /// **탭 하나를 닫을 때** 그 파일이 잃을 상태를 들고 있나. `filePanelEntryNeedsDirtyProtection`과 달리
-    /// `mode.isEditable()`을 보지 **않는다** — 그 조건은 "source-edit는 native dirty가 최신 CM6 revision보다
-    /// 늦을 수 있다"는 이유로 **⌘Q 종료** 게이트가 쓰는 것이고, 거기서는 복구 기회가 없어 보수적으로 막는 게 맞다.
-    /// 탭 닫기는 다르다 — `requestFilePanelClose`의 revision-pinned 2단계 스냅샷이 그 지연을 해소하므로,
-    /// mode만으로 막으면 **깨끗한 `.py`/`.json` 탭이 영원히 안 닫힌다**(.text의 기본 mode가 source_edit이다).
-    fn filePanelEntryBlocksClose(entry: dock_panel.Entry) bool {
-        return entry.dirty or entry.dirty_sync_pending or entry.external_change or
-            entry.conflict_reload_pending or entry.mutation_pending_id != 0;
-    }
-
-    fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
-        return entry.dirty or entry.dirty_sync_pending or entry.external_change or
-            entry.conflict_reload_pending or entry.mode.isEditable() or entry.mutation_pending_id != 0;
-    }
-
     /// 창/세션 종료 전에 해소해야 하는 파일 편집 상태가 하나라도 있는지. source-edit는 native dirty가 최신 CM6
     /// revision보다 늦을 수 있으므로 clean으로 보이더라도 보호한다. 모든 창을 함께 닫는 Cmd+Q는 Swift가 이 getter로
     /// 각 세션을 순회하고, 확정 직전에도 다시 검사한다.
     pub fn hasProtectedFilePanelsForExit(self: *const AppSession) bool {
-        return self.hasProtectedFilePanelsForExitExcluding(null);
-    }
-
-    /// 이 파일 하나를 닫는 것이 창 닫기가 될 때 쓰는 게이트. **다른 파일이 잃을 상태를 들고 있나**만 본다 —
-    /// `hasProtectedFilePanelsForExit`의 file-tree mutation 항목까지 보면, 이 close를 **일으킨 바로 그**
-    /// rename/delete 작업이 자기 자신을 막아 항상 거부된다(code-review max).
-    fn filePanelsBlockCloseExcluding(self: *const AppSession, exclude: *const dock_panel.Entry) bool {
-        if (!self.dock_initialized) return false;
-        var it = self.fileEntriesConst();
-        while (it.next()) |entry| {
-            if (entry == exclude) continue;
-            if (filePanelEntryNeedsDirtyProtection(entry.*)) return true;
-        }
-        return false;
-    }
-
-    /// `exclude`는 **지금 닫는 중이라 이미 상태를 해소한** entry다. 그 entry 자신이 종료를 막으면
-    /// "닫혔다고 보고했는데 창은 그대로"인 유령 상태가 되므로(2단계 close가 끝난 뒤라 잃을 게 없다)
-    /// 게이트에서 뺀다. 그 밖의 파일이 막는 것은 그대로 막는다.
-    fn hasProtectedFilePanelsForExitExcluding(self: *const AppSession, exclude: ?*const dock_panel.Entry) bool {
-        if (self.pending_file_panel_close != null or self.file_panel_save_close_pending != null) {
-            // 지금 닫는 중인 그 entry의 transition은 제외 대상과 같은 이유로 무시한다.
-            const own = if (exclude) |e| blk: {
-                const pending = self.pending_file_panel_close orelse break :blk false;
-                break :blk pending.surface_id == e.surface_id;
-            } else false;
-            if (!own or self.file_panel_save_close_pending != null) return true;
-        }
-        if (self.file_tree_mutation_waiting_request != null or self.file_tree_edit_inflight or
-            self.file_tree_delete_inflight or (self.file_tree_initialized and self.file_tree_mutation_backend.pendingCount() != 0) or
-            self.file_tree_trash_queue_len != 0 or self.file_tree_manual_recovery_paths_len != 0 or
-            self.file_tree_manual_recovery_unknown or
-            self.file_tree_mutation_editor_locks_len != 0) return true;
-        if (!self.dock_initialized) return false;
-        var entry_it3 = self.fileEntriesConst();
-        while (entry_it3.next()) |entry| {
-            if (exclude) |e| if (entry == e) continue;
-            if (filePanelEntryNeedsDirtyProtection(entry.*)) return true;
-        }
-        return false;
-    }
-
-    fn blockSessionExitForFilePanels(self: *AppSession) bool {
-        if (!self.hasProtectedFilePanelsForExit()) return false;
-        self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
-        return true;
-    }
-
-    fn hasFilePanelCloseTransition(self: *const AppSession) bool {
-        if (self.pending_file_panel_close != null or self.file_panel_save_close_pending != null or
-            self.file_panel_close_unlock_actions_len != 0) return true;
-        if (!self.dock_initialized) return false;
-        var entry_it4 = self.fileEntriesConst();
-        while (entry_it4.next()) |entry| if (entry.dirty_sync_pending) return true;
-        return false;
-    }
-
-    fn resetFilePanelTransientStateForDockReplacement(self: *AppSession) void {
-        self.cancelPointerGesture();
-        self.advanceDockAsyncEpoch();
-        if (self.pending_confirm == .file_panel_close) {
-            self.pending_confirm = .none;
-            self.chrome_host.confirm.dismiss();
-        }
-        self.clearFilePanelCloseWithoutUnlock();
-        self.file_panel_mode_pending = null;
-        self.file_panel_dirty_sync_actions_len = 0;
-        self.file_panel_close_unlock_actions_len = 0;
-        self.file_tree_reload_actions_len = 0;
-        self.clearFileTreeSelection();
-        self.focus_owner = .workspace;
-        self.workspace_focus_pending = true;
-        self.file_tree_focus_pending = false;
-        self.file_tree_restore_surface_pending = null;
-    }
-
-    /// 창 병합 시 파일 **entry 자체는 옮기지 않는다** — FP16에서 entry는 Term 소유라 워크스페이스(탭)와
-    /// 함께 자동으로 이동한다. 여기서 하는 일은 그 이동이 destination의 불변식을 깨지 않게 만드는 것뿐이다:
-    /// 창당 상한·경로 유일성 admission, destination 탐색기/watch 재구성, source-lifetime 래치 정리.
-    ///
-    /// 창당 경로 유일성(§1)은 여전히 지켜야 한다. 두 창에 같은 파일이 열려 있으면 병합 뒤 한 창에 같은 경로가
-    /// 두 Term으로 공존하므로 한쪽을 닫는다. **양쪽 다** 잃을 상태를 들고 있으면 어느 내용을 살릴지 자동으로
-    /// 정하지 않고 병합 자체를 거부하고, 한쪽만 들고 있으면 그 편집을 보존하고 **깨끗한 쪽**을 닫는다.
-    /// 둘 다 깨끗하면 옮겨오는 쪽(source)을 닫아 destination 배치를 유지한다(§4).
-    ///
-    /// 실패 가능한 일(admission·트리 후보)을 전부 먼저 끝낸 뒤 무실패 commit으로 넘어가므로, 어느
-    /// allocation이 실패해도 양쪽 창이 원상 유지된다.
-    fn mergeFilePanelStateInto(src: *AppSession, dst: *AppSession) !void {
-        // 1) 창당 상한 admission. 병합 결과가 max_entries를 넘으면 고정 크기 배열을 쓰는 순회들이 넘친다.
-        var unique: usize = 0;
-        var count_it = src.fileEntries();
-        while (count_it.next()) |src_entry| {
-            if (dst.fileEntryForPath(src_entry.path) == null) unique += 1;
-        }
-        if (dst.fileEntryCount() + unique > dock_panel.max_entries) return error.UnsupportedMove;
-
-        // 2) 중복 경로 admission — **닫을 쪽을 여기서 정하고, 정할 수 없으면 모델을 건드리기 전에 거부한다.**
-        //    ⓐ 거부 조건은 **양쪽 다 잃을 상태**(`filePanelEntryBlocksClose`)일 때다. 넓은 술어를 쓰면
-        //       손도 안 댄 편집 가능 파일(`.text`의 기본 mode가 source_edit)이 창 병합을 막는다(§4).
-        //    ⓑ 닫을 쪽이 그 창의 **마지막 Term이 되면** 그 close는 창 닫기라 병합 중에 할 수 없다.
-        //       판정은 스냅샷이 아니라 **이번 계획이 그 창에서 몇 개를 닫는지 누적**해서 한다 — 스냅샷으로
-        //       보면 같은 창의 두 번째 중복에서 pane이 비고 adoptTab이 빈 pane을 읽어 크래시한다(code-review max).
-        const DoomedSide = struct { owner: *AppSession, entry: *dock_panel.Entry };
-        var doomed_plan: [dock_panel.max_entries]DoomedSide = undefined;
-        var doomed_len: usize = 0;
-        const src_terms = src.windowTermCount();
-        const dst_terms = dst.windowTermCount();
-        var src_planned: usize = 0;
-        var dst_planned: usize = 0;
-        var dup_it = src.fileEntries();
-        while (dup_it.next()) |src_entry| {
-            const dup = dst.fileEntryForPath(src_entry.path) orelse continue;
-            const src_blocks = filePanelEntryBlocksClose(src_entry.*);
-            const dst_blocks = filePanelEntryBlocksClose(dup.*);
-            if (src_blocks and dst_blocks) return error.UnsupportedMove;
-            const prefer_src_doomed = !src_blocks;
-            const first: DoomedSide = if (prefer_src_doomed) .{ .owner = src, .entry = src_entry } else .{ .owner = dst, .entry = dup };
-            const second: DoomedSide = if (prefer_src_doomed) .{ .owner = dst, .entry = dup } else .{ .owner = src, .entry = src_entry };
-            const first_survives = (if (first.owner == src) src_terms - src_planned else dst_terms - dst_planned) > 1;
-            const second_blocks = filePanelEntryBlocksClose(second.entry.*);
-            const second_survives = (if (second.owner == src) src_terms - src_planned else dst_terms - dst_planned) > 1;
-            const chosen = if (first_survives)
-                first
-            else if (!second_blocks and second_survives)
-                second
-            else
-                return error.UnsupportedMove;
-            if (doomed_len >= doomed_plan.len) return error.UnsupportedMove;
-            doomed_plan[doomed_len] = chosen;
-            doomed_len += 1;
-            if (chosen.owner == src) src_planned += 1 else dst_planned += 1;
-        }
-
-        // 3) destination 탐색기 후보를 만든다. 옮겨오는 파일이 destination의 recent/watch 집합에 없으면
-        //    병합 뒤 그 파일의 외부 변경을 감지하지 못하고 최근 목록에도 안 뜬다.
-        //    explorer root/recent **권위는 destination**이다 — source root를 흡수하지 않는다. 다만 양쪽이
-        //    inferred면 source가 파일을 열 때 정한 project root가 dirname보다 정확하므로 그걸 쓴다
-        //    (`/repo/sub/file.md`가 `/repo`에서 `/repo/sub`로 줄어드는 것을 막는다).
-        // 도크에 남은 건 탐색기(트리)뿐이므로 여기서 다루는 "권위"는 root/recent 하나다.
-        // destination 탐색기가 **비어 있으면**(root도 recent도 없음) 그건 권위가 아니라 부재다 —
-        // 그대로 두면 옮겨온 파일 탭이 자기 프로젝트 루트 없이 도착하므로 source 것을 채택한다.
-        // 비어 있지 않으면 destination이 권위다(파일 탭 유무가 아니라 트리 내용이 기준).
-        var dst_tree = if (dst.file_tree.hasContent())
-            try dst.file_tree.clone()
-        else
-            try src.file_tree.clone();
-        defer dst_tree.deinit(); // commit은 후보를 빈 Tree로 되돌려 준다(단일 출처 commitFileTreeCandidate)
-        var watch_extras: [dock_panel.max_entries][]const u8 = undefined;
-        var watch_count: usize = 0;
-        var dst_watch_it = dst.fileEntries();
-        while (dst_watch_it.next()) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
-            watch_extras[watch_count] = parent;
-            watch_count += 1;
-        };
-        var incoming_it = src.fileEntries();
-        while (incoming_it.next()) |entry| {
-            if (dst.fileEntryForPath(entry.path) != null) continue; // clean 중복은 아래에서 닫는다
-            const parent = std.fs.path.dirname(entry.path) orelse continue;
-            var inferred_root = parent;
-            if (dst_tree.rootMode() == .inferred and src.file_tree.rootMode() == .inferred) {
-                var source_authority: ?[]const u8 = null;
-                for (0..src.file_tree.rootCount()) |root_index| {
-                    const source_root = src.file_tree.rootAt(root_index).?;
-                    if (!file_tree.Tree.pathWithinRoot(entry.path, source_root)) continue;
-                    if (source_authority == null or source_root.len > source_authority.?.len)
-                        source_authority = source_root;
-                }
-                if (source_authority) |root| inferred_root = root;
-            }
-            try dst_tree.recordOpened(entry.path, inferred_root);
-            watch_extras[watch_count] = parent;
-            watch_count += 1;
-        }
-        try dst_tree.resetWatchRequests(watch_extras[0..watch_count]);
-        var dst_rows: std.ArrayList(file_tree.Row) = .empty;
-        defer dst_rows.deinit(dst.allocator);
-        try dst.prepareFileTreeRowStaging(&dst_rows, unique);
-
-        // ── 여기부터 무실패 commit ───────────────────────────────────────────────
-        // 4) admission이 정해 둔 계획을 그대로 실행한다(여기서 다시 고르지 않는다).
-        for (doomed_plan[0..doomed_len]) |planned| {
-            const entry = planned.entry;
-            const owner = planned.owner;
-            // destination 쪽을 닫을 때는 그 surface를 가리키던 destination one-shot을 **살아남는 쪽**으로
-            // 다시 겨눈다. 안 하면 병합 뒤 mode 갱신·typed focus가 방금 사라진 surface를 기다리며 멈춘다.
-            const survivor: ?*const dock_panel.Entry = if (owner == dst)
-                src.fileEntryForPath(entry.path)
-            else
-                null;
-            const retired_surface = entry.surface_id;
-            // 한 번 retire하면 removeFilePanelQueuedActions가 one-shot을 지우므로 **먼저** 읽어 둔다.
-            const had_mode_pending = dst.file_panel_mode_pending == retired_surface;
-            const had_restore_pending = dst.file_tree_restore_surface_pending == retired_surface;
-            const had_focus_pending = if (dst.pending_dock_focus) |pending|
-                pending.expected_surface_id == retired_surface
-            else
-                false;
-            // 통지는 destroyTerm 하나만 낸다 — retire까지 통지하면 같은 surface가 두 번 닫힘으로 보고된다.
-            var retired_focus = false;
-            owner.noteRetiredFilePanelFocus(entry, &retired_focus);
-            owner.removeFilePanelQueuedActions(entry.surface_id);
-            // admission이 "닫을 수 있는 쪽"만 골랐으므로 여기서는 성공한다.
-            _ = owner.closeFileTermForEntry(entry);
-            // 닫은 파일이 그 창의 입력 소유였으면 workspace로 되돌린다 — 안 하면 focus_owner가 파괴된
-            // surface를 가리킨 채 남아 키가 아무 데도 가지 않는다(code-review max).
-            if (retired_focus) {
-                owner.focusWorkspaceInput();
-                owner.workspace_focus_pending = true;
-            }
-            if (survivor) |replacement| {
-                if (had_mode_pending) dst.file_panel_mode_pending = replacement.surface_id;
-                if (had_restore_pending) dst.file_tree_restore_surface_pending = null;
-                if (had_focus_pending) dst.queuePendingDockFocus(replacement);
-            }
-        }
-        // 5) source 창 수명에 묶여 있던 래치를 비운다 — 그 큐는 source와 함께 사라지므로, 그대로 옮기면
-        //    destination에서 완료해 줄 주체가 없어 reload가 영영 멈춘다.
-        var latch_it = src.fileEntries();
-        while (latch_it.next()) |entry| {
-            entry.conflict_reload_pending = false;
-            entry.conflict_reload_generation = 0;
-        }
-        dst.buildPreparedFileTreeRows(&dst_tree, &dst_rows);
-        dst.commitFileTreeCandidate(&dst_tree, &dst_rows);
-        // 표시 의도(presented)만 OR로 합친다.
-        if (src.dock.presented) dst.dock.presented = true;
-        dst.file_tree_rows_dirty = true;
-        dst.metal_dirty = true;
+        return file_panel_ops.hasProtectedFilePanelsForExitExcluding(self, null);
     }
 
     /// M3d-2a-i 이동 **범위 게이트**(code-review [1]) — 이 워크스페이스가 라이브 이동 지원 범위 안인가. M3d-2a-i는
@@ -9703,14 +9264,14 @@ pub const AppSession = struct {
             for (src.tabs.items[idx].panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     const entry = term.file_entry orelse continue;
-                    if (dst.fileEntryForPath(entry.path) != null) {
+                    if (file_panel_ops.fileEntryForPath(dst, entry.path) != null) {
                         // 거부는 조용하면 안 된다 — ABI는 move_failed로만 돌아가고 Swift는 그걸 그냥 흘린다.
                         src.showNotice("대상 창에 같은 파일이 이미 열려 있어 워크스페이스를 옮기지 못했습니다.");
                         return error.UnsupportedMove;
                     }
                 }
             }
-            if (dst.fileEntryCount() + countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries) {
+            if (file_panel_ops.fileEntryCount(dst) + file_panel_ops.countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries) {
                 src.showNotice("대상 창의 파일 탭이 너무 많아 워크스페이스를 옮기지 못했습니다.");
                 return error.UnsupportedMove;
             }
@@ -9780,8 +9341,8 @@ pub const AppSession = struct {
         }
         // close lock/snapshot/save/unlock callback은 session pointer에 핀된다. reparent 중 이관하면 old callback이
         // destination과 불일치해 사라지므로, 모든 입력 전이가 terminal ack로 끝날 때까지 모델 수술을 거부한다.
-        if (src.hasFilePanelCloseTransition() or dst.hasFilePanelCloseTransition()) return error.UnsupportedMove;
-        if (src.fileTreeNamespaceMutationBusy() or dst.fileTreeNamespaceMutationBusy()) return error.UnsupportedMove;
+        if (file_panel_ops.hasFilePanelCloseTransition(src) or file_panel_ops.hasFilePanelCloseTransition(dst)) return error.UnsupportedMove;
+        if (file_panel_ops.fileTreeNamespaceMutationBusy(src) or file_panel_ops.fileTreeNamespaceMutationBusy(dst)) return error.UnsupportedMove;
         // One destination native responder can serialize one delayed dock focus. Two independent
         // in-flight requests cannot be losslessly ordered across window ownership, so reject before
         // any model mutation. A single request is reissued below by surviving EntryId.
@@ -9811,14 +9372,14 @@ pub const AppSession = struct {
             src_composition.preedit_len,
         );
         defer pending_transfer.deinit();
-        try mergeFilePanelStateInto(src, dst);
+        try file_panel_ops.mergeFilePanelStateInto(src, dst);
         src_composition.commit(false);
         pending_transfer.capture(src, dst);
         // mergeFilePanelStateInto가 destination clean duplicate token을 dirty replacement EntryId로 remap할 수 있으므로
         // 모델 merge가 끝난 뒤 surviving token을 캡처한다.
         const pending_dock_focus = src.pending_dock_focus orelse dst.pending_dock_focus;
-        src.advanceDockAsyncEpoch();
-        dst.advanceDockAsyncEpoch();
+        file_panel_ops.advanceDockAsyncEpoch(src);
+        file_panel_ops.advanceDockAsyncEpoch(dst);
         // mergeFilePanelStateInto 뒤 workspace 수술은 capacity와 pending input의 destination-owned copy가
         // 이미 확보돼 무실패다. source cleanup 직전에 queue ownership을 infallible swap한다.
         pending_transfer.commit(dst);
@@ -11667,7 +11228,7 @@ pub const AppSession = struct {
         return self.chrome_minimal and !self.minimal_tabs;
     }
 
-    fn dispatchAppAction(self: *AppSession, action: config_mod.Action) void {
+    pub fn dispatchAppAction(self: *AppSession, action: config_mod.Action) void {
         switch (action) {
             .new_tab => if (!self.tabsBlocked()) {
                 _ = self.newTab() catch return;
@@ -11721,15 +11282,15 @@ pub const AppSession = struct {
             .new_web_tab => if (!self.tabsBlocked()) {
                 self.newWebTermInActivePane(.browser) catch {};
             },
-            .open_file_panel => self.requestFilePanelPick(),
-            .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
-            .toggle_file_panel_focus => self.toggleFilePanelFocus(),
-            .toggle_file_panel_mode => self.toggleActiveFilePanelMode(),
-            .focus_file_tree => self.focusFileTree(),
-            .new_file => self.startFileTreeEdit(.create_file),
-            .new_directory => self.startFileTreeEdit(.create_directory),
-            .rename_file_tree_entry => self.startFileTreeEdit(.rename),
-            .delete_file_tree_entry => self.requestDeleteSelectedFileTreeEntry(),
+            .open_file_panel => file_panel_ops.requestFilePanelPick(self),
+            .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),
+            .toggle_file_panel_focus => file_panel_ops.toggleFilePanelFocus(self),
+            .toggle_file_panel_mode => file_panel_ops.toggleActiveFilePanelMode(self),
+            .focus_file_tree => file_panel_ops.focusFileTree(self),
+            .new_file => file_panel_ops.startFileTreeEdit(self, .create_file),
+            .new_directory => file_panel_ops.startFileTreeEdit(self, .create_directory),
+            .rename_file_tree_entry => file_panel_ops.startFileTreeEdit(self, .rename),
+            .delete_file_tree_entry => file_panel_ops.requestDeleteSelectedFileTreeEntry(self),
             .close_focused => switch (self.focus_owner) {
                 // FP16 §3.4: 파일이 워크스페이스 pane 탭이므로 **cascade 판정은 requestClose가 그대로 소유**한다.
                 // 여기서 `requestFilePanelClose`로 바로 새면 `resolveCloseScope`가 `.session`으로 올려 보내던
@@ -11741,8 +11302,8 @@ pub const AppSession = struct {
                     self.requestClose(.term_or_pane);
                 },
                 // FP16: "focused group의 active entry" 자리를 활성 Term이 대신한다.
-                .file_tree => if (self.activeFileEntry()) |entry| {
-                    if (entry.surface_id != 0) self.requestFilePanelClose(entry.surface_id);
+                .file_tree => if (file_panel_ops.activeFileEntry(self)) |entry| {
+                    if (entry.surface_id != 0) file_panel_ops.requestFilePanelClose(self, entry.surface_id);
                 },
             },
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
@@ -12444,50 +12005,10 @@ pub const AppSession = struct {
     /// surface가 없는 파일 entry에 새 sid를 발급한다(창 전체). rename으로 surface가 retire된 entry도
     /// 여기서 다시 살아난다 — FP16 전에는 도크 group 순회였고, 지금은 Term 창구가 유일한 출처다.
     fn assignDockSurfaceIds(self: *AppSession) void {
-        var it = self.fileEntries();
+        var it = file_panel_ops.fileEntries(self);
         while (it.next()) |entry| {
             if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
         }
-    }
-
-    fn queueFilePanelDirtySyncAction(self: *AppSession, surface_id: u64, request_id: u64) void {
-        if (surface_id == 0) return;
-        for (self.file_panel_dirty_sync_actions[0..self.file_panel_dirty_sync_actions_len]) |*queued| {
-            if (queued.surface_id != surface_id) continue;
-            if (request_id != 0) queued.request_id = request_id;
-            return;
-        }
-        if (self.file_panel_dirty_sync_actions_len >= self.file_panel_dirty_sync_actions.len) return;
-        self.file_panel_dirty_sync_actions[self.file_panel_dirty_sync_actions_len] = .{ .surface_id = surface_id, .request_id = request_id };
-        self.file_panel_dirty_sync_actions_len += 1;
-    }
-
-    fn removeFilePanelDirtySyncAction(self: *AppSession, surface_id: u64) void {
-        var i: usize = 0;
-        while (i < self.file_panel_dirty_sync_actions_len) : (i += 1) {
-            if (self.file_panel_dirty_sync_actions[i].surface_id != surface_id) continue;
-            const last = self.file_panel_dirty_sync_actions_len - 1;
-            self.file_panel_dirty_sync_actions[i] = self.file_panel_dirty_sync_actions[last];
-            self.file_panel_dirty_sync_actions_len = last;
-            return;
-        }
-    }
-
-    /// 스냅샷 요청이 실제로 나갔으면 true. 호출자가 "요청했으니 기다린다"와 "보낼 대상이 없다"를 구분해야
-    /// 하는 자리(scope close 지연)가 있어 결과를 돌려준다.
-    fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) bool {
-        if (!entry.kind.usesEditorBridge() or !entry.mode.isEditable() or entry.surface_id == 0) return false;
-        entry.dirty_sync_pending = true;
-        self.queueFilePanelDirtySyncAction(entry.surface_id, 0);
-        return true;
-    }
-
-    fn markFilePanelCloseDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry, request_id: u64) void {
-        // source→read 전환 뒤에도 CM6 buffer와 dirty 상태는 surface에 남는다. 닫기 transaction은 mode와 무관하게
-        // 최신 snapshot을 요구해야 read-mode dirty 탭이 즉시 닫히지 않는다.
-        if (!entry.kind.usesEditorBridge() or entry.surface_id == 0) return;
-        entry.dirty_sync_pending = true;
-        self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
     }
 
     pub const FilePanelOpenPathResult = enum(u32) {
@@ -12498,27 +12019,14 @@ pub const AppSession = struct {
 
     pub const FileTreeReloadAction = struct { surface_id: u64, conflict: bool };
 
-    fn queueFileTreeReload(self: *AppSession, surface_id: u64, conflict: bool) void {
-        if (surface_id == 0) return;
-        for (self.file_tree_reload_actions[0..self.file_tree_reload_actions_len]) |*queued| {
-            if (queued.surface_id == surface_id) {
-                queued.conflict = queued.conflict or conflict;
-                return;
-            }
-        }
-        if (self.file_tree_reload_actions_len >= self.file_tree_reload_actions.len) return;
-        self.file_tree_reload_actions[self.file_tree_reload_actions_len] = .{ .surface_id = surface_id, .conflict = conflict };
-        self.file_tree_reload_actions_len += 1;
-    }
-
     pub fn takeFileTreeReloadAction(self: *AppSession) ?FileTreeReloadAction {
         while (self.file_tree_reload_actions_len != 0) {
             self.file_tree_reload_actions_len -= 1;
             const action = self.file_tree_reload_actions[self.file_tree_reload_actions_len];
             if (action.conflict) return action;
-            const entry = self.fileEntryForSurfaceId(action.surface_id) orelse continue;
+            const entry = file_panel_ops.fileEntryForSurfaceId(self, action.surface_id) orelse continue;
             if (entry.dirty or entry.dirty_sync_pending or entry.external_change) {
-                self.markExternalFileChange(entry);
+                file_panel_ops.markExternalFileChange(self, entry);
                 continue;
             }
             return action;
@@ -12526,7 +12034,7 @@ pub const AppSession = struct {
         return null;
     }
 
-    fn bumpExternalFileChange(entry: *dock_panel.Entry) void {
+    pub fn bumpExternalFileChange(entry: *dock_panel.Entry) void {
         entry.external_change_generation +%= 1;
         if (entry.external_change_generation == 0) entry.external_change_generation = 1;
     }
@@ -12536,27 +12044,6 @@ pub const AppSession = struct {
         entry.external_change = true;
         self.metal_dirty = true;
         self.file_tree_rows_dirty = true;
-    }
-
-    fn markExternalFileChange(self: *AppSession, entry: *dock_panel.Entry) void {
-        bumpExternalFileChange(entry);
-        if (entry.dirty or entry.dirty_sync_pending or entry.external_change) {
-            entry.external_change = true;
-        } else {
-            self.queueFileTreeReload(entry.surface_id, false);
-        }
-        self.metal_dirty = true;
-        self.file_tree_rows_dirty = true;
-    }
-
-    fn verifySelfWriteEvent(self: *AppSession, entry: *dock_panel.Entry) bool {
-        const owned = self.allocator.dupe(u8, entry.path) catch return false;
-        if (!self.file_tree_backend.submitFileHash(owned)) {
-            self.allocator.free(owned);
-            return false;
-        }
-        entry.self_write_verifications +|= 1;
-        return true;
     }
 
     /// Swift FSEvents callback(메인 queue)이 넘긴 file-level 변경. tree refresh를 예약하고 clean 문서는 자동 reload,
@@ -12574,7 +12061,7 @@ pub const AppSession = struct {
         // 작업트리 파일이 바뀌어도 git 상태가 바뀐다(수정·삭제) — 목록을 보고 있으면 같이 다시 읽는다.
         self.refreshGitStatus();
         const coarse = self.file_tree.containsRootPath(changed_path);
-        var entry_it15 = self.fileEntries();
+        var entry_it15 = file_panel_ops.fileEntries(self);
         while (entry_it15.next()) |entry| {
             if (!std.mem.eql(u8, entry.path, changed_path) and
                 !(coarse and file_tree.Tree.pathWithinRoot(entry.path, changed_path))) continue;
@@ -12587,13 +12074,13 @@ pub const AppSession = struct {
                 continue;
             }
             if (entry.self_write_grace_ticks != 0) {
-                if (!self.verifySelfWriteEvent(entry)) {
+                if (!file_panel_ops.verifySelfWriteEvent(self, entry)) {
                     entry.self_write_grace_ticks = 0;
                     entry.self_write_verifications = 0;
-                    self.markExternalFileChange(entry);
+                    file_panel_ops.markExternalFileChange(self, entry);
                 }
             } else {
-                self.markExternalFileChange(entry);
+                file_panel_ops.markExternalFileChange(self, entry);
             }
             if (!coarse) break;
         }
@@ -12622,178 +12109,8 @@ pub const AppSession = struct {
         return pending;
     }
 
-    fn resetFileTreeWatchRootsFor(self: *const AppSession, tree: *file_tree.Tree, extra_open_path: ?[]const u8) !void {
-        // 라이브 경로: 창구 순회 결과를 고정 버퍼에 모아 슬라이스로 넘긴다(창당 max_entries 상한이 bound).
-        var buf: [dock_panel.max_entries]dock_panel.Entry = undefined;
-        var n: usize = 0;
-        var it = self.fileEntriesConst();
-        while (it.next()) |entry| {
-            if (n >= buf.len) break;
-            buf[n] = entry.*;
-            n += 1;
-        }
-        return resetFileTreeWatchRootsForEntries(tree, buf[0..n], extra_open_path);
-    }
-
-    /// watcher union은 "표시 root ∪ 열린 파일의 부모"다(§7). 입력이 dock 구조일 이유가 없어 **entry 슬라이스**를
-    /// 받는다 — 복원 중에는 staged 목록이, 라이브에서는 창구 순회 결과가 들어온다(FP16 2-2r).
-    fn resetFileTreeWatchRootsForEntries(
-        tree: *file_tree.Tree,
-        entries: []const dock_panel.Entry,
-        extra_open_path: ?[]const u8,
-    ) !void {
-        var extras: [dock_panel.max_entries + 1][]const u8 = undefined;
-        var count: usize = 0;
-        for (entries) |entry| {
-            const parent = std.fs.path.dirname(entry.path) orelse continue;
-            extras[count] = parent;
-            count += 1;
-        }
-        if (extra_open_path) |path| if (std.fs.path.dirname(path)) |parent| {
-            extras[count] = parent;
-            count += 1;
-        };
-        try tree.resetWatchRequests(extras[0..count]);
-    }
-
-    /// 트리의 열림/활성/dirty 마커는 entry 집합만 있으면 만들 수 있다 — dock 구조가 입력일 이유가 없다(FP16 2-2r).
-    /// `active_index`는 복원 목록의 활성 entry(라이브에서는 활성 파일 Term)를 가리킨다.
-    fn buildFileTreeRowsForEntries(
-        allocator: std.mem.Allocator,
-        entries: []const dock_panel.Entry,
-        active_index: ?usize,
-        tree: *const file_tree.Tree,
-        open_states: *std.ArrayList(file_tree.OpenState),
-        rows: *std.ArrayList(file_tree.Row),
-    ) !void {
-        try open_states.ensureTotalCapacity(allocator, entries.len);
-        {
-            for (entries, 0..) |entry, i| open_states.appendAssumeCapacity(.{
-                .path = entry.path,
-                .active = active_index != null and active_index.? == i,
-                .dirty = entry.dirty,
-                .external_change = entry.external_change,
-            });
-        }
-        try rows.ensureTotalCapacity(allocator, file_tree.max_materialized_nodes + file_tree.max_recent + file_tree.max_roots + 1);
-        try tree.buildRows(allocator, open_states.items, rows);
-        classifyFileTreeRows(rows.items);
-    }
-
-    fn classifyFileTreeRows(rows: []file_tree.Row) void {
-        classifyFileTreeRowsCounted(rows, null);
-    }
-
-    fn classifyFileTreeRowsCounted(rows: []file_tree.Row, counters: ?*FileTreePerfCounters) void {
-        for (rows) |*row| switch (row.*) {
-            .recent_header => |*v| {
-                if (counters) |value| {
-                    value.row_visits += 1;
-                    value.classifier_calls += 1;
-                }
-                v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_header, "", !v.collapsed));
-            },
-            .recent_file => |*v| {
-                if (counters) |value| {
-                    value.row_visits += 1;
-                    value.classifier_calls += 1;
-                }
-                v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_file, v.label, false));
-            },
-            .root => |*v| {
-                if (counters) |value| {
-                    value.row_visits += 1;
-                    value.classifier_calls += 1;
-                }
-                v.icon_kind = @intFromEnum(file_tree_icon.classify(.root, v.label, v.expanded));
-            },
-            .directory => |*v| {
-                if (counters) |value| {
-                    value.row_visits += 1;
-                    value.classifier_calls += 1;
-                }
-                v.icon_kind = @intFromEnum(file_tree_icon.classify(.directory, v.label, v.expanded));
-            },
-            .file => |*v| {
-                if (counters) |value| {
-                    value.row_visits += 1;
-                    value.classifier_calls += 1;
-                }
-                v.icon_kind = @intFromEnum(file_tree_icon.classify(.file, v.label, false));
-            },
-            .empty => {
-                if (counters) |value| value.row_visits += 1;
-            },
-        };
-    }
-
-    fn refreshFileTreeWatchRoots(self: *AppSession) !void {
-        if (!self.file_tree_initialized) return;
-        try self.resetFileTreeWatchRootsFor(&self.file_tree, null);
-        self.file_tree_watch_reset_pending = true;
-    }
-
-    fn prepareFileTreeRowStaging(self: *AppSession, rows: *std.ArrayList(file_tree.Row), extra_entries: usize) !void {
-        try self.file_tree_open_states.ensureTotalCapacity(self.allocator, self.fileEntryCount() + extra_entries);
-        try rows.ensureTotalCapacity(self.allocator, file_tree.max_materialized_nodes + file_tree.max_recent + file_tree.max_roots + 1);
-    }
-
-    /// 지금 화면을 차지하고 있는 파일 entry(활성 탭 → 활성 pane → 활성 Term). 창 전체에서 최대 하나다 —
-    /// 옛 도크의 "focused group의 active entry"와 같은 자리다. 트리 활성 마커의 단일 출처.
-    fn activeFileEntry(self: *AppSession) ?*dock_panel.Entry {
-        if (self.tabs.items.len == 0) return null;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        return tab.activeTerm().file_entry;
-    }
-
-    /// 열린 파일 마커(경로·활성·dirty·외부변경)를 Term 창구에서 `file_tree_open_states`로 투영한다.
-    /// 트리를 새로 그리는 모든 경로가 이 한 함수를 공유한다(정상 갱신·후보 트리 준비 양쪽).
-    /// `prepareFileTreeRowStaging`이 이미 capacity를 잡아 둔 뒤에만 부른다 — 무할당이다.
-    fn projectFileTreeOpenStatesAssumeCapacity(self: *AppSession) void {
-        self.file_tree_open_states.clearRetainingCapacity();
-        const active = self.activeFileEntry();
-        var it = self.fileEntries();
-        while (it.next()) |entry| self.file_tree_open_states.appendAssumeCapacity(.{
-            .path = entry.path,
-            .active = entry == active,
-            .dirty = entry.dirty,
-            .external_change = entry.external_change,
-        });
-    }
-
-    fn projectFileTreeOpenStates(self: *AppSession) !void {
-        try self.file_tree_open_states.ensureTotalCapacity(self.allocator, self.fileEntryCount());
-        self.projectFileTreeOpenStatesAssumeCapacity();
-    }
-
-    /// prepareFileTreeRowStaging 뒤에만 호출한다. capacity가 고정돼 도크 commit 이후에도 allocation/OOM 없이
-    /// live open/dirty/active 상태를 후보 Tree row로 투영한다.
-    fn buildPreparedFileTreeRows(self: *AppSession, tree: *const file_tree.Tree, rows: *std.ArrayList(file_tree.Row)) void {
-        self.projectFileTreeOpenStatesAssumeCapacity();
-        tree.buildRows(self.allocator, self.file_tree_open_states.items, rows) catch unreachable;
-        classifyFileTreeRows(rows.items);
-    }
-
-    /// root/watch/rows의 모든 allocation이 끝난 뒤 세 authority를 한 번에 무실패 교체한다.
-    fn commitFileTreeCandidate(self: *AppSession, candidate: *file_tree.Tree, candidate_rows: *std.ArrayList(file_tree.Row)) void {
-        self.clearFileTreeSelection();
-        const old_tree = self.file_tree;
-        const old_rows = self.file_tree_rows;
-        self.file_tree = candidate.*;
-        self.file_tree_rows = candidate_rows.*;
-        candidate.* = old_tree;
-        candidate_rows.* = old_rows;
-        candidate_rows.deinit(self.allocator);
-        candidate_rows.* = .empty;
-        candidate.deinit();
-        candidate.* = file_tree.Tree.init(self.allocator);
-        self.advanceFileTreeProjectionGeneration();
-        self.file_tree_rows_dirty = false;
-        self.file_tree_watch_reset_pending = true;
-    }
-
     fn requestFileConflictReload(self: *AppSession, surface_id: u64) void {
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return;
         if (!entry.external_change) return;
         self.showConfirmButtons(
             .{ .file_conflict_reload = surface_id },
@@ -12803,11 +12120,11 @@ pub const AppSession = struct {
     }
 
     fn beginFileConflictReload(self: *AppSession, surface_id: u64) void {
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return;
         if (!entry.external_change or entry.conflict_reload_pending) return;
         entry.conflict_reload_pending = true;
         entry.conflict_reload_generation = entry.external_change_generation;
-        self.queueFileTreeReload(surface_id, true);
+        file_panel_ops.queueFileTreeReload(self, surface_id, true);
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
     }
@@ -12816,7 +12133,7 @@ pub const AppSession = struct {
     /// 내리고 원래 dirty buffer/conflict/save guard를 그대로 둬 사용자가 재시도하거나 복사할 수 있게 한다.
     pub fn completeFileConflictReload(self: *AppSession, surface_id: u64, success: bool) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.conflict_reload_pending) {
             if (!success) self.latchExternalFileChange(entry); // clean auto-reload가 편집 중단/실패를 보고한 보수적 latch.
@@ -12829,320 +12146,16 @@ pub const AppSession = struct {
             entry.dirty = false;
             entry.dirty_sync_pending = false;
             entry.external_change = false;
-            self.removeFilePanelDirtySyncAction(surface_id);
+            file_panel_ops.removeFilePanelDirtySyncAction(self, surface_id);
         }
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
     }
 
-    fn ageFilePanelSelfWriteLatches(self: *AppSession) void {
-        if (!self.dock_initialized) return;
-        var entry_it5 = self.fileEntries();
-        while (entry_it5.next()) |entry| if (entry.self_write_verifications == 0) {
-            entry.self_write_grace_ticks -|= 1;
-            if (entry.self_write_grace_ticks == 0) entry.self_write_hash = 0;
-        };
-    }
-
-    fn rebuildFileTreeFromDock(self: *AppSession) !void {
-        if (!self.file_tree_initialized) return;
-        self.file_tree_backend.deinit();
-        self.file_tree.deinit();
-        self.file_tree = file_tree.Tree.init(self.allocator);
-        self.file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
-        self.file_tree_rows.clearRetainingCapacity();
-        self.file_tree_rows_dirty = true;
-        self.file_tree_watch_reset_pending = true;
-        var entry_it16 = self.fileEntries();
-        while (entry_it16.next()) |entry| {
-            const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
-            defer self.allocator.free(root);
-            try self.file_tree.recordOpened(entry.path, root);
-        }
-    }
-
-    /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 blocking
-    /// path lookup/read는 worker에만 있고, main actor는 queue/snapshot 작업과 result descriptor close만 수행한다.
-    /// ET-CWD(docs/file-explorer.md §1): 활성 터미널 cwd가 **바뀌면** 탐색기에서 그 자리를 펼친다(reveal).
-    /// root를 갈지 않으므로 접힘 상태·watcher·영속이 그대로다 — 그 판단의 근거는 file-explorer §1의 기각 표에 있다.
-    ///
-    /// 정책 넷을 여기서 전부 집행한다: 도크가 보일 때만 / 활성 pane·활성 Term의 cwd만 / cwd가 없으면 직전
-    /// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다). root 밖 경로는 `revealDirectory`가 무시한다.
-    fn followActiveTerminalCwd(self: *AppSession) void {
-        if (!self.dockVisible()) return;
-        if (self.tabs.items.len == 0) return;
-        const term = self.activePane().activeTerm();
-        // updateFileTree는 renderer보다 먼저 tick에서 돈다. 여기서 observation을 새로 읽지 않으면 OSC 7의
-        // cwd 변경을 아직 보지 못해 한 번도 reveal하지 않는 frame이 생긴다. readObservation은 runtime cache만
-        // 갱신하며 filesystem scan은 worker 경계에 그대로 남는다.
-        self.refreshTermObservation(term, false, false);
-        // 파일·브라우저 탭은 cwd가 없다 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
-        if (term.rt.observation.availability == .unavailable) return;
-        const cwd = term.rt.observation.cwd.items;
-        if (cwd.len == 0) return;
-        if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
-        const owned = self.allocator.dupe(u8, cwd) catch return;
-        const reveal = self.file_tree.revealDirectory(owned) catch {
-            self.allocator.free(owned);
-            return; // OOM이면 이전 CWD를 보존해 다음 tick에 재시도한다.
-        };
-        if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
-        self.file_tree_followed_cwd = owned;
-        // root 밖이면 Tree의 이전 file-open reveal intent는 그대로 두되, 그것을 새 CWD의 scroll 대상으로
-        // 오인하지 않는다. 반대로 같은 경로의 기존 intent는 새 scan 없이도 CWD 대상이므로 재투영 뒤 보정한다.
-        switch (reveal) {
-            .rejected => self.file_tree_follow_scroll_pending = false,
-            .already_target, .accepted => {
-                self.file_tree_rows_dirty = true;
-                self.file_tree_follow_scroll_pending = true;
-            },
-        }
-    }
-
-    /// reveal 대상 행을 뷰포트 안으로 **최소한만** 민다(file-explorer §1 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
-    fn scrollFileTreeToFollowedCwd(self: *AppSession) void {
-        if (!self.file_tree_follow_scroll_pending) return;
-        const target = self.file_tree_followed_cwd orelse {
-            self.file_tree_follow_scroll_pending = false;
-            return;
-        };
-        if (self.cell_height_px == 0) return; // 렌더 전 — 다음 tick에 다시 본다(pending 유지)
-        if (self.fileTreeScrollExtent().viewport_h_px == 0) return;
-        const row_index = blk: {
-            for (self.file_tree_rows.items, 0..) |row, i| {
-                const path = maru.session.file_tree.rowPath(row) orelse continue;
-                if (std.mem.eql(u8, path, target)) break :blk i;
-            }
-            break :blk null;
-        } orelse return; // 아직 그 행이 안 보인다(lazy scan 진행 중) — pending 유지, 다음 재투영에서 다시 본다
-        self.file_tree_follow_scroll_pending = false;
-        // 키보드 anchor와 **같은** 최소 이동을 쓴다. 예전에는 여기 산술이 따로 있었고, 픽셀로 옮기면
-        // 두 벌이 각각 갈릴 자리였다.
-        self.scrollFileTreeRowIntoView(row_index);
-    }
-
-    fn updateFileTree(self: *AppSession) !void {
-        if (!self.file_tree_initialized) return;
-        var changed = false;
-        while (self.file_tree_backend.takeResult()) |owned_result| {
-            var result = owned_result;
-            defer result.deinit(self.allocator, self.io);
-            if (result.kind == .root_validation) {
-                root_result: {
-                    const pending = self.file_tree_root_validation orelse break :root_result;
-                    if (pending.request_id != result.request_id or
-                        pending.expected_root_generation != result.expected_root_generation or
-                        @intFromEnum(pending.operation) != result.root_operation or
-                        pending.round != result.root_validation_round) break :root_result;
-                    if (self.file_tree.rootGeneration() != pending.expected_root_generation) {
-                        self.file_tree_root_validation = null;
-                        self.reportFileTreeRootOutcome(.stale_generation, "탐색기 루트가 바뀌어 폴더 선택 결과를 취소했습니다.");
-                        break :root_result;
-                    }
-                    if (!result.ok) {
-                        self.file_tree_root_validation = null;
-                        self.reportFileTreeRootOutcome(.validation_failed, "선택한 폴더를 열 수 없습니다.");
-                        break :root_result;
-                    }
-                    if (pending.round == 0) {
-                        const identity = result.identity orelse {
-                            self.file_tree_root_validation = null;
-                            self.reportFileTreeRootOutcome(.identity_missing, "선택한 폴더 identity를 확인할 수 없습니다.");
-                            break :root_result;
-                        };
-                        const canonical = self.allocator.dupe(u8, result.path) catch {
-                            self.file_tree_root_validation = null;
-                            self.reportFileTreeRootOutcome(.allocation_failed, "폴더 재검증 상태를 준비할 수 없습니다.");
-                            break :root_result;
-                        };
-                        if (!self.file_tree_backend.submitRootValidation(
-                            canonical,
-                            pending.request_id,
-                            pending.expected_root_generation,
-                            @intFromEnum(pending.operation),
-                            1,
-                        )) {
-                            self.allocator.free(canonical);
-                            self.file_tree_root_validation = null;
-                            self.reportFileTreeRootOutcome(.backend_busy, "폴더 재검증 작업을 시작하지 못했습니다.");
-                            break :root_result;
-                        }
-                        self.file_tree_root_validation.?.round = 1;
-                        self.file_tree_root_validation.?.identity = identity;
-                        break :root_result;
-                    }
-                    const expected_identity = pending.identity orelse {
-                        self.file_tree_root_validation = null;
-                        self.reportFileTreeRootOutcome(.identity_missing, "폴더 재검증 상태가 유효하지 않습니다.");
-                        break :root_result;
-                    };
-                    const actual_identity = result.identity orelse {
-                        self.file_tree_root_validation = null;
-                        self.reportFileTreeRootOutcome(.identity_missing, "폴더 identity가 사라져 변경을 취소했습니다.");
-                        break :root_result;
-                    };
-                    const validated_dir = result.validated_dir orelse {
-                        self.file_tree_root_validation = null;
-                        self.reportFileTreeRootOutcome(.identity_missing, "폴더 검증 capability가 사라져 변경을 취소했습니다.");
-                        break :root_result;
-                    };
-                    if (!expected_identity.eql(actual_identity)) {
-                        self.file_tree_root_validation = null;
-                        self.reportFileTreeRootOutcome(.identity_changed, "선택한 폴더가 검증 중 교체되어 변경을 취소했습니다.");
-                        break :root_result;
-                    }
-                    self.file_tree_root_validation = null;
-                    var candidate = self.file_tree.cloneForRootTransaction() catch {
-                        self.reportFileTreeRootOutcome(.allocation_failed, "탐색기 루트 변경 상태를 준비할 수 없습니다.");
-                        break :root_result;
-                    };
-                    defer candidate.deinit();
-                    const roots = [_][]const u8{result.path};
-                    switch (pending.operation) {
-                        .replace => candidate.replaceExplicitRoots(&roots) catch {
-                            self.reportFileTreeRootOutcome(.model_stage_failed, "탐색기 루트를 교체할 수 없습니다.");
-                            break :root_result;
-                        },
-                        .add => candidate.addExplicitRoot(result.path) catch {
-                            self.reportFileTreeRootOutcome(.model_stage_failed, "작업공간에 폴더를 추가할 수 없습니다.");
-                            break :root_result;
-                        },
-                        .none => break :root_result,
-                    }
-                    if (result.identity) |identity| _ = candidate.pinRootIdentity(result.path, identity);
-                    self.resetFileTreeWatchRootsFor(&candidate, null) catch {
-                        self.reportFileTreeRootOutcome(.watcher_stage_failed, "폴더 감시를 갱신할 수 없어 루트 변경을 취소했습니다.");
-                        break :root_result;
-                    };
-                    var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
-                    defer candidate_rows.deinit(self.allocator);
-                    self.prepareFileTreeRowStaging(&candidate_rows, 0) catch {
-                        self.reportFileTreeRootOutcome(.row_stage_failed, "탐색기 행 상태를 준비할 수 없어 루트 변경을 취소했습니다.");
-                        break :root_result;
-                    };
-                    self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
-                    const validated_scan_path = candidate.takeScanRequestForPath(result.path) orelse {
-                        self.reportFileTreeRootOutcome(.model_stage_failed, "검증된 탐색기 루트의 첫 scan을 준비할 수 없습니다.");
-                        break :root_result;
-                    };
-                    if (!self.file_tree_backend.submitValidatedRootScan(
-                        validated_scan_path,
-                        candidate.rootGeneration(),
-                        validated_dir,
-                    )) {
-                        candidate.requeueScan(validated_scan_path) catch {};
-                        self.allocator.free(validated_scan_path);
-                        self.reportFileTreeRootOutcome(.backend_busy, "검증된 폴더 scan을 시작하지 못해 변경을 취소했습니다.");
-                        break :root_result;
-                    }
-                    result.validated_dir = null; // first scan worker now owns the descriptor capability.
-                    self.commitFileTreeCandidate(&candidate, &candidate_rows);
-                    self.reportFileTreeRootOutcome(switch (pending.operation) {
-                        .replace => .committed_replace,
-                        .add => .committed_add,
-                        .none => .model_stage_failed,
-                    }, null);
-                    self.dock.presented = true;
-                    self.dock.collapsed = false;
-                    self.file_tree_scroll.reset();
-                    self.clearFileTreeSelection();
-                    self.file_tree_rows_dirty = true;
-                    changed = true;
-                }
-                break; // at most one root validation/revalidation completion per frame tick.
-            }
-            if (result.kind == .file_hash) {
-                hash_groups: {
-                    var hash_it = self.fileEntries();
-                    while (hash_it.next()) |entry| {
-                        if (!std.mem.eql(u8, entry.path, result.path) or entry.self_write_verifications == 0) continue;
-                        if (!result.ok or result.file_hash != entry.self_write_hash) {
-                            entry.self_write_verifications = 0;
-                            entry.self_write_grace_ticks = 0;
-                            entry.self_write_hash = 0;
-                            self.markExternalFileChange(entry);
-                        } else {
-                            entry.self_write_verifications -= 1;
-                            if (entry.self_write_verifications == 0) {
-                                entry.self_write_grace_ticks = 0;
-                                entry.self_write_hash = 0;
-                            }
-                        }
-                        break :hash_groups;
-                    }
-                }
-                changed = true;
-                continue;
-            }
-            // Directory results belong to the exact root snapshot that queued them. Comparing only
-            // the path is insufficient for A -> B -> A because the same bytes can name a new root
-            // authority after two replacements.
-            if (result.expected_root_generation != self.file_tree.rootGeneration()) continue;
-            if (!result.ok) {
-                self.file_tree.failSnapshot(result.path);
-                changed = true;
-                continue;
-            }
-            self.file_tree_entry_inputs.clearRetainingCapacity();
-            self.file_tree_entry_inputs.ensureTotalCapacity(self.allocator, result.entries.items.len) catch |err| {
-                self.file_tree.failSnapshot(result.path);
-                self.file_tree.requeueScan(result.path) catch {};
-                self.file_tree_rows_dirty = true;
-                return err;
-            };
-            for (result.entries.items) |entry| self.file_tree_entry_inputs.appendAssumeCapacity(.{
-                .name = entry.name,
-                .kind = entry.kind,
-                .identity = entry.identity,
-            });
-            self.file_tree.applySnapshotWithIdentity(result.path, result.identity, self.file_tree_entry_inputs.items) catch |err| switch (err) {
-                error.NotFound => {}, // watcher refresh 중 부모가 사라졌거나 root가 이관된 정상 race.
-                error.IdentityMismatch => {
-                    self.file_tree.failSnapshot(result.path);
-                    self.showNotice("탐색기 폴더가 다른 디렉터리로 바뀌어 갱신을 중단했습니다. 폴더를 다시 여세요.");
-                },
-                else => {
-                    self.file_tree.failSnapshot(result.path);
-                    self.file_tree.requeueScan(result.path) catch {};
-                    self.file_tree_rows_dirty = true;
-                    return err;
-                },
-            };
-            changed = true;
-        }
-
-        var submitted: usize = 0;
-        while (submitted < file_tree_backend.max_inflight) {
-            const path = self.file_tree.takeScanRequest() orelse break;
-            if (!self.file_tree_backend.submit(path, self.file_tree.rootGeneration())) {
-                self.file_tree.requeueScan(path) catch {};
-                self.allocator.free(path);
-                break;
-            }
-            submitted += 1;
-        }
-
-        self.followActiveTerminalCwd();
-
-        if (changed) self.file_tree_rows_dirty = true;
-        if (self.file_tree_rows_dirty) {
-            try self.projectFileTreeOpenStates();
-            try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
-            classifyFileTreeRows(self.file_tree_rows.items);
-            self.reconcileFileTreeSelection();
-            self.clampFileTreeScroll();
-            self.file_tree_hovered_row = null;
-            self.scrollFileTreeToFollowedCwd(); // ET-CWD: 재투영된 행 기준으로 뷰포트 보정(file-explorer §1 정책 4)
-            self.advanceFileTreeProjectionGeneration();
-            self.file_tree_rows_dirty = false;
-            self.metal_dirty = true;
-        }
-    }
-
     /// openKindForPath 결과를 도크 EntryKind로 옮기는 단일 지점. 새 kind(svg·image·media·pdf, FP13~)는 여기서
     /// 한 번만 매핑을 넓힌다(docs/file-panel.md §2.2). 이름이 1:1이라도 두 enum(bridge OpenKind·dock EntryKind)의
     /// 레이어 경계를 유지한다.
-    fn entryKindForOpenKind(open_kind: file_panel_bridge.OpenKind) dock_panel.EntryKind {
+    pub fn entryKindForOpenKind(open_kind: file_panel_bridge.OpenKind) dock_panel.EntryKind {
         return switch (open_kind) {
             .markdown => .markdown,
             .html => .html,
@@ -13152,562 +12165,6 @@ pub const AppSession = struct {
             .media => .media,
             .pdf => .pdf,
         };
-    }
-
-    fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u8) void {
-        const open_kind = file_panel_bridge.openKindForPath(path) orelse return;
-        var candidate = self.file_tree.clone() catch return;
-        defer candidate.deinit();
-        candidate.recordOpened(path, root) catch return;
-        self.resetFileTreeWatchRootsFor(&candidate, path) catch return;
-        var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
-        defer candidate_rows.deinit(self.allocator);
-        self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return;
-        const kind = entryKindForOpenKind(open_kind);
-        // FP16: 생성 경로도 Term을 만든다. 옛 `dock.open`을 그대로 두면 창구(pane 트리 walk)가 못 보는
-        // orphan entry가 생겨 같은 파일을 트리에서 다시 열 때 중복 Term이 만들어진다(code-review max).
-        const opened = self.openFileTermInActivePane(path, kind) catch return;
-        self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
-        self.commitFileTreeCandidate(&candidate, &candidate_rows);
-        if (opened.previous_active_term) |prev| if (prev != opened.term) {
-            if (prev.file_entry) |prev_entry| _ = self.markFilePanelDirtySyncPending(prev_entry);
-        };
-        const entry = opened.term.file_entry orelse return;
-        // Creation was initiated from the tree: keep tree keyboard ownership while the new WebView is
-        // created, so subsequent arrows/F2 do not unexpectedly type into CM6.
-        self.focus_owner = .{ .file_tree = .{ .restore_surface = entry.surface_id } };
-        self.file_tree_focus_pending = true;
-        self.file_panel_mode_pending = entry.surface_id;
-        self.dock.collapsed = false;
-    }
-
-    fn prepareFileTreeRenameRemap(self: *AppSession, id: u64, old_path: []const u8, new_path: []const u8) !void {
-        var plan = PendingRenameRemap{ .id = id };
-        errdefer plan.deinit(self.allocator);
-        var entry_it6 = self.fileEntries();
-        while (entry_it6.next()) |entry| {
-            const replacement = (try file_tree_mutation.remapPath(self.allocator, entry.path, old_path, new_path)) orelse continue;
-            const expected = try self.allocator.dupe(u8, entry.path);
-            const new_kind: ?dock_panel.EntryKind = if (file_panel_bridge.openKindForPath(replacement)) |k|
-                entryKindForOpenKind(k)
-            else
-                null;
-            plan.dock_items[plan.dock_len] = .{
-                .expected = expected,
-                .replacement = replacement,
-                .new_kind = new_kind,
-            };
-            plan.dock_len += 1;
-        }
-        // No supported open can enter while the mutation is in flight, so conflicts only need to be
-        // rejected once at admission. Completion re-resolves each item by its **expected path** and
-        // re-checks the `mutation_pending_id` stamp, so an unrelated close/reorder — or a close followed
-        // by a reopen of the same path — cannot redirect the delayed rename acknowledgement (FP16 §1 ⑷).
-        for (plan.dock_items[0..plan.dock_len]) |item| if (self.fileEntryForPath(item.replacement) != null)
-            return error.PathConflict;
-        for (0..self.file_tree.recentCount()) |index| {
-            const recent = self.file_tree.recentAt(index).?;
-            const replacement = (try file_tree_mutation.remapPath(self.allocator, recent, old_path, new_path)) orelse continue;
-            const expected = try self.allocator.dupe(u8, recent);
-            plan.recent_items[plan.recent_len] = .{ .index = index, .expected = expected, .replacement = replacement };
-            plan.recent_len += 1;
-        }
-        if (self.pending_rename_remap) |*old| old.deinit(self.allocator);
-        self.pending_rename_remap = plan;
-    }
-
-    /// 파일 entry가 들고 있던 live surface를 정리한다. rename 재생성과 "비지원 확장자로 바뀌어 entry를 접는"
-    /// 경로가 **같은 teardown**을 쓰게 하는 단일 출처다. 이 정리를 빠뜨리면 `onAppSessionSurfaceClosed`가 안 돌아
-    /// capability·pane grant가 없는 surface에 남고, `focus_owner`가 다음 tick에 파괴될 WKWebView를 계속 가리켜
-    /// Esc/Enter가 죽은 surface로 포커스를 보낸다(code-review max).
-    /// kind가 바뀐 rename처럼 **뷰를 새로 만들어야** 하는 경우, 그 파일 Term의 web surface를 새 panel kind로
-    /// 다시 만든다. surface_id는 재사용하지 않으므로(§3) 새 id가 발급되고, entry 소유는 그대로 옮겨간다.
-    /// 실패하면 옛 Term이 그대로 남아 호출자가 본 상태가 변하지 않는다.
-    fn rebuildFileTermSurface(self: *AppSession, entry: *dock_panel.Entry) !void {
-        for (self.tabs.items, 0..) |tab, tab_index| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items, 0..) |term, term_index| {
-                    if (term.file_entry != entry) continue;
-                    const replacement = try self.createWebTerm(panelKindForEntryKind(entry.kind));
-                    // 소유를 먼저 떼어 destroyTerm이 entry·path까지 해제하지 않게 한다.
-                    term.file_entry = null;
-                    self.destroyTerm(term);
-                    replacement.file_entry = entry;
-                    entry.surface_id = replacement.surfaceId();
-                    pane.terms.items[term_index] = replacement;
-                    // 대표 surface·leaf rect 재바인딩(닫힌 Term을 가리키던 stale 포인터 방지).
-                    self.refreshAfterReap(tab_index);
-                    self.metal_dirty = true;
-                    return;
-                }
-            }
-        }
-    }
-
-    /// 이 entry의 surface가 입력·복원 소유였는지만 기록한다(통지·큐 정리 없음). Term teardown이 통지를
-    /// 낼 경로에서 쓴다 — 통지를 두 번 내지 않기 위해서다.
-    fn noteRetiredFilePanelFocus(self: *AppSession, entry: *dock_panel.Entry, retired_focus: *bool) void {
-        const surface_id = entry.surface_id;
-        if (surface_id == 0) return;
-        retired_focus.* = retired_focus.* or self.fileSurfaceOwnsInput(surface_id);
-    }
-
-    fn retireFilePanelSurface(self: *AppSession, entry: *dock_panel.Entry, retired_focus: *bool) void {
-        const surface_id = entry.surface_id;
-        if (surface_id == 0) return;
-        retired_focus.* = retired_focus.* or self.fileSurfaceOwnsInput(surface_id);
-        self.removeFilePanelQueuedActions(surface_id);
-        self.notifySurfaceClosed(surface_id);
-        entry.surface_id = 0;
-    }
-
-    fn applyFileTreeRename(self: *AppSession, id: u64, new_path: []const u8) bool {
-        const plan = if (self.pending_rename_remap) |*pending| pending else return false;
-        if (plan.id != id) return false;
-        // Validate the exact admission snapshot before the first swap. Open is globally blocked while a
-        // rename is in flight; unrelated close/reorder is tolerated because lookup is by expected path.
-        //
-        // **키는 expected path + `mutation_pending_id` 스탬프다(FP16 §1 ⑷).** 정합성을 지는 건 원래부터 이 쌍이었고
-        // `EntryId`는 빠른 핸들일 뿐이었다 — close 후 같은 경로 재오픈이라는 aliasing 시나리오도 새 entry에는
-        // 스탬프가 없어 fail-close된다(스파이크 §11.1 S2). 소유가 Term으로 옮겨가도 이 키는 그대로 성립한다.
-        for (plan.dock_items[0..plan.dock_len]) |item| {
-            const entry = self.fileEntryForPath(item.expected) orelse return false;
-            if (entry.mutation_pending_id != id) return false;
-        }
-        for (plan.recent_items[0..plan.recent_len]) |item| {
-            const current = self.file_tree.recentAt(item.index) orelse return false;
-            if (!std.mem.eql(u8, current, item.expected)) return false;
-        }
-
-        var retired_focus = false;
-        for (plan.recent_items[0..plan.recent_len]) |item|
-            std.debug.assert(self.file_tree.replaceRecentOwned(item.index, item.expected, item.replacement));
-        for (plan.dock_items[0..plan.dock_len]) |item| {
-            const entry = self.fileEntryForPath(item.expected) orelse unreachable;
-            const old_surface = entry.surface_id;
-            const old_owned = entry.path;
-            const old_kind = entry.kind;
-            entry.path = item.replacement;
-            self.allocator.free(old_owned);
-            const new_kind = item.new_kind orelse entry.kind;
-            const kind_changed = new_kind != entry.kind;
-            if (kind_changed) {
-                entry.kind = new_kind;
-                entry.mode = dock_panel.Mode.defaultFor(new_kind);
-            }
-            // 뷰를 다시 세워야 하는 조건은 **둘**이다(FP16 §1 ⑵⑶).
-            //  ⓐ trust config 전환 — `WKWebViewConfiguration`이 init 시점 고정이라(MaruAppHost.swift:2843~2868)
-            //     신뢰↔격리는 재생성 말고 방법이 없다. 격리(html·pdf)는 핀 URL이 init에 캐시된 `let`이라 같은
-            //     kind끼리도 지금은 재생성한다(핀만 갱신하는 무손실 경로는 §13 백로그).
-            //  ⓑ **kind 변경** — shell의 뷰어는 생성 시점 `?lang=`/`?kind=` 힌트로 정해지고 `entry.mode`도
-            //     되밀 채널이 없다. kind만 바꾸고 뷰를 두면 `.md`→`.png`에서 markdown shell이 PNG 바이트를
-            //     텍스트로 그리고, 더 나쁘게는 mode가 non-editable로 리셋된 채 CM6가 살아 있어 이후 삭제/rename이
-            //     편집기 잠금·dirty 스냅샷을 건너뛴다(code-review max). 그래서 kind가 바뀌면 반드시 재생성한다.
-            const rebuild = kind_changed or filePanelKindIsIsolated(old_kind) or filePanelKindIsIsolated(entry.kind);
-            if (old_surface != 0 and rebuild) {
-                // 재생성 경로에서는 **통지를 destroyTerm 하나만** 낸다 — retire까지 통지하면 같은 surface가
-                // 두 번 닫힘으로 보고돼 Swift가 이미 없는 WKWebView를 두 번 정리한다(code-review max).
-                self.noteRetiredFilePanelFocus(entry, &retired_focus);
-                // 새 kind의 뷰를 즉시 다시 만든다. 실패하면 surface_id가 0인 채로 남아 저장·mode 전환·닫기가
-                // 전부 SurfaceNotFound가 되는 좀비 탭이 되므로, 그때는 그 탭을 닫아 좀비를 안 남긴다.
-                // 실패는 첫 `try`(createWebTerm)에서만 난다 — 그 시점 옛 Term은 **아직 살아 있다**. 그러니
-                // 통지하거나 닫으려 들면 안 되고(살아 있는 surface를 닫혔다고 보고하게 된다), 사용자에게
-                // 알리고 옛 뷰를 그대로 둔다. 다음 열기/전환이 다시 시도한다(code-review max).
-                self.rebuildFileTermSurface(entry) catch {
-                    self.showNotice("파일 뷰를 다시 만들 수 없어 이전 보기를 유지했습니다.");
-                };
-            } else if (old_surface != 0) {
-                // 경로만 바뀐 신뢰 kind rename은 **아무 통지도 하지 않는다** — breadcrumb은 `entry.path`에서
-                // 파생하는 Zig GPU chrome이고 read/write는 pathless라 shell이 경로를 모른다(§11.1 S3·S4).
-                // 상대 asset도 깨지지 않는다: 트리 rename은 이름만 바꾸므로 파일과 그 형제 asset이 **함께**
-                // 움직인다(디렉터리 rename이면 하위 트리가 통째로). 그래서 옛 `!same_dir` reload 분기는 제거했다
-                // — 디렉터리 rename에서 하위 entry 전부를 헛되이 재로드시키던 결함이었다(code-review max).
-                //
-                // 다만 rename은 FSEvents에 새 경로의 file-level 이벤트로 잡히고, `fileTreeChanged`가 그걸
-                // 외부 변경으로 보고 reload를 걸어 무손실 계약을 깨뜨린다. 저장이 쓰는 self-write grace latch를
-                // 같은 목적으로 무장해 그 echo를 우리 이벤트로 소비한다.
-                if (entry.disk_content_hash_valid) {
-                    entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
-                    entry.self_write_hash = entry.disk_content_hash; // rename은 내용을 안 바꾼다 — 해시가 그대로다.
-                    entry.self_write_verifications = 0;
-                } else {
-                    // 아직 내용을 읽은 적이 없어 대조 기준선이 없다(예: readSelfImage 경로). echo를 우리 것으로
-                    // 증명할 수 없으므로 억제하지 않고 기존 외부변경 reload에 맡긴다(안전 쪽).
-                    self.queueFileTreeReload(old_surface, false);
-                }
-            }
-        }
-        // A supported file renamed to an unsupported extension remains on disk and selected in the
-        // project tree, but no longer has a file-panel capability. Remove only those clean reserved
-        // entries after every allocation and path swap has succeeded.
-        {
-            // 대상을 먼저 수집한 뒤 닫는다 — close가 pane 트리를 변형하므로 순회 중에 닫으면 어긋난다.
-            var doomed: [dock_panel.max_entries]*dock_panel.Entry = undefined;
-            var doomed_len: usize = 0;
-            var prune_it = self.fileEntries();
-            while (prune_it.next()) |entry| {
-                if (!file_tree_mutation.pathWithin(entry.path, new_path) or file_panel_bridge.openKindForPath(entry.path) != null) continue;
-                if (doomed_len >= doomed.len) break;
-                doomed[doomed_len] = entry;
-                doomed_len += 1;
-            }
-            for (doomed[0..doomed_len]) |entry| {
-                // 위 루프가 신뢰 kind rename에서 surface를 **유지**하게 된 뒤로, 여기 도달하는 entry가 live
-                // surface를 들고 있을 수 있다(예: `notes.md` → `notes.docx` — kind는 그대로라 재생성 대상이 아닌데
-                // 확장자가 비지원이라 접힌다). teardown 없이 지우면 capability·pane grant가 새고 focus가 죽은
-                // surface를 가리킨다(code-review max).
-                self.retireFilePanelSurface(entry, &retired_focus);
-                _ = self.closeFileTermForEntry(entry);
-            }
-        }
-        self.normalizeEmptyDockGroups();
-        if (retired_focus) {
-            // FP16: "focused group의 active entry" 자리를 활성 pane의 활성 Term이 대신한다.
-            const restore_surface = blk: {
-                const active_term = self.activePane().activeTerm();
-                const active_entry = active_term.file_entry orelse break :blk null;
-                break :blk if (active_entry.surface_id != 0) active_entry.surface_id else null;
-            };
-            self.focus_owner = .{ .file_tree = .{ .restore_surface = restore_surface } };
-            self.file_tree_focus_pending = true;
-        }
-        plan.committed = true;
-        plan.deinit(self.allocator);
-        self.pending_rename_remap = null;
-        return true;
-    }
-
-    fn discardPendingRenameRemap(self: *AppSession, id: u64) void {
-        if (self.pending_rename_remap) |*plan| {
-            if (plan.id != id) return;
-            plan.deinit(self.allocator);
-            self.pending_rename_remap = null;
-        }
-    }
-
-    fn fileTreePathProtectedNow(self: *const AppSession, path: []const u8, request_id: u64) bool {
-        var entry_it7 = self.fileEntriesConst();
-        while (entry_it7.next()) |entry| {
-            if (!file_tree_mutation.pathWithin(entry.path, path)) continue;
-            if (entry.mutation_pending_id != 0 and entry.mutation_pending_id != request_id) return true;
-            const editor_locked = if (entry.mode.isEditable()) blk: {
-                for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
-                    if (lock.mutation_id == request_id and lock.surface_id == entry.surface_id and lock.acknowledged) break :blk true;
-                }
-                break :blk false;
-            } else true;
-            if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
-                entry.conflict_reload_pending or !editor_locked) return true;
-        }
-        return false;
-    }
-
-    fn enqueueFileTreeRenameRollback(self: *AppSession, result: file_tree_mutation_backend.Result) bool {
-        const root = self.file_tree.rootForMutation(result.source) orelse return false;
-        const plan: file_tree_mutation.Plan = .{
-            .operation = .rename,
-            .root = root,
-            .source = result.target,
-            .parent = std.fs.path.dirname(result.source) orelse return false,
-            .name = std.fs.path.basename(result.source),
-        };
-        var request = file_tree_mutation_backend.Request.init(self.allocator, result.id, plan) catch return false;
-        const identity = result.identity orelse {
-            request.deinit(self.allocator);
-            return false;
-        };
-        request.identity = .{ .device = identity.device, .inode = identity.inode, .kind = @intCast(identity.kind) };
-        request.parent_identity = result.parent_identity;
-        request.root_identity = result.root_identity;
-        request.row_kind = result.row_kind;
-        request.selection_generation = result.selection_generation;
-        if (!self.file_tree_mutation_backend.submit(request)) {
-            request.deinit(self.allocator);
-            return false;
-        }
-        self.file_tree_rename_rollback_id = result.id;
-        self.file_tree_mutation_backend.pump();
-        return true;
-    }
-
-    fn enqueueFileTreeDeleteRestore(
-        self: *AppSession,
-        id: u64,
-        root: []const u8,
-        staged: []const u8,
-        original: []const u8,
-        identity: file_tree_mutation_backend.Identity,
-        parent_identity: ?file_tree.Identity,
-        root_identity: ?file_tree.Identity,
-    ) bool {
-        var restore = file_tree_mutation_backend.Request.initRestore(
-            self.allocator,
-            id,
-            root,
-            staged,
-            original,
-            identity,
-            parent_identity,
-            root_identity,
-        ) catch return false;
-        if (!self.file_tree_mutation_backend.submit(restore)) {
-            restore.deinit(self.allocator);
-            return false;
-        }
-        self.file_tree_mutation_backend.pump();
-        return true;
-    }
-
-    fn removeDeletedDockEntries(self: *AppSession, removed_path: []const u8) FileTreeDockRemovalStats {
-        // Trash completion은 AppKit main actor에서 오므로 entry마다 tree를 처음부터 다시 찾지 않는다. group tree는
-        // bulk commit 끝까지 그대로 두고 각 entry를 정확히 한 번 방문한 뒤 empty leaf를 한 번만 정규화한다.
-        var stats: FileTreeDockRemovalStats = .{};
-        var removed_surfaces: DeletedSurfaceSet = .{};
-        var removed_any = false;
-        var removed_input_owner = false;
-        var removed_tree_restore = false;
-        // FP16: 대상 entry를 **먼저 수집**한 뒤 처리한다 — close가 pane 트리를 변형하므로 순회 중에 닫으면
-        // 이터레이터가 어긋난다. 창당 max_entries가 수집 버퍼의 bound다.
-        var doomed: [dock_panel.max_entries]dock_panel.Entry = undefined;
-        var doomed_len: usize = 0;
-        {
-            var scan = self.fileEntries();
-            while (scan.next()) |candidate| {
-                stats.entry_visits += 1;
-                if (!file_tree_mutation.pathWithin(candidate.path, removed_path)) continue;
-                if (doomed_len >= doomed.len) break;
-                doomed[doomed_len] = candidate.*;
-                doomed_len += 1;
-            }
-        }
-        {
-            for (doomed[0..doomed_len]) |entry| {
-                removed_any = true;
-
-                const pending_owned = if (self.pending_dock_focus) |pending| pending.entry_id == entry.id else false;
-                const entry_owned = switch (self.focus_owner) {
-                    .dock_pending => pending_owned, // FP16: group 개념이 사라져 pending 소유만 본다
-                    .workspace, .file_tree => self.fileSurfaceOwnsInput(entry.surface_id),
-                };
-                if (entry_owned) removed_input_owner = true;
-                if (self.fileTreeFocused() and self.focus_owner.file_tree.restore_surface == entry.surface_id and entry.surface_id != 0)
-                    removed_tree_restore = true;
-
-                if (entry.surface_id != 0) {
-                    removed_surfaces.insert(entry.surface_id);
-                    if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == entry.surface_id)
-                        self.clearFilePanelCloseWithoutUnlock();
-                } else if (pending_owned) {
-                    self.cancelPendingDockFocus();
-                }
-            }
-        }
-        if (!removed_any) return stats;
-
-        self.removeFilePanelQueuedActionsBulk(&removed_surfaces, &stats);
-        // queued one-shots를 먼저 없앤 뒤 native callback을 낸다. callback이 browser control completion을
-        // 동기 직렬화하더라도 retired surface action을 다시 관측할 수 없다.
-        // FP16: notifySurfaceClosed는 destroyTerm이 낸다 — 여기서 따로 부르면 같은 surface가 두 번 통지된다.
-        // teardown은 queued one-shot 제거 **뒤**라야 retired surface action을 다시 관측하지 않는다.
-        for (doomed[0..doomed_len]) |entry| {
-            if (self.fileEntryForId(entry.id)) |live| _ = self.closeFileTermForEntry(live); // Term이 entry·path 소유를 회수한다(FP16)
-        }
-
-        if (removed_input_owner) {
-            if (self.fileEntryCount() == 0) {
-                self.focusWorkspaceInput();
-                self.workspace_focus_pending = true;
-            } else {
-                // FP16: 파일이 pane 탭이라 "다음 도크 entry로 승계"가 아니라 pane의 active_term 승계가
-                // 이미 일어났다(closeTermAt). 입력은 그 pane(=workspace)으로 간다.
-                self.focusWorkspaceInput();
-                self.workspace_focus_pending = true;
-            }
-        } else if (removed_tree_restore and self.fileTreeFocused()) {
-            self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
-            self.file_tree_restore_surface_pending = null;
-        }
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-        return stats;
-    }
-
-    fn updateFileTreeMutations(self: *AppSession) void {
-        self.file_tree_mutation_backend.pump();
-        var result = self.file_tree_mutation_backend.takeResult() orelse return; // max one completion per frame
-        defer result.deinit(self.allocator);
-        if (!result.ok) {
-            if (result.recovery_required) {
-                if (result.operation == .stage_delete) {
-                    self.file_tree_delete_inflight = false;
-                    self.discardPendingDeleteRoot(result.id);
-                }
-                self.retainFileTreeRecoveryPath(result.target);
-                result.target_transferred = true;
-                return;
-            }
-            if (result.operation == .rename and self.file_tree_rename_rollback_id == result.id) {
-                // The filesystem remains at the post-rename path. Keep reservation/editor locks and
-                // exact model plan fail-closed; transfer the worker-owned path without allocating.
-                self.file_tree_rename_rollback_id = null;
-                self.retainFileTreeRecoveryPath(result.source);
-                result.source_transferred = true;
-                return;
-            }
-            if (result.operation == .stage_delete) {
-                self.file_tree_delete_inflight = false;
-                self.discardPendingDeleteRoot(result.id);
-            }
-            if (result.operation == .create_file or result.operation == .create_directory or result.operation == .rename)
-                self.file_tree_edit_inflight = false;
-            if (result.operation == .rename) self.discardPendingRenameRemap(result.id);
-            if (self.file_tree_rename_rollback_id == result.id) self.file_tree_rename_rollback_id = null;
-            if (result.operation == .stage_delete or result.operation == .restore_delete or result.operation == .rename) {
-                self.clearFileTreeMutationReservation(result.id);
-                self.releaseFileTreeMutationEditorLocks(result.id, true);
-            }
-            if (result.operation == .restore_delete) {
-                self.finishPendingTrashRecord(result.id);
-                self.retainFileTreeRecoveryPath(result.source);
-                result.source_transferred = true;
-                return;
-            }
-            self.showNotice(switch (result.failure) {
-                .collision => "같은 이름의 항목이 이미 있습니다.",
-                .not_found => "대상이 사라져 파일 변경을 완료하지 못했습니다.",
-                .denied => "권한이 없어 파일을 변경할 수 없습니다.",
-                else => "파일 변경에 실패했습니다. 트리와 열린 탭은 유지됩니다.",
-            });
-            return;
-        }
-        const parent = std.fs.path.dirname(if (result.operation == .stage_delete) result.source else result.target) orelse return;
-        switch (result.operation) {
-            .create_file, .create_directory => {
-                self.file_tree_edit_inflight = false;
-                self.file_tree.invalidatePath(parent) catch {};
-                const kind: file_tree.RowKind = if (result.operation == .create_directory) .directory else .file;
-                if (self.file_tree_selection.generation == result.selection_generation)
-                    _ = self.file_tree_selection.setIdentity(kind, result.target, self.file_tree_selection.index_hint);
-                if (result.operation == .create_file) if (self.file_tree.rootForMutation(result.target)) |root|
-                    self.openCreatedFilePanel(result.target, root);
-            },
-            .rename => {
-                if (self.file_tree_rename_rollback_id == result.id) {
-                    self.file_tree_rename_rollback_id = null;
-                    self.file_tree_edit_inflight = false;
-                    self.clearFileTreeMutationReservation(result.id);
-                    self.releaseFileTreeMutationEditorLocks(result.id, true);
-                    self.discardPendingRenameRemap(result.id);
-                    self.file_tree.invalidatePath(std.fs.path.dirname(result.target) orelse result.target) catch {};
-                    self.showNotice("편집 상태가 바뀌어 이름 변경을 취소했습니다.");
-                    return;
-                }
-                if (self.fileTreePathProtectedNow(result.source, result.id)) {
-                    if (!self.enqueueFileTreeRenameRollback(result)) {
-                        self.retainFileTreeRecoveryPath(result.target);
-                        result.target_transferred = true;
-                    }
-                    return;
-                }
-                if (!self.applyFileTreeRename(result.id, result.target)) {
-                    if (!self.enqueueFileTreeRenameRollback(result)) {
-                        self.retainFileTreeRecoveryPath(result.target);
-                        result.target_transferred = true;
-                    }
-                    return;
-                }
-                self.file_tree_edit_inflight = false;
-                self.clearFileTreeMutationReservation(result.id);
-                self.releaseFileTreeMutationEditorLocks(result.id, false);
-                self.file_tree.invalidatePath(parent) catch {};
-                if (self.file_tree_selection.generation == result.selection_generation)
-                    _ = self.file_tree_selection.setIdentity(result.row_kind, result.target, self.file_tree_selection.index_hint);
-            },
-            .stage_delete => {
-                self.file_tree_delete_inflight = false;
-                const owned_root = self.takePendingDeleteRoot(result.id) orelse {
-                    self.clearFileTreeMutationReservation(result.id);
-                    self.releaseFileTreeMutationEditorLocks(result.id, true);
-                    self.retainFileTreeRecoveryPath(result.target);
-                    result.target_transferred = true;
-                    return;
-                };
-                const identity = result.identity orelse {
-                    self.allocator.free(owned_root);
-                    self.clearFileTreeMutationReservation(result.id);
-                    self.releaseFileTreeMutationEditorLocks(result.id, true);
-                    self.retainFileTreeRecoveryPath(result.target);
-                    result.target_transferred = true;
-                    return;
-                };
-                // A source editor may have become dirty while the worker was pinning/staging. Restore instead
-                // of handing the staged URL to AppKit in that case.
-                if (self.fileTreePathProtectedNow(result.source, result.id)) {
-                    const restoring = self.enqueueFileTreeDeleteRestore(
-                        result.id,
-                        owned_root,
-                        result.target,
-                        result.source,
-                        identity,
-                        result.parent_identity,
-                        result.root_identity,
-                    );
-                    self.allocator.free(owned_root);
-                    if (restoring) {
-                        self.showNotice("편집 상태가 바뀌어 휴지통 이동을 취소했습니다.");
-                    } else {
-                        self.clearFileTreeMutationReservation(result.id);
-                        self.releaseFileTreeMutationEditorLocks(result.id, true);
-                        self.retainFileTreeRecoveryPath(result.target);
-                        result.target_transferred = true;
-                    }
-                    return;
-                }
-                if (self.file_tree_trash_queue_len >= self.file_tree_trash_queue.len) {
-                    const restoring = self.enqueueFileTreeDeleteRestore(
-                        result.id,
-                        owned_root,
-                        result.target,
-                        result.source,
-                        identity,
-                        result.parent_identity,
-                        result.root_identity,
-                    );
-                    self.allocator.free(owned_root);
-                    if (restoring) {
-                        self.showNotice("휴지통 어댑터 큐가 가득 차 원래 위치로 복원합니다.");
-                    } else {
-                        self.clearFileTreeMutationReservation(result.id);
-                        self.releaseFileTreeMutationEditorLocks(result.id, true);
-                        self.retainFileTreeRecoveryPath(result.target);
-                        result.target_transferred = true;
-                    }
-                    return;
-                }
-                self.file_tree_trash_queue[self.file_tree_trash_queue_len] = .{
-                    .id = result.id,
-                    .root = owned_root,
-                    .original = result.source,
-                    .staged = result.target,
-                    .identity = identity,
-                    .parent_identity = result.parent_identity,
-                    .root_identity = result.root_identity,
-                    .row_kind = result.row_kind,
-                    .selection_generation = result.selection_generation,
-                };
-                self.file_tree_trash_queue_len += 1;
-                result.source_transferred = true;
-                result.target_transferred = true;
-            },
-            .restore_delete => {
-                self.clearFileTreeMutationReservation(result.id);
-                self.releaseFileTreeMutationEditorLocks(result.id, true);
-                self.finishPendingTrashRecord(result.id);
-                self.showNotice("휴지통 이동에 실패해 원래 위치로 복원했습니다.");
-            },
-        }
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
     }
 
     pub fn peekFileTreeTrashAction(self: *const AppSession) ?FileTreeTrashAction {
@@ -13737,27 +12194,28 @@ pub const AppSession = struct {
         // guessed, or duplicate callbacks without releasing the namespace reservation early.
         if (pending.id != id or !pending.taken or pending.restoring) return;
         if (outcome == .moved_verified) {
-            self.clearFileTreeMutationReservation(pending.id);
-            const protected_now = self.fileTreePathProtectedNow(pending.original, pending.id);
+            file_panel_ops.clearFileTreeMutationReservation(self, pending.id);
+            const protected_now = file_panel_ops.fileTreePathProtectedNow(self, pending.original, pending.id);
             if (protected_now) {
                 // The native destination mapping proves the staged object reached Trash, but a
                 // late editor/external-change signal means closing the buffer could lose data. Reflect
                 // the filesystem removal while keeping the protected tab available for recovery/save.
-                self.releaseFileTreeMutationEditorLocks(pending.id, true);
+                file_panel_ops.releaseFileTreeMutationEditorLocks(self, pending.id, true);
                 self.showNotice("휴지통 이동은 완료됐지만 편집 상태가 바뀌어 열린 탭은 유지합니다.");
             } else {
-                _ = self.removeDeletedDockEntries(pending.original);
-                self.releaseFileTreeMutationEditorLocks(pending.id, false);
+                _ = file_panel_ops.removeDeletedDockEntries(self, pending.original);
+                file_panel_ops.releaseFileTreeMutationEditorLocks(self, pending.id, false);
             }
             self.file_tree.removeRecentWithin(pending.original);
             if (std.fs.path.dirname(pending.original)) |parent| self.file_tree.invalidatePath(parent) catch {};
             if (self.file_tree_selection.generation == pending.selection_generation) {
                 const selected_path = self.file_tree_selection.path();
                 if (self.file_tree_selection.kind == pending.row_kind and selected_path != null and
-                    std.mem.eql(u8, selected_path.?, pending.original)) self.clearFileTreeSelection();
+                    std.mem.eql(u8, selected_path.?, pending.original)) file_panel_ops.clearFileTreeSelection(self);
             }
         } else if (outcome == .not_moved) {
-            if (!self.enqueueFileTreeDeleteRestore(
+            if (!file_panel_ops.enqueueFileTreeDeleteRestore(
+                self,
                 pending.id,
                 pending.root,
                 pending.staged,
@@ -13766,11 +12224,11 @@ pub const AppSession = struct {
                 pending.parent_identity,
                 pending.root_identity,
             )) {
-                self.clearFileTreeMutationReservation(pending.id);
-                self.releaseFileTreeMutationEditorLocks(pending.id, true);
-                const retained = self.takePendingTrashStaged(pending.id) orelse return;
-                self.finishPendingTrashRecord(pending.id);
-                self.retainFileTreeRecoveryPath(retained);
+                file_panel_ops.clearFileTreeMutationReservation(self, pending.id);
+                file_panel_ops.releaseFileTreeMutationEditorLocks(self, pending.id, true);
+                const retained = file_panel_ops.takePendingTrashStaged(self, pending.id) orelse return;
+                file_panel_ops.finishPendingTrashRecord(self, pending.id);
+                file_panel_ops.retainFileTreeRecoveryPath(self, retained);
                 return;
             }
             self.file_tree_trash_queue[0].restoring = true;
@@ -13784,117 +12242,31 @@ pub const AppSession = struct {
                 if (path.len != 0) self.allocator.dupe(u8, path) catch null else null
             else
                 null;
-            self.finishPendingTrashRecord(pending.id);
+            file_panel_ops.finishPendingTrashRecord(self, pending.id);
             if (owned_recovery) |path| {
-                self.retainFileTreeRecoveryPath(path);
+                file_panel_ops.retainFileTreeRecoveryPath(self, path);
             } else {
-                self.retainFileTreeUnknownRecovery();
+                file_panel_ops.retainFileTreeUnknownRecovery(self);
             }
             self.file_tree_rows_dirty = true;
             self.metal_dirty = true;
             return;
         }
-        self.finishPendingTrashRecord(pending.id);
+        file_panel_ops.finishPendingTrashRecord(self, pending.id);
         self.file_tree_mutation_backend.pump();
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
     }
 
-    fn finishPendingTrashRecord(self: *AppSession, id: u64) void {
-        var index: usize = 0;
-        while (index < self.file_tree_trash_queue_len and self.file_tree_trash_queue[index].id != id) : (index += 1) {}
-        if (index >= self.file_tree_trash_queue_len) return;
-        const pending = self.file_tree_trash_queue[index];
-        self.allocator.free(pending.root);
-        self.allocator.free(pending.original);
-        self.allocator.free(pending.staged);
-        var i = index + 1;
-        while (i < self.file_tree_trash_queue_len) : (i += 1) self.file_tree_trash_queue[i - 1] = self.file_tree_trash_queue[i];
-        self.file_tree_trash_queue_len -= 1;
-    }
-
-    fn takePendingTrashStaged(self: *AppSession, id: u64) ?[]u8 {
-        for (self.file_tree_trash_queue[0..self.file_tree_trash_queue_len]) |*pending| {
-            if (pending.id != id) continue;
-            const staged = pending.staged;
-            pending.staged = staged[0..0];
-            return staged;
-        }
-        return null;
-    }
-
-    fn retainFileTreeRecoveryPath(self: *AppSession, recovery_path: []u8) void {
-        if (!builtin.is_test) std.log.err("file tree mutation requires manual recovery: {s}", .{recovery_path});
-        // Namespace mutations are globally blocked once any manual recovery exists, so admission
-        // guarantees this preallocated slot is available. Transfer existing ownership: no OOM gap.
-        std.debug.assert(self.file_tree_manual_recovery_paths_len < self.file_tree_manual_recovery_paths.len);
-        self.file_tree_manual_recovery_paths[self.file_tree_manual_recovery_paths_len] = recovery_path;
-        self.file_tree_manual_recovery_paths_len += 1;
-        var message_buf: [std.fs.max_path_bytes + 96]u8 = undefined;
-        const message = std.fmt.bufPrint(&message_buf, "자동 복구가 필요합니다. 이 경로의 파일을 확인하세요: {s}", .{recovery_path}) catch
-            "자동 복구가 필요합니다. 로그의 recovery 경로에서 파일을 확인하세요.";
-        self.showNotice(message);
-    }
-
-    fn retainFileTreeUnknownRecovery(self: *AppSession) void {
-        if (!builtin.is_test) std.log.err("file tree Trash mutation requires manual recovery; destination path unavailable", .{});
-        self.file_tree_manual_recovery_unknown = true;
-        self.showNotice("휴지통 이동 결과를 검증할 수 없습니다. 휴지통을 확인하세요. 정상 종료와 파일 변경을 차단했습니다.");
-    }
-
-    fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
-        // 다른 뷰를 보는 중이면 트리 행은 화면에 없다 — 좌표가 같은 rect 안이어도 hit이 되면 안 된다(§3.5).
-        if (self.dock.view != .explorer) return null;
-        if (!self.dockVisible() or self.cell_height_px == 0) return null;
-        const tree_rect = self.dockGeometry().tree_content;
-        if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
-        if (self.dockListScrollbarGeometry()) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
-        // 픽셀 스크롤이므로 뷰포트 안 y는 **content 좌표로 올린 뒤** 행 높이로 나눈다. 창의 첫 행이
-        // 위로 밀려 있어도(부분 행) 같은 식이 그 행을 준다 — 렌더가 origin을 그만큼 올리는 것과 짝이다.
-        const local_px = y_px - @as(f64, @floatFromInt(tree_rect.y));
-        if (local_px < 0) return null;
-        const content_y = @as(f64, @floatFromInt(self.fileTreeEffectiveScrollPx())) + local_px;
-        const index: usize = @intFromFloat(content_y / @as(f64, @floatFromInt(self.cell_height_px)));
-        return if (index < self.file_tree_rows.items.len) index else null;
-    }
-
-    fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
-        return self.fileTreeFileMutationBusy() or
-            self.file_tree_root_pick_pending != .none or self.file_tree_root_picker_inflight != .none or
-            self.file_tree_root_validation != null;
-    }
-
-    fn fileTreeFileMutationBusy(self: *const AppSession) bool {
-        return self.pending_file_tree_delete != null or self.file_tree_edit_inflight or self.file_tree_delete_inflight or
-            self.file_tree_mutation_waiting_request != null or self.file_tree_trash_queue_len != 0 or
-            self.file_tree_manual_recovery_paths_len != 0 or self.file_tree_manual_recovery_unknown;
-    }
-
     /// 탐색기 스크롤 좌표계의 세 값. **한 자리에서 함께** 만든다 — content와 viewport가 따로 계산되면
     /// 그 둘을 빼서 얻는 상한이 호출부마다 갈리고, 갈리는 순간 목록이 빈 곳으로 스크롤되거나 마지막
     /// 행에 못 닿는다(rows 시절 실제로 그런 결함이 있었다).
-    const FileTreeScrollExtent = struct { content_h_px: u32, viewport_h_px: u32, max_offset_px: u32 };
-
-    fn fileTreeScrollExtent(self: *const AppSession) FileTreeScrollExtent {
-        const row_h = self.cell_height_px;
-        const viewport = self.dockGeometry().tree_content.h;
-        const content: u32 = @intCast(@min(
-            @as(u64, self.file_tree_rows.items.len) * @as(u64, row_h),
-            @as(u64, std.math.maxInt(u32)),
-        ));
-        return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };
-    }
-
-    /// 발행·hit-test·렌더가 읽는 유일한 스크롤 값. 상태의 `offset_y_px`를 직접 읽지 않는 이유는
-    /// 목록이 짧아진 뒤 `clamp`가 돌기 전 tick에도 창이 유계여야 하기 때문이다.
-    fn fileTreeEffectiveScrollPx(self: *const AppSession) u32 {
-        return @min(self.file_tree_scroll.offset_y_px, self.fileTreeScrollExtent().max_offset_px);
-    }
+    pub const FileTreeScrollExtent = struct { content_h_px: u32, viewport_h_px: u32, max_offset_px: u32 };
 
     /// published tree가 발행한 track/thumb rect에서 스크롤바 기하를 **되읽는다**. 여기서 다시 계산하면
     /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른"
     /// 결함이고, 도크가 같은 이유로 같은 함수를 갖는다(SV2b).
-    fn dockListScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
+    pub fn dockListScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
         var track: ?chrome.ui.layout.UiRect = null;
         var thumb: ?chrome.ui.layout.UiRect = null;
         for (self.dock_list_scroll_entries[0..self.dock_list_scroll_entry_count]) |entry| {
@@ -13953,8 +12325,8 @@ pub const AppSession = struct {
         return switch (self.dock.view) {
             .explorer => .{
                 .rect = content,
-                .extent = self.fileTreeScrollExtent(),
-                .offset_px = self.fileTreeEffectiveScrollPx(),
+                .extent = file_panel_ops.fileTreeScrollExtent(self),
+                .offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self),
             },
             .source_control => .{
                 .rect = .{
@@ -13975,7 +12347,7 @@ pub const AppSession = struct {
     /// 소유하므로 여기서는 라우팅만 한다.
     fn setDockListScrollOffsetPx(self: *AppSession, offset_px: i64) void {
         switch (self.dock.view) {
-            .explorer => self.setFileTreeScrollOffsetPx(offset_px),
+            .explorer => file_panel_ops.setFileTreeScrollOffsetPx(self, offset_px),
             .source_control => self.setScmScrollOffsetPx(offset_px),
             else => {},
         }
@@ -13995,7 +12367,7 @@ pub const AppSession = struct {
     /// 지금 보이는 도크 목록이 매 프레임 내는 tree. **자식이 없다** — 행은 셀 격자라 tree 노드가 아니고(ML6의 텍스트
     /// 모델 블로커), 이 선언이 사는 이유는 track/thumb을 공용 경로로 내기 위해서다. 가상화 평행이동도
     /// 여기서 쓰지 않는다(셀 경로가 자기 원점 편향으로 한다 — SV2a).
-    fn buildDockListScrollTree(self: *AppSession) void {
+    pub fn buildDockListScrollTree(self: *AppSession) void {
         self.dock_list_scroll_entry_count = 0;
         self.dock_list_scroll_max_offset_px = 0;
         // 지금 보이는 목록으로 만든 스크롤바다 — 다른 뷰에 발행하면 목록과 무관한 막대가 뜨고 드래그도 먹는다.
@@ -14056,13 +12428,6 @@ pub const AppSession = struct {
         self.dock_list_scroll_max_offset_px = extent.max_offset_px;
     }
 
-    fn fileTreeScrollTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
-        return .{
-            .entries = self.dock_list_scroll_entries[0..self.dock_list_scroll_entry_count],
-            .generation = self.dock_list_scroll_generation,
-        };
-    }
-
     /// 재투영 지점. 계측은 여기 있다 — `buildDockListScrollTree`는 down/move에서도 불리므로 그것까지
     /// 세면 "프레임당 몇 번 투영했는가"라는 예산의 의미가 달라진다.
     fn refreshDockListScrollbar(self: *AppSession) void {
@@ -14071,15 +12436,6 @@ pub const AppSession = struct {
             counters.geometry_builds += 1;
         }
         self.buildDockListScrollTree();
-    }
-
-    fn advanceFileTreeProjectionGeneration(self: *AppSession) void {
-        self.file_tree_projection_generation +%= 1;
-        if (self.file_tree_projection_generation == 0) self.file_tree_projection_generation = 1;
-        self.dock_list_scroll_entry_count = 0;
-        self.dock_list_scrollbar_hovered = false;
-        self.sidebar_scrollbar_hovered = false;
-        if (self.scrollbarCaptureActive()) self.endScrollbarCapture();
     }
 
     fn setDockListScrollbarHovered(self: *AppSession, hovered: bool) void {
@@ -14094,29 +12450,13 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 스크롤 위치를 확정하는 모든 입구(스크롤바 드래그·track click·키보드 anchor·reveal)가 지나는 한
-    /// 자리. 상한은 스크롤바 기하가 아니라 `fileTreeScrollExtent`가 준다 — 스크롤바는 넘치지 않는
-    /// 목록에 아예 발행되지 않으므로, 기하를 상한의 출처로 쓰면 "아직 발행 전"과 "스크롤할 것 없음"이
-    /// 구분되지 않는다.
-    fn setFileTreeScrollOffsetPx(self: *AppSession, offset_px: i64) void {
-        const extent = self.fileTreeScrollExtent();
-        if (!self.file_tree_scroll.setOffsetPx(offset_px, extent.max_offset_px)) return;
-        // 옮긴 **직후**의 thumb을 지금 알아야 이어지는 드래그의 grab 기준점이 튀지 않는다. tree를 다시
-        // 내면 track/thumb rect가 새 offset을 반영한다 — 기하를 두 번째로 만들지 않는다.
-        self.buildDockListScrollTree();
-        self.file_tree_hovered_row = null;
-        self.dock_list_scrollbar_idle_ticks = 0;
-        self.dock_list_scrollbar_last_offset_px = self.file_tree_scroll.offset_y_px;
-        self.metal_dirty = true;
-    }
-
     /// scrollbar를 capture가 볼 수 있는 tree로 다시 발행한다. thumb이 스크롤에 따라 움직이므로 매
     /// move마다 재발행하고 세대를 올린다 — capture를 넘길지는 §5 carry verdict가 판정한다.
-    fn scrollbarCaptureActive(self: *const AppSession) bool {
+    pub fn scrollbarCaptureActive(self: *const AppSession) bool {
         return self.scrollbar_interaction.capture != null;
     }
 
-    fn endScrollbarCapture(self: *AppSession) void {
+    pub fn endScrollbarCapture(self: *AppSession) void {
         self.scrollbar_interaction.capture = null;
         self.dock_list_scroll_drag.end();
         self.dock_list_scroll_drag_owner = null;
@@ -14147,7 +12487,7 @@ pub const AppSession = struct {
         // verdict가 판정한다. 예전에는 전용 `publish`가 rect 두 개를 손으로 만들었고, 지금은 같은
         // `scrollArea` 선언이 낸 tree를 그대로 쓴다.
         self.buildDockListScrollTree();
-        const snapshot = self.fileTreeScrollTree();
+        const snapshot = file_panel_ops.fileTreeScrollTree(self);
         if (snapshot.entries.len == 0) {
             self.endScrollbarCapture();
             return true;
@@ -14173,7 +12513,7 @@ pub const AppSession = struct {
             self.endScrollbarCapture();
             return true;
         };
-        if (!fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
+        if (!file_panel_ops.fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
             self.endScrollbarCapture();
             return true;
         }
@@ -14271,7 +12611,7 @@ pub const AppSession = struct {
             self.endScrollbarCapture();
             return true;
         };
-        if (!fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
+        if (!file_panel_ops.fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
             self.endScrollbarCapture();
             return true;
         }
@@ -14320,17 +12660,6 @@ pub const AppSession = struct {
         return true;
     }
 
-    /// 드래그 중에 잡은 thumb을 **계속 잡고 있어도 되는가**. 스크롤 위치(`thumb_y`)는 드래그가 바꾸는
-    /// 값이라 비교에서 빠지고, 그 밖의 것이 하나라도 달라지면 다른 목록·다른 기하를 가리키므로 끊는다.
-    fn fileTreeScrollbarSameSnapshot(
-        a: chrome.ui.scroll_area.ScrollbarGeometry,
-        b: chrome.ui.scroll_area.ScrollbarGeometry,
-    ) bool {
-        return a.track_x == b.track_x and a.track_y == b.track_y and
-            a.track_w == b.track_w and a.track_h == b.track_h and
-            a.thumb_h == b.thumb_h and a.max_offset_px == b.max_offset_px;
-    }
-
     fn beginDockListScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
         self.buildDockListScrollTree();
         const geometry = self.dockListScrollbarGeometry() orelse return false;
@@ -14338,7 +12667,7 @@ pub const AppSession = struct {
         // down이 thumb인지 track 빈 곳인지, 잡은 지점을 어떻게 기억하는지, 점프 후 기하가 어떻게 되는지는
         // `scroll_area.Drag`가 안다. host는 published 기하를 건네고 점프 결과만 적용한다.
         if (self.dock_list_scroll_drag.begin(geometry, x_px, y_px)) |jumped| self.setDockListScrollOffsetPx(jumped);
-        const snapshot = self.fileTreeScrollTree();
+        const snapshot = file_panel_ops.fileTreeScrollTree(self);
         if (snapshot.entries.len == 0) return false;
         _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
             .phase = .down,
@@ -14364,226 +12693,6 @@ pub const AppSession = struct {
         return true;
     }
 
-    fn fileTreeFocused(self: *const AppSession) bool {
-        return self.focus_owner == .file_tree;
-    }
-
-    fn clearFileTreeSelection(self: *AppSession) void {
-        self.file_tree_selection.clear();
-    }
-
-    fn setFileTreeSelection(self: *AppSession, index: usize) bool {
-        if (!self.file_tree_selection.set(self.file_tree_rows.items, index)) return false;
-        self.scrollFileTreeRowIntoView(index);
-        self.metal_dirty = true;
-        return true;
-    }
-
-    fn selectedFileTreeRow(self: *const AppSession) ?usize {
-        return self.file_tree_selection.index(self.file_tree_rows.items);
-    }
-
-    fn fileTreeSelectionPath(self: *const AppSession) ?[]const u8 {
-        return self.file_tree_selection.path();
-    }
-
-    fn reconcileFileTreeSelection(self: *AppSession) void {
-        if (self.file_tree_selection.kind == null) {
-            if (self.fileTreeFocused()) self.selectFirstFileTreeRow();
-            return;
-        }
-        const resolved = self.file_tree_selection.reconcile(self.file_tree_rows.items) orelse return;
-        self.scrollFileTreeRowIntoView(resolved);
-    }
-
-    fn selectFirstFileTreeRow(self: *AppSession) void {
-        for (self.file_tree_rows.items, 0..) |row, index| if (file_tree.rowIdentity(row) != null) {
-            _ = self.setFileTreeSelection(index);
-            return;
-        };
-    }
-
-    /// 목록이 짧아졌을 때 offset을 창 안으로 당긴다. **호출부에 인라인으로 두면 테스트가 이 산술을
-    /// 복제하게 되고, 복제본은 호출부를 판정하지 못한다** — 실제로 그랬다(적대적 검증에서 clamp 변이가
-    /// 복제 기반 단언을 통과했다).
-    fn clampFileTreeScroll(self: *AppSession) void {
-        self.file_tree_scroll.clamp(self.fileTreeScrollExtent().max_offset_px);
-    }
-
-    /// 렌더가 draw list에 넘기는 창. **호출부에 인라인으로 두면 테스트가 그 산술을 복제하게 되고,
-    /// 복제본은 호출부를 판정하지 못한다** — 실제로 호출부를 상수로 바꾸는 변이가 복제 기반 단언을
-    /// 통과했다(§10.1).
-    ///
-    /// 세 값이 한 쌍이다. `origin_shift_px`는 첫 행이 뷰포트 위로 밀려 나간 양이고, 렌더는 pane
-    /// origin을 그만큼 **올려** 그 행을 부분적으로 보이게 한다. 그래서 `count`는 뷰포트를 덮는 데
-    /// 필요한 행 수(위·아래 부분 행 포함)이며, 삐져나온 몫은 pane clip이 자른다.
-    ///
-    /// 행 높이가 균일(`cell_height_px`)하므로 `scroll_area.project`의 walk 대신 나눗셈으로 같은 답을
-    /// 낸다 — 탐색기 행은 수천 개가 될 수 있고 창은 매 프레임 필요하다. 그 둘이 같은 답이라는 것은
-    /// 테스트가 `project`와 대조해 고정한다(도크는 카드 높이가 가변이라 walk가 필수다).
-    fn fileTreeDrawWindow(self: *const AppSession) struct { start: usize, count: u16, origin_shift_px: u32 } {
-        const row_h = self.cell_height_px;
-        if (row_h == 0) return .{ .start = 0, .count = 0, .origin_shift_px = 0 };
-        const offset = self.fileTreeEffectiveScrollPx();
-        const start: usize = offset / row_h;
-        const shift = offset % row_h;
-        const viewport = self.dockGeometry().tree_content.h;
-        // 위로 shift만큼 밀린 상태에서 뷰포트를 덮으려면 올림이 필요하다 — 내림이면 바닥에 배경이 남는다.
-        const needed: usize = (@as(usize, viewport) + shift + row_h - 1) / row_h;
-        const remaining = self.file_tree_rows.items.len -| start;
-        return .{
-            .start = start,
-            .count = @intCast(@min(@min(needed, remaining), @as(usize, std.math.maxInt(u16)))),
-            .origin_shift_px = shift,
-        };
-    }
-
-    /// 키보드 Page 이동이 쓰는 "온전히 보이는 행 수". 창(`fileTreeDrawWindow`)과 달리 **부분 행을 세지
-    /// 않는다** — 반쯤 걸친 행까지 한 페이지로 치면 Page Down이 그 행을 건너뛴다.
-    fn fileTreeVisibleRows(self: *const AppSession) usize {
-        if (self.cell_height_px == 0) return 0;
-        return self.dockGeometry().tree_content.h / self.cell_height_px;
-    }
-
-    /// 대상 행을 뷰포트 안으로 **최소한만** 민다(file-explorer §1 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
-    /// 픽셀 좌표라 "보인다"의 기준은 행이 **온전히** 들어와 있는가다: 부분적으로 걸친 행은 마저 넣는다.
-    fn scrollFileTreeRowIntoView(self: *AppSession, index: usize) void {
-        const row_h = self.cell_height_px;
-        if (row_h == 0) return;
-        const extent = self.fileTreeScrollExtent();
-        if (extent.viewport_h_px == 0) return;
-        const top: u64 = @as(u64, index) * @as(u64, row_h);
-        const bottom = top + row_h;
-        const offset = self.fileTreeEffectiveScrollPx();
-        if (top < offset) {
-            self.setFileTreeScrollOffsetPx(@intCast(@min(top, @as(u64, std.math.maxInt(i32)))));
-        } else if (bottom > @as(u64, offset) + extent.viewport_h_px) {
-            self.setFileTreeScrollOffsetPx(@intCast(@min(bottom - extent.viewport_h_px, @as(u64, std.math.maxInt(i32)))));
-        }
-    }
-
-    fn focusFileTree(self: *AppSession) void {
-        if (!self.dock_initialized or !self.dock.presented) return;
-        self.cancelPendingDockFocus();
-        if (self.dock.collapsed) self.activateFilePanelDockControl();
-        // 다른 뷰를 보는 중이면 먼저 탐색기로 되돌린다 — 보이지 않는 트리에 키 입력이 가면 안 된다
-        // (docs/file-explorer.md §3.5). 접힘 해제와 같은 급의 "포커스 전에 보이게 만든다" 처리다.
-        if (self.dock.view != .explorer) {
-            self.dock.view = .explorer;
-            self.metal_dirty = true;
-        }
-        const restore_surface: ?u64 = switch (self.focus_owner) {
-            .file_tree => |owner| owner.restore_surface,
-            // workspace 소유 중 활성 Term이 파일이면 그 surface가 Esc 복원 대상이다(옛 `.dock_surface`).
-            .workspace => self.focusedDockSurface(),
-            .dock_pending => null,
-        };
-        self.focus_owner = .{ .file_tree = .{ .restore_surface = restore_surface } };
-        self.workspace_focus_pending = false;
-        self.file_tree_restore_surface_pending = null;
-        self.file_tree_focus_pending = true;
-        if (self.selectedFileTreeRow() == null) self.selectFirstFileTreeRow();
-        self.metal_dirty = true;
-    }
-
-    /// FP9 왕복 포커스 action. 구조 포커스의 단일 출처인 `FocusOwner`만 바꾸고 AppKit에는 기존 pending
-    /// one-shot으로 responder 전이를 요청한다. 빈 도크에서 picker를 암묵적으로 열지 않아 단축키 재바인딩도
-    /// 예측 가능하게 유지한다.
-    /// 활성 파일 Term의 표시 모드를 그 kind가 허용하는 다음 모드로 넘긴다(읽기 ↔ 소스). 헤더 mode 선택기
-    /// 클릭과 같은 `setFilePanelMode` 경로를 써서 pending action·web 통지가 동일하게 흐른다. 모드가 하나뿐인
-    /// kind(text·image·media·pdf)와 파일이 아닌 Term은 무동작이다.
-    fn toggleActiveFilePanelMode(self: *AppSession) void {
-        const pane = self.activePane();
-        if (pane.terms.items.len == 0) return;
-        const entry = pane.activeTerm().file_entry orelse {
-            self.showNotice("파일 탭에서만 쓸 수 있습니다.");
-            return;
-        };
-        const modes = dock_layout.modesForKind(entry.kind);
-        if (modes.len < 2) return; // 선택지가 없으면 조용히 무동작(알림이 오히려 방해다).
-        var next = modes[0].mode;
-        for (modes, 0..) |descriptor, i| {
-            if (descriptor.mode == entry.mode) {
-                next = modes[(i + 1) % modes.len].mode;
-                break;
-            }
-        }
-        self.setFilePanelMode(entry, next);
-        self.metal_dirty = true;
-    }
-
-    fn toggleFilePanelFocus(self: *AppSession) void {
-        switch (self.focus_owner) {
-            .workspace => {
-                if (!self.dock_initialized or !self.dockHasContent()) {
-                    self.showNotice("파일 패널에 포커스할 내용이 없습니다.");
-                    return;
-                }
-                self.focusFileTree();
-            },
-            .dock_pending, .file_tree => self.focusWorkspaceInput(),
-        }
-        if (self.focus_owner == .workspace) self.workspace_focus_pending = true;
-    }
-
-    fn restoreFileTreeFocus(self: *AppSession) void {
-        const owner = switch (self.focus_owner) {
-            .file_tree => |owner| owner,
-            else => return,
-        };
-        self.file_tree_focus_pending = false;
-        if (owner.restore_surface) |surface_id| {
-            if (self.activateFilePanelSurfaceForRestore(surface_id)) {
-                // 복원 대상은 트리로 들어가기 **전에** 이미 publish된 surface다(가시성으로 재확인) — 새 barrier가
-                // 아니라 곧바로 owner다. 다만 그 사이에 걸린 다른 파일의 pending은 취소해야 늦은 ack가
-                // 사용자가 되돌아온 이 surface에서 focus를 뺏지 않는다.
-                self.cancelPendingDockFocus();
-                self.focus_owner = .workspace;
-                self.file_tree_restore_surface_pending = surface_id;
-                self.workspace_focus_pending = false;
-                self.metal_dirty = true;
-                return;
-            }
-        }
-        self.focus_owner = .workspace;
-        self.file_tree_restore_surface_pending = null;
-        self.workspace_focus_pending = true;
-        self.metal_dirty = true;
-    }
-
-    /// 복원 뒤 이 파일 surface를 화면에 올린다. FP16에서 "활성화"는 도크 그룹의 active index가 아니라
-    /// 그 파일 **Term이 있는 pane/워크스페이스로 이동**하는 것이다 — activateExistingFileTerm이 그 단일 출처다.
-    /// 트리에서 Esc로 빠져나올 때 **직전에 보고 있던** 파일 WebView로 입력을 되돌린다. 그 사이 다른 파일을
-    /// 열었으면 그 pane의 탭을 되돌려야 하므로 pane 안 활성 탭까지는 바꾼다. 다만 **워크스페이스는 넘지
-    /// 않는다** — 같은 surface가 다른 탭에 있다고 그리로 점프하면 사용자가 보던 화면이 통째로 바뀐다
-    /// (code-review max). 활성 워크스페이스 밖이면 복원 capability가 만료된 것이라 실패로 돌려주고,
-    /// 호출자가 workspace로 되돌린다.
-    fn activateFilePanelSurfaceForRestore(self: *AppSession, surface_id: u64) bool {
-        if (surface_id == 0 or self.tabs.items.len == 0) return false;
-        if (self.fileEntryForSurfaceId(surface_id) == null) return false;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        for (tab.panes.items, 0..) |pane, pane_index| {
-            for (pane.terms.items, 0..) |term, term_index| {
-                const entry = term.file_entry orelse continue;
-                if (entry.surface_id != surface_id) continue;
-                // 떠나게 되는 활성 Term이 편집 중인 파일이면 dirty 스냅샷을 먼저 요청한다(§3.2 two-phase).
-                // 열기 경로(`activateExistingFileTerm`)와 같은 계약이라 복원만 예외가 되면 안 된다.
-                if (pane.terms.items.len > 0) {
-                    const leaving = pane.activeTerm();
-                    if (leaving != term) if (leaving.file_entry) |leaving_entry| {
-                        _ = self.markFilePanelDirtySyncPending(leaving_entry);
-                    };
-                }
-                if (tab.active_pane != pane_index) self.focusPane(pane_index);
-                self.focusTerm(term_index);
-                self.file_panel_mode_pending = surface_id;
-                self.file_tree_rows_dirty = true;
-                return true;
-            }
-        }
-        return false;
-    }
-
     pub fn takeFileTreeFocusAction(self: *AppSession) bool {
         const pending = self.file_tree_focus_pending;
         self.file_tree_focus_pending = false;
@@ -14605,617 +12714,13 @@ pub const AppSession = struct {
         return dropped;
     }
 
-    fn fileTreeMutationTarget(row: file_tree.Row) ?file_tree_mutation.Target {
-        return switch (row) {
-            .root => |v| .{ .kind = .root, .path = v.path, .identity = v.identity },
-            .directory => |v| .{ .kind = .directory, .path = v.path, .symlink = v.symlink, .identity = v.identity },
-            .file => |v| .{ .kind = .file, .path = v.path, .symlink = v.symlink, .identity = v.identity },
-            .recent_header, .recent_file, .empty => null,
-        };
-    }
-
-    fn copyFileTreeEditTarget(target: file_tree_mutation.Target, edit_kind: FileTreeEditKind) ?FileTreeEditTarget {
-        if (target.path.len > std.fs.max_path_bytes) return null;
-        var out = FileTreeEditTarget{
-            .row_kind = target.kind,
-            .symlink = target.symlink,
-            .edit_kind = edit_kind,
-            .identity = target.identity,
-            .parent_identity = target.parent_identity,
-            .root_identity = target.root_identity,
-        };
-        @memcpy(out.path_buf[0..target.path.len], target.path);
-        out.path_len = target.path.len;
-        return out;
-    }
-
-    fn copyPendingFileTreeDelete(target: file_tree_mutation.Target, root_generation: u64) ?PendingFileTreeDelete {
-        if (target.path.len > std.fs.max_path_bytes) return null;
-        var out = PendingFileTreeDelete{
-            .row_kind = target.kind,
-            .symlink = target.symlink,
-            .identity = target.identity,
-            .parent_identity = target.parent_identity,
-            .root_identity = target.root_identity,
-            .root_generation = root_generation,
-        };
-        @memcpy(out.path_buf[0..target.path.len], target.path);
-        out.path_len = target.path.len;
-        return out;
-    }
-
-    fn selectedFileTreeMutationTarget(self: *const AppSession) ?file_tree_mutation.Target {
-        const index = self.selectedFileTreeRow() orelse return null;
-        if (index >= self.file_tree_rows.items.len) return null;
-        var target = fileTreeMutationTarget(self.file_tree_rows.items[index]) orelse return null;
-        if (file_tree.parentIndex(self.file_tree_rows.items, index)) |parent_index|
-            target.parent_identity = rowFileIdentity(self.file_tree_rows.items[parent_index]);
-        if (self.file_tree.rootForMutation(target.path)) |root_path| {
-            for (self.file_tree_rows.items) |row| switch (row) {
-                .root => |root| if (std.mem.eql(u8, root.path, root_path)) {
-                    target.root_identity = root.identity;
-                    break;
-                },
-                else => {},
-            };
-        }
-        return target;
-    }
-
-    fn rowFileIdentity(row: file_tree.Row) ?file_tree.Identity {
+    pub fn rowFileIdentity(row: file_tree.Row) ?file_tree.Identity {
         return switch (row) {
             .root => |v| v.identity,
             .directory => |v| v.identity,
             .file => |v| v.identity,
             else => null,
         };
-    }
-
-    fn startFileTreeEdit(self: *AppSession, edit_kind: FileTreeEditKind) void {
-        if (self.fileTreeNamespaceMutationBusy()) {
-            self.showNotice("이전 파일 변경이 끝날 때까지 기다려 주세요.");
-            return;
-        }
-        const target = self.selectedFileTreeMutationTarget() orelse {
-            self.showNotice("프로젝트 파일 또는 폴더를 먼저 선택해 주세요.");
-            return;
-        };
-        if (edit_kind == .rename and target.kind == .root) {
-            self.showNotice("프로젝트 루트 자체는 이름을 바꿀 수 없습니다.");
-            return;
-        }
-        if (edit_kind != .rename and target.symlink and (target.kind == .root or target.kind == .directory)) {
-            self.showNotice("심볼릭 링크 폴더 안에는 항목을 만들 수 없습니다.");
-            return;
-        }
-        const copied = copyFileTreeEditTarget(target, edit_kind) orelse {
-            self.showNotice("경로가 너무 길어 변경할 수 없습니다.");
-            return;
-        };
-        self.startRename(.{ .file_tree = copied });
-    }
-
-    fn fillFileTreeProtections(self: *const AppSession, out: []file_tree_mutation.Protection) usize {
-        var n: usize = 0;
-        if (!self.dock_initialized) return 0;
-        var entry_it8 = self.fileEntriesConst();
-        while (entry_it8.next()) |entry| {
-            if (n >= out.len) return n;
-            out[n] = .{
-                .path = entry.path,
-                .dirty = entry.dirty,
-                // A native-clean source editor is not trusted yet: enqueueFileTreeEdit/delete reserve it,
-                // acquire a request-scoped CM6 read-only lock and only submit after the matching snapshot.
-                .dirty_sync_pending = entry.dirty_sync_pending or entry.mutation_pending_id != 0,
-                .external_change = entry.external_change,
-                .conflict_reload_pending = entry.conflict_reload_pending,
-            };
-            n += 1;
-        }
-        return n;
-    }
-
-    /// A dirty/source-edit file opened through a symlink alias can be outside the target's lexical
-    /// prefix while still residing below the target directory by inode. Until dock entries persist a
-    /// canonical ancestor chain, fail closed for directory mutations when any protected file panel
-    /// exists in any project root. Cross-root symlinks make a lexical-root restriction unsafe.
-    fn fileTreeDirectoryAliasRisk(self: *const AppSession, target_path: []const u8, root: []const u8) bool {
-        _ = target_path;
-        _ = root;
-        var entry_it9 = self.fileEntriesConst();
-        while (entry_it9.next()) |entry| {
-            if (filePanelEntryNeedsDirtyProtection(entry.*)) return true;
-        }
-        return false;
-    }
-
-    fn reserveFileTreeMutation(self: *AppSession, request_id: u64, source: []const u8) bool {
-        var reserved: [dock_panel.max_entries]*dock_panel.Entry = undefined;
-        var n: usize = 0;
-        var entry_it10 = self.fileEntries();
-        while (entry_it10.next()) |entry| {
-            if (!file_tree_mutation.pathWithin(entry.path, source)) continue;
-            if (entry.mutation_pending_id != 0) {
-                for (reserved[0..n]) |prior| prior.mutation_pending_id = 0;
-                return false;
-            }
-            entry.mutation_pending_id = request_id;
-            reserved[n] = entry;
-            n += 1;
-        }
-        return true;
-    }
-
-    fn clearFileTreeMutationReservation(self: *AppSession, request_id: u64) void {
-        if (!self.dock_initialized or request_id == 0) return;
-        var entry_it11 = self.fileEntries();
-        while (entry_it11.next()) |entry| {
-            if (entry.mutation_pending_id == request_id) entry.mutation_pending_id = 0;
-        }
-    }
-
-    fn takePendingDeleteRoot(self: *AppSession, id: u64) ?[]u8 {
-        const pending = self.pending_delete_root orelse return null;
-        if (pending.id != id) return null;
-        self.pending_delete_root = null;
-        return pending.root;
-    }
-
-    fn discardPendingDeleteRoot(self: *AppSession, id: u64) void {
-        if (self.takePendingDeleteRoot(id)) |root| self.allocator.free(root);
-    }
-
-    fn nextFileTreeMutationRequestId(self: *AppSession) ?u64 {
-        if (self.file_tree_mutation_request_id == std.math.maxInt(u64)) return null;
-        self.file_tree_mutation_request_id += 1;
-        return self.file_tree_mutation_request_id;
-    }
-
-    fn releaseFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, unlock: bool) void {
-        var write: usize = 0;
-        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
-            if (lock.mutation_id == mutation_id) {
-                self.removeFilePanelDirtySyncAction(lock.surface_id);
-                if (self.fileEntryForSurfaceId(lock.surface_id)) |entry| entry.dirty_sync_pending = false;
-                if (unlock) self.queueFilePanelCloseUnlock(lock.surface_id, lock.request_id);
-                continue;
-            }
-            self.file_tree_mutation_editor_locks[write] = lock;
-            write += 1;
-        }
-        self.file_tree_mutation_editor_locks_len = write;
-    }
-
-    fn abortWaitingFileTreeMutation(self: *AppSession, mutation_id: u64, message: []const u8) void {
-        if (self.file_tree_mutation_waiting_request) |*request| {
-            if (request.id == mutation_id) {
-                request.deinit(self.allocator);
-                self.file_tree_mutation_waiting_request = null;
-            }
-        }
-        if (self.file_tree_mutation_queue_reserved) {
-            self.file_tree_mutation_backend.cancelReservation();
-            self.file_tree_mutation_queue_reserved = false;
-        }
-        self.clearFileTreeMutationReservation(mutation_id);
-        self.discardPendingDeleteRoot(mutation_id);
-        self.releaseFileTreeMutationEditorLocks(mutation_id, true);
-        self.file_tree_edit_inflight = false;
-        self.file_tree_delete_inflight = false;
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-        self.showNotice(message);
-    }
-
-    fn beginFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, source: []const u8) !bool {
-        var needed: usize = 0;
-        var entry_it12 = self.fileEntries();
-        while (entry_it12.next()) |entry| {
-            if (file_tree_mutation.pathWithin(entry.path, source) and entry.mode.isEditable()) {
-                if (entry.surface_id == 0) return error.SurfaceMissing;
-                needed += 1;
-            }
-        }
-        if (needed == 0) return false;
-        if (self.file_tree_mutation_editor_locks_len + needed > self.file_tree_mutation_editor_locks.len or
-            self.file_panel_dirty_sync_actions_len + needed > self.file_panel_dirty_sync_actions.len or
-            self.file_panel_close_request_id + needed > max_file_panel_close_request_id) return error.Capacity;
-
-        var entry_it13 = self.fileEntries();
-        while (entry_it13.next()) |entry| {
-            if (!file_tree_mutation.pathWithin(entry.path, source) or !entry.mode.isEditable()) continue;
-            self.file_panel_close_request_id += 1;
-            const request_id = self.file_panel_close_request_id;
-            self.file_tree_mutation_editor_locks[self.file_tree_mutation_editor_locks_len] = .{
-                .mutation_id = mutation_id,
-                .surface_id = entry.surface_id,
-                .request_id = request_id,
-            };
-            self.file_tree_mutation_editor_locks_len += 1;
-            entry.dirty_sync_pending = true;
-            self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
-        }
-        self.file_tree_rows_dirty = true;
-        self.refreshFileTreeWatchRoots() catch {};
-        self.metal_dirty = true;
-        return true;
-    }
-
-    fn fileTreeMutationEditorLock(self: *AppSession, surface_id: u64, request_id: u64) ?*FileTreeMutationEditorLock {
-        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |*lock| {
-            if (lock.surface_id == surface_id and lock.request_id == request_id and lock.phase == .waiting) return lock;
-        }
-        return null;
-    }
-
-    fn mutationEditorLocksAcknowledged(self: *const AppSession, mutation_id: u64) bool {
-        var found = false;
-        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
-            if (lock.mutation_id != mutation_id) continue;
-            found = true;
-            if (!lock.acknowledged) return false;
-        }
-        return found;
-    }
-
-    fn submitWaitingFileTreeMutation(self: *AppSession, mutation_id: u64) bool {
-        if (!self.mutationEditorLocksAcknowledged(mutation_id)) return false;
-        const request = self.file_tree_mutation_waiting_request orelse return false;
-        if (request.id != mutation_id) return false;
-        self.file_tree_mutation_waiting_request = null;
-        std.debug.assert(self.file_tree_mutation_queue_reserved);
-        self.file_tree_mutation_backend.submitReserved(request);
-        self.file_tree_mutation_queue_reserved = false;
-        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |*lock| {
-            if (lock.mutation_id == mutation_id) lock.phase = .submitted;
-        }
-        self.file_tree_mutation_backend.pump();
-        return true;
-    }
-
-    fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: []const u8) bool {
-        if (self.fileTreeNamespaceMutationBusy()) {
-            self.showNotice("이전 파일 변경이 끝날 때까지 기다려 주세요.");
-            return false;
-        }
-        const root = self.file_tree.rootForMutation(target.path()) orelse {
-            self.showNotice("프로젝트 루트 밖의 항목은 변경할 수 없습니다.");
-            return false;
-        };
-        const roots = [_][]const u8{root};
-        var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
-        const protection_len = self.fillFileTreeProtections(&protections);
-        const policy_target: file_tree_mutation.Target = .{
-            .kind = target.row_kind,
-            .path = target.path(),
-            .symlink = target.symlink,
-            .identity = target.identity,
-            .parent_identity = target.parent_identity,
-            .root_identity = target.root_identity,
-        };
-        if (target.edit_kind == .rename and policy_target.kind == .directory and
-            self.fileTreeDirectoryAliasRisk(policy_target.path, root))
-        {
-            self.showNotice("같은 프로젝트의 편집 중 파일이 symlink alias일 수 있어 폴더 이름 변경을 차단했습니다.");
-            return false;
-        }
-        const plan = switch (target.edit_kind) {
-            .create_file => file_tree_mutation.planCreate(&roots, policy_target, name, false),
-            .create_directory => file_tree_mutation.planCreate(&roots, policy_target, name, true),
-            .rename => file_tree_mutation.planRename(&roots, policy_target, name, protections[0..protection_len]),
-        } catch |err| {
-            self.showNotice(switch (err) {
-                error.InvalidName => "이름은 비어 있거나 '.', '..'일 수 없고 '/'를 포함할 수 없습니다.",
-                error.ProtectedEntry => "저장되지 않았거나 동기화·충돌 처리 중인 파일을 포함해 변경할 수 없습니다.",
-                error.SymlinkContainer => "심볼릭 링크 폴더 안에는 항목을 만들 수 없습니다.",
-                error.Unchanged => "같은 이름입니다.",
-                else => "이 항목은 변경할 수 없습니다.",
-            });
-            return false;
-        };
-        if (plan.root_identity == null or plan.parent_identity == null or
-            (plan.operation == .rename and plan.identity == null))
-        {
-            self.showNotice("파일 identity가 아직 준비되지 않았습니다. 트리 새로고침 뒤 다시 시도해 주세요.");
-            return false;
-        }
-        if (!self.file_tree_mutation_backend.tryReserve()) {
-            self.showNotice("파일 변경 요청 큐가 가득 찼습니다. 잠시 후 다시 시도해 주세요.");
-            return false;
-        }
-        self.file_tree_mutation_queue_reserved = true;
-        var keep_queue_reservation = false;
-        defer if (self.file_tree_mutation_queue_reserved and !keep_queue_reservation) {
-            self.file_tree_mutation_backend.cancelReservation();
-            self.file_tree_mutation_queue_reserved = false;
-        };
-        const id = self.nextFileTreeMutationRequestId() orelse {
-            self.showNotice("파일 변경 요청 번호를 더 발급할 수 없습니다.");
-            return false;
-        };
-        var request = file_tree_mutation_backend.Request.init(self.allocator, id, plan) catch {
-            self.showNotice("파일 변경 요청을 준비할 수 없습니다.");
-            return false;
-        };
-        request.selection_generation = self.file_tree_selection.generation;
-        const reserved = target.edit_kind == .rename;
-        if (reserved) {
-            const new_path = std.fs.path.join(self.allocator, &.{ plan.parent, plan.name }) catch {
-                request.deinit(self.allocator);
-                self.showNotice("이름 변경 경로 계획을 준비할 수 없습니다.");
-                return false;
-            };
-            defer self.allocator.free(new_path);
-            self.prepareFileTreeRenameRemap(id, target.path(), new_path) catch {
-                request.deinit(self.allocator);
-                self.showNotice("이름 변경 경로 계획을 준비할 수 없습니다.");
-                return false;
-            };
-        }
-        if (reserved and !self.reserveFileTreeMutation(id, target.path())) {
-            request.deinit(self.allocator);
-            self.discardPendingRenameRemap(id);
-            self.showNotice("다른 파일 변경이 같은 항목을 사용 중입니다.");
-            return false;
-        }
-        if (reserved) {
-            const waiting = self.beginFileTreeMutationEditorLocks(id, target.path()) catch {
-                request.deinit(self.allocator);
-                self.clearFileTreeMutationReservation(id);
-                self.discardPendingRenameRemap(id);
-                self.showNotice("편집기를 잠글 수 없어 이름 변경을 시작하지 않았습니다.");
-                return false;
-            };
-            if (waiting) {
-                self.file_tree_mutation_waiting_request = request;
-                self.file_tree_edit_inflight = true;
-                keep_queue_reservation = true;
-                return true;
-            }
-        }
-        self.file_tree_mutation_backend.submitReserved(request);
-        self.file_tree_mutation_queue_reserved = false;
-        self.file_tree_edit_inflight = true;
-        self.file_tree_mutation_backend.pump();
-        return true;
-    }
-
-    fn requestDeleteSelectedFileTreeEntry(self: *AppSession) void {
-        if (self.fileTreeNamespaceMutationBusy()) {
-            self.showNotice("이전 휴지통 이동이 끝날 때까지 기다려 주세요.");
-            return;
-        }
-        if (self.file_tree_trash_queue_len >= self.file_tree_trash_queue.len) {
-            self.showNotice("휴지통 요청 큐가 가득 찼습니다. 이전 작업이 끝난 뒤 다시 시도해 주세요.");
-            return;
-        }
-        const target = self.selectedFileTreeMutationTarget() orelse {
-            self.showNotice("삭제할 프로젝트 파일 또는 폴더를 먼저 선택해 주세요.");
-            return;
-        };
-        if (target.kind == .root) {
-            self.showNotice("프로젝트 루트 자체는 삭제할 수 없습니다.");
-            return;
-        }
-        var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
-        const protection_len = self.fillFileTreeProtections(&protections);
-        const root = self.file_tree.rootForMutation(target.path) orelse return;
-        if (target.kind == .directory and self.fileTreeDirectoryAliasRisk(target.path, root)) {
-            self.showNotice("같은 프로젝트의 편집 중 파일이 symlink alias일 수 있어 폴더 삭제를 차단했습니다.");
-            return;
-        }
-        const roots = [_][]const u8{root};
-        _ = file_tree_mutation.planDelete(&roots, target, protections[0..protection_len]) catch |err| {
-            self.showNotice(if (err == error.ProtectedEntry)
-                "저장되지 않았거나 동기화·충돌 처리 중인 파일을 포함해 삭제할 수 없습니다."
-            else
-                "이 항목은 삭제할 수 없습니다.");
-            return;
-        };
-        self.pending_file_tree_delete = copyPendingFileTreeDelete(target, self.file_tree.rootGeneration()) orelse return;
-        self.showConfirmButtons(.file_tree_delete, "선택한 항목을 macOS 휴지통으로 이동할까요?", .{ .confirm = "휴지통으로 이동", .cancel = "취소" });
-    }
-
-    fn confirmFileTreeDelete(self: *AppSession) void {
-        const pending = self.pending_file_tree_delete orelse return;
-        self.pending_file_tree_delete = null;
-        if (pending.root_generation != self.file_tree.rootGeneration()) {
-            self.showNotice("탐색기 루트가 바뀌어 삭제를 취소했습니다.");
-            return;
-        }
-        const target: file_tree_mutation.Target = .{
-            .kind = pending.row_kind,
-            .path = pending.path(),
-            .symlink = pending.symlink,
-            .identity = pending.identity,
-            .parent_identity = pending.parent_identity,
-            .root_identity = pending.root_identity,
-        };
-        const root = self.file_tree.rootForMutation(target.path) orelse return;
-        if (target.kind == .directory and self.fileTreeDirectoryAliasRisk(target.path, root)) {
-            self.showNotice("상태가 바뀌어 폴더 삭제를 취소했습니다.");
-            return;
-        }
-        const roots = [_][]const u8{root};
-        var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
-        const protection_len = self.fillFileTreeProtections(&protections);
-        const plan = file_tree_mutation.planDelete(&roots, target, protections[0..protection_len]) catch {
-            self.showNotice("상태가 바뀌어 삭제를 취소했습니다.");
-            return;
-        };
-        if (plan.identity == null or plan.parent_identity == null or plan.root_identity == null) {
-            self.showNotice("파일 identity가 아직 준비되지 않았습니다. 트리 새로고침 뒤 다시 시도해 주세요.");
-            return;
-        }
-        if (!self.file_tree_mutation_backend.tryReserve()) {
-            self.showNotice("파일 변경 요청 큐가 가득 찼습니다. 잠시 후 다시 시도해 주세요.");
-            return;
-        }
-        self.file_tree_mutation_queue_reserved = true;
-        var keep_queue_reservation = false;
-        defer if (self.file_tree_mutation_queue_reserved and !keep_queue_reservation) {
-            self.file_tree_mutation_backend.cancelReservation();
-            self.file_tree_mutation_queue_reserved = false;
-        };
-        const id = self.nextFileTreeMutationRequestId() orelse return;
-        var request = file_tree_mutation_backend.Request.init(self.allocator, id, plan) catch return;
-        request.selection_generation = self.file_tree_selection.generation;
-        const owned_root = self.allocator.dupe(u8, root) catch {
-            request.deinit(self.allocator);
-            self.showNotice("삭제 복구 경로를 준비할 수 없어 시작하지 않았습니다.");
-            return;
-        };
-        std.debug.assert(self.pending_delete_root == null);
-        self.pending_delete_root = .{ .id = id, .root = owned_root };
-        if (!self.reserveFileTreeMutation(id, target.path)) {
-            request.deinit(self.allocator);
-            self.discardPendingDeleteRoot(id);
-            self.showNotice("다른 파일 변경이 같은 항목을 사용 중입니다.");
-            return;
-        }
-        const waiting = self.beginFileTreeMutationEditorLocks(id, target.path) catch {
-            request.deinit(self.allocator);
-            self.clearFileTreeMutationReservation(id);
-            self.discardPendingDeleteRoot(id);
-            self.showNotice("편집기를 잠글 수 없어 휴지통 이동을 시작하지 않았습니다.");
-            return;
-        };
-        if (waiting) {
-            self.file_tree_mutation_waiting_request = request;
-            self.file_tree_delete_inflight = true;
-            keep_queue_reservation = true;
-            return;
-        }
-        self.file_tree_mutation_backend.submitReserved(request);
-        self.file_tree_mutation_queue_reserved = false;
-        self.file_tree_delete_inflight = true;
-        self.file_tree_mutation_backend.pump();
-    }
-
-    fn isFileTreeDefaultKey(event: terminal.KeyEvent) bool {
-        const no_modifiers = !event.modifiers.command and !event.modifiers.control and
-            !event.modifiers.option and !event.modifiers.shift;
-        if (no_modifiers) return switch (event.key) {
-            .arrow_up, .arrow_down, .arrow_left, .arrow_right, .enter, .home, .end, .page_up, .page_down, .escape => true,
-            .function => |n| n == 2,
-            else => false,
-        };
-        return event.key == .backspace and event.modifiers.command and !event.modifiers.control and
-            !event.modifiers.option and !event.modifiers.shift;
-    }
-
-    fn fileTreeNavigationIntent(event: terminal.KeyEvent) ?file_tree_navigation.Intent {
-        return switch (event.key) {
-            .arrow_up => .previous,
-            .arrow_down => .next,
-            .arrow_left => .collapse_or_parent,
-            .arrow_right => .expand_or_child,
-            .enter => .activate,
-            .home => .first,
-            .end => .last,
-            .page_up => .page_up,
-            .page_down => .page_down,
-            else => null,
-        };
-    }
-
-    fn handleFileTreeDefaultKey(self: *AppSession, event: terminal.KeyEvent) void {
-        if (event.key == .escape) {
-            self.restoreFileTreeFocus();
-            return;
-        }
-        if (event.key == .function and event.key.function == 2) {
-            self.dispatchAppAction(.rename_file_tree_entry);
-            return;
-        }
-        if (event.key == .backspace and event.modifiers.command) {
-            self.dispatchAppAction(.delete_file_tree_entry);
-            return;
-        }
-        if (self.selectedFileTreeRow() == null) self.selectFirstFileTreeRow();
-        const selected = self.selectedFileTreeRow() orelse return;
-        const intent = fileTreeNavigationIntent(event) orelse return;
-        switch (file_tree_navigation.navigate(
-            self.file_tree_rows.items,
-            selected,
-            intent,
-            self.fileTreeVisibleRows(),
-        )) {
-            .none => {},
-            .select => |index| _ = self.setFileTreeSelection(index),
-            .activate => |index| self.activateFileTreeRow(index),
-        }
-        self.metal_dirty = true;
-    }
-
-    fn activateFileTreeRow(self: *AppSession, index: usize) void {
-        if (index >= self.file_tree_rows.items.len) return;
-        const row = self.file_tree_rows.items[index];
-        switch (row) {
-            .recent_header => self.file_tree.toggleRecent(),
-            .root => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
-            .directory => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
-            .recent_file => |v| self.openFileTreePath(v.path, v.supported),
-            .file => |v| self.openProjectedFileTreePath(v.path, v.supported, v.identity),
-            .empty => {},
-        }
-        self.file_tree_rows_dirty = true;
-        self.updateFileTree() catch {};
-        self.metal_dirty = true;
-    }
-
-    fn openFileTreePath(self: *AppSession, path: []const u8, supported: bool) void {
-        if (supported) {
-            const tree_owner: ?FileTreeFocusOwner = switch (self.focus_owner) {
-                .file_tree => |owner| owner,
-                else => null,
-            };
-            _ = self.openFilePanelPath(path);
-            if (tree_owner) |owner| {
-                self.focus_owner = .{ .file_tree = owner };
-                self.file_tree_focus_pending = true;
-                self.workspace_focus_pending = false;
-            }
-            return;
-        }
-        const owned = self.allocator.dupe(u8, path) catch return;
-        if (self.file_tree_external_open) |old| self.allocator.free(old);
-        self.file_tree_external_open = owned;
-    }
-
-    fn openProjectedFileTreePath(
-        self: *AppSession,
-        path: []const u8,
-        supported: bool,
-        expected_leaf_identity: ?file_tree.Identity,
-    ) void {
-        const leaf_identity = expected_leaf_identity orelse return;
-        const root = self.file_tree.rootCapabilityForPath(path) orelse return;
-        var validated = file_tree_backend.openValidatedFileTreeRow(
-            self.allocator,
-            self.io,
-            root.path,
-            root.identity,
-            path,
-            leaf_identity,
-        ) orelse return;
-        defer validated.deinit(self.io);
-        if (supported) {
-            const tree_owner: ?FileTreeFocusOwner = switch (self.focus_owner) {
-                .file_tree => |owner| owner,
-                else => null,
-            };
-            _ = self.openFilePanelPathFromValidatedRow(path, validated.file, leaf_identity);
-            if (tree_owner) |owner| {
-                self.focus_owner = .{ .file_tree = owner };
-                self.file_tree_focus_pending = true;
-                self.workspace_focus_pending = false;
-            }
-            return;
-        }
-        // The exact regular-file capability stays open through admission into the native one-shot.
-        // Subsequent same-UID namespace mutation after this queue boundary is the external opener's race.
-        self.openFileTreePath(path, false);
     }
 
     pub fn takeFileTreeExternalOpen(self: *AppSession) ?[]u8 {
@@ -15231,87 +12736,12 @@ pub const AppSession = struct {
     /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
     /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
     pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
-        if (self.fileTreeFileMutationBusy() or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
+        if (file_panel_ops.fileTreeFileMutationBusy(self) or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
             !std.unicode.utf8ValidateSlice(path)) return .failed;
         const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
         const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
         if (stat.kind != .file) return .failed;
-        return self.openFilePanelPathAfterValidation(path, open_kind, null);
-    }
-
-    fn openFilePanelPathFromValidatedRow(
-        self: *AppSession,
-        path: []const u8,
-        file: std.Io.File,
-        identity: file_tree.Identity,
-    ) FilePanelOpenPathResult {
-        if (self.fileTreeFileMutationBusy() or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
-            !std.unicode.utf8ValidateSlice(path)) return .failed;
-        const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
-        const stat = file.stat(self.io) catch return .failed;
-        if (stat.kind != .file) return .failed;
-        return self.openFilePanelPathAfterValidation(path, open_kind, identity);
-    }
-
-    fn openFilePanelPathAfterValidation(
-        self: *AppSession,
-        path: []const u8,
-        open_kind: file_panel_bridge.OpenKind,
-        initial_identity: ?file_tree.Identity,
-    ) FilePanelOpenPathResult {
-        if (self.file_tree_initialized) {
-            const root = file_tree_backend.projectRootForFile(self.allocator, self.io, path) catch return .failed;
-            defer self.allocator.free(root);
-            var candidate = self.file_tree.clone() catch return .failed;
-            defer candidate.deinit();
-            candidate.recordOpened(path, root) catch return .failed;
-            self.resetFileTreeWatchRootsFor(&candidate, path) catch return .failed;
-            var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
-            defer candidate_rows.deinit(self.allocator);
-            self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return .failed;
-            const kind = entryKindForOpenKind(open_kind);
-            const opened = self.openFileTermInActivePane(path, kind) catch return .failed;
-            self.pinInitialFilePanelIdentity(opened, initial_identity);
-            self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
-            self.commitFileTreeCandidate(&candidate, &candidate_rows);
-            return self.finishOpenFilePanel(opened);
-        }
-        const kind = entryKindForOpenKind(open_kind);
-        const opened = self.openFileTermInActivePane(path, kind) catch return .failed;
-        self.pinInitialFilePanelIdentity(opened, initial_identity);
-        return self.finishOpenFilePanel(opened);
-    }
-
-    fn pinInitialFilePanelIdentity(
-        self: *AppSession,
-        opened: FileOpenResult,
-        identity: ?file_tree.Identity,
-    ) void {
-        _ = self;
-        const entry = opened.term.file_entry orelse return;
-        if (!opened.created or !entry.kind.usesEditorBridge()) return;
-        const expected = identity orelse return;
-        entry.initial_file_identity_device = expected.device;
-        entry.initial_file_identity_inode = expected.inode;
-        entry.initial_file_identity_kind = expected.kind;
-        entry.initial_file_identity_pending = true;
-    }
-
-    fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelOpenPathResult {
-        // 떠나게 된 직전 활성 Term이 편집 중인 파일이었으면 dirty 스냅샷을 요청한다(§3.2 two-phase).
-        if (opened.previous_active_term) |prev| if (prev != opened.term) {
-            if (prev.file_entry) |prev_entry| _ = self.markFilePanelDirtySyncPending(prev_entry);
-        };
-        const active_entry = opened.term.file_entry orelse return .failed;
-        self.requestDockEntryFocus(active_entry);
-        self.dock.collapsed = false;
-        if (self.surface_initialized) {
-            for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-            self.recomputeActivePaneRect();
-            self.last_resize_size = null;
-        }
-        self.metal_dirty = true;
-        return .opened;
+        return file_panel_ops.openFilePanelPathAfterValidation(self, path, open_kind, null);
     }
 
     pub const FilePanelLinkError = std.mem.Allocator.Error || error{
@@ -15323,31 +12753,11 @@ pub const AppSession = struct {
         StaleDocument,
     };
 
-    /// 파일 패널(문서 안 링크) 전용 정책: `file-panel.external-link-target`(+`⌘⇧` 강제)에 따라 **새** browser Term을
-    /// 만들거나 시스템 브라우저로 보낸다. 재사용 개념이 없다(문서에서 따라간 링크는 새 탭이 자연스럽다).
-    /// 터미널 화면 링크는 정책이 달라(`input.link-open-target` — 재사용 우선) `openTerminalWebLink`가 소유하고,
-    /// 둘 다 아래 `queueExternalLinkAction` 실행 경로를 공유한다.
-    fn queueExternalLink(
-        self: *AppSession,
-        href: []const u8,
-        force_system: bool,
-    ) FilePanelLinkError!void {
-        if (!file_panel_bridge.isExplicitHttpLink(href)) return error.InvalidLink;
-        if (self.external_link_kind != null) return error.LinkBusy;
-
-        const use_system = force_system or self.loaded_config.config.file_panel.external_link_target == .system;
-        const surface_id = if (use_system) 0 else self.appendWebTermInActivePane(.browser) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.OpenFailed,
-        };
-        return self.queueExternalLinkAction(href, surface_id);
-    }
-
     /// 결정된 대상(`surface_id`, 0=시스템 브라우저)으로 외부 링크 열기 action 하나를 세운다 — 파일 패널과 터미널
     /// 링크의 **공유 실행 경로**. Swift가 매 tick surface 전이 batch를 적용한 뒤 `takeExternalLinkAction`으로
     /// drain하므로, 방금 만든 browser Term의 WKWebView가 준비된 다음에 navigate가 실행된다.
     /// drain 전 연속 요청은 `LinkBusy`로 거부해 URL 덮어쓰기나 목적지 없는 빈 browser 탭을 만들지 않는다.
-    fn queueExternalLinkAction(self: *AppSession, href: []const u8, surface_id: u64) FilePanelLinkError!void {
+    pub fn queueExternalLinkAction(self: *AppSession, href: []const u8, surface_id: u64) FilePanelLinkError!void {
         if (!file_panel_bridge.isExplicitHttpLink(href)) return error.InvalidLink;
         if (self.external_link_kind != null) return error.LinkBusy;
         if (href.len > self.external_link_url_buf.len) return error.InvalidLink;
@@ -15367,8 +12777,8 @@ pub const AppSession = struct {
         force_system: bool,
     ) FilePanelLinkError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const source = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        if (file_panel_bridge.isExplicitHttpLink(href)) return self.queueExternalLink(href, force_system);
+        const source = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+        if (file_panel_bridge.isExplicitHttpLink(href)) return file_panel_ops.queueExternalLink(self, href, force_system);
         if (source.kind != .markdown) return error.WrongKind;
         const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -15388,7 +12798,7 @@ pub const AppSession = struct {
         force_system: bool,
     ) FilePanelLinkError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const source = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const source = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (source.kind != .markdown) return error.WrongKind;
         if (!source.editor_document_active or source.editor_epoch != editor_epoch)
             return error.StaleDocument;
@@ -15424,7 +12834,7 @@ pub const AppSession = struct {
     /// 반환 path는 DockPanel entry 소유이며 호출 중 복사해 쓰는 borrowed slice다.
     pub fn filePanelEntryInfo(self: *AppSession, surface_id: u64) ?FilePanelEntryInfo {
         if (!self.dock_initialized) return null;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return null;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return null;
         return .{ .path = entry.path, .kind = entry.kind };
     }
 
@@ -15432,7 +12842,7 @@ pub const AppSession = struct {
     /// markdown/html은 null이라 Swift가 기존 markdown shell URL을 그대로 쓴다. 언어는 핀 경로(SSOT)에서 매번 파생한다.
     pub fn filePanelLanguage(self: *AppSession, surface_id: u64) ?file_panel_bridge.TextLanguage {
         if (!self.dock_initialized) return null;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return null;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return null;
         return switch (entry.kind) {
             .text => file_panel_bridge.textLanguageForPath(entry.path),
             .svg => .xml,
@@ -15450,7 +12860,7 @@ pub const AppSession = struct {
         editor_epoch: u64,
     ) bool {
         if (!self.dock_initialized or editor_epoch == 0) return false;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return false;
         // mermaid를 렌더하는 모드는 읽기뿐이다 — 소스 모드는 생 Markdown 편집이라 렌더 대상이 아니다.
         // 다른 조건(문서 active·epoch 일치·recovery 아님·mutation 없음)은 read 모드도 beginDocument로 충족한다.
         return entry.kind == .markdown and
@@ -15506,7 +12916,7 @@ pub const AppSession = struct {
         }
         // 다른/retired WKWebView의 늦은 callback은 현재의 유효한 replacement token까지 취소할 권한이 없다.
         if (pending.expected_surface_id != surface_id) return false;
-        const entry = self.fileEntryForId(pending.entry_id) orelse {
+        const entry = file_panel_ops.fileEntryForId(self, pending.entry_id) orelse {
             self.pending_dock_focus = null;
             self.pending_dock_focus_action = false;
             return false;
@@ -15531,20 +12941,6 @@ pub const AppSession = struct {
         return (self.pending_dock_focus orelse return null).expected_surface_id;
     }
 
-    /// FP16 §3.4: "어느 파일 WebView가 native focus를 갖나"는 별도 축이 아니라 **활성 pane의 활성 Term**에서
-    /// 파생된다 — 파일이 워크스페이스 pane 탭이 된 뒤로 브라우저 Term과 같은 규칙이다. 옛 `.dock_surface`
-    /// 축은 그래서 사라졌다(도크가 워크스페이스 밖에 있던 시절의 잔재).
-    /// 그 파일 surface가 지금 **입력 소유**인가. 두 가지다 — workspace 소유이면서 활성 pane의 활성 Term이
-    /// 그 파일이거나(`focusedDockSurface`), 트리가 소유 중이면서 그 파일이 Esc 복원 대상이거나.
-    /// 후자를 빼면 트리에서 rename/삭제할 때 파괴된 surface가 복원 대상으로 남는다(code-review max).
-    fn fileSurfaceOwnsInput(self: *const AppSession, surface_id: u64) bool {
-        if (surface_id == 0) return false;
-        return switch (self.focus_owner) {
-            .file_tree => |owner| owner.restore_surface == surface_id,
-            else => (self.focusedDockSurface() orelse return false) == surface_id,
-        };
-    }
-
     pub fn focusedDockSurface(self: *const AppSession) ?u64 {
         if (self.focus_owner != .workspace or self.tabs.items.len == 0) return null;
         const tab = self.tabs.items[self.app_window.active_tab];
@@ -15553,19 +12949,6 @@ pub const AppSession = struct {
         if (pane.terms.items.len == 0) return null;
         const entry = pane.activeTerm().file_entry orelse return null;
         return if (entry.surface_id == 0) null else entry.surface_id;
-    }
-
-    /// `.dock_pending`은 영속 owner가 아니라 PendingDockFocus와 정확히 일치하는 짧은 publish barrier다.
-    /// key routing, native responder override, paste 차단과 focus border가 모두 이 validator를 공유한다.
-    /// 그 파일 entry가 지금 **키를 받을 자리**인가 — 활성 탭 → 활성 pane → 활성 Term. `fileSurfaceIsVisible`
-    /// (활성 탭의 어느 pane에서든 보인다)보다 좁다: 보이는 것과 입력을 갖는 것은 split에서 다르다.
-    fn fileEntryIsFocusTarget(self: *const AppSession, entry: *const dock_panel.Entry) bool {
-        if (self.tabs.items.len == 0) return false;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        if (tab.panes.items.len == 0) return false;
-        const pane = tab.panes.items[@min(tab.active_pane, tab.panes.items.len - 1)];
-        if (pane.terms.items.len == 0) return false;
-        return pane.activeTerm().file_entry == entry;
     }
 
     fn pendingDockEntryOwnsInput(self: *const AppSession) bool {
@@ -15582,10 +12965,10 @@ pub const AppSession = struct {
         // 받을 자리, 즉 **활성 탭의 활성 pane의 활성 Term**이어야 한다. "활성 워크스페이스에 있다"로는
         // 같은 pane의 터미널 탭이나 다른 split pane에서 타이핑하는 동안에도 barrier가 키를 삼킨다.
         // surface_id로 보지 않는 이유: 아직 sid가 없는(publish 전) entry가 이 barrier의 주 대상이다.
-        const owner_entry = self.fileEntryForIdConst(pending.entry_id) orelse return false;
-        if (!self.fileEntryIsFocusTarget(owner_entry)) return false;
+        const owner_entry = file_panel_ops.fileEntryForIdConst(self, pending.entry_id) orelse return false;
+        if (!file_panel_ops.fileEntryIsFocusTarget(self, owner_entry)) return false;
         const entry = blk: {
-            var it = self.fileEntriesConst();
+            var it = file_panel_ops.fileEntriesConst(self);
             while (it.next()) |e| {
                 if (e.id == pending.entry_id) break :blk e.*;
             }
@@ -15618,124 +13001,10 @@ pub const AppSession = struct {
         return pending;
     }
 
-    fn removeFilePanelQueuedActions(self: *AppSession, surface_id: u64) void {
-        self.removeFilePanelDirtySyncAction(surface_id);
-        if (self.file_panel_mode_pending == surface_id) self.file_panel_mode_pending = null;
-        if (self.pending_dock_focus) |pending| {
-            if (pending.expected_surface_id == surface_id) {
-                self.pending_dock_focus = null;
-                self.pending_dock_focus_action = false;
-            }
-        }
-        if (self.file_panel_save_close_pending) |pending| {
-            if (pending.surface_id == surface_id) self.file_panel_save_close_pending = null;
-        }
-        var unlock_i: usize = 0;
-        while (unlock_i < self.file_panel_close_unlock_actions_len) {
-            if (self.file_panel_close_unlock_actions[unlock_i].surface_id != surface_id) {
-                unlock_i += 1;
-                continue;
-            }
-            const last = self.file_panel_close_unlock_actions_len - 1;
-            self.file_panel_close_unlock_actions[unlock_i] = self.file_panel_close_unlock_actions[last];
-            self.file_panel_close_unlock_actions_len = last;
-        }
-        var i: usize = 0;
-        while (i < self.file_tree_reload_actions_len) {
-            if (self.file_tree_reload_actions[i].surface_id != surface_id) {
-                i += 1;
-                continue;
-            }
-            const last = self.file_tree_reload_actions_len - 1;
-            self.file_tree_reload_actions[i] = self.file_tree_reload_actions[last];
-            self.file_tree_reload_actions_len = last;
-        }
-    }
-
-    /// Trash bulk commit용 queue cleanup. 삭제 surface set을 fixed open-address table로 한 번 만든 뒤 각 bounded
-    /// action array를 정확히 한 번 compact한다. 단일-tab close는 위의 작은 targeted helper를 계속 쓴다.
-    fn removeFilePanelQueuedActionsBulk(self: *AppSession, removed: *const DeletedSurfaceSet, stats: *FileTreeDockRemovalStats) void {
-        if (self.file_panel_mode_pending) |surface_id| {
-            if (removed.contains(surface_id)) self.file_panel_mode_pending = null;
-        }
-        if (self.pending_dock_focus) |pending| {
-            if (pending.expected_surface_id) |surface_id| {
-                if (removed.contains(surface_id)) self.cancelPendingDockFocus();
-            }
-        }
-        if (self.file_panel_save_close_pending) |pending| {
-            if (removed.contains(pending.surface_id)) self.file_panel_save_close_pending = null;
-        }
-
-        var write: usize = 0;
-        for (self.file_panel_dirty_sync_actions[0..self.file_panel_dirty_sync_actions_len]) |action| {
-            stats.dirty_sync_visits += 1;
-            if (removed.contains(action.surface_id)) continue;
-            self.file_panel_dirty_sync_actions[write] = action;
-            write += 1;
-        }
-        self.file_panel_dirty_sync_actions_len = write;
-
-        write = 0;
-        for (self.file_panel_close_unlock_actions[0..self.file_panel_close_unlock_actions_len]) |action| {
-            stats.unlock_visits += 1;
-            if (removed.contains(action.surface_id)) continue;
-            self.file_panel_close_unlock_actions[write] = action;
-            write += 1;
-        }
-        self.file_panel_close_unlock_actions_len = write;
-
-        write = 0;
-        for (self.file_tree_reload_actions[0..self.file_tree_reload_actions_len]) |action| {
-            stats.reload_visits += 1;
-            if (removed.contains(action.surface_id)) continue;
-            self.file_tree_reload_actions[write] = action;
-            write += 1;
-        }
-        self.file_tree_reload_actions_len = write;
-    }
-
-    fn queueFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: u64) void {
-        if (surface_id == 0 or request_id == 0) return;
-        for (self.file_panel_close_unlock_actions[0..self.file_panel_close_unlock_actions_len]) |*queued| {
-            if (queued.surface_id != surface_id) continue;
-            // 같은 surface의 더 새 close가 이전 unlock drain 전에 취소되면 최신 owner만 풀면 된다. 이전 owner는
-            // 이미 새 sync가 대체했거나 이 unlock이 없어도 더 이상 입력을 막지 않는다.
-            queued.request_id = request_id;
-            return;
-        }
-        if (self.file_panel_close_unlock_actions_len >= self.file_panel_close_unlock_actions.len) return;
-        self.file_panel_close_unlock_actions[self.file_panel_close_unlock_actions_len] = .{ .surface_id = surface_id, .request_id = request_id };
-        self.file_panel_close_unlock_actions_len += 1;
-    }
-
     pub fn takeFilePanelCloseUnlockAction(self: *AppSession) ?FilePanelCloseUnlockAction {
         if (self.file_panel_close_unlock_actions_len == 0) return null;
         self.file_panel_close_unlock_actions_len -= 1;
         return self.file_panel_close_unlock_actions[self.file_panel_close_unlock_actions_len];
-    }
-
-    fn clearFilePanelCloseWithoutUnlock(self: *AppSession) void {
-        if (self.pending_file_panel_close) |pending| self.allocator.free(pending.expected_path);
-        self.pending_file_panel_close = null;
-        self.file_panel_save_close_pending = null;
-    }
-
-    /// close transaction의 모든 예약을 한 곳에서 회수한다. sync one-shot이 아직 queue에 있든 이미 WebKit으로
-    /// 넘어갔든 entry protection을 즉시 내리고 request-scoped unlock을 보낸다. 늦은 success/failure ack는
-    /// pending request id가 없어 닫기를 진행하지 못한다.
-    fn cancelFilePanelClose(self: *AppSession) void {
-        const pending = self.pending_file_panel_close orelse return;
-        // 보호 플래그는 unlock된 editor가 request_id=0 최신 snapshot을 보고할 때까지 유지한다. 여기서 내리면
-        // native clean이 stale인 상태에서 비활성 WKWebView가 LRU eviction되어 미저장 buffer를 잃을 수 있다.
-        self.removeFilePanelDirtySyncAction(pending.surface_id);
-        if (self.file_panel_save_close_pending) |save| {
-            if (save.surface_id == pending.surface_id and save.request_id == pending.request_id) {
-                self.file_panel_save_close_pending = null;
-            }
-        }
-        self.queueFilePanelCloseUnlock(pending.surface_id, pending.request_id);
-        self.clearFilePanelCloseWithoutUnlock();
     }
 
     /// request-scoped unlock 자체를 실행할 panel/JS가 사라졌을 때의 terminal ack. 같은 surface의 새 close가 이미
@@ -15745,88 +13014,13 @@ pub const AppSession = struct {
         if (self.pending_file_panel_close) |pending| {
             if (pending.surface_id == surface_id and pending.request_id != request_id) return;
         }
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return;
         entry.dirty = true;
         entry.dirty_sync_pending = false;
-        self.removeFilePanelDirtySyncAction(surface_id);
+        file_panel_ops.removeFilePanelDirtySyncAction(self, surface_id);
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
         self.showNotice("편집 상태를 다시 확인할 수 없어 파일 탭을 보호했습니다.");
-    }
-
-    /// surface-less close와 bulk rename/delete처럼 `closeFilePanelSurfaceNow`를 거치지 않는 제거 경로의 공용
-    /// empty-leaf 정규화. L2가 tree/focused_group을 고치고 L4는 사라진 구조 owner만 content/workspace로 재파생한다.
-    fn normalizeEmptyDockGroups(self: *AppSession) void {
-        if (!self.dock_initialized) return;
-        // FP16: entry가 Term으로 옮겨가 "빈 leaf"라는 구조가 없다. 남은 일은 사라진 파일을 가리키는
-        // publish barrier owner를 workspace로 되돌리는 것뿐이다 — pane의 active_term 승계는 이미
-        // closeTermAt이 끝냈다.
-        const owned_entry_id = switch (self.focus_owner) {
-            .dock_pending => |entry_id| entry_id,
-            else => return,
-        };
-        if (self.fileEntryForId(owned_entry_id) != null) return;
-        self.focusWorkspaceInput();
-        self.workspace_focus_pending = true;
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-    }
-
-    fn closeFilePanelSurfaceNow(self: *AppSession, surface_id: u64) bool {
-        if (surface_id == 0) return false;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
-        const owned_focus = switch (self.focus_owner) {
-            .workspace => self.fileSurfaceOwnsInput(surface_id),
-            .file_tree => |owner| owner.restore_surface == surface_id,
-            // publish 대기 barrier도 입력 소유다 — 그 파일을 닫으면 barrier가 가리킬 대상이 사라지므로
-            // 아래에서 승계 대상으로 다시 발급해야 한다(안 하면 입력이 죽은 owner에 묶인다).
-            .dock_pending => |entry_id| entry_id == entry.id,
-        };
-        // Term이 entry·path 소유를 회수하고 destroyTerm이 notifySurfaceClosed까지 부른다(FP16) — 옛
-        // `group.remove` + `free(path)` + 명시적 notify 삼중 쌍을 대체한다.
-        //
-        // **close를 먼저 시도한다.** 거부될 수 있는데 트랜잭션을 먼저 파기하면, CM6은 close lock이 걸린
-        // 채인데 unlock one-shot은 버려져 그 파일을 영영 편집할 수 없게 된다(code-review max).
-        if (!self.closeFileTermForEntry(entry)) return false;
-        self.removeFilePanelQueuedActions(surface_id);
-        if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == surface_id)
-            self.clearFilePanelCloseWithoutUnlock();
-        // 입력 소유가 이 파일에 있었으면 workspace로 돌린다. 파일이 이제 pane 탭이라 "다음 도크 entry로 승계"라는
-        // 옛 규칙은 성립하지 않는다 — pane의 active_term 승계는 closeFileTermForEntry가 이미 했고, 키 입력은
-        // 그 pane(=workspace)으로 간다.
-        if (owned_focus) {
-            if (self.fileTreeFocused()) {
-                // tree는 project/recent history로 계속 조작할 수 있다. 사라진 WebView만 Esc restore capability에서 제거한다.
-                self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
-                self.file_tree_restore_surface_pending = null;
-            } else if (self.activeFileEntry()) |successor| {
-                // 승계 Term이 또 다른 파일이면 그 파일로 typed focus를 다시 발급한다(옛 "다음 도크 entry로
-                // 승계"와 같은 사용자 경험). 승계가 터미널이면 workspace로 간다.
-                self.requestDockEntryFocus(successor);
-            } else {
-                self.focusWorkspaceInput();
-                self.workspace_focus_pending = true;
-            }
-        }
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-        return true;
-    }
-
-    /// surface_id로 파일 entry를 찾는다(창 전체).
-    /// 창의 열린 파일 수. 옛 `dock.entryCountTotal()`의 Term판이다.
-    fn fileEntryCountConst(self: *const AppSession) usize {
-        var n: usize = 0;
-        var it = self.fileEntriesConst();
-        while (it.next()) |_| n += 1;
-        return n;
-    }
-
-    fn fileEntryCount(self: *AppSession) usize {
-        var n: usize = 0;
-        var it = self.fileEntries();
-        while (it.next()) |_| n += 1;
-        return n;
     }
 
     /// 워크스페이스 순회 순서(탭→pane→Term)에서 `index`번째 파일 entry.
@@ -15834,84 +13028,12 @@ pub const AppSession = struct {
     /// 그룹 배열을 들고 있을 때의 "열린 순서"가 이제 pane 안 Term 순서이기 때문이다.
     pub fn fileEntryAt(self: *AppSession, index: usize) ?*dock_panel.Entry {
         var n: usize = 0;
-        var it = self.fileEntries();
+        var it = file_panel_ops.fileEntries(self);
         while (it.next()) |entry| {
             if (n == index) return entry;
             n += 1;
         }
         return null;
-    }
-
-    fn fileEntryForSurfaceId(self: *AppSession, surface_id: u64) ?*dock_panel.Entry {
-        if (surface_id == 0) return null;
-        var it = self.fileEntries();
-        while (it.next()) |entry| {
-            if (entry.surface_id == surface_id) return entry;
-        }
-        return null;
-    }
-
-    fn filePanelCloseEntry(self: *AppSession, pending: PendingFilePanelClose) ?*dock_panel.Entry {
-        if (pending.surface_generation != pending.surface_id) return null; // surface id는 앱 전역 비재사용이라 generation token 겸용.
-        const entry = self.fileEntryForSurfaceId(pending.surface_id) orelse return null;
-        if (!std.mem.eql(u8, entry.path, pending.expected_path) or
-            entry.external_change_generation != pending.state_generation) return null;
-        if (pending.phase != .syncing and entry.editor_revision != pending.revision) return null;
-        return entry;
-    }
-
-    fn abortStaleFilePanelClose(self: *AppSession) void {
-        self.cancelFilePanelClose();
-        self.showNotice("파일 탭 상태가 바뀌어 닫기를 취소했습니다.");
-    }
-
-    fn requestFilePanelClose(self: *AppSession, surface_id: u64) void {
-        if (self.pending_file_panel_close != null) return;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return;
-        if (entry.mutation_pending_id != 0) {
-            self.showNotice("파일 변경이 끝난 뒤 탭을 닫을 수 있습니다.");
-            return;
-        }
-        // HTML과 안정된 native-clean Markdown/text read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는
-        // 살아 있으므로 dirty/pending/conflict인 편집 브리지 kind는 mode와 무관하게 revision-pinned coordinator를 거친다.
-        if (entry.kind.usesEditorBridge() and filePanelEntryNeedsDirtyProtection(entry.*)) {
-            if (self.file_panel_close_request_id >= max_file_panel_close_request_id) {
-                self.showNotice("파일 닫기 요청 번호를 더 발급할 수 없어 탭을 닫지 않았습니다.");
-                return;
-            }
-            self.file_panel_close_request_id += 1;
-            const request_id = self.file_panel_close_request_id;
-            const expected_path = self.allocator.dupe(u8, entry.path) catch {
-                self.showNotice("파일 닫기 상태를 준비할 수 없어 탭을 닫지 않았습니다.");
-                return;
-            };
-            self.pending_file_panel_close = .{
-                .surface_id = surface_id,
-                .surface_generation = surface_id,
-                .request_id = request_id,
-                .expected_path = expected_path,
-                .state_generation = entry.external_change_generation,
-                .phase = .syncing,
-            };
-            self.markFilePanelCloseDirtySyncPending(entry, request_id);
-            return;
-        }
-        _ = self.closeFilePanelSurfaceNow(surface_id);
-    }
-
-    fn showFilePanelCloseChoices(self: *AppSession, pending: PendingFilePanelClose, entry: *const dock_panel.Entry) void {
-        self.pending_file_panel_close = pending;
-        if (entry.external_change) {
-            self.showConfirmButtons(.file_panel_close, "디스크에서 변경된 파일입니다. 변경사항을 버리고 닫을까요?", .{ .confirm = "변경사항 버리기", .cancel = "취소" });
-            var next = pending;
-            next.phase = .confirm_conflict;
-            self.pending_file_panel_close = next;
-        } else {
-            self.showConfirmChoices(.file_panel_close, "저장하지 않은 변경사항이 있습니다.", .{ .primary = "저장", .alternate = "변경사항 버리기", .cancel = "취소" });
-            var next = pending;
-            next.phase = .confirm_dirty;
-            self.pending_file_panel_close = next;
-        }
     }
 
     pub fn takeFilePanelSaveCloseAction(self: *AppSession) ?FilePanelSaveCloseAction {
@@ -15920,8 +13042,8 @@ pub const AppSession = struct {
         const pending = self.pending_file_panel_close orelse return null;
         if (pending.surface_id != action.surface_id or pending.request_id != action.request_id or
             pending.phase != .saving) return null;
-        if (self.filePanelCloseEntry(pending) == null) {
-            self.abortStaleFilePanelClose();
+        if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
+            file_panel_ops.abortStaleFilePanelClose(self);
             return null;
         }
         return action;
@@ -15930,63 +13052,25 @@ pub const AppSession = struct {
     pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id: u64, revision: u64, success: bool) void {
         const pending = self.pending_file_panel_close orelse return;
         if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .saving) return;
-        if (self.filePanelCloseEntry(pending) == null) {
-            self.abortStaleFilePanelClose();
+        if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
+            file_panel_ops.abortStaleFilePanelClose(self);
             return;
         }
         if (!success) {
-            self.cancelFilePanelClose();
+            file_panel_ops.cancelFilePanelClose(self);
             self.showNotice("파일을 저장할 수 없어 탭을 닫지 않았습니다.");
             return;
         }
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse {
-            self.cancelFilePanelClose();
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse {
+            file_panel_ops.cancelFilePanelClose(self);
             return;
         };
         if (entry.editor_revision != revision or entry.dirty or entry.dirty_sync_pending or entry.external_change) {
-            self.cancelFilePanelClose();
+            file_panel_ops.cancelFilePanelClose(self);
             self.showNotice("저장 후 편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
             return;
         }
-        _ = self.closeFilePanelSurfaceNow(surface_id);
-    }
-
-    /// workspace.v1은 외부 입력이므로, DockPanel의 구조 검증 뒤에도 라이브 open과 같은 파일 capability 검증을 다시
-    /// 적용한다. kind↔확장자·절대 UTF-8 경로·regular-file을 모두 만족하지 않는 entry만 버리고 terminal workspace는
-    /// 계속 복원한다. 원래 active entry가 버려지면 첫 유효 entry를 활성화하며, 전부 버려지면 빈 도크다.
-    /// 반환은 **버린 entry 수**다. 호출자(applyWorkspaceWindow)가 이 값을 checkpoint 차단 판정에 쓴다 — 조용히 버리고
-    /// apply를 성공으로 반환하면 다음 Quit이 버려진 도크를 파일에 커밋해 사용자가 배치를 영구히 잃는다.
-    fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) usize {
-        const old_active = panel.restored_active;
-        const original_len = panel.restored.items.len;
-        var original_index: usize = 0;
-        var current_index: usize = 0;
-        var new_active: ?usize = null;
-        while (original_index < original_len) : (original_index += 1) {
-            const entry = panel.restored.items[current_index];
-            const open_kind = file_panel_bridge.openKindForPath(entry.path) orelse {
-                const removed = panel.restored.orderedRemove(current_index);
-                self.allocator.free(removed.path);
-                continue;
-            };
-            const expected_kind = entryKindForOpenKind(open_kind);
-            const valid = std.fs.path.isAbsolute(entry.path) and
-                std.unicode.utf8ValidateSlice(entry.path) and
-                expected_kind == entry.kind and
-                blk: {
-                    const stat = std.Io.Dir.cwd().statFile(self.io, entry.path, .{}) catch break :blk false;
-                    break :blk stat.kind == .file;
-                };
-            if (!valid) {
-                const removed = panel.restored.orderedRemove(current_index);
-                self.allocator.free(removed.path);
-                continue;
-            }
-            if (old_active == original_index) new_active = current_index;
-            current_index += 1;
-        }
-        panel.restored_active = if (panel.restored.items.len == 0) null else new_active orelse 0;
-        return original_len - panel.restored.items.len;
+        _ = file_panel_ops.closeFilePanelSurfaceNow(self, surface_id);
     }
 
     /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
@@ -16019,93 +13103,20 @@ pub const AppSession = struct {
         OutOfMemory,
     };
 
-    /// FIFO/device/socket가 open 자체에서 대기하지 않도록 nonblocking으로 descriptor를 얻는다.
-    /// 호출자는 같은 fd를 fstat한 뒤 정규 파일일 때만 읽으므로, 일반 파일에서는 NONBLOCK이 의미를 바꾸지 않는다.
-    fn openFilePanelRead(dir: std.Io.Dir, path: []const u8, follow_symlinks: bool) FilePanelReadError!std.Io.File {
-        const fd = std.posix.openat(dir.handle, path, .{
-            .ACCMODE = .RDONLY,
-            .NONBLOCK = true,
-            .NOFOLLOW = !follow_symlinks,
-            .CLOEXEC = true,
-        }, 0) catch |err| switch (err) {
-            error.FileNotFound => return error.NotFound,
-            error.IsDir => return error.NotRegularFile,
-            error.SymLinkLoop => return error.OutsideRoot,
-            else => return error.NotFound,
-        };
-        return .{
-            .handle = fd,
-            .flags = .{ .nonblocking = true },
-        };
-    }
-
-    /// nonblocking으로 연 file descriptor에서 kind/크기 확인과 읽기를 끝내 경로 검사와 사용 사이의 재-open 경쟁을 없앤다.
-    fn readOpenedFile(self: *AppSession, gpa: std.mem.Allocator, file: std.Io.File) FilePanelReadError![]u8 {
-        const stat = file.stat(self.io) catch return error.NotFound;
-        if (stat.kind != .file) return error.NotRegularFile;
-        if (stat.size > file_panel_bridge.max_file_bytes) return error.TooLarge;
-
-        var read_buf: [64 * 1024]u8 = undefined;
-        var reader = file.reader(self.io, &read_buf);
-        const bytes = reader.interface.allocRemaining(
-            gpa,
-            .limited(file_panel_bridge.max_file_bytes + 1),
-        ) catch |err| switch (err) {
-            error.StreamTooLong => return error.TooLarge,
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NotFound,
-        };
-        if (bytes.len > file_panel_bridge.max_file_bytes) {
-            gpa.free(bytes);
-            return error.TooLarge;
-        }
-        return bytes;
-    }
-
-    fn openedFileIdentity(self: *AppSession, file: std.Io.File) FilePanelReadError!file_tree.Identity {
-        if (comptime builtin.os.tag == .macos) {
-            var stat: std.posix.Stat = undefined;
-            if (std.c.fstat(file.handle, &stat) != 0) return error.NotFound;
-            return .{
-                .device = @intCast(stat.dev),
-                .inode = @intCast(stat.ino),
-                .kind = @intFromEnum(if (std.posix.S.ISREG(stat.mode))
-                    file_tree.IdentityKind.regular
-                else if (std.posix.S.ISDIR(stat.mode))
-                    file_tree.IdentityKind.directory
-                else if (std.posix.S.ISLNK(stat.mode))
-                    file_tree.IdentityKind.symlink
-                else
-                    file_tree.IdentityKind.other),
-            };
-        }
-        const stat = file.stat(self.io) catch return error.NotFound;
-        return .{
-            .device = 0,
-            .inode = @intCast(stat.inode),
-            .kind = @intFromEnum(switch (stat.kind) {
-                .file => file_tree.IdentityKind.regular,
-                .directory => file_tree.IdentityKind.directory,
-                .sym_link => file_tree.IdentityKind.symlink,
-                else => file_tree.IdentityKind.other,
-            }),
-        };
-    }
-
     /// surface가 핀한 Markdown 파일을 읽는다. web 쪽에서 경로를 지정할 수 없고, 단일 파일 상한은 8 MiB다.
     pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
         if (entry.mutation_pending_id != 0) return error.MutationPending;
 
         const cwd = std.Io.Dir.cwd();
-        const file = try openFilePanelRead(cwd, entry.path, !entry.initial_file_identity_pending);
+        const file = try file_panel_ops.openFilePanelRead(cwd, entry.path, !entry.initial_file_identity_pending);
         defer file.close(self.io);
         if (entry.initial_file_identity_pending) {
-            const actual = try self.openedFileIdentity(file);
+            const actual = try file_panel_ops.openedFileIdentity(self, file);
             const expected: file_tree.Identity = .{
                 .device = entry.initial_file_identity_device,
                 .inode = entry.initial_file_identity_inode,
@@ -16114,7 +13125,7 @@ pub const AppSession = struct {
             if (!actual.eql(expected)) return error.NotFound;
         }
         const before = file.stat(self.io) catch return error.NotFound;
-        const bytes = try self.readOpenedFile(gpa, file);
+        const bytes = try file_panel_ops.readOpenedFile(self, gpa, file);
         errdefer gpa.free(bytes);
         const after = file.stat(self.io) catch return error.NotFound;
         if (before.kind != .file or after.kind != .file or before.inode != after.inode or before.size != after.size or
@@ -16153,7 +13164,7 @@ pub const AppSession = struct {
     /// revision만으로는 이전 document와 새 document를 구분할 수 없다.
     pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (document_id == 0) return error.StaleDocument;
 
@@ -16177,7 +13188,7 @@ pub const AppSession = struct {
         // 여기부터는 실제 새 document 승인이다. 이전 close의 lock/snapshot 예약은 새 page가 소유할 수 없으므로
         // 이 전이에서만 취소한다.
         if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
-            self.cancelFilePanelClose();
+            file_panel_ops.cancelFilePanelClose(self);
 
         const had_editor_document = entry.editor_document_active;
         entry.editor_document_id = document_id;
@@ -16202,7 +13213,7 @@ pub const AppSession = struct {
     /// 새 document begin 전까지 active=false로 이전 page의 모든 read/write/ACK를 즉시 무효화한다.
     pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
         if (!self.dock_initialized) return 0;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return 0;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return 0;
         if (!entry.kind.usesEditorBridge()) return 0;
         // LRU/rename이 새 surface id를 발급한 뒤 첫 begin 전이면 Entry에 남은 active flag는 이전 surface 문서다.
         // 새 WebView의 조기 종료를 그 문서 손실로 오인하지 않고 safe reload만 허용한다.
@@ -16218,7 +13229,7 @@ pub const AppSession = struct {
         entry.dirty = true;
         entry.dirty_sync_pending = true;
         if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
-            self.cancelFilePanelClose();
+            file_panel_ops.cancelFilePanelClose(self);
         self.showNotice("편집 중 웹 콘텐츠가 종료되어 자동 복구 전까지 파일 작업을 차단했습니다.");
         self.metal_dirty = true;
         return 2;
@@ -16230,83 +13241,19 @@ pub const AppSession = struct {
         editor_epoch: u64,
         success: bool,
     ) FilePanelWriteError!void {
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
         return self.completeFileConflictReload(surface_id, success);
     }
 
-    const PinnedFilePanelParent = struct {
+    pub const PinnedFilePanelParent = struct {
         dir: std.Io.Dir,
         basename: []const u8,
     };
 
-    /// 절대 경로의 부모를 root fd부터 component별 openat(NO_FOLLOW)으로 걷는다. 이후 원본 검사·temp 생성·commit은
-    /// 모두 이 동일 directory capability와 basename에 상대적으로 수행하므로, 검사 뒤 parent path가 symlink/다른
-    /// directory로 교체돼도 새 경로를 다시 열어 엉뚱한 파일을 덮지 않는다.
-    fn openPinnedFilePanelParent(io: std.Io, absolute_path: []const u8) FilePanelWriteError!PinnedFilePanelParent {
-        if (!std.fs.path.isAbsolute(absolute_path)) return error.NotFound;
-        const parent_path = std.fs.path.dirname(absolute_path) orelse return error.NotFound;
-        const basename = std.fs.path.basename(absolute_path);
-        if (basename.len == 0 or std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) return error.NotFound;
-
-        var current = std.Io.Dir.openDirAbsolute(io, "/", .{ .follow_symlinks = false }) catch return error.NotFound;
-        errdefer current.close(io);
-        var components = std.mem.tokenizeScalar(u8, if (parent_path.len > 0) parent_path[1..] else parent_path, '/');
-        while (components.next()) |component| {
-            if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.NotFound;
-            const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return error.NotFound;
-            current.close(io);
-            current = next;
-        }
-        return .{ .dir = current, .basename = basename };
-    }
-
-    fn swapPinnedFilePanelNames(parent: std.Io.Dir, from: []const u8, to: []const u8) bool {
-        if (builtin.os.tag != .macos) return false;
-        var from_buf: [std.fs.max_path_bytes]u8 = undefined;
-        var to_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (from.len + 1 > from_buf.len or to.len + 1 > to_buf.len) return false;
-        @memcpy(from_buf[0..from.len], from);
-        from_buf[from.len] = 0;
-        @memcpy(to_buf[0..to.len], to);
-        to_buf[to.len] = 0;
-        return FilePanelTestC.renameatx_np(
-            @intCast(parent.handle),
-            @ptrCast(from_buf[0..from.len :0]),
-            @intCast(parent.handle),
-            @ptrCast(to_buf[0..to.len :0]),
-            rename_swap,
-        ) == 0;
-    }
-
-    fn pinnedFilePanelNameHasInode(io: std.Io, parent: std.Io.Dir, name: []const u8, inode: std.Io.File.INode) bool {
-        var file = openFilePanelRead(parent, name, false) catch return false;
-        defer file.close(io);
-        const stat = file.stat(io) catch return false;
-        return stat.kind == .file and stat.inode == inode;
-    }
-
-    fn swapPinnedFilePanelNamesIfPair(
-        io: std.Io,
-        parent: std.Io.Dir,
-        from: []const u8,
-        from_inode: std.Io.File.INode,
-        to: []const u8,
-        to_inode: std.Io.File.INode,
-    ) bool {
-        if (!pinnedFilePanelNameHasInode(io, parent, from, from_inode) or
-            !pinnedFilePanelNameHasInode(io, parent, to, to_inode)) return false;
-        return swapPinnedFilePanelNames(parent, from, to);
-    }
-
-    fn deletePinnedFilePanelNameIfInode(io: std.Io, parent: std.Io.Dir, name: []const u8, inode: std.Io.File.INode) void {
-        if (!pinnedFilePanelNameHasInode(io, parent, name, inode)) return;
-        parent.deleteFile(io, name) catch {};
-    }
-
-    fn stableOpenedFileHash(io: std.Io, file: std.Io.File, expected_inode: std.Io.File.INode) FilePanelWriteError!u64 {
+    pub fn stableOpenedFileHash(io: std.Io, file: std.Io.File, expected_inode: std.Io.File.INode) FilePanelWriteError!u64 {
         const before = file.stat(io) catch return error.ExternalConflict;
         if (before.kind != .file or before.inode != expected_inode or before.size > file_panel_bridge.max_file_bytes)
             return error.ExternalConflict;
@@ -16325,107 +13272,13 @@ pub const AppSession = struct {
         return hash.final();
     }
 
-    /// 이미 핀한 parent와 original fd를 사용해 저장한다. macOS에서는 temp↔leaf를 RENAME_SWAP 한 뒤 양쪽 inode가
-    /// 예상한 original/replacement인지 검증한다. leaf가 검사 뒤 교체됐으면 swap을 되돌려 경쟁 파일을 보존하고
-    /// ExternalConflict로 실패한다. 다른 플랫폼의 헤드리스 빌드는 같은 pinned parent에서 std atomic replace를 쓴다.
-    fn writePinnedFilePanel(
-        io: std.Io,
-        parent: std.Io.Dir,
-        basename: []const u8,
-        original: std.Io.File,
-        original_stat: std.Io.File.Stat,
-        expected_content_hash: u64,
-        content: []const u8,
-    ) FilePanelWriteError!void {
-        if (builtin.os.tag != .macos) {
-            var atomic = parent.createFileAtomic(io, basename, .{
-                .permissions = original_stat.permissions,
-                .replace = true,
-            }) catch return error.WriteFailed;
-            defer atomic.deinit(io);
-            atomic.file.writeStreamingAll(io, content) catch return error.WriteFailed;
-            atomic.file.sync(io) catch return error.WriteFailed;
-            atomic.replace(io) catch return error.WriteFailed;
-            return;
-        }
-
-        var random: u64 = undefined;
-        io.random(std.mem.asBytes(&random));
-        var temp_name_buf: [40]u8 = undefined;
-        const temp_name = std.fmt.bufPrint(&temp_name_buf, ".maru-save-{x}", .{random}) catch return error.WriteFailed;
-        var replacement = parent.createFile(io, temp_name, .{
-            .exclusive = true,
-            .permissions = original_stat.permissions,
-        }) catch return error.WriteFailed;
-        defer replacement.close(io);
-        const created_stat = replacement.stat(io) catch return error.WriteFailed;
-        var temp_owned_inode: ?std.Io.File.INode = created_stat.inode;
-        defer if (temp_owned_inode) |inode| deletePinnedFilePanelNameIfInode(io, parent, temp_name, inode);
-
-        // rename-replace는 새 inode가 되므로 원본 ACL/xattr/owner를 temp fd로 먼저 복사한다. metadata 복사가 실패하면
-        // 원본을 그대로 두고 저장 자체를 실패시켜 quarantine·Finder tag 등을 조용히 잃지 않는다.
-        if (std.c.fcopyfile(original.handle, replacement.handle, null, .{
-            .ACL = true,
-            .STAT = true,
-            .XATTR = true,
-        }) != 0) return error.WriteFailed;
-        replacement.writeStreamingAll(io, content) catch return error.WriteFailed;
-        replacement.sync(io) catch return error.WriteFailed;
-        const replacement_stat = replacement.stat(io) catch return error.WriteFailed;
-
-        // temp 작성 중 같은 inode가 외부에서 in-place 수정됐는지도 content token으로 잡는다. stat-before/hash/
-        // stat-after가 안정된 동일 inode만 허용하고, 여기서 swap까지의 최소 namespace gap만 플랫폼 한계로 남긴다.
-        var current = openFilePanelRead(parent, basename, false) catch return error.ExternalConflict;
-        defer current.close(io);
-        const current_hash = try stableOpenedFileHash(io, current, original_stat.inode);
-        if (current_hash != expected_content_hash) return error.ExternalConflict;
-
-        // 최초 commit도 이름만 믿지 않는다. temp가 우리가 만든 replacement이고 leaf가 처음 연 original인 pair가
-        // 직전까지 유지될 때만 swap한다. 외부 leaf/temp 교체를 관측하면 namespace를 전혀 바꾸지 않고 conflict.
-        if (!swapPinnedFilePanelNamesIfPair(
-            io,
-            parent,
-            temp_name,
-            replacement_stat.inode,
-            basename,
-            original_stat.inode,
-        )) return error.ExternalConflict;
-        // swap 뒤 temp 이름은 더 이상 우리가 만든 inode라고 가정할 수 없다. 양쪽 identity 검증 또는 성공한 rollback
-        // 전에는 defer가 임의 경쟁 파일을 지우지 않게 소유권을 내린다.
-        temp_owned_inode = null;
-        const committed_pair_valid = validate: {
-            var committed = openFilePanelRead(parent, basename, false) catch break :validate false;
-            defer committed.close(io);
-            var displaced = openFilePanelRead(parent, temp_name, false) catch break :validate false;
-            defer displaced.close(io);
-            const committed_stat = committed.stat(io) catch break :validate false;
-            const displaced_stat = displaced.stat(io) catch break :validate false;
-            break :validate committed_stat.kind == .file and displaced_stat.kind == .file and
-                committed_stat.inode == replacement_stat.inode and displaced_stat.inode == original_stat.inode;
-        };
-        if (!committed_pair_valid) {
-            // rollback 권위는 관측된 임의 inode가 아니라 original/replacement 고정 pair뿐이다. pair가 달라졌으면
-            // 경쟁자가 둔 temp를 leaf로 승격하지 않고 추가 namespace mutation 없이 conflict로 남긴다.
-            if (swapPinnedFilePanelNamesIfPair(
-                io,
-                parent,
-                temp_name,
-                original_stat.inode,
-                basename,
-                replacement_stat.inode,
-            )) temp_owned_inode = replacement_stat.inode;
-            return error.ExternalConflict;
-        }
-        temp_owned_inode = original_stat.inode; // 검증된 displaced original만 commit 완료 뒤 제거한다.
-    }
-
     /// 신뢰 shell이 핀한 Markdown 파일 하나만 원자 교체한다. 웹 요청에는 경로 인자가 없고 surface→entry 경로를
     /// 여기서 다시 해소한다. 원본 권한을 보존한 동일 디렉터리 임시 파일을 fsync한 뒤 rename-replace하므로 실패 시
     /// 기존 파일이 부분 내용으로 노출되지 않는다. dirty 최종값은 저장 중 재편집과 직렬화한 shell의 setDirty가 내리며,
     /// write 자체는 true를 false로 바꾸지 않아 저장 완료와 재편집 사이 eviction race를 만들지 않는다.
     pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
@@ -16435,13 +13288,13 @@ pub const AppSession = struct {
         if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
         if (!entry.disk_content_hash_valid) return error.ExternalConflict;
 
-        const pinned = try openPinnedFilePanelParent(self.io, entry.path);
+        const pinned = try file_panel_ops.openPinnedFilePanelParent(self.io, entry.path);
         defer pinned.dir.close(self.io);
-        var original = openFilePanelRead(pinned.dir, pinned.basename, false) catch return error.NotFound;
+        var original = file_panel_ops.openFilePanelRead(pinned.dir, pinned.basename, false) catch return error.NotFound;
         defer original.close(self.io);
         const stat = original.stat(self.io) catch return error.NotFound;
         if (stat.kind != .file) return error.NotRegularFile;
-        try writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, entry.disk_content_hash, content);
+        try file_panel_ops.writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, entry.disk_content_hash, content);
         entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
         entry.self_write_hash = std.hash.Wyhash.hash(0, content);
         entry.disk_content_hash = entry.self_write_hash;
@@ -16464,15 +13317,9 @@ pub const AppSession = struct {
         });
     }
 
-    /// CM6 문서 변경 상태를 도크 모델에 미러한다. Markdown surface만 허용하고 값이 바뀔 때만 redraw한다.
-    pub fn setFilePanelDirty(self: *AppSession, surface_id: u64, dirty: bool) FilePanelWriteError!void {
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        return self.reportFilePanelDirty(surface_id, .{ .dirty = dirty, .editor_epoch = entry.editor_epoch, .revision = entry.editor_revision +| 1, .request_id = 0 });
-    }
-
     pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         // 기존 headless policy fixtures만 zero/zero sentinel을 쓴다. 제품 빌드에는 이 seam 자체가 없고 JSON bridge도
         // non-positive epoch을 거부한다.
@@ -16480,14 +13327,14 @@ pub const AppSession = struct {
         if (!test_unbound and (!entry.editor_document_active or report.editor_epoch != entry.editor_epoch))
             return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
-        const mutation_lock = if (report.request_id != 0) self.fileTreeMutationEditorLock(surface_id, report.request_id) else null;
+        const mutation_lock = if (report.request_id != 0) file_panel_ops.fileTreeMutationEditorLock(self, surface_id, report.request_id) else null;
         if (entry.mutation_pending_id != 0 and mutation_lock == null) return error.MutationPending;
         var close_pending: ?PendingFilePanelClose = null;
         if (report.request_id != 0 and mutation_lock == null) {
             const pending = self.pending_file_panel_close orelse return;
             if (pending.surface_id != surface_id or pending.phase != .syncing or pending.request_id != report.request_id) return;
-            if (self.filePanelCloseEntry(pending) == null) {
-                self.abortStaleFilePanelClose();
+            if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
+                file_panel_ops.abortStaleFilePanelClose(self);
                 return;
             }
             close_pending = pending;
@@ -16500,55 +13347,46 @@ pub const AppSession = struct {
         const close_match = close_pending != null;
         if (self.pending_file_panel_close == null or self.pending_file_panel_close.?.surface_id != surface_id or close_match) {
             entry.dirty_sync_pending = false;
-            self.removeFilePanelDirtySyncAction(surface_id);
+            file_panel_ops.removeFilePanelDirtySyncAction(self, surface_id);
         }
         if (changed) self.metal_dirty = true;
         if (changed) self.file_tree_rows_dirty = true;
         if (mutation_lock) |lock| {
             if (entry.external_change or report.dirty) {
                 const mutation_id = lock.mutation_id;
-                self.abortWaitingFileTreeMutation(mutation_id, "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.");
+                file_panel_ops.abortWaitingFileTreeMutation(self, mutation_id, "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.");
                 return;
             }
             lock.acknowledged = true;
-            _ = self.submitWaitingFileTreeMutation(lock.mutation_id);
+            _ = file_panel_ops.submitWaitingFileTreeMutation(self, lock.mutation_id);
             return;
         }
         if (close_pending) |pending| {
             var pinned = pending;
             pinned.revision = report.revision;
             if (!entry.dirty and !entry.external_change) {
-                _ = self.closeFilePanelSurfaceNow(surface_id);
+                _ = file_panel_ops.closeFilePanelSurfaceNow(self, surface_id);
                 return;
             }
-            self.showFilePanelCloseChoices(pinned, entry);
+            file_panel_ops.showFilePanelCloseChoices(self, pinned, entry);
         }
     }
 
     pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
-        if (self.fileTreeMutationEditorLock(surface_id, request_id)) |lock| {
+        if (file_panel_ops.fileTreeMutationEditorLock(self, surface_id, request_id)) |lock| {
             const mutation_id = lock.mutation_id;
-            self.abortWaitingFileTreeMutation(mutation_id, "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.");
+            file_panel_ops.abortWaitingFileTreeMutation(self, mutation_id, "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.");
             return;
         }
         const pending = self.pending_file_panel_close orelse return;
         if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .syncing) return;
-        self.cancelFilePanelClose();
+        file_panel_ops.cancelFilePanelClose(self);
         self.showNotice("편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
     }
 
     pub fn filePanelMode(self: *AppSession, surface_id: u64) ?dock_panel.Mode {
         if (!self.dock_initialized) return null;
-        return (self.fileEntryForSurfaceId(surface_id) orelse return null).mode;
-    }
-
-    /// 헤더 밴드에서 mode를 고른다. 허용되지 않는 조합(§2.2 `Mode.allowedFor`)이나 무변화는 무동작이고,
-    /// 바뀌면 shell에 한 번 전달할 one-shot을 세운다(`takeFilePanelModeAction`).
-    fn setFilePanelMode(self: *AppSession, entry: *dock_panel.Entry, mode: dock_panel.Mode) void {
-        if (entry.mode == mode or !mode.allowedFor(entry.kind)) return;
-        entry.mode = mode;
-        self.file_panel_mode_pending = entry.surface_id;
-        self.file_tree_rows_dirty = true;
+        return (file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return null).mode;
     }
 
     /// surface_id로 파일 패널 mode를 바꾼다. 헤더 mode 선택기 클릭과 **같은 경로**를 쓰므로 pending action도
@@ -16557,9 +13395,9 @@ pub const AppSession = struct {
     /// 이후의 팔레트·단축키)가 Zig 권위를 우회해 Swift 로컬 상태만 바꾸면 ⌘S 라우팅 같은 판정이 어긋난다.
     pub fn setFilePanelModeBySurface(self: *AppSession, surface_id: u64, mode: dock_panel.Mode) bool {
         if (!self.dock_initialized) return false;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return false;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return false;
         if (!mode.allowedFor(entry.kind)) return false;
-        self.setFilePanelMode(entry, mode);
+        file_panel_ops.setFilePanelMode(self, entry, mode);
         return true;
     }
 
@@ -16600,12 +13438,12 @@ pub const AppSession = struct {
         raw_path: []const u8,
     ) FilePanelReadError![]u8 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
 
         var normalized_buf: [std.fs.max_path_bytes]u8 = undefined;
         const normalized = file_panel_bridge.normalizeAssetPath(raw_path, &normalized_buf) catch return error.InvalidPath;
-        const pinned = openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
+        const pinned = file_panel_ops.openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
         defer pinned.dir.close(self.io);
 
         var opened_dirs: [std.fs.max_path_bytes / 2]std.Io.Dir = undefined;
@@ -16629,9 +13467,9 @@ pub const AppSession = struct {
             }
         }
 
-        const file = try openFilePanelRead(current, std.fs.path.basename(normalized), false);
+        const file = try file_panel_ops.openFilePanelRead(current, std.fs.path.basename(normalized), false);
         defer file.close(self.io);
-        return self.readOpenedFile(gpa, file);
+        return file_panel_ops.readOpenedFile(self, gpa, file);
     }
 
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
@@ -16683,7 +13521,7 @@ pub const AppSession = struct {
     ///
     /// 소유권 경계는 이관 한 지점뿐이다 — 그 전엔 이 목록이 `path`를 소유하고 실패 시 `deinit`이 해제하며,
     /// 그 뒤엔 Term이 소유하고 `destroyTerm`이 해제한다. 중간 상태가 없다.
-    const RestoredFileEntries = struct {
+    pub const RestoredFileEntries = struct {
         items: std.ArrayList(dock_panel.Entry) = .empty,
         /// 복원 당시 활성이던 entry의 평탄화 index(없으면 null). 이관 뒤 그 Term을 활성 탭으로 만든다.
         active_index: ?usize = null,
@@ -16693,16 +13531,6 @@ pub const AppSession = struct {
             self.items.deinit(gpa);
         }
     };
-
-    /// 아직 `self.tabs`에 설치되지 않은 복원 pane이 이미 그 경로의 파일 Term을 들고 있나(마이그레이션 dedup).
-    fn restoredPaneHasPath(self: *AppSession, pane: *Pane, path: []const u8) bool {
-        _ = self;
-        for (pane.terms.items) |term| {
-            const entry = term.file_entry orelse continue;
-            if (std.mem.eql(u8, entry.path, path)) return true;
-        }
-        return false;
-    }
 
     /// 복원된 `DockPanel`의 평탄 목록에서 소유를 가져온다(panel은 비워진다). 와이어 파싱·검증·mode clamp는
     /// `DockPanel.restore`가 이미 했으므로 재구현하지 않고 결과만 가져온다 — 포맷 규칙의 단일 출처 유지.
@@ -16720,78 +13548,6 @@ pub const AppSession = struct {
         return out;
     }
 
-    /// staged 목록의 entry들을 대상 pane에 파일 Term으로 **이관**한다. 실패 지점이 없어야 부분 이관이 안 남으므로
-    /// Term 생성과 capacity 예약을 먼저 끝내고 마지막에 무실패로 붙인다(기존 swap 구간과 같은 규율).
-    /// staged 목록의 entry들을 대상 pane에 파일 Term으로 **이관**한다. 부분 이관이 남으면 안 되므로
-    /// **할 수 있는 실패를 모두 앞에서 끝낸다** — Term·heap Entry 생성과 capacity 예약을 마친 뒤, 마지막 루프는
-    /// 실패 지점이 하나도 없다(기존 swap 구간의 "teardown 뒤 append는 무실패" 규율과 같다).
-    fn transferRestoredFileEntries(
-        self: *AppSession,
-        entries: *RestoredFileEntries,
-        pane: *Pane,
-    ) !void {
-        // §5.0 마이그레이션 규칙: 옛 `dock-entry`를 이어 붙이는 중에도 **창당 경로 유일성**을 강제한다.
-        // 이 시점 `self.tabs`는 아직 옛 것이지만 `pane`은 새로 만든 탭의 것이므로, 이미 배치된 새 탭들의
-        // 파일 Term을 기준으로 본다. 중복은 첫 번째(pane이 자기 `file-term`으로 들고 온 것)만 남긴다.
-        {
-            var i: usize = 0;
-            while (i < entries.items.items.len) {
-                const candidate = entries.items.items[i];
-                if (self.restoredPaneHasPath(pane, candidate.path)) {
-                    _ = entries.items.orderedRemove(i);
-                    self.allocator.free(candidate.path);
-                    if (entries.active_index) |ai| {
-                        if (ai == i) entries.active_index = null else if (ai > i) entries.active_index = ai - 1;
-                    }
-                    continue;
-                }
-                i += 1;
-            }
-        }
-        var had_file_terms = false;
-        for (pane.terms.items) |term| {
-            if (term.file_entry != null) had_file_terms = true;
-        }
-        const count = entries.items.items.len;
-        if (count == 0) return;
-
-        const Pending = struct { term: *Term, heap: *dock_panel.Entry };
-        var pending: std.ArrayList(Pending) = .empty;
-        defer pending.deinit(self.allocator);
-        try pending.ensureTotalCapacity(self.allocator, count);
-        errdefer for (pending.items) |p| {
-            self.destroyTerm(p.term); // term.file_entry는 아직 null이라 heap을 건드리지 않는다
-            self.allocator.destroy(p.heap);
-        };
-        try pane.terms.ensureUnusedCapacity(self.allocator, count);
-
-        for (entries.items.items) |entry| {
-            const heap = try self.allocator.create(dock_panel.Entry);
-            errdefer self.allocator.destroy(heap);
-            const term = try self.createWebTerm(panelKindForEntryKind(entry.kind));
-            heap.* = entry; // path 소유가 목록에서 heap Entry로 이동
-            pending.appendAssumeCapacity(.{ .term = term, .heap = heap });
-        }
-
-        // ── 여기부터 무실패 ──
-        const first_index = pane.terms.items.len;
-        for (pending.items) |p| {
-            p.heap.surface_id = p.term.surfaceId();
-            p.term.file_entry = p.heap;
-            pane.terms.appendAssumeCapacity(p.term);
-        }
-        // 호출자(applyWorkspaceWindow)가 이미 "비어 있지 않으면 하나는 활성"으로 정규화해 둔다.
-        // 단, 이 pane이 **이미 새 포맷(`file-term`)으로 자기 파일 탭을 들고 왔으면** 그 `active-term`이
-        // 권위다 — legacy `dock-entry` 마이그레이션은 **이어 붙이기**지 활성 전환이 아니다(§5.0).
-        const active_index = entries.active_index orelse 0;
-        if (!had_file_terms and first_index + active_index < pane.terms.items.len) {
-            pane.active_term = first_index + active_index;
-        }
-        // 목록은 더 이상 path를 소유하지 않는다(heap Entry로 이동) — 해제 없이 비운다.
-        entries.items.clearRetainingCapacity();
-        entries.active_index = null;
-    }
-
     /// 파일 entry를 닫는다 = 그 파일 **Term을 닫는다**(FP16). entry의 소유가 Term이므로 `destroyTerm`이
     /// entry·path까지 해제한다 — 옛 `group.remove` + `allocator.free(path)` 쌍을 대체한다.
     ///
@@ -16805,7 +13561,7 @@ pub const AppSession = struct {
         defer candidate.deinit();
         var extras: [dock_panel.max_entries]([]const u8) = undefined;
         var extra_count: usize = 0;
-        var dst_it = dst.fileEntries();
+        var dst_it = file_panel_ops.fileEntries(dst);
         while (dst_it.next()) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
             if (extra_count >= extras.len) break;
             extras[extra_count] = parent;
@@ -16836,48 +13592,14 @@ pub const AppSession = struct {
         try candidate.resetWatchRequests(extras[0..extra_count]);
         var rows: std.ArrayList(file_tree.Row) = .empty;
         defer rows.deinit(dst.allocator);
-        try dst.prepareFileTreeRowStaging(&rows, countTabFileEntries(tab));
-        dst.buildPreparedFileTreeRows(&candidate, &rows);
-        dst.commitFileTreeCandidate(&candidate, &rows);
+        try file_panel_ops.prepareFileTreeRowStaging(dst, &rows, file_panel_ops.countTabFileEntries(tab));
+        file_panel_ops.buildPreparedFileTreeRows(dst, &candidate, &rows);
+        file_panel_ops.commitFileTreeCandidate(dst, &candidate, &rows);
         dst.file_tree_rows_dirty = true;
     }
 
-    fn countTabFileEntries(tab: *Tab) usize {
-        var n: usize = 0;
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |term| {
-                if (term.file_entry != null) n += 1;
-            }
-        }
-        return n;
-    }
-
-    /// `fileEntryForId`의 const 변형(순수 술어용).
-    fn fileEntryForIdConst(self: *const AppSession, entry_id: dock_panel.EntryId) ?*const dock_panel.Entry {
-        if (entry_id == 0) return null;
-        var it = self.fileEntriesConst();
-        while (it.next()) |entry| {
-            if (entry.id == entry_id) return entry;
-        }
-        return null;
-    }
-
-    /// 그 EntryId가 **활성 워크스페이스**의 파일인가. publish 대기 barrier가 보이지 않는 파일을 가리킨 채
-    /// 입력을 삼키지 않게 하는 게이트다.
-    fn activeTabHasFileEntry(self: *const AppSession, entry_id: dock_panel.EntryId) bool {
-        if (self.tabs.items.len == 0) return false;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |term| {
-                const entry = term.file_entry orelse continue;
-                if (entry.id == entry_id) return true;
-            }
-        }
-        return false;
-    }
-
     /// 이 창의 전체 Term 수. 병합 계획이 "이만큼 닫으면 창이 빈다"를 누적으로 판정할 때 쓴다.
-    fn windowTermCount(self: *const AppSession) usize {
+    pub fn windowTermCount(self: *const AppSession) usize {
         var n: usize = 0;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| n += pane.terms.items.len;
@@ -16885,52 +13607,11 @@ pub const AppSession = struct {
         return n;
     }
 
-    /// 파일 entry를 든 Term을 닫는다. **true를 돌려줬으면 Term은 실제로 사라졌다** — 호출자는 반환 뒤
-    /// `entry` 포인터를 다시 읽으면 안 되고, false면 아무것도 바뀌지 않았다고 믿어도 된다.
-    fn closeFileTermForEntry(self: *AppSession, entry: *const dock_panel.Entry) bool {
-        for (self.tabs.items, 0..) |tab, tab_index| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items, 0..) |term, term_index| {
-                    if (term.file_entry != entry) continue;
-                    // 이 Term이 창에 하나뿐이면 닫는 것이 곧 창을 닫는 것이다(터미널 Term과 같은 계약 —
-                    // closeTermAt → closeTab → latchSessionClose). 그런데 latch는 **다른** 보호 파일이 있으면
-                    // 조용히 no-op이므로, 그 상태에서 Term을 먼저 파괴하면 "닫혔다"고 보고해 놓고 창은 그대로
-                    // 남는 유령이 된다(code-review max). 그래서 파괴 **전에** 종료 가능 여부를 먼저 묻고,
-                    // 막히면 아무것도 안 한 채 false를 돌려준다. 자기 자신은 이미 2단계 close로 상태를
-                    // 해소했으므로 게이트에서 뺀다.
-                    if (pane.terms.items.len <= 1 and tab.panes.items.len <= 1 and self.tabs.items.len <= 1) {
-                        // 이 Term이 창에 하나뿐이면 닫는 것이 곧 창을 닫는 것이다. **구조는 건드리지 않고
-                        // 종료 latch만 건다** — Term을 먼저 빼면 pane이 Term 0개가 되어 모델 불변식이 깨지고,
-                        // latch가 그 직후 `activeSurface()`(방금 free된 대표 surface)에 쓴다. closeTab이
-                        // 마지막 탭에 대해 하는 것과 같은 계약이다: 정리는 deinit이 한다.
-                        //
-                        // 아래 게이트를 **먼저** 통과했으므로 latch는 반드시 실효한다 — 그래서 true가
-                        // "닫혔다"는 뜻으로 정직하다(유령 성공이 아니다).
-                        if (self.filePanelsBlockCloseExcluding(entry)) {
-                            self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
-                            return false;
-                        }
-                        self.ended_seen = true;
-                        self.activeSurface().process_state = .exited;
-                        self.metal_dirty = true;
-                        return true;
-                    }
-                    // 정규 경로에 위임한다 — 직접 orderedRemove하면 배경 탭의 surface_ptrs 재바인딩과 active
-                    // 시프트 보정, pane collapse, 마지막 탭의 종료 latch를 빠뜨린다(전부 closeTermAt이 소유).
-                    self.closeTermAt(tab_index, pane, term_index);
-                    self.metal_dirty = true;
-                    return true;
-                }
-            }
-        }
-        return false;
+    pub fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {
+        return if (file_panel_ops.filePanelKindIsIsolated(kind)) .browser else .markdown;
     }
 
-    fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {
-        return if (filePanelKindIsIsolated(kind)) .browser else .markdown;
-    }
-
-    const FileOpenResult = struct {
+    pub const FileOpenResult = struct {
         term: *Term,
         created: bool,
         /// 이 열기로 **떠나게 된** 같은 pane의 직전 활성 Term(없으면 null). 편집 중이던 파일이라면 호출자가
@@ -17193,7 +13874,7 @@ pub const AppSession = struct {
         surface_id: u64,
     ) anyerror!?maru.session.control_bridge.DiffSides {
         if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .diff) return error.WrongKind;
         if (entry.diff_failed) return error.ReadFailed;
         // 잘린 내용을 온전한 파일처럼 보여 주지 않는다 — 상한 초과와 같은 취급으로 화면이 이유를 말한다.
@@ -17209,19 +13890,19 @@ pub const AppSession = struct {
 
     /// 이미 열린 파일이면 그 Term으로 이동·활성화하고, 아니면 활성 pane에 새 파일 Term을 만든다.
     /// 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
-    fn openFileTermInActivePane(
+    pub fn openFileTermInActivePane(
         self: *AppSession,
         path: []const u8,
         kind: dock_panel.EntryKind,
     ) !FileOpenResult {
         // diff는 위 유일성 키가 다르므로 경로만으로 기존 Term을 재사용하지 않는다(그 확인은 openDiffTerm이 한다).
         if (kind != .diff) {
-            if (self.fileTermForPath(path)) |existing| return self.activateExistingFileTerm(existing);
+            if (file_panel_ops.fileTermForPath(self, path)) |existing| return self.activateExistingFileTerm(existing);
         }
 
         // 창당 상한. 옛 `DockPanel.open`이 모델 불변식으로 걸던 것을 열기 시점 검사로 옮겼다(§10 열린 질문 2번).
         var count: usize = 0;
-        var it = self.fileEntries();
+        var it = file_panel_ops.fileEntries(self);
         while (it.next()) |_| count += 1;
         if (count >= dock_panel.max_entries) return error.TooManyEntries;
 
@@ -17274,87 +13955,15 @@ pub const AppSession = struct {
         return .{ .term = target, .created = false, .previous_active_term = null };
     }
 
-    /// 그 surface의 파일 Term이 **지금 화면에 있나** — 활성 탭의 어느 pane에서든 그 pane의 활성 Term이면
-    /// 보인다(split이면 여러 개가 동시에 보일 수 있다). 옛 도크의 "group의 active entry" 재증명 자리다.
-    fn fileSurfaceIsVisible(self: *const AppSession, surface_id: u64) bool {
-        if (surface_id == 0 or self.tabs.items.len == 0) return false;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        for (tab.panes.items) |pane| {
-            if (pane.terms.items.len == 0) continue;
-            const entry = pane.activeTerm().file_entry orelse continue;
-            if (entry.surface_id == surface_id) return true;
-        }
-        return false;
-    }
-
-    /// 창 전체에서 **그 경로의 비-diff 파일 Term**. diff는 같은 경로로 따로 존재할 수 있어(§3.5 유일성 키가
-    /// `(경로, kind, base)`) 여기서 제외한다 — 안 그러면 탐색기에서 파일을 열 때 열려 있던 diff Term이 활성화된다.
-    fn fileTermForPath(self: *AppSession, path: []const u8) ?*Term {
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    const entry = term.file_entry orelse continue;
-                    if (entry.kind == .diff) continue;
-                    if (std.mem.eql(u8, entry.path, path)) return term;
-                }
-            }
-        }
-        return null;
-    }
-
-    /// 창 전체에서 그 `EntryId`의 파일 Term.
-    fn fileTermForId(self: *AppSession, entry_id: dock_panel.EntryId) ?*Term {
-        if (entry_id == 0) return null;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    const entry = term.file_entry orelse continue;
-                    if (entry.id == entry_id) return term;
-                }
-            }
-        }
-        return null;
-    }
-
-    /// 창 전체에서 그 경로의 파일 entry. 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
-    fn fileEntryForPath(self: *AppSession, path: []const u8) ?*dock_panel.Entry {
-        const term = self.fileTermForPath(path) orelse return null;
-        return term.file_entry;
-    }
-
-    /// 창 전체에서 그 `EntryId`의 파일 entry.
-    fn fileEntryForId(self: *AppSession, entry_id: dock_panel.EntryId) ?*dock_panel.Entry {
-        return self.fileEntryForIdCounted(entry_id, null);
-    }
-
-    /// 방문 수를 계측하는 변형(성능 gate가 소비 — docs/performance-budget.md).
-    fn fileEntryForIdCounted(
-        self: *AppSession,
-        entry_id: dock_panel.EntryId,
-        counters: ?*EntryLookupCounters,
-    ) ?*dock_panel.Entry {
-        if (entry_id == 0) return null;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    const entry = term.file_entry orelse continue;
-                    if (counters) |c| c.entry_visits += 1;
-                    if (entry.id == entry_id) return entry;
-                }
-            }
-        }
-        return null;
-    }
-
     /// 창의 모든 파일 entry 순회. 호출처는 저장 위치를 모른다 — B-1이 이 창구를 만든 이유이고, FP16은 여기
     /// 본문만 pane 트리 walk로 갈아끼웠다(호출처 32곳 무변경).
-    const FileEntryIterator = struct {
+    pub const FileEntryIterator = struct {
         session: *AppSession,
         tab_index: usize = 0,
         pane_index: usize = 0,
         term_index: usize = 0,
 
-        fn next(self: *FileEntryIterator) ?*dock_panel.Entry {
+        pub fn next(self: *FileEntryIterator) ?*dock_panel.Entry {
             while (self.tab_index < self.session.tabs.items.len) {
                 const tab = self.session.tabs.items[self.tab_index];
                 if (self.pane_index >= tab.panes.items.len) {
@@ -17377,18 +13986,14 @@ pub const AppSession = struct {
         }
     };
 
-    fn fileEntries(self: *AppSession) FileEntryIterator {
-        return .{ .session = self };
-    }
-
     /// 읽기 전용 소비처(종료 보호 게이트·파일 트리 보호 판정 등)용 const 변형.
-    const FileEntryConstIterator = struct {
+    pub const FileEntryConstIterator = struct {
         session: *const AppSession,
         tab_index: usize = 0,
         pane_index: usize = 0,
         term_index: usize = 0,
 
-        fn next(self: *FileEntryConstIterator) ?*const dock_panel.Entry {
+        pub fn next(self: *FileEntryConstIterator) ?*const dock_panel.Entry {
             while (self.tab_index < self.session.tabs.items.len) {
                 const tab = self.session.tabs.items[self.tab_index];
                 if (self.pane_index >= tab.panes.items.len) {
@@ -17411,12 +14016,8 @@ pub const AppSession = struct {
         }
     };
 
-    fn fileEntriesConst(self: *const AppSession) FileEntryConstIterator {
-        return .{ .session = self };
-    }
-
     fn dockHasLiveSurface(self: *AppSession) bool {
-        var it = self.fileEntries();
+        var it = file_panel_ops.fileEntries(self);
         while (it.next()) |entry| {
             if (entry.surface_id != 0) return true;
         }
@@ -17628,47 +14229,6 @@ pub const AppSession = struct {
     pub fn activeWebSurfaceId(self: *AppSession) u64 {
         const term = self.activePane().activeTerm();
         return if (isBrowserTerm(term)) term.surfaceId() else 0;
-    }
-
-    /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·
-    /// 터미널 링크 착지·닫기 확인)이 공유하는 **유일한 판정**이다. 인라인 복사가 늘면 `web_panel_kind`가 늘어날 때
-    /// 한 곳을 놓쳐 "안 보이는 WKWebView에 링크가 로드되는" 류의 버그가 난다(코드리뷰 지적) — 그래서 이 함수 밖에서
-    /// `web_panel_kind == .browser`를 직접 비교하지 않는다.
-    ///
-    /// **의도적 예외 하나**: WKWebView **trust config 파생**(control-plane §8.1)은 "browser 기능인가"가 아니라
-    /// "격리 config를 쓰는가"를 묻는 별개 질문이라 이 술어를 쓰지 않는다. 파일 패널의 `.html`/`.pdf`도 거기서는
-    /// untrusted가 맞다.
-    ///
-    /// **FP16 확장 지점**(docs/file-panel.md §8): 파일 entry가 `Term`으로 옮겨오면 `.html`/`.pdf` 파일 Term이
-    /// 격리 config 때문에 `web_panel_kind == .browser`를 갖게 된다. 그때 이 술어에 "파일 entry 없음" 조건을 더하면
-    /// 주소창·nav 단축키가 로컬 HTML 파일 뷰에 잘못 걸리는 것을 **한 곳에서** 막는다. 지금 통합해 두는 이유가 그것이다.
-    /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·
-    /// 터미널 링크 착지·닫기 확인)이 공유하는 **유일한 판정**이다. 인라인 복사가 늘면 `web_panel_kind`가 늘어날 때
-    /// 한 곳을 놓쳐 "안 보이는 WKWebView에 링크가 로드되는" 류의 버그가 난다(코드리뷰 지적) — 그래서 이 함수 밖에서
-    /// `web_panel_kind == .browser`를 직접 비교하지 않는다.
-    ///
-    /// **의도적 예외 하나**: WKWebView **trust config 파생**(control-plane §8.1)은 "browser 기능인가"가 아니라
-    /// "격리 config를 쓰는가"를 묻는 별개 질문이라 이 술어를 쓰지 않는다. 파일 패널의 `.html`/`.pdf`도 거기서는
-    /// untrusted가 맞다.
-    ///
-    /// **FP16 확장 지점**(docs/file-panel.md §8): 파일 entry가 `Term`으로 옮겨오면 `.html`/`.pdf` 파일 Term이
-    /// 격리 config 때문에 `web_panel_kind == .browser`를 갖게 된다. 그때 이 술어에 "파일 entry 없음" 조건을 더하면
-    /// 주소창·nav 단축키가 로컬 HTML 파일 뷰에 잘못 걸리는 것을 **한 곳에서** 막는다. 지금 통합해 두는 이유가 그것이다.
-    /// 이 파일 kind가 **격리 config**(filePanelKind=2, `loadFileURL`)를 쓰는가. 신뢰 shell(=1)과 갈리는
-    /// 유일한 축이며 Swift의 `WKWebViewConfiguration` 선택과 같은 판정이다(app_host_abi.zig `file_panel_entry`).
-    /// rename이 뷰를 다시 세워야 하는지도 이 값으로 정한다(FP16 §1 ⑶).
-    fn filePanelKindIsIsolated(kind: dock_panel.EntryKind) bool {
-        // 같은 분할이 세 곳에 있다: 여기, `maru_macos_app_session_file_panel_entry`(app_host_abi.zig, 1/2 반환),
-        // `collectWebSurfaces`(.markdown/.browser 매핑). 셋 다 exhaustive switch라 **새 EntryKind를 더하면**
-        // 컴파일러가 세 곳을 모두 잡아 준다. 반대로 **기존 kind의 소속만 한 곳에서 바꾸면** 컴파일은 통과한 채
-        // trust config와 재생성 판정이 갈라지므로, 이 분할을 옮길 때는 세 곳을 함께 고친다(code-review max).
-        return switch (kind) {
-            // FP14b: image도 격리 loadFileURL(WebKit image document + 주입 뷰어 스크립트) — 신뢰 shell로
-            // 바이트를 옮기던 readSelfImage 경로를 걷어냈다(§2.2 "왜 FP14의 신뢰 shell을 걷어냈나").
-            .html, .image, .media, .pdf => true,
-            // diff는 신뢰 shell(=1)이다 — 격리 loadFileURL로는 두 문서를 나란히 못 세우고 브리지도 못 쓴다.
-            .markdown, .text, .svg, .diff => false,
-        };
     }
 
     fn isBrowserTerm(term: *const Term) bool {
@@ -19533,7 +16093,7 @@ pub const AppSession = struct {
     /// 인라인 rename을 시작한다 — 대상의 현재 custom_name으로 편집기를 시드(없으면 빈 편집기 = 새 이름)하고 다른
     /// 모달은 닫는다(배타적). 이후 키/IME는 모달 가드가 rename_input으로 라우팅한다. 대상은 dispatchAppAction이
     /// 활성 워크스페이스/pane/Term으로 고른다(또는 PR4/PR5 클릭 대상).
-    fn startRename(self: *AppSession, target: RenameTarget) void {
+    pub fn startRename(self: *AppSession, target: RenameTarget) void {
         self.chrome_host.find.hide(); // rename은 별도 모달 — 열려 있던 오버레이를 닫는다(배타적)
         self.chrome_host.palette.hide();
         self.rename_input.clear();
@@ -19560,7 +16120,7 @@ pub const AppSession = struct {
         _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
         const text = self.rename_input.query.items;
         if (target == .file_tree) {
-            if (self.enqueueFileTreeEdit(target.file_tree, text)) self.closeRename();
+            if (file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, text)) self.closeRename();
             return;
         }
         // 빈 텍스트(의도적 삭제) → null. 비어있지 않은데 dupe가 OOM이면 **기존 이름을 보존**하고 편집기만 닫는다 —
@@ -20417,43 +16977,6 @@ pub const AppSession = struct {
         return self.context_menu_items_buf[0..2];
     }
 
-    fn buildFileTreeContextMenuItems(self: *AppSession) []const []const u8 {
-        const target = self.file_tree_context_target orelse return &.{};
-        var n: usize = 0;
-        if (!(target.symlink and (target.row_kind == .root or target.row_kind == .directory))) {
-            self.context_menu_items_buf[n] = "새 파일…";
-            n += 1;
-            self.context_menu_items_buf[n] = "새 폴더…";
-            n += 1;
-        }
-        if (target.row_kind == .file or target.row_kind == .directory) {
-            self.context_menu_items_buf[n] = "이름 변경";
-            n += 1;
-            self.context_menu_items_buf[n] = "휴지통으로 이동";
-            n += 1;
-        }
-        if (target.row_kind == .root) {
-            self.context_menu_items_buf[n] = "파일 열기…";
-            n += 1;
-            self.context_menu_items_buf[n] = "폴더 열기…";
-            n += 1;
-            self.context_menu_items_buf[n] = "작업공간에 폴더 추가…";
-            n += 1;
-            self.context_menu_items_buf[n] = "작업공간에서 폴더 제거";
-            n += 1;
-        }
-        self.context_menu_items_len = n;
-        return self.context_menu_items_buf[0..n];
-    }
-
-    fn buildFileTreeBackgroundMenuItems(self: *AppSession) []const []const u8 {
-        self.context_menu_items_buf[0] = "파일 열기…";
-        self.context_menu_items_buf[1] = "폴더 열기…";
-        self.context_menu_items_buf[2] = "작업공간에 폴더 추가…";
-        self.context_menu_items_len = 3;
-        return self.context_menu_items_buf[0..3];
-    }
-
     /// 파일 Term 본문 우클릭 메뉴 상태(docs/file-panel.md §2.6). `href`는 소유 버퍼다 — 렌더러가 준 문자열이라
     /// 메뉴가 열려 있는 동안 web이 문서를 바꿔도 우리가 든 값이 그대로여야 한다.
     const FileContentMenu = struct {
@@ -20474,7 +16997,7 @@ pub const AppSession = struct {
         surface_id: u64,
         request: maru.session.control_bridge.MenuRequest,
     ) !void {
-        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.Unsupported;
+        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.Unsupported;
         var buf: [content_menu.max_items]content_menu.Item = undefined;
         const items = content_menu.build(request.target, entry.mode, request.has_selection, &buf);
         if (items.len == 0) return; // 낼 항목이 없으면 빈 메뉴를 띄우지 않는다
@@ -20667,7 +17190,7 @@ pub const AppSession = struct {
                     self.pending_file_menu_action = .{ .surface_id = surface_id, .item = item };
                     // **그 문서로 포커스를 돌려준다.** 메뉴 클릭은 오버레이 통과 경로라 터미널 뷰가 받는데, 그대로
                     // 두면 이어지는 ⌘Z·타이핑이 편집기까지 못 간다 — 잘라내기는 됐는데 되돌리기가 안 되던 원인이다.
-                    if (self.fileEntryForSurfaceId(surface_id)) |entry| self.requestDockEntryFocus(entry);
+                    if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| self.requestDockEntryFocus(entry);
                     self.closeContextMenu();
                 },
                 .native => switch (item) {
@@ -20695,7 +17218,7 @@ pub const AppSession = struct {
                     .open_source => {
                         self.closeContextMenu();
                         _ = self.setFilePanelModeBySurface(surface_id, .source_edit);
-                        if (self.fileEntryForSurfaceId(surface_id)) |entry| self.requestDockEntryFocus(entry);
+                        if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| self.requestDockEntryFocus(entry);
                     },
                     // 이미지 저장은 저장 패널 ABI가 필요해 이 슬라이스에 없다(§2.6) — 항목도 만들지 않는다.
                     .save_image, .copy, .cut, .paste, .select_all => self.closeContextMenu(),
@@ -20733,9 +17256,9 @@ pub const AppSession = struct {
             const selected = self.chrome_host.context_menu.selected;
             self.closeContextMenu();
             switch (selected) {
-                0 => self.requestFilePanelPick(),
-                1 => self.requestFileTreeRootPick(.replace),
-                2 => self.requestFileTreeRootPick(.add),
+                0 => file_panel_ops.requestFilePanelPick(self),
+                1 => file_panel_ops.requestFileTreeRootPick(self, .replace),
+                2 => file_panel_ops.requestFileTreeRootPick(self, .add),
                 else => {},
             }
             return;
@@ -20753,22 +17276,22 @@ pub const AppSession = struct {
                 self.showNotice("선택한 항목이 변경되어 명령을 취소했습니다.");
                 return;
             };
-            _ = self.setFileTreeSelection(current_index);
+            _ = file_panel_ops.setFileTreeSelection(self, current_index);
             if (target.row_kind == .root) {
                 switch (sel) {
-                    0 => self.startFileTreeEdit(.create_file),
-                    1 => self.startFileTreeEdit(.create_directory),
-                    2 => self.requestFilePanelPick(),
-                    3 => self.requestFileTreeRootPick(.replace),
-                    4 => self.requestFileTreeRootPick(.add),
-                    5 => self.removeFileTreeRoot(target.path()),
+                    0 => file_panel_ops.startFileTreeEdit(self, .create_file),
+                    1 => file_panel_ops.startFileTreeEdit(self, .create_directory),
+                    2 => file_panel_ops.requestFilePanelPick(self),
+                    3 => file_panel_ops.requestFileTreeRootPick(self, .replace),
+                    4 => file_panel_ops.requestFileTreeRootPick(self, .add),
+                    5 => file_panel_ops.removeFileTreeRoot(self, target.path()),
                     else => {},
                 }
-            } else if (create_allowed and sel == 0) self.startFileTreeEdit(.create_file) else if (create_allowed and sel == 1)
-                self.startFileTreeEdit(.create_directory)
+            } else if (create_allowed and sel == 0) file_panel_ops.startFileTreeEdit(self, .create_file) else if (create_allowed and sel == 1)
+                file_panel_ops.startFileTreeEdit(self, .create_directory)
             else {
                 const base: usize = if (create_allowed) 2 else 0;
-                if (sel == base) self.startFileTreeEdit(.rename) else if (sel == base + 1) self.requestDeleteSelectedFileTreeEntry();
+                if (sel == base) file_panel_ops.startFileTreeEdit(self, .rename) else if (sel == base + 1) file_panel_ops.requestDeleteSelectedFileTreeEntry(self);
             }
             self.metal_dirty = true;
             return;
@@ -20884,8 +17407,8 @@ pub const AppSession = struct {
                 switch (owner) {
                     .file_panel_close => if (self.pending_file_panel_close) |pending| switch (pending.phase) {
                         .confirm_dirty => {
-                            if (self.filePanelCloseEntry(pending) == null) {
-                                self.abortStaleFilePanelClose();
+                            if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
+                                file_panel_ops.abortStaleFilePanelClose(self);
                             } else {
                                 var saving = pending;
                                 saving.phase = .saving;
@@ -20894,14 +17417,14 @@ pub const AppSession = struct {
                             }
                         },
                         .confirm_conflict => {
-                            if (self.filePanelCloseEntry(pending) != null)
-                                _ = self.closeFilePanelSurfaceNow(pending.surface_id)
+                            if (file_panel_ops.filePanelCloseEntry(self, pending) != null)
+                                _ = file_panel_ops.closeFilePanelSurfaceNow(self, pending.surface_id)
                             else
-                                self.abortStaleFilePanelClose();
+                                file_panel_ops.abortStaleFilePanelClose(self);
                         },
                         .syncing, .saving => {},
                     },
-                    .file_tree_delete => self.confirmFileTreeDelete(),
+                    .file_tree_delete => file_panel_ops.confirmFileTreeDelete(self),
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => {
                         self.quit_decision = .accepted;
@@ -20927,10 +17450,10 @@ pub const AppSession = struct {
                 } else if (owner == .file_panel_close) {
                     if (self.pending_file_panel_close) |pending| {
                         if (pending.phase == .confirm_dirty) {
-                            if (self.filePanelCloseEntry(pending) != null)
-                                _ = self.closeFilePanelSurfaceNow(pending.surface_id)
+                            if (file_panel_ops.filePanelCloseEntry(self, pending) != null)
+                                _ = file_panel_ops.closeFilePanelSurfaceNow(self, pending.surface_id)
                             else
-                                self.abortStaleFilePanelClose();
+                                file_panel_ops.abortStaleFilePanelClose(self);
                         }
                     } else self.cancelPendingConfirm();
                 }
@@ -21988,10 +18511,10 @@ pub const AppSession = struct {
         }
         // project tree focus는 terminal byte stream과 완전히 분리한다. 사용자 app binding이 최우선이고 explicit
         // unbind/terminal macro는 소비만 하며, 둘 다 없을 때만 표준 tree key를 실행한다.
-        if (self.fileTreeFocused()) {
-            switch (self.loaded_config.keyBindingResolver().resolveFileTree(event, isFileTreeDefaultKey(event))) {
+        if (file_panel_ops.fileTreeFocused(self)) {
+            switch (self.loaded_config.keyBindingResolver().resolveFileTree(event, file_panel_ops.isFileTreeDefaultKey(event))) {
                 .app_action => |action| self.dispatchAppAction(action),
-                .tree_default => self.handleFileTreeDefaultKey(event),
+                .tree_default => file_panel_ops.handleFileTreeDefaultKey(self, event),
                 .consumed => {},
             }
             return self.keyConsumedByApp();
@@ -22110,7 +18633,7 @@ pub const AppSession = struct {
     /// dispatchWebAppAction으로 직접 실행해 terminal copy/paste·scroll·macro 전처리를 우회한다.
     fn webContextIsEditable(self: *AppSession, surface_id: u64) bool {
         return if (self.dock_initialized)
-            if (self.fileEntryForSurfaceId(surface_id)) |entry|
+            if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry|
                 entry.kind.usesEditorBridge() and entry.mode.isEditable()
             else
                 false
@@ -22130,12 +18653,12 @@ pub const AppSession = struct {
     fn webAppActionSource(self: *AppSession, surface_id: u64) ?WebAppActionSource {
         if (surface_id == 0) return null;
         if (self.dock_initialized) {
-            if (self.fileEntryForSurfaceId(surface_id)) |entry| {
+            if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| {
                 if (entry.surface_id != surface_id) return null;
                 // 옛 "그 entry가 group의 active여야 한다"는 capability 재증명의 FP16판. 배경 탭·비활성
                 // 파일 Term의 늦은 WKWebView 키 이벤트가 보이지 않는 surface 기준으로 app action을
                 // 실행하지 못하게 막는다(code-review max).
-                if (!self.fileSurfaceIsVisible(surface_id)) return null;
+                if (!file_panel_ops.fileSurfaceIsVisible(self, surface_id)) return null;
                 return .file_panel;
             }
         }
@@ -22158,7 +18681,7 @@ pub const AppSession = struct {
                 // 실제 NSEvent source를 먼저 공용 native-focus funnel로 logical owner에 반영한다. 이후 dirty
                 // sync/save가 늦게 끝나기 전에 사용자가 다른 곳을 focus하면 그 최신 owner가 close successor보다 이긴다.
                 if (!self.focusFilePanelSurface(surface_id)) return false;
-                self.requestFilePanelClose(surface_id);
+                file_panel_ops.requestFilePanelClose(self, surface_id);
             } else {
                 // 실제 NSEvent source가 workspace browser이므로 stale dock owner/publish barrier를 먼저 버린다.
                 // WebView에서 Metal successor로 responder를 넘겨야 하므로 logical owner 정합뿐 아니라 native
@@ -22377,7 +18900,7 @@ pub const AppSession = struct {
                 @as(f64, @floatFromInt(self.scale_milli)) / 1000.0
             else
                 @as(f64, @floatFromInt(self.cell_height_px));
-            const extent = self.fileTreeScrollExtent();
+            const extent = file_panel_ops.fileTreeScrollExtent(self);
             if (self.file_tree_scroll.scrollByWheel(
                 delta_y * @as(f64, self.appearance.scroll_multiplier),
                 unit,
@@ -22386,7 +18909,7 @@ pub const AppSession = struct {
                 self.buildDockListScrollTree();
                 self.dock_list_scrollbar_idle_ticks = 0;
                 self.metal_dirty = true;
-                self.setHoveredFileTreeRow(self.fileTreeRowAt(x_px, y_px));
+                file_panel_ops.setHoveredFileTreeRow(self, file_panel_ops.fileTreeRowAt(self, x_px, y_px));
             }
             // 목록 끝에 닿아도 소비한다 — 도크와 같은 규율(뒤 터미널로 새지 않는다).
             return;
@@ -22521,7 +19044,7 @@ pub const AppSession = struct {
         if (self.fileContentMenuHoldsWebFocus()) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
-            self.fileTreeFocused() or self.pendingDockEntryOwnsInput();
+            file_panel_ops.fileTreeFocused(self) or self.pendingDockEntryOwnsInput();
     }
 
     /// 파일 본문 메뉴가 떠 있고, 그것 말고 입력을 가져갈 오버레이가 없나. 다른 모달(확인·팔레트·세팅)이 함께
@@ -23223,13 +19746,13 @@ pub const AppSession = struct {
         //  - 터미널 본문이면 **fall through** — 아래 mouse-reporting 경로(DECSET 1000~1003)가 우버튼을 트래킹 앱에
         //    리포트한다. 무조건 return하면 우-down은 안 가고 우-drag/up(kind 2/3)만 리포트돼 비대칭이 된다(회귀).
         if (kind == 1 and button == 2) {
-            if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
-                if (fileTreeMutationTarget(self.file_tree_rows.items[row_index])) |tree_target| {
-                    _ = self.setFileTreeSelection(row_index);
-                    self.focusFileTree();
-                    if (copyPendingFileTreeDelete(tree_target, self.file_tree.rootGeneration())) |copied| {
+            if (file_panel_ops.fileTreeRowAt(self, x_px, y_px)) |row_index| {
+                if (file_panel_ops.fileTreeMutationTarget(self.file_tree_rows.items[row_index])) |tree_target| {
+                    _ = file_panel_ops.setFileTreeSelection(self, row_index);
+                    file_panel_ops.focusFileTree(self);
+                    if (file_panel_ops.copyPendingFileTreeDelete(tree_target, self.file_tree.rootGeneration())) |copied| {
                         self.file_tree_context_target = copied;
-                        const items = self.buildFileTreeContextMenuItems();
+                        const items = file_panel_ops.buildFileTreeContextMenuItems(self);
                         if (items.len > 0) {
                             self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
                             self.metal_dirty = true;
@@ -23243,7 +19766,7 @@ pub const AppSession = struct {
                 layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree))
             {
                 self.file_tree_background_menu = true;
-                const items = self.buildFileTreeBackgroundMenuItems();
+                const items = file_panel_ops.buildFileTreeBackgroundMenuItems(self);
                 self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
                 self.metal_dirty = true;
                 return;
@@ -23323,9 +19846,9 @@ pub const AppSession = struct {
             }
         }
         if (kind == 1 and button == 0) {
-            if (self.filePanelDockControlRect()) |r| {
+            if (file_panel_ops.filePanelDockControlRect(self)) |r| {
                 if (layout_math.pointInRect(x_px, y_px, r)) {
-                    self.activateFilePanelDockControl();
+                    file_panel_ops.activateFilePanelDockControl(self);
                     return;
                 }
             }
@@ -23398,21 +19921,21 @@ pub const AppSession = struct {
                 }
                 if (self.dock.view == .explorer) {
                     if (self.beginDockListScrollbarGesture(x_px, y_px)) return;
-                    if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
+                    if (file_panel_ops.fileTreeRowAt(self, x_px, y_px)) |row_index| {
                         if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
-                            self.focusFileTree();
-                            self.requestFilePanelPick();
+                            file_panel_ops.focusFileTree(self);
+                            file_panel_ops.requestFilePanelPick(self);
                             return;
                         }
-                        self.focusFileTree();
-                        _ = self.setFileTreeSelection(row_index);
-                        self.activateFileTreeRow(row_index);
+                        file_panel_ops.focusFileTree(self);
+                        _ = file_panel_ops.setFileTreeSelection(self, row_index);
+                        file_panel_ops.activateFileTreeRow(self, row_index);
                         return;
                     }
                     if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
-                        self.focusFileTree(); // header/빈 여백 클릭도 tree 입력 축을 얻는다.
+                        file_panel_ops.focusFileTree(self); // header/빈 여백 클릭도 tree 입력 축을 얻는다.
                         if (!self.file_tree.hasContent() and layout_math.pointInRect(x_px, y_px, dg.tree_content))
-                            self.requestFilePanelPick();
+                            file_panel_ops.requestFilePanelPick(self);
                         return;
                     }
                 }
@@ -23639,7 +20162,7 @@ pub const AppSession = struct {
                                 }
                             }
                             if (dock_layout.headerModeAt(band.band, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px)) |mode| {
-                                self.setFilePanelMode(entry, mode);
+                                file_panel_ops.setFilePanelMode(self, entry, mode);
                             }
                             self.drag_autoscroll = 0;
                             self.mouse_drag_selecting = false;
@@ -23836,7 +20359,7 @@ pub const AppSession = struct {
         return clampFrameRateHz(self.frame_loop_rate_hz);
     }
 
-    fn ticksForMs(self: *const AppSession, ms: u32) u32 {
+    pub fn ticksForMs(self: *const AppSession, ms: u32) u32 {
         return ticksForMsAtRate(ms, self.frameRateHz());
     }
 
@@ -24102,7 +20625,7 @@ pub const AppSession = struct {
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
         // 비-terminal이면 sendTextAsKeys→handleKeyEvent→addr_edit 인터셉트로 글자를 append한다.
         if (self.addr_edit != null) return .addr_edit;
-        if (self.fileTreeFocused()) return .file_tree;
+        if (file_panel_ops.fileTreeFocused(self)) return .file_tree;
         if (self.pendingDockEntryOwnsInput()) return .dock_pending;
         return .terminal;
     }
@@ -24808,7 +21331,7 @@ pub const AppSession = struct {
     /// paste 게이트(위)와 제자리 재시작 ⏎ 게이트(`handleKeyEvent`)가 같은 판정을 공유한다 — 둘 다 "보이지 않는
     /// PTY로 입력이 새지 않게" 하는 같은 규율이고, 한쪽만 고치면 다른 쪽이 트리의 Enter를 훔친다(code-review).
     fn structuralInputOwner(self: *const AppSession) bool {
-        return self.fileTreeFocused() or self.pendingDockEntryOwnsInput();
+        return file_panel_ops.fileTreeFocused(self) or self.pendingDockEntryOwnsInput();
     }
 
     /// 슬라이스 4: ⌘X 잘라내기 — 선택 바이트를 **먼저 클립보드-쓰기 큐에 캡처**한 뒤 선택을 지운다(cut 표준: 바이트를 넘기지
@@ -25687,7 +22210,7 @@ pub const AppSession = struct {
         }
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
-        self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
+        file_panel_ops.setHoveredFileTreeRow(self, if (self.dockVisible()) file_panel_ops.fileTreeRowAt(self, x_px, y_px) else null);
         self.setHoveredDockViewSlot(self.dockViewSlotAt(x_px, y_px));
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
@@ -25756,7 +22279,7 @@ pub const AppSession = struct {
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
-        if (self.filePanelDockControlRect()) |r| {
+        if (file_panel_ops.filePanelDockControlRect(self)) |r| {
             if (layout_math.pointInRect(x_px, y_px, r)) {
                 self.setDockToggleHovered(true);
                 self.setHoveredTab(null);
@@ -25783,7 +22306,7 @@ pub const AppSession = struct {
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
-                self.setHoveredFileTreeRow(null);
+                file_panel_ops.setHoveredFileTreeRow(self, null);
                 const slot = self.dockViewSlotAt(x_px, y_px);
                 self.setHoveredDockViewSlot(slot);
                 return if (slot != null) .link else .default; // 슬롯 위만 클릭 가능(여백은 화살표)
@@ -25802,7 +22325,7 @@ pub const AppSession = struct {
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
-                return if (self.fileTreeRowAt(x_px, y_px) != null) .link else .default;
+                return if (file_panel_ops.fileTreeRowAt(self, x_px, y_px) != null) .link else .default;
             }
         }
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
@@ -27280,57 +23803,10 @@ pub const AppSession = struct {
         return true;
     }
 
-    /// 이 창(AppSession)의 라이브 상태를 workspace restore 모델(maru.session.workspace.Window)로 캡처한다(R3). 탭→pane
-    /// split 트리→Term→surface를 걸어 선언적 상태만 모은다 — live PTY/process/grid는 안 담는다. cwd/title은 host 또는
-    /// in-process backend의 runtime observation, command는 spawn argv[0](surface.command). split 트리는 *Pane leaf를
-    /// pane 인덱스로 환원해 preorder TreeNode로 평탄화(직렬화 모델과 같은 형태). 멀티 창 전체 모델은 호출자(R5)가
-    /// 각 세션의 Window를 모아 만든다. 모든 슬라이스·문자열은 `arena`가 소유한다(호출자가 deinit).
-    /// is_active = 이 창이 저장 시점 key(활성) 창인가(Swift `window.isKeyWindow`). 재시작 복원 loop가 이 마커로
-    /// 활성 창을 다시 focus한다(M3e — docs/window-surface-mobility.md §8A.8). false면 workspace.v1 옵션-키가
-    /// 생략돼(group-collapsed 패턴) 옛 파일과 flat 동일하다.
-    /// frame = 이 창의 픽셀(점) frame(Swift `window.frame`, 전역 스크린 좌표). null이면 win-* 키 생략(옛 파일 flat 동일)
-    /// → 복원이 cascade 기본 위치. 있으면 재시작 시 그 위치·크기·모니터로 복원한다(M3f — §8A.8). frame은 AppKit
-    /// NSWindow 영역이라 Swift가 읽어 ABI로 넘긴다(Zig는 창 픽셀 좌표를 모른다).
-    /// 열린 파일 목록을 workspace 파일에 실을 형태로 뽑는다. FP16에서 entry가 Term 소유가 된 뒤로
-    /// `DockPanel.persistedState`(그룹 순회)는 항상 빈 목록을 돌려주므로, 창구 순회가 유일한 출처다.
-    /// 도크 자체의 배치(side/size/collapsed/presented)는 여전히 `self.dock`이 든다.
-    fn persistFilePanelState(self: *AppSession, arena: std.mem.Allocator) !dock_panel.PersistedState {
-        const count = self.fileEntryCount();
-        if (count > dock_panel.max_entries) return error.InvalidPersistedState;
-        const entries = try arena.alloc(dock_panel.PersistedEntry, count);
-        // 와이어 불변식: entry가 있으면 **정확히 하나**가 active다(workspace.validateDockState). 지금 창의
-        // 활성 Term이 터미널이면 활성 파일이 없으므로 첫 파일을 활성으로 싣는다 — 안 그러면 직렬화가
-        // 거부되고 Swift가 checkpoint 전체를 포기해 **모든 창**이 다음 실행에서 사라진다(code-review max).
-        const active = self.activeFileEntry();
-        var active_index: usize = 0;
-        var i: usize = 0;
-        var it = self.fileEntries();
-        while (it.next()) |entry| {
-            if (!entry.mode.allowedFor(entry.kind)) return error.InvalidPersistedState;
-            if (active != null and entry == active.?) active_index = i;
-            entries[i] = .{
-                .path = entry.path,
-                .kind = entry.kind,
-                .mode = entry.mode,
-                .active = false,
-            };
-            i += 1;
-        }
-        if (count > 0) entries[active_index].active = true;
-        return .{
-            .side = self.dock.side,
-            .size = self.dock.size,
-            .collapsed = self.dock.collapsed,
-            .presented = self.dock.presented,
-            .view = self.dock.view,
-            .entries = entries,
-        };
-    }
-
     pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
         var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
-        const dock = if (self.dock_initialized) try self.persistFilePanelState(arena) else dock_panel.PersistedState{};
+        const dock = if (self.dock_initialized) try file_panel_ops.persistFilePanelState(self, arena) else dock_panel.PersistedState{};
         const explorer_roots: ?[]const []const u8 = if (self.file_tree_initialized and self.file_tree.rootMode() == .explicit) blk: {
             const roots = try arena.alloc([]const u8, self.file_tree.rootCount());
             for (roots, 0..) |*root, i| root.* = try arena.dupe(u8, self.file_tree.rootAt(i).?);
@@ -27639,7 +24115,7 @@ pub const AppSession = struct {
         // 공개 ABI가 시작 복원 외의 라이브 세션에도 호출될 수 있으므로, old dock을 교체하기 전에 보호 중인
         // CM6/close/reload/mutation 상태를 fail-close한다. 새 모델 준비 뒤 검사하면 외부 작업과의 사이에 폐기
         // window가 생기므로 admission의 첫 read-only gate로 둔다.
-        if (self.hasProtectedFilePanelsForExit() or self.hasFilePanelCloseTransition() or self.fileTreeNamespaceMutationBusy())
+        if (self.hasProtectedFilePanelsForExit() or file_panel_ops.hasFilePanelCloseTransition(self) or file_panel_ops.fileTreeNamespaceMutationBusy(self))
             return error.UnsupportedMove;
 
         // restore build가 OOM/후속 surface 실패로 publish되지 않으면 후보 Term이 올린 notice/drop 회계도 존재하지 않았던
@@ -27655,7 +24131,7 @@ pub const AppSession = struct {
         // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
         var dropped: usize = 0;
         const newly_ended_before = self.ended_placeholder_dropped_pending;
-        dropped += self.pruneInvalidRestoredFilePanelEntries(&new_dock);
+        dropped += file_panel_ops.pruneInvalidRestoredFilePanelEntries(self, &new_dock);
         // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
         // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
         var restored_entries = try flattenRestoredDock(self.allocator, &new_dock);
@@ -27696,7 +24172,7 @@ pub const AppSession = struct {
             try new_file_tree.replaceExplicitRoots(canonical[0..validated_len]);
             for (validated[0..validated_len]) |root| _ = new_file_tree.pinRootIdentity(root.path, root.identity);
         }
-        try resetFileTreeWatchRootsForEntries(&new_file_tree, restored_entries.items.items, null);
+        try file_panel_ops.resetFileTreeWatchRootsForEntries(&new_file_tree, restored_entries.items.items, null);
         var new_file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
         var new_file_tree_backend_owned = true;
         errdefer if (new_file_tree_backend_owned) new_file_tree_backend.deinit();
@@ -27709,7 +24185,7 @@ pub const AppSession = struct {
         // 아무것도 활성으로 안 칠하는 어긋남이 난다(code-review max).
         if (restored_entries.items.items.len != 0 and restored_entries.active_index == null)
             restored_entries.active_index = 0;
-        try buildFileTreeRowsForEntries(
+        try file_panel_ops.buildFileTreeRowsForEntries(
             self.allocator,
             restored_entries.items.items,
             restored_entries.active_index,
@@ -27734,7 +24210,7 @@ pub const AppSession = struct {
         if (restored_entries.items.items.len != 0 and new_tabs.items.len != 0) {
             const target_tab = new_tabs.items[@min(win.active_tab, new_tabs.items.len - 1)];
             const target_pane = target_tab.panes.items[@min(target_tab.active_pane, target_tab.panes.items.len - 1)];
-            try self.transferRestoredFileEntries(&restored_entries, target_pane);
+            try file_panel_ops.transferRestoredFileEntries(self, &restored_entries, target_pane);
         }
         try self.tabs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
         try self.surface_ptrs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
@@ -27760,7 +24236,7 @@ pub const AppSession = struct {
         // deferred restore 세션은 이 publish 지점까지 PTY/surface/frame loop가 0개였다. 저장 모델의 Term들이 모두
         // stage된 뒤에만 첫 surface를 활성화하므로 성공 복원은 throwaway fresh shell을 만들지 않는다.
         self.finishInitialSurface();
-        self.resetFilePanelTransientStateForDockReplacement();
+        file_panel_ops.resetFilePanelTransientStateForDockReplacement(self);
         if (self.dock_initialized) self.dock.deinit();
         self.dock = new_dock;
         self.dock_initialized = true;
@@ -27781,7 +24257,7 @@ pub const AppSession = struct {
         old_file_tree.deinit();
         old_file_tree_open_states.deinit(self.allocator);
         old_file_tree_rows.deinit(self.allocator);
-        self.advanceFileTreeProjectionGeneration();
+        file_panel_ops.advanceFileTreeProjectionGeneration(self);
         self.file_tree_rows_dirty = false;
         self.file_tree_watch_reset_pending = true;
         // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
@@ -27796,7 +24272,7 @@ pub const AppSession = struct {
         // 복원된 활성 파일에 publish 대기 barrier를 건다. `resetFilePanelTransientStateForDockReplacement`가
         // 위에서 transient를 전부 지우므로 **커밋 뒤**여야 한다 — 라이브 열기와 같은 계약이라, typed ack
         // 전까지 PTY·paste·close가 새 WKWebView 대신 터미널로 잘못 라우팅되지 않는다.
-        if (self.activeFileEntry()) |restored_active| self.requestDockEntryFocus(restored_active);
+        if (file_panel_ops.activeFileEntry(self)) |restored_active| self.requestDockEntryFocus(restored_active);
         self.normalizePinnedFromGroups();
         self.stablePartitionPinned();
         self.floatLocalPinsAllGroups(); // 복원 로컬 pin 재float(GL §13.4 배선 (3) — 복원 특례도 항상 stablePartitionPinned 뒤, local-pinned 영속 반영)
@@ -29312,13 +25788,13 @@ pub const AppSession = struct {
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
-        self.ageFilePanelSelfWriteLatches();
+        file_panel_ops.ageFilePanelSelfWriteLatches(self);
         agent_dock.updateAgentSessionArchive(self); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
         agent_dock.updateAgentSessionArchiveDetail(self); // inline detail worker 결과만 drain; open/read/parse는 worker 전용
         agent_dock.refreshAgentSessionArchiveProjectScopeForFocus(self); // active-surface id 비교만; root I/O는 worker
         agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
-        self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
-        self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
+        file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
+        file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
         // **웹이 활성인 동안 스크롤백 매치가 살아 있으면 안 된다**(불변식). 슬라이스 ①에서는 오버레이를 통째로
         // 닫았지만, ②가 웹 탭에도 find를 주므로 이제 **닫지 않고 대상만 바꾼다** — 남겨야 할 것은 오버레이가
@@ -29916,9 +26392,9 @@ pub const AppSession = struct {
 
             // Resolve the identity-backed selection once for this projected frame. Both the background
             // quad and the glyph paint below consume this exact index, including after async row rebuilds.
-            const file_tree_selected_index = self.selectedFileTreeRow();
+            const file_tree_selected_index = file_panel_ops.selectedFileTreeRow(self);
             const file_tree_selection_paint: ?coretext_frame_builder.FileTreeSelectionPaint =
-                if (self.fileTreeFocused()) if (file_tree_selected_index) |index| .{
+                if (file_panel_ops.fileTreeFocused(self)) if (file_tree_selected_index) |index| .{
                     .index = index,
                     .foreground = .{ .rgb = self.appearance.theme.accent_foreground },
                 } else null else null;
@@ -29963,7 +26439,7 @@ pub const AppSession = struct {
                 if (self.dock.view == .explorer and dg.tree_content.w > 0 and self.cell_height_px > 0) {
                     // 밴드는 행 텍스트와 **같은 창·같은 원점 편향**을 써야 한다 — 갈라지면 하이라이트가
                     // 글자와 어긋난 채 반 칸 밀린다.
-                    const window = self.fileTreeDrawWindow();
+                    const window = file_panel_ops.fileTreeDrawWindow(self);
                     const start = window.start;
                     const end = @min(self.file_tree_rows.items.len, start + window.count);
                     // 텍스트 pane origin과 **같은 식**이다(둘 다 tree_content.y에서 shift를 뺀다).
@@ -29984,7 +26460,7 @@ pub const AppSession = struct {
                             // 전폭이면 append 순서에 따라 스크롤바를 덮는다(SV2b).
                             .w = self.dockListTextWidthPx(),
                             .h = self.cell_height_px,
-                        }, if (selected and self.fileTreeFocused())
+                        }, if (selected and file_panel_ops.fileTreeFocused(self))
                             packOpaqueRgb(self.appearance.theme.accent)
                         else if (selected)
                             self.chromeQuadBg(self.sidebarHoverBg())
@@ -29999,7 +26475,7 @@ pub const AppSession = struct {
                 self.appendDockListScrollbar();
             }
             // 접기/펴기 토글 배경 — 평소 투명(배경색과 동일), 호버 시에만 하이라이트(왼쪽 헤더 아이콘 동형). 사용자 피드백.
-            if (self.dock_toggle_hovered) if (self.filePanelDockControlRect()) |r| {
+            if (self.dock_toggle_hovered) if (file_panel_ops.filePanelDockControlRect(self)) |r| {
                 self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarHoverBg()));
             };
 
@@ -30309,11 +26785,11 @@ pub const AppSession = struct {
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const tree_content_cols: u16 = @intCast(@min(dg.tree_content.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-                        const draw_window = self.fileTreeDrawWindow();
+                        const draw_window = file_panel_ops.fileTreeDrawWindow(self);
                         // 소스 컨트롤·에이전트 세션은 아직 행 단위 스크롤이라 **온전히 보이는 행 수**를
                         // 쓴다. 탐색기의 창(`draw_window.count`)은 부분 행을 포함하므로 여기 섞으면 그
                         // 두 뷰가 자를 것 없이 바닥으로 삐져나온다(SV3·SV4가 이관할 자리다).
-                        const visible_rows: u16 = @intCast(@min(self.fileTreeVisibleRows(), @as(usize, std.math.maxInt(u16))));
+                        const visible_rows: u16 = @intCast(@min(file_panel_ops.fileTreeVisibleRows(self), @as(usize, std.math.maxInt(u16))));
                         const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                         const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                         if (tree_cols > 0 and dg.view_bar.h > 0) {
@@ -30503,7 +26979,7 @@ pub const AppSession = struct {
                 }
                 // 접기/펴기 토글 글리프 — 접힘·팽창 공통. 왼쪽 헤더 아이콘과 같게 1.7× 확대(.dock_toggle dest)하고 띠 세로 중앙에.
                 // 1칸 글리프를 2칸 rect 중앙에: origin_x를 반칸 밀어 글리프 셀 중심 = rect 중심(호버 배경과 동심 — 사용자 피드백).
-                if (self.filePanelDockControlRect()) |r| {
+                if (file_panel_ops.filePanelDockControlRect(self)) |r| {
                     const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                     if (coretext_frame_builder.buildFileDockToggleDrawList(self.allocator, dock_active_fg)) |ddl| {
                         // visual hit rect가 titlebar 아래로 확장돼도 glyph center는 titlebar 자체에 고정한다.
@@ -30984,7 +27460,7 @@ pub const AppSession = struct {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 접힘 종 클릭 영역 — 창 드래그 아님
             }
-            if (self.filePanelDockControlRect()) |r| {
+            if (file_panel_ops.filePanelDockControlRect(self)) |r| {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 도크 접힘 펼치기 토글(우상단) — 창 드래그 아님(안 제외하면 클릭이 performDrag로 새 토글이 안 눌린다)
             }
@@ -31074,12 +27550,6 @@ pub const AppSession = struct {
         );
     }
 
-    fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {
-        if (usizeOptEql(self.file_tree_hovered_row, row)) return;
-        self.file_tree_hovered_row = row;
-        self.metal_dirty = true;
-    }
-
     /// #5b: 호버 중인 ‹/› 스크롤 버튼을 갱신한다. 바뀌면 재드로우(버튼이 밝아져 클릭 가능 표시). 같으면 무동작.
     fn setHoveredScroll(self: *AppSession, s: ?ScrollRef) void {
         const same = (self.hovered_scroll == null and s == null) or
@@ -31128,7 +27598,7 @@ pub const AppSession = struct {
     fn clearAllHover(self: *AppSession) void {
         self.setHoveredSlot(null);
         self.setHoveredTab(null);
-        self.setHoveredFileTreeRow(null);
+        file_panel_ops.setHoveredFileTreeRow(self, null);
         self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
         self.setHoveredFileHeaderMode(null); // 파일 헤더 mode 선택기 호버도 같은 이유로 정리
         self.setHoveredHeaderRegion(.none);
@@ -31258,7 +27728,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn usizeOptEql(a: ?usize, b: ?usize) bool {
+    pub fn usizeOptEql(a: ?usize, b: ?usize) bool {
         if (a == null and b == null) return true;
         if (a == null or b == null) return false;
         return a.? == b.?;
@@ -31968,9 +28438,9 @@ pub const AppSession = struct {
         }
         if (self.dockListScrollbarGeometry() == null) {
             self.dock_list_scrollbar_idle_ticks = fade_done_ticks;
-            self.dock_list_scrollbar_last_offset_px = self.fileTreeEffectiveScrollPx();
-        } else if (self.fileTreeEffectiveScrollPx() != self.dock_list_scrollbar_last_offset_px) {
-            self.dock_list_scrollbar_last_offset_px = self.fileTreeEffectiveScrollPx();
+            self.dock_list_scrollbar_last_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
+        } else if (file_panel_ops.fileTreeEffectiveScrollPx(self) != self.dock_list_scrollbar_last_offset_px) {
+            self.dock_list_scrollbar_last_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
             if (self.dock_list_scrollbar_idle_ticks != 0) self.metal_dirty = true;
             self.dock_list_scrollbar_idle_ticks = 0;
         } else if (self.dock_list_scrollbar_hovered or self.scrollbarCaptureActive()) {
@@ -32266,7 +28736,7 @@ pub const AppSession = struct {
     /// reconcile을 다시 돈다(docs/scroll-area.md §7). 그래서 선언은 불변으로 두고, paint가 만든 op의
     /// alpha를 이 자리에서 덮는다.
     fn appendDockListScrollbar(self: *AppSession) void {
-        const snapshot = self.fileTreeScrollTree();
+        const snapshot = file_panel_ops.fileTreeScrollTree(self);
         if (snapshot.entries.len == 0) return;
         const emphasized = self.dock_list_scrollbar_hovered or self.scrollbarCaptureActive();
         const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.dock_list_scrollbar_idle_ticks);
@@ -32739,7 +29209,7 @@ pub const AppSession = struct {
             self.endScrollbarCapture();
             return true;
         };
-        if (!fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
+        if (!file_panel_ops.fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
             self.endScrollbarCapture();
             return true;
         }
@@ -33332,7 +29802,7 @@ pub const AppSession = struct {
     /// control a user uses before it can click the session view switcher; returning this geometry
     /// does not open the dock or request a file picker.
     fn dockLauncherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        const rect = self.filePanelDockControlRect() orelse return .{};
+        const rect = file_panel_ops.filePanelDockControlRect(self) orelse return .{};
         return .{
             .x_px = @floatFromInt(rect.x),
             .y_px = @floatFromInt(rect.y),
@@ -35334,7 +31804,7 @@ pub const AppSession = struct {
         self.file_tree_manual_recovery_paths_len = 0;
         self.file_tree_manual_recovery_unknown = false;
 
-        self.clearFilePanelCloseWithoutUnlock();
+        file_panel_ops.clearFilePanelCloseWithoutUnlock(self);
         if (self.dock_initialized) {
             self.dock.deinit();
             self.dock_initialized = false;
@@ -50411,10 +46881,10 @@ test "empty file dock launcher presents explorer and empty content requests the 
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    try std.testing.expect(!session.dockHasContent());
+    try std.testing.expect(!file_panel_ops.dockHasContent(session));
     try std.testing.expect(!session.dockVisible());
-    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.open, session.filePanelDockControlAction().?);
-    const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.open, file_panel_ops.filePanelDockControlAction(session).?);
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     try std.testing.expect(!session.isWindowDragRegion(
         @floatFromInt(launcher.x + 1),
         @floatFromInt(launcher.y + 1),
@@ -50445,15 +46915,15 @@ test "empty file dock launcher presents explorer and empty content requests the 
 
     _ = 0; // FP16: 도크 그룹 개념 제거
     _ = try session.openFileTermInActivePane("/tmp/launcher-transition.md", .markdown);
-    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, session.filePanelDockControlAction().?);
-    session.activateFilePanelDockControl();
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, file_panel_ops.filePanelDockControlAction(session).?);
+    file_panel_ops.activateFilePanelDockControl(session);
     try std.testing.expect(session.dock.collapsed);
-    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, session.filePanelDockControlAction().?);
-    session.activateFilePanelDockControl();
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, file_panel_ops.filePanelDockControlAction(session).?);
+    file_panel_ops.activateFilePanelDockControl(session);
     try std.testing.expect(!session.dock.collapsed);
 
     session.chrome_minimal = true;
-    try std.testing.expect(session.filePanelDockControlRect() == null);
+    try std.testing.expect(file_panel_ops.filePanelDockControlRect(session) == null);
 }
 
 test "file tree root picker is a typed one-shot and cancel or invalid path preserves roots" {
@@ -50465,19 +46935,19 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try session.file_tree.replaceExplicitRoots(&.{"/before"});
     const generation = session.file_tree.rootGeneration();
 
-    session.requestFileTreeRootPick(.replace);
-    try std.testing.expectEqual(FileTreeRootOutcome.picker_requested, session.fileTreeRootOutcome());
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
+    try std.testing.expectEqual(FileTreeRootOutcome.picker_requested, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     try std.testing.expectEqual(FileTreeRootOperation.none, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(&.{}); // AppKit cancel
-    try std.testing.expectEqual(FileTreeRootOutcome.picker_canceled, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOutcome.picker_canceled, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 
-    session.requestFileTreeRootPick(.add);
+    file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick("relative");
-    try std.testing.expectEqual(FileTreeRootOutcome.invalid_path, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOutcome.invalid_path, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 }
@@ -50515,7 +46985,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     const outside = try std.fs.path.join(allocator, &.{ tmp_root, "outside" });
     defer allocator.free(outside);
 
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     try session.file_tree.replaceExplicitRoots(&.{project});
     const root_generation = session.file_tree.rootGeneration();
     const root_count = session.file_tree.rootCount();
@@ -50531,7 +47001,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // updateFileTree는 renderer보다 먼저 run한다. 따라서 내부에서 observation을 refresh하지 않으면 OSC 7이
     // 아직 Term cache에 안 들어와 이 첫 reveal을 놓친다.
     try testWriteActiveTermCwd(session, one);
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
     // one은 초기 viewport 안의 행이다. follow가 보이는 대상을 다시 위로 당기면 사용자의 탐색 위치를
@@ -50545,7 +47015,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // 관측은 tick마다 같은 CWD를 되풀이한다. 같은 값에서 rows 재투영이나 scroll을 다시 걸면 사용자가
     // 탐색 중인 위치를 빼앗으므로, raw scroll과 dirty/pending 상태가 그대로여야 한다.
     session.file_tree_scroll.offset_y_px = 2 * session.cell_height_px;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expect(!session.file_tree_rows_dirty);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
     try std.testing.expectEqual(2 * session.cell_height_px, session.file_tree_scroll.offset_y_px);
@@ -50553,7 +47023,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
 
     // root 밖 CWD는 Tree의 기존 one reveal을 보존하지만, 그것을 outside의 scroll pending으로 바꾸면 안 된다.
     try testWriteActiveTermCwd(session, outside);
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
     try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
@@ -50575,7 +47045,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try std.testing.expectEqual(session.cell_height_px, session.dockGeometry().tree_content.h);
     session.file_tree_scroll.offset_y_px = 6 * session.cell_height_px;
     try testWriteActiveTermCwd(session, one);
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
     // 한 행 viewport라 index 1을 넣는 최소 이동은 그 행의 top(= 한 행 높이)이다.
@@ -50585,24 +47055,24 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
     try session.splitActivePane(.horizontal);
     try testWriteActiveTermCwd(session, two);
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 
     // 파일/브라우저 Term은 CWD가 없으므로 직전 local CWD와 Tree 상태를 지우지 않는다.
     session.dispatchAppAction(.new_web_tab);
     try std.testing.expect(session.activePane().activeTerm().kind == .web);
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 }
 
 fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {
     var attempts: usize = 0;
     while (session.file_tree_root_validation != null and attempts < 2_000) : (attempts += 1) {
-        try session.updateFileTree();
+        try file_panel_ops.updateFileTree(session);
         std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     if (session.file_tree_root_validation != null) return error.TestUnexpectedResult;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
 }
 
 test "file tree root picker replaces adds repeats and rejects stale completion without touching dirty dock entries" {
@@ -50629,45 +47099,45 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
     defer allocator.free(outside);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(outside));
-    const entry = session.fileEntryForPath(outside).?;
+    const entry = file_panel_ops.fileEntryForPath(session, outside).?;
     entry.dirty = true;
     entry.external_change = true;
     const entry_id = entry.id;
     const surface_id = entry.surface_id;
 
-    session.requestFileTreeRootPick(.replace);
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_a);
     try testWaitForFileTreeRootCompletion(session);
-    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
     try std.testing.expectEqualStrings(root_a, session.file_tree.rootAt(0).?);
 
-    session.requestFileTreeRootPick(.add);
+    file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_b);
     try testWaitForFileTreeRootCompletion(session);
-    try std.testing.expectEqual(FileTreeRootOutcome.committed_add, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_add, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 2), session.file_tree.rootCount());
 
-    session.requestFileTreeRootPick(.replace);
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_c);
     try testWaitForFileTreeRootCompletion(session);
-    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
     try std.testing.expectEqualStrings(root_c, session.file_tree.rootAt(0).?);
 
     // A completion issued against C must not publish after an intervening root generation change.
-    session.requestFileTreeRootPick(.replace);
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_a);
     try session.file_tree.replaceExplicitRoots(&.{root_b});
     try testWaitForFileTreeRootCompletion(session);
-    try std.testing.expectEqual(FileTreeRootOutcome.stale_generation, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOutcome.stale_generation, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqualStrings(root_b, session.file_tree.rootAt(0).?);
 
-    const preserved = session.fileEntryForPath(outside).?.*;
+    const preserved = file_panel_ops.fileEntryForPath(session, outside).?.*;
     try std.testing.expectEqual(entry_id, preserved.id);
     try std.testing.expectEqual(surface_id, preserved.surface_id);
     try std.testing.expect(preserved.dirty and preserved.external_change);
@@ -50709,25 +47179,25 @@ test "file tree root validation completion projects live dock open close state a
     defer allocator.free(live_path);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(closed_path));
-    const closed_surface = session.fileEntryForPath(closed_path).?.surface_id;
+    const closed_surface = file_panel_ops.fileEntryForPath(session, closed_path).?.surface_id;
     // Keep the namespace explicit so opening an outside file during validation does not itself change
     // root_generation and turn this freshness case into the separate stale-generation case.
     try session.file_tree.replaceExplicitRoots(&.{initial_root});
     const validation_generation = session.file_tree.rootGeneration();
-    session.requestFileTreeRootPick(.replace);
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(selected_root);
     try std.testing.expect(session.file_tree_root_validation != null);
 
-    try std.testing.expect(session.closeFilePanelSurfaceNow(closed_surface));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, closed_surface));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(live_path));
     try std.testing.expectEqual(validation_generation, session.file_tree.rootGeneration());
     try testWaitForFileTreeRootCompletion(session);
 
-    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
-    try std.testing.expect(session.fileEntryForPath(closed_path) == null);
-    try std.testing.expect(session.fileEntryForPath(live_path) != null);
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, closed_path) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, live_path) != null);
     var saw_closed_row = false;
     var saw_live_row = false;
     for (session.file_tree_rows.items) |row| switch (row) {
@@ -50773,13 +47243,13 @@ test "file tree retained first scan is published but stale namespace row activat
     const selected = try std.fs.path.join(allocator, &.{ tmp_root, "selected" });
     defer allocator.free(selected);
 
-    session.requestFileTreeRootPick(.replace);
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(selected);
 
     var attempts: usize = 0;
     while ((session.file_tree_root_validation == null or session.file_tree_root_validation.?.round == 0) and attempts < 2_000) : (attempts += 1) {
-        try session.updateFileTree();
+        try file_panel_ops.updateFileTree(session);
         std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     try std.testing.expect(session.file_tree_root_validation != null);
@@ -50794,15 +47264,15 @@ test "file tree retained first scan is published but stale namespace row activat
     try tmp.dir.rename("selected", tmp.dir, "moved", session.io);
     try tmp.dir.createDir(session.io, "selected", .default_dir);
     try tmp.dir.writeFile(session.io, .{ .sub_path = "selected/same.md", .data = "# replacement" });
-    try session.updateFileTree();
-    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
 
     attempts = 0;
     while (session.file_tree_backend.resultCountForTest() == 0 and attempts < 2_000) : (attempts += 1) {
         std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     try std.testing.expect(session.file_tree_backend.resultCountForTest() > 0);
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
 
     var row_index: ?usize = null;
     for (session.file_tree_rows.items, 0..) |row, index| switch (row) {
@@ -50812,8 +47282,8 @@ test "file tree retained first scan is published but stale namespace row activat
         else => {},
     };
     try std.testing.expect(row_index != null); // exact first scan came from the retained old descriptor.
-    session.activateFileTreeRow(row_index.?);
-    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
+    file_panel_ops.activateFileTreeRow(session, row_index.?);
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     try std.testing.expect(session.peekFileTreeExternalOpen() == null);
 }
 
@@ -50846,10 +47316,10 @@ test "file tree markdown activation pins first hydration identity across leaf re
         .identity = doc_identity,
     }});
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     const row = file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = doc }).?;
-    session.activateFileTreeRow(row);
-    const entry = session.fileEntryForPath(doc).?;
+    file_panel_ops.activateFileTreeRow(session, row);
+    const entry = file_panel_ops.fileEntryForPath(session, doc).?;
     try std.testing.expect(entry.initial_file_identity_pending);
 
     try tmp.dir.rename("root/doc.md", tmp.dir, "root/moved.md", session.io);
@@ -50897,12 +47367,12 @@ test "pending file tree root validation rejects merge and workspace restore befo
     const dst_tab = dst.tabs.items[0];
     const src_tabs = src.tabs.items.len;
     const dst_tabs = dst.tabs.items.len;
-    const src_entries = src.fileEntryCount();
-    const dst_entries = dst.fileEntryCount();
+    const src_entries = file_panel_ops.fileEntryCount(src);
+    const dst_entries = file_panel_ops.fileEntryCount(dst);
     const src_generation = src.file_tree.rootGeneration();
     const dst_generation = dst.file_tree.rootGeneration();
 
-    src.requestFileTreeRootPick(.replace);
+    file_panel_ops.requestFileTreeRootPick(src, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, src.takeFileTreeRootPickRequest());
     src.provideFileTreeRootPick(selected_root);
     try std.testing.expect(src.file_tree_root_validation != null);
@@ -50916,15 +47386,15 @@ test "pending file tree root validation rejects merge and workspace restore befo
     try std.testing.expectEqual(dst_tabs, dst.tabs.items.len);
     try std.testing.expectEqual(src_tab, src.tabs.items[0]);
     try std.testing.expectEqual(dst_tab, dst.tabs.items[0]);
-    try std.testing.expectEqual(src_entries, src.fileEntryCount());
-    try std.testing.expectEqual(dst_entries, dst.fileEntryCount());
+    try std.testing.expectEqual(src_entries, file_panel_ops.fileEntryCount(src));
+    try std.testing.expectEqual(dst_entries, file_panel_ops.fileEntryCount(dst));
     try std.testing.expectEqual(src_generation, src.file_tree.rootGeneration());
     try std.testing.expectEqual(dst_generation, dst.file_tree.rootGeneration());
     try std.testing.expectEqualStrings("/source-before", src.file_tree.rootAt(0).?);
     try std.testing.expectEqualStrings("/destination-before", dst.file_tree.rootAt(0).?);
-    try std.testing.expect(src.fileEntryForPath("/tmp/root-pending-src.html") != null);
-    try std.testing.expect(dst.fileEntryForPath("/tmp/root-pending-dst.html") != null);
-    try std.testing.expect(src.fileEntryForPath("/tmp/root-pending-replacement.html") == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(src, "/tmp/root-pending-src.html") != null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(dst, "/tmp/root-pending-dst.html") != null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(src, "/tmp/root-pending-replacement.html") == null);
 }
 
 test "file tree header and populated blank left click are inert while right click exposes root actions" {
@@ -50934,10 +47404,10 @@ test "file tree header and populated blank left click are inert while right clic
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     try session.file_tree.replaceExplicitRoots(&.{"/project"});
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     const content = session.dockGeometry().tree_content;
     try std.testing.expect(session.file_tree_rows.items.len >= 2);
 
@@ -50973,7 +47443,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
@@ -50986,9 +47456,9 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
 
     // ① wheel — 트리 위에서 굴리면 스크롤 상태가 움직인다. 이 셋은 서로 다른 입구지만 **같은
     //    상태**를 움직여야 한다. 각자 자기 스크롤 위치를 들면 thumb과 내용이 어긋난다.
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
     session.scrollWheel(-5, 0, false, inside_x, inside_y);
-    const after_wheel = session.fileTreeEffectiveScrollPx();
+    const after_wheel = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expect(after_wheel > 0);
 
     // ② track click — thumb **밖**을 누르면 그 지점으로 점프한다(드래그가 아니다).
@@ -50997,7 +47467,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
         geometry.track_x + geometry.track_w / 2,
         track_bottom,
     ));
-    const after_track = session.fileTreeEffectiveScrollPx();
+    const after_track = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expect(after_track > after_wheel);
     session.endScrollbarCapture();
 
@@ -51007,15 +47477,15 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     //    스크롤을 실제로 읽고 있어야만 성립하는 성질이다. 픽셀 스크롤이라 창의 첫 행은 반쯤 걸쳐
     //    있을 수 있으므로, 그 다음 행부터가 "온전히 보이는" 첫 행이다.
     const first_full_row = (after_track + session.cell_height_px - 1) / session.cell_height_px;
-    const visible_index = first_full_row + session.fileTreeVisibleRows() / 2;
-    session.scrollFileTreeRowIntoView(visible_index);
-    try std.testing.expectEqual(after_track, session.fileTreeEffectiveScrollPx());
+    const visible_index = first_full_row + file_panel_ops.fileTreeVisibleRows(session) / 2;
+    file_panel_ops.scrollFileTreeRowIntoView(session, visible_index);
+    try std.testing.expectEqual(after_track, file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     // ④ keyboard — 선택이 화면 밖으로 나가면 anchor가 그것을 따라 들어온다.
-    session.scrollFileTreeRowIntoView(0);
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
-    session.scrollFileTreeRowIntoView(500);
-    const after_anchor = session.fileTreeEffectiveScrollPx();
+    file_panel_ops.scrollFileTreeRowIntoView(session, 0);
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
+    file_panel_ops.scrollFileTreeRowIntoView(session, 500);
+    const after_anchor = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expect(after_anchor > 0);
 
     // ⑤ 그리고 그 상태가 곧 thumb 위치다 — **발행된 tree**가 같은 값에서 나온다(SV2b: 기하를 다시
@@ -51027,7 +47497,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     // thumb이 track 시작보다 아래에 있다 — 스크롤 상태가 발행에 반영됐다는 뜻이다.
     try std.testing.expect(moved.thumb_y > moved.track_y);
     // 그리고 그 위치는 offset의 함수다: 맨 위로 되돌리면 thumb도 track 상단으로 붙는다.
-    session.setFileTreeScrollOffsetPx(0);
+    file_panel_ops.setFileTreeScrollOffsetPx(session, 0);
     const at_top = session.dockListScrollbarGeometry().?;
     try std.testing.expectApproxEqAbs(at_top.track_y, at_top.thumb_y, 0.01);
 }
@@ -51040,7 +47510,7 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
     defer session.deinit();
 
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
@@ -51077,7 +47547,7 @@ test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적�
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
 
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
@@ -51091,16 +47561,16 @@ test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적�
         top.track_y + top.track_h - 1,
     ));
     try std.testing.expect(session.scrollbarCaptureActive());
-    try std.testing.expect(session.fileTreeEffectiveScrollPx() > 0);
+    try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
 
     // thumb을 맨 위로 끈다. move는 좌표만 모으므로 이 시점엔 아직 그대로다.
     _ = session.routeScrollbarCapture(2, top.track_y);
-    try std.testing.expect(session.fileTreeEffectiveScrollPx() > 0);
+    try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
 
     // **손을 떼지 않은 채**(up=kind 3을 보내지 않고) tick 한 번 — 여기서 적용돼야 한다. 이 fixture의 축은
     // "up 없이도 적용되는가"이지 capture 수명이 아니다(그쪽은 stale-snapshot cancel 테스트가 소유한다).
     _ = try session.tick();
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
     session.endScrollbarCapture();
 }
 
@@ -51114,7 +47584,7 @@ test "file tree scrollbar publishes one tree that paint and hit-test both read" 
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
@@ -51171,7 +47641,7 @@ test "file tree scrollbar is painted after the row band and never under it" {
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     session.file_tree_rows.clearRetainingCapacity();
     for (0..512) |_| try session.file_tree_rows.append(allocator, .{ .file = .{
         .path = "/repo/src/main.zig",
@@ -51184,7 +47654,7 @@ test "file tree scrollbar is painted after the row band and never under it" {
         .external_change = false,
         .symlink = false,
     } });
-    _ = session.setFileTreeSelection(0); // 밴드가 나오도록 한 행을 선택한다
+    _ = file_panel_ops.setFileTreeSelection(session, 0); // 밴드가 나오도록 한 행을 선택한다
     session.refreshDockListScrollbar();
     const geometry = session.dockListScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
     const content = session.dockGeometry().tree_content;
@@ -51213,7 +47683,7 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
 
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
@@ -51232,14 +47702,14 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
         top.track_y + top.track_h - 1,
     ));
     try std.testing.expect(session.scrollbarCaptureActive());
-    try std.testing.expect(session.fileTreeEffectiveScrollPx() > 0);
+    try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
     // move는 좌표만 모으고 tick이 적용한다(계약 §4.3) — 옛 경로는 move가 곧 재투영이었다.
     _ = session.routeScrollbarCapture(2, top.track_y);
     session.applyPendingScrollbarScroll();
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
     _ = session.routeScrollbarCapture(2, std.math.nan(f64));
     session.applyPendingScrollbarScroll();
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     // Root authority is part of the drag snapshot. A late move after replacement must not commit.
     const restarted = session.dockListScrollbarGeometry().?;
@@ -51247,12 +47717,12 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     try session.file_tree.replaceExplicitRoots(&.{"/different"});
     _ = session.routeScrollbarCapture(2, top.track_y + top.track_h);
     try std.testing.expect(!session.scrollbarCaptureActive());
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     session.refreshDockListScrollbar();
     const current = session.dockListScrollbarGeometry().?;
     try std.testing.expect(session.beginDockListScrollbarGesture(current.track_x, current.thumb_y));
-    session.advanceFileTreeProjectionGeneration();
+    file_panel_ops.advanceFileTreeProjectionGeneration(session);
     try std.testing.expect(session.pointerGestureIs(.none));
 
     session.file_tree_rows.clearRetainingCapacity();
@@ -51278,7 +47748,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
 
     // **뷰포트가 셀 높이의 배수면 이 테스트는 아무것도 판정하지 못한다** — 부분 행 단언이 통째로
     // 무의미해진다(§10.1 "단언이 판정할 수 있는 상태인지 본다"). 나머지가 0이 아닌 창 높이를 찾고,
@@ -51295,7 +47765,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
 
     const tree = session.dockGeometry().tree_content;
     const cell_h = session.cell_height_px;
-    const visible = session.fileTreeVisibleRows();
+    const visible = file_panel_ops.fileTreeVisibleRows(session);
     const remainder = picked_remainder;
 
     // ① `fileTreeVisibleRows`는 여전히 내림이다 — 그것이 Page 키의 단위다(온전히 보이는 행).
@@ -51322,7 +47792,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
 
     // ② **바닥 부분 행을 그린다**(SV2-0에서 뒤집힌 계약). 창은 뷰포트를 덮을 만큼 올림이고, 그
     //    부분 행은 hit-test에서도 살아 있다 — 보이는 것을 클릭할 수 있어야 한다.
-    const window_top = session.fileTreeDrawWindow();
+    const window_top = file_panel_ops.fileTreeDrawWindow(session);
     try std.testing.expectEqual(@as(usize, 0), window_top.start);
     try std.testing.expectEqual(@as(u32, 0), window_top.origin_shift_px);
     // 창은 뷰포트를 **덮되 최소한**이다. 이 두 성질이 곧 "올림"이며, 개수를 산술로 다시 적으면
@@ -51333,9 +47803,9 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
 
     const x: f64 = @floatFromInt(tree.x + 1);
     const inside_y: f64 = @floatFromInt(tree.y + (visible - 1) * cell_h + cell_h / 2);
-    try std.testing.expectEqual(@as(?usize, visible - 1), session.fileTreeRowAt(x, inside_y));
+    try std.testing.expectEqual(@as(?usize, visible - 1), file_panel_ops.fileTreeRowAt(session, x, inside_y));
     const partial_y: f64 = @floatFromInt(tree.y + visible * cell_h + remainder / 2);
-    try std.testing.expectEqual(@as(?usize, visible), session.fileTreeRowAt(x, partial_y));
+    try std.testing.expectEqual(@as(?usize, visible), file_panel_ops.fileTreeRowAt(session, x, partial_y));
 
     // ③ 스크롤은 **content 바닥이 뷰포트 바닥에 붙는 지점**까지 간다. 행 index 시절에는 마지막 행
     //    아래에 나머지 픽셀만큼 배경이 남았다 — 그 상한이 픽셀로 바뀐 것이 이 슬라이스의 본체다.
@@ -51343,28 +47813,28 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     session.file_tree_scroll.offset_y_px = std.math.maxInt(u32);
     try std.testing.expectEqual(
         @as(u32, @intCast(rows_len)) * cell_h - tree.h,
-        session.fileTreeEffectiveScrollPx(),
+        file_panel_ops.fileTreeEffectiveScrollPx(session),
     );
     // 바닥에 닿았으면 뷰포트 마지막 픽셀이 **마지막 행**이다(행 index 시절엔 그 자리가 배경이었다).
     const bottom_y: f64 = @floatFromInt(tree.y + tree.h - 1);
-    try std.testing.expectEqual(@as(?usize, rows_len - 1), session.fileTreeRowAt(x, bottom_y));
+    try std.testing.expectEqual(@as(?usize, rows_len - 1), file_panel_ops.fileTreeRowAt(session, x, bottom_y));
 
     // ④ 창의 세 값이 서로 맞물린다. 부분 offset(행 경계가 아닌 자리)에서 봐야 판정이 된다.
     const half = cell_h / 2;
     if (half == 0) return error.FileTreeFixtureCannotJudgePartialRow;
     session.file_tree_scroll.offset_y_px = 3 * cell_h + half;
     {
-        const window = session.fileTreeDrawWindow();
+        const window = file_panel_ops.fileTreeDrawWindow(session);
         try std.testing.expectEqual(@as(usize, 3), window.start);
         try std.testing.expectEqual(half, window.origin_shift_px);
         // 위로 half만큼 밀렸어도 창은 여전히 뷰포트를 덮되 최소한이다.
         try expectWindowCoversViewport(window.count, window.origin_shift_px, cell_h, tree.h);
 
         // hit-test가 **같은 창**을 본다: 뷰포트 첫 픽셀은 반쯤 잘린 그 행(index 3)이다.
-        try std.testing.expectEqual(@as(?usize, 3), session.fileTreeRowAt(x, @floatFromInt(tree.y)));
+        try std.testing.expectEqual(@as(?usize, 3), file_panel_ops.fileTreeRowAt(session, x, @floatFromInt(tree.y)));
         // 그 행이 끝나는 지점 바로 아래는 다음 행이다.
         const next_row_y: f64 = @floatFromInt(tree.y + (cell_h - half));
-        try std.testing.expectEqual(@as(?usize, 4), session.fileTreeRowAt(x, next_row_y));
+        try std.testing.expectEqual(@as(?usize, 4), file_panel_ops.fileTreeRowAt(session, x, next_row_y));
     }
 
     // ⑤ 나눗셈으로 만든 이 창이 `scroll_area.project`의 walk와 **같은 답**이어야 한다. 탐색기는 행
@@ -51377,19 +47847,19 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
                 return self.h;
             }
         };
-        const window = session.fileTreeDrawWindow();
+        const window = file_panel_ops.fileTreeDrawWindow(session);
         const projected = chrome.ui.scroll_area.project(
             Uniform{ .h = cell_h },
             Uniform.heightPx,
             .{ .count = rows_len, .gap_px = 0, .viewport_h_px = tree.h },
-            session.fileTreeEffectiveScrollPx(),
+            file_panel_ops.fileTreeEffectiveScrollPx(session),
         );
         try std.testing.expectEqual(projected.first_index, window.start);
         try std.testing.expectEqual(@as(u16, @intCast(projected.end_exclusive - projected.first_index)), window.count);
         // project의 원점 편향은 음수 local y이고, 창의 shift는 그 절댓값이다.
         try std.testing.expectEqual(@as(i32, -@as(i32, @intCast(window.origin_shift_px))), projected.first_origin_y_px);
-        try std.testing.expectEqual(session.fileTreeEffectiveScrollPx(), projected.offset_y_px);
-        try std.testing.expectEqual(session.fileTreeScrollExtent().max_offset_px, projected.max_offset_px);
+        try std.testing.expectEqual(file_panel_ops.fileTreeEffectiveScrollPx(session), projected.offset_y_px);
+        try std.testing.expectEqual(file_panel_ops.fileTreeScrollExtent(session).max_offset_px, projected.max_offset_px);
     }
 
     // ⑥ **렌더가 그 창을 실제로 쓴다.** 위의 것들은 host 산술이라, 렌더가 다른 수를 쓰면 전부 통과하면서
@@ -51408,8 +47878,8 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
             row.file.label = owned;
         }
 
-        const window = session.fileTreeDrawWindow();
-        try std.testing.expectEqual(session.fileTreeEffectiveScrollPx() / cell_h, window.start);
+        const window = file_panel_ops.fileTreeDrawWindow(session);
+        try std.testing.expectEqual(file_panel_ops.fileTreeEffectiveScrollPx(session) / cell_h, window.start);
 
         const fg: terminal.Color = .{ .rgb = .{ .r = 200, .g = 200, .b = 200 } };
         var dl = try coretext_frame_builder.buildFileTreeDrawList(
@@ -51453,18 +47923,18 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     session.file_tree_scroll.reset();
     {
         // rect 위쪽 밖.
-        try std.testing.expect(session.fileTreeRowAt(x, @floatFromInt(tree.y -| 2)) == null);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, x, @floatFromInt(tree.y -| 2)) == null);
         // rect 왼쪽 밖.
-        try std.testing.expect(session.fileTreeRowAt(@floatFromInt(tree.x -| 2), inside_y) == null);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, @floatFromInt(tree.x -| 2), inside_y) == null);
         // rect 오른쪽/아래 밖. 위·왼쪽만 보면 `pointInRect`를 반쪽만 써도 통과한다(적대적 검증).
-        try std.testing.expect(session.fileTreeRowAt(@floatFromInt(tree.x + tree.w + 2), inside_y) == null);
-        try std.testing.expect(session.fileTreeRowAt(x, @floatFromInt(tree.y + tree.h + 2)) == null);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, @floatFromInt(tree.x + tree.w + 2), inside_y) == null);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, x, @floatFromInt(tree.y + tree.h + 2)) == null);
         // 스크롤바 트랙 위 — 목록이 넘치므로 트랙이 있다.
         const bar = session.dockListScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
         const track_x: f64 = bar.track_x + bar.track_w / 2;
         const track_y: f64 = bar.track_y + bar.track_h / 2;
         try std.testing.expect(bar.trackContains(track_x, track_y));
-        try std.testing.expect(session.fileTreeRowAt(track_x, track_y) == null);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, track_x, track_y) == null);
     }
 
     // ⑧ 셀 높이가 0이면 창도 0이다. 0으로 나누면 패닉이고, 1로 눌러 계산하면 창이 뷰포트 높이만큼
@@ -51472,9 +47942,9 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     {
         const saved = session.cell_height_px;
         session.cell_height_px = 0;
-        try std.testing.expectEqual(@as(usize, 0), session.fileTreeVisibleRows());
-        try std.testing.expectEqual(@as(u16, 0), session.fileTreeDrawWindow().count);
-        try std.testing.expect(session.fileTreeRowAt(x, inside_y) == null);
+        try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileTreeVisibleRows(session));
+        try std.testing.expectEqual(@as(u16, 0), file_panel_ops.fileTreeDrawWindow(session).count);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, x, inside_y) == null);
         session.cell_height_px = saved;
     }
 
@@ -51490,25 +47960,25 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         session.file_tree_rows.items[target_index].file.path = followed;
         session.file_tree_followed_cwd = followed;
         session.file_tree_follow_scroll_pending = true;
-        session.scrollFileTreeToFollowedCwd();
+        file_panel_ops.scrollFileTreeToFollowedCwd(session);
         try std.testing.expectEqual(
             @as(u32, @intCast(target_index + 1)) * cell_h - tree.h,
-            session.fileTreeEffectiveScrollPx(),
+            file_panel_ops.fileTreeEffectiveScrollPx(session),
         );
 
         // **위로도 따라간다.** 아래로 가는 분기만 보면 위 분기를 통째로 지워도 통과한다(적대적 검증).
         // 창 **위**에 있는 행을 따라가면 그 행의 top이 뷰포트 top에 온다.
         session.file_tree_scroll.offset_y_px = @as(u32, @intCast(target_index + 5)) * cell_h;
         session.file_tree_follow_scroll_pending = true;
-        session.scrollFileTreeToFollowedCwd();
-        try std.testing.expectEqual(@as(u32, @intCast(target_index)) * cell_h, session.fileTreeEffectiveScrollPx());
+        file_panel_ops.scrollFileTreeToFollowedCwd(session);
+        try std.testing.expectEqual(@as(u32, @intCast(target_index)) * cell_h, file_panel_ops.fileTreeEffectiveScrollPx(session));
 
         // **이미 온전히 보이면 스크롤을 뺏지 않는다**(file-explorer §1 정책 4). 이 항이 없으면 위
         //  두 분기를 "항상 top으로"로 바꿔도 통과한다.
-        const settled = session.fileTreeEffectiveScrollPx();
+        const settled = file_panel_ops.fileTreeEffectiveScrollPx(session);
         session.file_tree_follow_scroll_pending = true;
-        session.scrollFileTreeToFollowedCwd();
-        try std.testing.expectEqual(settled, session.fileTreeEffectiveScrollPx());
+        file_panel_ops.scrollFileTreeToFollowedCwd(session);
+        try std.testing.expectEqual(settled, file_panel_ops.fileTreeEffectiveScrollPx(session));
 
         session.file_tree_followed_cwd = null;
     }
@@ -51519,7 +47989,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         session.file_tree_scroll.offset_y_px = 12 * cell_h;
         const shrunk = visible + 2;
         session.file_tree_rows.shrinkRetainingCapacity(shrunk);
-        session.clampFileTreeScroll();
+        file_panel_ops.clampFileTreeScroll(session);
         try std.testing.expectEqual(
             @as(u32, @intCast(shrunk)) * cell_h - tree.h,
             session.file_tree_scroll.offset_y_px,
@@ -51531,7 +48001,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     {
         session.file_tree_rows.clearRetainingCapacity();
         session.file_tree_scroll.reset();
-        try std.testing.expect(session.fileTreeRowAt(x, inside_y) == null);
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, x, inside_y) == null);
         // 아래 ⑫가 판정하려면 행이 다시 있어야 한다 — 빈 채로 두면 그 단언이 무의미해진다.
         for (0..visible) |_| try session.file_tree_rows.append(allocator, .{ .file = .{
             .path = "/repo/src/main.zig",
@@ -51549,7 +48019,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     // ⑫ 행 전체가 뷰포트 안에 들어가면 스크롤이 없다.
     session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
     session.file_tree_scroll.offset_y_px = std.math.maxInt(u32);
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 }
 
 test "file tree production hot paths emit bounded counter artifact" {
@@ -51559,7 +48029,7 @@ test "file tree production hot paths emit bounded counter artifact" {
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
 
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, file_tree.max_materialized_nodes);
@@ -51576,7 +48046,7 @@ test "file tree production hot paths emit bounded counter artifact" {
     } });
 
     var counters: FileTreePerfCounters = .{};
-    AppSession.classifyFileTreeRowsCounted(session.file_tree_rows.items, &counters);
+    file_panel_ops.classifyFileTreeRowsCounted(session.file_tree_rows.items, &counters);
     try std.testing.expectEqual(file_tree.max_materialized_nodes, counters.row_visits);
     try std.testing.expectEqual(counters.row_visits, counters.classifier_calls);
     for (session.file_tree_rows.items) |row|
@@ -51652,7 +48122,7 @@ test "file tree row staging OOM leaves live root rows and watcher authority unch
     try session.file_tree.replaceExplicitRoots(&.{"/before"});
     try session.file_tree.resetWatchRequests(&.{"/safety"});
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     const live_generation = session.file_tree.rootGeneration();
     try std.testing.expectEqualStrings("/before", session.file_tree_rows.items[0].root.path);
 
@@ -51664,7 +48134,7 @@ test "file tree row staging OOM leaves live root rows and watcher authority unch
     defer candidate_rows.deinit(allocator);
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     session.allocator = failing.allocator();
-    try std.testing.expectError(error.OutOfMemory, session.prepareFileTreeRowStaging(&candidate_rows, 0));
+    try std.testing.expectError(error.OutOfMemory, file_panel_ops.prepareFileTreeRowStaging(session, &candidate_rows, 0));
     session.allocator = allocator;
 
     try std.testing.expectEqual(live_generation, session.file_tree.rootGeneration());
@@ -51698,7 +48168,7 @@ test "file tree scan completion is fenced across A to B to A root generations" {
 
     try session.file_tree.replaceExplicitRoots(&.{root_a});
     const old_generation = session.file_tree.rootGeneration();
-    try session.updateFileTree(); // submits A at old_generation
+    try file_panel_ops.updateFileTree(session); // submits A at old_generation
     try session.file_tree.replaceExplicitRoots(&.{root_b});
     try session.file_tree.replaceExplicitRoots(&.{root_a});
     try std.testing.expect(session.file_tree.rootGeneration() != old_generation);
@@ -51707,11 +48177,11 @@ test "file tree scan completion is fenced across A to B to A root generations" {
 
     var attempts: usize = 0;
     while (!session.file_tree_backend.isIdleForTest() and attempts < 2_000) : (attempts += 1) {
-        try session.updateFileTree();
+        try file_panel_ops.updateFileTree(session);
         std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     try std.testing.expect(session.file_tree_backend.isIdleForTest());
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqual(@as(usize, 2), session.file_tree_rows.items.len); // root + recent header, no stale child
     try std.testing.expect(session.file_tree_rows.items[0].root.loading);
 }
@@ -51723,10 +48193,10 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     try session.file_tree.replaceExplicitRoots(&.{"/before"});
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     const content = session.dockGeometry().tree_content;
     session.mouse(1, @floatFromInt(content.x + 2), @floatFromInt(content.y + 2), 2, 0);
     try std.testing.expect(session.file_tree_context_target != null);
@@ -51739,16 +48209,16 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
     session.chrome_host.notice.dismiss();
 
     const target: file_tree_mutation.Target = .{ .kind = .file, .path = "/after/file.md" };
-    session.pending_file_tree_delete = AppSession.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
+    session.pending_file_tree_delete = file_panel_ops.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
     try session.file_tree.replaceExplicitRoots(&.{"/newer"});
-    session.confirmFileTreeDelete();
+    file_panel_ops.confirmFileTreeDelete(session);
     try std.testing.expect(session.pending_file_tree_delete == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_tree_mutation_backend.pendingCount());
     try std.testing.expectEqualStrings("/newer", session.file_tree.rootAt(0).?);
 
-    session.pending_file_tree_delete = AppSession.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
-    session.removeFileTreeRoot("/newer");
-    try std.testing.expectEqual(FileTreeRootOutcome.busy, session.fileTreeRootOutcome());
+    session.pending_file_tree_delete = file_panel_ops.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
+    file_panel_ops.removeFileTreeRoot(session, "/newer");
+    try std.testing.expectEqual(FileTreeRootOutcome.busy, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqualStrings("/newer", session.file_tree.rootAt(0).?);
     try std.testing.expect(session.chrome_host.notice.open);
     session.pending_file_tree_delete = null;
@@ -51786,7 +48256,7 @@ test "workspace restore validates explicit roots and atomically rebuilds explore
     // v144: 미존재 root(missing)를 버렸다는 신호가 남아야 한다 — 이 root 강등은 apply를 실패시키지 않으므로, 신호가
     // 없으면 다음 Quit이 root 하나가 빠진 explorer 상태를 checkpoint에 커밋한다(사용자 root 영구 손실).
     try std.testing.expectEqual(@as(u32, 1), session.takeWorkspaceRestoreDropped());
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
     try std.testing.expectEqualStrings(explicit_root, session.file_tree.rootAt(0).?);
@@ -51858,7 +48328,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
             entry.mode = .read;
             try session.file_tree.replaceExplicitRoots(&.{before_root});
             var staged: [1]dock_panel.Entry = .{entry.*};
-            try AppSession.buildFileTreeRowsForEntries(
+            try file_panel_ops.buildFileTreeRowsForEntries(
                 backing_allocator,
                 staged[0..],
                 0,
@@ -51889,7 +48359,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
             try std.testing.expectEqualStrings(before_root, session.file_tree.rootAt(0).?);
             try std.testing.expectEqual(before_generation, session.file_tree.rootGeneration());
             try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
-            try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+            try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
             _ = 0; // FP16: Harness가 만든 location 대신 창구가 소유(위 fileEntryCount로 검증)
             try std.testing.expectEqual(before_rows_len, session.file_tree_rows.items.len);
             try std.testing.expect(session.file_tree_rows.items.ptr == before_rows_ptr);
@@ -51945,7 +48415,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
             // already completed the no-fail swap, so it must be wholly new rather than a mixed half-state.
             try std.testing.expectEqualStrings(new_root, session.file_tree.rootAt(0).?);
             try std.testing.expectEqualStrings("replacement", session.tabs.items[0].custom_name.?);
-            try std.testing.expect(session.fileEntryForPath(new_path) != null);
+            try std.testing.expect(file_panel_ops.fileEntryForPath(session, new_path) != null);
             // plain live + already-ended 후보가 publish돼 notice가 실제 mutate된다. newly-Gone의 notice+dropped 동시
             // rollback은 RestoreAccountingSnapshot/recordEndedPlaceholder production helper 회귀가 별도로 고정한다.
             try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_dropped_pending);
@@ -52097,13 +48567,13 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
 
     const terminal_inputs = session.total_terminal_input_events;
     const workspace_count = session.tabs.items.len;
-    try std.testing.expect(session.closeFilePanelSurfaceNow(a_surface));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, a_surface));
     // A를 닫으면 pane의 활성 Term이 승계되므로 baseline은 close **뒤**에 잡는다.
     const terminal_surface = session.activeSurface().id;
     const terms_before_blocked_close = session.activePane().terms.items.len;
     // FP16: 파일이 pane 탭이라 close는 pane의 active_term 승계로 끝나고 입력은 workspace로 간다.
     // publish 대기 barrier는 그 다음 "승계된 파일로 focus" 요청이 만든다.
-    const successor = session.fileEntryForId(b_id).?;
+    const successor = file_panel_ops.fileEntryForId(session, b_id).?;
     session.requestDockEntryFocus(successor);
     try std.testing.expect(session.pending_dock_focus != null);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
@@ -52123,7 +48593,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     try std.testing.expect(session.handleDroppedImage("private-image"));
     try std.testing.expectEqual(upload_counter, session.upload_counter);
     session.dispatchAppAction(.close_focused);
-    try std.testing.expect(session.fileEntryForId(b_id) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForId(session, b_id) != null);
     try std.testing.expectEqual(workspace_count, session.tabs.items.len);
     try std.testing.expectEqual(terms_before_blocked_close, session.activePane().terms.items.len);
     try std.testing.expectEqual(terminal_surface, session.activeSurface().id);
@@ -52149,7 +48619,7 @@ test "FP9 closing pending entry reissues typed focus for its live successor" {
     session.requestDockEntryFocus(b_open.term.file_entry.?);
     try std.testing.expect(session.focus_owner == .dock_pending and session.pending_dock_focus.?.entry_id == b_open.term.file_entry.?.id);
 
-    try std.testing.expect(session.closeFilePanelSurfaceNow(b_surface));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, b_surface));
     // 승계가 **실제로 pane의 active_term을 옮겼는지**까지 본다 — token만 보면 화면은 엉뚱한 탭을 보여
     // 주는데도 통과한다(code-review max).
     try std.testing.expectEqual(a_id, session.activePane().activeTerm().file_entry.?.id);
@@ -52171,12 +48641,12 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     const b_id = b_open.term.file_entry.?.id;
     session.assignDockSurfaceIds();
     const a_surface = session.fileEntryAt(0).?.surface_id;
-    const b_surface = session.fileEntryForId(b_id).?.surface_id;
+    const b_surface = file_panel_ops.fileEntryForId(session, b_id).?.surface_id;
     try std.testing.expect(session.focusFilePanelSurface(b_surface));
     // FP16: 마지막으로 연 B를 닫으면 pane의 active_term 승계가 앞 파일 A를 고르고, publish 대기 barrier가
     // 그 A를 가리킨다(옛 "빈 leaf collapse + 이웃 group으로 focus 이양"을 대신한다).
-    try std.testing.expect(session.closeFilePanelSurfaceNow(b_surface));
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, b_surface));
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     // 승계 대상이 pane의 활성 탭이 됐는지도 확인한다(token 일치만으로는 화면 상태를 못 지킨다).
     try std.testing.expectEqualStrings("/tmp/fp9-empty-owner-a.md", session.activePane().activeTerm().file_entry.?.path);
     try std.testing.expect(session.pending_dock_focus != null);
@@ -52186,8 +48656,8 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     try std.testing.expect(session.focusedDockSurface() == a_surface);
 
     // 마지막 전역 entry까지 닫으면 모델 루트 하나만 남고 input은 workspace로 돌아가지만, 한 번 연 빈 도크는 유지한다.
-    try std.testing.expect(session.closeFilePanelSurfaceNow(a_surface));
-    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, a_surface));
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.workspace_focus_pending);
     try std.testing.expect(session.dockVisible());
@@ -52209,7 +48679,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(file_path));
     const sid = session.fileEntryAt(0).?.surface_id;
-    try std.testing.expect(session.closeFilePanelSurfaceNow(sid));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     try std.testing.expect(session.dockVisible()); // recent/project tree content는 남아 있다.
 
     try session.newTermInActivePane();
@@ -52265,7 +48735,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(!session.dispatchWebAppAction(0, close_tab_event));
     try std.testing.expectEqual(initial_terms, session.activePane().terms.items.len);
     try std.testing.expectEqual(initial_tabs, session.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 
     // FP16 §3.4: 입력 소유가 활성 Term에서 파생되면서 "stale dock owner" 상태가 구조적으로 사라졌다.
     // 남은 계약: Metal 키가 왔을 때 **활성 Term이 터미널이면** 그 터미널을 닫는다(파일은 안 건드린다).
@@ -52279,7 +48749,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expectEqual(terms_before - 1, session.activePane().terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 
     // browser Term도 native WebView source다. FP16에서는 그 WebView가 키를 받으려면 **활성 Term**이어야
     // 하므로(소유가 곧 활성 Term), 그 상태에서 app action이 Term cascade만 타는지가 남은 계약이다.
@@ -52328,7 +48798,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     _ = try session.handleMetalKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(successor_terms_before - 1, session.activePane().terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 
     // 명시적으로 재바인딩한 close_term은 active browser capability에서만 허용되고 같은 workspace cascade를 탄다.
     const browser_close_term_sid = try session.appendWebTermInActivePane(.browser);
@@ -52362,8 +48832,8 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     const sync = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
     session.dispatchChromeAction(.confirm_alternate);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) == null);
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(successor_sid, session.fileEntryAt(0).?.surface_id);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.completePendingDockFocus(successor_sid));
@@ -52374,7 +48844,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     const clean_sid = session.fileEntryAt(1).?.surface_id;
     session.focus_owner = .workspace;
     try std.testing.expect(session.dispatchWebAppAction(clean_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
-    try std.testing.expect(session.fileEntryForSurfaceId(clean_sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, clean_sid) == null);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
 
     // 늦은 save ACK는 close 시작 뒤의 더 최신 workspace focus를 탈취하지 않는다.
@@ -52392,11 +48862,11 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try session.reportFilePanelDirty(save_sid, .{ .dirty = false, .revision = 2 });
     session.focusWorkspaceInput();
     session.completeFilePanelSaveClose(save_sid, save_action.request_id, 2, true);
-    try std.testing.expect(session.fileEntryForSurfaceId(save_sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, save_sid) == null);
     // FP16: 입력 소유가 활성 Term에서 파생되므로, 그 파일을 닫으면 pane이 승계한 **다음 파일**로 barrier가
     // 다시 발급된다. 어느 쪽이든 받아들이면 승계 회귀를 못 잡으므로 결과를 고정한다 — 남은 파일이 하나이니
     // 그것이 활성이고, 그것이 barrier를 든다.
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     const successor = session.activePane().activeTerm().file_entry.?;
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, successor.id);
     try std.testing.expectEqual(successor.id, session.pending_dock_focus.?.entry_id);
@@ -52418,12 +48888,12 @@ test "file tree bulk delete visits entries and action queues exactly once" {
             try std.fmt.bufPrint(&path_buf, "/tmp/fp9-bulk-delete/{d}.md", .{entry_index});
         _ = try session.openFileTermInActivePane(entry_path, .markdown);
     }
-    try std.testing.expectEqual(@as(usize, dock_panel.max_entries), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, dock_panel.max_entries), file_panel_ops.fileEntryCount(session));
     {
-        var it = session.fileEntries();
+        var it = file_panel_ops.fileEntries(session);
         while (it.next()) |entry| entry.surface_id = session.surface_ids.next();
     }
-    const survivor_sid = session.fileEntryForPath("/tmp/fp9-bulk-survivor.md").?.*.surface_id;
+    const survivor_sid = file_panel_ops.fileEntryForPath(session, "/tmp/fp9-bulk-survivor.md").?.*.surface_id;
     const deleted_sid = session.fileEntryAt(0).?.surface_id;
     for (0..dock_panel.max_entries) |index| {
         const surface_id = if (index % 2 == 0) survivor_sid else deleted_sid;
@@ -52448,7 +48918,7 @@ test "file tree bulk delete visits entries and action queues exactly once" {
     var counting = std.testing.FailingAllocator.init(allocator, .{});
     session.allocator = counting.allocator();
     session.dock.allocator = counting.allocator();
-    const stats = session.removeDeletedDockEntries("/tmp/fp9-bulk-delete");
+    const stats = file_panel_ops.removeDeletedDockEntries(session, "/tmp/fp9-bulk-delete");
     session.allocator = allocator;
     session.dock.allocator = allocator;
 
@@ -52462,7 +48932,7 @@ test "file tree bulk delete visits entries and action queues exactly once" {
     try std.testing.expectEqual(@as(usize, dock_panel.max_entries / 2), session.file_tree_reload_actions_len);
     // FP16: 파일 삭제가 곧 **Term teardown**이라 surface·pane 재배치가 실제로 할당한다. 옛 "도크 모델
     // 변경은 무할당" 계약은 대상이 사라졌다 — 남은 주제는 위 visit 카운트(entry·큐를 딱 한 번씩만 훑는다)다.
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(survivor_sid, session.fileEntryAt(0).?.surface_id);
     try std.testing.expect(session.focus_owner == .workspace);
 }
@@ -52589,7 +49059,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.metal_dirty = true;
     _ = try session.tick();
     var saw_dock_toggle = false;
-    const dock_toggle = session.filePanelDockControlRect().?; // 팽창 상태에도 표시(일원화).
+    const dock_toggle = file_panel_ops.filePanelDockControlRect(session).?; // 팽창 상태에도 표시(일원화).
     for (session.metal_buffer.cells) |cell| {
         // 파일 도크 컨트롤 ◧(maru PUA 0xF0006, 렌더러가 1.7× 확대)는 탭바가 아니라 titlebar 띠 우측 끝(filePanelDockControlRect)에 세로 중앙 렌더된다.
         if (cell.codepoint == icons.codepoint(.sidebar_collapse) and
@@ -52671,8 +49141,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
 
     // titlebar 띠 우측 끝 단일 토글로 닫고 다시 연다(탭바 접기 버튼을 일원화 — 팽창 상태에도 토글 표시).
-    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, session.filePanelDockControlAction().?);
-    const collapse_toggle = session.filePanelDockControlRect().?;
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, file_panel_ops.filePanelDockControlAction(session).?);
+    const collapse_toggle = file_panel_ops.filePanelDockControlRect(session).?;
     const collapse_x: f64 = @floatFromInt(collapse_toggle.x + 1);
     const collapse_y: f64 = @floatFromInt(collapse_toggle.y + 1);
     const dirty_surface_id = session.fileEntryAt(0).?.surface_id;
@@ -52693,8 +49163,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         try std.testing.expect(!surface.visible);
     }
     try std.testing.expect(preserved_dirty_surface);
-    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, session.filePanelDockControlAction().?);
-    const toggle = session.filePanelDockControlRect().?;
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, file_panel_ops.filePanelDockControlAction(session).?);
+    const toggle = file_panel_ops.filePanelDockControlRect(session).?;
     // Fix A: 도크 접힘 토글 위는 창 드래그 영역이 아니다 — 아니면 클릭이 Swift performDrag로 새 토글이 안 눌린다.
     try std.testing.expect(!session.isWindowDragRegion(@floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1)));
     // 토글 바로 왼쪽 빈 띠는 드래그 영역(제외가 토글 폭에만 걸림을 확인).
@@ -52744,7 +49214,7 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expect(!session.takeFilePanelPickRequest());
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     const md_surface_id = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(md_surface_id != 0);
     try std.testing.expectEqualStrings(md_path, session.filePanelEntryInfo(md_surface_id).?.path);
@@ -52754,25 +49224,25 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     // FP16: source group 개념이 없어져, 링크는 source 파일이 있는 pane의 새 탭으로 열린다
     // (옛 "다른 group이 focus여도 source group에 연다" 대조 자리).
     try session.openFilePanelLink(md_surface_id, "two.html#preview", false);
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(html_path, session.fileEntryAt(1).?.path);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
     // text kind(§2.2): 로컬 텍스트 링크도 markdown과 같은 정책으로 source 파일이 있는 pane에 연다.
     try session.openFilePanelLink(md_surface_id, "three.txt", false);
-    try std.testing.expectEqual(@as(usize, 3), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(text_path, session.fileEntryAt(2).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.text, session.fileEntryAt(2).?.kind);
     try std.testing.expectEqual(session.fileEntryAt(2).?.id, session.pending_dock_focus.?.entry_id);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
-    try std.testing.expectEqual(@as(usize, 3), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     const html_surface_id = session.fileEntryAt(1).?.surface_id;
     try std.testing.expectEqual(dock_panel.EntryKind.html, session.filePanelEntryInfo(html_surface_id).?.kind);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
     try std.testing.expectError(error.WrongKind, session.openFilePanelLink(html_surface_id, "one.md", false));
     try std.testing.expectError(error.SurfaceNotFound, session.openFilePanelLink(999_999, "one.md", false));
     try std.testing.expectError(error.OpenFailed, session.openFilePanelLink(md_surface_id, "missing.md", false));
-    try std.testing.expectEqual(@as(usize, 3), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
 
     var external_buf: [std.fs.max_path_bytes]u8 = undefined;
     const first_editor_epoch = try session.beginFilePanelDocument(md_surface_id, 1001);
@@ -52802,11 +49272,11 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "javascript:alert(1)", false));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
-    try std.testing.expectEqual(@as(usize, 3), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
     // three.txt는 이제 text kind(§2.2)이고 이미 열려 있어 새 탭 없이 기존 탭을 활성화한다(duplicate).
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(text_path));
-    try std.testing.expectEqual(@as(usize, 3), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(dir_path));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath("relative.md"));
     try std.testing.expect(session.filePanelEntryInfo(999_999) == null);
@@ -52839,7 +49309,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     const dirty_epoch = try session.beginFilePanelDocument(dirty_sid, 1);
     const dirty_initial = try session.readFilePanel(allocator, dirty_sid, dirty_epoch);
     allocator.free(dirty_initial);
-    try session.setFilePanelDirty(dirty_sid, true);
+    try file_panel_ops.setFilePanelDirty(session, dirty_sid, true);
     session.fileTreeChanged(dirty_path);
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
     try std.testing.expect(session.takeFileTreeReloadAction() == null);
@@ -52866,7 +49336,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
     try std.testing.expect(!session.fileEntryAt(0).?.conflict_reload_pending);
-    try session.setFilePanelDirty(dirty_sid, false); // 일반 clean ack로 conflict를 우회할 수도 없다.
+    try file_panel_ops.setFilePanelDirty(session, dirty_sid, false); // 일반 clean ack로 conflict를 우회할 수도 없다.
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
 
     session.requestFileConflictReload(dirty_sid);
@@ -52889,21 +49359,21 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     const clean_epoch = try session.beginFilePanelDocument(clean_sid, 1);
     const initial_clean = try session.readFilePanel(allocator, clean_sid, clean_epoch);
     allocator.free(initial_clean);
-    try session.setFilePanelDirty(clean_sid, true);
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, true);
     try session.writeFilePanel(clean_sid, clean_epoch, "# saved");
-    try session.setFilePanelDirty(clean_sid, false); // 정상 순서: clean ack가 200ms FSEvent보다 먼저 도착한다.
-    try session.setFilePanelDirty(clean_sid, true); // 그 사이 재편집해도 자기 저장 event는 conflict가 아니다.
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, false); // 정상 순서: clean ack가 200ms FSEvent보다 먼저 도착한다.
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, true); // 그 사이 재편집해도 자기 저장 event는 conflict가 아니다.
     session.fileTreeChanged(clean_path);
     try std.testing.expect(!session.fileEntryAt(1).?.external_change);
     try std.testing.expect(session.takeFileTreeReloadAction() == null);
     var verify_attempts: usize = 0;
     while (session.fileEntryAt(1).?.self_write_verifications != 0 and verify_attempts < 100) : (verify_attempts += 1) {
-        try session.updateFileTree();
+        try file_panel_ops.updateFileTree(session);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     try std.testing.expectEqual(@as(u8, 0), session.fileEntryAt(1).?.self_write_verifications);
     try std.testing.expect(!session.fileEntryAt(1).?.external_change);
-    try session.setFilePanelDirty(clean_sid, false);
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, false);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# externally changed" });
     session.fileTreeChanged(clean_path);
     const clean_reload = session.takeFileTreeReloadAction().?;
@@ -52924,13 +49394,13 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     allocator.free(reloaded_clean);
     try session.completeFileConflictReload(clean_sid, true);
     try session.writeFilePanel(clean_sid, clean_epoch, "# saved again");
-    try session.setFilePanelDirty(clean_sid, false);
-    try session.setFilePanelDirty(clean_sid, true);
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, false);
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, true);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# external inside grace" });
     session.fileTreeChanged(clean_path); // own event와 외부 overwrite가 coalesce돼도 hash mismatch가 진짜 변경을 보존한다.
     verify_attempts = 0;
     while (session.fileEntryAt(1).?.self_write_verifications != 0 and verify_attempts < 100) : (verify_attempts += 1) {
-        try session.updateFileTree();
+        try file_panel_ops.updateFileTree(session);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     try std.testing.expect(session.fileEntryAt(1).?.external_change);
@@ -52939,7 +49409,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     session.dispatchChromeAction(.confirm_accept);
     _ = session.takeFileTreeReloadAction();
     try session.completeFileConflictReload(clean_sid, true);
-    try session.setFilePanelDirty(clean_sid, true);
+    try file_panel_ops.setFilePanelDirty(session, clean_sid, true);
     session.fileTreeChanged(root); // dropped-event coarse recovery는 열린 하위 dirty entry도 conflict로 승격한다.
     try std.testing.expect(session.fileEntryAt(1).?.external_change);
 
@@ -52957,12 +49427,14 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     const full_rows = geometry.tree_content.h / session.cell_height_px;
     while (session.file_tree_rows.items.len <= full_rows) try session.file_tree_rows.append(allocator, .{ .empty = {} });
     session.file_tree_scroll.reset();
-    try std.testing.expectEqual(@as(?usize, full_rows), session.fileTreeRowAt(
+    try std.testing.expectEqual(@as(?usize, full_rows), file_panel_ops.fileTreeRowAt(
+        session,
         @floatFromInt(geometry.tree_content.x + 1),
         @floatFromInt(geometry.tree_content.y + full_rows * session.cell_height_px),
     ));
     // 뷰포트 **밖**은 여전히 행이 아니다 — 부분 행을 살렸다고 rect 경계까지 무른 것이 아니다.
-    try std.testing.expect(session.fileTreeRowAt(
+    try std.testing.expect(file_panel_ops.fileTreeRowAt(
+        session,
         @floatFromInt(geometry.tree_content.x + 1),
         @floatFromInt(geometry.tree_content.y + geometry.tree_content.h),
     ) == null);
@@ -52993,7 +49465,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
         .{ .name = "b.md", .kind = .file },
     });
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
 
     // 클릭 hit-test 뒤 focus 전환이 rows를 rebuild하지 않는다. pending recent-row 삽입이 있어도 old index가
     // 가리킨 A를 먼저 선택/활성화한 뒤 activate 경로의 rebuild에서 path+kind로 재해소한다.
@@ -53005,18 +49477,18 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
         1,
         // FP16: 트리 좌측 가장자리는 outer divider grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
         @floatFromInt(tree_rect.x + tree_rect.w / 2),
-        @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a)) * session.cell_height_px - session.fileTreeEffectiveScrollPx() + 1),
+        @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a)) * session.cell_height_px - file_panel_ops.fileTreeEffectiveScrollPx(session) + 1),
         0,
         0,
     );
-    try std.testing.expectEqualStrings("/repo/docs/a.md", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo/docs/a.md", file_panel_ops.fileTreeSelectionPath(session).?);
     _ = session.takeFileTreeFocusAction();
     _ = session.focusFilePanelSurface(sid);
-    session.clearFileTreeSelection();
+    file_panel_ops.clearFileTreeSelection(session);
 
     // 왕복 action은 파일(=workspace)과 tree 사이를 오간다(FP16에서 dock surface 축이 사라졌다).
     try std.testing.expect(!session.anyOverlayOpen());
-    session.fileEntryForSurfaceId(sid).?.mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
+    file_panel_ops.fileEntryForSurfaceId(session, sid).?.mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.web_editor, session.webKeyRoute(sid, .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }));
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(sid, .{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
     // FP16 §3.4: 파일 focus가 곧 `.workspace`라, 그 상태에서의 왕복 토글은 tree로 간다.
@@ -53043,63 +49515,63 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
 
     // Right: expanded root → first child, expanded directory → first file. active marker와 selection은 별개다.
     _ = try session.handleKeyEvent(.{ .key = .arrow_right });
-    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo/docs", file_panel_ops.fileTreeSelectionPath(session).?);
     _ = try session.handleKeyEvent(.{ .key = .arrow_right });
-    try std.testing.expectEqualStrings("/repo/docs/a.md", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo/docs/a.md", file_panel_ops.fileTreeSelectionPath(session).?);
 
     // watcher-style reorder 뒤에도 path+kind identity가 같은 파일을 따라간다(row index는 바뀜).
-    const old_index = session.selectedFileTreeRow().?;
+    const old_index = file_panel_ops.selectedFileTreeRow(session).?;
     try session.file_tree.applySnapshot("/repo/docs", &.{
         .{ .name = "0.md", .kind = .file },
         .{ .name = "a.md", .kind = .file },
         .{ .name = "b.md", .kind = .file },
     });
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
-    try std.testing.expectEqualStrings("/repo/docs/a.md", session.fileTreeSelectionPath().?);
-    try std.testing.expect(session.selectedFileTreeRow().? != old_index);
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expectEqualStrings("/repo/docs/a.md", file_panel_ops.fileTreeSelectionPath(session).?);
+    try std.testing.expect(file_panel_ops.selectedFileTreeRow(session).? != old_index);
 
     // Left는 부모 이동 후 collapse, Right는 expand 후 첫 자식으로 이동한다.
     _ = try session.handleKeyEvent(.{ .key = .arrow_left });
-    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo/docs", file_panel_ops.fileTreeSelectionPath(session).?);
     _ = try session.handleKeyEvent(.{ .key = .arrow_left });
-    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
-    try std.testing.expect(!session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    try std.testing.expectEqualStrings("/repo/docs", file_panel_ops.fileTreeSelectionPath(session).?);
+    try std.testing.expect(!session.file_tree_rows.items[file_panel_ops.selectedFileTreeRow(session).?].directory.expanded);
     _ = try session.handleKeyEvent(.{ .key = .arrow_right });
-    try std.testing.expect(session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    try std.testing.expect(session.file_tree_rows.items[file_panel_ops.selectedFileTreeRow(session).?].directory.expanded);
     _ = try session.handleKeyEvent(.{ .key = .arrow_right });
-    try std.testing.expectEqualStrings("/repo/docs/0.md", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo/docs/0.md", file_panel_ops.fileTreeSelectionPath(session).?);
 
     // Up/Down/Enter/Page 키까지 L2 navigation 정책을 거쳐 선택·접힘·viewport를 함께 보정한다.
     _ = try session.handleKeyEvent(.{ .key = .home });
     _ = try session.handleKeyEvent(.{ .key = .arrow_down });
-    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo/docs", file_panel_ops.fileTreeSelectionPath(session).?);
     _ = try session.handleKeyEvent(.{ .key = .arrow_up });
-    try std.testing.expectEqualStrings("/repo", session.fileTreeSelectionPath().?);
+    try std.testing.expectEqualStrings("/repo", file_panel_ops.fileTreeSelectionPath(session).?);
     _ = try session.handleKeyEvent(.{ .key = .arrow_down });
     _ = try session.handleKeyEvent(.{ .key = .enter });
-    try std.testing.expect(!session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    try std.testing.expect(!session.file_tree_rows.items[file_panel_ops.selectedFileTreeRow(session).?].directory.expanded);
     _ = try session.handleKeyEvent(.{ .key = .enter });
-    try std.testing.expect(session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    try std.testing.expect(session.file_tree_rows.items[file_panel_ops.selectedFileTreeRow(session).?].directory.expanded);
 
     // End/PageUp/PageDown/Home 이동은 선택을 viewport 안으로 자동 보정한다.
     _ = try session.handleKeyEvent(.{ .key = .end });
-    const end_index = session.selectedFileTreeRow().?;
-    const visible = session.fileTreeVisibleRows();
+    const end_index = file_panel_ops.selectedFileTreeRow(session).?;
+    const visible = file_panel_ops.fileTreeVisibleRows(session);
     if (visible > 0) {
         // 픽셀 좌표: 선택 행이 뷰포트 안에 **온전히** 들어와 있어야 한다.
-        const offset = session.fileTreeEffectiveScrollPx();
+        const offset = file_panel_ops.fileTreeEffectiveScrollPx(session);
         const row_top = @as(u32, @intCast(end_index)) * session.cell_height_px;
         try std.testing.expect(row_top >= offset);
         try std.testing.expect(row_top + session.cell_height_px <= offset + session.dockGeometry().tree_content.h);
     }
     _ = try session.handleKeyEvent(.{ .key = .page_up });
-    try std.testing.expect(session.selectedFileTreeRow().? <= end_index);
+    try std.testing.expect(file_panel_ops.selectedFileTreeRow(session).? <= end_index);
     _ = try session.handleKeyEvent(.{ .key = .home });
-    try std.testing.expectEqual(@as(usize, 0), session.selectedFileTreeRow().?);
-    try std.testing.expectEqual(@as(u32, 0), session.fileTreeEffectiveScrollPx());
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.selectedFileTreeRow(session).?);
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
     _ = try session.handleKeyEvent(.{ .key = .page_down });
-    try std.testing.expect(session.selectedFileTreeRow().? > 0);
+    try std.testing.expect(file_panel_ops.selectedFileTreeRow(session).? > 0);
     _ = try session.handleKeyEvent(.{ .key = .home });
 
     _ = try session.handleKeyEvent(.{ .key = .escape });
@@ -53109,17 +49581,17 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     // restore surface가 tree focus 중 사라지면 Esc는 stale id를 부활시키지 않고 workspace로 fallback한다.
     _ = session.focusFilePanelSurface(sid);
     session.dispatchAppAction(.focus_file_tree);
-    try std.testing.expect(session.closeFilePanelSurfaceNow(sid));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     try std.testing.expect(session.focus_owner == .file_tree);
     try std.testing.expect(session.dockVisible());
-    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
-    session.handleFileTreeDefaultKey(.{ .key = .escape });
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
+    file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.takeWorkspaceFocusAction());
     try std.testing.expect(session.takeFileTreeRestoreSurfaceAction() == null);
 
     // 마지막 탭 뒤에도 recent/project tree가 남으므로 Cmd+Shift+E로 빈 group의 tree에 다시 진입할 수 있다.
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
     session.dispatchAppAction(.focus_file_tree);
     try std.testing.expect(session.focus_owner == .file_tree);
     try std.testing.expect(session.takeFileTreeFocusAction());
@@ -53155,18 +49627,18 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
         .{ .name = "b.md", .kind = .file, .identity = try testFileTreeIdentity(b_path) },
     });
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
+    try file_panel_ops.updateFileTree(session);
 
     // 새 B 탭을 Enter로 연 뒤에도 tree owner는 A를 restore target으로 보존한다.
-    session.focusFileTree();
+    file_panel_ops.focusFileTree(session);
     const b_row = file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = b_path }).?;
-    _ = session.setFileTreeSelection(b_row);
-    session.handleFileTreeDefaultKey(.{ .key = .enter });
+    _ = file_panel_ops.setFileTreeSelection(session, b_row);
+    file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .enter });
     try std.testing.expect(session.focus_owner == .file_tree);
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
     const b_sid = session.fileEntryAt(1).?.surface_id;
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
-    session.handleFileTreeDefaultKey(.{ .key = .escape });
+    file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     // 복원 대상 A는 이미 publish된 surface라 barrier 없이 곧바로 owner가 되고, B의 pending은 취소된다.
     try std.testing.expect(session.pending_dock_focus == null);
     try std.testing.expect(session.focusedDockSurface() == a_sid);
@@ -53174,13 +49646,13 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expectEqual(@as(?u64, a_sid), session.file_panel_mode_pending);
 
     // 이미 존재하는 B도 새 surface 없이 활성화하며 Esc는 다시 A를 visible target으로 되돌린다.
-    session.focusFileTree();
-    _ = session.setFileTreeSelection(file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = b_path }).?);
-    session.handleFileTreeDefaultKey(.{ .key = .enter });
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    file_panel_ops.focusFileTree(session);
+    _ = file_panel_ops.setFileTreeSelection(session, file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = b_path }).?);
+    file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .enter });
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(b_sid, session.fileEntryAt(1).?.surface_id);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
-    session.handleFileTreeDefaultKey(.{ .key = .escape });
+    file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     try std.testing.expect(session.pending_dock_focus == null);
     try std.testing.expect(session.focusedDockSurface() == a_sid);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
@@ -53234,9 +49706,9 @@ test "file tree mutations create rename protect dirty and use a visible staged T
         .identity = try testFileTreeIdentity(anchor),
     }});
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
-    session.focusFileTree();
-    _ = session.setFileTreeSelection(file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .root, .path = root }).?);
+    try file_panel_ops.updateFileTree(session);
+    file_panel_ops.focusFileTree(session);
+    _ = file_panel_ops.setFileTreeSelection(session, file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .root, .path = root }).?);
 
     // Palette/context/F2 share startRename + commitRename. A dotfile is valid and a successful Markdown
     // create opens in the focused dock group without synchronous frame-tick stat/root discovery.
@@ -53246,12 +49718,12 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     session.commitRename();
     try std.testing.expect(session.rename == null);
     var attempts: usize = 0;
-    while (session.fileEntryForPath(created) == null and attempts < 500) : (attempts += 1) {
-        session.updateFileTreeMutations();
+    while (file_panel_ops.fileEntryForPath(session, created) == null and attempts < 500) : (attempts += 1) {
+        file_panel_ops.updateFileTreeMutations(session);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
-    try std.testing.expect(session.fileEntryForPath(created) != null);
-    const created_sid = session.fileEntryForPath(created).?.*.surface_id;
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, created) != null);
+    const created_sid = file_panel_ops.fileEntryForPath(session, created).?.*.surface_id;
 
     // Reproject the worker result, then F2 edits the copied path identity. Rename remaps the live dock path
     // and retires/recreates its path-pinned WebView surface id.
@@ -53260,11 +49732,11 @@ test "file tree mutations create rename protect dirty and use a visible staged T
         .{ .name = "anchor.md", .kind = .file, .identity = try testFileTreeIdentity(anchor) },
     });
     session.file_tree_rows_dirty = true;
-    try session.updateFileTree();
-    _ = session.setFileTreeSelection(file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = created }).?);
-    const created_location = session.fileEntryForPath(created).?;
+    try file_panel_ops.updateFileTree(session);
+    _ = file_panel_ops.setFileTreeSelection(session, file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = created }).?);
+    const created_location = file_panel_ops.fileEntryForPath(session, created).?;
     created_location.mode = .source_edit;
-    session.handleFileTreeDefaultKey(.{ .key = .{ .function = 2 } });
+    file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .{ .function = 2 } });
     try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
     session.rename_input.clear();
     try session.rename_input.query.appendSlice(allocator, "renamed.md");
@@ -53289,21 +49761,21 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     }));
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_close_unlock_actions_len);
     attempts = 0;
-    while (session.fileEntryForPath(renamed) == null and attempts < 500) : (attempts += 1) {
-        session.updateFileTreeMutations();
+    while (file_panel_ops.fileEntryForPath(session, renamed) == null and attempts < 500) : (attempts += 1) {
+        file_panel_ops.updateFileTreeMutations(session);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     // FP16 §1 ⑵: `.md` → `.md` 같은 디렉터리 rename은 **surface를 교체하지 않는다**. 경로가 WKWebView에 박혀
     // 있지 않고(shell이 file_panel_entry로 surface_id 조회) breadcrumb은 Zig chrome이며 read/write가 pathless라
     // 재생성할 이유가 없다(스파이크 §11.1 S3·S4). 옛 계약은 항상 새 id를 발급했고 recreate 펌프가 필요했다.
-    const renamed_entry = session.fileEntryForPath(renamed).?;
+    const renamed_entry = file_panel_ops.fileEntryForPath(session, renamed).?;
     const renamed_sid = renamed_entry.surface_id;
     try std.testing.expectEqual(created_sid, renamed_sid);
     try std.testing.expect(renamed_sid != 0);
-    try std.testing.expect(session.fileEntryForPath(created) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, created) == null);
 
     // Dirty state blocks both file and containing-directory destructive operations before Trash handoff.
-    try session.setFilePanelDirty(renamed_sid, true);
+    try file_panel_ops.setFilePanelDirty(session, renamed_sid, true);
     // A scanner result can legitimately race this test's manually applied snapshot. Build the same L2 row
     // projection directly so the destructive-policy assertions are independent of detached scan timing.
     session.file_tree_rows.clearRetainingCapacity();
@@ -53327,20 +49799,20 @@ test "file tree mutations create rename protect dirty and use a visible staged T
         .identity = try testFileTreeIdentity(renamed),
     } });
     session.file_tree_rows_dirty = false;
-    _ = session.setFileTreeSelection(1);
-    session.requestDeleteSelectedFileTreeEntry();
+    _ = file_panel_ops.setFileTreeSelection(session, 1);
+    file_panel_ops.requestDeleteSelectedFileTreeEntry(session);
     try std.testing.expect(session.pending_file_tree_delete == null);
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try session.setFilePanelDirty(renamed_sid, false);
+    try file_panel_ops.setFilePanelDirty(session, renamed_sid, false);
 
     // Clean delete stages the exact identity under a non-dot sibling name so Finder shows the Trash item.
     // A failed recycle restores the original path and keeps its open tab.
-    session.requestDeleteSelectedFileTreeEntry();
+    file_panel_ops.requestDeleteSelectedFileTreeEntry(session);
     try std.testing.expect(session.pending_confirm == .file_tree_delete);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
     const delete_lock = session.takeFilePanelDirtySyncActionV2().?;
-    const delete_revision = session.fileEntryForSurfaceId(delete_lock.surface_id).?.editor_revision + 1;
+    const delete_revision = file_panel_ops.fileEntryForSurfaceId(session, delete_lock.surface_id).?.editor_revision + 1;
     try session.reportFilePanelDirty(delete_lock.surface_id, .{
         .dirty = false,
         .revision = delete_revision,
@@ -53348,7 +49820,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     });
     attempts = 0;
     while (session.peekFileTreeTrashAction() == null and attempts < 500) : (attempts += 1) {
-        session.updateFileTreeMutations();
+        file_panel_ops.updateFileTreeMutations(session);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     const peeked = session.peekFileTreeTrashAction().?;
@@ -53359,7 +49831,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     try std.testing.expect(session.peekFileTreeTrashAction() != null);
     _ = try std.Io.Dir.cwd().statFile(io, peeked.path, .{});
     try std.testing.expect(std.fs.path.basename(peeked.path)[0] != '.');
-    try std.testing.expect(session.fileEntryForPath(renamed) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, renamed) != null);
     const taken = session.takeFileTreeTrashAction().?;
     try std.testing.expectEqual(peeked.id, taken.id);
     try std.testing.expectEqualStrings(peeked.path, taken.path);
@@ -53376,24 +49848,24 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     session.completeFileTreeTrash(taken.id, .moved_verified, null); // duplicate late callback is a no-op
     attempts = 0;
     while (attempts < 500) : (attempts += 1) {
-        session.updateFileTreeMutations();
+        file_panel_ops.updateFileTreeMutations(session);
         // worker가 파일을 먼저 복원하고 app-side restore completion은 다음 turn에 게시할 수 있다.
         // namespace reservation까지 해제된 뒤에만 다음 삭제를 시작해야 실제 제품 순서를 검증한다.
         if (std.Io.Dir.cwd().statFile(io, renamed, .{})) |_| {
-            if (!session.fileTreeFileMutationBusy()) break;
+            if (!file_panel_ops.fileTreeFileMutationBusy(session)) break;
         } else |_| {}
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     _ = try std.Io.Dir.cwd().statFile(io, renamed, .{});
-    try std.testing.expect(!session.fileTreeFileMutationBusy());
-    try std.testing.expect(session.fileEntryForPath(renamed) != null);
+    try std.testing.expect(!file_panel_ops.fileTreeFileMutationBusy(session));
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, renamed) != null);
 
     // A successful native Trash ack commits the model only after the OS operation and closes clean tabs.
-    session.requestDeleteSelectedFileTreeEntry();
+    file_panel_ops.requestDeleteSelectedFileTreeEntry(session);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
     const success_delete_lock = session.takeFilePanelDirtySyncActionV2().?;
-    const success_delete_revision = session.fileEntryForSurfaceId(success_delete_lock.surface_id).?.editor_revision + 1;
+    const success_delete_revision = file_panel_ops.fileEntryForSurfaceId(session, success_delete_lock.surface_id).?.editor_revision + 1;
     try session.reportFilePanelDirty(success_delete_lock.surface_id, .{
         .dirty = false,
         .revision = success_delete_revision,
@@ -53401,7 +49873,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     });
     attempts = 0;
     while (session.peekFileTreeTrashAction() == null and attempts < 500) : (attempts += 1) {
-        session.updateFileTreeMutations();
+        file_panel_ops.updateFileTreeMutations(session);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     const success_action = session.takeFileTreeTrashAction().?;
@@ -53411,7 +49883,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     // already absent from the project before Zig commits tree/recent/tab state.
     try std.Io.Dir.cwd().deleteFile(io, success_action.path);
     session.completeFileTreeTrash(success_action.id, .moved_verified, null);
-    try std.testing.expect(session.fileEntryForPath(renamed) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, renamed) == null);
 
     // A destination mapping with an unverified identity is already an OS move, not a rollback case.
     // Preserve its last-known destination and do not invent a nonexistent staged recovery path.
@@ -53458,41 +49930,41 @@ test "file tree rename changes supported panel kind and removes unsupported pane
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(markdown));
-    const markdown_location = session.fileEntryForPath(markdown).?;
+    const markdown_location = file_panel_ops.fileEntryForPath(session, markdown).?;
     const old_surface = markdown_location.surface_id;
     try std.testing.expect(session.completePendingDockFocus(old_surface));
 
-    try session.prepareFileTreeRenameRemap(1, markdown, html);
-    try std.testing.expect(session.reserveFileTreeMutation(1, markdown));
-    try std.testing.expect(session.applyFileTreeRename(1, html));
-    session.clearFileTreeMutationReservation(1);
-    const html_location = session.fileEntryForPath(html).?;
+    try file_panel_ops.prepareFileTreeRenameRemap(session, 1, markdown, html);
+    try std.testing.expect(file_panel_ops.reserveFileTreeMutation(session, 1, markdown));
+    try std.testing.expect(file_panel_ops.applyFileTreeRename(session, 1, html));
+    file_panel_ops.clearFileTreeMutationReservation(session, 1);
+    const html_location = file_panel_ops.fileEntryForPath(session, html).?;
     const html_entry = html_location;
     try std.testing.expectEqual(dock_panel.EntryKind.html, html_entry.kind);
     try std.testing.expectEqual(dock_panel.Mode.read, html_entry.mode);
     try std.testing.expect(html_entry.surface_id != 0 and html_entry.surface_id != old_surface);
-    try std.testing.expect(session.fileEntryForPath(markdown) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, markdown) == null);
 
     // html→.txt는 지원 kind 전이(§2.2·§7): 패널을 닫지 않고 text kind·source_edit·새 surface로 변환한다.
-    try session.prepareFileTreeRenameRemap(2, html, text);
-    try std.testing.expect(session.reserveFileTreeMutation(2, html));
-    try std.testing.expect(session.applyFileTreeRename(2, text));
-    session.clearFileTreeMutationReservation(2);
-    const text_location = session.fileEntryForPath(text).?;
+    try file_panel_ops.prepareFileTreeRenameRemap(session, 2, html, text);
+    try std.testing.expect(file_panel_ops.reserveFileTreeMutation(session, 2, html));
+    try std.testing.expect(file_panel_ops.applyFileTreeRename(session, 2, text));
+    file_panel_ops.clearFileTreeMutationReservation(session, 2);
+    const text_location = file_panel_ops.fileEntryForPath(session, text).?;
     const text_entry = text_location;
     try std.testing.expectEqual(dock_panel.EntryKind.text, text_entry.kind);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, text_entry.mode);
-    try std.testing.expect(session.fileEntryForPath(html) == null);
-    try std.testing.expect(session.fileEntryCount() == 1);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, html) == null);
+    try std.testing.expect(file_panel_ops.fileEntryCount(session) == 1);
 
     // text→.bin은 비지원 확장자라 clean file-panel entry를 닫는다.
-    try session.prepareFileTreeRenameRemap(3, text, unsupported);
-    try std.testing.expect(session.reserveFileTreeMutation(3, text));
-    try std.testing.expect(session.applyFileTreeRename(3, unsupported));
-    session.clearFileTreeMutationReservation(3);
-    try std.testing.expect(session.fileEntryForPath(text) == null);
-    try std.testing.expect(session.fileEntryForPath(unsupported) == null);
-    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount());
+    try file_panel_ops.prepareFileTreeRenameRemap(session, 3, text, unsupported);
+    try std.testing.expect(file_panel_ops.reserveFileTreeMutation(session, 3, text));
+    try std.testing.expect(file_panel_ops.applyFileTreeRename(session, 3, unsupported));
+    file_panel_ops.clearFileTreeMutationReservation(session, 3);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, text) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, unsupported) == null);
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     try std.testing.expect(switch (session.focus_owner) {
         .file_tree => true,
         else => false,
@@ -53543,7 +50015,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     // 없으면 Swift가 checkpoint를 막지 못해 다음 Quit이 **버려진 도크를 파일에 커밋**한다(사용자 배치 영구 손실).
     try std.testing.expectEqual(@as(u32, 4), session.takeWorkspaceRestoreDropped());
     try std.testing.expectEqual(@as(u32, 0), session.takeWorkspaceRestoreDropped()); // 소비형 — 두 번째 읽기는 0
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.fileEntryAt(0).?.kind);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id); // invalid active entry 제거 → 첫 유효 entry
@@ -53561,14 +50033,14 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     // B-4: 캡처가 파일 탭을 pane `file-term`으로 싣게 됐으므로, 이 창을 다시 적용하면 그 파일은 살아 돌아온다.
     // 여기서 검증하는 건 **legacy `dock-entry` 경로**다 — 디렉터리를 가리키는 옛 entry는 버려지고(마이그레이션
     // 입력이 0개가 되고), pane이 들고 온 파일만 남는다.
-    try std.testing.expectEqual(@as(usize, 1), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
 
     // 옛 다중 group 와이어를 읽던 경로는 2026-07-29에 제거했다(그 포맷 파서와 함께) — 여기서는 pane이 들고 온
     // 파일만 남는다는 것까지가 검증 범위다. 아래 capture는 그 상태가 새 포맷으로 다시 나가는지를 본다.
     var arena3 = std.heap.ArenaAllocator.init(allocator);
     defer arena3.deinit();
-    const persisted = try session.persistFilePanelState(arena3.allocator());
+    const persisted = try file_panel_ops.persistFilePanelState(session, arena3.allocator());
     try std.testing.expectEqual(@as(usize, 1), persisted.entries.len);
     try std.testing.expect(persisted.entries[0].active);
 }
@@ -53589,7 +50061,7 @@ test "FP9 restore barrier rejects a live protected dock before model replacement
     opened.term.file_entry.?.dirty = true;
 
     try std.testing.expectError(error.UnsupportedMove, session.applyWorkspaceWindow(replacement));
-    const preserved = session.fileEntryForId(protected_id).?;
+    const preserved = file_panel_ops.fileEntryForId(session, protected_id).?;
     try std.testing.expect(preserved.dirty);
     try std.testing.expectEqualStrings("/tmp/fp9-protected-restore.md", preserved.path);
 }
@@ -54339,7 +50811,7 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
 
     // ⑦ **도크 목록과 동시에 살아 있다.** 둘은 한 화면에 함께 있으므로 한쪽 발행이 다른 쪽을 지우면 안 된다
     //    — 도크가 뷰를 갈아끼우며 저장소를 공유하는 것(SV3b)과 조건이 다르다.
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     session.buildDockListScrollTree();
     session.buildSidebarScrollTree();
     try std.testing.expect(session.sidebarScrollTree().entries.len >= 2);
@@ -67254,11 +63726,11 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     try std.testing.expect(!session.filePanelMermaidDocumentActive(901, doc_epoch + 1));
     const initial_doc = try session.readFilePanel(allocator, 901, doc_epoch);
     allocator.free(initial_doc);
-    try session.setFilePanelDirty(901, true);
+    try file_panel_ops.setFilePanelDirty(session, 901, true);
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
     try session.writeFilePanel(901, doc_epoch, "# 저장\n한글");
     try std.testing.expect(session.fileEntryAt(0).?.dirty); // shell ack 전 write가 eviction 보호를 내리지 않는다.
-    try session.setFilePanelDirty(901, false);
+    try file_panel_ops.setFilePanelDirty(session, 901, false);
     try std.testing.expect(!session.fileEntryAt(0).?.dirty);
     const after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
     defer allocator.free(after);
@@ -67377,7 +63849,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
     entry.editor_epoch = maru.session.control_bridge.max_js_safe_integer;
     entry.disk_content_hash = 123;
     entry.disk_content_hash_valid = true;
-    session.requestFilePanelClose(entry.surface_id);
+    file_panel_ops.requestFilePanelClose(session, entry.surface_id);
     const pending_request_id = session.pending_file_panel_close.?.request_id;
     const sync_actions = session.file_panel_dirty_sync_actions_len;
 
@@ -67405,7 +63877,7 @@ test "file panel document begin changes pending close only for an accepted repla
     const sid = entry.surface_id;
     const epoch = try session.beginFilePanelDocument(sid, 2);
 
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     const pending_request_id = session.pending_file_panel_close.?.request_id;
     const sync_actions = session.file_panel_dirty_sync_actions_len;
     const unlock_actions = session.file_panel_close_unlock_actions_len;
@@ -67565,9 +64037,9 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     const path = try std.fmt.allocPrint(allocator, "{s}/parent/doc.md", .{root});
     defer allocator.free(path);
 
-    const pinned = try AppSession.openPinnedFilePanelParent(io, path);
+    const pinned = try file_panel_ops.openPinnedFilePanelParent(io, path);
     defer pinned.dir.close(io);
-    var original = try AppSession.openFilePanelRead(pinned.dir, pinned.basename, false);
+    var original = try file_panel_ops.openFilePanelRead(pinned.dir, pinned.basename, false);
     defer original.close(io);
     const original_stat = try original.stat(io);
 
@@ -67575,7 +64047,7 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     try tmp.dir.rename("parent", tmp.dir, "moved", io);
     try tmp.dir.createDirPath(io, "parent");
     try tmp.dir.writeFile(io, .{ .sub_path = "parent/doc.md", .data = "competitor-parent" });
-    try AppSession.writePinnedFilePanel(io, pinned.dir, pinned.basename, original, original_stat, std.hash.Wyhash.hash(0, "original"), "saved-pinned");
+    try file_panel_ops.writePinnedFilePanel(io, pinned.dir, pinned.basename, original, original_stat, std.hash.Wyhash.hash(0, "original"), "saved-pinned");
     const moved = try tmp.dir.readFileAlloc(io, "moved/doc.md", allocator, .limited(1024));
     defer allocator.free(moved);
     try std.testing.expectEqualStrings("saved-pinned", moved);
@@ -67586,16 +64058,16 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     // original fd를 연 뒤 같은 parent의 leaf inode가 바뀌면 swap 검증이 이를 감지하고 원상 복구한다.
     const moved_path = try std.fmt.allocPrint(allocator, "{s}/moved/doc.md", .{root});
     defer allocator.free(moved_path);
-    const moved_pinned = try AppSession.openPinnedFilePanelParent(io, moved_path);
+    const moved_pinned = try file_panel_ops.openPinnedFilePanelParent(io, moved_path);
     defer moved_pinned.dir.close(io);
-    var moved_original = try AppSession.openFilePanelRead(moved_pinned.dir, moved_pinned.basename, false);
+    var moved_original = try file_panel_ops.openFilePanelRead(moved_pinned.dir, moved_pinned.basename, false);
     defer moved_original.close(io);
     const moved_original_stat = try moved_original.stat(io);
     try tmp.dir.deleteFile(io, "moved/doc.md");
     try tmp.dir.writeFile(io, .{ .sub_path = "moved/doc.md", .data = "competitor-leaf" });
     try std.testing.expectError(
         error.ExternalConflict,
-        AppSession.writePinnedFilePanel(io, moved_pinned.dir, moved_pinned.basename, moved_original, moved_original_stat, std.hash.Wyhash.hash(0, "saved-pinned"), "must-not-land"),
+        file_panel_ops.writePinnedFilePanel(io, moved_pinned.dir, moved_pinned.basename, moved_original, moved_original_stat, std.hash.Wyhash.hash(0, "saved-pinned"), "must-not-land"),
     );
     const competitor_leaf = try tmp.dir.readFileAlloc(io, "moved/doc.md", allocator, .limited(1024));
     defer allocator.free(competitor_leaf);
@@ -67604,7 +64076,7 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     try tmp.dir.symLink(io, "moved", "parent-link", .{});
     const symlink_parent_path = try std.fmt.allocPrint(allocator, "{s}/parent-link/doc.md", .{root});
     defer allocator.free(symlink_parent_path);
-    try std.testing.expectError(error.NotFound, AppSession.openPinnedFilePanelParent(io, symlink_parent_path));
+    try std.testing.expectError(error.NotFound, file_panel_ops.openPinnedFilePanelParent(io, symlink_parent_path));
 
     // temp 이름이 initial commit 전에 교체되면 expected replacement/original pair가 아니므로 leaf는 불변이다.
     try tmp.dir.createDirPath(io, "pair-race");
@@ -67612,15 +64084,15 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     try tmp.dir.writeFile(io, .{ .sub_path = "pair-race/temp", .data = "pair-replacement" });
     var pair_dir = try tmp.dir.openDir(io, "pair-race", .{ .follow_symlinks = false });
     defer pair_dir.close(io);
-    var pair_original = try AppSession.openFilePanelRead(pair_dir, "doc.md", false);
+    var pair_original = try file_panel_ops.openFilePanelRead(pair_dir, "doc.md", false);
     defer pair_original.close(io);
     const pair_original_inode = (try pair_original.stat(io)).inode;
-    var pair_replacement = try AppSession.openFilePanelRead(pair_dir, "temp", false);
+    var pair_replacement = try file_panel_ops.openFilePanelRead(pair_dir, "temp", false);
     const pair_replacement_inode = (try pair_replacement.stat(io)).inode;
     pair_replacement.close(io);
     try pair_dir.deleteFile(io, "temp");
     try pair_dir.writeFile(io, .{ .sub_path = "temp", .data = "temp-competitor" });
-    try std.testing.expect(!AppSession.swapPinnedFilePanelNamesIfPair(
+    try std.testing.expect(!file_panel_ops.swapPinnedFilePanelNamesIfPair(
         io,
         pair_dir,
         "temp",
@@ -67636,10 +64108,10 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     // 승격하지 않는다. leaf에는 우리 replacement가, temp에는 competitor가 그대로 남는다.
     try pair_dir.deleteFile(io, "temp");
     try pair_dir.writeFile(io, .{ .sub_path = "temp", .data = "pair-replacement-2" });
-    var pair_replacement_2 = try AppSession.openFilePanelRead(pair_dir, "temp", false);
+    var pair_replacement_2 = try file_panel_ops.openFilePanelRead(pair_dir, "temp", false);
     const pair_replacement_inode_2 = (try pair_replacement_2.stat(io)).inode;
     pair_replacement_2.close(io);
-    try std.testing.expect(AppSession.swapPinnedFilePanelNamesIfPair(
+    try std.testing.expect(file_panel_ops.swapPinnedFilePanelNamesIfPair(
         io,
         pair_dir,
         "temp",
@@ -67649,7 +64121,7 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     ));
     try pair_dir.deleteFile(io, "temp");
     try pair_dir.writeFile(io, .{ .sub_path = "temp", .data = "post-swap-competitor" });
-    try std.testing.expect(!AppSession.swapPinnedFilePanelNamesIfPair(
+    try std.testing.expect(!file_panel_ops.swapPinnedFilePanelNamesIfPair(
         io,
         pair_dir,
         "temp",
@@ -67704,56 +64176,56 @@ test "file panel close syncs dirty state then handles clean discard save failure
     session.assignDockSurfaceIds();
     var sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     var sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expectEqual(sid, sync_action.surface_id);
     try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 1, .request_id = sync_action.request_id });
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) == null);
-    try std.testing.expectEqual(@as(usize, 0), session.fileEntryCount()); // 마지막 탭이어도 group 유지
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session)); // 마지막 탭이어도 group 유지
 
     _ = try session.openFileTermInActivePane("/tmp/close-dirty.md", .markdown);
     session.assignDockSurfaceIds();
     sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_dirty, session.pending_file_panel_close.?.phase);
     session.dispatchChromeAction(.confirm_cancel);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
 
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 2, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
     var save_action = session.takeFilePanelSaveCloseAction().?;
     try std.testing.expectEqual(sid, save_action.surface_id);
     session.completeFilePanelSaveClose(sid, save_action.request_id, 2, false);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
 
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
     save_action = session.takeFilePanelSaveCloseAction().?;
     const stale_save_request_id = save_action.request_id;
     try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 3 });
-    const saved_revision = session.fileEntryForSurfaceId(sid).?.editor_revision;
+    const saved_revision = file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision;
     session.completeFilePanelSaveClose(sid, save_action.request_id, saved_revision - 1, true);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null); // stale save ack는 닫지 않는다.
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null); // stale save ack는 닫지 않는다.
     try std.testing.expectEqual(sid, session.takeFilePanelCloseUnlockAction().?.surface_id);
 
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = saved_revision + 1, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
     save_action = session.takeFilePanelSaveCloseAction().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = saved_revision + 1 });
-    const final_revision = session.fileEntryForSurfaceId(sid).?.editor_revision;
+    const final_revision = file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision;
     session.completeFilePanelSaveClose(sid, stale_save_request_id, final_revision, true);
     try std.testing.expectEqual(FilePanelClosePhase.saving, session.pending_file_panel_close.?.phase);
     session.completeFilePanelSaveClose(sid, save_action.request_id, final_revision, true);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 
     _ = try session.openFileTermInActivePane("/tmp/close-conflict.md", .markdown);
     session.assignDockSurfaceIds();
@@ -67761,19 +64233,19 @@ test "file panel close syncs dirty state then handles clean discard save failure
     session.fileEntryAt(0).?.mode = .source_edit;
     session.fileEntryAt(0).?.dirty = true;
     session.fileEntryAt(0).?.external_change = true;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_conflict, session.pending_file_panel_close.?.phase);
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 2 });
     session.dispatchChromeAction(.confirm_accept);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null); // conflict discard도 stale revision 거부
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null); // conflict discard도 stale revision 거부
     _ = session.takeFilePanelCloseUnlockAction();
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 }
 
 test "file panel read-mode dirty pending and conflict close through the snapshot coordinator" {
@@ -67794,7 +64266,7 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
     session.dispatchAppAction(.close_focused);
     var sync = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expectEqual(sid, sync.surface_id);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_dirty, session.pending_file_panel_close.?.phase);
     session.dispatchChromeAction(.confirm_cancel);
@@ -67803,7 +64275,7 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
 
     // source→read 전환의 generic sync가 아직 pending이면 native clean이어도 새 close request가 그 snapshot을 supersede한다.
     entry.dirty_sync_pending = true;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expect(sync.request_id != 0);
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync.request_id });
@@ -67813,12 +64285,12 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
 
     // read mode external conflict는 저장 선택지를 열지 않고 discard/cancel 2-choice로 제한한다.
     entry.external_change = true;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     sync = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 5, .request_id = sync.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_conflict, session.pending_file_panel_close.?.phase);
     session.dispatchChromeAction(.confirm_accept);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 }
 
 test "file panel exit protection gates window session quit and automatic terminal exit" {
@@ -67852,7 +64324,7 @@ test "file panel exit protection gates window session quit and automatic termina
     session.fileEntryAt(0).?.mode = .read;
     session.fileEntryAt(0).?.dirty = false;
     session.fileEntryAt(0).?.dirty_sync_pending = false;
-    _ = session.closeFilePanelSurfaceNow(sid);
+    _ = file_panel_ops.closeFilePanelSurfaceNow(session, sid);
     session.latchSessionEndOrHold(null, 999_999);
     try std.testing.expect(!session.file_panel_exit_held);
     try std.testing.expect(session.ended_seen);
@@ -67869,70 +64341,70 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
 
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     const first = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expectEqual(@as(u64, 1), first.request_id);
 
     // 다른 요청의 snapshot은 모델 dirty/revision과 현재 close transaction을 전혀 바꾸지 않는다.
     try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 1, .request_id = first.request_id + 1 });
     try std.testing.expectEqual(FilePanelClosePhase.syncing, session.pending_file_panel_close.?.phase);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
-    try std.testing.expectEqual(@as(u64, 0), session.fileEntryForSurfaceId(sid).?.editor_revision);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
+    try std.testing.expectEqual(@as(u64, 0), file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision);
 
     // 다른 destructive confirm이 single-owner slot을 선점하면 close lock과 coordinator를 함께 해제한다.
     session.requestResetAll();
     try std.testing.expect(session.pending_confirm == .reset);
     try std.testing.expect(session.pending_file_panel_close == null);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid).?.dirty_sync_pending); // unlock snapshot ack까지 LRU 보호
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending); // unlock snapshot ack까지 LRU 보호
     const first_unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(sid, first_unlock.surface_id);
     try std.testing.expectEqual(first.request_id, first_unlock.request_id);
 
     // old unlock이 drain되기 전에 같은 surface의 새 close가 시작돼도 이전 request 실패는 새 보호를 내리지 않는다.
     session.dispatchChromeAction(.confirm_cancel);
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     const second = session.takeFilePanelDirtySyncActionV2().?;
     session.failFilePanelCloseUnlock(sid, first_unlock.request_id);
     try std.testing.expectEqual(second.request_id, session.pending_file_panel_close.?.request_id);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid).?.dirty_sync_pending);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
 
     // 이미 무효화된 request 1 ack가 늦게 와도 request 2 transaction을 완료하거나 탭을 닫지 않는다.
     try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 2, .request_id = first.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.syncing, session.pending_file_panel_close.?.phase);
-    try std.testing.expectEqual(@as(u64, 0), session.fileEntryForSurfaceId(sid).?.editor_revision);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid).?.dirty_sync_pending);
+    try std.testing.expectEqual(@as(u64, 0), file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = second.request_id });
     session.dispatchChromeAction(.confirm_cancel);
     const second_unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(second.request_id, second_unlock.request_id);
     session.failFilePanelCloseUnlock(sid, second_unlock.request_id);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
 
     // host가 panel/JavaScript를 찾지 못한 경로도 pending과 lock을 명시적으로 회수한다.
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     const third = session.takeFilePanelDirtySyncActionV2().?;
     session.failFilePanelDirtySync(sid, third.request_id);
     try std.testing.expect(session.pending_file_panel_close == null);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid).?.dirty_sync_pending);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
     const third_unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(sid, third_unlock.surface_id);
     try std.testing.expectEqual(third.request_id, third_unlock.request_id);
     session.failFilePanelCloseUnlock(sid, third_unlock.request_id);
-    try std.testing.expect(!session.fileEntryForSurfaceId(sid).?.dirty_sync_pending);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid).?.dirty); // 실패 시 clean 추정 금지
+    try std.testing.expect(!file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty); // 실패 시 clean 추정 금지
     try std.testing.expect(session.chrome_host.notice.open);
 
     // 같은 surface/revision처럼 보여도 state generation이 바뀌면 전체 target identity가 달라 닫지 않는다.
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     const fourth = session.takeFilePanelDirtySyncActionV2().?;
-    session.fileEntryForSurfaceId(sid).?.external_change_generation +%= 1;
+    file_panel_ops.fileEntryForSurfaceId(session, sid).?.external_change_generation +%= 1;
     try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 4, .request_id = fourth.request_id });
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     try std.testing.expect(session.pending_file_panel_close == null);
 
     session.file_panel_close_request_id = max_file_panel_close_request_id;
     const queued_before = session.file_panel_dirty_sync_actions_len;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     try std.testing.expect(session.pending_file_panel_close == null); // JS-safe ID를 재사용/wrap하지 않는다.
     try std.testing.expectEqual(queued_before, session.file_panel_dirty_sync_actions_len);
 }
@@ -67951,21 +64423,21 @@ test "file panel dirty close alternate discards only the pinned tab" {
     const active_sid = session.fileEntryAt(1).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
 
-    session.requestFilePanelClose(background_sid);
+    file_panel_ops.requestFilePanelClose(session, background_sid);
     const action = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 1, .request_id = action.request_id });
     try std.testing.expect(session.pending_confirm == .file_panel_close);
     try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 2 }); // confirm 뒤 늦은 editor 전진
     session.dispatchChromeAction(.confirm_alternate);
-    try std.testing.expect(session.fileEntryForSurfaceId(background_sid) != null); // stale snapshot discard 거부
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, background_sid) != null); // stale snapshot discard 거부
     const stale_unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(action.request_id, stale_unlock.request_id);
 
-    session.requestFilePanelClose(background_sid);
+    file_panel_ops.requestFilePanelClose(session, background_sid);
     const current = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 3, .request_id = current.request_id });
     session.dispatchChromeAction(.confirm_alternate);
-    try std.testing.expect(session.fileEntryForSurfaceId(background_sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, background_sid) == null);
     try std.testing.expectEqual(active_sid, session.fileEntryAt(0).?.surface_id);
     try std.testing.expect(session.pending_file_panel_close == null);
 }
@@ -67980,17 +64452,17 @@ test "file panel save action identity mismatch aborts and unlocks instead of sti
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     const sync = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
     session.dispatchChromeAction(.confirm_accept);
-    const entry = session.fileEntryForSurfaceId(sid).?;
+    const entry = file_panel_ops.fileEntryForSurfaceId(session, sid).?;
     const old_path = entry.path;
     entry.path = try allocator.dupe(u8, "/tmp/save-drain-other.md");
     allocator.free(old_path); // coordinator는 독립 expected_path를 소유하므로 이제 old entry path가 없어도 안전하다.
     try std.testing.expect(session.takeFilePanelSaveCloseAction() == null);
     try std.testing.expect(session.pending_file_panel_close == null);
-    try std.testing.expect(session.fileEntryForSurfaceId(sid) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     const unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(sync.request_id, unlock.request_id);
     try std.testing.expect(session.chrome_host.notice.open);
@@ -68009,10 +64481,10 @@ test "dock replacement clears file close hover focus and one-shot transients" {
     _ = session.focusFilePanelSurface(sid);
     session.queuePendingDockFocus(session.fileEntryAt(0).?);
     const old_dock_epoch = session.dock_async_epoch;
-    session.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(session, sid);
     try std.testing.expect(session.pending_file_panel_close != null);
 
-    session.resetFilePanelTransientStateForDockReplacement();
+    file_panel_ops.resetFilePanelTransientStateForDockReplacement(session);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expect(session.file_panel_save_close_pending == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
@@ -68076,7 +64548,7 @@ test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface
     // 전 entry가 surface_id를 갖고 있고 서로 다르다(비재사용).
     var seen: [12]u64 = undefined;
     var n: usize = 0;
-    var it = session.fileEntries();
+    var it = file_panel_ops.fileEntries(session);
     while (it.next()) |entry| {
         try std.testing.expect(entry.surface_id != 0); // 회수 0
         for (seen[0..n]) |prior| try std.testing.expect(prior != entry.surface_id);
@@ -68112,9 +64584,9 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     try dst.file_tree.replaceExplicitRoots(&.{"/destination-workspace"});
     try std.testing.expect(src.completePendingDockFocus(src.fileEntryAt(0).?.surface_id));
     try std.testing.expect(dst.completePendingDockFocus(dst.fileEntryAt(0).?.surface_id));
-    const moved_sid = src.fileEntryForPath(src_path).?.surface_id;
-    try src.setFilePanelDirty(moved_sid, true);
-    const source_entry = src.fileEntryForPath(src_path).?;
+    const moved_sid = file_panel_ops.fileEntryForPath(src, src_path).?.surface_id;
+    try file_panel_ops.setFilePanelDirty(src, moved_sid, true);
+    const source_entry = file_panel_ops.fileEntryForPath(src, src_path).?;
     source_entry.mode = .source_edit;
     const moved_entry_id = source_entry.id;
     src.requestDockEntryFocus(source_entry);
@@ -68124,13 +64596,13 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     var moved_buf: [16]u64 = undefined;
     const outcome = try src.mergeSessionInto(dst, &moved_buf);
     try std.testing.expect(outcome.source_window_closed);
-    try std.testing.expectEqual(@as(usize, 0), src.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(src));
     try std.testing.expect(!src.hasWebSurface(moved_sid));
     try std.testing.expect(dst.hasWebSurface(moved_sid));
     try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
     try std.testing.expectEqualStrings("/destination-workspace", dst.file_tree.rootAt(0).?);
     try std.testing.expectEqualStrings("/source-workspace", src.file_tree.rootAt(0).?);
-    const moved_entry = dst.fileEntryForSurfaceId(moved_sid).?;
+    const moved_entry = file_panel_ops.fileEntryForSurfaceId(dst, moved_sid).?;
     try std.testing.expect(moved_entry.dirty);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, moved_entry.mode);
     try std.testing.expect(std.mem.indexOfScalar(u64, outcome.moved_surfaces, moved_sid) != null);
@@ -68144,8 +64616,8 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     // dst가 보던 자기 파일이 계속 입력 소유다 — 배경으로 온 파일이 그것을 빼앗지 않는다.
     try std.testing.expect(dst.focus_owner != .dock_pending);
     // 옮겨온 파일과 그 dirty 상태·live surface는 그대로 살아 있다(배경일 뿐 사라지지 않는다).
-    try std.testing.expect(dst.fileEntryForId(moved_entry_id) != null);
-    try std.testing.expect(dst.fileEntryForId(moved_entry_id).?.dirty);
+    try std.testing.expect(file_panel_ops.fileEntryForId(dst, moved_entry_id) != null);
+    try std.testing.expect(file_panel_ops.fileEntryForId(dst, moved_entry_id).?.dirty);
     try std.testing.expect(dst.hasWebSurface(moved_sid));
     // 그 워크스페이스로 전환하면 다시 보이고, 그때 barrier를 새로 걸 수 있다.
     for (dst.tabs.items, 0..) |t, ti| {
@@ -68157,7 +64629,7 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
             }
         }
     }
-    dst.requestDockEntryFocus(dst.fileEntryForId(moved_entry_id).?);
+    dst.requestDockEntryFocus(file_panel_ops.fileEntryForId(dst, moved_entry_id).?);
     try std.testing.expect(dst.pendingDockEntryOwnsInput());
     try std.testing.expect(dst.completePendingDockFocus(moved_sid));
 }
@@ -68182,7 +64654,7 @@ test "FP6 merge into empty explorer adopts source explorer authority and present
     try std.testing.expect(dst.dock.presented);
     try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
     try std.testing.expectEqualStrings("/source-explicit", dst.file_tree.rootAt(0).?);
-    try std.testing.expectEqual(@as(usize, 1), dst.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(dst));
 }
 
 test "FP6 merge with no destination file tabs preserves configured destination explorer root" {
@@ -68204,7 +64676,7 @@ test "FP6 merge with no destination file tabs preserves configured destination e
     _ = try src.mergeSessionInto(dst, &moved_buf);
     try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
     try std.testing.expectEqualStrings("/destination-root", dst.file_tree.rootAt(0).?);
-    try std.testing.expectEqual(@as(usize, 1), dst.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(dst));
 }
 
 test "FP6 merge preserves source project-root authority in an inferred destination" {
@@ -68248,7 +64720,7 @@ test "file panel close transition rejects window merge before model mutation" {
     src.assignDockSurfaceIds();
     const sid = src.fileEntryAt(0).?.surface_id;
     src.fileEntryAt(0).?.mode = .source_edit;
-    src.requestFilePanelClose(sid);
+    file_panel_ops.requestFilePanelClose(src, sid);
     const request_id = src.pending_file_panel_close.?.request_id;
     const src_tabs = src.tabs.items.len;
     const dst_tabs = dst.tabs.items.len;
@@ -68257,8 +64729,8 @@ test "file panel close transition rejects window merge before model mutation" {
     try std.testing.expectEqual(src_tabs, src.tabs.items.len);
     try std.testing.expectEqual(dst_tabs, dst.tabs.items.len);
     try std.testing.expectEqual(request_id, src.pending_file_panel_close.?.request_id);
-    try std.testing.expect(src.fileEntryForSurfaceId(sid).?.dirty_sync_pending);
-    try std.testing.expect(dst.fileEntryForSurfaceId(sid) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(src, sid).?.dirty_sync_pending);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(dst, sid) == null);
 }
 
 test "FP8 merge carries every source 파일 탭과 live surface를 destination으로 옮긴다faces" {
@@ -68275,7 +64747,7 @@ test "FP8 merge carries every source 파일 탭과 live surface를 destination�
     const src_b_id = src_b_open.term.file_entry.?.id;
     src.assignDockSurfaceIds();
     const sid_a = src.fileEntryAt(0).?.surface_id;
-    const sid_b = src.fileEntryForId(src_b_id).?.surface_id;
+    const sid_b = file_panel_ops.fileEntryForId(src, src_b_id).?.surface_id;
 
     _ = try dst.openFileTermInActivePane("/tmp/fp8-merge-dst.md", .markdown);
     _ = try dst.openFileTermInActivePane("/tmp/fp8-merge-dst-split.md", .markdown);
@@ -68283,11 +64755,11 @@ test "FP8 merge carries every source 파일 탭과 live surface를 destination�
 
     var moved_buf: [16]u64 = undefined;
     _ = try src.mergeSessionInto(dst, &moved_buf);
-    try std.testing.expectEqual(@as(usize, 0), src.fileEntryCount());
-    try std.testing.expectEqual(@as(usize, 4), dst.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(src));
+    try std.testing.expectEqual(@as(usize, 4), file_panel_ops.fileEntryCount(dst));
     // FP16: 파일이 pane 탭이라 merge가 별도로 entry를 평탄화하지 않는다 — 탭이 옮겨가면 파일도 같이 온다.
-    try std.testing.expect(dst.fileEntryForPath("/tmp/fp8-merge-a.md") != null);
-    try std.testing.expect(dst.fileEntryForPath("/tmp/fp8-merge-b.html") != null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(dst, "/tmp/fp8-merge-a.md") != null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(dst, "/tmp/fp8-merge-b.html") != null);
     try std.testing.expect(dst.hasWebSurface(sid_a));
     try std.testing.expect(dst.hasWebSurface(sid_b));
 }
@@ -68316,8 +64788,8 @@ test "FP6 merge rejects duplicate dirty file panels without mutating either dock
 
     var moved_buf: [16]u64 = undefined;
     try std.testing.expectError(error.UnsupportedMove, src.mergeSessionInto(dst, &moved_buf));
-    try std.testing.expectEqual(@as(usize, 1), src.fileEntryCount());
-    try std.testing.expectEqual(@as(usize, 1), dst.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(src));
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(dst));
     try std.testing.expectEqual(src_surface_id, src.fileEntryAt(0).?.surface_id);
     try std.testing.expectEqual(dst_surface_id, dst.fileEntryAt(0).?.surface_id);
     try std.testing.expect(src.fileEntryAt(0).?.dirty);
@@ -68359,14 +64831,14 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
 
     var moved_buf: [16]u64 = undefined;
     _ = try src.mergeSessionInto(dst, &moved_buf);
-    const replacement = dst.fileEntryForPath(path).?;
+    const replacement = file_panel_ops.fileEntryForPath(dst, path).?;
     try std.testing.expectEqual(source_id, replacement.id);
     try std.testing.expectEqual(source_surface, replacement.surface_id);
     // mode 갱신은 살아남은 쪽으로 재조준된다(one-shot 유실 없음). tree restore는 사라진 surface를 가리키던
     // 것이라 비운다.
     try std.testing.expectEqual(source_surface, dst.file_panel_mode_pending.?);
     try std.testing.expect(dst.file_tree_restore_surface_pending == null);
-    try std.testing.expect(dst.fileEntryForSurfaceId(retired_surface) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(dst, retired_surface) == null);
     // FP16: 살아남은 파일이 **배경 워크스페이스**에 앉으므로(merge는 dst가 보던 워크스페이스를 유지한다)
     // publish 대기 barrier는 버려진다 — 보이지 않는 파일이 화면의 입력을 삼키지 않게 한다.
     try std.testing.expect(dst.pending_dock_focus == null);
@@ -68927,39 +65399,39 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
     var seen_b = false;
     var seen_c = false;
     var count: usize = 0;
-    var it = session.fileEntries();
+    var it = file_panel_ops.fileEntries(session);
     while (it.next()) |entry| {
         count += 1;
         if (std.mem.eql(u8, entry.path, "/tmp/b1-a.md")) seen_a = true;
         if (std.mem.eql(u8, entry.path, "/tmp/b1-b.md")) seen_b = true;
         if (std.mem.eql(u8, entry.path, "/tmp/b1-c.md")) seen_c = true;
     }
-    try std.testing.expectEqual(session.fileEntryCount(), count);
+    try std.testing.expectEqual(file_panel_ops.fileEntryCount(session), count);
     try std.testing.expect(seen_a and seen_b and seen_c);
 
     // ② const 변형도 같은 집합을 본다(순수 술어용).
     var const_count: usize = 0;
-    var cit = session.fileEntriesConst();
+    var cit = file_panel_ops.fileEntriesConst(session);
     while (cit.next()) |_| const_count += 1;
     try std.testing.expectEqual(count, const_count);
 
     // ③ 경로·EntryId 조회는 배치를 몰라도 정확한 entry를 준다 — 다른 워크스페이스에 있는 c까지.
-    const by_path = session.fileEntryForPath("/tmp/b1-c.md").?;
+    const by_path = file_panel_ops.fileEntryForPath(session, "/tmp/b1-c.md").?;
     try std.testing.expectEqualStrings("/tmp/b1-c.md", by_path.path);
-    const by_id = session.fileEntryForId(c_id).?;
+    const by_id = file_panel_ops.fileEntryForId(session, c_id).?;
     try std.testing.expectEqual(by_path, by_id); // 같은 주소
-    const a_entry = session.fileEntryForId(a_id).?;
+    const a_entry = file_panel_ops.fileEntryForId(session, a_id).?;
     try std.testing.expectEqualStrings("/tmp/b1-a.md", a_entry.path);
 
     // ④ 없는 키는 null(창 전체를 뒤진 뒤).
-    try std.testing.expect(session.fileEntryForPath("/tmp/b1-missing.md") == null);
-    try std.testing.expect(session.fileEntryForId(0) == null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, "/tmp/b1-missing.md") == null);
+    try std.testing.expect(file_panel_ops.fileEntryForId(session, 0) == null);
 
     // ⑤ 반환은 포인터라 호출처가 그룹 인덱싱 없이 바로 변경할 수 있다(mutation 예약 경로가 이 형태를 쓴다).
     // 검증도 그룹 인덱싱이 아니라 **같은 API 재조회**로 한다 — 내부 배치를 단언하면 이 테스트가 감추려는 바로 그
     // 구조에 다시 의존하게 되고, FP16b가 소유를 Term으로 옮길 때 통과하지 못한다.
     by_path.mutation_pending_id = 42;
-    try std.testing.expectEqual(@as(u64, 42), session.fileEntryForPath("/tmp/b1-c.md").?.mutation_pending_id);
+    try std.testing.expectEqual(@as(u64, 42), file_panel_ops.fileEntryForPath(session, "/tmp/b1-c.md").?.mutation_pending_id);
 }
 
 // FP16 §5.0 왕복 게이트: 파일 Term이 `pane` 줄의 `file-term` 필드로 나갔다가 **같은 자리**로 돌아온다.
@@ -68977,7 +65449,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     _ = try session.openFileTermInActivePane("/tmp/fp16-persist-alpha.md", .markdown);
     _ = try session.openFileTermInActivePane("/tmp/fp16-persist-beta.html", .html);
     session.assignDockSurfaceIds();
-    session.fileEntryForPath("/tmp/fp16-persist-alpha.md").?.mode = .source_edit;
+    file_panel_ops.fileEntryForPath(session, "/tmp/fp16-persist-alpha.md").?.mode = .source_edit;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -69008,7 +65480,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     // 복원: 파일 Term이 persisted 자리대로 되살아난다(터미널 0, alpha 1, beta 2).
     // 라이브 편집 mode는 복원을 fail-close하므로(§3.2 종료 보호) 적용 전에 읽기로 되돌린다 — 텍스트에는
     // 이미 source_edit이 실려 있어 왕복 검증에는 영향이 없다.
-    session.fileEntryForPath("/tmp/fp16-persist-alpha.md").?.mode = .read;
+    file_panel_ops.fileEntryForPath(session, "/tmp/fp16-persist-alpha.md").?.mode = .read;
     try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
     const pane = session.activePane();
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
@@ -69017,7 +65489,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     try std.testing.expectEqualStrings("/tmp/fp16-persist-beta.html", pane.terms.items[2].file_entry.?.path);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, pane.terms.items[1].file_entry.?.mode);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
-    try std.testing.expectEqual(@as(usize, 2), session.fileEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 }
 
 // ── FP16 닫기 계약 회귀 가드 ────────────────────────────────────────────────────────────────────
@@ -69044,7 +65516,7 @@ test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지
     }
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
 
-    try std.testing.expect(session.closeFilePanelSurfaceNow(sid));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     // **구조는 그대로다** — Term을 빼면 pane이 Term 0개가 되어 모델 불변식이 깨지고, latch가 그 직후
     // 해제된 대표 surface에 쓴다(5차 리뷰가 잡은 UAF). 정리는 deinit이 한다.
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
@@ -69068,9 +65540,9 @@ test "FP16 닫기: 다른 파일이 종료를 막으면 마지막 Term close는 
     const victim_sid = victim.term.file_entry.?.surface_id;
 
     // 창 전체에 Term이 둘 이상이라 마지막-Term 분기는 안 탄다 — 정상 close.
-    try std.testing.expect(session.closeFilePanelSurfaceNow(victim_sid));
+    try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, victim_sid));
     try std.testing.expect(!session.ended_seen);
-    try std.testing.expect(session.fileEntryForPath("/tmp/fp16-guard.md") != null);
+    try std.testing.expect(file_panel_ops.fileEntryForPath(session, "/tmp/fp16-guard.md") != null);
 }
 
 test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없어도 두 번째 시도를 막지 않는다" {
@@ -69097,11 +65569,11 @@ test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없�
 
     // 그리고 답이 안 왔어도 그 파일이 close를 막지 않는다 — 여기서 막으면 브릿지가 죽은 순간
     // 그 pane·워크스페이스가 영원히 안 닫힌다(code-review max).
-    try std.testing.expect(!AppSession.termHasProtectedFilePanel(opened.term));
+    try std.testing.expect(!file_panel_ops.termHasProtectedFilePanel(opened.term));
 
     // 스냅샷이 **돌아와** dirty가 서면 다시 정상적으로 막는다.
     entry.dirty = true;
-    try std.testing.expect(AppSession.termHasProtectedFilePanel(opened.term));
+    try std.testing.expect(file_panel_ops.termHasProtectedFilePanel(opened.term));
 }
 
 // §6c host-backed 검색 회귀 가드. 원격에서만 증분 검색(타이핑)이 매치로 스크롤되지 않던 결함 — find.zig의
@@ -69171,7 +65643,7 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     try std.testing.expect(session.dockVisible());
     _ = session.takeFilePanelPickRequest();
@@ -69183,7 +65655,7 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
     session.setDockView(.source_control);
     session.mouse(1, x, y, 0, 0);
     try std.testing.expect(!session.takeFilePanelPickRequest()); // 폴더 다이얼로그 금지
-    try std.testing.expect(!session.fileTreeFocused()); // 트리 포커스도 안 뺏는다
+    try std.testing.expect(!file_panel_ops.fileTreeFocused(session)); // 트리 포커스도 안 뺏는다
     session.mouse(1, x, y, 0, 2); // 우클릭 배경 메뉴(새 폴더 등)도 탐색기 조작이라 안 뜬다
     try std.testing.expect(!session.chrome_host.context_menu.open);
     try std.testing.expect(!session.file_tree_background_menu);
@@ -69245,7 +65717,7 @@ test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에
     try std.testing.expect(md.term != diff.term); // 서로를 빼앗지 않는다
 
     // 탐색기 경로 조회는 diff를 건너뛴다 — 그러지 않으면 파일을 열 때 diff Term이 활성화된다.
-    try std.testing.expectEqual(md.term, session.fileTermForPath(path).?);
+    try std.testing.expectEqual(md.term, file_panel_ops.fileTermForPath(session, path).?);
     // 반대로 diff 조회는 base까지 본다: 같은 경로의 다른 base는 다른 Term이다.
     diff.term.file_entry.?.diff_base = .staged;
     try std.testing.expectEqual(diff.term, session.diffTermFor(path, .staged).?);
@@ -69301,7 +65773,7 @@ test "dock list viewport ends exactly where the status bar begins" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
 
     // 창 높이를 여러 개로 바꿔 본다 — 한 크기에서만 맞는 것은 우연일 수 있다.
     for ([_]u32{ 700, 813, 900, 1041 }) |h| {
@@ -69323,7 +65795,7 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    session.activateFilePanelDockControl();
+    file_panel_ops.activateFilePanelDockControl(session);
     session.setDockView(.source_control);
     session.rememberGitRepo("/repo");
 
@@ -69465,7 +65937,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     _ = try session.resize(1400, 900, 1000);
 
     // 도크를 열고 소스 컨트롤 뷰로.
-    const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     session.setDockView(.source_control);
 
@@ -69515,7 +65987,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     session.mouse(1, x, row_y(session, 3, rect.y), 0, 0);
 
     var diffs: usize = 0;
-    var it = session.fileEntries();
+    var it = file_panel_ops.fileEntries(session);
     while (it.next()) |entry| {
         if (entry.kind == .diff) diffs += 1;
     }
@@ -69546,7 +66018,7 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
     session.openDiffTerm("/repo", "/repo/b.txt", "b.txt", null, .unstaged);
 
     var diffs: usize = 0;
-    var it = session.fileEntries();
+    var it = file_panel_ops.fileEntries(session);
     while (it.next()) |entry| {
         if (entry.kind == .diff) diffs += 1;
     }
@@ -69589,7 +66061,7 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
         };
         // drainGitStatus가 하는 일과 같은 절차 — 짝이 없으면 해제한다.
         var matched = false;
-        var it = session.fileEntries();
+        var it = file_panel_ops.fileEntries(session);
         while (it.next()) |candidate| {
             if (candidate.kind == .diff and candidate.diff_request_id == late.request_id) matched = true;
         }
@@ -69773,7 +66245,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     const doc = try std.fs.path.join(allocator, &.{ tmp_root, "doc.md" });
     defer allocator.free(doc);
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(doc));
-    const entry = session.fileEntryForPath(doc).?;
+    const entry = file_panel_ops.fileEntryForPath(session, doc).?;
     const surface_id = entry.surface_id;
 
     // 아직 배치된 적 없는 surface는 좌표를 만들 수 없다 — 열지 않는다(추측한 자리에 띄우지 않는다).

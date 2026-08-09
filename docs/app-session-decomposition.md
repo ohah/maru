@@ -262,6 +262,24 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > `<name>_ops.`를 부르면 후보에서 뺀다. F15에서 `scmDrawWindow` 하나를, term/surface 후보 조사에서
 > 9개를 자동으로 걸러 냈다.
 >
+> ## 익명 struct 반환에 이름을 주고 옮겼다(2026-08-10)
+>
+> F11·F12에서 각각 하나씩 "옮기지 못한 함수"로 남겨 둔 것을 처리했다. 익명 struct는 허브 facade가
+> 만든 타입과 그룹 파일이 만든 타입이 **서로 다른 타입**이 되어 위임이 성립하지 않는다. `AppSession`에
+> `WebNavAction`·`ImeCursorRect` 두 타입을 두고 그것을 반환하게 한 뒤 각각 `web.zig`·`input.zig`로 옮겼다.
+>
+> | | |
+> |---|---|
+> | `app_session.zig` | −73줄 |
+> | 허브 pub | 553 → 558 (**+5**) |
+>
+> **pub이 늘었고 줄 수 절감도 작다.** 그럼에도 한 이유는 **"익명 struct라서 못 옮긴다"는 예외를 없애는
+> 것** 자체다 — 예외가 남아 있으면 다음 사람이 같은 자리에서 다시 멈춘다.
+>
+> 리베이스에서 충돌 해소가 **닫는 중괄호 하나를 삼켰다**. 양쪽을 이어 붙이는 자동 해소가 함수 경계를
+> 보지 않기 때문이다. 컴파일러가 `expected statement, found 'a document comment'`로 잡았지만,
+> 이런 자동 해소는 앞으로 함수 경계에서 손으로 봐야 한다.
+>
 > ## 디버그 픽스처 하네스 분리(2026-08-10)
 >
 > F9에서 등록한 후속을 처리했다. `maybeDebugOpenSettings`(586줄)와 `maybeDebugOpenFilePanel`(12줄)을

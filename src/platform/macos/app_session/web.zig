@@ -26,6 +26,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const WebNavAction = app_session_mod.WebNavAction;
 const term_ops = @import("term.zig");
 const input_ops = @import("input.zig");
 const dock_layout = app_session_mod.dock_layout;
@@ -946,4 +947,18 @@ pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
     // 진짜인지 흐려진다. 초안은 `web_find_result`도 들었는데 아무도 읽지 않는 죽은 상태였다.
     self.chrome_host.find.page_found = found;
     self.metal_dirty = true;
+}
+
+// --- 익명 struct 반환에 이름을 준 뒤 옮겨 온 함수 ---
+// 반환 타입이 `?struct { ... }`이던 동안은 허브 facade가 만든 타입과 이 파일이 만든 타입이 서로
+// 다른 타입이 되어 옮길 수 없었다. `AppSession`에 이름 있는 타입을 두어 해결했다.
+
+/// Phase 7e-3: nav 버튼(back/forward/reload) 클릭 신호를 drain(1회성). null=이번 tick 없음. 7e-3 Swift가 code에 따라
+/// BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView)를 실행한다. code: 0=back·1=forward·2=reload.
+pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
+    if (self.web_nav_action_pending) |sid| {
+        self.web_nav_action_pending = null;
+        return .{ .surface_id = sid, .code = self.web_nav_action_code };
+    }
+    return null;
 }

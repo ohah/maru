@@ -4,10 +4,10 @@ const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
 const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
-const input_ops = @import("app_session/input.zig");
-const web_ops = @import("app_session/web.zig");
-const workspace_ops = @import("app_session/workspace.zig");
-const settings_ops = @import("app_session/settings.zig");
+pub const input_ops = @import("app_session/input.zig");
+pub const web_ops = @import("app_session/web.zig");
+pub const workspace_ops = @import("app_session/workspace.zig");
+pub const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
 const sidebar_ops = @import("app_session/sidebar.zig");
 const tab_ops = @import("app_session/tab.zig");
@@ -460,8 +460,8 @@ pub const CursorKind = enum(i32) {
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
 // 실제로는 init이 refreshCellMetrics를 부르므로 resize 시점엔 항상 실제 메트릭이 있다.
-const placeholder_cell_width_px = input_math.placeholder_cell_width_px; // session core 단일 출처(grid 기하·hit-test와 공유)
-const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // session core 단일 출처(휠 환산과 공유)
+pub const placeholder_cell_width_px = input_math.placeholder_cell_width_px; // session core 단일 출처(grid 기하·hit-test와 공유)
+pub const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // session core 단일 출처(휠 환산과 공유)
 // OSC 52 읽기 응답 상한(원문 클립보드 바이트). 과대 클립보드를 base64 OSC 52로 PTY에 쏟는 폭주를 막는다
 // (코어 OSC 52 write 상한 max_clipboard_bytes와 같은 16MB). 초과하면 응답하지 않는다(F2-6).
 const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
@@ -2208,6 +2208,13 @@ pub const MeasuredTextCache = struct {
     }
 };
 
+/// `takeWebNavAction`의 반환. 익명 struct로 두면 `web.zig`로 본문을 옮길 때 허브가 만든 타입과
+/// 그룹이 만든 타입이 **서로 다른 타입**이 되어 facade를 세울 수 없다(F11에서 그래서 못 옮겼다).
+pub const WebNavAction = struct { surface_id: u64, code: u8 };
+
+/// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
+pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
+
 pub const AppSession = struct {
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
     pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
@@ -2216,6 +2223,16 @@ pub const AppSession = struct {
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenSettings(self);
+    }
+
+    /// 본문 분리: app_session/web.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
+        return web_ops.takeWebNavAction(self);
+    }
+
+    /// 본문 분리: app_session/input.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
+        return input_ops.imeCursorRect(self);
     }
 
     /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
@@ -7834,16 +7851,6 @@ pub const AppSession = struct {
     /// 다시 본다) — 그래야 `created` 전에 navigate가 나가 유실되지 않는다. 사용자 입력(commit)이 항상 우선이다.
     pub const WebNavigateRequest = struct { surface_id: u64, url: []const u8 };
 
-    /// Phase 7e-3: nav 버튼(back/forward/reload) 클릭 신호를 drain(1회성). null=이번 tick 없음. 7e-3 Swift가 code에 따라
-    /// BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView)를 실행한다. code: 0=back·1=forward·2=reload.
-    pub fn takeWebNavAction(self: *AppSession) ?struct { surface_id: u64, code: u8 } {
-        if (self.web_nav_action_pending) |sid| {
-            self.web_nav_action_pending = null;
-            return .{ .surface_id = sid, .code = self.web_nav_action_code };
-        }
-        return null;
-    }
-
     /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와
     /// 같은 로직이되, GUI는 selfExePath=앱 바이너리(maru-macos-app)라 **형제 `maru`(CLI)**를 가리킨다. 순수 경로 로직은
     /// maru.cli.install, 여기선 자기 경로 resolve + mkdir/symlink(std.c) + 결과 notice. sudo 불요 user-level이라 권한 상승 없음.
@@ -11142,86 +11149,6 @@ pub const AppSession = struct {
                 event.modifiers.option or event.modifiers.command,
             .enter => enter_newline,
             else => false,
-        };
-    }
-
-    /// IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점 — 마우스 좌표와 같은 규약).
-    /// 입력기가 firstRect로 물어보면 Swift가 이 값을 화면 좌표로 바꿔 후보창을 커서 위치에
-    /// 띄운다. 조합 중에는 canonical base snapshot의 cursor가 preedit 시작 anchor라 후보창이 그 위치에 뜬다.
-    /// 반환: row*cell_h, col*cell_w, cell_w, cell_h.
-    // self는 *AppSession(비-const) — rename caret 위치(renameCaretRect)가 leaf-rects 레이아웃을 펴는 *AppSession
-    // 헬퍼를 거치기 때문(읽기 전용 계산이지만 activeTabLeafRects 체인이 비-const). ABI·테스트 호출자는 모두 mutable.
-    pub fn imeCursorRect(self: *AppSession) struct { x: f64, y: f64, w: f64, h: f64 } {
-        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
-        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-        if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
-        // 활성 입력 대상(inputFocus 단일 출처)의 입력 caret 옆에 후보창을 띄운다 — caretRect가 위치 단일 출처.
-        // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
-        const props = self.buildChromeProps();
-        const focus: InputFocus = if (self.ime_terminal_target_id != null) .terminal else self.inputFocus();
-        const overlay_caret: ?chrome.draw.Rect = switch (focus) {
-            .confirm, .notice, .file_tree, .dock_pending => null, // 조합을 안 받으므로 후보창 위치 무의미.
-            // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
-            // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
-            .rename => settings_ops.renameCaretRect(self),
-            // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
-            .settings => self.settings_search_caret,
-            .sidebar_search => sidebar_ops.sidebarSearchCaretRect(self),
-            .agent_session_search => agent_dock.agentSessionDockSearchCaretRect(self),
-            .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
-            .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
-            // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
-            // 렌더 "1c"와 같은 밴드·nav_end·편집폭 셈법으로 위치 단일 소스). null이면(밴드 못 찾음) 아래 폴백. web term 활성 중
-            // (activeTermIsTerminal=false) 본문 origin 폴백은 caret과 어긋나므로 이 rect가 필요하다(리뷰 [4]).
-            .addr_edit => web_ops.addrEditCaretRect(self),
-            .terminal => null,
-        };
-        if (overlay_caret) |r| {
-            return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
-        }
-        // [4e-2, §6·1-B] 활성 Term이 web이면 터미널 커서(sentinel)가 없다 — 본문 origin 폴백 rect를 준다(WebKit이 웹
-        // 포커스 IME 후보창 위치를 자체 관리, 4d). web Term 없으면 이 분기 미진입(byte-identical).
-        if (!term_ops.activeTermIsTerminal(self)) {
-            return .{ .x = @floatFromInt(self.active_pane_rect.x), .y = @floatFromInt(self.active_pane_rect.y), .w = cw, .h = ch };
-        }
-        // [P4-3, §12] 터미널 커서 위치를 **활성 surface 코어에서 lockCore 아래** 읽는다 — 예전 무락 직접
-        // (core.screen.cursor) 읽기는 리더 write와 torn read 잠재 race였다(값 struct라 크래시는 아니나 한 프레임 잘못된
-        // 위치 가능). imeCursorRect는 IME 후보창 질의 시에만(조합 중) 불리는 event-driven 경로라 per-tick 아님 — 여기 lock은
-        // 경합/비용 무관하고, **같은 활성 surface**에서 origin(active_pane_rect)과 커서를 함께 잡아 팬 전환 시점 차도 없다
-        // (스냅샷 캐시는 active_pane_rect가 동기 갱신인데 캐시는 per-tick이라 전환 한 프레임 오위치를 냈다 — code-review [2]).
-        const cursor = blk: {
-            const s = if (self.ime_terminal_target_id) |target_id| input_ops.imeTerminalSurfaceById(self, target_id) orelse {
-                // 사라진 pin을 새 active cursor로 위장하지 않는다. 후보창은 neutral pane origin에 둔다.
-                return .{
-                    .x = @floatFromInt(self.active_pane_rect.x),
-                    .y = @floatFromInt(self.active_pane_rect.y),
-                    .w = cw,
-                    .h = ch,
-                };
-            } else term_ops.activeSurface(self);
-            s.lockCore(self.io);
-            defer s.unlockCore(self.io);
-            break :blk s.baseCursorLocked() orelse {
-                // capability를 협상하지 않은 구 live host의 cursor는 viewport 의미를 판정할 수
-                // 없다. hidden origin을 실제 anchor로 위장하지 않고 pane origin으로 fail-closed한다.
-                return .{
-                    .x = @floatFromInt(self.active_pane_rect.x),
-                    .y = @floatFromInt(self.active_pane_rect.y),
-                    .w = cw,
-                    .h = ch,
-                };
-            };
-        };
-        const cur_row = cursor.row;
-        const cur_col = cursor.col;
-        return .{
-            // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을
-            // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 origin만큼 왼쪽/위에 뜬다(pxToCell의 역변환:
-            // pxToCell은 빼고, 셀→스크린인 여기선 더한다). 단일 panel이면 origin = (사이드바 폭+padding_x, padding_y).
-            .x = @as(f64, @floatFromInt(self.active_pane_rect.x)) + @as(f64, @floatFromInt(cur_col)) * cw,
-            .y = @as(f64, @floatFromInt(self.active_pane_rect.y)) + @as(f64, @floatFromInt(cur_row)) * ch,
-            .w = cw,
-            .h = ch,
         };
     }
 

@@ -2020,6 +2020,11 @@ pub fn build(b: *std.Build) void {
         "test-session-host-2c3d-c3-1",
         "2c3d C3-1 inline attachment event owner Debug and ReleaseFast gates",
     );
+    const session_host_2c3d_c3_2_step = b.step(
+        "test-session-host-2c3d-c3-2",
+        "2c3d C3-2 purge-first product event drain Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_2_step.dependOn(session_host_2c3d_c3_1_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2212,6 +2217,37 @@ pub fn build(b: *std.Build) void {
         run_event_c3_1_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_1_step.dependOn(&run_event_c3_1_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_1_boundary_tests.step);
+
+        const event_c3_2_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/generation_attachment.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3a-2c3d C3-2"},
+        });
+        const run_event_c3_2_runtime_tests = b.addRunArtifact(event_c3_2_runtime_tests);
+        run_event_c3_2_runtime_tests.addArg("--maru-expect-tests=8");
+        run_event_c3_2_runtime_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_2_step.dependOn(&run_event_c3_2_runtime_tests.step);
+
+        const event_c3_2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_2_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3d C3-2 purge-first product drain boundary"},
+        });
+        const run_event_c3_2_boundary_tests = b.addRunArtifact(event_c3_2_boundary_tests);
+        run_event_c3_2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_2_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_2_step.dependOn(&run_event_c3_2_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_2_boundary_tests.step);
 
         const control_c2_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

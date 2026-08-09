@@ -135,6 +135,11 @@ pub const Op = union(enum) {
         /// 키우면 **글자가 줄 상자보다 커져 래스터가 잘린다**(`raster_height_px`가 이 값에서 나온다).
         /// 세로 정렬 기준이기도 하므로 폰트와 함께 커져야 한다.
         line_height_px: ?u16 = null,
+        /// 셀 폭(device px, 편집기 전용). 있으면 백엔드가 글자 x를 **폰트 advance가 아니라 셀
+        /// 인덱스**로 놓는다 — 글자마다 셀 폭(EAW)을 누적해 몇 번째 칸인지 센다. 등폭 폰트도
+        /// advance가 셀 폭과 미세하게 달라(7.8px vs 8px) 그대로 두면 두 번째 글자부터 격자를
+        /// 벗어난다. `font_px`·`line_height_px`와 함께 온다.
+        cell_w_px: ?u16 = null,
         wide_icons: bool = false,
         /// Pixel constraint is needed when the worker centres an icon+label group.  `max_cols`
         /// remains the legacy grid fallback; a rich-only action can preserve the final content

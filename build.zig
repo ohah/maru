@@ -2235,6 +2235,23 @@ pub fn build(b: *std.Build) void {
         run_event_c3_2_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c3_2_step.dependOn(&run_event_c3_2_runtime_tests.step);
 
+        const event_c3_2_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/remote_runtime.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3a-2c3d C3-2 product drain"},
+        });
+        const run_event_c3_2_product_tests = b.addRunArtifact(event_c3_2_product_tests);
+        run_event_c3_2_product_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_2_product_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_2_step.dependOn(&run_event_c3_2_product_tests.step);
+
         const event_c3_2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_2c3d_c3_2_boundary.zig"),

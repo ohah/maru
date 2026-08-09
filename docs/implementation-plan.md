@@ -1397,8 +1397,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       construction은 binding reserve → transport mint → inline owner exact-address reserve → request prepare 순서이고, 실패는
       transport terminalize → binding abort의 기존 역순 rollback으로 request/pin/queue/quarantine leak 0을 보장한다.
       **C3-2**는 이 wrapper를 소비하는 purge-first 제품 drain과 ended priority를 소유한다. focused gate는
-      `test-session-host-2c3d-c3-2`이며 C3-1 전체와 Debug·ReleaseFast product runtime sentinel 8+boundary 1을
-      exact-count로 실행한다. generation drain은 `purge -> take -> view/classify/apply -> release` 하나뿐이고,
+      `test-session-host-2c3d-c3-2`이며 C3-1 전체와 Debug·ReleaseFast attachment runtime sentinel 8+
+      actual generation `RemoteRuntime` product drain 1+boundary 1을
+      exact-count로 실행한다. generation drain은 `release_pending -> purge -> take -> view/classify/apply -> release` 하나뿐이고,
+      release `Busy` 뒤에는 registry-backed attachment readiness로 같은 canonical owner release를 다음 tick의 purge보다 먼저
+      재시도한다. semantic apply 결과는 settlement까지 runtime의 closed pending outcome에 보존해 중복 apply와 오류 소실을 막는다.
       `.ended_pending`은 `protocol.max_client_pending_events`에서 파생한 유계 budget 안에서 purge로 되돌아간다.
       budget 소진은 입력·출력·화면 진전 0의 `Busy`로 다음 tick에 넘긴다. legacy raw acquisition과 공통 semantic
       classify/apply SSOT는 분리하며 generation 실패의 legacy fallback은 0이다. **C3-3**은 actual socket의

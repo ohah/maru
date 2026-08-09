@@ -1161,7 +1161,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    allocation-free 재구성 결과가 그 projection과 exact 일치할 때만 반환한다. 따라서 payload 재파싱은 두 번째 SSOT가 아니다. 내부 상태가 이 envelope를
    넘거나 주소가 봉인된 canonical slot과 exact 일치하지 않으면 compile/admission 단계에서 거부한다.
    public release·cleanup pin·quarantine까지 C2로 구현 완료했다. C3-1의 `GenerationAttachment` inline owner/mirror/wrapper와
-   teardown 합성은 C3-1로 구현 완료했다. C3-2의 purge-first 제품 drain과 C3-3의 actual socket/source-zero는 아직 미구현이다.
+   teardown 합성은 C3-1로 구현 완료했다. C3-2의 release-pending→purge-first 제품 drain도 구현했으며 C3-3의 actual
+   socket event/source-zero는 아직 미구현이다.
    C2는 `GenerationTransport.releaseEvent(owner:*EventOwner) EventError!void` 하나만 public facade에 추가해
    transport declaration을 exact 14로 만든다. C2의 production-type facade take/release는 test-only settlement를 호출하지 않으며,
    C3가 소유하는 `GenerationAttachment` 제품 drain·purge orchestration도 선취하지 않는다. C2의 private 구현 경계는
@@ -1179,19 +1180,25 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    purge facade delta 0을 고정한다. C3-2와 C3-3은 각각 별도 gate를 만들며 C3-1 증거로 drain/socket 완료를 주장하지 않는다.
 
    C3-2 focused gate 이름은 `test-session-host-2c3d-c3-2`다. 이 gate는 C3-1 전체를 상속하고
-   Debug·ReleaseFast에서 C3-2 product runtime sentinel 8개와 boundary 1개를 exact-count로 실행한다.
+   Debug·ReleaseFast에서 attachment runtime sentinel 8개, actual generation `RemoteRuntime` product drain 1개와
+   boundary 1개를 exact-count로 실행한다.
    C3-2는 기존 `ClientSlot.prepareEndedPurge`/`commitEndedPurge` transaction을 새 큐 구현 없이
    무인자 `GenerationTransport.purgeEndedStream()`과 `GenerationAttachment` wrapper로만 투영한다. facade는
    exact 14에서 최종 exact 15로 바뀌며 결과는 `enum{not_ended,purged}`, 오류는
    `error{Busy,InvalidOwner,Corrupt,Terminal}`의 닫힌 집합이다. 임의 stream ID·allocator·raw `Client`는 facade를
    통과하지 않는다.
 
-   제품 generation drain의 순서는 `purge -> take -> view/classify/apply -> release`다. 첫 purge가 `.purged`면
+   제품 generation drain의 순서는 `release_pending -> purge -> take -> view/classify/apply -> release`다. 이전 tick의
+   release가 `Busy`였으면 registry-backed attachment readiness로 canonical live owner를 확인한 뒤 같은 owner release를
+   purge보다 먼저 재시도한다. semantic apply 결과는 owner settlement까지 `RemoteRuntime`의 closed pending outcome에 보존하고
+   release 성공 뒤 한 번만 반환하므로 apply를 반복하거나 원래 오류를 잃지 않는다. empty/double release는 추측 호출하지 않는다.
+   첫 purge가 `.purged`면
    같은 turn의 take·metadata·input·output·screen은 0이고 즉시 ended를 반환한다. `.not_ended` 뒤 take가
    `.ended_pending`이면 입력·출력을 진행하지 않고 purge로 되돌아간다. 이 재시도 budget은
    `protocol.max_client_pending_events`에서 직접 파생하며 magic count를 두지 않는다. budget 소진은 queue나 owner를
    바꾸지 않는 `Busy`로 다음 pump tick에 넘기고, 다음 tick도 purge-first에서 시작한다. `.taken`만 view하고 모든
-   semantic 성공·실패 경로에서 exact once release한다. legacy arm의 raw drain과 공통 semantic classify/apply SSOT는
+   semantic 성공·실패 경로에서 exact once release한다. release `Busy`는 owner/mirror와 pending semantic outcome을 보존한 채
+   다음 tick release-first로 수렴하고 `Corrupt|Terminal`은 typed fail-close한다. legacy arm의 raw drain과 공통 semantic classify/apply SSOT는
    보존하고 generation 실패의 legacy fallback은 0이다. C3-2는 component/product-type 배선까지만 완료로 세며 actual
    Darwin socket, revoked→fence→release 왕복과 generation raw Client event source-zero는 C3-3이 소유한다.
 

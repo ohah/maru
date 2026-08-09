@@ -6,6 +6,9 @@
 
 const std = @import("std");
 
+pub const PurgeEndedOutcome = enum { not_ended, purged };
+pub const PurgeEndedError = error{ Busy, InvalidOwner, Corrupt, Terminal };
+
 /// Identity of one request whose frame and request slot are still owned by a
 /// GenerationTransport. Zero is excluded from every component so pristine
 /// storage cannot be mistaken for a live request after a partial init.

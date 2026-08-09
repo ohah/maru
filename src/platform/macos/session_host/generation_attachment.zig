@@ -341,6 +341,27 @@ pub const GenerationAttachment = struct {
         self.event_generation_mirror = 0;
     }
 
+    /// Settles only a registry-proven live inline event. A pristine owner is a no-op; an unrelated
+    /// stream-operation blocker remains Busy, so callers never guess by issuing an empty release.
+    pub fn releasePendingEvent(self: *GenerationAttachment) generation_transport_mod.EventError!bool {
+        if (!self.valid() or self.lifecycle != .attached)
+            return error.InvalidOwner;
+        const readiness = generation_transport_mod.eventReadinessOwned(
+            &self.transport,
+            @intFromPtr(self),
+            &self.event_owner,
+            self.event_generation_mirror,
+        );
+        if (self.event_generation_mirror == 0) return switch (readiness) {
+            .ready => false,
+            .busy => error.Busy,
+            .invalid => error.Corrupt,
+        };
+        if (readiness != .busy) return error.Corrupt;
+        try self.releaseEvent();
+        return true;
+    }
+
     pub fn purgeEndedStream(
         self: *GenerationAttachment,
     ) generation_transport_mod.PurgeEndedError!generation_transport_mod.PurgeEndedOutcome {

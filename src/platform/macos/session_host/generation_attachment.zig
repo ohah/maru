@@ -467,6 +467,60 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
     attachment = .{};
 }
 
+test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3D31,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    const receipt = try attachment.prepareControllerAttach(&adapter, 0x2C3D32);
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedFromPromotedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x2C3D33,
+        accepted,
+        response_bytes,
+        testAllocationProvenance(0x2C3D33),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x2C3D32,
+        .stream_id = 0x2C3D34,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+
+    try adapter.logicalClient().bufferGenerationEventForTest(
+        0x2C3D34,
+        "{\"event\":\"future.event\"}",
+    );
+    try std.testing.expectEqual(
+        generation_transport_mod.EventTakeOutcome.taken,
+        try attachment.takeEvent(),
+    );
+    try std.testing.expect(attachment.event_generation_mirror != 0);
+    _ = try attachment.viewEvent();
+    try std.testing.expectEqual(DeinitOutcome.busy, attachment.tryDeinit(&adapter));
+    try attachment.releaseEvent();
+    try std.testing.expectEqual(@as(u64, 0), attachment.event_generation_mirror);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+}
+
 const AttachmentReentrantFreeAllocator = struct {
     parent: std.mem.Allocator,
     target: ?*GenerationAttachment = null,

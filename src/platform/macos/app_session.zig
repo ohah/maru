@@ -31306,7 +31306,7 @@ pub const AppSession = struct {
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
-                    self.collectPaneTabTitles(&collected, pane_frame_builder, lr.leaf, pb, titles.items, editing_tab, text_origin_y, bar_cols);
+                    self.collectPaneTabTitles(&collected, pane_frame_builder, lr.leaf, pb, titles.items, editing_tab, pb.full, bar_cols);
 
                     // 1c) Phase 7e-1b: browser 웹 패널 주소창 밴드 — 이 pane의 **활성 탭**이 browser web Term이면 탭 바 바로
                     //     아래에 읽기전용 URL 밴드(배경 quad + URL 셀)를 그린다. collectWebSurfaces inset이 browser면 top을
@@ -34081,7 +34081,7 @@ pub const AppSession = struct {
         pb: PaneBar,
         titles: []const []const u8,
         editing_tab: ?usize,
-        text_origin_y: u32,
+        bar_rect: maru.session.SplitRect,
         bar_cols: u32,
     ) void {
         const cw = self.cell_width_px;
@@ -34090,6 +34090,13 @@ pub const AppSession = struct {
         // hit-test(`paneTabIndexAt` 등)와 **같은 메트릭**을 쓴다 — 보이는 탭과 클릭되는 탭이 갈리면 안 된다.
         const m = barMetrics(pb.tabs, cw, self.paneTermOrder(leaf).len, self.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols) orelse return;
         const active = self.paneActiveTermIndex(leaf);
+
+        // 세로 위치는 **role line box** 기준 바 중앙이다. 셀 텍스트가 쓰는 `chromeBarTextOffsetY`는
+        // `(bar_h - cell_height) / 2`라 폰트가 커지면 제목이 위로 밀린다 — measured 제목의 높이는 셀이 아니라
+        // role 토큰(pt)에서 나오므로 같은 식을 쓰면 어긋난다(24pt 캡처가 실제로 그 어긋남을 보여줬다).
+        // 사이드바 검색 줄이 상단 바 밴드에서 쓰는 것과 **같은 공식**이다.
+        const title_line_h = chrome.ui.typography.lineHeightPx(.control, self.scale_milli);
+        const title_y = bar_rect.y +| (if (bar_rect.h > title_line_h) (bar_rect.h - title_line_h) / 2 else 0);
 
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
         defer ops.deinit(self.allocator);
@@ -34123,7 +34130,7 @@ pub const AppSession = struct {
             }
             ops.append(self.allocator, .{
                 .text = .{
-                    .origin = .{ .x = @intCast(start_px), .y = @intCast(text_origin_y) },
+                    .origin = .{ .x = @intCast(start_px), .y = @intCast(title_y) },
                     .runs = runs.items[run_index .. run_index + 1],
                     // 활성 탭만 또렷하게. 셀 경로의 `active_tab_fg`/`tab_fg`에 대응하는 chrome role이다 —
                     // measured는 op당 role 하나라 색을 토큰에서 받는다(비활성 색이 미세하게 달라진다).

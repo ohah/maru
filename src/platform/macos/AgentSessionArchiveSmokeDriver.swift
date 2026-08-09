@@ -628,6 +628,16 @@ final class AgentSessionArchiveSmokeDriver {
         switch (scenario, state) {
         case (.resumePointer, .list), (.resumePointer, .loading), (.resumePointer, .ready), (.detailStale, .loading), (.detailStale, .stale):
             return true
+        // 이 시나리오는 이미 14pt/24pt를 오가며 rect를 재고 있다(geometry). 같은 실행에서 목록 캡처도 남겨,
+        // "큰 폰트에서 chrome 텍스트가 바 밴드 안에 머무는가"를 수치와 그림으로 함께 보게 한다 —
+        // measured 이관(docs/file-explorer.md §3.5)이 고친 것이 정확히 그 결함이다.
+        //
+        // 캡처 경로는 시나리오 이름 하나로 정해지므로 네 조합(14/24 × 1x/2x)이 같은 파일을 노린다. 캡처
+        // 콜백은 덮어쓰기를 막으려고 이미 있는 파일을 거부하므로, **셸 하네스가 매 실행 전에 지우고 실행
+        // 후 접미사 이름으로 보관한다**(geometry와 같은 규율). 그 규율이 없으면 2회차부터 캡처가 실패하고
+        // 시나리오 전체가 실패한다.
+        case (.fontScaleRects, .list):
+            return true
         default:
             return false
         }

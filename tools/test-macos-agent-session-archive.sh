@@ -50,6 +50,7 @@ run_scenario() {
     font_config=
     summary_name=$scenario
     geometry_name=
+    capture_name=
     if [ "$scenario" = font-scale-rects ]; then
         case "$font_size:$render_scale" in
             14:1000|14:2000|24:1000|24:2000)
@@ -57,7 +58,12 @@ run_scenario() {
                 cp "tests/fixtures/agent-session-archive/font-size-$font_size.config" "$font_config"
                 summary_name="$scenario-font-$font_size-scale-$render_scale"
                 geometry_name="$root/$summary_name.geometry.json"
-                rm -f "$root/font-scale-rects.geometry.json" "$geometry_name"
+                # 캡처 경로는 시나리오 이름 하나로 정해져 네 조합이 같은 파일을 노린다. 캡처 콜백은
+                # 덮어쓰기를 막으려고 이미 있는 파일을 거부하므로(그대로 두면 2회차부터 시나리오가 실패),
+                # geometry와 같은 규율로 **실행 전에 지우고 실행 후 접미사 이름으로 보관**한다.
+                capture_name="$root/captures/$summary_name-list.ppm"
+                rm -f "$root/font-scale-rects.geometry.json" "$geometry_name" \
+                    "$root/captures/font-scale-rects-list.ppm" "$capture_name"
                 ;;
             *)
                 echo "font-scale-rects requires 14|24 pt and 1000|2000 scale" >&2
@@ -126,6 +132,10 @@ run_scenario() {
     if [ -n "$geometry_name" ]; then
         test -s "$root/font-scale-rects.geometry.json"
         cp "$root/font-scale-rects.geometry.json" "$geometry_name"
+    fi
+    if [ -n "$capture_name" ]; then
+        test -s "$root/captures/font-scale-rects-list.ppm"
+        cp "$root/captures/font-scale-rects-list.ppm" "$capture_name"
     fi
 }
 
@@ -271,7 +281,7 @@ grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/claude-resu
 # The two sentinel cold processes cover every product detail state without making every action
 # variant perform expensive Metal readback. `sips` only repackages renderer-written PPM so the
 # resulting PNG is reviewable in a PR; it never captures an AppKit view through another path.
-for capture in resume-pointer-list resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale expanded-scroll-anchor-scroll-anchor-before expanded-scroll-anchor-scroll-anchor-after; do
+for capture in resume-pointer-list resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale expanded-scroll-anchor-scroll-anchor-before expanded-scroll-anchor-scroll-anchor-after font-scale-rects-font-14-scale-1000-list font-scale-rects-font-24-scale-1000-list; do
     ppm="$root/captures/$capture.ppm"
     png="$root/captures/$capture.png"
     test -s "$ppm"

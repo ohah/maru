@@ -18,6 +18,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const terminal = @import("../terminal.zig");
 const pty = @import("../pty.zig");
+const resource_usage = @import("../session/resource_usage.zig"); // seam은 순수 타입을 쓴다(플랫폼 타입을 위로 올리지 않는다)
 const surface_mod = @import("../session/surface.zig");
 const live_surface_registry = @import("../session/live_surface_registry.zig");
 const runtime_mod = @import("runtime.zig");
@@ -54,6 +55,7 @@ pub const InProcessTermBackend = struct {
         .finish_after_termination = finishAfterTermination,
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
+        .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
         .read_observation = readObservation,
         .refresh_observation = readObservation,
@@ -192,6 +194,24 @@ pub const InProcessTermBackend = struct {
         const t = self.terminalSlot(handle) orelse return null;
         return t.live_pty.session.foregroundProcessGroup();
     }
+
+    fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []resource_usage.Sample) usize {
+        const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
+        const t = self.terminalSlot(handle) orelse return 0;
+        // 플랫폼 타입 → 순수 타입 변환은 **여기 한 곳**이다. seam 위(app_session)는 pty 타입을 모른다.
+        var raw: [max_resource_samples]pty.types.ProcessResourceSample = undefined;
+        const room = @min(out.len, raw.len);
+        const n = t.live_pty.session.resourceSamples(raw[0..room]);
+        for (raw[0..n], out[0..n]) |src, *dst| dst.* = .{
+            .pid = src.pid,
+            .footprint_bytes = src.footprint_bytes,
+            .cpu_ns = src.cpu_ns,
+        };
+        return n;
+    }
+
+    /// 한 번에 변환할 표본 상한(스택 버퍼). 호출자가 더 큰 out을 줘도 이만큼씩만 채운다.
+    const max_resource_samples: usize = 64;
 
     fn foregroundProcessNames(ctx: *anyopaque, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));

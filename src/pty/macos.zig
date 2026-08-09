@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin"); // 이 파일은 macOS 전용이지만 테스트는 Linux CI에서도 컴파일된다 — skip 가드용
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 // maru 자체 terminfo 로컬 캐시(경로·버전·컴파일 명령)의 단일 출처. `maru terminfo` 서브커맨드(cli)와 공유해,
@@ -48,6 +49,74 @@ extern "c" fn proc_listpgrppids(pgrpid: c_int, buffer: ?*anyopaque, buffersize: 
 // 그룹으로 띄우므로(실측: claude pgid 33854 ↔ 자식 pgid 83612) foreground pgid 열거로는 그 자식을 못 본다.
 // 세션 신원 env는 **자식에게만** 내려오므로(agentSessionIdentity) 자식을 직접 열거해야 한다. 공개 libproc API.
 extern "c" fn proc_listchildpids(ppid: c_int, buffer: ?*anyopaque, buffersize: c_int) c_int;
+// proc_pid_rusage: pid 하나의 누적 자원 사용량. 공개 libproc API(<libproc.h>, macOS 10.9+).
+// **V0을 쓴다** — 필요한 세 필드(ri_phys_footprint·ri_user_time·ri_system_time)가 V0에 이미 있고 V2와 값이
+// 같은데(실측), 필드가 11개(96바이트)뿐이라 손으로 옮기는 extern struct가 틀릴 여지가 가장 작다.
+extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: ?*anyopaque) c_int;
+const rusage_info_v0: c_int = 0;
+
+/// `struct rusage_info_v0`(<sys/resource.h>) 미러. 순서·크기가 헤더와 **정확히** 같아야 한다 —
+/// 어긋나면 컴파일러가 못 잡고 값만 조용히 쓰레기가 된다. 아래 comptime 단언이 크기 드리프트를 잡는다.
+const RusageInfoV0 = extern struct {
+    uuid: [16]u8,
+    user_time: u64,
+    system_time: u64,
+    pkg_idle_wkups: u64,
+    interrupt_wkups: u64,
+    pageins: u64,
+    wired_size: u64,
+    resident_size: u64,
+    phys_footprint: u64,
+    proc_start_abstime: u64,
+    proc_exit_abstime: u64,
+};
+comptime {
+    // 16 + 10×8 = 96. 헤더가 바뀌거나 필드를 빠뜨리면 여기서 멈춘다.
+    if (@sizeOf(RusageInfoV0) != 96) @compileError("rusage_info_v0 레이아웃이 헤더와 어긋난다");
+}
+
+/// 한 pid의 자원 표본. 실패(죽은 pid·권한 밖)면 null — **구조체를 읽지 않는다.**
+/// `rc != 0`이면 out이 안 채워져 쓰레기가 나온다(실측: 7.6e12 MB). 샘플링 중 프로세스가 사라지는 것은 정상이다.
+pub fn processResourceSample(pid: std.c.pid_t) ?types.ProcessResourceSample {
+    var info: RusageInfoV0 = undefined;
+    if (proc_pid_rusage(@intCast(pid), rusage_info_v0, &info) != 0) return null;
+    return .{
+        .pid = @intCast(pid),
+        .footprint_bytes = info.phys_footprint,
+        .cpu_ns = info.user_time +| info.system_time,
+    };
+}
+
+/// `root`와 그 자손의 표본을 `out`에 채우고 개수를 돌려준다(깊이·개수 상한 안에서).
+/// `proc_listchildpids`는 **직속 자식만** 주므로 재귀한다. 상한은 폭주 방어다 — fork 폭탄이나 순환에서
+/// tick을 붙잡지 않는다(docs/status-bar.md §6 "비용과 게이트").
+pub fn processTreeSamples(root: std.c.pid_t, out: []types.ProcessResourceSample) usize {
+    if (out.len == 0 or root <= 0) return 0;
+    var n: usize = 0;
+    collectProcessTree(root, out, &n, 0);
+    return n;
+}
+
+const max_process_tree_depth: u32 = 8;
+
+fn collectProcessTree(pid: std.c.pid_t, out: []types.ProcessResourceSample, n: *usize, depth: u32) void {
+    if (n.* >= out.len or depth > max_process_tree_depth) return;
+    if (processResourceSample(pid)) |sample| {
+        out[n.*] = sample;
+        n.* += 1;
+    }
+    // 표본을 못 얻어도 자식은 훑는다 — 부모가 권한 밖이어도 자식이 우리 것일 수 있다.
+    // ⚠️ `proc_listchildpids`는 **pid 개수**를 돌려준다(바이트가 아니다 — 이 파일 위쪽 905·922행이 같은 규약을
+    // 쓴다). 바이트로 보고 4로 나누면 자식이 늘 0이 되어 트리를 못 내려간다(실측으로 그렇게 깨져 있었다).
+    var kids: [64]c_int = undefined;
+    const child_count = proc_listchildpids(@intCast(pid), &kids, @intCast(@sizeOf(@TypeOf(kids))));
+    if (child_count <= 0) return;
+    const count = @min(@as(usize, @intCast(child_count)), kids.len);
+    for (kids[0..count]) |kid| {
+        if (kid <= 0 or kid == pid) continue; // 자기 자신을 자식으로 받으면 무한 재귀다
+        collectProcessTree(@intCast(kid), out, n, depth + 1);
+    }
+}
 extern "c" fn getpgid(pid: c_int) c_int;
 // KERN_PROCARGS2: pid의 argv/envp 덤프(공개 macOS sysctl — ps·libproc도 같은 방식). codex처럼 `#!/usr/bin/env node`
 // 스크립트로 도는 에이전트는 proc_name이 "node"라 미감지되므로, comm이 인터프리터면 argv[1] 스크립트 basename
@@ -869,6 +938,14 @@ pub const PtySession = struct {
     /// proc_listpgrppids 뒤 getpgid를 다시 확인해 열거와 이름 조회 사이 PID 재사용도 다른 그룹 이름으로 오인하지 않는다.
     /// comm이 interpreter/버전 문자열이면 argv basename으로 해소하지만, provider 판정은 app 계층이 맡는다.
     /// **틱 스레드에서만 호출**(정적 procargs_buf 공유, close와 fd lifecycle 규약은 foregroundProcessGroup과 동일).
+    /// 이 세션의 프로세스 트리(셸 + 자손) 자원 표본. 상태바 리소스 항목이 backend seam으로 가져간다.
+    /// 뿌리는 `child_pid`다 — login(1) wrapper가 뿌리여도 그 자손을 재귀로 훑으므로 실제 셸·에이전트가 잡힌다.
+    /// 닫히는 중이면 0(죽은 pid를 훑어 봐야 실패만 쌓인다).
+    pub fn resourceSamples(self: *PtySession, out: []types.ProcessResourceSample) usize {
+        if (out.len == 0 or self.closing.load(.acquire) or self.exited.load(.acquire)) return 0;
+        return processTreeSamples(self.child_pid, out);
+    }
+
     pub fn foregroundProcessNames(self: *PtySession, out: []types.ForegroundProcessName) usize {
         if (out.len == 0 or self.closing.load(.acquire)) return 0;
         const fd = self.master_fd.load(.acquire);
@@ -996,6 +1073,69 @@ pub const PtySession = struct {
         }
     }
 };
+
+test "processResourceSample: 자기 프로세스는 그럴듯한 값을 준다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const me = std.c.getpid();
+    const s = processResourceSample(me) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, @intCast(me)), s.pid);
+    // 살아서 이 코드를 돌고 있으니 메모리는 1 MiB 이상이고, 테스트 프로세스가 64 GiB를 쓸 리는 없다.
+    // (상한이 있어야 **레이아웃이 어긋나 엉뚱한 필드를 읽는 경우**를 잡는다 — 그때 값이 천문학적으로 튄다.)
+    try std.testing.expect(s.footprint_bytes > 1024 * 1024);
+    try std.testing.expect(s.footprint_bytes < 64 * 1024 * 1024 * 1024);
+    try std.testing.expect(s.cpu_ns > 0);
+    try std.testing.expect(s.cpu_ns < 24 * std.time.ns_per_hour);
+}
+
+test "processResourceSample: 없는 pid는 null이다(쓰레기값을 읽지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // pid 0은 커널 자리라 rusage가 실패한다. 실패를 null로 돌려주지 않으면 미초기화 구조체를 읽어
+    // 7.6e12 MB 같은 값이 나온다(실측).
+    try std.testing.expect(processResourceSample(0) == null);
+}
+
+test "processTreeSamples: 뿌리뿐 아니라 **자손까지** 담는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var buf: [64]types.ProcessResourceSample = undefined;
+    const me = std.c.getpid();
+
+    // **뿌리만 확인하면 자식 열거가 깨져도 통과한다.** 실제로 그렇게 깨져 있었다:
+    // `proc_listchildpids`는 pid **개수**를 돌려주는데 바이트로 보고 4로 나눠 자식이 늘 0이었고,
+    // 제품에서는 뿌리가 setuid root인 `login(1)`이라 그 자신은 EPERM으로 표본이 안 잡혀 **합계가 0**이었다.
+    // 그래서 여기서 자식을 하나 만들어 트리가 실제로 내려가는지 본다.
+    const child = std.c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) {
+        // 자식: 부모가 표본을 뜰 때까지 살아 있기만 하면 된다(그 뒤 부모가 죽인다).
+        // Zig 0.16 std.c에 usleep이 없다 — 저장소가 쓰는 poll 대기 패턴을 그대로 쓴다.
+        while (true) {
+            var delay_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+            _ = std.c.poll(@ptrCast(&delay_fd), 0, 50);
+        }
+        std.c._exit(0);
+    }
+    defer {
+        _ = std.c.kill(child, std.c.SIG.KILL);
+        var status: c_int = 0;
+        _ = std.c.waitpid(child, &status, 0);
+    }
+
+    const n = processTreeSamples(me, &buf);
+    try std.testing.expect(n >= 2); // 나 + 방금 만든 자식
+    try std.testing.expect(n <= buf.len);
+    try std.testing.expectEqual(@as(i32, @intCast(me)), buf[0].pid);
+    var saw_child = false;
+    for (buf[0..n]) |sample| {
+        if (sample.pid == @as(i32, @intCast(child))) saw_child = true;
+    }
+    try std.testing.expect(saw_child);
+
+    // out이 비면 아무것도 안 쓴다(경계).
+    var empty: [0]types.ProcessResourceSample = undefined;
+    try std.testing.expectEqual(@as(usize, 0), processTreeSamples(me, &empty));
+    // 유효하지 않은 뿌리도 안전하다.
+    try std.testing.expectEqual(@as(usize, 0), processTreeSamples(0, &buf));
+}
 
 // execve는 argv 문자열들이 child가 exec될 때까지 유효해야 한다.
 // 그래서 request의 slice를 그대로 빌려 쓰지 않고, null-terminated 복사본을 session spawn 중에 보관한다.

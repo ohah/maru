@@ -82,6 +82,13 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
+    /// 비-macOS 스텁 — macOS backend의 resourceSamples와 구조 동기. 지원 backend가 없어 표본이 없다.
+    pub fn resourceSamples(self: *UnsupportedPtySession, out: []types.ProcessResourceSample) usize {
+        _ = self;
+        _ = out;
+        return 0;
+    }
+
     /// 비-macOS 스텁 — macOS backend의 foregroundProcessNames와 구조 동기. 지원 backend가 없어 빈 목록이다.
     pub fn foregroundProcessNames(self: *UnsupportedPtySession, out: []types.ForegroundProcessName) usize {
         _ = self;

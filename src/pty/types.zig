@@ -117,6 +117,15 @@ pub fn appendSingleQuoted(allocator: std.mem.Allocator, buf: *std.ArrayList(u8),
     try buf.append(allocator, '\'');
 }
 
+/// 프로세스 하나의 자원 표본(상태바 리소스 항목 — docs/status-bar.md §6).
+/// 값의 뜻은 플랫폼 어댑터가 정한다: macOS는 `ri_phys_footprint`와 user+system CPU 누적 나노초다.
+/// 계산(합산·차분·포맷)은 이 타입을 받는 `session.resource_usage`가 순수하게 한다.
+pub const ProcessResourceSample = struct {
+    pid: i32,
+    footprint_bytes: u64,
+    cpu_ns: u64,
+};
+
 pub fn plannedBackendForMacOS() Backend {
     return .macos_openpty;
 }

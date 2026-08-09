@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const notification_ops = @import("notification.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
@@ -35,7 +36,7 @@ const sidebar_search_icon_col = app_session_mod.sidebar_search_icon_col;
 const workspaceLabel = app_session_mod.workspaceLabel;
 const MeasuredTextCache = app_session_mod.MeasuredTextCache;
 const agentIconCodepoint = app_session_mod.agentIconCodepoint;
-const notificationBadgeCol = AppSession.notificationBadgeCol;
+const notificationBadgeCol = @import("notification.zig").notificationBadgeCol;
 const packRgbAlpha = app_session_mod.packRgbAlpha;
 const sidebar_scrollbar_min_thumb_px = app_session_mod.sidebar_scrollbar_min_thumb_px;
 const sidebar_toggle_codepoint = app_session_mod.sidebar_toggle_codepoint;
@@ -2225,7 +2226,7 @@ pub fn buildCollapsedToggleDrawList(self: *AppSession) !?renderer.DrawList {
     if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
     const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
     const btn_col = self.collapsedToggleCol();
-    const bell_col = self.collapsedBellCol();
+    const bell_col = notification_ops.collapsedBellCol(self);
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(self.allocator);
     // 좌→우: 종+배지(가장 왼쪽, 펼침 헤더와 같은 순서) → ◧ 펼치기 토글. 알림 종은 접힘에도 유지 — 펼침 헤더와 같은

@@ -32,6 +32,7 @@ const icons = maru.icons;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 아직 그쪽 소유(이 PR 한계)
 const AppSession = app_session_mod.AppSession;
+const tab_ops = @import("tab.zig");
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
@@ -424,7 +425,7 @@ pub fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?Agent
         .project => self.agent_session_archive_project_scope_requested = true,
         .all => unreachable,
     };
-    const term = self.activeTab().activeTerm();
+    const term = tab_ops.activeTab(self).activeTerm();
     self.refreshTermObservation(term, false, false);
     const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) {
@@ -2047,7 +2048,7 @@ pub fn focusLiveArchiveSession(self: *AppSession, detail: *const InlineArchiveDe
             .codex => term.agent_kind == .codex,
         };
         if (!provider_matches or !std.mem.eql(u8, term.agent_transcript.identity(), detail.record.parsed.session_id)) continue;
-        _ = self.switchTab(tab_index);
+        _ = tab_ops.switchTab(self, tab_index);
         _ = pane_ops.focusPaneByPtr(self, pane);
         self.focusTerm(term_index);
         return true;

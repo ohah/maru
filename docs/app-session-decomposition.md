@@ -19,6 +19,12 @@
 | 2026-06 | 20,183 | 이 문서 최초 측정 · (b) 결정 시점 |
 | 2026-07 | 35,134 | (b) "일단락" 이후 |
 | 2026-08-08 | **72,317** | (b) 결정 대비 3.6배 |
+| 2026-08-09 (F6까지) | **64,497** | F1·F2·F4·F5·F6로 −7,820. 그룹 파일 6개 합계 9,909줄 |
+
+> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). 남은 F7~F10을 이름 기준으로 다 옮겨도
+> `app_session.zig`에는 test 블록 33,000줄대와 허브(`tick`·`mouse`·`handleKeyEvent`)가 남으므로
+> **56,000줄대**가 착지점이다. 그보다 더 줄이려면 test 소유처를 따로 정해야 하고, 그 값은 §2-c-3 실측대로
+> pub화 6배다.
 
 **거대 메서드 top(2026-08-08)**: `tick`(1,484)·`mouse`(978)·`maybeDebugOpenSettings`(568)·`handleKeyEvent`(401)·`buildSidebarTitleDrawList`(363)·`deinit`(322)·`rebuildSidebar`(320)·`hoverCursor`(256)·`updateFileTree`(217)·`init`(205). `tick`/`mouse`/`handleKeyEvent`는 **오케스트레이션 허브**(프레임 루프·입력 라우터)다 — `tick`은 멀티 페인 통합 빌드(`collectShaped`→`placeMultiPane`→`placeAndDistribute`, 활성 panel `shapeOnlyBuild` 합류)를 품는다. (`buildSidebarTitleFrame`/`buildChromeOverlayFrame`/`buildFloatingTabFrame`은 통합 후 production 미사용이라 test 전용 free 헬퍼로 분리했다.)
 
@@ -104,7 +110,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F2** ✅ | 파일 탐색기·파일 패널 | 3,840(메서드) | 중 | **한 파일**(`file_panel.zig`)로 — 분할하면 순환 때문에 pub화가 는다(아래). 2026-08-09 완료, pub화 50 |
 | **F4** ✅ | pane · split · divider | 1,570(메서드) | 중 | 2026-08-09 완료 → `app_session/pane.zig`, pub화 43 |
 | **F5** ✅ | 도크 일반(view·레이아웃·스크롤바) | 484(메서드) | 낮음 | 2026-08-09 완료 → `app_session/dock.zig`, pub화 4(예측과 일치) |
-| **F6** | tab | ~1,590 | 낮음 | |
+| **F6** ✅ | tab(생성·전환·이동·고정·그룹·제목) | 1,254(메서드) | 낮음 | 2026-08-09 완료 → `app_session/tab.zig`, pub화 41 |
 | **F7** | sidebar | ~1,620 | 중 | `metal_frame` 셀·색 결합(옛 E4 실측) |
 | **F8** | scroll | ~1,440 | 낮음 | |
 | **F9** | settings · context menu · rename | ~1,830 | 낮음 | |
@@ -161,6 +167,27 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > 그 결과 F5는 **pub화 4개가 예측과 정확히 일치**한 첫 그룹이 됐다(F2 26→50, F4 35→43). 그룹이 작고
 > 경계가 깨끗하면 추정이 맞는다는 뜻이지, 추정 방법이 나아진 것은 아니다 — §2-c-2의 규칙은 그대로다.
+
+> **부분 문자열 함정(F6).** `tab`은 `stable`·`established`·`editable`·`executable`의 부분 문자열이라
+> 이름 일치만으로 `stablePartitionPinned`·`stablePartitionSubtree`·`reestablishTopLevelBoundaryOnMove`·
+> `stableOpenedFileHash`·`webContextIsEditable`·`writeExecutableFile` 여섯이 딸려온다. 단어 경계
+> (`(^|[a-z])[Tt]ab([A-Z]|s\b|bar|Bar|$)`)로 걸러 제외했다 — F4의 `pane`↔`filePanel`과 같은 유형이고,
+> 이름으로 경계를 잡는 이상 그룹마다 먼저 확인해야 한다.
+>
+> **반대 방향도 있다(F6).** 호출 관계로만 딸려오는 `projectRowsFrom`(사이드바 행 투영)·`setHoveredScroll`
+> (스크롤 hover)은 유일한 호출자가 탭 함수일 뿐 내용은 각각 F7·F8 소유다. 지금 `tab.zig`로 옮기면 다음
+> 그룹에서 도로 옮겨야 하고, 남겨서 치르는 값은 pub화 1개뿐이라 제외했다. **소유는 호출 근접성이 아니라
+> 내용으로 정한다** — 이름 함정과 같은 규칙을 반대 방향으로 적용한 것이다.
+>
+> 실제 결과: `app_session.zig` 65,907 → 64,497(−1,410), `tab.zig` 1,567줄(메서드 48 + `*Tab`만 보는 순수
+> 판정 10), pub화 41개(그중 **함수는 26개**, 나머지 15개는 타입·색 상수 등
+> 함수 아닌 선언이라 예측 하한 18의 대상 밖이었다 — §2-c-2 "추정치는 하한이다"의 네 번째 사례).
+> 반대로 `app_session.zig`의 pub 10개는 **사라졌다**(탭 함수 9개가 옮겨 갔고 `file_panel_ops` 재수출을
+> 없앴다) — 허브의 pub 표면 순증은 31개다, test 771개 전원 잔류, `test-macos-app-host-abi` 2,840 passed / 0 failed.
+>
+> 이 그룹에서 그룹 파일끼리의 참조를 `app_session.zig`의 재수출(`pub const pane_ops = ...`) 경유에서
+> **직접 `@import`**로 바로잡았다(`pane.zig`의 `file_panel_ops` 포함). 허브를 경유할 이유가 없고,
+> 경유하면 허브의 pub 표면이 그룹 수만큼 늘어난다.
 
 라인 수치는 **메서드 이름 기준 근사치**다. 각 단계 착수 시 실제 응집도(허브 결합·cross-group accessor)를 코드로 재검증하고 그 결과로 범위를 정정한다 — 이 문서의 사전 추정은 E1·E4·E5에서 세 번 빗나갔다([[roadmap-docs-stale-verify-with-code]]).
 

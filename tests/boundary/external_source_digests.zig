@@ -165,7 +165,10 @@ pub const inventory = [_]Proof{
     // 헤더 아이콘 줄 원점을 뽑은 헬퍼와 상수뿐이고, Client 구성·receiver 집합과는 무관하다.
     // 도크 일반(view·레이아웃·스크롤바)을 `app_session/dock.zig`로 떼어내며 또 바뀐다(F5). count는 4
     // 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor 4개를 pub으로 연 것뿐이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "92dc29503de288da4b3688afa1c14454e24a3911cced92afc7cdc33f2dbc7b73" },
+    // 탭(생성·전환·이동·고정·그룹·제목)을 `app_session/tab.zig`로 떼어내며 또 바뀐다(F6). count는 4
+    // 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor를 열고(41) 옮겨간 탭 함수 pub을 닫은
+    // 것뿐이다. 그룹 파일끼리 `app_session.zig` 재수출을 거치던 참조도 직접 `@import`으로 바꿨다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "8085ae7de1391118cfa2dac8f1a9fe07a85e147f290242744488dd930789382a" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

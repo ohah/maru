@@ -1056,9 +1056,18 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
     // **토큰 경로는 원래 식을 그대로 둔다.** `point_size`는 glyph에 실려 `raster_font_size_milli`가
     // 되므로 그 의미(논리 pt)를 바꾸면 도크·탭의 래스터 크기가 달라진다 — Lab이 1× 고정이라
     // 골든으로는 드러나지 않고 Retina에서만 2배가 되는 종류의 회귀다.
-    // **둘은 짝이다.** 한쪽만 오면 폰트는 셀을 따라 커지는데 줄 상자는 토큰 고정이라(또는 그 반대)
+    // **셋은 한 묶음이다.** 한쪽만 오면 폰트는 셀을 따라 커지는데 줄 상자는 토큰 고정이라(또는 그 반대)
     // 글자가 잘리거나 여백이 어긋난다. 호출자가 실수하면 여기서 멈춘다.
+    //
+    // `cell_w_px`도 같이 잰다. 앞서 이 assert는 앞의 둘만 봤는데, **빠진 하나가 하필 배치 의미를 가르는
+    // 필드**였다 — 없으면 백엔드가 글자 x를 폰트 advance로 놓아(measured) 격자를 벗어난다. 등폭이어도
+    // advance 7.8px vs 셀 8px이라 두 번째 글자부터 어긋나고, 이 결함은 **컴파일도 테스트도 통과하고
+    // 화면에서만** 드러난다(실측 이력: 계산 x=224인데 화면 x=167 — 캡처가 잡았다).
+    //
+    // 골든은 이 부류를 못 막는다. 회귀는 잡지만 **첫 구현은 그 상태로 비준**한다 —
+    // `editor-font-large.ppm`이 이 스택에서 다섯 번 갱신됐고, 글리프가 안 커지던 동안에도 통과했다.
     std.debug.assert((run.font_px == null) == (run.line_height_px == null));
+    std.debug.assert((run.font_px == null) == (run.cell_w_px == null));
     const token_pt = chrome.ui.typography.token(run.role).point_size;
     const point_size: u16 = if (run.font_px) |px| @max(1, px) else token_pt;
     // 셀 경로의 크기는 **이미 device 픽셀**이라 backing scale을 다시 곱하지 않는다(호출자가 반영해

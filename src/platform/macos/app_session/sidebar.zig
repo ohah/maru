@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const scroll_ops = @import("scroll.zig");
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
 const metal_frame = app_session_mod.metal_frame;
@@ -382,15 +383,15 @@ pub fn routeSidebarScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) boo
     buildSidebarScrollTree(self);
     const snapshot = sidebarScrollTree(self);
     if (snapshot.entries.len == 0) {
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         return true;
     }
     const live = sidebarScrollbarGeometry(self) orelse {
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         return true;
     };
     if (!file_panel_ops.fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         return true;
     }
     // 매 move마다 tree를 다시 발행하므로(thumb이 움직인다) capture를 **넘겨야** 한다 — 평범한
@@ -404,11 +405,11 @@ pub fn routeSidebarScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) boo
         .domain_identity = 0,
     };
     _ = chrome.ui.interaction.reconcileCarryingCapture(&self.scrollbar_interaction, snapshot, key, key) catch {
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         return true;
     };
     if (self.scrollbar_interaction.capture == null) {
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         return true;
     }
     const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
@@ -419,7 +420,7 @@ pub fn routeSidebarScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) boo
         .button = .left,
         .generation = snapshot.generation,
     }) catch {
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         return true;
     };
     if (dispatched.drag) |event| switch (event) {
@@ -429,12 +430,12 @@ pub fn routeSidebarScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) boo
         },
         .dropped => |update| {
             self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
-            self.applyPendingScrollbarScroll();
-            self.endScrollbarCapture();
+            scroll_ops.applyPendingScrollbarScroll(self);
+            scroll_ops.endScrollbarCapture(self);
         },
-        .cancelled => self.endScrollbarCapture(),
+        .cancelled => scroll_ops.endScrollbarCapture(self),
     };
-    if (kind == 3) self.endScrollbarCapture();
+    if (kind == 3) scroll_ops.endScrollbarCapture(self);
     return true;
 }
 
@@ -1182,7 +1183,7 @@ pub fn appendSidebarScrollbar(self: *AppSession) void {
     if (snapshot.entries.len == 0) return;
     // 호버·드래그 중이면 full로 — 커서를 안 바꾸는 대신 이 강조가 "잡을 수 있다"를 알린다(도크와 같은 규율).
     const emphasized = self.sidebar_scrollbar_hovered or (self.scrollbar_drag_target == .sidebar);
-    const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.sidebar_scrollbar_idle_ticks);
+    const alpha: u8 = if (emphasized) scrollbar_alpha_full else scroll_ops.scrollbarAlpha(self, self.sidebar_scrollbar_idle_ticks);
 
     var ops: [sidebar_scroll_max_entries]chrome.draw.Op = undefined;
     const tokens = self.buildChromeTokens();

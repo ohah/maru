@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const scroll_ops = @import("scroll.zig");
 const PendingDockFocus = app_session_mod.PendingDockFocus;
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
@@ -1645,7 +1646,7 @@ pub fn advanceFileTreeProjectionGeneration(self: *AppSession) void {
     self.dock_list_scroll_entry_count = 0;
     self.dock_list_scrollbar_hovered = false;
     self.sidebar_scrollbar_hovered = false;
-    if (self.scrollbarCaptureActive()) self.endScrollbarCapture();
+    if (scroll_ops.scrollbarCaptureActive(self)) scroll_ops.endScrollbarCapture(self);
 }
 
 pub fn advanceDockAsyncEpoch(self: *AppSession) void {

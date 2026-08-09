@@ -3523,6 +3523,9 @@ pub const AppSession = struct {
     dock_list_scroll_generation: u64 = 0,
     /// 사이드바 스크롤바의 발행 저장소(SV4a). 도크 목록과 **따로** 둔다 — 둘은 동시에 화면에 있으므로
     /// 하나를 발행하면 다른 하나가 지워지는 자리를 만들면 안 된다(뷰를 갈아끼우는 도크와 다른 조건이다).
+    /// 알림 패널의 스크롤 창(SV5a-2) — 세팅과 같은 형태로 컴포넌트가 준다. 저장하는 상태가 아니라
+    /// 같은 프레임 안에서 발행 지점으로 넘기는 값이다.
+    notif_scroll_view: ?chrome.components.notifications.ScrollView = null,
     /// 세팅 폼의 스크롤 창 — `buildChromeOverlayPrep`이 컴포넌트에서 받아 두고 발행 지점이 읽는다.
     /// 저장하는 상태가 아니라 같은 프레임 안에서 넘기는 값이다(팔레트와 같은 규율 — SV5b).
     settings_scroll_view: ?chrome.components.settings.ScrollView = null,
@@ -26319,6 +26322,10 @@ pub const AppSession = struct {
                     // 덮어 화면에서 사라진다(실측). 버킷이 다른 도크·사이드바 막대와 다른 점이다.
                     self.appendPaletteScrollbar();
                     if (self.settings_scroll_view) |sv| self.appendSettingsScrollbar(sv);
+                    if (self.notif_scroll_view) |sv| self.appendOverlayScrollbar(sv.viewport, .{
+                        .offset_px = sv.offset_px,
+                        .content_h_px = sv.content_h_px,
+                    }); // SV5a-2: 알림도 공용 경로 — 컴포넌트가 손수 그리던 2px 막대를 지웠다
                 }
             }
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
@@ -31413,6 +31420,9 @@ pub const AppSession = struct {
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
+        // **리셋은 설정보다 앞이다.** 처음에 세팅 리셋 옆에 뒀다가 방금 넣은 값을 그 자리에서 지워
+        // 막대가 화면에서 사라졌다(실측) — 세팅은 설정이 리셋 뒤라 살아남았고 알림만 순서가 반대였다.
+        self.notif_scroll_view = null; // 알림이 닫히면 막대도 없다 — 남기면 stale 막대가 뜬다
         var notif_items: []const chrome.components.notifications.Item = &.{}; // caret 배치(append 후)에 재사용 — 같은 패널 rect
         if (self.chrome_host.notifications.open) {
             notif_items = try self.buildNotificationItems(arena); // 히스토리 → 카드(역순) 주입
@@ -31420,6 +31430,7 @@ pub const AppSession = struct {
             // 다음 프레임들의 hoverCursor coarse 게이트가 쓸 패널 content rect를 캐시한다(이미 빌드한 notif_items 재사용 —
             // 추가 비용 없음). 게이트가 이 rect로 "포인터가 패널 밖이면 빌드 스킵"을 판정한다(notif_panel_rect 주석 참조).
             self.notif_panel_rect = chrome.components.notifications.panelRect(&self.chrome_host.notifications, notif_items, props);
+            self.notif_scroll_view = chrome.components.notifications.scrollView(&self.chrome_host.notifications, notif_items, props);
             try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
         }
         self.settings_search_caret = null; // 세팅 안 열림/검색 아님이면 없음(imeCursorRect가 터미널 커서로 폴백)
@@ -50829,6 +50840,43 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
 // 선택과 무관하게 목록을 움직이므로 그 방식으로는 표현할 수 없다. 대신 선택이 창 밖으로 나가면
 // `followPaletteSelection`이 **미리** 당긴다 — 두 축을 렌더에서 함께 풀면 굴린 자리가 매 프레임
 // 선택 쪽으로 되돌아간다.
+// SV5a-2 — 알림 막대도 공용 경로로 발행한다(컴포넌트가 손수 그리던 2px 직사각을 지웠다). 발행 재료를
+// 프레임 안에서 넘기므로 **리셋이 설정보다 앞**이어야 한다 — 뒤에 두면 방금 넣은 값을 그 자리에서
+// 지워 막대가 화면에서 사라진다(실제로 그렇게 나갔다).
+test "notification scroll view survives the frame that produced it" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 알림을 패널이 넘칠 만큼 쌓는다 — 안 넘치면 막대가 없어 이 테스트가 아무것도 판정하지 못한다.
+    for (0..40) |_| {
+        const title = allocator.dupe(u8, "t") catch break;
+        const body = allocator.dupe(u8, "b") catch break;
+        session.notification_history.append(allocator, .{ .title = title, .body = body, .surface_id = 0, .timestamp_ns = 0 }) catch break;
+    }
+    session.openNotificationPanel();
+    if (!session.chrome_host.notifications.open) return error.PanelDidNotOpen;
+
+    // 프레임을 한 번 돌린 뒤에도 발행 재료가 **살아 있어야** 한다. prep은 DrawList를 소유하므로 푼다.
+    if (session.buildChromeOverlayPrep() catch null) |prep| {
+        var dl = prep.dl;
+        dl.deinit(allocator);
+    }
+    const sv = session.notif_scroll_view orelse return error.ScrollViewClearedByItsOwnFrame;
+    try std.testing.expect(sv.viewport.h > 0);
+    try std.testing.expect(sv.content_h_px > sv.viewport.h);
+
+    // 패널을 닫으면 다음 프레임에 사라진다 — 남기면 stale 막대가 뜬다.
+    session.chrome_host.notifications.hide();
+    if (session.buildChromeOverlayPrep() catch null) |prep| {
+        var dl = prep.dl;
+        dl.deinit(allocator);
+    }
+    try std.testing.expect(session.notif_scroll_view == null);
+}
+
 test "palette scrollbar follows stored offset and the wheel, and selection pulls only when out of view" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

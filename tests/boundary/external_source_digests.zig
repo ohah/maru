@@ -158,7 +158,8 @@ pub const inventory = [_]Proof{
     // count는 4 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor 13개를 pub으로 연 것뿐이다.
     // 파일 탐색기·파일 패널을 `app_session/file_panel.zig`로 떼어내며 또 바뀐다(F2). count는 4 그대로다 —
     // 옮긴 블록에 `@field` 접근이 없고, 공용 accessor 50개를 pub으로 연 것뿐이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "6147996f614cb8502b5939cd2b5375090084ad4d10d9b2f150cfcaa648b7b40a" },
+    // SV5a-2(알림 막대를 공용 발행 경로로 — 손수 그린 복제본 제거)로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "c8d3902987e33f1beaaacda019b5588c19e68d7d3ed1b057ad9a16a20182dd37" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

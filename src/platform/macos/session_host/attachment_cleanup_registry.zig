@@ -11,6 +11,8 @@ const contract = @import("generation_attachment_contract.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
 const rpc_response_authority = @import("rpc_response_authority.zig");
 
+extern "c" fn alarm(seconds: c_uint) c_uint;
+
 pub const max_entries: usize = 4096;
 
 const RegistryLifecycle = enum(u8) {
@@ -37,6 +39,7 @@ const EventAuthorityLifecycle = enum(u8) {
     idle,
     reserved,
     live,
+    releasing,
     terminal,
 };
 
@@ -153,32 +156,66 @@ pub const EventGenerationReceipt = struct {
     owner_addr: usize,
 };
 
+pub const EventReleaseContinuation = struct {
+    event: EventGenerationReceipt,
+    completion_addr: usize,
+    registered_operation_id: u64,
+};
+
+pub const EventReleaseReadiness = enum(u8) { live, busy, terminal };
+
+pub const EventPinRecoveryPermit = struct {
+    event: EventGenerationReceipt,
+    permit_generation: u64,
+    completion_addr: usize,
+    registered_operation_id: u64,
+};
+
+pub const EventTrustedCleanup = struct {
+    pub const State = enum(u8) { live, releasing };
+
+    event: EventGenerationReceipt,
+    quarantine_slot_index: u16,
+    quarantine_reservation_generation: u64,
+    state: State,
+};
+
 const EventAuthority = struct {
     next_generation: u64 = 1,
     active_generation: u64 = 0,
     active_owner_addr: usize = 0,
+    completion_addr: usize = 0,
+    registered_operation_id: u64 = 0,
+    quarantine_slot_index: u16 = 0,
+    quarantine_reservation_generation: u64 = 0,
     lifecycle: EventAuthorityLifecycle = .idle,
 
     fn pristineExact(self: *const EventAuthority) bool {
         return eventAuthorityLifecycleRawValid(&self.lifecycle) and
             self.lifecycle == .idle and self.next_generation == 1 and
-            self.active_generation == 0 and self.active_owner_addr == 0;
+            self.active_generation == 0 and self.active_owner_addr == 0 and
+            self.completion_addr == 0 and self.registered_operation_id == 0 and
+            self.quarantine_slot_index == 0 and self.quarantine_reservation_generation == 0;
     }
 
     fn idleExact(self: *const EventAuthority) bool {
         return eventAuthorityLifecycleRawValid(&self.lifecycle) and
             self.lifecycle == .idle and self.next_generation != 0 and
-            self.active_generation == 0 and self.active_owner_addr == 0;
+            self.active_generation == 0 and self.active_owner_addr == 0 and
+            self.completion_addr == 0 and self.registered_operation_id == 0 and
+            self.quarantine_slot_index == 0 and self.quarantine_reservation_generation == 0;
     }
 
     fn settledExact(self: *const EventAuthority) bool {
         if (!eventAuthorityLifecycleRawValid(&self.lifecycle) or
-            self.active_generation != 0 or self.active_owner_addr != 0)
+            self.active_generation != 0 or self.active_owner_addr != 0 or
+            self.completion_addr != 0 or self.registered_operation_id != 0 or
+            self.quarantine_slot_index != 0 or self.quarantine_reservation_generation != 0)
             return false;
         return switch (self.lifecycle) {
             .idle => self.next_generation != 0,
             .terminal => self.next_generation == std.math.maxInt(u64),
-            .reserved, .live => false,
+            .reserved, .live, .releasing => false,
         };
     }
 };
@@ -979,6 +1016,13 @@ pub const AttachmentCleanupRegistry = struct {
     ) Error!prepared_request_authority.SettlementReadiness {
         const entry = try self.exactEntry(reservation, identity);
         if (require_drop_active and entry.lifecycle != .drop_active) return .invalid;
+        if (!eventAuthorityLifecycleRawValid(&entry.event_authority.lifecycle)) return .invalid;
+        if (!entry.event_authority.settledExact()) {
+            return switch (entry.event_authority.lifecycle) {
+                .reserved, .live, .releasing => .busy,
+                .idle, .terminal => .invalid,
+            };
+        }
         return entry.prepared_request.settlementReadiness();
     }
 
@@ -1084,6 +1128,143 @@ pub const AttachmentCleanupRegistry = struct {
             receipt.owner_addr == authority.active_owner_addr and receipt.owner_addr != 0;
     }
 
+    pub fn eventReleaseReadiness(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) Error!EventReleaseReadiness {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle)) return error.InvalidState;
+        return switch (authority.lifecycle) {
+            .live => .live,
+            .reserved => .busy,
+            .idle, .releasing, .terminal => .terminal,
+        };
+    }
+
+    pub fn beginEventReleaseNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+        completion_addr: usize,
+        registered_operation_id: u64,
+    ) EventReleaseContinuation {
+        if (completion_addr == 0 or registered_operation_id == 0)
+            @panic("event release continuation identity is empty");
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event release lost binding authority");
+        const authority = &entry.event_authority;
+        if (!eventReceiptMatches(self, entry, authority, identity, receipt) or authority.lifecycle != .live or
+            authority.completion_addr != 0 or authority.registered_operation_id != 0)
+            @panic("event release lost live authority");
+        authority.completion_addr = completion_addr;
+        authority.registered_operation_id = registered_operation_id;
+        authority.lifecycle = .releasing;
+        return .{
+            .event = receipt,
+            .completion_addr = completion_addr,
+            .registered_operation_id = registered_operation_id,
+        };
+    }
+
+    pub fn finishEventReleaseNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        continuation: EventReleaseContinuation,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event release completion lost binding authority");
+        const authority = &entry.event_authority;
+        if (!eventReceiptMatches(self, entry, authority, identity, continuation.event) or
+            authority.lifecycle != .releasing or
+            authority.completion_addr != 0 or authority.registered_operation_id != 0 or
+            continuation.completion_addr == 0 or continuation.registered_operation_id == 0)
+            @panic("event release completion receipt drifted");
+        authority.active_generation = 0;
+        authority.active_owner_addr = 0;
+        authority.completion_addr = 0;
+        authority.registered_operation_id = 0;
+        authority.quarantine_slot_index = 0;
+        authority.quarantine_reservation_generation = 0;
+        authority.lifecycle = .idle;
+    }
+
+    pub fn consumeEventReleaseContinuationNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        continuation: EventReleaseContinuation,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event release continuation lost binding authority");
+        const authority = &entry.event_authority;
+        if (!eventReceiptMatches(self, entry, authority, identity, continuation.event) or
+            authority.lifecycle != .releasing or
+            authority.completion_addr != continuation.completion_addr or
+            authority.registered_operation_id != continuation.registered_operation_id or
+            continuation.completion_addr == 0 or continuation.registered_operation_id == 0)
+            @panic("event release continuation replayed or drifted");
+        authority.completion_addr = 0;
+        authority.registered_operation_id = 0;
+    }
+
+    pub fn terminalizeLiveEventForRecoveryNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+        completion_addr: usize,
+        registered_operation_id: u64,
+    ) EventPinRecoveryPermit {
+        if (completion_addr == 0 or registered_operation_id == 0)
+            @panic("event recovery continuation identity is empty");
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event recovery lost binding authority");
+        const authority = &entry.event_authority;
+        if (!eventReceiptMatches(self, entry, authority, identity, receipt) or authority.lifecycle != .live or
+            authority.completion_addr != 0 or authority.registered_operation_id != 0)
+            @panic("event recovery requires callback-free live authority");
+        const permit_generation = authority.active_generation;
+        authority.active_generation = 0;
+        authority.active_owner_addr = 0;
+        authority.completion_addr = completion_addr;
+        authority.registered_operation_id = registered_operation_id;
+        authority.quarantine_slot_index = 0;
+        authority.quarantine_reservation_generation = 0;
+        authority.next_generation = std.math.maxInt(u64);
+        authority.lifecycle = .terminal;
+        return .{
+            .event = receipt,
+            .permit_generation = permit_generation,
+            .completion_addr = completion_addr,
+            .registered_operation_id = registered_operation_id,
+        };
+    }
+
+    pub fn consumeEventPinRecoveryPermitNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        permit: EventPinRecoveryPermit,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event recovery permit lost binding authority");
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or authority.lifecycle != .terminal or
+            authority.active_generation != 0 or authority.active_owner_addr != 0 or
+            authority.next_generation != std.math.maxInt(u64) or
+            authority.completion_addr != permit.completion_addr or
+            authority.registered_operation_id != permit.registered_operation_id or
+            permit.permit_generation == 0 or permit.permit_generation != permit.event.event_generation or
+            permit.completion_addr == 0 or permit.registered_operation_id == 0)
+            @panic("event recovery permit replayed or drifted");
+        authority.completion_addr = 0;
+        authority.registered_operation_id = 0;
+    }
+
     pub fn rollbackEventGenerationBeforePublishNoFail(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
@@ -1103,6 +1284,8 @@ pub const AttachmentCleanupRegistry = struct {
             @panic("event generation rollback lost reserved authority");
         entry.event_authority.active_generation = 0;
         entry.event_authority.active_owner_addr = 0;
+        entry.event_authority.quarantine_slot_index = 0;
+        entry.event_authority.quarantine_reservation_generation = 0;
         entry.event_authority.lifecycle = .idle;
     }
 
@@ -1126,6 +1309,53 @@ pub const AttachmentCleanupRegistry = struct {
         authority.lifecycle = .live;
     }
 
+    pub fn bindEventCleanupNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+        quarantine_slot_index: u16,
+        quarantine_reservation_generation: u64,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event cleanup bind lost binding authority");
+        const authority = &entry.event_authority;
+        if (authority.lifecycle != .reserved or quarantine_reservation_generation == 0 or
+            !eventReceiptMatches(self, entry, authority, identity, receipt) or
+            authority.quarantine_slot_index != 0 or authority.quarantine_reservation_generation != 0)
+            @panic("event cleanup bind drifted");
+        authority.quarantine_slot_index = quarantine_slot_index;
+        authority.quarantine_reservation_generation = quarantine_reservation_generation;
+    }
+
+    pub fn trustedEventCleanup(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        owner_addr: usize,
+    ) Error!EventTrustedCleanup {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            (authority.lifecycle != .live and authority.lifecycle != .releasing) or
+            authority.active_generation == 0 or authority.active_owner_addr != owner_addr or
+            owner_addr == 0 or authority.quarantine_reservation_generation == 0)
+            return error.InvalidState;
+        return .{
+            .event = .{
+                .registry_incarnation = self.incarnation,
+                .binding_reservation_id = identity.binding_reservation_id,
+                .node_incarnation = identity.node_incarnation,
+                .stream_id = entry.stream_id,
+                .event_generation = authority.active_generation,
+                .owner_addr = owner_addr,
+            },
+            .quarantine_slot_index = authority.quarantine_slot_index,
+            .quarantine_reservation_generation = authority.quarantine_reservation_generation,
+            .state = if (authority.lifecycle == .live) .live else .releasing,
+        };
+    }
+
     pub fn settleEventGenerationForTest(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
@@ -1138,7 +1368,25 @@ pub const AttachmentCleanupRegistry = struct {
             return error.InvalidState;
         entry.event_authority.active_generation = 0;
         entry.event_authority.active_owner_addr = 0;
+        entry.event_authority.quarantine_slot_index = 0;
+        entry.event_authority.quarantine_reservation_generation = 0;
         entry.event_authority.lifecycle = .idle;
+    }
+
+    fn eventReceiptMatches(
+        self: *const AttachmentCleanupRegistry,
+        entry: *const Entry,
+        authority: *const EventAuthority,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) bool {
+        return eventAuthorityLifecycleRawValid(&authority.lifecycle) and
+            receipt.registry_incarnation == self.incarnation and
+            receipt.binding_reservation_id == identity.binding_reservation_id and
+            receipt.node_incarnation == identity.node_incarnation and
+            receipt.stream_id == entry.stream_id and receipt.stream_id != 0 and
+            receipt.event_generation == authority.active_generation and
+            receipt.owner_addr == authority.active_owner_addr and receipt.owner_addr != 0;
     }
 
     pub fn exhaustEventGenerationForTest(
@@ -1618,7 +1866,7 @@ test "B3-1 registry owns final-address RPC authority init settle and zero clear"
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
 }
 
-test "B3-1 registry footprint drop and empty corruption gates are bounded" {
+test "CR3a-2c3d C2 B3-1 registry footprint drop and empty corruption gates are bounded" {
     const LegacyEntry = struct {
         lifecycle: EntryLifecycle = .empty,
         reservation_id: u64 = 0,
@@ -1631,12 +1879,15 @@ test "B3-1 registry footprint drop and empty corruption gates are bounded" {
     };
     const per_entry_delta = @sizeOf(Entry) - @sizeOf(LegacyEntry);
     try std.testing.expect(@sizeOf(rpc_response_authority.Authority) <= 256);
-    try std.testing.expect(@sizeOf(EventAuthority) <= 32);
-    try std.testing.expect(@sizeOf(EventAuthority) * max_entries <= 128 * 1024);
+    // C2 keeps the final-address completion and registered-operation identities in the canonical
+    // row so replay is rejected before allocator.free or pin decrement. With the pre-existing
+    // quarantine identity this is seven machine words plus compact tags, rounded to 64 bytes.
+    try std.testing.expect(@sizeOf(EventAuthority) <= 64);
+    try std.testing.expect(@sizeOf(EventAuthority) * max_entries <= 256 * 1024);
     // 2c3d adds three checked event-generation scalars to the binding SSOT. Keep the resulting
     // fixed table growth explicit instead of silently inheriting the pre-event 512 KiB budget.
-    try std.testing.expect(per_entry_delta <= 160);
-    try std.testing.expect(per_entry_delta * max_entries <= 640 * 1024);
+    try std.testing.expect(per_entry_delta <= 192);
+    try std.testing.expect(per_entry_delta * max_entries <= 768 * 1024);
 
     var registry: AttachmentCleanupRegistry = .{};
     try AttachmentCleanupRegistry.initInPlace(&registry, 0xB311);
@@ -2624,5 +2875,129 @@ test "CR3a-2c3d C1 event generation exhaustion is sticky and mutation free" {
     );
     try registry.beginBoundDrop(bound.reservation, bound.identity, 97);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 97);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
+    const expected_tags = [_][]const u8{ "idle", "reserved", "live", "releasing", "terminal" };
+    const actual_tags = std.meta.fields(EventAuthorityLifecycle);
+    try std.testing.expectEqual(expected_tags.len, actual_tags.len);
+    inline for (actual_tags, 0..) |actual, index|
+        try std.testing.expectEqualStrings(expected_tags[index], actual.name);
+    for (0..256) |raw| {
+        var authority: EventAuthority = .{};
+        @as(*u8, @ptrCast(&authority.lifecycle)).* = @intCast(raw);
+        try std.testing.expectEqual(raw <= @intFromEnum(EventAuthorityLifecycle.terminal), eventAuthorityLifecycleRawValid(&authority.lifecycle));
+    }
+
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D_C201);
+    const bound = try registry.reserve(fixtureSeed(0xD600, 0xD601));
+    try registry.bindStream(bound.reservation, bound.identity, 101);
+    const burned = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        101,
+        0xD700,
+    );
+    registry.rollbackEventGenerationBeforePublishNoFail(
+        bound.reservation,
+        bound.identity,
+        burned,
+    );
+    const next = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        101,
+        0xD700,
+    );
+    try std.testing.expectEqual(burned.event_generation + 1, next.event_generation);
+    registry.rollbackEventGenerationBeforePublishNoFail(
+        bound.reservation,
+        bound.identity,
+        next,
+    );
+    const live = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        101,
+        0xD700,
+    );
+    registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, live);
+    const continuation = registry.beginEventReleaseNoFail(
+        bound.reservation,
+        bound.identity,
+        live,
+        0xD710,
+        0xD711,
+    );
+    try std.testing.expect(!(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        live,
+    )));
+    registry.consumeEventReleaseContinuationNoFail(bound.reservation, bound.identity, continuation);
+    const releasing_entry = try registry.exactEntry(bound.reservation, bound.identity);
+    try std.testing.expectEqual(@as(usize, 0), releasing_entry.event_authority.completion_addr);
+    try std.testing.expectEqual(@as(u64, 0), releasing_entry.event_authority.registered_operation_id);
+    if (builtin.os.tag == .macos) {
+        const child = std.c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            _ = alarm(5);
+            registry.consumeEventReleaseContinuationNoFail(
+                bound.reservation,
+                bound.identity,
+                continuation,
+            );
+            std.c._exit(0);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        const unsigned_status: u32 = @bitCast(status);
+        try std.testing.expect(std.c.W.IFSIGNALED(unsigned_status) or std.c.W.EXITSTATUS(unsigned_status) != 0);
+        try std.testing.expect(!(std.c.W.IFSIGNALED(unsigned_status) and std.c.W.TERMSIG(unsigned_status) == std.c.SIG.ALRM));
+    }
+    registry.finishEventReleaseNoFail(bound.reservation, bound.identity, continuation);
+
+    const corrupt = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        101,
+        0xD700,
+    );
+    registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, corrupt);
+    const recovery = registry.terminalizeLiveEventForRecoveryNoFail(
+        bound.reservation,
+        bound.identity,
+        corrupt,
+        0xD720,
+        0xD721,
+    );
+    try std.testing.expectEqual(corrupt.event_generation, recovery.permit_generation);
+    registry.consumeEventPinRecoveryPermitNoFail(bound.reservation, bound.identity, recovery);
+    const terminal_entry = try registry.exactEntry(bound.reservation, bound.identity);
+    try std.testing.expectEqual(@as(usize, 0), terminal_entry.event_authority.completion_addr);
+    try std.testing.expectEqual(@as(u64, 0), terminal_entry.event_authority.registered_operation_id);
+    if (builtin.os.tag == .macos) {
+        const child = std.c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            _ = alarm(5);
+            registry.consumeEventPinRecoveryPermitNoFail(
+                bound.reservation,
+                bound.identity,
+                recovery,
+            );
+            std.c._exit(0);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        const unsigned_status: u32 = @bitCast(status);
+        try std.testing.expect(std.c.W.IFSIGNALED(unsigned_status) or std.c.W.EXITSTATUS(unsigned_status) != 0);
+        try std.testing.expect(!(std.c.W.IFSIGNALED(unsigned_status) and std.c.W.TERMSIG(unsigned_status) == std.c.SIG.ALRM));
+    }
+    try registry.beginBoundDrop(bound.reservation, bound.identity, 101);
+    try registry.completeActiveDrop(bound.reservation, bound.identity, 101);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
 }

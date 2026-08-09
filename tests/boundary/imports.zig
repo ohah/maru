@@ -444,6 +444,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "readPreparedResponseUnderExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "commitPreparedExecutionRecoveryPoisonNoFail", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "commitPreparedExecutionRecoveryCleanupNoFail", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "poisonDuringClientSlotOperationNoFail", .receiver_type = mutable, .class = .unchecked },
 
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionLeaseMatches", .receiver_type = immutable, .class = .observation },
@@ -1357,6 +1358,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnderExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnchecked" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonDuringClientSlotOperationNoFail" },
             },
         },
         .{
@@ -1382,6 +1384,26 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "takeGenerationEvent" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventOwnerCurrent" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "discardGenerationEventForTest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventQuarantineReservation" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventQuarantineIdentity" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "generation_event_release_callback_active_addr" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTrustedView" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventReleaseProjection" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventReleaseRequest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventReleasePrepared" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "prepared_event_release_storage_size" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedGenerationEventRelease" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventTrustedView" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareGenerationEventRelease" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitGenerationEventRelease" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pinProjectionFromMirror" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "generation_event_quarantine" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventQuarantine" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "generation_event_quarantine_registry" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleaseLifecycle" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleaseDisposition" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedEventReleaseInternal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedEventRelease" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_poison" },
@@ -2174,6 +2196,7 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
         "    pub fn sendControlNonBlocking(",
         "    pub fn pumpPendingOutput(",
         "    pub fn takeEvent(",
+        "    pub fn releaseEvent(",
         "    pub fn fenceRevoke(",
         "    pub fn readInitialSnapshot(",
         "    pub fn poison(",
@@ -2775,7 +2798,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 7),
+        @as(usize, 8),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -3746,11 +3769,44 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             .owner_suffixes = &.{
                 "platform/macos/session_host/connection_lease.zig",
                 "platform/macos/session_host/client_slot.zig",
+                "platform/macos/session_host/generation_event_contract.zig",
             },
             .pump_references = 0,
         },
         .{
             .name = "releaseDuringActiveCleanupUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "rollbackCanonicalPinUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "commitPreparedPinReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "abortPreparedPinReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "consumeCanonicalPinUnchecked",
             .owner_suffixes = &.{
                 "platform/macos/session_host/connection_lease.zig",
                 "platform/macos/session_host/client_slot.zig",
@@ -3968,7 +4024,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     }
     // Allocator restoration is now a checked one-shot token consume, so it intentionally no
     // longer contributes an `*Unchecked` declaration to this global authority inventory.
-    try std.testing.expectEqual(@as(usize, 41), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 45), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -6882,6 +6938,11 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             entry.path,
             "platform/macos/session_host/generation_transport.zig",
         );
+        const is_generation_event_contract = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/generation_event_contract.zig",
+        );
         const is_remote_attachment = std.mem.eql(
             u8,
             entry.path,
@@ -6891,7 +6952,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         // `src/` cannot bypass the product-wide mint/consume-zero gate with a longer path.
         const imports_lease = countStringLiteralOutsideTopLevelTests(source, "connection_lease.zig");
         try std.testing.expectEqual(
-            @as(usize, if (is_client_slot or is_host_adapter or is_generation_attachment) 1 else 0),
+            @as(usize, if (is_client_slot or is_host_adapter or is_generation_attachment or
+                is_generation_event_contract) 1 else 0),
             imports_lease,
         );
         const lease_type_count = countIdentifierOutsideTopLevelTests(source, "ConnectionLease");
@@ -6903,14 +6965,18 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         } else {
             // CR3a-2a stores the lease only in the final-address GUI attachment, while HostAdapter
             // forwards its exact address to ClientSlot. ClientSlot additionally names the type in
-            // the ended-purge destination range preflight; it still does not store or mint another
-            // lease. Transport and external movable owners may not name the cleanup capability.
+            // the ended-purge destination range preflight. 2c3d C1 adds two event-owner range
+            // checks and C2 adds one trusted-mirror pointer reconstruction for prepared normal
+            // release; it still does not store or mint another lease. Transport and external
+            // movable owners may not name the cleanup capability.
             const expected_lease_count: usize = if (is_client_slot)
-                11
+                14
             else if (is_host_adapter)
                 4
             else if (is_generation_attachment)
                 1
+            else if (is_generation_event_contract)
+                2
             else
                 0;
             try std.testing.expectEqual(

@@ -1259,8 +1259,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `borrowed/classifying/effect_pending/release_pending`은 RemoteRuntime의 설명용 처리 단계이며 registry에 복제하지 않고, retry phase는
    `pending_generation_event_outcome` 하나만 소유한다. accepted 분류는 현재 ClientSlot take가 canonical payload를 재검증해 얻은
    trusted preflight 결과를 reserve 입력으로 소비하며 aggregate query에서 payload를 다시 파싱하지 않는다. queue 제거부터 registry publication까지 계속 live인
-   `StreamOperationPermit`과 owner-thread/no-yield suffix가 handoff를 직렬화한다. registered-node operation은 이 구간 전에 끝나므로
-   원자성 근거가 아니다. derived aggregate는 reserved/live/releasing revoke를 모두 blocker로 세어 관측 가능한 queue 0/aggregate 0
+   `StreamOperationPermit`과 owner-thread/no-yield suffix가 handoff를 직렬화한다. C3-3a3에서는 registered-node operation을 direct execution
+   lease의 shared pin으로 publication 뒤까지 유지하지만 operation 자체가 아니라 execution lease와 aggregate overlap이 원자성 근거다.
+   derived aggregate는 reserved/live/releasing revoke를 모두 blocker로 세어 관측 가능한 queue 0/aggregate 0
    틈을 만들지 않는다. pre-reserve 실패는 cache `0 -> 0`, revoke reserve는 `0 -> 1`, reserve 뒤 abort는 `0 -> 1 -> 0`이고
    live publication과 releasing 시작은 delta 0이다. 여러 sibling revoke는 기존 binding별 authority의 독립 row로 세며 queued latch와
    revoke aggregate가 모두 0일 때만 connection mutation gate를 다시 연다. release Busy·effect Busy·terminal cleanup과 allocator
@@ -1299,15 +1300,34 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `error{InvalidOwner, Busy}!Decision`이고 canonical active-owner 실행의 `Decision` payload만 `blocked|admitted`다. pre-acquire
    invalid/copy/stale/already-consumed replay는 `InvalidOwner`, operation/lease contention은 `Busy`의 기존 typed error channel을
    재사용하며 각 facade가 위 표의 결과로 map한다. blocker는 표의 owner/state를 하나도 바꾸지 않는다.
-   C3-3a1 authority substrate와 C3-3a2 final-admission substrate는 product caller exact 0인 dormant gate로 구현됐다. C3-3a3
-   product activation은 아직 미구현이다. C3-3a3에서
-   product take/release와 현재 mutation consumer를 동시에 배선하기 전에는 보호 기능 활성화나 C3-3a 완료를 주장하지 않는다.
+   C3-3a1 authority와 C3-3a2 final-admission substrate는 dormant 구현 완료이고 product caller는 각각 0이다. C3-3a3은 doc-first 진행
+   상태이며 product activation은 아직 0이다. C3-3a3 product activation은 a1 authority를 product take/release에, a2 final-admission
+   transaction을 현재 mutation consumer에 원자적으로 함께 배선한다. event take는 blocker producer이므로 target queued event와 자신이
+   reserve한 aggregate를 다시 검사하는 a2 consumer predicate를 사용하지 않는다. accepted preflight의 exact `event == .revoked`만
+   `EventOrderingClass.controller_revoke`이고 unknown 및 다른 accepted event는 `.none`이다. permit prepare와 public take prepare 뒤
+   registered operation을 열고 즉시 queued/aggregate 재조회 없는 direct execution lease로 승격한다. held validation/borrow core가 queue
+   addr/len/capacity/bytes, exact event/payload pointer·digest·preflight를 재검증한 뒤에만 payload parse와 quarantine→pin→a1 reserve/bind를
+   수행한다. lease 전에는 prepared scalar/address를 저장할 뿐 payload를 역참조하지 않는다.
+   direct lease 획득 `Busy`에는 activation transaction이 아직 없으므로 own registered shared pin을 유지한 채 기존 public abort가
+   prepared descriptor를 pristine으로 reset하고, registered operation을 release한 뒤 permit을 abort한다. live permit이 이 정산 동안 제품 operation을 계속 막으며 새 held
+   cleanup leaf를 만들지 않는다.
+   `idle|ended_pending`은 이 ordinary activation 경로에 들어가지 않는다. payload 역참조, activation transaction, registered
+   operation, execution lease, quarantine, pin과 a1 reservation은 모두 0이다. 둘 다 permit을 no-fail consume한다. `idle`은 prepared
+   storage pristine을 유지하고, `ended_pending`만 그 전에 prepared descriptor를 tombstone한 뒤 기존 결과를 반환한다.
    각 mutation family는 ClientSlot owner-thread operation의 single shared pin을 기존 `ClientOperationFence`의 execution lease로
    upgrade한 뒤 queued/aggregate를 검사한다. shared pin만으로는 다른 shared mutation을 배제하지 못하므로 직렬화 근거로 쓰지 않는다.
    upgrade 경합은 mutation 0의 `Busy`이고, held-path는 public Client API를 다시 호출해 shared pin을 중첩하지 않는 internal leaf만
    사용한다. execution lease는 검사부터 allocation·queue offset·syscall commit까지 no-yield로 유지한다. 정산 순서는 held internal
    leaf 완료 또는 blocked 판정 -> execution lease를 single shared로 downgrade -> final-address transaction lifecycle consume ->
-   `endRegisteredNodeOperation`의 마지막 shared pin release다. canonical owner는 lease-held 상태에서 lifecycle/receipt 검증과 no-fail
+   `endRegisteredNodeOperation`의 마지막 shared pin release다. producer transaction은 canonical prepared take, permit, quarantine
+   reservation/identity, pin projection과 a1 receipt를 by-value로 봉인하되 canonical lifecycle을 복제하지 않는다. transaction 자신의
+   final address, closed `pristine|active|consumed` phase와 각 canonical owner의 live bit만 rollback orchestration SSOT로 소유한다.
+   public/held Client wrapper는 mutation 0 validation/borrow core와 validated queue-remove core를 공유하고 held wrapper는 public shared gate를
+   중첩하지 않는다. success는 held queue commit→a1 live publication→permit no-fail consume→lease downgrade→transaction consume→registered
+   operation release의 실패·callback 0 suffix다. queue 미소비 실패는 a1→pin→quarantine의 reverse rollback, held prepared tombstone,
+   필요 시 lease-held poison, lease downgrade→transaction consume→operation release→permit abort로 정산한다. queue 소비 뒤 suffix 불일치는
+   복구하지 않고 fail-stop한다. canonical owner는
+   lease-held 상태에서 lifecycle/receipt 검증과 no-fail
    settlement plan을 모두 끝내므로 downgrade 이후 suffix는 실패하지 않는다. 반면 pre-acquire invalid/copy/stale/already-consumed
    replay는 canonical lease·transaction·pin mutation 0의 typed reject이며, canonical active owner만 위 정산 순서를 수행한다. output이
    slot/node/operation registry/request owner/binding storage와 겹치는 경우도 execution lease 전에 `InvalidOwner`로 거부한다. 새 mutex, fence, generation을
@@ -1354,16 +1374,19 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    queued+a1 query 연결은 a3에서 모든 family와 동시에 활성화한다. 위 closed 7-row mapping은 기존 facade가 소유하고 registry
    transaction에 복제하지 않는다. future 2c3e는 helper signature type assertion만 가지며 caller는 0이다.
    C3-3a3 `test-session-host-2c3d-c3-3a3`은 Debug·ReleaseFast product
-   runtime 8+actual-socket 2+boundary 1로 두 substrate를 동시에 활성화한다. quarantine reserve→pin reserve→generation reserve→
-   quarantine/cleanup bind의 각 fault ordinal과 `Client.commitGenerationEventTake`의
-   `Busy|Terminal|Corrupt|InvalidPrepared`에서 `(queue=1,aggregate=0,permit/pin/quarantine/reserved-authority=0)` final tuple을 검사하고,
+   runtime 8+actual-socket 2+boundary 1로 두 substrate를 동시에 활성화한다. permit→public prepare→registered operation→direct lease→held
+   validate/borrow 뒤 quarantine reserve→pin reserve→generation reserve→quarantine/cleanup bind의 각 fault ordinal과 ClientSlot-only held
+   commit wrapper의 `Terminal|Corrupt|InvalidPrepared`에서
+   `(queue=1,aggregate=0,permit/pin/quarantine/reserved-authority=0)` final tuple을 검사한다. direct lease 획득 `Busy`는 reserve 전
+   별도 oracle로 `prepared=pristine`과 owner mutation 0을 검사하고,
    queue commit 뒤
    authority publication은 fallible operation·callback 0의 no-fail suffix임을 고정한다. callback·foreign thread·teardown·check 직후
    revoke 경쟁은 현재 모든 generation mutation의 allocation/callback/offset/syscall 0과 owner 보존을 검증한다. target pending
    outbound offset 0은 exact free 1/wire 0, partial offset은 no-retry fail-close, sibling pending은 offset/owner 보존·flush 0 뒤 aggregate
    zero에서 재개한다. blocker 결과는 위 closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 owner retention을 전수
    고정한다. public nonblocking input은 `0`, public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. boundary는 새 revoke
-   registry/lifecycle 0, 기존 `EventAuthority` sole SSOT, exact-15 facade, a1/a2 product caller 0, a3 final-admission helper와 현재 mutation
+   registry/lifecycle 0, 기존 `EventAuthority` sole SSOT, exact-15 facade, a3 이전 a1/a2 product caller 0과 a3 이후 exact activated caller
+   inventory, producer activation helper와 현재 mutation
    family의 exact caller inventory를 고정한다. future 2c3e caller 편입은 2c3e gate가 소유한다. C3-3b failure settlement와 C3-3c
    actual socket/source-zero가 green이 되기 전에는 C3-3 완료를 주장하지 않는다.
 
@@ -1379,13 +1402,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    owner finalize 뒤 node 접근은 0이다. boundary는 이 호출을 각각 exact 1과 역방향 import 0으로 고정한다. C2 take는 원 PID와
    `GenerationTransport.owner_thread_id`를 registry mutex 또는 owner/quarantine/PinOwner pointer 접근 전에 검증한다. lock 순서는
    registered node operation→stream permit→quarantine unbound count+byte reservation→cleanup pin prepare→event generation reserve와
-   quarantine row bind→queue
-   commit이다. 각 fallible 단계는 private rollback receipt를 남기고 다음 단계 실패 시 역순으로 mutation 0까지 되돌린다.
+   quarantine row bind→queue commit이다. 이는 C2 baseline 순서이며 C3-3a3 product take는 위 producer activation 순서로 대체한다.
+   각 fallible 단계는 private rollback receipt를 남기고 다음 단계 실패 시 역순으로 mutation 0까지 되돌린다.
    여기서 mutation 0은 queue/out, pin, quarantine count+bytes와 active binding publication의 원상복구를 뜻하며,
    checked-monotonic event generation과 registry issuer는 실패해도 burn하고 절대 되감거나 재사용하지 않는다.
    destination/final-address/512-byte containment·seal storage와 owner publication 가능성까지 queue commit 전에 검증하며,
-   `Client.commitGenerationEventTake`가 마지막 fallible 지점이다. queue commit 뒤 registry publication→owner publish→permit consume은
-   rollback 없는 no-fail suffix다. `idle|ended_pending`은 pin/reservation 0이다. C2 release도 PID/thread를
+   C2에서는 `Client.commitGenerationEventTake`가 마지막 fallible 지점이다. C3-3a3은 ClientSlot-only held validation/commit wrapper와
+   no-fail permit consume으로 이 경계를 대체하고 public wrapper는 lease 밖 회귀만 담당한다. queue commit 뒤 registry
+   publication→owner publish→permit consume은 rollback 없는 no-fail suffix다.
+   `idle|ended_pending`은 pin/reservation 0이다. C2 release도 PID/thread를
    mutex와 pointer dereference 전에 검증하고, binding generation·canonical owner address·lease·stable allocator·trusted mirror를
    모두 통과한 뒤 owner/mirror를 `releasing`으로 먼저 게시한다. allocator free callback이 시작된 뒤에는 lookup, allocation,
    allocator 선택, seal 재계산처럼 실패할 수 있는 작업이 없다. callback 직전에는 owner/binding/quarantine row를 `releasing`으로

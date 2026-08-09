@@ -22835,8 +22835,9 @@ pub const AppSession = struct {
         self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
     }
 
-    /// 앱(chrome 오버레이·rename·주소창·사이드바 검색·도크·파일 트리 등)이 키를 소비했다.
-    /// PTY로 내려보내지 않고 여기서 끝낸다.
+    /// PTY write 없이 여기서 종결되는 모든 경로 — chrome 오버레이·rename·주소창·사이드바 검색·도크·
+    /// 파일 트리, 그리고 스크롤백 페이지 스크롤처럼 **터미널 자신이** 소비하는 경우까지 포함한다.
+    /// 열거가 아니라 이 판정 기준으로 읽어야 새 분기가 늘어도 낡지 않는다.
     fn keyConsumedByApp(self: *AppSession) FrameSummary {
         self.total_app_key_events += 1;
         self.settleKeyEventSummary();
@@ -23911,9 +23912,6 @@ pub const AppSession = struct {
         return layout_math.pxToCell(self.cell_width_px, self.cell_height_px, surface.core.size.cols, surface.core.size.rows, rect, x_px, y_px);
     }
 
-    /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
-    /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
-    /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     /// 진행 중인 포인터 제스처(사이드바 탭·그룹, 터미널 탭, pane, 각종 divider, 스크롤바 드래그)가
     /// 이 이벤트를 캡처하는지 판정하고, 캡처하면 처리까지 마친다. 반환 true = 이벤트 소비됨.
     ///
@@ -23931,7 +23929,7 @@ pub const AppSession = struct {
         // 반대로 **새 제스처를 시작하는 down은 오버레이가 먼저 본다** — 오버레이 위 클릭이 그 아래
         // 터미널·탭으로 새면 안 되기 때문이다. 그래서 이 구간은 kind 2/3만 잡고 kind 1은 아래로 흘린다.
         // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
-        // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
+        // down(1)은 호출자(`mouse`)의 일반 라우팅으로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.pointerGestureIs(.sidebar_tab) and (kind == 2 or kind == 3)) {
             const drag = &self.pointer_gesture_owner.sidebar_tab;
             if (kind == 2 and drag.index < self.tabs.items.len) {
@@ -24011,7 +24009,7 @@ pub const AppSession = struct {
             return true;
         }
         // Term 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 소스 pane 바 안에서 x로 타겟 탭을 잡아
-        // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
+        // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 호출자(`mouse`)의 일반 라우팅으로 흘려 새 드래그를 시작한다.
         if (self.pointerGestureIs(.terminal_tab) and (kind == 2 or kind == 3)) {
             if (kind == 2) {
                 self.dragTabTo(x_px); // pane 내 live 재정렬(PR-E1)
@@ -24035,7 +24033,7 @@ pub const AppSession = struct {
         }
         // pane(분할 영역) 통째 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 커서 좌표만 갱신(floating
         // 미리보기가 따라가게), up이 사이드바면 새 워크스페이스 분리/합치기(dropPaneAt). 사이드바 밖이면 no-op.
-        // 새 down(1)은 아래 일반 처리로 흘려 새 제스처를 시작한다.
+        // 새 down(1)은 호출자(`mouse`)의 일반 라우팅으로 흘려 새 제스처를 시작한다.
         if (self.pointerGestureIs(.pane) and (kind == 2 or kind == 3)) {
             const drag = &self.pointer_gesture_owner.pane;
             if (kind == 2) {
@@ -24110,6 +24108,9 @@ pub const AppSession = struct {
         return false;
     }
 
+    /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
+    /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
+    /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
         // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
@@ -30347,12 +30348,12 @@ pub const AppSession = struct {
     }
 
     /// 지난 프레임 동안 포인터가 남긴 것을 이번 tick에 정확히 한 번씩 적용하고, 살아 있는 탭 드래그가
-    /// 아직 유효한지 확인한다. 프레임 계측보다 **앞**에 둔다 — geometry가 확정된 상태로 아래 build와
-    /// 투영이 돌아야 한다.
+    /// 아직 유효한지 확인한다. 프레임 계측(`ft_start`)보다 **앞**에 둔다 — geometry가 확정된 상태로
+    /// 호출부(`tick`)의 build와 투영이 돌아야 한다.
     fn settleDeferredPointerInput(self: *AppSession) void {
         // 이 tick의 divider resize와 scrollbar scroll을 여기서 한 번씩 적용한다 — move가 몇 번 왔든 최종
         // 좌표 하나이고, clamp 결과가 직전과 같으면 effect가 없다(계약 §4.3). frame 계측이 시작되기 전에
-        // 두어 geometry가 확정된 상태로 아래 build/투영이 돌게 한다.
+        // 두어 geometry가 확정된 상태로 호출부(`tick`)의 build/투영이 돌게 한다.
         //
         // **둘 다 여기 있어야 한다.** scrollbar 쪽이 빠져 있어서 thumb을 끄는 동안에는 좌표만 쌓이고
         // 손을 뗄 때(`dropped`) 한 번에 적용됐다 — 같은 coalescing을 쓰는 divider는 매 tick 반영되는데
@@ -30378,10 +30379,16 @@ pub const AppSession = struct {
         if (self.pointerGestureIs(.terminal_tab) and self.anyModalOverlayOpen()) self.cancelPointerGesture();
     }
 
-    /// 프레임 계측이 시작되기 전 단계 — 저자가 `ft_pre` 마크에 "pre(housekeeping)"이라 이름 붙인 구간이다.
+    /// 프레임 계측의 첫 구간(`ft_start`→`ft_pre`) — 저자가 그 마크에 "pre(housekeeping)"이라 이름 붙인
+    /// 구간 그대로다. 계측 **전**에 도는 것은 `settleDeferredPointerInput` 쪽이므로 이 함수를 `ft_start`
+    /// 위로 올리면 pre 항목이 항상 0으로 붕괴한다.
+    ///
     /// 백그라운드 worker가 남긴 결과를 메인 스레드 상태로 옮기고(아카이브·파일 트리·git·업로드·업데이트),
-    /// 렌더 전에 성립해야 하는 불변식을 정리한다. 여기서 하는 일은 전부 큐에서 꺼내 적용하는 것뿐이고
-    /// 파일시스템·네트워크 I/O는 worker가 소유한다 — 이 순서가 무너지면 tick이 blocking I/O를 물게 된다.
+    /// 렌더 전에 성립해야 하는 불변식을 정리한다. **대부분은** worker 결과 큐를 꺼내 적용하는 것이지만
+    /// 예외가 둘이다 — `pollAgentKinds`는 ≈0.5s throttle로 foreground process 열거 syscall을 직접 하고
+    /// 그 안에서 surface core 락을 잡으며, `requestBranchMenu`(MARU_FORCE_BRANCH_MENU 경로)는 `.git`
+    /// 탐색과 git 실행 파일 탐색으로 `access(2)`를 친다. 새 항목을 여기 추가할 때는 이 둘 외에
+    /// blocking I/O를 늘리지 않는다 — 늘어나면 tick이 그만큼 blocking I/O를 물게 된다.
     fn runFramePreHousekeeping(self: *AppSession) void {
         if (!self.update_started) { // 첫 tick에서 인앱 새 버전 안내 백그라운드 체크를 1회 띄운다(config로 끔)
             self.update_started = true;
@@ -30464,12 +30471,16 @@ pub const AppSession = struct {
     }
 
     /// Find(⌘F) 하이라이트를 이 프레임 기준으로 다시 계산한다. 뷰포트에 보이는 매치를
-    /// `find_view_spans`에 채우고 현재 매치 span을 돌려준다 — 현재 매치만 별도 강조색으로 그리기 때문에
-    /// 나머지 span과 갈라서 반환한다.
+    /// `find_view_spans`에 채우고(Find 패널이 열려 있을 때만 — ⌘G 닫힘-네비 중에는 현재 매치 span만
+    /// 돌려준다) 현재 매치 span을 반환한다. 현재 매치만 별도 강조색으로 그리므로 나머지와 갈라서 준다.
     ///
-    /// `output_events`는 이 tick에 새 출력이 들어왔는지다. 출력이 있으면 매치의 절대 좌표가 스크롤백
-    /// eviction으로 어긋날 수 있어 재검색하고, 없으면 이전 결과를 그대로 클립만 한다.
-    fn collectFindViewSpans(self: *AppSession, output_events: u64) ?terminal.SelectionSpan {
+    /// `output_events`는 이 tick에 새 출력이 들어왔는지다. 출력이 있거나 원격 검색 결과가
+    /// dirty면(`remote_find_dirty`) 재검색하고, 그 외에는 이전 결과를 클립만 한다 — 출력이 들어오면
+    /// 매치의 절대 좌표가 스크롤백 eviction으로 어긋날 수 있기 때문이다.
+    ///
+    /// 활성 surface가 로컬 코어면 `lockCore`를 잡고 반환 전에 반드시 푼다. 이미 core 락을 쥔 자리에서
+    /// 부르면 `core_mutex`가 비재진입이라 `core_owner.zig`에서 즉시 panic한다(현재 호출자는 tick 하나).
+    fn collectFindViewSpans(self: *AppSession, output_events: usize) ?terminal.SelectionSpan {
         // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
         // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
         const find_active = self.chrome_host.find.open or self.find_nav;
@@ -30484,7 +30495,7 @@ pub const AppSession = struct {
             if (is_macos and fa_surface.remote != null) {
                 // §6c host-backed: 검색은 host가(콘텐츠·스크롤백 소유 — placeholder는 빈 셀이라 못 함). output(스크롤도
                 // delta라 포함)/query 변화 시만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 remote_find_spans에
-                // 캐시하고, tick은 그 캐시를 find_view_spans에 복사만 한다(매 tick RPC 회피). 현재 매치 강조색·네비는 #6c-2.
+                // 캐시하고, 이 함수는 그 캐시를 find_view_spans에 복사만 한다(매 tick RPC 회피). 현재 매치 강조색·네비는 #6c-2.
                 if (find_active) {
                     if (self.remote_find_dirty or output_events > 0) {
                         self.refreshRemoteFind(fa_surface);

@@ -113,7 +113,11 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 - **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 **이식 기여 0**이다. (c)로 F 시리즈를 열어도 이 사실은 바뀌지 않는다 — (c)가 사는 것은 이식이 아니라 읽기·편집 비용이며, 이를 이식 성과로 포장하지 않는다. 이식에 기여한 건 **순수 그룹(b1·b2 `layout_math`)뿐**이고 그 축은 일단락 상태다(좌표 변환 기하 = 이식 핵심). E1 find·E4 sidebar·E5 workspace는 실측 결과 모두 orchestration 결합이라 (b) 대상이 아니었다 — Explore 사전 추정(순수 85~95%)은 셋 다 빗나갔고, 착수 코드 재검증이 정정했다([[roadmap-docs-stale-verify-with-code]]).
 - **cross-group accessor pub화**: 캡슐화 일부 양보(§2-c-2). core.zig 선례가 있고, accessor는 어차피 안정 표면이라 수용. F 시리즈는 그룹 수가 많아 pub 표면이 E1보다 넓어지므로, **PR마다 pub화한 accessor를 명시**하고 누적 목록을 §5 검증에서 본다.
-- **허브 잔류**: `tick`(1,484줄)·`mouse`(978)·`handleKeyEvent`(401)는 본질적 횡단이라 파일 분해 비대상. 거대 메서드의 가독성은 소함수 추출·주석으로(별 PR). **F 시리즈가 끝나도 이 셋은 남으므로 `app_session.zig`가 "작은 파일"이 되지는 않는다** — 종착지는 허브 + 그룹 facade + ABI 진입이다.
+- **허브 잔류**: `tick`·`mouse`·`handleKeyEvent`는 본질적 횡단이라 **파일 분해** 비대상이다. 가독성은 같은 파일 안 소함수 추출로 다뤘고(2026-08-09 완료 — 아래), **F 시리즈가 끝나도 이 셋은 남으므로 `app_session.zig`가 "작은 파일"이 되지는 않는다.** 종착지는 허브 + 그룹 facade + ABI 진입이다.
+
+  > **허브 소함수 추출(2026-08-09 완료).** `handleKeyEvent` 401→340, `mouse` 978→794, `tick` 1,484→1,367(각 추출 시점 기준). 뺀 것은 **이미 거기 있던 경계**뿐이다 — 21회 반복되던 key-down 종결부(`settleKeyEventSummary`·`keyConsumedByApp`·`keyIgnored`), 저자가 구분선으로 표시해 둔 제스처 라우팅 9블록(`routeActivePointerGesture`), 계측 변수 흐름 밖의 독립 단계 셋(`settleDeferredPointerInput`·`runFramePreHousekeeping`·`collectFindViewSpans`). **파일 총 줄 수는 ±0**(같은 파일 안 이동)이고 pub 표면·test 위치·import 경계는 불변이며, `imports.zig`의 external source digest만 갱신했다. 3라운드 적대적 검증에서 역-인라인 정규화 diff로 동작 동등성을 확인했다(blocker·major 0).
+  >
+  > **`cell_colors`에서 멈춘 이유**는 락이 아니다(처음엔 그렇게 적었으나 검증에서 반증됐다 — 그 블록의 락은 `if` 블록 안에 갇혀 있고 `unlockCore`가 블록 마지막 문장이라 `defer`와 등가이며, 같은 작업에서 뺀 `collectFindViewSpans`가 정확히 그 모양이다). 실제 이유는 둘이다: ⑴ ROI가 낮다(42줄 대부분이 struct 리터럴, 빼도 tick −2.9%), ⑵ [io-render-threading.md](io-render-threading.md) **P4-3**이 `cell_colors`(F)·활성 build(G)·kitty(I)·sticky(J)를 투영 tick의 **단일 lock 스코프로 수렴**시키는 것을 목표로 잡고 있어, 지금 F를 별 함수로 빼면 그 통합이 함수 경계를 넘어야 한다. 같은 이유로 **이미 뺀 `collectFindViewSpans`(E)가 P4-3의 전제를 흔든다** — 그 문서 §12.2 행 E와 P4-3에 새 함수 경계를 등재해 두었다.
 - **파일 수 증가**: 그룹 10개 + 동반 test가 새 파일로 늘어난다. 총 읽을 양이 주는 게 아니라 **무관한 것까지 읽는 비용**이 주는 것이므로, 그룹 경계가 도메인과 어긋나면 이득이 사라진다. 그래서 각 단계 착수 시 응집도를 코드로 재검증한다(§4.1).
 - **ROI**: (b) 시점의 "그룹당 100~400줄이라 감소폭이 작다"는 20,183줄 시점 관측이라 **폐기**한다. F 시리즈 실측은 그룹당 570~4,090줄(메서드) + 동반 test로 그 2배다. 누적으로 `app_session.zig`가 그룹 facade + 허브만 남는 게 종착.
 

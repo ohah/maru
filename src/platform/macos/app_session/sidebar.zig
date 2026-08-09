@@ -19,6 +19,10 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const dock_list_scrollbar_inset_px = app_session_mod.dock_list_scrollbar_inset_px;
+const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
+const dock_list_scrollbar_width_px = app_session_mod.dock_list_scrollbar_width_px;
+const spinner_wave = app_session_mod.spinner_wave;
 const git_ops = @import("git.zig");
 const notification_ops = @import("notification.zig");
 const workspace_ops = @import("workspace.zig");
@@ -28,20 +32,12 @@ const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
 const metal_frame = app_session_mod.metal_frame;
 const agentBrandColor = @import("agent.zig").agentBrandColor;
-const isAgentSpinnerCp = app_session_mod.isAgentSpinnerCp;
-const sidebarFolderLine = app_session_mod.sidebarFolderLine;
 const chrome_system_text = app_session_mod.chrome_system_text;
-const packStraightRgbU32 = app_session_mod.packStraightRgbU32;
-const sidebarBandCell = app_session_mod.sidebarBandCell;
-const sidebar_search_icon_col = app_session_mod.sidebar_search_icon_col;
 const workspaceLabel = app_session_mod.workspaceLabel;
 const MeasuredTextCache = app_session_mod.MeasuredTextCache;
 const agentIconCodepoint = app_session_mod.agentIconCodepoint;
 const notificationBadgeCol = @import("notification.zig").notificationBadgeCol;
 const packRgbAlpha = app_session_mod.packRgbAlpha;
-const sidebar_scrollbar_min_thumb_px = app_session_mod.sidebar_scrollbar_min_thumb_px;
-const sidebar_toggle_codepoint = app_session_mod.sidebar_toggle_codepoint;
-const tab_bg_tint_alpha = app_session_mod.tab_bg_tint_alpha;
 const AgentKind = app_session_mod.AgentKind;
 const agentTermOf = @import("agent.zig").agentTermOf;
 const blendRgb = app_session_mod.blendRgb;
@@ -49,8 +45,6 @@ const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const diag_gate = app_session_mod.diag_gate;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;
 const pane_ops = @import("pane.zig");
-const sidebar_scrollbar_inset_px = app_session_mod.sidebar_scrollbar_inset_px;
-const spinnerBarCp = app_session_mod.spinnerBarCp;
 const terminal = app_session_mod.terminal;
 const traffic_light_clearance_pt = app_session_mod.traffic_light_clearance_pt;
 const CollectedPane = AppSession.CollectedPane;
@@ -70,12 +64,7 @@ const renderer = app_session_mod.renderer;
 const scrollbar_alpha_full = app_session_mod.scrollbar_alpha_full;
 const sidebarCwdPath = app_session_mod.sidebarCwdPath;
 const sidebar_max_pt = app_session_mod.sidebar_max_pt;
-const sidebar_min_pt = app_session_mod.sidebar_min_pt;
-const sidebar_scroll_ids = app_session_mod.sidebar_scroll_ids;
 const sidebar_scroll_max_entries = app_session_mod.sidebar_scroll_max_entries;
-const sidebar_scrollbar_width_px = app_session_mod.sidebar_scrollbar_width_px;
-const sidebar_search_text_col = app_session_mod.sidebar_search_text_col;
-const spinner_bar_count = app_session_mod.spinner_bar_count;
 const tab_ops = @import("tab.zig");
 
 /// 사이드바 상단 헤더 높이 = 신호등 띠 + 상단 바. 헤더의 두 줄(아이콘·검색)이 창 오른쪽의 두 밴드와 1:1로
@@ -2247,3 +2236,114 @@ pub fn buildCollapsedToggleDrawList(self: *AppSession) !?renderer.DrawList {
         .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
+
+// 사이드바 접기/펼치기 토글 아이콘 코드포인트(등록 PUA `sidebar_collapse` — 좌측 절반 채운 사각형 = 왼쪽 패널, 옛 ◧ U+25E7 대체). 헤더 아이콘 줄(펼침)·
+// 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
+pub const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
+
+pub const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
+
+/// 사이드바 스크롤바 치수(SV4a). 도크 목록과 **같은 값**을 쓴다 — 한 창에 두 스크롤바가 나란히 서므로
+/// 굵기가 다르면 그 자체가 결함으로 보인다. 별도 상수로 두는 것은 사이드바 폭이 사용자 드래그로
+/// 변하는 값이라 나중에 갈릴 여지를 남겨 두기 위해서다.
+pub const sidebar_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
+
+pub const sidebar_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
+
+pub const sidebar_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
+
+/// 사이드바가 내는 tree의 노드 id. 도크 목록과 **다른 값**이어야 한다 — 둘은 동시에 발행돼 있고,
+/// id가 겹치면 hit-test·capture가 어느 스크롤바인지 구분하지 못한다.
+pub const sidebar_scroll_ids = struct {
+    pub const area: chrome.ui.tree.UiId = 0x5342_0001;
+    pub const track: chrome.ui.tree.UiId = 0x5342_0002;
+    pub const thumb: chrome.ui.tree.UiId = 0x5342_0003;
+};
+
+/// 카드 폴더줄(owned) = 폴더 아이콘(0xF000A) prefix + 순수 cwd(sidebarCwdPath). 브랜치줄 octocat(0xF0009)과 같은
+/// "아이콘 + 공백 + 텍스트" 조립 패턴 — 표현(아이콘)은 카드 조립부에, 경로 파생은 sidebarCwdPath에 둔다. cwd 비면 "".
+pub fn sidebarFolderLine(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
+    const path = try sidebarCwdPath(allocator, term);
+    defer allocator.free(path);
+    if (path.len == 0) return allocator.dupe(u8, "");
+    return std.fmt.allocPrint(allocator, icons.utf8(.folder) ++ " {s}", .{path});
+}
+
+/// 0xRRGGBB(카드별 프리셋 색 등) + alpha를 GpuQuad 색 워드(0xAARRGGBB, straight-alpha — 셰이더가 rgb*=a)로 패킹.
+/// packRgbAlpha(Rgb)의 u32-입력 버전 — 사이드바 배경 tint·좌측 막대가 임의 프리셋 RGB를 담을 때 공유(0x00FF_FFFF 마스크 단일 출처).
+pub fn packStraightRgbU32(rgb: u32, alpha: u8) u32 {
+    return (@as(u32, alpha) << 24) | (rgb & 0x00FF_FFFF);
+}
+
+/// 사이드바 하이라이트/색 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
+/// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
+/// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
+/// sentinel-UV(-1) 배경 셀을 만든다. u16 width 상한도 같이 막는다. **가변 높이(code-review #7)**: 세로 위치는
+/// `origin_y`(content-상대 rowTop = 헤더·스크롤 제외)로, 높이는 `height`(카드=slot_h·그룹 헤더=header_row_h)로
+/// 실어 준다 — .m 렌더러가 옛 균일 `row*slot_h`/`slot_h` 대신 이 둘을 써 그룹 헤더(얇은 한 줄)와 정합한다(glyph 옵션2와
+/// 동형). height는 glyph 없는 sentinel 셀이라 미사용인 `atlas_height_px` 필드로 나른다(atlas 미참조라 안전). `row`는
+/// tint 역매핑·디버그용 표시 row(세로 위치는 origin_y가 단일 출처). 순수 함수라 OS와 무관하게 단위 테스트한다
+/// (lowerSidebar가 호출). 사이드바가 꺼졌거나(폭 0) cell 폭 미상이면 null.
+pub fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, row: u16, origin_y: u32, height: u32, active_bg: u32) ?metal_frame.NativeMetalCell {
+    if (sidebar_width_px == 0 or cell_width_px == 0) return null;
+    const cols_u32 = @min(sidebar_width_px / cell_width_px, @as(u32, std.math.maxInt(u16)));
+    const sidebar_cols: u16 = @intCast(cols_u32);
+    if (sidebar_cols == 0) return null;
+    return .{
+        .row = row,
+        .col = 0,
+        .width = sidebar_cols,
+        .codepoint = ' ',
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = height, // 밴드 행 높이(가변 — 카드=slot_h·헤더=header_row_h)를 .m cell_h로 나른다(#7)
+        .u0 = -1.0,
+        .v0 = -1.0,
+        .u1 = -1.0,
+        .v1 = -1.0,
+        .foreground = 0,
+        .background = active_bg,
+        .origin_y = origin_y, // content-상대 rowTop(헤더·스크롤 제외). .m이 header 시프트·scroll을 더한다(glyph 옵션2 동형, #7)
+    };
+}
+
+/// per-tab 배경색(우클릭 "배경: …") tint 세기 — rich gpu_quad·tui 밴드 두 경로 단일 출처. 0xB0 ≈ 69%
+/// (0x66 ≈ 40%에서 올림 — 옅어서 안 보인다는 라이브 요청). 0=투명, 0xFF=완전 불투명.
+pub const tab_bg_tint_alpha: u8 = 0xB0;
+
+/// 이퀄라이저 바 개수 = 위상 테이블 길이(단일 출처 — 둘이 어긋나 spinnerBarCp가 OOB 나지 않게 파생, code-review high 후속).
+pub const spinner_bar_count: usize = spinner_bar_phase.len;
+
+/// 프레임 f, 바 c의 블록 codepoint(▁~█). 높이 h(1~8) → base+h(▁=U+2581 … █=U+2588). frame은 이미 wave 길이로 wrap됨.
+pub fn spinnerBarCp(frame: u8, bar: usize) u21 {
+    const h = spinner_wave[(@as(usize, frame) + spinner_bar_phase[bar]) % spinner_wave.len];
+    return spinner_block_base + @as(u21, h);
+}
+
+/// codepoint가 스피너 바 글리프(블록 ▁~█)인가 — 색칠 루프 게이트(상태줄 row로 좁힌 뒤 이 체크). 범위는 emit(spinnerBarCp)이
+/// 내는 [base+1, base+max(wave)]와 **자동으로** 일치한다(wave 높이가 바뀌어도 게이트가 따라감 — 단일 출처, code-review high 후속).
+pub fn isAgentSpinnerCp(cp: u21) bool {
+    const max_h = comptime std.mem.max(u8, &spinner_wave);
+    return cp > spinner_block_base and cp <= spinner_block_base + @as(u21, max_h);
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// 검색 줄 레이아웃 — 렌더(buildSidebarHeaderDrawList)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
+// 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.
+pub const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
+
+/// 각 바의 위상 offset(파형 길이 14 위, 간격 4·4·4·2) — 바마다 파형을 다른 지점에서 읽어 시차를 두고 오르내린다. 삼각 파형이라
+/// 프레임에 따라 인접 두 바가 같은 높이로 겹치는 순간도 있지만(자연스러운 마루/골) 전체적으로 파도처럼 흐른다. 바 개수는 이 길이가 단일 출처.
+pub const spinner_bar_phase = [_]u8{ 0, 4, 8, 12 };
+
+/// 블록 글리프 베이스 codepoint(U+2580). 높이 h(1~8)를 더하면 ▁(U+2581)~█(U+2588). emit(sidebar_ops.spinnerBarCp)·색칠 게이트(sidebar_ops.isAgentSpinnerCp)의 단일 출처.
+pub const spinner_block_base: u21 = 0x2580;

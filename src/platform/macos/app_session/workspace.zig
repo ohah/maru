@@ -24,6 +24,9 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const setenv = app_session_mod.setenv;
+const unsetenv = app_session_mod.unsetenv;
+const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
 const assertPinnedPrefixRuntime = AppSession.assertPinnedPrefixRuntime;
@@ -36,15 +39,12 @@ const WorkspaceAgent = AppSession.WorkspaceAgent;
 const agent_dock = app_session_mod.agent_dock;
 const config_mod = app_session_mod.config_mod;
 const dock_panel = app_session_mod.dock_panel;
-const homeForRootCwd = app_session_mod.homeForRootCwd;
 const pane_ops = @import("pane.zig");
 const CloseScope = app_session_mod.CloseScope;
 const PaneTree = app_session_mod.PaneTree;
 const Tab = app_session_mod.Tab;
 const dock_ops = @import("dock.zig");
-const effectiveWindowBlur = app_session_mod.effectiveWindowBlur;
 const file_panel_ops = @import("file_panel.zig");
-const resolveWorkspaceRoot = app_session_mod.resolveWorkspaceRoot;
 const settings_ops = @import("settings.zig");
 const sidebar_ops = @import("sidebar.zig");
 const surface_move = app_session_mod.surface_move;
@@ -595,3 +595,81 @@ pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
 pub fn workspaceHasStatusLine(tab: *Tab) bool {
     return tab_ops.tabAgentRepresentative(tab) != null;
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// config `workspace.root`(시작 창·새 워크스페이스 탭 전용)를 spawn cwd로 해석한다. 빈 값이면 null(상속
+// cwd로 spawn — maru를 띄운 디렉터리). `~`·`~/…`는 `home`($HOME)으로 확장해 `buf`에 쓰고 그 슬라이스를
+// 돌려준다(확장 없으면 `configured`를 그대로 빌린다 — loaded_config arena가 세션 동안 소유). 최종 형식 필터는
+// **usableRestoreCwd 단일 출처에 위임**한다(빈/과길이/비절대 → null) — 상대경로를 넘기면 자식이 앱 cwd 기준으로
+// chdir해 예측 불가. 존재·디렉터리 여부는 검사하지 않는다 — childExec가 chdir 실패 시 $HOME으로 graceful 폴백한다
+// (TOCTOU 회피, usableRestoreCwd와 같은 결). 반환 슬라이스는 `buf`가 살아 있는 동안(=spawn 호출까지) 유효하다.
+// loader는 raw 문자열만 보관하므로 env 의존(`~` 확장)을 여기 platform layer에서 처리한다.
+pub fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[]const u8 {
+    if (configured.len == 0) return null;
+    var path = configured;
+    // `~` 단독 또는 `~/…`를 $HOME으로 확장한다(셸의 tilde expansion은 셸을 안 거치는 execve엔 안 일어난다).
+    // $HOME이 없거나(드묾) **빈 문자열/상대경로**면 확장 못 하므로 null(상속 cwd) — `~`로 시작하는 상대경로를
+    // 그대로 넘기지 않는다. 빈 home 가드가 핵심: getenv는 `HOME=""`도 non-null로 주므로 `home orelse`만으론
+    // 빈 home이 통과해 `~/proj`가 `/proj`(절대경로처럼 보임)로 오해석된다. isAbsolute("")==false라 한 검사로 둘 다 막는다.
+    if (std.mem.eql(u8, configured, "~") or std.mem.startsWith(u8, configured, "~/")) {
+        const h = home orelse return null;
+        if (!std.fs.path.isAbsolute(h)) return null; // 빈/상대 home → 확장 불가(폴백 spawn)
+        const rest = configured[1..]; // "" 또는 "/…"
+        path = std.fmt.bufPrint(buf, "{s}{s}", .{ h, rest }) catch return null; // 너무 길면 null(폴백 spawn)
+    }
+    return usableRestoreCwd(path); // 절대경로·길이 필터(단일 출처 재사용 — 비절대/과길이는 null)
+}
+
+// config `workspace.root` **미설정** 시 첫 창/폴백 cwd를 정한다. maru의 launch cwd가 `/`였으면(`launch_is_root`
+// — .app 더블클릭·launchd·open으로 뜬 흔한 증상) `home`(절대경로)을 `buf`에 써서 돌려주고, 그 외(정상 cwd·home
+// 없음/상대·`/` 아님)는 null(=launch cwd를 그대로 상속). Ghostty가 launchd/open 실행을 `home`으로 보는 것과 같은
+// 결인데, 침습적 런처 감지 대신 "cwd가 `/`" 증상으로 좁혀 잡는다(터미널에서 띄운 정상 세션은 cwd가 `/`가 아니라
+// 그대로 상속). `launch_is_root`는 init에서 getcwd로 한 번만 판정해 주입한다(maru는 자기 cwd를 안 바꿔 시작 시
+// 한 번이면 충분 — 새 탭/분할마다 getcwd 시스템콜을 반복하지 않는다). 그래서 이 함수는 I/O 없이 순수(테스트 가능).
+pub fn homeForRootCwd(buf: []u8, launch_is_root: bool, home: ?[]const u8) ?[]const u8 {
+    if (!launch_is_root) return null; // 정상 cwd면 그대로 상속(폴백 안 함)
+    const h = home orelse return null;
+    if (!std.fs.path.isAbsolute(h) or h.len > buf.len) return null;
+    @memcpy(buf[0..h.len], h);
+    return buf[0..h.len];
+}
+
+/// 창 뒤 배경 블러(window.blur, F3-1)의 **유효 반경**(px). config 반경을 그대로 주되, 창이 불투명(opacity>=1)이면
+/// 뒤가 안 비쳐 블러가 보이지 않으므로 0으로 깎는다 — Ghostty `ghostty_set_window_background_blur`가
+/// `background-opacity >= 1.0`에서 early-return하는 게이트와 동등. 이 정책이 단일 출처고, platform host(macOS=CGS,
+/// 추후 Win=DWM·Linux=컴포지터)는 반환값을 그대로 OS 창 속성에 싣는다. 순수 함수라 헤드리스 단위 테스트 가능.
+pub fn effectiveWindowBlur(blur: u32, opacity: f32) u32 {
+    if (blur == 0) return 0;
+    if (opacity >= 1.0) return 0; // 불투명 창 — 블러 안 보임
+    return blur;
+}
+
+/// provider fixture 테스트가 실제 사용자 홈·설정·캐시를 건드리지 않도록 관련 env를 저장했다가 되돌린다. 이 테스트들은
+/// **실 파일시스템에 쓰는** 경로를 검증하므로 tmp로 밀어 넣는 것이 필수다.
+pub const ProviderEnvGuard = struct {
+    const names = [_][:0]const u8{ "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "MARU_CONFIG" };
+
+    a: std.mem.Allocator,
+    saved: [names.len]?[:0]u8 = .{null} ** names.len,
+
+    pub fn capture(a: std.mem.Allocator) !ProviderEnvGuard {
+        var self = ProviderEnvGuard{ .a = a };
+        for (names, &self.saved) |name, *slot| {
+            if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeZ(u8, std.mem.span(raw));
+        }
+        return self;
+    }
+
+    pub fn restore(self: *ProviderEnvGuard) void {
+        for (names, self.saved) |name, old| {
+            if (old) |value| {
+                _ = setenv(name.ptr, value.ptr, 1);
+                self.a.free(value);
+            } else {
+                _ = unsetenv(name.ptr);
+            }
+        }
+    }
+};

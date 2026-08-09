@@ -21,38 +21,32 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
+const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
-const overlay_scrollbar_min_thumb_px = app_session_mod.overlay_scrollbar_min_thumb_px;
 const agent_dock = app_session_mod.agent_dock;
 const overlay_scrollbar_inset_px = app_session_mod.overlay_scrollbar_inset_px;
 const layout_math = app_session_mod.layout_math;
 const overlay_scrollbar_width_px = app_session_mod.overlay_scrollbar_width_px;
-const scrollbar_bar_emphasize_px = app_session_mod.scrollbar_bar_emphasize_px;
 const Term = app_session_mod.Term;
 const default_scrollbar_fade_ticks = app_session_mod.default_scrollbar_fade_ticks;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;
 const dock_ops = @import("dock.zig");
 const overlay_scroll_max_entries = app_session_mod.overlay_scroll_max_entries;
-const scrollbar_alpha_idle = app_session_mod.scrollbar_alpha_idle;
-const scrollbar_bar_min_px = app_session_mod.scrollbar_bar_min_px;
 const tab_ops = @import("tab.zig");
 const FileTreeScrollExtent = AppSession.FileTreeScrollExtent;
 const OverlayScrollExtent = AppSession.OverlayScrollExtent;
 const ScrollRef = app_session_mod.ScrollRef;
 const default_scrollbar_visible_ticks = app_session_mod.default_scrollbar_visible_ticks;
-const drag_autoscroll_step_ms = app_session_mod.drag_autoscroll_step_ms;
 const file_panel_ops = @import("file_panel.zig");
-const overlay_scroll_ids = app_session_mod.overlay_scroll_ids;
 const pane_ops = @import("pane.zig");
 const scrollbar_alpha_full = app_session_mod.scrollbar_alpha_full;
-const scrollbar_bar_mul = app_session_mod.scrollbar_bar_mul;
 const scrollbar_fade_ms = app_session_mod.scrollbar_fade_ms;
 const scrollbar_visible_ms = app_session_mod.scrollbar_visible_ms;
 const sidebar_ops = @import("sidebar.zig");
 const terminal = app_session_mod.terminal;
-const wheelDeltaToLines = app_session_mod.wheelDeltaToLines;
 
 /// 키보드 ↑↓로 알림 선택이 바뀐 뒤 — 선택 카드가 패널 viewport 밖이면 보이게 스크롤한다(컴포넌트 ensureSelectedVisible
 /// 단일 출처). 개수·metrics만 넘긴다(Item 빌드 불필요). scroll_offset 상태를 두는 알림 패널 특유 처리(palette는 파생).
@@ -1025,3 +1019,33 @@ pub fn appendPaletteScrollbar(self: *AppSession) void {
         .content_h_px = @as(u32, @intCast(total)) * lay.ch,
     });
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub const wheelDeltaToLines = input_math.wheelDeltaToLines;
+
+// 드래그 자동 스크롤이 한 줄 더 스크롤하기까지의 간격(ms) — frame rate와 무관하게 일정 속도(≈30줄/s)를 유지하려고
+// tick 수가 아니라 경과 ms로 게이트한다. 옛 30Hz 1틱/줄(≈33ms/줄)과 같은 체감 속도를 기준으로 잡았다. msPerTick
+// 누적이 이 값을 넘을 때마다 한 줄 스크롤한다(render.frame-rate_min=30이라 msPerTick≤이 값 → tick당 최대 한 줄).
+pub const drag_autoscroll_step_ms: u32 = 33;
+
+// 스크롤바 thumb 폭(굵기). cell_width의 비율, 최소 px 보장. hover/드래그면 +emphasize_px로 살짝 굵게(affordance).
+pub const scrollbar_bar_mul: f32 = 0.5; // cell_width 대비 폭 비율(굵게 — 잡기/보기 쉽게)
+
+pub const scrollbar_bar_min_px: f32 = 7.0; // 작은 폰트에서도 최소 두께
+
+pub const scrollbar_bar_emphasize_px: f32 = 2.0; // hover/드래그 시 추가 폭
+
+pub const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
+
+/// 오버레이(팔레트·세팅·알림) 스크롤바가 쓰는 id·저장소(SV5b). 오버레이는 **한 번에 하나만 열리므로**
+/// 발행 저장소를 셋이 공유한다 — SV3b가 탐색기↔소스 컨트롤에서 쓴 것과 같은 근거다(도크·사이드바와는
+/// 조건이 다르다. 그 둘은 동시에 화면에 있어 저장소를 나눠야 했다).
+pub const overlay_scroll_ids = struct {
+    pub const area: chrome.ui.tree.UiId = 0x4F56_0001;
+    pub const track: chrome.ui.tree.UiId = 0x4F56_0002;
+    pub const thumb: chrome.ui.tree.UiId = 0x4F56_0003;
+};
+
+pub const overlay_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;

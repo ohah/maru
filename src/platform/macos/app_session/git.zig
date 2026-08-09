@@ -24,7 +24,6 @@ const git_command = app_session_mod.git_command;
 const layout_math = app_session_mod.layout_math;
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
-const readGitBranch = app_session_mod.readGitBranch;
 const settings_ops = @import("settings.zig");
 const tab_ops = @import("tab.zig");
 const Term = app_session_mod.Term;
@@ -370,4 +369,53 @@ pub fn termGitBranchForCwd(self: *AppSession, term: *Term, cwd: []const u8) ?[]c
     term.git_branch_cwd = self.allocator.dupe(u8, cwd) catch null;
     if (diag_gate.maruDebugEnabled()) std.log.scoped(.git).info("branch: cwd={s} -> {?s}", .{ cwd, term.git_branch });
     return term.git_branch;
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+/// cwd(OSC 7 보고)에서 부모로 올라가며 `<dir>/.git/HEAD`를 찾아 git 브랜치명을 도출한다(owned 슬라이스, 호출자 해제).
+/// `ref: refs/heads/<branch>`면 그 branch, detached(raw SHA)면 짧게 7자. 못 찾으면 null(브랜치 표시 없음).
+/// 절대 경로만, walk-up은 루트까지(깊이 128 가드). 베이스: git이 cwd부터 부모로 .git을 찾는 방식. worktree(.git가
+/// gitdir: 파일)는 best-effort 미지원(.git/HEAD 못 읽으면 null) — 후속. fs 읽기는 cwd 변경 시에만(termGitBranch 캐시).
+pub fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]const u8 {
+    if (cwd.len == 0 or cwd.len >= std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
+    var dir: []const u8 = cwd;
+    var depth: usize = 0;
+    while (depth < 128) : (depth += 1) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const head_path = std.fmt.bufPrint(&buf, "{s}/.git/HEAD", .{dir}) catch return null;
+        if (std.Io.Dir.cwd().readFileAlloc(io, head_path, allocator, .limited(4096))) |data| {
+            defer allocator.free(data);
+            // .git/HEAD가 있으니 이미 repo 안 — 파싱 결과가 null이어도 더 올라가지 않는다.
+            return if (parseGitHead(data)) |b| (allocator.dupe(u8, b) catch null) else null;
+        } else |_| {}
+        const parent = std.fs.path.dirname(dir) orelse return null;
+        if (parent.len >= dir.len) return null; // 진전 없음(루트 도달)
+        dir = parent;
+    }
+    return null;
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+/// `.git/HEAD` 내용에서 브랜치명을 뽑는 순수 파서(입력 슬라이스 참조 반환 — 할당 없음). `ref: refs/heads/<branch>`면
+/// branch, detached(raw SHA ≥7 hex)면 짧게 7자, 그 외(빈 ref·쓰레기)면 null. readGitBranch가 fs 읽은 뒤 호출·dupe.
+pub fn parseGitHead(content: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+    const ref_prefix = "ref: refs/heads/";
+    if (std.mem.startsWith(u8, trimmed, ref_prefix)) {
+        const branch = trimmed[ref_prefix.len..];
+        return if (branch.len == 0) null else branch;
+    }
+    return if (isHexStr(trimmed) and trimmed.len >= 7) trimmed[0..7] else null;
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub fn isHexStr(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isHex(c)) return false;
+    return s.len > 0;
 }

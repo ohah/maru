@@ -39,17 +39,13 @@ const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const dock_view_bar = app_session_mod.dock_view_bar;
-const session_dock_ui_zoom_max_milli = app_session_mod.session_dock_ui_zoom_max_milli;
 const smokeProbeVisibleRect = AppSession.smokeProbeVisibleRect;
 const AgentSessionArchiveScope = app_session_mod.AgentSessionArchiveScope;
 const AgentSessionArchiveSmokeProbe = app_session_mod.AgentSessionArchiveSmokeProbe;
 const AgentSessionDockPointerDispatch = AppSession.AgentSessionDockPointerDispatch;
 const CollectedPane = AppSession.CollectedPane;
 const MeasuredTextCache = app_session_mod.MeasuredTextCache;
-const agent_session_archive_snapshot_ttl_ns = app_session_mod.agent_session_archive_snapshot_ttl_ns;
-const asciiContainsIgnoreCase = app_session_mod.asciiContainsIgnoreCase;
 const file_tree = app_session_mod.file_tree;
-const session_dock_ui_zoom_min_milli = app_session_mod.session_dock_ui_zoom_min_milli;
 
 pub fn archiveOpenedDevice(file: std.Io.File) u64 {
     if (comptime builtin.os.tag != .macos) return 0;
@@ -2061,3 +2057,30 @@ pub fn focusLiveArchiveSession(self: *AppSession, detail: *const InlineArchiveDe
     };
     return false;
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
+
+pub fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var start: usize = 0;
+    while (start + needle.len <= haystack.len) : (start += 1) {
+        var index: usize = 0;
+        while (index < needle.len and std.ascii.toLower(haystack[start + index]) == std.ascii.toLower(needle[index])) : (index += 1) {}
+        if (index == needle.len) return true;
+    }
+    return false;
+}
+
+// Session Dock은 terminal line spacing·font size와 별도 Chrome typography(role별 고정 pt)를 유지한다.
+// **face는 예외로 terminal `font.family`를 따른다** — 사이드바와 한 화면에 보이므로 face까지 독립이면
+// 사용자 폰트 설정을 앱이 절반만 따르게 된다(docs/font-strategy.md "Chrome 텍스트 face"). 크기 위계가
+// 독립이라 face를 바꿔도 도크 기하는 불변이다. 다만 사용자가
+// Cmd+/−/0으로 요청한 font-size zoom은 Dock 전체의 명시적 UI zoom으로 반영한다. 범위는 좁은 dock에서
+// 48pt action target과 최소 읽기 밀도를 보존하도록 [75%, 150%]로 제한한다.
+pub const session_dock_ui_zoom_min_milli: u32 = 750;
+
+pub const session_dock_ui_zoom_max_milli: u32 = 1500;

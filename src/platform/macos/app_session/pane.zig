@@ -59,7 +59,6 @@ const isBrowserTerm = @import("web.zig").isBrowserTerm;
 const pane_grip_cols = AppSession.pane_grip_cols;
 const scrollbarThumbGeom = @import("scroll.zig").scrollbarThumbGeom;
 const AgentKind = app_session_mod.AgentKind;
-const FocusDirection = app_session_mod.FocusDirection;
 const PendingClose = app_session_mod.PendingClose;
 const activeIndexAfterRemoval = app_session_mod.activeIndexAfterRemoval;
 const app = app_session_mod.app;
@@ -67,7 +66,6 @@ const coretext_frame_builder = app_session_mod.coretext_frame_builder;
 const dock_layout = app_session_mod.dock_layout;
 const dock_panel = app_session_mod.dock_panel;
 const metal_frame = app_session_mod.metal_frame;
-const restoreSurfaceSize = app_session_mod.restoreSurfaceSize;
 const spawnRequest = app_session_mod.spawnRequest;
 const web_panel_layout = app_session_mod.web_panel_layout;
 const CollectedPane = AppSession.CollectedPane;
@@ -2049,3 +2047,21 @@ test "탭 제목 batch는 원본이 해제돼도 유효한 소유 복사본을 �
     try std.testing.expectEqual(@as(usize, 1), batch.entries.items.len);
     try std.testing.expectEqualStrings("세션호스트", batch.entries.items[0].text);
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
+// 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
+pub fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
+    return terminal.clampGridSize(.{
+        .cols = if (sm.cols > 0) sm.cols else terminal.Size.default.cols,
+        .rows = if (sm.rows > 0) sm.rows else terminal.Size.default.rows,
+    });
+}
+
+/// 스크린 점(backing px)을 담는 panel(없으면 null). split 탭에서 마우스 클릭이 어느 panel에 떨어졌는지
+// pane hit-test(paneAtPoint)·방향 탐색(paneInDirection)·FocusDirection은 session core로 이동(후속) —
+// Model.paneAtPoint/paneInDirection/FocusDirection. 순수(레이아웃 rect만)라 헤드리스 테스트도 session_model로.
+// platform은 termRect→layout으로 leaf_rects를 만들어 넘긴다. 단일 출처: src/session/session_model.zig.
+pub const FocusDirection = Model.FocusDirection;

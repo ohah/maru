@@ -171,7 +171,10 @@ pub const inventory = [_]Proof{
     // 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor를 열고(41) 옮겨간 탭 함수 pub을 닫은
     // 것뿐이다. 그룹 파일끼리 `app_session.zig` 재수출을 거치던 참조도 직접 `@import`으로 바꿨다.
     // 상태바 리소스 항목(표본 폴링·표시 캐시·항목 추가)이 붙어 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "1ce71acb837d18b3b00752afeeac68295caaaf71fa5072e43b39c9d6047adcee" },
+    // 사이드바(행 모델·스크롤·드래그 프리뷰·카드·헤더)를 `app_session/sidebar.zig`로 떼어내며 또
+    // 바뀐다(F7). count는 4 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor를 열고(44)
+    // 옮겨간 사이드바 함수 pub을 닫은 것뿐이다. 탭 그룹 모델 240줄은 소유가 tab이라 옮기지 않았다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "28e7e25f284d49bd3793a0be35e3a630782201ab6940f15508b5863bb34d47fd" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

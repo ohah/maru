@@ -19,9 +19,9 @@
 | 2026-06 | 20,183 | 이 문서 최초 측정 · (b) 결정 시점 |
 | 2026-07 | 35,134 | (b) "일단락" 이후 |
 | 2026-08-08 | **72,317** | (b) 결정 대비 3.6배 |
-| 2026-08-09 (F6까지) | **64,497** | F1·F2·F4·F5·F6로 −7,820. 그룹 파일 6개 합계 9,909줄 |
+| 2026-08-09 (F7까지) | **62,335** | F1·F2·F4·F5·F6·F7로 −9,982. 그룹 파일 7개 합계 12,152줄 |
 
-> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). 남은 F7~F10을 이름 기준으로 다 옮겨도
+> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). 남은 F8~F10을 이름 기준으로 다 옮겨도
 > `app_session.zig`에는 test 블록 33,000줄대와 허브(`tick`·`mouse`·`handleKeyEvent`)가 남으므로
 > **56,000줄대**가 착지점이다. 그보다 더 줄이려면 test 소유처를 따로 정해야 하고, 그 값은 §2-c-3 실측대로
 > pub화 6배다.
@@ -111,7 +111,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F4** ✅ | pane · split · divider | 1,570(메서드) | 중 | 2026-08-09 완료 → `app_session/pane.zig`, pub화 43 |
 | **F5** ✅ | 도크 일반(view·레이아웃·스크롤바) | 484(메서드) | 낮음 | 2026-08-09 완료 → `app_session/dock.zig`, pub화 4(예측과 일치) |
 | **F6** ✅ | tab(생성·전환·이동·고정·그룹·제목) | 1,254(메서드) | 낮음 | 2026-08-09 완료 → `app_session/tab.zig`, pub화 41 |
-| **F7** | sidebar | ~1,620 | 중 | `metal_frame` 셀·색 결합(옛 E4 실측) |
+| **F7** ✅ | 사이드바(행 모델·스크롤·드래그 프리뷰·카드·헤더) | 1,812(메서드) | 중 | 2026-08-09 완료 → `app_session/sidebar.zig`, pub화 44 |
 | **F8** | scroll | ~1,440 | 낮음 | |
 | **F9** | settings · context menu · rename | ~1,830 | 낮음 | |
 | **F10** | workspace capture/restore | ~810 | 중 | 캡처=agent PTY·복원=`createPane` spawn(옛 E5 실측) |
@@ -167,6 +167,28 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > 그 결과 F5는 **pub화 4개가 예측과 정확히 일치**한 첫 그룹이 됐다(F2 26→50, F4 35→43). 그룹이 작고
 > 경계가 깨끗하면 추정이 맞는다는 뜻이지, 추정 방법이 나아진 것은 아니다 — §2-c-2의 규칙은 그대로다.
+
+> **이름이 도메인을 숨기는 세 번째 유형(F7에서 발견).** F4·F6의 함정은 *부분 문자열*이었고 F6에서
+> *호출 근접성*을 하나 더 봤다. F7에서 셋째가 나왔다 — **도메인 개념이 다른 이름을 쓴다.**
+> `moveGroupSibling`·`moveGroupRange`·`relevelBlock`·`groupSubtreeEnd`·`effectiveDepthAt`·
+> `stablePartitionPinned` 등 240줄은 이름에 `tab`이 없어 F6가 못 가져갔고, 사이드바 드래그에서만
+> 불리므로 F7의 흡수 조건에는 걸린다. 그러나 본문은 **탭 그룹 마커와 depth를 수술한다** — 사이드바는
+> 그 모델을 *표시*할 뿐이다. F7로 보내면 잘못된 소유가 굳으므로 제외했고, `tab.zig`로 보내는 것은
+> **F6 보정**으로 아래에 등록한다.
+>
+> **후속: F6 보정(탭 그룹 모델 240줄).** `moveGroupRange`·`relevelBlock`·`relevelBlockCore`·
+> `groupSubtreeEnd`·`effectiveDepthAt`·`enclosingGroupMarkerIndex`·`pinBoundariesAlignGroups`·
+> `stablePartitionPinned`·`stablePartitionSubtree`·`assertPinnedPrefixRuntime`·`pinRegionBounds`·
+> `moveGroupSibling`·`moveGroupNesting`·`simulateGroupMove`를 `tab.zig`로 옮긴다. F6에서 pub으로 연
+> 것들이 여기 다수 포함되므로 옮기면 다시 닫힌다.
+>
+> 실제 결과(F7): `app_session.zig` 64,497 → 62,335(−2,162), `sidebar.zig` 2,240줄(메서드 71 + 인자만
+> 보는 순수 기하·판정 7), pub화 44개(함수 24) / 제거 7개 → 순증 37개, test 771개 전원 잔류,
+> `test-macos-app-host-abi` 2,844 passed / 0 failed.
+>
+> **값 리시버 함정(F7).** `*const AppSession`을 받는 함수를 `var session: AppSession = undefined`인
+> test에서 부르면, 메서드 호출 문법은 자동으로 주소를 잡지만 free 함수 호출은 `&session`이 필요하다.
+> 2건이 컴파일 오류로 잡혔다. 앞으로의 그룹에서도 나온다.
 
 > **부분 문자열 함정(F6).** `tab`은 `stable`·`established`·`editable`·`executable`의 부분 문자열이라
 > 이름 일치만으로 `stablePartitionPinned`·`stablePartitionSubtree`·`reestablishTopLevelBoundaryOnMove`·

@@ -336,7 +336,3 @@ test "줄 끝이 `\\r`인 줄 다음에 오는 개행은 CRLF다" {
     try testing.expectEqual(LineEnding.crlf, idx.line(1).?.ending);
     try testing.expectEqual(@as(usize, 0), idx.line(1).?.contentLen());
 }
-
-test "TEMP-PROBE-must-fail-if-collected" {
-    try std.testing.expect(false);
-}

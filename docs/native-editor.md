@@ -85,6 +85,7 @@ L2  src/session/editor/          문서 모델 — chrome·OS를 모름
       line_index.zig             byte offset ↔ 논리행 (N1 — buffer 도입 시 흡수 여부를 함께 정한다)
       selection.zig              multi-selection(byte range 배열) + goal column
       document.zig               파일 → 문서 해석(BOM·줄바꿈·파일 끝 개행 보존, §3.5)
+      hazard.zig                 적대적 입력 판정(BiDi·제어·폭 0·비표준 공백, §3.8)
       span.zig                   Span/role + SpanProvider 주입점
       (기존 계약) protocol.zig · grant.zig · document_registry.zig · diff_model.zig
 
@@ -469,6 +470,10 @@ selection이 배열(§3.2)이므로 복사·붙여넣기가 단순하지 않다.
 - **논리 순서 그대로 그린다.** 등폭 격자는 문자 하나가 열 하나(또는 둘)라는 전제 위에 서는데, BiDi 재정렬은 그 대응을 깨뜨린다. RTL 문자열이 시각적으로 뒤집혀 보이지 않는 대가를 치르되, **offset ↔ 열 대응과 선택 영역의 의미가 보존**된다. 터미널도 같은 이유로 같은 선택을 하고 있다.
 - **BiDi 제어 문자(`U+202A`~`U+202E`, `U+2066`~`U+2069`)를 가시화한다.** 이들은 폭 0이라 보이지 않으면서 **주변 텍스트의 표시 순서를 바꾼다** — Trojan Source의 수단이 정확히 이것이다. 지우지 않고(문서를 바꾸면 안 된다) 눈에 보이는 표기로 그리며, §5 스팬 층의 경고 role을 쓴다.
 - **완전한 BiDi 지원(UAX #9)은 이 계약 밖이다**(§12). 그것을 하려면 등폭 전제를 다시 정의해야 한다.
+
+**가시화는 구현됐다**(`session/editor/hazard.zig` + `chrome/components/editor_view/content.zig`). 판정은 L2가 하고(어떤 codepoint가 위험한지는 화면과 무관한 문서 성질이다) 표시는 L3가 `<U+202E>` 형태로 그린다 — **codepoint 값을 그대로 보여준다**. `U+FFFD` 하나로 뭉뚱그리면 검토자가 무엇이 숨었는지 알 수 없고, Trojan Source 리뷰에서는 `U+202E`인지 `U+2066`인지가 판단을 가른다. 시각 골든 `editor-hazard-visible`이 이것을 고정하며, **가시화가 꺼지면 그 줄들이 평범해 보이므로**(그것이 공격의 목적이다) 픽셀이 유일한 자동 가드다.
+
+**`U+200D`(ZWJ)는 잡지 않는다.** 이모지 가족(👨‍👩‍👧)을 잇는 정상 문자라 위험으로 분류하면 평범한 이모지가 전부 경고가 된다. 식별자 안의 ZWJ는 §5 진단이 볼 문제이지 표시의 문제가 아니다. 탭·LF·CR도 같은 이유로 뺀다 — 편집기가 그 셋에 의미를 부여한다.
 
 **제어 문자와 비출력 문자를 가시화한다.** NUL·ESC·BEL 같은 C0 제어 문자, zero-width(`U+200B`·`U+FEFF`), 비표준 공백(`U+00A0`)은 눈에 보이는 표기로 그린다. **터미널과 달리 해석하지 않는다** — 편집기에 온 ESC는 명령이 아니라 파일의 바이트다.
 

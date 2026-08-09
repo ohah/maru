@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const headerIconRasterExtentPx = app_session_mod.headerIconRasterExtentPx;
 const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
 const workspace_ops = @import("workspace.zig");
@@ -35,8 +36,6 @@ const PendingDockFocus = app_session_mod.PendingDockFocus;
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const renameatx_np = AppSession.renameatx_np;
-const file_tree_icon = app_session_mod.file_tree_icon;
-const EntryLookupCounters = app_session_mod.EntryLookupCounters;
 const FilePanelOpenPathResult = AppSession.FilePanelOpenPathResult;
 const FileTreePerfCounters = app_session_mod.FileTreePerfCounters;
 const PendingFileTreeDelete = app_session_mod.PendingFileTreeDelete;
@@ -46,21 +45,17 @@ const entryKindForOpenKind = AppSession.entryKindForOpenKind;
 const file_tree_backend = app_session_mod.file_tree_backend;
 const openFilePanelPath = AppSession.openFilePanelPath;
 const panelKindForEntryKind = AppSession.panelKindForEntryKind;
-const rename_swap = app_session_mod.rename_swap;
 const reportFilePanelDirty = AppSession.reportFilePanelDirty;
 const rowFileIdentity = AppSession.rowFileIdentity;
 const stableOpenedFileHash = AppSession.stableOpenedFileHash;
 const CloseScope = app_session_mod.CloseScope;
-const DeletedSurfaceSet = app_session_mod.DeletedSurfaceSet;
 const FileEntryConstIterator = AppSession.FileEntryConstIterator;
 const FileEntryIterator = AppSession.FileEntryIterator;
 const FileOpenResult = AppSession.FileOpenResult;
 const FilePanelDockControlAction = AppSession.FilePanelDockControlAction;
 const FilePanelLinkError = AppSession.FilePanelLinkError;
 const FilePanelReadError = AppSession.FilePanelReadError;
-const FilePanelTestC = app_session_mod.FilePanelTestC;
 const FilePanelWriteError = AppSession.FilePanelWriteError;
-const FileTreeDockRemovalStats = app_session_mod.FileTreeDockRemovalStats;
 const FileTreeEditKind = app_session_mod.FileTreeEditKind;
 const FileTreeEditTarget = app_session_mod.FileTreeEditTarget;
 const FileTreeFocusOwner = app_session_mod.FileTreeFocusOwner;
@@ -76,17 +71,14 @@ const RestoredFileEntries = AppSession.RestoredFileEntries;
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
 const agent_dock = app_session_mod.agent_dock;
-const dockToggleVisualBottomPx = app_session_mod.dockToggleVisualBottomPx;
 const dock_layout = app_session_mod.dock_layout;
 const dock_panel = app_session_mod.dock_panel;
 const file_panel_bridge = app_session_mod.file_panel_bridge;
 const file_tree = app_session_mod.file_tree;
-const file_tree_mutation = app_session_mod.file_tree_mutation;
 const file_tree_mutation_backend = app_session_mod.file_tree_mutation_backend;
 const file_tree_navigation = app_session_mod.file_tree_navigation;
 const hasProtectedFilePanelsForExit = AppSession.hasProtectedFilePanelsForExit;
 const layout_math = app_session_mod.layout_math;
-const max_file_panel_close_request_id = app_session_mod.max_file_panel_close_request_id;
 const usizeOptEql = AppSession.usizeOptEql;
 
 pub fn setFileTreeSelection(self: *AppSession, index: usize) bool {
@@ -3667,3 +3659,82 @@ pub fn requeuePendingDockFocus(self: *AppSession, old: PendingDockFocus) void {
     self.file_tree_focus_pending = false;
     self.file_tree_restore_surface_pending = null;
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub const file_tree_mutation = maru.session.file_tree_mutation;
+
+pub const file_tree_icon = chrome.file_tree_icon;
+
+pub const FilePanelTestC = struct {
+    pub extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
+    pub extern "c" fn renameatx_np(
+        from_dir_fd: c_int,
+        from: [*:0]const u8,
+        to_dir_fd: c_int,
+        to: [*:0]const u8,
+        flags: c_uint,
+    ) c_int;
+};
+
+pub const rename_swap: c_uint = 0x00000002;
+
+/// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
+/// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
+pub fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
+    if (cell_height_px == 0) return titlebar_strip_px;
+    const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
+    const raster_height_px = headerIconRasterExtentPx(cell_height_px);
+    const bottom = @as(u64, origin_y) + (@as(u64, cell_height_px) + raster_height_px + 1) / 2;
+    return @intCast(@min(bottom, std.math.maxInt(u32)));
+}
+
+// JavaScript bridge arguments are IEEE-754 numbers. Keep close request IDs inside the exact integer range so the
+// request echoed by CM6 cannot alias a different native request after conversion through NSNumber/JavaScript.
+pub const max_file_panel_close_request_id = maru.session.control_bridge.max_js_safe_integer;
+
+pub const DeletedSurfaceSet = struct {
+    const slot_count = dock_panel.max_entries * 2;
+    keys: [slot_count]u64 = [_]u64{0} ** slot_count,
+
+    fn start(surface_id: u64) usize {
+        return @as(usize, @truncate(surface_id *% 0x9e3779b97f4a7c15)) & (slot_count - 1);
+    }
+
+    pub fn insert(self: *@This(), surface_id: u64) void {
+        std.debug.assert(surface_id != 0);
+        var slot = start(surface_id);
+        for (0..slot_count) |_| {
+            if (self.keys[slot] == 0 or self.keys[slot] == surface_id) {
+                self.keys[slot] = surface_id;
+                return;
+            }
+            slot = (slot + 1) & (slot_count - 1);
+        }
+        unreachable; // 최대 256개를 512-slot table에 넣으므로 full은 모델 cap 위반이다.
+    }
+
+    pub fn contains(self: *const @This(), surface_id: u64) bool {
+        if (surface_id == 0) return false;
+        var slot = start(surface_id);
+        for (0..slot_count) |_| {
+            const candidate = self.keys[slot];
+            if (candidate == 0) return false;
+            if (candidate == surface_id) return true;
+            slot = (slot + 1) & (slot_count - 1);
+        }
+        return false;
+    }
+};
+
+/// `fileEntryForIdCounted`의 방문 수 계측(성능 gate 소비 — docs/performance-budget.md).
+/// FP16 전에는 `DockPanel.EntryLookupCounters`였다 — 조회가 도크에서 Term 창구로 옮겨오며 함께 왔다.
+pub const EntryLookupCounters = struct { entry_visits: usize = 0 };
+
+pub const FileTreeDockRemovalStats = struct {
+    entry_visits: usize = 0,
+    dirty_sync_visits: usize = 0,
+    unlock_visits: usize = 0,
+    reload_visits: usize = 0,
+};

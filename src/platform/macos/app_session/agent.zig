@@ -25,38 +25,27 @@ const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const writeExecutableFile = AppSession.writeExecutableFile;
 const resolveConfiguredShell = app_session_mod.resolveConfiguredShell;
 const writeStatusLineCommand = AppSession.writeStatusLineCommand;
-const buildResumeShellCommand = app_session_mod.buildResumeShellCommand;
 const readStatusLineState = AppSession.readStatusLineState;
 const turnStateOf = AppSession.turnStateOf;
 const StatuslineLock = AppSession.StatuslineLock;
 const agent_dock = app_session_mod.agent_dock;
-const agent_screen_tail_bytes = app_session_mod.agent_screen_tail_bytes;
-const agent_screen_tail_rows = app_session_mod.agent_screen_tail_rows;
 const diag_gate = app_session_mod.diag_gate;
 const readFileAlloc = AppSession.readFileAlloc;
 const readFileState = AppSession.readFileState;
 const sidebar_ops = @import("sidebar.zig");
 const spawnRequest = app_session_mod.spawnRequest;
-const agentProcessPid = app_session_mod.agentProcessPid;
-const agent_activity_window_ms = app_session_mod.agent_activity_window_ms;
 const agent_running_flag = app_session_mod.agent_running_flag;
-const classifyAgentProcesses = app_session_mod.classifyAgentProcesses;
 const layout_math = app_session_mod.layout_math;
 const sessionCacheBase = AppSession.sessionCacheBase;
 const settings_ops = @import("settings.zig");
 const spinner_wave = app_session_mod.spinner_wave;
-const transcript_poll_interval_ms = app_session_mod.transcript_poll_interval_ms;
 const workspace_ops = @import("workspace.zig");
 const AgentKind = app_session_mod.AgentKind;
 const AgentTally = AppSession.AgentTally;
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
 const WorkspaceAgent = AppSession.WorkspaceAgent;
-const agent_age_repaint_interval_ms = app_session_mod.agent_age_repaint_interval_ms;
-const agent_observer_interval_ms = app_session_mod.agent_observer_interval_ms;
-const agent_poll_interval_ms = app_session_mod.agent_poll_interval_ms;
 const agent_session_archive_backend = app_session_mod.agent_session_archive_backend;
-const agent_spin_interval_ms = app_session_mod.agent_spin_interval_ms;
 const git_backend_mod = app_session_mod.git_backend_mod;
 const is_macos = app_session_mod.is_macos;
 const pane_ops = @import("pane.zig");
@@ -775,4 +764,113 @@ pub fn recolorAgentFlagCells(cells: anytype, kind: AgentKind) void {
     for (cells) |*c| {
         if (c.codepoint == agent_running_flag) c.style.foreground = .{ .rgb = brand };
     }
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
+// (wall-clock)으로 재 tick rate와 무관하게 그 속도를 지킨다(§10.5). 기본값은 macOS 캐럿 관례(on 500ms / off 500ms).
+pub const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
+
+/// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
+/// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
+pub const transcript_poll_interval_ms: u64 = 1000;
+
+/// 활동 시각은 **시간이 흐르는 것만으로** 값이 바뀐다(5m → 6m). 다른 재렌더 사유가 없으면 화면에 멈춘 값이 남다가
+/// 무관한 이벤트에 갑자기 뛴다 — 값이 틀린 것보다 그 거동이 더 헷갈린다(code-review max). 그래서 에이전트를 보여주는
+/// 동안 이 주기로 재렌더한다. 표기 최소 단위가 분이므로 이보다 촘촘할 이유가 없다.
+pub const agent_age_repaint_interval_ms: u32 = 20_000;
+
+pub const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
+
+pub const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
+
+/// observer가 읽는 화면 tail 상한(행·바이트). 옛 12행은 **사용자 입력이 길어지면 근거를 잃는** 두 번째 원인이었다 —
+/// 실측(codex 0.146.0)에서 composer는 입력 행 수만큼 제한 없이 자라, 입력 13행부터 프롬프트 마커가 12행 tail 밖으로
+/// 밀려 idle 근거가 사라졌다. 상시 chrome(프롬프트 마커·실행 footer)은 입력 길이와 무관하게 tail 안에 남아야 하므로
+/// 화면 높이급으로 둔다. 오래된 오버레이 문구가 현재 근거로 끌려오는 것은 행 수가 아니라 오버레이 규칙의 거리
+/// 게이트가 막는다(docs/agent-session.md «상태 모델과 우선순위»).
+///
+/// byte 상한은 **행 상한을 잘라먹지 않을 만큼** 크게 잡는다. `dumpRecentTextUtf8`이 `max_bytes / (cols*4 + 1)`로 행 수를
+/// 다시 계산하므로, 32KiB로 두면 320칸에서 25행·640칸에서 12행으로 줄어 이 상수가 대체하려던 한계가 넓은 창에서 그대로
+/// 되살아난다(코드 리뷰에서 재현). 128KiB면 640칸에서도 48행이 유지된다. worst-case 가정(모든 셀 4바이트)일 뿐이고
+/// 실제 복사량은 화면 내용만큼이라, ASCII 화면에서는 여전히 수십 KiB다.
+pub const agent_screen_tail_rows: usize = 48;
+
+pub const agent_screen_tail_bytes: usize = 128 * 1024;
+
+pub const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
+
+/// login/shell wrapper를 건너뛰고 같은 foreground group 안의 실제 agent 구성원을 찾는다. OS 열거와 provider 정책을
+/// 섞지 않도록 PTY는 이름 목록만 준다. 서로 다른 provider가 같은 group에 동시에 보이면 열거 순서로 임의 선택하지 않고
+/// none으로 실패해 오분류를 피한다. 같은 provider의 wrapper/native 중복은 하나로 취급한다.
+/// foreground 목록에서 **에이전트 프로세스의 pid**를 고른다(없으면 null). 세션 신원 env는 이 pid의 자식에게만
+/// 내려오므로(`agentSessionIdentity`) 결속의 출발점이다. 이름 판정은 `classifyAgent` 단일 출처를 재사용한다.
+pub fn agentProcessPid(processes: []const maru.pty.types.ForegroundProcessName, kind: AgentKind) ?i32 {
+    if (kind == .none) return null;
+    for (processes) |*process| {
+        if (classifyAgent(process.slice()) != kind) continue;
+        if (process.pid > 0) return process.pid;
+    }
+    return null;
+}
+
+pub fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessName) AgentKind {
+    var found: AgentKind = .none;
+    for (processes) |*process| {
+        const kind = classifyAgent(process.slice());
+        if (kind == .none) continue;
+        if (found != .none and found != kind) return .none;
+        found = kind;
+    }
+    return found;
+}
+
+/// config `shell.command`를 검증해 spawn에 쓸 최종 셸 경로를 돌려준다. 설정돼 있고 실행 가능한 파일이면 그
+/// 경로를, 아니면(빈 값·`~`·상대경로·없는 경로·실행 불가) `resolveInteractiveShell()` 기본 셸로 폴백한다.
+/// **이유**: 잘못된 셸 경로를 그대로 execve하면 자식이 즉시 _exit(127)로 죽고, 첫(유일) 창이면
+/// allTabsTerminated → app_should_terminate로 앱이 시작하자마자 종료된다. 여기서 미리 걸러 세션을 잃지 않는다
+/// (workspace.root의 chdir 실패 시 $HOME graceful 폴백과 같은 forgiving 정책). 폴백(resolveInteractiveShell =
+/// $MARU_INTERACTIVE_SHELL→$SHELL→/bin/sh)도 실행 불가일 수 있어($SHELL가 삭제된 셸을 가리킴) 한 번 더 검사하고,
+/// 그것마저 실패하면 최후로 `/bin/sh`로 떨어진다 — 폴백까지 exec 실패해 첫 창이 종료되는 것을 막는다.
+/// **범위(부분 방어)**: 이 함수는 *실행 불가한 셸 경로*만 막는다. 실행은 되지만 즉시 종료하는 셸(예: /usr/bin/false)
+/// 이나 셸을 종료시키는 shell.args는 못 막아, 그 경우 여전히 세션이 끝나 유일 창이면 앱이 종료된다 — 그건 별개의
+/// 루트커즈("시작 시 유일 surface 즉시 사망 → 앱 종료" lifecycle)로, 후속 과제다(project-rules.md §루트커즈). 반환
+/// 슬라이스는 `command`(config arena) 또는 environ/정적 리터럴을 가리켜 caller가 소유/해제하지 않는다(spawn 시 dupeZ 복사).
+/// `exec <provider> <args…>` 문자열을 만든다. 각 토큰을 작은따옴표로 감싸 셸이 어떤 확장도 하지
+/// 않게 한다(메커니즘 단일 출처: `maru.pty.types.appendSingleQuoted`).
+///
+/// `exec`를 붙이는 이유: 중간 셸이 남지 않아 프로세스 트리가 직접 exec일 때와 같아지고, 실행 중
+/// 판정(foreground process group 열거)이 그대로 성립한다. 호출자가 반환 슬라이스를 free한다.
+pub fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "exec");
+    for (argv) |token| {
+        try out.append(allocator, ' ');
+        try maru.pty.types.appendSingleQuoted(allocator, &out, token);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+/// 포그라운드 process group 구성원 이름 하나를 에이전트 종류로 분류한다(대소문자 무시 prefix 일치).
+/// PTY backend가 comm이 interpreter면 argv[1], 버전 문자열이면 argv[0]으로 먼저 해소한다.
+pub fn classifyAgent(name: ?[]const u8) AgentKind {
+    const n = name orelse return .none;
+    if (startsWithCi(n, "claude")) return .claude;
+    if (startsWithCi(n, "codex")) return .codex;
+    return .none;
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+/// haystack이 prefix로 시작하는가(대소문자 무시). 프로세스명 분류용 — 부분일치(claudia·mycodex 오탐)를 피하면서
+/// 변종("claude-code"·"codex-cli")은 잡는다.
+pub fn startsWithCi(haystack: []const u8, prefix: []const u8) bool {
+    return haystack.len >= prefix.len and std.ascii.eqlIgnoreCase(haystack[0..prefix.len], prefix);
 }

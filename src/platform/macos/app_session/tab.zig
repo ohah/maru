@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const workspace_ops = @import("workspace.zig");
@@ -32,7 +33,6 @@ const Tab = app_session_mod.Tab;
 const coretext_frame_builder = app_session_mod.coretext_frame_builder;
 const app = app_session_mod.app;
 const commandName = app_session_mod.commandName;
-const adjustActiveForMove = app_session_mod.adjustActiveForMove;
 const is_macos = app_session_mod.is_macos;
 const spawnRequest = app_session_mod.spawnRequest;
 const termLabel = app_session_mod.termLabel;
@@ -43,10 +43,8 @@ const agentStatePriority = @import("agent.zig").agentStatePriority;
 const barMetrics = app_session_mod.barMetrics;
 const layout_math = app_session_mod.layout_math;
 const max_group_nesting = app_session_mod.max_group_nesting;
-const plausibleSurfaceSize = app_session_mod.plausibleSurfaceSize;
 const rotateMove = app_session_mod.rotateMove;
 const sentinelBgCell = app_session_mod.sentinelBgCell;
-const tabRefEql = app_session_mod.tabRefEql;
 const AgentKind = app_session_mod.AgentKind;
 const AgentRepresentative = AppSession.AgentRepresentative;
 const BarHover = AppSession.BarHover;
@@ -64,7 +62,6 @@ const dock_ops = @import("dock.zig");
 const metal_frame = app_session_mod.metal_frame;
 const pane_ops = @import("pane.zig");
 const renderer = app_session_mod.renderer;
-const reselectAfterClose = app_session_mod.reselectAfterClose;
 const workspaceLabel = app_session_mod.workspaceLabel;
 
 /// 현재 활성 탭(`*Tab`). live_pty/pump 등 탭 내부에 접근할 때 쓴다. `app_window.active_tab`을
@@ -1570,4 +1567,30 @@ pub fn tabTitleBody(title: []const u8) []const u8 {
     if (!tabTitleRunningMarker(title)) return title;
     const rest = title[agentFlagUtf8().len..];
     return if (std.mem.startsWith(u8, rest, " ")) rest[1..] else rest;
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub const adjustActiveForMove = input_math.adjustActiveForMove;
+
+pub const reselectAfterClose = input_math.reselectAfterClose;
+
+/// 저장할 만한 grid인가 — 아니면 null. `pane_ops.restoreSurfaceSize`의 짝(하나는 읽고 하나는 쓸 값을 고른다).
+///
+/// 0은 "관측 없음"이고, **`clampGridSize`의 하한(2×1)은 "기하를 몰라 하한에 걸린 값"**이다. 후자를 저장하면
+/// 다음 실행이 그 크기로 복원·재접속해 스스로를 재생산한다(실측: `workspace.v1`에 `cols=2 rows=1`이 박혀
+/// 재시작을 넘어 살아남았다). 하한값은 정상 크기와 숫자로 구별되지 않으므로 저장 직전에 걸러야 한다.
+/// 하한과 **정확히 같을 때만** 버린다 — 진짜로 작은 창의 정상 grid까지 버리지 않기 위해 좁게 잡는다.
+pub fn plausibleSurfaceSize(size: terminal.Size) ?terminal.Size {
+    if (size.cols == 0 or size.rows == 0) return null;
+    const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
+    if (size.cols == floor.cols and size.rows == floor.rows) return null;
+    return size;
+}
+
+pub fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.?.pane == b.?.pane and a.?.tab == b.?.tab;
 }

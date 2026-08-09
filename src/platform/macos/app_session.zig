@@ -26,8 +26,6 @@ pub const git_command = maru.session.git_command; // 브랜치 목록 출력 파
 pub const content_menu = maru.session.content_menu;
 pub const file_tree = maru.session.file_tree;
 pub const file_tree_navigation = maru.session.file_tree_navigation;
-pub const file_tree_mutation = maru.session.file_tree_mutation;
-pub const file_tree_icon = chrome.file_tree_icon;
 pub const dock_view_bar = chrome.components.dock_view_bar;
 pub const git_backend_mod = @import("git_backend.zig");
 pub const scm_view = maru.session.scm_view;
@@ -38,15 +36,10 @@ pub const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패
 // L2 session core(src/session)로 추출한 순수 입력/재정렬 수학. 내부 호출처는 bare 이름을 유지하도록 file-scope
 // alias로 재노출한다(docs/layering-and-portability.md §3 — 2차 추출 슬라이스 1). 정의·테스트는 session/input_math.zig.
 // (maru.session을 별칭으로 잡지 않는다 — 테스트들이 'session'을 지역 변수로 쓴다.)
-const input_math = maru.session.input_math;
-pub const adjustActiveForMove = input_math.adjustActiveForMove;
+pub const input_math = maru.session.input_math;
 pub const rotateMove = input_math.rotateMove;
-pub const reselectAfterClose = input_math.reselectAfterClose;
 pub const clampMoveToGroup = input_math.clampMoveToGroup;
-pub const wheelDeltaToLines = input_math.wheelDeltaToLines;
 const pageScrollDelta = input_math.pageScrollDelta;
-// IME 순수 판정도 session core로 추출(src/session/ime.zig). bare 호출(imeEnd) 유지용 alias.
-pub const imeDecide = maru.session.ime.decide;
 const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(keep-alive면 원격 backend로 배선)
 // 영속 세션 host의 Client/RemoteTermBackend는 macOS 전용 syscall을 써서 barrel이 non-macOS에서 `struct {}`로 제외한다.
 // app_session은 ABI 테스트로 **Linux에서도 컴파일**되므로(실행은 macOS만) 필드 타입과 사용을 comptime gate한다 —
@@ -74,7 +67,6 @@ test {
     _ = @import("chrome/chrome_draw_lowering.zig");
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;
-const agent_session_archive_detail = maru.session.agent_session_archive_detail;
 pub const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 pub const global_hotkey = @import("global_hotkey.zig");
@@ -107,19 +99,6 @@ pub const PaneTree = Model.PaneTree;
 pub const Tab = Model.Tab;
 const group_normalize = maru.session.group_normalize; // M3c: 그룹 정규화 순수 함수(L2 리프트) — 아래 L4 메서드가 self.tabs.items로 위임(재구현 금지)
 pub const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
-
-pub const FilePanelTestC = struct {
-    extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
-    pub extern "c" fn renameatx_np(
-        from_dir_fd: c_int,
-        from: [*:0]const u8,
-        to_dir_fd: c_int,
-        to: [*:0]const u8,
-        flags: c_uint,
-    ) c_int;
-};
-
-pub const rename_swap: c_uint = 0x00000002;
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -488,32 +467,11 @@ const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
 // 배경 이미지(window.background-image, F2-1)용 예약 kitty image id — kg 텍스처 캐시·live_ids에서 배경 이미지를
 // 가리킨다. u32 최댓값이라 kitty 프로그램 id(보통 작은 값)와 충돌 가능성이 낮다(충돌 시 텍스처 슬롯 공유 — 드묾).
 const background_image_id: u32 = 0xFFFF_FFFF;
-// 시각 벨(bell.visual) flash 지속 시간(ms). frame rate별 tick 수로 환산해 실제 페이드 시간을 유지한다(F2-4).
-pub const bell_flash_total_ms: u32 = 250;
-// 시각 벨 flash 최대 alpha(천분율) — 전경색 반투명 오버레이의 시작 불투명도. 너무 세지 않게(가독성·자극 균형) 0.35(F2-4).
-pub const bell_flash_peak_milli: u32 = 350;
-// 드래그 자동 스크롤이 한 줄 더 스크롤하기까지의 간격(ms) — frame rate와 무관하게 일정 속도(≈30줄/s)를 유지하려고
-// tick 수가 아니라 경과 ms로 게이트한다. 옛 30Hz 1틱/줄(≈33ms/줄)과 같은 체감 속도를 기준으로 잡았다. msPerTick
-// 누적이 이 값을 넘을 때마다 한 줄 스크롤한다(render.frame-rate_min=30이라 msPerTick≤이 값 → tick당 최대 한 줄).
-pub const drag_autoscroll_step_ms: u32 = 33;
-pub const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
 
 /// Archive scope owns only display filtering.  It never changes the scanner's
 /// candidate set, so changing scope/search is immediately reversible and does
 /// not put filesystem work on the render or key-input path.
 pub const AgentSessionArchiveScope = enum { workspace, project, all };
-
-pub fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var start: usize = 0;
-    while (start + needle.len <= haystack.len) : (start += 1) {
-        var index: usize = 0;
-        while (index < needle.len and std.ascii.toLower(haystack[start + index]) == std.ascii.toLower(needle[index])) : (index += 1) {}
-        if (index == needle.len) return true;
-    }
-    return false;
-}
 
 test "archive scope admits only canonical cwd beneath the exact root boundary" {
     const parsed = maru.session.agent_session_archive.Parsed{
@@ -722,7 +680,6 @@ test "archive relative age uses the worker mtime without filesystem access" {
 // 우측 경계를 드래그해 바꾸면 `AppSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
 // DPI 변경(refreshCellMetrics)에도 살아남는다.
 const default_sidebar_width_pt: u32 = 180;
-pub const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
 pub const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
 // 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 5200 = 5.2× — 최대 4줄 카드(이름·브랜치·
@@ -737,41 +694,18 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 // 그룹 헤더 row 높이 = cell 높이 × 3.0(위아래 여백 넉넉히; 카드 슬롯 5.2×보다는 얇다). 가변 높이의 헤더
 // 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 사용자 요청으로 1.5→3.0(위아래 높이 2배, 텍스트 크기는 불변 — glyph는 밴드 중앙).
 const sidebar_header_row_h_ratio_milli: u32 = 3000;
-// 사이드바 접기/펼치기 토글 아이콘 코드포인트(등록 PUA `sidebar_collapse` — 좌측 절반 채운 사각형 = 왼쪽 패널, 옛 ◧ U+25E7 대체). 헤더 아이콘 줄(펼침)·
-// 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
-pub const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
 // 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 같은 1.7이
 // 렌더러 quad(.m)에도 있어, 여기에 또 상수를 두면 세 곳이 어긋날 수 있다.
 const header_icon_scale = chrome.ui.icon;
 
-/// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
-/// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
-pub fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
-    if (cell_height_px == 0) return titlebar_strip_px;
-    const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
-    const raster_height_px = headerIconRasterExtentPx(cell_height_px);
-    const bottom = @as(u64, origin_y) + (@as(u64, cell_height_px) + raster_height_px + 1) / 2;
-    return @intCast(@min(bottom, std.math.maxInt(u32)));
-}
-
-fn headerIconRasterExtentPx(cell_extent_px: u32) u32 {
+pub fn headerIconRasterExtentPx(cell_extent_px: u32) u32 {
     return header_icon_scale.cellRasterExtentPx(cell_extent_px);
 }
-// 검색 줄 레이아웃 — 렌더(buildSidebarHeaderDrawList)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
-// 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.
-pub const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
-pub const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
 pub const traffic_light_clearance_pt: u32 = 72;
-// 접힘 헤더 가장 왼쪽 아이콘 묶음(종+배지)을 신호등 클리어런스에서 더 오른쪽으로 미는 여백 칸 수 — 호버 배경이 셀
-// 중심 기준 좌측으로 ≈0.8칸 번지므로, 1칸이면 신호등에 닿을 만큼 붙어 보였다(사용자 피드백). 2칸으로 한 칸 이상 간격.
-pub const collapsed_toggle_gap_cells: u32 = 2;
 // 접힘 시 ◧ 펼치기 토글을 알림 종에서 오른쪽으로 띄우는 칸 수 — 펼침 헤더의 아이콘 간격(3칸)과 같게 둬 종↔◧이
 // 같은 리듬으로 보인다(접힘에도 알림 아이콘 유지, 사용자 피드백). ◧ col = collapsedBellCol() + 이 값(종이 ◧ 왼쪽).
 const collapsed_bell_gap_cells: u32 = 3;
-// "9+" 안 읽음 배지가 종 글리프 왼쪽으로 뻗는 최대 칸 수(10+면 2칸). collapsedBellCol이 이만큼을 신호등 클리어런스
-// 오른쪽에 예약해 배지가 신호등을 침범하지 않게 하고, openNotificationPanel 접힘 anchor가 배지 묶음 좌단을 잡는 단일 출처.
-pub const collapsed_badge_max_cells: u16 = 2;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
 // 펼침은 한 줄(터미널이 사이드바 우측이라 신호등 아래가 아님)이지만, 접힘은 터미널이 전폭이라 신호등 높이를 확보한다.
 const collapsed_titlebar_min_pt: u32 = 30;
@@ -779,10 +713,6 @@ const collapsed_titlebar_min_pt: u32 = 30;
 // (~28pt)보다 낮아 상단 드래그 영역이 좁게 느껴진다(사용자 피드백). 네이티브 높이를 바닥으로 잡아 드래그 영역을 맞춘다.
 const titlebar_strip_min_pt: u32 = 28;
 
-/// 알림 배지 원의 중심이 헤더 아이콘 줄 **셀 안에서** 얼마나 아래인가(셀 높이 비율). digit 글리프의 시각
-/// 중심은 셀 중앙(0.5)보다 약간 위라 0.46이다. 줄 자체의 원점은 `sidebarHeaderIconRowTopPx`가 따로 준다 —
-/// 이 상수는 그 원점 **위에서의 nudge**일 뿐이라 둘을 섞으면 안 된다(섞어서 배지가 어긋났던 결함).
-pub const notification_badge_center_in_cell: f32 = 0.46;
 // 창 바닥 상태표시줄 높이(논리 pt, SB1). VSCode(22px)·Zed와 같은 급이고, 상단 타이틀바 띠(28pt)보다 낮게 둬
 // 상/하단 chrome의 위계를 유지한다. **터미널 폰트에서 파생하지 않는다** — 도크 view bar가 그렇게 했다가
 // 폰트를 키우면 같은 아이콘 줄이 오르내리는 회귀가 났고(실측 53px↔80px) 폰트 독립 pt로 옮겼다. 상태바는
@@ -813,33 +743,17 @@ const max_status_bar_right_items: usize = 4; // blocked·running·알림·리소
 // theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
 pub const font_size_min: f32 = 6.0;
 pub const font_size_max: f32 = 72.0;
-// Session Dock은 terminal line spacing·font size와 별도 Chrome typography(role별 고정 pt)를 유지한다.
-// **face는 예외로 terminal `font.family`를 따른다** — 사이드바와 한 화면에 보이므로 face까지 독립이면
-// 사용자 폰트 설정을 앱이 절반만 따르게 된다(docs/font-strategy.md "Chrome 텍스트 face"). 크기 위계가
-// 독립이라 face를 바꿔도 도크 기하는 불변이다. 다만 사용자가
-// Cmd+/−/0으로 요청한 font-size zoom은 Dock 전체의 명시적 UI zoom으로 반영한다. 범위는 좁은 dock에서
-// 48pt action target과 최소 읽기 밀도를 보존하도록 [75%, 150%]로 제한한다.
-pub const session_dock_ui_zoom_min_milli: u32 = 750;
-pub const session_dock_ui_zoom_max_milli: u32 = 1500;
 // ⌘+/⌘- 한 번에 바꾸는 폰트 크기 보폭(pt). Terminal.app·iTerm2·Ghostty처럼 **고정 1pt** — 설정 항목으로 두지
 // 않는다(보폭값은 화면에 즉각 반영이 안 보여 슬라이더로 노출하면 혼란만 준다). ⌘0 reset은 보폭과 무관하게
 // base_font_size로 복귀.
 const font_size_step: f32 = 1.0;
 
-// 스크롤바 thumb 폭(굵기). cell_width의 비율, 최소 px 보장. hover/드래그면 +emphasize_px로 살짝 굵게(affordance).
-pub const scrollbar_bar_mul: f32 = 0.5; // cell_width 대비 폭 비율(굵게 — 잡기/보기 쉽게)
-pub const scrollbar_bar_min_px: f32 = 7.0; // 작은 폰트에서도 최소 두께
-pub const scrollbar_bar_emphasize_px: f32 = 2.0; // hover/드래그 시 추가 폭
 // fade(자동 흐려짐) — 스크롤(view_offset 변화) 후 visible_ms 동안 full, 이어 fade_ms 동안 idle(faint)로
 // 흐려진다. 숨기지 않고 faint로만 남겨(위치·잡을 곳을 잃지 않게) macOS overlay 관례를 따른다.
 pub const scrollbar_visible_ms: u32 = 1667; // 옛 30Hz 50틱과 같은 약 1.67s full 유지
 pub const scrollbar_fade_ms: u32 = 450; // 옛 30Hz 14틱과 같은 약 0.45s 동안 full→faint
 pub const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
-pub const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
-// 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
-// (wall-clock)으로 재 tick rate와 무관하게 그 속도를 지킨다(§10.5). 기본값은 macOS 캐럿 관례(on 500ms / off 500ms).
-pub const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
 /// 상태바 리소스 표본 주기. 에이전트 폴링(0.5s)보다 **느리게** 둔다 — 메모리·CPU는 초 단위로 움직이고,
 /// 더 자주 재도 사람이 못 읽는다(docs/status-bar.md §6 "비용과 게이트").
 const resource_poll_interval_ms: u32 = 1000;
@@ -904,16 +818,6 @@ fn monotonicMs() u64 {
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
 }
-/// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
-/// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
-pub const transcript_poll_interval_ms: u64 = 1000;
-/// 활동 시각은 **시간이 흐르는 것만으로** 값이 바뀐다(5m → 6m). 다른 재렌더 사유가 없으면 화면에 멈춘 값이 남다가
-/// 무관한 이벤트에 갑자기 뛴다 — 값이 틀린 것보다 그 거동이 더 헷갈린다(code-review max). 그래서 에이전트를 보여주는
-/// 동안 이 주기로 재렌더한다. 표기 최소 단위가 분이므로 이보다 촘촘할 이유가 없다.
-pub const agent_age_repaint_interval_ms: u32 = 20_000;
-/// 알림 본문에 싣는 대화 한 줄의 상한(bytes). 표시 상한(`max_text_bytes`)보다 짧다 — OS 배너는 몇 줄만 보여주고
-/// 자르므로, 긴 원문을 통째로 넣어봐야 뒤가 안 보이면서 알림만 커진다.
-pub const notification_conversation_max_bytes: usize = 160;
 /// codex 후보를 **몇 개까지 열어** 신원을 확인할지. 서브에이전트가 같은 계층에 섞이므로(실측 최근 40개 중 32개)
 /// 하나만 보면 못 찾는다. 20이면 그 밀도보다 작아 서브에이전트를 대량으로 돌린 직후 사용자 세션이 후보 밖으로
 /// 밀렸다(code-review max) — 관측된 밀도(80%)에 여유를 둬 48로 잡는다. 매핑이 잡히면 mtime이 바뀔 때만 다시
@@ -927,21 +831,6 @@ const transcript_sibling_scan_limit: usize = 8;
 const transcript_staleness_grace_ns: i96 = 60 * std.time.ns_per_s;
 /// codex `session_meta`(첫 레코드)를 찾는 데 읽는 앞부분 크기.
 const codex_head_bytes: usize = 64 * 1024;
-pub const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
-pub const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
-/// observer가 읽는 화면 tail 상한(행·바이트). 옛 12행은 **사용자 입력이 길어지면 근거를 잃는** 두 번째 원인이었다 —
-/// 실측(codex 0.146.0)에서 composer는 입력 행 수만큼 제한 없이 자라, 입력 13행부터 프롬프트 마커가 12행 tail 밖으로
-/// 밀려 idle 근거가 사라졌다. 상시 chrome(프롬프트 마커·실행 footer)은 입력 길이와 무관하게 tail 안에 남아야 하므로
-/// 화면 높이급으로 둔다. 오래된 오버레이 문구가 현재 근거로 끌려오는 것은 행 수가 아니라 오버레이 규칙의 거리
-/// 게이트가 막는다(docs/agent-session.md «상태 모델과 우선순위»).
-///
-/// byte 상한은 **행 상한을 잘라먹지 않을 만큼** 크게 잡는다. `dumpRecentTextUtf8`이 `max_bytes / (cols*4 + 1)`로 행 수를
-/// 다시 계산하므로, 32KiB로 두면 320칸에서 25행·640칸에서 12행으로 줄어 이 상수가 대체하려던 한계가 넓은 창에서 그대로
-/// 되살아난다(코드 리뷰에서 재현). 128KiB면 640칸에서도 48행이 유지된다. worst-case 가정(모든 셀 4바이트)일 뿐이고
-/// 실제 복사량은 화면 내용만큼이라, ASCII 화면에서는 여전히 수십 KiB다.
-pub const agent_screen_tail_rows: usize = 48;
-pub const agent_screen_tail_bytes: usize = 128 * 1024;
-pub const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
 // sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
@@ -989,34 +878,11 @@ pub const dock_list_scroll_drag_payload: u64 = 1;
 /// scrollArea 자신 + track + thumb. 자식이 없으므로 이보다 커질 수 없다.
 pub const dock_list_scroll_max_entries: usize = 3;
 
-/// 사이드바 스크롤바 치수(SV4a). 도크 목록과 **같은 값**을 쓴다 — 한 창에 두 스크롤바가 나란히 서므로
-/// 굵기가 다르면 그 자체가 결함으로 보인다. 별도 상수로 두는 것은 사이드바 폭이 사용자 드래그로
-/// 변하는 값이라 나중에 갈릴 여지를 남겨 두기 위해서다.
-pub const sidebar_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
-pub const sidebar_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
-pub const sidebar_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
-
-/// 사이드바가 내는 tree의 노드 id. 도크 목록과 **다른 값**이어야 한다 — 둘은 동시에 발행돼 있고,
-/// id가 겹치면 hit-test·capture가 어느 스크롤바인지 구분하지 못한다.
-pub const sidebar_scroll_ids = struct {
-    pub const area: chrome.ui.tree.UiId = 0x5342_0001;
-    pub const track: chrome.ui.tree.UiId = 0x5342_0002;
-    pub const thumb: chrome.ui.tree.UiId = 0x5342_0003;
-};
 pub const sidebar_scroll_max_entries: usize = 3;
 
-/// 오버레이(팔레트·세팅·알림) 스크롤바가 쓰는 id·저장소(SV5b). 오버레이는 **한 번에 하나만 열리므로**
-/// 발행 저장소를 셋이 공유한다 — SV3b가 탐색기↔소스 컨트롤에서 쓴 것과 같은 근거다(도크·사이드바와는
-/// 조건이 다르다. 그 둘은 동시에 화면에 있어 저장소를 나눠야 했다).
-pub const overlay_scroll_ids = struct {
-    pub const area: chrome.ui.tree.UiId = 0x4F56_0001;
-    pub const track: chrome.ui.tree.UiId = 0x4F56_0002;
-    pub const thumb: chrome.ui.tree.UiId = 0x4F56_0003;
-};
 pub const overlay_scroll_max_entries: usize = 3;
 pub const overlay_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
 pub const overlay_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
-pub const overlay_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
 
 /// 이번 tick에 활성 surface frame을 (재)투영할지 결정한다 — 순수 함수라 게이트 규칙을 헤드리스로 고정한다.
 /// 베이스/결정(docs/io-render-threading.md): synchronized output(DECSET 2026)은 **라이브 화면**이 half-drawn
@@ -1069,43 +935,21 @@ fn shouldProjectFrame(
     return (metal_dirty or view_scrolled or esu_advanced or force_reproject) and !sync_blocks;
 }
 
-// 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
-// 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
-pub fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
-    return terminal.clampGridSize(.{
-        .cols = if (sm.cols > 0) sm.cols else terminal.Size.default.cols,
-        .rows = if (sm.rows > 0) sm.rows else terminal.Size.default.rows,
-    });
-}
-
-/// 저장할 만한 grid인가 — 아니면 null. `restoreSurfaceSize`의 짝(하나는 읽고 하나는 쓸 값을 고른다).
-///
-/// 0은 "관측 없음"이고, **`clampGridSize`의 하한(2×1)은 "기하를 몰라 하한에 걸린 값"**이다. 후자를 저장하면
-/// 다음 실행이 그 크기로 복원·재접속해 스스로를 재생산한다(실측: `workspace.v1`에 `cols=2 rows=1`이 박혀
-/// 재시작을 넘어 살아남았다). 하한값은 정상 크기와 숫자로 구별되지 않으므로 저장 직전에 걸러야 한다.
-/// 하한과 **정확히 같을 때만** 버린다 — 진짜로 작은 창의 정상 grid까지 버리지 않기 위해 좁게 잡는다.
-pub fn plausibleSurfaceSize(size: terminal.Size) ?terminal.Size {
-    if (size.cols == 0 or size.rows == 0) return null;
-    const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
-    if (size.cols == floor.cols and size.rows == floor.rows) return null;
-    return size;
-}
-
-test "plausibleSurfaceSize: clamp 하한은 저장하지 않고 정상 grid는 통과시킨다" {
+test "tab_ops.plausibleSurfaceSize: clamp 하한은 저장하지 않고 정상 grid는 통과시킨다" {
     const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
     // 기하를 몰라 하한에 걸린 값 — 저장하면 다음 실행이 그 크기로 복원돼 스스로를 재생산한다.
-    try std.testing.expect(plausibleSurfaceSize(floor) == null);
-    try std.testing.expect(plausibleSurfaceSize(.{ .cols = 0, .rows = 0 }) == null);
-    try std.testing.expect(plausibleSurfaceSize(.{ .cols = 80, .rows = 0 }) == null);
-    try std.testing.expect(plausibleSurfaceSize(.{ .cols = 0, .rows = 24 }) == null);
+    try std.testing.expect(tab_ops.plausibleSurfaceSize(floor) == null);
+    try std.testing.expect(tab_ops.plausibleSurfaceSize(.{ .cols = 0, .rows = 0 }) == null);
+    try std.testing.expect(tab_ops.plausibleSurfaceSize(.{ .cols = 80, .rows = 0 }) == null);
+    try std.testing.expect(tab_ops.plausibleSurfaceSize(.{ .cols = 0, .rows = 24 }) == null);
     // 하한과 정확히 같을 때만 버린다 — 진짜로 작은 창의 정상 grid는 살린다.
     try std.testing.expectEqual(
         terminal.Size{ .cols = floor.cols, .rows = floor.rows + 1 },
-        plausibleSurfaceSize(.{ .cols = floor.cols, .rows = floor.rows + 1 }).?,
+        tab_ops.plausibleSurfaceSize(.{ .cols = floor.cols, .rows = floor.rows + 1 }).?,
     );
     try std.testing.expectEqual(
         terminal.Size{ .cols = 135, .rows = 74 },
-        plausibleSurfaceSize(.{ .cols = 135, .rows = 74 }).?,
+        tab_ops.plausibleSurfaceSize(.{ .cols = 135, .rows = 74 }).?,
     );
 }
 
@@ -1113,9 +957,9 @@ test "복원 왕복: 하한 grid를 저장하지 않으면 다음 복원이 하�
     // 실측 회귀: workspace.v1에 `cols=2 rows=1`이 박혀 재시작을 넘어 살아남았고, 다음 복원이 그 크기로
     // 재접속해 스스로를 재생산했다. 저장 직전 필터가 그 고리를 끊는지 왕복으로 고정한다.
     const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
-    const persisted = plausibleSurfaceSize(floor) orelse terminal.Size.default;
+    const persisted = tab_ops.plausibleSurfaceSize(floor) orelse terminal.Size.default;
     try std.testing.expectEqual(terminal.Size.default, persisted);
-    const restored = restoreSurfaceSize(.{ .cols = persisted.cols, .rows = persisted.rows });
+    const restored = pane_ops.restoreSurfaceSize(.{ .cols = persisted.cols, .rows = persisted.rows });
     try std.testing.expect(!(restored.cols == floor.cols and restored.rows == floor.rows));
 }
 
@@ -1132,89 +976,12 @@ pub fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
     return cwd;
 }
 
-// config `workspace.root`(시작 창·새 워크스페이스 탭 전용)를 spawn cwd로 해석한다. 빈 값이면 null(상속
-// cwd로 spawn — maru를 띄운 디렉터리). `~`·`~/…`는 `home`($HOME)으로 확장해 `buf`에 쓰고 그 슬라이스를
-// 돌려준다(확장 없으면 `configured`를 그대로 빌린다 — loaded_config arena가 세션 동안 소유). 최종 형식 필터는
-// **usableRestoreCwd 단일 출처에 위임**한다(빈/과길이/비절대 → null) — 상대경로를 넘기면 자식이 앱 cwd 기준으로
-// chdir해 예측 불가. 존재·디렉터리 여부는 검사하지 않는다 — childExec가 chdir 실패 시 $HOME으로 graceful 폴백한다
-// (TOCTOU 회피, usableRestoreCwd와 같은 결). 반환 슬라이스는 `buf`가 살아 있는 동안(=spawn 호출까지) 유효하다.
-// loader는 raw 문자열만 보관하므로 env 의존(`~` 확장)을 여기 platform layer에서 처리한다.
-pub fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[]const u8 {
-    if (configured.len == 0) return null;
-    var path = configured;
-    // `~` 단독 또는 `~/…`를 $HOME으로 확장한다(셸의 tilde expansion은 셸을 안 거치는 execve엔 안 일어난다).
-    // $HOME이 없거나(드묾) **빈 문자열/상대경로**면 확장 못 하므로 null(상속 cwd) — `~`로 시작하는 상대경로를
-    // 그대로 넘기지 않는다. 빈 home 가드가 핵심: getenv는 `HOME=""`도 non-null로 주므로 `home orelse`만으론
-    // 빈 home이 통과해 `~/proj`가 `/proj`(절대경로처럼 보임)로 오해석된다. isAbsolute("")==false라 한 검사로 둘 다 막는다.
-    if (std.mem.eql(u8, configured, "~") or std.mem.startsWith(u8, configured, "~/")) {
-        const h = home orelse return null;
-        if (!std.fs.path.isAbsolute(h)) return null; // 빈/상대 home → 확장 불가(폴백 spawn)
-        const rest = configured[1..]; // "" 또는 "/…"
-        path = std.fmt.bufPrint(buf, "{s}{s}", .{ h, rest }) catch return null; // 너무 길면 null(폴백 spawn)
-    }
-    return usableRestoreCwd(path); // 절대경로·길이 필터(단일 출처 재사용 — 비절대/과길이는 null)
-}
-
-// config `workspace.root` **미설정** 시 첫 창/폴백 cwd를 정한다. maru의 launch cwd가 `/`였으면(`launch_is_root`
-// — .app 더블클릭·launchd·open으로 뜬 흔한 증상) `home`(절대경로)을 `buf`에 써서 돌려주고, 그 외(정상 cwd·home
-// 없음/상대·`/` 아님)는 null(=launch cwd를 그대로 상속). Ghostty가 launchd/open 실행을 `home`으로 보는 것과 같은
-// 결인데, 침습적 런처 감지 대신 "cwd가 `/`" 증상으로 좁혀 잡는다(터미널에서 띄운 정상 세션은 cwd가 `/`가 아니라
-// 그대로 상속). `launch_is_root`는 init에서 getcwd로 한 번만 판정해 주입한다(maru는 자기 cwd를 안 바꿔 시작 시
-// 한 번이면 충분 — 새 탭/분할마다 getcwd 시스템콜을 반복하지 않는다). 그래서 이 함수는 I/O 없이 순수(테스트 가능).
-pub fn homeForRootCwd(buf: []u8, launch_is_root: bool, home: ?[]const u8) ?[]const u8 {
-    if (!launch_is_root) return null; // 정상 cwd면 그대로 상속(폴백 안 함)
-    const h = home orelse return null;
-    if (!std.fs.path.isAbsolute(h) or h.len > buf.len) return null;
-    @memcpy(buf[0..h.len], h);
-    return buf[0..h.len];
-}
-
 // maru의 launch cwd가 `/`인지 한 번 판정한다(init이 launch_cwd_is_root에 캐시 → homeForRootCwd가 소비). getcwd
 // 실패 시 false(home 승격 안 함 — 상속 그대로). maru는 자기 cwd를 안 바꿔 시작 시 한 번이면 충분(per-surface getcwd 제거).
 fn detectLaunchCwdIsRoot(io: std.Io) bool {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.process.currentPath(io, &cwd_buf) catch return false;
     return std.mem.eql(u8, cwd_buf[0..n], "/");
-}
-
-fn isHexStr(s: []const u8) bool {
-    for (s) |c| if (!std.ascii.isHex(c)) return false;
-    return s.len > 0;
-}
-
-/// `.git/HEAD` 내용에서 브랜치명을 뽑는 순수 파서(입력 슬라이스 참조 반환 — 할당 없음). `ref: refs/heads/<branch>`면
-/// branch, detached(raw SHA ≥7 hex)면 짧게 7자, 그 외(빈 ref·쓰레기)면 null. readGitBranch가 fs 읽은 뒤 호출·dupe.
-fn parseGitHead(content: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
-    const ref_prefix = "ref: refs/heads/";
-    if (std.mem.startsWith(u8, trimmed, ref_prefix)) {
-        const branch = trimmed[ref_prefix.len..];
-        return if (branch.len == 0) null else branch;
-    }
-    return if (isHexStr(trimmed) and trimmed.len >= 7) trimmed[0..7] else null;
-}
-
-/// cwd(OSC 7 보고)에서 부모로 올라가며 `<dir>/.git/HEAD`를 찾아 git 브랜치명을 도출한다(owned 슬라이스, 호출자 해제).
-/// `ref: refs/heads/<branch>`면 그 branch, detached(raw SHA)면 짧게 7자. 못 찾으면 null(브랜치 표시 없음).
-/// 절대 경로만, walk-up은 루트까지(깊이 128 가드). 베이스: git이 cwd부터 부모로 .git을 찾는 방식. worktree(.git가
-/// gitdir: 파일)는 best-effort 미지원(.git/HEAD 못 읽으면 null) — 후속. fs 읽기는 cwd 변경 시에만(termGitBranch 캐시).
-pub fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]const u8 {
-    if (cwd.len == 0 or cwd.len >= std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
-    var dir: []const u8 = cwd;
-    var depth: usize = 0;
-    while (depth < 128) : (depth += 1) {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const head_path = std.fmt.bufPrint(&buf, "{s}/.git/HEAD", .{dir}) catch return null;
-        if (std.Io.Dir.cwd().readFileAlloc(io, head_path, allocator, .limited(4096))) |data| {
-            defer allocator.free(data);
-            // .git/HEAD가 있으니 이미 repo 안 — 파싱 결과가 null이어도 더 올라가지 않는다.
-            return if (parseGitHead(data)) |b| (allocator.dupe(u8, b) catch null) else null;
-        } else |_| {}
-        const parent = std.fs.path.dirname(dir) orelse return null;
-        if (parent.len >= dir.len) return null; // 진전 없음(루트 도달)
-        dir = parent;
-    }
-    return null;
 }
 
 /// 사이드바 경로줄(카드 폴더줄)용 **순수 cwd 문자열**(owned). $HOME 접두는 "~"로 축약한다(예: /Users/x/p → ~/p).
@@ -1229,15 +996,6 @@ pub fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
         return std.fmt.allocPrint(allocator, "~{s}", .{cwd[home.len..]});
     return allocator.dupe(u8, cwd);
-}
-
-/// 카드 폴더줄(owned) = 폴더 아이콘(0xF000A) prefix + 순수 cwd(sidebarCwdPath). 브랜치줄 octocat(0xF0009)과 같은
-/// "아이콘 + 공백 + 텍스트" 조립 패턴 — 표현(아이콘)은 카드 조립부에, 경로 파생은 sidebarCwdPath에 둔다. cwd 비면 "".
-pub fn sidebarFolderLine(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
-    const path = try sidebarCwdPath(allocator, term);
-    defer allocator.free(path);
-    if (path.len == 0) return allocator.dupe(u8, "");
-    return std.fmt.allocPrint(allocator, icons.utf8(.folder) ++ " {s}", .{path});
 }
 
 // 순수 레이아웃 기하(layout_math.PaddingPx·gridFromBacking·gridFromRectPx·ptToPx)는 session/layout_math.zig로 이동(b1).
@@ -1268,27 +1026,17 @@ fn applyFontSpacing(
     return .{ .advance_width_px = advance_width_px, .glyph_width_px = base_width_px, .height_px = height_px };
 }
 
-/// 창 뒤 배경 블러(window.blur, F3-1)의 **유효 반경**(px). config 반경을 그대로 주되, 창이 불투명(opacity>=1)이면
-/// 뒤가 안 비쳐 블러가 보이지 않으므로 0으로 깎는다 — Ghostty `ghostty_set_window_background_blur`가
-/// `background-opacity >= 1.0`에서 early-return하는 게이트와 동등. 이 정책이 단일 출처고, platform host(macOS=CGS,
-/// 추후 Win=DWM·Linux=컴포지터)는 반환값을 그대로 OS 창 속성에 싣는다. 순수 함수라 헤드리스 단위 테스트 가능.
-pub fn effectiveWindowBlur(blur: u32, opacity: f32) u32 {
-    if (blur == 0) return 0;
-    if (opacity >= 1.0) return 0; // 불투명 창 — 블러 안 보임
-    return blur;
-}
-
-test "effectiveWindowBlur: opacity 게이트 — 불투명이면 0, 투명일 때만 반경" {
+test "workspace_ops.effectiveWindowBlur: opacity 게이트 — 불투명이면 0, 투명일 때만 반경" {
     // 블러 0이면 opacity 무관하게 0.
-    try std.testing.expectEqual(@as(u32, 0), effectiveWindowBlur(0, 0.5));
-    try std.testing.expectEqual(@as(u32, 0), effectiveWindowBlur(0, 1.0));
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.effectiveWindowBlur(0, 0.5));
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.effectiveWindowBlur(0, 1.0));
     // 블러>0이어도 불투명(opacity>=1)이면 0(뒤가 안 비침).
-    try std.testing.expectEqual(@as(u32, 0), effectiveWindowBlur(20, 1.0));
-    try std.testing.expectEqual(@as(u32, 0), effectiveWindowBlur(20, 1.5)); // 1 초과도 불투명 취급
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.effectiveWindowBlur(20, 1.0));
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.effectiveWindowBlur(20, 1.5)); // 1 초과도 불투명 취급
     // 블러>0 + 투명(opacity<1)이면 그 반경 그대로.
-    try std.testing.expectEqual(@as(u32, 20), effectiveWindowBlur(20, 0.8));
-    try std.testing.expectEqual(@as(u32, 1), effectiveWindowBlur(1, 0.0));
-    try std.testing.expectEqual(@as(u32, 100), effectiveWindowBlur(100, 0.99));
+    try std.testing.expectEqual(@as(u32, 20), workspace_ops.effectiveWindowBlur(20, 0.8));
+    try std.testing.expectEqual(@as(u32, 1), workspace_ops.effectiveWindowBlur(1, 0.0));
+    try std.testing.expectEqual(@as(u32, 100), workspace_ops.effectiveWindowBlur(100, 0.99));
 }
 
 /// color.Rgb를 불투명(A=0xFF) 0xAARRGGBB로 packing한다(사이드바 strip/활성 밴드 셀 배경 색용). 셀
@@ -1300,46 +1048,6 @@ pub fn packRgbAlpha(rgb: maru.color.Rgb, alpha: u8) u32 {
 
 pub fn packOpaqueRgb(rgb: maru.color.Rgb) u32 {
     return packRgbAlpha(rgb, 0xFF);
-}
-
-/// 0xRRGGBB(카드별 프리셋 색 등) + alpha를 GpuQuad 색 워드(0xAARRGGBB, straight-alpha — 셰이더가 rgb*=a)로 패킹.
-/// packRgbAlpha(Rgb)의 u32-입력 버전 — 사이드바 배경 tint·좌측 막대가 임의 프리셋 RGB를 담을 때 공유(0x00FF_FFFF 마스크 단일 출처).
-pub fn packStraightRgbU32(rgb: u32, alpha: u8) u32 {
-    return (@as(u32, alpha) << 24) | (rgb & 0x00FF_FFFF);
-}
-
-/// 사이드바 하이라이트/색 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
-/// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
-/// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
-/// sentinel-UV(-1) 배경 셀을 만든다. u16 width 상한도 같이 막는다. **가변 높이(code-review #7)**: 세로 위치는
-/// `origin_y`(content-상대 rowTop = 헤더·스크롤 제외)로, 높이는 `height`(카드=slot_h·그룹 헤더=header_row_h)로
-/// 실어 준다 — .m 렌더러가 옛 균일 `row*slot_h`/`slot_h` 대신 이 둘을 써 그룹 헤더(얇은 한 줄)와 정합한다(glyph 옵션2와
-/// 동형). height는 glyph 없는 sentinel 셀이라 미사용인 `atlas_height_px` 필드로 나른다(atlas 미참조라 안전). `row`는
-/// tint 역매핑·디버그용 표시 row(세로 위치는 origin_y가 단일 출처). 순수 함수라 OS와 무관하게 단위 테스트한다
-/// (lowerSidebar가 호출). 사이드바가 꺼졌거나(폭 0) cell 폭 미상이면 null.
-pub fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, row: u16, origin_y: u32, height: u32, active_bg: u32) ?metal_frame.NativeMetalCell {
-    if (sidebar_width_px == 0 or cell_width_px == 0) return null;
-    const cols_u32 = @min(sidebar_width_px / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    const sidebar_cols: u16 = @intCast(cols_u32);
-    if (sidebar_cols == 0) return null;
-    return .{
-        .row = row,
-        .col = 0,
-        .width = sidebar_cols,
-        .codepoint = ' ',
-        .slot_id = 0,
-        .atlas_x_px = 0,
-        .atlas_y_px = 0,
-        .atlas_width_px = 0,
-        .atlas_height_px = height, // 밴드 행 높이(가변 — 카드=slot_h·헤더=header_row_h)를 .m cell_h로 나른다(#7)
-        .u0 = -1.0,
-        .v0 = -1.0,
-        .u1 = -1.0,
-        .v1 = -1.0,
-        .foreground = 0,
-        .background = active_bg,
-        .origin_y = origin_y, // content-상대 rowTop(헤더·스크롤 제외). .m이 header 시프트·scroll을 더한다(glyph 옵션2 동형, #7)
-    };
 }
 
 /// sentinel-UV(아틀라스 없음 — u/v=-1로 셰이더가 글리프 샘플 대신 배경만 칠함) chrome 셀 1개. pane 탭 바
@@ -1395,10 +1103,6 @@ fn premultipliedRgba(rgb: u32, alpha: u8) u32 {
     const b = ((rgb & 0xFF) * a) / 255;
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
-
-/// per-tab 배경색(우클릭 "배경: …") tint 세기 — rich gpu_quad·tui 밴드 두 경로 단일 출처. 0xB0 ≈ 69%
-/// (0x66 ≈ 40%에서 올림 — 옅어서 안 보인다는 라이브 요청). 0=투명, 0xFF=완전 불투명.
-pub const tab_bg_tint_alpha: u8 = 0xB0;
 
 /// base(0xAARRGGBB)의 RGB를 tint_rgb(0xRRGGBB) 쪽으로 alpha/255만큼 lerp한다(base의 알파 보존). 사이드바 밴드에
 /// per-tab 배경 tint를 섞어, tui 기본 테마의 불투명 활성/호버 밴드가 tint quad를 덮어도 활성 슬롯에서 색이 보이게 한다.
@@ -1484,15 +1188,9 @@ fn tabbarHighlightCell(m: chrome.components.tabbar.Metrics, tab_index: usize, bg
     return sentinelBgCell(@intCast(seg.start_col), @intCast(seg.end_col - seg.start_col), bg, m.bar_x, m.bar_y);
 }
 
-/// 스크린 점(backing px)을 담는 panel(없으면 null). split 탭에서 마우스 클릭이 어느 panel에 떨어졌는지
-// pane hit-test(paneAtPoint)·방향 탐색(paneInDirection)·FocusDirection은 session core로 이동(후속) —
-// Model.paneAtPoint/paneInDirection/FocusDirection. 순수(레이아웃 rect만)라 헤드리스 테스트도 session_model로.
-// platform은 termRect→layout으로 leaf_rects를 만들어 넘긴다. 단일 출처: src/session/session_model.zig.
-pub const FocusDirection = Model.FocusDirection;
-
 // (paneInDirection은 위 주석대로 session core로 이동 — Model.paneInDirection)
 
-// adjustActiveForMove·rotateMove·reselectAfterClose·wheelDeltaToLines는 session core로 추출됐다 — 위 file-scope
+// tab_ops.adjustActiveForMove·rotateMove·tab_ops.reselectAfterClose·wheelDeltaToLines는 session core로 추출됐다 — 위 file-scope
 // alias(input_math.*)로 bare 이름 그대로 호출한다. 정의·단위 테스트는 src/session/input_math.zig.
 
 // 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
@@ -1799,9 +1497,6 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
 }
 
 const FilePanelClosePhase = enum { syncing, confirm_dirty, confirm_conflict, saving };
-// JavaScript bridge arguments are IEEE-754 numbers. Keep close request IDs inside the exact integer range so the
-// request echoed by CM6 cannot alias a different native request after conversion through NSNumber/JavaScript.
-pub const max_file_panel_close_request_id = maru.session.control_bridge.max_js_safe_integer;
 pub const PendingFilePanelClose = struct {
     surface_id: u64,
     surface_generation: u64,
@@ -1827,51 +1522,6 @@ const PendingConfirm = union(enum) {
 pub const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
 pub const FilePanelSaveCloseAction = struct { surface_id: u64, request_id: u64 };
 pub const FilePanelCloseUnlockAction = struct { surface_id: u64, request_id: u64 };
-
-pub const DeletedSurfaceSet = struct {
-    const slot_count = dock_panel.max_entries * 2;
-    keys: [slot_count]u64 = [_]u64{0} ** slot_count,
-
-    fn start(surface_id: u64) usize {
-        return @as(usize, @truncate(surface_id *% 0x9e3779b97f4a7c15)) & (slot_count - 1);
-    }
-
-    pub fn insert(self: *@This(), surface_id: u64) void {
-        std.debug.assert(surface_id != 0);
-        var slot = start(surface_id);
-        for (0..slot_count) |_| {
-            if (self.keys[slot] == 0 or self.keys[slot] == surface_id) {
-                self.keys[slot] = surface_id;
-                return;
-            }
-            slot = (slot + 1) & (slot_count - 1);
-        }
-        unreachable; // 최대 256개를 512-slot table에 넣으므로 full은 모델 cap 위반이다.
-    }
-
-    pub fn contains(self: *const @This(), surface_id: u64) bool {
-        if (surface_id == 0) return false;
-        var slot = start(surface_id);
-        for (0..slot_count) |_| {
-            const candidate = self.keys[slot];
-            if (candidate == 0) return false;
-            if (candidate == surface_id) return true;
-            slot = (slot + 1) & (slot_count - 1);
-        }
-        return false;
-    }
-};
-
-/// `fileEntryForIdCounted`의 방문 수 계측(성능 gate 소비 — docs/performance-budget.md).
-/// FP16 전에는 `DockPanel.EntryLookupCounters`였다 — 조회가 도크에서 Term 창구로 옮겨오며 함께 왔다.
-pub const EntryLookupCounters = struct { entry_visits: usize = 0 };
-
-pub const FileTreeDockRemovalStats = struct {
-    entry_visits: usize = 0,
-    dirty_sync_visits: usize = 0,
-    unlock_visits: usize = 0,
-    reload_visits: usize = 0,
-};
 
 /// Cmd+Q 종료 확인 모달의 결정. host(Swift)가 FrameSummary.quit_decision으로 읽어 NSApp.reply로 종료를 진행/취소한다.
 /// 값은 ABI 약속이라(0/1/2) Swift drainQuitDecision의 case와 일치해야 한다.
@@ -1928,30 +1578,10 @@ const NotificationHistoryItem = struct {
 /// running 스피너 = **codex "working" 파형(이퀄라이저)의 축소판** — 4칸 바운싱 바다(사용자 피드백: 옛 브라유
 /// 회전 dot["작은 점 왔다갔다"] 대신 codex 스피너처럼). codex 원본은 폭 20칸+ 파형이라 좁은 사이드바 카드엔 4칸으로 줄였다.
 /// 블록 문자 ▁▂▃▄▅▆▇█(U+2581~2588)은 renderer/block_glyph.zig가 절차 합성 → 폰트 의존 없이 또렷(braille와 같은 합성 경로).
-/// 각 바의 높이는 삼각 파형(spinner_wave)을 서로 다른 위상(spinner_bar_phase)으로 읽어 파도처럼 흐른다. 상태줄이 현재
+/// 각 바의 높이는 삼각 파형(spinner_wave)을 서로 다른 위상(sidebar_ops.spinner_bar_phase)으로 읽어 파도처럼 흐른다. 상태줄이 현재
 /// `agent_spin_frame`의 바 글리프들을 그리고, 색칠 루프가 이 codepoint들을 브랜드색으로 칠한다(아이콘과 같은 패턴).
 /// 바 높이 삼각 파형(1~8, 8칸 오름 + 6칸 내림 = 끝점 중복 없는 주기 14). `agent_spin_frame`도 이 길이로 wrap한다(아래 advance).
 pub const spinner_wave = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2 };
-/// 각 바의 위상 offset(파형 길이 14 위, 간격 4·4·4·2) — 바마다 파형을 다른 지점에서 읽어 시차를 두고 오르내린다. 삼각 파형이라
-/// 프레임에 따라 인접 두 바가 같은 높이로 겹치는 순간도 있지만(자연스러운 마루/골) 전체적으로 파도처럼 흐른다. 바 개수는 이 길이가 단일 출처.
-const spinner_bar_phase = [_]u8{ 0, 4, 8, 12 };
-/// 이퀄라이저 바 개수 = 위상 테이블 길이(단일 출처 — 둘이 어긋나 spinnerBarCp가 OOB 나지 않게 파생, code-review high 후속).
-pub const spinner_bar_count: usize = spinner_bar_phase.len;
-/// 블록 글리프 베이스 codepoint(U+2580). 높이 h(1~8)를 더하면 ▁(U+2581)~█(U+2588). emit(spinnerBarCp)·색칠 게이트(isAgentSpinnerCp)의 단일 출처.
-const spinner_block_base: u21 = 0x2580;
-
-/// 프레임 f, 바 c의 블록 codepoint(▁~█). 높이 h(1~8) → base+h(▁=U+2581 … █=U+2588). frame은 이미 wave 길이로 wrap됨.
-pub fn spinnerBarCp(frame: u8, bar: usize) u21 {
-    const h = spinner_wave[(@as(usize, frame) + spinner_bar_phase[bar]) % spinner_wave.len];
-    return spinner_block_base + @as(u21, h);
-}
-
-/// codepoint가 스피너 바 글리프(블록 ▁~█)인가 — 색칠 루프 게이트(상태줄 row로 좁힌 뒤 이 체크). 범위는 emit(spinnerBarCp)이
-/// 내는 [base+1, base+max(wave)]와 **자동으로** 일치한다(wave 높이가 바뀌어도 게이트가 따라감 — 단일 출처, code-review high 후속).
-pub fn isAgentSpinnerCp(cp: u21) bool {
-    const max_h = comptime std.mem.max(u8, &spinner_wave);
-    return cp > spinner_block_base and cp <= spinner_block_base + @as(u21, max_h);
-}
 
 /// 상단 탭 바 running 표시 = **1칸 정적 플래그** ●(U+25CF). 사이드바 카드는 전용 상태줄이 있어 애니메이션 파형을
 /// 쓰지만, 탭 바(pane 라벨·Term 탭)는 등폭이라 폭이 귀하다 — tmux/screen의 창-목록 활동 플래그(1글자)·zellij/iTerm2
@@ -2004,46 +1634,6 @@ test "file dock breadcrumb keeps the useful parent instead of the absolute home 
     const text = try fileDockBreadcrumbAlloc(std.testing.allocator, "/Users/user/project/docs/web-panel.md");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("docs / web-panel.md", text);
-}
-
-/// haystack이 prefix로 시작하는가(대소문자 무시). 프로세스명 분류용 — 부분일치(claudia·mycodex 오탐)를 피하면서
-/// 변종("claude-code"·"codex-cli")은 잡는다.
-fn startsWithCi(haystack: []const u8, prefix: []const u8) bool {
-    return haystack.len >= prefix.len and std.ascii.eqlIgnoreCase(haystack[0..prefix.len], prefix);
-}
-
-/// 포그라운드 process group 구성원 이름 하나를 에이전트 종류로 분류한다(대소문자 무시 prefix 일치).
-/// PTY backend가 comm이 interpreter면 argv[1], 버전 문자열이면 argv[0]으로 먼저 해소한다.
-fn classifyAgent(name: ?[]const u8) AgentKind {
-    const n = name orelse return .none;
-    if (startsWithCi(n, "claude")) return .claude;
-    if (startsWithCi(n, "codex")) return .codex;
-    return .none;
-}
-
-/// login/shell wrapper를 건너뛰고 같은 foreground group 안의 실제 agent 구성원을 찾는다. OS 열거와 provider 정책을
-/// 섞지 않도록 PTY는 이름 목록만 준다. 서로 다른 provider가 같은 group에 동시에 보이면 열거 순서로 임의 선택하지 않고
-/// none으로 실패해 오분류를 피한다. 같은 provider의 wrapper/native 중복은 하나로 취급한다.
-/// foreground 목록에서 **에이전트 프로세스의 pid**를 고른다(없으면 null). 세션 신원 env는 이 pid의 자식에게만
-/// 내려오므로(`agentSessionIdentity`) 결속의 출발점이다. 이름 판정은 `classifyAgent` 단일 출처를 재사용한다.
-pub fn agentProcessPid(processes: []const maru.pty.types.ForegroundProcessName, kind: AgentKind) ?i32 {
-    if (kind == .none) return null;
-    for (processes) |*process| {
-        if (classifyAgent(process.slice()) != kind) continue;
-        if (process.pid > 0) return process.pid;
-    }
-    return null;
-}
-
-pub fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessName) AgentKind {
-    var found: AgentKind = .none;
-    for (processes) |*process| {
-        const kind = classifyAgent(process.slice());
-        if (kind == .none) continue;
-        if (found != .none and found != kind) return .none;
-        found = kind;
-    }
-    return found;
 }
 
 /// 한 panel(split leaf = 화면의 한 분할 영역). 탭 모델로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
@@ -2266,7 +1856,7 @@ pub const ClipboardAction = enum(u8) {
 /// 베이스/결정: 색 팔레트는 단일 표준이 없어 maru가 택한 기본 셋이다 — 앰버(#DDA15E)는 maru accent(마루=나무 마루),
 /// 나머지는 서로·앰버와 명확히 구분되는 중간 채도 색조(파랑/초록/빨강/보라)로 골라 여러 워크스페이스를 한눈에 가르게 했다.
 /// 0(없음)에 순수 검정 프리셋이 없으므로 "0=색 없음"과 충돌하지 않는다. 배경 tint·좌측 막대 **둘 다** 이 팔레트를
-/// 프리셋으로 쓴다(직교한 별도 설정, 색만 공유). 적용 알파는 용도별로 다르다 — 배경=반투명 tint(tab_bg_tint_alpha), 막대=불투명.
+/// 프리셋으로 쓴다(직교한 별도 설정, 색만 공유). 적용 알파는 용도별로 다르다 — 배경=반투명 tint(sidebar_ops.tab_bg_tint_alpha), 막대=불투명.
 pub const tab_color_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
 /// 프리셋 색 이름(배경 "배경: …"·막대 "바: …" 라벨이 공유). tab_color_presets와 index-align — 개수가 어긋나면 comptime 실패.
 const tab_color_names = [_][]const u8{ "없음", "앰버", "파랑", "초록", "빨강", "보라" };
@@ -2369,12 +1959,6 @@ pub const ctx_group_menu_color_first: usize = ctx_group_menu_ungroup + 1; // 그
 comptime {
     // 그룹 헤더 메뉴 항목 최대치(Rename + 그룹 풀기 + 색 프리셋)가 공유 버퍼(ctx_menu_count 크기)를 넘지 않는지 확인.
     if (ctx_group_menu_color_first + tab_group_color_labels.len > ctx_menu_count) @compileError("group header menu exceeds context_menu_items_buf");
-}
-
-pub fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    return a.?.pane == b.?.pane and a.?.tab == b.?.tab;
 }
 
 /// orderedRemove(removed_index)로 한 항목을 뺀 뒤, active 인덱스가 같은 논리적 항목을 계속 가리키도록 보정한다.
@@ -2920,7 +2504,7 @@ pub const AppSession = struct {
     live_registry: *maru.session.LiveSurfaceRegistry(app.LiveSurface) = &app_runtime.live_registry,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
-    // (homeForRootCwd)에 쓴다. getcwd 실패 시 false(승격 안 함 — 상속 그대로).
+    // (workspace_ops.homeForRootCwd)에 쓴다. getcwd 실패 시 false(승격 안 함 — 상속 그대로).
     launch_cwd_is_root: bool = false,
     // 새 탭(Cmd+T)이 첫 탭과 같은 종류의 셸을 띄우도록 spawn 파라미터를 보관한다. zdotdir(ZDOTDIR
     // 셸 통합 디렉터리)는 새 탭 spawn에도 필요하므로 init 끝에 free하지 않고 여기에 들고 deinit에서 푼다.
@@ -3189,7 +2773,7 @@ pub const AppSession = struct {
     // new_tab/new_term을 무동작으로 막는다(사이드바·탭 바가 없어 안 보이는 탭 생성 차단). true면 허용(파워유저).
     // chrome_minimal=false면 tabsBlocked()가 항상 false라 full 모드 탭은 이 값과 무관하게 동작한다.
     minimal_tabs: bool = false,
-    // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_min_pt, sidebar_max_pt]로
+    // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_ops.sidebar_min_pt, sidebar_max_pt]로
     // 갱신된다. backing 픽셀 폭은 scale을 곱해 구하므로 pt로 들면 DPI가 바뀌어도(refreshCellMetrics) 유지된다.
     sidebar_width_pt: u32 = default_sidebar_width_pt,
     // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
@@ -4131,7 +3715,7 @@ pub const AppSession = struct {
     resource_menu_len: usize = 0,
     /// 행 문자열 저장소. `context_menu_items_buf`는 슬라이스만 들므로 실제 바이트는 여기 산다.
     resource_menu_text: [max_resource_rows + resource_header_rows][resource_row_max_bytes]u8 = undefined,
-    /// 활동 시각 재렌더 tick 카운터(agent_age_repaint_interval_ms).
+    /// 활동 시각 재렌더 tick 카운터(agent_ops.agent_age_repaint_interval_ms).
     agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
     // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ms에 해당하는 tick 수를 넘으면 ESU
@@ -12586,8 +12170,8 @@ pub const AppSession = struct {
         return .terminal;
     }
 
-    // ImeDecision·imeDecide·dropLastCodepoint는 session core로 추출(src/session/ime.zig). 위 file-scope alias
-    // (imeDecide=ime.decide)로 imeEnd가 bare 이름 그대로 호출한다. 정의·단위 테스트는 ime.zig.
+    // ImeDecision·input_ops.imeDecide·dropLastCodepoint는 session core로 추출(src/session/ime.zig). 위 file-scope alias
+    // (input_ops.imeDecide=ime.decide)로 imeEnd가 bare 이름 그대로 호출한다. 정의·단위 테스트는 ime.zig.
 
     /// 한글 후보를 확정시키며 함께 온 키를 확정 후 다시 보낼지(Ghostty 정책 동작 비교). 화살표는 커서
     /// 이동이라 항상(왼쪽만 수정자 조건), Enter는 enter_newline(config input.ime-enter=newline)일 때만 —
@@ -14699,7 +14283,7 @@ pub const AppSession = struct {
     }
 
     /// 각 Term의 포그라운드 프로세스(claude/codex)를 throttled로 polling해 agent_kind를 갱신한다. 매 tick
-    /// syscall은 비싸므로 agent_poll_interval_ms(≈0.5s)마다. 변화가 있으면 metal_dirty로 재렌더(심볼 표시 갱신).
+    /// syscall은 비싸므로 agent_ops.agent_poll_interval_ms(≈0.5s)마다. 변화가 있으면 metal_dirty로 재렌더(심볼 표시 갱신).
     /// 이 창의 터미널 프로세스 표본을 모아 리소스 표시를 갱신한다(docs/status-bar.md §6).
     ///
     /// **창 단위로 귀속되는 것만 센다** — 앱 자신·웹 콘텐츠는 앱 전역이라 창 상태바에 넣으면 창이 둘일 때
@@ -17224,7 +16808,7 @@ pub const AppSession = struct {
     /// 자르는 이유가 위아래 서로 다르다:
     /// - **위**(header): 스크롤된 카드가 헤더 위로 새는 것을 막는다. 스크롤이 0이면 샐 것이 없으므로 안 자른다
     ///   (기존 동작 보존 — 헤더를 늘 자르면 헤더 영역에 걸친 표면이 없는데도 scissor가 걸린다).
-    /// - **아래**(status bar): `sidebarBandCell`이 세로 경계를 안 보므로(폭·칸수만 본다) 스크롤이 0이어도
+    /// - **아래**(status bar): `sidebar_ops.sidebarBandCell`이 세로 경계를 안 보므로(폭·칸수만 본다) 스크롤이 0이어도
     ///   맨 아래 카드가 상태바 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줬을 뿐이다.
     pub const SidebarScissor = struct { top: u32, bottom: u32 };
 
@@ -18953,33 +18537,6 @@ fn isExecutablePath(path: []const u8) bool {
     return std.c.access(dz.ptr, std.posix.F_OK) != 0; // 디렉터리면 성공 → false; 정규 파일이면 ENOTDIR → true
 }
 
-/// config `shell.command`를 검증해 spawn에 쓸 최종 셸 경로를 돌려준다. 설정돼 있고 실행 가능한 파일이면 그
-/// 경로를, 아니면(빈 값·`~`·상대경로·없는 경로·실행 불가) `resolveInteractiveShell()` 기본 셸로 폴백한다.
-/// **이유**: 잘못된 셸 경로를 그대로 execve하면 자식이 즉시 _exit(127)로 죽고, 첫(유일) 창이면
-/// allTabsTerminated → app_should_terminate로 앱이 시작하자마자 종료된다. 여기서 미리 걸러 세션을 잃지 않는다
-/// (workspace.root의 chdir 실패 시 $HOME graceful 폴백과 같은 forgiving 정책). 폴백(resolveInteractiveShell =
-/// $MARU_INTERACTIVE_SHELL→$SHELL→/bin/sh)도 실행 불가일 수 있어($SHELL가 삭제된 셸을 가리킴) 한 번 더 검사하고,
-/// 그것마저 실패하면 최후로 `/bin/sh`로 떨어진다 — 폴백까지 exec 실패해 첫 창이 종료되는 것을 막는다.
-/// **범위(부분 방어)**: 이 함수는 *실행 불가한 셸 경로*만 막는다. 실행은 되지만 즉시 종료하는 셸(예: /usr/bin/false)
-/// 이나 셸을 종료시키는 shell.args는 못 막아, 그 경우 여전히 세션이 끝나 유일 창이면 앱이 종료된다 — 그건 별개의
-/// 루트커즈("시작 시 유일 surface 즉시 사망 → 앱 종료" lifecycle)로, 후속 과제다(project-rules.md §루트커즈). 반환
-/// 슬라이스는 `command`(config arena) 또는 environ/정적 리터럴을 가리켜 caller가 소유/해제하지 않는다(spawn 시 dupeZ 복사).
-/// `exec <provider> <args…>` 문자열을 만든다. 각 토큰을 작은따옴표로 감싸 셸이 어떤 확장도 하지
-/// 않게 한다(메커니즘 단일 출처: `maru.pty.types.appendSingleQuoted`).
-///
-/// `exec`를 붙이는 이유: 중간 셸이 남지 않아 프로세스 트리가 직접 exec일 때와 같아지고, 실행 중
-/// 판정(foreground process group 열거)이 그대로 성립한다. 호출자가 반환 슬라이스를 free한다.
-pub fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "exec");
-    for (argv) |token| {
-        try out.append(allocator, ' ');
-        try maru.pty.types.appendSingleQuoted(allocator, &out, token);
-    }
-    return try out.toOwnedSlice(allocator);
-}
-
 pub fn resolveConfiguredShell(command: []const u8) []const u8 {
     if (isExecutablePath(command)) return command;
     const fallback = maru.pty.resolveInteractiveShell();
@@ -19115,8 +18672,8 @@ fn expectProviderFixtureEntries(io: std.Io, base: []const u8, expected: []const 
     try std.testing.expectEqual(expected.len, seen);
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+pub extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 /// `sidebar.agent-transcript-hook`을 끈 config 파일 내용. 이 계약의 "옵션이 꺼지면 provider 파일을 전혀 건드리지
 /// 않는다"를 검사하는 fixture다(docs/agent-session.md «사이드바 대화 표시와의 경계»).
@@ -19124,41 +18681,13 @@ const hook_off_config = "sidebar.agent-transcript-hook = false\n";
 /// 같은 계약의 반대편 — 켠 경로에서 `statusLine` 키 외에는 손대지 않는지 검사하는 fixture.
 const hook_on_config = "sidebar.agent-transcript-hook = true\n";
 
-/// provider fixture 테스트가 실제 사용자 홈·설정·캐시를 건드리지 않도록 관련 env를 저장했다가 되돌린다. 이 테스트들은
-/// **실 파일시스템에 쓰는** 경로를 검증하므로 tmp로 밀어 넣는 것이 필수다.
-const ProviderEnvGuard = struct {
-    const names = [_][:0]const u8{ "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "MARU_CONFIG" };
-
-    a: std.mem.Allocator,
-    saved: [names.len]?[:0]u8 = .{null} ** names.len,
-
-    fn capture(a: std.mem.Allocator) !ProviderEnvGuard {
-        var self = ProviderEnvGuard{ .a = a };
-        for (names, &self.saved) |name, *slot| {
-            if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeZ(u8, std.mem.span(raw));
-        }
-        return self;
-    }
-
-    fn restore(self: *ProviderEnvGuard) void {
-        for (names, self.saved) |name, old| {
-            if (old) |value| {
-                _ = setenv(name.ptr, value.ptr, 1);
-                self.a.free(value);
-            } else {
-                _ = unsetenv(name.ptr);
-            }
-        }
-    }
-};
-
 test "provider files remain unchanged across AppSession.init when the statusline hook is off" {
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var env_guard = try ProviderEnvGuard.capture(a);
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
     defer env_guard.restore();
     // 옵션이 꺼진 제품 경로를 검사한다 — config 파일 파싱 자체는 loader 단위 테스트가 본다.
     test_config_text = hook_off_config;
@@ -19318,7 +18847,7 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var env_guard = try ProviderEnvGuard.capture(a);
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
     defer env_guard.restore();
     test_config_text = hook_on_config;
     defer test_config_text = "";
@@ -19479,7 +19008,7 @@ test "agent statusline hook serializes, preserves file identity, and refuses to 
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var env_guard = try ProviderEnvGuard.capture(a);
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
     defer env_guard.restore();
     test_config_text = hook_on_config;
     defer test_config_text = "";
@@ -19840,15 +19369,15 @@ test "chromePointerFromMouse: kind→phase, xterm button→PointerButton, mods �
 
 // window padding이 터미널 영역 rect(termRect)를 좌상으로 들이고 폭/높이를 2배만큼 줄이는지 고정한다 — 이 rect가
 // 렌더 origin·마우스 hit-test(pxToCell)·IME·split leaf의 단일 출처라, 여기서 inset이 맞으면 그 전부가 정합한다.
-test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·null=none" {
-    try std.testing.expectEqual(AgentKind.claude, classifyAgent("claude"));
-    try std.testing.expectEqual(AgentKind.claude, classifyAgent("Claude")); // 대소문자 무시
-    try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex"));
-    try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex-cli")); // 부분일치
-    try std.testing.expectEqual(AgentKind.none, classifyAgent("zsh"));
-    try std.testing.expectEqual(AgentKind.none, classifyAgent("node")); // "node"는 에이전트명 아님 — foregroundProcessNames가 argv[1]("codex")로 먼저 해소
-    try std.testing.expectEqual(AgentKind.none, classifyAgent(null));
-    try std.testing.expectEqual(AgentKind.none, classifyAgent(""));
+test "agent_ops.classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·null=none" {
+    try std.testing.expectEqual(AgentKind.claude, agent_ops.classifyAgent("claude"));
+    try std.testing.expectEqual(AgentKind.claude, agent_ops.classifyAgent("Claude")); // 대소문자 무시
+    try std.testing.expectEqual(AgentKind.codex, agent_ops.classifyAgent("codex"));
+    try std.testing.expectEqual(AgentKind.codex, agent_ops.classifyAgent("codex-cli")); // 부분일치
+    try std.testing.expectEqual(AgentKind.none, agent_ops.classifyAgent("zsh"));
+    try std.testing.expectEqual(AgentKind.none, agent_ops.classifyAgent("node")); // "node"는 에이전트명 아님 — foregroundProcessNames가 argv[1]("codex")로 먼저 해소
+    try std.testing.expectEqual(AgentKind.none, agent_ops.classifyAgent(null));
+    try std.testing.expectEqual(AgentKind.none, agent_ops.classifyAgent(""));
     // 아이콘 코드포인트 매핑(독립 아이콘 셀에 쓰임).
     try std.testing.expectEqual(@as(u21, 0), agentSymbolCodepoint(.none));
     try std.testing.expectEqual(@as(u21, 0x2736), agentSymbolCodepoint(.claude)); // 알림용 실제 ✶
@@ -19857,7 +19386,7 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(icons.codepoint(.diamond), agentIconCodepoint(.codex)); // 사이드바 PUA diamond
 }
 
-test "classifyAgentProcesses: login/shell leader를 건너뛰고 같은 foreground group의 agent를 찾는다" {
+test "agent_ops.classifyAgentProcesses: login/shell leader를 건너뛰고 같은 foreground group의 agent를 찾는다" {
     var processes: [3]maru.pty.types.ForegroundProcessName = undefined;
     const fixtures = [_][]const u8{ "login", "zsh", "claude" };
     for (&processes, fixtures, 1..) |*process, fixture, pid| {
@@ -19865,23 +19394,23 @@ test "classifyAgentProcesses: login/shell leader를 건너뛰고 같은 foregrou
         process.len = @intCast(fixture.len);
         @memcpy(process.bytes[0..fixture.len], fixture);
     }
-    try std.testing.expectEqual(AgentKind.claude, classifyAgentProcesses(&processes));
+    try std.testing.expectEqual(AgentKind.claude, agent_ops.classifyAgentProcesses(&processes));
 
     const codex = "codex";
     processes[2].len = @intCast(codex.len);
     @memcpy(processes[2].bytes[0..codex.len], codex);
-    try std.testing.expectEqual(AgentKind.codex, classifyAgentProcesses(&processes));
+    try std.testing.expectEqual(AgentKind.codex, agent_ops.classifyAgentProcesses(&processes));
 
     processes[2].len = 3;
     @memcpy(processes[2].bytes[0..3], "vim");
-    try std.testing.expectEqual(AgentKind.none, classifyAgentProcesses(&processes));
+    try std.testing.expectEqual(AgentKind.none, agent_ops.classifyAgentProcesses(&processes));
 
     // 같은 group에 서로 다른 provider가 동시에 보이는 비정상/중첩 경로는 proc_list 순서에 따라 임의 선택하지 않는다.
     processes[1].len = 5;
     @memcpy(processes[1].bytes[0..5], "codex");
     processes[2].len = 6;
     @memcpy(processes[2].bytes[0..6], "claude");
-    try std.testing.expectEqual(AgentKind.none, classifyAgentProcesses(&processes));
+    try std.testing.expectEqual(AgentKind.none, agent_ops.classifyAgentProcesses(&processes));
 }
 
 test "dimRgb: 색을 45%로 낮춘다(0 아님 — 글자 안 사라짐; 현재 pane grip muted에 쓰임)" {
@@ -19891,7 +19420,7 @@ test "dimRgb: 색을 45%로 낮춘다(0 아님 — 글자 안 사라짐; 현재 
 }
 
 // running 스피너 = codex식 4칸 이퀄라이저 파형(옛 브라유 회전 dot 대체). 이 테스트가 증명하는 것:
-// (1) 모든 프레임의 모든 바가 블록 글리프(▁~█)라 색칠 게이트(isAgentSpinnerCp)에 잡히고 renderer/block_glyph 합성 경로로 또렷하게 그려진다.
+// (1) 모든 프레임의 모든 바가 블록 글리프(▁~█)라 색칠 게이트(sidebar_ops.isAgentSpinnerCp)에 잡히고 renderer/block_glyph 합성 경로로 또렷하게 그려진다.
 // (2) 위상 offset 덕에 한 프레임 안에서 바 높이가 획일적이지 않다(파도처럼 보이는 근거) — 최소 한 프레임은 서로 다른 높이를 갖는다.
 // (3) advance가 파형 길이(14)로 wrap하므로 프레임이 그 범위를 넘지 않는다(u8 자연 wrap 시 파형 튐 회피).
 test "spinner: 4칸 이퀄라이저 바가 전부 블록 글리프이고 위상차로 파도친다" {
@@ -19899,10 +19428,10 @@ test "spinner: 4칸 이퀄라이저 바가 전부 블록 글리프이고 위상�
     for (0..spinner_wave.len) |f| {
         const frame: u8 = @intCast(f);
         var prev: ?u21 = null;
-        for (0..spinner_bar_count) |bar| {
-            const cp = spinnerBarCp(frame, bar);
+        for (0..sidebar_ops.spinner_bar_count) |bar| {
+            const cp = sidebar_ops.spinnerBarCp(frame, bar);
             try std.testing.expect(cp >= 0x2581 and cp <= 0x2588); // ▁~█ 범위
-            try std.testing.expect(isAgentSpinnerCp(cp)); // 색칠 게이트가 잡는다
+            try std.testing.expect(sidebar_ops.isAgentSpinnerCp(cp)); // 색칠 게이트가 잡는다
             if (prev) |p| {
                 if (p != cp) any_varied = true;
             }
@@ -19911,13 +19440,13 @@ test "spinner: 4칸 이퀄라이저 바가 전부 블록 글리프이고 위상�
     }
     try std.testing.expect(any_varied); // 획일적이지 않다(파형)
     // 브라유(U+280B 등)는 더 이상 스피너로 취급되지 않는다 — 게이트가 블록 전용.
-    try std.testing.expect(!isAgentSpinnerCp(0x280B));
-    try std.testing.expect(!isAgentSpinnerCp(spinner_block_base)); // base(U+2580, 높이 0=바 없음)는 게이트 밖 — emit 최소가 base+1이라 일치.
+    try std.testing.expect(!sidebar_ops.isAgentSpinnerCp(0x280B));
+    try std.testing.expect(!sidebar_ops.isAgentSpinnerCp(sidebar_ops.spinner_block_base)); // base(U+2580, 높이 0=바 없음)는 게이트 밖 — emit 최소가 base+1이라 일치.
     // 프레임 0 = 사용자가 승인한 모양 "▁▅▇▃"(wave[0,4,8,12]=1,5,7,3). 시각 계약을 고정한다.
-    try std.testing.expectEqual(@as(u21, 0x2581), spinnerBarCp(0, 0)); // ▁
-    try std.testing.expectEqual(@as(u21, 0x2585), spinnerBarCp(0, 1)); // ▅
-    try std.testing.expectEqual(@as(u21, 0x2587), spinnerBarCp(0, 2)); // ▇
-    try std.testing.expectEqual(@as(u21, 0x2583), spinnerBarCp(0, 3)); // ▃
+    try std.testing.expectEqual(@as(u21, 0x2581), sidebar_ops.spinnerBarCp(0, 0)); // ▁
+    try std.testing.expectEqual(@as(u21, 0x2585), sidebar_ops.spinnerBarCp(0, 1)); // ▅
+    try std.testing.expectEqual(@as(u21, 0x2587), sidebar_ops.spinnerBarCp(0, 2)); // ▇
+    try std.testing.expectEqual(@as(u21, 0x2583), sidebar_ops.spinnerBarCp(0, 3)); // ▃
 }
 
 // workspaceStatusLine(탭 단위 상태줄)과 tabAgentKind(대표 종류)의 상태별 문자열/폴백을 고정한다. 1-Term 탭이라
@@ -20539,7 +20068,7 @@ test "code-review #6: accent 색 top_level 경계 리셋 — 색 그룹 뒤 top�
             return n;
         }
     }.run;
-    const group_bar = packStraightRgbU32(0x4A7BC4, 0xFF); // 그룹 색 막대(불투명) — SG5-2와 동일 팔레트
+    const group_bar = sidebar_ops.packStraightRgbU32(0x4A7BC4, 0xFF); // 그룹 색 막대(불투명) — SG5-2와 동일 팔레트
 
     // 색 그룹 A = [t0(마커, 파랑), t1(멤버)] — 마커 자기 카드 + 멤버 t1 = 그룹 색 막대 2개(색 렌더 sanity).
     session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
@@ -21679,7 +21208,7 @@ test "그룹핀 리뷰 #6: accent 막대 current_group_color가 핀 경계에서
     const tk = session.buildChromeTokens();
     const bar_w = tk.space.accent_bar_width_px;
     try std.testing.expect(bar_w > 0); // rich accent 막대 존재(전제)
-    const red_word = packStraightRgbU32(red, 0xFF);
+    const red_word = sidebar_ops.packStraightRgbU32(red, 0xFF);
     var red_accents: usize = 0;
     for (session.gpu_quads.items) |q| {
         if (q.layer == 0 and q.fill_color0 == red_word and q.w == @as(f32, @floatFromInt(bar_w)) and q.x == 0) red_accents += 1;
@@ -26748,7 +26277,7 @@ test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중
         try std.testing.expect(std.mem.endsWith(u8, s, "진행중"));
         const first_len = std.unicode.utf8ByteSequenceLength(s[0]) catch 1;
         const first_cp = std.unicode.utf8Decode(s[0..first_len]) catch 0;
-        try std.testing.expect(isAgentSpinnerCp(first_cp)); // 선두가 이퀄라이저 바
+        try std.testing.expect(sidebar_ops.isAgentSpinnerCp(first_cp)); // 선두가 이퀄라이저 바
     }
     try std.testing.expectEqual(AgentKind.claude, tab_ops.tabAgentKind(tab));
 
@@ -26905,7 +26434,7 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
     });
     defer session.deinit();
     const term = session.tabs.items[0].activePane().activeTerm();
-    const interval_ns: i128 = @as(i128, agent_spin_interval_ms) * std.time.ns_per_ms;
+    const interval_ns: i128 = @as(i128, agent_ops.agent_spin_interval_ms) * std.time.ns_per_ms;
     const wave_len: u8 = @intCast(spinner_wave.len);
 
     // 에이전트 없음 → 여러 번 돌려도 위상 불변 + chrome_dirty 안 세움 + baseline 0 유지(idle 재투영 없음).
@@ -27205,15 +26734,15 @@ test "markNotificationsReadBySurface: 배너 클릭→그 surface 안읽음 모�
     try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
 }
 
-test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
-    try std.testing.expectEqualStrings("main", parseGitHead("ref: refs/heads/main\n").?);
-    try std.testing.expectEqualStrings("feature/x", parseGitHead("ref: refs/heads/feature/x").?); // 슬래시 포함 브랜치
-    try std.testing.expectEqualStrings("0123456", parseGitHead("0123456789abcdef0123456789abcdef01234567\n").?); // detached → short
-    try std.testing.expect(parseGitHead("ref: refs/heads/\n") == null); // 빈 브랜치
-    try std.testing.expect(parseGitHead("garbage here") == null); // hex 아님·ref 아님
-    try std.testing.expect(parseGitHead("ref: refs/tags/v1") == null); // heads 아님(태그) → 미지원
-    try std.testing.expect(parseGitHead("") == null);
-    try std.testing.expect(parseGitHead("abc") == null); // 7자 미만 hex
+test "git_ops.parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
+    try std.testing.expectEqualStrings("main", git_ops.parseGitHead("ref: refs/heads/main\n").?);
+    try std.testing.expectEqualStrings("feature/x", git_ops.parseGitHead("ref: refs/heads/feature/x").?); // 슬래시 포함 브랜치
+    try std.testing.expectEqualStrings("0123456", git_ops.parseGitHead("0123456789abcdef0123456789abcdef01234567\n").?); // detached → short
+    try std.testing.expect(git_ops.parseGitHead("ref: refs/heads/\n") == null); // 빈 브랜치
+    try std.testing.expect(git_ops.parseGitHead("garbage here") == null); // hex 아님·ref 아님
+    try std.testing.expect(git_ops.parseGitHead("ref: refs/tags/v1") == null); // heads 아님(태그) → 미지원
+    try std.testing.expect(git_ops.parseGitHead("") == null);
+    try std.testing.expect(git_ops.parseGitHead("abc") == null); // 7자 미만 hex
 }
 
 test "window padding insets only the cell grid, not chrome (termRect/paneBarRect to edge, paneTermRect inset)" {
@@ -29881,7 +29410,7 @@ test "follow-system 중 preset-dark 변경은 라이브 재적용 + user_custom 
     try std.testing.expectEqual(true, session.theme_user_custom); // 잠금 해제 복원
 }
 
-// wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
+// scroll_ops.wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
 
 test "commitComposition is a safe no-op when there is no active preedit" {
     // 조합이 없으면(preedit==null) 아무것도 안 보내고 무해해야 한다 — IME 우회 특수키(PageUp)마다
@@ -29920,14 +29449,14 @@ test "sidebarSearchLine: 넘치면 tail 창(선두 …)으로 caret을 입력 �
     {
         const line = sidebar_ops.sidebarSearchLine(&session, 30); // 넉넉한 max_col
         try std.testing.expect(!line.truncated);
-        try std.testing.expectEqual(sidebar_search_text_col + @as(u16, 3), line.caret_col);
+        try std.testing.expectEqual(sidebar_ops.sidebar_search_text_col + @as(u16, 3), line.caret_col);
     }
 
     // 넘침: 좁은 max_col → tail 창 + caret이 max_col 안 + 뒤쪽(방금 친 'j')이 보인다.
     session.sidebar_search_input.clear();
     for ("abcdefghij") |c| try session.sidebar_search_input.appendChar(std.testing.allocator, c); // 10칸
     {
-        const max_col: u16 = sidebar_search_text_col + 6; // 입력 영역 6칸
+        const max_col: u16 = sidebar_ops.sidebar_search_text_col + 6; // 입력 영역 6칸
         const line = sidebar_ops.sidebarSearchLine(&session, max_col);
         try std.testing.expect(line.truncated);
         try std.testing.expect(line.caret_col < max_col); // caret이 잘려 숨지 않음
@@ -30471,7 +30000,7 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 50), scroll_ops.scrollbarVisibleTicks(&session));
     try std.testing.expectEqual(@as(u32, 14), scroll_ops.scrollbarFadeTicks(&session));
     try std.testing.expectEqual(@as(u32, 8), notification_ops.bellFlashTotalTicks(&session));
-    try std.testing.expectEqual(@as(u32, 33), session.msPerTick()); // round(1000/30) = drag_autoscroll_step_ms
+    try std.testing.expectEqual(@as(u32, 33), session.msPerTick()); // round(1000/30) = scroll_ops.drag_autoscroll_step_ms
 
     session.loaded_config.config.render_frame_rate = 120;
     try std.testing.expectEqual(@as(u32, 120), session.configuredFrameRateHz());
@@ -31274,7 +30803,7 @@ test "sidebar group color(SG5-2): 그룹 색 → 헤더 밴드 tint·소속 카�
             return false;
         }
     }.run;
-    const group_bar = packStraightRgbU32(0x4A7BC4, 0xFF); // 그룹 색 막대(불투명) = 0xFF4A7BC4
+    const group_bar = sidebar_ops.packStraightRgbU32(0x4A7BC4, 0xFF); // 그룹 색 막대(불투명) = 0xFF4A7BC4
 
     // 색 지정 전: 소속 카드가 무색이라 그룹 색 막대는 없다(활성만 기본 accent, 비활성은 막대 없음).
     sidebar_ops.rebuildSidebar(session) catch {};
@@ -31287,7 +30816,7 @@ test "sidebar group color(SG5-2): 그룹 색 → 헤더 밴드 tint·소속 카�
 
     // 헤더 밴드 그룹 색 tint: lowerSidebar가 헤더 밴드(.tab_hover_bg) 색에 그룹 색을 **카드 배경 tint와 같은 blend
     // 경로·같은 알파**로 섞는다. 렌더가 쓰는 것과 동일한 헬퍼로 기대값을 계산해 정확히 일치하는 quad가 있는지 본다.
-    const expected_header = session.chromeQuadBg(blendRgb(sidebar_ops.sidebarHoverBg(session), 0x4A7BC4, tab_bg_tint_alpha));
+    const expected_header = session.chromeQuadBg(blendRgb(sidebar_ops.sidebarHoverBg(session), 0x4A7BC4, sidebar_ops.tab_bg_tint_alpha));
     try std.testing.expect(hasQuad(session, expected_header));
 
     // 층 분리: 그룹 색은 마커 탭의 group_color에만 실리고 개별 카드 background_color/accent_color는 0(안 겹침).
@@ -33530,9 +33059,9 @@ test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll sc
     try std.testing.expect(smaller_card_h_px < base_card_h_px);
 
     session.setFontSize(font_size_min);
-    try std.testing.expectEqual(session_dock_ui_zoom_min_milli, agent_dock.agentSessionDockUiZoomMilli(session));
+    try std.testing.expectEqual(agent_dock.session_dock_ui_zoom_min_milli, agent_dock.agentSessionDockUiZoomMilli(session));
     session.setFontSize(font_size_max);
-    try std.testing.expectEqual(session_dock_ui_zoom_max_milli, agent_dock.agentSessionDockUiZoomMilli(session));
+    try std.testing.expectEqual(agent_dock.session_dock_ui_zoom_max_milli, agent_dock.agentSessionDockUiZoomMilli(session));
     session.dispatchAppAction(.reset_font_size);
     try std.testing.expectEqual(@as(u32, 1000), agent_dock.agentSessionDockUiZoomMilli(session));
 }
@@ -33772,13 +33301,13 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
 
 test "dock toggle visual bottom covers 1.7x glyph when titlebar is below equal or above cell height" {
     // strip < cell: renderer starts the cell at y=0, so visible bottom is 1.35ch.
-    try std.testing.expectEqual(@as(u32, 27), dockToggleVisualBottomPx(20, 10));
+    try std.testing.expectEqual(@as(u32, 27), file_panel_ops.dockToggleVisualBottomPx(20, 10));
     // strip == cell: 같은 경계이며 큰 글꼴에서도 glyph 아래쪽까지 hit rect가 포함한다.
-    try std.testing.expectEqual(@as(u32, 27), dockToggleVisualBottomPx(20, 20));
+    try std.testing.expectEqual(@as(u32, 27), file_panel_ops.dockToggleVisualBottomPx(20, 20));
     // strip > 1.7ch: glyph가 strip 안에 완전히 들어가므로 호출부의 max(strip, bottom)가 strip을 유지한다.
-    try std.testing.expectEqual(@as(u32, 37), dockToggleVisualBottomPx(20, 40));
+    try std.testing.expectEqual(@as(u32, 37), file_panel_ops.dockToggleVisualBottomPx(20, 40));
     // 제품 기본 근사(ch=18, strip=28)는 1.7x quad의 1px 남짓한 아래 돌출까지 포함한다.
-    try std.testing.expectEqual(@as(u32, 29), dockToggleVisualBottomPx(18, 28));
+    try std.testing.expectEqual(@as(u32, 29), file_panel_ops.dockToggleVisualBottomPx(18, 28));
 }
 
 test "empty file dock launcher presents explorer and empty content requests the shared file picker" {
@@ -34969,7 +34498,7 @@ test "file tree production hot paths emit bounded counter artifact" {
     try std.testing.expectEqual(file_tree.max_materialized_nodes, counters.row_visits);
     try std.testing.expectEqual(counters.row_visits, counters.classifier_calls);
     for (session.file_tree_rows.items) |row|
-        try std.testing.expectEqual(@intFromEnum(file_tree_icon.IconKind.code), file_tree.rowIconKind(row));
+        try std.testing.expectEqual(@intFromEnum(file_panel_ops.file_tree_icon.IconKind.code), file_tree.rowIconKind(row));
 
     file_panel_ops.refreshDockListScrollbar(session);
     const geometry = dock_ops.dockListScrollbarGeometry(session).?;
@@ -35127,7 +34656,7 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
     try std.testing.expect(session.chrome_host.notice.open);
     session.chrome_host.notice.dismiss();
 
-    const target: file_tree_mutation.Target = .{ .kind = .file, .path = "/after/file.md" };
+    const target: file_panel_ops.file_tree_mutation.Target = .{ .kind = .file, .path = "/after/file.md" };
     session.pending_file_tree_delete = file_panel_ops.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
     try session.file_tree.replaceExplicitRoots(&.{"/newer"});
     file_panel_ops.confirmFileTreeDelete(session);
@@ -37221,37 +36750,37 @@ test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 child
     try std.testing.expect(usableRestoreCwd("relative/path") == null);
 }
 
-test "resolveWorkspaceRoot: 빈값=상속(null), 절대경로 그대로, `~` 확장, 형식 필터" {
+test "workspace_ops.resolveWorkspaceRoot: 빈값=상속(null), 절대경로 그대로, `~` 확장, 형식 필터" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     // 빈 값(기본) → null = 상속 cwd로 spawn(설정 안 함).
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "", "/home/u") == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "", "/home/u") == null);
     // 절대경로는 그대로(config arena 슬라이스를 빌림 — buf 안 씀).
-    try std.testing.expectEqualStrings("/work/proj", resolveWorkspaceRoot(&buf, "/work/proj", "/home/u").?);
+    try std.testing.expectEqualStrings("/work/proj", workspace_ops.resolveWorkspaceRoot(&buf, "/work/proj", "/home/u").?);
     // `~` 단독 → $HOME, `~/sub` → $HOME/sub(셸을 안 거치는 execve엔 tilde expansion이 없어 직접 한다).
-    try std.testing.expectEqualStrings("/home/u", resolveWorkspaceRoot(&buf, "~", "/home/u").?);
-    try std.testing.expectEqualStrings("/home/u/proj", resolveWorkspaceRoot(&buf, "~/proj", "/home/u").?);
+    try std.testing.expectEqualStrings("/home/u", workspace_ops.resolveWorkspaceRoot(&buf, "~", "/home/u").?);
+    try std.testing.expectEqualStrings("/home/u/proj", workspace_ops.resolveWorkspaceRoot(&buf, "~/proj", "/home/u").?);
     // `~`인데 $HOME이 없으면(null) 확장 불가 → null(`~`로 시작하는 상대경로를 그대로 넘기지 않는다).
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "~/proj", null) == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "~/proj", null) == null);
     // `~`인데 HOME=""(getenv가 non-null 빈 문자열로 줌) 또는 상대 home이면 확장 불가 → null. 가드가 없으면
     // `~/proj`가 `/proj`(절대처럼 보임)로 새 나가는 회귀를 막는다.
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "~/proj", "") == null);
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "~", "") == null);
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "~/proj", "rel/home") == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "~/proj", "") == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "~", "") == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "~/proj", "rel/home") == null);
     // 상대경로(절대 아님)는 거른다 → null. `~user`(다른 사용자)는 확장 안 하므로 상대경로로 떨어져 null.
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "relative/path", "/home/u") == null);
-    try std.testing.expect(resolveWorkspaceRoot(&buf, "~user/proj", "/home/u") == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "relative/path", "/home/u") == null);
+    try std.testing.expect(workspace_ops.resolveWorkspaceRoot(&buf, "~user/proj", "/home/u") == null);
 }
 
-test "homeForRootCwd: launch cwd가 `/`(.app)면 home으로, 정상 cwd면 상속(null)" {
+test "workspace_ops.homeForRootCwd: launch cwd가 `/`(.app)면 home으로, 정상 cwd면 상속(null)" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     // launch cwd가 `/`(.app 더블클릭) + home 절대경로 → home으로 올린다.
-    try std.testing.expectEqualStrings("/Users/me", homeForRootCwd(&buf, true, "/Users/me").?);
+    try std.testing.expectEqualStrings("/Users/me", workspace_ops.homeForRootCwd(&buf, true, "/Users/me").?);
     // 정상 cwd(터미널에서 띄움)면 그대로 상속 → null(폴백 안 함).
-    try std.testing.expect(homeForRootCwd(&buf, false, "/Users/me") == null);
+    try std.testing.expect(workspace_ops.homeForRootCwd(&buf, false, "/Users/me") == null);
     // launch cwd가 `/`여도 home이 없거나(null) 빈/상대경로면 폴백 불가 → null(상속).
-    try std.testing.expect(homeForRootCwd(&buf, true, null) == null);
-    try std.testing.expect(homeForRootCwd(&buf, true, "relative") == null);
-    try std.testing.expect(homeForRootCwd(&buf, true, "") == null); // HOME="" → 폴백 안 함
+    try std.testing.expect(workspace_ops.homeForRootCwd(&buf, true, null) == null);
+    try std.testing.expect(workspace_ops.homeForRootCwd(&buf, true, "relative") == null);
+    try std.testing.expect(workspace_ops.homeForRootCwd(&buf, true, "") == null); // HOME="" → 폴백 안 함
 }
 
 test "resolveConfiguredShell: 실행 가능한 셸만 그대로, 빈값·`~`·상대·없는 경로·디렉터리는 기본 셸로 폴백" {
@@ -37572,7 +37101,7 @@ test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inh
     _ = try session.resize(800, 600, 1000);
 
     // 테스트는 빈 config로 init되므로(workspace.root=""), 설정된 root를 직접 주입한다 — 절대경로 **정적 리터럴**이라
-    // arena가 추적/free하지 않아 안전(Parsed.deinit은 arena.deinit 일괄 해제만 한다). 이렇게 해야 resolveWorkspaceRoot
+    // arena가 추적/free하지 않아 안전(Parsed.deinit은 arena.deinit 일괄 해제만 한다). 이렇게 해야 workspace_ops.resolveWorkspaceRoot
     // 순수 단위 테스트 너머로 "설정된 root 경로가 실제 newSurfaceCwd 배선을 통과해 req.cwd가 되는지"가 검증된다(#5 공백 보강).
     session.loaded_config.config.workspace.root = "/tmp/maru-root";
 
@@ -37653,13 +37182,13 @@ test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree�
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
-test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {
+test "sidebar_ops.sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {
     // 순수 함수: 폭/cell 폭/표시 행/origin_y/높이/색만으로 밴드 셀을 만든다(OS 무관). 사이드바 꺼짐(폭 0)·cell 폭 0이면 null.
-    try std.testing.expect(sidebarBandCell(0, 8, 0, 0, 40, 0xFF112233) == null);
-    try std.testing.expect(sidebarBandCell(180, 0, 0, 0, 40, 0xFF112233) == null);
+    try std.testing.expect(sidebar_ops.sidebarBandCell(0, 8, 0, 0, 40, 0xFF112233) == null);
+    try std.testing.expect(sidebar_ops.sidebarBandCell(180, 0, 0, 0, 40, 0xFF112233) == null);
 
     // 180px 폭, cell 폭 9px → floor(180/9)=20칸. col 0, width 20, sentinel UV, 배경=색. origin_y/height는 가변 높이 소스(#7).
-    const cell = sidebarBandCell(180, 9, 0, 100, 40, 0xFF112233).?;
+    const cell = sidebar_ops.sidebarBandCell(180, 9, 0, 100, 40, 0xFF112233).?;
     try std.testing.expectEqual(@as(u16, 0), cell.col);
     try std.testing.expectEqual(@as(u16, 20), cell.width);
     try std.testing.expectEqual(@as(u16, 0), cell.row);
@@ -37670,13 +37199,13 @@ test "sidebarBandCell sizes the active band to the sidebar width and emits a sen
     try std.testing.expectEqual(@as(u32, 0), cell.foreground);
 
     // 밴드 폭은 floor라 origin_x를 넘지 않는다: 17px 폭/8px cell → 2칸(2*8=16<=17). ceil(=3,24px)이면 침범.
-    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(17, 8, 0, 0, 40, 0xFF000000).?.width);
+    try std.testing.expectEqual(@as(u16, 2), sidebar_ops.sidebarBandCell(17, 8, 0, 0, 40, 0xFF000000).?.width);
     // 표시 행은 인자대로(탭 i = 행 i): 3번째 탭이면 row 2.
-    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(180, 9, 2, 0, 40, 0xFF000000).?.row);
+    try std.testing.expectEqual(@as(u16, 2), sidebar_ops.sidebarBandCell(180, 9, 2, 0, 40, 0xFF000000).?.row);
     // 그룹 헤더 밴드는 얇은 높이(header_row_h)를 그대로 나른다(카드 slot_h와 다름) — .m이 이 값으로 얇게 그린다.
-    try std.testing.expectEqual(@as(u32, 18), sidebarBandCell(180, 9, 0, 0, 18, 0xFF000000).?.atlas_height_px);
+    try std.testing.expectEqual(@as(u32, 18), sidebar_ops.sidebarBandCell(180, 9, 0, 0, 18, 0xFF000000).?.atlas_height_px);
     // cell 폭이 사이드바 폭보다 크면 0칸 → null(밴드 없음).
-    try std.testing.expect(sidebarBandCell(8, 16, 0, 0, 40, 0xFF000000) == null);
+    try std.testing.expect(sidebar_ops.sidebarBandCell(8, 16, 0, 0, 40, 0xFF000000) == null);
 }
 
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
@@ -37714,8 +37243,8 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
     var track: ?chrome.ui.layout.UiRect = null;
     var thumb: ?chrome.ui.layout.UiRect = null;
     for (snapshot.entries) |entry| {
-        if (entry.id == sidebar_scroll_ids.track) track = entry.rect;
-        if (entry.id == sidebar_scroll_ids.thumb) thumb = entry.rect;
+        if (entry.id == sidebar_ops.sidebar_scroll_ids.track) track = entry.rect;
+        if (entry.id == sidebar_ops.sidebar_scroll_ids.thumb) thumb = entry.rect;
     }
     const t = track orelse return error.NoTrack;
     const h = thumb orelse return error.NoThumb;
@@ -37727,7 +37256,7 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
     try std.testing.expect(t.x + t.width <= @as(f32, @floatFromInt(session.sidebar_width_px)));
     // ⑥ thumb은 트랙 안이고 최소 크기를 지킨다(뷰포트가 아주 작아도 잡을 수 있어야 한다).
     try std.testing.expect(h.y >= t.y and h.y + h.height <= t.y + t.height);
-    try std.testing.expect(h.height >= @as(f32, @floatFromInt(sidebar_scrollbar_min_thumb_px)) or h.height >= t.height);
+    try std.testing.expect(h.height >= @as(f32, @floatFromInt(sidebar_ops.sidebar_scrollbar_min_thumb_px)) or h.height >= t.height);
 
     // ⑦ **도크 목록과 동시에 살아 있다.** 둘은 한 화면에 함께 있으므로 한쪽 발행이 다른 쪽을 지우면 안 된다
     //    — 도크가 뷰를 갈아끼우며 저장소를 공유하는 것(SV3b)과 조건이 다르다.
@@ -37958,7 +37487,7 @@ test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock lis
     try sidebar_ops.rebuildSidebar(session);
     const content_h = chrome.components.sidebar.contentHeight(sidebar_ops.sidebarRenderRows(session), sidebar_ops.sidebarMetrics(session));
     const viewport_h = content_h / 2;
-    if (viewport_h <= sidebar_scrollbar_min_thumb_px * 2) return error.SidebarFixtureTooShort;
+    if (viewport_h <= sidebar_ops.sidebar_scrollbar_min_thumb_px * 2) return error.SidebarFixtureTooShort;
     session.backing_height_px = session.sidebar_header_height_px + session.statusBarHeightPx() + viewport_h;
     if (sidebar_ops.sidebarMaxScroll(session) == 0) return error.SidebarFixtureDoesNotOverflow;
 
@@ -40575,13 +40104,13 @@ test "관측 tail 상한은 여러 행 composer의 프롬프트 마커를 계속
         }
         try core.write("\r\n  Context 4% used · weekly 67% left · gpt-5.6-sol low");
 
-        const tail = try core.dumpRecentTextUtf8(allocator, agent_screen_tail_rows, agent_screen_tail_bytes);
+        const tail = try core.dumpRecentTextUtf8(allocator, agent_ops.agent_screen_tail_rows, agent_ops.agent_screen_tail_bytes);
         defer allocator.free(tail);
         try std.testing.expect(std.mem.indexOf(u8, tail, "›") != null);
         try std.testing.expectEqual(observer.State.idle, observer.detect(.codex, .{ .screen = tail, .output_active = true }).state);
 
         // non-vacuous: 옛 12행 상한으로 같은 화면을 읽으면 마커가 빠지고 폴백이 running을 세운다.
-        const short_tail = try core.dumpRecentTextUtf8(allocator, 12, agent_screen_tail_bytes);
+        const short_tail = try core.dumpRecentTextUtf8(allocator, 12, agent_ops.agent_screen_tail_bytes);
         defer allocator.free(short_tail);
         try std.testing.expect(std.mem.indexOf(u8, short_tail, "›") == null);
         try std.testing.expectEqual(observer.State.running, observer.detect(.codex, .{ .screen = short_tail, .output_active = true }).state);
@@ -42818,23 +42347,23 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
 test "resume 셸 명령: exec 접두와 토큰별 작은따옴표 인용" {
     const a = std.testing.allocator;
 
-    const claude = try buildResumeShellCommand(a, &.{ "claude", "--resume", "0c803aaf-505b-4c7a" });
+    const claude = try agent_ops.buildResumeShellCommand(a, &.{ "claude", "--resume", "0c803aaf-505b-4c7a" });
     defer a.free(claude);
     try std.testing.expectEqualStrings("exec 'claude' '--resume' '0c803aaf-505b-4c7a'", claude);
 
-    const codex = try buildResumeShellCommand(a, &.{ "codex", "resume", "019fc0e4-5594" });
+    const codex = try agent_ops.buildResumeShellCommand(a, &.{ "codex", "resume", "019fc0e4-5594" });
     defer a.free(codex);
     try std.testing.expectEqualStrings("exec 'codex' 'resume' '019fc0e4-5594'", codex);
 
     // 작은따옴표가 든 토큰은 따옴표를 닫고 이어 붙이는 형태로 감싼다 — 따옴표를 닫고 명령을
     // 이어 쓰는 주입을 막는다. 세션 id는 UUID라 실제로 이런 값이 오지 않지만, 인용 메커니즘이
     // 값에 의존하지 않는다는 것을 고정한다.
-    const tricky = try buildResumeShellCommand(a, &.{ "claude", "x'y" });
+    const tricky = try agent_ops.buildResumeShellCommand(a, &.{ "claude", "x'y" });
     defer a.free(tricky);
     try std.testing.expectEqualStrings("exec 'claude' 'x'\\''y'", tricky);
 
     // 공백·메타문자도 따옴표 안에서는 확장되지 않는다.
-    const spaced = try buildResumeShellCommand(a, &.{ "my provider", "$HOME && ls" });
+    const spaced = try agent_ops.buildResumeShellCommand(a, &.{ "my provider", "$HOME && ls" });
     defer a.free(spaced);
     try std.testing.expectEqualStrings("exec 'my provider' '$HOME && ls'", spaced);
 }
@@ -44303,9 +43832,9 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     sidebar_ops.setSidebarWidthPx(session, 1_000_000);
     try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
     sidebar_ops.setSidebarWidthPx(session, 0);
-    // 좁게 → 헤더 아이콘(신호등 + 🔔/◧/⚙/+ 과 배지)이 겹치지 않는 동적 최소(sidebarMinPt, 13칸)로 clamp. 독립 검증: [sidebar_min_pt, max] 안.
+    // 좁게 → 헤더 아이콘(신호등 + 🔔/◧/⚙/+ 과 배지)이 겹치지 않는 동적 최소(sidebarMinPt, 13칸)로 clamp. 독립 검증: [sidebar_ops.sidebar_min_pt, max] 안.
     try std.testing.expectEqual(sidebar_ops.sidebarMinPt(session), session.sidebar_width_pt);
-    try std.testing.expect(session.sidebar_width_pt >= sidebar_min_pt and session.sidebar_width_pt <= sidebar_max_pt);
+    try std.testing.expect(session.sidebar_width_pt >= sidebar_ops.sidebar_min_pt and session.sidebar_width_pt <= sidebar_max_pt);
     // cap: cell 폭이 거대해 헤더 하한이 max를 넘어도 pt는 sidebar_max_pt를 안 넘는다(clamp lower>upper assert 패닉 방지 —
     // code-review). 고정 식과 무관한 독립 oracle(상한 == max).
     const saved_cw = session.cell_width_px;
@@ -46696,7 +46225,7 @@ test "SB1: 사이드바 scissor는 스크롤과 상태바 각각을 이유로 �
     try std.testing.expectEqual(@as(u32, 40), scrolled.top);
     try std.testing.expectEqual(@as(u32, 960), scrolled.bottom);
 
-    // 상태바만 — **스크롤이 0이어도 아래를 자른다**(`sidebarBandCell`이 세로 경계를 안 보므로 맨 아래
+    // 상태바만 — **스크롤이 0이어도 아래를 자른다**(`sidebar_ops.sidebarBandCell`이 세로 경계를 안 보므로 맨 아래
     // 카드가 띠 안까지 발행된다). 위는 안 자른다: 스크롤이 0이면 헤더 위로 샐 것이 없다(기존 동작 보존).
     const bar_only = S(960, true, 40, 0, 22);
     try std.testing.expectEqual(@as(u32, 0), bar_only.top);
@@ -46883,7 +46412,7 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
 
     // 이 테스트는 **앵커가 실제로 있을 때의 기하**를 보므로 상태바에 브랜치 항목을 세운다.
     // 실행 디렉터리의 저장소 형태에 기대지 않고 cache를 직접 구성한다. linked worktree의 `.git`은
-    // 디렉터리가 아닌 gitdir 파일이라 `readGitBranch`의 best-effort 범위 밖이고, 그 차이는 메뉴 기하와 무관하다.
+    // 디렉터리가 아닌 gitdir 파일이라 `git_ops.readGitBranch`의 best-effort 범위 밖이고, 그 차이는 메뉴 기하와 무관하다.
     const term = pane_ops.activePane(session).activeTerm();
     term.rt.observation.availability = .current;
     term.rt.observation.cwd.clearRetainingCapacity();
@@ -48936,7 +48465,7 @@ test "notification badge circle vertically contains the header icon row the rend
     // 원 중심 == 렌더러 줄 원점 + 셀 안 nudge. **포함(원이 숫자를 삼키는가)으로는 부족하다** — 원 지름이
     // 셀 높이의 0.82배라 원점을 통째로 빠뜨려도 숫자가 원 안에 남아 통과한다(실제로 통과시켜 봤다).
     // 고정해야 하는 것은 "원과 셀이 같은 원점을 쓰는가"이므로 등식으로 잡는다.
-    const digit_center_y: f32 = row_top + @as(f32, @floatFromInt(ch)) * notification_badge_center_in_cell;
+    const digit_center_y: f32 = row_top + @as(f32, @floatFromInt(ch)) * notification_ops.notification_badge_center_in_cell;
     const circle_center_y: f32 = c.y + c.h / 2.0;
     try std.testing.expectApproxEqAbs(digit_center_y, circle_center_y, 0.01);
 
@@ -49620,7 +49149,7 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
     }
 }
 
-// imeDecide(이제 ime.decide) 단위 테스트는 함수와 함께 src/session/ime.zig로 이동. imeEnd(부작용 포함)의
+// input_ops.imeDecide(이제 ime.decide) 단위 테스트는 함수와 함께 src/session/ime.zig로 이동. imeEnd(부작용 포함)의
 // 통합 테스트는 아래에 그대로 둔다(라이브 PTY/트랜잭션 닫힘 검증).
 
 test "imeEnd always closes the transaction even with a null key (no leak) and fails closed on OOM" {
@@ -50147,15 +49676,15 @@ test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·
     try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.computeScrollbarAlpha(0));
     try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.computeScrollbarAlpha(visible));
     // fade 완료 후(visible+fade 이상) faint 정착.
-    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.computeScrollbarAlpha(visible + fade));
-    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.computeScrollbarAlpha(visible + fade + 100));
+    try std.testing.expectEqual(scroll_ops.scrollbar_alpha_idle, scroll_ops.computeScrollbarAlpha(visible + fade));
+    try std.testing.expectEqual(scroll_ops.scrollbar_alpha_idle, scroll_ops.computeScrollbarAlpha(visible + fade + 100));
     // fade 창 안은 full~idle 사이에서 단조 감소(틱이 늘수록 alpha가 줄거나 같다).
     var prev: u8 = scrollbar_alpha_full;
     var k: u32 = visible;
     while (k <= visible + fade) : (k += 1) {
         const a = scroll_ops.computeScrollbarAlpha(k);
         try std.testing.expect(a <= prev);
-        try std.testing.expect(a >= scrollbar_alpha_idle);
+        try std.testing.expect(a >= scroll_ops.scrollbar_alpha_idle);
         prev = a;
     }
 }
@@ -50168,21 +49697,21 @@ test "scrollbarAlpha: host frame-loop cadence에 따라 fade tick 수만 바뀌�
     try std.testing.expectEqual(@as(u32, 100), scroll_ops.scrollbarVisibleTicks(&session));
     try std.testing.expectEqual(@as(u32, 27), scroll_ops.scrollbarFadeTicks(&session));
     try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarVisibleTicks(&session)));
-    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
+    try std.testing.expectEqual(scroll_ops.scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
 
     session.loaded_config.config.render_frame_rate = 30;
     session.setFrameLoopRateHz(30);
     try std.testing.expectEqual(@as(u32, 50), scroll_ops.scrollbarVisibleTicks(&session));
     try std.testing.expectEqual(@as(u32, 14), scroll_ops.scrollbarFadeTicks(&session));
     try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarVisibleTicks(&session)));
-    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
+    try std.testing.expectEqual(scroll_ops.scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
 
     session.loaded_config.config.render_frame_rate = 120;
     session.setFrameLoopRateHz(120);
     try std.testing.expectEqual(@as(u32, 200), scroll_ops.scrollbarVisibleTicks(&session));
     try std.testing.expectEqual(@as(u32, 54), scroll_ops.scrollbarFadeTicks(&session));
     try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarVisibleTicks(&session)));
-    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
+    try std.testing.expectEqual(scroll_ops.scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
 }
 
 test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (per-pane)" {
@@ -50228,7 +49757,7 @@ test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (
         count += 1;
         const a: u8 = @intCast((q.fill_color0 >> 24) & 0xff);
         if (a == scrollbar_alpha_full) saw_full = true;
-        if (a == scrollbar_alpha_idle) saw_faint = true;
+        if (a == scroll_ops.scrollbar_alpha_idle) saw_faint = true;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
     try std.testing.expect(saw_full); // idle_ticks 0 pane
@@ -51206,8 +50735,8 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
     defer allocator.free(fifo_doc_path);
     const fifo_asset_path = try std.fmt.allocPrintSentinel(allocator, "{s}/pipe.png", .{root}, 0);
     defer allocator.free(fifo_asset_path);
-    try std.testing.expectEqual(@as(c_int, 0), FilePanelTestC.mkfifo(fifo_doc_path, 0o600));
-    try std.testing.expectEqual(@as(c_int, 0), FilePanelTestC.mkfifo(fifo_asset_path, 0o600));
+    try std.testing.expectEqual(@as(c_int, 0), file_panel_ops.FilePanelTestC.mkfifo(fifo_doc_path, 0o600));
+    try std.testing.expectEqual(@as(c_int, 0), file_panel_ops.FilePanelTestC.mkfifo(fifo_asset_path, 0o600));
     const doc_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
     defer allocator.free(doc_path);
 
@@ -52017,7 +51546,7 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     try std.testing.expect(session.pending_file_panel_close == null);
 
-    session.file_panel_close_request_id = max_file_panel_close_request_id;
+    session.file_panel_close_request_id = file_panel_ops.max_file_panel_close_request_id;
     const queued_before = session.file_panel_dirty_sync_actions_len;
     file_panel_ops.requestFilePanelClose(session, sid);
     try std.testing.expect(session.pending_file_panel_close == null); // JS-safe ID를 재사용/wrap하지 않는다.

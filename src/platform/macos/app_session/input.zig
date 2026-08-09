@@ -36,7 +36,6 @@ const Term = app_session_mod.Term;
 const command_catalog = app_session_mod.command_catalog;
 const config_mod = app_session_mod.config_mod;
 const global_hotkey = app_session_mod.global_hotkey;
-const imeDecide = app_session_mod.imeDecide;
 const keyhint_hold = app_session_mod.keyhint_hold;
 
 /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
@@ -863,3 +862,9 @@ pub fn buildKeyHintBadges(self: *AppSession, props: chrome.ChromeProps, tokens: 
 
     try self.chrome_host.collectKeyHintsDraws(badges.items, props, tokens, arena, draws);
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// IME 순수 판정도 session core로 추출(src/session/ime.zig). bare 호출(imeEnd) 유지용 alias.
+pub const imeDecide = maru.session.ime.decide;

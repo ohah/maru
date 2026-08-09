@@ -18,11 +18,8 @@ const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
-const collapsed_toggle_gap_cells = app_session_mod.collapsed_toggle_gap_cells;
 const notificationLocation = app_session_mod.notificationLocation;
 const is_macos = app_session_mod.is_macos;
-const notification_badge_center_in_cell = app_session_mod.notification_badge_center_in_cell;
-const notification_conversation_max_bytes = app_session_mod.notification_conversation_max_bytes;
 const notification_location_buf_len = app_session_mod.notification_location_buf_len;
 const tab_ops = @import("tab.zig");
 const traffic_light_clearance_pt = app_session_mod.traffic_light_clearance_pt;
@@ -30,9 +27,6 @@ const triangleQuad = AppSession.triangleQuad;
 const PendingNotification = AppSession.PendingNotification;
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
-const bell_flash_peak_milli = app_session_mod.bell_flash_peak_milli;
-const bell_flash_total_ms = app_session_mod.bell_flash_total_ms;
-const collapsed_badge_max_cells = app_session_mod.collapsed_badge_max_cells;
 const layout_math = app_session_mod.layout_math;
 const packRgbAlpha = app_session_mod.packRgbAlpha;
 const sidebar_ops = @import("sidebar.zig");
@@ -591,3 +585,29 @@ pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.componen
     // 상단 테두리를 덮는 painter 관계도 그대로 유지된다).
     self.overlay_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill, border_w, border_col)) catch {};
 }
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// 시각 벨(bell.visual) flash 지속 시간(ms). frame rate별 tick 수로 환산해 실제 페이드 시간을 유지한다(F2-4).
+pub const bell_flash_total_ms: u32 = 250;
+
+// 시각 벨 flash 최대 alpha(천분율) — 전경색 반투명 오버레이의 시작 불투명도. 너무 세지 않게(가독성·자극 균형) 0.35(F2-4).
+pub const bell_flash_peak_milli: u32 = 350;
+
+// 접힘 헤더 가장 왼쪽 아이콘 묶음(종+배지)을 신호등 클리어런스에서 더 오른쪽으로 미는 여백 칸 수 — 호버 배경이 셀
+// 중심 기준 좌측으로 ≈0.8칸 번지므로, 1칸이면 신호등에 닿을 만큼 붙어 보였다(사용자 피드백). 2칸으로 한 칸 이상 간격.
+pub const collapsed_toggle_gap_cells: u32 = 2;
+
+// "9+" 안 읽음 배지가 종 글리프 왼쪽으로 뻗는 최대 칸 수(10+면 2칸). collapsedBellCol이 이만큼을 신호등 클리어런스
+// 오른쪽에 예약해 배지가 신호등을 침범하지 않게 하고, openNotificationPanel 접힘 anchor가 배지 묶음 좌단을 잡는 단일 출처.
+pub const collapsed_badge_max_cells: u16 = 2;
+
+/// 알림 배지 원의 중심이 헤더 아이콘 줄 **셀 안에서** 얼마나 아래인가(셀 높이 비율). digit 글리프의 시각
+/// 중심은 셀 중앙(0.5)보다 약간 위라 0.46이다. 줄 자체의 원점은 `sidebarHeaderIconRowTopPx`가 따로 준다 —
+/// 이 상수는 그 원점 **위에서의 nudge**일 뿐이라 둘을 섞으면 안 된다(섞어서 배지가 어긋났던 결함).
+pub const notification_badge_center_in_cell: f32 = 0.46;
+
+/// 알림 본문에 싣는 대화 한 줄의 상한(bytes). 표시 상한(`max_text_bytes`)보다 짧다 — OS 배너는 몇 줄만 보여주고
+/// 자르므로, 긴 원문을 통째로 넣어봐야 뒤가 안 보이면서 알림만 커진다.
+pub const notification_conversation_max_bytes: usize = 160;

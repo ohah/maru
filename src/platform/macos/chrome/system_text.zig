@@ -1066,6 +1066,10 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
     //
     // 골든은 이 부류를 못 막는다. 회귀는 잡지만 **첫 구현은 그 상태로 비준**한다 —
     // `editor-font-large.ppm`이 이 스택에서 다섯 번 갱신됐고, 글리프가 안 커지던 동안에도 통과했다.
+    //
+    // **이 방어의 사정거리를 정확히 알고 쓴다.** `std.debug.assert`는 Debug·ReleaseSafe에서는 멈추지만
+    // **ReleaseFast에서는 사라진다** — 배포 DMG가 그것이다(`.mise.toml`의 `macos-dmg -Doptimize=ReleaseFast`).
+    // 즉 테스트·Lab·ReleaseSafe 게이트가 잡아 주는 것이고, 제품 바이너리는 이 검사를 받지 않는다.
     std.debug.assert((run.font_px == null) == (run.line_height_px == null));
     std.debug.assert((run.font_px == null) == (run.cell_w_px == null));
     const token_pt = chrome.ui.typography.token(run.role).point_size;

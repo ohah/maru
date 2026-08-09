@@ -232,8 +232,10 @@ L3는 L2 캐시를 **복사하지 않고 읽는다** — chrome이 session을 pr
 
 **지금 둔 방어는 `system_text.zig`의 assert 하나다.** 편집기 전용 필드 셋(`font_px`·`line_height_px`·
 `cell_w_px`)이 **다 있거나 다 없어야** 한다고 못박는다. 원래 앞의 둘만 재고 있었는데, 빠진 하나가 하필
-배치 의미를 가르는 필드였다. **이 방어의 한계는 알고 쓴다** — `std.debug.assert`는 Release에서 사라지므로
-제품 경로가 아니라 **테스트·Lab에서만** 멈춘다.
+배치 의미를 가르는 필드였다. **이 방어의 사정거리는 알고 쓴다** — `std.debug.assert`는
+Debug·ReleaseSafe에서는 멈추지만 **ReleaseFast에서는 사라진다**. 배포 DMG가 ReleaseFast이므로
+(`.mise.toml`의 `macos-dmg -Doptimize=ReleaseFast`) **제품 바이너리는 이 검사를 받지 않는다** —
+잡아 주는 것은 테스트·Lab·ReleaseSafe 게이트다.
 
 **더 강한 형태(세 필드를 `editor_metrics: ?struct{...}` 하나로 묶어 잘못된 조합을 표현 불가로 만들기)는
 N2 이후로 미룬다.** 인레이 힌트·ghost text가 "편집기 폰트 크기는 따르되 배치는 flow"를 원할 수 있는데

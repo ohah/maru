@@ -89,6 +89,7 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
                 // 등폭 셀 격자에 그린다(§2.0) — 폰트 크기가 셀에서 나오고 글자 x가 셀 배수로 스냅된다.
                 .font_px = props.font_px,
                 .line_height_px = props.cell_h_px,
+                .cell_w_px = props.cell_w_px,
             },
         };
         op_count += 1;

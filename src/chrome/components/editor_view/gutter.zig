@@ -86,36 +86,27 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         const len: u16 = @intCast(@min(text.len, field_cols));
         const col = props.layout.line_numbers.start + (field_cols - len);
 
-        // **자리마다 op을 낸다.** 문자열 하나로 넘기면 백엔드가 measured advance로 이어 붙이는데,
-        // 그 advance가 셀 폭과 미세하게 달라(등폭 폰트도 7.8px vs 셀 8px 같은 차이가 난다) 두 번째
-        // 글자부터 격자를 벗어난다 — 실측에서 `9`와 `10`의 오른쪽 끝이 기본 2px, 큰 폰트 4px
-        // 어긋났다. 폰트 크기를 셀에서 파생해도 이 차이는 남는다(그렇게 해 보고 확인했다).
-        //
-        // op 원점은 우리가 셀 좌표로 주므로 **한 op에 한 글자면 벗어날 수 없다.** 줄 번호는 길어야
-        // 여섯 자라 op 부담이 작고, 본문에는 이 방법을 쓸 수 없다(한 줄 60자면 op이 폭발한다).
-        // 근본 해법은 백엔드가 cluster 폭으로 셀 인덱스를 세어 스냅하는 것이며 별도 작업으로 남는다.
-        const y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px);
-        for (text, 0..) |_, digit_index| {
-            if (run_used >= runs.len) return error.OutOfSpace;
-            runs[run_used] = .{ .text = text[digit_index .. digit_index + 1] };
-            const run_slice = runs[run_used .. run_used + 1];
-            run_used += 1;
+        // 문자열 하나로 낸다. 백엔드가 `cell_w_px`를 보고 **글자마다 셀 인덱스를 세어** 놓으므로
+        // (`platform/macos/chrome/system_text.zig`) 자리마다 op을 쪼갤 필요가 없다.
+        if (run_used >= runs.len) return error.OutOfSpace;
+        runs[run_used] = .{ .text = text };
+        const run_slice = runs[run_used .. run_used + 1];
+        run_used += 1;
 
-            if (op_count >= out.len) return error.OutOfSpace;
-            const digit_col = col + @as(u16, @intCast(digit_index));
-            out[op_count] = .{ .text = .{
-                .origin = .{
-                    .x = props.origin_px.x + @as(i32, digit_col) * @as(i32, props.cell_w_px),
-                    .y = y,
-                },
-                .runs = run_slice,
-                .role = line_number_role,
-                .max_cols = 1,
-                .font_px = props.font_px,
-                .line_height_px = props.cell_h_px,
-            } };
-            op_count += 1;
-        }
+        if (op_count >= out.len) return error.OutOfSpace;
+        out[op_count] = .{ .text = .{
+            .origin = .{
+                .x = props.origin_px.x + @as(i32, col) * @as(i32, props.cell_w_px),
+                .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+            },
+            .runs = run_slice,
+            .role = line_number_role,
+            .max_cols = field_cols,
+            .font_px = props.font_px,
+            .line_height_px = props.cell_h_px,
+            .cell_w_px = props.cell_w_px,
+        } };
+        op_count += 1;
     }
 
     return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used };

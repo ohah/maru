@@ -17,6 +17,7 @@ const renderer = maru.renderer;
 const bridge = @import("../coretext_smoke_bridge.zig");
 const probe = @import("../coretext_probe.zig");
 const metal_frame = renderer.metal_frame;
+const width = maru.width; // Unicode 셀 폭(EAW) — 한글/CJK/이모지=2칸
 
 /// **x 스냅은 두지 않는다**(2026-08-09 실측으로 기각). `x_px`를 셀 배수로 반올림하는 방식은
 /// 글자마다 advance가 다를 때(한글 2칸, fallback 폰트) 여러 글자가 같은 칸으로 몰려 문자열이
@@ -71,6 +72,8 @@ pub const Request = struct {
         font_px: ?u16 = null,
         /// 편집기 줄 높이(device px, §2.0). `font_px`와 짝이다.
         line_height_px: ?u16 = null,
+        /// 편집기 셀 폭(device px, §2.0). 글자 x를 **셀 인덱스**로 놓을 때 쓴다.
+        cell_w_px: ?u16 = null,
     };
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -110,6 +113,8 @@ pub const UnresolvedArtifact = struct {
     font_pxs: []?u16,
     /// run별 줄 높이(device px, §2.0).
     line_heights: []?u16,
+    /// run별 셀 폭(device px, §2.0).
+    cell_widths: []?u16,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
@@ -119,6 +124,7 @@ pub const UnresolvedArtifact = struct {
         allocator.free(self.above_clips);
         allocator.free(self.font_pxs);
         allocator.free(self.line_heights);
+        allocator.free(self.cell_widths);
         self.* = undefined;
     }
 };
@@ -445,6 +451,7 @@ pub fn prepareRequest(
                     .placement = text.placement,
                     .font_px = text.font_px,
                     .line_height_px = text.line_height_px,
+                    .cell_w_px = text.cell_w_px,
                     .scroll_clipped = text.scroll_clipped,
                     .above_clip = if (text.above_scroll) text.clip else null,
                 });
@@ -735,6 +742,8 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(font_pxs);
     const line_heights = try allocator.alloc(?u16, request.runs.len);
     errdefer allocator.free(line_heights);
+    const cell_widths = try allocator.alloc(?u16, request.runs.len);
+    errdefer allocator.free(cell_widths);
     for (request.runs, 0..) |run, index| {
         if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
         placements[index] = run.placement;
@@ -743,6 +752,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
         above_clips[index] = run.above_clip;
         font_pxs[index] = run.font_px;
         line_heights[index] = run.line_height_px;
+        cell_widths[index] = run.cell_w_px;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, .{ .family = request.font_family, .fallback = request.font_fallback }, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
@@ -761,7 +771,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .font_pxs = font_pxs, .line_heights = line_heights };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips, .font_pxs = font_pxs, .line_heights = line_heights, .cell_widths = cell_widths };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -803,10 +813,35 @@ pub fn resolveArtifact(
     // records만 errdefer로 회수하면 그 경로마다 placement 배열이 프레임 단위로 샌다.
     errdefer allocator.free(placements);
     var record_index: usize = 0;
+    // **셀 격자 run은 x를 advance가 아니라 셀 인덱스로 놓는다**(§2.0).
+    //
+    // CoreText가 준 `x_px`는 폰트 advance를 누적한 값이라, advance가 셀 폭과 미세하게만 달라도
+    // (등폭 폰트도 7.8px vs 셀 8px 같은 차이가 난다) 두 번째 글자부터 격자를 벗어난다. 그래서
+    // 글자마다 **셀 폭(EAW)을 누적해** 몇 번째 칸인지 직접 센다 — 한글·CJK·이모지는 두 칸,
+    // 결합 문자는 0칸이라 앞 글자와 같은 칸에 놓인다.
+    //
+    // x를 셀 배수로 **반올림**하는 방식은 기각했다. 글자마다 advance가 다르면 여러 글자가 같은
+    // 칸으로 몰려 문자열이 겹쳐 그려진다(실제로 그렇게 깨진 캡처를 봤다). 인덱스를 세는 것과
+    // 좌표를 반올림하는 것은 다르다.
+    //
+    // glyph는 run 안에서 논리 순서로 오므로 run이 바뀔 때만 카운터를 리셋한다. 리거처로 codepoint와
+    // glyph가 1:1이 아니면 근사가 되지만, 코드 편집기 폰트에서 리거처는 통상 꺼 둔다.
+    var grid_run: ?u16 = null;
+    var grid_cell: u32 = 0;
     for (unresolved.glyphs) |glyph| {
         const run_index: usize = glyph.run_index;
         const layout = unresolved.placements[run_index];
         const label_origin = labelOrigin(layout, glyph.origin, advances[run_index], glyph.line_height_px);
+        const grid_x: ?f32 = if (unresolved.cell_widths[run_index]) |cw| blk: {
+            if (grid_run == null or grid_run.? != glyph.run_index) {
+                grid_run = glyph.run_index;
+                grid_cell = 0;
+            }
+            const x = @as(f32, @floatFromInt(grid_cell)) * @as(f32, @floatFromInt(cw));
+            const cp: u21 = @intCast(@min(glyph.codepoint, std.math.maxInt(u21)));
+            grid_cell += width.cellWidth(cp);
+            break :blk x;
+        } else null;
         const record = &records[record_index];
         const placement = &placements[record_index];
         const name = probe.cStringField(&glyph.font_name);
@@ -825,10 +860,8 @@ pub fn resolveArtifact(
             .raster_width_px = @intFromFloat(@ceil(advance)),
             .raster_height_px = @intFromFloat(@ceil(glyph.line_height_px)),
         };
-        // **셀 격자면 x를 칸 배수로 스냅한다**(§2.0). 폰트 advance가 셀 폭과 미세하게 달라도
-        // 두 번째 글자부터 격자를 벗어나지 않는다 — 그것이 `10`의 `0`이 밀리던 원인이었다.
         placement.* = .{
-            .x_px = label_origin.x_px + glyph.x_px,
+            .x_px = label_origin.x_px + (grid_x orelse glyph.x_px),
             .y_px = label_origin.y_px,
             .advance_px = advance,
             .line_height_px = glyph.line_height_px,

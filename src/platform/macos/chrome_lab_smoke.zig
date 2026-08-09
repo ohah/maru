@@ -32,6 +32,21 @@ const cell_height_px: u32 = 16;
 /// 래스터한다. 그래서 시나리오마다 다르게 주면 **실제로 폰트를 키운 화면**이 나오고, "편집기 폰트를
 /// 키우면 gutter가 함께 커진다"([native-editor.md](../../../docs/native-editor.md) §4.1의 셀 경로 근거)를
 /// 캡처로 확인할 수 있다. 셀 크기만 바꾸고 폰트는 그대로인 반쪽 검증이 아니다.
+/// 이 시나리오의 폰트 크기(device px).
+///
+/// 제품에서는 사용자 `font.size`가 원인이고 셀이 그 폰트 메트릭에서 나온다(`refreshCellMetrics`).
+/// Lab은 폰트를 재지 않고 셀을 직접 정하므로 **역산**한다 — 등폭 코드 폰트의 줄 높이가 관례적으로
+/// em의 1.2~1.35배라 1.25로 나눈다. 기본 셀 16px에서 13px이 나와 typography `.body` 토큰과 같으므로
+/// 기존 캡처가 바뀌지 않고, 셀을 키운 시나리오에서만 폰트가 따라 커진다.
+///
+/// **이 근사가 픽스처에 있는 것이 요점이다.** 백엔드는 폰트 크기를 그대로 받고, 제품은 아는 값을
+/// 그대로 넘기므로 어디에도 역산이 남지 않는다.
+fn fontPxFor(id: lab.ScenarioId) u16 {
+    const cell = cellSizeFor(id);
+    const px = @as(f32, @floatFromInt(cell.h)) / 1.25;
+    return @max(1, @as(u16, @intFromFloat(@round(px))));
+}
+
 fn cellSizeFor(id: lab.ScenarioId) struct { w: u32, h: u32 } {
     return switch (id) {
         // 1.5배. 기존 시나리오는 기본값을 유지해야 커밋된 골든이 그대로 통한다.
@@ -158,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
         .now_ns = 0,
         .cell_w_px = @intCast(cellSizeFor(scenario_id).w),
         .cell_h_px = @intCast(cellSizeFor(scenario_id).h),
+        .font_px = fontPxFor(scenario_id),
     }, &tokens, .{
         .entries = &entries,
         .items = &items,

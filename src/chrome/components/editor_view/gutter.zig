@@ -33,6 +33,8 @@ pub const Props = struct {
     /// 셀 하나의 픽셀 크기. 셀 좌표를 draw op의 픽셀 좌표로 바꾸는 데만 쓴다.
     cell_w_px: u16,
     cell_h_px: u16,
+    /// 이 뷰의 폰트 크기(device px). 셀 크기와 **같은 폰트에서** 나와야 배치와 글자가 어긋나지 않는다.
+    font_px: u16,
     /// 편집기 뷰의 좌상단 픽셀 원점. 뷰가 창 안 어디에 있든 gutter는 그 기준으로 그려진다.
     origin_px: draw.Px,
 };
@@ -101,7 +103,8 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
             .runs = run_slice,
             .role = line_number_role,
             .max_cols = field_cols,
-            .cell_grid = .{ .cell_w_px = props.cell_w_px, .cell_h_px = props.cell_h_px },
+            .font_px = props.font_px,
+            .line_height_px = props.cell_h_px,
         } };
         op_count += 1;
     }
@@ -148,6 +151,7 @@ fn testProps(layout: geometry.Layout, rows: []const Row) Props {
         .rows = rows,
         .cell_w_px = 8,
         .cell_h_px = 16,
+        .font_px = 13,
         .origin_px = .{ .x = 0, .y = 0 },
     };
 }

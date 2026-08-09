@@ -65,10 +65,15 @@ pub const Scenario = struct {
     id: ScenarioId,
     viewport_px: chrome.ui.layout.UiSize,
     now_ns: u64,
-    /// 이 캡처의 셀 크기(= 폰트 크기). 호출자가 `cellSizeFor`로 정해 넘긴다 — Lab이 자체 상수를 들면
-    /// 렌더러가 쓰는 값과 갈려서, 글자는 커졌는데 배치는 안 커지는 캡처가 나온다.
+    /// 이 캡처의 셀 크기. 호출자가 `cellSizeFor`로 정해 넘긴다 — Lab이 자체 상수를 들면 렌더러가
+    /// 쓰는 값과 갈려서, 글자는 커졌는데 배치는 안 커지는 캡처가 나온다.
     cell_w_px: u16 = 8,
     cell_h_px: u16 = 16,
+    /// 이 캡처의 폰트 크기(device px). **제품은 사용자 `font.size`에서 오고 셀이 그 폰트에서
+    /// 파생되지만**, Lab은 실제 폰트 메트릭을 재지 않으므로 셀에서 근사 역산해 넘긴다
+    /// (`chrome_lab_smoke.fontPxFor`). 그 근사가 픽스처 쪽에 있는 것이 요점이다 — 백엔드는
+    /// 폰트 크기를 그대로 받고 역산을 모른다.
+    font_px: u16 = 13,
 };
 
 pub const Result = struct {
@@ -209,6 +214,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
+        .font_px = scenario.font_px,
     }, buffers.ops, buffers.text_bytes, buffers.text_runs);
 
     var content_rows: [row_capacity]editor_view.content.Row = undefined;
@@ -223,6 +229,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
+        .font_px = scenario.font_px,
     }, buffers.ops[gw.ops..], buffers.text_bytes[gw.bytes..], buffers.text_runs[gw.runs..]);
 
     return .{

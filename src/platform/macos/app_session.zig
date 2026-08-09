@@ -792,7 +792,7 @@ const status_bar_v_pad_pt: u32 = 4;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
-const max_status_bar_right_items: usize = 3;
+const max_status_bar_right_items: usize = 4; // blocked·running·알림·리소스
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -827,6 +827,20 @@ const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
 // (wall-clock)으로 재 tick rate와 무관하게 그 속도를 지킨다(§10.5). 기본값은 macOS 캐럿 관례(on 500ms / off 500ms).
 const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
+/// 상태바 리소스 표본 주기. 에이전트 폴링(0.5s)보다 **느리게** 둔다 — 메모리·CPU는 초 단위로 움직이고,
+/// 더 자주 재도 사람이 못 읽는다(docs/status-bar.md §6 "비용과 게이트").
+const resource_poll_interval_ms: u32 = 1000;
+/// 한 Term 트리에서 가져올 표본 상한. 폭주 방어 — fork 폭탄이나 깊은 트리가 tick을 붙잡지 않게 한다.
+const max_resource_samples_per_term: usize = 48;
+
+/// 단조 시계(ms). CPU%는 차분이라 **tick 개수가 아니라 벽시계**로 재야 한다 — 프레임 루프가 흔들리면
+/// `ticks/hz`가 실제 경과와 어긋나고, 하필 머신이 바쁠 때(= 사용자가 CPU%를 보는 때) 틀린다.
+/// Zig 0.16은 `std.time.Timer`·`nanoTimestamp`가 없다(src/session/control_bridge.zig `monotonicMs`와 같은 관례).
+fn monotonicMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
 /// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
 /// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
 const transcript_poll_interval_ms: u64 = 1000;
@@ -3735,6 +3749,15 @@ pub const AppSession = struct {
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
     // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
     agent_poll_ticks: u32 = 0,
+    /// 상태바 리소스 항목(docs/status-bar.md §6). 샘플링은 에이전트 폴링보다 느린 자체 주기로 돈다 —
+    /// 초 단위로 변하는 값이라 자주 재도 사람이 못 읽는다.
+    resource_poll_ticks: u32 = 0,
+    resource_meter: maru.session.resource_usage.Meter = .{},
+    /// 마지막으로 **표시할 수 있는** 값. null이면 항목을 내지 않는다(첫 표본·긴 공백·터미널 없음).
+    resource_reading: ?maru.session.resource_usage.Reading = null,
+    /// 표시 문자열 캐시. **이게 바뀔 때만** 재렌더한다 — 원값이 흔들려도 글자가 같으면 매초 다시 그리지 않는다.
+    resource_text_buf: [maru.session.resource_usage.text_max_bytes]u8 = undefined,
+    resource_text_len: usize = 0,
     /// 활동 시각 재렌더 tick 카운터(agent_age_repaint_interval_ms).
     agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
@@ -21320,6 +21343,72 @@ pub const AppSession = struct {
 
     /// 각 Term의 포그라운드 프로세스(claude/codex)를 throttled로 polling해 agent_kind를 갱신한다. 매 tick
     /// syscall은 비싸므로 agent_poll_interval_ms(≈0.5s)마다. 변화가 있으면 metal_dirty로 재렌더(심볼 표시 갱신).
+    /// 이 창의 터미널 프로세스 표본을 모아 리소스 표시를 갱신한다(docs/status-bar.md §6).
+    ///
+    /// **창 단위로 귀속되는 것만 센다** — 앱 자신·웹 콘텐츠는 앱 전역이라 창 상태바에 넣으면 창이 둘일 때
+    /// 같은 값이 두 번 표시된다. host-backed 터미널은 backend가 0을 돌려줘 자연히 빠진다(v1 범위 밖).
+    ///
+    /// 상태바가 안 보이면(설정 off·quick terminal) **아예 재지 않는다** — 안 보이는 UI에 syscall을 쓰지 않는다.
+    fn pollResourceUsage(self: *AppSession) void {
+        self.resource_poll_ticks += 1;
+        if (self.resource_poll_ticks < self.ticksForMs(resource_poll_interval_ms)) return;
+        self.resource_poll_ticks = 0;
+        if (!self.surface_initialized) return;
+        if (self.statusBarHeightPx() == 0) { // 단일 게이트: chrome_minimal + status-bar.show
+            self.clearResourceReading();
+            return;
+        }
+
+        var samples: [max_resource_samples_per_term * 4]maru.session.resource_usage.Sample = undefined;
+        var n: usize = 0;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.kind != .terminal) continue;
+                    if (!term.rt.live_initialized or term.rt.terminated) continue;
+                    if (n >= samples.len) break;
+                    const room = @min(max_resource_samples_per_term, samples.len - n);
+                    n += self.backendFor(term).resourceSamples(term.rt.handle, samples[n..][0..room]);
+                }
+            }
+        }
+
+        if (n == 0) { // 터미널이 없거나(웹 탭만) 표본을 하나도 못 얻었다 — 0을 그리지 않고 항목을 내린다
+            self.clearResourceReading();
+            return;
+        }
+
+        const reading = self.resource_meter.update(self.allocator, samples[0..n], monotonicMs()) orelse {
+            // 첫 표본·긴 공백 — CPU%를 낼 수 없으면 **항목 자체를 내지 않는다**(메모리만 먼저 그리면 폭이
+            // 변해 좌측 경로가 흔들린다).
+            self.clearResourceReading();
+            return;
+        };
+
+        var buf: [maru.session.resource_usage.text_max_bytes]u8 = undefined;
+        const text = maru.session.resource_usage.format(&buf, reading);
+        // **글자가 바뀔 때만** 재렌더한다. 원값은 매초 흔들려도 표시가 같으면 다시 그릴 이유가 없다.
+        if (text.len == self.resource_text_len and
+            std.mem.eql(u8, text, self.resource_text_buf[0..self.resource_text_len])) return;
+        @memcpy(self.resource_text_buf[0..text.len], text);
+        self.resource_text_len = text.len;
+        self.resource_reading = reading;
+        self.metal_dirty = true;
+    }
+
+    fn clearResourceReading(self: *AppSession) void {
+        if (self.resource_reading == null and self.resource_text_len == 0) return;
+        self.resource_reading = null;
+        self.resource_text_len = 0;
+        self.metal_dirty = true;
+    }
+
+    /// 상태바가 그릴 리소스 문자열. 없으면 null(항목 없음).
+    fn resourceText(self: *const AppSession) ?[]const u8 {
+        if (self.resource_text_len == 0) return null;
+        return self.resource_text_buf[0..self.resource_text_len];
+    }
+
     fn pollAgentKinds(self: *AppSession) void {
         self.agent_poll_ticks += 1;
         self.agent_observer_poll_ticks += 1;
@@ -22345,6 +22434,7 @@ pub const AppSession = struct {
             }
         }
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
+        self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
     }
 
@@ -26701,6 +26791,29 @@ pub const AppSession = struct {
             }
         }
 
+        // 리소스는 **배열 마지막**(= 가장 왼쪽)이다. 폭이 모자라면 뒤부터 버려지므로 가장 먼저 사라져야 한다 —
+        // 막힌 에이전트가 리소스 숫자에 밀려 없어지면 안 된다(docs/status-bar.md §6 "자리").
+        // 아이콘이 없다(등록부가 닫혀 있어 SVG 추가가 필요하다 — 숫자가 쓸모 있다고 확인된 뒤로 미룬다).
+        if (self.resourceText()) |res_text| {
+            if (rn < max_status_bar_right_items) {
+                if (self.buildStatusBarItem(null, res_text, bar_cols, fg, icon_fg, .plain)) |dl| {
+                    // **숫자는 잘리면 안 된다.** 좁은 창에서 텍스트 예산(바 폭의 1/3)이 모자라면 빌더가
+                    // 말줄임하는데(`appendEllipsizedTitle`), 이름과 달리 잘린 숫자는 **다른 값으로 읽힌다**
+                    // ("512 MB ·…"). 온전히 못 담으면 항목을 통째로 내린다 — 부재가 오독보다 낫다.
+                    // 판정은 빌더가 되돌려준 실제 폭으로 한다(예산 산술을 여기서 다시 구현하지 않는다).
+                    if (dl.size.cols >= maru.session.resource_usage.text_cols) {
+                        right_frames[rn] = dl;
+                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                        right_ids[rn] = .resource;
+                        rn += 1;
+                    } else {
+                        var truncated = dl;
+                        truncated.deinit(self.allocator);
+                    }
+                }
+            }
+        }
+
         if (n == 0 and rn == 0) {
             self.clearStatusBarTree();
             return;
@@ -26753,7 +26866,7 @@ pub const AppSession = struct {
         path,
     };
 
-    fn buildStatusBarItem(self: *AppSession, icon: u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color, kind: StatusBarItemKind) ?renderer.DrawList {
+    fn buildStatusBarItem(self: *AppSession, icon: ?u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color, kind: StatusBarItemKind) ?renderer.DrawList {
         const max_text_cols: u16 = @max(1, bar_cols / 3);
         // 경로는 컴포넌트 단위로 먼저 줄인다. 예산을 아는 곳이 여기뿐이라 여기서 한다 — 호출부가 따로
         // 계산하면 줄인 폭과 그리는 폭이 갈린다. wide_icon predicate는 null이다(경로에 등록 아이콘이 올 수
@@ -26859,6 +26972,9 @@ pub const AppSession = struct {
             .running_agents, .blocked_agents => dock_ops.openDockTo(self, .agent_sessions),
             .cwd => dock_ops.openDockTo(self, .explorer),
             .git_branch => self.requestBranchMenu(), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
+            // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
+            // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
+            .resource => {},
         }
         self.metal_dirty = true;
     }
@@ -26869,6 +26985,7 @@ pub const AppSession = struct {
         return switch (id) {
             // 브랜치도 이제 누를 수 있다 — 목록이 생겼다(§6에서 내려온 항목).
             .notifications, .running_agents, .blocked_agents, .cwd, .git_branch => true,
+            .resource => false, // 표시 전용 — 열 대상이 없다
         };
     }
 
@@ -27761,6 +27878,7 @@ pub const AppSession = struct {
 
     pub fn deinit(self: *AppSession) void {
         self.clearBranchMenuText(); // 브랜치 목록 버퍼(owned) 해제 — 메뉴가 열린 채 종료돼도 남지 않게
+        self.resource_meter.deinit(self.allocator); // pid별 이전 CPU 맵 — 창마다 있으니 닫을 때 반드시 푼다
         // 소스 컨트롤(E1) 자원: backend는 detached worker를 refcount로 붙들고 있으므로 여기서 놓아야 스레드가
         // 끝난 뒤 정리된다. 결과·감시 경로도 세션 소유라 함께 푼다(이 셋은 세션 수명과 정확히 같다).
         if (self.git_backend) |*backend| backend.deinit();
@@ -56761,6 +56879,231 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지�
 // SB1: **요청 중에 상태바가 사라지면 메뉴를 띄우면 안 된다.** 목록 읽기는 비동기라, 그 사이 사용자가
 // `status-bar.show`를 끄거나 quick terminal로 바뀌면 **클릭한 대상이 화면에서 없어진다.** 그때 결과가
 // 도착해 메뉴를 열면 앵커가 없어 창 바닥에 붙고, 사용자는 누른 적 없는 메뉴를 보게 된다.
+// SB-R: 리소스 항목은 **두 번째 표본부터** 뜬다. 첫 표본엔 CPU%를 낼 수 없고(차분이라 기준선이 없다),
+// 메모리만 먼저 그리면 폭이 변해 좌측 경로가 매초 흔들린다(docs/status-bar.md §6 "표시 폭은 고정한다").
+test "SB-R: 리소스 항목은 첫 표본에 안 뜨고 두 번째 표본부터 뜬다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try std.testing.expect(session.resourceText() == null); // 아직 아무 표본도 없다
+
+    // 실 프로세스 표본은 시각마다 다르므로 **Meter를 직접** 태운다(순수 계약을 여기서 다시 검증하지 않고,
+    // 세션이 그 결과를 문자열·재렌더로 이어 붙이는지만 본다).
+    const ru = maru.session.resource_usage;
+    try std.testing.expect(session.resource_meter.update(allocator, &.{
+        .{ .pid = 1, .footprint_bytes = 512 * 1024 * 1024, .cpu_ns = 0 },
+    }, 1_000) == null); // 첫 표본 — 값 없음
+
+    const reading = session.resource_meter.update(allocator, &.{
+        .{ .pid = 1, .footprint_bytes = 512 * 1024 * 1024, .cpu_ns = 100_000_000 },
+    }, 2_000) orelse return error.TestExpectedReading;
+    try std.testing.expectEqual(@as(u64, 100), reading.cpu_permille);
+
+    // 세션이 그 값을 표시 문자열로 들고 있게 한다(pollResourceUsage의 뒷부분과 같은 계약).
+    var buf: [ru.text_max_bytes]u8 = undefined;
+    const text = ru.format(&buf, reading);
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    const shown = session.resourceText() orelse return error.TestExpectedText;
+    try std.testing.expectEqualStrings("  512 MB ·   10%", shown);
+
+    // 상태바가 실제로 그 항목을 **그린다**(상태만 보면 렌더가 무시해도 통과한다).
+    try std.testing.expect(try statusBarHasText(allocator, session, "512 MB"));
+}
+
+// SB-R 적대적: **표시가 그대로면 다시 그리지 않는다.** 원값은 매초 흔들리지만 표시 문자열이 같으면
+// 재렌더할 이유가 없다 — 초당 전체 프레임을 다시 그리는 비용은 배터리에 그대로 실린다.
+test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 기준선 + 값 하나를 만든다.
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+    var spin: u64 = monotonicMs();
+    while (monotonicMs() == spin) spin = monotonicMs();
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+    const first = session.resourceText() orelse return error.TestExpectedResourceText;
+
+    // 같은 표시가 다시 나오는 상황을 만든다 — 표시 문자열을 그대로 두고 폴링을 한 번 더 돌린다.
+    // (실 표본이 조금 달라도 반올림 뒤 같은 글자면 재렌더가 없어야 한다.)
+    var kept: [maru.session.resource_usage.text_max_bytes]u8 = undefined;
+    @memcpy(kept[0..first.len], first);
+    const kept_len = first.len;
+
+    session.metal_dirty = false;
+    spin = monotonicMs();
+    while (monotonicMs() == spin) spin = monotonicMs();
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+
+    const now = session.resourceText() orelse return error.TestExpectedResourceText;
+    if (now.len == kept_len and std.mem.eql(u8, now, kept[0..kept_len])) {
+        // 글자가 같다 → 재렌더 없음이 계약이다.
+        try std.testing.expect(!session.metal_dirty);
+    } else {
+        // 글자가 바뀌었다면 재렌더가 **있어야** 한다(반대 방향도 계약이다).
+        try std.testing.expect(session.metal_dirty);
+    }
+}
+
+// SB-R 적대적: **조각이 아니라 이어 붙인 경로를 본다.** 위 테스트들은 Meter를 직접 태워 계약을 검증하지만,
+// backend → 표본 → Meter → 문자열이 실제로 이어졌는지는 증명하지 않는다. 여기서 `pollResourceUsage`를
+// 두 번 돌려(첫 표본은 기준선) 표시가 생기는지 본다 — 배선이 끊겨 있으면 영영 null이다.
+test "SB-R: 폴링 두 번이면 실제 backend 표본으로 표시가 생긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // **tick이 실제로 폴링을 부르는지** 여기서 고정한다 — 아래 직접 호출만 있으면 배선이 끊겨도 통과한다.
+    // 이 tick이 곧 **첫 표본(기준선)**이다.
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(u32, 0), session.resource_poll_ticks); // 주기 도달 → 폴링이 카운터를 리셋했다
+    try std.testing.expect(session.resourceText() == null); // 첫 표본은 기준선이라 표시가 없다
+
+    // 두 번째 표본은 벽시계가 흘러야 값이 된다 — Meter가 gap>0을 요구하므로 1ms라도 지나게 한다.
+    var spin: u64 = monotonicMs();
+    while (monotonicMs() == spin) spin = monotonicMs();
+
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+
+    // **표시가 반드시 생겨야 한다.** 처음엔 "못 잡으면 null도 정상"이라는 예외를 뒀는데, 그러면 seam을
+    // 끊어 표본을 0으로 만들어도 테스트가 통과한다(뮤테이션으로 확인했다) — 배선을 못 지키는 테스트다.
+    // 스모크 세션은 실제로 PTY 자식을 띄우므로 표본이 잡힌다. 언젠가 그 전제가 깨지면 여기서 시끄럽게
+    // 실패하는 편이 조용히 눈감는 것보다 낫다.
+    const text = session.resourceText() orelse return error.TestExpectedResourceText;
+    try std.testing.expectEqual(maru.session.resource_usage.text_cols, try std.unicode.utf8CountCodepoints(text));
+    try std.testing.expect(session.resource_reading != null);
+}
+
+// SB-R 적대적: **좁은 창에서 숫자가 잘리면 안 된다.** 텍스트 예산은 바 폭의 1/3이라 창이 좁으면 리소스
+// 문자열(16칸)이 안 들어간다. 이름이라면 앞부분만 보여도 식별되지만 **숫자는 잘리면 다른 값으로 읽힌다**
+// ("512 MB ·…"). 그때는 항목을 통째로 내려야 한다.
+test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const ru = maru.session.resource_usage;
+    const text = "  512 MB ·   10%";
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    try std.testing.expectEqual(ru.text_cols, text.len - 1); // `·`가 2바이트라 칸 수는 하나 적다(전제)
+
+    // 넓은 창: 예산이 넉넉해 온전히 뜬다.
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+
+    // 좁은 창: 예산(바 폭/3)이 16칸에 못 미쳐 말줄임될 상황 — 숫자가 보이면 안 된다.
+    _ = try session.resize(260, 600, session.scale_milli);
+    const bar_cols = session.backing_width_px / session.cell_width_px;
+    try std.testing.expect(bar_cols / 3 < ru.text_cols); // 전제: 예산이 실제로 모자란다
+    try std.testing.expect(!(try statusBarHasText(allocator, session, "512")));
+}
+
+// SB-R: **상태바가 안 보이면 재지 않는다.** 안 보이는 UI에 syscall을 쓰지 않는다 —
+// 설정 off와 quick terminal 둘 다 `statusBarHeightPx() == 0`이라 게이트가 그 단일 판정에 걸려야 한다.
+test "SB-R: 상태바가 숨겨져 있으면 표본을 재지 않고 표시도 지운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 표시가 있는 상태를 만든다.
+    session.resource_text_len = 3;
+    @memcpy(session.resource_text_buf[0..3], "abc");
+    session.resource_reading = .{ .footprint_bytes = 1, .cpu_permille = 1 };
+    try std.testing.expect(session.resourceText() != null);
+
+    // 상태바를 끈다 → 다음 폴링이 표시를 지운다(0을 그리지 않고 항목을 내린다).
+    session.chrome_minimal = true;
+    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 전제
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2; // 주기 도달을 강제
+    session.pollResourceUsage();
+    try std.testing.expect(session.resourceText() == null);
+}
+
+/// 상태바를 **실제 렌더 경로**(`collectStatusBarItems`)로 그려 `needle`의 코드포인트가 모두 셀에 있는지 본다.
+/// 상태만 단언하면 렌더가 그 상태를 무시해도 통과하므로(그리는 것이 계약이다) 그림을 본다.
+fn statusBarHasText(allocator: std.mem.Allocator, session: *AppSession, needle: []const u8) !bool {
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+
+    var it = (std.unicode.Utf8View.init(needle) catch return false).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp == ' ') continue; // 공백은 셀에 안 실릴 수 있다(패딩)
+        var found = false;
+        outer: for (collected.items) |c| {
+            for (c.pane.owned_list.cells) |cell| {
+                if (cell.codepoint == cp) {
+                    found = true;
+                    break :outer;
+                }
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
 test "SB1: 브랜치 목록 요청 중 상태바가 사라지면 메뉴를 열지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

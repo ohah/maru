@@ -23,6 +23,7 @@
 const std = @import("std");
 const terminal = @import("../terminal.zig");
 const pty = @import("../pty.zig");
+const resource_usage = @import("../session/resource_usage.zig"); // 상태바 리소스 표본의 **순수** 타입(플랫폼 타입을 seam 위로 올리지 않는다)
 const surface_mod = @import("../session/surface.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
@@ -258,6 +259,15 @@ pub const VTable = struct {
     /// 포그라운드 process group id(agent observer용). runtime이 없거나 PTY가 없으면 null. 관통 관측이지 제어가 아니다.
     foreground_process_group: *const fn (ctx: *anyopaque, handle: RuntimeHandle) ?i32,
 
+    /// 이 runtime의 프로세스 트리(셸 + 자손)의 자원 표본을 `out`에 채우고 개수를 돌려준다.
+    /// 상태바 리소스 항목이 쓴다(docs/status-bar.md §6). 고정 버퍼라 alloc 없음.
+    ///
+    /// **이 seam으로 넘기는 이유**: pid·libproc을 `app_session`이 직접 만지지 않게 한다. 그리고 host-backed
+    /// 터미널은 PTY가 host 프로세스 안에 있어 앱에서 트리를 훑을 수 없는데, 그 구현이 나중에 같은 함수를
+    /// 채우면 끝난다 — 지금 app_session에서 훑어 두면 그때 다시 뜯어야 한다.
+    /// 표본을 못 얻으면 0(항목이 안 뜬다 — 0을 그리면 "0 바이트를 쓰는 중"으로 읽힌다).
+    resource_samples: *const fn (ctx: *anyopaque, handle: RuntimeHandle, out: []resource_usage.Sample) usize,
+
     /// 포그라운드 프로세스 이름들을 `out`에 채우고 채운 개수를 돌려준다(agent kind 분류용). 고정 버퍼라 alloc 없음.
     foreground_process_names: *const fn (ctx: *anyopaque, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize,
 
@@ -330,6 +340,10 @@ pub const TermRuntimeBackend = struct {
 
     pub fn foregroundProcessNames(self: TermRuntimeBackend, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize {
         return self.vtable.foreground_process_names(self.ctx, handle, out);
+    }
+
+    pub fn resourceSamples(self: TermRuntimeBackend, handle: RuntimeHandle, out: []resource_usage.Sample) usize {
+        return self.vtable.resource_samples(self.ctx, handle, out);
     }
 
     pub fn readObservation(self: TermRuntimeBackend, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void {
@@ -405,6 +419,7 @@ const FakeTermBackend = struct {
         .finish_after_termination = finishAfterTermination,
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
+        .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
         .read_observation = readObservation,
         .refresh_observation = readObservation,
@@ -528,6 +543,14 @@ const FakeTermBackend = struct {
         const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
         if (self.find(handle) == null or out.len == 0) return 0;
         out[0] = .{ .pid = 1, .len = 0 };
+        return 1;
+    }
+
+    /// 테스트용 고정 표본 — 실 프로세스가 없으므로 "표본 하나가 온다"는 배관만 증명한다.
+    fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []resource_usage.Sample) usize {
+        const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
+        if (self.find(handle) == null or out.len == 0) return 0;
+        out[0] = .{ .pid = 1, .footprint_bytes = 1024 * 1024, .cpu_ns = 1_000_000 };
         return 1;
     }
 

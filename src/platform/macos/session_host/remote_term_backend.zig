@@ -82,6 +82,7 @@ pub const RemoteTermBackend = struct {
         .finish_after_termination = finishAfterTermination,
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
+        .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
         .read_observation = readObservation,
         .refresh_observation = refreshObservation,
@@ -488,6 +489,17 @@ pub const RemoteTermBackend = struct {
         const rr = (self.runtimes.get(handle) orelse return null).runtime;
         if (rr.observation.availability != .current or !rr.observation.foreground_available) return null;
         return rr.observation.foreground_pgid;
+    }
+
+    /// host-backed 터미널의 자원 표본은 **아직 없다**(docs/status-bar.md §6 "keep-alive를 켜면 터미널이 0이 된다").
+    /// PTY가 host 프로세스 안에 있어 앱에서 트리를 훑을 수 없고, host가 `live_child_pid`를 들고 있으므로
+    /// 나중에 이 함수를 RPC로 채우면 된다 — 그때 재설계가 아니라 구멍 메우기다. 지금은 0이라 항목이 안 뜬다
+    /// (0을 그리면 "터미널이 메모리를 안 쓴다"는 거짓말이 된다).
+    fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []maru.session.resource_usage.Sample) usize {
+        _ = ctx;
+        _ = handle;
+        _ = out;
+        return 0;
     }
 
     fn foregroundProcessNames(ctx: *anyopaque, handle: RuntimeHandle, out: []ForegroundProcessName) usize {

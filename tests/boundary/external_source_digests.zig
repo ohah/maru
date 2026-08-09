@@ -17,7 +17,9 @@ pub const Proof = struct {
     digest_hex: []const u8,
 };
 pub const inventory = [_]Proof{
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "da55524e0da397637fae2ce52c0030719551a1ae2a931ae9cbd7bf9c8814a335" },
+    // 상태바 리소스 표본 seam(resource_samples)이 붙어 바뀐다. count는 3 그대로다 — vtable 항목과 래퍼를
+    // 더했을 뿐이고 Client 구성이나 receiver 집합과는 무관하다.
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "7f03ec659e9de7e3273268859aad04a2c08821ffed058093ded92bbfdd705a02" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "6a7538dfdc98ece9f85c70584a2500e505f7d278d84716190780585fa198a7d6" },
@@ -168,7 +170,8 @@ pub const inventory = [_]Proof{
     // 탭(생성·전환·이동·고정·그룹·제목)을 `app_session/tab.zig`로 떼어내며 또 바뀐다(F6). count는 4
     // 그대로다 — 옮긴 블록에 `@field` 접근이 없고, 공용 accessor를 열고(41) 옮겨간 탭 함수 pub을 닫은
     // 것뿐이다. 그룹 파일끼리 `app_session.zig` 재수출을 거치던 참조도 직접 `@import`으로 바꿨다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "8085ae7de1391118cfa2dac8f1a9fe07a85e147f290242744488dd930789382a" },
+    // 상태바 리소스 항목(표본 폴링·표시 캐시·항목 추가)이 붙어 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "1ce71acb837d18b3b00752afeeac68295caaaf71fa5072e43b39c9d6047adcee" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

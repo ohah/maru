@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const pane_ops = @import("pane.zig");
 const renameatx_np = AppSession.renameatx_np;
 const file_tree_icon = app_session_mod.file_tree_icon;
 const EntryLookupCounters = app_session_mod.EntryLookupCounters;
@@ -98,8 +99,8 @@ pub fn toggleFilePanelDockSide(self: *AppSession) void {
         .bottom => .right,
     };
     self.dock.size = 0;
-    for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-    self.recomputeActivePaneRect();
+    for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+    pane_ops.recomputeActivePaneRect(self);
     self.last_resize_size = null;
     self.file_tree_rows_dirty = true;
     self.metal_dirty = true;
@@ -327,7 +328,7 @@ pub fn applyFileTreeRename(self: *AppSession, id: u64, new_path: []const u8) boo
     if (retired_focus) {
         // FP16: "focused group의 active entry" 자리를 활성 pane의 활성 Term이 대신한다.
         const restore_surface = blk: {
-            const active_term = self.activePane().activeTerm();
+            const active_term = pane_ops.activePane(self).activeTerm();
             const active_entry = active_term.file_entry orelse break :blk null;
             break :blk if (active_entry.surface_id != 0) active_entry.surface_id else null;
         };
@@ -379,8 +380,8 @@ pub fn hasProtectedFilePanelsForExitExcluding(self: *const AppSession, exclude: 
 pub fn scopeHasProtectedFilePanel(self: *AppSession, scope: CloseScope) bool {
     return switch (scope) {
         .none => false,
-        .term => termHasProtectedFilePanel(self.activePane().activeTerm()),
-        .pane => paneHasProtectedFilePanel(self.activePane()),
+        .term => termHasProtectedFilePanel(pane_ops.activePane(self).activeTerm()),
+        .pane => paneHasProtectedFilePanel(pane_ops.activePane(self)),
         .tab => |idx| tabHasProtectedFilePanel(self.tabs.items[idx]),
         // ⌘Q는 복구 기회가 없어 보수적으로 — 편집 가능 mode만으로도 막는다(hasProtectedFilePanelsForExit).
         .session => hasProtectedFilePanelsForExit(self),
@@ -902,7 +903,7 @@ pub fn openProjectedFileTreePath(
 pub fn followActiveTerminalCwd(self: *AppSession) void {
     if (!self.dockVisible()) return;
     if (self.tabs.items.len == 0) return;
-    const term = self.activePane().activeTerm();
+    const term = pane_ops.activePane(self).activeTerm();
     // updateFileTree는 renderer보다 먼저 tick에서 돈다. 여기서 observation을 새로 읽지 않으면 OSC 7의
     // cwd 변경을 아직 보지 못해 한 번도 reveal하지 않는 frame이 생긴다. readObservation은 runtime cache만
     // 갱신하며 filesystem scan은 worker 경계에 그대로 남는다.
@@ -1132,8 +1133,8 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
     self.requestDockEntryFocus(active_entry);
     self.dock.collapsed = false;
     if (self.surface_initialized) {
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
+        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+        pane_ops.recomputeActivePaneRect(self);
         self.last_resize_size = null;
     }
     self.metal_dirty = true;
@@ -1444,14 +1445,14 @@ pub fn openFilePanelPathAfterValidation(
         defer candidate_rows.deinit(self.allocator);
         prepareFileTreeRowStaging(self, &candidate_rows, 1) catch return .failed;
         const kind = entryKindForOpenKind(open_kind);
-        const opened = self.openFileTermInActivePane(path, kind) catch return .failed;
+        const opened = pane_ops.openFileTermInActivePane(self, path, kind) catch return .failed;
         pinInitialFilePanelIdentity(self, opened, initial_identity);
         buildPreparedFileTreeRows(self, &candidate, &candidate_rows);
         commitFileTreeCandidate(self, &candidate, &candidate_rows);
         return finishOpenFilePanel(self, opened);
     }
     const kind = entryKindForOpenKind(open_kind);
-    const opened = self.openFileTermInActivePane(path, kind) catch return .failed;
+    const opened = pane_ops.openFileTermInActivePane(self, path, kind) catch return .failed;
     pinInitialFilePanelIdentity(self, opened, initial_identity);
     return finishOpenFilePanel(self, opened);
 }
@@ -1727,8 +1728,8 @@ pub fn activateFilePanelDockControl(self: *AppSession) void {
         .collapse => self.dock.collapsed = true,
         .expand => self.dock.collapsed = false,
     }
-    for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-    self.recomputeActivePaneRect();
+    for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+    pane_ops.recomputeActivePaneRect(self);
     self.last_resize_size = null;
     self.metal_dirty = true;
 }
@@ -1911,7 +1912,7 @@ pub fn fileTreeSelectionPath(self: *const AppSession) ?[]const u8 {
 /// 클릭과 같은 `setFilePanelMode` 경로를 써서 pending action·web 통지가 동일하게 흐른다. 모드가 하나뿐인
 /// kind(text·image·media·pdf)와 파일이 아닌 Term은 무동작이다.
 pub fn toggleActiveFilePanelMode(self: *AppSession) void {
-    const pane = self.activePane();
+    const pane = pane_ops.activePane(self);
     if (pane.terms.items.len == 0) return;
     const entry = pane.activeTerm().file_entry orelse {
         self.showNotice("파일 탭에서만 쓸 수 있습니다.");
@@ -2052,7 +2053,7 @@ pub fn queueExternalLink(
     if (self.external_link_kind != null) return error.LinkBusy;
 
     const use_system = force_system or self.loaded_config.config.file_panel.external_link_target == .system;
-    const surface_id = if (use_system) 0 else self.appendWebTermInActivePane(.browser) catch |err| switch (err) {
+    const surface_id = if (use_system) 0 else pane_ops.appendWebTermInActivePane(self, .browser) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.OpenFailed,
     };
@@ -2727,7 +2728,7 @@ pub fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u
     const kind = entryKindForOpenKind(open_kind);
     // FP16: 생성 경로도 Term을 만든다. 옛 `dock.open`을 그대로 두면 창구(pane 트리 walk)가 못 보는
     // orphan entry가 생겨 같은 파일을 트리에서 다시 열 때 중복 Term이 만들어진다(code-review max).
-    const opened = self.openFileTermInActivePane(path, kind) catch return;
+    const opened = pane_ops.openFileTermInActivePane(self, path, kind) catch return;
     buildPreparedFileTreeRows(self, &candidate, &candidate_rows);
     commitFileTreeCandidate(self, &candidate, &candidate_rows);
     if (opened.previous_active_term) |prev| if (prev != opened.term) {
@@ -3342,7 +3343,7 @@ pub fn activateFilePanelSurfaceForRestore(self: *AppSession, surface_id: u64) bo
                     _ = markFilePanelDirtySyncPending(self, leaving_entry);
                 };
             }
-            if (tab.active_pane != pane_index) self.focusPane(pane_index);
+            if (tab.active_pane != pane_index) pane_ops.focusPane(self, pane_index);
             self.focusTerm(term_index);
             self.file_panel_mode_pending = surface_id;
             self.file_tree_rows_dirty = true;

@@ -102,7 +102,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 |---|---|---|---|---|
 | **F1** ✅ | **에이전트 세션 기록 도크**(archive + agent dock) | 1,595(메서드) | 낮음 | **F3를 흡수해 하나로.** 2026-08-09 완료 → `app_session/agent_dock.zig` |
 | **F2** ✅ | 파일 탐색기·파일 패널 | 3,840(메서드) | 중 | **한 파일**(`file_panel.zig`)로 — 분할하면 순환 때문에 pub화가 는다(아래). 2026-08-09 완료, pub화 50 |
-| **F4** | pane · split | ~2,350 | 중 | PTY spawn 결합 — 허브 경계 주의 |
+| **F4** ✅ | pane · split · divider | 1,570(메서드) | 중 | 2026-08-09 완료 → `app_session/pane.zig`, pub화 43 |
 | **F5** | dock | ~1,660 | 낮음 | |
 | **F6** | tab | ~1,590 | 낮음 | |
 | **F7** | sidebar | ~1,620 | 중 | `metal_frame` 셀·색 결합(옛 E4 실측) |
@@ -140,6 +140,17 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > 분해](terminal-core-decomposition.md) §2의 선례를 따른다 — 그 문서도 "연산 추출 우선, 구조 변경(Screen
 > struct fold)은 별도 initiative"를 택했고 이유가 같다("고위험 단일 도약"을 피한다). 분리 후에는 같은 변경이
 > 3,840줄 파일 안에서 일어나 리뷰 범위가 73,000줄에서 그만큼 좁아진다.
+
+> **F4에서 되돌린 두 번 — 이름 매칭의 함정(2026-08-09).** 그룹 경계와 호출부 치환을 이름으로 다루다가
+> 두 번 통째로 되돌렸다. 다음 그룹은 같은 자리에서 멈추지 않도록 기록한다.
+>
+> 1. **`pane`은 `filePanel`에도 걸린다**(`filepanel`에 부분 문자열로 포함). F2가 가져간 파일 패널 함수
+>    **30개**가 seed에 섞여 첫 추출을 폐기했다. 이름으로 좁힐 때는 단어 경계를 쓰고(`(^|[a-z])Pane([A-Z]|s\b|$)`)
+>    결과 목록을 반드시 눈으로 확인한다.
+> 2. **`<변수>.method(` 일괄 치환은 같은 이름의 다른 타입 메서드를 부순다.** `tab.activePane()`은 `Tab`의
+>    메서드인데 `pane_ops.activePane(tab)`으로 바뀌어 **906건**이 잘못 치환됐다. 치환은 그룹 본문 안의
+>    `self.`에 한정하고, 그룹 밖 호출부는 **컴파일러가 지목한 줄만** 고친다. 이때 접두어(`pane_ops`)가 다시
+>    receiver로 잡히는 이중 치환을 막는 가드가 필요하다(`(?!pane_ops\b)`).
 
 라인 수치는 **메서드 이름 기준 근사치**다. 각 단계 착수 시 실제 응집도(허브 결합·cross-group accessor)를 코드로 재검증하고 그 결과로 범위를 정정한다 — 이 문서의 사전 추정은 E1·E4·E5에서 세 번 빗나갔다([[roadmap-docs-stale-verify-with-code]]).
 

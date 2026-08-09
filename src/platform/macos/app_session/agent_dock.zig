@@ -32,6 +32,7 @@ const icons = maru.icons;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 아직 그쪽 소유(이 PR 한계)
 const AppSession = app_session_mod.AppSession;
+const pane_ops = @import("pane.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const dock_view_bar = app_session_mod.dock_view_bar;
 const session_dock_ui_zoom_max_milli = app_session_mod.session_dock_ui_zoom_max_milli;
@@ -2046,7 +2047,7 @@ pub fn focusLiveArchiveSession(self: *AppSession, detail: *const InlineArchiveDe
         };
         if (!provider_matches or !std.mem.eql(u8, term.agent_transcript.identity(), detail.record.parsed.session_id)) continue;
         _ = self.switchTab(tab_index);
-        _ = self.focusPaneByPtr(pane);
+        _ = pane_ops.focusPaneByPtr(self, pane);
         self.focusTerm(term_index);
         return true;
     };

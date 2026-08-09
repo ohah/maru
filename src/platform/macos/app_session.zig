@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 
-const app = maru.app;
+pub const app = maru.app;
 const chrome = maru.chrome;
 const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물) — 카드 줄의 브랜치·폴더 glyph
 const config_mod = maru.config;
@@ -22,7 +22,7 @@ const git_backend_mod = @import("git_backend.zig");
 const scm_view = maru.session.scm_view;
 pub const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
-const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
+pub const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
 
 // L2 session core(src/session)로 추출한 순수 입력/재정렬 수학. 내부 호출처는 bare 이름을 유지하도록 file-scope
 // alias로 재노출한다(docs/layering-and-portability.md §3 — 2차 추출 슬라이스 1). 정의·테스트는 session/input_math.zig.
@@ -46,8 +46,8 @@ const RemoteSessionAdapter = if (is_macos) session_host.host_adapter.HostAdapter
 const RemoteSessionBackend = if (is_macos) session_host.remote_term_backend.RemoteTermBackend else void;
 const RemoteHostPool = if (is_macos) session_host.host_pool.HostPool(RemoteSessionAdapter) else void;
 extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
-const coretext_bridge = @import("coretext_smoke_bridge.zig");
-const coretext_frame_builder = @import("coretext_frame_builder.zig");
+pub const coretext_bridge = @import("coretext_smoke_bridge.zig");
+pub const coretext_frame_builder = @import("coretext_frame_builder.zig");
 pub const file_tree_backend = @import("file_tree_backend.zig");
 pub const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 pub const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
@@ -64,7 +64,7 @@ test {
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;
 const agent_session_archive_detail = maru.session.agent_session_archive_detail;
-const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
+pub const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
@@ -75,7 +75,8 @@ const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gestu
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
-const file_panel_ops = @import("app_session/file_panel.zig"); // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+pub const file_panel_ops = @import("app_session/file_panel.zig");
+const pane_ops = @import("app_session/pane.zig"); // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
@@ -87,10 +88,10 @@ const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh cont
 // 세션 모델(Term/Pane/Tab + split 트리)은 session core가 generic으로 소유한다 — platform은 런타임 결합부
 // `TermRuntime`(아래 정의)을 주입해 인스턴스화하고, 별칭으로 기존 Term/*Term/Pane/Tab/PaneTree 참조를 그대로
 // 쓴다. 단일 출처: src/session/session_model.zig, docs/layering-and-portability.md §3.1.
-const Model = maru.session.session_model.Model(TermRuntime);
+pub const Model = maru.session.session_model.Model(TermRuntime);
 pub const Term = Model.Term;
 pub const Pane = Model.Pane;
-const PaneTree = Model.PaneTree;
+pub const PaneTree = Model.PaneTree;
 pub const Tab = Model.Tab;
 const group_normalize = maru.session.group_normalize; // M3c: 그룹 정규화 순수 함수(L2 리프트) — 아래 L4 메서드가 self.tabs.items로 위임(재구현 금지)
 const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
@@ -813,7 +814,7 @@ const scrollbar_bar_emphasize_px: f32 = 2.0; // hover/드래그 시 추가 폭
 // 흐려진다. 숨기지 않고 faint로만 남겨(위치·잡을 곳을 잃지 않게) macOS overlay 관례를 따른다.
 const scrollbar_visible_ms: u32 = 1667; // 옛 30Hz 50틱과 같은 약 1.67s full 유지
 const scrollbar_fade_ms: u32 = 450; // 옛 30Hz 14틱과 같은 약 0.45s 동안 full→faint
-const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
+pub const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
 const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
@@ -976,7 +977,7 @@ fn shouldProjectFrame(
 
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
 // 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
-fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
+pub fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
     return terminal.clampGridSize(.{
         .cols = if (sm.cols > 0) sm.cols else terminal.Size.default.cols,
         .rows = if (sm.rows > 0) sm.rows else terminal.Size.default.rows,
@@ -1028,7 +1029,7 @@ test "복원 왕복: 하한 grid를 저장하지 않으면 다음 복원이 하�
 // cwd를, 아니면(빈값·상대경로·없음·파일·권한 없음) null을 돌려준다 — null이면 기본 cwd로 spawn해 surface를 잃지
 // 않는다. cwd 자식 chdir 실패는 _exit(126)이라(pty/macos childExec), 미리 확인 안 하면 복원된 셸이 즉시 죽어
 // 다음 tick에 reap된다. workspace-restore.md "실패 처리": 한 surface가 어긋나도 나머지(와 그 surface)를 살린다.
-fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
+pub fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
     // 잘 형성된 **절대 경로**만 spawn cwd로 넘긴다(빈값·상대경로·과도 길이는 거른다 — 상대경로를 넘기면 자식이
     // 앱 cwd 기준으로 chdir해 예측 불가). 존재·디렉터리 여부는 더 이상 여기서 추측하지 않는다: childExec가 chdir
     // 실패 시 $HOME으로 graceful 폴백하므로(없는 cwd·TOCTOU·파일 경로를 단일 권위로 처리), 여기선 형식만 본다.
@@ -1199,7 +1200,7 @@ test "effectiveWindowBlur: opacity 게이트 — 불투명이면 0, 투명일 �
 /// color.Rgb를 불투명(A=0xFF) 0xAARRGGBB로 packing한다(사이드바 strip/활성 밴드 셀 배경 색용). 셀
 /// 배경은 A=0xFF여야 셰이더가 그 색으로 칠한다(A=0이면 "배경 없음").
 /// rgb + alpha를 GpuQuad/cell 색 워드(0xAARRGGBB)로 패킹. 색 패킹의 단일 출처 — packOpaqueRgb·스크롤바 fade가 공유.
-fn packRgbAlpha(rgb: maru.color.Rgb, alpha: u8) u32 {
+pub fn packRgbAlpha(rgb: maru.color.Rgb, alpha: u8) u32 {
     return (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
@@ -1250,7 +1251,7 @@ fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, row: u16, origin_y
 /// sentinel-UV(아틀라스 없음 — u/v=-1로 셰이더가 글리프 샘플 대신 배경만 칠함) chrome 셀 1개. pane 탭 바
 /// 배경·활성 탭 하이라이트가 공유하는 보일러플레이트(16개 필드)를 한 곳에 모은다. origin_x + col*cw,
 /// origin_y(row 0)에 width칸을 bg로 채운다. 순수 함수.
-fn sentinelBgCell(col: u16, width: u16, bg: u32, origin_x: u32, origin_y: u32) metal_frame.NativeMetalCell {
+pub fn sentinelBgCell(col: u16, width: u16, bg: u32, origin_x: u32, origin_y: u32) metal_frame.NativeMetalCell {
     return .{
         .row = 0,
         .col = col,
@@ -1369,7 +1370,7 @@ fn notificationLocation(buf: []u8, tab: *Tab, term: *const Term) []const u8 {
 /// 것". coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다. cell·바·
 /// 탭 폭이 0이면(초소형 바) null을 줘 호출자가 탭 처리를 건너뛴다. hit-test 수학은 chrome tabbar로 이전(C3b) — platform은
 /// 메트릭 빌드 + 활성 밴드 단일 셀(tabbarHighlightCell)만(밴드가 한 칸이라 chrome view→cell round-trip이 무의미; 리뷰 §3).
-fn barMetrics(bar: maru.session.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) ?chrome.components.tabbar.Metrics {
+pub fn barMetrics(bar: maru.session.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) ?chrome.components.tabbar.Metrics {
     if (cell_width_px == 0 or bar.w == 0 or term_count == 0) return null;
     const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols == 0) return null;
@@ -1393,7 +1394,7 @@ fn tabbarHighlightCell(m: chrome.components.tabbar.Metrics, tab_index: usize, bg
 // pane hit-test(paneAtPoint)·방향 탐색(paneInDirection)·FocusDirection은 session core로 이동(후속) —
 // Model.paneAtPoint/paneInDirection/FocusDirection. 순수(레이아웃 rect만)라 헤드리스 테스트도 session_model로.
 // platform은 termRect→layout으로 leaf_rects를 만들어 넘긴다. 단일 출처: src/session/session_model.zig.
-const FocusDirection = Model.FocusDirection;
+pub const FocusDirection = Model.FocusDirection;
 
 // (paneInDirection은 위 주석대로 session core로 이동 — Model.paneInDirection)
 
@@ -1427,7 +1428,7 @@ const frametime_slow_ns: i128 = 8 * std.time.ns_per_ms;
 // (`resize_delivery_failures`)와 같은 도메인 데이터를 헤드리스 테스트가 읽는다(관측 가능성 원칙).
 // 게이트는 diag.zig 단일 출처.
 const resize_diag = std.log.scoped(.resize);
-const diag_gate = @import("diag.zig");
+pub const diag_gate = @import("diag.zig");
 
 fn nsToMs(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
@@ -1808,7 +1809,7 @@ pub const CloseScope = union(enum) {
 
 /// Term 포그라운드에서 도는 에이전트 CLI 종류 — session core(OS-중립)로 이동, 여기선 별칭(S2-4a).
 /// 정의·심볼(claude=✶, codex=◆) 단일 출처: src/session/session_model.zig.
-const AgentKind = maru.session.session_model.AgentKind;
+pub const AgentKind = maru.session.session_model.AgentKind;
 
 /// 인앱 알림 센터에 보관하는 알림 한 건(owned title/body). OSC 9/777이 pendingNotification()으로
 /// 드레인하는 단일 funnel에서 push된다. surface_id로 클릭 시 그 터미널로 점프(activateSurfaceById). timestamp_ns는
@@ -2283,7 +2284,7 @@ fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
 /// 항목으로 튀게 하던 버그의 단일 출처 수정 — Pane.active_term(closeTermAt·moveTermToNewSplit·moveTermToPane)과
 /// Tab.active_pane(detachPaneFromTab)이 공유한다. (closeActiveTerm·closeActivePane은 removed==active라 이 보정이
 /// 불필요하다 — 그 자리로 당겨 온 다음 항목을 그대로 활성으로 둔다.)
-fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) usize {
+pub fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) usize {
     var a = active;
     if (removed_index < a) a -= 1; // 닫힌 항목이 활성보다 앞 → 활성이 한 칸 당겨졌다
     if (a >= new_len) a = new_len - 1; // 활성이 마지막이었고 그 뒤가 닫힘 → 마지막으로 clamp
@@ -2303,7 +2304,7 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
 // 실어줌 — M2b allocator 분리 유지, remove에서 짝이 맞음). 프로덕션은 창 allocator도 smp라 사실상 동일(테스트만 분리).
 // **스레드**: 메인 스레드 전용(surface_id.zig·세션 트리와 같은 계약 — createTerm/destroyTerm/입력/resize/tick pump는
 // 전부 메인 이벤트다). 리더는 interactive 모드서 core에 직접 write(setProcessing)라 `routing`을 안 건드린다(§8A.2 독립).
-var app_runtime: app.AppRuntime = .{};
+pub var app_runtime: app.AppRuntime = .{};
 
 // P3-e3-4d 영속 세션 host 연결 — **앱 프로세스 전역**(창별이 아니라). 한 앱에 창을 여러 개 열어도 host 연결은 **하나**를
 // 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
@@ -3978,11 +3979,11 @@ pub const AppSession = struct {
             self.allocator,
             &self.app_window,
             self.runtime,
-            &self.activePane().activeTerm().rt.pump,
+            &pane_ops.activePane(self).activeTerm().rt.pump,
             &self.renderer_state,
             self.io,
         );
-        self.recomputeActivePaneRect();
+        pane_ops.recomputeActivePaneRect(self);
     }
 
     /// 현재 활성 탭(`*Tab`). live_pty/pump 등 탭 내부에 접근할 때 쓴다. `app_window.active_tab`을
@@ -3990,11 +3991,6 @@ pub const AppSession = struct {
     /// 부른다(surface_initialized·tabs 비어있지 않음).
     pub fn activeTab(self: *AppSession) *Tab {
         return self.tabs.items[self.app_window.active_tab];
-    }
-
-    /// 활성 탭의 포커스된 panel. live_pty/pump/surface 접근(입력·커서·frame_loop pump)에 쓴다.
-    pub fn activePane(self: *AppSession) *Pane {
-        return self.activeTab().activePane();
     }
 
     pub fn dockVisible(self: *const AppSession) bool {
@@ -4080,8 +4076,8 @@ pub const AppSession = struct {
             agent_dock.refreshAgentSessionArchive(self, false);
         }
         if (auto_right_width_changed) {
-            for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-            self.recomputeActivePaneRect();
+            for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+            pane_ops.recomputeActivePaneRect(self);
             self.last_resize_size = null;
         }
         self.metal_dirty = true;
@@ -4383,7 +4379,7 @@ pub const AppSession = struct {
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
-            .divider_px = self.dividerThicknessPx(),
+            .divider_px = pane_ops.dividerThicknessPx(self),
             // view bar는 **도크의 chrome**이지 터미널의 chrome이 아니다. 그래서 예전 explorer 경로처럼
             // `paneBarHeightPx`(terminal cell 높이 + padding)를 받지 않는다 — 그 식은 뷰마다 아이콘 줄이
             // 오르내리게 했고(사용자 보고: 실측 53px ↔ 80px) 터미널 폰트가 도크 기하를 정하게 만든다
@@ -4402,7 +4398,7 @@ pub const AppSession = struct {
         });
     }
 
-    fn pointerGestureIs(self: *const AppSession, comptime tag: std.meta.Tag(PointerGestureOwner)) bool {
+    pub fn pointerGestureIs(self: *const AppSession, comptime tag: std.meta.Tag(PointerGestureOwner)) bool {
         return std.meta.activeTag(self.pointer_gesture_owner) == tag;
     }
 
@@ -4413,7 +4409,7 @@ pub const AppSession = struct {
         self.pointer_gesture_owner = .none;
         // divider capture는 이제 다른 축(`divider_interaction`)이라 union을 비우는 것만으로 끝나지
         // 않는다. 두 capture 권위가 같은 stream에 공존하면 §4.3의 "한 stream에 owner 하나"가 깨진다.
-        self.endDividerCapture();
+        pane_ops.endDividerCapture(self);
         self.endScrollbarCapture();
         self.metal_dirty = true;
     }
@@ -4435,7 +4431,7 @@ pub const AppSession = struct {
         self.pointer_gesture_owner = owner;
     }
 
-    fn finishPointerGesture(self: *AppSession) void {
+    pub fn finishPointerGesture(self: *AppSession) void {
         self.pointer_gesture_owner = .none;
     }
 
@@ -4534,7 +4530,7 @@ pub const AppSession = struct {
     /// 공유하는 단일 출처. window padding은 여기서 빼지 않는다 — 탭 바·divider·pane 배경 같은 chrome은 사이드바
     /// 경계/창 가장자리까지 꽉 차고, padding은 paneTermRect가 셀 그리드 영역에만 inset한다. backing 크기는 마지막
     /// resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일 leaf가 origin에만 그려진다(무해).
-    fn termRect(self: *const AppSession) maru.session.SplitRect {
+    pub fn termRect(self: *const AppSession) maru.session.SplitRect {
         // 상단 타이틀바 띠(titlebar_strip_px)만큼 터미널 영역을 아래로 들인다 — 신호등·헤더 아이콘 줄과 pane 탭 바·
         // 서페이스가 안 겹친다(cmux식). 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
         // 렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합한다.
@@ -4584,7 +4580,7 @@ pub const AppSession = struct {
     /// 그 경로에서는 폰트 파생이 요구사항이다. 어느 쪽이든 두 바가 이 함수 하나를 쓰므로 정렬은 유지된다.
     ///
     /// cell 높이 미상이면 0(바 없음) — buildChromeTokens 읽기 전 가드.
-    fn chromeBarHeightPx(self: *const AppSession) u32 {
+    pub fn chromeBarHeightPx(self: *const AppSession) u32 {
         if (self.cell_height_px == 0) return 0;
         const space = self.buildChromeTokens().space;
         if (space.bar_height_pt > 0) return layout_math.ptToPx(space.bar_height_pt, self.scale_milli);
@@ -4632,65 +4628,11 @@ pub const AppSession = struct {
         return (bar_h -| self.cell_height_px) / 2;
     }
 
-    /// per-pane 가로 탭 바의 backing 픽셀 높이. 높이 자체는 도크 뷰 스위처와 공유하는 `chromeBarHeightPx`가
-    /// 정하고, 여기서는 **터미널 쪽 게이트만** 얹는다. 제목은 origin_y를 pad_y만큼 내려 바 가운데에 두고,
-    /// paneTermRect가 이 높이만큼 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다.
-    /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
-    fn paneBarHeightPx(self: *const AppSession) u32 {
-        if (self.chrome_minimal) return 0;
-        return self.chromeBarHeightPx();
-    }
-
-    const PaneGeometry = struct {
+    pub const PaneGeometry = struct {
         bar: ?maru.session.SplitRect,
         body: maru.session.SplitRect,
         grid: maru.session.SplitRect,
     };
-
-    /// panel leaf 하나에서 tab bar, 실제 본문 외곽, terminal cell grid를 한 번만 투영한다. focus border는 body,
-    /// PTY resize·셀 렌더·hit-test·IME는 grid를 소비한다. bar/padding 판정이 accessor나 renderer에 복제되면 두 rect가
-    /// 서로 다른 frame을 가리킬 수 있으므로 이 함수가 기하 단일 출처다. 과대 padding은 zero-size grid의 origin까지
-    /// body 끝에 clamp해 IME/hit-test 좌표가 pane 밖으로 탈출하지 않게 한다.
-    fn paneGeometry(self: *const AppSession, rect: maru.session.SplitRect) PaneGeometry {
-        const bar_h = self.paneBarHeightPx();
-        const pad = self.window_padding_px;
-        const has_bar = bar_h > 0 and rect.h > bar_h;
-        const bar: ?maru.session.SplitRect = if (has_bar)
-            .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = bar_h }
-        else
-            null;
-        const body: maru.session.SplitRect = if (has_bar)
-            .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h }
-        else
-            rect;
-        const grid = layout_math.insetRect(body, pad);
-        return .{ .bar = bar, .body = body, .grid = grid };
-    }
-
-    /// 이미 순회 중인 frame leaf 하나에서 active pane의 기하를 최대 한 번 캡처한다. 이 함수는 layout이나 검색을
-    /// 시작하지 않으며 할당도 하지 않는다. caller가 가진 기존 chrome 순회에 projection을 융합하므로 focus border를
-    /// 위해 두 번째 leaf scan을 만들지 않는다. layout이 완주하지 못했으면 partial prefix를 신뢰하지 않고 null을 유지한다.
-    fn captureActivePaneGeometry(
-        self: *AppSession,
-        layout_complete: bool,
-        active_pane: *Pane,
-        leaf_rect: PaneTree.LeafRect,
-        out: *?PaneGeometry,
-    ) void {
-        if (!layout_complete or out.* != null or leaf_rect.leaf != active_pane) return;
-        out.* = self.paneGeometry(leaf_rect.rect);
-    }
-
-    /// panel leaf rect의 상단 탭 바와 window padding을 뺀 '셀 그리드 영역'. `paneGeometry` accessor라
-    /// bar/padding 산술을 소유하지 않는다.
-    fn paneTermRect(self: *const AppSession, rect: maru.session.SplitRect) maru.session.SplitRect {
-        return self.paneGeometry(rect).grid;
-    }
-
-    /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). `paneGeometry` accessor.
-    fn paneBarRect(self: *const AppSession, rect: maru.session.SplitRect) ?maru.session.SplitRect {
-        return self.paneGeometry(rect).bar;
-    }
 
     /// pane 라벨 세그먼트(탭 바 좌측)가 차지할 컬럼 수. custom_name(사용자 rename)이 없으면 0(세그먼트 없음 —
     /// 탭이 바 전체 사용, 기존 동작). 있으면 좌패딩+이름폭+간격을 [3, max]로, 단 탭 영역 최소(min_tab_cols)는
@@ -4702,35 +4644,14 @@ pub const AppSession = struct {
     /// pane 탭 바 좌측 grip 핸들 폭(항상 예약 — pane 통째 드래그 손잡이). 3칸 = 좌패딩 + grip 글리프(중앙) + 우패딩
     /// (글리프가 좌단·divider에 붙지 않게 양쪽 여백). 라벨 뒤 탭 영역 최소 보장(좁은 바면 grip·라벨 생략). 둘 다
     /// paneBar·paneLabelColsForWidth가 공유하는 단일 출처. buildPaneGripDrawList가 글리프를 cols/2(중앙) 칸에 그린다.
-    const pane_grip_cols: u32 = 3;
-    const pane_min_tab_cols: u32 = 6;
-    fn paneLabelColsForWidth(name_width: usize, bar_cols: u32) u32 {
-        if (name_width == 0) return 0;
-        const max_label: u32 = 20; // 긴 이름이 바를 지배하지 않게 상한
-        if (bar_cols <= pane_min_tab_cols) return 0;
-        const want = @min(@as(u32, @intCast(name_width)) + 2, max_label); // 좌패딩+이름+간격
-        const cols = @min(want, bar_cols - pane_min_tab_cols);
-        return if (cols < 3) 0 else cols; // 3칸 미만이면 패딩+글자+간격 불가 → 생략
-    }
-
-    fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
-        const name = app.pickLabel(pane.custom_name, "");
-        if (name.len == 0) return 0;
-        return paneLabelColsForWidth(chrome.text_layout.displayCols(name, null), bar_cols); // pane 라벨(사용자 텍스트) — 아이콘 widen 안 함
-    }
+    pub const pane_grip_cols: u32 = 3;
+    pub const pane_min_tab_cols: u32 = 6;
 
     /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
-    fn renamingWorkspace(self: *const AppSession, tab: *Tab) bool {
+    pub fn renamingWorkspace(self: *const AppSession, tab: *Tab) bool {
         const r = self.rename orelse return false;
         return switch (r) {
             .workspace => |t| t == tab,
-            else => false,
-        };
-    }
-    fn renamingPane(self: *const AppSession, pane: *Pane) bool {
-        const r = self.rename orelse return false;
-        return switch (r) {
-            .pane => |p| p == pane,
             else => false,
         };
     }
@@ -4743,7 +4664,7 @@ pub const AppSession = struct {
     }
     /// 이 그룹 시작 탭의 이름(group_start)을 지금 편집 중인가(SG3c 헤더 rename) — buildSidebarTitleDrawList가 헤더 glyph에
     /// 편집 텍스트를 보일지 판정. renamingWorkspace의 그룹판(같은 규율).
-    fn renamingGroup(self: *const AppSession, tab: *Tab) bool {
+    pub fn renamingGroup(self: *const AppSession, tab: *Tab) bool {
         const r = self.rename orelse return false;
         return switch (r) {
             .group => |t| t == tab,
@@ -4760,12 +4681,6 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ self.rename_input.query.items, self.rename_input.preedit.items, caret });
     }
 
-    /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
-    /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
-    fn renameDisplayWidth(self: *const AppSession) usize {
-        return self.renameQueryCols() + chrome.text_layout.displayCols(self.rename_input.preedit.items, null) + 1;
-    }
-
     /// rename 편집 텍스트(query)의 표시 칸 수 — **방출자와 같은 단위**여야 한다.
     ///
     /// rename 편집기는 `appendEllipsizedTitle`이 그린다(사이드바 카드 이름줄·파일 트리 행·pane 탭·라벨). 그 방출은
@@ -4776,19 +4691,8 @@ pub const AppSession = struct {
     ///
     /// `overlay_input.displayCols`는 폐기 대상이 아니다 — find·palette·context menu·모달은 `placeText`(오버레이
     /// raster)가 **코드포인트 단위로** 그리므로 그쪽 폭 모델과 짝이 맞다. 두 폭 함수는 각자의 방출자를 따라간다.
-    fn renameQueryCols(self: *const AppSession) u32 {
+    pub fn renameQueryCols(self: *const AppSession) u32 {
         return @intCast(chrome.text_layout.displayCols(self.rename_input.query.items, null));
-    }
-
-    /// 활성 탭의 leaf 중 pane==찾는 pane인 것의 PaneBar(rename caret 위치 계산용). 못 찾으면 null.
-    fn paneBarForLeaf(self: *AppSession, pane: *Pane) ?PaneBar {
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
-            if (lr.leaf == pane) return self.paneBar(lr.rect, lr.leaf);
-        }
-        return null;
     }
 
     const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
@@ -4800,30 +4704,11 @@ pub const AppSession = struct {
         for (leaf_rects.items) |lr| {
             // 보이는 순서(드래그 중이면 preview)로 찾는다 — 이 위치는 탭 세그먼트 기하의 근거라 paint와 같은
             // 순서를 써야 한다(§4.4).
-            for (self.paneTermOrder(lr.leaf), 0..) |t, ti| {
+            for (pane_ops.paneTermOrder(self, lr.leaf), 0..) |t, ti| {
                 if (t == term) {
-                    const pb = self.paneBar(lr.rect, lr.leaf) orelse return null;
+                    const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse return null;
                     return .{ .pb = pb, .tab_index = ti, .count = lr.leaf.terms.items.len, .scroll = lr.leaf.tab_scroll_cols };
                 }
-            }
-        }
-        return null;
-    }
-
-    /// Phase 7e-2a: 주소창 편집 중(addr_edit)인 surface가 **활성 탭인 leaf**의 PaneBar(밴드·caret 위치 공유 소스).
-    /// 편집 아님/그 surface가 활성 탭 아님/바 없음이면 null. imeCursorRect(.addr_edit caret)·mouse-down 클릭-어웨이(밴드
-    /// 재클릭 판정)가 같은 leaf 기하를 쓰게 한다 — 렌더 "1c"·클릭 ①b의 band(y=full.y+bar_h)와 정합.
-    fn addrEditPaneBar(self: *AppSession) ?PaneBar {
-        const sid = self.addrEditSurfaceId() orelse return null;
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
-            const at = lr.leaf.active_term;
-            if (at >= lr.leaf.terms.items.len) continue;
-            const term = lr.leaf.terms.items[at];
-            if (isBrowserTerm(term) and term.surfaceId() == sid) {
-                return self.paneBar(lr.rect, lr.leaf);
             }
         }
         return null;
@@ -4832,7 +4717,7 @@ pub const AppSession = struct {
     /// 주소창 편집 밴드(탭 바 바로 아래)가 포인트를 포함하는가 — mouse-down 클릭-어웨이(cancelAddrEdit)가 "자기 밴드
     /// 재클릭(caret 재배치·nav 버튼)"만 살리게 판정한다(그 외 클릭이면 false → 편집 취소). 편집 아님/밴드 없음이면 false.
     fn addrEditBandContainsPoint(self: *AppSession, x_px: f64, y_px: f64) bool {
-        const pb = self.addrEditPaneBar() orelse return false;
+        const pb = pane_ops.addrEditPaneBar(self) orelse return false;
         const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(렌더 "1c"·클릭 ①b와 동일 소스)
         const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
         return layout_math.pointInRect(x_px, y_px, band);
@@ -4847,7 +4732,7 @@ pub const AppSession = struct {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return null;
-        const pb = self.addrEditPaneBar() orelse return null;
+        const pb = pane_ops.addrEditPaneBar(self) orelse return null;
         const cols: u32 = pb.full.w / cw;
         if (cols == 0) return null;
         const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)(navButtonAt·렌더 단일 소스)
@@ -4933,7 +4818,7 @@ pub const AppSession = struct {
                 };
             },
             .pane => |pane| {
-                const pb = self.paneBarForLeaf(pane) orelse return null;
+                const pb = pane_ops.paneBarForLeaf(self, pane) orelse return null;
                 // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1). 긴 이름은 말줄임되므로 caret을 라벨 세그먼트
                 // 우경계(label_cols-1, 마지막 칸은 탭과의 간격)로 clamp해 후보창이 라벨 밖(탭 위)으로 새지 않게.
                 const caret_col = @min(1 + qcols, if (pb.label_cols > 1) pb.label_cols - 1 else 1);
@@ -5022,68 +4907,14 @@ pub const AppSession = struct {
         }
     }
 
-    /// 탭 영역 sub-rect — 전체 바에서 좌측 라벨(label_cols)을 뗀 나머지. 탭 hit-test(barMetrics)·탭 제목 렌더가
-    /// 이 sub-rect를 공유해 라벨만큼 우측으로 밀린다(label_cols=0이면 전체 바 == 기존 동작).
-    fn paneTabBarRect(bar: maru.session.SplitRect, label_cols: u32, cw: u32) maru.session.SplitRect {
-        const off = label_cols * cw;
-        return .{ .x = bar.x + off, .y = bar.y, .w = bar.w -| off, .h = bar.h };
-    }
+    pub const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
 
-    /// 한 pane 탭 바의 레이아웃 단일 출처 — `full`(전체 바: 배경·클릭 판정), `grip`(좌측 grip 핸들 폭, 항상 예약:
-    /// pane 통째 드래그 손잡이), `label_cols`(grip 뒤 custom_name 라벨 폭, 이름 없으면 0), `tabs`(grip+라벨 뗀 탭
-    /// 영역: barMetrics·탭 제목·활성 밴드). 좌측 세그먼트 = `[full.x, tabs.x)` = grip + 라벨. 모든 hit-test/렌더가 이
-    /// 한 함수를 거쳐 "보이는 == 클릭되는"을 유지한다. 바가 없거나 cell 미상이면 null. 좁은 바(min_tab 미보장)면 grip 0.
-    /// pane 탭 바 **바로 아래** 한 줄 — browser 주소창 밴드와 파일 헤더 밴드가 공유하는 rect다.
-    /// `collectWebSurfaces`의 `inset.top = bar_h + addr_h`와 정확히 abut한다(밴드가 웹뷰를 덮지 않는다).
-    fn paneBandRect(bar: PaneBar) maru.session.SplitRect {
-        return .{ .x = bar.full.x, .y = bar.full.y + bar.full.h, .w = bar.full.w, .h = bar.full.h };
-    }
-
-    const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
-
-    /// leaf rect를 이미 든 호출자(렌더·hit-test 루프)가 아닌 곳에서 쓰는 조회판 — 활성 탭에서 그 pane의
-    /// leaf rect를 찾아 같은 밴드를 준다.
-    fn fileHeaderBandForPaneLookup(self: *AppSession, pane: *Pane) ?FileHeaderBand {
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
-            if (lr.leaf == pane) return self.fileHeaderBandForPane(pane, lr.rect);
-        }
-        return null;
-    }
-
-    /// 그 pane의 활성 Term이 파일이면 헤더 밴드 rect를 준다(아니면 null). 렌더와 hit-test의 단일 출처다.
-    fn fileHeaderBandForPane(self: *AppSession, pane: *Pane, rect: maru.session.SplitRect) ?FileHeaderBand {
-        if (pane.terms.items.len == 0) return null;
-        const entry = pane.activeTerm().file_entry orelse return null;
-        const bar = self.paneBar(rect, pane) orelse return null;
-        if (bar.full.h == 0) return null;
-        return .{ .band = paneBandRect(bar), .entry = entry };
-    }
-
-    const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
-    fn paneBar(self: *const AppSession, rect: maru.session.SplitRect, pane: *Pane) ?PaneBar {
-        const full = self.paneBarRect(rect) orelse return null;
-        const cw = self.cell_width_px;
-        if (cw == 0) return null;
-        const bar_cols = full.w / cw;
-        // grip 핸들은 항상 예약하되, 탭 영역 최소(min_tab_cols)가 안 남는 좁은 바면 생략(0). 라벨 폭은 grip을 뺀
-        // 나머지(avail) 기준으로 잡아 grip+라벨+탭이 모두 들어가게 한다.
-        const grip = if (bar_cols > pane_grip_cols + pane_min_tab_cols) pane_grip_cols else 0;
-        const avail = bar_cols - grip;
-        // rename 편집 중인 pane이면 custom_name이 비어도 편집 텍스트 폭으로 세그먼트를 띄운다(caret이 보이게).
-        const label_cols = if (self.renamingPane(pane))
-            paneLabelColsForWidth(self.renameDisplayWidth(), avail)
-        else
-            paneLabelCols(pane, avail);
-        return .{ .full = full, .tabs = paneTabBarRect(full, grip + label_cols, cw), .label_cols = label_cols, .grip_cols = grip };
-    }
+    pub const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
 
     /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
     /// 렌더용 — 각 surface를 자기 rect에 그린다). 단일 leaf면 [{활성 surface, term_rect}] 하나; split 이후
     /// 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 termRect로 계산해 넘김).
-    fn activeTabLeafRects(
+    pub fn activeTabLeafRects(
         self: *AppSession,
         allocator: std.mem.Allocator,
         term_rect: maru.session.SplitRect,
@@ -5107,7 +4938,7 @@ pub const AppSession = struct {
     /// - 자식이 끝난 Term(`process_state == .exited`)·link가 사라진 Term(host runtime 사망): runtime이 dead
     ///   adapter로의 라우팅을 **문서화된 계약대로** 거부한다([surface-runtime-api.md]). 거부는 runtime 쪽 사실일 뿐
     ///   레이아웃 사실이 아니므로, 표시 grid는 여기서 직접 맞춘다.
-    fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
+    pub fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
         if (term.kind == .web) return;
         if (term.rt.ended_placeholder) {
             self.resizeTermCoreToLayout(term, size);
@@ -5141,186 +4972,13 @@ pub const AppSession = struct {
     /// 레이아웃 크기를 runtime에 전달하지 못한 사실을 관측 지점에 남긴다. 표시 grid는 이미 맞춰졌으므로 화면은
     /// 정상이지만 자식 프로세스는 옛 winsize를 믿는다 — 원인을 남기지 않으면 "그 pane의 TUI만 어긋난다"를
     /// 추적할 수 없다. 카운터는 헤드리스 테스트가 읽고, 상세는 MARU_DEBUG 로그로 낸다.
-    fn noteResizeDeliveryFailure(self: *AppSession, term: *Term, err: app.RuntimeError) void {
+    pub fn noteResizeDeliveryFailure(self: *AppSession, term: *Term, err: app.RuntimeError) void {
         self.resize_delivery_failures += 1;
         self.last_resize_delivery_error = @errorName(err); // comptime 정적 문자열 — 수명 안전
         if (diag_gate.maruDebugEnabled()) resize_diag.info(
             "layout resize not delivered: surface={d} error={s}",
             .{ term.surface.id, @errorName(err) },
         );
-    }
-
-    /// 터미널 영역 기하가 **아직 없는가**(창 크기 미확정 — 복원 직후·첫 AppKit resize 전).
-    ///
-    /// 0인 rect를 그대로 레이아웃에 넣으면 `gridFromRectPx`가 0을 내고 `clampGridSize` 하한에 걸려 **2×1**이 된다.
-    /// 그 값은 "이 pane은 2칸짜리 터미널"이 아니라 **"아직 모른다"**인데, 하한을 거치면서 정상 크기와 구별할 수
-    /// 없는 숫자가 되어 세 곳을 연쇄로 오염시킨다: ① host runtime의 진짜 크기(135×74)를 덮어쓰고 ②
-    /// `resizeTermCoreToLayout`이 `observation.size`에 심고 ③ `captureWorkspaceTab`이 그걸 workspace에 저장해
-    /// **재시작을 넘어 영구화**한다 — 다음 복원이 2×1로 재접속해 스스로를 재생산한다(실측: workspace.v1에
-    /// `cols=2 rows=1` 기록됨). 기하를 모를 때는 아무에게도 알리지 않는 것이 유일하게 옳다. 실제 기하가 오면
-    /// `resize()`가 이 패스를 다시 돌린다.
-    fn layoutGeometryUnknown(self: *const AppSession) bool {
-        const r = self.termRect();
-        return r.w == 0 or r.h == 0;
-    }
-
-    /// 활성 탭의 각 panel을 자기 leaf rect grid로 resize한다(window resize·split 후 재배치). 단일 leaf면
-    /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. **레이아웃 적용은 개별 Term의
-    /// runtime 전달 실패로 중단되지 않는다**(표시 grid는 `resizeTermForLayout`이 보장하고, 못 전달한 사실은
-    /// `noteResizeDeliveryFailure`가 남긴다). leaf rect 계산 실패(OOM)만 전파한다.
-    fn resizeActiveTabPanes(self: *AppSession) !void {
-        if (self.layoutGeometryUnknown()) return;
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
-        for (leaf_rects.items) |lr| {
-            // 각 panel은 상단 탭 바를 뺀 '터미널 영역'(paneTermRect)에 그려지므로 Term grid도 그 크기로 맞춘다.
-            const trect = self.paneTermRect(lr.rect);
-            const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
-            // panel의 모든 Term(가로 탭)을 같은 rect grid로 맞춘다 — 비활성 Term도 전환 즉시 올바른 크기가 되게.
-            for (lr.leaf.terms.items) |term| {
-                // **레이아웃 적용은 한 Term의 runtime 전달 실패로 중단되지 않는다.** 표시 grid는
-                // `resizeTermForLayout`이 이미 보장하므로 남은 error는 "PTY winsize·원격 host에 못 보냈다"뿐인데,
-                // 그걸 밖으로 전파하면 `resize()`가 `recomputeActivePaneRect`·`last_resize_size`·`metal_dirty`를
-                // 스킵한 half-state로 끝난다(활성 pane의 세션이 죽어 있으면 창 크기 조정이 통째로 깨짐).
-                // 대신 삼키지 않고 관측 지점에 남긴다(관측 가능성 원칙).
-                self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err);
-            }
-        }
-    }
-
-    /// 주어진 탭(활성/배경)의 각 panel을 자기 leaf rect grid로 resize한다 — reap collapse 후 형제가 빈자리
-    /// 확장. best-effort: 임의 탭이라 모든 Term 에러를 무시한다(resizeActiveTabPanes는 활성 Term 에러를 resize()
-    /// try 계약대로 전파하지만, 이 경로는 자동 정리라 한 panel 실패가 다른 재배치를 막지 않게 한다). 레이아웃
-    /// 실패(OOM)는 무시(다음 resize/tick이 다시 맞춘다).
-    pub fn resizeTabPanes(self: *AppSession, tab: *Tab) void {
-        if (self.layoutGeometryUnknown()) return; // 기하 미확정 구간의 2×1 오염 방지 — layoutGeometryUnknown 주석
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        PaneTree.layout(self.allocator, tab.tree, self.termRect(), &leaf_rects) catch return;
-        for (leaf_rects.items) |lr| {
-            const trect = self.paneTermRect(lr.rect);
-            const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
-            for (lr.leaf.terms.items) |term| {
-                self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
-            }
-        }
-    }
-
-    /// 활성 panel의 픽셀 rect를 다시 계산해 캐시한다(`active_pane_rect`). 활성 탭 tree를 터미널 영역에서
-    /// 펴 활성 surface의 leaf rect를 찾는다. 못 찾거나(OOM) 단일 panel이면 터미널 영역 전체로 폴백 —
-    /// 단일 panel은 그게 곧 활성 rect라 결과가 같다. 레이아웃/포커스/리사이즈가 바뀔 때(split·switchTab·
-    /// resize·focusPane·closeTab·init) 호출해, pxToCell/imeCursorRect가 매 마우스 이벤트마다 재레이아웃
-    /// (할당) 없이 캐시된 origin을 읽게 한다.
-    pub fn recomputeActivePaneRect(self: *AppSession) void {
-        const active_pane = self.activePane();
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
-            for (leaf_rects.items) |lr| {
-                if (lr.leaf == active_pane) {
-                    self.active_pane_rect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 영역(좌표 origin)
-                    return;
-                }
-            }
-        } else |_| {}
-        self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백: 터미널 영역(바 아래)
-    }
-
-    /// panel 사이 divider 선 색(0xAARRGGBB) — 활성 하이라이트 색을 써서 두 panel 사이 경계가 또렷하게 보이게.
-    fn dividerColor(self: *const AppSession) u32 {
-        // divider(검색바 하단 언더바·pane split 선)는 **중립 패널색(sidebar_background)**에서 파생한다 — 예전엔 sidebar_active를
-        // 직접 썼는데, dark_pink처럼 sidebar_active에 **채도 높은 accent(로즈)**를 준 테마에선 그 라인이 중립 크롬 위에서 튄다
-        // (사용자 피드백 "Search 언더바 색이 따로 논다"). 배경보다 살짝 밝게(+24)로 둔다 — sidebar_*를 파생으로 두는 테마에선
-        // sidebar_background(=배경+24)에 +24가 곧 sidebar_active(=배경+48)라 **기존과 동일**(회귀 없음), 명시-active 테마만 중립화.
-        const b = self.appearance.theme.sidebar_background;
-        const r: u32 = @min(@as(u32, b.r) + 24, 255);
-        const g: u32 = @min(@as(u32, b.g) + 24, 255);
-        const bch: u32 = @min(@as(u32, b.b) + 24, 255);
-        return 0xFF00_0000 | (r << 16) | (g << 8) | bch;
-    }
-
-    /// 얇은 **세로선**을 overlay 셀로 그린다 — [y_start, y_end) 범위에 행마다(cell 높이 step) origin_x에 sentinel
-    /// 셀 1개씩, reserved=30으로 seam 중앙의 configured divider strip을 칠한다.
-    fn appendVerticalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, y_start: u32, y_end: u32, reserved: u16, color: u32) void {
-        const ch = self.cell_height_px;
-        if (ch == 0) return;
-        var y = y_start;
-        while (y < y_end) : (y += ch) {
-            var c = sentinelBgCell(0, 1, color, origin_x, y);
-            c.reserved = reserved;
-            out.append(self.allocator, c) catch return;
-        }
-    }
-
-    /// 얇은 **가로선**을 overlay 셀로 그린다 — origin_y에 폭(width_px→floor cols, 최소 1)만큼 sentinel 셀 1개,
-    /// reserved=31로 seam 중앙의 configured divider strip을 칠한다.
-    fn appendHorizontalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, origin_y: u32, width_px: u32, reserved: u16, color: u32) void {
-        const cw = self.cell_width_px;
-        if (cw == 0) return;
-        const cols = @min(@max(width_px / cw, 1), @as(u32, std.math.maxInt(u16)));
-        var c = sentinelBgCell(0, @intCast(cols), color, origin_x, origin_y);
-        c.reserved = reserved;
-        out.append(self.allocator, c) catch return;
-    }
-
-    /// app DividerSeg(라이브 *Split 결합)를 neutral chrome `divider.Seg`로 변환한다 — chrome은 app 트리를 모르므로
-    /// host가 떼어 준다(palette Row 선례). 좌우 분할(horizontal)=세로선, 상하 분할(vertical)=가로선. bounds는 u32→i32.
-    fn appSegToDivider(seg: PaneTree.DividerSeg) chrome.components.divider.Seg {
-        return .{
-            .orientation = switch (seg.direction) {
-                .horizontal => .vertical_line,
-                .vertical => .horizontal_line,
-            },
-            .bounds = .{ .x = @intCast(seg.bounds.x), .y = @intCast(seg.bounds.y), .w = seg.bounds.w, .h = seg.bounds.h },
-            .pos = seg.pos,
-        };
-    }
-
-    /// 활성 탭의 divider 선들을 overlay 셀로 out에 append한다(렌더). chrome `divider.view`가 seg→Rule op(선)을 내고,
-    /// `lowerDividerRules`가 그 Rule을 렌더러 **부분 사각형**(reserved=3 bar=좌측 ~2px / 2 underline=하단 ~2px, 커서
-    /// 모양과 같은 경로)으로 lower해 **얇은 선**으로 seam에 얹는다. divider 선/hit-test 수학은 chrome 컴포넌트가 단일
-    /// 출처(C2). 단일 panel이면 빈 채. 셀 0이면 무동작. layout과 같은 좌표계(termRect)라 경계에 정확히 얹힌다.
-    fn appendActiveTabDividers(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
-        if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-        if (self.dividerThicknessPx() == 0) return; // split.divider-thickness=0(숨김)이면 0-area 셀을 아예 안 낸다(낭비 방지)
-        var app_segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
-        defer app_segs.deinit(self.allocator);
-        self.layoutActiveTabDividers(&app_segs) catch return;
-        if (app_segs.items.len == 0) return;
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-        var neutral: std.ArrayList(chrome.components.divider.Seg) = .empty;
-        for (app_segs.items) |seg| neutral.append(arena, appSegToDivider(seg)) catch return;
-        var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        chrome.components.divider.view(neutral.items, arena, &ops) catch return;
-        self.lowerDividerRules(ops.items, out);
-    }
-
-    /// chrome `divider.view`가 낸 Rule op(선)을 렌더러 부분 사각형 NativeMetalCell로 lower한다 — 세로선(from.x==to.x)은
-    /// 경계 x에 셀 1개씩(reserved=30) 행마다, 가로선(from.y==to.y)은 경계 y에 bounds 폭 한 칸(reserved=31). **셀 origin을
-    /// 경계(seam) 자체에 두고**, 렌더러(reserved 30/31)가 config 두께(divider_thickness_px)를 그 seam에 **중앙 정렬**하고
-    /// 셀 크기로 clamp한다 — 옛 −1/+1−ch offset은 ~2px 고정 가정이라 두꺼운 값이 한쪽으로 쏠렸다(code-review). 색은
-    /// `dividerColor()`(tui 토큰 .divider=sidebar_active). divider는 overlay가 아니라 pane chrome 셀이라 이 얇은-선 lowering을 platform이 갖는다.
-    fn lowerDividerRules(self: *AppSession, ops: []const chrome.draw.Op, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
-        const color = self.dividerColor();
-        for (ops) |op| switch (op) {
-            .rule => |r| {
-                if (r.from.x == r.to.x) { // 세로선: 경계 x(seam)에 셀 origin, y0..y1 행마다 (렌더러가 seam 중앙정렬)
-                    const x: u32 = @intCast(@max(r.from.x, 0));
-                    const y0: u32 = @intCast(@max(@min(r.from.y, r.to.y), 0));
-                    const y1: u32 = @intCast(@max(@max(r.from.y, r.to.y), 0));
-                    self.appendVerticalLine(out, x, y0, y1, 30, color); // reserved 30=divider 세로선(seam 중앙정렬 config 두께, 커서 15%와 분리)
-                } else { // 가로선(from.y == to.y): 경계 y(seam)에 셀 origin, bounds 폭 한 칸 (렌더러가 seam 중앙정렬)
-                    const oy: u32 = @intCast(@max(r.from.y, 0));
-                    const x0: u32 = @intCast(@max(@min(r.from.x, r.to.x), 0));
-                    const x1: u32 = @intCast(@max(@max(r.from.x, r.to.x), 0));
-                    self.appendHorizontalLine(out, x0, oy, x1 - x0, 31, color); // reserved 31=divider 가로선(seam 중앙정렬 config 두께)
-                }
-            },
-            else => {},
-        };
     }
 
     /// minimal(chrome 없는 quick terminal) 세션에서 탭이 여러 개일 때 **우상단에 작은 "탭 점" 인디케이터**를 overlay
@@ -5334,7 +4992,7 @@ pub const AppSession = struct {
         if (cw == 0) return;
 
         // 적응형 차원: 워크스페이스 우선(여러 개면 그쪽), 아니면 활성 pane의 Term. 둘 다 1개면 표시 안 함.
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         var count: u32 = undefined;
         var active: u32 = undefined;
         if (self.tabs.items.len > 1) {
@@ -5347,7 +5005,7 @@ pub const AppSession = struct {
 
         // 화면 폭(셀 칸). minimal이라 사이드바 없음. paneTermRect가 window padding을 inset하므로(minimal은 바 없음)
         // 점 인디케이터도 셀 그리드와 같은 padding 안쪽에 정렬된다. 칸 0이면 안 그림.
-        const term_rect = self.paneTermRect(self.termRect());
+        const term_rect = pane_ops.paneTermRect(self, self.termRect());
         const cols = term_rect.w / cw;
         if (cols == 0) return;
 
@@ -5376,83 +5034,6 @@ pub const AppSession = struct {
             const color = self.chromeCellBg(if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg()); // window.opacity(셀 premultiply)
             out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, term_rect.y)) catch return;
         }
-    }
-
-    /// 마우스 (x,y)가 활성 탭 어느 divider의 드래그 밴드 안인가 — 맞으면 그 DividerSeg, 아니면 null. 밴드는 경계
-    /// pos ± (cell 절반 + margin), 교차축은 bounds 안. 렌더 divider(같은 layoutDividers)와 정렬돼 "보이는 =
-    /// 잡히는". 단일 panel이면 항상 null(divider 없음). 마우스 down(1) divider 드래그 시작 판정에 쓴다.
-    /// 마우스 (x,y)가 어느 divider 드래그 밴드 안인가 — 맞으면 {neutral Seg, 라이브 *Split}, 아니면 null. app DividerSeg는
-    /// hover_divider_scratch에, neutral 변환은 divider_seg_scratch에(index 일치) — chrome `divider.hitTest`가 후자로 판정하고,
-    /// 그 index의 **neutral seg**(드래그/커서가 직접 씀 — 재변환 없음)와 split을 돌려준다(보이는==잡히는). split만 app.
-    /// ⚠️ 반환값은 두 scratch 버퍼의 **borrow**다 — **다음 dividerAtPoint 호출 전에 소비**하라(scratch를 clear+재기록하므로
-    /// 보관/aliasing 금지). 현 호출처(down=divider_drag_seg로 값 복사, hover=hit.seg.orientation 즉시 읽기)는 안전하다.
-    fn dividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?struct { seg: chrome.components.divider.Seg, split: *PaneTree.Split } {
-        const segs = &self.hover_divider_scratch;
-        segs.clearRetainingCapacity();
-        self.layoutActiveTabDividers(segs) catch return null;
-        self.divider_seg_scratch.clearRetainingCapacity();
-        for (segs.items) |seg| self.divider_seg_scratch.append(self.allocator, appSegToDivider(seg)) catch return null;
-        const i = chrome.components.divider.hitTest(self.divider_seg_scratch.items, self.cell_width_px, self.cell_height_px, x_px, y_px) orelse return null;
-        return .{ .seg = self.divider_seg_scratch.items[i], .split = segs.items[i].split };
-    }
-
-    fn layoutActiveTabDividers(self: *AppSession, out: *std.ArrayList(PaneTree.DividerSeg)) !void {
-        try PaneTree.layoutDividers(self.allocator, self.activeTab().tree, self.termRect(), out);
-    }
-
-    /// 활성 탭의 divider를 capture가 볼 수 있는 tree로 다시 발행한다 — CIM2.
-    ///
-    /// 선이 실제로 움직이므로 pointer move마다 재발행하고 세대를 올린다. 그래서 drag 도중 capture를
-    /// 넘길지는 §5의 carry verdict가 판정하며, 그것 없이는 첫 move에 죽는다. 발행과 같은 순서로
-    /// live `*Split`을 담아 두는데, payload를 split으로 되돌리는 역매핑은 host의 몫이기 때문이다.
-    fn publishDividerTree(self: *AppSession) ?chrome.ui.tree.UiRectTree {
-        const segs = &self.hover_divider_scratch;
-        segs.clearRetainingCapacity();
-        self.layoutActiveTabDividers(segs) catch return null;
-
-        self.divider_seg_scratch.clearRetainingCapacity();
-        for (segs.items) |seg| self.divider_seg_scratch.append(self.allocator, appSegToDivider(seg)) catch return null;
-
-        self.divider_entry_scratch.resize(self.allocator, self.divider_seg_scratch.items.len) catch return null;
-        const published = chrome.components.divider.publish(
-            self.divider_seg_scratch.items,
-            self.cell_width_px,
-            self.cell_height_px,
-            self.divider_snapshot_generation +| 1,
-            self.divider_entry_scratch.items,
-        ) catch return null;
-        self.divider_snapshot_generation +|= 1;
-
-        self.divider_split_scratch.clearRetainingCapacity();
-        for (segs.items) |seg| self.divider_split_scratch.append(self.allocator, seg.split) catch return null;
-        return published;
-    }
-
-    /// 발행된 identity가 지금 가리키는 live split. 구조가 바뀌어 그 identity가 사라졌으면 null이다.
-    fn dividerSplitForIdentity(self: *AppSession, identity: u64) ?*PaneTree.Split {
-        const index = chrome.components.divider.segIndexOf(identity, self.divider_split_scratch.items.len) orelse return null;
-        return self.divider_split_scratch.items[index];
-    }
-
-    /// capture를 다음 발행으로 넘길지 판정하는 §5 compatibility key. epoch와 domain identity는
-    /// chrome이 모르는 값이라 host가 채우고, 중립 모듈은 **같은지만** 본다. 여기서 epoch는 활성 탭
-    /// (탭을 바꾸면 다른 트리)이고 domain identity는 그 identity가 지금 가리키는 split이다.
-    fn dividerCompatibilityKey(self: *AppSession, identity: u64) chrome.ui.interaction.GestureCompatibility {
-        return .{
-            .kind = identity,
-            .enabled = true,
-            .owner_epoch = @intFromPtr(self.activeTab()),
-            .domain_identity = if (self.dividerSplitForIdentity(identity)) |split| @intFromPtr(split) else 0,
-        };
-    }
-
-    /// divider drag가 끝났거나(up/drop) 취소됐을 때 host 쪽 흔적을 전부 지운다. coalescer의 `applied`
-    /// 까지 비우는 것이 중요하다 — 남기면 다음 drag의 첫 move가 "안 바뀌었다"로 먹힌다.
-    fn endDividerCapture(self: *AppSession) void {
-        self.divider_interaction.capture = null;
-        self.divider_capture_seg = null;
-        self.divider_capture_split = null;
-        self.divider_coalescer.reset();
     }
 
     /// 닫힌 fixture 전용 divider 관측치. 발행된 밴드 rect와 이 drag의 계측만 담고, split 포인터나
@@ -5498,38 +5079,12 @@ pub const AppSession = struct {
         tab_model_first_id: u64 = 0,
     };
 
-    /// CIM4b E2E용 탭 바 관측치. 좌표는 렌더·hit-test와 **같은 출처**(`paneBar`+`barMetrics`)에서 뽑는다 —
-    /// fixture가 자기 산수로 겨냥하면 제품이 잡는 지점과 갈릴 수 있다.
-    fn fillTabDragSmokeProbe(self: *AppSession, probe: *DividerSmokeProbe) void {
-        probe.tab_drag_active = self.pointerGestureIs(.terminal_tab);
-        const pane = self.activePane();
-        const count = pane.terms.items.len;
-        if (count == 0 or self.cell_width_px == 0) return;
-        probe.tab_count = std.math.lossyCast(u32, count);
-        probe.tab_model_first_id = pane.terms.items[0].surface.id;
-        probe.tab_visible_first_id = self.paneTermOrder(pane)[0].surface.id;
-
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
-        for (leaf_rects.items) |lr| {
-            if (lr.leaf != pane) continue;
-            const pb = self.paneBar(lr.rect, pane) orelse return;
-            const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
-            probe.tab_bar_present = true;
-            probe.tab_first_x_px = @intCast(pb.tabs.x + self.cell_width_px); // 세그먼트 안쪽(✕ zone 회피)
-            probe.tab_slot_w_px = m.tab_w * self.cell_width_px;
-            probe.tab_bar_y_px = @intCast(pb.full.y + 1);
-            return;
-        }
-    }
-
     /// 활성 탭의 **첫** divider를 발행 경로 그대로 읽는다(`publishDividerTree`와 같은 출처).
     pub fn dividerSmokeProbe(self: *AppSession) DividerSmokeProbe {
         var probe = DividerSmokeProbe{
             .padding_left_px = self.window_padding_px.left,
             .padding_right_px = self.window_padding_px.right,
-            .capture_active = self.dividerCaptureActive(),
+            .capture_active = pane_ops.dividerCaptureActive(self),
             .scrollbar_capture_active = self.scrollbarCaptureActive(),
             .scrollbar_move_events = self.scrollbar_move_events,
             .scrollbar_scroll_applications = self.scrollbar_scroll_applications,
@@ -5537,7 +5092,7 @@ pub const AppSession = struct {
             .move_events = self.divider_move_events,
             .resize_applications = self.divider_resize_applications,
         };
-        self.fillTabDragSmokeProbe(&probe);
+        pane_ops.fillTabDragSmokeProbe(self, &probe);
         // 스모크가 겨냥할 좌표는 **발행된 tree**에서 그대로 온다. 예전에는 probe가 기하를 다시 발행해
         // 두 번째 출처를 만들었다 — 겨냥한 지점과 제품이 잡는 지점이 갈릴 자리였다.
         for (self.dock_list_scroll_entries[0..self.dock_list_scroll_entry_count]) |entry| {
@@ -5548,7 +5103,7 @@ pub const AppSession = struct {
             probe.scrollbar_thumb_w_px = @intFromFloat(@max(entry.rect.width, 0));
             probe.scrollbar_thumb_h_px = @intFromFloat(@max(entry.rect.height, 0));
         }
-        const published = self.publishDividerTree() orelse return probe;
+        const published = pane_ops.publishDividerTree(self) orelse return probe;
         if (published.entries.len == 0) return probe;
 
         // 웹 패널이 **덮고 있는** divider를 우선 고른다. seam pass-through는 그 지점에서만 시험되고,
@@ -5593,120 +5148,6 @@ pub const AppSession = struct {
         return probe;
     }
 
-    fn dividerCaptureActive(self: *const AppSession) bool {
-        return self.divider_interaction.capture != null;
-    }
-
-    /// pointer down이 divider 밴드에서 시작했으면 capture를 잡는다. 잡았으면 true.
-    fn beginDividerCapture(self: *AppSession, x_px: f64, y_px: f64) bool {
-        const tree_snapshot = self.publishDividerTree() orelse return false;
-        if (tree_snapshot.entries.len == 0) return false;
-        const dispatched = chrome.ui.interaction.dispatch(&self.divider_interaction, tree_snapshot, .{
-            .phase = .down,
-            .x_px = x_px,
-            .y_px = y_px,
-            .timestamp_ns = 0,
-            .generation = tree_snapshot.generation,
-        }) catch return false;
-        _ = dispatched;
-
-        const capture = self.divider_interaction.capture orelse return false;
-        const index = chrome.components.divider.segIndexOf(capture.id, self.divider_seg_scratch.items.len) orelse {
-            self.endDividerCapture();
-            return false;
-        };
-        // ratio의 분모가 되는 bounds는 down 시점 값을 쓴다 — drag 도중 선이 움직여도 나누는 부모
-        // 영역은 그대로이고, 매 move의 재발행에서 다시 읽으면 반올림이 누적될 자리가 생긴다.
-        // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 그 규율은 같다.
-        self.clearSidebarDragPreview();
-        self.pointer_gesture_owner = .none;
-        self.divider_capture_seg = self.divider_seg_scratch.items[index];
-        self.divider_capture_split = self.divider_split_scratch.items[index];
-        self.divider_coalescer.reset();
-        self.metal_dirty = true;
-        return true;
-    }
-
-    /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
-    fn routeDividerCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64) bool {
-        const capture = self.divider_interaction.capture orelse return false;
-        const identity = capture.id;
-        const previous_key = chrome.ui.interaction.GestureCompatibility{
-            .kind = identity,
-            .enabled = true,
-            .owner_epoch = @intFromPtr(self.activeTab()),
-            .domain_identity = if (self.divider_capture_split) |split| @intFromPtr(split) else 0,
-        };
-
-        const tree_snapshot = self.publishDividerTree() orelse {
-            self.endDividerCapture();
-            return true;
-        };
-        const current_key = self.dividerCompatibilityKey(identity);
-        const carried = chrome.ui.interaction.reconcileCarryingCapture(
-            &self.divider_interaction,
-            tree_snapshot,
-            previous_key,
-            current_key,
-        ) catch {
-            self.endDividerCapture();
-            return true;
-        };
-        // carry하지 못하면 `reconcileCarryingCapture`가 capture를 이미 비웠다(그리고 drag를
-        // `cancelled`로 닫았다). 그것이 곧 판정이므로 여기서 사유를 다시 묻지 않는다 — split이
-        // 사라졌거나 탭이 바뀐 경우가 전부 이 한 검사로 들어온다.
-        _ = carried;
-        if (self.divider_interaction.capture == null) {
-            self.endDividerCapture();
-            return true;
-        }
-
-        const dispatched = chrome.ui.interaction.dispatch(&self.divider_interaction, tree_snapshot, .{
-            .phase = if (kind == 2) .move else .up,
-            .x_px = x_px,
-            .y_px = y_px,
-            .timestamp_ns = 0,
-            .button = .left,
-            .generation = tree_snapshot.generation,
-        }) catch {
-            self.endDividerCapture();
-            return true;
-        };
-
-        if (dispatched.drag) |event| switch (event) {
-            // 좌표를 모으기만 한다. 실제 resize는 tick이 최종 하나로 한 번 한다.
-            .began, .moved => |update| {
-                self.divider_coalescer.absorb(update.x_px, update.y_px);
-                self.divider_move_events +|= 1;
-            },
-            .dropped => |update| {
-                self.divider_coalescer.absorb(update.x_px, update.y_px);
-                self.applyPendingDividerResize();
-                self.endDividerCapture();
-            },
-            .cancelled => self.endDividerCapture(),
-        };
-        if (kind == 3) self.endDividerCapture();
-        return true;
-    }
-
-    /// tick이 부르는 소비 지점 — 계약 §4.3. move 이벤트가 몇 번 왔든 최종 좌표 하나만 적용하고,
-    /// clamp 결과가 직전과 같으면 resize 팬아웃 자체를 하지 않는다.
-    fn applyPendingDividerResize(self: *AppSession) void {
-        const point = self.divider_coalescer.take() orelse return;
-        const seg = self.divider_capture_seg orelse return;
-        const split = self.divider_capture_split orelse return;
-        const raw = chrome.components.divider.dragRatio(seg, point.x_px, point.y_px) orelse return;
-        // 클램프는 host가 한다(maru.session.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다).
-        const clamped = maru.session.clampRatio(raw);
-        if (!self.divider_coalescer.commitIfChanged(clamped)) return;
-        split.ratio = clamped;
-        self.divider_resize_applications +|= 1;
-        self.resizeActiveTabPanes() catch {};
-        self.recomputeActivePaneRect();
-        self.metal_dirty = true;
-    }
-
     /// 사이드바 최소 폭(pt) — 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 🔔/◧/⚙/+ 아이콘, sidebar.zig headerHit)이
     /// 겹치지 않는 하한. 아이콘은 cell 폭에 비례하므로 고정 sidebar_min_pt(120)로는 큰 폰트에서 신호등과 겹친다 — 신호등
     /// 클리어런스 + 13칸을 px로 잡아 pt 환산한 값과 sidebar_min_pt 중 큰 쪽이다. 13칸 = 알림 그룹의 좌단(펼침 헤더의 종
@@ -5733,19 +5174,10 @@ pub const AppSession = struct {
         if (pt == self.sidebar_width_pt) return;
         self.sidebar_width_pt = pt;
         self.sidebar_width_px = layout_math.ptToPx(pt, self.scale_milli);
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab); // 모든 탭의 term 폭이 바뀐다(best-effort)
-        self.recomputeActivePaneRect();
+        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab); // 모든 탭의 term 폭이 바뀐다(best-effort)
+        pane_ops.recomputeActivePaneRect(self);
         self.rebuildSidebar() catch {}; // sidebar_cols 환산이 바뀌므로 밴드 재생성
         self.metal_dirty = true;
-    }
-
-    fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-        return layout_math.pointInRect(
-            x_px,
-            y_px,
-            dock_layout.outerDividerHitRect(self.dockGeometry(), self.dock.side, self.dockDividerGrabBandPx()),
-        );
     }
 
     fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
@@ -5766,15 +5198,10 @@ pub const AppSession = struct {
         const effective_px = self.dockGeometry().dock_size_px;
         self.dock.size = dock_layout.sizePtForEffectiveWidth(effective_px, 0, self.scale_milli);
         if (self.dock.size == before) return;
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
+        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+        pane_ops.recomputeActivePaneRect(self);
         self.last_resize_size = null;
         self.metal_dirty = true;
-    }
-
-    fn dockDividerGrabBandPx(self: *const AppSession) u32 {
-        if (self.dividerThicknessPx() == 0) return 0;
-        return dock_layout.dividerGrabBandPx(self.scale_milli);
     }
 
     /// 사이드바 접기/펼치기 토글 — 헤더 토글 아이콘·접힘 시 좌상단 펼치기 버튼이 부른다. 접으면 effective 폭이 0(카드·
@@ -5790,43 +5217,10 @@ pub const AppSession = struct {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         self.sidebar_width_px = if (self.sidebar_collapsed) 0 else layout_math.ptToPx(self.sidebar_width_pt, self.scale_milli);
         self.titlebar_strip_px = self.computeTitlebarStripPx(); // 접힘=신호등 높이, 펼침=한 줄 — termRect/grid 전에 갱신
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
+        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+        pane_ops.recomputeActivePaneRect(self);
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
-    }
-
-    /// 활성 탭이 split(panel 2개 이상)인가. 마우스 클릭으로 panel을 전환할지(단일이면 무동작) 판정에 쓴다.
-    fn activeTabHasSplit(self: *AppSession) bool {
-        return PaneTree.leafCount(self.activeTab().tree) > 1;
-    }
-
-    /// 활성 탭 안에서 포커스를 panel index로 옮긴다(입력/커서/IME/렌더가 따라간다). 활성 panel surface를
-    /// 탭 대표(`surface_ptrs[active_tab]` = `app_window.active()`)와 `frame_loop.pump`에 재바인딩하고
-    /// 활성 panel rect를 다시 계산한다. 같은 panel이거나 범위 밖이면 무동작. 탭 자체는 안 바꾼다.
-    pub fn focusPane(self: *AppSession, pane_index: usize) void {
-        const tab = self.activeTab();
-        if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
-        self.commitComposition(); // input owner를 바꾸기 전에 원 surface의 marked text를 확정한다.
-        self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
-        tab.active_pane = pane_index;
-        self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        self.recomputeActivePaneRect();
-        self.metal_dirty = true;
-    }
-
-    /// 활성 탭에서 주어진 panel을 찾아 포커스한다(찾으면 true). 마우스/키보드 hit-test가 고른 `*Pane`으로
-    /// 포커스를 옮길 때 쓴다(panel→index 매핑).
-    pub fn focusPaneByPtr(self: *AppSession, pane: *Pane) bool {
-        const tab = self.activeTab();
-        for (tab.panes.items, 0..) |p, i| {
-            if (p == pane) {
-                self.focusPane(i);
-                return true;
-            }
-        }
-        return false;
     }
 
     /// 활성 pane 안에서 보이는 Term(가로 탭)을 term_index로 바꾼다(탭 전환). 활성 Term surface를 탭
@@ -5840,7 +5234,7 @@ pub const AppSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
             if (lr.leaf != pane) continue;
-            const pb = self.paneBar(lr.rect, pane) orelse return;
+            const pb = pane_ops.paneBar(self, lr.rect, pane) orelse return;
             const m = barMetrics(pb.tabs, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
             if (!m.has_scroll) return; // 안 넘침 — 다 보임
             // **드래그 중에는 스크롤을 건드리지 않는다.** 보이는 슬롯은 preview 공간인데 `tab_scroll_cols`는
@@ -5859,7 +5253,7 @@ pub const AppSession = struct {
     }
 
     pub fn focusTerm(self: *AppSession, term_index: usize) void {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
         self.commitComposition(); // 새 Term으로 확정 바이트/preedit이 넘어가지 않게 target pin을 먼저 비운다.
         self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
@@ -5871,7 +5265,7 @@ pub const AppSession = struct {
         // 버린다(워크스페이스 전환·창 병합과 같은 규칙, code-review max).
         self.dropPendingDockFocusIfHidden();
         self.file_tree_rows_dirty = true; // 활성 파일이 바뀌었을 수 있다 — 트리 활성 마커 갱신
-        self.recomputeActivePaneRect();
+        pane_ops.recomputeActivePaneRect(self);
         self.metal_dirty = true;
     }
 
@@ -5879,26 +5273,15 @@ pub const AppSession = struct {
     /// **이동은 보이는 순서에서 센다** — 드래그 중이면 탭 바가 preview 순서를 그리므로, model 인덱스로 세면
     /// "오른쪽 다음 탭"이 화면에서 인접하지 않은 탭이 된다(§4.4 "보이는 것이 조작되는 것").
     fn focusTermRelative(self: *AppSession, delta: i64) void {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         const n = pane.terms.items.len;
         if (n <= 1) return;
-        const order = self.paneTermOrder(pane);
+        const order = pane_ops.paneTermOrder(self, pane);
         if (order.len != n) return;
-        const cur: i64 = @intCast(self.paneActiveTermIndex(pane));
+        const cur: i64 = @intCast(pane_ops.paneActiveTermIndex(self, pane));
         const next_slot: usize = @intCast(@mod(cur + delta, @as(i64, @intCast(n))));
         // 고른 것은 슬롯이고 `focusTerm`은 model 인덱스를 받는다.
         self.focusTerm(self.termModelIndex(pane, order[next_slot]) orelse return);
-    }
-
-    /// 활성 워크스페이스의 split(pane)을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘]/⌘[). pane이
-    /// 1개(분할 없음)면 무동작. focusPane이 active_pane·대표 surface·active rect를 갱신한다(focusTermRelative와 동형).
-    fn focusPaneRelative(self: *AppSession, delta: i64) void {
-        const tab = self.activeTab();
-        const n = tab.panes.items.len;
-        if (n <= 1) return;
-        const cur: i64 = @intCast(tab.active_pane);
-        const next = @mod(cur + delta, @as(i64, @intCast(n)));
-        self.focusPane(@intCast(next));
     }
 
     /// CIM4b(§4.4): 탭 드래그 시작 순서를 transaction 버퍼에 보관한다. 실패(OOM)하면 false — 호출자는 드래그를
@@ -5962,7 +5345,7 @@ pub const AppSession = struct {
     /// `tick`이 매 프레임 `tabDragSetChanged`로 폐기한다.
     /// clamp는 주입하지 않는다: pin 그룹은 워크스페이스(`self.tabs`) 축 전용이고 `pane.terms`에는 없으며,
     /// 목적지 범위 clamp는 `Metrics.tabIndex`가 이미 [0,len)으로 한다.
-    fn tabDragTransaction(self: *AppSession, pane: *Pane) ?chrome.ui.provisional_order.Transaction {
+    pub fn tabDragTransaction(self: *AppSession, pane: *Pane) ?chrome.ui.provisional_order.Transaction {
         if (!self.pointerGestureIs(.terminal_tab)) return null;
         const drag = self.pointer_gesture_owner.terminal_tab;
         if (drag.pane != pane) return null;
@@ -5974,25 +5357,6 @@ pub const AppSession = struct {
             .preview = self.tab_drag_preview.items,
             .source = @intFromPtr(pane.terms.items[drag.index]),
         };
-    }
-
-    /// drag 중이면 preview 순서, 아니면 model 순서. **paint와 hit-test가 함께 이것을 읽는다**(§4.4) — 갈리면
-    /// 보이는 자리와 놓이는 자리가 달라진다.
-    fn paneTermOrder(self: *AppSession, pane: *Pane) []const *Term {
-        if (self.tabDragTransaction(pane) == null) return pane.terms.items;
-        if (self.tab_drag_order.items.len != pane.terms.items.len) return pane.terms.items;
-        return self.tab_drag_order.items;
-    }
-
-    /// 활성 탭의 **보이는** 위치. `pane.active_term`은 model 인덱스라 preview와 순서가 다르면 두 해석이 갈린다 —
-    /// preview를 그대로 쓰는 게 아니라 model이 가리키는 `*Term`을 preview에서 되찾는다.
-    fn paneActiveTermIndex(self: *AppSession, pane: *Pane) usize {
-        const order = self.paneTermOrder(pane);
-        if (order.ptr == pane.terms.items.ptr) return pane.active_term;
-        if (pane.active_term >= pane.terms.items.len) return pane.active_term;
-        const active = pane.terms.items[pane.active_term];
-        for (order, 0..) |t, i| if (t == active) return i;
-        return pane.active_term;
     }
 
     /// 드래그 중인 Term 탭을 현재 마우스 x에 따라 소스 pane 바 안에서 재정렬한다(PR-E1: pane 내). 소스 pane의
@@ -6014,7 +5378,7 @@ pub const AppSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
             if (lr.leaf != pane) continue;
-            const pb = self.paneBar(lr.rect, pane) orelse return;
+            const pb = pane_ops.paneBar(self, lr.rect, pane) orelse return;
             const m = barMetrics(pb.tabs, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
             const target = m.tabIndex(pane.terms.items.len, x_px);
             const before = txn.destination();
@@ -6061,7 +5425,7 @@ pub const AppSession = struct {
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
-            const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+            const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
             if (layout_math.pointInRect(x_px, y_px, pb.full)) { // 클릭 판정은 전체 바(라벨 포함)
                 const dst_count = lr.leaf.terms.items.len; // dst pane은 항상 Term ≥1(빈 pane은 collapse됨)
                 const m = barMetrics(pb.tabs, self.cell_width_px, dst_count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
@@ -6072,91 +5436,19 @@ pub const AppSession = struct {
                     self.commitTabDragOrder(src, m.tabIndex(dst_count, x_px));
                     return;
                 }
-                self.moveTermToPane(src, drag.index, lr.leaf, m.tabIndex(dst_count, x_px));
+                pane_ops.moveTermToPane(self, src, drag.index, lr.leaf, m.tabIndex(dst_count, x_px));
                 return;
             }
         }
         // 바가 아니면 어느 pane '본문' drop-zone(상/하/좌/우 절반) 위인지 — 그 방향으로 새 split을 만든다(④:
         // Term을 다른 pane 본문에 떨어뜨려 재배치). 단일 Term pane을 자기 본문에 떨어뜨리면 무의미라 무동작.
         for (leaf_rects.items) |lr| {
-            const body = self.paneTermRect(lr.rect);
+            const body = pane_ops.paneTermRect(self, lr.rect);
             if (layout_math.paneDropZone(body, x_px, y_px)) |zone| {
-                self.moveTermToNewSplit(src, drag.index, lr.leaf, zone);
+                pane_ops.moveTermToNewSplit(self, src, drag.index, lr.leaf, zone);
                 return;
             }
         }
-    }
-
-    /// 드래그한 Term을 src에서 빼 '새 pane'에 담고, target pane의 자리(leaf)를 split{...}로 바꿔 zone 방향으로
-    /// 끼운다(④: Term 탭을 다른 pane 본문에 드롭 → 거기 새 split). left/right=좌우(horizontal), top/bottom=
-    /// 상하(vertical); left/top은 새 pane이 앞(a), right/bottom은 뒤(b). 모든 alloc을 먼저 해 실패 시 트리/terms를
-    /// 안 건드린다(Term은 src에 남는다). 성공 후 새 pane으로 포커스, src가 비면 collapse, 전 panel resize.
-    /// target==src인데 src Term이 1개뿐이면(자기를 자기로 split) 무의미 — 무동작.
-    fn moveTermToNewSplit(self: *AppSession, src: *Pane, src_idx: usize, target: *Pane, zone: layout_math.PaneDropZone) void {
-        if (src_idx >= src.terms.items.len) return;
-        if (target == src and src.terms.items.len <= 1) return;
-        const tab = self.activeTab();
-        const dir: maru.session.SplitDirection = switch (zone) {
-            .left, .right => .horizontal,
-            .top, .bottom => .vertical,
-        };
-        const new_first = switch (zone) {
-            .left, .top => true,
-            .right, .bottom => false,
-        };
-        // 1) 실패 가능한 alloc을 먼저(트리/terms는 아직 안 건드림): 빈 새 pane + terms capacity + panes append + split.
-        const new_pane = self.allocator.create(Pane) catch return;
-        new_pane.* = .{};
-        new_pane.terms.ensureTotalCapacity(self.allocator, 1) catch {
-            self.allocator.destroy(new_pane);
-            return;
-        };
-        tab.panes.append(self.allocator, new_pane) catch {
-            new_pane.terms.deinit(self.allocator);
-            self.allocator.destroy(new_pane);
-            return;
-        };
-        const split = self.allocator.create(PaneTree.Split) catch {
-            _ = tab.panes.pop();
-            new_pane.terms.deinit(self.allocator);
-            self.allocator.destroy(new_pane);
-            return;
-        };
-        split.* = .{
-            .direction = dir,
-            .ratio = 0.5,
-            .a = if (new_first) .{ .leaf = new_pane } else .{ .leaf = target },
-            .b = if (new_first) .{ .leaf = target } else .{ .leaf = new_pane },
-        };
-        // 2) 트리에서 target leaf → split{...} 교체. 미발견이면 전부 원복(트리는 변형 전이라 무변).
-        if (!PaneTree.replaceLeaf(&tab.tree, target, .{ .split = split })) {
-            self.allocator.destroy(split);
-            _ = tab.panes.pop();
-            new_pane.terms.deinit(self.allocator);
-            self.allocator.destroy(new_pane);
-            return;
-        }
-        // replace 성공 뒤는 infallible다. 새 split을 활성화하기 전에 원 surface의 marked text를 확정한다.
-        self.commitComposition();
-        // 3) 이제 infallible: src에서 Term을 빼 새 pane으로(capacity 확보됨). Term은 heap-pin이라 surface/reader 안 움직임.
-        const term = src.terms.orderedRemove(src_idx);
-        new_pane.terms.appendAssumeCapacity(term);
-        new_pane.active_term = 0;
-        // src에서 임의 위치(src_idx)를 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 비면(아래 collapse) 0 무의미.
-        src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
-        self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
-        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
-        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
-        // **사이드바도 다시 투영한다**: 에이전트 목록 행은 pane/term **인덱스**를 들고 있어, Term이 reap으로 빠지면
-        // 남은 행의 인덱스가 다른 Term을 가리킨다(범위 검사만으로는 못 걸러낸다 — 길이는 여전히 유효하므로).
-        // 그대로 두면 사용자가 보는 행과 클릭이 닫는 Term이 어긋난다(code-review max).
-        self.rebuildSidebar() catch {};
-        if (src.terms.items.len == 0) self.collapsePaneIn(tab, src); // src가 비면 collapse(removeLeaf)
-        // 4) 새 pane으로 포커스 + 대표 surface 재바인딩 + 전 panel을 새 leaf rect grid로 resize + 좌표 재계산.
-        _ = self.focusPaneByPtr(new_pane);
-        self.resizeActiveTabPanes() catch {};
-        self.recomputeActivePaneRect();
-        self.metal_dirty = true;
     }
 
     /// 탭 드래그 중 마우스가 올라간 드롭 타겟을 판정한다(④b 하이라이트용 — dropTabAt의 커밋 판정과 같은 우선순위).
@@ -6171,14 +5463,14 @@ pub const AppSession = struct {
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
         for (leaf_rects.items) |lr| {
-            const bar = self.paneBarRect(lr.rect) orelse continue;
+            const bar = pane_ops.paneBarRect(self, lr.rect) orelse continue;
             if (layout_math.pointInRect(x_px, y_px, bar)) {
                 if (lr.leaf == src) return null; // 자기 바 — 재정렬(드롭 아님)
                 return .{ .pane = lr.leaf, .zone = null };
             }
         }
         for (leaf_rects.items) |lr| {
-            const body = self.paneTermRect(lr.rect);
+            const body = pane_ops.paneTermRect(self, lr.rect);
             if (layout_math.paneDropZone(body, x_px, y_px)) |zone| {
                 if (lr.leaf == src and src.terms.items.len <= 1) return null; // 자기-split 무의미
                 return .{ .pane = lr.leaf, .zone = zone };
@@ -6222,7 +5514,7 @@ pub const AppSession = struct {
         const bg = premultipliedRgba(self.sidebarActiveBg() & 0x00FF_FFFF, 0x55); // 반투명 강조(≈33%)
         for (leaf_rects.items) |lr| {
             if (lr.leaf != target.pane) continue;
-            const zone_rect = if (target.zone) |z| layout_math.halfRect(self.paneTermRect(lr.rect), z) else (self.paneBarRect(lr.rect) orelse lr.rect);
+            const zone_rect = if (target.zone) |z| layout_math.halfRect(pane_ops.paneTermRect(self, lr.rect), z) else (pane_ops.paneBarRect(self, lr.rect) orelse lr.rect);
             if (zone_rect.w == 0 or zone_rect.h == 0) return;
             const cols = @min(@max(zone_rect.w / cw, 1), @as(u32, std.math.maxInt(u16)));
             var y = zone_rect.y;
@@ -6391,289 +5683,10 @@ pub const AppSession = struct {
         };
     }
 
-    /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
-    /// 옮긴 Term을 dst의 활성 탭으로 만들고, src가 비면 collapse한다. 그 뒤 모든 panel을 새 leaf rect grid로
-    /// resize + 좌표 재계산. insert 실패는 src로 원복한다. src==dst거나 인덱스 밖이면 무동작. Term은 heap-pin
-    /// (`*Term`)이라 pane 사이를 포인터로 옮겨도 surface/reader 주소가 안 움직인다(runtime link도 그대로).
-    fn moveTermToPane(self: *AppSession, src: *Pane, src_idx: usize, dst: *Pane, dst_idx: usize) void {
-        if (src == dst or src_idx >= src.terms.items.len) return;
-        const term = src.terms.orderedRemove(src_idx);
-        const idx = @min(dst_idx, dst.terms.items.len);
-        dst.terms.insert(self.allocator, idx, term) catch {
-            src.terms.insert(self.allocator, @min(src_idx, src.terms.items.len), term) catch {}; // 원복
-            return;
-        };
-        // insert 성공 뒤부터 구조 전이는 infallible다. dst로 input owner를 옮기기 전에 현재 조합을
-        // pin된 원 surface로 확정한다(드래그 중 활성 pane이 바뀌어도 새 Term으로 새지 않게).
-        self.commitComposition();
-        // src에서 임의 위치(src_idx)를 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 비면(아래 collapse) 0 무의미.
-        src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
-        dst.active_term = idx; // 옮긴 Term을 dst의 활성으로
-
-        self.hovered_tab = null; // 트리/탭이 바뀌니 stale 호버 비움
-        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
-        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
-        if (src.terms.items.len == 0) self.collapsePane(src); // 마지막 Term이 나갔으면 src collapse(형제로)
-
-        // dst를 활성 pane으로(collapse로 인덱스가 밀렸을 수 있어 다시 찾는다) + 대표 surface 재바인딩.
-        const tab = self.activeTab();
-        for (tab.panes.items, 0..) |p, i| {
-            if (p == dst) {
-                tab.active_pane = i;
-                break;
-            }
-        }
-        self.surface_ptrs.items[self.app_window.active_tab] = dst.activeTerm().surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        self.resizeActiveTabPanes() catch {}; // 옮긴 Term을 dst term rect grid로(+ src 형제가 빈자리 확장)
-        self.recomputeActivePaneRect();
-        self.metal_dirty = true;
-    }
-
-    /// 비어 있는 pane(모든 Term이 옮겨 나감/exit)을 활성 탭에서 collapse한다. cross-pane 이동(moveTermToPane)이
-    /// 쓰는 활성 탭 전용 래퍼 — 임의 탭은 collapsePaneIn을 직접 쓴다.
-    fn collapsePane(self: *AppSession, pane: *Pane) void {
-        self.collapsePaneIn(self.activeTab(), pane);
-    }
-
-    /// 주어진 탭(tab)에서 pane을 트리(removeLeaf, 형제로 collapse)와 panes 리스트에서 떼지만 **해제하지 않고**
-    /// 보존한다 — pane은 살아남아 호출자가 다른 워크스페이스에 심는다(분리·합치기). 단일 pane 워크스페이스(형제
-    /// 없음)면 false(호출자가 no-op). 성공 시 떼어낸 split을 destroy하고 active_pane을 범위 clamp한다. pane이
-    /// 살아 있으므로 invalidateForFreedPane은 부르지 않는다(포인터가 유효 — destroy 경로인 collapsePaneIn만 부른다).
-    /// divider_drag가 이 split이면 destroy 전에 표적 null한다(무관 드래그는 보존 — removeLeaf가 freed split을 surface).
-    fn detachPaneFromTab(self: *AppSession, tab: *Tab, pane: *Pane) bool {
-        if (tab.panes.items.len <= 1) return false;
-        const freed_split = PaneTree.removeLeaf(&tab.tree, pane) orelse return false;
-        self.invalidateForFreedSplit(freed_split);
-        self.allocator.destroy(freed_split);
-        var removed_index: usize = tab.panes.items.len; // 미발견 sentinel(>= 모든 활성 인덱스 → 보정 no-op)
-        for (tab.panes.items, 0..) |p, i| {
-            if (p == pane) {
-                removed_index = i;
-                _ = tab.panes.orderedRemove(i);
-                break;
-            }
-        }
-        // 임의 위치(removed_index)의 pane을 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 배경 pane collapse(reap
-        // 경로 closeTermAt→collapsePaneIn 포함) 시 활성 pane이 엉뚱한 pane으로 튀던 버그. len>1 가드 후라 제거 후 len>=1.
-        tab.active_pane = activeIndexAfterRemoval(tab.active_pane, removed_index, tab.panes.items.len);
-        return true;
-    }
-
-    /// 주어진 탭(tab)에서 비어 있는 pane을 떼고(detachPaneFromTab, 형제로 collapse) 해제한다. split에서만(형제가
-    /// 있을 때) 일어나므로 단일 pane이면 무동작. pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다.
-    /// 활성/배경 탭 모두에 쓴다(detach + destroy의 단일 출처 — 분리·합치기는 detach만 쓰고 pane을 보존한다).
-    fn collapsePaneIn(self: *AppSession, tab: *Tab, pane: *Pane) void {
-        if (!self.detachPaneFromTab(tab, pane)) return;
-        self.destroyPane(pane);
-    }
-
-    /// 활성 탭의 한 pane(분할 영역)을 **통째로** 떼어 새 단독 워크스페이스로 분리한다(grip 핸들을 사이드바 빈
-    /// 영역에 드롭). Term을 옮기는 게 아니라 `*Pane` 포인터를 새 Tab의 단일 leaf 트리로 재부모화한다 — 담긴
-    /// Term(가로 탭)·surface/PTY는 heap-pin이라 그대로 따라온다. 단독 pane 워크스페이스(형제 없음)면 빈
-    /// 워크스페이스만 남으므로 **무동작**(단독 워크스페이스를 옮기는 건 사이드바 카드 재정렬의 몫). 새 탭을 끝에
-    /// 붙이고 활성으로 만든다(사이드바 빈 영역 = 목록 아래 = 끝). 단일 출처: docs/tabs-splits-layout.md.
-    fn promotePaneToNewWorkspace(self: *AppSession, pane: *Pane) void {
-        const src_tab = self.activeTab();
-        if (src_tab.panes.items.len <= 1) return; // 단독 pane — 무동작
-        const src_index = self.app_window.active_tab;
-        // 1) 실패 가능한 alloc 먼저(트리는 아직 안 건드림) — 새 Tab + 모든 리스트 capacity 예약. 실패하면 pane은
-        //    src에 그대로 남는다(원자성). 예약을 다 끝낸 뒤의 단계는 infallible이라 부분 실패가 없다.
-        const tab = self.allocator.create(Tab) catch return;
-        tab.* = .{};
-        tab.panes.ensureTotalCapacity(self.allocator, 1) catch {
-            self.allocator.destroy(tab);
-            return;
-        };
-        self.tabs.ensureUnusedCapacity(self.allocator, 1) catch {
-            tab.panes.deinit(self.allocator);
-            self.allocator.destroy(tab);
-            return;
-        };
-        self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1) catch {
-            tab.panes.deinit(self.allocator);
-            self.allocator.destroy(tab);
-            return;
-        };
-        // 모든 실패 가능한 예약이 끝났다. pane을 새 workspace의 input owner로 만들기 전에 원 surface의
-        // client-local preedit을 확정해, Surface 포인터와 함께 다른 attachment로 이동하지 않게 한다.
-        self.commitComposition();
-        // 2) infallible: src에서 pane을 떼고(형제로 collapse) src 대표 surface를 새 활성 Term으로 재바인딩.
-        _ = self.detachPaneFromTab(src_tab, pane); // len>1 확인했으므로 true
-        self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
-        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
-        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
-        self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
-        // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs에 끼워 활성으로. **끝 append가 아니라 첫 group_start
-        //    마커 직전**(= 최상위 구간 끝)에 넣는다 — §2.1 연속 파티션상 리스트 끝 탭은 그룹이 하나라도 있으면 항상
-        //    마지막 그룹의 멤버로 위치 파생돼(들여쓰기·마지막 그룹이 접혔으면 숨김), "단독 워크스페이스로 분리"가
-        //    그룹에 흡수된다. removeFromGroupForTab이 카드를 첫 마커 앞으로 옮기는 것과 같은 결(firstGroupStartInRegion 공유).
-        //    tabs/surface_ptrs를 **같은 인덱스**에 insert해 병렬 배열 정합을 유지하고 active_tab을 그 인덱스로. 그룹 전무면
-        //    firstGroupStartInRegion=null → 끝(=기존 동작 보존). ensureUnusedCapacity를 위에서 예약했으므로 insert는 realloc/실패 없음.
-        //    **핀 리전(§12 GP1)**: 새 탭은 비고정(Tab 기본 pinned=false)이라 **비고정 리전** [pinned_count, len)의 첫 마커
-        //    앞에 넣는다 — 고정 프리픽스를 침범하지 않는다. 고정 그룹 0개면 모든 마커가 비고정 리전이라 리전 앵커=전역 앵커.
-        tab.panes.appendAssumeCapacity(pane);
-        tab.active_pane = 0;
-        tab.tree = .{ .leaf = pane };
-        const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse self.tabs.items.len;
-        self.tabs.insertAssumeCapacity(insert_at, tab);
-        self.surface_ptrs.insertAssumeCapacity(insert_at, pane.activeTerm().surface);
-        self.app_window.tabs = self.surface_ptrs.items; // items 슬라이스 길이 변경 — 새 items로 재바인딩
-        self.app_window.active_tab = insert_at;
-        // 4) 양쪽 resize(소스는 형제가 빈자리 확장, 새 탭은 단일 leaf 풀 영역) + 좌표/사이드바 갱신.
-        self.resizeTabPanes(src_tab); // 비활성이라 best-effort
-        self.resizeActiveTabPanes() catch {};
-        self.recomputeActivePaneRect();
-        self.metal_dirty = true;
-        self.rebuildSidebar() catch {};
-    }
-
-    /// 활성 탭의 한 pane을 통째로 떼어 **다른** 워크스페이스(target_index)에 합친다(grip 핸들을 그 카드에 드롭).
-    /// target의 활성 pane을 좌우(`split_horizontal`)로 나눠 들어온 pane을 우측·활성으로 둔다(⌘D 관례 — 카드는
-    /// 방향 정보가 없어 기본 좌우). 트리 수술은 moveTermToNewSplit과 같은 모양(replaceLeaf로 target leaf → split)
-    /// 이되 새 pane을 만들지 않고 떼어온 pane을 재사용한다. 소스의 마지막 pane이면 빈 소스 워크스페이스를 함께
-    /// 제거한다. target이 자기 워크스페이스거나 범위 밖이면 무동작. 단일 출처: docs/tabs-splits-layout.md.
-    fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usize) void {
-        const src_tab = self.activeTab();
-        const src_index = self.app_window.active_tab;
-        if (target_index == src_index or target_index >= self.tabs.items.len) return; // 자기/범위 밖 — 무동작
-        const target_tab = self.tabs.items[target_index];
-        const target_active = target_tab.activePane();
-        // 1) 실패 가능한 alloc 먼저: split 노드 + target.panes capacity. 실패하면 src 무변.
-        const split = self.allocator.create(PaneTree.Split) catch return;
-        target_tab.panes.ensureUnusedCapacity(self.allocator, 1) catch {
-            self.allocator.destroy(split);
-            return;
-        };
-        split.* = .{
-            .direction = .horizontal,
-            .ratio = 0.5,
-            .a = .{ .leaf = target_active },
-            .b = .{ .leaf = pane },
-        };
-        // 2) target 트리에 split을 먼저 끼운다(pane이 잠시 양쪽 트리 leaf가 되지만 동기라 무해). target_active는
-        //    target leaf라 false일 수 없으나, 도달 불가 분기에서 split만 해제하고 src를 안 건드린 채 빠진다.
-        if (!PaneTree.replaceLeaf(&target_tab.tree, target_active, .{ .split = split })) {
-            self.allocator.destroy(split);
-            return;
-        }
-        // 이후 수술은 infallible다. target workspace로 포커스를 옮기기 전에 조합을 원 surface에 확정한다.
-        self.commitComposition();
-        // 3) infallible: src에서 떼고 두 탭 대표 surface 재바인딩 + target.panes에 pane 추가. 마지막 pane이면
-        // 빈 workspace를 남기지 않고 Tab shell만 제거한다(Pane/Term/surface/PTY는 target이 그대로 승계).
-        const source_workspace_removed = src_tab.panes.items.len == 1;
-        if (source_workspace_removed) {
-            self.cancelPointerGesture();
-            _ = self.inheritGroupMarker(src_index);
-            _ = self.reestablishTopLevelBoundaryOnMove(src_index);
-            _ = self.tabs.orderedRemove(src_index);
-            _ = self.surface_ptrs.orderedRemove(src_index);
-            self.app_window.tabs = self.surface_ptrs.items;
-        } else {
-            _ = self.detachPaneFromTab(src_tab, pane);
-            self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
-        }
-        self.hovered_tab = null;
-        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
-        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
-        target_tab.panes.appendAssumeCapacity(pane);
-        target_tab.active_pane = target_tab.panes.items.len - 1;
-        const landed_index = if (source_workspace_removed and target_index > src_index) target_index - 1 else target_index;
-        self.surface_ptrs.items[landed_index] = target_tab.activeTerm().surface;
-        if (source_workspace_removed) {
-            // src_tab은 이제 collection 밖의 빈 workspace shell이다. tree의 leaf와 panes 항목은 target이 소유하므로
-            // destroyTabStandalone/destroyPane을 쓰지 않고 컨테이너와 owned sidebar metadata만 정리한다.
-            if (self.renamingWorkspace(src_tab) or self.renamingGroup(src_tab)) {
-                self.rename = null;
-                self.rename_input.clear();
-            }
-            if (self.context_menu_target) |t| {
-                const hit = switch (t) {
-                    .workspace => |w| w == src_tab,
-                    .group => |g| g == src_tab,
-                    else => false,
-                };
-                if (hit) {
-                    self.context_menu_target = null;
-                    self.chrome_host.context_menu.hide();
-                }
-            }
-            if (src_tab.custom_name) |n| self.allocator.free(n);
-            if (src_tab.group_start) |g| self.allocator.free(g);
-            PaneTree.deinit(self.allocator, src_tab.tree); // leaf는 해제하지 않으며 split은 단독 pane이라 없음
-            src_tab.panes.deinit(self.allocator);
-            self.allocator.destroy(src_tab);
-            self.normalizePinnedFromGroups();
-            self.floatLocalPinsAllGroups();
-        }
-        // 4) 소스 resize(형제 확장) 후 target을 활성으로 전환(switchTab이 target resize+좌표+사이드바 재빌드).
-        if (!source_workspace_removed) self.resizeTabPanes(src_tab);
-        _ = self.switchTab(landed_index);
-        self.metal_dirty = true;
-    }
-
     /// pane grip 드래그의 드롭 목적지 — 사이드바 좌표를 해석한다. 카드 위면 그 워크스페이스에 **합치기**(merge),
     /// 사이드바 빈 영역(헤더·목록 아래)이면 **새 워크스페이스**(new_workspace). 사이드바 밖이거나 자기 워크스페이스
     /// 카드면 null(드롭 아님 — no-op). dropPaneAt(커밋)이 단일 출처로 쓴다.
-    const PaneDropDest = union(enum) { new_workspace, merge: usize };
-    fn computePaneDropDest(self: *AppSession, x_px: f64, y_px: f64) ?PaneDropDest {
-        if (!self.inSidebar(x_px)) return null; // 사이드바 밖 — 드롭 아님
-        // 헤더(검색바·◧/⚙/+ 아이콘) 영역은 드롭 불가 — 여기서 떼면 sidebarSlotAt가 null이라 아래 폴백이 new_workspace로
-        // 떨어져 '검색바에 떨어뜨려도 새 워크스페이스가 생기는' 오동작이 된다(하이라이트도 카드 아래 행에 잘못 켜진다).
-        if (y_px < @as(f64, @floatFromInt(self.sidebar_header_height_px))) return null;
-        if (self.sidebarSlotAt(y_px)) |slot| {
-            // 유효 row 위. 카드면 그 워크스페이스에 merge. **그룹 헤더 row(visibleTab=null)면 no-op** — pane을
-            // "그룹"에 넣는 개념이 없고(그룹은 워크스페이스가 아니라 묶음), 새 워크스페이스도 아니므로(옛 코드는 여기서
-            // new_workspace로 falls through해 헤더에 떨어뜨려도 원치 않는 새 워크스페이스가 생겼다, code-review #3)
-            // 최소 안전 동작으로 드롭을 무시한다(상단 검색 헤더 가드와 같은 결). past-end(리스트 아래)는 sidebarSlotAt이
-            // null이라 이 블록을 건너뛰어 아래 new_workspace로 간다(자연스러운 "빈 영역=새 워크스페이스" 유지).
-            const tab_idx = self.visibleTab(slot) orelse return null; // 그룹 헤더 row → 드롭 무동작(no-op)
-            if (tab_idx == self.app_window.active_tab) return null; // 자기 워크스페이스 — 무의미
-            return .{ .merge = tab_idx };
-        }
-        return .new_workspace; // 사이드바 빈 영역(카드 목록 아래) — 새 워크스페이스
-    }
-
-    /// new_workspace 드롭 하이라이트 표시 슬롯 — promotePaneToNewWorkspace가 새(비고정) 탭을 **비고정 리전의 첫 group_start
-    /// 마커 직전**(§12 GP1 `firstGroupStartInRegion(pinned_count, len)` = 그 리전 최상위 구간 끝)에 끼우므로, 하이라이트도
-    /// **그 마커의 group_header row**를 가리켜 실제 삽입 위치와 정합한다(전역 첫 헤더가 아니다 — 고정 색 그룹이 앞에 있으면
-    /// 전역 첫 헤더는 고정 리전이라 삽입점과 어긋난다). 거기에 .drop_zone 밴드를 그려 새 카드가 들어설 자리를 미리 보인다
-    /// (bandFill이 헤더 높이로 그려 카드 높이와는 살짝 다르지만 위치는 정확). 비고정 그룹이 없으면(그룹 전무·전부 고정·검색
-    /// 으로 헤더 숨김) 카드 목록 아래 행(rows.len)으로 폴백 = 기존 "빈 영역=새 워크스페이스" 동작 보존. 고정 그룹 0개면
-    /// 비고정 리전 = 전역이라 그 마커의 헤더 = 첫 group_header row → 옛 동작과 byte-identical.
-    fn newWorkspaceHighlightSlot(self: *const AppSession) usize {
-        const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse return self.sidebar_rows.items.len;
-        for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
-            .group_header => |h| if (h.tab == insert_at) return slot,
-            .agent_toggle, .agent => {},
-            .card => {},
-        };
-        return self.sidebar_rows.items.len;
-    }
-
-    /// 드롭 타겟 하이라이트로 강조할 사이드바 표시 슬롯 — computePaneDropDest(드롭 판정 단일 출처)에서 도출한다.
-    /// merge면 그 카드의 표시 슬롯(displaySlotOf), new_workspace면 첫 그룹 헤더 앞(최상위 구간 끝 = 실제 삽입 위치,
-    /// 그룹 없으면 카드 아래 행). 드롭 아님(밖/자기)이면 null.
-    fn paneDropHighlightSlot(self: *AppSession, x_px: f64, y_px: f64) ?usize {
-        return switch (self.computePaneDropDest(x_px, y_px) orelse return null) {
-            .new_workspace => self.newWorkspaceHighlightSlot(), // 최상위 구간 끝(첫 그룹 헤더 앞) — 삽입 위치와 정합
-            .merge => |tab_idx| self.displaySlotOf(tab_idx), // 합칠 카드의 표시 슬롯(검색 필터로 숨겨졌으면 null)
-        };
-    }
-
-    /// pane grip 드래그 up(drop) — 드롭 목적지에 따라 분리(promote)/합치기(merge). 사이드바 밖/자기 워크스페이스면
-    /// 무동작. mouse가 up(kind 3)에서 부른다(pane_drag 캡처 경로).
-    fn dropPaneAt(self: *AppSession, x_px: f64, y_px: f64) void {
-        const pane = switch (self.pointer_gesture_owner) {
-            .pane => |drag| drag.pane,
-            else => return,
-        };
-        const dest = self.computePaneDropDest(x_px, y_px) orelse return;
-        switch (dest) {
-            .new_workspace => self.promotePaneToNewWorkspace(pane),
-            .merge => |idx| self.mergePaneIntoWorkspace(pane, idx),
-        }
-    }
+    pub const PaneDropDest = union(enum) { new_workspace, merge: usize };
 
     const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
 
@@ -6751,7 +5764,7 @@ pub const AppSession = struct {
             pane.active_term = activeIndexAfterRemoval(pane.active_term, term_index, pane.terms.items.len);
             self.refreshAfterReap(tab_index);
         } else if (tab.panes.items.len > 1) {
-            self.collapsePaneIn(tab, pane); // 빈 pane을 형제로 collapse(active_pane clamp 포함)
+            pane_ops.collapsePaneIn(self, tab, pane); // 빈 pane을 형제로 collapse(active_pane clamp 포함)
             self.refreshAfterReap(tab_index);
         } else {
             self.closeTab(tab_index); // 탭의 마지막 pane이 비었다 — 워크스페이스 close(대표 surface·active_tab은 closeTab가 처리)
@@ -6765,44 +5778,20 @@ pub const AppSession = struct {
         const tab = self.tabs.items[tab_index];
         self.surface_ptrs.items[tab_index] = tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
-        self.resizeTabPanes(tab);
+        pane_ops.resizeTabPanes(self, tab);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
         self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
         if (tab_index == self.app_window.active_tab) {
-            self.recomputeActivePaneRect();
+            pane_ops.recomputeActivePaneRect(self);
             self.metal_dirty = true;
         }
-    }
-
-    /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T). 활성 pane의 현재 rect grid
-    /// 크기로 새 셸을 spawn해 pane.terms에 더한다. spawn/alloc 실패는 errdefer로 원복하고 무시(pane 불변).
-    fn newTermInActivePane(self: *AppSession) !void {
-        const pane = self.activePane();
-        const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
-        var cfg = self.new_tab_config;
-        cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
-        // 서페이스(새 Term)는 Term 탭이라 tab-inherit-cwd 토글을 따른다(켜지면 포커스 cwd 상속, 아니면 root).
-        // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
-        const term = try self.createTerm(
-            req,
-            size,
-            cfg.queue_capacity,
-            "Maru",
-            commandName(cfg.command_kind),
-        );
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
     }
 
     /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
     /// `sh -c`로 조립하지 않고, `/usr/bin/env`와 provider argv를 분리해 직접 exec 한다.
     pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
@@ -6943,7 +5932,7 @@ pub const AppSession = struct {
     /// cwd는 묘비가 들고 있던 마지막 위치를 형식 검증해 넘긴다 — 비었거나 사라진 디렉터리면 기본 cwd로 spawn된다.
     /// Term 포인터를 들던 rename·컨텍스트 메뉴 상태는 `destroyTerm`이 단일 chokepoint로 정리한다.
     fn respawnEndedPlaceholder(self: *AppSession) !void {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         const index = pane.active_term;
         const tomb = pane.terms.items[index];
         std.debug.assert(tomb.rt.ended_placeholder);
@@ -6969,27 +5958,8 @@ pub const AppSession = struct {
         // focusTerm은 같은 인덱스면 early-return하므로 대표 surface를 직접 갱신한다(탭바·렌더가 이걸 읽는다).
         self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
-        self.recomputeActivePaneRect();
+        pane_ops.recomputeActivePaneRect(self);
         self.metal_dirty = true;
-    }
-
-    /// 활성 pane에 새 **web Term**(`panel_kind`=markdown|browser)을 띄우고 그 탭으로 포커스한다(command
-    /// `new_web_tab`·File 메뉴 — 4e-5, 그리고 debug 훅 maybeDebugOpenWebPanel의 위임 대상). `newTermInActivePane`을
-    /// 미러링하되 PTY spawn/셸 없이 `createWebTerm(panel_kind)`로 sentinel surface를 만든다(WKWebView는
-    /// computeWebSurfaceTransitions가 walk해 Swift가 붙인다, §6). create→append→focus 3단계 + append 실패 errdefer
-    /// 롤백이 web Term 생성의 **단일 출처**다(debug 훅이 이 시퀀스를 재구현하지 않게).
-    pub fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !u64 {
-        const pane = self.activePane();
-        const term = try self.createWebTerm(panel_kind);
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
-        self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
-        return term.surfaceId();
-    }
-
-    fn newWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !void {
-        _ = try self.appendWebTermInActivePane(panel_kind);
     }
 
     /// Phase 7f-0: 팝업(`WKUIDelegate.createWebViewWith`) adopt용 — Swift가 WebKit이 넘긴 config로 **이미 만든**
@@ -6999,101 +5969,13 @@ pub const AppSession = struct {
     /// 생성과 반대). create 전이는 평소대로 emit되며, Swift drain이 `webPanels[surface_id]` 존재 시 중복 WKWebView 생성을
     /// 스킵한다(7f-1) — 이 함수는 term/트리만 만든다. 실패는 호출처(ABI)가 0(sentinel)으로 접는다.
     pub fn createAdoptedWebTermInActivePane(self: *AppSession) !u64 {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         const term = try self.createWebTerm(.browser); // 팝업 = untrusted browser 고정(§7 격리)
         errdefer self.destroyTerm(term); // append 실패 시 방금 만든 term 롤백(newWebTermInActivePane과 동형)
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1); // 새 탭으로 포커스(사용자가 연 새 창 = 활성)
         self.metal_dirty = true;
         return term.surfaceId();
-    }
-
-    /// 키보드 pane 이동 — 활성 panel에서 direction 방향의 인접 panel로 포커스를 옮긴다(있으면). split이 없거나
-    /// 그 방향에 panel이 없으면 무동작(best-effort: leaf rect 레이아웃 OOM도 그냥 이동 안 함). 활성 탭 leaf
-    /// rect를 펴 paneInDirection으로 대상을 고른 뒤 focusPaneBySurface로 옮긴다.
-    fn focusPaneInDirection(self: *AppSession, dir: FocusDirection) void {
-        if (!self.activeTabHasSplit()) return;
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
-        if (Model.paneInDirection(leaf_rects.items, self.activePane(), dir)) |pane| {
-            _ = self.focusPaneByPtr(pane);
-        }
-    }
-
-    /// 활성 panel을 direction으로 둘로 나눈다(사실상 표준 멀티플렉서 split 동작 참고 — 코드 미참고). 활성 panel의
-    /// 현재 leaf rect를 splitRect로 a(기존)·b(새)로 나눠, b 크기로 새 셸 panel을 spawn하고, 트리에서 활성
-    /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
-    /// 옮긴다. 단일 panel 탭이면 첫 분할(2개), 이미 split이면 활성 panel이 다시 나뉜다(중첩). spawn/alloc
-    /// 실패는 errdefer로 트리/탭을 원복한다(부분 상태를 남기지 않는다).
-    fn splitActivePane(self: *AppSession, direction: maru.session.SplitDirection) !void {
-        const tab = self.activeTab();
-        const active = tab.activePane();
-
-        // 1) 활성 panel의 현재 rect를 레이아웃에서 찾는다(없으면 — 있어선 안 되지만 — 분할 안 함).
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
-        var active_rect: ?maru.session.SplitRect = null;
-        for (leaf_rects.items) |lr| {
-            if (lr.leaf == active) {
-                active_rect = lr.rect;
-                break;
-            }
-        }
-        const arect = active_rect orelse return error.ActivePaneNotInTree;
-
-        // 2) active rect를 direction·0.5로 a(기존)·b(새)로 나눈 grid.
-        // 두 자식 panel 각자 상단 탭 바를 예약하므로, Term grid는 leaf rect가 아니라 paneTermRect(바 아래)로 잰다.
-        const parts = maru.session.splitRect(arect, direction, 0.5);
-        const a_term = self.paneTermRect(parts.a);
-        const b_term = self.paneTermRect(parts.b);
-        const a_size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, a_term.w, a_term.h);
-        const b_size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, b_term.w, b_term.h);
-
-        // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
-        var cfg = self.new_tab_config;
-        cfg.size = b_size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
-        // 팬(분할)은 split-inherit-cwd면 분할되는(활성) pane의 활성 Term cwd 상속, 아니면 root. 아래 트리 변형
-        // 전에 읽어 focusedTermCwd의 active가 아직 포커스 Term을 가리킨다.
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.split_inherit_cwd);
-        const new_pane = try self.createPane(
-            req,
-            b_size,
-            cfg.queue_capacity,
-            "Maru",
-            commandName(cfg.command_kind),
-        );
-        errdefer self.destroyPane(new_pane);
-        try tab.panes.append(self.allocator, new_pane);
-        errdefer _ = tab.panes.pop();
-
-        // 4) split 노드를 heap에 만들고 트리에서 활성 leaf를 split{a: 기존, b: 새}로 교체.
-        const split = try self.allocator.create(PaneTree.Split);
-        errdefer self.allocator.destroy(split);
-        split.* = .{
-            .direction = direction,
-            .ratio = 0.5,
-            .a = .{ .leaf = active },
-            .b = .{ .leaf = new_pane },
-        };
-        if (!PaneTree.replaceLeaf(&tab.tree, active, .{ .split = split })) {
-            return error.ActivePaneNotInTree; // errdefer가 split·pane을 원복(트리는 변형 전이라 무변)
-        }
-
-        // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY라 winsize를 못 보내도 **표시
-        //    grid는 반드시 줄어든다**(resizeTermForLayout 계약) — 안 그러면 그 Term이 divider를 넘어 새 panel 위에
-        //    글자를 그린다. 전달 실패는 split을 막지 않고 관측 지점에만 남긴다.
-        for (active.terms.items) |term| {
-            self.resizeTermForLayout(term, a_size) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
-        }
-
-        // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
-        //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는
-        //    그대로라 사이드바 갱신은 불요.
-        self.focusPane(tab.panes.items.len - 1);
     }
 
     /// P2 seam(docs/persistent-session-host.md §13 P2): 이 창의 terminal runtime 계약 표면. GUI는 이 backend에
@@ -7414,7 +6296,7 @@ pub const AppSession = struct {
     ///
     /// 파일 하나 `stat`이라 spawn 경로에 얹어도 비용이 없다. 없을 때만 다시 쓰고, 재생성이 실패해도 보관 중인
     /// 경로를 그대로 돌려준다 — 통합이 없는 평범한 셸로 뜨는 편이 spawn 자체를 막는 것보다 낫다.
-    fn shellIntegrationZdotdir(self: *AppSession) ?[]const u8 {
+    pub fn shellIntegrationZdotdir(self: *AppSession) ?[]const u8 {
         const dir = self.new_tab_zdotdir orelse return null;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const zshenv = std.fmt.bufPrint(&buf, "{s}/.zshenv", .{dir}) catch return dir;
@@ -7479,11 +6361,6 @@ pub const AppSession = struct {
         }
     };
 
-    fn recordEndedPlaceholder(self: *AppSession, newly_gone: bool) void {
-        self.ended_placeholder_notice_pending += 1;
-        if (newly_gone) self.ended_placeholder_dropped_pending += 1;
-    }
-
     /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
     /// dirname의 형제 `maru`를 쓴다. 못 찾으면 null. **형제 maru 경로 도출의 단일 출처** — `installCli`도 이걸 쓴다(code-review #15).
     fn siblingMaruPath(self: *AppSession, a: std.mem.Allocator) ?[:0]const u8 {
@@ -7527,7 +6404,7 @@ pub const AppSession = struct {
     /// 그 슬롯이 고정한다. Term은 surface를 포인터로 참조하고 runtime은 handle로 다룬다(surface_id·pty_id 발급=앱 전역
     /// surface_ids). spawn 성공 후 이후 단계 실패는 `errdefer be.remove(id)`로 번들을 회수하고, spawn 자체 실패는 backend
     /// 내부 2-pass 정리가 맡는다. Pane에 거는 건 호출자(createPane/⌘T)가 한다.
-    fn createTerm(
+    pub fn createTerm(
         self: *AppSession,
         request: maru.pty.SpawnRequest,
         size: terminal.Size,
@@ -7843,109 +6720,6 @@ pub const AppSession = struct {
         return term;
     }
 
-    /// §7 **종료 placeholder**(묘비)를 만든다 — manifest엔 있었지만 host runtime이 영구히 없어 읽기 전용으로 복원하는
-    /// Term이다. `createWebTerm`과 같은 "PTY 없는 registry 슬롯" 패턴(web arm sentinel + 제자리 `Surface.init`)을 쓰되
-    /// 두 곳이 다르다: (1) `kind`는 **`.terminal` 그대로**라 기존 렌더·라벨 경로가 무변경으로 화면을 그린다,
-    /// (2) core를 1×1이 아니라 **저장 grid로 연다** — sentinel 1×1에 텍스트를 쓰면 한 칸만 보이고, 그 크기가 다음
-    /// checkpoint에 저장돼 복원마다 2×1로 열화된다(`clampGridSize`가 cols를 2로 올린다).
-    ///
-    /// 마지막 알려진 값은 **이미 owned 저장소가 있는 곳**에 심어 capture 코드를 건드리지 않는다.
-    /// - title → `auto_title`: `syncAutoTitles`가 `!live_initialized`로 건너뛰어 덮이지 않고 `termLabel`이 라벨로 쓴다.
-    /// - cwd·size → `observation`(`.stale`): `refreshTermObservation`이 `!live_initialized`로 즉시 반환하므로 보존되고,
-    ///   `captureWorkspaceTab`이 `availability != .unavailable`일 때만 읽으므로 `.stale`이어야 저장된다.
-    /// - command → `rt.ended_command`.
-    /// `surface.title`/`surface.cwd`에는 **절대 넣지 않는다** — `Surface.title`은 borrowed 계약이고 복원 입력은 파싱
-    /// arena 소유라 apply 직후 해제되어 댕글링이 된다.
-    fn createEndedPlaceholderTerm(
-        self: *AppSession,
-        title: []const u8,
-        cwd: []const u8,
-        command: []const u8,
-        size: terminal.Size,
-        runtime_host_id: []const u8,
-        runtime_id: []const u8,
-    ) !*Term {
-        const term = try self.allocator.create(Term);
-        errdefer self.allocator.destroy(term);
-        term.* = .{}; // kind=.terminal 기본값 유지(SurfaceKind는 닫힌 열거 — 확장하지 않는다)
-        term.rt.ended_placeholder = true;
-
-        const id = self.surface_ids.next();
-        const slot = try self.live_registry.create(id, 0);
-        slot.* = .{ .web = .{ .internal_allocator = self.allocator } }; // PTY 없는 arm 재사용(경량 teardown)
-        term.surface = &slot.web.surface;
-        errdefer self.live_registry.removeUninitialized(id) catch {};
-        term.surface.* = try maru.session.Surface.init(self.allocator, id, terminal.clampGridSize(size));
-        errdefer self.live_registry.remove(id) catch {};
-        // 아래 metadata는 Term-owned다. 중간 OOM에서도 registry뿐 아니라 이미 복사한 문자열을 모두 되돌린다.
-        errdefer {
-            term.auto_title.deinit(self.allocator);
-            term.rt.observation.deinit(self.allocator);
-            if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command);
-            if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
-            if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
-        }
-
-        // createTerm과 같은 core 정책 chokepoint — 안내 텍스트가 사용자 테마·폭 규칙으로 보이게 한다.
-        term.surface.core.setConfigPalette(self.appearance.theme.palette);
-        term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
-        term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
-        term.surface.core.setDefaultCursorShape(self.configCursorShape());
-        // 읽기 전용. 정확히는 이 surface가 `SurfaceRuntime`에 **attach되지 않으므로**(link 없음 — PTY도 backend 슬롯도
-        // 없다) writeInput·enqueueCoreCommand·resize는 process_state 가드에 닿기 전에 `UnknownSurface`로 먼저 실패한다
-        // (runtime.zig의 `linkBySurface orelse return error.UnknownSurface`). `process_state = .exited`를 함께 세우는 것은
-        // 화면·라벨·capture가 "종료된 Term"과 같은 상태를 읽게 하기 위해서다(attach된 로컬 종료 Term과 동일 표현).
-        // 결과적으로 선택·스크롤 같은 core command는 묘비에서 no-op인데, 이는 **종료된 로컬 터미널과 같은 기존 동작**이다
-        // (그쪽도 `process_state == .exited`라 `ProcessExited`로 거부된다) — 묘비만의 회귀가 아니다. 화면 안내는 core에
-        // 직접 쓰고(writeSurfaceGuidance), 레이아웃 resize도 core를 직접 만진다(resizeTermForLayout).
-        term.surface.process_state = .exited;
-        if (title.len > 0) try term.auto_title.appendSlice(self.allocator, title);
-        try term.rt.observation.replace(self.allocator, .{
-            .availability = .stale, // "마지막으로 알려진 값" — unavailable이면 capture가 title/cwd를 빈 문자열로 쓴다
-            .size = terminal.clampGridSize(size),
-            .cwd = cwd,
-            .window_title = title,
-        });
-        term.rt.ended_command = try self.allocator.dupe(u8, command);
-        term.rt.ended_runtime_host_id = try self.allocator.dupe(u8, runtime_host_id);
-        term.rt.ended_runtime_id = try self.allocator.dupe(u8, runtime_id);
-        return term;
-    }
-
-    /// 한 panel(Pane)을 heap-pin으로 만든다 — Term 1개를 담은 컨테이너. 탭→pane 모델에서 Pane은 여러 Term을
-    /// 가로 탭으로 들 수 있고(⌘T가 추가), 생성 시엔 1개로 시작한다. heap-pin(`*Pane`)이라 트리 회전·ArrayList
-    /// realloc에도 본체가 안 움직인다(SplitTree leaf가 이 `*Pane`을 가리킴). 부분 실패는 errdefer로 정리.
-    fn createPane(
-        self: *AppSession,
-        request: maru.pty.SpawnRequest,
-        size: terminal.Size,
-        queue_capacity: usize,
-        title: []const u8,
-        command: []const u8,
-    ) !*Pane {
-        const pane = try self.allocator.create(Pane);
-        errdefer self.allocator.destroy(pane);
-        pane.* = .{};
-        errdefer pane.terms.deinit(self.allocator);
-
-        const term = try self.createTerm(request, size, queue_capacity, title, command);
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        pane.active_term = 0;
-        return pane;
-    }
-
-    /// 한 panel을 teardown하고 heap 해제한다 — 담긴 모든 Term을 destroyTerm한 뒤 terms 리스트·Pane을 해제.
-    /// createPane errdefer·closeTab·closeActivePane·split 실패 정리에 쓴다. **모든 Pane 해제의 단일 chokepoint라,
-    /// 해제 직전 구조-무효화 계약(invalidateForFreedPane)을 부른다 — 이 Pane을 가리키던 호버/드래그 포인터를 정리.**
-    fn destroyPane(self: *AppSession, pane: *Pane) void {
-        self.invalidateForFreedPane(pane); // S1: 포인터 비교는 해제 전 주소로(deref 없음) — 흩어진 null화 대체
-        for (pane.terms.items) |term| self.destroyTerm(term);
-        if (pane.custom_name) |n| self.allocator.free(n); // 사용자 rename(owned) 해제
-        pane.terms.deinit(self.allocator);
-        self.allocator.destroy(pane);
-    }
-
     /// 새 탭을 만든다 — Tab과 첫 panel을 heap-pin하고, panel의 surface로 단일-leaf 트리를 세우고,
     /// `tabs`/`surface_ptrs`에 추가하고 `app_window.tabs`를 갱신하고 새 탭을 활성으로 만든다. 새 Tab 포인터
     /// 반환. 부분 실패는 errdefer로 정리한다(create tab→panes 리스트→pane→append 역순).
@@ -7962,8 +6736,8 @@ pub const AppSession = struct {
         tab.* = .{};
         errdefer tab.panes.deinit(self.allocator); // 실패 시 panes 리스트 backing 해제(pane은 아래 errdefer가)
 
-        const pane = try self.createPane(request, size, queue_capacity, title, command);
-        errdefer self.destroyPane(pane);
+        const pane = try pane_ops.createPane(self, request, size, queue_capacity, title, command);
+        errdefer pane_ops.destroyPane(self, pane);
 
         try tab.panes.append(self.allocator, pane);
         tab.active_pane = 0;
@@ -7992,7 +6766,7 @@ pub const AppSession = struct {
         // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = insert_at;
-        self.recomputeActivePaneRect(); // 새 탭이 활성이 됐으니 좌표 origin 갱신(init 중엔 사이드바 폭이 아직
+        pane_ops.recomputeActivePaneRect(self); // 새 탭이 활성이 됐으니 좌표 origin 갱신(init 중엔 사이드바 폭이 아직
         // 0이라 init 끝의 recompute가 다시 잡고, post-init newTab은 여기서 바로 맞는다)
         // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
         // 완성·append됨) 빈 사이드바로 degrade한다 — 여기서 try면 errdefer가 멀쩡한 탭을 헐어버린다.
@@ -8032,9 +6806,9 @@ pub const AppSession = struct {
         // 전환한 탭을 현재 창 grid로 맞춘다. resize()는 활성 탭만 만지고 last_resize_size는 세션-전역이라, 다른
         // 탭이 활성인 동안 창이 리사이즈됐거나 복원으로 저장 grid로 spawn된 탭은 전환 시점까지 stale grid다 —
         // 여기서 lazy 보정한다(복원·일반 둘 다). best-effort: 죽은 PTY 등은 무시(resizeTabPanes 계약).
-        self.resizeTabPanes(self.activeTab());
+        pane_ops.resizeTabPanes(self, self.activeTab());
         self.metal_dirty = true;
-        self.recomputeActivePaneRect(); // 새 탭의 활성 panel rect로 좌표 origin 갱신
+        pane_ops.recomputeActivePaneRect(self); // 새 탭의 활성 panel rect로 좌표 origin 갱신
         self.rebuildSidebar() catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
         return true;
     }
@@ -8062,7 +6836,7 @@ pub const AppSession = struct {
         // 순서가 핵심(위 doc): switchTab으로 대상 탭을 활성으로 만든 뒤라야 focusPaneByPtr가 그 탭의 panes에서
         // loc.pane을 찾고, 그 뒤라야 focusTerm이 올바른 활성 pane을 만진다.
         _ = self.switchTab(loc.tab_index);
-        _ = self.focusPaneByPtr(loc.pane);
+        _ = pane_ops.focusPaneByPtr(self, loc.pane);
         self.focusTerm(loc.term_index);
         return true;
     }
@@ -8130,65 +6904,14 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// **세션-트리 구조-무효화 계약(S1)의 단일 출처.** 한 Pane이 해제되기 직전 destroyPane이 부른다 — 모든
-    /// 트리 변형(closeTab·closeActivePane·collapsePaneIn·applyWorkspaceWindow·reap)이 노드 해제 시 destroyPane을
-    /// 거치므로, 이 한 지점이 흩어진 null화 없이 stale 포인터 UAF를 구조적으로 막는다(스냅샷 가드는 UAF를 못 잡는다
-    /// — docs/layering-and-portability.md §6, [[devsession-undefined-test-field-trap]]).
-    ///
-    /// **표적 무효화**(`*Pane` 포인터): 해제되는 바로 이 Pane을 가리키던 hover/drag 포인터만 비운다 — 다른 Pane을
-    /// 가리키면 유지한다. 이게 핵심: 무관한 Pane 닫힘(또는 reap)이 진행 중 탭 드래그/호버를 끊지 않으면서, 드래그
-    /// 중인 Pane 자체가 reap으로 해제되는 비동기 UAF는 닫는다(tick reap ↔ 마우스 드래그가 메인 스레드에서 교차).
-    ///
-    /// **보수적 무효화**(`hovered_slot`=슬롯 인덱스): 슬롯 인덱스는 pane 수에 의존해 어느 Pane
-    /// 해제든 stale이 되므로 비운다(캐시라 다음 이동이 재설정). `divider_drag`(*Split)는 여기서 안 건드린다 —
-    /// removeLeaf가 떼어낸 split을 돌려주므로 그 호출처(collapsePaneIn·closeActivePane)가 invalidateForFreedSplit으로
-    /// **표적** 무효화하고, 트리 통째 해제(destroyTabStandalone)는 거기서 따로 비운다.
-    fn invalidateForFreedPane(self: *AppSession, pane: *Pane) void {
-        if (self.hovered_tab) |ht| {
-            if (ht.pane == pane) self.hovered_tab = null;
-        }
-        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버는 transient(surface_id 키) — pane 해제 시 보수적으로 비운다(다음 이동이 재설정)
-        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
-        switch (self.pointer_gesture_owner) {
-            .terminal_tab => |drag| if (drag.pane == pane) self.finishPointerGesture(),
-            .pane => |drag| if (drag.pane == pane) self.finishPointerGesture(),
-            // scrollbar payload에는 surface identity가 없으므로 pane teardown에서 보수적으로 capture를 끝낸다.
-            .scrollbar => self.finishPointerGesture(),
-            else => {},
-        }
-        // rename 대상이 이 pane이면 stale 포인터가 안 되게 비운다(teardown 중이라 closeRename의 부수효과 없이 직접).
-        if (self.renamingPane(pane)) {
-            self.rename = null;
-            self.rename_input.clear();
-        }
-        // 컨텍스트 메뉴 대상이 이 pane이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
-        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .pane and t.pane == pane) {
-            self.context_menu_target = null;
-            self.chrome_host.context_menu.hide();
-        };
-        self.hovered_slot = null;
-        // chrome ChromeState 훅(현재 무동작). 핸들 기반 드래그 상태가 C2/C3서 ChromeState로 이주하면 여기 한 줄이
-        // 그 무효화를 떠맡는다 — destroyPane 단일 chokepoint라 호출처는 그대로 따라온다(docs/chrome-strategy.md §5.5).
-        self.chrome_host.interaction.invalidateForStructuralChange();
-    }
-
     /// Term 배열 mutation 직전의 위치 기반 gesture barrier. 같은 pane의 terminal-tab index는 어느 항목 제거에서도
     /// shift될 수 있어 전부 취소한다. scrollbar는 현재 active Term 자체가 사라질 때만 취소해 배경 reap은 보존한다.
     fn cancelPointerGestureForTermRemoval(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
         switch (self.pointer_gesture_owner) {
             .terminal_tab => |drag| if (drag.pane == pane) self.finishPointerGesture(),
-            .scrollbar => if (tab_index == self.app_window.active_tab and pane == self.activePane() and term_index == pane.active_term)
+            .scrollbar => if (tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and term_index == pane.active_term)
                 self.finishPointerGesture(),
             else => {},
-        }
-    }
-
-    /// split 노드가 해제되기 직전(removeLeaf 반환 → destroy 사이) 부른다 — divider_drag가 **바로 이 split**을
-    /// 가리키면 표적 null한다(다른 split이면 유지 → 무관한 reap-collapse가 진행 중 divider 드래그를 안 끊는다).
-    /// removeLeaf가 freed split을 surface하게 바뀌어 가능해진 표적 무효화(예전 보수적 blanket-null 대체).
-    fn invalidateForFreedSplit(self: *AppSession, split: *PaneTree.Split) void {
-        if (self.divider_capture_split) |captured| {
-            if (captured == split) self.endDividerCapture();
         }
     }
 
@@ -8206,7 +6929,7 @@ pub const AppSession = struct {
     /// `cursorIsAtPrompt`가 읽는 코어 필드(semantic_state·alt_active)는 reader 스레드가 `core.write`로 갱신하므로,
     /// 메인 스레드 읽기는 **lockCore 아래**에서 한다(surface.zig 불변식·torn read 방지 — cwd/scrollback 형제와 동일).
     /// 단일 출처: docs/macos-app-host-boundary.md "닫기 확인", src/terminal/core.zig cursorIsAtPrompt.
-    fn termHasRunningJob(term: *Term, io: std.Io) bool {
+    pub fn termHasRunningJob(term: *Term, io: std.Io) bool {
         if (!term.rt.live_initialized) return false;
         if (term.surface.process_state == .exited) return false;
         // in-process core가 실제 runtime SSOT다. 테스트의 직접 fixture mutate뿐 아니라 닫기 직전 최신 OSC 133 상태를
@@ -8226,13 +6949,8 @@ pub const AppSession = struct {
         return true;
     }
 
-    fn paneHasRunningJob(pane: *Pane, io: std.Io) bool {
-        for (pane.terms.items) |t| if (termHasRunningJob(t, io)) return true;
-        return false;
-    }
-
     fn tabHasRunningJob(tab: *Tab, io: std.Io) bool {
-        for (tab.panes.items) |p| if (paneHasRunningJob(p, io)) return true;
+        for (tab.panes.items) |p| if (pane_ops.paneHasRunningJob(p, io)) return true;
         return false;
     }
 
@@ -8240,11 +6958,6 @@ pub const AppSession = struct {
     // 옛 동작은 **활성 Term**만 봤다. 사용자 요청으로 **워크스페이스(탭) 안 어느 pane/Term이든** running이면 스피너를
     // 띄운다(백그라운드 pane/Term의 에이전트도 표시). agent_state는 pollAgentKinds가 모든 pane×Term을 갱신하므로
     // 백그라운드 Term도 최신이다. termHasRunningJob(셸 job)과 **별개** — 이건 claude/codex 에이전트 running 상태다.
-
-    fn paneHasRunningAgent(pane: *Pane) bool {
-        for (pane.terms.items) |t| if (t.agent_state == .running) return true;
-        return false;
-    }
 
     /// 위 개수와 함께 보여줄 에이전트 종류 심볼. 돌고 있는 것 중 **처음 만난 kind**를 쓴다 — 섞여 있을 때
     /// 무엇을 대표로 삼을지는 의미 있는 규칙이 없고(둘 다 돌면 둘 다 중요하다), 개수가 이미 "여럿"을 말해 준다.
@@ -8274,7 +6987,7 @@ pub const AppSession = struct {
     }
 
     fn tabHasRunningAgent(tab: *Tab) bool {
-        for (tab.panes.items) |p| if (paneHasRunningAgent(p)) return true;
+        for (tab.panes.items) |p| if (pane_ops.paneHasRunningAgent(p)) return true;
         return false;
     }
 
@@ -8309,12 +7022,6 @@ pub const AppSession = struct {
         return if (tabAgentRepresentative(tab)) |representative| representative.term.agent_kind else .none;
     }
 
-    /// pane 라벨(탭바) 색의 대표 에이전트 종류 — running Term 우선, 없으면 활성 Term kind.
-    fn paneAgentKind(pane: *Pane) AgentKind {
-        for (pane.terms.items) |t| if (t.agent_state == .running and t.agent_kind != .none) return t.agent_kind;
-        return pane.activeTerm().agent_kind;
-    }
-
     /// 이 탭(tab_index)의 에이전트 상태/종류 변화가 **화면에 보이는 running 표시**에 영향을 주는가 — pollAgentKinds/State의
     /// metal_dirty 게이트. 옛 "활성 Term만 보이면 재렌더"에서 확장한다: (1) 사이드바 카드 스피너·아이콘·색은 이제 **워크스페이스
     /// 단위**(tabHasRunningAgent/tabAgentKind)라 그 탭의 **어느 Term** 상태가 바뀌어도 카드가 바뀐다 → 카드가 보이면 재렌더.
@@ -8324,7 +7031,7 @@ pub const AppSession = struct {
         // (1) 사이드바 카드가 보이고 이 탭이 검색 필터를 통과하면(displaySlotOf 재사용 — 멤버십 스캔 단일 출처, code-review high).
         if (!self.sidebar_collapsed and !self.chrome_minimal and self.displaySlotOf(tab_index) != null) return true;
         // (2) 탭 바가 그려지고(chrome_minimal이면 paneBarHeightPx==0) 이 탭이 활성이면 이 탭의 Term들이 탭으로 보인다.
-        return self.paneBarHeightPx() > 0 and self.app_window.active_tab == tab_index;
+        return pane_ops.paneBarHeightPx(self) > 0 and self.app_window.active_tab == tab_index;
     }
 
     fn sessionHasRunningJob(self: *AppSession) bool {
@@ -8334,15 +7041,11 @@ pub const AppSession = struct {
 
     // 닫힐 scope에 browser web term이 있나 — 브라우저 탭 닫기는 실행 중 셸 명령이 없어도(web term=live_initialized=false라
     // termHasRunningJob=false) "닫을까요?" 확인을 띄운다(제보). running job과 병렬 게이트. markdown web term은 제외(browser만).
-    fn termIsWebBrowser(term: *Term) bool {
+    pub fn termIsWebBrowser(term: *Term) bool {
         return isBrowserTerm(term); // 판정은 isBrowserTerm 단일 출처(중복 정의 제거)
     }
-    fn paneHasWebBrowser(pane: *Pane) bool {
-        for (pane.terms.items) |t| if (termIsWebBrowser(t)) return true;
-        return false;
-    }
     fn tabHasWebBrowser(tab: *Tab) bool {
-        for (tab.panes.items) |p| if (paneHasWebBrowser(p)) return true;
+        for (tab.panes.items) |p| if (pane_ops.paneHasWebBrowser(p)) return true;
         return false;
     }
     fn sessionHasWebBrowser(self: *AppSession) bool {
@@ -8364,7 +7067,7 @@ pub const AppSession = struct {
             .pane => {
                 // close 대상은 활성 pane이 아닐 수 있다(사이드바에서 비활성 워크스페이스 닫기) —
                 // `closeTargetHasRunningJob`과 같은 대상 해소를 쓴다.
-                const pane = self.closeTargetPane(target) orelse return false;
+                const pane = pane_ops.closeTargetPane(self, target) orelse return false;
                 requested = self.requestScopeCloseSnapshot(pane);
             },
             .tab => |idx| {
@@ -8388,24 +7091,11 @@ pub const AppSession = struct {
         return requested;
     }
 
-    /// close 대상 pane(활성 pane이 아닐 수 있다). `agent_term`은 그 Term이 사는 pane이다.
-    fn closeTargetPane(self: *AppSession, target: PendingClose) ?*Pane {
-        switch (target) {
-            .agent_term => |t| {
-                if (t.tab >= self.tabs.items.len) return null;
-                const tab = self.tabs.items[t.tab];
-                if (t.pane >= tab.panes.items.len) return null;
-                return tab.panes.items[t.pane];
-            },
-            else => return self.activePane(),
-        }
-    }
-
     fn scopeHasWebBrowser(self: *AppSession, scope: CloseScope) bool {
         return switch (scope) {
             .none => false,
-            .term => termIsWebBrowser(self.activePane().activeTerm()),
-            .pane => paneHasWebBrowser(self.activePane()),
+            .term => termIsWebBrowser(pane_ops.activePane(self).activeTerm()),
+            .pane => pane_ops.paneHasWebBrowser(pane_ops.activePane(self)),
             .tab => |idx| tabHasWebBrowser(self.tabs.items[idx]),
             .session => self.sessionHasWebBrowser(),
         };
@@ -8414,7 +7104,7 @@ pub const AppSession = struct {
     /// 워크스페이스 cascade(close_tab/close_term이 단일 pane에서 떨어질 때)를 범위로 해석한다 — split이면 활성 pane만
     /// collapse, 단일 pane이면 탭(마지막 탭이면 세션 전체)을 닫는다. resolveCloseScope의 하위 단계(단일 출처).
     fn resolveWorkspaceScope(self: *AppSession) CloseScope {
-        if (self.activeTabHasSplit()) return .pane;
+        if (pane_ops.activeTabHasSplit(self)) return .pane;
         if (self.tabs.items.len == 1) return .session;
         return .{ .tab = self.app_window.active_tab };
     }
@@ -8425,7 +7115,7 @@ pub const AppSession = struct {
     fn resolveCloseScope(self: *AppSession, target: PendingClose) CloseScope {
         return switch (target) {
             .active_term => .term,
-            .term_or_pane => if (self.activePane().terms.items.len > 1) .term else self.resolveWorkspaceScope(),
+            .term_or_pane => if (pane_ops.activePane(self).terms.items.len > 1) .term else self.resolveWorkspaceScope(),
             .pane_or_tab => self.resolveWorkspaceScope(),
             .tab_index => |idx| if (idx >= self.tabs.items.len)
                 .none
@@ -8453,8 +7143,8 @@ pub const AppSession = struct {
     fn scopeHasRunningJob(self: *AppSession, scope: CloseScope) bool {
         return switch (scope) {
             .none => false,
-            .term => termHasRunningJob(self.activePane().activeTerm(), self.io),
-            .pane => paneHasRunningJob(self.activePane(), self.io),
+            .term => termHasRunningJob(pane_ops.activePane(self).activeTerm(), self.io),
+            .pane => pane_ops.paneHasRunningJob(pane_ops.activePane(self), self.io),
             .tab => |idx| tabHasRunningJob(self.tabs.items[idx], self.io),
             .session => self.sessionHasRunningJob(),
         };
@@ -8475,7 +7165,7 @@ pub const AppSession = struct {
                     switch (scope) {
                         .term => if (a.term < pane.terms.items.len)
                             return termHasRunningJob(pane.terms.items[a.term], self.io),
-                        .pane => return paneHasRunningJob(pane, self.io),
+                        .pane => return pane_ops.paneHasRunningJob(pane, self.io),
                         else => {},
                     }
                 }
@@ -8495,7 +7185,7 @@ pub const AppSession = struct {
         // 파일 Term 하나를 닫는 것이면 **막지 말고** 2단계 close 파이프라인으로 보낸다 — 거기서 revision-pinned
         // 스냅샷 sync와 저장/버리기/취소 확인이 일어난다. 이걸 안 하면 파일 탭이 영영 안 닫힌다(code-review max).
         if (scope == .term and target != .agent_term) {
-            const term = self.activePane().activeTerm();
+            const term = pane_ops.activePane(self).activeTerm();
             if (term.file_entry) |entry| if (entry.surface_id != 0) {
                 file_panel_ops.requestFilePanelClose(self, entry.surface_id);
                 return;
@@ -8537,7 +7227,7 @@ pub const AppSession = struct {
     /// 보류한 닫기를 실제 실행 — confirm_accept(확정)와 requestClose의 "명령 없음" 즉시 경로가 공유한다.
     /// resolveCloseScope(cascade 단일 출처)로 범위를 풀어 그 범위의 leaf teardown으로 디스패치한다 — 판정
     /// (closeTargetHasRunningJob)과 정확히 같은 cascade를 타므로 "묻고 닫는 대상"이 항상 일치한다.
-    fn executeClose(self: *AppSession, target: PendingClose) void {
+    pub fn executeClose(self: *AppSession, target: PendingClose) void {
         // 에이전트 행 ✕는 **활성과 무관한 Term**이라 활성 기준 closeActiveTerm/closeActivePane을 쓸 수 없다 —
         // 인덱스 경로로 직접 닫고, 캐스케이드(마지막 Term→pane→탭)는 closeTermAt이 처리한다.
         if (target == .agent_term) {
@@ -8559,7 +7249,7 @@ pub const AppSession = struct {
         switch (self.resolveCloseScope(target)) {
             .none => {},
             .term => self.closeActiveTerm(),
-            .pane => self.closeActivePane(),
+            .pane => pane_ops.closeActivePane(self),
             .tab => |idx| self.closeTab(idx),
             .session => if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose(),
         }
@@ -8613,7 +7303,7 @@ pub const AppSession = struct {
     fn writeHeldGuidance(self: *AppSession, detail: []const u8) void {
         var buf: [320]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "\r\n\x1b[2m  ▸ 셸이 시작 직후 종료됐습니다 ({s}).\r\n    ⏎ 다시 시도    ⌘, 설정에서 shell.command·shell.args 확인\x1b[0m\r\n", .{detail}) catch return;
-        self.writeSurfaceGuidance(self.activePane().activeTerm().surface, line);
+        self.writeSurfaceGuidance(pane_ops.activePane(self).activeTerm().surface, line);
     }
 
     /// 죽은/PTY 없는 surface의 core에 안내 텍스트를 쓰는 **락 규율 단일 출처**. 리더가 없거나 이미 멈춘 surface라
@@ -8811,7 +7501,7 @@ pub const AppSession = struct {
     /// 호출부가 no-op 재선택을 걸러 호출; `focusPaneByPtr`는 `focusPane` 경유로 커버). `confirm_accept`는 `executeClose`
     /// 전에 `pending_close`를 null로 비우므로(재진입 방지), 닫기 실행 중 포커스 이동이 이걸 다시 건드리지 않는다.
     /// (옛 `invalidatePendingCloseOnReap`/`invalidatePendingCloseOnFocusChange` byte-identical 중복을 통합 — code-review.)
-    fn invalidatePositionalPendingClose(self: *AppSession) void {
+    pub fn invalidatePositionalPendingClose(self: *AppSession) void {
         const p = switch (self.pending_confirm) {
             .close => |target| target,
             else => return,
@@ -8830,7 +7520,7 @@ pub const AppSession = struct {
     /// top카드는 마커가 아니라 inheritGroupMarker와 배타. **재확립했으면 true 반환** — 홀더가 실제로 안 움직인 제자리
     /// 케이스면 caller가 spurious flag를 되돌릴 수 있게(commit의 landed==origin revert와 동형). closeTab(제거는 항상 일어남)은
     /// 반환값을 무시하고, togglePin은 moveTab no-op이면 되돌린다. simulateDrop/commit은 각자 가상/post-clamp 문맥이라 인라인 유지.
-    fn reestablishTopLevelBoundaryOnMove(self: *AppSession, idx: usize) bool {
+    pub fn reestablishTopLevelBoundaryOnMove(self: *AppSession, idx: usize) bool {
         const len = self.tabs.items.len;
         if (idx == 0 or idx >= len or idx + 1 >= len) return false;
         const holder = self.tabs.items[idx];
@@ -8883,7 +7573,7 @@ pub const AppSession = struct {
         self.destroyTabStandalone(tab);
 
         self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
-        self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
+        pane_ops.recomputeActivePaneRect(self); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
         // 이 탭의 Pane/split 노드가 해제됐으니 stale 호버·divider 포인터를 비워야 하는데, 위 destroyTabStandalone의
         // destroyPane 루프가 invalidateForFreedPane(S1 chokepoint)으로 이미 처리했다(다음 이동이 재설정).
         // 그룹 고정 C2(§12.5 GP2): 위 inheritGroupMarker 마커 승계 뒤 멤버 pinned 캐시를 마커 기준으로 재동기(비프리뷰
@@ -8934,7 +7624,7 @@ pub const AppSession = struct {
         }
         // pane/Term 수준 정리(destroyPane→invalidateForFreedPane + destroyTerm 미러 — 해제 없이 포인터 비교만).
         for (tab.panes.items) |pane| {
-            self.invalidateForFreedPane(pane); // hovered_tab·tab_drag_pane·pane_drag_pane·rename(pane)·context_menu(pane)·hovered_slot
+            pane_ops.invalidateForFreedPane(self, pane); // hovered_tab·tab_drag_pane·pane_drag_pane·rename(pane)·context_menu(pane)·hovered_slot
             for (pane.terms.items) |term| {
                 if (self.renamingTerm(term)) {
                     self.rename = null;
@@ -8958,7 +7648,7 @@ pub const AppSession = struct {
         }
         // divider_drag가 이 탭 트리 소속 split이면 표적 null(무관한 탭 트리를 가리키면 유지 — destroyTabStandalone 동형).
         if (self.divider_capture_split) |captured| {
-            if (PaneTree.containsSplit(tab.tree, captured)) self.endDividerCapture();
+            if (PaneTree.containsSplit(tab.tree, captured)) pane_ops.endDividerCapture(self);
         }
     }
 
@@ -8983,7 +7673,7 @@ pub const AppSession = struct {
             return tab;
         }
         self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
-        self.recomputeActivePaneRect();
+        pane_ops.recomputeActivePaneRect(self);
         self.normalizePinnedFromGroups(); // 잔존 탭 멤버 pin 재동기(closeTab tail 동형 — src 측 재정규화 §1.4)
         self.floatLocalPinsAllGroups();
         if (!defer_rebuild) self.rebuildSidebar() catch {};
@@ -9007,7 +7697,7 @@ pub const AppSession = struct {
         var captured = false;
         if (PaneTree.layout(self.allocator, tab.tree, self.termRect(), &leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
-                const trect = self.paneTermRect(lr.rect);
+                const trect = pane_ops.paneTermRect(self, lr.rect);
                 const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
                 for (lr.leaf.terms.items) |term| {
                     self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
@@ -9019,7 +7709,7 @@ pub const AppSession = struct {
             }
         } else |_| {}
         if (!captured) {
-            self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백(단일 leaf면 위 루프가 이미 세팅)
+            self.active_pane_rect = pane_ops.paneTermRect(self, self.termRect()); // 폴백(단일 leaf면 위 루프가 이미 세팅)
         }
     }
 
@@ -9410,7 +8100,7 @@ pub const AppSession = struct {
         // barrier는 화면에 있는 워크스페이스의 키·붙여넣기·닫기를 삼키기만 한다 — 버린다. 중복 해소가
         // 재조준한 token도 같은 규칙을 지난다(code-review max).
         dst.dropPendingDockFocusIfHidden();
-        dst.recomputeActivePaneRect(); // 복원된 활성 탭 기준으로 좌표 origin 재계산(adoptTab이 캡처한 마지막-adopt rect는 stale)
+        pane_ops.recomputeActivePaneRect(dst); // 복원된 활성 탭 기준으로 좌표 origin 재계산(adoptTab이 캡처한 마지막-adopt rect는 stale)
         dst.rebuildSidebar() catch {}; // [4] O(K²) 회피 — 매 adopt 대신 끝에 1회
         return .{
             .moved_surfaces = moved,
@@ -9422,41 +8112,11 @@ pub const AppSession = struct {
         };
     }
 
-    /// 활성 탭의 활성 panel을 닫는다(split이 있으면 pane을 하나씩 닫는다). 트리를 형제로
-    /// collapse(removeLeaf)하고 panel을 teardown(destroyPane)한 뒤, active_pane을 보정하고, 대표 surface·
-    /// pump를 새 활성 panel로 재바인딩하고, 남은 panel을 collapse된 트리의 새 leaf rect로 resize한다. panel이
-    /// 1개뿐이면 무동작(그 경우 resolveWorkspaceScope가 .tab/.session으로 보내 closeTab/latch가 맡는다). 활성 탭에만 적용한다.
-    fn closeActivePane(self: *AppSession) void {
-        const tab = self.activeTab();
-        if (tab.panes.items.len <= 1) return; // 단일 panel은 탭 close 경로
-        const idx = tab.active_pane;
-        const closing = tab.panes.items[idx];
-        // 1) 트리에서 이 panel(leaf)을 떼고 형제로 collapse — removeLeaf가 떼어낸 split을 돌려주면, divider_drag가
-        //    그 split이면 표적 null하고 destroy한다(Term/surface는 아래 destroyPane가).
-        const freed_split = PaneTree.removeLeaf(&tab.tree, closing) orelse return;
-        self.invalidateForFreedSplit(freed_split);
-        self.allocator.destroy(freed_split);
-        // 2) panes에서 빼고 panel teardown(모든 Term closeAndDetach → reader join → surface deinit → free).
-        _ = tab.panes.orderedRemove(idx);
-        self.destroyPane(closing);
-        // 3) active_pane 보정: 닫은 게 마지막이면 이전, 아니면 그 자리로 온 다음 panel(같은 인덱스).
-        tab.active_pane = if (idx >= tab.panes.items.len) tab.panes.items.len - 1 else idx;
-        // 4) 대표 surface(= app_window.active())·pump를 새 활성 panel(의 활성 Term)로 재바인딩(닫은 포인터 dangling 방지).
-        self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        // 5) 남은 panel을 collapse된 트리의 새 leaf rect로 resize + 좌표 origin 재계산.
-        self.resizeActiveTabPanes() catch {};
-        self.recomputeActivePaneRect();
-        // 닫은 Pane·해제된 split 노드를 가리키던 호버·divider 포인터는 위 destroyPane이 invalidateForFreedPane
-        // (S1 chokepoint)으로 이미 비웠다 — 여기서 따로 리셋하지 않는다.
-        self.metal_dirty = true;
-    }
-
     /// 활성 pane의 활성 Term(가로 탭)을 닫는다. pane에 Term이 2개 이상일 때만 — teardown(destroyTerm)하고
     /// terms에서 빼고 active_term을 보정한 뒤 새 활성 Term surface로 재바인딩한다. Term이 1개뿐이면 무동작
     /// (closeActiveTermOrPane이 pane/워크스페이스 close로 보낸다). tree leaf는 pane이라 Term close엔 안 바뀐다.
     fn closeActiveTerm(self: *AppSession) void {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         if (pane.terms.items.len <= 1) return;
         const idx = pane.active_term;
         self.cancelPointerGestureForTermRemoval(self.app_window.active_tab, pane, idx);
@@ -9467,21 +8127,14 @@ pub const AppSession = struct {
         pane.active_term = if (idx >= pane.terms.items.len) pane.terms.items.len - 1 else idx;
         self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
-        self.recomputeActivePaneRect();
+        pane_ops.recomputeActivePaneRect(self);
         self.metal_dirty = true;
-    }
-
-    /// Cmd+W 정책(계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을, 1개뿐이면 pane(split이면 collapse)을,
-    /// 단일 pane이면 워크스페이스(탭/창)를 닫는다. cascade 판단은 resolveCloseScope 단일 출처라, 여긴 그 진입점으로
-    /// 위임하는 얇은 별칭이다(직접 호출하는 테스트·문서용 이름 유지).
-    fn closeActiveTermOrPane(self: *AppSession) void {
-        self.executeClose(.term_or_pane);
     }
 
     /// 사이드바 고정 탭(우클릭 Pin) 개수. 불변식: 고정 탭은 항상 배열 앞쪽 `[0, pinned_count)`에 연속으로 모인다
     /// (toggle/drag 경로가 그 불변식을 유지). 따라서 이 개수가 곧 고정/비고정 영역의 경계 인덱스다(pinned_count).
     /// pin 토글 정렬과 moveTab 그룹 clamp가 단일 출처로 이 헬퍼를 쓴다.
-    fn countPinnedTabs(self: *const AppSession) usize {
+    pub fn countPinnedTabs(self: *const AppSession) usize {
         var n: usize = 0;
         for (self.tabs.items) |t| if (t.pinned) {
             n += 1;
@@ -10426,7 +9079,7 @@ pub const AppSession = struct {
     /// 각 iteration이 `self.tabs.items[i]`를 다시 읽어(재배열로 자식 마커가 밀려도) 좌→우로 모든 마커를 **정확히 1회**
     /// 방문한다(부모를 자식보다 먼저 처리 — 자식 float는 부모가 자식 블록을 통째 옮긴 뒤 그 안에서만 일어난다). 드래그
     /// 게이트·no-op(로컬 pin 0개면 전 호출 byte-identical)은 stablePartitionSubtree 내부가 처리한다. rebuild/dirty는 caller 몫.
-    fn floatLocalPinsAllGroups(self: *AppSession) void {
+    pub fn floatLocalPinsAllGroups(self: *AppSession) void {
         var i: usize = 0;
         while (i < self.tabs.items.len) : (i += 1) {
             if (self.tabs.items[i].group_start != null) self.stablePartitionSubtree(i);
@@ -10539,7 +9192,7 @@ pub const AppSession = struct {
     /// **SG8 드래그 게이트(필수)**: self.tabs를 mutate하므로 `sidebar_drag_preview != null`(드래그 프리뷰 활성)이면 **절대
     /// 안 돈다** — SG8은 "드래그 내내 self.tabs 불변"을 보존한다(프리뷰는 sidebar_preview_rows 위 가상 배치, 확정=commit
     /// 후에만 self.tabs 변경). 이 단일 게이트로 모든 호출처가 안전하다(commit 경로는 clearSidebarDragPreview 후라 통과).
-    fn normalizePinnedFromGroups(self: *AppSession) void {
+    pub fn normalizePinnedFromGroups(self: *AppSession) void {
         if (self.sidebar_drag_preview != null) return; // SG8 드래그 게이트(L4 잔류 — §8A.4): 프리뷰 중 self.tabs.pinned 불변
         group_normalize.normalizePinnedFromGroups(Tab, self.tabs.items); // L2 리프트(M3c) — suffix-exclusion 정규화 코어로 위임
     }
@@ -10729,7 +9382,7 @@ pub const AppSession = struct {
         const tab = self.tabs.items[tab_index];
         if (pane_index >= tab.panes.items.len) return;
         const pane = tab.panes.items[pane_index];
-        _ = self.focusPaneByPtr(pane); // 2) 그 Pane으로(같은 pane이면 무동작)
+        _ = pane_ops.focusPaneByPtr(self, pane); // 2) 그 Pane으로(같은 pane이면 무동작)
         if (term_index >= pane.terms.items.len) return;
         self.focusTerm(term_index); // 3) 그 Pane 안 그 Term 탭으로 — 가려진 탭이 실제로 앞으로 나온다
         self.metal_dirty = true;
@@ -10939,7 +9592,7 @@ pub const AppSession = struct {
     /// 리전이면(예: 고정 top카드 하나뿐인 그룹을 닫으면 next는 첫 비고정 top카드) 멤버가 아니다. 그런데도 승계하면
     /// 그 top카드가 마커+pinned를 물려받아 **고정 그룹 마커로 오승격**한다. 리전이 다르면 승계하지 않고(그룹 소멸)
     /// false를 반환해 호출자가 마커를 free/destroy하게 둔다. canonical 상태(멤버 pin=마커 pin)라 이 판정이 안정하다.
-    fn inheritGroupMarker(self: *AppSession, from: usize) bool {
+    pub fn inheritGroupMarker(self: *AppSession, from: usize) bool {
         return group_normalize.inheritGroupMarker(Tab, self.tabs.items, from); // L2 리프트(M3c) — 마커 승계(same-region·leaf-only 가드)로 위임
     }
 
@@ -10947,7 +9600,7 @@ pub const AppSession = struct {
     /// docs/sidebar-groups.md §12). 그룹 고정은 리스트를 `[고정][비고정]` 2리전으로 나누고, 각 리전 안에서 §2.1 연속
     /// 파티션(최상위 카드 = 그 리전의 첫 마커 이전)이 다시 성립한다. lo/hi로 리전을 국한해 그 리전의 앵커만 찾는다.
     /// 리전을 [0, len)로 주면(고정 그룹 0개면 모든 마커가 비고정이라 사실상 항상 그렇다) 전역 첫 마커 = 옛 동작과 동일.
-    fn firstGroupStartInRegion(self: *const AppSession, lo: usize, hi: usize) ?usize {
+    pub fn firstGroupStartInRegion(self: *const AppSession, lo: usize, hi: usize) ?usize {
         const clamp_hi = @min(hi, self.tabs.items.len);
         var i = lo;
         while (i < clamp_hi) : (i += 1) if (self.tabs.items[i].group_start != null) return i;
@@ -11157,7 +9810,7 @@ pub const AppSession = struct {
     /// 없음)이면 같은 pane의 첫 terminal 형제로 상속한다. web-only pane(터미널 형제 없음)이면 null → 호출자가 root
     /// 폴백. web Term의 sentinel core를 읽어 cwd 상속이 루트로 떨어지는 4e 회귀를 막는다.
     fn cwdSourceTerm(self: *AppSession) ?*Term {
-        const pane = self.activePane();
+        const pane = pane_ops.activePane(self);
         const active = pane.activeTerm();
         if (active.kind == .terminal) return active;
         for (pane.terms.items) |t| if (t.kind == .terminal) return t; // web 활성이면 pane 내 터미널 형제로 상속
@@ -11193,7 +9846,7 @@ pub const AppSession = struct {
     /// childExec가 **spawn 시점에 dupeZ로 복사**한다. 그래서 `buf`는 호출자 스택에 두고 spawn(createTab/createTerm/
     /// createPane) 호출이 끝날 때까지 살아 있어야 한다 — 헬퍼가 `buf`를 내부 선언하면 반환 시 소멸해 use-after-scope가
     /// 된다. 호출자는 `var root_buf: [std.fs.max_path_bytes]u8 = undefined;`를 spawn과 같은 스코프에 두고 그 포인터를 넘긴다.
-    fn applySpawnCwd(self: *AppSession, req: *maru.pty.SpawnRequest, buf: []u8, inherit: bool) void {
+    pub fn applySpawnCwd(self: *AppSession, req: *maru.pty.SpawnRequest, buf: []u8, inherit: bool) void {
         if (self.newSurfaceCwd(buf, inherit)) |c| req.cwd = c;
     }
 
@@ -11206,7 +9859,7 @@ pub const AppSession = struct {
         // 직전 활성 탭 사이즈를 물려받는다(resizeActiveTabPanes가 전체로 다시 펴는 강제 리사이즈 전까지 고착). 단일
         // leaf가 실제로 차지할 영역(paneTermRect(termRect))의 grid로 잡아, init 첫 탭(spawn_config.size=전체 grid)과
         // 같은 계약을 따른다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid와도 정확히 일치한다.
-        const full = self.paneTermRect(self.termRect());
+        const full = pane_ops.paneTermRect(self, self.termRect());
         cfg.size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, full.w, full.h);
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
@@ -11249,18 +9902,18 @@ pub const AppSession = struct {
             .close_tab => self.requestClose(.pane_or_tab),
             // 분할 실패(셸 spawn/alloc 실패)는 세션을 죽이지 않고 무시한다 — splitActivePane이 errdefer로
             // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
-            .split_horizontal => self.splitActivePane(.horizontal) catch {},
-            .split_vertical => self.splitActivePane(.vertical) catch {},
+            .split_horizontal => pane_ops.splitActivePane(self, .horizontal) catch {},
+            .split_vertical => pane_ops.splitActivePane(self, .vertical) catch {},
             // 키보드 pane 이동(Cmd+Option+화살표). split이 없거나 그 방향에 panel이 없으면 무동작.
-            .focus_pane_left => self.focusPaneInDirection(.left),
-            .focus_pane_right => self.focusPaneInDirection(.right),
-            .focus_pane_up => self.focusPaneInDirection(.up),
-            .focus_pane_down => self.focusPaneInDirection(.down),
+            .focus_pane_left => pane_ops.focusPaneInDirection(self, .left),
+            .focus_pane_right => pane_ops.focusPaneInDirection(self, .right),
+            .focus_pane_up => pane_ops.focusPaneInDirection(self, .up),
+            .focus_pane_down => pane_ops.focusPaneInDirection(self, .down),
             // 인라인 rename 시작 — 활성 워크스페이스/pane/Term의 custom_name을 편집한다. 활성 대상은 항상 ≥1이라
             // 안전. 키보드/팔릿 경로(클릭 대상은 PR4/PR5가 startRename을 직접 부른다).
             .rename_workspace => self.startRename(.{ .workspace = self.activeTab() }),
-            .rename_pane => self.startRename(.{ .pane = self.activePane() }),
-            .rename_term => self.startRename(.{ .term = self.activePane().activeTerm() }),
+            .rename_pane => self.startRename(.{ .pane = pane_ops.activePane(self) }),
+            .rename_term => self.startRename(.{ .term = pane_ops.activePane(self).activeTerm() }),
             // 사이드바 그룹(SG3c) — 활성 워크스페이스 기준(키보드/팔레트). 우클릭·헤더 클릭은 클릭 대상으로 같은 메서드를 부른다.
             // create_group=활성 탭에 그룹 시작 마커, ungroup=활성 탭이 속한 그룹의 마커 제거, rename_group=활성 탭 그룹 이름 편집.
             .create_group => self.createGroupForTab(self.activeTab()), // SG5-3: 그룹 안 → depth+1 중첩
@@ -11278,12 +9931,12 @@ pub const AppSession = struct {
             // Term(가로 탭) 단위: ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
             // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
             .new_term => if (!self.tabsBlocked()) {
-                self.newTermInActivePane() catch {};
+                pane_ops.newTermInActivePane(self) catch {};
             },
             // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 대체). tabsBlocked(chrome 최소)면 막고,
             // 생성 실패는 무시(newWebTermInActivePane이 errdefer로 원복).
             .new_web_tab => if (!self.tabsBlocked()) {
-                self.newWebTermInActivePane(.browser) catch {};
+                pane_ops.newWebTermInActivePane(self, .browser) catch {};
             },
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
             .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),
@@ -11313,14 +9966,14 @@ pub const AppSession = struct {
             .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
             .previous_term => self.focusTermRelative(-1),
-            .next_pane => self.focusPaneRelative(1),
-            .previous_pane => self.focusPaneRelative(-1),
+            .next_pane => pane_ops.focusPaneRelative(self, 1),
+            .previous_pane => pane_ops.focusPaneRelative(self, -1),
             // 활성 pane을 통째로 새 단독 워크스페이스로 분리(grip 드래그→사이드바 빈 영역의 키보드/팔릿 버전).
             // 단독 pane 워크스페이스면 promotePaneToNewWorkspace가 no-op. tabsBlocked(chrome 최소)면 막는다.
-            .move_pane_to_new_workspace => if (!self.tabsBlocked()) self.promotePaneToNewWorkspace(self.activePane()),
+            .move_pane_to_new_workspace => if (!self.tabsBlocked()) pane_ops.promotePaneToNewWorkspace(self, pane_ops.activePane(self)),
             // 활성 pane을 N번 워크스페이스에 합치기(merge — 드래그를 그 카드에 드롭하는 것의 키보드 버전). 마지막
             // pane이면 빈 소스 워크스페이스도 제거한다. 자기/범위 밖이면 no-op. index는 0-based(select_tab과 동일).
-            .move_pane_to_workspace => |n| if (!self.tabsBlocked()) self.mergePaneIntoWorkspace(self.activePane(), n),
+            .move_pane_to_workspace => |n| if (!self.tabsBlocked()) pane_ops.mergePaneIntoWorkspace(self, pane_ops.activePane(self), n),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
                 // 주소창 편집 중이면 터미널이 아니라 편집 중인 주소 필드를 전체 선택한다(⌘C/⌘V가 copyText/pasteText로
@@ -11446,12 +10099,12 @@ pub const AppSession = struct {
         }
         // MARU_FORCE_BLOCKED=1 — 활성 Term을 blocked로 세워 상태바 blocked 항목을 헤드리스로 찍는다.
         if (std.c.getenv("MARU_FORCE_BLOCKED") != null) {
-            const t = self.activePane().activeTerm();
+            const t = pane_ops.activePane(self).activeTerm();
             t.agent_state = .blocked;
             t.agent_kind = .claude;
         }
         if (std.c.getenv("MARU_FORCE_AGENT") != null) {
-            const t = self.activePane().activeTerm();
+            const t = pane_ops.activePane(self).activeTerm();
             t.agent_state = .running;
             t.agent_kind = .claude;
         }
@@ -11463,7 +10116,7 @@ pub const AppSession = struct {
             }
         }
         if (std.c.getenv("MARU_FORCE_SPLIT") != null) {
-            self.splitActivePane(.horizontal) catch {};
+            pane_ops.splitActivePane(self, .horizontal) catch {};
             for (self.activeTab().panes.items) |pane| {
                 const surface = pane.activeTerm().surface;
                 surface.lockCore(self.io);
@@ -11998,7 +10651,7 @@ pub const AppSession = struct {
         const kind: web_panel_layout.PanelKind = if (std.c.getenv("MARU_WEB_PANEL_MARKDOWN") != null) .markdown else .browser;
         // web Term 생성의 create→append→focus 시퀀스(+append 실패 errdefer 롤백)는 newWebTermInActivePane 단일
         // 출처에 위임한다. 실패면 debug 플래그를 안 세워 다음 tick 재시도한다(pane은 errdefer로 불변).
-        self.newWebTermInActivePane(kind) catch return;
+        pane_ops.newWebTermInActivePane(self, kind) catch return;
         self.debug_web_term_opened = true;
     }
 
@@ -12887,7 +11540,7 @@ pub const AppSession = struct {
             for (pane.terms.items, 0..) |term, term_index| {
                 const entry = term.file_entry orelse continue;
                 if (entry.surface_id != surface_id) continue;
-                if (tab.active_pane != pane_index) self.focusPane(pane_index);
+                if (tab.active_pane != pane_index) pane_ops.focusPane(self, pane_index);
                 self.focusTerm(term_index);
                 found = true;
                 break;
@@ -13482,12 +12135,6 @@ pub const AppSession = struct {
         return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
     }
 
-    /// 이 pane(leaf)에 web Term이 하나라도 있는가(anyLeaf pred — pointer-identity leaf를 여기서 해석). alloc-free.
-    fn paneHasWebTerm(pane: *Pane) bool {
-        for (pane.terms.items) |term| if (term.kind == .web) return true;
-        return false;
-    }
-
     /// 창의 **어느 탭에든** web Term이 있나(FrameSummary.web_surfaces_present 원천). **유지 카운터가 아니라 매 tick
     /// 트리에서 계산**한 신호라 창 간 이동(moveWorkspaceToSession=detach/adopt 포인터 relocate, destroy/create 없음)·
     /// 재부모화·닫기 어느 경로에도 트리가 단일 출처로 자동 정합한다(옛 유지 카운터는 이동에서 원본 stuck-high·대상
@@ -13499,7 +12146,7 @@ pub const AppSession = struct {
     fn windowHasWebTerm(self: *AppSession) bool {
         if (!self.surface_initialized or self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
-            if (PaneTree.anyLeaf(tab.tree, paneHasWebTerm)) return true;
+            if (PaneTree.anyLeaf(tab.tree, pane_ops.paneHasWebTerm)) return true;
         }
         return false;
     }
@@ -13798,7 +12445,7 @@ pub const AppSession = struct {
             _ = self.activateExistingFileTerm(existing);
             return;
         }
-        const opened = self.openFileTermInActivePane(abs_path, .diff) catch return;
+        const opened = pane_ops.openFileTermInActivePane(self, abs_path, .diff) catch return;
         const entry = opened.term.file_entry orelse return;
         entry.diff_base = base;
         // 옛 값이 있으면 먼저 푼다 — 대입만 하면 그 할당이 회수 불가가 된다(리뷰에서 잡힌 누수).
@@ -13891,54 +12538,9 @@ pub const AppSession = struct {
         };
     }
 
-    /// 이미 열린 파일이면 그 Term으로 이동·활성화하고, 아니면 활성 pane에 새 파일 Term을 만든다.
-    /// 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
-    pub fn openFileTermInActivePane(
-        self: *AppSession,
-        path: []const u8,
-        kind: dock_panel.EntryKind,
-    ) !FileOpenResult {
-        // diff는 위 유일성 키가 다르므로 경로만으로 기존 Term을 재사용하지 않는다(그 확인은 openDiffTerm이 한다).
-        if (kind != .diff) {
-            if (file_panel_ops.fileTermForPath(self, path)) |existing| return self.activateExistingFileTerm(existing);
-        }
-
-        // 창당 상한. 옛 `DockPanel.open`이 모델 불변식으로 걸던 것을 열기 시점 검사로 옮겼다(§10 열린 질문 2번).
-        var count: usize = 0;
-        var it = file_panel_ops.fileEntries(self);
-        while (it.next()) |_| count += 1;
-        if (count >= dock_panel.max_entries) return error.TooManyEntries;
-
-        const pane = self.activePane();
-        const previous_active_term: ?*Term = if (pane.terms.items.len > 0) pane.activeTerm() else null;
-
-        const entry = try self.allocator.create(dock_panel.Entry);
-        errdefer self.allocator.destroy(entry);
-        const owned_path = try self.allocator.dupe(u8, path);
-        errdefer self.allocator.free(owned_path);
-        entry.* = .{
-            .id = try app_runtime.entry_ids.next(),
-            .path = owned_path,
-            .kind = kind,
-            .mode = dock_panel.Mode.defaultFor(kind),
-        };
-        const term = try self.createWebTerm(panelKindForEntryKind(kind));
-        // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        // 소유권이 여기서 Term으로 넘어간다. 이후 실패 지점이 없으므로 위 errdefer들은 돌지 않는다.
-        term.file_entry = entry;
-        entry.surface_id = term.surfaceId();
-        self.focusTerm(pane.terms.items.len - 1);
-        // 파일을 열면 탐색기도 함께 나타난다 — 옛 `DockPanel.open`이 세우던 자리다. FP16에서 도크가
-        // 탐색기 전용이 된 뒤에도 "파일을 열면 그 파일이 있는 프로젝트를 볼 수 있어야 한다"는 계약은 같다.
-        self.dock.presented = true;
-        return .{ .term = term, .created = true, .previous_active_term = previous_active_term };
-    }
-
     /// 이미 열려 있는 파일 Term을 화면에 올린다 — 필요하면 워크스페이스·pane까지 건너간다(§1: 다른 pane을
     /// target으로 열어도 원래 Term을 반환해 그쪽으로 focus).
-    fn activateExistingFileTerm(self: *AppSession, target: *Term) FileOpenResult {
+    pub fn activateExistingFileTerm(self: *AppSession, target: *Term) FileOpenResult {
         // 새로 여는 것과 같은 사용자 제스처이므로 탐색기 표시도 같아야 한다(§3.1 — 열기는 프로젝트를 보여 준다).
         self.dock.presented = true;
         for (self.tabs.items, 0..) |tab, tab_index| {
@@ -13948,7 +12550,7 @@ pub const AppSession = struct {
                     const previous_active_term: ?*Term =
                         if (pane.terms.items.len > 0) pane.activeTerm() else null;
                     if (self.app_window.active_tab != tab_index) _ = self.switchTab(tab_index);
-                    if (self.activeTab().active_pane != pane_index) self.focusPane(pane_index);
+                    if (self.activeTab().active_pane != pane_index) pane_ops.focusPane(self, pane_index);
                     self.focusTerm(term_index);
                     return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
                 }
@@ -14031,32 +12633,6 @@ pub const AppSession = struct {
         return self.windowHasWebTerm() or self.dockHasLiveSurface();
     }
 
-    fn dividerTargetRect(rect: maru.session.SplitRect) web_panel_layout.RectF64 {
-        return .{
-            .x = @floatFromInt(rect.x),
-            .y = @floatFromInt(rect.y),
-            .w = @floatFromInt(rect.w),
-            .h = @floatFromInt(rect.h),
-        };
-    }
-
-    fn dividerBandPt(self: *const AppSession, content: maru.session.SplitRect, target: web_panel_layout.RectF64, edge: web_panel_layout.DividerEdge) f64 {
-        const px = web_panel_layout.dividerPassThroughBandPx(content, target, edge);
-        return px * 1000.0 / @as(f64, @floatFromInt(@max(@as(u32, 1), self.scale_milli)));
-    }
-
-    /// Workspace SplitTree divider의 실제 chrome hit-test 폭과 같은 분수 px target. leaf bounds로 교차축과
-    /// 해당 leaf 쪽 절반만 제한해도 content edge와의 교집합은 실제 parent-bounds target과 동일하다.
-    fn paneDividerTarget(self: *const AppSession, leaf: maru.session.SplitRect, edge: web_panel_layout.DividerEdge) web_panel_layout.RectF64 {
-        const orientation: chrome.components.divider.Orientation = if (edge == .bottom) .horizontal_line else .vertical_line;
-        const half = chrome.components.divider.hitHalfExtentPx(orientation, self.cell_width_px, self.cell_height_px);
-        return switch (edge) {
-            .left => .{ .x = @as(f64, @floatFromInt(leaf.x)) - half, .y = @floatFromInt(leaf.y), .w = 2 * half, .h = @floatFromInt(leaf.h) },
-            .right => .{ .x = @as(f64, @floatFromInt(leaf.x +| leaf.w)) - half, .y = @floatFromInt(leaf.y), .w = 2 * half, .h = @floatFromInt(leaf.h) },
-            .bottom => .{ .x = @floatFromInt(leaf.x), .y = @as(f64, @floatFromInt(leaf.y +| leaf.h)) - half, .w = @floatFromInt(leaf.w), .h = 2 * half },
-        };
-    }
-
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
     /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
     /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). **비활성 워크스페이스 탭의 web Term도
@@ -14067,8 +12643,8 @@ pub const AppSession = struct {
         if (self.surface_initialized and self.tabs.items.len > 0) {
             self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)
             try self.activeTabLeafRects(self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
-            const bar_h = self.paneBarHeightPx();
-            const dt = self.dividerThicknessPx();
+            const bar_h = pane_ops.paneBarHeightPx(self);
+            const dt = pane_ops.dividerThicknessPx(self);
             // seam inset: WKWebView는 native NSView라 자기 frame 안 클릭을 **삼킨다**(터미널처럼 mouse handler가
             // dividerAtPoint를 먼저 가로챌 수 없다) → 형제 pane과 맞닿는 seam 가장자리서 divider를 **물리적으로 노출**해야
             // 마우스가 seam에 닿아 드래그 리사이즈된다(web-panel.md §5). 이전 `dt/2`는 기본 dt=1px에서 **0**이라 아무 효과
@@ -14118,21 +12694,21 @@ pub const AppSession = struct {
                     const content_rect = layout_math.insetRect(web_panel_layout.contentRect(lr.rect, inset), self.window_padding_px);
                     var grab_bands: web_panel_layout.DividerGrabBandsPt = .{};
                     if ((seam_edges & 1) != 0) {
-                        grab_bands.left = self.dividerBandPt(content_rect, self.paneDividerTarget(lr.rect, .left), .left);
+                        grab_bands.left = pane_ops.dividerBandPt(self, content_rect, pane_ops.paneDividerTarget(self, lr.rect, .left), .left);
                     }
                     if ((seam_edges & 2) != 0) {
                         const target = if (at_right_dock)
-                            dividerTargetRect(dock_layout.outerDividerHitRect(dg, .right, self.dockDividerGrabBandPx()))
+                            pane_ops.dividerTargetRect(dock_layout.outerDividerHitRect(dg, .right, pane_ops.dockDividerGrabBandPx(self)))
                         else
-                            self.paneDividerTarget(lr.rect, .right);
-                        grab_bands.right = self.dividerBandPt(content_rect, target, .right);
+                            pane_ops.paneDividerTarget(self, lr.rect, .right);
+                        grab_bands.right = pane_ops.dividerBandPt(self, content_rect, target, .right);
                     }
                     if ((seam_edges & 4) != 0) {
                         const target = if (at_bottom_dock)
-                            dividerTargetRect(dock_layout.outerDividerHitRect(dg, .bottom, self.dockDividerGrabBandPx()))
+                            pane_ops.dividerTargetRect(dock_layout.outerDividerHitRect(dg, .bottom, pane_ops.dockDividerGrabBandPx(self)))
                         else
-                            self.paneDividerTarget(lr.rect, .bottom);
-                        grab_bands.bottom = self.dividerBandPt(content_rect, target, .bottom);
+                            pane_ops.paneDividerTarget(self, lr.rect, .bottom);
+                        grab_bands.bottom = pane_ops.dividerBandPt(self, content_rect, target, .bottom);
                     }
                     try out.append(self.allocator, .{
                         .surface_id = term.surfaceId(),
@@ -14230,11 +12806,11 @@ pub const AppSession = struct {
     /// isWebPanelFocused만으론 놓친다). split의 비활성 pane 브라우저는 활성 pane이 아니라 0을 반환해 걸러진다.
     /// 0은 유효 surface_id가 아니므로(1부터 발급) sentinel로 안전.
     pub fn activeWebSurfaceId(self: *AppSession) u64 {
-        const term = self.activePane().activeTerm();
+        const term = pane_ops.activePane(self).activeTerm();
         return if (isBrowserTerm(term)) term.surfaceId() else 0;
     }
 
-    fn isBrowserTerm(term: *const Term) bool {
+    pub fn isBrowserTerm(term: *const Term) bool {
         // **파일 entry 제외가 여기 있다**(FP16 §8). `.html`/`.pdf` 파일 Term은 격리 config를 쓰려고
         // `web_panel_kind == .browser`를 갖게 되는데, 그렇다고 browser 기능(주소창 밴드·nav 단축키·URL 편집·
         // 터미널 링크 착지)이 걸리면 로컬 HTML 파일 뷰가 브라우저처럼 동작한다. PR #1638이 판정 8곳을 이 함수
@@ -14282,7 +12858,7 @@ pub const AppSession = struct {
         const surface_id = if (visible != 0) visible else switch (target) {
             .auto => return false, // 보이는 패널이 없으면 시스템 — auto는 탭을 새로 만들지 않는다
             // in-app: 없으면 새로 연다. 실패(OOM 등)는 링크를 삼키는 대신 시스템 브라우저로 폴백한다.
-            .in_app => self.appendWebTermInActivePane(.browser) catch return false,
+            .in_app => pane_ops.appendWebTermInActivePane(self, .browser) catch return false,
             .system => unreachable, // 위에서 이미 걸렀다
         };
         // 직전 요청이 아직 drain되지 않았으면(같은 tick 안 연타) 이번 클릭은 시스템으로 보낸다 — URL을 덮어써
@@ -14297,7 +12873,7 @@ pub const AppSession = struct {
     /// `activeWebSurfaceId`(browser 전용)와 달리 **markdown web term도 포함**한다(둘 다 WKWebView라 포커스 대상).
     /// Swift가 surface_id→webPanels로 webview를 조회한다. terminal 활성이면 0(→터미널 뷰 포커스). 0=유효 id 아님(1부터).
     pub fn activeWebSurfaceIdAnyKind(self: *AppSession) u64 {
-        const term = self.activePane().activeTerm();
+        const term = pane_ops.activePane(self).activeTerm();
         if (term.kind == .web) return term.surfaceId();
         return 0;
     }
@@ -14340,7 +12916,7 @@ pub const AppSession = struct {
 
     /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다(파일 내부 전용, ABI export는
     /// terminal_owns_input으로 대체돼 더는 pub 아님).
-    fn addrEditSurfaceId(self: *const AppSession) ?u64 {
+    pub fn addrEditSurfaceId(self: *const AppSession) ?u64 {
         return self.addr_edit;
     }
 
@@ -14384,7 +12960,7 @@ pub const AppSession = struct {
     /// caret 배치·드래그 시작은 클릭 핸들러 ①b가 한다(여기선 false 반환). 소비했으면 true(호출자 return). 드래그는 밴드를
     /// 벗어나도 addr_dragging으로 캡처를 유지한다(스크롤바 드래그와 동형·포커스 불변식 §5.1). 편집 아니면 밴드 없음 → false.
     fn addrBandMouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64) bool {
-        const pb = self.addrEditPaneBar() orelse return false;
+        const pb = pane_ops.addrEditPaneBar(self) orelse return false;
         const cw = self.cell_width_px;
         if (cw == 0) return false;
         const bar_h = pb.full.h;
@@ -16752,7 +15328,7 @@ pub const AppSession = struct {
     }
 
     /// 표시 슬롯 → 원본 tab 인덱스(검색 필터 역매핑). 범위 밖이면 null. slotAt/click/hover가 표시 슬롯을 실제 탭으로.
-    fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
+    pub fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
         if (display_slot >= self.sidebar_rows.items.len) return null;
         return switch (self.sidebar_rows.items[display_slot]) {
             .card => |c| c.tab,
@@ -16762,7 +15338,7 @@ pub const AppSession = struct {
     }
 
     /// 원본 tab 인덱스 → 표시 슬롯(row 인덱스; 검색 필터 정방향). 필터로 숨겨졌으면 null. 활성 밴드를 표시 슬롯에 그릴 때 쓴다.
-    fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
+    pub fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
         for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
             .card => |c| if (c.tab == tab_index) return slot,
             .agent_toggle, .agent => {},
@@ -16842,7 +15418,7 @@ pub const AppSession = struct {
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
         for (leaf_rects.items) |lr| {
-            const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+            const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
             if (!layout_math.pointInRect(x_px, y_px, pb.full)) continue;
             // 좌측 grip+라벨 세그먼트 → 그 pane(grip은 항상 예약돼 더블/우클릭 rename 대상도 grip 영역 포함).
             if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) return .{ .pane = lr.leaf };
@@ -16853,7 +15429,7 @@ pub const AppSession = struct {
             if (m.inCloseZone(tab, x_px)) return null; // 탭 우측 ✕(close) zone은 rename 대상 아님
             // 보이는 순서에서 고른다 — 드래그 중이면 사용자가 본 자리가 preview이고, rename은 그 제스처를
             // 취소하지 않으므로 model 순서로 고르면 눌린 것과 다른 탭이 대상이 된다(§4.4 "paint와 hit-test가 함께").
-            const order = self.paneTermOrder(lr.leaf);
+            const order = pane_ops.paneTermOrder(self, lr.leaf);
             if (tab < order.len) return .{ .term = order[tab] };
             return null;
         }
@@ -16873,7 +15449,7 @@ pub const AppSession = struct {
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return false;
         for (leaf_rects.items) |lr| {
-            if (self.paneBar(lr.rect, lr.leaf)) |pb| {
+            if (pane_ops.paneBar(self, lr.rect, lr.leaf)) |pb| {
                 if (layout_math.pointInRect(x_px, y_px, pb.full)) return true;
             }
         }
@@ -17767,8 +16343,8 @@ pub const AppSession = struct {
         self.clearMeasuredTextCaches();
         if (self.backing_width_px > 0 and self.backing_height_px > 0) {
             const grid = layout_math.gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.gridPadding());
-            self.resizeActiveTabPanes() catch {};
-            self.recomputeActivePaneRect();
+            pane_ops.resizeActiveTabPanes(self) catch {};
+            pane_ops.recomputeActivePaneRect(self);
             self.last_resize_size = grid;
         }
         self.metal_dirty = true;
@@ -18397,7 +16973,7 @@ pub const AppSession = struct {
             !self.anyModalOverlayOpen() and !self.structuralInputOwner())
         {
             self.chrome_host.notice.dismiss();
-            self.newTermInActivePane() catch {
+            pane_ops.newTermInActivePane(self) catch {
                 // 재시작 실패(spawn 실패·OOM 등)는 조용히 삼키지 않는다 — held 유지된 채 안내를 다시 띄운다.
                 self.showNotice("셸 재시작에 실패했습니다 — 설정(⌘,)을 확인하세요.");
             };
@@ -18412,7 +16988,7 @@ pub const AppSession = struct {
         // 라우팅보다 위에 있어서, 게이트가 없으면 탐색기에서 파일을 여는 Enter(isFileTreeDefaultKey→.activate)와 빈 dock
         // 그룹의 Enter를 전부 삼켜 **보고 있지도 않은 묘비**를 되살린다(code-review). tabs 0 가드는 activePane() deref 보호.
         if (self.surface_initialized and self.tabs.items.len > 0 and
-            self.activePane().activeTerm().rt.ended_placeholder and
+            pane_ops.activePane(self).activeTerm().rt.ended_placeholder and
             event.key == .enter and
             !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
             !self.anyModalOverlayOpen() and !self.structuralInputOwner())
@@ -18538,7 +17114,7 @@ pub const AppSession = struct {
         // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
         // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
         if (self.surface_initialized) {
-            const active_term = self.activePane().activeTerm();
+            const active_term = pane_ops.activePane(self).activeTerm();
             const page_alt_active = if (active_term.surface.remote != null)
                 (if (active_term.rt.observation.availability == .unavailable)
                     true // host mode 미확정이면 Page 키를 scrollback으로 삼키지 않고 PTY 경로로 보낸다.
@@ -18666,7 +17242,7 @@ pub const AppSession = struct {
             }
         }
         if (!self.surface_initialized) return null;
-        const term = self.activePane().activeTerm();
+        const term = pane_ops.activePane(self).activeTerm();
         if (!termIsWebBrowser(term) or term.surfaceId() != surface_id) return null;
         if (self.activeSurface().id != surface_id or !self.ownsSurface(surface_id)) return null;
         return .workspace_browser;
@@ -18948,7 +17524,7 @@ pub const AppSession = struct {
         // 이어도 옆 셸 pane 위 휠이 그 셸 스크롤백을 움직인다. 사이드바/밖(hit null)이면 활성 surface로 fallback.
         // surface와 rect는 한 leaf에서 온 한 쌍이라 함께 unwrap한다 — 둘을 따로 풀면 다른 분기에서 와 pane↔좌표가
         // 어긋날 수 있다(이 rework가 막으려는 것). rect는 트래킹 리포트 좌표용(pxToCellIn).
-        const hit = self.paneTargetAt(x_px, y_px);
+        const hit = pane_ops.paneTargetAt(self, x_px, y_px);
         const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ self.activeSurface(), self.active_pane_rect };
         // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
         // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
@@ -19061,7 +17637,7 @@ pub const AppSession = struct {
     /// config `cursor.shape`(config enum)를 코어/렌더가 쓰는 terminal enum으로 옮긴다. 두 enum은 **멤버 순서가 다르다**
     /// (config: block/bar/underline, terminal: block/underline/bar) — `@intFromEnum` 재해석은 bar↔underline을 조용히
     /// 뒤바꾼다. 명시 switch라 어느 쪽에 variant가 늘면 컴파일이 멈춘다(unfocusedCursorMode와 같은 경계 규율).
-    fn configCursorShape(self: *const AppSession) terminal.CursorShape {
+    pub fn configCursorShape(self: *const AppSession) terminal.CursorShape {
         return switch (self.appearance.cursor.shape) {
             .block => .block,
             .bar => .bar,
@@ -19099,38 +17675,6 @@ pub const AppSession = struct {
         self.runtime.enqueueCoreCommand(active.id, .{ .report_focus = gained }, self.io) catch {};
     }
 
-    /// 스크린 점(backing px) 아래 panel의 활성 Term surface + 그 터미널 본문 rect(탭 바 제외 = 셀 origin).
-    /// **'포인터 아래 pane이 소유' 라우팅의 단일 출처**로, 두 소비처가 공유한다.
-    ///  - 휠: '커서 아래' surface가 스크롤백/mouse reporting을 처리하고 리포트 좌표도 그 rect 기준이라 정합한다.
-    ///  - 링크(URL·파일 경로) 클릭/hover: 클릭한 pane의 화면에서 링크를 찾는다. 활성 pane 고정으로 두면 **활성이
-    ///    아닌 pane의 링크가 영영 안 열린다** — `pxToCell`은 좌표를 grid 안으로 **clamp**하므로 다른 pane을 눌러도
-    ///    null이 아니라 활성 pane의 엉뚱한 셀이 나오고, 활성이 web Term(빈 sentinel core)이면 항상 (0,0) 빈 셀만
-    ///    보게 된다(브라우저 패널을 띄운 뒤 터미널 링크가 먹통이던 사용자 제보의 루트커즈).
-    ///
-    /// 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖 — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
-    /// hit-test는 **pane 전체 rect**(탭 바 포함)로 한다 — 휠은 탭 바 위에서도 그 pane이 소유해야 자연스럽다. 반환
-    /// `rect`는 본문(탭 바 제외)이므로, "여기에 링크가 있나"를 묻는 소비처는 `pxToCellIn`(clamp)이 아니라
-    /// `paneCellAtExact`를 써서 탭 바·여백 좌표가 첫 행 셀로 접히지 않게 해야 한다(리뷰 지적 — chrome 클릭이 링크로 오인).
-    fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *maru.session.Surface, rect: maru.session.SplitRect } {
-        if (!self.surface_initialized) return null;
-        // 입력 hot path라 영속 scratch를 재사용한다(매 mouse-move 할당 회피 — web/dock scratch와 같은 패턴).
-        self.pane_target_rects_scratch.clearRetainingCapacity();
-        self.activeTabLeafRects(self.allocator, self.termRect(), &self.pane_target_rects_scratch) catch return null;
-        for (self.pane_target_rects_scratch.items) |lr| {
-            if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue; // paneAtPoint와 같은 반열린 hit-test
-            return .{ .surface = lr.leaf.activeTerm().surface, .rect = self.paneTermRect(lr.rect) };
-        }
-        return null;
-    }
-
-    /// 링크 조회 전용 셀 변환 — `paneTargetAt`이 준 (surface, 본문 rect)에서 좌표가 **실제 셀 위**일 때만 CellHit.
-    /// 탭 바·divider 밴드·주소창 밴드·grid 뒤 여백은 null이다. `pxToCellIn`(clamp)을 쓰면 그런 chrome 클릭이 첫 행
-    /// 셀로 접혀, 수식키+클릭이 탭 전환을 삼키고 엉뚱한 링크를 여는 오인이 생긴다(hover는 chrome 분기에서 먼저
-    /// 밑줄을 지우므로 "밑줄 없는 곳이 열리는" 비대칭까지 됐다). 클릭과 hover가 같이 쓴다.
-    fn paneCellAtExact(self: *const AppSession, surface: *const maru.session.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?layout_math.CellHit {
-        return layout_math.pxToCellExact(self.cell_width_px, self.cell_height_px, surface.core.size.cols, surface.core.size.rows, rect, x_px, y_px);
-    }
-
     /// 가로 스와이프(delta_x→cols)를 커서 아래 pane의 탭 바 가로 스크롤로 바꾼다(#2b). 그 pane이 탭 넘침(has_scroll)이
     /// 아니면 무동작. 클릭 ‹›와 같이 eff(=bm.scroll_cols, [0,max] clamp된 값) 기준이라 stale tab_scroll_cols가 자동
     /// 정정된다(다음 렌더 tabLayout이 다시 clamp). natural 방향: 오른쪽 스와이프(cols>0)면 왼쪽 탭으로(scroll 감소).
@@ -19140,7 +17684,7 @@ pub const AppSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
             if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue; // 커서가 이 pane(탭 바+터미널) 영역일 때만
-            const pb = self.paneBar(lr.rect, lr.leaf) orelse return;
+            const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse return;
             const count = lr.leaf.terms.items.len;
             const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
             if (!m.has_scroll) return; // 탭이 안 넘침 — 가로 스크롤할 것 없음
@@ -19157,7 +17701,7 @@ pub const AppSession = struct {
     /// 로컬·비-터미널·관측 미가용이면 null → host.handleKeyEvent가 active surface의 실제 core 모드를 읽는다. option_as_meta는
     /// core 모드가 아니라 config라 호출자(frame_loop)가 뒤에 합친다. cwd·마우스·bracketed 관측 형제(remoteMouseTracking).
     fn hostBackedEncodeOptions(self: *AppSession) ?terminal.input.EncodeOptions {
-        const active_term = self.activePane().activeTerm();
+        const active_term = pane_ops.activePane(self).activeTerm();
         if (active_term.kind != .terminal or active_term.surface.remote == null) return null;
         const obs = &active_term.rt.observation;
         if (obs.availability == .unavailable) return null;
@@ -19476,7 +18020,7 @@ pub const AppSession = struct {
             if (kind == 2) {
                 drag.x = x_px;
                 drag.y = y_px;
-                const slot = self.paneDropHighlightSlot(x_px, y_px); // 드롭 타겟 카드/빈 영역
+                const slot = pane_ops.paneDropHighlightSlot(self, x_px, y_px); // 드롭 타겟 카드/빈 영역
                 if (!usizeOptEql(drag.drop_slot, slot)) {
                     drag.drop_slot = slot;
                     self.rebuildSidebar() catch {}; // .drop_zone 밴드를 새 슬롯으로 이동(슬롯 전환 시에만)
@@ -19485,7 +18029,7 @@ pub const AppSession = struct {
             } else {
                 const was_highlighting = drag.drop_slot != null;
                 drag.drop_slot = null;
-                self.dropPaneAt(x_px, y_px); // up: 사이드바면 분리(빈 영역)/합치기(카드), 밖이면 no-op
+                pane_ops.dropPaneAt(self, x_px, y_px); // up: 사이드바면 분리(빈 영역)/합치기(카드), 밖이면 no-op
                 self.finishPointerGesture();
                 // 밴드가 떠 있었으면 제거를 보장한다. 커밋(promote/merge)은 이미 rebuild하므로 그 경우만 약간 중복이나,
                 // 밴드가 없던 드롭(터미널 등)은 rebuild를 건너뛴다(드롭은 hot path 아님 — 무조건 rebuild 대비 절감).
@@ -19509,8 +18053,8 @@ pub const AppSession = struct {
         // `InteractionState`가 든다(CIM2). move는 좌표를 모으기만 하고 tick이 최종 하나를 적용하며,
         // 매 move의 재발행에서 capture를 넘길지는 §5 carry verdict가 판정한다. 새 down(1)은 아래
         // 일반 처리로 흘려 새 드래그를 시작한다.
-        if (self.dividerCaptureActive() and (kind == 2 or kind == 3)) {
-            if (self.routeDividerCapture(kind, x_px, y_px)) return true;
+        if (pane_ops.dividerCaptureActive(self) and (kind == 2 or kind == 3)) {
+            if (pane_ops.routeDividerCapture(self, kind, x_px, y_px)) return true;
         }
         // 사이드바 폭 조절 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(③a) — drag는 경계를 x로 잡아 폭을 live
         // 갱신, up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그를 시작한다.
@@ -19732,7 +18276,7 @@ pub const AppSession = struct {
         // `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
         // capture 없는 pointer만 rect로 분류한다(docs/chrome-interaction-migration.md §2).
         if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
-            self.pointerGestureIs(.none) and !self.dividerCaptureActive() and !self.mouse_drag_selecting)
+            self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
         {
             const content = self.dockGeometry().tree_content;
             const captured = self.agent_session_dock_interaction.capture != null;
@@ -19858,7 +18402,7 @@ pub const AppSession = struct {
             // outer divider의 확장 grab band는 dock editor/tree 안쪽과 겹친다. 내부 hit-test보다 먼저 잡아야
             // 정확한 divider 선이 dockGroupAtPoint의 null 조기 반환에 막히지 않고, WKWebView가 통과시킨 안쪽
             // seam 클릭도 파일/그룹 클릭으로 오인되지 않는다.
-            if (self.dockDividerAtPoint(x_px, y_px)) {
+            if (pane_ops.dockDividerAtPoint(self, x_px, y_px)) {
                 const g = self.dockGeometry();
                 // sizePtForPointer의 권위 경계는 dock 본문 시작점이다(divider의 dock 쪽 edge). 포인터가 확장
                 // hit band 어디에 있든 이 간격을 보존해 경계가 클릭점으로 순간 이동하지 않게 한다.
@@ -20069,14 +18613,14 @@ pub const AppSession = struct {
                 //    (focusPaneByPtr+focusTerm로 그 탭을 활성으로 만든 뒤 closeActiveTermOrPane cascade). 단일 panel도
                 //    Term이 여럿이면 전환/닫기 된다. ✕는 호버 중일 때만 보이므로 hovered_tab과 일치할 때만 닫는다.
                 for (leaf_rects.items) |lr| {
-                    const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                    const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                     if (layout_math.pointInRect(x_px, y_px, pb.full)) {
                         // 좌측 grip+라벨 세그먼트 클릭 → 그 pane 포커스 + **pane 통째 드래그 arm**(이어지는 drag(2)가
                         // floating 미리보기, up(3)이 사이드바면 분리/합치기 — 안 끌면 그냥 포커스). 탭 hit-test는 그 뒤
                         // 영역(pb.tabs)만 대상이라, 좌측 영역 x가 tabIndex의 좌측 clamp로 탭0을 잘못 잡는 걸 막는다.
                         // 더블클릭·우클릭 rename은 같은 영역에서 renameTargetAt이 따로 처리(kind 4/우클릭은 위에서 분기).
                         if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
-                            _ = self.focusPaneByPtr(lr.leaf);
+                            _ = pane_ops.focusPaneByPtr(self, lr.leaf);
                             self.beginPointerGesture(.{ .pane = .{ .pane = lr.leaf, .x = x_px, .y = y_px } });
                             self.drag_autoscroll = 0;
                             self.mouse_drag_selecting = false;
@@ -20086,21 +18630,21 @@ pub const AppSession = struct {
                         const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
                         // 바 우측 ‹›(가로 스크롤) 버튼 클릭 → 그 pane의 tab_scroll_cols를 ±tab_w(한 탭). 넘침 범위로 clamp. "+"·탭보다 먼저.
                         if (m) |bm| if (bm.inScrollLeftZone(x_px)) {
-                            _ = self.focusPaneByPtr(lr.leaf);
+                            _ = pane_ops.focusPaneByPtr(self, lr.leaf);
                             lr.leaf.tab_scroll_cols = bm.scroll_cols -| bm.tab_w; // ‹ 이전 탭 — bm.scroll_cols(=clamp된 eff) 기준이라 stale 자동 정정
                             self.metal_dirty = true;
                             return;
                         };
                         if (m) |bm| if (bm.inScrollRightZone(x_px)) {
-                            _ = self.focusPaneByPtr(lr.leaf);
+                            _ = pane_ops.focusPaneByPtr(self, lr.leaf);
                             lr.leaf.tab_scroll_cols = bm.scroll_cols + bm.tab_w; // › 다음 탭 — 다음 렌더의 tabLayout이 [0,max]로 clamp
                             self.metal_dirty = true;
                             return;
                         };
                         // 바 우측 "+" 버튼 클릭 → 그 pane을 포커스하고 새 Term을 띄운다(⌘T의 마우스 버전). 탭/✕보다 먼저.
                         if (m) |bm| if (bm.inPlusZone(x_px)) {
-                            _ = self.focusPaneByPtr(lr.leaf);
-                            self.newTermInActivePane() catch {};
+                            _ = pane_ops.focusPaneByPtr(self, lr.leaf);
+                            pane_ops.newTermInActivePane(self) catch {};
                             self.drag_autoscroll = 0;
                             self.mouse_drag_selecting = false;
                             return;
@@ -20117,7 +18661,7 @@ pub const AppSession = struct {
                             if (self.tab_drag_order.items.len != count or slot >= count) break :blk slot;
                             break :blk self.termModelIndex(lr.leaf, self.tab_drag_order.items[slot]) orelse slot;
                         };
-                        _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
+                        _ = pane_ops.focusPaneByPtr(self, lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
                         self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
@@ -20150,9 +18694,9 @@ pub const AppSession = struct {
                     // ①a-2) FP16d 파일 헤더 밴드 클릭 → 모드 선택기/충돌 표식. 렌더와 같은 rect·같은 cell 권위
                     //       (`dock_layout.headerCellLayout`)를 써 보이는 구간과 눌리는 구간이 일치한다. 충돌 `!`을
                     //       mode 토글보다 **먼저** 검사해, 표식을 누르면 편집 모드가 바뀌는 대신 disk reload 확인으로 간다.
-                    if (self.fileHeaderBandForPane(lr.leaf, lr.rect)) |band| {
+                    if (pane_ops.fileHeaderBandForPane(self, lr.leaf, lr.rect)) |band| {
                         if (layout_math.pointInRect(x_px, y_px, band.band)) {
-                            _ = self.focusPaneByPtr(lr.leaf);
+                            _ = pane_ops.focusPaneByPtr(self, lr.leaf);
                             const entry = band.entry;
                             if (entry.external_change) {
                                 if (dock_layout.headerConflictRect(band.band, self.cell_width_px, entry.dirty)) |r| {
@@ -20180,7 +18724,7 @@ pub const AppSession = struct {
                             const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(7e-1b addr_bar_h와 동일 소스)
                             const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
                             if (layout_math.pointInRect(x_px, y_px, band)) {
-                                _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
+                                _ = pane_ops.focusPaneByPtr(self, lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
                                 // 버튼 존(navButtonAt)이면 nav action. 렌더가 존 가운데 칸에 그린 것과 같은 nav_button_w/count 단일 소스라
                                 // 보이는 버튼 == 클릭되는 버튼. 활성 판정·pending 세움은 setBrowserNavAction 단일 정책(키보드 단축키 7e-4와
                                 // 공유) — 비활성 버튼은 no-op(클릭만 소비, 편집 진입 안 함).
@@ -20213,14 +18757,14 @@ pub const AppSession = struct {
                 // ⓐ divider 클릭 → 리사이즈 드래그 시작(PR6). 탭 바(①)보다 뒤·pane 선택(②)보다 앞 — 탭 바는
                 //    seam에 붙어 있어 우선권을 주고, divider는 terminal 영역 seam에서 잡는다. drag(2)/up(3)은 위
                 //    divider 캡처가 받는다. split일 때만(dividerAtPoint가 단일 panel이면 null).
-                if (self.beginDividerCapture(x_px, y_px)) {
+                if (pane_ops.beginDividerCapture(self, x_px, y_px)) {
                     self.drag_autoscroll = 0;
                     self.mouse_drag_selecting = false;
                     return;
                 }
                 // ② split에서 다른 panel의 터미널 영역 클릭 → 그 pane 포커스(활성 panel이면 아래 선택 경로로).
                 if (Model.paneAtPoint(leaf_rects.items, x_px, y_px)) |pane| {
-                    if (pane != self.activePane() and self.focusPaneByPtr(pane)) {
+                    if (pane != pane_ops.activePane(self) and pane_ops.focusPaneByPtr(self, pane)) {
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
                         return;
@@ -21643,7 +20187,7 @@ pub const AppSession = struct {
             self.cancelAddrEdit(false); // 클릭-어웨이와 같은 취소(현재 URL 복원) — focus-restore 안 함
             self.metal_dirty = true;
         }
-        if (!self.focusPaneByPtr(pane)) return .not_applicable;
+        if (!pane_ops.focusPaneByPtr(self, pane)) return .not_applicable;
         self.focusTerm(term_index); // 같은 Term이면 무동작
         return .routed;
     }
@@ -21654,7 +20198,7 @@ pub const AppSession = struct {
         const rect = for (leaf_rects) |lr| {
             if (lr.leaf == pane) break lr.rect;
         } else return null;
-        const pb = self.paneBar(rect, pane) orelse return null;
+        const pb = pane_ops.paneBar(self, rect, pane) orelse return null;
         if (!layout_math.pointInRect(x_px, y_px, pb.full)) return null; // 바 밖(본문) — pane 활성 Term이 대상
         if (x_px < @as(f64, @floatFromInt(pb.tabs.x))) return null; // grip/라벨 세그먼트
         const count = pane.terms.items.len;
@@ -21664,7 +20208,7 @@ pub const AppSession = struct {
         // 좌표 → **보이는** 슬롯 → 그 Term → model 인덱스. 반환값은 `pane.terms` 인덱스로 소비되므로(호출자가
         // `terms.items[i]`·`focusTerm(i)`) 변환이 필요하다. renameTargetAt과 같은 자리를 같은 Term으로 치겠다는
         // 이 함수의 약속은 드래그 중에도 지켜져야 한다 — 그쪽은 보이는 순서로 고른다(§4.4).
-        const order = self.paneTermOrder(pane);
+        const order = pane_ops.paneTermOrder(self, pane);
         if (tab >= order.len) return null;
         return self.termModelIndex(pane, order[tab]);
     }
@@ -21690,8 +20234,8 @@ pub const AppSession = struct {
         if (self.structuralInputOwner()) return;
         // §7 종료 placeholder는 읽기 전용이다(PTY도 handle도 없다). 여기서 막지 않으면 아래 SSH/paste 경로가 handle=0
         // 관측을 시도해 실패 notice를 띄우는데, 사용자에겐 "왜 실패했는지" 설명이 안 되는 잡음이다. 되살리기는 ⏎만이다.
-        if (self.activePane().activeTerm().rt.ended_placeholder) return;
-        const active_term = self.activePane().activeTerm();
+        if (pane_ops.activePane(self).activeTerm().rt.ended_placeholder) return;
+        const active_term = pane_ops.activePane(self).activeTerm();
         if (active_term.kind == .terminal) {
             self.backendFor(active_term).refreshObservation(
                 active_term.rt.handle,
@@ -21748,8 +20292,8 @@ pub const AppSession = struct {
         if (self.structuralInputOwner()) return true;
         // §7 종료 placeholder는 읽기 전용 — **consumed(true)로 돌려** Swift의 텍스트 fallback이 PTY로 새지 않게 한다
         // (위 "구조 owner에서는 no-op도 consumed" 규율과 같은 이유). 되살리기는 ⏎만이다.
-        if (self.activePane().activeTerm().rt.ended_placeholder) return true;
-        const active_term = self.activePane().activeTerm();
+        if (pane_ops.activePane(self).activeTerm().rt.ended_placeholder) return true;
+        const active_term = pane_ops.activePane(self).activeTerm();
         if (active_term.kind == .terminal) {
             self.backendFor(active_term).refreshObservation(
                 active_term.rt.handle,
@@ -21815,7 +20359,7 @@ pub const AppSession = struct {
     };
 
     fn remoteUploadContext(self: *AppSession) ?RemoteUpload {
-        const term = self.activePane().activeTerm();
+        const term = pane_ops.activePane(self).activeTerm();
         if (term.kind != .terminal or term.rt.observation.availability != .current) return null;
         const dest: ?[]u8 = if (term.rt.observation.ssh_remote_dest_present)
             (self.allocator.dupe(u8, term.rt.observation.ssh_remote_dest.items) catch null)
@@ -22293,7 +20837,7 @@ pub const AppSession = struct {
         self.setDockToggleHovered(false); // 토글 밖 → 호버 하이라이트 해제(실제 마우스는 터미널을 지나 이 경로를 밟음)
         // outer dock divider의 grab band는 일부가 dock/WKWebView 안쪽으로 겹친다. 내부 tree/group보다 먼저
         // 판정해야 그 겹친 구간도 resize cursor가 되고, 정확한 1px divider 위가 group miss로 사라지지 않는다.
-        if (self.dockDividerAtPoint(x_px, y_px)) {
+        if (pane_ops.dockDividerAtPoint(self, x_px, y_px)) {
             self.setHoveredTab(null);
             self.clearHoverUrlAnchor();
             return switch (self.dock.side) {
@@ -22352,7 +20896,7 @@ pub const AppSession = struct {
             return .link;
         }
         // divider 밴드 위면 리사이즈 커서(클릭과 같은 dividerAtPoint — 탭 바 다음 순서). 단일 panel이면 null.
-        if (self.dividerAtPoint(x_px, y_px)) |hit| {
+        if (pane_ops.dividerAtPoint(self, x_px, y_px)) |hit| {
             self.clearHoverUrlAnchor();
             return switch (hit.seg.orientation) {
                 .vertical_line => .resize_h, // 세로 divider — 좌우로 끈다
@@ -22367,8 +20911,8 @@ pub const AppSession = struct {
             // 클릭(urlAt)과 **같은** paneTargetAt 라우팅 + **같은** clamp 없는 셀 변환 — "밑줄 보이는 곳 = 열리는 곳"이
             // pane 단위로도, pane 안 chrome(탭 바·여백) 단위로도 성립하게. 활성 pane 고정이면 비활성 pane/브라우저 옆
             // 터미널에서 밑줄이 안 뜨거나 엉뚱한 pane에 그려진다.
-            if (self.paneTargetAt(x_px, y_px)) |hit| {
-                if (self.paneCellAtExact(hit.surface, hit.rect, x_px, y_px)) |cell| {
+            if (pane_ops.paneTargetAt(self, x_px, y_px)) |hit| {
+                if (pane_ops.paneCellAtExact(self, hit.surface, hit.rect, x_px, y_px)) |cell| {
                     const s = hit.surface;
                     // 분류(로컬 wordIsUrl / 원격 링크 목록 조회)가 화면·스크롤백을 읽으므로 락 아래에서 한다 —
                     // urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매 mouse-move라 클릭보다
@@ -22443,7 +20987,7 @@ pub const AppSession = struct {
     /// 비용: hover 중일 때만, tick당 leaf rect 계산 1회(영속 scratch라 할당 0).
     fn revalidateHoverLink(self: *AppSession) void {
         const pos = self.hover_url_pos_px orelse return;
-        const still: u64 = if (self.paneTargetAt(pos.x, pos.y)) |hit| hit.surface.id else 0;
+        const still: u64 = if (pane_ops.paneTargetAt(self, pos.x, pos.y)) |hit| hit.surface.id else 0;
         if (still != self.hover_url_surface_id) self.clearHoverUrlAnchor();
     }
 
@@ -22490,8 +21034,8 @@ pub const AppSession = struct {
         // browser web Term이면 빈 sentinel core라 항상 빈 결과였다(사용자 제보). 사이드바/터미널 밖이면 null.
         // 셀 변환은 **clamp 없는** paneCellAtExact를 쓴다 — 탭 바·divider·여백 좌표가 첫 행 셀로 접히면 그 위 클릭이
         // 링크로 오인돼 탭 전환을 삼킨다(hover는 그 영역에서 밑줄을 지우므로 비대칭까지 생긴다).
-        const hit = self.paneTargetAt(x_px, y_px) orelse return &.{};
-        const cell = self.paneCellAtExact(hit.surface, hit.rect, x_px, y_px) orelse return &.{};
+        const hit = pane_ops.paneTargetAt(self, x_px, y_px) orelse return &.{};
+        const cell = pane_ops.paneCellAtExact(self, hit.surface, hit.rect, x_px, y_px) orelse return &.{};
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
@@ -22606,7 +21150,7 @@ pub const AppSession = struct {
         // 텍스트를 가져온다(텍스트가 커서 관측에 못 싣는다). 정책(write allow)과 NSPasteboard 쓰기는 로컬과
         // 동일하게 client가 한다 — §기능을 어느 쪽에 둘 것인가.
         if (is_macos and self.activeSurface().remote != null) {
-            const term = self.activePane().activeTerm();
+            const term = pane_ops.activePane(self).activeTerm();
             const seq = term.rt.observation.clipboard_write_seq;
             const last = term.rt.last_clipboard_write_seq orelse {
                 term.rt.last_clipboard_write_seq = seq; // 첫 관측 = 기준선(재접속 시 지난 복사 재생 금지)
@@ -22672,7 +21216,7 @@ pub const AppSession = struct {
         // **정책 게이트는 여기 그대로** — 클립보드 읽기 허용 여부는 client config이고, 응답 바이트는 아래
         // provideClipboardRead가 PTY로 쓰므로(원격이면 host PTY) 추가 왕복이 필요 없다.
         if (is_macos and s.remote != null) {
-            const term = self.activePane().activeTerm();
+            const term = pane_ops.activePane(self).activeTerm();
             const seq = term.rt.observation.clipboard_read_seq;
             const last = term.rt.last_clipboard_read_seq orelse {
                 // 첫 관측은 기준선만 잡는다. 이게 없으면 재접속 때 host의 누적 read seq가 곧바로 요청으로 보여
@@ -23210,7 +21754,7 @@ pub const AppSession = struct {
     /// 슬라이스. 반환은 Term의 owned observation cache 소유로 다음 동기화/destroy까지 유효하다. Swift가 창 제목에 쓴다.
     pub fn currentCwd(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
-        const term = self.activePane().activeTerm();
+        const term = pane_ops.activePane(self).activeTerm();
         self.refreshTermObservation(term, false, false);
         if (term.kind != .terminal or term.rt.observation.availability == .unavailable) return &.{};
         return term.rt.observation.cwd.items;
@@ -23414,8 +21958,8 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return &.{};
         // 4e: 활성 Term이 web이면 sentinel core엔 OSC 제목이 없어 빈값이 나온다 — kind 파생 라벨("Browser"/
         // "Markdown", custom_name 우선)을 창 제목으로 쓴다(termLabel 단일 해석). terminal 경로는 그대로.
-        if (!self.activeTermIsTerminal()) return termLabel(self.activePane().activeTerm());
-        const term = self.activePane().activeTerm();
+        if (!self.activeTermIsTerminal()) return termLabel(pane_ops.activePane(self).activeTerm());
+        const term = pane_ops.activePane(self).activeTerm();
         self.refreshTermObservation(term, false, false);
         if (term.rt.observation.availability == .unavailable) return &.{};
         return term.rt.observation.window_title.items;
@@ -24286,7 +22830,7 @@ pub const AppSession = struct {
         // 복원된 모든 탭을 현재 창 grid로 맞춘다. apply는 resize를 안 부르고 각 surface는 저장 grid로 spawn되며,
         // caller의 resizeAppSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
         // 활성 탭을 빠뜨린다. 여기서 전 탭을 명시적으로 맞춰 dedup·활성탭-한정을 둘 다 우회한다(best-effort).
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
         // §7 묘비 안내는 **resize 뒤**에 쓴다 — 최종 pane 폭이 정해진 다음이어야 reflow로 줄이 어긋나지 않는다.
         // 멱등 래치가 있어 재적용에도 덧쓰지 않는다. 비-묘비 Term은 함수 첫 줄에서 no-op이다.
         for (self.tabs.items) |tab| {
@@ -24296,7 +22840,7 @@ pub const AppSession = struct {
         }
         // 활성 탭의 대표 surface는 위 swap 루프가 이미 surface_ptrs[*]에 바인딩했고 active_pane도 빌드 때
         // 세팅됐다(focusPane(active==active)는 early-return no-op이라 호출하지 않는다). 좌표·사이드바만 갱신.
-        self.recomputeActivePaneRect();
+        pane_ops.recomputeActivePaneRect(self);
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
         // publish가 끝난 뒤에만 기록한다(실패 경로는 창 apply 실패로 이미 신호가 있다). Swift가 apply 성공 직후
@@ -24334,11 +22878,11 @@ pub const AppSession = struct {
                 self.chrome_host.context_menu.hide();
             }
         }
-        for (tab.panes.items) |pane| self.destroyPane(pane);
+        for (tab.panes.items) |pane| pane_ops.destroyPane(self, pane);
         // 트리를 통째 해제하기 전에, divider_drag가 이 트리 소속 split이면 표적 null(다른 탭 트리를 가리키면 유지 —
         // 무관한 탭 close가 진행 중 divider 드래그를 안 끊는다). collapse 경로의 invalidateForFreedSplit과 같은 규율.
         if (self.divider_capture_split) |captured| {
-            if (PaneTree.containsSplit(tab.tree, captured)) self.endDividerCapture();
+            if (PaneTree.containsSplit(tab.tree, captured)) pane_ops.endDividerCapture(self);
         }
         if (tab.custom_name) |n| self.allocator.free(n); // 워크스페이스 사용자 rename(owned) 해제
         if (tab.group_start) |g| self.allocator.free(g); // 사이드바 그룹 시작 마커(owned) 해제
@@ -24356,10 +22900,10 @@ pub const AppSession = struct {
         errdefer self.allocator.destroy(tab);
         tab.* = .{};
         errdefer tab.panes.deinit(self.allocator);
-        errdefer for (tab.panes.items) |p| self.destroyPane(p);
+        errdefer for (tab.panes.items) |p| pane_ops.destroyPane(self, p);
 
         try tab.panes.ensureTotalCapacity(self.allocator, m.panes.len);
-        for (m.panes) |pm| tab.panes.appendAssumeCapacity(try self.buildWorkspacePane(pm));
+        for (m.panes) |pm| tab.panes.appendAssumeCapacity(try pane_ops.buildWorkspacePane(self, pm));
 
         // 트리 빌드 — 새로 만든 split 노드를 추적해 에러 시 전부 해제(트리 미완성이라 PaneTree.deinit 못 씀).
         // capacity를 split 노드 수만큼 미리 잡아 추적 append를 무실패화한다: create 직후 append가 OOM이면 그
@@ -24409,135 +22953,9 @@ pub const AppSession = struct {
     // buildWorkspaceTreeNode(workspace.TreeNode → PaneTree.Node 복원)는 session core로 이동(§3.1) —
     // Model.buildTreeNode(self.allocator 대신 allocator 인자로 pure화). 단일 출처: src/session/session_model.zig.
 
-    /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
-    /// FP16 §5.0: pane은 **persisted 시퀀스**(터미널 surface + 파일 Term)를 index 순서대로 되살린다.
-    /// `file-term`의 index가 그 시퀀스 안의 자리이고, 나머지 자리를 `surfaces`가 순서대로 채운다.
-    /// pane은 항상 Term >= 1이어야 하므로(모델 불변식) 시퀀스가 비면 `EmptyPane`이다.
-    fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*Pane {
-        const total = m.surfaces.len + m.file_terms.len;
-        if (total == 0) return error.EmptyPane;
-
-        // pane 생성은 surface 하나가 필요하다. 터미널이 하나도 없는(파일 Term만인) pane은 첫 파일로 만든다.
-        var pane: *Pane = undefined;
-        var next_surface: usize = 0;
-        var seeded_file = false;
-        if (m.surfaces.len > 0) {
-            pane = try self.createPaneFromSurface(m.surfaces[0]);
-            next_surface = 1;
-        } else {
-            pane = try self.createPaneFromFileTerm(m.file_terms[0]);
-            seeded_file = true;
-        }
-        errdefer self.destroyPane(pane);
-        pane.custom_name = try self.dupeCustomName(m.custom_name); // pane 사용자 rename 복원(errdefer destroyPane가 free)
-        try pane.terms.ensureTotalCapacity(self.allocator, total);
-
-        // 시퀀스를 앞에서부터 채운다. 각 자리는 그 index를 요구하는 file-term이 있으면 파일 Term, 없으면
-        // 다음 터미널 surface다(검증 — index 중복 없음·[0,total) 전수 — 은 파서가 이미 했다). seed로 이미
-        // 만든 Term은 건너뛴다.
-        var slot: usize = 0;
-        var seed_file_used = !seeded_file;
-        while (slot < total) : (slot += 1) {
-            const file_index: ?usize = blk: {
-                for (m.file_terms, 0..) |ft, fi| if (ft.index == slot) break :blk fi;
-                break :blk null;
-            };
-            if (file_index) |fi| {
-                if (!seed_file_used) {
-                    seed_file_used = true; // seed가 곧 이 자리의 파일이다(터미널 0개인 pane)
-                    continue;
-                }
-                pane.terms.appendAssumeCapacity(try self.createFileTermFromModel(m.file_terms[fi]));
-                continue;
-            }
-            if (next_surface >= m.surfaces.len) continue; // seed로 쓴 surface 자리
-            pane.terms.appendAssumeCapacity(try self.createTermFromSurface(m.surfaces[next_surface]));
-            next_surface += 1;
-        }
-        pane.active_term = @min(m.active_term, pane.terms.items.len - 1);
-
-        // WP-P: 브라우저 Term을 `insert_after`(앞의 persisted Term 수) 자리에 끼워 넣는다. 뒤에서부터 삽입해야
-        // 앞 record의 자리 계산이 안 밀린다(같은 insert_after가 여럿이면 등장 순서를 유지한다 — 뒤 record가 더
-        // 뒤에 오도록 역순으로 넣는다). URL은 Term에 pending으로 달고, surface가 생성된 tick에 navigate로 나간다.
-        if (m.browser_terms.len > 0) {
-            var bi = m.browser_terms.len;
-            while (bi > 0) {
-                bi -= 1;
-                const bt = m.browser_terms[bi];
-                const at = @min(bt.insert_after, pane.terms.items.len);
-                const term = self.createWebTerm(.browser) catch continue; // 실패한 record만 버린다(창은 살린다)
-                term.pending_url = self.allocator.dupe(u8, bt.url) catch null;
-                pane.terms.insert(self.allocator, at, term) catch {
-                    self.destroyTerm(term);
-                    continue;
-                };
-                // 활성 record면 그 자리를 활성 탭으로. 아니면 삽입으로 밀린 활성 인덱스를 보정한다.
-                if (m.active_browser) |ab| {
-                    if (ab == bi) {
-                        pane.active_term = at;
-                    } else if (at <= pane.active_term) {
-                        pane.active_term += 1;
-                    }
-                } else if (at <= pane.active_term) {
-                    pane.active_term += 1;
-                }
-            }
-            pane.active_term = @min(pane.active_term, pane.terms.items.len - 1);
-        }
-        return pane;
-    }
-
-    /// 복원 모델의 파일 Term 하나를 라이브 web Term + entry로 되살린다. 소유는 라이브 열기와 같다 —
-    /// Term이 entry와 path를 든다(§1).
-    fn createFileTermFromModel(self: *AppSession, m: maru.session.workspace.FileTerm) !*Term {
-        const entry = try self.allocator.create(dock_panel.Entry);
-        errdefer self.allocator.destroy(entry);
-        const owned_path = try self.allocator.dupe(u8, m.path);
-        errdefer self.allocator.free(owned_path);
-        entry.* = .{
-            .id = try app_runtime.entry_ids.next(),
-            .path = owned_path,
-            .kind = m.kind,
-            .mode = m.mode,
-        };
-        const term = try self.createWebTerm(panelKindForEntryKind(m.kind));
-        // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
-        errdefer self.destroyTerm(term);
-        term.file_entry = entry;
-        entry.surface_id = term.surfaceId();
-        return term;
-    }
-
-    /// 터미널 surface가 하나도 없는 pane(파일 Term만)의 pane 생성 seed.
-    fn createPaneFromFileTerm(self: *AppSession, m: maru.session.workspace.FileTerm) !*Pane {
-        const pane = try self.allocator.create(Pane);
-        errdefer self.allocator.destroy(pane);
-        pane.* = .{};
-        const term = try self.createFileTermFromModel(m);
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        return pane;
-    }
-
-    /// 복원 surface 하나로 spawn 준비(createPane/createTerm 공통). new_tab_config에 저장 grid를 얹고, 사용 가능한
-    /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
-    /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
-    fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
-        // P3-e3-5: host-backed surface의 identity 쌍을 곧 부를 createTerm에 동기 전달한다. 두 slice는 parse arena
-        // 소유지만 createTerm이 즉시 비교/memcpy하고 비우므로 수명은 충분하다. host 없는 runtime_id는 legacy migration.
-        self.restore_runtime_host_id = sm.runtime_host_id;
-        self.restore_runtime_id = sm.runtime_id;
-        var cfg = self.new_tab_config;
-        const size = restoreSurfaceSize(sm);
-        cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
-        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
-        return .{ .req = req, .size = size };
-    }
-
     /// 직렬화 모델의 custom_name(""=없음)을 라이브 owned `?[]const u8`(null=없음)로 변환한다 — 비면 null,
     /// 아니면 세션 allocator로 dupe. 복원과 rename commit(PR3)이 공유하는 ""→null 단일 변환점이라 규칙이 한 곳뿐이다.
-    fn dupeCustomName(self: *AppSession, name: []const u8) !?[]const u8 {
+    pub fn dupeCustomName(self: *AppSession, name: []const u8) !?[]const u8 {
         if (name.len == 0) return null;
         return try self.allocator.dupe(u8, name);
     }
@@ -24546,82 +22964,10 @@ pub const AppSession = struct {
 
     /// createTerm 실패를 durable tombstone 전이와 fail-close로 나누는 순수 경계. legacy bare runtime-id는 current host로
     /// attach를 시도할 수 있어도 manifest가 exact host namespace를 증명하지 않으므로 Gone을 저장 가능한 묘비로 승격하지 않는다.
-    fn restoreFailureDisposition(err: anyerror, has_exact_host: bool) anyerror!RestoreFailureDisposition {
+    pub fn restoreFailureDisposition(err: anyerror, has_exact_host: bool) anyerror!RestoreFailureDisposition {
         if (err != error.PersistentRuntimeGone) return err;
         if (!has_exact_host) return error.PersistentRuntimeUnavailable;
         return .ended;
-    }
-
-    /// 복원 surface 하나를 라이브 Term으로 만드는 **단일 분기점**. host runtime이 영구히 없으면
-    /// (`error.PersistentRuntimeGone`) 창 전체를 실패시키는 대신 **그 Term만 종료 placeholder**로 만들어, 탭·split·창
-    /// frame은 정상 복원한다(§7 "나머지는 attach, 누락 Term만 종료 placeholder"). `PersistentRuntimeUnavailable`은 그대로
-    /// 전파해 현행 fail-close를 유지한다 — 일시 실패를 placeholder로 굳히면 살아 있는 runtime을 영구히 잃는다.
-    /// pane 진입점과 term 진입점이 이 함수를 공유해 분기가 한 곳에만 있다.
-    fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
-        if (sm.runtime_state == .ended) {
-            self.recordEndedPlaceholder(false);
-            // 이미 완전하게 표현된 tombstone은 attach/probe/spawn 경계에 들어가지 않는다. restoreSpawn도 호출하지 않아
-            // 임시 identity 채널을 오염시키지 않는다.
-            return try self.createEndedPlaceholderTerm(
-                sm.title,
-                sm.cwd,
-                sm.command,
-                restoreSurfaceSize(sm),
-                sm.runtime_host_id,
-                sm.runtime_id,
-            );
-        }
-        const rs = self.restoreSpawn(sm);
-        errdefer self.clearRestoreRuntimeIdentity();
-        const cfg = self.new_tab_config;
-        return self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind)) catch |err| {
-            _ = try restoreFailureDisposition(err, sm.runtime_host_id.len > 0);
-            self.clearRestoreRuntimeIdentity(); // createTerm이 이미 소비했지만 멱등 방어
-            self.recordEndedPlaceholder(true);
-            // 관측: 묘비 1개당 한 줄(MARU_DEBUG 게이트). **cwd는 남기지 않는다** — 홈 경로가 노출되면
-            // project-rules.md redaction 기준에 걸린다. host/runtime id는 opaque hex라 안전하다.
-            if (diag_gate.maruDebugEnabled()) std.log.scoped(.restore).info(
-                "ended placeholder host={s} runtime={s} cols={d} rows={d}",
-                .{ sm.runtime_host_id, sm.runtime_id, rs.size.cols, rs.size.rows },
-            );
-            return try self.createEndedPlaceholderTerm(
-                sm.title,
-                sm.cwd,
-                sm.command,
-                rs.size,
-                sm.runtime_host_id,
-                sm.runtime_id,
-            );
-        };
-    }
-
-    /// 복원 surface 하나로 panel을 만든다. `createPane`을 부르지 않고 Term 생성을 `createRestoredTerm`에 위임한 뒤
-    /// 빈 Pane에 담는 이유: placeholder 분기를 pane/term 두 진입점에 복사하지 않기 위해서다(`createPane`은 내부에서
-    /// `createTerm`을 직접 부른다). 조립 순서·errdefer는 `createPane`과 동형이다.
-    fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Pane {
-        const pane = try self.allocator.create(Pane);
-        errdefer self.allocator.destroy(pane);
-        pane.* = .{};
-        errdefer pane.terms.deinit(self.allocator);
-        const term = try self.createRestoredTerm(sm);
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        pane.active_term = 0;
-        // 첫 Term(=이 surface)의 사용자 rename 복원. 실패 시 위 errdefer들이 역순으로 정리한다.
-        term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
-        return pane;
-    }
-
-    fn createTermFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
-        const term = try self.createRestoredTerm(sm);
-        errdefer self.destroyTerm(term);
-        term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
-        return term;
-    }
-
-    fn clearRestoreRuntimeIdentity(self: *AppSession) void {
-        self.restore_runtime_host_id = "";
-        self.restore_runtime_id = "";
     }
 
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 auto_hide/screen/chrome·재생성 판정에 쓴다. 이 세션의
@@ -24733,8 +23079,8 @@ pub const AppSession = struct {
         // 재배치한다. 단일 leaf면 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일.
         self.backing_width_px = width_px;
         self.backing_height_px = height_px;
-        try self.resizeActiveTabPanes();
-        self.recomputeActivePaneRect(); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
+        try pane_ops.resizeActiveTabPanes(self);
+        pane_ops.recomputeActivePaneRect(self); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
         self.last_resize_size = size;
         self.refreshDockListScrollbar();
         if (resize_agent_session_dock) {
@@ -24769,7 +23115,7 @@ pub const AppSession = struct {
             });
         }
         // 창 제목/사이드바와 같은 runtime observation cwd를 찍는다(host-backed placeholder core 오진 방지).
-        const cwd = self.activePane().activeTerm().rt.observation.cwd.items;
+        const cwd = pane_ops.activePane(self).activeTerm().rt.observation.cwd.items;
         if (cwd.len > 0) screen_diag.info("cwd={s}", .{cwd});
         var text: [240]u8 = undefined;
         var bg: [240]u8 = undefined;
@@ -24810,7 +23156,7 @@ pub const AppSession = struct {
     fn drainShellEventsForFrame(self: *AppSession) void {
         if (!self.surface_initialized) return;
         if (!self.activeTermIsTerminal()) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
-        if (self.activePane().activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
+        if (pane_ops.activePane(self).activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
         const core = &self.activeSurface().core;
         if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
         if (diag_gate.maruDebugEnabled()) {
@@ -25748,7 +24094,7 @@ pub const AppSession = struct {
         // **둘 다 여기 있어야 한다.** scrollbar 쪽이 빠져 있어서 thumb을 끄는 동안에는 좌표만 쌓이고
         // 손을 뗄 때(`dropped`) 한 번에 적용됐다 — 같은 coalescing을 쓰는 divider는 매 tick 반영되는데
         // 스크롤만 "놓아야 움직이는" 것으로 보였다(제보).
-        self.applyPendingDividerResize();
+        pane_ops.applyPendingDividerResize(self);
         self.applyPendingScrollbarScroll();
         // Session Dock scrollbar도 같은 규율이다 — 도크의 drag는 chrome interaction tree가 소유하지만
         // 소비 지점은 동일하게 tick 하나다.
@@ -26256,7 +24602,7 @@ pub const AppSession = struct {
             if (builtin.os.tag == .macos) {
                 // 통합 수집: DrawList만 만들고 collect(.sidebar) — placeAndDistribute가 sidebar_frame을 채운다(한 atlas 세대).
                 if (self.buildSidebarTitleDrawList()) |dl| {
-                    self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar);
+                    self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar);
                 } else |_| {}
             }
             // 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) — 절대 좌표라
@@ -26265,7 +24611,7 @@ pub const AppSession = struct {
             // 상태표시줄 항목(SB1-S3b) — 같은 통합 수집에 합류시켜 한 atlas 세대를 쓴다(사이드바·도크와 동형).
             if (builtin.os.tag == .macos) {
                 const sb_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
-                self.collectStatusBarItems(&collected, self.paneFrameBuilder(), sb_colors);
+                self.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(self), sb_colors);
             }
             var sidebar_header_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
@@ -26273,12 +24619,12 @@ pub const AppSession = struct {
                 // 통합 수집: DrawList만 만들고 collect(.sidebar_header) — placeAndDistribute가 sidebar_header_frame을 채운다.
                 // 아이콘 줄은 origin (0,0)을 유지해야 렌더러가 헤더로 인식해 합성 아이콘을 1.7×로 굽는다(§3.5).
                 if (self.buildSidebarHeaderDrawList(.icons)) |maybe_dl| {
-                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar_header);
+                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar_header);
                 } else |_| {}
                 // 검색 줄은 상단 바 밴드 중앙에 자기 origin으로 놓인다 — 오른쪽 pane 탭 바·도크 뷰 스위처와 한 줄로
                 // 맞추기 위해서다(docs/file-explorer.md §3.5). `row = 0` frame이라 py_top이 곧 이 origin이 된다.
                 if (self.buildSidebarHeaderDrawList(.search)) |maybe_dl| {
-                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, self.paneFrameBuilder(), .{ .sidebar_search = .{
+                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .{ .sidebar_search = .{
                         .origin_x = 0,
                         .origin_y = self.sidebarSearchGlyphOriginY(),
                         .colors = .{ .default_fg = self.appearance.theme.foreground },
@@ -26286,7 +24632,7 @@ pub const AppSession = struct {
                 } else |_| {}
                 // 검색 줄 **텍스트**는 measured 경로다(🔍 아이콘만 위 셀 frame에 남는다). 폰트를 키워도 바 밴드를
                 // 넘치지 않게 하려는 것이 이 이관의 목적이다(docs/file-explorer.md §3.5).
-                self.collectSidebarSearchText(&collected, self.paneFrameBuilder());
+                self.collectSidebarSearchText(&collected, pane_ops.paneFrameBuilder(self));
             }
             // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
             // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
@@ -26303,7 +24649,7 @@ pub const AppSession = struct {
             self.appendStatusBarBackground();
             self.appendStatusBarHover(); // 클릭 가능한 항목 위 호버 배경(배경 바로 뒤 = 같은 bottom 버킷 안에서 위)
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
-            self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
+            pane_ops.appendPaneScrollbars(self); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             self.gpu_glyphs.clearRetainingCapacity(); // B1: final pixel text도 completed frame 단위로만 보관한다.
@@ -26342,7 +24688,7 @@ pub const AppSession = struct {
                 self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch break :blk false;
                 break :blk true;
             };
-            const active_pane = self.activePane();
+            const active_pane = pane_ops.activePane(self);
             var active_pane_geometry: ?PaneGeometry = null;
 
             // per-pane 상단 탭 바 chrome: 바 배경(전체) + 활성 Term 탭 하이라이트. 각 panel rect 상단 바에 origin
@@ -26358,8 +24704,8 @@ pub const AppSession = struct {
             const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad, 0이면 tui 셀)
             const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(테마 accent — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
-                self.captureActivePaneGeometry(leaf_layout_complete, active_pane, lr, &active_pane_geometry);
-                const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                pane_ops.captureActivePaneGeometry(self, leaf_layout_complete, active_pane, lr, &active_pane_geometry);
+                const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                 const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
                 // tui 밴드 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). rich는 아래에서
                 // 본문색 cutout(U-tab2)으로 override하고 포커스 구분을 언더바 색으로 옮긴다 — tui 보존(이 hl_bg는 tui 셀 밴드 전용).
@@ -26379,7 +24725,7 @@ pub const AppSession = struct {
                     // 하는 systemic 변경(사이드바 이중레이어 한계와 동류, 보류). 현 반투명 cutout이 두 근사 중 본문에 더 가깝다.
                     const tab_cutout_bg = self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.background));
                     const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg)); // 언더바=focus indicator(배경 아님) — 불투명 유지
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, self.paneActiveTermIndex(lr.leaf), tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, pane_ops.paneActiveTermIndex(self, lr.leaf), tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
@@ -26390,7 +24736,7 @@ pub const AppSession = struct {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
                     if (paneBarBgCell(bar, self.cell_width_px, self.chromeCellBg(self.sidebarBg()))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     if (m_opt) |m| {
-                        if (tabbarHighlightCell(m, self.paneActiveTermIndex(lr.leaf), self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                        if (tabbarHighlightCell(m, pane_ops.paneActiveTermIndex(self, lr.leaf), self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     }
                 }
                 // 활성 pane 강조는 활성 탭 하단 앰버 언더바(appendActiveTabHighlight)로 일원화한다(사용자 요청) — 옛
@@ -26441,7 +24787,7 @@ pub const AppSession = struct {
                         .y = dg.view_bar.y + dg.view_bar.h -| 1,
                         .w = dg.view_bar.w,
                         .h = 1,
-                    }, self.dividerColor());
+                    }, pane_ops.dividerColor(self));
                 }
                 if (self.dock.view == .explorer and dg.tree_content.w > 0 and self.cell_height_px > 0) {
                     // 밴드는 행 텍스트와 **같은 창·같은 원점 편향**을 써야 한다 — 갈라지면 하이라이트가
@@ -26475,7 +24821,7 @@ pub const AppSession = struct {
                             self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()), dg.tree_content);
                     }
                 }
-                self.appendBarBgQuad(dg.divider, self.dividerColor());
+                self.appendBarBgQuad(dg.divider, pane_ops.dividerColor(self));
                 // **밴드보다 뒤에** 넣는다(SV2b). 스크롤바가 layer 2로 내려와 행 하이라이트 밴드와 같은
                 // 버킷이 됐고, 그 안에서는 배열 순서가 painter 순서다. 밴드 폭은 gutter 앞에서 끝나므로
                 // 지금은 겹치지 않지만, 순서까지 맞춰야 밴드 폭이 나중에 넓어져도 thumb이 안 가려진다.
@@ -26495,12 +24841,12 @@ pub const AppSession = struct {
             self.drag_overlay_cells_scratch.clearRetainingCapacity();
             const drag_overlay_cells = &self.drag_overlay_cells_scratch;
             self.appendDropTargetHighlight(drag_overlay_cells);
-            self.appendActiveTabDividers(&pane_overlay);
+            pane_ops.appendActiveTabDividers(self, &pane_overlay);
 
             // 활성 panel의 origin(grid = 바+padding 아래). terminal frame은 기존처럼 OOM fallback을 유지하되, focus
             // border는 현재 leaf identity를 증명한 body만 사용한다. layout 실패 때 전체 workspace를 focused로 보이는
             // 거짓 cue보다 이번 frame border 0이 안전하며 다음 정상 frame에서 자동 복원된다.
-            const active_fallback = self.paneTermRect(self.termRect());
+            const active_fallback = pane_ops.paneTermRect(self, self.termRect());
             var active_origin_x: u32 = active_fallback.x;
             var active_origin_y: u32 = active_fallback.y;
             var active_term_rect: maru.session.SplitRect = active_fallback;
@@ -26553,12 +24899,12 @@ pub const AppSession = struct {
             const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
             if (builtin.os.tag == .macos) {
                 // grip/label/탭바/비활성/floating/활성 collect가 공유하는 finishPane용 builder(단일 출처 paneFrameBuilder).
-                const pane_frame_builder = self.paneFrameBuilder();
+                const pane_frame_builder = pane_ops.paneFrameBuilder(self);
 
                 // 1) 각 pane의 탭 바 제목 frame — Term 제목들을 가로 등폭 탭으로(buildPaneTabBarDrawList). 활성 panel
                 //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
                 for (leaf_rects.items) |lr| {
-                    const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                    const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                     // 제목/라벨을 바 세로 가운데에. 바 높이에 폰트 독립 하한이 들어올 수 있으므로 pad가 아니라
                     // 실제 바 높이에서 오프셋을 파생한다(chromeBarTextOffsetY — IME caret도 같은 식).
                     const text_origin_y = pb.full.y + self.chromeBarTextOffsetY(pb.full.h);
@@ -26581,9 +24927,9 @@ pub const AppSession = struct {
                         // 이름이어도 세그먼트를 띄워(renameDisplayWidth) caret이 보인다. 편집 텍스트는 owned라 해제.
                         var name_buf: ?[]const u8 = null;
                         defer if (name_buf) |b| self.allocator.free(b);
-                        const renaming_pane = self.renamingPane(lr.leaf);
+                        const renaming_pane = pane_ops.renamingPane(self, lr.leaf);
                         // running이면(편집 중 아님) 이름 앞에 1칸 정적 플래그 "● " prefix(owned) — ● 셀은 아래 recolor로 브랜드색.
-                        const pane_running = !renaming_pane and paneHasRunningAgent(lr.leaf);
+                        const pane_running = !renaming_pane and pane_ops.paneHasRunningAgent(lr.leaf);
                         const name = if (renaming_pane) blk: {
                             const e = self.renameEditText(self.allocator) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
                             name_buf = e;
@@ -26597,7 +24943,7 @@ pub const AppSession = struct {
                         // rename 중이면 tail 앵커 — 긴 이름을 칠 때 라벨 세그먼트가 caret(문자열 끝)를 따라가 방금 친 글자가 안 잘린다.
                         const label_anchor: chrome.text_layout.Anchor = if (renaming_pane) .tail else .head;
                         if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg, label_anchor)) |ldl| {
-                            if (pane_running) recolorAgentFlagCells(ldl.cells, paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
+                            if (pane_running) recolorAgentFlagCells(ldl.cells, pane_ops.paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
                             self.collectShaped(&collected, ldl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, .origin_y = text_origin_y, .colors = tabbar_colors } });
                         } else |_| {}
                     }
@@ -26616,7 +24962,7 @@ pub const AppSession = struct {
                     var editing_tab: ?usize = null;
                     // 보이는 순서(드래그 중이면 preview)로 제목을 싣는다 — 이 순서가 §4.4 provisional live reorder가
                     // 실제로 화면에 보이는 자리다. model(`terms.items`)은 up commit까지 그대로다.
-                    for (self.paneTermOrder(lr.leaf)) |term| {
+                    for (pane_ops.paneTermOrder(self, lr.leaf)) |term| {
                         // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목(번호 prefix 없음 — 모던 탭은
                         // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
@@ -26655,11 +25001,11 @@ pub const AppSession = struct {
                         const marker = if (tabTitleRunningMarker(t)) agentFlagUtf8() else "";
                         marker_titles.append(self.allocator, self.allocator.dupe(u8, marker) catch continue) catch {};
                     }
-                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, marker_titles.items, @intCast(bar_cols), tab_fg, close_tab, self.paneActiveTermIndex(lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, null) catch continue;
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, marker_titles.items, @intCast(bar_cols), tab_fg, close_tab, pane_ops.paneActiveTermIndex(self, lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, null) catch continue;
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
-                    if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
+                    if (pane_ops.paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, pane_ops.paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
-                    self.collectPaneTabTitles(&collected, pane_frame_builder, lr.leaf, pb, titles.items, editing_tab, pb.full, bar_cols);
+                    pane_ops.collectPaneTabTitles(self, &collected, pane_frame_builder, lr.leaf, pb, titles.items, editing_tab, pb.full, bar_cols);
 
                     // 1c) Phase 7e-1b: browser 웹 패널 주소창 밴드 — 이 pane의 **활성 탭**이 browser web Term이면 탭 바 바로
                     //     아래에 읽기전용 URL 밴드(배경 quad + URL 셀)를 그린다. collectWebSurfaces inset이 browser면 top을
@@ -26668,7 +25014,7 @@ pub const AppSession = struct {
                     //     = inset.top과 정확히 abut). markdown web/터미널 탭은 밴드 없음(skip). 편집·버튼은 7e-2/7e-3.
                     // 1c-0) FP16d 파일 헤더 밴드 — 활성 탭이 파일 Term이면 같은 밴드 자리에 breadcrumb +
                     //       모드 선택기를 그린다(§3.1). browser 주소창 밴드와 상호 배타다(둘 다 활성 탭 기준).
-                    if (self.fileHeaderBandForPane(lr.leaf, lr.rect)) |band| {
+                    if (pane_ops.fileHeaderBandForPane(self, lr.leaf, lr.rect)) |band| {
                         self.appendBarBgQuad(band.band, self.chromeQuadBg(self.sidebarBg()));
                         // 호버 중인 mode 슬롯에 배경 quad를 얹는다(밴드 배경 위·글리프 아래 = 나중 append). 클릭 영역이
                         // 드러나야 "눌리는 곳"임을 알 수 있다 — nav 버튼 호버와 같은 색(sidebarHoverBg)·같은 규율.
@@ -27037,7 +25383,7 @@ pub const AppSession = struct {
                         pane_colors.blink_on = !self.appearance.blink_text or self.blink_visible; // blink 위상(전역, config 게이트)
                         if (pane_fg) |fg| pane_colors.default_fg = fg;
                         if (pane_bg) |bg| pane_colors.default_bg = bg;
-                        const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
+                        const t = pane_ops.paneTermRect(self, lr.rect); // 바 아래 영역 origin
                         self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = t.x, .origin_y = t.y, .colors = pane_colors } });
                     }
                 }
@@ -27061,7 +25407,7 @@ pub const AppSession = struct {
                 // 이미 준비됨. builder는 finishPane(place/raster)용이라 cursor_unfocused 없는 pane_frame_builder로 충분하다
                 // (커서는 shapeOnly 단계의 DrawList에 이미 반영됨).
                 if (active_shaped) |ap| {
-                    self.collectShapedPane(&collected, ap, pane_frame_builder, .active);
+                    pane_ops.collectShapedPane(self, &collected, ap, pane_frame_builder, .active);
                     active_shaped = null;
                 }
 
@@ -27111,7 +25457,7 @@ pub const AppSession = struct {
                 // 텍스트(active_term_rect.y..+ch)와 y가 겹치지 않는다. layer 3(over)라 셀 위에 또렷이.
                 const dch = self.cell_height_px;
                 const dthick: u32 = @max(@as(u32, 1), self.buildChromeTokens().border.line_thickness_px);
-                self.appendSolidQuad(@floatFromInt(pf.origin_x), @floatFromInt(pf.origin_y + dch), @floatFromInt(active_term_rect.w), @floatFromInt(dthick), self.dividerColor(), 3);
+                self.appendSolidQuad(@floatFromInt(pf.origin_x), @floatFromInt(pf.origin_y + dch), @floatFromInt(active_term_rect.w), @floatFromInt(dthick), pane_ops.dividerColor(self), 3);
             }
             // floating 탭 ghost는 **최상위 오버레이 레이어**(replace의 drag_overlay_frame)로 라우팅한다 — pane_frames
             // (터미널 레이어)에 두면 WKWebView에 가려 web pane 위 드래그가 안 보인다(web-panel.md §5). raster는 replace의
@@ -27251,7 +25597,7 @@ pub const AppSession = struct {
                     collected.deinit(self.allocator);
                 }
                 if (self.buildSidebarTitleDrawList()) |dl| {
-                    self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar);
+                    self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar);
                 } else |_| {}
                 if (collected.items.len > 0) {
                     const gen_before = self.renderer_state.atlas.generation;
@@ -27428,7 +25774,7 @@ pub const AppSession = struct {
 
     /// 비활성 탭 제목용 흐린 전경색 — sidebar_foreground(테마화된 사이드바 글자색, 기본=foreground)를 background
     /// 쪽으로 45% 섞어 muted한다. 활성 탭은 full sidebar_foreground라 대비로 글자가 도드라진다. 사이드바·pane 탭 바 공유.
-    fn mutedForeground(self: *const AppSession) maru.color.Rgb {
+    pub fn mutedForeground(self: *const AppSession) maru.color.Rgb {
         const f = self.appearance.theme.sidebar_foreground;
         const b = self.appearance.theme.background;
         return .{
@@ -27439,7 +25785,7 @@ pub const AppSession = struct {
     }
 
     /// 스크린 x가 세로 사이드바 영역 안인가(순수 `xInSidebar` 래퍼).
-    fn inSidebar(self: *const AppSession, x_px: f64) bool {
+    pub fn inSidebar(self: *const AppSession, x_px: f64) bool {
         return chrome.components.sidebar.inSidebar(x_px, self.sidebar_width_px);
     }
 
@@ -27477,7 +25823,7 @@ pub const AppSession = struct {
     }
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수·스크롤로 판정).
-    fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
+    pub fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
         // 가변 높이(카드=slot_h·헤더=cell_h). 반환은 row 인덱스(호출처 visibleTab이 row→tab). header_row_h는 SG3b-2에서
         // 헤더 row가 실제로 생길 때 의미를 갖고, 지금(카드만)은 안 쓰인다 — cell_height_px를 근사로 넘긴다.
         return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebarMetrics(), self.sidebar_scroll_offset_px);
@@ -27629,7 +25975,7 @@ pub const AppSession = struct {
         leaf_rects.clearRetainingCapacity();
         if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
-                const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                 if (layout_math.pointInRect(x_px, y_px, pb.full)) {
                     on_bar = true; // 탭 바 위 — 탭·‹/›·+·pane 포커스 모두 클릭 가능 영역
                     // 좌측 grip+라벨 영역 = 드래그 손잡이(grab 커서). 탭 호버 아님(탭0 ✕ 오표시 방지) — 그 뒤 탭 영역만 hit-test.
@@ -27670,7 +26016,7 @@ pub const AppSession = struct {
         leaf_rects.clearRetainingCapacity();
         if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
-                const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                 const at = lr.leaf.active_term;
                 if (at >= lr.leaf.terms.items.len) continue;
                 const term = lr.leaf.terms.items[at];
@@ -27695,7 +26041,7 @@ pub const AppSession = struct {
         leaf_rects.clearRetainingCapacity();
         if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
-                const band = self.fileHeaderBandForPane(lr.leaf, lr.rect) orelse continue;
+                const band = pane_ops.fileHeaderBandForPane(self, lr.leaf, lr.rect) orelse continue;
                 if (!layout_math.pointInRect(x_px, y_px, band.band)) continue;
                 const mode = dock_layout.headerModeAt(
                     band.band,
@@ -27777,7 +26123,7 @@ pub const AppSession = struct {
 
     /// 카드 드래그 프리뷰 정리(up 확정·드래그 취소·teardown 공통) — 고스트 상태와 투영 버퍼를 비운다. 이후 rebuild가
     /// sidebarRenderRows()로 원본 sidebar_rows 렌더에 복귀한다(preview=null이면 원본을 돌려줌).
-    fn clearSidebarDragPreview(self: *AppSession) void {
+    pub fn clearSidebarDragPreview(self: *AppSession) void {
         self.sidebar_drag_preview = null;
         self.sidebar_preview_rows.clearRetainingCapacity();
     }
@@ -27870,7 +26216,7 @@ pub const AppSession = struct {
     /// glyph는 여기서 안 만든다(tick의 제목 패스가 따로 더해 metal_buffer가 밴드와 머지). 사이드바가
     /// 꺼졌거나(폭 0) cell 폭 미상이면 비운다. 탭 추가/전환/메트릭/호버 변경 때 호출한다. 실패(OOM)는
     /// 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가 catch).
-    fn rebuildSidebar(self: *AppSession) !void {
+    pub fn rebuildSidebar(self: *AppSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
         // **자기 레이어(0)만 비운다.** 옛 코드는 `gpu_quads`를 통째로 비웠는데, 이 함수는 hover·드래그·탭 전환 등
         // 수십 개 이벤트 핸들러에서 **tick 사이에** 불린다. 그 직후 tick이 full 투영이 아니면(sync hold + chrome
@@ -27907,7 +26253,7 @@ pub const AppSession = struct {
             const tk = self.buildChromeTokens();
             const thickness: f32 = @floatFromInt(@max(@as(u32, 1), tk.border.line_thickness_px));
             const uy: f32 = @as(f32, @floatFromInt(self.sidebar_header_height_px)) - thickness;
-            self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, self.dividerColor(), 0);
+            self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, pane_ops.dividerColor(self), 0);
         }
         // 헤더 아이콘 호버 배경(웹 버튼 hover) — hovered_header_region이 아이콘이면 그 아이콘 뒤에 둥근 quad(layer 0,
         // 아이콘 셀 아래). 아이콘 col은 buildSidebarHeaderDrawList과 같은 단일 레이아웃(◧ cols-8·⚙ cols-5·+ cols-2).
@@ -28333,7 +26679,7 @@ pub const AppSession = struct {
     /// 스크롤바 thumb 기하(보이는 영역 내 y offset·높이, backing px) — 순수 함수라 단위 테스트 가능. sb_count==0
     /// (스크롤백 없음)·메트릭 0이면 null(안 그림). thumb 높이=보이는 비율(view/(sb+view)), 최소 높이로 clamp.
     /// y: view_offset 0(바닥)이면 view_h-thumb_h(아래), sb_count(꼭대기)면 0(위) — 위로 스크롤할수록 thumb가 올라간다.
-    fn scrollbarThumbGeom(sb_count: usize, view_offset: usize, cell_height_px: u32, view_h_px: u32) ?struct { y: f32, h: f32 } {
+    pub fn scrollbarThumbGeom(sb_count: usize, view_offset: usize, cell_height_px: u32, view_h_px: u32) ?struct { y: f32, h: f32 } {
         if (sb_count == 0 or cell_height_px == 0 or view_h_px == 0) return null;
         const ch: f32 = @floatFromInt(cell_height_px);
         const sb_px: f32 = @as(f32, @floatFromInt(sb_count)) * ch; // 스크롤백 총 높이(px)
@@ -28357,7 +26703,7 @@ pub const AppSession = struct {
 
     /// 스크롤바 thumb 폭(px) — cell_width 비율, 최소 px 보장. emphasized(hover/드래그)면 +emphasize_px로 굵게.
     /// appendScrollbar(그리기)·scrollbarGrabAt(hit-test)가 공유해 폭이 어긋나지 않게 한다(순수 함수 — 테스트 가능).
-    fn scrollbarBarWidthPx(cell_width_px: u32, emphasized: bool) f32 {
+    pub fn scrollbarBarWidthPx(cell_width_px: u32, emphasized: bool) f32 {
         const base = @max(@as(f32, @floatFromInt(cell_width_px)) * scrollbar_bar_mul, scrollbar_bar_min_px);
         return if (emphasized) base + scrollbar_bar_emphasize_px else base;
     }
@@ -28376,7 +26722,7 @@ pub const AppSession = struct {
         return @intCast(@as(u32, scrollbar_alpha_full) - drop);
     }
 
-    fn scrollbarAlpha(self: *const AppSession, idle_ticks: u32) u8 {
+    pub fn scrollbarAlpha(self: *const AppSession, idle_ticks: u32) u8 {
         return computeScrollbarAlphaFor(idle_ticks, self.scrollbarVisibleTicks(), self.scrollbarFadeTicks());
     }
 
@@ -28397,7 +26743,7 @@ pub const AppSession = struct {
         const fade_done_ticks = self.scrollbarFadeCompleteTicks();
         // 활성 탭의 모든 pane을 순회해 각자 fade를 갱신한다(per-pane — pane 목록만 보면 되고 rect/layout 불요라
         // 매 tick 싸다). 활성 pane은 hover/드래그면 full로 핀. 한 pane이라도 alpha가 바뀌면 metal_dirty.
-        const active_pane = self.activePane();
+        const active_pane = pane_ops.activePane(self);
         for (self.activeTab().panes.items) |pane| {
             const psurface = pane.activeTerm().surface;
             // scrollbackLen(리더 core.write가 증가)·viewOffset 스칼라를 락 아래 한 번에 읽는다
@@ -28467,7 +26813,7 @@ pub const AppSession = struct {
     /// host-backed는 host가 wire로 보낸 값에서 같은 필드를 채우기 때문이다(중립 DTO). 예전엔 호출처들이
     /// `core.scrollbackLen()`을 직접 읽어 원격에선 항상 0이었고(placeholder), 그래서 스크롤백이 쌓여도 스크롤바가
     /// 뜨지 않았다. **호출자가 lockCore를 보유해야 한다**(snapshot이 소스 메모리를 alias — 스칼라만 읽고 복사).
-    fn scrollStateOf(surface: *maru.session.Surface) struct { scrollback_len: usize, view_offset: usize } {
+    pub fn scrollStateOf(surface: *maru.session.Surface) struct { scrollback_len: usize, view_offset: usize } {
         const snap = surface.renderSnapshot();
         return .{ .scrollback_len = snap.scrollback_len, .view_offset = snap.view_offset };
     }
@@ -28538,23 +26884,6 @@ pub const AppSession = struct {
         if (target != snap.view_offset) {
             self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_offset = target }, self.io) catch {};
             self.metal_dirty = true;
-        }
-    }
-
-    /// 활성 탭의 모든 pane 우측에 스크롤바를 그린다 — **각 pane이 자기 idle_ticks로 독립 fade**(per-pane), 활성
-    /// pane만 추가로 hover/드래그 강조(세션 상태). 각 pane은 자기 core의 view_offset/scrollback을 반영. leaf rect는
-    /// 재사용 scratch로 계산(per-frame 할당 churn 없음), 실패(OOM)면 활성 pane만(폴백). per-frame(layer3)에서 부른다.
-    fn appendPaneScrollbars(self: *AppSession) void {
-        if (!self.surface_initialized) return;
-        self.scrollbar_leaf_scratch.clearRetainingCapacity();
-        if (self.activeTabLeafRects(self.allocator, self.termRect(), &self.scrollbar_leaf_scratch)) |_| {
-            const active_pane = self.activePane();
-            for (self.scrollbar_leaf_scratch.items) |lr| {
-                const trect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 터미널 영역(active_pane_rect와 같은 식)
-                self.appendScrollbar(trect, lr.leaf, lr.leaf == active_pane);
-            }
-        } else |_| {
-            self.appendScrollbar(self.active_pane_rect, self.activePane(), true);
         }
     }
 
@@ -28660,51 +26989,6 @@ pub const AppSession = struct {
         };
     }
 
-    /// 한 pane 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
-    /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 3 over)에 뜬다.
-    /// alpha는 pane.scrollbar_idle_ticks로 fade(활성·비활성 모두 per-pane 독립). `is_active`면 추가로 hover/드래그
-    /// 강조(굵게+full, 세션 상태) — 상호작용(hover/드래그)은 활성 pane만이라 비활성 pane은 fade만(emphasize 없음).
-    /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
-    fn appendScrollbar(self: *AppSession, rect: maru.session.SplitRect, pane: *Pane, is_active: bool) void {
-        if (rect.w == 0) return;
-        // 코어 읽기는 **락 아래**(§9.1) — `scrollStateOf`의 계약이 그렇다(snapshot이 소스 메모리를 alias).
-        // 옛 코드는 렌더 경로만 락 없이 읽어, 대량 출력 중 `scrollback_len`이 ms마다 늘면 fade 판정(락 아래
-        // 값)과 thumb 기하(락 밖 값)가 서로 다른 시점에서 나와 thumb이 미세하게 튀었다. host-backed surface면
-        // 이 락이 곧 RemoteScreen mutex라 계약이 더 강하다. 형제 경로(updateScrollbarFade·dragScrollbarTo)는
-        // 이미 락을 잡는다 — 렌더만 예외였다.
-        const surface = pane.activeTerm().surface;
-        const scroll_state = blk: {
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            break :blk scrollStateOf(surface);
-        };
-        const geom = scrollbarThumbGeom(scroll_state.scrollback_len, scroll_state.view_offset, self.cell_height_px, rect.h) orelse return;
-        const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
-        const thumb_h: f32 = geom.h;
-        // 활성 pane만 hover/드래그로 굵게+full(세션 상태). alpha는 **per-pane fade**(각 pane scrollbar_idle_ticks) —
-        // 활성·비활성 모두 자기 스크롤 활동으로 독립적으로 흐려진다(비활성 pane을 휠로 스크롤하면 그 pane만 full→fade).
-        const emphasized = is_active and (self.scrollbar_hovered or self.pointerGestureIs(.scrollbar));
-        const bar_w: f32 = scrollbarBarWidthPx(self.cell_width_px, emphasized);
-        const x: f32 = @as(f32, @floatFromInt(rect.x + rect.w)) - bar_w - 2.0; // 우측 가장자리에서 2px 안쪽
-        const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(pane.scrollbar_idle_ticks);
-        const rgb = self.mutedForeground(); // muted 전경(사이드바 비활성 탭과 같은 톤)
-        const color: u32 = packRgbAlpha(rgb, alpha); // 셰이더가 rgb*=a premultiply
-        const r = bar_w * 0.5; // pill 모양(반지름 = 폭 절반)
-        self.gpu_quads.append(self.allocator, .{
-            .x = x,
-            .y = thumb_y,
-            .w = bar_w,
-            .h = thumb_h,
-            .corner_radii = .{ r, r, r, r },
-            .border_widths = .{ 0, 0, 0, 0 },
-            .fill_color0 = color,
-            .fill_color1 = color,
-            .border_color = 0,
-            .gradient_kind = 0,
-            .layer = 3, // over 패스(셀·사이드바 위) per-frame. layer 1(모달)이 gpu_quads에서 뒤에 append돼 위로 — 모달이 스크롤바를 가린다.
-        }) catch {};
-    }
-
     /// 사이드바 스크롤바를 **공용 paint 경로**로 그린다(SV4a). 발행된 tree를 `ui_paint`가 quad op으로
     /// 옮기고 `chrome_draw_lowering`이 GpuQuad로 내린다 — 탐색기·소스 컨트롤과 같은 경로다.
     ///
@@ -28800,7 +27084,7 @@ pub const AppSession = struct {
     /// HiDPI 분수 스케일에서 떨린다. 형제 선 헬퍼(appendHorizontalLine)가 셀+reserved ~2px를 쓰는 것과 같은
     /// 이유로 토큰 두께(≥2px)면 중심 행이 cov≈1로 선명하다. 두께만큼 바 하단 안쪽에 둔다(바 위로 안 새게).
     fn appendTabBarUnderline(self: *AppSession, bar: maru.session.SplitRect, thickness: u32) void {
-        self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), self.dividerColor(), 2);
+        self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), pane_ops.dividerColor(self), 2);
     }
 
     /// chrome `sidebar.view`가 낸 밴드 fill op을 sidebar 셀(NativeMetalCell)로 lower한다 — fill rect.y / slot_h = 슬롯 행,
@@ -29410,113 +27694,6 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
     }
 
-    /// DrawList 셀 중 running 플래그 ●를 종류 브랜드색으로 칠한다 — 탭바 pane 라벨·Term 탭의 flagPrefixedLabel prefix용
-    /// (그 draw list 단위로). none이면 무동작. ●가 라벨 텍스트에 섞일 여지는 드물고, 있어도 색만 바뀌는 사소한 오탐이라
-    /// per-tab 셀 범위 게이트까진 불필요(혼재 kind는 pane 대표색으로 통일 — 드문 트레이드오프, code-review max #4·#5).
-    /// pane 탭 제목을 measured 경로로 수집한다(이관 3단계 — docs/file-explorer.md §3.5).
-    ///
-    /// 세그먼트 기하는 `tabbar.Metrics.segOf` **그대로**다. 탭 폭·✕ 자리·가로 스크롤은 셀 칸에서 나오고
-    /// hit-test가 같은 값을 보므로, 제목만 픽셀로 그려도 "보이는 탭 == 클릭되는 탭"이 유지된다. 제목 영역은
-    /// 셀 경로가 쓰던 규칙과 같다: 좌패딩 1칸, ✕가 있으면 우측 3칸을 비운다(`title_end = seg_end - 3`).
-    ///
-    /// 마커(`●`)는 셀에 남으므로 마커가 있는 탭은 제목이 그만큼(2칸) 오른쪽에서 시작한다.
-    fn collectPaneTabTitles(
-        self: *AppSession,
-        collected: *std.ArrayList(CollectedPane),
-        builder: coretext_frame_builder.CoreTextFrameBuilder,
-        leaf: *Pane,
-        pb: PaneBar,
-        titles: []const []const u8,
-        editing_tab: ?usize,
-        bar_rect: maru.session.SplitRect,
-        bar_cols: u32,
-    ) void {
-        const cw = self.cell_width_px;
-        if (cw == 0 or titles.len == 0) return;
-        const tokens = self.buildChromeTokens();
-        // hit-test(`paneTabIndexAt` 등)와 **같은 메트릭**을 쓴다 — 보이는 탭과 클릭되는 탭이 갈리면 안 된다.
-        const m = barMetrics(pb.tabs, cw, self.paneTermOrder(leaf).len, self.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols) orelse return;
-        const active = self.paneActiveTermIndex(leaf);
-
-        // 세로 위치는 **role line box** 기준 바 중앙이다. 셀 텍스트가 쓰는 `chromeBarTextOffsetY`는
-        // `(bar_h - cell_height) / 2`라 폰트가 커지면 제목이 위로 밀린다 — measured 제목의 높이는 셀이 아니라
-        // role 토큰(pt)에서 나오므로 같은 식을 쓰면 어긋난다(24pt 캡처가 실제로 그 어긋남을 보여줬다).
-        // 사이드바 검색 줄이 상단 바 밴드에서 쓰는 것과 **같은 공식**이다.
-        const title_line_h = chrome.ui.typography.lineHeightPx(.control, self.scale_milli);
-        const title_y = bar_rect.y +| (if (bar_rect.h > title_line_h) (bar_rect.h - title_line_h) / 2 else 0);
-
-        var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        defer ops.deinit(self.allocator);
-        var runs: std.ArrayList(chrome.draw.Run) = .empty;
-        defer runs.deinit(self.allocator);
-        // run은 op이 슬라이스로 참조하므로 **먼저 전부 채운 뒤** op을 만든다(ArrayList가 realloc하면 앞선 op의
-        // 포인터가 죽는다). 그래서 두 배열을 나눠 담고 인덱스로 이어 붙인다.
-        for (titles) |title| {
-            const body = tabTitleBody(title);
-            if (body.len == 0) continue;
-            runs.append(self.allocator, .{ .text = body }) catch return;
-        }
-        var run_index: usize = 0;
-        for (titles, 0..) |title, i| {
-            const body = tabTitleBody(title);
-            if (body.len == 0) continue;
-            const seg = m.segOf(i);
-            if (seg.end_px <= seg.start_px) { // 우단에서 잘려 안 보이는 탭
-                run_index += 1;
-                continue;
-            }
-            const lead_cols: u32 = if (tabTitleRunningMarker(title)) 3 else 1; // 좌패딩 1 + 마커(2칸)
-            const trail_cols: u32 = if (seg.has_close) 3 else 1; // ✕ 좌여백·✕·우여백
-            // `segOf`의 px는 `colPx`가 `bar_x`를 이미 더한 **절대 좌표**다 — 여기에 `pb.tabs.x`를 또 더하면
-            // 제목이 탭 밖 오른쪽으로 밀린다(실제 캡처로 잡힌 회귀).
-            const start_px = @as(u32, @intFromFloat(@max(seg.start_px, 0))) + lead_cols * cw;
-            const end_px = @as(u32, @intFromFloat(@max(seg.end_px, 0)));
-            if (end_px <= start_px + trail_cols * cw) {
-                run_index += 1;
-                continue; // 제목이 들어갈 자리가 없다
-            }
-            ops.append(self.allocator, .{
-                .text = .{
-                    .origin = .{ .x = @intCast(start_px), .y = @intCast(title_y) },
-                    .runs = runs.items[run_index .. run_index + 1],
-                    // 활성 탭만 또렷하게. 셀 경로의 `active_tab_fg`/`tab_fg`에 대응하는 chrome role이다 —
-                    // measured는 op당 role 하나라 색을 토큰에서 받는다(비활성 색이 미세하게 달라진다).
-                    .role = if (active == i) .surface_fg else .muted_fg,
-                    .text_role = .control,
-                    .max_width_px = end_px - start_px - trail_cols * cw,
-                    // rename 중인 탭만 tail 앵커 — 긴 이름을 칠 때 caret(문자열 끝)이 세그먼트 안에 남는다.
-                    .anchor = if (editing_tab != null and editing_tab.? == i) .tail else .head,
-                },
-            }) catch return;
-            run_index += 1;
-        }
-        if (ops.items.len == 0) return;
-
-        const fingerprint = chrome_draw_lowering.richTextFingerprint(ops.items, &tokens, cw, self.cell_height_px, @intCast(@min(bar_cols, @as(u32, std.math.maxInt(u16)))), 1, 0);
-        // pane마다 슬롯을 두지 않는다 — op origin이 절대 좌표라 한 아티팩트가 모든 pane의 탭 제목을 담을 수
-        // 있지만, 이 함수는 pane 루프 안에서 불리므로 **마지막 pane의 것만** 캐시에 남는다. split이 여럿이면
-        // 캐시가 매 pane마다 갈리므로, 그 경우는 miss가 정상이고 단일 pane(대다수)에서 hit한다.
-        if (!MeasuredTextCache.hit(self.pane_tab_title_text_cache, fingerprint)) {
-            var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops.items, &tokens, cw, .{
-                .family = self.appearance.font.family,
-                .fallback = self.appearance.font.fallback,
-            }) catch return;
-            defer request.deinit(self.allocator);
-            var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, self.scale_milli) catch return;
-            defer unresolved.deinit(self.allocator);
-            const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
-            MeasuredTextCache.store(&self.pane_tab_title_text_cache, self.allocator, fingerprint, artifact, 0);
-        }
-        if (self.pane_tab_title_text_cache) |*cache| {
-            const dl = chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return;
-            self.collectMeasuredTextFromCache(collected, dl, cache, builder, .{ .sidebar_search = .{
-                .origin_x = 0,
-                .origin_y = 0,
-                .colors = .{ .default_fg = self.appearance.theme.foreground },
-            } });
-        }
-    }
-
     /// running 마커(`●`) UTF-8 한 글자. 셀 draw list가 마커만 그릴 때 쓴다(제목은 measured 경로).
     fn agentFlagUtf8() []const u8 {
         return "\u{25CF}";
@@ -29524,12 +27701,12 @@ pub const AppSession = struct {
 
     /// 이 탭 제목이 running 마커로 시작하는가. `flagPrefixedLabel`이 붙인 prefix를 되읽는 단일 판정이다 —
     /// 마커를 셀에, 제목을 measured에 보내려면 둘을 같은 기준으로 갈라야 한다.
-    fn tabTitleRunningMarker(title: []const u8) bool {
+    pub fn tabTitleRunningMarker(title: []const u8) bool {
         return std.mem.startsWith(u8, title, agentFlagUtf8());
     }
 
     /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
-    fn tabTitleBody(title: []const u8) []const u8 {
+    pub fn tabTitleBody(title: []const u8) []const u8 {
         if (!tabTitleRunningMarker(title)) return title;
         const rest = title[agentFlagUtf8().len..];
         return if (std.mem.startsWith(u8, rest, " ")) rest[1..] else rest;
@@ -29669,7 +27846,7 @@ pub const AppSession = struct {
         /// glyph에만 적용된다.
         scroll_delta_y_px: f32 = 0,
     };
-    const CollectDest = union(enum) {
+    pub const CollectDest = union(enum) {
         sidebar,
         sidebar_header,
         /// 사이드바 헤더 검색 줄 — 상단 바 밴드 중앙에 자기 px origin으로 놓인다(docs/file-explorer.md §3.5).
@@ -29716,20 +27893,6 @@ pub const AppSession = struct {
         builder: coretext_frame_builder.CoreTextFrameBuilder,
     };
 
-    /// 사이드바/탭바/비활성/오버레이/floating 공용 frame builder(cursor_unfocused 없음 — 활성 panel만 cursor 모드를
-    /// 쓴다). macOS 전용 coretext bridge라 호출은 `if (builtin.os.tag == .macos)` 안에서만 한다(비-macOS는 lazy 미분석).
-    fn paneFrameBuilder(self: *const AppSession) coretext_frame_builder.CoreTextFrameBuilder {
-        return .{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(self.cell_width_px),
-            .glyph_cell_width_px = @intCast(self.glyph_cell_width_px),
-            .cell_height_px = @intCast(self.cell_height_px),
-        };
-    }
-
     /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
     pub fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
@@ -29755,7 +27918,7 @@ pub const AppSession = struct {
                 }
             }
         }
-        self.collectShapedPane(collected, pane, builder, dest);
+        pane_ops.collectShapedPane(self, collected, pane, builder, dest);
     }
 
     /// B1 rich Chrome cache hit. `shapeFromRecords` duplicates only per-frame renderer run
@@ -29831,17 +27994,6 @@ pub const AppSession = struct {
         const bottom = @min(entry.rect.y + entry.rect.height, clip.y + clip.height);
         if (!(right > left and bottom > top)) return null;
         return .{ .x = left, .y = top, .width = right - left, .height = bottom - top };
-    }
-
-    /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다 — append-or-deinit 꼬리의 단일 출처다(collectShaped는 DrawList를
-    /// shapeOnly한 뒤 이걸 부르고, 활성 panel은 frame_builder가 미리 shape한 ShapedPane을 바로 넘긴다). append 실패면 그
-    /// 페인만 deinit. 소유권은 collected로 이전되므로 호출자는 넘긴 ShapedPane을 더는 deinit하지 않는다(호출자가 보관
-    /// 변수를 null로 비운다).
-    fn collectShapedPane(self: *AppSession, collected: *std.ArrayList(CollectedPane), pane: coretext_frame_builder.ShapedPane, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
-        var p = pane;
-        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder }) catch {
-            p.deinit(self.allocator);
-        };
     }
 
     /// 수집된 모든 페인을 한 placeMultiPane(한 atlas 세대)으로 배치하고 dest별로 RenderFrame을 분배한다. finishPane이
@@ -30496,7 +28648,7 @@ pub const AppSession = struct {
             return;
         }
 
-        const term = self.activePane().activeTerm();
+        const term = pane_ops.activePane(self).activeTerm();
         const bar_cols: u16 = @intCast(@min(self.backing_width_px / self.cell_width_px, std.math.maxInt(u16)));
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
         const icon_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
@@ -30767,8 +28919,8 @@ pub const AppSession = struct {
         self.dock.presented = true;
         self.dock.collapsed = false;
         self.enterDockView(view);
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
+        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
+        pane_ops.recomputeActivePaneRect(self);
         self.last_resize_size = null;
     }
 
@@ -31369,8 +29521,8 @@ pub const AppSession = struct {
         // 활성 pane 탭바: + 버튼(plus zone) → ⌘T(new_term), 활성 탭(seg) → ⌘W(close_focused의 workspace 경로). barMetrics(렌더·hit-test와
         // 같은 메트릭)로 위치 단일 출처 — +/탭 seg를 인라인 재계산하지 않는다.
         {
-            const pane = self.activePane();
-            if (self.paneBarForLeaf(pane)) |pb| {
+            const pane = pane_ops.activePane(self);
+            if (pane_ops.paneBarForLeaf(self, pane)) |pb| {
                 const cw2 = self.cell_width_px;
                 if (barMetrics(pb.tabs, cw2, pane.terms.items.len, tokens.space.tab_width_cols, pane.tab_scroll_cols)) |m| {
                     if (try Local.chordStr(resolver, Action.new_term, arena)) |cs| {
@@ -31382,7 +29534,7 @@ pub const AppSession = struct {
                     if (try Local.chordStr(resolver, Action.close_term, arena)) |cs| {
                         // ⌘W 배지는 **보이는** 활성 탭 세그먼트에 얹는다 — 드래그 중이면 model 인덱스와
                         // 갈려(§4.4) 배지가 활성이 아닌 탭 위에 앉는다(닫힐 탭을 잘못 알려 준다).
-                        const seg = m.segOf(self.paneActiveTermIndex(pane));
+                        const seg = m.segOf(pane_ops.paneActiveTermIndex(self, pane));
                         if (seg.end_col > seg.start_col) try badges.append(arena, .{ .rect = .{ .x = @intCast(pb.tabs.x + seg.start_col * cw2), .y = @intCast(pb.tabs.y), .w = (seg.end_col - seg.start_col) * cw2, .h = pb.tabs.h }, .chord = cs });
                     }
                 }
@@ -31605,7 +29757,7 @@ pub const AppSession = struct {
             .sidebar_header_height_px = self.sidebar_header_height_px,
             .sidebar_scroll_offset_px = self.sidebar_scroll_offset_px,
             .titlebar_strip_px = self.titlebar_strip_px,
-            .divider_thickness_px = self.dividerThicknessPx(),
+            .divider_thickness_px = pane_ops.dividerThicknessPx(self),
             // 상태바 높이는 `dock_layout`이 유일 권위다(S1이 낸 seam) — 여기서 따로 계산하면 작업영역을
             // 깎은 값과 strip을 자르는 값이 갈릴 수 있다. 지금은 입력이 0이라 항상 0이다(S2b가 뒤집는다).
             .status_bar_height_px = self.dockGeometry().status_bar.h,
@@ -31663,16 +29815,6 @@ pub const AppSession = struct {
         frame.window_opacity_milli = @intFromFloat(@round(self.appearance.window_opacity * 1000.0));
         // pane divider(reserved 30/31) device px 두께 — config split.divider-thickness(논리 pt) 단일 출처.
         return frame;
-    }
-
-    /// config split.divider-thickness(논리 pt)를 divider strip의 backing px 두께로 환산한다(× scale_milli/1000 —
-    /// letter-spacing·window padding과 같은 분수 scale). **0(이하)=숨김, 양수는 최소 1px 보장** — round가 0.5px 미만을
-    /// 0으로 없애 양수 config인데 divider가 통째 사라지는 걸 막는다(code-review: 1x에서 0.4pt 등). @intFromFloat 음수 UB도
-    /// 이 게이트가 막는다. metalFrame(렌더 값)·appendActiveTabDividers(0이면 셀 emit 스킵)의 단일 출처. 커서 강조선(15%)과 무관.
-    fn dividerThicknessPx(self: *const AppSession) u32 {
-        if (self.scale_milli == 0 or self.appearance.split_divider_thickness <= 0.0) return 0;
-        const px_f = self.appearance.split_divider_thickness * @as(f32, @floatFromInt(self.scale_milli)) / 1000.0;
-        return @max(@as(u32, 1), @as(u32, @intFromFloat(@round(px_f))));
     }
 
     pub fn deinit(self: *AppSession) void {
@@ -32190,7 +30332,7 @@ fn startupExitDetail(buf: []u8, ended: ?app.RuntimePumpTermination) []const u8 {
     };
 }
 
-fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.ShellConfig, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
+pub fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.ShellConfig, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
     var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
             .command = "/bin/sh",
@@ -32226,7 +30368,7 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.Sh
     return request;
 }
 
-fn commandName(kind: CommandKind) []const u8 {
+pub fn commandName(kind: CommandKind) []const u8 {
     return switch (kind) {
         .controlled_smoke => "/bin/sh -c maru-app-smoke",
         .interactive_shell, .quick_interactive_shell => maru.pty.resolveInteractiveShell(),
@@ -34788,7 +32930,7 @@ test "그룹핀 리뷰 #5: newWorkspaceHighlightSlot이 비고정 리전 첫 마
     session.tabs.items[3].group_depth = 1;
     session.recomputeVisibleTabs();
 
-    const hl = session.newWorkspaceHighlightSlot();
+    const hl = pane_ops.newWorkspaceHighlightSlot(session);
     try std.testing.expect(hl < session.sidebar_rows.items.len);
     try std.testing.expect(session.sidebar_rows.items[hl] == .group_header);
     // ★ 하이라이트 = 비고정 리전 마커(UG, tab 3)의 헤더 — 삽입 위치와 정합. 옛 버그면 전역 첫 헤더(고정 PG, slot 0)를 반환.
@@ -36675,18 +34817,18 @@ test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페�
     // 그룹 헤더 row(index 1) 중앙 y에 pane grip 드롭 → **null(no-op)**. 옛 코드는 new_workspace로 falls through했다.
     const hdr_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, session.sidebarMetrics(), 0);
     const hdr_y: f64 = @floatFromInt(hdr_top + @as(i64, @intCast(header_row_h / 2)));
-    try std.testing.expect(session.computePaneDropDest(x, hdr_y) == null); // 헤더 드롭 = 무동작
+    try std.testing.expect(pane_ops.computePaneDropDest(session, x, hdr_y) == null); // 헤더 드롭 = 무동작
 
     // 비활성 카드 row(index 0 = t0) → merge(그 워크스페이스에 합치기).
     const card_top = sb.rowTop(session.sidebar_rows.items, 0, header_h, session.sidebarMetrics(), 0);
     const card_y: f64 = @floatFromInt(card_top + @as(i64, @intCast(sb.rowHeight(session.sidebar_rows.items[0], session.sidebarMetrics()) / 2)));
-    const dest = session.computePaneDropDest(x, card_y);
+    const dest = pane_ops.computePaneDropDest(session, x, card_y);
     try std.testing.expect(dest != null and dest.? == .merge);
 
     // 리스트 아래 빈 영역(past-end) → new_workspace(자연스러운 "빈 영역=새 워크스페이스" 보존).
     const past_end = sb.rowTop(session.sidebar_rows.items, session.sidebar_rows.items.len, header_h, session.sidebarMetrics(), 0);
     const below_y: f64 = @floatFromInt(past_end + @as(i64, @intCast(slot_h)));
-    const dest2 = session.computePaneDropDest(x, below_y);
+    const dest2 = pane_ops.computePaneDropDest(session, x, below_y);
     try std.testing.expect(dest2 != null and dest2.? == .new_workspace);
 }
 
@@ -36711,7 +34853,7 @@ test "드래그앤드롭 pane 라우팅: routeDropAtPoint가 떨어뜨린 pane�
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{};
-    try session.splitActivePane(.horizontal); // 좌우 2 pane, 활성 = 새로 생긴 pane
+    try pane_ops.splitActivePane(session, .horizontal); // 좌우 2 pane, 활성 = 새로 생긴 pane
     const tab = session.activeTab();
     try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
 
@@ -36725,15 +34867,15 @@ test "드래그앤드롭 pane 라우팅: routeDropAtPoint가 떨어뜨린 pane�
         const cx: f64 = @floatFromInt(lr.rect.x + @as(i64, @intCast(lr.rect.w / 2)));
         const cy: f64 = @floatFromInt(lr.rect.y + @as(i64, @intCast(lr.rect.h / 2)));
         try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(cx, cy));
-        try std.testing.expectEqual(lr.leaf, session.activePane()); // 떨어뜨린 pane이 활성
+        try std.testing.expectEqual(lr.leaf, pane_ops.activePane(session)); // 떨어뜨린 pane이 활성
     }
 
     // 사이드바 위 드롭 → not_applicable = 활성 pane 폴백(기존 동작 보존, 이번 범위 밖). **거부가 아니다** —
     // 호스트는 그대로 활성 pane에 삽입한다(거부와 섞으면 사이드바 드롭이 통째로 무시된다).
-    const before = session.activePane();
+    const before = pane_ops.activePane(session);
     const sidebar_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     try std.testing.expectEqual(AppSession.DropRoute.not_applicable, session.routeDropAtPoint(sidebar_x, 100));
-    try std.testing.expectEqual(before, session.activePane()); // 활성 pane 불변
+    try std.testing.expectEqual(before, pane_ops.activePane(session)); // 활성 pane 불변
 }
 
 test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (pane까지만 라우팅하면 엉뚱한 Term에 들어간다)" {
@@ -36758,7 +34900,7 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
     // 한 pane에 Term 3개(탭 3개). 활성은 마지막에 만든 것.
     session.dispatchAppAction(.new_term);
     session.dispatchAppAction(.new_term);
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     session.focusTerm(2);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
@@ -36767,7 +34909,7 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
     defer leaf_rects.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &leaf_rects);
     const rect = leaf_rects.items[0].rect;
-    const pb = session.paneBar(rect, pane) orelse return error.SkipZigTest;
+    const pb = pane_ops.paneBar(session, rect, pane) orelse return error.SkipZigTest;
     const bar_y: f64 = @floatFromInt(pb.tabs.y + pb.tabs.h / 2);
 
     // 탭 바를 훑어 각 Term 탭의 한 지점을 찾는다(내부 기하에 의존하지 않고 hit-test 자체로 — 클릭 경로와 같은 함수).
@@ -36821,13 +34963,13 @@ test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused —
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{};
-    try session.splitActivePane(.horizontal); // 2 pane
+    try pane_ops.splitActivePane(session, .horizontal); // 2 pane
 
     var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer leaf_rects.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &leaf_rects);
     // 활성이 **아닌** pane을 대상으로 삼는다(라우팅이 실제로 일어나야 의미 있는 자리).
-    const active_pane = session.activePane();
+    const active_pane = pane_ops.activePane(session);
     const target = for (leaf_rects.items) |lr| {
         if (lr.leaf != active_pane) break lr;
     } else return error.SkipZigTest;
@@ -36836,28 +34978,28 @@ test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused —
 
     // 기준선: 가드가 없으면 정상 라우팅(가드가 "항상 막는" 게 아님을 함께 증명).
     try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(tx, ty));
-    try std.testing.expectEqual(target.leaf, session.activePane());
-    _ = session.focusPaneByPtr(active_pane); // 원복
-    try std.testing.expectEqual(active_pane, session.activePane());
+    try std.testing.expectEqual(target.leaf, pane_ops.activePane(session));
+    _ = pane_ops.focusPaneByPtr(session, active_pane); // 원복
+    try std.testing.expectEqual(active_pane, pane_ops.activePane(session));
 
     // ① 오버레이/모달 — confirm 말고 **설정 화면**으로 검증한다(예전 가드는 confirm만 봐서 이걸 놓쳤다).
     session.chrome_host.settings.open = true;
     try std.testing.expect(session.anyOverlayOpen());
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(tx, ty));
-    try std.testing.expectEqual(active_pane, session.activePane()); // 포커스 안 뺏김
+    try std.testing.expectEqual(active_pane, pane_ops.activePane(session)); // 포커스 안 뺏김
     session.chrome_host.settings.open = false;
 
     // 확인 모달도 같은 판정(anyOverlayOpen에 포함).
     session.showConfirmButtons(.{ .paste = session.activeSurface().id }, AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(tx, ty));
-    try std.testing.expectEqual(active_pane, session.activePane());
+    try std.testing.expectEqual(active_pane, pane_ops.activePane(session));
     session.chrome_host.confirm.dismiss();
     try std.testing.expect(!session.anyOverlayOpen());
 
     // ② 대상 Term이 web → refused(활성 pane으로 폴백해 삽입하면 web pane 포커스를 훔치고 내용은 사라진다).
     target.leaf.terms.items[target.leaf.active_term].kind = .web;
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(tx, ty));
-    try std.testing.expectEqual(active_pane, session.activePane()); // 포커스 안 뺏김
+    try std.testing.expectEqual(active_pane, pane_ops.activePane(session)); // 포커스 안 뺏김
     target.leaf.terms.items[target.leaf.active_term].kind = .terminal; // deinit 전 원복(teardown 경로 보호)
 }
 
@@ -36881,7 +35023,7 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{};
-    try session.splitActivePane(.horizontal); // 2 pane
+    try pane_ops.splitActivePane(session, .horizontal); // 2 pane
 
     const origin_id = session.activeSurface().id; // 붙여넣기를 시작한(=대상이어야 할) surface
     // 위험한 payload(개행) → 확인 모달로 보류. 이때 대상이 고정된다.
@@ -36892,7 +35034,7 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
     try std.testing.expectEqual(origin_id, session.pending_confirm.paste); // ★ 대상 고정
 
     // 확인하는 동안 사용자가 다른 pane으로 이동(탭/pane 전환·다른 pane 클릭 등).
-    session.focusPaneRelative(1);
+    pane_ops.focusPaneRelative(session, 1);
     const other_id = session.activeSurface().id;
     try std.testing.expect(other_id != origin_id);
 
@@ -37948,10 +36090,10 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         try std.testing.expect(t2.local_pinned);
         // 최상위 t0(index0)을 활성으로 만들고 split → 2 pane → 그 새 pane을 새 워크스페이스로 분리.
         session.app_window.active_tab = 0;
-        try session.splitActivePane(.horizontal); // t0 = [p0, p1], 활성 p1
+        try pane_ops.splitActivePane(session, .horizontal); // t0 = [p0, p1], 활성 p1
         try std.testing.expectEqual(@as(usize, 2), session.tabs.items[0].panes.items.len);
         const before_len = session.tabs.items.len;
-        session.promotePaneToNewWorkspace(session.activePane()); // p1 → 새 비고정 top-level 탭(첫 마커 앞 삽입)
+        pane_ops.promotePaneToNewWorkspace(session, pane_ops.activePane(session)); // p1 → 새 비고정 top-level 탭(첫 마커 앞 삽입)
         try std.testing.expectEqual(before_len + 1, session.tabs.items.len); // 새 탭 삽입됨
         // ★ 기존 그룹 A의 로컬 pin 보존: t2가 여전히 그룹 안·로컬 pin·마커 직후(index 이동은 됐어도 상대순서 불변).
         try std.testing.expect(t2.local_pinned); // ★ 로컬 pin 플래그 보존
@@ -39788,16 +37930,16 @@ test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·
 
     const tab = session.tabs.items[0];
     // pane 2개, 각 pane에 Term 2개 → 그 중 **가려진 탭**(pane0의 term1)에 에이전트를 둔다.
-    try session.splitActivePane(.horizontal);
-    _ = session.focusPaneByPtr(tab.panes.items[0]);
-    try session.newTermInActivePane();
+    try pane_ops.splitActivePane(session, .horizontal);
+    _ = pane_ops.focusPaneByPtr(session, tab.panes.items[0]);
+    try pane_ops.newTermInActivePane(session);
     const target_pane: usize = 0;
     const target_term: usize = 1;
     const t = tab.panes.items[target_pane].terms.items[target_term];
     t.agent_kind = .claude;
     t.agent_state = .idle;
     // 다른 pane을 활성으로 만들어 "가려진 자리"를 재현한다.
-    _ = session.focusPaneByPtr(tab.panes.items[1]);
+    _ = pane_ops.focusPaneByPtr(session, tab.panes.items[1]);
     tab.panes.items[target_pane].active_term = 0; // 그 pane의 활성 탭도 0(에이전트는 1에 있다)
     session.rebuildSidebar() catch {};
 
@@ -39813,7 +37955,7 @@ test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·
 
     // 클릭 → 세 단계가 모두 수행된다.
     session.focusAgentRow(rows[ar].agent.tab, rows[ar].agent.pane, rows[ar].agent.term);
-    try std.testing.expectEqual(tab.panes.items[target_pane], session.activePane()); // 2) Pane
+    try std.testing.expectEqual(tab.panes.items[target_pane], pane_ops.activePane(session)); // 2) Pane
     try std.testing.expectEqual(target_term, tab.panes.items[target_pane].active_term); // 3) Term 탭
 
     // 사라진 Term을 가리키는 행은 무동작(stale 인덱스 방어).
@@ -39854,7 +37996,7 @@ test "사이드바 에이전트 목록: Term 전수 나열·개수와 무관하�
     tab.agents_collapsed = false;
 
     // (2) 같은 pane에 Term을 하나 더 띄워 에이전트 2개 → `N agents` 토글 + 행 2개.
-    try session.newTermInActivePane();
+    try pane_ops.newTermInActivePane(session);
     const t1 = tab.panes.items[0].terms.items[1];
     t1.agent_kind = .claude;
     t1.agent_state = .idle;
@@ -40115,12 +38257,12 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
 
     // 표적: 비활성 탭(t1)의 둘째 panel(우측 split)의 둘째 가로탭. 만든 직후 활성이라 activeSurface로 id를 잡는다.
     _ = try session.newTab(); // tabs [t0, t1], 활성 t1
-    try session.splitActivePane(.horizontal); // t1: pane [p0, p1], 활성 p1
-    try session.newTermInActivePane(); // p1: term [tm0, tm1], 활성 tm1
+    try pane_ops.splitActivePane(session, .horizontal); // t1: pane [p0, p1], 활성 p1
+    try pane_ops.newTermInActivePane(session); // p1: term [tm0, tm1], 활성 tm1
     const target_id = session.activeSurface().id;
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 
     // 활성을 다른 워크스페이스(t0)로 옮겨, 활성화가 탭 경계를 넘는지(단순 no-op이 아닌지) 본다.
     try std.testing.expect(session.switchTab(0));
@@ -40130,13 +38272,13 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
     try std.testing.expect(session.activateSurfaceById(target_id));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
     try std.testing.expectEqual(target_id, session.activeSurface().id);
 
     // 없는 id(알림 후 그 Term이 닫힌 경우 모사)는 false + 활성 상태 불변 — stale 알림이 엉뚱한 surface를 깨우지 않는다.
     try std.testing.expect(!session.activateSurfaceById(0xFFFF_FFFF));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 }
 
 test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id로 drain한다" {
@@ -40164,7 +38306,7 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
     session.window_focused = true; // 포커스 창 — 활성 Term이 "지금 보는" Term이 되게(전면 배너 억제 대상)
 
     // 활성 탭에 split을 만들어 비활성 pane을 둔다: panes [p0, p1], 활성 p1. 발신원 = 비활성 p0의 Term.
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // p1 활성
     const bg_term = session.activeTab().panes.items[0].terms.items[0]; // 비활성 p0의 Term(*Term)
     const bg_id = bg_term.surface.id;
@@ -40395,14 +38537,14 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(600 - session.statusBarHeightPx(), r.h);
 
     // 탭 바: leaf rect 상단·사이드바 경계에 붙는다(padding inset 없음 — chrome은 가장자리까지).
-    const bar = session.paneBarRect(r).?;
+    const bar = pane_ops.paneBarRect(session, r).?;
     try std.testing.expectEqual(session.sidebar_width_px, bar.x);
     try std.testing.expectEqual(@as(u32, 0), bar.y);
     try std.testing.expectEqual(@as(u32, 800), bar.w);
 
     // 셀 그리드: 탭 바 아래 + window padding inset(여기만 여백).
-    const bar_h = session.paneBarHeightPx();
-    const g = session.paneTermRect(r);
+    const bar_h = pane_ops.paneBarHeightPx(session);
+    const g = pane_ops.paneTermRect(session, r);
     try std.testing.expectEqual(session.sidebar_width_px + 8, g.x); // 좌 = 사이드바 + pad_x
     try std.testing.expectEqual(bar_h + 4, g.y); // 상 = 탭 바 + pad_y
     try std.testing.expectEqual(@as(u32, 800 - 16), g.w); // 폭 = backing − 사이드바 − 2·pad_x
@@ -40410,7 +38552,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
 
     // padding 0이면 grid도 inset 없음(탭 바만 뺀 영역).
     session.window_padding_px = .{};
-    const g0 = session.paneTermRect(r);
+    const g0 = pane_ops.paneTermRect(session, r);
     try std.testing.expectEqual(session.sidebar_width_px, g0.x);
     try std.testing.expectEqual(bar_h, g0.y);
     try std.testing.expectEqual(@as(u32, 800), g0.w);
@@ -40441,8 +38583,8 @@ test "asymmetric window padding insets paneTermRect by left/top and grid by left
     session.backing_height_px = 600;
 
     const r = session.termRect();
-    const bar_h = session.paneBarHeightPx();
-    const g = session.paneTermRect(r);
+    const bar_h = pane_ops.paneBarHeightPx(session);
+    const g = pane_ops.paneTermRect(session, r);
     // x는 left(10)만큼만, y는 top(4) + 바만큼 들어간다(우/하는 origin에 영향 없음).
     try std.testing.expectEqual(session.sidebar_width_px + 10, g.x);
     try std.testing.expectEqual(bar_h + 4, g.y);
@@ -40998,11 +39140,11 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
     try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
     const b1 = s1.live_registry.findBySurface(sid1).?; // *LiveSurface 번들 슬롯
     const b2 = s2.live_registry.findBySurface(sid2).?;
-    try std.testing.expectEqual(s1.activePane().activeTerm().rt.handle, sid1);
-    try std.testing.expectEqual(s2.activePane().activeTerm().rt.handle, sid2);
+    try std.testing.expectEqual(pane_ops.activePane(s1).activeTerm().rt.handle, sid1);
+    try std.testing.expectEqual(pane_ops.activePane(s2).activeTerm().rt.handle, sid2);
     // M3a 핵심: Term.surface가 이제 번들 슬롯의 surface를 가리킨다(Term-inline이 아니라 registry 소유).
-    try std.testing.expectEqual(s1.activePane().activeTerm().surface, &b1.terminal.surface);
-    try std.testing.expectEqual(s2.activePane().activeTerm().surface, &b2.terminal.surface);
+    try std.testing.expectEqual(pane_ops.activePane(s1).activeTerm().surface, &b1.terminal.surface);
+    try std.testing.expectEqual(pane_ops.activePane(s2).activeTerm().surface, &b2.terminal.surface);
     // 두 창의 번들이 한 registry에 공존한다(앱 전역 소유 — 창이 달라도 같은 owner).
     try std.testing.expectEqual(before + 2, app_runtime.live_registry.count());
 }
@@ -41185,13 +39327,13 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         defer s2.deinit();
         // production과 같은 resolver를 타므로 Window A에서 이미 켠 앱 전역 policy가 B의 stale 빈 test config보다
         // 우선한다. 따라서 B의 **첫 Term부터** 같은 공유 connection/backend의 remote여야 한다.
-        try std.testing.expect(s2.activePane().activeTerm().surface.remote != null);
+        try std.testing.expect(pane_ops.activePane(s2).activeTerm().surface.remote != null);
         try std.testing.expectEqual(@as(usize, 2), app_remote_backend.?.runtimes.count());
 
         // 제품 복사 경로 회귀: 두 번째 창의 활성 host-backed Term에서 보이는 "Maru"를 선택한 뒤 AppSession.copyText를
         // 호출한다. RemoteRuntime.selectedText 부품 테스트만으로는 활성 Term/surface id/앱 전역 backend 라우팅이 어긋나
         // 실제 Cmd+C가 빈 문자열이 되는 회귀를 잡지 못하므로, 실제 AppSession 경계까지 고정한다.
-        const s2_active = s2.activePane().activeTerm();
+        const s2_active = pane_ops.activePane(s2).activeTerm();
         var s2_ready = false;
         var s2_it: usize = 0;
         while (s2_it < 100 and !s2_ready) : (s2_it += 1) {
@@ -41355,8 +39497,9 @@ test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 �
     defer a.destroy(session);
     defer session.deinit();
 
-    const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm(
+    const pane = pane_ops.activePane(session);
+    const tomb = try pane_ops.createEndedPlaceholderTerm(
+        session,
         "배포 감시",
         "/tmp",
         "/bin/zsh",
@@ -41427,8 +39570,8 @@ test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 �
     defer a.destroy(session);
     defer session.deinit();
 
-    const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm("배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
+    const pane = pane_ops.activePane(session);
+    const tomb = try pane_ops.createEndedPlaceholderTerm(session, "배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(a, tomb);
     session.focusTerm(pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
@@ -41457,8 +39600,8 @@ test "종료 placeholder: 되살리기가 사용자 rename을 승계한다" {
     defer a.destroy(session);
     defer session.deinit();
 
-    const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
+    const pane = pane_ops.activePane(session);
+    const tomb = try pane_ops.createEndedPlaceholderTerm(session, "끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(a, tomb);
     session.focusTerm(pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
@@ -41483,8 +39626,8 @@ test "종료 placeholder: 제목·경로가 버퍼를 넘겨도 ⏎ 힌트가 �
     // 고정 버퍼(768B)를 확실히 넘기는 길이 — 한글 제목 480B + 깊은 경로 598B.
     const long_title = "한글제목" ** 40;
     const long_cwd = "/very/deep/project/path" ** 26;
-    const tomb = try session.createEndedPlaceholderTerm(long_title, long_cwd, "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
-    try session.activePane().terms.append(a, tomb);
+    const tomb = try pane_ops.createEndedPlaceholderTerm(session, long_title, long_cwd, "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
+    try pane_ops.activePane(session).terms.append(a, tomb);
 
     session.writeEndedPlaceholderGuidance(tomb);
     tomb.surface.lockCore(session.io);
@@ -41514,8 +39657,8 @@ test "종료 placeholder: 레이아웃 resize가 저장될 grid까지 옮긴다"
     defer a.destroy(session);
     defer session.deinit();
 
-    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
-    try session.activePane().terms.append(a, tomb);
+    const tomb = try pane_ops.createEndedPlaceholderTerm(session, "끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
+    try pane_ops.activePane(session).terms.append(a, tomb);
     try session.resizeTermForLayout(tomb, .{ .cols = 120, .rows = 40 });
     try std.testing.expectEqual(@as(u16, 120), tomb.rt.observation.size.cols);
     try std.testing.expectEqual(@as(u16, 40), tomb.rt.observation.size.rows);
@@ -41531,18 +39674,18 @@ test "드롭 라우팅: 묘비 pane은 refused (포커스도 뺏지 않는다)" 
     defer a.destroy(session);
     defer session.deinit();
 
-    try session.splitActivePane(.horizontal); // 좌우 2 pane, 활성 = 새 pane(살아 있는 셸)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌우 2 pane, 활성 = 새 pane(살아 있는 셸)
     const tab = session.activeTab();
     try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
-    const live_pane = session.activePane();
+    const live_pane = pane_ops.activePane(session);
     const tomb_pane = if (tab.panes.items[0] == live_pane) tab.panes.items[1] else tab.panes.items[0];
 
     // 대상 pane의 활성 Term을 묘비로 바꾼다(제자리 교체 — 슬롯 수·트리 불변).
     const dead = tomb_pane.terms.items[tomb_pane.active_term];
-    const tomb = try session.createEndedPlaceholderTerm("끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
+    const tomb = try pane_ops.createEndedPlaceholderTerm(session, "끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     tomb_pane.terms.items[tomb_pane.active_term] = tomb;
     session.destroyTerm(dead);
-    session.surface_ptrs.items[session.app_window.active_tab] = session.activePane().activeTerm().surface;
+    session.surface_ptrs.items[session.app_window.active_tab] = pane_ops.activePane(session).activeTerm().surface;
     session.app_window.tabs = session.surface_ptrs.items;
 
     var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -41555,7 +39698,7 @@ test "드롭 라우팅: 묘비 pane은 refused (포커스도 뺏지 않는다)" 
     const cx: f64 = @floatFromInt(rect.x + @as(i64, @intCast(rect.w / 2)));
     const cy: f64 = @floatFromInt(rect.y + @as(i64, @intCast(rect.h / 2)));
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(cx, cy));
-    try std.testing.expectEqual(live_pane, session.activePane()); // 포커스는 살아 있는 pane에 그대로
+    try std.testing.expectEqual(live_pane, pane_ops.activePane(session)); // 포커스는 살아 있는 pane에 그대로
 }
 
 // §7 복원 배선을 못박는다: runtime이 영구히 없는 Term **하나만** 묘비가 되고 같은 pane의 다른 surface·split 트리·탭
@@ -41671,11 +39814,11 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const live_term = pane.activeTerm();
     const before_slots = session.live_registry.count();
 
-    const tomb = try session.createEndedPlaceholderTerm("빌드 로그", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
+    const tomb = try pane_ops.createEndedPlaceholderTerm(session, "빌드 로그", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(allocator, tomb);
 
     // 정체성: kind는 .terminal이라 렌더 경로가 그대로 돌고, PTY 계열은 전부 미할당이다.
@@ -41809,7 +39952,7 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
 
     // production apply가 쓰는 동일 snapshot/record/restore 조합으로 newly-Gone의 두 counter가 함께 rollback되는지 고정한다.
     const accounting = AppSession.RestoreAccountingSnapshot.capture(session);
-    session.recordEndedPlaceholder(true);
+    pane_ops.recordEndedPlaceholder(session, true);
     try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_notice_pending);
     try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_dropped_pending);
     accounting.restore(session);
@@ -41851,8 +39994,9 @@ test "종료 placeholder: capture가 metadata와 durable runtime tombstone을 �
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const pane = session.activePane();
-    const tomb = try session.createEndedPlaceholderTerm(
+    const pane = pane_ops.activePane(session);
+    const tomb = try pane_ops.createEndedPlaceholderTerm(
+        session,
         "배포 감시",
         "/tmp",
         "/bin/zsh",
@@ -42897,7 +41041,7 @@ test "dispatchBell: 배경(비활성) pane의 BEL도 잡는다 — Dock 배지/�
     session.backing_height_px = 600;
     session.window_padding_px = .{};
 
-    try session.splitActivePane(.horizontal); // pane [p0, p1], 활성 p1
+    try pane_ops.splitActivePane(session, .horizontal); // pane [p0, p1], 활성 p1
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // 활성 = p1
 
@@ -43210,7 +41354,7 @@ test "addrEditCaretRect: 주소창 편집 caret이 밴드 안(y) + nav_end 뒤(x
     session.enterAddrEdit(sid, "https://x");
     const r = session.addrEditCaretRect() orelse return error.NoCaret;
 
-    const pb = session.addrEditPaneBar() orelse return error.NoBar;
+    const pb = pane_ops.addrEditPaneBar(session) orelse return error.NoBar;
     const cw = session.cell_width_px;
     const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존(렌더·hit-test 단일 소스)
     const cols: u32 = pb.full.w / cw;
@@ -43239,7 +41383,7 @@ test "슬라이스 3: 주소창 밴드 마우스 — 클릭 caret 배치·더블
     session.enterAddrEdit(sid, "aa/bb/cc");
     try std.testing.expectEqual(@as(usize, 8), session.addr_field.caret); // 시드 후 끝-caret
 
-    const pb = session.addrEditPaneBar() orelse return error.NoBar;
+    const pb = pane_ops.addrEditPaneBar(session) orelse return error.NoBar;
     const cw = session.cell_width_px;
     const bar_h = pb.full.h;
     const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
@@ -43963,7 +42107,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         defer session.deinit();
         // spawn 크기 = layout_math.gridFromBacking(창 px, 세션 자신의 cell·사이드바 메트릭) — resize 경로와 같은 단일 출처.
         const expected = layout_math.gridFromBacking(1600, 900, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.gridPadding()); // spawn은 gridPadding(상단 띠 포함)을 쓴다
-        const got = session.activePane().activeTerm().surface.core.size;
+        const got = pane_ops.activePane(session).activeTerm().surface.core.size;
         try std.testing.expectEqual(expected, got);
         try std.testing.expect(got.cols != 80 or got.rows != 24); // 80×24 폴백이 아니다(창이 더 넓어 grid가 다름)
     }
@@ -43984,7 +42128,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         defer session.deinit();
         // 진단으로 확인됨: 2x에서 cell=17×37·sidebar_px=360·grid 91×32. init의 spawn 그리드는 정확하다(불일치 없음).
         const expected = layout_math.gridFromBacking(1920, 1200, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.gridPadding()); // spawn은 gridPadding(상단 띠 포함)을 쓴다
-        try std.testing.expectEqual(expected, session.activePane().activeTerm().surface.core.size);
+        try std.testing.expectEqual(expected, pane_ops.activePane(session).activeTerm().surface.core.size);
     }
     // backing px 0(헤드리스·창 미상) — cols/rows로 폴백 spawn.
     {
@@ -44001,7 +42145,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
             .scale_milli = 0,
         });
         defer session.deinit();
-        try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, session.activePane().activeTerm().surface.core.size);
+        try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, pane_ops.activePane(session).activeTerm().surface.core.size);
     }
 }
 
@@ -44011,7 +42155,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
 // 검증한다(atlas readback). production fn으로 두면 미사용이라 test 전용 free 함수로 분리해 둔다.
 fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
     const dl = try session.buildSidebarTitleDrawList();
-    return session.paneFrameBuilder().buildFromDrawList(session.allocator, dl, &session.renderer_state);
+    return pane_ops.paneFrameBuilder(session).buildFromDrawList(session.allocator, dl, &session.renderer_state);
 }
 
 fn testBuildChromeOverlayFrame(session: *AppSession) !metal_frame.PaneFrame {
@@ -44067,7 +42211,7 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
     var sticky_pf: ?metal_frame.PaneFrame = null; // built_frames 소유(view)
     var active_result: ?AppSession.ActiveResult = null; // built_frames 소유(view)
 
-    const builder = session.paneFrameBuilder();
+    const builder = pane_ops.paneFrameBuilder(session);
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
     // 활성 surface의 DrawList(실 CoreText shape 대상)를 dest별로 collect — sidebar/pane/active/floating/sticky 5종.
     const dests = [_]AppSession.CollectDest{
@@ -44325,7 +42469,7 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.acceptContextMenu();
 
     // pane/term 대상은 Rename만(색·고정 없음).
-    session.context_menu_target = .{ .pane = session.activePane() };
+    session.context_menu_target = .{ .pane = pane_ops.activePane(session) };
     try std.testing.expectEqual(@as(usize, 1), session.buildContextMenuItems().len);
     session.context_menu_target = null;
 }
@@ -45013,12 +43157,12 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
 
     // 4) Term rename 중 그 Term을 닫으면 rename이 자동 취소된다(destroyTerm 무효화 — stale 포인터/UAF 방지).
     //    pane에 Term을 하나 더 만들어 닫기가 Term 단위로 끝나게(cascade로 세션 종료 latch를 안 치게) 한다.
-    session.newTermInActivePane() catch {};
+    pane_ops.newTermInActivePane(session) catch {};
     session.focusTerm(0); // 첫 Term을 활성으로
-    const term0 = session.activePane().activeTerm();
+    const term0 = pane_ops.activePane(session).activeTerm();
     session.startRename(.{ .term = term0 });
     try std.testing.expect(session.rename != null);
-    session.closeActiveTermOrPane(); // 활성(term0) 닫힘 → destroyTerm(term0) → rename null
+    pane_ops.closeActiveTermOrPane(session); // 활성(term0) 닫힘 → destroyTerm(term0) → rename null
     try std.testing.expect(session.rename == null);
 }
 
@@ -45044,8 +43188,8 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
-    const term0 = session.activePane().activeTerm();
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    const term0 = pane_ops.activePane(session).activeTerm();
     session.mouse(4, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(session.renamingTerm(term0));
     session.closeRename();
@@ -45080,8 +43224,8 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
-    const term0 = session.activePane().activeTerm();
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const term0 = pane_ops.activePane(session).activeTerm();
 
     // ① Term 탭 우클릭(button==2) → 메뉴 열림 + 대상 = term0(아직 rename 아님 — 메뉴만).
     session.mouse(1, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 2, 0);
@@ -45118,7 +43262,7 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const term0 = session.activePane().activeTerm();
+    const term0 = pane_ops.activePane(session).activeTerm();
     session.startRename(.{ .term = term0 });
     session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'h' } });
     session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'i' } });
@@ -45139,8 +43283,8 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
-    const term_body = session.paneTermRect(lr.items[0].rect);
+    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
+    const term_body = pane_ops.paneTermRect(session, lr.items[0].rect);
     const cr = session.renameCaretRect() orelse return error.NoCaret;
     try std.testing.expectEqual(@as(u32, session.cell_width_px), cr.w);
     try std.testing.expect(@as(u32, @intCast(cr.y)) >= bar.y and @as(u32, @intCast(cr.y)) < term_body.y); // 탭 바 안(본문 위)
@@ -45235,7 +43379,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    const term0 = session.activePane().activeTerm();
+    const term0 = pane_ops.activePane(session).activeTerm();
 
     // (#7) rename 중 setFocused(false) → 확정(custom_name 기록, 편집기 닫힘).
     session.startRename(.{ .term = term0 });
@@ -45257,7 +43401,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const body = session.paneTermRect(lr.items[0].rect);
+    const body = pane_ops.paneTermRect(session, lr.items[0].rect);
     session.activeSurface().core.mouse_tracking = .normal;
     session.drag_autoscroll = 1;
     session.mouse_drag_selecting = true;
@@ -45612,10 +43756,10 @@ test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
     // (paneTermRect가 이제 padding도 inset — minimal grid의 padding 동작은 별도 테스트가 커버).
     session.window_padding_px = .{};
     try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
-    try std.testing.expectEqual(@as(u32, 0), session.paneBarHeightPx());
+    try std.testing.expectEqual(@as(u32, 0), pane_ops.paneBarHeightPx(session));
     const rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
-    try std.testing.expect(session.paneBarRect(rect) == null);
-    const term = session.paneTermRect(rect);
+    try std.testing.expect(pane_ops.paneBarRect(session, rect) == null);
+    const term = pane_ops.paneTermRect(session, rect);
     try std.testing.expectEqual(@as(u32, 0), term.y);
     try std.testing.expectEqual(@as(u32, 600), term.h);
 }
@@ -45640,11 +43784,11 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
         defer session.deinit();
         try std.testing.expect(session.tabsBlocked());
         try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
-        try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+        try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
         session.dispatchAppAction(.new_tab);
         session.dispatchAppAction(.new_term);
         try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // 새 워크스페이스 안 생김
-        try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len); // 새 Term 안 생김
+        try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len); // 새 Term 안 생김
     }
 
     // ② chrome_minimal + minimal_tabs=1: 탭/Term 생성이 다시 동작.
@@ -45663,7 +43807,7 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
         defer session.deinit();
         try std.testing.expect(!session.tabsBlocked());
         session.dispatchAppAction(.new_term); // 활성 pane에 Term 추가
-        try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+        try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
         session.dispatchAppAction(.new_tab); // 새 워크스페이스
         try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     }
@@ -45734,7 +43878,7 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
         });
         defer session.deinit();
         session.dispatchAppAction(.new_term); // Term 2개(full은 게이트 없음)
-        try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+        try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
         out.clearRetainingCapacity();
         session.appendMinimalTabIndicator(&out);
         try std.testing.expectEqual(@as(usize, 0), out.items.len); // full → 무동작
@@ -45778,11 +43922,11 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
     try std.testing.expect(saw_new_term and saw_close_tab);
 
     // runAction: new_term → 활성 pane Term +1(full 세션이라 tabsBlocked=false). 모르는 키는 false·무동작.
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.runAction("new_term"));
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.runAction("bogus_action"));
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 }
 
 test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합 표시 → Enter 디스패치+닫힘 → 프레임 빌드" {
@@ -45820,10 +43964,10 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     try std.testing.expect(command_palette.actionAt(session.palette_filtered.items, session.chrome_host.palette.selected).? == .new_term);
 
     // Enter → accept → acceptPalette가 new_term 실행(full이라 게이트 없음) 후 닫힘. 활성 pane Term +1.
-    const before = session.activePane().terms.items.len;
+    const before = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.palette.open);
-    try std.testing.expectEqual(before + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(before + 1, pane_ops.activePane(session).terms.items.len);
 
     // 다시 열고 Esc로 닫힌다.
     session.dispatchAppAction(.toggle_command_palette);
@@ -45840,9 +43984,9 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     // 회귀(메뉴 모달 우회): 팝업이 열린 동안 메뉴바 keyEquivalent 경로(runAction)는 무시된다 — 모달 뒤 터미널이
     // 조작되면 안 된다. (팝업 자신의 Enter는 chrome_host.handleInput → dispatchChromeAction이 처리하므로 별개.)
     try std.testing.expect(session.chrome_host.palette.open);
-    const terms_before_runaction = session.activePane().terms.items.len;
+    const terms_before_runaction = pane_ops.activePane(session).terms.items.len;
     try std.testing.expect(!session.runAction("new_term"));
-    try std.testing.expectEqual(terms_before_runaction, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before_runaction, pane_ops.activePane(session).terms.items.len);
 
     // caret 깜빡임: 팝업이 열린 프레임을 tick으로 빌드하면 cursor_cells=1(팝업 입력 caret이 맨 끝 suffix) — 이제
     // caret이 터미널 커서와 같은 suffix-trim 깜빡임을 탄다. (예전엔 0으로 고정해 정적이었음 — caret 깜빡임 추가로 변경.)
@@ -46925,7 +45069,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
     try std.testing.expect(!session.takeFilePanelPickRequest());
 
     _ = 0; // FP16: 도크 그룹 개념 제거
-    _ = try session.openFileTermInActivePane("/tmp/launcher-transition.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/launcher-transition.md", .markdown);
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, file_panel_ops.filePanelDockControlAction(session).?);
     file_panel_ops.activateFilePanelDockControl(session);
     try std.testing.expect(session.dock.collapsed);
@@ -46968,7 +45112,7 @@ fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
     // observation을 refresh해야 한다는 제품 불변을 증명하지 못한다.
     var osc: [std.fs.max_path_bytes + 32]u8 = undefined;
     const bytes = try std.fmt.bufPrint(&osc, "\x1b]7;file://localhost{s}\x07", .{cwd});
-    try session.activePane().activeTerm().surface.core.write(bytes);
+    try pane_ops.activePane(session).activeTerm().surface.core.write(bytes);
 }
 
 test "file tree ET-CWD follows the active pane observation and keeps an old reveal inert for an outside cwd" {
@@ -47064,14 +45208,14 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     session.backing_height_px = saved_backing_height_px;
 
     // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     try testWriteActiveTermCwd(session, two);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 
     // 파일/브라우저 Term은 CWD가 없으므로 직전 local CWD와 Tree 상태를 지우지 않는다.
     session.dispatchAppAction(.new_web_tab);
-    try std.testing.expect(session.activePane().activeTerm().kind == .web);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 }
@@ -47357,8 +45501,8 @@ test "pending file tree root validation rejects merge and workspace restore befo
     const selected_root = try std.fs.path.join(allocator, &.{ tmp_root, "selected-root" });
     defer allocator.free(selected_root);
 
-    _ = try src.openFileTermInActivePane("/tmp/root-pending-src.html", .html);
-    _ = try dst.openFileTermInActivePane("/tmp/root-pending-dst.html", .html);
+    _ = try pane_ops.openFileTermInActivePane(src, "/tmp/root-pending-src.html", .html);
+    _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/root-pending-dst.html", .html);
     src.assignDockSurfaceIds();
     dst.assignDockSurfaceIds();
     try src.file_tree.replaceExplicitRoots(&.{"/source-before"});
@@ -48334,7 +46478,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
 
     const Harness = struct {
         fn prepare(session: *AppSession, backing_allocator: std.mem.Allocator, before_root: []const u8, before_path: []const u8) !void {
-            const opened = try session.openFileTermInActivePane(before_path, .markdown);
+            const opened = try pane_ops.openFileTermInActivePane(session, before_path, .markdown);
             const entry = opened.term.file_entry.?;
             entry.mode = .read;
             try session.file_tree.replaceExplicitRoots(&.{before_root});
@@ -48449,11 +46593,11 @@ test "file header mode selector reports a click cursor and tracks hover per slot
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
-    _ = try session.openFileTermInActivePane("/tmp/hover.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/hover.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
 
-    const band = session.fileHeaderBandForPaneLookup(session.activePane()).?;
+    const band = pane_ops.fileHeaderBandForPaneLookup(session, pane_ops.activePane(session)).?;
     const read_rect = dock_layout.headerModeRect(band.band, session.cell_width_px, .markdown, .read, false, false).?;
     const rich_rect = dock_layout.headerModeRect(band.band, session.cell_width_px, .markdown, .rich, false, false).?;
     const read_x: f64 = @floatFromInt(read_rect.x + 1);
@@ -48493,7 +46637,7 @@ test "file panel mode toggle: keyboard action walks the same modes the header of
 
     // markdown은 읽기로 시작한다(라이브 프리뷰 폐기 — docs/file-panel.md §1). 키보드 경로가 없으면 편집에
     // 들어가는 유일한 길이 헤더 mode 선택기 마우스 클릭뿐이므로, 이 왕복이 제품 계약이다.
-    _ = try session.openFileTermInActivePane("/tmp/mode-toggle.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/mode-toggle.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
@@ -48512,7 +46656,7 @@ test "file panel mode toggle: keyboard action walks the same modes the header of
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
     // 모드가 하나뿐인 kind(text)는 무동작이고 알림도 띄우지 않는다 — 토글할 선택지 자체가 없다.
-    _ = try session.openFileTermInActivePane("/tmp/mode-toggle.py", .text);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/mode-toggle.py", .text);
     session.assignDockSurfaceIds();
     const text_entry = session.fileEntryAt(1).?;
     try std.testing.expectEqual(dock_panel.Mode.source_edit, text_entry.mode);
@@ -48534,7 +46678,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.chrome_host.notice.open);
     session.chrome_host.notice.dismiss();
-    _ = try session.openFileTermInActivePane("/tmp/focus-toggle.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/focus-toggle.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     // FP16: 파일을 열면 그 파일이 publish 대기 barrier를 갖는다(requestDockEntryFocus). 이 테스트의
@@ -48568,9 +46712,9 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const b_open = try session.openFileTermInActivePane("/tmp/fp9-surface-less-successor-b.md", .markdown);
+    const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-surface-less-successor-b.md", .markdown);
     const b_id = b_open.term.file_entry.?.id;
-    const a_open = try session.openFileTermInActivePane("/tmp/fp9-live-active-a.md", .markdown);
+    const a_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-live-active-a.md", .markdown);
     session.assignDockSurfaceIds();
     const a_surface = a_open.term.file_entry.?.surface_id;
     try std.testing.expect(a_surface != 0);
@@ -48581,7 +46725,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, a_surface));
     // A를 닫으면 pane의 활성 Term이 승계되므로 baseline은 close **뒤**에 잡는다.
     const terminal_surface = session.activeSurface().id;
-    const terms_before_blocked_close = session.activePane().terms.items.len;
+    const terms_before_blocked_close = pane_ops.activePane(session).terms.items.len;
     // FP16: 파일이 pane 탭이라 close는 pane의 active_term 승계로 끝나고 입력은 workspace로 간다.
     // publish 대기 barrier는 그 다음 "승계된 파일로 focus" 요청이 만든다.
     const successor = file_panel_ops.fileEntryForId(session, b_id).?;
@@ -48606,7 +46750,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     session.dispatchAppAction(.close_focused);
     try std.testing.expect(file_panel_ops.fileEntryForId(session, b_id) != null);
     try std.testing.expectEqual(workspace_count, session.tabs.items.len);
-    try std.testing.expectEqual(terms_before_blocked_close, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before_blocked_close, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(terminal_surface, session.activeSurface().id);
     try std.testing.expect(session.pending_file_panel_close == null);
 
@@ -48621,8 +46765,8 @@ test "FP9 closing pending entry reissues typed focus for its live successor" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const a_open = try session.openFileTermInActivePane("/tmp/fp9-pending-close-a.md", .markdown);
-    const b_open = try session.openFileTermInActivePane("/tmp/fp9-pending-close-b.md", .markdown);
+    const a_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-pending-close-a.md", .markdown);
+    const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-pending-close-b.md", .markdown);
     session.assignDockSurfaceIds();
     const a_id = a_open.term.file_entry.?.id;
     const a_surface = a_open.term.file_entry.?.surface_id;
@@ -48633,7 +46777,7 @@ test "FP9 closing pending entry reissues typed focus for its live successor" {
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, b_surface));
     // 승계가 **실제로 pane의 active_term을 옮겼는지**까지 본다 — token만 보면 화면은 엉뚱한 탭을 보여
     // 주는데도 통과한다(code-review max).
-    try std.testing.expectEqual(a_id, session.activePane().activeTerm().file_entry.?.id);
+    try std.testing.expectEqual(a_id, pane_ops.activePane(session).activeTerm().file_entry.?.id);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
     try std.testing.expectEqual(a_id, session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
@@ -48647,8 +46791,8 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/fp9-empty-owner-a.md", .markdown);
-    const b_open = try session.openFileTermInActivePane("/tmp/fp9-empty-owner-b.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-a.md", .markdown);
+    const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-b.md", .markdown);
     const b_id = b_open.term.file_entry.?.id;
     session.assignDockSurfaceIds();
     const a_surface = session.fileEntryAt(0).?.surface_id;
@@ -48659,7 +46803,7 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, b_surface));
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     // 승계 대상이 pane의 활성 탭이 됐는지도 확인한다(token 일치만으로는 화면 상태를 못 지킨다).
-    try std.testing.expectEqualStrings("/tmp/fp9-empty-owner-a.md", session.activePane().activeTerm().file_entry.?.path);
+    try std.testing.expectEqualStrings("/tmp/fp9-empty-owner-a.md", pane_ops.activePane(session).activeTerm().file_entry.?.path);
     try std.testing.expect(session.pending_dock_focus != null);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
@@ -48693,10 +46837,10 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     try std.testing.expect(session.dockVisible()); // recent/project tree content는 남아 있다.
 
-    try session.newTermInActivePane();
-    session.activePane().activeTerm().rt.terminated = true;
-    session.activePane().activeTerm().surface.process_state = .exited;
-    const terms_before = session.activePane().terms.items.len;
+    try pane_ops.newTermInActivePane(session);
+    pane_ops.activePane(session).activeTerm().rt.terminated = true;
+    pane_ops.activePane(session).activeTerm().surface.process_state = .exited;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
     // FP16: 도크에 editor leaf가 없어 "빈 leaf 클릭"이라는 시나리오 자체가 사라졌다(도크 안 클릭은 이제
     // 전부 탐색기 클릭이고, 그건 의도대로 트리에 포커스를 준다). 남은 주제는 **파일을 다 닫은 뒤**의 상태다:
     // 입력은 workspace로 돌아가고, 트리 history가 남아 도크는 계속 보인다.
@@ -48712,7 +46856,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     try std.testing.expectEqual(@as(usize, 0), border_quads);
 
     _ = try session.handleMetalKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(terms_before - 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before - 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
 }
 
@@ -48722,8 +46866,8 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/source-aware-successor.html", .html);
-    _ = try session.openFileTermInActivePane("/tmp/source-aware-close.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-successor.html", .html);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-close.md", .markdown);
     session.assignDockSurfaceIds();
     const successor_sid = session.fileEntryAt(0).?.surface_id;
     const sid = session.fileEntryAt(1).?.surface_id;
@@ -48739,53 +46883,53 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
 
     // terminal 전용 close_term은 active 파일 WebView에서도 consume-only이며, inactive file/invalid sentinel은
     // close_tab을 포함한 모든 app action의 capability gate를 통과하지 못한다.
-    const initial_terms = session.activePane().terms.items.len;
+    const initial_terms = pane_ops.activePane(session).terms.items.len;
     const initial_tabs = session.tabs.items.len;
     try std.testing.expect(!session.dispatchWebAppAction(sid, close_term_event));
     try std.testing.expect(!session.dispatchWebAppAction(successor_sid, close_tab_event));
     try std.testing.expect(!session.dispatchWebAppAction(0, close_tab_event));
-    try std.testing.expectEqual(initial_terms, session.activePane().terms.items.len);
+    try std.testing.expectEqual(initial_terms, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(initial_tabs, session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 
     // FP16 §3.4: 입력 소유가 활성 Term에서 파생되면서 "stale dock owner" 상태가 구조적으로 사라졌다.
     // 남은 계약: Metal 키가 왔을 때 **활성 Term이 터미널이면** 그 터미널을 닫는다(파일은 안 건드린다).
-    try session.newTermInActivePane();
-    session.activePane().activeTerm().rt.terminated = true;
-    session.activePane().activeTerm().surface.process_state = .exited;
-    const terms_before = session.activePane().terms.items.len;
-    try std.testing.expect(session.activePane().activeTerm().file_entry == null); // 활성 = 터미널
+    try pane_ops.newTermInActivePane(session);
+    pane_ops.activePane(session).activeTerm().rt.terminated = true;
+    pane_ops.activePane(session).activeTerm().surface.process_state = .exited;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().file_entry == null); // 활성 = 터미널
     try std.testing.expectEqual(@as(?u64, null), session.focusedDockSurface());
     _ = try session.handleMetalKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(terms_before - 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before - 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
     try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 
     // browser Term도 native WebView source다. FP16에서는 그 WebView가 키를 받으려면 **활성 Term**이어야
     // 하므로(소유가 곧 활성 Term), 그 상태에서 app action이 Term cascade만 타는지가 남은 계약이다.
-    const browser_sid = try session.appendWebTermInActivePane(.browser);
-    const browser_terms_before = session.activePane().terms.items.len;
+    const browser_sid = try pane_ops.appendWebTermInActivePane(session, .browser);
+    const browser_terms_before = pane_ops.activePane(session).terms.items.len;
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.pending_dock_focus == null);
     try std.testing.expect(session.takeWorkspaceFocusAction());
-    try std.testing.expectEqual(browser_terms_before, session.activePane().terms.items.len);
+    try std.testing.expectEqual(browser_terms_before, pane_ops.activePane(session).terms.items.len);
     session.chrome_host.confirm.dismiss(); // 실제 chrome handle은 HostAction을 내기 전에 모달 view를 닫는다.
     session.dispatchChromeAction(.confirm_cancel);
     try std.testing.expect(session.pending_confirm == .none);
-    try std.testing.expectEqual(browser_terms_before, session.activePane().terms.items.len);
+    try std.testing.expectEqual(browser_terms_before, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.focus_owner == .workspace);
 
     // valid dock_group publish barrier도 browser event가 취소한다. accept 뒤 successor terminal이 responder를 받고,
     // 그 다음 Metal Cmd+W는 dirty Markdown이 아니라 눈앞의 terminal cascade를 계속 따른다.
-    try session.newTermInActivePane();
-    session.activePane().activeTerm().rt.terminated = true;
-    session.activePane().activeTerm().surface.process_state = .exited;
+    try pane_ops.newTermInActivePane(session);
+    pane_ops.activePane(session).activeTerm().rt.terminated = true;
+    pane_ops.activePane(session).activeTerm().surface.process_state = .exited;
     // FP16: pane에 [terminal, 파일 2개, browser, successor terminal]이 함께 있다. 인덱스를 가정하지 않고
     // browser surface로 되찾아 활성화한다.
-    for (session.activePane().terms.items, 0..) |t, ti| {
+    for (pane_ops.activePane(session).terms.items, 0..) |t, ti| {
         if (t.kind == .web and t.surfaceId() == browser_sid) {
             session.focusTerm(ti);
             break;
@@ -48801,26 +46945,26 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.pending_dock_focus == null);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
-    try std.testing.expectEqual(browser_terms_before, session.activePane().terms.items.len);
+    try std.testing.expectEqual(browser_terms_before, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.takeWorkspaceFocusAction());
-    const successor_terms_before = session.activePane().terms.items.len;
+    const successor_terms_before = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleMetalKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(successor_terms_before - 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(successor_terms_before - 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
 
     // 명시적으로 재바인딩한 close_term은 active browser capability에서만 허용되고 같은 workspace cascade를 탄다.
-    const browser_close_term_sid = try session.appendWebTermInActivePane(.browser);
-    const close_term_terms_before = session.activePane().terms.items.len;
+    const browser_close_term_sid = try pane_ops.appendWebTermInActivePane(session, .browser);
+    const close_term_terms_before = pane_ops.activePane(session).terms.items.len;
     try std.testing.expect(session.dispatchWebAppAction(browser_close_term_sid, close_term_event));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.takeWorkspaceFocusAction());
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
-    try std.testing.expectEqual(close_term_terms_before - 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(close_term_terms_before - 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     _ = session.focusFilePanelSurface(sid);
     try std.testing.expect(!session.dispatchWebAppAction(browser_close_term_sid, close_tab_event));
@@ -48850,7 +46994,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.completePendingDockFocus(successor_sid));
 
     // clean WebView close도 stale workspace owner보다 실제 event surface를 우선한다.
-    _ = try session.openFileTermInActivePane("/tmp/source-aware-clean.html", .html);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-clean.html", .html);
     session.assignDockSurfaceIds();
     const clean_sid = session.fileEntryAt(1).?.surface_id;
     session.focus_owner = .workspace;
@@ -48860,7 +47004,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
 
     // 늦은 save ACK는 close 시작 뒤의 더 최신 workspace focus를 탈취하지 않는다.
     try std.testing.expect(session.completePendingDockFocus(successor_sid));
-    _ = try session.openFileTermInActivePane("/tmp/source-aware-save.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-save.md", .markdown);
     session.assignDockSurfaceIds();
     const save_sid = session.fileEntryAt(1).?.surface_id;
     session.fileEntryAt(1).?.mode = .source_edit;
@@ -48878,7 +47022,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // 다시 발급된다. 어느 쪽이든 받아들이면 승계 회귀를 못 잡으므로 결과를 고정한다 — 남은 파일이 하나이니
     // 그것이 활성이고, 그것이 barrier를 든다.
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
-    const successor = session.activePane().activeTerm().file_entry.?;
+    const successor = pane_ops.activePane(session).activeTerm().file_entry.?;
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, successor.id);
     try std.testing.expectEqual(successor.id, session.pending_dock_focus.?.entry_id);
 }
@@ -48897,7 +47041,7 @@ test "file tree bulk delete visits entries and action queues exactly once" {
             "/tmp/fp9-bulk-survivor.md"
         else
             try std.fmt.bufPrint(&path_buf, "/tmp/fp9-bulk-delete/{d}.md", .{entry_index});
-        _ = try session.openFileTermInActivePane(entry_path, .markdown);
+        _ = try pane_ops.openFileTermInActivePane(session, entry_path, .markdown);
     }
     try std.testing.expectEqual(@as(usize, dock_panel.max_entries), file_panel_ops.fileEntryCount(session));
     {
@@ -48968,7 +47112,7 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
     const terminal_tab = try initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(terminal_tab);
     defer terminal_tab.deinit();
-    const pane = terminal_tab.activePane();
+    const pane = pane_ops.activePane(terminal_tab);
     terminal_tab.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane, .index = pane.active_term } };
     terminal_tab.closeActiveTerm();
     try std.testing.expect(terminal_tab.pointerGestureIs(.none));
@@ -49001,9 +47145,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    try session.newWebTermInActivePane(.browser); // 도크 경계에 맞닿는 workspace WKWebView seam도 함께 검증.
-    _ = try session.openFileTermInActivePane("/tmp/alpha.md", .markdown);
-    _ = try session.openFileTermInActivePane("/tmp/beta.html", .html);
+    try pane_ops.newWebTermInActivePane(session, .browser); // 도크 경계에 맞닿는 workspace WKWebView seam도 함께 검증.
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/alpha.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/beta.html", .html);
     session.assignDockSurfaceIds();
     session.dock.size = dock_layout.default_right_pt;
 
@@ -49024,10 +47168,10 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, surfaces.items[2].panel_kind);
     // 활성 web surface는 workspace 영역을 채우고, 도크와 맞닿은 오른쪽 seam을 그대로 받는다.
     try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges);
-    const workspace_seam = session.dividerThicknessPx() + @max(@as(u32, 1), session.scale_milli / 1000);
+    const workspace_seam = pane_ops.dividerThicknessPx(session) + @max(@as(u32, 1), session.scale_milli / 1000);
     const workspace_web_chrome = web_panel_layout.contentRect(right.terminal, .{
         // FP16d: 파일 Term도 pane 탭 바 + 헤더 밴드 2단이다(브라우저의 주소창 밴드와 같은 경로·같은 높이).
-        .top = 2 * session.paneBarHeightPx(),
+        .top = 2 * pane_ops.paneBarHeightPx(session),
         .right = workspace_seam,
     });
     try std.testing.expectEqual(layout_math.insetRect(workspace_web_chrome, session.window_padding_px), surfaces.items[2].content_rect);
@@ -49038,7 +47182,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     const workspace_band_px = workspace_surface.divider_grab_bands_pt.right * scale;
     // band는 divider hit 폭과 seam/padding의 교집합이라 0일 수 있다(FP16 이전에도 그랬다). 0이 아닐 때만
     // "native가 양보한 내부점이 같은 Zig target인가"를 검증한다.
-    if (workspace_band_px > 0) try std.testing.expect(session.dockDividerAtPoint(
+    if (workspace_band_px > 0) try std.testing.expect(pane_ops.dockDividerAtPoint(
+        session,
         @as(f64, @floatFromInt(workspace_surface.content_rect.x + workspace_surface.content_rect.w)) - workspace_band_px / 2,
         @floatFromInt(workspace_surface.content_rect.y + workspace_surface.content_rect.h / 2),
     ));
@@ -49052,7 +47197,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     // 브라우저 탭(터미널 다음)을 다시 활성으로 올린다.
     session.focusTerm(1);
     const browser_sid = session.activeWebSurfaceId();
-    const browser_bar = session.paneBarForLeaf(session.activePane()) orelse return error.NoBrowserBar;
+    const browser_bar = pane_ops.paneBarForLeaf(session, pane_ops.activePane(session)) orelse return error.NoBrowserBar;
     const address_y: f64 = @floatFromInt(browser_bar.full.y + browser_bar.full.h + browser_bar.full.h / 2);
     const address_x: f64 = @floatFromInt(browser_bar.full.x +
         (@as(u32, nav_button_count) * nav_button_w + 2) * session.cell_width_px);
@@ -49457,7 +47602,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/repo/docs/a.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/repo/docs/a.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     _ = session.focusFilePanelSurface(sid);
@@ -50067,7 +48212,7 @@ test "FP9 restore barrier rejects a live protected dock before model replacement
     defer arena.deinit();
     const replacement = try session.captureWorkspaceWindow(arena.allocator(), false, null);
     _ = 0; // FP16: 도크 그룹 개념 제거
-    const opened = try session.openFileTermInActivePane("/tmp/fp9-protected-restore.md", .markdown);
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-protected-restore.md", .markdown);
     const protected_id = opened.term.file_entry.?.id;
     opened.term.file_entry.?.dirty = true;
 
@@ -50242,8 +48387,8 @@ test "legacy provider workspace fields are ignored across multi-window parse app
     session0.new_tab_config.command_kind = .interactive_shell;
     session0.loaded_config.config.shell.command = "/bin/sh";
     session0.loaded_config.config.shell.args = &.{"-i"};
-    const restored0 = session0.restoreSpawn(parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0]).req;
-    const restored1 = session0.restoreSpawn(parsed.workspace.windows[0].tabs[0].panes[1].surfaces[0]).req;
+    const restored0 = pane_ops.restoreSpawn(session0, parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0]).req;
+    const restored1 = pane_ops.restoreSpawn(session0, parsed.workspace.windows[0].tabs[0].panes[1].surfaces[0]).req;
     try std.testing.expectEqualStrings("/tmp", restored0.cwd.?);
     try std.testing.expectEqualStrings("/", restored1.cwd.?);
     try std.testing.expectEqualStrings("/bin/sh", restored0.command);
@@ -50500,7 +48645,7 @@ test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+
     });
     defer session.deinit();
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     pane.terms.items[0].rt.terminated = true; // 유일 Term 종료 → allTabsTerminated true
 
     // (A) 비정상(exit 127)+무출력 → 창 유지(held), ended_seen 안 섬(앱이 시작 시 종료되지 않음).
@@ -50516,13 +48661,13 @@ test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+
     session.dispatchAppAction(.new_term);
     try std.testing.expect(!session.startup_held);
     try std.testing.expect(session.pending_zombie_reap);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len); // [죽은 T0, 새 T1]
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len); // [죽은 T0, 새 T1]
     // zombie reap: live 형제(T1)가 생겨 allTabsTerminated=false → 죽은 T0가 닫힌다(좀비 탭 방지).
     session.reapTerminatedTerms();
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // (C) 새 세션이 usable(출력>0)였고 **정상 종료(exit 0, grace 밖)** → 기존대로 세션 종료(ended_seen).
-    for (session.activePane().terms.items) |term| term.rt.terminated = true;
+    for (pane_ops.activePane(session).terms.items) |term| term.rt.terminated = true;
     session.total_output_events = 5; // usable였음
     session.latchSessionEndOrHold(app.RuntimePumpTermination{ .exited = .{ .exited = 0 } }, 999_999);
     try std.testing.expect(session.ended_seen);
@@ -50553,8 +48698,8 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
     defer session.deinit();
 
     // held 창 흉내: 활성 surface가 종료됨(process_state=.exited라 writeInput이 ProcessExited로 실패).
-    session.activePane().terms.items[0].rt.terminated = true;
-    session.activePane().terms.items[0].surface.process_state = .exited;
+    pane_ops.activePane(session).terms.items[0].rt.terminated = true;
+    pane_ops.activePane(session).terms.items[0].surface.process_state = .exited;
     session.startup_held = true;
 
     // 평문 'a'(터미널 입력)는 죽은 PTY write 실패 → catch가 ignored로 회계(치명적 fault 아님), ended_seen 안 섬.
@@ -50566,18 +48711,18 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
 
     // 회귀 가드(#1151 리뷰): held 창에서 **rename 중** Enter는 rename 확정으로 가야지 respawn을 뺏으면 안 된다
     // (held-Enter 개입이 rename 핸들러 뒤에 있어야 함). rename을 시작하고 Enter → rename 확정, 새 Term 안 생김.
-    session.startRename(.{ .term = session.activePane().activeTerm() });
-    const terms_before_rename = session.activePane().terms.items.len;
+    session.startRename(.{ .term = pane_ops.activePane(session).activeTerm() });
+    const terms_before_rename = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.rename == null); // rename이 Enter를 소비·확정(respawn이 안 뺏음)
-    try std.testing.expectEqual(terms_before_rename, session.activePane().terms.items.len); // respawn 안 함
+    try std.testing.expectEqual(terms_before_rename, pane_ops.activePane(session).terms.items.len); // respawn 안 함
     try std.testing.expect(session.startup_held); // 여전히 held
 
     // #4 held 창에서 ⏎(Enter, 모디파이어·모달·rename 없음)는 그 자리에서 셸을 재시작(in-place respawn) — 새 Term + re-arm.
     session.total_output_events = 7; // #3 리셋 검증용(1차 시도 출력 흉내)
-    const terms_before = session.activePane().terms.items.len;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
-    try std.testing.expect(session.activePane().terms.items.len > terms_before); // 새 셸 추가
+    try std.testing.expect(pane_ops.activePane(session).terms.items.len > terms_before); // 새 셸 추가
     try std.testing.expect(!session.startup_held); // createTerm이 re-arm
     try std.testing.expect(session.pending_zombie_reap); // 죽은 Term reap 예약
     try std.testing.expectEqual(@as(u64, 0), session.total_output_events); // #3 재시도 세션 usable 신호 리셋
@@ -51107,7 +49252,7 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
 
     // pane grip을 리스트 아래(past-end = rows.len)에 드롭 → 새 워크스페이스 하이라이트. 옛 코드는 sidebarBandRow(null)로
     // 이 셀을 삼켜(orelse continue) 하이라이트가 안 떴다(code-review #8). 이제 origin_y=contentHeight로 셀이 방출된다.
-    session.pointer_gesture_owner = .{ .pane = .{ .pane = session.activePane(), .x = 0, .y = 0, .drop_slot = rows_len } };
+    session.pointer_gesture_owner = .{ .pane = .{ .pane = pane_ops.activePane(session), .x = 0, .y = 0, .drop_slot = rows_len } };
     try session.rebuildSidebar();
     var saw_past_end_band = false;
     for (session.sidebar_cells.items) |c| {
@@ -51152,7 +49297,7 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
     // 활성 탭은 panel 1개(split 전), active_pane 0, tree는 단일 leaf(= 활성 panel surface).
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
-    try std.testing.expectEqual(session.activeSurface(), session.activePane().activeTerm().surface);
+    try std.testing.expectEqual(session.activeSurface(), pane_ops.activePane(session).activeTerm().surface);
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
 
     var out: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -51161,7 +49306,7 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
     try session.activeTabLeafRects(allocator, rect, &out);
     // 단일 leaf → rect 1개 = 입력 rect 전체, leaf = 활성 panel.
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
-    try std.testing.expectEqual(session.activePane(), out.items[0].leaf);
+    try std.testing.expectEqual(pane_ops.activePane(session), out.items[0].leaf);
     try std.testing.expectEqual(rect, out.items[0].rect);
 }
 
@@ -51188,19 +49333,19 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
 
-    const old_pane = session.activePane();
+    const old_pane = pane_ops.activePane(session);
     const old_surface = session.activeSurface();
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
 
     // 트리/포커스: panel 2개, 새 panel(인덱스 1)이 활성, tree는 horizontal split{a: 기존, b: 새}.
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
     try std.testing.expectEqual(@as(usize, 2), PaneTree.leafCount(session.activeTab().tree));
-    const new_pane = session.activePane();
+    const new_pane = pane_ops.activePane(session);
     const new_surface = session.activeSurface();
     try std.testing.expect(new_pane != old_pane); // 포커스가 새 panel로 이동
     try std.testing.expect(new_surface != old_surface);
-    try std.testing.expectEqual(new_surface, session.activePane().activeTerm().surface);
+    try std.testing.expectEqual(new_surface, pane_ops.activePane(session).activeTerm().surface);
     switch (session.activeTab().tree) {
         .leaf => return error.TestExpectedSplitNode,
         .split => |sp| {
@@ -51243,11 +49388,11 @@ test "newTab(새 워크스페이스): 직전 활성 탭이 split이어도 새 �
 
     // 단일 panel 탭의 '전체 영역' grid를 기준으로 잡는다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid가
     // 곧 newTab이 새 단일-panel 탭에 잡아야 할 grid다(둘 다 paneTermRect(termRect) 경로라 정확히 일치해야 한다).
-    try session.resizeActiveTabPanes();
+    try pane_ops.resizeActiveTabPanes(session);
     const full = session.activeSurface().core.size;
 
     // 직전 활성 탭을 좌우로 분할 → 활성 surface는 분할된 '한 panel'이라 cols가 전체보다 작아진다.
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     const split_panel = session.activeSurface().core.size;
     try std.testing.expect(split_panel.cols < full.cols); // 분할로 폭이 줄었다(테스트 전제 확인)
 
@@ -51280,15 +49425,15 @@ test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증(다른 split 테스트와 같은 규율)
 
-    try session.resizeActiveTabPanes();
+    try pane_ops.resizeActiveTabPanes(session);
     const full = session.activeSurface().core.size;
 
     // "held 창": 자식이 끝난 Term은 `process_state = .exited`라 `SurfaceRuntime.resize`가 core에 닿기 전에
     // `ProcessExited`로 거부한다(runtime.zig — dead adapter로의 라우팅 거부는 문서화된 계약).
-    const dead = session.activePane().activeTerm();
+    const dead = pane_ops.activePane(session).activeTerm();
     dead.surface.process_state = .exited;
 
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
 
     // 회귀 전에는 거부된 resize가 그대로 삼켜져 dead가 분할 전 폭(full)을 유지했다 → 옆 pane 침범.
     try std.testing.expect(dead.surface.core.size.cols < full.cols);
@@ -51355,9 +49500,9 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
     // chokepoint 동작을 고정한다(나머지 호출처는 같은 chokepoint를 공유).
 
     // ── 케이스 1: 닫는 Pane을 가리키던 포인터는 표적 null; divider도 '닫는 split'이라 표적 null; 슬롯은 보수적 null ──
-    const pane_a = session.activePane();
-    try session.splitActivePane(.horizontal); // panes [a, b], 활성 b(닫을 대상)
-    const pane_b = session.activePane();
+    const pane_a = pane_ops.activePane(session);
+    try pane_ops.splitActivePane(session, .horizontal); // panes [a, b], 활성 b(닫을 대상)
+    const pane_b = pane_ops.activePane(session);
     try std.testing.expect(pane_b != pane_a);
     session.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane_b, .index = 0 } };
     session.hovered_tab = .{ .pane = pane_b, .tab = 0 };
@@ -51365,7 +49510,7 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
     // invalidation is exercised independently below.
     session.hovered_slot = 3;
 
-    session.closeActivePane(); // b 해제 → destroyPane(b) → invalidateForFreedPane(b)
+    pane_ops.closeActivePane(session); // b 해제 → destroyPane(b) → invalidateForFreedPane(b)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab)); // 표적: b를 가리켰으니 owner 해제
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab)); // 드래그 대상 사라짐 → 제스처 중단
@@ -51373,13 +49518,13 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
     try std.testing.expect(session.hovered_slot == null);
 
     // ── 케이스 2: 무관한 Pane을 닫아도 다른 Pane을 가리키던 드래그/호버는 보존(tab-drag 불변식) ──
-    try session.splitActivePane(.horizontal); // panes [a, c], 활성 c
-    const pane_c = session.activePane();
+    try pane_ops.splitActivePane(session, .horizontal); // panes [a, c], 활성 c
+    const pane_c = pane_ops.activePane(session);
     try std.testing.expect(pane_c != pane_a);
     session.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane_a, .index = 0 } };
     session.hovered_tab = .{ .pane = pane_a, .tab = 0 };
 
-    session.closeActivePane(); // c 해제(a와 무관) → invalidateForFreedPane(c)
+    pane_ops.closeActivePane(session); // c 해제(a와 무관) → invalidateForFreedPane(c)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expect(session.pointer_gesture_owner.terminal_tab.pane == pane_a); // 보존: c≠a라 안 끊김
     try std.testing.expect(session.pointerGestureIs(.terminal_tab)); // 드래그 계속
@@ -51404,8 +49549,8 @@ test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
 
     // 3 pane: tree = split{P0, split{P1, P2}}(루트 split + 중첩 inner split). 두 번 분할로 만든다.
-    try session.splitActivePane(.horizontal); // [P0, P1], 활성 P1, tree=split{P0,P1}
-    try session.splitActivePane(.horizontal); // P1→split{P1,P2}; [P0,P1,P2], 활성 P2, tree=split{P0, split{P1,P2}}
+    try pane_ops.splitActivePane(session, .horizontal); // [P0, P1], 활성 P1, tree=split{P0,P1}
+    try pane_ops.splitActivePane(session, .horizontal); // P1→split{P1,P2}; [P0,P1,P2], 활성 P2, tree=split{P0, split{P1,P2}}
     try std.testing.expectEqual(@as(usize, 3), session.activeTab().panes.items.len);
     const root_split = switch (session.activeTab().tree) {
         .split => |sp| sp,
@@ -51416,12 +49561,12 @@ test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 
     // root split이라 표적 비교로 **보존**돼야 한다(예전 보수적 blanket-null이면 여기서 잘못 끊겼다).
     session.divider_capture_split = root_split;
     session.divider_capture_seg = .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .pos = 0 };
-    session.closeActivePane(); // P2 해제 → removeLeaf가 inner split 반환 → invalidateForFreedSplit(inner≠root)
+    pane_ops.closeActivePane(session); // P2 해제 → removeLeaf가 inner split 반환 → invalidateForFreedSplit(inner≠root)
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     try std.testing.expect(session.divider_capture_split == root_split);
 
     // 남은 한 pane을 더 닫으면 이번엔 root split이 collapse → divider_drag(=root) 표적 null.
-    session.closeActivePane(); // removeLeaf가 root split 반환 → invalidateForFreedSplit(root==divider_drag)
+    pane_ops.closeActivePane(session); // removeLeaf가 root split 반환 → invalidateForFreedSplit(root==divider_drag)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expect(session.divider_capture_split == null);
 }
@@ -51447,14 +49592,14 @@ test "promotePaneToNewWorkspace: 활성 pane을 떼어 새 단독 워크스페�
     session.window_padding_px = .{};
 
     // ws0: split으로 pane 2개([a, b]), 활성 b.
-    const pane_a = session.activePane();
-    try session.splitActivePane(.horizontal);
-    const pane_b = session.activePane();
+    const pane_a = pane_ops.activePane(session);
+    try pane_ops.splitActivePane(session, .horizontal);
+    const pane_b = pane_ops.activePane(session);
     try std.testing.expect(pane_b != pane_a);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
 
-    session.promotePaneToNewWorkspace(pane_b); // 활성 pane(b)을 새 워크스페이스로 분리
+    pane_ops.promotePaneToNewWorkspace(session, pane_b); // 활성 pane(b)을 새 워크스페이스로 분리
 
     // 워크스페이스 2개, 새 탭이 활성, 새 탭은 pane b 하나(단일 leaf), ws0은 a 하나.
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
@@ -51493,7 +49638,7 @@ test "promotePaneToNewWorkspace: 단독 pane 워크스페이스면 무동작(빈
 
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
-    session.promotePaneToNewWorkspace(session.activePane()); // 단독 pane — no-op
+    pane_ops.promotePaneToNewWorkspace(session, pane_ops.activePane(session)); // 단독 pane — no-op
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // 무변(빈 워크스페이스 안 생김)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
 }
@@ -51522,14 +49667,14 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
 
     // 활성 t0으로 전환 후 split → t0 pane 2개([a,b]), 활성 b.
     try std.testing.expect(session.switchTab(0));
-    const pane_a = session.activePane();
-    try session.splitActivePane(.horizontal);
-    const pane_b = session.activePane();
+    const pane_a = pane_ops.activePane(session);
+    try pane_ops.splitActivePane(session, .horizontal);
+    const pane_b = pane_ops.activePane(session);
     try std.testing.expect(pane_b != pane_a);
     try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
 
     // pane b를 새 워크스페이스로 분리 → 끝 append가 아니라 첫 그룹 마커(현재 idx1) **직전**(idx1)에 삽입.
-    session.promotePaneToNewWorkspace(pane_b);
+    pane_ops.promotePaneToNewWorkspace(session, pane_b);
 
     // 탭 4개, 새 탭은 idx1(활성), 최상위(group_start==null 마커 아님), 그룹 마커는 idx2로 밀림.
     try std.testing.expectEqual(@as(usize, 4), session.tabs.items.len);
@@ -51563,7 +49708,7 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
     try std.testing.expect(new_card_slot.? < first_header_slot.?); // 첫 그룹 헤더 앞(최상위 구간)
 
     // 하이라이트 정합: new_workspace 드롭 하이라이트가 첫 그룹 헤더 슬롯(= 삽입 위치)을 가리킨다.
-    try std.testing.expectEqual(first_header_slot.?, session.newWorkspaceHighlightSlot());
+    try std.testing.expectEqual(first_header_slot.?, pane_ops.newWorkspaceHighlightSlot(session));
 }
 
 test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크스페이스가 사이드바에 보인다(그룹 흡수 안 됨)" {
@@ -51589,9 +49734,9 @@ test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크
     session.tabs.items[1].group_collapsed = true;
 
     try std.testing.expect(session.switchTab(0));
-    try session.splitActivePane(.horizontal);
-    const pane_b = session.activePane();
-    session.promotePaneToNewWorkspace(pane_b); // 첫 마커 앞(idx1)에 삽입 → 최상위
+    try pane_ops.splitActivePane(session, .horizontal);
+    const pane_b = pane_ops.activePane(session);
+    pane_ops.promotePaneToNewWorkspace(session, pane_b); // 첫 마커 앞(idx1)에 삽입 → 최상위
 
     // 새 탭 = idx1, 접힌 그룹 마커는 idx2. projectRows에서 새 카드는 보이고(흡수 안 됨) depth 0.
     session.recomputeVisibleTabs();
@@ -51632,9 +49777,9 @@ test "mergePaneIntoWorkspace: 활성 pane을 다른 워크스페이스에 합친
     session.window_padding_px = .{};
 
     // ws0: split → pane 2개([a,b]), 활성 b. ws1: newTab(활성이 ws1로). 다시 ws0으로 전환.
-    const pane_a = session.activePane();
-    try session.splitActivePane(.horizontal);
-    const pane_b = session.activePane();
+    const pane_a = pane_ops.activePane(session);
+    try pane_ops.splitActivePane(session, .horizontal);
+    const pane_b = pane_ops.activePane(session);
     _ = try session.newTab();
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     const ws1 = session.tabs.items[1];
@@ -51642,7 +49787,7 @@ test "mergePaneIntoWorkspace: 활성 pane을 다른 워크스페이스에 합친
     try std.testing.expect(session.switchTab(0));
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 
-    session.mergePaneIntoWorkspace(pane_b, 1); // 활성(ws0)의 pane b를 ws1에 합침
+    pane_ops.mergePaneIntoWorkspace(session, pane_b, 1); // 활성(ws0)의 pane b를 ws1에 합침
 
     // ws0은 a 하나, ws1은 [원래 pane0, b] 2개, 활성은 ws1, ws1 활성 pane = b(우측).
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
@@ -51692,9 +49837,9 @@ test "mergePaneIntoWorkspace: 단독 pane도 대상에 합치고 빈 소스 워�
     const target_tab = session.tabs.items[1];
     const target_original_pane = target_tab.activePane();
     try std.testing.expect(session.switchTab(0));
-    const moved_pane = session.activePane();
+    const moved_pane = pane_ops.activePane(session);
     const moved_surface = moved_pane.activeTerm().surface;
-    session.mergePaneIntoWorkspace(moved_pane, 1);
+    pane_ops.mergePaneIntoWorkspace(session, moved_pane, 1);
 
     // 소스 workspace는 사라지고 target이 index 0으로 당겨진다. Pane/Surface 포인터는 그대로라 PTY 재시작이 없다.
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
@@ -51737,11 +49882,11 @@ test "mergePaneIntoWorkspace: 자기 워크스페이스/범위 밖이면 무동�
     session.backing_height_px = 600;
     session.window_padding_px = .{};
 
-    try session.splitActivePane(.horizontal);
-    const pane_b = session.activePane();
-    session.mergePaneIntoWorkspace(pane_b, session.app_window.active_tab); // 자기 자신
+    try pane_ops.splitActivePane(session, .horizontal);
+    const pane_b = pane_ops.activePane(session);
+    pane_ops.mergePaneIntoWorkspace(session, pane_b, session.app_window.active_tab); // 자기 자신
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
-    session.mergePaneIntoWorkspace(pane_b, 99); // 범위 밖
+    pane_ops.mergePaneIntoWorkspace(session, pane_b, 99); // 범위 밖
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
 }
 
@@ -51763,13 +49908,13 @@ test "grip 드래그: 사이드바 빈 영역 드롭 → 새 워크스페이스 
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.horizontal); // ws0: pane 2개, 활성 = 우(b)
+    try pane_ops.splitActivePane(session, .horizontal); // ws0: pane 2개, 활성 = 우(b)
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pane_b = session.activePane();
+    const pane_b = pane_ops.activePane(session);
     try std.testing.expect(lr.items[1].leaf == pane_b);
-    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[1].rect, lr.items[1].leaf).?;
     try std.testing.expect(pb.grip_cols > 0); // grip 항상 예약
 
     // grip(좌측, tabs.x 앞) down → pane_drag arm(tab_drag 아님).
@@ -51813,8 +49958,8 @@ test "grip 드래그: 단독 pane을 다른 워크스페이스 카드에 드롭 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const moved_pane = session.activePane();
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const moved_pane = pane_ops.activePane(session);
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     try std.testing.expect(pb.grip_cols > 0);
 
     const grip_x: f64 = @floatFromInt(pb.full.x + pb.grip_cols * session.cell_width_px / 2);
@@ -51852,11 +49997,11 @@ test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(
 
     _ = try session.newTab(); // [ws0, ws1]
     try std.testing.expect(session.switchTab(0)); // 활성 ws0
-    try session.splitActivePane(.horizontal); // ws0 2 pane, 활성 = b
+    try pane_ops.splitActivePane(session, .horizontal); // ws0 2 pane, 활성 = b
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[1].rect, lr.items[1].leaf).?;
     session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0); // grip arm
     try std.testing.expect(session.pointerGestureIs(.pane));
 
@@ -51880,7 +50025,7 @@ test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(
     const header_y: f64 = @floatFromInt(session.sidebar_header_height_px / 2);
     session.mouse(2, sx, header_y, 0, 0);
     try std.testing.expect(session.pointer_gesture_owner.pane.drop_slot == null);
-    try std.testing.expect(session.computePaneDropDest(sx, header_y) == null); // 드롭도 no-op
+    try std.testing.expect(pane_ops.computePaneDropDest(session, sx, header_y) == null); // 드롭도 no-op
     // up → 하이라이트·드래그 정리.
     session.mouse(3, @floatFromInt(pb.full.x + 20), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(!session.pointerGestureIs(.pane));
@@ -51902,8 +50047,8 @@ test "move_pane_to_new_workspace 액션: 활성 pane을 새 워크스페이스�
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.horizontal); // ws0: 2 pane, 활성 b
-    const pane_b = session.activePane();
+    try pane_ops.splitActivePane(session, .horizontal); // ws0: 2 pane, 활성 b
+    const pane_b = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 
     session.dispatchAppAction(.move_pane_to_new_workspace); // 활성 pane → 새 워크스페이스
@@ -51935,8 +50080,8 @@ test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에
 
     _ = try session.newTab(); // [ws0, ws1]
     try std.testing.expect(session.switchTab(0)); // 활성 ws0
-    try session.splitActivePane(.horizontal); // ws0: 2 pane, 활성 b
-    const pane_b = session.activePane();
+    try pane_ops.splitActivePane(session, .horizontal); // ws0: 2 pane, 활성 b
+    const pane_b = pane_ops.activePane(session);
 
     // 자기 워크스페이스(0)로 merge → no-op.
     session.dispatchAppAction(.{ .move_pane_to_workspace = 0 });
@@ -52014,29 +50159,29 @@ test "paneLabelCols/paneTabBarRect: 라벨 없으면 0(전체 바), 있으면 �
 
     // custom_name 없음 → label_cols 0, 탭 sub-rect == 전체 바(기존 동작).
     var bare: Pane = .{ .custom_name = null };
-    try std.testing.expectEqual(@as(u32, 0), AppSession.paneLabelCols(&bare, 40));
-    const t0 = AppSession.paneTabBarRect(full, 0, 8);
+    try std.testing.expectEqual(@as(u32, 0), pane_ops.paneLabelCols(&bare, 40));
+    const t0 = pane_ops.paneTabBarRect(full, 0, 8);
     try std.testing.expectEqual(@as(u32, 100), t0.x);
     try std.testing.expectEqual(@as(u32, 320), t0.w);
 
     // "build"(5칸) → want = 5 + 2(좌패딩·간격) = 7. bar_cols 40이라 cap 충분 → 7칸 예약, 탭이 그만큼 우측으로.
     var named: Pane = .{ .custom_name = "build" };
-    const lc = AppSession.paneLabelCols(&named, 40);
+    const lc = pane_ops.paneLabelCols(&named, 40);
     try std.testing.expectEqual(@as(u32, 7), lc);
-    const t1 = AppSession.paneTabBarRect(full, lc, 8);
+    const t1 = pane_ops.paneTabBarRect(full, lc, 8);
     try std.testing.expectEqual(@as(u32, 100 + 7 * 8), t1.x); // 라벨만큼 우측 offset
     try std.testing.expectEqual(@as(u32, 320 - 7 * 8), t1.w);
 
     // 좁은 바(bar_cols ≤ min_tab_cols=6)면 라벨 생략(탭 우선).
-    try std.testing.expectEqual(@as(u32, 0), AppSession.paneLabelCols(&named, 6));
+    try std.testing.expectEqual(@as(u32, 0), pane_ops.paneLabelCols(&named, 6));
 
     // 긴 이름은 max_label(20)로 cap.
     var long: Pane = .{ .custom_name = "this-is-a-very-long-pane-name-indeed" };
-    try std.testing.expectEqual(@as(u32, 20), AppSession.paneLabelCols(&long, 100));
+    try std.testing.expectEqual(@as(u32, 20), pane_ops.paneLabelCols(&long, 100));
 
     // 빈 custom_name("")도 없음으로 본다(app.pickLabel 규칙).
     var empty: Pane = .{ .custom_name = "" };
-    try std.testing.expectEqual(@as(u32, 0), AppSession.paneLabelCols(&empty, 40));
+    try std.testing.expectEqual(@as(u32, 0), pane_ops.paneLabelCols(&empty, 40));
 }
 
 // premultipliedRgba가 alpha로 rgb를 미리 곱하는지(④b 하이라이트 블렌딩). 순수. (pointInRect·paneDropZone·
@@ -52066,7 +50211,7 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     session.window_padding_px = .{}; // paneTermRect가 이제 padding을 읽는다 — 바 기하만 격리(undefined UB 회피)
 
     const rect: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
-    var geometry = session.paneGeometry(rect);
+    var geometry = pane_ops.paneGeometry(&session, rect);
     const term = geometry.grid;
     try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, geometry.body); // 바 18(=cell 12 + pad 3*2) 아래
     try std.testing.expectEqual(geometry.body, term); // padding 0이면 body=grid
@@ -52077,20 +50222,20 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
 
     // 바 높이 이하의 작은 rect는 바 없음 — 터미널이 leaf rect 전체, paneBarRect는 null.
     const tiny: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 12 };
-    geometry = session.paneGeometry(tiny);
+    geometry = pane_ops.paneGeometry(&session, tiny);
     try std.testing.expectEqual(tiny, geometry.body);
     try std.testing.expectEqual(tiny, geometry.grid);
     try std.testing.expect(geometry.bar == null);
 
     // 비대칭 padding은 body를 움직이지 않고 grid만 inset한다.
     session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
-    geometry = session.paneGeometry(rect);
+    geometry = pane_ops.paneGeometry(&session, rect);
     try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, geometry.body);
     try std.testing.expectEqual(maru.session.SplitRect{ .x = 190, .y = 22, .w = 770, .h = 570 }, geometry.grid);
 
     // 과대 padding은 grid를 body 끝의 zero rect로 clamp한다. origin/end 어느 쪽도 body 밖으로 나가지 않는다.
     session.window_padding_px = .{ .left = 2000, .right = 3000, .top = 4000, .bottom = 5000 };
-    geometry = session.paneGeometry(rect);
+    geometry = pane_ops.paneGeometry(&session, rect);
     const body_right = geometry.body.x + geometry.body.w;
     const body_bottom = geometry.body.y + geometry.body.h;
     try std.testing.expectEqual(body_right, geometry.grid.x);
@@ -52104,7 +50249,7 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     // 이 구간이 token 경로의 회귀 가드다 — tui(token 0 = 셀 파생)만 검증하면 token이 죽어도 green이 된다.
     session.appearance = config_mod.resolveAppearance(.{ .chrome_theme = .rich }) catch unreachable;
     session.window_padding_px = .{};
-    geometry = session.paneGeometry(rect);
+    geometry = pane_ops.paneGeometry(&session, rect);
     const rich_bar = geometry.bar.?;
     try std.testing.expectEqual(@as(u32, 40), rich_bar.h); // token 40pt @1x — cell 12는 식에 안 들어간다
     try std.testing.expectEqual(rect.x, rich_bar.x);
@@ -52117,7 +50262,7 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     // minimal은 tab bar 정책 자체가 꺼져 body=leaf다. padding은 여전히 grid에만 적용된다.
     session.chrome_minimal = true;
     session.window_padding_px = .{ .left = 3, .right = 5, .top = 7, .bottom = 11 };
-    geometry = session.paneGeometry(rect);
+    geometry = pane_ops.paneGeometry(&session, rect);
     try std.testing.expect(geometry.bar == null);
     try std.testing.expectEqual(rect, geometry.body);
     try std.testing.expectEqual(maru.session.SplitRect{ .x = 183, .y = 7, .w = 792, .h = 582 }, geometry.grid);
@@ -52135,7 +50280,7 @@ test "FP9 active-pane projection rejects partial layout OOM and recovers" {
 
     // 실제 SplitTree.layout이 append 뒤 후속 grow에서 실패하는 partial-prefix를 만든다. leaf는 트리 소유가 아니므로
     // 같은 유효 pane pointer를 반복한 synthetic tree로 PTY 32개를 만들지 않고 allocator failure만 격리한다.
-    const active = session.activePane();
+    const active = pane_ops.activePane(session);
     var tree: PaneTree.Node = .{ .leaf = active };
     for (1..32) |_| {
         const split = try allocator.create(PaneTree.Split);
@@ -52158,7 +50303,7 @@ test "FP9 active-pane projection rejects partial layout OOM and recovers" {
             if (err == error.OutOfMemory and partial.items.len > 0) {
                 saw_partial_oom = true;
                 var rejected: ?AppSession.PaneGeometry = null;
-                for (partial.items) |leaf| session.captureActivePaneGeometry(false, active, leaf, &rejected);
+                for (partial.items) |leaf| pane_ops.captureActivePaneGeometry(session, false, active, leaf, &rejected);
                 try std.testing.expect(rejected == null);
                 session.dropQuadsByLayer(1);
                 session.drag_overlay_cells_scratch.clearRetainingCapacity();
@@ -52176,7 +50321,7 @@ test "FP9 active-pane projection rejects partial layout OOM and recovers" {
     // layout 자체는 완료됐어도 active identity가 slice에 없으면 같은 fail-close를 적용하고 stale body를 재사용하지 않는다.
     var foreign_pane: Pane = undefined;
     var identity_rejected: ?AppSession.PaneGeometry = null;
-    session.captureActivePaneGeometry(true, active, .{
+    pane_ops.captureActivePaneGeometry(session, true, active, .{
         .leaf = &foreign_pane,
         .rect = session.termRect(),
     }, &identity_rejected);
@@ -52194,7 +50339,7 @@ test "FP9 active-pane projection rejects partial layout OOM and recovers" {
     defer complete.deinit(allocator);
     try PaneTree.layout(allocator, tree, session.termRect(), &complete);
     var recovered: ?AppSession.PaneGeometry = null;
-    for (complete.items) |leaf| session.captureActivePaneGeometry(true, active, leaf, &recovered);
+    for (complete.items) |leaf| pane_ops.captureActivePaneGeometry(session, true, active, leaf, &recovered);
     try std.testing.expect(recovered != null);
     session.dropQuadsByLayer(1);
     session.drag_overlay_cells_scratch.clearRetainingCapacity();
@@ -52212,7 +50357,7 @@ test "FP9 active-pane projection adds no layout scan or allocation at workspace 
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const active = session.activePane();
+    const active = pane_ops.activePane(session);
     var counting = std.testing.FailingAllocator.init(allocator, .{});
     session.allocator = counting.allocator();
     var existing_chrome_leaf_visits: usize = 0;
@@ -52222,7 +50367,7 @@ test "FP9 active-pane projection adds no layout scan or allocation at workspace 
         // 별도 layout call이나 내부 leaf scan을 만들 수 없고, 첫 active match 뒤에는 고정 비교 한 번뿐이다.
         for (0..maru.session.workspace.max_panes_per_tab) |leaf_index| {
             existing_chrome_leaf_visits += 1;
-            session.captureActivePaneGeometry(true, active, .{
+            pane_ops.captureActivePaneGeometry(session, true, active, .{
                 .leaf = active,
                 .rect = .{
                     .x = @intCast(leaf_index),
@@ -52252,10 +50397,10 @@ test "FP9 workspace focus border uses pane body and fails closed for non-key or 
     var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer leaves.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
-    const active = session.activePane();
+    const active = pane_ops.activePane(session);
     var active_geometry: ?AppSession.PaneGeometry = null;
     for (leaves.items) |leaf| {
-        if (leaf.leaf == active) active_geometry = session.paneGeometry(leaf.rect);
+        if (leaf.leaf == active) active_geometry = pane_ops.paneGeometry(session, leaf.rect);
     }
     const geometry = active_geometry orelse return error.MissingActivePaneGeometry;
     try std.testing.expect(geometry.body.x < geometry.grid.x);
@@ -52358,7 +50503,7 @@ test "focus border suppressed while notification panel or context menu is open" 
     try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
     var active_geometry: ?AppSession.PaneGeometry = null;
     for (leaves.items) |leaf| {
-        if (leaf.leaf == session.activePane()) active_geometry = session.paneGeometry(leaf.rect);
+        if (leaf.leaf == pane_ops.activePane(session)) active_geometry = pane_ops.paneGeometry(session, leaf.rect);
     }
     const geometry = active_geometry orelse return error.MissingActivePaneGeometry;
 
@@ -52410,7 +50555,7 @@ test "FP9 production frame follows active pane body across horizontal and vertic
     session.appearance.chrome_theme = .rich;
     session.window_padding_px = .{ .left = 11, .right = 17, .top = 5, .bottom = 9 };
     _ = try session.resize(1400, 900, 1000);
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     session.window_focused = true;
     session.focus_owner = .workspace;
 
@@ -52419,7 +50564,7 @@ test "FP9 production frame follows active pane body across horizontal and vertic
     try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
     var horizontal_geometry: ?AppSession.PaneGeometry = null;
     for (leaves.items) |leaf| {
-        if (leaf.leaf == session.activePane()) horizontal_geometry = session.paneGeometry(leaf.rect);
+        if (leaf.leaf == pane_ops.activePane(session)) horizontal_geometry = pane_ops.paneGeometry(session, leaf.rect);
     }
     const horizontal = horizontal_geometry orelse return error.MissingHorizontalActivePaneGeometry;
     try std.testing.expect(horizontal.body.x < horizontal.grid.x);
@@ -52443,13 +50588,13 @@ test "FP9 production frame follows active pane body across horizontal and vertic
         .leaf => return error.MissingSplitRoot,
     };
     root_split.direction = .vertical;
-    try session.resizeActiveTabPanes();
-    session.recomputeActivePaneRect();
+    try pane_ops.resizeActiveTabPanes(session);
+    pane_ops.recomputeActivePaneRect(session);
     leaves.clearRetainingCapacity();
     try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
     var vertical_geometry: ?AppSession.PaneGeometry = null;
     for (leaves.items) |leaf| {
-        if (leaf.leaf == session.activePane()) vertical_geometry = session.paneGeometry(leaf.rect);
+        if (leaf.leaf == pane_ops.activePane(session)) vertical_geometry = pane_ops.paneGeometry(session, leaf.rect);
     }
     const vertical = vertical_geometry orelse return error.MissingVerticalActivePaneGeometry;
     try std.testing.expect(vertical.body.y > horizontal.body.y);
@@ -52493,7 +50638,7 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
 
     // 단일 panel: 터미널 영역(active_pane_rect)은 사이드바 옆·상단 타이틀바 띠 + 바 아래(y = 띠 + 바 높이)에서 시작.
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
-    try std.testing.expectEqual(session.titlebar_strip_px + session.paneBarHeightPx(), session.active_pane_rect.y);
+    try std.testing.expectEqual(session.titlebar_strip_px + pane_ops.paneBarHeightPx(session), session.active_pane_rect.y);
     try std.testing.expect(session.active_pane_rect.h < session.backing_height_px);
 
     // tick이 바 chrome 셀을 포함해 크래시 없이 돈다. chrome(바 배경)은 cells 맨 앞에 prepend된다 —
@@ -52530,7 +50675,7 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
 
     // 활성 pane에 web Term 하나를 만들어 활성화(디버그 훅과 같은 경로).
     const w1 = try session.createWebTerm(.browser);
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try pane.terms.append(allocator, w1);
     session.focusTerm(pane.terms.items.len - 1);
 
@@ -52575,7 +50720,7 @@ test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const terms_before = pane.terms.items.len;
 
     // 팝업 adopt term 생성 → 유효 surface_id 반환(1부터 발급, 0=sentinel).
@@ -52617,7 +50762,7 @@ test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal�
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
 
     // 초기: 활성 term = terminal → any_kind 0(browser 전용 activeWebSurfaceId도 0).
     try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceIdAnyKind());
@@ -52658,7 +50803,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
         defer session.deinit();
         _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-        const pane = session.activePane();
+        const pane = pane_ops.activePane(session);
         const before = pane.terms.items.len; // 첫 터미널 Term 하나
         try std.testing.expect(!session.windowHasWebTerm());
 
@@ -52693,7 +50838,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
         defer session.deinit();
         try std.testing.expect(session.tabsBlocked());
         session.dispatchAppAction(.new_web_tab);
-        try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len); // web Term 안 생김
+        try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len); // web Term 안 생김
         try std.testing.expect(!session.windowHasWebTerm());
     }
 }
@@ -52752,7 +50897,7 @@ test "allTabsTerminated: web-only 잔여는 세션을 살려 둔다(web-only 창
     defer session.deinit();
 
     session.dispatchAppAction(.new_web_tab); // pane=[terminal, web], web 활성
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
 
     // 터미널(인덱스 0)을 활성으로 만들어 닫아 web만 남긴다.
@@ -52776,10 +50921,10 @@ test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→�
     defer session.deinit();
 
     try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07"); // 터미널에 OSC 7 cwd
-    const term_sibling = session.activePane().activeTerm();
+    const term_sibling = pane_ops.activePane(session).activeTerm();
 
     session.dispatchAppAction(.new_web_tab); // pane=[terminal, web], web 활성
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expect(pane.activeTerm().kind == .web);
 
     // cwdSourceTerm은 sentinel(web)이 아니라 terminal 형제를 골라야 한다.
@@ -52802,7 +50947,7 @@ test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel �
     defer session.deinit();
 
     session.dispatchAppAction(.new_web_tab); // web(browser) Term 활성화
-    try std.testing.expect(session.activePane().activeTerm().kind == .web);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
     try std.testing.expectEqualStrings("Browser", session.windowTitle());
 }
 
@@ -52818,7 +50963,7 @@ test "captureWorkspaceTab: URL 있는 브라우저만 있는 pane은 셸 placeho
 
     // pane = [브라우저] 만 남긴다(터미널 닫기).
     session.dispatchAppAction(.new_web_tab);
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     session.focusTerm(0);
     session.closeActiveTerm();
@@ -52869,7 +51014,7 @@ test "captureWorkspaceTab: 활성 브라우저가 마지막 탭이어도 active-
     defer allocator.free(path);
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
     session.dispatchAppAction(.new_web_tab);
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term); // 브라우저가 활성·마지막
     try std.testing.expect(pane.terms.items[2].file_entry == null and pane.terms.items[2].kind == .web);
@@ -52916,7 +51061,7 @@ test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
 
     // (a) pane=[terminal, web] → capture는 terminal 하나만 싣는다(수정 전: web 포함 2개).
     session.dispatchAppAction(.new_web_tab);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     {
         const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
         try std.testing.expectEqual(@as(usize, 1), wtab.panes.len);
@@ -52926,8 +51071,8 @@ test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
     // (b) web-only pane: 터미널을 닫아 pane=[web]만 → capture는 셸 placeholder 하나(빈 command/agent, sentinel size 유효).
     session.focusTerm(0);
     session.closeActiveTerm();
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
-    try std.testing.expect(session.activePane().terms.items[0].kind == .web);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expect(pane_ops.activePane(session).terms.items[0].kind == .web);
     {
         const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
         try std.testing.expectEqual(@as(usize, 1), wtab.panes.len);
@@ -52955,7 +51100,7 @@ test "captureWorkspaceTab: active_term remap — web 스킵 시 활성 터미널
     session.dispatchAppAction(.new_term); // [term0, web, term2], active=term2
     session.dispatchAppAction(.new_term); // [term0, web, term2, term3], active=term3
     session.focusTerm(2); // active=term2(터미널, idx 2)
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 4), pane.terms.items.len);
     try std.testing.expect(pane.terms.items[1].kind == .web);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
@@ -52977,7 +51122,7 @@ test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로
     defer session.deinit();
 
     session.dispatchAppAction(.new_web_tab); // web(browser) Term
-    const web_id = session.activePane().activeTerm().surfaceId();
+    const web_id = pane_ops.activePane(session).activeTerm().surfaceId();
 
     const c = try session.collectSession(allocator, 7, .normal);
     defer c.deinit();
@@ -53005,7 +51150,7 @@ test "collector: web Term url은 web_nav_states에서 채운다(§9.6 browser.li
     defer session.deinit();
 
     session.dispatchAppAction(.new_web_tab); // web(browser) Term
-    const web_id = session.activePane().activeTerm().surfaceId();
+    const web_id = pane_ops.activePane(session).activeTerm().surfaceId();
     // Swift KVO가 하던 nav 상태 upsert를 직접 — collector가 이 url을 DTO에 실어야 한다.
     session.setWebNavState(web_id, false, false, "https://www.naver.com/");
 
@@ -53027,9 +51172,9 @@ test "ownsSurface: 소유 terminal·web은 true, 미소유 id는 false (target-w
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const term_id = session.activePane().activeTerm().surfaceId(); // 초기 터미널
+    const term_id = pane_ops.activePane(session).activeTerm().surfaceId(); // 초기 터미널
     session.dispatchAppAction(.new_web_tab); // web(browser) Term
-    const web_id = session.activePane().activeTerm().surfaceId();
+    const web_id = pane_ops.activePane(session).activeTerm().surfaceId();
 
     try std.testing.expect(session.ownsSurface(term_id)); // 소유 terminal
     try std.testing.expect(session.ownsSurface(web_id)); // 소유 web(kind 필터 없음)
@@ -53047,7 +51192,7 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
     defer cur.deinit(allocator);
     try session.collectWebSurfaces(&cur);
     const tr = session.termRect();
-    const bar_h = session.paneBarHeightPx();
+    const bar_h = pane_ops.paneBarHeightPx(session);
     var saw = [3]bool{ false, false, false }; // left, right, bottom seam을 실제 밟았는지(non-vacuous)
     for (cur.items) |s| {
         var lr: ?maru.session.SplitRect = null;
@@ -53112,7 +51257,7 @@ test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키�
 
         var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
         defer segs.deinit(allocator);
-        try session.layoutActiveTabDividers(&segs);
+        try pane_ops.layoutActiveTabDividers(session, &segs);
         try std.testing.expect(segs.items.len > 0);
         const seg = segs.items[0];
         const div_x: f64 = @floatFromInt(seg.pos);
@@ -53145,7 +51290,7 @@ test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키�
         // ③ 그리고 실제로 잡힌다. 이것이 사용자가 겪는 결과이고, 위 두 경로 중 어느 쪽으로
         //    성립하든 답은 같아야 한다.
         session.mouse(1, div_x, div_y, 0, 0);
-        try std.testing.expect(session.dividerCaptureActive());
+        try std.testing.expect(pane_ops.dividerCaptureActive(session));
         session.mouse(3, div_x, div_y, 0, 0);
     }
 }
@@ -53156,7 +51301,7 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
 
     const expected_seam = struct {
         fn v(session: *AppSession) u32 {
-            const dt = session.dividerThicknessPx();
+            const dt = pane_ops.dividerThicknessPx(session);
             return if (dt == 0) 0 else dt + @max(@as(u32, 1), session.scale_milli / 1000);
         }
     }.v;
@@ -53170,7 +51315,7 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
         try std.testing.expect(seam > 0);
         session.dispatchAppAction(.split_horizontal);
         session.dispatchAppAction(.new_web_tab);
-        session.focusPaneRelative(-1);
+        pane_ops.focusPaneRelative(session, -1);
         session.dispatchAppAction(.new_web_tab);
         const saw = try checkWebSeamInsets(session, seam, allocator);
         try std.testing.expect(saw[0] or saw[1]); // 세로 divider의 좌/우 seam을 실제 밟음
@@ -53184,7 +51329,7 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
         const seam = expected_seam(session);
         session.dispatchAppAction(.split_vertical);
         session.dispatchAppAction(.new_web_tab);
-        session.focusPaneRelative(-1);
+        pane_ops.focusPaneRelative(session, -1);
         session.dispatchAppAction(.new_web_tab);
         const saw = try checkWebSeamInsets(session, seam, allocator);
         try std.testing.expect(saw[2]); // ★ 위 pane의 아래(가로 divider) seam을 실제 밟음 — bottom inset 잠금
@@ -53230,8 +51375,8 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
 
     // ⌘T → 활성 pane에 Term 2개(활성 = 1).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 
     // tick이 크래시 없이 돈다(탭 바 제목 frame + 비활성 Term은 안 그림 — 활성 Term surface만). chrome은 cells
     // 맨 앞에 바 배경(전체) + 활성 Term 탭 하이라이트(세그먼트) 두 종류가 prepend된다. 첫 둘은 origin_y 0·slot 0.
@@ -53270,7 +51415,7 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.vertical); // 상(비활성)/하(활성·포커스) 두 pane
+    try pane_ops.splitActivePane(session, .vertical); // 상(비활성)/하(활성·포커스) 두 pane
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     _ = try session.tick();
 
@@ -53394,7 +51539,7 @@ test "U-tab2: pane Term tab title has no number prefix (rename caret sits right 
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     _ = try session.tick();
 
-    const term = session.activePane().activeTerm();
+    const term = pane_ops.activePane(session).activeTerm();
     session.startRename(.{ .term = term }); // custom_name 없는 새 Term → 편집기 비어 qcols=0
     const caret = session.renameCaretRect() orelse return error.TestUnexpectedResult;
     const loc = session.termBarLocation(term) orelse return error.TestUnexpectedResult;
@@ -53423,7 +51568,7 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.vertical); // 상/하 — 아래(새) pane 활성
+    try pane_ops.splitActivePane(session, .vertical); // 상/하 — 아래(새) pane 활성
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     _ = try session.tick();
 
@@ -53456,8 +51601,8 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
 
     // 아래 pane(활성)에 Term 2개를 만들고, 아래 바의 탭 0을 클릭해 전환되는지(세로 분할 hit-test) 본다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
     // 아래 pane 바 y = 위 pane 높이(termRect.h/2 ≈ 300) + 1, 탭 0 = 바 좌단.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -53466,7 +51611,7 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
     const bottom_bar_y: f64 = @floatFromInt(bottom_rect.y + 1);
     // 사이드바 우측 리사이즈 밴드보다 안쪽(+30) — 아래 pane은 full-width라 x가 사이드바 경계에서 시작한다.
     session.mouse(1, @floatFromInt(bottom_rect.x + 30), bottom_bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 아래 바 탭 0으로 전환
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term); // 아래 바 탭 0으로 전환
 }
 
 // 탭 바의 탭을 클릭하면 그 Term으로 전환하는지(PR-D1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 2개(활성
@@ -53489,19 +51634,19 @@ test "clicking a tab in the pane bar switches to that Term" {
 
     // ⌘T → Term 2개, 활성 = 1.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 
     // 탭 바는 단일 panel이라 터미널 영역(상단 타이틀바 띠 아래) 전체 폭의 상단 strip. 탭 0 = 바 좌단, 탭 1 = 바 우반.
     const bar_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) + 1; // 띠 아래 바 안(y in [띠, 띠+바높이))
     const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30); // 탭 0 세그먼트(사이드바 우측 리사이즈 밴드보다 안쪽)
     session.mouse(1, left_tab_x, bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 탭 0으로 전환
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term); // 탭 0으로 전환
 
     // 탭 1(바 우반, 2탭이라 폭의 절반 이후) 클릭 → 다시 Term 1.
     const right_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 600); // 바 폭(800)의 우반
     session.mouse(1, right_tab_x, bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 
     // 탭 바 클릭은 터미널 선택을 시작하지 않는다(소비). 선택 드래그 플래그가 안 켜진다.
     try std.testing.expect(!session.mouse_drag_selecting);
@@ -53529,14 +51674,14 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     // ⌘T 두 번 → Term 3개. 단일 panel이라 바 폭 = 터미널 폭(800/cw cols), 3탭 등폭.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
     markAllTermsAtPrompt(session); // idle 셸 흉내 — ✕ 닫기가 확인 모달 없이 즉시 진행되게
 
     // 활성 pane의 바 rect를 구해 탭 1의 ✕ zone x를 계산한다.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
     const m = barMetrics(bar, session.cell_width_px, 3, 0, 0).?;
     // 탭 1 ✕ zone col = (1+1)*tab_w - 1(우측 안쪽). x = bar.x + (2*tab_w - 1)*cw.
     const close_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w - 1) * session.cell_width_px);
@@ -53550,7 +51695,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
 
     // ✕ 클릭 → 탭 1 Term 닫힘 → 2개. 닫은 뒤 호버는 비워진다(stale 방지).
     session.mouse(1, close_x, bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.hovered_tab == null);
     try std.testing.expect(!session.ended_seen); // 아직 Term 남음 — 세션 유지
 }
@@ -53574,7 +51719,7 @@ fn initSmokeSessionTwoTerms(allocator: std.mem.Allocator) !*AppSession {
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     // ⌘T → Term 2개(활성 pane). .term_or_pane 닫기는 활성 Term 하나만 teardown한다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     return session;
 }
 
@@ -53662,12 +51807,12 @@ test "close-confirm: 셸이 프롬프트(OSC 133 input)면 확인 모달 없이 
     defer session.deinit();
 
     // 정착한 idle 프롬프트 = 셸 통합이 입력 대기(B)를 마킹한 상태 → 실행 중 명령 없음.
-    session.activePane().activeTerm().surface.core.semantic_state = .input;
+    pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .input;
     try std.testing.expect(!session.closeTargetHasRunningJob(.term_or_pane));
 
     // requestClose → 즉시 닫힘(모달 안 뜸, 보류 없음).
     session.requestClose(.term_or_pane);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
 }
@@ -53680,12 +51825,12 @@ test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 �
     defer session.deinit();
 
     // 셸이 명령 출력 시작(C)을 마킹 = 포그라운드 명령 실행 중.
-    session.activePane().activeTerm().surface.core.semantic_state = .command;
+    pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .command;
     try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
 
     // requestClose → 모달 열고 보류(안 닫음).
     session.requestClose(.term_or_pane);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .close);
 }
@@ -53711,7 +51856,7 @@ test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인
     // 활성 pane에 browser web Term을 추가·활성화 → pane이 [terminal, browser]라 .term_or_pane이 .term으로 해석되고
     // 활성 term=browser. web term은 live_initialized=false라 running job이 아니다(이게 조용히 닫히던 버그의 핵).
     const w1 = try session.createWebTerm(.browser);
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try pane.terms.append(allocator, w1);
     session.focusTerm(pane.terms.items.len - 1);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, pane.activeTerm().web_panel_kind);
@@ -53739,7 +51884,7 @@ test "close-confirm: 마지막 창(is_last_window)에서 세션 닫기는 Cmd+Q�
     // 두 Term을 하나로 줄여 이제 단일 Term·단일 pane·단일 탭 = requestClose(.term_or_pane)가 .session으로 해석되게.
     markAllTermsAtPrompt(session);
     session.closeActiveTerm(); // 2→1 Term(닫기 확인 없이 메커니즘만)
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 
     // 마지막 창 → 세션(창) 닫기는 앱 종료라 requestAppQuit 경로: pending_quit을 세우고 ended_seen은 latch하지 않는다.
@@ -53769,7 +51914,7 @@ test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기
 
     markAllTermsAtPrompt(session);
     session.closeActiveTerm(); // 2→1 Term
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // is_last_window=false(멀티 창의 비-마지막 창·기본값) → 이 창만 닫기: 종료 확인 안 뜨고 세션 종료 latch.
     session.is_last_window = false;
@@ -53787,7 +51932,7 @@ test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인
     defer session.deinit();
 
     // semantic_state가 프롬프트여도 alt 화면(vim·claude 등)이면 실행 중으로 본다.
-    const t = session.activePane().activeTerm();
+    const t = pane_ops.activePane(session).activeTerm();
     t.surface.core.semantic_state = .input;
     t.surface.core.alt_active = true;
     try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
@@ -53802,7 +51947,7 @@ test "close-confirm: 셸 통합 없음(unknown, primary 화면)이면 보수적�
 
     // OSC 133을 안 쏘는 셸(semantic_state=unknown) + primary 화면 → 프롬프트인지 모름 → 보수적으로 확인(Ghostty
     // 정책). 데이터 손실 방지 우선. maru 기본 zsh는 통합을 주입하므로 대부분 세션은 이 경로가 아님.
-    session.activePane().activeTerm().surface.core.semantic_state = .unknown;
+    pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .unknown;
     try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
 }
 
@@ -53886,8 +52031,8 @@ test "automatic agent sessions dock width reflows the live pane without persisti
     session.dock.side = .right;
     session.dock.size = 0;
     session.dock.view = .explorer;
-    for (session.tabs.items) |tab| session.resizeTabPanes(tab);
-    session.recomputeActivePaneRect();
+    for (session.tabs.items) |tab| pane_ops.resizeTabPanes(session, tab);
+    pane_ops.recomputeActivePaneRect(session);
     const explorer_dock = session.dockGeometry();
     const explorer_pane = session.active_pane_rect;
 
@@ -53925,7 +52070,7 @@ test "collector: 단일 term 세션 — 좌표·id·focused·membership·termina
     defer allocator.destroy(session);
     defer session.deinit();
 
-    session.activePane().activeTerm().surface.core.semantic_state = .input; // 프롬프트 idle → at_prompt=true
+    pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .input; // 프롬프트 idle → at_prompt=true
     const active_id = session.activeSurface().id;
 
     const c = try session.collectSession(allocator, 42, .normal);
@@ -53961,7 +52106,7 @@ test "collector: 다중 term(가로 탭) — 같은 tab/pane 좌표·구별 id, 
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     const active_id = session.activeSurface().id;
 
     const c = try session.collectSession(allocator, 7, .normal);
@@ -53988,7 +52133,7 @@ test "collector: split pane — pane 0/1 좌표, 같은 tab" {
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try session.splitActivePane(.horizontal); // pane [0,1]
+    try pane_ops.splitActivePane(session, .horizontal); // pane [0,1]
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
 
     const c = try session.collectSession(allocator, 1, .normal);
@@ -54081,7 +52226,7 @@ test "collector: at_prompt 3상 term별 반영(command·unknown·alt)" {
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const t0 = pane.terms.items[0];
     const t1 = pane.terms.items[1];
     t0.surface.core.semantic_state = .command; // 실행 중 → not_at_prompt
@@ -54110,7 +52255,7 @@ test "collector: agent·cwd(OSC 7)·title(custom_name 우선)이 DTO에 실린�
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const term = session.activePane().activeTerm();
+    const term = pane_ops.activePane(session).activeTerm();
     term.agent_kind = .claude; // 포그라운드 에이전트(pollAgentKinds가 세우는 파생값을 직접 세팅)
     term.agent_state = .running;
     try term.surface.core.write("\x1b]7;file://h/Users/me/proj\x07"); // OSC 7 → cwd
@@ -54193,14 +52338,14 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     _ = try session.handleKeyEvent(.{ .key = .escape });
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 
     // 다시 보류하고 Enter → 확정: active_term 닫힘(1개), 보류 비워짐, 모달 닫힘.
     session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     _ = try session.handleKeyEvent(.{ .key = .enter });
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.ended_seen); // Term이 남아 세션 유지
 }
 
@@ -54495,14 +52640,14 @@ test "기본값 리셋 토스트는 아무 클릭으로나 닫히고 그 뒤 버
 
     // ⌘T → Term 2개(활성=1). 탭 바 클릭으로 탭 전환을 검증할 대상.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 
     const bar_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) + 1;
     const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30);
 
     // ── 리셋 전: 탭 바 좌단(탭 0) 클릭 → 활성 0으로 전환된다(버튼이 눌린다). ──
     session.mouse(1, left_tab_x, bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term);
 
     // ── 통합 리셋(확인 모달 Enter 확정) → "초기화했습니다" 토스트(notice)가 뜬다. ──
     session.requestResetAll();
@@ -54515,11 +52660,11 @@ test "기본값 리셋 토스트는 아무 클릭으로나 닫히고 그 뒤 버
     const right_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 600);
     session.mouse(1, right_tab_x, bar_y, 0, 0);
     try std.testing.expect(!session.chrome_host.notice.open); // 첫 클릭으로 토스트가 닫힘
-    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 닫는 클릭은 소비 — 탭 전환 안 됨
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term); // 닫는 클릭은 소비 — 탭 전환 안 됨
 
     // ── 토스트가 닫힌 뒤 같은 자리를 다시 클릭 → 이번엔 탭이 전환된다(입력이 정상 복구). ──
     session.mouse(1, right_tab_x, bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 
     // ── 사이드바 헤더 '+'(새 워크스페이스)도 토스트 없는 평상시처럼 동작(헤더 아이콘 클릭 회귀 가드). ──
     {
@@ -54643,14 +52788,14 @@ test "리셋 토스트를 닫는 키(⌘T)는 소비되어 새 텀을 만들지 
     try std.testing.expect(session.chrome_host.notice.open);
 
     // ⌘T(=새 텀 바인딩)를 토스트 위에서 누름 → 토스트만 닫히고, 텀 수는 그대로(바인딩 미실행 = 소비).
-    const terms_before = session.activePane().terms.items.len;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     try std.testing.expect(!session.chrome_host.notice.open); // 닫힘
-    try std.testing.expectEqual(terms_before, session.activePane().terms.items.len); // ⌘T 미실행(소비)
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len); // ⌘T 미실행(소비)
 
     // 토스트가 닫힌 뒤 다시 ⌘T → 이번엔 새 텀이 생긴다(바인딩 정상 복구).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
 }
 
 // 회귀(code-review #10): **알림 패널과 notice 토스트가 공존할 때, 입력은 notice를 먼저 닫고 패널은 유지된다**.
@@ -54713,7 +52858,7 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개(확정 닫기 검증용)
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 
     session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
@@ -54746,7 +52891,7 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     session.mouse(1, cx, cy, 0, 0);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // (2) 좌클릭 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
     session.showConfirm("닫을까요?", .active_term);
@@ -54782,13 +52927,13 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
     session.appearance.chrome_theme = .tui;
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // 활성 pane(단일)의 바 rect → "+" zone x를 계산한다.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
     const m = barMetrics(bar, session.cell_width_px, 1, 0, 0).?;
     try std.testing.expect(m.hasPlusZone()); // 바가 넓어 "+" zone이 존재
     // "+" zone = col [tab_cols, cols). 첫 col 중앙을 클릭.
@@ -54798,7 +52943,7 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
 
     // "+" 클릭 → 새 Term → 2개.
     session.mouse(1, plus_x, bar_y, 0, 0);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.ended_seen); // 세션 유지
 }
 
@@ -54825,7 +52970,7 @@ test "hovering the '+' button does not mark the last tab for close" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
     const m = barMetrics(bar, session.cell_width_px, 2, 0, 0).?;
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
@@ -54869,11 +53014,11 @@ test "CIM4b: 탭 드래그는 model을 안 건드리고 보이는 순서만 바�
 
     // 보이는 순서(paint·hit-test 공용)만 [T1,T2,T0]으로 회전했고, 활성 표시도 끌리는 탭을 따라간다.
     // `active_term`은 model 인덱스라 preview를 그대로 쓰면 안 되고 그 Term의 preview 내 위치여야 한다.
-    const order = session.paneTermOrder(pane);
+    const order = pane_ops.paneTermOrder(session, pane);
     try std.testing.expectEqual(t1, order[0]);
     try std.testing.expectEqual(t2, order[1]);
     try std.testing.expectEqual(t0, order[2]);
-    try std.testing.expectEqual(@as(usize, 2), session.paneActiveTermIndex(pane));
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.paneActiveTermIndex(session, pane));
 
     // (2) drag.index는 시작 model 인덱스로 고정 — floating 미리보기 라벨(`terms.items[drag.index]`)과
     //     cross-pane 이동(moveTermToPane)이 이 해석을 쓴다. preview 위치로 덮으면 둘 다 엉뚱한 Term을 짚는다.
@@ -54888,7 +53033,7 @@ test "CIM4b: 탭 드래그는 model을 안 건드리고 보이는 순서만 바�
     try std.testing.expectEqual(t0, pane.terms.items[2]);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
     // 드래그가 끝나면 접근자는 다시 model을 돌려준다(preview 잔재가 안 샌다).
-    try std.testing.expectEqual(pane.terms.items.ptr, session.paneTermOrder(pane).ptr);
+    try std.testing.expectEqual(pane.terms.items.ptr, pane_ops.paneTermOrder(session, pane).ptr);
 }
 
 // §4.4: "commit destination의 권위는 up 좌표의 재hit-test이고, 유효한 destination을 못 짚으면 commit 없이
@@ -54924,7 +53069,7 @@ test "CIM4b: 제자리 드롭은 model effect 0이고 화면은 다시 그린다
 
     // 끝자리까지 끌었다가 **원래 자리로 되돌아와** 뗀다 — preview는 다시 시작 순서라 commit할 것이 없다.
     session.mouse(2, f.tab0_x, f.bar_y, 0, 0);
-    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[0]);
+    try std.testing.expectEqual(f.terms[0], pane_ops.paneTermOrder(session, f.pane)[0]);
     session.metal_dirty = false;
     session.mouse(3, f.tab0_x, f.bar_y, 0, 0);
     // model은 무변경(commit이 아무 일도 안 했다).
@@ -54967,14 +53112,14 @@ fn initTabDragSession(allocator: std.mem.Allocator) !*AppSession {
 fn beginTabDragToLastSlot(session: *AppSession, allocator: std.mem.Allocator) !TabDragMidFlight {
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     const terms: [3]*Term = .{ pane.terms.items[0], pane.terms.items[1], pane.terms.items[2] };
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     // 세그먼트 폭은 **제품과 같은 토큰**으로 잰다 — tab_width_cols를 0으로 두면 rich 테마(16)와 어긋나
     // 겨냥한 슬롯과 제품이 잡는 슬롯이 갈린다(끝자리만 겨냥하는 테스트는 clamp 덕에 우연히 맞는다).
     const m = barMetrics(pb.tabs, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, 0).?;
@@ -54985,8 +53130,8 @@ fn beginTabDragToLastSlot(session: *AppSession, allocator: std.mem.Allocator) !T
     session.mouse(1, tab0_x, bar_y, 0, 0);
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
     session.mouse(2, tab2_x, bar_y, 0, 0);
-    try std.testing.expectEqual(terms[0], session.paneTermOrder(pane)[2]); // preview는 끝자리로 갔다
-    try std.testing.expectEqual(@as(usize, 2), session.paneActiveTermIndex(pane));
+    try std.testing.expectEqual(terms[0], pane_ops.paneTermOrder(session, pane)[2]); // preview는 끝자리로 갔다
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.paneActiveTermIndex(session, pane));
     return .{ .pane = pane, .terms = terms, .tab0_x = tab0_x, .tab_last_x = tab2_x, .bar_y = bar_y };
 }
 
@@ -55002,7 +53147,7 @@ test "CIM4b: commit destination은 up 좌표가 정한다(마지막 move가 아�
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const t0 = pane.terms.items[0];
     const t1 = pane.terms.items[1];
     const t2 = pane.terms.items[2];
@@ -55010,7 +53155,7 @@ test "CIM4b: commit destination은 up 좌표가 정한다(마지막 move가 아�
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     const m = barMetrics(pb.tabs, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, 0).?;
     const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
     const tab1_x: f64 = @floatFromInt(pb.tabs.x + (1 * m.tab_w + 1) * session.cell_width_px);
@@ -55019,7 +53164,7 @@ test "CIM4b: commit destination은 up 좌표가 정한다(마지막 move가 아�
 
     session.mouse(1, tab0_x, bar_y, 0, 0);
     session.mouse(2, tab2_x, bar_y, 0, 0); // 마지막 move는 끝자리를 가리켰다
-    try std.testing.expectEqual(t0, session.paneTermOrder(pane)[2]);
+    try std.testing.expectEqual(t0, pane_ops.paneTermOrder(session, pane)[2]);
     session.mouse(3, tab1_x, bar_y, 0, 0); // 그러나 손은 가운데에서 뗐다
 
     // up 좌표(슬롯 1)가 이긴다: [T0,T1,T2] → T0를 1로 = [T1,T0,T2].
@@ -55047,7 +53192,7 @@ test "CIM4b: 드래그 중 ⌘T로 Term이 늘면 provisional을 폐기한다" {
     try std.testing.expectEqual(f.terms[0], f.pane.terms.items[0]);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[1]);
     try std.testing.expectEqual(f.terms[2], f.pane.terms.items[2]);
-    try std.testing.expectEqual(f.pane.terms.items.ptr, session.paneTermOrder(f.pane).ptr);
+    try std.testing.expectEqual(f.pane.terms.items.ptr, pane_ops.paneTermOrder(session, f.pane).ptr);
 }
 
 // preview는 `*Term`을 프레임 간 캐시하는 유일한 자리다. **in-place 교체**(슬롯을 갈아끼우고 옛 Term을 해제)는
@@ -55066,7 +53211,7 @@ test "CIM4b: 드래그 중 Term이 in-place로 교체되면 preview를 폐기한
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
     session.cancelTabDragForTerm(victim);
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab)); // 해제 전에 제스처가 끊겼다
-    try std.testing.expectEqual(f.pane.terms.items.ptr, session.paneTermOrder(f.pane).ptr);
+    try std.testing.expectEqual(f.pane.terms.items.ptr, pane_ops.paneTermOrder(session, f.pane).ptr);
 }
 
 // "보이는 것 = 눌리는 것"(§4.4). up이 유실돼 preview가 화면에 떠 있는 상태에서 누른 down은, 그 down이
@@ -55103,7 +53248,7 @@ test "CIM4b: preview가 떠 있을 때는 비-좌클릭 down도 보이던 탭을
     // up이 위 capture 블록에 들어가 사용자가 요청하지 않은 재정렬을 commit한다. 원래 드래그가 그대로 살아 있다.
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
     try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.terminal_tab.index);
-    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[2]); // 원래 preview 유지
+    try std.testing.expectEqual(f.terms[0], pane_ops.paneTermOrder(session, f.pane)[2]); // 원래 preview 유지
 
     // 그 가운데 버튼 up이 와도 model은 그대로다(가로챈 제스처가 없으므로 commit할 것이 없다).
     session.mouse(3, f.tab0_x, f.bar_y, 1, 0);
@@ -55148,10 +53293,10 @@ test "CIM4b: 드래그 중 ⌘⌥]는 보이는 순서에서 다음 탭으로 �
     const f = try beginTabDragToLastSlot(session, allocator);
 
     // 보이는 순서 [T1,T2,T0], 활성은 끌리는 T0(슬롯 2). 오른쪽 다음 = wrap해서 슬롯 0 = T1.
-    try std.testing.expectEqual(@as(usize, 2), session.paneActiveTermIndex(f.pane));
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.paneActiveTermIndex(session, f.pane));
     session.focusTermRelative(1);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[f.pane.active_term]);
-    try std.testing.expectEqual(@as(usize, 0), session.paneActiveTermIndex(f.pane)); // 보이는 슬롯 0
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.paneActiveTermIndex(session, f.pane)); // 보이는 슬롯 0
 }
 
 // preview 공간에서 파생된 값이 **영속 상태에 새지 않는지**. `tab_scroll_cols`는 model-영속인데 드래그 중
@@ -55166,13 +53311,13 @@ test "CIM4b: 드래그 중에는 탭 바 스크롤을 건드리지 않는다(pre
 
     // 이 축은 **바가 넘칠 때만** 산다 — 안 넘치면 `ensureActiveTermVisible`이 애초에 무동작이다.
     for (0..7) |_| _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 8), pane.terms.items.len);
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     const m = barMetrics(pb.tabs, session.cell_width_px, pane.terms.items.len, session.buildChromeTokens().space.tab_width_cols, 0).?;
     try std.testing.expect(m.has_scroll); // 넘치는 바라야 이 결함이 성립한다
 
@@ -55204,8 +53349,8 @@ fn expectTabDragRestored(session: *AppSession, f: TabDragMidFlight) !void {
     try std.testing.expectEqual(f.terms[2], f.pane.terms.items[2]);
     try std.testing.expectEqual(@as(usize, 0), f.pane.active_term);
     // 접근자가 model로 되돌아왔다 — 파기된 preview가 화면에 남지 않는다.
-    try std.testing.expectEqual(f.pane.terms.items.ptr, session.paneTermOrder(f.pane).ptr);
-    try std.testing.expectEqual(@as(usize, 0), session.paneActiveTermIndex(f.pane));
+    try std.testing.expectEqual(f.pane.terms.items.ptr, pane_ops.paneTermOrder(session, f.pane).ptr);
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.paneActiveTermIndex(session, f.pane));
 }
 
 // §4.4 복원 트리거 ①: Escape. 드래그 중 Escape는 앱이 소비하고(터미널로 안 흘림) 시작 순서로 되돌린다.
@@ -55244,7 +53389,7 @@ test "CIM4b 복원: 새 primary down이 이전 드래그를 버린다(up 유실 
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[f.pane.active_term]);
     // 새 드래그는 자기 시작 순서를 처음부터 다시 잡는다(이어받기 없음) — 지금 model 순서가 곧 시작 순서다.
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
-    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[0]);
+    try std.testing.expectEqual(f.terms[0], pane_ops.paneTermOrder(session, f.pane)[0]);
 }
 
 // §4.4 복원 트리거 ③: window deactivate. 창이 키를 잃으면 뗄 곳이 없으므로 드래그를 끝낸다.
@@ -55290,7 +53435,7 @@ test "CIM4b: 드래그 중 뜬 notice 토스트는 재정렬을 파기하지도,
     try std.testing.expect(!session.anyModalOverlayOpen());
     _ = try session.tick();
     try std.testing.expect(session.pointerGestureIs(.terminal_tab)); // 드래그는 살아 있다
-    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[2]); // preview도 그대로
+    try std.testing.expectEqual(f.terms[0], pane_ops.paneTermOrder(session, f.pane)[2]); // preview도 그대로
 
     // 손을 떼면 그 up이 드래그를 정상 commit한다. **토스트는 그대로 열려 있다** — 드래그가 남의 알림을
     // 대신 닫아 주지 않는다(닫는 것은 사용자의 다음 클릭·키다).
@@ -55314,11 +53459,11 @@ test "CIM4b: 제자리로 돌아온 드래그도 Escape가 취소하고 소비�
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     const m = barMetrics(pb.tabs, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, 0).?;
     const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
     const bar_y: f64 = @floatFromInt(pb.full.y + 1);
@@ -55328,7 +53473,7 @@ test "CIM4b: 제자리로 돌아온 드래그도 Escape가 취소하고 소비�
     session.mouse(1, tab0_x, bar_y, 0, 0);
     session.mouse(2, tab2_x, bar_y, 0, 0); // 끝자리까지 끌었다가
     session.mouse(2, tab0_x, bar_y, 0, 0); // 원래 자리로 되돌아왔다 — preview == start
-    try std.testing.expectEqual(t0, session.paneTermOrder(pane)[0]);
+    try std.testing.expectEqual(t0, pane_ops.paneTermOrder(session, pane)[0]);
 
     const app_keys_before = session.total_app_key_events;
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
@@ -55355,7 +53500,7 @@ test "CIM4b 복원: 드래그 중 Term이 사라지면 preview를 폐기한다" 
     try std.testing.expectEqual(@as(usize, 2), f.pane.terms.items.len);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
     try std.testing.expectEqual(f.terms[2], f.pane.terms.items[1]);
-    try std.testing.expectEqual(f.pane.terms.items.ptr, session.paneTermOrder(f.pane).ptr);
+    try std.testing.expectEqual(f.pane.terms.items.ptr, pane_ops.paneTermOrder(session, f.pane).ptr);
     // 뒤늦은 up이 죽은 preview를 되살려 commit하지 않는다(effect 0).
     session.mouse(3, f.tab0_x, f.bar_y, 0, 0);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
@@ -55382,7 +53527,7 @@ test "dragging a Term tab reorders it within the pane" {
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     const id0 = pane.terms.items[0].surface.id; // 드래그할 탭(T0)
     const id1 = pane.terms.items[1].surface.id;
@@ -55391,7 +53536,7 @@ test "dragging a Term tab reorders it within the pane" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     const m = barMetrics(pb.tabs, session.cell_width_px, 3, 0, 0).?;
     const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
     const tab2_x: f64 = @floatFromInt(pb.tabs.x + (2 * m.tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
@@ -55431,9 +53576,9 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(기존)·우(새, 활성)
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 우 pane Term 2개
-    const right = session.activePane();
+    const right = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), right.terms.items.len);
 
     // leaf rect로 좌/우 pane과 바를 잡는다(tree 순서: [0]=좌, [1]=우).
@@ -55442,8 +53587,8 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const left = lr.items[0].leaf;
     try std.testing.expect(lr.items[1].leaf == right);
-    const left_bar = session.paneBarRect(lr.items[0].rect).?;
-    const right_pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const left_bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
+    const right_pb = pane_ops.paneBar(session, lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 탭 0)
 
     // ① 우 탭 0을 좌 pane 바에 drop → 좌 2개·우 1개, 좌 활성. collapse 없음(우에 1개 남음).
@@ -55453,7 +53598,7 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len); // 아직 2 pane
     try std.testing.expectEqual(@as(usize, 1), right.terms.items.len);
     try std.testing.expectEqual(@as(usize, 2), left.terms.items.len);
-    try std.testing.expectEqual(left, session.activePane()); // 옮긴 곳이 활성
+    try std.testing.expectEqual(left, pane_ops.activePane(session)); // 옮긴 곳이 활성
     var found = false;
     for (left.terms.items) |t| {
         if (t.surface.id == moved_id) found = true;
@@ -55465,7 +53610,7 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0); // up over 좌 바
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len); // 우 collapse → 1 pane
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
-    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len); // 좌가 3개 다 가짐
+    try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len); // 좌가 3개 다 가짐
     try std.testing.expect(!session.ended_seen);
 }
 
@@ -55488,14 +53633,14 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성), 각 Term 1개
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(기존)·우(새, 활성), 각 Term 1개
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const right = session.activePane();
+    const right = pane_ops.activePane(session);
     try std.testing.expect(lr.items[1].leaf == right);
-    const left_body = session.paneTermRect(lr.items[0].rect); // 좌 pane 본문(바 아래)
-    const right_pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const left_body = pane_ops.paneTermRect(session, lr.items[0].rect); // 좌 pane 본문(바 아래)
+    const right_pb = pane_ops.paneBar(session, lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 pane의 유일 Term)
 
     // 우 pane 탭 down(드래그 arm) → 좌 pane 본문 '좌측 절반'에 up(drop). 우는 비어 collapse, 새 split 좌우.
@@ -55509,13 +53654,13 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
     // 여전히 2 pane(새 + 좌), leafCount 2. 옮긴 Term은 새(활성) pane에, 그게 가장 왼쪽.
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 2), PaneTree.leafCount(session.activeTab().tree));
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
-    try std.testing.expectEqual(moved_id, session.activePane().activeTerm().surface.id); // 새 pane이 옮긴 Term·활성
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(moved_id, pane_ops.activePane(session).activeTerm().surface.id); // 새 pane이 옮긴 Term·활성
     var lr2: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr2.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr2);
     try std.testing.expectEqual(@as(usize, 2), lr2.items.len);
-    try std.testing.expect(lr2.items[0].leaf == session.activePane()); // 새 pane이 좌측(left zone)
+    try std.testing.expect(lr2.items[0].leaf == pane_ops.activePane(session)); // 새 pane이 좌측(left zone)
     try std.testing.expect(lr2.items[0].rect.x < lr2.items[1].rect.x); // 좌우 배치
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick();
@@ -55539,14 +53684,14 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(기존)·우(새, 활성)
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const left = lr.items[0].leaf;
-    const left_body = session.paneTermRect(lr.items[0].rect);
-    const left_bar = session.paneBarRect(lr.items[0].rect).?;
-    const right_pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const left_body = pane_ops.paneTermRect(session, lr.items[0].rect);
+    const left_bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
+    const right_pb = pane_ops.paneBar(session, lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
 
     // 우 pane 탭 down(드래그 arm). 처음엔 드롭 타겟 없음.
     session.mouse(1, @floatFromInt(right_pb.tabs.x + 5), @floatFromInt(right_pb.full.y + 1), 0, 0);
@@ -55624,7 +53769,7 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     session.mouse(1, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0); // 탭 down → arm
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
     session.mouse(2, 333, 222, 0, 0); // 드래그
@@ -55664,13 +53809,13 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
     const old_surface = session.activeSurface();
-    try session.splitActivePane(.horizontal); // 좌우 분할 — 새 panel(오른쪽)이 활성
+    try pane_ops.splitActivePane(session, .horizontal); // 좌우 분할 — 새 panel(오른쪽)이 활성
     const new_surface = session.activeSurface();
     try std.testing.expect(new_surface != old_surface);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
 
     // 클릭은 탭 바 '아래'(터미널 영역)에서 — 바 클릭은 Term 탭 전환이라 panel 터미널 hit-test와 구분된다.
-    const click_y: f64 = @floatFromInt(session.paneBarHeightPx() + 20);
+    const click_y: f64 = @floatFromInt(pane_ops.paneBarHeightPx(session) + 20);
     // 왼쪽(기존, 비활성) panel 영역 클릭 → 포커스가 기존 panel로. 좌표 origin도 왼쪽 rect(사이드바 옆)로 갱신.
     const left_x: f64 = @floatFromInt(session.sidebar_width_px + 10);
     session.mouse(1, left_x, click_y, 0, 0);
@@ -55706,7 +53851,7 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(기존)·우(새, 활성)
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -55719,8 +53864,8 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     try std.testing.expectEqual(@as(usize, 0), left_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
 
-    const left_body = session.paneTermRect(lr.items[0].rect);
-    const right_body = session.paneTermRect(lr.items[1].rect);
+    const left_body = pane_ops.paneTermRect(session, lr.items[0].rect);
+    const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
     // 왼쪽(비활성) 본문 위에서 위로 스크롤 → 왼쪽 뷰포트만 위로(과거), 오른쪽 불변·활성 pane 불변.
     session.scrollWheel(3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
     try std.testing.expect(left_surface.core.view_offset > 0);
@@ -55751,7 +53896,7 @@ test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     const surface = session.activeSurface();
     try surface.core.write("X\r\n" ** 200); // 스크롤백 충분히(200줄)
-    const body = session.paneTermRect(session.active_pane_rect);
+    const body = pane_ops.paneTermRect(session, session.active_pane_rect);
     const cx: f64 = @floatFromInt(body.x + body.w / 2);
     const cy: f64 = @floatFromInt(body.y + body.h / 2);
 
@@ -55796,7 +53941,7 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     const surface = session.activeSurface();
     try surface.core.write("hello\r\n" ** 40); // 선택할 내용 + 스크롤백
-    const body = session.paneTermRect(session.active_pane_rect);
+    const body = pane_ops.paneTermRect(session, session.active_pane_rect);
     const cx: f64 = @floatFromInt(body.x + body.w / 2);
     const cy: f64 = @floatFromInt(body.y + body.h / 2);
     surface.core.mouse_tracking = .normal; // 트래킹 TUI pane 흉내 — 클릭·휠이 리포팅으로 빠진다
@@ -55904,7 +54049,7 @@ test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pa
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal); // 좌(기존, 비활성)·우(새, 활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(기존, 비활성)·우(새, 활성)
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -55914,7 +54059,7 @@ test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pa
 
     // 비활성(왼쪽) pane의 첫 행에만 링크를 둔다. 활성 pane은 빈 화면이라, 옛 동작(활성 고정)이면 무엇을 눌러도 빈 결과다.
     try left_surface.core.write("https://a.co");
-    const body = session.paneTermRect(lr.items[0].rect);
+    const body = pane_ops.paneTermRect(session, lr.items[0].rect);
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const ch: f64 = @floatFromInt(session.cell_height_px);
     const x = @as(f64, @floatFromInt(body.x)) + 3.5 * cw; // URL 안(col 3)
@@ -55929,7 +54074,7 @@ test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pa
     try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
 
     // 활성(오른쪽) pane의 같은 상대 위치는 빈 화면이라 링크가 아니다 — hit-test가 pane을 실제로 가르는지.
-    const right_body = session.paneTermRect(lr.items[1].rect);
+    const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
     const rx = @as(f64, @floatFromInt(right_body.x)) + 3.5 * cw;
     try std.testing.expectEqualStrings("", session.urlAt(rx, y, 32));
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(rx, y, 32));
@@ -55954,7 +54099,7 @@ test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal); // 좌(터미널)·우(활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(터미널)·우(활성)
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -55963,14 +54108,14 @@ test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 
     try term_surface.core.write("https://a.co");
 
     // 오른쪽 pane에 browser web Term을 열고 활성으로 둔다(제보 상황 — 브라우저를 클릭해 포커스가 그쪽에 있는 상태).
-    _ = try session.appendWebTermInActivePane(.browser);
-    try std.testing.expect(session.activePane().activeTerm().kind == .web);
+    _ = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
     // sentinel은 빈 core다(createWebTerm이 1×1 요청 → clampGridSize가 cols 최소 2로 올려 2×1). 화면이 없으니
     // 활성 고정 조회는 좌표와 무관하게 늘 빈 결과였다.
     try std.testing.expectEqual(@as(u16, 2), session.activeSurface().core.size.cols);
     try std.testing.expectEqual(@as(u16, 1), session.activeSurface().core.size.rows);
 
-    const body = session.paneTermRect(lr.items[0].rect);
+    const body = pane_ops.paneTermRect(session, lr.items[0].rect);
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const ch: f64 = @floatFromInt(session.cell_height_px);
     const x = @as(f64, @floatFromInt(body.x)) + 3.5 * cw;
@@ -56006,7 +54151,7 @@ test "링크 조회는 pane chrome(탭 바·여백)을 셀로 접지 않는다" 
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const full = lr.items[0].rect;
-    const body = session.paneTermRect(full);
+    const body = pane_ops.paneTermRect(session, full);
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const ch: f64 = @floatFromInt(session.cell_height_px);
     const x = @as(f64, @floatFromInt(body.x)) + 3.5 * cw; // 링크 열 위
@@ -56050,7 +54195,7 @@ test "비활성 pane hover 밑줄이 실제 프레임 셀까지 실린다" {
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal); // 좌(비활성)·우(활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(비활성)·우(활성)
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -56072,8 +54217,8 @@ test "비활성 pane hover 밑줄이 실제 프레임 셀까지 실린다" {
         }
     }.run;
 
-    const left_body = session.paneTermRect(lr.items[0].rect);
-    const right_body = session.paneTermRect(lr.items[1].rect);
+    const left_body = pane_ops.paneTermRect(session, lr.items[0].rect);
+    const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
 
     // hover 없음 → 어느 pane에도 밑줄 없음.
     session.metal_dirty = true;
@@ -56156,7 +54301,7 @@ test "커서가 멈춘 채 split하면 stale 링크 밑줄이 내려간다" {
     try std.testing.expect(session.hoverLinkSpanFor(left) != null);
 
     // 마우스를 움직이지 않고 split. 링크는 창 왼쪽 끝이라 그 좌표는 여전히 왼쪽 pane → 밑줄 유지(과잉 해제 금지).
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     session.revalidateHoverLink();
     try std.testing.expect(session.hoverLinkSpanFor(left) != null);
 
@@ -56193,8 +54338,8 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
     try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
     try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null); // pending도 안 남는다
 
-    try session.splitActivePane(.horizontal); // 좌(터미널)·우(활성)
-    const browser_id = try session.appendWebTermInActivePane(.browser); // 우 pane에 브라우저 탭
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(터미널)·우(활성)
+    const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser); // 우 pane에 브라우저 탭
 
     // ② 활성 pane이 브라우저면 그 패널이 대상이다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름).
     try std.testing.expect(session.openTerminalWebLink("https://a.co"));
@@ -56218,16 +54363,16 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
     session.loaded_config.config.input.link_open_target = .auto;
 
     // ⑤ 포커스가 왼쪽 터미널 pane으로 가도 오른쪽 브라우저가 **화면에 보이므로** 여전히 대상이다.
-    try std.testing.expect(session.focusPaneByPtr(session.activeTab().panes.items[0]));
-    try std.testing.expect(session.activePane().activeTerm().kind == .terminal);
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, session.activeTab().panes.items[0]));
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal);
     try std.testing.expect(session.openTerminalWebLink("https://a.co"));
     try std.testing.expectEqual(browser_id, (session.takeExternalLinkAction(&url_buf).?).surface_id);
 
     // ⑥ 브라우저가 **숨은 Term 탭**이면 대상이 아니다 — 안 보이는 패널에 열면 화면이 안 바뀌어 먹통처럼 보인다.
     //    오른쪽 pane으로 돌아가 첫 Term(터미널)을 활성화하면 브라우저 탭은 뒤로 숨는다. auto라 시스템으로 간다.
-    try std.testing.expect(session.focusPaneByPtr(session.activeTab().panes.items[1]));
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, session.activeTab().panes.items[1]));
     session.focusTerm(0);
-    try std.testing.expect(session.activePane().activeTerm().kind == .terminal);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal);
     try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
 }
 
@@ -56252,12 +54397,12 @@ test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 brows
     session.loaded_config.config.input.link_open_target = .in_app;
     var url_buf: [512]u8 = undefined;
 
-    const terms_before = session.activePane().terms.items.len;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
     try std.testing.expect(session.openTerminalWebLink("https://a.co"));
 
     // 새 browser Term이 활성 pane에 생기고, pending action이 그 surface를 가리킨다.
-    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
-    const created = session.activePane().activeTerm();
+    try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
+    const created = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(created.kind == .web and created.web_panel_kind == .browser);
     const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(ExternalLinkActionKind.in_app, action.kind);
@@ -56266,12 +54411,12 @@ test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 brows
 
     // 두 번째 링크는 방금 만든 브라우저가 **보이므로** 재사용한다 — 클릭마다 탭이 늘지 않는다.
     try std.testing.expect(session.openTerminalWebLink("https://b.co"));
-    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(created.surfaceId(), (session.takeExternalLinkAction(&url_buf).?).surface_id);
 
     // in-app이어도 http(s)가 아니면 브라우저로 안 보내고 탭도 안 만든다.
     try std.testing.expect(!session.openTerminalWebLink("mailto:a@b.co"));
-    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
 }
 
 // 앞 요청이 아직 drain되지 않았으면(같은 tick 안 연타) 이번 클릭은 시스템으로 보낸다 — pending URL을 덮어써
@@ -56291,7 +54436,7 @@ test "openTerminalWebLink: drain 전 두 번째 요청은 pending을 덮어쓰�
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    _ = try session.appendWebTermInActivePane(.browser);
+    _ = try pane_ops.appendWebTermInActivePane(session, .browser);
     var url_buf: [512]u8 = undefined;
 
     try std.testing.expect(session.openTerminalWebLink("https://first.co"));
@@ -56318,7 +54463,7 @@ test "wheel routes by the surface under the cursor even when the active pane has
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(기존)·우(새, 활성)
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -56332,8 +54477,8 @@ test "wheel routes by the surface under the cursor even when the active pane has
     try std.testing.expectEqual(@as(usize, 0), left_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
 
-    const left_body = session.paneTermRect(lr.items[0].rect);
-    const right_body = session.paneTermRect(lr.items[1].rect);
+    const left_body = pane_ops.paneTermRect(session, lr.items[0].rect);
+    const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
     // 비활성(왼쪽, 비트래킹) 본문 위 휠 → 왼쪽 스크롤백이 움직인다(활성 트래킹이 안 가로챔), 포커스 불변.
     session.scrollWheel(3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
     try std.testing.expect(left_surface.core.view_offset > 0);
@@ -56363,12 +54508,12 @@ test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane unde
     defer session.deinit();
     session.appearance.chrome_theme = .rich; // 고정폭 탭(tab_width_cols>0) — 넘쳐야 ‹›/has_scroll
     _ = try session.resize(session.sidebar_width_px + 400, 300, session.scale_milli);
-    for (0..6) |_| session.newTermInActivePane() catch {}; // 탭 여러 개 → 고정폭×N이 바를 넘침
+    for (0..6) |_| pane_ops.newTermInActivePane(session) catch {}; // 탭 여러 개 → 고정폭×N이 바를 넘침
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const leaf = lr.items[0].leaf;
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
     const bx: f64 = @floatFromInt(bar.x + bar.w / 2);
     const by: f64 = @floatFromInt(bar.y + 1);
     // 넘침 전제(has_scroll) 확인 — 아니면 가로 스크롤 자체가 무의미.
@@ -56404,14 +54549,14 @@ test "horizontal tab-bar swipe still scrolls even when the pane has mouse tracki
     defer session.deinit();
     session.appearance.chrome_theme = .rich; // 고정폭 탭 → 넘쳐야 has_scroll
     _ = try session.resize(session.sidebar_width_px + 400, 300, session.scale_milli);
-    for (0..6) |_| session.newTermInActivePane() catch {}; // 탭 여러 개 → 바 넘침
+    for (0..6) |_| pane_ops.newTermInActivePane(session) catch {}; // 탭 여러 개 → 바 넘침
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const leaf = lr.items[0].leaf;
     // 그 pane의 활성 Term을 마우스 트래킹 앱으로 둔다 — 옛 동작이면 tracking 분기의 return이 가로 스크롤을 삼켰다.
     leaf.activeTerm().surface.core.mouse_tracking = .normal;
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
     const bx: f64 = @floatFromInt(bar.x + bar.w / 2);
     const by: f64 = @floatFromInt(bar.y + 1);
     const m = barMetrics(bar, session.cell_width_px, leaf.terms.items.len, session.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols).?;
@@ -56443,7 +54588,7 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
     const old_surface = session.activeSurface();
-    try session.splitActivePane(.horizontal); // 좌우 분할 — 오른쪽(새) panel 활성
+    try pane_ops.splitActivePane(session, .horizontal); // 좌우 분할 — 오른쪽(새) panel 활성
     const new_surface = session.activeSurface();
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
 
@@ -56483,9 +54628,9 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
     const left = session.activeSurface(); // 분할 전 surface = 분할 후 왼쪽(기존) panel
-    try session.splitActivePane(.horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
+    try pane_ops.splitActivePane(session, .horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
-    try std.testing.expect(session.activeTabHasSplit());
+    try std.testing.expect(pane_ops.activeTabHasSplit(session));
     markAllTermsAtPrompt(session); // idle 셸 흉내 — Cmd+W가 확인 모달 없이 즉시 pane을 닫게
 
     // Cmd+W → 활성(오른쪽) panel 닫힘 → 트리가 형제(왼쪽)로 collapse → 1 panel만 남고 그게 활성.
@@ -56493,7 +54638,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expectEqual(left, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
-    try std.testing.expect(!session.activeTabHasSplit());
+    try std.testing.expect(!pane_ops.activeTabHasSplit(session));
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
     // 남은 panel이 빈자리를 차지해 터미널 영역 전체로 resize됐다(좌표 origin도 사이드바 옆·전체 폭).
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
@@ -56522,13 +54667,13 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try session.splitActivePane(.horizontal); // 좌우 — 오른쪽(새) pane 활성, ratio 0.5
+    try pane_ops.splitActivePane(session, .horizontal); // 좌우 — 오른쪽(새) pane 활성, ratio 0.5
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
 
     // 활성 탭 divider(1개, 세로선)를 구해 그 위를 클릭한다 — y는 터미널 영역 중간(바 아래).
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     try std.testing.expectEqual(@as(usize, 1), segs.items.len);
     const seg = segs.items[0];
     try std.testing.expectEqual(maru.session.SplitDirection.horizontal, seg.direction);
@@ -56542,7 +54687,7 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
 
     // down on divider → 드래그 시작.
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
 
     // 왼쪽으로 200px 드래그 → ratio = 200/800 = 0.25(왼쪽 작아지고 오른쪽=활성 커진다). move는
     // 좌표를 **모으기만** 하고 실제 resize는 tick이 한다(계약 §4.3) — move가 곧 resize이던 예전
@@ -56564,11 +54709,11 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
 
     // up → 드래그 종료.
     session.mouse(3, div_x - 200, div_y, 0, 0);
-    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
 
     // divider가 아닌 곳(왼쪽 pane 터미널 중앙) down은 divider 드래그를 시작하지 않는다.
     session.mouse(1, @floatFromInt(seg.bounds.x + 20), div_y, 0, 0);
-    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
     _ = try session.tick();
 }
 
@@ -56593,14 +54738,14 @@ test "split dividers render as thin lines (reserved 30/31 divider strips), not f
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 좌우 split → 세로 divider. 모든 divider 셀이 reserved=30(좌 세로선=config 두께), 경계 x 근처(±cw)에 센터.
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     const seam_x = segs.items[0].pos;
     var cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
     defer cells.deinit(allocator);
-    session.appendActiveTabDividers(&cells);
+    pane_ops.appendActiveTabDividers(session, &cells);
     try std.testing.expect(cells.items.len > 1); // 행마다 한 셀 → 여러 개
     for (cells.items) |c| {
         try std.testing.expectEqual(@as(u16, 30), c.reserved); // divider 세로선(seam 중앙정렬, 커서 15%와 분리)
@@ -56609,9 +54754,9 @@ test "split dividers render as thin lines (reserved 30/31 divider strips), not f
     }
 
     // 상하 split → 가로 divider는 reserved=31(seam 중앙정렬 가로선) 한 칸(폭=cols).
-    try session.splitActivePane(.vertical);
+    try pane_ops.splitActivePane(session, .vertical);
     cells.clearRetainingCapacity();
-    session.appendActiveTabDividers(&cells);
+    pane_ops.appendActiveTabDividers(session, &cells);
     var saw_underline = false;
     for (cells.items) |c| {
         if (c.reserved == 31) {
@@ -56649,7 +54794,7 @@ test "hoverCursor returns region-specific cursor kinds" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     try std.testing.expect(pb.grip_cols > 0);
     // grip 중앙(글리프 칸) — full.x+1은 padding=0 테스트라 사이드바 resize-edge 밴드와 겹쳐 .resize_h가 되므로 그 밖으로.
     const grip_cx: f64 = @floatFromInt(pb.full.x + pb.grip_cols * session.cell_width_px / 2);
@@ -56666,17 +54811,17 @@ test "hoverCursor returns region-specific cursor kinds" {
     }
 
     // 좌우 split → 세로 divider 위 = resize_h(↔). 상하 split → 가로 divider 위 = resize_v(↕).
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     const hseg = segs.items[0];
     const hdiv_y: f64 = @floatFromInt(hseg.bounds.y + hseg.bounds.h / 2);
     try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(@floatFromInt(hseg.pos), hdiv_y, 0));
 
-    try session.splitActivePane(.vertical);
+    try pane_ops.splitActivePane(session, .vertical);
     segs.clearRetainingCapacity();
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     var saw_v = false;
     for (segs.items) |seg| {
         if (seg.direction == .vertical) {
@@ -56715,7 +54860,7 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
 
     // ⌘T → 활성 pane에 Term 2개([T0, T1], T1 활성).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     try std.testing.expectEqual(@as(usize, 1), pane.active_term);
     const t1_id = pane.terms.items[1].surface.id; // 살아남을(활성) Term
@@ -56755,7 +54900,7 @@ test "PR5b regression: reaping a lower-indexed sibling keeps the middle-active T
     // ⌘T ×2 → 활성 pane에 Term 3개([T0,T1,T2], T2 활성).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     // 활성을 **중간** T1로 둔다(구조 단위 테스트 — 탭 전환과 동치). T1이 화면에 보이는 터미널.
     pane.active_term = 1;
@@ -56808,7 +54953,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
 
     // (a) 인덱스/활성 기준 보류(.active_term)는 reap이 취소한다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
@@ -56821,7 +54966,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
 
     // (b) .window 보류는 reap에도 유지된다(창 전체 표적이라 인덱스 stale 무관).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 다시 Term 2개
-    const pane2 = session.activePane();
+    const pane2 = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane2.terms.items.len);
     session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
     pane2.terms.items[0].rt.terminated = true;
@@ -56912,20 +55057,20 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
 
     const left = session.activeSurface(); // 분할 전 = 분할 후 왼쪽(기존) pane P0
-    try session.splitActivePane(.horizontal); // 오른쪽(새) pane P1 활성, 2 panes
+    try pane_ops.splitActivePane(session, .horizontal); // 오른쪽(새) pane P1 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     const right_id = session.activeSurface().id; // P1(활성)
     try std.testing.expect(left.id != right_id);
 
     // 왼쪽(배경) pane P0의 유일한 Term 셸이 exit → reap → P0 collapse, P1만 전체 폭으로 남고 활성 유지.
-    const active_pane = session.activePane();
+    const active_pane = pane_ops.activePane(session);
     for (session.activeTab().panes.items) |p| {
         if (p != active_pane) p.terms.items[0].rt.terminated = true; // P0
     }
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
-    try std.testing.expect(!session.activeTabHasSplit());
+    try std.testing.expect(!pane_ops.activeTabHasSplit(session));
     try std.testing.expectEqual(right_id, session.activeSurface().id); // P1 유지·활성
     try std.testing.expectEqual(@as(u32, 800), session.active_pane_rect.w); // 전체 폭으로 확장
     try std.testing.expect(!session.ended_seen);
@@ -56990,10 +55135,10 @@ test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
     defer session.deinit();
 
     // 단일 탭·단일 pane·단일 Term이 exit → reap 무동작(구조 유지). 세션 종료는 reap이 아니라 tick latch가 한다.
-    session.activePane().terms.items[0].rt.terminated = true;
+    pane_ops.activePane(session).terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.ended_seen);
 }
 
@@ -59778,7 +57923,7 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
 
     const long_path = "/tmp/aaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb/cccccccccccccccc/dddddddddddddddd/leafdir";
     const black: terminal.Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
-    const term = session.activePane().activeTerm();
+    const term = pane_ops.activePane(session).activeTerm();
     term.rt.observation.availability = .current;
     term.rt.observation.cwd.clearRetainingCapacity();
     try term.rt.observation.cwd.appendSlice(allocator, long_path);
@@ -59903,7 +58048,7 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
     // 이 테스트는 **앵커가 실제로 있을 때의 기하**를 보므로 상태바에 브랜치 항목을 세운다.
     // 실행 디렉터리의 저장소 형태에 기대지 않고 cache를 직접 구성한다. linked worktree의 `.git`은
     // 디렉터리가 아닌 gitdir 파일이라 `readGitBranch`의 best-effort 범위 밖이고, 그 차이는 메뉴 기하와 무관하다.
-    const term = session.activePane().activeTerm();
+    const term = pane_ops.activePane(session).activeTerm();
     term.rt.observation.availability = .current;
     term.rt.observation.cwd.clearRetainingCapacity();
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -59983,7 +58128,7 @@ test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌�
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
 
@@ -60035,12 +58180,12 @@ test "WP-F1: pane 전환으로 웹이 활성이 돼도 스크롤백 매치가 �
     web_pane.active_term = web_pane.terms.items.len - 1;
 
     // 첫 pane(터미널)에서 find를 연다.
-    _ = session.focusPaneByPtr(panes[0]);
+    _ = pane_ops.focusPaneByPtr(session, panes[0]);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open);
 
     // pane을 웹 쪽으로 옮긴다 — 여기서도 닫혀야 한다.
-    _ = session.focusPaneByPtr(web_pane);
+    _ = pane_ops.focusPaneByPtr(session, web_pane);
     _ = try session.tick();
     // 경로가 달라도 결론은 같다 — 열린 채, 터미널 매치는 버린다.
     try std.testing.expect(session.chrome_host.find.open);
@@ -60068,7 +58213,7 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 �
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open); // 터미널에서 열었다
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1); // 웹 탭으로 전환
@@ -60102,7 +58247,7 @@ test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어�
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60173,7 +58318,7 @@ test "WP-F1 R8 프로브: 웹 탭에서 Enter/Shift+Enter가 페이지 다음·�
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60226,7 +58371,7 @@ test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤�
     const offset_before = session.activeSurface().core.viewOffset();
 
     // 마크다운 탭에 들렀다 돌아온다 — 닫혀 있으므로 화면은 그대로여야 한다.
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60254,7 +58399,7 @@ test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온�
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60293,7 +58438,7 @@ test "WP-F1 R5 프로브: 웹에 들렀다 터미널로 돌아오면 스크롤�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 터미널 화면에 찾을 글자를 심는다(유니크 토큰 — 셸 출력과 충돌 없게).
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three");
     session.dispatchAppAction(.toggle_find);
     for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
@@ -60329,7 +58474,7 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const a = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, a);
     const a_idx = pane.terms.items.len - 1;
@@ -60372,7 +58517,7 @@ test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60414,7 +58559,7 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const a = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, a);
     const a_idx = pane.terms.items.len - 1;
@@ -60469,7 +58614,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60547,7 +58692,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const br = try session.createWebTerm(.browser);
     try pane.terms.append(allocator, br);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60595,7 +58740,7 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
     try session.chrome_host.find.input.appendChar(allocator, 'a');
     session.dispatchAppAction(.toggle_find); // 닫아도 검색어는 남는다
 
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -60632,7 +58777,7 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지�
     try std.testing.expect(!session.chrome_host.find.open);
 
     // 마크다운 웹 탭으로 옮기면 **열리고, 검색어가 페이지로 나간다**(제보된 버그의 회귀 테스트).
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
@@ -61131,12 +59276,12 @@ test "SB1: 에이전트 집계는 비활성 탭까지 센다(안 보이는 곳�
     _ = try session.resize(1000, 700, 1000);
 
     // 첫 탭의 Term을 blocked로 세우고, **다른 탭으로 옮긴다**.
-    const first = session.activePane().activeTerm();
+    const first = pane_ops.activePane(session).activeTerm();
     first.agent_state = .blocked;
     first.agent_kind = .claude;
     session.dispatchAppAction(.new_tab);
     try std.testing.expect(session.tabs.items.len >= 2);
-    try std.testing.expect(session.activePane().activeTerm() != first); // 이제 다른 Term을 보고 있다
+    try std.testing.expect(pane_ops.activePane(session).activeTerm() != first); // 이제 다른 Term을 보고 있다
 
     // 활성이 아닌데도 잡힌다 — 이게 없으면 기능이 요점을 잃는다.
     const away = session.tallyAgents();
@@ -61144,8 +59289,8 @@ test "SB1: 에이전트 집계는 비활성 탭까지 센다(안 보이는 곳�
     try std.testing.expectEqual(@as(usize, 0), away.running);
 
     // running도 같은 방식으로 합산되고, 대표 kind는 running 쪽에서 온다(blocked가 kind를 가로채지 않는다).
-    session.activePane().activeTerm().agent_state = .running;
-    session.activePane().activeTerm().agent_kind = .codex;
+    pane_ops.activePane(session).activeTerm().agent_state = .running;
+    pane_ops.activePane(session).activeTerm().agent_kind = .codex;
     const both = session.tallyAgents();
     try std.testing.expectEqual(@as(usize, 1), both.blocked);
     try std.testing.expectEqual(@as(usize, 1), both.running);
@@ -61522,20 +59667,20 @@ test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" 
     });
     defer session.deinit();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // Cmd+T → new_term → 활성 pane에 Term 추가(워크스페이스 수 불변), 새 Term이 활성.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
     try std.testing.expect(session.total_app_key_events >= 1); // 앱 액션으로 회계(PTY로 안 샘)
 
     // Cmd+Shift+T → new_tab → 새 워크스페이스(활성), 그 워크스페이스는 Term 1개로 시작.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } });
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // 안 묶인 Cmd 조합(Cmd+S)은 아무것도 안 만들고 무시(ignored).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } });
@@ -61602,13 +59747,13 @@ test "handleKeyEvent applies user config keybindings (resolver wired from loaded
     session.loaded_config.keybindings = &user_binds;
 
     // Cmd+E는 빈 resolver였다면 ignored지만, 사용자 바인딩이 먹어 활성 pane에 Term이 추가된다.
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
 
     // 사용자 바인딩에 없는 기본 조합(Cmd+T)도 여전히 동작한다(resolver가 default_app_bindings로 폴백).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
 }
 
 test "web app action dispatch bypasses terminal preprocessing and rejects a stale route" {
@@ -61630,7 +59775,7 @@ test "web app action dispatch bypasses terminal preprocessing and rejects a stal
         .{ .chord = try config_mod.KeyChord.parse("Cmd+Backspace"), .action = .new_term },
     };
     session.loaded_config.keybindings = &user_binds;
-    const browser_sid = try session.appendWebTermInActivePane(.browser);
+    const browser_sid = try pane_ops.appendWebTermInActivePane(session, .browser);
     const copy: terminal.KeyEvent = .{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true } };
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(0, copy));
     try std.testing.expect(!session.dispatchWebAppAction(0, copy)); // invalid sentinel은 action provenance가 아니다.
@@ -61644,19 +59789,19 @@ test "web app action dispatch bypasses terminal preprocessing and rejects a stal
     const paste: terminal.KeyEvent = .{ .key = .{ .char = 'v' }, .modifiers = .{ .command = true } };
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(browser_sid, paste));
     session.loaded_config.keybindings = &.{};
-    const terms_before_stale = session.activePane().terms.items.len;
+    const terms_before_stale = pane_ops.activePane(session).terms.items.len;
     try std.testing.expect(!session.dispatchWebAppAction(browser_sid, paste));
-    try std.testing.expectEqual(terms_before_stale, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before_stale, pane_ops.activePane(session).terms.items.len);
 
     session.loaded_config.keybindings = &user_binds;
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, paste));
     const line_edit: terminal.KeyEvent = .{ .key = .backspace, .modifiers = .{ .command = true } };
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(browser_sid, line_edit));
     try std.testing.expect(!session.dispatchWebAppAction(browser_sid, line_edit)); // browser는 이제 background Term이다.
-    try std.testing.expectEqual(terms_before_stale + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before_stale + 1, pane_ops.activePane(session).terms.items.len);
     session.focusTerm(1);
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, line_edit));
-    try std.testing.expectEqual(terms_before_stale + 2, session.activePane().terms.items.len);
+    try std.testing.expectEqual(terms_before_stale + 2, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(u64, 3), session.total_app_key_events);
     try std.testing.expectEqual(@as(u64, 0), session.total_terminal_input_events);
 }
@@ -61683,26 +59828,26 @@ test "Term lifecycle: Cmd+T adds, Cmd+Opt+]/[ cycle, Cmd+W cascades Term to work
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = cmd });
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
-    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).active_term);
     markAllTermsAtPrompt(session); // idle 셸 흉내 — 이후 ⌘W cascade가 확인 모달 없이 즉시 진행되게(닫힌 뒤 남는 Term도 유지)
 
     // ⌘⌥] → 다음(wrap): 2→0. ⌘⌥[ → 이전(wrap): 0→2. (⌘[]는 이제 split 순환이라 Term 순환은 ⌘⌥[]로 옮겼다.)
     const cmd_opt: terminal.ModifierSet = .{ .command = true, .option = true };
     _ = try session.handleKeyEvent(.{ .key = .{ .char = ']' }, .modifiers = cmd_opt });
-    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = '[' }, .modifiers = cmd_opt });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).active_term);
 
     // ⌘W → 활성 Term(2) 닫힘 → Term 2개, 활성 1(보정). pane/워크스페이스 수 불변.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = cmd });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
 
     // ⌘W → Term(1) 닫힘 → Term 1개. 아직 pane/워크스페이스 그대로(세션 유지).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = cmd });
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.ended_seen);
 
     // ⌘W → 이제 Term 1·pane 1·워크스페이스 1 → 마지막 워크스페이스 close = 세션 종료 latch(cascade 끝).
@@ -62468,7 +60613,7 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{};
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     const tab = session.activeTab();
     try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
     const sa = tab.panes.items[0].terms.items[tab.panes.items[0].active_term].surface;
@@ -62651,7 +60796,7 @@ test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (
     const panes = session.activeTab().panes.items;
     panes[0].scrollbar_idle_ticks = 0; // full
     panes[1].scrollbar_idle_ticks = session.scrollbarFadeCompleteTicks(); // faint 정착
-    session.appendPaneScrollbars();
+    pane_ops.appendPaneScrollbars(session);
 
     // pane 2개 → layer3 thumb 2개. 각 pane 자기 idle_ticks 반영 — 하나 full, 하나 faint.
     var count: usize = 0;
@@ -63048,7 +61193,7 @@ test "moveWorkspaceToSession same-session commits only when active owner changes
 
     try addMoveTestWorkspace(session, "same-session-background");
     session.app_window.active_tab = 0;
-    session.recomputeActivePaneRect();
+    pane_ops.recomputeActivePaneRect(session);
     const old_active = session.activeSurface();
     const moved = session.tabs.items[1].activeTerm().surface;
     session.imeMarked("전");
@@ -63199,7 +61344,7 @@ test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동�
     // src 워크스페이스 1(활성)의 활성 pane에 web Term을 만들고 그 surface_id를 잡는다.
     try addMoveTestWorkspace(src, "web-ws");
     src.dispatchAppAction(.new_web_tab);
-    const sid = src.activePane().activeTerm().surfaceId();
+    const sid = pane_ops.activePane(src).activeTerm().surfaceId();
     // 이동 전: src에 live, dst엔 없음, 없는 id는 false(이동 판정 3케이스의 기준).
     try std.testing.expect(src.hasWebSurface(sid));
     try std.testing.expect(!dst.hasWebSurface(sid));
@@ -63577,7 +61722,7 @@ test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
-    _ = try session.openFileTermInActivePane(doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 701;
     session.fileEntryAt(0).?.editor_epoch = 1;
     session.fileEntryAt(0).?.editor_document_active = true;
@@ -63613,7 +61758,7 @@ test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
-    _ = try session.openFileTermInActivePane(doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 751;
     session.fileEntryAt(0).?.editor_epoch = 1;
     session.fileEntryAt(0).?.editor_document_active = true;
@@ -63649,11 +61794,11 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
-    _ = try session.openFileTermInActivePane(fifo_doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, fifo_doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 776;
     session.fileEntryAt(0).?.editor_epoch = 1;
     session.fileEntryAt(0).?.editor_document_active = true;
-    _ = try session.openFileTermInActivePane(doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(1).?.surface_id = 777;
 
     try std.testing.expectError(error.NotRegularFile, session.readFilePanel(allocator, 776, 1));
@@ -63690,9 +61835,9 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
-    _ = try session.openFileTermInActivePane(doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 801;
-    _ = try session.openFileTermInActivePane(html_path, .html);
+    _ = try pane_ops.openFileTermInActivePane(session, html_path, .html);
     session.fileEntryAt(1).?.surface_id = 802;
 
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape.png"));
@@ -63725,7 +61870,7 @@ test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
-    _ = try session.openFileTermInActivePane(doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 803;
 
     try root_tmp.dir.rename("pinned", root_tmp.dir, "moved", io);
@@ -63760,11 +61905,11 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
-    _ = try session.openFileTermInActivePane(doc_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(0).?.surface_id = 901;
-    _ = try session.openFileTermInActivePane(html_path, .html);
+    _ = try pane_ops.openFileTermInActivePane(session, html_path, .html);
     session.fileEntryAt(1).?.surface_id = 902;
-    _ = try session.openFileTermInActivePane(link_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, link_path, .markdown);
     session.fileEntryAt(2).?.surface_id = 903;
     // markdown 기본 모드는 읽기이며, 편집·write·mermaid 게이트를 모두 그 제품 경로에서 검증한다
     // (읽기로 전환해도 CM6 buffer가 살아 있어 ⌘S 저장이 성립한다 — docs/file-panel.md §2.4).
@@ -63829,7 +61974,7 @@ test "file panel document epoch rejects stale reload reports and latches dirty c
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/editor-epoch.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/editor-epoch.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
 
@@ -63865,7 +62010,7 @@ test "file panel first document pending is not recovery and begin is document-id
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/first-document.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/first-document.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
@@ -63889,7 +62034,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/exhausted-editor-epoch.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/exhausted-editor-epoch.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 확인 경로는 소스 모드
@@ -63918,7 +62063,7 @@ test "file panel document begin changes pending close only for an accepted repla
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/begin-close-identity.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/begin-close-identity.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 경로는 소스 모드
@@ -63955,7 +62100,7 @@ test "file panel termination invalidates current document and latches unacked ed
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/terminated-document.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/terminated-document.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
@@ -63982,7 +62127,7 @@ test "file panel termination invalidates current document and latches unacked ed
         .revision = 0,
     }));
 
-    _ = try session.openFileTermInActivePane("/tmp/read-document.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/read-document.md", .markdown);
     const read_entry = session.fileEntryAt(1).?;
     read_entry.mode = .read;
     session.assignDockSurfaceIds();
@@ -63991,7 +62136,7 @@ test "file panel termination invalidates current document and latches unacked ed
     try std.testing.expect(!read_entry.editor_recovery_required);
     try std.testing.expect(!read_entry.dirty);
 
-    _ = try session.openFileTermInActivePane("/tmp/dirty-read-document.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/dirty-read-document.md", .markdown);
     const dirty_read = session.fileEntryAt(2).?;
     dirty_read.mode = .read;
     session.assignDockSurfaceIds();
@@ -64000,7 +62145,7 @@ test "file panel termination invalidates current document and latches unacked ed
     try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(dirty_read.surface_id));
     try std.testing.expect(dirty_read.editor_recovery_required);
 
-    _ = try session.openFileTermInActivePane("/tmp/pending-read-document.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/pending-read-document.md", .markdown);
     const pending_read = session.fileEntryAt(3).?;
     pending_read.mode = .read;
     session.assignDockSurfaceIds();
@@ -64052,7 +62197,7 @@ test "file panel new surface termination before begin does not consume old clean
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/recreated-surface.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/recreated-surface.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     const old_surface = entry.surface_id;
@@ -64191,14 +62336,14 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/fp6-mode.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp6-mode.md", .markdown);
     session.assignDockSurfaceIds();
     const entry = session.fileEntryAt(0).?;
     const surface_id = entry.surface_id;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
     // FP16d: 밴드는 도크가 아니라 파일 Term이 소유한다 — 활성 pane의 밴드 rect에서 모드 칸을 찾는다.
-    const band = session.fileHeaderBandForPaneLookup(session.activePane()).?;
+    const band = pane_ops.fileHeaderBandForPaneLookup(session, pane_ops.activePane(session)).?;
     const control = dock_layout.headerModeRect(band.band, session.cell_width_px, .markdown, .source_edit, false, false).?;
     session.mouse(
         1,
@@ -64220,7 +62365,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/close-clean.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-clean.md", .markdown);
     session.assignDockSurfaceIds();
     var sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
@@ -64231,7 +62376,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session)); // 마지막 탭이어도 group 유지
 
-    _ = try session.openFileTermInActivePane("/tmp/close-dirty.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-dirty.md", .markdown);
     session.assignDockSurfaceIds();
     sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
@@ -64275,7 +62420,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     session.completeFilePanelSaveClose(sid, save_action.request_id, final_revision, true);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 
-    _ = try session.openFileTermInActivePane("/tmp/close-conflict.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-conflict.md", .markdown);
     session.assignDockSurfaceIds();
     sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
@@ -64302,7 +62447,7 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/close-read-dirty.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-read-dirty.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     const entry = session.fileEntryAt(0).?;
@@ -64347,7 +62492,7 @@ test "file panel exit protection gates window session quit and automatic termina
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/exit-protected.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/exit-protected.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit; // native-clean처럼 보여도 CM6 snapshot 전에는 종료 금지
@@ -64364,7 +62509,7 @@ test "file panel exit protection gates window session quit and automatic termina
     // FP16: 파일 패널이 pane의 web Term이라 터미널이 다 죽어도 `allTabsTerminated`가 false다 — 창은
     // dirty 여부와 무관하게 유지된다(옛 `file_panel_exit_held` 경로보다 강한 보호). 사용자에게 보이는
     // 계약은 그대로다: 자동 종료가 일어나지 않는다.
-    for (session.activePane().terms.items) |term| term.rt.terminated = true;
+    for (pane_ops.activePane(session).terms.items) |term| term.rt.terminated = true;
     session.total_output_events = 1;
     session.latchSessionEndOrHold(null, 999_999);
     try std.testing.expect(!session.ended_seen);
@@ -64384,7 +62529,7 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/close-request-identity.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-request-identity.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
@@ -64463,8 +62608,8 @@ test "file panel dirty close alternate discards only the pinned tab" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/close-background-a.md", .markdown);
-    _ = try session.openFileTermInActivePane("/tmp/close-background-b.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-background-a.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-background-b.md", .markdown);
     session.assignDockSurfaceIds();
     // FP16: 두 번째 open이 곧 pane의 active 파일 탭이다(옛 group.active = 1 자리).
     const background_sid = session.fileEntryAt(0).?.surface_id;
@@ -64496,7 +62641,7 @@ test "file panel save action identity mismatch aborts and unlocks instead of sti
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/save-drain-stale.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/save-drain-stale.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
@@ -64522,7 +62667,7 @@ test "dock replacement clears file close hover focus and one-shot transients" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/replace-pending.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/replace-pending.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
@@ -64550,7 +62695,7 @@ test "file panel focus supersedes a queued workspace first-responder action" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    _ = try session.openFileTermInActivePane("/tmp/focus-successor.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/focus-successor.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = session.fileEntryAt(0).?.surface_id;
     session.workspace_focus_pending = true;
@@ -64691,7 +62836,7 @@ test "FP6 merge into empty explorer adopts source explorer authority and present
     const dst = try initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
-    _ = try src.openFileTermInActivePane("/tmp/adopt-root.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(src, "/tmp/adopt-root.md", .markdown);
     src.assignDockSurfaceIds();
     try src.file_tree.replaceExplicitRoots(&.{"/source-explicit"});
     src.dock.presented = true;
@@ -64714,7 +62859,7 @@ test "FP6 merge with no destination file tabs preserves configured destination e
     const dst = try initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
-    _ = try src.openFileTermInActivePane("/tmp/source-only.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(src, "/tmp/source-only.md", .markdown);
     src.assignDockSurfaceIds();
     try src.file_tree.replaceExplicitRoots(&.{"/source-root"});
     try dst.file_tree.replaceExplicitRoots(&.{"/destination-root"});
@@ -64739,8 +62884,8 @@ test "FP6 merge preserves source project-root authority in an inferred destinati
 
     const source_path = "/repo/sub/file.md";
     const destination_path = "/destination/open.md";
-    _ = try src.openFileTermInActivePane(source_path, .markdown);
-    _ = try dst.openFileTermInActivePane(destination_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(src, source_path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(dst, destination_path, .markdown);
     src.assignDockSurfaceIds();
     dst.assignDockSurfaceIds();
     try src.file_tree.recordOpened(source_path, "/repo");
@@ -64764,7 +62909,7 @@ test "file panel close transition rejects window merge before model mutation" {
     const dst = try initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
-    _ = try src.openFileTermInActivePane("/tmp/merge-close-lock.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(src, "/tmp/merge-close-lock.md", .markdown);
     src.assignDockSurfaceIds();
     const sid = src.fileEntryAt(0).?.surface_id;
     src.fileEntryAt(0).?.mode = .source_edit;
@@ -64790,15 +62935,15 @@ test "FP8 merge carries every source 파일 탭과 live surface를 destination�
     const dst = try initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
-    _ = try src.openFileTermInActivePane("/tmp/fp8-merge-a.md", .markdown);
-    const src_b_open = try src.openFileTermInActivePane("/tmp/fp8-merge-b.html", .html);
+    _ = try pane_ops.openFileTermInActivePane(src, "/tmp/fp8-merge-a.md", .markdown);
+    const src_b_open = try pane_ops.openFileTermInActivePane(src, "/tmp/fp8-merge-b.html", .html);
     const src_b_id = src_b_open.term.file_entry.?.id;
     src.assignDockSurfaceIds();
     const sid_a = src.fileEntryAt(0).?.surface_id;
     const sid_b = file_panel_ops.fileEntryForId(src, src_b_id).?.surface_id;
 
-    _ = try dst.openFileTermInActivePane("/tmp/fp8-merge-dst.md", .markdown);
-    _ = try dst.openFileTermInActivePane("/tmp/fp8-merge-dst-split.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/fp8-merge-dst.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/fp8-merge-dst-split.md", .markdown);
     dst.assignDockSurfaceIds();
 
     var moved_buf: [16]u64 = undefined;
@@ -64823,8 +62968,8 @@ test "FP6 merge rejects duplicate dirty file panels without mutating either dock
     defer dst.deinit();
 
     const path = "/tmp/fp6-duplicate-dirty.md";
-    _ = try src.openFileTermInActivePane(path, .markdown);
-    _ = try dst.openFileTermInActivePane(path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(src, path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(dst, path, .markdown);
     src.assignDockSurfaceIds();
     dst.assignDockSurfaceIds();
     const src_entry = src.fileEntryAt(0).?;
@@ -64855,9 +63000,9 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     defer dst.deinit();
 
     const path = "/tmp/fp9-duplicate-focus.md";
-    _ = try src.openFileTermInActivePane(path, .markdown);
-    _ = try dst.openFileTermInActivePane(path, .markdown);
-    _ = try dst.openFileTermInActivePane("/tmp/fp9-newer-native-focus.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(src, path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(dst, path, .markdown);
+    _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/fp9-newer-native-focus.md", .markdown);
     src.assignDockSurfaceIds();
     dst.assignDockSurfaceIds();
     const source = src.fileEntryAt(0).?;
@@ -65144,7 +63289,7 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
 
-    const term = session.activePane().terms.items[session.activePane().active_term];
+    const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
     const rect = session.active_pane_rect;
     const x = @as(f64, @floatFromInt(rect.x)) + 5.5 * @as(f64, @floatFromInt(session.cell_width_px));
@@ -65236,7 +63381,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     const surface = session.activeSurface();
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
-    const term = session.activePane().terms.items[session.activePane().active_term];
+    const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
     session.audible_bell = true;
 
@@ -65291,7 +63436,7 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     const surface = session.activeSurface();
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
-    const term = session.activePane().terms.items[session.activePane().active_term];
+    const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
 
     // 요청 없음 → false.
@@ -65338,7 +63483,7 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     const surface = session.activeSurface();
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
-    const term = session.activePane().terms.items[session.activePane().active_term];
+    const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
     session.audible_bell = true;
     session.loaded_config.config.osc52.read = .allow;
@@ -65381,18 +63526,18 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    const pane = session.activePane();
-    try session.newWebTermInActivePane(.markdown);
+    const pane = pane_ops.activePane(session);
+    try pane_ops.newWebTermInActivePane(session, .markdown);
     const md = pane.activeTerm();
     try std.testing.expect(md.kind == .web and md.web_panel_kind == .markdown);
     try std.testing.expect(!AppSession.isBrowserTerm(md)); // 술어가 갈라낸다
 
-    try session.newWebTermInActivePane(.browser);
+    try pane_ops.newWebTermInActivePane(session, .browser);
     const browser = pane.activeTerm();
     try std.testing.expect(AppSession.isBrowserTerm(browser));
 
     // 소비처 검증: 주소창 밴드는 browser에만 top inset을 더한다(bar_h vs 2*bar_h).
-    const bar_h = session.paneBarHeightPx();
+    const bar_h = pane_ops.paneBarHeightPx(session);
     try std.testing.expect(bar_h > 0);
 
     var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
@@ -65434,12 +63579,12 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    const a = try session.openFileTermInActivePane("/tmp/b1-a.md", .markdown);
+    const a = try pane_ops.openFileTermInActivePane(session, "/tmp/b1-a.md", .markdown);
     const a_id = a.term.file_entry.?.id;
-    _ = try session.openFileTermInActivePane("/tmp/b1-b.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/b1-b.md", .markdown);
     // 두 번째 워크스페이스에 열어 이터레이터가 **탭 경계**를 넘는지 검증한다(FP16에서 그룹 경계를 대신한다).
     _ = try session.newTab();
-    const c = try session.openFileTermInActivePane("/tmp/b1-c.md", .markdown);
+    const c = try pane_ops.openFileTermInActivePane(session, "/tmp/b1-c.md", .markdown);
     const c_id = c.term.file_entry.?.id;
 
     // ① 이터레이터는 그룹과 무관하게 창의 전 entry를 준다.
@@ -65493,9 +63638,9 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     defer session.deinit();
 
     // pane: [terminal, browser, alpha.md, beta.html] — persisted 시퀀스는 [terminal, alpha, beta]다.
-    _ = try session.newWebTermInActivePane(.browser);
-    _ = try session.openFileTermInActivePane("/tmp/fp16-persist-alpha.md", .markdown);
-    _ = try session.openFileTermInActivePane("/tmp/fp16-persist-beta.html", .html);
+    _ = try pane_ops.newWebTermInActivePane(session, .browser);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-persist-alpha.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-persist-beta.html", .html);
     session.assignDockSurfaceIds();
     file_panel_ops.fileEntryForPath(session, "/tmp/fp16-persist-alpha.md").?.mode = .source_edit;
 
@@ -65530,7 +63675,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     // 이미 source_edit이 실려 있어 왕복 검증에는 영향이 없다.
     file_panel_ops.fileEntryForPath(session, "/tmp/fp16-persist-alpha.md").?.mode = .read;
     try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     try std.testing.expect(pane.terms.items[0].file_entry == null); // 터미널
     try std.testing.expectEqualStrings("/tmp/fp16-persist-alpha.md", pane.terms.items[1].file_entry.?.path);
@@ -65552,10 +63697,10 @@ test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지
     defer session.deinit();
 
     // pane을 [파일] 하나로 만든다(터미널을 닫아).
-    const opened = try session.openFileTermInActivePane("/tmp/fp16-last-term.md", .markdown);
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-last-term.md", .markdown);
     session.assignDockSurfaceIds();
     const sid = opened.term.file_entry.?.surface_id;
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     while (pane.terms.items.len > 1) {
         const victim = for (pane.terms.items, 0..) |t, i| {
             if (t.file_entry == null) break i;
@@ -65567,7 +63712,7 @@ test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     // **구조는 그대로다** — Term을 빼면 pane이 Term 0개가 되어 모델 불변식이 깨지고, latch가 그 직후
     // 해제된 대표 surface에 쓴다(5차 리뷰가 잡은 UAF). 정리는 deinit이 한다.
-    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.ended_seen); // 창이 닫힌다
 }
 
@@ -65579,11 +63724,11 @@ test "FP16 닫기: 다른 파일이 종료를 막으면 마지막 Term close는 
     defer session.deinit();
 
     // 워크스페이스 둘: 0번에 지킬 파일(dirty), 1번에 닫을 파일.
-    const guarded = try session.openFileTermInActivePane("/tmp/fp16-guard.md", .markdown);
+    const guarded = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-guard.md", .markdown);
     session.assignDockSurfaceIds();
     guarded.term.file_entry.?.dirty = true;
     _ = try session.newTab();
-    const victim = try session.openFileTermInActivePane("/tmp/fp16-victim.md", .markdown);
+    const victim = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-victim.md", .markdown);
     session.assignDockSurfaceIds();
     const victim_sid = victim.term.file_entry.?.surface_id;
 
@@ -65601,7 +63746,7 @@ test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없�
     defer session.deinit();
 
     // `.text`의 기본 mode는 source_edit이다 — 손도 안 댄 이 탭 하나가 그 pane을 영영 못 닫게 하면 안 된다.
-    const opened = try session.openFileTermInActivePane("/tmp/fp16-clean.py", .text);
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-clean.py", .text);
     session.assignDockSurfaceIds();
     const entry = opened.term.file_entry.?;
     try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
@@ -65733,9 +63878,9 @@ test "captureWorkspaceTab: diff Term은 index를 차지하지 않는다(복원 f
     defer arena.deinit();
 
     // [term0, diff, markdown] — diff가 가운데라 뒤 파일 Term의 index가 밀린다(그게 결함의 조건이었다).
-    _ = try session.openFileTermInActivePane("/tmp/diff-capture.zig", .diff);
-    _ = try session.openFileTermInActivePane("/tmp/diff-capture.md", .markdown);
-    const pane = session.activePane();
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/diff-capture.zig", .diff);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/diff-capture.md", .markdown);
+    const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
 
     const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
@@ -65760,8 +63905,8 @@ test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에
     defer session.deinit();
 
     const path = "/tmp/same-path.md";
-    const md = try session.openFileTermInActivePane(path, .markdown);
-    const diff = try session.openFileTermInActivePane(path, .diff);
+    const md = try pane_ops.openFileTermInActivePane(session, path, .markdown);
+    const diff = try pane_ops.openFileTermInActivePane(session, path, .diff);
     try std.testing.expect(md.term != diff.term); // 서로를 빼앗지 않는다
 
     // 탐색기 경로 조회는 diff를 건너뛴다 — 그러지 않으면 파일을 열 때 diff Term이 활성화된다.
@@ -66090,7 +64235,7 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
     const request_id = entry.diff_request_id;
 
     // 그 Term을 닫는다(백엔드가 실제로 돌고 있었다면 결과는 뒤에 온다).
-    const pane = session.activePane();
+    const pane = pane_ops.activePane(session);
     var index: usize = 0;
     while (index < pane.terms.items.len) : (index += 1) {
         if (pane.terms.items[index] == term) break;
@@ -66538,8 +64683,8 @@ fn openAgentSessionsDockForRouting(session: *AppSession, side: dock_panel.Side) 
     session.agent_session_archive_initialized = false;
     session.setDockView(.agent_sessions);
     session.agent_session_archive_initialized = true;
-    for (session.tabs.items) |tab| session.resizeTabPanes(tab);
-    session.recomputeActivePaneRect();
+    for (session.tabs.items) |tab| pane_ops.resizeTabPanes(session, tab);
+    pane_ops.recomputeActivePaneRect(session);
 }
 
 fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side) !*AppSession {
@@ -66585,11 +64730,11 @@ test "divider capture는 split이 사라지면 carry verdict가 취소한다" {
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 3 pane: split{P0, split{P1, P2}}. 안쪽 divider를 잡고 그 split을 없앤다.
-    try session.splitActivePane(.horizontal);
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     try std.testing.expectEqual(@as(usize, 2), segs.items.len);
 
     // 활성 pane(P2)이 속한 안쪽 split의 divider를 찾는다.
@@ -66605,17 +64750,17 @@ test "divider capture는 split이 사라지면 carry verdict가 취소한다" {
     const div_y: f64 = @floatFromInt(inner.bounds.y + inner.bounds.h / 2);
 
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
     try std.testing.expect(session.divider_capture_split == inner.split);
 
     // 드래그 중에 그 split이 collapse된다(단축키 close 등 외부 구조 변경).
-    session.closeActivePane();
-    try std.testing.expect(!session.dividerCaptureActive());
+    pane_ops.closeActivePane(session);
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
 
     // 이후 move는 아무 것도 끌지 않는다 — 사라진 대상 위에서 resize가 계속되면 안 된다.
     session.mouse(2, div_x - 100, div_y, 0, 0);
     _ = try session.tick();
-    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
 }
 
 test "드래그 중 탭이 바뀌면 carry verdict가 divider capture를 끊는다" {
@@ -66633,18 +64778,18 @@ test "드래그 중 탭이 바뀌면 carry verdict가 divider capture를 끊는�
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
 
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     const seg = segs.items[0];
     const split = seg.split;
     const div_x: f64 = @floatFromInt(seg.pos);
     const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
 
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
     const ratio_at_capture = split.ratio;
 
     // 드래그 도중 키보드로 다른 탭을 연다. split은 그대로 살아 있으므로 구조 무효화 경로는 아무
@@ -66656,7 +64801,7 @@ test "드래그 중 탭이 바뀌면 carry verdict가 divider capture를 끊는�
     _ = try session.tick();
 
     // capture가 끊기고, 보이지도 않는 탭의 split이 조용히 resize되지 않는다.
-    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
     try std.testing.expectEqual(ratio_at_capture, split.ratio);
 }
 
@@ -66675,11 +64820,11 @@ test "divider probe는 move 수가 아니라 tick 수만큼 resize했음을 드�
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
 
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     const seg = segs.items[0];
     const div_x: f64 = @floatFromInt(seg.pos);
     const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
@@ -66725,24 +64870,24 @@ test "divider capture와 PointerGestureOwner는 같은 stream에 공존하지 �
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
 
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     const seg = segs.items[0];
     const div_x: f64 = @floatFromInt(seg.pos);
     const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
 
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
     // divider가 capture를 들고 있는 동안 owner union은 비어 있어야 한다. 두 권위가 겹치면
     // 어느 쪽이 이 stream을 소유하는지 이벤트마다 달라진다(이관 계약 §4.3).
     try std.testing.expect(session.pointerGestureIs(.none));
 
     // 반대 방향: 다른 gesture가 시작되면 divider capture가 끝난다.
     session.beginPointerGesture(.{ .scrollbar = .{ .grab = 0 } });
-    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
     try std.testing.expect(session.divider_capture_split == null);
 }
 
@@ -66754,17 +64899,17 @@ test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추
     defer session.deinit();
     try std.testing.expect(session.dockVisible());
 
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
-    try session.layoutActiveTabDividers(&segs);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
     const seg = segs.items[0];
     const split = seg.split;
     const div_x: f64 = @floatFromInt(seg.pos);
     const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
 
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
     session.mouse(2, div_x - 200, div_y, 0, 0);
     _ = try session.tick();
     const ratio_outside = split.ratio;
@@ -66775,11 +64920,11 @@ test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
     _ = try session.tick();
     try std.testing.expect(split.ratio != ratio_outside);
-    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
     try std.testing.expect(session.agent_session_dock_interaction.capture == null);
 
     session.mouse(3, dock_center.x, dock_center.y, 0, 0);
-    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(!pane_ops.dividerCaptureActive(session));
     _ = try session.tick();
 }
 
@@ -66790,11 +64935,11 @@ test "라이브 Term 탭 드래그는 도크 위를 지나도 좌표를 계속 �
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try session.newTermInActivePane(); // 탭 2개 — 탭 세그먼트가 생긴다
+    try pane_ops.newTermInActivePane(session); // 탭 2개 — 탭 세그먼트가 생긴다
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     const tab_x: f64 = @floatFromInt(pb.tabs.x + 2);
     const tab_y: f64 = @floatFromInt(pb.full.y + 1);
 
@@ -66820,11 +64965,11 @@ test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받�
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try session.splitActivePane(.horizontal);
+    try pane_ops.splitActivePane(session, .horizontal);
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+    const pb = pane_ops.paneBar(session, lr.items[1].rect, lr.items[1].leaf).?;
 
     // grip(좌측, tabs.x 앞) down → pane 통째 드래그 arm.
     session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0);
@@ -67466,9 +65611,9 @@ test "도크 ⌘ 단축키는 실제로 실행할 때만 키를 소비한다" {
 
     // 펼친 카드가 없다 = 도크가 실행할 것이 없다 → 사용자 바인딩이 살아 있어야 한다.
     try std.testing.expect(session.agent_session_inline_detail == null);
-    const before = session.activePane().terms.items.len;
+    const before = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(before + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(before + 1, pane_ops.activePane(session).terms.items.len);
 
     // 대조군: ready expansion이 있으면 도크가 먼저 가져간다(문서화된 `⌘L` = 로그 보기). 이때는 사용자
     // 바인딩이 실행되지 않아야 한다 — 게이트가 vacuous하지 않다는 뜻이다.
@@ -67480,9 +65625,9 @@ test "도크 ⌘ 단축키는 실제로 실행할 때만 키를 소비한다" {
     try std.testing.expect(session.agent_session_inline_detail != null);
     // loading 상태는 아직 ready가 아니므로 이 시점의 ⌘L도 여전히 사용자 바인딩으로 흘러야 한다.
     try std.testing.expect(session.agent_session_inline_detail.?.state != .ready);
-    const before_loading = session.activePane().terms.items.len;
+    const before_loading = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(before_loading + 1, session.activePane().terms.items.len);
+    try std.testing.expectEqual(before_loading + 1, pane_ops.activePane(session).terms.items.len);
     _ = try session.tick();
 }
 
@@ -68051,8 +66196,8 @@ test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바
     try std.testing.expectEqual(explorer.tree.y, agent.tree.y);
 
     // (2) 그 높이가 곧 terminal pane 탭 바 높이다.
-    try std.testing.expectEqual(session.paneBarHeightPx(), explorer.view_bar.h);
-    try std.testing.expectEqual(session.paneBarHeightPx(), agent.view_bar.h);
+    try std.testing.expectEqual(pane_ops.paneBarHeightPx(session), explorer.view_bar.h);
+    try std.testing.expectEqual(pane_ops.paneBarHeightPx(session), agent.view_bar.h);
 
     // 그 높이는 chrome token 값 **그대로**다 — 셀 항이 `@max`로도 섞이지 않는다.
     const token_px = layout_math.ptToPx(session.buildChromeTokens().space.bar_height_pt, session.scale_milli);
@@ -68074,7 +66219,7 @@ test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바
     try std.testing.expectEqual(zoomed_explorer.view_bar.h, zoomed_agent.view_bar.h);
     try std.testing.expectEqual(zoomed_explorer.tree.y, zoomed_agent.tree.y);
     // 그리고 두 바는 폰트가 바뀐 뒤에도 여전히 서로 같다.
-    try std.testing.expectEqual(session.paneBarHeightPx(), zoomed_explorer.view_bar.h);
+    try std.testing.expectEqual(pane_ops.paneBarHeightPx(session), zoomed_explorer.view_bar.h);
 }
 
 // 이 테스트가 증명하는 것: 사이드바 헤더의 두 줄이 창 오른쪽의 두 밴드와 **같은 좌표**에 있고, 그 정렬이

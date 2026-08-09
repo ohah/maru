@@ -181,7 +181,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 웹 탭 페이지 찾기(§8 슬라이스 ② — take/provide/undeliverable 3종)로 또 바뀐다. count는 4 그대로다.
     // 사이드바 헤더를 신호등 띠 + 상단 바 두 밴드로 정렬하며 또 바뀐다(docs/file-explorer.md §3.5). count는 4
     // 그대로다 — 헤더 높이·밴드 y를 푸는 순수 헬퍼와 draw list 분리뿐이고, Client 구성·receiver 집합과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "64b07918cff9788a88b6f734622721c6801c013bf8df7405168c964b7286e99a" },
+    // `reapplyAmbiguousWidth`의 빈 lockCore/unlockCore 쌍을 제거하며 또 바뀐다. count는 4 그대로다 —
+    // 죽은 락 두 줄을 지웠을 뿐 `@field` 접근과 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "69c1426245dcd6cccbea569e87e3828c19fc384b45d2d731eebdd2bd8abb727c" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

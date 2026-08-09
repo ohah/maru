@@ -189,7 +189,10 @@ pub const inventory = [_]Proof{
     // 집합과는 무관하다.
     // workspace·window(캡처/복원/이동, 창 속성)를 `app_session/workspace.zig`로 떼어내며 또 바뀐다(F10).
     // count는 2 그대로다 — 옮긴 블록에 `@field`가 없다. F9에서 이사한 둘은 settings.zig에 그대로 있다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c6d9d09ed12e3f3dc86d22ada2845910ff19abfeb0bc72cc78a458d2a400c999" },
+    // SV6b(오버레이 over quad를 프레임 끝에 한 덩어리로 flush)와 시각 검증용 MARU_FORCE_STICKY 훅으로 또
+    // 바뀐다. count는 2 그대로다 — 더한 것은 대기 버퍼 하나와 그 flush 호출, core에 바이트를 쓰는 훅뿐이고,
+    // 어느 것도 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6e266afc42005302b32e1c0f7e4fa40c13cf51625ad42b0df1f4aadebcd742bf" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

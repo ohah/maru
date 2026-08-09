@@ -1161,6 +1161,312 @@ test "CR3a-2c3d C1 null-profile drop and deinit validate sealed events" {
     try std.testing.expect(client.tryDeinit());
 }
 
+test "CR3a-2c3d C1 event ingress survives generation allocator scope restore" {
+    var stable_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const stable_allocator = stable_counting.allocator();
+    var temporary_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const temporary_allocator = temporary_counting.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    client.connection_profile = .gui;
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(
+        temporary_allocator,
+        .attachment_batch,
+        &scope,
+    );
+    const temporary_allocs_before = temporary_counting.alloc_calls;
+    const temporary_frees_before = temporary_counting.free_calls;
+    const stable_allocs_before = stable_counting.alloc_calls;
+    const scoped_payload = try temporary_allocator.dupe(u8, "{\"event\":\"future.event\"}");
+    try client.bufferCanonicalEvent(.{
+        .header = .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 23,
+            .payload_len = @intCast(scoped_payload.len),
+        },
+        .payload = scoped_payload,
+    });
+    try std.testing.expectEqual(temporary_allocs_before + 1, temporary_counting.alloc_calls);
+    try std.testing.expectEqual(temporary_frees_before + 1, temporary_counting.free_calls);
+    try std.testing.expect(stable_counting.alloc_calls > stable_allocs_before);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    try client.restoreGenerationAllocatorScope(&scope);
+
+    try std.testing.expect(!client.unusable);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(u64, 23), client.pending_events.items[0].header.stream_id);
+    const event = (try client.takeEventForStream(23)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(event.preflight.? == .unknown);
+    try std.testing.expect(event.sealMatches(stable_allocator));
+    const stable_frees_before_release = stable_counting.free_calls;
+    client.releaseEvent(event);
+    try std.testing.expectEqual(stable_frees_before_release + 1, stable_counting.free_calls);
+}
+
+test "CR3a-2c3d C1 active allocator scope preserves ended validation and event drop" {
+    var stable_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const stable_allocator = stable_counting.allocator();
+    var temporary_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const temporary_allocator = temporary_counting.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    client.connection_profile = .gui;
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(temporary_allocator, .attachment_batch, &scope);
+    const payload = try temporary_allocator.dupe(u8, "{\"event\":\"runtime.ended\"}");
+    try client.bufferCanonicalEvent(.{
+        .header = .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 29,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    });
+    const peek = try client.peekEndedEventForStream(29);
+    const hint = switch (peek) {
+        .candidate => |value| value,
+        .not_ended => return error.TestUnexpectedResult,
+    };
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(29, hint, &scratch, &prepared);
+    try std.testing.expect(prepared.abort());
+
+    const stable_frees_before_drop = stable_counting.free_calls;
+    client.dropBufferedStream(29);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
+    try std.testing.expectEqual(stable_frees_before_drop + 1, stable_counting.free_calls);
+    try client.restoreGenerationAllocatorScope(&scope);
+}
+
+test "CR3a-2c3d C1 allocator scope drift rejects coherently forged event authority" {
+    var stable_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const stable_allocator = stable_counting.allocator();
+    var temporary_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const temporary_allocator = temporary_counting.allocator();
+    var forged_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const forged_allocator = forged_counting.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    client.connection_profile = .gui;
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(temporary_allocator, .attachment_batch, &scope);
+    const canonical_identity = client.active_generation_allocator_scope.?;
+    const canonical_ledger_previous = ledger.allocator_scope_previous;
+    client.active_generation_allocator_scope.?.previous_allocator = forged_allocator;
+    ledger.allocator_scope_previous = forged_allocator;
+    const temporary_frees_before = temporary_counting.free_calls;
+    const payload = try temporary_allocator.dupe(u8, "{\"event\":\"future.event\"}");
+    try std.testing.expectError(error.ProtocolError, client.bufferCanonicalEvent(.{
+        .header = .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 31,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    }));
+    try std.testing.expectEqual(temporary_frees_before + 1, temporary_counting.free_calls);
+    try std.testing.expectEqual(@as(usize, 0), forged_counting.alloc_calls);
+    try std.testing.expectEqual(@as(usize, 0), forged_counting.free_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
+    try std.testing.expect(client.unusable);
+
+    client.active_generation_allocator_scope = canonical_identity;
+    ledger.allocator_scope_previous = canonical_ledger_previous;
+    try client.restoreGenerationAllocatorScope(&scope);
+}
+
+test "CR3a-2c3d C1 forged ledger pointer cannot replace private scope authority" {
+    var stable_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const stable_allocator = stable_counting.allocator();
+    var temporary_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const temporary_allocator = temporary_counting.allocator();
+    var forged_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const forged_allocator = forged_counting.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    client.connection_profile = .gui;
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(temporary_allocator, .attachment_batch, &scope);
+
+    var forged_ledger: generation_batch_registry.AccountingLedger = .{};
+    try forged_ledger.initInPlace();
+    try forged_ledger.bindClient(@intFromPtr(&client));
+    const canonical_identity = client.active_generation_allocator_scope.?;
+    client.active_generation_allocator_scope.?.previous_allocator = forged_allocator;
+    client.generation_batch_accounting.ledger = &forged_ledger;
+    const temporary_frees_before = temporary_counting.free_calls;
+    const payload = try temporary_allocator.dupe(u8, "{\"event\":\"future.event\"}");
+    try std.testing.expectError(error.ProtocolError, client.bufferCanonicalEvent(.{
+        .header = .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 33,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    }));
+    try std.testing.expectEqual(temporary_frees_before + 1, temporary_counting.free_calls);
+    try std.testing.expectEqual(@as(usize, 0), forged_counting.alloc_calls);
+    try std.testing.expectEqual(@as(usize, 0), forged_counting.free_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+
+    client.generation_batch_accounting.ledger = &ledger;
+    client.active_generation_allocator_scope = canonical_identity;
+    try client.restoreGenerationAllocatorScope(&scope);
+}
+
+test "CR3a-2c3d C1 stable event canonicalization OOM cleans temporary ownership" {
+    var stable_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const stable_allocator = stable_failing.allocator();
+    var temporary_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const temporary_allocator = temporary_counting.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    client.connection_profile = .gui;
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(temporary_allocator, .attachment_batch, &scope);
+    stable_failing.fail_index = stable_failing.alloc_index;
+    const temporary_frees_before = temporary_counting.free_calls;
+    const payload = try temporary_allocator.dupe(u8, "{\"event\":\"future.event\"}");
+    try std.testing.expectError(error.OutOfMemory, client.bufferCanonicalEvent(.{
+        .header = .{
+            .major = protocol.version_major,
+            .kind = .event,
+            .stream_id = 37,
+            .payload_len = @intCast(payload.len),
+        },
+        .payload = payload,
+    }));
+    try std.testing.expectEqual(temporary_frees_before + 1, temporary_counting.free_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.local_resource_exhausted,
+        client.first_poison_reason.?,
+    );
+
+    try client.restoreGenerationAllocatorScopeUnchecked(&scope);
+}
+
+test "CR3a-2c3d C1 ledger admission failure publishes no allocator scope state" {
+    const stable_allocator = std.testing.allocator;
+    var installed_buffer: [1]u8 = undefined;
+    var installed_fba = std.heap.FixedBufferAllocator.init(&installed_buffer);
+    const installed_allocator = installed_fba.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+    try ledger.beginAllocatorScope(
+        @intFromPtr(&client),
+        1,
+        1,
+        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        stable_allocator,
+        installed_allocator,
+    );
+    defer ledger.endAllocatorScope(
+        @intFromPtr(&client),
+        1,
+        1,
+        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        stable_allocator,
+        installed_allocator,
+    ) catch unreachable;
+
+    const epoch_before = client.generation_allocator_scope_epoch;
+    var scope: Client.GenerationAllocatorScope = .{};
+    try std.testing.expectError(
+        error.InvalidState,
+        client.beginGenerationAllocatorScope(
+            installed_allocator,
+            .attachment_batch,
+            &scope,
+        ),
+    );
+    try std.testing.expectEqual(Client.GenerationAllocatorScopeLifecycle.pristine, scope.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), scope.self_addr);
+    try std.testing.expectEqual(epoch_before, client.generation_allocator_scope_epoch);
+    try std.testing.expect(client.active_generation_allocator_scope == null);
+    try std.testing.expect(client.parser.usesAllocator(stable_allocator));
+    try std.testing.expect(Client.allocatorEql(client.allocator, stable_allocator));
+}
+
+test "CR3a-2c3d C1 ledger-only allocator authority blocks Client teardown" {
+    const stable_allocator = std.testing.allocator;
+    var installed_buffer: [1]u8 = undefined;
+    var installed_fba = std.heap.FixedBufferAllocator.init(&installed_buffer);
+    const installed_allocator = installed_fba.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+    try ledger.beginAllocatorScope(
+        @intFromPtr(&client),
+        1,
+        1,
+        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        stable_allocator,
+        installed_allocator,
+    );
+    try std.testing.expect(!client.tryDeinit());
+    try std.testing.expectEqual(generation_batch_registry.DeinitOutcome.busy, ledger.preflightDeinit());
+    try ledger.endAllocatorScope(
+        @intFromPtr(&client),
+        1,
+        1,
+        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        stable_allocator,
+        installed_allocator,
+    );
+    try std.testing.expect(client.tryDeinit());
+}
+
+test "CR3a-2c3d C1 rpc execute allocator scope uses the shared closed purpose" {
+    const stable_allocator = std.testing.allocator;
+    var installed_buffer: [1]u8 = undefined;
+    var installed_fba = std.heap.FixedBufferAllocator.init(&installed_buffer);
+    const installed_allocator = installed_fba.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(installed_allocator, .rpc_execute, &scope);
+    try std.testing.expect(client.parser.usesAllocator(installed_allocator));
+    try client.restoreGenerationAllocatorScope(&scope);
+    try std.testing.expect(client.parser.usesAllocator(stable_allocator));
+    try std.testing.expectEqual(generation_batch_registry.DeinitOutcome.cleaned, ledger.preflightDeinit());
+}
+
 /// ended purge의 빠른 판정 결과다. `event_index`는 느린 트랜잭션이 다시 검증할 힌트일 뿐
 /// 소유권이나 commit 권위를 나타내지 않는다.
 pub const EndedEventHint = struct {
@@ -6249,7 +6555,7 @@ pub const Client = struct {
         if (self.active_generation_allocator_scope != null) return false;
         if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
             (self.generation_batch_accounting.ledger != null and
-                self.generation_batch_accounting.ledger.?.item_count != 0))
+                self.generation_batch_accounting.ledger.?.preflightDeinit() != .cleaned))
             return false;
         if (bound_client) {
             // A generation-node Client is admitted only in blocking mode and the public external
@@ -6293,7 +6599,7 @@ pub const Client = struct {
         return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
             self.generation_batch_accounting.valid(@intFromPtr(self)) and
             (self.generation_batch_accounting.ledger == null or
-                self.generation_batch_accounting.ledger.?.item_count == 0) and
+                self.generation_batch_accounting.ledger.?.preflightDeinit() == .cleaned) and
             self.generationBatchSourceRangesValid();
     }
 
@@ -6338,12 +6644,7 @@ pub const Client = struct {
         self.generation_batch_accounting.ledger = ledger;
     }
 
-    pub const GenerationAllocatorPurpose = enum {
-        attachment_batch,
-        initial_snapshot,
-        rpc_prepare,
-        rpc_execute,
-    };
+    pub const GenerationAllocatorPurpose = generation_batch_registry.AllocatorScopePurpose;
 
     pub const GenerationAllocatorScopeLifecycle = enum {
         pristine,
@@ -6358,6 +6659,23 @@ pub const Client = struct {
         purpose: GenerationAllocatorPurpose,
         previous_allocator: std.mem.Allocator,
         installed_allocator: std.mem.Allocator,
+
+        fn validForClient(self: GenerationAllocatorScopeIdentity, client: *const Client) bool {
+            const purpose_raw = @as(*const u8, @ptrCast(&self.purpose)).*;
+            const ledger = client.generation_batch_accounting.ledger orelse return false;
+            return purpose_raw <= @intFromEnum(GenerationAllocatorPurpose.rpc_execute) and
+                self.token_addr != 0 and self.client_addr == @intFromPtr(client) and
+                self.epoch != 0 and ledger.allocatorScopeMatches(
+                self.client_addr,
+                self.token_addr,
+                self.epoch,
+                purpose_raw,
+                self.previous_allocator,
+                self.installed_allocator,
+            ) and
+                allocatorEql(client.allocator, self.installed_allocator) and
+                client.parser.usesAllocator(self.installed_allocator);
+        }
 
         fn matchesToken(
             self: GenerationAllocatorScopeIdentity,
@@ -6396,6 +6714,16 @@ pub const Client = struct {
         return left.ptr == right.ptr and left.vtable == right.vtable;
     }
 
+    /// Event ownership outlives a blocking generation allocator scope. While the parser uses the
+    /// installed allocator, event publication remains anchored to the pre-scope Client domain.
+    fn canonicalEventAllocator(self: *const Client) error{InvalidState}!std.mem.Allocator {
+        if (self.active_generation_allocator_scope) |scope| {
+            if (!scope.validForClient(self)) return error.InvalidState;
+            return scope.previous_allocator;
+        }
+        return self.allocator;
+    }
+
     pub fn beginGenerationAllocatorScope(
         self: *Client,
         allocator: std.mem.Allocator,
@@ -6424,6 +6752,22 @@ pub const Client = struct {
         const epoch = std.math.add(u64, self.generation_allocator_scope_epoch, 1) catch
             return error.IdentityExhausted;
         if (epoch == 0) return error.IdentityExhausted;
+        const active_identity: GenerationAllocatorScopeIdentity = .{
+            .token_addr = out_start,
+            .client_addr = @intFromPtr(self),
+            .epoch = epoch,
+            .purpose = purpose,
+            .previous_allocator = self.allocator,
+            .installed_allocator = allocator,
+        };
+        try self.generation_batch_accounting.ledger.?.beginAllocatorScope(
+            @intFromPtr(self),
+            out_start,
+            epoch,
+            @intFromEnum(purpose),
+            self.allocator,
+            allocator,
+        );
         out.* = .{
             .self_addr = out_start,
             .client_addr = @intFromPtr(self),
@@ -6436,14 +6780,7 @@ pub const Client = struct {
             .lifecycle = .active,
         };
         self.generation_allocator_scope_epoch = epoch;
-        self.active_generation_allocator_scope = .{
-            .token_addr = out_start,
-            .client_addr = out.client_addr,
-            .epoch = out.epoch,
-            .purpose = purpose,
-            .previous_allocator = self.allocator,
-            .installed_allocator = allocator,
-        };
+        self.active_generation_allocator_scope = active_identity;
         self.allocator = allocator;
         self.parser.restoreAllocatorAfterDrift(allocator);
     }
@@ -6487,11 +6824,20 @@ pub const Client = struct {
     ) (ClientError || generation_batch_registry.Error)!void {
         const active = self.active_generation_allocator_scope orelse return error.InvalidState;
         if (!scope.rawDiscriminatorsValid() or scope.lifecycle != .active or
+            !active.validForClient(self) or
             !active.matchesToken(scope) or
             active.client_addr != @intFromPtr(self) or
             !allocatorEql(self.allocator, active.installed_allocator) or
             !self.parser.usesAllocator(active.installed_allocator))
             return error.InvalidState;
+        try self.generation_batch_accounting.ledger.?.endAllocatorScope(
+            active.client_addr,
+            active.token_addr,
+            active.epoch,
+            @intFromEnum(active.purpose),
+            active.previous_allocator,
+            active.installed_allocator,
+        );
         self.allocator = active.previous_allocator;
         self.parser.restoreAllocatorAfterDrift(active.previous_allocator);
         self.active_generation_allocator_scope = null;
@@ -8391,11 +8737,16 @@ pub const Client = struct {
     pub fn commitPreparedExecutionRecoveryCleanupNoFail(self: *Client) void {
         const active_scope = self.active_generation_allocator_scope orelse
             @panic("prepared execution recovery allocator scope missing");
-        if (active_scope.token_addr == 0 or active_scope.client_addr != @intFromPtr(self) or
-            active_scope.epoch == 0 or active_scope.purpose != .rpc_execute or
-            !allocatorEql(self.allocator, active_scope.installed_allocator) or
-            !self.parser.usesAllocator(active_scope.installed_allocator))
+        if (active_scope.purpose != .rpc_execute or !active_scope.validForClient(self))
             @panic("prepared execution recovery allocator scope drifted");
+        self.generation_batch_accounting.ledger.?.endAllocatorScope(
+            active_scope.client_addr,
+            active_scope.token_addr,
+            active_scope.epoch,
+            @intFromEnum(active_scope.purpose),
+            active_scope.previous_allocator,
+            active_scope.installed_allocator,
+        ) catch @panic("prepared execution recovery allocator authority drifted");
         self.allocator = active_scope.previous_allocator;
         self.parser.restoreAllocatorAfterDrift(active_scope.previous_allocator);
         self.active_generation_allocator_scope = null;
@@ -9785,6 +10136,14 @@ pub const Client = struct {
             self.poison(.local_invariant_violation);
             return;
         }
+        const event_allocator = if (self.connection_profile != null and
+            self.connection_profile.?.requiresStrictExternalEvents())
+            self.allocator
+        else
+            self.canonicalEventAllocator() catch {
+                self.poison(.local_invariant_violation);
+                return;
+            };
         var i: usize = 0;
         while (i < self.pending_batches.items.len) {
             if (self.pending_batches.items[i].stream_id == stream_id) {
@@ -9812,7 +10171,7 @@ pub const Client = struct {
             if (self.pending_events.items[i].header.stream_id == stream_id) {
                 const frame = self.pending_events.orderedRemove(i);
                 self.pending_event_bytes -= frame.payload.len;
-                frame.deinit(self.allocator);
+                frame.deinit(event_allocator);
             } else i += 1;
         }
     }
@@ -9824,6 +10183,7 @@ pub const Client = struct {
     }
 
     fn validateGenerationEventQueue(self: *const Client) bool {
+        const event_allocator = self.canonicalEventAllocator() catch return false;
         if (self.pending_events.items.len > self.pending_events.capacity or
             self.pending_events.items.len > max_pending_event_count or
             (self.connection_profile != null and
@@ -9835,7 +10195,7 @@ pub const Client = struct {
                 event.header.request_id != 0 or event.header.stream_id == 0 or
                 event.header.flags != 0 or event.header.payload_len != event.payload.len or
                 event.payload.len > protocol.max_control_json or event.preflight == null or
-                !event.sealMatches(self.allocator))
+                !event.sealMatches(event_allocator))
                 return false;
             switch (event.preflight.?) {
                 .accepted, .unknown => {},
@@ -9952,42 +10312,18 @@ pub const Client = struct {
         // poison 전에 쌓인 event도 어느 stream의 누락보다 최신인지 증명할 수 없다. 일부 runtime만 한 번 더 전진시키지 않고
         // 모든 shared runtime이 다음 pump에서 같은 ConnectionClosed를 보게 한다.
         if (self.unusable) return null;
+        const event_allocator = self.canonicalEventAllocator() catch {
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
         // A sealed GUI event whose header/preflight/payload pairing drifted is connection-wide
         // ambiguous. Its header is no longer routing evidence, so consume/free it here and report
         // a typed terminal before any runtime can project the corrupted parsed view.
         for (self.pending_events.items, 0..) |frame, i| {
-            if (!frame.sealMatches(self.allocator)) {
-                if (builtin.is_test) {
-                    const seal_value = frame.admission_seal;
-                    std.debug.print(
-                        "client event seal mismatch: stream={d} preflight={s} seal={} header={} allocator={} address={} length={} digest={} admission={}\n",
-                        .{
-                            frame.header.stream_id,
-                            if (frame.preflight == null) "raw" else @tagName(frame.preflight.?),
-                            seal_value != null,
-                            if (seal_value) |seal| std.meta.eql(seal.header, frame.header) else false,
-                            if (seal_value) |seal| std.meta.eql(seal.allocator, self.allocator) else false,
-                            if (seal_value) |seal| seal.payload_addr == @intFromPtr(frame.payload.ptr) else false,
-                            if (seal_value) |seal| seal.payload_len == frame.payload.len else false,
-                            if (seal_value) |seal| blk: {
-                                const digest = runtime_event_wire.payloadDigest(frame.payload);
-                                break :blk std.mem.eql(u8, &seal.payload_digest, &digest);
-                            } else false,
-                            if (seal_value) |seal| blk: {
-                                const verdict = frame.preflight orelse break :blk false;
-                                break :blk switch (verdict) {
-                                    .accepted => |accepted| std.meta.activeTag(seal.admission) == .accepted and
-                                        runtime_event_wire.eventPreflightEql(seal.admission.accepted, accepted),
-                                    .unknown => std.meta.activeTag(seal.admission) == .unknown,
-                                    else => false,
-                                };
-                            } else false,
-                        },
-                    );
-                }
+            if (!frame.sealMatches(event_allocator)) {
                 const owned = self.pending_events.orderedRemove(i);
                 self.pending_event_bytes -= owned.payload.len;
-                owned.deinit(self.allocator);
+                owned.deinit(event_allocator);
                 self.poison(.local_invariant_violation);
                 return error.ProtocolError;
             }
@@ -10016,6 +10352,8 @@ pub const Client = struct {
             self.pending_events.items.len > self.pending_events.capacity or
             self.pending_events.items.len > max_pending_event_count)
             return error.InvalidClientState;
+        const event_allocator = self.canonicalEventAllocator() catch
+            return error.InvalidClientState;
 
         for (self.pending_events.items, 0..) |frame, index| {
             if (frame.header.stream_id != stream_id) continue;
@@ -10030,7 +10368,7 @@ pub const Client = struct {
                 .accepted => |value| value,
                 else => return error.InvalidClientState,
             };
-            if (!frame.acceptedSealMetadataMatches(accepted, self.allocator))
+            if (!frame.acceptedSealMetadataMatches(accepted, event_allocator))
                 return error.InvalidClientState;
 
             return if (accepted.event == .ended)
@@ -10056,6 +10394,8 @@ pub const Client = struct {
         if (out.lifecycle != .empty or out.self_addr != 0 or
             scratch.lifecycle != .empty or target_stream == 0)
             return error.DestinationOccupied;
+        const event_allocator = self.canonicalEventAllocator() catch
+            return error.InvalidSource;
         const client_start = @intFromPtr(self);
         const scratch_start = @intFromPtr(scratch);
         const out_start = @intFromPtr(out);
@@ -10108,7 +10448,7 @@ pub const Client = struct {
             else => return error.InvalidHint,
         };
         if (ended_preflight.event != .ended or
-            !ended.acceptedSealMetadataMatches(ended_preflight, self.allocator))
+            !ended.acceptedSealMetadataMatches(ended_preflight, event_allocator))
             return error.InvalidHint;
 
         scratch.batch_targets = .initEmpty();
@@ -10188,7 +10528,7 @@ pub const Client = struct {
                 .accepted => |value| value,
                 else => return error.InvalidSource,
             };
-            if (!event.sealMatches(self.allocator)) return error.InvalidSource;
+            if (!event.sealMatches(event_allocator)) return error.InvalidSource;
             const descriptor = externalFrameDescriptor(event);
             try endedPurgeRangeOutsideProtected(
                 try endedPurgeCheckedPayloadRange(descriptor.payload_address, descriptor.payload_len),
@@ -10265,7 +10605,7 @@ pub const Client = struct {
         for (self.pending_stream.items, 0..) |frame, index|
             writeEndedPurgeFrameSeal(&stream_writer, scratch.stream[index], frame.payload);
         for (self.pending_events.items, 0..) |event, index| {
-            if (!event.sealMatches(self.allocator)) return error.InvalidSource;
+            if (!event.sealMatches(event_allocator)) return error.InvalidSource;
             writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
         }
         if (self.partial_batch) |partial|
@@ -10467,6 +10807,8 @@ pub const Client = struct {
             operation_generation == 0 or target_stream == 0 or
             self.io_mode != .blocking)
             return error.InvalidState;
+        const event_allocator = self.canonicalEventAllocator() catch
+            return error.Corrupt;
 
         const client_range = externalRangeOfValue(self);
         const scratch_range = externalRangeOfValue(scratch);
@@ -10632,7 +10974,7 @@ pub const Client = struct {
                 ) catch return error.ArithmeticOverflow;
         }
         for (self.pending_events.items, 0..) |event, index| {
-            if (!event.sealMatches(self.allocator)) return error.Corrupt;
+            if (!event.sealMatches(event_allocator)) return error.Corrupt;
             writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
             event_bytes = std.math.add(usize, event_bytes, event.payload.len) catch
                 return error.ArithmeticOverflow;
@@ -10831,6 +11173,7 @@ pub const Client = struct {
         inventory: *const PreparedEndedPurgeInventory,
         prepared: *const PreparedEndedPurgeCommit,
     ) bool {
+        const event_allocator = self.canonicalEventAllocator() catch return false;
         if (operation_generation == 0 or self.fd != prepared.captured_fd or
             self.ownership != .standalone or self.unusable or
             self.first_poison_reason != null)
@@ -10947,7 +11290,7 @@ pub const Client = struct {
             const event = self.pending_events.items[survivor_ordinal];
             const descriptor = frozen.events[source];
             if (!std.meta.eql(externalFrameDescriptor(event), descriptor) or
-                !event.sealMatches(self.allocator))
+                !event.sealMatches(event_allocator))
                 return false;
             writeEndedPurgeFrameSeal(&survivors, descriptor, event.payload);
             survivor_ordinal += 1;
@@ -11072,6 +11415,8 @@ pub const Client = struct {
 
         const frozen: *const EndedPurgeScratch = scratch;
         const cleanup_allocator = self.allocator;
+        const event_allocator = self.canonicalEventAllocator() catch
+            @panic("ended purge event allocator authority drifted before cleanup");
         var range_order: [max_external_owner_range_count]u16 = undefined;
         validateEndedPurgeOuterRanges(
             self,
@@ -11111,7 +11456,7 @@ pub const Client = struct {
         for (self.pending_events.items, 0..) |event, index| {
             const descriptor = externalFrameDescriptor(event);
             if (!std.meta.eql(descriptor, frozen.events[index]) or
-                !event.sealMatches(self.allocator))
+                !event.sealMatches(event_allocator))
                 @panic("ended purge event descriptor drifted before cleanup");
             writeEndedPurgeFrameSeal(&event_writer, descriptor, event.payload);
         }
@@ -11224,7 +11569,7 @@ pub const Client = struct {
                 @panic("ended purge event cleanup ordinal drifted");
             const descriptor = frozen.events[source];
             self.cleanupEndedPurgeTargetDirect(
-                cleanup_allocator,
+                event_allocator,
                 descriptor.payload_address,
                 descriptor.payload_len,
                 &prepared.event_cleanup_ordinal,
@@ -11328,11 +11673,15 @@ pub const Client = struct {
 
     /// Releases an event through the allocator that admitted it. Consumers must not assume their
     /// projection allocator is identical to the shared Client transport allocator.
-    pub fn releaseEvent(self: *const Client, event: BufferedEvent) void {
+    pub fn releaseEvent(self: *Client, event: BufferedEvent) void {
         const operation_fence_held = self.beginPublicMutation() catch return;
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return;
-        event.deinit(self.allocator);
+        const event_allocator = self.canonicalEventAllocator() catch {
+            self.poison(.local_invariant_violation);
+            return;
+        };
+        event.deinit(event_allocator);
     }
 
     /// full-state event는 같은 stream+종류의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
@@ -11358,7 +11707,24 @@ pub const Client = struct {
             self.poison(.local_invariant_violation);
             return error.ProtocolError;
         }
-        return self.bufferEventWithAllocator(frame, self.allocator);
+        const parser_allocator = self.allocator;
+        const event_allocator = self.canonicalEventAllocator() catch {
+            frame.deinit(parser_allocator);
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+        if (!allocatorEql(parser_allocator, event_allocator)) {
+            const payload = event_allocator.dupe(u8, frame.payload) catch {
+                frame.deinit(parser_allocator);
+                self.poison(.local_resource_exhausted);
+                return error.OutOfMemory;
+            };
+            var canonical = frame;
+            canonical.payload = payload;
+            frame.deinit(parser_allocator);
+            return self.bufferEventWithAllocator(canonical, event_allocator);
+        }
+        return self.bufferEventWithAllocator(frame, event_allocator);
     }
 
     pub fn bufferGenerationEventForTest(
@@ -11369,7 +11735,11 @@ pub const Client = struct {
         if (!builtin.is_test) return error.ProtocolError;
         const operation_fence_held = try self.beginPublicMutation();
         defer if (operation_fence_held) self.endPublicMutation();
-        const owned = self.allocator.dupe(u8, payload) catch return error.OutOfMemory;
+        const event_allocator = self.canonicalEventAllocator() catch {
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+        const owned = event_allocator.dupe(u8, payload) catch return error.OutOfMemory;
         return self.bufferEventWithAllocator(.{
             .header = .{
                 .kind = .event,
@@ -11378,7 +11748,7 @@ pub const Client = struct {
                 .major = self.wire_major,
             },
             .payload = owned,
-        }, self.allocator);
+        }, event_allocator);
     }
 
     fn bufferEventWithAllocator(
@@ -11401,7 +11771,12 @@ pub const Client = struct {
         // GUI-generation events must enter and leave through the canonical Client allocator.
         // Merely recording a foreign allocator in the seal would publish poisoned ownership and
         // make replacement or teardown choose between a mismatched free and a leak.
-        if (!std.meta.eql(allocator, self.allocator)) {
+        const event_allocator = self.canonicalEventAllocator() catch {
+            frame.deinit(allocator);
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+        if (!allocatorEql(allocator, event_allocator)) {
             frame.deinit(allocator);
             self.poison(.local_invariant_violation);
             return error.ProtocolError;
@@ -11483,7 +11858,7 @@ pub const Client = struct {
         // No replacement/supersession decision may inspect a previously admitted header or
         // parsed scalar until its independent admission copy has rebound all three components.
         for (self.pending_events.items) |old| {
-            if (!old.sealMatches(self.allocator)) {
+            if (!old.sealMatches(event_allocator)) {
                 buffered.deinit(allocator);
                 self.poison(.local_invariant_violation);
                 return error.ProtocolError;
@@ -12006,8 +12381,9 @@ pub const Client = struct {
         self: *const Client,
         stream_id: ?u64,
     ) bool {
+        const event_allocator = self.canonicalEventAllocator() catch return true;
         for (self.pending_events.items) |frame| {
-            if (!frame.sealMatches(self.allocator)) return true;
+            if (!frame.sealMatches(event_allocator)) return true;
             const verdict = frame.preflight orelse
                 runtime_event_wire.preflightEvent(frame.payload, .{});
             switch (verdict) {
@@ -18280,6 +18656,7 @@ const ProofForgedAllocator = struct {
 
 const FreeCountingAllocator = struct {
     parent: std.mem.Allocator,
+    alloc_calls: usize = 0,
     free_calls: usize = 0,
     mutate_on_free_a: ?*usize = null,
     mutate_on_free_b: ?*usize = null,
@@ -18305,6 +18682,7 @@ const FreeCountingAllocator = struct {
         ret_addr: usize,
     ) ?[*]u8 {
         const self: *FreeCountingAllocator = @ptrCast(@alignCast(context));
+        self.alloc_calls += 1;
         return self.parent.vtable.alloc(
             self.parent.ptr,
             len,

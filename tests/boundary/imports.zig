@@ -363,7 +363,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "bufferGenerationEventForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "peekEndedEventForStream", .receiver_type = immutable, .class = .guarded },
         .{ .name = "prepareEndedPurgeInventory", .receiver_type = immutable, .class = .guarded },
-        .{ .name = "releaseEvent", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "releaseEvent", .receiver_type = mutable, .class = .guarded },
         .{ .name = "sendInput", .receiver_type = mutable, .class = .guarded },
         .{ .name = "sendInputNonBlocking", .receiver_type = mutable, .class = .guarded },
         .{ .name = "sendScrollToBottomNonBlocking", .receiver_type = mutable, .class = .guarded },
@@ -1173,11 +1173,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     }{
         .{
             .path = "src/platform/macos/session_host/client.zig",
-            .baseline_count = 527,
-            // The allocator restore receiver is now a checked one-shot token consume rather than
-            // an unchecked allocator setter; this reviewed API rename intentionally changes the
-            // frozen declaration digest without expanding the baseline count.
-            .baseline_digest = .{ 0xa9, 0x86, 0xac, 0xb5, 0x53, 0x2e, 0x29, 0xb5, 0x89, 0x15, 0xe1, 0xa2, 0xfa, 0x98, 0xb4, 0xb0, 0x0c, 0xe2, 0xcd, 0x1e, 0xa8, 0x39, 0x4b, 0xb4, 0x83, 0x9a, 0xed, 0x9b, 0x42, 0xc5, 0x05, 0xb3 },
+            .baseline_count = 528,
+            // Event publication now has one private stable-domain selector so a temporary
+            // generation parser allocator cannot become persistent queue authority.
+            .baseline_digest = .{ 0xf8, 0xeb, 0xc7, 0x01, 0xb5, 0x75, 0x0f, 0x73, 0xe5, 0x9c, 0xf5, 0x43, 0xda, 0x6b, 0x7b, 0xcb, 0x03, 0x92, 0x38, 0x85, 0x04, 0xa6, 0xd8, 0xad, 0x49, 0xe5, 0x27, 0xd2, 0x3d, 0xaf, 0x21, 0xde },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{

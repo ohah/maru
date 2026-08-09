@@ -2109,7 +2109,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3a-2c3d C1"},
         });
         const run_event_c1_runtime_tests = b.addRunArtifact(event_c1_runtime_tests);
-        run_event_c1_runtime_tests.addArg("--maru-expect-tests=11");
+        run_event_c1_runtime_tests.addArg("--maru-expect-tests=21");
         run_event_c1_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c1_step.dependOn(&run_event_c1_runtime_tests.step);
 

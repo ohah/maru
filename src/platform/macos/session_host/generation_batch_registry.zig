@@ -4,6 +4,7 @@
 //! 실제 payload descriptor와 accounting receipt는 final-address registry 안에 남긴다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const max_entries: usize = 4096;
 
@@ -133,6 +134,44 @@ pub const DeinitOutcome = enum { cleaned, busy, already_dead, corrupt };
 
 const AccountingLifecycle = enum(u8) { pristine, live, dead };
 const AccountingEntryLifecycle = enum(u8) { empty, live, releasing };
+pub const AllocatorScopePurpose = enum(u8) {
+    attachment_batch,
+    initial_snapshot,
+    rpc_prepare,
+    rpc_execute,
+};
+const allocator_scope_purpose_max: u8 = @intFromEnum(AllocatorScopePurpose.rpc_execute);
+const AllocatorScopeState = enum { idle, active, invalid };
+
+const AllocatorScopeAuthority = struct {
+    ledger_addr: usize = 0,
+    client_addr: usize = 0,
+    token_addr: usize = 0,
+    epoch: u64 = 0,
+    purpose_raw: u8 = 0,
+    previous: ?std.mem.Allocator = null,
+    installed: ?std.mem.Allocator = null,
+    generation: u64 = 0,
+};
+
+var allocator_scope_authority_mutex: std.atomic.Mutex = .unlocked;
+var allocator_scope_authorities: [max_entries]AllocatorScopeAuthority =
+    [_]AllocatorScopeAuthority{.{}} ** max_entries;
+var allocator_scope_authority_generation: u64 = 0;
+var allocator_scope_authority_process_id: std.atomic.Value(u32) = .init(0);
+
+fn allocatorScopeProcessMatches() bool {
+    const current: u32 = if (builtin.os.tag == .macos) @intCast(std.c.getpid()) else 1;
+    const observed = allocator_scope_authority_process_id.load(.acquire);
+    if (observed == current) return true;
+    if (observed != 0) return false;
+    return allocator_scope_authority_process_id.cmpxchgStrong(
+        0,
+        current,
+        .acq_rel,
+        .acquire,
+    ) == null;
+}
 
 pub const PreparedAccountingConsume = struct {
     ledger_slot: u16,
@@ -155,6 +194,13 @@ pub const AccountingLedger = struct {
     releasing_item_count: usize = 0,
     releasing_byte_count: usize = 0,
     lifecycle: AccountingLifecycle = .pristine,
+    allocator_scope_token_addr: usize = 0,
+    allocator_scope_epoch: u64 = 0,
+    allocator_scope_purpose_raw: u8 = 0,
+    allocator_scope_previous: ?std.mem.Allocator = null,
+    allocator_scope_installed: ?std.mem.Allocator = null,
+    allocator_scope_authority_slot: u16 = 0,
+    allocator_scope_authority_generation: u64 = 0,
     entries: [max_entries]AccountingEntry = [_]AccountingEntry{.{}} ** max_entries,
 
     pub fn initInPlace(out: *AccountingLedger) Error!void {
@@ -171,11 +217,144 @@ pub const AccountingLedger = struct {
     fn valid(self: *const AccountingLedger) bool {
         return self.self_addr == @intFromPtr(self) and self.lifecycle == .live and
             self.item_count <= max_entries and self.releasing_item_count <= self.item_count and
-            self.releasing_byte_count <= self.byte_count;
+            self.releasing_byte_count <= self.byte_count and self.allocatorScopeState() != .invalid;
+    }
+
+    fn allocatorScopeState(self: *const AccountingLedger) AllocatorScopeState {
+        const idle = self.allocator_scope_token_addr == 0 and self.allocator_scope_epoch == 0 and
+            self.allocator_scope_purpose_raw == 0 and self.allocator_scope_previous == null and
+            self.allocator_scope_installed == null and self.allocator_scope_authority_slot == 0 and
+            self.allocator_scope_authority_generation == 0;
+        if (idle) return .idle;
+        const active = self.allocator_scope_token_addr != 0 and self.allocator_scope_epoch != 0 and
+            self.allocator_scope_purpose_raw <= allocator_scope_purpose_max and
+            self.allocator_scope_previous != null and self.allocator_scope_installed != null and
+            self.allocator_scope_authority_slot != 0 and self.allocator_scope_authority_generation != 0;
+        return if (active) .active else .invalid;
     }
 
     pub fn matchesClient(self: *const AccountingLedger, client_addr: usize) bool {
         return self.valid() and self.client_addr == client_addr and client_addr != 0;
+    }
+
+    pub fn beginAllocatorScope(
+        self: *AccountingLedger,
+        client_addr: usize,
+        token_addr: usize,
+        epoch: u64,
+        purpose_raw: u8,
+        previous: std.mem.Allocator,
+        installed: std.mem.Allocator,
+    ) Error!void {
+        if (!self.matchesClient(client_addr) or token_addr == 0 or epoch == 0 or
+            purpose_raw > allocator_scope_purpose_max or self.allocatorScopeState() != .idle)
+            return error.InvalidState;
+        if (!allocatorScopeProcessMatches()) return error.InvalidState;
+        while (!allocator_scope_authority_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer allocator_scope_authority_mutex.unlock();
+        const slot = for (&allocator_scope_authorities, 0..) |*entry, index| {
+            if (entry.ledger_addr == 0) break index;
+        } else return error.CapacityExhausted;
+        const generation = std.math.add(u64, allocator_scope_authority_generation, 1) catch
+            return error.IdentityExhausted;
+        if (generation == 0) return error.IdentityExhausted;
+        allocator_scope_authorities[slot] = .{
+            .ledger_addr = @intFromPtr(self),
+            .client_addr = client_addr,
+            .token_addr = token_addr,
+            .epoch = epoch,
+            .purpose_raw = purpose_raw,
+            .previous = previous,
+            .installed = installed,
+            .generation = generation,
+        };
+        allocator_scope_authority_generation = generation;
+        self.allocator_scope_token_addr = token_addr;
+        self.allocator_scope_epoch = epoch;
+        self.allocator_scope_purpose_raw = purpose_raw;
+        self.allocator_scope_previous = previous;
+        self.allocator_scope_installed = installed;
+        self.allocator_scope_authority_slot = @intCast(slot + 1);
+        self.allocator_scope_authority_generation = generation;
+    }
+
+    pub fn allocatorScopeMatches(
+        self: *const AccountingLedger,
+        client_addr: usize,
+        token_addr: usize,
+        epoch: u64,
+        purpose_raw: u8,
+        previous: std.mem.Allocator,
+        installed: std.mem.Allocator,
+    ) bool {
+        if (!(self.matchesClient(client_addr) and self.allocatorScopeState() == .active and
+            token_addr != 0 and epoch != 0 and purpose_raw <= allocator_scope_purpose_max and
+            self.allocator_scope_token_addr == token_addr and self.allocator_scope_epoch == epoch and
+            self.allocator_scope_purpose_raw == purpose_raw and
+            allocatorEql(self.allocator_scope_previous orelse return false, previous) and
+            allocatorEql(self.allocator_scope_installed orelse return false, installed))) return false;
+        if (!allocatorScopeProcessMatches()) return false;
+        while (!allocator_scope_authority_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer allocator_scope_authority_mutex.unlock();
+        const slot = @as(usize, self.allocator_scope_authority_slot) - 1;
+        if (slot >= allocator_scope_authorities.len) return false;
+        const authority = allocator_scope_authorities[slot];
+        return authority.ledger_addr == @intFromPtr(self) and authority.client_addr == client_addr and
+            authority.token_addr == token_addr and authority.epoch == epoch and
+            authority.purpose_raw == purpose_raw and
+            authority.generation == self.allocator_scope_authority_generation and
+            allocatorEql(authority.previous orelse return false, previous) and
+            allocatorEql(authority.installed orelse return false, installed);
+    }
+
+    pub fn endAllocatorScope(
+        self: *AccountingLedger,
+        client_addr: usize,
+        token_addr: usize,
+        epoch: u64,
+        purpose_raw: u8,
+        previous: std.mem.Allocator,
+        installed: std.mem.Allocator,
+    ) Error!void {
+        if (!self.matchesClient(client_addr) or self.allocatorScopeState() != .active or
+            token_addr == 0 or epoch == 0 or purpose_raw > allocator_scope_purpose_max or
+            self.allocator_scope_token_addr != token_addr or self.allocator_scope_epoch != epoch or
+            self.allocator_scope_purpose_raw != purpose_raw or
+            !allocatorEql(self.allocator_scope_previous orelse return error.InvalidState, previous) or
+            !allocatorEql(self.allocator_scope_installed orelse return error.InvalidState, installed) or
+            !allocatorScopeProcessMatches()) return error.InvalidState;
+        while (!allocator_scope_authority_mutex.tryLock()) std.atomic.spinLoopHint();
+        const slot = @as(usize, self.allocator_scope_authority_slot) - 1;
+        if (slot >= allocator_scope_authorities.len) {
+            allocator_scope_authority_mutex.unlock();
+            return error.InvalidState;
+        }
+        const authority = allocator_scope_authorities[slot];
+        if (authority.ledger_addr != @intFromPtr(self) or authority.client_addr != client_addr or
+            authority.token_addr != token_addr or authority.epoch != epoch or
+            authority.purpose_raw != purpose_raw or
+            authority.generation != self.allocator_scope_authority_generation or
+            !allocatorEql(authority.previous orelse {
+                allocator_scope_authority_mutex.unlock();
+                return error.InvalidState;
+            }, previous) or
+            !allocatorEql(authority.installed orelse {
+                allocator_scope_authority_mutex.unlock();
+                return error.InvalidState;
+            }, installed))
+        {
+            allocator_scope_authority_mutex.unlock();
+            return error.InvalidState;
+        }
+        allocator_scope_authorities[slot] = .{};
+        allocator_scope_authority_mutex.unlock();
+        self.allocator_scope_token_addr = 0;
+        self.allocator_scope_epoch = 0;
+        self.allocator_scope_purpose_raw = 0;
+        self.allocator_scope_previous = null;
+        self.allocator_scope_installed = null;
+        self.allocator_scope_authority_slot = 0;
+        self.allocator_scope_authority_generation = 0;
     }
 
     pub fn reserve(
@@ -239,7 +418,7 @@ pub const AccountingLedger = struct {
     pub fn preflightDeinit(self: *const AccountingLedger) DeinitOutcome {
         if (!self.valid()) return if (self.lifecycle == .dead) .already_dead else .corrupt;
         if (self.item_count != 0 or self.byte_count != 0 or self.releasing_item_count != 0 or
-            self.releasing_byte_count != 0)
+            self.releasing_byte_count != 0 or self.allocatorScopeState() != .idle)
             return .busy;
         for (self.entries) |entry| if (entry.lifecycle != .empty) return .corrupt;
         return .cleaned;
@@ -251,6 +430,121 @@ pub const AccountingLedger = struct {
         return outcome;
     }
 };
+
+fn allocatorEql(left: std.mem.Allocator, right: std.mem.Allocator) bool {
+    return left.ptr == right.ptr and left.vtable == right.vtable;
+}
+
+test "CR3a-2c3d C1 allocator authority rejects raw and partial ledger states" {
+    var ledger: AccountingLedger = .{};
+    try ledger.initInPlace();
+    try ledger.bindClient(1);
+    const previous_allocator = std.testing.allocator;
+    var installed_buffer: [1]u8 = undefined;
+    var installed_fba = std.heap.FixedBufferAllocator.init(&installed_buffer);
+    const installed_allocator = installed_fba.allocator();
+    inline for (std.enums.values(AllocatorScopePurpose), 0..) |purpose, index| {
+        const token = index + 2;
+        const epoch = index + 3;
+        try ledger.beginAllocatorScope(
+            1,
+            token,
+            epoch,
+            @intFromEnum(purpose),
+            previous_allocator,
+            installed_allocator,
+        );
+        try std.testing.expect(ledger.allocatorScopeMatches(
+            1,
+            token,
+            epoch,
+            @intFromEnum(purpose),
+            previous_allocator,
+            installed_allocator,
+        ));
+        try ledger.endAllocatorScope(
+            1,
+            token,
+            epoch,
+            @intFromEnum(purpose),
+            previous_allocator,
+            installed_allocator,
+        );
+    }
+    try std.testing.expectError(error.InvalidState, ledger.beginAllocatorScope(
+        1,
+        2,
+        3,
+        allocator_scope_purpose_max + 1,
+        previous_allocator,
+        installed_allocator,
+    ));
+    try std.testing.expectEqual(DeinitOutcome.cleaned, ledger.preflightDeinit());
+
+    ledger.allocator_scope_purpose_raw = 1;
+    try std.testing.expectEqual(DeinitOutcome.corrupt, ledger.preflightDeinit());
+    try std.testing.expectError(error.InvalidState, ledger.beginAllocatorScope(
+        1,
+        2,
+        3,
+        0,
+        previous_allocator,
+        installed_allocator,
+    ));
+    ledger.allocator_scope_purpose_raw = 0;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, ledger.preflightDeinit());
+}
+
+test "CR3a-2c3d C1 fork child rejects inherited allocator authority before mutex" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try std.testing.expect(allocatorScopeProcessMatches());
+    while (!allocator_scope_authority_mutex.tryLock()) std.atomic.spinLoopHint();
+    const child = std.c.fork();
+    if (child < 0) {
+        allocator_scope_authority_mutex.unlock();
+        return error.TestUnexpectedResult;
+    }
+    if (child == 0) {
+        var ledger: AccountingLedger = .{};
+        ledger.initInPlace() catch std.c._exit(2);
+        ledger.bindClient(1) catch std.c._exit(3);
+        const result = ledger.beginAllocatorScope(
+            1,
+            2,
+            3,
+            @intFromEnum(AllocatorScopePurpose.rpc_execute),
+            std.testing.allocator,
+            std.heap.page_allocator,
+        );
+        if (result) |_| std.c._exit(4) else |err| {
+            if (err != error.InvalidState) std.c._exit(5);
+        }
+        std.c._exit(0);
+    }
+    allocator_scope_authority_mutex.unlock();
+    var status: c_int = 0;
+    var attempts: usize = 0;
+    while (attempts < 2_000) : (attempts += 1) {
+        const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
+        if (waited == child) {
+            const raw_status: u32 = @bitCast(status);
+            try std.testing.expect(std.c.W.IFEXITED(raw_status));
+            try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(raw_status));
+            return;
+        }
+        if (waited < 0) {
+            if (std.posix.errno(waited) == .INTR) continue;
+            _ = std.c.kill(child, std.c.SIG.KILL);
+            _ = std.c.waitpid(child, &status, 0);
+            return error.TestUnexpectedResult;
+        }
+        var delay_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        _ = std.c.poll(@ptrCast(&delay_fd), 0, 1);
+    }
+    _ = std.c.kill(child, std.c.SIG.KILL);
+    _ = std.c.waitpid(child, &status, 0);
+    return error.TestUnexpectedResult;
+}
 
 const RegistryLifecycle = enum(u8) { pristine, live, dead };
 const EntryLifecycle = enum(u8) { empty, reserved, ingress, live, releasing };

@@ -72,17 +72,19 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         run_used += 1;
 
         if (op_count >= out.len) return error.OutOfSpace;
-        out[op_count] = .{ .text = .{
-            .origin = .{
-                .x = props.origin_px.x +
-                    @as(i32, props.layout.content.start) * @as(i32, props.cell_w_px),
-                .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+        out[op_count] = .{
+            .text = .{
+                .origin = .{
+                    .x = props.origin_px.x +
+                        @as(i32, props.layout.content.start) * @as(i32, props.cell_w_px),
+                    .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+                },
+                .runs = run_slice,
+                .role = text_role,
+                // 본문 영역을 넘는 글자는 자른다. 이것이 없으면 긴 줄이 gutter 옆 창 밖까지 그려진다.
+                .max_cols = props.layout.content.width,
             },
-            .runs = run_slice,
-            .role = text_role,
-            // 본문 영역을 넘는 글자는 자른다. 이것이 없으면 긴 줄이 gutter 옆 창 밖까지 그려진다.
-            .max_cols = props.layout.content.width,
-        } };
+        };
         op_count += 1;
     }
 

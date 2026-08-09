@@ -431,6 +431,19 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "endClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "beginRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "endRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "callUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "validateGenerationEventTakeUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "commitGenerationEventTakeUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "abortGenerationEventTakeDuringRegisteredOperation", .receiver_type = immutable, .class = .unchecked },
+        .{ .name = "abortGenerationEventTakeUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendInputUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendInputNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendResyncNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendScrollToBottomUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendCoreCommandUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "pumpPendingOutputUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "beginConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "endConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "releaseEndedPurgeExclusiveClean", .receiver_type = mutable, .class = .unchecked },
@@ -450,12 +463,14 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "commitPreparedExecutionRecoveryPoisonNoFail", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "commitPreparedExecutionRecoveryCleanupNoFail", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "poisonDuringClientSlotOperationNoFail", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "setNextExecutionCapabilityIdentityForTest", .receiver_type = mutable, .class = .unchecked },
 
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
         .{ .name = "bufferedControllerRevokeUnderRegisteredOperationExecutionLease", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionLeaseMatches", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionPoisonReason", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedExecutionRecoveryPoisonedForTest", .receiver_type = immutable, .class = .observation },
+        .{ .name = "nextExecutionCapabilityIdentityForTest", .receiver_type = immutable, .class = .observation },
         .{ .name = "revalidatePreparedResponsePublication", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
@@ -1181,10 +1196,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     }{
         .{
             .path = "src/platform/macos/session_host/client.zig",
-            .baseline_count = 528,
+            .baseline_count = 527,
             // Event publication now has one private stable-domain selector so a temporary
             // generation parser allocator cannot become persistent queue authority.
-            .baseline_digest = .{ 0xf8, 0xeb, 0xc7, 0x01, 0xb5, 0x75, 0x0f, 0x73, 0xe5, 0x9c, 0xf5, 0x43, 0xda, 0x6b, 0x7b, 0xcb, 0x03, 0x92, 0x38, 0x85, 0x04, 0xa6, 0xd8, 0xad, 0x49, 0xe5, 0x27, 0xd2, 0x3d, 0xaf, 0x21, 0xde },
+            .baseline_digest = .{ 0x71, 0x62, 0x35, 0x04, 0xbf, 0x72, 0x71, 0x3e, 0xf3, 0x29, 0x6e, 0xa5, 0x8b, 0x28, 0x95, 0xd4, 0x40, 0xbf, 0xb8, 0x70, 0x9e, 0xa8, 0x4a, 0x33, 0xd6, 0xee, 0xab, 0x88, 0x0f, 0x18, 0x24, 0x2a },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
@@ -1208,6 +1223,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_transaction" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "operation_thread_identity" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "initRegisteredOperationExecutionCapabilityGuard" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "owner_process_nonce" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "executed_response_mod" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ObservedPreparedBlockingRpcExecutionError" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ObservedPreparedBlockingRpcExecution" },
@@ -1331,15 +1349,32 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionWriteProbe" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "next_client_operation_fence_incarnation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueClientOperationFenceIncarnation" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RegisteredOperationExecutionCapability" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RegisteredOperationExecutionHandle" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PinnedExecutionCapabilityGuard" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RegisteredOperationExecutionMintReceipt" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ExecutionCapabilityPublicationTestHook" },
+                .{ .parent = "root", .kind = "var", .visibility = "pub", .modifier = "", .name = "execution_capability_publication_test_hook" },
+                .{ .parent = "root", .kind = "var", .visibility = "pub", .modifier = "", .name = "execution_capability_read_test_hook" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "execution_lease_bit" },
                 .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "fence_incarnation" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "execution_capability_addr" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "execution_capability_identity" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "execution_owner_thread_id" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "execution_owner_thread_incarnation" },
+                .{ .parent = "ClientOperationFence", .kind = "field", .visibility = "private", .modifier = "", .name = "next_execution_capability_identity" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "tryAcquireExecutionLease" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "releaseExecutionLease" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "upgradeSingleSharedToExecutionLease" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "downgradeExecutionLeaseToSingleShared" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "executionLeaseHeld" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueExecutionCapabilityIdentity" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "executionCapabilityMatches" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "requireRegisteredOperationExecutionCapability" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "endRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "setNextExecutionCapabilityIdentityForTest" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "nextExecutionCapabilityIdentityForTest" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bufferedControllerRevokeUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_lease_addr" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_request_execution_fence_addr" },
@@ -1377,12 +1412,40 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonDuringClientSlotOperationNoFail" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markDeferredPoisonForTest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ValidatedGenerationEventTake" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventHeldError" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "callGuardedWithIo" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareBlockingRpcGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonMutationIo" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "validateGenerationEventTakeCore" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "commitValidatedGenerationEventTakeCore" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "validateGenerationEventTakeUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitGenerationEventTakeUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortGenerationEventTakeDuringRegisteredOperation" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortGenerationEventTakeUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendInputGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendInputUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendInputNonBlockingGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendInputNonBlockingUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendScrollToBottomNonBlockingGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendResyncNonBlockingGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendResyncNonBlockingUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendCoreCommandNonBlockingGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendScrollToBottomUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendCoreCommandUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "flushPendingOutboundBlockingMode" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "pumpPendingOutputGuarded" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpPendingOutputUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendDontWait" },
             },
         },
         .{
             .path = "src/platform/macos/session_host/client_slot.zig",
-            .baseline_count = 128,
-            .baseline_digest = .{ 0x24, 0xcb, 0x31, 0x83, 0xb1, 0xa9, 0xdd, 0xc6, 0x7c, 0x88, 0xe2, 0xe9, 0x74, 0xc2, 0xc8, 0xd5, 0x52, 0xf7, 0x13, 0xf8, 0x0e, 0x74, 0x51, 0x30, 0xf5, 0x11, 0x95, 0x8f, 0xc2, 0x46, 0xca, 0x54 },
+            .baseline_count = 126,
+            .baseline_digest = .{ 0x83, 0xb0, 0x73, 0x6a, 0x08, 0x61, 0xf1, 0x7f, 0xdc, 0x89, 0x89, 0xe2, 0xf5, 0x2b, 0x63, 0x1b, 0x04, 0x86, 0x39, 0x70, 0x04, 0x6c, 0xf8, 0xbc, 0x02, 0x03, 0x87, 0x43, 0xf5, 0x43, 0x8d, 0x99 },
             .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
             .optional_containers = &.{
                 "PreparedExecutionTxn",
@@ -1392,6 +1455,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "operation_thread_identity" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "mintRegisteredOperationExecutionReceipt" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "runtime_event_wire" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeRequest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventIdentity" },
@@ -1684,6 +1749,41 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopFreedRpcResponse" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusableUnderPublicationScope" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusableUnchecked" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationInputError" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventTakeActivationTransaction" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventTakeActivationTestHook" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "const", .visibility = "private", .modifier = "", .name = "Lifecycle" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "self_addr" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle_raw" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "admission" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_addr" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "permit_registry_id" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "quarantine_reservation" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "pin_projection" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "authority_receipt" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "quarantine_live" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "pin_live" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "authority_live" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "field", .visibility = "private", .modifier = "", .name = "seal" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "digest" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "reseal" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "setQuarantineLive" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "setPinLive" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "setAuthorityLive" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "setResourceLive" },
+                .{ .parent = "EventTakeActivationTransaction", .kind = "fn", .visibility = "private", .modifier = "", .name = "finish" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginEventTakeActivationTransaction" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "runC3a3ProductTakeFaultCase" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransactionWithOperationPermitAndRegistry" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finalAdmissionTransactionWithOperationAndRegistry" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpGenerationPendingOutput" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationInput" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationInputNonBlocking" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginGenerationInputOwner" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginBoundControllerMutationOwner" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationResyncNonBlocking" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callGenerationRpc" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeStreamOperationPermitNoFail" },
             },
         },
     };
@@ -1860,7 +1960,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "abortRegisteredExclusiveTeardown"),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        // The second source-visible reference is the builtin.is_test activation-contention
+        // probe; it must observe AdminBusy and never acquires teardown authority.
+        @as(usize, 2),
         countIdentifierOutsideTopLevelTests(client_slot, "tryAcquireClientSlotTeardownExclusive"),
     );
     try std.testing.expectEqual(
@@ -2250,7 +2352,12 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(product_source, signature));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "*anyopaque"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "pub fn call("));
-    try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "method: []const u8"));
+    const facade_start = std.mem.indexOf(u8, product_source, "pub const GenerationTransport = struct") orelse
+        return error.TestUnexpectedResult;
+    const facade_end = std.mem.indexOfPos(u8, product_source, facade_start, "pub fn sendResyncNonBlockingOwned(") orelse
+        return error.TestUnexpectedResult;
+    const facade_source = product_source[facade_start..facade_end];
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(facade_source, "method: []const u8"));
     const direct_prepared_client_apis = [_][]const u8{
         ".prepareBlockingRpcStorage(",
         ".abortPreparedBlockingRpcStorage",
@@ -2673,9 +2780,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
             "initAcceptedFromPromotedInPlace",
         ),
     );
-    // C3-1 shares one private unit-fixture constructor across its adversarial cases. The helper is
-    // source-counted below by its ForEventTest name and has no product caller; any second low-level
-    // response assembly still fails this inventory.
+    // The maintained fixture seam exists only in the builtin.is_test namespace. The retired
+    // event-specific helper must stay absent so fixtures share one reviewed low-level response
+    // assembly path without adding a callable production symbol.
     try std.testing.expectEqual(
         @as(usize, 1),
         countIdentifierOutsideTopLevelTests(
@@ -2684,8 +2791,16 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 0),
         countOccurrences(attachment_source, "fn initAttachedForEventTest("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(attachment_source, "pub const testing_api = if (builtin.is_test) struct"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(attachment_source, "pub fn initAttached("),
     );
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(slot_product, ".promoteObserved("));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(ledger_product, "promoteExact"));
@@ -2745,6 +2860,7 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
             "platform/macos/session_host/generation_attachment.zig",
         );
         try std.testing.expectEqual(
+            // RemoteRuntime uses testing_api.initAttached and must not name the raw response seam.
             @as(usize, @intFromBool(is_response)) + @as(usize, @intFromBool(is_ledger)) +
                 @as(usize, @intFromBool(is_attachment)),
             countIdentifierOutsideTopLevelTests(source, "initAcceptedFromPromotedInPlace"),
@@ -2860,7 +2976,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 9),
+        @as(usize, 10),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -6721,7 +6837,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "pub fn poisonGenerationConnection(",
                 "fn mapGenerationRequestClientError(",
             ) orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(source, "unusable"));
+            try std.testing.expectEqual(@as(usize, 3), countFieldAssignments(source, "unusable"));
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(source, "first_poison_reason"));
             const confirmed_z = try allocator.dupeZ(u8, confirmed);
             defer allocator.free(confirmed_z);
@@ -7043,9 +7159,10 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             // the ended-purge destination range preflight. 2c3d C1 adds two event-owner range
             // checks and C2 adds one trusted-mirror pointer reconstruction for prepared normal
             // release; it still does not store or mint another lease. Transport and external
-            // movable owners may not name the cleanup capability.
+            // movable owners may not name the cleanup capability. C3-3a3 adds one exact
+            // event-lease destination range to the activation transaction preflight.
             const expected_lease_count: usize = if (is_client_slot)
-                14
+                16
             else if (is_host_adapter)
                 4
             else if (is_generation_attachment)
@@ -8311,7 +8428,7 @@ fn expectClientOperationFenceSchema(
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "ClientOperationFence") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 31), members.len);
+    try std.testing.expectEqual(@as(usize, 39), members.len);
     const constants = [_][]const u8{
         "shared_count_mask",
         "execution_lease_bit",
@@ -8329,17 +8446,39 @@ fn expectClientOperationFenceSchema(
     try expectTypedFieldWithDefault(&tree, source, members[7], "self_addr", "usize", "0");
     try expectTypedFieldWithDefault(&tree, source, members[8], "client_addr", "usize", "0");
     try expectTypedFieldWithDefault(&tree, source, members[9], "owner_process_id", "u32", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[10], "slot_incarnation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[11], "node_incarnation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[12], "fence_generation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[13], "fence_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[10], "owner_process_nonce", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[11], "slot_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[12], "node_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[13], "fence_generation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[14], "fence_incarnation", "u64", "0");
     try expectTypedFieldWithDefault(
         &tree,
         source,
-        members[14],
+        members[15],
         "state",
         "std.atomic.Value(u64)",
         ".init(0)",
+    );
+    try expectTypedFieldWithDefault(
+        &tree,
+        source,
+        members[16],
+        "execution_capability_addr",
+        "std.atomic.Value(usize)",
+        ".init(0)",
+    );
+    inline for (.{
+        "execution_capability_identity",
+        "execution_owner_thread_id",
+        "execution_owner_thread_incarnation",
+        "next_execution_capability_identity",
+    }, 17..) |name, index| try expectTypedFieldWithDefault(
+        &tree,
+        source,
+        members[index],
+        name,
+        "std.atomic.Value(u64)",
+        if (std.mem.eql(u8, name, "next_execution_capability_identity")) ".init(1)" else ".init(0)",
     );
     const methods = [_][]const u8{
         "initInPlace",
@@ -8351,6 +8490,8 @@ fn expectClientOperationFenceSchema(
         "upgradeSingleSharedToExecutionLease",
         "downgradeExecutionLeaseToSingleShared",
         "executionLeaseHeld",
+        "issueExecutionCapabilityIdentity",
+        "executionCapabilityMatches",
         "recordIntrusionIfExactExclusive",
         "sealExclusiveForPublication",
         "intruded",
@@ -8360,7 +8501,7 @@ fn expectClientOperationFenceSchema(
         "identityMatches",
     };
     for (methods, 0..) |name, index| {
-        const tuple = declarationTuple(&tree, "ClientOperationFence", members[index + 15]);
+        const tuple = declarationTuple(&tree, "ClientOperationFence", members[index + 21]);
         try std.testing.expectEqualStrings("fn", tuple.kind);
         try std.testing.expectEqualStrings(name, tuple.name);
     }

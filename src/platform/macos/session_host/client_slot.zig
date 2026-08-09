@@ -11,6 +11,7 @@ const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
 const batch_registry_mod = @import("generation_batch_registry.zig");
 const owner_seal = @import("external_owner_seal.zig");
+const operation_thread_identity = @import("operation_thread_identity.zig");
 const contract = @import("generation_attachment_contract.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -39,6 +40,30 @@ var process_runtime_pid: std.atomic.Value(u32) = .init(0);
 threadlocal var prepared_execution_cleanup_active_addr: usize = 0;
 threadlocal var finish_permit_alias_case_for_test: u8 = 0;
 threadlocal var generation_event_release_callback_active_addr: usize = 0;
+
+const EventTakeActivationTestHook = struct {
+    const Fault = enum(u8) { none, quarantine_reserve, pin_reserve, authority_reserve, cleanup_bind };
+    var fault: Fault = .none;
+    var suffix_stage: u8 = 0;
+    var probe_contention: bool = false;
+    var reentry_busy: bool = false;
+    var teardown_busy: bool = false;
+    var foreign_busy: bool = false;
+
+    fn reset() void {
+        if (!builtin.is_test) unreachable;
+        fault = .none;
+        suffix_stage = 0;
+        probe_contention = false;
+        reentry_busy = false;
+        teardown_busy = false;
+        foreign_busy = false;
+    }
+
+    fn failAt(expected: Fault) bool {
+        return builtin.is_test and fault == expected;
+    }
+};
 
 const RpcSubstrateFailStopTestHook = struct {
     const version: u8 = 1;
@@ -1322,6 +1347,7 @@ pub const GenerationEventTakeOutcome = union(enum) {
 };
 
 pub const GenerationEventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
+pub const GenerationInputError = client_mod.ClientError || error{ Busy, InvalidOwner };
 pub const GenerationPoisonError = error{ Busy, InvalidOwner, ConnectionClosed };
 pub const GenerationEventAttachmentReadiness = cleanup_registry_mod.EventAttachmentReadiness;
 pub const GenerationEndedPurgeOutcome = enum { not_ended, purged };
@@ -1429,8 +1455,6 @@ var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
 threadlocal var batch_release_callback_active: bool = false;
-threadlocal var operation_thread_incarnation: u64 = 0;
-var next_operation_thread_incarnation: std.atomic.Value(u64) = .init(1);
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
 var generation_response_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
@@ -1498,27 +1522,11 @@ fn unregisterClientSlot(expected: ClientSlotRegistryEntry) bool {
 }
 
 fn acquireOperationThreadIncarnation() error{IdentityExhausted}!u64 {
-    if (operation_thread_incarnation != 0) return operation_thread_incarnation;
-    var observed = next_operation_thread_incarnation.load(.acquire);
-    while (true) {
-        if (observed == 0 or observed == std.math.maxInt(u64))
-            return error.IdentityExhausted;
-        if (next_operation_thread_incarnation.cmpxchgWeak(
-            observed,
-            observed + 1,
-            .acq_rel,
-            .acquire,
-        )) |actual| {
-            observed = actual;
-            continue;
-        }
-        operation_thread_incarnation = observed;
-        return observed;
-    }
+    return operation_thread_identity.acquire();
 }
 
 fn operationThreadMatches(incarnation: u64) bool {
-    return incarnation != 0 and operation_thread_incarnation == incarnation;
+    return operation_thread_identity.matches(incarnation);
 }
 
 const max_stream_operation_permits = 4096;
@@ -1682,7 +1690,7 @@ fn reserveRegisteredNodeOperation(
         .slot_addr = lookup.slot_addr,
         .slot_incarnation = lookup.slot_incarnation,
         .pid = currentPid(),
-        .owner_thread_incarnation = operation_thread_incarnation,
+        .owner_thread_incarnation = operation_thread_identity.current(),
     };
     registered_node_operations[index] = entry;
     return .{ .index = index, .entry = entry };
@@ -1953,18 +1961,45 @@ const FinalAdmissionBlockers = struct {
 };
 const FinalAdmissionProtectedRange = struct { start: usize, len: usize };
 const max_final_admission_protected_ranges = 4;
+
+fn mintRegisteredOperationExecutionReceipt(
+    out: *client_mod.RegisteredOperationExecutionMintReceipt,
+    operation: RegisteredNodeOperation,
+    owner: RegisteredNodeOperationEntry,
+) error{InvalidOwner}!void {
+    if (!out.pristineExact() or owner.state != .live or
+        owner.operation_id != operation.operation_id or owner.node_addr != @intFromPtr(operation.node) or
+        owner.pid != currentPid() or !operationThreadMatches(owner.owner_thread_incarnation))
+        return error.InvalidOwner;
+    const slot: *const ClientSlot = @ptrFromInt(owner.slot_addr);
+    if (slot.pid != owner.pid or slot.process_nonce == 0) return error.InvalidOwner;
+    operation_thread_identity.issueMintReceipt(
+        out,
+        @intFromPtr(&operation.node.client),
+        operation.operation_id,
+        owner.pid,
+        slot.process_nonce,
+        owner.owner_thread_incarnation,
+    ) catch return error.InvalidOwner;
+}
+
 const FinalAdmissionTransaction = struct {
     const Lifecycle = enum(u8) { pristine, active, consumed };
 
     self_addr: usize = 0,
     operation: RegisteredNodeOperation = undefined,
+    mint_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{},
+    execution_capability: client_mod.RegisteredOperationExecutionCapability = .{},
+    execution_handle: ?client_mod.RegisteredOperationExecutionHandle = null,
     owns_registered_operation_raw: u8 = 0,
     lifecycle_raw: u8 = @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine),
     seal: owner_seal.Digest = [_]u8{0} ** 32,
 
     fn pristineExact(self: *const @This()) bool {
         return self.self_addr == 0 and self.owns_registered_operation_raw == 0 and
-            self.lifecycle_raw == @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine);
+            self.lifecycle_raw == @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine) and
+            self.mint_receipt.pristineExact() and
+            self.execution_capability.pristineExact() and self.execution_handle == null;
     }
 
     fn finish(self: *@This()) error{InvalidOwner}!void {
@@ -1994,7 +2029,7 @@ const FinalAdmissionTransaction = struct {
             @panic("active final admission transaction content drifted");
         const operation = self.operation;
         const owns_registered_operation = self.owns_registered_operation_raw == 1;
-        operation.node.client.endRegisteredOperationExecutionLease();
+        operation.node.client.endRegisteredOperationExecutionLease(self.execution_handle.?);
         consumeFinalAdmissionTransactionNoFail(
             operation,
             @intFromPtr(self),
@@ -2005,6 +2040,118 @@ const FinalAdmissionTransaction = struct {
     }
 };
 
+const EventTakeActivationTransaction = struct {
+    const Lifecycle = enum(u8) { pristine, active, consumed };
+
+    self_addr: usize = 0,
+    lifecycle_raw: u8 = @intFromEnum(EventTakeActivationTransaction.Lifecycle.pristine),
+    admission: FinalAdmissionTransaction = .{},
+    prepared_addr: usize = 0,
+    permit_registry_id: u64 = 0,
+    quarantine_live: bool = false,
+    pin_live: bool = false,
+    authority_live: bool = false,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    fn digest(self: *const @This()) owner_seal.Digest {
+        var writer = owner_seal.Writer.init("maru.event-take-activation.v1");
+        writer.writeUsize(self.self_addr);
+        writer.writeU8(self.lifecycle_raw);
+        writer.writeUsize(@intFromPtr(&self.admission));
+        writer.writeUsize(self.prepared_addr);
+        writer.writeU64(self.permit_registry_id);
+        writer.writeU8(@intFromBool(self.quarantine_live));
+        writer.writeU8(@intFromBool(self.pin_live));
+        writer.writeU8(@intFromBool(self.authority_live));
+        return writer.finish();
+    }
+
+    fn reseal(self: *@This()) void {
+        self.seal = self.digest();
+    }
+
+    fn setQuarantineLive(self: *@This(), live: bool) void {
+        self.quarantine_live = live;
+        self.reseal();
+    }
+
+    fn setPinLive(self: *@This(), live: bool) void {
+        self.pin_live = live;
+        self.reseal();
+    }
+
+    fn setAuthorityLive(self: *@This(), live: bool) void {
+        self.authority_live = live;
+        self.reseal();
+    }
+
+    fn setResourceLive(self: *@This(), resource: enum { quarantine, pin, authority }, live: bool) void {
+        switch (resource) {
+            .quarantine => self.setQuarantineLive(live),
+            .pin => self.setPinLive(live),
+            .authority => self.setAuthorityLive(live),
+        }
+    }
+
+    fn finish(self: *@This()) void {
+        if (self.self_addr != @intFromPtr(self) or self.lifecycle_raw !=
+            @intFromEnum(EventTakeActivationTransaction.Lifecycle.active) or
+            !std.mem.eql(u8, &self.seal, &self.digest()) or self.quarantine_live or
+            self.pin_live or self.authority_live)
+            @panic("event take activation authority drifted");
+        self.admission.finish() catch
+            @panic("event take activation settlement failed");
+        if (builtin.is_test and EventTakeActivationTestHook.probe_contention)
+            EventTakeActivationTestHook.suffix_stage = 4;
+        self.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.consumed);
+        self.reseal();
+    }
+};
+
+fn beginEventTakeActivationTransaction(
+    out: *EventTakeActivationTransaction,
+    operation: *const RegisteredNodeOperation,
+    prepared: *client_mod.PreparedGenerationEventTake,
+    permit: StreamOperationPermit,
+    protected_ranges: []const FinalAdmissionProtectedRange,
+) error{ InvalidOwner, Busy }!void {
+    if (out.self_addr != 0 or out.lifecycle_raw != @intFromEnum(EventTakeActivationTransaction.Lifecycle.pristine) or
+        !out.admission.pristineExact()) return error.InvalidOwner;
+    const node = resolveRegisteredNodeOperation(operation.*) orelse return error.InvalidOwner;
+    const operation_owner = registeredNodeOperationOwnerEntry(operation.*) orelse
+        return error.InvalidOwner;
+    if (!finalAdmissionDestinationValid(&out.admission, operation.*, protected_ranges))
+        return error.InvalidOwner;
+    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
+        generation_event_release_callback_active_addr != 0)
+        return error.Busy;
+    mintRegisteredOperationExecutionReceipt(
+        &out.admission.mint_receipt,
+        operation.*,
+        operation_owner,
+    ) catch return error.InvalidOwner;
+    errdefer _ = operation_thread_identity.abortMintReceipt(&out.admission.mint_receipt);
+    out.admission.execution_handle = node.client.beginRegisteredOperationExecutionLease(
+        &out.admission.execution_capability,
+        &out.admission.mint_receipt,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    errdefer node.client.endRegisteredOperationExecutionLease(out.admission.execution_handle.?);
+    bindFinalAdmissionTransactionNoFail(operation.*, @intFromPtr(&out.admission), false);
+    out.admission.self_addr = @intFromPtr(&out.admission);
+    out.admission.operation = operation.*;
+    out.admission.owns_registered_operation_raw = 0;
+    out.admission.lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.active);
+    out.admission.seal = finalAdmissionTransactionSeal(&out.admission);
+    out.self_addr = @intFromPtr(out);
+    out.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.active);
+    out.prepared_addr = @intFromPtr(prepared);
+    out.permit_registry_id = permit.registry_id;
+    out.reseal();
+}
+
 fn finalAdmissionTransactionSeal(transaction: *const FinalAdmissionTransaction) owner_seal.Digest {
     var writer = owner_seal.Writer.init("maru.final-admission.transaction.v1");
     writer.writeUsize(transaction.self_addr);
@@ -2012,6 +2159,9 @@ fn finalAdmissionTransactionSeal(transaction: *const FinalAdmissionTransaction) 
     writer.writeU16(transaction.operation.registry_index);
     writer.writeU64(transaction.operation.operation_id);
     writer.writeU64(transaction.operation.pid);
+    writer.writeUsize(@intFromPtr(&transaction.execution_capability));
+    writer.writeU64(transaction.execution_capability.lease_identity);
+    writer.writeU64(transaction.execution_capability.operation_identity);
     writer.writeU8(transaction.owns_registered_operation_raw);
     writer.writeU8(transaction.lifecycle_raw);
     return writer.finish();
@@ -2046,31 +2196,45 @@ fn beginFinalAdmissionTransactionCore(
     owns_registered_operation: bool,
     blockers: FinalAdmissionBlockers,
     protected_ranges: []const FinalAdmissionProtectedRange,
+    exact_control_permit: ?StreamOperationPermit,
 ) error{ InvalidOwner, Busy }!FinalAdmissionDecision {
     const node = resolveRegisteredNodeOperation(operation) orelse return error.InvalidOwner;
+    const operation_owner = registeredNodeOperationOwnerEntry(operation) orelse return error.InvalidOwner;
     if (!finalAdmissionDestinationValid(out, operation, protected_ranges) or !out.pristineExact())
         return error.InvalidOwner;
+    const stream_operation_valid = if (exact_control_permit) |permit|
+        permit.kind == .control and permit.slot.streamOperationPermitLive(permit) and
+            @intFromPtr(permit.slot) == operation_owner.slot_addr and
+            permit.slot.current.incarnation.tagged == operation.node.incarnation.tagged
+    else
+        streamOperationNodeIdle(node);
     if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
-        generation_event_release_callback_active_addr != 0 or !streamOperationNodeIdle(node))
+        generation_event_release_callback_active_addr != 0 or !stream_operation_valid)
         return error.Busy;
-    node.client.beginRegisteredOperationExecutionLease() catch |err| return switch (err) {
+    mintRegisteredOperationExecutionReceipt(&out.mint_receipt, operation, operation_owner) catch
+        return error.InvalidOwner;
+    errdefer _ = operation_thread_identity.abortMintReceipt(&out.mint_receipt);
+    out.execution_handle = node.client.beginRegisteredOperationExecutionLease(
+        &out.execution_capability,
+        &out.mint_receipt,
+    ) catch |err| return switch (err) {
         error.AdminBusy => error.Busy,
         else => error.InvalidOwner,
     };
-    errdefer node.client.endRegisteredOperationExecutionLease();
-    const queued = node.client.bufferedControllerRevokeUnderRegisteredOperationExecutionLease() catch
+    errdefer node.client.endRegisteredOperationExecutionLease(out.execution_handle.?);
+    const queued = node.client.bufferedControllerRevokeUnderRegisteredOperationExecutionLease(
+        out.execution_handle.?,
+    ) catch
         return error.InvalidOwner;
     bindFinalAdmissionTransactionNoFail(
         operation,
         @intFromPtr(out),
         owns_registered_operation,
     );
-    out.* = .{
-        .self_addr = @intFromPtr(out),
-        .operation = operation,
-        .owns_registered_operation_raw = @intFromBool(owns_registered_operation),
-        .lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.active),
-    };
+    out.self_addr = @intFromPtr(out);
+    out.operation = operation;
+    out.owns_registered_operation_raw = @intFromBool(owns_registered_operation);
+    out.lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.active);
     out.seal = finalAdmissionTransactionSeal(out);
     if (queued or blockers.queued or blockers.aggregate_count != 0) {
         out.finish() catch @panic("validated blocked final admission settlement failed");
@@ -2127,7 +2291,7 @@ fn finalAdmissionTransaction(
             .len = @sizeOf(contract.PreparedAttachmentBinding),
         },
     };
-    return beginFinalAdmissionTransactionCore(out, operation, true, blockers, &protected_ranges);
+    return beginFinalAdmissionTransactionCore(out, operation, true, blockers, &protected_ranges, null);
 }
 
 fn finalAdmissionTransactionWithOperation(
@@ -2148,7 +2312,63 @@ fn finalAdmissionTransactionWithOperation(
         false,
         blockers,
         protected_ranges,
+        null,
     );
+}
+
+fn finalAdmissionTransactionWithOperationPermitAndRegistry(
+    operation: *const RegisteredNodeOperation,
+    permit: StreamOperationPermit,
+    out: *FinalAdmissionTransaction,
+    protected_ranges: []const FinalAdmissionProtectedRange,
+) error{ InvalidOwner, Busy }!FinalAdmissionDecision {
+    if (byteRangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(FinalAdmissionTransaction),
+        @intFromPtr(operation),
+        @sizeOf(RegisteredNodeOperation),
+    )) return error.InvalidOwner;
+    const decision = try beginFinalAdmissionTransactionCore(
+        out,
+        operation.*,
+        false,
+        .{},
+        protected_ranges,
+        permit,
+    );
+    if (decision == .blocked) return .blocked;
+    const blockers = operation.node.cleanup_registry.revokeBlockerCount() catch {
+        out.finish() catch @panic("validated aggregate admission settlement failed");
+        return error.InvalidOwner;
+    };
+    if (blockers != 0) {
+        out.finish() catch @panic("validated aggregate blocker settlement failed");
+        return .blocked;
+    }
+    return .admitted;
+}
+
+fn finalAdmissionTransactionWithOperationAndRegistry(
+    operation: *const RegisteredNodeOperation,
+    out: *FinalAdmissionTransaction,
+    protected_ranges: []const FinalAdmissionProtectedRange,
+) error{ InvalidOwner, Busy }!FinalAdmissionDecision {
+    const decision = try finalAdmissionTransactionWithOperation(
+        operation,
+        out,
+        .{},
+        protected_ranges,
+    );
+    if (decision == .blocked) return .blocked;
+    const blockers = operation.node.cleanup_registry.revokeBlockerCount() catch {
+        out.finish() catch @panic("validated aggregate admission settlement failed");
+        return error.InvalidOwner;
+    };
+    if (blockers != 0) {
+        out.finish() catch @panic("validated aggregate blocker settlement failed");
+        return .blocked;
+    }
+    return .admitted;
 }
 
 const GenerationRequestOwner = struct {
@@ -2422,6 +2642,7 @@ pub fn sendGenerationControl(
     const admission = try beginGenerationControlOwner(request);
     defer endRegisteredNodeOperation(admission.operation);
     const node = admission.operation.node;
+    const control = request.control.decode() orelse return error.InvalidOwner;
     const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
     const permit = slot.prepareStreamOperationPermit(
         .control,
@@ -2435,11 +2656,22 @@ pub fn sendGenerationControl(
     };
     defer slot.abortStreamOperationPermit(permit) catch
         @panic("generation control stream-operation permit release drifted");
-    const control = request.control.decode() orelse return error.InvalidOwner;
     switch (control) {
         .scroll_to_bottom => {
             if (!node.client.async_scroll_to_bottom_v1) return error.Unsupported;
-            node.client.sendScrollToBottom(request.bound_stream_id) catch |err|
+            var transaction: FinalAdmissionTransaction = .{};
+            const decision = try finalAdmissionTransactionWithOperationPermitAndRegistry(
+                &admission.operation,
+                permit,
+                &transaction,
+                &.{},
+            );
+            if (decision == .blocked) return error.Busy;
+            defer transaction.finish() catch @panic("generation control admission settlement failed");
+            node.client.sendScrollToBottomUnderRegisteredOperationExecutionLease(
+                transaction.execution_handle.?,
+                request.bound_stream_id,
+            ) catch |err|
                 return mapGenerationControlClientError(err);
         },
         .core_command => |command| {
@@ -2447,7 +2679,24 @@ pub fn sendGenerationControl(
             var params: [4096]u8 = undefined;
             const encoded = encodeGenerationCoreCommand(&params, request.bound_stream_id, command) orelse
                 return error.ResourceExhausted;
-            node.client.sendCoreCommand(request.bound_stream_id, encoded) catch |err|
+            var transaction: FinalAdmissionTransaction = .{};
+            const protected = [_]FinalAdmissionProtectedRange{.{
+                .start = @intFromPtr(encoded.ptr),
+                .len = encoded.len,
+            }};
+            const decision = try finalAdmissionTransactionWithOperationPermitAndRegistry(
+                &admission.operation,
+                permit,
+                &transaction,
+                &protected,
+            );
+            if (decision == .blocked) return error.Busy;
+            defer transaction.finish() catch @panic("generation control admission settlement failed");
+            node.client.sendCoreCommandUnderRegisteredOperationExecutionLease(
+                transaction.execution_handle.?,
+                request.bound_stream_id,
+                encoded,
+            ) catch |err|
                 return mapGenerationControlClientError(err);
         },
     }
@@ -2461,6 +2710,7 @@ pub fn sendGenerationControlNonBlocking(
     const admission = try beginGenerationControlOwner(request);
     defer endRegisteredNodeOperation(admission.operation);
     const node = admission.operation.node;
+    const control = request.control.decode() orelse return error.InvalidOwner;
     const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
     const permit = slot.prepareStreamOperationPermit(
         .control,
@@ -2474,11 +2724,22 @@ pub fn sendGenerationControlNonBlocking(
     };
     defer slot.abortStreamOperationPermit(permit) catch
         @panic("generation control stream-operation permit release drifted");
-    const control = request.control.decode() orelse return error.InvalidOwner;
     return switch (control) {
         .scroll_to_bottom => blk: {
             if (!node.client.async_scroll_to_bottom_v1) return error.Unsupported;
-            break :blk node.client.sendScrollToBottomNonBlocking(request.bound_stream_id) catch |err|
+            var transaction: FinalAdmissionTransaction = .{};
+            const decision = try finalAdmissionTransactionWithOperationPermitAndRegistry(
+                &admission.operation,
+                permit,
+                &transaction,
+                &.{},
+            );
+            if (decision == .blocked) break :blk false;
+            defer transaction.finish() catch @panic("generation nonblocking control admission settlement failed");
+            break :blk node.client.sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease(
+                transaction.execution_handle.?,
+                request.bound_stream_id,
+            ) catch |err|
                 return mapGenerationControlClientError(err);
         },
         .core_command => |command| blk: {
@@ -2486,7 +2747,24 @@ pub fn sendGenerationControlNonBlocking(
             var params: [4096]u8 = undefined;
             const encoded = encodeGenerationCoreCommand(&params, request.bound_stream_id, command) orelse
                 return error.ResourceExhausted;
-            break :blk node.client.sendCoreCommandNonBlocking(request.bound_stream_id, encoded) catch |err|
+            var transaction: FinalAdmissionTransaction = .{};
+            const protected = [_]FinalAdmissionProtectedRange{.{
+                .start = @intFromPtr(encoded.ptr),
+                .len = encoded.len,
+            }};
+            const decision = try finalAdmissionTransactionWithOperationPermitAndRegistry(
+                &admission.operation,
+                permit,
+                &transaction,
+                &protected,
+            );
+            if (decision == .blocked) break :blk false;
+            defer transaction.finish() catch @panic("generation nonblocking control admission settlement failed");
+            break :blk node.client.sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease(
+                transaction.execution_handle.?,
+                request.bound_stream_id,
+                encoded,
+            ) catch |err|
                 return mapGenerationControlClientError(err);
         },
     };
@@ -2497,25 +2775,12 @@ fn beginGenerationControlOwner(
 ) GenerationControlError!GenerationRequestOwner {
     // Decode before registry resolution so corrupt outer/nested tags cannot authorize a Client read.
     _ = request.control.decode() orelse return error.InvalidOwner;
-    const admission = beginGenerationRequestOwner(request, false) catch |err| return switch (err) {
-        error.Busy => error.Busy,
-        error.InvalidOwner => error.InvalidOwner,
-        error.Unauthorized => error.Unauthorized,
-        else => error.ProtocolError,
-    };
-    errdefer endRegisteredNodeOperation(admission.operation);
-    const decision = admission.operation.node.cleanup_registry.requestDecision(
-        request.reservation.cleanup,
-        admission.identity,
-        .bound_controller_mutation,
-        .core_command,
-        request.bound_stream_id,
-    ) catch return error.InvalidOwner;
-    switch (decision) {
-        .allowed => return admission,
-        .unauthorized => return error.Unauthorized,
-        .busy => return error.Busy,
-    }
+    return beginBoundControllerMutationOwner(request, request.bound_stream_id) catch |err|
+        return switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+            error.Unauthorized => error.Unauthorized,
+        };
 }
 
 fn mapGenerationControlClientError(err: client_mod.ClientError) GenerationControlError {
@@ -6352,43 +6617,18 @@ pub fn takeGenerationEvent(
     defer slot.current.client.abortGenerationEventTake(&prepared);
     switch (kind) {
         .idle => {
-            slot.consumeStreamOperationPermit(permit) catch unreachable;
+            slot.consumeStreamOperationPermitNoFail(permit);
             permit_live = false;
             return .idle;
         },
         .ended_pending => {
-            slot.consumeStreamOperationPermit(permit) catch unreachable;
+            slot.current.client.abortGenerationEventTake(&prepared);
+            slot.consumeStreamOperationPermitNoFail(permit);
             permit_live = false;
             return .ended_pending;
         },
         .ordinary => {},
     }
-    if (prepared.payload_len == 0 or
-        byteRangesOverlap(
-            prepared.payload_addr,
-            prepared.payload_len,
-            request.owner.owner_addr,
-            request.owner.owner_size,
-        ) or
-        byteRangesOverlap(
-            prepared.payload_addr,
-            prepared.payload_len,
-            request.owner.slot_addr,
-            @sizeOf(ClientSlot),
-        ) or
-        byteRangesOverlap(
-            prepared.payload_addr,
-            prepared.payload_len,
-            @intFromPtr(slot.current),
-            @sizeOf(ClientNode),
-        ) or
-        byteRangesOverlap(
-            prepared.payload_addr,
-            prepared.payload_len,
-            request.event_lease_addr,
-            @sizeOf(lease_mod.ConnectionLease),
-        ))
-        return generationEventCorrupt(slot);
 
     const operation = beginRegisteredNodeOperation(.{
         .slot_addr = request.owner.slot_addr,
@@ -6398,31 +6638,101 @@ pub fn takeGenerationEvent(
         error.Busy => error.Busy,
         error.InvalidOwner => error.InvalidOwner,
     };
-    const node = operation.node;
-    if (!slot.streamOperationPermitLive(permit)) {
+    defer {
         endRegisteredNodeOperation(operation);
-        return error.Busy;
+        if (builtin.is_test and EventTakeActivationTestHook.probe_contention)
+            EventTakeActivationTestHook.suffix_stage = 5;
+    }
+    const node = operation.node;
+    if (!slot.streamOperationPermitLive(permit)) return error.Busy;
+    const protected_ranges = [_]FinalAdmissionProtectedRange{
+        .{ .start = request.owner.owner_addr, .len = request.owner.owner_size },
+        .{ .start = request.event_lease_addr, .len = @sizeOf(lease_mod.ConnectionLease) },
+        .{ .start = @intFromPtr(&prepared), .len = @sizeOf(client_mod.PreparedGenerationEventTake) },
+    };
+    var activation: EventTakeActivationTransaction = .{};
+    beginEventTakeActivationTransaction(
+        &activation,
+        &operation,
+        &prepared,
+        permit,
+        &protected_ranges,
+    ) catch |err| {
+        if (err == error.Busy)
+            slot.current.client.abortGenerationEventTakeDuringRegisteredOperation(&prepared);
+        return err;
+    };
+    defer activation.finish();
+    defer slot.current.client.abortGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        activation.admission.execution_handle.?,
+        &prepared,
+    );
+    var owned: ?client_mod.OwnedGenerationEvent = null;
+    const validated = slot.current.client
+        .validateGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        activation.admission.execution_handle.?,
+        &prepared,
+        &owned,
+    ) catch |err| {
+        if (err == error.Corrupt or err == error.InvalidPrepared)
+            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+        return switch (err) {
+            error.Terminal => error.Terminal,
+            error.Corrupt, error.InvalidPrepared => error.Corrupt,
+        };
+    };
+    if (validated.payload.len == 0 or
+        byteRangesOverlap(
+            @intFromPtr(validated.payload.ptr),
+            validated.payload.len,
+            request.owner.owner_addr,
+            request.owner.owner_size,
+        ) or
+        byteRangesOverlap(
+            @intFromPtr(validated.payload.ptr),
+            validated.payload.len,
+            request.owner.slot_addr,
+            @sizeOf(ClientSlot),
+        ) or
+        byteRangesOverlap(
+            @intFromPtr(validated.payload.ptr),
+            validated.payload.len,
+            @intFromPtr(slot.current),
+            @sizeOf(ClientNode),
+        ) or
+        byteRangesOverlap(
+            @intFromPtr(validated.payload.ptr),
+            validated.payload.len,
+            request.event_lease_addr,
+            @sizeOf(lease_mod.ConnectionLease),
+        ))
+    {
+        slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+        return error.Corrupt;
     }
     const trusted_admission = runtime_event_wire.preflightEvent(
-        @as([*]const u8, @ptrFromInt(prepared.payload_addr))[0..prepared.payload_len],
+        validated.payload,
         .{},
     );
-    const TrustedAdmission = struct { tag: u8, digest: runtime_event_wire.Digest };
+    const TrustedAdmission = struct {
+        tag: u8,
+        digest: runtime_event_wire.Digest,
+        ordering: cleanup_registry_mod.EventOrderingClass,
+    };
     const trusted_admission_projection: TrustedAdmission = switch (trusted_admission) {
         .accepted => |accepted| .{
             .tag = 1,
             .digest = runtime_event_wire.eventPreflightProjectionDigest(accepted),
+            .ordering = if (accepted.event == .revoked) .controller_revoke else .none,
         },
-        .unknown => .{ .tag = 0, .digest = [_]u8{0} ** 32 },
+        .unknown => .{ .tag = 0, .digest = [_]u8{0} ** 32, .ordering = .none },
         else => {
-            endRegisteredNodeOperation(operation);
-            return generationEventCorrupt(slot);
+            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+            return error.Corrupt;
         },
     };
-    const quarantine = &(generation_event_quarantine_registry orelse {
-        endRegisteredNodeOperation(operation);
-        return error.InvalidOwner;
-    });
+    const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
+    if (EventTakeActivationTestHook.failAt(.quarantine_reserve)) return error.Busy;
     const thread_id: u64 = @intCast(std.Thread.getCurrentId());
     const quarantine_reservation = quarantine.reserveUnbound(
         currentPid(),
@@ -6450,70 +6760,104 @@ pub fn takeGenerationEvent(
             .process_nonce = request.owner.process_nonce,
             .owner_thread_id = thread_id,
         },
-    ) catch |err| {
-        endRegisteredNodeOperation(operation);
-        return switch (err) {
-            error.CapacityExhausted, error.ByteCapacityExhausted, error.Busy => error.Busy,
-            error.ProcessDomainMismatch,
-            error.ThreadDomainMismatch,
-            error.InvalidIdentity,
-            error.InvalidState,
-            => generationEventCorrupt(slot),
-        };
+    ) catch |err| return switch (err) {
+        error.CapacityExhausted, error.ByteCapacityExhausted, error.Busy => error.Busy,
+        error.ProcessDomainMismatch,
+        error.ThreadDomainMismatch,
+        error.InvalidIdentity,
+        error.InvalidState,
+        => blk: {
+            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+            break :blk error.Corrupt;
+        },
     };
     var quarantine_live = true;
-    defer if (quarantine_live) quarantine.rollback(
-        currentPid(),
-        thread_id,
-        quarantine_reservation,
-    ) catch @panic("event quarantine rollback failed");
+    activation.setQuarantineLive(true);
+    defer if (quarantine_live) {
+        quarantine.rollback(
+            currentPid(),
+            thread_id,
+            quarantine_reservation,
+        ) catch @panic("event quarantine rollback failed");
+        activation.setResourceLive(.quarantine, false);
+    };
 
+    if (EventTakeActivationTestHook.failAt(.pin_reserve)) return error.Busy;
     const pin_projection = lease_mod.reserveCanonicalPin(
         &slot.current.pin_owner,
         request.event_lease_addr,
         request.bound_stream_id,
         currentPid(),
-    ) catch |err| {
-        endRegisteredNodeOperation(operation);
-        return switch (err) {
-            error.PinOverflow => error.Terminal,
-            error.InvalidOwner, error.InvalidStream => generationEventCorrupt(slot),
-        };
+    ) catch |err| return switch (err) {
+        error.PinOverflow => error.Terminal,
+        error.InvalidOwner, error.InvalidStream => blk: {
+            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+            break :blk error.Corrupt;
+        },
     };
     var pin_live = true;
-    defer if (pin_live) lease_mod.rollbackCanonicalPinUnchecked(
-        pin_projection,
-        &slot.current.pin_owner,
-        currentPid(),
-    );
-    const receipt = node.cleanup_registry.reserveEventGeneration(
+    activation.setPinLive(true);
+    defer if (pin_live) {
+        lease_mod.rollbackCanonicalPinUnchecked(
+            pin_projection,
+            &slot.current.pin_owner,
+            currentPid(),
+        );
+        activation.setResourceLive(.pin, false);
+    };
+    if (EventTakeActivationTestHook.failAt(.authority_reserve)) return error.Busy;
+    const receipt = node.cleanup_registry.reserveEventGenerationWithOrdering(
         request.owner.reservation.cleanup,
         request.owner.reservation.identity,
         request.bound_stream_id,
         request.event_owner_addr,
+        trusted_admission_projection.ordering,
     ) catch |err| {
-        endRegisteredNodeOperation(operation);
         return switch (err) {
             error.IdentityExhausted => error.Terminal,
             error.InvalidState => error.Busy,
             else => error.InvalidOwner,
         };
     };
+    var reservation_live = true;
+    activation.setAuthorityLive(true);
+    if (builtin.is_test and EventTakeActivationTestHook.probe_contention) {
+        batch_release_callback_active = true;
+        EventTakeActivationTestHook.reentry_busy = if (takeGenerationEvent(request)) |_| false else |err| err == error.Busy;
+        batch_release_callback_active = false;
+        EventTakeActivationTestHook.teardown_busy = if (slot.current.client.tryAcquireClientSlotTeardownExclusive()) |_| false else |err| err == error.AdminBusy;
+        const ForeignProbe = struct {
+            fn run(client: *client_mod.Client, busy: *bool) void {
+                busy.* = if (client.call("host.info", null)) |_| false else |err| err == error.AdminBusy;
+            }
+        };
+        const thread = std.Thread.spawn(.{}, ForeignProbe.run, .{
+            &slot.current.client,
+            &EventTakeActivationTestHook.foreign_busy,
+        }) catch @panic("C3-3a3 foreign probe spawn failed");
+        thread.join();
+    }
+    defer if (reservation_live) {
+        slot.current.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
+            request.owner.reservation.cleanup,
+            request.owner.reservation.identity,
+            receipt,
+        );
+        activation.setResourceLive(.authority, false);
+    };
+    if (EventTakeActivationTestHook.failAt(.cleanup_bind)) return error.Busy;
     const quarantine_identity = quarantine.bind(
         currentPid(),
         thread_id,
         quarantine_reservation,
         receipt.event_generation,
     ) catch |err| {
-        node.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
-            request.owner.reservation.cleanup,
-            request.owner.reservation.identity,
-            receipt,
-        );
-        endRegisteredNodeOperation(operation);
         return switch (err) {
             error.CapacityExhausted, error.ByteCapacityExhausted, error.Busy => error.Busy,
-            else => generationEventCorrupt(slot),
+            else => blk: {
+                slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+                break :blk error.Corrupt;
+            },
         };
     };
     node.cleanup_registry.bindEventCleanupNoFail(
@@ -6523,21 +6867,17 @@ pub fn takeGenerationEvent(
         quarantine_reservation.slot_index,
         quarantine_reservation.reservation_generation,
     );
-    endRegisteredNodeOperation(operation);
-    var reservation_live = true;
-    defer if (reservation_live) {
-        slot.current.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
-            request.owner.reservation.cleanup,
-            request.owner.reservation.identity,
-            receipt,
-        );
-    };
-
-    var owned: ?client_mod.OwnedGenerationEvent = null;
-    slot.current.client.commitGenerationEventTake(&prepared, &owned) catch |err| return switch (err) {
-        error.Busy => error.Busy,
+    slot.current.client.commitGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        activation.admission.execution_handle.?,
+        &prepared,
+        &owned,
+        validated,
+    ) catch |err| return switch (err) {
         error.Terminal => error.Terminal,
-        error.Corrupt, error.InvalidPrepared => generationEventCorrupt(slot),
+        error.Corrupt, error.InvalidPrepared => blk: {
+            slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
+            break :blk error.Corrupt;
+        },
     };
     const event = owned orelse unreachable;
     slot.current.cleanup_registry.commitEventGenerationPublicationNoFail(
@@ -6545,11 +6885,17 @@ pub fn takeGenerationEvent(
         request.owner.reservation.identity,
         receipt,
     );
-    slot.consumeStreamOperationPermit(permit) catch unreachable;
+    if (builtin.is_test) EventTakeActivationTestHook.suffix_stage = 1;
+    slot.consumeStreamOperationPermitNoFail(permit);
+    if (builtin.is_test) EventTakeActivationTestHook.suffix_stage = 2;
     permit_live = false;
     reservation_live = false;
     quarantine_live = false;
     pin_live = false;
+    activation.setResourceLive(.authority, false);
+    activation.setResourceLive(.quarantine, false);
+    activation.setResourceLive(.pin, false);
+    if (builtin.is_test) EventTakeActivationTestHook.suffix_stage = 3;
     return .{ .taken = .{
         .identity = .{ .owner = request.owner, .receipt = receipt },
         .header = event.header,
@@ -6582,6 +6928,173 @@ pub fn generationEventAttachmentReadiness(
         error.InvalidState => error.Corrupt,
         else => error.InvalidOwner,
     };
+}
+
+pub fn pumpGenerationPendingOutput(
+    owner: GenerationTransportOwnerQuery,
+) GenerationEventError!bool {
+    const admission = beginGenerationRequestOwner(owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    const decision = finalAdmissionTransactionWithOperationAndRegistry(
+        &admission.operation,
+        &transaction,
+        &.{},
+    ) catch |err| return err;
+    if (decision == .blocked) return false;
+    defer transaction.finish() catch
+        @panic("pending output final admission settlement failed");
+    return admission.operation.node.client
+        .pumpPendingOutputUnderRegisteredOperationExecutionLease(
+        transaction.execution_handle.?,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.ConnectionClosed => error.InvalidOwner,
+        else => error.Terminal,
+    };
+}
+
+pub fn sendGenerationInput(
+    owner: GenerationTransportOwnerQuery,
+    stream_id: u64,
+    bytes: []const u8,
+) GenerationInputError!void {
+    const admission = try beginGenerationInputOwner(owner, stream_id);
+    defer endRegisteredNodeOperation(admission.operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    const protected = [_]FinalAdmissionProtectedRange{.{
+        .start = @intFromPtr(bytes.ptr),
+        .len = bytes.len,
+    }};
+    const decision = try finalAdmissionTransactionWithOperationAndRegistry(
+        &admission.operation,
+        &transaction,
+        &protected,
+    );
+    if (decision == .blocked) return error.Busy;
+    defer transaction.finish() catch @panic("generation input admission settlement failed");
+    return admission.operation.node.client.sendInputUnderRegisteredOperationExecutionLease(
+        transaction.execution_handle.?,
+        stream_id,
+        bytes,
+    );
+}
+
+pub fn sendGenerationInputNonBlocking(
+    owner: GenerationTransportOwnerQuery,
+    stream_id: u64,
+    bytes: []const u8,
+) GenerationInputError!usize {
+    const admission = try beginGenerationInputOwner(owner, stream_id);
+    defer endRegisteredNodeOperation(admission.operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    const protected = [_]FinalAdmissionProtectedRange{.{
+        .start = @intFromPtr(bytes.ptr),
+        .len = bytes.len,
+    }};
+    const decision = try finalAdmissionTransactionWithOperationAndRegistry(
+        &admission.operation,
+        &transaction,
+        &protected,
+    );
+    if (decision == .blocked) return 0;
+    defer transaction.finish() catch @panic("generation nonblocking input admission settlement failed");
+    return admission.operation.node.client
+        .sendInputNonBlockingUnderRegisteredOperationExecutionLease(
+        transaction.execution_handle.?,
+        stream_id,
+        bytes,
+    );
+}
+
+fn beginGenerationInputOwner(
+    owner: GenerationTransportOwnerQuery,
+    stream_id: u64,
+) GenerationInputError!GenerationRequestOwner {
+    return beginBoundControllerMutationOwner(owner, stream_id) catch |err| return err;
+}
+
+fn beginBoundControllerMutationOwner(
+    request: anytype,
+    stream_id: u64,
+) error{ Busy, InvalidOwner, Unauthorized }!GenerationRequestOwner {
+    const admission = beginGenerationRequestOwner(request, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    errdefer endRegisteredNodeOperation(admission.operation);
+    const live = admission.operation.node.cleanup_registry.controllerAuthorityLive(
+        request.reservation.cleanup,
+        admission.identity,
+        stream_id,
+    ) catch return error.InvalidOwner;
+    if (!live) return error.Unauthorized;
+    return admission;
+}
+
+pub fn sendGenerationResyncNonBlocking(
+    owner: GenerationTransportOwnerQuery,
+    stream_id: u64,
+) GenerationInputError!bool {
+    const admission = beginGenerationRequestOwner(owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    const decision = try finalAdmissionTransactionWithOperationAndRegistry(
+        &admission.operation,
+        &transaction,
+        &.{},
+    );
+    if (decision == .blocked) return false;
+    defer transaction.finish() catch @panic("generation resync admission settlement failed");
+    return admission.operation.node.client
+        .sendResyncNonBlockingUnderRegisteredOperationExecutionLease(
+        transaction.execution_handle.?,
+        stream_id,
+    );
+}
+
+pub fn callGenerationRpc(
+    owner: GenerationTransportOwnerQuery,
+    method: []const u8,
+    params_json: ?[]const u8,
+) client_mod.ClientError![]u8 {
+    const admission = beginGenerationRequestOwner(owner, false) catch |err| return switch (err) {
+        error.Busy => error.AdminBusy,
+        else => error.ProtocolError,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    var protected: [2]FinalAdmissionProtectedRange = undefined;
+    var protected_len: usize = 0;
+    if (method.len != 0) {
+        protected[protected_len] = .{ .start = @intFromPtr(method.ptr), .len = method.len };
+        protected_len += 1;
+    }
+    if (params_json) |params| if (params.len != 0) {
+        protected[protected_len] = .{ .start = @intFromPtr(params.ptr), .len = params.len };
+        protected_len += 1;
+    };
+    const decision = finalAdmissionTransactionWithOperationAndRegistry(
+        &admission.operation,
+        &transaction,
+        protected[0..protected_len],
+    ) catch |err| return switch (err) {
+        error.Busy => error.AdminBusy,
+        error.InvalidOwner => error.ProtocolError,
+    };
+    if (decision == .blocked) return error.AdminBusy;
+    defer transaction.finish() catch @panic("generation RPC admission settlement failed");
+    return admission.operation.node.client.callUnderRegisteredOperationExecutionLease(
+        transaction.execution_handle.?,
+        method,
+        params_json,
+    );
 }
 
 /// Projects the existing ended-purge transaction through one sealed generation binding. The
@@ -7489,6 +8002,7 @@ pub const ClientSlot = struct {
             &node.operation_fence,
             @intFromPtr(&node.client),
             pid,
+            issuer.process_nonce,
             slot_identity.tagged,
             node_identity.tagged,
             node_identity.tagged,
@@ -8175,6 +8689,14 @@ pub const ClientSlot = struct {
             return error.InvalidStreamOperationPermit;
         try unregisterStreamOperationPermit(permit);
         self.clearStreamOperationPermit();
+    }
+
+    fn consumeStreamOperationPermitNoFail(
+        self: *ClientSlot,
+        permit: StreamOperationPermit,
+    ) void {
+        self.consumeStreamOperationPermit(permit) catch
+            @panic("validated stream operation permit consume failed");
     }
 
     fn prepareStreamOperationPermitConsume(
@@ -9758,6 +10280,976 @@ fn fixtureClient(allocator: std.mem.Allocator, host_id: u128) client_mod.Client 
         .host_id = host_id,
         .parser = @import("framing.zig").FrameParser.init(allocator),
     };
+}
+
+fn runC3a3ProductTakeFaultCase(fault: EventTakeActivationTestHook.Fault, seed: u128) !void {
+    const Owner = struct {
+        lease: lease_mod.ConnectionLease = .{},
+        event_owner: u8 = 0,
+    };
+    var source = fixtureClient(std.testing.allocator, seed);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, seed);
+    defer slot.deinit();
+    var owner: Owner = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var transport_storage: u8 = 0;
+    var prepared_storage: u8 = 0;
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &owner.lease, seed + 1);
+    const prepared_call = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = @intCast(seed + 2),
+        .request_id = @intCast(seed + 3),
+        .request_digest = @intCast(seed + 4),
+    }).?;
+    try binding.pairRequest(prepared_call);
+    try binding.beginExecute(prepared_call);
+    try slot.commitAttachmentBinding(
+        &binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(prepared_call).?,
+            prepared_call.request_id,
+        ).?,
+        7,
+        &owner.lease,
+    );
+    const seal = try slot.transportOwnerSeal(reservation);
+    const transport_incarnation: u64 = @intCast(seed + 5);
+    try contract.TransportOwnerSeal.initInPlace(
+        seal,
+        transport_incarnation,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        @intFromPtr(&transport_storage),
+        @intFromPtr(&prepared_storage),
+    );
+    defer {
+        seal.terminalize(transport_incarnation) catch @panic("C3-3a3 owner seal cleanup failed");
+        slot.beginAttachmentDrop(&binding, reservation, &owner.lease) catch
+            @panic("C3-3a3 binding drop begin failed");
+        slot.finishActiveAttachmentDrop(&binding, reservation, &owner.lease);
+    }
+    try slot.current.client.bufferGenerationEventForTest(7, "{\"event\":\"future.event\"}");
+    const query: GenerationTransportOwnerQuery = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = slot.incarnation.tagged,
+        .node_incarnation = slot.current.incarnation.tagged,
+        .host_id = slot.current.client.host_id,
+        .pid = slot.pid,
+        .process_nonce = slot.process_nonce,
+        .transport_addr = @intFromPtr(&transport_storage),
+        .transport_incarnation = transport_incarnation,
+        .owner_addr = @intFromPtr(&owner),
+        .owner_size = @sizeOf(Owner),
+        .owner_seal_addr = @intFromPtr(seal),
+        .prepared_storage_addr = @intFromPtr(&prepared_storage),
+        .reservation = reservation,
+    };
+    const quarantine = &(generation_event_quarantine_registry orelse return error.TestUnexpectedResult);
+    const quarantine_before = try quarantine.snapshot(
+        currentPid(),
+        @intCast(std.Thread.getCurrentId()),
+    );
+    EventTakeActivationTestHook.reset();
+    EventTakeActivationTestHook.fault = fault;
+    EventTakeActivationTestHook.probe_contention = fault == .none;
+    defer EventTakeActivationTestHook.reset();
+    const request: GenerationEventTakeRequest = .{
+        .owner = query,
+        .bound_stream_id = 7,
+        .event_owner_addr = @intFromPtr(&owner.event_owner),
+        .event_lease_addr = @intFromPtr(&owner.lease),
+    };
+    if (fault == .none) {
+        const outcome = try takeGenerationEvent(request);
+        try std.testing.expect(outcome == .taken);
+        try std.testing.expectEqual(@as(u8, 5), EventTakeActivationTestHook.suffix_stage);
+        try std.testing.expect(EventTakeActivationTestHook.reentry_busy);
+        try std.testing.expect(EventTakeActivationTestHook.teardown_busy);
+        try std.testing.expect(EventTakeActivationTestHook.foreign_busy);
+        std.c._exit(0);
+    }
+    try std.testing.expectError(error.Busy, takeGenerationEvent(request));
+    try std.testing.expectEqual(@as(usize, 1), slot.current.client.pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.cleanup_registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), slot.current.pin_owner.cleanup_pin_count);
+    const snapshot = try quarantine.snapshot(currentPid(), @intCast(std.Thread.getCurrentId()));
+    try std.testing.expectEqual(quarantine_before, snapshot);
+}
+
+test "C3-3a3 product client slot activation transaction seal covers final address phase and live bits" {
+    try ClientSlot.initializeProcessRuntime();
+    inline for (.{
+        EventTakeActivationTestHook.Fault.quarantine_reserve,
+        .pin_reserve,
+        .authority_reserve,
+        .cleanup_bind,
+    }, 0..) |fault, index| try runC3a3ProductTakeFaultCase(fault, 0xA310 + index * 8);
+    var transaction: EventTakeActivationTransaction = .{};
+    transaction.self_addr = @intFromPtr(&transaction);
+    transaction.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.active);
+    transaction.prepared_addr = 0xA301;
+    transaction.permit_registry_id = 0xA302;
+    transaction.reseal();
+    const baseline = transaction.seal;
+
+    transaction.quarantine_live = true;
+    transaction.reseal();
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &transaction.seal));
+    const quarantine_seal = transaction.seal;
+    transaction.quarantine_live = false;
+    transaction.pin_live = true;
+    transaction.reseal();
+    try std.testing.expect(!std.mem.eql(u8, &quarantine_seal, &transaction.seal));
+    const pin_seal = transaction.seal;
+    transaction.pin_live = false;
+    transaction.authority_live = true;
+    transaction.reseal();
+    try std.testing.expect(!std.mem.eql(u8, &pin_seal, &transaction.seal));
+
+    var copied = transaction;
+    try std.testing.expect(copied.self_addr != @intFromPtr(&copied));
+    try std.testing.expect(!std.mem.eql(u8, &copied.seal, &copied.digest()));
+    if (builtin.os.tag == .macos) {
+        // Each canonical live-bit owner must fail closed even when a copied
+        // transaction is otherwise resealed at its new address.  The fourth
+        // case fixes unsealed tuple mutation as a separate authority failure.
+        inline for (0..4) |drift_case| {
+            const child = std.c.fork();
+            if (child < 0) return error.TestUnexpectedResult;
+            if (child == 0) {
+                _ = std.c.close(2);
+                var candidate = copied;
+                candidate.self_addr = @intFromPtr(&candidate);
+                candidate.quarantine_live = drift_case == 0;
+                candidate.pin_live = drift_case == 1;
+                candidate.authority_live = drift_case == 2;
+                candidate.reseal();
+                if (drift_case == 3) candidate.pin_live = true;
+                candidate.finish();
+                std.c._exit(3);
+            }
+            var status: c_int = 0;
+            try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+            const wait_status: u32 = @bitCast(status);
+            try std.testing.expect(
+                std.c.W.IFSIGNALED(wait_status) or
+                    (std.c.W.IFEXITED(wait_status) and std.c.W.EXITSTATUS(wait_status) != 0),
+            );
+        }
+    }
+    transaction.authority_live = false;
+    transaction.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.consumed);
+    transaction.reseal();
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &transaction.seal));
+}
+
+test "C3-3a3 product client slot direct lease Busy resets prepared under retained shared pin" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA303);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA303);
+    defer slot.deinit();
+    try slot.current.client.bufferGenerationEventForTest(7, "{\"event\":\"future.event\"}");
+    var prepared: client_mod.PreparedGenerationEventTake = .{};
+    try std.testing.expectEqual(
+        client_mod.GenerationEventTakeKind.ordinary,
+        try slot.current.client.prepareGenerationEventTake(7, &prepared),
+    );
+    const first = try beginRegisteredNodeOperation(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = slot.incarnation.tagged,
+        .node = .{ .incarnation = slot.current.incarnation.tagged },
+        .owner_thread_incarnation = slot.operation_owner_thread_incarnation,
+    });
+    defer endRegisteredNodeOperation(first);
+    const sibling = try beginRegisteredNodeOperation(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = slot.incarnation.tagged,
+        .node = .{ .incarnation = slot.current.incarnation.tagged },
+        .owner_thread_incarnation = slot.operation_owner_thread_incarnation,
+    });
+    defer endRegisteredNodeOperation(sibling);
+    var mint_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+    try mintRegisteredOperationExecutionReceipt(
+        &mint_receipt,
+        first,
+        registeredNodeOperationOwnerEntry(first).?,
+    );
+    var execution_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.current.client.beginRegisteredOperationExecutionLease(
+            &execution_capability,
+            &mint_receipt,
+        ),
+    );
+    slot.current.client.abortGenerationEventTakeDuringRegisteredOperation(&prepared);
+    try std.testing.expect(std.meta.eql(prepared, client_mod.PreparedGenerationEventTake{}));
+    try std.testing.expectEqual(@as(usize, 1), slot.current.client.pending_events.items.len);
+    const AdversarialCases = struct {
+        fn run() !void {
+            try ClientSlot.initializeProcessRuntime();
+            if (builtin.os.tag == .macos) {
+                const child = std.c.fork();
+                if (child < 0) return error.TestUnexpectedResult;
+                if (child == 0) {
+                    const unpublished_handle: client_mod.RegisteredOperationExecutionHandle = .{
+                        .slot_index = 0,
+                        .slot_generation = 0,
+                        .registry_key = 0,
+                        .publication_identity = 0,
+                        .operation_identity = 0,
+                    };
+                    const stale_client: *client_mod.Client = @ptrFromInt(0x1000);
+                    _ = stale_client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                        unpublished_handle,
+                    ) catch |err| std.c._exit(if (err == error.ConnectionClosed) 0 else 2);
+                    std.c._exit(3);
+                }
+                var status: c_int = 0;
+                try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+                const wait_status: u32 = @bitCast(status);
+                try std.testing.expect(std.c.W.IFEXITED(wait_status));
+                try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(wait_status));
+            }
+            var probe_source = fixtureClient(std.testing.allocator, 0xA353);
+            var probe_slot: ClientSlot = undefined;
+            try ClientSlot.initInPlace(&probe_slot, std.testing.allocator, &probe_source, 0xA353);
+            defer probe_slot.deinit();
+            const probe_operation = try beginRegisteredNodeOperation(.{
+                .slot_addr = @intFromPtr(&probe_slot),
+                .slot_incarnation = probe_slot.incarnation.tagged,
+                .node = .{ .incarnation = probe_slot.current.incarnation.tagged },
+                .owner_thread_incarnation = probe_slot.operation_owner_thread_incarnation,
+            });
+            defer endRegisteredNodeOperation(probe_operation);
+            var forged_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{
+                .self_addr = 0,
+                .slot_index = 7,
+                .slot_generation = 1,
+                .registry_key = 0xF0,
+                .client_addr = @intFromPtr(&probe_slot.current.client),
+                .operation_identity = probe_operation.operation_id,
+                .owner_process_id = currentPid(),
+                .owner_process_nonce = probe_slot.process_nonce,
+                .owner_thread_id = @intCast(std.Thread.getCurrentId()),
+                .owner_thread_incarnation = probe_slot.operation_owner_thread_incarnation,
+                .live = true,
+            };
+            forged_receipt.self_addr = @intFromPtr(&forged_receipt);
+            var forged_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            try std.testing.expectError(
+                error.AdminBusy,
+                probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                    &forged_capability,
+                    &forged_receipt,
+                ),
+            );
+            try std.testing.expect(forged_capability.pristineExact());
+            var probe_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+            try mintRegisteredOperationExecutionReceipt(
+                &probe_receipt,
+                probe_operation,
+                registeredNodeOperationOwnerEntry(probe_operation).?,
+            );
+            var copied_receipt = probe_receipt;
+            var copied_receipt_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            try std.testing.expectError(
+                error.AdminBusy,
+                probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                    &copied_receipt_capability,
+                    &copied_receipt,
+                ),
+            );
+            try std.testing.expect(copied_receipt_capability.pristineExact());
+            try std.testing.expect(probe_receipt.live);
+            var probe_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+
+            const ForeignMintProbe = struct {
+                client: *client_mod.Client,
+                receipt: *client_mod.RegisteredOperationExecutionMintReceipt,
+                capability: client_mod.RegisteredOperationExecutionCapability = .{},
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    _ = context.client.beginRegisteredOperationExecutionLease(
+                        &context.capability,
+                        context.receipt,
+                    ) catch |err| {
+                        context.result.store(if (err == error.AdminBusy) 1 else 2, .release);
+                        return;
+                    };
+                    context.result.store(3, .release);
+                }
+            };
+            var foreign_mint: ForeignMintProbe = .{
+                .client = &probe_slot.current.client,
+                .receipt = &probe_receipt,
+            };
+            const foreign_minter = try std.Thread.spawn(.{}, ForeignMintProbe.run, .{&foreign_mint});
+            foreign_minter.join();
+            try std.testing.expectEqual(@as(u8, 1), foreign_mint.result.load(.acquire));
+            try std.testing.expect(foreign_mint.capability.pristineExact());
+            try std.testing.expect(probe_receipt.live);
+
+            const PublicationProbe = struct {
+                client: *client_mod.Client,
+                handle: client_mod.RegisteredOperationExecutionHandle,
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    if (!client_mod.ExecutionCapabilityPublicationTestHook.waitUntil(
+                        &client_mod.execution_capability_publication_test_hook.reached,
+                    )) {
+                        context.result.store(4, .release);
+                        client_mod.execution_capability_publication_test_hook.proceed.store(true, .release);
+                        return;
+                    }
+                    _ = context.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                        context.handle,
+                    ) catch |err| {
+                        context.result.store(if (err == error.ConnectionClosed) 1 else 2, .release);
+                        client_mod.execution_capability_publication_test_hook.proceed.store(true, .release);
+                        return;
+                    };
+                    context.result.store(3, .release);
+                    client_mod.execution_capability_publication_test_hook.proceed.store(true, .release);
+                }
+            };
+            client_mod.execution_capability_publication_test_hook.reached.store(false, .release);
+            client_mod.execution_capability_publication_test_hook.proceed.store(false, .release);
+            client_mod.execution_capability_publication_test_hook.armed.store(true, .release);
+            var publication_probe: PublicationProbe = .{
+                .client = &probe_slot.current.client,
+                .handle = .{
+                    .slot_index = 0,
+                    .slot_generation = 0,
+                    .registry_key = 0,
+                    .publication_identity = 0,
+                    .operation_identity = 0,
+                },
+            };
+            const publication_thread = try std.Thread.spawn(.{}, PublicationProbe.run, .{&publication_probe});
+            const probe_handle = try probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                &probe_capability,
+                &probe_receipt,
+            );
+            publication_thread.join();
+            try std.testing.expectEqual(@as(u8, 1), publication_probe.result.load(.acquire));
+
+            var exhausted_pin: operation_thread_identity.CapabilityPin = .{};
+            operation_thread_identity.testing_api.armReaderPinExhaustion();
+            try std.testing.expect(!operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                probe_handle,
+                &exhausted_pin,
+            ));
+            try std.testing.expect(exhausted_pin.pristineExact());
+            try std.testing.expect(operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                probe_handle,
+                &exhausted_pin,
+            ));
+            try std.testing.expect(operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(
+                &exhausted_pin,
+            ));
+
+            var oob_pin: operation_thread_identity.CapabilityPin = .{};
+            try std.testing.expect(operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                probe_handle,
+                &oob_pin,
+            ));
+            var forged_oob_pin = oob_pin;
+            forged_oob_pin.slot_index = std.math.maxInt(u16);
+            try std.testing.expect(!operation_thread_identity.closeCapability(&forged_oob_pin));
+            try std.testing.expect(operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(
+                &oob_pin,
+            ));
+
+            var tampered_pin: operation_thread_identity.CapabilityPin = .{};
+            try std.testing.expect(operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                probe_handle,
+                &tampered_pin,
+            ));
+            const ForeignPinTamperProbe = struct {
+                pin: *operation_thread_identity.CapabilityPin,
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    context.pin.fields.owner_process_id = operation_thread_identity.currentProcessId();
+                    context.pin.fields.owner_thread_id = @intCast(std.Thread.getCurrentId());
+                    context.pin.fields.owner_thread_incarnation = operation_thread_identity.acquire() catch 0;
+                    context.result.store(
+                        if (operation_thread_identity.closeCapability(context.pin)) 2 else 1,
+                        .release,
+                    );
+                }
+            };
+            var tamper_probe: ForeignPinTamperProbe = .{ .pin = &tampered_pin };
+            const tamper_thread = try std.Thread.spawn(.{}, ForeignPinTamperProbe.run, .{&tamper_probe});
+            tamper_thread.join();
+            try std.testing.expectEqual(@as(u8, 1), tamper_probe.result.load(.acquire));
+            try std.testing.expect(operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(
+                &tampered_pin,
+            ));
+
+            if (builtin.os.tag == .macos) {
+                var fork_pin: operation_thread_identity.CapabilityPin = .{};
+                try std.testing.expect(operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                    probe_handle,
+                    &fork_pin,
+                ));
+                operation_thread_identity.testing_api.lockCapabilityRegistry();
+                const child = std.c.fork();
+                if (child < 0) {
+                    operation_thread_identity.testing_api.unlockCapabilityRegistry();
+                    return error.TestUnexpectedResult;
+                }
+                if (child == 0) {
+                    fork_pin.fields.owner_process_id = operation_thread_identity.currentProcessId();
+                    fork_pin.fields.owner_thread_id = @intCast(std.Thread.getCurrentId());
+                    std.c._exit(if (!operation_thread_identity.closeCapability(&fork_pin) and
+                        !operation_thread_identity.unpinCapability(&fork_pin)) 0 else 2);
+                }
+                operation_thread_identity.testing_api.unlockCapabilityRegistry();
+                var status: c_int = 0;
+                try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+                const wait_status: u32 = @bitCast(status);
+                try std.testing.expect(std.c.W.IFEXITED(wait_status));
+                try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(wait_status));
+                try std.testing.expect(operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(
+                    &fork_pin,
+                ));
+            }
+
+            var copied_handle = probe_handle;
+            copied_handle.registry_key +%= 1;
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                probe_slot.current.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(copied_handle),
+            );
+
+            const ForeignProbe = struct {
+                client: *client_mod.Client,
+                handle: client_mod.RegisteredOperationExecutionHandle,
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    _ = context.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                        context.handle,
+                    ) catch |err| {
+                        context.result.store(if (err == error.ConnectionClosed) 1 else 2, .release);
+                        return;
+                    };
+                    context.result.store(3, .release);
+                }
+            };
+            var foreign_probe: ForeignProbe = .{
+                .client = &probe_slot.current.client,
+                .handle = probe_handle,
+            };
+            const foreign = try std.Thread.spawn(.{}, ForeignProbe.run, .{&foreign_probe});
+            foreign.join();
+            try std.testing.expectEqual(@as(u8, 1), foreign_probe.result.load(.acquire));
+
+            try std.testing.expect(probe_slot.current.client.enterGenerationAllocatorCallback());
+            try std.testing.expectError(
+                error.AdminBusy,
+                probe_slot.current.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                    probe_handle,
+                ),
+            );
+            probe_slot.current.client.leaveGenerationAllocatorCallbackUnchecked();
+            if (builtin.os.tag == .macos) {
+                var inherited_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+                try mintRegisteredOperationExecutionReceipt(
+                    &inherited_receipt,
+                    probe_operation,
+                    registeredNodeOperationOwnerEntry(probe_operation).?,
+                );
+                operation_thread_identity.testing_api.lockRegistry();
+                const child = std.c.fork();
+                if (child < 0) {
+                    operation_thread_identity.testing_api.unlockRegistry();
+                    return error.TestUnexpectedResult;
+                }
+                if (child == 0) {
+                    if (operation_thread_identity.abortMintReceipt(&inherited_receipt)) std.c._exit(2);
+                    _ = probe_slot.current.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                        probe_handle,
+                    ) catch |err| std.c._exit(if (err == error.ConnectionClosed) 0 else 3);
+                    std.c._exit(4);
+                }
+                operation_thread_identity.testing_api.unlockRegistry();
+                var status: c_int = 0;
+                try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+                const wait_status: u32 = @bitCast(status);
+                try std.testing.expect(std.c.W.IFEXITED(wait_status));
+                try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(wait_status));
+                try std.testing.expect(operation_thread_identity.abortMintReceipt(&inherited_receipt));
+            }
+            client_mod.execution_capability_read_test_hook.reached.store(false, .release);
+            client_mod.execution_capability_read_test_hook.proceed.store(false, .release);
+            operation_thread_identity.testing_api.armCapabilityClosing();
+            var second_close_pin: operation_thread_identity.CapabilityPin = .{};
+            try std.testing.expect(operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                probe_handle,
+                &second_close_pin,
+            ));
+            const RegistryReaderProbe = struct {
+                handle: client_mod.RegisteredOperationExecutionHandle,
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    var pin: operation_thread_identity.CapabilityPin = .{};
+                    if (!operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                        context.handle,
+                        &pin,
+                    )) {
+                        context.result.store(2, .release);
+                        return;
+                    }
+                    var copied_pin = pin;
+                    if (operation_thread_identity.unpinCapability(&copied_pin)) {
+                        context.result.store(5, .release);
+                        return;
+                    }
+                    client_mod.execution_capability_read_test_hook.reached.store(true, .release);
+                    if (!client_mod.ExecutionCapabilityPublicationTestHook.waitUntil(
+                        &client_mod.execution_capability_read_test_hook.proceed,
+                    )) {
+                        context.result.store(3, .release);
+                        return;
+                    }
+                    const first_unpin = operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(&pin);
+                    const double_unpin = operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(&pin);
+                    context.result.store(if (first_unpin and !double_unpin) 1 else 4, .release);
+                }
+            };
+            var closing_probe: RegistryReaderProbe = .{ .handle = probe_handle };
+            const closing_reader = try std.Thread.spawn(.{}, RegistryReaderProbe.run, .{&closing_probe});
+            try std.testing.expect(client_mod.ExecutionCapabilityPublicationTestHook.waitUntil(
+                &client_mod.execution_capability_read_test_hook.reached,
+            ));
+            const CloseCoordinator = struct {
+                handle: client_mod.RegisteredOperationExecutionHandle,
+                close_completed: *const std.atomic.Value(bool),
+                second_close_pin: *operation_thread_identity.CapabilityPin,
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    if (!client_mod.ExecutionCapabilityPublicationTestHook.waitUntil(
+                        operation_thread_identity.testing_api.capabilityClosingReached(),
+                    )) @panic("capability close hook timed out");
+                    if (context.close_completed.load(.acquire)) {
+                        context.result.store(3, .release);
+                        client_mod.execution_capability_read_test_hook.proceed.store(true, .release);
+                        return;
+                    }
+                    if (operation_thread_identity.testing_api.closeCapabilityIgnoringOwner(
+                        context.second_close_pin,
+                    ) or !context.second_close_pin.live or
+                        !operation_thread_identity.testing_api.unpinCapabilityIgnoringOwner(
+                            context.second_close_pin,
+                        ))
+                    {
+                        context.result.store(4, .release);
+                        client_mod.execution_capability_read_test_hook.proceed.store(true, .release);
+                        return;
+                    }
+                    var late_pin: operation_thread_identity.CapabilityPin = .{};
+                    context.result.store(
+                        if (operation_thread_identity.testing_api.pinCapabilityIgnoringThread(
+                            context.handle,
+                            &late_pin,
+                        )) 2 else 1,
+                        .release,
+                    );
+                    client_mod.execution_capability_read_test_hook.proceed.store(true, .release);
+                }
+            };
+            var close_completed: std.atomic.Value(bool) = .init(false);
+            var close_probe: CloseCoordinator = .{
+                .handle = probe_handle,
+                .close_completed = &close_completed,
+                .second_close_pin = &second_close_pin,
+            };
+            const close_coordinator = try std.Thread.spawn(.{}, CloseCoordinator.run, .{&close_probe});
+            probe_slot.current.client.endRegisteredOperationExecutionLease(probe_handle);
+            close_completed.store(true, .release);
+            close_coordinator.join();
+            closing_reader.join();
+            try std.testing.expectEqual(@as(u8, 1), closing_probe.result.load(.acquire));
+            try std.testing.expectEqual(@as(u8, 1), close_probe.result.load(.acquire));
+
+            const stale_same_address_handle = probe_handle;
+            probe_capability = .{};
+            var same_address_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+            try mintRegisteredOperationExecutionReceipt(
+                &same_address_receipt,
+                probe_operation,
+                registeredNodeOperationOwnerEntry(probe_operation).?,
+            );
+            const same_address_handle = try probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                &probe_capability,
+                &same_address_receipt,
+            );
+            try std.testing.expect(stale_same_address_handle.slot_generation != same_address_handle.slot_generation);
+            try std.testing.expect(stale_same_address_handle.registry_key != same_address_handle.registry_key);
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                probe_slot.current.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                    stale_same_address_handle,
+                ),
+            );
+            probe_slot.current.client.endRegisteredOperationExecutionLease(same_address_handle);
+            if (builtin.os.tag == .macos) {
+                const mapped = try std.posix.mmap(
+                    null,
+                    std.heap.page_size_min,
+                    .{ .READ = true, .WRITE = true },
+                    .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+                    -1,
+                    0,
+                );
+                const mapped_capability: *client_mod.RegisteredOperationExecutionCapability =
+                    @ptrCast(@alignCast(mapped.ptr));
+                mapped_capability.* = .{};
+                var mapped_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+                try mintRegisteredOperationExecutionReceipt(
+                    &mapped_receipt,
+                    probe_operation,
+                    registeredNodeOperationOwnerEntry(probe_operation).?,
+                );
+                const mapped_handle = try probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                    mapped_capability,
+                    &mapped_receipt,
+                );
+                probe_slot.current.client.endRegisteredOperationExecutionLease(mapped_handle);
+                std.posix.munmap(mapped);
+                try std.testing.expectError(
+                    error.ConnectionClosed,
+                    probe_slot.current.client.pumpPendingOutputUnderRegisteredOperationExecutionLease(
+                        mapped_handle,
+                    ),
+                );
+            }
+
+            var racing_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+            try mintRegisteredOperationExecutionReceipt(
+                &racing_receipt,
+                probe_operation,
+                registeredNodeOperationOwnerEntry(probe_operation).?,
+            );
+            const ForeignAbortProbe = struct {
+                receipt: *client_mod.RegisteredOperationExecutionMintReceipt,
+                result: std.atomic.Value(u8) = .init(0),
+
+                fn run(context: *@This()) void {
+                    context.result.store(
+                        if (operation_thread_identity.abortMintReceipt(context.receipt)) 2 else 1,
+                        .release,
+                    );
+                }
+            };
+            operation_thread_identity.receipt_read_test_hook.reached.store(false, .release);
+            operation_thread_identity.receipt_read_test_hook.proceed.store(false, .release);
+            operation_thread_identity.receipt_read_test_hook.armed.store(true, .release);
+            var foreign_abort: ForeignAbortProbe = .{ .receipt = &racing_receipt };
+            const abort_reader = try std.Thread.spawn(.{}, ForeignAbortProbe.run, .{&foreign_abort});
+            try std.testing.expect(client_mod.ExecutionCapabilityPublicationTestHook.waitUntil(
+                &operation_thread_identity.receipt_read_test_hook.reached,
+            ));
+            var racing_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            const racing_handle = try probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                &racing_capability,
+                &racing_receipt,
+            );
+            operation_thread_identity.receipt_read_test_hook.proceed.store(true, .release);
+            abort_reader.join();
+            try std.testing.expectEqual(@as(u8, 1), foreign_abort.result.load(.acquire));
+            probe_slot.current.client.endRegisteredOperationExecutionLease(racing_handle);
+            var registry_exhaustion_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+            try mintRegisteredOperationExecutionReceipt(
+                &registry_exhaustion_receipt,
+                probe_operation,
+                registeredNodeOperationOwnerEntry(probe_operation).?,
+            );
+            var registry_exhaustion_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            operation_thread_identity.testing_api.armCapabilityPublishExhaustion();
+            try std.testing.expectError(
+                error.AdminBusy,
+                probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                    &registry_exhaustion_capability,
+                    &registry_exhaustion_receipt,
+                ),
+            );
+            try std.testing.expect(registry_exhaustion_capability.pristineExact());
+            var replay_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            try std.testing.expectError(
+                error.AdminBusy,
+                probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                    &replay_capability,
+                    &probe_receipt,
+                ),
+            );
+            try std.testing.expect(replay_capability.pristineExact());
+
+            const free_before_abort = operation_thread_identity.testing_api.freeCount();
+            var aborted_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+            try mintRegisteredOperationExecutionReceipt(
+                &aborted_receipt,
+                probe_operation,
+                registeredNodeOperationOwnerEntry(probe_operation).?,
+            );
+            try std.testing.expectEqual(
+                free_before_abort - 1,
+                operation_thread_identity.testing_api.freeCount(),
+            );
+            var non_pristine_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            non_pristine_capability.client_addr = 1;
+            try std.testing.expectError(
+                error.AdminBusy,
+                probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                    &non_pristine_capability,
+                    &aborted_receipt,
+                ),
+            );
+            try std.testing.expect(operation_thread_identity.abortMintReceipt(&aborted_receipt));
+            try std.testing.expectEqual(
+                free_before_abort,
+                operation_thread_identity.testing_api.freeCount(),
+            );
+
+            probe_slot.current.client.setNextExecutionCapabilityIdentityForTest(
+                std.math.maxInt(u64) - 1,
+            );
+            var last_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+            try mintRegisteredOperationExecutionReceipt(
+                &last_receipt,
+                probe_operation,
+                registeredNodeOperationOwnerEntry(probe_operation).?,
+            );
+            var last_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+            const last_handle = try probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                &last_capability,
+                &last_receipt,
+            );
+            try std.testing.expectEqual(std.math.maxInt(u64) - 1, last_capability.lease_identity);
+            probe_slot.current.client.endRegisteredOperationExecutionLease(last_handle);
+            try std.testing.expectEqual(
+                std.math.maxInt(u64),
+                probe_slot.current.client.nextExecutionCapabilityIdentityForTest(),
+            );
+            inline for (0..2) |_| {
+                var exhausted_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+                try mintRegisteredOperationExecutionReceipt(
+                    &exhausted_receipt,
+                    probe_operation,
+                    registeredNodeOperationOwnerEntry(probe_operation).?,
+                );
+                var exhausted_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+                try std.testing.expectError(
+                    error.ConnectionClosed,
+                    probe_slot.current.client.beginRegisteredOperationExecutionLease(
+                        &exhausted_capability,
+                        &exhausted_receipt,
+                    ),
+                );
+                try std.testing.expect(exhausted_capability.pristineExact());
+                try std.testing.expectEqual(
+                    std.math.maxInt(u64),
+                    probe_slot.current.client.nextExecutionCapabilityIdentityForTest(),
+                );
+            }
+        }
+    };
+    try AdversarialCases.run();
+}
+
+test "C3-3a3 product client slot held validation rejects invalid corrupt and terminal without queue consumption" {
+    const Case = enum { invalid, corrupt, terminal };
+    inline for (std.enums.values(Case)) |case| {
+        var source = fixtureClient(std.testing.allocator, 0xA304 + @as(u128, @intFromEnum(case)));
+        var slot: ClientSlot = undefined;
+        try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+        defer slot.deinit();
+        try slot.current.client.bufferGenerationEventForTest(7, "{\"event\":\"future.event\"}");
+        var prepared: client_mod.PreparedGenerationEventTake = .{};
+        _ = try slot.current.client.prepareGenerationEventTake(7, &prepared);
+        var candidate = prepared;
+        if (case == .invalid) candidate.self_addr +%= 1;
+        if (case == .corrupt) slot.current.client.pending_events.items[0].payload[0] ^= 1;
+        if (case == .terminal) slot.current.client.unusable = true;
+        const operation = try beginRegisteredNodeOperation(.{
+            .slot_addr = @intFromPtr(&slot),
+            .slot_incarnation = slot.incarnation.tagged,
+            .node = .{ .incarnation = slot.current.incarnation.tagged },
+            .owner_thread_incarnation = slot.operation_owner_thread_incarnation,
+        });
+        var mint_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+        mintRegisteredOperationExecutionReceipt(
+            &mint_receipt,
+            operation,
+            registeredNodeOperationOwnerEntry(operation).?,
+        ) catch unreachable;
+        var execution_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+        const execution_handle = slot.current.client.beginRegisteredOperationExecutionLease(
+            &execution_capability,
+            &mint_receipt,
+        ) catch unreachable;
+        var owned: ?client_mod.OwnedGenerationEvent = null;
+        const result = slot.current.client.validateGenerationEventTakeUnderRegisteredOperationExecutionLease(
+            execution_handle,
+            if (case == .invalid) &candidate else &prepared,
+            &owned,
+        );
+        switch (case) {
+            .invalid => try std.testing.expectError(error.InvalidPrepared, result),
+            .corrupt => try std.testing.expectError(error.Corrupt, result),
+            .terminal => try std.testing.expectError(error.Terminal, result),
+        }
+        try std.testing.expect(owned == null);
+        try std.testing.expectEqual(@as(usize, 1), slot.current.client.pending_events.items.len);
+        if (case == .corrupt) slot.current.client.pending_events.items[0].payload[0] ^= 1;
+        if (case == .terminal) slot.current.client.unusable = false;
+        slot.current.client.abortGenerationEventTakeUnderRegisteredOperationExecutionLease(
+            execution_handle,
+            &prepared,
+        );
+        slot.current.client.endRegisteredOperationExecutionLease(execution_handle);
+        endRegisteredNodeOperation(operation);
+        try std.testing.expect(std.meta.eql(prepared, client_mod.PreparedGenerationEventTake{}));
+    }
+}
+
+test "C3-3a3 product client slot held commit consumes the validated queue head exactly once" {
+    var source = fixtureClient(std.testing.allocator, 0xA307);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA307);
+    defer slot.deinit();
+    try slot.current.client.bufferGenerationEventForTest(7, "{\"event\":\"future.event\"}");
+    var prepared: client_mod.PreparedGenerationEventTake = .{};
+    _ = try slot.current.client.prepareGenerationEventTake(7, &prepared);
+    const operation = try beginRegisteredNodeOperation(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = slot.incarnation.tagged,
+        .node = .{ .incarnation = slot.current.incarnation.tagged },
+        .owner_thread_incarnation = slot.operation_owner_thread_incarnation,
+    });
+    var mint_receipt: client_mod.RegisteredOperationExecutionMintReceipt = .{};
+    mintRegisteredOperationExecutionReceipt(
+        &mint_receipt,
+        operation,
+        registeredNodeOperationOwnerEntry(operation).?,
+    ) catch unreachable;
+    var execution_capability: client_mod.RegisteredOperationExecutionCapability = .{};
+    const execution_handle = slot.current.client.beginRegisteredOperationExecutionLease(
+        &execution_capability,
+        &mint_receipt,
+    ) catch unreachable;
+    var owned: ?client_mod.OwnedGenerationEvent = null;
+    const validated = try slot.current.client.validateGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        execution_handle,
+        &prepared,
+        &owned,
+    );
+    try slot.current.client.commitGenerationEventTakeUnderRegisteredOperationExecutionLease(
+        execution_handle,
+        &prepared,
+        &owned,
+        validated,
+    );
+    slot.current.client.endRegisteredOperationExecutionLease(execution_handle);
+    endRegisteredNodeOperation(operation);
+    const event = owned.?;
+    defer std.testing.allocator.free(event.payload);
+    try std.testing.expectEqualStrings("{\"event\":\"future.event\"}", event.payload);
+    try std.testing.expectEqual(@as(usize, 0), slot.current.client.pending_events.items.len);
+    try std.testing.expectError(
+        error.InvalidPrepared,
+        slot.current.client.commitGenerationEventTake(&prepared, &owned),
+    );
+}
+
+test "C3-3a3 product client slot live revoke aggregate blocks final admission until authority rollback" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xA308);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xA308);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xA309);
+    const prepared_call = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0xA30A,
+        .request_id = 0xA30B,
+        .request_digest = 0xA30C,
+    }).?;
+    try binding.pairRequest(prepared_call);
+    try binding.beginExecute(prepared_call);
+    try slot.commitAttachmentBinding(
+        &binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(prepared_call).?,
+            prepared_call.request_id,
+        ).?,
+        7,
+        &lease,
+    );
+    const receipt = try slot.current.cleanup_registry.reserveEventGenerationWithOrdering(
+        reservation.cleanup,
+        reservation.identity,
+        7,
+        0xA30D,
+        .controller_revoke,
+    );
+    if (builtin.os.tag == .macos) {
+        const child = std.c.fork();
+        if (child < 0) return error.TestUnexpectedResult;
+        if (child == 0) {
+            _ = std.c.close(2);
+            slot.current.cleanup_registry.revoke_blocker_count = 0;
+            slot.current.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
+                reservation.cleanup,
+                reservation.identity,
+                receipt,
+            );
+            std.c._exit(3);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        const wait_status: u32 = @bitCast(status);
+        try std.testing.expect(
+            std.c.W.IFSIGNALED(wait_status) or
+                (std.c.W.IFEXITED(wait_status) and std.c.W.EXITSTATUS(wait_status) != 0),
+        );
+    }
+    const operation = try beginRegisteredNodeOperation(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_incarnation = slot.incarnation.tagged,
+        .node = .{ .incarnation = slot.current.incarnation.tagged },
+        .owner_thread_incarnation = slot.operation_owner_thread_incarnation,
+    });
+    var blocked: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.blocked,
+        try finalAdmissionTransactionWithOperationAndRegistry(&operation, &blocked, &.{}),
+    );
+    slot.current.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
+        reservation.cleanup,
+        reservation.identity,
+        receipt,
+    );
+    var admitted: FinalAdmissionTransaction = .{};
+    try std.testing.expectEqual(
+        FinalAdmissionDecision.admitted,
+        try finalAdmissionTransactionWithOperationAndRegistry(&operation, &admitted, &.{}),
+    );
+    try admitted.finish();
+    endRegisteredNodeOperation(operation);
+    try slot.beginAttachmentDrop(&binding, reservation, &lease);
+    slot.finishActiveAttachmentDrop(&binding, reservation, &lease);
 }
 
 test "C3-3a2 final-address transaction rejects copy and replay without canonical mutation" {

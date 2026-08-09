@@ -5,6 +5,7 @@
 //! pre-reserved connection lease and the single teardown path around that payload.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const client_slot_mod = @import("client_slot.zig");
 const connection_lease = @import("connection_lease.zig");
 const contract = @import("generation_attachment_contract.zig");
@@ -285,6 +286,20 @@ pub const GenerationAttachment = struct {
         return self.transport.sendControl(control);
     }
 
+    pub fn callOrdered(
+        self: *GenerationAttachment,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) @import("client.zig").ClientError![]u8 {
+        if (!self.valid() or self.lifecycle != .attached) return error.ProtocolError;
+        return generation_transport_mod.callOwned(
+            &self.transport,
+            @intFromPtr(self),
+            method,
+            params_json,
+        );
+    }
+
     pub fn takeEvent(
         self: *GenerationAttachment,
     ) generation_transport_mod.EventError!generation_transport_mod.EventTakeOutcome {
@@ -498,6 +513,16 @@ pub const GenerationAttachment = struct {
         return self.transport.pumpPendingOutput();
     }
 
+    pub fn sendResyncNonBlocking(
+        self: *GenerationAttachment,
+    ) generation_transport_mod.InputError!bool {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return generation_transport_mod.sendResyncNonBlockingOwned(
+            &self.transport,
+            @intFromPtr(self),
+        );
+    }
+
     pub fn fenceRevoke(
         self: *GenerationAttachment,
     ) generation_transport_mod.InputError!generation_transport_mod.RevokeFence {
@@ -559,37 +584,70 @@ fn rawLifecycleValid(value: *const Lifecycle) bool {
     return raw <= @intFromEnum(Lifecycle.terminal);
 }
 
-fn initAttachedForEventTest(
-    attachment: *GenerationAttachment,
-    adapter: *host_adapter_mod.HostAdapter,
-    allocator: std.mem.Allocator,
-    runtime_id: u128,
-    stream_id: u64,
-) !void {
-    try GenerationAttachment.initInPlace(attachment, adapter);
-    const receipt = try attachment.prepareControllerAttach(adapter, runtime_id);
-    try attachment.binding.beginExecute(receipt);
-    attachment.lifecycle = .executing;
-    try attachment.transport.abortPreparedRequest(receipt);
-    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
-    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
-    const response_bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedFromPromotedInPlace(
-        allocator,
-        try adapter.responseOwnerSeal(attachment.reservation.?),
-        stream_id + 1,
-        accepted,
-        response_bytes,
-        testAllocationProvenance(stream_id + 1),
-    );
-    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(adapter));
-    try attachment.commitAccepted(adapter, accepted, .{
-        .runtime_id = runtime_id,
-        .stream_id = stream_id,
-        .role = .controller,
-        .controller_generation = 1,
-    }, allocator);
-}
+pub const testing_api = if (builtin.is_test) struct {
+    pub fn initAttached(
+        attachment: *GenerationAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        runtime_id: u128,
+        stream_id: u64,
+    ) !void {
+        try GenerationAttachment.initInPlace(attachment, adapter);
+        const receipt = try attachment.prepareControllerAttach(adapter, runtime_id);
+        const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+        var response_bytes: ?[]u8 = null;
+        errdefer {
+            if (response_bytes) |bytes| allocator.free(bytes);
+            switch (attachment.lifecycle) {
+                .binding_prepared => {
+                    attachment.transport.abortPreparedRequest(receipt) catch {};
+                    attachment.terminalizeTransport();
+                    adapter.abortAttachmentBinding(
+                        &attachment.binding,
+                        attachment.reservation.?,
+                    ) catch @panic("test attachment prepared rollback failed");
+                    attachment.lifecycle = .terminal;
+                },
+                .executing => {
+                    _ = attachment.finishResponse(adapter);
+                    attachment.transport.abortPreparedRequest(receipt) catch {};
+                    attachment.terminalizeTransport();
+                    adapter.abortExecutedAttachmentBinding(
+                        &attachment.binding,
+                        attachment.reservation.?,
+                        executed,
+                    ) catch @panic("test attachment executed rollback failed");
+                    attachment.lifecycle = .terminal;
+                },
+                .attached => attachment.deinit(adapter),
+                .shell => attachment.lifecycle = .terminal,
+                .pristine, .cleaning, .terminal => {},
+            }
+        }
+        try attachment.binding.beginExecute(receipt);
+        attachment.lifecycle = .executing;
+        try attachment.transport.abortPreparedRequest(receipt);
+        const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+        response_bytes = try allocator.dupe(u8, "accepted");
+        try attachment.response.initAcceptedFromPromotedInPlace(
+            allocator,
+            try adapter.responseOwnerSeal(attachment.reservation.?),
+            stream_id + 1,
+            accepted,
+            response_bytes.?,
+            testAllocationProvenance(stream_id + 1),
+        );
+        response_bytes = null;
+        if (attachment.finishResponse(adapter) != .cleaned)
+            return error.TestUnexpectedResult;
+        try attachment.commitAccepted(adapter, accepted, .{
+            .runtime_id = runtime_id,
+            .stream_id = stream_id,
+            .role = .controller,
+            .controller_generation = 1,
+        }, allocator);
+    }
+} else struct {};
 
 test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseFast" {
     var attachment: GenerationAttachment = .{};
@@ -619,7 +677,7 @@ test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" 
     defer adapter.deinit();
 
     var attachment: GenerationAttachment = .{};
-    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D32, 0x2C3D34);
+    try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D32, 0x2C3D34);
 
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D34,
@@ -651,7 +709,7 @@ test "CR3a-2c3d C3-1 mirror drift and copied attachment cannot settle canonical 
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
-    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D42, 0x2C3D43);
+    try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D42, 0x2C3D43);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D43,
         "{\"event\":\"future.event\"}",
@@ -762,7 +820,7 @@ test "CR3a-2c3d C3-1 release callback preserves mirror and teardown stays busy" 
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
-    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D62, 0x2C3D63);
+    try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D62, 0x2C3D63);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D63,
         "{\"event\":\"future.event\"}",
@@ -842,7 +900,7 @@ test "CR3a-2c3d C3-1 same-address stale owner hands current event off without fr
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
-    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3D82, 0x2C3D83);
+    try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D82, 0x2C3D83);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D83,
         "{\"event\":\"future.event.one\"}",
@@ -897,7 +955,7 @@ test "CR3a-2c3d C3-1 mirror drift and permit exhaustion converge through canonic
 
     // A zeroed non-authoritative mirror must not prevent the canonical C2 owner from releasing.
     var zero_drift: GenerationAttachment = .{};
-    try initAttachedForEventTest(&zero_drift, &adapter, allocator, 0x2C3D92, 0x2C3D93);
+    try testing_api.initAttached(&zero_drift, &adapter, allocator, 0x2C3D92, 0x2C3D93);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D93,
         "{\"event\":\"future.event.zero-drift\"}",
@@ -916,7 +974,7 @@ test "CR3a-2c3d C3-1 mirror drift and permit exhaustion converge through canonic
     // Once operation identities are exhausted, release cannot retry. It must perform a trusted
     // no-free transfer under the registered-node operation and leave teardown convergent.
     var exhausted: GenerationAttachment = .{};
-    try initAttachedForEventTest(&exhausted, &adapter, allocator, 0x2C3D94, 0x2C3D95);
+    try testing_api.initAttached(&exhausted, &adapter, allocator, 0x2C3D94, 0x2C3D95);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3D95,
         "{\"event\":\"future.event.exhausted\"}",
@@ -960,7 +1018,7 @@ test "CR3a-2c3d C3-2 ended event purges before ordinary event ownership" {
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
-    try initAttachedForEventTest(&attachment, &adapter, allocator, 0x2C3DA2, 0x2C3DA3);
+    try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3DA2, 0x2C3DA3);
     try adapter.logicalClient().bufferGenerationEventForTest(
         0x2C3DA3,
         "{\"event\":\"runtime.ended\"}",
@@ -997,7 +1055,7 @@ fn initPurgeTest(
         .parser = framing.FrameParser.init(allocator),
     };
     try host_adapter_mod.HostAdapter.initInPlace(adapter, allocator, client);
-    try initAttachedForEventTest(attachment, adapter, allocator, runtime_id, stream_id);
+    try testing_api.initAttached(attachment, adapter, allocator, runtime_id, stream_id);
     return fds[1];
 }
 

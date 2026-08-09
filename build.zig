@@ -2040,6 +2040,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3a2 dormant final admission Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3a2_step.dependOn(session_host_2c3d_c3_3a1_step);
+    const session_host_2c3d_c3_3a3_step = b.step(
+        "test-session-host-2c3d-c3-3a3",
+        "2c3d C3-3a3 revoke ordering activation Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3a3_step.dependOn(session_host_2c3d_c3_3a2_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2373,6 +2378,62 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3a2_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3a2_step.dependOn(&run_event_c3_3a2_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3a2_boundary_tests.step);
+
+        const event_c3_3a3_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3a3_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3d C3-3a3 revoke ordering activation boundary"},
+        });
+        const run_event_c3_3a3_boundary_tests = b.addRunArtifact(event_c3_3a3_boundary_tests);
+        run_event_c3_3a3_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3a3_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a3_step.dependOn(&run_event_c3_3a3_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3a3_boundary_tests.step);
+
+        inline for (.{
+            .{ "src/platform/macos/session_host/client_slot.zig", 5, "C3-3a3 product client slot" },
+            .{ "src/platform/macos/session_host/generation_transport.zig", 3, "C3-3a3 product generation transport" },
+            .{ "src/platform/macos/session_host/remote_runtime.zig", 2, "C3-3a3 product remote runtime" },
+        }) |runtime_inventory| {
+            const event_c3_3a3_runtime_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(runtime_inventory[0]),
+                    .target = target,
+                    .optimize = b3_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{runtime_inventory[2]},
+            });
+            const run_event_c3_3a3_runtime_tests = b.addRunArtifact(event_c3_3a3_runtime_tests);
+            run_event_c3_3a3_runtime_tests.addArg(b.fmt(
+                "--maru-expect-tests={d}",
+                .{runtime_inventory[1]},
+            ));
+            run_event_c3_3a3_runtime_tests.setCwd(b.path("."));
+            session_host_2c3d_c3_3a3_step.dependOn(&run_event_c3_3a3_runtime_tests.step);
+        }
+
+        const event_c3_3a3_actual_socket_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/remote_runtime.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3a3 actual socket"},
+        });
+        const run_event_c3_3a3_actual_socket_tests =
+            b.addRunArtifact(event_c3_3a3_actual_socket_tests);
+        run_event_c3_3a3_actual_socket_tests.addArg("--maru-expect-tests=2");
+        run_event_c3_3a3_actual_socket_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a3_step.dependOn(&run_event_c3_3a3_actual_socket_tests.step);
 
         inline for (.{
             "own buffered revoke suppresses newly arriving input before role cache catches up",

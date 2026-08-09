@@ -36,10 +36,12 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.sendGenerationControlNonBlocking(self.controlOperation(control))"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn sendGenerationControl("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn sendGenerationControlNonBlocking("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendScrollToBottom("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendScrollToBottomNonBlocking("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendCoreCommand("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendCoreCommandNonBlocking("));
+    // C3-3a3 keeps the same typed control facade but executes below the already-held
+    // registered-operation lease instead of re-entering the public Client guard.
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendScrollToBottomUnderRegisteredOperationExecutionLease("));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease("));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendCoreCommandUnderRegisteredOperationExecutionLease("));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease("));
     const transport_facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
     // 2c3d C3-2 adds the bounded ended-purge facade without widening control.
@@ -71,7 +73,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     const attachment_blocking_control = between(
         attachment,
         "    pub fn sendControl(",
-        "    pub fn tryDeinit(",
+        "    pub fn callOrdered(",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -112,7 +114,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommandNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottom("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommand("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendResyncNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "client.sendResyncNonBlocking("));
     const response_core = between(
         runtime,
         "    pub fn sendCoreCommandBlocking(",

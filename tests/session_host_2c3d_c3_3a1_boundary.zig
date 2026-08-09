@@ -40,8 +40,8 @@ test "CR3a-2c3d C3-3a1 dormant revoke authority boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(registry, "revoke_blocker_count: usize = 0"));
     try std.testing.expectEqual(@as(usize, 1), count(production, "pub fn reserveEventGenerationWithOrdering("));
     try std.testing.expectEqual(@as(usize, 0), count(production, ".reserveEventGenerationWithOrdering("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, ".reserveEventGeneration("));
-    try std.testing.expectEqual(@as(usize, 0), count(slot, "reserveEventGenerationWithOrdering("));
+    try std.testing.expectEqual(@as(usize, 0), count(slot, ".reserveEventGeneration("));
+    try std.testing.expectEqual(@as(usize, 2), count(slot, ".reserveEventGenerationWithOrdering("));
     try std.testing.expectEqual(@as(usize, 1), count(ordinary_reserve, ".none,"));
     try std.testing.expectEqual(@as(usize, 1), count(scan_oracle, "if (!builtin.is_test) unreachable;"));
     try std.testing.expectEqual(
@@ -61,14 +61,14 @@ test "CR3a-2c3d C3-3a1 dormant revoke authority boundary" {
         try countSessionHostSources(allocator, "event_authority: EventAuthority = .{}"),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         try countSessionHostProductionIdentifiers(
             allocator,
             "reserveEventGenerationWithOrdering",
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 4),
         try countSessionHostProductionIdentifiers(allocator, "revokeBlockerCount"),
     );
     const interleaved: [:0]const u8 =

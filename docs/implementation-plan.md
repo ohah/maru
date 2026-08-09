@@ -1471,7 +1471,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       nonblocking pump와 pending-output/resync stream은 progress `false`, raw `callOrdered` RPC는 `AdminBusy`, observer resize는 success
       no-op다. owner-retention exact 표의 SSOT는 persistent-session-host.md가 소유한다. future 2c3e RPC execute는 helper signature만 예약하고
       caller 편입은 2c3e gate가 소유한다.
-      **C3-3a3 product activation(doc-first 진행, product caller 0)**은 기존 take/release에 a1을, 현재 존재하는 모든 generation mutation
+      **C3-3a3 product activation(구현·활성화 완료)**은 기존 take/release에 a1을, 현재 존재하는 모든 generation mutation
       consumer에 a2를 동시에 배선한다. take는 blocker producer이므로 target queued event와 자신이 reserve한 aggregate에 다시 막히는 a2
       consumer predicate를 사용하지 않고 producer 전용 final-address activation transaction을 쓴다. permit→prepare→registered
       operation→direct execution lease→held validate/borrow 뒤에만 payload를 역참조하고 quarantine/pin/a1을 reserve·bind한다. accepted
@@ -1480,18 +1480,55 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       SSOT로 소유한다. held commit 뒤 a1 publish→permit no-fail consume→lease downgrade→transaction consume→operation release는
       실패·callback 0 suffix다.
       mutation consumer final gate는 검사부터 allocation·queue offset·syscall commit까지 family별 existing execution lease를 유지한다.
-      shared pin만으로는 다른 shared mutation을 배제하지 않으므로 직렬화 근거로 쓰지 않는다. product activation 전 a1/a2 callsite는 0이다.
+      shared pin만으로는 다른 shared mutation을 배제하지 않으므로 직렬화 근거로 쓰지 않는다. a1/a2 standalone substrate gate의
+      역사적 product caller는 0이고, 현재 활성 caller inventory는 C3-3a3 boundary가 단일 출처로 소유한다.
+      execution lease mint는 private live-operation row와 neutral TLS thread incarnation을 검증한 final-address receipt만 Client에 넘긴다.
+      receipt의 canonical SSOT는 process-global bounded 4,096-slot registry이며 mutex 아래 O(1) free-stack pop과
+      `slot_index` direct lookup을 쓴다. receipt의 atomic registry token은 pre-lock locator일 뿐이며 registry row/receipt의 exact key는
+      slot generation·monotonic registry key·final address·Client/
+      operation·PID/process nonce·thread id/incarnation이다. issue/consume/abort는 mutex 전에 PID/process nonce/TLS를 검사하고 lock 뒤
+      PID를 재검사해 fork child가 상속 mutex나 Client graph를 만지기 전에 거부한다. tuple/live는 mutex 안에서만 판정·변경하고
+      consume-vs-abort는 한 winner만 slot을 회수한다. Client는 exact registry receipt를 먼저 consume·slot
+      generation 증가·free-stack 반환한 뒤에만 fence/graph를 읽고 final-address capability body를 완성해 address·identity·thread tuple을
+      release-publish한다. held API는 raw pointer/public digest/local pin 대신 opaque handle
+      `{slot index,slot generation,private key,publication identity,operation identity}`만 받는다. receipt registry와 별도인
+      process-private bounded 4,096-slot capability registry가 O(1) free-stack/direct-slot으로 active/closing/readers를 소유한다.
+      capability registry와 별도인 bounded 4,096-slot O(1) reader-pin registry는 caller-final pin address+
+      reader slot/generation/key+capability slot/generation/key row를 먼저 등록한 뒤 readers를 올린다. exact one-shot row
+      consume만 unpin/close owner reader를 내리며 copy/move/forge/double-unpin/sibling은 mutation 0이다. capability key는
+      settlement pre-lock은 registry PID/nonce+reader-slot bounds만 읽고 public `pin.fields` authority를 쓰지 않는다. mutex 안
+      final-address/reader slot-generation-key row exact consume→canonical capability slot-generation-key materialize→owner process/thread/TLS
+      compare 후에만 readers--를 수행한다. close drain은 canonical captured capability tuple만 사용한다.
+      module-private 256-bit production random secret의 keyed BLAKE3
+      `maru.capability.registry-key.v1 || counter || slot || generation` transcript의 64-bit 축약이다. immediate reuse의 exact ABA
+      authority는 slot generation이고 key는 probabilistic private discriminator다. runtime test의 old/new key inequality는 관측
+      oracle이며 absolute collision-free 계약이 아니다.
+      preflight는 registry pin 성공 후에만 capability pointer/fence/body projection을 private guard에 materialize하고,
+      require는 마지막 fence/body read까지 guard를 유지한다. publish exhaustion은 body·local identity·fence tuple을
+      pristine rollback한다. end는 active→closing, self reader release, readers==0 대기, generation bump+free-slot 반환 후
+      body lifetime을 종료한다. 반환 후 same-address reuse/new generation은 허용하며 old handle은 pointer materialization 전
+      거부한다. closing 게시 직후 late pin reject+close wait, OOB/foreign/fork fields tamper mutation 0,
+      injected reader-capacity exhaustion seam의 out-pristine/readers unchanged와 즉시 reuse, mmap-unmap stale, forged key/fork/replay,
+      caller/private-registry closure를 exact-5/boundary가 고정한다. fault/closing hook은 `builtin.is_test` conditional
+      private storage/API로 production callable API가 없는 설계이며 nm/symbol-zero gate는 주장하지 않는다.
+      consume 전 후속 실패는 두 canonical mint caller의 `errdefer abortMintReceipt`가 exact slot/capacity를 반환하며
+      미회수 receipt를 허용하지 않는다. held leaf는
+      graph read 전에 reader pin 후 검증한다. exact-5 runtime은 max-terminal issuer,
+      copied/forged/foreign/callback/publication-teardown, deterministic end-vs-reader·consume-vs-abort, fork pre-lock reject,
+      abort-capacity 원복과 O(1) free-count oracle의 typed reject·mutation 0을 고정한다. Zig build에 TSAN target은 없으며
+      Debug·ReleaseFast deterministic interleaving과 atomic ordering review를 검증 경계로 두다.
       `idle|ended_pending`은 payload 역참조와 activation transaction/operation/lease/quarantine/pin/a1이 모두 0이다. `idle`은 prepared
       storage pristine을 유지하고 `ended_pending`만 prepared descriptor를 먼저 tombstone하며 둘 다 permit no-fail consume을 수행한다.
-      a3은 Debug·ReleaseFast product runtime 8+actual-socket 2+boundary 1을 실행한다. quarantine reserve→pin reserve→generation
+      a3은 Debug·ReleaseFast product runtime 10+actual-socket 2+boundary 1을 실행한다. quarantine reserve→pin reserve→generation
       reserve→quarantine/cleanup bind의 각 precommit fault와 ClientSlot-only held commit wrapper의
       `Terminal|Corrupt|InvalidPrepared`는 reserve 뒤 cache를 exact rollback한다. direct lease 획득 `Busy`는 transaction 생성 전
       public prepared abort/reset→operation release→permit abort로 정산해 reserve 전 mutation 0과
       `(queue=1,prepared=pristine,aggregate=0,permit/pin/quarantine/reserved-authority=0)`으로 수렴한다. queue commit 성공 뒤에는
       `(queue=0,aggregate=1)`만 허용한다. target pending outbound
       offset 0은 exact free 1/wire 0, partial offset은 no-retry fail-close, sibling pending은 offset/owner 보존·flush 0 뒤 aggregate zero에서
-      재개한다. callback/foreign/teardown/check 직후 revoke 경쟁은 allocation/callback/offset/syscall 0과 persistent-session-host.md
-      closed 7-row의 `Busy|AdminBusy|false|observer success no-op` 및 owner retention을 전수 증명한다. public nonblocking input은 `0`,
+      재개한다. activation authority-live 상태의 callback reentry·foreign·teardown은 mutation 전에 거부하고, facade별 blocker gate는
+      persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
+      public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
       **C3-3b failure settlement**는 generation arm의 raw capability/poison/fence 접근을 typed adapter로 치환한다. effect confirmation을
       먼저 재시도하고 confirmed 뒤 release하며, release가 Busy면 다음 tick의 purge/take보다 release를 먼저 재시도하는 상태만 제품

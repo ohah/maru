@@ -71,7 +71,9 @@ test "CR3a-2c3d C2 release boundary remains leaf-owned and product-unwired" {
         count(release_commit, ".poisonDuringClientSlotOperationNoFail("),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // C2 owns the original release suffix and C3-3a3 reuses the same
+        // no-fail poison primitive at each activated mutation boundary.
+        @as(usize, 9),
         try countSourceReferences(allocator, "poisonDuringClientSlotOperationNoFail("),
     );
 

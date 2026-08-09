@@ -1,4 +1,5 @@
 const std = @import("std");
+const scroll_ops = @import("app_session/scroll.zig");
 const sidebar_ops = @import("app_session/sidebar.zig");
 const tab_ops = @import("app_session/tab.zig");
 const builtin = @import("builtin");
@@ -34,7 +35,7 @@ pub const adjustActiveForMove = input_math.adjustActiveForMove;
 pub const rotateMove = input_math.rotateMove;
 pub const reselectAfterClose = input_math.reselectAfterClose;
 pub const clampMoveToGroup = input_math.clampMoveToGroup;
-const wheelDeltaToLines = input_math.wheelDeltaToLines;
+pub const wheelDeltaToLines = input_math.wheelDeltaToLines;
 const pageScrollDelta = input_math.pageScrollDelta;
 // IME 순수 판정도 session core로 추출(src/session/ime.zig). bare 호출(imeEnd) 유지용 alias.
 const imeDecide = maru.session.ime.decide;
@@ -486,7 +487,7 @@ const bell_flash_peak_milli: u32 = 350;
 // 드래그 자동 스크롤이 한 줄 더 스크롤하기까지의 간격(ms) — frame rate와 무관하게 일정 속도(≈30줄/s)를 유지하려고
 // tick 수가 아니라 경과 ms로 게이트한다. 옛 30Hz 1틱/줄(≈33ms/줄)과 같은 체감 속도를 기준으로 잡았다. msPerTick
 // 누적이 이 값을 넘을 때마다 한 줄 스크롤한다(render.frame-rate_min=30이라 msPerTick≤이 값 → tick당 최대 한 줄).
-const drag_autoscroll_step_ms: u32 = 33;
+pub const drag_autoscroll_step_ms: u32 = 33;
 pub const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
 
 /// Archive scope owns only display filtering.  It never changes the scanner's
@@ -815,15 +816,15 @@ pub const session_dock_ui_zoom_max_milli: u32 = 1500;
 const font_size_step: f32 = 1.0;
 
 // 스크롤바 thumb 폭(굵기). cell_width의 비율, 최소 px 보장. hover/드래그면 +emphasize_px로 살짝 굵게(affordance).
-const scrollbar_bar_mul: f32 = 0.5; // cell_width 대비 폭 비율(굵게 — 잡기/보기 쉽게)
-const scrollbar_bar_min_px: f32 = 7.0; // 작은 폰트에서도 최소 두께
-const scrollbar_bar_emphasize_px: f32 = 2.0; // hover/드래그 시 추가 폭
+pub const scrollbar_bar_mul: f32 = 0.5; // cell_width 대비 폭 비율(굵게 — 잡기/보기 쉽게)
+pub const scrollbar_bar_min_px: f32 = 7.0; // 작은 폰트에서도 최소 두께
+pub const scrollbar_bar_emphasize_px: f32 = 2.0; // hover/드래그 시 추가 폭
 // fade(자동 흐려짐) — 스크롤(view_offset 변화) 후 visible_ms 동안 full, 이어 fade_ms 동안 idle(faint)로
 // 흐려진다. 숨기지 않고 faint로만 남겨(위치·잡을 곳을 잃지 않게) macOS overlay 관례를 따른다.
-const scrollbar_visible_ms: u32 = 1667; // 옛 30Hz 50틱과 같은 약 1.67s full 유지
-const scrollbar_fade_ms: u32 = 450; // 옛 30Hz 14틱과 같은 약 0.45s 동안 full→faint
+pub const scrollbar_visible_ms: u32 = 1667; // 옛 30Hz 50틱과 같은 약 1.67s full 유지
+pub const scrollbar_fade_ms: u32 = 450; // 옛 30Hz 14틱과 같은 약 0.45s 동안 full→faint
 pub const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
-const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
+pub const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
 // (wall-clock)으로 재 tick rate와 무관하게 그 속도를 지킨다(§10.5). 기본값은 macOS 캐럿 관례(on 500ms / off 500ms).
@@ -896,8 +897,8 @@ fn clampFrameRateHz(hz: u32) u32 {
     return @min(config_mod.theme.render_frame_rate_max, @max(config_mod.theme.render_frame_rate_min, hz));
 }
 
-const default_scrollbar_visible_ticks: u32 = ticksForMsAtRate(scrollbar_visible_ms, config_mod.theme.render_frame_rate_default);
-const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms, config_mod.theme.render_frame_rate_default);
+pub const default_scrollbar_visible_ticks: u32 = ticksForMsAtRate(scrollbar_visible_ms, config_mod.theme.render_frame_rate_default);
+pub const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms, config_mod.theme.render_frame_rate_default);
 
 /// 탐색기 스크롤바 치수(SV2b). 옛 `components/file_tree_scrollbar.zig`가 들고 있던 값을 그대로 옮겼다 —
 /// 그 모듈은 기능이 전부 `chrome/ui/scroll_area.zig`에 있어 이 슬라이스에서 지웠다.
@@ -936,15 +937,15 @@ pub const sidebar_scroll_max_entries: usize = 3;
 /// 오버레이(팔레트·세팅·알림) 스크롤바가 쓰는 id·저장소(SV5b). 오버레이는 **한 번에 하나만 열리므로**
 /// 발행 저장소를 셋이 공유한다 — SV3b가 탐색기↔소스 컨트롤에서 쓴 것과 같은 근거다(도크·사이드바와는
 /// 조건이 다르다. 그 둘은 동시에 화면에 있어 저장소를 나눠야 했다).
-const overlay_scroll_ids = struct {
-    const area: chrome.ui.tree.UiId = 0x4F56_0001;
-    const track: chrome.ui.tree.UiId = 0x4F56_0002;
-    const thumb: chrome.ui.tree.UiId = 0x4F56_0003;
+pub const overlay_scroll_ids = struct {
+    pub const area: chrome.ui.tree.UiId = 0x4F56_0001;
+    pub const track: chrome.ui.tree.UiId = 0x4F56_0002;
+    pub const thumb: chrome.ui.tree.UiId = 0x4F56_0003;
 };
-const overlay_scroll_max_entries: usize = 3;
-const overlay_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
-const overlay_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
-const overlay_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
+pub const overlay_scroll_max_entries: usize = 3;
+pub const overlay_scrollbar_width_px: u32 = dock_list_scrollbar_width_px;
+pub const overlay_scrollbar_inset_px: u32 = dock_list_scrollbar_inset_px;
+pub const overlay_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
 
 /// 이번 tick에 활성 surface frame을 (재)투영할지 결정한다 — 순수 함수라 게이트 규칙을 헤드리스로 고정한다.
 /// 베이스/결정(docs/io-render-threading.md): synchronized output(DECSET 2026)은 **라이브 화면**이 half-drawn
@@ -2546,6 +2547,16 @@ pub const MeasuredTextCache = struct {
 };
 
 pub const AppSession = struct {
+    /// 본문 분리: app_session/scroll.zig(F8). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
+        return scroll_ops.scrollPage(self, delta_pages);
+    }
+
+    /// 본문 분리: app_session/scroll.zig(F8). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
+        return scroll_ops.scrollWheel(self, delta_y, delta_x, precise, x_px, y_px);
+    }
+
     allocator: std.mem.Allocator,
     io: std.Io,
     // 탭들. 각 Tab은 heap-pin(`*Tab`)이라 ArrayList가 realloc해도 본체(live_pty reader·surface)는
@@ -4216,7 +4227,7 @@ pub const AppSession = struct {
             // 목록이 짧아졌으면 offset을 창 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번
             // 유계화하지만 **raw 값은 그대로 남아**, 목록이 다시 길어질 때 그 자리로 튄다. 탐색기가
             // `updateFileTree`에서 같은 일을 하는 것과 같은 자리다.
-            self.clampScmScroll();
+            scroll_ops.clampScmScroll(self);
             self.metal_dirty = true;
             // 진단은 **수치만** 남긴다 — 경로·브랜치명·상태 원문은 사용자 저장소 내용이라 로그에 넣지 않는다
             // (docs/editor-surface.md §8.3의 민감정보 경계와 같은 규율).
@@ -4311,7 +4322,7 @@ pub const AppSession = struct {
         // divider capture는 이제 다른 축(`divider_interaction`)이라 union을 비우는 것만으로 끝나지
         // 않는다. 두 capture 권위가 같은 stream에 공존하면 §4.3의 "한 stream에 owner 하나"가 깨진다.
         pane_ops.endDividerCapture(self);
-        self.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(self);
         self.metal_dirty = true;
     }
 
@@ -4845,7 +4856,7 @@ pub const AppSession = struct {
             .padding_left_px = self.window_padding_px.left,
             .padding_right_px = self.window_padding_px.right,
             .capture_active = pane_ops.dividerCaptureActive(self),
-            .scrollbar_capture_active = self.scrollbarCaptureActive(),
+            .scrollbar_capture_active = scroll_ops.scrollbarCaptureActive(self),
             .scrollbar_move_events = self.scrollbar_move_events,
             .scrollbar_scroll_applications = self.scrollbar_scroll_applications,
             .scrollbar_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self),
@@ -5163,7 +5174,7 @@ pub const AppSession = struct {
     /// (findTerminatedTerm)와 알림 클릭 역조회(activateSurfaceById)가 같은 3중 순회를 공유하는 단일 출처다 —
     /// 순회 규칙(탭→panel→Term, 첫 매치 반환)이 한 곳에만 있어 갈릴 여지가 없다. 반환한 *Pane은 heap-pin이라
     /// 트리 변형 전까지 안정. predicate는 comptime이라 호출부마다 인라인된다(함수 포인터 간접호출 없음).
-    fn findTermWhere(self: *AppSession, context: anytype, comptime pred: fn (@TypeOf(context), *Term) bool) ?TermLoc {
+    pub fn findTermWhere(self: *AppSession, context: anytype, comptime pred: fn (@TypeOf(context), *Term) bool) ?TermLoc {
         for (self.tabs.items, 0..) |tab, ti| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items, 0..) |term, tj| {
@@ -6271,13 +6282,6 @@ pub const AppSession = struct {
         const surface_id = self.notification_history.items[history_index].surface_id;
         self.markNotificationsReadBySurface(surface_id); // 그 surface를 봤으니 전체 읽음 — 데스크톱 배너 클릭과 동일 정책(통일)
         _ = self.activateSurfaceById(surface_id); // 닫힌 surface면 false(점프 안 함, 패널은 이미 닫음)
-    }
-
-    /// 키보드 ↑↓로 알림 선택이 바뀐 뒤 — 선택 카드가 패널 viewport 밖이면 보이게 스크롤한다(컴포넌트 ensureSelectedVisible
-    /// 단일 출처). 개수·metrics만 넘긴다(Item 빌드 불필요). scroll_offset 상태를 두는 알림 패널 특유 처리(palette는 파생).
-    fn scrollNotificationsToSelected(self: *AppSession) void {
-        self.chrome_host.notifications.ensureSelectedVisible(self.notification_history.items.len, self.buildCellMetrics());
-        self.metal_dirty = true;
     }
 
     /// Term 배열 mutation 직전의 위치 기반 gesture barrier. 같은 pane의 terminal-tab index는 어느 항목 제거에서도
@@ -9425,115 +9429,6 @@ pub const AppSession = struct {
     /// 그 사각형 안에 놓여야 헤더 옆에 막대가 뜨지 않는다.
     pub const DockListScroll = struct { rect: maru.session.SplitRect, extent: FileTreeScrollExtent, offset_px: u32 };
 
-    /// scrollbar를 capture가 볼 수 있는 tree로 다시 발행한다. thumb이 스크롤에 따라 움직이므로 매
-    /// move마다 재발행하고 세대를 올린다 — capture를 넘길지는 §5 carry verdict가 판정한다.
-    pub fn scrollbarCaptureActive(self: *const AppSession) bool {
-        return self.scrollbar_interaction.capture != null;
-    }
-
-    pub fn endScrollbarCapture(self: *AppSession) void {
-        self.scrollbar_interaction.capture = null;
-        self.dock_list_scroll_drag.end();
-        self.dock_list_scroll_drag_owner = null;
-        self.scrollbar_drag_target = .none;
-    }
-
-    /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
-    fn routeScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
-        if (self.scrollbar_drag_target == .overlay) return self.routeOverlayScrollbarCapture(kind, y_px);
-        if (self.scrollbar_drag_target == .sidebar) return sidebar_ops.routeSidebarScrollbarCapture(self, kind, y_px);
-        const owner = self.dock_list_scroll_drag_owner orelse return false;
-        if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
-
-        const key = chrome.ui.interaction.GestureCompatibility{
-            .kind = dock_list_scroll_drag_payload,
-            .enabled = true,
-            .owner_epoch = owner.root_generation,
-            .domain_identity = owner.projection_generation,
-        };
-        const current_key = chrome.ui.interaction.GestureCompatibility{
-            .kind = dock_list_scroll_drag_payload,
-            .enabled = true,
-            .owner_epoch = self.file_tree.rootGeneration(),
-            .domain_identity = self.file_tree_projection_generation,
-        };
-
-        // thumb이 스크롤에 따라 움직이므로 매 move마다 다시 발행한다 — capture를 넘길지는 §5 carry
-        // verdict가 판정한다. 예전에는 전용 `publish`가 rect 두 개를 손으로 만들었고, 지금은 같은
-        // `scrollArea` 선언이 낸 tree를 그대로 쓴다.
-        dock_ops.buildDockListScrollTree(self);
-        const snapshot = file_panel_ops.fileTreeScrollTree(self);
-        if (snapshot.entries.len == 0) {
-            self.endScrollbarCapture();
-            return true;
-        }
-        _ = chrome.ui.interaction.reconcileCarryingCapture(
-            &self.scrollbar_interaction,
-            snapshot,
-            key,
-            current_key,
-        ) catch {
-            self.endScrollbarCapture();
-            return true;
-        };
-        if (self.scrollbar_interaction.capture == null) {
-            self.endScrollbarCapture();
-            return true;
-        }
-
-        // key가 같아도 track/thumb **기하**가 달라졌으면 down 시점 기하로 계산한 스크롤이 손가락과
-        // 어긋난다. carry key는 host가 주입한 값의 동등성만 보므로 이 축은 여기서 domain이 지킨다
-        // (계약 §5의 "up effect는 live domain validation을 다시 통과한다"와 같은 자리다).
-        const live = dock_ops.dockListScrollbarGeometry(self) orelse {
-            self.endScrollbarCapture();
-            return true;
-        };
-        if (!file_panel_ops.fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
-            self.endScrollbarCapture();
-            return true;
-        }
-
-        const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
-            .phase = if (kind == 2) .move else .up,
-            .x_px = @as(f64, self.dock_list_scroll_drag.geometry.track_x) + @as(f64, self.dock_list_scroll_drag.geometry.track_w) / 2,
-            .y_px = y_px,
-            .timestamp_ns = 0,
-            .button = .left,
-            .generation = snapshot.generation,
-        }) catch {
-            self.endScrollbarCapture();
-            return true;
-        };
-        if (dispatched.drag) |event| switch (event) {
-            .began, .moved => |update| {
-                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
-                self.scrollbar_move_events +|= 1;
-            },
-            .dropped => |update| {
-                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
-                self.applyPendingScrollbarScroll();
-                self.endScrollbarCapture();
-            },
-            .cancelled => self.endScrollbarCapture(),
-        };
-        if (kind == 3) self.endScrollbarCapture();
-        return true;
-    }
-
-    /// tick이 부르는 소비 지점. move가 몇 번 왔든 최종 좌표 하나만 적용하고, 같은 offset으로 clamp되면
-    /// 재투영하지 않는다. 흡수·소비·중복 억제는 `scroll_area.Drag`가 소유한다(도크와 같은 타입).
-    pub fn applyPendingScrollbarScroll(self: *AppSession) void {
-        const offset_px = self.dock_list_scroll_drag.takeOffset() orelse return;
-        self.scrollbar_scroll_applications +|= 1;
-        // 어느 스크롤바를 잡았느냐가 offset이 갈 곳을 정한다. 태그를 안 보면 사이드바를 끄는데
-        // **보이지 않는 도크 목록**이 스크롤된다(SV3b가 뷰 라우팅에서 세운 것과 같은 위험이다).
-        switch (self.scrollbar_drag_target) {
-            .overlay => self.setOverlayScrollOffsetPx(offset_px),
-            .sidebar => sidebar_ops.setSidebarScrollOffsetPx(self, offset_px),
-            .dock_list, .none => dock_ops.setDockListScrollOffsetPx(self, offset_px),
-        }
-    }
-
     pub fn takeFileTreeFocusAction(self: *AppSession) bool {
         const pending = self.file_tree_focus_pending;
         self.file_tree_focus_pending = false;
@@ -10422,7 +10317,7 @@ pub const AppSession = struct {
         const list_top = @as(f64, @floatFromInt(rect.y + self.cell_height_px));
         if (y_px < list_top) return null;
         // 픽셀 스크롤이라 뷰포트 안 y를 content 좌표로 올린 뒤 나눈다(SV3a — 탐색기와 같은 식).
-        const content_y = @as(f64, @floatFromInt(self.scmEffectiveScrollPx())) + (y_px - list_top);
+        const content_y = @as(f64, @floatFromInt(scroll_ops.scmEffectiveScrollPx(self))) + (y_px - list_top);
         const index: usize = @intFromFloat(content_y / @as(f64, @floatFromInt(self.cell_height_px)));
         const row = self.scmRowAtIndex(index, out, scratch) orelse return null;
         self.scm_selected_row = index;
@@ -10455,7 +10350,7 @@ pub const AppSession = struct {
     /// **버퍼는 렌더·hit-test와 같은 크기여야 한다.** 이 값이 스크롤 content 높이의 출처이므로, 여기서만
     /// 더 많이 세면 그리지 못하는 행까지 스크롤 범위에 들어가 목록 아래에 빈 곳이 생긴다(적대적 검증에서
     /// 512 vs 128로 어긋나 있던 것을 맞췄다).
-    fn scmTotalRows(self: *AppSession) usize {
+    pub fn scmTotalRows(self: *AppSession) usize {
         var buf: [scm_row_capacity]scm_view.Row = undefined;
         var scratch: [std.fs.max_path_bytes]u8 = undefined;
         const result = self.git_result orelse return 0;
@@ -10475,30 +10370,12 @@ pub const AppSession = struct {
         return model.rows.len;
     }
 
-    /// 소스 컨트롤 목록의 스크롤 좌표계(SV3a). **브랜치 헤더 한 줄을 뺀** 나머지가 뷰포트다 — 헤더는
-    /// 스크롤에서 고정이므로 스크롤 좌표에 들어가지 않는다. 탐색기와 같은 이유로 세 값을 한 자리에서
-    /// 만든다(상한이 호출부마다 갈리면 목록이 빈 곳으로 스크롤된다).
-    pub fn scmScrollExtent(self: *AppSession) FileTreeScrollExtent {
-        const row_h = self.cell_height_px;
-        const rect = dock_ops.dockGeometry(self).tree_content;
-        const viewport = rect.h -| row_h; // 헤더 한 줄
-        const content: u32 = @intCast(@min(
-            @as(u64, self.scmTotalRows()) * @as(u64, row_h),
-            @as(u64, std.math.maxInt(u32)),
-        ));
-        return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };
-    }
-
-    pub fn scmEffectiveScrollPx(self: *AppSession) u32 {
-        return @min(self.scm_scroll.offset_y_px, self.scmScrollExtent().max_offset_px);
-    }
-
     /// 목록이 그리는 창. 탐색기와 같은 세 값이고 같은 계약이다 — `count`는 밀린 양까지 덮는 **올림**이라
     /// 뷰포트 바닥에 배경 띠가 남지 않는다.
     fn scmDrawWindow(self: *AppSession) struct { start: usize, count: u16, origin_shift_px: u32 } {
         const row_h = self.cell_height_px;
         if (row_h == 0) return .{ .start = 0, .count = 0, .origin_shift_px = 0 };
-        const extent = self.scmScrollExtent();
+        const extent = scroll_ops.scmScrollExtent(self);
         const offset = @min(self.scm_scroll.offset_y_px, extent.max_offset_px);
         const start: usize = offset / row_h;
         const shift = offset % row_h;
@@ -10509,10 +10386,6 @@ pub const AppSession = struct {
             .count = @intCast(@min(@min(needed, remaining), @as(usize, std.math.maxInt(u16)))),
             .origin_shift_px = shift,
         };
-    }
-
-    fn clampScmScroll(self: *AppSession) void {
-        self.scm_scroll.clamp(self.scmScrollExtent().max_offset_px);
     }
 
     /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
@@ -13916,7 +13789,7 @@ pub const AppSession = struct {
                 self.chrome_host.notifications.hide();
                 self.metal_dirty = true;
             },
-            .notifications_selection_changed => self.scrollNotificationsToSelected(), // ↑↓ 선택 이동 — 선택 보이게 스크롤 + 재렌더
+            .notifications_selection_changed => scroll_ops.scrollNotificationsToSelected(self), // ↑↓ 선택 이동 — 선택 보이게 스크롤 + 재렌더
             .notifications_delete => self.deleteNotification(self.chrome_host.notifications.selected), // Backspace — selected 카드 삭제
             .notifications_mark_all_read => self.markAllNotificationsRead(), // 하단 "모두 읽음"
             .notifications_clear_all => self.clearNotifications(), // 하단 "모두 지우기"
@@ -14039,7 +13912,7 @@ pub const AppSession = struct {
                     const client_voff = blk: {
                         surface.lockCore(self.io);
                         defer surface.unlockCore(self.io);
-                        break :blk scrollStateOf(surface).view_offset;
+                        break :blk scroll_ops.scrollStateOf(surface).view_offset;
                     };
                     if (!remoteFindSpansApplicable(res.voff, client_voff)) return;
                     std.mem.swap(std.ArrayList(terminal.SelectionSpan), &self.remote_find_spans, &self.remote_find_pending);
@@ -14097,7 +13970,7 @@ pub const AppSession = struct {
     /// **web Term이 하나도 없으면 항상 true**라 터미널 렌더·입력이 byte-identical이다. `activeSurface()`와 **같은
     /// active_tab 인덱스**를 봐 정합한다(surface_ptrs[active_tab]가 activePane().activeTerm().surface로 동기 유지 —
     /// focusTerm/focusPane 등이 재바인딩). `*const`라 mutable tick 경로와 const metalFrame 경로가 함께 쓴다.
-    fn activeTermIsTerminal(self: *const AppSession) bool {
+    pub fn activeTermIsTerminal(self: *const AppSession) bool {
         if (!self.surface_initialized or self.tabs.items.len == 0) return true;
         const tab = self.tabs.items[self.app_window.active_tab];
         const pane = tab.panes.items[tab.active_pane];
@@ -15069,7 +14942,7 @@ pub const AppSession = struct {
             };
             const page_delta = pageScrollDelta(self.page_keys_scroll, page_alt_active, event.key);
             if (page_delta != 0) {
-                self.scrollPage(page_delta);
+                scroll_ops.scrollPage(self, page_delta);
                 return self.keyConsumedByApp(); // 앱(터미널)이 소비 — PTY로 안 보냄
             }
         }
@@ -15301,216 +15174,6 @@ pub const AppSession = struct {
         return effectiveWindowBlur(self.loaded_config.config.window_blur, self.loaded_config.config.window_opacity);
     }
 
-    /// 뷰포트를 delta_up줄만큼 스크롤한다(+위=과거, -아래=현재). 스크롤 로직은 TerminalCore가
-    /// 소유하고, 여기선 다음 tick이 새 뷰를 그리도록 metal_dirty만 세운다(Swift는 휠/키 이벤트를
-    /// 이 함수로 넘기는 얇은 글루다).
-    pub fn scroll(self: *AppSession, delta_up: i32) void {
-        // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상(스크롤백)이 없다(sentinel) — no-op(웹 스크롤은 WKWebView 소유).
-        if (!self.surface_initialized or !self.activeTermIsTerminal()) return;
-        const surface = self.activeSurface();
-        // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
-        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, delta_up) }, self.io) catch {};
-        self.metal_dirty = true;
-    }
-
-    /// 마우스/트랙패드 휠 스크롤. Swift는 raw NSEvent 값(델타 포인트 + 정밀 델타 여부)만 넘기고,
-    /// 줄 수 환산은 여기서 실제 cell 메트릭으로 한다(네이티브 최소화). 정밀(트랙패드) 델타는 포인트
-    /// 단위라 한 줄 높이(포인트)로 나눠 줄 수로 바꾸고, 줄 단위(마우스 휠) 델타는 그대로 줄 수다.
-    /// 한 줄 미만의 정밀 델타는 wheel_accum에 누적해 천천히 스크롤해도 줄이 소실되지 않는다.
-    /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
-    pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
-        if (!self.surface_initialized) return;
-        // 닫기 확인 모달은 결정 게이트라 마우스 클릭(mouse())뿐 아니라 휠도 막는다 — 안 막으면 모달 뒤 터미널/스크롤백이
-        // 사용자 결정 중에 움직이거나(스크롤) 트래킹 앱에 휠이 리포트된다(모달 의도 위배).
-        if (self.chrome_host.confirm.open) return;
-        // 상태바 위 휠은 **삼킨다**. 아래 라우팅은 "어느 pane에도 안 맞으면 활성 surface로 fallback"이라,
-        // 안 막으면 상태바를 굴리는 동작이 터미널 스크롤백을 움직인다. 사이드바 판정보다 먼저 둔다 —
-        // 상태바는 창 전폭이라 사이드바 아래 구간도 지나가고, 뒤에 두면 그 구간이 사이드바 스크롤로 샌다.
-        //
-        // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 아래 notice 처리는 "아무 입력으로나 닫힘"
-        // 규율이라 휠도 토스트를 닫아야 하는데(그 주석이 옛 회귀를 적어 뒀다), 여기서 삼키면 토스트가
-        // 뜬 채로 스크롤도 막히고 닫히지도 않는다. 알림 패널 휠 처리도 아래에 있다. `mouse()`와 같은 게이트다.
-        if (!self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) return;
-        // notice 토스트(비-인터랙티브 정보, 자동 닫힘 타이머 없음)는 **휠로도 닫는다** — 키(notice.handle)·클릭(mouse())과
-        // 같은 "아무 입력으로나 닫힘" 규율을 휠까지 확장한다(옛날엔 아래 anyOverlayOpen이 휠을 삼키기만 해 토스트가 떠 있는
-        // 동안 스크롤이 막힌 채 닫히지도 않았다). 휠은 소비한다(닫되 스크롤은 안 함 — 토스트 확인 제스처). notifications와
-        // 공존할 수 있어(showNotice가 패널을 안 닫음) 그 분기보다 먼저 둔다(mouse()의 notice-우선 순서와 일치).
-        if (self.chrome_host.notice.open) {
-            self.chrome_host.notice.dismiss();
-            self.metal_dirty = true;
-            return;
-        }
-        // 알림 패널이 열려 있으면 휠은 패널 카드 스크롤로 가로챈다(클릭이 패널로 가로채지는 mouse()의 게이트와 짝 —
-        // 터미널/스크롤백으로 안 흘린다). 휠 위(lines>0)=목록 위(최신, offset↓)·아래=오래된(offset↑). 카드 단위라 줄
-        // 수를 그대로 카드 delta로 쓴다(부호 반전: 위로 굴리면 offset 감소). 개수·metrics만 넘긴다(Item 빌드 불필요).
-        if (self.chrome_host.notifications.open) {
-            if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
-            const scaled = delta_y * @as(f64, self.appearance.scroll_multiplier);
-            const lines = wheelDeltaToLines(&self.wheel_accum, scaled, precise, self.cell_height_px, self.scale_milli);
-            if (lines != 0) {
-                self.chrome_host.notifications.scrollBy(self.notification_history.items.len, self.buildCellMetrics(), @as(i64, -lines));
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        // 그 외 오버레이(notice·context_menu·find·palette·settings)가 열려 있으면 휠을 **소비**한다 — 터미널/스크롤백으로
-        // 안 흘린다(클릭이 mouse()에서 막히는 것과 짝, 오버레이는 배타적이라 한 번에 하나).
-        //
-        // **SV5d: 팔레트·세팅은 여기서 자기 목록을 굴린다**(위 주석이 "자체 스크롤은 아직 없다(후속)"이라
-        // 적어 둔 그 후속이다). 소비 게이트가 이 자리에 있으므로 스크롤도 **여기서** 해야 한다 — 뒤에
-        // 두면 이 return에 먼저 걸려 도달하지 못한다(실제로 그렇게 나갔다).
-        if (self.anyOverlayOpen()) {
-            const lines_overlay = wheelDeltaToLines(&self.wheel_accum, delta_y * @as(f64, self.appearance.scroll_multiplier), precise, self.cell_height_px, self.scale_milli);
-            _ = self.scrollOverlayByLines(lines_overlay);
-            return;
-        }
-        const session_dock_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and
-            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
-        // Do not carry a sub-pixel trackpad remainder from the dock into a later re-entry. The
-        // next dock gesture must start from its own physical direction and owner.
-        // 도크를 떠났으면 분수 잔여를 남기지 않는다 — 다시 들어왔을 때 첫 틱이 엉뚱하게 튄다.
-        if (!session_dock_wheel_target) self.agent_session_archive_scroll.dropWheelResidue();
-        if (session_dock_wheel_target) {
-            // 도크는 양쪽 clamp 경계에서도 자기 휠 이벤트를 소비한다. 안 그러면 목록 끝에 닿은
-            // 트랙패드 제스처가 뒤 터미널/PTY로 샌다.
-            const dock_scale_milli = agent_dock.agentSessionDockScaleMilli(self);
-            const m = chrome.components.session_dock.types.DockMetrics.resolve(dock_scale_milli);
-            // precise(트랙패드)는 논리 픽셀, 아니면 카드 한 장이 한 틱이다.
-            const unit: f64 = if (precise)
-                @as(f64, @floatFromInt(dock_scale_milli)) / 1000.0
-            else
-                @as(f64, @floatFromInt(m.card_h));
-            // 잔여 축적·방향 전환·정수부 소비·overflow 가드는 `State`가 소유한다.
-            const projection = agent_dock.agentSessionDockScrollProjection(self);
-            if (self.agent_session_archive_scroll.scrollByWheel(
-                delta_y * @as(f64, self.appearance.scroll_multiplier),
-                unit,
-                projection.max_offset_px,
-            )) self.metal_dirty = true;
-            return;
-        }
-        // 소스 컨트롤도 **자기 상태**(scm_scroll)로 굴린다 — 뷰별로 나눠 두지 않으면 안 보이는 목록이
-        // 움직인다. 탐색기와 같은 픽셀 경로이므로 줄 환산 앞에 둔다(SV3a).
-        const scm_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .source_control and
-            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
-        if (!scm_wheel_target) self.scm_scroll.dropWheelResidue();
-        if (scm_wheel_target) {
-            const unit: f64 = if (precise)
-                @as(f64, @floatFromInt(self.scale_milli)) / 1000.0
-            else
-                @as(f64, @floatFromInt(self.cell_height_px));
-            const extent = self.scmScrollExtent();
-            if (self.scm_scroll.scrollByWheel(
-                delta_y * @as(f64, self.appearance.scroll_multiplier),
-                unit,
-                extent.max_offset_px,
-            )) self.metal_dirty = true;
-            // 목록 끝에 닿아도 소비한다 — 도크·탐색기와 같은 규율(뒤 터미널로 새지 않는다).
-            return;
-        }
-        // 탐색기도 자기 상태(file_tree_scroll)로 굴린다 — 다른 뷰에서 굴리면 안 보이는 목록이 움직인다.
-        // **줄 환산(`wheelDeltaToLines`)보다 앞에 둔다**: 픽셀 상태라 공유 `wheel_accum`을 소비할 이유가
-        // 없고, 소비하면 탐색기 위 제스처가 터미널 스크롤백의 잔여를 갉아먹는다.
-        const file_tree_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .explorer and
-            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
-        if (!file_tree_wheel_target) self.file_tree_scroll.dropWheelResidue();
-        if (file_tree_wheel_target) {
-            // precise(트랙패드)는 논리 픽셀이라 부분 행이 그대로 드러나고, 아니면 한 행이 한 틱이다.
-            const unit: f64 = if (precise)
-                @as(f64, @floatFromInt(self.scale_milli)) / 1000.0
-            else
-                @as(f64, @floatFromInt(self.cell_height_px));
-            const extent = file_panel_ops.fileTreeScrollExtent(self);
-            if (self.file_tree_scroll.scrollByWheel(
-                delta_y * @as(f64, self.appearance.scroll_multiplier),
-                unit,
-                extent.max_offset_px,
-            )) {
-                dock_ops.buildDockListScrollTree(self);
-                self.dock_list_scrollbar_idle_ticks = 0;
-                self.metal_dirty = true;
-                file_panel_ops.setHoveredFileTreeRow(self, file_panel_ops.fileTreeRowAt(self, x_px, y_px));
-            }
-            // 목록 끝에 닿아도 소비한다 — 도크와 같은 규율(뒤 터미널로 새지 않는다).
-            return;
-        }
-        // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
-        // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
-        if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
-        // 세로 스크롤 배수(scroll.multiplier): delta에 곱해 줄 환산 전 속도를 조절한다(가로 탭 바엔 적용 안 함 — 아래
-        // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
-        const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
-        const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
-        // 사이드바 위 휠 = 사이드바 세로 스크롤이 **통째로 소비**한다(커서 아래 소유 원칙을 사이드바로 확장 — 터미널/
-        // 스크롤백으로 안 흘린다). 카드가 헤더 아래 뷰포트를 안 넘으면 clamp가 no-op이라 무동작이지만, 그래도 소비해
-        // 사이드바 위 휠이 뒤 터미널을 굴리는 위화감을 막는다. 한 줄(cell 높이)을 픽셀 단위로 환산해 스무스 스크롤한다 —
-        // 위(lines>0=과거)면 콘텐츠를 아래로(offset↓), 아래면 위로(offset↑). 가로(탭 바)는 사이드바와 무관해 건너뛴다.
-        if (self.sidebar_width_px > 0 and sidebar_ops.inSidebar(self, x_px)) {
-            const max = sidebar_ops.sidebarMaxScroll(self);
-            if (lines != 0 and max > 0) { // 안 넘치면 소비만(아래 return) — 헛 rebuild 안 함
-                const step: i64 = @as(i64, lines) * @as(i64, @intCast(self.cell_height_px));
-                const next: i64 = @as(i64, self.sidebar_scroll_offset_px) - step; // lines>0(위) → offset 감소
-                const clamped: u32 = @intCast(std.math.clamp(next, 0, @as(i64, max)));
-                if (clamped != self.sidebar_scroll_offset_px) { // 실제로 움직였을 때만 재배치
-                    self.sidebar_scroll_offset_px = clamped;
-                    sidebar_ops.rebuildSidebar(self) catch {}; // 밴드·tint quad를 새 오프셋으로 재배치(셀은 .m이 frame 오프셋으로 자동, 스크롤바는 per-frame)
-                    self.metal_dirty = true;
-                }
-            }
-            return;
-        }
-        // 휠은 '커서 아래' surface가 통째로 처리한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤하고
-        // (포커스는 안 바꾼다), mouse tracking 판정·리포트 좌표도 그 surface 기준이라 정합한다. 베이스: Ghostty/
-        // Warp — 휠은 포인터 아래 surface가 소유한다(포커스 무관). 그래야 포커스 pane이 트래킹 앱(vim/tmux 등)
-        // 이어도 옆 셸 pane 위 휠이 그 셸 스크롤백을 움직인다. 사이드바/밖(hit null)이면 활성 surface로 fallback.
-        // surface와 rect는 한 leaf에서 온 한 쌍이라 함께 unwrap한다 — 둘을 따로 풀면 다른 분기에서 와 pane↔좌표가
-        // 어긋날 수 있다(이 rework가 막으려는 것). rect는 트래킹 리포트 좌표용(pxToCellIn).
-        const hit = pane_ops.paneTargetAt(self, x_px, y_px);
-        const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ self.activeSurface(), self.active_pane_rect };
-        // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
-        // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
-        // mouse_tracking 읽기는 메인 락-아래(읽기 위임 안 함, §9.1). reportMouse(코어 mutate+응답)는 full (a)
-        // (docs/io-render-threading.md §9 P3-4)로 reader에 위임 — 휠 lines만큼 반복 enqueue, reader가 각 적용 후
-        // pendingResponse를 PTY로 흘린다.
-        // host-backed(원격)면 placeholder core엔 mouse_tracking이 없으므로(진짜 코어는 host) 관측에서 온 실제
-        // 모드로 게이트하고, 아래 enqueueCoreCommand(report_mouse)가 host로 라우팅돼 host가 인코딩·PTY 주입한다(§입력 패리티).
-        const tracking = if (target.remote != null)
-            self.remoteMouseTracking(target.id) != .none
-        else blk: {
-            target.lockCore(self.io);
-            defer target.unlockCore(self.io);
-            break :blk target.core.mouse_tracking != .none;
-        };
-        // 세로(터미널) 축: 트래킹이면 앱이 휠을 소비(SGR 64/65 리포트), 아니면 커서 아래 surface 스크롤백을 굴린다.
-        if (tracking) {
-            // 리포트는 target(커서 아래)으로, 좌표도 그 본문 rect 기준이라 pane↔좌표가 정합한다. 사이드바/밖(hit
-            // null)이면 활성 pane으로 폴백(target/rect 한 쌍). lines>0=위(과거)=64, <0=아래=65, 앱이 휠을 소비한다.
-            if (lines != 0) {
-                // 트래킹 앱이 휠을 소비하면 그 앱이 화면을 굴린다 — 남은 선택은 옛 좌표를 가리키는 유령이라
-                // 먼저 해제한다(Ghostty: 리포팅 중 스크롤이면 setSelection(null)). lines 반복 리포트와 달리
-                // 해제는 이벤트당 한 번이면 충분하다(lines만큼 반복할 이유가 없다).
-                self.clearSurfaceSelection(target.id);
-                if (self.pxToCellIn(target, rect, x_px, y_px)) |cell| {
-                    const wb: u8 = if (lines > 0) 64 else 65;
-                    var n: i32 = if (lines > 0) lines else -lines;
-                    while (n > 0) : (n -= 1) self.runtime.enqueueCoreCommand(target.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }, self.io) catch {};
-                }
-            }
-        } else {
-            self.scrollSurfaceLines(target, lines);
-        }
-        // 가로(트랙패드 2-finger) 델타 → 커서 아래 pane 탭 바 가로 스크롤(#2b). 세로(터미널)와 **직교 축**이라 한
-        // 이벤트(대각선)에서 둘 다 처리될 수 있고, 탭 바는 Maru chrome(터미널 앱이 못 받는 축)이라 mouse tracking과
-        // 무관하게 항상 처리한다 — 트래킹 앱 pane 위에서도 탭 바는 굴러간다(세로만 앱이 소비). 안 넘치면 무동작.
-        if (std.math.isFinite(delta_x) and delta_x != 0) {
-            if (delta_x * self.tab_wheel_accum < 0) self.tab_wheel_accum = 0; // 방향 전환 시 잔여 버림(세로와 같은 규율)
-            const cols = wheelDeltaToLines(&self.tab_wheel_accum, delta_x, precise, self.cell_width_px, self.scale_milli); // 셀 환산 범용 — 가로는 cell_width
-            if (cols != 0) {
-                tab_ops.scrollTabBarAt(self, x_px, y_px, cols); // 커서 아래 터미널 pane 탭 바(있으면) // 커서 아래 도크 그룹 탭 바(있으면) — pane과 영역이 안 겹쳐 둘 중 하나만 매치
-            }
-        }
-    }
-
     /// 창 포커스 변화(OS window key/resign)를 활성 surface 코어에 알린다 — focus reporting(DECSET 1004)이 켜져
     /// 있으면 CSI I(gained)/CSI O(lost)가 PTY로 흐른다(vim FocusGained/Lost). off면 reportFocus가 무동작이라 무전송.
     /// 창이 포커스를 잃었을 때 커서를 어떻게 그릴지(config.cursor.unfocused) renderer 모드로 환산한다. 포커스가
@@ -15640,7 +15303,7 @@ pub const AppSession = struct {
     /// 예전엔 관측이 bool뿐이라 모드를 가를 수 없었고, 그래서 host-backed에서 **motion 리포트가 통째로 빠져** 있었다
     /// (클릭만 이관됨). 관측에 모드가 없는 구 host는 `mouse_tracking` bool에서 `.normal`로 보수적으로 폴백해
     /// motion을 추측 전송하지 않는다(1000만 켠 앱에 motion을 쏟으면 PTY 부하·오작동).
-    fn remoteMouseTracking(self: *AppSession, surface_id: u64) terminal.MouseTracking {
+    pub fn remoteMouseTracking(self: *AppSession, surface_id: u64) terminal.MouseTracking {
         const loc = self.findTermWhere(surface_id, struct {
             fn pred(id: u64, term: *Term) bool {
                 return term.kind == .terminal and term.surface.id == id;
@@ -15660,85 +15323,9 @@ pub const AppSession = struct {
     /// "이동 없는 클릭"과 좌표 무효화(resize reflow·alt 전환)뿐이라, 트래킹 TUI pane에서 하이라이트가 영구히
     /// 남는다(클릭이 리포팅으로 빠져 선택을 손도 안 댄다). 베이스: Ghostty Surface.zig — 같은 세 지점에서
     /// `setSelection(null)`. 선택이 없으면 코어의 `selectionClear`가 즉시 return하므로 반복 호출은 무해하다.
-    fn clearSurfaceSelection(self: *AppSession, surface_id: u64) void {
+    pub fn clearSurfaceSelection(self: *AppSession, surface_id: u64) void {
         self.runtime.enqueueCoreCommand(surface_id, .select_clear, self.io) catch {};
         self.metal_dirty = true; // 해제된 하이라이트가 한 프레임 더 남지 않게(다른 선택 사이트와 같은 규율)
-    }
-
-    /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
-    /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
-    /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
-    /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 paneTargetAt으로 고른 surface에 직접 쓴다.
-    fn scrollLines(self: *AppSession, lines: i32) void {
-        self.scrollSurfaceLines(self.activeSurface(), lines);
-    }
-
-    /// 주어진 surface를 줄 수만큼 스크롤한다 — 휠은 커서 아래 panel(비활성 가능), 키보드는 활성. alt screen +
-    /// alternate scroll(DECSET 1007)이면 그 surface PTY로 화살표 키를 보내고(less/vim 등 프로그램 스크롤),
-    /// 아니면 그 surface의 뷰포트를 스크롤한다(scrollback). 줄 0이면 무동작.
-    fn scrollSurfaceLines(self: *AppSession, surface: *maru.session.Surface, lines: i32) void {
-        if (lines == 0) return;
-        const core = &surface.core;
-        var is_alt = false;
-        var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-        var alt_len: usize = 0;
-        if (surface.remote != null) {
-            const loc = self.findTermWhere(surface.id, struct {
-                fn pred(id: u64, term: *Term) bool {
-                    return term.kind == .terminal and term.surface.id == id;
-                }
-            }.pred) orelse return;
-            const term = loc.pane.terms.items[loc.term_index];
-            // 관측이 아직 안 왔으면(재접속 직후 metadata 도착 전 ~0.5s window 등) **alt-screen 판정만 스킵**하고 평범한
-            // 스크롤백(host view_offset — 관측이 필요 없음)은 그대로 진행한다. 예전엔 여기서 hard return이라 관측 미가용
-            // 창에서 **양쪽 경로 다 죽어** 스크롤이 완전히 안 됐다(host-alive robustness — 재접속 직후 스크롤 즉시 동작).
-            const observation = &term.rt.observation;
-            if (observation.availability != .unavailable and observation.alt_active and observation.alternate_scroll) {
-                is_alt = true;
-                const bytes = if (lines > 0)
-                    (if (observation.app_cursor_keys) "\x1bOA" else "\x1b[A")
-                else
-                    (if (observation.app_cursor_keys) "\x1bOB" else "\x1b[B");
-                @memcpy(key_buffer[0..bytes.len], bytes);
-                alt_len = bytes.len;
-            }
-        } else {
-            // local alt+alternate_scroll 판정 + key encoding은 실제 core lock 아래.
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            if (core.alt_active and core.alternate_scroll) {
-                is_alt = true;
-                const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
-                const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch return;
-                alt_len = bytes.len;
-            }
-        }
-        if (is_alt) {
-            // 휠을 화살표 키로 바꿔 프로그램에 보내는 순간 그 화면은 프로그램이 다시 그린다 — 남은 선택은
-            // 좌표가 어긋난 유령이 되므로 해제한다(Ghostty도 이 변환 경로에서 항상 setSelection(null)).
-            self.clearSurfaceSelection(surface.id);
-            // alt screen + alternate scroll(DECSET 1007): 프로그램에 화살표 키를 보낸다(PTY write — core mutate 아님).
-            // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput을 하면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍.
-            const bytes = key_buffer[0..alt_len];
-            var batch: [512]u8 = undefined;
-            const per_batch = batch.len / bytes.len;
-            var remaining: u32 = @abs(lines);
-            while (remaining > 0) {
-                const count = @min(remaining, @as(u32, @intCast(per_batch)));
-                var len: usize = 0;
-                var i: u32 = 0;
-                while (i < count) : (i += 1) {
-                    @memcpy(batch[len..][0..bytes.len], bytes);
-                    len += bytes.len;
-                }
-                self.runtime.writeInput(surface.id, .{ .bytes = batch[0..len] }) catch break; // 쓰기 실패 = 남은 스크롤 드랍, 중단
-                remaining -= count;
-            }
-            return;
-        }
-        // non-alt: scrollViewport를 reader에 위임.
-        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, lines) }, self.io) catch {};
-        self.metal_dirty = true;
     }
 
     /// 버튼 없는 마우스 이동(hover)을 먼저 bounded SessionDock tree에, 이어 필요할 때만 mouse reporting으로 PTY에
@@ -15808,7 +15395,7 @@ pub const AppSession = struct {
     /// 비활성 pane으로 리포트할 때 그 pane 기준 좌표(pane↔좌표 정합)를 얻는 데도 쓴다. 핵심: clamp를 float
     /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환에서 trap(앱
     /// 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null, 음수(영역 밖) 좌표는 0 clamp.
-    fn pxToCellIn(self: *const AppSession, surface: *const maru.session.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?CellHit {
+    pub fn pxToCellIn(self: *const AppSession, surface: *const maru.session.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?CellHit {
         // 본문 산술은 session/layout_math.zig로 분리(b2) — self/surface에서 cell 메트릭·grid 크기만 뽑아 위임.
         return layout_math.pxToCell(self.cell_width_px, self.cell_height_px, surface.core.size.cols, surface.core.size.rows, rect, x_px, y_px);
     }
@@ -15997,11 +15584,11 @@ pub const AppSession = struct {
         // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
         // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
         // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
-        if (self.scrollbarCaptureActive() and (kind == 2 or kind == 3)) {
-            if (self.routeScrollbarCapture(kind, y_px)) return true;
+        if (scroll_ops.scrollbarCaptureActive(self) and (kind == 2 or kind == 3)) {
+            if (scroll_ops.routeScrollbarCapture(self, kind, y_px)) return true;
         }
         if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
-            if (kind == 2) self.dragScrollbarTo(y_px) else {
+            if (kind == 2) scroll_ops.dragScrollbarTo(self, y_px) else {
                 self.finishPointerGesture();
             }
             return true;
@@ -16141,7 +15728,7 @@ pub const AppSession = struct {
         }
         // 팔레트는 마우스 클릭 처리가 없다(키보드 전용 오버레이) — 스크롤바 드래그만 받는다(SV5d).
         if (self.chrome_host.palette.open and kind == 1) {
-            if (self.beginOverlayScrollbarGesture(x_px, y_px)) return;
+            if (scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) return;
         }
         // 세팅 모달이 열려 있으면 포인터를 settings 컴포넌트에 라우팅한다(confirm/context_menu처럼 전용 hit-test —
         // 아래 generic handlePointer 게이트는 settings를 모르므로 여기서 먼저 처리·return해 클릭이 뒤로 안 샌다). 행은
@@ -16149,7 +15736,7 @@ pub const AppSession = struct {
         if (self.chrome_host.settings.open) {
             // 스크롤바가 먼저다(SV5d) — 막대는 gutter 안이라 폼 행과 안 겹치지만, 순서를 뒤로 두면
             // 트랙 위 클릭이 **행 선택**으로 샌다(탐색기·사이드바가 세운 규율 그대로).
-            if (kind == 1 and self.beginOverlayScrollbarGesture(x_px, y_px)) return;
+            if (kind == 1 and scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) return;
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             const fields = self.buildSettingsFields(arena_state.allocator()) catch return;
@@ -16696,11 +16283,11 @@ pub const AppSession = struct {
         // 보다 먼저 가로챈다 — 우측 가장자리 얇은 띠라 평소 셀 선택을 거의 안 가린다(스크롤백 없으면 스크롤바
         // 자체가 없어 이 분기도 안 탄다). 트랙(thumb 밖) 클릭은 즉시 그 지점으로 점프하고 이어서 드래그한다.
         if (kind == 1) {
-            if (self.scrollbarGrabAt(x_px, y_px)) |grab| {
+            if (scroll_ops.scrollbarGrabAt(self, x_px, y_px)) |grab| {
                 self.beginPointerGesture(.{ .scrollbar = .{ .grab = grab } });
                 self.drag_autoscroll = 0;
                 self.mouse_drag_selecting = false;
-                self.dragScrollbarTo(y_px);
+                scroll_ops.dragScrollbarTo(self, y_px);
                 return;
             }
         }
@@ -16833,25 +16420,13 @@ pub const AppSession = struct {
     // 한 tick의 실제 경과 시간(ms) = round(1000 / 실제 cadence). frameRateHz는 #1117에서 Swift가 주입한
     // frame_loop_rate_hz(실제 NSTimer cadence)를 반환하므로, 이 값은 호스트 타이머 기준 tick 간격이다. 드래그
     // 자동 스크롤이 tick당 경과 ms를 누적해 frame rate 무관 속도를 내는 데 쓴다(ticksForMs의 역방향).
-    fn msPerTick(self: *const AppSession) u32 {
+    pub fn msPerTick(self: *const AppSession) u32 {
         const hz = self.frameRateHz();
         return @max(1, (1000 + hz / 2) / hz);
     }
 
     fn bellFlashTotalTicks(self: *const AppSession) u32 {
         return self.ticksForMs(bell_flash_total_ms);
-    }
-
-    fn scrollbarVisibleTicks(self: *const AppSession) u32 {
-        return self.ticksForMs(scrollbar_visible_ms);
-    }
-
-    fn scrollbarFadeTicks(self: *const AppSession) u32 {
-        return self.ticksForMs(scrollbar_fade_ms);
-    }
-
-    fn scrollbarFadeCompleteTicks(self: *const AppSession) u32 {
-        return self.scrollbarVisibleTicks() + self.scrollbarFadeTicks();
     }
 
     fn agentPollIntervalTicks(self: *const AppSession) u32 {
@@ -17034,40 +16609,6 @@ pub const AppSession = struct {
         self.blink_phase_ns = 0; // baseline 폐기 — 다음 idle tick이 지금부터 새 반주기를 시작한다
         self.blink_visible = true;
         self.metal_buffer.setCursorFadeMilli(1000);
-    }
-
-    /// 드래그 자동 스크롤 한 스텝(frame-loop tick마다). 드래그가 grid 밖에 머무는 동안 한 줄씩
-    /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
-    fn applyDragAutoscroll(self: *AppSession) void {
-        if (self.drag_autoscroll == 0) {
-            self.drag_autoscroll_accum_ms = 0; // 드래그가 grid 안으로 돌아옴 — 다음 진입이 새로 누적 시작
-            return;
-        }
-        // **frame rate 무관 속도**: 옛날엔 tick마다 한 줄이라 기본이 30→60Hz로 오르며 자동 스크롤이 2배(120Hz면
-        // 4배) 빨라졌다. tick 수가 아니라 경과 ms로 게이트해 항상 ≈30줄/s를 유지한다 — msPerTick 누적이 step_ms를
-        // 넘을 때만 한 줄. frame-rate_min=30이라 msPerTick≤step_ms → tick당 최대 한 줄(저rate에서도 과속 없음).
-        self.drag_autoscroll_accum_ms += self.msPerTick();
-        if (self.drag_autoscroll_accum_ms < drag_autoscroll_step_ms) return;
-        self.drag_autoscroll_accum_ms -= drag_autoscroll_step_ms;
-        const surface = self.activeSurface();
-        const core = &surface.core;
-        // selection_anchor/view_offset/selection_head 읽기 + scrollViewport/selectionExtend(코어 변경)는 리더
-        // core.write와 경합 — 메서드 전체를 락 아래(docs/io-render-threading.md PR3). 짧은 메서드라 락 비용 무시 가능;
-        // 함수가 metal_dirty 직후 끝나므로 함수-스코프 defer로 풀어 early return도 안전히 unlock.
-        // 게이트("확장할 선택이 있는가") + grid rows는 코어 read(메인 락-아래 — 읽기는 위임 안 함, §9.1).
-        // mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동
-        // 스크롤이 영원히 안 걸린다.
-        const rows: u16 = blk: {
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            if (core.selection_anchor == null) return; // 확장할 선택 없음
-            break :blk core.size.rows;
-        };
-        const row: u16 = if (self.drag_autoscroll > 0) 0 else rows - 1;
-        // scroll+extend는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임 — **kind-2 드래그 extend와
-        // 같은 명령 큐를 타 순서 보존**(둘이 다른 스레드면 선택이 어긋날 수 있다). 원래의 "변화 시만 재투영" 최적화는
-        // reader 렌더 트리거로 대체한다(스크롤백 끝에서 포인터를 grid 밖에 둘 때 cheap render tick 몇 개 — §9 trade-off).
-        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_and_extend = .{ .delta = @as(isize, self.drag_autoscroll), .row = row, .col = self.last_drag_col } }, self.io) catch {};
     }
 
     /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달은 배타적(show가 서로 닫는다 — showNotice/toggleFind/
@@ -18649,7 +18190,7 @@ pub const AppSession = struct {
         }
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
-        self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
+        scroll_ops.setScrollbarHovered(self, scroll_ops.scrollbarGrabAt(self, x_px, y_px) != null);
         dock_ops.setDockListScrollbarHovered(self, if (dock_ops.dockListScrollbarGeometry(self)) |geometry| geometry.trackContains(x_px, y_px) else false);
         sidebar_ops.setSidebarScrollbarHovered(self, sidebar_ops.pointOnSidebarScrollbar(self, x_px, y_px));
         // Phase 7e-4: browser 주소창 밴드 nav 버튼 호버도 매 이동 갱신한다(스크롤바 호버처럼 아래 early return 전에 항상 —
@@ -20660,14 +20201,6 @@ pub const AppSession = struct {
     // pageScrollDelta는 session core로 추출됐다(위 file-scope alias=input_math.pageScrollDelta로 호출).
     // 정의·단위 테스트는 src/session/input_math.zig.
 
-    pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
-        // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상 없음(sentinel) — no-op(scroll과 동형).
-        if (!self.surface_initialized or !self.activeTermIsTerminal()) return;
-        const rows = self.activeSurface().core.size.rows;
-        const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
-        self.scrollLines(delta_pages *| page);
-    }
-
     /// 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트를 점프한다(OSC 133 셸 통합 필요 — Cmd+↑/↓).
     /// 분류·이동 로직은 core가 소유하고, 여기선 스크롤됐으면 다음 tick이 다시 그리도록 metal_dirty만
     /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
@@ -21785,7 +21318,7 @@ pub const AppSession = struct {
         // 손을 뗄 때(`dropped`) 한 번에 적용됐다 — 같은 coalescing을 쓰는 divider는 매 tick 반영되는데
         // 스크롤만 "놓아야 움직이는" 것으로 보였다(제보).
         pane_ops.applyPendingDividerResize(self);
-        self.applyPendingScrollbarScroll();
+        scroll_ops.applyPendingScrollbarScroll(self);
         // Session Dock scrollbar도 같은 규율이다 — 도크의 drag는 chrome interaction tree가 소유하지만
         // 소비 지점은 동일하게 tick 하나다.
         agent_dock.applyAgentSessionDockScrollDrag(self);
@@ -21823,7 +21356,7 @@ pub const AppSession = struct {
         self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
-        self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
+        scroll_ops.applyDragAutoscroll(self); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
@@ -22107,7 +21640,7 @@ pub const AppSession = struct {
         if (active_output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         file_panel_ops.refreshDockListScrollbar(self); // frame당 geometry build 1회; fade/render는 같은 snapshot만 소비한다.
-        self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
+        scroll_ops.updateScrollbarFade(self); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
         // 활성 surface가 직전 tick과 바뀌면 sync 게이트 baseline 3개(last_rendered_esu·last_rendered_view_offset·
         // sync_hold_ticks)가 전부 단일 AppSession 필드라 이전 surface 값이 남는다. 비교 대상(sync_esu_count·view_offset·
         // freeze 경과)은 per-surface이므로, 남은 값이 전환 tick에 진행 중(mid-sync) 프레임을 **강제 투영**시켜 2026이
@@ -22357,9 +21890,9 @@ pub const AppSession = struct {
                     // SV5b: 팔레트 결과 목록 우측 막대. **오버레이 lowering 뒤에** 낸다 — 팔레트 배경도
                     // 같은 over 버킷이고 그 안에서는 배열 순서가 painter 순서라, 앞에 내면 배경이 막대를
                     // 덮어 화면에서 사라진다(실측). 버킷이 다른 도크·사이드바 막대와 다른 점이다.
-                    self.appendPaletteScrollbar();
-                    if (self.settings_scroll_view) |sv| self.appendSettingsScrollbar(sv);
-                    if (self.notif_scroll_view) |sv| self.appendOverlayScrollbar(sv.viewport, .{
+                    scroll_ops.appendPaletteScrollbar(self);
+                    if (self.settings_scroll_view) |sv| scroll_ops.appendSettingsScrollbar(self, sv);
+                    if (self.notif_scroll_view) |sv| scroll_ops.appendOverlayScrollbar(self, sv.viewport, .{
                         .offset_px = sv.offset_px,
                         .content_h_px = sv.content_h_px,
                     }); // SV5a-2: 알림도 공용 경로 — 컴포넌트가 손수 그리던 2px 막대를 지웠다
@@ -22420,8 +21953,8 @@ pub const AppSession = struct {
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
-                        self.appendScrollButtonQuad(m, m.tab_cols, self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
-                        self.appendScrollButtonQuad(m, m.tab_cols + 2, self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
+                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols, self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
+                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + 2, self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)));
                     };
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
@@ -23494,15 +23027,6 @@ pub const AppSession = struct {
         return chrome.components.notifications.hitTest(&self.chrome_host.notifications, items, self.buildChromeProps(), x_px, y_px);
     }
 
-    /// #5b: 호버 중인 ‹/› 스크롤 버튼을 갱신한다. 바뀌면 재드로우(버튼이 밝아져 클릭 가능 표시). 같으면 무동작.
-    pub fn setHoveredScroll(self: *AppSession, s: ?ScrollRef) void {
-        const same = (self.hovered_scroll == null and s == null) or
-            (self.hovered_scroll != null and s != null and self.hovered_scroll.?.pane == s.?.pane and self.hovered_scroll.?.right == s.?.right);
-        if (same) return;
-        self.hovered_scroll = s;
-        self.metal_dirty = true;
-    }
-
     /// 호버 중인 헤더 아이콘 영역을 갱신한다. 아이콘(◧/⚙/+)이면 그 region, 그 외(검색·none)는 null로 정규화한다.
     /// 바뀌면 사이드바를 재빌드해(retained layer 0 quad) 아이콘 뒤 호버 배경을 그리거나 지운다. 같으면 무동작
     /// (재빌드 churn 방지 — 아이콘 경계를 넘을 때만 1회). 검색 줄은 caret만 있고 호버 배경 없음(텍스트 입력 영역).
@@ -23539,7 +23063,7 @@ pub const AppSession = struct {
         self.setHoveredFileHeaderMode(null); // 파일 헤더 mode 선택기 호버도 같은 이유로 정리
         self.setHoveredHeaderRegion(.none);
         self.setHoveredCollapsedToggle(false);
-        self.setScrollbarHovered(false);
+        scroll_ops.setScrollbarHovered(self, false);
         self.clearHoverUrlAnchor();
         _ = agent_dock.agentSessionDockPointer(self, .move, -1, -1);
     }
@@ -23651,13 +23175,6 @@ pub const AppSession = struct {
         self.gpu_quads.shrinkRetainingCapacity(write);
     }
 
-    /// #5a: 우측 가로 스크롤 ‹/› 버튼의 사각형 배경(GpuQuad layer 2) — col 셀(‹=tab_cols, ›=tab_cols+2) 영역을 약한
-    /// 배경으로 채워 "클릭 가능한 버튼"으로 보이게 한다. glyph는 coretext가 같은 col에 그린다(배경 위). hover 색은 #5b, 커서는 #5c.
-    fn appendScrollButtonQuad(self: *AppSession, m: chrome.components.tabbar.Metrics, col: u32, bg: u32) void {
-        const x: f32 = @floatFromInt(m.bar_x + col * m.cell_width_px);
-        self.appendSolidQuad(x, @floatFromInt(m.bar_y), @floatFromInt(m.cell_width_px), @floatFromInt(m.bar_h), bg, 2);
-    }
-
     /// solid 직각 GpuQuad(곡률·테두리·gradient 없음)를 지정 layer에 append하는 공통 헬퍼 — appendBarBgQuad·
     /// appendTabBarUnderline이 공유해 같은 11필드 보일러플레이트 반복을 없앤다(GpuQuad는 extern struct라 필드
     /// default가 없어 필드 추가 시 모든 리터럴을 손봐야 하는데, solid 직각 quad는 이 헬퍼 한 곳으로 모은다). 둥근/
@@ -23691,217 +23208,6 @@ pub const AppSession = struct {
     /// - **아래**(status bar): `sidebarBandCell`이 세로 경계를 안 보므로(폭·칸수만 본다) 스크롤이 0이어도
     ///   맨 아래 카드가 상태바 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줬을 뿐이다.
     pub const SidebarScissor = struct { top: u32, bottom: u32 };
-
-    /// 스크롤바 thumb 기하(보이는 영역 내 y offset·높이, backing px) — 순수 함수라 단위 테스트 가능. sb_count==0
-    /// (스크롤백 없음)·메트릭 0이면 null(안 그림). thumb 높이=보이는 비율(view/(sb+view)), 최소 높이로 clamp.
-    /// y: view_offset 0(바닥)이면 view_h-thumb_h(아래), sb_count(꼭대기)면 0(위) — 위로 스크롤할수록 thumb가 올라간다.
-    pub fn scrollbarThumbGeom(sb_count: usize, view_offset: usize, cell_height_px: u32, view_h_px: u32) ?struct { y: f32, h: f32 } {
-        if (sb_count == 0 or cell_height_px == 0 or view_h_px == 0) return null;
-        const ch: f32 = @floatFromInt(cell_height_px);
-        const sb_px: f32 = @as(f32, @floatFromInt(sb_count)) * ch; // 스크롤백 총 높이(px)
-        const view_px: f32 = @floatFromInt(view_h_px); // 보이는 높이
-        const min_thumb: f32 = @max(view_px * 0.04, 18.0);
-        var thumb_h: f32 = view_px * view_px / (sb_px + view_px);
-        if (thumb_h < min_thumb) thumb_h = min_thumb;
-        if (thumb_h > view_px) thumb_h = view_px;
-        const t: f32 = if (sb_px > 0) @as(f32, @floatFromInt(view_offset)) * ch / sb_px else 0; // 0..1
-        return .{ .y = (view_px - thumb_h) * (1.0 - t), .h = thumb_h };
-    }
-
-    /// 드래그 위치 t(0=트랙 바닥, 1=꼭대기)를 view_offset으로 매핑 — scrollbarThumbGeom의 `t = view_offset/sb_count`
-    /// 역(逆). [0,1]로 clamp 후 round해 [0,sb_count] 정수 offset. 순수 함수라 단위 테스트 가능.
-    fn scrollbarTargetOffset(t: f64, sb_count: usize) usize {
-        var tt = t;
-        if (tt < 0) tt = 0;
-        if (tt > 1) tt = 1;
-        return @intFromFloat(@round(tt * @as(f64, @floatFromInt(sb_count))));
-    }
-
-    /// 스크롤바 thumb 폭(px) — cell_width 비율, 최소 px 보장. emphasized(hover/드래그)면 +emphasize_px로 굵게.
-    /// appendScrollbar(그리기)·scrollbarGrabAt(hit-test)가 공유해 폭이 어긋나지 않게 한다(순수 함수 — 테스트 가능).
-    pub fn scrollbarBarWidthPx(cell_width_px: u32, emphasized: bool) f32 {
-        const base = @max(@as(f32, @floatFromInt(cell_width_px)) * scrollbar_bar_mul, scrollbar_bar_min_px);
-        return if (emphasized) base + scrollbar_bar_emphasize_px else base;
-    }
-
-    /// idle 틱에 따른 스크롤바 alpha(0xAARRGGBB의 A). visible_ticks까지 full, 이어 fade_ticks 동안 full→idle로
-    /// 선형 감쇠, 이후 idle(faint) 유지(숨기지 않음). 순수 함수 — 테스트 가능. hover/드래그 override는 호출처에서.
-    fn computeScrollbarAlpha(idle_ticks: u32) u8 {
-        return computeScrollbarAlphaFor(idle_ticks, default_scrollbar_visible_ticks, default_scrollbar_fade_ticks);
-    }
-
-    fn computeScrollbarAlphaFor(idle_ticks: u32, visible_ticks: u32, fade_ticks: u32) u8 {
-        if (idle_ticks <= visible_ticks) return scrollbar_alpha_full;
-        if (idle_ticks >= visible_ticks + fade_ticks) return scrollbar_alpha_idle;
-        const into: u32 = idle_ticks - visible_ticks; // 1..fade_ticks-1
-        const drop: u32 = @as(u32, scrollbar_alpha_full - scrollbar_alpha_idle) * into / fade_ticks;
-        return @intCast(@as(u32, scrollbar_alpha_full) - drop);
-    }
-
-    pub fn scrollbarAlpha(self: *const AppSession, idle_ticks: u32) u8 {
-        return computeScrollbarAlphaFor(idle_ticks, self.scrollbarVisibleTicks(), self.scrollbarFadeTicks());
-    }
-
-    /// 마우스가 스크롤바 영역에 있는지 갱신(hoverCursor가 매 이동 호출). 바뀌면 redraw 표시 — hover 강조가
-    /// 곧바로 나타나거나 사라지게. fade 리셋(idle_ticks=0)은 updateScrollbarFade가 hover를 보고 한다.
-    fn setScrollbarHovered(self: *AppSession, on: bool) void {
-        if (self.scrollbar_hovered == on) return;
-        self.scrollbar_hovered = on;
-        self.metal_dirty = true;
-    }
-
-    /// 매 tick 스크롤바 fade를 갱신한다(updateCursorBlink와 같은 frame-loop tick). 한 곳에서 활성 surface의 view_offset
-    /// 변화를 감지해(스크롤·드래그·page-key·surface 전환) idle_ticks를 0(full)으로 리셋하고, hover/드래그면 full로
-    /// 핀, 그 외엔 매 tick 늘려 fade 창에서 alpha가 바뀔 때만 metal_dirty를 세운다(idle 정착 후엔 정적 — 비용 0).
-    fn updateScrollbarFade(self: *AppSession) void {
-        if (!self.surface_initialized) return;
-        const visible_ticks = self.scrollbarVisibleTicks();
-        const fade_done_ticks = self.scrollbarFadeCompleteTicks();
-        // 활성 탭의 모든 pane을 순회해 각자 fade를 갱신한다(per-pane — pane 목록만 보면 되고 rect/layout 불요라
-        // 매 tick 싸다). 활성 pane은 hover/드래그면 full로 핀. 한 pane이라도 alpha가 바뀌면 metal_dirty.
-        const active_pane = pane_ops.activePane(self);
-        for (tab_ops.activeTab(self).panes.items) |pane| {
-            const psurface = pane.activeTerm().surface;
-            // scrollbackLen(리더 core.write가 증가)·viewOffset 스칼라를 락 아래 한 번에 읽는다
-            // (docs/io-render-threading.md PR3). 비-const 메서드라 락 가능.
-            psurface.lockCore(self.io);
-            const scroll_state = scrollStateOf(psurface);
-            psurface.unlockCore(self.io);
-            const sb_len = scroll_state.scrollback_len;
-            const vo = scroll_state.view_offset;
-            if (sb_len == 0) {
-                // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머 리셋(0→nonzero 전환).
-                pane.scrollbar_idle_ticks = 0;
-                pane.scrollbar_last_view_offset = 0;
-                continue;
-            }
-            if (vo != pane.scrollbar_last_view_offset) { // 이 pane 스크롤 활동 → full로 복귀
-                pane.scrollbar_last_view_offset = vo;
-                if (pane.scrollbar_idle_ticks != 0) self.metal_dirty = true;
-                pane.scrollbar_idle_ticks = 0;
-                continue;
-            }
-            if (pane == active_pane and (self.scrollbar_hovered or self.pointerGestureIs(.scrollbar))) { // 활성 pane 상호작용 — full 핀
-                if (pane.scrollbar_idle_ticks != 0) {
-                    pane.scrollbar_idle_ticks = 0;
-                    self.metal_dirty = true;
-                }
-                continue;
-            }
-            if (pane.scrollbar_idle_ticks >= fade_done_ticks) continue; // faint 정착 — 정적
-            pane.scrollbar_idle_ticks += 1;
-            if (pane.scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
-        }
-        // 사이드바 스크롤바 fade(단일 트랙 — pane과 동형). 스크롤 활동은 offset 변화로 감지(휠/clamp가 바꾼다).
-        // 스크롤 불필요(max 0)면 다음 등장이 full로 시작하게 타이머·last를 리셋한다.
-        if (sidebar_ops.sidebarMaxScroll(self) == 0) {
-            self.sidebar_scrollbar_idle_ticks = fade_done_ticks; // faint 정착(안 보임)
-            self.sidebar_scrollbar_last_offset = self.sidebar_scroll_offset_px;
-        } else if (self.sidebar_scroll_offset_px != self.sidebar_scrollbar_last_offset) { // 스크롤 활동 → full 복귀
-            self.sidebar_scrollbar_last_offset = self.sidebar_scroll_offset_px;
-            if (self.sidebar_scrollbar_idle_ticks != 0) self.metal_dirty = true;
-            self.sidebar_scrollbar_idle_ticks = 0;
-        } else if (self.sidebar_scrollbar_idle_ticks < fade_done_ticks) {
-            self.sidebar_scrollbar_idle_ticks += 1;
-            if (self.sidebar_scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
-        }
-        if (dock_ops.dockListScrollbarGeometry(self) == null) {
-            self.dock_list_scrollbar_idle_ticks = fade_done_ticks;
-            self.dock_list_scrollbar_last_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
-        } else if (file_panel_ops.fileTreeEffectiveScrollPx(self) != self.dock_list_scrollbar_last_offset_px) {
-            self.dock_list_scrollbar_last_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
-            if (self.dock_list_scrollbar_idle_ticks != 0) self.metal_dirty = true;
-            self.dock_list_scrollbar_idle_ticks = 0;
-        } else if (self.dock_list_scrollbar_hovered or self.scrollbarCaptureActive()) {
-            if (self.dock_list_scrollbar_idle_ticks != 0) self.metal_dirty = true;
-            self.dock_list_scrollbar_idle_ticks = 0;
-        } else if (self.dock_list_scrollbar_idle_ticks < fade_done_ticks) {
-            self.dock_list_scrollbar_idle_ticks += 1;
-            if (self.dock_list_scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true;
-        }
-    }
-
-    /// down 좌표가 활성 pane 스크롤바(thumb 또는 트랙)에 있으면 잡은 grab offset(y_px - thumb_top, px)을 돌려준다.
-    /// thumb 위면 그 offset(드래그가 thumb 내 상대 위치를 유지), thumb 밖 트랙이면 thumb_h/2(클릭 지점에 thumb
-    /// 중앙을 맞춰 점프). 스크롤백 없음·메트릭 0·영역 밖이면 null. x 영역은 thumb 폭 + 좌측 4px 여유(잡기 쉽게),
-    /// y는 트랙(pane) 전체. appendScrollbar와 같은 bar_w(cell_width*0.32, 최소 5)·우측 2px 안쪽 배치를 쓴다.
-    /// 스크롤바 thumb 계산에 쓰는 스크롤 상태. **화면 소유자를 묻지 않는다** — `renderSnapshot()`이 로컬은 core에서,
-    /// host-backed는 host가 wire로 보낸 값에서 같은 필드를 채우기 때문이다(중립 DTO). 예전엔 호출처들이
-    /// `core.scrollbackLen()`을 직접 읽어 원격에선 항상 0이었고(placeholder), 그래서 스크롤백이 쌓여도 스크롤바가
-    /// 뜨지 않았다. **호출자가 lockCore를 보유해야 한다**(snapshot이 소스 메모리를 alias — 스칼라만 읽고 복사).
-    pub fn scrollStateOf(surface: *maru.session.Surface) struct { scrollback_len: usize, view_offset: usize } {
-        const snap = surface.renderSnapshot();
-        return .{ .scrollback_len = snap.scrollback_len, .view_offset = snap.view_offset };
-    }
-
-    fn scrollbarGrabAt(self: *const AppSession, x_px: f64, y_px: f64) ?f32 {
-        const rect = self.active_pane_rect;
-        if (rect.w == 0 or self.cell_width_px == 0) return null;
-        // 호출자(hoverCursor·mouse)가 락 밖에서 부르는 hit-test라 **여기서 잡는다** — `scrollStateOf`의 계약이
-        // "호출자가 lockCore 보유"다. 옛 주석은 "스칼라 두 개뿐이라 괜찮다"고 적었지만 그 판단은 계약이 할 몫이고,
-        // 원격 backing이면 이 락이 곧 RemoteScreen mutex라 delta-apply와의 직렬화가 실제로 필요하다.
-        const grab_surface = @constCast(self).activeSurface();
-        const scroll_state = blk: {
-            grab_surface.lockCore(self.io);
-            defer grab_surface.unlockCore(self.io);
-            break :blk scrollStateOf(grab_surface);
-        };
-        const geom = scrollbarThumbGeom(scroll_state.scrollback_len, scroll_state.view_offset, self.cell_height_px, rect.h) orelse return null;
-        // thumb가 트랙을 꽉 채워 스크롤 여지가 없으면(track<=0, degenerate 작은 pane) 잡지 않는다 — 안 그러면
-        // 클릭을 캡처하고도 dragScrollbarTo가 무동작이라 선택도 스크롤도 안 되는 dead zone이 된다.
-        if (geom.h >= @as(f32, @floatFromInt(rect.h))) return null;
-        // hit-test는 base 폭(비-emphasized) + 4px 여유 — hover로 굵어진 폭이 아니라 안정된 base로 잡는다.
-        const bar_w: f64 = scrollbarBarWidthPx(self.cell_width_px, false);
-        const right: f64 = @floatFromInt(rect.x + rect.w);
-        const zone_left: f64 = right - bar_w - 2.0 - 4.0; // thumb 좌단(우측 2px 안쪽) - 4px grab 여유
-        if (x_px < zone_left or x_px > right) return null;
-        const top: f64 = @floatFromInt(rect.y);
-        const bottom: f64 = top + @as(f64, @floatFromInt(rect.h));
-        if (y_px < top or y_px > bottom) return null;
-        const thumb_top: f64 = top + @as(f64, geom.y);
-        const grab: f64 = y_px - thumb_top;
-        if (grab >= 0 and grab <= @as(f64, geom.h)) return @floatCast(grab); // thumb 위 — 상대 위치 유지
-        return geom.h * 0.5; // 트랙 — thumb 중앙을 클릭에 맞춤(점프)
-    }
-
-    /// 드래그/트랙-점프 중 마우스 y로 view_offset을 절대 설정한다. new_thumb_top(view 내) = (y_px - rect.y) - grab을
-    /// [0, track]로 clamp(track = view_h - thumb_h), t = 1 - thumb_top/track(0=바닥, 1=꼭대기), target =
-    /// scrollbarTargetOffset(t, sb_count). 현재 viewOffset과의 차이만큼 scrollViewport(절대 위치 → 상대 delta).
-    fn dragScrollbarTo(self: *AppSession, y_px: f64) void {
-        const grab: f64 = switch (self.pointer_gesture_owner) {
-            .scrollbar => |drag| drag.grab,
-            else => return,
-        };
-        const rect = self.active_pane_rect;
-        if (rect.h == 0 or self.cell_height_px == 0) return;
-        // 코어 읽기(scrollbackLen·viewOffset)는 락 아래(§9.1). scrollViewport mutate는 **락 밖에서** reader에 위임
-        // (full (a)) — 락을 잡은 채 enqueueCoreCommand하면 non-interactive 폴백이 같은 core_mutex를 재취득해 재진입
-        // (panic/deadlock). 그래서 읽기만 락에 가두고, enqueue는 락 해제 후 한다(다른 위임 사이트와 같은 규율).
-        const surface = self.activeSurface();
-        const snap = blk: {
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            break :blk scrollStateOf(surface);
-        };
-        const total_sb = snap.scrollback_len;
-        if (total_sb == 0) return;
-        // thumb_h는 view_offset과 무관(sb_count·ch·view_h만) — 현재 offset으로 구해도 .h는 안정적.
-        const geom = scrollbarThumbGeom(total_sb, snap.view_offset, self.cell_height_px, rect.h) orelse return;
-        const view_px: f64 = @floatFromInt(rect.h);
-        const track: f64 = view_px - @as(f64, geom.h); // thumb_top 가동 범위
-        if (track <= 0) return; // thumb가 트랙을 꽉 채움 — 스크롤 여지 없음
-        var thumb_top: f64 = (y_px - @as(f64, @floatFromInt(rect.y))) - grab;
-        if (thumb_top < 0) thumb_top = 0;
-        if (thumb_top > track) thumb_top = track;
-        const t: f64 = 1.0 - thumb_top / track; // 0=바닥(offset 0), 1=꼭대기(offset sb_count)
-        const target = scrollbarTargetOffset(t, total_sb);
-        // 절대 목표를 reader에 위임(scroll_to_offset) — reader가 적용 시점의 fresh view_offset에서 delta 계산
-        // (메인이 delta를 미리 빼면 연속 드래그가 옛 base로 double-count돼 어긋남).
-        if (target != snap.view_offset) {
-            self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_offset = target }, self.io) catch {};
-            self.metal_dirty = true;
-        }
-    }
 
     /// 시각 벨(bell.visual): flash 중(bell_flash_ticks>0)이면 화면 전체(backing px)를 전경색 반투명 GpuQuad로 덮고
     /// 남은 tick 비율로 alpha를 정해 페이드한다. over 패스(layer 1)라 셀·chrome 위에 뜬다. 매 frame 1 감소 —
@@ -24038,92 +23344,8 @@ pub const AppSession = struct {
     /// **같은 도메인**이어야 thumb이 트랙 끝에 닿는 순간 스크롤도 끝난다.
     pub const SidebarScrollExtent = struct { rect: maru.session.SplitRect, content_h_px: u32, max_offset_px: u32 };
 
-    /// 팔레트 스크롤바를 **공용 발행 경로**로 낸다(SV5b). 컴포넌트가 자기 막대를 그리는 대신 host가
-    /// `tree.scrollArea`를 선언하고 `ui_paint`+`chrome_draw_lowering`이 quad로 내린다 — 도크·탐색기·
-    /// 소스 컨트롤·사이드바와 같은 막대가 된다.
-    ///
-    /// **offset은 저장된 값이 아니다.** 팔레트는 창을 selected에서 매번 재파생하므로 그 파생값을 픽셀로
-    /// 환산해 쓴다(`win_start × ch`). 그래서 이 슬라이스는 스크롤 상태를 만들지 않는다.
-    /// 세팅 폼 목록 우측 막대(SV5c). 팔레트와 **같은 발행 저장소**를 쓴다 — 오버레이는 한 번에 하나만
-    /// 열리므로 둘이 동시에 살아 있을 일이 없다.
-    ///
-    /// 팔레트와 다른 점은 뷰포트를 **컴포넌트가 준다**(`settings.scrollView`)는 것이다. 세팅은 폼 폭이
-    /// nav·control·↺ 여백에 얽혀 있어 host가 다시 계산하면 두 벌이 갈린다.
-    fn appendSettingsScrollbar(self: *AppSession, view: chrome.components.settings.ScrollView) void {
-        const ch = self.cell_height_px;
-        if (ch == 0 or view.visible == 0 or view.total <= view.visible) return;
-        self.appendOverlayScrollbar(view.viewport, .{
-            .offset_px = @as(u32, @intCast(view.win_start)) * ch,
-            .content_h_px = @as(u32, @intCast(view.total)) * ch,
-        });
-    }
-
     /// 오버레이 스크롤바 발행의 공통 부분(SV5b/SV5c) — 팔레트·세팅이 뷰포트와 스크롤 양만 다르다.
-    const OverlayScrollExtent = struct { offset_px: u32, content_h_px: u32 };
-
-    fn appendOverlayScrollbar(self: *AppSession, viewport: chrome.draw.Rect, extent: OverlayScrollExtent) void {
-        if (viewport.w == 0 or viewport.h == 0) return;
-
-        var entries: [overlay_scroll_max_entries]chrome.ui.tree.RectEntry = undefined;
-        var items: [overlay_scroll_max_entries]chrome.ui.layout.Item = undefined;
-        var flex: [overlay_scroll_max_entries]chrome.ui.layout.FlexScratch = undefined;
-        var child_rects: [overlay_scroll_max_entries]chrome.ui.layout.UiRect = undefined;
-
-        const metrics: chrome.ui.scroll_area.ScrollbarMetrics = .{
-            .width_px = overlay_scrollbar_width_px,
-            .inset_x_px = overlay_scrollbar_inset_px,
-            .min_thumb_px = overlay_scrollbar_min_thumb_px,
-        };
-        const node = chrome.ui.tree.scrollArea(.{
-            .id = overlay_scroll_ids.area,
-            .scroll = .{
-                .offset_px = extent.offset_px,
-                .content_h_px = extent.content_h_px,
-                .gutter_px = @floatFromInt(metrics.width_px + metrics.inset_x_px),
-                .metrics = metrics,
-                // thumb을 누른 것 자체가 스크롤 의사라 threshold는 0이다. track도 같은 payload를 선언해
-                // 눌러 점프한 뒤 손을 떼지 않고 이어 끌 수 있다(도크·사이드바와 같은 규율).
-                .drag = .{ .payload = dock_list_scroll_drag_payload, .axis = .vertical, .threshold_px = 0 },
-                .track = .{ .id = overlay_scroll_ids.track, .action = .{ .id = overlay_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
-                .thumb = .{ .id = overlay_scroll_ids.thumb, .action = .{ .id = overlay_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2, overlay_scrollbar_width_px / 2 } } },
-            },
-        }, &.{});
-
-        const built = chrome.ui.tree.build(node, .{
-            .root_size = .{ .width = @floatFromInt(viewport.w), .height = @floatFromInt(viewport.h) },
-            .max_entries = overlay_scroll_max_entries,
-            .max_depth = 2,
-        }, .{
-            .entries = &entries,
-            .items = &items,
-            .flex_scratch = &flex,
-            .child_rects = &child_rects,
-        }) catch return;
-
-        self.overlay_scroll_generation +|= 1;
-        for (built.entries, 0..) |entry, i| {
-            var moved = entry;
-            moved.rect.x += @floatFromInt(viewport.x);
-            moved.rect.y += @floatFromInt(viewport.y);
-            if (moved.effective_clip) |*clip| {
-                clip.x += @floatFromInt(viewport.x);
-                clip.y += @floatFromInt(viewport.y);
-            }
-            self.overlay_scroll_entries[i] = moved;
-        }
-        self.overlay_scroll_entry_count = built.entries.len;
-
-        const snapshot: chrome.ui.tree.UiRectTree = .{
-            .entries = self.overlay_scroll_entries[0..self.overlay_scroll_entry_count],
-            .generation = self.overlay_scroll_generation,
-        };
-        var ops: [overlay_scroll_max_entries]chrome.draw.Op = undefined;
-        const tokens = self.buildChromeTokens();
-        const draws = chrome.ui.paint.paint(snapshot, .{}, &tokens, .sidebar, .{ .ops = &ops }) catch return;
-        // over(3) — 모달 배경 quad(layer 1)와 같은 버킷이라 **발행 순서**가 z를 정한다. 이 함수를
-        // 오버레이 lowering **뒤에** 부르는 것이 그 규약이다(SV5b에서 앞에 뒀다가 배경에 덮였다).
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 3);
-    }
+    pub const OverlayScrollExtent = struct { offset_px: u32, content_h_px: u32 };
 
     /// 팔레트 선택이 창 밖이면 **최소로** 당긴다. 창 안이면 움직이지 않는다 — 휠·드래그로 굴린 자리를
     /// 존중하는 것이 offset을 저장하게 된 이유다(SV5d).
@@ -24153,181 +23375,6 @@ pub const AppSession = struct {
             offset = bottom - viewport_h;
         }
         self.palette_scroll.offset_y_px = @min(offset, max_offset);
-    }
-
-    /// 오버레이 위 휠(SV5d). 팔레트·세팅은 원래 휠이 **없었다** — 목록이 열려 있는데 뒤 터미널이 굴러
-    /// 가는 것이 위화감이라, 축이 있으면 델타가 0이어도 소비한다(사이드바 휠과 같은 규율).
-    fn scrollOverlayByLines(self: *AppSession, lines: i64) bool {
-        if (self.chrome_host.palette.open) {
-            const ch = @max(self.cell_height_px, 1);
-            const total = self.palette_filtered.items.len;
-            const visible = @min(total, chrome.components.palette.max_visible);
-            if (total <= visible or visible == 0) return true; // 안 넘침 — 소비만
-            const max_offset: u32 = @intCast((total - visible) * ch);
-            if (self.palette_scroll.scrollByPx(-lines * @as(i64, ch), max_offset)) self.metal_dirty = true;
-            return true;
-        }
-        if (self.chrome_host.settings.open) {
-            // 상한은 **직전 프레임이 캐시한 창**에서 얻는다 — 여기서 labels·fields를 다시 빌드하면 휠
-            // 한 틱마다 arena 작업이 붙는다. 한 프레임 늦은 상한은 다음 layout이 clamp하므로 안전하다.
-            const sv = self.settings_scroll_view orelse return true; // 안 넘침 — 소비만
-            const ch = @max(self.cell_height_px, 1);
-            const max_offset: u32 = @intCast((sv.total -| sv.visible) * ch);
-            if (self.chrome_host.settings.scroll.scrollByPx(-lines * @as(i64, ch), max_offset)) self.metal_dirty = true;
-            return true;
-        }
-        return false;
-    }
-
-    fn overlayScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
-        var track: ?chrome.ui.layout.UiRect = null;
-        var thumb: ?chrome.ui.layout.UiRect = null;
-        for (self.overlay_scroll_entries[0..self.overlay_scroll_entry_count]) |entry| {
-            if (entry.id == overlay_scroll_ids.track) track = entry.rect;
-            if (entry.id == overlay_scroll_ids.thumb) thumb = entry.rect;
-        }
-        const t = track orelse return null;
-        const h = thumb orelse return null;
-        return .{
-            .track_x = t.x,
-            .track_y = t.y,
-            .track_w = t.width,
-            .track_h = t.height,
-            .thumb_y = h.y,
-            .thumb_h = h.height,
-            .max_offset_px = self.overlayMaxOffsetPx(),
-        };
-    }
-
-    /// 지금 열린 오버레이의 스크롤 상한(px). 발행된 막대와 **같은 시점의 값**이라야 드래그가 손가락과 안 어긋난다.
-    fn overlayMaxOffsetPx(self: *const AppSession) u32 {
-        const ch = @max(self.cell_height_px, 1);
-        if (self.chrome_host.palette.open) {
-            const total = self.palette_filtered.items.len;
-            const visible = @min(total, chrome.components.palette.max_visible);
-            return @intCast((total -| visible) * ch);
-        }
-        if (self.settings_scroll_view) |sv| return @intCast((sv.total -| sv.visible) * ch);
-        return 0;
-    }
-
-    /// 드래그가 낸 offset을 **지금 열린 오버레이**에 적용한다. 소유자가 갈리면 보이지 않는 목록이 스크롤된다.
-    fn setOverlayScrollOffsetPx(self: *AppSession, offset_px: u32) void {
-        const clamped = @min(offset_px, self.overlayMaxOffsetPx());
-        if (self.chrome_host.palette.open) {
-            if (clamped == self.palette_scroll.offset_y_px) return;
-            self.palette_scroll.offset_y_px = clamped;
-        } else if (self.chrome_host.settings.open) {
-            if (clamped == self.chrome_host.settings.scroll.offset_y_px) return;
-            self.chrome_host.settings.scroll.offset_y_px = clamped;
-        } else return;
-        self.metal_dirty = true;
-    }
-
-    /// 오버레이 스크롤바를 잡는다(SV5d). 도크·사이드바와 **같은 타입**(`scroll_area.Drag`)을 쓰고 태그만 다르다.
-    fn beginOverlayScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
-        const geometry = self.overlayScrollbarGeometry() orelse return false;
-        if (!geometry.trackContains(x_px, y_px)) return false;
-        if (self.dock_list_scroll_drag.begin(geometry, x_px, y_px)) |jumped| self.setOverlayScrollOffsetPx(jumped);
-        const snapshot: chrome.ui.tree.UiRectTree = .{
-            .entries = self.overlay_scroll_entries[0..self.overlay_scroll_entry_count],
-            .generation = self.overlay_scroll_generation,
-        };
-        if (snapshot.entries.len == 0) return false;
-        _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
-            .phase = .down,
-            .x_px = x_px,
-            .y_px = y_px,
-            .timestamp_ns = 0,
-            .generation = snapshot.generation,
-        }) catch return false;
-        if (self.scrollbar_interaction.capture == null) {
-            self.dock_list_scroll_drag.end();
-            return false;
-        }
-        self.pointer_gesture_owner = .none;
-        self.scrollbar_drag_target = .overlay;
-        self.metal_dirty = true;
-        return true;
-    }
-
-    /// capture가 살아 있는 동안의 move/up(오버레이). 사이드바 경로와 같은 형태 — carry key는 고정값이고
-    /// "같은 막대를 계속 잡고 있는가"는 기하 비교가 판정한다(오버레이는 한 번에 하나만 열린다).
-    fn routeOverlayScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
-        const snapshot: chrome.ui.tree.UiRectTree = .{
-            .entries = self.overlay_scroll_entries[0..self.overlay_scroll_entry_count],
-            .generation = self.overlay_scroll_generation,
-        };
-        if (snapshot.entries.len == 0) {
-            self.endScrollbarCapture();
-            return true;
-        }
-        const live = self.overlayScrollbarGeometry() orelse {
-            self.endScrollbarCapture();
-            return true;
-        };
-        if (!file_panel_ops.fileTreeScrollbarSameSnapshot(self.dock_list_scroll_drag.geometry, live)) {
-            self.endScrollbarCapture();
-            return true;
-        }
-        const key = chrome.ui.interaction.GestureCompatibility{
-            .kind = dock_list_scroll_drag_payload,
-            .enabled = true,
-            .owner_epoch = 0,
-            .domain_identity = 0,
-        };
-        _ = chrome.ui.interaction.reconcileCarryingCapture(&self.scrollbar_interaction, snapshot, key, key) catch {
-            self.endScrollbarCapture();
-            return true;
-        };
-        if (self.scrollbar_interaction.capture == null) {
-            self.endScrollbarCapture();
-            return true;
-        }
-        const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
-            .phase = if (kind == 2) .move else .up,
-            .x_px = @as(f64, self.dock_list_scroll_drag.geometry.track_x) + @as(f64, self.dock_list_scroll_drag.geometry.track_w) / 2,
-            .y_px = y_px,
-            .timestamp_ns = 0,
-            .button = .left,
-            .generation = snapshot.generation,
-        }) catch {
-            self.endScrollbarCapture();
-            return true;
-        };
-        if (dispatched.drag) |event| switch (event) {
-            .began, .moved => |update| {
-                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
-                self.scrollbar_move_events +|= 1;
-            },
-            .dropped => |update| {
-                self.dock_list_scroll_drag.absorb(update.x_px, update.y_px);
-                self.applyPendingScrollbarScroll();
-                self.endScrollbarCapture();
-            },
-            .cancelled => self.endScrollbarCapture(),
-        };
-        if (kind == 3) self.endScrollbarCapture();
-        return true;
-    }
-
-    fn appendPaletteScrollbar(self: *AppSession) void {
-        if (!self.chrome_host.palette.open) return;
-        const lay = chrome.components.overlay_input.panelLayout(self.buildChromeProps()) orelse return;
-        const total = self.palette_filtered.items.len;
-        const visible = @min(total, chrome.components.palette.max_visible);
-        if (total <= visible or visible == 0) return; // 안 넘침 — 막대 없음
-        const max_offset: u32 = @intCast((total - visible) * lay.ch);
-        // 목록 영역은 프롬프트 줄(row0) **아래**다 — 그 줄은 스크롤에서 고정이므로 트랙도 그 아래에서 시작한다.
-        self.appendOverlayScrollbar(.{
-            .x = lay.x,
-            .y = lay.y + @as(i32, @intCast(lay.ch)),
-            .w = lay.panel_cols * lay.cw,
-            .h = @as(u32, @intCast(visible)) * lay.ch,
-        }, .{
-            .offset_px = @min(self.palette_scroll.offset_y_px, max_offset),
-            .content_h_px = @as(u32, @intCast(total)) * lay.ch,
-        });
     }
 
     /// 이름 앞에 running이면 "● "(1칸 정적 플래그 + 공백)를 붙인 owned 라벨을 만든다(아니면 base 복제). 탭바 pane 라벨·Term
@@ -25016,7 +24063,7 @@ pub const AppSession = struct {
 
     /// 포인터가 창 바닥 상태표시줄 위인가. **렌더 rect와 같은 산술**을 쓴다(`appendStatusBarBackground`와 한 쌍) —
     /// 갈리면 보이는 자리와 눌리는 자리가 어긋난다. 상태바는 창 전폭이라 사이드바 아래 구간도 포함한다.
-    fn pointInStatusBar(self: *const AppSession, x_px: f64, y_px: f64) bool {
+    pub fn pointInStatusBar(self: *const AppSession, x_px: f64, y_px: f64) bool {
         const h = self.statusBarHeightPx();
         if (h == 0 or self.backing_width_px == 0) return false;
         const top: f64 = @floatFromInt(self.backing_height_px -| h);
@@ -25236,7 +24283,7 @@ pub const AppSession = struct {
     /// 전역 모달이 terminal-only 중심으로 치우치지 않게 한다. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
     /// 셀/화면 메트릭만(토큰·shape 없이) — 휠/키 스크롤처럼 metrics만 필요한 경로가 buildChromeProps의 토큰 빌드를
     /// 피하게 한다. buildChromeProps도 이걸 재사용해 metrics를 단일 출처로 둔다.
-    fn buildCellMetrics(self: *const AppSession) chrome.props.CellMetrics {
+    pub fn buildCellMetrics(self: *const AppSession) chrome.props.CellMetrics {
         const workspace = dock_ops.dockGeometry(self).workspace;
         return .{
             .cell_width_px = self.cell_width_px,
@@ -36391,7 +35438,7 @@ test "① host-backed 스크롤은 observation 미가용(재접속 직후)에도
         // scrollback은 관측이 필요 없다 → 미가용이어도 core `.scroll`을 enqueue하고 metal_dirty를 세워야 한다.
         // pre-fix는 여기서 hard-return이라 metal_dirty가 false로 남아 red. post-fix는 alt 판정만 스킵하고 fall-through해 green.
         session.metal_dirty = false;
-        session.scrollSurfaceLines(term.surface, 3);
+        scroll_ops.scrollSurfaceLines(session, term.surface, 3);
         try std.testing.expect(session.metal_dirty);
     } else {
         return error.SkipZigTest;
@@ -37430,11 +36477,11 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
     try tab_surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
     try std.testing.expectEqual(@as(usize, 4), tab_surface.core.scrollbackLen());
 
-    session.scrollPage(1); // 위로 한 화면 = rows-1 = 4줄
+    scroll_ops.scrollPage(&session, 1); // 위로 한 화면 = rows-1 = 4줄
     try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset);
     try std.testing.expect(session.metal_dirty);
 
-    session.scrollPage(-1); // 아래로 한 화면 -> 바닥
+    scroll_ops.scrollPage(&session, -1); // 아래로 한 화면 -> 바닥
     try std.testing.expectEqual(@as(usize, 0), tab_surface.core.view_offset);
 }
 
@@ -37572,9 +36619,9 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.mouse(2, 0.0, -5.0, 0, 0); // col 0, grid 위 밖
     try std.testing.expectEqual(@as(i8, 1), session.drag_autoscroll);
 
-    session.applyDragAutoscroll(); // tick 1: 한 줄 위로 + 선택이 뷰 최상단으로 확장
+    scroll_ops.applyDragAutoscroll(&session); // tick 1: 한 줄 위로 + 선택이 뷰 최상단으로 확장
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);
-    session.applyDragAutoscroll(); // tick 2: 맨 위까지
+    scroll_ops.applyDragAutoscroll(&session); // tick 2: 맨 위까지
     try std.testing.expectEqual(@as(usize, 2), core.view_offset);
     const text = (try core.extractSelection(std.testing.allocator)).?;
     defer std.testing.allocator.free(text);
@@ -37629,7 +36676,7 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     core.selectionStart(1, 0); // 화면 행1에서 드래그 시작(autoscroll이 선택을 위로 확장)
 
     var calls: usize = 0;
-    while (calls < 8) : (calls += 1) session.applyDragAutoscroll();
+    while (calls < 8) : (calls += 1) scroll_ops.applyDragAutoscroll(&session);
     try std.testing.expect(core.view_offset >= 1); // 스크롤은 일어난다(게이트가 영영 막지 않음)
     try std.testing.expect(core.view_offset <= 2); // 그러나 8콜에 8줄이 아니다 — 고프레임 과속 회귀 방어
 }
@@ -37643,8 +36690,8 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(config_mod.theme.render_frame_rate_default, session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 30), session.ticksForMs(500)); // 500ms@60Hz
     try std.testing.expectEqual(@as(u32, 60), session.syncTimeoutTicks()); // 1s@60Hz
-    try std.testing.expectEqual(@as(u32, 100), session.scrollbarVisibleTicks()); // 1.667s@60Hz
-    try std.testing.expectEqual(@as(u32, 27), session.scrollbarFadeTicks()); // 450ms@60Hz
+    try std.testing.expectEqual(@as(u32, 100), scroll_ops.scrollbarVisibleTicks(&session)); // 1.667s@60Hz
+    try std.testing.expectEqual(@as(u32, 27), scroll_ops.scrollbarFadeTicks(&session)); // 450ms@60Hz
     try std.testing.expectEqual(@as(u32, 15), session.bellFlashTotalTicks()); // 250ms@60Hz
     try std.testing.expectEqual(@as(u32, 17), session.msPerTick()); // round(1000/60) — 드래그 자동 스크롤 누적용
 
@@ -37657,8 +36704,8 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 30), session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 15), session.ticksForMs(500));
     try std.testing.expectEqual(@as(u32, 30), session.syncTimeoutTicks());
-    try std.testing.expectEqual(@as(u32, 50), session.scrollbarVisibleTicks());
-    try std.testing.expectEqual(@as(u32, 14), session.scrollbarFadeTicks());
+    try std.testing.expectEqual(@as(u32, 50), scroll_ops.scrollbarVisibleTicks(&session));
+    try std.testing.expectEqual(@as(u32, 14), scroll_ops.scrollbarFadeTicks(&session));
     try std.testing.expectEqual(@as(u32, 8), session.bellFlashTotalTicks());
     try std.testing.expectEqual(@as(u32, 33), session.msPerTick()); // round(1000/30) = drag_autoscroll_step_ms
 
@@ -37669,8 +36716,8 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 120), session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 60), session.ticksForMs(500));
     try std.testing.expectEqual(@as(u32, 120), session.syncTimeoutTicks());
-    try std.testing.expectEqual(@as(u32, 200), session.scrollbarVisibleTicks());
-    try std.testing.expectEqual(@as(u32, 54), session.scrollbarFadeTicks());
+    try std.testing.expectEqual(@as(u32, 200), scroll_ops.scrollbarVisibleTicks(&session));
+    try std.testing.expectEqual(@as(u32, 54), scroll_ops.scrollbarFadeTicks(&session));
     try std.testing.expectEqual(@as(u32, 30), session.bellFlashTotalTicks());
     try std.testing.expectEqual(@as(u32, 8), session.msPerTick()); // round(1000/120)
 
@@ -40246,7 +39293,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
 
     // 9줄 출력 → 5행 화면 위로 4줄 스크롤백
     try tab_surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
-    session.scrollPage(1); // 위로 한 화면
+    scroll_ops.scrollPage(&session, 1); // 위로 한 화면
     try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset);
 
     // (a) 터미널 포커스: imeBegin이 바닥으로 스냅한다(조합도 타이핑 — preedit이 보이게)
@@ -40255,7 +39302,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.imeEnd(null); // 실제 keyDown처럼 트랜잭션을 닫아 terminal pin을 해제한다.
 
     // 다시 위로 스크롤
-    session.scrollPage(1);
+    scroll_ops.scrollPage(&session, 1);
     try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset);
 
     // (b) find 포커스: imeBegin은 뒤 터미널을 건드리지 않는다(#4 — 조합은 find 입력칸으로 간다)
@@ -41511,7 +40558,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     // ① wheel — 트리 위에서 굴리면 스크롤 상태가 움직인다. 이 셋은 서로 다른 입구지만 **같은
     //    상태**를 움직여야 한다. 각자 자기 스크롤 위치를 들면 thumb과 내용이 어긋난다.
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
-    session.scrollWheel(-5, 0, false, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, -5, 0, false, inside_x, inside_y);
     const after_wheel = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expect(after_wheel > 0);
 
@@ -41524,7 +40571,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     ));
     const after_track = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expect(after_track > after_wheel);
-    session.endScrollbarCapture();
+    scroll_ops.endScrollbarCapture(session);
 
     // ③ **상태 공유** — 앞 두 입구가 올려놓은 값을 keyboard anchor가 이어받는가. 단조 증가만
     //    보면 각 입구가 자기 변수를 들고 있어도 통과한다(마지막에 쓴 쪽이 게터에 반영되므로).
@@ -41574,7 +40621,7 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
     if (geometry.max_offset_px == 0) return error.SkipZigTest;
 
     try std.testing.expect(dock_ops.beginDockListScrollbarGesture(session, geometry.track_x, geometry.thumb_y));
-    try std.testing.expect(session.scrollbarCaptureActive());
+    try std.testing.expect(scroll_ops.scrollbarCaptureActive(session));
 
     // 세대는 둘 다 그대로 두고 기하만 바꾼다. carry key는 host가 주입한 값의 동등성만 보므로
     // 이 축은 key로 표현되지 않는다 — down 시점 기하로 계산한 스크롤이 손가락과 어긋나기 전에
@@ -41586,8 +40633,8 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
     try std.testing.expectEqual(root_before, session.file_tree.rootGeneration());
     try std.testing.expectEqual(projection_before, session.file_tree_projection_generation);
 
-    _ = session.routeScrollbarCapture(2, geometry.track_y + geometry.track_h - 1);
-    try std.testing.expect(!session.scrollbarCaptureActive());
+    _ = scroll_ops.routeScrollbarCapture(session, 2, geometry.track_y + geometry.track_h - 1);
+    try std.testing.expect(!scroll_ops.scrollbarCaptureActive(session));
 }
 
 // 계약 §4.3의 coalescing은 "move를 모아 **tick이** 적용한다"이지 "up에서 한 번 적용한다"가 아니다.
@@ -41616,18 +40663,18 @@ test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적�
         top.track_x + top.track_w / 2,
         top.track_y + top.track_h - 1,
     ));
-    try std.testing.expect(session.scrollbarCaptureActive());
+    try std.testing.expect(scroll_ops.scrollbarCaptureActive(session));
     try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
 
     // thumb을 맨 위로 끈다. move는 좌표만 모으므로 이 시점엔 아직 그대로다.
-    _ = session.routeScrollbarCapture(2, top.track_y);
+    _ = scroll_ops.routeScrollbarCapture(session, 2, top.track_y);
     try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
 
     // **손을 떼지 않은 채**(up=kind 3을 보내지 않고) tick 한 번 — 여기서 적용돼야 한다. 이 fixture의 축은
     // "up 없이도 적용되는가"이지 capture 수명이 아니다(그쪽은 stale-snapshot cancel 테스트가 소유한다).
     _ = try session.tick();
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
-    session.endScrollbarCapture();
+    scroll_ops.endScrollbarCapture(session);
 }
 
 // SV2b — 탐색기 스크롤바가 공용 ScrollArea 경로로 넘어간 것을 고정한다. 옛 구조는 **별도 tree**
@@ -41758,22 +40805,22 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
         top.track_x + top.track_w / 2,
         top.track_y + top.track_h - 1,
     ));
-    try std.testing.expect(session.scrollbarCaptureActive());
+    try std.testing.expect(scroll_ops.scrollbarCaptureActive(session));
     try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
     // move는 좌표만 모으고 tick이 적용한다(계약 §4.3) — 옛 경로는 move가 곧 재투영이었다.
-    _ = session.routeScrollbarCapture(2, top.track_y);
-    session.applyPendingScrollbarScroll();
+    _ = scroll_ops.routeScrollbarCapture(session, 2, top.track_y);
+    scroll_ops.applyPendingScrollbarScroll(session);
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
-    _ = session.routeScrollbarCapture(2, std.math.nan(f64));
-    session.applyPendingScrollbarScroll();
+    _ = scroll_ops.routeScrollbarCapture(session, 2, std.math.nan(f64));
+    scroll_ops.applyPendingScrollbarScroll(session);
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     // Root authority is part of the drag snapshot. A late move after replacement must not commit.
     const restarted = dock_ops.dockListScrollbarGeometry(session).?;
     try std.testing.expect(dock_ops.beginDockListScrollbarGesture(session, restarted.track_x, restarted.thumb_y));
     try session.file_tree.replaceExplicitRoots(&.{"/different"});
-    _ = session.routeScrollbarCapture(2, top.track_y + top.track_h);
-    try std.testing.expect(!session.scrollbarCaptureActive());
+    _ = scroll_ops.routeScrollbarCapture(session, 2, top.track_y + top.track_h);
+    try std.testing.expect(!scroll_ops.scrollbarCaptureActive(session));
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     file_panel_ops.refreshDockListScrollbar(session);
@@ -42119,10 +41166,10 @@ test "file tree production hot paths emit bounded counter artifact" {
     session.file_tree_perf_counters = &counters;
     for (0..1000) |event| {
         const y = geometry.track_y + @as(f32, @floatFromInt(event % @as(usize, @intFromFloat(geometry.track_h))));
-        _ = session.routeScrollbarCapture(2, y);
-        session.applyPendingScrollbarScroll();
+        _ = scroll_ops.routeScrollbarCapture(session, 2, y);
+        scroll_ops.applyPendingScrollbarScroll(session);
     }
-    session.endScrollbarCapture();
+    scroll_ops.endScrollbarCapture(session);
 
     for (0..1000) |_| {
         // 스크롤바는 SV2b에서 layer 2(밴드와 같은 버킷)로 내려왔다 — drop과 append를 짝짓는 층도 그것이다.
@@ -44943,17 +43990,17 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
     session.chrome_host.palette.selected = 0;
     session.palette_scroll = .{};
     session.gpu_quads.clearRetainingCapacity();
-    session.appendPaletteScrollbar();
+    scroll_ops.appendPaletteScrollbar(session);
     try std.testing.expect(session.gpu_quads.items.len >= 2); // track + thumb
     for (session.gpu_quads.items) |q| try std.testing.expectEqual(@as(u32, 3), q.layer);
 
     // ② **휠이 선택과 무관하게** 목록을 움직인다(SV5d의 이유). 한 틱 = 한 줄.
-    try std.testing.expect(session.scrollOverlayByLines(-1));
+    try std.testing.expect(scroll_ops.scrollOverlayByLines(session, -1));
     try std.testing.expectEqual(ch, session.palette_scroll.offset_y_px);
     try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.selected); // 선택은 그대로
 
     // ③ 상한에서 멈춘다.
-    _ = session.scrollOverlayByLines(-10_000);
+    _ = scroll_ops.scrollOverlayByLines(session, -10_000);
     try std.testing.expectEqual(max_offset, session.palette_scroll.offset_y_px);
 
     // ④ 선택이 **창 안**이면 follow가 움직이지 않는다 — 굴린 자리를 존중한다.
@@ -44973,22 +44020,23 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
     session.chrome_host.palette.selected = 0;
     session.palette_scroll = .{};
     session.gpu_quads.clearRetainingCapacity();
-    session.appendPaletteScrollbar();
-    if (session.overlayScrollbarGeometry()) |geometry| {
-        try std.testing.expect(session.beginOverlayScrollbarGesture(
+    scroll_ops.appendPaletteScrollbar(session);
+    if (scroll_ops.overlayScrollbarGeometry(session)) |geometry| {
+        try std.testing.expect(scroll_ops.beginOverlayScrollbarGesture(
+            session,
             @as(f64, geometry.track_x) + @as(f64, geometry.track_w) / 2,
             @as(f64, geometry.thumb_y) + @as(f64, geometry.thumb_h) / 2,
         ));
         try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .overlay), session.scrollbar_drag_target);
-        _ = session.routeOverlayScrollbarCapture(2, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
-        session.applyPendingScrollbarScroll();
+        _ = scroll_ops.routeOverlayScrollbarCapture(session, 2, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+        scroll_ops.applyPendingScrollbarScroll(session);
         try std.testing.expectEqual(max_offset, session.palette_scroll.offset_y_px);
         // up이 capture와 태그를 함께 놓는다 — 태그가 남으면 다음 도크 드래그가 팔레트를 움직인다.
-        _ = session.routeOverlayScrollbarCapture(3, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
-        try std.testing.expect(!session.scrollbarCaptureActive());
+        _ = scroll_ops.routeOverlayScrollbarCapture(session, 3, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+        try std.testing.expect(!scroll_ops.scrollbarCaptureActive(session));
         try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .none), session.scrollbar_drag_target);
         // 트랙 **밖**을 누르면 안 잡힌다.
-        try std.testing.expect(!session.beginOverlayScrollbarGesture(0, @as(f64, geometry.track_y) + 1));
+        try std.testing.expect(!scroll_ops.beginOverlayScrollbarGesture(session, 0, @as(f64, geometry.track_y) + 1));
     }
 
     // ⑦ **휠로 굴린 자리가 다음 프레임에 되돌아가지 않는다.** 이것이 SV5d의 전제이고, 실제로 여기서
@@ -44997,7 +44045,7 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
     session.chrome_host.palette.selected = 0;
     session.followPaletteSelection(); // 현재 선택을 먼저 반영해 둔다(제품에서도 매 프레임 불린다)
     session.palette_scroll = .{};
-    _ = session.scrollOverlayByLines(-2);
+    _ = scroll_ops.scrollOverlayByLines(session, -2);
     const after_wheel = session.palette_scroll.offset_y_px;
     try std.testing.expect(after_wheel > 0);
     session.followPaletteSelection(); // 선택이 그대로다 → 굴린 자리를 지킨다
@@ -45010,9 +44058,9 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
     // ⑧ 팔레트가 닫히면 막대도 없고 휠도 안 먹는다 — 뒤 터미널이 굴러야 한다.
     session.chrome_host.palette.hide();
     session.gpu_quads.clearRetainingCapacity();
-    session.appendPaletteScrollbar();
+    scroll_ops.appendPaletteScrollbar(session);
     try std.testing.expectEqual(@as(usize, 0), session.gpu_quads.items.len);
-    if (!session.chrome_host.settings.open) try std.testing.expect(!session.scrollOverlayByLines(-1));
+    if (!session.chrome_host.settings.open) try std.testing.expect(!scroll_ops.scrollOverlayByLines(session, -1));
 }
 
 test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock list alone" {
@@ -45045,12 +44093,12 @@ test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock lis
         @as(f64, geometry.track_x) + @as(f64, geometry.track_w) / 2,
         @as(f64, geometry.thumb_y) + @as(f64, geometry.thumb_h) / 2,
     ));
-    try std.testing.expect(session.scrollbarCaptureActive());
+    try std.testing.expect(scroll_ops.scrollbarCaptureActive(session));
     try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .sidebar), session.scrollbar_drag_target);
 
     // ② 트랙 바닥까지 끌면 사이드바가 상한까지 간다. move는 흡수만 하고 tick이 소비한다(§4.3).
-    _ = session.routeScrollbarCapture(2, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
-    session.applyPendingScrollbarScroll();
+    _ = scroll_ops.routeScrollbarCapture(session, 2, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+    scroll_ops.applyPendingScrollbarScroll(session);
     try std.testing.expectEqual(sidebar_ops.sidebarMaxScroll(session), session.sidebar_scroll_offset_px);
     try std.testing.expect(session.sidebar_scroll_offset_px > 0);
 
@@ -45058,8 +44106,8 @@ test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock lis
     try std.testing.expectEqual(dock_before, session.file_tree_scroll.offset_y_px);
 
     // ④ up이 capture와 태그를 함께 놓는다 — 태그가 남으면 다음 도크 드래그가 사이드바를 움직인다.
-    _ = session.routeScrollbarCapture(3, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
-    try std.testing.expect(!session.scrollbarCaptureActive());
+    _ = scroll_ops.routeScrollbarCapture(session, 3, @as(f64, geometry.track_y) + @as(f64, geometry.track_h) - 1);
+    try std.testing.expect(!scroll_ops.scrollbarCaptureActive(session));
     try std.testing.expectEqual(@as(@TypeOf(session.scrollbar_drag_target), .none), session.scrollbar_drag_target);
 
     // ⑤ 트랙 **밖**을 누르면 스크롤바가 잡히지 않는다 — 카드 클릭이 스크롤로 새면 안 된다.
@@ -48665,7 +47713,7 @@ test "기본값 리셋 토스트는 아무 키로나 닫히고 그 뒤 키 입�
     // ④ 휠도 토스트를 닫는다(키·클릭과 같은 "아무 입력으로나 닫힘" 규율 — 옛날엔 휠만 막힌 채 안 닫혔다).
     session.showNotice("again2");
     try std.testing.expect(session.chrome_host.notice.open);
-    session.scrollWheel(3.0, 0.0, false, @floatFromInt(session.sidebar_width_px + 400), 150);
+    scroll_ops.scrollWheel(session, 3.0, 0.0, false, @floatFromInt(session.sidebar_width_px + 400), 150);
     try std.testing.expect(!session.chrome_host.notice.open); // 휠로도 닫힘
 }
 
@@ -49771,13 +48819,13 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     const left_body = pane_ops.paneTermRect(session, lr.items[0].rect);
     const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
     // 왼쪽(비활성) 본문 위에서 위로 스크롤 → 왼쪽 뷰포트만 위로(과거), 오른쪽 불변·활성 pane 불변.
-    session.scrollWheel(3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
+    scroll_ops.scrollWheel(session, 3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
     try std.testing.expect(left_surface.core.view_offset > 0);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane); // 포커스 안 바뀜
 
     // 오른쪽(활성) 본문 위에서 스크롤 → 오른쪽 뷰포트가 움직인다.
-    session.scrollWheel(3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
+    scroll_ops.scrollWheel(session, 3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
     try std.testing.expect(right_surface.core.view_offset > 0);
 }
 
@@ -49807,19 +48855,19 @@ test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1
     // 배수 1.0: 한 휠 틱(위로=과거)의 기준 스크롤량.
     session.appearance.scroll_multiplier = 1.0;
     session.wheel_accum = 0;
-    session.scrollWheel(3, 0, false, cx, cy);
+    scroll_ops.scrollWheel(session, 3, 0, false, cx, cy);
     const off1 = surface.core.view_offset;
     try std.testing.expect(off1 > 0);
 
     // 맨 아래로 복귀(아래 휠) + 누적 잔여 리셋 — 다음 측정을 동일 시작점에서.
     session.wheel_accum = 0;
-    session.scrollWheel(-50, 0, false, cx, cy);
+    scroll_ops.scrollWheel(session, -50, 0, false, cx, cy);
     try std.testing.expectEqual(@as(usize, 0), surface.core.view_offset);
 
     // 배수 3.0: 같은 휠 틱이 delta×3이라 더 많은 줄을 굴린다.
     session.appearance.scroll_multiplier = 3.0;
     session.wheel_accum = 0;
-    session.scrollWheel(3, 0, false, cx, cy);
+    scroll_ops.scrollWheel(session, 3, 0, false, cx, cy);
     try std.testing.expect(surface.core.view_offset > off1);
 }
 
@@ -49860,7 +48908,7 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
     session.dispatchAppAction(.select_all);
     try std.testing.expect(surface.core.selection_anchor != null);
     session.wheel_accum = 0;
-    session.scrollWheel(3, 0, false, cx, cy);
+    scroll_ops.scrollWheel(session, 3, 0, false, cx, cy);
     try std.testing.expect(surface.core.selection_anchor == null);
 
     // ③ 타이핑: 평범한 글자는 macOS가 IME 확정으로 커밋해 handleKeyEvent를 우회하므로 **그 경로**가 사이트다.
@@ -50384,13 +49432,13 @@ test "wheel routes by the surface under the cursor even when the active pane has
     const left_body = pane_ops.paneTermRect(session, lr.items[0].rect);
     const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
     // 비활성(왼쪽, 비트래킹) 본문 위 휠 → 왼쪽 스크롤백이 움직인다(활성 트래킹이 안 가로챔), 포커스 불변.
-    session.scrollWheel(3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
+    scroll_ops.scrollWheel(session, 3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
     try std.testing.expect(left_surface.core.view_offset > 0);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane); // 포커스 안 바뀜
 
     // 활성(오른쪽, 트래킹) 본문 위 휠 → 앱이 소비, 스크롤백 불변(커서 아래 surface 기준 판정).
-    session.scrollWheel(3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
+    scroll_ops.scrollWheel(session, 3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
 }
 
@@ -50428,11 +49476,11 @@ test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane unde
     const start = leaf.tab_scroll_cols;
     try std.testing.expect(start > 0);
     // 오른쪽 스와이프(delta_x>0) → 왼쪽 탭(scroll 감소).
-    session.scrollWheel(0, 100, false, bx, by);
+    scroll_ops.scrollWheel(session, 0, 100, false, bx, by);
     try std.testing.expect(leaf.tab_scroll_cols < start);
     // 왼쪽 스와이프(delta_x<0) → 오른쪽 탭(scroll 증가, 되돌아감).
     const mid = leaf.tab_scroll_cols;
-    session.scrollWheel(0, -100, false, bx, by);
+    scroll_ops.scrollWheel(session, 0, -100, false, bx, by);
     try std.testing.expect(leaf.tab_scroll_cols > mid);
 }
 
@@ -50468,7 +49516,7 @@ test "horizontal tab-bar swipe still scrolls even when the pane has mouse tracki
     const start = leaf.tab_scroll_cols;
     try std.testing.expect(start > 0);
     // 트래킹 켜진 pane 위 가로 스와이프 → 탭 바가 여전히 움직인다(chrome 축은 앱 mouse mode와 무관).
-    session.scrollWheel(0, 100, false, bx, by);
+    scroll_ops.scrollWheel(session, 0, 100, false, bx, by);
     try std.testing.expect(leaf.tab_scroll_cols < start);
 }
 
@@ -55275,7 +54323,7 @@ test "SB1: notice가 떠 있으면 상태바 휠이 그것을 닫는 처리를 �
 
     session.showNotice("test");
     try std.testing.expect(session.chrome_host.notice.open);
-    session.scrollWheel(-1, 0, false, cx, cy);
+    scroll_ops.scrollWheel(session, -1, 0, false, cx, cy);
     try std.testing.expect(!session.chrome_host.notice.open); // 휠이 토스트를 닫았다
 }
 
@@ -56221,13 +55269,13 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     // 더블클릭 직후 드래그가 grid 위 밖으로 — mouse_drag_selecting=false여도 autoscroll이 돈다.
     session.mouse(2, 0.0, -5.0, 0, 0);
     try std.testing.expectEqual(@as(i8, 1), session.drag_autoscroll);
-    session.applyDragAutoscroll();
+    scroll_ops.applyDragAutoscroll(&session);
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);
     try std.testing.expect(session.metal_dirty);
 
     // 더 갈 곳이 없으면(스크롤백 끝 + head 그대로) 재투영을 걸지 않는다 — frame-loop 재투영 루프 방지.
     session.metal_dirty = false;
-    session.applyDragAutoscroll();
+    scroll_ops.applyDragAutoscroll(&session);
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);
     try std.testing.expect(!session.metal_dirty);
 }
@@ -56863,34 +55911,34 @@ test "sidebarMaxScrollPx: 콘텐츠가 헤더 아래 뷰포트를 넘는 양(스
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {
     // 스크롤백 없으면 안 그림(null).
-    try std.testing.expect(AppSession.scrollbarThumbGeom(0, 0, 16, 320) == null);
-    try std.testing.expect(AppSession.scrollbarThumbGeom(20, 0, 0, 320) == null); // cell_height 0
-    try std.testing.expect(AppSession.scrollbarThumbGeom(20, 0, 16, 0) == null); // view 0
+    try std.testing.expect(scroll_ops.scrollbarThumbGeom(0, 0, 16, 320) == null);
+    try std.testing.expect(scroll_ops.scrollbarThumbGeom(20, 0, 0, 320) == null); // cell_height 0
+    try std.testing.expect(scroll_ops.scrollbarThumbGeom(20, 0, 16, 0) == null); // view 0
 
     // sb_count=20(=20행 @16px=320px), view 320px. total 640px → thumb_h = 320*320/640 = 160.
-    const bottom = AppSession.scrollbarThumbGeom(20, 0, 16, 320).?; // view_offset 0 = 바닥
+    const bottom = scroll_ops.scrollbarThumbGeom(20, 0, 16, 320).?; // view_offset 0 = 바닥
     try std.testing.expectApproxEqAbs(@as(f32, 160), bottom.h, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 160), bottom.y, 0.5); // 바닥: y = view-thumb = 320-160
-    const top = AppSession.scrollbarThumbGeom(20, 20, 16, 320).?; // view_offset 20 = 꼭대기
+    const top = scroll_ops.scrollbarThumbGeom(20, 20, 16, 320).?; // view_offset 20 = 꼭대기
     try std.testing.expectApproxEqAbs(@as(f32, 0), top.y, 0.5); // 꼭대기: y = 0
-    const mid = AppSession.scrollbarThumbGeom(20, 10, 16, 320).?; // 중간(t=0.5)
+    const mid = scroll_ops.scrollbarThumbGeom(20, 10, 16, 320).?; // 중간(t=0.5)
     try std.testing.expectApproxEqAbs(@as(f32, 80), mid.y, 0.5); // (320-160)*(1-0.5)
 
     // 스크롤백이 많으면 thumb는 최소 높이(18px)로 clamp.
-    const tiny = AppSession.scrollbarThumbGeom(10000, 0, 16, 320).?;
+    const tiny = scroll_ops.scrollbarThumbGeom(10000, 0, 16, 320).?;
     try std.testing.expectApproxEqAbs(@as(f32, 18), tiny.h, 0.5);
 }
 
 test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" {
     // t(0=바닥, 1=꼭대기)를 view_offset으로. 경계·중간.
-    try std.testing.expectEqual(@as(usize, 0), AppSession.scrollbarTargetOffset(0.0, 20)); // 바닥
-    try std.testing.expectEqual(@as(usize, 20), AppSession.scrollbarTargetOffset(1.0, 20)); // 꼭대기
-    try std.testing.expectEqual(@as(usize, 10), AppSession.scrollbarTargetOffset(0.5, 20)); // 중간
+    try std.testing.expectEqual(@as(usize, 0), scroll_ops.scrollbarTargetOffset(0.0, 20)); // 바닥
+    try std.testing.expectEqual(@as(usize, 20), scroll_ops.scrollbarTargetOffset(1.0, 20)); // 꼭대기
+    try std.testing.expectEqual(@as(usize, 10), scroll_ops.scrollbarTargetOffset(0.5, 20)); // 중간
     // [0,1] 밖은 clamp.
-    try std.testing.expectEqual(@as(usize, 0), AppSession.scrollbarTargetOffset(-0.3, 20));
-    try std.testing.expectEqual(@as(usize, 20), AppSession.scrollbarTargetOffset(1.5, 20));
+    try std.testing.expectEqual(@as(usize, 0), scroll_ops.scrollbarTargetOffset(-0.3, 20));
+    try std.testing.expectEqual(@as(usize, 20), scroll_ops.scrollbarTargetOffset(1.5, 20));
     // round(0.5*20=10 정수경계 위 1.54→2).
-    try std.testing.expectEqual(@as(usize, 2), AppSession.scrollbarTargetOffset(0.077, 20));
+    try std.testing.expectEqual(@as(usize, 2), scroll_ops.scrollbarTargetOffset(0.077, 20));
 
     // 역매핑은 scrollbarThumbGeom의 정확한 역이어야 한다 — 각 view_offset에서 thumb_top(geom.y)을 뽑아
     // t로 되돌리면 같은 offset이 나온다(드래그 위치 ↔ scroll 위치가 1:1, drift 없음).
@@ -56898,36 +55946,36 @@ test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" 
     const ch: u32 = 16;
     const view: u32 = 320;
     inline for (.{ 0, 3, 7, 13, 20 }) |V| {
-        const g = AppSession.scrollbarThumbGeom(sb, V, ch, view).?;
+        const g = scroll_ops.scrollbarThumbGeom(sb, V, ch, view).?;
         const track: f64 = @as(f64, @floatFromInt(view)) - @as(f64, g.h);
         const t: f64 = 1.0 - @as(f64, g.y) / track;
-        try std.testing.expectEqual(@as(usize, V), AppSession.scrollbarTargetOffset(t, sb));
+        try std.testing.expectEqual(@as(usize, V), scroll_ops.scrollbarTargetOffset(t, sb));
     }
 }
 
 test "scrollbarBarWidthPx: cell 비율·최소 px·emphasize 가산" {
     // cell_width 큰 경우 비율(0.5)이 최소(7)를 넘는다.
-    try std.testing.expectApproxEqAbs(@as(f32, 10), AppSession.scrollbarBarWidthPx(20, false), 0.01); // 20*0.5
-    try std.testing.expectApproxEqAbs(@as(f32, 12), AppSession.scrollbarBarWidthPx(20, true), 0.01); // +2 emphasize
+    try std.testing.expectApproxEqAbs(@as(f32, 10), scroll_ops.scrollbarBarWidthPx(20, false), 0.01); // 20*0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 12), scroll_ops.scrollbarBarWidthPx(20, true), 0.01); // +2 emphasize
     // 작은 cell이면 최소 px로 clamp.
-    try std.testing.expectApproxEqAbs(@as(f32, 7), AppSession.scrollbarBarWidthPx(8, false), 0.01); // 8*0.5=4 < 7
-    try std.testing.expectApproxEqAbs(@as(f32, 9), AppSession.scrollbarBarWidthPx(8, true), 0.01); // 7+2
+    try std.testing.expectApproxEqAbs(@as(f32, 7), scroll_ops.scrollbarBarWidthPx(8, false), 0.01); // 8*0.5=4 < 7
+    try std.testing.expectApproxEqAbs(@as(f32, 9), scroll_ops.scrollbarBarWidthPx(8, true), 0.01); // 7+2
 }
 
 test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·단조 감소)" {
     const visible = default_scrollbar_visible_ticks;
     const fade = default_scrollbar_fade_ticks;
     // visible_ticks까지 full.
-    try std.testing.expectEqual(scrollbar_alpha_full, AppSession.computeScrollbarAlpha(0));
-    try std.testing.expectEqual(scrollbar_alpha_full, AppSession.computeScrollbarAlpha(visible));
+    try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.computeScrollbarAlpha(0));
+    try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.computeScrollbarAlpha(visible));
     // fade 완료 후(visible+fade 이상) faint 정착.
-    try std.testing.expectEqual(scrollbar_alpha_idle, AppSession.computeScrollbarAlpha(visible + fade));
-    try std.testing.expectEqual(scrollbar_alpha_idle, AppSession.computeScrollbarAlpha(visible + fade + 100));
+    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.computeScrollbarAlpha(visible + fade));
+    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.computeScrollbarAlpha(visible + fade + 100));
     // fade 창 안은 full~idle 사이에서 단조 감소(틱이 늘수록 alpha가 줄거나 같다).
     var prev: u8 = scrollbar_alpha_full;
     var k: u32 = visible;
     while (k <= visible + fade) : (k += 1) {
-        const a = AppSession.computeScrollbarAlpha(k);
+        const a = scroll_ops.computeScrollbarAlpha(k);
         try std.testing.expect(a <= prev);
         try std.testing.expect(a >= scrollbar_alpha_idle);
         prev = a;
@@ -56939,24 +55987,24 @@ test "scrollbarAlpha: host frame-loop cadence에 따라 fade tick 수만 바뀌�
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
 
-    try std.testing.expectEqual(@as(u32, 100), session.scrollbarVisibleTicks());
-    try std.testing.expectEqual(@as(u32, 27), session.scrollbarFadeTicks());
-    try std.testing.expectEqual(scrollbar_alpha_full, session.scrollbarAlpha(session.scrollbarVisibleTicks()));
-    try std.testing.expectEqual(scrollbar_alpha_idle, session.scrollbarAlpha(session.scrollbarFadeCompleteTicks()));
+    try std.testing.expectEqual(@as(u32, 100), scroll_ops.scrollbarVisibleTicks(&session));
+    try std.testing.expectEqual(@as(u32, 27), scroll_ops.scrollbarFadeTicks(&session));
+    try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarVisibleTicks(&session)));
+    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
 
     session.loaded_config.config.render_frame_rate = 30;
     session.setFrameLoopRateHz(30);
-    try std.testing.expectEqual(@as(u32, 50), session.scrollbarVisibleTicks());
-    try std.testing.expectEqual(@as(u32, 14), session.scrollbarFadeTicks());
-    try std.testing.expectEqual(scrollbar_alpha_full, session.scrollbarAlpha(session.scrollbarVisibleTicks()));
-    try std.testing.expectEqual(scrollbar_alpha_idle, session.scrollbarAlpha(session.scrollbarFadeCompleteTicks()));
+    try std.testing.expectEqual(@as(u32, 50), scroll_ops.scrollbarVisibleTicks(&session));
+    try std.testing.expectEqual(@as(u32, 14), scroll_ops.scrollbarFadeTicks(&session));
+    try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarVisibleTicks(&session)));
+    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
 
     session.loaded_config.config.render_frame_rate = 120;
     session.setFrameLoopRateHz(120);
-    try std.testing.expectEqual(@as(u32, 200), session.scrollbarVisibleTicks());
-    try std.testing.expectEqual(@as(u32, 54), session.scrollbarFadeTicks());
-    try std.testing.expectEqual(scrollbar_alpha_full, session.scrollbarAlpha(session.scrollbarVisibleTicks()));
-    try std.testing.expectEqual(scrollbar_alpha_idle, session.scrollbarAlpha(session.scrollbarFadeCompleteTicks()));
+    try std.testing.expectEqual(@as(u32, 200), scroll_ops.scrollbarVisibleTicks(&session));
+    try std.testing.expectEqual(@as(u32, 54), scroll_ops.scrollbarFadeTicks(&session));
+    try std.testing.expectEqual(scrollbar_alpha_full, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarVisibleTicks(&session)));
+    try std.testing.expectEqual(scrollbar_alpha_idle, scroll_ops.scrollbarAlpha(&session, scroll_ops.scrollbarFadeCompleteTicks(&session)));
 }
 
 test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (per-pane)" {
@@ -56990,7 +56038,7 @@ test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (
     session.scrollbar_hovered = false;
     const panes = tab_ops.activeTab(session).panes.items;
     panes[0].scrollbar_idle_ticks = 0; // full
-    panes[1].scrollbar_idle_ticks = session.scrollbarFadeCompleteTicks(); // faint 정착
+    panes[1].scrollbar_idle_ticks = scroll_ops.scrollbarFadeCompleteTicks(session); // faint 정착
     pane_ops.appendPaneScrollbars(session);
 
     // pane 2개 → layer3 thumb 2개. 각 pane 자기 idle_ticks 반영 — 하나 full, 하나 faint.
@@ -59537,9 +58585,9 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
     defer surface.remote = null;
 
     // 스크롤백 없음 → thumb 없음(스크롤바 미표시).
-    try std.testing.expect(AppSession.scrollbarThumbGeom(
-        AppSession.scrollStateOf(surface).scrollback_len,
-        AppSession.scrollStateOf(surface).view_offset,
+    try std.testing.expect(scroll_ops.scrollbarThumbGeom(
+        scroll_ops.scrollStateOf(surface).scrollback_len,
+        scroll_ops.scrollStateOf(surface).view_offset,
         session.cell_height_px,
         session.active_pane_rect.h,
     ) == null);
@@ -59547,10 +58595,10 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
     // host가 스크롤백 500행·offset 120을 실어 주면 그대로 반영된다(예전엔 placeholder라 0이었다).
     fake.snap.scrollback_len = 500;
     fake.snap.view_offset = 120;
-    const state = AppSession.scrollStateOf(surface);
+    const state = scroll_ops.scrollStateOf(surface);
     try std.testing.expectEqual(@as(usize, 500), state.scrollback_len);
     try std.testing.expectEqual(@as(usize, 120), state.view_offset);
-    const geom = AppSession.scrollbarThumbGeom(state.scrollback_len, state.view_offset, session.cell_height_px, session.active_pane_rect.h) orelse
+    const geom = scroll_ops.scrollbarThumbGeom(state.scrollback_len, state.view_offset, session.cell_height_px, session.active_pane_rect.h) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(geom.h > 0); // thumb이 실제로 그려질 크기를 가진다
 }
@@ -60051,7 +59099,7 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
 
     // 휠은 탐색기 스크롤 상태를 건드리지 않는다(안 보이는 목록이 움직이면 돌아왔을 때 위치가 어긋난다).
     session.file_tree_scroll.reset();
-    session.scrollWheel(-600, 0, false, x, y);
+    scroll_ops.scrollWheel(session, -600, 0, false, x, y);
     try std.testing.expectEqual(@as(u32, 0), session.file_tree_scroll.offset_y_px);
     // 탐색기 행 수로 만든 스크롤바도 다른 뷰에는 없다(그리기·드래그 양쪽).
     try std.testing.expect(dock_ops.dockListScrollbarGeometry(session) == null);
@@ -60218,7 +59266,7 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     defer session.backing_height_px = saved_backing_height_px;
     session.backing_height_px = dock_ops.dockGeometry(session).tree.y + cell_h * 5 + session.statusBarHeightPx();
     const rect = dock_ops.dockGeometry(session).tree_content;
-    const extent = session.scmScrollExtent();
+    const extent = scroll_ops.scmScrollExtent(session);
     if (extent.max_offset_px == 0) return error.ScmFixtureDoesNotOverflow;
 
     // ① 뷰포트는 **헤더 한 줄을 뺀** 나머지다. 이 한 줄을 빼지 않으면 목록이 바닥에서 한 줄만큼 넘친다.
@@ -60258,13 +59306,13 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     // ⑤ 상한은 content 바닥이 뷰포트 바닥에 붙는 지점이다 — 행 좌표 시절에는 그 아래 나머지 픽셀만큼
     //    배경이 남았다. clamp도 같은 상한을 본다.
     session.scm_scroll.offset_y_px = std.math.maxInt(u32);
-    try std.testing.expectEqual(extent.max_offset_px, session.scmEffectiveScrollPx());
-    session.clampScmScroll();
+    try std.testing.expectEqual(extent.max_offset_px, scroll_ops.scmEffectiveScrollPx(session));
+    scroll_ops.clampScmScroll(session);
     try std.testing.expectEqual(extent.max_offset_px, session.scm_scroll.offset_y_px);
 
     // ⑥ 휠이 그 상태를 픽셀로 움직인다 — 트랙패드는 논리 픽셀이라 행 경계에서 멈추지 않는다.
     session.scm_scroll.reset();
-    session.scrollWheel(-1, 0, true, x, @floatFromInt(rect.y + cell_h + 1));
+    scroll_ops.scrollWheel(session, -1, 0, true, x, @floatFromInt(rect.y + cell_h + 1));
     const after_wheel = session.scm_scroll.offset_y_px;
     try std.testing.expect(after_wheel > 0);
     try std.testing.expect(after_wheel < cell_h); // 한 행을 통째로 건너뛰지 않았다
@@ -60306,15 +59354,15 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
             bar.track_x + bar.track_w / 2,
             bar.track_y + bar.track_h - 1, // 트랙 아래쪽 = 점프
         ));
-        try std.testing.expect(session.scmEffectiveScrollPx() > 0);
+        try std.testing.expect(scroll_ops.scmEffectiveScrollPx(session) > 0);
         try std.testing.expectEqual(before_file_tree, session.file_tree_scroll.offset_y_px);
-        session.endScrollbarCapture();
+        scroll_ops.endScrollbarCapture(session);
     }
 
     // ⑩ 다른 뷰에서 굴리면 이 목록은 움직이지 않는다(뷰별로 상태를 나눠 둔 이유).
     dock_ops.setDockView(session, .explorer);
     const before = session.scm_scroll.offset_y_px;
-    session.scrollWheel(-600, 0, false, x, @floatFromInt(rect.y + cell_h + 1));
+    scroll_ops.scrollWheel(session, -600, 0, false, x, @floatFromInt(rect.y + cell_h + 1));
     try std.testing.expectEqual(before, session.scm_scroll.offset_y_px);
 }
 
@@ -61436,7 +60484,7 @@ test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상�
     try std.testing.expect(max_offset > 0);
 
     // ① 아래로 굴리면 목록이 아래로 간다. 부호가 뒤집히면 맨 위에서 아무 일도 일어나지 않는다.
-    session.scrollWheel(-3, 0, false, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, -3, 0, false, inside_x, inside_y);
     const after_down = session.agent_session_archive_scroll.offset_y_px;
     try std.testing.expect(after_down > 0);
 
@@ -61444,23 +60492,23 @@ test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상�
     //
     // 잔여가 **실제로 남아 있는 상태**에서 나가야 그것이 지워지는지 볼 수 있다. non-precise 델타는
     // 카드 높이 단위라 잔여를 남기지 않으므로, precise 틱으로 1픽셀 미만을 먼저 쌓는다.
-    session.scrollWheel(-0.3, 0, true, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, -0.3, 0, true, inside_x, inside_y);
     try std.testing.expect(session.agent_session_archive_scroll.wheel_residue_px != 0);
     const before_outside = session.agent_session_archive_scroll.offset_y_px;
 
     const outside_x: f64 = @floatFromInt(content.x / 2);
-    session.scrollWheel(-3, 0, false, outside_x, inside_y);
+    scroll_ops.scrollWheel(session, -3, 0, false, outside_x, inside_y);
     try std.testing.expectEqual(before_outside, session.agent_session_archive_scroll.offset_y_px);
     // 도크를 떠났으므로 분수 잔여도 남기지 않는다 — 남기면 다시 들어왔을 때 첫 틱이 엉뚱하게 튄다.
     try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_scroll.wheel_residue_px);
 
     // ③ 위로 되돌리면 원래 자리로 돌아온다(②에서 쌓은 1픽셀 미만은 offset을 안 움직였다).
     try std.testing.expectEqual(after_down, before_outside);
-    session.scrollWheel(3, 0, false, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, 3, 0, false, inside_x, inside_y);
     try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
 
     // ④ 끝까지 굴려도 상한을 넘지 않는다.
-    for (0..200) |_| session.scrollWheel(-10, 0, false, inside_x, inside_y);
+    for (0..200) |_| scroll_ops.scrollWheel(session, -10, 0, false, inside_x, inside_y);
     try std.testing.expectEqual(max_offset, session.agent_session_archive_scroll.offset_y_px);
 }
 
@@ -61477,12 +60525,12 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
 
     // precise(트랙패드) 델타는 1픽셀보다 작을 수 있다. 정수 픽셀이 찰 때까지는 움직이지 않고
     // 잔여로만 쌓인다 — 그러지 않으면 미세한 손가락 움직임이 한 픽셀씩 튄다.
-    session.scrollWheel(-0.6, 0, true, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, -0.6, 0, true, inside_x, inside_y);
     try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
     try std.testing.expect(session.agent_session_archive_scroll.wheel_residue_px != 0);
 
     // 두 번째로 1픽셀을 넘긴다(0.6 + 0.6 = 1.2).
-    session.scrollWheel(-0.6, 0, true, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, -0.6, 0, true, inside_x, inside_y);
     const moved = session.agent_session_archive_scroll.offset_y_px;
     // 두 번 합쳐 1픽셀을 넘겼으니 이제 움직인다.
     try std.testing.expect(moved > 0);
@@ -61490,7 +60538,7 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
     try std.testing.expect(@abs(session.agent_session_archive_scroll.wheel_residue_px) < 1);
 
     // 방향을 뒤집으면 이전 방향의 잔여를 버린다 — 남겨 두면 첫 반대 틱이 상쇄돼 굼뜨게 느껴진다.
-    session.scrollWheel(0.1, 0, true, inside_x, inside_y);
+    scroll_ops.scrollWheel(session, 0.1, 0, true, inside_x, inside_y);
     try std.testing.expect(session.agent_session_archive_scroll.wheel_residue_px > 0);
 }
 
@@ -61874,7 +60922,7 @@ test "라이브 스크롤바 thumb 드래그는 도크 위를 지나도 소유�
     const rect = session.active_pane_rect;
     const grab_x: f64 = @floatFromInt(rect.x + rect.w - 2);
     const grab_y: f64 = @floatFromInt(rect.y + rect.h / 2);
-    try std.testing.expect(session.scrollbarGrabAt(grab_x, grab_y) != null);
+    try std.testing.expect(scroll_ops.scrollbarGrabAt(session, grab_x, grab_y) != null);
 
     session.mouse(1, grab_x, grab_y, 0, 0);
     try std.testing.expect(session.pointerGestureIs(.scrollbar));

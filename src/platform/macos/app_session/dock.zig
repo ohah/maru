@@ -20,6 +20,7 @@ const dock_panel = maru.session.dock_panel;
 const dock_layout = maru.session.dock_layout;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
 const tab_ops = @import("tab.zig");
 const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
@@ -126,8 +127,8 @@ pub fn openDockTo(self: *AppSession, view: dock_panel.View) void {
 pub fn appendDockListScrollbar(self: *AppSession) void {
     const snapshot = file_panel_ops.fileTreeScrollTree(self);
     if (snapshot.entries.len == 0) return;
-    const emphasized = self.dock_list_scrollbar_hovered or self.scrollbarCaptureActive();
-    const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.dock_list_scrollbar_idle_ticks);
+    const emphasized = self.dock_list_scrollbar_hovered or scroll_ops.scrollbarCaptureActive(self);
+    const alpha: u8 = if (emphasized) scrollbar_alpha_full else scroll_ops.scrollbarAlpha(self, self.dock_list_scrollbar_idle_ticks);
 
     var ops: [dock_list_scroll_max_entries]chrome.draw.Op = undefined;
     const tokens = self.buildChromeTokens();
@@ -446,8 +447,8 @@ pub fn dockListScroll(self: *AppSession) ?DockListScroll {
                 .w = content.w,
                 .h = content.h -| self.cell_height_px,
             },
-            .extent = self.scmScrollExtent(),
-            .offset_px = self.scmEffectiveScrollPx(),
+            .extent = scroll_ops.scmScrollExtent(self),
+            .offset_px = scroll_ops.scmEffectiveScrollPx(self),
         },
         // 에이전트 세션 도크는 자기 tree(`session_dock.build`)를 이미 갖고 있다.
         else => null,
@@ -508,7 +509,7 @@ pub fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
 /// 기하가 아니라 extent가 주고, 옮긴 직후의 thumb을 알아야 이어지는 드래그가 튀지 않으므로 tree를
 /// 다시 낸다.
 pub fn setScmScrollOffsetPx(self: *AppSession, offset_px: i64) void {
-    const extent = self.scmScrollExtent();
+    const extent = scroll_ops.scmScrollExtent(self);
     if (!self.scm_scroll.setOffsetPx(offset_px, extent.max_offset_px)) return;
     buildDockListScrollTree(self);
     self.dock_list_scrollbar_idle_ticks = 0;

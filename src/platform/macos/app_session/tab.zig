@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
 const Tab = app_session_mod.Tab;
 const coretext_frame_builder = app_session_mod.coretext_frame_builder;
@@ -1492,7 +1493,7 @@ pub fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
         }
     } else |_| {}
     setHoveredTab(self, next);
-    self.setHoveredScroll(next_scroll);
+    scroll_ops.setHoveredScroll(self, next_scroll);
     return if (on_grip) .grip else if (on_bar) .tabs else .none;
 }
 

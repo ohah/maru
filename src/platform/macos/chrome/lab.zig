@@ -17,8 +17,8 @@ const archive_detail = chrome.components.archive_detail;
 ///
 /// sticky 시나리오는 그룹 둘·카드 넷에 상단 고정 헤더까지 그리므로 여기가 가장 많이 든다. 상한을
 /// 시나리오마다 나누지 않는 이유는 위와 같다 — 하나만 넉넉하면 다른 쪽이 캡처 전에 죽는다.
-pub const frame_op_capacity = 80;
-pub const frame_run_capacity = 80;
+pub const frame_op_capacity = 256;
+pub const frame_run_capacity = 256;
 
 pub const ScenarioId = enum {
     empty,

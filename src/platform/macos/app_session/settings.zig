@@ -28,6 +28,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const agent_ops = @import("agent.zig");
 const input_ops = @import("input.zig");
 const web_ops = @import("web.zig");
 const ctx_group_menu_color_first = app_session_mod.ctx_group_menu_color_first;
@@ -956,7 +957,7 @@ pub fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
 /// config 기본으로 되돌려야 하므로 applyLoadedConfig(false)를 직접 부른다.
 pub fn reapplyLoadedConfig(self: *AppSession) void {
     applyLoadedConfig(self, true);
-    self.reconcileAgentStatusline(); // 토글을 껐으면 여기서 복원·제거까지 간다
+    agent_ops.reconcileAgentStatusline(self); // 토글을 껐으면 여기서 복원·제거까지 간다
 }
 
 /// reapplyLoadedConfig 본체. 메모리의 loaded_config(스키마 필드 in-place 변경)에서 appearance를 다시 resolve해 적용한다.

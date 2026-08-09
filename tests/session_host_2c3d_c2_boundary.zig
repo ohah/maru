@@ -78,7 +78,8 @@ test "CR3a-2c3d C2 release boundary remains leaf-owned and product-unwired" {
     try std.testing.expectEqual(@as(usize, 0), count(runtime, ".transport.takeEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, ".transport.releaseEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(attachment, ".transport.takeEvent("));
-    try std.testing.expectEqual(@as(usize, 0), count(attachment, ".transport.releaseEvent("));
+    // C3-1 owns the sole product wrapper while C2 still owns the release transaction itself.
+    try std.testing.expectEqual(@as(usize, 1), count(attachment, ".transport.releaseEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(client, "generation_event_quarantine"));
     try std.testing.expectEqual(@as(usize, 0), count(client, "releaseGenerationEvent("));
 

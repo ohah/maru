@@ -20,8 +20,9 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.takeEventProjected("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.eventReadinessOwned("));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, ".takeEvent("));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, ".releaseEvent("));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "dropBufferedStream("));
+    // The one legacy in-process drain remains until C3-2; C3-1 adds no generation pump consumer.
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".releaseEvent("));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "dropBufferedStream("));
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;

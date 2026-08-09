@@ -118,6 +118,10 @@ pub const EventTakeOutcome = generation_event.EventTakeOutcome;
 pub const EventAdmission = generation_event.EventAdmission;
 pub const EventError = generation_event.EventError;
 pub const EventViewError = generation_event.EventViewError;
+pub const ProjectedEventTake = struct {
+    outcome: EventTakeOutcome,
+    generation: u64,
+};
 
 const Lifecycle = enum(u8) {
     pristine,
@@ -288,6 +292,17 @@ pub const GenerationTransport = struct {
         self: *GenerationTransport,
         out: *EventOwner,
     ) EventError!EventTakeOutcome {
+        return (try self.takeEventProjectedInternal(out)).outcome;
+    }
+
+    pub fn releaseEvent(self: *GenerationTransport, owner: *EventOwner) EventError!void {
+        return releaseEventOwned(self, owner);
+    }
+
+    fn takeEventProjectedInternal(
+        self: *GenerationTransport,
+        out: *EventOwner,
+    ) EventError!ProjectedEventTake {
         if (!self.requestIdentityValid()) return error.InvalidOwner;
         if (!eventDestinationValid(self, out) or !generation_event.pristineExact(out))
             return error.InvalidOwner;
@@ -303,16 +318,17 @@ pub const GenerationTransport = struct {
             error.Terminal => error.Terminal,
         };
         return switch (outcome) {
-            .idle => .idle,
-            .ended_pending => .ended_pending,
+            .idle => .{ .outcome = .idle, .generation = 0 },
+            .ended_pending => .{ .outcome = .ended_pending, .generation = 0 },
             .taken => |publication| blk: {
+                const generation = publication.identity.receipt.event_generation;
                 generation_event.publish(out, publication);
-                break :blk .taken;
+                break :blk .{ .outcome = .taken, .generation = generation };
             },
         };
     }
 
-    pub fn releaseEvent(self: *GenerationTransport, owner: *EventOwner) EventError!void {
+    fn releaseEventOwned(self: *GenerationTransport, owner: *EventOwner) EventError!void {
         if (!self.requestIdentityValid() or !eventDestinationValid(self, owner))
             return error.InvalidOwner;
         const projection = generation_event.releaseProjection(owner) catch |err| return err;
@@ -599,6 +615,15 @@ pub const GenerationTransport = struct {
     }
 };
 
+/// Package-level attachment seam. It publishes the mirror only from the canonical registry
+/// publication returned by the same take transaction; EventOwner bytes are not re-read.
+pub fn takeEventProjected(
+    transport: *GenerationTransport,
+    out: *EventOwner,
+) EventError!ProjectedEventTake {
+    return transport.takeEventProjectedInternal(out);
+}
+
 fn mapPrepareError(err: client_slot_mod.GenerationRequestError) PrepareError {
     return switch (err) {
         error.Busy => error.Busy,
@@ -829,6 +854,44 @@ test "CR3a-2c3b transport mint rejects every non-containing declared owner range
         try std.testing.expect((try slot.transportOwnerSeal(reservation)).settledExact());
         try slot.abortAttachmentBinding(&binding, reservation);
     }
+}
+
+pub const EventReadiness = enum { ready, busy, invalid };
+
+/// Checks process/thread/final-address identity before touching the opaque inline owner. Canonical
+/// registry readiness is still enforced by preflightTerminalizeOwned; this local projection only
+/// rejects attachment/owner drift that a cleanup pin alone cannot describe.
+pub fn eventReadinessOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+    owner: *const EventOwner,
+    generation_mirror: u64,
+) EventReadiness {
+    if (!transport.requestIdentityValid() or transport.owner_addr != owner_addr or
+        !eventDestinationValid(transport, owner))
+        return .invalid;
+    const canonical = client_slot_mod.generationEventAttachmentReadiness(
+        transport.ownerQuery(),
+        transport.bound_stream_id,
+        @intFromPtr(owner),
+        generation_mirror,
+    ) catch |err| return switch (err) {
+        error.Busy => .busy,
+        else => .invalid,
+    };
+    if (generation_mirror == 0) {
+        if (!generation_event.settledForAttachment(owner)) return .invalid;
+    } else if (!generation_event.liveGenerationMatches(owner, generation_mirror)) {
+        return .invalid;
+    }
+    return switch (canonical) {
+        .ready => switch (preflightTerminalizeOwned(transport, owner_addr)) {
+            .ready => .ready,
+            .busy, .invalid => .invalid,
+        },
+        .busy => .busy,
+        .invalid => .invalid,
+    };
 }
 
 test "CR3a-2c3b transport mint rejects an overbroad owner range crossing canonical slot state" {

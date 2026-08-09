@@ -1380,8 +1380,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPublication" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeOutcome" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventAttachmentReadiness" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "generationEventCorrupt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "takeGenerationEvent" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventAttachmentReadiness" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventOwnerCurrent" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "discardGenerationEventForTest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventQuarantineReservation" },
@@ -7024,9 +7026,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
-            // Shell teardown now preflights allocator-callback reentry just like attached
-            // teardown; both call sites must stay behind GenerationAttachment.
-            .{ .name = "preflightTerminalizeOwned", .transport_count = 2, .attachment_count = 2 },
+            // Shell and attached teardown retain their direct fences; C3-1 adds one transport-local
+            // event-readiness composition fence without opening another product owner.
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 2 },
         };
         for (owned_helpers) |helper| {
             const expected: usize = if (is_generation_transport)

@@ -1322,6 +1322,7 @@ pub const GenerationEventTakeOutcome = union(enum) {
 };
 
 pub const GenerationEventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
+pub const GenerationEventAttachmentReadiness = cleanup_registry_mod.EventAttachmentReadiness;
 
 pub const GenerationEventTrustedView = struct {
     payload_digest: runtime_event_wire.Digest,
@@ -6264,6 +6265,29 @@ pub fn takeGenerationEvent(
         .quarantine_identity = quarantine_identity,
         .pin_projection = pin_projection,
     } };
+}
+
+pub fn generationEventAttachmentReadiness(
+    owner: GenerationTransportOwnerQuery,
+    bound_stream_id: u64,
+    event_owner_addr: usize,
+    generation_mirror: u64,
+) GenerationEventError!GenerationEventAttachmentReadiness {
+    if (bound_stream_id == 0 or event_owner_addr == 0) return error.InvalidOwner;
+    const operation = beginGenerationRequestOwner(owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(operation.operation);
+    return operation.operation.node.cleanup_registry.eventAttachmentReadiness(
+        owner.reservation.cleanup,
+        owner.reservation.identity,
+        event_owner_addr,
+        generation_mirror,
+    ) catch |err| switch (err) {
+        error.InvalidState => error.Corrupt,
+        else => error.InvalidOwner,
+    };
 }
 
 pub fn generationEventOwnerCurrent(

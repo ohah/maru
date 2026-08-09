@@ -150,7 +150,9 @@ pub const inventory = [_]Proof{
     // 없던 필드를 뺀 것뿐이고, Client 구성·receiver 집합과는 무관하다.
     // 사이드바 검색 줄 텍스트를 measured 경로로 옮기며 또 바뀐다(이관 2단계, docs/file-explorer.md §3.5).
     // count는 4 그대로다 — 검색 텍스트의 rect·문자열·수집 헬퍼를 더한 것뿐이고 Client 구성과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "47247d27f995730ca7f3f39b2468ed671e4f78379dadf541164fd652986054ea" },
+    // 탭 제목 텍스트를 measured 경로로 옮기며 또 바뀐다(이관 3단계). count는 4 그대로다 — 마커/본문 분리
+    // 헬퍼와 제목 발행 함수를 더한 것뿐이고, Client 구성·receiver 집합과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "6434219cbd7e2a16e42150c26954708c397956e8919f5e66eb68023750ce566f" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

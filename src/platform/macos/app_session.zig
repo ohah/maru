@@ -3444,6 +3444,8 @@ pub const AppSession = struct {
     /// 사이드바 헤더 검색 줄의 measured 셰이핑 캐시(이관 2단계). 슬롯이 도크와 따로인 이유는 fingerprint가
     /// 각자의 ops에서 나오기 때문이다 — 한 슬롯을 공유하면 검색어를 칠 때마다 도크 아티팩트가 버려진다.
     sidebar_search_text_cache: ?MeasuredTextCache = null,
+    /// pane 탭 제목의 measured 셰이핑 캐시(이관 3단계).
+    pane_tab_title_text_cache: ?MeasuredTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     /// Session Dock가 키보드 owner인가(docs/agent-session-list.md의 `agent_session_list` focus).
     /// **component-local `InteractionState.focused`로 대신할 수 없다**: 그건 published node id라
@@ -22324,6 +22326,7 @@ pub const AppSession = struct {
     fn clearMeasuredTextCaches(self: *AppSession) void {
         MeasuredTextCache.clear(&self.agent_session_dock_rich_text_cache, self.allocator);
         MeasuredTextCache.clear(&self.sidebar_search_text_cache, self.allocator);
+        MeasuredTextCache.clear(&self.pane_tab_title_text_cache, self.allocator);
     }
 
     /// 도크의 비례 텍스트를 **이번 프레임 안에서** 셰이핑해 캐시에 넣는다.
@@ -31285,10 +31288,25 @@ pub const AppSession = struct {
                     // ✕는 **모든 Term 탭에 고정 표시**한다(호버 전용 폐기 — 사용자 요청). 어디를 눌러야 닫히는지
                     // 마우스를 올려보기 전에 알 수 있어야 한다는 같은 이유로 사이드바 카드·에이전트 행도 고정이다.
                     const close_tab = true;
-                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, self.paneActiveTermIndex(lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, editing_tab) catch continue;
+                    // **제목 텍스트는 measured 경로**로 옮겼다(`collectPaneTabTitles`) — 셀 높이에 묶여 있으면 폰트를
+                    // 키울 때 제목이 바 밖으로 넘친다(docs/file-explorer.md §3.5의 이관 3단계). 셀 draw list에는
+                    // ✕와 running 마커(●)만 남긴다: 마커는 `Op.Text.role`이 op당 하나라 measured로 옮기면 제목과
+                    // 다른 색을 못 준다(chrome-strategy가 남긴 "아이콘 색을 라벨과 따로 줄 수단" 항목). 마커가
+                    // 제목 **앞**에 오는 prefix라, 사이드바 검색이 🔍를 셀에 남긴 것과 같은 패턴으로 분리된다.
+                    var marker_titles: std.ArrayList([]const u8) = .empty;
+                    defer {
+                        for (marker_titles.items) |l| self.allocator.free(l);
+                        marker_titles.deinit(self.allocator);
+                    }
+                    for (titles.items) |t| {
+                        const marker = if (tabTitleRunningMarker(t)) agentFlagUtf8() else "";
+                        marker_titles.append(self.allocator, self.allocator.dupe(u8, marker) catch continue) catch {};
+                    }
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, marker_titles.items, @intCast(bar_cols), tab_fg, close_tab, self.paneActiveTermIndex(lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, null) catch continue;
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
+                    self.collectPaneTabTitles(&collected, pane_frame_builder, lr.leaf, pb, titles.items, editing_tab, text_origin_y, bar_cols);
 
                     // 1c) Phase 7e-1b: browser 웹 패널 주소창 밴드 — 이 pane의 **활성 탭**이 browser web Term이면 탭 바 바로
                     //     아래에 읽기전용 URL 밴드(배경 quad + URL 셀)를 그린다. collectWebSurfaces inset이 browser면 top을
@@ -34048,6 +34066,121 @@ pub const AppSession = struct {
     /// DrawList 셀 중 running 플래그 ●를 종류 브랜드색으로 칠한다 — 탭바 pane 라벨·Term 탭의 flagPrefixedLabel prefix용
     /// (그 draw list 단위로). none이면 무동작. ●가 라벨 텍스트에 섞일 여지는 드물고, 있어도 색만 바뀌는 사소한 오탐이라
     /// per-tab 셀 범위 게이트까진 불필요(혼재 kind는 pane 대표색으로 통일 — 드문 트레이드오프, code-review max #4·#5).
+    /// pane 탭 제목을 measured 경로로 수집한다(이관 3단계 — docs/file-explorer.md §3.5).
+    ///
+    /// 세그먼트 기하는 `tabbar.Metrics.segOf` **그대로**다. 탭 폭·✕ 자리·가로 스크롤은 셀 칸에서 나오고
+    /// hit-test가 같은 값을 보므로, 제목만 픽셀로 그려도 "보이는 탭 == 클릭되는 탭"이 유지된다. 제목 영역은
+    /// 셀 경로가 쓰던 규칙과 같다: 좌패딩 1칸, ✕가 있으면 우측 3칸을 비운다(`title_end = seg_end - 3`).
+    ///
+    /// 마커(`●`)는 셀에 남으므로 마커가 있는 탭은 제목이 그만큼(2칸) 오른쪽에서 시작한다.
+    fn collectPaneTabTitles(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        leaf: *Pane,
+        pb: PaneBar,
+        titles: []const []const u8,
+        editing_tab: ?usize,
+        text_origin_y: u32,
+        bar_cols: u32,
+    ) void {
+        const cw = self.cell_width_px;
+        if (cw == 0 or titles.len == 0) return;
+        const tokens = self.buildChromeTokens();
+        // hit-test(`paneTabIndexAt` 등)와 **같은 메트릭**을 쓴다 — 보이는 탭과 클릭되는 탭이 갈리면 안 된다.
+        const m = barMetrics(pb.tabs, cw, self.paneTermOrder(leaf).len, self.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols) orelse return;
+        const active = self.paneActiveTermIndex(leaf);
+
+        var ops: std.ArrayList(chrome.draw.Op) = .empty;
+        defer ops.deinit(self.allocator);
+        var runs: std.ArrayList(chrome.draw.Run) = .empty;
+        defer runs.deinit(self.allocator);
+        // run은 op이 슬라이스로 참조하므로 **먼저 전부 채운 뒤** op을 만든다(ArrayList가 realloc하면 앞선 op의
+        // 포인터가 죽는다). 그래서 두 배열을 나눠 담고 인덱스로 이어 붙인다.
+        for (titles) |title| {
+            const body = tabTitleBody(title);
+            if (body.len == 0) continue;
+            runs.append(self.allocator, .{ .text = body }) catch return;
+        }
+        var run_index: usize = 0;
+        for (titles, 0..) |title, i| {
+            const body = tabTitleBody(title);
+            if (body.len == 0) continue;
+            const seg = m.segOf(i);
+            if (seg.end_px <= seg.start_px) { // 우단에서 잘려 안 보이는 탭
+                run_index += 1;
+                continue;
+            }
+            const lead_cols: u32 = if (tabTitleRunningMarker(title)) 3 else 1; // 좌패딩 1 + 마커(2칸)
+            const trail_cols: u32 = if (seg.has_close) 3 else 1; // ✕ 좌여백·✕·우여백
+            // `segOf`의 px는 `colPx`가 `bar_x`를 이미 더한 **절대 좌표**다 — 여기에 `pb.tabs.x`를 또 더하면
+            // 제목이 탭 밖 오른쪽으로 밀린다(실제 캡처로 잡힌 회귀).
+            const start_px = @as(u32, @intFromFloat(@max(seg.start_px, 0))) + lead_cols * cw;
+            const end_px = @as(u32, @intFromFloat(@max(seg.end_px, 0)));
+            if (end_px <= start_px + trail_cols * cw) {
+                run_index += 1;
+                continue; // 제목이 들어갈 자리가 없다
+            }
+            ops.append(self.allocator, .{
+                .text = .{
+                    .origin = .{ .x = @intCast(start_px), .y = @intCast(text_origin_y) },
+                    .runs = runs.items[run_index .. run_index + 1],
+                    // 활성 탭만 또렷하게. 셀 경로의 `active_tab_fg`/`tab_fg`에 대응하는 chrome role이다 —
+                    // measured는 op당 role 하나라 색을 토큰에서 받는다(비활성 색이 미세하게 달라진다).
+                    .role = if (active == i) .surface_fg else .muted_fg,
+                    .text_role = .control,
+                    .max_width_px = end_px - start_px - trail_cols * cw,
+                    // rename 중인 탭만 tail 앵커 — 긴 이름을 칠 때 caret(문자열 끝)이 세그먼트 안에 남는다.
+                    .anchor = if (editing_tab != null and editing_tab.? == i) .tail else .head,
+                },
+            }) catch return;
+            run_index += 1;
+        }
+        if (ops.items.len == 0) return;
+
+        const fingerprint = chrome_draw_lowering.richTextFingerprint(ops.items, &tokens, cw, self.cell_height_px, @intCast(@min(bar_cols, @as(u32, std.math.maxInt(u16)))), 1, 0);
+        // pane마다 슬롯을 두지 않는다 — op origin이 절대 좌표라 한 아티팩트가 모든 pane의 탭 제목을 담을 수
+        // 있지만, 이 함수는 pane 루프 안에서 불리므로 **마지막 pane의 것만** 캐시에 남는다. split이 여럿이면
+        // 캐시가 매 pane마다 갈리므로, 그 경우는 miss가 정상이고 단일 pane(대다수)에서 hit한다.
+        if (!MeasuredTextCache.hit(self.pane_tab_title_text_cache, fingerprint)) {
+            var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops.items, &tokens, cw, .{
+                .family = self.appearance.font.family,
+                .fallback = self.appearance.font.fallback,
+            }) catch return;
+            defer request.deinit(self.allocator);
+            var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, self.scale_milli) catch return;
+            defer unresolved.deinit(self.allocator);
+            const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
+            MeasuredTextCache.store(&self.pane_tab_title_text_cache, self.allocator, fingerprint, artifact, 0);
+        }
+        if (self.pane_tab_title_text_cache) |*cache| {
+            const dl = chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return;
+            self.collectMeasuredTextFromCache(collected, dl, cache, builder, .{ .sidebar_search = .{
+                .origin_x = 0,
+                .origin_y = 0,
+                .colors = .{ .default_fg = self.appearance.theme.foreground },
+            } });
+        }
+    }
+
+    /// running 마커(`●`) UTF-8 한 글자. 셀 draw list가 마커만 그릴 때 쓴다(제목은 measured 경로).
+    fn agentFlagUtf8() []const u8 {
+        return "\u{25CF}";
+    }
+
+    /// 이 탭 제목이 running 마커로 시작하는가. `flagPrefixedLabel`이 붙인 prefix를 되읽는 단일 판정이다 —
+    /// 마커를 셀에, 제목을 measured에 보내려면 둘을 같은 기준으로 갈라야 한다.
+    fn tabTitleRunningMarker(title: []const u8) bool {
+        return std.mem.startsWith(u8, title, agentFlagUtf8());
+    }
+
+    /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
+    fn tabTitleBody(title: []const u8) []const u8 {
+        if (!tabTitleRunningMarker(title)) return title;
+        const rest = title[agentFlagUtf8().len..];
+        return if (std.mem.startsWith(u8, rest, " ")) rest[1..] else rest;
+    }
+
     fn recolorAgentFlagCells(cells: anytype, kind: AgentKind) void {
         const brand = agentBrandColor(kind) orelse return;
         for (cells) |*c| {
@@ -73655,4 +73788,28 @@ test "사이드바 검색 줄은 query·preedit·caret을 한 문자열로 합�
     session.sidebar_search_input.query.clearRetainingCapacity();
     session.sidebar_search_input.preedit.clearRetainingCapacity();
     try std.testing.expect(session.sidebarSearchTextAlloc(&muted) == null);
+}
+
+// 이 테스트가 증명하는 것: 탭 제목에서 running 마커(`●`)와 본문을 가르는 규칙.
+//
+// 왜 터미널에서 중요한가 — 마커는 셀 경로에, 제목은 measured 경로에 간다. 두 경로가 **같은 기준으로**
+// 갈라야 마커가 두 번 그려지거나(제목에도 남음) 사라지지 않는다. 나누는 이유는 `Op.Text.role`이 op당
+// 하나라, 한 op으로는 "브랜드색 마커 + 중립색 제목"을 표현할 수 없기 때문이다(chrome-strategy가 남긴
+// "아이콘 색을 라벨과 따로 줄 수단" 항목). 마커가 prefix라 이 분리가 성립한다.
+test "탭 제목은 running 마커와 본문을 같은 기준으로 가른다" {
+    // `flagPrefixedLabel`이 붙이는 형태 그대로("● 제목").
+    try std.testing.expect(AppSession.tabTitleRunningMarker("\u{25CF} zsh"));
+    try std.testing.expectEqualStrings("zsh", AppSession.tabTitleBody("\u{25CF} zsh"));
+
+    // 마커가 없으면 본문이 원본 그대로다(복사·수정 없음).
+    try std.testing.expect(!AppSession.tabTitleRunningMarker("zsh"));
+    try std.testing.expectEqualStrings("zsh", AppSession.tabTitleBody("zsh"));
+
+    // 제목 안에 우연히 ●가 들어가도 **선두가 아니면** 마커가 아니다 — 사용자가 rename으로 넣을 수 있고,
+    // 그때 본문 일부를 마커로 오인해 잘라내면 제목이 깨진다.
+    try std.testing.expect(!AppSession.tabTitleRunningMarker("build \u{25CF} watch"));
+    try std.testing.expectEqualStrings("build \u{25CF} watch", AppSession.tabTitleBody("build \u{25CF} watch"));
+
+    // 마커 뒤 공백이 없는 형태도 본문만 남긴다(형식이 바뀌어도 마커만 떨어지게).
+    try std.testing.expectEqualStrings("zsh", AppSession.tabTitleBody("\u{25CF}zsh"));
 }

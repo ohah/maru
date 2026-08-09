@@ -1379,8 +1379,22 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       canonical resource handoff를 알며, owner-local lifecycle은 기존 import 방향대로 `generation_event_contract`가 소유하고
       `GenerationTransport.releaseEvent`가 scalar prepare→owner tombstone→resource commit→owner finalize를 조정한다. C2는
       production-type facade exact 14이고 제품 event callsite는 0이다.
-      C3 generation 제품 drain·ended priority·actual socket/source-zero의 세 PR-size gate로 나누며 각 gate가
-      Debug·ReleaseFast focused sentinel과 boundary를 가진다. 2c3d 완료 전에는 generation event source-zero를 주장하지 않는다.
+      C3는 세 PR-size gate로 나누며 각 gate가 Debug·ReleaseFast focused sentinel과 boundary를 가진다.
+      **C3-1**은 `GenerationAttachment` 안의 exact 512-byte `EventOwner`, 권위 없는
+      `event_generation_mirror:u64` projection(0=idle/settled, nonzero=검증된 live generation), attachment-only
+      `takeEvent/viewEvent/releaseEvent` wrapper와 teardown `Busy -> explicit release -> success`만 소유한다. canonical
+      generation과 cleanup readiness의 SSOT는 계속 ClientNode binding registry이고 mirror는 free/drop/release 권위가 아니다.
+      transport가 canonical take 결과에서 generation을 함께 투영한 뒤에만 mirror를 게시하며 public owner bytes나 payload를
+      재해석하지 않는다. clean release는 mirror를 0으로 만들고, `Busy|InvalidOwner`는 owner/mirror를 보존하며, corrupt
+      release는 C2 trusted no-free handoff와 poison을 끝낸 뒤 owner terminal·mirror 0을 게시하고 `Corrupt`를 반환한다.
+      `Terminal`은 registry가 owner settlement를 재확인한 경우에만 mirror를 0으로 동기화한다. mirror 단독 terminal/idle 값은
+      teardown 권위가 아니며 registry와 불일치하면 mutation 0 `Corrupt`다. `tryDeinit`은 allocator callback이나 release를
+      내부 실행하지 않고 canonical owner가 live/releasing이면 `Busy`; explicit `releaseEvent` 뒤 재호출만 기존 drop을 시작한다.
+      construction은 binding reserve → transport mint → inline owner exact-address reserve → request prepare 순서이고, 실패는
+      transport terminalize → binding abort의 기존 역순 rollback으로 request/pin/queue/quarantine leak 0을 보장한다.
+      **C3-2**는 이 wrapper를 소비하는 purge-first 제품 drain과 ended priority를, **C3-3**은 actual socket의
+      revoked→borrow/classify→fence→release와 generation raw Client event source-zero를 소유한다. C3-1에는 제품 pump/socket
+      consumer가 0이고, C3-3 전에는 2c3d 완료나 generation event source-zero를 주장하지 않는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

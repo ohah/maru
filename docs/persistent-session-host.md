@@ -2736,7 +2736,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `complete_owner_seal`은 `captured_fd` 숫자와 `{st_dev,st_ino,st_mode&S_IFMT,SO_TYPE}`을 domain
    `maru.ended-purge.complete-owner.v1`에 포함한다. post-validation은 pointer/len/cap/fd scalar를 먼저 비교하고 안전할 때만 current fd를
    정확히 한 번 같은 platform stat primitive+`getsockopt`로 seal을 재계산한다. Linux의 device identity는
-   `{dev_major,dev_minor}`의 lossless pair projection이다. EBADF, non-socket, non-stream 또는 identity 불일치는 drift이고
+   `{dev_major,dev_minor}`의 lossless pair projection이며 `stx_mask`가 `STATX_TYPE|STATX_INO`를 반환하지 않으면 fail-closed한다.
+   EBADF, non-socket, non-stream 또는 identity 불일치는 drift이고
    captured/current fd를 close하거나 write하지 않는다. 이 tuple은 CI fixture에서 지원하는 close→new socket/file `dup2` 교체를 탐지하는
    best-effort evidence이지 커널이 보장하는 connection-unique cookie나 open-file-description identity가 아니다. 같은 tuple이 재사용되는
    coherent raw fd 교체의 완전한 탐지·복구는 비목표이며, allocator callback이 Maru owner fd를 직접 close/rebind하는 행위는 지원 계약 밖의

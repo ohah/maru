@@ -508,6 +508,9 @@ pub fn view(
     const header_h_i: i32 = @intCast(l.header_h);
     // 카드 내용은 gutter를 뺀 폭을 쓴다(hit-test와 같은 값 — Layout.card_cols 주석 참조).
     const panel_cols: u32 = l.card_cols;
+    // 배경·clip 폭도 텍스트와 **같은 칸 수**에서 뽑는다 — 픽셀 gutter를 따로 빼면 칸 올림과 어긋나
+    // 마지막 칸이 막대와 반쯤 겹친다.
+    const card_w: u32 = l.card_cols * l.cw;
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
     // 패널 배경(둥근+테두리) — context_menu/palette와 동일.
@@ -518,7 +521,9 @@ pub fn view(
     heading_runs[0] = .{ .text = panel_heading };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + cw, .y = rect.y }, .runs = heading_runs, .role = .surface_fg } });
     try appendHeaderActions(l, arena, out, items.len > 0); // 항목 있으면 활성 버튼, 빈 상태면 비활성(dim)
-    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = rect.y + header_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
+    // 구분선 폭은 **카드 폭**이다(패널 전폭이 아니다) — 전폭이면 gutter를 가로질러 스크롤바 뒤로
+    // 선이 지나간다(사용자 보고). 카드 배경이 gutter에서 멈추는 것과 끝을 맞춘다.
+    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = rect.y + header_h_i - 1, .w = card_w, .h = 1 }, .role = .divider } });
 
     if (items.len == 0) {
         // 빈 상태 일러스트: 종-슬래시 아이콘 + 굵은 제목 + 부제(헤더 아래 본문 영역에 세로로 배치, 가로 가운데).
@@ -541,11 +546,17 @@ pub fn view(
     // 스크롤바 gutter를 **상시** 예약한다(SV5a-2). 막대가 공용 경로로 옮겨 오면서 8px pill이 됐는데,
     // 카드 밴드가 패널 폭을 다 먹으면 그 위를 덮어 **안 읽은 카드의 밝은 배경에 막대가 묻힌다**(실측).
     // 사이드바·팔레트가 세운 것과 같은 규율이고, 여기서도 밴드와 우측 요소가 이 폭 하나를 함께 쓴다.
-    // 배경·clip 폭도 텍스트와 **같은 칸 수**에서 뽑는다 — 픽셀 gutter를 따로 빼면 칸 올림과 어긋나
-    // 마지막 칸이 막대와 반쯤 겹친다.
-    const card_w: u32 = l.card_cols * l.cw;
     if (l.scrollable) {
-        try out.append(arena, .{ .clip = .{ .x = rect.x, .y = body_top, .w = card_w, .h = l.viewport_h_px } });
+        // **패널 전체**다 — 카드 뷰포트가 아니다. 이 `.clip` op은 오버레이 **셀 전체**에 걸리는 프레임
+        // scissor라(`OverlayRaster.clip_rect` → `PaneFrame.clip_rect`), 카드 뷰포트로 주면 그 위에 있는
+        // **헤더 셀이 통째로 잘려** "알림"·"모두 읽음"·"모두 지우기" 라벨이 사라진다(스크롤이 켜질 때만
+        // 나타나던 결함 — 헤더 배경·구분선은 GPU quad라 scissor를 안 받아 상자만 남았다).
+        //
+        // 그러면 이 op이 하는 일이 남는가: **남는다.** 카드 자르기는 아래 `card_clip`(= `Op.Text.clip`)이
+        // 하지만 그건 셀 단위라 origin이 안에 있는 행을 통째로 살린다 — 뷰포트 바닥에 걸친 마지막 행이
+        // 패널 밖으로 삐져나온다. 그 픽셀 잘림은 이 프레임 scissor만 할 수 있다. 그래서 지우지 않고
+        // 경계를 패널로 넓힌다(폭도 `card_w`가 아니라 전폭 — 헤더 우측 버튼 라벨이 gutter 자리까지 온다).
+        try out.append(arena, .{ .clip = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h } });
     }
     // 카드 글자를 자를 뷰포트(SV5a). **텍스트는 `Op.Text.clip` 필드로 자른다** — 위에서 낸 `.clip` op은
     // 오버레이 **셀 전체**의 프레임 clip이고, 셀 격자로 lowering하는 모달 경로(`metal_lowering.placeText`)가
@@ -608,7 +619,7 @@ pub fn view(
         // 경계를 분명히 보이게 한다(사용자 피드백 — 예전엔 마지막 카드를 무조건 건너뛰었다). 마지막 카드 아래 선은 카드↔
         // 빈 여백 경계를 가르되, gap이 없으면(스크롤/딱 맞음) 패널 하단 테두리와 겹치므로 생략한다. `.rule`은 macOS no-op이라 `.fill`.
         if (vis + 1 < l.visible or has_gap_below) {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
+            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = card_w, .h = 1 }, .role = .divider } });
         }
     }
 }
@@ -832,6 +843,70 @@ test "notifications view 호버: hovered 카드만 tab_hover_bg(선택 우선) +
         hover_card_bg2 += 1;
     };
     try std.testing.expectEqual(@as(usize, 0), hover_card_bg2);
+}
+
+// 스크롤이 켜졌을 때만 나던 결함 둘을 한 자리에서 고정한다.
+//
+// (1) **헤더가 잘려 사라졌다.** `.clip` op은 오버레이 **셀 전체**에 걸리는 프레임 scissor인데
+//     (`OverlayRaster.clip_rect` → `PaneFrame.clip_rect`) 그것을 카드 뷰포트로 줬다. 헤더 셀이 그 위라
+//     통째로 잘려 "알림"·버튼 라벨이 사라졌다 — 헤더 배경·구분선은 GPU quad라 scissor를 안 받아
+//     상자만 남는 그림이 됐다. clip은 **패널 전체**여야 한다.
+// (2) **구분선이 gutter를 가로질렀다.** 카드 배경은 gutter에서 멈추는데 구분선만 패널 전폭이라 스크롤바
+//     뒤로 선이 지나갔다(사용자 보고).
+test "notifications view 스크롤: 프레임 clip은 패널 전체(헤더 포함) + 구분선은 gutter를 안 넘는다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 800,
+        .backing_height_px = 100,
+        .overlay_scroll_gutter_px = 16,
+    } };
+    var items_buf: [8]Item = undefined;
+    for (&items_buf) |*it| it.* = .{ .title = "t", .body = "b", .relative_time = "방금", .is_read = false, .is_alive = true };
+    const items: []const Item = &items_buf;
+
+    var s: State = .{};
+    s.show(0, 0, items.len);
+    const l = layout(&s, items, p).?;
+    try std.testing.expect(l.scrollable); // 안 넘치면 이 판정자는 공허하다
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+    defer out.deinit(arena);
+    try view(&s, items, p, &tk, arena, &out);
+
+    // (1) 프레임 clip은 패널 전체다 — 헤더 위쪽 경계와 같은 y에서 시작해야 헤더 셀이 산다.
+    var clip: ?draw.Rect = null;
+    for (out.items) |op| if (op == .clip) {
+        clip = op.clip;
+    };
+    const c = clip orelse return error.FrameClipMissing;
+    try std.testing.expectEqual(l.rect.y, c.y);
+    try std.testing.expectEqual(l.rect.h, c.h);
+    try std.testing.expectEqual(l.rect.w, c.w);
+
+    // 헤더 제목이 그 clip 안에 있다 — 이것이 "라벨이 사라지지 않는다"의 직접 판정이다.
+    var heading_y: ?i32 = null;
+    for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, panel_heading)) {
+        heading_y = op.text.origin.y;
+    };
+    const hy = heading_y orelse return error.HeadingMissing;
+    try std.testing.expect(hy >= c.y and hy < c.y + @as(i32, @intCast(c.h)));
+
+    // (2) 어떤 구분선도 카드 폭을 넘지 않는다 — 넘으면 gutter를 가로질러 스크롤바 뒤로 지나간다.
+    const card_right = l.rect.x + @as(i32, @intCast(l.card_cols * l.cw));
+    var dividers: usize = 0;
+    for (out.items) |op| if (op == .fill and op.fill.role == .divider) {
+        dividers += 1;
+        try std.testing.expect(op.fill.rect.x + @as(i32, @intCast(op.fill.rect.w)) <= card_right);
+    };
+    try std.testing.expect(dividers >= 2); // 헤더 + 카드 최소 하나
+    try std.testing.expect(l.card_cols < l.panel_cols); // gutter가 실제로 예약됐다(아니면 위 단언이 공허)
 }
 
 test "notifications panelRect: 빈 제목 폴백 + [min,max] 폭 cap + 종 밑(사이드바 안 유지) + 화면 우/하단 clamp" {

@@ -196,7 +196,19 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   못 자르므로 통째 카드만 보인다). `State.scroll_offset`(보이는 첫 카드, 0=최신)으로 `items[first..first+visible]`만
   렌더한다. 마우스 휠(패널 열림 시 `scrollWheel`이 가로채 터미널/스크롤백으로 안 흘림)·키보드 ↑↓(선택이 viewport
   밖이면 `ensureSelectedVisible`가 따라 스크롤)로 움직인다. **헤더 밴드(제목+액션)는 viewport 상단 sticky**라 스크롤해도
-  안 잘리고, 카드 영역만 스크롤한다. 스크롤 가능하면 카드 영역(헤더 아래) 우측에 얇은 스크롤바 thumb(보이는 비율). 보이는 카드 수·상한은 `scrollWindow`
+  안 잘리고, 카드 영역만 스크롤한다. 스크롤 가능하면 카드 영역(헤더 아래) 우측에 얇은 스크롤바 thumb(보이는 비율).
+
+  **자르는 채널이 둘이고 경계가 서로 다르다** — 섞으면 헤더가 사라진다.
+  - `Op.Text.clip` **필드**(`card_clip`) = **카드 뷰포트**. 셀 격자 lowering(`metal_lowering.placeText`)이
+    글자를 버리는 판정은 이것이고, 셀 단위라 origin이 밖인 행을 통째로 버린다.
+  - `.clip` **op**(프레임 scissor, `OverlayRaster.clip_rect` → `PaneFrame.clip_rect`) = **패널 전체**. 오버레이
+    **셀 전체**에 걸리므로 카드 뷰포트로 주면 그 위의 헤더 셀이 통째로 잘려 "알림"·버튼 라벨이 사라진다(헤더
+    배경·구분선은 GPU quad라 scissor를 안 받아 상자만 남는다). 이 op이 하는 일은 뷰포트 바닥에 걸친 마지막
+    행의 **픽셀 잘림**이다 — `Text.clip`은 행 단위라 그걸 못 한다. 그래서 지우지 않고 경계만 패널로 둔다.
+
+  **구분선·카드 배경 폭은 `Layout.card_cols`** (패널 폭 − 스크롤바 gutter, 칸 단위 올림) 하나가 정한다. 텍스트·✕
+  배치와 hit-test도 같은 값을 본다. 예전엔 gutter를 배경에만 반영해 막대가 우측 시간·✕를 덮었고, 구분선만 패널
+  전폭이라 gutter를 가로질러 스크롤바 뒤로 선이 지나갔다. 보이는 카드 수·상한은 `scrollWindow`
   (개수·화면 높이만 — 휠/키 경로가 Item을 안 빌드하게)가, 선택 끝맞춤 윈도잉은 `overlay_input.windowStart`(palette·
   settings와 공유)가 단일 출처. 다른 오버레이가 열렸을 땐 휠을 소비만 한다(터미널로 안 흘림 — `mouse()` 클릭 게이트와 짝).
 - **클릭 → 점프 + 읽음**: 카드 본문 클릭/Enter → `acceptNotification`이 selected(역순: 0=최신)를 히스토리 인덱스로

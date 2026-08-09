@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
 const Tab = app_session_mod.Tab;
@@ -1091,7 +1092,7 @@ pub fn startRenameGroupForTab(self: *AppSession, tab: *Tab) void {
         break;
     };
     const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 그룹에 안 속함 → no-op
-    self.startRename(.{ .group = self.tabs.items[mi] });
+    settings_ops.startRename(self, .{ .group = self.tabs.items[mi] });
 }
 
 /// 사용자 액션(Cmd+T)으로 새 탭을 연다 — 첫 탭과 같은 종류의 셸을 '현재 창 크기'로 띄운다(보관한

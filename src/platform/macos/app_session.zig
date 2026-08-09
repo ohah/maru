@@ -1,4 +1,5 @@
 const std = @import("std");
+const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
 const sidebar_ops = @import("app_session/sidebar.zig");
 const tab_ops = @import("app_session/tab.zig");
@@ -8,20 +9,20 @@ const maru = @import("maru");
 pub const app = maru.app;
 const chrome = maru.chrome;
 pub const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물) — 카드 줄의 브랜치·폴더 glyph
-const config_mod = maru.config;
+pub const config_mod = maru.config;
 pub const renderer = maru.renderer;
 pub const terminal = maru.terminal;
 pub const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 pub const dock_layout = maru.session.dock_layout;
 pub const dock_panel = maru.session.dock_panel;
-const git_command = maru.session.git_command; // 브랜치 목록 출력 파서(순수) — argv 조립과 같은 모듈
-const content_menu = maru.session.content_menu;
+pub const git_command = maru.session.git_command; // 브랜치 목록 출력 파서(순수) — argv 조립과 같은 모듈
+pub const content_menu = maru.session.content_menu;
 pub const file_tree = maru.session.file_tree;
 pub const file_tree_navigation = maru.session.file_tree_navigation;
 pub const file_tree_mutation = maru.session.file_tree_mutation;
 pub const file_tree_icon = chrome.file_tree_icon;
 pub const dock_view_bar = chrome.components.dock_view_bar;
-const git_backend_mod = @import("git_backend.zig");
+pub const git_backend_mod = @import("git_backend.zig");
 const scm_view = maru.session.scm_view;
 pub const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
@@ -70,7 +71,7 @@ const agent_session_archive_detail = maru.session.agent_session_archive_detail;
 pub const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
-const command_catalog = @import("command_catalog.zig");
+pub const command_catalog = @import("command_catalog.zig");
 const update_check = @import("update_check.zig"); // 인앱 새 버전 안내(distribution.md): tag 파싱·semver 비교·curl 조회
 const build_options = @import("build_options"); // build.zig가 주입한 .version(build.zig.zon 단일 출처)
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
@@ -800,8 +801,8 @@ const max_status_bar_right_items: usize = 4; // blocked·running·알림·리소
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
 // 1~2칸으로 무너져 런타임 UX로는 부적절하다(config 파일로는 그 밖 값도 가능, 단축키·세팅 GUI 슬라이더가 이 범위).
 // theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
-const font_size_min: f32 = 6.0;
-const font_size_max: f32 = 72.0;
+pub const font_size_min: f32 = 6.0;
+pub const font_size_max: f32 = 72.0;
 // Session Dock은 terminal line spacing·font size와 별도 Chrome typography(role별 고정 pt)를 유지한다.
 // **face는 예외로 terminal `font.family`를 따른다** — 사이드바와 한 화면에 보이므로 face까지 독립이면
 // 사용자 폰트 설정을 앱이 절반만 따르게 된다(docs/font-strategy.md "Chrome 텍스트 face"). 크기 위계가
@@ -1995,7 +1996,7 @@ const FileHeaderModeRef = struct { surface_id: u64, mode: dock_panel.Mode };
 /// 인라인 rename 중인 대상(어느 계층의 어느 라이브 객체). 커밋 시 그 객체의 custom_name을 쓴다. 모두 heap-pin
 /// 포인터(*Tab/*Pane/*Term)라 ArrayList realloc·트리 회전에도 안정 — 단 그 객체가 teardown(close/exit/reap)으로
 /// 사라지면 호출자가 rename을 취소(null)해야 한다(stale 포인터 방지, invalidateForFreedPane·destroyTerm 경로).
-const RenameTarget = union(enum) {
+pub const RenameTarget = union(enum) {
     workspace: *Tab,
     pane: *Pane,
     term: *Term,
@@ -2185,7 +2186,7 @@ pub const FileTreePerfCounters = struct {
 /// OS 클립보드 1회성 동작 신호(input.right-click paste·menu). Zig가 우클릭/터미널 메뉴에서 세우고, Swift가 매 tick
 /// take_clipboard_action으로 drain해 실행한다(copy=copySelectionToPasteboard, paste=pastePasteboardText). ABI는
 /// u32로 전달(none=0/copy=1/paste=2) — 끝의 take_clipboard_action 주석과 1:1. 클립보드는 OS 소유라 Swift가 실행.
-const ClipboardAction = enum(u8) {
+pub const ClipboardAction = enum(u8) {
     none = 0,
     copy = 1,
     paste = 2,
@@ -2196,7 +2197,7 @@ const ClipboardAction = enum(u8) {
 /// 나머지는 서로·앰버와 명확히 구분되는 중간 채도 색조(파랑/초록/빨강/보라)로 골라 여러 워크스페이스를 한눈에 가르게 했다.
 /// 0(없음)에 순수 검정 프리셋이 없으므로 "0=색 없음"과 충돌하지 않는다. 배경 tint·좌측 막대 **둘 다** 이 팔레트를
 /// 프리셋으로 쓴다(직교한 별도 설정, 색만 공유). 적용 알파는 용도별로 다르다 — 배경=반투명 tint(tab_bg_tint_alpha), 막대=불투명.
-const tab_color_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
+pub const tab_color_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
 /// 프리셋 색 이름(배경 "배경: …"·막대 "바: …" 라벨이 공유). tab_color_presets와 index-align — 개수가 어긋나면 comptime 실패.
 const tab_color_names = [_][]const u8{ "없음", "앰버", "파랑", "초록", "빨강", "보라" };
 comptime {
@@ -2208,13 +2209,13 @@ fn tabColorLabels(comptime prefix: []const u8) [tab_color_presets.len][]const u8
     for (tab_color_names, 0..) |name, i| out[i] = prefix ++ name;
     return out;
 }
-const tab_bg_labels = tabColorLabels("배경: "); // 배경 tint 프리셋 라벨
+pub const tab_bg_labels = tabColorLabels("배경: "); // 배경 tint 프리셋 라벨
 // 좌측 accent 막대색 라벨 — 배경 tint와 직교한 별도 설정(사용자 요청: "왼쪽 바 색·배경색 두 개 따로"). "바: 없음"(0)=기본
 // (활성 카드=테마 앰버·비활성=막대 없음), 그 외=활성·비활성 카드 모두 그 색 막대. 값은 acceptContextMenu가 tab_color_presets에서 꺼낸다.
-const tab_accent_labels = tabColorLabels("바: ");
+pub const tab_accent_labels = tabColorLabels("바: ");
 // 그룹 공통 색 프리셋 라벨(SG5-2) — 카드 색과 같은 팔레트(tab_color_presets) 재사용. 그룹 헤더 밴드·소속 카드 막대에
 // 실리는 그룹 색을 우클릭에서 바꾼다("그룹 색: 없음"(0)=색 없음/기본 폴백). 그룹에 안 속하면 setGroupColorForTab no-op.
-const tab_group_color_labels = tabColorLabels("그룹 색: ");
+pub const tab_group_color_labels = tabColorLabels("그룹 색: ");
 // 중첩 그룹(SG5-3) depth 스택 상한 — projectRows/effectiveDepthAt이 위치 파생 depth를 계산할 때 쓰는 고정 버퍼 크기.
 // 실사용은 얕고(폴더 트리 몇 단), 이 값을 넘는 극단 중첩은 push 가드로 무시(depth 계산이 top에서 포화 — 크래시 없음).
 // create_group도 이 값으로 새 마커 depth를 클램프해 u8 오버플로/무한 들여쓰기를 막는다.
@@ -2260,21 +2261,21 @@ fn groupBlockPermutation(perm: []usize, n: usize, m: usize, j: usize, rest_inser
     }
     return new_marker;
 }
-const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, bg_first..=배경, accent_first..=바(buildContextMenuItems 순서와 단일 출처).
-const ctx_menu_bg_first: usize = 2;
-const ctx_menu_accent_first: usize = ctx_menu_bg_first + tab_bg_labels.len; // 배경 프리셋 다음(=8)부터 accent 막대 프리셋
-const ctx_menu_group_create: usize = ctx_menu_accent_first + tab_accent_labels.len; // accent 다음: "새 그룹으로 묶기"(create_group=중첩)
-const ctx_menu_group_sibling: usize = ctx_menu_group_create + 1; // "형제 그룹으로 분리"(create_sibling_group=같은 depth 형제, SG5-3)
-const ctx_menu_group_ungroup: usize = ctx_menu_group_sibling + 1; // "그룹 풀기"(ungroup) — SG3c 우클릭(단축키/팔레트 공유)
-const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup 다음: "그룹 색: …" 프리셋(SG5-2)
+pub const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, bg_first..=배경, accent_first..=바(buildContextMenuItems 순서와 단일 출처).
+pub const ctx_menu_bg_first: usize = 2;
+pub const ctx_menu_accent_first: usize = ctx_menu_bg_first + tab_bg_labels.len; // 배경 프리셋 다음(=8)부터 accent 막대 프리셋
+pub const ctx_menu_group_create: usize = ctx_menu_accent_first + tab_accent_labels.len; // accent 다음: "새 그룹으로 묶기"(create_group=중첩)
+pub const ctx_menu_group_sibling: usize = ctx_menu_group_create + 1; // "형제 그룹으로 분리"(create_sibling_group=같은 depth 형제, SG5-3)
+pub const ctx_menu_group_ungroup: usize = ctx_menu_group_sibling + 1; // "그룹 풀기"(ungroup) — SG3c 우클릭(단축키/팔레트 공유)
+pub const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup 다음: "그룹 색: …" 프리셋(SG5-2)
 // "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 조건부로 맨 끝에 붙인다(최상위 카드엔 안 뜸). 맨 끝이라
 // 항상 present일 때만 이 인덱스를 차지하고(shorter 메뉴에선 sel이 여기 도달 못 함) 앞 고정 인덱스를 안 흔든다.
-const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_color_labels.len;
+pub const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_color_labels.len;
 // "여기서 최상위로 분리"(promote_to_top_level, §14.5·§14.7) — remove 바로 뒤 슬롯. **비마커 그룹 멤버(leaf)에만** 붙인다
 // (§14.8 SR5 결정 (a): 마커 카드는 promoteTabToTopLevelInPlace no-op이라 숨긴다). 그래서 remove(tabIsInGroup)와 promote
 // (tabIsInGroup ∧ 비마커)는 leaf 멤버에선 함께 뜨고(remove=ctx_menu_group_remove·promote=ctx_menu_group_promote로 고정 인덱스
 // 정렬), 마커 카드에선 remove만 떠 메뉴가 한 칸 짧아진다(sel이 ctx_menu_group_promote에 도달 못 해 앞 인덱스 불변).
-const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
+pub const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
 /// 브랜치 메뉴에 띄우는 최대 개수. `for-each-ref`는 최근 순이라 위쪽이 대개 원하는 것이고, 목록이 길면
 /// 메뉴가 화면을 넘어 쓸모가 없어진다. 넘치는 만큼은 터미널에서 `git branch`로 보는 게 맞다.
 const max_branch_menu_items: usize = 12;
@@ -2286,9 +2287,9 @@ const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 
 // (setGroupColorForTab)은 카드 메뉴와 **같은 인프라**를 재사용해 헤더/카드가 같은 색 메뉴를 공유한다(중복 최소). 대상 마커
 // 탭은 renameTargetAt이 group_header row의 self.tabs[gh.tab](= group_start 마커)로 잡는다. 카드 메뉴처럼 pin/배경/accent를
 // 넣지 않는 이유: 헤더는 그룹 전체를 가리키는 합성 row이지 개별 카드가 아니다(개별 카드 색은 그 카드 우클릭에 있다).
-const ctx_group_menu_pin: usize = 1; // Rename(0) 다음: 그룹 고정/해제(toggleGroupPin — 그룹 통째 고정, GP3 §12.10)
-const ctx_group_menu_ungroup: usize = ctx_group_menu_pin + 1; // 그 다음: 그룹 풀기
-const ctx_group_menu_color_first: usize = ctx_group_menu_ungroup + 1; // 그룹 색 프리셋 시작(카드 메뉴의 group_color_first와 같은 라벨/팔레트)
+pub const ctx_group_menu_pin: usize = 1; // Rename(0) 다음: 그룹 고정/해제(toggleGroupPin — 그룹 통째 고정, GP3 §12.10)
+pub const ctx_group_menu_ungroup: usize = ctx_group_menu_pin + 1; // 그 다음: 그룹 풀기
+pub const ctx_group_menu_color_first: usize = ctx_group_menu_ungroup + 1; // 그룹 색 프리셋 시작(카드 메뉴의 group_color_first와 같은 라벨/팔레트)
 comptime {
     // 그룹 헤더 메뉴 항목 최대치(Rename + 그룹 풀기 + 색 프리셋)가 공유 버퍼(ctx_menu_count 크기)를 넘지 않는지 확인.
     if (ctx_group_menu_color_first + tab_group_color_labels.len > ctx_menu_count) @compileError("group header menu exceeds context_menu_items_buf");
@@ -2364,7 +2365,7 @@ var app_quit_keep_alive: bool = false;
 // 기본 quit은 detach(생존), 이 alternate만 명시적으로 다 끝낸다. app_quitting과 짝으로 리셋한다.
 var app_quit_end_all: bool = false;
 
-fn setAppKeepAlivePolicy(value: bool) void {
+pub fn setAppKeepAlivePolicy(value: bool) void {
     app_keep_alive_after_quit = value;
     app_keep_alive_policy_initialized = true;
 }
@@ -2547,6 +2548,43 @@ pub const MeasuredTextCache = struct {
 };
 
 pub const AppSession = struct {
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn configPath(self: *AppSession) []const u8 {
+        return settings_ops.configPath(self);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn keyHintConfig(self: *const AppSession) KeyHintConfigAbi {
+        return settings_ops.keyHintConfig(self);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn openFileContentMenu(
+        self: *AppSession,
+        surface_id: u64,
+        request: maru.session.control_bridge.MenuRequest,
+    ) !void {
+        return settings_ops.openFileContentMenu(self, surface_id, request);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn quickTerminalConfig(self: *const AppSession) QuickTerminalConfig {
+        return settings_ops.quickTerminalConfig(self);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn reloadConfig(self: *AppSession) void {
+        return settings_ops.reloadConfig(self);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn serializeConfig(self: *AppSession) ![]const u8 {
+        return settings_ops.serializeConfig(self);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeConfigDirty(self: *AppSession) bool {
+        return settings_ops.takeConfigDirty(self);
+    }
+    /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
+        return settings_ops.takeFileMenuAction(self);
+    }
+
     /// 본문 분리: app_session/scroll.zig(F8). ABI가 직접 부르므로 진입만 남긴다.
     pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
         return scroll_ops.scrollPage(self, delta_pages);
@@ -4170,10 +4208,10 @@ pub const AppSession = struct {
                 self.showNotice("브랜치 목록을 읽지 못했습니다"); // 조용히 아무 일도 안 일어나는 것보다 낫다
                 continue;
             }
-            self.clearBranchMenuText();
+            settings_ops.clearBranchMenuText(self);
             self.branch_menu_text = res.text; // 소유권 인수 — 이름 슬라이스가 이 버퍼를 빌린다
             self.branch_menu_len = git_command.collectBranches(self.branch_menu_text, &self.branch_menu_names);
-            self.openBranchMenu();
+            settings_ops.openBranchMenu(self);
         }
         while (backend.takeSnapshotResult()) |taken| {
             var snapshot = taken;
@@ -4246,7 +4284,7 @@ pub const AppSession = struct {
     /// 아닙니다"가 뜬다(손 확인에서 실제로 그랬다).
     ///
     /// 결과 슬라이스는 `buf`에 담아 돌려준다(walk-up 중간 경로라 어디도 소유하지 않는다).
-    fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
+    pub fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
         for (self.file_tree.roots.items) |root| {
             if (repoRootFor(root.path, buf)) |found| return found;
         }
@@ -4462,7 +4500,7 @@ pub const AppSession = struct {
     /// 테마에서는 `바 높이 = cell + 2*pad`가 성립하지 않는다. 그때 pad를 오프셋으로 쓰면 제목이 바 위쪽에
     /// 붙는다(폰트가 작을수록 심해진다). 상태바가 쓰는 `(h -| cell_height) / 2`와 같은 식으로 실제 바 높이에서
     /// 파생한다 — token이 0이라 셀 파생으로 떨어지는 tui에서는 이 식이 pad_y와 같은 값을 낸다(동작 보존).
-    fn chromeBarTextOffsetY(self: *const AppSession, bar_h: u32) u32 {
+    pub fn chromeBarTextOffsetY(self: *const AppSession, bar_h: u32) u32 {
         return (bar_h -| self.cell_height_px) / 2;
     }
 
@@ -4510,32 +4548,9 @@ pub const AppSession = struct {
         };
     }
 
-    /// rename 편집 표시 텍스트 "query+조합중preedit" + caret 1칸. caret은 `blink_visible`이면 '|', 아니면 공백 —
-    /// **폭은 항상 +1로 고정**(renameDisplayWidth와 일치)이라 깜빡여도 텍스트/세그먼트 폭이 안 흔들린다. 토글은
-    /// updateCursorBlink가 rename 중 metal_dirty로 rebuild를 일으켜 보인다(터미널 커서 suffix-trim과 달리 인라인
-    /// caret은 셀 스트림의 글자라 full rebuild 필요 — text-blink와 같은 경로). 호출자(allocator) 소유.
-    pub fn renameEditText(self: *AppSession, allocator: std.mem.Allocator) ![]const u8 {
-        const caret: []const u8 = if (self.blink_visible) "|" else " ";
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ self.rename_input.query.items, self.rename_input.preedit.items, caret });
-    }
-
-    /// rename 편집 텍스트(query)의 표시 칸 수 — **방출자와 같은 단위**여야 한다.
-    ///
-    /// rename 편집기는 `appendEllipsizedTitle`이 그린다(사이드바 카드 이름줄·파일 트리 행·pane 탭·라벨). 그 방출은
-    /// CG1 이후 **grapheme cluster 하나 = 셀 하나**인데, 여기서 `overlay_input.displayCols`(코드포인트당
-    /// Σ max(1,cellWidth))를 쓰면 NFD 이름에서 두 모델이 갈라진다 — macOS FS가 주는 '한'(U+1112 U+1161 U+11AB)이
-    /// 렌더는 2칸인데 displayCols는 4칸으로 세, caret과 IME 후보창이 글자에서 ~2배 오른쪽으로 떠 버린다
-    /// (code-review max). 그래서 방출과 같은 폭 함수(`chrome.text_layout.displayCols`)를 단일 출처로 쓴다.
-    ///
-    /// `overlay_input.displayCols`는 폐기 대상이 아니다 — find·palette·context menu·모달은 `placeText`(오버레이
-    /// raster)가 **코드포인트 단위로** 그리므로 그쪽 폭 모델과 짝이 맞다. 두 폭 함수는 각자의 방출자를 따라간다.
-    pub fn renameQueryCols(self: *const AppSession) u32 {
-        return @intCast(chrome.text_layout.displayCols(self.rename_input.query.items, null));
-    }
-
     const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
     /// term이 속한 pane의 바·그 탭 인덱스(rename caret 위치 계산용). 못 찾으면 null.
-    fn termBarLocation(self: *AppSession, term: *Term) ?TermBarLoc {
+    pub fn termBarLocation(self: *AppSession, term: *Term) ?TermBarLoc {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
@@ -4585,164 +4600,6 @@ pub const AppSession = struct {
             .w = @intCast(cw),
             .h = @intCast(ch),
         };
-    }
-
-    /// rename 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect)에 쓴다. 대상별 편집기
-    /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐
-    /// 그려짐 — 단일 줄 append라 뒤 텍스트 없음, find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
-    /// 구하면 null(터미널 커서로 폴백). 렌더 geometry(paneBar·barMetrics·segOf, 사이드바 indent/slot)와 같은 셈법.
-    fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
-        const target = self.rename orelse return null;
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
-        if (cw == 0 or ch == 0) return null;
-        const qcols: u32 = self.renameQueryCols(); // 방출자(appendEllipsizedTitle)와 같은 cluster 단위
-        switch (target) {
-            .workspace => |tab| {
-                const idx = for (self.tabs.items, 0..) |t, i| {
-                    if (t == tab) break i;
-                } else return null;
-                // 사이드바 이름줄(line 0) 좌단 indent(buildSidebarTitleFrame와 같은 ceil(card_gap+accent_bar)/cw).
-                // 번호 prefix는 제거됐으므로(이름줄에 번호 없음) caret = indent + query 폭.
-                const sp = self.buildChromeTokens().space;
-                const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
-                // 이름줄이 사이드바 폭을 넘치면 렌더(buildSidebarDrawList editing_row)가 tail 앵커로 caret을 이름영역 **우경계**에
-                // 두므로, caret_col도 거기로 clamp해야 IME 후보창이 잘린 caret 아래(사이드바 안)에 온다 — 안 그러면 head-anchored
-                // 열이 사이드바 밖 터미널 위로 떠 조합창이 caret과 분리된다(.pane/.term의 세그먼트 우경계 clamp와 같은 규율).
-                const full_cols: u32 = self.sidebar_width_px / cw;
-                const caret_col = @min(indent_cols + qcols, full_cols -| 2);
-                // 리네임 카드 줄 수: 이름줄(항상) + 상태줄(running·idle 에이전트면). 리네임 중 branch/path 보조줄은
-                // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
-                // 세로 중앙 정렬하므로, 상태줄이 생기면 이름줄이 위로 (ch/2) 올라간다 — caret y도 같은 n을 써야 IME
-                // 후보창이 이름 caret 아래에 오고 파형 상태줄과 안 겹친다(buildSidebarDrawList의 line_count 인코딩과 동형).
-                // rename 중 카드 줄 수 = 이름줄 + **상태줄**(있으면). 보조줄(브랜치·경로)만 편집 중 숨긴다.
-                // 렌더(buildSidebarTitleDrawList의 rename 분기)가 workspaceStatusLine을 여전히 append하므로 여기서
-                // 1로 고정하면 caret이 반 줄 아래로 밀려 IME 후보창이 상태줄을 덮는다(code-review max — 원래 있던
-                // 계산을 되돌린다).
-                const line_count: u32 = if (workspaceHasStatusLine(tab)) 2 else 1;
-                // 카드 이름줄(line 0)의 view 절대 y — Swift firstRect가 backing px 좌상단 원점을 view 좌표로 변환만
-                // 하므로(사이드바 origin 보정 없음), 렌더러(maru_metal_renderer.m: slot_idx*slot_h + header − scroll +
-                // 블록중앙)와 같은 절대 y를 줘야 한다. 예전엔 idx*slot_h만 써서 헤더 높이만큼 위·스크롤만큼 아래로
-                // 어긋났다(검색 caret sidebarSearchCaretRect가 search_row*ch로 헤더 영역 절대 y를 쓰는 것과 같은 규약).
-                // slotTop이 header 더하고 scroll 뺀 슬롯 상단(단일 출처, i64), 거기에 n줄 블록 세로 중앙 오프셋을 더한다.
-                // 헤더 위로 스크롤돼 음수면 헤더 아래로 clamp — IME 후보창이 고정 검색 헤더 위로 뜨지 않게(scissor가 편집
-                // 텍스트를 헤더에서 자르는 것과 짝, slotAt이 헤더 영역을 슬롯에서 제외하는 것과 일관).
-                // 옛 버그(조사 확인): idx는 원본 탭 인덱스인데 slotTop에 슬롯으로 넣어 검색 필터 활성 시 표시 슬롯과
-                // 어긋났다. displaySlotOf로 원본 탭→표시 row로 바꿔 교정하고, 가변 높이 rowTop을 쓴다. 필터로 숨었으면
-                // (rename 중엔 드묾) null → 터미널 커서 폴백.
-                // SG8d: 카드 드래그 프리뷰 중이면 렌더가 preview_rows를 쓰므로 caret도 그 도메인에서 이 탭 카드의 표시 row를
-                // 찾아 rowTop을 잰다(rename↔카드 드래그는 사실상 배타지만, 공존해도 caret이 그려진 카드와 어긋나지 않게).
-                // 비드래그면 sidebarRenderRows()==sidebar_rows라 displaySlotOf와 동일 결과(회귀 없음).
-                const rrows = sidebar_ops.sidebarRenderRows(self);
-                const slot_row = blk_sr: {
-                    for (rrows, 0..) |r, s| switch (r) {
-                        .card => |c| if (c.tab == idx) break :blk_sr s,
-                        .agent_toggle, .agent => {},
-                        .group_header => {},
-                    };
-                    break :blk_sr (self.displaySlotOf(idx) orelse return null);
-                };
-                const slot_top = chrome.components.sidebar.rowTop(rrows, slot_row, self.sidebar_header_height_px, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px);
-                // 블록중앙은 **그 row의 실제 높이**로 잡는다 — 카드 높이가 줄 수 가변이라 옛 고정 슬롯을 쓰면
-                // 리네임 caret이 카드 밖으로 밀린다(fillSidebarGlyphPyTop과 같은 계산을 공유). 이름줄=line 0이라 +block_off만.
-                const row_h_caret = chrome.components.sidebar.rowHeight(rrows[slot_row], sidebar_ops.sidebarMetrics(self));
-                const block_off: i64 = @intCast((row_h_caret -| sidebar_ops.sidebarBlockHeight(line_count, ch)) / 2);
-                const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
-                return .{
-                    .x = @intCast(caret_col * cw),
-                    .y = @intCast(caret_y),
-                    .w = @intCast(cw),
-                    .h = @intCast(ch),
-                };
-            },
-            .pane => |pane| {
-                const pb = pane_ops.paneBarForLeaf(self, pane) orelse return null;
-                // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1). 긴 이름은 말줄임되므로 caret을 라벨 세그먼트
-                // 우경계(label_cols-1, 마지막 칸은 탭과의 간격)로 clamp해 후보창이 라벨 밖(탭 위)으로 새지 않게.
-                const caret_col = @min(1 + qcols, if (pb.label_cols > 1) pb.label_cols - 1 else 1);
-                const text_offset_y = self.chromeBarTextOffsetY(pb.full.h); // 렌더 text_origin_y와 같은 식
-                return .{
-                    .x = @intCast(pb.full.x + (pb.grip_cols + caret_col) * cw), // 이름은 grip 핸들 뒤에서 시작
-                    .y = @intCast(pb.full.y + text_offset_y),
-                    .w = @intCast(cw),
-                    .h = @intCast(ch),
-                };
-            },
-            .term => |term| {
-                const loc = self.termBarLocation(term) orelse return null;
-                const m = barMetrics(loc.pb.tabs, cw, loc.count, self.buildChromeTokens().space.tab_width_cols, loc.scroll) orelse return null;
-                const seg = m.segOf(loc.tab_index);
-                // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) 뒤(번호 prefix 제거 — U-tab2). **그 탭 세그먼트 우경계(seg.end_col)**로
-                // clamp해 caret/후보창이 인접 탭 위로 새지 않게 한다(end_col<=start_col인 overflow 탭이면 m.cols 폴백).
-                const seg_end = if (seg.end_col > seg.start_col) seg.end_col else m.cols;
-                const caret_col = @min(seg.start_col + 1 + qcols, seg_end);
-                const text_offset_y = self.chromeBarTextOffsetY(loc.pb.tabs.h); // 렌더 text_origin_y와 같은 식
-                return .{
-                    .x = @intCast(loc.pb.tabs.x + caret_col * cw),
-                    .y = @intCast(loc.pb.tabs.y + text_offset_y),
-                    .w = @intCast(cw),
-                    .h = @intCast(ch),
-                };
-            },
-            .group => |gtab| {
-                // 그룹 헤더 rename caret — 헤더 텍스트 "{삼각} {편집}"에서 삼각(1칸)+공백(1칸) 뒤가 편집 시작이라 col=2+qcols.
-                // 헤더 표시 row를 찾아(group_header.tab == 대상 인덱스) rowTop + 헤더 1줄 세로 중앙에 caret y를 둔다.
-                const idx = for (self.tabs.items, 0..) |t, i| {
-                    if (t == gtab) break i;
-                } else return null;
-                var slot_row: ?usize = null;
-                var hdr_depth: u8 = 1;
-                // SG8d: 렌더 도메인(카드 드래그 중=preview_rows)에서 헤더 표시 row를 찾아 caret을 그려진 헤더와 정합시킨다.
-                const rrows = sidebar_ops.sidebarRenderRows(self);
-                for (rrows, 0..) |row, s| switch (row) {
-                    .group_header => |gh| if (gh.tab == idx) {
-                        slot_row = s;
-                        hdr_depth = gh.depth;
-                        break;
-                    },
-                    .agent_toggle, .agent => {},
-                    .card => {},
-                };
-                const sr = slot_row orelse return null;
-                // buildSidebarTitleDrawList는 모든 사이드바 glyph(헤더 삼각/이름 포함)를 indent_cols(=ceil((card_gap+
-                // accent_bar)/cw))만큼 우측으로 민다(13936). .workspace caret(2053)이 그 항을 더하듯 헤더 caret도 더해야
-                // 삼각/이름과 정렬된다 — 옛 코드는 이 항이 없어 캐럿·IME 후보창이 indent_cols만큼 왼쪽으로 어긋났다(code-review #5).
-                const sp = self.buildChromeTokens().space;
-                const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
-                // 중첩 헤더(SG5-3)는 (depth-1)*group_indent 만큼 더 들여써 있으므로 caret도 그만큼 우측으로. 최상위(depth 1)=0이라
-                // 비중첩 caret은 그대로. group_indent_cols = ceil(group_indent_px / cw)(buildSidebarTitleDrawList와 단일 출처).
-                const gindent_px = sp.group_indent_px;
-                const gindent_cols: u32 = if (gindent_px > 0) (@as(u32, gindent_px) + cw - 1) / cw else 0;
-                const hindent_cols: u32 = (if (hdr_depth > 0) hdr_depth - 1 else 0) * gindent_cols;
-                // head 위치 = 사이드바 indent + 중첩 들여쓰기 + 삼각 + 공백 + 편집 폭. 헤더 이름이 사이드바 폭을 넘치면
-                // 렌더가 tail 앵커(editing_row)로 caret을 이름영역 우경계에 두므로, 여기도 full_cols-2로 clamp해 IME 후보창이
-                // 사이드바 밖 터미널 위로 안 뜨게 한다(.workspace와 같은 규율 + main #5의 indent_cols 항 보존).
-                const full_cols: u32 = self.sidebar_width_px / cw;
-                const caret_col: u32 = @min(indent_cols + hindent_cols + 2 + qcols, full_cols -| 2);
-                const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px);
-                const block_off: i64 = @intCast((self.sidebar_header_row_h_px -| ch) / 2); // 헤더 1줄 세로 중앙
-                const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
-                return .{ .x = @intCast(caret_col * cw), .y = @intCast(caret_y), .w = @intCast(cw), .h = @intCast(ch) };
-            },
-            .file_tree => |edit| {
-                const index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = edit.row_kind, .path = edit.path() }) orelse
-                    file_panel_ops.selectedFileTreeRow(self) orelse return null;
-                const dg = dock_ops.dockGeometry(self);
-                // 픽셀 스크롤이라 행의 y는 content 좌표에서 offset을 뺀 값이다. 위·아래로 완전히 벗어난
-                // 행에는 caret을 두지 않는다 — 부분적으로 걸친 행은 pane clip이 자르므로 그대로 둔다.
-                const row_top: i64 = @as(i64, @intCast(index)) * @as(i64, ch) - @as(i64, file_panel_ops.fileTreeEffectiveScrollPx(self));
-                if (row_top + @as(i64, ch) <= 0 or row_top >= @as(i64, dg.tree_content.h)) return null;
-                const depth = file_tree.rowDepth(self.file_tree_rows.items[index]) orelse 0;
-                const start_col: u32 = @min(@as(u32, 4) + @as(u32, depth) * 2, dg.tree_content.w / cw -| 1);
-                const max_col = dg.tree_content.w / cw -| 1;
-                return .{
-                    .x = @intCast(dg.tree_content.x + @min(start_col + qcols, max_col) * cw),
-                    .y = @intCast(@as(i64, dg.tree_content.y) + row_top),
-                    .w = @intCast(cw),
-                    .h = @intCast(ch),
-                };
-            },
-        }
     }
 
     pub const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
@@ -5516,7 +5373,7 @@ pub const AppSession = struct {
     /// 세운다. best-effort — 실패면 모듈-var가 null로 남아 in-process로 폴백한다. exe=형제 `maru` CLI(launcher가 exec),
     /// base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`(discovery가 그 아래 `session-host/`를 씀). **allocator=`smp_allocator`**
     /// (앱 전역 자원 — routing/live_registry와 동일, 프로세스 수명이라 창 allocator를 안 씀). 경로 문자열은 transient(arena).
-    fn ensureRemoteBackend(self: *AppSession) void {
+    pub fn ensureRemoteBackend(self: *AppSession) void {
         // 원격 host는 macOS 전용 — Linux ABI 컴파일에선 아래 블록이 comptime 가지치기돼 no-op이다.
         if (is_macos) {
             if (app_remote_backend != null) return; // 이미 앱 전역으로 세워짐 — 재사용(창마다 새 연결 금지).
@@ -5932,7 +5789,7 @@ pub const AppSession = struct {
             } else null,
             // config cursor.shape — 원격 core는 host 소유라 spawn snapshot에 실어야 첫 출력 전에 기본 모양이 선다
             // (in-process는 아래 chokepoint가 같은 값을 직접 주입 — 로컬/원격 동일 규칙).
-            .default_cursor_shape = self.configCursorShape(),
+            .default_cursor_shape = settings_ops.configCursorShape(self),
         };
         const surface = surface: {
             if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
@@ -6065,7 +5922,7 @@ pub const AppSession = struct {
         // config cursor.shape를 코어 **기본** 커서 모양으로 주입한다(DECSCUSR 0·RIS 복귀 지점). 앱이 DECSCUSR로
         // 명시하면 그게 이기고(vim 모드별 bar/block), 거둬들이면 이 값으로 돌아온다. 원격은 위 runtime_config가
         // 같은 값을 host core에 싣는다 — 여기 직접 주입은 in-process 경로(placeholder core는 host가 덮어씀).
-        term.surface.core.setDefaultCursorShape(self.configCursorShape());
+        term.surface.core.setDefaultCursorShape(settings_ops.configCursorShape(self));
         term.surface.title = title;
         term.surface.command = command;
 
@@ -6758,7 +6615,7 @@ pub const AppSession = struct {
         self.view_options_menu = false;
         self.terminal_context_menu = false;
         self.branch_menu_open = false;
-        self.clearFileContentMenu();
+        settings_ops.clearFileContentMenu(self);
         // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
         // 그리드(union bbox)에 painter-order로 raster해 텍스트가 겹쳐 보였다(z-order 겹침). settings를 단일-오버레이
         // 불변식에 포함해 한 번에 하나만 뜨게 한다. toggleSettings는 이 경로를 거치지 않아 열기엔 영향 없음.
@@ -8057,7 +7914,7 @@ pub const AppSession = struct {
     /// (새 pinned_count)으로 옮긴다. moveTab이 tabs/surface_ptrs를 같이 회전하고 active_tab을 보정하므로(이미 새
     /// pin 상태 기준으로 같은 그룹에 clamp) 인덱스 추적이 일관된다. tab은 heap-pin `*Tab`이라 회전 후에도 안정 —
     /// 옮긴 뒤 자기 인덱스를 다시 찾을 필요 없이 목적 인덱스로 곧장 옮긴다.
-    fn togglePin(self: *AppSession, tab: *Tab) void {
+    pub fn togglePin(self: *AppSession, tab: *Tab) void {
         // 현재 인덱스(heap-pin 포인터 일치로 검색 — 탭 수는 적다). 못 찾으면(있을 수 없음) 토글만 하고 끝.
         var from: ?usize = null;
         for (self.tabs.items, 0..) |t, i| if (t == tab) {
@@ -8109,7 +7966,7 @@ pub const AppSession = struct {
     ///     고정 그룹 앞에 다른 고정 그룹) 프리픽스 불변식을 항상 지킨다(moveGroupRange 단일 insert_before로는 표현 못 하는
     ///     경계 케이스 — 연속 블록이라 stable 수집이 그룹 통째를 붙여 옮기고 파티션 무결이 유지된다).
     ///  4. `normalize`(idempotent 확인) 후 1회 rebuild.
-    fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
+    pub fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
         var mi_opt: ?usize = null;
         for (self.tabs.items, 0..) |t, i| if (t == marker) {
             mi_opt = i;
@@ -8146,7 +8003,7 @@ pub const AppSession = struct {
     /// keystone). 최상위 카드(그룹 미소속)면 no-op — 로컬 pin이 무의미하므로 호출처(acceptContextMenu)가 최상위는 togglePin,
     /// 마커 카드는 toggleGroupPin으로 분기한다(cardPinRole). 활성 탭 포인터는 reorderTabs가 추적해 유지된다(stablePartitionSubtree).
     /// 드래그 게이트(§13.4 보강6)는 stablePartitionSubtree 내부가 처리(프리뷰 중이면 float 생략, 플래그만 세팅).
-    fn toggleLocalPin(self: *AppSession, member: *Tab) void {
+    pub fn toggleLocalPin(self: *AppSession, member: *Tab) void {
         var idx: ?usize = null;
         for (self.tabs.items, 0..) |t, i| if (t == member) {
             idx = i;
@@ -8167,7 +8024,7 @@ pub const AppSession = struct {
     ///  - **비마커 멤버**(그룹 소속) = `.local` — 그룹 내 위치 고정(toggleLocalPin, GL §13). 현행 그룹째 위임(GP3)을 되돌린 것.
     ///  - **최상위 카드**(그룹 미소속) = `.individual` — 개별 전역 pin(togglePin, 현행 유지).
     const CardPinRole = enum { group, local, individual };
-    fn cardPinRole(self: *AppSession, tab: *const Tab) CardPinRole {
+    pub fn cardPinRole(self: *AppSession, tab: *const Tab) CardPinRole {
         if (tab.group_start != null) return .group; // 마커 카드 = 그룹 시작 → 그룹째(C2 권위)
         if (tab_ops.enclosingGroupMarkerTab(self, tab) != null) return .local; // 비마커 멤버 = 그룹-로컬 위치 고정
         return .individual; // 최상위 카드 = 개별 전역 pin
@@ -8426,9 +8283,9 @@ pub const AppSession = struct {
             .focus_pane_down => pane_ops.focusPaneInDirection(self, .down),
             // 인라인 rename 시작 — 활성 워크스페이스/pane/Term의 custom_name을 편집한다. 활성 대상은 항상 ≥1이라
             // 안전. 키보드/팔릿 경로(클릭 대상은 PR4/PR5가 startRename을 직접 부른다).
-            .rename_workspace => self.startRename(.{ .workspace = tab_ops.activeTab(self) }),
-            .rename_pane => self.startRename(.{ .pane = pane_ops.activePane(self) }),
-            .rename_term => self.startRename(.{ .term = pane_ops.activePane(self).activeTerm() }),
+            .rename_workspace => settings_ops.startRename(self, .{ .workspace = tab_ops.activeTab(self) }),
+            .rename_pane => settings_ops.startRename(self, .{ .pane = pane_ops.activePane(self) }),
+            .rename_term => settings_ops.startRename(self, .{ .term = pane_ops.activePane(self).activeTerm() }),
             // 사이드바 그룹(SG3c) — 활성 워크스페이스 기준(키보드/팔레트). 우클릭·헤더 클릭은 클릭 대상으로 같은 메서드를 부른다.
             // create_group=활성 탭에 그룹 시작 마커, ungroup=활성 탭이 속한 그룹의 마커 제거, rename_group=활성 탭 그룹 이름 편집.
             .create_group => tab_ops.createGroupForTab(self, tab_ops.activeTab(self)), // SG5-3: 그룹 안 → depth+1 중첩
@@ -8515,7 +8372,7 @@ pub const AppSession = struct {
             },
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
-            .toggle_settings => self.toggleSettings(),
+            .toggle_settings => settings_ops.toggleSettings(self),
             .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
             // Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState). **여는 UI는 하나이고, 질의가
             // 가는 곳만 갈린다** — 활성 탭이 터미널이면 스크롤백, 웹(마크다운 뷰어·browser)이면 그 페이지다
@@ -9118,22 +8975,22 @@ pub const AppSession = struct {
             return;
         }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
-        self.toggleSettings();
+        settings_ops.toggleSettings(self);
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
         if (std.c.getenv("MARU_OPEN_SETTINGS_SECTION")) |sv| {
             self.chrome_host.settings.section = std.fmt.parseInt(usize, std.mem.span(sv), 10) catch 0;
-            self.refreshSettingsFieldCount();
+            settings_ops.refreshSettingsFieldCount(self);
         }
         // MARU_OPEN_SETTINGS_EDIT=1 — 섹션 마지막 행(text면)을 인라인 편집 모드로(text 위젯 caret 캡처용 debug-gate).
         if (std.c.getenv("MARU_OPEN_SETTINGS_EDIT") != null and self.chrome_host.settings.count > 0) {
             self.chrome_host.settings.selected = self.chrome_host.settings.count - 1;
-            self.toggleSelectedSetting();
+            settings_ops.toggleSelectedSetting(self);
         }
         // MARU_OPEN_SETTINGS_SEARCH=<쿼리> — 검색 모드로 그 쿼리를 채워 필터된 폼을 캡처(검색 self-verify debug-gate).
         if (std.c.getenv("MARU_OPEN_SETTINGS_SEARCH")) |sv| {
             self.chrome_host.settings.startSearch();
             for (std.mem.span(sv)) |c| self.chrome_host.settings.appendSearchCp(c);
-            self.refreshSettingsFieldCount();
+            settings_ops.refreshSettingsFieldCount(self);
         }
         // MARU_OPEN_SETTINGS_PICK=1 — 현재 섹션 첫 color 행을 선택하고 HSV picker를 연다(picker self-verify debug-gate).
         // theme 섹션(MARU_OPEN_SETTINGS_SECTION=1)과 함께 쓰면 색 그리드를 캡처. color 행이 없으면 무동작.
@@ -9143,7 +9000,7 @@ pub const AppSession = struct {
             if (self.currentSectionFields(scratch.allocator())) |cf| {
                 if (cf.colors.len > 0) {
                     self.chrome_host.settings.selected = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
-                    self.toggleSelectedSetting();
+                    settings_ops.toggleSelectedSetting(self);
                 }
             } else |_| {}
         }
@@ -11263,42 +11120,6 @@ pub const AppSession = struct {
         self.showNotice(msg); // showNotice가 notice_message_buf로 복사하므로 arena deinit 후에도 유효
     }
 
-    /// 세팅 화면(⌘,)을 토글한다 — 열려 있으면 닫고, 아니면 다른 오버레이를 닫고 연다(배타적, palette/find와 같은 규율).
-    /// 열 때 bool 스키마 필드 수를 컴포넌트에 주입해(setFieldCount) 키 라우팅(↑↓ wrap·Space/Enter 토글 가드)이 동작하게 한다.
-    fn toggleSettings(self: *AppSession) void {
-        if (self.chrome_host.settings.open) {
-            self.chrome_host.settings.hide();
-        } else {
-            self.chrome_host.notice.dismiss(); // 배타적
-            self.chrome_host.find.hide();
-            self.chrome_host.palette.hide();
-            self.find_matches.clearRetainingCapacity();
-            self.chrome_host.settings.show();
-            self.chrome_host.settings.section = 0; // 항상 첫 섹션부터(네비 — config-gui §4)
-            self.refreshSettingsFieldCount();
-        }
-    }
-
-    /// 현재 섹션의 필드 수를 컴포넌트에 주입한다(setFieldCount — ↑↓ wrap·Space/Enter 가드). 섹션 전환/열기 때 호출.
-    /// scratch arena로 빌드(핸들러와 같은 currentSectionFields 단일 출처).
-    fn refreshSettingsFieldCount(self: *AppSession) void {
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        // 네비 키보드 ↓는 섹션 수를 모르는 컴포넌트가 section을 +1만 하므로(상한 미지), 여기서 실제 섹션 수로 clamp한다.
-        // 안 하면 section이 범위를 넘어 계속 커져 ↑가 한참 먹지 않는다(currentSectionFields는 min clamp로 보기만 보정).
-        // 네비 맨 아래에 "↺ 초기화" 액션 행(§6.4)이 실제 섹션들 뒤에 하나 더 있으므로 상한은 sections.len(=리셋 행 인덱스)까지
-        // 허용한다 — nav_reset_row로 그 인덱스를 컴포넌트에 알려 Enter/클릭이 폼 진입 대신 .reset_all을 내게 한다.
-        if (self.buildSectionList(scratch.allocator())) |sections| {
-            self.chrome_host.settings.nav_reset_row = sections.len;
-            if (self.chrome_host.settings.section > sections.len)
-                self.chrome_host.settings.section = sections.len;
-        } else |_| {
-            self.chrome_host.settings.nav_reset_row = null;
-        }
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        self.chrome_host.settings.setFieldCount(cf.total());
-    }
-
     /// 좌측 네비 한 항목 — 섹션 enum(미지정=null) + 표시 라벨.
     const SettingsSectionEntry = struct { section: ?config_mod.Section, label: []const u8 };
 
@@ -11322,71 +11143,26 @@ pub const AppSession = struct {
         fn nonSpecialTotal(self: SettingsSectionFields) usize {
             return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
         }
-        fn total(self: SettingsSectionFields) usize {
+        pub fn total(self: SettingsSectionFields) usize {
             return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len + self.global_entries.len;
         }
         /// 팔레트 그리드 행의 selected 인덱스(있으면 항상 마지막 = 다른 필드 다음). 없으면 null.
-        fn paletteRowIndex(self: SettingsSectionFields) ?usize {
+        pub fn paletteRowIndex(self: SettingsSectionFields) ?usize {
             return if (self.has_palette) self.nonSpecialTotal() else null;
         }
         /// keybind 행들의 첫 selected 인덱스(있으면 schema 필드 + palette 다음). 교차 섹션 검색에선 palette(theme)와
         /// keybind(input)가 같이 나올 수 있어 palette 한 행을 오프셋에 더한다(없으면 0). 없으면 null.
-        fn keybindRowStart(self: SettingsSectionFields) ?usize {
+        pub fn keybindRowStart(self: SettingsSectionFields) ?usize {
             return if (self.keybind_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) else null;
         }
         /// 전역 단축키 행들의 첫 selected 인덱스(있으면 항상 **맨 끝** = schema 필드 + palette + in-app keybind 다음). 없으면 null.
-        fn globalKeybindRowStart(self: SettingsSectionFields) ?usize {
+        pub fn globalKeybindRowStart(self: SettingsSectionFields) ?usize {
             return if (self.global_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len else null;
         }
     };
 
-    /// 세팅 검색 매칭 — 쿼리가 비었으면 항상 true, 아니면 라벨(보이는 텍스트) 또는 키에 부분일치(ASCII 대소문자 무시;
-    /// 한글은 대소문자가 없어 그대로 부분일치). 필터의 단일 출처 — currentSectionFields가 모든 행 종류에 같은 규칙 적용.
-    fn settingsRowMatches(label: []const u8, key: []const u8, query: []const u8) bool {
-        if (query.len == 0) return true;
-        return std.ascii.indexOfIgnoreCase(label, query) != null or std.ascii.indexOfIgnoreCase(key, query) != null;
-    }
-
-    /// 섹션 표시 라벨(config_mod.Section → 한국어). null=스키마 섹션 미지정 그룹("기타").
-    fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
-        const s = sec orelse return "기타";
-        return switch (s) {
-            .font => "폰트",
-            .theme => "테마",
-            .cursor => "커서",
-            .window => "창",
-            .input => "입력",
-            .terminal => "터미널",
-            .workspace => "워크스페이스",
-            .quick_terminal => "퀵 터미널",
-            .sidebar => "사이드바",
-            .global_hotkey => "글로벌 핫키",
-        };
-    }
-
-    /// UI에 새로 노출해도 되는 config 키인가. `chrome.theme=tui`와 `chrome.preset=cell`은 이미 저장된
-    /// config를 읽는 호환 경로만 남기며, GUI·검색에서 다시 선택·변경할 수 있게 만들지 않는다.
-    /// 이 예외를 field 생성과 section 생성이 함께 써야 검색/직접 섹션 전환 중 되살아나는 우회가 없다.
-    /// 단일 출처: docs/chrome-strategy.md "Chrome 전용 전환 정책".
-    fn settingsExposesConfigKey(key: []const u8) bool {
-        return !std.mem.eql(u8, key, "chrome.theme") and
-            !std.mem.eql(u8, key, "chrome.preset");
-    }
-
-    fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
-        // `.global_hotkey`는 schema 필드가 없는 특수 섹션이라 강제로 목록에 넣는다(전역 단축키 녹음 행만 — theme의
-        // palette·input의 keybind 특수 행 패턴처럼 currentSectionFields가 행을 합성한다). 좌측 네비에 항상 보여야 한다.
-        if (sec == .global_hotkey) return true;
-        for (bools) |b| if (settingsExposesConfigKey(b.key) and b.section == sec) return true;
-        for (nums) |n| if (settingsExposesConfigKey(n.key) and n.section == sec) return true;
-        for (enums) |e| if (settingsExposesConfigKey(e.key) and e.section == sec) return true;
-        for (texts) |t| if (settingsExposesConfigKey(t.key) and t.section == sec) return true;
-        for (colors) |c| if (settingsExposesConfigKey(c.key) and c.section == sec) return true;
-        return false;
-    }
-
     /// 필드가 있는 섹션만 선언 순으로 모은다(좌측 네비 — config-gui §4). 미지정 필드가 있으면 끝에 "기타". arena 소유.
-    fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]SettingsSectionEntry {
+    pub fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]SettingsSectionEntry {
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
         try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
@@ -11400,16 +11176,16 @@ pub const AppSession = struct {
         var list: std.ArrayList(SettingsSectionEntry) = .empty;
         inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
             const sec: config_mod.Section = @enumFromInt(ef.value);
-            if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, sec))
-                try list.append(arena, .{ .section = sec, .label = settingsSectionLabel(sec) });
+            if (settings_ops.settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, sec))
+                try list.append(arena, .{ .section = sec, .label = settings_ops.settingsSectionLabel(sec) });
         }
-        if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, null))
-            try list.append(arena, .{ .section = null, .label = settingsSectionLabel(null) });
+        if (settings_ops.settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, null))
+            try list.append(arena, .{ .section = null, .label = settings_ops.settingsSectionLabel(null) });
         return list.items;
     }
 
     /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum→text). arena 소유. 핸들러가 selected를 이 순서로 매핑.
-    fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
+    pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
         // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
         // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
         self.loaded_config.config.session.keep_alive_after_quit = app_keep_alive_after_quit;
@@ -11434,33 +11210,33 @@ pub const AppSession = struct {
         const q = self.chrome_host.settings.searchQuery();
         const cross = q.len > 0;
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        for (bools_all.items) |b| if (settingsExposesConfigKey(b.key) and (cross or b.section == sel_sec) and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
+        for (bools_all.items) |b| if (settings_ops.settingsExposesConfigKey(b.key) and (cross or b.section == sel_sec) and settings_ops.settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        for (nums_all.items) |n| if (settingsExposesConfigKey(n.key) and (cross or n.section == sel_sec) and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
+        for (nums_all.items) |n| if (settings_ops.settingsExposesConfigKey(n.key) and (cross or n.section == sel_sec) and settings_ops.settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        for (enums_all.items) |e| if (settingsExposesConfigKey(e.key) and (cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
+        for (enums_all.items) |e| if (settings_ops.settingsExposesConfigKey(e.key) and (cross or e.section == sel_sec) and settings_ops.settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
         // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
         // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
         // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
-        if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
+        if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settings_ops.settingsRowMatches("테마 프리셋", "theme.preset", q)) {
             // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
             // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
             const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else "사용자 지정";
             try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
         }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        for (texts_all.items) |t| if (settingsExposesConfigKey(t.key) and (cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
+        for (texts_all.items) |t| if (settings_ops.settingsExposesConfigKey(t.key) and (cross or t.section == sel_sec) and settings_ops.settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
         // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
         // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
         if (cross or sel_sec == .terminal) {
-            if (settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
+            if (settings_ops.settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
                 try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
             for (self.loaded_config.config.env) |entry| {
                 const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
-                if (settingsRowMatches(entry[0..eq], "env", q))
+                if (settings_ops.settingsRowMatches(entry[0..eq], "env", q))
                     try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
             }
-            if (settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
+            if (settings_ops.settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
                 try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
         }
         // 입력 섹션엔 사용자 터미널 매크로(keybind = chord = text:/esc:/ctrl:)를 rhs 편집 text 행으로 노출한다(env 특수 행
@@ -11470,228 +11246,74 @@ pub const AppSession = struct {
             for (self.loaded_config.terminal_bindings) |b| {
                 var disp_buf: [command_catalog.max_chord_display_len]u8 = undefined;
                 const disp = command_catalog.formatChord(b.chord, &disp_buf);
-                if (settingsRowMatches(disp, "macro", q)) {
+                if (settings_ops.settingsRowMatches(disp, "macro", q)) {
                     var chord_buf: [64]u8 = undefined; // 매치된 행만 chord config 표기 계산(필터된 행 낭비 제거)
                     const chord_cfg = b.chord.toConfigString(&chord_buf);
                     try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
                 }
             }
-            if (settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
+            if (settings_ops.settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
                 try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
         }
         // Workspace 섹션엔 시작 디렉터리(workspace.root)를 합성 text 행으로 노출한다(schema 필드 아님 — loader 명시
         // 핸들러 특수 키, shell.args 선례). 값=현재 root(빈 값=상속 cwd). 커밋은 setWorkspaceRoot(loader와 형식 검증 공유).
         if (cross or sel_sec == .workspace) {
-            if (settingsRowMatches("시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", "workspace.root", q))
+            if (settings_ops.settingsRowMatches("시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", "workspace.root", q))
                 try texts.append(arena, .{ .key = "workspace.root", .doc = "시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", .value = self.loaded_config.config.workspace.root, .section = .workspace });
         }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        for (colors_all.items) |c| if (settingsExposesConfigKey(c.key) and (cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
+        for (colors_all.items) |c| if (settings_ops.settingsExposesConfigKey(c.key) and (cross or c.section == sel_sec) and settings_ops.settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
         // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
         // 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 keybindRowStart가 palette 오프셋을 더한다.
         var keybinds: std.ArrayList(command_catalog.Entry) = .empty;
         if (cross or sel_sec == .input) {
-            for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
+            for (command_catalog.entries) |entry| if (settings_ops.settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
         }
-        const palette_on = (cross or sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
+        const palette_on = (cross or sel_sec == .theme) and settings_ops.settingsRowMatches("ANSI 팔레트", "theme.palette", q);
         // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
         // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
         var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
         if (cross or sel_sec == .global_hotkey) {
-            for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try globals.append(arena, entry);
+            for (command_catalog.global_entries) |entry| if (settings_ops.settingsRowMatches(entry.title, entry.key, q)) try globals.append(arena, entry);
         }
         return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
-    }
-
-    /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
-    /// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
-    /// 교차 검색(cross)일 때 행 라벨 앞에 섹션명을 붙인다(`<섹션> › <라벨>`) — 결과가 어느 섹션 설정인지 보이게.
-    /// 빈 쿼리(현재 섹션만)면 라벨 그대로. 모든 행 종류(scalar=필드 .section, palette=.theme·keybind=.input·global=
-    /// .global_hotkey)가 이 단일 헬퍼를 거쳐 접두 규칙이 한 곳. 단일 출처: docs/config-gui.md §6.8.
-    fn settingsRowLabel(arena: std.mem.Allocator, cross: bool, section: ?config_mod.Section, label: []const u8) ![]const u8 {
-        if (!cross) return label;
-        return std.fmt.allocPrint(arena, "{s} › {s}", .{ settingsSectionLabel(section), label });
     }
 
     /// 기본 config(theme.Config{})의 스키마 필드 값 — 항목별 리셋(§6.11)의 "기본과 다른가" 판정·리셋 대상 값의 단일 출처.
     /// buildSettingsFields(is_default 주입)와 resetSelectedSettingRow(기본값 적용)가 같은 순회 결과를 키로 룩업한다.
     /// 별도 기본값 테이블 없이 스키마를 Config{}로 한 번 더 순회해 얻는다(기본값은 구조체 필드 초기화 값이 단일 출처). arena 소유.
-    const SettingsDefaults = struct {
+    pub const SettingsDefaults = struct {
         bools: []config_mod.schema.BoolField,
         nums: []config_mod.schema.NumberField,
         enums: []config_mod.schema.EnumField,
         texts: []config_mod.schema.TextField,
         colors: []config_mod.schema.ColorField,
-        fn boolFor(self: SettingsDefaults, key: []const u8) ?bool {
+        pub fn boolFor(self: SettingsDefaults, key: []const u8) ?bool {
             for (self.bools) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
             return null;
         }
-        fn numFor(self: SettingsDefaults, key: []const u8) ?f64 {
+        pub fn numFor(self: SettingsDefaults, key: []const u8) ?f64 {
             for (self.nums) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
             return null;
         }
-        fn enumCurrentFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
+        pub fn enumCurrentFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
             for (self.enums) |f| if (std.mem.eql(u8, f.key, key)) return f.current;
             return null;
         }
-        fn textFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
+        pub fn textFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
             for (self.texts) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
             return null;
         }
-        fn colorFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
+        pub fn colorFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
             for (self.colors) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
             return null;
         }
     };
-    fn buildSettingsDefaults(arena: std.mem.Allocator) !SettingsDefaults {
-        const def = config_mod.Config{};
-        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        try config_mod.schema.appendBoolFields(arena, def, &bools);
-        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        try config_mod.schema.appendNumberFields(arena, def, &nums);
-        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        try config_mod.schema.appendEnumFields(arena, def, &enums);
-        var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        try config_mod.schema.appendTextFields(arena, def, &texts);
-        var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        try config_mod.schema.appendColorFields(arena, def, &colors);
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items };
-    }
-
-    /// 합성(synthetic) text 행이 기본값과 같은가(§6.11) — 동기화 키(env/macro)는 값 존재=override, 추가 sentinel은 항상 기본,
-    /// shell.args/workspace.root는 빈 값이 기본, 나머지 schema text는 기본 문자열 비교. buildSettingsFields의 is_default 주입용.
-    fn settingsTextIsDefault(t: config_mod.schema.TextField, defaults: SettingsDefaults) bool {
-        if (std.mem.eql(u8, t.key, "env.") or std.mem.eql(u8, t.key, "macro.")) return true; // 추가 sentinel 행 — ↺ 없음
-        if (std.mem.startsWith(u8, t.key, "env.") or std.mem.startsWith(u8, t.key, "macro.")) return false; // 실제 env/macro = override
-        if (std.mem.eql(u8, t.key, "shell.args") or std.mem.eql(u8, t.key, "workspace.root")) return t.value.len == 0;
-        if (defaults.textFor(t.key)) |dv| return std.mem.eql(u8, dv, t.value);
-        return true;
-    }
-
-    /// 액션에 사용자 지정 in-app 키바인딩이 있는가(§6.11 keybind 행 is_default 판정). 있으면 ↺(=빌트인으로 unbind)를 띄운다.
-    /// unbindActionEntry의 found_user 검사와 같은 기준(빌트인은 loaded_config.keybindings에 없다). 순수 unbind만 한 경우는
-    /// 못 잡는다(chord 기준이라 — v1 한계, 전체 리셋이 담당).
-    fn settingsActionHasUserBinding(self: *AppSession, action: config_mod.Action) bool {
-        // Action은 union(enum)이라 ==가 아니라 std.meta.eql로 비교한다(command_catalog.chordForAction 선례).
-        for (self.loaded_config.keybindings) |b| if (std.meta.eql(b.action, action)) return true;
-        return false;
-    }
-
-    fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
-        const Row = chrome.components.settings.FieldRow;
-        const cf = try self.currentSectionFields(arena);
-        const defaults = try buildSettingsDefaults(arena); // §6.11 is_default 판정용(기본 config 대비)
-        // 교차 검색(쿼리 있음)이면 행 라벨에 섹션명 접두 — currentSectionFields의 cross 게이트와 같은 조건(단일 출처).
-        const cross = self.chrome_host.settings.searchQuery().len > 0;
-        // 결합 순서: bool(toggle) → number(입력 박스) → enum(dropdown) → text(편집) → color(스와치). selected/handler
-        // 인덱싱이 이 순서를 공유한다(toggle/adjust/commitSelectedText가 같은 currentSectionFields 빌드로 구간 매핑).
-        const rows = try arena.alloc(Row, cf.total());
-        var i: usize = 0;
-        for (cf.bools) |b| {
-            // §6.11: 기본값과 같은가 — 기본 config의 같은 키 값과 비교(못 찾으면 기본으로 봄=↺ 없음).
-            const is_def = if (defaults.boolFor(b.key)) |dv| dv == b.value else true;
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, b.section, if (b.doc.len > 0) b.doc else b.key), .kind = .{ .toggle = b.value }, .is_default = is_def };
-            i += 1;
-        }
-        for (cf.nums) |n| {
-            const is_def = if (defaults.numFor(n.key)) |dv| dv == n.value else true;
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, n.section, if (n.doc.len > 0) n.doc else n.key), .kind = .{ .number = .{ .value = n.value, .min = n.min, .max = n.max } }, .is_default = is_def };
-            i += 1;
-        }
-        for (cf.enums) |e| {
-            // theme.preset(synthetic)은 v1에서 ↺ 제외(테마 되돌리기는 프리셋 드롭다운·개별 색 ↺·전체 리셋이 담당 — §6.11).
-            // 나머지 enum은 기본 변형 토큰과 현재 토큰 비교(둘 다 같은 appendEnumFields 변환이라 직접 비교 가능).
-            const is_def = if (std.mem.eql(u8, e.key, "theme.preset"))
-                true
-            else if (defaults.enumCurrentFor(e.key)) |dv| std.mem.eql(u8, dv, e.current) else true;
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, e.section, if (e.doc.len > 0) e.doc else e.key), .kind = .{ .dropdown = e.current }, .is_default = is_def };
-            i += 1;
-        }
-        for (cf.texts) |t| {
-            const label = try settingsRowLabel(arena, cross, t.section, if (t.doc.len > 0) t.doc else t.key);
-            // font.family는 dropdown 스타일 폰트 피커(←→로 번들 폰트 순환, Enter로 직접입력) — 나머지 텍스트 필드는 인라인 편집.
-            const kind: chrome.components.settings.FieldRow.Kind = if (std.mem.eql(u8, t.key, "font.family")) .{ .font = t.value } else .{ .text = t.value };
-            rows[i] = .{ .label = label, .kind = kind, .is_default = settingsTextIsDefault(t, defaults) };
-            i += 1;
-        }
-        // 테마 프리셋이 활성이면 색·팔레트 행을 잠근다(프리셋이 색을 정하므로) — 회색 표시 + 입력은 핸들러가 전환/차단.
-        const preset_active = self.themePresetActive();
-        for (cf.colors) |c| {
-            // 현재 hex를 RGB로 파싱해 스와치에. 저장 config는 검증돼 유효하지만 방어적으로 회색 폴백(상수 hex로 — 타입을
-            // parseHexColor 반환과 일치시켜 별도 color import 불요; #808080은 항상 유효).
-            const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
-            const is_def = if (defaults.colorFor(c.key)) |dv| std.mem.eql(u8, dv, c.value) else true;
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, c.section, if (c.doc.len > 0) c.doc else c.key), .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active, .is_default = is_def };
-            i += 1;
-        }
-        if (cf.has_palette) {
-            // ANSI 16색 팔레트 그리드(theme.palette.0~15). 각 셀의 효과색 = config override 있으면 그 hex, 없으면 표준
-            // xterm256 기본(index<16=ansi16). hex는 편집 시드용(override는 그대로, 기본은 RGB→#rrggbb 포맷). 선택 셀은
-            // State.grid_cell(클램프). arena 소유(이 프레임만 — view가 읽고 버린다).
-            var cells: [16]Row.PaletteGrid.Cell = undefined;
-            for (&cells, 0..) |*cell, idx| {
-                if (self.loaded_config.config.theme.palette[idx]) |hex| {
-                    const rgb = config_mod.appearance.parseHexColor(hex) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
-                    cell.* = .{ .rgb = rgb, .hex = hex };
-                } else {
-                    const rgb = terminal.types.xterm256(@intCast(idx));
-                    cell.* = .{ .rgb = rgb, .hex = try rgbToHex(arena, rgb) };
-                }
-            }
-            const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
-            // §6.11: 팔레트 행 ↺는 **선택 셀**이 override(config.theme.palette[sel] 있음)일 때만 — ↺/Backspace가 그 셀만 리셋.
-            const pal_is_def = self.loaded_config.config.theme.palette[sel] == null;
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, .theme, "ANSI 팔레트"), .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active, .is_default = pal_is_def };
-            i += 1;
-        }
-        if (cf.keybind_entries.len > 0) {
-            // (검색으로 필터된) keybind 행(라벨=title, 값=현재 chord 표시). 현재 chord는 resolver에서 fresh 계산
-            // (리바인딩 즉시 반영). 빈 chord(미지정)는 컴포넌트가 "(미지정)"으로 표시. arena 소유(이 프레임만).
-            const resolver = self.loaded_config.keyBindingResolver();
-            for (cf.keybind_entries) |entry| {
-                const chord = command_catalog.chordForAction(resolver, entry.action);
-                var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
-                const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
-                // §6.11: 사용자 지정 rebinding이 있으면 ↺(=빌트인으로 unbind). 순수 unbind만 한 경우는 못 잡음(v1 한계).
-                const is_def = !self.settingsActionHasUserBinding(entry.action);
-                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .input, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) }, .is_default = is_def };
-                i += 1;
-            }
-        }
-        if (cf.global_entries.len > 0) {
-            // 전역(OS) 단축키 행(라벨=title, 값=현재 chord 표시). in-app과 달리 빌트인 기본이 없어 사용자 global_bindings만
-            // 스캔(chordForGlobalAction) — 없으면 빈 문자열(컴포넌트가 "(미지정)"으로 표시). 같은 `.keybind` 위젯 재사용.
-            for (cf.global_entries) |entry| {
-                const chord = command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action);
-                var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
-                const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
-                // §6.11: 전역은 빌트인 기본이 없어 사용자 바인딩(chord 존재)이 곧 override — 있으면 ↺(=해제).
-                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .global_hotkey, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) }, .is_default = chord == null };
-                i += 1;
-            }
-        }
-        return rows;
-    }
 
     /// RGB를 `#rrggbb` 소문자 hex로(arena 소유). 팔레트 그리드의 미override 셀(xterm256 기본)의 편집 시드/표시용.
-    fn rgbToHex(arena: std.mem.Allocator, rgb: @TypeOf(config_mod.appearance.parseHexColor("#000000") catch unreachable)) ![]const u8 {
+    pub fn rgbToHex(arena: std.mem.Allocator, rgb: @TypeOf(config_mod.appearance.parseHexColor("#000000") catch unreachable)) ![]const u8 {
         return std.fmt.allocPrint(arena, "#{x:0>2}{x:0>2}{x:0>2}", .{ rgb.r, rgb.g, rgb.b });
-    }
-
-    /// 좌측 네비 라벨 목록(현재 섹션 강조는 컴포넌트가 settings.section으로). arena 소유.
-    fn buildSettingsSectionLabels(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
-        const sections = try self.buildSectionList(arena);
-        // +1 = 네비 맨 아래 "↺ 초기화" 액션 행(§6.4). 실제 섹션(폼 매핑=buildSectionList)과 분리해 라벨 목록에만 더한다 —
-        // 이 행은 섹션이 아니라 requestResetAll 액션(nav_reset_row=sections.len으로 컴포넌트에 알림). 라벨 글리프는 단일 출처.
-        const labels = try arena.alloc([]const u8, sections.len + 1);
-        for (sections, 0..) |s, i| labels[i] = s.label;
-        labels[sections.len] = try std.fmt.allocPrint(arena, "{s} 초기화", .{chrome.components.settings.reset_glyph});
-        return labels;
-    }
-
-    fn isDesktopNotificationSettingKey(key: []const u8) bool {
-        return std.mem.eql(u8, key, "notifications.osc");
     }
 
     /// 선택된 세팅 행의 bool config 값을 뒤집고 라이브 적용한다(즉시 반영). raw config(loaded_config.config)를 키로
@@ -11699,35 +11321,7 @@ pub const AppSession = struct {
     /// (updateConfigForKeys + dirty/Swift atomic write) — 지금은 세션 내 라이브 적용까지. 행 목록은 schema 순서라
     /// 컴포넌트 selected 인덱스와 일치한다(buildSettingsFields와 같은 appendBoolFields 순회).
     /// font.family 드롭다운의 마지막 슬롯 라벨 — 목록 밖 임의 설치 폰트를 인라인 편집으로 넣는 진입점(선택 시 편집 열림).
-    const font_direct_input_label = "직접 입력…";
-
-    /// 드롭다운 팝업이 열렸을 때 그 변형 라벨 목록(enum 변형 또는 번들 폰트 + "직접 입력…"). 팝업이 닫혔거나 선택 행이
-    /// enum/font가 아니면 빈 슬라이스. settings.view/handlePointer에 dropdown_items로 주입해 팝업 목록·hit-test를 그린다.
-    fn buildSettingsDropdownItems(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
-        if (!self.chrome_host.settings.dropdown.open) return &.{};
-        const cf = try self.currentSectionFields(arena);
-        const sel = self.chrome_host.settings.selected;
-        const after_nums = cf.bools.len + cf.nums.len;
-        const after_enums = after_nums + cf.enums.len;
-        const after_texts = after_enums + cf.texts.len;
-        if (sel >= after_nums and sel < after_enums) {
-            const e = cf.enums[sel - after_nums];
-            if (std.mem.eql(u8, e.key, "theme.preset")) return self.themePresetVariants(arena);
-            return (try config_mod.schema.enumVariants(arena, self.loaded_config.config, e.key)) orelse &.{};
-        }
-        if (sel >= after_enums and sel < after_texts) {
-            const ti = sel - after_enums;
-            if (ti < cf.texts.len and std.mem.eql(u8, cf.texts[ti].key, "font.family")) {
-                // 번들 폰트 + "직접 입력…"(마지막 슬롯 — 목록 밖 임의 설치 폰트를 인라인 편집으로 넣는다).
-                const fonts = config_mod.theme.bundled_font_families;
-                const out = try arena.alloc([]const u8, fonts.len + 1);
-                for (fonts, 0..) |fam, i| out[i] = fam;
-                out[fonts.len] = font_direct_input_label;
-                return out;
-            }
-        }
-        return &.{};
-    }
+    pub const font_direct_input_label = "직접 입력…";
 
     /// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용**한다(팝업은 안 닫음). enum=setEnumIndex,
     /// font.family=그 폰트 setText, theme.preset=applyThemePresetIndex. **persist=false면 파일 영속을 예약하지 않는다(인메모리
@@ -11755,9 +11349,9 @@ pub const AppSession = struct {
                     self.follow_applied_dark = null;
                     self.applyFollowSystemTheme();
                 } else {
-                    self.reapplyLoadedConfig();
+                    settings_ops.reapplyLoadedConfig(self);
                 }
-                if (persist) self.markConfigKeyDirty(e.key);
+                if (persist) settings_ops.markConfigKeyDirty(self, e.key);
             }
             return;
         }
@@ -11769,8 +11363,8 @@ pub const AppSession = struct {
                 // 폰트(스냅샷)를 다시 보여준다(선택 표시용, 안 바꿈). "직접 입력" 확정은 applyDropdownSelection이 편집을 연다.
                 const value: []const u8 = if (idx < fonts.len) fonts[idx] else self.dropdown_snapshot_font;
                 if (config_mod.schema.setText(&self.loaded_config.config, "font.family", value)) {
-                    self.reapplyLoadedConfig();
-                    if (persist and idx < fonts.len) self.markConfigKeyDirty("font.family");
+                    settings_ops.reapplyLoadedConfig(self);
+                    if (persist and idx < fonts.len) settings_ops.markConfigKeyDirty(self, "font.family");
                 }
             }
             return;
@@ -11822,185 +11416,15 @@ pub const AppSession = struct {
         switch (self.dropdown_snapshot_kind) {
             .font => {
                 if (config_mod.schema.setText(&self.loaded_config.config, "font.family", self.dropdown_snapshot_font))
-                    self.reapplyLoadedConfig(); // 인메모리만 — markDirty 없음(파일은 원본 폰트 그대로)
+                    settings_ops.reapplyLoadedConfig(self); // 인메모리만 — markDirty 없음(파일은 원본 폰트 그대로)
             },
             .preset => {
                 self.loaded_config.config.theme = self.dropdown_snapshot_theme;
                 self.theme_user_custom = self.dropdown_snapshot_user_custom;
-                self.reapplyLoadedConfig();
+                settings_ops.reapplyLoadedConfig(self);
             },
             .none => self.applyDropdownIndex(self.chrome_host.settings.dropdown.original, false), // enum — 인덱스 복원(persist=false, 안 바뀐 값 영속 안 함)
         }
-    }
-
-    /// 설정 팔레트 그리드 행의 폼-포커스 ←→를 16색 셀 이동으로 가로챈다(host가 rows를 모르는 특수 행 — platform 전용).
-    /// 처리하면 true(키 소비). 조건: 설정 열림·폼 포커스·다른 모드(팝업/picker/편집/녹음) 아님·선택 행=팔레트 그리드·
-    /// 평범한 ←/→. **검색 중에도 동작한다** — `currentSectionFields`가 검색 필터를 적용해 `paletteRowIndex`와 `selected`가
-    /// 같은 필터-인덱스라 정합하고, 검색의 ←→는 원래 소비만 되던 미사용 키라 셀 이동으로 재활용해도 충돌 없다(↑↓·글자는
-    /// 여전히 검색 나비·쿼리 편집). ← 셀0·→ 셀15(끝)에선 false를 돌려(intercept 안 함) 컴포넌트가 처리한다(검색 중엔 그 방향
-    /// 키가 소비돼 no-op, 비-검색이면 영역 포커스 이동으로 이어진다).
-    fn settingsPaletteArrowIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
-        const s = &self.chrome_host.settings;
-        if (!s.open or s.nav_focused or s.dropdown.open or s.picking or s.editing or s.recording) return false;
-        const dir: i32 = switch (chromeInputFromKeyEvent(event)) {
-            .key => |k| switch (k.key) {
-                .left => -1,
-                .right => 1,
-                else => return false,
-            },
-            else => return false,
-        };
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return false;
-        const pi = cf.paletteRowIndex() orelse return false;
-        if (pi != s.selected) return false;
-        const gc = @min(s.grid_cell, 15);
-        if (dir < 0 and gc == 0) return false; // ← 셀0 → 영역 이동(nav)으로 넘김
-        if (dir > 0 and gc == 15) return false; // → 셀15(끝) → 컴포넌트로(폼이라 no-op)
-        s.moveGridCell(dir);
-        return true;
-    }
-
-    fn toggleSelectedSetting(self: *AppSession) void {
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-        if (sel < cf.bools.len) {
-            // bool 행 — flip.
-            const f = cf.bools[sel];
-            const new_value = !f.value;
-            if (config_mod.schema.setBool(&self.loaded_config.config, f.key, new_value)) {
-                // theme.follow-system은 단순 재resolve로 부족하다 — 켜면 현재 시스템 외관 프리셋을 즉시 덮고(reapply만
-                // 하면 system_is_dark가 안 반영돼 토글이 무효처럼 보임), 끄면 덮기 전 사용자 테마로 복귀해야 한다(F2-9).
-                if (std.mem.eql(u8, f.key, "theme.follow-system")) {
-                    if (self.loaded_config.config.theme_follow_system)
-                        self.applyFollowSystemTheme()
-                    else
-                        self.disableFollowSystemTheme();
-                    // theme.preset synthetic 행이 follow-system on/off로 사라지거나 나타나 theme 섹션 행 수가 바뀐다 —
-                    // setFieldCount가 selected를 clamp하도록 갱신한다(안 하면 선택 인덱스가 stale, 리뷰 C).
-                    self.refreshSettingsFieldCount();
-                } else {
-                    self.reapplyLoadedConfig();
-                }
-                if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) {
-                    setAppKeepAlivePolicy(new_value);
-                    if (new_value and !self.is_quick) self.ensureRemoteBackend();
-                }
-                if (new_value and isDesktopNotificationSettingKey(f.key)) {
-                    self.notification_authorization_pending = true;
-                }
-                self.markConfigKeyDirty(f.key);
-            }
-            return;
-        }
-        const after_nums = cf.bools.len + cf.nums.len;
-        if (sel >= cf.bools.len and sel < after_nums) {
-            // number 행 — 활성(클릭/Enter) = 인라인 수치 편집 시작(입력 박스, 현재값 시드). 커밋 Enter→commitSelectedText가
-            // 파싱+범위 clamp+setNumber. (프로그레스바 슬라이더 대체 — 사용자가 값을 직접 타이핑.) 시드는 표시값과 같은 포맷.
-            const ni = sel - cf.bools.len;
-            if (ni < cf.nums.len) {
-                const seed = chrome.components.settings.formatNumberValue(scratch.allocator(), cf.nums[ni].value) catch return;
-                self.chrome_host.settings.enterEdit(seed);
-            }
-            return;
-        }
-        const after_enums = after_nums + cf.enums.len;
-        if (sel >= after_nums and sel < after_enums) {
-            // enum 행 — 활성(클릭/Enter/Space) = **드롭다운 팝업 열기**(변형 목록 + 현재 인덱스에서 선택 시작). 선택 확정은
-            // dropdown_accept → applyDropdownSelection. theme.preset은 synthetic(스키마 enum 아님)이라 팝업 대신 프리셋 순환(특수).
-            const e = cf.enums[sel - after_nums];
-            if (std.mem.eql(u8, e.key, "theme.preset")) {
-                // theme.preset은 synthetic이지만 명백한 선택 목록이라 드롭다운 팝업으로(16 프리셋 + "사용자 지정").
-                // 취소 복원 스냅샷: 인덱스로 못 되살리는 커스텀 테마 색을 통째로 저장(code-review 데이터 손실 수정).
-                self.dropdown_snapshot_kind = .preset;
-                self.dropdown_snapshot_theme = self.loaded_config.config.theme;
-                self.dropdown_snapshot_user_custom = self.theme_user_custom;
-                const variants = self.themePresetVariants(scratch.allocator()) catch return;
-                self.chrome_host.settings.dropdown.show(variants.len, self.themePresetCurrentIndex());
-                self.metal_dirty = true;
-                return;
-            }
-            self.dropdown_snapshot_kind = .none; // enum은 인덱스 복원으로 충분
-            const variants = (config_mod.schema.enumVariants(scratch.allocator(), self.loaded_config.config, e.key) catch null) orelse return;
-            const cur_idx = config_mod.schema.enumIndex(self.loaded_config.config, e.key) orelse 0;
-            self.chrome_host.settings.dropdown.show(variants.len, cur_idx);
-            self.metal_dirty = true;
-            return;
-        }
-        const after_texts = after_enums + cf.texts.len;
-        if (sel >= after_enums and sel < after_texts) {
-            // text 행 — 활성(클릭/Enter). font.family는 **번들 폰트 드롭다운 팝업**(선택 목록 + "직접 입력…"),
-            // window.background-image는 파일 선택창, 나머지는 인라인 편집 시작(현재값 시드). 커밋은 Enter→commitSelectedText.
-            const ti = sel - after_enums;
-            if (ti < cf.texts.len) {
-                const tkey = cf.texts[ti].key;
-                if (std.mem.eql(u8, tkey, "font.family")) {
-                    const fonts = config_mod.theme.bundled_font_families;
-                    // 취소 복원 스냅샷: 목록 밖 커스텀 폰트를 열 때 통째로 저장(인덱스로는 못 되살림 — 데이터 손실 수정).
-                    self.dropdown_snapshot_kind = .font;
-                    self.dropdown_snapshot_font = self.loaded_config.arena.allocator().dupe(u8, cf.texts[ti].value) catch "";
-                    var cur_idx: usize = fonts.len; // 현재값이 목록 안이면 그 인덱스, 밖(커스텀)이면 "직접 입력…" 슬롯(=fonts.len)
-                    for (fonts, 0..) |fam, i| if (std.mem.eql(u8, fam, cf.texts[ti].value)) {
-                        cur_idx = i;
-                        break;
-                    };
-                    self.chrome_host.settings.dropdown.show(fonts.len + 1, cur_idx); // +1 = "직접 입력…"
-                    self.metal_dirty = true;
-                } else if (std.mem.eql(u8, tkey, "window.background-image")) {
-                    self.file_pick_pending = true;
-                } else {
-                    self.chrome_host.settings.enterEdit(cf.texts[ti].value);
-                }
-            }
-            return;
-        }
-        const after_colors = after_texts + cf.colors.len;
-        if (sel >= after_texts and sel < after_colors) {
-            // color 행 — 활성(스와치 클릭/Enter) = HSV picker 열기(현재 색으로 시드). 확정은 settings_color_picked →
-            // commitPickerColor. ←→는 별개로 16색 프리셋 순환(adjustSelectedSetting), hex 영역 클릭은 컴포넌트가 enterEdit.
-            const ci = sel - after_texts;
-            if (ci < cf.colors.len) {
-                // 프리셋 잠금 상태면 "사용자 지정"으로 전환(잠금 해제)한 뒤 편집 — 클릭 시 자동 전환 후 편집(plan A).
-                if (self.themePresetActive()) self.theme_user_custom = true;
-                const c = cf.colors[ci];
-                const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
-                self.chrome_host.settings.openPicker(rgb);
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
-            // 팔레트 그리드 행 — Enter/Space = 선택 셀 hex 인라인 편집 시작(현재 효과색 시드). 커밋은 commitSelectedText.
-            if (self.themePresetActive()) self.theme_user_custom = true; // 프리셋 잠금이면 사용자 지정으로 전환 후 편집
-            const gi = @min(self.chrome_host.settings.grid_cell, 15);
-            const seed = self.paletteCellHex(scratch.allocator(), gi) catch return;
-            self.chrome_host.settings.enterEdit(seed);
-            return;
-        };
-        if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
-            // keybind 행 — Enter/Space/클릭 = 녹음 시작. 다음 raw 키를 handleKeyEvent가 가로채 captureKeybindRecording로 rebind.
-            self.chrome_host.settings.recording = true;
-            self.metal_dirty = true;
-            return;
-        };
-        if (cf.globalKeybindRowStart()) |gs| if (sel >= gs and sel - gs < cf.global_entries.len) {
-            // 전역 단축키 행 — in-app keybind 행과 동일 경로(녹음 시작 → captureKeybindRecording가 글로벌 분기로 rebind).
-            self.chrome_host.settings.recording = true;
-            self.metal_dirty = true;
-            return;
-        };
-        // number 행(bool..after_nums)은 위 number 분기에서 입력 박스 편집을 이미 열었다 — 여기 fall-through 대상 아님.
-    }
-
-    /// 팔레트 셀 idx의 효과색 hex(arena 소유) — config override 있으면 그 hex(빌림), 없으면 xterm256 기본을 #rrggbb로.
-    /// 그리드 행의 편집 시드용(enterEdit가 즉시 고정 버퍼에 복사하므로 arena 수명은 호출 직후까지면 충분).
-    fn paletteCellHex(self: *AppSession, arena: std.mem.Allocator, idx: usize) ![]const u8 {
-        if (idx >= self.loaded_config.config.theme.palette.len) return "#000000";
-        if (self.loaded_config.config.theme.palette[idx]) |hex| return hex;
-        return try rgbToHex(arena, terminal.types.xterm256(@intCast(idx)));
     }
 
     /// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
@@ -12021,8 +11445,8 @@ pub const AppSession = struct {
             const gi = @min(self.chrome_host.settings.grid_cell, 15);
             const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
             if (config_mod.schema.setPaletteColor(&self.loaded_config.config, gi, owned)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyDirty(config_mod.schema.paletteKey(gi));
+                settings_ops.reapplyLoadedConfig(self);
+                settings_ops.markConfigKeyDirty(self, config_mod.schema.paletteKey(gi));
             }
             return;
         };
@@ -12035,8 +11459,8 @@ pub const AppSession = struct {
             const nkey = cf.nums[ni].key;
             const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, self.chrome_host.settings.editText(), " ")) catch return;
             if (config_mod.schema.setNumber(&self.loaded_config.config, nkey, parsed)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyDirty(nkey);
+                settings_ops.reapplyLoadedConfig(self);
+                settings_ops.markConfigKeyDirty(self, nkey);
             }
             return;
         }
@@ -12052,20 +11476,20 @@ pub const AppSession = struct {
                 self.setWorkspaceRoot(editor); // 시작 디렉터리 — loader와 형식 검증 공유
             } else if (std.mem.eql(u8, tkey, "env.")) {
                 self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
-                self.refreshSettingsFieldCount(); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
+                settings_ops.refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
             } else if (std.mem.startsWith(u8, tkey, "env.")) {
                 self.setEnvVar(tkey["env.".len..], editor); // 기존 env 값 편집
             } else if (std.mem.eql(u8, tkey, "macro.")) {
                 self.addTerminalMacro(editor); // 추가 행 — "chord = text:..." 파싱
-                self.refreshSettingsFieldCount(); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
+                settings_ops.refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
             } else if (std.mem.startsWith(u8, tkey, "macro.")) {
                 self.setTerminalMacro(tkey["macro.".len..], editor); // 기존 매크로 rhs 편집
             } else {
                 // schema 텍스트(.text) — config arena dupe 후 검증·적용.
                 const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
                 if (config_mod.schema.setText(&self.loaded_config.config, tkey, owned)) {
-                    self.reapplyLoadedConfig();
-                    self.markConfigKeyDirty(tkey);
+                    settings_ops.reapplyLoadedConfig(self);
+                    settings_ops.markConfigKeyDirty(self, tkey);
                     // 셸 경로가 실행 불가능하면(없는 경로·`~`·상대경로·디렉터리·비실행 파일) spawn 시 기본 셸로
                     // 폴백된다(resolveConfiguredShell). 저장은 그대로 두되 즉시 안내해, 예전처럼 다음 실행에 앱이 조용히
                     // 종료되지 않음을 알린다. `~`/시작 디렉터리는 이 필드가 아니라 config workspace.root임을 함께 안내.
@@ -12086,8 +11510,8 @@ pub const AppSession = struct {
             if (ci >= cf.colors.len) return;
             const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
             if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, owned)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyDirty(cf.colors[ci].key);
+                settings_ops.reapplyLoadedConfig(self);
+                settings_ops.markConfigKeyDirty(self, cf.colors[ci].key);
             }
             return;
         }
@@ -12111,8 +11535,8 @@ pub const AppSession = struct {
         if (ci >= cf.colors.len) return;
         const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;
         if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, hex)) {
-            self.reapplyLoadedConfig();
-            self.markConfigKeyDirty(cf.colors[ci].key);
+            settings_ops.reapplyLoadedConfig(self);
+            settings_ops.markConfigKeyDirty(self, cf.colors[ci].key);
         }
     }
 
@@ -12125,7 +11549,7 @@ pub const AppSession = struct {
         var it = std.mem.tokenizeAny(u8, text, &std.ascii.whitespace);
         while (it.next()) |tok| list.append(a, a.dupe(u8, tok) catch return) catch return;
         self.loaded_config.config.shell.args = list.toOwnedSlice(a) catch return;
-        self.markConfigKeyDirty("shell.args");
+        settings_ops.markConfigKeyDirty(self, "shell.args");
     }
 
     /// 세팅 GUI에서 시작 디렉터리(workspace.root) 커밋 — loader와 같은 형식 규칙(`loader.isValidWorkspaceRoot`)으로
@@ -12136,7 +11560,7 @@ pub const AppSession = struct {
         const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
         if (trimmed.len == 0) {
             self.loaded_config.config.workspace.root = ""; // 클리어 → 상속 cwd(기본)
-            self.markConfigKeyDirty("workspace.root");
+            settings_ops.markConfigKeyDirty(self, "workspace.root");
             return;
         }
         if (!config_mod.loader.isValidWorkspaceRoot(trimmed)) {
@@ -12145,7 +11569,7 @@ pub const AppSession = struct {
         }
         const owned = self.loaded_config.arena.allocator().dupe(u8, trimmed) catch return;
         self.loaded_config.config.workspace.root = owned;
-        self.markConfigKeyDirty("workspace.root");
+        settings_ops.markConfigKeyDirty(self, "workspace.root");
     }
 
     /// env.<name>을 value로 upsert한다(있으면 교체, 없으면 추가 — config.env는 "KEY=VALUE" 리스트). value는 양끝 trim
@@ -12169,18 +11593,18 @@ pub const AppSession = struct {
         if (!found) list.append(a, new_entry) catch return;
         self.loaded_config.config.env = list.toOwnedSlice(a) catch return;
         const dirty_key = std.fmt.allocPrint(a, "env.{s}", .{name}) catch return;
-        self.markConfigKeyDirty(dirty_key);
+        settings_ops.markConfigKeyDirty(self, dirty_key);
     }
 
     /// env 추가 행 커밋 — "KEY=VALUE" 텍스트를 파싱해 setEnvVar로 upsert. '=' 없거나 KEY(양끝 trim)가 비면 notice.
     fn addEnvVar(self: *AppSession, text: []const u8) void {
         const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-            self.settingsMessageOrNotice("환경 변수는 KEY=VALUE 형식이어야 합니다");
+            settings_ops.settingsMessageOrNotice(self, "환경 변수는 KEY=VALUE 형식이어야 합니다");
             return;
         };
         const name = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
         if (name.len == 0) {
-            self.settingsMessageOrNotice("환경 변수 KEY가 비어 있습니다");
+            settings_ops.settingsMessageOrNotice(self, "환경 변수 KEY가 비어 있습니다");
             return;
         }
         self.setEnvVar(name, text[eq + 1 ..]);
@@ -12216,7 +11640,7 @@ pub const AppSession = struct {
 
     /// 같은 chord의 대기 중 매크로 write-back 예약(추가·삭제 양쪽)을 비운다 — 재추가가 옛 삭제를, 삭제가 옛 추가를
     /// 상쇄하고, 같은 chord를 여러 번 편집해도 예약이 중복돼 줄이 두 번 써지지 않게 한다(serialize 전 dedup·cross-cancel).
-    fn cancelPendingMacro(self: *AppSession, chord_str: []const u8) void {
+    pub fn cancelPendingMacro(self: *AppSession, chord_str: []const u8) void {
         var i: usize = 0;
         while (i < self.config_terminal_macros.items.len) {
             if (std.mem.eql(u8, self.config_terminal_macros.items[i].chord, chord_str)) {
@@ -12238,11 +11662,11 @@ pub const AppSession = struct {
         const a = self.loaded_config.arena.allocator();
         const rhs_trim = std.mem.trim(u8, rhs_str, &std.ascii.whitespace);
         const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch {
-            self.settingsMessageOrNotice("단축키 표기를 읽지 못했습니다");
+            settings_ops.settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
             return;
         };
         const macro = config_mod.parseMacroRhs(a, rhs_trim) orelse {
-            self.settingsMessageOrNotice("매크로는 text:/esc:/ctrl: 형식이어야 합니다");
+            settings_ops.settingsMessageOrNotice(self, "매크로는 text:/esc:/ctrl: 형식이어야 합니다");
             return;
         };
         // 같은 chord면 교체, 없으면 추가(한 chord=한 매크로).
@@ -12260,14 +11684,14 @@ pub const AppSession = struct {
         var probe = self.loaded_config.keyBindingResolver();
         probe.terminal_bindings = new_binds;
         probe.validate() catch {
-            self.settingsMessageOrNotice("다른 단축키와 충돌해 적용하지 못했습니다");
+            settings_ops.settingsMessageOrNotice(self, "다른 단축키와 충돌해 적용하지 못했습니다");
             return;
         };
         // validate는 **사용자** 바인딩만 본다(loaded_config.keybindings엔 빌트인 없음, default_*는 resolve 내부에만).
         // 그래서 빌트인 chord(Cmd+T 등)는 위 검증을 통과해 매크로가 조용히 빌트인을 가린다 — 차단은 아니고(오버라이드는
         // 사용자 의도, rebind 충돌 경고와 동일 last-wins) **경고**로 알린다(code-review max). unbinds로 죽인 chord는 제외.
         if (!resolverUnbinds(self.loaded_config.unbinds, chord) and chordShadowsBuiltin(chord))
-            self.settingsMessageOrNotice("기본 단축키를 매크로가 덮어씁니다");
+            settings_ops.settingsMessageOrNotice(self, "기본 단축키를 매크로가 덮어씁니다");
         self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
         // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
         // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
@@ -12285,332 +11709,27 @@ pub const AppSession = struct {
     /// upsert. `=` 없거나 chord가 비면 notice.
     fn addTerminalMacro(self: *AppSession, text: []const u8) void {
         const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-            self.settingsMessageOrNotice("매크로는 'chord = text:...' 형식이어야 합니다");
+            settings_ops.settingsMessageOrNotice(self, "매크로는 'chord = text:...' 형식이어야 합니다");
             return;
         };
         const chord_part = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
         if (chord_part.len == 0) {
-            self.settingsMessageOrNotice("단축키가 비어 있습니다");
+            settings_ops.settingsMessageOrNotice(self, "단축키가 비어 있습니다");
             return;
         }
         // chord 정규화(파싱 → toConfigString) — 행 키·write-back 줄이 표준 표기를 쓰게.
         const chord = config_mod.keybinding.KeyChord.parse(chord_part) catch {
-            self.settingsMessageOrNotice("단축키 표기를 읽지 못했습니다");
+            settings_ops.settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
             return;
         };
         var chord_buf: [64]u8 = undefined;
         self.setTerminalMacro(chord.toConfigString(&chord_buf), text[eq + 1 ..]);
     }
 
-    /// 터미널 매크로 삭제(Backspace) — chord_str의 binding을 라이브 제거 + write-back 줄 제거 예약.
-    fn removeTerminalMacro(self: *AppSession, chord_str: []const u8) void {
-        const a = self.loaded_config.arena.allocator();
-        const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch return;
-        var list: std.ArrayList(config_mod.keybinding.TerminalBinding) = .empty;
-        for (self.loaded_config.terminal_bindings) |b| {
-            if (!b.chord.eql(chord)) list.append(a, b) catch return;
-        }
-        self.loaded_config.terminal_bindings = list.toOwnedSlice(a) catch return;
-        self.cancelPendingMacro(chord_str); // 같은 chord 대기 추가 예약 상쇄 + 중복 삭제 예약 방지
-        const chord_owned = a.dupe(u8, chord_str) catch return;
-        self.config_terminal_macro_removes.append(self.allocator, chord_owned) catch return;
-        self.metal_dirty = true;
-    }
-
-    /// 선택 행을 삭제한다(Backspace). **env.<KEY> 행** → env 변수 삭제, **keybind 행** → 사용자 지정 단축키 해제(unbind).
-    /// 그 외(schema·shell.args·env 추가 sentinel·palette)는 무동작. 둘 다 spawn/입력 시점이라 appearance 재적용 없음.
-    /// 선택된 세팅 폼 행을 **기본값으로 되돌린다**(§6.11) — ↺ 클릭(settings_reset_field)·Backspace(settings_delete_row)의
-    /// 공통 경로. 행 종류로 분기: scalar(bool/number/enum)·color·schema text는 기본 config 값으로 setter + **override 줄 제거**
-    /// (markConfigKeyRemoved — override-only 정책상 파일엔 key=default를 안 쓰고 줄을 뺀다), palette 셀은 override 제거(null),
-    /// env/macro/keybind/global은 삭제/해제(=그들의 기본값 "없음"). 인덱스 산술은 toggleSelectedSetting·buildSettingsFields와
-    /// 같은 구간 순서(bool→num→enum→text→color→palette→keybind→global)를 공유한다. 이미 기본값인 행은 조용히 무동작
-    /// (컴포넌트가 is_default 행엔 ↺를 안 그리므로 ↺ 경로로는 안 오고, Backspace로는 no-op).
-    fn resetSelectedSettingRow(self: *AppSession) void {
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const defaults = buildSettingsDefaults(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-
-        // bool 행 → 기본값으로 flip(theme.follow-system은 toggle과 같은 특수 재적용).
-        if (sel < cf.bools.len) {
-            const key = cf.bools[sel].key;
-            const dv = defaults.boolFor(key) orelse return;
-            if (config_mod.schema.setBool(&self.loaded_config.config, key, dv)) {
-                if (std.mem.eql(u8, key, "theme.follow-system")) {
-                    if (self.loaded_config.config.theme_follow_system) self.applyFollowSystemTheme() else self.disableFollowSystemTheme();
-                    self.refreshSettingsFieldCount();
-                } else self.reapplyLoadedConfig();
-                self.markConfigKeyRemoved(key);
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        const after_nums = cf.bools.len + cf.nums.len;
-        if (sel >= cf.bools.len and sel < after_nums) {
-            const key = cf.nums[sel - cf.bools.len].key;
-            const dv = defaults.numFor(key) orelse return;
-            if (config_mod.schema.setNumber(&self.loaded_config.config, key, dv)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyRemoved(key);
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        const after_enums = after_nums + cf.enums.len;
-        if (sel >= after_nums and sel < after_enums) {
-            const e = cf.enums[sel - after_nums];
-            if (std.mem.eql(u8, e.key, "theme.preset")) return; // theme.preset은 v1 ↺ 제외(is_default=true라 안 옴) — 방어적 무동작
-            const di = config_mod.schema.enumIndex(config_mod.Config{}, e.key) orelse return; // 기본 변형의 선언순 인덱스
-            if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, di)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyRemoved(e.key);
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        const after_texts = after_enums + cf.texts.len;
-        if (sel >= after_enums and sel < after_texts) {
-            self.resetSelectedTextRow(cf.texts[sel - after_enums], defaults);
-            return;
-        }
-        const after_colors = after_texts + cf.colors.len;
-        if (sel >= after_texts and sel < after_colors) {
-            if (self.themePresetActive()) return; // 프리셋 잠금 색 행은 ↺가 안 뜨므로 Backspace로도 리셋 금지(잠금 우회 방지 — buildSettingsFields의 disabled와 일치)
-            const c = cf.colors[sel - after_texts];
-            const dv = defaults.colorFor(c.key) orelse return; // 기본 색 hex(#RRGGBB)
-            const owned = self.loaded_config.arena.allocator().dupe(u8, dv) catch return; // setText는 config arena 소유 슬라이스를 요구
-            if (config_mod.schema.setText(&self.loaded_config.config, c.key, owned)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyRemoved(c.key);
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        // palette 그리드 행 → **선택 셀** override 제거(null → 표준 xterm256 기본색, §6.5·§6.11).
-        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
-            if (self.themePresetActive()) return; // 프리셋 잠금이면 ↺ 미표시와 일치 — Backspace로도 리셋 금지
-            const gi = @min(self.chrome_host.settings.grid_cell, 15);
-            if (self.loaded_config.config.theme.palette[gi] != null) {
-                self.loaded_config.config.theme.palette[gi] = null;
-                self.reapplyLoadedConfig();
-                self.markConfigKeyRemoved(config_mod.schema.paletteKey(gi));
-                self.metal_dirty = true;
-            }
-            return;
-        };
-        // keybind 행 → 사용자 지정 단축키 해제(빌트인 복귀 — 그들의 "기본값").
-        if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
-            self.unbindActionEntry(cf.keybind_entries[sel - ks]);
-            self.metal_dirty = true;
-            return;
-        };
-        // 전역 단축키 행 → global_bindings에서 제거(unbind) + 줄 제거 예약(전역은 빌트인 없어 "없음"이 기본).
-        if (cf.globalKeybindRowStart()) |gs| if (sel >= gs and sel - gs < cf.global_entries.len) {
-            self.unbindGlobalEntry(cf.global_entries[sel - gs]);
-            self.metal_dirty = true;
-            return;
-        };
-    }
-
-    /// text 행 리셋(§6.11 resetSelectedSettingRow의 text 분기 — 케이스가 많아 분리). 동기화 키(env/macro)는 삭제, bg-image·
-    /// shell.args·workspace.root는 빈 값(직접 클리어 — setText는 빈 값 거부라 필드 직접 세팅), 나머지 schema text(font.family 등)는
-    /// 기본 문자열로 setText. 모두 override 줄 제거(markConfigKeyRemoved). env/macro/shell.args/workspace.root는 spawn 시점
-    /// 값이라 라이브 재적용 생략(removeEnvVar 선례), font.family 등 렌더 영향 키만 reapplyLoadedConfig.
-    fn resetSelectedTextRow(self: *AppSession, t: config_mod.schema.TextField, defaults: SettingsDefaults) void {
-        if (std.mem.startsWith(u8, t.key, "env.") and t.key.len > "env.".len) {
-            self.removeEnvVar(t.key["env.".len..]); // env.<KEY> 삭제(= 그 변수의 기본값 "없음")
-            self.refreshSettingsFieldCount();
-            self.metal_dirty = true;
-            return;
-        }
-        if (std.mem.startsWith(u8, t.key, "macro.") and t.key.len > "macro.".len) {
-            self.removeTerminalMacro(t.key["macro.".len..]); // 터미널 매크로 제거
-            self.refreshSettingsFieldCount();
-            self.metal_dirty = true;
-            return;
-        }
-        if (std.mem.eql(u8, t.key, "window.background-image")) {
-            // 빈 값(배경 없음)으로 — setText는 빈 값을 거부하므로 필드를 직접 빈 리터럴로. 라이브 반영 + override 줄 제거.
-            self.loaded_config.config.window_background_image = "";
-            self.reapplyLoadedConfig();
-            self.markConfigKeyRemoved("window.background-image");
-            self.metal_dirty = true;
-            return;
-        }
-        if (std.mem.eql(u8, t.key, "shell.args")) {
-            self.loaded_config.config.shell.args = &.{}; // 기본값 = 빈 argv(셸 spawn 시점 반영)
-            self.markConfigKeyRemoved("shell.args");
-            self.metal_dirty = true;
-            return;
-        }
-        if (std.mem.eql(u8, t.key, "workspace.root")) {
-            self.loaded_config.config.workspace.root = ""; // 기본값 = 빈(상속 cwd)
-            self.markConfigKeyRemoved("workspace.root");
-            self.metal_dirty = true;
-            return;
-        }
-        const dv = defaults.textFor(t.key) orelse return;
-        if (dv.len == 0) {
-            // 기본값이 빈 문자열인 schema text(font.fallback 등) — setText가 빈 값을 거부해 라이브 클리어 불가. override 줄만
-            // 제거해 다음 로드에서 기본값(빈)이 되게 한다(드묾 — 대부분 비-빈 기본값). 라이브 반영은 reapply로도 config 필드가
-            // 안 비어 못하므로 생략(한계, §6.11 문서화).
-            self.markConfigKeyRemoved(t.key);
-            self.metal_dirty = true;
-            return;
-        }
-        const owned = self.loaded_config.arena.allocator().dupe(u8, dv) catch return; // setText는 config arena 소유 슬라이스 요구
-        if (config_mod.schema.setText(&self.loaded_config.config, t.key, owned)) {
-            self.reapplyLoadedConfig();
-            self.markConfigKeyRemoved(t.key);
-            self.metal_dirty = true;
-        }
-    }
-
-    /// env.<name>을 config.env에서 제거 + 파일 줄 삭제 예약(removeConfigLines). setEnvVar의 짝. name 키는 동적이라
-    /// loaded_config.arena 소유로 config_removed_keys에 둔다(serializeConfig drain까지 유효).
-    fn removeEnvVar(self: *AppSession, name: []const u8) void {
-        const a = self.loaded_config.arena.allocator();
-        var list: std.ArrayList([]const u8) = .empty;
-        for (self.loaded_config.config.env) |entry| {
-            const eq = std.mem.indexOfScalar(u8, entry, '=') orelse entry.len;
-            if (!std.mem.eql(u8, entry[0..eq], name)) list.append(a, entry) catch return; // 그 KEY만 제외
-        }
-        self.loaded_config.config.env = list.toOwnedSlice(a) catch return;
-        const removed_key = std.fmt.allocPrint(a, "env.{s}", .{name}) catch return;
-        self.markConfigKeyRemoved(removed_key);
-    }
-
-    /// config 키 줄 삭제를 예약한다(중복은 한 번만 — markConfigKeyDirty의 삭제 짝). serializeConfig가 removeConfigLines로 반영.
-    fn markConfigKeyRemoved(self: *AppSession, key: []const u8) void {
-        for (self.config_removed_keys.items) |k| if (std.mem.eql(u8, k, key)) return;
-        self.config_removed_keys.append(self.allocator, key) catch {};
-    }
-
-    /// **[보류된 dead code — 프로덕션 호출 없음]** 옛 ←→ 값 조절 라우터: 선택 행 종류에 따라 number 스텝(범위 4%)·
-    /// enum 순환·폰트 순환·색 프리셋 순환·팔레트 셀 이동·theme 프리셋 순환(dir=-1/+1)을 했다. **재설계로 ←→가 "영역
-    /// 포커스 이동"(←네비·→폼)이 되면서 `handle`이 더는 adjust를 방출하지 않아 죽었다**(테스트만 호출). 지우지 않은 건
-    /// "숫자·드롭다운도 ←→로 조절하면 일관적일까?" 결정이 **보류 중**이라 — ←→ adjust를 다시 넣기로 하면 이게 그 구현이다.
-    /// 현재 모델을 영구 확정하면 이 함수 + `applyThemePreset(dir)` + deprecated Action(slider_set/adjust_left/right)을 함께
-    /// 제거한다. (docs/config-gui.md §4 "←→ adjust 보류" 참조.)
-    fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-        if (sel < cf.bools.len) return; // bool 행 — ←/→ 무동작
-        const after_nums = cf.bools.len + cf.nums.len;
-        if (sel < after_nums) {
-            // slider 행 — 한 스텝 조절.
-            const n = cf.nums[sel - cf.bools.len];
-            const span = n.max - n.min;
-            const step = if (n.is_int) @max(@as(f64, 1), span * 0.04) else span * 0.04;
-            const value = std.math.clamp(n.value + @as(f64, @floatFromInt(dir)) * step, n.min, n.max);
-            if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyDirty(n.key);
-            }
-            return;
-        }
-        const after_enums = after_nums + cf.enums.len;
-        if (sel < after_enums) {
-            // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환. theme.preset은 synthetic(특수)이라 별도 적용.
-            const e = cf.enums[sel - after_nums];
-            if (std.mem.eql(u8, e.key, "theme.preset")) {
-                self.applyThemePreset(dir);
-            } else if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, dir)) {
-                self.reapplyLoadedConfig();
-                self.markConfigKeyDirty(e.key);
-            }
-            return;
-        }
-        const after_texts = after_enums + cf.texts.len;
-        const after_colors = after_texts + cf.colors.len;
-        if (sel < after_texts) {
-            // text 행 — font.family만 ←/→로 번들 폰트(theme.bundled_font_families) 순환(테마 프리셋처럼 키보드 선택).
-            // 나머지 텍스트 필드는 ←/→ 무동작(편집은 Enter/클릭). 목록 밖 시스템·직접입력 폰트는 첫/마지막 항목으로
-            // 진입한다(cycleFontFamily) — 커스텀 폰트 복귀는 Enter 직접입력.
-            const t = cf.texts[sel - after_enums];
-            if (std.mem.eql(u8, t.key, "font.family")) {
-                if (config_mod.schema.cycleFontFamily(&self.loaded_config.config, dir)) {
-                    self.reapplyLoadedConfig();
-                    self.markConfigKeyDirty("font.family");
-                }
-            }
-            return;
-        }
-        if (sel >= after_texts and sel < after_colors) {
-            // color 행 — ←/→ = 이전/다음 16색 프리셋 순환. 단 테마 프리셋 잠금이면 막는다(색을 풀려면 클릭으로
-            // "사용자 지정" 전환해야 — ←/→로 슬쩍 바뀌는 혼란 방지).
-            if (self.themePresetActive()) return;
-            const ci = sel - after_texts;
-            if (ci < cf.colors.len) {
-                const c = cf.colors[ci];
-                if (config_mod.schema.cycleColor(&self.loaded_config.config, c.key, dir)) {
-                    self.reapplyLoadedConfig();
-                    self.markConfigKeyDirty(c.key);
-                }
-            }
-            return;
-        }
-        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
-            // 팔레트 그리드 행 — ←/→ = 선택 셀 이동(색 변경 아님, 재렌더만). 색 변경은 Enter→hex 편집.
-            self.chrome_host.settings.moveGridCell(dir);
-            return;
-        };
-        // keybind/global 행은 ←/→ 무동작(녹음은 Enter/클릭). text 행은 위 after_texts 분기에서 처리(font.family만 순환).
-    }
-
-    /// 세팅 GUI 라이브 재적용(토글·슬라이더·enum·색·배경 이미지·테마)의 공통 진입점. **런타임 ⌘+/− 줌을 보존한다** —
-    /// 폰트와 무관한 토글(커서 깜빡임 등)이 확대/축소를 리셋하지 않게(버그 수정). 통합 리셋(resetAllSettings)은 줌까지
-    /// config 기본으로 되돌려야 하므로 applyLoadedConfig(false)를 직접 부른다.
-    fn reapplyLoadedConfig(self: *AppSession) void {
-        self.applyLoadedConfig(true);
-        self.reconcileAgentStatusline(); // 토글을 껐으면 여기서 복원·제거까지 간다
-    }
-
-    /// reapplyLoadedConfig 본체. 메모리의 loaded_config(스키마 필드 in-place 변경)에서 appearance를 다시 resolve해 적용한다.
-    /// reloadConfig(파일 재로드)의 적용 단계만 떼어낸 것 — loaded_config를 교체/free하지 않으므로(같은 arena 유지)
-    /// appearance가 그 arena를 계속 빌려도 안전하다(reloadConfig의 swap-then-free 순서 가드는 불필요). resolve 실패면
-    /// 무동작(forgiving — appearance 보존). behavior 캐시·palette·scrollback·ambiguous-width·사이드바도 함께 갱신.
-    /// preserve_zoom이면 ⌘+/− 런타임 줌을 보존하고(applyAppearancePreservingZoom — 단 폰트 크기 자체가 바뀐 GUI
-    /// 변경이면 그 값이 사용자 의도라 줌을 안 얹는다), false면(통합 리셋) 줌까지 config 기본 크기로 되돌린다.
-    fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
-        const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
-        // 사이드바 폭(sidebar.width, pt)을 메모리 config에서 되읽는다 — 세팅 GUI number 위젯·통합 리셋이 바꿨을 수 있다.
-        // 아래 applyAppearance→applyMetricsPipeline→refreshCellMetrics 전에 세워야 clamp·px 환산·grid 재배치가 새 폭을
-        // 따라간다. 드래그 write-back이 이 미러(loaded_config)도 갱신하므로 런타임↔config가 일치 → 되읽어도 사용자가
-        // 끈 폭을 보존한다(reapply가 런타임 전용 override를 날리는 부류의 회피 — loaded_config 미러 경로).
-        self.sidebar_width_pt = self.loaded_config.config.sidebar.width_pt;
-        if (preserve_zoom)
-            self.applyAppearancePreservingZoom(new_appearance)
-        else
-            self.applyAppearance(new_appearance); // 통합 리셋 — 줌도 config 기본 크기로(applyAppearance가 base=appearance=config)
-        self.audible_bell = self.loaded_config.config.bell.audible;
-        self.bell_visual = self.loaded_config.config.bell.visual;
-        self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
-        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
-        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
-        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
-        self.option_as_meta = self.loaded_config.config.input.option_as_meta;
-        self.reapplyScrollback();
-        self.reapplyConfigPalette();
-        self.reapplyAmbiguousWidth();
-        self.reapplyEmojiWidth();
-        self.reapplyDefaultCursorShape();
-        sidebar_ops.rebuildSidebar(self) catch {};
-        // 커맨드 카탈로그는 여기서 재빌드하지 않는다 — reapplyLoadedConfig 자체는 keybindings/unbinds를 바꾸지 않는다
-        // (GUI 토글·슬라이더·색 선택은 스키마 GUI 필드라 keybind 무관). keybind를 실제로 바꾸는 경로가 직접 재빌드한다:
-        // rebind/unbindActionEntry·reloadConfig·resetAllSettings. **resetAllSettings는 keybind 4종을 빈 슬라이스로 비운 뒤**
-        // applyLoadedConfig(false)로 재적용하고, 그 **뒤에** 자체적으로 rebuildCommandCatalog를 호출한다(#2-b). 즉 이 경로는
-        // keybind-불변이라 여기서 카탈로그를 안 건드리는 게 맞고, reset의 keybind 변경 반영은 resetAllSettings의 명시 재빌드가 책임진다.
-        self.metal_dirty = true;
-    }
-
     /// terminal.KeyEvent → chrome.input.InputEvent. chrome은 terminal 타입을 모르므로(L1/L3 경계) 이 변환을
     /// 플랫폼 어댑터가 소유한다. 모디파이어(shift/ctrl/opt/cmd)도 매핑한다 — find의 Shift+Enter(이전 매치)·
     /// ⌘/⌃/⌥+글자(닫기) 판정에 쓴다. char가 아닌 키의 codepoint는 0.
-    fn chromeInputFromKeyEvent(event: terminal.KeyEvent) chrome.input.InputEvent {
+    pub fn chromeInputFromKeyEvent(event: terminal.KeyEvent) chrome.input.InputEvent {
         const key: chrome.input.Key = switch (event.key) {
             .enter => .enter,
             .escape => .escape,
@@ -12671,105 +11790,6 @@ pub const AppSession = struct {
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *AppSession) void {
         find_ops.toggleFind(self); // 본문 분리: app_session/find.zig(E1)
-    }
-
-    /// 인라인 rename을 시작한다 — 대상의 현재 custom_name으로 편집기를 시드(없으면 빈 편집기 = 새 이름)하고 다른
-    /// 모달은 닫는다(배타적). 이후 키/IME는 모달 가드가 rename_input으로 라우팅한다. 대상은 dispatchAppAction이
-    /// 활성 워크스페이스/pane/Term으로 고른다(또는 PR4/PR5 클릭 대상).
-    pub fn startRename(self: *AppSession, target: RenameTarget) void {
-        self.chrome_host.find.hide(); // rename은 별도 모달 — 열려 있던 오버레이를 닫는다(배타적)
-        self.chrome_host.palette.hide();
-        self.rename_input.clear();
-        // 현재 custom_name으로 시드(owned 문자열을 query에 복사) — 없으면 빈 편집기. auto title은 시드하지 않는다
-        // (custom_name만 편집 대상). 사용자는 편집기에서 그대로 바꾸거나 지운다.
-        const seed: ?[]const u8 = switch (target) {
-            .workspace => |t| t.custom_name,
-            .pane => |p| p.custom_name,
-            .term => |t| t.surface.custom_name,
-            .group => |t| t.group_start, // 그룹 이름 = group_start 마커
-            .file_tree => |t| if (t.edit_kind == .rename) std.fs.path.basename(t.path()) else null,
-        };
-        if (seed) |s| self.rename_input.query.appendSlice(self.allocator, s) catch {};
-        self.rename = target;
-        self.resetCursorBlink();
-        self.metal_dirty = true;
-    }
-
-    /// rename 편집 텍스트(query)를 대상 custom_name으로 확정한다 — 비면 custom_name을 지운다(이름 없음). 조합 중
-    /// preedit가 남아 있으면 먼저 query로 확정(IME 글자 손실 방지 — find와 같은 규율). 옛 owned custom_name을 free
-    /// 하고 새 owned 문자열로 교체. 그 뒤 편집기를 닫는다.
-    fn commitRename(self: *AppSession) void {
-        const target = self.rename orelse return;
-        _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
-        const text = self.rename_input.query.items;
-        if (target == .file_tree) {
-            if (file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, text)) self.closeRename();
-            return;
-        }
-        // 빈 텍스트(의도적 삭제) → null. 비어있지 않은데 dupe가 OOM이면 **기존 이름을 보존**하고 편집기만 닫는다 —
-        // catch null로 흡수하면 OOM과 '빈 이름'을 구분 못 해 입력한 이름이 통째로 사라진다(기존 이름까지 free).
-        const new_name: ?[]const u8 = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch {
-            self.closeRename();
-            return;
-        });
-        switch (target) {
-            .workspace => |t| {
-                if (t.custom_name) |old| self.allocator.free(old);
-                t.custom_name = new_name;
-            },
-            .pane => |p| {
-                if (p.custom_name) |old| self.allocator.free(old);
-                p.custom_name = new_name;
-            },
-            .term => |t| {
-                if (t.surface.custom_name) |old| self.allocator.free(old);
-                t.surface.custom_name = new_name;
-            },
-            .group => |t| {
-                // 그룹 이름은 비어도 마커(group_start)를 지우지 않는다 — null이면 그룹이 사라지므로(§2.1) 빈 문자열로
-                // 둔다(이름 없는 그룹 시작, 폴백 "그룹" 표시). 그룹 해제는 ungroup 액션이 담당(rename과 분리).
-                if (t.group_start) |old| self.allocator.free(old);
-                t.group_start = new_name orelse (self.allocator.dupe(u8, "") catch null);
-                sidebar_ops.rebuildSidebar(self) catch {}; // 헤더 라벨 즉시 갱신
-            },
-            .file_tree => unreachable,
-        }
-        self.closeRename();
-    }
-
-    /// rename 편집기를 닫는다(취소·커밋 공통 종료) — 입력을 비우고 rename을 null로. custom_name은 안 건드린다
-    /// (취소면 원래 이름 유지, 커밋이면 위에서 이미 갱신). 대상 teardown 시 invalidate도 이 상태만 비우면 된다.
-    fn closeRename(self: *AppSession) void {
-        if (self.rename == null) return;
-        self.rename = null;
-        self.rename_input.clear();
-        self.resetCursorBlink();
-        self.metal_dirty = true;
-    }
-
-    /// rename 활성 중 키 처리(모달 가드가 호출). Enter=확정·Esc=취소·Backspace=삭제·평문 글자=추가. 모디파이어
-    /// 글자·기타 키(↑↓ 등)는 무시해 편집기를 유지한다(텍스트 필드라 단축키를 뒤로 안 흘린다). IME 조합은
-    /// imeSetPreedit/imeEnd가 rename_input에 직접 넣는다(find/palette와 같은 경로).
-    fn handleRenameKey(self: *AppSession, ev: chrome.input.InputEvent) void {
-        switch (ev) {
-            .key => |k| switch (k.key) {
-                .escape => self.closeRename(),
-                .enter => self.commitRename(),
-                .backspace => {
-                    self.rename_input.backspace();
-                    self.resetCursorBlink();
-                    self.metal_dirty = true;
-                },
-                .char => {
-                    if (k.mods.command or k.mods.control or k.mods.option) return; // 단축키 조합은 편집기에 안 쌓음
-                    self.rename_input.appendChar(self.allocator, k.codepoint) catch {};
-                    self.resetCursorBlink();
-                    self.metal_dirty = true;
-                },
-                else => {}, // up/down/other — 무시(편집기 유지)
-            },
-            .pointer => {}, // rename 텍스트 편집기는 포인터를 안 받는다(CS-4-0 — 모달 위젯 포인터는 chrome_host 경로).
-        }
     }
 
     /// SG8a 순수 투영 코어를 **라이브 sidebar_rows**에 얇게 위임하는 래퍼(preview=null). recomputeVisibleTabs·SG8a/b
@@ -13209,47 +12229,6 @@ pub const AppSession = struct {
     /// 사이드바는 '|' 글리프라 내용 **뒤**에 둔다). max_col은 우측 아이콘 침범 방지 경계(cols-4). 무 alloc(tailWindow 슬라이스).
     pub const SidebarSearchLine = struct { truncated: bool, query: []const u8, preedit: []const u8, caret_col: u16 };
 
-    /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
-    /// null(터미널 본문·‹›/+·"+" 슬롯·바 밖). 더블클릭(kind 4)과 우클릭 메뉴가 공유해 **같은 자리를 같은 대상으로**
-    /// 친다(단일 출처). hit-test는 paneBar(full/tabs/label_cols)·barMetrics를 재사용.
-    fn renameTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?RenameTarget {
-        if (sidebar_ops.inSidebar(self, x_px)) {
-            // 사이드바: 슬롯이면 그 워크스페이스. 단 우측 ✕(close) zone은 rename 대상 아님(닫기 자리에서 rename 방지).
-            // "+" 슬롯/빈 영역은 sidebarSlotAt이 null이라 자연히 제외.
-            if (sidebar_ops.sidebarSlotAt(self, y_px)) |slot| {
-                // 그룹 헤더 더블클릭 → 그룹 이름 rename(rename_group과 같은 대상). onGroupHeader가 헤더/카드를 가른다.
-                if (chrome.components.sidebar.onGroupHeader(self.sidebar_rows.items, slot)) {
-                    const gh = self.sidebar_rows.items[slot].group_header;
-                    if (gh.tab < self.tabs.items.len) return .{ .group = self.tabs.items[gh.tab] };
-                    return null;
-                }
-                if (sidebar_ops.sidebarCloseButtonAt(self, x_px)) return null;
-                if (tab_ops.visibleTab(self, slot)) |tab_idx| return .{ .workspace = self.tabs.items[tab_idx] }; // 표시 슬롯 → 원본(검색 필터)
-            }
-            return null;
-        }
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
-            const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
-            if (!layout_math.pointInRect(x_px, y_px, pb.full)) continue;
-            // 좌측 grip+라벨 세그먼트 → 그 pane(grip은 항상 예약돼 더블/우클릭 rename 대상도 grip 영역 포함).
-            if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) return .{ .pane = lr.leaf };
-            const count = lr.leaf.terms.items.len;
-            const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return null;
-            if (m.inScrollLeftZone(x_px) or m.inScrollRightZone(x_px) or m.inPlusZone(x_px)) return null; // ‹›/+ 은 대상 아님
-            const tab = m.tabIndex(count, x_px);
-            if (m.inCloseZone(tab, x_px)) return null; // 탭 우측 ✕(close) zone은 rename 대상 아님
-            // 보이는 순서에서 고른다 — 드래그 중이면 사용자가 본 자리가 preview이고, rename은 그 제스처를
-            // 취소하지 않으므로 model 순서로 고르면 눌린 것과 다른 탭이 대상이 된다(§4.4 "paint와 hit-test가 함께").
-            const order = pane_ops.paneTermOrder(self, lr.leaf);
-            if (tab < order.len) return .{ .term = order[tab] };
-            return null;
-        }
-        return null;
-    }
-
     /// 점이 chrome(사이드바 또는 어떤 pane의 탭 바) 위인가 — 우클릭이 chrome이면 consume하고 터미널 본문이면
     /// mouse-reporting으로 흘리는 판정에 쓴다. renameTargetAt가 null인 chrome 영역(사이드바 +/빈칸·바 ‹›/+)과
     /// 터미널 본문을 구분한다(renameTargetAt는 둘 다 null이라 구분 불가).
@@ -13270,109 +12249,9 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 현재 컨텍스트 메뉴 대상에 맞는 항목 라벨을 buf에 채우고 슬라이스 반환. workspace = Rename + Pin/Unpin + 배경
-    /// 프리셋 + 그룹 액션/색, group(헤더) = Rename + 그룹 풀기 + 그룹 색, pane/term = Rename만. show가 호출해 len을
-    /// 박고, itemAt/draws/accept가 contextMenuItems로 같은 리스트를 본다.
-    fn buildContextMenuItems(self: *AppSession) []const []const u8 {
-        var n: usize = 0;
-        self.context_menu_items_buf[n] = "Rename";
-        n += 1;
-        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .workspace) {
-            // 카드 pin 라벨 = cardPinRole 단일 판정(dispatch와 공유, ctx_menu_pin=1 인덱스 고정). GL §13 GL2 세 컨텍스트:
-            //  · 마커 카드(.group) = 그룹째 고정(헤더 동형, 개별 pin이면 C2 캐시 권위 §12.2가 깨져 그룹째가 유일 안전)
-            //  · 비마커 멤버(.local) = **그룹 내 위치 고정**(toggleLocalPin, 현행 그룹째 위임 되돌림 — 그룹-로컬 축)
-            //  · 최상위 카드(.individual) = 개별 전역 위치 고정(togglePin, 현행)
-            self.context_menu_items_buf[n] = switch (self.cardPinRole(t.workspace)) {
-                .group => if (tab_ops.enclosingGroupMarkerTab(self, t.workspace)) |mk|
-                    (if (mk.pinned) "그룹 고정 해제" else "그룹째 고정")
-                else
-                    (if (t.workspace.pinned) "고정 해제" else "위치 고정"),
-                .local => if (t.workspace.local_pinned) "그룹 내 고정 해제" else "그룹 내 위치 고정",
-                .individual => if (t.workspace.pinned) "고정 해제" else "위치 고정",
-            };
-            n += 1;
-            for (tab_bg_labels) |lbl| {
-                self.context_menu_items_buf[n] = lbl;
-                n += 1;
-            }
-            for (tab_accent_labels) |lbl| { // 좌측 accent 막대색(배경과 직교) — ctx_menu_accent_first부터
-                self.context_menu_items_buf[n] = lbl;
-                n += 1;
-            }
-            // 사이드바 그룹(SG3c·SG5-3) — 위치 파생 마커(group_start) 세팅/제거(단축키·팔레트와 같은 세션 메서드).
-            // 항상 노출(pin처럼 인덱스 고정) — ungroup은 그룹에 안 속하면 no-op이라 안전. "새 그룹으로 묶기"=중첩(depth+1),
-            // "형제 그룹으로 분리"=같은 depth 형제(SG5-3, 명시적 분리 — 그룹 안 카드에서 형제 최상위/형제 그룹 생성).
-            self.context_menu_items_buf[n] = "새 그룹으로 묶기"; // ctx_menu_group_create
-            n += 1;
-            self.context_menu_items_buf[n] = "형제 그룹으로 분리"; // ctx_menu_group_sibling
-            n += 1;
-            self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_menu_group_ungroup
-            n += 1;
-            for (tab_group_color_labels) |lbl| { // 그룹 공통 색(SG5-2) — ctx_menu_group_color_first부터. 소속 그룹 마커에 색 세팅
-                self.context_menu_items_buf[n] = lbl;
-                n += 1;
-            }
-            // "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 맨 끝에 붙인다(최상위 카드엔 안 뜸 — tabIsInGroup).
-            // ungroup(그룹 통째 해제)과 달리 이 카드 하나만 최상위로 뺀다. 맨 끝 조건부라 앞 고정 인덱스를 안 흔든다(sel==ctx_menu_group_remove).
-            if (tab_ops.tabIsInGroup(self, t.workspace)) {
-                self.context_menu_items_buf[n] = "그룹에서 빼기"; // ctx_menu_group_remove
-                n += 1;
-                // "여기서 최상위로 분리"(promote-in-place, §14.5·§14.7) — remove 바로 뒤. removeFromGroup(그룹 밖 이동+unpin)과
-                // 달리 **제자리** top_level만 세팅(위치·pin 불변 — 고정 top카드 가능). **마커 카드(group_start!=null)에선 숨긴다**
-                // (§14.8 SR5 결정 (a)): promoteTabToTopLevelInPlace가 leaf-only(§13.8)상 마커에 no-op이라, 뜨면 "눌러도 무동작"인
-                // 죽은 항목이 된다(remove는 마커에서도 nested subgroup 빼기로 유효해 유지). 조건부라 마커면 promote 슬롯이 비어
-                // 메뉴가 한 칸 짧아지고(ctx_menu_group_remove까지), sel이 ctx_menu_group_promote에 절대 도달 못 해 인덱스가 안 흔들린다.
-                if (t.workspace.group_start == null) {
-                    self.context_menu_items_buf[n] = "여기서 최상위로 분리"; // ctx_menu_group_promote
-                    n += 1;
-                }
-            }
-        };
-        // 그룹 헤더 우클릭(SG5-2-header) — 대상은 group_start 마커 탭(renameTargetAt). 헤더 스코프 액션만: Rename(0)=그룹
-        // 이름 편집은 위에서 이미 넣었고, 여기서 "그룹 풀기"(ungroup)와 "그룹 색: …" 프리셋을 붙인다. 색 라벨/팔레트/세팅은
-        // 카드 메뉴와 같은 인프라(tab_group_color_labels·tab_color_presets·setGroupColorForTab)를 재사용해 같은 색 메뉴를 공유한다.
-        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .group) {
-            // 그룹 고정/해제(toggleGroupPin — GP3 §12.10). 마커 pinned = 그룹 고정 권위(§12.2)라 헤더에서 그룹째 토글한다.
-            self.context_menu_items_buf[n] = if (t.group.pinned) "그룹 고정 해제" else "그룹 고정"; // ctx_group_menu_pin
-            n += 1;
-            self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_group_menu_ungroup
-            n += 1;
-            for (tab_group_color_labels) |lbl| { // 그룹 색 프리셋 — ctx_group_menu_color_first부터(카드 메뉴와 같은 라벨)
-                self.context_menu_items_buf[n] = lbl;
-                n += 1;
-            }
-        };
-        self.context_menu_items_len = n;
-        return self.context_menu_items_buf[0..n];
-    }
-
-    fn contextMenuItems(self: *const AppSession) []const []const u8 {
-        return self.context_menu_items_buf[0..self.context_menu_items_len];
-    }
-
-    /// view options(⚙) 메뉴 항목 — 사이드바 카드 표시 토글. 라벨 체크마크 prefix로 현재 on/off를 보인다(✓+공백=표시,
-    /// 공백 2칸=숨김 — EAW 폭 정렬). 이름줄은 항상 표시라 토글 없음(사용자 요청). rename 메뉴와 같은 context_menu_items_buf·
-    /// itemAt/draws/accept 경로를 공유하고, 분기는 view_options_menu 플래그로 한다. 라벨은 정적 리터럴이라 소유 불요.
-    fn buildViewOptionsMenuItems(self: *AppSession) []const []const u8 {
-        const sb = self.loaded_config.config.sidebar;
-        self.context_menu_items_buf[0] = if (sb.show_branch) "\u{2713} 브랜치 표시" else "  브랜치 표시";
-        self.context_menu_items_buf[1] = if (sb.show_folder) "\u{2713} 폴더 표시" else "  폴더 표시";
-        self.context_menu_items_len = 2;
-        return self.context_menu_items_buf[0..2];
-    }
-
-    /// 터미널 본문 우클릭 메뉴 항목(input.right-click=menu) — 복사/붙여넣기. rename·view_options와 같은
-    /// context_menu_items_buf·itemAt/draws/accept 경로를 공유하고 분기는 terminal_context_menu 플래그로 한다(F2-5).
-    fn buildTerminalContextMenuItems(self: *AppSession) []const []const u8 {
-        self.context_menu_items_buf[0] = "복사";
-        self.context_menu_items_buf[1] = "붙여넣기";
-        self.context_menu_items_len = 2;
-        return self.context_menu_items_buf[0..2];
-    }
-
     /// 파일 Term 본문 우클릭 메뉴 상태(docs/file-panel.md §2.6). `href`는 소유 버퍼다 — 렌더러가 준 문자열이라
     /// 메뉴가 열려 있는 동안 web이 문서를 바꿔도 우리가 든 값이 그대로여야 한다.
-    const FileContentMenu = struct {
+    pub const FileContentMenu = struct {
         surface_id: u64,
         editor_epoch: u64,
         items: [content_menu.max_items]content_menu.Item = undefined,
@@ -13381,71 +12260,14 @@ pub const AppSession = struct {
     };
 
     /// web이 실행할 메뉴 동작(선택에 붙은 것). Swift가 tick마다 drain해 그 surface의 web에 이벤트로 전달한다.
-    const FileMenuAction = struct { surface_id: u64, item: content_menu.Item };
-
-    /// 본문 우클릭 → 메뉴를 연다. 좌표는 shell 뷰포트 CSS px이라 그 web surface rect + backing scale로 창 좌표를 만든다.
-    /// **모드는 web에서 받지 않는다** — 그 Term의 entry가 이미 안다(두 출처가 갈리지 않게).
-    pub fn openFileContentMenu(
-        self: *AppSession,
-        surface_id: u64,
-        request: maru.session.control_bridge.MenuRequest,
-    ) !void {
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.Unsupported;
-        var buf: [content_menu.max_items]content_menu.Item = undefined;
-        const items = content_menu.build(request.target, entry.mode, request.has_selection, &buf);
-        if (items.len == 0) return; // 낼 항목이 없으면 빈 메뉴를 띄우지 않는다
-
-        const rect = self.webSurfaceRect(surface_id) orelse return error.Unsupported;
-        const scale: f64 = @as(f64, @floatFromInt(@max(@as(u32, 1), self.scale_milli))) / 1000.0;
-        // 좌표는 rect 안으로 clamp한다 — 렌더러가 준 값이라 뷰 밖을 가리킬 수 있고, 그러면 메뉴가 자기 문서와
-        // 무관한 자리에 뜬다. clamp는 "고쳐서 통과"가 아니라 **이 surface 안에서만 뜬다**는 계약이다.
-        const x = std.math.clamp(
-            @as(f64, @floatFromInt(rect.x)) + request.x * scale,
-            @as(f64, @floatFromInt(rect.x)),
-            @as(f64, @floatFromInt(rect.x + rect.w)),
-        );
-        const y = std.math.clamp(
-            @as(f64, @floatFromInt(rect.y)) + request.y * scale,
-            @as(f64, @floatFromInt(rect.y)),
-            @as(f64, @floatFromInt(rect.y + rect.h)),
-        );
-
-        self.closeContextMenu(); // 열려 있던 다른 메뉴가 있으면 먼저 정리(대상·플래그 배타)
-        var state: FileContentMenu = .{ .surface_id = surface_id, .editor_epoch = request.editor_epoch };
-        if (request.href.len > 0) state.href = self.allocator.dupe(u8, request.href) catch &.{};
-        for (items, 0..) |item, i| {
-            self.context_menu_items_buf[i] = item.label();
-            state.items[i] = item;
-        }
-        state.len = items.len;
-        self.context_menu_items_len = items.len;
-        self.file_content_menu = state;
-        self.chrome_host.context_menu.show(@intFromFloat(x), @intFromFloat(y), items.len);
-        self.metal_dirty = true;
-    }
+    pub const FileMenuAction = struct { surface_id: u64, item: content_menu.Item };
 
     /// 지난 tick 레이아웃에서 그 web surface의 본문 rect(backing px). 아직 한 번도 배치되지 않았으면 null이다.
-    fn webSurfaceRect(self: *AppSession, surface_id: u64) ?web_panel_layout.Rect {
+    pub fn webSurfaceRect(self: *AppSession, surface_id: u64) ?web_panel_layout.Rect {
         for (self.web_panel_prev.items) |layout| {
             if (layout.surface_id == surface_id) return layout.content_rect;
         }
         return null;
-    }
-
-    /// web이 실행할 메뉴 동작을 drain한다(있으면 그 동작, 비우고). Swift가 매 tick 호출한다.
-    pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
-        const action = self.pending_file_menu_action;
-        self.pending_file_menu_action = null;
-        return action;
-    }
-
-    /// 터미널 본문 (x,y backing px)에 복사/붙여넣기 컨텍스트 메뉴를 띄운다(input.right-click=menu). 항목 선택은
-    /// acceptContextMenu가 terminal_context_menu 분기로 pending_clipboard_action을 세운다(Swift가 OS 클립보드 실행).
-    fn showTerminalContextMenu(self: *AppSession, x_px: f64, y_px: f64) void {
-        self.terminal_context_menu = true;
-        const items = self.buildTerminalContextMenuItems();
-        self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
-        self.metal_dirty = true;
     }
 
     /// OS 클립보드 1회성 동작을 drain한다(있으면 그 동작, 비우고). Swift가 매 tick 호출해 copy/paste를 실행한다(F2-5).
@@ -13453,294 +12275,6 @@ pub const AppSession = struct {
         const action = self.pending_clipboard_action;
         self.pending_clipboard_action = .none;
         return action;
-    }
-
-    /// 컨텍스트/뷰옵션/터미널 메뉴 공통 teardown — hide + 대상·플래그 비움. 바깥 클릭·Esc 경로가 공유한다.
-    fn clearBranchMenuText(self: *AppSession) void {
-        // **해제와 닫기를 묶는다.** 메뉴 항목(`context_menu_items_buf`)이 이 버퍼를 빌리므로, 열린 채로 해제하면
-        // 다음 draw가 해제된 메모리를 읽는다. 재발행이 늘 뒤따르지도 않는다 — 새 목록이 0개면 `openBranchMenu`가
-        // 알림만 띄우고 돌아온다.
-        if (self.branch_menu_open) self.closeContextMenu();
-        if (self.branch_menu_text.len > 0) self.allocator.free(self.branch_menu_text);
-        self.branch_menu_text = &.{};
-        self.branch_menu_len = 0;
-    }
-
-    /// 상태바 브랜치 항목에서 브랜치 목록을 **요청**한다. 결과는 다음 tick에 `drainGitStatus`가 걷어 메뉴를 연다.
-    /// git 실행은 백엔드 스레드라 클릭이 UI를 멈추지 않는다.
-    fn requestBranchMenu(self: *AppSession) void {
-        if (self.branch_menu_pending) return; // 연타로 프로세스가 쌓이지 않게
-        // 백엔드는 **지연 생성**이다(소스 컨트롤을 연 적 없으면 없다). 없으면 조용히 무시되던 것을 여기서 만든다 —
-        // `refreshGitStatus`와 같은 규율. 안 그러면 도크를 한 번도 안 연 사용자에겐 브랜치 클릭이 아무 일도 안 한다.
-        if (self.git_backend == null) {
-            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch {
-                self.showNotice("git 백엔드를 시작하지 못했습니다");
-                return;
-            };
-        }
-        var backend = &(self.git_backend orelse return);
-        var exe_buf: [1024]u8 = undefined;
-        const git_exe = git_backend_mod.locate(&exe_buf) orelse {
-            self.showNotice("git을 찾지 못했습니다");
-            return;
-        };
-        var repo_buf: [1024]u8 = undefined;
-        const repo = self.gitRepoRoot(&repo_buf) orelse {
-            self.showNotice("git 저장소가 아닙니다");
-            return;
-        };
-        self.git_request_seq +%= 1;
-        if (backend.submitBranches(git_exe, repo, self.git_request_seq)) self.branch_menu_pending = true;
-    }
-
-    /// 걷은 목록으로 메뉴를 연다. 앵커는 **상태바 브랜치 항목 위**다 — 메뉴는 위로 펼쳐야 바에 가리지 않는다.
-    fn openBranchMenu(self: *AppSession) void {
-        if (self.branch_menu_len == 0) {
-            self.showNotice("브랜치가 없습니다");
-            return;
-        }
-        // **앵커가 있어야 연다.** 목록 읽기는 비동기라 그 사이 바가 사라질 수 있다(`status-bar.show` 끄기·
-        // quick terminal 전환). 그때 열면 앵커 없이 창 바닥에 붙어, 사용자는 누른 적 없는 메뉴를 보게 된다.
-        // 조용히 접는 게 맞다 — 클릭 대상이 화면에 없으므로 알릴 것도 없다.
-        var anchor_x: f64 = 0;
-        var anchor_y: f64 = 0;
-        var anchored = false;
-        for (self.statusBarTree().entries) |e| {
-            if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
-            anchor_x = e.rect.x;
-            anchor_y = e.rect.y;
-            anchored = true;
-        }
-        if (!anchored) return;
-        self.closeContextMenu();
-        for (self.branch_menu_names[0..self.branch_menu_len], 0..) |name, i| self.context_menu_items_buf[i] = name;
-        self.context_menu_items_len = self.branch_menu_len;
-        self.branch_menu_open = true;
-        self.chrome_host.context_menu.show(@intFromFloat(anchor_x), @intFromFloat(anchor_y), self.branch_menu_len);
-        self.metal_dirty = true;
-    }
-
-    /// 고른 브랜치를 **활성 터미널에 명령으로 넣어 준다.** 우리가 checkout을 실행하지 않는 이유는
-    /// `docs/editor-surface.md` §6의 읽기 전용 계약이다 — hook 실행·index 쓰기는 그 밖이고, 실행 주체가
-    /// 셸이어야 dirty tree·충돌·hook 출력이 평소처럼 사용자에게 보인다. 엔터는 사용자가 친다.
-    fn applyBranchMenuSelection(self: *AppSession, index: usize) void {
-        if (index >= self.branch_menu_len) return;
-        const name = self.branch_menu_names[index];
-        var buf: [512]u8 = undefined;
-        const cmd = git_command.branchSwitchCommand(name, &buf) orelse {
-            self.showNotice("브랜치 이름을 명령으로 만들 수 없습니다");
-            return;
-        };
-        self.pasteText(cmd, false);
-    }
-
-    fn closeContextMenu(self: *AppSession) void {
-        self.chrome_host.context_menu.hide();
-        self.context_menu_target = null;
-        self.file_tree_context_target = null;
-        self.file_tree_background_menu = false;
-        self.view_options_menu = false;
-        self.terminal_context_menu = false;
-        self.branch_menu_open = false; // 목록 텍스트는 다음 요청까지 살려 둔다(재열기 비용 절약)
-        self.clearFileContentMenu();
-        self.metal_dirty = true;
-    }
-
-    /// 파일 본문 메뉴 상태를 비운다(§2.6). 메뉴를 닫는 **모든** 경로가 이걸 지나야 href가 새지 않는다 —
-    /// 바깥 클릭·Esc(`closeContextMenu`)와 오버레이 일괄 정리(`dismissMessageOverlays`) 둘 다 소유자다.
-    fn clearFileContentMenu(self: *AppSession) void {
-        const menu = self.file_content_menu orelse return;
-        if (menu.href.len > 0) self.allocator.free(menu.href);
-        self.file_content_menu = null;
-    }
-
-    /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·bg_first..=배경 tint 프리셋·accent_first..=좌측 막대색 프리셋.
-    /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
-    fn acceptContextMenu(self: *AppSession) void {
-        // 브랜치 목록이 가장 먼저다 — 다른 메뉴 상태와 배타이고, 고른 이름을 터미널에 넣고 닫는다.
-        if (self.branch_menu_open) {
-            const selected = self.chrome_host.context_menu.selected;
-            self.closeContextMenu(); // 먼저 닫는다 — 주입한 명령이 메뉴에 가리지 않게
-            self.applyBranchMenuSelection(selected);
-            return;
-        }
-        // 터미널 본문 우클릭 메뉴(input.right-click=menu): 0=복사·1=붙여넣기 → pending_clipboard_action을 세워 Swift가
-        // OS 클립보드 동작을 한다. 메뉴를 닫고 return(rename·view_options와 배타). copy는 선택이 없으면 Swift가 no-op.
-        // 파일 본문 우클릭 메뉴(§2.6): 항목마다 실행 주인이 다르다. native가 이미 소유한 동작(링크 열기·복사·모드
-        // 전환)은 여기서 실행하고, 선택에 붙은 것(복사·잘라내기·붙여넣기·전체 선택)은 web으로 되돌려 보낸다.
-        if (self.file_content_menu) |menu| {
-            const selected = self.chrome_host.context_menu.selected;
-            if (selected >= menu.len) {
-                self.closeContextMenu();
-                return;
-            }
-            const item = menu.items[selected];
-            const surface_id = menu.surface_id;
-            const editor_epoch = menu.editor_epoch;
-            // href는 메뉴 teardown에서 해제되므로 **닫기 전에** 복사해 쓴다.
-            switch (item.owner()) {
-                .web => {
-                    self.pending_file_menu_action = .{ .surface_id = surface_id, .item = item };
-                    // **그 문서로 포커스를 돌려준다.** 메뉴 클릭은 오버레이 통과 경로라 터미널 뷰가 받는데, 그대로
-                    // 두면 이어지는 ⌘Z·타이핑이 편집기까지 못 간다 — 잘라내기는 됐는데 되돌리기가 안 되던 원인이다.
-                    if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| dock_ops.requestDockEntryFocus(self, entry);
-                    self.closeContextMenu();
-                },
-                .native => switch (item) {
-                    .open_link => {
-                        const href = self.allocator.dupe(u8, menu.href) catch {
-                            self.closeContextMenu();
-                            return;
-                        };
-                        defer self.allocator.free(href);
-                        self.closeContextMenu();
-                        self.openFilePanelDocumentLink(surface_id, editor_epoch, href, false) catch {
-                            self.showNotice("링크를 열지 못했습니다.");
-                        };
-                    },
-                    .copy_link, .copy_path => {
-                        // OSC 52 write와 같은 drain으로 Swift가 NSPasteboard에 쓴다(새 ABI 불요).
-                        const captured = self.allocator.dupe(u8, menu.href) catch {
-                            self.closeContextMenu();
-                            return;
-                        };
-                        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
-                        self.chrome_clipboard_write = captured;
-                        self.closeContextMenu();
-                    },
-                    .open_source => {
-                        self.closeContextMenu();
-                        _ = self.setFilePanelModeBySurface(surface_id, .source_edit);
-                        if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| dock_ops.requestDockEntryFocus(self, entry);
-                    },
-                    // 이미지 저장은 저장 패널 ABI가 필요해 이 슬라이스에 없다(§2.6) — 항목도 만들지 않는다.
-                    .save_image, .copy, .cut, .paste, .select_all => self.closeContextMenu(),
-                },
-            }
-            return;
-        }
-        if (self.terminal_context_menu) {
-            const action: ClipboardAction = switch (self.chrome_host.context_menu.selected) {
-                0 => .copy,
-                1 => .paste,
-                else => .none,
-            };
-            self.pending_clipboard_action = action;
-            self.closeContextMenu(); // hide + terminal_context_menu 비움
-            return;
-        }
-        // view options 메뉴: 항목 선택 = 표시 토글. 메뉴를 '닫지 않고'(체크박스 패널) config bool을 뒤집고 라벨(체크마크)을
-        // 갱신한 뒤 카드를 재빌드하고, config 파일 반영을 예약한다(config_dirty_keys → Swift persist). 닫기는 바깥 클릭/Esc.
-        if (self.view_options_menu) {
-            switch (self.chrome_host.context_menu.selected) {
-                0 => self.loaded_config.config.sidebar.show_branch = !self.loaded_config.config.sidebar.show_branch,
-                1 => self.loaded_config.config.sidebar.show_folder = !self.loaded_config.config.sidebar.show_folder,
-                else => {},
-            }
-            _ = self.buildViewOptionsMenuItems(); // 라벨 체크마크 갱신(메뉴 열린 채)
-            sidebar_ops.rebuildSidebar(self) catch {}; // 카드 표시 즉시 반영
-            // config 파일 persist 예약(앱→config) — 두 사이드바 표시 키를 dirty 집합에 넣는다(옛 동작과 동일하게 둘 다 기록).
-            self.markConfigKeyDirty("sidebar.show-branch");
-            self.markConfigKeyDirty("sidebar.show-folder");
-            self.metal_dirty = true;
-            return;
-        }
-        if (self.file_tree_background_menu) {
-            const selected = self.chrome_host.context_menu.selected;
-            self.closeContextMenu();
-            switch (selected) {
-                0 => file_panel_ops.requestFilePanelPick(self),
-                1 => file_panel_ops.requestFileTreeRootPick(self, .replace),
-                2 => file_panel_ops.requestFileTreeRootPick(self, .add),
-                else => {},
-            }
-            return;
-        }
-        if (self.file_tree_context_target) |target| {
-            const sel = self.chrome_host.context_menu.selected;
-            const create_allowed = !(target.symlink and (target.row_kind == .root or target.row_kind == .directory));
-            self.file_tree_context_target = null;
-            self.chrome_host.context_menu.hide();
-            if (target.root_generation != self.file_tree.rootGeneration()) {
-                self.showNotice("탐색기 루트가 바뀌어 명령을 취소했습니다.");
-                return;
-            }
-            const current_index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = target.row_kind, .path = target.path() }) orelse {
-                self.showNotice("선택한 항목이 변경되어 명령을 취소했습니다.");
-                return;
-            };
-            _ = file_panel_ops.setFileTreeSelection(self, current_index);
-            if (target.row_kind == .root) {
-                switch (sel) {
-                    0 => file_panel_ops.startFileTreeEdit(self, .create_file),
-                    1 => file_panel_ops.startFileTreeEdit(self, .create_directory),
-                    2 => file_panel_ops.requestFilePanelPick(self),
-                    3 => file_panel_ops.requestFileTreeRootPick(self, .replace),
-                    4 => file_panel_ops.requestFileTreeRootPick(self, .add),
-                    5 => file_panel_ops.removeFileTreeRoot(self, target.path()),
-                    else => {},
-                }
-            } else if (create_allowed and sel == 0) file_panel_ops.startFileTreeEdit(self, .create_file) else if (create_allowed and sel == 1)
-                file_panel_ops.startFileTreeEdit(self, .create_directory)
-            else {
-                const base: usize = if (create_allowed) 2 else 0;
-                if (sel == base) file_panel_ops.startFileTreeEdit(self, .rename) else if (sel == base + 1) file_panel_ops.requestDeleteSelectedFileTreeEntry(self);
-            }
-            self.metal_dirty = true;
-            return;
-        }
-        const target = self.context_menu_target;
-        const sel = self.chrome_host.context_menu.selected;
-        self.context_menu_target = null;
-        self.chrome_host.context_menu.hide();
-        self.metal_dirty = true;
-        const t = target orelse return;
-        if (sel == 0) {
-            self.startRename(t); // "Rename"(모든 대상)
-            return;
-        }
-        if (std.meta.activeTag(t) == .workspace) {
-            const tab = t.workspace;
-            if (sel == ctx_menu_pin) {
-                // GL §13 GL2 — cardPinRole 분기(라벨과 공유). 비마커 멤버=그룹-로컬 위치 고정(toggleLocalPin, 현행 그룹째
-                // 위임 되돌림)·마커 카드=그룹째 고정(toggleGroupPin, C2 권위 §12.2 — 개별 pin이면 캐시 desync)·최상위=개별 togglePin.
-                switch (self.cardPinRole(tab)) {
-                    .group => if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| self.toggleGroupPin(mk),
-                    .local => self.toggleLocalPin(tab),
-                    .individual => self.togglePin(tab),
-                }
-            } else if (sel == ctx_menu_group_create) {
-                tab_ops.createGroupForTab(self, tab); // 새 그룹으로 묶기=중첩(단축키 Cmd+Opt+G·팔레트 공유 — 클릭 대상 기준)
-            } else if (sel == ctx_menu_group_sibling) {
-                tab_ops.createSiblingGroupForTab(self, tab); // 형제 그룹으로 분리=같은 depth 형제(단축키 Cmd+Opt+Shift+G·팔레트 공유, SG5-3)
-            } else if (sel == ctx_menu_group_ungroup) {
-                tab_ops.ungroupTab(self, tab); // 그룹 풀기(클릭 대상이 속한 그룹의 시작 마커 제거)
-            } else if (sel == ctx_menu_group_remove) {
-                tab_ops.removeFromGroupForTab(self, tab); // 그룹에서 빼기(이 카드 하나만 최상위로 — 그룹 유지). 그룹 소속 카드에만 뜨는 항목
-            } else if (sel == ctx_menu_group_promote) {
-                tab_ops.promoteTabToTopLevelInPlace(self, tab); // 여기서 최상위로 분리(제자리 top_level·pin 불변 — remove의 이동+unpin과 구별, §14.7)
-            } else if (sel >= ctx_menu_bg_first and sel < ctx_menu_bg_first + tab_color_presets.len) {
-                tab.background_color = tab_color_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
-            } else if (sel >= ctx_menu_accent_first and sel < ctx_menu_accent_first + tab_color_presets.len) {
-                tab.accent_color = tab_color_presets[sel - ctx_menu_accent_first]; // 좌측 accent 막대색 프리셋(bound·index 모두 tab_color_presets — 공유 팔레트)
-            } else if (sel >= ctx_menu_group_color_first and sel < ctx_menu_group_color_first + tab_color_presets.len) {
-                tab_ops.setGroupColorForTab(self, tab, tab_color_presets[sel - ctx_menu_group_color_first]); // 그룹 공통 색(SG5-2) — 소속 그룹 마커에 세팅(카드 색과 같은 팔레트)
-            }
-        } else if (std.meta.activeTag(t) == .group) {
-            // 그룹 헤더 우클릭(SG5-2-header) — 대상 tab은 group_start 마커. sel==0(Rename)은 위에서 startRename(.group)로 처리됨.
-            // ungroup·색은 카드 메뉴와 같은 세션 메서드를 쓴다(대상이 마커라 enclosingGroupMarkerIndex가 자기 자신을 찾아 동작).
-            const tab = t.group;
-            if (sel == ctx_group_menu_pin) {
-                // 그룹 고정/해제(마커 pinned 토글 → 멤버 동기 → 리전 안착, GP3 §12.10). **top-level 해소**(§12.1
-                // pin ⊃ group ⊃ nest): 중첩 subgroup 헤더에서 눌러도 그 subtree만 pin돼 부모에서 떨어지지 않게
-                // enclosingGroupMarkerTab(depth 1까지 상향)으로 최상위 마커를 잡는다. 마커는 항상 자기 그룹에 속하니 non-null.
-                if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| self.toggleGroupPin(mk);
-            } else if (sel == ctx_group_menu_ungroup) {
-                tab_ops.ungroupTab(self, tab); // 그룹 풀기(헤더가 가리키는 그룹의 시작 마커 제거)
-            } else if (sel >= ctx_group_menu_color_first and sel < ctx_group_menu_color_first + tab_color_presets.len) {
-                tab_ops.setGroupColorForTab(self, tab, tab_color_presets[sel - ctx_group_menu_color_first]); // 그룹 색(카드 메뉴와 같은 dispatch·팔레트)
-            }
-        }
     }
 
     /// Find 다음/이전 매치로(⌘G/⌘⇧G). 오버레이가 닫혀 있어도 동작한다 — show가 비우기 전까지 검색어는
@@ -13776,7 +12310,7 @@ pub const AppSession = struct {
             // 생길 때 조용히 빠진다. 대신 렌더 직전 `followPaletteSelection`이 **값 비교**로 잡는다.
             .palette_selection_changed => {},
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
-            .context_menu_accept => self.acceptContextMenu(), // selected 항목 실행(현재 "Rename" → 대상 rename)
+            .context_menu_accept => settings_ops.acceptContextMenu(self), // selected 항목 실행(현재 "Rename" → 대상 rename)
             .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
                 self.context_menu_target = null;
                 self.file_tree_context_target = null;
@@ -13825,7 +12359,7 @@ pub const AppSession = struct {
                         app_quitting = true; // P3-e3-6: 앱 종료 확정 → 각 창 deinit이 host-backed Term을 terminate 대신 detach(runtime 생존).
                     },
                     .file_conflict_reload => |surface_id| self.beginFileConflictReload(surface_id),
-                    .reset => self.resetAllSettings(),
+                    .reset => settings_ops.resetAllSettings(self),
                     .paste => |target_id| self.confirmPendingPaste(target_id),
                     .close => |target| self.executeClose(target),
                     .none => {},
@@ -13857,7 +12391,7 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
-            .settings_toggle => self.toggleSelectedSetting(), // 선택 행 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color·keybind)
+            .settings_toggle => settings_ops.toggleSelectedSetting(self), // 선택 행 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color·keybind)
             .settings_dropdown_accept => self.applyDropdownSelection(), // 드롭다운 팝업 Enter/클릭 — 선택 변형 확정 + 팝업 닫기
             .settings_dropdown_preview => self.applyDropdownPreview(), // 드롭다운 ↑↓ — highlighted 라이브 적용(팝업 유지 — 바로 반영)
             .settings_dropdown_cancel => self.cancelDropdownSelection(), // 드롭다운 Esc/바깥 클릭 — original로 복원(프리뷰 되돌림)
@@ -13865,17 +12399,17 @@ pub const AppSession = struct {
             .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더(창은 아래 follow가 잡는다)
             .settings_section_changed => {
                 // 좌측 네비 클릭 — 컴포넌트가 section·selected 갱신, platform은 새 섹션 필드 수 주입 + 재렌더.
-                self.refreshSettingsFieldCount();
+                settings_ops.refreshSettingsFieldCount(self);
                 self.metal_dirty = true;
             },
             .settings_text_commit => self.commitSelectedText(), // 인라인 편집 Enter — editText→setText + 적용 + 영속
             .settings_search_changed => {
                 // 검색 쿼리 변경 — 필터된 행 수를 다시 주입(setFieldCount가 selected를 clamp) + 재렌더.
-                self.refreshSettingsFieldCount();
+                settings_ops.refreshSettingsFieldCount(self);
                 self.metal_dirty = true;
             },
-            .settings_delete_row => self.resetSelectedSettingRow(), // 선택 행 Backspace — env/macro/keybind 삭제·스칼라 기본값 복원(§6.11)
-            .settings_reset_field => self.resetSelectedSettingRow(), // 선택 행 ↺ 클릭 — 그 항목만 기본값 복원(§6.11, Backspace와 같은 경로)
+            .settings_delete_row => settings_ops.resetSelectedSettingRow(self), // 선택 행 Backspace — env/macro/keybind 삭제·스칼라 기본값 복원(§6.11)
+            .settings_reset_field => settings_ops.resetSelectedSettingRow(self), // 선택 행 ↺ 클릭 — 그 항목만 기본값 복원(§6.11, Backspace와 같은 경로)
             .settings_reset_all => self.requestResetAll(), // 네비 "↺ 초기화" — 전체 리셋 확인 모달(§6.4, 커맨드 팔레트·메뉴와 같은 경로)
             .settings_color_picked => self.commitPickerColor(), // HSV picker Enter — pickerRgb()→#rrggbb로 선택 color 행 커밋
             .settings_eyedropper => self.color_sample_pending = true, // HSV picker `i` — Swift가 NSColorSampler 열도록 신호
@@ -14113,42 +12647,12 @@ pub const AppSession = struct {
             agent_dock.restoreAgentSessionDockScrollAnchor(self, dock_scroll_anchor, dock_scroll_fallback_offset_px);
     }
 
-    /// appearance(폰트·여백·테마)가 통째로 바뀌었을 때의 일반 적용 경로. setFontSize의 메트릭 재계산을 일반화한 것 —
-    /// reloadConfig(파일 새 값)·reapplyLoadedConfig(통합 리셋 resetAllSettings 등)이 공유한다. appearance를 갈아끼우고 base_font_size를
-    /// 새 폰트 크기로 맞춘 뒤(⌘0 기준도 따라감), 메트릭·grid·atlas 파이프라인을 돌린다. palette/scrollback 같은
-    /// 코어 behavior 재주입은 호출자가 한다(appearance만 다루는 단일 책임).
-    fn applyAppearance(self: *AppSession, new_appearance: config_mod.ResolvedAppearance) void {
-        self.appearance = new_appearance;
-        self.base_font_size = new_appearance.font.size; // 새 config 기본 폰트 크기 = ⌘0 reset 기준
-        self.applyMetricsPipeline();
-    }
-
-    /// applyAppearance에 런타임 ⌘+/− 줌 보존을 얹은 변형 — config를 라이브 재적용하는 두 경로(GUI 토글
-    /// reapplyLoadedConfig·파일 재로드 reloadConfig)가 공유해 줌 처리를 일치시킨다. setFontSize(⌘+/−)는 런타임
-    /// appearance.font.size만 바꾸고 config는 안 건드리므로, config 재resolve가 그 줌을 날린다. 이를 막되:
-    ///   - **config 폰트 크기가 그대로일 때만**(`config_size == base_font_size`) base 대비 줌 델타를 새 크기 위에
-    ///     다시 얹는다. 폰트 크기 자체를 GUI(슬라이더/스텝)나 파일로 바꿨다면 그 값이 사용자가 의도한 절대 크기이므로
-    ///     줌을 안 얹고 그대로 둔다 — 안 그러면 슬라이더 표시값과 렌더 크기가 어긋난다(code-review high #1).
-    ///   - 경계 클램프는 ⌘+/− 와 동일하게 초과분을 흡수한다(clamp-forget): 줌 델타를 별도 저장하지 않고 appearance에서
-    ///     유도하므로, max/min을 넘긴 줌은 그만큼만 남는다. ⌘+/− 도 같은 의미라(누른 만큼 못 가면 잊음) 일관적이다.
-    /// ⌘0 기준 base_font_size는 줌 제외한 config 크기로 둔다(applyAppearance가 줌 포함 크기로 세운 것을 교정).
-    fn applyAppearancePreservingZoom(self: *AppSession, new_appearance: config_mod.ResolvedAppearance) void {
-        var appe = new_appearance;
-        const config_size = new_appearance.font.size; // ⌘0 기준이 될 config 폰트 크기(줌 제외)
-        if (config_size == self.base_font_size) {
-            const zoom_delta = self.appearance.font.size - self.base_font_size;
-            appe.font.size = std.math.clamp(config_size + zoom_delta, font_size_min, font_size_max);
-        }
-        self.applyAppearance(appe);
-        self.base_font_size = config_size; // applyAppearance가 줌 포함 크기로 세운 ⌘0 기준을 줌 제외 config 값으로 교정
-    }
-
     /// appearance.font(크기·family·line-height·letter-spacing)·window_padding이 바뀐 뒤 cell 메트릭과 그것에서
     /// 파생되는 모든 것을 다시 잡는다(setFontSize·applyAppearance 공유): ① refreshCellMetrics(cell 픽셀·사이드바·
     /// 패딩 px 재계산) → ② atlas 무효화(새 크기로 재래스터·옛 슬롯 회수) → ③ 같은 창(backing px)에서 grid 재산출
     /// + 각 pane resize(resize 본문과 동일한 reflow). 아직 첫 resize 전(backing 0)이면 grid는 스킵 — 곧 올 Swift
     /// resize가 새 메트릭으로 grid를 잡는다.
-    fn applyMetricsPipeline(self: *AppSession) void {
+    pub fn applyMetricsPipeline(self: *AppSession) void {
         self.refreshCellMetrics();
         _ = self.renderer_state.atlas.invalidate(.font_size_changed);
         // The renderer's FontId registry deliberately lives as long as the atlas. A font family
@@ -14201,174 +12705,6 @@ pub const AppSession = struct {
         return was;
     }
 
-    /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
-    /// 값은 기본값 유지 + diagnostic), 로드 자체가 실패(OOM 등)하면 무동작이다(기존 config 유지). 적용 순서:
-    /// ① 새 Parsed로 loaded_config 교체(옛 arena deinit 후 — appearance가 family 슬라이스를 빌리므로 새 appearance를
-    ///    먼저 만들지 말고 loaded_config를 갈아끼운 뒤 resolve한다 → 옛 family를 빌린 옛 appearance는 이 시점에 버린다).
-    /// ② appearance resolve + applyAppearance(메트릭·grid·atlas + base_font_size).
-    /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette/ambiguous-width)도 모든 surface에 재적용.
-    /// resetAllSettings(통합 리셋)와 형제 경로다 — reload는 파일 값으로, reset은 기본 Config로 같은 appearance/behavior 적용을 한다.
-    pub fn reloadConfig(self: *AppSession) void {
-        var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
-        // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
-        // appearance·loaded_config를 그대로 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다.
-        const new_appearance = config_mod.resolveAppearance(new_parsed.config) catch {
-            new_parsed.deinit();
-            return;
-        };
-        // 파일의 새 사이드바 폭(sidebar.width, pt)을 메트릭 파이프라인 전에 세운다 — 바로 아래 applyAppearancePreservingZoom이
-        // 부르는 refreshCellMetrics가 동적 하한으로 clamp·px 환산하고, 이어지는 grid 재배치가 새 폭을 반영한다(파일→앱
-        // 양방향). loaded_config 교체 전이라 new_parsed에서 읽는다. reload는 "파일에서 다시 읽기"라 미저장 드래그 편집을
-        // 덮는 게 맞다(아래 clearConfigDirty가 write-back 대기열을 비우는 것과 일관).
-        self.sidebar_width_pt = new_parsed.config.sidebar.width_pt;
-        // appearance 통째 교체 — 옛 family를 더는 안 읽는다. 줌 보존(GUI 토글과 일치 — code-review high #2)은
-        // 옛 appearance.font.size·base_font_size(둘 다 스칼라 f32)만 읽으므로 옛 arena family slice를 deref하지 않아 UAF 없음.
-        // **새 config를 먼저 세운다.** `applyAppearancePreservingZoom`이 타는 메트릭 파이프라인은 pane/PTY
-        // 크기를 다시 재는데, 그 계산이 `gridPadding` → `statusBarHeightPx` → `loaded_config`를 읽는다.
-        // 교체가 뒤에 오면 **옛 값으로 재고 새 값으로 그리게** 되어, 예컨대 `status-bar.show`를 끈 reload에서
-        // 바는 사라졌는데 셸은 늘어난 행을 못 받는다(실측 36행이어야 할 것이 35행). 옛 arena는 appearance를
-        // 통째로 바꾼 뒤에 버려야 UAF가 없으므로 deinit만 마지막에 남긴다.
-        var old_loaded = self.loaded_config;
-        self.loaded_config = new_parsed;
-        self.applyAppearancePreservingZoom(new_appearance);
-        old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
-        setAppKeepAlivePolicy(self.loaded_config.config.session.keep_alive_after_quit);
-        // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
-        // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
-        self.theme_pre_follow = null;
-        self.follow_applied_dark = null; // 새 config라 외관 게이트도 리셋 — 아래 applyFollowSystemTheme가 다시 적용
-        // 옛 arena를 버렸으니 write-back 대기열(config_dirty_keys·theme_preset_persist·keybind/global rebind·removed 등 9개)도
-        // 비운다 — 이 큐들은 옛 arena의 문자열(동적 env 키·keybind chord·프리셋 이름)을 가리키므로 free 후 다음 serializeConfig가
-        // 읽으면 use-after-free다. reload는 "파일에서 다시 읽기"라 대기 중 미저장 편집을 버리는 게 의미상 맞다. clearConfigDirty는
-        // list 길이만 리셋·옵셔널 null 대입이라 옛 slice를 deref하지 않아 free 후 호출도 안전.
-        self.clearConfigDirty();
-        // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
-        self.audible_bell = self.loaded_config.config.bell.audible;
-        self.bell_visual = self.loaded_config.config.bell.visual;
-        self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
-        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
-        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
-        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
-        self.option_as_meta = self.loaded_config.config.input.option_as_meta;
-        self.reapplyScrollback();
-        self.reapplyConfigPalette();
-        self.reapplyAmbiguousWidth();
-        self.reapplyEmojiWidth();
-        self.reapplyDefaultCursorShape();
-        // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
-        // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
-        sidebar_ops.rebuildSidebar(self) catch {};
-        // 파일에서 새로 깔았으니 "사용자 지정" 명시 플래그를 해제 — 색이 어떤 프리셋과 일치하면 다시 잠금(derive 기준).
-        self.theme_user_custom = false;
-        self.metal_dirty = true;
-        // 파일 새 값이라 keybind도 바뀌었을 수 있다 — 커맨드 카탈로그를 재빌드해 Zig-side 커맨드 팔레트의 표시 chord를
-        // 갱신한다(buildPaletteRows가 command_key_displays를 라이브로 읽는다). 키 디스패치는 resolver를 매 이벤트마다
-        // 라이브로 읽어 이미 새 값이지만, 캐시된 표시 문자열은 재빌드해야 바뀐다(rebind/unbindActionEntry와 동일).
-        // Swift 메뉴바 keyEquivalent도 rebuildCommandCatalog가 세우는 command_catalog_dirty를 drainMenuDirty가 다음 tick에
-        // drain해 갱신된다(v85 — 더는 재시작 필요 없음).
-        self.rebuildCommandCatalog();
-        // 파일 새 값이라 전역 단축키도 다시 빌드해 라이브 OS 재등록(PR2 — 지금까지 reload가 global을 재반영 못 하던 버그도 같이 고침).
-        self.rebuildGlobalHotkeys() catch {};
-        self.global_hotkeys_dirty = true;
-        // follow-system이 켜져 있으면(파일 새 값) 위에서 깐 파일 테마 위에 현재 시스템 외관 프리셋을 다시 덮는다(F2-9).
-        self.applyFollowSystemTheme();
-    }
-
-    /// **통합 리셋** — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(ABI `reset_defaults`)와 커맨드
-    /// 팝업 "Reset All Settings to Defaults"(`reset_settings` 액션) **두 진입점이 모두 이 단일 함수**를 호출한다(통일 —
-    /// code-review #829 후속: 옛 메뉴 전용 부분 갱신이 preset/alias 오염·런타임 드리프트를 내던 걸 검증된 단일 경로로
-    /// 일원화). loaded_config.config를 정적 기본값으로 갈고(새 arena 불요 — 기본값은 정적 리터럴), keybind 바인딩 4종도
-    /// 빈 슬라이스(빌트인만)로 비우고, reloadConfig와 같은 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)
-    /// + 카탈로그·전역 단축키 재빌드를 한 뒤, **config 파일을 안내 주석만 남긴 기본
-    /// 상태로 덮어쓴다**(삭제가 아니라 — 파일·경로 보존, 사용자가 기본 상태를 보고 편집 가능; 사용자 요청).
-    /// **예외 하나: `session.keep-alive-after-quit`은 초기화하지 않고 보존한다.** 이 키는 취향이 아니라 살아 있는
-    /// PTY의 소유권 모드이고, 기본값으로 되돌리면 다음 Quit이 host-backed runtime을 terminate해 사용자의 터미널
-    /// 세션이 경고 없이 사라진다. 보존 근거와 notice 문구는 함수 본문 주석을 단일 출처로 둔다.
-    pub fn resetAllSettings(self: *AppSession) void {
-        // `session.keep-alive-after-quit`은 취향 설정이 아니라 **runtime 소유권 모드**다. true면 PTY를 host
-        // (`maru-sessiond`)가 소유하고 GUI는 뷰어일 뿐이라 Quit이 detach지만, false면 PTY 수명이 이 앱 프로세스에
-        // 묶여 **다음 Quit이 살아 있는 host-backed runtime까지 terminate**한다(docs/persistent-session-host.md
-        // 토글 의미론 표 + docs/configuration.md `session.keep-alive-after-quit` 행). 그래서 "모든 설정 초기화"가
-        // 이 키까지 기본값으로 되돌리면, 사용자가 켜 둔 터미널 세션 전부가 **다음 종료에 경고 없이 전멸**한다 —
-        // 파괴는 명시적이어야 한다며 `Quit and End All Sessions`를 전용 경로로 따로 둔 같은 문서의 원칙과 정면으로
-        // 어긋난다(실제 사고: 리셋 뒤 평범한 Quit으로 host-backed runtime 12개가 소멸). 따라서 리셋은 이 키만
-        // 보존하고, 끄는 결정은 사용자가 세팅 workspace 섹션 토글로 직접 하도록 아래 notice로 안내한다.
-        const keep_alive = self.loaded_config.config.session.keep_alive_after_quit;
-        self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
-        self.loaded_config.config.session.keep_alive_after_quit = keep_alive; // 보존 — 아래 파일 write도 같은 값을 남긴다
-        // 리터럴 false가 아니라 `Config{}` 기본값을 기준으로 "보존이 실제 override인지" 판정한다. 문서가 기능 완성
-        // 뒤 기본값을 true로 전환한다고 예고했으므로(persistent-session-host.md), 그때 리터럴 비교로 두면 사용자가
-        // 명시적으로 끈 false를 리셋이 도로 켜 버려 같은 사고가 반대 방향으로 난다.
-        const default_keep_alive = (config_mod.Config{}).session.keep_alive_after_quit;
-        const keep_alive_preserved = keep_alive != default_keep_alive;
-        setAppKeepAlivePolicy(keep_alive); // 보존값 그대로 — 리셋이 live 소유권 정책을 뒤집지 않는다.
-        // keybind도 config다 — "모든 설정 초기화"는 인앱/파일 keybind 바인딩(keybindings·unbinds·terminal_bindings·
-        // global_bindings)도 즉시 기본값(빈 슬라이스=빌트인만)으로 되돌린다. 옛 슬라이스는 arena 소유라 미참조로 남았다
-        // 다음 reload/deinit에 해제(config.* 정적 교체와 같은 수명 규칙 — 여기서 free 금지). 이렇게 비워야 keyBindingResolver
-        // (매 키 라이브)가 빌트인만 적용하고, 아래 rebuildGlobalHotkeys가 전역 단축키를 실제로 해제하며, rebuildCommandCatalog가
-        // 기본 chord를 표시한다(빈 슬라이스 대입은 옛 slice를 deref하지 않아 안전).
-        self.loaded_config.keybindings = &.{};
-        self.loaded_config.unbinds = &.{};
-        self.loaded_config.terminal_bindings = &.{};
-        self.loaded_config.global_bindings = &.{};
-        self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
-        self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
-        self.applyLoadedConfig(false); // resolve→apply→behavior 캐시→reapply* 재적용. false=런타임 줌도 config 기본으로(통합 리셋이라 ⌘+/− 확대 해제; resolve-first 안전, reloadConfig 미러 — 리뷰 #827)
-        // **config 파일을 기본 상태로 덮어쓴다**(삭제 아님) → 빈+주석이라 다음 로드는 schema·특수 키·주석 전부 기본값.
-        // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
-        // (theme.preset/palette/env/cursor.color/shell.args)가 안 지워지고 (b) 빈 항목까지 40여 줄을 쏟는다(리뷰 #827).
-        var wrote = false;
-        const path = self.configWritePath(); // 안전 chokepoint: 테스트가 tmp redirect 안 했으면 ""(쓰기 스킵) — 실 config 보호
-        if (path.len > 0) {
-            // 아래 `body` peer 타입(보존 override가 있으면 owned `[]u8`, 없으면 이 헤더)을 하나로 맞추려 슬라이스로 못박는다.
-            const header: []const u8 = "# Maru config — Reset to Defaults로 초기화됨(모든 설정 기본값). 키 설명: docs/configuration.md\n";
-            // atomic write(temp + replace=rename) — 부분 쓰기가 원본 config를 손상하지 않게(serializeConfig→Swift atomic·
-            // workspace write와 같은 보장). .replace=true는 File.Atomic.replace 계약(Dir.zig:1878), .make_path=true는 신규
-            // 사용자의 ~/.config[/maru] 부모까지 재귀 생성(리뷰 #844-followup — 수동 단계별 mkdir 대체). 실패는 forgiving이되
-            // wrote로 추적해 거짓 성공 notice는 피한다(파일 미반영이면 재부팅 시 옛 설정 부활하므로 사용자에게 알린다).
-            write_blk: {
-                // 보존한 keep-alive가 기본값과 다르면 override 한 줄을 **같은 atomic write에** 담는다. 다음 tick
-                // serializeConfig에 미루면 그 사이 앱이 죽었을 때 파일(기본값)과 live 정책(보존값)이 갈라지고, 다음
-                // 실행이 조용히 in-process로 떨어져 지금 고치는 사고와 같은 결과가 된다. 키 문자열과 값 포맷은 스키마
-                // 직렬화 단일 출처(`updateConfigForKeys`)에 맡겨 손으로 렌더하지 않는다 — 키 rename 시 같이 따라간다.
-                const owned: ?[]u8 = if (keep_alive_preserved)
-                    (config_mod.updateConfigForKeys(self.allocator, header, self.loaded_config.config, &.{"session.keep-alive-after-quit"}) catch break :write_blk)
-                else
-                    null;
-                defer if (owned) |b| self.allocator.free(b);
-                const body: []const u8 = if (owned) |b| b else header;
-                var af = std.Io.Dir.cwd().createFileAtomic(self.io, path, .{ .replace = true, .make_path = true }) catch break :write_blk;
-                defer af.deinit(self.io); // replace 성공 시 no-op, 실패/중도 탈출 시 temp 정리
-                var wbuf: [256]u8 = undefined;
-                var fw = af.file.writer(self.io, &wbuf);
-                fw.interface.writeAll(body) catch break :write_blk;
-                fw.interface.flush() catch break :write_blk;
-                af.replace(self.io) catch break :write_blk;
-                wrote = true;
-            }
-        }
-        // 모든 dirty 컬렉션을 비워 Swift 부분 write-back을 막는다(리뷰 #844-followup) — config_dirty_keys 하나만 비우면
-        // 리셋 직전 예약된 keybind rebind/unbind·env 삭제가 살아남아, 다음 tick serializeConfig가 takeConfigDirty()=true로
-        // 방금 리셋한 파일에 그 변경을 도로 써넣는다(takeConfigDirty가 5개 컬렉션을 OR로 본다).
-        self.clearConfigDirty();
-        self.theme_user_custom = false; // 기본값으로 되돌렸으니 "사용자 지정" 해제 — 기본 테마(maru 프리셋)는 잠금이 맞다
-        // keybind를 빌트인만으로 비웠으니 커맨드 카탈로그(팔레트·메뉴바 표시 chord)도 재빌드한다. reapplyLoadedConfig는
-        // keybind 불변 경로라 카탈로그를 안 건드린다 — reset은 keybind를 바꾸는 유일한 reapply 호출자라 여기서 명시 재빌드.
-        self.rebuildCommandCatalog();
-        // 위에서 global_bindings를 비웠으니 global_hotkeys도 비고, 라이브 OS 재등록(dirty)으로 등록 해제까지 따라간다(PR2).
-        self.rebuildGlobalHotkeys() catch {};
-        self.global_hotkeys_dirty = true;
-        self.metal_dirty = true;
-        if (!wrote and path.len > 0)
-            self.showNotice("기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다")
-        else if (keep_alive_preserved)
-            // 보존을 조용히 처리하면 사용자는 "모든 설정 초기화"라는 말대로 세션 유지도 꺼졌다고 믿고, 나중에
-            // 예상과 다른 Quit 동작을 만난다. 보존 사실과 **수동 변경 경로**를 같이 알려야 결정권이 사용자에게 남는다.
-            self.showNotice("모든 설정을 기본값으로 초기화했습니다 — 세션 유지(keep-alive)는 살아 있는 터미널을 지키려 그대로 뒀습니다. 끄려면 세팅 › workspace에서 직접 변경하세요")
-        else
-            self.showNotice("모든 설정을 기본값으로 초기화했습니다");
-    }
-
     /// serializeConfig가 소비하는 config write-back 대기열 전부를 비운다(takeConfigDirty가 OR로 보는 것과 동일 집합).
     /// reset처럼 "대기 중인 모든 변경을 폐기"해야 하는 경로에서 쓴다 — 일부만 비우면 남은 keybind/env/전역 변경이 다음 tick
     /// serializeConfig를 통해 되살아난다. serializeConfig와 같은 clearRetainingCapacity 패턴(항목 메모리는 비소유).
@@ -14377,7 +12713,7 @@ pub const AppSession = struct {
     // (dirty 집계)·deinit(해제) 셋이 inline for로 자동 처리된다 — 예전엔 그 셋을 따로 손으로 나열해 하나 빠뜨리면 "버린
     // 편집이 저장됨/리스트 누수"가 조용히 났다(code-review max #2). theme_preset_persist는 리스트가 아닌 optional이라
     // registry 밖에서 명시적으로 다룬다. 아래 comptime 가드가 이름 오타를 빌드 시 잡는다.
-    const pending_writeback_lists = [_][]const u8{
+    pub const pending_writeback_lists = [_][]const u8{
         "config_dirty_keys",      "config_keybind_rebinds",        "config_removed_keys",
         "config_keybind_removed", "config_keybind_unbinds",        "config_keybind_unbind_removed",
         "config_terminal_macros", "config_terminal_macro_removes", "config_global_rebinds",
@@ -14387,15 +12723,10 @@ pub const AppSession = struct {
         for (pending_writeback_lists) |n| if (!@hasField(AppSession, n)) @compileError("pending_writeback_lists: 알 수 없는 필드 " ++ n);
     }
 
-    fn clearConfigDirty(self: *AppSession) void {
-        inline for (pending_writeback_lists) |n| @field(self, n).clearRetainingCapacity();
-        self.theme_preset_persist = null; // 리스트가 아닌 optional이라 registry 밖 — 같은 집합으로 폐기
-    }
-
     /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
     /// 표시·순환의 기준 — theme.preset은 저장 필드가 아니라 색에서 derive(loader가 깐 색을 역으로 식별). hex는 대소문자
     /// 무시 비교(#FFFFFF==#ffffff — loader는 사용자 입력 대소문자를 보존하므로, 리뷰 #827).
-    fn detectThemePreset(t: config_mod.theme.ThemeConfig) ?config_mod.theme.ThemePreset {
+    pub fn detectThemePreset(t: config_mod.theme.ThemeConfig) ?config_mod.theme.ThemePreset {
         inline for (@typeInfo(config_mod.theme.ThemePreset).@"enum".fields) |ef| {
             const p: config_mod.theme.ThemePreset = @enumFromInt(ef.value);
             const pc = config_mod.theme.presetColors(p);
@@ -14403,50 +12734,6 @@ pub const AppSession = struct {
                 std.ascii.eqlIgnoreCase(t.cursor, pc.cursor) and std.ascii.eqlIgnoreCase(t.selection, pc.selection)) return p;
         }
         return null;
-    }
-
-    /// **[보류된 dead code — `adjustSelectedSetting`(옛 ←→ adjust)에서만 호출되어 프로덕션 미사용]** 테마 드롭다운 팝업은
-    /// 절대-인덱스 `applyThemePresetIndex`가 대체했다. 이 dir-순환은 ←→ adjust 보류 결정과 함께 유지한다(재도입 시 재활용).
-    /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환한다(테마 섹션 dropdown). 순환 슬롯 = [프리셋 0..n-1] + ["사용자 지정"=n].
-    /// 현재 위치는 theme_user_custom이거나 detect=null이면 "사용자 지정"(n), 아니면 그 프리셋. "사용자 지정"으로 가면 색을
-    /// 그대로 두고 잠금만 해제(theme_user_custom=true — 색·팔레트 행 편집 허용), 프리셋으로 가면 그 색 세트를 통째로 깔고
-    /// (presetColors — 정적 리터럴이라 dupe 불요) 잠금(theme_user_custom=false) + 라이브 재resolve·`theme.preset` write-back.
-    /// **프리셋 전체가 영속된다**(persistThemePreset — `theme.preset = <name>` 한 줄을 쓰고 로더가 16색 팔레트·파생색까지
-    /// 통째로 펼친다; 옛 "주 색 4개만 영속" 한계 해소, 팔레트 영속 리뷰). search/sidebar 색은 그 테마에서 derive돼 자동 복원.
-    fn applyThemePreset(self: *AppSession, dir: i8) void {
-        const Preset = config_mod.theme.ThemePreset;
-        const n: i64 = @typeInfo(Preset).@"enum".fields.len; // 프리셋 수; 슬롯 인덱스 n = "사용자 지정"
-        const detected = detectThemePreset(self.loaded_config.config.theme);
-        const cur: i64 = if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
-        const slots = n + 1;
-        const next = @mod(cur + @as(i64, dir) + slots, slots);
-        if (next == n) {
-            // "사용자 지정" — 색은 그대로, 잠금만 해제. detect가 우연히 프리셋과 일치해도 이 플래그가 우선(themePresetActive).
-            self.theme_user_custom = true;
-            self.metal_dirty = true;
-            return;
-        }
-        self.theme_user_custom = false;
-        const preset: config_mod.theme.ThemePreset = @enumFromInt(@as(usize, @intCast(next)));
-        self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
-        self.reapplyLoadedConfig();
-        self.persistThemePreset(preset);
-    }
-
-    /// 테마 프리셋 드롭다운의 변형 라벨 — 16 프리셋 @tagName(underscore, viewPopup이 dash 변환) + "사용자 지정"(마지막 슬롯).
-    fn themePresetVariants(_: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
-        const fields = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields;
-        const out = try arena.alloc([]const u8, fields.len + 1);
-        inline for (fields, 0..) |f, i| out[i] = f.name;
-        out[fields.len] = "사용자 지정";
-        return out;
-    }
-
-    /// 테마 프리셋 드롭다운의 현재 선택 인덱스 — 활성 프리셋의 ordinal, 아니면 "사용자 지정" 슬롯(=프리셋 수).
-    fn themePresetCurrentIndex(self: *AppSession) usize {
-        const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
-        const detected = detectThemePreset(self.loaded_config.config.theme);
-        return if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
     }
 
     /// 테마 프리셋을 **절대 인덱스**로 적용한다(드롭다운 팝업 — applyThemePreset의 dir-순환 짝). idx가 프리셋 수 이상
@@ -14459,31 +12746,31 @@ pub const AppSession = struct {
             // (미리보기가 persist를 안 했으니 파일의 커스텀 색 줄이 그대로라, 여기선 인메모리 복원만 하면 파일도 정합).
             self.loaded_config.config.theme = self.dropdown_snapshot_theme;
             self.theme_user_custom = true;
-            self.reapplyLoadedConfig();
+            settings_ops.reapplyLoadedConfig(self);
             return;
         }
         self.theme_user_custom = false;
         const preset: config_mod.theme.ThemePreset = @enumFromInt(idx);
         self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
-        self.reapplyLoadedConfig();
+        settings_ops.reapplyLoadedConfig(self);
         if (persist) self.persistThemePreset(preset); // 확정에서만 파일에 theme.preset 예약(미리보기는 인메모리만)
     }
 
     /// 프리셋을 **통째로 영속**한다(4색만 쓰던 옛 한계 해소 — ANSI 16색 팔레트·파생색 포함, 리뷰). `theme.preset = <name>`
     /// 한 줄을 쓰도록 예약하고(serializeConfig가 set/update), 그 줄과 충돌할 개별 theme.* 색·palette override 줄은 제거
     /// 예약한다 — 로더가 theme.preset을 통째 프리셋 색으로 펼치므로 남은 override가 위에 덮어쓰면 반쪽만 적용되기 때문.
-    fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePreset) void {
+    pub fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePreset) void {
         const a = self.loaded_config.arena.allocator();
         // @tagName은 underscore(gruvbox_dark), config 파일은 dash(gruvbox-dark) — 로더 parseEnum이 받는 형식으로 변환.
         self.theme_preset_persist = std.mem.replaceOwned(u8, a, @tagName(preset), "_", "-") catch null;
         // 개별 override 줄 제거(theme.preset이 base를 깔므로 남으면 충돌). 4 주 색 + 16 팔레트.
-        self.markConfigKeyRemoved("theme.background");
-        self.markConfigKeyRemoved("theme.foreground");
-        self.markConfigKeyRemoved("theme.cursor");
-        self.markConfigKeyRemoved("theme.selection");
+        settings_ops.markConfigKeyRemoved(self, "theme.background");
+        settings_ops.markConfigKeyRemoved(self, "theme.foreground");
+        settings_ops.markConfigKeyRemoved(self, "theme.cursor");
+        settings_ops.markConfigKeyRemoved(self, "theme.selection");
         for (0..16) |i| {
             const k = std.fmt.allocPrint(a, "theme.palette.{d}", .{i}) catch continue;
-            self.markConfigKeyRemoved(k);
+            settings_ops.markConfigKeyRemoved(self, k);
         }
     }
 
@@ -14497,7 +12784,7 @@ pub const AppSession = struct {
     /// follow-system이 켜져 있으면 현재 시스템 외관(system_is_dark)에 맞는 프리셋으로 config.theme를 교체하고 라이브
     /// 재적용한다(재resolve + 팔레트 재주입 + metal_dirty). **write-back 없음** — 시스템 주도 색이라 config 파일에 영속하지
     /// 않는다(사용자가 적은 theme.preset/색은 파일에 그대로 남아 follow-system을 끄면 복귀). reload·setSystemAppearance가 공유.
-    fn applyFollowSystemTheme(self: *AppSession) void {
+    pub fn applyFollowSystemTheme(self: *AppSession) void {
         if (!self.loaded_config.config.theme_follow_system) return;
         // 같은 외관을 이미 적용했으면 무거운 재적용을 건너뛴다(AppKit의 잦은 viewDidChangeEffectiveAppearance 통지 대비).
         // follow를 막 켰을 땐(follow_applied_dark==null) 같은 is_dark여도 적용해야 하므로 null 체크가 게이트를 연다(F2-9).
@@ -14518,25 +12805,12 @@ pub const AppSession = struct {
         self.theme_user_custom = false;
         self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
         self.follow_applied_dark = self.system_is_dark;
-        self.reapplyLoadedConfig();
-    }
-
-    /// follow-system을 끌 때(세팅 토글 OFF) 호출 — 덮기 전 스냅샷한 사용자(파일) 테마로 config.theme를 복귀하고
-    /// 라이브 재적용한다. 스냅샷이 없으면(켠 적 없음) config.theme가 이미 파일 값이라 그대로 재적용만. follow-system
-    /// 색은 파일에 write-back을 안 했으므로 이 메모리 복원이 복귀의 단일 경로다(reload는 async write 경합 위험). F2-9.
-    fn disableFollowSystemTheme(self: *AppSession) void {
-        if (self.theme_pre_follow) |saved| {
-            self.loaded_config.config.theme = saved;
-            self.theme_user_custom = self.theme_user_custom_pre_follow; // 색과 함께 잠금 상태도 복원(F2-9 리뷰 라운드2)
-            self.theme_pre_follow = null;
-        }
-        self.follow_applied_dark = null; // follow 종료 — 다음에 다시 켜면 같은 외관이어도 재적용
-        self.reapplyLoadedConfig();
+        settings_ops.reapplyLoadedConfig(self);
     }
 
     /// 테마 프리셋이 "활성"인가 — 색이 어떤 프리셋과 일치하고(detectThemePreset) 사용자가 "사용자 지정"으로 풀지 않았으면
     /// true. 활성이면 세팅의 색·팔레트 행을 잠근다(프리셋이 색을 정하므로). 색 핸들러·buildSettingsFields가 공유하는 단일 판정.
-    fn themePresetActive(self: *const AppSession) bool {
+    pub fn themePresetActive(self: *const AppSession) bool {
         return !self.theme_user_custom and detectThemePreset(self.loaded_config.config.theme) != null;
     }
 
@@ -14558,88 +12832,6 @@ pub const AppSession = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         surface.core.resetInputModes();
-    }
-
-    /// 현재 appearance.theme.palette를 모든 탭/panel/Term 코어에 재주입한다(reload·reset 공유). createTerm의
-    /// setConfigPalette와 같은 chokepoint지만, 여기 surface들은 이미 live(리더 스레드가 코어 접근)라 코어 변경은
-    /// core_mutex 아래서 한다(docs/io-render-threading.md PR3 — OSC 4 변경과의 data race 방지). metal_dirty는
-    /// 호출자(applyAppearance→applyMetricsPipeline)가 이미 세운다.
-    fn reapplyConfigPalette(self: *AppSession) void {
-        const palette = self.appearance.theme.palette;
-        const default_colors: maru.session.core_command.DefaultColors = .{
-            .foreground = self.appearance.theme.foreground,
-            .background = self.appearance.theme.background,
-        };
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    // Phase 3 위임(docs/io-render-threading.md §9 P3-3): config 재적용도 메인이 직접 mutate 안 하고
-                    // reader로 위임한다(interactive면 큐, 아니면 enqueueCoreCommand 내부 직접 폴백). reload는 attach 후라
-                    // 링크 존재(없으면 UnknownSurface로 스킵 — best-effort).
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_config_palette = palette }, self.io) catch {};
-                    // OSC 10/11 query의 default fg/bg도 renderer theme와 같은 값을 보게 한다. buildFrame의 direct
-                    // setDefaultColors는 local render 안전망이고 remote placeholder에는 host 효과가 없으므로 이 경계가 필요하다.
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_default_colors = default_colors }, self.io) catch {};
-                }
-            }
-        }
-    }
-
-    /// config scrollback.lines를 모든 탭/panel/Term 코어 max_scrollback에 재주입한다(reload 전용 — reset은 behavior를
-    /// 안 건드린다). createTerm과 같은 chokepoint지만 live surface라 core_mutex 아래서 쓴다(리더 스레드가 ring을
-    /// lazy-alloc/scroll로 읽으므로). 이미 할당된 ring을 줄이지는 않는다 — 코어가 다음 eviction에서 새 cap을 본다.
-    fn reapplyScrollback(self: *AppSession) void {
-        const lines = self.loaded_config.config.scrollback.lines;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    // Phase 3 위임(P3-3): scrollback cap 재적용도 reader로 위임(config 재적용과 동일 — best-effort).
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_max_scrollback = lines }, self.io) catch {};
-                }
-            }
-        }
-    }
-
-    /// text.ambiguous-width reload를 라이브 코어에 재적용한다(createTerm chokepoint와 같은 값을 이미 떠 있는
-    /// surface에도). reader 단일 mutator 계약상 set_max_scrollback과 같이 CoreCommand로 위임한다. 이후 putCell부터
-    /// 새 폭이 반영된다(이미 저장된 셀은 옛 폭 유지 — 폭 변경은 본래 redraw 필요; max_scrollback과 같은 best-effort).
-    fn reapplyAmbiguousWidth(self: *AppSession) void {
-        const wide = self.loaded_config.config.ambiguous_width == .wide;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_ambiguous_wide = wide }, self.io) catch {};
-                }
-            }
-        }
-    }
-
-    /// text.emoji-width reload를 라이브 코어에 재적용한다(reapplyAmbiguousWidth와 같은 best-effort 패턴 — 이후
-    /// putCell부터 새 폭, 이미 저장된 셀은 옛 폭 유지). 이모지(VS16/키캡)를 2칸으로 볼지를 라이브 surface에 반영.
-    fn reapplyEmojiWidth(self: *AppSession) void {
-        const wide = self.loaded_config.config.emoji_width == .wide;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_emoji_wide = wide }, self.io) catch {};
-                }
-            }
-        }
-    }
-
-    /// cursor.shape reload를 라이브 코어에 재적용한다(createTerm chokepoint와 같은 값을 이미 떠 있는 surface에도 —
-    /// reapplyEmojiWidth와 같은 위임·best-effort 패턴). **앱이 DECSCUSR로 모양을 명시 중인 Term은 코어가 스스로
-    /// 건너뛴다**(setDefaultCursorShape의 `cursor_shape_overridden` 가드) — 설정 한 번 바꿨다고 vim insert-mode의
-    /// bar가 block으로 튀지 않는다. 원격 Term도 같은 명령이 host core에서 같은 규칙으로 적용된다.
-    fn reapplyDefaultCursorShape(self: *AppSession) void {
-        const shape = self.configCursorShape();
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_default_cursor_shape = shape }, self.io) catch {};
-                }
-            }
-        }
     }
 
     /// Metal TerminalView에서 들어온 key는 물리 responder가 최신 사용자 intent다. file-tree와 surface-publish
@@ -14713,7 +12905,7 @@ pub const AppSession = struct {
         // 비-모달 notice(토스트)는 제외 — 지나가는 토스트가 활성 편집을 끊으면 안 되고, terminalOwnsInput(Swift focus-sync
         // override 단일 출처)도 anyModalOverlayOpen을 쓰므로 일치시킨다(14차 리뷰 [3]).
         if (self.rename != null and !self.anyModalOverlayOpen()) {
-            self.handleRenameKey(chromeInputFromKeyEvent(event));
+            settings_ops.handleRenameKey(self, chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             return self.keyConsumedByApp(); // rename(앱)이 소비
         }
@@ -14825,7 +13017,7 @@ pub const AppSession = struct {
         if (self.anyOverlayOpen()) {
             // 설정 팔레트 그리드 행(폼 포커스)의 ←→ = 16색 셀 이동. host는 rows를 몰라 이 특수 행을 못 가르므로 platform이
             // pre-intercept한다(그 행에서만). ← 셀0·→ 셀15(끝)에선 intercept 안 해 컴포넌트의 영역 포커스 이동으로 이어진다.
-            if (self.settingsPaletteArrowIntercept(event)) {
+            if (settings_ops.settingsPaletteArrowIntercept(self, event)) {
                 self.resetCursorBlink();
                 self.metal_dirty = true;
                 return self.keyConsumedByApp();
@@ -15153,18 +13345,6 @@ pub const AppSession = struct {
     /// 단축키 힌트 config를 ABI용 값으로(Swift 홀드 감지가 읽어 enabled/지연/트리거 모디파이어 결정). modifier:
     /// 0=command·1=control·2=option. gesture 정책은 Zig(config) 단일 출처, 타이머 clock만 Swift(native 최소).
     pub const KeyHintConfigAbi = struct { enabled: bool, delay_ms: u32, modifier: u32 };
-    pub fn keyHintConfig(self: *const AppSession) KeyHintConfigAbi {
-        const kh = self.loaded_config.config.keyhint;
-        return .{
-            .enabled = kh.enabled,
-            .delay_ms = kh.delay,
-            .modifier = switch (kh.modifier) {
-                .command => 0,
-                .control => 1,
-                .option => 2,
-            },
-        };
-    }
 
     /// 창 뒤 배경 블러의 **유효 반경**(px). config `window.blur`를 그대로 주되, `window.opacity >= 1`이면(불투명 창 —
     /// 뒤가 안 비쳐 블러가 보이지 않음) 0으로 깎는다. 이 게이트 정책이 Zig 단일 출처고, platform host는 이 값을
@@ -15224,29 +13404,10 @@ pub const AppSession = struct {
         // 옮기면 WKWebView가 포커스를 잃고, WebKit은 포커스 없는 문서의 선택을 **아예 안 그린다** — 사용자가 방금
         // 겨냥한 블록이 우클릭하는 순간 사라진다(실제로 그랬다). 선택을 우리가 흉내 내 그리는 길은 리스트 마커처럼
         // 텍스트 노드가 아닌 것을 덮어 버려 접었다(§2.6). 그래서 그리게 두는 대신 **포커스를 안 뺏는다.**
-        if (self.fileContentMenuHoldsWebFocus()) return false;
+        if (settings_ops.fileContentMenuHoldsWebFocus(self)) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
             file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
-    }
-
-    /// 파일 본문 메뉴가 떠 있고, 그것 말고 입력을 가져갈 오버레이가 없나. 다른 모달(확인·팔레트·세팅)이 함께
-    /// 열려 있으면 그쪽이 이긴다 — 그 화면들은 키가 Zig로 가야 동작한다.
-    fn fileContentMenuHoldsWebFocus(self: *const AppSession) bool {
-        if (self.file_content_menu == null) return false;
-        const h = &self.chrome_host;
-        return !(h.confirm.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open);
-    }
-
-    /// config `cursor.shape`(config enum)를 코어/렌더가 쓰는 terminal enum으로 옮긴다. 두 enum은 **멤버 순서가 다르다**
-    /// (config: block/bar/underline, terminal: block/underline/bar) — `@intFromEnum` 재해석은 bar↔underline을 조용히
-    /// 뒤바꾼다. 명시 switch라 어느 쪽에 variant가 늘면 컴파일이 멈춘다(unfocusedCursorMode와 같은 경계 규율).
-    pub fn configCursorShape(self: *const AppSession) terminal.CursorShape {
-        return switch (self.appearance.cursor.shape) {
-            .block => .block,
-            .bar => .bar,
-            .underline => .underline,
-        };
     }
 
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
@@ -15575,7 +13736,7 @@ pub const AppSession = struct {
                 // 않는다. config 미러 대신 시작값과 비교하는 이유는 sidebar_resize_start_pt 주석 참고(init clamp 불일치 회피).
                 if (self.sidebar_width_pt != start_pt) {
                     self.loaded_config.config.sidebar.width_pt = self.sidebar_width_pt;
-                    self.markConfigKeyDirty("sidebar.width");
+                    settings_ops.markConfigKeyDirty(self, "sidebar.width");
                 }
                 self.finishPointerGesture();
             }
@@ -15681,7 +13842,7 @@ pub const AppSession = struct {
         }
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
-        if (kind == 1 and self.rename != null) self.commitRename();
+        if (kind == 1 and self.rename != null) settings_ops.commitRename(self);
         // Phase 7e-2a: 주소창 편집 중 **자기 밴드 밖**(탭/pane/워크스페이스/터미널)을 down하면 편집을 취소한다 — rename의
         // mouse-down commit-away를 미러하되, 브라우저 관례상 클릭-어웨이 = **취소(현재 URL 복원)**로 한다(commit-navigate는
         // 안 친 URL로 튀어 놀람). 단 편집 중인 그 밴드 재클릭(caret 재배치·nav 버튼)은 유지 — 아래 ①b 밴드 핸들러가 URL 존
@@ -15695,11 +13856,11 @@ pub const AppSession = struct {
         // 마우스 이벤트도 메뉴 중엔 소비). 메뉴는 최상위 모달이라 뒤(터미널/탭)로 안 흘린다.
         if (self.chrome_host.context_menu.open) {
             if (kind == 1) {
-                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, self.contextMenuItems(), self.buildChromeProps(), x_px, y_px)) |idx| {
+                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, settings_ops.contextMenuItems(self), self.buildChromeProps(), x_px, y_px)) |idx| {
                     self.chrome_host.context_menu.selected = idx;
-                    self.acceptContextMenu();
+                    settings_ops.acceptContextMenu(self);
                 } else {
-                    self.closeContextMenu(); // 항목 밖 클릭 → 닫기(대상·view_options 플래그 비움)
+                    settings_ops.closeContextMenu(self); // 항목 밖 클릭 → 닫기(대상·view_options 플래그 비움)
                 }
             }
             return;
@@ -15739,9 +13900,9 @@ pub const AppSession = struct {
             if (kind == 1 and scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) return;
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
-            const fields = self.buildSettingsFields(arena_state.allocator()) catch return;
-            const labels = self.buildSettingsSectionLabels(arena_state.allocator()) catch return;
-            const items = self.buildSettingsDropdownItems(arena_state.allocator()) catch return; // 드롭다운 팝업 열림 시 변형 목록(itemAt hit-test)
+            const fields = settings_ops.buildSettingsFields(self, arena_state.allocator()) catch return;
+            const labels = settings_ops.buildSettingsSectionLabels(self, arena_state.allocator()) catch return;
+            const items = settings_ops.buildSettingsDropdownItems(self, arena_state.allocator()) catch return; // 드롭다운 팝업 열림 시 변형 목록(itemAt hit-test)
             const tk = self.buildChromeTokens();
             const ev = chromePointerFromMouse(kind, x_px, y_px, button, mods);
             const act = chrome.components.settings.handlePointer(ev, labels, fields, items, self.buildChromeProps(), &tk, &self.chrome_host.settings);
@@ -15825,9 +13986,9 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
                 return;
             }
-            if (self.renameTargetAt(x_px, y_px)) |target| {
+            if (settings_ops.renameTargetAt(self, x_px, y_px)) |target| {
                 self.context_menu_target = target;
-                const items = self.buildContextMenuItems(); // 대상 타입에 맞는 항목(workspace=Rename+Pin+배경, pane/term=Rename)
+                const items = settings_ops.buildContextMenuItems(self); // 대상 타입에 맞는 항목(workspace=Rename+Pin+배경, pane/term=Rename)
                 self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
                 // 검색이 활성인 채 메뉴가 뜨면 키 라우팅이 검색을 먼저 봐(handleSidebarSearchKey) 메뉴를 ↑↓/Enter로 못
                 // 움직이고 Esc가 메뉴 대신 검색을 닫는다 — blur해 키 포커스를 메뉴로 넘긴다(검색어는 보존). 대상은 위에서
@@ -15855,7 +14016,7 @@ pub const AppSession = struct {
                     return;
                 },
                 .menu => {
-                    self.showTerminalContextMenu(x_px, y_px); // 복사/붙여넣기 컨텍스트 메뉴
+                    settings_ops.showTerminalContextMenu(self, x_px, y_px); // 복사/붙여넣기 컨텍스트 메뉴
                     return;
                 },
             };
@@ -15866,9 +14027,9 @@ pub const AppSession = struct {
         // 사이 up(3)이 드래그 arm을 풀었다(더블클릭은 드래그 아님 — 안전하게 한 번 더 해제). 우클릭 메뉴와 같은
         // renameTargetAt를 써 "더블클릭 == 우클릭"이 같은 자리를 같은 대상으로 친다.
         if (kind == 4) {
-            if (self.renameTargetAt(x_px, y_px)) |target| {
+            if (settings_ops.renameTargetAt(self, x_px, y_px)) |target| {
                 self.cancelPointerGesture();
-                self.startRename(target);
+                settings_ops.startRename(self, target);
                 return;
             }
         }
@@ -16031,7 +14192,7 @@ pub const AppSession = struct {
                         // ⚙ 클릭 → 사이드바 표시 토글 메뉴(브랜치·폴더)를 ⚙ 아이콘 아래에 띄운다(체크박스 패널).
                         // 다시 ⚙(메뉴 박스 밖)를 클릭하면 닫힌다(아래 context_menu.open 분기의 바깥-클릭 경로).
                         self.view_options_menu = true;
-                        const items = self.buildViewOptionsMenuItems();
+                        const items = settings_ops.buildViewOptionsMenuItems(self);
                         const anchor_x: i32 = @intCast(self.sidebar_width_px -| 4 * self.cell_width_px); // ⚙ 아이콘 col
                         const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
                         self.chrome_host.context_menu.show(anchor_x, anchor_y, items.len);
@@ -16909,7 +15070,7 @@ pub const AppSession = struct {
             .confirm, .notice, .file_tree, .dock_pending => null, // 조합을 안 받으므로 후보창 위치 무의미.
             // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
             // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
-            .rename => self.renameCaretRect(),
+            .rename => settings_ops.renameCaretRect(self),
             // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
             .settings => self.settings_search_caret,
             .sidebar_search => sidebar_ops.sidebarSearchCaretRect(self),
@@ -16985,7 +15146,7 @@ pub const AppSession = struct {
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
             .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
-                self.refreshSettingsFieldCount(); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
+                settings_ops.refreshSettingsFieldCount(self); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
                 self.metal_dirty = true;
             },
             .rename => if (self.rename_input.commitPreedit(self.allocator)) {
@@ -17131,7 +15292,7 @@ pub const AppSession = struct {
         // down이 이미 commit하지만, 앱-간 전환(window resign)은 이 경로뿐이라 여기서 확정한다. commitRename이 조합
         // preedit도 먼저 query로 확정하므로 commitComposition을 따로 부를 필요 없다(rename은 find/palette와 배타적).
         if (self.rename != null) {
-            self.commitRename();
+            settings_ops.commitRename(self);
             return;
         }
         self.commitComposition();
@@ -17643,7 +15804,7 @@ pub const AppSession = struct {
         // 안 하면 rename 편집기가 **옛 Term에 바인딩된 채 열려 있고** 포커스만 새 pane으로 가서, 사용자가 붙여넣은
         // 경로 뒤에 타이핑하면 그 키가 셸이 아니라 보이지 않는 편집기로 가고 Enter가 옛 탭 이름을 바꾼다(클릭
         // 경로에서 이미 고쳤던 "rename 하이재킹"과 같은 상태 — code-review). 주소창 편집도 같다.
-        if (self.rename != null) self.commitRename(); // 포커스 상실 = 확정(docs/tabs-splits-layout.md)
+        if (self.rename != null) settings_ops.commitRename(self); // 포커스 상실 = 확정(docs/tabs-splits-layout.md)
         if (self.addr_edit != null) {
             self.cancelAddrEdit(false); // 클릭-어웨이와 같은 취소(현재 URL 복원) — focus-restore 안 함
             self.metal_dirty = true;
@@ -18143,17 +16304,6 @@ pub const AppSession = struct {
         return (mods & mask) != 0;
     }
 
-    /// config `input.link-detection`을 자동 감지 범위(scopes)로 변환한다. osc8-only=자동 감지 끔(OSC 8 명시 링크만),
-    /// web=http(s)만(이전 동작), full=추가 스킴+절대/홈/상대/bare 경로. hover·클릭이 매 호출 현재 config를 넘겨
-    /// reload-safe(코어는 토글 상태를 안 든다 — word_separators 주입과 동형). 단일 출처: docs/link-detection.md.
-    fn linkScopesFromConfig(self: *const AppSession) terminal.LinkScopes {
-        return switch (self.loaded_config.config.input.link_detection) {
-            .osc8_only => terminal.link_scopes_none,
-            .web => terminal.link_scopes_web,
-            .full => terminal.link_scopes_full,
-        };
-    }
-
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
         if (!self.surface_initialized) return .text;
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
@@ -18392,7 +16542,7 @@ pub const AppSession = struct {
                         // 로컬: URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
                         // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
                         // 클립(아래 hoverLinkSpanFor)되므로 stale·OOB가 안 생긴다.
-                        if (s.core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig())) |a| {
+                        if (s.core.urlAnchorAt(cell.row, cell.col, settings_ops.linkScopesFromConfig(self))) |a| {
                             next = a;
                             next_surface_id = s.id;
                         }
@@ -18416,7 +16566,7 @@ pub const AppSession = struct {
     /// 분리(docs/link-detection.md §원격(host-backed) 세션). OSC 8(scope=osc8)은 프리셋과 무관하게 항상 통과한다.
     /// **호출자가 `lockCore`를 보유해야 한다** — 반환 span은 값 복사지만 순회하는 `links` 슬라이스가 화면 소스를 alias한다.
     fn remoteLinkSpanAt(self: *const AppSession, surface: *maru.session.Surface, row: usize, col: u16) ?terminal.SelectionSpan {
-        const scopes = self.linkScopesFromConfig();
+        const scopes = settings_ops.linkScopesFromConfig(self);
         for (surface.renderSnapshot().links) |link| {
             if (!link.scope.enabledIn(scopes)) continue;
             const s = link.span.start;
@@ -18516,7 +16666,7 @@ pub const AppSession = struct {
         // 열리는 곳"을 유지한다. capability 없는 구 host면 backend가 null을 줘 일반 클릭으로 흐른다.
         if (is_macos and s.remote != null) {
             if (app_remote_backend) |*rb| {
-                if (rb.linkAtFor(s.id, cell.row, cell.col, packLinkScopes(self.linkScopesFromConfig()))) |link| {
+                if (rb.linkAtFor(s.id, cell.row, cell.col, packLinkScopes(settings_ops.linkScopesFromConfig(self)))) |link| {
                     self.url_buffer = link.text; // owned(host 추출 바이트) — 다음 urlAt까지 유효.
                     self.url_kind = link.kind;
                     return self.url_buffer;
@@ -18525,7 +16675,7 @@ pub const AppSession = struct {
             return &.{};
         }
         s.lockCore(self.io);
-        const ext = s.core.extractUrlAt(self.allocator, cell.row, cell.col, self.linkScopesFromConfig()) catch null;
+        const ext = s.core.extractUrlAt(self.allocator, cell.row, cell.col, settings_ops.linkScopesFromConfig(self)) catch null;
         s.unlockCore(self.io);
         const e = ext orelse return &.{};
         self.url_buffer = e.text;
@@ -19177,8 +17327,8 @@ pub const AppSession = struct {
         if (path.len == 0) return;
         const owned = self.loaded_config.arena.allocator().dupe(u8, path) catch return;
         if (config_mod.schema.setText(&self.loaded_config.config, "window.background-image", owned)) {
-            self.reapplyLoadedConfig();
-            self.markConfigKeyDirty("window.background-image");
+            settings_ops.reapplyLoadedConfig(self);
+            settings_ops.markConfigKeyDirty(self, "window.background-image");
         }
     }
 
@@ -19195,20 +17345,6 @@ pub const AppSession = struct {
     pub fn provideSampledColor(self: *AppSession, rgb: maru.color.Rgb) void {
         self.chrome_host.settings.setPickerRgb(rgb);
         self.metal_dirty = true;
-    }
-
-    /// 세팅 GUI에서 바뀐 config 키를 write-back 예약 집합에 넣는다(중복은 무시 — 한 번만). 키는 스키마 정적 리터럴.
-    fn markConfigKeyDirty(self: *AppSession, key: []const u8) void {
-        for (self.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, key)) return;
-        self.config_dirty_keys.append(self.allocator, key) catch {};
-    }
-
-    /// 반영할 config 키가 있으면 true(앱→파일 write-back 예약 — 사이드바 view options·세팅 화면 공용). 여기선 비우지
-    /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
-    /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
-    pub fn takeConfigDirty(self: *AppSession) bool {
-        inline for (pending_writeback_lists) |n| if (@field(self, n).items.len > 0) return true;
-        return self.theme_preset_persist != null; // 리스트가 아닌 optional이라 registry 밖 — 따로 본다
     }
 
     /// backend runtime observation으로 동기화한 현재 cwd(OSC 7, percent-decode된 경로). 한 번도 못 받았으면 빈
@@ -19392,26 +17528,6 @@ pub const AppSession = struct {
         };
     }
 
-    /// config 파일 경로(Open Config 메뉴용). loader.defaultConfigPath(MARU_CONFIG override·$HOME/.config/maru/
-    /// config)가 단일 출처 — 한 번 계산해 세션 소유 버퍼에 캐시한다(다음 호출은 캐시, destroy까지 유효).
-    /// HOME 없음·OOM이면 빈 슬라이스(Swift가 무동작). 경로 계산만 — 파일 생성/열기는 platform(Swift) OS 동작.
-    pub fn configPath(self: *AppSession) []const u8 {
-        if (self.config_path_buffer) |b| return b;
-        const path = (config_mod.defaultConfigPath(self.allocator) catch null) orelse return &.{};
-        self.config_path_buffer = path; // owned 슬라이스 — 세션이 소유(deinit이 해제)
-        return path;
-    }
-
-    /// **config 파일을 실제로 쓰는 경로**가 대상 경로를 얻을 때 쓰는 안전 chokepoint(configPath는 resolve+캐시 read 전용).
-    /// 테스트에서 config_path_buffer를 tmp로 명시 redirect하지 않았으면 빈 경로를 돌려줘 쓰기를 스킵시킨다 — zig build
-    /// test(macOS)가 실제 사용자 config($HOME/.config/maru/config)를 절대 못 건드리게 한다. 과거 reset 테스트가 tmp 가드를
-    /// 빠뜨려 실 config를 헤더만 남기고 날린 footgun을 **개별 테스트 가드 누락과 무관하게 원천 차단**한다(새 config-쓰기
-    /// 테스트가 가드를 잊어도 안전). 프로덕션(is_test=false)은 configPath() 그대로. 새 config-파일 writer는 이걸 거쳐야 한다.
-    fn configWritePath(self: *AppSession) []const u8 {
-        if (builtin.is_test and self.config_path_buffer == null) return &.{};
-        return self.configPath();
-    }
-
     /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).
     /// 우선순위 로직은 core가 소유한다(native 최소) — Swift는 받아서 빈값이면 앱 이름으로 폴백만.
     /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
@@ -19431,7 +17547,7 @@ pub const AppSession = struct {
     /// 바인딩을 descriptorFor로 매핑해 채운다(가상 키코드로 매핑 안 되는 chord는 null → 스킵, 등록 불가라 init과 같은 동작).
     /// descriptor는 POD라 self.allocator로 복사(arena 무관 — global_bindings arena가 reload에서 갈려도 안전). dirty는
     /// 여기서 세우지 않는다(앱 시작 1회 vs 라이브 재등록을 호출자가 가른다 — init은 false 유지, 라이브 경로는 true로 세움).
-    fn rebuildGlobalHotkeys(self: *AppSession) !void {
+    pub fn rebuildGlobalHotkeys(self: *AppSession) !void {
         self.global_hotkeys.clearRetainingCapacity();
         for (self.loaded_config.global_bindings) |gb| {
             if (global_hotkey.descriptorFor(gb)) |d| {
@@ -19505,7 +17621,7 @@ pub const AppSession = struct {
     /// 카탈로그를 비우고 다시 빌드한다(리바인딩 후 — 메뉴바·팝업의 단축키 표시 갱신). buildCommandCatalog가 append-only라
     /// 먼저 owned 표시/equiv를 해제하고 비운다. command_catalog_dirty를 세워 Swift tick이 메뉴바를 다시 빌드하게 한다
     /// (모든 keybind 변경 경로 — rebind/unbind·reload·reset — 의 단일 출처). Zig-side 팔레트는 라이브라 즉시 갱신.
-    fn rebuildCommandCatalog(self: *AppSession) void {
+    pub fn rebuildCommandCatalog(self: *AppSession) void {
         for (self.command_key_displays.items) |s| self.allocator.free(s);
         self.command_key_displays.clearRetainingCapacity();
         for (self.command_key_equivalents.items) |s| self.allocator.free(s);
@@ -19524,7 +17640,7 @@ pub const AppSession = struct {
     /// 같을 때 그 키를 살린다 — 사용자 바인딩이 resolver 우선이라 동작은 같지만 파일에 중복 unbind 줄을 안 남긴다). 이미
     /// unbinds에 있으면 스킵(중복 누적 방지). 다중-chord 빌트인(next/previous_tab·increase/decrease_font_size=2개)은 전부
     /// 처리(리뷰 #840). 카탈로그 재빌드는 호출자가 한다. **rebind(완전 교체)·unbind(완전 해제)가 공유하는 단일 출처.**
-    fn unbindBuiltinChords(self: *AppSession, entry: command_catalog.Entry, except: ?config_mod.KeyChord) void {
+    pub fn unbindBuiltinChords(self: *AppSession, entry: command_catalog.Entry, except: ?config_mod.KeyChord) void {
         const a = self.loaded_config.arena.allocator();
         var ub: std.ArrayList(config_mod.KeyChord) = .empty;
         ub.appendSlice(a, self.loaded_config.unbinds) catch return;
@@ -19588,7 +17704,7 @@ pub const AppSession = struct {
             if (oc.eql(chord)) {
                 var msg_buf: [160]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "이 단축키는 '{s}'에 이미 묶여 있습니다 — 덮어씁니다", .{other.title}) catch "이 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다";
-                self.settingsMessageOrNotice(msg); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
+                settings_ops.settingsMessageOrNotice(self, msg); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
                 break;
             }
         }
@@ -19624,41 +17740,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 액션의 단축키를 **완전히 해제**한다(keybind 행 Backspace). 현재 effective chord Y(resolver — 사용자/빌트인 무관)를
-    /// 구해, 사용자 바인딩이면 빼고 + Y를 loaded_config.unbinds에 넣어 빌트인이어도 ignored로 만든다(라이브 즉시 — resolver가
-    /// unbinds를 본다). 영속: 사용자 줄 제거 예약 + `keybind = Y = unbind` 지시어 예약. 펜딩 rebind 취소. 해제 후
-    /// chordForAction(Y가 unbinds라)이 null → 행은 "(미지정)". 이미 미지정이면 notice.
-    fn unbindActionEntry(self: *AppSession, entry: command_catalog.Entry) void {
-        const a = self.loaded_config.arena.allocator();
-        const resolver = self.loaded_config.keyBindingResolver();
-        if (command_catalog.chordForAction(resolver, entry.action) == null) {
-            self.settingsMessageOrNotice("이미 지정된 단축키가 없습니다");
-            return;
-        }
-        // ① 사용자 바인딩 제거(사용자 chord는 제거만으로 죽는다 — config 줄 제거 + 라이브 슬라이스에서 드롭).
-        var list: std.ArrayList(config_mod.AppBinding) = .empty;
-        var found_user = false;
-        for (self.loaded_config.keybindings) |b| {
-            if (std.meta.eql(b.action, entry.action)) {
-                found_user = true; // 드롭
-            } else list.append(a, b) catch return;
-        }
-        if (found_user) self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
-        // ② **빌트인 chord 전부**를 unbind(except=null) — 사용자 chord만 빼면 빌트인이 되살아나므로 모두 죽인다(완전 해제).
-        // 다중-chord 빌트인도 전부(리뷰 #840). rebind(완전 교체)와 공유하는 unbindBuiltinChords 단일 출처.
-        self.unbindBuiltinChords(entry, null);
-        self.rebuildCommandCatalog();
-        // 펜딩 rebind 취소(unbind가 우선).
-        var i: usize = 0;
-        while (i < self.config_keybind_rebinds.items.len) {
-            if (std.mem.eql(u8, self.config_keybind_rebinds.items[i].action, entry.key)) {
-                _ = self.config_keybind_rebinds.orderedRemove(i);
-            } else i += 1;
-        }
-        if (found_user) self.markKeybindRemoved(entry.key); // 영속: 사용자 줄 제거
-        self.metal_dirty = true;
-    }
-
     /// 전역(OS) 액션을 새 chord로 다시 묶는다(rebindActionEntry의 글로벌 미러). chord가 전역 등록 불가(descriptorFor가
     /// null — 가상 키코드 매핑 없음, 예 Plus·Insert)면 notice로 거부하고 중단한다(파일에 못 쓸 chord를 안 받는다). 아니면
     /// loaded_config.global_bindings를 새 슬라이스로 교체(그 액션을 새 chord로, 없으면 추가, 같은 action 중복 제거),
@@ -19668,14 +17749,14 @@ pub const AppSession = struct {
         const a = self.loaded_config.arena.allocator();
         // 전역 등록 가능한 chord인지 먼저 확인(가상 키코드 매핑) — 안 되면 파일에 못 쓸 chord라 거부.
         if (global_hotkey.descriptorFor(.{ .chord = chord, .action = entry.action }) == null) {
-            self.settingsMessageOrNotice("이 키는 전역 단축키로 등록할 수 없습니다"); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
+            settings_ops.settingsMessageOrNotice(self, "이 키는 전역 단축키로 등록할 수 없습니다"); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
             return;
         }
         // 충돌 경고(선택): 이 chord가 **다른 전역 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — last-wins).
         for (self.loaded_config.global_bindings) |other| {
             if (other.action == entry.action) continue;
             if (other.chord.eql(chord)) {
-                self.settingsMessageOrNotice("이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다");
+                settings_ops.settingsMessageOrNotice(self, "이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다");
                 break;
             }
         }
@@ -19702,29 +17783,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 전역(OS) 액션의 단축키를 해제한다(전역 행 Backspace — unbindActionEntry의 글로벌 미러). 빌트인 기본이 없으므로
-    /// global_bindings에서 그 액션 줄을 빼면 끝이다(in-app처럼 unbind 지시어가 필요 없다). 안 묶여 있으면 notice. 펜딩
-    /// rebind는 취소하고 줄 제거를 예약(markGlobalRemoved → removeGlobalKeybindLines). OS 반영은 재시작 후.
-    fn unbindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry) void {
-        const a = self.loaded_config.arena.allocator();
-        if (command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action) == null) {
-            self.settingsMessageOrNotice("이미 지정된 전역 단축키가 없습니다");
-            return;
-        }
-        var list: std.ArrayList(config_mod.GlobalBinding) = .empty;
-        for (self.loaded_config.global_bindings) |b| {
-            if (b.action == entry.action) continue; // 드롭(중복 포함 전부)
-            list.append(a, b) catch return;
-        }
-        self.loaded_config.global_bindings = list.toOwnedSlice(a) catch return;
-        self.cancelGlobalRebind(entry.key); // 펜딩 rebind 취소(제거가 우선)
-        self.markGlobalRemoved(entry.key); // 영속: 전역 줄 제거
-        // 라이브 OS 재등록(PR2) — 그 액션이 빠진 global_bindings로 global_hotkeys를 다시 빌드하고 dirty(Swift drain → 재등록).
-        self.rebuildGlobalHotkeys() catch {};
-        self.global_hotkeys_dirty = true;
-        self.metal_dirty = true;
-    }
-
     /// 전역 keybind 재바인딩 예약(markConfigKeyDirty·rebind upsert의 글로벌 미러 — action 키별 한 건). action은
     /// command_catalog 정적 키, chord는 loaded_config.arena 소유(config 표기). serializeConfig가 updateGlobalKeybindLines로 반영.
     fn markGlobalRebind(self: *AppSession, action_key: []const u8, chord_str: []const u8) void {
@@ -19735,28 +17793,6 @@ pub const AppSession = struct {
             }
         }
         self.config_global_rebinds.append(self.allocator, .{ .action = action_key, .chord = chord_str }) catch {};
-    }
-
-    /// 전역 keybind 줄 제거 예약(중복 한 번만). action은 command_catalog 정적 키. serializeConfig가 removeGlobalKeybindLines로 반영.
-    fn markGlobalRemoved(self: *AppSession, action_key: []const u8) void {
-        for (self.config_global_removed.items) |k| if (std.mem.eql(u8, k, action_key)) return;
-        self.config_global_removed.append(self.allocator, action_key) catch {};
-    }
-
-    /// 펜딩 전역 rebind를 액션 키로 취소한다(unbind가 rebind보다 우선 — 같은 액션을 바꿨다 지우면 결국 제거).
-    fn cancelGlobalRebind(self: *AppSession, action_key: []const u8) void {
-        var i: usize = 0;
-        while (i < self.config_global_rebinds.items.len) {
-            if (std.mem.eql(u8, self.config_global_rebinds.items[i].action, action_key)) {
-                _ = self.config_global_rebinds.orderedRemove(i);
-            } else i += 1;
-        }
-    }
-
-    /// keybind 줄 제거 예약(중복 한 번만). action은 command_catalog 정적 키. serializeConfig가 removeKeybindLines로 반영.
-    fn markKeybindRemoved(self: *AppSession, action_key: []const u8) void {
-        for (self.config_keybind_removed.items) |k| if (std.mem.eql(u8, k, action_key)) return;
-        self.config_keybind_removed.append(self.allocator, action_key) catch {};
     }
 
     /// `keybind = chord = unbind` 지시어 예약(중복 한 번만). chord는 config 표기(loaded_config.arena 소유).
@@ -19841,111 +17877,6 @@ pub const AppSession = struct {
         const win = try self.captureWorkspaceWindow(arena.allocator(), is_active, frame);
         const text = try maru.session.workspace.serializeWindow(self.allocator, win);
         self.workspace_buffer = text;
-        return text;
-    }
-
-    /// 현재 sidebar 토글(show_branch/show_folder)을 config 파일에 반영할 새 텍스트를 직렬화한다(owned, 다음
-    /// 호출/deinit까지 유효 — workspace_buffer 패턴). 원본 config를 읽어 updateConfigText로 부분 갱신하므로
-    /// 주석·미파싱 키를 보존한다. Swift가 받아 config 경로에 atomic write한다(앱→config 방향). 원본이 없거나
-    /// 읽기 실패면 빈 텍스트로 두 키를 append한다(forgiving — config가 없어도 토글이 새 파일을 만든다).
-    pub fn serializeConfig(self: *AppSession) ![]const u8 {
-        if (self.sidebar_config_buffer) |b| {
-            self.allocator.free(b);
-            self.sidebar_config_buffer = null;
-        }
-        const path = self.configPath();
-        const owned: ?[]u8 = if (path.len == 0)
-            null
-        else
-            std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1 << 20)) catch null;
-        defer if (owned) |o| self.allocator.free(o);
-        const original: []const u8 = owned orelse &.{};
-
-        // 바뀐 키만 현재값으로 부분 갱신(override-only write-back, S0-1b 일반화 — 사이드바 view options·세팅 화면
-        // 공용). 값은 스키마 직렬화(configKeyValues)가 단일 출처라 타입별 손코드 중복이 없다. 성공 시 dirty 집합을
-        // 비운다(아래) — updateConfigForKeys가 실패하면 try가 빠져나가 키가 남아 다음 tick 재시도된다.
-        var text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, self.config_dirty_keys.items);
-        errdefer self.allocator.free(text); // 이후 체이닝 패스(theme.preset·keybind 등) 중 try 실패 시 현재 text 버퍼 누수 방지 —
-        // text는 패스마다 reassign되므로 errdefer는 항상 최신 버퍼를 free하고, 성공 경로(sidebar_config_buffer 보관·return)에선 미발화.
-        // 테마 프리셋 영속(팔레트 포함): `theme.preset = <name>` 줄을 set/update한다 — configKeyValues가 derive 키
-        // theme.preset을 emit하지 않으므로(round-trip 대칭 유지) 전용 패스로 쓴다. 충돌할 개별 theme.* override는
-        // config_removed_keys(아래 제거 패스)가 빼므로 base 프리셋 색이 온전히 산다. 성공해야 비운다(실패 시 재시도).
-        if (self.theme_preset_persist) |name| {
-            const kv = [_]config_mod.ConfigKeyValue{.{ .key = "theme.preset", .value = name }};
-            const chained = try config_mod.updateConfigText(self.allocator, text, &kv);
-            self.allocator.free(text);
-            text = chained;
-            self.theme_preset_persist = null;
-        }
-        // keybind 재바인딩은 `keybind = chord = action` 줄이라 key=value 패스로 못 다룬다 — 전용 패스로 체이닝한다
-        // (앞 단계 결과 텍스트 위에 keybind 줄을 action 기준 갱신/추가). 성공해야 양쪽 dirty를 비운다.
-        if (self.config_keybind_rebinds.items.len > 0) {
-            const chained = try config_mod.updateKeybindLines(self.allocator, text, self.config_keybind_rebinds.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_keybind_rebinds.clearRetainingCapacity();
-        }
-        // 삭제 예약된 키(env 변수 삭제 등)는 줄을 제거한다 — 갱신 패스 뒤에 체이닝(삭제 우선). 같은 키를 갱신+삭제 둘 다면
-        // 갱신이 먼저 줄을 남겨도 여기서 빠진다.
-        if (self.config_removed_keys.items.len > 0) {
-            const chained = try config_mod.removeConfigLines(self.allocator, text, self.config_removed_keys.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_removed_keys.clearRetainingCapacity();
-        }
-        // keybind unbind — `keybind = chord = action` 줄을 action 기준으로 제거(keybind 갱신 패스 뒤, 제거 우선).
-        if (self.config_keybind_removed.items.len > 0) {
-            const chained = try config_mod.removeKeybindLines(self.allocator, text, self.config_keybind_removed.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_keybind_removed.clearRetainingCapacity();
-        }
-        // 터미널 매크로 upsert — `keybind = <chord> = text:/esc:/ctrl:` 줄을 chord 기준 갱신/추가(전용 패스).
-        if (self.config_terminal_macros.items.len > 0) {
-            const chained = try config_mod.updateTerminalMacroLines(self.allocator, text, self.config_terminal_macros.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_terminal_macros.clearRetainingCapacity();
-        }
-        // 터미널 매크로 삭제 — `keybind = <chord> = <매크로 rhs>` 줄을 chord 기준 제거(갱신 패스 뒤, 제거 우선).
-        if (self.config_terminal_macro_removes.items.len > 0) {
-            const chained = try config_mod.removeTerminalMacroLines(self.allocator, text, self.config_terminal_macro_removes.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_terminal_macro_removes.clearRetainingCapacity();
-        }
-        // 빌트인 죽이기 — `keybind = chord = unbind` 지시어 append(사용자 줄 제거 뒤, 마지막).
-        if (self.config_keybind_unbinds.items.len > 0) {
-            const chained = try config_mod.appendKeybindUnbinds(self.allocator, text, self.config_keybind_unbinds.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_keybind_unbinds.clearRetainingCapacity();
-        }
-        // stale unbind 정리 — 재바인딩으로 부활한 chord의 옛 `keybind = chord = unbind` 줄을 제거(append 패스 뒤 — append가 안
-        // 쓴 chord를 여기서 빼 정리; 같은 chord를 죽임+부활 둘 다면 append는 펜딩에서 빠져 안 쓰고 여기서 옛 줄만 뺀다).
-        if (self.config_keybind_unbind_removed.items.len > 0) {
-            const chained = try config_mod.removeKeybindUnbindLines(self.allocator, text, self.config_keybind_unbind_removed.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_keybind_unbind_removed.clearRetainingCapacity();
-        }
-        // 전역(OS) 단축키 재바인딩 — `keybind = global:<chord> = <action>` 줄을 action 기준 갱신/추가(in-app keybind 줄과
-        // 별도 패스, global: 좌측만 매칭). 기존 keybind 체이닝 뒤에 둔다.
-        if (self.config_global_rebinds.items.len > 0) {
-            const chained = try config_mod.updateGlobalKeybindLines(self.allocator, text, self.config_global_rebinds.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_global_rebinds.clearRetainingCapacity();
-        }
-        // 전역 단축키 해제 — `keybind = global:<chord> = <action>` 줄을 action 기준 제거(전역 갱신 패스 뒤, 제거 우선).
-        if (self.config_global_removed.items.len > 0) {
-            const chained = try config_mod.removeGlobalKeybindLines(self.allocator, text, self.config_global_removed.items);
-            self.allocator.free(text);
-            text = chained;
-            self.config_global_removed.clearRetainingCapacity();
-        }
-        self.sidebar_config_buffer = text;
-        self.config_dirty_keys.clearRetainingCapacity();
         return text;
     }
 
@@ -20171,22 +18102,6 @@ pub const AppSession = struct {
         if (err != error.PersistentRuntimeGone) return err;
         if (!has_exact_host) return error.PersistentRuntimeUnavailable;
         return .ended;
-    }
-
-    /// quick terminal 표시 옵션(config에서 파싱). Swift가 auto_hide/screen/chrome·재생성 판정에 쓴다. 이 세션의
-    /// **현재** config를 읽는 라이브 스냅샷 — Swift가 매 토글마다 다시 불러 설정 변경을 반영한다(세션-불변 아님).
-    /// 패널 사각형은 quickTerminalFrames(위치 기하)가 따로 계산한다.
-    pub fn quickTerminalConfig(self: *const AppSession) QuickTerminalConfig {
-        const qt = self.loaded_config.config.quick_terminal;
-        return .{
-            .height_milli = @intFromFloat(@round(qt.height_fraction * 1000.0)),
-            .auto_hide = if (qt.auto_hide) 1 else 0,
-            .screen = @intFromEnum(qt.screen),
-            .position = @intFromEnum(qt.position),
-            .chrome = @intFromEnum(qt.chrome),
-            .minimal_tabs = if (qt.minimal_tabs) 1 else 0,
-            .width_milli = @intFromFloat(@round(qt.width_fraction * 1000.0)),
-        };
     }
 
     /// quick 패널 보임/숨김 사각형을 이 세션의 **현재** config로 계산한다(스냅샷 캐시 없음 — 매 호출 라이브).
@@ -20698,17 +18613,6 @@ pub const AppSession = struct {
         }
     };
 
-    /// claude 설정 디렉터리(존재 여부는 호출부가 판정). 규칙 자체는 OS 중립이라 session 레이어가 갖고, 여기서는
-    /// env 조회만 해서 넘긴다. 결과는 `buf` 소유.
-    fn claudeConfigDir(buf: []u8) ?[]const u8 {
-        const env = struct {
-            fn get(name: [*:0]const u8) ?[]const u8 {
-                return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
-            }
-        };
-        return maru.session.agent_statusline.configDir(buf, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
-    }
-
     /// `settings.json`의 `statusLine` 상태를 읽는다. **"없다"와 "못 읽었다"를 가른다**(`SettingsState`).
     fn readStatusLineState(a: std.mem.Allocator, io: std.Io, path: []const u8) maru.session.agent_statusline.SettingsState {
         const raw = switch (readFileState(io, a, path)) {
@@ -20844,7 +18748,7 @@ pub const AppSession = struct {
     /// - 끄면 감쌌던 원래 명령을 `statusLine`에 복원하고 우리 것(스크립트·마커)을 지운다 — 설치 전 상태로 돌아간다.
     ///
     /// best-effort다. 실패는 조용히 지나간다 — 이 훅이 없어도 대화는 자식 신원 경로(§7.2.1)로 대부분 잡힌다.
-    fn reconcileAgentStatusline(self: *AppSession) void {
+    pub fn reconcileAgentStatusline(self: *AppSession) void {
         if (!is_macos) return;
         const sl = maru.session.agent_statusline;
 
@@ -20856,7 +18760,7 @@ pub const AppSession = struct {
         // 우선이고 없으면 `$HOME/.claude`다(과거 hook cleanup과 같은 판정). 그 디렉터리가 없으면 claude를 쓰지
         // 않는 사람이므로 **디렉터리를 만들지 않고 그대로 물러난다** — 남의 홈에 우리 흔적을 남길 이유가 없다.
         var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const claude_dir = claudeConfigDir(&claude_dir_buf) orelse return;
+        const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return;
         const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
         dir_handle.close(self.io);
         const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
@@ -21000,7 +18904,7 @@ pub const AppSession = struct {
         // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
         if (cache.identity_len == 0) return false;
         var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const claude_dir = claudeConfigDir(&claude_dir_buf) orelse return false;
+        const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return false;
         var slug_buf: [1024]u8 = undefined;
         const slug = tr.claudeDirName(cwd, &slug_buf) orelse return false;
         var path_buf: [2048]u8 = undefined;
@@ -21421,7 +19325,7 @@ pub const AppSession = struct {
             // 브랜치 항목이 **선 뒤에만** 요청한다 — 그 전에는 저장소 판정이 실패해 오류 알림이 화면에 남는다.
             for (self.statusBarTree().entries) |e| {
                 if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
-                self.requestBranchMenu();
+                settings_ops.requestBranchMenu(self);
                 break;
             }
         }
@@ -22155,7 +20059,7 @@ pub const AppSession = struct {
                         // running이면(편집 중 아님) 이름 앞에 1칸 정적 플래그 "● " prefix(owned) — ● 셀은 아래 recolor로 브랜드색.
                         const pane_running = !renaming_pane and pane_ops.paneHasRunningAgent(lr.leaf);
                         const name = if (renaming_pane) blk: {
-                            const e = self.renameEditText(self.allocator) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
+                            const e = settings_ops.renameEditText(self, self.allocator) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
                             name_buf = e;
                             break :blk e;
                         } else if (pane_running) blk: {
@@ -22191,7 +20095,7 @@ pub const AppSession = struct {
                         // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
                         if (self.renamingTerm(term)) {
-                            const edit = self.renameEditText(self.allocator) catch continue;
+                            const edit = settings_ops.renameEditText(self, self.allocator) catch continue;
                             defer self.allocator.free(edit);
                             const label = self.allocator.dupe(u8, edit) catch continue;
                             // editing_tab은 **term 인덱스가 아니라 titles 인덱스**로 잡는다 — 앞 term의 append가 OOM으로 실패해
@@ -22516,7 +20420,7 @@ pub const AppSession = struct {
                                 // scrollbar, draw no row glyphs instead of letting the track cover the only cell.
                                 if (content_cols == 0) break :file_tree_rows;
                                 const tree_edit_text = if (self.rename) |renaming|
-                                    if (renaming == .file_tree) self.renameEditText(self.allocator) catch null else null
+                                    if (renaming == .file_tree) settings_ops.renameEditText(self, self.allocator) catch null else null
                                 else
                                     null;
                                 defer if (tree_edit_text) |owned| self.allocator.free(owned);
@@ -23424,7 +21328,7 @@ pub const AppSession = struct {
     /// 리네임 caret 줄 수 계산용 — workspaceStatusLine이 non-empty 상태줄을 낼지 텍스트 생성 없이 순수 판정한다(caret은
     /// 파형 문자열이 필요 없고, runningStatusLine 할당·spinner 조회를 피한다). 에이전트가 있으면 unknown도
     /// "상태 확인 중"을 표시한다. 위 workspaceStatusLine의 non-empty 조건과 반드시 동기다.
-    fn workspaceHasStatusLine(tab: *Tab) bool {
+    pub fn workspaceHasStatusLine(tab: *Tab) bool {
         return tab_ops.tabAgentRepresentative(tab) != null;
     }
 
@@ -23998,7 +21902,7 @@ pub const AppSession = struct {
     }
 
     /// 발행된 tree(슬라이스 view). 호출자가 hit-test·hover에 쓴다.
-    fn statusBarTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
+    pub fn statusBarTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
         return .{
             .entries = self.status_bar_entry_scratch[0..self.status_bar_entry_count],
             .generation = self.status_bar_generation,
@@ -24043,7 +21947,7 @@ pub const AppSession = struct {
             .notifications => self.openNotificationPanel(),
             .running_agents, .blocked_agents => dock_ops.openDockTo(self, .agent_sessions),
             .cwd => dock_ops.openDockTo(self, .explorer),
-            .git_branch => self.requestBranchMenu(), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
+            .git_branch => settings_ops.requestBranchMenu(self), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
             // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
             .resource => {},
@@ -24513,7 +22417,7 @@ pub const AppSession = struct {
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.context_menu.open) {
-            try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
+            try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
         // **리셋은 설정보다 앞이다.** 처음에 세팅 리셋 옆에 뒀다가 방금 넣은 값을 그 자리에서 지워
         // 막대가 화면에서 사라졌다(실측) — 세팅은 설정이 리셋 뒤라 살아남았고 알림만 순서가 반대였다.
@@ -24531,9 +22435,9 @@ pub const AppSession = struct {
         self.settings_search_caret = null; // 세팅 안 열림/검색 아님이면 없음(imeCursorRect가 터미널 커서로 폴백)
         self.settings_scroll_view = null; // 세팅이 닫히면 막대도 없다 — 남기면 다음 프레임에 stale 막대가 뜬다
         if (self.chrome_host.settings.open) {
-            const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
-            const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
-            const items = try self.buildSettingsDropdownItems(arena); // 드롭다운 팝업 열림 시 변형 목록(닫혔으면 빈)
+            const labels = try settings_ops.buildSettingsSectionLabels(self, arena); // 좌측 네비 라벨(platform 소유)
+            const fields = try settings_ops.buildSettingsFields(self, arena); // 현재 섹션의 필드 행 주입(platform 소유)
+            const items = try settings_ops.buildSettingsDropdownItems(self, arena); // 드롭다운 팝업 열림 시 변형 목록(닫혔으면 빈)
             chrome.components.settings.ensureSelectedVisible(&self.chrome_host.settings, labels, fields, props, &tokens); // 값 비교 follow(팔레트와 같은 규율)
             try self.chrome_host.collectSettingsDraws(labels, fields, items, props, &tokens, arena, &draws);
             // 검색줄 caret을 캐시한다(sections/rows/props가 여기 있으니 추가 비용 없음) — imeCursorRect가 IME 후보창을
@@ -24666,19 +22570,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 안내 메시지를 **세팅 모달이 열려 있으면 폼 상단 인라인 배너**(§6.9)로, 아니면 일반 notice 토스트로 보인다.
-    /// keybind 녹음(세팅 안)의 검증 실패("등록 불가 키")·충돌 경고가 showNotice로 가면 dismissMessageOverlays가 세팅
-    /// 모달까지 닫아(단일-오버레이 불변식) 사용자가 녹음하던 화면이 사라지던 문제를 고친다 — 배너는 세팅 자체 그리드
-    /// 안 텍스트라 모달을 닫지 않고 위에 얹힌다. 세팅 밖(메뉴 rebind 등)에서 온 같은 메시지는 기존대로 토스트.
-    fn settingsMessageOrNotice(self: *AppSession, message: []const u8) void {
-        if (self.chrome_host.settings.open) {
-            self.chrome_host.settings.setMessage(message);
-            self.metal_dirty = true;
-        } else {
-            self.showNotice(message);
-        }
-    }
-
     /// 이번 투영이 확정하는 chrome 기하 — `metal_buffer`에 스탬프해 셀과 한 몸으로 만든다. draw 시점의 live
     /// 값을 덮어쓰면 메트릭이 바뀌고 아직 재투영되지 않은 프레임(host는 generation 변화 없이도 다시 그릴 수 있다)
     /// 에서 **옛 pitch 셀 + 새 헤더/슬롯 높이**가 섞인다.
@@ -24761,7 +22652,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
-        self.clearBranchMenuText(); // 브랜치 목록 버퍼(owned) 해제 — 메뉴가 열린 채 종료돼도 남지 않게
+        settings_ops.clearBranchMenuText(self); // 브랜치 목록 버퍼(owned) 해제 — 메뉴가 열린 채 종료돼도 남지 않게
         self.resource_meter.deinit(self.allocator); // pid별 이전 CPU 맵 — 창마다 있으니 닫을 때 반드시 푼다
         // 소스 컨트롤(E1) 자원: backend는 detached worker를 refcount로 붙들고 있으므로 여기서 놓아야 스레드가
         // 끝난 뒤 정리된다. 결과·감시 경로도 세션 소유라 함께 푼다(이 셋은 세션 수명과 정확히 같다).
@@ -25993,7 +23884,7 @@ test "quickTerminalFrames/quickTerminalConfig: 설정 변경을 라이브로 반
     // config 스칼라(auto_hide/chrome/position)도 라이브: 바꾸면 다음 조회에 그대로 반영.
     session.loaded_config.config.quick_terminal.auto_hide = false;
     session.loaded_config.config.quick_terminal.chrome = .minimal;
-    const cfg = session.quickTerminalConfig();
+    const cfg = settings_ops.quickTerminalConfig(session);
     try std.testing.expectEqual(@as(u32, 0), cfg.auto_hide);
     try std.testing.expectEqual(@as(u32, @intFromEnum(config_mod.theme.QuickTerminalChrome.minimal)), cfg.chrome);
     try std.testing.expectEqual(@as(u32, @intFromEnum(config_mod.theme.QuickTerminalPosition.bottom)), cfg.position);
@@ -27250,41 +25141,41 @@ test "GP3(b)/GL2: 카드 pin 라우팅 — 마커 카드=그룹째 고정·비�
     // ── (1) **마커 카드**(t0) 우클릭 → 그룹째 고정(cardPinRole=.group). 마커는 그룹 시작이라 개별 pin이면 C2 캐시 권위
     //    (§12.2)가 깨지므로 그룹째로 위임(GP3 유지). accept → 마커+모든 멤버 통째 pinned.
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
-    try std.testing.expectEqualStrings("그룹째 고정", session.buildContextMenuItems()[ctx_menu_pin]);
+    try std.testing.expectEqualStrings("그룹째 고정", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned);
     // 다시 열면 "그룹 고정 해제"(그룹째 토글 상태 반영). 해제 → 전부 unpinned.
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
-    try std.testing.expectEqualStrings("그룹 고정 해제", session.buildContextMenuItems()[ctx_menu_pin]);
+    try std.testing.expectEqualStrings("그룹 고정 해제", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = session.tabs.items[0] };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(!session.tabs.items[0].pinned and !session.tabs.items[1].pinned);
 
     // ── (2) **비마커 멤버**(t1) 우클릭 → **그룹-로컬 위치 고정**(cardPinRole=.local, GL §13 — 그룹째 위임을 되돌림).
     //    라벨은 "그룹 내 위치 고정", accept → local_pinned만 세팅되고 **전역 pinned는 불변**(그룹째 고정이 아님).
     const m1 = session.tabs.items[1];
     session.context_menu_target = .{ .workspace = m1 };
-    try std.testing.expectEqualStrings("그룹 내 위치 고정", session.buildContextMenuItems()[ctx_menu_pin]);
+    try std.testing.expectEqualStrings("그룹 내 위치 고정", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = m1 };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(m1.local_pinned); // ★ 로컬 pin 세팅(그룹-로컬)
     try std.testing.expect(!session.tabs.items[0].pinned and !m1.pinned); // ★ 전역 pinned 불변(그룹째 아님)
     // 다시 열면 "그룹 내 고정 해제"(로컬 토글 상태 반영).
     session.context_menu_target = .{ .workspace = m1 };
-    try std.testing.expectEqualStrings("그룹 내 고정 해제", session.buildContextMenuItems()[ctx_menu_pin]);
+    try std.testing.expectEqualStrings("그룹 내 고정 해제", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
 
     // ── (3) **최상위**(그룹 미소속) 카드 → 개별 전역 pin(cardPinRole=.individual, togglePin — 현행 유지).
     tab_ops.ungroupTab(session, session.tabs.items[0]); // 그룹 풀어 전부 최상위 카드로
     const top0 = session.tabs.items[0];
     session.context_menu_target = .{ .workspace = top0 };
-    try std.testing.expectEqualStrings("위치 고정", session.buildContextMenuItems()[ctx_menu_pin]);
+    try std.testing.expectEqualStrings("위치 고정", settings_ops.buildContextMenuItems(session)[ctx_menu_pin]);
     session.context_menu_target = .{ .workspace = top0 };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(top0.pinned); // 개별 전역 pin
 }
 
@@ -27813,7 +25704,7 @@ test "그룹핀 리뷰 #3: toggleGroupPin이 중첩 subgroup에서 top-level로 
     // 그룹 헤더 우클릭 "그룹 고정"을 **중첩 subgroup 헤더(t2)**에서 실행 → top-level G1 통째 고정(subtree만 떼지 않음).
     session.context_menu_target = .{ .group = t2 };
     session.chrome_host.context_menu.selected = ctx_group_menu_pin;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     // ★ G1 전체(t0..t4)가 pinned — 옛 버그면 t2..t4만 pin돼 t0·t1에서 떨어져 나갔다(detach).
     for (session.tabs.items) |t| try std.testing.expect(t.pinned);
     try std.testing.expect(session.pinBoundariesAlignGroups()); // 핀 경계가 subtree 중간을 안 자름(I3)
@@ -28633,14 +26524,14 @@ test "SR5(c): promote 마커 숨김 — leaf 멤버=여기서 최상위로 분�
 
     // leaf 멤버: remove + promote **둘 다**(full 메뉴, promote=ctx_menu_group_promote).
     session.context_menu_target = .{ .workspace = leaf };
-    const leaf_items = session.buildContextMenuItems();
+    const leaf_items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(ctx_menu_count, leaf_items.len);
     try std.testing.expectEqualStrings("그룹에서 빼기", leaf_items[ctx_menu_group_remove]);
     try std.testing.expectEqualStrings("여기서 최상위로 분리", leaf_items[ctx_menu_group_promote]);
 
     // 마커 카드: remove만(promote 숨김 — promoteTabToTopLevelInPlace no-op이라 죽은 항목 방지). len=ctx_menu_group_promote.
     session.context_menu_target = .{ .workspace = marker };
-    const marker_items = session.buildContextMenuItems();
+    const marker_items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(ctx_menu_group_promote, marker_items.len);
     try std.testing.expectEqualStrings("그룹에서 빼기", marker_items[ctx_menu_group_remove]);
     // 마커에도 promote를 강제 dispatch하면 no-op(방어 — 숨겨도 인덱스 도달 불가지만 액션 자체가 안전).
@@ -29271,7 +27162,7 @@ test "code-review #1: 그룹 헤더 우클릭(context_menu_target=.group) 중 �
     try std.testing.expect(session.context_menu_target == null); // .group 대상이 클리어돼 dangling 없음
 
     // 메뉴 accept 경로가 stale 대상을 안 건드리는지(null이면 no-op) 확인 — 여기서 UAF면 leak-check가 잡는다.
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(session.context_menu_target == null);
 }
 
@@ -29300,14 +27191,14 @@ test "rename caret 폭은 방출자와 같은 cluster 단위다(NFD 이름에서
     // 방출자(appendEllipsizedTitle)가 쓰는 폭 = 음절당 2칸.
     const emitted_cols = chrome.text_layout.displayCols(nfd, null);
     try std.testing.expectEqual(@as(usize, 4), emitted_cols); // 한(2) + 글(2)
-    try std.testing.expectEqual(@as(u32, @intCast(emitted_cols)), session.renameQueryCols()); // ★ 같은 단위
+    try std.testing.expectEqual(@as(u32, @intCast(emitted_cols)), settings_ops.renameQueryCols(session)); // ★ 같은 단위
     // 완성형과도 같아야 한다(같은 글자니까) — NFD/NFC가 caret 좌표에서 동치.
     try std.testing.expectEqual(
         chrome.text_layout.displayCols("한글", null),
-        @as(usize, session.renameQueryCols()),
+        @as(usize, settings_ops.renameQueryCols(session)),
     );
     // ★ 옛 코드(코드포인트 단위)는 **8칸**을 냈다 — 자모 6개 각각 max(1,cellWidth)로 (2+1+1)+(2+1+1). 실측 확인.
-    try std.testing.expect(chrome.components.overlay_input.displayCols(nfd) != session.renameQueryCols());
+    try std.testing.expect(chrome.components.overlay_input.displayCols(nfd) != settings_ops.renameQueryCols(session));
 }
 
 test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영(헤더 삼각/이름과 정렬)" {
@@ -29326,7 +27217,7 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
     _ = try tab_ops.newTab(session); // [t0, t1]
     const marker = session.tabs.items[0];
     tab_ops.createGroupAbsorbForTab(session, marker); // t0 그룹 시작(depth1, 기본 이름 "그룹 1")
-    session.startRename(.{ .group = marker }); // 그룹 이름 편집 시작(query=group_start 시드)
+    settings_ops.startRename(session, .{ .group = marker }); // 그룹 이름 편집 시작(query=group_start 시드)
     tab_ops.recomputeVisibleTabs(session);
 
     const cw = session.cell_width_px;
@@ -29334,8 +27225,8 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
     const sp = session.buildChromeTokens().space;
     const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
     try std.testing.expect(indent_cols > 0); // rich = accent_bar+card_gap>0 — 0이면 이 회귀를 못 잡으므로 전제 확인
-    const qcols: u32 = session.renameQueryCols();
-    const rect = session.renameCaretRect() orelse return error.NoCaret;
+    const qcols: u32 = settings_ops.renameQueryCols(session);
+    const rect = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     // depth1(hindent=0): caret_col = indent_cols + 2(삼각+공백) + qcols. 옛 코드는 indent_cols가 빠져(=2+qcols)
     // 캐럿·IME 후보창이 indent_cols칸 왼쪽으로 어긋났다(code-review #5). buildSidebarTitleDrawList의 전역 shift와 정합.
     try std.testing.expectEqual(@as(i32, @intCast((indent_cols + 2 + qcols) * cw)), rect.x);
@@ -31102,13 +28993,13 @@ fn expectCardTopLevelPinned(session: *AppSession, tab: *Tab) !void {
 fn rightClickPin(session: *AppSession, tab: *Tab) void {
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_pin;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
 }
 
 /// 워크스페이스 카드 우클릭 메뉴의 pin 라벨(cardPinRole 분기 결과) — context_menu_target 세팅 후 buildContextMenuItems 공유.
 fn pinMenuLabel(session: *AppSession, tab: *Tab) []const u8 {
     session.context_menu_target = .{ .workspace = tab };
-    return session.buildContextMenuItems()[ctx_menu_pin];
+    return settings_ops.buildContextMenuItems(session)[ctx_menu_pin];
 }
 
 test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 배치 모두 그룹 밖 최상위 유지(cardPinRole=.individual·projectRows depth0·enclosing null·📌)" {
@@ -36074,7 +33965,7 @@ test "follow-system 토글 ON 즉시 적용·OFF 사용자 테마 복귀 + 같�
 
     // 토글 OFF: 덮기 전 사용자(dracula) 테마로 라이브 복귀해야 한다(버그: 예전엔 시스템색 잔류).
     session.loaded_config.config.theme_follow_system = false;
-    session.disableFollowSystemTheme();
+    settings_ops.disableFollowSystemTheme(session);
     try std.testing.expectEqualStrings(user_bg, session.loaded_config.config.theme.background); // dracula 복귀
     try std.testing.expect(session.theme_pre_follow == null); // 스냅샷 소비됨
     try std.testing.expect(session.follow_applied_dark == null); // 외관 게이트 리셋
@@ -36113,7 +34004,7 @@ test "follow-system 중 preset-dark 변경은 라이브 재적용 + user_custom 
 
     // 끄면 색뿐 아니라 user_custom 잠금 상태(true)도 복원돼야 한다(버그: false 잔류로 잠김).
     session.loaded_config.config.theme_follow_system = false;
-    session.disableFollowSystemTheme();
+    settings_ops.disableFollowSystemTheme(session);
     try std.testing.expectEqual(true, session.theme_user_custom); // 잠금 해제 복원
 }
 
@@ -36215,7 +34106,7 @@ test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret
     // 넘침: 긴 이름(20칸) → head(indent+20) > 우경계 → x는 clamp(64)로 잘려 사이드바 안에 머문다.
     for (0..20) |_| try session.rename_input.appendChar(allocator, 'a');
     {
-        const r = session.renameCaretRect() orelse return error.NoCaret;
+        const r = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
         try std.testing.expectEqual(clamp_x, r.x);
     }
 
@@ -36227,7 +34118,7 @@ test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret
         const indent_cols = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
         const head_x: i32 = @intCast((indent_cols + 2) * cw);
         try std.testing.expect(head_x < clamp_x); // 이 셋업에선 head가 우경계보다 왼쪽(=비넘침 케이스 성립)
-        const r = session.renameCaretRect() orelse return error.NoCaret;
+        const r = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
         try std.testing.expectEqual(head_x, r.x);
     }
 }
@@ -36251,7 +34142,7 @@ test "renameCaretRect(.group): 헤더 이름이 넘치면 caret x를 사이드�
 
     // 넘침: 긴 헤더 이름 → x clamp(우경계).
     for (0..20) |_| try session.rename_input.appendChar(allocator, 'a');
-    const r = session.renameCaretRect() orelse return error.NoCaret;
+    const r = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     try std.testing.expectEqual(clamp_x, r.x);
 }
 
@@ -36939,11 +34830,11 @@ test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 �
 test "configCursorShape: config↔terminal CursorShape 멤버 순서가 달라도 값이 보존된다" {
     var session: AppSession = undefined;
     session.appearance.cursor.shape = .block;
-    try std.testing.expectEqual(terminal.CursorShape.block, session.configCursorShape());
+    try std.testing.expectEqual(terminal.CursorShape.block, settings_ops.configCursorShape(&session));
     session.appearance.cursor.shape = .bar;
-    try std.testing.expectEqual(terminal.CursorShape.bar, session.configCursorShape());
+    try std.testing.expectEqual(terminal.CursorShape.bar, settings_ops.configCursorShape(&session));
     session.appearance.cursor.shape = .underline;
-    try std.testing.expectEqual(terminal.CursorShape.underline, session.configCursorShape());
+    try std.testing.expectEqual(terminal.CursorShape.underline, settings_ops.configCursorShape(&session));
     // 숫자 재해석이었다면 bar(config 1)가 underline(terminal 1)로 갔을 것 — 그 경로를 명시적으로 배제한다.
     try std.testing.expect(@intFromEnum(config_mod.theme.CursorShape.bar) != @intFromEnum(terminal.CursorShape.bar));
 }
@@ -37322,7 +35213,7 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라) + 바 프리셋(같은 6색) + 그룹(묶기·분리·풀기·색).
     // "그룹에서 빼기"는 **그룹 소속 카드에만** 뜨므로 미그룹 활성 카드엔 안 나온다(아래 그룹 생성 후 등장 확인).
     session.context_menu_target = .{ .workspace = tab };
-    const items = session.buildContextMenuItems();
+    const items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(@as(usize, 2 + tab_color_presets.len + tab_accent_labels.len + 3 + tab_group_color_labels.len), items.len);
     try std.testing.expectEqual(ctx_menu_group_remove, items.len); // 최상위 카드 → 빼기 미포함(버퍼 최대 ctx_menu_count보다 1 적다)
     try std.testing.expectEqualStrings("Rename", items[0]);
@@ -37338,68 +35229,68 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     // 그룹으로 묶기(selected=create) → 활성 워크스페이스에 group_start 마커. 풀기(selected=ungroup) → 제거.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_create;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(tab.group_start != null);
     // 그룹 소속이 되면 메뉴 맨 끝에 "그룹에서 빼기"가 뜬다. **tab은 이제 마커 카드**(createGroup으로 group_start!=null)라
     // "여기서 최상위로 분리"(promote)는 숨긴다(§14.8 SR5 결정 (a) — 마커 promote no-op). 그래서 len=ctx_menu_group_promote
     // (=ctx_menu_count-1, remove까지만)이고 remove=ctx_menu_group_remove에 그대로 정렬한다(마커에선 promote 슬롯 비어 한 칸 짧다).
     session.context_menu_target = .{ .workspace = tab };
-    const grouped_items = session.buildContextMenuItems();
+    const grouped_items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(ctx_menu_group_promote, grouped_items.len); // 마커 → remove만(promote 숨김)
     try std.testing.expectEqualStrings("그룹에서 빼기", grouped_items[ctx_menu_group_remove]);
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_ungroup;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(tab.group_start == null);
 
     // accept selected=1 → pin 토글(true). acceptContextMenu가 target을 null화하므로 매번 재설정.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(tab.pinned);
 
     // 다시 열면 "고정 해제"가 뜬다(토글 상태 반영).
     session.context_menu_target = .{ .workspace = tab };
-    try std.testing.expectEqualStrings("고정 해제", session.buildContextMenuItems()[1]);
+    try std.testing.expectEqualStrings("고정 해제", settings_ops.buildContextMenuItems(session)[1]);
 
     // accept selected=3(배경: 앰버, idx 0=Rename·1=Pin·2=없음·3=앰버) → background_color = 0xDDA15E.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_bg_first + 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0xDDA15E), tab.background_color);
 
     // 배경: 없음(selected=2) → 0으로 해제.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_bg_first;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0), tab.background_color);
 
     // 바: 파랑(accent_first + 2, 프리셋 0=없음·1=앰버·2=파랑) → accent_color = 0x4A7BC4(배경과 직교, 별도 필드).
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_accent_first + 2;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0x4A7BC4), tab.accent_color);
     try std.testing.expectEqual(@as(u32, 0), tab.background_color); // 배경은 안 건드림(직교 확인)
 
     // 바: 없음(accent_first) → 0으로 해제.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_accent_first;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0), tab.accent_color);
 
     // 그룹 색(SG5-2): 그룹에 안 속하면 no-op(색 얹을 마커 없음). tab은 앞서 ungroup되어 group_start==null.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_color_first + 2; // 파랑
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0), tab.group_color); // 그룹 아님 → no-op
 
     // 그룹으로 묶은 뒤 그룹 색: 파랑 → 마커 탭(=자기)에 group_color. 개별 background/accent는 안 건드림(층 분리 — 직교).
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_create;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_color_first + 2; // 파랑(프리셋 0=없음·1=앰버·2=파랑)
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0x4A7BC4), tab.group_color);
     try std.testing.expectEqual(@as(u32, 0), tab.background_color); // 그룹 색은 카드 배경 tint와 직교(다른 층)
     try std.testing.expectEqual(@as(u32, 0), tab.accent_color); // 그룹 색은 개별 accent 막대와도 별도 저장
@@ -37407,16 +35298,16 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     // 그룹 색: 없음(group_color_first) → 0으로 해제.
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_color_first;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0), tab.group_color);
     // 정리: 다음 pane/term 검증 전에 그룹 마커 해제(단일 탭 그룹).
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_ungroup;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
 
     // pane/term 대상은 Rename만(색·고정 없음).
     session.context_menu_target = .{ .pane = pane_ops.activePane(session) };
-    try std.testing.expectEqual(@as(usize, 1), session.buildContextMenuItems().len);
+    try std.testing.expectEqual(@as(usize, 1), settings_ops.buildContextMenuItems(session).len);
     session.context_menu_target = null;
 }
 
@@ -37444,7 +35335,7 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
 
     // 헤더 우클릭 대상 = 마커 탭(.group). 메뉴: Rename + 그룹 고정 + 그룹 풀기 + 그룹 색 6프리셋 = 3 + tab_group_color_labels.len.
     session.context_menu_target = .{ .group = marker };
-    const items = session.buildContextMenuItems();
+    const items = settings_ops.buildContextMenuItems(session);
     try std.testing.expectEqual(@as(usize, 3 + tab_group_color_labels.len), items.len);
     try std.testing.expectEqualStrings("Rename", items[0]); // 그룹 이름 편집(startRename(.group))
     try std.testing.expectEqualStrings("그룹 고정", items[ctx_group_menu_pin]); // GP3 §12.10 — 미고정 그룹 → "그룹 고정"
@@ -37455,7 +35346,7 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
     // accept 그룹 색: 파랑 → 마커 탭(t1)에 group_color(카드 우클릭 색 dispatch와 같은 setGroupColorForTab 경로).
     session.context_menu_target = .{ .group = marker };
     session.chrome_host.context_menu.selected = ctx_group_menu_color_first + 2; // 파랑(0=없음·1=앰버·2=파랑)
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0x4A7BC4), marker.group_color);
     try std.testing.expectEqual(@as(u32, 0), marker.background_color); // 그룹 색은 개별 카드 배경/막대와 직교(층 분리)
     try std.testing.expectEqual(@as(u32, 0), marker.accent_color);
@@ -37463,22 +35354,22 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
     // accept 그룹 색: 없음 → 0으로 해제(카드 메뉴와 동일한 폴백).
     session.context_menu_target = .{ .group = marker };
     session.chrome_host.context_menu.selected = ctx_group_menu_color_first; // 없음
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(@as(u32, 0), marker.group_color);
 
     // accept Rename(sel=0) → 그룹 이름 인라인 편집 시작(마커 group_start 시드). 그룹은 유지.
     session.context_menu_target = .{ .group = marker };
     session.chrome_host.context_menu.selected = 0;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(session.rename != null);
     try std.testing.expect(std.meta.activeTag(session.rename.?) == .group);
-    session.closeRename();
+    settings_ops.closeRename(session);
     try std.testing.expect(marker.group_start != null); // Rename은 그룹을 풀지 않는다(ungroup과 분리)
 
     // accept 그룹 풀기(ungroup) → 마커의 group_start 제거(그룹 해제). 헤더 스코프 액션이 마커에 그대로 적용됨.
     session.context_menu_target = .{ .group = marker };
     session.chrome_host.context_menu.selected = ctx_group_menu_ungroup;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(marker.group_start == null);
 }
 
@@ -37552,25 +35443,25 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
     defer session.deinit();
 
     // showTerminalContextMenu가 복사/붙여넣기 2항목을 박고 terminal_context_menu 플래그를 세운다.
-    session.showTerminalContextMenu(200, 100);
+    settings_ops.showTerminalContextMenu(session, 200, 100);
     try std.testing.expect(session.terminal_context_menu);
-    const items = session.contextMenuItems();
+    const items = settings_ops.contextMenuItems(session);
     try std.testing.expectEqual(@as(usize, 2), items.len);
     try std.testing.expectEqualStrings("복사", items[0]);
     try std.testing.expectEqualStrings("붙여넣기", items[1]);
 
     // 항목 0(복사) accept → pending=.copy, 메뉴 닫힘(terminal_context_menu 비움).
     session.chrome_host.context_menu.selected = 0;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expect(!session.terminal_context_menu);
     // takeClipboardAction이 1회성 — 처음엔 .copy, 다음엔 .none.
     try std.testing.expectEqual(ClipboardAction.copy, session.takeClipboardAction());
     try std.testing.expectEqual(ClipboardAction.none, session.takeClipboardAction());
 
     // 항목 1(붙여넣기) accept → pending=.paste.
-    session.showTerminalContextMenu(200, 100);
+    settings_ops.showTerminalContextMenu(session, 200, 100);
     session.chrome_host.context_menu.selected = 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(ClipboardAction.paste, session.takeClipboardAction());
 
     // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
@@ -38078,27 +35969,27 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
 
     const tab = tab_ops.activeTab(session);
     // 1) 워크스페이스 rename: 시작 → 'h','i' → Enter 확정 → custom_name == "hi", 편집기 닫힘.
-    session.startRename(.{ .workspace = tab });
+    settings_ops.startRename(session, .{ .workspace = tab });
     try std.testing.expect(session.rename != null);
-    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'h' } });
-    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'i' } });
-    session.handleRenameKey(.{ .key = .{ .key = .enter } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'h' } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'i' } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .enter } });
     try std.testing.expect(session.rename == null);
     try std.testing.expectEqualStrings("hi", tab.custom_name.?);
 
     // 2) 취소: 시작 시 현재 이름으로 시드 → 'x' 추가 → Esc → custom_name 그대로("hi").
-    session.startRename(.{ .workspace = tab });
+    settings_ops.startRename(session, .{ .workspace = tab });
     try std.testing.expectEqualStrings("hi", session.rename_input.query.items);
-    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'x' } });
-    session.handleRenameKey(.{ .key = .{ .key = .escape } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'x' } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .escape } });
     try std.testing.expect(session.rename == null);
     try std.testing.expectEqualStrings("hi", tab.custom_name.?);
 
     // 3) 빈 텍스트 확정 → custom_name 지워짐(null = 이름 없음).
-    session.startRename(.{ .workspace = tab });
-    session.handleRenameKey(.{ .key = .{ .key = .backspace } });
-    session.handleRenameKey(.{ .key = .{ .key = .backspace } });
-    session.handleRenameKey(.{ .key = .{ .key = .enter } });
+    settings_ops.startRename(session, .{ .workspace = tab });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .backspace } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .backspace } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .enter } });
     try std.testing.expect(tab.custom_name == null);
 
     // 4) Term rename 중 그 Term을 닫으면 rename이 자동 취소된다(destroyTerm 무효화 — stale 포인터/UAF 방지).
@@ -38106,7 +35997,7 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
     pane_ops.newTermInActivePane(session) catch {};
     session.focusTerm(0); // 첫 Term을 활성으로
     const term0 = pane_ops.activePane(session).activeTerm();
-    session.startRename(.{ .term = term0 });
+    settings_ops.startRename(session, .{ .term = term0 });
     try std.testing.expect(session.rename != null);
     pane_ops.closeActiveTermOrPane(session); // 활성(term0) 닫힘 → destroyTerm(term0) → rename null
     try std.testing.expect(session.rename == null);
@@ -38138,7 +36029,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     const term0 = pane_ops.activePane(session).activeTerm();
     session.mouse(4, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(session.renamingTerm(term0));
-    session.closeRename();
+    settings_ops.closeRename(session);
 
     // ② 사이드바 슬롯 더블클릭 → 그 워크스페이스 rename.
     const tab = tab_ops.activeTab(session);
@@ -38146,7 +36037,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     const sy = sidebar_ops.testSidebarRowCenterY(session, 0); // 슬롯 0 중앙(상단 헤더 아래)
     session.mouse(4, sx, sy, 0, 0);
     try std.testing.expect(session.renamingWorkspace(tab));
-    session.closeRename();
+    settings_ops.closeRename(session);
 }
 
 // 우클릭 컨텍스트 메뉴(PR5): Term 탭 우클릭 → 메뉴 열림 + 대상 세팅, 항목(Rename) 클릭 → 메뉴 닫힘 + 그 대상
@@ -38184,7 +36075,7 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     session.mouse(1, mx, my, 0, 0);
     try std.testing.expect(!session.chrome_host.context_menu.open);
     try std.testing.expect(session.renamingTerm(term0));
-    session.closeRename();
+    settings_ops.closeRename(session);
 
     // ③ 터미널 본문(바 아래) 우클릭 → 대상 없음 → 메뉴 안 열림.
     session.mouse(1, @floatFromInt(pb.full.x + 4), @floatFromInt(pb.full.y + pb.full.h + 5), 2, 0);
@@ -38209,16 +36100,16 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const term0 = pane_ops.activePane(session).activeTerm();
-    session.startRename(.{ .term = term0 });
-    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'h' } });
-    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'i' } });
+    settings_ops.startRename(session, .{ .term = term0 });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'h' } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'i' } });
 
     // 깜빡임: blink_visible면 '|', 아니면 공백으로 끝난다 — 두 표시폭이 같아야(폭 흔들림 없음).
     session.blink_visible = true;
-    const on = try session.renameEditText(allocator);
+    const on = try settings_ops.renameEditText(session, allocator);
     defer allocator.free(on);
     session.blink_visible = false;
-    const off = try session.renameEditText(allocator);
+    const off = try settings_ops.renameEditText(session, allocator);
     defer allocator.free(off);
     try std.testing.expect(std.mem.endsWith(u8, on, "hi|"));
     try std.testing.expect(std.mem.endsWith(u8, off, "hi ")); // 공백 caret
@@ -38231,12 +36122,12 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
     const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
     const term_body = pane_ops.paneTermRect(session, lr.items[0].rect);
-    const cr = session.renameCaretRect() orelse return error.NoCaret;
+    const cr = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     try std.testing.expectEqual(@as(u32, session.cell_width_px), cr.w);
     try std.testing.expect(@as(u32, @intCast(cr.y)) >= bar.y and @as(u32, @intCast(cr.y)) < term_body.y); // 탭 바 안(본문 위)
     const ime = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, @floatFromInt(cr.y)), ime.y); // imeCursorRect가 rename caret을 씀
-    session.closeRename();
+    settings_ops.closeRename(session);
 }
 
 // F1 회귀 가드(코드리뷰 high CONFIRMED): 워크스페이스 리네임 중 상태줄(running 파형·idle ✓)이 붙어 카드가 2줄이 되면
@@ -38275,10 +36166,10 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     // 1) non-agent 워크스페이스(scroll 0): 카드 1줄(이름만) → caret = header + 슬롯 세로 중앙(1줄 블록).
     term.agent_kind = .none;
     sidebar_ops.rebuildSidebar(session) catch {}; // Row.lines(줄 수)는 투영 때 굳는다 — 상태를 바꿨으면 다시 투영해야 정합
-    session.startRename(.{ .workspace = tab });
-    const cr1 = session.renameCaretRect() orelse return error.NoCaret;
+    settings_ops.startRename(session, .{ .workspace = tab });
+    const cr1 = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     try std.testing.expectEqual(@as(i32, @intCast(header + pad_v)), cr1.y);
-    session.closeRename();
+    settings_ops.closeRename(session);
 
     // 2) 에이전트가 있으면 **rename 중에도 상태줄이 그려지므로**(편집 화면에서 파형을 보여달라는 사용자 요청)
     // 카드는 2줄 블록이고 이름줄은 그만큼 위로 올라간다. caret은 렌더와 **같은 줄 수**를 봐야 IME 후보창이
@@ -38286,13 +36177,13 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     term.agent_kind = .claude;
     term.agent_state = .idle;
     sidebar_ops.rebuildSidebar(session) catch {};
-    session.startRename(.{ .workspace = tab });
-    const cr2 = session.renameCaretRect() orelse return error.NoCaret;
+    settings_ops.startRename(session, .{ .workspace = tab });
+    const cr2 = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     const m2 = sidebar_ops.sidebarMetrics(session);
     const row_h2 = chrome.components.sidebar.rowHeight(session.sidebar_rows.items[0], m2);
     const off2 = (row_h2 -| sidebar_ops.sidebarBlockHeight(2, ch)) / 2;
     try std.testing.expectEqual(@as(i32, @intCast(header + m2.content_pad_v + off2)), cr2.y);
-    session.closeRename();
+    settings_ops.closeRename(session);
     try std.testing.expect(cr2.y < cr1.y); // 상태줄이 붙으면 이름줄(=caret)이 위로 올라간다
 
     // 3) scroll offset 반영: 콘텐츠가 offset만큼 위로 밀리면 caret도 따라 올라간다(slotTop이 scroll을 뺌). idx 0,
@@ -38301,10 +36192,10 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     sidebar_ops.rebuildSidebar(session) catch {};
     const offset: u32 = @min(ch / 2, pad_v); // pad_v 이하라 헤더 clamp(@max header)에 안 걸린다
     session.sidebar_scroll_offset_px = offset;
-    session.startRename(.{ .workspace = tab });
-    const cr3 = session.renameCaretRect() orelse return error.NoCaret;
+    settings_ops.startRename(session, .{ .workspace = tab });
+    const cr3 = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     try std.testing.expectEqual(@as(i32, @intCast(header + pad_v - offset)), cr3.y);
-    session.closeRename();
+    settings_ops.closeRename(session);
     session.sidebar_scroll_offset_px = 0; // 복원
 }
 
@@ -38328,8 +36219,8 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     const term0 = pane_ops.activePane(session).activeTerm();
 
     // (#7) rename 중 setFocused(false) → 확정(custom_name 기록, 편집기 닫힘).
-    session.startRename(.{ .term = term0 });
-    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'z' } });
+    settings_ops.startRename(session, .{ .term = term0 });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'z' } });
     session.setFocused(false);
     try std.testing.expect(session.rename == null);
     try std.testing.expectEqualStrings("z", term0.surface.custom_name.?);
@@ -38339,8 +36230,8 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     const slot_y = sidebar_ops.testSidebarRowCenterY(session, 0); // 슬롯 0 중앙(상단 헤더 아래)
     const rename_close_range = sidebar_ops.sidebarColumns(session).?.closeXRange(session.cell_width_px);
     const close_x = rename_close_range.start + (rename_close_range.end - rename_close_range.start) / 2;
-    try std.testing.expect(session.renameTargetAt(close_x, slot_y) == null);
-    try std.testing.expect(session.renameTargetAt(@floatFromInt(session.cell_width_px), slot_y) != null); // 좌측=워크스페이스
+    try std.testing.expect(settings_ops.renameTargetAt(session, close_x, slot_y) == null);
+    try std.testing.expect(settings_ops.renameTargetAt(session, @floatFromInt(session.cell_width_px), slot_y) != null); // 좌측=워크스페이스
 
     // (#2) mouse_tracking 켠 상태에서 터미널 본문 우클릭(button==2) → 메뉴 안 열림 + reporting 경로 도달
     //      (drag_autoscroll/selecting 리셋이 그 증거). 가드가 본문을 consume하면(회귀) 리셋 안 됨.
@@ -39797,7 +37688,7 @@ test "reapplyLoadedConfig: GUI 토글이 런타임 줌(⌘+/−)을 보존한다
 
     // 폰트와 무관한 설정 토글(예: cursor.blink) → loaded_config in-place flip 후 reapplyLoadedConfig.
     _ = config_mod.schema.setBool(&session.loaded_config.config, "cursor.blink", false);
-    session.reapplyLoadedConfig();
+    settings_ops.reapplyLoadedConfig(session);
     try std.testing.expectEqual(factory.font.size + 6, session.appearance.font.size); // 줌 보존(버그였다면 factory로 리셋)
     try std.testing.expectEqual(factory.font.size, session.base_font_size); // ⌘0 기준은 줌 제외 config 값
     try std.testing.expectEqual(zoomed_cw, session.cell_width_px); // cell 메트릭도 확대 그대로
@@ -39812,7 +37703,7 @@ test "reapplyLoadedConfig: GUI 토글이 런타임 줌(⌘+/−)을 보존한다
     // base=appearance=새 config 값이 된다(안 그러면 슬라이더는 14를 가리키는데 렌더는 20이 되는 불일치).
     session.setFontSize(factory.font.size + 6); // 다시 +6 확대(appearance=base+6, base=base)
     session.loaded_config.config.font.size = factory.font.size + 2; // 슬라이더로 config 폰트 크기 변경
-    session.reapplyLoadedConfig();
+    settings_ops.reapplyLoadedConfig(session);
     try std.testing.expectEqual(factory.font.size + 2, session.base_font_size); // ⌘0 기준 = 새 config 값
     try std.testing.expectEqual(factory.font.size + 2, session.appearance.font.size); // 줌 안 얹힘 — 슬라이더 값 그대로
 }
@@ -39858,7 +37749,7 @@ test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 �
     // keybind 초기화(#2-b) 검증용: unbind 1개를 arena에 심어 reset이 비우는지 본다(빈 슬라이스에서 시작하면 약한 검증이라).
     session.loaded_config.unbinds = try session.loaded_config.arena.allocator().dupe(config_mod.KeyChord, &.{try config_mod.KeyChord.parse("Cmd+J")});
 
-    session.resetAllSettings();
+    settings_ops.resetAllSettings(session);
 
     // 런타임·loaded_config가 공장 기본값으로(resetAllSettings: loaded_config=Config{} + reapplyLoadedConfig).
     try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
@@ -39898,7 +37789,7 @@ test "applyAppearance: 새 appearance로 appearance·base_font_size·메트릭�
     bigger.font = session.appearance.font; // family 슬라이스는 살아있는 loaded_config 빌림(undefined family 회피)
     bigger.font.size = session.appearance.font.size + 8;
 
-    session.applyAppearance(bigger);
+    settings_ops.applyAppearance(session, bigger);
     try std.testing.expectEqual(bigger.font.size, session.appearance.font.size);
     try std.testing.expectEqual(bigger.font.size, session.base_font_size); // base_font_size도 새 크기로(⌘0 기준)
     try std.testing.expect(session.cell_width_px > cw0); // 메트릭 재계산(큰 폰트 → 큰 cell)
@@ -40525,16 +38416,16 @@ test "file tree header and populated blank left click are inert while right clic
 
     session.mouse(1, header_x, header_y, 2, 0);
     try std.testing.expect(session.file_tree_background_menu);
-    try std.testing.expectEqual(@as(usize, 3), session.contextMenuItems().len);
+    try std.testing.expectEqual(@as(usize, 3), settings_ops.contextMenuItems(session).len);
     session.chrome_host.context_menu.selected = 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(&.{});
 
     session.mouse(1, header_x, blank_y, 2, 0);
     try std.testing.expect(session.file_tree_background_menu);
-    try std.testing.expectEqualStrings("작업공간에 폴더 추가…", session.contextMenuItems()[2]);
-    session.closeContextMenu();
+    try std.testing.expectEqualStrings("작업공간에 폴더 추가…", settings_ops.contextMenuItems(session)[2]);
+    settings_ops.closeContextMenu(session);
 }
 
 test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고 발행이 그 값을 따른다" {
@@ -41304,10 +39195,10 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
     const content = dock_ops.dockGeometry(session).tree_content;
     session.mouse(1, @floatFromInt(content.x + 2), @floatFromInt(content.y + 2), 2, 0);
     try std.testing.expect(session.file_tree_context_target != null);
-    try std.testing.expectEqual(@as(usize, 6), session.contextMenuItems().len);
+    try std.testing.expectEqual(@as(usize, 6), settings_ops.contextMenuItems(session).len);
     try session.file_tree.replaceExplicitRoots(&.{"/after"});
     session.chrome_host.context_menu.selected = 5;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqualStrings("/after", session.file_tree.rootAt(0).?);
     try std.testing.expect(session.chrome_host.notice.open);
     session.chrome_host.notice.dismiss();
@@ -42820,7 +40711,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     session.dispatchAppAction(.new_file);
     try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
     try session.rename_input.query.appendSlice(allocator, ".new.md");
-    session.commitRename();
+    settings_ops.commitRename(session);
     try std.testing.expect(session.rename == null);
     var attempts: usize = 0;
     while (file_panel_ops.fileEntryForPath(session, created) == null and attempts < 500) : (attempts += 1) {
@@ -42845,7 +40736,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
     session.rename_input.clear();
     try session.rename_input.query.appendSlice(allocator, "renamed.md");
-    session.commitRename();
+    settings_ops.commitRename(session);
     // Clean source-edit is not trusted from native state alone. The worker remains unsubmitted until the
     // request-scoped CM6 lock reports its latest revision as clean.
     try std.testing.expect(session.file_tree_mutation_waiting_request != null);
@@ -43660,7 +41551,7 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
 
     // 회귀 가드(#1151 리뷰): held 창에서 **rename 중** Enter는 rename 확정으로 가야지 respawn을 뺏으면 안 된다
     // (held-Enter 개입이 rename 핸들러 뒤에 있어야 함). rename을 시작하고 Enter → rename 확정, 새 Term 안 생김.
-    session.startRename(.{ .term = pane_ops.activePane(session).activeTerm() });
+    settings_ops.startRename(session, .{ .term = pane_ops.activePane(session).activeTerm() });
     const terms_before_rename = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.rename == null); // rename이 Enter를 소비·확정(respawn이 안 뺏음)
@@ -46492,8 +44383,8 @@ test "U-tab2: pane Term tab title has no number prefix (rename caret sits right 
     _ = try session.tick();
 
     const term = pane_ops.activePane(session).activeTerm();
-    session.startRename(.{ .term = term }); // custom_name 없는 새 Term → 편집기 비어 qcols=0
-    const caret = session.renameCaretRect() orelse return error.TestUnexpectedResult;
+    settings_ops.startRename(session, .{ .term = term }); // custom_name 없는 새 Term → 편집기 비어 qcols=0
+    const caret = settings_ops.renameCaretRect(session) orelse return error.TestUnexpectedResult;
     const loc = session.termBarLocation(term) orelse return error.TestUnexpectedResult;
     // 단일 Term이라 tab 0 = 탭 영역 좌단(seg.start_col=0). 번호 prefix 제거 → caret_col=1(좌패딩만).
     const expected_x: i32 = @intCast(loc.pb.tabs.x + session.cell_width_px);
@@ -47450,12 +45341,12 @@ test "settingsRowLabel: cross일 때만 섹션명 접두(<섹션> › <라벨>)"
     const arena = arena_inst.allocator();
 
     // 비-cross(빈 쿼리=현재 섹션만): 라벨 그대로.
-    try std.testing.expectEqualStrings("폰트 크기", try AppSession.settingsRowLabel(arena, false, .font, "폰트 크기"));
+    try std.testing.expectEqualStrings("폰트 크기", try settings_ops.settingsRowLabel(arena, false, .font, "폰트 크기"));
 
     // cross: 섹션명 + " › " + 라벨.
-    const got = try AppSession.settingsRowLabel(arena, true, .font, "폰트 크기");
+    const got = try settings_ops.settingsRowLabel(arena, true, .font, "폰트 크기");
     try std.testing.expect(std.mem.endsWith(u8, got, " › 폰트 크기"));
-    const prefix = AppSession.settingsSectionLabel(.font);
+    const prefix = settings_ops.settingsSectionLabel(.font);
     try std.testing.expect(std.mem.startsWith(u8, got, prefix));
     try std.testing.expect(got.len > "폰트 크기".len); // 섹션명이 실제로 앞에 붙음
 }
@@ -47492,7 +45383,7 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
     try std.testing.expectEqualStrings("text:bye", try AppSession.macroRhsString(ar, session.loaded_config.terminal_bindings[0].input));
 
     // 삭제: 라이브 binding 0개, 추가 예약은 상쇄(cross-cancel)되고 삭제 예약 1개.
-    session.removeTerminalMacro("Ctrl+G");
+    settings_ops.removeTerminalMacro(session, "Ctrl+G");
     try std.testing.expectEqual(@as(usize, 0), session.loaded_config.terminal_bindings.len);
     try std.testing.expectEqual(@as(usize, 0), session.config_terminal_macros.items.len); // 추가 예약 상쇄
     try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macro_removes.items.len);
@@ -47528,7 +45419,7 @@ test "config pending: takeConfigDirty/clearConfigDirty가 모든 카테고리를
     defer session.deinit();
     const A = session.allocator;
 
-    try std.testing.expect(!session.takeConfigDirty()); // 시작은 깨끗
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 시작은 깨끗
 
     // 모든 pending 카테고리에 한 건씩 — 하나라도 집계/clear에서 빠지면 아래 단언이 깨진다.
     try session.config_dirty_keys.append(A, "font.size");
@@ -47543,10 +45434,10 @@ test "config pending: takeConfigDirty/clearConfigDirty가 모든 카테고리를
     try session.config_global_removed.append(A, "toggle_window");
     session.theme_preset_persist = "dracula";
 
-    try std.testing.expect(session.takeConfigDirty()); // 무엇이든 차 있으면 dirty
+    try std.testing.expect(settings_ops.takeConfigDirty(session)); // 무엇이든 차 있으면 dirty
 
     // clearConfigDirty가 **전부** 비워야 — 빠진 카테고리가 있으면 takeConfigDirty가 여전히 true(또는 그 리스트가 stale로 남아 다음 저장에 샘).
-    session.clearConfigDirty();
+    settings_ops.clearConfigDirty(session);
     try std.testing.expectEqual(@as(usize, 0), session.config_dirty_keys.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.config_keybind_rebinds.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.config_removed_keys.items.len);
@@ -47558,7 +45449,7 @@ test "config pending: takeConfigDirty/clearConfigDirty가 모든 카테고리를
     try std.testing.expectEqual(@as(usize, 0), session.config_global_rebinds.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.config_global_removed.items.len);
     try std.testing.expect(session.theme_preset_persist == null);
-    try std.testing.expect(!session.takeConfigDirty()); // clear 후 깨끗
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // clear 후 깨끗
 }
 
 // 회귀: **기본값 리셋 후 마우스 입력이 영구히 막히지 않는다**. 사용자 보고 — "기본값으로 리셋 후에 터미널 버튼이 다
@@ -50460,7 +48351,7 @@ test "③a-2: applying config sidebar.width drives the runtime sidebar width (co
     // 메모리 config의 폭을 동적 하한 위·max 아래의 값으로 바꾸고 재적용 → 런타임 폭이 그대로 따라온다(clamp 무영향 구간).
     const want: u32 = std.math.clamp(@as(u32, 300), sidebar_ops.sidebarMinPt(session), sidebar_max_pt);
     session.loaded_config.config.sidebar.width_pt = want;
-    session.reapplyLoadedConfig();
+    settings_ops.reapplyLoadedConfig(session);
     try std.testing.expectEqual(want, session.sidebar_width_pt);
     try std.testing.expectEqual(layout_math.ptToPx(want, session.scale_milli), session.sidebar_width_px);
     _ = try session.tick(); // 폭 재적용 후 다음 tick 크래시 없음
@@ -50631,16 +48522,16 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
 
     // 항목 0(브랜치 표시) 선택·accept → show_branch 토글 + 메뉴 유지 + persist 신호(1회성).
     session.chrome_host.context_menu.selected = 0;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(!init_branch, session.loaded_config.config.sidebar.show_branch);
     try std.testing.expect(session.view_options_menu); // 체크박스 패널 — 닫히지 않는다
-    try std.testing.expect(session.takeConfigDirty()); // persist 예약 — true(dirty 키 있음)
+    try std.testing.expect(settings_ops.takeConfigDirty(session)); // persist 예약 — true(dirty 키 있음)
     session.config_dirty_keys.clearRetainingCapacity(); // serializeConfig가 하는 일(파일 IO 없이 계약만 확인)
-    try std.testing.expect(!session.takeConfigDirty()); // 비워짐 — false
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 비워짐 — false
 
     // 항목 1(폴더 표시) 토글 — 메뉴 유지.
     session.chrome_host.context_menu.selected = 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(!init_folder, session.loaded_config.config.sidebar.show_folder);
     try std.testing.expect(session.view_options_menu);
 
@@ -50669,9 +48560,9 @@ test "settings hides legacy TUI chrome selector while preserving loaded config" 
     });
     defer session.deinit();
     session.loaded_config.config.chrome_theme = .tui;
-    try std.testing.expect(!AppSession.settingsExposesConfigKey("chrome.theme"));
-    try std.testing.expect(!AppSession.settingsExposesConfigKey("chrome.preset"));
-    try std.testing.expect(AppSession.settingsExposesConfigKey("chrome.tab-style"));
+    try std.testing.expect(!settings_ops.settingsExposesConfigKey("chrome.theme"));
+    try std.testing.expect(!settings_ops.settingsExposesConfigKey("chrome.preset"));
+    try std.testing.expect(settings_ops.settingsExposesConfigKey("chrome.tab-style"));
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -50709,7 +48600,7 @@ test "settings 드롭다운 통합: enum 행 활성→팝업 열림·변형 목�
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -50729,18 +48620,18 @@ test "settings 드롭다운 통합: enum 행 활성→팝업 열림·변형 목�
         if (enum_row != null) break;
     }
     try std.testing.expect(enum_row != null); // 스키마 enum 행이 존재
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = enum_row.?;
-    _ = session.takeConfigDirty(); // 이전 dirty 비우기
+    _ = settings_ops.takeConfigDirty(session); // 이전 dirty 비우기
 
     // 활성 → 드롭다운 팝업 열림 + 현재 인덱스에서 시작.
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.dropdown.open);
     const cur = config_mod.schema.enumIndex(session.loaded_config.config, enum_key).?;
     try std.testing.expectEqual(cur, session.chrome_host.settings.dropdown.selected);
 
     // buildSettingsDropdownItems가 그 enum의 변형 목록을 준다.
-    const items = try session.buildSettingsDropdownItems(scratch.allocator());
+    const items = try settings_ops.buildSettingsDropdownItems(session, scratch.allocator());
     const variants = (try config_mod.schema.enumVariants(scratch.allocator(), session.loaded_config.config, enum_key)).?;
     try std.testing.expectEqual(variants.len, items.len);
 
@@ -50750,7 +48641,7 @@ test "settings 드롭다운 통합: enum 행 활성→팝업 열림·변형 목�
     session.applyDropdownSelection();
     try std.testing.expect(!session.chrome_host.settings.dropdown.open);
     try std.testing.expectEqual(@as(?usize, target), config_mod.schema.enumIndex(session.loaded_config.config, enum_key));
-    try std.testing.expect(session.takeConfigDirty()); // 영속 예약됨
+    try std.testing.expect(settings_ops.takeConfigDirty(session)); // 영속 예약됨
 }
 
 test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 config 변경 (슬라이더 대체)" {
@@ -50769,7 +48660,7 @@ test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 co
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -50788,17 +48679,17 @@ test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 co
         }
     }
     try std.testing.expect(num_row != null); // number 행이 존재
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = num_row.?;
-    _ = session.takeConfigDirty();
+    _ = settings_ops.takeConfigDirty(session);
 
     // 활성 → 편집 진입(입력 박스, 현재값 시드). 편집 버퍼를 범위 초과 값으로 덮고 커밋 → clamp.
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.editing);
     session.chrome_host.settings.enterEdit("999999"); // 범위 초과
     session.commitSelectedText();
     try std.testing.expect(!session.chrome_host.settings.editing); // 커밋 후 편집 종료
-    try std.testing.expect(session.takeConfigDirty()); // 영속 예약
+    try std.testing.expect(settings_ops.takeConfigDirty(session)); // 영속 예약
 
     // config number가 max로 clamp됐는지 — 재빌드해 그 키의 값 확인(f32 저장 반올림 허용).
     session.chrome_host.settings.selected = num_row.?;
@@ -50828,7 +48719,7 @@ test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이�
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -50843,7 +48734,7 @@ test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이�
         }
     }
     try std.testing.expect(pal_row != null); // 팔레트 그리드 행 존재(테마 섹션)
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = pal_row.?;
     session.chrome_host.settings.nav_focused = false; // 폼 포커스
     session.chrome_host.settings.grid_cell = 0;
@@ -50852,22 +48743,22 @@ test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이�
     const right = terminal.KeyEvent{ .key = .arrow_right, .modifiers = .{} };
 
     // ← 셀0 → 미가로채기(false — 컴포넌트 영역 이동으로), grid_cell 불변.
-    try std.testing.expect(!session.settingsPaletteArrowIntercept(left));
+    try std.testing.expect(!settings_ops.settingsPaletteArrowIntercept(session, left));
     try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.grid_cell);
     // → 셀0 → 가로채기(셀 이동) grid_cell→1.
-    try std.testing.expect(session.settingsPaletteArrowIntercept(right));
+    try std.testing.expect(settings_ops.settingsPaletteArrowIntercept(session, right));
     try std.testing.expectEqual(@as(usize, 1), session.chrome_host.settings.grid_cell);
     // 셀15에서 → → 미가로채기(끝).
     session.chrome_host.settings.grid_cell = 15;
-    try std.testing.expect(!session.settingsPaletteArrowIntercept(right));
+    try std.testing.expect(!settings_ops.settingsPaletteArrowIntercept(session, right));
     // 셀5에서 ← → 가로채기 grid_cell→4.
     session.chrome_host.settings.grid_cell = 5;
-    try std.testing.expect(session.settingsPaletteArrowIntercept(left));
+    try std.testing.expect(settings_ops.settingsPaletteArrowIntercept(session, left));
     try std.testing.expectEqual(@as(usize, 4), session.chrome_host.settings.grid_cell);
     // 네비 포커스면 미가로채기(폼 전용).
     session.chrome_host.settings.nav_focused = true;
     session.chrome_host.settings.grid_cell = 5;
-    try std.testing.expect(!session.settingsPaletteArrowIntercept(right));
+    try std.testing.expect(!settings_ops.settingsPaletteArrowIntercept(session, right));
 }
 
 test "settingsPaletteArrowIntercept: 검색 중에도 팔레트 ←→ 셀 이동 살아있음(검색 필터 인덱스 정합)" {
@@ -50885,14 +48776,14 @@ test "settingsPaletteArrowIntercept: 검색 중에도 팔레트 ←→ 셀 이�
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     // "palette"로 검색(theme.palette 키 부분일치) → 교차 검색으로 팔레트 행이 나온다.
     const s = &session.chrome_host.settings;
     s.startSearch();
     for ("palette") |c| s.appendSearchCp(c);
     try std.testing.expect(s.searching);
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
 
     // 필터된 필드에서 팔레트 행 인덱스를 찾아 selected로(검색 필터가 적용된 인덱스라 intercept와 정합).
     var scratch = std.heap.ArenaAllocator.init(allocator);
@@ -50906,9 +48797,9 @@ test "settingsPaletteArrowIntercept: 검색 중에도 팔레트 ←→ 셀 이�
     const right = terminal.KeyEvent{ .key = .arrow_right, .modifiers = .{} };
     const left = terminal.KeyEvent{ .key = .arrow_left, .modifiers = .{} };
     // 검색 중이어도 → 셀 이동(가로챔) grid_cell→6, ← → 5.
-    try std.testing.expect(session.settingsPaletteArrowIntercept(right));
+    try std.testing.expect(settings_ops.settingsPaletteArrowIntercept(session, right));
     try std.testing.expectEqual(@as(usize, 6), s.grid_cell);
-    try std.testing.expect(session.settingsPaletteArrowIntercept(left));
+    try std.testing.expect(settings_ops.settingsPaletteArrowIntercept(session, left));
     try std.testing.expectEqual(@as(usize, 5), s.grid_cell);
     try std.testing.expect(s.searching); // 검색은 그대로 유지
 }
@@ -50930,7 +48821,7 @@ test "settings 폰트 드롭다운 취소: 커스텀(번들 밖) 폰트 복원 (
     });
     defer session.deinit();
     session.loaded_config.config.font.family = "Menlo"; // 번들 밖 커스텀(정적 문자열)
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -50945,11 +48836,11 @@ test "settings 폰트 드롭다운 취소: 커스텀(번들 밖) 폰트 복원 (
         if (font_row != null) break;
     }
     try std.testing.expect(font_row != null);
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = font_row.?;
 
     // 열기 → 스냅샷(kind=.font, "Menlo"), cur_idx="직접 입력…" 슬롯(=번들 수, 목록 밖이라).
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.dropdown.open);
     // 첫 번들 폰트를 라이브 프리뷰 → font.family가 바뀐다.
     session.chrome_host.settings.dropdown.selected = 0;
@@ -50981,7 +48872,7 @@ test "settings 테마 프리셋 드롭다운 취소: 커스텀 테마 색·잠�
     session.theme_user_custom = true; // 커스텀(프리셋 아님)
     session.loaded_config.config.theme.background = "#070b0d"; // 프리셋과 안 겹칠 커스텀 색(hex 문자열)
     const orig_bg = session.loaded_config.config.theme.background;
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -50996,11 +48887,11 @@ test "settings 테마 프리셋 드롭다운 취소: 커스텀 테마 색·잠�
         if (preset_row != null) break;
     }
     try std.testing.expect(preset_row != null); // theme.preset 행 존재
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = preset_row.?;
 
     // 열기 → 스냅샷(kind=.preset, 커스텀 색·user_custom). 첫 프리셋 프리뷰 → 색이 바뀐다.
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.dropdown.open);
     session.chrome_host.settings.dropdown.selected = 0;
     session.applyDropdownPreview();
@@ -51008,14 +48899,14 @@ test "settings 테마 프리셋 드롭다운 취소: 커스텀 테마 색·잠�
     try std.testing.expect(!session.theme_user_custom); // 프리셋 적용이 잠금
     // **핵심 회귀 가드(code-review high)**: 미리보기는 인메모리만 — 파일 영속을 예약하면 안 된다(theme_preset_persist·dirty 없음).
     try std.testing.expect(session.theme_preset_persist == null);
-    try std.testing.expect(!session.takeConfigDirty());
+    try std.testing.expect(!settings_ops.takeConfigDirty(session));
 
     // 취소 → 원본 커스텀 색·user_custom 복원 + **파일 영속도 없음**(미리본 프리셋이 disk에 안 써짐).
     session.cancelDropdownSelection();
     try std.testing.expectEqualStrings(orig_bg, session.loaded_config.config.theme.background);
     try std.testing.expect(session.theme_user_custom);
     try std.testing.expect(session.theme_preset_persist == null); // theme.preset 줄 예약 없음
-    try std.testing.expect(!session.takeConfigDirty()); // 커스텀 색 줄이 disk에서 안 지워짐
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 커스텀 색 줄이 disk에서 안 지워짐
 }
 
 test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 색이 아니라 원본 커스텀 복원 (데이터 손실 회귀 가드)" {
@@ -51038,7 +48929,7 @@ test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 �
     session.theme_user_custom = true;
     session.loaded_config.config.theme.background = "#070b0d";
     const orig_bg = session.loaded_config.config.theme.background;
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -51053,11 +48944,11 @@ test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 �
         if (preset_row != null) break;
     }
     try std.testing.expect(preset_row != null);
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = preset_row.?;
 
     // 열기(현재=사용자 지정 슬롯). 프리셋 프리뷰 → 색 바뀜. 다시 "사용자 지정" 슬롯 선택 후 확정.
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
     session.chrome_host.settings.dropdown.selected = 0; // 첫 프리셋 미리보기
     session.applyDropdownPreview();
@@ -51085,7 +48976,7 @@ test "settings enum 드롭다운 취소: 안 바뀐 값은 dirty로 영속 안 �
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -51102,15 +48993,15 @@ test "settings enum 드롭다운 취소: 안 바뀐 값은 dirty로 영속 안 �
         if (enum_row != null) break;
     }
     try std.testing.expect(enum_row != null);
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     session.chrome_host.settings.selected = enum_row.?;
 
     // 열고 → 취소(선택 안 바꿈). 값 불변 + dirty 없음(안 바뀐 값 영속 안 함).
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.dropdown.open);
     session.cancelDropdownSelection();
     try std.testing.expect(!session.chrome_host.settings.dropdown.open);
-    try std.testing.expect(!session.takeConfigDirty()); // 구경만 한 값은 파일에 안 pin
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 구경만 한 값은 파일에 안 pin
 }
 
 test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist 예약 (CS-4-4c)" {
@@ -51127,10 +49018,10 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
     });
     defer session.deinit();
 
-    session.toggleSettings(); // 세팅 열기 + 행 수 주입(setFieldCount)
+    settings_ops.toggleSettings(session); // 세팅 열기 + 행 수 주입(setFieldCount)
     try std.testing.expect(session.chrome_host.settings.open);
     try std.testing.expect(session.chrome_host.settings.count > 0);
-    try std.testing.expect(!session.takeConfigDirty()); // 토글 전 — dirty 없음
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 토글 전 — dirty 없음
 
     // Section 네비(CS-4): 폼은 선택 섹션 필드만(bool→num→enum)이라 bool이 있는 섹션을 찾아 그 섹션·첫 행(bool)으로 간다.
     var scratch = std.heap.ArenaAllocator.init(allocator);
@@ -51146,20 +49037,20 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
         }
     }
     try std.testing.expect(found_section); // bool 필드가 있는 섹션이 존재
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     const cf0 = try session.currentSectionFields(scratch.allocator());
     const first_key = cf0.bools[0].key; // 섹션 내 bool은 맨 앞(buildSettingsFields 순서)
     const first_val = cf0.bools[0].value;
 
     session.chrome_host.settings.selected = 0;
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
 
     // (1) 메모리 config가 flip됐다 — 같은 섹션을 다시 열거해 첫 bool 값이 뒤집혔는지 본다.
     const cf1 = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(!first_val, cf1.bools[0].value);
 
     // (2) persist 예약 — 그 키가 config_dirty_keys에 들어갔다(Swift가 drain해 파일에 atomic write).
-    try std.testing.expect(session.takeConfigDirty());
+    try std.testing.expect(settings_ops.takeConfigDirty(session));
     var found = false;
     for (session.config_dirty_keys.items) |k| {
         if (std.mem.eql(u8, k, first_key)) found = true;
@@ -51188,7 +49079,7 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
     defer scratch.deinit();
 
     // 폰트 섹션 선택(font.size number 행 보유). 열면서 nav_reset_row가 실제 섹션 수로 세팅되는지도 본다(§6.4).
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
     const sections = try session.buildSectionList(scratch.allocator());
     var font_idx: ?usize = null;
     for (sections, 0..) |s, i| if (s.section == .font) {
@@ -51197,12 +49088,12 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
     };
     try std.testing.expect(font_idx != null);
     session.chrome_host.settings.section = font_idx.?;
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     try std.testing.expectEqual(@as(?usize, sections.len), session.chrome_host.settings.nav_reset_row); // 리셋 행 = 섹션 뒤
 
     // 기본 상태: 폼의 모든 행이 is_default=true(↺ 없음).
     {
-        const rows0 = try session.buildSettingsFields(scratch.allocator());
+        const rows0 = try settings_ops.buildSettingsFields(session, scratch.allocator());
         for (rows0) |r| try std.testing.expect(r.is_default);
     }
 
@@ -51223,12 +49114,12 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
 
     // 그 행만 is_default=false(↺ 표시 대상).
     {
-        const rows1 = try session.buildSettingsFields(scratch.allocator());
+        const rows1 = try settings_ops.buildSettingsFields(session, scratch.allocator());
         try std.testing.expect(!rows1[sel].is_default);
     }
 
     // 리셋 → 기본값 복원 + config_removed_keys에 font.size(파일 줄 제거 예약).
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expectEqual(default_size, session.loaded_config.config.font.size);
     var removed = false;
     for (session.config_removed_keys.items) |k| if (std.mem.eql(u8, k, "font.size")) {
@@ -51238,7 +49129,7 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
 
     // 리셋 후 다시 is_default=true(↺ 사라짐).
     {
-        const rows2 = try session.buildSettingsFields(scratch.allocator());
+        const rows2 = try settings_ops.buildSettingsFields(session, scratch.allocator());
         try std.testing.expect(rows2[sel].is_default);
     }
 }
@@ -51258,7 +49149,7 @@ test "settings notifications.osc toggle requests macOS authorization once" {
     defer session.deinit();
 
     session.loaded_config.config.notifications.osc = false;
-    session.toggleSettings();
+    settings_ops.toggleSettings(session);
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const sections = try session.buildSectionList(scratch.allocator());
@@ -51266,7 +49157,7 @@ test "settings notifications.osc toggle requests macOS authorization once" {
         session.chrome_host.settings.section = i;
         break;
     };
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     const fields = try session.currentSectionFields(scratch.allocator());
     var found = false;
     for (fields.bools, 0..) |field, i| if (std.mem.eql(u8, field.key, "notifications.osc")) {
@@ -51277,7 +49168,7 @@ test "settings notifications.osc toggle requests macOS authorization once" {
     try std.testing.expect(found);
 
     try std.testing.expect(!session.takeNotificationAuthorizationRequest());
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.loaded_config.config.notifications.osc);
     try std.testing.expect(session.takeNotificationAuthorizationRequest());
     try std.testing.expect(!session.takeNotificationAuthorizationRequest());
@@ -51348,7 +49239,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     };
     try std.testing.expect(win_si != null);
     session.chrome_host.settings.section = win_si.?;
-    session.refreshSettingsFieldCount();
+    settings_ops.refreshSettingsFieldCount(session);
     const cf = try session.currentSectionFields(scratch.allocator());
     var tix: ?usize = null;
     for (cf.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, "window.background-image")) {
@@ -51359,7 +49250,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     session.chrome_host.settings.selected = after_enums + tix.?;
 
     // (1) 활성(Enter/클릭) → 인라인 편집이 아니라 파일 선택창 요청(file_pick_pending). 편집 모드는 안 켜진다.
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(!session.chrome_host.settings.editing); // 인라인 편집 아님
     try std.testing.expect(session.takeFilePickRequest()); // 요청 대기 → drain
     try std.testing.expect(!session.takeFilePickRequest()); // 1회성
@@ -51367,10 +49258,10 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     // (2) Swift NSOpenPanel이 고른 경로를 provide → config에 적용 + 영속 예약.
     session.providePickedFile("/Users/me/Pictures/bg.png");
     try std.testing.expectEqualStrings("/Users/me/Pictures/bg.png", session.loaded_config.config.window_background_image);
-    try std.testing.expect(session.takeConfigDirty());
+    try std.testing.expect(settings_ops.takeConfigDirty(session));
 
     // (3) 그 행 Backspace → 빈 값(배경 없음)으로 지우기.
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expectEqualStrings("", session.loaded_config.config.window_background_image);
 
     // (4) 빈 경로 provide(취소 등)는 무동작 — 직전 빈 값 유지.
@@ -51442,7 +49333,7 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
 
     // 셀 5 선택 → Enter(toggle) = 편집 시작(기본 미override라 xterm256(5) 시드).
     session.chrome_host.settings.grid_cell = 5;
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.editing);
 
     // 편집 버퍼를 새 hex로 바꿔 커밋 → palette[5]=#abcdef, dirty=theme.palette.5(write-back이 직렬화).
@@ -51460,9 +49351,9 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
 
     // ←/→(adjust) = 선택 셀 이동(색 변경 아님, wrap).
     session.chrome_host.settings.grid_cell = 5;
-    session.adjustSelectedSetting(1);
+    settings_ops.adjustSelectedSetting(session, 1);
     try std.testing.expectEqual(@as(usize, 6), session.chrome_host.settings.grid_cell);
-    session.adjustSelectedSetting(-1);
+    settings_ops.adjustSelectedSetting(session, -1);
     try std.testing.expectEqual(@as(usize, 5), session.chrome_host.settings.grid_cell);
 
     // 잘못된 hex는 거부(기존값 유지) — 파일 로드와 같은 검증.
@@ -51505,7 +49396,7 @@ test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerR
     const key = cf.colors[0].key;
 
     // Enter(toggle) → HSV picker 열림(현재 색 시드).
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.picking);
 
     // 순수 빨강으로 설정 후 커밋 → 그 color 키 = #ff0000, dirty 예약, picker 닫힘.
@@ -51559,7 +49450,7 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
 
     // new_term은 command_catalog.entries[0] — 그 keybind 행 선택 → Enter(toggle) = 녹음 시작.
     session.chrome_host.settings.selected = ks; // entries[0]=new_term
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.recording);
 
     // Cmd+E 캡처 → new_term이 Cmd+E로 rebind + dirty 예약 + 녹음 종료.
@@ -51569,7 +49460,7 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
     const resolver = session.loaded_config.keyBindingResolver();
     const chord = command_catalog.chordForAction(resolver, .new_term).?;
     try std.testing.expect((try config_mod.KeyChord.parse("Cmd+E")).eql(chord)); // resolver가 새 chord 반영
-    try std.testing.expect(session.takeConfigDirty()); // write-back 예약됨
+    try std.testing.expect(settings_ops.takeConfigDirty(session)); // write-back 예약됨
     var saw = false;
     for (session.config_keybind_rebinds.items) |rb| if (std.mem.eql(u8, rb.action, "new_term") and std.mem.eql(u8, rb.chord, "Cmd+E")) {
         saw = true;
@@ -51620,7 +49511,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
 
     // global_entries[0]=toggle_window 행 선택 → Enter(toggle) = 녹음 시작.
     session.chrome_host.settings.selected = gs;
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.recording);
 
     // Cmd+Alt+Space 캡처 → toggle_window가 그 chord로 rebind + global_bindings 교체 + 큐 적재 + 녹음 종료.
@@ -51628,7 +49519,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
     try std.testing.expect(!session.chrome_host.settings.recording);
     const chord = command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window).?;
     try std.testing.expect((try config_mod.KeyChord.parse("Cmd+Alt+Space")).eql(chord)); // global_bindings 교체 반영
-    try std.testing.expect(session.takeConfigDirty());
+    try std.testing.expect(settings_ops.takeConfigDirty(session));
     var saw = false;
     for (session.config_global_rebinds.items) |rb| if (std.mem.eql(u8, rb.action, "toggle_window") and std.mem.eql(u8, rb.chord, "Cmd+Alt+Space")) {
         saw = true;
@@ -51649,7 +49540,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
     // Backspace로 해제 → global_bindings에서 제거 + 줄 제거 예약 + 펜딩 rebind 취소.
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?; // toggle_window 행
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expect(command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window) == null);
     var saw_removed = false;
     for (session.config_global_removed.items) |k| if (std.mem.eql(u8, k, "toggle_window")) {
@@ -51690,7 +49581,7 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
     const cf = try session.currentSectionFields(scratch.allocator());
     const gs = cf.globalKeybindRowStart().?;
     session.chrome_host.settings.selected = gs; // toggle_window 행
-    session.toggleSelectedSetting(); // 녹음 시작
+    settings_ops.toggleSelectedSetting(session); // 녹음 시작
     session.captureKeybindRecording(.{ .key = .{ .char = ' ' }, .modifiers = .{ .command = true, .option = true } });
     try std.testing.expectEqual(@as(usize, 1), session.globalHotkeys().len); // descriptor 재생성(매핑 가능 chord)
     try std.testing.expect(session.global_hotkeys_dirty); // rebind가 dirty 세움
@@ -51710,12 +49601,12 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
 
     // GUI unbind(행 Backspace)도 dirty를 세운다 — 매핑 가능 chord로 다시 묶은 뒤 해제.
     session.chrome_host.settings.selected = gs;
-    session.toggleSelectedSetting();
+    settings_ops.toggleSelectedSetting(session);
     session.captureKeybindRecording(.{ .key = .{ .char = ' ' }, .modifiers = .{ .command = true, .option = true } });
     _ = session.takeGlobalHotkeysDirty(); // rebind dirty 소비
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?;
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expect(session.global_hotkeys_dirty); // unbind가 dirty 세움
     try std.testing.expectEqual(@as(usize, 0), session.globalHotkeys().len); // 해제 후 빈 목록
 
@@ -51729,7 +49620,7 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
     if (session.config_path_buffer) |b| allocator.free(b);
     session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
     _ = session.takeGlobalHotkeysDirty();
-    session.resetAllSettings();
+    settings_ops.resetAllSettings(session);
     try std.testing.expect(session.global_hotkeys_dirty);
     try std.testing.expectEqual(@as(usize, 0), session.globalHotkeys().len);
 }
@@ -51759,7 +49650,7 @@ test "reloadConfig: 옛 arena 문자열을 가리키는 write-back 대기열을 
 
     // reloadConfig는 옛 arena를 deinit한다 — clearConfigDirty로 위 큐를 비우지 않으면 두 슬라이스가 dangling이 되고
     // 다음 serializeConfig가 freed 메모리를 읽는다. 비우면 null·빈 목록이라 안전.
-    session.reloadConfig();
+    settings_ops.reloadConfig(session);
     try std.testing.expect(session.theme_preset_persist == null);
     try std.testing.expectEqual(@as(usize, 0), session.config_keybind_unbind_removed.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.config_dirty_keys.items.len);
@@ -51803,7 +49694,7 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     try std.testing.expect(has_user_bind);
 
     // 이제 Backspace로 unbind → 사용자 바인딩 제거 + 빌트인 chord(Cmd+T) unbind 지시어 예약 + 줄 제거 + 펜딩 rebind 취소.
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     for (session.loaded_config.keybindings) |b| try std.testing.expect(std.meta.activeTag(b.action) != .new_term); // 사용자 바인딩 사라짐
     // 완전 해제 — chordForAction(new_term)이 null(사용자 Cmd+E 제거 + 빌트인 Cmd+T unbinds로 죽음).
     try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .new_term) == null);
@@ -51818,13 +49709,13 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     };
     try std.testing.expect(saw_unbind);
     for (session.config_keybind_rebinds.items) |rb| try std.testing.expect(!std.mem.eql(u8, rb.action, "new_term")); // 펜딩 rebind 취소
-    try std.testing.expect(session.takeConfigDirty());
+    try std.testing.expect(settings_ops.takeConfigDirty(session));
 
     // 이미 해제된 액션을 다시 unbind 시도 → notice 경로(무동작, keybindings 불변).
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.keybindRowStart().?;
     const len_before = session.loaded_config.keybindings.len;
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expectEqual(len_before, session.loaded_config.keybindings.len); // 불변(이미 미지정)
 }
 
@@ -51937,7 +49828,7 @@ test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도
     };
     session.chrome_host.settings.selected = nt_sel.?;
     session.config_keybind_unbinds.clearRetainingCapacity();
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     // 두 빌트인 chord가 모두 죽어 next_tab이 **완전히** 미지정(하나만 죽이는 회귀면 첫 chord가 남아 non-null).
     try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .next_tab) == null);
     try std.testing.expect(session.config_keybind_unbinds.items.len >= 2); // chord 2개 다 unbind 지시어 예약
@@ -52005,7 +49896,7 @@ test "settings keybind stale unbind 정리: unbind한 chord를 다시 바인딩�
     for (command_catalog.entries) |e| if (std.mem.eql(u8, e.key, "next_tab")) {
         nt = e;
     };
-    session.unbindActionEntry(nt.?);
+    settings_ops.unbindActionEntry(session, nt.?);
     var target: ?config_mod.KeyChord = null;
     for (config_mod.keybinding.default_app_bindings) |db| if (std.meta.eql(db.action, .next_tab)) {
         target = db.chord;
@@ -52194,10 +50085,10 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
 
     // Backspace 삭제 → FOO 제거, BAZ 유지 + dirty 제거 키.
     session.config_removed_keys.clearRetainingCapacity();
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len);
     try std.testing.expectEqualStrings("BAZ=qux", session.loaded_config.config.env[0]);
-    try std.testing.expect(session.takeConfigDirty());
+    try std.testing.expect(settings_ops.takeConfigDirty(session));
     var saw = false;
     for (session.config_removed_keys.items) |k| if (std.mem.eql(u8, k, "env.FOO")) {
         saw = true;
@@ -52212,7 +50103,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
         sa_sel = after_enums2 + i;
     };
     session.chrome_host.settings.selected = sa_sel.?;
-    session.resetSelectedSettingRow();
+    settings_ops.resetSelectedSettingRow(session);
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 그대로
 }
 
@@ -52315,7 +50206,7 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     // applyThemePreset: dir=+1 적용 → config.theme가 그 프리셋 색 + **theme.preset 영속 예약**(개별 색·palette는 제거
     // 예약 — 4색만 쓰던 옛 한계 해소, 팔레트 영속 리뷰). theme.preset 한 줄이 로더에서 16색 팔레트까지 통째로 펼쳐진다.
     session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
-    session.applyThemePreset(1); // maru → 다음(ghostty)
+    settings_ops.applyThemePreset(session, 1); // maru → 다음(ghostty)
     try std.testing.expectEqualStrings(config_mod.theme.presetColors(.ghostty).background, session.loaded_config.config.theme.background);
     try std.testing.expectEqual(config_mod.theme.ThemePreset.ghostty, AppSession.detectThemePreset(session.loaded_config.config.theme).?);
     try std.testing.expect(session.theme_preset_persist != null);
@@ -52344,10 +50235,10 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     // 안 비우면 다음 tick serializeConfig가 takeConfigDirty()=true로 방금 리셋한 파일에 되살린다. 대표로 두 컬렉션에 더미.
     try session.config_removed_keys.append(allocator, "env.STALE");
     try session.config_keybind_unbinds.append(allocator, "cmd+k");
-    session.resetAllSettings();
+    settings_ops.resetAllSettings(session);
     try std.testing.expectEqual((config_mod.Config{}).font.size, session.loaded_config.config.font.size); // 라이브 기본값
     try std.testing.expectEqual((config_mod.Config{}).cursor.blink, session.loaded_config.config.cursor.blink);
-    try std.testing.expect(!session.takeConfigDirty()); // 5개 dirty 컬렉션 전부 비워짐(부분 write-back 예약 없음)
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 5개 dirty 컬렉션 전부 비워짐(부분 write-back 예약 없음)
     // config 파일이 기본 상태로 덮어써졌는지(삭제 아님 — 파일 존재 + 안내 주석, 옛 override 사라짐).
     const after = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
     defer allocator.free(after);
@@ -52359,7 +50250,7 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     const nested = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/nested/dir/config", .{tmp.sub_path});
     allocator.free(session.config_path_buffer.?);
     session.config_path_buffer = try allocator.dupe(u8, nested);
-    session.resetAllSettings();
+    settings_ops.resetAllSettings(session);
     const nested_after = tmp.dir.readFileAlloc(io, "nested/dir/config", allocator, .limited(4096)) catch null;
     defer if (nested_after) |na| allocator.free(na);
     try std.testing.expect(nested_after != null); // make_path가 nested/dir를 생성하고 헤더를 씀
@@ -52404,7 +50295,7 @@ test "resetAllSettings: session.keep-alive-after-quit은 초기화 예외로 보
     setAppKeepAlivePolicy(!default_keep_alive);
     session.loaded_config.config.font.size = 99; // 함께 갈려야 하는 대조군(보통 설정은 초기화된다)
 
-    session.resetAllSettings();
+    settings_ops.resetAllSettings(session);
 
     // 1) 값 보존 — 대조군은 기본값으로 갔는데 이 키만 사용자 값으로 남는다.
     try std.testing.expectEqual(!default_keep_alive, session.loaded_config.config.session.keep_alive_after_quit);
@@ -52422,7 +50313,7 @@ test "resetAllSettings: session.keep-alive-after-quit은 초기화 예외로 보
     // 여기서 무조건 emit하면 리셋 결과 파일이 기본값 한 줄을 항상 갖게 되어 full-dump 회피 원칙이 깨진다).
     session.loaded_config.config.session.keep_alive_after_quit = default_keep_alive;
     setAppKeepAlivePolicy(default_keep_alive);
-    session.resetAllSettings();
+    settings_ops.resetAllSettings(session);
     const plain = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
     defer allocator.free(plain);
     try std.testing.expect(std.mem.indexOf(u8, plain, "session.keep-alive-after-quit") == null);
@@ -52455,13 +50346,13 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
     session.loaded_config.config.theme = config_mod.theme.presetColors(last);
     session.theme_user_custom = false;
     const last_bg = session.loaded_config.config.theme.background;
-    session.applyThemePreset(1);
+    settings_ops.applyThemePreset(session, 1);
     try std.testing.expect(session.theme_user_custom);
     try std.testing.expectEqualStrings(last_bg, session.loaded_config.config.theme.background);
     try std.testing.expect(!session.themePresetActive());
 
     // "사용자 지정"에서 +1 → 첫 프리셋(maru) 적용 + 잠금 복귀.
-    session.applyThemePreset(1);
+    settings_ops.applyThemePreset(session, 1);
     try std.testing.expect(!session.theme_user_custom);
     try std.testing.expectEqual(Preset.maru, AppSession.detectThemePreset(session.loaded_config.config.theme).?);
     try std.testing.expect(session.themePresetActive());
@@ -52473,7 +50364,7 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
     for (secs, 0..) |s, idx| if (s.section == .theme) {
         session.chrome_host.settings.section = idx;
     };
-    const rows = try session.buildSettingsFields(arena.allocator());
+    const rows = try settings_ops.buildSettingsFields(session, arena.allocator());
     var first_dropdown: ?[]const u8 = null;
     var any_color = false;
     var any_color_enabled = false;
@@ -52492,7 +50383,7 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
 
     // "사용자 지정"으로 풀면 색 행 활성(편집 가능).
     session.theme_user_custom = true;
-    const rows2 = try session.buildSettingsFields(arena.allocator());
+    const rows2 = try settings_ops.buildSettingsFields(session, arena.allocator());
     var any_color_enabled2 = false;
     for (rows2) |r| if (r.kind == .color) {
         if (!r.disabled) any_color_enabled2 = true;
@@ -52972,7 +50863,7 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
     } else {
         _ = unsetenv("MARU_CONFIG");
     };
-    session.reloadConfig();
+    settings_ops.reloadConfig(session);
     _ = try session.tick();
 
     try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 껐다
@@ -53022,7 +50913,7 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
 
     session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\nfix/b\n");
     session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
-    session.openBranchMenu();
+    settings_ops.openBranchMenu(session);
     try std.testing.expect(session.chrome_host.context_menu.open);
 
     // 메뉴 x를 추정하지 않고 **훑는다** — 앵커는 브랜치 항목 유무·사이드바 클램프에 따라 달라진다.
@@ -53031,7 +50922,7 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
     try std.testing.expect(h > 0);
     const bar_top = session.backing_height_px -| h;
     const props = session.buildChromeProps();
-    const items = session.contextMenuItems();
+    const items = settings_ops.contextMenuItems(session);
 
     // ① 바 안에서는 어디를 찔러도 메뉴가 잡히면 안 된다(덮지 않는다).
     var x: u32 = 0;
@@ -54014,7 +51905,7 @@ test "SB1: 브랜치 목록 요청 중 상태바가 사라지면 메뉴를 열�
     _ = try session.tick();
     try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 전제: 바가 사라졌다
 
-    session.openBranchMenu();
+    settings_ops.openBranchMenu(session);
     try std.testing.expect(!session.branch_menu_open);
     try std.testing.expect(!session.chrome_host.context_menu.open);
 }
@@ -54049,7 +51940,7 @@ test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangl
     try std.testing.expect(session.chrome_host.context_menu.open);
 
     // 버퍼를 비운다 — 이 시점에 메뉴가 열린 채면 항목 포인터가 해제된 메모리를 가리킨다.
-    session.clearBranchMenuText();
+    settings_ops.clearBranchMenuText(session);
     try std.testing.expect(!session.branch_menu_open);
     try std.testing.expect(!session.chrome_host.context_menu.open);
 }
@@ -54079,11 +51970,11 @@ test "SB1: 브랜치 선택은 git switch를 터미널에 넣기만 한다" {
     try std.testing.expectEqual(@as(usize, 3), session.branch_menu_len);
 
     // 범위 밖은 조용히 무동작 — 메뉴와 목록이 어긋나도 엉뚱한 브랜치로 가지 않고, 오류 표시도 띄우지 않는다.
-    session.applyBranchMenuSelection(99);
+    settings_ops.applyBranchMenuSelection(session, 99);
     try std.testing.expect(!session.chrome_host.notice.open);
 
     // 정상 선택은 오류 없이 지나간다(무엇이 나가는지는 아래 순수 계약이 잠근다).
-    session.applyBranchMenuSelection(1);
+    settings_ops.applyBranchMenuSelection(session, 1);
     try std.testing.expect(!session.chrome_host.notice.open);
 
     var cmd_buf: [128]u8 = undefined;
@@ -54092,7 +51983,7 @@ test "SB1: 브랜치 선택은 git switch를 터미널에 넣기만 한다" {
 
     // 손상된 이름은 **조용히 넘기지 않고** 알린다 — 셸에 이상한 것을 넣지 않는다.
     session.branch_menu_names[0] = "bad name";
-    session.applyBranchMenuSelection(0);
+    settings_ops.applyBranchMenuSelection(session, 0);
     try std.testing.expect(session.chrome_host.notice.open);
 }
 
@@ -56062,8 +53953,8 @@ test "configPath caches the resolved config path (single alloc, freed in deinit)
     session.allocator = std.testing.allocator;
     session.config_path_buffer = null;
     defer if (session.config_path_buffer) |b| std.testing.allocator.free(b);
-    const p1 = session.configPath();
-    const p2 = session.configPath();
+    const p1 = settings_ops.configPath(&session);
+    const p2 = settings_ops.configPath(&session);
     // 두 번째 호출은 캐시 — 같은 포인터/길이(재할당 없음, 안 그러면 testing.allocator가 leak 잡음).
     try std.testing.expectEqual(p1.ptr, p2.ptr);
     try std.testing.expectEqual(p1.len, p2.len);
@@ -59687,7 +57578,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     const surface_id = entry.surface_id;
 
     // 아직 배치된 적 없는 surface는 좌표를 만들 수 없다 — 열지 않는다(추측한 자리에 띄우지 않는다).
-    try std.testing.expectError(error.Unsupported, session.openFileContentMenu(surface_id, .{
+    try std.testing.expectError(error.Unsupported, settings_ops.openFileContentMenu(session, surface_id, .{
         .editor_epoch = 1,
         .x = 10,
         .y = 10,
@@ -59705,7 +57596,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     });
 
     // 읽기 모드 + 링크: 링크 열기·주소 복사. 좌표는 rect 원점 + CSS px × backing scale이다.
-    try session.openFileContentMenu(surface_id, .{
+    try settings_ops.openFileContentMenu(session, surface_id, .{
         .editor_epoch = 1,
         .x = 20,
         .y = 30,
@@ -59723,13 +57614,13 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
 
     // 주소 복사는 native가 실행한다 — OSC 52 write와 같은 drain 큐에 들어간다(web으로 안 넘어간다).
     session.chrome_host.context_menu.selected = 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqualStrings("./other.md", session.chrome_clipboard_write);
     try std.testing.expect(session.file_content_menu == null); // 실행 후 메뉴가 닫힌다
-    try std.testing.expect(session.takeFileMenuAction() == null);
+    try std.testing.expect(settings_ops.takeFileMenuAction(session) == null);
 
     // 읽기 모드 + 본문(선택 있음): 복사·전체 선택. 둘 다 선택에 붙어 web이 실행한다.
-    try session.openFileContentMenu(surface_id, .{
+    try settings_ops.openFileContentMenu(session, surface_id, .{
         .editor_epoch = 1,
         .x = 0,
         .y = 0,
@@ -59740,16 +57631,16 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
     try std.testing.expectEqualStrings("복사", session.context_menu_items_buf[0]);
     session.chrome_host.context_menu.selected = 0;
-    session.acceptContextMenu();
-    const action = session.takeFileMenuAction().?;
+    settings_ops.acceptContextMenu(session);
+    const action = settings_ops.takeFileMenuAction(session).?;
     try std.testing.expectEqual(surface_id, action.surface_id);
     try std.testing.expectEqual(maru.session.content_menu.Item.copy, action.item);
-    try std.testing.expect(session.takeFileMenuAction() == null); // 1회성
+    try std.testing.expect(settings_ops.takeFileMenuAction(session) == null); // 1회성
     // 포커스를 그 문서로 돌려준다 — 안 그러면 이어지는 ⌘Z·타이핑이 편집기까지 못 간다.
     try std.testing.expectEqual(surface_id, session.takePendingDockFocusAction().?);
 
     // 읽기 모드 + 여백의 "소스 모드로 열기"는 헤더 선택기와 **같은 경로**로 모드를 옮긴다.
-    try session.openFileContentMenu(surface_id, .{
+    try settings_ops.openFileContentMenu(session, surface_id, .{
         .editor_epoch = 1,
         .x = 0,
         .y = 0,
@@ -59759,11 +57650,11 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     });
     try std.testing.expectEqualStrings("소스 모드로 열기", session.context_menu_items_buf[1]);
     session.chrome_host.context_menu.selected = 1;
-    session.acceptContextMenu();
+    settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, session.filePanelMode(surface_id).?);
 
     // 소스 모드가 되면 같은 여백에서 붙여넣기가 생기고 "소스 모드로 열기"는 사라진다(갈 곳이 자기 자신이다).
-    try session.openFileContentMenu(surface_id, .{
+    try settings_ops.openFileContentMenu(session, surface_id, .{
         .editor_epoch = 1,
         .x = 0,
         .y = 0,
@@ -59774,10 +57665,10 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
     try std.testing.expectEqualStrings("붙여넣기", session.context_menu_items_buf[0]);
     try std.testing.expectEqualStrings("전체 선택", session.context_menu_items_buf[1]);
-    session.closeContextMenu();
+    settings_ops.closeContextMenu(session);
 
     // 파일 본문이 아닌 surface는 메뉴도 클립보드 쓰기도 못 연다.
-    try std.testing.expectError(error.Unsupported, session.openFileContentMenu(surface_id + 999, .{
+    try std.testing.expectError(error.Unsupported, settings_ops.openFileContentMenu(session, surface_id + 999, .{
         .editor_epoch = 1,
         .x = 0,
         .y = 0,
@@ -59807,7 +57698,7 @@ test "파일 본문 메뉴는 웹뷰 포커스를 뺏지 않는다(다른 모달
     session.chrome_host.context_menu.show(10, 10, 2);
     session.terminal_context_menu = true;
     try std.testing.expect(session.terminalOwnsInput());
-    session.closeContextMenu();
+    settings_ops.closeContextMenu(session);
 
     // 파일 본문 메뉴는 예외다.
     session.file_content_menu = .{ .surface_id = 7, .editor_epoch = 1, .len = 2 };
@@ -59818,7 +57709,7 @@ test "파일 본문 메뉴는 웹뷰 포커스를 뺏지 않는다(다른 모달
     session.chrome_host.palette.open = true;
     try std.testing.expect(session.terminalOwnsInput());
     session.chrome_host.palette.open = false;
-    session.closeContextMenu();
+    settings_ops.closeContextMenu(session);
     try std.testing.expect(!session.terminalOwnsInput()); // 메뉴가 닫혔고 다른 것도 없다
 }
 
@@ -61069,7 +58960,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .settings => session.chrome_host.settings.open = true,
         .find => session.chrome_host.find.open = true,
         .palette => session.chrome_host.palette.open = true,
-        .rename => session.startRename(.{ .workspace = session.tabs.items[0] }),
+        .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,
         .file_tree => session.focus_owner = .{ .file_tree = .{ .restore_surface = null } },
@@ -61147,7 +59038,7 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
         session.window_padding_px = .{};
         _ = try session.resize(1600, 900, 1000);
 
-        session.startRename(.{ .workspace = session.tabs.items[0] });
+        settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] });
         try std.testing.expect(session.rename != null);
         session.showNotice("작업공간 경로 분석을 시작하지 못했습니다.");
 
@@ -61178,7 +59069,7 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
         _ = try session.resize(1600, 900, 1000);
 
         session.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
-        session.startRename(.{ .workspace = session.tabs.items[0] });
+        settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] });
         try std.testing.expect(session.chrome_host.notice.open);
         try std.testing.expect(session.rename != null);
         try std.testing.expectEqual(AppSession.InputFocus.notice, session.inputFocus());

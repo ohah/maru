@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const PendingDockFocus = app_session_mod.PendingDockFocus;
 const dock_ops = @import("dock.zig");
@@ -519,7 +520,7 @@ pub fn startFileTreeEdit(self: *AppSession, edit_kind: FileTreeEditKind) void {
         self.showNotice("경로가 너무 길어 변경할 수 없습니다.");
         return;
     };
-    self.startRename(.{ .file_tree = copied });
+    settings_ops.startRename(self, .{ .file_tree = copied });
 }
 
 pub fn updateFileTree(self: *AppSession) !void {

@@ -1202,7 +1202,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    보존하고 generation 실패의 legacy fallback은 0이다. C3-2는 component/product-type 배선까지만 완료로 세며 actual
    Darwin socket, revoked→fence→release 왕복과 generation raw Client event source-zero는 C3-3이 소유한다.
    C3-3은 `applyObservationEvent`의 generation arm에서 raw `self.client.wire_major`, `metadata_support`, `poison`과 raw Client
-   revoke fence 인자를 제거한다. capability 입력은 `GenerationCapabilities` projection, effect는 mode-specific typed
+   revoke fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거한다. capability 입력은
+   `GenerationCapabilities` projection, effect는 mode-specific typed
    poison/fence adapter 하나로 바꾸고 pure classify/materialize/apply policy만 공통 SSOT로 남긴다.
 
    `client_slot`은 node/binding/pin/quarantine/payload free의 canonical resource transaction을 조정하는 유일한 owner다.

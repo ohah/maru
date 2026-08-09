@@ -7,17 +7,17 @@ const chrome = maru.chrome;
 const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물) — 카드 줄의 브랜치·폴더 glyph
 const config_mod = maru.config;
 const renderer = maru.renderer;
-const terminal = maru.terminal;
+pub const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
-const dock_layout = maru.session.dock_layout;
-const dock_panel = maru.session.dock_panel;
+pub const dock_layout = maru.session.dock_layout;
+pub const dock_panel = maru.session.dock_panel;
 const git_command = maru.session.git_command; // 브랜치 목록 출력 파서(순수) — argv 조립과 같은 모듈
 const content_menu = maru.session.content_menu;
-const file_tree = maru.session.file_tree;
+pub const file_tree = maru.session.file_tree;
 const file_tree_navigation = maru.session.file_tree_navigation;
 const file_tree_mutation = maru.session.file_tree_mutation;
 const file_tree_icon = chrome.file_tree_icon;
-const dock_view_bar = chrome.components.dock_view_bar;
+pub const dock_view_bar = chrome.components.dock_view_bar;
 const git_backend_mod = @import("git_backend.zig");
 const scm_view = maru.session.scm_view;
 const file_panel_bridge = maru.session.file_panel_bridge;
@@ -50,19 +50,19 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
-const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
-const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
+pub const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
+pub const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
-const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
-const chrome_system_text = @import("chrome/system_text.zig");
+pub const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
+pub const chrome_system_text = @import("chrome/system_text.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
     _ = @import("chrome/lab.zig");
     _ = @import("chrome/chrome_draw_lowering.zig");
 }
-const agent_session_archive_view = maru.session.agent_session_archive_view;
+pub const agent_session_archive_view = maru.session.agent_session_archive_view;
 const agent_session_archive_detail = maru.session.agent_session_archive_detail;
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
@@ -73,7 +73,8 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
-const find_ops = @import("app_session/find.zig"); // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+const find_ops = @import("app_session/find.zig");
+const agent_dock = @import("app_session/agent_dock.zig"); // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
@@ -481,21 +482,14 @@ const bell_flash_peak_milli: u32 = 350;
 // tick 수가 아니라 경과 ms로 게이트한다. 옛 30Hz 1틱/줄(≈33ms/줄)과 같은 체감 속도를 기준으로 잡았다. msPerTick
 // 누적이 이 값을 넘을 때마다 한 줄 스크롤한다(render.frame-rate_min=30이라 msPerTick≤이 값 → tick당 최대 한 줄).
 const drag_autoscroll_step_ms: u32 = 33;
-const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
+pub const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
 
 /// Archive scope owns only display filtering.  It never changes the scanner's
 /// candidate set, so changing scope/search is immediately reversible and does
 /// not put filesystem work on the render or key-input path.
-const AgentSessionArchiveScope = enum { workspace, project, all };
+pub const AgentSessionArchiveScope = enum { workspace, project, all };
 
-fn archiveOpenedDevice(file: std.Io.File) u64 {
-    if (comptime builtin.os.tag != .macos) return 0;
-    var stat: std.posix.Stat = undefined;
-    if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
-    return @intCast(stat.dev);
-}
-
-fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+pub fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
     var start: usize = 0;
@@ -505,193 +499,6 @@ fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
         if (index == needle.len) return true;
     }
     return false;
-}
-
-fn agentSessionArchiveMatches(record: agent_session_archive_backend.Record, query: []const u8) bool {
-    return query.len == 0 or asciiContainsIgnoreCase(record.parsed.title, query) or
-        asciiContainsIgnoreCase(record.parsed.summary, query) or
-        asciiContainsIgnoreCase(record.parsed.cwd, query) or
-        asciiContainsIgnoreCase(record.parsed.model, query);
-}
-
-/// 마지막 활동 시각은 이미 immutable worker snapshot 안에 있으므로 카드가 filesystem을 건드리지 않고
-/// 상대 시간을 보인다. 시계 되감기와 미래 시각은 의도적으로 "방금"으로 그린다.
-///
-/// 넘기는 값은 **정렬 키와 같은 것**이어야 한다(`lastActivityNs`). 다르면 목록 순서와 카드가 말하는
-/// 시간이 어긋나 "3일 전" 카드가 맨 위에 앉는다.
-fn formatAgentSessionArchiveRelativeAge(now_ns: i128, activity_ns: i96, buf: []u8) []const u8 {
-    const then: i128 = activity_ns;
-    const delta_ns = if (now_ns > then) now_ns - then else 0;
-    const minutes = @divFloor(delta_ns, 60 * std.time.ns_per_s);
-    if (minutes == 0) return "방금";
-    if (minutes < 60) return std.fmt.bufPrint(buf, "{d}분 전", .{minutes}) catch "방금";
-    const hours = @divFloor(minutes, 60);
-    if (hours < 24) return std.fmt.bufPrint(buf, "{d}시간 전", .{hours}) catch "방금";
-    return std.fmt.bufPrint(buf, "{d}일 전", .{@divFloor(hours, 24)}) catch "방금";
-}
-
-fn agentSessionArchiveWithinRoot(record: agent_session_archive_backend.Record, root: []const u8) bool {
-    return record.parsed.cwd_canonical and record.parsed.cwd.len > 0 and std.fs.path.isAbsolute(record.parsed.cwd) and
-        file_tree.Tree.pathWithinRoot(record.parsed.cwd, root);
-}
-
-fn sameAgentSessionArchiveIdentity(a: *const agent_session_archive_backend.Record, b: *const agent_session_archive_backend.Record) bool {
-    return a.parsed.provider == b.parsed.provider and a.inode == b.inode and a.device == b.device and
-        std.mem.eql(u8, a.parsed.session_id, b.parsed.session_id);
-}
-
-/// A borrowed identity is sufficient only inside the one main-actor transaction that swaps an
-/// immutable archive snapshot.  It is captured before the old records are freed and resolved
-/// against the replacement before that free, so no session id is copied or retained past its
-/// source snapshot.
-const ArchiveScrollIdentity = struct {
-    provider: maru.session.agent_session_archive.Provider,
-    session_id: []const u8,
-    device: u64,
-    inode: std.Io.File.INode,
-
-    fn fromRecord(record: *const agent_session_archive_backend.Record) ArchiveScrollIdentity {
-        return .{
-            .provider = record.parsed.provider,
-            .session_id = record.parsed.session_id,
-            .device = record.device,
-            .inode = record.inode,
-        };
-    }
-
-    fn eqlRecord(self: ArchiveScrollIdentity, record: *const agent_session_archive_backend.Record) bool {
-        return self.provider == record.parsed.provider and self.device == record.device and self.inode == record.inode and
-            std.mem.eql(u8, self.session_id, record.parsed.session_id);
-    }
-};
-
-const ArchiveScrollAnchor = struct {
-    identity: ArchiveScrollIdentity,
-    /// Backing pixels from the anchored card's top to the old viewport top.  This is always
-    /// non-negative because only a card crossing the viewport top may become an anchor.
-    intra_card_y_px: u32,
-};
-
-/// 아카이브 목록의 항목 높이 규칙이다. `chrome.ui.scroll_area`는 높이가 균일하다고 가정하지 않고
-/// comptime 함수로 물어보므로(docs/scroll-area.md §3), 그룹 헤더·카드·펼친 카드라는 이 도크만의
-/// 예외가 전부 여기 한 자리에 모인다. 스크롤 투영·anchor 복원·페이지 키가 같은 값을 본다.
-const ArchiveScrollItems = struct {
-    /// **살아 있는 투영을 빌린 슬라이스**다. 스냅샷 교체·필터 재계산을 건너 붙들면 dangling이 되므로
-    /// 호출자는 이 값을 저장하지 않고 같은 표현식 안에서 쓴다. 높이만 필요하면 필드를 복사한다.
-    entries: []const agent_session_archive_view.Entry,
-    group_h_px: u32,
-    card_h_px: u32,
-    gap_px: u32,
-    /// 펼침은 최대 하나다. 그 index와 완전히 예약된 높이를 여기 함께 두어야 virtualization·clip·
-    /// hit-test가 같은 content-space 기하에 합의한다 — host가 detail 전용 y를 따로 더하지 않는다.
-    expanded_index: ?usize = null,
-    expanded_h_px: u32 = 0,
-
-    fn heightPx(self: ArchiveScrollItems, index: usize) u32 {
-        return switch (self.entries[index]) {
-            .group => self.group_h_px,
-            .card => if (self.expanded_index != null and self.expanded_index.? == index)
-                self.expanded_h_px
-            else
-                self.card_h_px,
-        };
-    }
-
-    fn extent(self: ArchiveScrollItems, viewport_h_px: u32) chrome.ui.scroll_area.Extent {
-        return .{ .count = self.entries.len, .gap_px = self.gap_px, .viewport_h_px = viewport_h_px };
-    }
-};
-
-/// content-space에서 지금 목록 상단에 걸리는 그룹과, 그것을 밀어낼 다음 그룹의 자리.
-const ArchiveStickyGroup = struct {
-    /// 전체 목록에서의 index다. **가상화 창 밖일 수 있다** — 그래서 component가 이걸 못 구한다.
-    index: usize,
-    top_px: u32,
-    next_top_px: ?u32,
-};
-
-/// 첫 그룹에 닿기 전이면 null이다. 그때는 흐름 위의 행이 그대로 보이고, 고정할 것이 없다.
-///
-/// "걸린 그룹"은 top이 offset **이하**인 마지막 그룹이다. 그 그룹의 행은 이미 뷰포트 위로 나갔거나
-/// 막 상단에 닿았고, 고정 헤더가 같은 rect를 덮으므로 두 번 그려 보이지 않는다.
-fn archiveStickyGroupFor(items: ArchiveScrollItems, offset_px: u32) ?ArchiveStickyGroup {
-    var top: u32 = 0;
-    var found: ?ArchiveStickyGroup = null;
-    for (items.entries, 0..) |entry, index| {
-        if (entry == .group) {
-            if (top <= offset_px) {
-                found = .{ .index = index, .top_px = top, .next_top_px = null };
-            } else if (found != null) {
-                found.?.next_top_px = top;
-                return found;
-            }
-        }
-        top +|= items.heightPx(index);
-        if (index + 1 < items.entries.len) top +|= items.gap_px;
-    }
-    return found;
-}
-
-fn archiveScrollAnchorFor(
-    records: []const agent_session_archive_backend.Record,
-    projection: chrome.ui.scroll_area.Projection,
-    items: ArchiveScrollItems,
-) ?ArchiveScrollAnchor {
-    var y: i64 = projection.first_origin_y_px;
-    var index = projection.first_index;
-    while (index < projection.end_exclusive) : (index += 1) {
-        const entry = items.entries[index];
-        const h: i64 = items.heightPx(index);
-        if (entry == .card and y <= 0 and y + h > 0) {
-            const record_index = entry.card;
-            if (record_index >= records.len) return null;
-            return .{
-                .identity = .fromRecord(&records[record_index]),
-                .intra_card_y_px = @intCast(-y),
-            };
-        }
-        y += h;
-        if (index + 1 < items.entries.len) y += items.gap_px;
-    }
-    return null;
-}
-
-fn archiveScrollAnchorOffsetFor(
-    records: []const agent_session_archive_backend.Record,
-    saved: ArchiveScrollAnchor,
-    items: ArchiveScrollItems,
-    max_offset_px: u32,
-) ?u32 {
-    var top: u32 = 0;
-    for (items.entries, 0..) |entry, index| {
-        const h = items.heightPx(index);
-        if (entry == .card) {
-            const record_index = entry.card;
-            if (record_index < records.len and saved.identity.eqlRecord(&records[record_index]))
-                return chrome.ui.scroll_area.anchorOffsetPx(top, saved.intra_card_y_px, max_offset_px);
-        }
-        top +|= h;
-        if (index + 1 < items.entries.len) top +|= items.gap_px;
-    }
-    return null;
-}
-
-fn archiveSnapshotSelectionIndex(
-    previous: ?*const agent_session_archive_backend.Record,
-    replacement: []const agent_session_archive_backend.Record,
-) ?usize {
-    const selected = previous orelse return null;
-    for (replacement, 0..) |*candidate, index| {
-        if (sameAgentSessionArchiveIdentity(selected, candidate)) return index;
-    }
-    return null;
-}
-
-/// Scope refresh is driven by the cheap runtime observation, never a
-/// filesystem comparison. A same-pane `cd` must therefore be distinguishable
-/// from a repeated frame carrying the same CWD.
-fn agentSessionArchiveObservedCwdChanged(previous: ?[]const u8, current: []const u8) bool {
-    return if (previous) |path| !std.mem.eql(u8, path, current) else true;
 }
 
 test "archive scope admits only canonical cwd beneath the exact root boundary" {
@@ -713,11 +520,11 @@ test "archive scope admits only canonical cwd beneath the exact root boundary" {
         .inode = 0,
         .device = 0,
     };
-    try std.testing.expect(agentSessionArchiveWithinRoot(record, "/workspace/project"));
-    try std.testing.expect(!agentSessionArchiveWithinRoot(record, "/workspace/project-old"));
+    try std.testing.expect(agent_dock.agentSessionArchiveWithinRoot(record, "/workspace/project"));
+    try std.testing.expect(!agent_dock.agentSessionArchiveWithinRoot(record, "/workspace/project-old"));
     var unresolved = record;
     unresolved.parsed.cwd_canonical = false;
-    try std.testing.expect(!agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
+    try std.testing.expect(!agent_dock.agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
 }
 
 // 방향 토글은 표시 계층에만 있다. 스캔 순서와 정렬 키는 건드리지 않으므로 `SortOrder`가 두 label과
@@ -734,10 +541,10 @@ test "정렬 방향 토글은 두 상태를 왕복한다" {
 // 부분만 받고 취소된 뒤 재진입하는 경우 — 여기서 점진 경로를 타면 화면의 목록이 첫 부분 발행(12개)으로
 // 덮여 **줄었다가 다시 차오른다**.
 test "점진 발행은 보여 줄 목록이 하나도 없을 때만 요청한다" {
-    try std.testing.expect(AppSession.shouldRequestArchiveProgress(0));
-    try std.testing.expect(!AppSession.shouldRequestArchiveProgress(1));
+    try std.testing.expect(agent_dock.shouldRequestArchiveProgress(0));
+    try std.testing.expect(!agent_dock.shouldRequestArchiveProgress(1));
     // 취소로 남은 부분 목록도 "보여 줄 목록"이다.
-    try std.testing.expect(!AppSession.shouldRequestArchiveProgress(12));
+    try std.testing.expect(!agent_dock.shouldRequestArchiveProgress(12));
 }
 
 test "archive snapshot replacement preserves selection only for the exact source identity" {
@@ -763,9 +570,9 @@ test "archive snapshot replacement preserves selection only for the exact source
         .{ .parsed = .{ .provider = .claude, .session_id = @constCast("other"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/project"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/other.jsonl"), .mtime_ns = 0, .inode = 8, .device = 11 },
         selected,
     };
-    try std.testing.expectEqual(@as(?usize, 1), archiveSnapshotSelectionIndex(&selected, &replacement));
+    try std.testing.expectEqual(@as(?usize, 1), agent_dock.archiveSnapshotSelectionIndex(&selected, &replacement));
     replacement[1].inode = 9;
-    try std.testing.expect(archiveSnapshotSelectionIndex(&selected, &replacement) == null);
+    try std.testing.expect(agent_dock.archiveSnapshotSelectionIndex(&selected, &replacement) == null);
 }
 
 test "archive scroll identity rejects same path or mtime when the exact source identity changed" {
@@ -776,7 +583,7 @@ test "archive scroll identity rejects same path or mtime when the exact source i
         .inode = 7,
         .device = 11,
     };
-    const identity = ArchiveScrollIdentity.fromRecord(&record);
+    const identity = agent_dock.ArchiveScrollIdentity.fromRecord(&record);
     try std.testing.expect(identity.eqlRecord(&record));
     var changed = record;
     changed.mtime_ns = 99;
@@ -795,33 +602,33 @@ test "sticky group is the last one at or above the offset, with the next one as 
     const entries = [_]agent_session_archive_view.Entry{
         .{ .group = 0 }, .{ .card = 0 }, .{ .card = 1 }, .{ .group = 1 }, .{ .card = 2 },
     };
-    const items = ArchiveScrollItems{ .entries = &entries, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+    const items = agent_dock.ArchiveScrollItems{ .entries = &entries, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
 
     // 첫 그룹에 닿기 전은 없다 — 첫 그룹의 top이 0이라 offset 0부터 이미 걸려 있다.
-    const at_top = archiveStickyGroupFor(items, 0).?;
+    const at_top = agent_dock.archiveStickyGroupFor(items, 0).?;
     try std.testing.expectEqual(@as(usize, 0), at_top.index);
     try std.testing.expectEqual(@as(u32, 0), at_top.top_px);
     try std.testing.expectEqual(@as(?u32, 150), at_top.next_top_px);
 
     // 두 번째 그룹 직전까지는 여전히 첫 그룹이 걸려 있다.
-    const before_second = archiveStickyGroupFor(items, 149).?;
+    const before_second = agent_dock.archiveStickyGroupFor(items, 149).?;
     try std.testing.expectEqual(@as(usize, 0), before_second.index);
 
     // top과 정확히 같은 offset부터 두 번째 그룹으로 넘어간다. 마지막이므로 밀어내는 것이 없다.
-    const second = archiveStickyGroupFor(items, 150).?;
+    const second = agent_dock.archiveStickyGroupFor(items, 150).?;
     try std.testing.expectEqual(@as(usize, 3), second.index);
     try std.testing.expectEqual(@as(u32, 150), second.top_px);
     try std.testing.expectEqual(@as(?u32, null), second.next_top_px);
 
     // 그룹이 하나도 없으면 고정할 것이 없다.
     const cards_only = [_]agent_session_archive_view.Entry{ .{ .card = 0 }, .{ .card = 1 } };
-    try std.testing.expect(archiveStickyGroupFor(.{ .entries = &cards_only, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 40) == null);
+    try std.testing.expect(agent_dock.archiveStickyGroupFor(.{ .entries = &cards_only, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 40) == null);
 
     // 첫 항목이 카드면 그 위에는 그룹이 없다 — offset이 첫 그룹 top보다 작으면 null이다.
     const card_first = [_]agent_session_archive_view.Entry{ .{ .card = 0 }, .{ .group = 0 }, .{ .card = 1 } };
-    const late = ArchiveScrollItems{ .entries = &card_first, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
-    try std.testing.expect(archiveStickyGroupFor(late, 59) == null);
-    try std.testing.expectEqual(@as(usize, 1), archiveStickyGroupFor(late, 60).?.index);
+    const late = agent_dock.ArchiveScrollItems{ .entries = &card_first, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+    try std.testing.expect(agent_dock.archiveStickyGroupFor(late, 59) == null);
+    try std.testing.expectEqual(@as(usize, 1), agent_dock.archiveStickyGroupFor(late, 60).?.index);
 }
 
 test "archive scroll anchor restores only the exact materialized card after reorder" {
@@ -830,8 +637,8 @@ test "archive scroll anchor restores only the exact materialized card after reor
         .{ .parsed = .{ .provider = .codex, .session_id = @constCast("other"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/b"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/b.jsonl"), .mtime_ns = 1, .inode = 8, .device = 11 },
     };
     const old_entries = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 0 }, .{ .card = 1 } };
-    const old_items = ArchiveScrollItems{ .entries = &old_entries, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
-    const anchor = archiveScrollAnchorFor(&records, .{
+    const old_items = agent_dock.ArchiveScrollItems{ .entries = &old_entries, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+    const anchor = agent_dock.archiveScrollAnchorFor(&records, .{
         .content_height_px = 140,
         .max_offset_px = 80,
         .offset_y_px = 45,
@@ -843,7 +650,7 @@ test "archive scroll anchor restores only the exact materialized card after reor
 
     // 그룹 헤더가 뷰포트 위쪽 경계를 차지하면 anchor가 없다. 헤더는 세션 신원을 대신할 수 없어
     // 그것으로 복원하면 "어느 세션을 보고 있었는가"가 아니라 "어느 그룹 근처였는가"로 바뀐다.
-    try std.testing.expect(archiveScrollAnchorFor(&records, .{
+    try std.testing.expect(agent_dock.archiveScrollAnchorFor(&records, .{
         .content_height_px = 140,
         .max_offset_px = 80,
         .offset_y_px = 5,
@@ -854,7 +661,7 @@ test "archive scroll anchor restores only the exact materialized card after reor
 
     // 경계에 정확히 맞닿은 카드(원점 0)는 유효한 anchor다 — 그 지점이 사용자가 보고 있던 곳이다.
     // 변위가 0이라는 것이 "anchor가 없다"는 뜻은 아니다.
-    const flush = archiveScrollAnchorFor(&records, .{
+    const flush = agent_dock.archiveScrollAnchorFor(&records, .{
         .content_height_px = 140,
         .max_offset_px = 80,
         .offset_y_px = 30,
@@ -866,7 +673,7 @@ test "archive scroll anchor restores only the exact materialized card after reor
 
     // 창의 **첫** 항목만 후보다. 두 번째 카드는 경계 아래에 있으므로, 첫 항목이 그룹 헤더라 건너뛰면
     // anchor는 없다(위 케이스). 아래처럼 첫 항목이 카드면 그 카드가 잡히고 다음 카드는 무시된다.
-    const first_wins = archiveScrollAnchorFor(&records, .{
+    const first_wins = agent_dock.archiveScrollAnchorFor(&records, .{
         .content_height_px = 140,
         .max_offset_px = 80,
         .offset_y_px = 45,
@@ -878,22 +685,22 @@ test "archive scroll anchor restores only the exact materialized card after reor
     try std.testing.expect(first_wins.identity.eqlRecord(&records[0]));
 
     const reordered = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 1 }, .{ .card = 0 } };
-    try std.testing.expectEqual(@as(?u32, 105), archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &reordered, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300));
+    try std.testing.expectEqual(@as(?u32, 105), agent_dock.archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &reordered, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300));
     const collapsed = [_]agent_session_archive_view.Entry{.{ .group = 0 }};
-    try std.testing.expect(archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &collapsed, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300) == null);
+    try std.testing.expect(agent_dock.archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &collapsed, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300) == null);
 }
 
 test "archive scope refresh detects same-pane cwd changes but ignores repeated observations" {
-    try std.testing.expect(agentSessionArchiveObservedCwdChanged(null, "/workspace/a"));
-    try std.testing.expect(!agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/a"));
-    try std.testing.expect(agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/b"));
+    try std.testing.expect(agent_dock.agentSessionArchiveObservedCwdChanged(null, "/workspace/a"));
+    try std.testing.expect(!agent_dock.agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/a"));
+    try std.testing.expect(agent_dock.agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/b"));
 }
 
 test "archive relative age uses the worker mtime without filesystem access" {
     var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("방금", formatAgentSessionArchiveRelativeAge(100, 200, &buf));
-    try std.testing.expectEqualStrings("5분 전", formatAgentSessionArchiveRelativeAge(5 * 60 * std.time.ns_per_s, 0, &buf));
-    try std.testing.expectEqualStrings("2시간 전", formatAgentSessionArchiveRelativeAge(2 * 60 * 60 * std.time.ns_per_s, 0, &buf));
+    try std.testing.expectEqualStrings("방금", agent_dock.formatAgentSessionArchiveRelativeAge(100, 200, &buf));
+    try std.testing.expectEqualStrings("5분 전", agent_dock.formatAgentSessionArchiveRelativeAge(5 * 60 * std.time.ns_per_s, 0, &buf));
+    try std.testing.expectEqualStrings("2시간 전", agent_dock.formatAgentSessionArchiveRelativeAge(2 * 60 * 60 * std.time.ns_per_s, 0, &buf));
 }
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
@@ -990,8 +797,8 @@ const font_size_max: f32 = 72.0;
 // 독립이라 face를 바꿔도 도크 기하는 불변이다. 다만 사용자가
 // Cmd+/−/0으로 요청한 font-size zoom은 Dock 전체의 명시적 UI zoom으로 반영한다. 범위는 좁은 dock에서
 // 48pt action target과 최소 읽기 밀도를 보존하도록 [75%, 150%]로 제한한다.
-const session_dock_ui_zoom_min_milli: u32 = 750;
-const session_dock_ui_zoom_max_milli: u32 = 1500;
+pub const session_dock_ui_zoom_min_milli: u32 = 750;
+pub const session_dock_ui_zoom_max_milli: u32 = 1500;
 // ⌘+/⌘- 한 번에 바꾸는 폰트 크기 보폭(pt). Terminal.app·iTerm2·Ghostty처럼 **고정 1pt** — 설정 항목으로 두지
 // 않는다(보폭값은 화면에 즉각 반영이 안 보여 슬라이더로 노출하면 혼란만 준다). ⌘0 reset은 보폭과 무관하게
 // base_font_size로 복귀.
@@ -1765,35 +1572,6 @@ const NormalizedConfig = struct {
     height_px: u32,
     scale_milli: u32,
     defer_initial_surface: bool = false,
-};
-
-/// 한 터미널의 런타임 단위: surface(그리드/스크롤백, 참조) + 그 surface에 붙은 live PTY 셸(참조) + 그 PTY를 drain하는
-/// pump. **M3a**: `surface`와 `live_pty`의 **소유**가 둘 다 앱 전역 `app_runtime.live_registry`로 옮겨졌고(`LiveSurface` 번들
-/// 슬롯), Term은 각각 그 슬롯 필드를 가리키는 포인터다(docs/window-surface-mobility.md §8A.1 옵션 A). reader thread가
-/// 잡는 `&live_pty.reader`·`&surface.core`/`&surface.core_mutex` 주소는 registry의 heap 슬롯(`allocator.create`)이
-/// 고정하므로 여전히 안정적이다 — 소유 위치가 Term-inline → registry-슬롯으로 바뀌었을 뿐 heap-pin 메커니즘은 동일하다.
-/// surface·live_pty가 **같은 번들 슬롯**에 있어 cross-window 이동 시 Term이 창을 옮겨도 이 두 주소는 불변이다(reader 계약).
-/// reader가 `&live_pty.reader`와 `&surface.core`(둘 다 이제 registry 슬롯)를 교차 바인딩하므로, teardown은 detach 선행
-/// 후 registry.remove(번들 deinit=live_pty reader join → surface.deinit)를 한 번에 지킨다. pump는 안정 `*queue`만 들어
-/// 이동 제약이 없다. 탭→pane 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
-///
-/// `TermRuntime` = Term의 런타임 부착(PTY 세션 **참조**·이벤트 펌프·생애 플래그) — platform이 소유하는 OS/런타임
-/// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). 모델 struct
-/// (Term/Pane/Tab)는 session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
-/// Dock-local, owned state for one inline archive disclosure. Keeping the selected record with
-/// its stable file identity lets resume/reveal reject a snapshot replacement without creating a
-/// Term, surface, or pane-body input owner.
-const InlineArchiveDetail = struct {
-    record: agent_session_archive_backend.Record,
-    request_id: u64,
-    state: enum { loading, ready, stale, unavailable } = .loading,
-    detail: ?agent_session_archive_detail.Detail = null,
-
-    fn deinit(self: *InlineArchiveDetail, allocator: std.mem.Allocator) void {
-        if (self.detail) |*parsed| parsed.deinit(allocator);
-        self.record.deinit(allocator);
-        self.* = undefined;
-    }
 };
 
 const TermRuntime = struct {
@@ -2700,7 +2478,7 @@ pub const SessionCollection = struct {
 /// 슬롯은 **소비처마다 따로** 둔다 — fingerprint가 그 소비처의 ops에서 나오므로, 한 슬롯을 공유하면
 /// 사이드바가 바뀔 때마다 도크 아티팩트가 버려진다. 새 소비처는 필드 하나를 더하고 아래 세 헬퍼
 /// (`hit`/`store`/`clear`)만 호출하면 되며, 소유권 규칙을 각자 다시 쓰지 않는다.
-const MeasuredTextCache = struct {
+pub const MeasuredTextCache = struct {
     fingerprint: u64,
     placements: []chrome_system_text.Placement,
     records: []renderer.ShapedGlyphRecord,
@@ -2711,14 +2489,14 @@ const MeasuredTextCache = struct {
 
     /// 이 fingerprint의 아티팩트가 슬롯에 살아 있는가. 스크롤은 fingerprint에 안 들어가므로 다른 스크롤
     /// 위치에서도 hit한다(호출자가 `scroll_origin_y_px` 차이로 평행이동한다).
-    fn hit(slot: ?MeasuredTextCache, fingerprint: u64) bool {
+    pub fn hit(slot: ?MeasuredTextCache, fingerprint: u64) bool {
         return if (slot) |c| c.fingerprint == fingerprint else false;
     }
 
     /// 새 아티팩트를 슬롯에 넣고 **옛 것을 해제한다**. 소유권이 여기 한 곳에 있어야 소비처가 늘어도
     /// free를 빠뜨리지 않는다 — 셰이핑이 실패하면 호출자가 이 함수를 부르지 않아 옛 아티팩트가 남고,
     /// fingerprint가 달라 hit하지 않으므로 잘못된 기하가 재사용되지 않는다.
-    fn store(
+    pub fn store(
         slot: *?MeasuredTextCache,
         allocator: std.mem.Allocator,
         fingerprint: u64,
@@ -3449,7 +3227,7 @@ pub const AppSession = struct {
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     /// Session Dock가 키보드 owner인가(docs/agent-session-list.md의 `agent_session_list` focus).
     /// **component-local `InteractionState.focused`로 대신할 수 없다**: 그건 published node id라
-    /// `invalidateAgentSessionDockFrame`이 selection/detail이 바뀔 때마다 통째로 지우고, 카드를 펼치면
+    /// `agent_dock.invalidateAgentSessionDockFrame`이 selection/detail이 바뀔 때마다 통째로 지우고, 카드를 펼치면
     /// action이 `item` → `card_header`로 옮겨가 `reconcile`도 지운다. 즉 카드를 클릭한 **바로 그 순간**
     /// 소유권이 사라져, Enter/Page가 도크가 아니라 터미널로 가 버린다. 키보드 소유는 그 frame node가
     /// 아니라 사용자의 마지막 focus 제스처에 묶인 session-level 사실이다.
@@ -3491,7 +3269,7 @@ pub const AppSession = struct {
     /// so the currently owned identity must authorize publication.
     agent_session_archive_detail_request_id: u64 = 0,
     /// A completed dock tree is the only render/input consumer of this DTO.
-    agent_session_inline_detail: ?InlineArchiveDetail = null,
+    agent_session_inline_detail: ?agent_dock.InlineArchiveDetail = null,
     /// Fixture-only evidence that an already-published detail action reached the stale source
     /// admission check. It is never used to authorize, render, or recover an archive action.
     agent_session_archive_smoke_stale_reveal_count: u32 = 0,
@@ -4206,7 +3984,7 @@ pub const AppSession = struct {
     /// 현재 활성 탭(`*Tab`). live_pty/pump 등 탭 내부에 접근할 때 쓴다. `app_window.active_tab`을
     /// 인덱스로 쓰므로 surface 라우팅(activeSurface)과 같은 활성 탭을 본다. 호출자는 탭이 있을 때만
     /// 부른다(surface_initialized·tabs 비어있지 않음).
-    fn activeTab(self: *AppSession) *Tab {
+    pub fn activeTab(self: *AppSession) *Tab {
         return self.tabs.items[self.app_window.active_tab];
     }
 
@@ -4215,7 +3993,7 @@ pub const AppSession = struct {
         return self.activeTab().activePane();
     }
 
-    fn dockVisible(self: *const AppSession) bool {
+    pub fn dockVisible(self: *const AppSession) bool {
         return self.dock_initialized and !self.chrome_minimal and self.dock.presented and !self.dock.collapsed;
     }
 
@@ -4242,28 +4020,12 @@ pub const AppSession = struct {
         };
     }
 
-    /// 도크 진입에서 아카이브 스캔을 요청할지. 순수 판정이라 부작용 없이 테스트로 고정한다.
-    ///
-    /// **가시성이 첫 조건이다.** `setDockView`는 도크가 닫힌 상태에서도 불리므로(workspace restore 등),
-    /// 이 가드가 없으면 보이지도 않는 도크가 사용자 이력 전체를 스캔한다.
-    fn shouldRefreshArchiveOnPresent(dock_visible: bool, view: dock_panel.View) bool {
-        return dock_visible and view == .agent_sessions;
-    }
-
-    /// 점진 발행을 요청할지. 순수 판정이라 부작용 없이 테스트로 고정한다.
-    ///
-    /// 기준은 "완주한 적이 있는가"가 아니라 **"지금 보여 줄 목록이 있는가"**다. 부분 진행 결과도 목록을
-    /// 통째로 교체하므로, 이미 목록이 있는데 점진 경로를 타면 첫 발행이 그 목록을 더 짧은 목록으로 덮는다.
-    fn shouldRequestArchiveProgress(visible_record_count: usize) bool {
-        return visible_record_count == 0;
-    }
-
     /// 도크에서 **이 뷰를 보여 준다**. 도크를 여는 모든 경로가 여기를 지난다.
     ///
     /// `setDockView`(전환)와 `onDockViewPresented`(진입)를 나누는 이유: 전환 함수는 "같은 뷰면 no-op"이
     /// 맞지만, **진입은 같은 뷰여도 일어난다**. 둘을 한 함수에 두었더니 `dock.view`가 이미
     /// `agent_sessions`인 채로 도크를 열면 맨 앞 조기 반환에 걸려 아카이브 스캔 요청이 아예 나가지
-    /// 않았다(도크를 떠날 때 `cancelAgentSessionArchive`가 진행 중 스캔을 취소하므로 닫았다 여는 흐름에서
+    /// 않았다(도크를 떠날 때 `agent_dock.cancelAgentSessionArchive`가 진행 중 스캔을 취소하므로 닫았다 여는 흐름에서
     /// 특히 잘 드러난다 — 목록도 스피너도 없이 비어 있고 새로 고침을 눌러야 나타났다).
     fn enterDockView(self: *AppSession, view: dock_panel.View) void {
         self.setDockView(view);
@@ -4275,13 +4037,13 @@ pub const AppSession = struct {
     /// **가시성 가드가 필수다** — `setDockView`는 도크가 닫힌 상태에서도 불리므로(workspace restore 등),
     /// 가드가 없으면 보이지도 않는 도크 때문에 사용자 이력 전체를 스캔한다.
     ///
-    /// 스캔 요청은 **항상 `force = false`**로 한다. 취소된 세대의 재요청은 `updateAgentSessionArchive`가
+    /// 스캔 요청은 **항상 `force = false`**로 한다. 취소된 세대의 재요청은 `agent_dock.updateAgentSessionArchive`가
     /// 단독으로 소유한다(그쪽만 `force = true`). 양쪽이 force를 쓰면 도크를 빠르게 여닫을 때
     /// `취소 → 재요청 → 취소`가 반복된다 — 취소 시 `agent_session_archive_completed_ns`가 갱신되지 않아
     /// TTL 가드도 걸리지 않기 때문이다.
     fn onDockViewPresented(self: *AppSession, view: dock_panel.View) void {
-        if (!shouldRefreshArchiveOnPresent(self.dockVisible(), view)) return;
-        self.refreshAgentSessionArchive(false);
+        if (!agent_dock.shouldRefreshArchiveOnPresent(self.dockVisible(), view)) return;
+        agent_dock.refreshAgentSessionArchive(self, false);
     }
 
     /// 뷰 전환. 같은 뷰면 no-op이라 불필요한 재그리기를 만들지 않는다. 트리를 떠날 때는 키보드 포커스도 함께
@@ -4300,335 +4062,28 @@ pub const AppSession = struct {
         // view 전환만으로 resize하지 않는다.
         const auto_right_width_changed = self.dockVisible() and self.dock.side == .right and self.dock.size == 0 and
             dock_layout.defaultRightPtForView(self.dock.view) != dock_layout.defaultRightPtForView(view);
-        if (self.dock.view == .agent_sessions and view != .agent_sessions) self.cancelAgentSessionArchive();
+        if (self.dock.view == .agent_sessions and view != .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
         self.dock.view = view;
         // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
         // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
         if (view != .agent_sessions) self.agent_session_dock_interaction = .{};
         // 뷰 전환은 어느 방향이든 도크 키보드 소유권을 놓는다. 들어올 때도 아직 누른 적이 없고,
         // 나갈 때 남겨 두면 다시 돌아왔을 때 클릭 없이 Enter를 가져간다.
-        self.releaseAgentSessionDockKeyFocus();
+        agent_dock.releaseAgentSessionDockKeyFocus(self);
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
         if (view == .agent_sessions) {
-            self.refreshAgentSessionArchiveScopeSnapshots();
+            agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
             self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;
-            self.requestAgentSessionArchiveScopeRoots(null);
-            self.refreshAgentSessionArchive(false);
+            agent_dock.requestAgentSessionArchiveScopeRoots(self, null);
+            agent_dock.refreshAgentSessionArchive(self, false);
         }
         if (auto_right_width_changed) {
             for (self.tabs.items) |tab| self.resizeTabPanes(tab);
             self.recomputeActivePaneRect();
             self.last_resize_size = null;
         }
-        self.metal_dirty = true;
-    }
-
-    fn refreshAgentSessionArchive(self: *AppSession, force: bool) void {
-        if (!self.agent_session_archive_initialized or self.agent_session_archive_loading) return;
-        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
-        if (!force and self.agent_session_archive_completed_ns != 0 and now - self.agent_session_archive_completed_ns < agent_session_archive_snapshot_ttl_ns) return;
-        const home_z = std.c.getenv("HOME") orelse return;
-        const home = std.mem.span(home_z);
-        if (home.len == 0) return;
-        const owned = self.allocator.dupe(u8, home) catch return;
-        // 점진 발행은 **빈 화면을 피하기 위한 것**이다(docs/agent-session-list.md §4.1). 그러므로 판정
-        // 기준은 "완주한 적이 있는가"가 아니라 "지금 보여 줄 목록이 있는가"다.
-        //
-        // 부분 진행 결과도 목록을 통째로 교체하므로, 화면에 이미 목록이 있는데 점진 경로를 타면 첫 발행
-        // (12개)이 그 목록을 덮어 **줄었다가 다시 차오르는** 것처럼 보인다. 이전 스캔이 부분만 받고
-        // 취소된 뒤 재진입하는 경우가 정확히 그 상황이다. 이럴 때는 완성본 하나로 교체하는 편이 조용하다.
-        const wants_progress = shouldRequestArchiveProgress(self.agent_session_archive_records.items.len);
-        if (!self.agent_session_archive_backend.submit(owned, wants_progress)) {
-            self.allocator.free(owned);
-            return;
-        }
-        self.agent_session_archive_loading = true;
-        self.metal_dirty = true;
-    }
-
-    /// Hiding this view must not let an old local-history scan replace a later, reopened dock.
-    /// The backend owns descriptor/allocation cleanup; this main-actor edge only withdraws the
-    /// generation and stops rendering a spinner for UI that is no longer visible.
-    fn cancelAgentSessionArchive(self: *AppSession) void {
-        if (!self.agent_session_archive_initialized) return;
-        if (!self.agent_session_archive_backend.cancel()) return;
-        self.agent_session_archive_loading = false;
-        self.metal_dirty = true;
-    }
-
-    fn updateAgentSessionArchive(self: *AppSession) void {
-        if (!self.agent_session_archive_initialized) return;
-        // The worker publishes one completed immutable snapshot only. Keeping
-        // the old snapshot until this point prevents refresh from blanking or
-        // visibly reordering the archive list while JSONL is still scanning.
-        var result = self.agent_session_archive_backend.takeResult() orelse return;
-        defer result.deinit(self.allocator);
-        switch (result.outcome) {
-            .completed, .partial_progress => {},
-            .cancelled => {
-                self.agent_session_archive_loading = false;
-                // A reopened dock requests again only after the cancelled worker has fully
-                // released its state. This makes the newest entry win without concurrent scans.
-                // 이 force 재요청은 **여기가 단독 소유자**다 — 도크 진입 훅은 force를 쓰지 않는다
-                // (양쪽이 쓰면 빠른 여닫기에서 `취소 → 재요청 → 취소`가 반복된다).
-                if (self.dockVisible() and self.dock.view == .agent_sessions) self.refreshAgentSessionArchive(true);
-                self.metal_dirty = true;
-                return;
-            },
-            .retain_previous => {
-                self.agent_session_archive_loading = false;
-                self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
-                self.metal_dirty = true;
-                return;
-            },
-        }
-        const prior_selected = if (self.agent_session_archive_selected) |index|
-            if (index < self.agent_session_archive_records.items.len) &self.agent_session_archive_records.items[index] else null
-        else
-            null;
-        const preserved_selected = archiveSnapshotSelectionIndex(prior_selected, result.records.items);
-        // Keep the old backing records alive until the replacement projection has had one chance
-        // to resolve the exact card anchor.  The anchor borrows the old session-id bytes, so
-        // freeing this list before restore would either dangle or force a second owned identity
-        // cache solely for this one atomic main-actor commit.
-        const prior_scroll_offset = self.agent_session_archive_scroll.offset_y_px;
-        const prior_scroll_anchor = self.captureAgentSessionDockScrollAnchor();
-        var old_records = self.agent_session_archive_records;
-        self.agent_session_archive_records = result.records;
-        result.records = .empty;
-        self.agent_session_archive_partial = result.partial;
-        self.agent_session_archive_selected = preserved_selected;
-        self.rebuildAgentSessionArchiveFilter();
-        self.reconcileAgentSessionInlineDetailAgainstSnapshot();
-        self.restoreAgentSessionDockScrollAnchor(prior_scroll_anchor, prior_scroll_offset);
-        for (old_records.items) |*record| record.deinit(self.allocator);
-        old_records.deinit(self.allocator);
-        self.agent_session_archive_scroll.dropWheelResidue();
-        // **부분 진행은 완료로 치지 않는다**(§4.1). `completed_ns`를 갱신하면 TTL 가드가 걸려 재스캔이
-        // 막히고 목록이 불완전한 채 고정되며, spinner를 끄면 아직 도는 스캔이 끝난 것처럼 보인다.
-        if (result.outcome == .completed) {
-            self.agent_session_archive_loading = false;
-            self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
-        }
-        self.metal_dirty = true;
-    }
-
-    fn clearAgentSessionArchiveWorkspaceRoot(self: *AppSession) void {
-        if (self.agent_session_archive_workspace_root) |old| self.allocator.free(old);
-        self.agent_session_archive_workspace_root = null;
-    }
-
-    fn clearAgentSessionArchiveProjectRoot(self: *AppSession) void {
-        if (self.agent_session_archive_project_root) |old| self.allocator.free(old);
-        self.agent_session_archive_project_root = null;
-    }
-
-    fn replaceAgentSessionArchiveScopeObservedCwd(self: *AppSession, owned_cwd: []u8) void {
-        if (self.agent_session_archive_scope_observed_cwd) |old| self.allocator.free(old);
-        self.agent_session_archive_scope_observed_cwd = owned_cwd;
-    }
-
-    fn clearAgentSessionArchiveScopeObservedCwd(self: *AppSession) void {
-        if (self.agent_session_archive_scope_observed_cwd) |old| self.allocator.free(old);
-        self.agent_session_archive_scope_observed_cwd = null;
-    }
-
-    fn submitAgentSessionArchiveScopeRoots(self: *AppSession, owned_cwd: []u8) bool {
-        self.agent_session_archive_scope_request_id +%= 1;
-        if (self.agent_session_archive_scope_request_id == 0) self.agent_session_archive_scope_request_id = 1;
-        if (!self.agent_session_archive_scope_backend.submit(owned_cwd, self.agent_session_archive_scope_request_id)) return false;
-        self.agent_session_archive_project_scope_loading = true;
-        self.metal_dirty = true;
-        return true;
-    }
-
-    /// A focus change can leave an older root walk in flight while the new
-    /// active Term has no local CWD. There is then no replacement job to fence
-    /// the old result, so advance the generation explicitly and let the drain
-    /// clear loading without ever publishing that previous tab's root.
-    fn invalidateAgentSessionArchiveScopeRequest(self: *AppSession) void {
-        self.agent_session_archive_scope_request_id +%= 1;
-        if (self.agent_session_archive_scope_request_id == 0) self.agent_session_archive_scope_request_id = 1;
-    }
-
-    /// Capture only the current in-memory observation on the main actor.  The
-    /// backend owns canonicalization and the `.git` ancestor walk, so neither
-    /// scope selection nor a later key/frame path can block on filesystem I/O.
-    fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?AgentSessionArchiveScope) void {
-        if (requested) |scope| switch (scope) {
-            .workspace => self.agent_session_archive_workspace_scope_requested = true,
-            .project => self.agent_session_archive_project_scope_requested = true,
-            .all => unreachable,
-        };
-        const term = self.activeTab().activeTerm();
-        self.refreshTermObservation(term, false, false);
-        const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
-        if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) {
-            const had_observed_cwd = self.agent_session_archive_scope_observed_cwd != null;
-            self.clearAgentSessionArchiveScopeObservedCwd();
-            if (!had_observed_cwd and requested == null) return;
-            if (self.agent_session_archive_project_scope_loading) {
-                if (self.agent_session_archive_project_scope_pending_cwd) |old| self.allocator.free(old);
-                self.agent_session_archive_project_scope_pending_cwd = null;
-                self.invalidateAgentSessionArchiveScopeRequest();
-            }
-            self.clearAgentSessionArchiveWorkspaceRoot();
-            self.clearAgentSessionArchiveProjectRoot();
-            if (self.agent_session_archive_workspace_scope_requested) {
-                self.agent_session_archive_workspace_scope_requested = false;
-                self.showNotice("활성 작업공간의 로컬 경로를 찾을 수 없습니다.");
-            }
-            if (self.agent_session_archive_project_scope_requested) {
-                self.agent_session_archive_project_scope_requested = false;
-                self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
-            }
-            if (self.agent_session_archive_scope != .all) {
-                self.rebuildAgentSessionArchiveFilter();
-                self.agent_session_archive_selected = null;
-                self.resetAgentSessionDockScroll();
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        const cwd_changed = agentSessionArchiveObservedCwdChanged(self.agent_session_archive_scope_observed_cwd, cwd);
-        if (!cwd_changed and requested == null) return;
-        const observed_cwd = self.allocator.dupe(u8, cwd) catch return;
-        const owned_cwd = self.allocator.dupe(u8, cwd) catch {
-            self.allocator.free(observed_cwd);
-            return;
-        };
-        self.replaceAgentSessionArchiveScopeObservedCwd(observed_cwd);
-        // A `cd` in the already active pane changes the containment authority
-        // just as a pane switch does. Do not leave rows from the old CWD's
-        // workspace/project visible while the replacement root is walking.
-        if (cwd_changed and self.agent_session_archive_scope != .all) {
-            self.clearAgentSessionArchiveWorkspaceRoot();
-            self.clearAgentSessionArchiveProjectRoot();
-            self.rebuildAgentSessionArchiveFilter();
-            self.agent_session_archive_selected = null;
-            self.resetAgentSessionDockScroll();
-            self.metal_dirty = true;
-        }
-        if (self.agent_session_archive_project_scope_loading) {
-            if (self.agent_session_archive_project_scope_pending_cwd) |old| self.allocator.free(old);
-            self.agent_session_archive_project_scope_pending_cwd = owned_cwd;
-            return;
-        }
-        if (!self.submitAgentSessionArchiveScopeRoots(owned_cwd)) {
-            self.allocator.free(owned_cwd);
-            if (self.agent_session_archive_workspace_scope_requested or self.agent_session_archive_project_scope_requested) {
-                self.agent_session_archive_workspace_scope_requested = false;
-                self.agent_session_archive_project_scope_requested = false;
-                self.showNotice("작업공간 경로 분석을 시작하지 못했습니다.");
-            }
-            return;
-        }
-    }
-
-    fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
-        var result = self.agent_session_archive_scope_backend.takeResult() orelse return;
-        defer result.deinit(self.allocator);
-        if (result.request_id != self.agent_session_archive_scope_request_id) {
-            // An active-Term transition without a usable CWD invalidated this
-            // worker. It has no replacement completion to clear the spinner.
-            self.agent_session_archive_project_scope_loading = false;
-            self.metal_dirty = true;
-            return;
-        }
-        self.agent_session_archive_project_scope_loading = false;
-        if (self.agent_session_archive_project_scope_pending_cwd) |pending_cwd| {
-            self.agent_session_archive_project_scope_pending_cwd = null;
-            if (self.submitAgentSessionArchiveScopeRoots(pending_cwd)) return;
-            self.allocator.free(pending_cwd);
-            self.agent_session_archive_workspace_scope_requested = false;
-            self.agent_session_archive_project_scope_requested = false;
-            self.showNotice("작업공간 경로 분석을 다시 시작하지 못했습니다.");
-            self.metal_dirty = true;
-            return;
-        }
-        self.clearAgentSessionArchiveWorkspaceRoot();
-        self.agent_session_archive_workspace_root = result.workspace_root;
-        result.workspace_root = null;
-        self.clearAgentSessionArchiveProjectRoot();
-        self.agent_session_archive_project_root = result.project_root;
-        result.project_root = null;
-        if (self.agent_session_archive_scope != .all) {
-            self.rebuildAgentSessionArchiveFilter();
-            self.agent_session_archive_selected = null;
-            self.resetAgentSessionDockScroll();
-        }
-        if (self.agent_session_archive_workspace_scope_requested) {
-            self.agent_session_archive_workspace_scope_requested = false;
-            if (self.agent_session_archive_workspace_root == null) {
-                self.showNotice("활성 작업공간의 로컬 경로를 찾을 수 없습니다.");
-            } else {
-                self.agent_session_archive_scope = .workspace;
-                self.rebuildAgentSessionArchiveFilter();
-                self.agent_session_archive_selected = null;
-                self.resetAgentSessionDockScroll();
-            }
-        }
-        if (self.agent_session_archive_project_scope_requested) {
-            self.agent_session_archive_project_scope_requested = false;
-            if (self.agent_session_archive_project_root == null) {
-                self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
-            } else {
-                self.agent_session_archive_scope = .project;
-                self.rebuildAgentSessionArchiveFilter();
-                self.agent_session_archive_selected = null;
-                self.resetAgentSessionDockScroll();
-            }
-        }
-        self.metal_dirty = true;
-    }
-
-    fn refreshAgentSessionArchiveProjectScopeForFocus(self: *AppSession) void {
-        if (!self.dockVisible() or self.dock.view != .agent_sessions or !self.surface_initialized) return;
-        const surface_id = self.activeSurface().id;
-        if (self.agent_session_archive_project_scope_surface_id == surface_id) return;
-        self.agent_session_archive_project_scope_surface_id = surface_id;
-        self.refreshAgentSessionArchiveScopeSnapshots();
-        self.requestAgentSessionArchiveScopeRoots(null);
-    }
-
-    fn refreshAgentSessionArchiveScopeSnapshots(self: *AppSession) void {
-        // A workspace root belongs to the active workspace tab, never to the
-        // window-global explorer. Drop the old snapshot before a new worker
-        // result arrives so switching tabs cannot briefly show another tab's
-        // archive containment range.
-        self.clearAgentSessionArchiveWorkspaceRoot();
-        self.clearAgentSessionArchiveProjectRoot();
-        self.clearAgentSessionArchiveScopeObservedCwd();
-        self.rebuildAgentSessionArchiveFilter();
-        self.agent_session_archive_selected = null;
-        self.resetAgentSessionDockScroll();
-    }
-
-    fn selectAgentSessionArchiveScope(self: *AppSession, scope: AgentSessionArchiveScope) void {
-        if (scope != .workspace) self.agent_session_archive_workspace_scope_requested = false;
-        if (scope != .project) self.agent_session_archive_project_scope_requested = false;
-        const available = switch (scope) {
-            .workspace => self.agent_session_archive_workspace_root != null,
-            .project => {
-                self.requestAgentSessionArchiveScopeRoots(.project);
-                return;
-            },
-            .all => true,
-        };
-        if (!available) {
-            if (scope == .workspace) {
-                self.requestAgentSessionArchiveScopeRoots(.workspace);
-                return;
-            }
-            unreachable;
-        }
-        self.agent_session_archive_scope = scope;
-        self.rebuildAgentSessionArchiveFilter();
-        self.agent_session_archive_selected = null;
-        self.closeAgentSessionInlineDetail();
-        self.resetAgentSessionDockScroll();
         self.metal_dirty = true;
     }
 
@@ -4913,7 +4368,7 @@ pub const AppSession = struct {
         return @max(floor_px, text_px);
     }
 
-    fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
+    pub fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
         return dock_layout.compute(.{
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
@@ -5086,10 +4541,10 @@ pub const AppSession = struct {
         const action = self.filePanelDockControlAction() orelse return;
         // A collapsed right dock has no consumer for archive work.  Withdraw the current
         // generation before changing geometry so reopening can request a fresh snapshot.
-        if (action == .collapse and self.dock.view == .agent_sessions) self.cancelAgentSessionArchive();
+        if (action == .collapse and self.dock.view == .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
         // 열기/접기/펴기 어느 것도 도크 **내용**을 누른 게 아니다. 접었다 편 뒤 클릭 없이 Enter가
         // 도크로 가지 않도록 소유권을 놓는다(게이트의 `dockVisible`만으로는 재표시 때 되살아난다).
-        self.releaseAgentSessionDockKeyFocus();
+        agent_dock.releaseAgentSessionDockKeyFocus(self);
         switch (action) {
             .open => {
                 self.dock.presented = true;
@@ -6495,7 +5950,7 @@ pub const AppSession = struct {
 
     /// 활성 탭에서 주어진 panel을 찾아 포커스한다(찾으면 true). 마우스/키보드 hit-test가 고른 `*Pane`으로
     /// 포커스를 옮길 때 쓴다(panel→index 매핑).
-    fn focusPaneByPtr(self: *AppSession, pane: *Pane) bool {
+    pub fn focusPaneByPtr(self: *AppSession, pane: *Pane) bool {
         const tab = self.activeTab();
         for (tab.panes.items, 0..) |p, i| {
             if (p == pane) {
@@ -7478,7 +6933,7 @@ pub const AppSession = struct {
 
     /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
     /// `sh -c`로 조립하지 않고, `/usr/bin/env`와 provider argv를 분리해 직접 exec 한다.
-    fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
+    pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
         const pane = self.activePane();
         const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
@@ -7494,7 +6949,7 @@ pub const AppSession = struct {
         // runner's inherited PATH.  That seam stays a direct exec with no shell wrapper.
         var shell_command: ?[]u8 = null;
         defer if (shell_command) |owned| self.allocator.free(owned);
-        if (archiveSmokeFakeProviderExecutable(record.parsed.provider)) |fake_executable| {
+        if (agent_dock.archiveSmokeFakeProviderExecutable(record.parsed.provider)) |fake_executable| {
             req.command = fake_executable;
             req.args = args[1..];
             req.login = false;
@@ -7529,79 +6984,6 @@ pub const AppSession = struct {
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1);
-    }
-
-    fn archiveSmokeFakeProviderExecutable(provider: maru.session.agent_session_archive.Provider) ?[]const u8 {
-        const enabled = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE") orelse return null;
-        if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return null;
-        // Keep the test-only direct-exec seam narrower than a single generic flag: it is valid
-        // only for one named cold-process action scenario per provider. Normal launches,
-        // including a user who happens to export the generic flag, retain `/usr/bin/env`.
-        const raw_scenario = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO") orelse return null;
-        const scenario = std.mem.span(raw_scenario);
-        const known_codex_scenario = std.mem.eql(u8, scenario, "resume-pointer") or
-            std.mem.eql(u8, scenario, "resume-keyboard") or
-            std.mem.eql(u8, scenario, "reveal-pointer") or
-            std.mem.eql(u8, scenario, "reveal-keyboard") or
-            std.mem.eql(u8, scenario, "reveal-recheck-pointer");
-        const raw = switch (provider) {
-            .codex => if (known_codex_scenario)
-                std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CODEX")
-            else
-                null,
-            .claude => if (std.mem.eql(u8, scenario, "claude-resume-pointer"))
-                std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CLAUDE")
-            else
-                null,
-        } orelse return null;
-        const path = std.mem.span(raw);
-        if (!std.fs.path.isAbsolute(path)) return null;
-        return path;
-    }
-
-    fn archiveSmokeScenarioIs(expected: []const u8) bool {
-        const enabled = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE") orelse return false;
-        if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return false;
-        const raw = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO") orelse return false;
-        return std.mem.eql(u8, std.mem.span(raw), expected);
-    }
-
-    /// Explicit archive-log action. The pending external-open ABI is shared
-    /// with file-tree reveal, but this admission first reopens the exact
-    /// no-follow regular file and compares the worker snapshot identity.
-    fn revealAgentSessionArchiveLog(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
-        const file = try std.Io.Dir.cwd().openFile(self.io, record.source_path, .{ .follow_symlinks = false });
-        defer file.close(self.io);
-        const stat = try file.stat(self.io);
-        if (stat.kind != .file or stat.inode != record.inode or archiveOpenedDevice(file) != record.device) return error.StaleArchiveSource;
-        const owned = try self.allocator.dupe(u8, record.source_path);
-        if (self.file_tree_external_open) |old| self.allocator.free(old);
-        self.file_tree_external_open = owned;
-    }
-
-    fn cloneAgentSessionArchiveRecord(
-        allocator: std.mem.Allocator,
-        source: *const agent_session_archive_backend.Record,
-    ) !agent_session_archive_backend.Record {
-        const parsed = try source.parsed.clone(allocator);
-        errdefer {
-            var owned = parsed;
-            owned.deinit(allocator);
-        }
-        const path = try allocator.dupe(u8, source.source_path);
-        return .{
-            .parsed = parsed,
-            .source_path = path,
-            .mtime_ns = source.mtime_ns,
-            .inode = source.inode,
-            .device = source.device,
-        };
-    }
-
-    fn nextAgentSessionArchiveDetailRequestId(self: *AppSession) u64 {
-        self.agent_session_archive_detail_request_id +%= 1;
-        if (self.agent_session_archive_detail_request_id == 0) self.agent_session_archive_detail_request_id = 1;
-        return self.agent_session_archive_detail_request_id;
     }
 
     /// The AppKit archive smoke is allowed to coordinate a deterministic detail
@@ -7673,120 +7055,17 @@ pub const AppSession = struct {
         target: AgentSessionArchiveSmokeProbeTarget,
     ) AgentSessionArchiveSmokeProbe {
         switch (target) {
-            .session_dock_card => return self.agentSessionDockSmokeProbe(),
-            .archive_resume => return self.inlineDetailSmokeProbe(.resume_session),
-            .archive_reveal_log => return self.inlineDetailSmokeProbe(.reveal_log),
-            .archive_focus_live => return self.inlineDetailSmokeProbe(.focus_live),
-            .dock_agent_sessions => return self.agentSessionDockSwitcherSmokeProbe(),
+            .session_dock_card => return agent_dock.agentSessionDockSmokeProbe(self),
+            .archive_resume => return agent_dock.inlineDetailSmokeProbe(self, .resume_session),
+            .archive_reveal_log => return agent_dock.inlineDetailSmokeProbe(self, .reveal_log),
+            .archive_focus_live => return agent_dock.inlineDetailSmokeProbe(self, .focus_live),
+            .dock_agent_sessions => return agent_dock.agentSessionDockSwitcherSmokeProbe(self),
             .dock_launcher => return self.dockLauncherSmokeProbe(),
-            .archive_refresh => return self.agentSessionDockRefreshSmokeProbe(),
-            .archive_expanded_scroll_anchor => return self.agentSessionDockExpandedAnchorSmokeProbe(),
-            .archive_scope_row => return self.agentSessionDockNodeSmokeProbe(chrome.components.session_dock.build.NodeIds.scope_row),
-            .archive_search => return self.agentSessionDockNodeSmokeProbe(chrome.components.session_dock.build.NodeIds.search),
-            .archive_expanded_card => return self.agentSessionDockExpandedCardSmokeProbe(),
-        }
-    }
-
-    fn inlineArchiveDetailMatchesRecord(detail: *const InlineArchiveDetail, record: *const agent_session_archive_backend.Record) bool {
-        return detail.record.parsed.provider == record.parsed.provider and
-            detail.record.device == record.device and
-            detail.record.inode == record.inode and
-            std.mem.eql(u8, detail.record.parsed.session_id, record.parsed.session_id);
-    }
-
-    /// A dock-local disclosure owns a cloned, identity-bound record and deliberately creates
-    /// neither a Term nor a surface. The SessionDock completed tree is its only render/input
-    /// owner. Selecting the same exact source toggles it; a different source revokes prior
-    /// capture before its loading state is painted.
-    fn openAgentSessionInlineDetail(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
-        if (self.agent_session_inline_detail) |*existing| {
-            if (inlineArchiveDetailMatchesRecord(existing, record)) {
-                self.closeAgentSessionInlineDetail();
-                return;
-            }
-            existing.deinit(self.allocator);
-            self.agent_session_inline_detail = null;
-        }
-        self.agent_session_inline_detail = .{
-            .record = try cloneAgentSessionArchiveRecord(self.allocator, record),
-            .request_id = self.nextAgentSessionArchiveDetailRequestId(),
-        };
-        self.invalidateAgentSessionDockFrame();
-        self.submitInlineAgentSessionDetail();
-        self.metal_dirty = true;
-    }
-
-    /// A disclosure has no independent surface lifetime. Every path which removes it revokes
-    /// the painted action table first, so delayed input cannot act on detail hidden by scope,
-    /// search, grouping, or Escape.
-    fn closeAgentSessionInlineDetail(self: *AppSession) void {
-        if (self.agent_session_inline_detail) |*detail| detail.deinit(self.allocator);
-        self.agent_session_inline_detail = null;
-        self.invalidateAgentSessionDockFrame();
-        self.metal_dirty = true;
-    }
-
-    /// The bounded backend accepts one detached read at a time.  A fast card switch therefore
-    /// leaves the newer identity in loading state until the older result is drained; the next
-    /// main-actor tick retries using only the current cloned identity.  No old result is ever
-    /// reused for the newer card.
-    fn submitInlineAgentSessionDetail(self: *AppSession) void {
-        const detail = self.agent_session_inline_detail orelse return;
-        if (detail.state != .loading) return;
-        var source: agent_session_archive_detail_backend.Source = .{
-            .provider = detail.record.parsed.provider,
-            .source_path = self.allocator.dupe(u8, detail.record.source_path) catch return,
-            .inode = detail.record.inode,
-            .device = detail.record.device,
-        };
-        if (!self.agent_session_archive_detail_backend.submit(source, detail.request_id)) source.deinit(self.allocator);
-    }
-
-    /// Frame work is queue-only: the detached backend performed every open,
-    /// stat, read, parse and redact operation before this point.
-    fn updateAgentSessionArchiveDetail(self: *AppSession) void {
-        var result = self.agent_session_archive_detail_backend.takeResult() orelse return;
-        defer result.deinit(self.allocator);
-        if (self.agent_session_inline_detail) |*detail| {
-            if (detail.request_id == result.request_id and detail.state == .loading) {
-                detail.state = switch (result.state) {
-                    .ready => .ready,
-                    .stale => .stale,
-                    .unavailable => .unavailable,
-                };
-                if (result.detail) |parsed| {
-                    detail.detail = parsed;
-                    result.detail = null;
-                }
-                self.invalidateAgentSessionDockFrame();
-                self.metal_dirty = true;
-            }
-        }
-        // A stale completion frees the one backend slot; retry the still-current loading
-        // identity only after that release, never by queuing raw transcript input on UI.
-        self.submitInlineAgentSessionDetail();
-    }
-
-    /// A refreshed archive may nominate the same provider session id from a different file
-    /// identity. The currently expanded disclosure cannot reveal or resume through that
-    /// replacement. Absence is intentionally not a mismatch: a bounded/partial snapshot cannot
-    /// prove the old file disappeared.
-    fn reconcileAgentSessionInlineDetailAgainstSnapshot(self: *AppSession) void {
-        if (self.agent_session_inline_detail) |*detail| {
-            var replacement_seen = false;
-            for (self.agent_session_archive_records.items) |record| {
-                if (record.parsed.provider != detail.record.parsed.provider or
-                    !std.mem.eql(u8, record.parsed.session_id, detail.record.parsed.session_id)) continue;
-                replacement_seen = record.inode != detail.record.inode or record.device != detail.record.device;
-                break;
-            }
-            if (replacement_seen and detail.state != .stale) {
-                if (detail.detail) |*parsed| parsed.deinit(self.allocator);
-                detail.detail = null;
-                detail.state = .stale;
-                self.invalidateAgentSessionDockFrame();
-                self.metal_dirty = true;
-            }
+            .archive_refresh => return agent_dock.agentSessionDockRefreshSmokeProbe(self),
+            .archive_expanded_scroll_anchor => return agent_dock.agentSessionDockExpandedAnchorSmokeProbe(self),
+            .archive_scope_row => return agent_dock.agentSessionDockNodeSmokeProbe(self, chrome.components.session_dock.build.NodeIds.scope_row),
+            .archive_search => return agent_dock.agentSessionDockNodeSmokeProbe(self, chrome.components.session_dock.build.NodeIds.search),
+            .archive_expanded_card => return agent_dock.agentSessionDockExpandedCardSmokeProbe(self),
         }
     }
 
@@ -7989,7 +7268,7 @@ pub const AppSession = struct {
     /// cache만 복사한다. in-process Term은 core가 곧 runtime SSOT이므로 title_generation(OSC 0/2/7/RIS)을 cheap gate로
     /// 삼아 sidebar/frame hot path의 불필요한 lock+allocation을 피한다. `force`는 workspace/control snapshot처럼
     /// semantic_state까지 즉시 coherent해야 하는 저빈도 경로용이다.
-    fn refreshTermObservation(self: *AppSession, term: *Term, include_foreground: bool, force: bool) void {
+    pub fn refreshTermObservation(self: *AppSession, term: *Term, include_foreground: bool, force: bool) void {
         if (term.kind != .terminal or !term.rt.live_initialized or term.rt.terminated) return;
         if (!force) {
             if (term.surface.remote != null) return; // remote pump/poll이 event cache를 갱신한다.
@@ -14579,347 +13858,6 @@ pub const AppSession = struct {
         return if (index < self.file_tree_rows.items.len) index else null;
     }
 
-    /// 스크롤 영역의 높이를 **layout에게 묻는다**(docs/scroll-area.md §4.2).
-    ///
-    /// 창(`project`)의 입력에 뷰포트 높이가 있고 그 출력이 무엇을 build할지 정하므로 "layout 전에
-    /// 뷰포트를 알아야 한다"는 순서 문제가 있다. 예전에는 `content.h - fixedChromeHeight()`로
-    /// **예측**해서 풀었는데, 그러면 같은 수의 출처가 둘이 되어 고정 chrome이 하나 늘거나 margin이
-    /// 바뀔 때 조용히 어긋난다(어긋나면 마지막 항목이 잘리거나 빈 띠가 남는다).
-    ///
-    /// 대신 **자식 없는** scroll-area로 layout을 한 번 돌린다. item 노드를 만들지 않으므로 비싸지
-    /// 않다 — 고정 chrome 넷과 빈 컨테이너뿐이다. 실패하면 0을 돌려주고, 그러면 창이 비어 이 프레임에
-    /// 목록이 그려지지 않는다(틀린 높이로 그리는 것보다 낫다).
-    fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
-        const content = self.dockGeometry().tree_content;
-        if (content.w == 0 or content.h == 0) return 0;
-
-        const sizes = chrome.components.session_dock.build.bufferSizes(&.{});
-        var nodes: [16]chrome.ui.tree.UiNode = undefined;
-        var entries: [16]chrome.ui.tree.RectEntry = undefined;
-        var layout_items: [16]chrome.ui.layout.Item = undefined;
-        var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
-        var child_rects: [16]chrome.ui.layout.UiRect = undefined;
-        var actions: [16]chrome.components.session_dock.ids.Entry = undefined;
-        if (sizes.entries > entries.len or sizes.actions > actions.len) return 0;
-
-        const frame = chrome.components.session_dock.build.build(
-            self.agentSessionDockProps(content, .{
-                .content_height_px = 0,
-                .max_offset_px = 0,
-                .offset_y_px = 0,
-                .first_index = 0,
-                .first_origin_y_px = 0,
-                .end_exclusive = 0,
-            }, &.{}),
-            .{
-                .nodes = nodes[0..sizes.nodes],
-                .entries = entries[0..sizes.entries],
-                .layout_items = layout_items[0..sizes.layout_items],
-                .flex_scratch = flex_scratch[0..sizes.flex_scratch],
-                .child_rects = child_rects[0..sizes.child_rects],
-                .actions = actions[0..sizes.actions],
-            },
-        ) catch return 0;
-        const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse return 0;
-        return @intFromFloat(@max(@round(frame.tree.entries[index].rect.height), 0));
-    }
-
-    /// Completed Session Dock geometry is the only coordinate source for the native IME
-    /// candidate window.  The field's label is shaped by CoreText, but its end caret follows
-    /// the same bounded EAW cell budget as the component before the worker has a new artifact.
-    /// This keeps a Korean composition inside the field rather than falling back to the active
-    /// terminal cursor.
-    fn agentSessionDockSearchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
-        if (!self.agentSessionSearchOwnsInput()) return null;
-        const cw = self.cell_width_px;
-        if (cw == 0) return null;
-        const content = self.dockGeometry().tree_content;
-        const entry = for (self.agent_session_dock_entries.items) |candidate| {
-            if (candidate.id == chrome.components.session_dock.build.NodeIds.search) break candidate;
-        } else return null;
-        const button = chrome.components.session_dock.types.ButtonMetrics.resolve(self.agentSessionDockScaleMilli());
-        const left = entry.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px + button.leading_icon_extent_px + button.leading_icon_gap_px));
-        const right = entry.rect.x + entry.rect.width - @as(f32, @floatFromInt(button.content_inset_x_px));
-        if (right <= left) return null;
-        const query_cols = chrome.components.overlay_input.displayCols(self.agent_session_archive_search.query.items);
-        // Marked text is painted immediately after committed query. The native candidate window
-        // must follow that same visible end, otherwise a Korean composition is anchored before
-        // its own preedit syllable while waiting for commit.
-        const preedit_cols = chrome.components.overlay_input.displayCols(self.agent_session_archive_search.preedit.items);
-        const wanted_x = left + @as(f32, @floatFromInt(query_cols +| preedit_cols)) * @as(f32, @floatFromInt(cw));
-        const x = @min(wanted_x, right - @as(f32, @floatFromInt(cw)));
-        const line_h = chrome.ui.typography.lineHeightPx(.control, self.agentSessionDockScaleMilli());
-        if (entry.rect.height < @as(f32, @floatFromInt(line_h))) return null;
-        return .{
-            .x = @as(i32, @intCast(content.x)) + @as(i32, @intFromFloat(@floor(x))),
-            .y = @as(i32, @intCast(content.y)) + @as(i32, @intFromFloat(@floor(entry.rect.y + (entry.rect.height - @as(f32, @floatFromInt(line_h)) / 2)))),
-            .w = cw,
-            .h = line_h,
-        };
-    }
-
-    /// Finds the one materialized projection entry whose source identity owns the inline
-    /// disclosure.  The record index is not stable across snapshots, so the lookup compares the
-    /// cloned `(provider, session id, device, inode)` identity rather than retaining an index.
-    fn agentSessionDockExpandedProjectionIndex(self: *const AppSession) ?usize {
-        const detail = self.agent_session_inline_detail orelse return null;
-        for (self.agent_session_archive_projection.entries.items, 0..) |entry, entry_index| {
-            if (entry != .card) continue;
-            const record_index = entry.card;
-            if (record_index >= self.agent_session_archive_records.items.len) continue;
-            if (inlineArchiveDetailMatchesRecord(&detail, &self.agent_session_archive_records.items[record_index]))
-                return entry_index;
-        }
-        return null;
-    }
-
-    /// This is the sole translation from archive entries to fixed chrome pixel metrics. It is pure
-    /// and bounded (records are capped at 500), and therefore safe on the render/input path.
-    fn agentSessionDockScrollProjection(self: *const AppSession) chrome.ui.scroll_area.Projection {
-        const items = self.agentSessionDockScrollItems();
-        return chrome.ui.scroll_area.project(
-            items,
-            ArchiveScrollItems.heightPx,
-            items.extent(self.agentSessionDockContentViewportHeightPx()),
-            self.agent_session_archive_scroll.offset_y_px,
-        );
-    }
-
-    fn agentSessionDockScrollItems(self: *const AppSession) ArchiveScrollItems {
-        const m = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli());
-        return .{
-            .entries = self.agent_session_archive_projection.entries.items,
-            .group_h_px = m.group_h,
-            .card_h_px = m.card_h,
-            .gap_px = m.item_gap,
-            .expanded_index = self.agentSessionDockExpandedProjectionIndex(),
-            .expanded_h_px = m.card_h + m.expanded_detail_h + m.expanded_actions_h,
-        };
-    }
-
-    /// Captures only a card that crosses the old viewport top.  A group header or the inter-item
-    /// gap cannot stand in for a session identity: when either occupies that boundary the caller
-    /// deliberately falls back to the retained numeric offset rather than guessing a neighbour.
-    fn captureAgentSessionDockScrollAnchor(self: *const AppSession) ?ArchiveScrollAnchor {
-        const projection = self.agentSessionDockScrollProjection();
-        return archiveScrollAnchorFor(
-            self.agent_session_archive_records.items,
-            projection,
-            self.agentSessionDockScrollItems(),
-        );
-    }
-
-    /// Resolves the old card identity only against a materialized replacement card.  It never
-    /// falls back to a title/path/mtime or a nearby record: an absent or collapsed identity keeps
-    /// the old numeric pixel offset, clamped to the new content bounds.
-    fn restoreAgentSessionDockScrollAnchor(self: *AppSession, anchor: ?ArchiveScrollAnchor, fallback_offset_px: u32) void {
-        const projection = self.agentSessionDockScrollProjection();
-        if (anchor) |saved| {
-            if (archiveScrollAnchorOffsetFor(
-                self.agent_session_archive_records.items,
-                saved,
-                self.agentSessionDockScrollItems(),
-                projection.max_offset_px,
-            )) |offset| {
-                _ = self.agent_session_archive_scroll.setOffsetPx(offset, projection.max_offset_px);
-                return;
-            }
-        }
-        _ = self.agent_session_archive_scroll.setOffsetPx(fallback_offset_px, projection.max_offset_px);
-    }
-
-    /// Session Dock가 키보드를 소유하는가 — 도크가 보이는 것만으로는 부족하고 사용자가 도크 안을 눌러
-    /// 키보드를 넘겨준 상태여야 한다(docs/agent-session-list.md §키보드: `agent_session_list` focus owner가
-    /// Enter/Page/Home/End를 갖는다). 스크롤 키·Enter·`/`가 **같은 게이트**를 써야 터미널에서 타이핑하는
-    /// 동안 도크가 그 키를 가져가지 않는다. 검색 필드가 활성이면 그쪽이 먼저다.
-    fn agentSessionDockOwnsKeys(self: *const AppSession) bool {
-        return self.dockVisible() and self.dock.view == .agent_sessions and
-            !self.agent_session_archive_search_active and
-            self.agent_session_dock_key_focus;
-    }
-
-    /// 도크 안 primary down은 키보드를 도크로 넘긴다. 카드/그룹뿐 아니라 헤더·빈 여백도 포함한다 —
-    /// 사용자가 도크를 눌렀다는 사실이 소유권이고, 그 frame에 어떤 action rect가 있었는지가 아니다.
-    fn takeAgentSessionDockKeyFocus(self: *AppSession) void {
-        if (self.agent_session_dock_key_focus) return;
-        self.agent_session_dock_key_focus = true;
-        self.metal_dirty = true;
-    }
-
-    /// 도크의 keyboard 소유권을 놓는다 — 선택 카드·펼친 detail·스크롤 위치는 그대로다. `focus_owner`는
-    /// 도크 카드를 눌러도 `.workspace`에 머무르므로, 터미널을 다시 클릭했을 때 조건부 `focusWorkspaceInput`
-    /// 하나로는 이 소유권이 남아 도크가 계속 키를 가져갔다. 도크 검색도 도크가 가진 키 소비자이므로
-    /// 여기서 함께 blur한다 — 그러지 않으면 `handleAgentSessionArchiveSearchKey`의 `else => return true`가
-    /// 터미널로 돌아온 뒤의 **모든** 키를 계속 삼킨다(Enter 하나가 아니라 타이핑 전체).
-    fn releaseAgentSessionDockKeyFocus(self: *AppSession) void {
-        const had_focus = self.agent_session_dock_key_focus or self.agent_session_dock_interaction.focused != null;
-        self.agent_session_dock_key_focus = false;
-        self.agent_session_dock_interaction.focused = null;
-        const blurred = self.blurAgentSessionDockSearch();
-        if (had_focus or blurred) self.metal_dirty = true;
-    }
-
-    /// 도크 검색바를 blur한다(포커스 아웃 — 도크 밖 클릭·view 전환·접기). 사이드바 검색의 `blurSidebarSearch`와
-    /// 같은 규율이다: **비활성만 하고 검색어는 보존**해 다시 검색바를 누르면 이어서 편집·필터한다. 조합 중이던
-    /// IME preedit는 잃지 않도록 확정한다(`commitPreedit`의 "포커스 상실" 계약). 완전히 비우려면 Esc다.
-    fn blurAgentSessionDockSearch(self: *AppSession) bool {
-        if (!self.agent_session_archive_search_active) return false;
-        self.agent_session_archive_search_active = false;
-        if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
-            self.rebuildAgentSessionArchiveFilter();
-            self.resetAgentSessionDockScroll();
-        }
-        return true;
-    }
-
-    /// Session Dock owns these navigation keys whenever its search field does not.  Returning
-    /// true at a boundary is intentional: a key aimed at the visible dock must not leak into the
-    /// focused terminal just because no further pixel motion is possible.
-    fn handleAgentSessionDockScrollKey(self: *AppSession, event: terminal.KeyEvent) bool {
-        if (!self.agentSessionDockOwnsKeys() or
-            event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
-            return false;
-        const projection = self.agentSessionDockScrollProjection();
-        // 카드 높이만 있으면 되므로 항목 열을 빌린 채로 두지 않는다(`ArchiveScrollItems.entries` 수명).
-        const card_h_px = self.agentSessionDockScrollItems().card_h_px;
-        const changed = switch (event.key) {
-            .page_up => self.agent_session_archive_scroll.scrollByPx(
-                -@as(i64, chrome.ui.scroll_area.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
-                projection.max_offset_px,
-            ),
-            .page_down => self.agent_session_archive_scroll.scrollByPx(
-                @as(i64, chrome.ui.scroll_area.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
-                projection.max_offset_px,
-            ),
-            .home => self.agent_session_archive_scroll.setOffsetPx(0, projection.max_offset_px),
-            .end => self.agent_session_archive_scroll.setOffsetPx(projection.max_offset_px, projection.max_offset_px),
-            else => return false,
-        };
-        self.agent_session_archive_scroll.dropWheelResidue();
-        if (changed) self.metal_dirty = true;
-        return true;
-    }
-
-    fn resetAgentSessionDockScroll(self: *AppSession) void {
-        self.agent_session_archive_scroll.reset();
-        self.agent_session_archive_scroll.dropWheelResidue();
-    }
-
-    fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
-        self.agent_session_archive_filtered_indices.clearRetainingCapacity();
-        for (self.agent_session_archive_records.items, 0..) |record, index| {
-            const scope_matches = switch (self.agent_session_archive_scope) {
-                .all => true,
-                .workspace => if (self.agent_session_archive_workspace_root) |root|
-                    agentSessionArchiveWithinRoot(record, root)
-                else
-                    false,
-                .project => if (self.agent_session_archive_project_root) |root|
-                    agentSessionArchiveWithinRoot(record, root)
-                else
-                    false,
-            };
-            if (scope_matches and agentSessionArchiveMatches(record, self.agent_session_archive_search.query.items))
-                self.agent_session_archive_filtered_indices.append(self.allocator, index) catch break;
-        }
-        // records는 worker가 마지막 활동 시각 내림차순으로 발행한다. 오래된순은 그 목록을 **뒤집기만**
-        // 하면 된다 — 여기서 다시 정렬하면 정렬 키가 두 곳에 생겨 서로 어긋날 수 있다. 그룹은 이 순서를
-        // 따라 projection이 다시 만들므로 그룹 순서와 그룹 안 순서가 함께 뒤집힌다.
-        if (self.agent_session_archive_sort == .oldest_first)
-            std.mem.reverse(usize, self.agent_session_archive_filtered_indices.items);
-        self.rebuildAgentSessionArchiveProjection();
-    }
-
-    fn rebuildAgentSessionArchiveProjection(self: *AppSession) void {
-        var items: std.ArrayList(agent_session_archive_view.Item) = .empty;
-        defer items.deinit(self.allocator);
-        items.ensureTotalCapacity(self.allocator, self.agent_session_archive_filtered_indices.items.len) catch return;
-        for (self.agent_session_archive_filtered_indices.items) |record_index| {
-            if (record_index >= self.agent_session_archive_records.items.len) continue;
-            const parsed = &self.agent_session_archive_records.items[record_index].parsed;
-            items.appendAssumeCapacity(.{
-                .record_index = record_index,
-                .cwd = parsed.cwd,
-                .cwd_canonical = parsed.cwd_canonical,
-            });
-        }
-        const collapsed: []const []const u8 = self.agent_session_archive_collapsed_groups.items;
-        const staged = agent_session_archive_view.build(self.allocator, items.items, collapsed) catch return;
-        self.agent_session_archive_projection.deinit(self.allocator);
-        self.agent_session_archive_projection = staged;
-        self.agent_session_dock_snapshot_generation +%= 1;
-        if (self.agent_session_dock_snapshot_generation == 0) self.agent_session_dock_snapshot_generation = 1;
-    }
-
-    /// 정렬 방향을 뒤집는다. 목록 순서가 통째로 바뀌므로 scroll anchor를 복원하지 않고 맨 위로 보낸다 —
-    /// 뒤집힌 목록의 "같은 자리"는 사용자가 보던 자리가 아니다. 열린 카드는 identity로 유지된다.
-    fn toggleAgentSessionArchiveSort(self: *AppSession) void {
-        self.agent_session_archive_sort = self.agent_session_archive_sort.toggled();
-        self.rebuildAgentSessionArchiveFilter();
-        self.agent_session_archive_scroll.offset_y_px = 0;
-        self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
-        self.agent_session_archive_scroll.dropWheelResidue();
-        self.metal_dirty = true;
-    }
-
-    fn toggleAgentSessionArchiveGroup(self: *AppSession, group_index: usize) void {
-        if (group_index >= self.agent_session_archive_projection.groups.items.len) return;
-        const key = self.agent_session_archive_projection.groups.items[group_index].key;
-        var existing: ?usize = null;
-        for (self.agent_session_archive_collapsed_groups.items, 0..) |collapsed, index| {
-            if (std.mem.eql(u8, collapsed, key)) {
-                existing = index;
-                break;
-            }
-        }
-        if (existing) |index| {
-            const removed = self.agent_session_archive_collapsed_groups.orderedRemove(index);
-            self.allocator.free(removed);
-        } else {
-            const owned = self.allocator.dupe(u8, key) catch return;
-            self.agent_session_archive_collapsed_groups.append(self.allocator, owned) catch {
-                self.allocator.free(owned);
-                return;
-            };
-        }
-        // A group change may remove the disclosure from the materialized projection. It must
-        // not leave a hidden ready action capability alive.
-        self.closeAgentSessionInlineDetail();
-        self.rebuildAgentSessionArchiveProjection();
-        self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
-        self.agent_session_archive_scroll.dropWheelResidue();
-        self.metal_dirty = true;
-    }
-
-    fn handleAgentSessionArchiveSearchKey(self: *AppSession, event: terminal.KeyEvent) bool {
-        if (!self.agent_session_archive_search_active) return false;
-        switch (event.key) {
-            .escape => {
-                self.agent_session_archive_search_active = false;
-                self.agent_session_archive_search.clear();
-            },
-            .backspace => {
-                self.agent_session_archive_search.backspace();
-            },
-            .char => |codepoint| {
-                if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return true;
-                var utf8: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(codepoint, &utf8) catch return true;
-                if (self.agent_session_archive_search.query.items.len + len <= 256)
-                    self.agent_session_archive_search.appendChar(self.allocator, codepoint) catch {};
-            },
-            else => return true,
-        }
-        self.rebuildAgentSessionArchiveFilter();
-        self.resetAgentSessionDockScroll();
-        // A query may hide the selected record; do not leave a hidden archive
-        // identity selected for the later explicit action/tab path.
-        self.agent_session_archive_selected = null;
-        self.closeAgentSessionInlineDetail();
-        self.metal_dirty = true;
-        return true;
-    }
-
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
         return self.fileTreeFileMutationBusy() or
             self.file_tree_root_pick_pending != .none or self.file_tree_root_picker_inflight != .none or
@@ -16665,7 +15603,7 @@ pub const AppSession = struct {
         // A terminal/body click takes the keyboard owner away from the archive list.  Without
         // releasing that ownership, Enter/PageUp/PageDown would keep driving an open dock while
         // the user was visibly typing in the workspace terminal.
-        self.releaseAgentSessionDockKeyFocus();
+        agent_dock.releaseAgentSessionDockKeyFocus(self);
         self.agent_session_dock_interaction.capture = null;
         self.focus_owner = .workspace;
         self.workspace_focus_pending = false;
@@ -22251,12 +21189,12 @@ pub const AppSession = struct {
         // position into an unrelated numeric backing-pixel offset. No card/closed detail falls
         // back to the existing bounded offset policy.
         const preserve_visible_dock_scroll = self.dock_initialized and self.dock.view == .agent_sessions and self.dockVisible();
-        const dock_scroll_anchor = if (preserve_visible_dock_scroll) self.captureAgentSessionDockScrollAnchor() else null;
+        const dock_scroll_anchor = if (preserve_visible_dock_scroll) agent_dock.captureAgentSessionDockScrollAnchor(self) else null;
         const dock_scroll_fallback_offset_px = self.agent_session_archive_scroll.offset_y_px;
         self.appearance.font.size = clamped;
         self.applyMetricsPipeline();
         if (preserve_visible_dock_scroll)
-            self.restoreAgentSessionDockScrollAnchor(dock_scroll_anchor, dock_scroll_fallback_offset_px);
+            agent_dock.restoreAgentSessionDockScrollAnchor(self, dock_scroll_anchor, dock_scroll_fallback_offset_px);
     }
 
     /// appearance(폰트·여백·테마)가 통째로 바뀌었을 때의 일반 적용 경로. setFontSize의 메트릭 재계산을 일반화한 것 —
@@ -22329,47 +21267,6 @@ pub const AppSession = struct {
         MeasuredTextCache.clear(&self.pane_tab_title_text_cache, self.allocator);
     }
 
-    /// 도크의 비례 텍스트를 **이번 프레임 안에서** 셰이핑해 캐시에 넣는다.
-    ///
-    /// 예전에는 이 일을 detached worker에 맡기고 결과를 다음 tick에 받았다. 그런데 도크의 모든 텍스트와
-    /// 등록 SVG 아이콘이 이 아티팩트 **하나**에 실리므로(`shapesTextOp`가 `!wide_icons` 전부를 담는다),
-    /// 결과가 없는 프레임의 도크는 카드 배경만 남은 빈 상자가 됐다. 게다가 in-flight가 1개라 스크롤처럼
-    /// 매 프레임 내용이 바뀌는 동안에는 도착한 결과가 계속 fingerprint 불일치로 버려져, 한 프레임 깜빡임이
-    /// 아니라 스크롤하는 내내 빈 상태가 유지됐다(사용자 보고).
-    ///
-    /// 나머지 chrome은 이미 이렇게 하고 있다 — 사이드바·탭바·터미널 본문은 `CoreTextFrameBuilder.shapeOnly`로
-    /// 같은 tick에 CoreText를 부르며, 터미널은 셀마다 `CTLine`을 하나씩 만든다. 도크 한 프레임은 그에 비하면
-    /// run 수십 개다(측정: 55 run·969 glyph에 1.4ms, ReleaseFast). 그러므로 캐시는 빈 프레임을 정당화하는
-    /// 장치가 아니라 **순수 최적화**이며, miss는 지금 셰이핑해서 메운다.
-    ///
-    /// 실패하면 캐시를 건드리지 않는다. 옛 fingerprint가 남아 hit되지 않으므로 호출자가 아이콘 없는
-    /// 프레임을 그리게 되지만, 잘못된 기하의 아티팩트를 재사용하는 것보다 낫다.
-    fn shapeAgentSessionDockRichText(
-        self: *AppSession,
-        ops: []const chrome.draw.Op,
-        tokens: *const chrome.Tokens,
-        fingerprint: u64,
-        dock_scale_milli: u32,
-        scroll_origin_y_px: i32,
-    ) void {
-        // face는 터미널과 같은 resolved appearance에서 온다 — 같은 화면의 사이드바가 사용자 monospace인데
-        // 도크만 시스템 UI face면 앱이 폰트 설정을 절반만 따르는 셈이다(docs/font-strategy.md "Chrome 텍스트
-        // face"). 크기 위계(role 토큰)는 여전히 `font.size`와 독립이라 도크 기하는 이 값에 흔들리지 않는다.
-        var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops, tokens, self.cell_width_px, .{
-            .family = self.appearance.font.family,
-            .fallback = self.appearance.font.fallback,
-        }) catch return;
-        defer request.deinit(self.allocator);
-        var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, dock_scale_milli) catch return;
-        defer unresolved.deinit(self.allocator);
-        const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
-        // 셰이핑이 이 프레임 안에서 끝나므로 기준 원점은 지금 그리는 그 값이다. worker 시절에는 submit
-        // 시점과 poll 시점의 스크롤이 달라 이 기준이 어긋날 수 있었지만 이제 그 간극이 없다.
-        // 옛 아티팩트 해제는 `store`가 소유한다 — 예전에는 여기서 **모든** 슬롯을 비우고(clear) 자기 것만
-        // 다시 채웠는데, 소비처가 늘면 그 방식이 남의 캐시를 매 셰이핑마다 버리게 된다.
-        MeasuredTextCache.store(&self.agent_session_dock_rich_text_cache, self.allocator, fingerprint, artifact, scroll_origin_y_px);
-    }
-
     /// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 프리뷰 iframe `zoom`·HTML/PDF `pageZoom`이 쓴다.
     /// 배율 = 현재 폰트 크기 / base_font_size(⌘0 기준 config 크기)이므로, 기본/⌘0에서 정확히 1.0이고 ⌘+/− 만큼만
     /// 프리뷰가 확대/축소된다(사용자 결정 2026-07-23 "cmd +/− 로 조절할 때 같이"). base가 비정상(≤0)이면 1.0으로
@@ -22379,33 +21276,6 @@ pub const AppSession = struct {
         if (!(base > 0) or !(self.appearance.font.size > 0)) return 1000;
         const ratio = std.math.clamp(self.appearance.font.size / base, 0.1, 10.0);
         return @intFromFloat(@round(ratio * 1000.0));
-    }
-
-    /// Cmd font-size zoom의 비율만 Session Dock의 native Chrome UI zoom으로 쓴다. Terminal font
-    /// family/line spacing/cell metrics은 intentionally excluded: one bounded value must be shared by
-    /// layout, text worker, paint, hit testing, and scroll projection so a stale scale cannot split
-    /// what is visible from what is clickable.
-    fn agentSessionDockUiZoomMilli(self: *const AppSession) u32 {
-        const base = self.base_font_size;
-        const current = self.appearance.font.size;
-        if (!(base > 0) or !(current > 0)) return 1000;
-        const ratio = current / base;
-        if (!std.math.isFinite(ratio)) return 1000;
-        const milli: f32 = std.math.clamp(
-            @round(ratio * 1000.0),
-            @as(f32, @floatFromInt(session_dock_ui_zoom_min_milli)),
-            @as(f32, @floatFromInt(session_dock_ui_zoom_max_milli)),
-        );
-        return @intFromFloat(milli);
-    }
-
-    /// Device backing scale and the user-visible bounded Dock zoom compose once. `0` remains the
-    /// pre-render fallback used by DockMetrics, while multiplication stays saturating for malformed
-    /// test/config input instead of wrapping a published Chrome tree to a tiny size.
-    fn agentSessionDockScaleMilli(self: *const AppSession) u32 {
-        const backing = if (self.scale_milli == 0) @as(u32, 1000) else self.scale_milli;
-        const product = @as(u64, backing) * @as(u64, self.agentSessionDockUiZoomMilli());
-        return @intCast(@min((product + 500) / 1000, @as(u64, std.math.maxInt(u32))));
     }
 
     /// take_bell 패턴의 1회성 drain: 세워져 있으면 true를 돌려주고 지운다(Swift tick이 매번 호출).
@@ -23054,16 +21924,16 @@ pub const AppSession = struct {
         // Session Dock keyboard focus remains with the dock while an inline detail is expanded.
         // Page keys therefore keep reaching the visible scroll owner.
         if (self.dockVisible() and self.dock.view == .agent_sessions) {
-            if (self.handleAgentSessionArchiveSearchKey(event)) {
+            if (agent_dock.handleAgentSessionArchiveSearchKey(self, event)) {
                 return self.keyConsumedByApp();
             }
-            if (self.handleAgentSessionDockScrollKey(event)) {
+            if (agent_dock.handleAgentSessionDockScrollKey(self, event)) {
                 return self.keyConsumedByApp();
             }
             // `/`도 Enter·Page와 같은 게이트를 쓴다. 도크가 보인다는 이유만으로 잡으면 터미널에서 친
             // 경로(`/usr/local/...`)·정규식·vi 검색의 첫 글자가 셸이 아니라 도크 검색을 열고 사라진다.
             // 수식키 없는 글자는 전부 터미널 입력이므로, 도크가 실제로 키보드를 갖고 있을 때만 가로챈다.
-            if (self.agentSessionDockOwnsKeys() and
+            if (agent_dock.agentSessionDockOwnsKeys(self) and
                 !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and switch (event.key) {
                 .char => |codepoint| codepoint == '/',
                 else => false,
@@ -23075,7 +21945,7 @@ pub const AppSession = struct {
             // ⌘ 조합은 위 focus 게이트를 일부러 쓰지 않는다. 수식키 없는 키(Enter·`/`·Esc·Page)는 터미널로
             // 갈 **입력**이라 도크가 focus 없이 가로채면 타이핑이 사라지지만, ⌘ chord는 어느 경우에도 PTY
             // 바이트가 아니라 앱 명령이다. 대신 **소비는 실행의 결과여야 한다**: chord 모양만 맞고 published
-            // ready expansion이 없으면(`agentSessionDockShortcutIntent`가 null) 아무 일도 안 하면서 키만
+            // ready expansion이 없으면(`agent_dock.agentSessionDockShortcutIntent`가 null) 아무 일도 안 하면서 키만
             // 삼키게 되고, 그러면 아래 keybind resolver에 도달하지 못해 메뉴 항목이 없는 액션 바인딩과
             // 터미널 매크로(`keybind = Cmd+L = text:…`)가 조용히 죽는다. 그래서 실행했을 때만 소비한다.
             // (메뉴 항목이 있는 액션은 애초에 AppKit keyEquivalent가 먼저 가져가 여기 오지 않는다.)
@@ -23086,32 +21956,32 @@ pub const AppSession = struct {
                 else => false,
             }) .reveal_log else null;
             if (dock_shortcut) |wanted| {
-                if (self.agentSessionDockShortcutIntent(wanted)) |intent| {
-                    self.applyAgentSessionDockIntent(intent);
+                if (agent_dock.agentSessionDockShortcutIntent(self, wanted)) |intent| {
+                    agent_dock.applyAgentSessionDockIntent(self, intent);
                     self.metal_dirty = true;
                     return self.keyConsumedByApp();
                 }
             }
             // Escape도 같은 게이트다. 카드를 펼쳐 둔 채 터미널로 돌아가면 vim의 Esc가 셸이 아니라 도크
             // expansion을 닫고 사라진다 — Enter만큼이나 치명적인 터미널 키다.
-            if (self.agentSessionDockOwnsKeys() and
+            if (agent_dock.agentSessionDockOwnsKeys(self) and
                 event.key == .escape and !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
                 self.agent_session_inline_detail != null)
             {
-                self.closeAgentSessionInlineDetail();
+                agent_dock.closeAgentSessionInlineDetail(self);
                 return self.keyConsumedByApp();
             }
         }
         // One plain activation toggles the selected dock card.  The provider remains inert
         // until the later explicit dock-local action has been published as ready.
-        // 게이트는 스크롤 키와 같은 `agentSessionDockOwnsKeys`다. 도크가 보인다는 이유만으로 잡으면,
+        // 게이트는 스크롤 키와 같은 `agent_dock.agentSessionDockOwnsKeys`다. 도크가 보인다는 이유만으로 잡으면,
         // 카드를 한 번 눌러 selection이 남은 뒤 터미널로 돌아와 친 Enter가 셸에 가지 않고 그 카드를
         // 다시 접었다 폈다 한다(사용자 보고: "세션 기록 탭이 열려 있으면 Enter가 도크 동작을 한다").
-        if (self.agentSessionDockOwnsKeys() and event.key == .enter and
+        if (agent_dock.agentSessionDockOwnsKeys(self) and event.key == .enter and
             !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift)
         {
             if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
-                self.applyAgentSessionDockIntent(.{ .select_card = @intCast(selected) });
+                agent_dock.applyAgentSessionDockIntent(self, .{ .select_card = @intCast(selected) });
                 self.metal_dirty = true;
                 return self.keyConsumedByApp();
             };
@@ -23460,7 +22330,7 @@ pub const AppSession = struct {
         if (session_dock_wheel_target) {
             // 도크는 양쪽 clamp 경계에서도 자기 휠 이벤트를 소비한다. 안 그러면 목록 끝에 닿은
             // 트랙패드 제스처가 뒤 터미널/PTY로 샌다.
-            const dock_scale_milli = self.agentSessionDockScaleMilli();
+            const dock_scale_milli = agent_dock.agentSessionDockScaleMilli(self);
             const m = chrome.components.session_dock.types.DockMetrics.resolve(dock_scale_milli);
             // precise(트랙패드)는 논리 픽셀, 아니면 카드 한 장이 한 틱이다.
             const unit: f64 = if (precise)
@@ -23468,7 +22338,7 @@ pub const AppSession = struct {
             else
                 @as(f64, @floatFromInt(m.card_h));
             // 잔여 축적·방향 전환·정수부 소비·overflow 가드는 `State`가 소유한다.
-            const projection = self.agentSessionDockScrollProjection();
+            const projection = agent_dock.agentSessionDockScrollProjection(self);
             if (self.agent_session_archive_scroll.scrollByWheel(
                 delta_y * @as(f64, self.appearance.scroll_multiplier),
                 unit,
@@ -23632,7 +22502,7 @@ pub const AppSession = struct {
     /// 도크 검색이 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은 게이트**를 쓰도록
     /// 하는 단일 출처다. 플래그만 보면 도크를 닫거나 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이
     /// first responder를 요구한다.
-    fn agentSessionSearchOwnsInput(self: *const AppSession) bool {
+    pub fn agentSessionSearchOwnsInput(self: *const AppSession) bool {
         return self.agent_session_archive_search_active and self.dockVisible() and self.dock.view == .agent_sessions;
     }
 
@@ -23899,7 +22769,7 @@ pub const AppSession = struct {
         // `hoverCursor` normally drives this same transition, but the event stream also reaches
         // this entry point when the terminal has DECSET 1003 enabled. Keep the component state
         // correct in that case without making agent-session hover depend on PTY tracking mode.
-        _ = self.agentSessionDockPointer(.move, x_px, y_px);
+        _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
         const active = self.activeSurface();
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
         // **host-backed면 관측 모드가 SSOT**다: placeholder core는 항상 `.none`이라 예전 코드는 여기서 항상 빠져
@@ -24342,7 +23212,7 @@ pub const AppSession = struct {
             const captured = self.agent_session_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {
                 const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
-                if (self.agentSessionDockPointer(phase, x_px, y_px)) |intent| self.applyAgentSessionDockIntent(intent);
+                if (agent_dock.agentSessionDockPointer(self, phase, x_px, y_px)) |intent| agent_dock.applyAgentSessionDockIntent(self, intent);
                 return;
             }
         }
@@ -24517,13 +23387,13 @@ pub const AppSession = struct {
                 if (self.dock.view == .agent_sessions and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // 도크를 눌렀다 = 키보드도 도크로. 아래 dispatch가 세우는 component-local focus는
                     // 같은 클릭이 일으키는 snapshot 무효화에 곧바로 지워지므로 소유권 신호가 못 된다.
-                    self.takeAgentSessionDockKeyFocus();
+                    agent_dock.takeAgentSessionDockKeyFocus(self);
                     // Primary down only arms the completed component tree. The matching up below
                     // is the one place that resolves and applies an archive intent, so a drag or
                     // a snapshot replacement cannot open a session merely because the pointer
                     // first touched a card. This is limited to the dock rect, so an expanded
                     // inline detail never changes the active terminal pane's input routing.
-                    _ = self.agentSessionDockPointer(.down, x_px, y_px);
+                    _ = agent_dock.agentSessionDockPointer(self, .down, x_px, y_px);
                     return;
                 }
                 if (self.dock.view == .explorer) {
@@ -24554,7 +23424,7 @@ pub const AppSession = struct {
             // AppKit responder 변화가 없을 수 있으므로 mouse policy도 같은 FocusOwner를 직접 갱신해야 한다.
             // 도크 카드 클릭은 `focus_owner`를 바꾸지 않으므로(계속 `.workspace`) 아래 조건만으로는
             // Session Dock의 component-local keyboard focus가 안 풀린다 — 그것부터 무조건 놓는다.
-            self.releaseAgentSessionDockKeyFocus();
+            agent_dock.releaseAgentSessionDockKeyFocus(self);
             if (self.focus_owner != .workspace or self.pending_dock_focus != null) self.focusWorkspaceInput();
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
@@ -25170,7 +24040,7 @@ pub const AppSession = struct {
     /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — caret이 항상 보이며 새 주기를 시작). 페이드 중이었어도
     /// 커서를 즉시 완전 표시(1000)로 고정한다 — 입력에 커서가 반쯤 사라진 채로 굳지 않게. 이미 표시 위상 + 완전
     /// 표시면 blink_visible·fade 둘 다 불변이라 generation이 안 올라 idle이 유지된다(setCursorFadeMilli가 게이트).
-    fn resetCursorBlink(self: *AppSession) void {
+    pub fn resetCursorBlink(self: *AppSession) void {
         self.blink_phase_ns = 0; // baseline 폐기 — 다음 idle tick이 지금부터 새 반주기를 시작한다
         self.blink_visible = true;
         self.metal_buffer.setCursorFadeMilli(1000);
@@ -25512,7 +24382,7 @@ pub const AppSession = struct {
             // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
             .settings => self.settings_search_caret,
             .sidebar_search => self.sidebarSearchCaretRect(),
-            .agent_session_search => self.agentSessionDockSearchCaretRect(),
+            .agent_session_search => agent_dock.agentSessionDockSearchCaretRect(self),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
             // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
@@ -25595,10 +24465,10 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .agent_session_search => if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
-                self.rebuildAgentSessionArchiveFilter();
-                self.resetAgentSessionDockScroll();
+                agent_dock.rebuildAgentSessionArchiveFilter(self);
+                agent_dock.resetAgentSessionDockScroll(self);
                 self.agent_session_archive_selected = null;
-                self.closeAgentSessionInlineDetail();
+                agent_dock.closeAgentSessionInlineDetail(self);
                 self.metal_dirty = true;
             },
             .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
@@ -26909,7 +25779,7 @@ pub const AppSession = struct {
             const dg = self.dockGeometry();
             // Do this before the view-bar return as well: moving from a card to a scope/view
             // selector is a leave transition for the SessionDock tree, not a frozen hover.
-            if (self.dock.view == .agent_sessions) _ = self.agentSessionDockPointer(.move, x_px, y_px);
+            if (self.dock.view == .agent_sessions) _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
@@ -29335,7 +28205,7 @@ pub const AppSession = struct {
         const resize_agent_session_dock = self.dockVisible() and self.dock.view == .agent_sessions;
         const prior_agent_session_scroll_offset = self.agent_session_archive_scroll.offset_y_px;
         const prior_agent_session_scroll_anchor = if (resize_agent_session_dock)
-            self.captureAgentSessionDockScrollAnchor()
+            agent_dock.captureAgentSessionDockScrollAnchor(self)
         else
             null;
         const scale_changed = next_scale != self.scale_milli;
@@ -29392,7 +28262,7 @@ pub const AppSession = struct {
             // The published rect tree still describes pre-resize geometry until the next paint.
             // Drop a pressed action now so a delayed mouse-up cannot resolve through that tree.
             self.agent_session_dock_interaction.capture = null;
-            self.restoreAgentSessionDockScrollAnchor(prior_agent_session_scroll_anchor, prior_agent_session_scroll_offset);
+            agent_dock.restoreAgentSessionDockScrollAnchor(self, prior_agent_session_scroll_anchor, prior_agent_session_scroll_offset);
         }
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
@@ -30403,7 +29273,7 @@ pub const AppSession = struct {
         self.applyPendingScrollbarScroll();
         // Session Dock scrollbar도 같은 규율이다 — 도크의 drag는 chrome interaction tree가 소유하지만
         // 소비 지점은 동일하게 tick 하나다.
-        self.applyAgentSessionDockScrollDrag();
+        agent_dock.applyAgentSessionDockScrollDrag(self);
         // §4.4: 드래그가 살아 있는 동안 다른 경로가 tab 집합을 바꾸면(⌘T·단축키 close·원격 관측의 Term 소멸)
         // provisional 배열을 새 집합에 재봉합하지 않고 폐기한다. 폐기하지 않으면 transaction이 영구히 무효라
         // 나머지 드래그가 조용한 무동작이 되고 floating 고스트만 커서를 따라다닌다.
@@ -30443,10 +29313,10 @@ pub const AppSession = struct {
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.ageFilePanelSelfWriteLatches();
-        self.updateAgentSessionArchive(); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
-        self.updateAgentSessionArchiveDetail(); // inline detail worker 결과만 drain; open/read/parse는 worker 전용
-        self.refreshAgentSessionArchiveProjectScopeForFocus(); // active-surface id 비교만; root I/O는 worker
-        self.updateAgentSessionArchiveProjectScope(); // scope root worker result만 적용; tick의 filesystem I/O는 0
+        agent_dock.updateAgentSessionArchive(self); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
+        agent_dock.updateAgentSessionArchiveDetail(self); // inline detail worker 결과만 drain; open/read/parse는 worker 전용
+        agent_dock.refreshAgentSessionArchiveProjectScopeForFocus(self); // active-surface id 비교만; root I/O는 worker
+        agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
@@ -31577,7 +30447,7 @@ pub const AppSession = struct {
                             }
                         }
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
-                            self.collectAgentSessionDock(&collected, pane_frame_builder, tabbar_colors);
+                            agent_dock.collectAgentSessionDock(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and tree_content_cols > 0 and draw_window.count > 0) {
                             // 텍스트가 쓸 수 있는 칸 수는 **gutter를 뺀 폭**에서 나온다(SV2b). 예전에는
@@ -32265,7 +31135,7 @@ pub const AppSession = struct {
         self.setHoveredCollapsedToggle(false);
         self.setScrollbarHovered(false);
         self.clearHoverUrlAnchor();
-        _ = self.agentSessionDockPointer(.move, -1, -1);
+        _ = agent_dock.agentSessionDockPointer(self, .move, -1, -1);
     }
 
     /// pane 탭 바 호버 영역 — none(바 밖), tabs(탭/‹›/+/pane 포커스 = 클릭), grip(좌측 grip+라벨 = 드래그 손잡이).
@@ -34347,7 +33217,7 @@ pub const AppSession = struct {
     /// 맨 뒤(커서 suffix)에 view로 넣고 render_stats를 산출한다(배치 origin/colors는 호출자가 locals로 박으므로 placement는
     /// 안 들고 있는다). 활성 frame은 built_frames가 소유(view라 따로 deinit 안 함 — built_frames 규율과 동형).
     const ActiveResult = struct { rf: renderer.RenderFrame };
-    const CollectedPane = struct {
+    pub const CollectedPane = struct {
         pane: coretext_frame_builder.ShapedPane,
         dest: CollectDest,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
@@ -34385,7 +33255,7 @@ pub const AppSession = struct {
 
     /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
-    fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
+    pub fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
         const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch return;
         // 헤더 아이콘(gear·plus·bell·sidebar_collapse — 등록 PUA)은 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
         // 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
@@ -34413,7 +33283,7 @@ pub const AppSession = struct {
 
     /// B1 rich Chrome cache hit. `shapeFromRecords` duplicates only per-frame renderer run
     /// ownership; it does not call CoreText or wait for a font worker.
-    fn collectMeasuredTextFromCache(
+    pub fn collectMeasuredTextFromCache(
         self: *AppSession,
         collected: *std.ArrayList(CollectedPane),
         dl: renderer.DrawList,
@@ -34448,695 +33318,15 @@ pub const AppSession = struct {
         return out;
     }
 
-    /// AS3-a 제품 경계: archive의 immutable projection을 SessionDock component props로만
-    /// 투영하고, component가 만든 같은 rect tree를 semantic paint/CoreText/Metal에 함께
-    /// 전달한다. 이 함수는 scanner·provider를 호출하지 않으며 매 frame에는 이미 publish된
-    /// snapshot만 읽는다. 따라서 느린 JSONL 분석이 메인 render tick을 막지 않는다.
-    /// 도크 컴포넌트에 넘길 props를 만드는 **유일한** 자리다. 렌더 경로 안에 리터럴로 두면 테스트가
-    /// 그 구성을 복제하게 되고, 복제본은 host를 판정하지 못한다 — 실제로 가상화 원점을 0으로 바꾸는
-    /// 변이가 복제 기반 테스트를 통과했다.
-    fn agentSessionDockScrollbarMinThumbPx(self: *const AppSession) u32 {
-        return chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).scrollbar_min_thumb;
-    }
-
-    /// 그룹 하나를 component DTO로 옮기는 **유일한** 자리다. 흐름 위의 행과 상단 고정 헤더가 같은
-    /// 값을 봐야 한다 — 라벨이나 개수가 갈리면 스크롤 도중 같은 그룹이 두 물건으로 보인다.
-    fn agentSessionDockGroupItem(self: *const AppSession, group_index: usize) ?chrome.components.session_dock.types.Group {
-        if (group_index >= self.agent_session_archive_projection.groups.items.len) return null;
-        const group = self.agent_session_archive_projection.groups.items[group_index];
-        return .{
-            .identity = @intCast(group_index),
-            .label = group.label,
-            .count = @intCast(@min(group.count, std.math.maxInt(u16))),
-            .collapsed = group.collapsed,
-        };
-    }
-
-    /// 상단에 걸린 그룹. **가상화 창 밖일 수 있으므로** component가 아니라 여기서 구한다.
-    fn agentSessionDockStickyGroup(self: *const AppSession, offset_px: u32) ?chrome.components.session_dock.types.StickyGroup {
-        const head = archiveStickyGroupFor(self.agentSessionDockScrollItems(), offset_px) orelse return null;
-        const entry = self.agent_session_archive_projection.entries.items[head.index];
-        const group = self.agentSessionDockGroupItem(switch (entry) {
-            .group => |group_index| group_index,
-            .card => return null,
-        }) orelse return null;
-        return .{ .group = group, .top_px = head.top_px, .next_top_px = head.next_top_px };
-    }
-
-    fn agentSessionDockProps(
-        self: *const AppSession,
-        content: @FieldType(dock_layout.Geometry, "tree_content"),
-        scroll_projection: chrome.ui.scroll_area.Projection,
-        items: []const chrome.components.session_dock.types.Item,
-    ) chrome.components.session_dock.types.Props {
-        const dock_scale_milli = self.agentSessionDockScaleMilli();
-        return .{
-            .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
-            .cell_width_px = self.cell_width_px,
-            .cell_height_px = self.cell_height_px,
-            .scale_milli = dock_scale_milli,
-            // Archive records are atomically swapped by the worker. Its scan generation is
-            // not exposed here yet, so the projection generation is the stable, main-thread
-            // action guard for this first host slice.
-            .snapshot_generation = self.agent_session_dock_snapshot_generation,
-            .displayed_count = @intCast(@min(self.agent_session_archive_filtered_indices.items.len, std.math.maxInt(u16))),
-            .scope = switch (self.agent_session_archive_scope) {
-                .workspace => .workspace,
-                .project => .project,
-                .all => .all,
-            },
-            .sort_order = self.agent_session_archive_sort,
-            .workspace_scope_enabled = self.agent_session_archive_workspace_root != null,
-            .project_scope_enabled = self.agent_session_archive_project_root != null,
-            .search = self.agent_session_archive_search.query.items,
-            .search_preedit = self.agent_session_archive_search.preedit.items,
-            .search_focused = self.agent_session_archive_search_active,
-            .search_cursor_visible = self.blink_visible,
-            // The rich system-text worker follows the same truthful loading rule as archive
-            // refresh: existing cards remain visible while its immutable artifact is pending.
-            .partial = self.agent_session_archive_partial,
-            .loading = self.agent_session_archive_loading and self.agent_session_archive_records.items.len == 0,
-            .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
-            .spinner_phase = @intCast(self.agent_spin_frame & 7),
-            .content_first_item_origin_y_px = scroll_projection.first_origin_y_px,
-            // 가상화 때문에 component는 보이는 아이템만 받는다. scrollbar가 "얼마나 긴 목록의 어디"인지
-            // 알 수 있는 유일한 입력이 이 두 값이다.
-            .scroll_content_height_px = scroll_projection.content_height_px,
-            .scroll_offset_px = scroll_projection.offset_y_px,
-            .expanded_identity = if (self.agent_session_inline_detail != null and self.agent_session_archive_selected != null)
-                @intCast(self.agent_session_archive_selected.?)
-            else
-                null,
-            .items = items,
-            .sticky_group = self.agentSessionDockStickyGroup(scroll_projection.offset_y_px),
-        };
-    }
-
-    fn collectAgentSessionDock(
-        self: *AppSession,
-        collected: *std.ArrayList(CollectedPane),
-        builder: coretext_frame_builder.CoreTextFrameBuilder,
-        colors: metal_frame.CellColors,
-    ) void {
-        if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-        const content = self.dockGeometry().tree_content;
-        if (content.w == 0 or content.h == 0) return;
-
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-        const scroll_projection = self.agentSessionDockScrollProjection();
-        const items = self.buildAgentSessionDockItems(arena, scroll_projection) catch return;
-        const dock_scale_milli = self.agentSessionDockScaleMilli();
-        const props = self.agentSessionDockProps(content, scroll_projection, items);
-        var expansion_actions: usize = 0;
-        var expansion_turns: usize = 0;
-        for (items) |item| switch (item) {
-            .group => {},
-            .card => |card| if (card.expanded) |expanded| {
-                expansion_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
-                expansion_turns += expanded.turns.len;
-            },
-        };
-        // 버퍼 크기는 **build가 소유한다**. 여기서 같은 산술을 다시 쓰면 둘이 갈리는 날 build가
-        // `InsufficientNodeBuffer`로 실패하고, 아래 `catch return`이 그것을 삼켜 도크가 통째로 멈춘다.
-        const sizes = chrome.components.session_dock.build.bufferSizes(items);
-        const frame = chrome.components.session_dock.build.build(props, .{
-            .nodes = arena.alloc(chrome.ui.tree.UiNode, sizes.nodes) catch return,
-            .entries = arena.alloc(chrome.ui.tree.RectEntry, sizes.entries) catch return,
-            .layout_items = arena.alloc(chrome.ui.layout.Item, sizes.layout_items) catch return,
-            .flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch) catch return,
-            .child_rects = arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects) catch return,
-            .actions = arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions) catch return,
-        }) catch return;
-
-        // Card quad + text op capacity: fixed header/scope/search cards plus either one item
-        // quad and title/summary/provider/metadata/disclosure text runs per projection item, or nine inert initial-loading
-        // skeleton stripes. Keep the placeholder budget explicit so the first scan cannot
-        // silently drop its loading affordance through a fixed-capacity overflow.
-        // B1-button-a emits the registered SVG icon and the measured action label as two
-        // semantic ops. Reserve both before the view runs: dropping only the label on a full
-        // fixed buffer would leave an enabled-looking icon with no command text.
-        // generic paint의 quad는 published entry 하나당 최대 하나다. 이 몫을 상수로 세면 tree가
-        // 자라는 변경마다 조용히 모자라는데, 그 결과가 "그 컴포넌트만 안 그려짐"이 아니라 **도크 전체
-        // 정지**다 — `view`가 실패하면 아래 `publishAgentSessionDockFrame`까지 못 가서 hit tree가
-        // 이전 프레임에 멈춘다(scrollbar를 추가하다 실제로 겪었다). 그래서 entry 수에서 유도한다.
-        const paint_quad_budget = frame.tree.entries.len;
-        // +1은 header의 정렬 토글 label이다.
-        const text_op_budget = 22 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4;
-        const ops = arena.alloc(chrome.draw.Op, paint_quad_budget + text_op_budget) catch return;
-        const runs = arena.alloc(chrome.draw.Run, 10 + items.len * 5 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
-        const text_bytes = arena.alloc(u8, 1024 + items.len * 1024 + expansion_turns * 1024) catch return;
-        const tokens = self.buildChromeTokens();
-        const draws = chrome.components.session_dock.view.view(props, frame, self.agent_session_dock_interaction, &tokens, .{
-            .ops = ops,
-            .runs = runs,
-            .text_bytes = text_bytes,
-        }) catch return;
-
-        self.publishAgentSessionDockFrame(frame, props.snapshot_generation);
-
-        // GPU card backgrounds must precede terminal/pane text; the adapter fixes this to
-        // renderer layer 2 instead of the overlay layer used by modal components.
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads, 2);
-        // One completed Dock tree becomes one DrawList and one CoreText shaping pass. The
-        // component keeps every text origin local to `content`; the collected pane translates
-        // the whole batch exactly once to backing coordinates.
-        const cols: u16 = @intCast(@min(content.w / self.cell_width_px, std.math.maxInt(u16)));
-        const rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
-        const icon_dl = chrome_draw_lowering.buildIconTextDrawList(
-            self.allocator,
-            draws.ops,
-            &tokens,
-            self.cell_width_px,
-            self.cell_height_px,
-            cols,
-            rows,
-        ) catch return;
-        // 스크롤 목록의 현재 원점. 목록 전체가 이 값만큼 함께 움직이므로, 셰이핑 키는 이 값을 뺀
-        // 상대 좌표로 만들고(스크롤 불변) 캐시를 재사용할 때 차이만 다시 더한다.
-        const scroll_origin_y_px = props.content_first_item_origin_y_px;
-        // 스크롤 뷰포트. published tree가 이미 갖고 있는 그 사각형을 backing 좌표로 옮겨 GPU 단계에
-        // 넘긴다. 이게 있으면 component가 "이 줄이 clip 안에 통째로 들어가는가"를 미리 판정할 필요가
-        // 없다 — 반쯤 걸친 카드/그룹도 픽셀 단위로 잘려 보인다.
-        const scroll_clip: ?metal_frame.ClipPx = blk: {
-            const rect = chrome.components.session_dock.build.scrollTextViewport(frame.tree) orelse break :blk null;
-            break :blk .{
-                .x = content.x +| @as(u32, @intFromFloat(@max(rect.x, 0))),
-                .y = content.y +| @as(u32, @intFromFloat(@max(rect.y, 0))),
-                .w = @intFromFloat(@max(rect.width, 0)),
-                .h = @intFromFloat(@max(rect.height, 0)),
-            };
-        };
-        const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
-            draws.ops,
-            &tokens,
-            self.cell_width_px,
-            self.cell_height_px,
-            cols,
-            rows,
-            scroll_origin_y_px,
-        );
-        // `richTextFingerprint` owns semantic component facts; scale changes the CoreText
-        // point size even when integer cell metrics happen to round to the same value.
-        const fingerprint = base_fingerprint ^ (@as(u64, dock_scale_milli) *% 0x9e3779b185ebca87);
-        // 캐시는 순수 최적화다. hit이면 CoreText 호출을 건너뛰고, miss면 지금 셰이핑해 이번 프레임에
-        // 그린다 — 다음 tick으로 미루면 그 프레임의 도크가 글자도 아이콘도 없는 빈 카드가 된다.
-        const cache_hit = MeasuredTextCache.hit(self.agent_session_dock_rich_text_cache, fingerprint);
-        if (!cache_hit) self.shapeAgentSessionDockRichText(draws.ops, &tokens, fingerprint, dock_scale_milli, scroll_origin_y_px);
-        if (self.agent_session_dock_rich_text_cache) |*cache| {
-            if (cache.fingerprint == fingerprint) {
-                self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
-                    .origin_x = content.x,
-                    .origin_y = content.y,
-                    .colors = colors,
-                    .clip_rect = scroll_clip,
-                    .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
-                } });
-                self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
-                    .origin_x = content.x,
-                    .origin_y = content.y,
-                    .colors = colors,
-                } });
-                return;
-            }
-        }
-        // 셰이핑이 실패한 프레임만 여기 온다(폰트 없음·할당 실패 등). 텍스트 없이 배경만 그리는 대신
-        // 아이콘 draw list라도 낸다 — 이 경로는 결함 상태이며 정상 흐름의 일부가 아니다.
-        self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
-            .origin_x = content.x,
-            .origin_y = content.y,
-            .colors = colors,
-        } });
-    }
-
-    /// The component receives only the cards that can appear in the current viewport. This is
-    /// a first virtualization consumer: hidden archive rows do not allocate CoreText frames or
-    /// Metal quads, while scroll remains a projection concern owned by the archive model.
-    fn buildAgentSessionDockItems(
-        self: *const AppSession,
-        allocator: std.mem.Allocator,
-        scroll_projection: chrome.ui.scroll_area.Projection,
-    ) ![]chrome.components.session_dock.types.Item {
-        var out: std.ArrayList(chrome.components.session_dock.types.Item) = .empty;
-        if (scroll_projection.first_index == scroll_projection.end_exclusive) return try out.toOwnedSlice(allocator);
-        var entry_index = scroll_projection.first_index;
-        const now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
-        while (entry_index < scroll_projection.end_exclusive) : (entry_index += 1) {
-            const entry = self.agent_session_archive_projection.entries.items[entry_index];
-            switch (entry) {
-                .group => |group_index| {
-                    const group = self.agentSessionDockGroupItem(group_index) orelse continue;
-                    try out.append(allocator, .{ .group = group });
-                },
-                .card => |record_index| {
-                    if (record_index >= self.agent_session_archive_records.items.len) continue;
-                    const record = self.agent_session_archive_records.items[record_index];
-                    const parsed = record.parsed;
-                    var age_buf: [32]u8 = undefined;
-                    const age = formatAgentSessionArchiveRelativeAge(now_ns, agent_session_archive_backend.lastActivityNs(record), &age_buf);
-                    const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
-                    // 서브에이전트를 돌린 세션만 그 개수를 덧붙인다. 0이면 아무것도 그리지 않아 평범한
-                    // 세션의 메타 줄이 길어지지 않는다(docs/agent-session-list.md §2.3). 상한 초과는
-                    // `999+`로 — 스캐너가 그 값에서 세기를 멈추므로 정확한 수를 주장하지 않는다.
-                    const metadata = if (record.subagent_count == 0)
-                        try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model })
-                    else if (record.subagent_count >= agent_session_archive_backend.max_subagent_count)
-                        try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s} · 서브에이전트 {d}+", .{ parsed.message_count, age, model, agent_session_archive_backend.max_subagent_count })
-                    else
-                        try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s} · 서브에이전트 {d}", .{ parsed.message_count, age, model, record.subagent_count });
-                    var expanded: ?chrome.components.session_dock.types.Expanded = null;
-                    if (self.agent_session_inline_detail) |detail| if (inlineArchiveDetailMatchesRecord(&detail, &record)) {
-                        const detail_state: chrome.components.session_dock.types.DetailState = switch (detail.state) {
-                            .loading => .loading,
-                            .ready => .ready,
-                            .stale => .stale,
-                            .unavailable => .unavailable,
-                        };
-                        var turns: []chrome.components.session_dock.types.Turn = &.{};
-                        var action_record_count: u32 = 0;
-                        if (detail.state == .ready) if (detail.detail) |parsed_detail| {
-                            const count = @min(parsed_detail.turns.items.len, 3);
-                            turns = try allocator.alloc(chrome.components.session_dock.types.Turn, count);
-                            for (parsed_detail.turns.items[0..count], turns) |turn, *out_turn| out_turn.* = .{
-                                .role = switch (turn.role) {
-                                    .user => .user,
-                                    .assistant => .assistant,
-                                },
-                                .text = turn.text,
-                            };
-                            action_record_count = parsed_detail.action_records;
-                        };
-                        expanded = .{
-                            .state = detail_state,
-                            .turns = turns,
-                            .action_record_count = action_record_count,
-                            .resume_enabled = detail.state == .ready,
-                            .reveal_enabled = detail.state == .ready,
-                            .focus_live_enabled = detail.state == .ready and self.archiveSessionHasLiveMapping(&detail),
-                        };
-                    };
-                    try out.append(allocator, .{ .card = .{
-                        .identity = @intCast(record_index),
-                        .provider = switch (parsed.provider) {
-                            .codex => .codex,
-                            .claude => .claude,
-                        },
-                        .title = parsed.title,
-                        .summary = parsed.summary,
-                        .metadata = metadata,
-                        .selected = self.agent_session_archive_selected != null and self.agent_session_archive_selected.? == record_index,
-                        .expanded = expanded,
-                    } });
-                },
-            }
-        }
-        return try out.toOwnedSlice(allocator);
-    }
-
-    /// Successful paint candidates alone replace the published input snapshot. Reconcile clears
-    /// a captured old action before the old backing entries are overwritten, so a delayed pointer
-    /// up can never open a session from the previous archive/scope/search result.
-    fn publishAgentSessionDockFrame(
-        self: *AppSession,
-        frame: chrome.components.session_dock.build.Frame,
-        generation: u64,
-    ) void {
-        // A normal redraw rebuilds the same value tree from the same immutable archive snapshot.
-        // Treating that as a replacement would cancel a just-pressed card before AppKit sends its
-        // matching mouse-up. Only a geometry/action mapping change is a true replacement; that
-        // path still reconciles below and deliberately cancels capture.
-        if (agentSessionDockFrameEql(
-            self.agent_session_dock_entries.items,
-            self.agent_session_dock_actions.items,
-            frame.tree.entries,
-            frame.actions,
-        )) return;
-        // Reserve both backing stores before touching the old snapshot. An allocation failure
-        // must leave the last fully painted hit tree intact rather than publishing entries with
-        // no matching action table (or clearing a usable dock during refresh).
-        self.agent_session_dock_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
-        self.agent_session_dock_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
-        const old_tree = chrome.ui.tree.UiRectTree{ .entries = self.agent_session_dock_entries.items };
-        if (self.agent_session_dock_entries.items.len > 0) {
-            // 기본 `reconcile`은 언제나 capture를 취소한다. 그것이 click의 안전한 기본값이지만
-            // **scrollbar drag에는 치명적**이다 — thumb을 끌면 thumb rect가 바뀌어 매 프레임 tree가
-            // 새로 발행되므로, 기본 경로에서는 드래그가 첫 move에 죽는다(사용자 보고: "스크롤바를
-            // 눌러도 드래그가 안 된다"). 그래서 scrollbar drag만 좁은 carry 문을 태운다. carry 조건은
-            // 그 모듈이 소유한다: 같은 identity가 새 tree에 정확히 하나, 여전히 닿을 수 있고 enabled,
-            // 그리고 host가 준 compatibility key가 같을 때만이다.
-            const scroll_payload = chrome.components.session_dock.build.scroll_drag_payload;
-            const dragging_scrollbar = if (self.agent_session_dock_interaction.capture) |capture|
-                if (capture.drag) |declared| declared.payload == scroll_payload else false
-            else
-                false;
-            if (dragging_scrollbar) {
-                // archive snapshot이 드래그 도중 교체되면 목록 길이 자체가 달라지므로 이어갈 근거가
-                // 없다. 그 판정을 generation 비교 하나로 위임한다.
-                const previous = chrome.ui.interaction.GestureCompatibility{
-                    .kind = scroll_payload,
-                    .enabled = true,
-                    .owner_epoch = self.agent_session_dock_snapshot_generation,
-                    .domain_identity = 0,
-                };
-                const current = chrome.ui.interaction.GestureCompatibility{
-                    .kind = scroll_payload,
-                    .enabled = true,
-                    .owner_epoch = generation,
-                    .domain_identity = 0,
-                };
-                _ = chrome.ui.interaction.reconcileCarryingCapture(
-                    &self.agent_session_dock_interaction,
-                    frame.tree,
-                    previous,
-                    current,
-                ) catch return;
-                // carry하지 못했으면 capture는 이미 비워졌다. host 쪽 drag 상태도 함께 끝내야
-                // 다음 down이 자기 grab 지점을 새로 잡는다.
-                if (self.agent_session_dock_interaction.capture == null) self.endAgentSessionDockScrollDrag();
-            } else {
-                _ = chrome.ui.interaction.reconcile(&self.agent_session_dock_interaction, old_tree, frame.tree) catch return;
-            }
-        }
-        self.agent_session_dock_entries.clearRetainingCapacity();
-        self.agent_session_dock_actions.clearRetainingCapacity();
-        self.agent_session_dock_entries.appendSliceAssumeCapacity(frame.tree.entries);
-        self.agent_session_dock_actions.appendSliceAssumeCapacity(frame.actions);
-        // The component action table itself carries this generation, and the click path resolves
-        // against this exact published value.
-        self.agent_session_dock_snapshot_generation = generation;
-    }
-
-    /// Selection/source changes invalidate the actually painted action capability before the
-    /// next frame can rebuild it.  This is stronger than merely incrementing a generation: a
-    /// queued pointer-up cannot resolve a prior resume/reveal rectangle during the repaint gap.
-    fn invalidateAgentSessionDockFrame(self: *AppSession) void {
-        self.agent_session_dock_entries.clearRetainingCapacity();
-        self.agent_session_dock_actions.clearRetainingCapacity();
-        self.agent_session_dock_interaction = .{};
-        self.agent_session_dock_snapshot_generation +%= 1;
-        if (self.agent_session_dock_snapshot_generation == 0) self.agent_session_dock_snapshot_generation = 1;
-    }
-
-    /// Value equality is the publication gate for this particular frame snapshot. `UiRectTree`
-    /// entries contain no borrowed archive text, and ids/action ids are scalar, so a structural
-    /// comparison detects both a layout change and a different visible archive projection without
-    /// relying on the broader scan generation alone.
-    fn agentSessionDockFrameEql(
-        old_entries: []const chrome.ui.tree.RectEntry,
-        old_actions: []const chrome.components.session_dock.ids.Entry,
-        new_entries: []const chrome.ui.tree.RectEntry,
-        new_actions: []const chrome.components.session_dock.ids.Entry,
-    ) bool {
-        if (old_entries.len != new_entries.len or old_actions.len != new_actions.len) return false;
-        for (old_entries, new_entries) |old, new| {
-            if (!std.meta.eql(old, new)) return false;
-        }
-        for (old_actions, new_actions) |old, new| {
-            if (!std.meta.eql(old, new)) return false;
-        }
-        return true;
-    }
-
     /// The only adapter from a platform pointer lifecycle to the published SessionDock tree.
     /// It has no archive side effects: an intent can emerge only from `UiPointerPhase.up`, after
     /// the generic interaction state has verified the captured action against this exact tree.
-    const AgentSessionDockPointerDispatch = struct {
+    pub const AgentSessionDockPointerDispatch = struct {
         intent: ?chrome.components.session_dock.ids.Intent,
         visual_changed: bool,
         /// scrollbar thumb/track이 선언한 drag의 lifecycle. click intent와 배타적이라 둘 다 실어 보낸다.
         drag: ?chrome.ui.interaction.DragEvent = null,
     };
-
-    fn dispatchAgentSessionDockPointer(
-        state: *chrome.ui.interaction.InteractionState,
-        entries: []const chrome.ui.tree.RectEntry,
-        actions: []const chrome.components.session_dock.ids.Entry,
-        generation: u64,
-        event: chrome.ui.interaction.UiPointerEvent,
-    ) ?AgentSessionDockPointerDispatch {
-        const dispatched = chrome.ui.interaction.dispatch(state, .{ .entries = entries }, event) catch return null;
-        var visual_changed = false;
-        for (dispatched.dirty.ids) |id| {
-            if (id != null) {
-                visual_changed = true;
-                break;
-            }
-        }
-        const action_id = dispatched.action orelse return .{ .intent = null, .visual_changed = visual_changed, .drag = dispatched.drag };
-        var table = chrome.components.session_dock.ids.Table.init(@constCast(actions));
-        table.count = actions.len;
-        return .{ .intent = table.resolve(action_id, generation), .visual_changed = visual_changed, .drag = dispatched.drag };
-    }
-
-    /// Keyboard shortcuts are not a second action path.  They resolve the same published,
-    /// generation-bound SessionDock capability as pointer-up, so a closed/loading/stale card
-    /// cannot resume or reveal merely because a row remains selected.
-    fn agentSessionDockShortcutIntent(
-        self: *const AppSession,
-        wanted: chrome.components.session_dock.ids.Intent,
-    ) ?chrome.components.session_dock.ids.Intent {
-        const detail = self.agent_session_inline_detail orelse return null;
-        if (detail.state != .ready) return null;
-        var table = chrome.components.session_dock.ids.Table.init(@constCast(self.agent_session_dock_actions.items));
-        table.count = self.agent_session_dock_actions.items.len;
-        for (self.agent_session_dock_actions.items) |entry| {
-            if (std.meta.activeTag(entry.intent) != std.meta.activeTag(wanted)) continue;
-            return table.resolve(entry.action_id, self.agent_session_dock_snapshot_generation);
-        }
-        return null;
-    }
-
-    fn agentSessionDockSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-        const content = self.dockGeometry().tree_content;
-        for (self.agent_session_dock_actions.items) |action| {
-            switch (action.intent) {
-                .select_card => {},
-                else => continue,
-            }
-            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
-            for (self.agent_session_dock_entries.items) |entry| {
-                const ui_action = entry.action orelse continue;
-                if (ui_action.id != action.action_id) continue;
-                const visible = smokeProbeVisibleRect(entry) orelse continue;
-                return .{
-                    .request_id = self.agent_session_dock_snapshot_generation,
-                    .generation = self.agent_session_dock_snapshot_generation,
-                    .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
-                    .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
-                    .width_px = visible.width,
-                    .height_px = visible.height,
-                    .present = true,
-                    .enabled = ui_action.enabled,
-                };
-            }
-        }
-        return .{};
-    }
-
-    /// The fixture may locate the refresh hit rect only after the normal component has painted
-    /// it. This observer neither requests a scan nor exposes the internal action id.
-    fn agentSessionDockRefreshSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-        const content = self.dockGeometry().tree_content;
-        for (self.agent_session_dock_actions.items) |action| {
-            switch (action.intent) {
-                .refresh => {},
-                else => continue,
-            }
-            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
-            for (self.agent_session_dock_entries.items) |entry| {
-                const ui_action = entry.action orelse continue;
-                if (ui_action.id != action.action_id) continue;
-                const visible = smokeProbeVisibleRect(entry) orelse continue;
-                return .{
-                    .request_id = self.agent_session_dock_snapshot_generation,
-                    .generation = self.agent_session_dock_snapshot_generation,
-                    .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
-                    .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
-                    .width_px = visible.width,
-                    .height_px = visible.height,
-                    .present = true,
-                    .enabled = ui_action.enabled,
-                };
-            }
-        }
-        return .{};
-    }
-
-    /// Reads a fixed SessionDock node from the already-published tree. It deliberately returns
-    /// the border rect, not text/icon ink bounds: text placement belongs to the rich-text
-    /// artifact and a test observer must not reimplement layout in the platform host.
-    fn agentSessionDockNodeSmokeProbe(self: *const AppSession, node_id: chrome.ui.tree.UiId) AgentSessionArchiveSmokeProbe {
-        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-        const content = self.dockGeometry().tree_content;
-        for (self.agent_session_dock_entries.items) |entry| {
-            if (entry.id != node_id) continue;
-            return .{
-                .request_id = self.agent_session_dock_snapshot_generation,
-                .generation = self.agent_session_dock_snapshot_generation,
-                .x_px = @as(f32, @floatFromInt(content.x)) + entry.rect.x,
-                .y_px = @as(f32, @floatFromInt(content.y)) + entry.rect.y,
-                .width_px = entry.rect.width,
-                .height_px = entry.rect.height,
-                .present = true,
-                .enabled = true,
-            };
-        }
-        return .{};
-    }
-
-    /// The expanded item's outer rect is a stable disclosure border, unlike its clipped child
-    /// action leaves. The observer ties it to the exact open detail before returning it, so a
-    /// recycled projected row can never stand in for a different archive identity.
-    fn agentSessionDockExpandedCardSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        const detail = self.agent_session_inline_detail orelse return .{};
-        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-        const content = self.dockGeometry().tree_content;
-        for (self.agent_session_dock_actions.items) |action| {
-            const record_index: usize = switch (action.intent) {
-                .select_card => |identity| if (identity <= std.math.maxInt(usize)) @intCast(identity) else continue,
-                else => continue,
-            };
-            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation or
-                record_index >= self.agent_session_archive_records.items.len or
-                !inlineArchiveDetailMatchesRecord(&detail, &self.agent_session_archive_records.items[record_index])) continue;
-            for (self.agent_session_dock_entries.items) |entry| {
-                const ui_action = entry.action orelse continue;
-                if (ui_action.id != action.action_id) continue;
-                const root_index = entry.parent_index orelse continue;
-                if (root_index >= self.agent_session_dock_entries.items.len) continue;
-                const root = self.agent_session_dock_entries.items[root_index];
-                return .{
-                    .request_id = detail.request_id,
-                    .generation = self.agent_session_dock_snapshot_generation,
-                    .x_px = @as(f32, @floatFromInt(content.x)) + root.rect.x,
-                    .y_px = @as(f32, @floatFromInt(content.y)) + root.rect.y,
-                    .width_px = root.rect.width,
-                    .height_px = root.rect.height,
-                    .state = switch (detail.state) {
-                        .loading => 1,
-                        .ready => 2,
-                        .stale => 3,
-                        .unavailable => 4,
-                    },
-                    .present = true,
-                    .enabled = true,
-                };
-            }
-        }
-        return .{};
-    }
-
-    /// Returns the un-clipped outer rect of the one identity-bound expanded card only while it
-    /// crosses the content clip top. The normal capability probes intentionally return a clipped
-    /// hit rect, but that value is always pinned to the clip edge for a partial row and cannot
-    /// distinguish a preserved intra-card scroll position from a broken refresh restore.
-    ///
-    /// This fixture observer is not an action lookup: `request_id` merely links the rect to the
-    /// already-open inline detail, and no provider/session/path/action data crosses the boundary.
-    fn agentSessionDockExpandedAnchorSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        const detail = self.agent_session_inline_detail orelse return .{};
-        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-        const content = self.dockGeometry().tree_content;
-        for (self.agent_session_dock_actions.items) |action| {
-            const record_index: usize = switch (action.intent) {
-                .select_card => |identity| if (identity <= std.math.maxInt(usize)) @intCast(identity) else continue,
-                else => continue,
-            };
-            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation or
-                record_index >= self.agent_session_archive_records.items.len or
-                !inlineArchiveDetailMatchesRecord(&detail, &self.agent_session_archive_records.items[record_index])) continue;
-            for (self.agent_session_dock_entries.items) |entry| {
-                const ui_action = entry.action orelse continue;
-                if (ui_action.id != action.action_id) continue;
-                const root_index = entry.parent_index orelse continue;
-                if (root_index >= self.agent_session_dock_entries.items.len) continue;
-                const root = self.agent_session_dock_entries.items[root_index];
-                const clip = root.effective_clip orelse continue;
-                if (!(root.rect.y < clip.y and root.rect.y + root.rect.height > clip.y)) continue;
-                return .{
-                    .request_id = detail.request_id,
-                    .generation = self.agent_session_dock_snapshot_generation,
-                    .x_px = @as(f32, @floatFromInt(content.x)) + root.rect.x,
-                    .y_px = @as(f32, @floatFromInt(content.y)) + root.rect.y,
-                    .width_px = root.rect.width,
-                    .height_px = root.rect.height,
-                    .state = switch (detail.state) {
-                        .loading => 1,
-                        .ready => 2,
-                        .stale => 3,
-                        .unavailable => 4,
-                    },
-                    .present = true,
-                    .enabled = true,
-                };
-            }
-        }
-        return .{};
-    }
-
-    /// Reads an action only from the same SessionDock tree that was painted for the inline
-    /// disclosure.  The closed AppKit fixture still calls the historical probe enum names, but
-    /// no archive Term/surface or second detail tree participates in the observation.
-    fn inlineDetailSmokeProbe(
-        self: *const AppSession,
-        wanted: chrome.components.session_dock.ids.Intent,
-    ) AgentSessionArchiveSmokeProbe {
-        const detail = self.agent_session_inline_detail orelse return .{};
-        const state: u32 = switch (detail.state) {
-            .loading => 1,
-            .ready => 2,
-            .stale => 3,
-            .unavailable => 4,
-        };
-        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{ .request_id = detail.request_id, .state = state };
-        const content = self.dockGeometry().tree_content;
-        for (self.agent_session_dock_actions.items) |action| {
-            if (std.meta.activeTag(action.intent) != std.meta.activeTag(wanted) or
-                action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
-            for (self.agent_session_dock_entries.items) |entry| {
-                const ui_action = entry.action orelse continue;
-                if (ui_action.id != action.action_id) continue;
-                const visible = smokeProbeVisibleRect(entry) orelse continue;
-                return .{
-                    .request_id = detail.request_id,
-                    .generation = self.agent_session_dock_snapshot_generation,
-                    .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
-                    .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
-                    .width_px = visible.width,
-                    .height_px = visible.height,
-                    .state = state,
-                    .present = true,
-                    .enabled = ui_action.enabled,
-                };
-            }
-        }
-        return .{ .request_id = detail.request_id, .state = state };
-    }
-
-    /// The fixture enters the list through exactly the same view-switcher slot as a user click.
-    /// This is geometry-only: it neither changes `dock.view` nor starts a scan. The normal mouse
-    /// dispatcher remains the sole authority that turns the later physical click into `setDockView`.
-    fn agentSessionDockSwitcherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        if (!self.dockVisible() or self.cell_width_px == 0) return .{};
-        const bar = self.dockGeometry().view_bar;
-        const slot = dock_view_bar.slotRect(
-            .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-            self.cell_width_px,
-            2,
-        ) orelse return .{};
-        if (slot.w == 0 or slot.h == 0) return .{};
-        return .{
-            .x_px = @floatFromInt(slot.x),
-            .y_px = @floatFromInt(slot.y),
-            .width_px = @floatFromInt(slot.w),
-            .height_px = @floatFromInt(slot.h),
-            .present = true,
-            .enabled = true,
-        };
-    }
 
     /// A cold app starts with its dock hidden.  The fixture must enter through the same titlebar
     /// control a user uses before it can click the session view switcher; returning this geometry
@@ -35156,7 +33346,7 @@ pub const AppSession = struct {
     /// A probe coordinate is only useful if the regular pointer dispatcher can hit it. The
     /// published tree's effective clip is therefore intersected here rather than returning an
     /// offscreen portion of a virtualized/partially scrolled action rect.
-    fn smokeProbeVisibleRect(entry: chrome.ui.tree.RectEntry) ?chrome.ui.layout.UiRect {
+    pub fn smokeProbeVisibleRect(entry: chrome.ui.tree.RectEntry) ?chrome.ui.layout.UiRect {
         const clip = entry.effective_clip orelse return entry.rect;
         const left = @max(entry.rect.x, clip.x);
         const top = @max(entry.rect.y, clip.y);
@@ -35164,202 +33354,6 @@ pub const AppSession = struct {
         const bottom = @min(entry.rect.y + entry.rect.height, clip.y + clip.height);
         if (!(right > left and bottom > top)) return null;
         return .{ .x = left, .y = top, .width = right - left, .height = bottom - top };
-    }
-
-    /// Pointer의 backing-px를 component-local px로 한 번만 변환해 같은 completed
-    /// SessionDock tree에 lifecycle event를 보낸다. 예전 archive 행 번호 계산을 병행하지
-    /// 않으므로 카드가 둥근 여백/가변 높이로 바뀌어도 "보이는 곳 = 눌리는 곳"이 유지된다.
-    fn agentSessionDockPointer(
-        self: *AppSession,
-        phase: chrome.ui.interaction.UiPointerPhase,
-        x_px: f64,
-        y_px: f64,
-    ) ?chrome.components.session_dock.ids.Intent {
-        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
-        const content = self.dockGeometry().tree_content;
-        if (self.agent_session_dock_entries.items.len == 0) return null;
-        const local_x = x_px - @as(f64, @floatFromInt(content.x));
-        const local_y = y_px - @as(f64, @floatFromInt(content.y));
-        // scrollbar를 잡는 순간은 down이다(up의 action이 아니다). 눌린 지점이 thumb인지 track인지에 따라
-        // grab 지점이 달라지고, track이면 그 자리로 먼저 점프한 뒤 이어서 끌 수 있어야 한다.
-        if (phase == .down) self.beginAgentSessionDockScrollDrag(local_x, local_y);
-        const dispatched = dispatchAgentSessionDockPointer(
-            &self.agent_session_dock_interaction,
-            self.agent_session_dock_entries.items,
-            self.agent_session_dock_actions.items,
-            self.agent_session_dock_snapshot_generation,
-            .{
-                .phase = phase,
-                .x_px = local_x,
-                .y_px = local_y,
-                .timestamp_ns = 0,
-            },
-        ) orelse return null;
-        if (dispatched.visual_changed) self.metal_dirty = true;
-        if (dispatched.drag) |event| self.absorbAgentSessionDockScrollDrag(event);
-        return dispatched.intent;
-    }
-
-    /// published tree가 발행한 track/thumb rect에서 현재 scrollbar 기하를 되읽는다. 여기서 다시 계산하면
-    /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른" 결함이다.
-    fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
-        const build_ids = chrome.components.session_dock.build.NodeIds;
-        var track: ?chrome.ui.layout.UiRect = null;
-        var thumb: ?chrome.ui.layout.UiRect = null;
-        for (self.agent_session_dock_entries.items) |entry| {
-            if (entry.id == build_ids.scroll_track) track = entry.rect;
-            if (entry.id == build_ids.scroll_thumb) thumb = entry.rect;
-        }
-        const t = track orelse return null;
-        const h = thumb orelse return null;
-        return .{
-            .track_x = t.x,
-            .track_y = t.y,
-            .track_w = t.width,
-            .track_h = t.height,
-            .thumb_y = h.y,
-            .thumb_h = h.height,
-            .max_offset_px = self.agentSessionDockScrollProjection().max_offset_px,
-        };
-    }
-
-    /// down이 scrollbar 안이면 드래그를 연다. thumb이면 잡은 지점을 그대로 유지하고, track이면 그 지점으로
-    /// 먼저 점프한 뒤 thumb 중앙을 잡은 것으로 친다(그래야 눌렀다 끌기 시작할 때 위치가 튀지 않는다).
-    /// down이 스크롤바 위인지, 잡기인지 점프인지, 잡은 지점을 어떻게 기억하는지는 `scroll_area.Drag`가
-    /// 안다. host는 published 기하를 건네고 점프 결과만 적용한다 — 기하를 두 번째로 만들지 않는다.
-    fn beginAgentSessionDockScrollDrag(self: *AppSession, local_x: f64, local_y: f64) void {
-        const bar = self.agentSessionDockScrollbarGeometry() orelse return;
-        if (self.agent_session_dock_scroll_drag.begin(bar, local_x, local_y)) |jumped|
-            self.setAgentSessionDockScrollOffset(jumped);
-    }
-
-    /// drag 이벤트에서 **좌표만** 흡수한다. payload 판정은 여기(host)가 한다 — `scroll_area`는
-    /// `interaction`을 import할 수 없다(그쪽이 `tree`를 쓰고 `tree`가 `scroll_area`를 쓴다).
-    fn absorbAgentSessionDockScrollDrag(self: *AppSession, event: chrome.ui.interaction.DragEvent) void {
-        const payload = chrome.components.session_dock.build.scroll_drag_payload;
-        switch (event) {
-            .began, .moved => |update| {
-                if (update.payload != payload) return;
-                self.agent_session_dock_scroll_drag.absorb(update.x_px, update.y_px);
-            },
-            .dropped => |update| {
-                if (update.payload != payload) return;
-                // 마지막 좌표는 버리지 않는다 — 놓기 직전의 위치가 최종 스크롤이다.
-                self.agent_session_dock_scroll_drag.absorb(update.x_px, update.y_px);
-                self.applyAgentSessionDockScrollDrag();
-                self.endAgentSessionDockScrollDrag();
-            },
-            .cancelled => |cancelled| {
-                if (cancelled.payload != payload) return;
-                self.endAgentSessionDockScrollDrag();
-            },
-        }
-    }
-
-    fn endAgentSessionDockScrollDrag(self: *AppSession) void {
-        self.agent_session_dock_scroll_drag.end();
-    }
-
-    /// tick이 부르는 소비 지점. 좌표 → offset 변환은 `Drag`가 하고 host는 그 결과를 적용만 한다.
-    fn applyAgentSessionDockScrollDrag(self: *AppSession) void {
-        const offset = self.agent_session_dock_scroll_drag.takeOffset() orelse return;
-        self.setAgentSessionDockScrollOffset(offset);
-    }
-
-    fn setAgentSessionDockScrollOffset(self: *AppSession, offset_px: u32) void {
-        const projection = self.agentSessionDockScrollProjection();
-        if (!self.agent_session_archive_scroll.setOffsetPx(offset_px, projection.max_offset_px)) return;
-        // 휠 잔여분은 스크롤 위치의 함수가 아니라 그 위치로 가는 도중의 상태다. 다른 경로가 위치를
-        // 확정했으면 남은 잔여분은 의미가 없다(키보드 스크롤과 같은 규율).
-        self.agent_session_archive_scroll.dropWheelResidue();
-        self.metal_dirty = true;
-    }
-
-    fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.session_dock.ids.Intent) void {
-        switch (intent) {
-            .refresh => self.refreshAgentSessionArchive(true),
-            .scope => |scope| self.selectAgentSessionArchiveScope(switch (scope) {
-                .workspace => .workspace,
-                .project => .project,
-                .all => .all,
-            }),
-            .toggle_sort => self.toggleAgentSessionArchiveSort(),
-            .focus_search => {
-                self.agent_session_archive_search_active = true;
-                self.resetCursorBlink();
-                self.metal_dirty = true;
-            },
-            .toggle_group => |identity| {
-                if (identity <= std.math.maxInt(usize)) self.toggleAgentSessionArchiveGroup(@intCast(identity));
-            },
-            .select_card => |identity| {
-                if (identity > std.math.maxInt(usize)) return;
-                const record_index: usize = @intCast(identity);
-                self.agent_session_archive_selected = record_index;
-                if (record_index < self.agent_session_archive_records.items.len) {
-                    self.openAgentSessionInlineDetail(&self.agent_session_archive_records.items[record_index]) catch {
-                        self.showNotice("세션 기록을 열지 못했습니다.");
-                    };
-                }
-                self.metal_dirty = true;
-            },
-            .resume_session => if (self.agent_session_inline_detail) |detail| if (detail.state == .ready) {
-                self.resumeAgentSessionInNewTerm(&detail.record) catch self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
-            },
-            .reveal_log => if (self.agent_session_inline_detail) |*detail| if (detail.state == .ready) {
-                self.revealAgentSessionArchiveLog(&detail.record) catch |err| {
-                    // Reveal performs a fresh no-follow identity check.  A source replaced after
-                    // the ready frame must immediately become stale in this same inline card;
-                    // keeping ready buttons after this rejection would make the UI lie.
-                    if (err == error.StaleArchiveSource) {
-                        if (detail.detail) |*parsed| parsed.deinit(self.allocator);
-                        detail.detail = null;
-                        detail.state = .stale;
-                        self.invalidateAgentSessionDockFrame();
-                        if (archiveSmokeScenarioIs("reveal-recheck-pointer"))
-                            self.agent_session_archive_smoke_stale_reveal_count +%= 1;
-                    }
-                    self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
-                };
-            },
-            .focus_live => if (self.agent_session_inline_detail) |detail| if (detail.state == .ready) {
-                if (!self.focusLiveArchiveSession(&detail)) self.showNotice("현재 열린 동일 세션을 찾지 못했습니다.");
-            },
-            // scrollbar는 up의 click이 아니라 down의 위치와 이어지는 drag가 결정한다. 목표 offset은
-            // pointer 좌표의 함수라 intent에 실을 수 없으므로 pointer 경로가 이미 처리했다.
-            .scroll_thumb, .scroll_track => {},
-        }
-    }
-
-    fn archiveSessionHasLiveMapping(self: *const AppSession, detail: *const InlineArchiveDetail) bool {
-        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-            if (!term.rt.live_initialized or term.rt.terminated) continue;
-            const provider_matches = switch (detail.record.parsed.provider) {
-                .claude => term.agent_kind == .claude,
-                .codex => term.agent_kind == .codex,
-            };
-            if (provider_matches and std.mem.eql(u8, term.agent_transcript.identity(), detail.record.parsed.session_id)) return true;
-        };
-        return false;
-    }
-
-    /// Identity comparison is deliberately repeated at activation time. A panel may have been
-    /// painted while a provider rotated its child session identity; focus is only authorized for
-    /// the exact provider/session pair visible in the current action table.
-    fn focusLiveArchiveSession(self: *AppSession, detail: *const InlineArchiveDetail) bool {
-        for (self.tabs.items, 0..) |tab, tab_index| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, term_index| {
-            if (!term.rt.live_initialized or term.rt.terminated) continue;
-            const provider_matches = switch (detail.record.parsed.provider) {
-                .claude => term.agent_kind == .claude,
-                .codex => term.agent_kind == .codex,
-            };
-            if (!provider_matches or !std.mem.eql(u8, term.agent_transcript.identity(), detail.record.parsed.session_id)) continue;
-            _ = self.switchTab(tab_index);
-            _ = self.focusPaneByPtr(pane);
-            self.focusTerm(term_index);
-            return true;
-        };
-        return false;
     }
 
     /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다 — append-or-deinit 꼬리의 단일 출처다(collectShaped는 DrawList를
@@ -36753,7 +34747,7 @@ pub const AppSession = struct {
     /// ResolvedTheme(config) → chrome 토큰. chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서 resolved
     /// Rgb만 뽑아 넘기고, **역할→색 매핑은 chrome.tokens.Tokens.tui가 단일 출처로 소유**한다(2nd 백엔드·rich도
     /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
-    fn buildChromeTokens(self: *const AppSession) chrome.Tokens {
+    pub fn buildChromeTokens(self: *const AppSession) chrome.Tokens {
         const t = self.appearance.theme;
         const tc = chrome.tokens.ThemeColors{
             .foreground = t.foreground,
@@ -52132,30 +50126,30 @@ test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll sc
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
 
-    const base_scale = session.agentSessionDockScaleMilli();
-    const base_card_h_px = session.agentSessionDockScrollItems().card_h_px;
-    try std.testing.expectEqual(@as(u32, 1000), session.agentSessionDockUiZoomMilli());
+    const base_scale = agent_dock.agentSessionDockScaleMilli(session);
+    const base_card_h_px = agent_dock.agentSessionDockScrollItems(session).card_h_px;
+    try std.testing.expectEqual(@as(u32, 1000), agent_dock.agentSessionDockUiZoomMilli(session));
     try std.testing.expectEqual(@as(u32, 1000), base_scale);
 
     session.dispatchAppAction(.increase_font_size);
-    const larger_scale = session.agentSessionDockScaleMilli();
-    const larger_card_h_px = session.agentSessionDockScrollItems().card_h_px;
+    const larger_scale = agent_dock.agentSessionDockScaleMilli(session);
+    const larger_card_h_px = agent_dock.agentSessionDockScrollItems(session).card_h_px;
     try std.testing.expect(larger_scale > base_scale);
     try std.testing.expect(larger_card_h_px > base_card_h_px);
 
     session.dispatchAppAction(.reset_font_size);
     session.dispatchAppAction(.decrease_font_size);
-    const smaller_scale = session.agentSessionDockScaleMilli();
-    const smaller_card_h_px = session.agentSessionDockScrollItems().card_h_px;
+    const smaller_scale = agent_dock.agentSessionDockScaleMilli(session);
+    const smaller_card_h_px = agent_dock.agentSessionDockScrollItems(session).card_h_px;
     try std.testing.expect(smaller_scale < base_scale);
     try std.testing.expect(smaller_card_h_px < base_card_h_px);
 
     session.setFontSize(font_size_min);
-    try std.testing.expectEqual(session_dock_ui_zoom_min_milli, session.agentSessionDockUiZoomMilli());
+    try std.testing.expectEqual(session_dock_ui_zoom_min_milli, agent_dock.agentSessionDockUiZoomMilli(session));
     session.setFontSize(font_size_max);
-    try std.testing.expectEqual(session_dock_ui_zoom_max_milli, session.agentSessionDockUiZoomMilli());
+    try std.testing.expectEqual(session_dock_ui_zoom_max_milli, agent_dock.agentSessionDockUiZoomMilli(session));
     session.dispatchAppAction(.reset_font_size);
-    try std.testing.expectEqual(@as(u32, 1000), session.agentSessionDockUiZoomMilli());
+    try std.testing.expectEqual(@as(u32, 1000), agent_dock.agentSessionDockUiZoomMilli(session));
 }
 
 test "Session Dock search owns committed text and IME preedit instead of leaking to the terminal" {
@@ -64429,23 +62423,23 @@ test "settings keybind stale unbind 정리: unbind한 chord를 다시 바인딩�
 // 도크를 열면 아카이브 스캔이 요청되는가. 예전에는 `setDockView` 하나가 "전환"과 "진입"을 겸해서,
 // `dock.view`가 이미 `agent_sessions`인 채로 도크를 열면 맨 앞 조기 반환(`if (self.dock.view == view) return`)에
 // 걸려 스캔 요청이 아예 나가지 않았다 — 목록도 스피너도 없이 비었고 새로 고침을 눌러야 나타났다.
-// 도크를 떠날 때 진행 중 스캔이 취소되므로(cancelAgentSessionArchive) 닫았다 여는 흐름에서 특히 잘 드러났다.
+// 도크를 떠날 때 진행 중 스캔이 취소되므로(agent_dock.cancelAgentSessionArchive) 닫았다 여는 흐름에서 특히 잘 드러났다.
 //
 // 실제 스캔은 사용자 홈 전체를 읽는 워커라 단위 테스트에서 돌릴 수 없다. 그래서 진입 판정을 순수 함수로
 // 분리해 그 규칙을 고정하고, 호출 경로는 `enterDockView` 하나로 모았다.
 test "도크 진입 판정: 보이는 도크의 agent_sessions에서만 아카이브 스캔을 요청한다" {
     // 보이고 + agent_sessions → 요청.
-    try std.testing.expect(AppSession.shouldRefreshArchiveOnPresent(true, .agent_sessions));
+    try std.testing.expect(agent_dock.shouldRefreshArchiveOnPresent(true, .agent_sessions));
     // 같은 뷰로 다시 들어와도 판정은 같다. "전환이 없었다"는 이유로 스캔을 건너뛰면 안 된다 — 이 회귀가
     // 첫 진입에 목록이 비어 있던 원인이다.
-    try std.testing.expect(AppSession.shouldRefreshArchiveOnPresent(true, .agent_sessions));
+    try std.testing.expect(agent_dock.shouldRefreshArchiveOnPresent(true, .agent_sessions));
     // 도크가 안 보이면 요청하지 않는다. setDockView는 workspace restore처럼 도크가 닫힌 상태에서도
     // 불리므로, 이 가드가 없으면 보이지도 않는 도크가 사용자 이력 전체를 스캔한다.
-    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(false, .agent_sessions));
+    try std.testing.expect(!agent_dock.shouldRefreshArchiveOnPresent(false, .agent_sessions));
     // 다른 뷰는 아카이브와 무관하다.
-    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(true, .explorer));
-    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(true, .source_control));
-    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(false, .explorer));
+    try std.testing.expect(!agent_dock.shouldRefreshArchiveOnPresent(true, .explorer));
+    try std.testing.expect(!agent_dock.shouldRefreshArchiveOnPresent(true, .source_control));
+    try std.testing.expect(!agent_dock.shouldRefreshArchiveOnPresent(false, .explorer));
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {
@@ -71935,7 +69929,7 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
     }};
     var state = chrome.ui.interaction.InteractionState{};
 
-    const hover = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+    const hover = agent_dock.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
         .phase = .move,
         .x_px = 20,
         .y_px = 30,
@@ -71945,7 +69939,7 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
     try std.testing.expect(hover.visual_changed);
     try std.testing.expectEqual(@as(?chrome.ui.tree.UiId, entries[0].id), state.hovered);
 
-    const down = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+    const down = agent_dock.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
         .phase = .down,
         .x_px = 20,
         .y_px = 30,
@@ -71956,7 +69950,7 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
 
     // Capture deliberately owns the matching up even outside the card, while the same published
     // action table still maps it to the original archive identity.
-    const up = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+    const up = agent_dock.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
         .phase = .up,
         .x_px = 900,
         .y_px = 900,
@@ -71965,14 +69959,14 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
     try std.testing.expectEqual(@as(?chrome.components.session_dock.ids.Intent, .{ .select_card = 42 }), up.intent);
     try std.testing.expect(state.capture == null);
 
-    _ = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+    _ = agent_dock.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
         .phase = .down,
         .x_px = 20,
         .y_px = 30,
         .timestamp_ns = 4,
     }).?;
     _ = try chrome.ui.interaction.reconcile(&state, .{ .entries = &entries }, .{ .entries = &entries });
-    const stale_up = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+    const stale_up = agent_dock.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
         .phase = .up,
         .x_px = 20,
         .y_px = 30,
@@ -71985,8 +69979,8 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
         .snapshot_generation = 9,
         .intent = .{ .select_card = 99 },
     }};
-    try std.testing.expect(AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &actions));
-    try std.testing.expect(!AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &changed_actions));
+    try std.testing.expect(agent_dock.agentSessionDockFrameEql(&entries, &actions, &entries, &actions));
+    try std.testing.expect(!agent_dock.agentSessionDockFrameEql(&entries, &actions, &entries, &changed_actions));
 }
 
 test "archive smoke probe returns only the pointer-hittable clipped capability rect" {
@@ -72328,7 +70322,7 @@ test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받�
     _ = try session.tick();
 }
 
-/// 픽스처 그룹 한 건. `entries`에 `.group`만 넣고 이 배열을 비워 두면 `buildAgentSessionDockItems`가
+/// 픽스처 그룹 한 건. `entries`에 `.group`만 넣고 이 배열을 비워 두면 `agent_dock.buildAgentSessionDockItems`가
 /// 그 항목을 건너뛰어 스크롤 좌표(그룹을 예약)와 발행 tree(그리지 않음)의 index가 어긋난다. 제품
 /// 경로는 둘을 같은 재투영에서 함께 만들지만, 테스트가 한쪽만 채우면 없는 결함을 만들어 낸다.
 fn appendFixtureArchiveGroup(session: *AppSession, allocator: std.mem.Allocator, count: usize) !void {
@@ -72387,18 +70381,18 @@ fn dockWheelFixture(allocator: std.mem.Allocator) !*AppSession {
 }
 
 /// 실제 발행 경로로 도크 tree를 publish해 스크롤바 기하가 생기게 한다. 기존 드래그 테스트는
-/// `agent_session_dock_scroll_drag`를 직접 세팅해 `beginAgentSessionDockScrollDrag`를 건너뛰었고,
+/// `agent_session_dock_scroll_drag`를 직접 세팅해 `agent_dock.beginAgentSessionDockScrollDrag`를 건너뛰었고,
 /// 그래서 down 시점의 계약(track 안인가·thumb인가·잡은 지점·점프 뒤 기하)이 전부 무판정이었다.
 fn publishDockFrameForDrag(session: *AppSession, allocator: std.mem.Allocator) !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const projection = session.agentSessionDockScrollProjection();
-    const items = try session.buildAgentSessionDockItems(arena, projection);
+    const projection = agent_dock.agentSessionDockScrollProjection(session);
+    const items = try agent_dock.buildAgentSessionDockItems(session, arena, projection);
     const sizes = chrome.components.session_dock.build.bufferSizes(items);
     const content = session.dockGeometry().tree_content;
-    const frame = try chrome.components.session_dock.build.build(session.agentSessionDockProps(content, projection, items), .{
+    const frame = try chrome.components.session_dock.build.build(agent_dock.agentSessionDockProps(session, content, projection, items), .{
         .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
         .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
         .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
@@ -72406,7 +70400,7 @@ fn publishDockFrameForDrag(session: *AppSession, allocator: std.mem.Allocator) !
         .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
         .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions),
     });
-    session.publishAgentSessionDockFrame(frame, session.agent_session_dock_snapshot_generation);
+    agent_dock.publishAgentSessionDockFrame(session, frame, session.agent_session_dock_snapshot_generation);
 }
 
 test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지한 채 시작한다" {
@@ -72417,12 +70411,12 @@ test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지�
     defer session.deinit();
 
     try publishDockFrameForDrag(session, allocator);
-    const bar = session.agentSessionDockScrollbarGeometry() orelse return error.TestUnexpectedResult;
+    const bar = agent_dock.agentSessionDockScrollbarGeometry(session) orelse return error.TestUnexpectedResult;
     try std.testing.expect(bar.max_offset_px > 0);
     try std.testing.expect(bar.thumb_h < bar.track_h);
 
     // ① track **밖** down은 드래그가 아니다. 이 판정이 없으면 gutter 바깥 클릭이 스크롤로 샌다.
-    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) - 20, @as(f64, bar.track_y) + 10);
+    agent_dock.beginAgentSessionDockScrollDrag(session, @as(f64, bar.track_x) - 20, @as(f64, bar.track_y) + 10);
     try std.testing.expect(!session.agent_session_dock_scroll_drag.active);
 
     // ② thumb 위 down은 **잡기**다 — 점프가 아니다. 목록이 그 자리에서 움직이면 안 되고, 잡은
@@ -72432,18 +70426,18 @@ test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지�
     //    grab_dy가 thumb 절반이고 목록이 그 지점으로 옮겨간다.
     const before = session.agent_session_archive_scroll.offset_y_px;
     const grab_y = @as(f64, bar.thumb_y) + 1;
-    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) + 1, grab_y);
+    agent_dock.beginAgentSessionDockScrollDrag(session, @as(f64, bar.track_x) + 1, grab_y);
     try std.testing.expect(session.agent_session_dock_scroll_drag.active);
     const thumb_drag = session.agent_session_dock_scroll_drag;
     try std.testing.expectEqual(before, session.agent_session_archive_scroll.offset_y_px);
     try std.testing.expectApproxEqAbs(@as(f32, 1), thumb_drag.grab_dy, 0.01);
     try std.testing.expect(thumb_drag.grab_dy < bar.thumb_h / 4);
-    session.endAgentSessionDockScrollDrag();
+    agent_dock.endAgentSessionDockScrollDrag(session);
 
     // ③ thumb **바깥** track down은 그 자리로 점프하고, 이어지는 드래그는 옮긴 뒤의 기하를 쓴다.
     //    옛 기하를 그대로 들면 손을 떼지 않고 끌기 시작하는 순간 thumb이 한 번 튄다.
     const far_y = @as(f64, bar.track_y) + @as(f64, bar.track_h) - 2;
-    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) + 1, far_y);
+    agent_dock.beginAgentSessionDockScrollDrag(session, @as(f64, bar.track_x) + 1, far_y);
     try std.testing.expect(session.agent_session_dock_scroll_drag.active);
     const track_drag = session.agent_session_dock_scroll_drag;
     try std.testing.expect(session.agent_session_archive_scroll.offset_y_px > before);
@@ -72451,7 +70445,7 @@ test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지�
     try std.testing.expectApproxEqAbs(expected.thumb_y, track_drag.geometry.thumb_y, 0.01);
     // 점프한 경우 thumb 중앙을 잡은 것으로 둔다 — 그래야 이어지는 이동이 커서를 그대로 따라간다.
     try std.testing.expectApproxEqAbs(bar.thumb_h / 2, track_drag.grab_dy, 0.01);
-    session.endAgentSessionDockScrollDrag();
+    agent_dock.endAgentSessionDockScrollDrag(session);
 }
 
 test "도크 키보드 스크롤은 한 항목을 남기고, 끝으로 가고, 휠 잔여를 비운다" {
@@ -72463,34 +70457,34 @@ test "도크 키보드 스크롤은 한 항목을 남기고, 끝으로 가고, �
 
     // 도크가 키보드를 가져야 이 키들이 도크 것이 된다(터미널에서 친 Page/Home이 새면 안 된다).
     session.agent_session_dock_key_focus = true;
-    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    try std.testing.expect(agent_dock.agentSessionDockOwnsKeys(session));
 
-    const projection = session.agentSessionDockScrollProjection();
-    const viewport = session.agentSessionDockContentViewportHeightPx();
-    const card_h = session.agentSessionDockScrollItems().card_h_px;
+    const projection = agent_dock.agentSessionDockScrollProjection(session);
+    const viewport = agent_dock.agentSessionDockContentViewportHeightPx(session);
+    const card_h = agent_dock.agentSessionDockScrollItems(session).card_h_px;
     try std.testing.expect(projection.max_offset_px > 0);
     try std.testing.expect(viewport > card_h);
 
     // PageDown은 **카드 하나를 화면에 남긴다** — 한 화면을 통째로 넘기면 읽던 맥락이 끊긴다.
-    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expect(agent_dock.handleAgentSessionDockScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
     try std.testing.expectEqual(viewport - card_h, session.agent_session_archive_scroll.offset_y_px);
 
     // End는 정확히 상한이다(그 너머는 빈 공간이라 갈 곳이 없다).
-    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .end, .modifiers = .{} }));
+    try std.testing.expect(agent_dock.handleAgentSessionDockScrollKey(session, .{ .key = .end, .modifiers = .{} }));
     try std.testing.expectEqual(projection.max_offset_px, session.agent_session_archive_scroll.offset_y_px);
 
     // Home은 맨 위. PageUp도 같은 걸음으로 되돌아온다.
-    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .home, .modifiers = .{} }));
+    try std.testing.expect(agent_dock.handleAgentSessionDockScrollKey(session, .{ .key = .home, .modifiers = .{} }));
     try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
 
     // 키가 위치를 확정했으므로 휠 잔여는 버린다 — 남기면 다음 휠 틱이 옛 방향에서 시작한다.
     session.agent_session_archive_scroll.wheel_residue_px = 3;
-    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expect(agent_dock.handleAgentSessionDockScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
     try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_scroll.wheel_residue_px);
 
     // 도크가 키보드를 놓으면 같은 키가 더 이상 도크 것이 아니다.
     session.agent_session_dock_key_focus = false;
-    try std.testing.expect(!session.handleAgentSessionDockScrollKey(.{ .key = .home, .modifiers = .{} }));
+    try std.testing.expect(!agent_dock.handleAgentSessionDockScrollKey(session, .{ .key = .home, .modifiers = .{} }));
 }
 
 test "재투영은 스냅샷 세대를 올려 진행 중인 스크롤바 드래그를 놓게 한다" {
@@ -72504,13 +70498,13 @@ test "재투영은 스냅샷 세대를 올려 진행 중인 스크롤바 드래�
     // 그대로면, 진행 중인 드래그가 없어진 목록 기준으로 계속 스크롤한다. 그 판정을 generation
     // 비교 하나에 위임했으므로 "재투영은 세대를 올린다"가 지켜져야 나머지가 성립한다.
     const before = session.agent_session_dock_snapshot_generation;
-    session.rebuildAgentSessionArchiveProjection();
+    agent_dock.rebuildAgentSessionArchiveProjection(session);
     try std.testing.expect(session.agent_session_dock_snapshot_generation != before);
 
     // 0은 "세대를 쓰지 않는 소비자"라는 뜻이라 wrap 시에도 건너뛴다 — 안 그러면 그 프레임만
     // 세대 검사가 통째로 꺼진다.
     session.agent_session_dock_snapshot_generation = std.math.maxInt(u64);
-    session.rebuildAgentSessionArchiveProjection();
+    agent_dock.rebuildAgentSessionArchiveProjection(session);
     try std.testing.expect(session.agent_session_dock_snapshot_generation != 0);
 }
 
@@ -72522,35 +70516,35 @@ test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를
     defer session.deinit();
 
     try publishDockFrameForDrag(session, allocator);
-    const bar = session.agentSessionDockScrollbarGeometry() orelse return error.TestUnexpectedResult;
+    const bar = agent_dock.agentSessionDockScrollbarGeometry(session) orelse return error.TestUnexpectedResult;
     const payload = chrome.components.session_dock.build.scroll_drag_payload;
 
-    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) + 1, @as(f64, bar.thumb_y) + 1);
+    agent_dock.beginAgentSessionDockScrollDrag(session, @as(f64, bar.track_x) + 1, @as(f64, bar.thumb_y) + 1);
     try std.testing.expect(session.agent_session_dock_scroll_drag.active);
     const start = session.agent_session_archive_scroll.offset_y_px;
 
     // ① 다른 제스처(탭 드래그 등)의 좌표를 스크롤로 먹으면 안 된다.
-    session.absorbAgentSessionDockScrollDrag(.{ .moved = .{
+    agent_dock.absorbAgentSessionDockScrollDrag(session, .{ .moved = .{
         .payload = payload +% 1,
         .x_px = @as(f64, bar.track_x),
         .y_px = @as(f64, bar.track_y) + @as(f64, bar.track_h),
     } });
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     try std.testing.expectEqual(start, session.agent_session_archive_scroll.offset_y_px);
 
     // ② 자기 payload는 흡수하되 **적용은 tick이 한다**. move만으로 움직이면 한 프레임에 같은 일을
     //    여러 번 하게 된다.
     const bottom_y = @as(f64, bar.track_y) + @as(f64, bar.track_h) - 1;
-    session.absorbAgentSessionDockScrollDrag(.{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
+    agent_dock.absorbAgentSessionDockScrollDrag(session, .{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
     try std.testing.expectEqual(start, session.agent_session_archive_scroll.offset_y_px);
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     const after_move = session.agent_session_archive_scroll.offset_y_px;
     try std.testing.expect(after_move > start);
 
     // ③ 같은 좌표를 다시 흡수해도 값이 그대로면 아무 일도 하지 않는다(track 끝에 닿은 채 미는 동안).
     session.agent_session_archive_scroll.wheel_residue_px = 7;
-    session.absorbAgentSessionDockScrollDrag(.{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.absorbAgentSessionDockScrollDrag(session, .{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     try std.testing.expectEqual(after_move, session.agent_session_archive_scroll.offset_y_px);
     // 위치가 안 바뀌었으므로 다른 상태도 건드리지 않았다.
     try std.testing.expectEqual(@as(f64, 7), session.agent_session_archive_scroll.wheel_residue_px);
@@ -72559,7 +70553,7 @@ test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를
     //    위치를 확정한 뒤에는 의미가 없다(남기면 다음 휠 틱이 엉뚱한 곳에서 시작한다).
     session.agent_session_archive_scroll.wheel_residue_px = 5;
     const up_y = @as(f64, bar.track_y) + 1;
-    session.absorbAgentSessionDockScrollDrag(.{ .dropped = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = up_y } });
+    agent_dock.absorbAgentSessionDockScrollDrag(session, .{ .dropped = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = up_y } });
     try std.testing.expect(session.agent_session_archive_scroll.offset_y_px < after_move);
     try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_scroll.wheel_residue_px);
     // drop이 드래그를 끝낸다.
@@ -72576,7 +70570,7 @@ test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상�
     const content = session.dockGeometry().tree_content;
     const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
     const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
-    const max_offset = session.agentSessionDockScrollProjection().max_offset_px;
+    const max_offset = agent_dock.agentSessionDockScrollProjection(session).max_offset_px;
     try std.testing.expect(max_offset > 0);
 
     // ① 아래로 굴리면 목록이 아래로 간다. 부호가 뒤집히면 맨 위에서 아무 일도 일어나지 않는다.
@@ -72639,7 +70633,7 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
 }
 
 // 스크롤 좌표계를 `chrome/ui/scroll_area.zig`로 옮긴 뒤, 그 모듈은 촘촘한데 **도크가 그 모듈에 넘기는
-// 값**에는 판정자가 거의 없다는 것이 변이 검증에서 드러났다. `ArchiveScrollItems`의 다섯 가지를 하나씩
+// 값**에는 판정자가 거의 없다는 것이 변이 검증에서 드러났다. `agent_dock.ArchiveScrollItems`의 다섯 가지를 하나씩
 // 틀리게 만들어도(펼침 예약 없음, gap 0, 항목 수 -1, 펼침 index null, 카드 높이에 펼침 높이) 전체
 // 스위트가 초록이었다. 모듈이 옳아도 입력이 틀리면 결과는 같이 틀린다.
 test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 도크 metrics와 일치한다" {
@@ -72649,12 +70643,12 @@ test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 �
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const m = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli());
+    const m = chrome.components.session_dock.types.DockMetrics.resolve(agent_dock.agentSessionDockScaleMilli(session));
     try appendFixtureArchiveGroup(session, allocator, 3);
     try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
     for (0..3) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
 
-    const items = session.agentSessionDockScrollItems();
+    const items = agent_dock.agentSessionDockScrollItems(session);
     // 높이는 도크가 그리는 것과 같은 값이어야 한다. 카드 높이에 펼침 detail이 섞이면 스크롤 좌표가
     // 실제 그림보다 길어져, 목록 끝에서 빈 공간이 남는다.
     try std.testing.expectEqual(m.card_h, items.card_h_px);
@@ -72675,7 +70669,7 @@ test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 �
     try std.testing.expectEqual(@as(u32, 0), extent.gap_px);
 
     // 전체 content 높이는 항목 높이의 합이다(gap이 0이므로 사이 여백이 더해지지 않는다).
-    const projection = session.agentSessionDockScrollProjection();
+    const projection = agent_dock.agentSessionDockScrollProjection(session);
     try std.testing.expectEqual(m.group_h + m.card_h * 3, projection.content_height_px);
 }
 
@@ -72694,12 +70688,12 @@ fn dockTreeItemRects(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const dock_items = try session.buildAgentSessionDockItems(arena, projection);
+    const dock_items = try agent_dock.buildAgentSessionDockItems(session, arena, projection);
     const sizes = chrome.components.session_dock.build.bufferSizes(dock_items);
     const content = session.dockGeometry().tree_content;
     // **제품이 쓰는 그 함수**로 props를 만든다. 여기서 리터럴을 다시 쓰면 host의 구성이 틀려도
     // 테스트는 자기 복제본만 보게 된다.
-    const frame = try chrome.components.session_dock.build.build(session.agentSessionDockProps(content, projection, dock_items), .{
+    const frame = try chrome.components.session_dock.build.build(agent_dock.agentSessionDockProps(session, content, projection, dock_items), .{
         .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
         .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
         .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
@@ -72718,7 +70712,7 @@ fn dockTreeItemRects(
     // docs/scroll-area.md §4.2가 SV1c에서 이 예측식을 없애겠다고 한 자리이므로, 없앤 뒤에도 같은 값인지
     // 이 단언이 지킨다(예측식이 되살아나도 여기서 갈라진다).
     try std.testing.expectEqual(
-        session.agentSessionDockContentViewportHeightPx(),
+        agent_dock.agentSessionDockContentViewportHeightPx(session),
         @as(u32, @intFromFloat(@round(frame.tree.entries[content_index].rect.height))),
     );
 
@@ -72730,7 +70724,7 @@ fn dockTreeItemRects(
         const thumb_h = frame.tree.entries[thumb_index].rect.height;
         const visible_ratio = track_h / @as(f32, @floatFromInt(projection.content_height_px));
         // 최소 두께에 걸리지 않는 목록에서만 비율이 그대로 드러난다.
-        if (thumb_h > @as(f32, @floatFromInt(session.agentSessionDockScrollbarMinThumbPx())))
+        if (thumb_h > @as(f32, @floatFromInt(agent_dock.agentSessionDockScrollbarMinThumbPx(session))))
             try std.testing.expectApproxEqAbs(visible_ratio, thumb_h / track_h, 0.01);
     }
 
@@ -72770,11 +70764,11 @@ test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 �
 
     // 목록을 반쯤 스크롤해 첫 항목이 **잘린** 상태를 만든다. 이때 그 항목은 음수 y에서 시작해야
     // 한다 — 0이면 부분적으로 보여야 할 카드가 통째로 위에 붙어, 스크롤해도 첫 줄이 안 잘린다.
-    const half = session.agentSessionDockScrollProjection().max_offset_px / 2;
+    const half = agent_dock.agentSessionDockScrollProjection(session).max_offset_px / 2;
     try std.testing.expect(half > 0);
     _ = session.agent_session_archive_scroll.setOffsetPx(@intCast(half), std.math.maxInt(u32));
     {
-        const projection = session.agentSessionDockScrollProjection();
+        const projection = agent_dock.agentSessionDockScrollProjection(session);
         try std.testing.expect(projection.first_origin_y_px < 0);
         try expectDockTreeMatchesScroll(session, allocator, &rects);
         try std.testing.expectEqual(@as(f32, @floatFromInt(projection.first_origin_y_px)), rects.items[0].y);
@@ -72783,14 +70777,14 @@ test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 �
 
     // 펼침도 같은 대조를 통과해야 한다. 예약과 그림이 갈리는 것이 사용자가 보고한 "펼침메뉴 누르면
     // 뒤로 보인다"의 정확한 형태다(예약은 카드 높이인데 그림은 detail+action까지 차지한다).
-    try session.openAgentSessionInlineDetail(&session.agent_session_archive_records.items[0]);
+    try agent_dock.openAgentSessionInlineDetail(session, &session.agent_session_archive_records.items[0]);
     session.agent_session_archive_selected = 0;
     {
-        const items = session.agentSessionDockScrollItems();
+        const items = agent_dock.agentSessionDockScrollItems(session);
         try std.testing.expect(items.expanded_index != null);
         try expectDockTreeMatchesScroll(session, allocator, &rects);
         // 펼친 항목은 실제로 다른 항목보다 크다 — 전부 같은 높이면 위 비교가 통과해도 무의미하다.
-        const expanded_offset = items.expanded_index.? - session.agentSessionDockScrollProjection().first_index;
+        const expanded_offset = items.expanded_index.? - agent_dock.agentSessionDockScrollProjection(session).first_index;
         for (rects.items, 0..) |rect, offset| {
             if (offset == expanded_offset) continue;
             try std.testing.expect(rect.height < rects.items[expanded_offset].height);
@@ -72805,8 +70799,8 @@ fn expectDockTreeMatchesScroll(
     allocator: std.mem.Allocator,
     rects: *std.ArrayList(DockTreeItemRect),
 ) !void {
-    const projection = session.agentSessionDockScrollProjection();
-    const items = session.agentSessionDockScrollItems();
+    const projection = agent_dock.agentSessionDockScrollProjection(session);
+    const items = agent_dock.agentSessionDockScrollItems(session);
     try dockTreeItemRects(session, allocator, projection, rects);
     try std.testing.expect(rects.items.len > 0);
 
@@ -72833,21 +70827,21 @@ test "펼친 카드는 스크롤 좌표에서도 펼친 높이를 예약한다" 
     try session.agent_session_archive_projection.entries.append(allocator, .{ .card = 0 });
     try session.agent_session_archive_projection.entries.append(allocator, .{ .card = 1 });
 
-    const collapsed = session.agentSessionDockScrollProjection().content_height_px;
-    try std.testing.expect(session.agentSessionDockScrollItems().expanded_index == null);
+    const collapsed = agent_dock.agentSessionDockScrollProjection(session).content_height_px;
+    try std.testing.expect(agent_dock.agentSessionDockScrollItems(session).expanded_index == null);
 
     // 펼침을 열면 그 항목만 detail+action 높이를 더 쓴다. 이 예약이 빠지면 아래 카드들이 펼친 카드
     // 위로 겹쳐 그려진다 — 사용자가 "펼침메뉴 누르면 뒤로 보인다"고 보고했던 바로 그 상태다.
-    try session.openAgentSessionInlineDetail(&session.agent_session_archive_records.items[0]);
-    const items = session.agentSessionDockScrollItems();
+    try agent_dock.openAgentSessionInlineDetail(session, &session.agent_session_archive_records.items[0]);
+    const items = agent_dock.agentSessionDockScrollItems(session);
     try std.testing.expectEqual(@as(?usize, 0), items.expanded_index);
 
-    const m = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli());
+    const m = chrome.components.session_dock.types.DockMetrics.resolve(agent_dock.agentSessionDockScaleMilli(session));
     const reserved = m.card_h + m.expanded_detail_h + m.expanded_actions_h;
     try std.testing.expectEqual(reserved, items.heightPx(0));
     // 다른 record를 가리키는 두 번째 항목은 펼쳐지지 않았다(펼침은 하나다).
     try std.testing.expectEqual(m.card_h, items.heightPx(1));
-    try std.testing.expectEqual(collapsed + reserved - m.card_h, session.agentSessionDockScrollProjection().content_height_px);
+    try std.testing.expectEqual(collapsed + reserved - m.card_h, agent_dock.agentSessionDockScrollProjection(session).content_height_px);
 }
 
 // 사용자 보고 회귀: "Agent 세션 기록 탭이 열려 있으면 Enter가 오른쪽 도크 동작을 할 때가 있다".
@@ -72864,7 +70858,7 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     try appendFixtureArchiveRecord(session, allocator);
     session.agent_session_archive_selected = 0;
     // 카드 클릭이 없었으므로 도크는 키보드를 갖고 있지 않다.
-    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    try std.testing.expect(!agent_dock.agentSessionDockOwnsKeys(session));
 
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.agent_session_inline_detail == null); // 도크가 Enter를 가져가지 않았다
@@ -72876,14 +70870,14 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     const dock_center = dockContentCenter(session);
     session.mouse(1, dock_center.x, dock_center.y, 0, 0);
     session.mouse(3, dock_center.x, dock_center.y, 0, 0);
-    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    try std.testing.expect(agent_dock.agentSessionDockOwnsKeys(session));
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.agent_session_inline_detail != null);
 
-    // 회귀 가드: 카드를 여는 그 순간 `invalidateAgentSessionDockFrame`이 component-local focus를
+    // 회귀 가드: 카드를 여는 그 순간 `agent_dock.invalidateAgentSessionDockFrame`이 component-local focus를
     // 지운다. 소유권을 그 node id로 판정하면 여기서 도크가 키보드를 잃어 Enter로 다시 접을 수 없다.
     try std.testing.expect(session.agent_session_dock_interaction.focused == null);
-    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    try std.testing.expect(agent_dock.agentSessionDockOwnsKeys(session));
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.agent_session_inline_detail == null); // 같은 카드 Enter = 닫기
 
@@ -72892,7 +70886,7 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     try std.testing.expect(session.agent_session_archive_search_active);
 
     // 검색이 활성이면 그쪽이 먼저다 — 같은 소유권에서도 카드 활성화 게이트는 닫힌다.
-    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    try std.testing.expect(!agent_dock.agentSessionDockOwnsKeys(session));
     for ("ab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
     try std.testing.expectEqualStrings("ab", session.agent_session_archive_search.query.items);
 
@@ -72900,9 +70894,9 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     // `.workspace` 그대로라, 이 해제가 없으면 위 게이트가 계속 참으로 남는다.
     const term_rect = session.active_pane_rect;
     session.mouse(1, @floatFromInt(term_rect.x + term_rect.w / 2), @floatFromInt(term_rect.y + term_rect.h / 2), 0, 0);
-    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    try std.testing.expect(!agent_dock.agentSessionDockOwnsKeys(session));
     // 도크 검색도 함께 blur된다(사이드바 `blurSidebarSearch`와 같은 규율 — 검색어는 보존). 이게 없으면
-    // `handleAgentSessionArchiveSearchKey`가 터미널로 돌아온 뒤의 모든 키를 계속 삼킨다.
+    // `agent_dock.handleAgentSessionArchiveSearchKey`가 터미널로 돌아온 뒤의 모든 키를 계속 삼킨다.
     try std.testing.expect(!session.agent_session_archive_search_active);
     try std.testing.expectEqualStrings("ab", session.agent_session_archive_search.query.items);
     for ("cd") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
@@ -72911,7 +70905,7 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     // Escape도 같은 게이트다: 카드를 펼쳐 둔 채 터미널에 있으면 vim의 Esc가 도크로 새면 안 된다.
     // 검색어가 남으면 그때 selection이 지워졌으므로(숨은 identity를 선택된 채 두지 않는다) 다시 세운다.
     session.agent_session_archive_search.clear();
-    session.rebuildAgentSessionArchiveFilter();
+    agent_dock.rebuildAgentSessionArchiveFilter(session);
     session.agent_session_archive_selected = 0;
     session.mouse(1, dock_center.x, dock_center.y, 0, 0);
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
@@ -72926,10 +70920,10 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
 
     // 뷰를 떠났다 돌아와도 클릭 없이는 소유권이 되살아나지 않는다.
     session.mouse(1, dock_center.x, dock_center.y, 0, 0);
-    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    try std.testing.expect(agent_dock.agentSessionDockOwnsKeys(session));
     session.setDockView(.explorer);
     session.setDockView(.agent_sessions);
-    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    try std.testing.expect(!agent_dock.agentSessionDockOwnsKeys(session));
     _ = try session.tick();
 }
 
@@ -73072,7 +71066,7 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     try std.testing.expect(!session.agent_session_archive_search_active);
     try std.testing.expect(!session.terminalOwnsInput());
 
-    // 제품에서는 도크 안 primary down이 이 소유권을 준다(`takeAgentSessionDockKeyFocus`). 이 테스트는
+    // 제품에서는 도크 안 primary down이 이 소유권을 준다(`agent_dock.takeAgentSessionDockKeyFocus`). 이 테스트는
     // 입력 소유 판정만 보므로 그 결과 상태만 세우고 같은 `/` 제품 키 경로로 검색을 연다.
     session.agent_session_dock_key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
@@ -73366,7 +71360,7 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
     for (0..30) |index| {
         try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
     }
-    const projection = session.agentSessionDockScrollProjection();
+    const projection = agent_dock.agentSessionDockScrollProjection(session);
     try std.testing.expect(projection.max_offset_px > 0);
 
     // down 시점의 기하를 직접 만든다. 실제 경로에서는 published tree에서 되읽지만, 이 테스트가 고정하려는
@@ -73389,30 +71383,30 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
     // tick 전에는 아직 아무것도 적용되지 않았다 — move가 직접 스크롤을 옮기면 이 단언이 깨진다.
     try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
 
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     const after_first_tick = session.agent_session_archive_scroll.offset_y_px;
     // 마지막 좌표(y=100) 하나만 적용된다.
     try std.testing.expectEqual(geometry.offsetForPointer(100, 0), after_first_tick);
     try std.testing.expect(after_first_tick > 0);
 
     // 남은 좌표가 없으면 다음 tick은 아무 일도 하지 않는다(같은 값을 다시 적용하지 않는다).
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     try std.testing.expectEqual(after_first_tick, session.agent_session_archive_scroll.offset_y_px);
 
     // 트랙 끝에 닿은 채 계속 밀어도 clamp 결과가 같으면 effect가 반복되지 않는다.
     session.agent_session_dock_scroll_drag.absorb(100, 100_000);
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     const at_end = session.agent_session_archive_scroll.offset_y_px;
     try std.testing.expectEqual(projection.max_offset_px, at_end);
     session.agent_session_dock_scroll_drag.absorb(100, 200_000);
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     try std.testing.expectEqual(at_end, session.agent_session_archive_scroll.offset_y_px);
 
     // 드래그가 끝나면 남은 좌표가 다음 드래그로 새지 않는다.
     session.agent_session_dock_scroll_drag.absorb(100, 7);
-    session.endAgentSessionDockScrollDrag();
+    agent_dock.endAgentSessionDockScrollDrag(session);
     try std.testing.expect(!session.agent_session_dock_scroll_drag.active);
-    session.applyAgentSessionDockScrollDrag();
+    agent_dock.applyAgentSessionDockScrollDrag(session);
     try std.testing.expectEqual(at_end, session.agent_session_archive_scroll.offset_y_px);
 }
 
@@ -73462,7 +71456,7 @@ test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 �
     _ = thumb_action_id;
 
     var first = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 0)};
-    session.publishAgentSessionDockFrame(.{ .tree = .{ .entries = &first }, .actions = table.slice() }, 7);
+    agent_dock.publishAgentSessionDockFrame(session, .{ .tree = .{ .entries = &first }, .actions = table.slice() }, 7);
     try std.testing.expectEqual(@as(usize, 1), session.agent_session_dock_entries.items.len);
 
     // thumb을 누른 상태를 만든다(실제 경로에서는 pointer down이 세운다).
@@ -73483,7 +71477,7 @@ test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 �
 
     // 끌면 thumb이 내려간다 = 새 tree. 같은 generation이면 capture가 살아남아야 한다.
     var moved = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 120)};
-    session.publishAgentSessionDockFrame(.{ .tree = .{ .entries = &moved }, .actions = table.slice() }, 7);
+    agent_dock.publishAgentSessionDockFrame(session, .{ .tree = .{ .entries = &moved }, .actions = table.slice() }, 7);
     try std.testing.expect(session.agent_session_dock_interaction.capture != null);
     try std.testing.expectEqual(@as(f32, 120), session.agent_session_dock_entries.items[0].rect.y);
 
@@ -73494,7 +71488,7 @@ test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 �
         .geometry = .{ .track_x = 100, .track_y = 0, .track_w = 16, .track_h = 400, .thumb_y = 120, .thumb_h = 40, .max_offset_px = 500 },
     };
     var replaced = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 200)};
-    session.publishAgentSessionDockFrame(.{ .tree = .{ .entries = &replaced }, .actions = table.slice() }, 8);
+    agent_dock.publishAgentSessionDockFrame(session, .{ .tree = .{ .entries = &replaced }, .actions = table.slice() }, 8);
     try std.testing.expect(session.agent_session_dock_interaction.capture == null);
     try std.testing.expect(!session.agent_session_dock_scroll_drag.active);
 }

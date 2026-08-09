@@ -30,7 +30,22 @@
 - **(c) core.zig보다 어려운 3가지 난점:**
   1. **허브 횡단**: `tick`/`mouse`/`handleKeyEvent`가 모든 그룹을 횡단한다 → **잔류**(분해 대상 아님, 내부 가독성은 소함수·주석으로).
   2. **가시성(pub) 표면 확대**: 그룹을 free fn 파일로 빼면, 그 함수가 **파일 경계를 넘어 이름으로 참조하는 모든 선언**이 pub이어야 한다. Zig의 privacy는 필드가 아니라 **선언 단위 + 파일 경계**이므로 대상이 accessor에 그치지 않는다 — 메서드(`^    fn ` 1,042개 vs `^    pub fn ` 185개, **84%가 non-pub**), 시그니처·지역에서 이름을 쓰는 타입(`Model`/`Term`/`Pane`/`PaneTree`/`Tab` 등 파일 스코프 `const`), 모듈 전역 `var`(`app_runtime` — 한 번 `pub var`가 되면 다시 좁힐 수단이 없다)가 모두 포함된다. core.zig의 accessor 분리(`absRow` 등, [[core-zig-decomposition-initiative]])와 동형이나 **규모가 다르다**. 실측 예: F1(archive) 하나가 그룹 밖 non-pub 메서드 19개 pub화를 강제하고 그중 12개는 F3(agent dock) 소유다 → 단계 순서가 pub화 소유권과 어긋나면 되돌리는 PR이 생긴다.
-  3. **test는 통째 분리 불가**: 파일 레벨 test 32,762줄(755개)이 `splitActivePane`·`mouse`·`handleKeyEvent`·`tick` 등 **private 메서드를 직접 호출**한다. 통째 옮기면 수십 개를 pub화해야 해 캡슐화가 깨진다 → test는 **자신이 검증하는 그룹 함수와 동반 이동**한다. 단 **동반 이동이 가능한 test는 일부다** — 실측상 2개 이상 그룹을 호출하는 test 275개(14,561줄) + 어느 그룹도 안 부르는 test 214개(7,271줄)는 어느 그룹 파일로도 자연히 갈 수 없어 잔류가 기본값이다. 또 파일 스코프 test 헬퍼 63개가 전부 non-pub이고 그룹을 횡단하므로(`initSmokeSessionSized` 184회 호출), **공용 헬퍼의 소유처를 F 시리즈 착수 전에 정해야 한다**.
+  3. **test는 잔류가 기본값이다(2026-08-09 실측으로 정정).** 파일 레벨 test 32,762줄(755개)이 `splitActivePane`·`mouse`·`handleKeyEvent`·`tick` 등 **private 메서드를 직접 호출**한다.
+
+     원래 이 항목은 "test는 자신이 검증하는 그룹 함수와 동반 이동한다"였다. 그룹 함수가 pub free fn이 되므로 test도 따라가야 캡슐화가 지켜진다는 논리였다. **F1+F3를 실제로 실행해 두 방식을 모두 돌려 보니 정반대였다:**
+
+     | 방식 | 강제되는 pub화 |
+     |---|---|
+     | test **동반 이동** | **78개** — `splitActivePane`·`newTab`·`dispatchAppAction`·`deinit`까지 열린다 |
+     | test **잔류** | **13개** — 그룹이 밖으로 부르는 공용 accessor뿐 |
+
+     이유는 비대칭이다. 그룹 test가 그룹 함수를 부르는 것(잔류 시 비용)보다, 그 test가 **그룹과 무관한 app_session 메서드를 부르는 것**(이동 시 비용)이 훨씬 많다. 판정자는 세션을 세우고(`initSmokeSessionSized`) 탭을 만들고 입력을 흘려보낸 뒤 그룹 동작을 확인하므로, 본문보다 훨씬 넓은 표면에 닿는다. **그러므로 test는 `app_session.zig`에 남기고 그룹 함수만 pub으로 노출한다.**
+
+     사전 추정으로는 이 결론을 얻을 수 없었다 — 호출 패턴을 정규식으로 세면 receiver 형태(`session.`·`s.`·`dst.`)와 간접 호출을 놓쳐 3개로 나왔다. **두 방식을 다 실행해 컴파일러가 요구하는 pub 개수를 센 뒤에야 갈렸다.** 다음 그룹도 같은 방식으로 확인한다([[roadmap-docs-stale-verify-with-code]]).
+
+     **그리고 이것이 이 저장소의 일관된 방식이다.** 선례인 [terminal core 분해](terminal-core-decomposition.md) §1.7이 같은 결론을 이미 적어 두었다 — *"테스트는 core.zig에 남아 public API로 동작을 보존한다 … 테스트는 facade를 검증하므로 core.zig에 둔다"*. 실제 배치도 그렇다: `core.zig` test 358개인데 갈라져 나간 `parser.zig`·`osc.zig`·`kitty.zig`·`types.zig`는 **0개**, `screen.zig`·`selection.zig`는 1개씩이다. 즉 **기존 파일을 분해할 때는 test를 원본에 남기고**(동작-보존 그물 유지), **새 파일을 처음 작성할 때만 그 파일에 test를 쓴다**(`session_host/*`가 그 경우). F 시리즈는 전자다. 원래 이 항목의 "동반 이동" 지침만 그 선례와 어긋나 있었다.
+
+     남는 문제: 파일 스코프 test 헬퍼 63개가 전부 non-pub이고 그룹을 횡단한다(`initSmokeSessionSized` 184회). test가 잔류하면 이 문제는 **당장은 터지지 않지만**, 그룹 파일이 자체 test를 갖게 되는 날 다시 온다. 공용 헬퍼 소유처는 그때 정한다.
 
 ## 3. 패턴 (core.zig 방향 A)
 
@@ -83,9 +98,8 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 | 단계 | 그룹 | 메서드 라인 | 위험 | 비고 |
 |---|---|---|---|---|
-| **F1** | agent session archive | ~570 | 낮음 | backend 3파일이 이미 분리돼 orchestration만 남음 — 패턴 재확인용 첫 슬라이스 |
+| **F1** ✅ | **에이전트 세션 기록 도크**(archive + agent dock) | 1,595(메서드) | 낮음 | **F3를 흡수해 하나로.** 2026-08-09 완료 → `app_session/agent_dock.zig` |
 | **F2** | file tree · file panel | ~4,090 | 중 | 최대 그룹. `file_tree.zig`/`file_panel.zig`로 **반드시 2개 이상 분할** |
-| **F3** | agent dock | ~2,145 | 중 | |
 | **F4** | pane · split | ~2,350 | 중 | PTY spawn 결합 — 허브 경계 주의 |
 | **F5** | dock | ~1,660 | 낮음 | |
 | **F6** | tab | ~1,590 | 낮음 | |
@@ -93,6 +107,15 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F8** | scroll | ~1,440 | 낮음 | |
 | **F9** | settings · context menu · rename | ~1,830 | 낮음 | |
 | **F10** | workspace capture/restore | ~810 | 중 | 캡처=agent PTY·복원=`createPane` spawn(옛 E5 실측) |
+
+> **F1과 F3를 합친 이유(2026-08-09 실측).** 문서가 둘을 나눈 기준은 **이름**이었는데 호출 관계는 한 덩어리다.
+> archive 메서드가 도크의 스크롤 앵커·인라인 상세·스모크 프로브를 부르므로, F1만 떼면 그룹 밖 non-pub
+> **21개** pub화가 강제되고 **그중 14개가 F3 소유**다 — 열었다가 F3에서 도로 닫아야 한다(§7 "스택 순서 역전"이
+> 첫 PR부터 발생). 합치면 pub화가 **13개**로 줄고 되돌릴 것이 없다. 다음 그룹도 이름이 아니라 호출 관계로
+> 경계를 확인한다.
+>
+> 실제 결과: `app_session.zig` 73,658 → 71,652(−2,006), `agent_dock.zig` 2,054줄, pub화 13개, test 767개 전원
+> 잔류(§2-c-3), `test-macos-app-host-abi` 2,816 passed / 0 failed.
 
 라인 수치는 **메서드 이름 기준 근사치**다. 각 단계 착수 시 실제 응집도(허브 결합·cross-group accessor)를 코드로 재검증하고 그 결과로 범위를 정정한다 — 이 문서의 사전 추정은 E1·E4·E5에서 세 번 빗나갔다([[roadmap-docs-stale-verify-with-code]]).
 

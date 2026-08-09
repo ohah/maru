@@ -29,7 +29,25 @@
 | 저장 ack 하나로 dirty를 지울 수 있다 | **기각.** save 중 추가 편집이 있으면 이전 revision ack가 최신 dirty를 지우면 안 된다. 외부 disk hash 변경도 별도 충돌이다. | `editor_revision`, `persisted_editor_revision`, `disk_fingerprint` 3축 CAS를 사용한다. |
 | diff before/after 전체 blob을 JSON-RPC로 보낼 수 있다 | **기각.** socket frame 상한은 1 MiB이고 현재 bridge 결과 버퍼는 8 KiB다. `app_session.zig` 한 파일만 2.7 MiB가 넘는다. | metadata 목록과 파일별 bounded open으로 분리한다. UI는 socket을 우회해 공통 L2 dispatcher를 직접 호출한다. |
 
-### 1.1 엔진 결정 (2026-07-17) — CodeMirror 6
+### 1.1 엔진 결정 — 2026-08-09 개정: 네이티브 등폭 GPU 뷰
+
+**diff 본문과 코드 편집의 엔진은 CM6가 아니라 네이티브 Zig + Metal이다**(사용자 결정 2026-08-09). 계약은 [native-editor.md](native-editor.md)가 단일 출처이며, diff 본문의 소유 관계는 그 문서 §7이 적는다 — **변경 목록(§3.5)은 계속 이 문서가 소유**하고 네이티브 chrome 그대로다.
+
+이 개정이 무효화하는 것은 아래 §1.1a의 **엔진 선택**과, 그것을 전제한 §3~§11의 "CM6/MergeView" 서술이다(§7.1 번들 항목, §10.0의 0b·2번을 포함한다 — 각 지점에 개정 표기를 달았다). **무효화하지 않는 것**: `EditorGrant`·`DocumentRegistry`·safe-save CAS·revision 3축·외부 변경 감시·git/LSP adapter·§3.5 소스 컨트롤 뷰는 엔진과 무관하게 그대로 유효하다.
+
+**대가를 명시한다.** 아래 원문이 CM6를 고른 근거 중 하나가 `@codemirror/merge`의 `acceptChunk`/`rejectChunk` 내장이었다 — hunk stage/unstage를 직접 구현해야 한다([native-editor.md](native-editor.md) §7). 읽기 전용 v1의 범위 밖이라 당장의 손실은 없지만 되찾는 비용이 CM6에서는 0이었다.
+
+**`EditorGrant`의 성격이 바뀐다(중요).** §3.5는 "grant는 *웹 브리지*가 넘는 경계를 게이트하는 장치이고 도크는 웹이 아니다. 반대로 **diff 본문을 그리는 파일 Term은 웹이므로** `diff.open`은 grant 게이트를 통과해야 한다"는 비대칭 위에 서 있었다. **diff 본문이 네이티브가 되면 그 비대칭이 사라진다** — 목록도 본문도 in-process다.
+
+- **사라지는 것**: diff/editor 표시 경로의 **브리지 신뢰 게이트**. 네이티브 뷰는 `maru-app://` origin도 `WKContentWorld`도 거치지 않으므로, "page가 root를 확대할 수 없게 한다"는 §3.2의 위협 모델이 그 경로에는 적용되지 않는다.
+- **남는 것**: ⑴ **경로 스코프 정책 자체**(root 밖 접근 금지·`..`/symlink 거부)는 그대로 필요하다. 다만 성격이 *신뢰 경계*에서 *내부 불변식*으로 바뀌므로, 강제 지점이 브리지 handler가 아니라 L2 코어와 `check-boundaries`다. ⑵ **외부 CLI/agent 경계**는 그대로다 — control-plane capability nonce를 쓰는 §3.2 마지막 문단은 무효화되지 않는다. ⑶ **마크다운 CM6**가 계속 쓰는 `maru.file.*` 브리지 게이트(file-panel 소유)도 그대로다.
+- **따라서 `EditorGrant`를 없애지는 않는다.** 다만 "웹 page로부터 방어하는 토큰"이 아니라 "surface에 결합된 자원 스코프 기술"로 읽는다. `tool_execute`(§8.1 workspace tool execution)는 **엔진과 무관하게** 그대로 유효하다 — LSP·포매터는 여전히 저장소의 임의 바이너리를 실행한다.
+
+**이 문서를 읽는 법(2026-08-09 이후).** 본문 곳곳의 "CM6"·"MergeView"·"신뢰 shell origin에 마운트"는 **diff·코드 편집 축에서는 개정 전 서술**이다. 구조적으로 중요한 지점(§3 다이어그램·재사용 목록·§10.0)에는 개정 표기를 달았고, 나머지는 이 절이 덮는다. **마크다운 소스·리치 편집 축에서는 그 서술들이 계속 유효**하다(file-panel 소유).
+
+아래는 그 결정의 원문이며, **마크다운 소스·리치 편집 축에서는 계속 유효**하다([file-panel.md](file-panel.md) §1의 미결 항목).
+
+### 1.1a 원문 — 엔진 결정 (2026-07-17) — CodeMirror 6
 
 위 표의 Monaco RED와 이후 실측을 근거로 **에디터 엔진을 CodeMirror 6(CM6)로 확정한다.** git diff는 `@codemirror/merge`의 `MergeView`(side-by-side)/`unifiedMergeView`(inline)로 구현한다. 근거:
 
@@ -90,8 +108,9 @@
 
 - **변경 목록·스테이징 UI = 우측 도크의 새 뷰**(Zig + GPU chrome). 탐색기 트리와 같은 컬럼을 공유하고 상단 아이콘 줄로
   전환한다(§3.5). 웹뷰가 아니다.
-- **diff 본문 = 파일 `Term`**(WKWebView + CM6 `MergeView`). 마크다운 문서가 그러하듯 탭 스트립에 살고, 터미널 옆에서
-  같은 split·드래그·닫기 계약을 그대로 쓴다.
+- **diff 본문 = 파일 `Term`**(**네이티브 등폭 GPU 뷰** — 2026-08-09 개정, §1.1. 옛 서술은 "WKWebView + CM6 `MergeView`").
+  마크다운 문서가 그러하듯 탭 스트립에 살고, 터미널 옆에서 같은 split·드래그·닫기 계약을 그대로 쓴다. 본문의 렌더·매핑
+  계약은 [native-editor.md](native-editor.md)가 소유한다.
 
 이 분할은 새 정책이 아니라 **FP16을 그대로 따른 결과**다. 도크는 "여러 파일을 훑는 세로 컬럼", Term은 "지금 보는 문서"이고,
 git 리뷰는 정확히 그 두 역할로 나뉜다. 초판이 상정한 "도크 콘텐츠 rect에 diff 웹앱을 얹는다"는 도크에 콘텐츠 rect가
@@ -106,11 +125,14 @@ git 리뷰는 정확히 그 두 역할로 나뉜다. 초판이 상정한 "도크
 
 워크스페이스 pane 트리 ── 탭 스트립 공유 ─────────────────────
   터미널 Term · 브라우저 Term · 파일 Term
-  파일 Term(diff kind) = WKWebView, 두 web 컨텍스트(file-panel §2.1):
+  파일 Term(diff kind) = **네이티브 등폭 GPU 뷰**(2026-08-09 개정 · native-editor.md)
+    in-process 직접 호출 — WKWebView·origin·브리지를 거치지 않는다
+       editor.* / diff.* / git.*             ← L2 코어 직접 호출(경로 스코프는 내부 불변식, §1.1)
+
+  파일 Term(markdown kind) = WKWebView, 두 web 컨텍스트(file-panel §2.1) — 개정 대상 아님:
     ├ 격리 렌더 origin  = 새니타이즈 md/rich-render(Mermaid 등). 브리지 없음.
     └ 신뢰 shell origin = CM6 마운트 + 브리지 + 오케스트레이션
          maru.file.read()/write(content)     ← file-panel: **핀 경로** read/write
-       + editor.* / diff.* / git.*            ← editor 확장, EditorGrant 게이트
 
 신뢰 shell 브리지(확장) ── in-process, host가 surface에 결합한 grant 검증 후 직접 호출
   -> L2: file-panel 정책 + editor 코어(신규)
@@ -128,10 +150,14 @@ external CLI/agent
   -> 같은 L2 policy/services
 ```
 
-**재사용 vs 신규(정합):** 도크 컬럼·폭/접기·파일 Term 호스팅·두 web 컨텍스트·CM6 마운트·`maru.file.*` 브리지 트랜스포트·
-dirty 보고는 **file-panel이 이미 가졌다**(재사용). editor가 신규로 짓는 것은 ⑴ L2 editor 코어(grant·registry·CAS·diff/turn
-model), ⑵ 그것을 부르는 **브리지 method 확장**(diff/git/multi-file/save), ⑶ **도크 소스 컨트롤 뷰 chrome**(§3.5)이다.
-별도 `.editor` PanelKind·별도 origin·별도 브리지를 만들지 않는다.
+**재사용 vs 신규(정합 — 2026-08-09 엔진 개정 반영):** 도크 컬럼·폭/접기·파일 Term 호스팅·dirty 보고는 **file-panel이 이미
+가졌다**(재사용). editor가 신규로 짓는 것은 ⑴ L2 editor 코어(grant·registry·CAS·diff/turn model), ⑵ 그것을 부르는 **in-process
+호출부**, ⑶ **도크 소스 컨트롤 뷰 chrome**(§3.5), ⑷ **네이티브 등폭 뷰**([native-editor.md](native-editor.md))다.
+별도 `.editor` PanelKind를 만들지 않는다.
+
+~~두 web 컨텍스트·CM6 마운트·`maru.file.*` 브리지 트랜스포트 재사용, 브리지 method 확장(diff/git/multi-file/save), 별도
+origin·별도 브리지 금지~~ → **diff·코드 편집 축에서 소멸**(§1.1). 웹 컨텍스트를 지나지 않으므로 재사용할 트랜스포트도,
+넓힐 브리지 method도, 금지할 새 origin도 없다. 이 서술들은 **마크다운 축에서는 계속 유효**하다(file-panel 소유).
 
 **목록이 웹이 아닌 이유.** 아키텍처 B(“chrome은 Zig+GPU, WKWebView는 콘텐츠만” — [file-panel.md](file-panel.md) §1)를 그대로
 따른다. 변경 목록은 트리·탭·사이드바 카드와 같은 계열의 chrome이고, 이미 GPU로 그리는 탐색기 트리 바로 위에 얹힌다. 목록을
@@ -165,7 +191,7 @@ L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit �
 
 그러므로 **editor 파일 write op를 markdown/뷰어 route에 얹지 않는다**(범위 확대 금지). `browser`는 계속 untrusted이며 editor bridge와 `maru-app://` asset에 접근하지 못한다.
 
-**레이아웃은 공유, trust는 분리(사용자 방향).** git diff·editor는 [file-panel.md](file-panel.md)의 전역 도크와 **동일한 시각 shell**(탭 스트립·헤더 밴드·파일 트리 = GPU chrome, 콘텐츠 rect = WKWebView)을 공유해 UX 일관성과 코드 재사용을 얻는다. 실제로 git diff는 도크의 **또 다른 콘텐츠 kind**(현행 `.md`/`.html` 옆)로 보는 게 자연스럽다. **다만 레이아웃 재사용이 trust 재사용을 뜻하지 않는다** — 같은 도크 안에서도 kind별 origin/CSP/grant는 위 계단대로 분리한다. 엔진은 CM6로 확정됐고(§1.1), 도크 정합(a/b)만 §10.0 결정 항목이다.
+**레이아웃은 공유, trust는 분리(사용자 방향).** git diff·editor는 [file-panel.md](file-panel.md)의 전역 도크와 **동일한 시각 shell**(탭 스트립·헤더 밴드·파일 트리 = GPU chrome, 콘텐츠 rect = WKWebView)을 공유해 UX 일관성과 코드 재사용을 얻는다. 실제로 git diff는 도크의 **또 다른 콘텐츠 kind**(현행 `.md`/`.html` 옆)로 보는 게 자연스럽다. **다만 레이아웃 재사용이 trust 재사용을 뜻하지 않는다** — 같은 도크 안에서도 kind별 origin/CSP/grant는 위 계단대로 분리한다. 엔진은 **네이티브 등폭 GPU 뷰로 개정**됐고(§1.1 — 옛 서술 "CM6로 확정"), 도크 정합(a/b)만 §10.0 결정 항목이다. 이 문단의 "콘텐츠 rect = WKWebView"도 diff 본문 축에서는 개정 대상이다.
 
 **origin 공유의 함정**: diff 파일 Term이 markdown 파일 Term과 같은 `maru-app://app` origin·같은 신뢰 shell 브리지를 공유하므로, **origin pin만으로는 "이 요청이 diff 리뷰냐 md 뷰어냐"를 구분할 수 없다**. 그래서 브리지 method가 `EditorGrant`를 요구하고, 그 grant는 native가 **그 파일 Term(surface_id)에 결합**한다 — md 뷰어 Term에는 `file_write`/`git_read`가 없고 diff/editor Term에만 있다. 즉 권한 구분은 origin이 아니라 **entry별 grant**가 한다. main frame + 신뢰 origin + top-level navigation 거부는 그대로 강제하고, md asset route로 이동해도 editor grant가 따라붙지 않게 한다.
 
@@ -250,7 +276,8 @@ editor **L2 코어**(정책·상태)는 신규 파일로 나눠 `app_session.zig
 
 확장 — file-panel 소유 코드에 method/kind 추가 (신규 병렬 파일 아님)
   file-panel 신뢰 shell 브리지  += editor.*/diff.*/git.* method + EditorGrant 검증
-  file-panel 웹앱(web/, React)  += diff 뷰(CM6 MergeView)·턴 타임라인
+  ~~file-panel 웹앱(web/, React) += diff 뷰(CM6 MergeView)~~ → **네이티브 등폭 뷰**(§1.1 개정)
+  file-panel 웹앱(web/, React)  += 턴 타임라인(마크다운 축)
   파일 Term entry kind(file-panel §2) += diff kind
   도크 뷰 스위처(file-explorer.md) += 소스 컨트롤 뷰
 ```
@@ -439,6 +466,8 @@ v1은 위 네 시점으로 충분하고, 그중 ⑶이 "터미널에서 에이�
 
 ## 4. 문서 권위와 저장 CAS
 
+> **2026-08-09 개정 — 이 절의 전제가 바뀌었다.** 아래는 "native가 전체 text 정본을 보유하지 않는다"를 전제로 쓰였으나, [native-editor.md](native-editor.md) §2·§3.0이 **버퍼를 L2에 두어 정확히 그 정본을 만든다.** 두 귀결이 따라온다 — ⑴ **`writable CM6 owner surface 하나` 제약이 diff·코드 편집 축에서 소멸**하고, 같은 문서를 두 뷰가 공유할 수 있다([native-editor.md](native-editor.md) §2.4가 그 계약을 소유하며 `file-panel.md` §1 불변식에 명시 명령 예외가 붙는다), ⑵ **문서 text·undo·selection의 소유자가 CM6가 아니라 L2 모델**이다. 아래 `DocumentState`의 revision·fingerprint·conflict 3축은 **엔진과 무관하게 그대로 유효**하다. 마크다운 축에서는 원문이 계속 맞다.
+
 CM6가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다(file-panel의 CM6 소스 편집과 같은 엔진). file-panel은 이미 **dirty를 브리지 신호로 Zig에 미러**하는데(file-panel §3), editor는 그 dirty 신호를 **revision/fingerprint/conflict가 있는 `DocumentRegistry`로 확장**한다 — 단일 핀 파일이 아니라 grant-root 안 여러 문서를 다루므로 identity·CAS가 필요하다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
 
 native가 전체 text 정본을 보유하지 않는 v1에서는 한 document에 **writable CM6 owner surface 하나**만 둔다. 두 번째 open은 기존 owner를 focus하거나 명시적 read-only snapshot을 연다. owner close/move/crash 때 dirty 여부를 확인한 뒤 owner를 transfer/recover하며, 두 page의 editable model을 실시간 동기화하는 것은 native canonical text 또는 CRDT/OT가 필요하므로 v1 범위 밖이다.
@@ -621,13 +650,18 @@ git 기준(HEAD/index/worktree) 외에 **"에이전트가 방금 바꾼 것"**�
   2026-07-29 사용자 결정). 이 문서 초판의 "UI 프레임워크를 도입하지 않는다(vanilla TS)"는 그 결정으로 **무효**다. 단
   **도크 변경 목록은 애초에 웹이 아니라 GPU chrome**이므로(§3) 이 결정의 영향 범위는 diff 본문 화면뿐이다. CM6·remark류는
   프레임워크가 아니라 **DOM 마운트 라이브러리**라 이 결정과 직교하며, 편집기를 React 컴포넌트로 다시 쓰지 않는다.
-- **에디터 엔진 = CodeMirror 6 (§1.1 확정, 제품 출하 중).** git diff는 `@codemirror/merge` `MergeView`/`unifiedMergeView`로
-  구현한다. CM6는 file-panel 소스 모드로 **이미 제품에서 돌고 있으므로**(§2) editor/diff는 그 스택에 `@codemirror/merge`만
-  더한다(별도 Monaco 엔진·별도 번들 없음).
-- CM6는 필요한 lang/merge/theme extension만 import하고, output asset을 검증한다. (Monaco의 `editor.api`/언어 contribution/worker 배선·barrel 회피는 CM6를 택하며 무의미해졌다.)
-- **worker.** CM6 MergeView diff는 워커가 없다(§1.1 실측). 향후 LSP/무거운 계산에 워커를 붙이면 URL을 정적 literal로 배선하고 manifest를 검증한다.
-- **zntc pin은 `0.1.4`로 이미 상향됐고 CM6가 번들된다**(§2 — `web/package.json`). 초판이 적은 "`0.1.3` 불가" 제약은 file-panel이
-  먼저 해소했다. editor가 더할 것은 `@codemirror/merge` 하나이며, 그 확장이 번들 산출물을 깨지 않는지만 E1에서 확인한다.
+- **에디터 엔진 = 네이티브 등폭 GPU 뷰(2026-08-09 개정, §1.1).** diff 본문에 CM6·`@codemirror/merge`를 쓰지 않으므로 **이 절의
+  editor/diff 번들 증분은 0이다.** 아래 세 항목은 개정 전 계획이며, **마크다운 소스·리치 편집이 계속 쓰는 CM6 스택 자체는
+  유효**하다(file-panel 소유). 즉 웹 번들은 유지되지만 editor가 거기에 더하는 것이 없다.
+  - ~~에디터 엔진 = CodeMirror 6 (§1.1a 확정, 제품 출하 중). git diff는 `@codemirror/merge` `MergeView`/`unifiedMergeView`로
+    구현한다. CM6는 file-panel 소스 모드로 이미 제품에서 돌고 있으므로(§2) editor/diff는 그 스택에 `@codemirror/merge`만
+    더한다(별도 Monaco 엔진·별도 번들 없음).~~
+  - ~~CM6는 필요한 lang/merge/theme extension만 import하고, output asset을 검증한다.~~ (Monaco의 `editor.api`/언어
+    contribution/worker 배선·barrel 회피가 무의미하다는 서술은 엔진 개정 뒤에도 유효하다 — Monaco는 어느 쪽으로도 채택되지 않는다.)
+  - ~~worker. CM6 MergeView diff는 워커가 없다(§1.1a 실측). 향후 LSP/무거운 계산에 워커를 붙이면…~~ **네이티브 경로에서 웹 워커
+    개념은 적용되지 않는다.** LSP·무거운 계산의 스레딩은 [io-render-threading.md](io-render-threading.md) 규율을 따른다.
+  - ~~zntc pin은 `0.1.4`로 이미 상향됐고 CM6가 번들된다(§2). editor가 더할 것은 `@codemirror/merge` 하나이며…~~ **editor가 더할
+    web 의존은 없다.** zntc pin은 file-panel의 마크다운 스택 사정으로만 움직인다.
 
 JS toolchain(zntc/`web/` Bun workspace)은 **FP2로 이미 도입 완료**됐으므로 editor는 툴체인을 새로 세우지 않는다(증분 = CM6 lang/merge extension + zntc pin 상향). bundle/RSS 예산 측정은 §7.4·§9에서 CM6 기준으로 확인한다.
 
@@ -853,12 +887,13 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
    `PanelKind`는 만들지 않는다. 원래 질문이던 "(a) 도크 콘텐츠 kind vs (b) 별도 `.editor` surface"는 FP16이 도크에서 콘텐츠
    rect를 없애며 둘 다 성립하지 않게 됐고, §3~§3.5가 (a′) 기준으로 재작성돼 도크 뷰가 이미 그 형태로 출하됐다.
 
-0b. **에디터 엔진 = CM6 (확정, 2026-07-17 · §1.1).** git diff는 `@codemirror/merge` MergeView/unifiedMergeView, hunk staging은 acceptChunk/rejectChunk. Monaco는 채택하지 않는다(WebKit RED가 diff 표시에도 걸리고, 마크다운이 CM6라 엔진 이원화). 이 확정이 §7.1·§7.4·§9의 Monaco 조건부 항목을 CM6 기준으로 바꿨다. **남은 엔진 관련 결정은 없다.**
+0b. **에디터 엔진 = 네이티브 등폭 GPU 뷰 (2026-08-09 개정 · §1.1).** diff 본문과 코드 편집은 CM6가 아니라 Zig + Metal이 그린다([native-editor.md](native-editor.md)). hunk staging은 CM6가 `acceptChunk`/`rejectChunk`로 무료 제공하던 것을 **직접 구현**해야 한다(읽기 전용 v1 범위 밖이라 당장의 손실은 없다). **아래는 개정 전 원문이며 마크다운 소스·리치 편집 축에서는 계속 유효하다:** ~~에디터 엔진 = CM6 (확정, 2026-07-17 · §1.1a). git diff는 `@codemirror/merge` MergeView/unifiedMergeView, hunk staging은 acceptChunk/rejectChunk. Monaco는 채택하지 않는다(WebKit RED가 diff 표시에도 걸리고, 마크다운이 CM6라 엔진 이원화). 이 확정이 §7.1·§7.4·§9의 Monaco 조건부 항목을 CM6 기준으로 바꿨다. 남은 엔진 관련 결정은 없다.~~
 
 1. **`PanelKind.editor`·ABI/wire 확장은 만들지 않는다(2026-07-31).** (a′)의 직접 귀결이다 — 0을 뒤집을 때만 되살아난다.
 
-2. **`@codemirror/merge`를 쓴다(2026-07-31).** 번들 가능성과 제품 WebKit 런타임이 모두 실증됐다(§7.4). 제품 번들 편입은
-   E1에서 하고, 그때 번들 크기를 다시 잰다.
+2. ~~**`@codemirror/merge`를 쓴다(2026-07-31).** 번들 가능성과 제품 WebKit 런타임이 모두 실증됐다(§7.4). 제품 번들 편입은
+   E1에서 하고, 그때 번들 크기를 다시 잰다.~~ → **소멸(2026-08-09 엔진 개정, §1.1).** diff 본문이 네이티브라 이 의존을
+   도입하지 않는다. 실증 결과 자체는 유효하나 소비처가 없어졌다.
 
 3. ~~editor origin 한정 `style-src 'unsafe-inline'` 허용 여부~~ → **소멸(FP12b, 2026-07-22 사용자 결정으로 이미 닫힘).**
    app origin은 `'unsafe-inline'`, render origin은 hash 핀이며 그 완화 이유가 CM6 style-mod다(§2·§7.2). editor는 그 위에

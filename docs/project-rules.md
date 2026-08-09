@@ -17,6 +17,7 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 ## 의존성
 
 - 런타임 의존성(`build.zig.zon`의 `dependencies`)은 기본 0으로 둔다. 새 런타임 의존성을 추가하려면 먼저 사용자와 논의한다.
+  - **현재 예외 1건: tree-sitter**(편집기 syntax 1층 — 2026-08-09 사용자 논의를 거친 결정, [native-editor.md](native-editor.md) §5.3). 코어와 언어별 grammar가 바이너리에 링크되므로 라이선스·attribution은 [third-party 라이선스](third-party-licenses.md)가, 번들 언어 목록은 [실제 구현 계획](implementation-plan.md)이 소유한다. **"기본 0"의 규율은 그대로다** — 이 예외가 다음 의존성의 선례가 되지 않는다.
 - dev/test/CI 의존성(외부 오라클의 libvterm, Ghostty libghostty-vt, Alacritty alacritty_terminal 등)은 opt-in으로만 쓰고 기본 `mise run check` 경로에 넣지 않는다.
 - 외부 reference를 추가하거나 필수 의존성으로 승격하는 규칙은 [레퍼런스와 공개 명세](references.md)·[오라클 비교 테스트 전략](oracle-testing.md)을 단일 출처로 둔다.
 - 배포물(`.app`/`.dmg`)에 **번들·재배포하는 제3자 자산**(폰트 등)은 재배포·임베드가 허용된 라이선스만 쓰고, 라이선스 파일 동봉·원본 무수정·RFN 처리·attribution 갱신 규칙은 [third-party 라이선스](third-party-licenses.md)를 단일 출처로 둔다.

@@ -1446,23 +1446,43 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `test-session-host-2c3d-c3-3a1`의 Debug·ReleaseFast registry runtime 7+boundary 1을 통과한다. copied registry, same-address
       generation ABA, typed stale/double settlement까지 a1이 소유하고 no-fail continuation/recovery replay와 unauthorized underflow의
       격리 subprocess는 실제 활성화와 함께 a3가 소유한다. 따라서 이 시점의 제품 동작은 C3-3과 동일하며 revoke ordering 활성화는 주장하지 않는다.
-      **C3-3a2 dormant final-admission substrate**는 ClientSlot owner-thread/Client operation fence 아래 사용할 단일 internal transaction을
-      만들되 product caller를 exact 0으로 유지한다. 현재 존재하는 blocking/nonblocking input, control, pending output,
-      prepared request/RPC와 resize·mouse·core·scroll·resync family의 error/progress·owner-retention 표를 Debug·ReleaseFast runtime
-      7+boundary 1로 고정한다. future 2c3e RPC execute는 helper signature만 예약하고 caller 편입은 2c3e gate가 소유한다.
+      **C3-3a2 dormant final-admission substrate**는 `client_slot.zig`의 기존 `RegisteredNodeOperation`/`ClientOperationFence` 아래 사용할
+      단일 internal transaction/core predicate를 만들되 product caller를 exact 0으로 유지한다. 새 mutex·fence·aggregate generation은
+      만들지 않는다. owner query에서 operation을 여는 wrapper와 이미 operation을 보유한 control/test-harness 경로용 wrapper는
+      ownership만 다르고 predicate는 하나다. 후자는 registered operation을 중첩하지 않는다. attach prepared product caller는 a2에서
+      0이고 future typed execute가 같은 wrapper를 재사용한다. transaction은 single shared pin을 기존 Client operation execution lease로
+      upgrade하고, held-path는 public Client API의 shared pin을 다시 중첩하지 않는 internal leaf를 사용한다. lease는 final 검사부터
+      allocation·queue offset·syscall commit까지 유지한다. 정산 순서는 held leaf 완료 또는 blocked 판정 -> single shared로 downgrade ->
+      transaction lifecycle consume -> registered operation의 마지막 shared pin release다. canonical owner는 lease-held 상태에서
+      lifecycle/receipt 검증과 no-fail settlement plan을 끝낸다. pre-acquire invalid/copy/stale/already-consumed replay는 canonical
+      lease·transaction·pin mutation 0으로 typed reject하고 canonical active owner만 위 순서를 수행한다. transaction은
+      `error{InvalidOwner, Busy}!Decision`을 반환하고 `Decision`만 `blocked|admitted`다. invalid/copy/stale/replay는 `InvalidOwner`,
+      operation/lease contention은 `Busy`를 재사용한다. a2는 injected closed decision으로 transaction을 검증한다.
+      a1 query는 declaration exact 1·production caller exact 0, a2 transaction도 declaration exact 1·production caller exact 0을
+      유지하며 실제 queued+a1 query 연결은 a3가 모든 family와 동시에 소유한다.
+      현재 존재하는 blocking/nonblocking input, generation control, pending output, 모든 raw `callOrdered` RPC와 두 resync 경로의
+      error/progress·owner-retention 표를 Debug·ReleaseFast runtime 7+boundary 1로 고정한다. attach prepared request/execute는 기존
+      owner/fence 회귀만 상속하며 일반 runtime typed execute가 아니다. `callOrdered`는 read-only처럼 보이는 method도 pending mutation을
+      flush할 수 있으므로 현행 queued-revoke 정책처럼 전부 막고, method별 세분화는 2c3e가 소유한다. raw identity/role/corruption,
+      capability `Unsupported`, revoke 결과 순서로 현행 결과를 보존한다. generation transport는 typed `Busy`, RemoteRuntime
+      nonblocking pump와 pending-output/resync stream은 progress `false`, raw `callOrdered` RPC는 `AdminBusy`, observer resize는 success
+      no-op다. owner-retention exact 표의 SSOT는 persistent-session-host.md가 소유한다. future 2c3e RPC execute는 helper signature만 예약하고
+      caller 편입은 2c3e gate가 소유한다.
       **C3-3a3 product activation**이 기존 take/release에 a1을, 현재 존재하는 모든 generation mutation final admission에 a2를 동시에
       배선한다. queue commit 전 generation/class reserve·bind가 끝나고 `Client` queue commit→existing authority live publication은
       fallible callback 0의 연속 no-fail suffix이며, live `StreamOperationPermit`과 owner-thread/no-yield가 직렬화한다. registered-node
       operation은 그 전에 끝나므로 handoff 근거가 아니다. final gate는 검사부터 allocation·queue offset·syscall commit까지 같은
-      family별 operation fence를 유지한다. product activation 전 a1/a2 callsite는 0이므로 반쪽 보호가 사용자 경로에 노출되지 않는다.
+      family별 existing execution lease를 유지한다. shared pin만으로는 다른 shared mutation을 배제하지 않으므로 직렬화 근거로 쓰지
+      않는다. product activation 전 a1/a2 callsite는 0이므로 반쪽 보호가 사용자 경로에 노출되지 않는다.
       a3은 Debug·ReleaseFast product runtime 8+actual-socket 2+boundary 1을 실행한다. quarantine reserve→pin reserve→generation
       reserve→quarantine/cleanup bind의 각 precommit fault와 `Client.commitGenerationEventTake`의
       `Busy|Terminal|Corrupt|InvalidPrepared`는 reserve 뒤 cache를 exact rollback해
       `(queue=1,aggregate=0,permit/pin/quarantine/reserved-authority=0)`으로 수렴한다. queue commit 성공 뒤에는
       `(queue=0,aggregate=1)`만 허용한다. target pending outbound
       offset 0은 exact free 1/wire 0, partial offset은 no-retry fail-close, sibling pending은 offset/owner 보존·flush 0 뒤 aggregate zero에서
-      재개한다. callback/foreign/teardown/check 직후 revoke 경쟁은 allocation/callback/offset/syscall 0과 API별 `Busy` 또는 progress
-      `false`를 증명한다. public `GenerationTransport`는 세 gate 모두 exact 15다.
+      재개한다. callback/foreign/teardown/check 직후 revoke 경쟁은 allocation/callback/offset/syscall 0과 persistent-session-host.md
+      closed 7-row의 `Busy|AdminBusy|false|observer success no-op` 및 owner retention을 전수 증명한다. public nonblocking input은 `0`,
+      public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
       **C3-3b failure settlement**는 generation arm의 raw capability/poison/fence 접근을 typed adapter로 치환한다. effect confirmation을
       먼저 재시도하고 confirmed 뒤 release하며, release가 Busy면 다음 tick의 purge/take보다 release를 먼저 재시도하는 상태만 제품
       `pending_generation_event_outcome`에 둔다. **C3-3c product socket/source-zero**는 열린 peer에서

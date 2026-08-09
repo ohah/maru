@@ -48,6 +48,41 @@ comptime {
         @compileError("external adoption event ordinal exceeds reducer u32 domain");
 }
 
+const FdStatIdentity = struct {
+    device: u64,
+    inode: u64,
+    mode_type: u32,
+};
+
+/// The normal product target uses Darwin `fstat`. The session-host module is also compiled and
+/// exercised by Linux CI, where Zig 0.16 deliberately exposes `std.c.fstat` as `void`; use statx
+/// there without weakening the fd-reuse identity evidence sealed by ended purge.
+fn fdStatIdentity(fd: c.fd_t) ?FdStatIdentity {
+    if (fd < 0) return null;
+    if (comptime builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var statx = std.mem.zeroes(linux.Statx);
+        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX.BASIC_STATS, &statx)) != .SUCCESS or
+            !linux.S.ISSOCK(statx.mode))
+            return null;
+        return .{
+            .device = (@as(u64, statx.dev_major) << 32) | statx.dev_minor,
+            .inode = statx.ino,
+            .mode_type = @intCast(statx.mode & linux.S.IFMT),
+        };
+    }
+
+    var stat: c.Stat = undefined;
+    if (c.fstat(fd, &stat) != 0 or !posix.S.ISSOCK(stat.mode)) return null;
+    return .{
+        // Darwin dev_t is signed. Seal its sign-extended kernel bit pattern instead of requiring
+        // the device identifier to be numerically non-negative.
+        .device = @bitCast(@as(i64, stat.dev)),
+        .inode = @intCast(stat.ino),
+        .mode_type = @intCast(stat.mode & posix.S.IFMT),
+    };
+}
+
 fn preparedRpcFromStorage(storage: *PreparedBlockingRpcStorage) *PreparedBlockingRpc {
     return @ptrCast(@alignCast(storage));
 }
@@ -10672,9 +10707,7 @@ pub const Client = struct {
             prepared.lifecycle != .pristine)
             return error.InvalidState;
 
-        var stat: c.Stat = undefined;
-        if (self.fd < 0 or c.fstat(self.fd, &stat) != 0 or !posix.S.ISSOCK(stat.mode))
-            return error.Corrupt;
+        const fd_stat = fdStatIdentity(self.fd) orelse return error.Corrupt;
         var socket_type: c_int = 0;
         var socket_type_len: c.socklen_t = @sizeOf(c_int);
         if (c.getsockopt(
@@ -10704,11 +10737,9 @@ pub const Client = struct {
         complete.writeUsize(@intFromPtr(self.allocator.ptr));
         complete.writeUsize(@intFromPtr(self.allocator.vtable));
         complete.writeU64(@intCast(self.fd));
-        // Darwin dev_t is signed. Seal its sign-extended kernel bit pattern instead
-        // of requiring the device identifier to be numerically non-negative.
-        complete.writeU64(@bitCast(@as(i64, stat.dev)));
-        complete.writeU64(@intCast(stat.ino));
-        complete.writeU64(@intCast(stat.mode & posix.S.IFMT));
+        complete.writeU64(fd_stat.device);
+        complete.writeU64(fd_stat.inode);
+        complete.writeU64(fd_stat.mode_type);
         complete.writeU64(@intCast(socket_type));
         complete.writeUsize(total);
         complete.writeU16(self.wire_major);
@@ -11178,9 +11209,7 @@ pub const Client = struct {
             self.ownership != .standalone or self.unusable or
             self.first_poison_reason != null)
             return false;
-        var stat: c.Stat = undefined;
-        if (self.fd < 0 or c.fstat(self.fd, &stat) != 0 or !posix.S.ISSOCK(stat.mode))
-            return false;
+        _ = fdStatIdentity(self.fd) orelse return false;
         var socket_type: c_int = 0;
         var socket_type_len: c.socklen_t = @sizeOf(c_int);
         if (c.getsockopt(self.fd, c.SOL.SOCKET, c.SO.TYPE, &socket_type, &socket_type_len) != 0 or

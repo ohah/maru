@@ -2727,14 +2727,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    B3b-O caller는 `ClientSlot.commitEndedPurge` exact one이다. ClientSlot teardown 전용 세 wrapper는 `ClientSlot.tryDeinit`에서만
    각각 exact once 호출한다.
 
-   blocking generation Client fd는 callback 전에 `fstat`의 `S_IFSOCK`과 `getsockopt(SO_TYPE)==SOCK_STREAM`을 반드시 만족해야 한다.
+   blocking generation Client fd는 callback 전에 Darwin `fstat` 또는 Linux CI의 동등한 `statx(AT_EMPTY_PATH)`에서
+   `S_IFSOCK`이고 `getsockopt(SO_TYPE)==SOCK_STREAM`을 반드시 만족해야 한다.
    prepare 대상 Client는 final-address bound fence의 exact exclusive를 이미 보유한 `.standalone` ownership과 `.blocking` I/O mode여야 한다.
    `.external_pump|moved|quarantined_no_free`, unbound/stale fence, exclusive 부재 또는 intrusion은 pointer-bearing owner graph와 fd를 읽기 전에
    mutation 0으로 거부한다. exact precedence는 `actual PID → Client/fence final-address+generation → exclusive/intrusion atomic →
    ownership/io_mode scalar → pointer-bearing owner graph/fd`다. prepare가 exclusive를 내부에서 acquire하거나 실패 시 release하지 않는다.
    `complete_owner_seal`은 `captured_fd` 숫자와 `{st_dev,st_ino,st_mode&S_IFMT,SO_TYPE}`을 domain
    `maru.ended-purge.complete-owner.v1`에 포함한다. post-validation은 pointer/len/cap/fd scalar를 먼저 비교하고 안전할 때만 current fd를
-   정확히 한 번 `fstat`+`getsockopt`해 seal을 재계산한다. EBADF, non-socket, non-stream 또는 identity 불일치는 drift이고
+   정확히 한 번 같은 platform stat primitive+`getsockopt`로 seal을 재계산한다. Linux의 device identity는
+   `{dev_major,dev_minor}`의 lossless pair projection이다. EBADF, non-socket, non-stream 또는 identity 불일치는 drift이고
    captured/current fd를 close하거나 write하지 않는다. 이 tuple은 CI fixture에서 지원하는 close→new socket/file `dup2` 교체를 탐지하는
    best-effort evidence이지 커널이 보장하는 connection-unique cookie나 open-file-description identity가 아니다. 같은 tuple이 재사용되는
    coherent raw fd 교체의 완전한 탐지·복구는 비목표이며, allocator callback이 Maru owner fd를 직접 close/rebind하는 행위는 지원 계약 밖의

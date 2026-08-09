@@ -908,7 +908,17 @@ pub const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms
 /// 탐색기 스크롤바 치수(SV2b). 옛 `components/file_tree_scrollbar.zig`가 들고 있던 값을 그대로 옮겼다 —
 /// 그 모듈은 기능이 전부 `chrome/ui/scroll_area.zig`에 있어 이 슬라이스에서 지웠다.
 pub const dock_list_scrollbar_width_px: u32 = 8;
-pub const dock_list_scrollbar_inset_px: u32 = 3;
+/// 막대 폭 + 이 값 = **거터**이고, 거터가 곧 잡는 폭이다(`ScrollbarGeometry.hit_w`). 막대는 그 안에
+/// 가운데로 뜬다.
+///
+/// 예전엔 3이라 거터가 11px, 2× 화면에서 5.5pt였고 실제로 잡히는 것은 막대 8px(4pt ≈ 1mm)뿐이었다 —
+/// 보이는 띠를 정확히 찍어야만 집혔다. 8로 올려 거터를 16px(8pt)로 만들고 그 전체를 잡게 했다. 막대
+/// 자체는 8px 그대로라 **보이는 굵기는 안 변한다**(얇은 띠는 의도한 디자인이다).
+///
+/// 안쪽으로 더 넓히지 않는 이유: 거터는 컨테이너가 상시 비워 두는 자리라 뺏을 콘텐츠가 없지만, 그
+/// 너머는 목록 행이다. 탐색기는 스크롤바를 행보다 **먼저** 판정하므로(`file_panel.zig`) 더 넓히면 행
+/// 클릭을 가져간다.
+pub const dock_list_scrollbar_inset_px: u32 = 8;
 pub const dock_list_scrollbar_min_thumb_px: u32 = 24;
 
 /// 탐색기가 내는 tree의 노드 id. `scrollArea`가 track/thumb을 **자기 preorder 안에서** 내므로
@@ -56723,6 +56733,8 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
         .track_y = 0,
         .track_w = 16,
         .track_h = 400,
+        .hit_x = 100,
+        .hit_w = 16,
         .thumb_y = 0,
         .thumb_h = 40,
         .max_offset_px = projection.max_offset_px,
@@ -56838,7 +56850,7 @@ test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 �
     // 이때는 capture를 끊고 host의 drag 상태도 함께 정리해야 다음 down이 grab 지점을 새로 잡는다.
     session.agent_session_dock_scroll_drag = .{
         .grab_dy = 10,
-        .geometry = .{ .track_x = 100, .track_y = 0, .track_w = 16, .track_h = 400, .thumb_y = 120, .thumb_h = 40, .max_offset_px = 500 },
+        .geometry = .{ .track_x = 100, .track_y = 0, .track_w = 16, .track_h = 400, .hit_x = 100, .hit_w = 16, .thumb_y = 120, .thumb_h = 40, .max_offset_px = 500 },
     };
     var replaced = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 200)};
     agent_dock.publishAgentSessionDockFrame(session, .{ .tree = .{ .entries = &replaced }, .actions = table.slice() }, 8);

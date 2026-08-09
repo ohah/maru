@@ -287,6 +287,12 @@ const Layout = struct {
     card_h: u32, // 카드 1개 높이(px) = ch × card_rows
     header_h: u32, // 헤더 밴드 높이(px) = ch × header_rows
     panel_cols: u32, // 박스 폭(칸)
+    /// 카드 내용이 쓸 수 있는 폭(칸) = `panel_cols` − 스크롤바 gutter. 넘치지 않으면 `panel_cols`와 같다.
+    ///
+    /// **텍스트·✕ 배치와 hit-test가 같이 이 값을 본다.** 예전엔 gutter를 카드 배경 폭에만 반영하고 텍스트는
+    /// `panel_cols`로 배치해, 막대가 우측 상대시간("방금")을 덮었다(gutter를 넓히자 드러났다). 폭을 한 번
+    /// 계산해 두 소비자가 같은 값을 쓰면 "보이는 곳 ≠ 눌리는 곳"이 정의상 생기지 않는다.
+    card_cols: u32,
     total: usize, // 전체 카드 수
     first: usize, // 보이는 첫 카드 인덱스(픽셀 offset / card_h)
     origin_shift_px: u32, // 첫 카드가 뷰포트 위로 밀린 픽셀(0이면 카드 경계에 딱 맞음)
@@ -362,6 +368,8 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
         .card_h = card_h,
         .header_h = header_h,
         .panel_cols = box_w / cw,
+        // gutter는 칸 단위로 올림해 예약한다 — 픽셀로 남기면 마지막 칸이 막대와 반쯤 겹친다.
+        .card_cols = (box_w / cw) -| (if (sw.scrollable and cw > 0) (p.metrics.overlay_scroll_gutter_px + cw - 1) / cw else 0),
         .total = total,
         .first = first,
         .origin_shift_px = origin_shift_px,
@@ -442,7 +450,7 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     const card_idx = l.first + vis_idx;
     const within = content_y - @as(f64, @floatFromInt(vis_idx)) * card_h;
     const line: u32 = @intFromFloat(within / @as(f64, @floatFromInt(l.ch))); // 0=제목줄, 1=본문줄
-    if (line >= 1 and col >= l.panel_cols -| 2) return .{ .close = card_idx }; // 본문줄 우측 끝 ✕
+    if (line >= 1 and col >= l.card_cols -| 2) return .{ .close = card_idx }; // 본문줄 우측 끝 ✕ (그린 자리와 같은 폭)
     return .{ .card = card_idx };
 }
 
@@ -498,7 +506,8 @@ pub fn view(
     const ch: i32 = @intCast(l.ch);
     const card_h_i: i32 = @intCast(l.card_h);
     const header_h_i: i32 = @intCast(l.header_h);
-    const panel_cols: u32 = l.panel_cols;
+    // 카드 내용은 gutter를 뺀 폭을 쓴다(hit-test와 같은 값 — Layout.card_cols 주석 참조).
+    const panel_cols: u32 = l.card_cols;
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
     // 패널 배경(둥근+테두리) — context_menu/palette와 동일.
@@ -532,8 +541,9 @@ pub fn view(
     // 스크롤바 gutter를 **상시** 예약한다(SV5a-2). 막대가 공용 경로로 옮겨 오면서 8px pill이 됐는데,
     // 카드 밴드가 패널 폭을 다 먹으면 그 위를 덮어 **안 읽은 카드의 밝은 배경에 막대가 묻힌다**(실측).
     // 사이드바·팔레트가 세운 것과 같은 규율이고, 여기서도 밴드와 우측 요소가 이 폭 하나를 함께 쓴다.
-    const gutter_px: u32 = if (l.scrollable) p.metrics.overlay_scroll_gutter_px else 0;
-    const card_w: u32 = rect.w -| gutter_px;
+    // 배경·clip 폭도 텍스트와 **같은 칸 수**에서 뽑는다 — 픽셀 gutter를 따로 빼면 칸 올림과 어긋나
+    // 마지막 칸이 막대와 반쯤 겹친다.
+    const card_w: u32 = l.card_cols * l.cw;
     if (l.scrollable) {
         try out.append(arena, .{ .clip = .{ .x = rect.x, .y = body_top, .w = card_w, .h = l.viewport_h_px } });
     }

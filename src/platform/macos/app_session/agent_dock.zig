@@ -1906,15 +1906,19 @@ pub fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.ui.scr
     }
     const t = track orelse return null;
     const h = thumb orelse return null;
-    return .{
+    // 잡는 자리(hit)는 tree에 안 실린다 — entry에는 그린 rect만 담긴다. 거터 폭으로 역산해 채운다.
+    const bar: chrome.ui.scroll_area.ScrollbarGeometry = .{
         .track_x = t.x,
         .track_y = t.y,
         .track_w = t.width,
         .track_h = t.height,
+        .hit_x = t.x,
+        .hit_w = t.width,
         .thumb_y = h.y,
         .thumb_h = h.height,
         .max_offset_px = agentSessionDockScrollProjection(self).max_offset_px,
     };
+    return bar.withHitSpan(@floatFromInt(chrome.components.session_dock.types.DockMetrics.resolve(agentSessionDockScaleMilli(self)).scrollbarMetrics().gutterPx()));
 }
 
 /// down이 scrollbar 안이면 드래그를 연다. thumb이면 잡은 지점을 그대로 유지하고, track이면 그 지점으로

@@ -166,6 +166,23 @@ completed tree**에 track과 thumb을 함께 싣는다.
 밀고, 스크롤바는 그렇게 비운 자리에 놓인다. CSS `scrollbar-gutter`와 taffy의
 `content_box_inset.right += scrollbar_gutter`가 같은 일을 한다.
 
+**gutter는 잡는 폭이기도 하다 — 그리는 폭과 다르다.** `ScrollbarGeometry`는 `track_*`(그리는 막대)와
+`hit_*`(잡는 자리)를 따로 든다. 막대는 gutter 안에 가운데로 뜨고, 포인터 판정(`trackContains`)은
+**gutter 전체**를 본다. 한때 `track_w` 하나가 둘을 겸했는데 막대가 8 backing px(2× 화면에서 4pt ≈ 1mm)라
+보이는 띠를 정확히 찍어야만 집혔다 — 얇게 보이는 것은 의도한 디자인이지만 조준 난이도까지 그 값에
+묶인 것은 의도가 아니었다.
+
+베이스: xterm.js(VS Code scrollable element)가 `verticalScrollbarSize`(포인터를 받는 트랙)와
+`verticalSliderSize`(보이는 thumb)를 나누고 slider를 트랙 안에 가운데 정렬한다
+(`verticalScrollbar.ts`). 같은 모델을 쓰되 **hit은 gutter 밖으로 나가지 않는다** — gutter는 컨테이너가
+상시 비워 둔 자리라 그 안에는 뺏을 콘텐츠가 없지만, 안쪽으로 넓히면 목록 행 클릭을 가져간다(탐색기는
+스크롤바를 행보다 **먼저** 판정한다). 조준을 더 키우려면 소비처가 gutter를 넓힌다 — 그래서
+`inset_x_px`를 3에서 8로 올려 gutter를 16px(8pt)로 뒀다.
+
+발행된 tree에는 **그린 rect만** 실리므로(그것이 "보이는 것 = 눌리는 것"의 단일 출처인 이유다), tree에서
+기하를 되읽는 경로는 `withHitSpan(gutter)`로 hit을 역산한다. gutter 자체는 `ScrollbarMetrics.gutterPx()`
+하나가 답한다 — 예약하는 폭과 잡는 폭이 갈라지지 않게.
+
 여기서 한 가지를 손으로 맞춰야 한다. `layoutFlex`의 clip은 padding을 **제외한** content box라
 (CSS의 padding box와 다르다) 방금 예약한 gutter까지 잘라 낸다. 그래서 `build`가 그 폭만큼 clip을
 되돌린다 — CSS에서 스크롤바가 padding box 안이라 자기 컨테이너에 잘리지 않는 것과 같은 자리를

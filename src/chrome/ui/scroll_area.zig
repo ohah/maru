@@ -126,15 +126,35 @@ pub const ScrollbarMetrics = struct {
     inset_x_px: u32,
     /// content가 아무리 길어도 thumb이 이보다 얇아지지 않는다 — 집을 수 없는 thumb은 affordance가 아니다.
     min_thumb_px: u32,
+
+    /// 컨테이너가 자기 폭에서 상시 예약하는 자리. **잡는 폭이기도 하다**(`ScrollbarGeometry.hit_w`) —
+    /// 막대는 이 안에 가운데로 뜬다. 소비처마다 손으로 더하면 예약한 폭과 잡는 폭이 갈라지므로 여기 둔다.
+    pub fn gutterPx(self: ScrollbarMetrics) u32 {
+        return self.width_px + self.inset_x_px;
+    }
 };
 
-/// track/thumb의 backing-pixel 기하. paint·hit-test·drag가 **같은 값 하나**를 소비한다. 이 struct는
-/// 상태가 없으므로 매 프레임 같은 입력에서 같은 결과가 나온다.
+/// track/thumb의 backing-pixel 기하. 상태가 없으므로 매 프레임 같은 입력에서 같은 결과가 나온다.
+///
+/// **그리는 폭과 잡는 폭은 다르다.** 한때 `track_w` 하나가 둘을 겸했는데, 막대가 8 backing px(2×에서
+/// 화면상 4pt ≈ 1mm)라 보이는 띠를 정확히 찍어야만 잡혔다. 얇게 보이는 것은 의도한 디자인이지만 조준
+/// 난이도까지 그 값에 묶인 것은 의도가 아니었다.
+///
+/// 베이스: xterm.js(VS Code scrollable element)가 `verticalScrollbarSize`(포인터를 받는 트랙)와
+/// `verticalSliderSize`(보이는 thumb)를 나누고 slider를 트랙 안에 가운데 정렬한다
+/// (`verticalScrollbar.ts` `_createSlider(0, floor((scrollbarSize - sliderSize) / 2), sliderSize)`).
+/// 같은 모델을 쓰되 hit 영역은 **거터 밖으로 나가지 않는다** — 거터는 컨테이너가 상시 비워 둔 자리라
+/// 그 안은 뺏을 콘텐츠가 없지만, 안쪽으로 넓히면 목록 행 클릭을 가져간다(탐색기는 스크롤바를 행보다
+/// 먼저 판정한다). 조준을 더 키우려면 소비처가 거터를 넓힌다.
 pub const ScrollbarGeometry = struct {
+    /// 그리는 자리(막대 자체).
     track_x: f32,
     track_y: f32,
     track_w: f32,
     track_h: f32,
+    /// 잡는 자리(거터 전체). 세로 범위는 track과 같으므로 x축만 따로 든다.
+    hit_x: f32,
+    hit_w: f32,
     thumb_y: f32,
     thumb_h: f32,
     max_offset_px: u32,
@@ -165,8 +185,23 @@ pub const ScrollbarGeometry = struct {
         return y >= self.thumb_y and y < self.thumb_y + self.thumb_h;
     }
 
+    /// 발행된 tree에서 되읽은 track rect로부터 잡는 자리를 채운다.
+    ///
+    /// tree entry에는 **그린 rect만** 실린다(그것이 "보이는 것과 눌리는 것의 단일 출처"인 이유다).
+    /// 그래서 hit 폭은 여기서 역산한다 — 막대는 거터 안에 가운데로 뜨므로 좌우 여백이 각각
+    /// `(gutter - track) / 2`이고, 그만큼 왼쪽으로 물리면 거터의 왼쪽 끝이 나온다. `scrollbarGeometry`가
+    /// 정방향으로 쓰는 식과 같은 관계라 두 경로가 갈라지지 않는다.
+    pub fn withHitSpan(self: ScrollbarGeometry, gutter_w: f32) ScrollbarGeometry {
+        var next = self;
+        const pad = (gutter_w - self.track_w) / 2;
+        next.hit_x = self.track_x - pad;
+        next.hit_w = gutter_w;
+        return next;
+    }
+
+    /// 포인터가 스크롤바를 잡는가 — **보이는 막대가 아니라 거터 전체**로 판정한다(위 주석의 이유).
     pub fn trackContains(self: ScrollbarGeometry, x: f64, y: f64) bool {
-        return x >= self.track_x and x < self.track_x + self.track_w and
+        return x >= self.hit_x and x < self.hit_x + self.hit_w and
             y >= self.track_y and y < self.track_y + self.track_h;
     }
 
@@ -199,6 +234,8 @@ pub const Drag = struct {
         .track_y = 0,
         .track_w = 0,
         .track_h = 0,
+        .hit_x = 0,
+        .hit_w = 0,
         .thumb_y = 0,
         .thumb_h = 0,
         .max_offset_px = 0,
@@ -286,6 +323,9 @@ pub fn scrollbarGeometry(
         .track_y = content.y,
         .track_w = width,
         .track_h = track_h,
+        // 잡는 자리는 거터 전체 — content edge에서 거터 끝까지. 막대는 그 안에 가운데로 뜬다.
+        .hit_x = content.x + content.w,
+        .hit_w = content.gutter_w,
         .thumb_y = content.y + travel * ratio,
         .thumb_h = thumb_h,
         .max_offset_px = max_offset,
@@ -560,12 +600,12 @@ test "withOffset predicts exactly what the next published geometry will be" {
         try std.testing.expectApproxEqAbs(published.thumb_y, at_top.withOffset(offset).thumb_y, 0.01);
     }
     // 스크롤할 것이 없으면 옮길 곳도 없다.
-    const fixed = ScrollbarGeometry{ .track_x = 0, .track_y = 0, .track_w = 8, .track_h = 100, .thumb_y = 0, .thumb_h = 100, .max_offset_px = 0 };
+    const fixed = ScrollbarGeometry{ .track_x = 0, .track_y = 0, .track_w = 8, .track_h = 100, .hit_x = 0, .hit_w = 8, .thumb_y = 0, .thumb_h = 100, .max_offset_px = 0 };
     try std.testing.expectEqual(@as(f32, 0), fixed.withOffset(50).thumb_y);
 }
 
 test "thumb and track containment use half-open bounds so adjacent pixels never both hit" {
-    const geometry = ScrollbarGeometry{ .track_x = 100, .track_y = 20, .track_w = 8, .track_h = 400, .thumb_y = 60, .thumb_h = 40, .max_offset_px = 1200 };
+    const geometry = ScrollbarGeometry{ .track_x = 100, .track_y = 20, .track_w = 8, .track_h = 400, .hit_x = 100, .hit_w = 8, .thumb_y = 60, .thumb_h = 40, .max_offset_px = 1200 };
     // thumb의 위 경계는 포함, 아래 경계는 제외다. 닫힌 구간이면 thumb 바로 아래 1px이 thumb이자
     // track이라 같은 down이 드래그와 점프 둘 다로 읽힌다.
     try std.testing.expect(geometry.thumbContains(60));
@@ -579,6 +619,47 @@ test "thumb and track containment use half-open bounds so adjacent pixels never 
     try std.testing.expect(!geometry.trackContains(99.9, 200));
     try std.testing.expect(!geometry.trackContains(104, 420));
     try std.testing.expect(!geometry.trackContains(104, 19.9));
+}
+
+// 잡는 폭은 **거터 전체**이고 그리는 폭은 막대뿐이다. 한때 `track_w` 하나가 둘을 겸해, 화면상 4pt
+// (8 backing px @2×)짜리 띠를 정확히 찍어야만 스크롤바가 잡혔다.
+//
+// 고정하는 것 둘: (a) 거터의 왼쪽 끝 — content edge 바로 옆 — 에서도 잡힌다(막대는 거기서 떨어져 있다),
+// (b) 그래도 거터 **밖**으로는 새지 않는다. (b)가 없으면 목록 행 클릭을 가져간다.
+test "scrollbar hit span covers the whole gutter, not just the painted bar" {
+    // content가 [10, 210), 거터 16px(210..226), 막대 8px → 막대는 그 안 가운데(214..222).
+    const content = ContentRect{ .x = 10, .y = 0, .w = 200, .h = 100, .gutter_w = 16 };
+    const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 8, .min_thumb_px = 24 };
+    const bar = scrollbarGeometry(content, 400, 0, m).?;
+
+    try std.testing.expectEqual(@as(f32, 214), bar.track_x); // 10 + 200 + (16 - 8) / 2
+    try std.testing.expectEqual(@as(f32, 8), bar.track_w); // 보이는 굵기는 막대 그대로
+    try std.testing.expectEqual(@as(f32, 210), bar.hit_x); // 잡는 자리는 content edge부터
+    try std.testing.expectEqual(@as(f32, 16), bar.hit_w); // 거터 전체
+
+    // 막대(214..222)에 닿지 않는 거터 자리에서도 잡힌다 — 이것이 이 슬라이스가 산 것이다.
+    try std.testing.expect(bar.trackContains(210, 50)); // 막대 왼쪽 여백
+    try std.testing.expect(bar.trackContains(224, 50)); // 막대 오른쪽 여백
+    try std.testing.expect(bar.trackContains(225.9, 50));
+    // 거터 밖은 여전히 아니다(왼쪽=목록 행, 오른쪽=컨테이너 밖).
+    try std.testing.expect(!bar.trackContains(209.9, 50));
+    try std.testing.expect(!bar.trackContains(226, 50));
+
+    // 발행된 tree에서 되읽는 경로도 같은 값을 얻는다 — tree에는 그린 rect만 실려서 역산이 필요하고,
+    // 그 역산이 정방향과 갈라지면 "보이는 곳 ≠ 눌리는 곳"이 된다.
+    const from_tree = (ScrollbarGeometry{
+        .track_x = bar.track_x,
+        .track_y = bar.track_y,
+        .track_w = bar.track_w,
+        .track_h = bar.track_h,
+        .hit_x = bar.track_x,
+        .hit_w = bar.track_w,
+        .thumb_y = bar.thumb_y,
+        .thumb_h = bar.thumb_h,
+        .max_offset_px = bar.max_offset_px,
+    }).withHitSpan(@floatFromInt(m.gutterPx()));
+    try std.testing.expectEqual(bar.hit_x, from_tree.hit_x);
+    try std.testing.expectEqual(bar.hit_w, from_tree.hit_w);
 }
 
 test "track click centers the thumb at the pointer" {

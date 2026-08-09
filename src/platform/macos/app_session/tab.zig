@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const git_ops = @import("git.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
@@ -1165,7 +1166,7 @@ pub fn tabMatchesSearch(self: *AppSession, tab: *Tab, query: []const u8) bool {
     if (query.len == 0) return true;
     const term = tab.activePane().activeTerm();
     const name = workspaceLabel(tab);
-    const branch = self.termGitBranch(term) orelse "";
+    const branch = git_ops.termGitBranch(self, term) orelse "";
     const folder = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     return std.ascii.indexOfIgnoreCase(name, query) != null or
         std.ascii.indexOfIgnoreCase(branch, query) != null or

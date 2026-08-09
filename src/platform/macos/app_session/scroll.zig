@@ -21,6 +21,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const git_ops = @import("git.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const overlay_scrollbar_min_thumb_px = app_session_mod.overlay_scrollbar_min_thumb_px;
 const agent_dock = app_session_mod.agent_dock;
@@ -176,7 +177,7 @@ pub fn scmScrollExtent(self: *AppSession) FileTreeScrollExtent {
     const rect = dock_ops.dockGeometry(self).tree_content;
     const viewport = rect.h -| row_h; // 헤더 한 줄
     const content: u32 = @intCast(@min(
-        @as(u64, self.scmTotalRows()) * @as(u64, row_h),
+        @as(u64, git_ops.scmTotalRows(self)) * @as(u64, row_h),
         @as(u64, std.math.maxInt(u32)),
     ));
     return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };

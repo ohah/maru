@@ -20,6 +20,7 @@ const dock_panel = maru.session.dock_panel;
 const dock_layout = maru.session.dock_layout;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
 const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
@@ -382,7 +383,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     agent_dock.releaseAgentSessionDockKeyFocus(self);
     if (view != .explorer and file_panel_ops.fileTreeFocused(self)) file_panel_ops.restoreFileTreeFocus(self);
     // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
-    if (view == .source_control) self.refreshGitStatus();
+    if (view == .source_control) git_ops.refreshGitStatus(self);
     if (view == .agent_sessions) {
         agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
         self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;

@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const git_ops = @import("git.zig");
 const notification_ops = @import("notification.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
@@ -506,7 +507,7 @@ pub fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceAgent) u8
     // **termGitBranch를 먼저** 부른다 — 이 호출이 관측(cwd)을 refresh하므로, sidebarHasCwd를 앞세우면 관측이
     // stale한 rebuild에서 줄 수를 1로 재고 같은 rebuild의 렌더는 2줄을 그려 행 높이와 글자가 어긋난다
     // (code-review max). sidebarCardLines가 쓰는 순서와 같게 맞춘다.
-    const has_branch = self.termGitBranch(term) != null;
+    const has_branch = git_ops.termGitBranch(self, term) != null;
     if (sidebarHasCwd(term)) {
         n += 1; // 폴더 줄
         if (has_branch) n += 1; // 브랜치 줄(repo 안일 때만 — 카드 보조줄과 같은 규칙)
@@ -544,7 +545,7 @@ pub fn sidebarCardLines(self: *AppSession, tab: *Tab) u8 {
     var n: u8 = 1; // 이름줄은 항상 그린다(사용자 요청 — 보조줄만 조건부)
     // 브랜치·경로줄은 **git repo 안**일 때만 존재한다(maru는 repo 밖 cwd 줄을 그리지 않는다). 그 전제 아래
     // 각 토글(show-branch·show-folder)이 독립적으로 줄을 켠다.
-    if (self.termGitBranch(term) != null) {
+    if (git_ops.termGitBranch(self, term) != null) {
         if (self.loaded_config.config.sidebar.show_branch) n += 1;
         if (self.loaded_config.config.sidebar.show_folder and sidebarHasCwd(term)) n += 1;
     }
@@ -1574,7 +1575,7 @@ pub fn agentRowFolderOwned(self: *AppSession, term: *Term, indent: []const u8) !
 /// 에이전트 행 **브랜치 줄**(owned) — git repo 안일 때만(카드 보조줄과 같은 규칙). **폴더와 같은 줄에 합치지
 /// 않는다**: 사이드바 폭에서 둘을 한 줄에 넣으면 브랜치가 잘린다(사용자 실측 피드백 — 설계의 "이어 붙인다"를 정정).
 pub fn agentRowBranchOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
-    const branch = self.termGitBranch(term) orelse return self.allocator.dupe(u8, "");
+    const branch = git_ops.termGitBranch(self, term) orelse return self.allocator.dupe(u8, "");
     return std.fmt.allocPrint(self.allocator, "{s}  " ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, branch });
 }
 
@@ -1860,7 +1861,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
             // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null) + view options 토글로 표시 여부 결정.
             // 이름줄은 항상 표시(사용자 요청). show-branch=false면 브랜치줄 생략, show-folder=false면 경로줄 생략.
             // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
-            const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
+            const branch = git_ops.termGitBranch(self, term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
             const show_branch = self.loaded_config.config.sidebar.show_branch;
             const show_folder = self.loaded_config.config.sidebar.show_folder;
             // 브랜치줄 prefix = GitHub octocat(0xF0009). 예전 git-branch(0xF0001)는 얇은 선+링 3개라 카드 셀 크기

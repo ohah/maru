@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const git_ops = @import("git.zig");
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const writeExecutableFile = AppSession.writeExecutableFile;
 const resolveConfiguredShell = app_session_mod.resolveConfiguredShell;
@@ -64,7 +65,7 @@ const tab_ops = @import("tab.zig");
 /// 다음 턴에 다시 시도한다(스냅샷 실패가 목록·diff를 막지 않는다).
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = self.git_repo orelse (self.gitRepoRoot(&repo_buf) orelse return);
+    const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
     // 저장소가 바뀌었으면 링을 버린다 — 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
     if (self.turn_ring_repo) |current| {
         if (!std.mem.eql(u8, current, repo)) {

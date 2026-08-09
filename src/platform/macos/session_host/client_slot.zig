@@ -1364,11 +1364,12 @@ const PreparedEventReleaseLifecycle = enum(u8) {
 };
 
 const PreparedEventReleaseDisposition = enum(u8) { clean, corrupt };
+const PreparedEventReleasePermitState = enum(u8) { identity_exhausted, consume_prepared };
 
 const PreparedEventReleaseInternal = struct {
     self_addr: usize = 0,
     operation: RegisteredNodeOperation = undefined,
-    permit: StreamOperationPermit = undefined,
+    permit_state: PreparedEventReleasePermitState = .identity_exhausted,
     permit_consume: ClientSlot.PreparedStreamOperationPermitConsume = .{},
     request: GenerationEventReleaseRequest = undefined,
     trusted: cleanup_registry_mod.EventTrustedCleanup = undefined,
@@ -6388,18 +6389,20 @@ pub fn prepareGenerationEventRelease(
         .busy => return error.Busy,
         .terminal => return error.Terminal,
     }
-    const permit = slot.prepareStreamOperationPermit(
+    var permit: ?StreamOperationPermit = slot.prepareStreamOperationPermit(
         .event,
         request.event_owner_addr,
         request.owner.transport_incarnation,
         request.owner.reservation.identity,
-    ) catch |err| return switch (err) {
-        error.AdminBusy => error.Busy,
-        error.IdentityExhausted => error.Terminal,
-        error.InvalidStreamOperationPermit => error.InvalidOwner,
+    ) catch |err| switch (err) {
+        error.AdminBusy => return error.Busy,
+        // Identity exhaustion is absorbing, but it must not strand an already-live event. The
+        // registered-node operation above is sufficient to perform the same trusted no-free
+        // recovery handoff used for corrupt public owner state.
+        error.IdentityExhausted => null,
+        error.InvalidStreamOperationPermit => return error.InvalidOwner,
     };
-    var permit_live = true;
-    defer if (permit_live) slot.abortStreamOperationPermit(permit) catch unreachable;
+    defer if (permit) |live| slot.abortStreamOperationPermit(live) catch unreachable;
 
     const trusted = admission.operation.node.cleanup_registry.trustedEventCleanup(
         request.owner.reservation.cleanup,
@@ -6426,7 +6429,7 @@ pub fn prepareGenerationEventRelease(
         quarantine_reservation,
         quarantine_identity,
     ) catch @panic("canonical event quarantine mirror drifted");
-    var corrupt = !projection.valid or
+    var corrupt = permit == null or !projection.valid or
         !std.meta.eql(trusted.event, projection.identity.receipt) or
         !std.meta.eql(projection.identity.owner, request.owner) or
         projection.self_addr != request.event_owner_addr or
@@ -6446,7 +6449,7 @@ pub fn prepareGenerationEventRelease(
     state.* = .{
         .self_addr = @intFromPtr(out),
         .operation = admission.operation,
-        .permit = permit,
+        .permit_state = if (permit != null) .consume_prepared else .identity_exhausted,
         .request = request,
         .trusted = trusted,
         .quarantine_reservation = quarantine_reservation,
@@ -6455,9 +6458,11 @@ pub fn prepareGenerationEventRelease(
         .lifecycle = .pristine,
     };
     @memset(out.storage[@sizeOf(PreparedEventReleaseInternal)..], 0);
-    slot.prepareStreamOperationPermitConsume(permit, &state.permit_consume) catch
-        @panic("preflighted event release permit consume drifted");
-    permit_live = false;
+    if (permit) |live| {
+        slot.prepareStreamOperationPermitConsume(live, &state.permit_consume) catch
+            @panic("preflighted event release permit consume drifted");
+        permit = null;
+    }
     if (corrupt) {
         _ = quarantine.beginTransfer(
             currentPid(),
@@ -6518,7 +6523,9 @@ pub fn prepareGenerationEventRelease(
 pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
     const state = preparedEventRelease(out);
     if (state.self_addr != @intFromPtr(out) or state.lifecycle != .prepared or
-        generation_event_release_callback_active_addr != 0)
+        generation_event_release_callback_active_addr != 0 or
+        (state.disposition == .clean and state.permit_state != .consume_prepared) or
+        (state.permit_state == .identity_exhausted and state.disposition != .corrupt))
         @panic("generation event release continuation drifted");
     const quarantine = &(generation_event_quarantine_registry orelse
         @panic("generation event quarantine disappeared"));
@@ -6576,9 +6583,14 @@ pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
             state.recovery_permit = undefined;
         },
     }
-    const slot: *ClientSlot = @ptrFromInt(state.request.owner.slot_addr);
-    if (!slot.consumeStreamOperationPermitUnchecked(&state.permit_consume))
-        @panic("generation event release permit drifted");
+    switch (state.permit_state) {
+        .identity_exhausted => {},
+        .consume_prepared => {
+            const slot: *ClientSlot = @ptrFromInt(state.request.owner.slot_addr);
+            if (!slot.consumeStreamOperationPermitUnchecked(&state.permit_consume))
+                @panic("generation event release permit drifted");
+        },
+    }
     if (state.disposition == .clean)
         lease_mod.commitPreparedPinReleaseUnchecked(
             &state.pin_release,

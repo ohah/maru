@@ -80,6 +80,17 @@ pub fn liveGenerationMatches(owner: *const EventOwner, generation: u64) bool {
         std.mem.eql(u8, &state.seal, &sealFor(state));
 }
 
+pub fn activeGenerationMatches(owner: *const EventOwner, generation: u64) bool {
+    if (generation == 0) return false;
+    const state = internalConst(owner);
+    return lifecycleRawValid(&state.lifecycle) and
+        (state.lifecycle == .live or state.lifecycle == .releasing) and
+        state.self_addr == @intFromPtr(owner) and
+        state.identity.receipt.owner_addr == @intFromPtr(owner) and
+        state.identity.receipt.event_generation == generation and
+        std.mem.eql(u8, &state.seal, &sealFor(state));
+}
+
 /// A settled local envelope is necessary, but never sufficient, for attachment teardown.
 pub fn settledForAttachment(owner: *const EventOwner) bool {
     return pristineExact(owner) or terminalExact(owner);

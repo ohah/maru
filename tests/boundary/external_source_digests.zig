@@ -183,7 +183,11 @@ pub const inventory = [_]Proof{
     // 비우기·비어있음 판정)을 함께 데려갔다. 반사가 늘거나 준 것이 아니라 **소유 파일이 바뀐 것**이라
     // 아래에 `app_session/settings.zig` 항목을 같은 수(2)로 새로 등재한다 — 합은 4로 보존된다.
     // 남은 둘은 `@field(self.chrome_host, field.name)`(모달 오버레이 역할표)과 같은 목록의 deinit이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3e772e8f7671d914fa0344d081da93ee8ed0f09df5738fafcdd070c70fbdf817" },
+    // pane 탭 제목 발행을 pane마다에서 프레임당 한 번으로 옮기며 또 바뀐다(단일 슬롯 캐시를 pane마다
+    // store해 앞 pane 아티팩트가 해제되던 use-after-free 수정). count는 F9가 옮긴 뒤의 2 그대로다 —
+    // 바뀐 것은 pane 루프 배선 3줄(batch 선언·append 호출·루프 뒤 flush)뿐이고 Client 구성·receiver
+    // 집합과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "8df3cb1003b37ad7e12a6aade1ef8e7307738f15fcf336784fce920f24c6b8df" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "e21c049953ebfba9323cba4a633efab92512e31e28ec683d8ea055a01956a8f2" },

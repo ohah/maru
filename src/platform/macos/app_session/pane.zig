@@ -520,27 +520,59 @@ pub fn paneTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: 
 /// DrawList 셀 중 running 플래그 ●를 종류 브랜드색으로 칠한다 — 탭바 pane 라벨·Term 탭의 flagPrefixedLabel prefix용
 /// (그 draw list 단위로). none이면 무동작. ●가 라벨 텍스트에 섞일 여지는 드물고, 있어도 색만 바뀌는 사소한 오탐이라
 /// per-tab 셀 범위 게이트까진 불필요(혼재 kind는 pane 대표색으로 통일 — 드문 트레이드오프, code-review max #4·#5).
-/// pane 탭 제목을 measured 경로로 수집한다(이관 3단계 — docs/file-explorer.md §3.5).
+/// 이번 프레임의 **모든 pane** 탭 제목을 모아 두는 누적 버퍼(이관 3단계 — docs/file-explorer.md §3.5).
+///
+/// pane마다 따로 셰이핑해 발행하지 **않는** 이유는 성능이 아니라 **수명**이다. `MeasuredTextCache`는
+/// 슬롯이 하나뿐이고 `store`가 새 아티팩트를 넣기 전에 옛 것을 해제하는데, 소비처는 아티팩트를 복사하지
+/// 않고 슬라이스 참조만 `collected`에 실어 두었다가 **프레임 말미**에 읽는다(`system_text.appendGpuGlyphs`가
+/// `placements[i]`로 좌표·색을 정한다). 그래서 pane 루프 안에서 pane마다 store하면 **뒤 pane의 store가
+/// 앞 pane이 이미 넘긴 placements를 해제**해, 앞 pane의 제목이 조용히 사라지거나 엉뚱한 좌표로 날아간다.
+/// 해제된 버퍼가 다음 셰이핑에 재사용되는지에 따라 갈리므로 split을 옮기기만 해도 증상이 오락가락한다.
+///
+/// op의 origin이 창 절대 좌표라 아티팩트 하나가 모든 pane의 제목을 담을 수 있다. 그래서 pane 루프는
+/// 여기에 쌓기만 하고, 루프가 끝난 뒤 `flushPaneTabTitles`가 **프레임당 한 번** 셰이핑·발행한다. 그러면
+/// 프레임 안에서 store가 한 번만 일어나므로 이 경로에서 소유권이 갈릴 여지가 구조적으로 없어지고,
+/// 덤으로 split이 여럿이어도 캐시가 정상적으로 hit한다(예전에는 pane마다 갈려 매번 재셰이핑했다).
+pub const TabTitleBatch = struct {
+    entries: std.ArrayList(Entry) = .empty,
+
+    pub const Entry = struct {
+        /// 제목 본문의 **소유 복사본**. pane 루프의 `titles`는 그 반복이 끝나면 해제되는데, op의 run은
+        /// 이 바이트를 슬라이스로 가리킨 채 flush까지 살아 있어야 한다.
+        text: []u8,
+        origin: chrome.draw.Px,
+        max_width_px: u32,
+        /// 그 pane의 활성 탭인가(색 역할 선택). role 값을 여기 담지 않는 것은 색 결정을 flush 한 곳에
+        /// 모아 두기 위해서다 — 이 구조체는 기하와 상태만 나른다.
+        active: bool,
+        /// rename 편집 중인 탭인가(넘칠 때 앞을 자르는 tail 앵커 선택).
+        editing: bool,
+    };
+
+    pub fn deinit(self: *TabTitleBatch, allocator: std.mem.Allocator) void {
+        for (self.entries.items) |e| allocator.free(e.text);
+        self.entries.deinit(allocator);
+    }
+};
+
+/// 한 pane의 탭 제목을 batch에 쌓는다(발행은 `flushPaneTabTitles`가 프레임당 한 번).
 ///
 /// 세그먼트 기하는 `tabbar.Metrics.segOf` **그대로**다. 탭 폭·✕ 자리·가로 스크롤은 셀 칸에서 나오고
 /// hit-test가 같은 값을 보므로, 제목만 픽셀로 그려도 "보이는 탭 == 클릭되는 탭"이 유지된다. 제목 영역은
 /// 셀 경로가 쓰던 규칙과 같다: 좌패딩 1칸, ✕가 있으면 우측 3칸을 비운다(`title_end = seg_end - 3`).
 ///
 /// 마커(`●`)는 셀에 남으므로 마커가 있는 탭은 제목이 그만큼(2칸) 오른쪽에서 시작한다.
-pub fn collectPaneTabTitles(
+pub fn appendPaneTabTitles(
     self: *AppSession,
-    collected: *std.ArrayList(CollectedPane),
-    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    batch: *TabTitleBatch,
     leaf: *Pane,
     pb: PaneBar,
     titles: []const []const u8,
     editing_tab: ?usize,
     bar_rect: maru.session.SplitRect,
-    bar_cols: u32,
 ) void {
     const cw = self.cell_width_px;
     if (cw == 0 or titles.len == 0) return;
-    const tokens = self.buildChromeTokens();
     // hit-test(`paneTabIndexAt` 등)와 **같은 메트릭**을 쓴다 — 보이는 탭과 클릭되는 탭이 갈리면 안 된다.
     const m = barMetrics(pb.tabs, cw, paneTermOrder(self, leaf).len, self.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols) orelse return;
     const active = paneActiveTermIndex(self, leaf);
@@ -552,59 +584,72 @@ pub fn collectPaneTabTitles(
     const title_line_h = chrome.ui.typography.lineHeightPx(.control, self.scale_milli);
     const title_y = bar_rect.y +| (if (bar_rect.h > title_line_h) (bar_rect.h - title_line_h) / 2 else 0);
 
-    var ops: std.ArrayList(chrome.draw.Op) = .empty;
-    defer ops.deinit(self.allocator);
-    var runs: std.ArrayList(chrome.draw.Run) = .empty;
-    defer runs.deinit(self.allocator);
-    // run은 op이 슬라이스로 참조하므로 **먼저 전부 채운 뒤** op을 만든다(ArrayList가 realloc하면 앞선 op의
-    // 포인터가 죽는다). 그래서 두 배열을 나눠 담고 인덱스로 이어 붙인다.
-    for (titles) |title| {
-        const body = tabTitleBody(title);
-        if (body.len == 0) continue;
-        runs.append(self.allocator, .{ .text = body }) catch return;
-    }
-    var run_index: usize = 0;
     for (titles, 0..) |title, i| {
         const body = tabTitleBody(title);
         if (body.len == 0) continue;
         const seg = m.segOf(i);
-        if (seg.end_px <= seg.start_px) { // 우단에서 잘려 안 보이는 탭
-            run_index += 1;
-            continue;
-        }
+        if (seg.end_px <= seg.start_px) continue; // 우단에서 잘려 안 보이는 탭
         const lead_cols: u32 = if (tabTitleRunningMarker(title)) 3 else 1; // 좌패딩 1 + 마커(2칸)
         const trail_cols: u32 = if (seg.has_close) 3 else 1; // ✕ 좌여백·✕·우여백
         // `segOf`의 px는 `colPx`가 `bar_x`를 이미 더한 **절대 좌표**다 — 여기에 `pb.tabs.x`를 또 더하면
-        // 제목이 탭 밖 오른쪽으로 밀린다(실제 캡처로 잡힌 회귀).
+        // 제목이 탭 밖 오른쪽으로 밀린다(실제 캡처로 잡힌 회귀). 절대 좌표라 여러 pane의 op을 한 아티팩트에
+        // 섞어도 각자 제자리에 놓인다 — 이 batch가 성립하는 근거다.
         const start_px = @as(u32, @intFromFloat(@max(seg.start_px, 0))) + lead_cols * cw;
         const end_px = @as(u32, @intFromFloat(@max(seg.end_px, 0)));
-        if (end_px <= start_px + trail_cols * cw) {
-            run_index += 1;
-            continue; // 제목이 들어갈 자리가 없다
-        }
-        ops.append(self.allocator, .{
-            .text = .{
-                .origin = .{ .x = @intCast(start_px), .y = @intCast(title_y) },
-                .runs = runs.items[run_index .. run_index + 1],
-                // 활성 탭만 또렷하게. 셀 경로의 `active_tab_fg`/`tab_fg`에 대응하는 chrome role이다 —
-                // measured는 op당 role 하나라 색을 토큰에서 받는다(비활성 색이 미세하게 달라진다).
-                .role = if (active == i) .surface_fg else .muted_fg,
-                .text_role = .control,
-                .max_width_px = end_px - start_px - trail_cols * cw,
-                // rename 중인 탭만 tail 앵커 — 긴 이름을 칠 때 caret(문자열 끝)이 세그먼트 안에 남는다.
-                .anchor = if (editing_tab != null and editing_tab.? == i) .tail else .head,
-            },
-        }) catch return;
-        run_index += 1;
+        if (end_px <= start_px + trail_cols * cw) continue; // 제목이 들어갈 자리가 없다
+        const owned = self.allocator.dupe(u8, body) catch return;
+        batch.entries.append(self.allocator, .{
+            .text = owned,
+            .origin = .{ .x = @intCast(start_px), .y = @intCast(title_y) },
+            .max_width_px = end_px - start_px - trail_cols * cw,
+            .active = active == i,
+            .editing = editing_tab != null and editing_tab.? == i,
+        }) catch {
+            self.allocator.free(owned);
+            return;
+        };
     }
-    if (ops.items.len == 0) return;
+}
 
-    const fingerprint = chrome_draw_lowering.richTextFingerprint(ops.items, &tokens, cw, self.cell_height_px, @intCast(@min(bar_cols, @as(u32, std.math.maxInt(u16)))), 1, 0);
-    // pane마다 슬롯을 두지 않는다 — op origin이 절대 좌표라 한 아티팩트가 모든 pane의 탭 제목을 담을 수
-    // 있지만, 이 함수는 pane 루프 안에서 불리므로 **마지막 pane의 것만** 캐시에 남는다. split이 여럿이면
-    // 캐시가 매 pane마다 갈리므로, 그 경우는 miss가 정상이고 단일 pane(대다수)에서 hit한다.
+/// batch에 쌓인 모든 pane의 탭 제목을 **한 번에** 셰이핑해 발행한다. pane 루프가 끝난 직후에 부른다 —
+/// 그 자리가 예전에 pane마다 발행하던 순서(탭 제목 → floating/sticky 오버레이)를 그대로 보존한다.
+pub fn flushPaneTabTitles(
+    self: *AppSession,
+    batch: *TabTitleBatch,
+    collected: *std.ArrayList(CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+) void {
+    const entries = batch.entries.items;
+    if (entries.len == 0) return;
+    const tokens = self.buildChromeTokens();
+
+    // run 배열을 **길이가 확정된 상태로 한 번에** 잡는다. ArrayList로 키우면 realloc이 앞서 만든 op의
+    // run 슬라이스를 죽이므로, run을 전부 확정한 뒤에야 op이 그것을 가리킬 수 있다.
+    const runs = self.allocator.alloc(chrome.draw.Run, entries.len) catch return;
+    defer self.allocator.free(runs);
+    const ops = self.allocator.alloc(chrome.draw.Op, entries.len) catch return;
+    defer self.allocator.free(ops);
+    for (entries, runs) |e, *run| run.* = .{ .text = e.text };
+    for (entries, ops, 0..) |e, *op, i| op.* = .{
+        .text = .{
+            .origin = e.origin,
+            .runs = runs[i .. i + 1],
+            // 활성 탭만 또렷하게. 셀 경로의 `active_tab_fg`/`tab_fg`에 대응하는 chrome role이다 —
+            // measured는 op당 role 하나라 색을 토큰에서 받는다(비활성 색이 미세하게 달라진다).
+            .role = if (e.active) .surface_fg else .muted_fg,
+            .text_role = .control,
+            .max_width_px = e.max_width_px,
+            // rename 중인 탭만 tail 앵커 — 긴 이름을 칠 때 caret(문자열 끝)이 세그먼트 안에 남는다.
+            .anchor = if (e.editing) .tail else .head,
+        },
+    };
+
+    // 그리드 크기(cols·rows)는 이 소비처의 키에 싣지 않는다. 제목 op은 창 절대 좌표와 픽셀 폭을 이미
+    // 담고 있어 pane이 리사이즈되면 origin·max_width가 먼저 달라지고, 폰트가 바뀌면 셀 크기 인자가 잡는다.
+    // 창 전체 cols를 넣으면 이 batch에 속하지 않은 pane의 폭 변화까지 키를 흔들어 재셰이핑만 늘어난다.
+    const fingerprint = chrome_draw_lowering.richTextFingerprint(ops, &tokens, self.cell_width_px, self.cell_height_px, 0, 0, 0);
     if (!MeasuredTextCache.hit(self.pane_tab_title_text_cache, fingerprint)) {
-        var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops.items, &tokens, cw, .{
+        var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops, &tokens, self.cell_width_px, .{
             .family = self.appearance.font.family,
             .fallback = self.appearance.font.fallback,
         }) catch return;
@@ -616,6 +661,8 @@ pub fn collectPaneTabTitles(
     }
     if (self.pane_tab_title_text_cache) |*cache| {
         const dl = chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return;
+        // dest가 `.sidebar_search`인 것은 이름과 달리 "origin 0,0 · clip 없음"이라는 배치 규약을 고른 것이다
+        // (op origin이 이미 창 절대 좌표라 여기서 더 옮길 것이 없다). 이름은 measured dest를 정리할 때 함께 손본다.
         self.collectMeasuredTextFromCache(collected, dl, cache, builder, .{ .sidebar_search = .{
             .origin_x = 0,
             .origin_y = 0,
@@ -1947,4 +1994,54 @@ pub fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout
     self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
     self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
     return term.surfaceId();
+}
+
+// 이 테스트가 증명하는 것: `appendPaneTabTitles`가 제목 문자열의 **소유 복사본**을 batch에 넣는다는 것.
+//
+// 왜 터미널에서 중요한가 — pane 루프는 pane마다 제목 버퍼(`titles`)를 만들고 그 반복이 끝나면 해제한다.
+// 실제 셰이핑·발행은 루프가 끝난 뒤 `flushPaneTabTitles`가 **한 번에** 하므로, batch가 원본을 참조만 하면
+// 발행 시점에는 이미 죽은 메모리를 읽는다. 이 batch 구조 자체가 "다중 pane에서 탭 제목이 사라지던" 회귀
+// (단일 슬롯 캐시를 pane마다 store해 앞 pane의 아티팩트가 해제되던 것)를 고치며 세운 것이라, 복사 계약이
+// 무너지면 같은 증상이 다른 원인으로 되돌아온다. testing allocator가 누수·이중 해제도 함께 잡는다.
+test "탭 제목 batch는 원본이 해제돼도 유효한 소유 복사본을 든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 탭 바 기하는 셀 크기에서 나온다 — 헤드리스 init은 렌더 상태를 세우지 않으므로 여기서 준다.
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+
+    const leaf = activePane(session);
+    // 바 기하는 **직접** 준다. 헤드리스 init에는 창 크기가 없어 `paneBar`가 null을 내는데, 이 테스트가 고정하려는
+    // 것은 레이아웃이 아니라 문자열 수명이므로 실제 창에 의존하지 않는 편이 낫다(그래야 SKIP으로 조용히 죽지 않는다).
+    const pb: PaneBar = .{
+        .full = .{ .x = 0, .y = 0, .w = 800, .h = 40 },
+        .tabs = .{ .x = 0, .y = 0, .w = 800, .h = 40 },
+        .label_cols = 0,
+        .grip_cols = 0,
+    };
+
+    var batch: TabTitleBatch = .{};
+    defer batch.deinit(allocator);
+
+    // pane 루프가 만드는 것과 **같은 수명**의 임시 제목 버퍼: append가 끝나면 그 반복과 함께 사라진다.
+    {
+        const transient = try allocator.dupe(u8, "세션호스트");
+        defer allocator.free(transient);
+        const titles = [_][]const u8{transient};
+        appendPaneTabTitles(session, &batch, leaf, pb, &titles, null, pb.full);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), batch.entries.items.len);
+    try std.testing.expectEqualStrings("세션호스트", batch.entries.items[0].text);
 }

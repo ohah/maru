@@ -20028,6 +20028,10 @@ pub const AppSession = struct {
             if (builtin.os.tag == .macos) {
                 // grip/label/탭바/비활성/floating/활성 collect가 공유하는 finishPane용 builder(단일 출처 paneFrameBuilder).
                 const pane_frame_builder = pane_ops.paneFrameBuilder(self);
+                // 모든 pane의 탭 제목을 여기 모아 **루프가 끝난 뒤 한 번** 셰이핑한다. pane마다 발행하면 뒤 pane의
+                // 캐시 store가 앞 pane이 이미 넘긴 아티팩트를 해제해 제목이 사라진다(`pane_ops.TabTitleBatch` doc).
+                var tab_title_batch: pane_ops.TabTitleBatch = .{};
+                defer tab_title_batch.deinit(self.allocator);
 
                 // 1) 각 pane의 탭 바 제목 frame — Term 제목들을 가로 등폭 탭으로(buildPaneTabBarDrawList). 활성 panel
                 //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
@@ -20133,7 +20137,7 @@ pub const AppSession = struct {
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (pane_ops.paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, pane_ops.paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
-                    pane_ops.collectPaneTabTitles(self, &collected, pane_frame_builder, lr.leaf, pb, titles.items, editing_tab, pb.full, bar_cols);
+                    pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
                     // 1c) Phase 7e-1b: browser 웹 패널 주소창 밴드 — 이 pane의 **활성 탭**이 browser web Term이면 탭 바 바로
                     //     아래에 읽기전용 URL 밴드(배경 quad + URL 셀)를 그린다. collectWebSurfaces inset이 browser면 top을
@@ -20259,6 +20263,9 @@ pub const AppSession = struct {
                         }
                     }
                 }
+                // 모든 pane의 탭 제목을 한 아티팩트로 발행한다. 자리가 pane 루프 **직후**인 것은 예전에 pane마다
+                // 발행하던 순서(탭 제목 → 도크·floating·sticky 오버레이)를 그대로 두기 위해서다.
+                pane_ops.flushPaneTabTitles(self, &tab_title_batch, &collected, pane_frame_builder);
 
                 // FP3 파일 도크 탭 제목+활성 파일 경로. 배경 quad와 같은 geometry origin에 2행을 배치한다.
                 if (dock_ops.dockVisible(self)) {

@@ -1125,18 +1125,36 @@ pub const RemoteRuntime = struct {
     ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
         // Revoke/ended events fence mutation. Consume already-buffered authority events before
         // advancing any input/control that was accepted on a previous UI turn.
-        var events = try self.drainObservationEvents();
+        var events = self.drainObservationEvents() catch |err| {
+            if (builtin.is_test) std.debug.print("remote runtime pump stage=events-before error={s}\n", .{@errorName(err)});
+            return err;
+        };
         if (events.ended) return .ended;
         // 마지막 non-blocking input 뒤에 새 입력/RPC가 영원히 없더라도 frame-loop pump가 연결의 bounded pending frame을
         // 계속 DONTWAIT로 진전시킨다. Client 하나를 여러 runtime이 공유하므로 어느 runtime pump가 호출해도 충분하다.
-        if (!(try self.pumpQueuedInput()))
+        if (!(self.pumpQueuedInput() catch |err| {
+            if (builtin.is_test) std.debug.print("remote runtime pump stage=input error={s}\n", .{@errorName(err)});
+            return err;
+        }))
             return if (events.metadata) .metadata else .idle;
-        _ = try self.attachment.pumpPendingOutput(self.client);
-        try self.pumpResyncIntent();
-        switch (try self.attachment.pumpScreen(self.io)) {
+        _ = self.attachment.pumpPendingOutput(self.client) catch |err| {
+            if (builtin.is_test) std.debug.print("remote runtime pump stage=output error={s}\n", .{@errorName(err)});
+            return err;
+        };
+        self.pumpResyncIntent() catch |err| {
+            if (builtin.is_test) std.debug.print("remote runtime pump stage=resync error={s}\n", .{@errorName(err)});
+            return err;
+        };
+        switch (self.attachment.pumpScreen(self.io) catch |err| {
+            if (builtin.is_test) std.debug.print("remote runtime pump stage=screen error={s}\n", .{@errorName(err)});
+            return err;
+        }) {
             .idle => {
                 // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
-                const after_read = try self.drainObservationEvents();
+                const after_read = self.drainObservationEvents() catch |err| {
+                    if (builtin.is_test) std.debug.print("remote runtime pump stage=events-after-idle error={s}\n", .{@errorName(err)});
+                    return err;
+                };
                 if (after_read.ended) return .ended;
                 events.metadata = after_read.metadata or events.metadata;
                 return if (events.metadata) .metadata else .idle;
@@ -1147,7 +1165,10 @@ pub const RemoteRuntime = struct {
             // activity on this connection.
             .recovery_commit_pending, .terminal => return error.ProtocolError,
         }
-        const after_screen = try self.drainObservationEvents();
+        const after_screen = self.drainObservationEvents() catch |err| {
+            if (builtin.is_test) std.debug.print("remote runtime pump stage=events-after-screen error={s}\n", .{@errorName(err)});
+            return err;
+        };
         if (after_screen.ended) return .ended;
         return .screen;
     }

@@ -2195,7 +2195,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR3a-2c3d C3-1"},
         });
         const run_event_c3_1_runtime_tests = b.addRunArtifact(event_c3_1_runtime_tests);
-        run_event_c3_1_runtime_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_1_runtime_tests.addArg("--maru-expect-tests=3");
         run_event_c3_1_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c3_1_step.dependOn(&run_event_c3_1_runtime_tests.step);
 

@@ -163,6 +163,7 @@ pub const EventReleaseContinuation = struct {
 };
 
 pub const EventReleaseReadiness = enum(u8) { live, busy, terminal };
+pub const EventAttachmentReadiness = enum(u8) { ready, busy, invalid };
 
 pub const EventPinRecoveryPermit = struct {
     event: EventGenerationReceipt,
@@ -1140,6 +1141,30 @@ pub const AttachmentCleanupRegistry = struct {
             .live => .live,
             .reserved => .busy,
             .idle, .releasing, .terminal => .terminal,
+        };
+    }
+
+    /// Canonical teardown projection for the inline attachment owner. The caller's generation is
+    /// only compared with registry state; it never authorizes cleanup or a lifecycle transition.
+    pub fn eventAttachmentReadiness(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        owner_addr: usize,
+        generation_mirror: u64,
+    ) Error!EventAttachmentReadiness {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle)) return error.InvalidState;
+        return switch (authority.lifecycle) {
+            .idle, .terminal => if (generation_mirror == 0) .ready else .invalid,
+            .reserved => .busy,
+            .live, .releasing => if (generation_mirror != 0 and
+                generation_mirror == authority.active_generation and
+                owner_addr != 0 and owner_addr == authority.active_owner_addr)
+                .busy
+            else
+                .invalid,
         };
     }
 

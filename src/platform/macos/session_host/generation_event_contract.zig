@@ -68,6 +68,23 @@ pub fn pristineExact(owner: *const EventOwner) bool {
     return std.mem.allEqual(u8, &owner.storage, 0);
 }
 
+/// Attachment-local drift check only. The binding registry remains the canonical event authority;
+/// callers must not use this projection to free, drop, or settle registry state.
+pub fn liveGenerationMatches(owner: *const EventOwner, generation: u64) bool {
+    if (generation == 0) return false;
+    const state = internalConst(owner);
+    return lifecycleRawValid(&state.lifecycle) and state.lifecycle == .live and
+        state.self_addr == @intFromPtr(owner) and
+        state.identity.receipt.owner_addr == @intFromPtr(owner) and
+        state.identity.receipt.event_generation == generation and
+        std.mem.eql(u8, &state.seal, &sealFor(state));
+}
+
+/// A settled local envelope is necessary, but never sufficient, for attachment teardown.
+pub fn settledForAttachment(owner: *const EventOwner) bool {
+    return pristineExact(owner) or terminalExact(owner);
+}
+
 fn terminalExact(owner: *const EventOwner) bool {
     const state = internalConst(owner);
     if (!lifecycleRawValid(&state.lifecycle) or state.lifecycle != .terminal or

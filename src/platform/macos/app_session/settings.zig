@@ -1383,6 +1383,8 @@ pub fn closeContextMenu(self: *AppSession) void {
     self.view_options_menu = false;
     self.terminal_context_menu = false;
     self.branch_menu_open = false; // 목록 텍스트는 다음 요청까지 살려 둔다(재열기 비용 절약)
+    self.resource_menu_open = false; // 얼린 행 순서도 여기서 놓는다(다음에 열 때 다시 정렬한다)
+    self.resource_menu_len = 0;
     clearFileContentMenu(self);
     self.metal_dirty = true;
 }
@@ -1398,7 +1400,16 @@ pub fn clearFileContentMenu(self: *AppSession) void {
 /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·bg_first..=배경 tint 프리셋·accent_first..=좌측 막대색 프리셋.
 /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
 pub fn acceptContextMenu(self: *AppSession) void {
-    // 브랜치 목록이 가장 먼저다 — 다른 메뉴 상태와 배타이고, 고른 이름을 터미널에 넣고 닫는다.
+    // 리소스 팝오버 — 고른 행의 Term으로 점프하고 닫는다. 점프는 `activateSurfaceById` 단일 출처
+    // (알림 클릭이 쓰는 그 경로: switchTab → focusPaneByPtr → focusTerm). 닫힌 탭이면 false라 무동작.
+    if (self.resource_menu_open) {
+        const selected = self.chrome_host.context_menu.selected;
+        const key: ?u64 = if (selected < self.resource_menu_len) self.resource_menu_keys[selected] else null;
+        closeContextMenu(self); // 먼저 닫는다 — 점프 뒤 메뉴가 남지 않게
+        if (key) |k| _ = self.activateSurfaceById(k);
+        return;
+    }
+    // 브랜치 목록이 그다음이다 — 다른 메뉴 상태와 배타이고, 고른 이름을 터미널에 넣고 닫는다.
     if (self.branch_menu_open) {
         const selected = self.chrome_host.context_menu.selected;
         closeContextMenu(self); // 먼저 닫는다 — 주입한 명령이 메뉴에 가리지 않게

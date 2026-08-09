@@ -841,6 +841,53 @@ pub const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에
 const resource_poll_interval_ms: u32 = 1000;
 /// 한 Term 트리에서 가져올 표본 상한. 폭주 방어 — fork 폭탄이나 깊은 트리가 tick을 붙잡지 않게 한다.
 const max_resource_samples_per_term: usize = 48;
+/// 리소스 팝오버가 띄우는 최대 행 수(= 최대 Term 수). 라벨은 공유 버퍼(`context_menu_items_buf`)를 쓰므로
+/// 그 크기를 넘으면 버퍼 밖에 쓴다 — 아래 comptime이 그걸 막는다. 넘치는 탭은 무거운 순 상위만 보인다.
+const max_resource_rows: usize = 12;
+/// 한 행 문자열의 바이트 상한. `탭 › 팬`(UTF-8, 한 글자 최대 3바이트) + 고정 폭 숫자 + 구분자.
+const resource_row_max_bytes: usize = 256;
+/// 행에서 **이름이 쓸 수 있는 표시 칸**. 숫자 열은 고정 폭이라(§4.1) 이름만 예산을 먹는다. 넘치면 EAW 절단.
+const resource_row_name_cols: u32 = 28;
+
+/// `bytes`를 표시 칸 `max_cols` 안으로 줄여 `buf`에 쓴다(EAW 기준 — 한글 한 자 2칸). 넘치면 끝에 `…`.
+/// `overlay_input.truncateToCols`는 arena를 받는데 여기는 tick 경로라 할당을 피한다 — 같은 규칙을 버퍼에 쓴다.
+fn truncateColsInto(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
+    if (chrome.components.overlay_input.displayCols(bytes) <= max_cols) {
+        const n = @min(bytes.len, buf.len);
+        @memcpy(buf[0..n], bytes[0..n]);
+        return buf[0..n];
+    }
+    if (max_cols == 0) return buf[0..0];
+    const budget = max_cols - 1; // `…` 1칸
+    const view = std.unicode.Utf8View.init(bytes) catch return buf[0..0];
+    var it = view.iterator();
+    var cols: u32 = 0;
+    var end: usize = 0;
+    while (it.nextCodepoint()) |cp| {
+        const w = @max(1, maru.terminal.width.cellWidth(cp));
+        if (cols + w > budget) break;
+        cols += w;
+        end = it.i;
+    }
+    const n = @min(end, buf.len -| 3);
+    @memcpy(buf[0..n], bytes[0..n]);
+    const ell = "\u{2026}";
+    if (n + ell.len <= buf.len) {
+        @memcpy(buf[n..][0..ell.len], ell);
+        return buf[0 .. n + ell.len];
+    }
+    return buf[0..n];
+}
+
+/// `src`를 `dst`에 담기는 만큼만 복사하고 쓴 바이트 수를 돌려준다(고정 버퍼 조립용 — 넘치면 자른다).
+fn copyClamped(dst: []u8, src: []const u8) usize {
+    const n = @min(dst.len, src.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
+}
+/// 팝오버가 **열려 있는 동안**의 표본 주기. 닫힘(1초)보다 당긴다 — 열어 두고 보는데 값이 안 변하면 멈춘 줄 안다.
+/// 더 당기지 않는 이유: CPU%는 차분이라 창이 짧을수록 값이 튀고, 사람이 못 읽는 속도로 재면 syscall만 는다.
+const resource_open_poll_interval_ms: u32 = 500;
 
 /// 단조 시계(ms). CPU%는 차분이라 **tick 개수가 아니라 벽시계**로 재야 한다 — 프레임 루프가 흔들리면
 /// `ticks/hz`가 실제 경과와 어긋나고, 하필 머신이 바쁠 때(= 사용자가 CPU%를 보는 때) 틀린다.
@@ -2296,6 +2343,12 @@ pub const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
 /// 메뉴가 화면을 넘어 쓸모가 없어진다. 넘치는 만큼은 터미널에서 `git branch`로 보는 게 맞다.
 const max_branch_menu_items: usize = 12;
 const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
+comptime {
+    // 라벨 버퍼는 **공유**다(`context_menu_items_buf`). 그룹 메뉴엔 이 가드가 있었는데 브랜치·리소스엔 없었다 —
+    // 넘치면 버퍼 밖에 쓴다. 상한을 늘릴 때 여기서 멈추게 한다.
+    if (max_branch_menu_items > ctx_menu_count) @compileError("branch menu exceeds context_menu_items_buf");
+    if (max_resource_rows > ctx_menu_count) @compileError("resource rows exceed context_menu_items_buf");
+}
 
 // 그룹 헤더 우클릭 메뉴(context_menu_target == .group) 인덱스 — 워크스페이스 카드 메뉴와 **별개의 compact 레이아웃**.
 // 헤더는 그룹 스코프 액션만 노출한다(SG5-2-header): 0=Rename(그룹 이름 편집 = startRename(.group) — 헤더 더블클릭과 같은
@@ -4027,6 +4080,17 @@ pub const AppSession = struct {
     /// 표시 문자열 캐시. **이게 바뀔 때만** 재렌더한다 — 원값이 흔들려도 글자가 같으면 매초 다시 그리지 않는다.
     resource_text_buf: [maru.session.resource_usage.text_max_bytes]u8 = undefined,
     resource_text_len: usize = 0,
+    /// 탭별 최신 읽기값(팝오버 행의 값 출처). 키는 Term의 surface_id다.
+    resource_rows: [max_resource_rows]maru.session.resource_usage.GroupReading = undefined,
+    resource_rows_len: usize = 0,
+    /// 팝오버가 열려 있는가. `closeContextMenu`가 내린다(다른 메뉴 종류 플래그와 같은 규율).
+    resource_menu_open: bool = false,
+    /// **열 때 고정한 행 순서**(surface_id). 값은 갱신하되 순서·개수는 얼린다 — 무거운 순 재정렬이 일어나면
+    /// 누르려던 줄이 손가락 밑에서 다른 탭이 된다(docs/status-bar.md §6).
+    resource_menu_keys: [max_resource_rows]u64 = undefined,
+    resource_menu_len: usize = 0,
+    /// 행 문자열 저장소. `context_menu_items_buf`는 슬라이스만 들므로 실제 바이트는 여기 산다.
+    resource_menu_text: [max_resource_rows][resource_row_max_bytes]u8 = undefined,
     /// 활동 시각 재렌더 tick 카운터(agent_age_repaint_interval_ms).
     agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
@@ -15446,7 +15510,8 @@ pub const AppSession = struct {
     /// 상태바가 안 보이면(설정 off·quick terminal) **아예 재지 않는다** — 안 보이는 UI에 syscall을 쓰지 않는다.
     fn pollResourceUsage(self: *AppSession) void {
         self.resource_poll_ticks += 1;
-        if (self.resource_poll_ticks < self.ticksForMs(resource_poll_interval_ms)) return;
+        const interval_ms = if (self.resource_menu_open) resource_open_poll_interval_ms else resource_poll_interval_ms;
+        if (self.resource_poll_ticks < self.ticksForMs(interval_ms)) return;
         self.resource_poll_ticks = 0;
         if (!self.surface_initialized) return;
         if (self.statusBarHeightPx() == 0) { // 단일 게이트: chrome_minimal + status-bar.show
@@ -15455,15 +15520,24 @@ pub const AppSession = struct {
         }
 
         var samples: [max_resource_samples_per_term * 4]maru.session.resource_usage.Sample = undefined;
+        var groups: [max_resource_rows]maru.session.resource_usage.Group = undefined;
         var n: usize = 0;
+        var group_n: usize = 0;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.kind != .terminal) continue;
                     if (!term.rt.live_initialized or term.rt.terminated) continue;
                     if (n >= samples.len) break;
+                    const start = n;
                     const room = @min(max_resource_samples_per_term, samples.len - n);
                     n += self.backendFor(term).resourceSamples(term.rt.handle, samples[n..][0..room]);
+                    // 표본이 0이어도 **행은 남긴다** — 탭은 존재하므로(값만 `—`). 행 상한을 넘으면 더 담지
+                    // 않는다(공유 라벨 버퍼 크기 — comptime 가드가 상한을 못 박는다).
+                    if (group_n < groups.len) {
+                        groups[group_n] = .{ .key = term.surfaceId(), .start = start, .len = n - start };
+                        group_n += 1;
+                    }
                 }
             }
         }
@@ -15473,12 +15547,22 @@ pub const AppSession = struct {
             return;
         }
 
-        const reading = self.resource_meter.update(self.allocator, samples[0..n], monotonicMs()) orelse {
+        const reading = self.resource_meter.updateGrouped(
+            self.allocator,
+            samples[0..n],
+            monotonicMs(),
+            groups[0..group_n],
+            &self.resource_rows,
+        ) orelse {
+            self.resource_rows_len = 0;
             // 첫 표본·긴 공백 — CPU%를 낼 수 없으면 **항목 자체를 내지 않는다**(메모리만 먼저 그리면 폭이
             // 변해 좌측 경로가 흔들린다).
             self.clearResourceReading();
             return;
         };
+
+        self.resource_rows_len = @min(group_n, self.resource_rows.len);
+        if (self.resource_menu_open) self.refreshResourceMenuRows(); // 열려 있으면 값만 다시 그린다(순서·개수 고정)
 
         var buf: [maru.session.resource_usage.text_max_bytes]u8 = undefined;
         const text = maru.session.resource_usage.format(&buf, reading);
@@ -15489,6 +15573,117 @@ pub const AppSession = struct {
         self.resource_text_len = text.len;
         self.resource_reading = reading;
         self.metal_dirty = true;
+    }
+
+    /// 리소스 팝오버를 연다 — 상태바 항목에 앵커한 탭별 목록(docs/status-bar.md §6 "리소스 팝오버").
+    ///
+    /// **열 때 행 집합과 순서를 정하고 닫힐 때까지 얼린다.** 무거운 순으로 정렬하는데 갱신마다 다시 정렬하면
+    /// 누르려던 줄이 손가락 밑에서 다른 탭이 되고, `context_menu.show()`를 다시 부르면 선택도 0으로 튕긴다.
+    fn openResourceMenu(self: *AppSession) void {
+        if (self.resource_rows_len == 0) {
+            self.showNotice("아직 측정된 터미널이 없습니다");
+            return;
+        }
+        // **앵커가 있어야 연다** — 브랜치 메뉴와 같은 규율(바가 사라진 뒤 열면 창 바닥에 붙는다).
+        var anchor_x: f64 = 0;
+        var anchor_y: f64 = 0;
+        var anchored = false;
+        for (self.statusBarTree().entries) |e| {
+            if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
+            anchor_x = e.rect.x;
+            anchor_y = e.rect.y;
+            anchored = true;
+        }
+        if (!anchored) return;
+
+        // 무거운 순 정렬 — 값이 없는 행(표본 0)은 뒤로.
+        var order: [max_resource_rows]usize = undefined;
+        var count: usize = 0;
+        for (0..self.resource_rows_len) |i| {
+            order[count] = i;
+            count += 1;
+        }
+        const Ctx = struct {
+            rows: []const maru.session.resource_usage.GroupReading,
+            fn heavier(ctx: @This(), a: usize, b: usize) bool {
+                const av = if (ctx.rows[a].reading) |r| r.footprint_bytes else 0;
+                const bv = if (ctx.rows[b].reading) |r| r.footprint_bytes else 0;
+                return av > bv;
+            }
+        };
+        std.sort.pdq(usize, order[0..count], Ctx{ .rows = self.resource_rows[0..self.resource_rows_len] }, Ctx.heavier);
+
+        settings_ops.closeContextMenu(self);
+        self.resource_menu_len = 0;
+        for (order[0..count]) |row_index| {
+            if (self.resource_menu_len >= max_resource_rows) break;
+            self.resource_menu_keys[self.resource_menu_len] = self.resource_rows[row_index].key;
+            self.resource_menu_len += 1;
+        }
+        self.resource_menu_open = true;
+        self.refreshResourceMenuRows();
+        self.chrome_host.context_menu.show(@intFromFloat(anchor_x), @intFromFloat(anchor_y), self.resource_menu_len);
+        self.metal_dirty = true;
+    }
+
+    /// 얼린 행 순서 그대로 **값만** 다시 조립한다(`show`를 다시 부르지 않는다 — 선택이 리셋된다).
+    fn refreshResourceMenuRows(self: *AppSession) void {
+        const ru = maru.session.resource_usage;
+        for (0..self.resource_menu_len) |i| {
+            const key = self.resource_menu_keys[i];
+            // 이 행의 최신 값을 키로 찾는다. 그 사이 탭이 죽었으면 못 찾는다 → `—`(갈 곳이 아님을 보인다).
+            var reading: ?ru.Reading = null;
+            for (self.resource_rows[0..self.resource_rows_len]) |row| {
+                if (row.key == key) {
+                    reading = row.reading;
+                    break;
+                }
+            }
+            self.context_menu_items_buf[i] = self.formatResourceRow(i, key, reading);
+        }
+        self.context_menu_items_len = self.resource_menu_len;
+    }
+
+    /// 한 행 = `탭 › 팬` + 고정 폭 숫자. 라벨 조립은 **알림과 같은 함수**(`notificationLocation`)를 쓴다 —
+    /// 구분자 규약이 앱 전체에서 하나여야 하고, 두 라벨이 같을 때 하나만 쓰는 처리도 거기 있다.
+    /// 패딩은 **EAW 표시 칸** 기준이다(한글 한 자 = 2칸) — 글자 수로 채우면 한글 탭에서 열이 어긋난다.
+    fn formatResourceRow(self: *AppSession, slot: usize, key: u64, reading: ?maru.session.resource_usage.Reading) []const u8 {
+        const ru = maru.session.resource_usage;
+        var loc_buf: [notification_location_buf_len]u8 = undefined;
+        const label = self.resourceRowLabel(&loc_buf, key);
+
+        var value_buf: [ru.text_max_bytes]u8 = undefined;
+        const value: []const u8 = if (reading) |r| ru.format(&value_buf, r) else "—";
+
+        // 이름 예산 = 전체 폭에서 숫자 열과 간격을 뺀 만큼. 넘치면 EAW 절단(`…`).
+        var name_buf: [resource_row_max_bytes]u8 = undefined;
+        const shown = truncateColsInto(&name_buf, label, resource_row_name_cols);
+        const name_cols = chrome.components.overlay_input.displayCols(shown);
+
+        var out = &self.resource_menu_text[slot];
+        var used: usize = 0;
+        used += copyClamped(out[used..], shown);
+        var pad = resource_row_name_cols -| name_cols;
+        while (pad > 0 and used < out.len) : (pad -= 1) {
+            out[used] = ' ';
+            used += 1;
+        }
+        used += copyClamped(out[used..], "  ");
+        used += copyClamped(out[used..], value);
+        return out[0..used];
+    }
+
+    /// 이 행이 가리키는 Term의 `탭 › 팬` 라벨. 못 찾으면(그 사이 닫힘) 마지막으로 알던 이름이 없으므로 물음표.
+    fn resourceRowLabel(self: *AppSession, buf: []u8, key: u64) []const u8 {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.surfaceId() != key) continue;
+                    return notificationLocation(buf, tab, term);
+                }
+            }
+        }
+        return "(닫힌 탭)";
     }
 
     fn clearResourceReading(self: *AppSession) void {
@@ -16040,6 +16235,16 @@ pub const AppSession = struct {
         }
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
+        // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
+        // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
+        // 생기고 항목도 그때 서므로 첫 tick에는 앵커가 없다. 가짜 행을 심지 않는다 — 실제 표본으로 열린다.
+        if (!self.resource_menu_open and std.c.getenv("MARU_FORCE_RESOURCE_MENU") != null) {
+            for (self.statusBarTree().entries) |e| {
+                if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
+                self.openResourceMenu();
+                break;
+            }
+        }
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
     }
 
@@ -18555,7 +18760,7 @@ pub const AppSession = struct {
             .git_branch => settings_ops.requestBranchMenu(self), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
             // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
-            .resource => {},
+            .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
         }
         self.metal_dirty = true;
     }
@@ -18566,7 +18771,7 @@ pub const AppSession = struct {
         return switch (id) {
             // 브랜치도 이제 누를 수 있다 — 목록이 생겼다(§6에서 내려온 항목).
             .notifications, .running_agents, .blocked_agents, .cwd, .git_branch => true,
-            .resource => false, // 표시 전용 — 열 대상이 없다
+            .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
         };
     }
 
@@ -48257,6 +48462,139 @@ test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
         // 글자가 바뀌었다면 재렌더가 **있어야** 한다(반대 방향도 계약이다).
         try std.testing.expect(session.metal_dirty);
     }
+}
+
+// SB-P: 팝오버는 **열 때 순서·개수를 얼리고 값만 갱신한다.** 무거운 순 정렬이라 갱신마다 다시 정렬하면
+// 누르려던 줄이 손가락 밑에서 다른 탭이 되고, `show()`를 다시 부르면 선택도 0으로 튕긴다(§6).
+test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 행 두 개를 심는다(가벼운 것이 먼저 — 정렬이 실제로 도는지 보려고).
+    session.resource_rows[0] = .{ .key = 111, .reading = .{ .footprint_bytes = 10, .cpu_permille = 0 } };
+    session.resource_rows[1] = .{ .key = 222, .reading = .{ .footprint_bytes = 900, .cpu_permille = 0 } };
+    session.resource_rows_len = 2;
+
+    // 상태바 항목이 서야 앵커가 생긴다 — 표시 문자열을 심고 tree를 세운다.
+    const text = "  512 MB ·   10%";
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    // **앵커는 렌더 경로가 발행한다** — `statusBarTree()`는 읽기만 한다. 실제로 한 번 그려야 rect가 생긴다.
+    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+
+    session.openResourceMenu();
+    try std.testing.expect(session.resource_menu_open);
+    try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
+    // 무거운 순 — 900이 먼저다.
+    try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
+    try std.testing.expectEqual(@as(u64, 111), session.resource_menu_keys[1]);
+
+    // 값이 뒤집혀도(111이 무거워져도) **순서는 그대로**여야 한다.
+    session.resource_rows[0] = .{ .key = 111, .reading = .{ .footprint_bytes = 9_000, .cpu_permille = 0 } };
+    session.refreshResourceMenuRows();
+    try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
+    try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
+    try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
+}
+
+// SB-P: 그 사이 죽은 탭은 **값이 `—`**다. 값이 멈춘 채 두면 살아 있는 것처럼 보이는데, 눌러도 아무 일도
+// 안 일어난다 — §4가 금지한 "눌리는 것처럼 보이는데 아무 일도 안 하는" 상태다.
+test "SB-P: 사라진 탭 행은 숫자 대신 값 없음으로 바뀐다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    session.resource_rows[0] = .{ .key = 777, .reading = .{ .footprint_bytes = 100 * 1024 * 1024, .cpu_permille = 50 } };
+    session.resource_rows_len = 1;
+    const text = "  512 MB ·   10%";
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+    session.openResourceMenu();
+    try std.testing.expect(session.resource_menu_open); // 앵커를 못 얻으면 아래 버퍼는 미초기화다(전제)
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "100 MB") != null);
+
+    // 그 Term이 사라진다(표본에서 빠짐) — 행은 남되 값이 없어야 한다.
+    session.resource_rows_len = 0;
+    session.refreshResourceMenuRows();
+    try std.testing.expectEqual(@as(usize, 1), session.context_menu_items_len); // 행은 유지(인덱스가 밀리면 안 된다)
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "—") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "100 MB") == null);
+}
+
+// SB-P 적대적: **한글 탭 이름에서 열이 어긋나면 안 된다.** 패딩을 글자 수로 하면 한글 한 자가 2칸이라
+// 숫자 열이 밀린다. EAW 기준이어야 모든 행의 숫자가 같은 칸에서 시작한다.
+test "SB-P: 한글 탭 이름이 섞여도 숫자 열이 같은 칸에서 시작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const ru = maru.session.resource_usage;
+    const reading: ru.Reading = .{ .footprint_bytes = 100 * 1024 * 1024, .cpu_permille = 50 };
+    // 라벨을 직접 조립해 폭만 본다(실 Term 없이 — 이름 출처는 다른 테스트가 덮는다).
+    var ascii_buf: [resource_row_max_bytes]u8 = undefined;
+    var cjk_buf: [resource_row_max_bytes]u8 = undefined;
+    const ascii_row = buildResourceRowForTest(&ascii_buf, "work", reading);
+    const cjk_row = buildResourceRowForTest(&cjk_buf, "작업공간", reading); // 4자 = 8칸
+
+    // 숫자가 시작하는 **칸**이 같아야 한다.
+    const a_at = std.mem.indexOf(u8, ascii_row, "100 MB") orelse return error.TestUnexpectedResult;
+    const c_at = std.mem.indexOf(u8, cjk_row, "100 MB") orelse return error.TestUnexpectedResult;
+    const a_cols = chrome.components.overlay_input.displayCols(ascii_row[0..a_at]);
+    const c_cols = chrome.components.overlay_input.displayCols(cjk_row[0..c_at]);
+    try std.testing.expectEqual(a_cols, c_cols);
+    // 바이트로 재면 다르다 — 그래서 칸으로 재야 한다는 것이 이 테스트의 요점이다.
+    try std.testing.expect(a_at != c_at);
+}
+
+/// 테스트용 행 조립 — `formatResourceRow`의 폭 계산 부분만 떼어 같은 규칙으로 만든다(실 Term 불요).
+fn buildResourceRowForTest(out: []u8, label: []const u8, reading: maru.session.resource_usage.Reading) []const u8 {
+    const ru = maru.session.resource_usage;
+    var value_buf: [ru.text_max_bytes]u8 = undefined;
+    const value = ru.format(&value_buf, reading);
+    var name_buf: [resource_row_max_bytes]u8 = undefined;
+    const shown = truncateColsInto(&name_buf, label, resource_row_name_cols);
+    const name_cols = chrome.components.overlay_input.displayCols(shown);
+    var used: usize = 0;
+    used += copyClamped(out[used..], shown);
+    var pad = resource_row_name_cols -| name_cols;
+    while (pad > 0 and used < out.len) : (pad -= 1) {
+        out[used] = ' ';
+        used += 1;
+    }
+    used += copyClamped(out[used..], "  ");
+    used += copyClamped(out[used..], value);
+    return out[0..used];
 }
 
 // SB-R 적대적: **조각이 아니라 이어 붙인 경로를 본다.** 위 테스트들은 Meter를 직접 태워 계약을 검증하지만,

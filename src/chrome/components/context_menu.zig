@@ -93,7 +93,11 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     const workspace = props.workspaceRect(m);
     const bw_px: i32 = @intCast(workspace.x + workspace.w);
     const bh_px: i32 = @intCast(workspace.y + workspace.h);
-    if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
+    // 가장자리에 **딱 붙이지 않는다.** 붙이면 그쪽 테두리가 창 경계와 겹쳐 안 보이고, 반대쪽만 둥근 모서리가
+    // 보여 잘린 것처럼 읽힌다(상태바 우측 항목에 앵커한 팝오버에서 실측 — anchor 820 + box 384 > 960이라
+    // 우단에 정확히 붙었다). 한 칸이면 테두리가 드러나기에 충분하다.
+    const edge_gap: i32 = @intCast(cw);
+    if (x + @as(i32, @intCast(box_w)) > bw_px - edge_gap) x = bw_px - edge_gap - @as(i32, @intCast(box_w)); // 우단
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
     // 좌단은 사이드바 오른쪽으로 — 메뉴는 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다(좁은 창에서
     // anchor가 작거나 box가 클 때). 사이드바 슬롯 우클릭이면 anchor가 사이드바 안이라 메뉴가 그 오른쪽 가장자리에 붙는다.
@@ -223,6 +227,27 @@ test "context_menu itemAt/view: anchor 박스 안 항목 행, 화면 밖이면 c
     try std.testing.expect(out.items[1] == .fill and out.items[1].fill.role == .tab_active_bg);
     try std.testing.expect(out.items[2] == .text);
     try std.testing.expectEqualStrings("Rename", out.items[2].text.runs[0].text);
+}
+
+test "context_menu menuRect: 우단에 딱 붙이지 않는다(테두리가 창 경계에 먹히지 않게)" {
+    // 상태바 우측 항목에 앵커한 팝오버에서 실측된 상황: 앵커가 오른쪽이라 상자가 창 밖으로 넘치고,
+    // 여백 없이 clamp하면 오른쪽 테두리가 경계와 겹쳐 **한쪽만 둥근** 잘린 모양이 된다.
+    const p: props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 960,
+        .backing_height_px = 600,
+    } };
+    var state: State = .{};
+    state.show(820, 560, 1); // 오른쪽 끝 앵커
+    const items = [_][]const u8{"Maru shell        407 MB ·    0%"};
+    const rect = menuRect(&state, &items, p) orelse return error.TestUnexpectedResult;
+
+    const right = rect.x + @as(i32, @intCast(rect.w));
+    const workspace_right: i32 = @intCast(props.workspaceRect(p.metrics).x + props.workspaceRect(p.metrics).w);
+    try std.testing.expect(right < workspace_right); // 붙지 않는다
+    try std.testing.expect(right >= workspace_right - @as(i32, @intCast(p.metrics.cell_width_px)) - 1); // 그렇다고 멀지도 않다
 }
 
 test "context_menu menuRect: 좌단을 사이드바 폭으로 clamp(사이드바 chrome 위 겹침 방지)" {

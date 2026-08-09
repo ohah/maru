@@ -26,6 +26,23 @@ pub const Reading = struct {
     cpu_permille: u64,
 };
 
+/// 표본 묶음 안의 한 구간 = 한 Term. 수집 루프가 Term마다 몇 개를 채웠는지 알고 있으므로 그 경계를 그대로
+/// 넘긴다(docs/status-bar.md §6 "탭별 귀속은 지금 집계와 다르다"). **차분은 창 단위로 한 번** 하고 그 결과를
+/// 이 경계로 쪼갠다 — Term마다 Meter를 두면 pid가 Term 사이를 옮겨 갈 때 이전값이 갈라진다.
+pub const Group = struct {
+    /// 이 구간의 주인(Term의 surface_id). 계산에 쓰지 않고 호출자가 행을 되짚는 데 쓴다.
+    key: u64,
+    start: usize,
+    len: usize,
+};
+
+/// 그룹별 결과. `reading`이 null이면 **표본이 없거나 CPU를 낼 수 없는** 구간이다 —
+/// 호출자는 숫자 대신 `—`를 그린다(0은 "0 바이트를 쓰는 중"으로 읽힌다).
+pub const GroupReading = struct {
+    key: u64,
+    reading: ?Reading,
+};
+
 /// 이전 표본이 이보다 오래됐으면 버린다. 상태바를 껐다 켜거나 디스플레이가 잠들면 Δ가 분 단위가 되고,
 /// 그 비율은 "지금"이 아니라 장기 평균이라 보여 주면 거짓말이다.
 pub const max_gap_ms: u64 = 5_000;
@@ -52,44 +69,81 @@ pub const Meter = struct {
         samples: []const Sample,
         wall_ms: u64,
     ) ?Reading {
-        var footprint: u64 = 0;
-        var delta_cpu_ns: u64 = 0;
+        return self.updateGrouped(allocator, samples, wall_ms, &.{}, &.{});
+    }
 
+    /// `update`와 같되 **그룹별 합계도 채운다**(탭별 행). `groups`의 각 구간을 `samples`에서 잘라 따로 합산하고
+    /// 결과를 `out`에 같은 순서로 쓴다(`out.len >= groups.len` — 모자라면 담기는 만큼만).
+    ///
+    /// 차분은 **창 단위로 한 번**이다: pid별 이전 CPU 맵은 하나이고, 그룹은 그 위에서 잘라 낼 뿐이다.
+    /// 전체 반환값(`?Reading`)의 계약은 `update`와 같다 — 첫 표본·긴 공백·시간 정지면 null이다.
+    pub fn updateGrouped(
+        self: *Meter,
+        allocator: std.mem.Allocator,
+        samples: []const Sample,
+        wall_ms: u64,
+        groups: []const Group,
+        out: []GroupReading,
+    ) ?Reading {
         const gap_ms = wall_ms -| self.prev_wall_ms;
         // 시간이 거꾸로 갔거나(단조 시계라 없어야 하지만) 안 흘렀으면 나눌 수 없다.
         const usable_gap = self.have_prev and gap_ms > 0 and gap_ms <= max_gap_ms;
 
+        // ① 전체 합계 — **이전 맵을 아직 건드리지 않는다.** 그룹 합산도 같은 맵을 읽어야 하므로
+        //    갱신은 맨 마지막이다(먼저 덮어쓰면 그룹 델타가 전부 0이 된다).
+        var footprint: u64 = 0;
+        var delta_cpu_ns: u64 = 0;
+        for (samples) |sm| {
+            footprint +|= sm.footprint_bytes;
+            if (usable_gap) delta_cpu_ns +|= sampleDelta(self, sm);
+        }
+
+        // ② 그룹 합계 — 같은 근거(이전 맵)를 그대로 읽는다.
+        const gap_ns = @as(u64, gap_ms) * std.time.ns_per_ms;
+        for (groups, 0..) |g, i| {
+            if (i >= out.len) break;
+            const end = @min(g.start +| g.len, samples.len);
+            if (!usable_gap or g.start >= end) {
+                // 표본이 없거나 전체가 값을 못 내면 이 행도 값이 없다 — 호출자가 `—`를 그린다.
+                out[i] = .{ .key = g.key, .reading = null };
+                continue;
+            }
+            var gf: u64 = 0;
+            var gd: u64 = 0;
+            for (samples[g.start..end]) |sm| {
+                gf +|= sm.footprint_bytes;
+                gd +|= sampleDelta(self, sm);
+            }
+            out[i] = .{ .key = g.key, .reading = .{
+                .footprint_bytes = gf,
+                .cpu_permille = gd * 1000 / gap_ns,
+            } };
+        }
+
+        // ③ 이제 이전 맵을 이번 표본으로 교체한다. 실패하면 이번 창을 통째로 버린다(이전 상태 유지 — 다음에 회복).
         var next: std.AutoHashMapUnmanaged(i32, u64) = .empty;
         next.ensureTotalCapacity(allocator, @intCast(samples.len)) catch {
-            // 새 맵을 못 만들면 이번 표본을 통째로 버린다(이전 상태는 그대로 둔다 — 다음 창에서 회복).
             next.deinit(allocator);
             return null;
         };
-
-        for (samples) |s| {
-            footprint +|= s.footprint_bytes;
-            if (usable_gap) {
-                if (self.prev_cpu_ns.get(s.pid)) |before| {
-                    // 누적값이라 단조 증가여야 하지만, pid 재사용이면 거꾸로 갈 수 있다 — 그때는 0으로 본다
-                    // (남의 프로세스 시간을 우리 것으로 세지 않는다).
-                    delta_cpu_ns +|= s.cpu_ns -| before;
-                }
-                // 새로 생긴 pid는 이번 창에 기여하지 않는다(시작점을 모르므로 전체 수명이 델타로 잡힌다).
-            }
-            next.putAssumeCapacity(s.pid, s.cpu_ns);
-        }
-
+        for (samples) |sm| next.putAssumeCapacity(sm.pid, sm.cpu_ns);
         self.prev_cpu_ns.deinit(allocator);
         self.prev_cpu_ns = next;
         self.prev_wall_ms = wall_ms;
         self.have_prev = true;
 
         if (!usable_gap) return null;
-        const gap_ns = @as(u64, gap_ms) * std.time.ns_per_ms;
         return .{
             .footprint_bytes = footprint,
             .cpu_permille = delta_cpu_ns * 1000 / gap_ns,
         };
+    }
+
+    /// 한 표본의 CPU 델타(이전 맵 기준). 새 pid는 0 — 시작점을 모르므로 수명 전체가 이번 창에 잡히면 안 된다.
+    /// 누적값이 거꾸로 가면(pid 재사용) 0으로 본다 — 남의 프로세스 시간을 우리 것으로 세지 않는다.
+    fn sampleDelta(self: *const Meter, sm: Sample) u64 {
+        const before = self.prev_cpu_ns.get(sm.pid) orelse return 0;
+        return sm.cpu_ns -| before;
     }
 };
 
@@ -237,6 +291,102 @@ test "Meter: 메모리는 트리 전체의 합이다" {
         .{ .pid = 2, .footprint_bytes = 700 * 1024 * 1024, .cpu_ns = 0 },
     }, 2_000);
     try std.testing.expectEqual(@as(u64, 1000 * 1024 * 1024), r.?.footprint_bytes);
+}
+
+test "updateGrouped: 탭별 합계가 창 전체 합계와 앞뒤가 맞는다" {
+    const allocator = std.testing.allocator;
+    var m: Meter = .{};
+    defer m.deinit(allocator);
+
+    const first = [_]Sample{
+        .{ .pid = 1, .footprint_bytes = 100, .cpu_ns = 1_000_000_000 }, // 탭 A
+        .{ .pid = 2, .footprint_bytes = 200, .cpu_ns = 2_000_000_000 }, // 탭 A
+        .{ .pid = 3, .footprint_bytes = 300, .cpu_ns = 3_000_000_000 }, // 탭 B
+    };
+    const groups = [_]Group{
+        .{ .key = 10, .start = 0, .len = 2 },
+        .{ .key = 20, .start = 2, .len = 1 },
+    };
+    var rows: [2]GroupReading = undefined;
+    try std.testing.expect(m.updateGrouped(allocator, &first, 1_000, &groups, &rows) == null); // 기준선
+    // 기준선에서도 **행은 나온다**(값만 없다) — 행이 통째로 사라지면 인덱스가 밀린다.
+    try std.testing.expectEqual(@as(u64, 10), rows[0].key);
+    try std.testing.expect(rows[0].reading == null);
+
+    const second = [_]Sample{
+        .{ .pid = 1, .footprint_bytes = 100, .cpu_ns = 1_100_000_000 }, // +0.1s
+        .{ .pid = 2, .footprint_bytes = 200, .cpu_ns = 2_400_000_000 }, // +0.4s
+        .{ .pid = 3, .footprint_bytes = 700, .cpu_ns = 3_200_000_000 }, // +0.2s
+    };
+    const total = m.updateGrouped(allocator, &second, 2_000, &groups, &rows) orelse
+        return error.TestExpectedReading;
+
+    // 탭 A = pid 1+2, 탭 B = pid 3.
+    try std.testing.expectEqual(@as(u64, 300), rows[0].reading.?.footprint_bytes);
+    try std.testing.expectEqual(@as(u64, 500), rows[0].reading.?.cpu_permille); // 0.5s/1s
+    try std.testing.expectEqual(@as(u64, 700), rows[1].reading.?.footprint_bytes);
+    try std.testing.expectEqual(@as(u64, 200), rows[1].reading.?.cpu_permille); // 0.2s/1s
+
+    // **합이 맞아야 한다** — 그룹을 다 더하면 창 전체가 된다(둘이 갈리면 어느 쪽을 믿을지 모른다).
+    try std.testing.expectEqual(total.footprint_bytes, rows[0].reading.?.footprint_bytes + rows[1].reading.?.footprint_bytes);
+    try std.testing.expectEqual(total.cpu_permille, rows[0].reading.?.cpu_permille + rows[1].reading.?.cpu_permille);
+}
+
+test "updateGrouped: 표본이 없는 Term은 0이 아니라 값 없음이다" {
+    const allocator = std.testing.allocator;
+    var m: Meter = .{};
+    defer m.deinit(allocator);
+
+    const samples = [_]Sample{.{ .pid = 1, .footprint_bytes = 100, .cpu_ns = 0 }};
+    const groups = [_]Group{
+        .{ .key = 10, .start = 0, .len = 1 },
+        .{ .key = 20, .start = 1, .len = 0 }, // host-backed·방금 만든 탭 — 표본 0
+    };
+    var rows: [2]GroupReading = undefined;
+    _ = m.updateGrouped(allocator, &samples, 1_000, &groups, &rows);
+    const second = [_]Sample{.{ .pid = 1, .footprint_bytes = 100, .cpu_ns = 100_000_000 }};
+    _ = m.updateGrouped(allocator, &second, 2_000, &groups, &rows);
+
+    try std.testing.expect(rows[0].reading != null);
+    // 0 MB가 아니라 **값 없음**이다. 0을 그리면 "0 바이트를 쓰는 중"으로 읽힌다.
+    try std.testing.expectEqual(@as(u64, 20), rows[1].key);
+    try std.testing.expect(rows[1].reading == null);
+}
+
+test "updateGrouped: out이 groups보다 짧아도 넘어 쓰지 않는다" {
+    const allocator = std.testing.allocator;
+    var m: Meter = .{};
+    defer m.deinit(allocator);
+
+    const samples = [_]Sample{
+        .{ .pid = 1, .footprint_bytes = 1, .cpu_ns = 0 },
+        .{ .pid = 2, .footprint_bytes = 2, .cpu_ns = 0 },
+        .{ .pid = 3, .footprint_bytes = 3, .cpu_ns = 0 },
+    };
+    const groups = [_]Group{
+        .{ .key = 1, .start = 0, .len = 1 },
+        .{ .key = 2, .start = 1, .len = 1 },
+        .{ .key = 3, .start = 2, .len = 1 },
+    };
+    var rows: [2]GroupReading = undefined; // 일부러 짧게(행 수 상한에 걸린 상황)
+    _ = m.updateGrouped(allocator, &samples, 1_000, &groups, &rows);
+    _ = m.updateGrouped(allocator, &samples, 2_000, &groups, &rows);
+    try std.testing.expectEqual(@as(u64, 1), rows[0].key);
+    try std.testing.expectEqual(@as(u64, 2), rows[1].key);
+}
+
+test "updateGrouped: 경계가 표본 범위를 넘어도 잘라서 읽는다" {
+    const allocator = std.testing.allocator;
+    var m: Meter = .{};
+    defer m.deinit(allocator);
+
+    const samples = [_]Sample{.{ .pid = 1, .footprint_bytes = 50, .cpu_ns = 0 }};
+    // len이 실제보다 크다(수집 중 표본이 줄었거나 경계 계산이 어긋난 경우) — 범위 밖을 읽으면 안 된다.
+    const groups = [_]Group{.{ .key = 7, .start = 0, .len = 99 }};
+    var rows: [1]GroupReading = undefined;
+    _ = m.updateGrouped(allocator, &samples, 1_000, &groups, &rows);
+    _ = m.updateGrouped(allocator, &samples, 2_000, &groups, &rows);
+    try std.testing.expectEqual(@as(u64, 50), rows[0].reading.?.footprint_bytes);
 }
 
 test "format: 값이 커져도 칸 수가 변하지 않는다(좌측 경로가 흔들리지 않게)" {

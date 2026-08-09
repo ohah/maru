@@ -262,6 +262,27 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > `<name>_ops.`를 부르면 후보에서 뺀다. F15에서 `scmDrawWindow` 하나를, term/surface 후보 조사에서
 > 9개를 자동으로 걸러 냈다.
 >
+> ## 디버그 픽스처 하네스 분리(2026-08-10)
+>
+> F9에서 등록한 후속을 처리했다. `maybeDebugOpenSettings`(586줄)와 `maybeDebugOpenFilePanel`(12줄)을
+> `app_session/debug_fixtures.zig`로 뺐다. ABI가 둘 다 직접 부르므로 진입점은 얇은 facade로 남는다.
+>
+> | | |
+> |---|---|
+> | `app_session.zig` | 54,989 → **54,394** (−595) |
+> | `debug_fixtures.zig` | 631줄 |
+> | 허브 pub | 553 → **550** |
+>
+> **크기보다 성격이 이유다.** 이름은 "세팅을 연다"이지만 지금은 사이드바 접힘·가짜 브랜치·그룹 상태·
+> 드래그 고스트·알림 배지를 **40개가 넘는 `MARU_*` 환경변수 게이트**로 강제하는 시나리오 하네스다.
+> 제품 경로를 읽는 사람이 이 분량의 디버그 스캐폴딩을 지나야 했다.
+>
+> 실측으로 범위를 정했다 — `MARU_*` 문자열을 읽는 `AppSession` 메서드는 넷인데, `init`(env 2개)과
+> `runFramePreHousekeeping`(env 2개)은 제품 함수라 두고 왔다. 환경변수를 읽는다고 전부 디버그가 아니다.
+>
+> 부수로 `tab.zig`가 **자기 모듈을 `tab_ops.`로 부르는** 자리를 넷 발견해 정리했다(F6 보정에서 허브 쪽
+> 접두 치환이 그룹 파일까지 번진 잔재다). 컴파일러가 `'tab_ops' is not marked 'pub'`으로 잡았다.
+>
 > ## F6 보정 — 탭 그룹 모델을 `tab.zig`로(2026-08-10)
 >
 > F7에서 등록한 후속을 처리했다. `moveGroupSibling`·`moveGroupRange`·`relevelBlock`·`relevelBlockCore`·

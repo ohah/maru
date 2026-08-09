@@ -79,7 +79,12 @@ pub fn displayCols(text: []const u8, wide_icon: ?WideIconFn) usize {
 }
 
 /// cluster 경계 — 경계가 base보다 앞서지 않게 clamp한다(손상 UTF-8에서도 전진 보장 = 무한루프 방지).
-fn clusterEndAfter(text: []const u8, i: usize, base_advance: usize) usize {
+/// `i`에서 시작하는 grapheme cluster의 끝(exclusive).
+///
+/// **공개하는 이유**: 편집기 탭 전개(`components/editor_view/content.zig`)가 열을 셀 때 같은 단위를
+/// 써야 한다. 코드포인트로 세면 이모지 ZWJ·NFD 한글에서 렌더보다 많이 세어 탭 위치가 어긋난다 —
+/// `displayCols`가 같은 이유로 cluster 단위를 쓴다.
+pub fn clusterEndAfter(text: []const u8, i: usize, base_advance: usize) usize {
     return @max(grapheme.clusterEnd(text, i), i + base_advance);
 }
 

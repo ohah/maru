@@ -233,8 +233,11 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         frame.draws.ops,
         &tokens,
-        cell_width_px,
-        cell_height_px,
+        // **시나리오 셀을 쓴다.** 위에서 cols/rows를 이 셀로 계산했으므로 여기에 모듈 상수를 넣으면
+        // 격자 크기와 셀 크기가 갈려, 아이콘·셀 경로 op이 의도한 자리의 2/3 지점에 놓이거나 열
+        // 범위 밖으로 사라진다(지금은 편집기 프레임이 셀 op을 안 내어 잠복 상태였다).
+        @intCast(cell.w),
+        @intCast(cell.h),
         cols,
         rows,
     );
@@ -374,8 +377,8 @@ pub fn main(init: std.process.Init) !void {
         // 인덱싱용 합성 격자(256열)라 캡처 기하와 무관해서 쓰지 않는다.
         cols,
         rows,
-        cell_width_px,
-        cell_height_px,
+        @as(u32, @intCast(cell.w)),
+        @as(u32, @intCast(cell.h)),
         if (metal_fixture.cells.len > 0) metal_fixture.cells.ptr else null,
         metal_fixture.cells.len,
         metal_fixture.atlas_width_px,

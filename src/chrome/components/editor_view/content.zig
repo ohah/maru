@@ -11,7 +11,7 @@
 const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
-const width = @import("../../../width.zig"); // Unicode 셀 폭(EAW) — 한글/CJK/이모지=2칸
+const text_layout = @import("../../text_layout.zig"); // 텍스트 셀 배치 단일 출처(cluster 분절·폭)
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -100,13 +100,15 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
 ///
-/// **열은 byte가 아니라 셀 폭으로 센다** — 한글·CJK·이모지는 두 칸이고 결합 문자는 0칸이다
-/// (`width.cellWidth`, 터미널과 같은 판정). VSCode도 같은 규칙을 쓴다: `cursorColumns.ts`의
-/// `_nextVisibleColumn`이 탭이면 탭스톱, 전각·이모지면 `+2`, 나머지는 `+1`이다.
+/// **열은 [text_layout](../../text_layout.zig)의 cluster 단위로 센다.** 그 모듈이 chrome 텍스트 셀
+/// 배치의 단일 출처이고 렌더가 같은 분절을 쓰므로, 여기서 다른 단위로 세면 탭 위치가 화면과 갈린다.
 ///
-/// 이것이 없으면 `가\tx`에서 탭이 세 칸으로 계산되는데 화면에서 "가"가 두 칸을 먹으므로 **정렬이
-/// 한 칸 어긋난다.** 렌더는 이미 옳다(`chrome/text_layout.zig`가 같은 폭 규칙을 쓴다) — 어긋나는
-/// 것은 이 전개의 탭 위치뿐이라, 한글 주석이 든 코드에서만 드러나는 종류의 결함이었다.
+/// **codepoint가 아니라 cluster여야 한다.** 이모지 ZWJ 가족·지역표시자 국기·NFD 한글은 codepoint가
+/// 여럿인데 화면에서는 한 cluster(1~2칸)다 — codepoint로 세면 탭 뒤 내용이 여러 칸 오른쪽으로 밀린다.
+/// 한글·CJK·이모지가 두 칸이고 결합 문자가 0칸인 것도 그 모듈의 판정을 따른다.
+///
+/// VSCode도 같은 계열 규칙을 쓴다: `cursorColumns.ts`의 `_nextVisibleColumn`이 탭이면 탭스톱,
+/// 전각·이모지면 `+2`, 나머지는 `+1`이다.
 /// 전개 결과와 **그것이 저장소를 얼마나 썼는지**. 둘을 함께 돌려주는 이유는 탭이 없을 때 원본을
 /// 빌려주기 때문이다 — 그 경우 `text.len > 0`이지만 `scratch_used == 0`이라, 호출자가 길이로
 /// 저장소 소비를 추정하면 틀린다.
@@ -137,16 +139,15 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8) !Expanded {
             continue;
         }
 
-        // 한 codepoint를 통째로 옮기고 그 **셀 폭**만큼 열을 센다. 잘린 UTF-8은 여기까지 오지 않지만
-        // (§3.5가 열 때 거부한다) 방어적으로 1 byte씩 넘긴다 — 여기서 죽으면 화면이 통째로 빈다.
-        const seq_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
-        const n = @min(seq_len, bytes.len - i);
+        // cluster 하나를 통째로 옮기고 그 **셀 폭**만큼 열을 센다. 잘린 UTF-8은 여기까지 오지
+        // 않지만(§3.5가 열 때 거부한다) `decodeCodepoint`가 U+FFFD로 물러나므로 여기서 죽지 않는다.
+        const base = text_layout.decodeCodepoint(bytes, i);
+        const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
+        const n = @max(1, end - i);
         if (used + n > out.len) return error.OutOfSpace;
         @memcpy(out[used..][0..n], bytes[i..][0..n]);
         used += n;
-
-        const cp = std.unicode.utf8Decode(bytes[i..][0..n]) catch null;
-        col += if (cp) |c| width.cellWidth(c) else 1;
+        col += text_layout.clusterCols(base.cp, null);
         i += n;
     }
     return .{ .text = out[0..used], .scratch_used = used };
@@ -370,4 +371,20 @@ test "탭 있는 줄과 없는 줄이 섞여도 회계가 맞는다" {
     try testing.expectEqual(@as(usize, 5), w.bytes); // 탭 있는 줄만 셌다
     try testing.expectEqualStrings("plain", ops[0].text.runs[0].text);
     try testing.expectEqualStrings("    x", ops[1].text.runs[0].text);
+}
+
+test "expandTabs: 여러 codepoint로 된 cluster도 한 단위로 센다" {
+    var out: [64]u8 = undefined;
+    // "e" + U+0301(결합 악센트)는 cluster 하나이고 1칸이다. codepoint로 세면 2칸이 되어
+    // 탭이 한 칸 덜 들어간다.
+    const r = try expandTabs("e\u{0301}\tx", 4, &out);
+    try testing.expectEqualStrings("e\u{0301}   x", r.text);
+}
+
+test "expandTabs: 지역표시자 국기는 한 cluster다" {
+    var out: [64]u8 = undefined;
+    // U+1F1F0 U+1F1F7(KR)은 codepoint 둘이지만 화면에서 한 cluster(2칸)다.
+    // codepoint로 세면 4칸으로 계산돼 탭 위치가 어긋난다.
+    const r = try expandTabs("\u{1F1F0}\u{1F1F7}\tx", 4, &out);
+    try testing.expectEqualStrings("\u{1F1F0}\u{1F1F7}  x", r.text);
 }

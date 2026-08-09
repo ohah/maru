@@ -85,7 +85,13 @@ pub const LineIndex = struct {
     /// offset 3(`c`)이 1번 줄이다. 이렇게 두지 않으면 줄 끝에 커서를 놓았을 때 다음 줄로 튄다.
     ///
     /// 문서 끝 offset(= 총 byte 수)은 **마지막 줄**로 답한다. 커서가 문서 맨 뒤에 있는 것은 정상 상태다.
+    ///
+    /// **문서 끝을 넘는 offset은 정상이 아니다.** 편집·재로드로 버퍼가 줄었는데 옛 caret offset이
+    /// 남아 있으면 그렇게 되는데, 여기서 조용히 마지막 줄로 답하면 `offsetInLine`이 그 줄의 내용
+    /// 길이를 넘는 열을 돌려주고, 그 값으로 만든 슬라이스가 버퍼 밖으로 넘어간다. Debug에서 즉시
+    /// 멈추고(아래 assert), Release에서는 `clampOffset`을 거치도록 소비처를 유도한다.
     pub fn lineAt(self: LineIndex, offset: usize) usize {
+        std.debug.assert(offset <= self.byteLen());
         var low: usize = 0;
         var high: usize = self.lines.len; // exclusive
 
@@ -100,12 +106,21 @@ pub const LineIndex = struct {
         return low;
     }
 
+    /// offset을 문서 범위 안으로 clamp한다. 버퍼가 줄어든 뒤 남은 옛 caret을 살릴 때 쓴다.
+    pub fn clampOffset(self: LineIndex, offset: usize) usize {
+        return @min(offset, self.byteLen());
+    }
+
     /// 줄 안에서의 byte offset(줄 시작으로부터). 화면 열이 **아니다** — 탭·전각·그래핌은 L3가 푼다.
+    ///
+    /// **줄 내용 길이를 넘지 않는다.** 넘는 값을 돌려주면 `bytes[start .. start + col]` 형태의
+    /// 슬라이스가 버퍼 밖으로 나간다.
     pub fn offsetInLine(self: LineIndex, offset: usize) usize {
-        const idx = self.lineAt(offset);
+        const clamped = self.clampOffset(offset);
+        const idx = self.lineAt(clamped);
         const l = self.lines[idx];
-        if (offset < l.start) return 0;
-        return offset - l.start;
+        if (clamped < l.start) return 0;
+        return @min(clamped - l.start, l.contentLen());
     }
 
     /// 문서 총 byte 수. 마지막 줄의 끝이 곧 문서 끝이다.
@@ -335,4 +350,22 @@ test "줄 끝이 `\\r`인 줄 다음에 오는 개행은 CRLF다" {
     try testing.expectEqual(LineEnding.crlf, idx.line(0).?.ending);
     try testing.expectEqual(LineEnding.crlf, idx.line(1).?.ending);
     try testing.expectEqual(@as(usize, 0), idx.line(1).?.contentLen());
+}
+
+test "clampOffset: 문서가 줄어든 뒤 남은 옛 offset을 범위 안으로 되돌린다" {
+    var idx = try build(testing.allocator, "ab\ncd");
+    defer idx.deinit();
+
+    try testing.expectEqual(@as(usize, 5), idx.clampOffset(5)); // 문서 끝은 유효
+    try testing.expectEqual(@as(usize, 5), idx.clampOffset(999)); // 넘으면 끝으로
+}
+
+test "offsetInLine: 줄 내용 길이를 넘지 않는다 — 슬라이스가 버퍼 밖으로 나가면 안 된다" {
+    var idx = try build(testing.allocator, "ab\ncd");
+    defer idx.deinit();
+
+    // 문서 끝(5)은 마지막 줄 "cd"의 offset 2 — 내용 길이와 같다(그 뒤에 커서를 놓을 수 있다).
+    try testing.expectEqual(@as(usize, 2), idx.offsetInLine(5));
+    // 범위를 넘겨도 그 값을 넘지 않는다.
+    try testing.expectEqual(@as(usize, 2), idx.offsetInLine(999));
 }

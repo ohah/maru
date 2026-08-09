@@ -20,6 +20,7 @@ const dock_panel = maru.session.dock_panel;
 const dock_layout = maru.session.dock_layout;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const sidebar_ops = @import("sidebar.zig");
 const tab_ops = @import("tab.zig");
 const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
@@ -72,7 +73,7 @@ pub fn beginDockListScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bo
         return false;
     }
     // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 규율은 같다.
-    self.clearSidebarDragPreview();
+    sidebar_ops.clearSidebarDragPreview(self);
     self.pointer_gesture_owner = .none;
     self.dock_list_scroll_drag_owner = .{
         .root_generation = self.file_tree.rootGeneration(),

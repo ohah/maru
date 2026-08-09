@@ -26,6 +26,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const sidebar_ops = @import("sidebar.zig");
 const tab_ops = @import("tab.zig");
 const dock_ops = @import("dock.zig");
 const PendingDockFocus = app_session_mod.PendingDockFocus;
@@ -1686,7 +1687,7 @@ pub fn moveTermToNewSplit(self: *AppSession, src: *Pane, src_idx: usize, target:
     // **사이드바도 다시 투영한다**: 에이전트 목록 행은 pane/term **인덱스**를 들고 있어, Term이 reap으로 빠지면
     // 남은 행의 인덱스가 다른 Term을 가리킨다(범위 검사만으로는 못 걸러낸다 — 길이는 여전히 유효하므로).
     // 그대로 두면 사용자가 보는 행과 클릭이 닫는 Term이 어긋난다(code-review max).
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     if (src.terms.items.len == 0) collapsePaneIn(self, tab, src); // src가 비면 collapse(removeLeaf)
     // 4) 새 pane으로 포커스 + 대표 surface 재바인딩 + 전 panel을 새 leaf rect grid로 resize + 좌표 재계산.
     _ = focusPaneByPtr(self, new_pane);
@@ -1719,11 +1720,11 @@ pub fn fileHeaderBandForPaneLookup(self: *AppSession, pane: *Pane) ?FileHeaderBa
 }
 
 pub fn computePaneDropDest(self: *AppSession, x_px: f64, y_px: f64) ?PaneDropDest {
-    if (!self.inSidebar(x_px)) return null; // 사이드바 밖 — 드롭 아님
+    if (!sidebar_ops.inSidebar(self, x_px)) return null; // 사이드바 밖 — 드롭 아님
     // 헤더(검색바·◧/⚙/+ 아이콘) 영역은 드롭 불가 — 여기서 떼면 sidebarSlotAt가 null이라 아래 폴백이 new_workspace로
     // 떨어져 '검색바에 떨어뜨려도 새 워크스페이스가 생기는' 오동작이 된다(하이라이트도 카드 아래 행에 잘못 켜진다).
     if (y_px < @as(f64, @floatFromInt(self.sidebar_header_height_px))) return null;
-    if (self.sidebarSlotAt(y_px)) |slot| {
+    if (sidebar_ops.sidebarSlotAt(self, y_px)) |slot| {
         // 유효 row 위. 카드면 그 워크스페이스에 merge. **그룹 헤더 row(visibleTab=null)면 no-op** — pane을
         // "그룹"에 넣는 개념이 없고(그룹은 워크스페이스가 아니라 묶음), 새 워크스페이스도 아니므로(옛 코드는 여기서
         // new_workspace로 falls through해 헤더에 떨어뜨려도 원치 않는 새 워크스페이스가 생겼다, code-review #3)
@@ -1793,7 +1794,7 @@ pub fn promotePaneToNewWorkspace(self: *AppSession, pane: *Pane) void {
     resizeActiveTabPanes(self) catch {};
     recomputeActivePaneRect(self);
     self.metal_dirty = true;
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
 }
 
 /// panel leaf 하나에서 tab bar, 실제 본문 외곽, terminal cell grid를 한 번만 투영한다. focus border는 body,
@@ -1906,7 +1907,7 @@ pub fn beginDividerCapture(self: *AppSession, x_px: f64, y_px: f64) bool {
     // ratio의 분모가 되는 bounds는 down 시점 값을 쓴다 — drag 도중 선이 움직여도 나누는 부모
     // 영역은 그대로이고, 매 move의 재발행에서 다시 읽으면 반올림이 누적될 자리가 생긴다.
     // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 그 규율은 같다.
-    self.clearSidebarDragPreview();
+    sidebar_ops.clearSidebarDragPreview(self);
     self.pointer_gesture_owner = .none;
     self.divider_capture_seg = self.divider_seg_scratch.items[index];
     self.divider_capture_split = self.divider_split_scratch.items[index];

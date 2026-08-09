@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const sidebar_ops = @import("sidebar.zig");
 const Tab = app_session_mod.Tab;
 const coretext_frame_builder = app_session_mod.coretext_frame_builder;
 const app = app_session_mod.app;
@@ -123,14 +124,14 @@ pub fn appendMinimalTabIndicator(self: *AppSession, out: *std.ArrayList(metal_fr
     out.append(self.allocator, sentinelBgCell(
         @intCast(@min(band_start, u16_max)),
         @intCast(@min(band_width, u16_max)),
-        self.chromeCellBg(self.sidebarBg()), // window.opacity(셀 premultiply)
+        self.chromeCellBg(sidebar_ops.sidebarBg(self)), // window.opacity(셀 premultiply)
         term_rect.x,
         term_rect.y,
     )) catch return;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         const col = band_start + pad + i * 2;
-        const color = self.chromeCellBg(if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg()); // window.opacity(셀 premultiply)
+        const color = self.chromeCellBg(if (i == active) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)); // window.opacity(셀 premultiply)
         out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, term_rect.y)) catch return;
     }
 }
@@ -401,7 +402,7 @@ pub fn createTab(
     // 0이라 init 끝의 recompute가 다시 잡고, post-init newTab은 여기서 바로 맞는다)
     // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
     // 완성·append됨) 빈 사이드바로 degrade한다 — 여기서 try면 errdefer가 멀쩡한 탭을 헐어버린다.
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     return tab;
 }
 
@@ -421,7 +422,7 @@ pub fn switchTab(self: *AppSession, index: usize) bool {
     pane_ops.resizeTabPanes(self, activeTab(self));
     self.metal_dirty = true;
     pane_ops.recomputeActivePaneRect(self); // 새 탭의 활성 panel rect로 좌표 origin 갱신
-    self.rebuildSidebar() catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
+    sidebar_ops.rebuildSidebar(self) catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
     return true;
 }
 
@@ -504,7 +505,7 @@ pub fn closeTab(self: *AppSession, index: usize) void {
     // 경로 — 탭 닫기라 드래그 게이트는 normalize 내부가 처리). 승계로 그룹 구성이 바뀌었을 수 있어 shred 방지.
     self.normalizePinnedFromGroups();
     self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — normalize 뒤, 마커 승계로 subtree 재구성 반영)
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
 }
 
@@ -589,7 +590,7 @@ pub fn detachTabForMove(self: *AppSession, index: usize, defer_rebuild: bool, cl
     pane_ops.recomputeActivePaneRect(self);
     self.normalizePinnedFromGroups(); // 잔존 탭 멤버 pin 재동기(closeTab tail 동형 — src 측 재정규화 §1.4)
     self.floatLocalPinsAllGroups();
-    if (!defer_rebuild) self.rebuildSidebar() catch {};
+    if (!defer_rebuild) sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     return tab;
 }
@@ -657,7 +658,7 @@ pub fn adoptTab(self: *AppSession, tab: *Tab, defer_rebuild: bool) !void {
     // 5) dst cell metric으로 옮겨온 트리를 dst 창 grid에 맞춘다(resize는 surface_id 키드 → 무재시작) + 좌표 캐시를
     //    한 번의 layout으로([5]) + 사이드바(merge면 caller가 끝에 1회 배치, [4]).
     resizeAdoptedTabAndCaptureActiveRect(self, tab);
-    if (!defer_rebuild) self.rebuildSidebar() catch {};
+    if (!defer_rebuild) sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
 }
 
@@ -714,7 +715,7 @@ pub fn moveTab(self: *AppSession, from: usize, raw_to: usize) usize {
     rotateMove(*Tab, self.tabs.items, from, to);
     rotateMove(*maru.session.Surface, self.surface_ptrs.items, from, to);
     self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     return to;
 }
@@ -907,7 +908,7 @@ pub fn beginGroupForTab(self: *AppSession, tab: *Tab, kind: GroupCreateKind, bre
     self.normalizePinnedFromGroups();
     self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — 새 마커 subtree에 흡수된 로컬 pin 멤버 정렬)
     self.clearStaleLocalPins(); // 위생(GL §13.7): 마커 전이·top_level break로 leaf 아니게 된 카드의 stale local_pinned 클리어(고아 📌 방지)
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
 }
 
@@ -955,7 +956,7 @@ pub fn ungroupTab(self: *AppSession, tab: *Tab) void {
     self.normalizePinnedFromGroups();
     self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — 마커 제거로 상위 그룹에 재소속된 멤버 정렬)
     self.clearStaleLocalPins(); // 위생(GL §13.7): 그룹 밖 top-level로 나간 옛 멤버의 stale local_pinned 클리어(고아 📌 방지)
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // ungroup 후 프리픽스·정렬 불변식(toggleGroupPin과 동형)
 }
@@ -1020,7 +1021,7 @@ pub fn removeFromGroupForTab(self: *AppSession, tab: *Tab) void {
         self.normalizePinnedFromGroups(); // move 후 — 남은 그룹 재동기, 빠진 카드는 비고정 top카드라 안 흡수
         self.floatLocalPinsAllGroups(); // 빼기 후 남은 그룹 로컬 pin 재float(빠진 카드=최상위)
         self.clearStaleLocalPins(); // 위생(GL §13.7): 빠진 카드=top-level → stale local_pinned 클리어(빼기=pin·로컬 pin 상실)
-        self.rebuildSidebar() catch {};
+        sidebar_ops.rebuildSidebar(self) catch {};
         self.metal_dirty = true;
         return;
     }
@@ -1040,7 +1041,7 @@ pub fn removeFromGroupForTab(self: *AppSession, tab: *Tab) void {
     }
     self.floatLocalPinsAllGroups();
     self.clearStaleLocalPins(); // 위생(GL §13.7): 빠진 카드=top-level → stale local_pinned 클리어(고아 📌 방지)
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
 }
 
@@ -1060,7 +1061,7 @@ pub fn promoteTabToTopLevelInPlace(self: *AppSession, tab: *Tab) void {
     self.normalizePinnedFromGroups(); // 그룹 고정 C2(§14.4): top_level 하드 break로 빠진 카드 반영, 남은 그룹 canonical
     self.floatLocalPinsAllGroups(); // 남은 그룹 로컬 pin 재float(승격 카드는 이제 최상위)
     self.clearStaleLocalPins(); // 위생(GL §13.7): top-level 전이한 카드의 stale local_pinned 클리어(고아 📌 방지)
-    self.rebuildSidebar() catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
 }
 
@@ -1076,7 +1077,7 @@ pub fn setGroupColorForTab(self: *AppSession, tab: *Tab, color: u32) void {
     };
     const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 최상위 카드 → no-op(색 얹을 그룹 없음)
     self.tabs.items[mi].group_color = color; // 그룹 시작 마커에만 색 저장(소속 카드는 위치 파생)
-    self.rebuildSidebar() catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
+    sidebar_ops.rebuildSidebar(self) catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
     self.metal_dirty = true;
 }
 

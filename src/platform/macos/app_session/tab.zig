@@ -1272,7 +1272,10 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
                 .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
                 .title = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable) term.rt.observation.window_title.items else ""),
-                .cwd = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else ""),
+                // **원격 cwd는 저장하지 않는다.** 워크스페이스 파일에는 host가 없으므로, 원격 경로를 그대로 담으면
+                // 복원 때 그것을 로컬 경로로 알고 spawn해 자식이 chdir에 실패한다(ssh-integration.md §9.4). 빈 값이면
+                // 복원이 기본 cwd로 열어 "엉뚱한 데서 열리는" 대신 **의도한 자리**에서 시작한다. 파일 포맷은 그대로다.
+                .cwd = try arena.dupe(u8, if (term.rt.observation.availability != .unavailable and !app_session_mod.termCwdIsRemote(term)) term.rt.observation.cwd.items else ""),
                 // §7 종료 placeholder는 spawn을 안 해 `surface.command`가 비어 있다 — 복원 입력에서 옮겨 둔 owned
                 // 사본을 쓴다. title·cwd·grid는 생성 시 observation에 `.stale`로 심어서 위 두 줄이 그대로 읽는다.
                 .command = try arena.dupe(u8, if (term.rt.ended_placeholder) term.rt.ended_command else (term.surface.command orelse "")),

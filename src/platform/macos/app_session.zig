@@ -989,9 +989,40 @@ fn detectLaunchCwdIsRoot(io: std.Io) bool {
 /// cwd가 비면 "". 폴더 아이콘 prefix는 호출부(buildSidebarTitleFrame)가 브랜치줄 octocat과 같은 패턴으로 붙인다 —
 /// 이 함수는 경로만 파생해, copy-path·click-to-open 등 다른 소비자가 PUA 글리프 없는 깨끗한 경로를 쓸 수 있다.
 /// 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
+/// 이 프로세스의 hostname — OSC 7 authority가 "우리"를 가리키는지 판정하는 기준값이다. 프로세스 수명 동안
+/// 바뀌지 않으므로 한 번만 조회해 캐시한다(OSC 7은 매 프롬프트 오고 폴더줄은 매 사이드바 rebuild마다 조립되므로,
+/// 캐시가 없으면 syscall이 그 빈도로 따라붙는다). **메인 스레드 전용** — 소비처(사이드바 조립·spawn cwd·경로
+/// resolve)가 모두 메인이라 lazy init에 경합이 없다. 조회 실패면 빈 문자열이고, 그때 `hostIsLocal`은 보수적으로
+/// 원격을 택한다(docs/ssh-integration.md §9.2).
+var local_hostname_storage: [std.posix.HOST_NAME_MAX]u8 = undefined;
+var local_hostname_cached: ?[]const u8 = null;
+pub fn localHostname() []const u8 {
+    if (local_hostname_cached) |cached| return cached;
+    const name: []const u8 = std.posix.gethostname(&local_hostname_storage) catch "";
+    local_hostname_cached = name;
+    return name;
+}
+
+/// 이 Term이 보고한 cwd가 **원격**인가 — 표시(폴더줄·상태바)와 안전(cwd 상속·경로 resolve·git 조회)이 공유하는
+/// 단일 판정이다. 재구현하지 말 것: 판정이 갈리면 폴더줄엔 원격이라 적히는데 새 탭은 그 경로로 로컬 spawn을
+/// 시도하는 식으로 어긋난다.
+///
+/// 관측이 없거나(`unavailable`) cwd가 비면 **로컬로 본다** — "값이 없음"을 원격으로 승격하면 셸 통합이 없는
+/// 로컬 세션이 통째로 원격 취급돼 cwd 상속이 꺼진다. 원격 판정의 근거는 오직 authority다(§9.2).
+pub fn termCwdIsRemote(term: *const Term) bool {
+    if (term.rt.observation.availability == .unavailable) return false;
+    if (term.rt.observation.cwd.items.len == 0) return false;
+    return !terminal.TerminalCore.hostIsLocal(term.rt.observation.cwd_host.items, localHostname());
+}
+
 pub fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     if (cwd.len == 0) return allocator.dupe(u8, "");
+    // 원격 cwd는 `<host>:<path>`로 그리고 `~` 축약을 **하지 않는다**. 축약하면 원격 $HOME을 로컬 것으로 계산해
+    // 남의 홈을 자기 홈처럼 보여 주고(로컬 $HOME과 우연히 겹치면 조용히 틀린다), host가 없으면 사용자가 그 경로를
+    // 로컬에서 열려다 실패한다. `host:path`는 scp/rsync 관례라 원격임이 즉시 읽힌다.
+    if (termCwdIsRemote(term))
+        return std.fmt.allocPrint(allocator, "{s}:{s}", .{ term.rt.observation.cwd_host.items, cwd });
     const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
     // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
     if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
@@ -4604,7 +4635,11 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         cfg.size = size;
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
-        if (usableRestoreCwd(tomb.rt.observation.cwd.items)) |c| req.cwd = c;
+        // 원격 cwd는 되살릴 Term의 spawn에 쓰지 않는다 — 그 경로는 원격 파일시스템의 것이라 로컬 자식이 chdir에
+        // 실패하고 $HOME으로 조용히 폴백한다(ssh-integration.md §9.4). cwd 없이 기본 자리에서 띄운다.
+        if (!termCwdIsRemote(tomb)) {
+            if (usableRestoreCwd(tomb.rt.observation.cwd.items)) |c| req.cwd = c;
+        }
         const fresh = try term_ops.createTerm(self, req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
 
         // 여기부터는 실패할 수 없는 구간이다 — 슬롯 교체·해제·대표 surface 재바인딩은 에러를 내지 않는다.
@@ -30504,8 +30539,9 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
 
-    // 활성 surface에 cwd(OSC 7) 심기 + split으로 pane 2개 + 새 탭(탭 2개).
-    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/tmp/proj\x07");
+    // 활성 surface에 cwd(OSC 7) 심기 + split으로 pane 2개 + 새 탭(탭 2개). authority는 로컬(빈 값) —
+    // 원격 cwd는 워크스페이스에 저장되지 않으므로(§9.4) 임의 host를 쓰면 이 캡처 단언이 빈 문자열을 본다.
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/proj\x07");
     session.dispatchAppAction(.split_horizontal);
     session.dispatchAppAction(.new_tab);
 
@@ -33771,7 +33807,7 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
     });
     defer session.deinit(); // workspace_buffer 해제 — testing.allocator가 leak을 잡는다
     _ = try session.resize(800, 600, 1000);
-    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/srv\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///srv\x07"); // 로컬 authority(원격은 저장 제외 — §9.4)
 
     const b0 = try workspace_ops.serializeWorkspaceWindow(session, true, null); // 활성 창 → active-window=1 마커(M3e)
     try std.testing.expect(std.mem.startsWith(u8, b0, "window ")); // 헤더 없는 블록(Swift가 헤더 하나로 모음)
@@ -34320,11 +34356,64 @@ test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inhe
     try std.testing.expect(term_ops.newSurfaceCwd(session, &buf, false) == null);
 
     // 활성 Term이 OSC 7로 cwd를 보고하면, inherit ON인 새 surface(탭/Term/split)는 그 절대경로를 상속한다.
-    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/tmp/proj\x07");
+    // authority는 **비워** 보낸다(`file:///path`) — VTE 규약상 localhost이고, 로컬 셸이 보고하는 형태다.
+    // 임의 host(`file://h/...`)를 쓰면 이제 원격으로 판정돼 상속이 끊긴다(바로 아래에서 그 동작을 고정한다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/proj\x07");
     try std.testing.expectEqualStrings("/tmp/proj", term_ops.focusedTermCwd(session, &buf).?);
     try std.testing.expectEqualStrings("/tmp/proj", term_ops.newSurfaceCwd(session, &buf, true).?);
     // inherit OFF면 포커스 cwd가 있어도 무시하고 root 폴백(여기선 root 미설정·정상 cwd라 null).
     try std.testing.expect(term_ops.newSurfaceCwd(session, &buf, false) == null);
+
+    // **원격 cwd는 상속하지 않는다.** 원격 경로로 로컬 spawn을 걸면 자식이 chdir에 실패해 $HOME으로 조용히
+    // 폴백하고, 사용자는 "새 탭이 엉뚱한 데서 열린다"만 본다. 여기서 끊어 root 폴백으로 보낸다(§9.4).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/srv/app\x07");
+    try std.testing.expect(term_ops.focusedTermCwd(session, &buf) == null);
+    try std.testing.expect(term_ops.newSurfaceCwd(session, &buf, true) == null);
+
+    // 로컬로 돌아오면(ssh 종료 후 다음 프롬프트) 상속이 되살아난다 — 원격 판정이 Term에 눌어붙지 않는다.
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://localhost/tmp/back\x07");
+    try std.testing.expectEqualStrings("/tmp/back", term_ops.focusedTermCwd(session, &buf).?);
+}
+
+// 원격 cwd 표시 계약(docs/ssh-integration.md §9.3). 폴더줄은 원격에서 **유일하게** "지금 어느 호스트의 어디"를
+// 알려 주는 자리인데, 예전 규칙(repo 안일 때만)은 브랜치가 로컬 `.git` 읽기라 원격에서 항상 null이 되어 그 줄을
+// 통째로 지웠다. 표시 문자열과 표시 여부를 함께 고정한다.
+test "sidebarCwdPath/sidebarFolderLineShown: 원격 cwd는 host를 붙이고 repo 밖에서도 그린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // 원격 보고 — `<host>:<path>`로 그리고 `~` 축약은 하지 않는다(원격 $HOME을 로컬이 모른다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/home/me/svc\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+    const remote_path = try sidebarCwdPath(allocator, term);
+    defer allocator.free(remote_path);
+    try std.testing.expectEqualStrings("build-box:/home/me/svc", remote_path);
+    // repo 밖(원격 경로엔 로컬 .git이 없다)인데도 폴더줄을 그린다 — 예전 규칙이 지우던 바로 그 줄이다.
+    try std.testing.expect(sidebar_ops.sidebarFolderLineShown(session, term));
+    // 원격 cwd로는 git 브랜치를 조회하지 않는다(같은 경로가 로컬에 있어도 엉뚱한 repo를 붙이지 않게).
+    try std.testing.expect(git_ops.termGitBranch(session, term) == null);
+
+    // 로컬 보고는 예전 동작 그대로 — host 접두 없음.
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/local-proj\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(!termCwdIsRemote(term));
+    const local_path = try sidebarCwdPath(allocator, term);
+    defer allocator.free(local_path);
+    try std.testing.expectEqualStrings("/tmp/local-proj", local_path);
 }
 
 test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inherit OFF는 root, ON은 포커스 우선" {
@@ -34354,7 +34443,8 @@ test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inh
     try std.testing.expectEqualStrings("/tmp/maru-root", term_ops.newSurfaceCwd(session, &buf, true).?); // 토글 ON이나 포커스 없음 → root
 
     // 활성 Term이 OSC 7로 cwd 보고: inherit ON은 포커스 cwd가 root보다 우선, OFF는 여전히 root.
-    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/work/svc\x07");
+    // authority는 비운다(로컬 셸이 보내는 형태) — 임의 host면 원격으로 판정돼 상속 자체가 끊긴다(§9.4).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///work/svc\x07");
     try std.testing.expectEqualStrings("/work/svc", term_ops.newSurfaceCwd(session, &buf, true).?); // ON → 포커스 우선
     try std.testing.expectEqualStrings("/tmp/maru-root", term_ops.newSurfaceCwd(session, &buf, false).?); // OFF → 포커스 무시, root
 }
@@ -36522,7 +36612,7 @@ test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→�
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/tmp/proj\x07"); // 터미널에 OSC 7 cwd
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/proj\x07"); // 터미널에 OSC 7 cwd(로컬 authority)
     const term_sibling = pane_ops.activePane(session).activeTerm();
 
     session.dispatchAppAction(.new_web_tab); // pane=[terminal, web], web 활성

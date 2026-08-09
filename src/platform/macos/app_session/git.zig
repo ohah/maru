@@ -359,6 +359,9 @@ pub fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
 /// 분리하며, sidebar와 control-plane이 이 단일 파생 경로를 공유한다. 캐시 키·재계산 로직은 단일 출처(재구현 금지).
 pub fn termGitBranchForCwd(self: *AppSession, term: *Term, cwd: []const u8) ?[]const u8 {
     if (cwd.len == 0) return null;
+    // 원격 cwd에는 로컬 `.git`이 없다. 읽어 봐야 항상 실패인데다, 같은 경로가 로컬에도 우연히 있으면 **엉뚱한
+    // repo의 브랜치**를 원격 세션 카드에 붙인다. 그래서 파일을 열기 전에 끊는다(ssh-integration.md §9.4).
+    if (app_session_mod.termCwdIsRemote(term)) return null;
     if (term.git_branch_cwd) |c| {
         if (std.mem.eql(u8, c, cwd)) return term.git_branch; // 캐시 적중(cwd 불변)
     }

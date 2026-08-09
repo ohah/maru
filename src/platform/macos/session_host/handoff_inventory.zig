@@ -192,6 +192,7 @@ pub const terminal_core_groups = [_]Group{
             "kitty_images",
             "kitty_placements",
             "cwd",
+            "cwd_host",
             "ssh_remote_dest",
             "title",
             "title_generation",

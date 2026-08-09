@@ -155,6 +155,10 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 87, .name = "observer_generation" },
     .{ .tag = 88, .name = "default_cursor_shape" },
     .{ .tag = 89, .name = "cursor_shape_overridden" },
+    // cwd(83)와 한 쌍인 OSC 7 authority. 기존 태그를 재사용하지 않고 새 태그를 붙인다 — 태그는 stable schema라
+    // 옛 host가 쓴 레코드를 새 host가 읽을 때 의미가 바뀌면 안 된다. 옛 레코드엔 이 태그가 없어 `null`(=로컬
+    // 취급)로 복원되고, 그 세션은 다음 OSC 7 보고에서 host를 다시 채운다(docs/ssh-integration.md §9.2).
+    .{ .tag = 90, .name = "cwd_host" },
 };
 
 comptime {

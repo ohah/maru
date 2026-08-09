@@ -204,23 +204,35 @@ pub fn dispatchHyperlink(self: *TerminalCore, after_code: []const u8) void {
 
 /// OSC 7: `7 ; file://<host>/<percent-encoded path>` — 셸이 cwd를 보고한다. VTE(GNOME)가
 /// 정의한 사실상 표준으로(공개 형식 문서 기반, VTE는 LGPL이라 소스 미열람), iTerm2/Terminal.app/
-/// kitty/WezTerm이 채택했다. `file://` 스킴만 받고, host는 무시한 채(로컬 단일 호스트 가정) 첫
-/// '/'부터의 path를 percent-decode해 저장한다. 형식이 안 맞거나 빈 path, OOM이면 기존 cwd를
-/// 유지한다 — 부분/깨진 갱신으로 이전 값을 잃지 않게 한다.
+/// kitty/WezTerm이 채택했다. `file://` 스킴만 받고 첫 '/'부터의 path를 percent-decode해 저장하며,
+/// 그 앞의 **authority(host)도 함께 보관**한다 — 버리면 원격 셸이 보고한 경로가 로컬 경로와 구분되지
+/// 않아 폴더줄이 사라지거나 없는 디렉터리로 spawn한다(docs/ssh-integration.md §9). 형식이 안 맞거나
+/// 빈 path, OOM이면 기존 cwd를 유지한다 — 부분/깨진 갱신으로 이전 값을 잃지 않게 한다.
 pub fn dispatchCwd(self: *TerminalCore, body: []const u8) void {
     const scheme = "file://";
     if (!std.mem.startsWith(u8, body, scheme)) return; // file 스킴만(다른 스킴은 무시)
     const authority_and_path = body[scheme.len..];
     // file://<host>/<path> — host(authority)는 첫 '/'까지, path는 그 '/'부터(절대경로라 '/' 포함).
     const slash = std.mem.indexOfScalar(u8, authority_and_path, '/') orelse return;
+    const raw_host = authority_and_path[0..slash];
     const raw_path = authority_and_path[slash..];
     if (raw_path.len == 0) return;
     const decoded = percentDecodeAlloc(self, raw_path) catch return; // OOM/실패면 기존 cwd 유지
+    // host는 **같은 갱신 안에서** 확보한다. 여기서 실패했는데 path만 새 값으로 바꾸면 새 경로에 옛 host가
+    // 붙어 짝이 어긋난다(로컬 경로에 원격 host가 붙는 최악의 오표시). 그래서 갱신 전체를 포기하고 이전
+    // 쌍을 그대로 둔다. host는 percent-decode하지 않는다 — authority는 hostname이라 인코딩이 오지 않고,
+    // 디코드하면 오히려 `%`가 든 이름이 다른 호스트로 바뀐다.
+    const host_copy: ?[]u8 = if (raw_host.len == 0) null else self.allocator.dupe(u8, raw_host) catch {
+        self.allocator.free(decoded);
+        return;
+    };
     // cwd가 **실제로 바뀔 때만** title_generation을 올린다 — 셸 통합(VTE/iTerm precmd)은 cd 안 해도 매 프롬프트 OSC 7을
     // 동일 경로로 재보고하므로, 무조건 bump하면 매 프롬프트 syncAutoTitles가 헛 lock+복사해 P4-1을 무력화한다(code-review [0]).
     const cwd_changed = if (self.cwd) |old| !std.mem.eql(u8, old, decoded) else true;
     if (self.cwd) |old| self.allocator.free(old);
     self.cwd = decoded;
+    if (self.cwd_host) |old| self.allocator.free(old);
+    self.cwd_host = host_copy;
     if (cwd_changed) self.bumpTitleGeneration(); // title이 null이면 windowTitle(cwd basename)이 바뀌므로 라벨 재sync 유도(P4-1, §12)
     self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시(recordShellEvent: core, pub)
 }

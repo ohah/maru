@@ -56,6 +56,9 @@ pub const RuntimeObservationView = struct {
     title_generation: u32 = 0,
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
     cwd: []const u8 = "",
+    /// 그 cwd를 보고한 OSC 7 authority(host). 빈 문자열이면 로컬(빈 authority = VTE 규약 localhost) 또는
+    /// 아직 보고 없음이다. cwd와 **함께** 실어야 소비처가 로컬/원격을 가를 수 있다(docs/ssh-integration.md §9).
+    cwd_host: []const u8 = "",
     window_title: []const u8 = "",
     ssh_remote_dest: ?[]const u8 = null,
     semantic_state: terminal.SemanticPrompt = .unknown,
@@ -92,6 +95,9 @@ pub const RuntimeObservation = struct {
     title_generation: u32 = 0,
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
     cwd: std.ArrayListUnmanaged(u8) = .empty,
+    /// cwd를 보고한 OSC 7 authority(owned). cwd와 한 쌍으로만 갱신된다 — 짝이 어긋나면 로컬 경로에 원격
+    /// host가 붙어 표시·상속·resolve가 모두 틀어진다(docs/ssh-integration.md §9.2).
+    cwd_host: std.ArrayListUnmanaged(u8) = .empty,
     window_title: std.ArrayListUnmanaged(u8) = .empty,
     ssh_remote_dest: std.ArrayListUnmanaged(u8) = .empty,
     ssh_remote_dest_present: bool = false,
@@ -120,6 +126,7 @@ pub const RuntimeObservation = struct {
 
     pub fn deinit(self: *RuntimeObservation, allocator: std.mem.Allocator) void {
         self.cwd.deinit(allocator);
+        self.cwd_host.deinit(allocator);
         self.window_title.deinit(allocator);
         self.clipboard_read_target.deinit(allocator);
         self.ssh_remote_dest.deinit(allocator);
@@ -155,6 +162,7 @@ pub const RuntimeObservation = struct {
         };
         errdefer next.deinit(allocator);
         try next.cwd.appendSlice(allocator, snapshot.cwd);
+        try next.cwd_host.appendSlice(allocator, snapshot.cwd_host); // cwd와 같은 트랜잭션에서만 갱신(쌍 유지)
         try next.window_title.appendSlice(allocator, snapshot.window_title);
         if (snapshot.ssh_remote_dest) |dest| try next.ssh_remote_dest.appendSlice(allocator, dest);
         try next.clipboard_read_target.appendSlice(allocator, snapshot.clipboard_read_target);
@@ -178,6 +186,7 @@ pub const RuntimeObservation = struct {
         var out: RuntimeObservationView = .{
             // 표현이 다른 필드(소유 버퍼 → 빌린 슬라이스, present 플래그 → optional)만 수동이다.
             .cwd = self.cwd.items,
+            .cwd_host = self.cwd_host.items,
             .window_title = self.window_title.items,
             .ssh_remote_dest = if (self.ssh_remote_dest_present) self.ssh_remote_dest.items else null,
             .clipboard_read_target = self.clipboard_read_target.items,
@@ -566,6 +575,7 @@ const FakeTermBackend = struct {
             .title_generation = rt.surface.core.title_generation.load(.monotonic),
             .size = rt.surface.core.size,
             .cwd = rt.surface.core.currentCwd(),
+            .cwd_host = rt.surface.core.currentCwdHost(),
             .window_title = rt.surface.core.windowTitle(),
             .ssh_remote_dest = rt.surface.core.sshRemoteDest(),
             .semantic_state = rt.surface.core.semantic_state,
@@ -789,6 +799,7 @@ test "RuntimeObservation.view: 모든 관측 필드가 view로 전달된다(자�
     obs.foreground_available = true;
     obs.foreground_pgid = 55;
     try obs.cwd.appendSlice(allocator, "/repo");
+    try obs.cwd_host.appendSlice(allocator, "box"); // cwd와 한 쌍 — view가 안 실으면 원격 판정이 통째로 죽는다
     try obs.window_title.appendSlice(allocator, "work");
     try obs.clipboard_read_target.appendSlice(allocator, "p");
     try obs.agent_progress.appendSlice(allocator, "working");

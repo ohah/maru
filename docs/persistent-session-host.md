@@ -1239,25 +1239,47 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `fd == -1` 후조건을 구현했다. `test-session-host-2c3d-c3-3`의 Debug·ReleaseFast actual socketpair가
    external typed invalid/exclusive Busy의 durable mutation 0, partial pending free exact 1, callback 안 poison/input/control과
    foreign teardown Busy, effect 뒤 fence 재사용, peer EOF와 idempotent 재호출을
-   고정한다. live revoke row·제품 failure settlement·source-zero와 actual revoked roundtrip은 아직 C3-3 후속 slice다.
+   고정한다. 기존 `EventAuthority` revoke class/derived cache·제품 failure settlement·source-zero와 actual revoked roundtrip은 아직
+   C3-3 후속 slice다.
 
-   accepted revoke의 ordering authority는 두 기존 canonical owner가 이어서 소유한다. take 전에는 sealed `pending_events`와
-   `hasBufferedControllerRevoke`가 queue latch이고, take commit은 event generation을 처음 발급하면서 같은 no-fail suffix에서 queue
-   제거와 ClientSlot/node cleanup registry의 in-flight row 게시를 원자 수행한다. in-flight receipt는
-   `{node_incarnation,binding_reservation,stream_id,event_generation}`이고 canonical registry lifecycle은 `live -> consumed`뿐이다.
+   accepted revoke의 ordering authority는 두 기존 canonical owner가 이어서 소유한다. 별도 revoke row나 admission generation은
+   만들지 않고, 기존 `AttachmentCleanupRegistry.Entry.event_authority`가 exact receipt와
+   `reserved -> live -> releasing -> idle|terminal` lifecycle을 계속 단독 소유한다. 이 authority에 closed
+   `none|controller_revoke` ordering class를 봉인한다. per-entry class/lifecycle가 SSOT이고 같은 registry의 node-local checked
+   derived cache는 `reserved|live|releasing` revoke 수의 O(1) projection일 뿐이다. production은 affected row의 exact
+   lifecycle/receipt와 checked counter bound/transition만 O(1)으로 검증하고 invalid raw lifecycle/receipt 또는 counter bound 위반을
+   fail-closed한다. Debug·ReleaseFast test-only invariant oracle만 bounded full scan으로 cache 일치를 확인하며, 임의 row/cache bit drift의
+   전수 탐지는 주장하지 않는다.
+   take 전에는 sealed `pending_events`와
+   `hasBufferedControllerRevoke`가 queue latch다. take transaction은 queue commit 전에 event generation과 trusted ordering class를
+   reserve/bind하고, 이어지는 `Client` queue commit→existing authority live publication의 연속 no-fail suffix가 queue owner를
+   in-flight row로 이전한다. in-flight receipt는
+   `{node_incarnation,binding_reservation,stream_id,event_generation}`이고 canonical registry lifecycle은 위 기존
+   `reserved -> live -> releasing -> idle|terminal`뿐이다.
    `borrowed/classifying/effect_pending/release_pending`은 RemoteRuntime의 설명용 처리 단계이며 registry에 복제하지 않고, retry phase는
-   `pending_generation_event_outcome` 하나만 소유한다. 별도 admission ID/generation이나 pre-queue row는 만들지 않는다. 여러 sibling revoke는 독립 row로 세며 queued latch와 live revoke count가 모두 0일 때만 connection mutation gate를 다시
-   연다. release Busy·effect Busy·terminal cleanup 동안 row를
-   유지하고 exact receipt consume만 감소시킨다. stale/copy/ABA/double consume과 count overflow/underflow는 aggregate를 바꾸지 않고
+   `pending_generation_event_outcome` 하나만 소유한다. accepted 분류는 현재 ClientSlot take가 canonical payload를 재검증해 얻은
+   trusted preflight 결과를 reserve 입력으로 소비하며 aggregate query에서 payload를 다시 파싱하지 않는다. queue 제거부터 registry publication까지 계속 live인
+   `StreamOperationPermit`과 owner-thread/no-yield suffix가 handoff를 직렬화한다. registered-node operation은 이 구간 전에 끝나므로
+   원자성 근거가 아니다. derived aggregate는 reserved/live/releasing revoke를 모두 blocker로 세어 관측 가능한 queue 0/aggregate 0
+   틈을 만들지 않는다. pre-reserve 실패는 cache `0 -> 0`, revoke reserve는 `0 -> 1`, reserve 뒤 abort는 `0 -> 1 -> 0`이고
+   live publication과 releasing 시작은 delta 0이다. 여러 sibling revoke는 기존 binding별 authority의 독립 row로 세며 queued latch와
+   revoke aggregate가 모두 0일 때만 connection mutation gate를 다시 연다. release Busy·effect Busy·terminal cleanup과 allocator
+   callback 동안 row/count를 유지한다. 정상 release는 allocator callback/quarantine settlement 뒤 `finishEventReleaseNoFail`에서
+   감소하며 그 뒤 permit consume까지 live `StreamOperationPermit`이 mutation을 계속 막는다. corrupt recovery는 terminalize에서 감소하지
+   않고 recovery permit 최종 consume 뒤 감소한다. teardown은 live/releasing event를 정산하지 않고 explicit release까지 `Busy`다.
+   stale/copy/ABA/double consume과 unauthorized underflow는 aggregate delta 0으로
    fail-stop한다. queue OOM/overflow는 in-flight row 발급 전의 기존 canonical event-ingress fail-close이며 queue latch를 게시했다고
    가장하지 않는다. allocator callback 동안 Client wire entry가 Busy이고 local pending mutation은 이후 connection terminal 정산에서
    폐기됨을 별도 hostile oracle로 고정한다.
 
-   aggregate gate의 consumer는 blocking/nonblocking input, generation control, pending-output flush, prepared/call execute,
-   resize·mouse·core·scroll·resync와 후속 2c3e RPC execute 전부다. 각 API의 상위 `RemoteRuntime` 검사와 별개로 ClientSlot/transport의
-   최종 queue-offset/syscall admission에서 queued latch와 live revoke count가 모두 0인지 검사한다. 별도 aggregate generation은 없다.
-   ClientSlot의 canonical owner-thread/registered operation fence가 이 검사부터 allocation·queue offset·syscall commit까지 no-yield
-   critical section을 소유하고, event ingress/publication도 같은 owner-thread fence를 거친다. allocator callback 재진입과 foreign thread는
+   aggregate gate의 현재 consumer는 blocking/nonblocking input, generation control, pending-output flush, prepared/call execute,
+   resize·mouse·core·scroll·resync다. 후속 2c3e RPC execute는 같은 helper 계약을 재사용하되 caller 편입과 source inventory는 2c3e
+   gate가 소유한다. 각 API의 상위 `RemoteRuntime` 검사와 별개로 ClientSlot/transport의
+   최종 queue-offset/syscall admission에서 queued latch와 revoke aggregate가 모두 0인지 검사한다. 별도 aggregate generation은 없다.
+   C3-3a1 authority와 C3-3a2 final-admission substrate는 product caller exact 0인 dormant gate로 각각 병합할 수 있다. C3-3a3에서
+   product take/release와 현재 mutation consumer를 동시에 배선하기 전에는 보호 기능 활성화나 C3-3a 완료를 주장하지 않는다.
+   각 mutation family의 ClientSlot owner-thread operation과 Client operation fence가 검사부터 allocation·queue offset·syscall commit까지
+   no-yield critical section을 소유한다. event handoff 자체는 별도로 위 `StreamOperationPermit`이 소유한다. allocator callback 재진입과 foreign thread는
    검사 전 mutation 0의 `Busy`다. gate 실패는 allocation, local/wire queue offset,
    callback과 syscall이 모두 0인 `Busy`다. target pending outbound는 offset 0만 취소하고 partial은 connection fail-close하며 sibling
    pending owner는 aggregate 동안 보존·flush 0, aggregate zero 뒤 재개한다.
@@ -1275,6 +1297,24 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    legacy attachment를, direct legacy connection에 generation attachment를 섞지 않으며 같은 Client의 mode 전환도 금지한다.
    C3-3의 generation in-flight revoke authority와 mutation gate는 이 single-mode invariant를 전제로 하고, 제품 조립·copy/stale
    hostile oracle이 혼합 mint/adopt를 wire·queue mutation 전에 거부한다. 이 invariant를 열기 전에는 공통 Client latch로 확대하지 않는다.
+
+   구현 gate는 모두 기존 confirmed-poison gate를 상속한다. C3-3a1 `test-session-host-2c3d-c3-3a1`은 Debug·ReleaseFast registry
+   runtime 7+boundary 1로 ordinary/unknown class none, revoke reserved/live/releasing, 정상·corrupt final consume, sibling
+   `0 -> 1 -> 2 -> 1 -> 0`, pre-reserve `0 -> 0`, post-reserve abort `0 -> 1 -> 0`, stale/copy/ABA/double consume과
+   unauthorized underflow delta 0, bounded scan/cache 일치를 검증하며 product caller는 exact 0이다. C3-3a2
+   `test-session-host-2c3d-c3-3a2`는 Debug·ReleaseFast final-admission runtime 7+boundary 1로 현재 mutation family의 closed
+   error/progress/owner-retention 표와 product caller 0을 고정한다. C3-3a3 `test-session-host-2c3d-c3-3a3`은 Debug·ReleaseFast product
+   runtime 8+actual-socket 2+boundary 1로 두 substrate를 동시에 활성화한다. quarantine reserve→pin reserve→generation reserve→
+   quarantine/cleanup bind의 각 fault ordinal과 `Client.commitGenerationEventTake`의
+   `Busy|Terminal|Corrupt|InvalidPrepared`에서 `(queue=1,aggregate=0,permit/pin/quarantine/reserved-authority=0)` final tuple을 검사하고,
+   queue commit 뒤
+   authority publication은 fallible operation·callback 0의 no-fail suffix임을 고정한다. callback·foreign thread·teardown·check 직후
+   revoke 경쟁은 현재 모든 generation mutation의 allocation/callback/offset/syscall 0과 owner 보존을 검증한다. target pending
+   outbound offset 0은 exact free 1/wire 0, partial offset은 no-retry fail-close, sibling pending은 offset/owner 보존·flush 0 뒤 aggregate
+   zero에서 재개한다. `pumpPendingOutput`은 기존 progress `false`, typed mutation facade는 `Busy`를 유지한다. boundary는 새 revoke
+   registry/lifecycle 0, 기존 `EventAuthority` sole SSOT, exact-15 facade, a1/a2 product caller 0, a3 final-admission helper와 현재 mutation
+   family의 exact caller inventory를 고정한다. future 2c3e caller 편입은 2c3e gate가 소유한다. C3-3b failure settlement와 C3-3c
+   actual socket/source-zero가 green이 되기 전에는 C3-3 완료를 주장하지 않는다.
 
    `client_slot`은 node/binding/pin/quarantine/payload free의 canonical resource transaction을 조정하는 유일한 owner다.
    public owner envelope의 local lifecycle은 import 방향을 보존해 `generation_event_contract`가 소유하고

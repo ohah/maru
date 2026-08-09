@@ -20,11 +20,11 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn releaseEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.reserveEventOwnerInPlace("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.takeEventProjected("));
-    try std.testing.expectEqual(@as(usize, 2), count(attachment, "generation_transport_mod.eventReadinessOwned("));
+    try std.testing.expectEqual(@as(usize, 3), count(attachment, "generation_transport_mod.eventReadinessOwned("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".takeEvent("));
     // C3-2 adds the generation product drain while preserving the legacy owner path.
-    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".releaseEvent("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, "dropBufferedStream("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".releaseEvent("));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, "dropBufferedStream("));
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
@@ -49,14 +49,14 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 3 },
         .{ .path = "platform/macos/session_host/client_slot.zig", .product = 1, .top_level_test = 0 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 0, .top_level_test = 2 },
-        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 2, .top_level_test = 0 },
+        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 2, .top_level_test = 1 },
     });
     try expectSourceIdentifierInventory(allocator, "releaseEvent", &.{
         .{ .path = "platform/macos/session_host/attach_product_resolver.zig", .product = 0, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 1 },
-        .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 3, .top_level_test = 14 },
+        .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 14 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 5, .top_level_test = 6 },
-        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 3, .top_level_test = 0 },
+        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
     });
     try expectSourceIdentifierInventory(allocator, "EventOwner", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 3 },
@@ -72,7 +72,7 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 0 },
     });
     try expectSourceIdentifierInventory(allocator, "eventReadinessOwned", &.{
-        .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 2, .top_level_test = 0 },
+        .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 3, .top_level_test = 0 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 0 },
     });
     // Raw Client event ownership is narrower than its file inventory. Pin the exact production
@@ -81,6 +81,13 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "takeEventForStream", 1);
     try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "releaseEvent", 1);
     try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "dropBufferedStream", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "takeEventForStream", 0);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "releaseEvent", 0);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "dropBufferedStream", 0);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "purgeEndedStream", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "takeEvent", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "viewEvent", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "settlePendingGenerationEvent", "releasePendingEvent", 1);
     const client = try readSource(allocator, "src/platform/macos/session_host/client.zig");
     defer allocator.free(client);
     try expectIdentifierCountInFunction(allocator, client, "dropBufferedStream", "dropBufferedStream", 1);

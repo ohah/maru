@@ -210,6 +210,16 @@ fn mapGenerationEventError(
     };
 }
 
+fn mapGenerationPurgeError(
+    err: @import("generation_transport.zig").PurgeEndedError,
+) client_mod.ClientError {
+    return switch (err) {
+        error.Busy => error.AdminBusy,
+        error.InvalidOwner, error.Corrupt => error.ProtocolError,
+        error.Terminal => error.ConnectionClosed,
+    };
+}
+
 const EventGenerationTracking = enum {
     untracked,
     tracked,
@@ -318,6 +328,7 @@ pub const RemoteRuntime = struct {
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
     pump_ended: bool,
     resync_needed: bool,
+    pending_generation_event_error: ?client_mod.ClientError,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
 
@@ -507,6 +518,7 @@ pub const RemoteRuntime = struct {
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
+        self.pending_generation_event_error = null;
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
@@ -1167,6 +1179,19 @@ pub const RemoteRuntime = struct {
         ended: bool = false,
     };
 
+    const GenerationDrainHookStage = enum {
+        before_pending_release,
+        before_purge,
+        after_purge_not_ended,
+        after_current_apply,
+        before_current_release,
+    };
+    const GenerationDrainHookDecision = enum { proceed, busy };
+    const GenerationDrainHook = *const fn (
+        *RemoteRuntime,
+        GenerationDrainHookStage,
+    ) GenerationDrainHookDecision;
+
     fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
         return switch (self.attachment) {
             .legacy => self.drainLegacyObservationEvents(),
@@ -1192,14 +1217,25 @@ pub const RemoteRuntime = struct {
     }
 
     fn drainGenerationObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
+        return self.drainGenerationObservationEventsWithHook(null);
+    }
+
+    fn drainGenerationObservationEventsWithHook(
+        self: *RemoteRuntime,
+        comptime hook: ?GenerationDrainHook,
+    ) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
         var retries_remaining = protocol.max_client_pending_events;
         while (true) {
             const generation = &self.attachment.generation;
+            try self.settlePendingGenerationEvent(generation, .before_pending_release, hook);
+            if (hook) |run| _ = run(self, .before_purge);
             switch (generation.purgeEndedStream() catch |err|
-                return mapGenerationEventError(err)) {
+                return mapGenerationPurgeError(err)) {
                 .purged => return .{ .ended = true },
-                .not_ended => {},
+                .not_ended => if (hook) |run| {
+                    _ = run(self, .after_purge_not_ended);
+                },
             }
             switch (generation.takeEvent() catch |err| return mapGenerationEventError(err)) {
                 .idle => return result,
@@ -1211,18 +1247,17 @@ pub const RemoteRuntime = struct {
                 .taken => {},
             }
             const view = generation.viewEvent() catch |err| {
-                generation.releaseEvent() catch |release_err|
-                    return mapGenerationEventError(release_err);
-                return switch (err) {
+                self.pending_generation_event_error = switch (err) {
                     error.InvalidOwner => error.ProtocolError,
                     error.Terminal => error.ConnectionClosed,
                 };
+                try self.settlePendingGenerationEvent(generation, .before_current_release, hook);
+                unreachable;
             };
             const verdict: runtime_event_wire.Verdict = switch (view.admission) {
                 .accepted => |accepted| .{ .accepted = accepted },
                 .unknown => .unknown,
             };
-            var apply_error: ?client_mod.ClientError = null;
             self.applyObservationEvent(
                 &result,
                 .{
@@ -1234,10 +1269,35 @@ pub const RemoteRuntime = struct {
                 view.payload,
                 verdict,
             ) catch |err| {
-                apply_error = err;
+                self.pending_generation_event_error = err;
             };
-            generation.releaseEvent() catch |err| return mapGenerationEventError(err);
-            if (apply_error) |err| return err;
+            if (hook) |run| _ = run(self, .after_current_apply);
+            try self.settlePendingGenerationEvent(generation, .before_current_release, hook);
+        }
+    }
+
+    fn settlePendingGenerationEvent(
+        self: *RemoteRuntime,
+        generation: *generation_attachment_mod.GenerationAttachment,
+        stage: GenerationDrainHookStage,
+        comptime hook: ?GenerationDrainHook,
+    ) client_mod.ClientError!void {
+        if (hook) |run| if (run(self, stage) == .busy) return error.AdminBusy;
+        const released = generation.releasePendingEvent() catch |err| {
+            if (err != error.Busy) self.pending_generation_event_error = null;
+            return mapGenerationEventError(err);
+        };
+        if (!released) {
+            if (self.pending_generation_event_error != null) {
+                self.pending_generation_event_error = null;
+                self.client.poison(.local_invariant_violation);
+                return error.ProtocolError;
+            }
+            return;
+        }
+        if (self.pending_generation_event_error) |err| {
+            self.pending_generation_event_error = null;
+            return err;
         }
     }
 
@@ -1249,92 +1309,92 @@ pub const RemoteRuntime = struct {
         verdict: runtime_event_wire.Verdict,
     ) client_mod.ClientError!void {
         const classification = runtime_metadata_wire.classifyAndMaterializeEvent(
-                self.allocator,
-                .{
-                    .runtime_id = self.attachment.statePtr().runtime_id,
-                    .stream_id = self.attachment.statePtr().stream_id,
+            self.allocator,
+            .{
+                .runtime_id = self.attachment.statePtr().runtime_id,
+                .stream_id = self.attachment.statePtr().stream_id,
+            },
+            .{
+                .role = switch (self.attachment.statePtr().role) {
+                    .observer => .observer,
+                    .controller => .controller,
                 },
-                .{
-                    .role = switch (self.attachment.statePtr().role) {
-                        .observer => .observer,
-                        .controller => .controller,
+                .generation = switch (self.event_generation_tracking) {
+                    .untracked => .untracked,
+                    .tracked => .{
+                        .tracked = self.attachment.statePtr().controller_generation,
                     },
-                    .generation = switch (self.event_generation_tracking) {
-                        .untracked => .untracked,
-                        .tracked => .{
-                            .tracked = self.attachment.statePtr().controller_generation,
-                        },
-                    },
                 },
-                .{
-                    .expected_major = self.client.wire_major,
-                    .metadata_support = self.client.metadata_support,
-                    .verdict = verdict,
-                },
-                .{
-                    .major = header.major,
-                    .kind = header.kind,
-                    .stream_id = header.stream_id,
-                    .request_id = header.request_id,
-                    .flags = header.flags,
-                    .payload_len = header.payload_len,
-                    .payload = payload,
-                },
-            ) catch |err| {
-                self.client.poison(if (err == error.OutOfMemory)
-                    .local_resource_exhausted
-                else
-                    .peer_contract_violation);
-                return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    else => error.ProtocolError,
-                };
+            },
+            .{
+                .expected_major = self.client.wire_major,
+                .metadata_support = self.client.metadata_support,
+                .verdict = verdict,
+            },
+            .{
+                .major = header.major,
+                .kind = header.kind,
+                .stream_id = header.stream_id,
+                .request_id = header.request_id,
+                .flags = header.flags,
+                .payload_len = header.payload_len,
+                .payload = payload,
+            },
+        ) catch |err| {
+            self.client.poison(if (err == error.OutOfMemory)
+                .local_resource_exhausted
+            else
+                .peer_contract_violation);
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.ProtocolError,
             };
+        };
         const event = switch (classification) {
-                .accepted => |accepted| accepted,
-                .violation => {
-                    self.client.poison(.peer_contract_violation);
-                    return error.ProtocolError;
-                },
-            };
+            .accepted => |accepted| accepted,
+            .violation => {
+                self.client.poison(.peer_contract_violation);
+                return error.ProtocolError;
+            },
+        };
         switch (event) {
-                .revoked => |generation| {
-                    const revoke_fence = self.attachment.applyValidatedRevokedAndFence(
-                        self.client,
-                        generation,
-                    ) catch {
-                        self.client.poison(.local_invariant_violation);
-                        return error.ProtocolError;
-                    };
-                    self.discardQueuedMutations();
-                    switch (revoke_fence) {
-                        .no_pending_stream_frame, .cancelled_before_write => {},
-                        .partial_frame_requires_close => {
-                            self.client.poison(.outbound_partial_write);
-                            return error.ConnectionClosed;
-                        },
-                    }
+            .revoked => |generation| {
+                const revoke_fence = self.attachment.applyValidatedRevokedAndFence(
+                    self.client,
+                    generation,
+                ) catch {
+                    self.client.poison(.local_invariant_violation);
+                    return error.ProtocolError;
+                };
+                self.discardQueuedMutations();
+                switch (revoke_fence) {
+                    .no_pending_stream_frame, .cancelled_before_write => {},
+                    .partial_frame_requires_close => {
+                        self.client.poison(.outbound_partial_write);
+                        return error.ConnectionClosed;
+                    },
+                }
+                result.metadata = true;
+            },
+            .invalidated => {
+                // Latch before releasing the event. The next frame-pump turn admits one
+                // bounded response-free stream ack; backpressure leaves it set for retry.
+                self.resync_needed = true;
+            },
+            .resized => |resized| {
+                const size: terminal.Size = .{ .cols = resized.cols, .rows = resized.rows };
+                if (try self.applyResizeFullState(size, resized.resize_generation))
                     result.metadata = true;
-                },
-                .invalidated => {
-                    // Latch before releasing the event. The next frame-pump turn admits one
-                    // bounded response-free stream ack; backpressure leaves it set for retry.
-                    self.resync_needed = true;
-                },
-                .resized => |resized| {
-                    const size: terminal.Size = .{ .cols = resized.cols, .rows = resized.rows };
-                    if (try self.applyResizeFullState(size, resized.resize_generation))
-                        result.metadata = true;
-                },
-                .metadata => |metadata| {
-                    var dto = metadata;
-                    defer dto.deinit();
-                    result.metadata = (self.applyMetadataDto(&dto) catch |err| {
-                        self.client.poison(.peer_contract_violation);
-                        return err;
-                    }) or result.metadata;
-                },
-                .ended => result.ended = true,
+            },
+            .metadata => |metadata| {
+                var dto = metadata;
+                defer dto.deinit();
+                result.metadata = (self.applyMetadataDto(&dto) catch |err| {
+                    self.client.poison(.peer_contract_violation);
+                    return err;
+                }) or result.metadata;
+            },
+            .ended => result.ended = true,
         }
     }
 
@@ -3790,18 +3850,12 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
         .offset = 1,
         .stream_id = 7,
     };
-    var event = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 7 },
-        .payload = try allocator.dupe(
-            u8,
-            "{\"event\":\"controller.revoked\",\"data\":{" ++
-                "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
-                "\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
-        ),
-    };
-    event.header.payload_len = @intCast(event.payload.len);
-    try rr.client.pending_events.append(allocator, event);
-    rr.client.pending_event_bytes = event.payload.len;
+    try rr.client.bufferGenerationEventForTest(
+        7,
+        "{\"event\":\"controller.revoked\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
 
     try std.testing.expectError(error.ConnectionClosed, rr.drainObservationEvents());
     try std.testing.expect(rr.client.unusable);
@@ -3811,6 +3865,218 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     );
     try std.testing.expectEqual(remote_attachment.Role.observer, rr.attachment.statePtr().role);
     try std.testing.expectError(error.Unauthorized, rr.sendInputNonBlocking("late"));
+    rr.surface.deinit();
+    rr.attachment.deinitWithAdapter(&adapter);
+}
+
+test "CR3a-2c3d C3-2 product drain purges ended generation before screen progress" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3," ++
+            "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+            "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+    );
+    defer allocator.free(response);
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&records, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&records, allocator, row);
+    const snapshot = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        records.items,
+    );
+    defer allocator.free(snapshot);
+    const Peer = struct {
+        fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            socket_server.writeAll(fd, response_wire) catch return;
+            socket_server.writeAll(fd, snapshot_wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = adapter.logicalClient();
+    rr.generation_adapter = &adapter;
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.resize_seq = 0;
+    rr.resize_generation = 0;
+    rr.resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
+    rr.observation = .{};
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    defer rr.observation.deinit(allocator);
+    try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
+    peer.join();
+
+    const Hook = struct {
+        var force_release_busy = false;
+        var inject_ended_after_purge = false;
+        var inject_apply_error = false;
+        var exhaust_retry_budget = false;
+        var ended_pending_count: usize = 0;
+
+        fn run(
+            runtime: *RemoteRuntime,
+            stage: RemoteRuntime.GenerationDrainHookStage,
+        ) RemoteRuntime.GenerationDrainHookDecision {
+            if (stage == .before_current_release and force_release_busy) {
+                force_release_busy = false;
+                return .busy;
+            }
+            if (stage == .after_purge_not_ended and inject_ended_after_purge) {
+                if (!exhaust_retry_budget) inject_ended_after_purge = false;
+                runtime.client.bufferGenerationEventForTest(
+                    runtime.attachment.streamId(),
+                    "{\"event\":\"runtime.ended\"}",
+                ) catch @panic("C3-2 race hook failed to publish ended event");
+                ended_pending_count += 1;
+            }
+            if (stage == .before_purge and exhaust_retry_budget and ended_pending_count != 0) {
+                runtime.client.dropBufferedStream(runtime.attachment.streamId());
+            }
+            if (stage == .after_current_apply and inject_apply_error) {
+                inject_apply_error = false;
+                runtime.pending_generation_event_error = error.ProtocolError;
+            }
+            return .proceed;
+        }
+    };
+    Hook.force_release_busy = true;
+    try rr.client.bufferGenerationEventForTest(7, "{\"event\":\"snapshot.invalidated\"}");
+    try std.testing.expectError(
+        error.AdminBusy,
+        rr.drainGenerationObservationEventsWithHook(Hook.run),
+    );
+    try std.testing.expect(rr.resync_needed);
+    try std.testing.expect(rr.attachment.generation.event_generation_mirror != 0);
+    const after_release_retry = try rr.drainObservationEvents();
+    try std.testing.expect(!after_release_retry.ended);
+    try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
+
+    Hook.force_release_busy = true;
+    Hook.inject_apply_error = true;
+    try rr.client.bufferGenerationEventForTest(7, "{\"event\":\"snapshot.invalidated\"}");
+    try std.testing.expectError(
+        error.AdminBusy,
+        rr.drainGenerationObservationEventsWithHook(Hook.run),
+    );
+    try std.testing.expectEqual(error.ProtocolError, rr.pending_generation_event_error.?);
+    try std.testing.expect(rr.attachment.generation.event_generation_mirror != 0);
+    try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
+    try std.testing.expect(rr.pending_generation_event_error == null);
+    try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
+
+    try rr.direct_input.appendSlice(allocator, "budget-must-not-send");
+    Hook.exhaust_retry_budget = true;
+    Hook.inject_ended_after_purge = true;
+    Hook.ended_pending_count = 0;
+    try std.testing.expectError(
+        error.AdminBusy,
+        rr.drainGenerationObservationEventsWithHook(Hook.run),
+    );
+    try std.testing.expectEqual(
+        @as(usize, protocol.max_client_pending_events + 1),
+        Hook.ended_pending_count,
+    );
+    try std.testing.expectEqualStrings("budget-must-not-send", rr.direct_input.items);
+    try std.testing.expectEqual(@as(u21, 'x'), rr.attachment.screenPtr().?.grid.cells[0].codepoint);
+    Hook.exhaust_retry_budget = false;
+    Hook.inject_ended_after_purge = false;
+    try std.testing.expect((try rr.drainObservationEvents()).ended);
+    rr.direct_input.clearRetainingCapacity();
+
+    try rr.client.bufferGenerationEventForTest(8, "{\"event\":\"runtime.ended\"}");
+    try rr.client.pending_batches.append(allocator, .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "stale-target"),
+        .allocator = allocator,
+    });
+    try rr.client.pending_batches.append(allocator, .{
+        .stream_id = 8,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "sibling"),
+        .allocator = allocator,
+    });
+    rr.client.pending_batch_bytes = "stale-target".len + "sibling".len;
+
+    Hook.inject_ended_after_purge = true;
+    const ended = try rr.drainGenerationObservationEventsWithHook(Hook.run);
+    try std.testing.expect(ended.ended);
+    try std.testing.expectEqual(@as(usize, 1), rr.client.pending_events.items.len);
+    try std.testing.expectEqual(@as(u64, 8), rr.client.pending_events.items[0].header.stream_id);
+    try std.testing.expectEqual(@as(usize, 1), rr.client.pending_batches.items.len);
+    try std.testing.expectEqual(@as(u64, 8), rr.client.pending_batches.items[0].stream_id);
+    try std.testing.expectEqualStrings("sibling", rr.client.pending_batches.items[0].bytes);
+    try std.testing.expectEqual(@as(u21, 'x'), rr.attachment.screenPtr().?.grid.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
+
+    try rr.direct_input.appendSlice(allocator, "must-not-send");
+    try rr.client.bufferGenerationEventForTest(7, "{\"event\":\"runtime.ended\"}");
+    try rr.client.pending_batches.append(allocator, .{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "second-stale-target"),
+        .allocator = allocator,
+    });
+    rr.client.pending_batch_bytes += "second-stale-target".len;
+    try std.testing.expectEqual(RemoteRuntime.PumpResult.ended, try rr.pumpDelta());
+    try std.testing.expectEqualStrings("must-not-send", rr.direct_input.items);
+    try std.testing.expect(rr.resync_needed);
+    try std.testing.expectEqual(@as(u21, 'x'), rr.attachment.screenPtr().?.grid.cells[0].codepoint);
+
     rr.surface.deinit();
     rr.attachment.deinitWithAdapter(&adapter);
 }

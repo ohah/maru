@@ -42,8 +42,8 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, "node.client.sendCoreCommandNonBlocking("));
     const transport_facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
-    // 2c3d C2 adds the paired release facade; purgeEndedStream remains a later slice.
-    try std.testing.expectEqual(@as(usize, 14), count(transport_facade, "    pub fn "));
+    // 2c3d C3-2 adds the bounded ended-purge facade without widening control.
+    try std.testing.expectEqual(@as(usize, 15), count(transport_facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn sendControl("));
     try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn sendControlNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "    pub fn sendControlNonBlocking("));

@@ -27,6 +27,7 @@ test "CR3a-2c3d C3-2 purge-first product drain boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(legacy_drain, "releaseEvent"));
     try std.testing.expectEqual(@as(usize, 1), count(legacy_drain, "dropBufferedStream"));
     try std.testing.expectEqual(@as(usize, 0), count(generation_drain, "takeEventForStream"));
+    try std.testing.expectEqual(@as(usize, 0), count(generation_drain, ".releaseEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(generation_drain, "dropBufferedStream"));
 }
 

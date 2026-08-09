@@ -1381,6 +1381,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeOutcome" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventAttachmentReadiness" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEndedPurgeOutcome" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEndedPurgeError" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "purgeGenerationEndedStream" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "generationEventCorrupt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "takeGenerationEvent" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventAttachmentReadiness" },
@@ -2200,6 +2203,7 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
         "    pub fn pumpPendingOutput(",
         "    pub fn takeEvent(",
         "    pub fn releaseEvent(",
+        "    pub fn purgeEndedStream(",
         "    pub fn fenceRevoke(",
         "    pub fn readInitialSnapshot(",
         "    pub fn poison(",
@@ -2269,7 +2273,7 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         return error.TestUnexpectedResult;
     const runtime_product = runtime_source[0..runtime_first_test];
     const raw_baseline = [_]struct { name: []const u8, count: usize }{
-        .{ .name = "wire_major", .count = 2 },
+        .{ .name = "wire_major", .count = 3 },
         .{ .name = "screen_codec_version", .count = 2 },
         .{ .name = "metadata_support", .count = 4 },
         .{ .name = "peer_attach_generation", .count = 1 },

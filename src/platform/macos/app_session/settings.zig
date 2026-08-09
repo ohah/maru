@@ -73,7 +73,7 @@ const git_command = app_session_mod.git_command;
 const pending_writeback_lists = AppSession.pending_writeback_lists;
 const rgbToHex = AppSession.rgbToHex;
 const tab_ops = @import("tab.zig");
-const workspaceHasStatusLine = AppSession.workspaceHasStatusLine;
+const workspaceHasStatusLine = @import("workspace.zig").workspaceHasStatusLine;
 
 /// rename 편집 표시 텍스트 "query+조합중preedit" + caret 1칸. caret은 `blink_visible`이면 '|', 아니면 공백 —
 /// **폭은 항상 +1로 고정**(renameDisplayWidth와 일치)이라 깜빡여도 텍스트/세그먼트 폭이 안 흔들린다. 토글은

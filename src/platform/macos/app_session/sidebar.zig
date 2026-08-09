@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const Tab = app_session_mod.Tab;
@@ -1798,7 +1799,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // (다른 repo이거나 같은 repo 다른 하위 디렉터리·브랜치) 경우에만 repo/경로(활성)와 스피너(다른 Term)가 시각적으로
         // 어긋난다 — 개요 가치를 위해 수용(code-review max 확인).
         const term = tab.activePane().activeTerm();
-        const renaming = self.renamingWorkspace(tab);
+        const renaming = workspace_ops.renamingWorkspace(self, tab);
         if (renaming) editing_row = row_i; // 이 카드 이름줄을 tail 앵커로(긴 이름 caret 유지)
         // 카드당 1회 스캔: 대표 kind + running(색칠 루프·상태줄과 공유). **rename 중에도** 실제 값을 계산한다 —
         // 편집 중에도 running 파형(상태줄)을 보여야 하기 때문(사용자 요청). 아이콘만 rename 중 숨긴다(캐럿 정렬).

@@ -1,4 +1,5 @@
 const std = @import("std");
+const workspace_ops = @import("app_session/workspace.zig");
 const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
 const sidebar_ops = @import("app_session/sidebar.zig");
@@ -99,7 +100,7 @@ pub const Pane = Model.Pane;
 pub const PaneTree = Model.PaneTree;
 pub const Tab = Model.Tab;
 const group_normalize = maru.session.group_normalize; // M3c: 그룹 정규화 순수 함수(L2 리프트) — 아래 L4 메서드가 self.tabs.items로 위임(재구현 금지)
-const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
+pub const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
 
 pub const FilePanelTestC = struct {
     extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
@@ -1069,7 +1070,7 @@ pub fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
 // chdir해 예측 불가. 존재·디렉터리 여부는 검사하지 않는다 — childExec가 chdir 실패 시 $HOME으로 graceful 폴백한다
 // (TOCTOU 회피, usableRestoreCwd와 같은 결). 반환 슬라이스는 `buf`가 살아 있는 동안(=spawn 호출까지) 유효하다.
 // loader는 raw 문자열만 보관하므로 env 의존(`~` 확장)을 여기 platform layer에서 처리한다.
-fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[]const u8 {
+pub fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[]const u8 {
     if (configured.len == 0) return null;
     var path = configured;
     // `~` 단독 또는 `~/…`를 $HOME으로 확장한다(셸의 tilde expansion은 셸을 안 거치는 execve엔 안 일어난다).
@@ -1091,7 +1092,7 @@ fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[
 // 결인데, 침습적 런처 감지 대신 "cwd가 `/`" 증상으로 좁혀 잡는다(터미널에서 띄운 정상 세션은 cwd가 `/`가 아니라
 // 그대로 상속). `launch_is_root`는 init에서 getcwd로 한 번만 판정해 주입한다(maru는 자기 cwd를 안 바꿔 시작 시
 // 한 번이면 충분 — 새 탭/분할마다 getcwd 시스템콜을 반복하지 않는다). 그래서 이 함수는 I/O 없이 순수(테스트 가능).
-fn homeForRootCwd(buf: []u8, launch_is_root: bool, home: ?[]const u8) ?[]const u8 {
+pub fn homeForRootCwd(buf: []u8, launch_is_root: bool, home: ?[]const u8) ?[]const u8 {
     if (!launch_is_root) return null; // 정상 cwd면 그대로 상속(폴백 안 함)
     const h = home orelse return null;
     if (!std.fs.path.isAbsolute(h) or h.len > buf.len) return null;
@@ -1202,7 +1203,7 @@ fn applyFontSpacing(
 /// 뒤가 안 비쳐 블러가 보이지 않으므로 0으로 깎는다 — Ghostty `ghostty_set_window_background_blur`가
 /// `background-opacity >= 1.0`에서 early-return하는 게이트와 동등. 이 정책이 단일 출처고, platform host(macOS=CGS,
 /// 추후 Win=DWM·Linux=컴포지터)는 반환값을 그대로 OS 창 속성에 싣는다. 순수 함수라 헤드리스 단위 테스트 가능.
-fn effectiveWindowBlur(blur: u32, opacity: f32) u32 {
+pub fn effectiveWindowBlur(blur: u32, opacity: f32) u32 {
     if (blur == 0) return 0;
     if (opacity >= 1.0) return 0; // 불투명 창 — 블러 안 보임
     return blur;
@@ -2548,6 +2549,55 @@ pub const MeasuredTextCache = struct {
 };
 
 pub const AppSession = struct {
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn activeWorkspaceIndex(self: *const AppSession) ?usize {
+        return workspace_ops.activeWorkspaceIndex(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
+        return workspace_ops.applyWorkspaceWindow(self, win);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn focusWorkspaceInput(self: *AppSession) void {
+        return workspace_ops.focusWorkspaceInput(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        return workspace_ops.isWindowDragRegion(self, x_px, y_px);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, out_ids: []u64) !surface_move.MoveOutcome {
+        return workspace_ops.moveWorkspaceToSession(src, dst, idx, out_ids);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn requestWindowClose(self: *AppSession) bool {
+        return workspace_ops.requestWindowClose(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru.session.workspace.Frame) ![]const u8 {
+        return workspace_ops.serializeWorkspaceWindow(self, is_active, frame);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWorkspaceFocusAction(self: *AppSession) bool {
+        return workspace_ops.takeWorkspaceFocusAction(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWorkspaceRestoreDropped(self: *AppSession) u32 {
+        return workspace_ops.takeWorkspaceRestoreDropped(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn windowBlurRadius(self: *const AppSession) u32 {
+        return workspace_ops.windowBlurRadius(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn windowTitle(self: *AppSession) []const u8 {
+        return workspace_ops.windowTitle(self);
+    }
+    /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn workspaceSurfaceCount(self: *AppSession, idx: usize) usize {
+        return workspace_ops.workspaceSurfaceCount(self, idx);
+    }
+
     /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
     pub fn configPath(self: *AppSession) []const u8 {
         return settings_ops.configPath(self);
@@ -4047,7 +4097,7 @@ pub const AppSession = struct {
 
     /// 첫 live tab이 준비된 뒤에만 renderer/frame loop를 세운다. 일반 init과 deferred workspace apply가 공유해
     /// "세션 생성 → throwaway shell → restore" 경로를 만들지 않는다.
-    fn finishInitialSurface(self: *AppSession) void {
+    pub fn finishInitialSurface(self: *AppSession) void {
         if (self.surface_initialized) return;
         std.debug.assert(self.tabs.items.len > 0);
         self.surface_initialized = true;
@@ -4523,14 +4573,6 @@ pub const AppSession = struct {
     pub const pane_grip_cols: u32 = 3;
     pub const pane_min_tab_cols: u32 = 6;
 
-    /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
-    pub fn renamingWorkspace(self: *const AppSession, tab: *Tab) bool {
-        const r = self.rename orelse return false;
-        return switch (r) {
-            .workspace => |t| t == tab,
-            else => false,
-        };
-    }
     pub fn renamingTerm(self: *const AppSession, term: *Term) bool {
         const r = self.rename orelse return false;
         return switch (r) {
@@ -5681,18 +5723,18 @@ pub const AppSession = struct {
         self.showNotice(msg);
     }
 
-    const RestoreAccountingSnapshot = struct {
+    pub const RestoreAccountingSnapshot = struct {
         notice: u32,
         dropped: u32,
 
-        fn capture(session: *const AppSession) RestoreAccountingSnapshot {
+        pub fn capture(session: *const AppSession) RestoreAccountingSnapshot {
             return .{
                 .notice = session.ended_placeholder_notice_pending,
                 .dropped = session.ended_placeholder_dropped_pending,
             };
         }
 
-        fn restore(snapshot: RestoreAccountingSnapshot, session: *AppSession) void {
+        pub fn restore(snapshot: RestoreAccountingSnapshot, session: *AppSession) void {
             session.ended_placeholder_notice_pending = snapshot.notice;
             session.ended_placeholder_dropped_pending = snapshot.dropped;
         }
@@ -6304,22 +6346,14 @@ pub const AppSession = struct {
         };
     }
 
-    /// 워크스페이스 cascade(close_tab/close_term이 단일 pane에서 떨어질 때)를 범위로 해석한다 — split이면 활성 pane만
-    /// collapse, 단일 pane이면 탭(마지막 탭이면 세션 전체)을 닫는다. resolveCloseScope의 하위 단계(단일 출처).
-    fn resolveWorkspaceScope(self: *AppSession) CloseScope {
-        if (pane_ops.activeTabHasSplit(self)) return .pane;
-        if (self.tabs.items.len == 1) return .session;
-        return .{ .tab = self.app_window.active_tab };
-    }
-
     /// 닫기 진입점이 실제로 무엇을 teardown하는지 cascade(Term>pane>탭>창)를 **단일 출처**로 해석한다. 판정
     /// (scopeHasRunningJob)과 실행(executeClose)이 이 한 함수를 공유해, 둘이 따로 인코딩돼 갈리는 일(과도하게 넓거나
     /// 좁게 묻기·엉뚱한 대상 닫기)을 막는다.
     fn resolveCloseScope(self: *AppSession, target: PendingClose) CloseScope {
         return switch (target) {
             .active_term => .term,
-            .term_or_pane => if (pane_ops.activePane(self).terms.items.len > 1) .term else self.resolveWorkspaceScope(),
-            .pane_or_tab => self.resolveWorkspaceScope(),
+            .term_or_pane => if (pane_ops.activePane(self).terms.items.len > 1) .term else workspace_ops.resolveWorkspaceScope(self),
+            .pane_or_tab => workspace_ops.resolveWorkspaceScope(self),
             .tab_index => |idx| if (idx >= self.tabs.items.len)
                 .none
             else if (self.tabs.items.len == 1)
@@ -6354,7 +6388,7 @@ pub const AppSession = struct {
     }
 
     /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.
-    fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
+    pub fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
         const scope = self.resolveCloseScope(target);
         // 에이전트 행 ✕는 **활성과 다른 Term**을 닫을 수 있다 — scopeHasRunningJob의 .term/.pane 가지는 활성 기준이라
         // 그대로 쓰면 "돌고 있는 백그라운드 에이전트를 닫는데 활성 Term이 idle이라 확인 없이 죽는다". 인덱스 경로로
@@ -6523,7 +6557,7 @@ pub const AppSession = struct {
     /// 당황하지 않는다. 멱등(`ended_guidance_written`) — 매 resize/재적용마다 덧쓰지 않는다.
     /// 호출 시점이 중요하다: `applyWorkspaceWindow` 꼬리의 `resizeTabPanes` **뒤**에 불러 최종 pane 폭에서 써야
     /// reflow로 줄이 어긋나지 않는다.
-    fn writeEndedPlaceholderGuidance(self: *AppSession, term: *Term) void {
+    pub fn writeEndedPlaceholderGuidance(self: *AppSession, term: *Term) void {
         if (!term.rt.ended_placeholder or term.rt.ended_guidance_written) return;
         const title = term.auto_title.items;
         const cwd = term.rt.observation.cwd.items;
@@ -6547,16 +6581,6 @@ pub const AppSession = struct {
         if (text.len == 0) return; // 한 줄도 못 썼으면 래치를 세우지 않는다 — 다음 호출이 다시 시도한다.
         term.rt.ended_guidance_written = true;
         self.writeSurfaceGuidance(term.surface, text);
-    }
-
-    /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
-    /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
-    /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
-    pub fn requestWindowClose(self: *AppSession) bool {
-        if (file_panel_ops.blockSessionExitForFilePanels(self)) return true;
-        if (!self.closeTargetHasRunningJob(.window)) return false;
-        self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
-        return true;
     }
 
     /// Cmd+Q/메뉴 "Quit maru"/Dock·로그아웃에 의한 앱 전체 종료 ABI(maru_macos_app_session_request_app_quit)가 부른다.
@@ -6656,7 +6680,7 @@ pub const AppSession = struct {
     }
 
     /// 닫기 확인 모달(라벨 "닫기"/"취소"). 보류 대상은 caller(requestClose/requestWindowClose)가 pending_close에 둔다.
-    fn showConfirm(self: *AppSession, message: []const u8, target: PendingClose) void {
+    pub fn showConfirm(self: *AppSession, message: []const u8, target: PendingClose) void {
         self.showConfirmButtons(.{ .close = target }, message, .{ .confirm = "닫기", .cancel = "취소" });
     }
 
@@ -6750,28 +6774,6 @@ pub const AppSession = struct {
     // 단 src 측 잔존 탭 재정규화(normalizePinnedFromGroups 등)는 closeTab tail 그대로 돈다. Swift 창 수명(빈 source
     // close·목적지 focus)은 M3d-2b(ABI outcome 소비).
 
-    /// 이 창의 trust 분류(§8A.5) — chrome_minimal이면 quick, 아니면 normal. cross-window 이동의 trust boundary
-    /// (`crossesTrustBoundary`) 판정에 쓴다. quick은 이동 단위에서 제외(§4)라 v1 실 경로는 normal↔normal뿐이지만,
-    /// revoke_caps guard+hook을 정확히 계산하려면 kind가 필요하다.
-    fn windowKind(self: *const AppSession) maru.session.WindowKind {
-        return if (self.chrome_minimal) .quick else .normal;
-    }
-
-    /// `idx` 워크스페이스의 surface 수(범위 밖=0). moveWorkspaceToSession의 참 이동 개수(버퍼 절단과 무관, [6]).
-    pub fn workspaceSurfaceCount(self: *AppSession, idx: usize) usize {
-        if (idx >= self.tabs.items.len) return 0;
-        return tab_ops.tabSurfaceCount(self.tabs.items[idx]);
-    }
-
-    /// M3d-2b 단일 카드 이동 배선 — 활성 워크스페이스(탭) 인덱스(read-only). Swift 메뉴가 이 인덱스를
-    /// `moveWorkspaceToSession`(ABI move_workspace_to)에 넘겨 활성 카드 **하나**만 다른 창으로 옮긴다(merge는
-    /// 전체라 인덱스 불요). `app_window`는 `surface_initialized` 전엔 `undefined`(1215)라 그 전/탭 전무면 null —
-    /// 호출부(ABI)가 sentinel로 접어 Swift가 무동작. `activeTab()`과 같은 `app_window.active_tab` 활성 단일 출처.
-    pub fn activeWorkspaceIndex(self: *const AppSession) ?usize {
-        if (!self.surface_initialized or self.tabs.items.len == 0) return null;
-        return self.app_window.active_tab;
-    }
-
     /// 이 세션의 모든 워크스페이스 surface 총수 — mergeSessionInto(cross-window)의 참 이동 개수(버퍼 절단과 무관, [6]).
     pub fn totalSurfaceCount(self: *AppSession) usize {
         var n: usize = 0;
@@ -6788,18 +6790,6 @@ pub const AppSession = struct {
     /// 각 세션을 순회하고, 확정 직전에도 다시 검사한다.
     pub fn hasProtectedFilePanelsForExit(self: *const AppSession) bool {
         return file_panel_ops.hasProtectedFilePanelsForExitExcluding(self, null);
-    }
-
-    /// M3d-2a-i 이동 **범위 게이트**(code-review [1]) — 이 워크스페이스가 라이브 이동 지원 범위 안인가. M3d-2a-i는
-    /// **비-그룹·비-pinned** 워크스페이스만 옮긴다(그룹 마커 문자열 free·pinned prefix 재정규화는 M3d-2a-ii). 범위 밖이면
-    /// `adoptTab`의 이탈 정규화(top_level/local_pinned만 리셋)로는 불변식(pinned prefix·그룹 파티션)이 깨져 다음 pin/group/
-    /// sidebar 연산의 `assertPinnedPrefixRuntime`가 패닉한다. 범위 밖 = **pinned**(전역 고정 프리픽스) or **group_start!=null**
-    /// (그룹 시작 마커) or **그룹 멤버**(enclosingGroupMarkerIndex != null). caller는 detach(비가역) **전에** 검사해 거부한다.
-    fn isMovableWorkspace(self: *const AppSession, idx: usize) bool {
-        if (idx >= self.tabs.items.len) return false;
-        const tab = self.tabs.items[idx];
-        if (tab.pinned or tab.group_start != null) return false;
-        return self.enclosingGroupMarkerIndex(idx) == null;
     }
 
     /// Cross-window model surgery가 source의 moved Term queue를 지우기 전에 destination allocator로
@@ -6823,7 +6813,7 @@ pub const AppSession = struct {
         /// reservation 뒤 source composition이 무할당 commit된 다음 호출한다. prepare 단계가
         /// destination/source current remainder와 예약된 preedit 길이만큼 capacity를 이미 확보했으므로
         /// 여기서는 allocation 없이 실제 최신 remainder를 복사한다.
-        fn capture(self: *PreparedPendingPasteTransfer, src: *AppSession, dst: *AppSession) void {
+        pub fn capture(self: *PreparedPendingPasteTransfer, src: *AppSession, dst: *AppSession) void {
             for (self.entries.items) |*entry| {
                 if (dst.pending_pastes.get(entry.surface_id)) |destination| {
                     if (destination.offset < destination.buf.items.len) {
@@ -6838,7 +6828,7 @@ pub const AppSession = struct {
             }
         }
 
-        fn commit(self: *PreparedPendingPasteTransfer, dst: *AppSession) void {
+        pub fn commit(self: *PreparedPendingPasteTransfer, dst: *AppSession) void {
             for (self.entries.items) |*entry| {
                 if (dst.pending_pastes.fetchRemove(entry.surface_id)) |kv| {
                     var old = kv.value;
@@ -6851,7 +6841,7 @@ pub const AppSession = struct {
         }
     };
 
-    fn preparePendingPasteTransfer(
+    pub fn preparePendingPasteTransfer(
         src: *AppSession,
         dst: *AppSession,
         tabs: []const *Tab,
@@ -6904,91 +6894,6 @@ pub const AppSession = struct {
         return prepared;
     }
 
-    /// 라이브 cross-window workspace 이동(M3d-2a-i) — src의 `idx` 워크스페이스를 detach(무-destroy)해 dst에 adopt(무-재시작).
-    /// outcome을 라이브 수술 결과에서 **직접** 채운다(§1.3): cross_window=src!=dst · source_window_closed=cross-window로 src가
-    /// 빈 경우 · moved_surfaces=이동 서브트리의 surface_id(out_ids backing) · revoke_caps=cross_window && trust boundary 교차.
-    /// same-window(src==dst)면 reorder로 보존(재구현 아님). idx 범위 밖 or dst OOM이면 error — 원자성: dst capacity를 detach
-    /// **전에** 예약해 실패 시 source 불변(promotePaneToNewWorkspace 선례). 빈 source면 `ended_seen`을 직접 latch(§1.6 —
-    /// activeSurface 접근 없이; 실제 창 close는 M3d-2b Swift가 source_window_closed 신호로 수행).
-    pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, out_ids: []u64) !surface_move.MoveOutcome {
-        if (idx >= src.tabs.items.len) return error.InvalidCoordinate;
-        // 범위 게이트(code-review [1]): M3d-2a-i는 비-그룹·비-pinned 워크스페이스만. detach(비가역) **전에** 거부해 source
-        // 불변(pinned/group 워크스페이스 이동은 M3d-2a-ii). 안 막으면 adoptTab의 부분 정규화가 pinned prefix·그룹 파티션을 깬다.
-        if (!src.isMovableWorkspace(idx)) return error.UnsupportedMove;
-        // 창당 경로 유일성(§1)은 merge뿐 아니라 **워크스페이스 이동**에도 적용된다 — 이 워크스페이스가 든
-        // 파일이 destination에 이미 열려 있으면 이동 뒤 같은 경로가 두 Term으로 공존한다. detach(비가역)
-        // 전에 거부한다. 병합처럼 자동 해소하지 않는 이유는 여기서는 **한 워크스페이스만** 옮기는 것이라
-        // 어느 쪽을 닫아도 사용자가 고르지 않은 창이 바뀌기 때문이다(code-review max).
-        if (src != dst) {
-            for (src.tabs.items[idx].panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    const entry = term.file_entry orelse continue;
-                    if (file_panel_ops.fileEntryForPath(dst, entry.path) != null) {
-                        // 거부는 조용하면 안 된다 — ABI는 move_failed로만 돌아가고 Swift는 그걸 그냥 흘린다.
-                        src.showNotice("대상 창에 같은 파일이 이미 열려 있어 워크스페이스를 옮기지 못했습니다.");
-                        return error.UnsupportedMove;
-                    }
-                }
-            }
-            if (file_panel_ops.fileEntryCount(dst) + file_panel_ops.countTabFileEntries(src.tabs.items[idx]) > dock_panel.max_entries) {
-                src.showNotice("대상 창의 파일 탭이 너무 많아 워크스페이스를 옮기지 못했습니다.");
-                return error.UnsupportedMove;
-            }
-            // 옮겨가는 파일을 destination 탐색기·watch 집합에 등록한다 — 안 하면 그 파일의 외부 변경
-            // 감지가 죽고 최근 목록에도 안 뜬다(mergeFilePanelStateInto와 같은 계약, code-review max).
-            try dst.adoptMovedFileTermsIntoExplorer(src.tabs.items[idx], src);
-        }
-        // before(수술 전, 순수): 이동 서브트리 surface_id 수집 + trust kind. surface_id는 이동 중 불변이라 순서만 안정하면 된다.
-        const moved = tab_ops.collectTabSurfaceIds(src.tabs.items[idx], out_ids);
-        const from_kind = src.windowKind();
-        const to_kind = dst.windowKind();
-        const cross_window = src != dst;
-        // 원자성(§8A.3): dst capacity를 detach(비가역 src 수술) **전에** 예약 — 실패하면 src 불변. adoptTab도 자체 예약(dst
-        // 단독 원자성)하지만, 이 pre-reserve가 두-세션 트랜잭션의 source 불변을 보장한다(예약됨 → adoptTab 내부 예약은 no-op).
-        try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
-        try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
-        // 활성 input owner가 바뀌는 세션의 client-local preedit을 구조 수술 전에 원 surface로 확정한다.
-        // cross-window는 active source가 떠날 수 있고 adoptTab이 destination의 active tab을 바꾸므로, 필요한
-        // 양쪽 terminal queue capacity를 모두 먼저 예약한다. 둘째 예약 OOM 뒤 첫 owner만 확정되는 partial
-        // commit을 막고, 어느 실패에서도 detach 전 양쪽 overlay/pin/queue의 논리 상태를 보존한다.
-        const src_owner_changes = if (cross_window) idx == src.app_window.active_tab else idx != src.app_window.active_tab;
-        const dst_owner_changes = cross_window;
-        var src_composition: ?StructuralCompositionReservation = null;
-        errdefer if (src_composition) |*reservation| reservation.rollback();
-        var dst_composition: ?StructuralCompositionReservation = null;
-        errdefer if (dst_composition) |*reservation| reservation.rollback();
-        if (src_owner_changes) src_composition = try src.reserveCompositionForStructuralMove();
-        if (dst_owner_changes) dst_composition = try dst.reserveCompositionForStructuralMove();
-        // source composition을 commit하면 moved queue remainder가 늘 수 있다. 그 최댓값까지 destination
-        // buffer를 먼저 확보해, 이 시점 이후에는 composition/queue/tree가 모두 infallible하게 전이된다.
-        const source_extra_id = if (src_composition) |reservation| reservation.target_id else null;
-        const source_extra_len = if (src_composition) |reservation| reservation.preedit_len else 0;
-        var pending_transfer = try preparePendingPasteTransfer(
-            src,
-            dst,
-            src.tabs.items[idx .. idx + 1],
-            if (cross_window) source_extra_id else null,
-            if (cross_window) source_extra_len else 0,
-        );
-        defer pending_transfer.deinit();
-        if (src_composition) |*reservation| reservation.commit(!cross_window);
-        if (dst_composition) |*reservation| reservation.commit(true);
-        pending_transfer.capture(src, dst);
-        pending_transfer.commit(dst);
-        const tab = tab_ops.detachTabForMove(src, idx, false, cross_window).?; // 위에서 idx 검증 → non-null. 단일 이동이라 즉시 사이드바 재빌드.
-        try tab_ops.adoptTab(dst, tab, false); // capacity 예약됨 → 무실패. insert+정규화+resize+trace 재지정.
-        const source_closed = cross_window and src.tabs.items.len == 0; // §1.6: cross-window로 src가 비었나
-        if (source_closed) src.ended_seen = true; // 빈 source 종료 latch(직접 — activeSurface 안 만짐, 실제 close는 M3d-2b)
-        return .{
-            .moved_surfaces = moved,
-            .from_window = @intCast(@intFromPtr(src)), // opaque window_id(§1 — 라우팅 키 아님). M3d-2b가 Swift window_id로 대체.
-            .to_window = @intCast(@intFromPtr(dst)),
-            .cross_window = cross_window,
-            .revoke_caps = cross_window and surface_move.crossesTrustBoundary(from_kind, to_kind),
-            .source_window_closed = source_closed,
-        };
-    }
-
     /// 라이브 전체 window merge(M3d-2a-i, §1·§4) — src의 **모든** 워크스페이스를 dst로 옮기고 src를 비운다(source_window_closed
     /// 항상 true). 각 워크스페이스를 순서대로 detach(0)→adopt한다(detach가 앞에서 빼므로 항상 idx 0). moved_surfaces는 수술
     /// 전 src 전체 surface_id(out_ids backing, 초과분 조용히 절단). src==dst(자기 merge)면 no-op. FP6 dirty 도크가 먼저
@@ -7009,12 +6914,12 @@ pub const AppSession = struct {
         // 범위 게이트(code-review [1]): merge는 src **모든** 워크스페이스를 옮기므로, 하나라도 범위 밖(pinned·그룹 마커·그룹
         // 멤버)이면 detach(비가역) **전에** 거부한다 → source·dst 완전 불변(그룹/pinned window merge는 M3d-2a-ii).
         for (0..src.tabs.items.len) |i| {
-            if (!src.isMovableWorkspace(i)) return error.UnsupportedMove;
+            if (!workspace_ops.isMovableWorkspace(src, i)) return error.UnsupportedMove;
         }
         try dst.tabs.ensureUnusedCapacity(dst.allocator, src.tabs.items.len);
         try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, src.tabs.items.len);
-        const from_kind = src.windowKind();
-        const to_kind = dst.windowKind();
+        const from_kind = workspace_ops.windowKind(src);
+        const to_kind = workspace_ops.windowKind(dst);
         var moved_n: usize = 0;
         for (src.tabs.items) |tab| moved_n = tab_ops.appendTabSurfaceIds(tab, out_ids, moved_n);
         moved_n = dock_ops.appendDockSurfaceIds(src, out_ids, moved_n);
@@ -8180,20 +8085,6 @@ pub const AppSession = struct {
         return true;
     }
 
-    /// 고정 시작 디렉터리(config `workspace.root`)를 spawn cwd로 해석한다 — **첫 창**과, inherit 토글이 꺼졌거나
-    /// 상속할 포커스 cwd가 없을 때의 폴백. 설정돼 있으면 `~` 확장·절대경로 필터(resolveWorkspaceRoot)를 거치고,
-    /// 비어 있으면 launch cwd를 상속하되 그게 `/`이면 $HOME으로 올린다(homeForRootCwd — .app 더블클릭 친절).
-    /// null이면 자식이 maru의 cwd를 그대로 상속한다. 결과 슬라이스는 `buf`(또는 config arena)에 묶이므로 호출자는
-    /// spawn이 끝날 때까지 `buf`를 살려 둔다. $HOME·getcwd 같은 env/I/O는 platform layer만 아는 값이라 여기서 읽는다.
-    fn workspaceRootCwd(self: *const AppSession, buf: []u8) ?[]const u8 {
-        const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
-        const configured = self.loaded_config.config.workspace.root;
-        if (configured.len > 0) return resolveWorkspaceRoot(buf, configured, home);
-        // 미설정: launch cwd 상속이 기본. 단 launch cwd가 `/`였으면(.app 더블클릭) home으로 올린다. `/` 판정은
-        // init에서 한 번 캐시한 launch_cwd_is_root를 쓴다 — maru는 자기 cwd를 안 바꿔 새 탭/분할마다 getcwd 불요.
-        return homeForRootCwd(buf, self.launch_cwd_is_root, home);
-    }
-
     /// 새 split(팬)·새 Term(서페이스)이 상속할 cwd — 포커스된(활성 pane의 활성) Term이 OSC 7로 보고한 현재
     /// cwd(절대경로 형식일 때만; usableRestoreCwd 필터)를 **`buf`로 복사해** 돌려준다. 못 받았으면(셸 통합 없음·
     /// 첫 프롬프트 전) null.
@@ -8232,7 +8123,7 @@ pub const AppSession = struct {
         if (inherit) {
             if (self.focusedTermCwd(buf)) |c| return c; // 포커스 Term cwd 상속(켜짐 + 보고됨) — buf로 복사됨
         }
-        return self.workspaceRootCwd(buf); // 꺼졌거나 상속할 cwd 없음 → 고정 root
+        return workspace_ops.workspaceRootCwd(self, buf); // 꺼졌거나 상속할 cwd 없음 → 고정 root
     }
 
     /// 새 surface spawn 요청에 cwd를 채운다(newSurfaceCwd 결과를 `req.cwd`에 얹는다). 모든 spawn 진입점
@@ -8326,7 +8217,7 @@ pub const AppSession = struct {
                 // 2단계 close로 보내는 것은 `requestClose`가 `scope == .term`에서 이미 한다.
                 .workspace => self.requestClose(.term_or_pane),
                 .dock_pending => if (!dock_ops.pendingDockEntryOwnsInput(self)) {
-                    self.focusWorkspaceInput();
+                    workspace_ops.focusWorkspaceInput(self);
                     self.requestClose(.term_or_pane);
                 },
                 // FP16: "focused group의 active entry" 자리를 활성 Term이 대신한다.
@@ -9298,15 +9189,6 @@ pub const AppSession = struct {
         return pending;
     }
 
-    /// 마지막 복원이 조용히 버린 항목 수를 소비한다(읽고 0으로 리셋 — 다른 take_* 게터와 같은 규약). Swift는 apply
-    /// 성공 직후 이걸 읽어 0이 아니면 checkpoint 차단 래치를 세운다. 소비형인 이유: 창마다 apply가 따로 호출되므로
-    /// 창별 결과를 누적 없이 봐야 하고, 한 번 읽은 뒤 남겨 두면 다음 창의 판정을 오염시킨다.
-    pub fn takeWorkspaceRestoreDropped(self: *AppSession) u32 {
-        const dropped = self.workspace_restore_dropped;
-        self.workspace_restore_dropped = 0;
-        return dropped;
-    }
-
     pub fn rowFileIdentity(row: file_tree.Row) ?file_tree.Identity {
         return switch (row) {
             .root => |v| v.identity,
@@ -9542,26 +9424,6 @@ pub const AppSession = struct {
         if (pane.terms.items.len == 0) return null;
         const entry = pane.activeTerm().file_entry orelse return null;
         return if (entry.surface_id == 0) null else entry.surface_id;
-    }
-
-    pub fn focusWorkspaceInput(self: *AppSession) void {
-        dock_ops.cancelPendingDockFocus(self);
-        // A terminal/body click takes the keyboard owner away from the archive list.  Without
-        // releasing that ownership, Enter/PageUp/PageDown would keep driving an open dock while
-        // the user was visibly typing in the workspace terminal.
-        agent_dock.releaseAgentSessionDockKeyFocus(self);
-        self.agent_session_dock_interaction.capture = null;
-        self.focus_owner = .workspace;
-        self.workspace_focus_pending = false;
-        self.file_tree_focus_pending = false;
-        self.file_tree_restore_surface_pending = null;
-        self.metal_dirty = true;
-    }
-
-    pub fn takeWorkspaceFocusAction(self: *AppSession) bool {
-        const pending = self.workspace_focus_pending;
-        self.workspace_focus_pending = false;
-        return pending;
     }
 
     pub fn takeFilePanelCloseUnlockAction(self: *AppSession) ?FilePanelCloseUnlockAction {
@@ -10042,22 +9904,6 @@ pub const AppSession = struct {
         return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
     }
 
-    /// 창의 **어느 탭에든** web Term이 있나(FrameSummary.web_surfaces_present 원천). **유지 카운터가 아니라 매 tick
-    /// 트리에서 계산**한 신호라 창 간 이동(moveWorkspaceToSession=detach/adopt 포인터 relocate, destroy/create 없음)·
-    /// 재부모화·닫기 어느 경로에도 트리가 단일 출처로 자동 정합한다(옛 유지 카운터는 이동에서 원본 stuck-high·대상
-    /// stuck-0으로 드리프트했다). alloc-free 재귀.
-    ///
-    /// FP16c로 `collectWebSurfaces` 수집 범위가 창 전체가 됐으므로 presence 신호도 같은 범위여야
-    /// 한다 — 활성 탭만 보면 비활성 워크스페이스의 첫 web surface 생성 전이가 영영 미적용된다(FP3이 도크에서
-    /// 실측으로 겪은 것과 같은 결함).
-    fn windowHasWebTerm(self: *AppSession) bool {
-        if (!self.surface_initialized or self.tabs.items.len == 0) return false;
-        for (self.tabs.items) |tab| {
-            if (PaneTree.anyLeaf(tab.tree, pane_ops.paneHasWebTerm)) return true;
-        }
-        return false;
-    }
-
     // ── 파일 entry 접근 (FP16b 선행 — docs/file-panel.md §10 B-1) ─────────────────────────────────
     //
     // 이 창에 **열린 파일 entry 집합**을 묻는 유일한 창구다. 저장소는 이제 `Term.file_entry`다(FP16b 완료) —
@@ -10097,7 +9943,7 @@ pub const AppSession = struct {
     /// `executeClose`가 소유하는 별도 정책이다.
     /// 창 간 이동으로 들어오는 파일들을 이 창의 탐색기 recent·watch 집합에 등록한다. 실패하면 아무것도
     /// 바꾸지 않는다(후보 트리에 다 쓴 뒤 무실패 commit) — 호출자는 detach 전에 이걸 부른다.
-    fn adoptMovedFileTermsIntoExplorer(dst: *AppSession, tab: *Tab, src: *AppSession) !void {
+    pub fn adoptMovedFileTermsIntoExplorer(dst: *AppSession, tab: *Tab, src: *AppSession) !void {
         var candidate = try dst.file_tree.clone();
         defer candidate.deinit();
         var extras: [dock_panel.max_entries]([]const u8) = undefined;
@@ -10137,15 +9983,6 @@ pub const AppSession = struct {
         file_panel_ops.buildPreparedFileTreeRows(dst, &candidate, &rows);
         file_panel_ops.commitFileTreeCandidate(dst, &candidate, &rows);
         dst.file_tree_rows_dirty = true;
-    }
-
-    /// 이 창의 전체 Term 수. 병합 계획이 "이만큼 닫으면 창이 빈다"를 누적으로 판정할 때 쓴다.
-    pub fn windowTermCount(self: *const AppSession) usize {
-        var n: usize = 0;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| n += pane.terms.items.len;
-        }
-        return n;
     }
 
     pub fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {
@@ -10491,7 +10328,7 @@ pub const AppSession = struct {
     };
 
     fn webSurfacesPresent(self: *AppSession) bool {
-        return self.windowHasWebTerm() or file_panel_ops.dockHasLiveSurface(self);
+        return workspace_ops.windowHasWebTerm(self) or file_panel_ops.dockHasLiveSurface(self);
     }
 
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
@@ -11473,7 +11310,7 @@ pub const AppSession = struct {
             if (std.mem.eql(u8, tkey, "shell.args")) {
                 self.setShellArgs(editor); // 공백-토큰 분리
             } else if (std.mem.eql(u8, tkey, "workspace.root")) {
-                self.setWorkspaceRoot(editor); // 시작 디렉터리 — loader와 형식 검증 공유
+                workspace_ops.setWorkspaceRoot(self, editor); // 시작 디렉터리 — loader와 형식 검증 공유
             } else if (std.mem.eql(u8, tkey, "env.")) {
                 self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
                 settings_ops.refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
@@ -11550,26 +11387,6 @@ pub const AppSession = struct {
         while (it.next()) |tok| list.append(a, a.dupe(u8, tok) catch return) catch return;
         self.loaded_config.config.shell.args = list.toOwnedSlice(a) catch return;
         settings_ops.markConfigKeyDirty(self, "shell.args");
-    }
-
-    /// 세팅 GUI에서 시작 디렉터리(workspace.root) 커밋 — loader와 같은 형식 규칙(`loader.isValidWorkspaceRoot`)으로
-    /// 검증해 드리프트를 막는다(config-gui.md §1·§6.6a). 빈 값=상속 cwd로 클리어, 절대경로/`~`는 저장(arena dupe),
-    /// 상대경로·`~user`는 무시+안내. `~` 확장·존재 검증은 spawn 시점(resolveWorkspaceRoot)이 하므로 여기선 형식만 본다.
-    /// root는 셸 spawn 시점에만 쓰이므로 라이브 재적용 없이 dirty만 찍는다(다음 새 Term부터 — shell.args/env와 같은 결).
-    fn setWorkspaceRoot(self: *AppSession, text: []const u8) void {
-        const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
-        if (trimmed.len == 0) {
-            self.loaded_config.config.workspace.root = ""; // 클리어 → 상속 cwd(기본)
-            settings_ops.markConfigKeyDirty(self, "workspace.root");
-            return;
-        }
-        if (!config_mod.loader.isValidWorkspaceRoot(trimmed)) {
-            self.chrome_host.settings.setMessage("시작 디렉터리는 절대경로 또는 ~/… 여야 합니다 (상대경로·~user 무시)");
-            return;
-        }
-        const owned = self.loaded_config.arena.allocator().dupe(u8, trimmed) catch return;
-        self.loaded_config.config.workspace.root = owned;
-        settings_ops.markConfigKeyDirty(self, "workspace.root");
     }
 
     /// env.<name>을 value로 upsert한다(있으면 교체, 없으면 추가 — config.env는 "KEY=VALUE" 리스트). value는 양끝 trim
@@ -12158,17 +11975,6 @@ pub const AppSession = struct {
     /// 사이 tick에 Term이 사라져도 재조회에서 걸러지고 dangling이 없다.
     pub const WorkspaceAgent = struct { pane: usize, term: usize };
 
-    /// 이 워크스페이스의 **모든 에이전트 Term**을 트리 순서(Pane 순회 → Pane 안 Term 순서)로 모은다.
-    /// 상태나 시각으로 재정렬하지 않는다 — 같은 자리의 에이전트가 상태 변화마다 목록에서 튀면 클릭 대상이 흔들린다(§2).
-    fn collectWorkspaceAgents(tab: *Tab, out: *std.ArrayList(WorkspaceAgent), allocator: std.mem.Allocator) void {
-        for (tab.panes.items, 0..) |pane, pi| {
-            for (pane.terms.items, 0..) |t, ti| {
-                if (t.kind != .terminal or t.agent_kind == .none) continue;
-                out.append(allocator, .{ .pane = pi, .term = ti }) catch return; // OOM: 이번 투영만 짧게(다음 rebuild가 복구)
-            }
-        }
-    }
-
     /// 카드 아래에 붙는 **에이전트 목록 행**을 방출한다(§1 규칙): 0개면 아무것도, 1개면 행 하나만(토글 없음),
     /// 2개 이상이면 `N agents` 토글 + (펼쳐졌으면) 행들. 접힘은 `tab.agents_collapsed`가 든다(비영속, §4).
     fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8) void {
@@ -12176,7 +11982,7 @@ pub const AppSession = struct {
         const tab = self.tabs.items[tab_index];
         var agents: std.ArrayList(WorkspaceAgent) = .empty;
         defer agents.deinit(self.allocator);
-        collectWorkspaceAgents(tab, &agents, self.allocator);
+        workspace_ops.collectWorkspaceAgents(tab, &agents, self.allocator);
         if (agents.items.len == 0) return;
         // **1개일 때도 토글을 낸다.** 처음엔 "1개면 토글 없이 행 하나"로 뒀지만(토글이 군더더기라고 봤다), 실사용에서
         // 에이전트 하나짜리 카드도 접을 수 없어 목록이 길어지는 게 불편했다(사용자 요청). 접기는 개수와 무관하게
@@ -12842,7 +12648,7 @@ pub const AppSession = struct {
             .dock_pending => self.inputFocus() == .terminal,
             .workspace, .file_tree => false,
         };
-        if (stale_dock_owner) self.focusWorkspaceInput();
+        if (stale_dock_owner) workspace_ops.focusWorkspaceInput(self);
         return self.handleKeyEvent(event);
     }
 
@@ -13271,7 +13077,7 @@ pub const AppSession = struct {
                 // 실제 NSEvent source가 workspace browser이므로 stale dock owner/publish barrier를 먼저 버린다.
                 // WebView에서 Metal successor로 responder를 넘겨야 하므로 logical owner 정합뿐 아니라 native
                 // one-shot도 함께 요청한다. confirm을 취소해 browser가 남아도 다음 키의 SSOT는 workspace다.
-                self.focusWorkspaceInput();
+                workspace_ops.focusWorkspaceInput(self);
                 self.workspace_focus_pending = true;
                 self.requestClose(.term_or_pane);
             }
@@ -13279,7 +13085,7 @@ pub const AppSession = struct {
             // 명시적 사용자 바인딩 호환 action이지만 terminal 전용이다. 파일 WebView에서는 resolver가 반환해도
             // consume-only no-op이고, active browser capability에서만 workspace cascade를 허용한다.
             if (source != .workspace_browser) return false;
-            self.focusWorkspaceInput();
+            workspace_ops.focusWorkspaceInput(self);
             self.workspace_focus_pending = true;
             self.requestClose(.term_or_pane);
         } else {
@@ -13345,14 +13151,6 @@ pub const AppSession = struct {
     /// 단축키 힌트 config를 ABI용 값으로(Swift 홀드 감지가 읽어 enabled/지연/트리거 모디파이어 결정). modifier:
     /// 0=command·1=control·2=option. gesture 정책은 Zig(config) 단일 출처, 타이머 clock만 Swift(native 최소).
     pub const KeyHintConfigAbi = struct { enabled: bool, delay_ms: u32, modifier: u32 };
-
-    /// 창 뒤 배경 블러의 **유효 반경**(px). config `window.blur`를 그대로 주되, `window.opacity >= 1`이면(불투명 창 —
-    /// 뒤가 안 비쳐 블러가 보이지 않음) 0으로 깎는다. 이 게이트 정책이 Zig 단일 출처고, platform host는 이 값을
-    /// 그대로 OS 창 속성에 싣는다(macOS=CGS, 추후 Win=DWM·Linux=컴포지터). Ghostty `ghostty_set_window_background_blur`가
-    /// `background-opacity >= 1.0`에서 early-return하는 게이트와 동등. (F3-1)
-    pub fn windowBlurRadius(self: *const AppSession) u32 {
-        return effectiveWindowBlur(self.loaded_config.config.window_blur, self.loaded_config.config.window_opacity);
-    }
 
     /// 창 포커스 변화(OS window key/resign)를 활성 surface 코어에 알린다 — focus reporting(DECSET 1004)이 켜져
     /// 있으면 CSI I(gained)/CSI O(lost)가 PTY로 흐른다(vim FocusGained/Lost). off면 reportFocus가 무동작이라 무전송.
@@ -14163,7 +13961,7 @@ pub const AppSession = struct {
             // 도크 카드 클릭은 `focus_owner`를 바꾸지 않으므로(계속 `.workspace`) 아래 조건만으로는
             // Session Dock의 component-local keyboard focus가 안 풀린다 — 그것부터 무조건 놓는다.
             agent_dock.releaseAgentSessionDockKeyFocus(self);
-            if (self.focus_owner != .workspace or self.pending_dock_focus != null) self.focusWorkspaceInput();
+            if (self.focus_owner != .workspace or self.pending_dock_focus != null) workspace_ops.focusWorkspaceInput(self);
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
         // 사이드바가 없어(폭 0) 경계 드래그 비활성(onResizeEdge가 x=0 근처를 잡아 의도치 않게 트리거되는 것 방지).
@@ -15183,7 +14981,7 @@ pub const AppSession = struct {
     /// 구조 이동 전 terminal composition queue admission의 2-phase ticket. `reserve`는 map/buffer
     /// capacity만 확보하고 preedit·pin·queue length·counter를 바꾸지 않는다. 필요한 source/destination
     /// ticket을 모두 확보한 뒤 `commit`하면 기존 commit 경로가 무할당으로 append/take할 수 있다.
-    const StructuralCompositionReservation = struct {
+    pub const StructuralCompositionReservation = struct {
         session: *AppSession,
         terminal: bool = false,
         target_id: ?u64 = null,
@@ -15191,7 +14989,7 @@ pub const AppSession = struct {
         created_queue: ?u64 = null,
         committed: bool = false,
 
-        fn rollback(self: *StructuralCompositionReservation) void {
+        pub fn rollback(self: *StructuralCompositionReservation) void {
             if (self.committed) return;
             if (self.created_queue) |target_id| {
                 if (self.session.pending_pastes.getPtr(target_id)) |queue| {
@@ -15204,7 +15002,7 @@ pub const AppSession = struct {
             }
         }
 
-        fn commit(self: *StructuralCompositionReservation, flush_terminal: bool) void {
+        pub fn commit(self: *StructuralCompositionReservation, flush_terminal: bool) void {
             if (self.committed) return;
             if (self.terminal) {
                 // reserve 뒤 같은 GUI transaction에서 실행되므로 preedit target/bytes는 변하지 않는다.
@@ -15218,7 +15016,7 @@ pub const AppSession = struct {
         }
     };
 
-    fn reserveCompositionForStructuralMove(self: *AppSession) !StructuralCompositionReservation {
+    pub fn reserveCompositionForStructuralMove(self: *AppSession) !StructuralCompositionReservation {
         var reservation: StructuralCompositionReservation = .{ .session = self };
         errdefer reservation.rollback();
         if (!self.surface_initialized) return reservation;
@@ -17528,20 +17326,6 @@ pub const AppSession = struct {
         };
     }
 
-    /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).
-    /// 우선순위 로직은 core가 소유한다(native 최소) — Swift는 받아서 빈값이면 앱 이름으로 폴백만.
-    /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
-    pub fn windowTitle(self: *AppSession) []const u8 {
-        if (!self.surface_initialized) return &.{};
-        // 4e: 활성 Term이 web이면 sentinel core엔 OSC 제목이 없어 빈값이 나온다 — kind 파생 라벨("Browser"/
-        // "Markdown", custom_name 우선)을 창 제목으로 쓴다(termLabel 단일 해석). terminal 경로는 그대로.
-        if (!self.activeTermIsTerminal()) return termLabel(pane_ops.activePane(self).activeTerm());
-        const term = pane_ops.activePane(self).activeTerm();
-        self.refreshTermObservation(term, false, false);
-        if (term.rt.observation.availability == .unavailable) return &.{};
-        return term.rt.observation.window_title.items;
-    }
-
     /// 전역(OS) 단축키 기술자 목록(global_hotkeys)을 loaded_config.global_bindings에서 다시 빌드한다. init이 한 번 부르고,
     /// 라이브 변경(rebindGlobalEntry/unbindGlobalEntry/reloadConfig/resetAllSettings)이 부른다 — 기존 목록을 비우고 각
     /// 바인딩을 descriptorFor로 매핑해 채운다(가상 키코드로 매핑 안 되는 chord는 null → 스킵, 등록 불가라 init과 같은 동작).
@@ -17847,240 +17631,10 @@ pub const AppSession = struct {
         return true;
     }
 
-    pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
-        var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
-        for (self.tabs.items) |tab| try tabs.append(arena, try tab_ops.captureWorkspaceTab(self, arena, tab));
-        const dock = if (self.dock_initialized) try file_panel_ops.persistFilePanelState(self, arena) else dock_panel.PersistedState{};
-        const explorer_roots: ?[]const []const u8 = if (self.file_tree_initialized and self.file_tree.rootMode() == .explicit) blk: {
-            const roots = try arena.alloc([]const u8, self.file_tree.rootCount());
-            for (roots, 0..) |*root, i| root.* = try arena.dupe(u8, self.file_tree.rootAt(i).?);
-            break :blk roots;
-        } else null;
-        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots } };
-    }
-
     /// PaneTree 노드를 preorder로 평탄화한다 — leaf(*Pane)는 그 Pane의 tab.panes 인덱스로, split은 방향+ratio(천분율)
     /// 로. 직렬화 모델(self-delimiting preorder)과 같은 순서·형태.
     // flattenPaneTree·paneIndexOf(PaneTree → workspace.TreeNode 평탄화)는 session core로 이동(§3.1) —
     // Model.flattenTree(내부에 paneIndexOf). 단일 출처: src/session/session_model.zig.
-
-    /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
-    /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
-    /// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v1` 헤더 아래로 모은다.
-    pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru.session.workspace.Frame) ![]const u8 {
-        if (self.workspace_buffer) |b| {
-            self.allocator.free(b);
-            self.workspace_buffer = null;
-        }
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const win = try self.captureWorkspaceWindow(arena.allocator(), is_active, frame);
-        const text = try maru.session.workspace.serializeWindow(self.allocator, win);
-        self.workspace_buffer = text;
-        return text;
-    }
-
-    /// 저장된 workspace 모델(한 창)을 이 세션에 적용해 탭/pane split 트리/Term을 재생성한다(R4 복원). 일반 live
-    /// 세션은 init이 만든 모델을 교체하고, 시작 restore용 deferred 세션은 빈 모델에 첫 publish한다. runtime-handle이
-    /// 살아 있으면 기존 host runtime에 attach하고, handle이 없는 선언적 surface만 저장 cwd에서 새 셸을 spawn한다.
-    /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
-    /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 live 모델 또는 deferred
-    /// 빈 상태를 보존한다. 빈 모델은 live 세션에선 무동작, deferred 세션에선 오류다. 빈 cwd spawn은 기본 cwd를 쓴다.
-    pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
-        if (win.tabs.len == 0) {
-            if (!self.surface_initialized) return error.EmptyWorkspace;
-            return;
-        }
-        // 공개 ABI가 시작 복원 외의 라이브 세션에도 호출될 수 있으므로, old dock을 교체하기 전에 보호 중인
-        // CM6/close/reload/mutation 상태를 fail-close한다. 새 모델 준비 뒤 검사하면 외부 작업과의 사이에 폐기
-        // window가 생기므로 admission의 첫 read-only gate로 둔다.
-        if (self.hasProtectedFilePanelsForExit() or file_panel_ops.hasFilePanelCloseTransition(self) or file_panel_ops.fileTreeNamespaceMutationBusy(self))
-            return error.UnsupportedMove;
-
-        // restore build가 OOM/후속 surface 실패로 publish되지 않으면 후보 Term이 올린 notice/drop 회계도 존재하지 않았던
-        // 일이어야 한다. 모델 교체와 같은 transaction에 묶어 다음 tick/재시도에 유령 count가 남지 않게 한다.
-        const restore_accounting_before = RestoreAccountingSnapshot.capture(self);
-        errdefer restore_accounting_before.restore(self);
-
-        var new_dock = try dock_panel.DockPanel.restore(self.allocator, &app_runtime.entry_ids, win.dock);
-        var new_dock_owned = true;
-        errdefer if (new_dock_owned) new_dock.deinit();
-        // 복원이 **조용히 버리는 것 셋**(손상된 파일 패널 entry, 그 결과로 비워진 dock 그룹, 접근 불가 explorer root)을
-        // 한 지역 변수에 모아 성공 publish 뒤 세션 필드로 넘긴다. 실패 경로에서는 기록하지 않는다 — 창 apply 자체가
-        // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
-        var dropped: usize = 0;
-        const newly_ended_before = self.ended_placeholder_dropped_pending;
-        dropped += file_panel_ops.pruneInvalidRestoredFilePanelEntries(self, &new_dock);
-        // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
-        // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
-        var restored_entries = try dock_ops.flattenRestoredDock(self.allocator, &new_dock);
-        // 성공 경로에서도 backing buffer를 반납해야 한다 — 이관이 소유를 가져가도 ArrayList 자체는 남는다.
-        // 이관이 건너뛰어진 경우(탭 0개)엔 path 문자열까지 여기서 회수된다.
-        defer restored_entries.deinit(self.allocator);
-        for (restored_entries.items.items) |*entry| {
-            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        }
-
-        // Explorer roots, watcher union, projected rows, and backend lifetime are staged before the
-        // first live tab/dock teardown. Missing or inaccessible persisted roots degrade only that root;
-        // allocation failure leaves the whole current session untouched.
-        var new_file_tree = file_tree.Tree.init(self.allocator);
-        var new_file_tree_owned = true;
-        errdefer if (new_file_tree_owned) new_file_tree.deinit();
-        {
-            for (restored_entries.items.items) |entry| {
-                const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
-                defer self.allocator.free(root);
-                try new_file_tree.recordOpened(entry.path, root);
-            }
-        }
-        if (win.explorer.roots) |roots| {
-            var validated: [file_tree.max_roots]file_tree_backend.ValidatedRoot = undefined;
-            var validated_len: usize = 0;
-            defer for (validated[0..validated_len]) |*root| root.deinit(self.allocator, self.io);
-            for (roots) |root_path| {
-                const root = try file_tree_backend.validateRootSnapshot(self.allocator, self.io, root_path) orelse {
-                    dropped += 1; // 미존재·접근 불가 root는 그 root만 버리고 복원을 계속한다 — 버린 사실은 위로 알린다.
-                    continue;
-                };
-                validated[validated_len] = root;
-                validated_len += 1;
-            }
-            var canonical: [file_tree.max_roots][]const u8 = undefined;
-            for (validated[0..validated_len], 0..) |root, i| canonical[i] = root.path;
-            try new_file_tree.replaceExplicitRoots(canonical[0..validated_len]);
-            for (validated[0..validated_len]) |root| _ = new_file_tree.pinRootIdentity(root.path, root.identity);
-        }
-        try file_panel_ops.resetFileTreeWatchRootsForEntries(&new_file_tree, restored_entries.items.items, null);
-        var new_file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
-        var new_file_tree_backend_owned = true;
-        errdefer if (new_file_tree_backend_owned) new_file_tree_backend.deinit();
-        var new_file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty;
-        defer new_file_tree_open_states.deinit(self.allocator);
-        var new_file_tree_rows: std.ArrayList(file_tree.Row) = .empty;
-        defer new_file_tree_rows.deinit(self.allocator);
-        // 활성 해소는 pane 배치(`transferRestoredFileEntries`)와 **같은 규칙**이어야 한다 — 영속된 활성이
-        // 검증에서 버려졌으면 첫 유효 entry가 활성이다. 두 곳이 갈리면 pane은 A를 보여 주는데 트리는
-        // 아무것도 활성으로 안 칠하는 어긋남이 난다(code-review max).
-        if (restored_entries.items.items.len != 0 and restored_entries.active_index == null)
-            restored_entries.active_index = 0;
-        try file_panel_ops.buildFileTreeRowsForEntries(
-            self.allocator,
-            restored_entries.items.items,
-            restored_entries.active_index,
-            &new_file_tree,
-            &new_file_tree_open_states,
-            &new_file_tree_rows,
-        );
-
-        // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
-        var new_tabs: std.ArrayList(*Tab) = .empty;
-        defer new_tabs.deinit(self.allocator);
-        errdefer for (new_tabs.items) |t| tab_ops.destroyTabStandalone(self, t);
-        try new_tabs.ensureTotalCapacity(self.allocator, win.tabs.len);
-        for (win.tabs) |tab_model| {
-            new_tabs.appendAssumeCapacity(try tab_ops.buildWorkspaceTab(self, tab_model));
-        }
-
-        // 2) swap이 실패하지 않게 컬렉션 capacity를 미리 잡는다(teardown 뒤 append가 무실패여야 half-state가 없다).
-        // FP16 2-2r: 탭이 다 생긴 지금이 배치 시점이다. staged 목록의 entry를 **활성 워크스페이스의 활성 pane**에
-        // 파일 Term으로 이관한다(§5.0 마이그레이션 규칙 — dock-entry는 창 레벨 키라 pane별 배치 정보가 없다).
-        // 아직 staged 구간이라 실패하면 errdefer가 새 탭과 목록을 함께 되돌린다.
-        if (restored_entries.items.items.len != 0 and new_tabs.items.len != 0) {
-            const target_tab = new_tabs.items[@min(win.active_tab, new_tabs.items.len - 1)];
-            const target_pane = target_tab.panes.items[@min(target_tab.active_pane, target_tab.panes.items.len - 1)];
-            try file_panel_ops.transferRestoredFileEntries(self, &restored_entries, target_pane);
-        }
-        try self.tabs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
-        try self.surface_ptrs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
-
-        // 여기까지 왔으면 뒤의 publish는 무실패다. staging provenance를 지워 이후 사용자 close가 기존 runtime을 정상
-        // terminate하게 한다. 이 지우기 전의 모든 errdefer는 attach-only runtime을 detach로 rollback한다.
-        for (new_tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| term.rt.restored_existing = false;
-            }
-        }
-
-        // 3) 기존 탭 teardown(closeTab의 teardown과 같은 순서 — 마지막-탭 latch는 안 탄다) 후 새 탭 설치.
-        for (self.tabs.items) |tab| tab_ops.destroyTabStandalone(self, tab);
-        self.tabs.clearRetainingCapacity();
-        self.surface_ptrs.clearRetainingCapacity();
-        for (new_tabs.items) |tab| {
-            self.tabs.appendAssumeCapacity(tab);
-            self.surface_ptrs.appendAssumeCapacity(tab.activePane().activeTerm().surface);
-        }
-        self.app_window.tabs = self.surface_ptrs.items;
-        self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
-        // deferred restore 세션은 이 publish 지점까지 PTY/surface/frame loop가 0개였다. 저장 모델의 Term들이 모두
-        // stage된 뒤에만 첫 surface를 활성화하므로 성공 복원은 throwaway fresh shell을 만들지 않는다.
-        self.finishInitialSurface();
-        file_panel_ops.resetFilePanelTransientStateForDockReplacement(self);
-        if (self.dock_initialized) self.dock.deinit();
-        self.dock = new_dock;
-        self.dock_initialized = true;
-        new_dock_owned = false;
-        var old_file_tree = self.file_tree;
-        var old_file_tree_backend = self.file_tree_backend;
-        var old_file_tree_open_states = self.file_tree_open_states;
-        var old_file_tree_rows = self.file_tree_rows;
-        self.file_tree = new_file_tree;
-        self.file_tree_backend = new_file_tree_backend;
-        self.file_tree_open_states = new_file_tree_open_states;
-        self.file_tree_rows = new_file_tree_rows;
-        new_file_tree_owned = false;
-        new_file_tree_backend_owned = false;
-        new_file_tree_open_states = .empty;
-        new_file_tree_rows = .empty;
-        old_file_tree_backend.deinit();
-        old_file_tree.deinit();
-        old_file_tree_open_states.deinit(self.allocator);
-        old_file_tree_rows.deinit(self.allocator);
-        file_panel_ops.advanceFileTreeProjectionGeneration(self);
-        self.file_tree_rows_dirty = false;
-        self.file_tree_watch_reset_pending = true;
-        // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
-        // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
-        // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
-        // 앞으로 모은다(고정끼리·비고정끼리 상대 순서 유지). 불변식을 모든 진입 경로(토글·드래그·복원)에서 성립시킨다.
-        // 복원 순서(그룹 고정 C2, docs/sidebar-groups.md §12.5·§12.9 GP2): **(1)탭 설치→(2)normalize→(3)stablePartition**.
-        // stablePartition 앞에 normalizePinnedFromGroups를 명시 호출해, 손상/레거시 혼합 파일(멤버 pinned=1·마커=0, 또는 마커
-        // pinned=1·멤버=0 desync)을 **마커 기준 canonical**로 흡수한 뒤(멤버 pinned := enclosing 마커 pinned) stablePartition이
-        // 고정 그룹을 **통째** 프리픽스로 모은다(정규화 누락 시 마커만 앞으로 가 그룹 shred가 실패 모드). 여긴 드래그 없는
-        // 시작/재적용 경로라 게이트(sidebar_drag_preview==null)는 자명히 통과한다.
-        // 복원된 활성 파일에 publish 대기 barrier를 건다. `resetFilePanelTransientStateForDockReplacement`가
-        // 위에서 transient를 전부 지우므로 **커밋 뒤**여야 한다 — 라이브 열기와 같은 계약이라, typed ack
-        // 전까지 PTY·paste·close가 새 WKWebView 대신 터미널로 잘못 라우팅되지 않는다.
-        if (file_panel_ops.activeFileEntry(self)) |restored_active| dock_ops.requestDockEntryFocus(self, restored_active);
-        self.normalizePinnedFromGroups();
-        self.stablePartitionPinned();
-        self.floatLocalPinsAllGroups(); // 복원 로컬 pin 재float(GL §13.4 배선 (3) — 복원 특례도 항상 stablePartitionPinned 뒤, local-pinned 영속 반영)
-        // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비워야 하는데, 위 destroyTabStandalone
-        // 루프의 destroyPane이 invalidateForFreedPane(S1 chokepoint)으로 옛 Pane을 가리키던 호버·드래그 포인터를 이미
-        // 비웠다(표적 무효화라 옛 Pane을 가리키던 tab_drag_pane도 포함). 지금은 시작 전용이라 드래그가 없지만,
-        // mid-session 재적용(repo별 workspace 후속)에서도 같은 chokepoint가 UAF를 막는다 — 따로 리셋하지 않는다.
-        // 복원된 모든 탭을 현재 창 grid로 맞춘다. apply는 resize를 안 부르고 각 surface는 저장 grid로 spawn되며,
-        // caller의 resizeAppSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
-        // 활성 탭을 빠뜨린다. 여기서 전 탭을 명시적으로 맞춰 dedup·활성탭-한정을 둘 다 우회한다(best-effort).
-        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
-        // §7 묘비 안내는 **resize 뒤**에 쓴다 — 최종 pane 폭이 정해진 다음이어야 reflow로 줄이 어긋나지 않는다.
-        // 멱등 래치가 있어 재적용에도 덧쓰지 않는다. 비-묘비 Term은 함수 첫 줄에서 no-op이다.
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| self.writeEndedPlaceholderGuidance(term);
-            }
-        }
-        // 활성 탭의 대표 surface는 위 swap 루프가 이미 surface_ptrs[*]에 바인딩했고 active_pane도 빌드 때
-        // 세팅됐다(focusPane(active==active)는 early-return no-op이라 호출하지 않는다). 좌표·사이드바만 갱신.
-        pane_ops.recomputeActivePaneRect(self);
-        sidebar_ops.rebuildSidebar(self) catch {};
-        self.metal_dirty = true;
-        // publish가 끝난 뒤에만 기록한다(실패 경로는 창 apply 실패로 이미 신호가 있다). Swift가 apply 성공 직후
-        // take_workspace_restore_dropped로 소비해 0이 아니면 이번 실행의 checkpoint를 마지막 완전본 백업 뒤에 쓴다.
-        dropped += self.ended_placeholder_dropped_pending - newly_ended_before;
-        self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
-        if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
-    }
 
     /// 모델 preorder TreeNode 한 subtree를 소비해 PaneTree.Node를 만든다. leaf는 panes[idx]를, split은 새 Split
     /// (dir/ratio)을 할당하고 뒤따르는 두 subtree(a,b)를 재귀로 짓는다. 할당한 split은 splits에 추적(에러 해제용).
@@ -20843,27 +20397,19 @@ pub const AppSession = struct {
         return self.last_summary;
     }
 
-    /// `window.opacity`(0~1)를 chrome **배경** alpha 바이트(0~255)로 환산한다 — 1.0이면 0xFF(불투명, 회귀 없음).
-    /// 터미널 기본 배경만 투명해지던 iTerm2/Ghostty `background-opacity` 모델을 사이드바·탭 바 **배경**까지 확장하는
-    /// 단일 출처다(사용자 요청 "사이드 탭까지 투명"). 전경 텍스트·아이콘·accent 막대·divider·focus 테두리는 배경이
-    /// 아니므로 이 경로를 안 거치고 `packOpaqueRgb`로 불투명 유지한다 — 텍스트 가독성과 포커스 단서를 보존한다.
-    fn windowOpacityByte(self: *const AppSession) u8 {
-        return @intFromFloat(@round(std.math.clamp(self.appearance.window_opacity, 0.0, 1.0) * 255.0));
-    }
-
     /// 불투명 chrome 배경색(0xAARRGGBB)에 `window.opacity`를 적용한 **셀 경로** 색. 셀 배경은 렌더러
     /// (maru_fill_cell_quad)가 straight로 실어 셰이더가 premultiplied-over로 합성하므로, 반투명은 소스에서 미리 곱해
     /// 넘겨야 색이 뜨지 않는다(drop-target 하이라이트 등 기존 반투명 셀과 같은 규약 — `premultipliedRgba`).
     /// opacity=1이면 `premultipliedRgba(c, 255)`가 원 불투명색과 동일이라 무동작.
     pub fn chromeCellBg(self: *const AppSession, opaque_color: u32) u32 {
-        return premultipliedRgba(opaque_color, self.windowOpacityByte());
+        return premultipliedRgba(opaque_color, workspace_ops.windowOpacityByte(self));
     }
 
     /// 불투명 chrome 배경색(0xAARRGGBB)에 `window.opacity`를 적용한 **quad 경로** 색 — straight-alpha(alpha 바이트만
     /// 교체, RGB 유지). SDF quad 셰이더(maru_quad_fragment)가 `rgb*=a`로 직접 premultiply하므로 straight로 넘긴다
     /// (hover_fill 등 기존 GpuQuad와 같은 규약 — `packRgbAlpha`). opacity=1이면 0xFF라 원 불투명색과 동일.
     pub fn chromeQuadBg(self: *const AppSession, opaque_color: u32) u32 {
-        return (@as(u32, self.windowOpacityByte()) << 24) | (opaque_color & 0x00FF_FFFF);
+        return (@as(u32, workspace_ops.windowOpacityByte(self)) << 24) | (opaque_color & 0x00FF_FFFF);
     }
 
     /// 비활성 탭 제목용 흐린 전경색 — sidebar_foreground(테마화된 사이드바 글자색, 기본=foreground)를 background
@@ -20876,39 +20422,6 @@ pub const AppSession = struct {
             .g = @intCast((@as(u32, f.g) * 55 + @as(u32, b.g) * 45) / 100),
             .b = @intCast((@as(u32, f.b) * 55 + @as(u32, b.b) * 45) / 100),
         };
-    }
-
-    /// (x,y backing px)가 창 chrome의 '빈' 영역(아이콘·검색·접힘 버튼이 아닌 곳)인가. Swift가 1이면 네이티브 타이틀바처럼
-    /// 창 이동(performDrag)·더블클릭 확대(zoom)를 한다. MaruMetalTerminalView는 mouseDownCanMoveWindow=false라(터미널/
-    /// 사이드바가 자체 마우스 사용) 콘텐츠 자동 드래그가 없고, 여기만 창 드래그 영역이다. 두 부분:
-    ///   ① 사이드바 헤더(펼침, 좌측)의 빈 영역 — headerHit==.none(아이콘·검색 제외, 신호등 옆 빈 공간 포함).
-    ///   ② 상단 타이틀바 띠(터미널 위·접힘 시 전체)의 빈 영역 — y<titlebar_strip_px, 접힘 ◧ 펼치기 버튼은 제외(클릭).
-    /// quick terminal(chrome_minimal — 신호등 없는 borderless)이면 항상 false.
-    pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
-        if (self.chrome_minimal) return false;
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px) or y_px < 0) return false;
-        // ① 사이드바 헤더(펼침): 3줄 헤더의 빈 영역.
-        if (self.sidebar_width_px > 0 and self.sidebar_header_height_px > 0 and sidebar_ops.inSidebar(self, x_px)) {
-            if (y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
-            return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, sidebar_ops.sidebarSearchBandTopPx(self)) == .none;
-        }
-        // ② 상단 타이틀바 띠(터미널 위, 또는 접힘 시 전체 폭): 한 줄. 접힘 ◧ 펼치기 버튼·알림 종 위면 드래그 아님(클릭).
-        if (self.titlebar_strip_px > 0 and y_px < @as(f64, @floatFromInt(self.titlebar_strip_px))) {
-            if (self.collapsedToggleRect()) |r| {
-                const rx: f64 = @floatFromInt(r.x);
-                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false;
-            }
-            if (self.collapsedNotificationRect()) |r| {
-                const rx: f64 = @floatFromInt(r.x);
-                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 접힘 종 클릭 영역 — 창 드래그 아님
-            }
-            if (file_panel_ops.filePanelDockControlRect(self)) |r| {
-                const rx: f64 = @floatFromInt(r.x);
-                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 도크 접힘 펼치기 토글(우상단) — 창 드래그 아님(안 제외하면 클릭이 performDrag로 새 토글이 안 눌린다)
-            }
-            return true;
-        }
-        return false;
     }
 
     /// 호버 중인 사이드바 슬롯을 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
@@ -21330,13 +20843,6 @@ pub const AppSession = struct {
         for (cells) |*c| {
             if (c.codepoint == agent_running_flag) c.style.foreground = .{ .rgb = brand };
         }
-    }
-
-    /// 리네임 caret 줄 수 계산용 — workspaceStatusLine이 non-empty 상태줄을 낼지 텍스트 생성 없이 순수 판정한다(caret은
-    /// 파형 문자열이 필요 없고, runningStatusLine 할당·spinner 조회를 피한다). 에이전트가 있으면 unknown도
-    /// "상태 확인 중"을 표시한다. 위 workspaceStatusLine의 non-empty 조건과 반드시 동기다.
-    pub fn workspaceHasStatusLine(tab: *Tab) bool {
-        return tab_ops.tabAgentRepresentative(tab) != null;
     }
 
     /// 탭 제목들을 라벨(제목만, 번호 prefix 없음 — U-tab2)로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
@@ -22087,7 +21593,7 @@ pub const AppSession = struct {
     /// (col+1.35)]·cw에 그려진다. rect를 col·cw부터 잡으면 클릭 영역이 글리프보다 0.5칸 오른쪽으로 치우쳐 글리프
     /// 좌측 일부가 안 눌리므로(code-review), 셀 중심에 2칸 폭을 중앙 정렬한다([(col-0.5),(col+1.5)]·cw — 호버 quad·
     /// 글리프와 동심).
-    fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
+    pub fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
         // 글리프 중심 (col+0.5)·cw에 2칸 폭 rect를 중앙 정렬(◧는 .m이 셀 중심 기준 1.7×로 키워 ≈[(col-0.35),(col+1.35)]·cw에
         // 그려지므로, col·cw부터 잡으면 0.5칸 우측으로 치우쳐 글리프 좌측이 안 눌린다 — code-review). collapsedIconRect 단일 출처.
         return self.collapsedIconRect(self.collapsedToggleCol(), 2 * self.cell_width_px);
@@ -22096,7 +21602,7 @@ pub const AppSession = struct {
     /// 접힘 시 알림 종(🔔)의 backing-px rect(클릭 hit-test) — collapsedBellCol()과 같은 col(단일 출처). 마우스 핸들러가 이
     /// rect 클릭이면 openNotificationPanel한다(◧ 토글과 별개 영역). 종 글리프 중심((bell_col+0.5)·cw, 렌더러 가로 −0.5칸
     /// nudge 반영)에 3칸 폭(배지+종)을 중앙 정렬. (3cw)/2 == cw + cw/2라 collapsedIconRect 중앙 정렬이 그대로 종 중심에 온다.
-    fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
+    pub fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
         return self.collapsedIconRect(self.collapsedBellCol(), 3 * self.cell_width_px);
     }
 
@@ -32594,7 +32100,7 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     // 한 pane에 두 surface: handle 없는 것(선언적 restore → 평범한 spawn)과 사라진 host handle(→ 묘비).
     const surfaces = [_]maru.session.workspace.Surface{
         .{ .title = "살아있는", .cwd = "/tmp", .command = "/bin/zsh", .cols = 80, .rows = 24 },
@@ -32614,7 +32120,7 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
     win.tabs = &tabs;
 
     // 핵심: apply가 **성공**한다(이전에는 여기서 error가 나 창이 teardown됐다).
-    try session.applyWorkspaceWindow(win);
+    try workspace_ops.applyWorkspaceWindow(session, win);
 
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqualStrings("복원됨", session.tabs.items[0].custom_name.?);
@@ -32637,7 +32143,7 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
 
     // code-review(max): durable wire가 exact handle을 보존해도 첫 영구 부재 판정이 오분류일 수 있다. Recovered Sessions
     // UI 전에는 되돌릴 경로가 없으므로 첫 live→ended 전이만 마지막 완전본 .bak 신호를 세운다.
-    try std.testing.expectEqual(@as(u32, 1), session.takeWorkspaceRestoreDropped());
+    try std.testing.expectEqual(@as(u32, 1), workspace_ops.takeWorkspaceRestoreDropped(session));
     // 같은 죽은 host를 가리키는 다음 surface는 blocking backoff(10×20ms)를 되풀이하지 않는다 — negative memo가 남는다.
     try std.testing.expectEqual(@as(u128, 0x1234_5678_90ab_cdef_1234_5678_90ab_cdef), session.restore_gone_host_id);
 }
@@ -32714,7 +32220,7 @@ test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     const surfaces = [_]maru.session.workspace.Surface{.{
         .title = "이미 끝난 세션",
         .cwd = "/tmp",
@@ -32732,13 +32238,13 @@ test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 
 
     session.restore_runtime_host_id = "restore-spawn-sentinel";
     session.restore_runtime_id = "restore-spawn-sentinel";
-    try session.applyWorkspaceWindow(win);
+    try workspace_ops.applyWorkspaceWindow(session, win);
     const tomb = session.tabs.items[0].panes.items[0].terms.items[0];
     try std.testing.expect(tomb.rt.ended_placeholder);
     try std.testing.expect(!tomb.rt.live_initialized);
     try std.testing.expectEqualStrings(surfaces[0].runtime_host_id, tomb.rt.ended_runtime_host_id);
     try std.testing.expectEqualStrings(surfaces[0].runtime_id, tomb.rt.ended_runtime_id);
-    try std.testing.expectEqual(@as(u32, 0), session.takeWorkspaceRestoreDropped());
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.takeWorkspaceRestoreDropped(session));
     // restoreSpawn이 호출되면 이 임시 채널은 surface handle로 덮였다가 clear된다. sentinel 유지가 tombstone branch가
     // attach/probe/spawn 공통 진입점보다 앞에서 끝났음을 직접 증명한다.
     try std.testing.expectEqualStrings("restore-spawn-sentinel", session.restore_runtime_host_id);
@@ -32746,7 +32252,7 @@ test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 
 
     var captured_arena = std.heap.ArenaAllocator.init(allocator);
     defer captured_arena.deinit();
-    const captured = try session.captureWorkspaceWindow(captured_arena.allocator(), false, null);
+    const captured = try workspace_ops.captureWorkspaceWindow(session, captured_arena.allocator(), false, null);
     const saved = captured.tabs[0].panes[0].surfaces[0];
     try std.testing.expectEqual(maru.session.workspace.RuntimeState.ended, saved.runtime_state);
     try std.testing.expectEqualStrings(surfaces[0].runtime_host_id, saved.runtime_host_id);
@@ -32807,7 +32313,7 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     const surfaces = [_]maru.session.workspace.Surface{.{
         .runtime_id = "fedcba0987654321fedcba0987654321",
         .cols = 80,
@@ -32818,7 +32324,7 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
     const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
     win.tabs = &tabs;
 
-    try std.testing.expectError(error.PersistentRuntimeUnavailable, session.applyWorkspaceWindow(win));
+    try std.testing.expectError(error.PersistentRuntimeUnavailable, workspace_ops.applyWorkspaceWindow(session, win));
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending);
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_dropped_pending);
 }
@@ -32854,7 +32360,7 @@ test "종료 placeholder: capture가 metadata와 durable runtime tombstone을 �
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     const surfaces = win.tabs[0].panes[0].surfaces;
     try std.testing.expectEqual(@as(usize, 2), surfaces.len); // 살아 있는 Term + 묘비 — 묘비는 스킵되지 않는다
     const saved = surfaces[1];
@@ -35867,7 +35373,7 @@ test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-p
         .{ .custom_name = "u3", .pinned = false, .tree = &leaf, .panes = &p3 },
     };
     // active_tab=3(u3, 비고정 끝) — 재배열 후에도 u3을 가리켜야(stable-partition이 active *Tab 추적).
-    try session.applyWorkspaceWindow(.{ .active_tab = 3, .tabs = &tabs });
+    try workspace_ops.applyWorkspaceWindow(session, .{ .active_tab = 3, .tabs = &tabs });
 
     try std.testing.expectEqual(@as(usize, 4), session.tabs.items.len);
     // stable-partition: 고정(P0,P2)이 앞으로(상대 순서 유지), 비고정(u1,u3)이 뒤로(상대 순서 유지) → [P0, P2, u1, u3].
@@ -36043,7 +35549,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     const sx = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
     const sy = sidebar_ops.testSidebarRowCenterY(session, 0); // 슬롯 0 중앙(상단 헤더 아래)
     session.mouse(4, sx, sy, 0, 0);
-    try std.testing.expect(session.renamingWorkspace(tab));
+    try std.testing.expect(workspace_ops.renamingWorkspace(session, tab));
     settings_ops.closeRename(session);
 }
 
@@ -37824,7 +37330,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
 
     // 탭 2개, 활성 탭 = 1(방금 만든 새 탭).
     try std.testing.expectEqual(@as(usize, 2), win.tabs.len);
@@ -37884,7 +37390,8 @@ test "empty file dock launcher presents explorer and empty content requests the 
     try std.testing.expect(!dock_ops.dockVisible(session));
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.open, file_panel_ops.filePanelDockControlAction(session).?);
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
-    try std.testing.expect(!session.isWindowDragRegion(
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(
+        session,
         @floatFromInt(launcher.x + 1),
         @floatFromInt(launcher.y + 1),
     ));
@@ -38354,7 +37861,7 @@ test "pending file tree root validation rejects merge and workspace restore befo
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var replacement = try dst.captureWorkspaceWindow(arena.allocator(), false, null);
+    var replacement = try workspace_ops.captureWorkspaceWindow(dst, arena.allocator(), false, null);
     const replacement_entries = [_]dock_panel.PersistedEntry{.{
         .path = "/tmp/root-pending-replacement.html",
         .kind = .html,
@@ -38378,7 +37885,7 @@ test "pending file tree root validation rejects merge and workspace restore befo
 
     var moved_buf: [16]u64 = undefined;
     try std.testing.expectError(error.UnsupportedMove, src.mergeSessionInto(dst, &moved_buf));
-    try std.testing.expectError(error.UnsupportedMove, src.applyWorkspaceWindow(replacement));
+    try std.testing.expectError(error.UnsupportedMove, workspace_ops.applyWorkspaceWindow(src, replacement));
 
     try std.testing.expect(src.file_tree_root_validation != null);
     try std.testing.expectEqual(src_tabs, src.tabs.items.len);
@@ -39247,17 +38754,17 @@ test "workspace restore validates explicit roots and atomically rebuilds explore
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     const entries = [_]dock_panel.PersistedEntry{.{ .path = outside, .kind = .markdown, .mode = .read, .active = true }};
     const roots = [_][]const u8{ explicit_root, missing };
     win.dock = .{ .presented = true, .entries = &entries };
     win.explorer = .{ .roots = &roots };
-    try session.applyWorkspaceWindow(win);
+    try workspace_ops.applyWorkspaceWindow(session, win);
 
     try std.testing.expect(session.dock.presented);
     // v144: 미존재 root(missing)를 버렸다는 신호가 남아야 한다 — 이 root 강등은 apply를 실패시키지 않으므로, 신호가
     // 없으면 다음 Quit이 root 하나가 빠진 explorer 상태를 checkpoint에 커밋한다(사용자 root 영구 손실).
-    try std.testing.expectEqual(@as(u32, 1), session.takeWorkspaceRestoreDropped());
+    try std.testing.expectEqual(@as(u32, 1), workspace_ops.takeWorkspaceRestoreDropped(session));
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
@@ -39391,7 +38898,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         session.allocator = failing.allocator();
         var apply_error: ?anyerror = null;
-        session.applyWorkspaceWindow(replacement) catch |err| {
+        workspace_ops.applyWorkspaceWindow(session, replacement) catch |err| {
             apply_error = err;
         };
         if (apply_error) |err| {
@@ -39530,7 +39037,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     const sid = session.fileEntryAt(0).?.surface_id;
     // FP16: 파일을 열면 그 파일이 publish 대기 barrier를 갖는다(requestDockEntryFocus). 이 테스트의
     // 주제는 toggle 왕복이므로 workspace baseline에서 시작한다.
-    session.focusWorkspaceInput();
+    workspace_ops.focusWorkspaceInput(session);
     try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount()); // baseline dock create
     try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
     session.dispatchAppAction(.toggle_file_panel_focus);
@@ -39761,7 +39268,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.pending_dock_focus == null);
-    try std.testing.expect(session.takeWorkspaceFocusAction());
+    try std.testing.expect(workspace_ops.takeWorkspaceFocusAction(session));
     try std.testing.expectEqual(browser_terms_before, pane_ops.activePane(session).terms.items.len);
     session.chrome_host.confirm.dismiss(); // 실제 chrome handle은 HostAction을 내기 전에 모달 view를 닫는다.
     session.dispatchChromeAction(.confirm_cancel);
@@ -39795,7 +39302,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expectEqual(browser_terms_before, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expect(session.focus_owner == .workspace);
-    try std.testing.expect(session.takeWorkspaceFocusAction());
+    try std.testing.expect(workspace_ops.takeWorkspaceFocusAction(session));
     const successor_terms_before = pane_ops.activePane(session).terms.items.len;
     _ = try session.handleMetalKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(successor_terms_before - 1, pane_ops.activePane(session).terms.items.len);
@@ -39808,7 +39315,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.dispatchWebAppAction(browser_close_term_sid, close_term_event));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
-    try std.testing.expect(session.takeWorkspaceFocusAction());
+    try std.testing.expect(workspace_ops.takeWorkspaceFocusAction(session));
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
     try std.testing.expectEqual(close_term_terms_before - 1, pane_ops.activePane(session).terms.items.len);
@@ -39862,7 +39369,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     session.dispatchChromeAction(.confirm_accept);
     const save_action = session.takeFilePanelSaveCloseAction().?;
     try session.reportFilePanelDirty(save_sid, .{ .dirty = false, .revision = 2 });
-    session.focusWorkspaceInput();
+    workspace_ops.focusWorkspaceInput(session);
     session.completeFilePanelSaveClose(save_sid, save_action.request_id, 2, true);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, save_sid) == null);
     // FP16: 입력 소유가 활성 Term에서 파생되므로, 그 파일을 닫으면 pane이 승계한 **다음 파일**로 barrier가
@@ -40169,9 +39676,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, file_panel_ops.filePanelDockControlAction(session).?);
     const toggle = file_panel_ops.filePanelDockControlRect(session).?;
     // Fix A: 도크 접힘 토글 위는 창 드래그 영역이 아니다 — 아니면 클릭이 Swift performDrag로 새 토글이 안 눌린다.
-    try std.testing.expect(!session.isWindowDragRegion(@floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1)));
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(session, @floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1)));
     // 토글 바로 왼쪽 빈 띠는 드래그 영역(제외가 토글 폭에만 걸림을 확인).
-    try std.testing.expect(session.isWindowDragRegion(@floatFromInt(toggle.x -| 2), @floatFromInt(toggle.y + 1)));
+    try std.testing.expect(workspace_ops.isWindowDragRegion(session, @floatFromInt(toggle.x -| 2), @floatFromInt(toggle.y + 1)));
     // Fix B: 창 우측 코너에 flush 아님(둥근 코너 클리어런스 여백).
     try std.testing.expect(toggle.x + toggle.w < session.backing_width_px);
     session.mouse(1, @floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1), 0, 0);
@@ -40181,7 +39688,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     defer arena.deinit();
     // 캡처가 "어느 파일이 활성인가"를 싣는지 보려면 파일 탭을 다시 활성으로 둔다(지금은 브라우저가 활성).
     session.focusTerm(3); // [terminal, browser, alpha.md, beta.html]
-    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
     try std.testing.expect(win.dock.entries[1].active);
@@ -40590,7 +40097,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     try std.testing.expect(session.focus_owner == .workspace);
-    try std.testing.expect(session.takeWorkspaceFocusAction());
+    try std.testing.expect(workspace_ops.takeWorkspaceFocusAction(session));
     try std.testing.expect(session.takeFileTreeRestoreSurfaceAction() == null);
 
     // 마지막 탭 뒤에도 recent/project tree가 남으므로 Cmd+Shift+E로 빈 group의 tree에 다시 진입할 수 있다.
@@ -41002,7 +40509,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     defer session.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const captured = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const captured = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     const entries = [_]dock_panel.PersistedEntry{
         .{ .path = valid_path, .kind = .markdown },
         .{ .path = mismatch_path, .kind = .html, .active = true },
@@ -41012,12 +40519,12 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     };
     var restored = captured;
     restored.dock = .{ .entries = &entries };
-    try session.applyWorkspaceWindow(restored);
+    try workspace_ops.applyWorkspaceWindow(session, restored);
 
     // v144: 버린 entry 4개(kind 불일치·상대경로·미존재·디렉터리)를 신호로 남긴다. apply는 성공하므로 이 신호가
     // 없으면 Swift가 checkpoint를 막지 못해 다음 Quit이 **버려진 도크를 파일에 커밋**한다(사용자 배치 영구 손실).
-    try std.testing.expectEqual(@as(u32, 4), session.takeWorkspaceRestoreDropped());
-    try std.testing.expectEqual(@as(u32, 0), session.takeWorkspaceRestoreDropped()); // 소비형 — 두 번째 읽기는 0
+    try std.testing.expectEqual(@as(u32, 4), workspace_ops.takeWorkspaceRestoreDropped(session));
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.takeWorkspaceRestoreDropped(session)); // 소비형 — 두 번째 읽기는 0
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(valid_path, session.fileEntryAt(0).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.fileEntryAt(0).?.kind);
@@ -41026,13 +40533,13 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
 
     var arena2 = std.heap.ArenaAllocator.init(allocator);
     defer arena2.deinit();
-    const captured2 = try session.captureWorkspaceWindow(arena2.allocator(), false, null);
+    const captured2 = try workspace_ops.captureWorkspaceWindow(session, arena2.allocator(), false, null);
     const invalid_only = [_]dock_panel.PersistedEntry{
         .{ .path = directory_path, .kind = .html, .active = true },
     };
     var restored2 = captured2;
     restored2.dock = .{ .entries = &invalid_only };
-    try session.applyWorkspaceWindow(restored2);
+    try workspace_ops.applyWorkspaceWindow(session, restored2);
     // B-4: 캡처가 파일 탭을 pane `file-term`으로 싣게 됐으므로, 이 창을 다시 적용하면 그 파일은 살아 돌아온다.
     // 여기서 검증하는 건 **legacy `dock-entry` 경로**다 — 디렉터리를 가리키는 옛 entry는 버려지고(마이그레이션
     // 입력이 0개가 되고), pane이 들고 온 파일만 남는다.
@@ -41057,13 +40564,13 @@ test "FP9 restore barrier rejects a live protected dock before model replacement
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const replacement = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const replacement = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     _ = 0; // FP16: 도크 그룹 개념 제거
     const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-protected-restore.md", .markdown);
     const protected_id = opened.term.file_entry.?.id;
     opened.term.file_entry.?.dirty = true;
 
-    try std.testing.expectError(error.UnsupportedMove, session.applyWorkspaceWindow(replacement));
+    try std.testing.expectError(error.UnsupportedMove, workspace_ops.applyWorkspaceWindow(session, replacement));
     const preserved = file_panel_ops.fileEntryForId(session, protected_id).?;
     try std.testing.expect(preserved.dirty);
     try std.testing.expectEqualStrings("/tmp/fp9-protected-restore.md", preserved.path);
@@ -41085,26 +40592,26 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
     _ = try session.resize(800, 600, 1000);
     try session.activeSurface().core.write("\x1b]7;file://h/srv\x07");
 
-    const b0 = try session.serializeWorkspaceWindow(true, null); // 활성 창 → active-window=1 마커(M3e)
+    const b0 = try workspace_ops.serializeWorkspaceWindow(session, true, null); // 활성 창 → active-window=1 마커(M3e)
     try std.testing.expect(std.mem.startsWith(u8, b0, "window ")); // 헤더 없는 블록(Swift가 헤더 하나로 모음)
     try std.testing.expect(std.mem.indexOf(u8, b0, "cwd=\"/srv\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, b0, "active-window=1") != null); // is_active=true 전달됨
 
     // 재호출: 이전 버퍼를 해제하고 새로 만든다(이전 버퍼를 안 free하면 testing.allocator leak). is_active=false면
     // active-window 키가 생략된다(옵션-키 패턴 — 옛 파일과 flat 동일).
-    const b1 = try session.serializeWorkspaceWindow(false, null);
+    const b1 = try workspace_ops.serializeWorkspaceWindow(session, false, null);
     try std.testing.expect(std.mem.startsWith(u8, b1, "window "));
     try std.testing.expect(std.mem.indexOf(u8, b1, "active-window") == null); // is_active=false → 키 생략
 
     // M3f: frame을 넘기면 win-x/y/w/h가 블록에 실린다(Swift window.frame → ABI → 여기). null이면(위) 키 생략(옛 파일 flat).
-    const b2 = try session.serializeWorkspaceWindow(false, .{ .x = 100, .y = 200, .w = 960, .h = 600 });
+    const b2 = try workspace_ops.serializeWorkspaceWindow(session, false, .{ .x = 100, .y = 200, .w = 960, .h = 600 });
     try std.testing.expect(std.mem.indexOf(u8, b2, "win-x=100 win-y=200 win-w=960 win-h=600") != null); // frame 전달됨
-    const b3 = try session.serializeWorkspaceWindow(false, null);
+    const b3 = try workspace_ops.serializeWorkspaceWindow(session, false, null);
     try std.testing.expect(std.mem.indexOf(u8, b3, "win-x") == null); // frame=null → 키 생략
 
     // [4] 테스트 갭 메움: 실 key 창은 is_active=true AND frame 둘 다다(한 블록에 active-window=1과 win-* 동시).
     // 위 케이스는 각각 하나만 검증했다(b0=active만, b2=frame만) — 조합 블록이 둘 다 방출하는지 확인.
-    const b4 = try session.serializeWorkspaceWindow(true, .{ .x = 100, .y = 200, .w = 960, .h = 600 });
+    const b4 = try workspace_ops.serializeWorkspaceWindow(session, true, .{ .x = 100, .y = 200, .w = 960, .h = 600 });
     try std.testing.expect(std.mem.indexOf(u8, b4, "active-window=1") != null); // 활성 마커
     try std.testing.expect(std.mem.indexOf(u8, b4, "win-x=100 win-y=200 win-w=960 win-h=600") != null); // frame 둘 다
 }
@@ -41141,7 +40648,7 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
         .{ .active_pane = 1, .group_start = "frontend", .group_collapsed = true, .tree = &tree0, .panes = &panes0 },
         .{ .active_pane = 0, .tree = &tree1, .panes = &panes1 },
     };
-    try session.applyWorkspaceWindow(.{ .active_tab = 1, .tabs = &tabs });
+    try workspace_ops.applyWorkspaceWindow(session, .{ .active_tab = 1, .tabs = &tabs });
 
     // 라이브 복원 확인: buildWorkspaceTab이 group_start를 owned로 dup했고(캡처가 재차 읽음), 탭1은 null.
     try std.testing.expectEqualStrings("frontend", session.tabs.items[0].group_start.?);
@@ -41151,7 +40658,7 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     // 캡처해 구조·active 인덱스가 모델과 일치하는지(cwd는 OSC-side라 round-trip 안 함 — 구조만).
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const cap = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const cap = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     try std.testing.expectEqual(@as(usize, 2), cap.tabs.len);
     try std.testing.expectEqual(@as(usize, 1), cap.active_tab);
     // 탭0: split horizontal ratio 500 + pane 2, active_pane 1.
@@ -41254,7 +40761,7 @@ test "legacy provider workspace fields are ignored across multi-window parse app
 
     var arena0 = std.heap.ArenaAllocator.init(allocator);
     defer arena0.deinit();
-    const cap0 = try session0.captureWorkspaceWindow(arena0.allocator(), false, null);
+    const cap0 = try workspace_ops.captureWorkspaceWindow(session0, arena0.allocator(), false, null);
     try std.testing.expectEqual(@as(usize, 1), cap0.tabs.len);
     try std.testing.expectEqual(@as(usize, 2), cap0.tabs[0].panes.len);
     try std.testing.expectEqual(@as(usize, 1), cap0.tabs[0].active_pane);
@@ -41268,7 +40775,7 @@ test "legacy provider workspace fields are ignored across multi-window parse app
 
     var arena1 = std.heap.ArenaAllocator.init(allocator);
     defer arena1.deinit();
-    const cap1 = try session1.captureWorkspaceWindow(arena1.allocator(), true, null);
+    const cap1 = try workspace_ops.captureWorkspaceWindow(session1, arena1.allocator(), true, null);
     try std.testing.expectEqual(@as(usize, 1), cap1.tabs.len);
     try std.testing.expectEqual(@as(usize, 1), cap1.tabs[0].panes.len);
     try std.testing.expectEqualStrings("second window", cap1.tabs[0].custom_name);
@@ -41590,17 +41097,17 @@ test "setWorkspaceRoot(세팅 GUI 시작 디렉터리): 절대/~ 저장·빈 값
     defer session.deinit();
 
     // 절대경로 저장.
-    session.setWorkspaceRoot("/tmp/proj");
+    workspace_ops.setWorkspaceRoot(session, "/tmp/proj");
     try std.testing.expectEqualStrings("/tmp/proj", session.loaded_config.config.workspace.root);
     // `~/…` 저장(양끝 trim; `~` 확장은 spawn 시점).
-    session.setWorkspaceRoot("  ~/work  ");
+    workspace_ops.setWorkspaceRoot(session, "  ~/work  ");
     try std.testing.expectEqualStrings("~/work", session.loaded_config.config.workspace.root);
     // 빈 값 = 상속 cwd로 클리어.
-    session.setWorkspaceRoot("");
+    workspace_ops.setWorkspaceRoot(session, "");
     try std.testing.expectEqualStrings("", session.loaded_config.config.workspace.root);
     // 상대경로 = 형식 불량 → 기존 값 유지 + 안내 배너(저장 안 함).
-    session.setWorkspaceRoot("/keep/me");
-    session.setWorkspaceRoot("relative/path");
+    workspace_ops.setWorkspaceRoot(session, "/keep/me");
+    workspace_ops.setWorkspaceRoot(session, "relative/path");
     try std.testing.expectEqualStrings("/keep/me", session.loaded_config.config.workspace.root);
     try std.testing.expect(session.chrome_host.settings.message().len > 0);
 }
@@ -41626,7 +41133,7 @@ test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inhe
     try std.testing.expect(session.focusedTermCwd(&buf) == null);
     // 테스트는 빈 config로 init(workspace.root="")·정상 cwd(test runner는 `/`가 아님) → root 폴백도 상속(null).
     // 기본 동작 회귀 방지(이 가정은 테스트를 `/`에서 돌리지 않는 한 성립).
-    try std.testing.expect(session.workspaceRootCwd(&buf) == null);
+    try std.testing.expect(workspace_ops.workspaceRootCwd(session, &buf) == null);
     // 상속할 cwd가 없으면 inherit on/off 둘 다 root 폴백(null) — toggle만으로 갑자기 경로가 안 생긴다.
     try std.testing.expect(session.newSurfaceCwd(&buf, true) == null);
     try std.testing.expect(session.newSurfaceCwd(&buf, false) == null);
@@ -41661,7 +41168,7 @@ test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inh
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     // 포커스 cwd 없음(OSC 7 전): inherit ON/OFF 둘 다 root로 떨어진다(설정된 절대경로가 그대로 흐른다).
-    try std.testing.expectEqualStrings("/tmp/maru-root", session.workspaceRootCwd(&buf).?);
+    try std.testing.expectEqualStrings("/tmp/maru-root", workspace_ops.workspaceRootCwd(session, &buf).?);
     try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, false).?); // 토글 OFF → root
     try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, true).?); // 토글 ON이나 포커스 없음 → root
 
@@ -41692,7 +41199,7 @@ test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, su
     const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &s }};
     const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
     const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
-    try session.applyWorkspaceWindow(.{ .tabs = &tabs }); // 실패 안 함
+    try workspace_ops.applyWorkspaceWindow(session, .{ .tabs = &tabs }); // 실패 안 함
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).panes.items.len);
 }
@@ -41726,13 +41233,13 @@ test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree�
         .{ .leaf = 0 },
     };
     const dup_tabs = [_]maru.session.workspace.Tab{.{ .tree = &dup_tree, .panes = &panes }};
-    try std.testing.expectError(error.MalformedTree, session.applyWorkspaceWindow(.{ .tabs = &dup_tabs }));
+    try std.testing.expectError(error.MalformedTree, workspace_ops.applyWorkspaceWindow(session, .{ .tabs = &dup_tabs }));
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // swap 전 실패 — 기존 세션 보존
 
     // 고아 leaf: panes=2인데 트리는 leaf 0 하나만(pane 1 미참조) → 고아 검사로 MalformedTree.
     const orphan_tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
     const orphan_tabs = [_]maru.session.workspace.Tab{.{ .tree = &orphan_tree, .panes = &panes }};
-    try std.testing.expectError(error.MalformedTree, session.applyWorkspaceWindow(.{ .tabs = &orphan_tabs }));
+    try std.testing.expectError(error.MalformedTree, workspace_ops.applyWorkspaceWindow(session, .{ .tabs = &orphan_tabs }));
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
@@ -43655,7 +43162,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
 
         const pane = pane_ops.activePane(session);
         const before = pane.terms.items.len; // 첫 터미널 Term 하나
-        try std.testing.expect(!session.windowHasWebTerm());
+        try std.testing.expect(!workspace_ops.windowHasWebTerm(session));
 
         session.dispatchAppAction(.new_web_tab);
 
@@ -43665,7 +43172,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
         try std.testing.expect(last.kind == .web);
         try std.testing.expectEqual(pane.terms.items.len - 1, pane.active_term);
         try std.testing.expectEqual(web_panel_layout.PanelKind.browser, last.web_panel_kind);
-        try std.testing.expect(session.windowHasWebTerm());
+        try std.testing.expect(workspace_ops.windowHasWebTerm(session));
 
         // tick epilogue가 web_surfaces_present=1을 실는다(비-vacuous — 대입 없으면 기본 0). 활성 web Term은 4e-2가 렌더 skip → 크래시 0.
         const summary = try session.tick();
@@ -43689,7 +43196,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
         try std.testing.expect(session.tabsBlocked());
         session.dispatchAppAction(.new_web_tab);
         try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len); // web Term 안 생김
-        try std.testing.expect(!session.windowHasWebTerm());
+        try std.testing.expect(!workspace_ops.windowHasWebTerm(session));
     }
 }
 
@@ -43712,28 +43219,28 @@ test "web_surfaces_present는 창 전체 트리에서 매 tick 파생된다(유�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 처음(터미널만): 신호 off.
-    try std.testing.expect(!session.windowHasWebTerm());
+    try std.testing.expect(!workspace_ops.windowHasWebTerm(session));
 
     // 활성 탭(워크스페이스 0)에 web Term 생성+활성화 → 신호 on, tick summary=1.
     session.dispatchAppAction(.new_web_tab);
-    try std.testing.expect(session.windowHasWebTerm());
+    try std.testing.expect(workspace_ops.windowHasWebTerm(session));
     try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
 
     // 터미널 전용 새 워크스페이스 탭으로 전환해도 신호는 on이다 — FP16c에서 수집 범위가 창 전체가 됐고
     // presence 신호도 같은 범위여야 비활성 워크스페이스의 첫 web surface 전이가 적용된다.
     _ = try tab_ops.newTab(session);
-    try std.testing.expect(session.windowHasWebTerm());
+    try std.testing.expect(workspace_ops.windowHasWebTerm(session));
     try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
 
     // 원래 탭(0)으로 돌아와도 같다(유지 카운터가 아니라 매 tick 트리에서 파생 — 드리프트 없음).
     _ = tab_ops.switchTab(session, 0);
-    try std.testing.expect(session.windowHasWebTerm());
+    try std.testing.expect(workspace_ops.windowHasWebTerm(session));
     try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
 
     // 그 web Term을 닫으면(closeActiveTerm=terms에서 제거+destroyTerm+재바인딩 — 트리 신호가 정확히 반영되려면 트리에서도
     // 빠져야 하므로 raw destroyTerm이 아닌 close 경로) 신호 off. tick summary=0.
     session.closeActiveTerm(); // 활성 pane의 활성 Term(web)을 닫는다(pane에 terminal+web 2개라 동작).
-    try std.testing.expect(!session.windowHasWebTerm());
+    try std.testing.expect(!workspace_ops.windowHasWebTerm(session));
     try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
 }
 
@@ -43798,7 +43305,7 @@ test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel �
 
     session.dispatchAppAction(.new_web_tab); // web(browser) Term 활성화
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
-    try std.testing.expectEqualStrings("Browser", session.windowTitle());
+    try std.testing.expectEqualStrings("Browser", workspace_ops.windowTitle(session));
 }
 
 // WP-P 회귀: URL 있는 브라우저만 있는 pane이 셸 placeholder까지 받으면 복원 때 **안 열었던 터미널 탭**이 생긴다
@@ -44201,7 +43708,7 @@ test "web scratch: 다중 tick 누수/크래시 0(영속 scratch swap 소유 흐
         _ = session.webSurfaceTransitionsCount(); // computeWebSurfaceTransitions(collect+diff+swap) 반복
         _ = try session.tick();
     }
-    try std.testing.expect(session.windowHasWebTerm());
+    try std.testing.expect(workspace_ops.windowHasWebTerm(session));
 }
 
 // pane에 Term이 여럿이면 탭 바가 제목 탭들 + 활성 Term 하이라이트를 그리는지(PR-C2) — 실 init/spawn/tick이
@@ -50419,27 +49926,27 @@ test "isWindowDragRegion: only empty header area drags the window (not icons/sea
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const icon_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) * 0.5; // 아이콘 줄(row 0)
     // 헤더 빈 영역(줄0 좌측 = 신호등 영역 옆 빈 공간) → 드래그 영역.
-    try std.testing.expect(session.isWindowDragRegion(2 * cw, icon_y));
+    try std.testing.expect(workspace_ops.isWindowDragRegion(session, 2 * cw, icon_y));
     // 우측 아이콘(◧/⚙/+) → 드래그 아님(클릭 대상).
     const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 3 * cw;
-    try std.testing.expect(!session.isWindowDragRegion(gear_x, icon_y));
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(session, gear_x, icon_y));
     // 검색 줄 → 드래그 아님.
     const search_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.85;
-    try std.testing.expect(!session.isWindowDragRegion(2 * cw, search_y));
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(session, 2 * cw, search_y));
     // 헤더 아래 카드 영역 → 드래그 아님.
     const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + 5;
-    try std.testing.expect(!session.isWindowDragRegion(2 * cw, card_y));
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(session, 2 * cw, card_y));
     // 터미널 위 타이틀바 띠(y<strip) → 드래그 영역(② cmux식 상단 띠).
     const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
-    try std.testing.expect(session.isWindowDragRegion(term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) * 0.5));
+    try std.testing.expect(workspace_ops.isWindowDragRegion(session, term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) * 0.5));
     // 터미널 '본문'(띠 아래 y≥strip) → 드래그 아님(셀 선택).
-    try std.testing.expect(!session.isWindowDragRegion(term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) + 5));
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(session, term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) + 5));
     // 접힘: 전체 폭 타이틀바 띠가 드래그, 단 ◧ 펼치기 버튼 위는 아님(클릭).
     sidebar_ops.toggleSidebarCollapsed(session);
     const strip_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) * 0.5;
-    try std.testing.expect(session.isWindowDragRegion(2 * cw, strip_y)); // 띠 빈 곳
+    try std.testing.expect(workspace_ops.isWindowDragRegion(session, 2 * cw, strip_y)); // 띠 빈 곳
     const btn = session.collapsedToggleRect().?;
-    try std.testing.expect(!session.isWindowDragRegion(@as(f64, @floatFromInt(btn.x)) + 1, strip_y)); // ◧ 버튼 위
+    try std.testing.expect(!workspace_ops.isWindowDragRegion(session, @as(f64, @floatFromInt(btn.x)) + 1, strip_y)); // ◧ 버튼 위
     sidebar_ops.toggleSidebarCollapsed(session); // 원복
 }
 
@@ -54132,7 +53639,7 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     const input_bytes_before_move = src.total_terminal_input_bytes;
 
     var buf: [8]u64 = undefined;
-    const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
 
     // outcome: 창 간 이동, moved={moved_id}, normal↔normal이라 revoke 없음, src에 첫 워크스페이스 남아 안 닫힘.
     try std.testing.expect(outcome.cross_window);
@@ -54202,7 +53709,7 @@ test "moveWorkspaceToSession aborts before detach when active preedit queue admi
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     src.allocator = failing.allocator();
     var moved_buf: [8]u64 = undefined;
-    const result = src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    const result = workspace_ops.moveWorkspaceToSession(src, dst, 1, &moved_buf);
     src.allocator = allocator;
 
     try std.testing.expectError(error.OutOfMemory, result);
@@ -54249,7 +53756,7 @@ test "moveWorkspaceToSession destination preedit OOM preserves both owners and r
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     dst.allocator = failing.allocator();
     var moved_buf: [8]u64 = undefined;
-    const failed = src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    const failed = workspace_ops.moveWorkspaceToSession(src, dst, 1, &moved_buf);
     dst.allocator = allocator;
 
     try std.testing.expectError(error.OutOfMemory, failed);
@@ -54266,7 +53773,7 @@ test "moveWorkspaceToSession destination preedit OOM preserves both owners and r
     try std.testing.expect(src.pending_pastes.get(moved.id) == null); // source preflight의 새 empty entry도 rollback.
     try std.testing.expectEqual(@as(usize, 0), dst.pending_pastes.get(destination.id).?.buf.items.len);
 
-    _ = try src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    _ = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &moved_buf);
     try std.testing.expect(!moved.preedit.active());
     try std.testing.expect(!destination.preedit.active());
     try std.testing.expect(src.ime_terminal_target_id == null);
@@ -54308,7 +53815,7 @@ test "moveWorkspaceToSession transfer preflight OOM occurs before either composi
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     dst.allocator = failing.allocator();
     var moved_buf: [8]u64 = undefined;
-    const result = src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    const result = workspace_ops.moveWorkspaceToSession(src, dst, 1, &moved_buf);
     dst.allocator = allocator;
 
     try std.testing.expectError(error.OutOfMemory, result);
@@ -54341,7 +53848,7 @@ test "moveWorkspaceToSession same-session commits only when active owner changes
     session.imeMarked("전");
     const before = session.total_terminal_input_bytes;
     var moved_buf: [8]u64 = undefined;
-    _ = try session.moveWorkspaceToSession(session, 1, &moved_buf);
+    _ = try workspace_ops.moveWorkspaceToSession(session, session, 1, &moved_buf);
     try std.testing.expect(!old_active.preedit.active());
     try std.testing.expectEqual(moved, session.activeSurface());
     try std.testing.expectEqual(before + "전".len, session.total_terminal_input_bytes);
@@ -54349,7 +53856,7 @@ test "moveWorkspaceToSession same-session commits only when active owner changes
     session.imeMarked("유");
     const active_before = session.activeSurface();
     const bytes_before_active_move = session.total_terminal_input_bytes;
-    _ = try session.moveWorkspaceToSession(session, session.app_window.active_tab, &moved_buf);
+    _ = try workspace_ops.moveWorkspaceToSession(session, session, session.app_window.active_tab, &moved_buf);
     try std.testing.expectEqual(active_before, session.activeSurface());
     try std.testing.expect(active_before.preedit.active());
     try std.testing.expectEqual(@as(?u64, active_before.id), session.ime_terminal_target_id);
@@ -54404,7 +53911,7 @@ test "moveWorkspaceToSession transfers exact pending input remainder with destin
     src.pending_pastes.getPtr(moved_id).?.offset = "sent:".len;
 
     var moved_buf: [8]u64 = undefined;
-    _ = try src.moveWorkspaceToSession(dst, 1, &moved_buf);
+    _ = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &moved_buf);
 
     try std.testing.expect(src.pending_pastes.get(moved_id) == null);
     const transferred = dst.pending_pastes.get(moved_id).?;
@@ -54454,19 +53961,19 @@ test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 windowH
     try addMoveTestWorkspace(src, "web-ws");
     try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
     src.dispatchAppAction(.new_web_tab);
-    try std.testing.expect(src.windowHasWebTerm()); // 이동 전: src 활성 탭(1)에 web 신호 on
+    try std.testing.expect(workspace_ops.windowHasWebTerm(src)); // 이동 전: src 활성 탭(1)에 web 신호 on
 
     // 워크스페이스 1(web 포함)을 dst로 옮긴다 — 크래시/누수 없이 완료(testing.allocator가 누수 감시).
     var buf: [8]u64 = undefined;
-    const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
     try std.testing.expect(outcome.cross_window);
     try std.testing.expectEqual(@as(usize, 1), src.tabs.items.len); // src에 첫(터미널) 워크스페이스 남음
     try std.testing.expectEqual(@as(usize, 2), dst.tabs.items.len); // dst가 web 워크스페이스 흡수
 
     // 대상(dst): adoptTab이 옮겨온 탭을 활성으로 세운다 → tree-derived 신호가 그 web Term을 본다(카운터로는 dst stuck-0였을 것).
-    try std.testing.expect(dst.windowHasWebTerm());
+    try std.testing.expect(workspace_ops.windowHasWebTerm(dst));
     // 원본(src): web 워크스페이스가 떠났으니 남은 활성 탭엔 web 없음 → off(카운터로는 src stuck-high였을 것). 드리프트 없음.
-    try std.testing.expect(!src.windowHasWebTerm());
+    try std.testing.expect(!workspace_ops.windowHasWebTerm(src));
 
     // tick 신호도 양 창 정합(epilogue가 각 세션 활성 탭 트리에서 파생).
     try std.testing.expectEqual(@as(u32, 1), (try dst.tick()).web_surfaces_present);
@@ -54493,7 +54000,7 @@ test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동�
     try std.testing.expect(!src.hasWebSurface(sid +% 987654));
 
     var buf: [8]u64 = undefined;
-    _ = try src.moveWorkspaceToSession(dst, 1, &buf);
+    _ = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
 
     // 이동 후: dst에 live(=원본 destroy 전이가 "다른 창 live"로 이동 판정 → 재부모화·browser.closed 억제),
     // src엔 부재(포인터 relocate라 원본 트리서 사라짐). 워크스페이스 전환(같은 창)과 달리 다른 창서 검출됨.
@@ -54514,7 +54021,7 @@ test "commitComposition/setFocused: 빈 세션(merge/move로 비워진 원본)�
     // src의 유일 워크스페이스를 dst로 옮겨 src를 **빈 세션**으로 만든다(0탭). surface_initialized는 유지, 활성 surface는 없음
     // = merge → makeKeyAndOrderFront(dst) → 원본 창 resignKey 시점의 상태.
     var buf: [8]u64 = undefined;
-    _ = try src.moveWorkspaceToSession(dst, 0, &buf);
+    _ = try workspace_ops.moveWorkspaceToSession(src, dst, 0, &buf);
     try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
     try std.testing.expect(src.surface_initialized); // 크래시 조건: 초기화됐으나 활성 surface 없음
     try std.testing.expect(src.app_window.active() == null);
@@ -54542,7 +54049,7 @@ test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스
     const moved_id = src.tabs.items[0].activeTerm().surface.id;
 
     var buf: [8]u64 = undefined;
-    const outcome = try src.moveWorkspaceToSession(dst, 0, &buf);
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 0, &buf);
 
     // src의 유일 워크스페이스가 빠져 빈 창 → source_window_closed + ended_seen 직접 latch(실제 close는 M3d-2b).
     try std.testing.expect(outcome.cross_window);
@@ -54569,7 +54076,7 @@ test "M3d-2a-i moveWorkspaceToSession: membershipChangeEvents가 movedOut+movedI
     const moved_id = src.tabs.items[1].activeTerm().surface.id;
 
     var buf: [8]u64 = undefined;
-    const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
 
     var evbuf: [4]surface_move.SurfaceMovedEvent = undefined;
     const events = surface_move.membershipChangeEvents(outcome, &evbuf);
@@ -54646,7 +54153,7 @@ test "M3d-2a-i adoptTab trace 재지정(SET): dst에 recorder 있으면 옮긴 s
     const moved_id = src.tabs.items[1].activeTerm().surface.id;
 
     var buf: [8]u64 = undefined;
-    _ = try src.moveWorkspaceToSession(dst, 1, &buf);
+    _ = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
 
     // dst에 recorder가 있으니 옮긴 surface 링크의 trace_recorder가 dst 것(&dst.trace_recorder.?)으로 재지정된다(앱-전역 공유 표).
     var found = false;
@@ -54685,7 +54192,7 @@ test "M3d-2a-i adoptTab trace 재지정(CLEAR): dst에 recorder 없으면 옮긴
     try std.testing.expect(pre_had);
 
     var buf: [8]u64 = undefined;
-    _ = try src.moveWorkspaceToSession(dst, 1, &buf); // dst엔 recorder 없음 → clear
+    _ = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf); // dst엔 recorder 없음 → clear
 
     var found = false;
     var cleared = false;
@@ -54710,7 +54217,7 @@ test "M3d-2a-i 결함[0] moveWorkspaceToSession으로 빈 source: tick()·close(
 
     // src의 유일 워크스페이스를 dst로 옮겨 src를 0탭·ended_seen으로 만든다(빈 source, §1.6).
     var buf: [8]u64 = undefined;
-    const outcome = try src.moveWorkspaceToSession(dst, 0, &buf);
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 0, &buf);
     try std.testing.expect(outcome.source_window_closed);
     try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
     try std.testing.expect(src.ended_seen);
@@ -54767,7 +54274,7 @@ test "M3d-2a-i 결함[1] pinned 워크스페이스 이동은 UnsupportedMove —
     const moved_id = src.tabs.items[0].activeTerm().surface.id;
 
     var buf: [8]u64 = undefined;
-    try std.testing.expectError(error.UnsupportedMove, src.moveWorkspaceToSession(dst, 0, &buf));
+    try std.testing.expectError(error.UnsupportedMove, workspace_ops.moveWorkspaceToSession(src, dst, 0, &buf));
     // detach 전 거부 → source·dst 완전 불변.
     try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), dst.tabs.items.len);
@@ -54790,8 +54297,8 @@ test "M3d-2a-i 결함[1] 그룹 마커·그룹 멤버 이동은 UnsupportedMove 
     src.tabs.items[0].group_start = try allocator.dupe(u8, "g");
 
     var buf: [8]u64 = undefined;
-    try std.testing.expectError(error.UnsupportedMove, src.moveWorkspaceToSession(dst, 0, &buf)); // 마커
-    try std.testing.expectError(error.UnsupportedMove, src.moveWorkspaceToSession(dst, 1, &buf)); // 멤버
+    try std.testing.expectError(error.UnsupportedMove, workspace_ops.moveWorkspaceToSession(src, dst, 0, &buf)); // 마커
+    try std.testing.expectError(error.UnsupportedMove, workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf)); // 멤버
     try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), dst.tabs.items.len);
     try std.testing.expect(!src.ended_seen);
@@ -55639,7 +55146,7 @@ test "file panel exit protection gates window session quit and automatic termina
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit; // native-clean처럼 보여도 CM6 snapshot 전에는 종료 금지
 
-    try std.testing.expect(session.requestWindowClose());
+    try std.testing.expect(workspace_ops.requestWindowClose(session));
     try std.testing.expect(!session.ended_seen);
     try std.testing.expect(session.chrome_host.notice.open);
     session.requestClose(.window);
@@ -55842,7 +55349,7 @@ test "file panel focus supersedes a queued workspace first-responder action" {
     const sid = session.fileEntryAt(0).?.surface_id;
     session.workspace_focus_pending = true;
     try std.testing.expect(session.focusFilePanelSurface(sid));
-    try std.testing.expect(!session.takeWorkspaceFocusAction());
+    try std.testing.expect(!workspace_ops.takeWorkspaceFocusAction(session));
     try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
 }
 
@@ -56788,7 +56295,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     const pane_model = win.tabs[0].panes[0];
     try std.testing.expectEqual(@as(usize, 2), pane_model.file_terms.len);
     try std.testing.expectEqual(@as(usize, 1), pane_model.surfaces.len); // 터미널 하나만 PTY surface
@@ -56816,7 +56323,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     // 라이브 편집 mode는 복원을 fail-close하므로(§3.2 종료 보호) 적용 전에 읽기로 되돌린다 — 텍스트에는
     // 이미 source_edit이 실려 있어 왕복 검증에는 영향이 없다.
     file_panel_ops.fileEntryForPath(session, "/tmp/fp16-persist-alpha.md").?.mode = .read;
-    try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
+    try workspace_ops.applyWorkspaceWindow(session, parsed.workspace.windows[0]);
     const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     try std.testing.expect(pane.terms.items[0].file_entry == null); // 터미널

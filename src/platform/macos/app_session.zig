@@ -766,6 +766,11 @@ const collapsed_titlebar_min_pt: u32 = 30;
 // 펼침 시 상단 타이틀바 띠의 최소 높이(논리 pt). 한 줄(cell_height ~17pt)만 띠로 두면 네이티브 macOS 타이틀바
 // (~28pt)보다 낮아 상단 드래그 영역이 좁게 느껴진다(사용자 피드백). 네이티브 높이를 바닥으로 잡아 드래그 영역을 맞춘다.
 const titlebar_strip_min_pt: u32 = 28;
+
+/// 알림 배지 원의 중심이 헤더 아이콘 줄 **셀 안에서** 얼마나 아래인가(셀 높이 비율). digit 글리프의 시각
+/// 중심은 셀 중앙(0.5)보다 약간 위라 0.46이다. 줄 자체의 원점은 `sidebarHeaderIconRowTopPx`가 따로 준다 —
+/// 이 상수는 그 원점 **위에서의 nudge**일 뿐이라 둘을 섞으면 안 된다(섞어서 배지가 어긋났던 결함).
+const notification_badge_center_in_cell: f32 = 0.46;
 // 창 바닥 상태표시줄 높이(논리 pt, SB1). VSCode(22px)·Zed와 같은 급이고, 상단 타이틀바 띠(28pt)보다 낮게 둬
 // 상/하단 chrome의 위계를 유지한다. **터미널 폰트에서 파생하지 않는다** — 도크 view bar가 그렇게 했다가
 // 폰트를 키우면 같은 아이콘 줄이 오르내리는 회귀가 났고(실측 53px↔80px) 폰트 독립 pt로 옮겼다. 상태바는
@@ -4601,13 +4606,23 @@ pub const AppSession = struct {
         return self.titlebar_strip_px;
     }
 
+    /// 헤더 아이콘 줄(🔔◧⚙+)의 셀 **상단** y — 렌더러가 이 줄에 실제로 쓰는 py_top과 같은 식이다
+    /// (`maru_metal_renderer.m`: `py_top = (strip - ch) * 0.5`). 이 줄만 `row × ch`가 아니라 신호등 띠
+    /// [0, titlebar_strip_px] 안 세로 중앙에 놓이므로, 이 줄 위에 무언가를 얹으려면 이 값이 원점이다.
+    ///
+    /// **셀이 아닌 GPU quad(알림 배지 원)도 이 원점을 써야 한다.** 배지는 한때 `ch * 0.46`으로 "줄이 y=0에서
+    /// 시작한다"를 가정했는데, 띠가 셀보다 높은 실제 창에서는 원만 `(strip-ch)/2`만큼 위로 떠 숫자가 원
+    /// 밖으로 빠져나갔다. 셀 세로 위치는 렌더러가, quad 세로 위치는 host가 정하므로 이 함수가 유일한 접점이다.
+    fn sidebarHeaderIconRowTopPx(self: *const AppSession) u32 {
+        const ch = self.cell_height_px;
+        const band = self.sidebarSearchBandTopPx();
+        return if (band > ch) (band - ch) / 2 else 0;
+    }
+
     /// 헤더 아이콘 줄(🔔◧⚙+)의 세로 중앙 y — 띠 안 세로 중앙에 그려진 한 셀 줄의 가운데.
     /// 렌더러(`maru_metal_renderer.m`의 띠 중앙 공식)·hit-test(`sidebar.headerHit`)와 **같은 기하**를 푼다.
     fn sidebarHeaderIconRowCenterPx(self: *const AppSession) u32 {
-        const ch = self.cell_height_px;
-        const band = self.sidebarSearchBandTopPx();
-        const top = if (band > ch) (band - ch) / 2 else 0;
-        return top + ch / 2;
+        return self.sidebarHeaderIconRowTopPx() + self.cell_height_px / 2;
     }
 
     /// 검색 줄 glyph의 세로 origin — 상단 바 밴드 안 세로 중앙. `row = 0` frame과 짝이라 `py_top = origin_y`가 된다.
@@ -28984,10 +28999,13 @@ pub const AppSession = struct {
         const cw_f: f32 = @floatFromInt(cw);
         const ch_f: f32 = @floatFromInt(ch);
         const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (코너 크기 종의 우상단 모서리에 원 좌단이 ~0.2cw 겹침)
-        // 배지 셀 중심(가로)·헤더 row 0 세로 중심(backing px). 흰 숫자가 원 가운데 오게 셀 중심에 맞춘다. center_y는 digit
-        // 글리프 시각 중심(셀 중앙보다 약간 위)에 맞춰 0.46ch로 둔다(검증). 원이 너무 크면 옆 ◧ 아이콘에 닿으므로 0.82ch.
+        // 배지 셀 중심(가로)·헤더 row 0 세로 중심(backing px). 흰 숫자가 원 가운데 오게 셀 중심에 맞춘다.
+        // 세로 기준은 `sidebarHeaderIconRowTopPx` — 헤더 아이콘 줄은 y=0이 아니라 신호등 띠 안 세로 중앙에 놓인다.
+        // 그 위에서 digit 글리프 시각 중심에 맞춰 notification_badge_center_in_cell을 더한다.
+        // 원이 너무 크면 옆 ◧ 아이콘에 닿으므로 0.82ch.
         const center_x: f32 = (@as(f32, @floatFromInt(badge_col)) + 0.5) * cw_f;
-        const center_y: f32 = ch_f * 0.46;
+        const row_top_f: f32 = @floatFromInt(self.sidebarHeaderIconRowTopPx());
+        const center_y: f32 = row_top_f + ch_f * notification_badge_center_in_cell;
         const d: f32 = ch_f * 0.82; // 원 지름(또렷하면서 ◧ 아이콘과 안 닿게)
         const red = packRgbAlpha(.{ .r = 0xE5, .g = 0x48, .b = 0x4D }, 0xFF); // 알림 배지 빨강(흰 숫자 대비). straight-alpha(셰이더 rgb*=a)
         self.gpu_quads.append(self.allocator, .{
@@ -59526,6 +59544,65 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
     _ = session.hoverCursor(far_x, 1, 0);
     try std.testing.expect(!session.hovered_collapsed_toggle);
     try std.testing.expect(!hasHoverQuad(session, hover_fill));
+}
+
+// 알림 배지 원(GPU quad, layer 4)은 그 위에 올라가는 흰 숫자(헤더 frame 셀)를 **가로·세로 모두** 감싸야 한다.
+// 가로는 notificationBadgeCol이 단일 출처라 원래 맞았지만, 세로는 오래 어긋나 있었다: 원은 `ch*0.46`으로 "헤더
+// 아이콘 줄이 y=0에서 시작한다"를 가정했는데 렌더러는 그 줄만 신호등 띠 안 세로 중앙에 놓는다
+// (maru_metal_renderer.m `py_top = (strip - ch) * 0.5`). 띠가 셀보다 높은 실제 창에서 원만 위로 떠 숫자가
+// 원 밖으로 빠져나갔고, 좌표 계측은 origin 0인 실행에서만 돌아 다섯 번을 통과했다.
+//
+// 그래서 이 판정자는 헬퍼를 호출하지 않고 **렌더러 공식을 그대로 다시 푼다** — 소비되는 ABI 값
+// (metalFrame().titlebar_strip_px)에서 셀 줄 y를 재구성해 원이 그 줄을 덮는지 본다. 헬퍼를 부르면
+// 두 쪽이 같이 틀려도 통과하므로 판정자가 아니게 된다.
+test "notification badge circle vertically contains the header icon row the renderer draws the digit on" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = session.pushNotificationHistory("t", "b", 0); // 안읽음 1 → 펼침 헤더에 배지
+    try std.testing.expect(!session.sidebar_collapsed);
+    _ = try session.tick(); // chrome 기하는 투영 시점 스탬프 — 한 프레임 확정 후 읽는다
+
+    const ch = session.cell_height_px;
+    const strip = session.metalFrame().titlebar_strip_px;
+    // 띠 > 셀이어야 이 판정자가 의미를 갖는다(둘이 같으면 py_top이 0이라 옛 코드도 통과한다).
+    try std.testing.expect(strip > ch);
+    // 렌더러가 헤더 아이콘 줄 셀에 쓰는 py_top — 공식을 여기서 다시 푼다.
+    const row_top: f32 = @floatFromInt((strip - ch) / 2);
+    try std.testing.expect(row_top > 0); // 0이면 옛 코드(원점 무시)와 구분이 안 돼 판정자가 아니게 된다
+
+    // 제품이 낸 배지 원을 찾는다: layer 4 + 정사각(w==h) + 반지름 = w/2.
+    var circle: ?metal_frame.GpuQuad = null;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != 4 or q.w != q.h or q.corner_radii[0] != q.w / 2.0) continue;
+        circle = q;
+    }
+    const c = circle orelse return error.BadgeCircleMissing;
+
+    // 원 중심 == 렌더러 줄 원점 + 셀 안 nudge. **포함(원이 숫자를 삼키는가)으로는 부족하다** — 원 지름이
+    // 셀 높이의 0.82배라 원점을 통째로 빠뜨려도 숫자가 원 안에 남아 통과한다(실제로 통과시켜 봤다).
+    // 고정해야 하는 것은 "원과 셀이 같은 원점을 쓰는가"이므로 등식으로 잡는다.
+    const digit_center_y: f32 = row_top + @as(f32, @floatFromInt(ch)) * notification_badge_center_in_cell;
+    const circle_center_y: f32 = c.y + c.h / 2.0;
+    try std.testing.expectApproxEqAbs(digit_center_y, circle_center_y, 0.01);
+
+    // 가로는 notificationBadgeCol 단일 출처 — 원 중심 == 그 셀의 중심.
+    const cols: u16 = @intCast(session.sidebar_width_px / session.cell_width_px);
+    const badge_col = AppSession.notificationBadgeCol(cols - 12);
+    const cell_center_x: f32 = (@as(f32, @floatFromInt(badge_col)) + 0.5) * @as(f32, @floatFromInt(session.cell_width_px));
+    try std.testing.expectApproxEqAbs(cell_center_x, c.x + c.w / 2.0, 0.01);
 }
 
 // 접힘에도 알림 종 유지: 좌상단 띠에 ◧ 오른쪽 종(collapsedBellCol=collapsedToggleCol+3)을 그리고, 그 클릭 rect는

@@ -131,7 +131,11 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   텍스트는 대비가 낮아 안 읽혔다). 종을 한 칸 왼쪽(`cols-12`)에 둬 배지(`cols-10`)와 ◧(`cols-8`) 사이에 `cols-9` 한 칸
   간격을 둔다(◧가 1.7×라 `cols-9`로 번져 배지와 닿던 것을 뗌). **빨강 원**은 `appendNotificationBadge`가 GpuQuad(layer 4)로,
   **흰 숫자**는 `appendBellAndBadge`가 헤더 frame 셀(같은 `cols-10`)로 둔다 — cell↔quad가 같은 col에서 만나 어긋나지 않는
-  단일 출처. 원형 1칸 제약상 **1~9는 숫자, 10개 이상은 "9"로 cap**한다(2칸 "9+"는 자리가 없음). **렌더 레이어 4**는 사이드바 bg strip
+  단일 출처. **세로도 같은 원점을 쓴다**: 헤더 아이콘 줄은 `row × ch`가 **아니라** 신호등 띠 `[0, titlebar_strip_px]` 안
+  세로 중앙에 놓이므로(`maru_metal_renderer.m`의 `py_top = (strip - ch) * 0.5`), 원도 `sidebarHeaderIconRowTopPx`를
+  원점으로 삼고 그 위에서 `notification_badge_center_in_cell`(0.46ch, digit 시각 중심)만큼 내린다. 원이 이 원점을 빼고
+  `ch*0.46`만 쓰면 띠가 셀보다 높은 창에서 `(strip-ch)/2`만큼 위로 떠 숫자가 원 밖으로 나간다 — **셀 세로 위치는
+  렌더러가, quad 세로 위치는 host가 정하므로 이 함수가 두 축의 유일한 접점**이다. 원형 1칸 제약상 **1~9는 숫자, 10개 이상은 "9"로 cap**한다(2칸 "9+"는 자리가 없음). **렌더 레이어 4**는 사이드바 bg strip
   '뒤' / 헤더 글리프(터미널 셀 패스) '앞'에 끼우는 전용 quad 패스다(`maru_metal_renderer.m`) — 0/1/3 레이어는 헤더 글리프
   '뒤'가 안 돼 흰 숫자를 덮으므로(헤더 hover quad 한계와 동형), 빨강 원이 숫자 아래·사이드바 배경 위에 오게 한 칸 신설.
 - **접힘 배지(종 좌측 텍스트, 유지)**: 접힘 타이틀바 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가리므로(원형

@@ -1180,7 +1180,13 @@ pub const RemoteRuntime = struct {
 
     fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
-        while (try self.client.takeEventForStream(self.attachment.streamId())) |frame| {
+        while (self.client.takeEventForStream(self.attachment.streamId()) catch |err| {
+            if (builtin.is_test) std.debug.print(
+                "remote runtime event drain stage=take error={s}\n",
+                .{@errorName(err)},
+            );
+            return err;
+        }) |frame| {
             defer self.client.releaseEvent(frame);
             const verdict = frame.preflight orelse
                 runtime_event_wire.preflightEvent(frame.payload, .{});
@@ -1217,6 +1223,10 @@ pub const RemoteRuntime = struct {
                     .payload = frame.payload,
                 },
             ) catch |err| {
+                if (builtin.is_test) std.debug.print(
+                    "remote runtime event drain stage=classify error={s}\n",
+                    .{@errorName(err)},
+                );
                 self.client.poison(if (err == error.OutOfMemory)
                     .local_resource_exhausted
                 else
@@ -1229,6 +1239,10 @@ pub const RemoteRuntime = struct {
             const event = switch (classification) {
                 .accepted => |accepted| accepted,
                 .violation => {
+                    if (builtin.is_test) std.debug.print(
+                        "remote runtime event drain stage=classification-violation\n",
+                        .{},
+                    );
                     self.client.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 },

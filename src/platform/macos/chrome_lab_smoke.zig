@@ -494,6 +494,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-gutter")) return .editor_gutter;
     if (std.mem.eql(u8, raw, "editor-scrolled")) return .editor_scrolled;
     if (std.mem.eql(u8, raw, "editor-font-large")) return .editor_font_large;
+    if (std.mem.eql(u8, raw, "editor-hazard")) return .editor_hazard;
     return null;
 }
 
@@ -517,6 +518,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_gutter => "editor-gutter",
         .editor_scrolled => "editor-scrolled",
         .editor_font_large => "editor-font-large",
+        .editor_hazard => "editor-hazard",
     };
 }
 

@@ -28,6 +28,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const input_ops = @import("input.zig");
 const web_ops = @import("web.zig");
 const ctx_group_menu_color_first = app_session_mod.ctx_group_menu_color_first;
 const ctx_group_menu_ungroup = app_session_mod.ctx_group_menu_ungroup;
@@ -65,7 +66,7 @@ const KeyHintConfigAbi = AppSession.KeyHintConfigAbi;
 const QuickTerminalConfig = app_session_mod.QuickTerminalConfig;
 const RenameTarget = app_session_mod.RenameTarget;
 const SettingsDefaults = AppSession.SettingsDefaults;
-const chromeInputFromKeyEvent = AppSession.chromeInputFromKeyEvent;
+const chromeInputFromKeyEvent = @import("input.zig").chromeInputFromKeyEvent;
 const command_catalog = app_session_mod.command_catalog;
 const config_mod = app_session_mod.config_mod;
 const file_panel_ops = @import("file_panel.zig");
@@ -1678,7 +1679,7 @@ pub fn reloadConfig(self: *AppSession) void {
     // drain해 갱신된다(v85 — 더는 재시작 필요 없음).
     self.rebuildCommandCatalog();
     // 파일 새 값이라 전역 단축키도 다시 빌드해 라이브 OS 재등록(PR2 — 지금까지 reload가 global을 재반영 못 하던 버그도 같이 고침).
-    self.rebuildGlobalHotkeys() catch {};
+    input_ops.rebuildGlobalHotkeys(self) catch {};
     self.global_hotkeys_dirty = true;
     // follow-system이 켜져 있으면(파일 새 값) 위에서 깐 파일 테마 위에 현재 시스템 외관 프리셋을 다시 덮는다(F2-9).
     self.applyFollowSystemTheme();
@@ -1766,7 +1767,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     // keybind 불변 경로라 카탈로그를 안 건드린다 — reset은 keybind를 바꾸는 유일한 reapply 호출자라 여기서 명시 재빌드.
     self.rebuildCommandCatalog();
     // 위에서 global_bindings를 비웠으니 global_hotkeys도 비고, 라이브 OS 재등록(dirty)으로 등록 해제까지 따라간다(PR2).
-    self.rebuildGlobalHotkeys() catch {};
+    input_ops.rebuildGlobalHotkeys(self) catch {};
     self.global_hotkeys_dirty = true;
     self.metal_dirty = true;
     if (!wrote and path.len > 0)
@@ -2022,7 +2023,7 @@ pub fn unbindActionEntry(self: *AppSession, entry: command_catalog.Entry) void {
     if (found_user) self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
     // ② **빌트인 chord 전부**를 unbind(except=null) — 사용자 chord만 빼면 빌트인이 되살아나므로 모두 죽인다(완전 해제).
     // 다중-chord 빌트인도 전부(리뷰 #840). rebind(완전 교체)와 공유하는 unbindBuiltinChords 단일 출처.
-    self.unbindBuiltinChords(entry, null);
+    input_ops.unbindBuiltinChords(self, entry, null);
     self.rebuildCommandCatalog();
     // 펜딩 rebind 취소(unbind가 우선).
     var i: usize = 0;
@@ -2053,7 +2054,7 @@ pub fn unbindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry) 
     cancelGlobalRebind(self, entry.key); // 펜딩 rebind 취소(제거가 우선)
     markGlobalRemoved(self, entry.key); // 영속: 전역 줄 제거
     // 라이브 OS 재등록(PR2) — 그 액션이 빠진 global_bindings로 global_hotkeys를 다시 빌드하고 dirty(Swift drain → 재등록).
-    self.rebuildGlobalHotkeys() catch {};
+    input_ops.rebuildGlobalHotkeys(self) catch {};
     self.global_hotkeys_dirty = true;
     self.metal_dirty = true;
 }

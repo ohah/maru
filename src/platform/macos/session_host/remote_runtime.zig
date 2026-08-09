@@ -4744,16 +4744,10 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    var revoke = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 7 },
-        .payload = try allocator.dupe(
-            u8,
-            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
-        ),
-    };
-    revoke.header.payload_len = @intCast(revoke.payload.len);
-    try client.pending_events.append(allocator, revoke);
-    client.pending_event_bytes = revoke.payload.len;
+    try client.bufferGenerationEventForTest(
+        7,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
 
     var runtime: RemoteRuntime = undefined;
     runtime.client = &client;
@@ -4797,16 +4791,10 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
         },
     };
     defer client.deinit();
-    var revoke = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 8 },
-        .payload = try allocator.dupe(
-            u8,
-            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000bb\",\"stream_id\":8,\"controller_generation\":4,\"reason\":\"takeover\"}}",
-        ),
-    };
-    revoke.header.payload_len = @intCast(revoke.payload.len);
-    try client.pending_events.append(allocator, revoke);
-    client.pending_event_bytes = revoke.payload.len;
+    try client.bufferGenerationEventForTest(
+        8,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000bb\",\"stream_id\":8,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
 
     var sibling: RemoteRuntime = undefined;
     sibling.client = &client;
@@ -5349,16 +5337,10 @@ test "CR3a-2c3a CR3a-2c3c C3 detach Busy fail-closes without mutation or RPC wir
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    var revoke = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 17 },
-        .payload = try allocator.dupe(
-            u8,
-            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"00000000000000000000000000000001\",\"stream_id\":17,\"controller_generation\":2,\"reason\":\"takeover\"}}",
-        ),
-    };
-    revoke.header.payload_len = @intCast(revoke.payload.len);
-    try client.pending_events.append(allocator, revoke);
-    client.pending_event_bytes = revoke.payload.len;
+    try client.bufferGenerationEventForTest(
+        17,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"00000000000000000000000000000001\",\"stream_id\":17,\"controller_generation\":2,\"reason\":\"takeover\"}}",
+    );
     const pending = try allocator.dupe(u8, "must-not-reach-peer");
     client.pending_outbound = .{ .frame = pending, .stream_id = 17 };
 
@@ -6007,23 +5989,12 @@ test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막
     defer client.deinit();
 
     // 남의 pane(stream 10)이 controller를 빼앗겼다. 그 runtime이 아직 pump되지 않아 버퍼에 남아 있다.
-    var foreign_revoke = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 10 },
-        .payload = try allocator.dupe(
-            u8,
-            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":10,\"controller_generation\":4,\"reason\":\"takeover\"}}",
-        ),
-    };
-    foreign_revoke.header.payload_len = @intCast(foreign_revoke.payload.len);
+    try client.bufferGenerationEventForTest(
+        10,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":10,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
     // 내 pane(stream 9)은 화면을 회수당했다.
-    var invalidated = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 9 },
-        .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
-    };
-    invalidated.header.payload_len = @intCast(invalidated.payload.len);
-    try client.pending_events.append(allocator, foreign_revoke);
-    try client.pending_events.append(allocator, invalidated);
-    client.pending_event_bytes = foreign_revoke.payload.len + invalidated.payload.len;
+    try client.bufferGenerationEventForTest(9, "{\"event\":\"snapshot.invalidated\"}");
 
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
@@ -6059,19 +6030,8 @@ test "remote runtime: typed ended event terminates only its stream pump" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    var ended = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 9 },
-        .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
-    };
-    ended.header.payload_len = @intCast(ended.payload.len);
-    var sibling = client_mod.BufferedEvent{
-        .header = .{ .kind = .event, .stream_id = 10 },
-        .payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}"),
-    };
-    sibling.header.payload_len = @intCast(sibling.payload.len);
-    try client.pending_events.append(allocator, ended);
-    try client.pending_events.append(allocator, sibling);
-    client.pending_event_bytes = ended.payload.len + sibling.payload.len;
+    try client.bufferGenerationEventForTest(9, "{\"event\":\"runtime.ended\"}");
+    try client.bufferGenerationEventForTest(10, "{\"event\":\"runtime.ended\"}");
     try client.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,

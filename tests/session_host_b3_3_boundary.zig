@@ -20,7 +20,7 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn settleRpcResponseExecutionTerminal("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn rpcExecutionAuthoritiesTerminalForTest("));
-    try std.testing.expectEqual(@as(usize, 3), count(registry, "if (!builtin.is_test) unreachable;"));
+    try std.testing.expectEqual(@as(usize, 5), count(registry, "if (!builtin.is_test) unreachable;"));
     try std.testing.expectEqual(@as(usize, 1), count(registry, ".exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "pub fn exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "if (!builtin.is_test) unreachable;"));

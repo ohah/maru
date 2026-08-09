@@ -357,6 +357,10 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "readGenerationBatch", .receiver_type = mutable, .class = .guarded },
         .{ .name = "dropBufferedStream", .receiver_type = mutable, .class = .guarded },
         .{ .name = "takeEventForStream", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "prepareGenerationEventTake", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "commitGenerationEventTake", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "abortGenerationEventTake", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "bufferGenerationEventForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "peekEndedEventForStream", .receiver_type = immutable, .class = .guarded },
         .{ .name = "prepareEndedPurgeInventory", .receiver_type = immutable, .class = .guarded },
         .{ .name = "releaseEvent", .receiver_type = immutable, .class = .guarded },
@@ -476,6 +480,10 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "readGenerationBatch", .funnel = "readGenerationBatch", .gate = "requireBlockingMode" },
         .{ .receiver = "dropBufferedStream", .funnel = "dropBufferedStream", .gate = "beginPublicMutation" },
         .{ .receiver = "takeEventForStream", .funnel = "takeEventForStream", .gate = "beginPublicMutation" },
+        .{ .receiver = "prepareGenerationEventTake", .funnel = "prepareGenerationEventTake", .gate = "beginPublicMutation" },
+        .{ .receiver = "commitGenerationEventTake", .funnel = "commitGenerationEventTake", .gate = "beginPublicMutation" },
+        .{ .receiver = "abortGenerationEventTake", .funnel = "abortGenerationEventTake", .gate = "beginPublicMutation" },
+        .{ .receiver = "bufferGenerationEventForTest", .funnel = "bufferGenerationEventForTest", .gate = "beginPublicMutation" },
         .{ .receiver = "peekEndedEventForStream", .funnel = "peekEndedEventForStream", .gate = "beginPublicMutation" },
         .{ .receiver = "prepareEndedPurgeInventory", .funnel = "prepareEndedPurgeInventory", .gate = "beginPublicMutation" },
         .{ .receiver = "releaseEvent", .funnel = "releaseEvent", .gate = "beginPublicMutation" },
@@ -1169,10 +1177,22 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             // The allocator restore receiver is now a checked one-shot token consume rather than
             // an unchecked allocator setter; this reviewed API rename intentionally changes the
             // frozen declaration digest without expanding the baseline count.
-            .baseline_digest = .{ 0xe6, 0xd2, 0xd8, 0x51, 0xf4, 0x0c, 0xd9, 0xdb, 0x04, 0xab, 0x89, 0x5d, 0xfc, 0xb1, 0xeb, 0x6f, 0xef, 0x5a, 0xe5, 0x73, 0x81, 0x92, 0xf4, 0x7a, 0xe7, 0xa6, 0x17, 0xa7, 0x3b, 0x18, 0x65, 0x21 },
+            .baseline_digest = .{ 0xa9, 0x86, 0xac, 0xb5, 0x53, 0x2e, 0x29, 0xb5, 0x89, 0x15, 0xe1, 0xa2, 0xfa, 0x98, 0xb4, 0xb0, 0x0c, 0xe2, 0xcd, 0x1e, 0xa8, 0x39, 0x4b, 0xb4, 0x83, 0x9a, 0xed, 0x9b, 0x42, 0xc5, 0x05, 0xb3 },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeKind" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventTakeLifecycle" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedGenerationEventTake" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "OwnedGenerationEvent" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPrepareError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventCommitError" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "validateGenerationEventQueue" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareGenerationEventTake" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitGenerationEventTake" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortGenerationEventTake" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bufferGenerationEventForTest" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferCanonicalEvent" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ClientOperationFence" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_transaction" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
@@ -1353,6 +1373,16 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "runtime_event_wire" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeRequest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventIdentity" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPublication" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventTakeOutcome" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventError" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "generationEventCorrupt" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "takeGenerationEvent" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventOwnerCurrent" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "discardGenerationEventForTest" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_poison" },
@@ -2144,6 +2174,7 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
         "    pub fn sendControl(",
         "    pub fn sendControlNonBlocking(",
         "    pub fn pumpPendingOutput(",
+        "    pub fn takeEvent(",
         "    pub fn fenceRevoke(",
         "    pub fn readInitialSnapshot(",
         "    pub fn poison(",
@@ -2745,7 +2776,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 6),
+        @as(usize, 7),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -6799,7 +6830,10 @@ test "CR3a-2c1 initial snapshot ownership stays final-address and generation-bou
 
     // Batch registry와 ended purge는 각각 2b2와 2c2의 별도 권위다.
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(transport, "readAttachmentBatch("));
-    try std.testing.expectEqual(@as(usize, 0), countOccurrences(transport, "dropBufferedStream("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countIdentifierOutsideTopLevelTests(transport, "dropBufferedStream"),
+    );
 }
 
 test "CR3a-1 ownership capabilities stay in their exact production boundaries" {

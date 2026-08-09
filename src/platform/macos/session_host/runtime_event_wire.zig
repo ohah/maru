@@ -25,6 +25,34 @@ pub fn payloadDigest(payload: []const u8) Digest {
     return sha(payload);
 }
 
+/// Canonical compact commitment to an accepted ingress result. `raw_digest` binds the exact
+/// payload while the normalized event projection makes a later parser/result drift observable.
+pub fn eventPreflightProjectionDigest(value: EventPreflight) Digest {
+    var hasher = Sha256.init(.{});
+    hasher.update("runtime-event-preflight-projection.v1");
+    hasher.update(&value.raw_digest);
+    const tag = @intFromEnum(std.meta.activeTag(value.event));
+    hasher.update(std.mem.asBytes(&tag));
+    switch (value.event) {
+        .revoked => |event| {
+            hasher.update(std.mem.asBytes(&event.runtime_id));
+            hasher.update(std.mem.asBytes(&event.stream_id));
+            hasher.update(std.mem.asBytes(&event.controller_generation));
+        },
+        .resized => |event| {
+            hasher.update(std.mem.asBytes(&event.runtime_id));
+            hasher.update(std.mem.asBytes(&event.cols));
+            hasher.update(std.mem.asBytes(&event.rows));
+            hasher.update(std.mem.asBytes(&event.resize_generation));
+        },
+        .metadata => |event| hasher.update(&event.semantic_digest),
+        .invalidated, .ended => {},
+    }
+    var digest: Digest = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
 /// Exact equality for a stored allocation-free parse result.
 ///
 /// `EventPreflight` contains fixed-capacity process storage whose unused tail is deliberately

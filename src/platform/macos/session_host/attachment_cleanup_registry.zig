@@ -33,6 +33,13 @@ const ControllerAuthority = enum(u8) {
     revoked,
 };
 
+const EventAuthorityLifecycle = enum(u8) {
+    idle,
+    reserved,
+    live,
+    terminal,
+};
+
 const AdmissionContext = enum(u8) {
     prepare,
     execute_attach,
@@ -78,6 +85,11 @@ fn entryLifecycleRawValid(value: *const EntryLifecycle) bool {
 fn controllerAuthorityRawValid(value: *const ControllerAuthority) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
     return raw <= @intFromEnum(ControllerAuthority.revoked);
+}
+
+fn eventAuthorityLifecycleRawValid(value: *const EventAuthorityLifecycle) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(EventAuthorityLifecycle.terminal);
 }
 
 /// Binding identity fields known before this registry mints its monotonic reservation ID.
@@ -130,6 +142,47 @@ pub const Reserved = struct {
     identity: contract.BindingIdentity,
 };
 
+/// Pointer-free projection of the binding entry's canonical event incarnation. It is evidence to
+/// revalidate against the registry, never an independently mutable receipt authority.
+pub const EventGenerationReceipt = struct {
+    registry_incarnation: u64,
+    binding_reservation_id: u64,
+    node_incarnation: u64,
+    stream_id: u64,
+    event_generation: u64,
+    owner_addr: usize,
+};
+
+const EventAuthority = struct {
+    next_generation: u64 = 1,
+    active_generation: u64 = 0,
+    active_owner_addr: usize = 0,
+    lifecycle: EventAuthorityLifecycle = .idle,
+
+    fn pristineExact(self: *const EventAuthority) bool {
+        return eventAuthorityLifecycleRawValid(&self.lifecycle) and
+            self.lifecycle == .idle and self.next_generation == 1 and
+            self.active_generation == 0 and self.active_owner_addr == 0;
+    }
+
+    fn idleExact(self: *const EventAuthority) bool {
+        return eventAuthorityLifecycleRawValid(&self.lifecycle) and
+            self.lifecycle == .idle and self.next_generation != 0 and
+            self.active_generation == 0 and self.active_owner_addr == 0;
+    }
+
+    fn settledExact(self: *const EventAuthority) bool {
+        if (!eventAuthorityLifecycleRawValid(&self.lifecycle) or
+            self.active_generation != 0 or self.active_owner_addr != 0)
+            return false;
+        return switch (self.lifecycle) {
+            .idle => self.next_generation != 0,
+            .terminal => self.next_generation == std.math.maxInt(u64),
+            .reserved, .live => false,
+        };
+    }
+};
+
 const Entry = struct {
     lifecycle: EntryLifecycle = .empty,
     reservation_id: u64 = 0,
@@ -140,6 +193,7 @@ const Entry = struct {
     prepared_request: prepared_request_authority.Authority = .{},
     rpc_response_authority: rpc_response_authority.Authority = .{},
     rpc_execution_recovery: RpcExecutionRecovery = .{},
+    event_authority: EventAuthority = .{},
 
     fn clear(self: *Entry) void {
         self.* = .{};
@@ -976,6 +1030,128 @@ pub const AttachmentCleanupRegistry = struct {
         return entry.controller_authority == .live;
     }
 
+    pub fn reserveEventGeneration(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        stream_id: u64,
+        owner_addr: usize,
+    ) Error!EventGenerationReceipt {
+        if (stream_id == 0) return error.InvalidStream;
+        if (owner_addr == 0) return error.InvalidIdentity;
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            entry.lifecycle != .bound or entry.stream_id != stream_id)
+            return error.InvalidState;
+        if (authority.lifecycle == .terminal) return error.IdentityExhausted;
+        if (!authority.idleExact()) return error.InvalidState;
+        const generation = authority.next_generation;
+        if (generation == 0 or generation == std.math.maxInt(u64)) {
+            authority.lifecycle = .terminal;
+            return error.IdentityExhausted;
+        }
+
+        authority.next_generation = generation + 1;
+        authority.active_generation = generation;
+        authority.active_owner_addr = owner_addr;
+        authority.lifecycle = .reserved;
+        return .{
+            .registry_incarnation = self.incarnation,
+            .binding_reservation_id = identity.binding_reservation_id,
+            .node_incarnation = identity.node_incarnation,
+            .stream_id = stream_id,
+            .event_generation = generation,
+            .owner_addr = owner_addr,
+        };
+    }
+
+    pub fn eventGenerationCurrent(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) Error!bool {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle)) return error.InvalidState;
+        return authority.lifecycle == .live and
+            receipt.registry_incarnation == self.incarnation and
+            receipt.binding_reservation_id == identity.binding_reservation_id and
+            receipt.node_incarnation == identity.node_incarnation and
+            receipt.stream_id == entry.stream_id and receipt.stream_id != 0 and
+            receipt.event_generation == authority.active_generation and
+            receipt.owner_addr == authority.active_owner_addr and receipt.owner_addr != 0;
+    }
+
+    pub fn rollbackEventGenerationBeforePublishNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event generation rollback lost binding authority");
+        const authority = &entry.event_authority;
+        if (authority.lifecycle != .reserved or
+            receipt.registry_incarnation != self.incarnation or
+            receipt.binding_reservation_id != identity.binding_reservation_id or
+            receipt.node_incarnation != identity.node_incarnation or
+            receipt.stream_id != entry.stream_id or receipt.stream_id == 0 or
+            receipt.event_generation != authority.active_generation or
+            receipt.owner_addr != authority.active_owner_addr or receipt.owner_addr == 0)
+            @panic("event generation rollback lost reserved authority");
+        entry.event_authority.active_generation = 0;
+        entry.event_authority.active_owner_addr = 0;
+        entry.event_authority.lifecycle = .idle;
+    }
+
+    pub fn commitEventGenerationPublicationNoFail(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) void {
+        const entry = self.exactEntry(reservation, identity) catch
+            @panic("event generation publication lost binding authority");
+        const authority = &entry.event_authority;
+        if (authority.lifecycle != .reserved or
+            receipt.registry_incarnation != self.incarnation or
+            receipt.binding_reservation_id != identity.binding_reservation_id or
+            receipt.node_incarnation != identity.node_incarnation or
+            receipt.stream_id != entry.stream_id or receipt.stream_id == 0 or
+            receipt.event_generation != authority.active_generation or
+            receipt.owner_addr != authority.active_owner_addr or receipt.owner_addr == 0)
+            @panic("event generation publication lost reserved authority");
+        authority.lifecycle = .live;
+    }
+
+    pub fn settleEventGenerationForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) Error!void {
+        if (!builtin.is_test) unreachable;
+        const entry = try self.exactEntry(reservation, identity);
+        if (!(try self.eventGenerationCurrent(reservation, identity, receipt)))
+            return error.InvalidState;
+        entry.event_authority.active_generation = 0;
+        entry.event_authority.active_owner_addr = 0;
+        entry.event_authority.lifecycle = .idle;
+    }
+
+    pub fn exhaustEventGenerationForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) Error!void {
+        if (!builtin.is_test) unreachable;
+        const entry = try self.exactEntry(reservation, identity);
+        if (!entry.event_authority.idleExact()) return error.InvalidState;
+        entry.event_authority.next_generation = std.math.maxInt(u64);
+    }
+
     pub fn controllerRevokePending(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
@@ -1026,6 +1202,7 @@ pub const AttachmentCleanupRegistry = struct {
         if (stream_id == 0) return error.InvalidStream;
         const entry = try self.exactEntry(reservation, identity);
         if (entry.lifecycle != .bound or entry.stream_id != stream_id or
+            !entry.event_authority.settledExact() or
             self.live_count == 0 or !dropAuthorityCanBegin(entry, self.incarnation))
             return error.InvalidState;
     }
@@ -1070,13 +1247,14 @@ pub const AttachmentCleanupRegistry = struct {
         }
         if (!self.valid()) return .corrupt;
         if (self.live_count != 0 or self.active_rpc_recovery_entry_plus_one != 0) return .busy;
-        for (self.entries) |entry| {
+        for (&self.entries) |*entry| {
             if (!entryLifecycleRawValid(&entry.lifecycle) or
                 !controllerAuthorityRawValid(&entry.controller_authority) or
                 entry.lifecycle != .empty or entry.reservation_id != 0 or
                 entry.stream_id != 0 or entry.controller_authority != .unavailable or
                 entry.transport_owner.lifecycle != .pristine or
                 entry.response_owner.lifecycle != .pristine or
+                !entry.event_authority.pristineExact() or
                 !entry.rpc_execution_recovery.emptyExact() or
                 !entry.rpc_response_authority.pristineExact())
                 return .corrupt;
@@ -1453,8 +1631,12 @@ test "B3-1 registry footprint drop and empty corruption gates are bounded" {
     };
     const per_entry_delta = @sizeOf(Entry) - @sizeOf(LegacyEntry);
     try std.testing.expect(@sizeOf(rpc_response_authority.Authority) <= 256);
-    try std.testing.expect(per_entry_delta <= 128);
-    try std.testing.expect(per_entry_delta * max_entries <= 512 * 1024);
+    try std.testing.expect(@sizeOf(EventAuthority) <= 32);
+    try std.testing.expect(@sizeOf(EventAuthority) * max_entries <= 128 * 1024);
+    // 2c3d adds three checked event-generation scalars to the binding SSOT. Keep the resulting
+    // fixed table growth explicit instead of silently inheriting the pre-event 512 KiB budget.
+    try std.testing.expect(per_entry_delta <= 160);
+    try std.testing.expect(per_entry_delta * max_entries <= 640 * 1024);
 
     var registry: AttachmentCleanupRegistry = .{};
     try AttachmentCleanupRegistry.initInPlace(&registry, 0xB311);
@@ -2351,4 +2533,96 @@ test "stream-drop registry rejects reservation identity exhaustion without mutat
     try std.testing.expectEqual(@as(usize, 0), try registry.count());
     // Exhaustion is sticky because zero/reuse must never follow the maximum identity.
     try std.testing.expectError(error.IdentityExhausted, registry.reserve(fixtureSeed(0xC001, 79)));
+}
+
+test "CR3a-2c3d C1 event generation is binding-canonical and burns same-address ABA" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D_C101);
+    const bound = try registry.reserve(fixtureSeed(0xD000, 0xD001));
+    try registry.bindStream(bound.reservation, bound.identity, 83);
+
+    const first = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        83,
+        0xD100,
+    );
+    try std.testing.expectEqual(@as(u64, 1), first.event_generation);
+    registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, first);
+    try std.testing.expect(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        first,
+    ));
+    try registry.settleEventGenerationForTest(bound.reservation, bound.identity, first);
+
+    const second = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        83,
+        0xD100,
+    );
+    try std.testing.expectEqual(@as(u64, 2), second.event_generation);
+    registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, second);
+    try std.testing.expect(!(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        first,
+    )));
+    try std.testing.expect(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        second,
+    ));
+    try registry.settleEventGenerationForTest(bound.reservation, bound.identity, second);
+    try registry.beginBoundDrop(bound.reservation, bound.identity, 83);
+    try registry.completeActiveDrop(bound.reservation, bound.identity, 83);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3d C1 active event generation blocks siblings and bound drop" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D_C102);
+    const bound = try registry.reserve(fixtureSeed(0xD200, 0xD201));
+    try registry.bindStream(bound.reservation, bound.identity, 89);
+
+    const live = try registry.reserveEventGeneration(
+        bound.reservation,
+        bound.identity,
+        89,
+        0xD300,
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.reserveEventGeneration(bound.reservation, bound.identity, 89, 0xD301),
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.beginBoundDrop(bound.reservation, bound.identity, 89),
+    );
+    registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, live);
+    try registry.settleEventGenerationForTest(bound.reservation, bound.identity, live);
+    try registry.beginBoundDrop(bound.reservation, bound.identity, 89);
+    try registry.completeActiveDrop(bound.reservation, bound.identity, 89);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3d C1 event generation exhaustion is sticky and mutation free" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D_C103);
+    const bound = try registry.reserve(fixtureSeed(0xD400, 0xD401));
+    try registry.bindStream(bound.reservation, bound.identity, 97);
+    registry.exhaustEventGenerationForTest(bound.reservation, bound.identity) catch unreachable;
+
+    try std.testing.expectError(
+        error.IdentityExhausted,
+        registry.reserveEventGeneration(bound.reservation, bound.identity, 97, 0xD500),
+    );
+    try std.testing.expectError(
+        error.IdentityExhausted,
+        registry.reserveEventGeneration(bound.reservation, bound.identity, 97, 0xD500),
+    );
+    try registry.beginBoundDrop(bound.reservation, bound.identity, 97);
+    try registry.completeActiveDrop(bound.reservation, bound.identity, 97);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
 }

@@ -305,6 +305,12 @@ fn metadataDtoMatchesObservation(
 /// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
+    const PendingGenerationEventOutcome = union(enum) {
+        none,
+        applied: EventDrain,
+        failed: client_mod.ClientError,
+    };
+
     client: *client_mod.Client, // borrowed — 여러 runtime이 한 connection을 공유한다(stream_id로 구분).
     generation_adapter: ?*host_adapter_mod.HostAdapter,
     allocator: std.mem.Allocator,
@@ -328,7 +334,7 @@ pub const RemoteRuntime = struct {
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
     pump_ended: bool,
     resync_needed: bool,
-    pending_generation_event_error: ?client_mod.ClientError,
+    pending_generation_event_outcome: PendingGenerationEventOutcome,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
 
@@ -518,7 +524,7 @@ pub const RemoteRuntime = struct {
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
-        self.pending_generation_event_error = null;
+        self.pending_generation_event_outcome = .none;
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
@@ -1228,7 +1234,12 @@ pub const RemoteRuntime = struct {
         var retries_remaining = protocol.max_client_pending_events;
         while (true) {
             const generation = &self.attachment.generation;
-            try self.settlePendingGenerationEvent(generation, .before_pending_release, hook);
+            try self.settlePendingGenerationEvent(
+                generation,
+                &result,
+                .before_pending_release,
+                hook,
+            );
             if (hook) |run| _ = run(self, .before_purge);
             switch (generation.purgeEndedStream() catch |err|
                 return mapGenerationPurgeError(err)) {
@@ -1247,19 +1258,25 @@ pub const RemoteRuntime = struct {
                 .taken => {},
             }
             const view = generation.viewEvent() catch |err| {
-                self.pending_generation_event_error = switch (err) {
+                self.pending_generation_event_outcome = .{ .failed = switch (err) {
                     error.InvalidOwner => error.ProtocolError,
                     error.Terminal => error.ConnectionClosed,
-                };
-                try self.settlePendingGenerationEvent(generation, .before_current_release, hook);
+                } };
+                try self.settlePendingGenerationEvent(
+                    generation,
+                    &result,
+                    .before_current_release,
+                    hook,
+                );
                 unreachable;
             };
             const verdict: runtime_event_wire.Verdict = switch (view.admission) {
                 .accepted => |accepted| .{ .accepted = accepted },
                 .unknown => .unknown,
             };
+            var event_result: EventDrain = .{};
             self.applyObservationEvent(
-                &result,
+                &event_result,
                 .{
                     .major = view.wire_major,
                     .kind = .event,
@@ -1269,35 +1286,51 @@ pub const RemoteRuntime = struct {
                 view.payload,
                 verdict,
             ) catch |err| {
-                self.pending_generation_event_error = err;
+                self.pending_generation_event_outcome = .{ .failed = err };
             };
             if (hook) |run| _ = run(self, .after_current_apply);
-            try self.settlePendingGenerationEvent(generation, .before_current_release, hook);
+            if (self.pending_generation_event_outcome == .none)
+                self.pending_generation_event_outcome = .{ .applied = event_result };
+            try self.settlePendingGenerationEvent(
+                generation,
+                &result,
+                .before_current_release,
+                hook,
+            );
         }
     }
 
     fn settlePendingGenerationEvent(
         self: *RemoteRuntime,
         generation: *generation_attachment_mod.GenerationAttachment,
+        result: *EventDrain,
         stage: GenerationDrainHookStage,
         comptime hook: ?GenerationDrainHook,
     ) client_mod.ClientError!void {
-        if (hook) |run| if (run(self, stage) == .busy) return error.AdminBusy;
-        const released = generation.releasePendingEvent() catch |err| {
-            if (err != error.Busy) self.pending_generation_event_error = null;
+        const released = blk: {
+            if (hook) |run| if (run(self, stage) == .busy) break :blk error.Busy;
+            break :blk generation.releasePendingEvent();
+        } catch |err| {
+            if (err != error.Busy) self.pending_generation_event_outcome = .none;
             return mapGenerationEventError(err);
         };
         if (!released) {
-            if (self.pending_generation_event_error != null) {
-                self.pending_generation_event_error = null;
+            if (self.pending_generation_event_outcome != .none) {
+                self.pending_generation_event_outcome = .none;
                 self.client.poison(.local_invariant_violation);
                 return error.ProtocolError;
             }
             return;
         }
-        if (self.pending_generation_event_error) |err| {
-            self.pending_generation_event_error = null;
-            return err;
+        const outcome = self.pending_generation_event_outcome;
+        self.pending_generation_event_outcome = .none;
+        switch (outcome) {
+            .none => {},
+            .applied => |applied| {
+                result.metadata = result.metadata or applied.metadata;
+                result.ended = result.ended or applied.ended;
+            },
+            .failed => |err| return err,
         }
     }
 
@@ -3988,21 +4021,26 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
             }
             if (stage == .after_current_apply and inject_apply_error) {
                 inject_apply_error = false;
-                runtime.pending_generation_event_error = error.ProtocolError;
+                runtime.pending_generation_event_outcome = .{ .failed = error.ProtocolError };
             }
             return .proceed;
         }
     };
     Hook.force_release_busy = true;
-    try rr.client.bufferGenerationEventForTest(7, "{\"event\":\"snapshot.invalidated\"}");
+    try rr.client.bufferGenerationEventForTest(
+        7,
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":2,\"rows\":1,\"resize_generation\":10,\"reason\":\"controller\"}}",
+    );
     try std.testing.expectError(
         error.AdminBusy,
         rr.drainGenerationObservationEventsWithHook(Hook.run),
     );
-    try std.testing.expect(rr.resync_needed);
     try std.testing.expect(rr.attachment.generation.event_generation_mirror != 0);
     const after_release_retry = try rr.drainObservationEvents();
     try std.testing.expect(!after_release_retry.ended);
+    try std.testing.expect(after_release_retry.metadata);
     try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
 
     Hook.force_release_busy = true;
@@ -4012,10 +4050,13 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
         error.AdminBusy,
         rr.drainGenerationObservationEventsWithHook(Hook.run),
     );
-    try std.testing.expectEqual(error.ProtocolError, rr.pending_generation_event_error.?);
+    try std.testing.expectEqual(
+        error.ProtocolError,
+        rr.pending_generation_event_outcome.failed,
+    );
     try std.testing.expect(rr.attachment.generation.event_generation_mirror != 0);
     try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
-    try std.testing.expect(rr.pending_generation_event_error == null);
+    try std.testing.expect(rr.pending_generation_event_outcome == .none);
     try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
 
     try rr.direct_input.appendSlice(allocator, "budget-must-not-send");

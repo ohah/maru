@@ -153,15 +153,46 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8) !Expanded {
         //
         // BiDi 제어 문자가 대표적인데, 폭 0이라 보이지 않으면서 주변 텍스트의 표시 순서를 바꾼다
         // (Trojan Source). 그리지 않으면 화면과 실제 내용이 달라져 §3.8의 불변식이 깨진다.
-        if (hazard.classify(base.cp) != null) {
-            var mark: [hazard.max_display_len]u8 = undefined;
-            const shown = hazard.displayText(base.cp, &mark);
-            if (used + shown.len > out.len) return error.OutOfSpace;
-            @memcpy(out[used..][0..shown.len], shown);
-            used += shown.len;
-            // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
-            col += shown.len;
-            i += n;
+        //
+        // **cluster 안을 들여다봐야 한다.** UAX#29 GB9가 ZWJ·결합 문자를 앞 글자의 cluster로
+        // 흡수하므로(`clusterEndAfter`), cluster 단위로만 훑으면 `ad<ZWJ>min`의 ZWJ가 `d`의
+        // cluster에 묻혀 그대로 지나간다 — 실제로 그렇게 안 보이는 캡처를 확인했다.
+        var scan = i;
+        var hazard_in_cluster = false;
+        while (scan < end) {
+            if (hazard.classifyInText(bytes, scan) != null) {
+                hazard_in_cluster = true;
+                break;
+            }
+            const step = std.unicode.utf8ByteSequenceLength(bytes[scan]) catch 1;
+            scan += @max(1, @min(step, end - scan));
+        }
+
+        if (hazard_in_cluster) {
+            // 이 cluster는 **codepoint 단위로** 처리한다 — 위험한 것만 표기로 바꾸고 나머지는
+            // 그대로 옮긴다. cluster를 통째로 표기로 바꾸면 정상 글자까지 사라진다.
+            var cp_i = i;
+            while (cp_i < end) {
+                const cp_len = @max(1, @min(std.unicode.utf8ByteSequenceLength(bytes[cp_i]) catch 1, end - cp_i));
+                if (hazard.classifyInText(bytes, cp_i)) |_| {
+                    const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
+                    var mark: [hazard.max_display_len]u8 = undefined;
+                    const shown = hazard.displayText(cp, &mark);
+                    if (used + shown.len > out.len) return error.OutOfSpace;
+                    @memcpy(out[used..][0..shown.len], shown);
+                    used += shown.len;
+                    // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
+                    col += shown.len;
+                } else {
+                    if (used + cp_len > out.len) return error.OutOfSpace;
+                    @memcpy(out[used..][0..cp_len], bytes[cp_i .. cp_i + cp_len]);
+                    used += cp_len;
+                    const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
+                    col += text_layout.clusterCols(cp, null);
+                }
+                cp_i += cp_len;
+            }
+            i = end;
             continue;
         }
 
@@ -443,4 +474,19 @@ test "expandTabs: 평범한 줄은 여전히 원본을 빌려준다 — 저장�
     const r = try expandTabs("const x = 1;", 4, &out);
     try testing.expectEqualStrings("const x = 1;", r.text);
     try testing.expectEqual(@as(usize, 0), r.scratch_used);
+}
+
+test "expandTabs: cluster 안에 묻힌 ZWJ도 드러낸다 — GB9가 앞 글자에 흡수한다" {
+    var out: [128]u8 = undefined;
+    // `ad<ZWJ>min`은 화면에서 `admin`과 같아 보인다. UAX#29가 ZWJ를 `d`의 cluster로 흡수하므로
+    // cluster 단위로만 훑으면 이 문자를 놓친다.
+    const r = try expandTabs("ad\u{200D}min", 4, &out);
+    try testing.expectEqualStrings("ad<U+200D>min", r.text);
+}
+
+test "expandTabs: 이모지 가족은 그대로 둔다 — 정상 ZWJ까지 표기로 바꾸면 안 된다" {
+    var out: [128]u8 = undefined;
+    const family = "\u{1F468}\u{200D}\u{1F469}";
+    const r = try expandTabs(family, 4, &out);
+    try testing.expectEqualStrings(family, r.text);
 }

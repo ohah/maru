@@ -170,6 +170,9 @@ const editor_fixture_lines = [_][]const u8{
     // 열 20(탭 4칸)이라 정렬이 눈에 띄게 갈린다 — 한글이 2칸이라는 것을 반영하지 않으면 여기서
     // 주석이 왼쪽으로 밀린다.
     "\tconst 한글 = 12;\t// 뒤 탭",
+    // 리거처 추적용. 지금은 `!=`·`=>`가 합쳐지지 않으며 그 원인이 셀 격자가 아님을 실측으로
+    // 확인했다(§3.8 인접 서술). 나중에 리거처가 켜지면 이 줄의 골든이 바뀌어 알려준다.
+    "\tif (a != b) x => y;  // 리거처",
     "\tif (greeting.len > 0) {",
     "\t\ttry stdout.print(\"{s}\\n\", .{greeting});",
     "\t}",
@@ -189,8 +192,10 @@ const editor_hazard_lines = [_][]const u8{
     "const user\u{200B}Name = 1;",
     "const esc = \"\x1b[31m\";",
     "const a\u{00A0}= 1;",
+    "const ad\u{200D}min = 2;",
+    "const ok = \"\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\";",
     "",
-    "// 위 네 줄에 숨은 문자가 있다",
+    "// 위에 숨은 문자가 있다(가족 이모지 줄은 정상)",
 };
 
 /// N1 §4.1 — 편집기 gutter와 본문을 실제 draw op으로 내려 픽셀까지 보낸다.

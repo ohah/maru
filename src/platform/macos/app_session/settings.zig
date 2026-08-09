@@ -1404,7 +1404,12 @@ pub fn acceptContextMenu(self: *AppSession) void {
     // (알림 클릭이 쓰는 그 경로: switchTab → focusPaneByPtr → focusTerm). 닫힌 탭이면 false라 무동작.
     if (self.resource_menu_open) {
         const selected = self.chrome_host.context_menu.selected;
-        const key: ?u64 = if (selected < self.resource_menu_len) self.resource_menu_keys[selected] else null;
+        // 선택 인덱스는 **머리글을 포함한** 행 번호다 — 빼지 않으면 한 칸 밀린 탭으로 점프한다.
+        const row = selected -| app_session_mod.resource_header_rows;
+        const key: ?u64 = if (selected >= app_session_mod.resource_header_rows and row < self.resource_menu_len)
+            self.resource_menu_keys[row]
+        else
+            null;
         closeContextMenu(self); // 먼저 닫는다 — 점프 뒤 메뉴가 남지 않게
         if (key) |k| _ = self.activateSurfaceById(k);
         return;

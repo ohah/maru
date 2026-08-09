@@ -204,7 +204,7 @@ pub const inventory = [_]Proof{
     // 옮긴 블록에 `@field`가 없다. 세션 기록 도크(F1)의 ABI facade 10개는 이름이 agent여도 두고 왔다.
     // git·SCM을 `app_session/git.zig`로 떼어내며 또 바뀐다(F15). count는 2 그대로다 — 옮긴 블록에
     // `@field`가 없다. `scmDrawWindow`는 이름만 SCM이고 dock(F5)의 facade라 두고 왔다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "2369da73447598d0a6a945df360fcf5ca3f30045893bda513daa895bed0feb53" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "50cbabe7655cb5504d85db5e2c902767418087cb4231081ab862acff1be1db43" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -218,7 +218,7 @@ pub const inventory = [_]Proof{
     // 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다 — 이사한 반사를 여기 등재해 짝을 맞춘다.
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 위 주석이 "등재한다"고
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "c5a8906c2ff4afecfcf5f25f159cb190d92eee75b652218490b4835c0a39faa6" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "e506890dfe1cd287463f4afb4b6027a94d749668da6e7567f51b91ac0577499d" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

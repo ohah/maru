@@ -32,6 +32,7 @@ const icons = maru.icons;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 아직 그쪽 소유(이 PR 한계)
 const AppSession = app_session_mod.AppSession;
+const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const dock_view_bar = app_session_mod.dock_view_bar;
@@ -334,7 +335,7 @@ pub fn updateAgentSessionArchive(self: *AppSession) void {
             // released its state. This makes the newest entry win without concurrent scans.
             // 이 force 재요청은 **여기가 단독 소유자**다 — 도크 진입 훅은 force를 쓰지 않는다
             // (양쪽이 쓰면 빠른 여닫기에서 `취소 → 재요청 → 취소`가 반복된다).
-            if (self.dockVisible() and self.dock.view == .agent_sessions) refreshAgentSessionArchive(self, true);
+            if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions) refreshAgentSessionArchive(self, true);
             self.metal_dirty = true;
             return;
         },
@@ -546,7 +547,7 @@ pub fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
 }
 
 pub fn refreshAgentSessionArchiveProjectScopeForFocus(self: *AppSession) void {
-    if (!self.dockVisible() or self.dock.view != .agent_sessions or !self.surface_initialized) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_sessions or !self.surface_initialized) return;
     const surface_id = self.activeSurface().id;
     if (self.agent_session_archive_project_scope_surface_id == surface_id) return;
     self.agent_session_archive_project_scope_surface_id = surface_id;
@@ -780,7 +781,7 @@ pub fn reconcileAgentSessionInlineDetailAgainstSnapshot(self: *AppSession) void 
 /// 않다 — 고정 chrome 넷과 빈 컨테이너뿐이다. 실패하면 0을 돌려주고, 그러면 창이 비어 이 프레임에
 /// 목록이 그려지지 않는다(틀린 높이로 그리는 것보다 낫다).
 pub fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
-    const content = self.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(self).tree_content;
     if (content.w == 0 or content.h == 0) return 0;
 
     const sizes = chrome.components.session_dock.build.bufferSizes(&.{});
@@ -823,7 +824,7 @@ pub fn agentSessionDockSearchCaretRect(self: *const AppSession) ?chrome.draw.Rec
     if (!self.agentSessionSearchOwnsInput()) return null;
     const cw = self.cell_width_px;
     if (cw == 0) return null;
-    const content = self.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(self).tree_content;
     const entry = for (self.agent_session_dock_entries.items) |candidate| {
         if (candidate.id == chrome.components.session_dock.build.NodeIds.search) break candidate;
     } else return null;
@@ -923,7 +924,7 @@ pub fn restoreAgentSessionDockScrollAnchor(self: *AppSession, anchor: ?ArchiveSc
 /// Enter/Page/Home/End를 갖는다). 스크롤 키·Enter·`/`가 **같은 게이트**를 써야 터미널에서 타이핑하는
 /// 동안 도크가 그 키를 가져가지 않는다. 검색 필드가 활성이면 그쪽이 먼저다.
 pub fn agentSessionDockOwnsKeys(self: *const AppSession) bool {
-    return self.dockVisible() and self.dock.view == .agent_sessions and
+    return dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and
         !self.agent_session_archive_search_active and
         self.agent_session_dock_key_focus;
 }
@@ -1269,7 +1270,7 @@ pub fn collectAgentSessionDock(
     colors: metal_frame.CellColors,
 ) void {
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    const content = self.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(self).tree_content;
     if (content.w == 0 or content.h == 0) return;
 
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -1628,8 +1629,8 @@ pub fn agentSessionDockShortcutIntent(
 }
 
 pub fn agentSessionDockSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-    if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
+    const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
         switch (action.intent) {
             .select_card => {},
@@ -1658,8 +1659,8 @@ pub fn agentSessionDockSmokeProbe(self: *const AppSession) AgentSessionArchiveSm
 /// The fixture may locate the refresh hit rect only after the normal component has painted
 /// it. This observer neither requests a scan nor exposes the internal action id.
 pub fn agentSessionDockRefreshSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-    if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
+    const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
         switch (action.intent) {
             .refresh => {},
@@ -1689,8 +1690,8 @@ pub fn agentSessionDockRefreshSmokeProbe(self: *const AppSession) AgentSessionAr
 /// the border rect, not text/icon ink bounds: text placement belongs to the rich-text
 /// artifact and a test observer must not reimplement layout in the platform host.
 pub fn agentSessionDockNodeSmokeProbe(self: *const AppSession, node_id: chrome.ui.tree.UiId) AgentSessionArchiveSmokeProbe {
-    if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
+    const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_entries.items) |entry| {
         if (entry.id != node_id) continue;
         return .{
@@ -1712,8 +1713,8 @@ pub fn agentSessionDockNodeSmokeProbe(self: *const AppSession, node_id: chrome.u
 /// recycled projected row can never stand in for a different archive identity.
 pub fn agentSessionDockExpandedCardSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
     const detail = self.agent_session_inline_detail orelse return .{};
-    if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
+    const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
         const record_index: usize = switch (action.intent) {
             .select_card => |identity| if (identity <= std.math.maxInt(usize)) @intCast(identity) else continue,
@@ -1758,8 +1759,8 @@ pub fn agentSessionDockExpandedCardSmokeProbe(self: *const AppSession) AgentSess
 /// already-open inline detail, and no provider/session/path/action data crosses the boundary.
 pub fn agentSessionDockExpandedAnchorSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
     const detail = self.agent_session_inline_detail orelse return .{};
-    if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
+    const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
         const record_index: usize = switch (action.intent) {
             .select_card => |identity| if (identity <= std.math.maxInt(usize)) @intCast(identity) else continue,
@@ -1811,8 +1812,8 @@ pub fn inlineDetailSmokeProbe(
         .stale => 3,
         .unavailable => 4,
     };
-    if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{ .request_id = detail.request_id, .state = state };
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{ .request_id = detail.request_id, .state = state };
+    const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
         if (std.meta.activeTag(action.intent) != std.meta.activeTag(wanted) or
             action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
@@ -1840,8 +1841,8 @@ pub fn inlineDetailSmokeProbe(
 /// This is geometry-only: it neither changes `dock.view` nor starts a scan. The normal mouse
 /// dispatcher remains the sole authority that turns the later physical click into `setDockView`.
 pub fn agentSessionDockSwitcherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-    if (!self.dockVisible() or self.cell_width_px == 0) return .{};
-    const bar = self.dockGeometry().view_bar;
+    if (!dock_ops.dockVisible(self) or self.cell_width_px == 0) return .{};
+    const bar = dock_ops.dockGeometry(self).view_bar;
     const slot = dock_view_bar.slotRect(
         .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
         self.cell_width_px,
@@ -1867,8 +1868,8 @@ pub fn agentSessionDockPointer(
     x_px: f64,
     y_px: f64,
 ) ?chrome.components.session_dock.ids.Intent {
-    if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
-    const content = self.dockGeometry().tree_content;
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self) or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+    const content = dock_ops.dockGeometry(self).tree_content;
     if (self.agent_session_dock_entries.items.len == 0) return null;
     const local_x = x_px - @as(f64, @floatFromInt(content.x));
     const local_y = y_px - @as(f64, @floatFromInt(content.y));

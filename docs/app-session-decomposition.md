@@ -103,7 +103,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F1** ✅ | **에이전트 세션 기록 도크**(archive + agent dock) | 1,595(메서드) | 낮음 | **F3를 흡수해 하나로.** 2026-08-09 완료 → `app_session/agent_dock.zig` |
 | **F2** ✅ | 파일 탐색기·파일 패널 | 3,840(메서드) | 중 | **한 파일**(`file_panel.zig`)로 — 분할하면 순환 때문에 pub화가 는다(아래). 2026-08-09 완료, pub화 50 |
 | **F4** ✅ | pane · split · divider | 1,570(메서드) | 중 | 2026-08-09 완료 → `app_session/pane.zig`, pub화 43 |
-| **F5** | dock | ~1,660 | 낮음 | |
+| **F5** ✅ | 도크 일반(view·레이아웃·스크롤바) | 484(메서드) | 낮음 | 2026-08-09 완료 → `app_session/dock.zig`, pub화 4(예측과 일치) |
 | **F6** | tab | ~1,590 | 낮음 | |
 | **F7** | sidebar | ~1,620 | 중 | `metal_frame` 셀·색 결합(옛 E4 실측) |
 | **F8** | scroll | ~1,440 | 낮음 | |
@@ -151,6 +151,16 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >    메서드인데 `pane_ops.activePane(tab)`으로 바뀌어 **906건**이 잘못 치환됐다. 치환은 그룹 본문 안의
 >    `self.`에 한정하고, 그룹 밖 호출부는 **컴파일러가 지목한 줄만** 고친다. 이때 접두어(`pane_ops`)가 다시
 >    receiver로 잡히는 이중 치환을 막는 가드가 필요하다(`(?!pane_ops\b)`).
+
+> **도크 안에 사는 것은 도크가 아니다(F1·F4·F5에서 세 번 반복).** `dock` 이름을 가졌지만 본문이 다른
+> 도메인을 만지는 함수가 매번 나왔다 — F1의 `dockHasContent`(`fileEntryCount`), F4의
+> `fillTabDragSmokeProbe`(`dividerSmokeProbe`가 채운다), F5의 `assignDockSurfaceIds`·`dockHasLiveSurface`·
+> `refreshDockListScrollbar`·`requeuePendingDockFocus`(전부 `fileEntries`·`file_tree_perf_counters`).
+> 파일 패널·에이전트 아카이브가 도크 **안에** 살기 때문에 생긴 이름이다. F5에서는 이 넷을 `dock.zig`가
+> 아니라 `file_panel.zig`로 보냈다 — 그러지 않았으면 나중에 되돌려야 한다.
+>
+> 그 결과 F5는 **pub화 4개가 예측과 정확히 일치**한 첫 그룹이 됐다(F2 26→50, F4 35→43). 그룹이 작고
+> 경계가 깨끗하면 추정이 맞는다는 뜻이지, 추정 방법이 나아진 것은 아니다 — §2-c-2의 규칙은 그대로다.
 
 라인 수치는 **메서드 이름 기준 근사치**다. 각 단계 착수 시 실제 응집도(허브 결합·cross-group accessor)를 코드로 재검증하고 그 결과로 범위를 정정한다 — 이 문서의 사전 추정은 E1·E4·E5에서 세 번 빗나갔다([[roadmap-docs-stale-verify-with-code]]).
 

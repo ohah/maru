@@ -76,7 +76,8 @@ const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const file_panel_ops = @import("app_session/file_panel.zig");
-const pane_ops = @import("app_session/pane.zig"); // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+const pane_ops = @import("app_session/pane.zig");
+const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
@@ -884,21 +885,21 @@ const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms, co
 
 /// 탐색기 스크롤바 치수(SV2b). 옛 `components/file_tree_scrollbar.zig`가 들고 있던 값을 그대로 옮겼다 —
 /// 그 모듈은 기능이 전부 `chrome/ui/scroll_area.zig`에 있어 이 슬라이스에서 지웠다.
-const dock_list_scrollbar_width_px: u32 = 8;
-const dock_list_scrollbar_inset_px: u32 = 3;
-const dock_list_scrollbar_min_thumb_px: u32 = 24;
+pub const dock_list_scrollbar_width_px: u32 = 8;
+pub const dock_list_scrollbar_inset_px: u32 = 3;
+pub const dock_list_scrollbar_min_thumb_px: u32 = 24;
 
 /// 탐색기가 내는 tree의 노드 id. `scrollArea`가 track/thumb을 **자기 preorder 안에서** 내므로
 /// root(=scrollArea) 하나에 둘이 딸린다.
-const dock_list_scroll_ids = struct {
-    const area: chrome.ui.tree.UiId = 0x4654_0001;
-    const track: chrome.ui.tree.UiId = 0x4654_0002;
-    const thumb: chrome.ui.tree.UiId = 0x4654_0003;
+pub const dock_list_scroll_ids = struct {
+    pub const area: chrome.ui.tree.UiId = 0x4654_0001;
+    pub const track: chrome.ui.tree.UiId = 0x4654_0002;
+    pub const thumb: chrome.ui.tree.UiId = 0x4654_0003;
 };
 /// track과 thumb이 함께 선언하는 drag payload. tree는 이 값의 의미를 모른다.
-const dock_list_scroll_drag_payload: u64 = 1;
+pub const dock_list_scroll_drag_payload: u64 = 1;
 /// scrollArea 자신 + track + thumb. 자식이 없으므로 이보다 커질 수 없다.
-const dock_list_scroll_max_entries: usize = 3;
+pub const dock_list_scroll_max_entries: usize = 3;
 
 /// 사이드바 스크롤바 치수(SV4a). 도크 목록과 **같은 값**을 쓴다 — 한 창에 두 스크롤바가 나란히 서므로
 /// 굵기가 다르면 그 자체가 결함으로 보인다. 별도 상수로 두는 것은 사이드바 폭이 사용자 드래그로
@@ -2123,7 +2124,7 @@ const DockAsyncToken = struct {
     request_or_entry_revision: u64,
 };
 
-const PendingDockFocus = DockAsyncToken;
+pub const PendingDockFocus = DockAsyncToken;
 
 const PointerGestureOwner = union(enum) {
     none,
@@ -3998,99 +3999,9 @@ pub const AppSession = struct {
         return self.tabs.items[self.app_window.active_tab];
     }
 
-    pub fn dockVisible(self: *const AppSession) bool {
-        return self.dock_initialized and !self.chrome_minimal and self.dock.presented and !self.dock.collapsed;
-    }
-
-    /// 현재 뷰가 스위처의 몇 번째 슬롯인지. chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 이 대응은
-    /// session 쪽인 여기가 소유한다 — 순서가 두 곳에 흩어지면 그린 자리와 눌리는 자리가 어긋난다.
-    fn dockViewSlotIndex(self: *const AppSession) usize {
-        return switch (self.dock.view) {
-            .explorer => 0,
-            .source_control => 1,
-            .agent_sessions => 2,
-        };
-    }
-
-    fn dockViewForSlot(index: usize) ?dock_panel.View {
-        return switch (index) {
-            0 => .explorer,
-            1 => .source_control,
-            2 => .agent_sessions,
-            else => null,
-        };
-    }
-
-    /// 도크에서 **이 뷰를 보여 준다**. 도크를 여는 모든 경로가 여기를 지난다.
-    ///
-    /// `setDockView`(전환)와 `onDockViewPresented`(진입)를 나누는 이유: 전환 함수는 "같은 뷰면 no-op"이
-    /// 맞지만, **진입은 같은 뷰여도 일어난다**. 둘을 한 함수에 두었더니 `dock.view`가 이미
-    /// `agent_sessions`인 채로 도크를 열면 맨 앞 조기 반환에 걸려 아카이브 스캔 요청이 아예 나가지
-    /// 않았다(도크를 떠날 때 `agent_dock.cancelAgentSessionArchive`가 진행 중 스캔을 취소하므로 닫았다 여는 흐름에서
-    /// 특히 잘 드러난다 — 목록도 스피너도 없이 비어 있고 새로 고침을 눌러야 나타났다).
-    fn enterDockView(self: *AppSession, view: dock_panel.View) void {
-        self.setDockView(view);
-        self.onDockViewPresented(view);
-    }
-
-    /// 진입 훅. 같은 뷰로 다시 들어와도 불린다.
-    ///
-    /// **가시성 가드가 필수다** — `setDockView`는 도크가 닫힌 상태에서도 불리므로(workspace restore 등),
-    /// 가드가 없으면 보이지도 않는 도크 때문에 사용자 이력 전체를 스캔한다.
-    ///
-    /// 스캔 요청은 **항상 `force = false`**로 한다. 취소된 세대의 재요청은 `agent_dock.updateAgentSessionArchive`가
-    /// 단독으로 소유한다(그쪽만 `force = true`). 양쪽이 force를 쓰면 도크를 빠르게 여닫을 때
-    /// `취소 → 재요청 → 취소`가 반복된다 — 취소 시 `agent_session_archive_completed_ns`가 갱신되지 않아
-    /// TTL 가드도 걸리지 않기 때문이다.
-    fn onDockViewPresented(self: *AppSession, view: dock_panel.View) void {
-        if (!agent_dock.shouldRefreshArchiveOnPresent(self.dockVisible(), view)) return;
-        agent_dock.refreshAgentSessionArchive(self, false);
-    }
-
-    /// 뷰 전환. 같은 뷰면 no-op이라 불필요한 재그리기를 만들지 않는다. 트리를 떠날 때는 키보드 포커스도 함께
-    /// 돌려준다 — 보이지 않는 트리가 키 입력을 계속 먹으면 안 된다(docs/file-explorer.md §3.5).
-    ///
-    /// **도크를 여는 경로는 이 함수를 직접 부르지 말고 `enterDockView`를 쓴다.** 여기 있는 조기 반환은
-    /// 재그리기 억제가 목적이라, 진입 부작용(스캔 요청)까지 함께 건너뛰면 안 된다.
-    ///
-    /// 이 함수를 그대로 쓰는 곳은 "전환만" 원하는 테스트다 — 진입 부작용 없이 상태만 세우려는 의도이므로
-    /// 남겨 둔다.
-    fn setDockView(self: *AppSession, view: dock_panel.View) void {
-        if (self.dock.view == view) return;
-        // `dock.size == 0`은 view별 자동 폭 sentinel이다. 따라서 explorer(180pt)와
-        // agent_sessions(640pt) 사이에서는 창 resize를 기다리지 않고 같은 event에서 모든 pane의
-        // grid와 Swift에 돌려주는 active rect를 갱신해야 한다. 수동 폭은 하나의 persisted state라
-        // view 전환만으로 resize하지 않는다.
-        const auto_right_width_changed = self.dockVisible() and self.dock.side == .right and self.dock.size == 0 and
-            dock_layout.defaultRightPtForView(self.dock.view) != dock_layout.defaultRightPtForView(view);
-        if (self.dock.view == .agent_sessions and view != .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
-        self.dock.view = view;
-        // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
-        // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
-        if (view != .agent_sessions) self.agent_session_dock_interaction = .{};
-        // 뷰 전환은 어느 방향이든 도크 키보드 소유권을 놓는다. 들어올 때도 아직 누른 적이 없고,
-        // 나갈 때 남겨 두면 다시 돌아왔을 때 클릭 없이 Enter를 가져간다.
-        agent_dock.releaseAgentSessionDockKeyFocus(self);
-        if (view != .explorer and file_panel_ops.fileTreeFocused(self)) file_panel_ops.restoreFileTreeFocus(self);
-        // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
-        if (view == .source_control) self.refreshGitStatus();
-        if (view == .agent_sessions) {
-            agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
-            self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;
-            agent_dock.requestAgentSessionArchiveScopeRoots(self, null);
-            agent_dock.refreshAgentSessionArchive(self, false);
-        }
-        if (auto_right_width_changed) {
-            for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
-            pane_ops.recomputeActivePaneRect(self);
-            self.last_resize_size = null;
-        }
-        self.metal_dirty = true;
-    }
-
     /// git 읽기를 건다. 소스 컨트롤 뷰를 보고 있지 않으면 아무것도 하지 않는다 — 안 보는 화면 때문에 프로세스를
     /// 띄우지 않는다. 이미 in-flight면 건너뛴다(큐를 쌓아 오래된 결과를 줄줄이 만들지 않는다 — §3.5).
-    fn refreshGitStatus(self: *AppSession) void {
+    pub fn refreshGitStatus(self: *AppSession) void {
         if (self.dock.view != .source_control) return;
         if (self.git_inflight != 0) return;
         var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -4347,7 +4258,7 @@ pub const AppSession = struct {
         return layout_math.ptToPx(status_bar_gap_pt, self.scale_milli);
     }
 
-    fn statusBarHeightPx(self: *const AppSession) u32 {
+    pub fn statusBarHeightPx(self: *const AppSession) u32 {
         // quick terminal은 chrome을 의도적으로 걷어낸 모드다 — `paneBarHeightPx`가 0을 돌려 탭 바를
         // 통째로 끄는 것과 같은 규율. §2 "항상 선다"는 도크·사이드바 **토글**(프레임마다 바뀌어
         // grid가 출렁이는 것)을 막는 규칙이고, 세션 생성 시 고정되는 이 모드는 그 대상이 아니다.
@@ -4367,40 +4278,6 @@ pub const AppSession = struct {
         const floor_px = layout_math.ptToPx(status_bar_height_pt, self.scale_milli);
         const text_px = self.cell_height_px +| (2 * layout_math.ptToPx(status_bar_v_pad_pt, self.scale_milli));
         return @max(floor_px, text_px);
-    }
-
-    pub fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
-        return dock_layout.compute(.{
-            .backing_width_px = self.backing_width_px,
-            .backing_height_px = self.backing_height_px,
-            .sidebar_width_px = self.sidebar_width_px,
-            // 도크와 터미널이 **같은 상단 띠**에서 시작한다. 예전에는 도크만 28pt 고정 safety band를 따로
-            // 받았는데, 그러면 폰트를 키우거나 사이드바를 접어 `titlebar_strip_px`가 움직일 때 두 상단 바의
-            // 시작선이 갈렸다 — 아래 경계선(`chromeBarHeightPx`)을 맞춰 놔도 시작이 다르면 여전히 어긋나
-            // 보인다(사용자 보고). 28pt는 그 띠의 **하한**으로 `computeTitlebarStripPx` 안에 그대로 살아 있고
-            // (접힘이면 신호등 세로 높이인 30pt), 뷰와 무관하다는 계약도 그대로다.
-            .titlebar_height_px = self.titlebar_strip_px,
-            .status_bar_px = self.statusBarHeightPx(),
-            .cell_width_px = self.cell_width_px,
-            .cell_height_px = self.cell_height_px,
-            .scale_milli = self.scale_milli,
-            .divider_px = pane_ops.dividerThicknessPx(self),
-            // view bar는 **도크의 chrome**이지 터미널의 chrome이 아니다. 그래서 예전 explorer 경로처럼
-            // `paneBarHeightPx`(terminal cell 높이 + padding)를 받지 않는다 — 그 식은 뷰마다 아이콘 줄이
-            // 오르내리게 했고(사용자 보고: 실측 53px ↔ 80px) 터미널 폰트가 도크 기하를 정하게 만든다
-            // (layering-and-portability 금지).
-            //
-            // 대신 두 바가 **공유 logical token**(`space.bar_height_pt`)을 통해 같은 높이를 낸다 —
-            // docs/agent-session-list.md §2.1.3이 "정렬이 필요하면 terminal 쪽이 아니라 두 chrome이 공유하는
-            // logical token을 새로 만든다"고 예고한 해법이다. 방향이 반대라는 점이 핵심이다: 도크가 터미널
-            // 식을 물려받는 게 아니라, 터미널 탭 바가 도크가 쓰던 40pt를 함께 본다. 모든 뷰가 이 값 하나를
-            // 쓰므로 뷰 전환도, 터미널 폰트 변경도 아이콘 위치를 움직이지 않는다.
-            .view_bar_px = self.chromeBarHeightPx(),
-            .side = if (self.dock_initialized) self.dock.side else .right,
-            .size_pt = if (self.dock_initialized) self.dock.size else 0,
-            .visible = self.dockVisible(),
-            .view = if (self.dock_initialized) self.dock.view else .explorer,
-        });
     }
 
     pub fn pointerGestureIs(self: *const AppSession, comptime tag: std.meta.Tag(PointerGestureOwner)) bool {
@@ -4438,49 +4315,6 @@ pub const AppSession = struct {
 
     pub fn finishPointerGesture(self: *AppSession) void {
         self.pointer_gesture_owner = .none;
-    }
-
-    pub fn cancelPendingDockFocus(self: *AppSession) void {
-        self.pending_dock_focus = null;
-        self.pending_dock_focus_action = false;
-    }
-
-    pub fn queuePendingDockFocus(self: *AppSession, entry: *const dock_panel.Entry) void {
-        self.pending_dock_focus = .{
-            .entry_id = entry.id,
-            .expected_surface_id = if (entry.surface_id == 0) null else entry.surface_id,
-            .dock_async_epoch = self.dock_async_epoch,
-            .request_or_entry_revision = entry.editor_revision,
-        };
-        self.pending_dock_focus_action = true;
-    }
-
-    pub fn requestDockEntryFocus(self: *AppSession, entry: *const dock_panel.Entry) void {
-        self.cancelPendingDockFocus();
-        self.queuePendingDockFocus(entry);
-        // Programmatic focus는 surface_id 존재만으로 native WKWebView publish를 추측하지 않는다. typed
-        // completion 전에는 group owner가 text/paste/terminal close를 fail-closed로 소비하고, 실제 WebView
-        // primary-down 또는 completion만 dock_surface로 승격한다.
-        // surface_id가 이미 있어도 dock_surface로 승격하지 않는다 — typed completion(또는 실제 WebView
-        // primary-down)만 승격이고, 그 전엔 fail-closed barrier가 text/paste/terminal close를 소비한다.
-        self.focus_owner = .{ .dock_pending = entry.id };
-        self.workspace_focus_pending = false;
-        self.file_tree_focus_pending = false;
-        self.file_tree_restore_surface_pending = null;
-    }
-
-    fn requeuePendingDockFocus(self: *AppSession, old: PendingDockFocus) void {
-        const entry = (file_panel_ops.fileEntryForId(self, old.entry_id) orelse return);
-        const expected_surface_id = old.expected_surface_id orelse return;
-        if (entry.surface_id != expected_surface_id or entry.editor_revision != old.request_or_entry_revision) return;
-        self.queuePendingDockFocus(entry);
-        // restore/window merge 뒤에도 typed ack 전 fail-close owner를 함께 재파생한다. token만 이관하고
-        // workspace/옛 surface owner를 남기면 늦은 native publish 전 PTY·paste·close가 잘못 라우팅된다.
-        // 아직 ack 전이므로 `.dock_surface`(승격)가 아니라 barrier 그대로 재파생한다.
-        self.focus_owner = .{ .dock_pending = entry.id };
-        self.workspace_focus_pending = false;
-        self.file_tree_focus_pending = false;
-        self.file_tree_restore_surface_pending = null;
     }
 
     pub const FilePanelDockControlAction = enum { open, collapse, expand };
@@ -4539,7 +4373,7 @@ pub const AppSession = struct {
         // 상단 타이틀바 띠(titlebar_strip_px)만큼 터미널 영역을 아래로 들인다 — 신호등·헤더 아이콘 줄과 pane 탭 바·
         // 서페이스가 안 겹친다(cmux식). 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
         // 렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합한다.
-        return self.dockGeometry().terminal;
+        return dock_ops.dockGeometry(self).terminal;
     }
 
     /// layout_math.gridFromBacking(spawn grid)용 padding — window padding에 상단 타이틀바 띠를 top으로 더해 termRect.y 들임과
@@ -4551,7 +4385,7 @@ pub const AppSession = struct {
         // config·메트릭 재계산·resize)이 한 번에 정합한다. 각 호출부에서 따로 빼면 하나만 빠뜨려도 spawn grid와
         // 실제 pane grid가 어긋난다(그 정합이 이 함수의 존재 이유다).
         p.bottom +|= self.statusBarHeightPx();
-        const g = self.dockGeometry();
+        const g = dock_ops.dockGeometry(self);
         if (g.dock.w > 0) switch (self.dock.side) {
             .right => p.right +|= g.divider.w + g.dock.w,
             .bottom => p.bottom +|= g.divider.h + g.dock.h,
@@ -4904,7 +4738,7 @@ pub const AppSession = struct {
             .file_tree => |edit| {
                 const index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = edit.row_kind, .path = edit.path() }) orelse
                     file_panel_ops.selectedFileTreeRow(self) orelse return null;
-                const dg = self.dockGeometry();
+                const dg = dock_ops.dockGeometry(self);
                 // 픽셀 스크롤이라 행의 y는 content 좌표에서 offset을 뺀 값이다. 위·아래로 완전히 벗어난
                 // 행에는 caret을 두지 않는다 — 부분적으로 걸친 행은 pane clip이 자르므로 그대로 둔다.
                 const row_top: i64 = @as(i64, @intCast(index)) * @as(i64, ch) - @as(i64, file_panel_ops.fileTreeEffectiveScrollPx(self));
@@ -5195,30 +5029,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
-        if (!self.dock_initialized or self.scale_milli == 0) return;
-        // grab band의 어느 지점에서 시작했든 `pointer delta == divider delta`가 되게 down 때 저장한 간격을 더한다.
-        // right는 x, bottom은 y 한 축만 보정한다. 이 보정이 없으면 첫 mouseDragged에서 최대 grab-band 폭만큼 점프한다.
-        const offset_px = switch (self.pointer_gesture_owner) {
-            .dock_outer_divider => |drag| drag.offset_px,
-            else => return,
-        };
-        const adjusted_x = if (self.dock.side == .right) x_px + offset_px else x_px;
-        const adjusted_y = if (self.dock.side == .bottom) y_px + offset_px else y_px;
-        const candidate = dock_layout.sizePtForPointer(self.dockGeometry(), self.dock.side, adjusted_x, adjusted_y, self.scale_milli) orelse return;
-        const before = self.dock.size;
-        self.dock.size = candidate;
-        // 손상·과대 입력은 순수 layout이 보장하는 terminal floor로 clamp한 실효 크기를 저장한다. tree write-back과
-        // 같은 sizePtForEffectiveWidth로 올림해 max clamp 경계에서 저장/복원 1px 드리프트를 없앤다(내림 회귀 수정).
-        const effective_px = self.dockGeometry().dock_size_px;
-        self.dock.size = dock_layout.sizePtForEffectiveWidth(effective_px, 0, self.scale_milli);
-        if (self.dock.size == before) return;
-        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
-        pane_ops.recomputeActivePaneRect(self);
-        self.last_resize_size = null;
-        self.metal_dirty = true;
-    }
-
     /// 사이드바 접기/펼치기 토글 — 헤더 토글 아이콘·접힘 시 좌상단 펼치기 버튼이 부른다. 접으면 effective 폭이 0(카드·
     /// 검색 숨김, 터미널이 그 자리까지 확장)이고 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. 폭이 모든 탭 term을
     /// 바꾸므로 setSidebarWidthPx와 같은 재배치(전 탭 resize + 활성 rect + 사이드바 재빌드)를 한다.
@@ -5278,7 +5088,7 @@ pub const AppSession = struct {
         self.ensureActiveTermVisible(pane); // #2(리뷰): 스크롤 밖 탭 선택 시 보이게 tab_scroll_cols 조정
         // pane 안 탭 전환도 파일의 가시성을 바꾼다 — 보이지 않게 된 파일의 publish 대기 barrier를 여기서
         // 버린다(워크스페이스 전환·창 병합과 같은 규칙, code-review max).
-        self.dropPendingDockFocusIfHidden();
+        dock_ops.dropPendingDockFocusIfHidden(self);
         self.file_tree_rows_dirty = true; // 활성 파일이 바뀌었을 수 있다 — 트리 활성 마커 갱신
         pane_ops.recomputeActivePaneRect(self);
         self.metal_dirty = true;
@@ -5581,7 +5391,7 @@ pub const AppSession = struct {
             .dock_pending => return,
             .file_tree => blk: {
                 if (self.inputFocus() != .file_tree) return;
-                break :blk self.dockGeometry().tree_content;
+                break :blk dock_ops.dockGeometry(self).tree_content;
             },
         };
         self.appendFocusedContentBorder(out, rect);
@@ -5932,7 +5742,7 @@ pub const AppSession = struct {
             .archive_reveal_log => return agent_dock.inlineDetailSmokeProbe(self, .reveal_log),
             .archive_focus_live => return agent_dock.inlineDetailSmokeProbe(self, .focus_live),
             .dock_agent_sessions => return agent_dock.agentSessionDockSwitcherSmokeProbe(self),
-            .dock_launcher => return self.dockLauncherSmokeProbe(),
+            .dock_launcher => return dock_ops.dockLauncherSmokeProbe(self),
             .archive_refresh => return agent_dock.agentSessionDockRefreshSmokeProbe(self),
             .archive_expanded_scroll_anchor => return agent_dock.agentSessionDockExpandedAnchorSmokeProbe(self),
             .archive_scope_row => return agent_dock.agentSessionDockNodeSmokeProbe(self, chrome.components.session_dock.build.NodeIds.scope_row),
@@ -6789,25 +6599,6 @@ pub const AppSession = struct {
         return tab;
     }
 
-    /// 활성 탭을 바꾼다(`app_window.selectTab`). 성공하면 활성 탭이 바뀌었으니 재드로우를 위해
-    /// metal_dirty를 세우고 true. 범위 밖 index면 false(활성 불변). 입력/렌더는 activeSurface가
-    /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
-    /// 워크스페이스를 바꾸면 보이지 않게 된 파일의 publish 대기 barrier를 버린다 — 남겨 두면 새 화면의
-    /// 입력을 그 파일이 계속 소유한다(§3.4).
-    fn dropPendingDockFocusIfHidden(self: *AppSession) void {
-        const pending = self.pending_dock_focus orelse return;
-        // 판정과 **같은 기준**(실제 가시성)을 쓴다 — 옛 탭 단위 기준은 같은 pane의 터미널 탭으로 옮겨간
-        // 상태를 "보인다"로 쳐서, 소유는 false인데 취소도 안 되는 orphan owner를 남겼다(code-review max).
-        if (file_panel_ops.fileEntryForIdConst(self, pending.entry_id)) |entry| {
-            if (file_panel_ops.fileEntryIsFocusTarget(self, entry)) return;
-        }
-        self.cancelPendingDockFocus();
-        if (self.focus_owner == .dock_pending) {
-            self.focusWorkspaceInput();
-            self.workspace_focus_pending = true;
-        }
-    }
-
     pub fn switchTab(self: *AppSession, index: usize) bool {
         const prev_tab = self.app_window.active_tab;
         if (index >= self.app_window.tabs.len) return false;
@@ -6817,7 +6608,7 @@ pub const AppSession = struct {
         // (window.zig), 알림 클릭이 이미 활성인 탭의 Term을 activateSurfaceById→switchTab(same)로 지날 때 유효한
         // 닫기 모달을 헛되이 취소하던 것 방지(code-review — focusPane/focusTerm은 자체 early-return이 no-op을 거른다).
         if (index != prev_tab) self.invalidatePositionalPendingClose();
-        if (index != prev_tab) self.dropPendingDockFocusIfHidden();
+        if (index != prev_tab) dock_ops.dropPendingDockFocusIfHidden(self);
         // 전환한 탭을 현재 창 grid로 맞춘다. resize()는 활성 탭만 만지고 last_resize_size는 세션-전역이라, 다른
         // 탭이 활성인 동안 창이 리사이즈됐거나 복원으로 저장 grid로 spawn된 탭은 전환 시점까지 stale grid다 —
         // 여기서 lazy 보정한다(복원·일반 둘 다). best-effort: 죽은 PTY 등은 무시(resizeTabPanes 계약).
@@ -7821,17 +7612,6 @@ pub const AppSession = struct {
         return n;
     }
 
-    fn appendDockSurfaceIds(self: *AppSession, out: []u64, start: usize) usize {
-        var n = start;
-        if (!self.dock_initialized) return n;
-        var entry_it2 = file_panel_ops.fileEntries(self);
-        while (entry_it2.next()) |entry| if (entry.surface_id != 0) {
-            if (n < out.len) out[n] = entry.surface_id;
-            n += 1;
-        };
-        return @min(n, out.len);
-    }
-
     /// 창/세션 종료 전에 해소해야 하는 파일 편집 상태가 하나라도 있는지. source-edit는 native dirty가 최신 CM6
     /// revision보다 늦을 수 있으므로 clean으로 보이더라도 보호한다. 모든 창을 함께 닫는 Cmd+Q는 Swift가 이 getter로
     /// 각 세션을 순회하고, 확정 직전에도 다시 검사한다.
@@ -7864,7 +7644,7 @@ pub const AppSession = struct {
         allocator: std.mem.Allocator,
         entries: std.ArrayList(Entry) = .empty,
 
-        fn deinit(self: *PreparedPendingPasteTransfer) void {
+        pub fn deinit(self: *PreparedPendingPasteTransfer) void {
             for (self.entries.items) |*entry| entry.queue.buf.deinit(self.allocator);
             self.entries.deinit(self.allocator);
         }
@@ -8066,7 +7846,7 @@ pub const AppSession = struct {
         const to_kind = dst.windowKind();
         var moved_n: usize = 0;
         for (src.tabs.items) |tab| moved_n = appendTabSurfaceIds(tab, out_ids, moved_n);
-        moved_n = src.appendDockSurfaceIds(out_ids, moved_n);
+        moved_n = dock_ops.appendDockSurfaceIds(src, out_ids, moved_n);
         const moved = out_ids[0..moved_n];
         // terminal admission과 moved queue transfer에 필요한 모든 allocation을 dock/model mutation 전에
         // 끝낸다. source preedit 길이까지 destination buffer에 예약하므로 commit 뒤 capture/swap은 infallible다.
@@ -8110,11 +7890,11 @@ pub const AppSession = struct {
         // FP16: 파일 entry가 Term 소유라 **탭이 옮겨오고 dst의 활성 워크스페이스가 복원된 뒤에야** token을
         // 재발급할 수 있다. 더 이르면 (a) 아직 dst에서 조회가 안 되거나 (b) adoptTab이 잠깐 활성으로 만든
         // 워크스페이스를 보고 "보인다"고 오판한다.
-        if (pending_dock_focus) |pending| dst.requeuePendingDockFocus(pending);
+        if (pending_dock_focus) |pending| file_panel_ops.requeuePendingDockFocus(dst, pending);
         // 옮겨온 파일이 **배경 워크스페이스**에 앉았으면(merge는 dst가 보던 워크스페이스를 유지한다) 그
         // barrier는 화면에 있는 워크스페이스의 키·붙여넣기·닫기를 삼키기만 한다 — 버린다. 중복 해소가
         // 재조준한 token도 같은 규칙을 지난다(code-review max).
-        dst.dropPendingDockFocusIfHidden();
+        dock_ops.dropPendingDockFocusIfHidden(dst);
         pane_ops.recomputeActivePaneRect(dst); // 복원된 활성 탭 기준으로 좌표 origin 재계산(adoptTab이 캡처한 마지막-adopt rect는 stale)
         dst.rebuildSidebar() catch {}; // [4] O(K²) 회피 — 매 adopt 대신 끝에 1회
         return .{
@@ -9968,7 +9748,7 @@ pub const AppSession = struct {
                 // 마지막-창 종료 확인("maru를 종료할까요?")을 건너뛴다(code-review max). 활성 Term이 파일일 때
                 // 2단계 close로 보내는 것은 `requestClose`가 `scope == .term`에서 이미 한다.
                 .workspace => self.requestClose(.term_or_pane),
-                .dock_pending => if (!self.pendingDockEntryOwnsInput()) {
+                .dock_pending => if (!dock_ops.pendingDockEntryOwnsInput(self)) {
                     self.focusWorkspaceInput();
                     self.requestClose(.term_or_pane);
                 },
@@ -10670,18 +10450,6 @@ pub const AppSession = struct {
         self.debug_web_term_opened = true;
     }
 
-    /// 창의 모든 파일 entry에 surface id를 발급한다. **상한이 없다** — FP16의 §1 불변식("파일 Term의 surface는
-    /// eviction으로 해제하지 않는다")대로 LRU를 제거했으므로, entry는 만들어질 때 id를 받고 닫힐 때까지 유지한다.
-    /// 0은 미할당 sentinel이라 이미 받은 entry는 건너뛴다(재발급 금지 — id는 앱 전역 비재사용).
-    /// surface가 없는 파일 entry에 새 sid를 발급한다(창 전체). rename으로 surface가 retire된 entry도
-    /// 여기서 다시 살아난다 — FP16 전에는 도크 group 순회였고, 지금은 Term 창구가 유일한 출처다.
-    fn assignDockSurfaceIds(self: *AppSession) void {
-        var it = file_panel_ops.fileEntries(self);
-        while (it.next()) |entry| {
-            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-        }
-    }
-
     pub const FilePanelOpenPathResult = enum(u32) {
         unsupported = 0,
         opened = 1,
@@ -10934,186 +10702,12 @@ pub const AppSession = struct {
     /// 행에 못 닿는다(rows 시절 실제로 그런 결함이 있었다).
     pub const FileTreeScrollExtent = struct { content_h_px: u32, viewport_h_px: u32, max_offset_px: u32 };
 
-    /// published tree가 발행한 track/thumb rect에서 스크롤바 기하를 **되읽는다**. 여기서 다시 계산하면
-    /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른"
-    /// 결함이고, 도크가 같은 이유로 같은 함수를 갖는다(SV2b).
-    pub fn dockListScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
-        var track: ?chrome.ui.layout.UiRect = null;
-        var thumb: ?chrome.ui.layout.UiRect = null;
-        for (self.dock_list_scroll_entries[0..self.dock_list_scroll_entry_count]) |entry| {
-            if (entry.id == dock_list_scroll_ids.track) track = entry.rect;
-            if (entry.id == dock_list_scroll_ids.thumb) thumb = entry.rect;
-        }
-        const t = track orelse return null;
-        const h = thumb orelse return null;
-        return .{
-            .track_x = t.x,
-            .track_y = t.y,
-            .track_w = t.width,
-            .track_h = t.height,
-            .thumb_y = h.y,
-            .thumb_h = h.height,
-            // 발행 시점에 기록한 상한을 읽는다 — 여기서 다시 계산하면 tree와 다른 값이 될 수 있다.
-            .max_offset_px = self.dock_list_scroll_max_offset_px,
-        };
-    }
-
-    /// 스크롤바가 놓일 여백(backing px). 컨테이너가 **자기 폭에서** 떼어 놓으므로 행 텍스트도 밴드도
-    /// 이 안으로 들어오지 않는다(docs/scroll-area.md §4). 예전에는 텍스트 **셀**을 통째로 빼서
-    /// (`reservedColumns`) 셀 폭에 따라 예약량이 들쭉날쭉했다.
-    fn dockListScrollGutterPx(self: *const AppSession) u32 {
-        const m = self.dockListScrollbarMetrics();
-        return m.width_px + m.inset_x_px;
-    }
-
-    /// 행 텍스트와 하이라이트 밴드가 쓸 수 있는 폭. 컨테이너가 gutter를 **상시** 떼어 놓으므로
-    /// 스크롤바가 나타나고 사라져도 이 값이 변하지 않는다 — 목록이 reflow하지 않는다는 뜻이다.
-    /// 스크롤바가 layer 2(텍스트 **아래**)로 내려왔으므로, 밴드가 이 폭을 넘으면 스크롤바를 덮는다.
-    fn dockListTextWidthPx(self: *const AppSession) u32 {
-        return self.dockGeometry().tree_content.w -| self.dockListScrollGutterPx();
-    }
-
-    fn dockListScrollbarMetrics(self: *const AppSession) chrome.ui.scroll_area.ScrollbarMetrics {
-        _ = self;
-        return .{
-            .width_px = dock_list_scrollbar_width_px,
-            .inset_x_px = dock_list_scrollbar_inset_px,
-            .min_thumb_px = dock_list_scrollbar_min_thumb_px,
-        };
-    }
-
     /// 지금 도크에 보이는 목록의 스크롤 축. 도크 뷰는 **한 번에 하나**만 보이므로 발행 저장소·드래그·
     /// interaction을 뷰마다 두지 않고 공유하고, 여기서 뷰에 따라 사각형·좌표계만 갈아끼운다.
     ///
     /// 소스 컨트롤은 브랜치 헤더 한 줄이 스크롤 밖이라 **뷰포트가 그 아래에서 시작한다** — track/thumb도
     /// 그 사각형 안에 놓여야 헤더 옆에 막대가 뜨지 않는다.
-    const DockListScroll = struct { rect: maru.session.SplitRect, extent: FileTreeScrollExtent, offset_px: u32 };
-
-    fn dockListScroll(self: *AppSession) ?DockListScroll {
-        if (!self.dockVisible() or self.cell_height_px == 0) return null;
-        const content = self.dockGeometry().tree_content;
-        if (content.w == 0 or content.h == 0) return null;
-        return switch (self.dock.view) {
-            .explorer => .{
-                .rect = content,
-                .extent = file_panel_ops.fileTreeScrollExtent(self),
-                .offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self),
-            },
-            .source_control => .{
-                .rect = .{
-                    .x = content.x,
-                    .y = content.y + self.cell_height_px,
-                    .w = content.w,
-                    .h = content.h -| self.cell_height_px,
-                },
-                .extent = self.scmScrollExtent(),
-                .offset_px = self.scmEffectiveScrollPx(),
-            },
-            // 에이전트 세션 도크는 자기 tree(`session_dock.build`)를 이미 갖고 있다.
-            else => null,
-        };
-    }
-
-    /// 스크롤바가 정한 위치를 지금 보이는 목록에 적용한다. 각 뷰의 setter가 clamp·리페인트·fade 리셋을
-    /// 소유하므로 여기서는 라우팅만 한다.
-    fn setDockListScrollOffsetPx(self: *AppSession, offset_px: i64) void {
-        switch (self.dock.view) {
-            .explorer => file_panel_ops.setFileTreeScrollOffsetPx(self, offset_px),
-            .source_control => self.setScmScrollOffsetPx(offset_px),
-            else => {},
-        }
-    }
-
-    /// 소스 컨트롤 쪽 setter. 탐색기의 `setFileTreeScrollOffsetPx`와 같은 계약이다 — 상한은 스크롤바
-    /// 기하가 아니라 extent가 주고, 옮긴 직후의 thumb을 알아야 이어지는 드래그가 튀지 않으므로 tree를
-    /// 다시 낸다.
-    fn setScmScrollOffsetPx(self: *AppSession, offset_px: i64) void {
-        const extent = self.scmScrollExtent();
-        if (!self.scm_scroll.setOffsetPx(offset_px, extent.max_offset_px)) return;
-        self.buildDockListScrollTree();
-        self.dock_list_scrollbar_idle_ticks = 0;
-        self.metal_dirty = true;
-    }
-
-    /// 지금 보이는 도크 목록이 매 프레임 내는 tree. **자식이 없다** — 행은 셀 격자라 tree 노드가 아니고(ML6의 텍스트
-    /// 모델 블로커), 이 선언이 사는 이유는 track/thumb을 공용 경로로 내기 위해서다. 가상화 평행이동도
-    /// 여기서 쓰지 않는다(셀 경로가 자기 원점 편향으로 한다 — SV2a).
-    pub fn buildDockListScrollTree(self: *AppSession) void {
-        self.dock_list_scroll_entry_count = 0;
-        self.dock_list_scroll_max_offset_px = 0;
-        // 지금 보이는 목록으로 만든 스크롤바다 — 다른 뷰에 발행하면 목록과 무관한 막대가 뜨고 드래그도 먹는다.
-        const axis = self.dockListScroll() orelse return;
-        const rect = axis.rect;
-        const extent = axis.extent;
-
-        var entries: [dock_list_scroll_max_entries]chrome.ui.tree.RectEntry = undefined;
-        var items: [dock_list_scroll_max_entries]chrome.ui.layout.Item = undefined;
-        var flex: [dock_list_scroll_max_entries]chrome.ui.layout.FlexScratch = undefined;
-        var child_rects: [dock_list_scroll_max_entries]chrome.ui.layout.UiRect = undefined;
-
-        // **root에는 outer style을 주지 않는다**(`error.RootOuterStyle`). 도크는 이 노드가 컨테이너의
-        // 자식이라 `height: fill`로 남은 높이를 먹지만, 탐색기는 스크롤 컨테이너 자체가 root라 크기가
-        // `root_size`로 이미 정해져 있다.
-        const node = chrome.ui.tree.scrollArea(.{
-            .id = dock_list_scroll_ids.area,
-            .scroll = .{
-                .offset_px = axis.offset_px,
-                .content_h_px = extent.content_h_px,
-                .gutter_px = @floatFromInt(self.dockListScrollGutterPx()),
-                .metrics = self.dockListScrollbarMetrics(),
-                // paint는 **불변**이다. fade alpha를 여기 실으면 tree가 매 프레임 달라져 entry·action
-                // 배열을 다시 복사하고 reconcile을 다시 돈다(docs/scroll-area.md §7). alpha는 아래
-                // `collectFileTreeScrollbar`가 paint 시점에 얹는다.
-                .track = .{ .id = dock_list_scroll_ids.track, .action = .{ .id = dock_list_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
-                .thumb = .{ .id = dock_list_scroll_ids.thumb, .action = .{ .id = dock_list_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ dock_list_scrollbar_width_px / 2, dock_list_scrollbar_width_px / 2, dock_list_scrollbar_width_px / 2, dock_list_scrollbar_width_px / 2 } } },
-                // thumb을 누른 것 자체가 스크롤 의사이고 그 지점에 경쟁할 click이 없으므로 threshold는 0이다.
-                // track도 같은 payload를 선언한다 — 눌러 점프한 뒤 손을 떼지 않고 이어 끌 수 있어야 한다.
-                .drag = .{ .payload = dock_list_scroll_drag_payload, .axis = .vertical, .threshold_px = 0 },
-            },
-        }, &.{});
-
-        const built = chrome.ui.tree.build(node, .{
-            .root_size = .{ .width = @floatFromInt(rect.w), .height = @floatFromInt(rect.h) },
-            .max_entries = dock_list_scroll_max_entries,
-            .max_depth = 2,
-        }, .{
-            .entries = &entries,
-            .items = &items,
-            .flex_scratch = &flex,
-            .child_rects = &child_rects,
-        }) catch return;
-
-        // tree는 컨테이너 로컬 좌표다. 발행 전에 backing 좌표로 옮겨 hit-test·paint가 같은 값을 본다.
-        self.dock_list_scroll_generation +|= 1;
-        for (built.entries, 0..) |entry, i| {
-            var moved = entry;
-            moved.rect.x += @floatFromInt(rect.x);
-            moved.rect.y += @floatFromInt(rect.y);
-            if (moved.effective_clip) |*clip| {
-                clip.x += @floatFromInt(rect.x);
-                clip.y += @floatFromInt(rect.y);
-            }
-            self.dock_list_scroll_entries[i] = moved;
-        }
-        self.dock_list_scroll_entry_count = built.entries.len;
-        self.dock_list_scroll_max_offset_px = extent.max_offset_px;
-    }
-
-    /// 재투영 지점. 계측은 여기 있다 — `buildDockListScrollTree`는 down/move에서도 불리므로 그것까지
-    /// 세면 "프레임당 몇 번 투영했는가"라는 예산의 의미가 달라진다.
-    fn refreshDockListScrollbar(self: *AppSession) void {
-        if (self.file_tree_perf_counters) |counters| {
-            counters.projected_frames += 1;
-            counters.geometry_builds += 1;
-        }
-        self.buildDockListScrollTree();
-    }
-
-    fn setDockListScrollbarHovered(self: *AppSession, hovered: bool) void {
-        if (self.dock_list_scrollbar_hovered == hovered) return;
-        self.dock_list_scrollbar_hovered = hovered;
-        self.metal_dirty = true;
-    }
+    pub const DockListScroll = struct { rect: maru.session.SplitRect, extent: FileTreeScrollExtent, offset_px: u32 };
 
     fn setSidebarScrollbarHovered(self: *AppSession, hovered: bool) void {
         if (self.sidebar_scrollbar_hovered == hovered) return;
@@ -11157,7 +10751,7 @@ pub const AppSession = struct {
         // thumb이 스크롤에 따라 움직이므로 매 move마다 다시 발행한다 — capture를 넘길지는 §5 carry
         // verdict가 판정한다. 예전에는 전용 `publish`가 rect 두 개를 손으로 만들었고, 지금은 같은
         // `scrollArea` 선언이 낸 tree를 그대로 쓴다.
-        self.buildDockListScrollTree();
+        dock_ops.buildDockListScrollTree(self);
         const snapshot = file_panel_ops.fileTreeScrollTree(self);
         if (snapshot.entries.len == 0) {
             self.endScrollbarCapture();
@@ -11180,7 +10774,7 @@ pub const AppSession = struct {
         // key가 같아도 track/thumb **기하**가 달라졌으면 down 시점 기하로 계산한 스크롤이 손가락과
         // 어긋난다. carry key는 host가 주입한 값의 동등성만 보므로 이 축은 여기서 domain이 지킨다
         // (계약 §5의 "up effect는 live domain validation을 다시 통과한다"와 같은 자리다).
-        const live = self.dockListScrollbarGeometry() orelse {
+        const live = dock_ops.dockListScrollbarGeometry(self) orelse {
             self.endScrollbarCapture();
             return true;
         };
@@ -11226,7 +10820,7 @@ pub const AppSession = struct {
         switch (self.scrollbar_drag_target) {
             .overlay => self.setOverlayScrollOffsetPx(offset_px),
             .sidebar => self.setSidebarScrollOffsetPx(offset_px),
-            .dock_list, .none => self.setDockListScrollOffsetPx(offset_px),
+            .dock_list, .none => dock_ops.setDockListScrollOffsetPx(self, offset_px),
         }
     }
 
@@ -11328,39 +10922,6 @@ pub const AppSession = struct {
             .cancelled => self.endScrollbarCapture(),
         };
         if (kind == 3) self.endScrollbarCapture();
-        return true;
-    }
-
-    fn beginDockListScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
-        self.buildDockListScrollTree();
-        const geometry = self.dockListScrollbarGeometry() orelse return false;
-        if (!geometry.trackContains(x_px, y_px)) return false;
-        // down이 thumb인지 track 빈 곳인지, 잡은 지점을 어떻게 기억하는지, 점프 후 기하가 어떻게 되는지는
-        // `scroll_area.Drag`가 안다. host는 published 기하를 건네고 점프 결과만 적용한다.
-        if (self.dock_list_scroll_drag.begin(geometry, x_px, y_px)) |jumped| self.setDockListScrollOffsetPx(jumped);
-        const snapshot = file_panel_ops.fileTreeScrollTree(self);
-        if (snapshot.entries.len == 0) return false;
-        _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
-            .phase = .down,
-            .x_px = x_px,
-            .y_px = y_px,
-            .timestamp_ns = 0,
-            .generation = snapshot.generation,
-        }) catch return false;
-        if (self.scrollbar_interaction.capture == null) {
-            self.dock_list_scroll_drag.end();
-            return false;
-        }
-        // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 규율은 같다.
-        self.clearSidebarDragPreview();
-        self.pointer_gesture_owner = .none;
-        self.dock_list_scroll_drag_owner = .{
-            .root_generation = self.file_tree.rootGeneration(),
-            .projection_generation = self.file_tree_projection_generation,
-        };
-        self.scrollbar_drag_target = .dock_list;
-        self.dock_list_scrollbar_idle_ticks = 0;
-        self.metal_dirty = true;
         return true;
     }
 
@@ -11565,7 +11126,7 @@ pub const AppSession = struct {
         if (!found) return false;
         // A direct native click is newer than a delayed surface-less drop focus. Cancel the token
         // before committing B so a retained Swift retry for A cannot steal firstResponder back.
-        self.cancelPendingDockFocus();
+        dock_ops.cancelPendingDockFocus(self);
         self.focus_owner = .workspace;
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
@@ -11622,38 +11183,8 @@ pub const AppSession = struct {
         return if (entry.surface_id == 0) null else entry.surface_id;
     }
 
-    fn pendingDockEntryOwnsInput(self: *const AppSession) bool {
-        const owned_entry_id = switch (self.focus_owner) {
-            .dock_pending => |entry_id| entry_id,
-            else => return false,
-        };
-        const pending = self.pending_dock_focus orelse return false;
-        if (pending.dock_async_epoch != self.dock_async_epoch) return false;
-        // FP16: barrier가 그룹이 아니라 pending entry 자체를 대조한다. 옛 runtime_id 대조와 같은 강도로,
-        // owner가 다른 파일을 가리키면 fail-close한다.
-        if (owned_entry_id != pending.entry_id) return false;
-        // 옛 `.dock_group`은 **보이는** group에 묶여 있었다. 같은 강도를 유지하려면 그 파일이 지금 키를
-        // 받을 자리, 즉 **활성 탭의 활성 pane의 활성 Term**이어야 한다. "활성 워크스페이스에 있다"로는
-        // 같은 pane의 터미널 탭이나 다른 split pane에서 타이핑하는 동안에도 barrier가 키를 삼킨다.
-        // surface_id로 보지 않는 이유: 아직 sid가 없는(publish 전) entry가 이 barrier의 주 대상이다.
-        const owner_entry = file_panel_ops.fileEntryForIdConst(self, pending.entry_id) orelse return false;
-        if (!file_panel_ops.fileEntryIsFocusTarget(self, owner_entry)) return false;
-        const entry = blk: {
-            var it = file_panel_ops.fileEntriesConst(self);
-            while (it.next()) |e| {
-                if (e.id == pending.entry_id) break :blk e.*;
-            }
-            return false;
-        };
-        if (entry.editor_revision != pending.request_or_entry_revision) return false;
-        return if (pending.expected_surface_id) |surface_id|
-            entry.surface_id == surface_id
-        else
-            entry.surface_id == 0;
-    }
-
     pub fn focusWorkspaceInput(self: *AppSession) void {
-        self.cancelPendingDockFocus();
+        dock_ops.cancelPendingDockFocus(self);
         // A terminal/body click takes the keyboard owner away from the archive list.  Without
         // releasing that ownership, Enter/PageUp/PageDown would keep driving an open dock while
         // the user was visibly typing in the workspace terminal.
@@ -12191,27 +11722,11 @@ pub const AppSession = struct {
         /// 복원 당시 활성이던 entry의 평탄화 index(없으면 null). 이관 뒤 그 Term을 활성 탭으로 만든다.
         active_index: ?usize = null,
 
-        fn deinit(self: *RestoredFileEntries, gpa: std.mem.Allocator) void {
+        pub fn deinit(self: *RestoredFileEntries, gpa: std.mem.Allocator) void {
             for (self.items.items) |entry| gpa.free(entry.path);
             self.items.deinit(gpa);
         }
     };
-
-    /// 복원된 `DockPanel`의 평탄 목록에서 소유를 가져온다(panel은 비워진다). 와이어 파싱·검증·mode clamp는
-    /// `DockPanel.restore`가 이미 했으므로 재구현하지 않고 결과만 가져온다 — 포맷 규칙의 단일 출처 유지.
-    fn flattenRestoredDock(
-        gpa: std.mem.Allocator,
-        panel: *dock_panel.DockPanel,
-    ) !RestoredFileEntries {
-        var out: RestoredFileEntries = .{};
-        errdefer out.deinit(gpa);
-        try out.items.ensureTotalCapacity(gpa, panel.restoredCount());
-        for (panel.restored.items) |entry| out.items.appendAssumeCapacity(entry); // path 소유가 목록으로 이동
-        out.active_index = panel.restored_active;
-        panel.restored.clearRetainingCapacity(); // panel은 더 이상 소유하지 않는다(이중 해제 방지)
-        panel.restored_active = null;
-        return out;
-    }
 
     /// 파일 entry를 닫는다 = 그 파일 **Term을 닫는다**(FP16). entry의 소유가 Term이므로 `destroyTerm`이
     /// entry·path까지 해제한다 — 옛 `group.remove` + `allocator.free(path)` 쌍을 대체한다.
@@ -12288,11 +11803,11 @@ pub const AppSession = struct {
     /// 다시 만들어 판정한다 — 그린 자리와 눌리는 자리가 어긋나지 않게 한다(행 목록을 따로 캐시하지 않는 이유다).
     /// 반환 슬라이스는 `git_result` 소유라 다음 갱신 전까지만 유효하다(호출자가 그 자리에서 쓴다).
     fn scmRowAt(self: *AppSession, x_px: f64, y_px: f64, out: []scm_view.Row, scratch: []u8) ?scm_view.Row {
-        if (self.dock.view != .source_control or !self.dockVisible() or self.cell_height_px == 0) return null;
-        const rect = self.dockGeometry().tree_content;
+        if (self.dock.view != .source_control or !dock_ops.dockVisible(self) or self.cell_height_px == 0) return null;
+        const rect = dock_ops.dockGeometry(self).tree_content;
         if (!layout_math.pointInRect(x_px, y_px, rect)) return null;
         // 스크롤바 위 클릭이 행 선택으로 새면 안 된다(탐색기와 같은 규율, SV3b).
-        if (self.dockListScrollbarGeometry()) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
+        if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
         // **첫 줄은 브랜치 헤더다**(렌더와 같은 자리 규칙 — 여기서 빼지 않으면 한 줄씩 어긋나 엉뚱한 행이
         // 열린다). 헤더는 스크롤 좌표 밖이므로 목록 좌표는 그 아래에서 시작한다.
         const list_top = @as(f64, @floatFromInt(rect.y + self.cell_height_px));
@@ -12354,9 +11869,9 @@ pub const AppSession = struct {
     /// 소스 컨트롤 목록의 스크롤 좌표계(SV3a). **브랜치 헤더 한 줄을 뺀** 나머지가 뷰포트다 — 헤더는
     /// 스크롤에서 고정이므로 스크롤 좌표에 들어가지 않는다. 탐색기와 같은 이유로 세 값을 한 자리에서
     /// 만든다(상한이 호출부마다 갈리면 목록이 빈 곳으로 스크롤된다).
-    fn scmScrollExtent(self: *AppSession) FileTreeScrollExtent {
+    pub fn scmScrollExtent(self: *AppSession) FileTreeScrollExtent {
         const row_h = self.cell_height_px;
-        const rect = self.dockGeometry().tree_content;
+        const rect = dock_ops.dockGeometry(self).tree_content;
         const viewport = rect.h -| row_h; // 헤더 한 줄
         const content: u32 = @intCast(@min(
             @as(u64, self.scmTotalRows()) * @as(u64, row_h),
@@ -12365,7 +11880,7 @@ pub const AppSession = struct {
         return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };
     }
 
-    fn scmEffectiveScrollPx(self: *AppSession) u32 {
+    pub fn scmEffectiveScrollPx(self: *AppSession) u32 {
         return @min(self.scm_scroll.offset_y_px, self.scmScrollExtent().max_offset_px);
     }
 
@@ -12636,16 +12151,8 @@ pub const AppSession = struct {
         }
     };
 
-    fn dockHasLiveSurface(self: *AppSession) bool {
-        var it = file_panel_ops.fileEntries(self);
-        while (it.next()) |entry| {
-            if (entry.surface_id != 0) return true;
-        }
-        return false;
-    }
-
     fn webSurfacesPresent(self: *AppSession) bool {
-        return self.windowHasWebTerm() or self.dockHasLiveSurface();
+        return self.windowHasWebTerm() or file_panel_ops.dockHasLiveSurface(self);
     }
 
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
@@ -12669,7 +12176,7 @@ pub const AppSession = struct {
             // dt==0(divider 숨김)이면 seam=0(무-inset, 웹뷰가 seam까지 채움).
             const seam: u32 = if (dt == 0) 0 else dt + @max(@as(u32, 1), self.scale_milli / 1000);
             const tr = self.termRect();
-            const dg = self.dockGeometry();
+            const dg = dock_ops.dockGeometry(self);
             for (self.web_leaf_rects_scratch.items) |lr| {
                 for (lr.leaf.terms.items, 0..) |term, i| {
                     if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
@@ -12694,13 +12201,13 @@ pub const AppSession = struct {
                         inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
                         seam_edges |= 1;
                     }
-                    const at_right_dock = self.dockVisible() and self.dock.side == .right and
+                    const at_right_dock = dock_ops.dockVisible(self) and self.dock.side == .right and
                         lr.rect.x + lr.rect.w == tr.x + tr.w and dg.divider.w > 0;
                     if (seam > 0 and (lr.rect.x + lr.rect.w < tr.x + tr.w or at_right_dock)) {
                         inset.right = seam; // 오른쪽 세로 divider
                         seam_edges |= 2;
                     }
-                    const at_bottom_dock = self.dockVisible() and self.dock.side == .bottom and
+                    const at_bottom_dock = dock_ops.dockVisible(self) and self.dock.side == .bottom and
                         lr.rect.y + lr.rect.h == tr.y + tr.h and dg.divider.h > 0;
                     if (seam > 0 and (lr.rect.y + lr.rect.h < tr.y + tr.h or at_bottom_dock)) {
                         inset.bottom = seam; // 아래 가로 divider
@@ -15456,8 +14963,8 @@ pub const AppSession = struct {
     /// 터미널 본문을 구분한다(renameTargetAt는 둘 다 null이라 구분 불가).
     fn pointOnChrome(self: *AppSession, x_px: f64, y_px: f64) bool {
         if (self.inSidebar(x_px)) return true;
-        if (self.dockVisible()) {
-            const dg = self.dockGeometry();
+        if (dock_ops.dockVisible(self)) {
+            const dg = dock_ops.dockGeometry(self);
             if (layout_math.pointInRect(x_px, y_px, dg.dock)) return true;
         }
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -15784,7 +15291,7 @@ pub const AppSession = struct {
                     self.pending_file_menu_action = .{ .surface_id = surface_id, .item = item };
                     // **그 문서로 포커스를 돌려준다.** 메뉴 클릭은 오버레이 통과 경로라 터미널 뷰가 받는데, 그대로
                     // 두면 이어지는 ⌘Z·타이핑이 편집기까지 못 간다 — 잘라내기는 됐는데 되돌리기가 안 되던 원인이다.
-                    if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| self.requestDockEntryFocus(entry);
+                    if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| dock_ops.requestDockEntryFocus(self, entry);
                     self.closeContextMenu();
                 },
                 .native => switch (item) {
@@ -15812,7 +15319,7 @@ pub const AppSession = struct {
                     .open_source => {
                         self.closeContextMenu();
                         _ = self.setFilePanelModeBySurface(surface_id, .source_edit);
-                        if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| self.requestDockEntryFocus(entry);
+                        if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| dock_ops.requestDockEntryFocus(self, entry);
                     },
                     // 이미지 저장은 저장 패널 ABI가 필요해 이 슬라이스에 없다(§2.6) — 항목도 만들지 않는다.
                     .save_image, .copy, .cut, .paste, .select_all => self.closeContextMenu(),
@@ -16305,7 +15812,7 @@ pub const AppSession = struct {
         // identity before changing the resolved metric so Cmd+/− never turns a stable session
         // position into an unrelated numeric backing-pixel offset. No card/closed detail falls
         // back to the existing bounded offset policy.
-        const preserve_visible_dock_scroll = self.dock_initialized and self.dock.view == .agent_sessions and self.dockVisible();
+        const preserve_visible_dock_scroll = self.dock_initialized and self.dock.view == .agent_sessions and dock_ops.dockVisible(self);
         const dock_scroll_anchor = if (preserve_visible_dock_scroll) agent_dock.captureAgentSessionDockScrollAnchor(self) else null;
         const dock_scroll_fallback_offset_px = self.agent_session_archive_scroll.offset_y_px;
         self.appearance.font.size = clamped;
@@ -17040,7 +16547,7 @@ pub const AppSession = struct {
         }
         // Session Dock keyboard focus remains with the dock while an inline detail is expanded.
         // Page keys therefore keep reaching the visible scroll owner.
-        if (self.dockVisible() and self.dock.view == .agent_sessions) {
+        if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions) {
             if (agent_dock.handleAgentSessionArchiveSearchKey(self, event)) {
                 return self.keyConsumedByApp();
             }
@@ -17115,7 +16622,7 @@ pub const AppSession = struct {
         }
         // 빈 editor group은 구조 input owner다. 사용자/기본 app action은 실행하되 terminal macro와
         // 일반 텍스트를 모두 소비해 보이지 않는 PTY에 입력이 새지 않게 한다.
-        if (self.pendingDockEntryOwnsInput()) {
+        if (dock_ops.pendingDockEntryOwnsInput(self)) {
             switch (self.loaded_config.keyBindingResolver().resolveFileTree(event, false)) {
                 .app_action => |action| self.dispatchAppAction(action),
                 .tree_default, .consumed => {},
@@ -17438,8 +16945,8 @@ pub const AppSession = struct {
             _ = self.scrollOverlayByLines(lines_overlay);
             return;
         }
-        const session_dock_wheel_target = self.dockVisible() and self.dock.view == .agent_sessions and
-            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content);
+        const session_dock_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and
+            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
         // Do not carry a sub-pixel trackpad remainder from the dock into a later re-entry. The
         // next dock gesture must start from its own physical direction and owner.
         // 도크를 떠났으면 분수 잔여를 남기지 않는다 — 다시 들어왔을 때 첫 틱이 엉뚱하게 튄다.
@@ -17465,8 +16972,8 @@ pub const AppSession = struct {
         }
         // 소스 컨트롤도 **자기 상태**(scm_scroll)로 굴린다 — 뷰별로 나눠 두지 않으면 안 보이는 목록이
         // 움직인다. 탐색기와 같은 픽셀 경로이므로 줄 환산 앞에 둔다(SV3a).
-        const scm_wheel_target = self.dockVisible() and self.dock.view == .source_control and
-            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content);
+        const scm_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .source_control and
+            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
         if (!scm_wheel_target) self.scm_scroll.dropWheelResidue();
         if (scm_wheel_target) {
             const unit: f64 = if (precise)
@@ -17485,8 +16992,8 @@ pub const AppSession = struct {
         // 탐색기도 자기 상태(file_tree_scroll)로 굴린다 — 다른 뷰에서 굴리면 안 보이는 목록이 움직인다.
         // **줄 환산(`wheelDeltaToLines`)보다 앞에 둔다**: 픽셀 상태라 공유 `wheel_accum`을 소비할 이유가
         // 없고, 소비하면 탐색기 위 제스처가 터미널 스크롤백의 잔여를 갉아먹는다.
-        const file_tree_wheel_target = self.dockVisible() and self.dock.view == .explorer and
-            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content);
+        const file_tree_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .explorer and
+            layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
         if (!file_tree_wheel_target) self.file_tree_scroll.dropWheelResidue();
         if (file_tree_wheel_target) {
             // precise(트랙패드)는 논리 픽셀이라 부분 행이 그대로 드러나고, 아니면 한 행이 한 틱이다.
@@ -17500,7 +17007,7 @@ pub const AppSession = struct {
                 unit,
                 extent.max_offset_px,
             )) {
-                self.buildDockListScrollTree();
+                dock_ops.buildDockListScrollTree(self);
                 self.dock_list_scrollbar_idle_ticks = 0;
                 self.metal_dirty = true;
                 file_panel_ops.setHoveredFileTreeRow(self, file_panel_ops.fileTreeRowAt(self, x_px, y_px));
@@ -17620,7 +17127,7 @@ pub const AppSession = struct {
     /// 하는 단일 출처다. 플래그만 보면 도크를 닫거나 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이
     /// first responder를 요구한다.
     pub fn agentSessionSearchOwnsInput(self: *const AppSession) bool {
-        return self.agent_session_archive_search_active and self.dockVisible() and self.dock.view == .agent_sessions;
+        return self.agent_session_archive_search_active and dock_ops.dockVisible(self) and self.dock.view == .agent_sessions;
     }
 
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
@@ -17638,7 +17145,7 @@ pub const AppSession = struct {
         if (self.fileContentMenuHoldsWebFocus()) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
-            file_panel_ops.fileTreeFocused(self) or self.pendingDockEntryOwnsInput();
+            file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
     /// 파일 본문 메뉴가 떠 있고, 그것 말고 입력을 가져갈 오버레이가 없나. 다른 모달(확인·팔레트·세팅)이 함께
@@ -18057,7 +17564,7 @@ pub const AppSession = struct {
         // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
         if (self.pointerGestureIs(.dock_outer_divider) and (kind == 2 or kind == 3)) {
             if (kind == 2) {
-                self.setDockSizeFromPointer(x_px, y_px);
+                dock_ops.setDockSizeFromPointer(self, x_px, y_px);
             } else {
                 self.metal_dirty = true;
                 self.finishPointerGesture();
@@ -18290,10 +17797,10 @@ pub const AppSession = struct {
         // 각각 따로 봐야 한다. 선택 drag는 처음 가드가 놓쳐 도크 위에서 놓으면 up이 도크에 먹히고
         // `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
         // capture 없는 pointer만 rect로 분류한다(docs/chrome-interaction-migration.md §2).
-        if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
+        if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
             self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
         {
-            const content = self.dockGeometry().tree_content;
+            const content = dock_ops.dockGeometry(self).tree_content;
             const captured = self.agent_session_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {
                 const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
@@ -18324,8 +17831,8 @@ pub const AppSession = struct {
                 }
             }
             // 배경 메뉴 항목은 전부 탐색기 조작이라 다른 뷰에서는 띄우지 않는다(빈 곳 우클릭은 아래로 흘러 chrome consume).
-            if (self.dockVisible() and self.dock.view == .explorer and
-                layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree))
+            if (dock_ops.dockVisible(self) and self.dock.view == .explorer and
+                layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree))
             {
                 self.file_tree_background_menu = true;
                 const items = file_panel_ops.buildFileTreeBackgroundMenuItems(self);
@@ -18418,7 +17925,7 @@ pub const AppSession = struct {
             // 정확한 divider 선이 dockGroupAtPoint의 null 조기 반환에 막히지 않고, WKWebView가 통과시킨 안쪽
             // seam 클릭도 파일/그룹 클릭으로 오인되지 않는다.
             if (pane_ops.dockDividerAtPoint(self, x_px, y_px)) {
-                const g = self.dockGeometry();
+                const g = dock_ops.dockGeometry(self);
                 // sizePtForPointer의 권위 경계는 dock 본문 시작점이다(divider의 dock 쪽 edge). 포인터가 확장
                 // hit band 어디에 있든 이 간격을 보존해 경계가 클릭점으로 순간 이동하지 않게 한다.
                 const offset_px = switch (self.dock.side) {
@@ -18431,13 +17938,13 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
                 return;
             }
-            if (self.dockVisible()) {
-                const dg = self.dockGeometry();
+            if (dock_ops.dockVisible(self)) {
+                const dg = dock_ops.dockGeometry(self);
                 // 뷰 스위처가 트리보다 먼저다 — 바는 트리 위에 있고 rect가 겹치지 않지만, 순서를 명시해
                 // 나중에 바가 커져도 트리 클릭에 먹히지 않게 한다(docs/file-explorer.md §3.5).
                 if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
-                    if (self.dockViewSlotAt(x_px, y_px)) |slot| {
-                        if (dockViewForSlot(slot)) |view| self.enterDockView(view);
+                    if (dock_ops.dockViewSlotAt(self, x_px, y_px)) |slot| {
+                        if (dock_ops.dockViewForSlot(slot)) |view| dock_ops.enterDockView(self, view);
                     }
                     return; // 바 안의 여백 클릭도 트리로 흘려보내지 않는다.
                 }
@@ -18482,7 +17989,7 @@ pub const AppSession = struct {
                     return;
                 }
                 if (self.dock.view == .explorer) {
-                    if (self.beginDockListScrollbarGesture(x_px, y_px)) return;
+                    if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
                     if (file_panel_ops.fileTreeRowAt(self, x_px, y_px)) |row_index| {
                         if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
                             file_panel_ops.focusFileTree(self);
@@ -18503,7 +18010,7 @@ pub const AppSession = struct {
                 }
                 // tree header/빈 row, editor 본문의 WebView seam처럼 도크 안에서 Metal까지 내려온 클릭은 도크가 소비한다.
                 // 반대로 도크 밖(workspace)은 여기서 return하지 않고 아래 pane 주소창·탭·터미널 hit-test로 흘러야 한다.
-                if (layout_math.pointInRect(x_px, y_px, self.dockGeometry().dock)) return;
+                if (layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) return;
             }
             // tree 밖의 명시적 primary click은 workspace 입력 축을 되찾는다. TerminalView가 이미 firstResponder라
             // AppKit responder 변화가 없을 수 있으므로 mouse policy도 같은 FocusOwner를 직접 갱신해야 한다.
@@ -19188,7 +18695,7 @@ pub const AppSession = struct {
         // 비-terminal이면 sendTextAsKeys→handleKeyEvent→addr_edit 인터셉트로 글자를 append한다.
         if (self.addr_edit != null) return .addr_edit;
         if (file_panel_ops.fileTreeFocused(self)) return .file_tree;
-        if (self.pendingDockEntryOwnsInput()) return .dock_pending;
+        if (dock_ops.pendingDockEntryOwnsInput(self)) return .dock_pending;
         return .terminal;
     }
 
@@ -19893,7 +19400,7 @@ pub const AppSession = struct {
     /// paste 게이트(위)와 제자리 재시작 ⏎ 게이트(`handleKeyEvent`)가 같은 판정을 공유한다 — 둘 다 "보이지 않는
     /// PTY로 입력이 새지 않게" 하는 같은 규율이고, 한쪽만 고치면 다른 쪽이 트리의 Enter를 훔친다(code-review).
     fn structuralInputOwner(self: *const AppSession) bool {
-        return file_panel_ops.fileTreeFocused(self) or self.pendingDockEntryOwnsInput();
+        return file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
     /// 슬라이스 4: ⌘X 잘라내기 — 선택 바이트를 **먼저 클립보드-쓰기 큐에 캡처**한 뒤 선택을 지운다(cut 표준: 바이트를 넘기지
@@ -20745,7 +20252,7 @@ pub const AppSession = struct {
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
-        self.setDockListScrollbarHovered(if (self.dockListScrollbarGeometry()) |geometry| geometry.trackContains(x_px, y_px) else false);
+        dock_ops.setDockListScrollbarHovered(self, if (dock_ops.dockListScrollbarGeometry(self)) |geometry| geometry.trackContains(x_px, y_px) else false);
         self.setSidebarScrollbarHovered(self.pointOnSidebarScrollbar(x_px, y_px));
         // Phase 7e-4: browser 주소창 밴드 nav 버튼 호버도 매 이동 갱신한다(스크롤바 호버처럼 아래 early return 전에 항상 —
         // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
@@ -20772,8 +20279,8 @@ pub const AppSession = struct {
         }
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
-        file_panel_ops.setHoveredFileTreeRow(self, if (self.dockVisible()) file_panel_ops.fileTreeRowAt(self, x_px, y_px) else null);
-        self.setHoveredDockViewSlot(self.dockViewSlotAt(x_px, y_px));
+        file_panel_ops.setHoveredFileTreeRow(self, if (dock_ops.dockVisible(self)) file_panel_ops.fileTreeRowAt(self, x_px, y_px) else null);
+        dock_ops.setHoveredDockViewSlot(self, dock_ops.dockViewSlotAt(self, x_px, y_px));
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -20843,13 +20350,13 @@ pub const AppSession = struct {
         self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
         if (file_panel_ops.filePanelDockControlRect(self)) |r| {
             if (layout_math.pointInRect(x_px, y_px, r)) {
-                self.setDockToggleHovered(true);
+                dock_ops.setDockToggleHovered(self, true);
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
                 return .link;
             }
         }
-        self.setDockToggleHovered(false); // 토글 밖 → 호버 하이라이트 해제(실제 마우스는 터미널을 지나 이 경로를 밟음)
+        dock_ops.setDockToggleHovered(self, false); // 토글 밖 → 호버 하이라이트 해제(실제 마우스는 터미널을 지나 이 경로를 밟음)
         // outer dock divider의 grab band는 일부가 dock/WKWebView 안쪽으로 겹친다. 내부 tree/group보다 먼저
         // 판정해야 그 겹친 구간도 resize cursor가 되고, 정확한 1px divider 위가 group miss로 사라지지 않는다.
         if (pane_ops.dockDividerAtPoint(self, x_px, y_px)) {
@@ -20860,8 +20367,8 @@ pub const AppSession = struct {
                 .bottom => .resize_v,
             };
         }
-        if (self.dockVisible()) {
-            const dg = self.dockGeometry();
+        if (dock_ops.dockVisible(self)) {
+            const dg = dock_ops.dockGeometry(self);
             // Do this before the view-bar return as well: moving from a card to a scope/view
             // selector is a leave transition for the SessionDock tree, not a frozen hover.
             if (self.dock.view == .agent_sessions) _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
@@ -20869,11 +20376,11 @@ pub const AppSession = struct {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
                 file_panel_ops.setHoveredFileTreeRow(self, null);
-                const slot = self.dockViewSlotAt(x_px, y_px);
-                self.setHoveredDockViewSlot(slot);
+                const slot = dock_ops.dockViewSlotAt(self, x_px, y_px);
+                dock_ops.setHoveredDockViewSlot(self, slot);
                 return if (slot != null) .link else .default; // 슬롯 위만 클릭 가능(여백은 화살표)
             }
-            self.setHoveredDockViewSlot(null);
+            dock_ops.setHoveredDockViewSlot(self, null);
             // SessionDock hover is owned by the same published tree that mouse down/up uses.
             // The dispatch above already clears a stale card highlight for tree-outside points;
             // this branch only selects the cursor response without a second archive row hit-test.
@@ -22696,7 +22203,7 @@ pub const AppSession = struct {
         dropped += file_panel_ops.pruneInvalidRestoredFilePanelEntries(self, &new_dock);
         // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
         // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
-        var restored_entries = try flattenRestoredDock(self.allocator, &new_dock);
+        var restored_entries = try dock_ops.flattenRestoredDock(self.allocator, &new_dock);
         // 성공 경로에서도 backing buffer를 반납해야 한다 — 이관이 소유를 가져가도 ArrayList 자체는 남는다.
         // 이관이 건너뛰어진 경우(탭 0개)엔 path 문자열까지 여기서 회수된다.
         defer restored_entries.deinit(self.allocator);
@@ -22834,7 +22341,7 @@ pub const AppSession = struct {
         // 복원된 활성 파일에 publish 대기 barrier를 건다. `resetFilePanelTransientStateForDockReplacement`가
         // 위에서 transient를 전부 지우므로 **커밋 뒤**여야 한다 — 라이브 열기와 같은 계약이라, typed ack
         // 전까지 PTY·paste·close가 새 WKWebView 대신 터미널로 잘못 라우팅되지 않는다.
-        if (file_panel_ops.activeFileEntry(self)) |restored_active| self.requestDockEntryFocus(restored_active);
+        if (file_panel_ops.activeFileEntry(self)) |restored_active| dock_ops.requestDockEntryFocus(self, restored_active);
         self.normalizePinnedFromGroups();
         self.stablePartitionPinned();
         self.floatLocalPinsAllGroups(); // 복원 로컬 pin 재float(GL §13.4 배선 (3) — 복원 특례도 항상 stablePartitionPinned 뒤, local-pinned 영속 반영)
@@ -23042,7 +22549,7 @@ pub const AppSession = struct {
         // Capture before scale/cell metrics change: the anchor's intra-card offset belongs to the
         // old backing-pixel geometry.  Hidden views retain their numeric state untouched, because
         // a zero-sized hidden dock is not a viewport against which it may be clamped.
-        const resize_agent_session_dock = self.dockVisible() and self.dock.view == .agent_sessions;
+        const resize_agent_session_dock = dock_ops.dockVisible(self) and self.dock.view == .agent_sessions;
         const prior_agent_session_scroll_offset = self.agent_session_archive_scroll.offset_y_px;
         const prior_agent_session_scroll_anchor = if (resize_agent_session_dock)
             agent_dock.captureAgentSessionDockScrollAnchor(self)
@@ -23097,7 +22604,7 @@ pub const AppSession = struct {
         try pane_ops.resizeActiveTabPanes(self);
         pane_ops.recomputeActivePaneRect(self); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
         self.last_resize_size = size;
-        self.refreshDockListScrollbar();
+        file_panel_ops.refreshDockListScrollbar(self);
         if (resize_agent_session_dock) {
             // The published rect tree still describes pre-resize geometry until the next paint.
             // Drop a pressed action now so a delayed mouse-up cannot resolve through that tree.
@@ -24430,7 +23937,7 @@ pub const AppSession = struct {
         const core_snap = self.readActiveSnapshot(active_output_events == 0 and self.appearance.blink_text);
         if (active_output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
-        self.refreshDockListScrollbar(); // frame당 geometry build 1회; fade/render는 같은 snapshot만 소비한다.
+        file_panel_ops.refreshDockListScrollbar(self); // frame당 geometry build 1회; fade/render는 같은 snapshot만 소비한다.
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
         // 활성 surface가 직전 tick과 바뀌면 sync 게이트 baseline 3개(last_rendered_esu·last_rendered_view_offset·
         // sync_hold_ticks)가 전부 단일 AppSession 필드라 이전 surface 값이 남는다. 비교 대상(sync_esu_count·view_offset·
@@ -24768,8 +24275,8 @@ pub const AppSession = struct {
                 } else null else null;
 
             // FP3 창-로컬 파일 도크 chrome. 순수 dockGeometry의 tab/header/divider rect를 그대로 쓴다.
-            if (self.dockVisible()) {
-                const dg = self.dockGeometry();
+            if (dock_ops.dockVisible(self)) {
+                const dg = dock_ops.dockGeometry(self);
                 self.appendBarBgQuad(dg.tree, self.chromeQuadBg(self.sidebarBg()));
                 // 뷰 스위처 한 행(docs/file-explorer.md §3.5). 활성 슬롯만 배경으로 표시해 "지금 보는 뷰"를 남긴다.
                 if (dg.view_bar.w > 0 and dg.view_bar.h > 0) {
@@ -24782,7 +24289,7 @@ pub const AppSession = struct {
                     };
                     // 호버를 **먼저** 깔고 활성을 그 위에 얹는다 — 활성 슬롯을 호버해도 활성 표시가 유지된다.
                     if (self.dock_view_hovered_slot) |hovered| {
-                        if (hovered != self.dockViewSlotIndex()) {
+                        if (hovered != dock_ops.dockViewSlotIndex(self)) {
                             if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, hovered)) |slot| {
                                 self.appendBarBgQuad(
                                     .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
@@ -24791,7 +24298,7 @@ pub const AppSession = struct {
                             }
                         }
                     }
-                    if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, self.dockViewSlotIndex())) |slot| {
+                    if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, dock_ops.dockViewSlotIndex(self))) |slot| {
                         self.appendBarBgQuad(
                             .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                             self.chromeQuadBg(self.sidebarActiveBg()),
@@ -24826,7 +24333,7 @@ pub const AppSession = struct {
                             .y = band_top + @as(u32, @intCast(index - start)) * self.cell_height_px,
                             // gutter를 뺀 폭이다. 스크롤바가 layer 2(밴드와 같은 층)로 내려왔으므로 밴드가
                             // 전폭이면 append 순서에 따라 스크롤바를 덮는다(SV2b).
-                            .w = self.dockListTextWidthPx(),
+                            .w = dock_ops.dockListTextWidthPx(self),
                             .h = self.cell_height_px,
                         }, if (selected and file_panel_ops.fileTreeFocused(self))
                             packOpaqueRgb(self.appearance.theme.accent)
@@ -24840,7 +24347,7 @@ pub const AppSession = struct {
                 // **밴드보다 뒤에** 넣는다(SV2b). 스크롤바가 layer 2로 내려와 행 하이라이트 밴드와 같은
                 // 버킷이 됐고, 그 안에서는 배열 순서가 painter 순서다. 밴드 폭은 gutter 앞에서 끝나므로
                 // 지금은 겹치지 않지만, 순서까지 맞춰야 밴드 폭이 나중에 넓어져도 thumb이 안 가려진다.
-                self.appendDockListScrollbar();
+                dock_ops.appendDockListScrollbar(self);
             }
             // 접기/펴기 토글 배경 — 평소 투명(배경색과 동일), 호버 시에만 하이라이트(왼쪽 헤더 아이콘 동형). 사용자 피드백.
             if (self.dock_toggle_hovered) if (file_panel_ops.filePanelDockControlRect(self)) |r| {
@@ -25148,8 +24655,8 @@ pub const AppSession = struct {
                 }
 
                 // FP3 파일 도크 탭 제목+활성 파일 경로. 배경 quad와 같은 geometry origin에 2행을 배치한다.
-                if (self.dockVisible()) {
-                    const dg = self.dockGeometry();
+                if (dock_ops.dockVisible(self)) {
+                    const dg = dock_ops.dockGeometry(self);
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const tree_content_cols: u16 = @intCast(@min(dg.tree_content.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
@@ -25165,7 +24672,7 @@ pub const AppSession = struct {
                                 self.allocator,
                                 tree_cols,
                                 1,
-                                self.dockViewSlotIndex(),
+                                dock_ops.dockViewSlotIndex(self),
                                 dock_active_fg,
                                 dock_fg,
                             )) |bdl| {
@@ -25182,7 +24689,7 @@ pub const AppSession = struct {
                         // 소스 컨트롤도 gutter를 뺀 폭을 쓴다(SV3b) — 스크롤바가 생겼으므로 글자가 그
                         // 자리를 침범하면 안 된다. 헤더 줄도 같은 폭이라 목록과 오른쪽 끝이 맞는다.
                         const scm_cols: u16 = @intCast(@min(
-                            self.dockListTextWidthPx() / self.cell_width_px,
+                            dock_ops.dockListTextWidthPx(self) / self.cell_width_px,
                             @as(u32, std.math.maxInt(u16)),
                         ));
                         if (self.dock.view == .source_control and scm_cols > 0 and visible_rows > 0) {
@@ -25299,7 +24806,7 @@ pub const AppSession = struct {
                             // 스크롤바가 없으면 0칸이라 목록 폭이 나타났다 사라졌다 했다. gutter는 컨테이너가
                             // 상시 소유하므로 스크롤바 유무로 행이 reflow하지 않는다.
                             const content_cols: u16 = @intCast(@min(
-                                self.dockListTextWidthPx() / self.cell_width_px,
+                                dock_ops.dockListTextWidthPx(self) / self.cell_width_px,
                                 @as(u32, std.math.maxInt(u16)),
                             ));
                             file_tree_rows: {
@@ -25898,26 +25405,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn setHoveredDockViewSlot(self: *AppSession, slot: ?usize) void {
-        if (usizeOptEql(self.dock_view_hovered_slot, slot)) return;
-        self.dock_view_hovered_slot = slot;
-        self.metal_dirty = true;
-    }
-
-    /// 좌표가 뷰 바의 어느 슬롯 위인지(렌더·hover·클릭 공용 — 기하가 두 벌이 되지 않게).
-    fn dockViewSlotAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
-        if (!self.dockVisible()) return null;
-        const bar = self.dockGeometry().view_bar;
-        if (bar.h == 0 or x_px < 0 or y_px < 0) return null;
-        if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
-        return dock_view_bar.slotAtPoint(
-            .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-            self.cell_width_px,
-            @intFromFloat(x_px),
-            @intFromFloat(y_px),
-        );
-    }
-
     /// #5b: 호버 중인 ‹/› 스크롤 버튼을 갱신한다. 바뀌면 재드로우(버튼이 밝아져 클릭 가능 표시). 같으면 무동작.
     fn setHoveredScroll(self: *AppSession, s: ?ScrollRef) void {
         const same = (self.hovered_scroll == null and s == null) or
@@ -25938,14 +25425,6 @@ pub const AppSession = struct {
         if (self.hovered_header_region == next) return;
         self.hovered_header_region = next;
         self.rebuildSidebar() catch {};
-        self.metal_dirty = true;
-    }
-
-    /// 도크 접기/펴기 토글 호버 상태 — 바뀔 때만 재렌더. 헤더 아이콘과 달리 rebuildSidebar 불요(도크 크롬은 매 프레임
-    /// collectShaped로 재빌드되고 호버 배경도 그 패스에서 dock_toggle_hovered를 읽어 그린다), metal_dirty만 세운다.
-    fn setDockToggleHovered(self: *AppSession, hovered: bool) void {
-        if (self.dock_toggle_hovered == hovered) return;
-        self.dock_toggle_hovered = hovered;
         self.metal_dirty = true;
     }
 
@@ -26804,7 +26283,7 @@ pub const AppSession = struct {
             self.sidebar_scrollbar_idle_ticks += 1;
             if (self.sidebar_scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
         }
-        if (self.dockListScrollbarGeometry() == null) {
+        if (dock_ops.dockListScrollbarGeometry(self) == null) {
             self.dock_list_scrollbar_idle_ticks = fade_done_ticks;
             self.dock_list_scrollbar_last_offset_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
         } else if (file_panel_ops.fileTreeEffectiveScrollPx(self) != self.dock_list_scrollbar_last_offset_px) {
@@ -27032,35 +26511,6 @@ pub const AppSession = struct {
         // 소유한 사이드바 배경 strip을 덮으므로, 2로 내리면 막대가 발행돼도 화면에서 사라진다(실측).
         // 예전에는 2로 내린 뒤 뒤에서 되돌렸는데, 그 되돌리기가 "같은 역할이 두 층에 흩어진" 증상이었다.
         chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 3);
-    }
-
-    /// 탐색기 스크롤바를 **공용 paint 경로**로 그린다(SV2b). 발행된 tree를 `ui_paint`가 quad op으로
-    /// 옮기고 `chrome_draw_lowering`이 GpuQuad로 내린다 — 도크와 같은 경로이며, 모양·색·radius를 host가
-    /// 손으로 다시 만들지 않는다.
-    ///
-    /// **fade alpha만 여기서 얹는다.** tree에 실으면 매 프레임 달라져 entry·action 배열을 다시 복사하고
-    /// reconcile을 다시 돈다(docs/scroll-area.md §7). 그래서 선언은 불변으로 두고, paint가 만든 op의
-    /// alpha를 이 자리에서 덮는다.
-    fn appendDockListScrollbar(self: *AppSession) void {
-        const snapshot = file_panel_ops.fileTreeScrollTree(self);
-        if (snapshot.entries.len == 0) return;
-        const emphasized = self.dock_list_scrollbar_hovered or self.scrollbarCaptureActive();
-        const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.dock_list_scrollbar_idle_ticks);
-
-        var ops: [dock_list_scroll_max_entries]chrome.draw.Op = undefined;
-        const tokens = self.buildChromeTokens();
-        const draws = chrome.ui.paint.paint(snapshot, self.scrollbar_interaction, &tokens, .sidebar, .{ .ops = &ops }) catch {
-            if (self.file_tree_perf_counters) |counters| counters.allocator_calls += 1;
-            return;
-        };
-        for (ops[0..draws.ops.len]) |*op| switch (op.*) {
-            .quad => |*q| q.alpha = alpha,
-            else => {},
-        };
-        const before = self.gpu_quads.items.len;
-        // rect는 이미 backing 좌표다(`buildDockListScrollTree`가 옮겼다) — origin을 다시 더하지 않는다.
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 2);
-        if (self.file_tree_perf_counters) |counters| counters.thumb_quads += @intCast(self.gpu_quads.items.len - before);
     }
 
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
@@ -27983,21 +27433,6 @@ pub const AppSession = struct {
         drag: ?chrome.ui.interaction.DragEvent = null,
     };
 
-    /// A cold app starts with its dock hidden.  The fixture must enter through the same titlebar
-    /// control a user uses before it can click the session view switcher; returning this geometry
-    /// does not open the dock or request a file picker.
-    fn dockLauncherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-        const rect = file_panel_ops.filePanelDockControlRect(self) orelse return .{};
-        return .{
-            .x_px = @floatFromInt(rect.x),
-            .y_px = @floatFromInt(rect.y),
-            .width_px = @floatFromInt(rect.w),
-            .height_px = @floatFromInt(rect.h),
-            .present = true,
-            .enabled = true,
-        };
-    }
-
     /// A probe coordinate is only useful if the regular pointer dispatcher can hit it. The
     /// published tree's effective clip is therefore intersected here rather than returning an
     /// offscreen portion of a virtualized/partially scrolled action rect.
@@ -28919,24 +28354,11 @@ pub const AppSession = struct {
     fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar.ItemId) void {
         switch (id) {
             .notifications => self.openNotificationPanel(),
-            .running_agents, .blocked_agents => self.openDockTo(.agent_sessions),
-            .cwd => self.openDockTo(.explorer),
+            .running_agents, .blocked_agents => dock_ops.openDockTo(self, .agent_sessions),
+            .cwd => dock_ops.openDockTo(self, .explorer),
             .git_branch => self.requestBranchMenu(), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
         }
         self.metal_dirty = true;
-    }
-
-    /// 도크를 열고 그 뷰로 바꾼다. **레이아웃 후속을 빠뜨리지 않는 것이 요점이다** — 필드만 세우면 도크는
-    /// 나타나는데 pane rect가 옛 폭 그대로라 다음 resize 전까지 어긋난다. 특히 이미 그 뷰였으면
-    /// `setDockView`가 조기 반환하므로 그쪽 resize 경로도 안 탄다. 기존 opener
-    /// (`activateFilePanelDockControl`)가 하는 후속과 같은 것을 한다.
-    fn openDockTo(self: *AppSession, view: dock_panel.View) void {
-        self.dock.presented = true;
-        self.dock.collapsed = false;
-        self.enterDockView(view);
-        for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
-        pane_ops.recomputeActivePaneRect(self);
-        self.last_resize_size = null;
     }
 
     /// 클릭 가능한 항목인가. 열 대상이 없는 항목은 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무
@@ -29359,7 +28781,7 @@ pub const AppSession = struct {
     /// 셀/화면 메트릭만(토큰·shape 없이) — 휠/키 스크롤처럼 metrics만 필요한 경로가 buildChromeProps의 토큰 빌드를
     /// 피하게 한다. buildChromeProps도 이걸 재사용해 metrics를 단일 출처로 둔다.
     fn buildCellMetrics(self: *const AppSession) chrome.props.CellMetrics {
-        const workspace = self.dockGeometry().workspace;
+        const workspace = dock_ops.dockGeometry(self).workspace;
         return .{
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
@@ -29767,7 +29189,7 @@ pub const AppSession = struct {
             self.sidebar_width_px > 0 and self.tabs.items.len > 0,
             self.sidebar_header_height_px,
             self.sidebar_scroll_offset_px,
-            self.dockGeometry().status_bar.h,
+            dock_ops.dockGeometry(self).status_bar.h,
         );
         return .{
             .terminal_origin_x_px = self.sidebar_width_px,
@@ -29778,7 +29200,7 @@ pub const AppSession = struct {
             .divider_thickness_px = pane_ops.dividerThicknessPx(self),
             // 상태바 높이는 `dock_layout`이 유일 권위다(S1이 낸 seam) — 여기서 따로 계산하면 작업영역을
             // 깎은 값과 strip을 자르는 값이 갈릴 수 있다. 지금은 입력이 0이라 항상 0이다(S2b가 뒤집는다).
-            .status_bar_height_px = self.dockGeometry().status_bar.h,
+            .status_bar_height_px = dock_ops.dockGeometry(self).status_bar.h,
             // scissor 구간도 여기서 정해 스탬프에 싣는다 — 셀과 같은 프레임이어야 자르는 자리와 그린 자리가
             // 맞는다. 렌더러엔 산술이 남지 않는다.
             .sidebar_scissor_top_px = scissor.top,
@@ -38128,9 +37550,9 @@ test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다
 test "도크 뷰 스위처: 슬롯 index 대응과 포커스 되돌림" {
     // chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 뷰↔슬롯 대응은 session이 소유한다. 두 곳에
     // 흩어지면 그린 자리와 눌리는 자리가 어긋나므로 왕복을 여기서 못박는다.
-    try std.testing.expectEqual(dock_panel.View.explorer, AppSession.dockViewForSlot(0).?);
-    try std.testing.expectEqual(dock_panel.View.source_control, AppSession.dockViewForSlot(1).?);
-    try std.testing.expect(AppSession.dockViewForSlot(chrome.components.dock_view_bar.slot_count) == null);
+    try std.testing.expectEqual(dock_panel.View.explorer, dock_ops.dockViewForSlot(0).?);
+    try std.testing.expectEqual(dock_panel.View.source_control, dock_ops.dockViewForSlot(1).?);
+    try std.testing.expect(dock_ops.dockViewForSlot(chrome.components.dock_view_bar.slot_count) == null);
 }
 
 test "agentDisplayVisible: 카드·탭바 안 보이면 false (재렌더 게이트)" {
@@ -44817,7 +44239,7 @@ test "Session Dock search owns committed text and IME preedit instead of leaking
     session.dock.collapsed = false;
     session.dock.side = .right;
     session.agent_session_archive_initialized = false;
-    session.setDockView(.agent_sessions);
+    dock_ops.setDockView(session, .agent_sessions);
     session.agent_session_archive_initialized = true;
     session.agent_session_archive_search_active = true;
     try std.testing.expectEqual(AppSession.InputFocus.agent_session_search, session.inputFocus());
@@ -45055,7 +44477,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
     _ = try session.resize(1400, 900, 1000);
 
     try std.testing.expect(!file_panel_ops.dockHasContent(session));
-    try std.testing.expect(!session.dockVisible());
+    try std.testing.expect(!dock_ops.dockVisible(session));
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.open, file_panel_ops.filePanelDockControlAction(session).?);
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     try std.testing.expect(!session.isWindowDragRegion(
@@ -45079,8 +44501,8 @@ test "empty file dock launcher presents explorer and empty content requests the 
 
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     try std.testing.expect(!session.takeFilePanelPickRequest());
-    try std.testing.expect(session.dockVisible());
-    const tree_content = session.dockGeometry().tree_content;
+    try std.testing.expect(dock_ops.dockVisible(session));
+    const tree_content = dock_ops.dockGeometry(session).tree_content;
     // FP16: 트리가 도크 전체라 좌측 가장자리는 outer divider의 grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
     session.mouse(1, @floatFromInt(tree_content.x + tree_content.w / 2), @floatFromInt(tree_content.y + 1), 0, 0);
     try std.testing.expect(session.takeFilePanelPickRequest());
@@ -45214,8 +44636,8 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // (도크 시작선과 view bar는 이제 terminal cell이 아니라 Chrome metric에서 나온다).
     // 상태바가 창 바닥을 먹으므로 그만큼 더 줘야 **한 행 viewport**라는 이 셋업의 의도가 유지된다. 안 더하면
     // 도크가 22px 짧아져 뷰 바가 접히고(낮은 도크 규칙) 본문이 오히려 커진다 — 전제가 뒤집힌다.
-    session.backing_height_px = session.dockGeometry().tree.y + session.cell_height_px + session.statusBarHeightPx();
-    try std.testing.expectEqual(session.cell_height_px, session.dockGeometry().tree_content.h);
+    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + session.cell_height_px + session.statusBarHeightPx();
+    try std.testing.expectEqual(session.cell_height_px, dock_ops.dockGeometry(session).tree_content.h);
     session.file_tree_scroll.offset_y_px = 6 * session.cell_height_px;
     try testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
@@ -45521,8 +44943,8 @@ test "pending file tree root validation rejects merge and workspace restore befo
 
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/root-pending-src.html", .html);
     _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/root-pending-dst.html", .html);
-    src.assignDockSurfaceIds();
-    dst.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
+    file_panel_ops.assignDockSurfaceIds(dst);
     try src.file_tree.replaceExplicitRoots(&.{"/source-before"});
     try dst.file_tree.replaceExplicitRoots(&.{"/destination-before"});
 
@@ -45581,7 +45003,7 @@ test "file tree header and populated blank left click are inert while right clic
     try session.file_tree.replaceExplicitRoots(&.{"/project"});
     session.file_tree_rows_dirty = true;
     try file_panel_ops.updateFileTree(session);
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     try std.testing.expect(session.file_tree_rows.items.len >= 2);
 
     const header_x: f64 = @floatFromInt(content.x + 2);
@@ -45620,10 +45042,10 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
-    session.refreshDockListScrollbar();
-    const geometry = session.dockListScrollbarGeometry() orelse return error.SkipZigTest;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const geometry = dock_ops.dockListScrollbarGeometry(session) orelse return error.SkipZigTest;
     if (geometry.max_offset_px == 0) return error.SkipZigTest;
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
     const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
 
@@ -45636,7 +45058,8 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
 
     // ② track click — thumb **밖**을 누르면 그 지점으로 점프한다(드래그가 아니다).
     const track_bottom = geometry.track_y + geometry.track_h - 1;
-    try std.testing.expect(session.beginDockListScrollbarGesture(
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(
+        session,
         geometry.track_x + geometry.track_w / 2,
         track_bottom,
     ));
@@ -45663,15 +45086,15 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
 
     // ⑤ 그리고 그 상태가 곧 thumb 위치다 — **발행된 tree**가 같은 값에서 나온다(SV2b: 기하를 다시
     //    계산하지 않고 track/thumb entry를 되읽는다).
-    session.refreshDockListScrollbar();
-    const moved = session.dockListScrollbarGeometry().?;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const moved = dock_ops.dockListScrollbarGeometry(session).?;
     // scrollArea가 track과 thumb을 자기 preorder 안에서 낸다 — 컨테이너까지 셋이다.
     try std.testing.expectEqual(@as(usize, 3), session.dock_list_scroll_entry_count);
     // thumb이 track 시작보다 아래에 있다 — 스크롤 상태가 발행에 반영됐다는 뜻이다.
     try std.testing.expect(moved.thumb_y > moved.track_y);
     // 그리고 그 위치는 offset의 함수다: 맨 위로 되돌리면 thumb도 track 상단으로 붙는다.
     file_panel_ops.setFileTreeScrollOffsetPx(session, 0);
-    const at_top = session.dockListScrollbarGeometry().?;
+    const at_top = dock_ops.dockListScrollbarGeometry(session).?;
     try std.testing.expectApproxEqAbs(at_top.track_y, at_top.thumb_y, 0.01);
 }
 
@@ -45687,11 +45110,11 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
-    session.refreshDockListScrollbar();
-    const geometry = session.dockListScrollbarGeometry() orelse return error.SkipZigTest;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const geometry = dock_ops.dockListScrollbarGeometry(session) orelse return error.SkipZigTest;
     if (geometry.max_offset_px == 0) return error.SkipZigTest;
 
-    try std.testing.expect(session.beginDockListScrollbarGesture(geometry.track_x, geometry.thumb_y));
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(session, geometry.track_x, geometry.thumb_y));
     try std.testing.expect(session.scrollbarCaptureActive());
 
     // 세대는 둘 다 그대로 두고 기하만 바꾼다. carry key는 host가 주입한 값의 동등성만 보므로
@@ -45725,11 +45148,12 @@ test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적�
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
-    session.refreshDockListScrollbar();
-    const top = session.dockListScrollbarGeometry().?;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const top = dock_ops.dockListScrollbarGeometry(session).?;
 
     // 트랙 하단을 눌러 아래로 스크롤한 상태에서 드래그를 시작한다(down 자체는 즉시 적용).
-    try std.testing.expect(session.beginDockListScrollbarGesture(
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(
+        session,
         top.track_x + top.track_w / 2,
         top.track_y + top.track_h - 1,
     ));
@@ -45761,11 +45185,11 @@ test "file tree scrollbar publishes one tree that paint and hit-test both read" 
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
-    session.refreshDockListScrollbar();
+    file_panel_ops.refreshDockListScrollbar(session);
 
     // ① 발행은 `scrollArea` 하나에서 나온다 — 컨테이너 + track + thumb.
     try std.testing.expectEqual(@as(usize, 3), session.dock_list_scroll_entry_count);
-    const geometry = session.dockListScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
+    const geometry = dock_ops.dockListScrollbarGeometry(session) orelse return error.FileTreeFixtureHasNoScrollbar;
 
     // ② **track이 thumb보다 먼저다.** `interaction.hitAction`이 reverse z-order라, 뒤집히면 thumb 위
     //    down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
@@ -45778,19 +45202,19 @@ test "file tree scrollbar publishes one tree that paint and hit-test both read" 
     try std.testing.expect(track_index.? < thumb_index.?);
 
     // ③ 그 rect가 **backing 좌표**다 — 컨테이너 로컬로 두면 hit이 도크 왼쪽 위로 밀린다.
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     try std.testing.expect(geometry.track_x >= @as(f32, @floatFromInt(content.x)));
     try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(content.y)), geometry.track_y, 0.01);
 
     // ④ gutter가 트랙을 **자기 폭 안에** 담는다: 트랙 오른쪽 변이 컨테이너를 넘지 않는다.
     try std.testing.expect(geometry.track_x + geometry.track_w <= @as(f32, @floatFromInt(content.x + content.w)));
     // 그리고 텍스트 폭은 gutter만큼 줄어 있다 — 그 둘이 겹치지 않는다는 뜻이다.
-    try std.testing.expectEqual(content.w - session.dockListScrollGutterPx(), session.dockListTextWidthPx());
-    try std.testing.expect(@as(f32, @floatFromInt(content.x + session.dockListTextWidthPx())) <= geometry.track_x);
+    try std.testing.expectEqual(content.w - dock_ops.dockListScrollGutterPx(session), dock_ops.dockListTextWidthPx(session));
+    try std.testing.expect(@as(f32, @floatFromInt(content.x + dock_ops.dockListTextWidthPx(session))) <= geometry.track_x);
 
     // ⑤ **paint가 그 tree에서 나온다.** host가 기하를 다시 만들면 이 단언은 통과하면서 화면만 어긋난다.
     session.gpu_quads.clearRetainingCapacity();
-    session.appendDockListScrollbar();
+    dock_ops.appendDockListScrollbar(session);
     try std.testing.expectEqual(@as(usize, 2), session.gpu_quads.items.len); // track + thumb
     var saw_thumb = false;
     for (session.gpu_quads.items) |quad| {
@@ -45828,23 +45252,23 @@ test "file tree scrollbar is painted after the row band and never under it" {
         .symlink = false,
     } });
     _ = file_panel_ops.setFileTreeSelection(session, 0); // 밴드가 나오도록 한 행을 선택한다
-    session.refreshDockListScrollbar();
-    const geometry = session.dockListScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
-    const content = session.dockGeometry().tree_content;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const geometry = dock_ops.dockListScrollbarGeometry(session) orelse return error.FileTreeFixtureHasNoScrollbar;
+    const content = dock_ops.dockGeometry(session).tree_content;
 
     // 밴드는 gutter **앞에서** 끝난다 — 트랙 위로 넘어오지 않는다.
     session.gpu_quads.clearRetainingCapacity();
     session.appendClippedBarBgQuad(.{
         .x = content.x,
         .y = content.y,
-        .w = session.dockListTextWidthPx(),
+        .w = dock_ops.dockListTextWidthPx(session),
         .h = session.cell_height_px,
     }, 0xFF00FF00, content);
     const band_end = session.gpu_quads.items[0].x + session.gpu_quads.items[0].w;
     try std.testing.expect(band_end <= geometry.track_x);
 
     // 그리고 스크롤바가 **그 뒤에** 온다(같은 버킷에서 나중이 위다).
-    session.appendDockListScrollbar();
+    dock_ops.appendDockListScrollbar(session);
     try std.testing.expect(session.gpu_quads.items.len > 1);
     for (session.gpu_quads.items[1..]) |quad| try std.testing.expectEqual(@as(u32, 2), quad.layer);
 }
@@ -45861,16 +45285,17 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     session.file_tree_rows.clearRetainingCapacity();
     try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
-    session.refreshDockListScrollbar();
-    const top = session.dockListScrollbarGeometry().?;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const top = dock_ops.dockListScrollbarGeometry(session).?;
     try std.testing.expectApproxEqAbs(top.track_y, top.thumb_y, 0.01); // 맨 위
-    const tree_content = session.dockGeometry().tree_content;
+    const tree_content = dock_ops.dockGeometry(session).tree_content;
     // gutter가 트랙 자리를 상시 비워 둔다(SV2b) — 마지막 텍스트 칸의 오른쪽 끝이 트랙 왼쪽 변을
     // 넘지 않는다. 예전에는 `reservedColumns`가 **셀 단위로** 빼서 셀 폭에 따라 예약량이 달라졌다.
-    const content_cols = session.dockListTextWidthPx() / session.cell_width_px;
+    const content_cols = dock_ops.dockListTextWidthPx(session) / session.cell_width_px;
     const last_content_right = tree_content.x + content_cols * session.cell_width_px;
     try std.testing.expect(@as(f32, @floatFromInt(last_content_right)) <= top.track_x);
-    try std.testing.expect(session.beginDockListScrollbarGesture(
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(
+        session,
         top.track_x + top.track_w / 2,
         top.track_y + top.track_h - 1,
     ));
@@ -45885,23 +45310,23 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     // Root authority is part of the drag snapshot. A late move after replacement must not commit.
-    const restarted = session.dockListScrollbarGeometry().?;
-    try std.testing.expect(session.beginDockListScrollbarGesture(restarted.track_x, restarted.thumb_y));
+    const restarted = dock_ops.dockListScrollbarGeometry(session).?;
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(session, restarted.track_x, restarted.thumb_y));
     try session.file_tree.replaceExplicitRoots(&.{"/different"});
     _ = session.routeScrollbarCapture(2, top.track_y + top.track_h);
     try std.testing.expect(!session.scrollbarCaptureActive());
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
 
-    session.refreshDockListScrollbar();
-    const current = session.dockListScrollbarGeometry().?;
-    try std.testing.expect(session.beginDockListScrollbarGesture(current.track_x, current.thumb_y));
+    file_panel_ops.refreshDockListScrollbar(session);
+    const current = dock_ops.dockListScrollbarGeometry(session).?;
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(session, current.track_x, current.thumb_y));
     file_panel_ops.advanceFileTreeProjectionGeneration(session);
     try std.testing.expect(session.pointerGestureIs(.none));
 
     session.file_tree_rows.clearRetainingCapacity();
     session.file_tree_rows.appendAssumeCapacity(.empty);
-    session.refreshDockListScrollbar();
-    try std.testing.expect(session.dockListScrollbarGeometry() == null);
+    file_panel_ops.refreshDockListScrollbar(session);
+    try std.testing.expect(dock_ops.dockListScrollbarGeometry(session) == null);
 }
 
 /// 창이 뷰포트를 **덮되 최소한**임을 본다 — 이것이 `fileTreeDrawWindow`의 올림 계약이다. 개수를
@@ -45930,13 +45355,13 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     for (0..64) |bump| {
         _ = try session.resize(1400, 900 + @as(u32, @intCast(bump)), 1000);
         if (session.cell_height_px == 0) continue;
-        const h = session.dockGeometry().tree_content.h;
+        const h = dock_ops.dockGeometry(session).tree_content.h;
         picked_remainder = h % session.cell_height_px;
         if (picked_remainder != 0) break;
     }
     if (picked_remainder == 0) return error.FileTreeFixtureCannotJudgePartialRow;
 
-    const tree = session.dockGeometry().tree_content;
+    const tree = dock_ops.dockGeometry(session).tree_content;
     const cell_h = session.cell_height_px;
     const visible = file_panel_ops.fileTreeVisibleRows(session);
     const remainder = picked_remainder;
@@ -45961,7 +45386,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         .symlink = false,
     } });
     session.file_tree_scroll.reset();
-    session.refreshDockListScrollbar();
+    file_panel_ops.refreshDockListScrollbar(session);
 
     // ② **바닥 부분 행을 그린다**(SV2-0에서 뒤집힌 계약). 창은 뷰포트를 덮을 만큼 올림이고, 그
     //    부분 행은 hit-test에서도 살아 있다 — 보이는 것을 클릭할 수 있어야 한다.
@@ -46103,7 +45528,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         try std.testing.expect(file_panel_ops.fileTreeRowAt(session, @floatFromInt(tree.x + tree.w + 2), inside_y) == null);
         try std.testing.expect(file_panel_ops.fileTreeRowAt(session, x, @floatFromInt(tree.y + tree.h + 2)) == null);
         // 스크롤바 트랙 위 — 목록이 넘치므로 트랙이 있다.
-        const bar = session.dockListScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
+        const bar = dock_ops.dockListScrollbarGeometry(session) orelse return error.FileTreeFixtureHasNoScrollbar;
         const track_x: f64 = bar.track_x + bar.track_w / 2;
         const track_y: f64 = bar.track_y + bar.track_h / 2;
         try std.testing.expect(bar.trackContains(track_x, track_y));
@@ -46225,10 +45650,10 @@ test "file tree production hot paths emit bounded counter artifact" {
     for (session.file_tree_rows.items) |row|
         try std.testing.expectEqual(@intFromEnum(file_tree_icon.IconKind.code), file_tree.rowIconKind(row));
 
-    session.refreshDockListScrollbar();
-    const geometry = session.dockListScrollbarGeometry().?;
+    file_panel_ops.refreshDockListScrollbar(session);
+    const geometry = dock_ops.dockListScrollbarGeometry(session).?;
     try session.gpu_quads.ensureUnusedCapacity(allocator, 1);
-    try std.testing.expect(session.beginDockListScrollbarGesture(geometry.track_x, geometry.thumb_y));
+    try std.testing.expect(dock_ops.beginDockListScrollbarGesture(session, geometry.track_x, geometry.thumb_y));
 
     var counting = std.testing.FailingAllocator.init(allocator, .{});
     session.allocator = counting.allocator();
@@ -46243,8 +45668,8 @@ test "file tree production hot paths emit bounded counter artifact" {
     for (0..1000) |_| {
         // 스크롤바는 SV2b에서 layer 2(밴드와 같은 버킷)로 내려왔다 — drop과 append를 짝짓는 층도 그것이다.
         session.dropQuadsByLayer(2);
-        session.refreshDockListScrollbar();
-        session.appendDockListScrollbar();
+        file_panel_ops.refreshDockListScrollbar(session);
+        dock_ops.appendDockListScrollbar(session);
     }
     session.file_tree_perf_counters = null;
     session.allocator = allocator;
@@ -46370,7 +45795,7 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
     try session.file_tree.replaceExplicitRoots(&.{"/before"});
     session.file_tree_rows_dirty = true;
     try file_panel_ops.updateFileTree(session);
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     session.mouse(1, @floatFromInt(content.x + 2), @floatFromInt(content.y + 2), 2, 0);
     try std.testing.expect(session.file_tree_context_target != null);
     try std.testing.expectEqual(@as(usize, 6), session.contextMenuItems().len);
@@ -46612,7 +46037,7 @@ test "file header mode selector reports a click cursor and tracks hover per slot
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/hover.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
 
     const band = pane_ops.fileHeaderBandForPaneLookup(session, pane_ops.activePane(session)).?;
@@ -46656,7 +46081,7 @@ test "file panel mode toggle: keyboard action walks the same modes the header of
     // markdown은 읽기로 시작한다(라이브 프리뷰 폐기 — docs/file-panel.md §1). 키보드 경로가 없으면 편집에
     // 들어가는 유일한 길이 헤더 mode 선택기 마우스 클릭뿐이므로, 이 왕복이 제품 계약이다.
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/mode-toggle.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
@@ -46675,7 +46100,7 @@ test "file panel mode toggle: keyboard action walks the same modes the header of
 
     // 모드가 하나뿐인 kind(text)는 무동작이고 알림도 띄우지 않는다 — 토글할 선택지 자체가 없다.
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/mode-toggle.py", .text);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const text_entry = session.fileEntryAt(1).?;
     try std.testing.expectEqual(dock_panel.Mode.source_edit, text_entry.mode);
     session.dispatchAppAction(.toggle_file_panel_mode);
@@ -46697,7 +46122,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     try std.testing.expect(session.chrome_host.notice.open);
     session.chrome_host.notice.dismiss();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/focus-toggle.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     // FP16: 파일을 열면 그 파일이 publish 대기 barrier를 갖는다(requestDockEntryFocus). 이 테스트의
     // 주제는 toggle 왕복이므로 workspace baseline에서 시작한다.
@@ -46733,7 +46158,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-surface-less-successor-b.md", .markdown);
     const b_id = b_open.term.file_entry.?.id;
     const a_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-live-active-a.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const a_surface = a_open.term.file_entry.?.surface_id;
     try std.testing.expect(a_surface != 0);
     try std.testing.expect(session.focusFilePanelSurface(a_surface));
@@ -46747,7 +46172,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     // FP16: 파일이 pane 탭이라 close는 pane의 active_term 승계로 끝나고 입력은 workspace로 간다.
     // publish 대기 barrier는 그 다음 "승계된 파일로 focus" 요청이 만든다.
     const successor = file_panel_ops.fileEntryForId(session, b_id).?;
-    session.requestDockEntryFocus(successor);
+    dock_ops.requestDockEntryFocus(session, successor);
     try std.testing.expect(session.pending_dock_focus != null);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
     // sid가 있어도 publish를 추측해 dock_surface로 승격하지 않는다 — typed completion만 승격이다.
@@ -46785,11 +46210,11 @@ test "FP9 closing pending entry reissues typed focus for its live successor" {
     defer session.deinit();
     const a_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-pending-close-a.md", .markdown);
     const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-pending-close-b.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const a_id = a_open.term.file_entry.?.id;
     const a_surface = a_open.term.file_entry.?.surface_id;
     const b_surface = b_open.term.file_entry.?.surface_id;
-    session.requestDockEntryFocus(b_open.term.file_entry.?);
+    dock_ops.requestDockEntryFocus(session, b_open.term.file_entry.?);
     try std.testing.expect(session.focus_owner == .dock_pending and session.pending_dock_focus.?.entry_id == b_open.term.file_entry.?.id);
 
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, b_surface));
@@ -46812,7 +46237,7 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-a.md", .markdown);
     const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-b.md", .markdown);
     const b_id = b_open.term.file_entry.?.id;
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const a_surface = session.fileEntryAt(0).?.surface_id;
     const b_surface = file_panel_ops.fileEntryForId(session, b_id).?.surface_id;
     try std.testing.expect(session.focusFilePanelSurface(b_surface));
@@ -46833,7 +46258,7 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.workspace_focus_pending);
-    try std.testing.expect(session.dockVisible());
+    try std.testing.expect(dock_ops.dockVisible(session));
 }
 
 test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 history가 도크를 유지한다" {
@@ -46853,7 +46278,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(file_path));
     const sid = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
-    try std.testing.expect(session.dockVisible()); // recent/project tree content는 남아 있다.
+    try std.testing.expect(dock_ops.dockVisible(session)); // recent/project tree content는 남아 있다.
 
     try pane_ops.newTermInActivePane(session);
     pane_ops.activePane(session).activeTerm().rt.terminated = true;
@@ -46886,7 +46311,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-successor.html", .html);
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-close.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const successor_sid = session.fileEntryAt(0).?.surface_id;
     const sid = session.fileEntryAt(1).?.surface_id;
     session.fileEntryAt(1).?.mode = .source_edit;
@@ -46955,8 +46380,8 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     } else return error.NoBrowserTerm;
     // 보이지 않는 파일(브라우저가 활성)에 barrier를 걸어도 **입력을 삼키지 않는다** — FP16에서 barrier는
     // 실제로 보이는 파일만 소유한다. 그래서 눈앞의 browser WebView가 낸 app action이 그대로 진행된다.
-    session.requestDockEntryFocus(session.fileEntryAt(1).?);
-    try std.testing.expect(!session.pendingDockEntryOwnsInput());
+    dock_ops.requestDockEntryFocus(session, session.fileEntryAt(1).?);
+    try std.testing.expect(!dock_ops.pendingDockEntryOwnsInput(session));
     try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
@@ -47013,7 +46438,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
 
     // clean WebView close도 stale workspace owner보다 실제 event surface를 우선한다.
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-clean.html", .html);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const clean_sid = session.fileEntryAt(1).?.surface_id;
     session.focus_owner = .workspace;
     try std.testing.expect(session.dispatchWebAppAction(clean_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
@@ -47023,7 +46448,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // 늦은 save ACK는 close 시작 뒤의 더 최신 workspace focus를 탈취하지 않는다.
     try std.testing.expect(session.completePendingDockFocus(successor_sid));
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-save.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const save_sid = session.fileEntryAt(1).?.surface_id;
     session.fileEntryAt(1).?.mode = .source_edit;
     session.fileEntryAt(1).?.dirty = true;
@@ -47166,10 +46591,10 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try pane_ops.newWebTermInActivePane(session, .browser); // 도크 경계에 맞닿는 workspace WKWebView seam도 함께 검증.
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/alpha.md", .markdown);
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/beta.html", .html);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     session.dock.size = dock_layout.default_right_pt;
 
-    const right = session.dockGeometry();
+    const right = dock_ops.dockGeometry(session);
     try std.testing.expect(right.dock.w > 0 and right.terminal.w + right.divider.w + right.dock.w == 1400 - session.sidebar_width_px);
     try std.testing.expectEqual(right.terminal, session.termRect());
     const gp = session.gridPadding();
@@ -47292,15 +46717,15 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.dispatchAppAction(.toggle_file_panel_dock_side);
     try std.testing.expectEqual(dock_panel.Side.bottom, session.dock.side);
     try std.testing.expectEqual(@as(u32, 0), session.dock.size);
-    try std.testing.expect(session.dockGeometry().dock.h > 0);
+    try std.testing.expect(dock_ops.dockGeometry(session).dock.h > 0);
     session.dispatchAppAction(.toggle_file_panel_dock_side);
     try std.testing.expectEqual(dock_panel.Side.right, session.dock.side);
     try std.testing.expectEqual(@as(u32, 0), session.dock.size);
-    try std.testing.expect(session.dockGeometry().dock.w > 0);
+    try std.testing.expect(dock_ops.dockGeometry(session).dock.w > 0);
 
     session.dock.side = .bottom;
     session.dock.size = 220;
-    const bottom = session.dockGeometry();
+    const bottom = dock_ops.dockGeometry(session);
     // 작업영역은 이제 창 바닥이 아니라 **상태바 윗변**에서 끝난다 — 세 조각의 합이 그만큼 줄어든다.
     try std.testing.expect(bottom.dock.h > 0 and bottom.terminal.h + bottom.divider.h + bottom.dock.h ==
         900 - session.titlebar_strip_px - bottom.status_bar.h);
@@ -47324,7 +46749,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.fileEntryAt(0).?.dirty = true;
     session.mouse(1, collapse_x, collapse_y, 0, 0);
     try std.testing.expect(session.dock.collapsed);
-    try std.testing.expectEqual(@as(u32, 0), session.dockGeometry().dock.h);
+    try std.testing.expectEqual(@as(u32, 0), dock_ops.dockGeometry(session).dock.h);
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
@@ -47394,7 +46819,7 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectEqualStrings(md_path, session.filePanelEntryInfo(md_surface_id).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.filePanelEntryInfo(md_surface_id).?.kind);
 
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     // FP16: source group 개념이 없어져, 링크는 source 파일이 있는 pane의 새 탭으로 열린다
     // (옛 "다른 group이 focus여도 source group에 연다" 대조 자리).
     try session.openFilePanelLink(md_surface_id, "two.html#preview", false);
@@ -47592,10 +47017,10 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     // 보이는 것을 누를 수 있어야 한다. 창 산술 자체는 SV2a 판정자가 소유하고, 여기서는 파일 도크
     // 경로에서도 같은 답이 나오는지만 본다.
     var height: u32 = 901;
-    var geometry = session.dockGeometry();
+    var geometry = dock_ops.dockGeometry(session);
     while (height < 940) : (height += 1) {
         _ = try session.resize(1400, height, 1000);
-        geometry = session.dockGeometry();
+        geometry = dock_ops.dockGeometry(session);
         if (geometry.tree_content.h % session.cell_height_px != 0) break;
     }
     const full_rows = geometry.tree_content.h / session.cell_height_px;
@@ -47621,7 +47046,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/repo/docs/a.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     _ = session.focusFilePanelSurface(sid);
 
@@ -47646,7 +47071,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     const clicked_a = file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = "/repo/docs/a.md" }).?;
     try session.file_tree.recordOpened("/repo/docs/b.md", "/repo");
     session.file_tree_rows_dirty = true;
-    const tree_rect = session.dockGeometry().tree_content;
+    const tree_rect = dock_ops.dockGeometry(session).tree_content;
     session.mouse(
         1,
         // FP16: 트리 좌측 가장자리는 outer divider grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
@@ -47737,7 +47162,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
         const offset = file_panel_ops.fileTreeEffectiveScrollPx(session);
         const row_top = @as(u32, @intCast(end_index)) * session.cell_height_px;
         try std.testing.expect(row_top >= offset);
-        try std.testing.expect(row_top + session.cell_height_px <= offset + session.dockGeometry().tree_content.h);
+        try std.testing.expect(row_top + session.cell_height_px <= offset + dock_ops.dockGeometry(session).tree_content.h);
     }
     _ = try session.handleKeyEvent(.{ .key = .page_up });
     try std.testing.expect(file_panel_ops.selectedFileTreeRow(session).? <= end_index);
@@ -47757,7 +47182,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     session.dispatchAppAction(.focus_file_tree);
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     try std.testing.expect(session.focus_owner == .file_tree);
-    try std.testing.expect(session.dockVisible());
+    try std.testing.expect(dock_ops.dockVisible(session));
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     try std.testing.expect(session.focus_owner == .workspace);
@@ -48986,7 +48411,7 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
     // ⑦ **도크 목록과 동시에 살아 있다.** 둘은 한 화면에 함께 있으므로 한쪽 발행이 다른 쪽을 지우면 안 된다
     //    — 도크가 뷰를 갈아끼우며 저장소를 공유하는 것(SV3b)과 조건이 다르다.
     file_panel_ops.activateFilePanelDockControl(session);
-    session.buildDockListScrollTree();
+    dock_ops.buildDockListScrollTree(session);
     session.buildSidebarScrollTree();
     try std.testing.expect(session.sidebarScrollTree().entries.len >= 2);
     for (session.sidebarScrollTree().entries) |entry| {
@@ -52051,16 +51476,16 @@ test "automatic agent sessions dock width reflows the live pane without persisti
     session.dock.view = .explorer;
     for (session.tabs.items) |tab| pane_ops.resizeTabPanes(session, tab);
     pane_ops.recomputeActivePaneRect(session);
-    const explorer_dock = session.dockGeometry();
+    const explorer_dock = dock_ops.dockGeometry(session);
     const explorer_pane = session.active_pane_rect;
 
     // This is a synchronous geometry test.  The real archive scanner is covered by its
     // own isolated AppKit fixture; starting its detached worker here would make this test
     // depend on a filesystem job that outlives the layout assertion and test allocator.
     session.agent_session_archive_initialized = false;
-    session.setDockView(.agent_sessions);
+    dock_ops.setDockView(session, .agent_sessions);
     session.agent_session_archive_initialized = true;
-    const archive_dock = session.dockGeometry();
+    const archive_dock = dock_ops.dockGeometry(session);
     const archive_pane = session.active_pane_rect;
     try std.testing.expectEqual(@as(u32, 0), session.dock.size); // view width must not leak into persistence
     try std.testing.expectEqual(dock_layout.default_agent_sessions_right_pt, archive_dock.dock.w);
@@ -52071,7 +51496,7 @@ test "automatic agent sessions dock width reflows the live pane without persisti
         session.activeSurface().core.size,
     );
 
-    session.setDockView(.explorer);
+    dock_ops.setDockView(session, .explorer);
     try std.testing.expectEqual(@as(u32, 0), session.dock.size);
     try std.testing.expectEqual(explorer_pane.w, session.active_pane_rect.w);
     try std.testing.expectEqual(
@@ -59437,7 +58862,7 @@ test "SB1-S2a: metalFrame의 상태바 높이는 dock_layout 권위와 같다" {
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick(); // 기하는 투영 스탬프라 한 번 돌려 확정한다
 
-    try std.testing.expectEqual(session.dockGeometry().status_bar.h, session.metalFrame().status_bar_height_px);
+    try std.testing.expectEqual(dock_ops.dockGeometry(session).status_bar.h, session.metalFrame().status_bar_height_px);
     // S2b가 높이를 세웠다 — 이제 실제 값이 나가고, 위 단언이 그 값이 `dock_layout` 권위와 같음을 보장한다.
     try std.testing.expectEqual(session.statusBarHeightPx(), session.metalFrame().status_bar_height_px);
     try std.testing.expect(session.metalFrame().status_bar_height_px > 0);
@@ -62052,7 +61477,7 @@ test "file panel document epoch rejects stale reload reports and latches dirty c
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/editor-epoch.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
 
     const first = try session.beginFilePanelDocument(sid, 1);
@@ -62088,7 +61513,7 @@ test "file panel first document pending is not recovery and begin is document-id
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/first-document.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
     const sid = entry.surface_id;
@@ -62112,7 +61537,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/exhausted-editor-epoch.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 확인 경로는 소스 모드
     entry.editor_surface_id = entry.surface_id;
@@ -62141,7 +61566,7 @@ test "file panel document begin changes pending close only for an accepted repla
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/begin-close-identity.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 경로는 소스 모드
     const sid = entry.surface_id;
@@ -62178,7 +61603,7 @@ test "file panel termination invalidates current document and latches unacked ed
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/terminated-document.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
     const sid = entry.surface_id;
@@ -62207,7 +61632,7 @@ test "file panel termination invalidates current document and latches unacked ed
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/read-document.md", .markdown);
     const read_entry = session.fileEntryAt(1).?;
     read_entry.mode = .read;
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     _ = try session.beginFilePanelDocument(read_entry.surface_id, 1);
     try std.testing.expectEqual(@as(u32, 1), session.filePanelDocumentTerminated(read_entry.surface_id));
     try std.testing.expect(!read_entry.editor_recovery_required);
@@ -62216,7 +61641,7 @@ test "file panel termination invalidates current document and latches unacked ed
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/dirty-read-document.md", .markdown);
     const dirty_read = session.fileEntryAt(2).?;
     dirty_read.mode = .read;
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     _ = try session.beginFilePanelDocument(dirty_read.surface_id, 1);
     dirty_read.dirty = true;
     try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(dirty_read.surface_id));
@@ -62225,7 +61650,7 @@ test "file panel termination invalidates current document and latches unacked ed
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/pending-read-document.md", .markdown);
     const pending_read = session.fileEntryAt(3).?;
     pending_read.mode = .read;
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     _ = try session.beginFilePanelDocument(pending_read.surface_id, 1);
     pending_read.dirty_sync_pending = true;
     try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(pending_read.surface_id));
@@ -62275,7 +61700,7 @@ test "file panel new surface termination before begin does not consume old clean
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/recreated-surface.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     const old_surface = entry.surface_id;
     const old_epoch = try session.beginFilePanelDocument(old_surface, 1);
@@ -62414,7 +61839,7 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp6-mode.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     const surface_id = entry.surface_id;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
@@ -62443,7 +61868,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-clean.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     var sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
     file_panel_ops.requestFilePanelClose(session, sid);
@@ -62454,7 +61879,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session)); // 마지막 탭이어도 group 유지
 
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-dirty.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
     file_panel_ops.requestFilePanelClose(session, sid);
@@ -62498,7 +61923,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-conflict.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
     session.fileEntryAt(0).?.dirty = true;
@@ -62525,7 +61950,7 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-read-dirty.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     const entry = session.fileEntryAt(0).?;
     entry.mode = .read;
@@ -62570,7 +61995,7 @@ test "file panel exit protection gates window session quit and automatic termina
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/exit-protected.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit; // native-clean처럼 보여도 CM6 snapshot 전에는 종료 금지
 
@@ -62607,7 +62032,7 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-request-identity.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
 
@@ -62687,7 +62112,7 @@ test "file panel dirty close alternate discards only the pinned tab" {
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-background-a.md", .markdown);
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-background-b.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     // FP16: 두 번째 open이 곧 pane의 active 파일 탭이다(옛 group.active = 1 자리).
     const background_sid = session.fileEntryAt(0).?.surface_id;
     const active_sid = session.fileEntryAt(1).?.surface_id;
@@ -62719,7 +62144,7 @@ test "file panel save action identity mismatch aborts and unlocks instead of sti
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/save-drain-stale.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
     file_panel_ops.requestFilePanelClose(session, sid);
@@ -62745,11 +62170,11 @@ test "dock replacement clears file close hover focus and one-shot transients" {
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/replace-pending.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     session.fileEntryAt(0).?.mode = .source_edit;
     _ = session.focusFilePanelSurface(sid);
-    session.queuePendingDockFocus(session.fileEntryAt(0).?);
+    dock_ops.queuePendingDockFocus(session, session.fileEntryAt(0).?);
     const old_dock_epoch = session.dock_async_epoch;
     file_panel_ops.requestFilePanelClose(session, sid);
     try std.testing.expect(session.pending_file_panel_close != null);
@@ -62773,7 +62198,7 @@ test "file panel focus supersedes a queued workspace first-responder action" {
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/focus-successor.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
     session.workspace_focus_pending = true;
     try std.testing.expect(session.focusFilePanelSurface(sid));
@@ -62859,7 +62284,7 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     const source_entry = file_panel_ops.fileEntryForPath(src, src_path).?;
     source_entry.mode = .source_edit;
     const moved_entry_id = source_entry.id;
-    src.requestDockEntryFocus(source_entry);
+    dock_ops.requestDockEntryFocus(src, source_entry);
     const src_epoch_before = src.dock_async_epoch;
     const dst_epoch_before = dst.dock_async_epoch;
 
@@ -62899,8 +62324,8 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
             }
         }
     }
-    dst.requestDockEntryFocus(file_panel_ops.fileEntryForId(dst, moved_entry_id).?);
-    try std.testing.expect(dst.pendingDockEntryOwnsInput());
+    dock_ops.requestDockEntryFocus(dst, file_panel_ops.fileEntryForId(dst, moved_entry_id).?);
+    try std.testing.expect(dock_ops.pendingDockEntryOwnsInput(dst));
     try std.testing.expect(dst.completePendingDockFocus(moved_sid));
 }
 
@@ -62914,7 +62339,7 @@ test "FP6 merge into empty explorer adopts source explorer authority and present
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/adopt-root.md", .markdown);
-    src.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
     try src.file_tree.replaceExplicitRoots(&.{"/source-explicit"});
     src.dock.presented = true;
     dst.dock.presented = false;
@@ -62937,7 +62362,7 @@ test "FP6 merge with no destination file tabs preserves configured destination e
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/source-only.md", .markdown);
-    src.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
     try src.file_tree.replaceExplicitRoots(&.{"/source-root"});
     try dst.file_tree.replaceExplicitRoots(&.{"/destination-root"});
     dst.dock.presented = true;
@@ -62963,8 +62388,8 @@ test "FP6 merge preserves source project-root authority in an inferred destinati
     const destination_path = "/destination/open.md";
     _ = try pane_ops.openFileTermInActivePane(src, source_path, .markdown);
     _ = try pane_ops.openFileTermInActivePane(dst, destination_path, .markdown);
-    src.assignDockSurfaceIds();
-    dst.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
+    file_panel_ops.assignDockSurfaceIds(dst);
     try src.file_tree.recordOpened(source_path, "/repo");
     try dst.file_tree.recordOpened(destination_path, "/destination");
 
@@ -62987,7 +62412,7 @@ test "file panel close transition rejects window merge before model mutation" {
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/merge-close-lock.md", .markdown);
-    src.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
     const sid = src.fileEntryAt(0).?.surface_id;
     src.fileEntryAt(0).?.mode = .source_edit;
     file_panel_ops.requestFilePanelClose(src, sid);
@@ -63015,13 +62440,13 @@ test "FP8 merge carries every source 파일 탭과 live surface를 destination�
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/fp8-merge-a.md", .markdown);
     const src_b_open = try pane_ops.openFileTermInActivePane(src, "/tmp/fp8-merge-b.html", .html);
     const src_b_id = src_b_open.term.file_entry.?.id;
-    src.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
     const sid_a = src.fileEntryAt(0).?.surface_id;
     const sid_b = file_panel_ops.fileEntryForId(src, src_b_id).?.surface_id;
 
     _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/fp8-merge-dst.md", .markdown);
     _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/fp8-merge-dst-split.md", .markdown);
-    dst.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(dst);
 
     var moved_buf: [16]u64 = undefined;
     _ = try src.mergeSessionInto(dst, &moved_buf);
@@ -63047,8 +62472,8 @@ test "FP6 merge rejects duplicate dirty file panels without mutating either dock
     const path = "/tmp/fp6-duplicate-dirty.md";
     _ = try pane_ops.openFileTermInActivePane(src, path, .markdown);
     _ = try pane_ops.openFileTermInActivePane(dst, path, .markdown);
-    src.assignDockSurfaceIds();
-    dst.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
+    file_panel_ops.assignDockSurfaceIds(dst);
     const src_entry = src.fileEntryAt(0).?;
     const dst_entry = dst.fileEntryAt(0).?;
     src_entry.dirty = true;
@@ -63080,8 +62505,8 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     _ = try pane_ops.openFileTermInActivePane(src, path, .markdown);
     _ = try pane_ops.openFileTermInActivePane(dst, path, .markdown);
     _ = try pane_ops.openFileTermInActivePane(dst, "/tmp/fp9-newer-native-focus.md", .markdown);
-    src.assignDockSurfaceIds();
-    dst.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(src);
+    file_panel_ops.assignDockSurfaceIds(dst);
     const source = src.fileEntryAt(0).?;
     const destination = dst.fileEntryAt(0).?;
     const newer_surface = dst.fileEntryAt(1).?.surface_id;
@@ -63097,7 +62522,7 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     _ = dst.focusFilePanelSurface(retired_surface);
     dst.file_panel_mode_pending = retired_surface;
     dst.file_tree_restore_surface_pending = retired_surface;
-    dst.queuePendingDockFocus(destination);
+    dock_ops.queuePendingDockFocus(dst, destination);
 
     var moved_buf: [16]u64 = undefined;
     _ = try src.mergeSessionInto(dst, &moved_buf);
@@ -63122,14 +62547,14 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
             }
         }
     }
-    dst.requestDockEntryFocus(replacement);
+    dock_ops.requestDockEntryFocus(dst, replacement);
     try std.testing.expectEqual(source_id, dst.pending_dock_focus.?.entry_id);
     try std.testing.expectEqual(source_surface, dst.pending_dock_focus.?.expected_surface_id.?);
     try std.testing.expect(dst.completePendingDockFocus(source_surface));
     try std.testing.expect(dst.focusedDockSurface() == source_surface);
     // A direct click on B supersedes the remapped A focus token. Independent mode-only A refresh
     // remains drainable but cannot move the logical/native focus back from B.
-    dst.queuePendingDockFocus(replacement);
+    dock_ops.queuePendingDockFocus(dst, replacement);
     dst.file_panel_mode_pending = source_surface;
     // 실제 클릭은 **보이는** 패널에만 온다 — B가 있는 워크스페이스로 먼저 돌아간다(FP16: focusFilePanelSurface는
     // 워크스페이스를 넘지 않는다). switchTab 자체가 보이지 않게 된 barrier를 버리므로, 클릭이 token을
@@ -63142,7 +62567,7 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
             }
         }
     }
-    dst.queuePendingDockFocus(replacement);
+    dock_ops.queuePendingDockFocus(dst, replacement);
     try std.testing.expect(dst.pending_dock_focus != null); // 클릭 전에는 살아 있다
     try std.testing.expect(dst.focusFilePanelSurface(newer_surface));
     try std.testing.expect(dst.pending_dock_focus == null); // 클릭이 지운다
@@ -63718,7 +63143,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     _ = try pane_ops.newWebTermInActivePane(session, .browser);
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-persist-alpha.md", .markdown);
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-persist-beta.html", .html);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     file_panel_ops.fileEntryForPath(session, "/tmp/fp16-persist-alpha.md").?.mode = .source_edit;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -63775,7 +63200,7 @@ test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지
 
     // pane을 [파일] 하나로 만든다(터미널을 닫아).
     const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-last-term.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const sid = opened.term.file_entry.?.surface_id;
     const pane = pane_ops.activePane(session);
     while (pane.terms.items.len > 1) {
@@ -63802,11 +63227,11 @@ test "FP16 닫기: 다른 파일이 종료를 막으면 마지막 Term close는 
 
     // 워크스페이스 둘: 0번에 지킬 파일(dirty), 1번에 닫을 파일.
     const guarded = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-guard.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     guarded.term.file_entry.?.dirty = true;
     _ = try session.newTab();
     const victim = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-victim.md", .markdown);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const victim_sid = victim.term.file_entry.?.surface_id;
 
     // 창 전체에 Term이 둘 이상이라 마지막-Term 분기는 안 탄다 — 정상 close.
@@ -63824,7 +63249,7 @@ test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없�
 
     // `.text`의 기본 mode는 source_edit이다 — 손도 안 댄 이 탭 하나가 그 pane을 영영 못 닫게 하면 안 된다.
     const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/fp16-clean.py", .text);
-    session.assignDockSurfaceIds();
+    file_panel_ops.assignDockSurfaceIds(session);
     const entry = opened.term.file_entry.?;
     try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
     try std.testing.expect(!entry.close_snapshot_requested);
@@ -63915,14 +63340,14 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
 
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
-    try std.testing.expect(session.dockVisible());
+    try std.testing.expect(dock_ops.dockVisible(session));
     _ = session.takeFilePanelPickRequest();
 
-    const tree_content = session.dockGeometry().tree_content;
+    const tree_content = dock_ops.dockGeometry(session).tree_content;
     const x: f64 = @floatFromInt(tree_content.x + tree_content.w / 2); // 좌측 divider grab band 밖
     const y: f64 = @floatFromInt(tree_content.y + 1);
 
-    session.setDockView(.source_control);
+    dock_ops.setDockView(session, .source_control);
     session.mouse(1, x, y, 0, 0);
     try std.testing.expect(!session.takeFilePanelPickRequest()); // 폴더 다이얼로그 금지
     try std.testing.expect(!file_panel_ops.fileTreeFocused(session)); // 트리 포커스도 안 뺏는다
@@ -63935,10 +63360,10 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
     session.scrollWheel(-600, 0, false, x, y);
     try std.testing.expectEqual(@as(u32, 0), session.file_tree_scroll.offset_y_px);
     // 탐색기 행 수로 만든 스크롤바도 다른 뷰에는 없다(그리기·드래그 양쪽).
-    try std.testing.expect(session.dockListScrollbarGeometry() == null);
+    try std.testing.expect(dock_ops.dockListScrollbarGeometry(session) == null);
 
     // 같은 좌표라도 탐색기로 돌아오면 원래 동작이 그대로다(게이트가 기능을 죽인 게 아니라 뷰로 가른 것).
-    session.setDockView(.explorer);
+    dock_ops.setDockView(session, .explorer);
     session.mouse(1, x, y, 0, 0);
     try std.testing.expect(session.takeFilePanelPickRequest());
 }
@@ -64048,7 +63473,7 @@ test "dock list viewport ends exactly where the status bar begins" {
     // 창 높이를 여러 개로 바꿔 본다 — 한 크기에서만 맞는 것은 우연일 수 있다.
     for ([_]u32{ 700, 813, 900, 1041 }) |h| {
         _ = try session.resize(1400, h, 1000);
-        const g = session.dockGeometry();
+        const g = dock_ops.dockGeometry(session);
         if (g.tree_content.h == 0) continue;
         try std.testing.expect(session.statusBarHeightPx() > 0);
         // 목록 바닥이 상태바 시작과 같다: 겹치지도, 사이에 빈 띠를 남기지도 않는다.
@@ -64066,7 +63491,7 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
     file_panel_ops.activateFilePanelDockControl(session);
-    session.setDockView(.source_control);
+    dock_ops.setDockView(session, .source_control);
     session.rememberGitRepo("/repo");
 
     // 뷰포트를 **넘치도록** 채운다. 넘치지 않으면 offset이 0으로 눌려 이 테스트가 아무것도 판정하지
@@ -64097,8 +63522,8 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     if (half == 0) return error.SkipZigTest;
     const saved_backing_height_px = session.backing_height_px;
     defer session.backing_height_px = saved_backing_height_px;
-    session.backing_height_px = session.dockGeometry().tree.y + cell_h * 5 + session.statusBarHeightPx();
-    const rect = session.dockGeometry().tree_content;
+    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + cell_h * 5 + session.statusBarHeightPx();
+    const rect = dock_ops.dockGeometry(session).tree_content;
     const extent = session.scmScrollExtent();
     if (extent.max_offset_px == 0) return error.ScmFixtureDoesNotOverflow;
 
@@ -64162,9 +63587,9 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     // ⑧ **스크롤바가 이 목록에도 뜬다**(SV3b). 발행은 탐색기와 같은 `scrollArea` 선언 하나에서 나오고,
     //    뷰포트가 헤더 아래에서 시작하므로 track도 그 아래에 놓인다 — 헤더 옆에 막대가 뜨면 안 된다.
     session.scm_scroll.reset();
-    session.refreshDockListScrollbar();
+    file_panel_ops.refreshDockListScrollbar(session);
     {
-        const bar = session.dockListScrollbarGeometry() orelse return error.ScmScrollbarMissing;
+        const bar = dock_ops.dockListScrollbarGeometry(session) orelse return error.ScmScrollbarMissing;
         try std.testing.expect(bar.track_y >= @as(f32, @floatFromInt(rect.y + cell_h)));
         try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(extent.viewport_h_px)), bar.track_h, 1.0);
         try std.testing.expectEqual(extent.max_offset_px, bar.max_offset_px);
@@ -64173,16 +63598,17 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
         const track_y: f64 = bar.track_y + bar.track_h / 2;
         try std.testing.expect(session.scmRowAt(track_x, track_y, &rows_buf, &scratch) == null);
         // 그리고 글자는 그 트랙 왼쪽에서 끝난다(gutter).
-        const content_right = rect.x + (session.dockListTextWidthPx() / session.cell_width_px) * session.cell_width_px;
+        const content_right = rect.x + (dock_ops.dockListTextWidthPx(session) / session.cell_width_px) * session.cell_width_px;
         try std.testing.expect(@as(f32, @floatFromInt(content_right)) <= bar.track_x);
     }
 
     // ⑨ **thumb 드래그가 이 목록을 움직인다** — 탐색기 offset이 아니라. 두 뷰가 발행 저장소를 공유하므로
     //    라우팅이 갈리면 보이지 않는 목록이 스크롤된다(그 결함을 막는 것이 뷰별 setter의 존재 이유다).
     {
-        const bar = session.dockListScrollbarGeometry().?;
+        const bar = dock_ops.dockListScrollbarGeometry(session).?;
         const before_file_tree = session.file_tree_scroll.offset_y_px;
-        try std.testing.expect(session.beginDockListScrollbarGesture(
+        try std.testing.expect(dock_ops.beginDockListScrollbarGesture(
+            session,
             bar.track_x + bar.track_w / 2,
             bar.track_y + bar.track_h - 1, // 트랙 아래쪽 = 점프
         ));
@@ -64192,7 +63618,7 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
     }
 
     // ⑩ 다른 뷰에서 굴리면 이 목록은 움직이지 않는다(뷰별로 상태를 나눠 둔 이유).
-    session.setDockView(.explorer);
+    dock_ops.setDockView(session, .explorer);
     const before = session.scm_scroll.offset_y_px;
     session.scrollWheel(-600, 0, false, x, @floatFromInt(rect.y + cell_h + 1));
     try std.testing.expectEqual(before, session.scm_scroll.offset_y_px);
@@ -64209,7 +63635,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     // 도크를 열고 소스 컨트롤 뷰로.
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
-    session.setDockView(.source_control);
+    dock_ops.setDockView(session, .source_control);
 
     // 검증 대상은 좌표→행 매핑과 "두 번째 클릭도 diff Term을 연다"이지 git 실행이 아니다. 그런데 diff Term을
     // 열면 `requestDiffContent`가 백그라운드 `diffWorker`를 띄우고, 그 스레드는 **detach라 테스트가 기다릴 수
@@ -64230,7 +63656,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
         .ok = true,
     };
 
-    const rect = session.dockGeometry().tree_content;
+    const rect = dock_ops.dockGeometry(session).tree_content;
     const x: f64 = @floatFromInt(rect.x + rect.w / 2);
     const row_y = struct {
         fn at(s: *AppSession, r: u32, top: u32) f64 {
@@ -64758,7 +64184,7 @@ fn openAgentSessionsDockForRouting(session: *AppSession, side: dock_panel.Side) 
     session.dock.side = side;
     session.dock.size = 0;
     session.agent_session_archive_initialized = false;
-    session.setDockView(.agent_sessions);
+    dock_ops.setDockView(session, .agent_sessions);
     session.agent_session_archive_initialized = true;
     for (session.tabs.items) |tab| pane_ops.resizeTabPanes(session, tab);
     pane_ops.recomputeActivePaneRect(session);
@@ -64783,7 +64209,7 @@ fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side)
 
 /// 도크 content 중앙 — 진행 중 gesture가 지나가더라도 도크로 새면 안 되는 좌표.
 fn dockContentCenter(session: *AppSession) struct { x: f64, y: f64 } {
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     return .{
         .x = @floatFromInt(content.x + content.w / 2),
         .y = @floatFromInt(content.y + content.h / 2),
@@ -64974,7 +64400,7 @@ test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추
     const session = try initDockedRoutingSession(allocator, .right);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expect(session.dockVisible());
+    try std.testing.expect(dock_ops.dockVisible(session));
 
     try pane_ops.splitActivePane(session, .horizontal);
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
@@ -65133,7 +64559,7 @@ fn publishDockFrameForDrag(session: *AppSession, allocator: std.mem.Allocator) !
     const projection = agent_dock.agentSessionDockScrollProjection(session);
     const items = try agent_dock.buildAgentSessionDockItems(session, arena, projection);
     const sizes = chrome.components.session_dock.build.bufferSizes(items);
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     const frame = try chrome.components.session_dock.build.build(agent_dock.agentSessionDockProps(session, content, projection, items), .{
         .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
         .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
@@ -65309,7 +64735,7 @@ test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상�
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
     const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
     const max_offset = agent_dock.agentSessionDockScrollProjection(session).max_offset_px;
@@ -65351,7 +64777,7 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
     const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
 
@@ -65432,7 +64858,7 @@ fn dockTreeItemRects(
 
     const dock_items = try agent_dock.buildAgentSessionDockItems(session, arena, projection);
     const sizes = chrome.components.session_dock.build.bufferSizes(dock_items);
-    const content = session.dockGeometry().tree_content;
+    const content = dock_ops.dockGeometry(session).tree_content;
     // **제품이 쓰는 그 함수**로 props를 만든다. 여기서 리터럴을 다시 쓰면 host의 구성이 틀려도
     // 테스트는 자기 복제본만 보게 된다.
     const frame = try chrome.components.session_dock.build.build(agent_dock.agentSessionDockProps(session, content, projection, dock_items), .{
@@ -65663,8 +65089,8 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     // 뷰를 떠났다 돌아와도 클릭 없이는 소유권이 되살아나지 않는다.
     session.mouse(1, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(agent_dock.agentSessionDockOwnsKeys(session));
-    session.setDockView(.explorer);
-    session.setDockView(.agent_sessions);
+    dock_ops.setDockView(session, .explorer);
+    dock_ops.setDockView(session, .agent_sessions);
     try std.testing.expect(!agent_dock.agentSessionDockOwnsKeys(session));
     _ = try session.tick();
 }
@@ -65797,9 +65223,9 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     session.dock.collapsed = false;
     session.dock.side = .right;
     session.agent_session_archive_initialized = false;
-    session.setDockView(.agent_sessions);
+    dock_ops.setDockView(session, .agent_sessions);
     session.agent_session_archive_initialized = true;
-    try std.testing.expect(session.dockVisible());
+    try std.testing.expect(dock_ops.dockVisible(session));
     try std.testing.expect(!session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
@@ -65837,17 +65263,17 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     // 아래 blur가 플래그를 실제로 지우게 된 뒤에도 유지한다(두 겹 — 상태와 게이트).
     session.agent_session_archive_search_active = true;
     session.dock.collapsed = true;
-    try std.testing.expect(!session.dockVisible());
+    try std.testing.expect(!dock_ops.dockVisible(session));
     try std.testing.expect(!session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
     session.dock.collapsed = false;
-    session.setDockView(.explorer);
+    dock_ops.setDockView(session, .explorer);
     try std.testing.expect(!session.terminalOwnsInput());
     // view 전환은 도크 검색을 blur한다 — 돌아왔을 때 클릭 없이 키를 삼키지 않게(사이드바와 같은 규율).
     try std.testing.expect(!session.agent_session_archive_search_active);
 
-    session.setDockView(.agent_sessions);
+    dock_ops.setDockView(session, .agent_sessions);
     try std.testing.expect(!session.terminalOwnsInput());
     session.agent_session_archive_search_active = true;
     try std.testing.expect(session.terminalOwnsInput());
@@ -65910,7 +65336,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
             session.dock.collapsed = false;
             session.dock.side = .right;
             session.agent_session_archive_initialized = false;
-            session.setDockView(.agent_sessions);
+            dock_ops.setDockView(session, .agent_sessions);
             session.agent_session_archive_initialized = true;
             session.agent_session_archive_search_active = true;
         },
@@ -66262,9 +65688,9 @@ test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바
     session.dock.presented = true;
 
     session.dock.view = .explorer;
-    const explorer = session.dockGeometry();
+    const explorer = dock_ops.dockGeometry(session);
     session.dock.view = .agent_sessions;
-    const agent = session.dockGeometry();
+    const agent = dock_ops.dockGeometry(session);
 
     // (1) 뷰 전환은 아이콘 줄도 그 아래 본문 시작선도 한 픽셀 움직이지 않는다.
     try std.testing.expect(explorer.view_bar.h > 0);
@@ -66287,9 +65713,9 @@ test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바
     session.setFontSize(session.appearance.font.size + 24);
     try std.testing.expect(session.cell_height_px != cell_before); // 폰트가 실제로 바뀌었다
     session.dock.view = .explorer;
-    const zoomed_explorer = session.dockGeometry();
+    const zoomed_explorer = dock_ops.dockGeometry(session);
     session.dock.view = .agent_sessions;
-    const zoomed_agent = session.dockGeometry();
+    const zoomed_agent = dock_ops.dockGeometry(session);
     try std.testing.expectEqual(explorer.view_bar.h, zoomed_explorer.view_bar.h);
     try std.testing.expectEqual(explorer.view_bar.y, zoomed_explorer.view_bar.y); // 시작선도 그대로
     try std.testing.expectEqual(explorer.tree.y, zoomed_explorer.tree.y);

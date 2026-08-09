@@ -26,6 +26,8 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const PendingDockFocus = app_session_mod.PendingDockFocus;
+const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const renameatx_np = AppSession.renameatx_np;
 const file_tree_icon = app_session_mod.file_tree_icon;
@@ -901,7 +903,7 @@ pub fn openProjectedFileTreePath(
 /// 정책 넷을 여기서 전부 집행한다: 도크가 보일 때만 / 활성 pane·활성 Term의 cwd만 / cwd가 없으면 직전
 /// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다). root 밖 경로는 `revealDirectory`가 무시한다.
 pub fn followActiveTerminalCwd(self: *AppSession) void {
-    if (!self.dockVisible()) return;
+    if (!dock_ops.dockVisible(self)) return;
     if (self.tabs.items.len == 0) return;
     const term = pane_ops.activePane(self).activeTerm();
     // updateFileTree는 renderer보다 먼저 tick에서 돈다. 여기서 observation을 새로 읽지 않으면 OSC 7의
@@ -1035,7 +1037,7 @@ pub fn removeDeletedDockEntries(self: *AppSession, removed_path: []const u8) Fil
                 if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == entry.surface_id)
                     clearFilePanelCloseWithoutUnlock(self);
             } else if (pending_owned) {
-                self.cancelPendingDockFocus();
+                dock_ops.cancelPendingDockFocus(self);
             }
         }
     }
@@ -1130,7 +1132,7 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
         if (prev.file_entry) |prev_entry| _ = markFilePanelDirtySyncPending(self, prev_entry);
     };
     const active_entry = opened.term.file_entry orelse return .failed;
-    self.requestDockEntryFocus(active_entry);
+    dock_ops.requestDockEntryFocus(self, active_entry);
     self.dock.collapsed = false;
     if (self.surface_initialized) {
         for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
@@ -1487,7 +1489,7 @@ pub fn closeFilePanelSurfaceNow(self: *AppSession, surface_id: u64) bool {
         } else if (activeFileEntry(self)) |successor| {
             // 승계 Term이 또 다른 파일이면 그 파일로 typed focus를 다시 발급한다(옛 "다음 도크 entry로
             // 승계"와 같은 사용자 경험). 승계가 터미널이면 workspace로 간다.
-            self.requestDockEntryFocus(successor);
+            dock_ops.requestDockEntryFocus(self, successor);
         } else {
             self.focusWorkspaceInput();
             self.workspace_focus_pending = true;
@@ -1718,7 +1720,7 @@ pub fn activateFilePanelDockControl(self: *AppSession) void {
     // generation before changing geometry so reopening can request a fresh snapshot.
     if (action == .collapse and self.dock.view == .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
     // 열기/접기/펴기 어느 것도 도크 **내용**을 누른 게 아니다. 접었다 편 뒤 클릭 없이 Enter가
-    // 도크로 가지 않도록 소유권을 놓는다(게이트의 `dockVisible`만으로는 재표시 때 되살아난다).
+    // 도크로 가지 않도록 소유권을 놓는다(게이트의 `dock_ops.dockVisible`만으로는 재표시 때 되살아난다).
     agent_dock.releaseAgentSessionDockKeyFocus(self);
     switch (action) {
         .open => {
@@ -1762,7 +1764,7 @@ pub fn removeFilePanelQueuedActionsBulk(self: *AppSession, removed: *const Delet
     }
     if (self.pending_dock_focus) |pending| {
         if (pending.expected_surface_id) |surface_id| {
-            if (removed.contains(surface_id)) self.cancelPendingDockFocus();
+            if (removed.contains(surface_id)) dock_ops.cancelPendingDockFocus(self);
         }
     }
     if (self.file_panel_save_close_pending) |pending| {
@@ -1844,7 +1846,7 @@ pub fn restoreFileTreeFocus(self: *AppSession) void {
             // 복원 대상은 트리로 들어가기 **전에** 이미 publish된 surface다(가시성으로 재확인) — 새 barrier가
             // 아니라 곧바로 owner다. 다만 그 사이에 걸린 다른 파일의 pending은 취소해야 늦은 ack가
             // 사용자가 되돌아온 이 surface에서 focus를 뺏지 않는다.
-            self.cancelPendingDockFocus();
+            dock_ops.cancelPendingDockFocus(self);
             self.focus_owner = .workspace;
             self.file_tree_restore_surface_pending = surface_id;
             self.workspace_focus_pending = false;
@@ -1888,10 +1890,10 @@ pub fn submitWaitingFileTreeMutation(self: *AppSession, mutation_id: u64) bool {
 pub fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     // 다른 뷰를 보는 중이면 트리 행은 화면에 없다 — 좌표가 같은 rect 안이어도 hit이 되면 안 된다(§3.5).
     if (self.dock.view != .explorer) return null;
-    if (!self.dockVisible() or self.cell_height_px == 0) return null;
-    const tree_rect = self.dockGeometry().tree_content;
+    if (!dock_ops.dockVisible(self) or self.cell_height_px == 0) return null;
+    const tree_rect = dock_ops.dockGeometry(self).tree_content;
     if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
-    if (self.dockListScrollbarGeometry()) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
+    if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
     // 픽셀 스크롤이므로 뷰포트 안 y는 **content 좌표로 올린 뒤** 행 높이로 나눈다. 창의 첫 행이
     // 위로 밀려 있어도(부분 행) 같은 식이 그 행을 준다 — 렌더가 origin을 그만큼 올리는 것과 짝이다.
     const local_px = y_px - @as(f64, @floatFromInt(tree_rect.y));
@@ -2429,7 +2431,7 @@ pub fn mergeFilePanelStateInto(src: *AppSession, dst: *AppSession) !void {
         if (survivor) |replacement| {
             if (had_mode_pending) dst.file_panel_mode_pending = replacement.surface_id;
             if (had_restore_pending) dst.file_tree_restore_surface_pending = null;
-            if (had_focus_pending) dst.queuePendingDockFocus(replacement);
+            if (had_focus_pending) dock_ops.queuePendingDockFocus(dst, replacement);
         }
     }
     // 5) source 창 수명에 묶여 있던 래치를 비운다 — 그 큐는 source와 함께 사라지므로, 그대로 옮기면
@@ -2455,7 +2457,7 @@ pub fn requestFilePanelPick(self: *AppSession) void {
 /// 않는다** — 반쯤 걸친 행까지 한 페이지로 치면 Page Down이 그 행을 건너뛴다.
 pub fn fileTreeVisibleRows(self: *const AppSession) usize {
     if (self.cell_height_px == 0) return 0;
-    return self.dockGeometry().tree_content.h / self.cell_height_px;
+    return dock_ops.dockGeometry(self).tree_content.h / self.cell_height_px;
 }
 
 /// 이 entry의 surface가 입력·복원 소유였는지만 기록한다(통지·큐 정리 없음). Term teardown이 통지를
@@ -2505,7 +2507,7 @@ pub fn fileTreeDrawWindow(self: *const AppSession) struct { start: usize, count:
     const offset = fileTreeEffectiveScrollPx(self);
     const start: usize = offset / row_h;
     const shift = offset % row_h;
-    const viewport = self.dockGeometry().tree_content.h;
+    const viewport = dock_ops.dockGeometry(self).tree_content.h;
     // 위로 shift만큼 밀린 상태에서 뷰포트를 덮으려면 올림이 필요하다 — 내림이면 바닥에 배경이 남는다.
     const needed: usize = (@as(usize, viewport) + shift + row_h - 1) / row_h;
     const remaining = self.file_tree_rows.items.len -| start;
@@ -2699,7 +2701,7 @@ pub fn openPinnedFilePanelParent(io: std.Io, absolute_path: []const u8) FilePane
 
 pub fn fileTreeScrollExtent(self: *const AppSession) FileTreeScrollExtent {
     const row_h = self.cell_height_px;
-    const viewport = self.dockGeometry().tree_content.h;
+    const viewport = dock_ops.dockGeometry(self).tree_content.h;
     const content: u32 = @intCast(@min(
         @as(u64, self.file_tree_rows.items.len) * @as(u64, row_h),
         @as(u64, std.math.maxInt(u32)),
@@ -2759,7 +2761,7 @@ pub fn activeTabHasFileEntry(self: *const AppSession, entry_id: dock_panel.Entry
 
 pub fn focusFileTree(self: *AppSession) void {
     if (!self.dock_initialized or !self.dock.presented) return;
-    self.cancelPendingDockFocus();
+    dock_ops.cancelPendingDockFocus(self);
     if (self.dock.collapsed) activateFilePanelDockControl(self);
     // 다른 뷰를 보는 중이면 먼저 탐색기로 되돌린다 — 보이지 않는 트리에 키 입력이 가면 안 된다
     // (docs/file-explorer.md §3.5). 접힘 해제와 같은 급의 "포커스 전에 보이게 만든다" 처리다.
@@ -3269,7 +3271,7 @@ pub fn setFileTreeScrollOffsetPx(self: *AppSession, offset_px: i64) void {
     if (!self.file_tree_scroll.setOffsetPx(offset_px, extent.max_offset_px)) return;
     // 옮긴 **직후**의 thumb을 지금 알아야 이어지는 드래그의 grab 기준점이 튀지 않는다. tree를 다시
     // 내면 track/thumb rect가 새 offset을 반영한다 — 기하를 두 번째로 만들지 않는다.
-    self.buildDockListScrollTree();
+    dock_ops.buildDockListScrollTree(self);
     self.file_tree_hovered_row = null;
     self.dock_list_scrollbar_idle_ticks = 0;
     self.dock_list_scrollbar_last_offset_px = self.file_tree_scroll.offset_y_px;
@@ -3615,4 +3617,48 @@ pub fn fileTreeNavigationIntent(event: terminal.KeyEvent) ?file_tree_navigation.
         .page_down => .page_down,
         else => null,
     };
+}
+
+/// 창의 모든 파일 entry에 surface id를 발급한다. **상한이 없다** — FP16의 §1 불변식("파일 Term의 surface는
+/// eviction으로 해제하지 않는다")대로 LRU를 제거했으므로, entry는 만들어질 때 id를 받고 닫힐 때까지 유지한다.
+/// 0은 미할당 sentinel이라 이미 받은 entry는 건너뛴다(재발급 금지 — id는 앱 전역 비재사용).
+/// surface가 없는 파일 entry에 새 sid를 발급한다(창 전체). rename으로 surface가 retire된 entry도
+/// 여기서 다시 살아난다 — FP16 전에는 도크 group 순회였고, 지금은 Term 창구가 유일한 출처다.
+pub fn assignDockSurfaceIds(self: *AppSession) void {
+    var it = fileEntries(self);
+    while (it.next()) |entry| {
+        if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+    }
+}
+
+pub fn dockHasLiveSurface(self: *AppSession) bool {
+    var it = fileEntries(self);
+    while (it.next()) |entry| {
+        if (entry.surface_id != 0) return true;
+    }
+    return false;
+}
+
+/// 재투영 지점. 계측은 여기 있다 — `dock_ops.buildDockListScrollTree`는 down/move에서도 불리므로 그것까지
+/// 세면 "프레임당 몇 번 투영했는가"라는 예산의 의미가 달라진다.
+pub fn refreshDockListScrollbar(self: *AppSession) void {
+    if (self.file_tree_perf_counters) |counters| {
+        counters.projected_frames += 1;
+        counters.geometry_builds += 1;
+    }
+    dock_ops.buildDockListScrollTree(self);
+}
+
+pub fn requeuePendingDockFocus(self: *AppSession, old: PendingDockFocus) void {
+    const entry = (fileEntryForId(self, old.entry_id) orelse return);
+    const expected_surface_id = old.expected_surface_id orelse return;
+    if (entry.surface_id != expected_surface_id or entry.editor_revision != old.request_or_entry_revision) return;
+    dock_ops.queuePendingDockFocus(self, entry);
+    // restore/window merge 뒤에도 typed ack 전 fail-close owner를 함께 재파생한다. token만 이관하고
+    // workspace/옛 surface owner를 남기면 늦은 native publish 전 PTY·paste·close가 잘못 라우팅된다.
+    // 아직 ack 전이므로 `.dock_surface`(승격)가 아니라 barrier 그대로 재파생한다.
+    self.focus_owner = .{ .dock_pending = entry.id };
+    self.workspace_focus_pending = false;
+    self.file_tree_focus_pending = false;
+    self.file_tree_restore_surface_pending = null;
 }

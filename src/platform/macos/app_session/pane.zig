@@ -26,6 +26,9 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const dock_ops = @import("dock.zig");
+const PendingDockFocus = app_session_mod.PendingDockFocus;
+const file_panel_ops = app_session_mod.file_panel_ops;
 const chrome_system_text = app_session_mod.chrome_system_text;
 const MeasuredTextCache = app_session_mod.MeasuredTextCache;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
@@ -33,7 +36,6 @@ const packRgbAlpha = app_session_mod.packRgbAlpha;
 const diag_gate = app_session_mod.diag_gate;
 const scrollbar_alpha_full = app_session_mod.scrollbar_alpha_full;
 const tabTitleRunningMarker = AppSession.tabTitleRunningMarker;
-const file_panel_ops = app_session_mod.file_panel_ops;
 const panelKindForEntryKind = AppSession.panelKindForEntryKind;
 const restoreFailureDisposition = AppSession.restoreFailureDisposition;
 const scrollbarBarWidthPx = AppSession.scrollbarBarWidthPx;
@@ -1489,7 +1491,7 @@ pub fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
     return layout_math.pointInRect(
         x_px,
         y_px,
-        dock_layout.outerDividerHitRect(self.dockGeometry(), self.dock.side, dockDividerGrabBandPx(self)),
+        dock_layout.outerDividerHitRect(dock_ops.dockGeometry(self), self.dock.side, dockDividerGrabBandPx(self)),
     );
 }
 

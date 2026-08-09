@@ -55,7 +55,8 @@ src/
     app_session/        app_session.zig에서 목적별로 떼어낸 그룹 구현(docs/app-session-decomposition.md §4.1 F 시리즈).
                         find.zig(스크롤백 ⌘F orchestration — E1), agent_dock.zig(에이전트 세션 기록 도크 —
                         아카이브 스캔·필터·스크롤·인라인 상세, F1+F3 병합), file_panel.zig(파일 탐색기·파일
-                        패널 — 트리 mutation·패널 생명주기·dock entry, F2. tree↔panel이 순환하므로 한 파일이다). 각 파일은 `*AppSession`을 받는
+                        패널 — 트리 mutation·패널 생명주기·dock entry, F2. tree↔panel이 순환하므로 한 파일이다), pane.zig(pane·split·divider —
+                        분할/합치기·pane 포커스·드래그·divider 히트테스트·pane별 바/스크롤바, F4). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
                         **test는 그룹 파일로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측).

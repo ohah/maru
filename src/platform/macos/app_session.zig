@@ -2690,9 +2690,17 @@ pub const SessionCollection = struct {
     }
 };
 
-/// Session Dock scrollbar를 끌고 있는 동안의 불변 스냅샷. `grab_dy`는 누른 지점과 thumb top의 거리라
-/// 드래그 내내 유지되고, `geometry`는 down 시점의 track/thumb 치수다.
-const AgentSessionDockRichTextCache = struct {
+/// measured chrome 텍스트 한 소비처의 셰이핑 결과 캐시.
+///
+/// **캐시는 순수 최적화가 아니라 이관의 선행 조건이다.** chrome 텍스트를 셀 그리드에서 measured 경로로
+/// 옮기려는 소비처(사이드바 검색 줄·find·palette·탭 제목 — docs/file-explorer.md §3.5의 이관 순서)는
+/// 모두 hover·드래그·탭 전환처럼 **tick 사이의 이벤트**에서 다시 그려진다. 캐시 없이 옮기면 마우스를
+/// 움직일 때마다 CoreText 셰이핑이 돈다.
+///
+/// 슬롯은 **소비처마다 따로** 둔다 — fingerprint가 그 소비처의 ops에서 나오므로, 한 슬롯을 공유하면
+/// 사이드바가 바뀔 때마다 도크 아티팩트가 버려진다. 새 소비처는 필드 하나를 더하고 아래 세 헬퍼
+/// (`hit`/`store`/`clear`)만 호출하면 되며, 소유권 규칙을 각자 다시 쓰지 않는다.
+const MeasuredTextCache = struct {
     fingerprint: u64,
     placements: []chrome_system_text.Placement,
     records: []renderer.ShapedGlyphRecord,
@@ -2700,6 +2708,39 @@ const AgentSessionDockRichTextCache = struct {
     /// 불변이므로 캐시는 다른 스크롤 위치에서도 hit한다. 그때 이 값과의 차이만큼 스크롤 소속 glyph를
     /// 평행이동해 같은 셰이핑 결과를 재사용한다.
     scroll_origin_y_px: i32,
+
+    /// 이 fingerprint의 아티팩트가 슬롯에 살아 있는가. 스크롤은 fingerprint에 안 들어가므로 다른 스크롤
+    /// 위치에서도 hit한다(호출자가 `scroll_origin_y_px` 차이로 평행이동한다).
+    fn hit(slot: ?MeasuredTextCache, fingerprint: u64) bool {
+        return if (slot) |c| c.fingerprint == fingerprint else false;
+    }
+
+    /// 새 아티팩트를 슬롯에 넣고 **옛 것을 해제한다**. 소유권이 여기 한 곳에 있어야 소비처가 늘어도
+    /// free를 빠뜨리지 않는다 — 셰이핑이 실패하면 호출자가 이 함수를 부르지 않아 옛 아티팩트가 남고,
+    /// fingerprint가 달라 hit하지 않으므로 잘못된 기하가 재사용되지 않는다.
+    fn store(
+        slot: *?MeasuredTextCache,
+        allocator: std.mem.Allocator,
+        fingerprint: u64,
+        artifact: chrome_system_text.Artifact,
+        scroll_origin_y_px: i32,
+    ) void {
+        clear(slot, allocator);
+        slot.* = .{
+            .fingerprint = fingerprint,
+            .placements = artifact.placements,
+            .records = artifact.records,
+            .scroll_origin_y_px = scroll_origin_y_px,
+        };
+    }
+
+    fn clear(slot: *?MeasuredTextCache, allocator: std.mem.Allocator) void {
+        if (slot.*) |c| {
+            allocator.free(c.placements);
+            allocator.free(c.records);
+            slot.* = null;
+        }
+    }
 };
 
 pub const AppSession = struct {
@@ -3401,7 +3442,7 @@ pub const AppSession = struct {
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
     // B1 rich-text artifact. The detached CoreText worker owns only an immutable scalar DTO;
     // this cache owns renderer-neutral records after the main actor resolves its font names.
-    agent_session_dock_rich_text_cache: ?AgentSessionDockRichTextCache = null,
+    agent_session_dock_rich_text_cache: ?MeasuredTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     /// Session Dock가 키보드 owner인가(docs/agent-session-list.md의 `agent_session_list` focus).
     /// **component-local `InteractionState.focused`로 대신할 수 없다**: 그건 published node id라
@@ -22256,7 +22297,7 @@ pub const AppSession = struct {
         // The renderer's FontId registry deliberately lives as long as the atlas. A font family
         // switch may retain identical cell metrics, so metric-only fingerprinting is insufficient:
         // discard Chrome shaped records before the next frame can replay an old face identity.
-        self.clearAgentSessionDockRichTextCache();
+        self.clearMeasuredTextCaches();
         if (self.backing_width_px > 0 and self.backing_height_px > 0) {
             const grid = layout_math.gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.gridPadding());
             self.resizeActiveTabPanes() catch {};
@@ -22276,12 +22317,11 @@ pub const AppSession = struct {
         self.file_panel_zoom_dirty = true;
     }
 
-    fn clearAgentSessionDockRichTextCache(self: *AppSession) void {
-        if (self.agent_session_dock_rich_text_cache) |cache| {
-            self.allocator.free(cache.placements);
-            self.allocator.free(cache.records);
-            self.agent_session_dock_rich_text_cache = null;
-        }
+    /// 모든 measured 텍스트 슬롯을 비운다. 폰트·face·atlas가 바뀌면 어느 소비처의 아티팩트도 유효하지
+    /// 않으므로 **한 초크포인트에서 전부** 버린다 — 소비처가 늘 때 여기 한 줄만 더하면 되고, 개별
+    /// 호출부가 자기 슬롯을 기억할 필요가 없다.
+    fn clearMeasuredTextCaches(self: *AppSession) void {
+        MeasuredTextCache.clear(&self.agent_session_dock_rich_text_cache, self.allocator);
     }
 
     /// 도크의 비례 텍스트를 **이번 프레임 안에서** 셰이핑해 캐시에 넣는다.
@@ -22318,15 +22358,11 @@ pub const AppSession = struct {
         var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, dock_scale_milli) catch return;
         defer unresolved.deinit(self.allocator);
         const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
-        self.clearAgentSessionDockRichTextCache();
-        self.agent_session_dock_rich_text_cache = .{
-            .fingerprint = fingerprint,
-            .placements = artifact.placements,
-            .records = artifact.records,
-            // 셰이핑이 이 프레임 안에서 끝나므로 기준 원점은 지금 그리는 그 값이다. worker 시절에는
-            // submit 시점과 poll 시점의 스크롤이 달라 이 기준이 어긋날 수 있었지만 이제 그 간극이 없다.
-            .scroll_origin_y_px = scroll_origin_y_px,
-        };
+        // 셰이핑이 이 프레임 안에서 끝나므로 기준 원점은 지금 그리는 그 값이다. worker 시절에는 submit
+        // 시점과 poll 시점의 스크롤이 달라 이 기준이 어긋날 수 있었지만 이제 그 간극이 없다.
+        // 옛 아티팩트 해제는 `store`가 소유한다 — 예전에는 여기서 **모든** 슬롯을 비우고(clear) 자기 것만
+        // 다시 채웠는데, 소비처가 늘면 그 방식이 남의 캐시를 매 셰이핑마다 버리게 된다.
+        MeasuredTextCache.store(&self.agent_session_dock_rich_text_cache, self.allocator, fingerprint, artifact, scroll_origin_y_px);
     }
 
     /// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 프리뷰 iframe `zoom`·HTML/PDF `pageZoom`이 쓴다.
@@ -29305,7 +29341,7 @@ pub const AppSession = struct {
             self.refreshCellMetrics();
             // B1 text artifacts key both pixel placement and glyph raster scale. Rebuild from
             // the resolved appearance rather than replaying a 1x/2x shaped-record cache.
-            self.clearAgentSessionDockRichTextCache();
+            self.clearMeasuredTextCaches();
         }
         // grid(cols/rows)를 Swift가 아니라 app session이 backing 픽셀 + 자기 cell 메트릭에서 직접
         // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
@@ -34240,7 +34276,7 @@ pub const AppSession = struct {
         self: *AppSession,
         collected: *std.ArrayList(CollectedPane),
         dl: renderer.DrawList,
-        cache: *const AgentSessionDockRichTextCache,
+        cache: *const MeasuredTextCache,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
         dest: CollectDest,
     ) void {
@@ -34465,7 +34501,7 @@ pub const AppSession = struct {
         const fingerprint = base_fingerprint ^ (@as(u64, dock_scale_milli) *% 0x9e3779b185ebca87);
         // 캐시는 순수 최적화다. hit이면 CoreText 호출을 건너뛰고, miss면 지금 셰이핑해 이번 프레임에
         // 그린다 — 다음 tick으로 미루면 그 프레임의 도크가 글자도 아이콘도 없는 빈 카드가 된다.
-        const cache_hit = if (self.agent_session_dock_rich_text_cache) |cache| cache.fingerprint == fingerprint else false;
+        const cache_hit = MeasuredTextCache.hit(self.agent_session_dock_rich_text_cache, fingerprint);
         if (!cache_hit) self.shapeAgentSessionDockRichText(draws.ops, &tokens, fingerprint, dock_scale_milli, scroll_origin_y_px);
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
@@ -37120,7 +37156,7 @@ pub const AppSession = struct {
         self.web_nav_states.deinit(self.allocator);
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.metal_buffer.deinit(self.allocator);
-        self.clearAgentSessionDockRichTextCache();
+        self.clearMeasuredTextCaches();
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
@@ -73414,4 +73450,45 @@ test "사이드바 헤더 검색 줄이 폰트 크기와 무관하게 상단 바
 
     // 헤더 높이 자체가 폰트에 **불변**이다(오른쪽 두 바와 같은 성질). 옛 식에서는 셀에 비례해 늘어났다.
     try std.testing.expectEqual(header_before, session.sidebar_header_height_px);
+}
+
+// 이 테스트가 증명하는 것: measured 텍스트 캐시 슬롯의 **소유권 규칙**.
+//
+// 왜 터미널에서 중요한가 — 이 캐시는 곧 소비처가 넷으로 늘어난다(사이드바 검색 줄·find·palette·탭 제목,
+// docs/file-explorer.md §3.5의 이관 순서). 소유권이 각 호출부에 흩어져 있으면 새 소비처를 더할 때마다
+// "옛 아티팩트를 언제 free하는가"를 다시 결정해야 하고, 한 번만 빠뜨려도 프레임마다 새는 누수가 된다.
+// 그래서 `store`가 교체와 해제를 함께 소유하고, 그 계약을 여기서 고정한다. testing allocator가 누수를
+// 잡으므로 `store`를 두 번 부르는 것만으로 "옛 것이 해제된다"가 증명된다.
+test "measured 텍스트 캐시: store가 옛 아티팩트를 해제하고 clear가 슬롯을 비운다" {
+    const allocator = std.testing.allocator;
+    var slot: ?MeasuredTextCache = null;
+
+    // 빈 슬롯은 어떤 fingerprint에도 hit하지 않는다.
+    try std.testing.expect(!MeasuredTextCache.hit(slot, 1));
+
+    const first = chrome_system_text.Artifact{
+        .records = try allocator.alloc(renderer.ShapedGlyphRecord, 2),
+        .placements = try allocator.alloc(chrome_system_text.Placement, 2),
+    };
+    MeasuredTextCache.store(&slot, allocator, 7, first, 100);
+    try std.testing.expect(MeasuredTextCache.hit(slot, 7));
+    try std.testing.expect(!MeasuredTextCache.hit(slot, 8)); // 다른 ops → miss
+    try std.testing.expectEqual(@as(i32, 100), slot.?.scroll_origin_y_px);
+
+    // 같은 슬롯에 다시 store: 옛 아티팩트가 해제된다(안 하면 testing allocator가 누수로 실패시킨다).
+    const second = chrome_system_text.Artifact{
+        .records = try allocator.alloc(renderer.ShapedGlyphRecord, 3),
+        .placements = try allocator.alloc(chrome_system_text.Placement, 3),
+    };
+    MeasuredTextCache.store(&slot, allocator, 9, second, -40);
+    try std.testing.expect(!MeasuredTextCache.hit(slot, 7)); // 옛 fingerprint는 더 이상 hit하지 않는다
+    try std.testing.expect(MeasuredTextCache.hit(slot, 9));
+    try std.testing.expectEqual(@as(usize, 3), slot.?.records.len);
+    // 스크롤 기준은 음수도 그대로 보존한다 — 목록이 위로 밀린 상태에서 셰이핑될 수 있고, 소비처가 이 값과의
+    // 차이로 평행이동하므로 부호를 잃으면 캐시 재사용이 글자를 반대로 민다.
+    try std.testing.expectEqual(@as(i32, -40), slot.?.scroll_origin_y_px);
+
+    MeasuredTextCache.clear(&slot, allocator);
+    try std.testing.expect(slot == null);
+    MeasuredTextCache.clear(&slot, allocator); // 두 번 비워도 안전(초크포인트가 여러 경로에서 불린다)
 }

@@ -84,36 +84,26 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         const len: u16 = @intCast(@min(text.len, field_cols));
         const col = props.layout.line_numbers.start + (field_cols - len);
 
-        // **자리마다 op을 낸다 — 문자열 하나로 내면 셀 격자를 벗어난다.**
-        //
-        // 텍스트 op은 백엔드에서 measured로 그려지고(`platform/macos/chrome/system_text.zig`) 두 번째
-        // 글자부터는 **폰트 advance**로 이어 붙는다. 숫자가 proportional인 폰트에서는 `1`이 좁아
-        // `10`의 `0`이 셀 경계보다 왼쪽에 놓이고, 그러면 `9`와 `10`의 오른쪽 끝이 어긋나 보인다
-        // (실측: `0`이 x=38에서 시작, 셀 5는 x=40부터). VSCode가 줄 번호에
-        // `font-variant-numeric: tabular-nums`를 거는 것도 같은 문제를 폰트 쪽에서 막는 것이다.
-        //
-        // 한 자리씩 자기 셀 원점에 놓으면 그 문제가 구조적으로 사라진다 — 이것이 §2.0이 말한
-        // "셀 경로"의 실제 의미다(문자열을 넘기고 백엔드가 이어 그리게 두는 것이 아니다).
-        const y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px);
-        for (text, 0..) |_, digit_index| {
-            if (run_used >= runs.len) return error.OutOfSpace;
-            runs[run_used] = .{ .text = text[digit_index .. digit_index + 1] };
-            const run_slice = runs[run_used .. run_used + 1];
-            run_used += 1;
+        // 문자열 하나로 낸다. 백엔드가 `cell_grid`를 보고 **글자 x를 셀 배수로 스냅**하므로
+        // (`platform/macos/chrome/system_text.zig`) 자리마다 op을 쪼갤 필요가 없다 — 쪼개면 op이
+        // 자릿수만큼 늘고, 그것이 이 파일의 옛 우회였다.
+        if (run_used >= runs.len) return error.OutOfSpace;
+        runs[run_used] = .{ .text = text };
+        const run_slice = runs[run_used .. run_used + 1];
+        run_used += 1;
 
-            if (op_count >= out.len) return error.OutOfSpace;
-            const digit_col = col + @as(u16, @intCast(digit_index));
-            out[op_count] = .{ .text = .{
-                .origin = .{
-                    .x = props.origin_px.x + @as(i32, digit_col) * @as(i32, props.cell_w_px),
-                    .y = y,
-                },
-                .runs = run_slice,
-                .role = line_number_role,
-                .max_cols = 1,
-            } };
-            op_count += 1;
-        }
+        if (op_count >= out.len) return error.OutOfSpace;
+        out[op_count] = .{ .text = .{
+            .origin = .{
+                .x = props.origin_px.x + @as(i32, col) * @as(i32, props.cell_w_px),
+                .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+            },
+            .runs = run_slice,
+            .role = line_number_role,
+            .max_cols = field_cols,
+            .cell_grid = .{ .cell_w_px = props.cell_w_px, .cell_h_px = props.cell_h_px },
+        } };
+        op_count += 1;
     }
 
     return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used };

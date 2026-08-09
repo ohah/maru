@@ -63,6 +63,7 @@ pub const components = struct {
         pub const geometry = @import("chrome/components/editor_view/geometry.zig");
         pub const gutter = @import("chrome/components/editor_view/gutter.zig");
         pub const content = @import("chrome/components/editor_view/content.zig");
+        pub const viewport = @import("chrome/components/editor_view/viewport.zig");
     };
     pub const session_dock = @import("chrome/components/session_dock.zig"); // archive session dock typed layout/action/view facade
     pub const archive_detail = @import("chrome/components/archive_detail.zig"); // redacted archive detail typed layout/action/view facade

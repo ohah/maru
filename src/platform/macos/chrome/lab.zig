@@ -44,6 +44,9 @@ pub const ScenarioId = enum {
     /// 자릿수가 늘어도(9→10) 본문 시작 열이 흔들리지 않는지가 단위 테스트로 안 보이는 부분이다.
     /// 좌표계를 셀↔픽셀로 오갈 때 어긋나는 회귀는 캡처로만 드러난다(탭 제목 이관 때 실제로 그랬다).
     editor_gutter,
+    /// N1 §4 — 뷰포트 컬링. 문서 중간으로 스크롤한 상태를 픽셀로 본다. **줄 번호가 1이 아니라
+    /// first_row+1에서 시작하는지**가 핵심이고, gutter 폭이 자릿수를 따라 넓어지는지도 함께 나온다.
+    editor_scrolled,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -103,7 +106,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -169,13 +172,26 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const total_cols: u16 = @intCast(viewport_w / cell_w_px);
     const line_count: usize = editor_fixture_lines.len;
 
-    const layout = editor_view.geometry.compute(total_cols, line_count, .{});
-    const visible_rows: u16 = @intCast(@min(line_count, viewport_h / cell_h_px));
+    // 스크롤 시나리오는 **화면을 일부러 좁힌다.** fixture를 화면보다 길게 늘리는 것보다 이쪽이
+    // 낫다 — 줄을 60개 손으로 쓰면 골든이 무엇을 보는지 흐려지고, 좁은 화면은 실제 분할 pane에서
+    // 늘 일어나는 상태다.
+    const vp: editor_view.viewport.Viewport = switch (scenario.id) {
+        .editor_scrolled => .{ .first_row = 5, .rows = 6 },
+        else => .{ .first_row = 0, .rows = @intCast(viewport_h / cell_h_px) },
+    };
 
-    // gutter와 본문이 같은 op 배열을 나눠 쓴다. gutter를 먼저 채우고 남은 자리에 본문을 잇는다.
-    var gutter_rows: [64]editor_view.gutter.Row = undefined;
-    const grows = editor_view.gutter.rowsForRange(0, visible_rows, &gutter_rows);
-    const gutter_ops = try editor_view.gutter.build(.{
+    const layout = editor_view.geometry.compute(total_cols, line_count, .{});
+    // 행 저장소가 고정이므로 **거기에 맞춰 자른다.** 지금 fixture로는 넘지 않지만, 줄을 늘리거나
+    // 뷰포트를 키우면 `while (n < visible)` 루프가 배열 밖을 쓴다. 잘린 캡처가 나오는 편이
+    // 메모리를 밟는 것보다 낫고, 그 상태는 골든이 즉시 잡는다.
+    const row_capacity: u16 = 64;
+    const visible = @min(vp.visibleRows(line_count), row_capacity);
+
+    // gutter와 본문이 같은 저장소를 나눠 쓴다. **쓴 양은 각 build가 돌려준 값으로만** 넘긴다 —
+    // 호출자가 다시 계산하면 그쪽 내부 규칙을 복제하게 된다.
+    var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
+    const grows = editor_view.gutter.rowsForRange(vp.first_row, visible, &gutter_rows);
+    const gw = try editor_view.gutter.build(.{
         .layout = layout,
         .rows = grows,
         .cell_w_px = cell_w_px,
@@ -183,39 +199,25 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .origin_px = .{ .x = 0, .y = 0 },
     }, buffers.ops, buffers.text_bytes, buffers.text_runs);
 
-    // gutter가 쓴 만큼을 빼고 넘긴다 — 겹쳐 쓰면 줄 번호 문자열이 본문 전개 결과로 덮인다.
-    var text_used: usize = 0;
-    for (grows) |r| {
-        if (r.number != null) text_used += digitsIn(r.number.?);
-    }
-
-    var content_rows: [64]editor_view.content.Row = undefined;
+    var content_rows: [row_capacity]editor_view.content.Row = undefined;
     var n: u16 = 0;
-    while (n < visible_rows) : (n += 1) {
-        content_rows[n] = .{ .bytes = editor_fixture_lines[n], .visual_row = n };
+    while (n < visible) : (n += 1) {
+        content_rows[n] = .{ .bytes = editor_fixture_lines[vp.first_row + n], .visual_row = n };
     }
 
-    const content_ops = try editor_view.content.build(.{
+    const cw = try editor_view.content.build(.{
         .layout = layout,
-        .rows = content_rows[0..visible_rows],
+        .rows = content_rows[0..visible],
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
-    }, buffers.ops[gutter_ops..], buffers.text_bytes[text_used..], buffers.text_runs[gutter_ops..]);
+    }, buffers.ops[gw.ops..], buffers.text_bytes[gw.bytes..], buffers.text_runs[gw.runs..]);
 
     return .{
         // 아직 hit-test 대상이 없다(줄 번호 클릭은 N2의 줄 선택, 본문 클릭은 캐럿 배치다). 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
-        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. gutter_ops + content_ops] },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. gw.ops + cw.ops] },
     };
-}
-
-/// 줄 번호가 scratch에 쓴 byte 수. gutter가 쓴 만큼을 건너뛰기 위해 같은 방식으로 센다.
-fn digitsIn(n: usize) usize {
-    var d: usize = 1;
-    var v = n;
-    while (v >= 10) : (v /= 10) d += 1;
-    return d;
 }
 
 fn buildDockFrame(
@@ -314,7 +316,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

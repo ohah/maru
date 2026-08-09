@@ -1243,7 +1243,10 @@ pub const RemoteRuntime = struct {
             if (hook) |run| _ = run(self, .before_purge);
             switch (generation.purgeEndedStream() catch |err|
                 return mapGenerationPurgeError(err)) {
-                .purged => return .{ .ended = true },
+                .purged => {
+                    result.ended = true;
+                    return result;
+                },
                 .not_ended => if (hook) |run| {
                     _ = run(self, .after_purge_not_ended);
                 },

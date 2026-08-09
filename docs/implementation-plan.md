@@ -1408,7 +1408,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       revoked→borrow/classify→fence→release와 generation raw Client event source-zero를 소유한다. C3-1에는 제품 pump/socket
       consumer가 0이고, C3-3 전에는 2c3d 완료나 generation event source-zero를 주장하지 않는다.
       C3-3은 `applyObservationEvent` generation arm의 raw `self.client.wire_major`, `metadata_support`, `poison`과 raw Client
-      revoke-fence 인자를 제거하고 `GenerationCapabilities`+mode-specific typed effect adapter로 대체한다. 공통
+      revoke-fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거하고
+      `GenerationCapabilities`+mode-specific typed effect adapter로 대체한다. 공통
       classify/materialize/apply policy만 mode-neutral SSOT로 남긴다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는

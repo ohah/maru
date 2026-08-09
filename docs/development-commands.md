@@ -103,7 +103,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 포맷: `mise run fmt`
 - 포맷 검사(변경 없이): `mise run fmt-check`
 - facade import 경계 검사: `mise run check-boundaries`
-- external source digest 갱신: `mise run update-boundary-digest` — `check-boundaries`의 external reflection inventory는 대상 파일의 **비-test 토큰 전체**를 SHA-256으로 잠근다. 그래서 그 파일(특히 `app_session.zig`)을 건드리는 거의 모든 PR이 `tests/boundary/imports.zig`의 digest 한 줄을 다시 써야 하고, main이 같은 파일을 건드리면 **리베이스마다 또** 써야 한다. 이 태스크가 그 손작업만 없앤다(실패 메시지의 해시를 눈으로 옮겨 적을 필요가 없다). **`@field` 사이트 수(`count`)가 바뀌면 갱신을 거부하고 멈춘다** — 그건 digest 이동이 아니라 반사 접근 자체가 늘거나 준 것이고, 이 게이트가 잡으려는 바로 그 신호이기 때문이다. 갱신 뒤에는 그 파일의 관행대로 **사유 주석 한 줄**을 직접 남긴다(도구가 사유를 지어내지 않는다).
+- external source digest 갱신: `mise run update-boundary-digest` — `check-boundaries`의 external reflection inventory는 대상 파일의 **비-test 토큰 전체**를 SHA-256으로 잠근다. 그래서 그 파일(특히 `app_session.zig`)을 건드리는 거의 모든 PR이 `tests/boundary/external_source_digests.zig`의 digest 한 줄을 다시 써야 하고, main이 같은 파일을 건드리면 **리베이스마다 또** 써야 한다. 이 태스크가 그 손작업만 없앤다(실패 메시지의 해시를 눈으로 옮겨 적을 필요가 없다). **`@field` 사이트 수(`count`)가 바뀌면 갱신을 거부하고 멈춘다** — 그건 digest 이동이 아니라 반사 접근 자체가 늘거나 준 것이고, 이 게이트가 잡으려는 바로 그 신호이기 때문이다. 갱신 뒤에는 그 파일의 관행대로 **사유 주석 한 줄**을 직접 남긴다(도구가 사유를 지어내지 않는다).
 - config 문서 ↔ 로더 키 대조: `mise run check-config-docs`(문서가 실재하지 않는 키를 광고하는지 — [config 스키마](config-schema.md#문서--키-양방향-게이트))
 - 아이콘 SVG→coverage 재생성 동기 검사(opt-in): `mise run icons:check` (로컬에 `rsvg-convert`와 Python Pillow 필요; 기본 `check`는 외부 도구 없이 SVG SHA-256 manifest와 C/Zig registry를 검사)
 - macOS AppSession 탐색기 성능 artifact gate: `mise run macos-file-explorer-perf` (전용 AppSession test 1개, 16,384 rows/1,000 events; Ubuntu에서는 skip되므로 별도 macOS PR CI job이 실행)

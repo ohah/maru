@@ -59,150 +59,8 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
     .{ .path = "src/platform/macos/session_host/client_external_turn_authority.zig", .function = "writeSeed", .expression = "@field(seed,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/executed_response.zig", .function = "responseTranscriptDigest", .expression = "@field(response,field.name)", .count = 1 },
 };
-const ExternalReflectionInventoryProof = struct {
-    path: []const u8,
-    count: usize,
-    digest_hex: []const u8,
-};
-const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "da55524e0da397637fae2ce52c0030719551a1ae2a931ae9cbd7bf9c8814a335" },
-    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
-    // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "6a7538dfdc98ece9f85c70584a2500e505f7d278d84716190780585fa198a7d6" },
-    // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
-    // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
-    // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
-    // CIM2가 divider capture 헬퍼(publish·carry key·tick 소비)와 AppKit E2E probe를 더하면서 digest가
-    // 바뀐다. reflection
-    // 수는 그대로 4다 — 새 코드는 필드를 이름으로 읽지 않고 live split 포인터만 비교한다.
-    // 이어서 Session Dock 키보드 소유권을 `agent_session_dock_key_focus`로 옮기며 다시 바뀐다.
-    // 여기서도 count는 4 그대로다 — 새 reflection 없이 제품 토큰만 달라졌다.
-    // Session Dock 스크롤 회귀 수정(셰이핑 캐시의 스크롤 기준·뷰포트 clip 전달·submit 시점 origin 배선)으로
-    // 다시 digest가 바뀐다. count는 여전히 4다 — 새 코드는 필드를 이름으로 읽지 않고 값만 넘긴다.
-    // CIM4b가 탭 드래그 preview를 model 밖 transaction으로 옮기며 또 바뀐다. count는 여전히 4다 —
-    // 새 코드(`paneTermOrder`·`paneActiveTermIndex`·`commitTabDragOrder`)는 필드를 이름으로 읽지 않고
-    // `*Term` 포인터와 인덱스만 다룬다.
-    // scrollbar coalescer를 tick이 소비하게 하며 또 바뀐다. count는 여전히 4다 — 호출 한 줄과 fixture뿐이다.
-    // 세션 도크 결함 묶음(텍스트 동기 셰이핑·스크롤바 발행/드래그·도크 view bar 기하)으로 다시 바뀐다.
-    // count는 여전히 4다 — 새 코드는 필드를 이름으로 읽지 않는다. 셰이핑은 op 슬라이스와 fingerprint만,
-    // 스크롤바는 published rect와 opaque drag payload만, view bar는 `DockMetrics` 값 하나만 다룬다.
-    // IC2(아이콘 이름 registry 이관)가 헤더·카드·에이전트 아이콘의 codepoint 리터럴을 `icons.codepoint(...)`/
-    // `icons.utf8(...)` 호출로 바꾸며 다시 바뀐다. count는 여전히 4다 — 이름 registry는 생성된 enum 상수라
-    // 필드를 이름으로 읽는 reflection이 아니다(`@field` 없음, comptime switch 한 번).
-    // IC4(아이콘 크기 토큰)가 헤더 아이콘 배율 상수를 `chrome.ui.icon`으로 옮기며 또 바뀐다. count는 4 그대로다 —
-    // 토큰 호출은 값 계산일 뿐 필드를 이름으로 읽지 않는다.
-    // 적대적 검증 수선이 `sidebar` → `sidebar_collapse`(그림 이름)로 바꾸며 또 바뀐다. count는 4 그대로다.
-    // SV1a(스크롤 좌표계를 `chrome/ui/scroll_area.zig`로 이관)가 props·버퍼 크기 단일 출처 추출과 스크롤
-    // 판정자 추가로 또 바꾼다. count는 4 그대로다 — 옮긴 것은 값 계산(높이·offset·버퍼 크기)이고,
-    // `ArchiveScrollItems`·`agentSessionDockProps`·`bufferSizes` 어느 것도 필드를 이름으로 읽지 않는다.
-    // SV1b의 `ScrollView` → `ScrollArea` 리네이밍이 같은 파일의 타입 참조를 바꾸며 또 바뀐다.
-    // count는 4 그대로다 — 이름만 달라졌고 읽는 방식은 그대로다.
-    // 렌더 낡음·깜빡임 수선(force_reproject·도크 caret blink·quad 수명/순서·chrome 기하 스탬프·
-    // 스크롤바/hit-test lock 계약·placement 실패 가드)으로 또 바뀐다. count는 4 그대로다 —
-    // 더한 어느 코드도 필드를 이름으로 읽지 않는다.
-    // SV1c가 뷰포트 예측식을 측정 pass로 바꾸고 drag·휠 잔여를 `scroll_area`로 옮기며 또 바뀐다.
-    // count는 4 그대로다 — host에서 사라진 것은 값 산술이고, 새로 부르는 `Drag`·`State`도 필드를
-    // 이름으로 읽지 않는다.
-    // SB1-S2a(상태바 ABI seam)로 또 바뀐다. count는 4 그대로다 — 새 값은 `dock_layout` 권위에서
-    // 읽어 스탬프에 싣는 것뿐이고, 필드를 이름으로 읽지 않는다.
-    // SV1d(도크 그룹 헤더 sticky)가 걸린 그룹 산출·그룹 DTO 단일 출처·스크롤 텍스트 뷰포트 배선으로
-    // 또 바뀐다. count는 4 그대로다 — `archiveStickyGroupFor`는 entry union을 switch로 보고,
-    // `agentSessionDockGroupItem`은 필드를 이름이 아니라 값으로 옮긴다.
-    // SB1-S2b(상태바 높이 flip)로 또 바뀐다. count는 4 그대로다 — 더한 코드는 높이를 빼거나 quad를
-    // 하나 더할 뿐이고, 필드를 이름으로 읽지 않는다.
-    // SB1-S3b(상태바 브랜치 항목)로 또 바뀐다. count는 4 그대로다 — 항목 수집은 기존 collectShaped
-    // 경로에 dest 하나를 더한 것뿐이고, 필드를 이름으로 읽지 않는다.
-    // SV2-0(탐색기 스크롤 판정자)이 그리는 창을 `fileTreeDrawWindow`로, clamp를 `clampFileTreeScroll`로
-    // 꺼내며 또 바뀐다. count는 4 그대로다 — 둘 다 정수만 계산하고 필드를 이름으로 읽지 않는다.
-    // SB1-S3c(상태바 cwd 항목)로 또 바뀐다. count는 4 그대로다 — 항목을 배열로 모으고 배치에
-    // 넘기는 것뿐이고, 필드를 이름으로 읽지 않는다.
-    // SB1-S3d(상태바 알림 항목 + 헤드리스 검증 훅)로 또 바뀐다. count는 4 그대로다 — 우측 배열을
-    // 하나 더 넘기는 것뿐이고, 필드를 이름으로 읽지 않는다.
-    // SV2a-2(탐색기 pane을 role로 표시하고 clip을 실어 v147 seam의 첫 소비자가 된다)로 또 바뀐다.
-    // count는 4 그대로다 — 더한 것은 bool 하나와 rect 전달뿐이고 필드를 이름으로 읽지 않는다.
-    // SB1-S3e(상태바 에이전트 항목 + 검증 훅)로 또 바뀐다. count는 4 그대로다.
-    // 상태바 높이를 텍스트 행 + 여백에서 파생하며 또 바뀐다. count는 4 그대로다.
-    // 사이드바 scissor 산술을 `.m`에서 Zig로 옮기며 또 바뀐다(ABI v168). count는 4 그대로다.
-    // SV2a-3(탐색기 스크롤 상태를 행에서 픽셀로)으로 또 바뀐다. count는 4 그대로다 — 바뀐 것은 탐색기
-    // 스크롤 좌표계와 그 소비처들이고, Client 구성이나 receiver 집합과는 무관하다.
-    // 상태바를 typed tree 소비자로 만들며(hover·클릭) 또 바뀐다. count는 4 그대로다.
-    // SV2b(탐색기 스크롤바를 공용 ScrollArea/paint 경로로 이관)로 또 바뀐다. count는 4 그대로다 —
-    // 바뀐 것은 스크롤바의 발행·paint 경로이고 Client 구성이나 receiver 집합과는 무관하다.
-    // SV3a(소스 컨트롤 목록을 픽셀 스크롤로, 헤더/목록 draw list 분리)로 또 바뀐다. count는 4 그대로다.
-    // 도크 진입 seam 분리(`enterDockView`/`onDockViewPresented`/`shouldRefreshArchiveOnPresent`)와 아카이브
-    // `partial` DTO 노출로 또 바뀐다. count는 4 그대로다 — 더한 것은 진입 훅과 스캐너 신호 전달뿐이고,
-    // Client 구성이나 receiver 집합과는 무관하다.
-    // 세션 카드의 서브에이전트 개수 표시로 또 바뀐다. count는 4 그대로다 — 스캐너가 센 값을 메타 문구에
-    // 잇는 것뿐이다.
-    // 세션 재개를 로그인 셸 경유로 바꾸며 또 바뀐다(`buildResumeShellCommand`). count는 4 그대로다 —
-    // spawn request의 command/args를 다르게 채울 뿐 Client 구성과는 무관하다.
-    // AS5(스트리밍 파서 + read cap 제거 + 점진 publish)로 또 바뀐다. count는 4 그대로다 — 결과 종류를
-    // union으로 정리하고 부분 진행을 다루는 분기가 늘었을 뿐이다.
-    // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
-    // 선택 해제 전이(⌘A 하이라이트가 트래킹 pane에서 안 지워지던 결함 — `clearSurfaceSelection`을 리포팅
-    // 클릭·휠·타이핑·Esc에 배선)로 또 바뀐다. count는 4 그대로다 — 더한 것은 `select_clear` 명령 enqueue
-    // 하나와 그 호출들뿐이고, Client 구성이나 receiver 집합과는 무관하다.
-    // v169(셀이 자기 clip을 든다 — PaneFrameRole.dock_list 제거)로 또 바뀐다. count는 4 그대로다.
-    // SV3b(소스 컨트롤 스크롤바 신규 + 발행 상태를 dock_list_scroll_*로 공유)로 또 바뀐다. count는 4 그대로다.
-    // 상태바 경로 항목이 컴포넌트 단위 생략을 타면서 또 바뀐다. count는 4 그대로다.
-    // SV4a(사이드바 스크롤바를 선언된 tree로 이관 + gutter 상시 예약)로 또 바뀐다. count는 4 그대로다.
-    // SV4b(사이드바 스크롤바 드래그 — capture·drag는 공유하고 대상만 태그)로 또 바뀐다. count는 4 그대로다.
-    // SV4b 후속(스크롤바 layer 3 복원 + hover 게이트)으로 또 바뀐다. count는 4 그대로다.
-    // 사이드바 스크롤바 hover 강조(커서는 안 바꾸고 alpha만)로 또 바뀐다. count는 4 그대로다.
-    // 사이드바 셀 scissor 게이트 수정(밴드 배열 → 실제로 그릴 셀이 있는가)으로 또 바뀐다. count는 4 그대로다.
-    // 상태바 브랜치 메뉴(요청·걷기·선택 주입)로 또 바뀐다. count는 4 그대로다.
-    // 상태바 브랜치 메뉴(요청·걷기·선택 주입)로 또 바뀐다. count는 4 그대로다.
-    // 도크 진입 seam 분리(`enterDockView`/`onDockViewPresented`/`shouldRefreshArchiveOnPresent`)와 아카이브
-    // `partial` DTO 노출로 또 바뀐다. count는 4 그대로다 — 더한 것은 진입 훅과 스캐너 신호 전달뿐이고,
-    // Client 구성이나 receiver 집합과는 무관하다.
-    // 세션 카드의 서브에이전트 개수 표시로 또 바뀐다. count는 4 그대로다 — 스캐너가 센 값을 메타 문구에
-    // 잇는 것뿐이다.
-    // 세션 재개를 로그인 셸 경유로 바꾸며 또 바뀐다(`buildResumeShellCommand`). count는 4 그대로다 —
-    // spawn request의 command/args를 다르게 채울 뿐 Client 구성과는 무관하다.
-    // 상단 바 통일(터미널 탭 바 = 도크 뷰 스위처)로 또 바뀐다. 높이는 공유 chrome token `space.bar_height_pt`가,
-    // 시작선은 `titlebar_strip_px` 하나가 정한다(도크 전용 `dock_top_px` 제거). 둘 다 terminal cell을 `@max`로도
-    // 섞지 않는다 — 섞었더니 `font-scale-rects` fixture가 14pt↔24pt 도크 rect 12px 이동을 잡아냈다. count는 4
-    // 그대로다: `chromeBarHeightPx`·`chromeBarTextOffsetY`는 토큰 값과 rect 높이로 산술만 하고, 시작선 쪽은
-    // 입력 필드 하나를 뺀 것이라 어느 쪽도 필드를 이름으로 읽지 않는다.
-    // 브랜치 메뉴 앵커 게이트로 또 바뀐다. count는 4 그대로다.
-    // 사이드바 카드 ✕의 열 배치를 chrome 단일 출처(`sidebar.columns`)로 올리며 또 바뀐다. count는 4 그대로다 —
-    // 새 헬퍼(`sidebarColumns`·`sidebarCloseButtonAt`)는 토큰 값을 chrome 함수에 넘기고 그 결과로 산술만 하며,
-    // 필드를 이름으로 읽지 않는다.
-    // SV5b(팔레트 스크롤바를 공용 발행 경로로 — 상태는 안 만든다)로 또 바뀐다. count는 4 그대로다.
-    // AS6(정렬 키·방향 토글)로 또 바뀐다. count는 4 그대로다.
-    // 아카이브 스캔 스트리밍 이관(점진 publish 요청 플래그)으로 또 바뀐다. count는 4 그대로다.
-    // 웹 탭 ⌘F 라우팅 게이트로 또 바뀐다. count는 4 그대로다.
-    // Chrome 텍스트 face를 사용자 `font.family`로 넘기며 또 바뀐다(docs/font-strategy.md "Chrome 텍스트
-    // face"). count는 4 그대로다 — resolved appearance의 두 문자열을 셰이핑 요청에 실어 보낼 뿐이고,
-    // Client 구성이나 receiver 집합과는 무관하다.
-    // SV5c(세팅 스크롤바 + 오버레이 발행 공통화)로 또 바뀐다. count는 4 그대로다.
-    // SV5d(오버레이 휠·드래그 + offset 상태 도입)로 또 바뀐다. count는 4 그대로다.
-    // SV5d(오버레이 휠·드래그 + offset 상태 + 값 비교 selection follow)로 또 바뀐다. count는 4 그대로다.
-    // 웹 탭 페이지 찾기(§8 슬라이스 ② — take/provide/undeliverable 3종)로 또 바뀐다. count는 4 그대로다.
-    // 사이드바 헤더를 신호등 띠 + 상단 바 두 밴드로 정렬하며 또 바뀐다(docs/file-explorer.md §3.5). count는 4
-    // 그대로다 — 헤더 높이·밴드 y를 푸는 순수 헬퍼와 draw list 분리뿐이고, Client 구성·receiver 집합과는 무관하다.
-    // `reapplyAmbiguousWidth`의 빈 lockCore/unlockCore 쌍을 제거하며 또 바뀐다. count는 4 그대로다 —
-    // 죽은 락 두 줄을 지웠을 뿐 `@field` 접근과 무관하다.
-    // `handleKeyEvent`의 라우팅 분기 21개가 공유하던 key-down 종결부를 헬퍼 3개
-    // (`settleKeyEventSummary`·`keyConsumedByApp`·`keyIgnored`)로 모으며 또 바뀐다. count는 4 그대로다 —
-    // 종결부는 요약 필드에 값을 쓸 뿐이고 Client 구성이나 `@field` 접근과 무관하다.
-    // `mouse`의 진행 중 포인터 제스처 라우팅 9블록을 `routeActivePointerGesture`로 떼어내며 또 바뀐다.
-    // count는 4 그대로다 — 블록을 통째로 옮겼을 뿐 `@field` 접근을 더하거나 빼지 않는다.
-    // `tick`의 지연 포인터 입력 적용·pre housekeeping·Find 뷰포트 span 계산을 각각 함수로 떼어내며 또
-    // 바뀐다. count는 4 그대로다 — 블록 이동일 뿐 `@field` 접근과 무관하다.
-    // measured 텍스트 캐시를 소비처별 슬롯 + 공용 헬퍼(hit/store/clear)로 일반화하며 또 바뀐다
-    // (docs/file-explorer.md §3.5 이관 1단계). count는 4 그대로다 — 캐시 소유권 규칙을 한곳에 모은 것뿐이고,
-    // Client 구성·receiver 집합과는 무관하다.
-    // SV6a(공용 lowering이 layer를 받는다 — 소비처의 되돌리기 제거)로 또 바뀐다. count는 4 그대로다.
-    // 웹 find 결과의 죽은 사본(`web_find_result`)을 지우며 또 바뀐다. count는 4 그대로다 — 읽는 곳이
-    // 없던 필드를 뺀 것뿐이고, Client 구성·receiver 집합과는 무관하다.
-    // 사이드바 검색 줄 텍스트를 measured 경로로 옮기며 또 바뀐다(이관 2단계, docs/file-explorer.md §3.5).
-    // count는 4 그대로다 — 검색 텍스트의 rect·문자열·수집 헬퍼를 더한 것뿐이고 Client 구성과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "47247d27f995730ca7f3f39b2468ed671e4f78379dadf541164fd652986054ea" },
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
-    .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
-    .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },
-};
+// external source digest 원장은 데이터 전용 파일로 뗐다(충돌 표면 축소 — 그 파일 머리 주석 참고).
+const external_digests = @import("external_source_digests.zig");
 
 test "CR3a-2c2b3b B3b-S shared guard oracle rejects alias late and unbound release shapes" {
     const good =
@@ -9092,8 +8950,8 @@ fn scanClientConstructionSource(
         var digest: [32]u8 = undefined;
         external_source_hasher.final(&digest);
         const digest_hex = std.fmt.bytesToHex(digest, .lower);
-        var proof_match: ?ExternalReflectionInventoryProof = null;
-        for (external_reflection_inventory) |proof| {
+        var proof_match: ?external_digests.Proof = null;
+        for (external_digests.inventory) |proof| {
             if (!std.mem.eql(u8, proof.path, path)) continue;
             proof_match = proof;
             break;

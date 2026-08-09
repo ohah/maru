@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-INVENTORY = REPO / "tests" / "boundary" / "imports.zig"
+INVENTORY = REPO / "tests" / "boundary" / "external_source_digests.zig"
 
 # `external source inventory mismatch: <path> count=<n> digest=<hex>`
 MISMATCH = re.compile(
@@ -123,7 +123,7 @@ def main() -> int:
     for path, old, new in updated:
         print(f"  {path}\n    {old[:16]}… → {new[:16]}…")
     print(
-        "\n갱신은 기계적이지만 **사유는 아니다.** tests/boundary/imports.zig의 해당 항목 위에\n"
+        "\n갱신은 기계적이지만 **사유는 아니다.** tests/boundary/external_source_digests.zig의 해당 항목 위에\n"
         "그 파일의 관행대로 사유 주석을 한 줄 남겨라 — 무엇을 바꿔서 digest가 움직였는지,\n"
         "그리고 count가 그대로인 이유를. 그 원장이 '이 digest가 왜 또 바뀌었나'의 유일한 기록이다."
     )

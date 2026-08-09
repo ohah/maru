@@ -47,6 +47,15 @@ pub fn statusBarBg(sidebar: Rgb, terminal: Rgb) Rgb {
     return if (ls >= lt) lightenRgb(sidebar, 14) else darkenRgb(sidebar, 14);
 }
 
+/// 상태바 **상단 경계선** 색. 바 배경에 divider 규칙을 한 번 더 적용한다.
+///
+/// 이 선은 위(터미널)와 아래(상태바) **둘 다와** 달라야 의미가 있다. `dividerBg`는 기준색의 명암 반대
+/// 방향으로 옮기고, 바 색 자체가 이미 터미널 반대 방향으로 옮겨진(`statusBarBg`) 색이라 — 다크에선
+/// 터미널<바<선, 라이트에선 터미널>바>선으로 세 색이 한 방향으로 벌어져 양쪽 대비가 동시에 보장된다.
+pub fn statusBarBorder(sidebar: Rgb, terminal: Rgb) Rgb {
+    return dividerBg(statusBarBg(sidebar, terminal));
+}
+
 /// Panel 경계선은 interactive active color에서 파생하지 않는다. active와 panel의 우연한 조합(예:
 /// panel=40, active=64, active-24=40)이 1px rule을 배경과 완전히 같게 만들어 목록 경계가 사라졌기
 /// 때문이다. 명암 반대 방향의 작은 이동은 dark/light panel 모두에서 semantic divider가 배경과 다름을
@@ -457,6 +466,32 @@ test "statusBarBg: 사이드바와도 터미널과도 구분된다(다크·라�
         try std.testing.expect(channelDistance(bar, c.side) >= 10);
         try std.testing.expect(channelDistance(bar, c.term) >= 10);
     }
+}
+
+test "statusBarBorder: 위(터미널)·아래(바) 양쪽과 구분되고 세 색이 한 방향으로 벌어진다" {
+    const cases = [_]struct { name: []const u8, term: Rgb, side: Rgb }{
+        .{ .name = "다크 기본", .term = .{ .r = 40, .g = 44, .b = 52 }, .side = .{ .r = 64, .g = 68, .b = 76 } },
+        .{ .name = "Solarized 라이트", .term = .{ .r = 253, .g = 246, .b = 227 }, .side = .{ .r = 238, .g = 232, .b = 213 } },
+        .{ .name = "Catppuccin 라이트", .term = .{ .r = 239, .g = 241, .b = 245 }, .side = .{ .r = 230, .g = 233, .b = 239 } },
+    };
+    for (cases) |c| {
+        const bar = statusBarBg(c.side, c.term);
+        const line = statusBarBorder(c.side, c.term);
+        // 선이 바에 묻히면 안 그린 것과 같고, 터미널에 묻히면 경계가 아니라 얼룩으로 보인다.
+        try std.testing.expect(channelDistance(line, bar) >= 10);
+        try std.testing.expect(channelDistance(line, c.term) >= 10);
+        // 터미널 → 바 → 선이 **같은 방향**으로 간다(단조). 방향이 꺾이면 선이 터미널 쪽으로 되돌아가
+        // 대비가 우연에 기댄다.
+        const lt = testLum(c.term);
+        const lb = testLum(bar);
+        const ll = testLum(line);
+        if (lb >= lt) try std.testing.expect(ll > lb) else try std.testing.expect(ll < lb);
+    }
+}
+
+/// 테스트용 명암 — 토큰 내부와 같은 가중치.
+fn testLum(c: Rgb) u16 {
+    return (@as(u16, c.r) * 77 + @as(u16, c.g) * 150 + @as(u16, c.b) * 29) >> 8;
 }
 
 /// 채널 평균 거리 — 색 비교용 테스트 도우미.

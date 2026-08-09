@@ -262,6 +262,28 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > `<name>_ops.`를 부르면 후보에서 뺀다. F15에서 `scmDrawWindow` 하나를, term/surface 후보 조사에서
 > 9개를 자동으로 걸러 냈다.
 >
+> ## F6 보정 — 탭 그룹 모델을 `tab.zig`로(2026-08-10)
+>
+> F7에서 등록한 후속을 처리했다. `moveGroupSibling`·`moveGroupRange`·`relevelBlock`·`relevelBlockCore`·
+> `groupSubtreeEnd`·`effectiveDepthAt`·`enclosingGroupMarkerIndex`·`pinBoundariesAlignGroups`·
+> `stablePartitionPinned`·`stablePartitionSubtree`·`assertPinnedPrefixRuntime`·`pinRegionBounds`·
+> `moveGroupNesting`·`simulateGroupMove`와 F9에서 더한 `togglePin`·`cardPinRole` **16개(341줄)**다.
+>
+> 이들은 **이름에 `tab`이 없어 F6가 못 가져갔고**, 사이드바 드래그·컨텍스트 메뉴에서만 불려 F7·F9에
+> 잘못 흡수될 뻔했다. 본문은 탭 그룹 마커와 depth를 수술하므로 소유는 `tab.zig`다.
+>
+> | | |
+> |---|---|
+> | `app_session.zig` | 55,435 → **54,989** (−446) |
+> | 허브 pub | 557 → **553** (−4) |
+> | `tab.zig` | 1,571 → 2,054 |
+>
+> **F6가 열었던 pub이 실제로 닫혔다.** F7 PR에서 "옮기면 F6에서 연 pub 여럿이 다시 닫힌다"고 적었고
+> 그대로 됐다 — 제거 10개, 신규 6개다.
+>
+> 이 작업으로 "이름에 도메인 단어가 없어 이름 기준으로 못 잡는 코드"의 첫 사례가 정리됐다. 나머지는
+> 호출 그래프 클러스터링이 필요하고 별개 작업이다.
+>
 > ## 파일 레벨 헬퍼 동반 이동 — pub이 처음으로 줄었다(2026-08-10)
 >
 > F14에서 "흡수 규칙이 `self.X(` 메서드 호출만 봐서 파일 레벨 자유 함수·상수가 전부 pub이 된다"고

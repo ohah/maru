@@ -209,7 +209,9 @@ pub const inventory = [_]Proof{
     // 호출자 3개는 게이트를 느슨하게 하는 대신 허브에 남겼다.
     // 한 그룹만 쓰는 파일 레벨 헬퍼 65개를 각 그룹 파일로 함께 옮기며 바뀐다. count는 2 그대로다 —
     // 옮긴 블록에 `@field`가 없다. 이 작업으로 허브 pub이 621 → 557로 **줄었다**(F 시리즈 이래 처음).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "2316cf2b88e2f77ef514bb706e34761f87dfeca1d7420f931873d3c0f7c69f4e" },
+    // F6 보정(탭 그룹 모델 16개를 `tab.zig`로)으로 또 바뀐다. count는 2 그대로다 — 옮긴 블록에
+    // `@field`가 없고, F6가 열었던 pub 10개가 닫혔다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f6d5424d541c852b789fbe48f3b162e7de597c6832777a9cb86c16edab6216fe" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -225,7 +227,7 @@ pub const inventory = [_]Proof{
     // 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다 — 이사한 반사를 여기 등재해 짝을 맞춘다.
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 위 주석이 "등재한다"고
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "a1a9abc148e73de0dc4307f0a19598c54961be53caf78d7551e2a236f5090bcd" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "0bf3e01607378a4a1feba57f78a03d3316774a663b571c2d59aa460fd5671bea" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

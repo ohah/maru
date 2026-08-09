@@ -1152,7 +1152,7 @@ pub fn buildContextMenuItems(self: *AppSession) []const []const u8 {
         //  · 마커 카드(.group) = 그룹째 고정(헤더 동형, 개별 pin이면 C2 캐시 권위 §12.2가 깨져 그룹째가 유일 안전)
         //  · 비마커 멤버(.local) = **그룹 내 위치 고정**(toggleLocalPin, 현행 그룹째 위임 되돌림 — 그룹-로컬 축)
         //  · 최상위 카드(.individual) = 개별 전역 위치 고정(togglePin, 현행)
-        self.context_menu_items_buf[n] = switch (self.cardPinRole(t.workspace)) {
+        self.context_menu_items_buf[n] = switch (tab_ops.cardPinRole(self, t.workspace)) {
             .group => if (tab_ops.enclosingGroupMarkerTab(self, t.workspace)) |mk|
                 (if (mk.pinned) "그룹 고정 해제" else "그룹째 고정")
             else
@@ -1562,10 +1562,10 @@ pub fn acceptContextMenu(self: *AppSession) void {
         if (sel == ctx_menu_pin) {
             // GL §13 GL2 — cardPinRole 분기(라벨과 공유). 비마커 멤버=그룹-로컬 위치 고정(toggleLocalPin, 현행 그룹째
             // 위임 되돌림)·마커 카드=그룹째 고정(toggleGroupPin, C2 권위 §12.2 — 개별 pin이면 캐시 desync)·최상위=개별 togglePin.
-            switch (self.cardPinRole(tab)) {
+            switch (tab_ops.cardPinRole(self, tab)) {
                 .group => if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| self.toggleGroupPin(mk),
                 .local => self.toggleLocalPin(tab),
-                .individual => self.togglePin(tab),
+                .individual => tab_ops.togglePin(self, tab),
             }
         } else if (sel == ctx_menu_group_create) {
             tab_ops.createGroupForTab(self, tab); // 새 그룹으로 묶기=중첩(단축키 Cmd+Opt+G·팔레트 공유 — 클릭 대상 기준)

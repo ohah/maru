@@ -29,7 +29,7 @@ const unsetenv = app_session_mod.unsetenv;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
-const assertPinnedPrefixRuntime = AppSession.assertPinnedPrefixRuntime;
+const assertPinnedPrefixRuntime = @import("tab.zig").assertPinnedPrefixRuntime;
 const file_tree_backend = app_session_mod.file_tree_backend;
 const file_tree = app_session_mod.file_tree;
 const preparePendingPasteTransfer = AppSession.preparePendingPasteTransfer;
@@ -109,7 +109,7 @@ pub fn isMovableWorkspace(self: *const AppSession, idx: usize) bool {
     if (idx >= self.tabs.items.len) return false;
     const tab = self.tabs.items[idx];
     if (tab.pinned or tab.group_start != null) return false;
-    return self.enclosingGroupMarkerIndex(idx) == null;
+    return tab_ops.enclosingGroupMarkerIndex(self, idx) == null;
 }
 
 /// 라이브 cross-window workspace 이동(M3d-2a-i) — src의 `idx` 워크스페이스를 detach(무-destroy)해 dst에 adopt(무-재시작).
@@ -519,7 +519,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 전까지 PTY·paste·close가 새 WKWebView 대신 터미널로 잘못 라우팅되지 않는다.
     if (file_panel_ops.activeFileEntry(self)) |restored_active| dock_ops.requestDockEntryFocus(self, restored_active);
     self.normalizePinnedFromGroups();
-    self.stablePartitionPinned();
+    tab_ops.stablePartitionPinned(self);
     self.floatLocalPinsAllGroups(); // 복원 로컬 pin 재float(GL §13.4 배선 (3) — 복원 특례도 항상 stablePartitionPinned 뒤, local-pinned 영속 반영)
     // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비워야 하는데, 위 destroyTabStandalone
     // 루프의 destroyPane이 invalidateForFreedPane(S1 chokepoint)으로 옛 Pane을 가리키던 호버·드래그 포인터를 이미

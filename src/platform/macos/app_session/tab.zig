@@ -22,6 +22,13 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const CardPinRole = AppSession.CardPinRole;
+const GroupMoveResult = AppSession.GroupMoveResult;
+const PinRegion = AppSession.PinRegion;
+const VirtualLayout = AppSession.VirtualLayout;
+const groupBlockPermutation = app_session_mod.groupBlockPermutation;
+const group_normalize = app_session_mod.group_normalize;
+const tab_ops = app_session_mod.tab_ops;
 const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
@@ -55,7 +62,6 @@ const TabRef = app_session_mod.TabRef;
 const Term = app_session_mod.Term;
 const addr_nav_url_cap = app_session_mod.addr_nav_url_cap;
 const agentFlagUtf8 = @import("agent.zig").agentFlagUtf8;
-const assertPinnedPrefixRuntime = AppSession.assertPinnedPrefixRuntime;
 const blendRgb = app_session_mod.blendRgb;
 const clampMoveToGroup = app_session_mod.clampMoveToGroup;
 const dock_ops = @import("dock.zig");
@@ -738,7 +744,7 @@ pub fn sidebarGroupDropTargetTab(self: *AppSession, raw_row: usize, from: usize)
                 // 밀리니 마커 뒤 마지막 자리 = j. 옛 코드는 항상 j-1이라 marker-only(j==m+1 → j-1==m)에 from>m 드롭이
                 // moveTab(from>m, m)으로 카드를 마커 **앞**에 떨궈 그룹 밖으로 샜다(code-review #2). 이제 두 방향 모두
                 // 마커 뒤(그룹 안)로 떨어진다. from==m(마커 탭)은 호출 전 제외(그룹 통째=SG5).
-                const j = self.groupSubtreeEnd(m, null, null);
+                const j = groupSubtreeEnd(self, m, null, null);
                 if (from < m) return j - 1;
                 return @min(j, len - 1);
             }
@@ -786,12 +792,12 @@ pub fn reorderTabs(
 /// 정하는 호출처(buildContextMenuItems)도 nearest·top-level이 같은 값이라 정합한다.
 pub fn enclosingGroupMarkerTab(self: *AppSession, tab: *const Tab) ?*Tab {
     for (self.tabs.items, 0..) |t, i| if (t == tab) {
-        var mi = self.enclosingGroupMarkerIndex(i) orelse return null;
+        var mi = enclosingGroupMarkerIndex(self, i) orelse return null;
         // depth 1(top-level)까지 부모 마커로 상향. mi는 매 반복 strictly 감소(mi-1에서 재조회)라 종료가 보장된다.
         // 형제 subgroup을 먼저 만나도 depth>1이라 계속 올라가 결국 top-level 마커에 닿는다(리전/리스트 시작에서 break).
-        while (self.effectiveDepthAt(mi, null, null) > 1) {
+        while (effectiveDepthAt(self, mi, null, null) > 1) {
             if (mi == 0) break;
-            mi = self.enclosingGroupMarkerIndex(mi - 1) orelse break;
+            mi = enclosingGroupMarkerIndex(self, mi - 1) orelse break;
         }
         return self.tabs.items[mi];
     };
@@ -922,7 +928,7 @@ pub fn ungroupTab(self: *AppSession, tab: *Tab) void {
         idx = i;
         break;
     };
-    const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 최상위 카드 → no-op
+    const mi = enclosingGroupMarkerIndex(self, idx orelse return) orelse return; // 최상위 카드 → no-op
     // 그룹째 고정 인계 차단(사용자 정책 "그룹 속성은 그룹 속성에서만" — 그룹 고정 C2 §12.2): 마커 `pinned`=그룹째 고정
     // **권위**, 멤버 `pinned`=파생 캐시다. ungroup은 그룹을 **소멸**시키므로(마커의 group_start 제거) 그룹째 고정은
     // 소멸하고 **멤버에 인계되면 안 된다** — 안 그러면 옛 멤버가 개별 고정(pinned=1)으로 잔류한다. 마커 제거 **전**(mi가
@@ -931,7 +937,7 @@ pub fn ungroupTab(self: *AppSession, tab: *Tab) void {
     // 그룹**은 이미 멤버 pinned=0이라 이 클리어가 no-op(회귀 0)이고, **고정 그룹**만 동작한다. local_pinned은 아래
     // clearStaleLocalPins가 top-level로 전이한 멤버만 골라 정리하므로(중첩 생존 subgroup 멤버 로컬 pin은 보존) 여기선
     // 안 건드린다 — 전 subtree를 무조건 클리어하면 살아남는 자식 그룹 멤버의 유효 로컬 pin까지 지운다.
-    const e = self.groupSubtreeEnd(mi, null, null); // 마커 제거 전 subtree 범위(mi가 유효 마커일 때만 정확)
+    const e = groupSubtreeEnd(self, mi, null, null); // 마커 제거 전 subtree 범위(mi가 유효 마커일 때만 정확)
     // **top-level 그룹 vs 중첩 subgroup 판정(마커 제거 전 — mi가 유효 마커일 때만 effectiveDepthAt가 정확)**: 그룹째
     // 고정은 **top-level 그룹 속성**(§12.1 pin ⊃ group ⊃ nest)이라 ungroup의 pinned 처리가 대상 깊이에 달렸다.
     //  - **top-level 그룹**(effectiveDepthAt==1): 그룹을 통째 소멸시키므로 그룹째 고정도 소멸 → 멤버 pinned 캐시를
@@ -943,14 +949,14 @@ pub fn ungroupTab(self: *AppSession, tab: *Tab) void {
     //    닫힘**: groupSubtreeEnd가 trailing 고정 top_level 카드(그룹 밖)를 [mi,e)에서 제외하므로, 중첩 ungroup에서
     //    partition을 스킵하면 그 **무관 고정 top카드**가 stablePartitionPinned로 맨 앞으로 front-jump하던 갭이 사라진다
     //    (partition 범위/조건이 top-level 게이트로 정합 — 무관 top카드 pinned·위치 유지).
-    const is_top_level = self.effectiveDepthAt(mi, null, null) == 1;
+    const is_top_level = effectiveDepthAt(self, mi, null, null) == 1;
     self.allocator.free(self.tabs.items[mi].group_start.?); // owned 마커 해제
     self.tabs.items[mi].group_start = null;
     self.tabs.items[mi].group_collapsed = false;
     if (is_top_level) {
         var k = mi;
         while (k < e) : (k += 1) self.tabs.items[k].pinned = false; // 마커+멤버 pinned 캐시 클리어 — top-level 그룹째 고정 소멸(인계 금지)
-        self.stablePartitionPinned(); // 남은 고정 프리픽스 무결 복구(중첩은 스킵 — 무관 고정 top카드 front-jump 방지 [5])
+        stablePartitionPinned(self); // 남은 고정 프리픽스 무결 복구(중첩은 스킵 — 무관 고정 top카드 front-jump 방지 [5])
     }
     // 그룹 고정 C2(§12.5 GP2): 마커가 사라져 아래 카드가 위 마커/최상위로 재소속됐으니 pinned 캐시를 새 enclosing 기준
     // 으로 재동기(비프리뷰 경로). 옛 멤버가 최상위가 되면 자기 값 유지(top-level이면 위에서 0으로 클리어), 상위 그룹으로
@@ -971,7 +977,7 @@ pub fn tabIsInGroup(self: *const AppSession, tab: *const Tab) bool {
     // 사이에 top_level 최상위 복귀가 없다). 옛 "리전 첫 마커 이후" 판정은 **그룹 뒤 top카드**를 그룹 안으로 오판했으나
     // (첫 마커 이후라는 이유만으로), enclosing 기반은 top_level 상향 클램프로 정확히 밖으로 본다. 전 탭 top_level=false면
     // enclosing(상향 최근접 마커)과 "리전 첫 마커 이후"가 동치(연속 파티션)라 옛 판정과 byte-identical.
-    for (self.tabs.items, 0..) |t, i| if (t == tab) return self.enclosingGroupMarkerIndex(i) != null;
+    for (self.tabs.items, 0..) |t, i| if (t == tab) return enclosingGroupMarkerIndex(self, i) != null;
     return false;
 }
 
@@ -991,7 +997,7 @@ pub fn removeFromGroupForTab(self: *AppSession, tab: *Tab) void {
     const ix = idx orelse return;
     // **핀 리전(§12 GP1)**: 빼기는 이 카드가 속한 핀 리전 **안의** 최상위(그 리전 첫 마커 앞)로만 옮긴다 — 고정
     // 프리픽스를 침범하지 않는다. reg는 pinned 기반이라 아래 마커 승계(그룹 필드만 이동, pinned 불변)에도 안정하다.
-    const reg = self.pinRegionBounds(ix);
+    const reg = pinRegionBounds(self, ix);
     // **그룹 밖 no-op 가드(code-review, promote 5617과 동형)**: 옛 `ix < fm0`(첫 마커 이전)은 §2.1 인터리빙에서 **그룹 뒤
     // top_level 카드**를 out-of-group으로 못 봤다(그 카드는 첫 마커 뒤라 `ix >= fm0`이지만 enclosing 마커가 없어 실제론
     // 그룹 밖). `!tabIsInGroup`(enclosing 기반)으로 바꿔 top카드·top-level run·그룹 전무를 모두 밖으로 정확히 판정한다
@@ -1077,7 +1083,7 @@ pub fn setGroupColorForTab(self: *AppSession, tab: *Tab, color: u32) void {
         idx = i;
         break;
     };
-    const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 최상위 카드 → no-op(색 얹을 그룹 없음)
+    const mi = enclosingGroupMarkerIndex(self, idx orelse return) orelse return; // 최상위 카드 → no-op(색 얹을 그룹 없음)
     self.tabs.items[mi].group_color = color; // 그룹 시작 마커에만 색 저장(소속 카드는 위치 파생)
     sidebar_ops.rebuildSidebar(self) catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
     self.metal_dirty = true;
@@ -1091,7 +1097,7 @@ pub fn startRenameGroupForTab(self: *AppSession, tab: *Tab) void {
         idx = i;
         break;
     };
-    const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 그룹에 안 속함 → no-op
+    const mi = enclosingGroupMarkerIndex(self, idx orelse return) orelse return; // 그룹에 안 속함 → no-op
     settings_ops.startRename(self, .{ .group = self.tabs.items[mi] });
 }
 
@@ -1593,4 +1599,456 @@ pub fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
     return a.?.pane == b.?.pane and a.?.tab == b.?.tab;
+}
+
+// --- F6 보정: 탭 그룹 모델(마커·depth·고정 구획) ---
+// 이름에 `tab`이 없어 F6가 못 가져갔고, 사이드바 드래그에서만 불려 F7에도 잘못 흡수될 뻔했다.
+// 본문은 탭 그룹 마커와 depth를 수술하므로 소유는 여기다(docs/app-session-decomposition.md §4.1).
+
+/// 마커 탭 m에서 시작하는 그룹 구간 [m, j)(j=다음 group_start 또는 끝, §2.1 연속 파티션)를 **하나의 블록으로**
+/// insert_before 경계(다른 그룹 시작 인덱스 또는 len)에 옮긴다. 구간 내부 순서(마커+소속 카드)는 유지되고, 삽입
+/// 위치가 항상 그룹 경계라 옮긴 뒤에도 모든 그룹이 [마커, 다음 마커) 연속 구간으로 남는다(파티션 위반 불가). insert_before
+/// 가 구간 [m, j] 안이면 제자리라 no-op. tabs/surface_ptrs를 함께 재배열하고(stablePartitionPinned와 같은 임시 버퍼),
+/// active_tab은 가리키던 *Tab을 추적해 새 인덱스로 보정한다(surface_ptrs.items는 app_window.tabs와 같은 backing이라
+/// in-place memcpy면 재바인딩 불요 — moveTab과 동형). 성공 시 옮긴 그룹의 **새 마커 인덱스**를 반환(드래그 라이브-
+/// 팔로우가 다음 프레임 기준을 갱신), no-op이면 m 그대로. **주의(§10 한계)**: pin+그룹 조합은 SG4처럼 범위 밖 —
+/// 그룹이 고정/비고정 파티션을 가로지르면 고정 프리픽스 불변식은 보장하지 않는다(그룹 이동은 그룹 경계만 본다).
+/// `defer_rebuild=true`면 성공 이동 후 rebuildSidebar/metal_dirty를 **건너뛴다** — moveGroupNesting/Sibling이 곧이어
+/// relevelBlock으로 depth를 다시 쓴 뒤 **한 번만** rebuild하게 해 드래그 프레임당 2회 rebuild를 없앤다(code-review #9).
+/// no-op 경로는 어느 값이든 원래 rebuild를 안 한다(순서 불변이라 재빌드 불요).
+pub fn moveGroupRange(self: *AppSession, m: usize, insert_before: usize, defer_rebuild: bool) usize {
+    const len = self.tabs.items.len;
+    if (m >= len or self.tabs.items[m].group_start == null) return m; // m은 그룹 시작 마커여야 한다
+    // 구간 [m, j) = 그룹 **subtree**(마커 + 소속 카드 + 자식 그룹 통째, SG5-3). 비중첩이면 "다음 마커"와 동일이라
+    // SG5-1 동작 보존. 중첩 자식이 함께 이동해 부모-자식 무결성이 유지된다(§9 드래그 최소 안전 동작).
+    const j = groupSubtreeEnd(self, m, null, null);
+    const range_len = j - m;
+    if (insert_before > len) return m;
+    if (insert_before >= m and insert_before <= j) return m; // 제자리(자기 구간·경계) — no-op
+    // 구간 제거 후 Rest에서의 삽입 위치: 구간 위(≤m)면 그대로, 구간 아래(≥j)면 range_len만큼 앞당김.
+    const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
+
+    // 순열(dst→src)을 groupBlockPermutation로 산출 — simulateDrop(가상 order 적용)과 **단일 순열 출처**(SG8b).
+    // 그 순열을 self.tabs/surface_ptrs에 적용(reorderTabs가 활성 *Tab을 추적·in-place memcpy, code-review #10).
+    // perm/reorderTabs 어느 alloc이 실패해도 순서 불변(m 반환).
+    const perm = self.allocator.alloc(usize, len) catch return m;
+    defer self.allocator.free(perm);
+    const new_marker = groupBlockPermutation(perm, len, m, j, rest_insert);
+    if (tab_ops.reorderTabs(self, @as([]const usize, perm), struct {
+        fn fill(p: []const usize, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+            for (p, 0..) |src, w| {
+                new_tabs[w] = s.tabs.items[src];
+                new_surfaces[w] = s.surface_ptrs.items[src];
+            }
+            return 0; // 새 마커는 groupBlockPermutation이 이미 반환(fill 반환값 미사용)
+        }
+    }.fill) == null) return m; // alloc 실패 → 순서 불변
+    if (!defer_rebuild) { // caller가 relevel 후 1회 rebuild하려면 여기선 생략(code-review #9)
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+    }
+    return new_marker;
+}
+
+/// SG5-4 중첩 이동: 그룹 subtree를 insert_before로 옮기고(moveGroupRange 재사용), subtree 마커들의 group_depth를
+/// target_depth 기준으로 **상대 유지 relevel**한다(dragged 마커=target_depth, 자식들은 상대 offset 유지). 이동+relevel
+/// 어느 쪽이든 바뀌면 changed=true. 연속 파티션·subtree 무결성은 moveGroupRange가, 트리 연속은 relevel+projectRows가 보장.
+pub fn moveGroupNesting(self: *AppSession, m: usize, insert_before: usize, target_depth: u8) GroupMoveResult {
+    const range_len = groupSubtreeEnd(self, m, null, null) - m;
+    const nm = moveGroupRange(self, m, insert_before, true); // defer rebuild — relevel 후 아래서 1회만(code-review #9)
+    const depth_changed = relevelBlock(self, nm, range_len, target_depth);
+    const changed = (nm != m) or depth_changed;
+    if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+    }
+    return .{ .marker = nm, .changed = changed };
+}
+
+/// SG5-1 형제 경계 이동 + SG5-4 빼기(un-nest): 그룹을 insert_before로 옮기고(moveGroupRange), 새 위치의 **자연 eff
+/// depth**로 relevel한다. 같은 레벨 이동이면 relevel이 no-op(저장 depth==eff)이라 기존 SG5-1 동작이 그대로 보존되고,
+/// 얕은 곳(최상위 등)으로 가면 gap-clamp된 eff(≤ 저장값)로 낮춰 빼기가 저장 depth에도 반영된다(gap 제거).
+pub fn moveGroupSibling(self: *AppSession, m: usize, insert_before: usize) GroupMoveResult {
+    const range_len = groupSubtreeEnd(self, m, null, null) - m;
+    const nm = moveGroupRange(self, m, insert_before, true); // defer rebuild — relevel 후 아래서 1회만(code-review #9)
+    const natural = effectiveDepthAt(self, nm, null, null); // 새 위치의 gap-clamp eff(빼기면 저장값보다 얕다)
+    const depth_changed = relevelBlock(self, nm, range_len, natural);
+    const changed = (nm != m) or depth_changed;
+    if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+    }
+    return .{ .marker = nm, .changed = changed };
+}
+
+/// 블록 [start, start+count)의 그룹 마커들 group_depth를 target_depth 기준으로 다시 쓴다 — 블록을 고립 subtree로 보고
+/// (projectRows pass1과 같은 스택 정규화로) 각 마커의 **블록-상대 eff**(첫 마커=1·자식=2·…)를 매긴 뒤 `target_depth +
+/// (블록eff-1)`로 remap한다(첫 마커=target_depth, 자식들은 상대 offset 유지). max_group_nesting 클램프. 실제로 바뀐
+/// depth가 있으면 true. 라이브 확정 경로(moveGroupNesting/Sibling)는 이 얇은 래퍼로 self.tabs를 직접 relevel한다.
+pub fn relevelBlock(self: *AppSession, start: usize, count: usize, target_depth: u8) bool {
+    return relevelBlockCore(self, start, count, target_depth, null, null);
+}
+
+/// relevelBlock의 order-aware 코어(SG8b — docs/sidebar-groups.md §9). `order`/`group_depth`가 non-null이면 **가상
+/// 배치**(simulateDrop, self.tabs 불변) 위에서 relevel하고 결과를 `group_depth[p]`에 쓰고, **둘 다 null이면 라이브
+/// self.tabs**를 relevel한다(effectiveDepthAt/groupSubtreeEnd의 null=라이브 패턴 동형). null 경로는 옛 relevelBlock과
+/// byte-identical. 스택 pop 판정은 **옛 declared**(가상=group_depth[p]·라이브=tab.group_depth)로 하고 현재 마커는 판정
+/// 후에만 덮어써 순서 안전(라이브·가상 어느 쪽이든 프리뷰와 확정이 같은 정규화를 낸다).
+pub fn relevelBlockCore(self: *AppSession, start: usize, count: usize, target_depth: u8, order: ?[]const usize, group_depth: ?[]u8) bool {
+    const total = if (order) |o| o.len else self.tabs.items.len;
+    const end = @min(start + count, total);
+    var stack: [max_group_nesting]u8 = undefined; // 블록-상대 eff(정규화)
+    var top: usize = 0;
+    var changed = false;
+    var p = start;
+    while (p < end) : (p += 1) {
+        const ti = if (order) |o| o[p] else p; // 위치 p의 원본 tab(가상 배치면 order[p], 라이브면 p)
+        if (self.tabs.items[ti].group_start == null) continue;
+        const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[p] else self.tabs.items[ti].group_depth); // 옛 declared
+        while (top > 0 and stack[top - 1] >= dd) top -= 1;
+        const parent_rel: u8 = if (top > 0) stack[top - 1] else 0;
+        const block_eff: u8 = parent_rel + 1; // 첫 마커=1, 자식=2…
+        if (top < stack.len) {
+            stack[top] = block_eff;
+            top += 1;
+        }
+        const nd: u8 = @intCast(@min(@as(usize, target_depth) + @as(usize, block_eff) - 1, max_group_nesting));
+        if (group_depth) |g| { // 가상: 위치-인덱스 depth 배열에 쓴다(self.tabs 불변)
+            if (g[p] != nd) {
+                g[p] = nd;
+                changed = true;
+            }
+        } else if (self.tabs.items[ti].group_depth != nd) { // 라이브: self.tabs에 쓴다
+            self.tabs.items[ti].group_depth = nd;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/// group_sibling/group_nest 공통 가상 이동 — moveGroupRange(순열)+relevelBlock(depth)의 가상판(self.tabs 불변). moveGroupRange와
+/// **같은 가드·순열·relevel 코어**를 쓴다: groupSubtreeEnd로 subtree [m,j)를 잡고, no-op(마커 아님·범위 밖·자기 구간)이면
+/// 순열 없이 relevel만, 그 외엔 groupBlockPermutation으로 order/group_depth를 lockstep 재배열한 뒤 relevelBlockCore(가상)한다.
+/// `target_depth==null`이면 moveGroupSibling처럼 **새 위치의 자연 eff**(effectiveDepthAt, gap-clamp된 = 빼기면 얕아짐)로,
+/// 값이면 moveGroupNesting처럼 그 depth로 relevel한다. `order`/`group_depth`는 simulateDrop이 넘긴 **identity 배치**다.
+pub fn simulateGroupMove(self: *AppSession, arena: std.mem.Allocator, order: []usize, group_depth: []u8, top_level: []bool, m: usize, insert_before: usize, target_depth: ?u8) !VirtualLayout {
+    const n = order.len;
+    // moveGroupRange 가드 재현(같은 no-op 판정). order는 아직 identity라 order[m]==m.
+    if (m >= n or self.tabs.items[order[m]].group_start == null)
+        return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = @min(m, n), .ghost_hi = @min(m + 1, n) };
+    const j = groupSubtreeEnd(self, m, order, group_depth); // subtree 끝(order=identity → 라이브와 동일)
+    const range_len = j - m;
+    if (insert_before > n or (insert_before >= m and insert_before <= j)) {
+        // 제자리(순열 no-op) — relevel만. sibling(자연 eff)이면 자기 자리 depth라 대개 무변, nest면 자기 depth 변경 가능
+        // (moveGroupRange no-op 시 moveGroupNesting/Sibling이 relevelBlock을 그대로 부르는 것과 동형). top_level은 그룹
+        // 이동이 안 바꾸므로(§14.6 — 카드 드래그 전용 전이) 순열도 override도 없이 그대로 넘긴다.
+        const td: u8 = target_depth orelse effectiveDepthAt(self, m, order, group_depth);
+        _ = relevelBlockCore(self, m, range_len, td, order, group_depth);
+        return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = m, .ghost_hi = m + range_len };
+    }
+    const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
+    // 블록 순열을 새 버퍼에 산출해 order/group_depth/top_level을 lockstep 재배열(groupBlockPermutation = moveGroupRange 공유
+    // 코어). top_level은 블록과 함께 따라가기만 한다(그룹 이동은 각 카드의 최상위 복귀 비트를 안 바꾼다, §14.6).
+    const perm = try arena.alloc(usize, n);
+    const new_marker = groupBlockPermutation(perm, n, m, j, rest_insert);
+    const new_order = try arena.alloc(usize, n);
+    const new_gd = try arena.alloc(u8, n);
+    const new_tl = try arena.alloc(bool, n);
+    for (perm, 0..) |src, w| {
+        new_order[w] = order[src];
+        new_gd[w] = group_depth[src];
+        new_tl[w] = top_level[src];
+    }
+    // 이동 후 배치에서 relevel. sibling은 새 위치의 자연 eff(빼기면 gap-clamp로 얕아짐), nest는 target_depth.
+    const td: u8 = target_depth orelse effectiveDepthAt(self, new_marker, new_order, new_gd);
+    _ = relevelBlockCore(self, new_marker, range_len, td, new_order, new_gd);
+    return .{ .order = new_order, .group_depth = new_gd, .top_level = new_tl, .ghost_lo = new_marker, .ghost_hi = new_marker + range_len };
+}
+
+/// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
+/// 재배열하고 active_tab도 가리키던 *Tab을 추적해 새 인덱스로 보정한다(reorderTabs 공유, code-review #10). 복원
+/// (applyWorkspaceWindow)이 저장 순서를 그대로 깔아 고정/비고정이 섞였을 때 불변식([0, pinned_count)에 고정 연속)을
+/// 복구한다. two-pass(고정 먼저, 비고정 뒤)라 안정적이다. alloc 실패면 재배열 생략(복원은 진행, 불변식만 미보장).
+pub fn stablePartitionPinned(self: *AppSession) void {
+    _ = tab_ops.reorderTabs(self, {}, struct {
+        fn fill(_: void, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+            var w: usize = 0;
+            for (s.tabs.items, s.surface_ptrs.items) |t, sf| if (t.pinned) { // pass 1: 고정(상대 순서 유지)
+                new_tabs[w] = t;
+                new_surfaces[w] = sf;
+                w += 1;
+            };
+            for (s.tabs.items, s.surface_ptrs.items) |t, sf| if (!t.pinned) { // pass 2: 비고정(상대 순서 유지)
+                new_tabs[w] = t;
+                new_surfaces[w] = sf;
+                w += 1;
+            };
+            return 0; // stablePartitionPinned은 반환값 미사용
+        }
+    }.fill);
+}
+
+/// 그룹-로컬 pin(GL §13) — 마커 `mi`의 subtree `[mi+1, groupSubtreeEnd(mi))` **안에서만** `local_pinned` 직접 멤버
+/// 카드를 마커 직후로 stable float한다(docs/sidebar-groups.md §13 GL1). 전역 pin(stablePartitionPinned = [고정][비고정]
+/// 2리전)과 **직교하는 축**이다 — 여긴 한 그룹 subtree 내부 순서만 바꾸고 전역 파티션·소속(§2.1 그룹 연속 I2·중첩 I3)은
+/// 불변이다(재배열이 [mi+1, e) **안에서만** 일어나 subtree 끝·형제/얕은 마커 경계를 안 넘음 — keystone 보조정리 §13).
+///
+/// **unit-aware(§13 보강5)**: 재배열 단위 = subtree의 **직접 top-level 단위**다. 직접 멤버 카드(group_start==null)는
+/// 크기 1 단위라 `local_pinned`면 float 대상이고, **자식 subgroup은 통째 블록**(`[j, groupSubtreeEnd(j))`)으로 하나의
+/// 단위라 절대 안 쪼개진다(moveGroupRange/groupBlockPermutation 결). GL1 범위=leaf 멤버라 subgroup 자체는 float 안 하고
+/// pass2에서 원순서로 실린다. 자식 subgroup **안** 멤버의 로컬 float는 그 자식 마커에 이 함수를 **따로** 부르는
+/// caller(GL2 배선) 몫이며, 그땐 이 재배열로 자식 마커 인덱스가 밀리므로 **heap-pin `*Tab` 포인터로 재탐색**해야 한다
+/// (인덱스 무효화 회피). reorderTabs가 활성 *Tab을 추적·in-place memcpy하니 활성 탭은 자동 보정된다.
+///
+/// **stable**: float끼리·나머지끼리 상대순서 유지(전역 stablePartitionPinned와 동형). 마커 자신(index mi)은 앵커라 제자리.
+/// **드래그 게이트(§13 보강6)**: `sidebar_drag_preview != null`이면 early-return — SG8 "드래그 내내 self.tabs 불변"을
+/// 보존한다(normalize 게이트와 동일 규율). **동작 보존**: subtree에 `local_pinned` 직접 멤버가 없으면 alloc 없이 no-op
+/// (byte-identical) — 현재 모든 탭 local_pinned=false라 GL1은 전 호출이 no-op이다. rebuild/dirty는 caller 몫(GL2).
+pub fn stablePartitionSubtree(self: *AppSession, mi: usize) void {
+    if (self.sidebar_drag_preview != null) return; // SG8: 프리뷰 중 self.tabs 불변(드래그 종료 후에만 float)
+    const len = self.tabs.items.len;
+    if (mi >= len or self.tabs.items[mi].group_start == null) return; // mi는 그룹 시작 마커여야 한다
+    const e = groupSubtreeEnd(self, mi, null, null); // subtree 끝(pin-인식·중첩 자식 통째 포함)
+    // early-out: 직접 멤버 카드 중 local_pinned가 없으면 재배열 불필요(alloc 회피, byte-identical). 직접 단위 walk로
+    // 자식 subgroup은 통째 skip해 그 안 카드는 안 본다(subgroup-as-member·자식 멤버는 GL1 대상 아님 — leaf 직접 멤버만).
+    var has_local = false;
+    var scan = mi + 1;
+    while (scan < e) {
+        if (self.tabs.items[scan].group_start != null) {
+            scan = groupSubtreeEnd(self, scan, null, null); // 자식 subtree 통째 skip
+        } else {
+            if (self.tabs.items[scan].local_pinned) {
+                has_local = true;
+                break;
+            }
+            scan += 1;
+        }
+    }
+    if (!has_local) return; // no-op — 로컬 pin 직접 멤버 없음(전 호출 no-op = byte-identical, GL1 회귀 0)
+    // reorderTabs(활성 *Tab 추적·임시 버퍼·in-place memcpy)로 [mi+1, e)만 순열, 밖은 identity. ctx=[mi, e].
+    _ = tab_ops.reorderTabs(self, @as([2]usize, .{ mi, e }), struct {
+        fn fill(ctx: [2]usize, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+            const m = ctx[0];
+            const end = ctx[1];
+            var w: usize = 0;
+            // identity 프리픽스 [0, m] — 마커(앵커) 포함·그 앞 전부 제자리.
+            while (w <= m) : (w += 1) {
+                new_tabs[w] = s.tabs.items[w];
+                new_surfaces[w] = s.surface_ptrs.items[w];
+            }
+            // pass1: local_pinned 직접 멤버 카드(상대순서 유지)를 마커 직후로 float. 자식 subgroup은 통째 skip.
+            var j = m + 1;
+            while (j < end) {
+                if (s.tabs.items[j].group_start != null) {
+                    j = groupSubtreeEnd(s, j, null, null);
+                } else {
+                    if (s.tabs.items[j].local_pinned) {
+                        new_tabs[w] = s.tabs.items[j];
+                        new_surfaces[w] = s.surface_ptrs.items[j];
+                        w += 1;
+                    }
+                    j += 1;
+                }
+            }
+            // pass2: 나머지(비-float 직접 카드 + 자식 subgroup 통째, 원 상대순서 유지).
+            j = m + 1;
+            while (j < end) {
+                if (s.tabs.items[j].group_start != null) {
+                    const unit_end = groupSubtreeEnd(s, j, null, null);
+                    while (j < unit_end) : (j += 1) { // 자식 subtree 통째 이동(I2/I3 — 쪼개지 않음)
+                        new_tabs[w] = s.tabs.items[j];
+                        new_surfaces[w] = s.surface_ptrs.items[j];
+                        w += 1;
+                    }
+                } else {
+                    if (!s.tabs.items[j].local_pinned) {
+                        new_tabs[w] = s.tabs.items[j];
+                        new_surfaces[w] = s.surface_ptrs.items[j];
+                        w += 1;
+                    }
+                    j += 1;
+                }
+            }
+            // identity 접미 [end, len).
+            j = end;
+            while (j < s.tabs.items.len) : (j += 1) {
+                new_tabs[w] = s.tabs.items[j];
+                new_surfaces[w] = s.surface_ptrs.items[j];
+                w += 1;
+            }
+            return 0; // 반환값 미사용(stablePartitionPinned와 동형)
+        }
+    }.fill);
+}
+
+/// 디버그 불변식 확인(런타임 — assertPinnedPrefix는 테스트 전용 std.testing이라 별도). 그룹 고정 C2(§12.11 보강9)로
+/// **두 층**을 assert한다: (1) 고정 프리픽스 연속(고정 탭이 [0, pinned_count)에 연속·그 뒤 전부 비고정), (2) **핀 경계 =
+/// 그룹 경계 정렬**(핀 경계가 그룹 subtree 중간을 자르지 않음 = I3 안전 전제). GP1~3 경로(toggleGroupPin·normalize·복원·
+/// removeFromGroup·clamp)가 이 확장 불변식을 지키는지 디버그에서 노출한다. 판정은 pinBoundariesAlignGroups(순수)에 위임해
+/// 헤드리스 테스트가 "정렬 통과·어긋남 검출"을 assert 없이(panic 없이) 확인할 수 있게 한다.
+pub fn assertPinnedPrefixRuntime(self: *AppSession) void {
+    // (1) 고정 프리픽스 연속 — 비고정 뒤에 고정이 나오면 정렬 로직 버그(I1).
+    var seen_unpinned = false;
+    for (self.tabs.items) |t| {
+        if (t.pinned) {
+            std.debug.assert(!seen_unpinned);
+        } else seen_unpinned = true;
+    }
+    // (2) 핀 경계 = 그룹(최상위 단위) 경계 정렬(§12.11 보강9 확장) — pinned_count가 그룹 subtree 중간을 안 가리킴.
+    std.debug.assert(pinBoundariesAlignGroups(self));
+}
+
+/// 핀 경계가 그룹 subtree **중간**을 자르지 않는가(그룹 고정 C2 — docs/sidebar-groups.md §12.11 보강9). 판정 구조는
+/// normalizePinnedFromGroups와 **동형**(suffix-exclusion): 각 최상위 그룹의 구조 subtree [i, e)(pin 무시)에서 마커 pin이
+/// **마지막으로 일치**하는 위치 last_match까지가 진짜 멤버 범위이고, 그 뒤 [last_match+1, e)는 다음 핀 리전의 최상위 카드
+/// 꼬리(§12.1 "고정 그룹 + 비고정 top카드")라 **정상**이다. 위반 = 진짜 멤버 범위 [i+1, last_match] 안에 마커 pin과 다른
+/// 카드가 끼는 것(desync 샌드위치 = 핀 경계가 그룹 subtree 중간을 자름, I3 안전 전제 붕괴). canonical(normalize 후) 상태는
+/// 항상 통과하고, 손상(멤버 desync 주입) 상태는 false. **순수 판정** — assertPinnedPrefixRuntime(런타임 assert)와 헤드리스
+/// 테스트(정렬 통과·어긋남 검출)가 공유한다. 중첩 자식은 부모 구조 subtree [i,e) 안이라 같은 검사로 통째 커버된다.
+///
+/// **§2.1 재설계(§14.4, SR2) — top_level 인식**: 인터리빙에서 그룹 뒤 top카드가 subtree 중간을 자르면 suffix-exclusion 판정이
+/// 그 앞 desync 멤버를 "꼬리"로 오인해 I3 위반을 **위음성으로 놓친다**. normalize와 동형으로 구조 subtree end 스캔에 top_level
+/// 하드 break를 넣되(**code-review PR#1197 정정**: exact 검사가 아니라 **pin flip도 존중하는 suffix-exclusion** — 리전 경계
+/// 넘는 tail은 검사서 배제하고 같은 리전 내 위반만 검출; exact 검사는 비고정 tail을 위반으로 오판·오염 유발), 위음성 없이
+/// 검출한다. top_level 0개면 기존 suffix-exclusion과 byte-identical.
+pub fn pinBoundariesAlignGroups(self: *AppSession) bool {
+    const n = self.tabs.items.len;
+    var i: usize = 0;
+    while (i < n) {
+        const marker = self.tabs.items[i];
+        if (marker.group_start == null) {
+            i += 1; // 최상위 카드(top_level 복귀 카드 포함) — 그룹 경계 아님
+            continue;
+        }
+        const eff = effectiveDepthAt(self, i, null, null);
+        const pin = marker.pinned; // 마커 = 그룹 고정 권위(§12.2)
+        // 구조 subtree [i, e): normalize와 동형 — 형제/얕은 마커에서 끊되 §2.1 재설계(§14) **top_level 하드 break**도 추가한다
+        // (top카드는 subtree 밖). code-review finding #3으로 normalize가 top_level 앞도 suffix-exclusion(pin 경계 존중)으로
+        // 통일됐으므로 align도 동형으로 suffix-exclusion만 쓴다 — 그래야 canonical(비고정 top카드 꼬리) 상태에서 위양성 없이 통과.
+        var e = i + 1;
+        while (e < n) : (e += 1) {
+            const t = self.tabs.items[e];
+            if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break; // 형제/얕은 마커 = soft 구조 경계
+            if (t.top_level) break; // §14 top_level 서브파티션 경계
+        }
+        // suffix-exclusion(normalize와 동형): 마커 pin이 마지막으로 일치하는 위치(진짜 멤버 범위 끝)까지만 검사. 그 뒤 꼬리는
+        // 다음 리전 genuine 카드라 배제(top_level 경계 앞이라도 pin flip을 넘는 꼬리는 비고정 카드 — finding #3). 진짜 멤버
+        // 범위 [i+1, last_match]에 마커 pin과 다른 카드가 끼면(desync 샌드위치) 핀 경계가 그룹 subtree 중간을 자름 → I3 위반.
+        var last_match = i;
+        var k = i + 1;
+        while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
+            last_match = k;
+        };
+        k = i + 1;
+        while (k <= last_match) : (k += 1) if (self.tabs.items[k].pinned != pin) return false;
+        i = e; // 구조 subtree 통째 처리 — 꼬리/top카드는 다음 마커/리전이 다룬다
+    }
+    return true;
+}
+
+/// 워크스페이스 탭의 위치 고정을 토글하고 불변식(고정 탭은 배열 앞쪽 `[0, pinned_count)`에 연속)을 유지한다.
+/// pin(false→true): 그 탭을 고정 영역 끝(새 pinned_count-1)으로 옮긴다. unpin(true→false): 비고정 영역 시작
+/// (새 pinned_count)으로 옮긴다. moveTab이 tabs/surface_ptrs를 같이 회전하고 active_tab을 보정하므로(이미 새
+/// pin 상태 기준으로 같은 그룹에 clamp) 인덱스 추적이 일관된다. tab은 heap-pin `*Tab`이라 회전 후에도 안정 —
+/// 옮긴 뒤 자기 인덱스를 다시 찾을 필요 없이 목적 인덱스로 곧장 옮긴다.
+pub fn togglePin(self: *AppSession, tab: *Tab) void {
+    // 현재 인덱스(heap-pin 포인터 일치로 검색 — 탭 수는 적다). 못 찾으면(있을 수 없음) 토글만 하고 끝.
+    var from: ?usize = null;
+    for (self.tabs.items, 0..) |t, i| if (t == tab) {
+        from = i;
+        break;
+    };
+    const idx = from orelse {
+        tab.pinned = !tab.pinned;
+        self.metal_dirty = true;
+        return;
+    };
+    // **[3] top_level 경계 홀더 재확립(§14.8 finding #2 — closeTab/commit과 동형 헬퍼)**: tab이 top_level 경계 홀더면
+    // pin 토글 이동으로 그 자리에서 빠질 때 뒤 sticky follower가 앞 그룹에 흡수(재부모화)되지 않게 경계를 재확립한다.
+    // **flip 전** 원래 pin 상태로 판정해야 한다 — follower는 홀더와 같은 리전이라 헬퍼의 `follower.pinned==holder.pinned`
+    // 게이트가 flip 뒤엔 어긋난다(그러면 리전 넘는 no-op 케이스가 자동 배제되는 부수효과도 있다). 아래 moveTab이 실제로
+    // 안 옮기면(landed==idx) 경계 소실이 없어 spurious flag를 되돌린다(commit landed==origin revert와 동형).
+    const set_boundary = self.reestablishTopLevelBoundaryOnMove(idx);
+    tab.pinned = !tab.pinned; // 토글 먼저 — moveTab의 그룹 clamp가 새 pin 상태를 본다.
+    // 새 pinned_count 기준 목적 인덱스: pin이면 고정 리전의 **첫 그룹 마커 앞**(= [고정 top카드][고정 그룹] 순서 유지 —
+    // 끝 count-1에 두면 고정 그룹 subtree 뒤라 위치 파생(§2.1)이 그 카드를 그룹 멤버로 흡수한다; 고정 그룹이 없으면
+    // 종전대로 끝 count-1이라 고정 top카드끼리는 위치만 바뀐다). unpin이면 비고정 영역 시작(count = 비고정 리전 첫
+    // 위치라 비고정 그룹이 있어도 그 마커 **앞** = top카드로 안착, 흡수 없음 — pin의 "끝"과 달리 "시작"이라 대칭 안전).
+    const pinned_count = tab_ops.countPinnedTabs(self);
+    const to: usize = if (tab.pinned)
+        (self.firstGroupStartInRegion(0, pinned_count) orelse (pinned_count - 1))
+    else
+        pinned_count;
+    const landed = tab_ops.moveTab(self, idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
+    if (set_boundary and landed == idx and idx + 1 < self.tabs.items.len)
+        self.tabs.items[idx + 1].top_level = false; // 제자리(no-op move) = 경계 소실 없음 → spurious flag 되돌림
+    // 무조건 rebuildSidebar: moveTab은 from==to(이미 그룹 경계 — 단일 탭/경계 탭 토글)면 early-return해 사이드바
+    // 밴드/슬롯 상태(rebuildSidebar 산출)를 다시 짓지 않는다. 토글이 reorder 없이도 사이드바 모델을 새 pin 상태로
+    // 일관되게 두려고 여기서 무조건 다시 짓는다(토글은 핫패스가 아니라 중복 호출 무해). 📌 글리프 자체는 매 frame
+    // buildSidebarTitleFrame이 tab.pinned를 라이브로 읽어 pins[]로 buildSidebarDrawList에 넘겨 이름줄 **우측 끝**에
+    // 그리므로(prefix 아님) metal_dirty=true만으로도 즉시 갱신된다 — 핀 아이콘은 metal_dirty가 단일 트리거다(원래
+    // "from==to 안전망"이 metal_dirty라던 주석을 정정).
+    sidebar_ops.rebuildSidebar(self) catch {};
+    self.metal_dirty = true;
+}
+
+pub fn cardPinRole(self: *AppSession, tab: *const Tab) CardPinRole {
+    if (tab.group_start != null) return .group; // 마커 카드 = 그룹 시작 → 그룹째(C2 권위)
+    if (tab_ops.enclosingGroupMarkerTab(self, tab) != null) return .local; // 비마커 멤버 = 그룹-로컬 위치 고정
+    return .individual; // 최상위 카드 = 개별 전역 pin
+}
+
+/// from(자기 포함)에서 **위로** 가장 가까운 group_start 마커의 인덱스 — §2.1 소속 파생(각 카드의 소속 = 자기 위에서
+/// 가장 가까운 그룹 시작 마커). 위에 마커가 없으면 null(최상위 카드). ungroupTab·setGroupColorForTab·
+/// startRenameGroupForTab이 공유한다(code-review #13 — 옛 세 곳의 상향 스캔 중복 통합). from은 유효 인덱스라 가정.
+/// **핀 리전 클램프(§12 GP1)**: 소속 마커는 from과 **같은 핀 리전**에 있어야 한다(pin ⊃ group — 비고정 카드가
+/// 고정 리전의 마커에 소속될 수 없다). 상향 스캔이 per-position pinned가 바뀌는 지점(핀 리전 경계)에 닿으면 null
+/// (이 리전엔 위에 마커 없음). 고정 그룹 0개면 from이 비고정 카드일 때 리전 안에서 마커를 먼저 만나 옛 동작과
+/// 동일하고(경계에 닿기 전 return), from이 고정 탭이면 리전에 마커가 없어 양쪽 다 null → byte-identical.
+pub fn enclosingGroupMarkerIndex(self: *const AppSession, from: usize) ?usize {
+    return group_normalize.enclosingGroupMarkerIndex(Tab, self.tabs.items, from); // L2 리프트(M3c) — 핀 리전·top_level 클램프 상향 스캔으로 위임
+}
+
+pub fn pinRegionBounds(self: *const AppSession, idx: usize) PinRegion {
+    const len = self.tabs.items.len;
+    if (idx >= len) return .{ .lo = idx, .hi = idx };
+    const pin = self.tabs.items[idx].pinned;
+    var lo = idx;
+    while (lo > 0 and self.tabs.items[lo - 1].pinned == pin) lo -= 1;
+    var hi = idx + 1;
+    while (hi < len and self.tabs.items[hi].pinned == pin) hi += 1;
+    return .{ .lo = lo, .hi = hi };
+}
+
+/// 위치 idx 시점의 위치 파생 depth를 재계산한다(스택 재실행). idx가 마커면 그 마커의 정규화 eff_depth, 카드면 소속
+/// 그룹 depth(0=최상위). create_group(중첩 생성 depth=카드 depth+1)·groupSubtreeEnd(마커 eff_depth)가 공유한다.
+/// **order-aware(SG8a)**: `order`(위치→원본 tab 순열)·`group_depth`(위치별 마커 선언 depth)가 non-null이면 그 가상
+/// 배치 위에서 계산하고, **둘 다 null이면 라이브 self.tabs**(identity)를 그대로 스캔한다 — null 경로는 옛 동작과
+/// byte-identical(드래그/create 경로가 그대로 쓴다). SG8b simulateDrop이 가상 order로 이 코어를 재사용한다.
+pub fn effectiveDepthAt(self: *AppSession, idx: usize, order: ?[]const usize, group_depth: ?[]const u8) u8 {
+    return group_normalize.effectiveDepthAt(Tab, self.tabs.items, idx, order, group_depth); // L2 리프트(M3c) — order-aware 위치 파생 depth로 위임
+}
+
+/// 마커 위치 m이 시작하는 그룹의 **subtree 끝** 위치 k(구간 [m, k) = 마커 + 소속 카드 + 자식 그룹 통째). k = 다음
+/// "정규화 depth <= eff_depth[m] 마커"(=m을 스택에서 pop시키는 마커) 또는 끝. 비중첩(전부 depth 1)이면 "다음
+/// 마커"와 동일이라 SG4/SG5-1 동작 보존. moveGroupRange·DropBoundary·접힌 헤더 드롭이 공유(중첩 subtree 무결성).
+/// **order-aware(SG8a)**: effectiveDepthAt과 동형 — order/group_depth non-null이면 가상 배치, 둘 다 null이면 라이브
+/// self.tabs를 스캔한다(null 경로 byte-identical). 드래그/create 경로는 null로 부른다.
+pub fn groupSubtreeEnd(self: *AppSession, m: usize, order: ?[]const usize, group_depth: ?[]const u8) usize {
+    const len = if (order) |o| o.len else self.tabs.items.len;
+    if (m >= len) return @min(m + 1, len);
+    const tm = if (order) |o| o[m] else m;
+    if (self.tabs.items[tm].group_start == null) return @min(m + 1, len);
+    const eff_m = effectiveDepthAt(self, m, order, group_depth);
+    const pin_m = self.tabs.items[tm].pinned; // 마커의 핀 리전(§12 GP1)
+    var k = m + 1;
+    while (k < len) : (k += 1) {
+        const tk = if (order) |o| o[k] else k;
+        const t = self.tabs.items[tk];
+        if (t.pinned != pin_m) break; // 핀 리전 경계 — subtree는 한 리전 통째(비고정 카드가 고정 subtree에 안 삼켜짐)
+        if (t.top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — 그룹 뒤 최상위 카드에서 subtree 끝(그룹 끝 표현의 핵심, OR=min)
+        const kd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[k] else t.group_depth);
+        if (t.group_start != null and kd <= eff_m) break;
+    }
+    return k;
 }

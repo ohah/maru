@@ -200,7 +200,7 @@ pub fn sidebarCardRowFor(self: *const AppSession, raw_row: usize) usize {
 pub fn sidebarCardDropTopLevel(self: *AppSession, raw_row: usize) bool {
     if (raw_row >= self.sidebar_rows.items.len) return false;
     return switch (self.sidebar_rows.items[raw_row]) {
-        .card => |c| c.tab < self.tabs.items.len and self.enclosingGroupMarkerIndex(c.tab) == null, // 타겟이 최상위면 최상위 복귀
+        .card => |c| c.tab < self.tabs.items.len and tab_ops.enclosingGroupMarkerIndex(self, c.tab) == null, // 타겟이 최상위면 최상위 복귀
         .agent_toggle, .agent => false, // 에이전트 목록 행은 드롭 타겟이 아니다
         .group_header => false, // 헤더 드롭 = 그룹 안(멤버)
     };
@@ -239,15 +239,15 @@ pub fn sidebarCardDropAfterGroup(self: *AppSession, raw_row: usize, from: usize,
         .card => |c| blk: {
             if (c.tab >= len) return null;
             const tl = self.topLevelGroupMarkerIndex(c.tab) orelse return null; // 그룹 밖 카드 → gap 아님
-            if (self.groupSubtreeEnd(tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
+            if (tab_ops.groupSubtreeEnd(self, tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
             break :blk .{ .m = tl, .j = c.tab + 1 }; // 위 가드가 j==c.tab+1 확립 → 재사용
         },
         .agent_toggle, .agent => return null, // 에이전트 목록 행은 그룹 gap 판정 대상이 아니다
         .group_header => |h| blk: {
             if (h.tab >= len) return null;
             if (!h.collapsed) return null; // 펼친 헤더 아래 경계 = 첫 멤버(모호) → skip(일반 헤더 드롭)
-            if (self.effectiveDepthAt(h.tab, null, null) != 1) return null; // 최상위 접힌 그룹만(중첩 접힌 헤더 gap은 모호)
-            break :blk .{ .m = h.tab, .j = self.groupSubtreeEnd(h.tab, null, null) };
+            if (tab_ops.effectiveDepthAt(self, h.tab, null, null) != 1) return null; // 최상위 접힌 그룹만(중첩 접힌 헤더 gap은 모호)
+            break :blk .{ .m = h.tab, .j = tab_ops.groupSubtreeEnd(self, h.tab, null, null) };
         },
     };
     const m = mj.m;
@@ -283,18 +283,18 @@ pub fn sidebarGroupDropBoundary(self: *AppSession, raw_row: usize, m: usize) ?us
     // (각 리전 안에서 §2.1가 다시 성립 — 비고정 리전이면 [pinned_count, len)의 첫 마커). 마커가 그 리전에 없으면 리전
     // 끝(reg.hi). 고정 그룹 0개면 m은 비고정 리전이라 리전 앵커=전역 앵커·reg.hi=len → 옛 `firstGroupStartIndex() orelse
     // len`과 byte-identical. (그룹 통째 이동 자체의 리전 clamp는 GP3 clampGroupMoveToRegion.)
-    const reg = self.pinRegionBounds(m);
+    const reg = tab_ops.pinRegionBounds(self, m);
     const first_group = self.firstGroupStartInRegion(reg.lo, reg.hi) orelse reg.hi;
 
     // **§14.6 SR4 인터리빙**: target이 **그룹 밖 top카드**(enclosing 마커 없음 = top_level 탭/그 sticky follower)면, 그
     // 카드가 속한 **최상위 run**을 한 단위로 보고 그룹을 그 앞/뒤로 끼운다(그룹↔탭 순서 교환). 그룹 헤더/멤버 row는 enclosing
     // 이 non-null이라 이 분기를 안 타고 아래 그룹 경계 로직으로 간다.
-    if (self.enclosingGroupMarkerIndex(target_tab) == null) {
+    if (tab_ops.enclosingGroupMarkerIndex(self, target_tab) == null) {
         // 최상위 run [run_lo, run_hi): run_lo=run 개시 카드(top_level 플래그가 선 카드 또는 리전 시작), run_hi=다음 마커/
         // 리전 끝. 위로 스캔은 개시 카드(top_level=true)에서 멈추고, 그 앞이 다른 최상위 카드일 때만 이어간다.
         var run_lo = target_tab;
         while (run_lo > reg.lo and !self.tabs.items[run_lo].top_level and
-            self.enclosingGroupMarkerIndex(run_lo - 1) == null) run_lo -= 1;
+            tab_ops.enclosingGroupMarkerIndex(self, run_lo - 1) == null) run_lo -= 1;
         // 리딩 zone(옛 동작 보존): run이 리전 첫머리에서 시작하고 개시 카드에 플래그가 없으면 = 그룹은 리딩 카드 뒤라는
         // 옛 가정. 이 경우만 아래 `first_group` clamp로 폴백한다(SG5-1 byte-identical). 그 외(플래그 있는 인터리브 top카드
         // ·그룹 뒤 top카드)는 run 단위로 순서 교환한다.
@@ -322,7 +322,7 @@ pub fn sidebarGroupDropBoundary(self: *AppSession, raw_row: usize, m: usize) ?us
     if (gi == m) return null; // 자기 그룹 — no-op(jitter 방지)
     if (gi < m) return gi; // 대상 그룹이 위 → 그 앞에 삽입(위로 이동)
     // 대상 그룹이 아래(gi > m) → 그 그룹 subtree 뒤(자식 그룹 포함, SG5-3)에 삽입.
-    return self.groupSubtreeEnd(gi, null, null);
+    return tab_ops.groupSubtreeEnd(self, gi, null, null);
 }
 
 pub fn setSidebarScrollbarHovered(self: *AppSession, hovered: bool) void {
@@ -761,7 +761,7 @@ pub fn commitSidebarDragPreview(self: *AppSession) void {
                 self.tabs.items[origin].top_level and
                 self.tabs.items[origin + 1].group_start == null and !self.tabs.items[origin + 1].top_level and
                 self.tabs.items[origin + 1].pinned == self.tabs.items[origin].pinned and
-                self.enclosingGroupMarkerIndex(origin - 1) != null;
+                tab_ops.enclosingGroupMarkerIndex(self, origin - 1) != null;
             if (restore_boundary) self.tabs.items[origin + 1].top_level = true;
             const landed = tab_ops.moveTab(self, origin, target); // SG8d 카드 — 반환값 = clamp 후 실제 안착 인덱스(no-op이면 origin)
             if (restore_boundary and landed == origin and origin + 1 < self.tabs.items.len)
@@ -787,8 +787,8 @@ pub fn commitSidebarDragPreview(self: *AppSession) void {
                 .{ origin, landed, c.top_level, source_pinned },
             );
         },
-        .group_sibling => |g| _ = self.moveGroupSibling(origin, g.insert_before), // SG5-1 형제 + SG5-4 빼기
-        .group_nest => |g| _ = self.moveGroupNesting(origin, g.insert_before, g.target_depth), // SG5-4 넣기
+        .group_sibling => |g| _ = tab_ops.moveGroupSibling(self, origin, g.insert_before), // SG5-1 형제 + SG5-4 빼기
+        .group_nest => |g| _ = tab_ops.moveGroupNesting(self, origin, g.insert_before, g.target_depth), // SG5-4 넣기
         .none => {}, // 제자리 — 고스트만 제거(아래 rebuild가 원본 복귀)
     }
     // 그룹 고정 C2(§12.5 GP2): 드래그 확정으로 카드/그룹이 재배치됐으니 멤버 pinned 캐시를 새 위치의 enclosing 마커

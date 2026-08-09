@@ -92,11 +92,6 @@ const allowlist = [_]Allowed{
         .reason = "chrome 오버레이(모달·세팅·팔레트·알림) 텍스트: DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 경로라 CG1과 표현이 다르다(후속 슬라이스).",
     },
     .{
-        .file = "platform/macos/app_session.zig",
-        .function = "buildSidebarHeaderDrawList",
-        .reason = "사이드바 검색 밴드(query+preedit): 주소창 편집 밴드와 같은 caret 열 모델이라 함께 옮겨야 한다(후속 슬라이스).",
-    },
-    .{
         .file = "terminal/preedit.zig",
         .function = "drawCells",
         .reason = "IME preedit 오버레이: 확정 전 텍스트를 base snapshot 위 scratch에 codepoint 단위로 임시 렌더한다 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형(NFC) marked text를 보내 실사용 증상이 없다(docs/grapheme-clustering.md §4.7의 '의도된 한계').",

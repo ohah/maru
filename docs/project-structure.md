@@ -68,7 +68,9 @@ src/
                         24개 중 12개를 Swift 호스트가 직접 부른다), web.zig(web panel·인앱 브라우저 — WKWebView surface
                         수명·주소창·내비·web term, F11. 52개 중 20개를 호스트가 직접 부른다), input.zig(키 입력·IME·키바인딩 — 라우팅과 소비 판정,
                         IME 조합 수명, 커밋 텍스트, 키 힌트, 전역 핫키, F12), notification.zig(알림·벨 — OSC 9/777
-                        수신과 방출, 이력·읽음 상태, 패널·배지, 벨 플래시, 원격 폴링, F13). 각 파일은 `*AppSession`을 받는
+                        수신과 방출, 이력·읽음 상태, 패널·배지, 벨 플래시, 원격 폴링, F13), agent.zig(에이전트 관측 —
+                        상태·종류·트랜스크립트 폴링, 상태줄, 스피너, 사이드바 행, 세션 재개, F14.
+                        세션 기록 도크는 여기가 아니라 agent_dock.zig 소유다). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
                         그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
                         `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).

@@ -200,14 +200,17 @@ pub const inventory = [_]Proof{
     // 옮긴 블록에 `@field`가 없다. ABI가 부르는 5개는 얇은 facade로 남겼다.
     // 스크롤바 잡는 폭을 gutter 전체로 넓히며(그리는 폭과 분리) 또 바뀐다. count는 2 그대로다 —
     // 더한 것은 거터 상수 값 하나뿐이고, 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f6e23f8cf23815845ec80e8d4b62ac66abfed4489cfb73057dd2d243f14301c9" },
+    // 에이전트 관측을 `app_session/agent.zig`로 떼어내며 또 바뀐다(F14). count는 2 그대로다 —
+    // 옮긴 블록에 `@field`가 없다. 세션 기록 도크(F1)의 ABI facade 10개는 이름이 agent여도 두고 왔다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4a666c4a9ad8cff129b7e02ffbfada25331e1ac45381b8a5ee8704a8848b7c9d" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
     // 그대로다 — 반사 접근은 손대지 않고 import 줄만 달라졌다.
     // F11에서 web 함수 alias를 허브 경유 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
     // F12에서 `chromeInputFromKeyEvent` alias를 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8b4f407b467ecb2956953b59dfda42f40a8f25042af19f481920e400a5724836" },
+    // F14에서 agent 함수 alias를 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "9957ce2cfe55352958a077d6348276c6c9610b297026f4cc151b3ee370f53dec" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

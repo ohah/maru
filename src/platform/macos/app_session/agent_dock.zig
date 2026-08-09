@@ -32,6 +32,7 @@ const icons = maru.icons;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 아직 그쪽 소유(이 PR 한계)
 const AppSession = app_session_mod.AppSession;
+const agent_ops = @import("agent.zig");
 const tab_ops = @import("tab.zig");
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
@@ -2002,7 +2003,7 @@ pub fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.
             self.metal_dirty = true;
         },
         .resume_session => if (self.agent_session_inline_detail) |detail| if (detail.state == .ready) {
-            self.resumeAgentSessionInNewTerm(&detail.record) catch self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
+            agent_ops.resumeAgentSessionInNewTerm(self, &detail.record) catch self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
         },
         .reveal_log => if (self.agent_session_inline_detail) |*detail| if (detail.state == .ready) {
             revealAgentSessionArchiveLog(self, &detail.record) catch |err| {

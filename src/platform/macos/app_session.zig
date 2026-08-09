@@ -1,4 +1,5 @@
 const std = @import("std");
+const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
 const input_ops = @import("app_session/input.zig");
 const web_ops = @import("app_session/web.zig");
@@ -833,7 +834,7 @@ pub const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — updateCursorBlink가 **실경과 시간**
 // (wall-clock)으로 재 tick rate와 무관하게 그 속도를 지킨다(§10.5). 기본값은 macOS 캐럿 관례(on 500ms / off 500ms).
-const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
+pub const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
 /// 상태바 리소스 표본 주기. 에이전트 폴링(0.5s)보다 **느리게** 둔다 — 메모리·CPU는 초 단위로 움직이고,
 /// 더 자주 재도 사람이 못 읽는다(docs/status-bar.md §6 "비용과 게이트").
 const resource_poll_interval_ms: u32 = 1000;
@@ -850,11 +851,11 @@ fn monotonicMs() u64 {
 }
 /// 세션 기록 파일(transcript) polling 주기. 대화는 **사람이 치는 속도**로 바뀌므로 상태 polling(≈0.5s)보다 느려도
 /// 충분하고, 디렉터리 스캔·tail 파싱을 그만큼 덜 한다(docs/sidebar-agent-list.md §7.4).
-const transcript_poll_interval_ms: u64 = 1000;
+pub const transcript_poll_interval_ms: u64 = 1000;
 /// 활동 시각은 **시간이 흐르는 것만으로** 값이 바뀐다(5m → 6m). 다른 재렌더 사유가 없으면 화면에 멈춘 값이 남다가
 /// 무관한 이벤트에 갑자기 뛴다 — 값이 틀린 것보다 그 거동이 더 헷갈린다(code-review max). 그래서 에이전트를 보여주는
 /// 동안 이 주기로 재렌더한다. 표기 최소 단위가 분이므로 이보다 촘촘할 이유가 없다.
-const agent_age_repaint_interval_ms: u32 = 20_000;
+pub const agent_age_repaint_interval_ms: u32 = 20_000;
 /// 알림 본문에 싣는 대화 한 줄의 상한(bytes). 표시 상한(`max_text_bytes`)보다 짧다 — OS 배너는 몇 줄만 보여주고
 /// 자르므로, 긴 원문을 통째로 넣어봐야 뒤가 안 보이면서 알림만 커진다.
 pub const notification_conversation_max_bytes: usize = 160;
@@ -871,8 +872,8 @@ const transcript_sibling_scan_limit: usize = 8;
 const transcript_staleness_grace_ns: i96 = 60 * std.time.ns_per_s;
 /// codex `session_meta`(첫 레코드)를 찾는 데 읽는 앞부분 크기.
 const codex_head_bytes: usize = 64 * 1024;
-const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
-const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
+pub const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
+pub const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
 /// observer가 읽는 화면 tail 상한(행·바이트). 옛 12행은 **사용자 입력이 길어지면 근거를 잃는** 두 번째 원인이었다 —
 /// 실측(codex 0.146.0)에서 composer는 입력 행 수만큼 제한 없이 자라, 입력 13행부터 프롬프트 마커가 12행 tail 밖으로
 /// 밀려 idle 근거가 사라졌다. 상시 chrome(프롬프트 마커·실행 footer)은 입력 길이와 무관하게 tail 안에 남아야 하므로
@@ -883,9 +884,9 @@ const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은
 /// 다시 계산하므로, 32KiB로 두면 320칸에서 25행·640칸에서 12행으로 줄어 이 상수가 대체하려던 한계가 넓은 창에서 그대로
 /// 되살아난다(코드 리뷰에서 재현). 128KiB면 640칸에서도 48행이 유지된다. worst-case 가정(모든 셀 4바이트)일 뿐이고
 /// 실제 복사량은 화면 내용만큼이라, ASCII 화면에서는 여전히 수십 KiB다.
-const agent_screen_tail_rows: usize = 48;
-const agent_screen_tail_bytes: usize = 128 * 1024;
-const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
+pub const agent_screen_tail_rows: usize = 48;
+pub const agent_screen_tail_bytes: usize = 128 * 1024;
+pub const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
 // sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
@@ -1875,7 +1876,7 @@ const NotificationHistoryItem = struct {
 /// 각 바의 높이는 삼각 파형(spinner_wave)을 서로 다른 위상(spinner_bar_phase)으로 읽어 파도처럼 흐른다. 상태줄이 현재
 /// `agent_spin_frame`의 바 글리프들을 그리고, 색칠 루프가 이 codepoint들을 브랜드색으로 칠한다(아이콘과 같은 패턴).
 /// 바 높이 삼각 파형(1~8, 8칸 오름 + 6칸 내림 = 끝점 중복 없는 주기 14). `agent_spin_frame`도 이 길이로 wrap한다(아래 advance).
-const spinner_wave = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2 };
+pub const spinner_wave = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2 };
 /// 각 바의 위상 offset(파형 길이 14 위, 간격 4·4·4·2) — 바마다 파형을 다른 지점에서 읽어 시차를 두고 오르내린다. 삼각 파형이라
 /// 프레임에 따라 인접 두 바가 같은 높이로 겹치는 순간도 있지만(자연스러운 마루/골) 전체적으로 파도처럼 흐른다. 바 개수는 이 길이가 단일 출처.
 const spinner_bar_phase = [_]u8{ 0, 4, 8, 12 };
@@ -1901,7 +1902,7 @@ pub fn isAgentSpinnerCp(cp: u21) bool {
 /// 쓰지만, 탭 바(pane 라벨·Term 탭)는 등폭이라 폭이 귀하다 — tmux/screen의 창-목록 활동 플래그(1글자)·zellij/iTerm2
 /// 탭 활동 점 관례를 따라 **애니메이션 없는 1칸 플래그**를 이름 앞에 붙인다. 정적이라 매 프레임 재투영이 필요 없고
 /// (상태 변화 시에만 dirty), running Term의 종류색(코랄/청록)으로 칠해 종류도 드러난다.
-const agent_running_flag: u21 = 0x25CF; // ●
+pub const agent_running_flag: u21 = 0x25CF; // ●
 
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
     // **알림 제목용 실제 유니코드** — OS 데스크톱 알림은 시스템 폰트로 그려지므로 maru 합성 PUA(agentIconCodepoint)를
@@ -1970,7 +1971,7 @@ fn classifyAgent(name: ?[]const u8) AgentKind {
 /// none으로 실패해 오분류를 피한다. 같은 provider의 wrapper/native 중복은 하나로 취급한다.
 /// foreground 목록에서 **에이전트 프로세스의 pid**를 고른다(없으면 null). 세션 신원 env는 이 pid의 자식에게만
 /// 내려오므로(`agentSessionIdentity`) 결속의 출발점이다. 이름 판정은 `classifyAgent` 단일 출처를 재사용한다.
-fn agentProcessPid(processes: []const maru.pty.types.ForegroundProcessName, kind: AgentKind) ?i32 {
+pub fn agentProcessPid(processes: []const maru.pty.types.ForegroundProcessName, kind: AgentKind) ?i32 {
     if (kind == .none) return null;
     for (processes) |*process| {
         if (classifyAgent(process.slice()) != kind) continue;
@@ -1979,7 +1980,7 @@ fn agentProcessPid(processes: []const maru.pty.types.ForegroundProcessName, kind
     return null;
 }
 
-fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessName) AgentKind {
+pub fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessName) AgentKind {
     var found: AgentKind = .none;
     for (processes) |*process| {
         const kind = classifyAgent(process.slice());
@@ -4270,7 +4271,7 @@ pub const AppSession = struct {
         self.surface_initialized = true;
         // 상태줄 훅을 config에 맞춘다(설치/복원). 사용자 파일을 건드리는 유일한 자리라 시작 시 한 번만 조정하고,
         // config를 다시 적용할 때 같은 함수가 다시 맞춘다.
-        self.reconcileAgentStatusline();
+        agent_ops.reconcileAgentStatusline(self);
         self.renderer_state = renderer.RendererState.init(self.allocator, .{});
         self.renderer_initialized = true;
         self.frame_loop = app.AppFrameLoop.init(
@@ -4314,7 +4315,7 @@ pub const AppSession = struct {
 
     /// 턴 스냅샷용 임시 index 경로(없으면 만든다). **저장소 밖**인 캐시 디렉터리에 둔다 — 저장소 안에 두면
     /// `add -A`가 그 파일을 잡아 스냅샷이 자기를 포함한다(§6.1).
-    fn turnIndexPath(self: *AppSession) ?[]const u8 {
+    pub fn turnIndexPath(self: *AppSession) ?[]const u8 {
         if (self.turn_index_path) |path| return path;
         const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
         if (home.len == 0) return null;
@@ -4329,30 +4330,6 @@ pub const AppSession = struct {
         } else |_| {}
         self.turn_index_path = path;
         return path;
-    }
-
-    /// 에이전트 턴이 끝났다 — 그 순간의 작업트리를 tree 하나로 굳힌다(§6.1). 실패하면 그냥 안 찍힌 것이고
-    /// 다음 턴에 다시 시도한다(스냅샷 실패가 목록·diff를 막지 않는다).
-    fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
-        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const repo = self.git_repo orelse (self.gitRepoRoot(&repo_buf) orelse return);
-        // 저장소가 바뀌었으면 링을 버린다 — 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
-        if (self.turn_ring_repo) |current| {
-            if (!std.mem.eql(u8, current, repo)) {
-                self.allocator.free(current);
-                self.turn_ring_repo = null;
-                self.turn_ring = .{};
-            }
-        }
-        if (self.turn_ring_repo == null) self.turn_ring_repo = self.allocator.dupe(u8, repo) catch return;
-
-        const index_file = self.turnIndexPath() orelse return;
-        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
-        if (self.git_backend == null) {
-            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
-        }
-        _ = self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id);
     }
 
     /// 목록을 읽은 저장소를 기억한다. 같은 값이면 다시 할당하지 않는다.
@@ -4392,7 +4369,7 @@ pub const AppSession = struct {
 
     /// `AgentState`(관측)를 턴 정책이 쓰는 값으로 옮긴다. 두 열거를 직접 잇지 않는 이유는 정책 모듈이 순수해야
     /// 하기 때문이다(그쪽은 관측 타입을 모른다).
-    fn turnStateOf(state: maru.session.agent_observer.State) maru.session.turn_snapshot.AgentState {
+    pub fn turnStateOf(state: maru.session.agent_observer.State) maru.session.turn_snapshot.AgentState {
         return switch (state) {
             .unknown => .unknown,
             .running => .running,
@@ -5284,61 +5261,6 @@ pub const AppSession = struct {
         }
     }
 
-    /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
-    /// `sh -c`로 조립하지 않고, `/usr/bin/env`와 provider argv를 분리해 직접 exec 한다.
-    pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
-        const pane = pane_ops.activePane(self);
-        const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
-        var cfg = self.new_tab_config;
-        cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
-        const provider_command: []const u8 = record.parsed.provider.label();
-        const args = switch (record.parsed.provider) {
-            .claude => [_][]const u8{ "claude", "--resume", record.parsed.session_id },
-            .codex => [_][]const u8{ "codex", "resume", record.parsed.session_id },
-        };
-        // The isolated AppKit fixture supplies one absolute fake executable so it can prove the
-        // provider-native argv without starting a real account session or depending on the build
-        // runner's inherited PATH.  That seam stays a direct exec with no shell wrapper.
-        var shell_command: ?[]u8 = null;
-        defer if (shell_command) |owned| self.allocator.free(owned);
-        if (agent_dock.archiveSmokeFakeProviderExecutable(record.parsed.provider)) |fake_executable| {
-            req.command = fake_executable;
-            req.args = args[1..];
-            req.login = false;
-        } else {
-            // 제품 경로는 **사용자 로그인 셸을 거쳐** provider를 찾는다. 예전에는 `/usr/bin/env claude`를
-            // 직접 exec했는데, 그러면 provider를 **부모 프로세스의 PATH에서만** 찾는다. 터미널에서 띄운
-            // 앱은 셸 PATH를 상속해 우연히 동작했지만 Dock/Finder에서 띄운 앱은 실패했다 — GUI 앱이
-            // 물려받는 PATH에는 `~/.local/bin`이나 버전 매니저 shim이 없다(실측: `launchctl getenv PATH`
-            // 미설정, `env -i … zsh -lc 'command -v claude'` 실패, `-lic`는 성공).
-            //
-            // `login = true`만 켜는 것으로는 안 된다. login(1) 래핑은 최종적으로
-            // `… -c "exec -l '<command>' '<args>'"`를 만드는데, `<command>`가 `/usr/bin/env`면 exec 대상이
-            // 셸이 아니라 **dotfile을 읽는 주체가 없다**. 그래서 exec 대상 자체를 셸로 만든다.
-            //
-            // 셸 종류로 분기하지 않는다. 분기해서 직접 exec으로 폴백해 봐야 그건 **이 커밋이 고치는
-            // 바로 그 실패**(Dock에서 PATH 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만
-            // 는다. 셸이 이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 그대로 뜬다 — 조용히
-            // 실패하지 않으므로 사용자가 원인을 본다.
-            shell_command = try buildResumeShellCommand(self.allocator, &args);
-            req.command = resolveConfiguredShell(self.loaded_config.config.shell.command);
-            // `-i`가 필요하다: PATH를 `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지
-            // 않는다. 일반 새 탭은 이미 대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을
-            // 일치시킨다. `exec`로 중간 셸을 남기지 않아 실행 중 판정(foreground process group 열거)도
-            // 그대로 성립한다.
-            req.args = &[_][]const u8{ "-l", "-i", "-c", shell_command.? };
-            req.login = true;
-        }
-        // cwd는 **명령 문자열에 넣지 않고** spawn 작업 디렉터리로만 전달한다 — 셸 메타문자가 명령으로
-        // 재해석될 여지를 두지 않는다.
-        if (usableRestoreCwd(record.parsed.cwd)) |cwd| req.cwd = cwd;
-        const term = try self.createTerm(req, size, cfg.queue_capacity, provider_command, args[0]);
-        errdefer self.destroyTerm(term);
-        try pane.terms.append(self.allocator, term);
-        self.focusTerm(pane.terms.items.len - 1);
-    }
-
     /// The AppKit archive smoke is allowed to coordinate a deterministic detail
     /// read, but production configuration and normal input never arm this
     /// backend-only gate.  Keeping this narrow seam on AppSession means Swift
@@ -5485,7 +5407,7 @@ pub const AppSession = struct {
     /// **기존 Term의 backend**(P3-e3). 원격-backed surface(`surface.remote != null`)면 원격 backend, 아니면 in-process로
     /// 라우팅한다 — close/remove/pump/foreground가 그 Term을 만든 backend로 가게 한다. `remote_backend`가 null이면 원격
     /// surface가 있을 수 없어 항상 in-process다(현행과 byte-identical). 원격 판정 SSOT는 `surface.remote`(e3-3).
-    fn backendFor(self: *AppSession, term: *Term) app.TermRuntimeBackend {
+    pub fn backendFor(self: *AppSession, term: *Term) app.TermRuntimeBackend {
         if (is_macos) {
             if (term.surface.remote != null) {
                 if (app_remote_backend) |*rb| return rb.backend();
@@ -5851,7 +5773,7 @@ pub const AppSession = struct {
 
     /// 세션 host 캐시 base = `${XDG_CACHE_HOME:-$HOME/.cache}/maru`(terminfo_cache 등 다른 maru 캐시와 같은 규칙 —
     /// discovery가 그 아래 `session-host/`를 붙인다). $HOME 부재면 null(폴백). 반환은 arena 소유.
-    fn sessionCacheBase(a: std.mem.Allocator) ?[]const u8 {
+    pub fn sessionCacheBase(a: std.mem.Allocator) ?[]const u8 {
         const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |value| std.mem.span(value) else null;
         const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else null;
         return maru.session.cache_path.maruBaseAlloc(a, xdg, home) catch null;
@@ -6258,51 +6180,9 @@ pub const AppSession = struct {
     /// 무엇을 대표로 삼을지는 의미 있는 규칙이 없고(둘 다 돌면 둘 다 중요하다), 개수가 이미 "여럿"을 말해 준다.
     /// 창 전체 에이전트 상태를 **한 번 순회로** 모은다. 예전엔 개수·kind를 각각 세어 매 프레임 5회
     /// 순회했다(같은 값을 가드와 본문에서 두 번씩). 값이 늘 때마다 순회가 늘어나는 구조라 한 곳으로 모은다.
-    const AgentTally = struct { running: usize = 0, blocked: usize = 0, running_kind: AgentKind = .none };
-
-    fn tallyAgents(self: *const AppSession) AgentTally {
-        var t: AgentTally = .{};
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    switch (term.agent_state) {
-                        .running => {
-                            t.running += 1;
-                            // 대표 kind는 **처음 만난 것**이다 — 섞여 있을 때 무엇을 대표로 삼을지 의미 있는
-                            // 규칙이 없고, 개수가 이미 "여럿"을 말해 준다.
-                            if (t.running_kind == .none and term.agent_kind != .none) t.running_kind = term.agent_kind;
-                        },
-                        .blocked => t.blocked += 1,
-                        .unknown, .idle => {},
-                    }
-                }
-            }
-        }
-        return t;
-    }
+    pub const AgentTally = struct { running: usize = 0, blocked: usize = 0, running_kind: AgentKind = .none };
 
     pub const AgentRepresentative = struct { term: *Term, state: maru.session.agent_observer.State };
-
-    pub fn agentStatePriority(state: maru.session.agent_observer.State) u8 {
-        return switch (state) {
-            .blocked => 3,
-            .running => 2,
-            .idle => 1,
-            .unknown => 0,
-        };
-    }
-
-    /// 이 탭(tab_index)의 에이전트 상태/종류 변화가 **화면에 보이는 running 표시**에 영향을 주는가 — pollAgentKinds/State의
-    /// metal_dirty 게이트. 옛 "활성 Term만 보이면 재렌더"에서 확장한다: (1) 사이드바 카드 스피너·아이콘·색은 이제 **워크스페이스
-    /// 단위**(tabHasRunningAgent/tabAgentKind)라 그 탭의 **어느 Term** 상태가 바뀌어도 카드가 바뀐다 → 카드가 보이면 재렌더.
-    /// (2) 탭 바는 **활성 탭의 모든 Term**에 정적 플래그(●)를 그리므로 활성 탭의 어느 Term 변화든 반영해야 한다. 둘 다 안 보이면
-    /// (접힘/최소 + 비활성 탭) 진짜로 화면에 없으니 재렌더 안 함(안 보이는 background Term churn으로 헛 재렌더 방지 — 옛 게이트 취지 유지).
-    fn agentDisplayVisible(self: *AppSession, tab_index: usize) bool {
-        // (1) 사이드바 카드가 보이고 이 탭이 검색 필터를 통과하면(displaySlotOf 재사용 — 멤버십 스캔 단일 출처, code-review high).
-        if (!self.sidebar_collapsed and !self.chrome_minimal and self.displaySlotOf(tab_index) != null) return true;
-        // (2) 탭 바가 그려지고(chrome_minimal이면 paneBarHeightPx==0) 이 탭이 활성이면 이 탭의 Term들이 탭으로 보인다.
-        return pane_ops.paneBarHeightPx(self) > 0 and self.app_window.active_tab == tab_index;
-    }
 
     fn sessionHasRunningJob(self: *AppSession) bool {
         for (self.tabs.items) |t| if (tab_ops.tabHasRunningJob(t, self.io)) return true;
@@ -7951,37 +7831,6 @@ pub const AppSession = struct {
         if (t.tab >= self.tabs.items.len) return;
         self.tabs.items[t.tab].agents_collapsed = !self.tabs.items[t.tab].agents_collapsed;
         sidebar_ops.rebuildSidebar(self) catch {};
-        self.metal_dirty = true;
-    }
-
-    /// 에이전트 행의 ✕ → **그 Term 하나만** 닫는다(워크스페이스나 pane이 아니라). 인덱스는 클릭 시점에 재조회해
-    /// 유효하지 않으면 무동작한다. 실행 중 명령 확인은 Term 단위 닫기의 기존 규율(`closeTermAt` → 캐스케이드)을
-    /// 그대로 따른다 — 마지막 Term이면 pane이, 마지막 pane이면 워크스페이스가 함께 닫힌다.
-    fn closeAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, term_index: usize) void {
-        if (tab_index >= self.tabs.items.len) return;
-        const tab = self.tabs.items[tab_index];
-        if (pane_index >= tab.panes.items.len) return;
-        if (term_index >= tab.panes.items[pane_index].terms.items.len) return;
-        // **반드시 requestClose를 거친다**: 실행 중 명령 확인 모달과 마지막-Term 캐스케이드(pane→탭→세션 latch)가
-        // 거기 있다. closeTermAt을 직접 부르면 (1) 돌고 있는 에이전트가 확인 없이 죽고 (2) 마지막 워크스페이스의
-        // 마지막 Term에서 closeTab이 세션 latch로 빠지며 해제된 surface에 쓰고(UAF) 이어지는 rebuild가 빈 pane을
-        // 인덱싱해 패닉한다(code-review max).
-        self.requestClose(.{ .agent_term = .{ .tab = tab_index, .pane = pane_index, .term = term_index } });
-    }
-
-    /// 에이전트 행 클릭 → **그 에이전트가 도는 자리**로 이동한다(§5): 워크스페이스 전환 → 그 Pane 포커스 →
-    /// 그 Pane 안에서 그 Term 탭 활성화. **3단계가 핵심이다** — Pane까지만 가면 그 Pane의 현재 활성 탭이 보일 뿐,
-    /// 사용자가 목록에서 지목한 에이전트는 여전히 가려진 탭에 있다.
-    /// 인덱스는 클릭 시점에 **재조회**해 유효하지 않으면(사이 tick에 닫힘·종료) 무동작한다(stale deref 금지).
-    fn focusAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, term_index: usize) void {
-        if (tab_index >= self.tabs.items.len) return;
-        _ = tab_ops.switchTab(self, tab_index); // 1) 다른 카드였으면 그 워크스페이스로
-        const tab = self.tabs.items[tab_index];
-        if (pane_index >= tab.panes.items.len) return;
-        const pane = tab.panes.items[pane_index];
-        _ = pane_ops.focusPaneByPtr(self, pane); // 2) 그 Pane으로(같은 pane이면 무동작)
-        if (term_index >= pane.terms.items.len) return;
-        self.focusTerm(term_index); // 3) 그 Pane 안 그 Term 탭으로 — 가려진 탭이 실제로 앞으로 나온다
         self.metal_dirty = true;
     }
 
@@ -11358,56 +11207,12 @@ pub const AppSession = struct {
             .local_pinned = local_pinned,
             .lines = if (tab_index < self.tabs.items.len) sidebar_ops.sidebarCardLines(self, self.tabs.items[tab_index]) else 1,
         } }) catch {};
-        self.appendAgentRows(out, tab_index, depth); // 카드 **바로 아래** 그 워크스페이스의 에이전트 목록(§2)
+        agent_ops.appendAgentRows(self, out, tab_index, depth); // 카드 **바로 아래** 그 워크스페이스의 에이전트 목록(§2)
     }
 
     /// 워크스페이스가 들고 있는 에이전트 Term 하나의 **인덱스 경로**. 포인터가 아니라 인덱스인 이유는 Row와 같다 —
     /// 사이 tick에 Term이 사라져도 재조회에서 걸러지고 dangling이 없다.
     pub const WorkspaceAgent = struct { pane: usize, term: usize };
-
-    /// 카드 아래에 붙는 **에이전트 목록 행**을 방출한다(§1 규칙): 0개면 아무것도, 1개면 행 하나만(토글 없음),
-    /// 2개 이상이면 `N agents` 토글 + (펼쳐졌으면) 행들. 접힘은 `tab.agents_collapsed`가 든다(비영속, §4).
-    fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8) void {
-        if (tab_index >= self.tabs.items.len) return;
-        const tab = self.tabs.items[tab_index];
-        var agents: std.ArrayList(WorkspaceAgent) = .empty;
-        defer agents.deinit(self.allocator);
-        workspace_ops.collectWorkspaceAgents(tab, &agents, self.allocator);
-        if (agents.items.len == 0) return;
-        // **1개일 때도 토글을 낸다.** 처음엔 "1개면 토글 없이 행 하나"로 뒀지만(토글이 군더더기라고 봤다), 실사용에서
-        // 에이전트 하나짜리 카드도 접을 수 없어 목록이 길어지는 게 불편했다(사용자 요청). 접기는 개수와 무관하게
-        // "이 카드를 지금 얼마나 펼쳐 둘 것인가"의 문제다.
-        out.append(self.allocator, .{
-            .agent_toggle = .{
-                .tab = tab_index,
-                .count = std.math.lossyCast(u16, agents.items.len),
-                .collapsed = tab.agents_collapsed,
-                .depth = depth,
-                .last = tab.agents_collapsed, // 접히면 토글이 이 묶음의 마지막 행이다(아래 여백을 카드와 같게)
-            },
-        }) catch return;
-        if (tab.agents_collapsed) return; // 접혔으면 행은 안 낸다(토글만 남는다)
-        for (agents.items, 0..) |ag, idx| {
-            out.append(self.allocator, .{
-                .agent = .{
-                    .tab = tab_index,
-                    .pane = ag.pane,
-                    .term = ag.term,
-                    .depth = depth,
-                    .lines = sidebar_ops.sidebarAgentRowLines(self, tab, ag),
-                    .last = idx + 1 == agents.items.len, // 마지막 행만 아래 여백을 카드와 같게(밴드 하단)
-                },
-            }) catch return;
-        }
-    }
-
-    /// 인덱스 경로 → 라이브 Term(범위 밖이면 null). 목록 행이 포인터 대신 인덱스를 드는 계약의 재조회 지점이다.
-    pub fn agentTermOf(tab: *Tab, ag: WorkspaceAgent) ?*Term {
-        if (ag.pane >= tab.panes.items.len) return null;
-        const pane = tab.panes.items[ag.pane];
-        if (ag.term >= pane.terms.items.len) return null;
-        return pane.terms.items[ag.term];
-    }
 
     /// 원본 tab 인덱스 → 표시 슬롯(row 인덱스; 검색 필터 정방향). 필터로 숨겨졌으면 null. 활성 밴드를 표시 슬롯에 그릴 때 쓴다.
     pub fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
@@ -13238,9 +13043,9 @@ pub const AppSession = struct {
                             // 에이전트 행: 우측 ✕ zone이면 **그 Term만 닫고**, 아니면 그 에이전트가 도는 자리로 이동한다
                             // (워크스페이스 → Pane → Term, §5). ✕는 호버 없이 고정 표시라 zone 판정만으로 가른다.
                             if (sidebar_ops.sidebarCloseButtonAt(self, x_px)) {
-                                self.closeAgentRow(ag.tab, ag.pane, ag.term);
+                                agent_ops.closeAgentRow(self, ag.tab, ag.pane, ag.term);
                             } else {
-                                self.focusAgentRow(ag.tab, ag.pane, ag.term);
+                                agent_ops.focusAgentRow(self, ag.tab, ag.pane, ag.term);
                             }
                         } else if (chrome.components.sidebar.onGroupHeader(self.sidebar_rows.items, slot)) {
                             if (self.sidebar_search_active) {
@@ -13607,15 +13412,7 @@ pub const AppSession = struct {
         return @max(1, (1000 + hz / 2) / hz);
     }
 
-    fn agentPollIntervalTicks(self: *const AppSession) u32 {
-        return self.ticksForMs(agent_poll_interval_ms);
-    }
-
-    fn agentObserverIntervalTicks(self: *const AppSession) u32 {
-        return self.ticksForMs(agent_observer_interval_ms);
-    }
-
-    fn awakeMs(self: *const AppSession) u64 {
+    pub fn awakeMs(self: *const AppSession) u64 {
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         return if (now_ns <= 0) 0 else @intCast(@divFloor(now_ns, std.time.ns_per_ms));
     }
@@ -13643,35 +13440,6 @@ pub const AppSession = struct {
             const into = t - hold + 1; // [1, fade] — 마지막 tick에 정확히 1000(다음 visible 반 시작에 이어짐)
             return (1000 * into) / fade; // 0 → 1000 (나타남)
         }
-    }
-
-    /// running 에이전트 스피너(사이드바 이퀄라이저 파형) 위상을 한 스텝 진행한다 — **tick()에서 출력과 무관하게 매 tick**
-    /// 호출된다. 커서 blink(updateCursorBlink)와 달리 스피너는 활성 surface의 출력과 무관한 애니메이션이라, 출력 게이트
-    /// (`output>0`이면 resetCursorBlink, else updateCursorBlink)에 얹으면 안 된다 — 연속 출력(SSH firehose·바쁜 원격 TUI)이
-    /// 매 tick 스피너 advance를 굶겨 **다른 탭의 running 에이전트 스피너가 멈추던** 버그의 근본 수정(§10.5 primary). 사이드바에
-    /// **실제로 보이는** 카드 중 running 에이전트가 있거나 archive worker가 목록을 읽는 동안에만 위상을 진행하고 사이드바만 부분
-    /// 투영(chrome_dirty)한다. archive spinner도 같은 wall-clock 위상을 재사용해 별도 tick/타이머를 만들지 않는다.
-    fn advanceAgentSpinner(self: *AppSession) void {
-        if (!self.anyAgentRunning() and !self.agent_session_archive_loading) {
-            self.agent_spin_last_ns = 0; // running 없음 — 무동작 + baseline 리셋(다음 running이 새 위상으로 시작)
-            return;
-        }
-        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
-        if (self.agent_spin_last_ns == 0) {
-            self.agent_spin_last_ns = now; // 첫 running tick — baseline만 세팅, 위상 불변
-            return;
-        }
-        const interval_ns: i128 = @as(i128, agent_spin_interval_ms) * std.time.ns_per_ms;
-        const elapsed = now - self.agent_spin_last_ns;
-        if (elapsed < interval_ns) return; // 한 주기 안 지남 — 아직 진행 안 함
-        // **wall-clock 경과분**만큼 위상 진행(tick 카운트 아님). tick이 느리거나 stall 후 재개돼도 실시간을 따라가
-        // 부드럽고, 큰 gap이면 여러 프레임을 한 번에 catch-up한다(§10.5 secondary). 소비한 interval의 나머지는 남겨
-        // (last_ns를 정확히 소비분만큼 전진) 위상을 실시간에 drift 없이 고정한다. 파형 길이(14)로 wrap.
-        const steps = @divTrunc(elapsed, interval_ns);
-        const wrap: u8 = @intCast(@mod(steps, @as(i128, spinner_wave.len)));
-        self.agent_spin_frame = (self.agent_spin_frame + wrap) % @as(u8, @intCast(spinner_wave.len));
-        self.agent_spin_last_ns += steps * interval_ns;
-        self.chrome_dirty = true; // [A] 사이드바만 부분 투영(sync hold 중에도 진행 + full-grid 재셰이프 회피)
     }
 
     /// 커서/오버레이 caret 깜빡임 한 스텝(frame-loop tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
@@ -13759,25 +13527,6 @@ pub const AppSession = struct {
         else
             1000;
         self.metal_buffer.setCursorFadeMilli(fade);
-    }
-
-    /// 사이드바에 **실제로 보이는** 워크스페이스 카드 중 running 에이전트가 있으면 true — 스피너 위상을 진행할지/사이드바를
-    /// 재투영할지 결정한다. 접힘이면 스피너가 안 보이고(false), 검색 필터로 숨은 탭은 카드가 없으므로(스피너 미표시) 제외해야
-    /// 한다 — 그래서 `tabs` 전체가 아니라 `sidebar_rows`(필터 통과 = 표시 카드)만 본다(code-review high #1: 옛 전체-스캔이
-    /// 접힘·필터아웃에도 130ms 재투영을 돌리던 회귀). 빈 검색이면 visible_tabs=전체라 평소와 동일.
-    fn anyAgentRunning(self: *AppSession) bool {
-        // **사이드바 카드의 애니메이션 파형만** 이 위상 게이트에 걸린다 — 탭바 running 표시는 **정적 1칸 플래그(●)**라
-        // 매 프레임 재투영이 필요 없다(상태 변화 시에만 pollAgentKinds가 dirty; 게이트는 agentDisplayVisible이 탭바까지 커버).
-        // 접힘·chrome_minimal이면 사이드바가 없어(sidebar_width_px=0) 카드 파형도 없으니 false(표시면 없는데 130ms 재셰이프
-        // 방지, code-review high #1 + max). 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_rows`만 본다. running 판정은
-        // 활성 Term만이 아니라 **어느 pane/Term이든**(tabHasRunningAgent) — 백그라운드 Term도 카드 파형을 돌린다(범위 확장).
-        if (self.sidebar_collapsed or self.chrome_minimal) return false;
-        for (self.sidebar_rows.items) |row| switch (row) {
-            .card => |c| if (c.tab < self.tabs.items.len and tab_ops.tabHasRunningAgent(self.tabs.items[c.tab])) return true,
-            .agent_toggle, .agent => {}, // 같은 탭의 부속이라 카드 판정으로 충분
-            .group_header => {}, // 헤더 row엔 에이전트가 없다
-        };
-        return false;
     }
 
     /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — caret이 항상 보이며 새 주기를 시작). 페이드 중이었어도
@@ -16091,118 +15840,8 @@ pub const AppSession = struct {
         return self.resource_text_buf[0..self.resource_text_len];
     }
 
-    fn pollAgentKinds(self: *AppSession) void {
-        self.agent_poll_ticks += 1;
-        self.agent_observer_poll_ticks += 1;
-        // 시간 경과만으로 바뀌는 표시(활동 시각)를 위한 주기적 재렌더. 사이드바가 보이고 에이전트가 하나라도
-        // 있을 때만 — 그 조건이 아니면 그릴 것이 없다.
-        self.agent_age_repaint_ticks += 1;
-        if (self.agent_age_repaint_ticks >= self.ticksForMs(agent_age_repaint_interval_ms)) {
-            self.agent_age_repaint_ticks = 0;
-            // 사이드바 카드가 실제로 보이는 상태에서만(접힘·minimal chrome이면 그릴 자리가 없다).
-            if (!self.sidebar_collapsed and !self.chrome_minimal and self.anyAgentPresent()) self.metal_dirty = true;
-        }
-        const periodic_kind_probe = self.agent_poll_ticks >= self.agentPollIntervalTicks();
-        const observer_probe = self.agent_observer_poll_ticks >= self.agentObserverIntervalTicks();
-        if (!periodic_kind_probe and !observer_probe) return;
-        if (periodic_kind_probe) self.agent_poll_ticks = 0;
-        if (observer_probe) self.agent_observer_poll_ticks = 0;
-        if (!self.surface_initialized) return;
-        // 모든 pane × 모든 Term을 보되 syscall은 ≈0.5s로 throttle한다. 화면에 카드/탭바가 실제로 보이는 탭만
-        // 상태 변화 시 dirty해, background observer가 불필요한 프레임을 만들지 않는다.
-        for (self.tabs.items, 0..) |tab, ti| {
-            const displayed = self.agentDisplayVisible(ti); // 스피너/플래그/아이콘 재렌더 게이트(카드 or 활성 탭 탭바) — 탭 내 모든 Term 공유
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    const be = self.backendFor(term);
-                    be.readObservation(term.rt.handle, self.allocator, &term.rt.observation, periodic_kind_probe) catch {
-                        // 마지막 coherent snapshot은 유지하되 current로 가장하지 않는다. remote reconnect 동안 kind/state를
-                        // none/idle로 덮지 않는 것이 알림 누락보다 안전하다.
-                        if (term.rt.observation.availability == .current)
-                            term.rt.observation.availability = .stale;
-                    };
-                    const observation_current = term.rt.observation.availability == .current;
-                    const foreground_available = observation_current and term.rt.observation.foreground_available;
-                    const pgid = if (observer_probe and foreground_available)
-                        (term.rt.observation.foreground_pgid orelse 0)
-                    else
-                        term.rt.agent_observer_pgid;
-                    const pgid_changed = observer_probe and pgid != term.rt.agent_observer_pgid;
-                    if (observer_probe and foreground_available) term.rt.agent_observer_pgid = pgid;
-                    if ((periodic_kind_probe or pgid_changed) and foreground_available) {
-                        const prev = term.agent_kind;
-                        term.agent_kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
-                        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
-                        if (term.agent_kind != prev) {
-                            if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
-                            if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
-                            // 새 프로세스의 화면/OSC/activity를 이전 상태와 섞지 않는다.
-                            term.agent_state = .unknown;
-                            term.agent_stabilizer.reset();
-                            term.agent_screen_generation = 0;
-                            term.agent_last_output_ms = 0;
-                            // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
-                            // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
-                            const had_reply_kind = term.agent_transcript.owned.reply().len > 0;
-                            term.agent_transcript.reset();
-                            if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
-                        }
-                    }
-                    if (observer_probe and observation_current and term.agent_kind != .none) {
-                        self.pollAgentState(term, displayed);
-                        self.pollAgentTranscript(term, displayed);
-                    }
-                }
-            }
-        }
-    }
-
-    /// 세션 기록 파일에서 그 Term의 **마지막 대화**(프롬프트·응답)를 갱신한다(docs/sidebar-agent-list.md §7).
-    ///
-    /// **선택적 보강**(계약 1)이라 어떤 실패도 조용히 지나간다 — 디렉터리가 없든(경로 인코딩 규칙이 provider 변경으로
-    /// 어긋나든), 파일을 못 열든, JSON이 깨졌든 행은 아이콘·상태·폴더·브랜치로 정상 동작하고 대화 줄만 빈다.
-    /// 그래서 이 함수는 error를 내지 않는다.
-    fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void {
-        if (term.agent_kind == .none) return;
-        const cache = &term.agent_transcript;
-        const now = self.awakeMs();
-        if (cache.last_poll_ms != 0 and now -| cache.last_poll_ms < transcript_poll_interval_ms) return;
-        cache.last_poll_ms = now;
-
-        // **줄 수를 좌우하는 값**으로 재투영을 판정한다. 예전엔 `isEmpty()`(프롬프트 OR 응답) 변화로 봤는데, 행
-        // 줄 수는 `reply()`만 늘리므로 "프롬프트는 이미 있고 응답만 새로 왔다"에서 재투영이 안 돌아 렌더는 3줄을
-        // 그리고 행 높이는 2줄로 남았다 — 그러면 응답 줄이 다음 행 위에 그려지고 클릭이 이웃 행의 ✕에 닿는다
-        // (code-review max). 프롬프트는 1행 안에서 자리를 바꿀 뿐이라 줄 수에 영향이 없다.
-        // **provider가 밝힌 세션 신원**을 먼저 확보한다(§7.2 채택안). 얻으면 그 값으로 파일을 확정하고, 못 얻으면
-        // 아래 provider 경로가 활동 상관 폴백으로 내려간다. 자식이 떠 있는 순간에만 읽히므로 캐시가 필수다.
-        // The provider-native identity is also the authority for the archive detail's exact
-        // live-Term action.  It must not depend on a shell OSC-7 CWD report: an agent launched
-        // before its shell integration emits CWD can still be the already-open session the user
-        // asked to return to.  Transcript path lookup below does require CWD, so keep that
-        // optional enrichment separate from identity observation.
-        self.refreshAgentSessionIdentity(term);
-        const cwd = term.rt.observation.cwd.items;
-        if (cwd.len == 0) return;
-        const had_reply = cache.owned.reply().len > 0;
-        // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
-        // 재투영은 여기 공통으로 남는다.
-        const changed = switch (term.agent_kind) {
-            .claude => self.refreshClaudeTranscript(term, cwd),
-            .codex => self.refreshCodexTranscript(term, cwd),
-            .none => false,
-        };
-        if (!changed) return;
-
-        // 대화 **유무**가 바뀌면 행 줄 수가 바뀌므로 재투영이 필요하다(행 높이·hit-test·밴드가 sidebar_rows에서
-        // 나온다). 텍스트만 바뀐 경우엔 라벨이 매 프레임 조립되므로 dirty만 세우면 된다.
-        const has_reply = cache.owned.reply().len > 0;
-        if (has_reply != had_reply) sidebar_ops.rebuildSidebar(self) catch {};
-        if (displayed) self.metal_dirty = true;
-    }
-
     /// 파일 전체를 arena에 읽는다(없거나 크면 null). 상태줄 스크립트·settings.json처럼 작은 파일 전용.
-    fn readFileAlloc(io: std.Io, a: std.mem.Allocator, path: []const u8) ?[]u8 {
+    pub fn readFileAlloc(io: std.Io, a: std.mem.Allocator, path: []const u8) ?[]u8 {
         const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
         defer file.close(io);
         const size = (file.stat(io) catch return null).size;
@@ -16220,7 +15859,7 @@ pub const AppSession = struct {
     /// "내용이 없는 정상 파일"인 경우는 이 경로에 없다.
     const FileRead = union(enum) { absent, unreadable, present: []u8 };
 
-    fn readFileState(io: std.Io, a: std.mem.Allocator, path: []const u8) FileRead {
+    pub fn readFileState(io: std.Io, a: std.mem.Allocator, path: []const u8) FileRead {
         const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return switch (err) {
             error.FileNotFound => .absent,
             else => .unreadable,
@@ -16243,7 +15882,7 @@ pub const AppSession = struct {
     ///   구성이 흔하므로, 심링크면 실체 경로를 해석해 그쪽을 갈아 끼운다.
     /// - 새 파일은 umask 기본 권한을 갖는다. 기존 파일이 있으면 그 권한을 그대로 승계한다 — `settings.json`을
     ///   `0600`으로 두던 사용자가 조용히 `0644`로 넓어지지 않게.
-    fn writeExecutableFile(io: std.Io, path: []const u8, body: []const u8, executable: bool) !void {
+    pub fn writeExecutableFile(io: std.Io, path: []const u8, body: []const u8, executable: bool) !void {
         // 심링크 해석: 실체가 있으면 그 경로가 쓰기 대상이다. 없으면(새로 만드는 경우) 주어진 경로 그대로.
         var real_buf: [std.fs.max_path_bytes]u8 = undefined;
         const target = if (std.Io.Dir.realPathFileAbsolute(io, path, &real_buf)) |len|
@@ -16290,12 +15929,12 @@ pub const AppSession = struct {
     ///
     /// `CLOEXEC`은 필수다. 이 fd가 exec된 자식(PTY 셸·curl·ssh)에게 새면 그 자식이 사는 내내 락이 잠겨
     /// **모든 인스턴스에서 설치도 제거도 조용히 무동작**이 된다(같은 규율: `app_instance_lease.zig`).
-    const StatuslineLock = struct {
+    pub const StatuslineLock = struct {
         fd: c_int, // -1 = 잠글 수 없어 락 없이 진행 중
 
         const Outcome = union(enum) { locked: StatuslineLock, unlockable: StatuslineLock, contended };
 
-        fn acquire(marker_path: [:0]const u8, create: bool) Outcome {
+        pub fn acquire(marker_path: [:0]const u8, create: bool) Outcome {
             const flags: std.c.O = if (create)
                 .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }
             else
@@ -16320,7 +15959,7 @@ pub const AppSession = struct {
 
         /// 우리가 잠근 그 파일이 **아직 같은 파일인가**. 다른 인스턴스가 마커를 지우고 새로 만들면 이름은 같아도
         /// inode가 달라 두 인스턴스가 동시에 임계구역에 들어간다(적대 검증이 실측한 lockfile unlink 함정).
-        fn stillOwns(self: StatuslineLock, io: std.Io, marker_path: []const u8) bool {
+        pub fn stillOwns(self: StatuslineLock, io: std.Io, marker_path: []const u8) bool {
             if (self.fd < 0) return true; // 락 없이 진행 중 — 확인할 것이 없다
             const held: std.Io.File = .{ .handle = self.fd, .flags = .{ .nonblocking = false } }; // 여기서 닫지 않는다
             const by_fd = held.stat(io) catch return false;
@@ -16333,7 +15972,7 @@ pub const AppSession = struct {
         /// 마커 본문을 제자리로 쓴다(락 유지). rename으로 갈아 끼우면 잠근 inode가 바뀌어 직렬화가 풀리므로
         /// 제자리에 쓴다. 대신 **부분 쓰기는 반드시 지운다** — 잘린 마커가 짧고 틀린 명령으로 파싱되면 그 쓰레기가
         /// 복원 때 사용자 `settings.json`에 들어간다(길이 필드가 1차 방어, 이 정리가 2차).
-        fn writeBody(self: StatuslineLock, body: []const u8) bool {
+        pub fn writeBody(self: StatuslineLock, body: []const u8) bool {
             if (self.fd < 0) return false;
             if (std.c.ftruncate(self.fd, 0) != 0) return false;
             const written = std.c.pwrite(self.fd, body.ptr, body.len, 0);
@@ -16345,13 +15984,13 @@ pub const AppSession = struct {
             return true;
         }
 
-        fn release(self: StatuslineLock) void {
+        pub fn release(self: StatuslineLock) void {
             if (self.fd >= 0) _ = std.c.close(self.fd); // close가 flock도 푼다
         }
     };
 
     /// `settings.json`의 `statusLine` 상태를 읽는다. **"없다"와 "못 읽었다"를 가른다**(`SettingsState`).
-    fn readStatusLineState(a: std.mem.Allocator, io: std.Io, path: []const u8) maru.session.agent_statusline.SettingsState {
+    pub fn readStatusLineState(a: std.mem.Allocator, io: std.Io, path: []const u8) maru.session.agent_statusline.SettingsState {
         const raw = switch (readFileState(io, a, path)) {
             // 파일이 없으면 statusLine도 없다 — 이건 확정이다.
             .absent => return .absent,
@@ -16384,7 +16023,7 @@ pub const AppSession = struct {
     ///   중간)에 걸리면 사용자 설정 **전체**를 `statusLine` 하나만 남기고 날렸다. 없는 파일만 새로 만든다.
     /// - **판단 근거가 아직 유효한지 쓰기 직전에 다시 본다**(compare-and-swap). 우리가 읽고 쓰는 사이는 스크립트
     ///   파일 쓰기만큼 벌어져 있고, 그 사이 claude나 사용자가 바꾼 값을 덮으면 그게 바로 이 사고의 축소판이다.
-    fn writeStatusLineCommand(
+    pub fn writeStatusLineCommand(
         a: std.mem.Allocator,
         io: std.Io,
         path: []const u8,
@@ -16444,337 +16083,6 @@ pub const AppSession = struct {
         out = aw.toArrayList();
         writeExecutableFile(io, path, out.items, false) catch return false;
         return true;
-    }
-
-    /// 자식 프로세스 env에서 세션 신원을 읽는다(§7.2.1 — 기본 경로, 사용자 파일 무침습).
-    fn agentIdentityFromChildEnv(self: *AppSession, term: *Term, key: []const u8, buf: []u8) ?[]const u8 {
-        _ = self;
-        const pid = agentProcessPid(term.rt.observation.foreground_processes.items, term.agent_kind) orelse return null;
-        return maru.pty.PtySession.agentSessionIdentity(pid, key, buf);
-    }
-
-    /// claude 상태줄 훅이 적어둔 per-pane 신원 파일을 읽는다(§7.2.2 — 옵션 보강).
-    ///
-    /// 훅은 `MARU_PANE_ID`(= surface id)를 파일명으로 쓰므로 **어느 Term의 세션인지가 자동으로 붙는다**. 자식 env가
-    /// 안 잡히는 경우(도구를 한 번도 안 쓴 세션)를 이 경로가 메운다. codex는 해당 없다 — 외부 스크립트를 실행하는
-    /// 상태줄 설정이 없다.
-    fn agentIdentityFromStatuslineFile(self: *AppSession, term: *Term, buf: []u8) ?[]const u8 {
-        if (term.agent_kind != .claude) return null;
-        const sl = maru.session.agent_statusline;
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
-        const base = sessionCacheBase(a) orelse return null;
-        const path = std.fmt.allocPrint(a, "{s}/{s}/{d}", .{ base, sl.session_dir_rel, term.surfaceId() }) catch return null;
-        const raw = readFileAlloc(self.io, a, path) orelse return null;
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (!sl.plausibleIdentity(trimmed)) return null;
-        const n = @min(trimmed.len, buf.len);
-        @memcpy(buf[0..n], trimmed[0..n]);
-        return buf[0..n];
-    }
-
-    /// claude 상태줄 훅을 config(`sidebar.agent-transcript-hook`)에 맞춰 설치하거나 제거한다. 앱 시작 시 한 번,
-    /// 그리고 config 재적용 때 호출한다(docs/sidebar-agent-list.md §7.2.2).
-    ///
-    /// **사용자 소유 파일을 건드리는 유일한 자리**라 규율을 여기서 지킨다:
-    /// - 이미 사용자가 쓰던 상태줄이 있으면 **지우지 않고 감싼다**(우리 스크립트가 그 명령을 그대로 실행).
-    /// - 감쌌던 원래 명령의 **단일 출처는 설치 마커**다. 스크립트 안의 표식은 사람이 읽으라고 있는 것이고, 우리가
-    ///   매 실행마다 덮어쓰는 파일을 유일한 근거로 삼았다가 실제로 사용자 상태줄을 영구히 잃었다(§7.2.2).
-    /// - 마커 파일 `flock`으로 **인스턴스 사이를 직렬화**한다. 잡지 못하면 물러난다.
-    /// - 끄면 감쌌던 원래 명령을 `statusLine`에 복원하고 우리 것(스크립트·마커)을 지운다 — 설치 전 상태로 돌아간다.
-    ///
-    /// best-effort다. 실패는 조용히 지나간다 — 이 훅이 없어도 대화는 자식 신원 경로(§7.2.1)로 대부분 잡힌다.
-    pub fn reconcileAgentStatusline(self: *AppSession) void {
-        if (!is_macos) return;
-        const sl = maru.session.agent_statusline;
-
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
-
-        // **claude가 설치돼 있을 때만 손댄다.** 설정 디렉터리는 claude 자신의 규칙대로 `CLAUDE_CONFIG_DIR`이
-        // 우선이고 없으면 `$HOME/.claude`다(과거 hook cleanup과 같은 판정). 그 디렉터리가 없으면 claude를 쓰지
-        // 않는 사람이므로 **디렉터리를 만들지 않고 그대로 물러난다** — 남의 홈에 우리 흔적을 남길 이유가 없다.
-        var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return;
-        const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
-        dir_handle.close(self.io);
-        const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
-        const settings_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
-        const marker_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude_dir, sl.marker_name }, 0) catch return;
-
-        const want = self.loaded_config.config.sidebar.agent_transcript_hook;
-
-        // 여기서부터 끝까지가 하나의 read-modify-write다 — 락 안에서만 읽고 쓴다. 읽기와 쓰기 사이에 다른 인스턴스가
-        // 끼어드는 것이 원본 소실의 원인이었다.
-        //
-        // 훅을 끈 사람에게는 **마커를 만들지 않는다**(`create = want`). 만들었다 지우는 것도 남의 홈을 건드리는
-        // 일이고, 조기 반환 경로에서 빈 마커가 잔류한다. 마커가 없으면 잠글 것도 없으니 락 없이 진행한다.
-        const marker_existed = readFileState(self.io, a, marker_path) != .absent;
-        const lock = switch (StatuslineLock.acquire(marker_path, want)) {
-            // 다른 인스턴스가 지금 같은 일을 하고 있다 → 우리가 할 일은 없다.
-            .contended => return,
-            // 애초에 잠글 수 없는 환경(권한·파일시스템)이다. 락을 넣기 전과 같은 위험을 지고 진행한다 —
-            // 조용한 영구 무동작보다 낫다.
-            .unlockable => |l| l,
-            .locked => |l| l,
-        };
-        defer lock.release();
-        var marker_written = false;
-        // 잠그느라 **새로 만든** 빈 마커는 아무것도 기록하지 않았으면 남기지 않는다(원래 있던 마커는 건드리지 않는다).
-        defer if (!marker_existed and !marker_written) {
-            std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
-        };
-
-        const script_read = readFileState(self.io, a, script_path);
-        const script_state: sl.ScriptState = switch (script_read) {
-            .absent => .absent,
-            .unreadable => .unreadable,
-            .present => .present,
-        };
-        const existing_script: ?[]const u8 = switch (script_read) {
-            .present => |body| body,
-            else => null,
-        };
-        const settings = readStatusLineState(a, self.io, settings_path);
-        const marker: ?sl.Marker = switch (readFileState(self.io, a, marker_path)) {
-            .present => |text| sl.parseMarker(text),
-            else => null,
-        };
-        const script_wrapped = if (existing_script) |body| sl.extractWrappedCommand(a, body) else null;
-
-        if (!want) {
-            // **복원**: 마커 → 스크립트 wrap 순으로 원본을 찾는다. 사용자가 그 사이 statusLine을 직접 바꿨다면
-            // (우리 것이 아니면) settings는 그대로 두고 우리 파일만 거둔다.
-            const restored = switch (sl.restoreActionFor(settings, marker, script_wrapped)) {
-                // 현재 상태를 못 읽었다 — 지우고 나면 되돌릴 근거가 사라지므로 **아무것도 하지 않는다**.
-                .unknown => return,
-                .leave => true,
-                .set => |cmd| writeStatusLineCommand(a, self.io, settings_path, cmd, settings),
-                .clear => writeStatusLineCommand(a, self.io, settings_path, null, settings),
-            };
-            // **복원에 실패했으면 근거를 지우지 않는다.** 지워버리면 사용자가 나중에 파일을 고쳐도 되살릴 것이 없다.
-            if (!restored) return;
-            std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
-            // 마커는 락 대상이라 지금 잡고 있는 fd가 가리킨다. 지우고 나서 close해도 락은 정상적으로 풀린다.
-            std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
-            return;
-        }
-
-        // 읽은 뒤에도 우리가 잠근 그 마커가 맞는지 확인한다 — 다른 인스턴스가 지우고 새로 만들었으면 우리 락은
-        // 더 이상 아무것도 막지 못한다.
-        if (!lock.stillOwns(self.io, marker_path)) return;
-
-        // 계획(없으면 설치·우리 것이면 갱신·남의 것이면 감싼다)과 **써도 되는가**를 함께 판정한다.
-        const write = switch (sl.actionFor(settings, marker, script_state, script_wrapped)) {
-            .skip => return,
-            .write => |w| w,
-        };
-
-        const cache_base = sessionCacheBase(a) orelse return;
-        const session_dir = std.fmt.allocPrint(a, "{s}/{s}", .{ cache_base, sl.session_dir_rel }) catch return;
-
-        var body: std.ArrayListUnmanaged(u8) = .empty;
-        defer body.deinit(a);
-        sl.scriptBody(&body, a, session_dir, write.wrapped) catch return;
-
-        // 마커를 **스크립트보다 먼저** 쓴다 — 이 순서라야 중간에 죽어도 원본을 되찾을 근거가 남는다. 확정이 아닌
-        // 값(모르는 상태에서 나온 것)은 기록하지 않는다: `wrapped 0`은 나중에 `statusLine` 키를 지우는 근거가 된다.
-        if (write.record_marker) {
-            var marker_body: std.ArrayListUnmanaged(u8) = .empty;
-            defer marker_body.deinit(a);
-            sl.markerBody(&marker_body, a, write.wrapped) catch return;
-            // 내용이 같으면 다시 쓰지 않는다 — reconcile은 세팅 GUI 조작마다 돌고, 매번 truncate하면 그때마다
-            // 잘린 마커가 보이는 창이 생긴다.
-            const same = switch (readFileState(self.io, a, marker_path)) {
-                .present => |old| std.mem.eql(u8, old, marker_body.items),
-                else => false,
-            };
-            marker_written = same or lock.writeBody(marker_body.items);
-            if (!marker_written) return; // 근거를 남기지 못했으면 스크립트도 바꾸지 않는다
-        } else {
-            marker_written = marker != null; // 기존 마커는 그대로 둔다
-        }
-
-        // 내용이 같으면 쓰지 않는다 — 매 실행마다 사용자 파일의 mtime을 흔들 이유가 없다.
-        if (existing_script) |old| if (std.mem.eql(u8, old, body.items)) {
-            if (settings != .command or !sl.commandIsOurs(settings.command))
-                _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
-            return;
-        };
-        writeExecutableFile(self.io, script_path, body.items, true) catch return;
-        _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
-    }
-
-    /// 에이전트가 자식에게 내려주는 **세션 신원**을 캐시에 채운다(claude `CLAUDE_CODE_SESSION_ID`, codex
-    /// `CODEX_THREAD_ID`). 이미 값이 있으면 자식이 없어도 유지하고, 새 값이 오면 교체한다(`/clear`로 세션이
-    /// 갈리는 경우 — 같은 프로세스가 새 id를 내려준다).
-    ///
-    /// 자식은 **도구 실행 중에만** 존재하므로 대부분의 호출은 null이다. 그래서 값을 얻지 못한 것 자체는 실패가
-    /// 아니고, 호출부는 신원이 있으면 확정 결속·없으면 활동 상관 폴백으로 갈린다.
-    fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
-        if (!is_macos) return; // 원격 host-backed는 pid가 이 기계에 없다 — 폴백 경로가 받는다
-        const key: []const u8 = switch (term.agent_kind) {
-            .claude => "CLAUDE_CODE_SESSION_ID",
-            .codex => "CODEX_THREAD_ID",
-            .none => return,
-        };
-        var buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
-        const value = self.agentIdentityFromChildEnv(term, key, &buf) orelse
-            self.agentIdentityFromStatuslineFile(term, &buf) orelse return;
-        const cache = &term.agent_transcript;
-        if (std.mem.eql(u8, cache.identity(), value)) return;
-        // 신원이 바뀌었다 = 다른 세션이다. 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다.
-        cache.reset();
-        cache.setIdentity(value);
-        self.metal_dirty = true;
-    }
-
-    /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
-    /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
-    fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
-        const tr = maru.session.agent_transcript;
-        const cache = &term.agent_transcript;
-        // **신원이 없으면 아무것도 하지 않는다.** 예전엔 여기서 "그 디렉터리의 가장 최신 파일"을 추측했는데, 그게
-        // 새 터미널에 직전 세션의 대화를 붙이고(사용자 제보) 같은 cwd의 두 에이전트가 서로의 대화를 물게 했다.
-        // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
-        if (cache.identity_len == 0) return false;
-        var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return false;
-        var slug_buf: [1024]u8 = undefined;
-        const slug = tr.claudeDirName(cwd, &slug_buf) orelse return false;
-        var path_buf: [2048]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&path_buf, "{s}/projects/{s}", .{ claude_dir, slug }) catch return false;
-        const dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{}) catch return false;
-        defer dir.close(self.io);
-
-        // **신원이 곧 파일명이다** — `CLAUDE_CODE_SESSION_ID`가 그대로 `<id>.jsonl`이다(provider가 자식 env로 밝힌
-        // 값, §7.2). 디렉터리를 훑을 것도 시간을 비교할 것도 없다.
-        var name_buf: [tr.max_name_bytes]u8 = undefined;
-        const wanted = std.fmt.bufPrint(&name_buf, "{s}.jsonl", .{cache.identity()}) catch return false;
-        if (!std.mem.eql(u8, wanted, cache.fileName())) {
-            cache.setFileName(wanted);
-            cache.read_mtime_ns = 0;
-            cache.owned.clear();
-        }
-
-        // mtime이 그대로면 다시 읽지 않는다(계약 4).
-        const st = dir.statFile(self.io, cache.fileName(), .{}) catch return false;
-        if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
-        cache.read_mtime_ns = st.mtime.nanoseconds;
-
-        const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return false;
-        defer self.allocator.free(tail_buf);
-        const tail = tr.readTail(self.io, dir, cache.fileName(), tail_buf);
-        if (tail.len == 0) return false;
-
-        var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer parse_arena.deinit();
-        var fresh: maru.session.agent_transcript.Owned = .{};
-        tr.parseClaudeTail(parse_arena.allocator(), tail, &fresh);
-        // 못 찾은 항목은 이전 값을 지킨다(§7.8) — provider 무관 공통 규율.
-        tr.mergeKeepingMissing(&cache.owned, &fresh);
-        return true;
-    }
-
-    /// codex: 날짜 계층(`YYYY/MM/DD`)이라 디렉터리 이름이 작업 디렉터리를 말해주지 않고, 서브에이전트 기록이
-    /// **같은 계층에 섞인다**(실측: 최근 40개 중 32개). 그래서 최근 후보를 열어 `session_meta`로 신원을 확인한다 —
-    /// `thread_source == "user"`이고 cwd가 이 Term과 같은 첫 후보를 고른다. 대화가 갱신됐으면 true.
-    fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
-        const tr = maru.session.agent_transcript;
-        const cache = &term.agent_transcript;
-        _ = cwd; // 신원으로 파일을 확정하므로 cwd 대조가 필요 없다(그 값이 곧 그 세션이다)
-        if (cache.identity_len == 0) return false; // claude와 같은 이유로 폴백 없음(§7.2)
-        const home_z = std.c.getenv("HOME") orelse return false;
-        const home = std.mem.span(home_z);
-        var path_buf: [2048]u8 = undefined;
-        const root_path = std.fmt.bufPrint(&path_buf, "{s}/.codex/sessions", .{home}) catch return false;
-        const root = std.Io.Dir.openDirAbsolute(self.io, root_path, .{}) catch return false;
-        defer root.close(self.io);
-
-        // **신원이 파일명에 박혀 있다** — rollout 파일명이 `rollout-<ts>-<thread_id>.jsonl`이고 `CODEX_THREAD_ID`가
-        // 그 thread_id(= `session_meta.id`)다. 후보를 열어 신원을 확인할 필요가 없어졌다.
-        if (cache.name_len == 0) {
-            var suffix_buf: [tr.max_identity_bytes + 8]u8 = undefined;
-            const suffix = std.fmt.bufPrint(&suffix_buf, "{s}.jsonl", .{cache.identity()}) catch return false;
-            var found_buf: [tr.max_name_bytes]u8 = undefined;
-            const found = tr.findCodexByThreadId(self.io, root, suffix, &found_buf) orelse return false;
-            cache.setFileName(found);
-            cache.read_mtime_ns = 0;
-        }
-
-        const st = root.statFile(self.io, cache.fileName(), .{}) catch return false;
-        if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
-        cache.read_mtime_ns = st.mtime.nanoseconds;
-
-        const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return false;
-        defer self.allocator.free(tail_buf);
-        const tail = tr.readTail(self.io, root, cache.fileName(), tail_buf);
-        if (tail.len == 0) return false;
-
-        var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer parse_arena.deinit();
-        var fresh: maru.session.agent_transcript.Owned = .{};
-        tr.parseCodexTail(parse_arena.allocator(), tail, &fresh);
-        tr.mergeKeepingMissing(&cache.owned, &fresh);
-        return true;
-    }
-
-    /// 어느 Term이든 에이전트가 돌고 있는가 — 활동 시각 재렌더 게이트. 전-Term 순회지만 필드 읽기뿐이라 20초에
-    /// 한 번 도는 비용으로 무시할 만하다.
-    fn anyAgentPresent(self: *AppSession) bool {
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (term.agent_kind != .none) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /// foreground process와 터미널이 이미 소유한 bounded 화면 tail·OSC title/progress·최근 PTY 출력을 결합한다.
-    /// raw 화면/제목은 로그에 남기지 않고, 순수 observer의 rule id와 최종 상태만 진단한다.
-    fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
-        const agent: maru.session.agent_observer.Agent = switch (term.agent_kind) {
-            .none => return,
-            .claude => .claude,
-            .codex => .codex,
-        };
-        const observation = &term.rt.observation;
-        if (observation.availability != .current) return;
-        const generation = observation.observer_generation;
-        const now_ms = self.awakeMs();
-        const activity_age_ms = now_ms -| term.agent_last_output_ms;
-        const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
-        if (generation == term.agent_screen_generation and term.agent_state == .idle and !output_active and
-            !term.agent_stabilizer.needsExpiryProbe()) return;
-        const screen = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, agent_screen_tail_rows, agent_screen_tail_bytes) catch null;
-        defer if (screen) |owned| self.allocator.free(owned);
-
-        term.agent_screen_generation = generation;
-        const detection = maru.session.agent_observer.detect(agent, .{
-            .screen = screen orelse "",
-            .osc_title = observation.window_title.items,
-            .osc_progress = observation.agent_progress.items,
-            .output_active = output_active,
-        });
-        observation.clearAgentProgress();
-        const previous = term.agent_state;
-        const current = term.agent_stabilizer.observe(detection, now_ms);
-        term.agent_state = current;
-        // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
-        if (maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current))) {
-            self.captureTurnSnapshot(term.surfaceId());
-        }
-        if (current != previous) {
-            if (displayed) self.metal_dirty = true;
-            if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
-                "agent previous={s} state={s} rule={s} idle={} blocker={} running={} activity_age_ms={d}",
-                .{ @tagName(previous), @tagName(current), detection.rule_id, detection.visible_idle, detection.visible_blocker, detection.visible_running, activity_age_ms },
-            );
-        }
     }
 
     /// 모든 Term의 자동 제목 캐시(auto_title)를 runtime observation에서 갱신한다. observation은 backend가 소유권을
@@ -17066,7 +16374,7 @@ pub const AppSession = struct {
                 break;
             }
         }
-        self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
+        agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
     }
@@ -17274,7 +16582,7 @@ pub const AppSession = struct {
         // 스피너는 출력과 무관하게 매 tick 진행한다(출력 게이트 밖) — 연속 출력이 스피너를 굶기던 버그 수정(§10.5).
         // 커서/텍스트 blink 게이트가 `drain_summary`(전 Term 합)가 아니라 `active_output_events`인 이유는 위 drain
         // 루프 주석 — 백그라운드 Term의 출력이 활성 커서 위상을 굶기던 같은 계열 결함의 수정이다.
-        self.advanceAgentSpinner();
+        agent_ops.advanceAgentSpinner(self);
         // [P4-2, §12] 활성 surface per-tick read를 단일 lock 스냅샷으로 통합 — sync 게이트(D)와 idle blink(B)가 이 한
         // lock을 공유한다. viewportHasBlink 셀 스캔은 idle+blink_text일 때만(출력 tick은 updateCursorBlink 미호출).
         const core_snap = self.readActiveSnapshot(active_output_events == 0 and self.appearance.blink_text);
@@ -17814,7 +17122,7 @@ pub const AppSession = struct {
                         // rename 중이면 tail 앵커 — 긴 이름을 칠 때 라벨 세그먼트가 caret(문자열 끝)를 따라가 방금 친 글자가 안 잘린다.
                         const label_anchor: chrome.text_layout.Anchor = if (renaming_pane) .tail else .head;
                         if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg, label_anchor)) |ldl| {
-                            if (pane_running) recolorAgentFlagCells(ldl.cells, pane_ops.paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
+                            if (pane_running) agent_ops.recolorAgentFlagCells(ldl.cells, pane_ops.paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
                             self.collectShaped(&collected, ldl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, .origin_y = text_origin_y, .colors = tabbar_colors } });
                         } else |_| {}
                     }
@@ -17869,12 +17177,12 @@ pub const AppSession = struct {
                         marker_titles.deinit(self.allocator);
                     }
                     for (titles.items) |t| {
-                        const marker = if (tab_ops.tabTitleRunningMarker(t)) agentFlagUtf8() else "";
+                        const marker = if (tab_ops.tabTitleRunningMarker(t)) agent_ops.agentFlagUtf8() else "";
                         marker_titles.append(self.allocator, self.allocator.dupe(u8, marker) catch continue) catch {};
                     }
                     const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, marker_titles.items, @intCast(bar_cols), tab_fg, close_tab, pane_ops.paneActiveTermIndex(self, lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, null) catch continue;
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
-                    if (pane_ops.paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, pane_ops.paneAgentKind(lr.leaf));
+                    if (pane_ops.paneHasRunningAgent(lr.leaf)) agent_ops.recolorAgentFlagCells(dl.cells, pane_ops.paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -18975,28 +18283,6 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(allocator, "{s} {s}", .{ flag[0..n], base });
     }
 
-    /// 에이전트 종류 브랜드색(claude=Anthropic 코랄 #CC785C, codex=OpenAI 청록 #10A37F). none이면 null. 아이콘·상태줄
-    /// 스피너·탭바 파형이 **모두 이 단일 출처**를 쓴다(색이 갈리지 않게 — code-review max, 옛 두 곳 하드코딩 통합).
-    pub fn agentBrandColor(kind: AgentKind) ?maru.color.Rgb {
-        return switch (kind) {
-            .claude => .{ .r = 0xCC, .g = 0x78, .b = 0x5C }, // Anthropic 공식 코랄 #CC785C
-            .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록 #10A37F
-            .none => null,
-        };
-    }
-
-    /// running 마커(`●`) UTF-8 한 글자. 셀 draw list가 마커만 그릴 때 쓴다(제목은 measured 경로).
-    pub fn agentFlagUtf8() []const u8 {
-        return "\u{25CF}";
-    }
-
-    fn recolorAgentFlagCells(cells: anytype, kind: AgentKind) void {
-        const brand = agentBrandColor(kind) orelse return;
-        for (cells) |*c| {
-            if (c.codepoint == agent_running_flag) c.style.foreground = .{ .rgb = brand };
-        }
-    }
-
     /// 탭 제목들을 라벨(제목만, 번호 prefix 없음 — U-tab2)로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
     /// row=탭 인덱스). `build`(터미널)와 같은 CoreTextFrameBuilder/renderer_state(atlas)를 써서 제목
     /// glyph도 터미널과 같은 slot을 재사용하고 새 glyph만 추가 업로드된다. macOS 전용(실 CoreText
@@ -19380,7 +18666,7 @@ pub const AppSession = struct {
         //
         // blocked는 **모양으로** 구분한다(모래시계 + 강조색). 색만 다르면 "저 강조색이 무슨 뜻인지"를 배워야
         // 하고, running과 같은 아이콘을 쓰면 개수가 무엇의 개수인지 모호해진다.
-        const agents = self.tallyAgents();
+        const agents = agent_ops.tallyAgents(self);
         if (agents.blocked > 0) {
             var blocked_buf: [16]u8 = undefined;
             const text = std.fmt.bufPrint(&blocked_buf, "{d}", .{@min(agents.blocked, 99)}) catch "";
@@ -20544,7 +19830,7 @@ fn isExecutablePath(path: []const u8) bool {
 ///
 /// `exec`를 붙이는 이유: 중간 셸이 남지 않아 프로세스 트리가 직접 exec일 때와 같아지고, 실행 중
 /// 판정(foreground process group 열거)이 그대로 성립한다. 호출자가 반환 슬라이스를 free한다.
-fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+pub fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "exec");
@@ -20555,7 +19841,7 @@ fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u
     return try out.toOwnedSlice(allocator);
 }
 
-fn resolveConfiguredShell(command: []const u8) []const u8 {
+pub fn resolveConfiguredShell(command: []const u8) []const u8 {
     if (isExecutablePath(command)) return command;
     const fallback = maru.pty.resolveInteractiveShell();
     return if (isExecutablePath(fallback)) fallback else "/bin/sh";
@@ -28191,7 +27477,7 @@ test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지�
 
     // 단일 워크스페이스·단일 pane·단일 Term = 캐스케이드가 세션 종료까지 가는 최악 경로. 예전엔 여기서
     // closeTab→latchSessionClose가 해제된 surface에 쓰고 이어지는 rebuild가 빈 pane을 인덱싱했다.
-    session.closeAgentRow(0, 0, 0);
+    agent_ops.closeAgentRow(session, 0, 0, 0);
 
     // 확인 모달이 열렸고(실행 중 명령) 아직 아무것도 파괴되지 않았다 — 즉시 종료가 아니다.
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
@@ -28236,12 +27522,12 @@ test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·
     try std.testing.expectEqual(target_term, rows[ar].agent.term);
 
     // 클릭 → 세 단계가 모두 수행된다.
-    session.focusAgentRow(rows[ar].agent.tab, rows[ar].agent.pane, rows[ar].agent.term);
+    agent_ops.focusAgentRow(session, rows[ar].agent.tab, rows[ar].agent.pane, rows[ar].agent.term);
     try std.testing.expectEqual(tab.panes.items[target_pane], pane_ops.activePane(session)); // 2) Pane
     try std.testing.expectEqual(target_term, tab.panes.items[target_pane].active_term); // 3) Term 탭
 
     // 사라진 Term을 가리키는 행은 무동작(stale 인덱스 방어).
-    session.focusAgentRow(0, target_pane, 999);
+    agent_ops.focusAgentRow(session, 0, target_pane, 999);
     try std.testing.expectEqual(target_term, tab.panes.items[target_pane].active_term);
 }
 
@@ -28414,19 +27700,19 @@ test "agentDisplayVisible: 카드·탭바 안 보이면 false (재렌더 게이�
     session.cell_height_px = 20; // paneBarHeightPx()>0 되게(탭 바 분기 검증용) — 0이면 바 없음 취급
 
     session.sidebar_collapsed = false;
-    try std.testing.expect(session.agentDisplayVisible(0)); // 펼침 → 카드 보임 → true
+    try std.testing.expect(agent_ops.agentDisplayVisible(session, 0)); // 펼침 → 카드 보임 → true
 
     // 카드도 없고(접힘) 탭바도 없게(chrome_minimal → paneBarHeightPx=0) 만들면 false.
     session.sidebar_collapsed = true;
     session.chrome_minimal = true;
-    try std.testing.expect(!session.agentDisplayVisible(0)); // 카드·탭바 둘 다 없음 → false
+    try std.testing.expect(!agent_ops.agentDisplayVisible(session, 0)); // 카드·탭바 둘 다 없음 → false
 
     // 접힘이어도 활성 탭(0)의 탭 바가 있으면 true(탭바 플래그 갱신 필요).
     session.chrome_minimal = false;
-    try std.testing.expect(session.agentDisplayVisible(0)); // 접힘이지만 활성 탭 탭바 → true
+    try std.testing.expect(agent_ops.agentDisplayVisible(session, 0)); // 접힘이지만 활성 탭 탭바 → true
 
     // 활성 탭이 아니고(idx 99) 접힘이면 카드·탭바 둘 다 없음 → false.
-    try std.testing.expect(!session.agentDisplayVisible(99));
+    try std.testing.expect(!agent_ops.agentDisplayVisible(session, 99));
 }
 
 // anyAgentRunning은 **사이드바 카드의 애니메이션 파형**이 실제로 보일 때만 true여야 한다(매 130ms full-grid 재투영 낭비
@@ -28452,14 +27738,14 @@ test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false
     try std.testing.expect(session.sidebar_rows.items.len >= 1);
 
     session.sidebar_collapsed = false;
-    try std.testing.expect(session.anyAgentRunning()); // 펼침 + 보이는 running → true
+    try std.testing.expect(agent_ops.anyAgentRunning(session)); // 펼침 + 보이는 running → true
 
     session.sidebar_collapsed = true;
-    try std.testing.expect(!session.anyAgentRunning()); // 접힘 → 카드 파형 안 보임 → false(탭바 플래그는 정적이라 무관)
+    try std.testing.expect(!agent_ops.anyAgentRunning(session)); // 접힘 → 카드 파형 안 보임 → false(탭바 플래그는 정적이라 무관)
 
     session.sidebar_collapsed = false;
     session.sidebar_rows.clearRetainingCapacity(); // 검색 필터로 카드 숨김
-    try std.testing.expect(!session.anyAgentRunning()); // 필터아웃 → 카드 없음 → false
+    try std.testing.expect(!agent_ops.anyAgentRunning(session)); // 필터아웃 → 카드 없음 → false
 }
 
 test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진행(굶김·cadence 회귀)" {
@@ -28486,7 +27772,7 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
     // 에이전트 없음 → 여러 번 돌려도 위상 불변 + chrome_dirty 안 세움 + baseline 0 유지(idle 재투영 없음).
     session.chrome_dirty = false;
     const f0 = session.agent_spin_frame;
-    for (0..5) |_| session.advanceAgentSpinner();
+    for (0..5) |_| agent_ops.advanceAgentSpinner(session);
     try std.testing.expectEqual(f0, session.agent_spin_frame);
     try std.testing.expect(!session.chrome_dirty);
     try std.testing.expectEqual(@as(i128, 0), session.agent_spin_last_ns);
@@ -28496,7 +27782,7 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
     term.agent_kind = .claude;
     try session.sidebar_rows.append(allocator, .{ .card = .{ .tab = 0, .active = true, .label = "", .depth = 0 } }); // 사이드바에 탭0 카드 보임(collapsed/minimal 기본 false)
     session.chrome_dirty = false;
-    session.advanceAgentSpinner(); // baseline 설정
+    agent_ops.advanceAgentSpinner(session); // baseline 설정
     try std.testing.expectEqual(f0, session.agent_spin_frame); // 아직 경과 0 → 불변
     try std.testing.expect(!session.chrome_dirty);
     try std.testing.expect(session.agent_spin_last_ns != 0);
@@ -28504,13 +27790,13 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
     // baseline을 2 interval 과거로 밀어 2프레임 경과를 모사 → 한 번 호출에 위상 +2(tick 카운트 아님) + chrome_dirty.
     session.agent_spin_last_ns = std.Io.Clock.awake.now(session.io).nanoseconds - 2 * interval_ns;
     session.chrome_dirty = false;
-    session.advanceAgentSpinner();
+    agent_ops.advanceAgentSpinner(session);
     try std.testing.expectEqual(@as(u8, (f0 + 2) % wave_len), session.agent_spin_frame); // catch-up 2프레임
     try std.testing.expect(session.chrome_dirty);
 
     // 방금 진행해 baseline이 ~현재라, 곧바로 다시 불러도 한 주기 안 지나 위상 불변(경과 기반 정확).
     session.chrome_dirty = false;
-    session.advanceAgentSpinner();
+    agent_ops.advanceAgentSpinner(session);
     try std.testing.expectEqual(@as(u8, (f0 + 2) % wave_len), session.agent_spin_frame);
     try std.testing.expect(!session.chrome_dirty);
 }
@@ -49919,14 +49205,14 @@ test "SB1: 에이전트 집계는 비활성 탭까지 센다(안 보이는 곳�
     try std.testing.expect(pane_ops.activePane(session).activeTerm() != first); // 이제 다른 Term을 보고 있다
 
     // 활성이 아닌데도 잡힌다 — 이게 없으면 기능이 요점을 잃는다.
-    const away = session.tallyAgents();
+    const away = agent_ops.tallyAgents(session);
     try std.testing.expectEqual(@as(usize, 1), away.blocked);
     try std.testing.expectEqual(@as(usize, 0), away.running);
 
     // running도 같은 방식으로 합산되고, 대표 kind는 running 쪽에서 온다(blocked가 kind를 가로채지 않는다).
     pane_ops.activePane(session).activeTerm().agent_state = .running;
     pane_ops.activePane(session).activeTerm().agent_kind = .codex;
-    const both = session.tallyAgents();
+    const both = agent_ops.tallyAgents(session);
     try std.testing.expectEqual(@as(usize, 1), both.blocked);
     try std.testing.expectEqual(@as(usize, 1), both.running);
     try std.testing.expectEqual(AgentKind.codex, both.running_kind);
@@ -55018,7 +54304,7 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     session.rememberGitRepo(repo);
 
     // 턴이 끝났다 — 그 순간의 작업트리를 굳힌다(에이전트 상태 전이가 부르는 바로 그 함수).
-    session.captureTurnSnapshot(1);
+    agent_ops.captureTurnSnapshot(session, 1);
     var spins: usize = 0;
     while (spins < 500 and session.turn_ring.len == 0) : (spins += 1) {
         session.drainGitStatus();
@@ -55089,7 +54375,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     // ① 실행 중: 실행 footer가 보인다(실측 규칙 `working_footer`).
     try surface.core.write("\x1b[2J\x1b[H● 파일을 고치는 중\r\n  Working... esc to interrupt\r\n");
     term.rt.observation.observer_generation +%= 1;
-    session.pollAgentState(term, false);
+    agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
     try std.testing.expectEqual(@as(usize, 0), session.turn_ring.len); // 아직 턴이 안 끝났다
 
@@ -55099,7 +54385,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     try surface.core.write("\r\n" ** 60);
     try surface.core.write("───────────────────────────────────────\r\n❯ \r\n");
     term.rt.observation.observer_generation +%= 1;
-    session.pollAgentState(term, false);
+    agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
 
     var spins: usize = 0;

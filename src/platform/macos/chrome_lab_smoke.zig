@@ -22,8 +22,23 @@ const renderer = maru.renderer;
 
 const artifact_dir = "zig-out/maru-macos-chrome-lab";
 const viewport = chrome.ui.layout.UiSize{ .width = 480, .height = 720 };
+/// Lab 기본 셀 크기. 기존 시나리오·골든이 전부 이 값을 전제로 잡혀 있다.
 const cell_width_px: u32 = 8;
 const cell_height_px: u32 = 16;
+
+/// 이 시나리오가 쓸 셀 크기.
+///
+/// **셀 크기가 곧 폰트 크기다** — 이 값이 `CoreTextFrameBuilder`로 들어가 글리프를 그 크기로
+/// 래스터한다. 그래서 시나리오마다 다르게 주면 **실제로 폰트를 키운 화면**이 나오고, "편집기 폰트를
+/// 키우면 gutter가 함께 커진다"([native-editor.md](../../../docs/native-editor.md) §4.1의 셀 경로 근거)를
+/// 캡처로 확인할 수 있다. 셀 크기만 바꾸고 폰트는 그대로인 반쪽 검증이 아니다.
+fn cellSizeFor(id: lab.ScenarioId) struct { w: u32, h: u32 } {
+    return switch (id) {
+        // 1.5배. 기존 시나리오는 기본값을 유지해야 커밋된 골든이 그대로 통한다.
+        .editor_font_large => .{ .w = 12, .h = 24 },
+        else => .{ .w = cell_width_px, .h = cell_height_px },
+    };
+}
 const terminal_background = [3]u8{ 20, 20, 20 };
 
 test "measured Chrome text adapter stays in the macOS platform boundary" {
@@ -141,6 +156,8 @@ pub fn main(init: std.process.Init) !void {
         .id = scenario_id,
         .viewport_px = viewport,
         .now_ns = 0,
+        .cell_w_px = @intCast(cellSizeFor(scenario_id).w),
+        .cell_h_px = @intCast(cellSizeFor(scenario_id).h),
     }, &tokens, .{
         .entries = &entries,
         .items = &items,
@@ -160,8 +177,9 @@ pub fn main(init: std.process.Init) !void {
     var gpu_quads: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer gpu_quads.deinit(allocator);
     chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, 2);
-    const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell_width_px)));
-    const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell_height_px)));
+    const cell = cellSizeFor(scenario_id);
+    const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell.w)));
+    const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell.h)));
     var lab_config: config.Config = .{};
     lab_config.font.family = font_variant.family();
     const appearance = try config.resolveAppearance(lab_config);
@@ -171,9 +189,9 @@ pub fn main(init: std.process.Init) !void {
         .appearance = appearance,
         .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
         .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-        .cell_width_px = cell_width_px,
-        .glyph_cell_width_px = cell_width_px,
-        .cell_height_px = cell_height_px,
+        .cell_width_px = @intCast(cell.w),
+        .glyph_cell_width_px = @intCast(cell.w),
+        .cell_height_px = @intCast(cell.h),
     };
     // 제품 Session Dock과 **같은** artifact를 쓴다. 예전에는 `RichTextArtifact`(셀 격자 + 오프셋, clip
     // 파라미터 없음)를 썼는데, 그러면 Lab 캡처의 텍스트가 제품과 다른 위치에 놓이고 스크롤 뷰포트로
@@ -183,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
         &renderer_state.font_registry,
         frame.draws.ops,
         &tokens,
-        cell_width_px,
+        cell.w,
         // Lab fixture에는 resolved appearance가 없다. 빈 face = system UI face라, 제품이 사용자 폰트를
         // 따라가도 이 시각 골든은 설치 폰트에 흔들리지 않는다(docs/font-strategy.md "Chrome 텍스트 face").
         .{},
@@ -456,6 +474,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "detail-unavailable")) return .detail_unavailable;
     if (std.mem.eql(u8, raw, "editor-gutter")) return .editor_gutter;
     if (std.mem.eql(u8, raw, "editor-scrolled")) return .editor_scrolled;
+    if (std.mem.eql(u8, raw, "editor-font-large")) return .editor_font_large;
     return null;
 }
 
@@ -478,6 +497,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .sidebar_status_strip => "sidebar-status-strip",
         .editor_gutter => "editor-gutter",
         .editor_scrolled => "editor-scrolled",
+        .editor_font_large => "editor-font-large",
     };
 }
 

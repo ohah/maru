@@ -47,6 +47,10 @@ pub const ScenarioId = enum {
     /// N1 §4 — 뷰포트 컬링. 문서 중간으로 스크롤한 상태를 픽셀로 본다. **줄 번호가 1이 아니라
     /// first_row+1에서 시작하는지**가 핵심이고, gutter 폭이 자릿수를 따라 넓어지는지도 함께 나온다.
     editor_scrolled,
+    /// N1 §4.1 — **폰트 크기를 키운 화면.** 셀 크기가 곧 폰트 크기이므로(`chrome_lab_smoke.cellSizeFor`)
+    /// 이 시나리오는 실제로 1.5배 큰 글자를 그린다. gutter가 함께 커지는지가 계약의 핵심 근거인데
+    /// (§4.1 — 그래서 measured가 아니라 셀 경로다), 기본 크기 캡처만으로는 그것이 증명되지 않는다.
+    editor_font_large,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -61,6 +65,10 @@ pub const Scenario = struct {
     id: ScenarioId,
     viewport_px: chrome.ui.layout.UiSize,
     now_ns: u64,
+    /// 이 캡처의 셀 크기(= 폰트 크기). 호출자가 `cellSizeFor`로 정해 넘긴다 — Lab이 자체 상수를 들면
+    /// 렌더러가 쓰는 값과 갈려서, 글자는 커졌는데 배치는 안 커지는 캡처가 나온다.
+    cell_w_px: u16 = 8,
+    cell_h_px: u16 = 16,
 };
 
 pub const Result = struct {
@@ -106,7 +114,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -165,8 +173,8 @@ const editor_fixture_lines = [_][]const u8{
 fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const editor_view = chrome.components.editor_view;
 
-    const cell_w_px: u16 = 8;
-    const cell_h_px: u16 = 16;
+    const cell_w_px = scenario.cell_w_px;
+    const cell_h_px = scenario.cell_h_px;
     const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
     const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
     const total_cols: u16 = @intCast(viewport_w / cell_w_px);
@@ -316,7 +324,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

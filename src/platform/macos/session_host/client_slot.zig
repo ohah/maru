@@ -1323,6 +1323,8 @@ pub const GenerationEventTakeOutcome = union(enum) {
 
 pub const GenerationEventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
 pub const GenerationEventAttachmentReadiness = cleanup_registry_mod.EventAttachmentReadiness;
+pub const GenerationEndedPurgeOutcome = enum { not_ended, purged };
+pub const GenerationEndedPurgeError = error{ Busy, InvalidOwner, Corrupt, Terminal };
 
 pub const GenerationEventTrustedView = struct {
     payload_digest: runtime_event_wire.Digest,
@@ -6289,6 +6291,76 @@ pub fn generationEventAttachmentReadiness(
         error.InvalidState => error.Corrupt,
         else => error.InvalidOwner,
     };
+}
+
+/// Projects the existing ended-purge transaction through one sealed generation binding. The
+/// fast path only peeks at the first target event; the slow path retains all queue ownership and
+/// cleanup policy in Client/ClientSlot rather than exposing a stream id or scratch storage.
+pub fn purgeGenerationEndedStream(
+    owner: GenerationTransportOwnerQuery,
+    bound_stream_id: u64,
+) GenerationEndedPurgeError!GenerationEndedPurgeOutcome {
+    if (bound_stream_id == 0) return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    const slot: *ClientSlot = @ptrFromInt(owner.slot_addr);
+    const event_readiness = admission.operation.node.cleanup_registry.eventPurgeReadiness(
+        owner.reservation.cleanup,
+        admission.identity,
+        admission.owner.event_owner_addr,
+    ) catch {
+        admission.operation.node.client.poison(.local_invariant_violation);
+        endRegisteredNodeOperation(admission.operation);
+        return error.Corrupt;
+    };
+    if (event_readiness == .busy) {
+        endRegisteredNodeOperation(admission.operation);
+        return error.Busy;
+    }
+    if (event_readiness != .ready) {
+        admission.operation.node.client.poison(.local_invariant_violation);
+        endRegisteredNodeOperation(admission.operation);
+        return error.Corrupt;
+    }
+    const peek = admission.operation.node.client.peekEndedEventForStream(bound_stream_id) catch {
+        admission.operation.node.client.poison(.local_invariant_violation);
+        endRegisteredNodeOperation(admission.operation);
+        return error.Corrupt;
+    };
+    endRegisteredNodeOperation(admission.operation);
+    const hint = switch (peek) {
+        .not_ended => return .not_ended,
+        .candidate => |candidate| candidate,
+    };
+
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var preparation: EndedPurgePreparation = .{};
+    slot.prepareEndedPurge(
+        owner.transport_incarnation,
+        owner.reservation,
+        bound_stream_id,
+        hint,
+        &scratch,
+        &preparation,
+    ) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.Corrupt, error.DestinationOccupied => error.Corrupt,
+        error.IdentityExhausted => error.Terminal,
+    };
+    var preparation_live = true;
+    defer if (preparation_live and !preparation.abort(slot))
+        @panic("generation ended purge rollback failed");
+    _ = slot.commitEndedPurge(&scratch, &preparation) catch |err| return switch (err) {
+        error.Busy, error.QuarantineUnavailable => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.InvalidState => error.Terminal,
+        error.Corrupt, error.ArithmeticOverflow, error.DestinationOccupied => error.Corrupt,
+    };
+    preparation_live = false;
+    return .purged;
 }
 
 pub fn generationEventOwnerCurrent(

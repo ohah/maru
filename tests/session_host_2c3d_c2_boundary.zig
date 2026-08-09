@@ -34,10 +34,10 @@ test "CR3a-2c3d C2 release boundary remains leaf-owned and product-unwired" {
         "pub fn commitGenerationEventRelease(",
         "pub fn discardGenerationEventForTest(",
     ) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 14), count(facade, "    pub fn "));
+    try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn takeEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn releaseEvent("));
-    try std.testing.expectEqual(@as(usize, 0), count(facade, "    pub fn purgeEndedStream("));
+    try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn purgeEndedStream("));
 
     try std.testing.expectEqual(@as(usize, 1), count(facade, "client_slot_mod.prepareGenerationEventRelease("));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "generation_event.publishReleasing("));

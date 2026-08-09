@@ -200,6 +200,16 @@ fn mapGenerationInputError(err: @import("generation_transport.zig").InputError) 
     };
 }
 
+fn mapGenerationEventError(
+    err: @import("generation_transport.zig").EventError,
+) client_mod.ClientError {
+    return switch (err) {
+        error.Busy => error.AdminBusy,
+        error.InvalidOwner, error.Corrupt => error.ProtocolError,
+        error.Terminal => error.ConnectionClosed,
+    };
+}
+
 const EventGenerationTracking = enum {
     untracked,
     tracked,
@@ -1158,12 +1168,87 @@ pub const RemoteRuntime = struct {
     };
 
     fn drainObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
+        return switch (self.attachment) {
+            .legacy => self.drainLegacyObservationEvents(),
+            .generation => self.drainGenerationObservationEvents(),
+        };
+    }
+
+    fn drainLegacyObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
         while (try self.client.takeEventForStream(self.attachment.streamId())) |frame| {
             defer self.client.releaseEvent(frame);
             const verdict = frame.preflight orelse
                 runtime_event_wire.preflightEvent(frame.payload, .{});
-            const classification = runtime_metadata_wire.classifyAndMaterializeEvent(
+            try self.applyObservationEvent(
+                &result,
+                frame.header,
+                frame.payload,
+                verdict,
+            );
+        }
+        if (result.ended) self.client.dropBufferedStream(self.attachment.streamId());
+        return result;
+    }
+
+    fn drainGenerationObservationEvents(self: *RemoteRuntime) client_mod.ClientError!EventDrain {
+        var result: EventDrain = .{};
+        var retries_remaining = protocol.max_client_pending_events;
+        while (true) {
+            const generation = &self.attachment.generation;
+            switch (generation.purgeEndedStream() catch |err|
+                return mapGenerationEventError(err)) {
+                .purged => return .{ .ended = true },
+                .not_ended => {},
+            }
+            switch (generation.takeEvent() catch |err| return mapGenerationEventError(err)) {
+                .idle => return result,
+                .ended_pending => {
+                    if (retries_remaining == 0) return error.AdminBusy;
+                    retries_remaining -= 1;
+                    continue;
+                },
+                .taken => {},
+            }
+            const view = generation.viewEvent() catch |err| {
+                generation.releaseEvent() catch |release_err|
+                    return mapGenerationEventError(release_err);
+                return switch (err) {
+                    error.InvalidOwner => error.ProtocolError,
+                    error.Terminal => error.ConnectionClosed,
+                };
+            };
+            const verdict: runtime_event_wire.Verdict = switch (view.admission) {
+                .accepted => |accepted| .{ .accepted = accepted },
+                .unknown => .unknown,
+            };
+            var apply_error: ?client_mod.ClientError = null;
+            self.applyObservationEvent(
+                &result,
+                .{
+                    .major = view.wire_major,
+                    .kind = .event,
+                    .stream_id = self.attachment.streamId(),
+                    .payload_len = @intCast(view.payload.len),
+                },
+                view.payload,
+                verdict,
+            ) catch |err| {
+                apply_error = err;
+            };
+            generation.releaseEvent() catch |err| return mapGenerationEventError(err);
+            if (apply_error) |err| return err;
+        }
+    }
+
+    fn applyObservationEvent(
+        self: *RemoteRuntime,
+        result: *EventDrain,
+        header: protocol.Header,
+        payload: []const u8,
+        verdict: runtime_event_wire.Verdict,
+    ) client_mod.ClientError!void {
+        const classification = runtime_metadata_wire.classifyAndMaterializeEvent(
                 self.allocator,
                 .{
                     .runtime_id = self.attachment.statePtr().runtime_id,
@@ -1187,13 +1272,13 @@ pub const RemoteRuntime = struct {
                     .verdict = verdict,
                 },
                 .{
-                    .major = frame.header.major,
-                    .kind = frame.header.kind,
-                    .stream_id = frame.header.stream_id,
-                    .request_id = frame.header.request_id,
-                    .flags = frame.header.flags,
-                    .payload_len = frame.header.payload_len,
-                    .payload = frame.payload,
+                    .major = header.major,
+                    .kind = header.kind,
+                    .stream_id = header.stream_id,
+                    .request_id = header.request_id,
+                    .flags = header.flags,
+                    .payload_len = header.payload_len,
+                    .payload = payload,
                 },
             ) catch |err| {
                 self.client.poison(if (err == error.OutOfMemory)
@@ -1205,14 +1290,14 @@ pub const RemoteRuntime = struct {
                     else => error.ProtocolError,
                 };
             };
-            const event = switch (classification) {
+        const event = switch (classification) {
                 .accepted => |accepted| accepted,
                 .violation => {
                     self.client.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 },
             };
-            switch (event) {
+        switch (event) {
                 .revoked => |generation| {
                     const revoke_fence = self.attachment.applyValidatedRevokedAndFence(
                         self.client,
@@ -1250,10 +1335,7 @@ pub const RemoteRuntime = struct {
                     }) or result.metadata;
                 },
                 .ended => result.ended = true,
-            }
         }
-        if (result.ended) self.client.dropBufferedStream(self.attachment.streamId());
-        return result;
     }
 
     fn pumpResyncIntent(self: *RemoteRuntime) client_mod.ClientError!void {

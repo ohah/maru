@@ -1168,6 +1168,28 @@ pub const AttachmentCleanupRegistry = struct {
         };
     }
 
+    /// Ended purge may start only while the reserved final-address event slot has no live owner.
+    /// Unlike attachment teardown this query does not accept a caller mirror as authority.
+    pub fn eventPurgeReadiness(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        owner_addr: usize,
+    ) Error!EventAttachmentReadiness {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or owner_addr == 0)
+            return error.InvalidState;
+        return switch (authority.lifecycle) {
+            .idle, .terminal => .ready,
+            .reserved => .busy,
+            .live, .releasing => if (authority.active_owner_addr == owner_addr)
+                .busy
+            else
+                error.InvalidState,
+        };
+    }
+
     pub fn beginEventReleaseNoFail(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,

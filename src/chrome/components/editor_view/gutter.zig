@@ -44,15 +44,25 @@ pub const line_number_role: tokens.ColorRole = .muted_fg;
 /// 줄 번호를 담는 최대 자릿수. `usize`를 십진으로 찍을 때 필요한 상한이며, 이보다 긴 문서는 없다.
 const max_digits = 20;
 
-/// gutter draw op을 `out`에 채우고 쓴 개수를 돌려준다.
+/// 이 호출이 각 저장소에서 **실제로 쓴 양**. 호출자가 그다음 소비자에게 남은 자리를 넘길 때 쓴다.
+///
+/// 개수를 돌려주지 않고 호출자가 다시 계산하게 두면 그 계산이 이 함수의 내부 규칙(랩 행은 건너뛴다,
+/// 자릿수만큼 쓴다)을 복제하게 되고, 여기가 바뀌면 조용히 어긋난다. 실제로 Lab이 그렇게 짜여 있었다.
+pub const Written = struct {
+    ops: usize,
+    bytes: usize,
+    runs: usize,
+};
+
+/// gutter draw op을 `out`에 채우고 각 저장소에서 쓴 양을 돌려준다.
 ///
 /// **할당하지 않는다.** 호출자가 준 저장소만 쓰며, 모자라면 `error.OutOfSpace`로 **fail-close**한다 —
 /// 조용히 잘라 내면 아래쪽 줄 번호가 사라진 채 캡처가 통과한다.
 ///
 /// 줄 번호는 **우측 정렬**이다(Monaco와 같다). 자릿수가 다른 줄이 좌측 정렬되면 본문과의 간격이
 /// 줄마다 달라져 읽기 흐름이 끊긴다.
-pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run) !usize {
-    if (props.layout.line_numbers.isEmpty()) return 0;
+pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run) !Written {
+    if (props.layout.line_numbers.isEmpty()) return .{ .ops = 0, .bytes = 0, .runs = 0 };
 
     var op_count: usize = 0;
     var scratch_used: usize = 0;
@@ -89,7 +99,7 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         op_count += 1;
     }
 
-    return op_count;
+    return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used };
 }
 
 /// 뷰포트에 보이는 논리 줄들을 gutter 행으로 편다. 랩·접힘이 없는 N1 경로다.
@@ -145,9 +155,9 @@ test "줄 번호는 우측 정렬된다 — 자릿수가 달라도 본문과의 
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const n = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
 
-    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(@as(usize, 2), w.ops);
 
     // 영역이 5셀(0..5)이므로 "1"은 열 4, "100"은 열 2에서 시작한다 — 오른쪽 끝이 같다.
     try testing.expectEqual(@as(i32, 4 * 8), ops[0].text.origin.x);
@@ -200,10 +210,13 @@ test "랩으로 이어진 행은 번호를 그리지 않는다 — 자리만 차
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const n = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
 
     // 행은 셋인데 op은 둘이다.
-    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(@as(usize, 2), w.ops);
+    // 쓴 byte도 둘의 자릿수 합이어야 한다("1"·"2" = 2). 호출자가 이 값으로 남은 자리를 넘긴다.
+    try testing.expectEqual(@as(usize, 2), w.bytes);
+    try testing.expectEqual(@as(usize, 2), w.runs);
     try testing.expectEqualStrings("2", ops[1].text.runs[0].text);
     // 두 번째 번호는 시각 행 2에 있어야 한다 — 랩 행을 건너뛴 만큼 내려간다.
     try testing.expectEqual(@as(i32, 32), ops[1].text.origin.y);
@@ -216,7 +229,9 @@ test "줄 번호를 끄면 아무것도 그리지 않는다" {
     var ops: [4]draw.Op = undefined;
     var scratch: [32]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    try testing.expectEqual(@as(usize, 0), try build(testProps(layout, &rows), &ops, &scratch, &runs));
+    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    try testing.expectEqual(@as(usize, 0), w.ops);
+    try testing.expectEqual(@as(usize, 0), w.bytes);
 }
 
 test "저장소가 모자라면 조용히 자르지 않고 실패한다" {

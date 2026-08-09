@@ -169,6 +169,15 @@ const cases = [_]Case{
     // baseline**에 선다(셀↔픽셀 변환이 어긋나면 세로로 반 칸 밀린다), ⑶ 탭이 탭스톱으로 전개돼
     // 들여쓰기 깊이가 줄마다 다르다, ⑷ 빈 줄이 자리를 유지해 다음 줄이 위로 당겨지지 않는다,
     // ⑸ 한글이 fallback 폰트로 그려진다.
+    // N1 §4 — 뷰포트 컬링. 문서 중간(first_row=5)으로 스크롤한 상태를 본다. **줄 번호가 1이 아니라
+    // 6에서 시작**하고 6행만 그려지는 것이 이 case의 계약이다. 컬링이 죽으면 1번부터 전부 그려져
+    // 곧바로 드러나고, off-by-one이 생기면 시작 번호가 5나 7이 된다.
+    .{
+        .name = "editor-viewport-scrolled",
+        .capture = "editor-scrolled.ppm",
+        .contract = "스크롤된 뷰포트가 first_row+1부터 visibleRows만큼만 그린다(1번부터 그리지 않는다)",
+        .rect = .{ .x = 0, .y = 0, .w = 340, .h = 120 },
+    },
     .{
         .name = "editor-content-text",
         .capture = "editor-gutter.ppm",

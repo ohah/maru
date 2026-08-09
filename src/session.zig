@@ -91,6 +91,8 @@ pub const core_command = @import("session/core_command.zig");
 /// 화면 좌표로의 변환은 L3(chrome)가 맡는다 — 이 네임스페이스는 플랫폼·렌더를 import하지 않는다.
 pub const editor = struct {
     pub const line_index = @import("session/editor/line_index.zig");
+    pub const selection = @import("session/editor/selection.zig");
+    pub const document = @import("session/editor/document.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

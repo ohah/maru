@@ -455,6 +455,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "detail-stale")) return .detail_stale;
     if (std.mem.eql(u8, raw, "detail-unavailable")) return .detail_unavailable;
     if (std.mem.eql(u8, raw, "editor-gutter")) return .editor_gutter;
+    if (std.mem.eql(u8, raw, "editor-scrolled")) return .editor_scrolled;
     return null;
 }
 
@@ -476,6 +477,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .detail_unavailable => "detail-unavailable",
         .sidebar_status_strip => "sidebar-status-strip",
         .editor_gutter => "editor-gutter",
+        .editor_scrolled => "editor-scrolled",
     };
 }
 

@@ -97,6 +97,16 @@ pub fn lower(
                 const row = @divTrunc(f.rect.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
                 if (col >= 0 and col < cols and row >= 0 and row < rows)
                     cursor = .{ .row = @intCast(row), .col = @intCast(col), .visible = true };
+            } else if (isHairline(f.rect, cw, ch)) {
+                // 셀보다 얇은 fill(구분선 등)은 **셀 격자로 표현할 수 없다.** paintRectBg는 픽셀 rect를
+                // `trunc(y/ch) .. trunc((y+h)/ch)` 행 범위로 내리므로, 1px이 행 마지막 픽셀에 걸리면 그 행이
+                // **통째로** 칠해지고(알림 카드 구분선이 18px 회색 밴드로 보이던 결함) 행 중간에 걸리면
+                // r0==r1이라 **아예 안 보인다**. 위치에 따라 둘 중 하나라 규율로 피할 수도 없다.
+                //
+                // 그래서 헤어라인만 GPU quad로 내린다 — `.swatch`/`.quad`가 "둥근 모서리는 셀로 못 그리니
+                // quad로"와 같은 규칙이고, 여기서는 '두께'가 그 이유다. 모달 배경 quad보다 **뒤에** append돼
+                // 같은 over 버킷 안에서 위에 그려진다(배경이 먼저 나오는 것은 lowerer의 painter 규칙).
+                appendHairline(&gpu_quads, allocator, f.rect, f.role, tk);
             } else paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
         },
         .border => |b| if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
@@ -141,6 +151,18 @@ pub fn lower(
         }
     }
     return .{ .cells = cells, .gpu_quads = gpu_quads, .gpu_shadows = gpu_shadows, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y, .cursor = cursor, .clip_rect = clip_rect };
+}
+
+/// 셀 격자로 표현할 수 없는 얇은 rect인가 — 한 축이라도 셀보다 얇으면 그렇다(가로선 h<ch·세로선 w<cw).
+/// 셀 하나가 최소 단위라 이보다 얇은 것은 반올림되어 **행/열 전체**가 되거나 사라진다.
+fn isHairline(rect: chrome.draw.Rect, cw: u32, ch: u32) bool {
+    return rect.h < ch or rect.w < cw;
+}
+
+/// 헤어라인 fill을 픽셀 그대로의 GPU quad로 낸다(모서리 곡률·테두리 없음). layer 1 = 모달 위젯 층 —
+/// 모달 배경 quad와 같은 층이되 뒤에 append되므로 그 위에 그려진다.
+fn appendHairline(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.mem.Allocator, rect: chrome.draw.Rect, role: chrome.tokens.ColorRole, tk: *const chrome.Tokens) void {
+    appendQuad(quads, allocator, rect, .{ 0, 0, 0, 0 }, .{ 0, 0, 0, 0 }, role, null, tk, 1);
 }
 
 fn appendSwatch(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.mem.Allocator, sw: chrome.draw.Op.Swatch) void {

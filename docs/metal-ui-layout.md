@@ -741,6 +741,16 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 **규칙을 이미 따르는 표면**(전부 Zig가 rect를 정해 `GpuQuad`로 낸다): 도크 패널 배경(`appendBarBgQuad` — 탭 바 배경과 공용)·도크 카드/버튼 배경(`chrome_draw_lowering.appendBackgroundQuads`), 모달 배경·테두리, 탭 밴드와 활성 탭 cutout, **rich** 사이드바 활성 밴드, 스크롤바 thumb, 시각 벨 플래시. 모달 **그림자**만 `GpuShadow` 별도 채널이고 blur 확장을 `.m`이 한다(위 표).
 
+**셀 격자는 셀보다 얇은 것을 표현할 수 없다.** `metal_lowering`의 `paintRectBg`는 픽셀 rect를
+`trunc(y/ch) .. trunc((y+h)/ch)` 행 범위로 내리므로, 1px 구분선은 **위치에 따라 둘 중 하나**가 된다 —
+행의 마지막 픽셀에 걸리면 `r1 == r0 + 1`이라 **그 행이 통째로** 칠해지고, 행 중간에 걸리면 `r1 == r0`이라
+**아예 안 보인다**. 알림 카드 구분선이 18px 회색 밴드로 보이던 것이 앞의 경우였다(1px 의도 → 18배).
+
+규율로 피할 수 없는 표현력의 한계이므로 **lowerer가 가른다**: `.fill`이 한 축이라도 셀보다 얇으면
+(`isHairline`) 셀 배경 대신 픽셀 그대로의 GPU quad로 낸다. `.swatch`/`.quad`가 "둥근 모서리는 셀로 못
+그리니 quad로" 가르는 것과 같은 규칙이고, 여기서는 **두께**가 그 이유다. 헤어라인 quad는 모달 배경
+quad와 같은 layer 1이되 뒤에 append돼 그 위에 그려진다(painter 규칙은 lowerer가 소유).
+
 **이관할 때의 함정**(사이드바 배경을 옮기는 경우 — 첫 예외):
 
 - **`layer = bottom`이다.** 지금 배경 strip은 터미널 셀 **앞**에 그려져 사이드바 헤더 glyph(터미널 셀 패스)가 그 위에 보인다. `under`로 옮기면 터미널 셀 **뒤**가 돼 배경이 헤더 아이콘을 덮는 회귀가 재발한다(그 회귀를 고친 기록이 draw 순서 주석에 있다).

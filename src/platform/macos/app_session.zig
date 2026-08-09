@@ -36917,6 +36917,56 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
     try std.testing.expectEqual(c.rgb(7, 7, 7), raster.cells.items[2].style.background.rgb); // row1 selection(painter order)
 }
 
+// 셀보다 얇은 fill(구분선·inset 버튼 배경)은 **셀 배경이 아니라 GPU quad**로 나가야 한다.
+//
+// `paintRectBg`는 픽셀 rect를 `trunc(y/ch) .. trunc((y+h)/ch)` 행 범위로 내린다. 그래서 1px 구분선은 위치에
+// 따라 **행 전체가 칠해지거나**(마지막 픽셀에 걸릴 때 r1==r0+1) **아예 안 보인다**(중간에 걸릴 때 r1==r0).
+// 알림 카드 구분선이 18px 회색 밴드로 보이던 것이 앞의 경우다 — 규율로 피할 수 없는 표현력의 한계라
+// 얇은 것만 quad 경로로 가른다(`.swatch`/`.quad`가 둥근 모서리를 quad로 보내는 것과 같은 규칙).
+test "rasterizeOverlayCells: 셀보다 얇은 fill은 셀 배경이 아니라 GPU quad로 나간다(구분선 밴드 회귀)" {
+    const allocator = std.testing.allocator;
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) maru.color.Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+    };
+    const tk = chrome.tokens.Tokens.tui(.{
+        .foreground = c.rgb(1, 1, 1),
+        .sidebar_background = c.rgb(2, 2, 2),
+        .sidebar_foreground = c.rgb(3, 3, 3),
+        .sidebar_active = c.rgb(4, 4, 4),
+        .search_match = c.rgb(5, 5, 5),
+        .search_match_current = c.rgb(6, 6, 6),
+        .selection = c.rgb(7, 7, 7),
+        .cursor = c.rgb(8, 8, 8),
+        .accent = c.rgb(9, 9, 9),
+    });
+    // cw=10, ch=20. 2칸×2행 패널 + 행0 마지막 픽셀(y=19)에 1px 구분선 — 옛 경로면 행0이 통째로 칠해졌다.
+    const ops = [_]chrome.draw.Op{
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 20, .h = 40 }, .role = .surface_bg } },
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 19, .w = 20, .h = 1 }, .role = .selection } },
+    };
+    const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
+
+    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20, false);
+    defer raster.cells.deinit(allocator);
+    defer raster.gpu_quads.deinit(allocator);
+    defer raster.gpu_shadows.deinit(allocator);
+
+    // 구분선은 quad 하나로 나가고, **픽셀 크기 그대로**다(행 높이로 반올림되지 않는다).
+    try std.testing.expectEqual(@as(usize, 1), raster.gpu_quads.items.len);
+    const q = raster.gpu_quads.items[0];
+    try std.testing.expectEqual(@as(f32, 19), q.y);
+    try std.testing.expectEqual(@as(f32, 1), q.h);
+    try std.testing.expectEqual(@as(f32, 20), q.w);
+    try std.testing.expectEqual(@as(u32, 1), q.layer); // 모달 배경과 같은 층 — 뒤에 append돼 그 위에 그려진다
+
+    // 그리고 어느 셀 배경도 구분선 색으로 바뀌지 않았다(옛 결함은 행0 전체가 selection 색이었다).
+    for (raster.cells.items) |cell| {
+        try std.testing.expectEqual(c.rgb(2, 2, 2), cell.style.background.rgb);
+    }
+}
+
 test "rasterizeOverlayCells: draw.Op.clip → OverlayRaster.clip_rect(렌더러 scissor 인프라, 안 그림)" {
     const allocator = std.testing.allocator;
     const cc = struct {

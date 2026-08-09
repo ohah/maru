@@ -19,11 +19,15 @@ test "CR3a-2c3d C3-2 purge-first product drain boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn drainGenerationObservationEvents("));
 
     // C3-2 keeps the existing raw Client event owner in the explicitly named legacy drain only.
-    try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "takeEventForStream", 1);
-    try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "releaseEvent", 1);
-    try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "dropBufferedStream", 1);
-    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEvents", "takeEventForStream", 0);
-    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEvents", "dropBufferedStream", 0);
+    const legacy_drain = between(runtime, "fn drainLegacyObservationEvents(", "fn drainGenerationObservationEvents(") orelse
+        return error.TestExpectedEqual;
+    const generation_drain = between(runtime, "fn drainGenerationObservationEvents(", "fn applyObservationEvent(") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(legacy_drain, "takeEventForStream"));
+    try std.testing.expectEqual(@as(usize, 1), count(legacy_drain, "releaseEvent"));
+    try std.testing.expectEqual(@as(usize, 1), count(legacy_drain, "dropBufferedStream"));
+    try std.testing.expectEqual(@as(usize, 0), count(generation_drain, "takeEventForStream"));
+    try std.testing.expectEqual(@as(usize, 0), count(generation_drain, "dropBufferedStream"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
@@ -51,34 +55,4 @@ fn between(source: []const u8, start: []const u8, end: []const u8) ?[]const u8 {
     const start_index = std.mem.indexOf(u8, source, start) orelse return null;
     const end_index = std.mem.indexOfPos(u8, source, start_index + start.len, end) orelse return null;
     return source[start_index..end_index];
-}
-
-fn expectIdentifierCountInFunction(
-    allocator: std.mem.Allocator,
-    source: [:0]const u8,
-    function_name: []const u8,
-    identifier: []const u8,
-    expected: usize,
-) !void {
-    var ast = try std.zig.Ast.parse(allocator, source, .zig);
-    defer ast.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), ast.errors.len);
-    var found: usize = 0;
-    var references: usize = 0;
-    for (ast.rootDecls()) |decl| {
-        var buffer: [1]std.zig.Ast.Node.Index = undefined;
-        const fn_decl = ast.fullFnProto(&buffer, decl) orelse continue;
-        const name_token = fn_decl.name_token orelse continue;
-        if (!std.mem.eql(u8, ast.tokenSlice(name_token), function_name)) continue;
-        found += 1;
-        const first = ast.firstToken(decl);
-        const last = ast.lastToken(decl);
-        var token = first;
-        while (token <= last) : (token += 1) {
-            if (ast.tokens.items(.tag)[token] == .identifier and
-                std.mem.eql(u8, ast.tokenSlice(token), identifier)) references += 1;
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), found);
-    try std.testing.expectEqual(expected, references);
 }

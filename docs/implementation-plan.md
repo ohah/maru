@@ -1429,7 +1429,43 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       external typed invalid/exclusive Busy는 reason/fd/pending durable mutation 0이다. guarded pending free callback의 poison/input/control과
       foreign teardown 재진입 Busy, effect 뒤 fence 재사용, exact free 1, peer EOF, first-reason/idempotency를
       `test-session-host-2c3d-c3-3` Debug·ReleaseFast에서 고정한다.
-      이 slice만으로 live revoke row, 제품 settlement/source-zero, revoked actual-socket roundtrip 완료를 주장하지 않는다.
+      이 slice만으로 기존 `EventAuthority` revoke class/derived cache, 제품 settlement/source-zero, revoked actual-socket roundtrip
+      완료를 주장하지 않는다.
+      다음 활성화는 **C3-3a revoke ordering gate**이며 세 reviewable gate로 닫는다. **C3-3a1 dormant authority substrate**는 새
+      row·generation·RemoteRuntime 단계 복제를 만들지 않고 canonical `AttachmentCleanupRegistry.Entry.event_authority`에 closed
+      `none|controller_revoke` class와 node-local checked derived cache를 추가한다. per-entry class/lifecycle가 SSOT이고 cache는
+      `reserved|live|releasing` revoke 수의 O(1) projection일 뿐이다. production은 affected row의 exact lifecycle/receipt와 checked
+      counter bound/transition만 O(1)으로 검증한다. Debug·ReleaseFast test-only invariant oracle만 bounded full scan으로 cache 일치를 확인한다.
+      trusted class 인자는 기존 ClientSlot take가 canonical payload를 재검증해 얻은 preflight 결과에서만 만든다. aggregate query는
+      payload를 다시 파싱하지 않는다. revoke reserve의 no-fail suffix가 `0 -> 1`, pre-reserve 실패는 `0 -> 0`, reserve 뒤 abort는
+      `0 -> 1 -> 0`이다. live publication과 releasing 시작은 delta 0이다. 정상 release는 allocator callback/quarantine settlement 뒤
+      `finishEventReleaseNoFail`에서 감소하고, live `StreamOperationPermit`이 그 뒤 permit consume까지 mutation을 계속 막는다. corrupt는
+      terminalize 때 감소하지 않고 recovery permit 최종 consume 뒤 감소한다. teardown은 live/releasing owner를 정산하지 않고 explicit
+      release까지 `Busy`다. stale/copy/ABA/double consume과 unauthorized underflow는 delta 0으로 fail-stop하며 production은 invalid raw
+      lifecycle/receipt나 counter bound 위반을 fail-closed한다. 임의 row/cache bit drift의 전수 복구·탐지는 주장하지 않는다. a1은 product take/release caller exact 0인 dormant component이고
+      Debug·ReleaseFast registry runtime 7+boundary 1을 통과해야 한다.
+      **C3-3a2 dormant final-admission substrate**는 ClientSlot owner-thread/Client operation fence 아래 사용할 단일 internal transaction을
+      만들되 product caller를 exact 0으로 유지한다. 현재 존재하는 blocking/nonblocking input, control, pending output,
+      prepared request/RPC와 resize·mouse·core·scroll·resync family의 error/progress·owner-retention 표를 Debug·ReleaseFast runtime
+      7+boundary 1로 고정한다. future 2c3e RPC execute는 helper signature만 예약하고 caller 편입은 2c3e gate가 소유한다.
+      **C3-3a3 product activation**이 기존 take/release에 a1을, 현재 존재하는 모든 generation mutation final admission에 a2를 동시에
+      배선한다. queue commit 전 generation/class reserve·bind가 끝나고 `Client` queue commit→existing authority live publication은
+      fallible callback 0의 연속 no-fail suffix이며, live `StreamOperationPermit`과 owner-thread/no-yield가 직렬화한다. registered-node
+      operation은 그 전에 끝나므로 handoff 근거가 아니다. final gate는 검사부터 allocation·queue offset·syscall commit까지 같은
+      family별 operation fence를 유지한다. product activation 전 a1/a2 callsite는 0이므로 반쪽 보호가 사용자 경로에 노출되지 않는다.
+      a3은 Debug·ReleaseFast product runtime 8+actual-socket 2+boundary 1을 실행한다. quarantine reserve→pin reserve→generation
+      reserve→quarantine/cleanup bind의 각 precommit fault와 `Client.commitGenerationEventTake`의
+      `Busy|Terminal|Corrupt|InvalidPrepared`는 reserve 뒤 cache를 exact rollback해
+      `(queue=1,aggregate=0,permit/pin/quarantine/reserved-authority=0)`으로 수렴한다. queue commit 성공 뒤에는
+      `(queue=0,aggregate=1)`만 허용한다. target pending outbound
+      offset 0은 exact free 1/wire 0, partial offset은 no-retry fail-close, sibling pending은 offset/owner 보존·flush 0 뒤 aggregate zero에서
+      재개한다. callback/foreign/teardown/check 직후 revoke 경쟁은 allocation/callback/offset/syscall 0과 API별 `Busy` 또는 progress
+      `false`를 증명한다. public `GenerationTransport`는 세 gate 모두 exact 15다.
+      **C3-3b failure settlement**는 generation arm의 raw capability/poison/fence 접근을 typed adapter로 치환한다. effect confirmation을
+      먼저 재시도하고 confirmed 뒤 release하며, release가 Busy면 다음 tick의 purge/take보다 release를 먼저 재시도하는 상태만 제품
+      `pending_generation_event_outcome`에 둔다. **C3-3c product socket/source-zero**는 열린 peer에서
+      revoked/unknown/semantic failure roundtrip과 generation raw Client event source-zero를 닫는다. immediate EOF·unread RX-first와
+      decoder cadence/parity는 계속 2c3e 범위다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

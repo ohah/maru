@@ -1,9 +1,10 @@
 const std = @import("std");
+const test_support = @import("app_session/test_support.zig");
 const workspace_ops = @import("app_session/workspace.zig");
-const settings_ops = @import("app_session/settings.zig");
+pub const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
-const sidebar_ops = @import("app_session/sidebar.zig");
-const tab_ops = @import("app_session/tab.zig");
+pub const sidebar_ops = @import("app_session/sidebar.zig");
+pub const tab_ops = @import("app_session/tab.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 
@@ -80,9 +81,9 @@ const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gestu
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
-const file_panel_ops = @import("app_session/file_panel.zig");
-const pane_ops = @import("app_session/pane.zig");
-const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+pub const file_panel_ops = @import("app_session/file_panel.zig");
+pub const pane_ops = @import("app_session/pane.zig");
+pub const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
@@ -1921,18 +1922,8 @@ fn dimRgb(c: maru.color.Rgb) maru.color.Rgb {
     };
 }
 
-/// Artifact 헤더는 절대경로(`/Users/...`)를 좁은 밴드에 밀어 넣지 않고 문맥 있는 마지막 두 component를
-/// breadcrumb로 보인다(`docs / web-panel.md`). 파일 capability의 실제 절대경로는 DockEntry에 그대로 남는다.
-fn fileDockBreadcrumbAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = std.fs.path.basename(path);
-    const parent_path = std.fs.path.dirname(path) orelse return allocator.dupe(u8, file);
-    const parent = std.fs.path.basename(parent_path);
-    if (parent.len == 0 or std.mem.eql(u8, parent, std.fs.path.sep_str)) return allocator.dupe(u8, file);
-    return std.fmt.allocPrint(allocator, "{s} / {s}", .{ parent, file });
-}
-
 test "file dock breadcrumb keeps the useful parent instead of the absolute home prefix" {
-    const text = try fileDockBreadcrumbAlloc(std.testing.allocator, "/Users/user/project/docs/web-panel.md");
+    const text = try test_support.fileDockBreadcrumbAlloc(std.testing.allocator, "/Users/user/project/docs/web-panel.md");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("docs / web-panel.md", text);
 }
@@ -2348,7 +2339,7 @@ pub var app_remote_backend: ?RemoteSessionBackend = null;
 var app_quitting: bool = false;
 // 설정 GUI는 창별 AppSession에 있지만 이 값은 앱 전체 정책이다. 한 창에서 true→false로 바꾼 뒤 다른 창이 stale
 // config를 들고 있어도 새 Term backend와 Quit teardown이 갈리지 않도록 process-global SSOT로 유지한다.
-var app_keep_alive_after_quit: bool = false;
+pub var app_keep_alive_after_quit: bool = false;
 // 첫 AppSession이 디스크 config를 앱 전역 정책으로 채운 뒤에는 새 Window/quick의 stale config snapshot이 이 값을
 // 덮지 않는다. 이후 변경 주체는 settings toggle/reload/reset뿐이다.
 var app_keep_alive_policy_initialized: bool = false;
@@ -7352,7 +7343,7 @@ pub const AppSession = struct {
 
     /// 드롭 계획(어떤 이동인가) — 프리뷰 hit-test가 산출하고 확정이 재사용한다(docs §9 SG8). 옮길 subtree 시작(origin)은
     /// 이 union이 아니라 호출자(SidebarDragPreview.origin / simulateDrop `origin` 인자)가 든다 — 문서 SidebarDragPreview 동형.
-    const DropPlan = union(enum) {
+    pub const DropPlan = union(enum) {
         // SG4: moveTab(origin, target_tab). **§14.6 SR4 model-2**: `top_level`=드롭 컨텍스트 전이 **의도**(그룹 밖 gap
         // 드롭=true·그룹 안 멤버 드롭=false). simulateDrop/commit이 이 의도를 meaningfulness 게이트(그룹 마커가 리전 안
         // 위에 있을 때만 flag가 필요 = 흡수 방지)와 AND해 최소 표현으로 굽는다 — default false ⇒ 옛 카드 드래그(전이 없음)와
@@ -7419,7 +7410,7 @@ pub const AppSession = struct {
         return .{ .lo = mi + 1, .hi = mi + count }; // 프리픽스 [mi+1, mi+1+count) 내부 인덱스
     }
 
-    fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std.mem.Allocator) !VirtualLayout {
+    pub fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std.mem.Allocator) !VirtualLayout {
         const n = self.tabs.items.len;
         // identity order + 라이브 group_depth(위치별 선언 depth) + 라이브 top_level(위치별 최상위 복귀 비트, §14.6 SR4).
         // 카드/그룹 이동이 이 위에서 순열·relevel한다.
@@ -10337,7 +10328,7 @@ pub const AppSession = struct {
     /// 집합에 남는다** — zero rect + `visible=false`로(FP16c, 아래 두 번째 루프). 집합에서 빠지면 surfaceDiff가
     /// destroyed를 내고 Swift가 WKWebView를 파괴해 미저장 CM6 버퍼가 사라지기 때문이다(docs/file-panel.md §4).
     /// OOM/미초기화면 error(호출자가 prev 불변 유지).
-    fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
+    pub fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
         if (self.surface_initialized and self.tabs.items.len > 0) {
             self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)
             try tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
@@ -14574,7 +14565,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, find, palette, addr_edit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, find, palette, addr_edit };
     fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -15772,7 +15763,7 @@ pub const AppSession = struct {
     const RemoteUpload = struct {
         dest: []u8,
         ctl: []u8,
-        fn deinit(self: RemoteUpload, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: RemoteUpload, allocator: std.mem.Allocator) void {
             allocator.free(self.dest);
             allocator.free(self.ctl);
         }
@@ -20896,7 +20887,7 @@ pub const AppSession = struct {
         measured_text: ?chrome_system_text.Artifact = null,
         /// 이 pane이 셀로 그리는 파일 탐색기 목록인가. 렌더러가 그 구간만 px로 자를 수 있게 role로
         /// 실어 보낸다(ABI v147). `dest`로는 구분되지 않는다 — 탐색기도 일반 `.pane`이다.
-        fn deinit(self: *CollectedPane, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *CollectedPane, allocator: std.mem.Allocator) void {
             self.pane.deinit(allocator);
         }
     };
@@ -21172,7 +21163,7 @@ pub const AppSession = struct {
         self.status_bar_hovered = null;
     }
 
-    fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
+    pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
         const h = self.statusBarHeightPx();
         if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) {
             self.clearStatusBarTree();
@@ -21908,7 +21899,7 @@ pub const AppSession = struct {
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
     /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
-    fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {
+    pub fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {
         // 오버레이는 터미널과 같은 셀·폰트(1×)로 그린다 — buildChromeProps도 같은 셀을 컴포넌트에 준다. 1.3× 확대는
         // 사용자 요청으로 제거(스케일 불일치로 한글이 약간 잘리던 문제도 함께 사라짐 — 셀=글리프 font size 일치).
         const cw = self.cell_width_px;
@@ -22735,35 +22726,10 @@ fn boolCode(value: bool) u32 {
     return if (value) 1 else 0;
 }
 
-const ProviderFixtureEntry = struct { name: []const u8, kind: std.Io.File.Kind };
-
-fn expectProviderFixtureEntries(io: std.Io, base: []const u8, expected: []const ProviderFixtureEntry) !void {
-    var dir = try std.Io.Dir.cwd().openDir(io, base, .{ .iterate = true });
-    defer dir.close(io);
-    var seen: usize = 0;
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        var matched = false;
-        for (expected) |want| {
-            if (!std.mem.eql(u8, entry.name, want.name)) continue;
-            try std.testing.expectEqual(want.kind, entry.kind);
-            matched = true;
-            break;
-        }
-        try std.testing.expect(matched);
-        seen += 1;
-    }
-    try std.testing.expectEqual(expected.len, seen);
-}
+pub const ProviderFixtureEntry = struct { name: []const u8, kind: std.Io.File.Kind };
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-
-/// `sidebar.agent-transcript-hook`을 끈 config 파일 내용. 이 계약의 "옵션이 꺼지면 provider 파일을 전혀 건드리지
-/// 않는다"를 검사하는 fixture다(docs/agent-session.md «사이드바 대화 표시와의 경계»).
-const hook_off_config = "sidebar.agent-transcript-hook = false\n";
-/// 같은 계약의 반대편 — 켠 경로에서 `statusLine` 키 외에는 손대지 않는지 검사하는 fixture.
-const hook_on_config = "sidebar.agent-transcript-hook = true\n";
 
 /// provider fixture 테스트가 실제 사용자 홈·설정·캐시를 건드리지 않도록 관련 env를 저장했다가 되돌린다. 이 테스트들은
 /// **실 파일시스템에 쓰는** 경로를 검증하므로 tmp로 밀어 넣는 것이 필수다.
@@ -22802,7 +22768,7 @@ test "provider files remain unchanged across AppSession.init when the statusline
     var env_guard = try ProviderEnvGuard.capture(a);
     defer env_guard.restore();
     // 옵션이 꺼진 제품 경로를 검사한다 — config 파일 파싱 자체는 loader 단위 테스트가 본다.
-    test_config_text = hook_off_config;
+    test_config_text = test_support.hook_off_config;
     defer test_config_text = "";
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
@@ -22866,23 +22832,23 @@ test "provider files remain unchanged across AppSession.init when the statusline
     try std.testing.expectEqualStrings(provider_config, codex_after);
     try std.testing.expectEqualStrings(mapping_42, mapping_42_after);
     try std.testing.expectEqualStrings(mapping_77, mapping_77_after);
-    try expectProviderFixtureEntries(io, root, &.{
+    try test_support.expectProviderFixtureEntries(io, root, &.{
         .{ .name = "home", .kind = .directory },
         .{ .name = "claude", .kind = .directory },
         .{ .name = "codex", .kind = .directory },
         .{ .name = "xdg", .kind = .directory },
         .{ .name = "cache", .kind = .directory },
     });
-    try expectProviderFixtureEntries(io, home, &.{});
-    try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
-    try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
-    try expectProviderFixtureEntries(io, xdg, &.{.{ .name = "maru", .kind = .directory }});
+    try test_support.expectProviderFixtureEntries(io, home, &.{});
+    try test_support.expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
+    try test_support.expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
+    try test_support.expectProviderFixtureEntries(io, xdg, &.{.{ .name = "maru", .kind = .directory }});
     const maru_dir = try std.fmt.allocPrint(a, "{s}/maru", .{xdg});
     defer a.free(maru_dir);
-    try expectProviderFixtureEntries(io, maru_dir, &.{.{ .name = "agent-sessions", .kind = .directory }});
+    try test_support.expectProviderFixtureEntries(io, maru_dir, &.{.{ .name = "agent-sessions", .kind = .directory }});
     const mapping_dir = try std.fmt.allocPrint(a, "{s}/maru/agent-sessions", .{xdg});
     defer a.free(mapping_dir);
-    try expectProviderFixtureEntries(io, mapping_dir, &.{
+    try test_support.expectProviderFixtureEntries(io, mapping_dir, &.{
         .{ .name = "42", .kind = .file },
         .{ .name = "77", .kind = .file },
     });
@@ -22915,26 +22881,26 @@ test "provider files remain unchanged across AppSession.init when the statusline
     });
     fallback_session.deinit();
 
-    try expectProviderFixtureEntries(io, fallback_home, &.{
+    try test_support.expectProviderFixtureEntries(io, fallback_home, &.{
         .{ .name = ".claude", .kind = .directory },
         .{ .name = ".codex", .kind = .directory },
         .{ .name = ".config", .kind = .directory },
     });
     const fallback_claude = try std.fmt.allocPrint(a, "{s}/.claude", .{fallback_home});
     defer a.free(fallback_claude);
-    try expectProviderFixtureEntries(io, fallback_claude, &.{.{ .name = "settings.json", .kind = .file }});
+    try test_support.expectProviderFixtureEntries(io, fallback_claude, &.{.{ .name = "settings.json", .kind = .file }});
     const fallback_codex = try std.fmt.allocPrint(a, "{s}/.codex", .{fallback_home});
     defer a.free(fallback_codex);
-    try expectProviderFixtureEntries(io, fallback_codex, &.{.{ .name = "hooks.json", .kind = .file }});
+    try test_support.expectProviderFixtureEntries(io, fallback_codex, &.{.{ .name = "hooks.json", .kind = .file }});
     const fallback_config_root = try std.fmt.allocPrint(a, "{s}/.config", .{fallback_home});
     defer a.free(fallback_config_root);
-    try expectProviderFixtureEntries(io, fallback_config_root, &.{.{ .name = "maru", .kind = .directory }});
+    try test_support.expectProviderFixtureEntries(io, fallback_config_root, &.{.{ .name = "maru", .kind = .directory }});
     const fallback_maru = try std.fmt.allocPrint(a, "{s}/.config/maru", .{fallback_home});
     defer a.free(fallback_maru);
-    try expectProviderFixtureEntries(io, fallback_maru, &.{.{ .name = "agent-sessions", .kind = .directory }});
+    try test_support.expectProviderFixtureEntries(io, fallback_maru, &.{.{ .name = "agent-sessions", .kind = .directory }});
     const fallback_mappings = try std.fmt.allocPrint(a, "{s}/.config/maru/agent-sessions", .{fallback_home});
     defer a.free(fallback_mappings);
-    try expectProviderFixtureEntries(io, fallback_mappings, &.{
+    try test_support.expectProviderFixtureEntries(io, fallback_mappings, &.{
         .{ .name = "42", .kind = .file },
         .{ .name = "77", .kind = .file },
     });
@@ -22961,7 +22927,7 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     defer tmp.cleanup();
     var env_guard = try ProviderEnvGuard.capture(a);
     defer env_guard.restore();
-    test_config_text = hook_on_config;
+    test_config_text = test_support.hook_on_config;
     defer test_config_text = "";
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
@@ -23012,12 +22978,12 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     session.deinit();
 
     // 늘어난 파일은 이름으로 우리 것임이 드러나는 스크립트와 마커 둘뿐이다. codex와 옛 mapping은 이 경로와 무관하다.
-    try expectProviderFixtureEntries(io, claude, &.{
+    try test_support.expectProviderFixtureEntries(io, claude, &.{
         .{ .name = sl.marker_name, .kind = .file },
         .{ .name = "settings.json", .kind = .file },
         .{ .name = sl.script_name, .kind = .file },
     });
-    try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
+    try test_support.expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
     const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(4096));
     defer a.free(codex_after);
     try std.testing.expectEqualStrings(codex_before, codex_after);
@@ -23088,7 +23054,7 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     }
 
     // 옵션을 끄면 설치 전 상태로 돌아간다 — 원래 명령이 `statusLine`에 복원되고 우리 스크립트는 사라진다.
-    test_config_text = hook_off_config;
+    test_config_text = test_support.hook_off_config;
     var off_session: AppSession = undefined;
     try off_session.init(io, a, .{
         .abi_version = abi_version,
@@ -23099,7 +23065,7 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     });
     off_session.deinit();
 
-    try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
+    try test_support.expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
     const restored = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
     defer a.free(restored);
     var restored_parsed = try std.json.parseFromSlice(std.json.Value, a, restored, .{});
@@ -23122,7 +23088,7 @@ test "agent statusline hook serializes, preserves file identity, and refuses to 
     defer tmp.cleanup();
     var env_guard = try ProviderEnvGuard.capture(a);
     defer env_guard.restore();
-    test_config_text = hook_on_config;
+    test_config_text = test_support.hook_on_config;
     defer test_config_text = "";
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
@@ -23216,7 +23182,7 @@ test "agent statusline hook serializes, preserves file identity, and refuses to 
         try std.testing.expect(sl.commandIsOurs(parsed.value.object.get("statusLine").?.object.get("command").?.string));
 
         // 임시 파일 잔해가 없다.
-        try expectProviderFixtureEntries(io, claude, &.{
+        try test_support.expectProviderFixtureEntries(io, claude, &.{
             .{ .name = sl.marker_name, .kind = .file },
             .{ .name = "settings.json", .kind = .sym_link },
             .{ .name = sl.script_name, .kind = .file },
@@ -23249,8 +23215,8 @@ test "agent statusline hook serializes, preserves file identity, and refuses to 
     // ── 4. 끄기인데 현재 상태를 못 읽으면 **근거를 지우지 않는다** ─────────────────────────────
     // 지우고 나면 사용자가 파일을 고쳐도 되살릴 것이 없다. 옛 코드는 복원 성공 여부와 무관하게 지웠다.
     {
-        test_config_text = hook_off_config;
-        defer test_config_text = hook_on_config;
+        test_config_text = test_support.hook_off_config;
+        defer test_config_text = test_support.hook_on_config;
 
         try runOnce(io, a);
 
@@ -24036,7 +24002,7 @@ test "CR#2: top카드 제거/이동이 경계를 다음 sticky follower에 재�
     try std.testing.expect(!tab_ops.tabIsInGroup(session, f)); // ★ f 안 흡수(revert하면 A에 흡수돼 true)
     try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // A=[0,2), f 밖
 
-    // (드래그) [A(마커,d1), a1, TOP(top_level), f] — TOP을 f 뒤로 드래그. commit=프리뷰 등가(expectCardDropTopLevelEquivalent).
+    // (드래그) [A(마커,d1), a1, TOP(top_level), f] — TOP을 f 뒤로 드래그. commit=프리뷰 등가(test_support.expectCardDropTopLevelEquivalent).
     const s2 = try allocator.create(AppSession);
     defer allocator.destroy(s2);
     try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -24053,7 +24019,7 @@ test "CR#2: top카드 제거/이동이 경계를 다음 sticky follower에 재�
     s2.tabs.items[2].top_level = true; // TOP
     const f2 = s2.tabs.items[3];
     // TOP(origin=2)을 index3(f 뒤)으로 이동 — origin이 빠져도 f가 앞 그룹에 흡수되면 안 된다. 등가 헬퍼가 프리뷰=확정도 검증.
-    try expectCardDropTopLevelEquivalent(s2, 2, .{ .card = .{ .target_tab = 3, .top_level = false } });
+    try test_support.expectCardDropTopLevelEquivalent(s2, 2, .{ .card = .{ .target_tab = 3, .top_level = false } });
     var f2_idx: usize = 99;
     for (s2.tabs.items, 0..) |t, i| if (t == f2) {
         f2_idx = i;
@@ -24149,7 +24115,7 @@ test "CR#5: sidebarGroupDropBoundary run_hi가 top_level서 정지 — 두 인�
     tab_ops.recomputeVisibleTabs(session);
 
     // G(m=0)를 TOP1 row에 드롭 → run_hi가 TOP2(top_level)서 멈춰 삽입 경계 = 3(TOP1과 TOP2 사이). 옛 run_hi는 4(둘 병합)였다.
-    const boundary = sidebar_ops.sidebarGroupDropBoundary(session, cardRowOf(session, 2), 0).?;
+    const boundary = sidebar_ops.sidebarGroupDropBoundary(session, test_support.cardRowOf(session, 2), 0).?;
     try std.testing.expectEqual(@as(usize, 3), boundary); // ★ TOP1·TOP2 사이(revert하면 4 = 둘 뒤로 병합)
 }
 
@@ -24964,7 +24930,7 @@ test "GP3(d): clampGroupMoveToRegion — 그룹 드래그 plan을 리전 경계�
     try std.testing.expectEqual(@as(usize, 4), session.clampGroupMoveToRegion(4, 0));
     // clamp된 insert_before(4)로 만든 group_sibling plan은 프리뷰(simulateDrop)와 확정(moveGroupSibling)이 **동일**
     // (SG8 이중경로 없음 — plan에 이미 clamp 구움). PG1이 고정 리전 안에서 PG2 뒤로 이동.
-    try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 4 } });
+    try test_support.expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 4 } });
     try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[3].pinned); // 이동 후에도 고정 프리픽스 무결
     try std.testing.expect(!session.tabs.items[4].pinned); // 비고정 리전 침범 없음
 }
@@ -25537,71 +25503,6 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
     try std.testing.expectEqual(@as(usize, 2), card_pins); // X1·X2만
 }
 
-/// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와
-/// 일치함을 단언한다: (1) move 전 탭 포인터·선언 depth 스냅샷, (2) simulateDrop → vl(+ self.tabs 불변 단언), (3) plan에
-/// 대응하는 실제 move를 **정확히 1회**, (4) 모든 위치 i에서 `before[vl.order[i]]==tabs[i]`(같은 탭이 같은 위치에)·
-/// `vl.group_depth[i]==tabs[i].group_depth`(같은 depth). 프리뷰(비커밋)와 확정(커밋)이 한 순수 코어로 수렴함을 고정한다.
-/// 중간 버퍼(그룹 순열 perm/new_order 등)까지 arena가 정리하므로 leak 없음.
-fn expectDropEquivalent(session: *AppSession, origin: usize, plan: AppSession.DropPlan) !void {
-    const alloc = std.testing.allocator;
-    const n = session.tabs.items.len;
-    const before = try alloc.alloc(*Tab, n);
-    defer alloc.free(before);
-    const before_gd = try alloc.alloc(u8, n);
-    defer alloc.free(before_gd);
-    for (session.tabs.items, 0..) |t, i| {
-        before[i] = t;
-        before_gd[i] = t.group_depth;
-    }
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const vl = try session.simulateDrop(origin, plan, arena.allocator());
-    // (2) self.tabs 불변 단언 — 순서·group_depth가 그대로(비커밋).
-    for (session.tabs.items, 0..) |t, i| {
-        try std.testing.expectEqual(before[i], t);
-        try std.testing.expectEqual(before_gd[i], t.group_depth);
-    }
-    // (3) 확정 경로 — plan별 실제 move 1회.
-    switch (plan) {
-        .none => {},
-        .card => |c| _ = tab_ops.moveTab(session, origin, c.target_tab),
-        .group_sibling => |g| _ = session.moveGroupSibling(origin, g.insert_before),
-        .group_nest => |g| _ = session.moveGroupNesting(origin, g.insert_before, g.target_depth),
-    }
-    // (4) 등가 단언 — 같은 위치에 같은 탭·같은 depth.
-    try std.testing.expectEqual(n, session.tabs.items.len);
-    for (session.tabs.items, 0..) |t, i| {
-        try std.testing.expectEqual(before[vl.order[i]], t);
-        try std.testing.expectEqual(vl.group_depth[i], t.group_depth);
-    }
-}
-
-/// §14.6 SR4 model-2 프리뷰=확정 등가(카드 경로) — simulateDrop이 낸 가상 `top_level[]`가 **실제 commitSidebarDragPreview**
-/// 확정 후 self.tabs.top_level와 위치별로 일치함을 단언한다(+order·group_depth도). expectDropEquivalent(raw move)와 달리
-/// **commit 경로**(top_level write 포함)를 태워, 프리뷰(가상 override)와 확정(실제 write)이 같은 게이트를 써 갈리지 않음을
-/// 고정한다(카드 plan 전용 — 그룹 plan은 top_level 불변이라 expectDropEquivalent로 충분). 로컬 pin 없는 시나리오라 commit의
-/// normalize/float/sweep 후처리는 no-op이라 vl와 committed가 그대로 일치한다(등가 정확성 보장).
-fn expectCardDropTopLevelEquivalent(session: *AppSession, origin: usize, plan: AppSession.DropPlan) !void {
-    const alloc = std.testing.allocator;
-    const n = session.tabs.items.len;
-    const before = try alloc.alloc(*Tab, n);
-    defer alloc.free(before);
-    for (session.tabs.items, 0..) |t, i| before[i] = t;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const vl = try session.simulateDrop(origin, plan, arena.allocator());
-    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변(비커밋 SG8)
-    // 확정 — 실제 commit 경로(moveTab + top_level write + normalize/float/sweep).
-    session.sidebar_drag_preview = .{ .origin = origin, .origin_len = 1, .plan = plan, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
-    sidebar_ops.commitSidebarDragPreview(session);
-    try std.testing.expectEqual(n, session.tabs.items.len);
-    for (session.tabs.items, 0..) |t, i| {
-        try std.testing.expectEqual(before[vl.order[i]], t); // 같은 위치에 같은 탭(순열 일치)
-        try std.testing.expectEqual(vl.group_depth[i], t.group_depth); // 선언 depth 일치
-        try std.testing.expectEqual(vl.top_level[i], t.top_level); // ★ 가상 top_level == 확정 실제 top_level(프리뷰=확정)
-    }
-}
-
 // §14.6 SR4 model-2 — 카드 드래그가 top_level을 **직접 전이**한다(그룹 밖 gap=최상위 복귀 / 그룹 안=멤버 흡수). VirtualLayout.
 // top_level[] 가상화로 프리뷰(가상 override)=확정(실제 write)이 같은 depth/소속을 낸다. 배치 [A(마커), a1, TOP1(top_level), X].
 test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_level=true·depth0·enclosing null(model-2 전이)" {
@@ -25644,7 +25545,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     const plan: AppSession.DropPlan = .{ .card = .{ .target_tab = target, .top_level = true } };
 
     // 프리뷰=확정 등가(가상 top_level == commit 후 실제).
-    try expectCardDropTopLevelEquivalent(session, 3, plan);
+    try test_support.expectCardDropTopLevelEquivalent(session, 3, plan);
 
     // 확정 결과: [A, a1, X, TOP1] — X는 그룹 뒤 최상위(top_level=true·depth0·밖), TOP1도 top카드 유지.
     var x_idx: usize = 0;
@@ -25707,7 +25608,7 @@ test "SR4(b): 카드를 그룹 안(멤버 카드)으로 드래그 → top_level=
     const target = tab_ops.sidebarGroupDropTargetTab(session, a1_row, 3).?;
     const plan: AppSession.DropPlan = .{ .card = .{ .target_tab = target, .top_level = false } };
 
-    try expectCardDropTopLevelEquivalent(session, 3, plan);
+    try test_support.expectCardDropTopLevelEquivalent(session, 3, plan);
 
     // 확정: X가 그룹 A 멤버로 흡수 — top_level=false(stale flag clear)·depth>0·enclosing=A마커.
     var x_idx: usize = 0;
@@ -25741,11 +25642,11 @@ test "SR4(c): 프리뷰=확정 등가 — 전이(그룹 밖/안)·no-op·none �
     tab_ops.recomputeVisibleTabs(session);
 
     // (1) 그룹 밖 전이(X를 TOP1 옆으로, top_level=true 의도).
-    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } });
+    try test_support.expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } });
     // (2) flat 드래그(t4를 t3 자리로, top_level 의도 false) — 그룹 마커 위 없음 리전이면 게이트가 false라 write 0(byte-identical).
-    try expectCardDropTopLevelEquivalent(session, session.tabs.items.len - 1, .{ .card = .{ .target_tab = 0, .top_level = true } });
+    try test_support.expectCardDropTopLevelEquivalent(session, session.tabs.items.len - 1, .{ .card = .{ .target_tab = 0, .top_level = true } });
     // (3) none plan — 제자리(전이 없음).
-    try expectCardDropTopLevelEquivalent(session, 1, .none);
+    try test_support.expectCardDropTopLevelEquivalent(session, 1, .none);
 }
 
 test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 뒤로 = pin 유지·top_level 전이·clampMoveToGroup 정합(§14.6)" {
@@ -25789,7 +25690,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
     }
 
     // X(고정 top, index3)를 TOP1 옆으로 → 고정 리전 안 인터리빙(top_level 전이, pin 유지). 등가.
-    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } });
+    try test_support.expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } });
     tab_ops.recomputeVisibleTabs(session);
     {
         var hdrs: usize = 0;
@@ -25932,7 +25833,7 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
 
     // 확정: b1을 gap plan으로 커밋 → [A, a1, b1(top), B]. b1이 A·B 사이 top카드(첫 인터리브).
     const b1 = session.tabs.items[3];
-    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } });
+    try test_support.expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } });
     var b1_idx: usize = 0;
     for (session.tabs.items, 0..) |t, i| if (t == b1) {
         b1_idx = i;
@@ -26002,7 +25903,7 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
 
     // 확정: b1이 접힌 A 뒤 top카드. [A(접힘), a1(숨김), b1(top), B].
     const b1 = session.tabs.items[3];
-    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } });
+    try test_support.expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } });
     var b1_idx: usize = 0;
     for (session.tabs.items, 0..) |t, i| if (t == b1) {
         b1_idx = i;
@@ -26186,9 +26087,9 @@ test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs
     }
 
     // 등가(넣기 커밋): t0를 A 안으로. after=[t1,t2,t3,t0].
-    try expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
+    try test_support.expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
     // 등가(빼기 커밋): t0(현재 index3)를 최상위 카드 자리(index0)로. after=[t0,t1,t2,t3].
-    try expectDropEquivalent(session, 3, .{ .card = .{ .target_tab = 0 } });
+    try test_support.expectDropEquivalent(session, 3, .{ .card = .{ .target_tab = 0 } });
 }
 
 test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에서 정직) + 등가" {
@@ -26218,7 +26119,7 @@ test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에
         try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3, 2 }, vl.order); // t3가 비고정 영역 시작(2)으로만
     }
     // 등가: moveTab(3,0)도 같은 clamp → 프리뷰-확정 일치.
-    try expectDropEquivalent(session, 3, .{ .card = .{ .target_tab = 0 } });
+    try test_support.expectDropEquivalent(session, 3, .{ .card = .{ .target_tab = 0 } });
 
     // 고정 t0(index0)를 비고정 영역 target 3으로 드롭 → clamp(3,true,pinned,4)=1(고정 영역 [0,1]). (커밋 후 t1은 index0.)
     {
@@ -26227,7 +26128,7 @@ test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에
         const vl = try session.simulateDrop(0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
         try std.testing.expectEqual(@as(usize, 1), vl.ghost_lo); // 고정 영역 끝(1)으로 clamp
     }
-    try expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
+    try test_support.expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
 }
 
 test "SG8b: 그룹 통째 형제 이동 등가 (SG5-1, simulateDrop == moveGroupSibling)" {
@@ -26260,7 +26161,7 @@ test "SG8b: 그룹 통째 형제 이동 등가 (SG5-1, simulateDrop == moveGroup
         try std.testing.expectEqual(@as(usize, 4), vl.ghost_hi);
         for (vl.group_depth) |d| if (d != 0) try std.testing.expectEqual(@as(u8, 1), d); // 형제라 depth 무변(비마커=원래값)
     }
-    try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 4 } });
+    try test_support.expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 4 } });
 }
 
 test "SG8b: 중첩 넣기 등가 (SG5-4, simulateDrop == moveGroupNesting) + subtree 상대 depth" {
@@ -26296,7 +26197,7 @@ test "SG8b: 중첩 넣기 등가 (SG5-4, simulateDrop == moveGroupNesting) + sub
         try std.testing.expectEqual(@as(u8, 2), vl.group_depth[2]); // A → B 자식
         try std.testing.expectEqual(@as(u8, 3), vl.group_depth[4]); // C → A 자식(상대 유지)
     }
-    try expectDropEquivalent(session, 0, .{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } });
+    try test_support.expectDropEquivalent(session, 0, .{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } });
 }
 
 test "SG8b: 형제 빼기 등가 — gap-clamp로 depth 얕아짐 (SG5-4 un-nest, simulateDrop == moveGroupSibling)" {
@@ -26329,7 +26230,7 @@ test "SG8b: 형제 빼기 등가 — gap-clamp로 depth 얕아짐 (SG5-4 un-nest
         // gap-clamp 빼기: B 마커(위치1) 저장 depth가 2→1로 얕아진다(자연 eff).
         try std.testing.expectEqual(@as(u8, 1), vl.group_depth[1]);
     }
-    try expectDropEquivalent(session, 3, .{ .group_sibling = .{ .insert_before = 1 } });
+    try test_support.expectDropEquivalent(session, 3, .{ .group_sibling = .{ .insert_before = 1 } });
 }
 
 test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불변 + no-op 등가" {
@@ -26356,32 +26257,10 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
         try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, vl.order);
         try std.testing.expectEqual(vl.ghost_lo, vl.ghost_hi); // 고스트 없음
     }
-    try expectDropEquivalent(session, 0, .none); // 실제 move 없음 — identity 등가
+    try test_support.expectDropEquivalent(session, 0, .none); // 실제 move 없음 — identity 등가
 
     // 자기 subtree 안으로의 형제 이동(insert_before∈[m,j]) → moveGroupRange no-op와 등가(제자리·depth 무변).
-    try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 2 } });
-}
-
-/// SG8c 테스트 헬퍼 — rows에 그 **원본 tab 인덱스**의 카드 row가 있으면 그 depth를 돌려준다(없으면 null). "고스트 존재/사라짐"
-/// (원본 tab이 카드 row로 방출됐는가)과 depth 정확성을 함께 본다(카드 .tab=원본 인덱스, 프리뷰 가상순서도 동일).
-fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u8 {
-    for (rows) |row| switch (row) {
-        .agent_toggle, .agent => {},
-        .card => |c| if (c.tab == tab) return c.depth,
-        .group_header => {},
-    };
-    return null;
-}
-
-/// SG8c 테스트 헬퍼 — rows에서 그 **원본 마커 tab 인덱스**의 group_header row를 돌려준다(없으면 null). collapsed flip·
-/// member_count·depth 단언용(헤더 .tab=마커 원본 인덱스).
-fn sg8cFindHeader(rows: []const chrome.components.sidebar.Row, tab: usize) ?chrome.components.sidebar.Row {
-    for (rows) |row| switch (row) {
-        .agent_toggle, .agent => {},
-        .group_header => |h| if (h.tab == tab) return row,
-        .card => {},
-    };
-    return null;
+    try test_support.expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 2 } });
 }
 
 // SG8c 1급 헤드리스(docs/sidebar-groups.md §9 SG8c): 카드를 **접힌 그룹**에 드롭하는 plan을 프리뷰 투영하면 그 카드
@@ -26409,7 +26288,7 @@ test "SG8c: 카드를 접힌 그룹에 드롭 → preview 고스트 존재(원�
     // 라이브(원본) 투영 — t0는 최상위 카드로 보이고(존재), A 헤더는 접힘(t2 숨김). 길이 비교의 기준(move 모델).
     tab_ops.recomputeVisibleTabs(session);
     const live_len = session.sidebar_rows.items.len;
-    try std.testing.expect(sg8cFindCardDepth(session.sidebar_rows.items, 0) != null);
+    try std.testing.expect(test_support.sg8cFindCardDepth(session.sidebar_rows.items, 0) != null);
 
     // self.tabs 불변 스냅샷(포인터·순서).
     const n = session.tabs.items.len;
@@ -26424,14 +26303,14 @@ test "SG8c: 카드를 접힌 그룹에 드롭 → preview 고스트 존재(원�
 
     // (원본=커밋 레이아웃) 프리뷰 예외 없이 가상 order를 그대로 투영하면 t0가 접힘 게이트로 **사라진다**(라이브 확정 시 증상).
     session.projectRowsFrom(vl.order, vl.group_depth);
-    try std.testing.expect(sg8cFindCardDepth(session.sidebar_rows.items, 0) == null); // 고스트 예외 없으면 사라짐
-    try std.testing.expect(sg8cFindHeader(session.sidebar_rows.items, 1).?.group_header.collapsed); // flip 없음(접힘 그대로)
+    try std.testing.expect(test_support.sg8cFindCardDepth(session.sidebar_rows.items, 0) == null); // 고스트 예외 없으면 사라짐
+    try std.testing.expect(test_support.sg8cFindHeader(session.sidebar_rows.items, 1).?.group_header.collapsed); // flip 없음(접힘 그대로)
 
     // (프리뷰) 고스트 강제 방출 + 헤더 flip + order-aware member_count.
     try session.refreshDragPreview(0, plan, 0, arena.allocator());
     const prows = session.sidebar_preview_rows.items;
-    try std.testing.expectEqual(@as(?u8, 1), sg8cFindCardDepth(prows, 0)); // (a) 고스트 존재 + depth 정확(A 안=depth 1)
-    const phdr = sg8cFindHeader(prows, 1).?.group_header;
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sg8cFindCardDepth(prows, 0)); // (a) 고스트 존재 + depth 정확(A 안=depth 1)
+    const phdr = test_support.sg8cFindHeader(prows, 1).?.group_header;
     try std.testing.expect(!phdr.collapsed); // 타겟 헤더 collapsed=false(flip)
     try std.testing.expectEqual(@as(u16, 3), phdr.member_count); // 고스트 반영(t1·t2·t0 = 3, 라이브는 2였음)
     try std.testing.expectEqual(live_len, prows.len); // (d) move(순열) 모델 — 길이 동일
@@ -26483,18 +26362,18 @@ test "SG8c: 펼친 그룹 nest 프리뷰 → subtree 고스트 상대 depth(A=2�
     const prows = session.sidebar_preview_rows.items;
 
     // 상대 depth 유지: A(마커 tab0)=2(B 자식), C(마커 tab2)=3(A 자식). 헤더·카드 모두.
-    try std.testing.expectEqual(@as(u8, 2), sg8cFindHeader(prows, 0).?.group_header.depth);
-    try std.testing.expectEqual(@as(?u8, 2), sg8cFindCardDepth(prows, 0));
-    try std.testing.expectEqual(@as(u8, 3), sg8cFindHeader(prows, 2).?.group_header.depth);
-    try std.testing.expectEqual(@as(?u8, 3), sg8cFindCardDepth(prows, 2));
+    try std.testing.expectEqual(@as(u8, 2), test_support.sg8cFindHeader(prows, 0).?.group_header.depth);
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sg8cFindCardDepth(prows, 0));
+    try std.testing.expectEqual(@as(u8, 3), test_support.sg8cFindHeader(prows, 2).?.group_header.depth);
+    try std.testing.expectEqual(@as(?u8, 3), test_support.sg8cFindCardDepth(prows, 2));
     // B(마커 tab4)는 부모라 depth1 불변.
-    try std.testing.expectEqual(@as(u8, 1), sg8cFindHeader(prows, 4).?.group_header.depth);
+    try std.testing.expectEqual(@as(u8, 1), test_support.sg8cFindHeader(prows, 4).?.group_header.depth);
     try std.testing.expectEqual(live_len, prows.len); // move 모델 — 길이 동일(접힘 없어 순열만)
 
     // 고스트 range: subtree(A·A직접카드·C) 전체가 표시-row 연속 구간으로 방출됐다(비어있지 않음).
     const dp = session.sidebar_drag_preview.?;
     try std.testing.expect(dp.ghost_lo < dp.ghost_hi);
-    try std.testing.expect(sg8cFindHeader(prows[dp.ghost_lo..dp.ghost_hi], 0) != null); // A 헤더가 고스트 구간 안
+    try std.testing.expect(test_support.sg8cFindHeader(prows[dp.ghost_lo..dp.ghost_hi], 0) != null); // A 헤더가 고스트 구간 안
 
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변
     try std.testing.expectEqual(n, session.tabs.items.len);
@@ -26781,27 +26660,27 @@ test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞
 
     // (B) 그룹 소속 **멤버** 카드 t2 빼기 → 첫 마커(t1) 직전으로 이동 = 최상위(depth 0). 그룹은 [t1,t3]로 유지.
     tab_ops.removeFromGroupForTab(session, t2);
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t2)); // 완전 최상위
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t2)); // 완전 최상위
     try std.testing.expect(t1.group_start != null); // 그룹 유지(멤버 하나만 빠짐)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t1)); // t1 여전히 그룹 안
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // t3 여전히 그룹 안
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t1)); // t1 여전히 그룹 안
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // t3 여전히 그룹 안
     // t2는 첫 마커(t1)보다 앞: tabs 순서 [t0, t2, t1, t3].
     try std.testing.expect(!tab_ops.tabIsInGroup(session, t2));
 
     // (C) 그룹 **시작 마커** 카드 t1 빼기 → 마커를 다음 소속 카드(t3)로 승계해 그룹 유지, t1은 최상위.
     tab_ops.removeFromGroupForTab(session, t1);
     try std.testing.expect(t1.group_start == null); // 마커 뗐다
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // t1 최상위
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t1)); // t1 최상위
     try std.testing.expect(t3.group_start != null); // t3이 마커 승계 → 그룹 유지
     try std.testing.expectEqualStrings("그룹 1", t3.group_start.?); // 이름 승계(소유권 이전, 누수 없음)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // t3 그룹 시작 카드
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // t3 그룹 시작 카드
 
     // (D) 마지막 멤버(=마커) t3 빼기 → 승계 대상 없어 그룹 소멸(마커 free — testing allocator 누수 감시). 전부 최상위.
     tab_ops.removeFromGroupForTab(session, t3);
     try std.testing.expect(t3.group_start == null);
     try std.testing.expect(session.firstGroupStartIndex() == null); // 그룹 전무
     try std.testing.expect(!tab_ops.tabIsInGroup(session, t3));
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t3));
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t3));
 }
 
 test "SG5-3: 2단계 중첩(A>B) — projectRows depth 0/1/2·헤더 depth·member_count·부모 직접카드가 자식 앞 제약" {
@@ -26845,11 +26724,11 @@ test "SG5-3: 2단계 중첩(A>B) — projectRows depth 0/1/2·헤더 depth·memb
     try std.testing.expect(rows[6].card.depth == 2 and rows[6].card.tab == 4); // B 직접카드 depth2
 
     // 부모 직접카드가 자식 앞 제약(§2.1 다단계): A의 depth1 카드(row2,3)가 B 헤더(row4)보다 앞. 자식 뒤 부모 복귀 없음.
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0));
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t1));
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2));
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t3));
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t4));
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t1));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2));
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t3));
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t4));
 }
 
 test "SG5-3: 다단계 접기 — 부모 A 접으면 자식 B와 그 카드 통째 숨김·자식 B만 접으면 B 카드만 숨김" {
@@ -26921,17 +26800,17 @@ test "SG5-3: ungroup 중첩 — 자식 ungroup은 부모로 재소속·부모 un
     tab_ops.ungroupTab(session, t3);
     try std.testing.expect(session.tabs.items[2].group_start == null); // B 마커 제거
     try std.testing.expect(session.tabs.items[0].group_start != null); // A 유지
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // A로 재소속(depth 1)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2)); // A로 재소속(depth 1)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3));
 
     // 다시 B를 중첩 생성한 뒤, 부모 A ungroup → A 마커 제거 → t0,t1 최상위·B는 부모 없어 gap 클램프로 depth 1(최상위 그룹) 승격.
     tab_ops.createGroupAbsorbForTab(session, t2); // B 재생성(depth 2)
     try std.testing.expectEqual(@as(u8, 2), t2.group_depth);
     tab_ops.ungroupTab(session, session.tabs.items[0]); // A(t0) 마커 제거
     try std.testing.expect(session.tabs.items[0].group_start == null); // A 제거
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, session.tabs.items[1])); // 옛 A 카드 t1 → 최상위
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, session.tabs.items[1])); // 옛 A 카드 t1 → 최상위
     // B는 저장 depth 2지만 부모가 없어 projectRows가 depth 1로 정규화(gap 클램프) → 최상위 그룹.
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2));
 }
 
 test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 depth+1) — 명시적 분리" {
@@ -26956,26 +26835,26 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
     // ── 최상위 카드에서 두 액션은 결과 동일(depth 1). t0에 create_sibling_group → depth 1(create_group과 동일).
     tab_ops.createSiblingGroupAbsorbForTab(session, t0);
     try std.testing.expectEqual(@as(u8, 1), t0.group_depth);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 최상위 그룹 A
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // 최상위 그룹 A
 
     // 이제 t0=그룹 A(depth1, [t0..t3] 전부). 그룹 안 카드 t2에서 두 액션을 대비한다.
     // ── create_group(t2) = **중첩**: t2 현재 depth 1 → B depth 2(A 자식). t3도 B(depth 2).
     tab_ops.createGroupAbsorbForTab(session, t2);
     try std.testing.expectEqual(@as(u8, 2), t2.group_depth); // 중첩 = depth+1
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t2)); // 중첩 자식
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t3)); // B 몸통(중첩)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t1)); // A 직접카드는 그대로 depth 1
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t2)); // 중첩 자식
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t3)); // B 몸통(중첩)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t1)); // A 직접카드는 그대로 depth 1
 
     // t2 그룹을 풀고(원복) 이번엔 create_sibling_group으로 대비.
     tab_ops.ungroupTab(session, t2); // B 마커 제거 → t2,t3 다시 A(depth1)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2));
 
     // ── create_sibling_group(t2) = **형제**: t2 현재 depth 1 → C depth 1(A와 같은 depth 형제, 중첩 아님). t3도 C(depth 1).
     tab_ops.createSiblingGroupAbsorbForTab(session, t2);
     try std.testing.expectEqual(@as(u8, 1), t2.group_depth); // 형제 = 같은 depth
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // 형제 그룹 C(최상위, 중첩 아님)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // C 몸통(depth 1, 중첩 아님)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // A 유지
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2)); // 형제 그룹 C(최상위, 중첩 아님)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // C 몸통(depth 1, 중첩 아님)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // A 유지
 
     // 연속 파티션: [A: t0,t1][C: t2,t3] 두 형제 최상위 그룹. 헤더 depth로 확인(둘 다 depth 1 = 중첩 아님).
     tab_ops.recomputeVisibleTabs(session);
@@ -27015,9 +26894,9 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
 
     // 그룹 A를 t2에서 시작 → t2·t3가 그룹 A(연속), t0·t1은 최상위(§2.1 첫 마커 이전 구간).
     tab_ops.createGroupAbsorbForTab(session, t2);
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // 그룹 A 마커 카드
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // 그룹 A 몸통
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0)); // 최상위
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2)); // 그룹 A 마커 카드
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // 그룹 A 몸통
 
     // rows(펼침): [card t0(d0), card t1(d0), header A(tab2), card t2(d1), card t3(d1)].
     tab_ops.recomputeVisibleTabs(session);
@@ -27036,8 +26915,8 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     try std.testing.expectEqual(t2, session.tabs.items[1]);
     try std.testing.expectEqual(t3, session.tabs.items[2]);
     try std.testing.expectEqual(t0, session.tabs.items[3]);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 넣기 성공 = depth 1
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // t1 여전히 최상위
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // 넣기 성공 = depth 1
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t1)); // t1 여전히 최상위
 
     // ── ② 빼기(최상위 카드에 드롭): t0(그룹 A, index 3)를 t1(최상위, row0=tab index 0)에 드롭 → 최상위 구간으로.
     {
@@ -27051,7 +26930,7 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     try std.testing.expectEqual(t1, session.tabs.items[1]);
     try std.testing.expectEqual(t2, session.tabs.items[2]);
     try std.testing.expectEqual(t3, session.tabs.items[3]);
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 빼기 성공 = depth 0
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0)); // 빼기 성공 = depth 0
 
     // ── ③ 넣기(펼친 그룹 헤더에 드롭, from<M): t1(최상위, index1)을 그룹 A 헤더(row2)에 → 그룹 최상단(마커 직후).
     tab_ops.recomputeVisibleTabs(session); // rows: [card t0(d0), card t1(d0), header A(tab2), card t2(d1), card t3(d1)]
@@ -27066,7 +26945,7 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     try std.testing.expectEqual(t2, session.tabs.items[1]);
     try std.testing.expectEqual(t1, session.tabs.items[2]);
     try std.testing.expectEqual(t3, session.tabs.items[3]);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t1)); // 그룹 안
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t1)); // 그룹 안
 
     // ── ④ 접힌 그룹 헤더에 드롭 → 그룹 끝에 추가(§10, 드롭 위치가 안 보이니 끝). t0를 접힌 A 헤더에.
     session.tabs.items[1].group_collapsed = true; // t2가 마커(index1) — 접기
@@ -27084,7 +26963,7 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     try std.testing.expectEqual(t0, session.tabs.items[3]); // 그룹 끝
     // 펼쳐서 확인: t0는 그룹 안(depth 1)·마지막 카드.
     session.tabs.items[0].group_collapsed = false;
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0));
     // 연속 파티션 불변식: 마커는 index 0 하나뿐, 나머지 전부 그 그룹(중간에 최상위로 안 쪼개짐).
     var marker_count: usize = 0;
     for (session.tabs.items) |t| if (t.group_start != null) {
@@ -27135,7 +27014,7 @@ test "code-review #2: 접힌 marker-only 그룹에 아래 카드 드롭(from>m) 
     try std.testing.expectEqual(t2, session.tabs.items[3]);
     // t3는 그룹 A 안(depth1) — 펼쳐서 확인(접힌 상태론 숨겨져 null).
     t1.group_collapsed = false;
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // 밖으로 안 샘 = 그룹 안
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // 밖으로 안 샘 = 그룹 안
 }
 
 test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페이스 안 생김(no-op)·카드=merge·빈 영역=new_workspace" {
@@ -27435,7 +27314,7 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     tab_ops.createGroupAbsorbForTab(session, t0);
     tab_ops.createGroupAbsorbForTab(session, t2);
     t2.group_depth = 1; // B를 최상위 형제로(create_group 중첩 기본을 이 테스트 목적에 맞게 오버라이드)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // B 몸통
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // B 몸통
 
     // ── from>M 펼친 헤더 넣기: t3(그룹 B, index3)를 그룹 A 헤더(m=0)에 드롭 → A 최상단(마커 직후, to=m+1).
     {
@@ -27449,7 +27328,7 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     try std.testing.expectEqual(t3, session.tabs.items[1]);
     try std.testing.expectEqual(t1, session.tabs.items[2]);
     try std.testing.expectEqual(t2, session.tabs.items[3]);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // A로 넣기 성공
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // A로 넣기 성공
 
     // ── SG5-1: 마커 탭 카드 드래그 = **그룹 통째 이동**(옛 SG4 no-op을 대체). mouse로 t0(마커 A) 카드를 잡아 그룹 B
     //    카드(row 5) 위로 끌면 그룹 A 구간 전체가 B 뒤로 옮겨간다(연속 파티션 유지).
@@ -28472,49 +28351,6 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
 // (흡수는 **렌더 소속**=projectRowsCore depth/enclosing로만 잡힌다). 이 매트릭스는 두 축을 **실제 사용자 경로**로 통과한다:
 // cardPinRole(우클릭 진입점 라우팅) + projectRowsCore(렌더된 카드가 그룹 밖 최상위인가).
 
-/// 카드 `tab`이 **그룹 밖 최상위 고정 카드로 렌더**되는지 사용자 경로로 단언한다(pin 회귀 매트릭스 공용). self.tabs 인덱스가
-/// 아니라 (1) cardPinRole=.individual(우클릭 pin이 개별 전역 pin으로 라우팅), (2) enclosing 마커 null·tabIsInGroup false
-/// (소속 파생상 그룹 밖), (3) projectRowsCore가 이 카드를 depth 0·비파생·📌로 방출(렌더 소속=최상위)을 함께 본다.
-fn expectCardTopLevelPinned(session: *AppSession, tab: *Tab) !void {
-    try std.testing.expect(session.cardPinRole(tab) == .individual); // 우클릭 pin = 개별 전역 pin(그룹 위임/로컬 아님)
-    try std.testing.expect(tab.group_start == null); // 마커 아님
-    try std.testing.expect(tab.pinned); // 개별 pin 상태
-    var idx: usize = 0;
-    for (session.tabs.items, 0..) |t, i| if (t == tab) {
-        idx = i;
-        break;
-    };
-    try std.testing.expect(session.enclosingGroupMarkerIndex(idx) == null); // 어느 그룹에도 안 속함
-    try std.testing.expect(!tab_ops.tabIsInGroup(session, tab)); // 그룹 밖(흡수 없음)
-    tab_ops.recomputeVisibleTabs(session);
-    var found = false;
-    for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent => {},
-        .card => |c| if (c.tab == idx) {
-            found = true;
-            try std.testing.expectEqual(@as(u8, 0), c.depth); // ★ 렌더 depth 0 = 최상위(그룹 흡수 없음)
-            try std.testing.expect(!c.pin_derived); // 개별 pin(그룹 파생 캐시 아님)
-            try std.testing.expect(!c.local_pinned); // 로컬 pin 아님(최상위엔 무의미)
-            try std.testing.expect(sidebar_ops.sidebarRowShowsPin(session, r)); // ★ 📌 표시(개별 pin 카드)
-        },
-        .group_header => {},
-    };
-    try std.testing.expect(found); // 카드가 실제로 렌더됨(숨김 아님)
-}
-
-/// 우클릭 "위치 고정" 실제 진입점을 태운다(라벨·dispatch 공유 cardPinRole 라우팅) — acceptContextMenu의 ctx_menu_pin 경로.
-fn rightClickPin(session: *AppSession, tab: *Tab) void {
-    session.context_menu_target = .{ .workspace = tab };
-    session.chrome_host.context_menu.selected = ctx_menu_pin;
-    settings_ops.acceptContextMenu(session);
-}
-
-/// 워크스페이스 카드 우클릭 메뉴의 pin 라벨(cardPinRole 분기 결과) — context_menu_target 세팅 후 buildContextMenuItems 공유.
-fn pinMenuLabel(session: *AppSession, tab: *Tab) []const u8 {
-    session.context_menu_target = .{ .workspace = tab };
-    return settings_ops.buildContextMenuItems(session)[ctx_menu_pin];
-}
-
 test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 배치 모두 그룹 밖 최상위 유지(cardPinRole=.individual·projectRows depth0·enclosing null·📌)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -28527,9 +28363,9 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         defer session.deinit();
         inline for (0..1) |_| _ = try tab_ops.newTab(session); // [t0,t1]
         const x = session.tabs.items[0];
-        try std.testing.expectEqualStrings("위치 고정", pinMenuLabel(session, x));
-        rightClickPin(session, x);
-        try expectCardTopLevelPinned(session, x);
+        try std.testing.expectEqualStrings("위치 고정", test_support.pinMenuLabel(session, x));
+        test_support.rightClickPin(session, x);
+        try test_support.expectCardTopLevelPinned(session, x);
     }
 
     // ── (b) 비고정 그룹 **앞** 최상위 카드: [X, G(비고정), A, B]. pin X → 그룹 밖 유지.
@@ -28541,8 +28377,8 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[1]); // G=[t1,t2,t3], t0=최상위
         const x = session.tabs.items[0];
-        rightClickPin(session, x);
-        try expectCardTopLevelPinned(session, x);
+        test_support.rightClickPin(session, x);
+        try test_support.expectCardTopLevelPinned(session, x);
     }
 
     // ── (c) **비고정 그룹 뒤 = 새 워크스페이스**(버그1 핵심): 비고정 그룹이 있을 때 Cmd+T로 새 탭을 만들면 끝 append로
@@ -28558,9 +28394,9 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         const y = try tab_ops.newTab(session); // ★ 그룹 존재 시 새 워크스페이스 — 흡수 방지로 그룹 **앞**에 삽입돼야
         try std.testing.expect(session.cardPinRole(y) == .individual); // ★ 흡수 안 됨(옛 버그면 .local)
         try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null); // ★ y가 index0(그룹 앞)·그룹 밖
-        try std.testing.expectEqualStrings("위치 고정", pinMenuLabel(session, y)); // "그룹 내 위치 고정" 아님
-        rightClickPin(session, y);
-        try expectCardTopLevelPinned(session, y);
+        try std.testing.expectEqualStrings("위치 고정", test_support.pinMenuLabel(session, y)); // "그룹 내 위치 고정" 아님
+        test_support.rightClickPin(session, y);
+        try test_support.expectCardTopLevelPinned(session, y);
     }
 
     // ── (d)/(e) 고정 그룹과 최상위 카드: 고정 그룹 존재 시 새 top카드(비고정 리전)를 pin → 고정 그룹 **앞**으로 안착
@@ -28575,8 +28411,8 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         session.toggleGroupPin(session.tabs.items[0]); // G 고정 → 프리픽스
         const y = try tab_ops.newTab(session); // 새 top카드 — 고정 프리픽스 뒤(비고정 리전)
         try std.testing.expect(session.cardPinRole(y) == .individual); // 비고정 리전 top카드(고정 그룹 뒤) = 개별
-        rightClickPin(session, y); // pin → 고정 그룹 **앞**으로(흡수 없음)
-        try expectCardTopLevelPinned(session, y);
+        test_support.rightClickPin(session, y); // pin → 고정 그룹 **앞**으로(흡수 없음)
+        try test_support.expectCardTopLevelPinned(session, y);
         // y가 고정 그룹 마커보다 **앞**(subtree 밖).
         var yidx: usize = 0;
         var gidx: usize = 0;
@@ -28596,10 +28432,10 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[1]); // G=[t1,t2], t0=최상위
         const x = session.tabs.items[0];
-        rightClickPin(session, x);
-        try expectCardTopLevelPinned(session, x);
-        try std.testing.expectEqualStrings("고정 해제", pinMenuLabel(session, x));
-        rightClickPin(session, x); // 해제
+        test_support.rightClickPin(session, x);
+        try test_support.expectCardTopLevelPinned(session, x);
+        try std.testing.expectEqualStrings("고정 해제", test_support.pinMenuLabel(session, x));
+        test_support.rightClickPin(session, x); // 해제
         try std.testing.expect(!x.pinned); // 개별 pin 풀림
         try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null); // 여전히 최상위(그룹 흡수 없음)
         try std.testing.expect(x.group_start == null and !x.local_pinned); // 마커 아님·로컬 pin 아님
@@ -28682,13 +28518,13 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     const marker = session.tabs.items[1];
     const lp = session.tabs.items[3];
     session.toggleLocalPin(lp); // A 멤버 로컬 pin
-    rightClickPin(session, top); // t0 개별 전역 pin(.individual)
+    test_support.rightClickPin(session, top); // t0 개별 전역 pin(.individual)
     session.toggleGroupPin(marker); // A 그룹째 고정
     // 세 축 독립: 개별 pin(top.pinned)·그룹째(marker.pinned)·로컬(lp.local_pinned) 공존.
     try std.testing.expect(top.pinned and top.group_start == null); // 개별 최상위
     try std.testing.expect(marker.pinned); // 그룹째 고정 권위
     try std.testing.expect(lp.pinned and lp.local_pinned); // 파생 캐시 + 로컬 pin
-    try expectCardTopLevelPinned(session, top); // 최상위 카드는 흡수 없이 그룹 밖 최상위 📌
+    try test_support.expectCardTopLevelPinned(session, top); // 최상위 카드는 흡수 없이 그룹 밖 최상위 📌
     // 렌더 📌 카운트: 최상위 카드 1(개별) + 헤더 1(그룹째 인디케이터) + 로컬 pin 멤버 1 = 카드 2·헤더 1.
     tab_ops.recomputeVisibleTabs(session);
     var card_pins: usize = 0;
@@ -28734,10 +28570,10 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
     tab_ops.createGroupAbsorbForTab(session, t4); // B(마커 index4) — 중첩 기본
     t4.group_depth = 1; // B를 최상위 형제로 오버라이드
     // 마커 수·초기 순서 확인.
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // 최상위
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // A 마커 카드
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B 마커 카드
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0)); // 최상위
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t1)); // 최상위
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2)); // A 마커 카드
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t4)); // B 마커 카드
 
     const markerCount = struct {
         fn f(s: *AppSession) usize {
@@ -28767,10 +28603,10 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
     try std.testing.expectEqual(t2, session.tabs.items[4]);
     try std.testing.expectEqual(t3, session.tabs.items[5]);
     try std.testing.expectEqual(@as(usize, 2), markerCount(session)); // 여전히 그룹 2개(쪼개짐 없음)
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위 보존
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // 최상위 보존
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t5)); // B 몸통(연속)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // A 몸통(연속)
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0)); // 최상위 보존
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t1)); // 최상위 보존
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t5)); // B 몸통(연속)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // A 몸통(연속)
 
     // ── ② 그룹 A(마커 index4)를 **다른 그룹 헤더(B) 위에 드롭** → 그 그룹 앞으로(위로 이동). rows: [c t0, c t1, hB(2), c t4, c t5, hA(5), c t2, c t3].
     tab_ops.recomputeVisibleTabs(session);
@@ -28817,24 +28653,6 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
 // 되는데 그룹 드래그만 안 됨). 아래 테스트는 그룹 드래그가 top_level 탭과 자유롭게 순서를 교환하고(그룹↔탭 인터리빙),
 // top_level 불변·프리뷰=확정·고정 리전 clamp가 정합함을 고정한다. 리딩 카드(플래그 없음)는 옛 clamp 폴백이라 SG5-1 회귀 0.
 
-/// 표시 카드 row 인덱스를 tab 인덱스로 찾는다(그룹 드래그 경계 테스트가 커서 hit-test 대신 쓰는 헤드리스 헬퍼).
-fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
-    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
-        .card => |c| if (c.tab == tab_idx) return s,
-        .group_header => {},
-    };
-    return 0;
-}
-
-/// 표시 row의 화면 y(backing px)를 그 row 안 frac 위치로 — cardDropPlan 실좌표(y_px) 테스트가 커서 y를 구성한다.
-fn sidebarDragScreenY(session: *AppSession, row: usize, frac: f64) f64 {
-    const rows = session.sidebar_rows.items;
-    const top = chrome.components.sidebar.rowTop(rows, row, session.sidebar_header_height_px, sidebar_ops.sidebarMetrics(session), session.sidebar_scroll_offset_px);
-    const h = chrome.components.sidebar.rowHeight(rows[row], sidebar_ops.sidebarMetrics(session));
-    return @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * frac;
-}
-
 // ── (A) 카드 드래그 실좌표(y_px→cardDropPlan) — 고정 탭을 그룹 꼬리로 끌면 top_level 탈출(흡수 아님) ────────────────
 // 증상 A: 실앱에서 고정 탭을 드래그하면 그룹 안 멤버로 **흡수**(top_level=false). 기존 헤드리스는 raw_row·y를 직접 넣어
 // (SR5(a)) hit-test **함수**만 봤고, mouse 핸들러의 y_px→raw_row→plan **실경로**(특히 드래그 소스가 프리뷰에서 빠져 그
@@ -28868,12 +28686,12 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     session.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 0 } }; // X가 드래그 소스
 
     // 표시 행(원본): [card X(0), header A(1), card a0(2), card a1(3)]. a1=마지막 멤버(그룹 꼬리).
-    const a1_row = cardRowOf(session, 2);
+    const a1_row = test_support.cardRowOf(session, 2);
     try std.testing.expectEqual(@as(usize, 3), a1_row);
 
     // ① 그룹 꼬리(마지막 멤버 a1의 상단 frac 0.15) 겨냥 — 프리뷰에선 X가 빠져 그룹이 위로 밀리므로 사용자가 보는
     //    "그룹 꼬리"는 원본 a1 상단쯤이다. 옛 판정(보정 없이 이 y로 sidebarCardDropAfterGroup)은 하단 40% 밖이라 흡수였다.
-    const y_tail = sidebarDragScreenY(session, a1_row, 0.15);
+    const y_tail = test_support.sidebarDragScreenY(session, a1_row, 0.15);
     // 옛 경로(보정 없음) 대비: raw_row=a1, 하단 경계 아님 → 탈출 null(흡수). 이게 헤드리스가 못 잡던 실패다.
     const raw_uncomp = chrome.components.sidebar.dragTargetSlot(y_tail, session.sidebar_header_height_px, session.sidebar_rows.items, sidebar_ops.sidebarMetrics(session), session.sidebar_scroll_offset_px);
     try std.testing.expect(sidebar_ops.sidebarCardDropAfterGroup(session, raw_uncomp, 0, y_tail) == null); // 보정 없으면 탈출 안 함(흡수)
@@ -28921,8 +28739,8 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     s2.sidebar_scroll_offset_px = 0;
     tab_ops.recomputeVisibleTabs(s2);
     s2.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 0 } };
-    const a0_row = cardRowOf(s2, 1); // a0(첫 멤버) row
-    const y_head = sidebarDragScreenY(s2, a0_row, 0.2); // 첫 멤버 상단 = 그룹 안이지만 고정 소스라 흡수 금지
+    const a0_row = test_support.cardRowOf(s2, 1); // a0(첫 멤버) row
+    const y_head = test_support.sidebarDragScreenY(s2, a0_row, 0.2); // 첫 멤버 상단 = 그룹 안이지만 고정 소스라 흡수 금지
     const plan_head = s2.cardDropPlan(0, y_head);
     switch (plan_head) {
         .card => |c| try std.testing.expect(c.top_level), // ★ 고정 소스 = 그룹 안 드롭이어도 흡수 금지(top_level 강제)
@@ -28969,8 +28787,8 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
 
     // 표시 행: [card X(0), header A(1), card a1(2), card a2(3)]. a1(=tab2) 한복판을 frac 0.3(상단)로 겨냥 →
     // 하단 경계(gap) 미발화라 sidebarGroupDropTargetTab(멤버 자리)+sidebarCardDropTopLevel(그룹 멤버=false) 경로.
-    const a1_row = cardRowOf(session, 2);
-    const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
+    const a1_row = test_support.cardRowOf(session, 2);
+    const y_mid = test_support.sidebarDragScreenY(session, a1_row, 0.3);
     // ① mouseMoved 산출(cardDropPlan): 고정 소스라 흡수 금지(top_level=true 강제) + **[2] 그룹 안 착지 금지** — target을
     // 그룹 A subtree 밖 경계로 clamp. origin=0(그룹 위)이라 그룹 뒤 끝(ge-1=3)으로 착지(한복판 2가 아니라 경계).
     const plan_mid = session.cardDropPlan(0, y_mid);
@@ -29030,8 +28848,8 @@ test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유
     session.sidebar_scroll_offset_px = 0;
     tab_ops.recomputeVisibleTabs(session);
     session.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 0 } };
-    const a1_row = cardRowOf(session, 2);
-    const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
+    const a1_row = test_support.cardRowOf(session, 2);
+    const y_mid = test_support.sidebarDragScreenY(session, a1_row, 0.3);
     const plan_mid = session.cardDropPlan(0, y_mid);
     switch (plan_mid) {
         .card => |c| {
@@ -29080,7 +28898,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         // groupNestPlan 직접: 드래그 그룹 마커(0)가 고정이라 nest 불가 → null(형제 폴백).
         try std.testing.expect(session.groupNestPlan(b_header_row, 0) == null); // ★ 고정 그룹 nest 금지
         // 전체 프레임(Cmd 눌림): nest 시도해도 sibling으로 폴백.
-        const y_b = sidebarDragScreenY(session, b_header_row, 0.5);
+        const y_b = test_support.sidebarDragScreenY(session, b_header_row, 0.5);
         session.groupDragPreviewFrame(0, y_b, true); // cmd_held=true
         try std.testing.expect(session.sidebar_drag_preview != null);
         try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // ★ Cmd여도 sibling(중첩 아님)
@@ -29111,7 +28929,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
             .card => {},
         };
         try std.testing.expect(session.groupNestPlan(b_header_row, 0) != null); // 비고정 = nest 가능(기존 동작)
-        const y_b = sidebarDragScreenY(session, b_header_row, 0.5);
+        const y_b = test_support.sidebarDragScreenY(session, b_header_row, 0.5);
         session.groupDragPreviewFrame(0, y_b, true); // cmd_held=true
         try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_nest); // ★ 비고정 Cmd = 중첩(회귀 0)
         sidebar_ops.clearSidebarDragPreview(session);
@@ -29147,8 +28965,8 @@ test "SR-PIN4: 고정 탭을 비고정 리전 위치로 드래그 → 고정 리
     const x_ptr = session.tabs.items[0];
     const u2_ptr = session.tabs.items[2];
     // X(고정)를 u2(비고정, position 2) 위로 드래그. target=2(비고정 리전)여도 clampMoveToGroup이 고정 리전 끝(1)로 가둔다.
-    const u2_row = cardRowOf(session, 2);
-    const y_u2 = sidebarDragScreenY(session, u2_row, 0.5);
+    const u2_row = test_support.cardRowOf(session, 2);
+    const y_u2 = test_support.sidebarDragScreenY(session, u2_row, 0.5);
     const plan = session.cardDropPlan(0, y_u2);
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -29180,7 +28998,7 @@ test "SR-PIN5: 프리뷰=확정 등가 — 고정 탭 그룹 한복판 drop plan
     tab_ops.recomputeVisibleTabs(session);
     // 고정 소스 X를 그룹 경계(뒤 끝 position 3 — [2] cardDropPlan이 그룹 밖으로 clamp할 값)로, top_level=true.
     // simulateDrop 가상 top_level[] == commitSidebarDragPreview 후 실제 top_level[] (프리뷰=확정 게이트 동일).
-    try expectCardDropTopLevelEquivalent(session, 0, .{ .card = .{ .target_tab = 3, .top_level = true } });
+    try test_support.expectCardDropTopLevelEquivalent(session, 0, .{ .card = .{ .target_tab = 3, .top_level = true } });
 }
 
 // ── (3) 드래그 중 접힌 그룹은 접힌 헤더로만 — 대상=접힌 그룹이면 subtree force-emit 억제, 타깃=접힌 그룹은 유지 ────────
@@ -29288,7 +29106,7 @@ test "SR4 그룹드래그(a): [탭X, 그룹A]에서 A를 X 앞으로 → [그룹
 
     // A(마커 index1)를 X row로 드래그 → 인터리빙 경계 = X 앞(0). 옛 코드는 target<first_group=1이라 first_group(1)로 clamp,
     // m==first_group이라 no-op(안 움직임)이었다. 이제 X가 top_level 인터리브 단위라 그 앞(0)을 낸다.
-    const boundary = sidebar_ops.sidebarGroupDropBoundary(session, cardRowOf(session, 0), 1).?;
+    const boundary = sidebar_ops.sidebarGroupDropBoundary(session, test_support.cardRowOf(session, 0), 1).?;
     try std.testing.expectEqual(@as(usize, 0), boundary);
     const plan: AppSession.DropPlan = .{ .group_sibling = .{ .insert_before = session.clampGroupMoveToRegion(1, boundary) } };
 
@@ -29336,18 +29154,18 @@ test "SR4 그룹드래그(b): [그룹A, 탭X, 그룹B]에서 그룹이 X를 넘�
     try std.testing.expect(session.enclosingGroupMarkerIndex(1) == null); // X = A·B 사이 최상위
 
     // ── ① B(마커 index2)를 X 위로 드래그 → B가 X 앞으로 = [A, B, X]. 경계=run_lo(X=1)<m(2) → 1. 프리뷰=확정 등가.
-    const b1 = sidebar_ops.sidebarGroupDropBoundary(session, cardRowOf(session, 1), 2).?;
+    const b1 = sidebar_ops.sidebarGroupDropBoundary(session, test_support.cardRowOf(session, 1), 2).?;
     try std.testing.expectEqual(@as(usize, 1), b1);
-    try expectDropEquivalent(session, 2, .{ .group_sibling = .{ .insert_before = b1 } });
+    try test_support.expectDropEquivalent(session, 2, .{ .group_sibling = .{ .insert_before = b1 } });
     try std.testing.expectEqual(x, session.tabs.items[2]); // X가 뒤로 밀림
     try std.testing.expect(x.top_level); // top_level 유지
     try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // 흡수 안 됨
 
     // ── ② B(이제 index1)를 X(이제 index2) 아래로 드래그 → B가 X 뒤로 = [A, X, B](복귀, X가 다시 A·B 사이). 경계=run_hi=len=3.
     tab_ops.recomputeVisibleTabs(session);
-    const b2 = sidebar_ops.sidebarGroupDropBoundary(session, cardRowOf(session, 2), 1).?;
+    const b2 = sidebar_ops.sidebarGroupDropBoundary(session, test_support.cardRowOf(session, 2), 1).?;
     try std.testing.expectEqual(@as(usize, 3), b2);
-    try expectDropEquivalent(session, 1, .{ .group_sibling = .{ .insert_before = b2 } });
+    try test_support.expectDropEquivalent(session, 1, .{ .group_sibling = .{ .insert_before = b2 } });
     try std.testing.expectEqual(x, session.tabs.items[1]); // X가 다시 A·B 사이(index1)
     try std.testing.expect(x.top_level); // top_level 불변
     try std.testing.expect(session.enclosingGroupMarkerIndex(1) == null);
@@ -29383,10 +29201,10 @@ test "SR4 그룹드래그(d): 고정 리전 인터리빙 clamp — 고정 그룹
     tab_ops.recomputeVisibleTabs(session);
 
     // ① 고정 그룹 A(마커1)를 고정 top카드 Xp 앞으로 → 경계 0, clamp 유지(고정 리전 [0, pinned_count] 안). 프리뷰=확정 등가.
-    const b1 = sidebar_ops.sidebarGroupDropBoundary(session, cardRowOf(session, 0), 1).?;
+    const b1 = sidebar_ops.sidebarGroupDropBoundary(session, test_support.cardRowOf(session, 0), 1).?;
     try std.testing.expectEqual(@as(usize, 0), b1);
     try std.testing.expectEqual(@as(usize, 0), session.clampGroupMoveToRegion(1, b1)); // 고정 리전 안이라 clamp no-op
-    try expectDropEquivalent(session, 1, .{ .group_sibling = .{ .insert_before = session.clampGroupMoveToRegion(1, b1) } });
+    try test_support.expectDropEquivalent(session, 1, .{ .group_sibling = .{ .insert_before = session.clampGroupMoveToRegion(1, b1) } });
     // 결과 [A=[a0,a1], Xp, t3, t4] — Xp 고정·top_level 유지, 그룹 A 고정 프리픽스 유지.
     const xp_idx = blk: {
         for (session.tabs.items, 0..) |t, i| if (t == xp) break :blk i;
@@ -29399,7 +29217,7 @@ test "SR4 그룹드래그(d): 고정 리전 인터리빙 clamp — 고정 그룹
 
     // ② 고정 그룹을 **비고정 타겟**(t3)으로 끌어도 clamp가 고정 경계(pinned_count)로 가둔다(비고정 리전 침범 방지, GP3 정합).
     tab_ops.recomputeVisibleTabs(session);
-    const raw = sidebar_ops.sidebarGroupDropBoundary(session, cardRowOf(session, 3), 0) orelse 0; // A 마커는 이제 index0
+    const raw = sidebar_ops.sidebarGroupDropBoundary(session, test_support.cardRowOf(session, 3), 0) orelse 0; // A 마커는 이제 index0
     const clamped = session.clampGroupMoveToRegion(0, raw);
     try std.testing.expect(clamped <= tab_ops.countPinnedTabs(session)); // ★ 고정 리전 경계 넘지 않음(프리뷰=확정 공통 clamp)
     _ = session.moveGroupRange(0, clamped, false);
@@ -29502,7 +29320,7 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
 
 /// SG5-4 테스트 헬퍼 — 탭 idx에 그룹 시작 마커(owned dup) + depth를 세팅한다. 위치 파생 구조를 정밀하게 짜기 위해
 /// create_group의 위치 의존 depth 계산 대신 직접 마커를 얹는다(session.deinit이 group_start를 free).
-fn setGroupMarker(session: *AppSession, idx: usize, name: []const u8, depth: u8) !void {
+pub fn setGroupMarker(session: *AppSession, idx: usize, name: []const u8, depth: u8) !void {
     session.tabs.items[idx].group_start = try session.allocator.dupe(u8, name);
     session.tabs.items[idx].group_depth = depth;
 }
@@ -29531,9 +29349,9 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     try setGroupMarker(session, 2, "C", 2); // A 안 중첩
     try setGroupMarker(session, 4, "B", 1); // A 형제(최상위)
     // 초기 depth 확인.
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // A 마커 카드
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t2)); // C(A 자식)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B(최상위)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // A 마커 카드
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t2)); // C(A 자식)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t4)); // B(최상위)
 
     // ── 드래그: A(마커 index0)를 B 헤더에 드롭 → B의 자식으로 중첩. projectRows로 B 헤더 row를 찾아 groupNestPlan에 넘긴다.
     tab_ops.recomputeVisibleTabs(session);
@@ -29551,10 +29369,10 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     try std.testing.expect(r.changed);
 
     // 결과: A가 B의 자식(depth2), C는 A의 자식(depth3) — **상대 depth 유지**(C는 A보다 1 깊음 유지).
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // A → B 자식(depth2)
-    try std.testing.expectEqual(@as(?u8, 3), sidebarCardDepth(session, t2)); // C → A 자식(depth3, 상대 유지)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B 최상위 유지
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t5)); // B 직접 카드
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t0)); // A → B 자식(depth2)
+    try std.testing.expectEqual(@as(?u8, 3), test_support.sidebarCardDepth(session, t2)); // C → A 자식(depth3, 상대 유지)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t4)); // B 최상위 유지
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t5)); // B 직접 카드
 
     // 트리 연속(gap 없음)·연속 파티션: projectRows가 유효 트리를 낸다(부모 직접 카드가 자식 헤더 앞). 헤더 depth로 확인.
     tab_ops.recomputeVisibleTabs(session);
@@ -29596,7 +29414,7 @@ test "SG5-4: 중첩 그룹을 최상위 카드에 드롭 → 빼기(depth 1) (mo
     // t0 최상위, A=[t1,t2](depth1), B 중첩=[t3,t4](depth2, A 안).
     try setGroupMarker(session, 1, "A", 1);
     try setGroupMarker(session, 3, "B", 2); // A 안 중첩
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t3)); // B 중첩(depth2)
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t3)); // B 중첩(depth2)
 
     // ── 드래그: B(마커 index3)를 최상위 카드 t0(row0)에 드롭 → 빼기(최상위 depth1로). 카드 드롭이라 형제 경로.
     tab_ops.recomputeVisibleTabs(session); // [c t0(0), hA(1), c t1(2), c t2(3), hB(4), c t3(5), c t4(6)]
@@ -29606,8 +29424,8 @@ test "SG5-4: 중첩 그룹을 최상위 카드에 드롭 → 빼기(depth 1) (mo
     try std.testing.expect(r.changed);
 
     // B가 최상위(depth1)로 빠짐. 저장 group_depth도 gap-clamp eff(1)로 맞춰진다(gap 제거).
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // 빼기 성공(depth1)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B 직접 카드
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t3)); // 빼기 성공(depth1)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t4)); // B 직접 카드
     // B 마커 탭의 저장 depth가 1로 정규화됐는지(releveel).
     var b_stored: ?u8 = null;
     for (session.tabs.items) |t| if (t.group_start != null and std.mem.eql(u8, t.group_start.?, "B")) {
@@ -29642,7 +29460,7 @@ test "SG5-4: 카드 드래그 — 중첩 자식 그룹 안(자식 depth)·최상
         const target = tab_ops.sidebarGroupDropTargetTab(session, 6, 0).?; // B 카드 t4(index4)
         _ = tab_ops.moveTab(session, 0, target);
     }
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // 자식 B 안 = depth2
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t0)); // 자식 B 안 = depth2
 
     // ── ② 다시 t0(현재 B 안)를 최상위로 — 재정렬로 첫 그룹 앞으로 빼기. moveTab(현 index → 0)로 최상위 앞.
     var t0_idx: usize = 0;
@@ -29650,7 +29468,7 @@ test "SG5-4: 카드 드래그 — 중첩 자식 그룹 안(자식 depth)·최상
         t0_idx = i;
     };
     _ = tab_ops.moveTab(session, t0_idx, 0); // 맨 앞(첫 마커 이전 = 최상위)
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위 = depth0
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0)); // 최상위 = depth0
 }
 
 test "SG5-4/N2: 그룹 헤더를 다른 그룹 헤더에 Cmd(⌘) 드롭 → 중첩 (mouse 시뮬레이션 — 통합)" {
@@ -29700,49 +29518,20 @@ test "SG5-4/N2: 그룹 헤더를 다른 그룹 헤더에 Cmd(⌘) 드롭 → 중
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_nest); // Cmd → 중첩 plan
 
     // 드래그 중 self.tabs 불변 — sidebar_rows(hit-test 도메인)는 아직 중첩 전(원본 depth). 확정은 up.
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위(불변)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // A 아직 최상위(프리뷰만 중첩)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2)); // B 최상위(불변)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // A 아직 최상위(프리뷰만 중첩)
     session.mouse(3, x, headerB_y, 0, CMD); // up → 마지막 plan(group_nest) 1회 커밋
     // 결과: A가 B의 자식(depth2). B는 최상위(depth1). t0(A 카드)=depth2(라이브 시절과 동일 = 등가).
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위
-    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // A → B 자식(중첩)
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2)); // B 최상위
+    try std.testing.expectEqual(@as(?u8, 2), test_support.sidebarCardDepth(session, t0)); // A → B 자식(중첩)
     try std.testing.expect(!session.pointerGestureIs(.sidebar_group));
     try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨
-}
-
-// ── 그룹 드래그 "Cmd=중첩 / 없으면 형제" modifier 매트릭스(N/P/R/B) 공용 헬퍼 ─────────────────────────────────────────
-// 표시 row의 세로 중앙 y(backing px, scroll=0). 그룹 드래그 mouse 시뮬레이션 테스트가 공유한다(N2와 같은 산식).
-fn sbRowCenterY(s: *AppSession, row: usize) f64 {
-    const sb = chrome.components.sidebar;
-    const top = sb.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, sidebar_ops.sidebarMetrics(s), 0);
-    const rh = sb.rowHeight(s.sidebar_rows.items[row], sidebar_ops.sidebarMetrics(s));
-    return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
-}
-
-// 두 형제 최상위 그룹 A=[t0,t1]·B=[t2,t3]을 만든 4-탭 세션. 호출자가 defer deinit/destroy. cols 넉넉히 잡아 사이드바+본문 확보.
-fn makeTwoSiblingGroups(allocator: std.mem.Allocator) !*AppSession {
-    const session = try allocator.create(AppSession);
-    errdefer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    session.window_padding_px = .{};
-    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
-    try setGroupMarker(session, 0, "A", 1);
-    try setGroupMarker(session, 2, "B", 1);
-    tab_ops.recomputeVisibleTabs(session); // [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
-    return session;
 }
 
 test "N1: 그룹 헤더를 다른 헤더에 Cmd 없이 드롭 → 형제(group_sibling, 중첩 안 됨·depth 불변)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try makeTwoSiblingGroups(allocator);
+    const session = try test_support.makeTwoSiblingGroups(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     const t0 = session.tabs.items[0];
@@ -29750,43 +29539,43 @@ test "N1: 그룹 헤더를 다른 헤더에 Cmd 없이 드롭 → 형제(group_s
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
 
     // 헤더 A(row0)를 헤더 B(row3)에 **Cmd 없이(mods=0)** 드래그 → 형제(중첩 아님).
-    session.mouse(1, x, sbRowCenterY(session, 0), 0, 0); // down → arm
+    session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, 0); // down → arm
     try std.testing.expect(session.pointerGestureIs(.sidebar_group));
-    session.mouse(2, x, sbRowCenterY(session, 3), 0, 0); // drag onto 헤더 B
+    session.mouse(2, x, test_support.sbRowCenterY(session, 3), 0, 0); // drag onto 헤더 B
     try std.testing.expect(session.sidebar_drag_preview != null);
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // Cmd 없음 → 형제(중첩 절대 안 함)
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 드래그 중 depth 불변
-    session.mouse(3, x, sbRowCenterY(session, 3), 0, 0); // up → 형제 이동 커밋
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // 드래그 중 depth 불변
+    session.mouse(3, x, test_support.sbRowCenterY(session, 3), 0, 0); // up → 형제 이동 커밋
     // 결과 [t2(B), t3, t0(A), t1] — A가 B 뒤 형제로. depth 둘 다 1(중첩 없음).
     try std.testing.expectEqual(t2, session.tabs.items[0]);
     try std.testing.expectEqual(t0, session.tabs.items[2]);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 최상위 유지
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // 최상위 유지
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t2));
     try std.testing.expect(session.sidebar_drag_preview == null);
 }
 
 test "N3: 그룹 헤더를 카드에 Cmd 없이 드롭 → 형제" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try makeTwoSiblingGroups(allocator);
+    const session = try test_support.makeTwoSiblingGroups(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     const t0 = session.tabs.items[0];
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
 
     // 헤더 A(row0)를 그룹 B의 카드 t3(row5)에 Cmd 없이 드래그 → 형제.
-    session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
-    session.mouse(2, x, sbRowCenterY(session, 5), 0, 0);
+    session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, 0);
+    session.mouse(2, x, test_support.sbRowCenterY(session, 5), 0, 0);
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // 카드 타깃 = 항상 형제
-    session.mouse(3, x, sbRowCenterY(session, 5), 0, 0);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 중첩 안 됨
+    session.mouse(3, x, test_support.sbRowCenterY(session, 5), 0, 0);
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // 중첩 안 됨
     try std.testing.expect(session.sidebar_drag_preview == null);
 }
 
 test "N4: 그룹 헤더를 카드에 Cmd 드롭 → 형제 폴백(넣을 헤더 없음, no-op 아님·정책 고정)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try makeTwoSiblingGroups(allocator);
+    const session = try test_support.makeTwoSiblingGroups(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     const t0 = session.tabs.items[0];
@@ -29794,18 +29583,18 @@ test "N4: 그룹 헤더를 카드에 Cmd 드롭 → 형제 폴백(넣을 헤더 
     const CMD: i32 = 32;
 
     // 헤더 A(row0)를 카드 t3(row5)에 **Cmd 눌러** 드래그 → 카드는 nest 대상 아님(groupNestPlan=null) → 형제 폴백.
-    session.mouse(1, x, sbRowCenterY(session, 0), 0, CMD);
-    session.mouse(2, x, sbRowCenterY(session, 5), 0, CMD);
+    session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, CMD);
+    session.mouse(2, x, test_support.sbRowCenterY(session, 5), 0, CMD);
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // N4 정책 = 형제 폴백(중첩 아님)
-    session.mouse(3, x, sbRowCenterY(session, 5), 0, CMD);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // depth 불변(중첩 아님)
+    session.mouse(3, x, test_support.sbRowCenterY(session, 5), 0, CMD);
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // depth 불변(중첩 아님)
     try std.testing.expect(session.sidebar_drag_preview == null);
 }
 
 test "N5: 접힌 그룹을 Cmd 없이 지나 드롭 → 형제(현재 불가하던 케이스 개선)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try makeTwoSiblingGroups(allocator);
+    const session = try test_support.makeTwoSiblingGroups(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     const t0 = session.tabs.items[0];
@@ -29815,14 +29604,14 @@ test "N5: 접힌 그룹을 Cmd 없이 지나 드롭 → 형제(현재 불가하�
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
 
     // 헤더 A(row0)를 접힌 헤더 B(row3)에 Cmd 없이 드래그 → 형제(과거엔 헤더 드롭=중첩이라 이 재정렬이 애매했다).
-    session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
-    session.mouse(2, x, sbRowCenterY(session, 3), 0, 0);
+    session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, 0);
+    session.mouse(2, x, test_support.sbRowCenterY(session, 3), 0, 0);
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling);
-    session.mouse(3, x, sbRowCenterY(session, 3), 0, 0);
+    session.mouse(3, x, test_support.sbRowCenterY(session, 3), 0, 0);
     // A가 접힌 B 뒤 형제로 — [t2(B), t3, t0(A), t1], depth 불변.
     try std.testing.expectEqual(t2, session.tabs.items[0]);
     try std.testing.expectEqual(t0, session.tabs.items[2]);
-    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0));
+    try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0));
     try std.testing.expect(session.sidebar_drag_preview == null);
 }
 
@@ -29833,31 +29622,31 @@ test "N6: 프리뷰=확정 — 드래그 중 캡처한 plan이 up 커밋 결과�
 
     // (a) nest: Cmd 헤더 드롭 → 드래그 중 plan=.group_nest, up 후 착지 depth=target_depth.
     {
-        const session = try makeTwoSiblingGroups(allocator);
+        const session = try test_support.makeTwoSiblingGroups(allocator);
         defer allocator.destroy(session);
         defer session.deinit();
         const t0 = session.tabs.items[0];
         const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-        session.mouse(1, x, sbRowCenterY(session, 0), 0, CMD);
-        session.mouse(2, x, sbRowCenterY(session, 3), 0, CMD);
+        session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, CMD);
+        session.mouse(2, x, test_support.sbRowCenterY(session, 3), 0, CMD);
         const captured = session.sidebar_drag_preview.?.plan;
         try std.testing.expect(captured == .group_nest);
         const target_depth = captured.group_nest.target_depth; // 프리뷰가 계획한 착지 depth
-        session.mouse(3, x, sbRowCenterY(session, 3), 0, CMD);
-        try std.testing.expectEqual(@as(?u8, target_depth), sidebarCardDepth(session, t0)); // 착지 = 프리뷰 plan
+        session.mouse(3, x, test_support.sbRowCenterY(session, 3), 0, CMD);
+        try std.testing.expectEqual(@as(?u8, target_depth), test_support.sidebarCardDepth(session, t0)); // 착지 = 프리뷰 plan
     }
     // (b) sibling: Cmd 없는 헤더 드롭 → plan=.group_sibling, up 후 형제 위치 착지.
     {
-        const session = try makeTwoSiblingGroups(allocator);
+        const session = try test_support.makeTwoSiblingGroups(allocator);
         defer allocator.destroy(session);
         defer session.deinit();
         const t0 = session.tabs.items[0];
         const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-        session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
-        session.mouse(2, x, sbRowCenterY(session, 3), 0, 0);
+        session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, 0);
+        session.mouse(2, x, test_support.sbRowCenterY(session, 3), 0, 0);
         try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling);
-        session.mouse(3, x, sbRowCenterY(session, 3), 0, 0);
-        try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 형제(depth 불변)
+        session.mouse(3, x, test_support.sbRowCenterY(session, 3), 0, 0);
+        try std.testing.expectEqual(@as(?u8, 1), test_support.sidebarCardDepth(session, t0)); // 형제(depth 불변)
     }
 }
 
@@ -29887,14 +29676,14 @@ test "P1: 고정 탭끼리 재정렬 — 둘 다 최상위 유지(enclosing null
     // 둘 다 그룹 밖 최상위(enclosing null·depth 0).
     try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null);
     try std.testing.expect(session.enclosingGroupMarkerIndex(1) == null);
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0));
-    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1));
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t0));
+    try std.testing.expectEqual(@as(?u8, 0), test_support.sidebarCardDepth(session, t1));
 }
 
 test "P2: 고정 그룹끼리 재정렬 — 둘 다 고정 유지(연속 파티션)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try makeTwoSiblingGroups(allocator);
+    const session = try test_support.makeTwoSiblingGroups(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     // A·B 둘 다 고정(마커+멤버 pinned = 정규화 캐시).
@@ -30027,15 +29816,6 @@ test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(
     try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<96;") == null); // 방어: 32+32+32=96도 없음
 }
 
-// B1 헬퍼 — 각 위치의 (그룹 마커 이름 첫 글자<<8 | group_depth) 시그니처. 구조적으로 동일한 두 세션의 착지 비교용.
-fn groupSig4(session: *AppSession, out: *[4]u16) void {
-    for (session.tabs.items, 0..) |t, i| {
-        if (i >= 4) break;
-        const nm: u16 = if (t.group_start) |g| (if (g.len > 0) @as(u16, g[0]) else 0) else 0;
-        out[i] = (nm << 8) | t.group_depth;
-    }
-}
-
 test "B1: 고정 그룹 0 + Cmd 미사용 그룹 드래그 = moveGroupSibling과 동일 착지(SG5/SG8 회귀 0)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -30043,25 +29823,25 @@ test "B1: 고정 그룹 0 + Cmd 미사용 그룹 드래그 = moveGroupSibling과
     // 경로 A: mouse 시뮬레이션(Cmd 없음)으로 헤더 A를 헤더 B에 드롭.
     var sig_mouse: [4]u16 = undefined;
     {
-        const session = try makeTwoSiblingGroups(allocator);
+        const session = try test_support.makeTwoSiblingGroups(allocator);
         defer allocator.destroy(session);
         defer session.deinit();
         const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-        session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
-        session.mouse(2, x, sbRowCenterY(session, 3), 0, 0);
-        session.mouse(3, x, sbRowCenterY(session, 3), 0, 0);
-        groupSig4(session, &sig_mouse);
+        session.mouse(1, x, test_support.sbRowCenterY(session, 0), 0, 0);
+        session.mouse(2, x, test_support.sbRowCenterY(session, 3), 0, 0);
+        session.mouse(3, x, test_support.sbRowCenterY(session, 3), 0, 0);
+        test_support.groupSig4(session, &sig_mouse);
     }
     // 경로 B: 직접 moveGroupSibling(A 마커=0, insert_before=B subtree 끝) — 옛 SG5-1 확정 경로.
     var sig_direct: [4]u16 = undefined;
     {
-        const session = try makeTwoSiblingGroups(allocator);
+        const session = try test_support.makeTwoSiblingGroups(allocator);
         defer allocator.destroy(session);
         defer session.deinit();
         const boundary = sidebar_ops.sidebarGroupDropBoundary(session, 3, 0).?; // 헤더 B(row3) 드롭 경계
         const clamped = session.clampGroupMoveToRegion(0, boundary);
         _ = session.moveGroupSibling(0, clamped);
-        groupSig4(session, &sig_direct);
+        test_support.groupSig4(session, &sig_direct);
     }
     try std.testing.expectEqualSlices(u16, &sig_mouse, &sig_direct); // 두 경로 동일(그룹 구조 byte-identical 착지)
 }
@@ -30136,7 +29916,7 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
 test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 다 없으면 빈칸이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -30189,7 +29969,7 @@ test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 �
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -30245,7 +30025,7 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
 test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지막 Term에서도 크래시하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -30272,7 +30052,7 @@ test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지�
 test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·Term까지 데려간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -30314,7 +30094,7 @@ test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·
 test "사이드바 에이전트 목록: Term 전수 나열·개수와 무관하게 접기 토글" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -31553,15 +31333,6 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
     try s2.runtime.writeInput(sid2, .{ .bytes = "" }); // s2는 생존 — 공유 표가 s1 close에 파괴되지 않았다
 }
 
-fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
-    app_keep_alive_after_quit = true;
-    session.loaded_config.config.session.keep_alive_after_quit = true;
-    const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
-    errdefer session.destroyTerm(term);
-    try session.tabs.items[0].panes.items[0].terms.append(session.allocator, term);
-    return term;
-}
-
 // P3-e3 통합 스모크 — keep-alive AppSession가 새 Term을 **host-backed backend**로 실제 spawn하고, 입력이 host를 거쳐
 // 화면에 반영되며, teardown이 in-process/원격 Term과 원격 backend/연결을 누수·크래시 없이 회수하는지 고정한다. 이 경로
 // (createTerm→backendForNew→원격 spawn, backendFor(term) 라우팅, deinit 원격 회수)는 부품 스모크(remote_term_backend·
@@ -31841,7 +31612,7 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
 test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 셸로 되살린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -31914,7 +31685,7 @@ test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 �
 test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 묘비를 건드리지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -31944,7 +31715,7 @@ test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 �
 test "종료 placeholder: 되살리기가 사용자 rename을 승계한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -31967,7 +31738,7 @@ test "종료 placeholder: 되살리기가 사용자 rename을 승계한다" {
 test "종료 placeholder: 제목·경로가 버퍼를 넘겨도 ⏎ 힌트가 화면에 남는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -32001,7 +31772,7 @@ test "종료 placeholder: 제목·경로가 버퍼를 넘겨도 ⏎ 힌트가 �
 test "종료 placeholder: 레이아웃 resize가 저장될 grid까지 옮긴다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -32018,7 +31789,7 @@ test "종료 placeholder: 레이아웃 resize가 저장될 grid까지 옮긴다"
 test "드롭 라우팅: 묘비 pane은 refused (포커스도 뺏지 않는다)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -32087,7 +31858,7 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
         _ = unsetenv("XDG_CACHE_HOME");
     };
 
-    const session = try initSmokeSessionSized(a);
+    const session = try test_support.initSmokeSessionSized(a);
     defer a.destroy(session);
     defer session.deinit();
 
@@ -32158,7 +31929,7 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
 test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을 모두 통과한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -32214,7 +31985,7 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
 test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 복원한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -32263,7 +32034,7 @@ test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 
     const text = try maru.session.workspace.serialize(captured_arena.allocator(), .{ .windows = &.{captured} });
     var parsed = try maru.session.workspace.parse(captured_arena.allocator(), text);
     defer parsed.deinit();
-    const second = try initSmokeSessionSized(allocator);
+    const second = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(second);
     defer second.deinit();
     second.restore_runtime_host_id = "second-cycle-sentinel";
@@ -32294,7 +32065,7 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
 
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -32338,7 +32109,7 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
 test "종료 placeholder: capture가 metadata와 durable runtime tombstone을 보존한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -32617,7 +32388,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
-        const first = try appendTrackedRemoteTermForTest(session);
+        const first = try test_support.appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null); // 첫 탭이 host-backed(backend가 init 전에 세워짐)
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
             try std.testing.expect(false);
@@ -32723,7 +32494,7 @@ test "R1: app-quit 중 close()가 먼저 돌아도 host-backed runtime이 생존
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
-        const first = try appendTrackedRemoteTermForTest(session);
+        const first = try test_support.appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null);
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
             try std.testing.expect(false);
@@ -32833,7 +32604,7 @@ test "① host-backed 스크롤은 observation 미가용(재접속 직후)에도
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
 
-        const term = try appendTrackedRemoteTermForTest(session);
+        const term = try test_support.appendTrackedRemoteTermForTest(session);
         try std.testing.expect(term.surface.remote != null); // host-backed
 
         // **재접속 직후 창 재현**: 첫 metadata 도착 전이라 관측 미가용. (createTerm의 attach barrier가 채웠을 수 있어 명시 강제.)
@@ -32991,7 +32762,7 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
-        const first = try appendTrackedRemoteTermForTest(session);
+        const first = try test_support.appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null);
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
             try std.testing.expect(false);
@@ -33575,36 +33346,10 @@ test "sidebarSearchLine: 넘치면 tail 창(선두 …)으로 caret을 입력 �
     }
 }
 
-// renameCaretRect는 셀·사이드바 픽셀 메트릭과 tabs/sidebar_rows가 필요해 실제 session.init로 세션을 만든 뒤(비-undefined,
-// UB 없음) headless라 0인 메트릭만 채워 호출한다. 검증 대상은 code-review high finding 1·2 수정: 워크스페이스/그룹 이름이
-// 사이드바 폭을 넘치면 렌더가 tail 앵커로 caret을 이름영역 우경계에 두므로, caret rect의 x도 거기로 clamp돼야 IME
-// 후보창이 사이드바 밖 터미널 위로 안 뜬다(head-anchored·unclamped 회귀 고정).
-fn initRenameCaretTestSession(allocator: std.mem.Allocator) !*AppSession {
-    const session = try allocator.create(AppSession);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    // headless init은 셀·사이드바 픽셀 메트릭이 0이라 renameCaretRect가 조기 null → 테스트용으로 채운다.
-    session.cell_width_px = 8;
-    session.cell_height_px = 16;
-    session.sidebar_width_px = 80; // full_cols = 80/8 = 10 → 우경계 clamp = full_cols-2 = 8칸(x=64)
-    session.sidebar_slot_height_px = 32;
-    // 카드 높이는 이제 줄 수 기반이라 슬롯 필드만으로는 안 잡힌다 — 1줄 카드 높이가 32이 되는 메트릭을 박아
-    // 고정 슬롯 시절 좌표 기대값을 그대로 쓴다(여백 0·스텝=줄높이).
-    session.sidebar_metrics = .{ .line_h = 32, .line_step = 32, .card_pad_v = 0, .header_row_h = session.sidebar_header_row_h_px, .content_pad_v = 0, .list_pad_v = 0 };
-    session.sidebar_header_height_px = 0;
-    session.sidebar_header_row_h_px = 16;
-    return session;
-}
-
 test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret x를 우경계로 clamp(넘침 아니면 head)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     tab_ops.recomputeVisibleTabs(session); // sidebar_rows 채움(displaySlotOf/rowTop이 읽음)
@@ -33639,7 +33384,7 @@ test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret
 test "renameCaretRect(.group): 헤더 이름이 넘치면 caret x를 사이드바 우경계로 clamp" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -33691,7 +33436,7 @@ fn attachTestRuntime(session: *AppSession, rt: *app.SurfaceRuntime, surface: *ma
 test "addrEditCaretRect: 주소창 편집 caret이 밴드 안(y) + nav_end 뒤(x) non-null (7e-2a 리뷰 [4])" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term/셀 메트릭 필요(session.init)
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     // termRect가 유효 폭·높이를 갖게 backing 픽셀을 채운다(rename 테스트는 사이드바 기하만 써 안 채웠다). titlebar 띠 0으로.
@@ -33721,7 +33466,7 @@ test "addrEditCaretRect: 주소창 편집 caret이 밴드 안(y) + nav_end 뒤(x
 test "슬라이스 3: 주소창 밴드 마우스 — 클릭 caret 배치·더블클릭 단어 선택 (mouse 배선)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term/셀 메트릭 필요(session.init)
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.backing_width_px = 800;
@@ -33775,7 +33520,7 @@ test "슬라이스 3: 주소창 밴드 마우스 — 클릭 caret 배치·더블
 test "리뷰 #1: ⌘←/⌘→가 편집을 취소하지 않고 caret을 이동한다 (is_shortcut_chord 게이트)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term 필요(session.init)
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.backing_width_px = 800;
@@ -33807,7 +33552,7 @@ test "리뷰 #1: ⌘←/⌘→가 편집을 취소하지 않고 caret을 이동�
 test "제보: ⌘⌫가 편집을 취소하거나 웹 포커스로 튕기지 않고 줄 시작까지 삭제한다 (is_shortcut_chord 게이트)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term 필요(session.init)
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.backing_width_px = 800;
@@ -33834,7 +33579,7 @@ test "제보: ⌘⌫가 편집을 취소하거나 웹 포커스로 튕기지 않
 test "제보: 주소창 IME 한글 — conjoining 자모 마크드/커밋이 완성형(NFC)으로 조합된다 (end-to-end)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term·IME 트랜잭션 필요
     const allocator = std.testing.allocator;
-    const session = try initRenameCaretTestSession(allocator);
+    const session = try test_support.initRenameCaretTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.backing_width_px = 800;
@@ -34136,18 +33881,6 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 1), ticksForMsAtRate(10, 60)); // 극단값도 최소 1틱
 }
 
-// 위상 진행이 **tick 수가 아니라 실경과 시간** 기준임을 고정한다(§10.5 secondary — 스피너와 같은 모델).
-// 회귀: 옛 코드는 ms를 **설정값** render.frame-rate로 틱 환산해 셌다. 실효 tick rate가 그보다 낮으면(무거운 tick·
-// 백그라운드 스로틀링, 실측 ~17Hz vs 설정 60Hz) 반주기가 그만큼 늘어나 깜빡임이 3배 넘게 느려졌다(사용자 제보
-// "너무 느리다"). 이제 tick을 아무리 많이 돌려도 시간이 안 지났으면 위상이 안 넘어가고, baseline을 과거로 밀면
-// tick 한 번으로도 넘어간다 — 두 방향을 함께 잠근다.
-/// 테스트 전용: blink 위상 baseline을 `halves`개 반주기만큼 과거로 밀어, 다음 `updateCursorBlink` 한 번이
-/// 그만큼 실경과한 것으로 보게 한다. wall-clock 모델이라 tick을 여러 번 도는 것으로는 위상이 안 넘어간다.
-fn testAdvanceBlinkHalves(session: *AppSession, halves: i128) void {
-    const interval_ns: i128 = @as(i128, @max(session.appearance.cursor.blink_interval_ms, 1)) * std.time.ns_per_ms;
-    session.blink_phase_ns = std.Io.Clock.awake.now(session.io).nanoseconds - halves * interval_ns;
-}
-
 test "cursor blink 위상: tick 수가 아니라 wall-clock 경과로 진행한다" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
@@ -34229,19 +33962,19 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.appearance.cursor.blink_fade_ms = 0; // 페이드 끔 = 하드 토글 — 이 테스트는 위상/리셋/steady 로직 검증(페이드 램프는 cursorFadeMilliForPhase 순수 테스트). updateCursorBlink가 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
 
     // 기본(DECSCUSR 1 = 깜빡 block, 페이드 끔): interval 틱마다 즉각 토글. rebuild(metal_dirty) 없이 generation만(suffix 불투명도).
-    testAdvanceBlinkHalves(&session, 1);
+    test_support.testAdvanceBlinkHalves(&session, 1);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible);
     try std.testing.expect(!session.metal_dirty);
     try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
     try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // off 위상 = 완전히 사라짐(페이드 끔이라 즉각)
-    testAdvanceBlinkHalves(&session, 1);
+    test_support.testAdvanceBlinkHalves(&session, 1);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
 
     // 활동(입력/출력) 리셋: off 위상이어도 즉시 보이게.
     session.blink_visible = false;
-    testAdvanceBlinkHalves(&session, 1); // 위상 한복판
+    test_support.testAdvanceBlinkHalves(&session, 1); // 위상 한복판
     session.resetCursorBlink();
     try std.testing.expect(session.blink_visible);
     try std.testing.expectEqual(@as(i128, 0), session.blink_phase_ns); // baseline 폐기 = 다음 tick이 새 반주기
@@ -34249,7 +33982,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     // steady 커서(DECSCUSR 2) + 오버레이 닫힘: 토글 안 함(보이는 위상 고정 — idle 절전).
     try tab_surface.core.write("\x1b[2 q");
     session.blink_visible = true;
-    testAdvanceBlinkHalves(&session, 3);
+    test_support.testAdvanceBlinkHalves(&session, 3);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible); // steady/조합 중 — 위상이 아무리 지나도 고정
 
@@ -34257,7 +33990,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     // 사용자 제보 "오버레이 커서가 안 깜빡임" 수정 — 터미널 커서와 같은 틱-카운터+suffix-trim 재활용.
     session.chrome_host.find.open = true;
     session.blink_visible = true;
-    testAdvanceBlinkHalves(&session, 1);
+    test_support.testAdvanceBlinkHalves(&session, 1);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible); // caret이 off 위상으로 토글됨
     session.chrome_host.find.open = false;
@@ -34268,7 +34001,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     try std.testing.expect(tab_surface.setPreeditLocked("\xec\x95\x88"));
     tab_surface.unlockCore(session.io);
     session.blink_visible = true;
-    testAdvanceBlinkHalves(&session, 3);
+    test_support.testAdvanceBlinkHalves(&session, 3);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible); // steady/조합 중 — 위상이 아무리 지나도 고정
     tab_surface.lockCore(session.io);
@@ -34310,7 +34043,7 @@ test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 �
     session.appearance.blink_text = false;
 
     // ① 커서는 DECSCUSR 기본(깜빡 block)인데 config가 껐다: 위상이 아예 안 돈다(다른 깜빡임도 없음 → idle 유지).
-    testAdvanceBlinkHalves(&session, 3);
+    test_support.testAdvanceBlinkHalves(&session, 3);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
     try std.testing.expectEqual(@as(u32, 1000), session.metal_buffer.cursor_fade_milli); // 완전 표시로 고정
@@ -34321,7 +34054,7 @@ test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 �
     try tab_surface.core.write("\x1b[5mblink\x1b[m");
     session.appearance.blink_text = true;
     session.blink_visible = true;
-    testAdvanceBlinkHalves(&session, 1);
+    test_support.testAdvanceBlinkHalves(&session, 1);
     session.updateCursorBlink(session.readActiveSnapshot(true));
     try std.testing.expect(!session.blink_visible); // 텍스트 blink 위상은 정상 진행(off 위상으로 토글)
     try std.testing.expect(session.metal_dirty); // 텍스트 blink는 full rebuild
@@ -34331,7 +34064,7 @@ test "cursor blink: config cursor.blink=false가 앱 DECSCUSR blink를 덮어 �
     //    실제로 보고 있다는 양방향 증거(true로도 red→green이 갈린다).
     session.appearance.cursor.blink = true;
     session.blink_visible = true;
-    testAdvanceBlinkHalves(&session, 1);
+    test_support.testAdvanceBlinkHalves(&session, 1);
     session.updateCursorBlink(session.readActiveSnapshot(true));
     try std.testing.expect(!session.blink_visible);
     try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // 페이드 끔 = 즉각 사라짐
@@ -34422,7 +34155,7 @@ test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투�
     try std.testing.expect(!session.metal_dirty);
 
     // 반주기를 넘기면 off 위상으로 토글 + 완전히 사라짐.
-    testAdvanceBlinkHalves(&session, 1);
+    test_support.testAdvanceBlinkHalves(&session, 1);
     session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible);
     try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli);
@@ -34503,25 +34236,9 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
 // 통합한다(cross-pane 정합). 이 헬퍼들은 sidebar/overlay/floating의 DrawList lowering(buildFromDrawList =
 // shapeOnly→placeMultiPane([1])→finishPane)을 단발로 검증한다 — production 통합[N] 경로 자체는 visible GPU smoke가
 // 검증한다(atlas readback). production fn으로 두면 미사용이라 test 전용 free 함수로 분리해 둔다.
-fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
+pub fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
     const dl = try sidebar_ops.buildSidebarTitleDrawList(session);
     return pane_ops.paneFrameBuilder(session).buildFromDrawList(session.allocator, dl, &session.renderer_state);
-}
-
-fn testBuildChromeOverlayFrame(session: *AppSession) !metal_frame.PaneFrame {
-    const prep = (try session.buildChromeOverlayPrep()) orelse return error.NotOpen;
-    const f = try prep.builder.buildFromDrawList(session.allocator, prep.dl, &session.renderer_state);
-    return .{ .frame = f, .origin_x = prep.placement.origin_x, .origin_y = prep.placement.origin_y, .colors = prep.placement.colors, .clip_rect = prep.placement.clip_rect };
-}
-
-fn testBuildFloatingTabFrame(session: *AppSession, builder: coretext_frame_builder.CoreTextFrameBuilder, built_frames: *std.ArrayList(renderer.RenderFrame)) ?metal_frame.PaneFrame {
-    const dp = tab_ops.buildFloatingTabDrawListAndPlacement(session) orelse return null;
-    var f = builder.buildFromDrawList(session.allocator, dp.dl, &session.renderer_state) catch return null;
-    built_frames.append(session.allocator, f) catch {
-        f.deinit(session.allocator);
-        return null;
-    };
-    return .{ .frame = f, .origin_x = dp.placement.origin_x, .origin_y = dp.placement.origin_y, .colors = dp.placement.colors };
 }
 
 test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected 소진 + 소유권(누수/double-free 없음)" {
@@ -34697,7 +34414,7 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     var gen_changes: usize = 0;
     const last_vis = session.blink_visible;
     const last_gen: u64 = session.metal_buffer.generation;
-    testAdvanceBlinkHalves(session, 1);
+    test_support.testAdvanceBlinkHalves(session, 1);
     _ = try session.tick();
     if (session.blink_visible != last_vis) toggles += 1;
     if (session.metal_buffer.generation != last_gen) gen_changes += 1;
@@ -35215,7 +34932,7 @@ test "togglePin: pin은 탭을 고정 영역 끝으로, unpin은 비고정 영�
     try std.testing.expectEqual(t3, session.tabs.items[0]);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.countPinnedTabs(session));
     // 불변식: tabs[0..pinned_count]가 전부 고정.
-    try assertPinnedPrefix(session);
+    try test_support.assertPinnedPrefix(session);
 
     // 중간 탭(t1, 지금 index 2)을 pin → 고정 영역 끝(index 1)으로 이동.
     session.togglePin(t1);
@@ -35223,7 +34940,7 @@ test "togglePin: pin은 탭을 고정 영역 끝으로, unpin은 비고정 영�
     try std.testing.expectEqual(t3, session.tabs.items[0]);
     try std.testing.expectEqual(t1, session.tabs.items[1]);
     try std.testing.expectEqual(@as(usize, 2), tab_ops.countPinnedTabs(session));
-    try assertPinnedPrefix(session);
+    try test_support.assertPinnedPrefix(session);
 
     // t3 unpin → 비고정 영역 시작(새 pinned_count=1, index 1)으로 이동. t1만 고정으로 남음(index 0).
     session.togglePin(t3);
@@ -35231,45 +34948,9 @@ test "togglePin: pin은 탭을 고정 영역 끝으로, unpin은 비고정 영�
     try std.testing.expectEqual(t1, session.tabs.items[0]);
     try std.testing.expectEqual(t3, session.tabs.items[1]);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.countPinnedTabs(session));
-    try assertPinnedPrefix(session);
+    try test_support.assertPinnedPrefix(session);
     // 나머지 비고정(t0,t2)은 t3 뒤.
     try std.testing.expect(!t0.pinned and !t2.pinned);
-}
-
-/// 불변식 검사 헬퍼: 고정 탭은 배열 앞쪽 `[0, pinned_count)`에 연속으로 모이고, 그 뒤는 전부 비고정.
-fn assertPinnedPrefix(session: *AppSession) !void {
-    const pc = tab_ops.countPinnedTabs(session);
-    for (session.tabs.items, 0..) |t, i| {
-        if (i < pc) try std.testing.expect(t.pinned) else try std.testing.expect(!t.pinned);
-    }
-}
-
-/// SG4 테스트 헬퍼 — 재투영(projectRows/recomputeVisibleTabs) 후 그 탭의 카드 row depth를 돌려준다(0=최상위·1=그룹 안).
-/// 위치 파생 소속을 단언하는 단일 출처: 넣기=depth 1, 빼기=depth 0. 표시 안 되는 탭(접힘 등)이면 null.
-fn sidebarCardDepth(session: *AppSession, tab: *Tab) ?u8 {
-    tab_ops.recomputeVisibleTabs(session);
-    var idx: ?usize = null;
-    for (session.tabs.items, 0..) |t, i| if (t == tab) {
-        idx = i;
-        break;
-    };
-    const ti = idx orelse return null;
-    for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
-        .card => |c| if (c.tab == ti) return c.depth,
-        .group_header => {},
-    };
-    return null;
-}
-
-/// 사이드바 제목 프레임에 📌(U+1F4CC) 핀 글리프 셀이 있는가 — buildSidebarTitleFrame이 pins[]로 tab.pinned를
-/// 넘겨 buildSidebarDrawList가 이름줄 **우측 끝**에 그렸을 때만 나타난다(옛 설계의 이름 prefix "📌 "는 폐기). 프레임은
-/// 매 frame 재-shape(tab.pinned 라이브)되므로 토글 직후 빌드하면 새 상태가 보인다.
-fn frameHasPinGlyph(session: *AppSession) !bool {
-    var f = try testBuildSidebarTitleFrame(session);
-    defer f.deinit(session.allocator);
-    for (f.draw_list.cells) |c| if (c.codepoint == 0x1F4CC) return true;
-    return false;
 }
 
 test "togglePin: 경계 탭(from==to)도 토글 즉시 📌 라벨이 갱신된다(불변식 유지)" {
@@ -35290,16 +34971,16 @@ test "togglePin: 경계 탭(from==to)도 토글 즉시 📌 라벨이 갱신된�
     // togglePin이 무조건 rebuildSidebar를 부르고 metal_dirty를 세워 즉시 재렌더되며, 제목 프레임이 tab.pinned를
     // 라이브로 읽어 📌를 붙인다. 토글 전엔 없고, pin 후엔 있고, unpin 후엔 다시 없어야 한다(경계 탭에서도).
     const t0 = session.tabs.items[0];
-    try std.testing.expect(!(try frameHasPinGlyph(session)));
+    try std.testing.expect(!(try test_support.frameHasPinGlyph(session)));
     session.togglePin(t0); // 경계 탭(from==to)
     try std.testing.expect(t0.pinned);
     try std.testing.expect(session.metal_dirty); // 재렌더 트리거
-    try std.testing.expect(try frameHasPinGlyph(session)); // 📌가 즉시 떠야 한다
-    try assertPinnedPrefix(session); // 불변식 성립
+    try std.testing.expect(try test_support.frameHasPinGlyph(session)); // 📌가 즉시 떠야 한다
+    try test_support.assertPinnedPrefix(session); // 불변식 성립
     session.togglePin(t0); // unpin도 경계(from==to)
     try std.testing.expect(!t0.pinned);
-    try std.testing.expect(!(try frameHasPinGlyph(session))); // 📌가 즉시 사라져야 한다
-    try assertPinnedPrefix(session);
+    try std.testing.expect(!(try test_support.frameHasPinGlyph(session))); // 📌가 즉시 사라져야 한다
+    try test_support.assertPinnedPrefix(session);
 }
 
 test "사이드바 이름줄 선두에 활성 마커('*')가 붙는다 — 핀과 위치 분리" {
@@ -35338,7 +35019,7 @@ test "사이드바 이름줄 선두에 활성 마커('*')가 붙는다 — 핀�
         if (c.row == mrow) try std.testing.expect(c.col >= mcol); // '*'가 이름줄 최좌단(선두)
     }
     // 핀(📌)은 안 붙었으니 핀 글리프는 없어야 한다 — 마커와 핀이 독립임을 고정.
-    try std.testing.expect(!(try frameHasPinGlyph(session)));
+    try std.testing.expect(!(try test_support.frameHasPinGlyph(session)));
 }
 
 test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-partition한다" {
@@ -35382,7 +35063,7 @@ test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-p
     try std.testing.expectEqualStrings("u1", session.tabs.items[2].custom_name.?);
     try std.testing.expectEqualStrings("u3", session.tabs.items[3].custom_name.?);
     try std.testing.expectEqual(@as(usize, 2), tab_ops.countPinnedTabs(session));
-    try assertPinnedPrefix(session); // 불변식 성립
+    try test_support.assertPinnedPrefix(session); // 불변식 성립
     // active_tab은 가리키던 u3(원래 index 3)의 새 위치(index 3)로 보정 — 여기선 그대로지만 추적 경로를 탄다.
     try std.testing.expectEqualStrings("u3", session.tabs.items[session.app_window.active_tab].custom_name.?);
 }
@@ -35424,7 +35105,7 @@ test "사이드바 드래그: 비고정 탭을 위로 끌어도 고정 영역을
     try std.testing.expectEqual(t1, session.tabs.items[1]);
     try std.testing.expectEqual(t3, session.tabs.items[2]);
     try std.testing.expectEqual(t2, session.tabs.items[3]);
-    try assertPinnedPrefix(session);
+    try test_support.assertPinnedPrefix(session);
     try std.testing.expect(!session.pointerGestureIs(.sidebar_tab));
 }
 
@@ -35463,7 +35144,7 @@ test "사이드바 드래그: 고정 탭끼리 재정렬(고정 영역 내 swap,
     try std.testing.expectEqual(t0, session.tabs.items[1]);
     try std.testing.expectEqual(t2, session.tabs.items[2]); // 비고정 불변
     try std.testing.expectEqual(t3, session.tabs.items[3]);
-    try assertPinnedPrefix(session);
+    try test_support.assertPinnedPrefix(session);
 }
 
 test "rename: commit writes custom_name, cancel keeps old, empty clears, teardown clears target" {
@@ -35868,29 +35549,6 @@ test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막�
     try std.testing.expectEqual(@as(usize, 2), session.last_rendered_view_offset);
 }
 
-// 탭 전환 sync-게이트 회귀 테스트 공용 스캐폴딩: controlled_smoke 세션을 만들어 tab0을 정착시키고(출력 소진),
-// 둘째 탭을 만들어(→tab1 활성) 정착시킨 뒤 세션을 돌려준다(호출자가 deinit+destroy). tab0 surface는
-// session.tabs.items[0].panes.items[0].terms.items[0].surface로 얻는다. [code-review 5] 네 테스트의 중복 제거.
-fn setupTwoTabsSettled(allocator: std.mem.Allocator) !*AppSession {
-    const session = try allocator.create(AppSession);
-    errdefer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    errdefer session.deinit();
-    var i: usize = 0;
-    while (i < 150) : (i += 1) _ = try session.tick(); // tab0 정착(controlled 출력 소진 → output_events=0)
-    _ = try tab_ops.newTab(session); // 둘째 탭 → tab1 활성(createTab이 새 탭을 활성으로)
-    std.debug.assert(session.tabs.items.len == 2);
-    i = 0;
-    while (i < 150) : (i += 1) _ = try session.tick(); // tab1 정착
-    return session;
-}
-
 // ── 회귀: 백그라운드 Term의 출력이 활성 커서 blink 위상을 굶기지 않는다 ─────────────────────────────
 // tick의 blink 게이트가 `drain_summary.output_events`(**모든** 탭/pane/Term의 합)를 보던 탓에, 백그라운드에서
 // 계속 출력하는 Term이 하나라도 있으면(에이전트·로그 tail·dev 서버) 활성 커서가 매 tick resetCursorBlink로
@@ -35902,7 +35560,7 @@ fn setupTwoTabsSettled(allocator: std.mem.Allocator) !*AppSession {
 test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 위상은 진행한다(전역 output 게이트 회귀)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY + CoreText tick 경로
     const allocator = std.testing.allocator;
-    const session = try setupTwoTabsSettled(allocator); // tab1 활성, 둘 다 출력 소진 상태
+    const session = try test_support.setupTwoTabsSettled(allocator); // tab1 활성, 둘 다 출력 소진 상태
     defer {
         session.deinit();
         allocator.destroy(session);
@@ -35927,7 +35585,7 @@ test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 �
     var i: u32 = 0;
     while (i < 3) : (i += 1) {
         session.pasteTextTo(bg_id, "x", false);
-        testAdvanceBlinkHalves(session, 1);
+        test_support.testAdvanceBlinkHalves(session, 1);
         _ = try session.tick();
         if (session.blink_visible != last) {
             toggles += 1;
@@ -35946,7 +35604,7 @@ test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 �
 test "탭 전환: mid-sync·완성없음(esu==0) surface는 미완성 프레임을 안 그리고 hold하며 스크롤/timeout으로 복구된다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText tick 투영 경로
     const allocator = std.testing.allocator;
-    const session = try setupTwoTabsSettled(allocator);
+    const session = try test_support.setupTwoTabsSettled(allocator);
     defer {
         session.deinit();
         allocator.destroy(session);
@@ -35990,7 +35648,7 @@ test "탭 전환: mid-sync·완성없음(esu==0) surface는 미완성 프레임�
 test "탭 전환: mid-sync(esu>0) surface의 진행 중 프레임을 조기 투영하지 않는다(hold 후 ESU 완성 시 투영)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try setupTwoTabsSettled(allocator);
+    const session = try test_support.setupTwoTabsSettled(allocator);
     defer {
         session.deinit();
         allocator.destroy(session);
@@ -36033,7 +35691,7 @@ test "탭 전환: mid-sync(esu>0) surface의 진행 중 프레임을 조기 투�
 test "탭 전환: 스크롤된 이전 탭이 있어도 mid-sync surface로 전환 시 view_scrolled로 오투영하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try setupTwoTabsSettled(allocator);
+    const session = try test_support.setupTwoTabsSettled(allocator);
     defer {
         session.deinit();
         allocator.destroy(session);
@@ -36064,7 +35722,7 @@ test "탭 전환: 스크롤된 이전 탭이 있어도 mid-sync surface로 전�
 test "탭 전환: 이월된 sync_hold_ticks가 timeout을 넘겨도 mid-sync surface로 전환 시 오투영하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try setupTwoTabsSettled(allocator);
+    const session = try test_support.setupTwoTabsSettled(allocator);
     defer {
         session.deinit();
         allocator.destroy(session);
@@ -36327,7 +35985,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
 
     // 열린 상태에서 chrome 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(palette.view → 일반 rasterizer).
     session.dispatchAppAction(.toggle_command_palette);
-    var pf = try testBuildChromeOverlayFrame(session);
+    var pf = try test_support.testBuildChromeOverlayFrame(session);
     defer pf.frame.deinit(allocator);
     try std.testing.expect(pf.frame.draw_list.cells.len > 0);
 
@@ -36385,7 +36043,7 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
 
     // chrome 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(find.view → 일반 rasterizer: "Find: …" + 카운터).
-    var ff = try testBuildChromeOverlayFrame(session);
+    var ff = try test_support.testBuildChromeOverlayFrame(session);
     defer ff.frame.deinit(allocator);
     try std.testing.expect(ff.frame.draw_list.cells.len > 0);
 
@@ -36739,7 +36397,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
     // 못 잡는다. 같은 세션에서 resize를 반복해 공유 atlas가 두 메트릭을 함께 들었을 때도 잘림이 없는지 본다.
     for ([_]u32{ 1000, 2000 }) |scale_milli| {
         _ = try session.resize(800, 600, scale_milli);
-        var ff = try testBuildChromeOverlayFrame(session);
+        var ff = try test_support.testBuildChromeOverlayFrame(session);
         defer ff.frame.deinit(allocator);
 
         // caret 재활용: cursor-role fill이 **cursor 오버레이**(glyph_quad_frame.overlays의 .cursor, visible)로 lower돼야
@@ -36795,7 +36453,7 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
     // scale 1.0·Retina 2.0 둘 다(실제 맥은 2.0).
     for ([_]u32{ 1000, 2000 }) |scale_milli| {
         _ = try session.resize(800, 600, scale_milli);
-        var ff = try testBuildChromeOverlayFrame(session);
+        var ff = try test_support.testBuildChromeOverlayFrame(session);
         defer ff.frame.deinit(allocator);
 
         // caret 재활용: cursor-role fill이 cursor 오버레이(glyph_quad_frame.overlays의 .cursor, visible)로 lower돼 터미널
@@ -36976,7 +36634,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
 
     // 닫힘이면 buildNoticeFrame은 NotOpen(오버레이 없음 — 호출자가 무시).
     try std.testing.expect(!session.chrome_host.notice.open);
-    try std.testing.expectError(error.NotOpen, testBuildChromeOverlayFrame(session));
+    try std.testing.expectError(error.NotOpen, test_support.testBuildChromeOverlayFrame(session));
 
     // showNotice는 메시지를 세션 소유 버퍼로 복사하고 연다 — 호출자의 transient 버퍼를 지워도 모달 메시지는 산다.
     {
@@ -36988,7 +36646,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
     try std.testing.expectEqualStrings("corrupt", session.chrome_host.notice.message);
 
     // 오버레이 프레임이 크래시 없이 셀을 낸다(박스 bg + 메시지 glyph — 컴포넌트 view→ChromeDraw→lower 경로).
-    var nf = try testBuildChromeOverlayFrame(session);
+    var nf = try test_support.testBuildChromeOverlayFrame(session);
     defer nf.frame.deinit(allocator);
     try std.testing.expect(nf.frame.draw_list.cells.len > 0);
 
@@ -37435,7 +37093,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
 test "file tree root picker is a typed one-shot and cancel or invalid path preserves roots" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try session.file_tree.replaceExplicitRoots(&.{"/before"});
@@ -37458,20 +37116,12 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 }
 
-fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
-    // 실제 OSC 7→core observation 경로를 쓴다. cache를 직접 바꾸면 updateFileTree가 renderer보다 먼저
-    // observation을 refresh해야 한다는 제품 불변을 증명하지 못한다.
-    var osc: [std.fs.max_path_bytes + 32]u8 = undefined;
-    const bytes = try std.fmt.bufPrint(&osc, "\x1b]7;file://localhost{s}\x07", .{cwd});
-    try pane_ops.activePane(session).activeTerm().surface.core.write(bytes);
-}
-
 test "file tree ET-CWD follows the active pane observation and keeps an old reveal inert for an outside cwd" {
     // 활성 pane의 OSC 7 관측만 소비하고, root 밖 CWD는 root/watch/persistence를 바꾸지 않으며 이전
     // file-open/reveal intent를 새 CWD의 scroll 대상으로 오인하지 않는 제품 경로 회귀다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -37497,16 +37147,16 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     const root_count = session.file_tree.rootCount();
     const initial_scan = session.file_tree.takeScanRequest().?;
     allocator.free(initial_scan);
-    try session.file_tree.applySnapshotWithIdentity(project, try testFileTreeIdentity(project), &.{
-        .{ .name = "one", .kind = .directory, .identity = try testFileTreeIdentity(one) },
-        .{ .name = "two", .kind = .directory, .identity = try testFileTreeIdentity(two) },
+    try session.file_tree.applySnapshotWithIdentity(project, try test_support.testFileTreeIdentity(project), &.{
+        .{ .name = "one", .kind = .directory, .identity = try test_support.testFileTreeIdentity(one) },
+        .{ .name = "two", .kind = .directory, .identity = try test_support.testFileTreeIdentity(two) },
     });
     session.file_tree_rows_dirty = true;
     session.file_tree_watch_reset_pending = false;
 
     // updateFileTree는 renderer보다 먼저 run한다. 따라서 내부에서 observation을 refresh하지 않으면 OSC 7이
     // 아직 Term cache에 안 들어와 이 첫 reveal을 놓친다.
-    try testWriteActiveTermCwd(session, one);
+    try test_support.testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
@@ -37528,7 +37178,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try std.testing.expect(!session.file_tree_watch_reset_pending);
 
     // root 밖 CWD는 Tree의 기존 one reveal을 보존하지만, 그것을 outside의 scroll pending으로 바꾸면 안 된다.
-    try testWriteActiveTermCwd(session, outside);
+    try test_support.testWriteActiveTermCwd(session, outside);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
@@ -37550,7 +37200,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     session.backing_height_px = dock_ops.dockGeometry(session).tree.y + session.cell_height_px + session.statusBarHeightPx();
     try std.testing.expectEqual(session.cell_height_px, dock_ops.dockGeometry(session).tree_content.h);
     session.file_tree_scroll.offset_y_px = 6 * session.cell_height_px;
-    try testWriteActiveTermCwd(session, one);
+    try test_support.testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
@@ -37560,7 +37210,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
 
     // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
     try pane_ops.splitActivePane(session, .horizontal);
-    try testWriteActiveTermCwd(session, two);
+    try test_support.testWriteActiveTermCwd(session, two);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 
@@ -37571,20 +37221,10 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 }
 
-fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {
-    var attempts: usize = 0;
-    while (session.file_tree_root_validation != null and attempts < 2_000) : (attempts += 1) {
-        try file_panel_ops.updateFileTree(session);
-        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
-    if (session.file_tree_root_validation != null) return error.TestUnexpectedResult;
-    try file_panel_ops.updateFileTree(session);
-}
-
 test "file tree root picker replaces adds repeats and rejects stale completion without touching dirty dock entries" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -37614,7 +37254,7 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_a);
-    try testWaitForFileTreeRootCompletion(session);
+    try test_support.testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
     try std.testing.expectEqualStrings(root_a, session.file_tree.rootAt(0).?);
@@ -37622,14 +37262,14 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
     file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_b);
-    try testWaitForFileTreeRootCompletion(session);
+    try test_support.testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_add, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 2), session.file_tree.rootCount());
 
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_c);
-    try testWaitForFileTreeRootCompletion(session);
+    try test_support.testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
     try std.testing.expectEqualStrings(root_c, session.file_tree.rootAt(0).?);
@@ -37639,7 +37279,7 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     session.provideFileTreeRootPick(root_a);
     try session.file_tree.replaceExplicitRoots(&.{root_b});
-    try testWaitForFileTreeRootCompletion(session);
+    try test_support.testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.stale_generation, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqualStrings(root_b, session.file_tree.rootAt(0).?);
 
@@ -37658,7 +37298,7 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
 test "file tree root validation completion projects live dock open close state and watcher safety roots" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -37698,7 +37338,7 @@ test "file tree root validation completion projects live dock open close state a
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, closed_surface));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(live_path));
     try std.testing.expectEqual(validation_generation, session.file_tree.rootGeneration());
-    try testWaitForFileTreeRootCompletion(session);
+    try test_support.testWaitForFileTreeRootCompletion(session);
 
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
@@ -37737,7 +37377,7 @@ test "file tree root validation completion projects live dock open close state a
 test "file tree retained first scan is published but stale namespace row activation is rejected" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -37796,7 +37436,7 @@ test "file tree retained first scan is published but stale namespace row activat
 test "file tree markdown activation pins first hydration identity across leaf replacement" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -37809,8 +37449,8 @@ test "file tree markdown activation pins first hydration identity across leaf re
     defer allocator.free(root);
     const doc = try std.fs.path.join(allocator, &.{ root, "doc.md" });
     defer allocator.free(doc);
-    const root_identity = try testFileTreeIdentity(root);
-    const doc_identity = try testFileTreeIdentity(doc);
+    const root_identity = try test_support.testFileTreeIdentity(root);
+    const doc_identity = try test_support.testFileTreeIdentity(doc);
 
     try session.file_tree.replaceExplicitRoots(&.{root});
     _ = session.file_tree.pinRootIdentity(root, root_identity);
@@ -37838,10 +37478,10 @@ test "file tree markdown activation pins first hydration identity across leaf re
 test "pending file tree root validation rejects merge and workspace restore before either session mutates" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -37906,7 +37546,7 @@ test "pending file tree root validation rejects merge and workspace restore befo
 test "file tree header and populated blank left click are inert while right click exposes root actions" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -37945,7 +37585,7 @@ test "file tree header and populated blank left click are inert while right clic
 test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고 발행이 그 값을 따른다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38012,7 +37652,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
 test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 드래그를 놓는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -38050,7 +37690,7 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
 test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적용한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38088,7 +37728,7 @@ test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적�
 test "file tree scrollbar publishes one tree that paint and hit-test both read" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38145,7 +37785,7 @@ test "file tree scrollbar publishes one tree that paint and hit-test both read" 
 test "file tree scrollbar is painted after the row band and never under it" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38187,7 +37827,7 @@ test "file tree scrollbar is painted after the row band and never under it" {
 test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38240,21 +37880,13 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     try std.testing.expect(dock_ops.dockListScrollbarGeometry(session) == null);
 }
 
-/// 창이 뷰포트를 **덮되 최소한**임을 본다 — 이것이 `fileTreeDrawWindow`의 올림 계약이다. 개수를
-/// 산술로 다시 적는 대신 성질로 판정한다: 복제한 산술은 그것이 판정해야 할 호출부와 함께 틀린다.
-fn expectWindowCoversViewport(count: u16, shift_px: u32, cell_h: u32, viewport_h: u32) !void {
-    const covered = @as(u32, count) * cell_h;
-    try std.testing.expect(covered >= viewport_h + shift_px); // 바닥에 빈 띠가 남지 않는다
-    try std.testing.expect((covered -| cell_h) < viewport_h + shift_px); // 안 보이는 행을 그리지 않는다
-}
-
 // SV2a — 탐색기 스크롤의 판정자. SV2-0이 세운 계약을 픽셀 좌표로 옮긴 것이고, **뒤집힌 항이 있다**:
 // 예전에는 "바닥 부분 행은 그려지지 않는다"가 계약이었다(행 index 스크롤의 결과였다). 이제는 그
 // 부분 행을 그리고 pane clip이 자르는 것이 계약이며, 아래 ②가 그 반전을 명시적으로 박는다.
 test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test, and render" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     file_panel_ops.activateFilePanelDockControl(session);
@@ -38307,7 +37939,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     // 창은 뷰포트를 **덮되 최소한**이다. 이 두 성질이 곧 "올림"이며, 개수를 산술로 다시 적으면
     // 호출부의 산술을 복제할 뿐 판정하지 못한다. 행 index 시절의 창(내림)보다 하나 크다는 것이
     // 뒤집힌 계약의 표시다.
-    try expectWindowCoversViewport(window_top.count, window_top.origin_shift_px, cell_h, tree.h);
+    try test_support.expectWindowCoversViewport(window_top.count, window_top.origin_shift_px, cell_h, tree.h);
     try std.testing.expect(window_top.count > visible);
 
     const x: f64 = @floatFromInt(tree.x + 1);
@@ -38337,7 +37969,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         try std.testing.expectEqual(@as(usize, 3), window.start);
         try std.testing.expectEqual(half, window.origin_shift_px);
         // 위로 half만큼 밀렸어도 창은 여전히 뷰포트를 덮되 최소한이다.
-        try expectWindowCoversViewport(window.count, window.origin_shift_px, cell_h, tree.h);
+        try test_support.expectWindowCoversViewport(window.count, window.origin_shift_px, cell_h, tree.h);
 
         // hit-test가 **같은 창**을 본다: 뷰포트 첫 픽셀은 반쯤 잘린 그 행(index 3)이다.
         try std.testing.expectEqual(@as(?usize, 3), file_panel_ops.fileTreeRowAt(session, x, @floatFromInt(tree.y)));
@@ -38534,7 +38166,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
 test "file tree production hot paths emit bounded counter artifact" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38625,7 +38257,7 @@ test "file tree production hot paths emit bounded counter artifact" {
 test "file tree row staging OOM leaves live root rows and watcher authority unchanged" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try session.file_tree.replaceExplicitRoots(&.{"/before"});
@@ -38660,7 +38292,7 @@ test "file tree row staging OOM leaves live root rows and watcher authority unch
 test "file tree scan completion is fenced across A to B to A root generations" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -38698,7 +38330,7 @@ test "file tree scan completion is fenced across A to B to A root generations" {
 test "file tree stale root menu delete confirmation and busy removal are fail closed" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38736,7 +38368,7 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
 test "workspace restore validates explicit roots and atomically rebuilds explorer watchers and rows" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -38879,7 +38511,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
 
     // Reuse the same live session after every rejected candidate. This keeps the test exhaustive up to
     // the no-fail commit boundary without paying full AppSession/PTY startup for every allocation index.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     var session_live = true;
     defer if (session_live) session.deinit();
@@ -38943,7 +38575,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
 test "file header mode selector reports a click cursor and tracks hover per slot" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -38979,7 +38611,7 @@ test "file header mode selector reports a click cursor and tracks hover per slot
 test "file panel mode toggle: keyboard action walks the same modes the header offers" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -39022,7 +38654,7 @@ test "file panel mode toggle: keyboard action walks the same modes the header of
 test "FP9 focus toggle: empty notice and workspace-dock round trip use one configurable action" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -39063,7 +38695,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
 test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 fail-close한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-surface-less-successor-b.md", .markdown);
@@ -39116,7 +38748,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
 test "FP9 closing pending entry reissues typed focus for its live successor" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     const a_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-pending-close-a.md", .markdown);
@@ -39142,7 +38774,7 @@ test "FP9 closing pending entry reissues typed focus for its live successor" {
 test "FP9 closing a group's final entry collapses the leaf and transfers focus to content" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-a.md", .markdown);
@@ -39183,7 +38815,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     const file_path = try std.fmt.allocPrint(allocator, "{s}/recent.md", .{path});
     defer allocator.free(file_path);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(file_path));
@@ -39217,7 +38849,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
 test "close_focused uses the actual Metal or WebView key source across a stale owner race" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/source-aware-successor.html", .html);
@@ -39384,7 +39016,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
 test "file tree bulk delete visits entries and action queues exactly once" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     // FP16: 그룹 분할이 없어 전부 한 pane의 파일 탭으로 쌓인다. bulk delete가 봐야 할 건 "entry 총량"이지
@@ -39450,7 +39082,7 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
-    const sidebar = try initSmokeSessionSized(allocator);
+    const sidebar = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(sidebar);
     defer sidebar.deinit();
     _ = try tab_ops.newTab(sidebar);
@@ -39463,7 +39095,7 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
     try std.testing.expectEqual(@as(usize, 1), sidebar.tabs.items.len);
     try std.testing.expectEqual(survivor, sidebar.tabs.items[0]);
 
-    const terminal_tab = try initSmokeSessionTwoTerms(allocator);
+    const terminal_tab = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(terminal_tab);
     defer terminal_tab.deinit();
     const pane = pane_ops.activePane(terminal_tab);
@@ -39474,7 +39106,7 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
     terminal_tab.mouse(3, 20, 20, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
 
-    const scrollbar = try initSmokeSessionTwoTerms(allocator);
+    const scrollbar = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(scrollbar);
     defer scrollbar.deinit();
     scrollbar.pointer_gesture_owner = .{ .scrollbar = .{ .grab = 0 } };
@@ -39715,7 +39347,7 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/folder.md", .{root});
     defer allocator.free(dir_path);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -39808,7 +39440,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     const clean_path = try std.fs.path.join(allocator, &.{ root, "clean.md" });
     defer allocator.free(clean_path);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(dirty_path));
@@ -39953,7 +39585,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
 test "file tree keyboard focus preserves identity navigates scrolls and restores responder target" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/repo/docs/a.md", .markdown);
@@ -40124,7 +39756,7 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     const b_path = try std.fmt.allocPrint(allocator, "{s}/b.md", .{root});
     defer allocator.free(b_path);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a_path));
@@ -40132,9 +39764,9 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expect(session.completePendingDockFocus(a_sid));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
-    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{
-        .{ .name = "a.md", .kind = .file, .identity = try testFileTreeIdentity(a_path) },
-        .{ .name = "b.md", .kind = .file, .identity = try testFileTreeIdentity(b_path) },
+    try session.file_tree.applySnapshotWithIdentity(root, try test_support.testFileTreeIdentity(root), &.{
+        .{ .name = "a.md", .kind = .file, .identity = try test_support.testFileTreeIdentity(a_path) },
+        .{ .name = "b.md", .kind = .file, .identity = try test_support.testFileTreeIdentity(b_path) },
     });
     session.file_tree_rows_dirty = true;
     try file_panel_ops.updateFileTree(session);
@@ -40168,25 +39800,6 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
 }
 
-fn testFileTreeIdentity(path: []const u8) !file_tree.Identity {
-    const path_z = try std.testing.allocator.dupeZ(u8, path);
-    defer std.testing.allocator.free(path_z);
-    var stat: std.posix.Stat = undefined;
-    if (std.c.fstatat(std.posix.AT.FDCWD, path_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
-    return .{
-        .device = @intCast(stat.dev),
-        .inode = @intCast(stat.ino),
-        .kind = @intFromEnum(if (std.posix.S.ISREG(stat.mode))
-            file_tree.IdentityKind.regular
-        else if (std.posix.S.ISDIR(stat.mode))
-            file_tree.IdentityKind.directory
-        else if (std.posix.S.ISLNK(stat.mode))
-            file_tree.IdentityKind.symlink
-        else
-            file_tree.IdentityKind.other),
-    };
-}
-
 test "file tree mutations create rename protect dirty and use a visible staged Trash handoff" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -40204,16 +39817,16 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     const renamed = try std.fs.path.join(allocator, &.{ root, "renamed.md" });
     defer allocator.free(renamed);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(anchor));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
-    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{.{
+    try session.file_tree.applySnapshotWithIdentity(root, try test_support.testFileTreeIdentity(root), &.{.{
         .name = "anchor.md",
         .kind = .file,
-        .identity = try testFileTreeIdentity(anchor),
+        .identity = try test_support.testFileTreeIdentity(anchor),
     }});
     session.file_tree_rows_dirty = true;
     try file_panel_ops.updateFileTree(session);
@@ -40237,9 +39850,9 @@ test "file tree mutations create rename protect dirty and use a visible staged T
 
     // Reproject the worker result, then F2 edits the copied path identity. Rename remaps the live dock path
     // and retires/recreates its path-pinned WebView surface id.
-    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{
-        .{ .name = ".new.md", .kind = .file, .identity = try testFileTreeIdentity(created) },
-        .{ .name = "anchor.md", .kind = .file, .identity = try testFileTreeIdentity(anchor) },
+    try session.file_tree.applySnapshotWithIdentity(root, try test_support.testFileTreeIdentity(root), &.{
+        .{ .name = ".new.md", .kind = .file, .identity = try test_support.testFileTreeIdentity(created) },
+        .{ .name = "anchor.md", .kind = .file, .identity = try test_support.testFileTreeIdentity(anchor) },
     });
     session.file_tree_rows_dirty = true;
     try file_panel_ops.updateFileTree(session);
@@ -40294,7 +39907,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
         .label = std.fs.path.basename(root),
         .expanded = true,
         .loading = false,
-        .identity = try testFileTreeIdentity(root),
+        .identity = try test_support.testFileTreeIdentity(root),
     } });
     try session.file_tree_rows.append(allocator, .{ .file = .{
         .path = renamed,
@@ -40306,7 +39919,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
         .dirty = true,
         .external_change = false,
         .symlink = false,
-        .identity = try testFileTreeIdentity(renamed),
+        .identity = try test_support.testFileTreeIdentity(renamed),
     } });
     session.file_tree_rows_dirty = false;
     _ = file_panel_ops.setFileTreeSelection(session, 1);
@@ -40436,7 +40049,7 @@ test "file tree rename changes supported panel kind and removes unsupported pane
     const unsupported = try std.fs.path.join(allocator, &.{ root, "kind.bin" });
     defer allocator.free(unsupported);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(markdown));
@@ -40504,7 +40117,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     const directory_path = try std.fmt.allocPrint(allocator, "{s}/folder.html", .{root});
     defer allocator.free(directory_path);
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -40558,7 +40171,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
 test "FP9 restore barrier rejects a live protected dock before model replacement" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -41277,7 +40890,7 @@ test "sidebarBandCell sizes the active band to the sidebar width and emits a sen
 test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a declared tree" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -41345,7 +40958,7 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
 test "notification scroll view survives the frame that produced it" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -41379,7 +40992,7 @@ test "notification scroll view survives the frame that produced it" {
 test "palette scrollbar follows stored offset and the wheel, and selection pulls only when out of view" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -41471,7 +41084,7 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
 test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock list alone" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -42628,7 +42241,7 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
 test "FP9 active-pane projection rejects partial layout OOM and recovers" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -42710,7 +42323,7 @@ test "FP9 active-pane projection rejects partial layout OOM and recovers" {
 test "FP9 active-pane projection adds no layout scan or allocation at workspace pane cap" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -42745,7 +42358,7 @@ test "FP9 active-pane projection adds no layout scan or allocation at workspace 
 test "FP9 workspace focus border uses pane body and fails closed for non-key or unknown leaf" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
@@ -42847,7 +42460,7 @@ test "FP9 workspace focus border uses pane body and fails closed for non-key or 
 test "focus border suppressed while notification panel or context menu is open" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
@@ -42906,7 +42519,7 @@ test "focus border suppressed while notification panel or context menu is open" 
 test "FP9 production frame follows active pane body across horizontal and vertical split" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.appearance.chrome_theme = .rich;
@@ -43249,7 +42862,7 @@ test "web_surfaces_present는 창 전체 트리에서 매 tick 파생된다(유�
 test "allTabsTerminated: web-only 잔여는 세션을 살려 둔다(web-only 창 종료 방지)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43273,7 +42886,7 @@ test "allTabsTerminated: web-only 잔여는 세션을 살려 둔다(web-only 창
 test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→루트 폴백 아님)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43299,7 +42912,7 @@ test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→�
 test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel 빈 제목 아님)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43314,7 +42927,7 @@ test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel �
 test "captureWorkspaceTab: URL 있는 브라우저만 있는 pane은 셸 placeholder를 안 받는다 (WP-P)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43361,7 +42974,7 @@ test "captureWorkspaceTab: 활성 브라우저가 마지막 탭이어도 active-
     const io = std.Io.Threaded.global_single_threaded.io();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43409,7 +43022,7 @@ test "captureWorkspaceTab: 활성 브라우저가 마지막 탭이어도 active-
 test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43446,7 +43059,7 @@ test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
 test "captureWorkspaceTab: active_term remap — web 스킵 시 활성 터미널 인덱스 보정" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -43474,7 +43087,7 @@ test "captureWorkspaceTab: active_term remap — web 스킵 시 활성 터미널
 test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로 직렬화" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43502,7 +43115,7 @@ test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로
 test "collector: web Term url은 web_nav_states에서 채운다(§9.6 browser.list 주소)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43525,7 +43138,7 @@ test "collector: web Term url은 web_nav_states에서 채운다(§9.6 browser.li
 test "ownsSurface: 소유 terminal·web은 true, 미소유 id는 false (target-window 모달)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -43536,48 +43149,6 @@ test "ownsSurface: 소유 terminal·web은 true, 미소유 id는 false (target-w
     try std.testing.expect(session.ownsSurface(term_id)); // 소유 terminal
     try std.testing.expect(session.ownsSurface(web_id)); // 소유 web(kind 필터 없음)
     try std.testing.expect(!session.ownsSurface(999_999)); // 미소유(다른 창·없는 id)
-}
-
-// [4e review 0] collectWebSurfaces seam inset 검증 헬퍼 — 각 web 본문 rect가 seam(형제 pane 경계) 가장자리서 `seam`만큼,
-// 바깥 경계는 0, top은 탭 바(bar_h) + (7e-1b) browser면 주소창 밴드(addr_h=bar_h)까지 들어갔는지 확인하고 어느 seam을
-// 실제로 밟았는지 [left,right,bottom]로 돌려준다. markdown web은 top=bar_h(주소창 없음), browser web은 top=2·bar_h.
-fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Allocator) ![3]bool {
-    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
-    defer leaves.deinit(allocator);
-    try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &leaves);
-    var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
-    defer cur.deinit(allocator);
-    try session.collectWebSurfaces(&cur);
-    const tr = session.termRect();
-    const bar_h = pane_ops.paneBarHeightPx(session);
-    var saw = [3]bool{ false, false, false }; // left, right, bottom seam을 실제 밟았는지(non-vacuous)
-    for (cur.items) |s| {
-        var lr: ?maru.session.SplitRect = null;
-        for (leaves.items) |lf| for (lf.leaf.terms.items) |t| {
-            if (t.kind == .web and t.surfaceId() == s.surface_id) lr = lf.rect;
-        };
-        const rect = lr.?;
-        const cr = s.content_rect;
-        const el: u32 = if (rect.x > tr.x) seam else 0;
-        const er: u32 = if (rect.x + rect.w < tr.x + tr.w) seam else 0;
-        const eb: u32 = if (rect.y + rect.h < tr.y + tr.h) seam else 0;
-        if (el > 0) saw[0] = true;
-        if (er > 0) saw[1] = true;
-        if (eb > 0) saw[2] = true;
-        // 7e-1b: browser web은 탭 바 아래 읽기전용 주소창 밴드(addr_h=bar_h)만큼 top inset이 더 들어간다(markdown은 0).
-        const addr_h: u32 = if (s.panel_kind == .browser) bar_h else 0;
-        try std.testing.expectEqual(rect.x + el, cr.x);
-        try std.testing.expectEqual(rect.y + bar_h + addr_h, cr.y); // top = 탭 바 + (browser면) 주소창 밴드(seam 추가 inset 없음)
-        try std.testing.expectEqual(rect.w - el - er, cr.w);
-        try std.testing.expectEqual(rect.h - bar_h - addr_h - eb, cr.h);
-        // seam_edges 비트마스크(L=1·R=2·B=4)는 inset이 걸린 가장자리와 정확히 일치해야 한다(Swift hitTest 통과의 단일 출처).
-        var expected_mask: u8 = 0;
-        if (el > 0) expected_mask |= 1;
-        if (er > 0) expected_mask |= 2;
-        if (eb > 0) expected_mask |= 4;
-        try std.testing.expectEqual(expected_mask, s.seam_edges);
-    }
-    return saw;
 }
 
 // [4e review 0 재수정] collectWebSurfaces: split에서 각 web 본문 rect는 seam 가장자리를 `dt + 클릭여유`만큼 들여 WKWebView가
@@ -43665,7 +43236,7 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
 
     // ① split_horizontal = 세로 divider(좌우 pane) → left/right seam.
     {
-        const session = try initSmokeSessionSized(allocator);
+        const session = try test_support.initSmokeSessionSized(allocator);
         defer allocator.destroy(session);
         defer session.deinit();
         const seam = expected_seam(session);
@@ -43674,13 +43245,13 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
         session.dispatchAppAction(.new_web_tab);
         pane_ops.focusPaneRelative(session, -1);
         session.dispatchAppAction(.new_web_tab);
-        const saw = try checkWebSeamInsets(session, seam, allocator);
+        const saw = try test_support.checkWebSeamInsets(session, seam, allocator);
         try std.testing.expect(saw[0] or saw[1]); // 세로 divider의 좌/우 seam을 실제 밟음
     }
 
     // ② split_vertical = 가로 divider(상/하 pane) → bottom seam(원래 테스트가 안 밟던 경로 — 사용자 제보 버그).
     {
-        const session = try initSmokeSessionSized(allocator);
+        const session = try test_support.initSmokeSessionSized(allocator);
         defer allocator.destroy(session);
         defer session.deinit();
         const seam = expected_seam(session);
@@ -43688,7 +43259,7 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
         session.dispatchAppAction(.new_web_tab);
         pane_ops.focusPaneRelative(session, -1);
         session.dispatchAppAction(.new_web_tab);
-        const saw = try checkWebSeamInsets(session, seam, allocator);
+        const saw = try test_support.checkWebSeamInsets(session, seam, allocator);
         try std.testing.expect(saw[2]); // ★ 위 pane의 아래(가로 divider) seam을 실제 밟음 — bottom inset 잠금
     }
 }
@@ -43698,7 +43269,7 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
 test "web scratch: 다중 tick 누수/크래시 0(영속 scratch swap 소유 흐름)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44032,7 +43603,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
-    markAllTermsAtPrompt(session); // idle 셸 흉내 — ✕ 닫기가 확인 모달 없이 즉시 진행되게
+    test_support.markAllTermsAtPrompt(session); // idle 셸 흉내 — ✕ 닫기가 확인 모달 없이 즉시 진행되게
 
     // 활성 pane의 바 rect를 구해 탭 1의 ✕ zone x를 계산한다.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -44055,29 +43626,6 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.hovered_tab == null);
     try std.testing.expect(!session.ended_seen); // 아직 Term 남음 — 세션 유지
-}
-
-// 닫기 확인(실행 중 명령 보호)의 트리거 판정은 코어의 cursorIsAtPrompt(셸 통합 OSC 133 + alt 화면)로 결정된다.
-// 아래 테스트들은 활성 Term 코어의 semantic_state/alt_active를 직접 세팅해 각 경우를 **결정론적**으로 증명한다
-// (controlled_smoke는 `/bin/sh -c "printf; read"`라 OSC 133·alt를 안 쏘므로 코어 상태는 세팅한 값 그대로 유지).
-// 프로세스/pgid를 안 쓰므로 job-control 셸이 필요 없다.
-fn initSmokeSessionTwoTerms(allocator: std.mem.Allocator) !*AppSession {
-    const session = try allocator.create(AppSession);
-    errdefer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    errdefer session.deinit();
-    session.window_padding_px = .{};
-    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    // ⌘T → Term 2개(활성 pane). .term_or_pane 닫기는 활성 Term 하나만 teardown한다.
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
-    return session;
 }
 
 test "관측 tail 상한은 여러 행 composer의 프롬프트 마커를 계속 실어 준다" {
@@ -44117,7 +43665,7 @@ test "관측 tail 상한은 여러 행 composer의 프롬프트 마커를 계속
 test "agent representative prioritizes blocked over running over active idle" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44144,22 +43692,10 @@ test "agent representative prioritizes blocked over running over active idle" {
     }
 }
 
-/// 테스트 유틸 — 세션의 모든 Term 코어를 "프롬프트에 idle"(OSC 133 input) 상태로 표시한다. controlled_smoke는
-/// OSC 133을 안 쏘므로 코어가 unknown이라 닫기 확인이 보수적으로 뜬다(cursorIsAtPrompt=false). 닫기를 **메커니즘**
-/// 으로만 쓰는(닫기 확인 자체가 검증 대상이 아닌) 탭/pane/Term 수명 테스트가, 프로덕션의 통합 셸 idle 상태를 흉내 내
-/// 즉시 닫히게 한다. 새 Term을 만든 뒤 닫기 직전에 부른다.
-fn markAllTermsAtPrompt(session: *AppSession) void {
-    for (session.tabs.items) |tab| {
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |t| t.surface.core.semantic_state = .input;
-        }
-    }
-}
-
 test "close-confirm: 셸이 프롬프트(OSC 133 input)면 확인 모달 없이 즉시 닫는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44177,7 +43713,7 @@ test "close-confirm: 셸이 프롬프트(OSC 133 input)면 확인 모달 없이 
 test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 띄우고 닫기를 보류한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44234,12 +43770,12 @@ test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인
 test "close-confirm: 마지막 창(is_last_window)에서 세션 닫기는 Cmd+Q와 동일한 종료 확인을 띄운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
     // 두 Term을 하나로 줄여 이제 단일 Term·단일 pane·단일 탭 = requestClose(.term_or_pane)가 .session으로 해석되게.
-    markAllTermsAtPrompt(session);
+    test_support.markAllTermsAtPrompt(session);
     session.closeActiveTerm(); // 2→1 Term(닫기 확인 없이 메커니즘만)
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
@@ -44265,11 +43801,11 @@ test "close-confirm: 마지막 창(is_last_window)에서 세션 닫기는 Cmd+Q�
 test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기는 종료 확인 없이 세션 종료를 latch한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
-    markAllTermsAtPrompt(session);
+    test_support.markAllTermsAtPrompt(session);
     session.closeActiveTerm(); // 2→1 Term
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
@@ -44284,7 +43820,7 @@ test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기
 test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인 모달을 띄운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44298,7 +43834,7 @@ test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인
 test "close-confirm: 셸 통합 없음(unknown, primary 화면)이면 보수적으로 확인 모달" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44338,7 +43874,7 @@ test "collector agentInfoWire: blocked는 별도 wire 값" {
 }
 
 test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown 매핑(내부→wire 격리)" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    // 실 세션 하네스(test_support.initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try std.testing.expect(agentInfoWire(.none, .running) == null); // none이면 state 무관 null(wire 생략)
     try std.testing.expect(agentInfoWire(.none, .idle) == null);
@@ -44355,28 +43891,10 @@ test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown
     try std.testing.expectEqual(control_surface.AgentState.unknown, c.state);
 }
 
-// 실 AppSession(controlled_smoke) 단일 term + 창 사이즈 세팅(split/newTab 선행). initSmokeSessionTwoTerms와 같은
-// 하니스 패턴(§ 위 close-confirm 테스트) — collector는 이 실 트리를 평탄화한다.
-fn initSmokeSessionSized(allocator: std.mem.Allocator) !*AppSession {
-    const session = try allocator.create(AppSession);
-    errdefer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    errdefer session.deinit();
-    session.window_padding_px = .{};
-    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    return session;
-}
-
 test "automatic agent sessions dock width reflows the live pane without persisting a view width" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1600, 900, 1000);
@@ -44423,7 +43941,7 @@ test "automatic agent sessions dock width reflows the live pane without persisti
 test "collector: 단일 term 세션 — 좌표·id·focused·membership·terminal 메타" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44459,7 +43977,7 @@ test "collector: 단일 term 세션 — 좌표·id·focused·membership·termina
 test "collector: 다중 term(가로 탭) — 같은 tab/pane 좌표·구별 id, focused 하나" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44486,7 +44004,7 @@ test "collector: 다중 term(가로 탭) — 같은 tab/pane 좌표·구별 id, 
 test "collector: split pane — pane 0/1 좌표, 같은 tab" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44510,7 +44028,7 @@ test "collector: split pane — pane 0/1 좌표, 같은 tab" {
 test "collector: 다중 tab — tab 0/1 좌표, membership에 두 surface" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44538,10 +44056,10 @@ test "collector: 다중 tab — tab 0/1 좌표, membership에 두 surface" {
 test "collector 멀티창: 두 세션을 공유 리스트로 합치면 window별 surface + key 창만 focused" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const s_key = try initSmokeSessionSized(allocator); // key 창(focused)
+    const s_key = try test_support.initSmokeSessionSized(allocator); // key 창(focused)
     defer allocator.destroy(s_key);
     defer s_key.deinit();
-    const s_bg = try initSmokeSessionSized(allocator); // 비-key 창(background)
+    const s_bg = try test_support.initSmokeSessionSized(allocator); // 비-key 창(background)
     defer allocator.destroy(s_bg);
     defer s_bg.deinit();
     s_bg.window_focused = false; // 이 창은 key가 아님 → 어떤 surface도 focused 아님
@@ -44579,7 +44097,7 @@ test "collector 멀티창: 두 세션을 공유 리스트로 합치면 window별
 test "collector: at_prompt 3상 term별 반영(command·unknown·alt)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44608,7 +44126,7 @@ test "collector: at_prompt 3상 term별 반영(command·unknown·alt)" {
 test "collector: agent·cwd(OSC 7)·title(custom_name 우선)이 DTO에 실린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44632,7 +44150,7 @@ test "collector: agent·cwd(OSC 7)·title(custom_name 우선)이 DTO에 실린�
 test "collector: window_focused=false면 focused 전무(A2 창 합류 시 key 창만 focused)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44646,7 +44164,7 @@ test "collector: window_focused=false면 focused 전무(A2 창 합류 시 key �
 test "collector: window_kind(quick)·window_id 주입이 membership에 반영" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44660,7 +44178,7 @@ test "collector: window_kind(quick)·window_id 주입이 membership에 반영" {
 test "collector→dispatch: 실 snapshot이 sessions.list(self)로 자기 surface를 응답" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -44683,7 +44201,7 @@ test "collector→dispatch: 실 snapshot이 sessions.list(self)로 자기 surfac
 test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한 닫기 실행)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
+    const session = try test_support.initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -45351,10 +44869,10 @@ test "hovering the '+' button does not mark the last tab for close" {
 test "CIM4b: 탭 드래그는 model을 안 건드리고 보이는 순서만 바꾼다 — commit은 up 한 번" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator); // down → 탭 2 자리까지 drag(아직 안 뗐다)
+    const f = try test_support.beginTabDragToLastSlot(session, allocator); // down → 탭 2 자리까지 drag(아직 안 뗐다)
     const pane = f.pane;
     const t0 = f.terms[0];
     const t1 = f.terms[1];
@@ -45399,10 +44917,10 @@ test "CIM4b: 탭 드래그는 model을 안 건드리고 보이는 순서만 바�
 test "CIM4b: 바 밖에서 뗀 드래그는 commit 없이 시작 순서로 남는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 사이드바 위(어느 leaf rect도 아니고 drop-zone도 아님)에서 up.
     session.mouse(3, 2, f.bar_y, 0, 0);
@@ -45419,10 +44937,10 @@ test "CIM4b: 바 밖에서 뗀 드래그는 commit 없이 시작 순서로 남�
 test "CIM4b: 제자리 드롭은 model effect 0이고 화면은 다시 그린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 끝자리까지 끌었다가 **원래 자리로 되돌아와** 뗀다 — preview는 다시 시작 순서라 commit할 것이 없다.
     session.mouse(2, f.tab0_x, f.bar_y, 0, 0);
@@ -45440,7 +44958,7 @@ test "CIM4b: 제자리 드롭은 model effect 0이고 화면은 다시 그린다
 
 // CIM4b fixture 공용 셋업. Term 3개 pane에서 탭 0을 탭 2 자리까지 끈 **중간 상태**를 만든다 — 반환 시점에
 // 드래그는 살아 있고, 보이는 순서는 [T1,T2,T0]이며, model은 아직 [T0,T1,T2] 그대로다.
-const TabDragMidFlight = struct {
+pub const TabDragMidFlight = struct {
     pane: *Pane,
     terms: [3]*Term,
     /// 슬롯 0·마지막 슬롯의 x(제품과 같은 `tab_width_cols`로 잰 값)와 바 y. 좌표를 각 테스트가 다시 만들면
@@ -45450,55 +44968,13 @@ const TabDragMidFlight = struct {
     bar_y: f64,
 };
 
-fn initTabDragSession(allocator: std.mem.Allocator) !*AppSession {
-    const session = try allocator.create(AppSession);
-    errdefer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    errdefer session.deinit();
-    session.window_padding_px = .{};
-    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    return session;
-}
-
-fn beginTabDragToLastSlot(session: *AppSession, allocator: std.mem.Allocator) !TabDragMidFlight {
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    const pane = pane_ops.activePane(session);
-    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
-    const terms: [3]*Term = .{ pane.terms.items[0], pane.terms.items[1], pane.terms.items[2] };
-
-    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
-    defer lr.deinit(allocator);
-    try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
-    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
-    // 세그먼트 폭은 **제품과 같은 토큰**으로 잰다 — tab_width_cols를 0으로 두면 rich 테마(16)와 어긋나
-    // 겨냥한 슬롯과 제품이 잡는 슬롯이 갈린다(끝자리만 겨냥하는 테스트는 clamp 덕에 우연히 맞는다).
-    const m = barMetrics(pb.tabs, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, 0).?;
-    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
-    const tab2_x: f64 = @floatFromInt(pb.tabs.x + (2 * m.tab_w + 1) * session.cell_width_px);
-    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
-
-    session.mouse(1, tab0_x, bar_y, 0, 0);
-    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
-    session.mouse(2, tab2_x, bar_y, 0, 0);
-    try std.testing.expectEqual(terms[0], pane_ops.paneTermOrder(session, pane)[2]); // preview는 끝자리로 갔다
-    try std.testing.expectEqual(@as(usize, 2), pane_ops.paneActiveTermIndex(session, pane));
-    return .{ .pane = pane, .terms = terms, .tab0_x = tab0_x, .tab_last_x = tab2_x, .bar_y = bar_y };
-}
-
 // §5: commit destination의 권위는 **up 좌표의 재hit-test**이지 마지막 move가 preview에 남긴 자리가 아니다.
 // 마지막 drag가 탭 2를 가리킨 뒤 탭 1 자리에서 손을 떼면 탭 1이 이긴다 — 둘이 갈리는 경로(coalescing으로
 // 마지막 move가 먹히거나, drag가 훑지 않은 x에서 떼는 경우)를 이 fixture가 고정한다.
 test "CIM4b: commit destination은 up 좌표가 정한다(마지막 move가 아니라)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -45536,10 +45012,10 @@ test "CIM4b: commit destination은 up 좌표가 정한다(마지막 move가 아�
 test "CIM4b: 드래그 중 ⌘T로 Term이 늘면 provisional을 폐기한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 집합 변경
     try std.testing.expectEqual(@as(usize, 4), f.pane.terms.items.len);
@@ -45558,10 +45034,10 @@ test "CIM4b: 드래그 중 ⌘T로 Term이 늘면 provisional을 폐기한다" {
 test "CIM4b: 드래그 중 Term이 in-place로 교체되면 preview를 폐기한다(dangling 방지)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 끌고 있던 Term(T0)을 그 자리에서 해제한다 — 길이는 그대로다.
     const victim = f.terms[0];
@@ -45576,10 +45052,10 @@ test "CIM4b: 드래그 중 Term이 in-place로 교체되면 preview를 폐기한
 test "CIM4b: preview가 떠 있을 때의 down은 보이던 탭을 고른다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 보이는 순서는 [T1,T2,T0]이라 슬롯 0에 있는 것은 T1이다. 그 자리를 누른다.
     session.mouse(1, f.tab0_x, f.bar_y, 0, 0);
@@ -45593,10 +45069,10 @@ test "CIM4b: preview가 떠 있을 때의 down은 보이던 탭을 고른다" {
 test "CIM4b: preview가 떠 있을 때는 비-좌클릭 down도 보이던 탭을 고른다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 보이는 순서는 [T1,T2,T0]이라 슬롯 0에 있는 것은 T1이다. 그 자리를 **가운데 버튼**으로 누른다.
     session.mouse(1, f.tab0_x, f.bar_y, 1, 0);
@@ -45620,10 +45096,10 @@ test "CIM4b: preview가 떠 있을 때는 비-좌클릭 down도 보이던 탭을
 test "CIM4b: 드래그 중 뜬 오버레이는 up을 삼키지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 비-모달 토스트(사용자가 부른 것이 아니라 비동기로 뜬다)가 드래그 도중 열린다.
     session.chrome_host.notice.open = true;
@@ -45644,10 +45120,10 @@ test "CIM4b: 드래그 중 뜬 오버레이는 up을 삼키지 않는다" {
 test "CIM4b: 드래그 중 ⌘⌥]는 보이는 순서에서 다음 탭으로 간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // 보이는 순서 [T1,T2,T0], 활성은 끌리는 T0(슬롯 2). 오른쪽 다음 = wrap해서 슬롯 0 = T1.
     try std.testing.expectEqual(@as(usize, 2), pane_ops.paneActiveTermIndex(session, f.pane));
@@ -45662,7 +45138,7 @@ test "CIM4b: 드래그 중 ⌘⌥]는 보이는 순서에서 다음 탭으로 �
 test "CIM4b: 드래그 중에는 탭 바 스크롤을 건드리지 않는다(preview가 영속 상태로 안 샌다)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -45697,31 +45173,18 @@ test "CIM4b: 드래그 중에는 탭 바 스크롤을 건드리지 않는다(pre
     try std.testing.expect(pane.tab_scroll_cols <= active_start); // 활성 탭 좌단이 보이는 범위 안
 }
 
-/// 복원됐는가 = 보이는 순서가 시작 순서와 같고, model이 한 번도 안 바뀌었다(effect 0).
-/// 각 복원 트리거는 `beginTabDragToLastSlot`이 만든 중간 상태에서 갈라져 이 한 가지만 본다.
-fn expectTabDragRestored(session: *AppSession, f: TabDragMidFlight) !void {
-    try std.testing.expect(!session.pointerGestureIs(.terminal_tab)); // 제스처가 끝났다
-    try std.testing.expectEqual(f.terms[0], f.pane.terms.items[0]);
-    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[1]);
-    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[2]);
-    try std.testing.expectEqual(@as(usize, 0), f.pane.active_term);
-    // 접근자가 model로 되돌아왔다 — 파기된 preview가 화면에 남지 않는다.
-    try std.testing.expectEqual(f.pane.terms.items.ptr, pane_ops.paneTermOrder(session, f.pane).ptr);
-    try std.testing.expectEqual(@as(usize, 0), pane_ops.paneActiveTermIndex(session, f.pane));
-}
-
 // §4.4 복원 트리거 ①: Escape. 드래그 중 Escape는 앱이 소비하고(터미널로 안 흘림) 시작 순서로 되돌린다.
 test "CIM4b 복원: Escape가 드래그를 시작 순서로 되돌린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     const app_keys_before = session.total_app_key_events;
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
-    try expectTabDragRestored(session, f);
+    try test_support.expectTabDragRestored(session, f);
     try std.testing.expectEqual(app_keys_before + 1, session.total_app_key_events); // 앱이 소비(터미널 미전달)
 }
 
@@ -45731,10 +45194,10 @@ test "CIM4b 복원: Escape가 드래그를 시작 순서로 되돌린다" {
 test "CIM4b 복원: 새 primary down이 이전 드래그를 버린다(up 유실 경로)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     // up 없이 새 down. 취소가 먼저 돌아 이전 preview는 commit되지 않는다.
     session.mouse(1, f.tab0_x, f.bar_y, 0, 0);
@@ -45753,13 +45216,13 @@ test "CIM4b 복원: 새 primary down이 이전 드래그를 버린다(up 유실 
 test "CIM4b 복원: 창 포커스 상실이 드래그를 시작 순서로 되돌린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     session.focusChanged(false);
-    try expectTabDragRestored(session, f);
+    try test_support.expectTabDragRestored(session, f);
 }
 
 // §4.4 복원 트리거 ④: modal/native overlay 진입. 게이트는 오버레이 집합에서 파생되므로 새 오버레이가
@@ -45767,14 +45230,14 @@ test "CIM4b 복원: 창 포커스 상실이 드래그를 시작 순서로 되돌
 test "CIM4b 복원: 모달이 열리면 다음 tick이 드래그를 되돌린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     session.chrome_host.palette.open = true; // 모달 진입
     _ = try session.tick();
-    try expectTabDragRestored(session, f);
+    try test_support.expectTabDragRestored(session, f);
 }
 
 // 비-모달 notice 토스트는 **복원 트리거가 아니다**. 토스트는 사용자가 부른 것이 아니라 비동기로 뜨므로
@@ -45783,10 +45246,10 @@ test "CIM4b 복원: 모달이 열리면 다음 tick이 드래그를 되돌린다
 test "CIM4b: 드래그 중 뜬 notice 토스트는 재정렬을 파기하지도, 드래그에 닫히지도 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     session.chrome_host.notice.open = true; // 비-모달 토스트 — 사용자가 부른 것이 아니다
     try std.testing.expect(!session.anyModalOverlayOpen());
@@ -45810,7 +45273,7 @@ test "CIM4b: 드래그 중 뜬 notice 토스트는 재정렬을 파기하지도,
 test "CIM4b: 제자리로 돌아온 드래그도 Escape가 취소하고 소비한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -45847,10 +45310,10 @@ test "CIM4b: 제자리로 돌아온 드래그도 Escape가 취소하고 소비�
 test "CIM4b 복원: 드래그 중 Term이 사라지면 preview를 폐기한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initTabDragSession(allocator);
+    const session = try test_support.initTabDragSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const f = try beginTabDragToLastSlot(session, allocator);
+    const f = try test_support.beginTabDragToLastSlot(session, allocator);
 
     session.closeActiveTerm(); // 활성 = 끌고 있던 T0
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
@@ -46120,7 +45583,7 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     }
 
     // 드래그 전엔 floating 탭 없음.
-    try std.testing.expect(testBuildFloatingTabFrame(session, builder, &built) == null);
+    try std.testing.expect(test_support.testBuildFloatingTabFrame(session, builder, &built) == null);
 
     // 탭 down(arm) → drag(2)로 마우스 이동 → tab_drag_x/y 갱신.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -46134,14 +45597,14 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     try std.testing.expectEqual(@as(f64, 222), session.pointer_gesture_owner.terminal_tab.y);
 
     // 드래그 중엔 floating 탭 frame이 빌드된다(커서 중심에 박스).
-    const pf = testBuildFloatingTabFrame(session, builder, &built);
+    const pf = test_support.testBuildFloatingTabFrame(session, builder, &built);
     try std.testing.expect(pf != null);
     try std.testing.expect(pf.?.origin_x < 333); // 박스가 커서 좌측으로 센터됨(폭/2 만큼)
 
     // up → 드래그 끝 → floating 탭 없음.
     session.mouse(3, 333, 222, 0, 0);
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
-    try std.testing.expect(testBuildFloatingTabFrame(session, builder, &built) == null);
+    try std.testing.expect(test_support.testBuildFloatingTabFrame(session, builder, &built) == null);
     _ = try session.tick();
 }
 
@@ -46988,7 +46451,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     try pane_ops.splitActivePane(session, .horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), tab_ops.activeTab(session).panes.items.len);
     try std.testing.expect(pane_ops.activeTabHasSplit(session));
-    markAllTermsAtPrompt(session); // idle 셸 흉내 — Cmd+W가 확인 모달 없이 즉시 pane을 닫게
+    test_support.markAllTermsAtPrompt(session); // idle 셸 흉내 — Cmd+W가 확인 모달 없이 즉시 pane을 닫게
 
     // Cmd+W → 활성(오른쪽) panel 닫힘 → 트리가 형제(왼쪽)로 collapse → 1 panel만 남고 그게 활성.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
@@ -47618,7 +47081,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
         "sh",
     );
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
-    markAllTermsAtPrompt(session); // idle 셸 흉내 — 슬롯 ✕ 닫기가 확인 모달 없이 즉시 탭을 닫게
+    test_support.markAllTermsAtPrompt(session); // idle 셸 흉내 — 슬롯 ✕ 닫기가 확인 모달 없이 즉시 탭을 닫게
 
     const w: f64 = @floatFromInt(session.sidebar_width_px);
     // ✕는 **그려진 그 칸**에서만 닫는다(`sidebar.columns`가 그리는 자리와 누르는 자리의 단일 출처).
@@ -50175,7 +49638,7 @@ test "SB1-S3d: 상태바 배경은 bottom 버킷이어야 텍스트를 안 덮�
 test "sidebar scissor engages on the product path even when bands are quads (rich)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -50778,7 +50241,7 @@ test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온�
 
     // 다시 열자마자 그리면 — 페이지 모드로 굳어 있으면 카운터가 없다.
     session.dispatchAppAction(.toggle_find);
-    try std.testing.expect(try findOverlayHasText(allocator, session, "0/0"));
+    try std.testing.expect(try test_support.findOverlayHasText(allocator, session, "0/0"));
 }
 
 // WP-F1 적대적 R5 프로브: 웹 탭에 잠깐 들렀다 **터미널로 돌아오면 스크롤백 검색이 살아 있어야** 한다.
@@ -50987,18 +50450,18 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
 
     // 결과 전 — 그릴 것이 없다(빈 자리). 그림 자체로 확인한다: 카운터 op가 없어야 한다.
     try std.testing.expect(session.chrome_host.find.page_found == null);
-    try std.testing.expect(!(try findOverlayHasText(allocator, session, "0/0")));
+    try std.testing.expect(!(try test_support.findOverlayHasText(allocator, session, "0/0")));
 
     // 찾음/없음이 실제로 **그려진다**(상태만 보면 view가 무시해도 통과한다).
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
     const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
     session.provideWebFindResult(req.seq, true);
-    try std.testing.expect(try findOverlayHasText(allocator, session, "찾음"));
-    try std.testing.expect(!(try findOverlayHasText(allocator, session, "0/0")));
+    try std.testing.expect(try test_support.findOverlayHasText(allocator, session, "찾음"));
+    try std.testing.expect(!(try test_support.findOverlayHasText(allocator, session, "0/0")));
 
     session.provideWebFindResult(req.seq, false);
-    try std.testing.expect(try findOverlayHasText(allocator, session, "없음"));
+    try std.testing.expect(try test_support.findOverlayHasText(allocator, session, "없음"));
 
     // 터미널로 돌아오면 다시 숫자 카운터다(페이지 답이 남지 않는다).
     session.focusTerm(0);
@@ -51007,33 +50470,9 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     try std.testing.expect(session.chrome_host.find.page_found == null);
     // 숫자 카운터로 돌아온다("/"는 이 오버레이에서 카운터에만 나온다 — 프롬프트는 "Find: ", 검색어는 "a").
     // 정확한 숫자는 단언하지 않는다: 돌아오면서 **실제로 재검색**하므로(R5) 셸 출력에 'a'가 있으면 0이 아니다.
-    try std.testing.expect(try findOverlayHasText(allocator, session, "/"));
-    try std.testing.expect(!(try findOverlayHasText(allocator, session, "찾음")));
-    try std.testing.expect(!(try findOverlayHasText(allocator, session, "없음")));
-}
-
-/// 오버레이를 **실제 렌더 경로**(buildChromeOverlayFrame과 같은 collectDraws)로 그려 `needle` 텍스트가 나오는지
-/// 본다 — 상태만 단언하면 view가 그 상태를 무시해도 통과하므로(그리는 것이 계약이다) 그림을 본다.
-fn findOverlayHasText(allocator: std.mem.Allocator, session: *AppSession, needle: []const u8) !bool {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const tk = session.buildChromeTokens();
-    const props = session.buildChromeProps();
-    var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
-    try session.chrome_host.collectDraws(props, &tk, arena, &draws);
-    for (draws.items) |d| {
-        for (d.ops) |op| {
-            const t = switch (op) {
-                .text => |tx| tx,
-                else => continue,
-            };
-            for (t.runs) |run| {
-                if (std.mem.indexOf(u8, run.text, needle) != null) return true;
-            }
-        }
-    }
-    return false;
+    try std.testing.expect(try test_support.findOverlayHasText(allocator, session, "/"));
+    try std.testing.expect(!(try test_support.findOverlayHasText(allocator, session, "찾음")));
+    try std.testing.expect(!(try test_support.findOverlayHasText(allocator, session, "없음")));
 }
 
 // WP-F1 적대적: **게이트가 종류를 빠뜨리거나 남의 탭을 보면 안 된다.** 판정이 `activeWebSurfaceIdAnyKind`라
@@ -51210,7 +50649,7 @@ test "SB-R: 리소스 항목은 첫 표본에 안 뜨고 두 번째 표본부터
     try std.testing.expectEqualStrings("  512 MB ·   10%", shown);
 
     // 상태바가 실제로 그 항목을 **그린다**(상태만 보면 렌더가 무시해도 통과한다).
-    try std.testing.expect(try statusBarHasText(allocator, session, "512 MB"));
+    try std.testing.expect(try test_support.statusBarHasText(allocator, session, "512 MB"));
 }
 
 // SB-R 적대적: **표시가 그대로면 다시 그리지 않는다.** 원값은 매초 흔들리지만 표시 문자열이 같으면
@@ -51327,13 +50766,13 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
 
     // 넓은 창: 예산이 넉넉해 온전히 뜬다.
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+    try std.testing.expect(try test_support.statusBarHasText(allocator, session, "512"));
 
     // 좁은 창: 예산(바 폭/3)이 16칸에 못 미쳐 말줄임될 상황 — 숫자가 보이면 안 된다.
     _ = try session.resize(260, 600, session.scale_milli);
     const bar_cols = session.backing_width_px / session.cell_width_px;
     try std.testing.expect(bar_cols / 3 < ru.text_cols); // 전제: 예산이 실제로 모자란다
-    try std.testing.expect(!(try statusBarHasText(allocator, session, "512")));
+    try std.testing.expect(!(try test_support.statusBarHasText(allocator, session, "512")));
 }
 
 // SB-R: **상태바가 안 보이면 재지 않는다.** 안 보이는 UI에 syscall을 쓰지 않는다 —
@@ -51365,34 +50804,6 @@ test "SB-R: 상태바가 숨겨져 있으면 표본을 재지 않고 표시도 �
     session.resource_poll_ticks = std.math.maxInt(u32) / 2; // 주기 도달을 강제
     session.pollResourceUsage();
     try std.testing.expect(session.resourceText() == null);
-}
-
-/// 상태바를 **실제 렌더 경로**(`collectStatusBarItems`)로 그려 `needle`의 코드포인트가 모두 셀에 있는지 본다.
-/// 상태만 단언하면 렌더가 그 상태를 무시해도 통과하므로(그리는 것이 계약이다) 그림을 본다.
-fn statusBarHasText(allocator: std.mem.Allocator, session: *AppSession, needle: []const u8) !bool {
-    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
-    defer {
-        for (collected.items) |*c| c.deinit(allocator);
-        collected.deinit(allocator);
-    }
-    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
-
-    var it = (std.unicode.Utf8View.init(needle) catch return false).iterator();
-    while (it.nextCodepoint()) |cp| {
-        if (cp == ' ') continue; // 공백은 셀에 안 실릴 수 있다(패딩)
-        var found = false;
-        outer: for (collected.items) |c| {
-            for (c.pane.owned_list.cells) |cell| {
-                if (cell.codepoint == cp) {
-                    found = true;
-                    break :outer;
-                }
-            }
-        }
-        if (!found) return false;
-    }
-    return true;
 }
 
 test "SB1: 브랜치 목록 요청 중 상태바가 사라지면 메뉴를 열지 않는다" {
@@ -52477,7 +51888,7 @@ test "Term lifecycle: Cmd+T adds, Cmd+Opt+]/[ cycle, Cmd+W cascades Term to work
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).panes.items.len);
     try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).active_term);
-    markAllTermsAtPrompt(session); // idle 셸 흉내 — 이후 ⌘W cascade가 확인 모달 없이 즉시 진행되게(닫힌 뒤 남는 Term도 유지)
+    test_support.markAllTermsAtPrompt(session); // idle 셸 흉내 — 이후 ⌘W cascade가 확인 모달 없이 즉시 진행되게(닫힌 뒤 남는 Term도 유지)
 
     // ⌘⌥] → 다음(wrap): 2→0. ⌘⌥[ → 이전(wrap): 0→2. (⌘[]는 이제 split 순환이라 Term 순환은 ⌘⌥[]로 옮겼다.)
     const cmd_opt: terminal.ModifierSet = .{ .command = true, .option = true };
@@ -53592,30 +53003,18 @@ test "pxToCell subtracts the active pane origin so clicks map to that pane's col
 // 양-창 정합·빈 source latch·outcome·trace 재지정을 헤드리스로 못박는다. 실 PTY라 macOS 게이트. 세션은 tick하지
 // 않으므로(surface 존재만 필요) controlled_smoke 셸의 exit/reap과 무관하게 결정론적이다.
 
-/// 살아 있는 워크스페이스(탭)를 하나 더 만든다 — cat으로 stdin을 물고 있어 (tick하면) reap이 안 닫는다(여기선 tick 안 함).
-fn addMoveTestWorkspace(session: *AppSession, title: []const u8) !void {
-    _ = try tab_ops.createTab(
-        session,
-        .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
-        .{ .cols = 20, .rows = 5 },
-        16,
-        title,
-        "sh",
-    );
-}
-
 test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSurface·live_pty·surface·스크롤백·재시작0) + 양창 정합 + outcome" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
     // src에 두 번째 워크스페이스를 만들어 그걸 옮긴다(첫 워크스페이스는 src에 남아 src가 안 닫히게).
-    try addMoveTestWorkspace(src, "moved-ws");
+    try test_support.addMoveTestWorkspace(src, "moved-ws");
     try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
 
     // 옮길 워크스페이스(idx 1)의 라이브 슬롯 스냅샷.
@@ -53685,14 +53084,14 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
 test "moveWorkspaceToSession aborts before detach when active preedit queue admission is OOM" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "preedit-oom");
+    try test_support.addMoveTestWorkspace(src, "preedit-oom");
     const moved = src.tabs.items[1].activeTerm().surface;
     const destination = dst.activeSurface();
     try std.testing.expectEqual(@as(usize, 1), src.app_window.active_tab);
@@ -53727,14 +53126,14 @@ test "moveWorkspaceToSession aborts before detach when active preedit queue admi
 test "moveWorkspaceToSession destination preedit OOM preserves both owners and retry admits each once" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "destination-preedit-oom");
+    try test_support.addMoveTestWorkspace(src, "destination-preedit-oom");
     const moved = src.tabs.items[1].activeTerm().surface;
     const destination = dst.activeSurface();
     src.imeMarked("한");
@@ -53785,14 +53184,14 @@ test "moveWorkspaceToSession destination preedit OOM preserves both owners and r
 test "moveWorkspaceToSession transfer preflight OOM occurs before either composition commit" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "transfer-preflight-oom");
+    try test_support.addMoveTestWorkspace(src, "transfer-preflight-oom");
     const moved = src.tabs.items[1].activeTerm().surface;
     const destination = dst.activeSurface();
     src.imeMarked("한");
@@ -53836,11 +53235,11 @@ test "moveWorkspaceToSession transfer preflight OOM occurs before either composi
 test "moveWorkspaceToSession same-session commits only when active owner changes" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try addMoveTestWorkspace(session, "same-session-background");
+    try test_support.addMoveTestWorkspace(session, "same-session-background");
     session.app_window.active_tab = 0;
     pane_ops.recomputeActivePaneRect(session);
     const old_active = session.activeSurface();
@@ -53866,10 +53265,10 @@ test "moveWorkspaceToSession same-session commits only when active owner changes
 test "mergeSessionInto commits source preedit and preserves destination active owner preedit" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -53898,14 +53297,14 @@ test "mergeSessionInto commits source preedit and preserves destination active o
 test "moveWorkspaceToSession transfers exact pending input remainder with destination offset zero" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "pending-input");
+    try test_support.addMoveTestWorkspace(src, "pending-input");
     const moved_id = src.tabs.items[1].activeTerm().surface.id;
     try std.testing.expect(src.queueInputBytes(moved_id, "sent:EXACT-REMAINDER", false));
     src.pending_pastes.getPtr(moved_id).?.offset = "sent:".len;
@@ -53922,10 +53321,10 @@ test "moveWorkspaceToSession transfers exact pending input remainder with destin
 test "mergeSessionInto transfers exact pending input remainder with destination offset zero" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -53950,15 +53349,15 @@ test "mergeSessionInto transfers exact pending input remainder with destination 
 test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 windowHasWebTerm 정합(tree-derived, 카운터 드리프트 없음)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
     // src에 두 번째 워크스페이스(createTab이 활성으로) — 그 활성 pane에 web Term을 만든다(new_web_tab).
-    try addMoveTestWorkspace(src, "web-ws");
+    try test_support.addMoveTestWorkspace(src, "web-ws");
     try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
     src.dispatchAppAction(.new_web_tab);
     try std.testing.expect(workspace_ops.windowHasWebTerm(src)); // 이동 전: src 활성 탭(1)에 web 신호 on
@@ -53983,15 +53382,15 @@ test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 windowH
 test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동↔닫힘 판정)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
     // src 워크스페이스 1(활성)의 활성 pane에 web Term을 만들고 그 surface_id를 잡는다.
-    try addMoveTestWorkspace(src, "web-ws");
+    try test_support.addMoveTestWorkspace(src, "web-ws");
     src.dispatchAppAction(.new_web_tab);
     const sid = pane_ops.activePane(src).activeTerm().surfaceId();
     // 이동 전: src에 live, dst엔 없음, 없는 id는 false(이동 판정 3케이스의 기준).
@@ -54011,10 +53410,10 @@ test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동�
 test "commitComposition/setFocused: 빈 세션(merge/move로 비워진 원본)서 패닉 없이 no-op (resignKey IME commit 크래시 방어)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -54038,10 +53437,10 @@ test "commitComposition/setFocused: 빈 세션(merge/move로 비워진 원본)�
 test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스페이스 이동 시 source_window_closed·ended_seen·0탭·deinit 무패닉" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -54065,14 +53464,14 @@ test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스
 test "M3d-2a-i moveWorkspaceToSession: membershipChangeEvents가 movedOut+movedIn 방출(§8A.3 어휘 재사용, from!=to)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "ws");
+    try test_support.addMoveTestWorkspace(src, "ws");
     const moved_id = src.tabs.items[1].activeTerm().surface.id;
 
     var buf: [8]u64 = undefined;
@@ -54092,15 +53491,15 @@ test "M3d-2a-i moveWorkspaceToSession: membershipChangeEvents가 movedOut+movedI
 test "M3d-2a-i mergeSessionInto: src 전체 이동 + source_window_closed(항상)·ended_seen + 모든 surface 무재시작 이동" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
     // src에 워크스페이스 2개(총 2), dst 1개.
-    try addMoveTestWorkspace(src, "ws2");
+    try test_support.addMoveTestWorkspace(src, "ws2");
     const id_a = src.tabs.items[0].activeTerm().surface.id;
     const id_b = src.tabs.items[1].activeTerm().surface.id;
 
@@ -54121,10 +53520,10 @@ test "M3d-2a-i mergeSessionInto: src 전체 이동 + source_window_closed(항상
 test "M3d-2a-i mergeSessionInto(self,self): no-op(무한루프 방지·src 안 닫힘)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const s = try initSmokeSessionSized(allocator);
+    const s = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(s);
     defer s.deinit();
-    try addMoveTestWorkspace(s, "ws2");
+    try test_support.addMoveTestWorkspace(s, "ws2");
     try std.testing.expectEqual(@as(usize, 2), s.tabs.items.len);
 
     var buf: [8]u64 = undefined;
@@ -54141,15 +53540,15 @@ test "M3d-2a-i adoptTab trace 재지정(SET): dst에 recorder 있으면 옮긴 s
     const allocator = std.testing.allocator;
     var aw: std.Io.Writer.Allocating = .init(allocator); // 먼저 선언 → 마지막 defer(모든 세션 deinit 뒤 해제)
     defer aw.deinit();
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
     dst.trace_recorder = app.trace_recorder.TraceRecorder.init(&aw.writer); // MARU_TRACE 흉내
 
-    try addMoveTestWorkspace(src, "ws"); // src(recorder 없음) → 이 링크는 null
+    try test_support.addMoveTestWorkspace(src, "ws"); // src(recorder 없음) → 이 링크는 null
     const moved_id = src.tabs.items[1].activeTerm().surface.id;
 
     var buf: [8]u64 = undefined;
@@ -54172,16 +53571,16 @@ test "M3d-2a-i adoptTab trace 재지정(CLEAR): dst에 recorder 없으면 옮긴
     const allocator = std.testing.allocator;
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
     // src에 recorder를 붙인 뒤 워크스페이스를 만들면 createTerm chokepoint가 그 surface 링크에 src recorder를 자동 부착.
     src.trace_recorder = app.trace_recorder.TraceRecorder.init(&aw.writer);
-    try addMoveTestWorkspace(src, "ws");
+    try test_support.addMoveTestWorkspace(src, "ws");
     const moved_id = src.tabs.items[1].activeTerm().surface.id;
 
     // 비-vacuous: 이동 전 링크가 recorder를 실제로 가졌는지 확인(안 그러면 clear가 무의미).
@@ -54208,10 +53607,10 @@ test "M3d-2a-i adoptTab trace 재지정(CLEAR): dst에 recorder 없으면 옮긴
 test "M3d-2a-i 결함[0] moveWorkspaceToSession으로 빈 source: tick()·close()가 0탭에서 패닉 없이 ended 보고" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -54239,14 +53638,14 @@ test "M3d-2a-i 결함[0] moveWorkspaceToSession으로 빈 source: tick()·close(
 test "M3d-2a-i 결함[0] mergeSessionInto로 빈 source: tick()·close()가 0탭에서 패닉 없이 처리" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "ws2"); // src 2탭
+    try test_support.addMoveTestWorkspace(src, "ws2"); // src 2탭
     var buf: [8]u64 = undefined;
     _ = try src.mergeSessionInto(dst, &buf); // src 전부 → dst, src 0탭
     try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
@@ -54262,14 +53661,14 @@ test "M3d-2a-i 결함[0] mergeSessionInto로 빈 source: tick()·close()가 0탭
 test "M3d-2a-i 결함[1] pinned 워크스페이스 이동은 UnsupportedMove — source·dst 불변" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "ws2"); // src 2탭
+    try test_support.addMoveTestWorkspace(src, "ws2"); // src 2탭
     src.tabs.items[0].pinned = true; // idx 0을 고정(유효 프리픽스) — 이 워크스페이스 이동은 범위 밖
     const moved_id = src.tabs.items[0].activeTerm().surface.id;
 
@@ -54285,14 +53684,14 @@ test "M3d-2a-i 결함[1] pinned 워크스페이스 이동은 UnsupportedMove —
 test "M3d-2a-i 결함[1] 그룹 마커·그룹 멤버 이동은 UnsupportedMove — source·dst 불변" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "ws2"); // src 2탭
+    try test_support.addMoveTestWorkspace(src, "ws2"); // src 2탭
     // idx 0을 그룹 시작 마커로 → idx 1은 그 그룹 멤버(위치 파생). group_start는 owned라 세션 allocator로 dupe(deinit이 free).
     src.tabs.items[0].group_start = try allocator.dupe(u8, "g");
 
@@ -54307,14 +53706,14 @@ test "M3d-2a-i 결함[1] 그룹 마커·그룹 멤버 이동은 UnsupportedMove 
 test "M3d-2a-i 결함[1] mergeSessionInto: src에 pinned/그룹 하나라도 있으면 UnsupportedMove — source·dst 불변" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    try addMoveTestWorkspace(src, "ws2"); // src 2탭(둘 다 이동 대상)
+    try test_support.addMoveTestWorkspace(src, "ws2"); // src 2탭(둘 다 이동 대상)
     src.tabs.items[1].pinned = true; // 하나만 범위 밖이어도 merge 전체 거부
 
     var buf: [8]u64 = undefined;
@@ -54329,18 +53728,18 @@ test "M3d-2a-i 결함[1] mergeSessionInto: src에 pinned/그룹 하나라도 있
 test "M3d-2a-i 결함[3] mergeSessionInto: dst 활성 워크스페이스 보존(마지막 병합 탭으로 발산 안 함)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
     // dst 2탭, 활성=idx 0(첫 워크스페이스). src 2탭.
-    try addMoveTestWorkspace(dst, "dst-ws2");
+    try test_support.addMoveTestWorkspace(dst, "dst-ws2");
     dst.app_window.active_tab = 0;
     const dst_active_tab = dst.tabs.items[0]; // dst가 보던 *Tab
-    try addMoveTestWorkspace(src, "src-ws2");
+    try test_support.addMoveTestWorkspace(src, "src-ws2");
 
     var buf: [8]u64 = undefined;
     _ = try src.mergeSessionInto(dst, &buf);
@@ -54352,7 +53751,7 @@ test "M3d-2a-i 결함[3] mergeSessionInto: dst 활성 워크스페이스 보존(
 }
 
 test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    // 실 세션 하네스(test_support.initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -54367,7 +53766,7 @@ test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
     defer allocator.free(doc_path);
 
     // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
@@ -54387,7 +53786,7 @@ test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
 }
 
 test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    // 실 세션 하네스(test_support.initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -54403,7 +53802,7 @@ test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected
     defer allocator.free(doc_path);
 
     // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
@@ -54439,7 +53838,7 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
     defer allocator.free(doc_path);
 
     // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
@@ -54455,7 +53854,7 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
 }
 
 test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    // 실 세션 하네스(test_support.initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -54480,7 +53879,7 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     defer allocator.free(html_path);
 
     // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
@@ -54496,7 +53895,7 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
 }
 
 test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    // 실 세션 하네스(test_support.initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -54515,7 +53914,7 @@ test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
     defer allocator.free(doc_path);
 
     // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
@@ -54531,7 +53930,7 @@ test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
 }
 
 test "FP6 file panel write atomically replaces only the pinned markdown and preserves dirty until shell ack" {
-    // 실 세션 하네스(initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
+    // 실 세션 하네스(test_support.initSmokeSessionSized)는 PTY·macOS 경로를 쓴다 — 비-macOS에서는 건너뛴다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -54550,7 +53949,7 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     defer allocator.free(link_path);
 
     // FP16: 파일 entry가 Term 소유라 도크만 초기화한 최소 하네스로는 만들 수 없다 — 실 세션이 필요하다.
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     session.io = io;
@@ -54600,7 +53999,7 @@ test "file panel save rejects same-inode external content changed after hydratio
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try tmp.dir.realPathFile(io, "doc.md", &path_buf)];
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
@@ -54620,7 +54019,7 @@ test "file panel save rejects same-inode external content changed after hydratio
 test "file panel document epoch rejects stale reload reports and latches dirty crash recovery" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/editor-epoch.md", .markdown);
@@ -54656,7 +54055,7 @@ test "file panel document epoch rejects stale reload reports and latches dirty c
 test "file panel first document pending is not recovery and begin is document-id idempotent" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/first-document.md", .markdown);
@@ -54680,7 +54079,7 @@ test "file panel first document pending is not recovery and begin is document-id
 test "file panel editor epoch exhaustion fails closed before accepting a document" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/exhausted-editor-epoch.md", .markdown);
@@ -54709,7 +54108,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
 test "file panel document begin changes pending close only for an accepted replacement" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/begin-close-identity.md", .markdown);
@@ -54746,7 +54145,7 @@ test "file panel document begin changes pending close only for an accepted repla
 test "file panel termination invalidates current document and latches unacked edits" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/terminated-document.md", .markdown);
@@ -54814,7 +54213,7 @@ test "file panel stale document read cannot replace current disk hash baseline" 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try tmp.dir.realPathFile(io, "doc.md", &path_buf)];
 
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
@@ -54843,7 +54242,7 @@ test "file panel stale document read cannot replace current disk hash baseline" 
 test "file panel new surface termination before begin does not consume old clean document identity" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/recreated-surface.md", .markdown);
@@ -54982,7 +54381,7 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
 test "FP6 file panel header toggles markdown mode and drains one action" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp6-mode.md", .markdown);
@@ -55011,7 +54410,7 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
 test "file panel close syncs dirty state then handles clean discard save failure and conflict" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-clean.md", .markdown);
@@ -55093,7 +54492,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
 test "file panel read-mode dirty pending and conflict close through the snapshot coordinator" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-read-dirty.md", .markdown);
@@ -55138,7 +54537,7 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
 test "file panel exit protection gates window session quit and automatic terminal exit" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/exit-protected.md", .markdown);
@@ -55175,7 +54574,7 @@ test "file panel exit protection gates window session quit and automatic termina
 test "file panel close pins request identity and a superseding confirm unlocks without stale close" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-request-identity.md", .markdown);
@@ -55254,7 +54653,7 @@ test "file panel close pins request identity and a superseding confirm unlocks w
 test "file panel dirty close alternate discards only the pinned tab" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-background-a.md", .markdown);
@@ -55287,7 +54686,7 @@ test "file panel dirty close alternate discards only the pinned tab" {
 test "file panel save action identity mismatch aborts and unlocks instead of sticking" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/save-drain-stale.md", .markdown);
@@ -55313,7 +54712,7 @@ test "file panel save action identity mismatch aborts and unlocks instead of sti
 test "dock replacement clears file close hover focus and one-shot transients" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/replace-pending.md", .markdown);
@@ -55341,7 +54740,7 @@ test "dock replacement clears file close hover focus and one-shot transients" {
 test "file panel focus supersedes a queued workspace first-responder action" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/focus-successor.md", .markdown);
@@ -55403,10 +54802,10 @@ test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface
 test "FP6 merge transfers dirty file state and live surface ownership before source teardown" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -55479,10 +54878,10 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
 test "FP6 merge into empty explorer adopts source explorer authority and presentation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/adopt-root.md", .markdown);
@@ -55502,10 +54901,10 @@ test "FP6 merge into empty explorer adopts source explorer authority and present
 test "FP6 merge with no destination file tabs preserves configured destination explorer root" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/source-only.md", .markdown);
@@ -55524,10 +54923,10 @@ test "FP6 merge with no destination file tabs preserves configured destination e
 test "FP6 merge preserves source project-root authority in an inferred destination" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -55552,10 +54951,10 @@ test "FP6 merge preserves source project-root authority in an inferred destinati
 test "file panel close transition rejects window merge before model mutation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/merge-close-lock.md", .markdown);
@@ -55578,10 +54977,10 @@ test "file panel close transition rejects window merge before model mutation" {
 test "FP8 merge carries every source 파일 탭과 live surface를 destination으로 옮긴다faces" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
     _ = try pane_ops.openFileTermInActivePane(src, "/tmp/fp8-merge-a.md", .markdown);
@@ -55609,10 +55008,10 @@ test "FP8 merge carries every source 파일 탭과 live surface를 destination�
 test "FP6 merge rejects duplicate dirty file panels without mutating either dock" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -55641,10 +55040,10 @@ test "FP6 merge rejects duplicate dirty file panels without mutating either dock
 test "FP9 merge remaps destination focus one-shots when dirty source replaces clean duplicate" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const src = try initSmokeSessionSized(allocator);
+    const src = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(src);
     defer src.deinit();
-    const dst = try initSmokeSessionSized(allocator);
+    const dst = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(dst);
     defer dst.deinit();
 
@@ -55725,28 +55124,6 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     try std.testing.expect(dst.focusedDockSurface() == newer_surface);
 }
 
-// host-backed(원격) Term의 Cmd+hover 회귀 가드. 이전에는 hoverCursor가 `activeSurface().core`를 직접 분류했는데,
-// 원격 surface의 그 core는 **빈 placeholder**라(화면은 host가 소유) 어떤 링크도 잡히지 않았다 — 밑줄도 링크 커서도
-// 무동작. 이제 host가 해석해 실어 준 RenderSnapshot.links를 조회한다(docs/link-detection.md §원격(host-backed) 세션).
-// 이 테스트는 그 조회 경로와 client 정책 필터(`input.link-detection`)를 함께 고정한다.
-const FakeLinkScreen = struct {
-    snap: terminal.RenderSnapshot,
-
-    fn render(ctx: *anyopaque) terminal.RenderSnapshot {
-        const self: *FakeLinkScreen = @ptrCast(@alignCast(ctx));
-        return self.snap;
-    }
-    // 이 fake는 host 연결 없이 화면 소스 계약만 흉내 낸다 — 단일 스레드 테스트라 락은 no-op으로 충분하다.
-    fn lockNoop(_: *anyopaque, _: std.Io) void {}
-    fn unlockNoop(_: *anyopaque, _: std.Io) void {}
-
-    const vtable: maru.session.surface.ScreenSource.VTable = .{
-        .render_snapshot = render,
-        .lock = lockNoop,
-        .unlock = unlockNoop,
-    };
-};
-
 test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가 산다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -55769,9 +55146,9 @@ test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가
         .{ .span = .{ .start = .{ .row = 1, .col = 0 }, .end = .{ .row = 1, .col = 9 }, .block = false }, .kind = .file_path, .scope = .bare_relative },
         .{ .span = .{ .start = .{ .row = 2, .col = 0 }, .end = .{ .row = 2, .col = 3 }, .block = false }, .kind = .url, .scope = .osc8 },
     };
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null; // Surface.deinit은 remote를 안 건드린다(소유는 주입한 쪽).
 
     const rect = session.active_pane_rect;
@@ -55823,9 +55200,9 @@ test "host-backed hover: client가 link-detection 프리셋으로 host 목록을
         .{ .span = .{ .start = .{ .row = 1, .col = 0 }, .end = .{ .row = 1, .col = 9 }, .block = false }, .kind = .file_path, .scope = .bare_relative },
         .{ .span = .{ .start = .{ .row = 2, .col = 0 }, .end = .{ .row = 2, .col = 3 }, .block = false }, .kind = .url, .scope = .osc8 },
     };
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
 
     const rect = session.active_pane_rect;
@@ -55933,9 +55310,9 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
 
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
@@ -55984,9 +55361,9 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 10 } } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 10 } } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
 
     // 스크롤백 없음 → thumb 없음(스크롤바 미표시).
@@ -56026,9 +55403,9 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     });
     defer session.deinit();
 
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
@@ -56081,9 +55458,9 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     });
     defer session.deinit();
 
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
@@ -56128,9 +55505,9 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     });
     defer session.deinit();
 
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
@@ -56282,7 +55659,7 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
 test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저는 자리를 비운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56341,7 +55718,7 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
 test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지 않고 종료 latch만 건다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56368,7 +55745,7 @@ test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지
 test "FP16 닫기: 다른 파일이 종료를 막으면 마지막 Term close는 아무것도 안 바꾸고 거부한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56390,7 +55767,7 @@ test "FP16 닫기: 다른 파일이 종료를 막으면 마지막 Term close는 
 test "FP16 닫기: 파괴 전 스냅샷은 한 번만 요청하고, 답이 없어도 두 번째 시도를 막지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56436,9 +55813,9 @@ test "host-backed find: 증분 검색과 네비가 둘 다 host 스크롤을 요
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
 
-    var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
+    var fake = test_support.FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
     const surface = session.activeSurface();
-    surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
+    surface.remote = .{ .ctx = &fake, .vtable = &test_support.FakeLinkScreen.vtable };
     defer surface.remote = null;
 
     session.dispatchAppAction(.toggle_find);
@@ -56520,7 +55897,7 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
 test "captureWorkspaceTab: diff Term은 index를 차지하지 않는다(복원 fail-close 방지)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -56549,7 +55926,7 @@ test "captureWorkspaceTab: diff Term은 index를 차지하지 않는다(복원 f
 test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에 kind가 든다)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56572,7 +55949,7 @@ test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에
 test "소스 컨트롤: 저장소의 .git을 감시 목록에 올리고 그 이벤트로 목록을 다시 읽는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56612,7 +55989,7 @@ test "소스 컨트롤: 저장소의 .git을 감시 목록에 올리고 그 이�
 test "dock list viewport ends exactly where the status bar begins" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     file_panel_ops.activateFilePanelDockControl(session);
@@ -56633,7 +56010,7 @@ test "dock list viewport ends exactly where the status bar begins" {
 test "scm list scrolls in pixels under a fixed header and gets its own scrollbar" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -56691,7 +56068,7 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
         const window = session.scmDrawWindow();
         try std.testing.expectEqual(@as(usize, 0), window.start);
         try std.testing.expectEqual(half, window.origin_shift_px);
-        try expectWindowCoversViewport(window.count, window.origin_shift_px, cell_h, extent.viewport_h_px);
+        try test_support.expectWindowCoversViewport(window.count, window.origin_shift_px, cell_h, extent.viewport_h_px);
         // 뷰포트 첫 픽셀은 아직 0번 행이다(반쯤 잘린 채로 보인다).
         const first = session.scmRowAt(x, @floatFromInt(rect.y + cell_h), &rows_buf, &scratch);
         try std.testing.expect(first != null);
@@ -56774,7 +56151,7 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
 test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -56846,7 +56223,7 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
 test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 열린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -56875,7 +56252,7 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
 test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
+    const session = try test_support.initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -57337,7 +56714,7 @@ fn openAgentSessionsDockForRouting(session: *AppSession, side: dock_panel.Side) 
     pane_ops.recomputeActivePaneRect(session);
 }
 
-fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side) !*AppSession {
+pub fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side) !*AppSession {
     const session = try allocator.create(AppSession);
     errdefer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -57352,15 +56729,6 @@ fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side)
     _ = try session.resize(1600, 900, 1000);
     openAgentSessionsDockForRouting(session, side);
     return session;
-}
-
-/// 도크 content 중앙 — 진행 중 gesture가 지나가더라도 도크로 새면 안 되는 좌표.
-fn dockContentCenter(session: *AppSession) struct { x: f64, y: f64 } {
-    const content = dock_ops.dockGeometry(session).tree_content;
-    return .{
-        .x = @floatFromInt(content.x + content.w / 2),
-        .y = @floatFromInt(content.y + content.h / 2),
-    };
 }
 
 test "divider capture는 split이 사라지면 carry verdict가 취소한다" {
@@ -57566,7 +56934,7 @@ test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추
 
     // 도크 content 위로 이동 — clamp가 아니라 이벤트 미도달로 얼어붙던 자리다. divider bounds가 도크
     // 왼쪽에서 끝나므로 ratio는 상한으로 가야 하고, 직전 값 그대로면 도크가 move를 가로챈 것이다.
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
     _ = try session.tick();
     try std.testing.expect(split.ratio != ratio_outside);
@@ -57597,7 +56965,7 @@ test "라이브 Term 탭 드래그는 도크 위를 지나도 좌표를 계속 �
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
 
     // drag(2)는 owner의 마지막 좌표를 갱신한다. 도크가 가로채면 그 값이 down 좌표에 머문다.
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
     try std.testing.expectEqual(dock_center.x, session.pointer_gesture_owner.terminal_tab.x);
@@ -57625,7 +56993,7 @@ test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받�
     session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(session.pointerGestureIs(.pane));
 
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(session.pointerGestureIs(.pane));
     try std.testing.expectEqual(dock_center.x, session.pointer_gesture_owner.pane.x);
@@ -57640,7 +57008,7 @@ test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받�
 /// 픽스처 그룹 한 건. `entries`에 `.group`만 넣고 이 배열을 비워 두면 `agent_dock.buildAgentSessionDockItems`가
 /// 그 항목을 건너뛰어 스크롤 좌표(그룹을 예약)와 발행 tree(그리지 않음)의 index가 어긋난다. 제품
 /// 경로는 둘을 같은 재투영에서 함께 만들지만, 테스트가 한쪽만 채우면 없는 결함을 만들어 낸다.
-fn appendFixtureArchiveGroup(session: *AppSession, allocator: std.mem.Allocator, count: usize) !void {
+pub fn appendFixtureArchiveGroup(session: *AppSession, allocator: std.mem.Allocator, count: usize) !void {
     const key = try allocator.dupe(u8, "/workspace/fixture");
     errdefer allocator.free(key);
     try session.agent_session_archive_projection.groups.append(allocator, .{
@@ -57651,15 +57019,10 @@ fn appendFixtureArchiveGroup(session: *AppSession, allocator: std.mem.Allocator,
     });
 }
 
-/// 픽스처 archive record 한 건 — 문자열은 session이 소유(deinit이 해제)한다.
-fn appendFixtureArchiveRecord(session: *AppSession, allocator: std.mem.Allocator) !void {
-    try appendFixtureArchiveRecordN(session, allocator, 0);
-}
-
 /// 서로 다른 신원의 픽스처 record. 도크의 펼침은 `{provider, session_id, device, inode}` 신원으로
 /// 매칭되므로, 같은 record를 두 항목이 가리키면 발행 tree가 **둘 다** 펼쳐 그린다. 실제 재투영은
 /// record 하나를 한 번만 내보내니, 신원을 index로 갈라 두어야 테스트가 없는 상태를 만들지 않는다.
-fn appendFixtureArchiveRecordN(session: *AppSession, allocator: std.mem.Allocator, index: usize) !void {
+pub fn appendFixtureArchiveRecordN(session: *AppSession, allocator: std.mem.Allocator, index: usize) !void {
     try session.agent_session_archive_records.append(allocator, .{
         .parsed = .{
             .provider = .claude,
@@ -57679,53 +57042,14 @@ fn appendFixtureArchiveRecordN(session: *AppSession, allocator: std.mem.Allocato
     });
 }
 
-// 도크 휠 경로에는 판정자가 하나도 없었다. 방향을 뒤집어도, 포인터가 터미널 위인데 도크가 먹어도,
-// 분수 residue를 소비하고도 안 빼서 같은 픽셀을 반복해도 전체 스위트가 초록이었다(이름에 "wheel"이
-// 든 기존 테스트는 파일 트리 것이다). §2가 residue를 ScrollArea 소유로 적었으므로 SV1c가 이 코드를
-// 옮기는데, 판정자 없이 옮기면 옮기다 깨져도 아무도 모른다.
-fn dockWheelFixture(allocator: std.mem.Allocator) !*AppSession {
-    const session = try initDockedRoutingSession(allocator, .right);
-    errdefer allocator.destroy(session);
-    errdefer session.deinit();
-    const card_count = 20;
-    for (0..card_count) |index| try appendFixtureArchiveRecordN(session, allocator, index);
-    try appendFixtureArchiveGroup(session, allocator, card_count);
-    try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
-    for (0..card_count) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
-    return session;
-}
-
-/// 실제 발행 경로로 도크 tree를 publish해 스크롤바 기하가 생기게 한다. 기존 드래그 테스트는
-/// `agent_session_dock_scroll_drag`를 직접 세팅해 `agent_dock.beginAgentSessionDockScrollDrag`를 건너뛰었고,
-/// 그래서 down 시점의 계약(track 안인가·thumb인가·잡은 지점·점프 뒤 기하)이 전부 무판정이었다.
-fn publishDockFrameForDrag(session: *AppSession, allocator: std.mem.Allocator) !void {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const projection = agent_dock.agentSessionDockScrollProjection(session);
-    const items = try agent_dock.buildAgentSessionDockItems(session, arena, projection);
-    const sizes = chrome.components.session_dock.build.bufferSizes(items);
-    const content = dock_ops.dockGeometry(session).tree_content;
-    const frame = try chrome.components.session_dock.build.build(agent_dock.agentSessionDockProps(session, content, projection, items), .{
-        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
-        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
-        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
-        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
-        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
-        .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions),
-    });
-    agent_dock.publishAgentSessionDockFrame(session, frame, session.agent_session_dock_snapshot_generation);
-}
-
 test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지한 채 시작한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try dockWheelFixture(allocator);
+    const session = try test_support.dockWheelFixture(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try publishDockFrameForDrag(session, allocator);
+    try test_support.publishDockFrameForDrag(session, allocator);
     const bar = agent_dock.agentSessionDockScrollbarGeometry(session) orelse return error.TestUnexpectedResult;
     try std.testing.expect(bar.max_offset_px > 0);
     try std.testing.expect(bar.thumb_h < bar.track_h);
@@ -57766,7 +57090,7 @@ test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지�
 test "도크 키보드 스크롤은 한 항목을 남기고, 끝으로 가고, 휠 잔여를 비운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try dockWheelFixture(allocator);
+    const session = try test_support.dockWheelFixture(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -57805,7 +57129,7 @@ test "도크 키보드 스크롤은 한 항목을 남기고, 끝으로 가고, �
 test "재투영은 스냅샷 세대를 올려 진행 중인 스크롤바 드래그를 놓게 한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try dockWheelFixture(allocator);
+    const session = try test_support.dockWheelFixture(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -57826,11 +57150,11 @@ test "재투영은 스냅샷 세대를 올려 진행 중인 스크롤바 드래�
 test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를 잃지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try dockWheelFixture(allocator);
+    const session = try test_support.dockWheelFixture(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try publishDockFrameForDrag(session, allocator);
+    try test_support.publishDockFrameForDrag(session, allocator);
     const bar = agent_dock.agentSessionDockScrollbarGeometry(session) orelse return error.TestUnexpectedResult;
     const payload = chrome.components.session_dock.build.scroll_drag_payload;
 
@@ -57878,7 +57202,7 @@ test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를
 test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상한 안에서 움직인다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try dockWheelFixture(allocator);
+    const session = try test_support.dockWheelFixture(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -57920,7 +57244,7 @@ test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상�
 test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면 버려진다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try dockWheelFixture(allocator);
+    const session = try test_support.dockWheelFixture(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
 
@@ -57991,9 +57315,9 @@ test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 �
 /// 스크롤 좌표가 예약한 높이와 **컴포넌트가 실제로 그린 rect**를 대조한다. 앞의 테스트는 host가
 /// metrics에서 값을 옳게 옮겼는지만 보는데, 그것만으로는 두 출처가 같은 답을 낸다는 보장이 없다 —
 /// 스크롤이 카드 하나를 72px로 예약해도 발행 tree가 80px로 그리면 목록 끝에서 어긋난다.
-const DockTreeItemRect = struct { y: f32, height: u32 };
+pub const DockTreeItemRect = struct { y: f32, height: u32 };
 
-fn dockTreeItemRects(
+pub fn dockTreeItemRects(
     session: *AppSession,
     allocator: std.mem.Allocator,
     projection: chrome.ui.scroll_area.Projection,
@@ -58074,7 +57398,7 @@ test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 �
     defer rects.deinit(allocator);
 
     // 맨 위에서는 첫 항목이 scroll-area 꼭대기에 정확히 붙는다.
-    try expectDockTreeMatchesScroll(session, allocator, &rects);
+    try test_support.expectDockTreeMatchesScroll(session, allocator, &rects);
     try std.testing.expectEqual(@as(f32, 0), rects.items[0].y);
 
     // 목록을 반쯤 스크롤해 첫 항목이 **잘린** 상태를 만든다. 이때 그 항목은 음수 y에서 시작해야
@@ -58085,7 +57409,7 @@ test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 �
     {
         const projection = agent_dock.agentSessionDockScrollProjection(session);
         try std.testing.expect(projection.first_origin_y_px < 0);
-        try expectDockTreeMatchesScroll(session, allocator, &rects);
+        try test_support.expectDockTreeMatchesScroll(session, allocator, &rects);
         try std.testing.expectEqual(@as(f32, @floatFromInt(projection.first_origin_y_px)), rects.items[0].y);
     }
     session.agent_session_archive_scroll.reset();
@@ -58097,36 +57421,13 @@ test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 �
     {
         const items = agent_dock.agentSessionDockScrollItems(session);
         try std.testing.expect(items.expanded_index != null);
-        try expectDockTreeMatchesScroll(session, allocator, &rects);
+        try test_support.expectDockTreeMatchesScroll(session, allocator, &rects);
         // 펼친 항목은 실제로 다른 항목보다 크다 — 전부 같은 높이면 위 비교가 통과해도 무의미하다.
         const expanded_offset = items.expanded_index.? - agent_dock.agentSessionDockScrollProjection(session).first_index;
         for (rects.items, 0..) |rect, offset| {
             if (offset == expanded_offset) continue;
             try std.testing.expect(rect.height < rects.items[expanded_offset].height);
         }
-    }
-}
-
-/// 스크롤 좌표계가 예약한 것과 발행 tree가 그린 것을 항목마다 대조한다. 높이뿐 아니라 **시작 y**도
-/// 본다 — 높이만 보면 첫 항목의 음수 원점(부분적으로 보이는 카드)이 사라져도 통과한다.
-fn expectDockTreeMatchesScroll(
-    session: *AppSession,
-    allocator: std.mem.Allocator,
-    rects: *std.ArrayList(DockTreeItemRect),
-) !void {
-    const projection = agent_dock.agentSessionDockScrollProjection(session);
-    const items = agent_dock.agentSessionDockScrollItems(session);
-    try dockTreeItemRects(session, allocator, projection, rects);
-    try std.testing.expect(rects.items.len > 0);
-
-    var expected_y: f32 = @floatFromInt(projection.first_origin_y_px);
-    for (rects.items, 0..) |rect, offset| {
-        const reserved = items.heightPx(projection.first_index + offset);
-        try std.testing.expectEqual(reserved, rect.height);
-        // 예약 높이를 누적한 자리에 그 항목이 실제로 놓여야 한다. 하나라도 어긋나면 그 아래 전부가
-        // 밀린다 — 카드가 겹치거나 목록 끝에 빈 띠가 생기는 것이 그 결과다.
-        try std.testing.expectEqual(expected_y, rect.y);
-        expected_y += @floatFromInt(reserved + items.gap_px);
     }
 }
 
@@ -58170,7 +57471,7 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try appendFixtureArchiveRecord(session, allocator);
+    try test_support.appendFixtureArchiveRecord(session, allocator);
     session.agent_session_archive_selected = 0;
     // 카드 클릭이 없었으므로 도크는 키보드를 갖고 있지 않다.
     try std.testing.expect(!agent_dock.agentSessionDockOwnsKeys(session));
@@ -58182,7 +57483,7 @@ test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니�
     try std.testing.expect(!session.agent_session_archive_search_active);
 
     // 대조군: **제품 경로**로 도크 안을 누르면 같은 Enter가 카드를 연다(게이트가 vacuous하지 않다).
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(1, dock_center.x, dock_center.y, 0, 0);
     session.mouse(3, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(agent_dock.agentSessionDockOwnsKeys(session));
@@ -58267,9 +57568,9 @@ test "도크 ⌘ 단축키는 실제로 실행할 때만 키를 소비한다" {
 
     // 대조군: ready expansion이 있으면 도크가 먼저 가져간다(문서화된 `⌘L` = 로그 보기). 이때는 사용자
     // 바인딩이 실행되지 않아야 한다 — 게이트가 vacuous하지 않다는 뜻이다.
-    try appendFixtureArchiveRecord(session, allocator);
+    try test_support.appendFixtureArchiveRecord(session, allocator);
     session.agent_session_archive_selected = 0;
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(1, dock_center.x, dock_center.y, 0, 0);
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.agent_session_inline_detail != null);
@@ -58298,7 +57599,7 @@ test "라이브 사이드바 카드 드래그는 도크 위를 지나도 소유�
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     const origin = session.pointer_gesture_owner.sidebar_tab.index;
 
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
     try std.testing.expectEqual(origin, session.pointer_gesture_owner.sidebar_tab.index);
@@ -58336,7 +57637,7 @@ test "라이브 스크롤바 thumb 드래그는 도크 위를 지나도 소유�
     // 위를 덮어 down 자체가 안 되고, 하단 도크는 content가 트랙의 세로 범위 밖이라 clamp 결과가 down이 만든
     // 값과 같아질 수 있다. 소유권 유지와 **up 해제**만으로 도크 가로채기를 고정한다 — 가로채이면 up이 도크로
     // 가서 owner가 armed로 남는다.
-    const dock_center = dockContentCenter(session);
+    const dock_center = test_support.dockContentCenter(session);
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(session.pointerGestureIs(.scrollbar));
     try std.testing.expect(session.agent_session_dock_interaction.capture == null);
@@ -58444,57 +57745,6 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
 // **host override 기대값**을 더해, 새 값을 채울 때 "이 소비자는 first responder를 요구하는가"를 반드시
 // 답하게 한다. 반대 방향(모달을 `anyModalOverlayOpen`에만 더하는 경우)은 이 가드의 범위 밖이다.
 
-/// `InputFocus` 값이 단독으로 활성일 때 host override(`terminalOwnsInput`)가 참이어야 하는가.
-fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
-    return switch (focus) {
-        // 터미널이 키를 갖는 기본 상태.
-        .terminal => false,
-        // 지나가는 토스트는 텍스트/IME를 받지 않으므로 웹 포커스를 뺏지 않는다(14차 리뷰 [3]).
-        .notice => false,
-        .confirm,
-        .settings,
-        .rename,
-        .sidebar_search,
-        .agent_session_search,
-        .find,
-        .palette,
-        .addr_edit,
-        .file_tree,
-        .dock_pending,
-        => true,
-    };
-}
-
-/// 그 focus 하나만 활성인 상태를 만든다. 만들 수 없으면 false(사유를 여기 남긴다).
-fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
-    switch (focus) {
-        .terminal => {},
-        .confirm => session.chrome_host.confirm.open = true,
-        .notice => session.chrome_host.notice.open = true,
-        .settings => session.chrome_host.settings.open = true,
-        .find => session.chrome_host.find.open = true,
-        .palette => session.chrome_host.palette.open = true,
-        .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
-        .sidebar_search => session.sidebar_search_active = true,
-        .addr_edit => session.addr_edit = 1,
-        .file_tree => session.focus_owner = .{ .file_tree = .{ .restore_surface = null } },
-        .agent_session_search => {
-            session.dock.presented = true;
-            session.dock.collapsed = false;
-            session.dock.side = .right;
-            session.agent_session_archive_initialized = false;
-            dock_ops.setDockView(session, .agent_sessions);
-            session.agent_session_archive_initialized = true;
-            session.agent_session_archive_search_active = true;
-        },
-        // pending dock focus는 live entry + async epoch가 맞아야 참이 된다(`pendingDockEntryOwnsInput`).
-        // 그 조합은 파일 패널 fixture가 소유하므로 여기서는 만들지 않는다 — 기대표에는 남아 있어
-        // `InputFocus`가 늘어날 때의 컴파일 강제는 그대로다.
-        .dock_pending => return false,
-    }
-    return true;
-}
-
 test "InputFocus의 모든 값이 terminalOwnsInput 기대와 일치한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -58513,9 +57763,9 @@ test "InputFocus의 모든 값이 terminalOwnsInput 기대와 일치한다" {
         session.window_padding_px = .{};
         _ = try session.resize(1600, 900, 1000);
 
-        if (activateSoleFocus(session, focus)) {
+        if (test_support.activateSoleFocus(session, focus)) {
             try std.testing.expectEqual(focus, session.inputFocus());
-            try std.testing.expectEqual(expectedTerminalResponder(focus), session.terminalOwnsInput());
+            try std.testing.expectEqual(test_support.expectedTerminalResponder(focus), session.terminalOwnsInput());
         }
         _ = try session.tick();
     }
@@ -58561,7 +57811,7 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
         try std.testing.expect(session.rename != null);
         // 우선순위는 notice지만(그 값 단독이면 override 불필요),
         try std.testing.expectEqual(AppSession.InputFocus.notice, session.inputFocus());
-        try std.testing.expect(!expectedTerminalResponder(session.inputFocus()));
+        try std.testing.expect(!test_support.expectedTerminalResponder(session.inputFocus()));
         // 합집합이라 rename 때문에 참이어야 한다.
         try std.testing.expect(session.terminalOwnsInput());
         _ = try session.tick();

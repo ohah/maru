@@ -315,6 +315,11 @@ pub const RemoteTermBackend = struct {
                     // 그 외(연결 끊김·codec DecodeError 등)는 세션 종료로 본다(로컬 read_error 계약과 동형). @errorName은 정적
                     // 문자열이라 DrainSummary.ended가 소비될 때까지 산다(runtime_pump.Termination 계약).
                     else => {
+                        if (builtin.is_test)
+                            std.debug.print(
+                                "remote term backend test pump failed: error={s}\n",
+                                .{@errorName(err)},
+                            );
                         // remote pump는 local RuntimeEventPump.applyQueuedEvent를 거치지 않으므로 여기서 surface를 직접
                         // latch해야 SurfaceRuntime 입력 gate가 죽은 PtyIo로 재전송하지 않는다. runtime별 one-shot으로
                         // 올려 shared connection 실패가 매 frame 같은 read_error를 재발행하는 것도 막는다.

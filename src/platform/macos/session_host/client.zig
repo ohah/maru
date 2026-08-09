@@ -54,6 +54,11 @@ const FdStatIdentity = struct {
     mode_type: u32,
 };
 
+const FdSocketIdentity = struct {
+    stat: FdStatIdentity,
+    socket_type: c_int,
+};
+
 /// The normal product target uses Darwin `fstat`. The session-host module is also compiled and
 /// exercised by Linux CI, where Zig 0.16 deliberately exposes `std.c.fstat` as `void`; use statx
 /// there without weakening the fd-reuse identity evidence sealed by ended purge.
@@ -63,6 +68,7 @@ fn fdStatIdentity(fd: c.fd_t) ?FdStatIdentity {
         const linux = std.os.linux;
         var statx = std.mem.zeroes(linux.Statx);
         if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX.BASIC_STATS, &statx)) != .SUCCESS or
+            !statx.mask.TYPE or !statx.mask.INO or
             !linux.S.ISSOCK(statx.mode))
             return null;
         return .{
@@ -81,6 +87,39 @@ fn fdStatIdentity(fd: c.fd_t) ?FdStatIdentity {
         .inode = @intCast(stat.ino),
         .mode_type = @intCast(stat.mode & posix.S.IFMT),
     };
+}
+
+fn fdSocketIdentity(fd: c.fd_t) ?FdSocketIdentity {
+    const stat = fdStatIdentity(fd) orelse return null;
+    var socket_type: c_int = 0;
+    var socket_type_len: c.socklen_t = @sizeOf(c_int);
+    if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.TYPE, &socket_type, &socket_type_len) != 0 or
+        socket_type_len != @sizeOf(c_int) or socket_type != posix.SOCK.STREAM)
+        return null;
+    return .{ .stat = stat, .socket_type = socket_type };
+}
+
+test "ended purge fd identity accepts one stable stream socket and rejects non-sockets" {
+    var sockets: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets),
+    );
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+
+    const first = fdSocketIdentity(sockets[0]) orelse return error.TestUnexpectedResult;
+    const second = fdSocketIdentity(sockets[0]) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualDeep(first, second);
+    try std.testing.expect(posix.S.ISSOCK(first.stat.mode_type));
+    try std.testing.expectEqual(@as(c_int, posix.SOCK.STREAM), first.socket_type);
+
+    var pipe_fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&pipe_fds));
+    defer _ = c.close(pipe_fds[0]);
+    defer _ = c.close(pipe_fds[1]);
+    try std.testing.expect(fdSocketIdentity(pipe_fds[0]) == null);
+    try std.testing.expect(fdSocketIdentity(-1) == null);
 }
 
 fn preparedRpcFromStorage(storage: *PreparedBlockingRpcStorage) *PreparedBlockingRpc {
@@ -10698,6 +10737,7 @@ pub const Client = struct {
         inventory: *const PreparedEndedPurgeInventory,
         prepared: *PreparedEndedPurgeCommit,
         include_survivor_seal: bool,
+        observed_socket: ?FdSocketIdentity,
     ) EndedPurgeCommitError!void {
         if (operation_generation == 0 or prepared.self_addr != 0 or
             prepared.client_addr != 0 or prepared.scratch_addr != 0 or
@@ -10707,18 +10747,7 @@ pub const Client = struct {
             prepared.lifecycle != .pristine)
             return error.InvalidState;
 
-        const fd_stat = fdStatIdentity(self.fd) orelse return error.Corrupt;
-        var socket_type: c_int = 0;
-        var socket_type_len: c.socklen_t = @sizeOf(c_int);
-        if (c.getsockopt(
-            self.fd,
-            c.SOL.SOCKET,
-            c.SO.TYPE,
-            &socket_type,
-            &socket_type_len,
-        ) != 0 or socket_type_len != @sizeOf(c_int) or
-            socket_type != posix.SOCK.STREAM)
-            return error.Corrupt;
+        const socket = observed_socket orelse fdSocketIdentity(self.fd) orelse return error.Corrupt;
 
         var total = inventory.demux_owned_extent_bytes;
         inline for (.{
@@ -10737,10 +10766,10 @@ pub const Client = struct {
         complete.writeUsize(@intFromPtr(self.allocator.ptr));
         complete.writeUsize(@intFromPtr(self.allocator.vtable));
         complete.writeU64(@intCast(self.fd));
-        complete.writeU64(fd_stat.device);
-        complete.writeU64(fd_stat.inode);
-        complete.writeU64(fd_stat.mode_type);
-        complete.writeU64(@intCast(socket_type));
+        complete.writeU64(socket.stat.device);
+        complete.writeU64(socket.stat.inode);
+        complete.writeU64(socket.stat.mode_type);
+        complete.writeU64(@intCast(socket.socket_type));
         complete.writeUsize(total);
         complete.writeU16(self.wire_major);
         complete.writeU16(self.parser.expected_major);
@@ -10969,6 +10998,7 @@ pub const Client = struct {
             inventory,
             &candidate,
             true,
+            null,
         );
 
         var batch_writer = owner_seal.Writer.init("maru.ended-purge.batch.v1");
@@ -11209,12 +11239,7 @@ pub const Client = struct {
             self.ownership != .standalone or self.unusable or
             self.first_poison_reason != null)
             return false;
-        _ = fdStatIdentity(self.fd) orelse return false;
-        var socket_type: c_int = 0;
-        var socket_type_len: c.socklen_t = @sizeOf(c_int);
-        if (c.getsockopt(self.fd, c.SOL.SOCKET, c.SO.TYPE, &socket_type, &socket_type_len) != 0 or
-            socket_type_len != @sizeOf(c_int) or socket_type != posix.SOCK.STREAM)
-            return false;
+        const socket = fdSocketIdentity(self.fd) orelse return false;
         if (externalArrayDescriptor(self.parser.buf).address != frozen.parser_backing.address or
             externalArrayDescriptor(self.parser.buf).capacity != frozen.parser_backing.capacity or
             externalArrayDescriptor(self.pending_batches).address != frozen.batch_backing.address or
@@ -11271,6 +11296,7 @@ pub const Client = struct {
             inventory,
             &current_complete,
             false,
+            socket,
         ) catch return false;
         if (current_complete.captured_fd != prepared.captured_fd or
             current_complete.complete_owned_extent_bytes != prepared.complete_owned_extent_bytes or
@@ -11520,6 +11546,7 @@ pub const Client = struct {
             inventory,
             &current_complete,
             false,
+            null,
         ) catch @panic("ended purge complete owner graph drifted before cleanup");
         if (current_complete.captured_fd != prepared.captured_fd or
             current_complete.complete_owned_extent_bytes != prepared.complete_owned_extent_bytes or

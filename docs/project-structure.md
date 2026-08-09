@@ -52,6 +52,12 @@ src/
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
 
+    app_session/        app_session.zig에서 목적별로 떼어낸 그룹 구현(docs/app-session-decomposition.md §4.1 F 시리즈).
+                        find.zig(스크롤백 ⌘F orchestration — E1), agent_dock.zig(에이전트 세션 기록 도크 —
+                        아카이브 스캔·필터·스크롤·인라인 상세, F1+F3 병합). 각 파일은 `*AppSession`을 받는
+                        free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
+                        **test는 그룹 파일로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
+                        동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측).
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.
                         persistent-session P2: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는
                         vtable 계약 `term_runtime_backend.zig`(TermRuntimeBackend·RuntimeHandle — opaque, PtyIo와 같은

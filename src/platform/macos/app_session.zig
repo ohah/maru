@@ -30568,6 +30568,20 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     }
     try std.testing.expect(saw_cwd);
 
+    // **원격 cwd는 저장하지 않는다**(§9.4). 워크스페이스 파일에는 host가 없으므로 원격 경로를 담으면 복원 때
+    // 그것을 로컬 경로로 알고 spawn해 자식이 chdir에 실패한다. 빈 값이면 복원이 기본 자리에서 연다.
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/srv/app\x07");
+    var remote_arena = std.heap.ArenaAllocator.init(allocator);
+    defer remote_arena.deinit();
+    const remote_win = try workspace_ops.captureWorkspaceWindow(session, remote_arena.allocator(), false, null);
+    for (remote_win.tabs) |t| {
+        for (t.panes) |pane| {
+            for (pane.surfaces) |s| {
+                try std.testing.expect(!std.mem.eql(u8, s.cwd, "/srv/app")); // 원격 경로가 새어 나가지 않는다
+            }
+        }
+    }
+
     // capture → serialize가 크래시 없이 기대 라인을 낸다(R1 writer와 결합).
     const wins = [_]maru.session.workspace.Window{win};
     const text = try maru.session.workspace.serialize(allocator, .{ .windows = &wins });

@@ -1869,7 +1869,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
             // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
             const branch = git_ops.termGitBranch(self, term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
             const show_branch = self.loaded_config.config.sidebar.show_branch;
-            const show_folder = self.loaded_config.config.sidebar.show_folder;
+            // show-folder 토글은 sidebarFolderLineShown 안에서 본다(줄 수 계산과 같은 함수를 공유하려고 옮겼다).
             // 브랜치줄 prefix = GitHub octocat(0xF0009). 예전 git-branch(0xF0001)는 얇은 선+링 3개라 카드 셀 크기
             // (~8~12px)로 area-average 다운스케일되면 내부 구조가 뭉개져 ├(U+251C)처럼 보였다(사용자 피드백). octocat은
             // 꽉 찬 단색 실루엣이라 작은 크기에서도 외곽이 살아 GitHub 마크로 읽힌다(icon_glyph fillCoverage 경로 동일).
@@ -1877,7 +1877,6 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
             // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
             // 각 보조줄은 **비어있지 않을 때만** indent를 붙인다(빈 줄은 그대로 "" — 카드 줄 수 계산 정합).
             try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}" ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
-            _ = show_folder; // 폴더줄 조건은 sidebarFolderLineShown이 단일 출처(줄 수 계산과 공유 — 토글도 그 안에서 본다)
             try path_lines.append(self.allocator, if (sidebarFolderLineShown(self, term)) blk: {
                 const fl = try sidebarFolderLine(self.allocator, term);
                 if (indent.len == 0 or fl.len == 0) break :blk fl; // depth 0 or 빈 줄 — 그대로(빈 줄에 공백 붙이면 4번째 줄이 생긴다)

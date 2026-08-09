@@ -61,6 +61,11 @@ pub const Error = std.mem.Allocator.Error || error{
 const FieldSpec = struct {
     tag: u32,
     name: []const u8,
+    /// **구 writer가 안 보냈어도 decode를 실패시키지 않는** 필드. v1에 뒤늦게 추가된 tag는 반드시 이것이어야 한다 —
+    /// 필수로 두면 N-1 host가 인코딩한 레코드에 그 tag가 없어 `MissingRequiredField`로 떨어지고, 실행 중 업그레이드가
+    /// 통째로 막힌다(docs/session-host-upgrade.md의 "required/optional field tag" 계약). 값이 없으면 그 필드는 새 core의
+    /// 기본값으로 남고, 셸이 다음에 보고할 때 채워진다.
+    optional: bool = false,
 };
 
 // Stable v1 wire tags. Never derive these from native field order. A native rename updates `name` while retaining its
@@ -156,9 +161,14 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 88, .name = "default_cursor_shape" },
     .{ .tag = 89, .name = "cursor_shape_overridden" },
     // cwd(83)와 한 쌍인 OSC 7 authority. 기존 태그를 재사용하지 않고 새 태그를 붙인다 — 태그는 stable schema라
-    // 옛 host가 쓴 레코드를 새 host가 읽을 때 의미가 바뀌면 안 된다. 옛 레코드엔 이 태그가 없어 `null`(=로컬
-    // 취급)로 복원되고, 그 세션은 다음 OSC 7 보고에서 host를 다시 채운다(docs/ssh-integration.md §9.2).
-    .{ .tag = 90, .name = "cwd_host" },
+    // 옛 host가 쓴 레코드를 새 host가 읽을 때 의미가 바뀌면 안 된다. **optional이어야 한다**: v1에 뒤늦게 추가된
+    // 필드라 N-1 host가 인코딩한 레코드에는 이 태그가 아예 없고, 필수로 두면 그 레코드가 `MissingRequiredField`로
+    // 거부돼 실행 중 업그레이드가 막힌다. 없으면 `null`(=로컬 취급)로 남고 다음 OSC 7 보고가 채운다.
+    //
+    // 그동안 cwd만 남고 host가 비어 **원격 경로가 로컬로 보이는 창**이 생기는데, 이는 이관 직후 다음 프롬프트까지의
+    // 짧은 구간이고 그 방향의 degrade는 안전하다(폴더줄이 예전처럼 브랜치 조건에 묶일 뿐 — ssh-integration.md §9.5의
+    // "보고자가 없을 때" 상태와 같다). 반대로 업그레이드를 막는 쪽은 세션 전체를 잃는다.
+    .{ .tag = 90, .name = "cwd_host", .optional = true },
 };
 
 comptime {
@@ -669,7 +679,9 @@ fn deinitValue(comptime T: type, value: *T, allocator: std.mem.Allocator) void {
 
 fn encodeCoreFields(writer: *Writer, core: *const TerminalCore) Error!void {
     inline for (core_fields_v1) |spec| {
-        const start = try writer.beginTlv(spec.tag, 0);
+        // optional 필드는 flag를 실어 보낸다 — **구 reader**가 모르는 tag를 만나도 `UnknownRequiredField`로
+        // 죽지 않고 건너뛰게 한다(신 host → 구 host 방향의 rollback 이관).
+        const start = try writer.beginTlv(spec.tag, if (spec.optional) flag_optional else 0);
         const Field = @TypeOf(@field(core.*, spec.name));
         try encodeValue(writer, Field, &@field(core.*, spec.name));
         try writer.endTlv(start);
@@ -806,7 +818,9 @@ pub fn decodeCore(allocator: std.mem.Allocator, bytes: []const u8) Error!Termina
                 if (!known and field_flags & flag_optional == 0) return error.UnknownRequiredField;
                 if (known) try field_reader.finish();
             }
-            inline for (seen) |present| if (!present) return error.MissingRequiredField;
+            // optional로 선언된 tag는 없어도 된다 — 그 자리는 새 core의 기본값으로 남는다. 필수 필드의 누락은
+            // 그대로 거부해, "일부만 복원된 core"가 조용히 통과하는 일은 계속 막는다.
+            inline for (seen, core_fields_v1) |present, spec| if (!present and !spec.optional) return error.MissingRequiredField;
         } else if (flags & flag_optional == 0) return error.UnknownRequiredField;
     }
     try payload_reader.finish();
@@ -1175,6 +1189,65 @@ fn appendEmptySection(allocator: std.mem.Allocator, original: []const u8, tag: u
     @memcpy(result[original.len + 4 .. original.len + 6], &flag_bytes);
     refreshEnvelope(result, 2);
     return result;
+}
+
+/// core 섹션에서 필드 TLV 하나를 통째로 들어내 **그 tag를 모르던 구 writer의 레코드**를 흉내 낸다. 섹션 길이와
+/// envelope(체크섬·payload 길이)을 함께 갱신하므로 decode가 정상 레코드로 읽는다. 첫 섹션이 core라는 전제는
+/// encodeCore가 그렇게 쓰기 때문이고, 아니면 테스트가 즉시 실패해 전제를 알린다.
+fn stripCoreField(allocator: std.mem.Allocator, original: []const u8, field_tag: u32) ![]u8 {
+    const section_start = envelope_header_len;
+    const section_tag = std.mem.readInt(u32, original[section_start..][0..4], .big);
+    try std.testing.expectEqual(section_terminal_core, section_tag);
+    const section_len = std.mem.readInt(u64, original[section_start + 8 ..][0..8], .big);
+    const body_start = section_start + tlv_header_len;
+    const body_end = body_start + @as(usize, @intCast(section_len));
+
+    // 필드 TLV들을 훑어 대상 tag의 [시작, 끝)을 찾는다.
+    var cut_start: ?usize = null;
+    var cut_end: usize = 0;
+    var pos: usize = body_start;
+    while (pos < body_end) {
+        const tag = std.mem.readInt(u32, original[pos..][0..4], .big);
+        const len: usize = @intCast(std.mem.readInt(u64, original[pos + 8 ..][0..8], .big));
+        const next = pos + tlv_header_len + len;
+        if (tag == field_tag) {
+            cut_start = pos;
+            cut_end = next;
+            break;
+        }
+        pos = next;
+    }
+    const start = cut_start orelse return error.FieldTagNotFound;
+    const removed = cut_end - start;
+
+    const result = try allocator.alloc(u8, original.len - removed);
+    @memcpy(result[0..start], original[0..start]);
+    @memcpy(result[start..], original[cut_end..]);
+    std.mem.writeInt(u64, result[section_start + 8 ..][0..8], section_len - removed, .big);
+    refreshEnvelope(result, 1);
+    return result;
+}
+
+// **구 host가 만든 레코드를 새 host가 읽을 수 있어야 한다.** v1에 뒤늦게 추가한 tag를 필수로 두면 N-1 레코드에
+// 그 tag가 없어 decode가 `MissingRequiredField`로 떨어지고, 실행 중 업그레이드가 통째로 막힌다(적대적 검증에서
+// 발견 — 처음 구현은 실제로 필수였다). optional 계약이 살아 있는지 여기서 고정한다.
+test "handoff v1 accepts an older writer record that lacks the optional cwd_host tag" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]7;file://build-box/srv\x07");
+    try std.testing.expectEqualStrings("build-box", core.currentCwdHost()); // writer 쪽엔 값이 있다
+
+    const encoded = try encodeCore(allocator, &core);
+    defer allocator.free(encoded);
+    const old_record = try stripCoreField(allocator, encoded, 90);
+    defer allocator.free(old_record);
+
+    var restored = try decodeCore(allocator, old_record);
+    defer restored.deinit();
+    // 나머지 필드는 그대로 복원되고, 없는 optional 필드만 기본값(=authority 미보고 → 로컬 취급)으로 남는다.
+    try std.testing.expectEqualStrings("/srv", restored.currentCwd());
+    try std.testing.expectEqualStrings("", restored.currentCwdHost());
 }
 
 test "handoff v1 skips unknown optional sections and rejects unknown required sections" {

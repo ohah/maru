@@ -1344,8 +1344,14 @@ pub const TerminalCore = struct {
         if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
         if (local_hostname.len == 0) return false;
         if (std.ascii.eqlIgnoreCase(host, local_hostname)) return true;
-        const host_short = host[0 .. std.mem.indexOfScalar(u8, host, '.') orelse host.len];
-        const local_short = local_hostname[0 .. std.mem.indexOfScalar(u8, local_hostname, '.') orelse local_hostname.len];
+        // 짧은 이름 대 FQDN 보정은 **한쪽이 도메인 없는 이름일 때만** 허용한다. 양쪽 다 FQDN인데 전체가 다르면
+        // 그것은 서로 다른 호스트다 — 첫 라벨만 비교하면 `box.corp.com`(원격)과 `box.home.net`(로컬)이 같아져
+        // 원격 경로를 로컬 spawn에 넘긴다(이 함수가 막으려는 바로 그 결함).
+        const host_dot = std.mem.indexOfScalar(u8, host, '.');
+        const local_dot = std.mem.indexOfScalar(u8, local_hostname, '.');
+        if (host_dot != null and local_dot != null) return false;
+        const host_short = host[0 .. host_dot orelse host.len];
+        const local_short = local_hostname[0 .. local_dot orelse local_hostname.len];
         return host_short.len > 0 and std.ascii.eqlIgnoreCase(host_short, local_short);
     }
 
@@ -2601,6 +2607,11 @@ test "hostIsLocal: empty/localhost/self are local, short-vs-FQDN matches, others
     try std.testing.expect(TerminalCore.hostIsLocal("box.local", "box")); // 반대 방향
     try std.testing.expect(!TerminalCore.hostIsLocal("server", "box.local"));
     try std.testing.expect(!TerminalCore.hostIsLocal("boxy", "box.local")); // prefix 일치는 다른 호스트
+    // **양쪽 다 FQDN이면 첫 라벨이 같아도 다른 호스트다.** 첫 라벨만 비교하면 사내망의 동명 서버가 로컬로
+    // 판정돼 원격 경로가 로컬 spawn·경로 resolve로 새어 나간다(적대적 검증에서 발견).
+    try std.testing.expect(!TerminalCore.hostIsLocal("box.corp.com", "box.home.net"));
+    try std.testing.expect(!TerminalCore.hostIsLocal("box.corp.com", "box.local"));
+    try std.testing.expect(TerminalCore.hostIsLocal("box.corp.com", "box.corp.com")); // 전체 일치는 여전히 로컬
     // 로컬 이름을 못 얻으면 보수적으로 원격 — 없는 경로로 spawn하는 쪽이 host 접두가 붙는 쪽보다 나쁘다.
     try std.testing.expect(!TerminalCore.hostIsLocal("box", ""));
     try std.testing.expect(TerminalCore.hostIsLocal("", "")); // 단 빈 authority는 여전히 로컬

@@ -1276,7 +1276,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    resize·mouse·core·scroll·resync다. 후속 2c3e RPC execute는 같은 helper 계약을 재사용하되 caller 편입과 source inventory는 2c3e
    gate가 소유한다. 각 API의 상위 `RemoteRuntime` 검사와 별개로 ClientSlot/transport의
    최종 queue-offset/syscall admission에서 queued latch와 revoke aggregate가 모두 0인지 검사한다. 별도 aggregate generation은 없다.
-   C3-3a1 authority와 C3-3a2 final-admission substrate는 product caller exact 0인 dormant gate로 각각 병합할 수 있다. C3-3a3에서
+   C3-3a1 authority substrate는 product caller exact 0인 dormant gate로 구현됐다. C3-3a2 final-admission substrate와 C3-3a3
+   product activation은 아직 미구현이다. C3-3a3에서
    product take/release와 현재 mutation consumer를 동시에 배선하기 전에는 보호 기능 활성화나 C3-3a 완료를 주장하지 않는다.
    각 mutation family의 ClientSlot owner-thread operation과 Client operation fence가 검사부터 allocation·queue offset·syscall commit까지
    no-yield critical section을 소유한다. event handoff 자체는 별도로 위 `StreamOperationPermit`이 소유한다. allocator callback 재진입과 foreign thread는
@@ -1300,8 +1301,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    구현 gate는 모두 기존 confirmed-poison gate를 상속한다. C3-3a1 `test-session-host-2c3d-c3-3a1`은 Debug·ReleaseFast registry
    runtime 7+boundary 1로 ordinary/unknown class none, revoke reserved/live/releasing, 정상·corrupt final consume, sibling
-   `0 -> 1 -> 2 -> 1 -> 0`, pre-reserve `0 -> 0`, post-reserve abort `0 -> 1 -> 0`, stale/copy/ABA/double consume과
-   unauthorized underflow delta 0, bounded scan/cache 일치를 검증하며 product caller는 exact 0이다. C3-3a2
+   `0 -> 1 -> 2 -> 1 -> 0`, pre-reserve `0 -> 0`, post-reserve abort `0 -> 1 -> 0`, copied registry 거부,
+   same-address generation ABA와 typed stale/double settlement delta 0, invalid raw class, counter bound 및 bounded scan/cache 일치를
+   검증하며 whole-session-host product take/query caller는 exact 0이다. no-fail continuation/recovery replay와 unauthorized underflow의
+   격리 subprocess 증거는 실제 product activation과 함께 C3-3a3 gate가 소유한다. C3-3a2
    `test-session-host-2c3d-c3-3a2`는 Debug·ReleaseFast final-admission runtime 7+boundary 1로 현재 mutation family의 closed
    error/progress/owner-retention 표와 product caller 0을 고정한다. C3-3a3 `test-session-host-2c3d-c3-3a3`은 Debug·ReleaseFast product
    runtime 8+actual-socket 2+boundary 1로 두 substrate를 동시에 활성화한다. quarantine reserve→pin reserve→generation reserve→

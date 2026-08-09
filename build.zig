@@ -2030,6 +2030,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3 confirmed generation poison Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3_step.dependOn(session_host_2c3d_c3_2_step);
+    const session_host_2c3d_c3_3a1_step = b.step(
+        "test-session-host-2c3d-c3-3a1",
+        "2c3d C3-3a1 dormant revoke authority Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3a1_step.dependOn(session_host_2c3d_c3_3_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2301,6 +2306,37 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3_step.dependOn(&run_event_c3_3_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3_boundary_tests.step);
+
+        const event_c3_3a1_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/attachment_cleanup_registry.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3a1"},
+        });
+        const run_event_c3_3a1_runtime_tests = b.addRunArtifact(event_c3_3a1_runtime_tests);
+        run_event_c3_3a1_runtime_tests.addArg("--maru-expect-tests=7");
+        run_event_c3_3a1_runtime_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a1_step.dependOn(&run_event_c3_3a1_runtime_tests.step);
+
+        const event_c3_3a1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3a1_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3d C3-3a1 dormant revoke authority boundary"},
+        });
+        const run_event_c3_3a1_boundary_tests = b.addRunArtifact(event_c3_3a1_boundary_tests);
+        run_event_c3_3a1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3a1_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3a1_step.dependOn(&run_event_c3_3a1_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3a1_boundary_tests.step);
 
         const control_c2_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

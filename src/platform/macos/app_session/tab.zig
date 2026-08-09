@@ -28,7 +28,6 @@ const PinRegion = AppSession.PinRegion;
 const VirtualLayout = AppSession.VirtualLayout;
 const groupBlockPermutation = app_session_mod.groupBlockPermutation;
 const group_normalize = app_session_mod.group_normalize;
-const tab_ops = app_session_mod.tab_ops;
 const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
@@ -1634,7 +1633,7 @@ pub fn moveGroupRange(self: *AppSession, m: usize, insert_before: usize, defer_r
     const perm = self.allocator.alloc(usize, len) catch return m;
     defer self.allocator.free(perm);
     const new_marker = groupBlockPermutation(perm, len, m, j, rest_insert);
-    if (tab_ops.reorderTabs(self, @as([]const usize, perm), struct {
+    if (reorderTabs(self, @as([]const usize, perm), struct {
         fn fill(p: []const usize, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
             for (p, 0..) |src, w| {
                 new_tabs[w] = s.tabs.items[src];
@@ -1770,7 +1769,7 @@ pub fn simulateGroupMove(self: *AppSession, arena: std.mem.Allocator, order: []u
 /// (applyWorkspaceWindow)이 저장 순서를 그대로 깔아 고정/비고정이 섞였을 때 불변식([0, pinned_count)에 고정 연속)을
 /// 복구한다. two-pass(고정 먼저, 비고정 뒤)라 안정적이다. alloc 실패면 재배열 생략(복원은 진행, 불변식만 미보장).
 pub fn stablePartitionPinned(self: *AppSession) void {
-    _ = tab_ops.reorderTabs(self, {}, struct {
+    _ = reorderTabs(self, {}, struct {
         fn fill(_: void, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
             var w: usize = 0;
             for (s.tabs.items, s.surface_ptrs.items) |t, sf| if (t.pinned) { // pass 1: 고정(상대 순서 유지)
@@ -1826,7 +1825,7 @@ pub fn stablePartitionSubtree(self: *AppSession, mi: usize) void {
     }
     if (!has_local) return; // no-op — 로컬 pin 직접 멤버 없음(전 호출 no-op = byte-identical, GL1 회귀 0)
     // reorderTabs(활성 *Tab 추적·임시 버퍼·in-place memcpy)로 [mi+1, e)만 순열, 밖은 identity. ctx=[mi, e].
-    _ = tab_ops.reorderTabs(self, @as([2]usize, .{ mi, e }), struct {
+    _ = reorderTabs(self, @as([2]usize, .{ mi, e }), struct {
         fn fill(ctx: [2]usize, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
             const m = ctx[0];
             const end = ctx[1];
@@ -1974,12 +1973,12 @@ pub fn togglePin(self: *AppSession, tab: *Tab) void {
     // 끝 count-1에 두면 고정 그룹 subtree 뒤라 위치 파생(§2.1)이 그 카드를 그룹 멤버로 흡수한다; 고정 그룹이 없으면
     // 종전대로 끝 count-1이라 고정 top카드끼리는 위치만 바뀐다). unpin이면 비고정 영역 시작(count = 비고정 리전 첫
     // 위치라 비고정 그룹이 있어도 그 마커 **앞** = top카드로 안착, 흡수 없음 — pin의 "끝"과 달리 "시작"이라 대칭 안전).
-    const pinned_count = tab_ops.countPinnedTabs(self);
+    const pinned_count = countPinnedTabs(self);
     const to: usize = if (tab.pinned)
         (self.firstGroupStartInRegion(0, pinned_count) orelse (pinned_count - 1))
     else
         pinned_count;
-    const landed = tab_ops.moveTab(self, idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
+    const landed = moveTab(self, idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
     if (set_boundary and landed == idx and idx + 1 < self.tabs.items.len)
         self.tabs.items[idx + 1].top_level = false; // 제자리(no-op move) = 경계 소실 없음 → spurious flag 되돌림
     // 무조건 rebuildSidebar: moveTab은 from==to(이미 그룹 경계 — 단일 탭/경계 탭 토글)면 early-return해 사이드바
@@ -1994,7 +1993,7 @@ pub fn togglePin(self: *AppSession, tab: *Tab) void {
 
 pub fn cardPinRole(self: *AppSession, tab: *const Tab) CardPinRole {
     if (tab.group_start != null) return .group; // 마커 카드 = 그룹 시작 → 그룹째(C2 권위)
-    if (tab_ops.enclosingGroupMarkerTab(self, tab) != null) return .local; // 비마커 멤버 = 그룹-로컬 위치 고정
+    if (enclosingGroupMarkerTab(self, tab) != null) return .local; // 비마커 멤버 = 그룹-로컬 위치 고정
     return .individual; // 최상위 카드 = 개별 전역 pin
 }
 

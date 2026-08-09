@@ -39,22 +39,22 @@ const layout_math = app_session_mod.layout_math;
 const PaneTree = app_session_mod.PaneTree;
 const TermBarLoc = AppSession.TermBarLoc;
 const activeIndexAfterRemoval = app_session_mod.activeIndexAfterRemoval;
-const dock_ops = app_session_mod.dock_ops;
-const file_panel_ops = app_session_mod.file_panel_ops;
+const dock_ops = @import("dock.zig");
+const file_panel_ops = @import("file_panel.zig");
 const renderer = app_session_mod.renderer;
-const settings_ops = app_session_mod.settings_ops;
-const web_ops = app_session_mod.web_ops;
+const settings_ops = @import("settings.zig");
+const web_ops = @import("web.zig");
 const Pane = app_session_mod.Pane;
 const SurfaceClosedCallback = app_session_mod.SurfaceClosedCallback;
 const Term = app_session_mod.Term;
 const TermLoc = AppSession.TermLoc;
-const agent_ops = app_session_mod.agent_ops;
+const agent_ops = @import("agent.zig");
 const app = app_session_mod.app;
-const pane_ops = app_session_mod.pane_ops;
-const tab_ops = app_session_mod.tab_ops;
+const pane_ops = @import("pane.zig");
+const tab_ops = @import("tab.zig");
 const terminal = app_session_mod.terminal;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
-const workspace_ops = app_session_mod.workspace_ops;
+const workspace_ops = @import("workspace.zig");
 
 /// 첫 live tab이 준비된 뒤에만 renderer/frame loop를 세운다. 일반 init과 deferred workspace apply가 공유해
 /// "세션 생성 → throwaway shell → restore" 경로를 만들지 않는다.

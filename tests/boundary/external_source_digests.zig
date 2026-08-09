@@ -211,7 +211,9 @@ pub const inventory = [_]Proof{
     // 옮긴 블록에 `@field`가 없다. 이 작업으로 허브 pub이 621 → 557로 **줄었다**(F 시리즈 이래 처음).
     // F6 보정(탭 그룹 모델 16개를 `tab.zig`로)으로 또 바뀐다. count는 2 그대로다 — 옮긴 블록에
     // `@field`가 없고, F6가 열었던 pub 10개가 닫혔다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f6d5424d541c852b789fbe48f3b162e7de597c6832777a9cb86c16edab6216fe" },
+    // 디버그 픽스처 하네스(`maybeDebugOpenSettings`·`maybeDebugOpenFilePanel`)를
+    // `app_session/debug_fixtures.zig`로 빼며 또 바뀐다. count는 2 그대로다 — 옮긴 블록에 `@field`가 없다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "d5ee70ed237ac82eee8b1a9f1b4939026722f6e2e3e51d4cd8b0d31b522a1604" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

@@ -33359,13 +33359,10 @@ pub const AppSession = struct {
             else => {},
         };
         // rect는 이미 backing 좌표다(`buildSidebarScrollTree`가 옮겼다) — origin을 다시 더하지 않는다.
-        const before = self.gpu_quads.items.len;
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
-        // **layer를 3(over)으로 되돌린다.** 공용 lowering은 quad를 layer 2로 내리는데, 렌더러는 그 버킷을
-        // 맨 처음 그리고 **그 위에 사이드바 배경 strip을 덮는다** — 막대가 발행돼도 화면에서 사라진다
-        // (실측: tree에는 track/thumb이 있는데 사이드바에 아무것도 안 보였다). 도크·탐색기 스크롤바가
-        // layer 2로 살아남는 것은 그 자리에 strip이 없어서지, layer 2가 안전해서가 아니다.
-        for (self.gpu_quads.items[before..]) |*q| q.layer = 3;
+        // over(3)를 **발행 시점에** 지정한다(SV6a). 렌더러는 layer 2를 맨 처음 그리고 그 위에 자기가
+        // 소유한 사이드바 배경 strip을 덮으므로, 2로 내리면 막대가 발행돼도 화면에서 사라진다(실측).
+        // 예전에는 2로 내린 뒤 뒤에서 되돌렸는데, 그 되돌리기가 "같은 역할이 두 층에 흩어진" 증상이었다.
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 3);
     }
 
     /// 탐색기 스크롤바를 **공용 paint 경로**로 그린다(SV2b). 발행된 tree를 `ui_paint`가 quad op으로
@@ -33393,7 +33390,7 @@ pub const AppSession = struct {
         };
         const before = self.gpu_quads.items.len;
         // rect는 이미 backing 좌표다(`buildDockListScrollTree`가 옮겼다) — origin을 다시 더하지 않는다.
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 2);
         if (self.file_tree_perf_counters) |counters| counters.thumb_quads += @intCast(self.gpu_quads.items.len - before);
     }
 
@@ -33703,10 +33700,9 @@ pub const AppSession = struct {
         var ops: [overlay_scroll_max_entries]chrome.draw.Op = undefined;
         const tokens = self.buildChromeTokens();
         const draws = chrome.ui.paint.paint(snapshot, .{}, &tokens, .sidebar, .{ .ops = &ops }) catch return;
-        const before = self.gpu_quads.items.len;
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
-        // layer를 over로 되돌린다 — 공용 lowering의 layer 2는 모달 배경 quad에 통째로 덮인다(SV5b 주석).
-        for (self.gpu_quads.items[before..]) |*q| q.layer = 3;
+        // over(3) — 모달 배경 quad(layer 1)와 같은 버킷이라 **발행 순서**가 z를 정한다. 이 함수를
+        // 오버레이 lowering **뒤에** 부르는 것이 그 규약이다(SV5b에서 앞에 뒀다가 배경에 덮였다).
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 3);
     }
 
     /// 팔레트 선택이 창 밖이면 **최소로** 당긴다. 창 안이면 움직이지 않는다 — 휠·드래그로 굴린 자리를
@@ -34457,7 +34453,7 @@ pub const AppSession = struct {
 
         // GPU card backgrounds must precede terminal/pane text; the adapter fixes this to
         // renderer layer 2 instead of the overlay layer used by modal components.
-        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads);
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads, 2);
         // One completed Dock tree becomes one DrawList and one CoreText shaping pass. The
         // component keeps every text origin local to `content`; the collected pane translates
         // the whole batch exactly once to backing coordinates.

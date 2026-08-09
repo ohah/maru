@@ -159,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
     // a gray rounded rectangle look like a completed UI capture.
     var gpu_quads: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer gpu_quads.deinit(allocator);
-    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads);
+    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, 2);
     const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell_width_px)));
     const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell_height_px)));
     var lab_config: config.Config = .{};

@@ -1837,6 +1837,14 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
   스크롤바 전용 layer 3이 추가된 상태이고, Session Dock 스크롤바만 layer 2에 나와 같은 역할이 두 층에
   흩어져 있다. 스크롤바 층을 layer 상수로 계속 표현할지, `(layer, z, order)` stable sort로 옮기고
   layer는 합성 패스 의미만 남길지를 이관과 함께 정한다.
+  - **SV6a — 공용 lowering이 layer를 받는다(완료).** `appendBackgroundQuads`가 layer 2를 고정 출력해
+    소비처 둘이 뒤에서 되돌리던 것을 없앴다. 인자로 받고 호출자가 명시한다(기본값 없음).
+  - **SV6b — 오버레이 quad를 프레임 끝에 flush한다(완료).** 계획했던 "발행 순서 규약"은 대상이 없었다
+    (이미 한 자리에서 순서대로 나오고 있었다). 실제로 깨져 있던 것은 sticky 배너 구분선(layer 3)이
+    오버레이보다 **뒤**에 나와 열린 오버레이 위에 그어지는 것이었고 — find 바 상단과 정확히 같은 행이다 —
+    구분선 좌표가 `placeAndDistribute` 뒤라야 나오므로 오버레이를 늦추는 쪽으로 고쳤다. `overlay_quads`
+    대기 버퍼가 순서를 규율 아닌 구조로 만든다. 판정자는 `gpu_quads` 꼬리 == `overlay_quads`.
+  - **전역 `(layer, z, order)` 정렬은 하지 않는다.** 근거와 재개 조건은 [ScrollArea](scroll-area.md)가 소유한다.
 
 **탭 바(가로 스크롤)는 이 순서에 없다.** 컬럼 좌표·‹› 버튼 affordance·`Pane.tab_scroll_cols` 소유자가
 모두 다르므로, 세로 목록을 모으는 것과 가로 축을 여는 것은 별개의 결정이다.

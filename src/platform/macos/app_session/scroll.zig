@@ -838,7 +838,9 @@ pub fn appendOverlayScrollbar(self: *AppSession, viewport: chrome.draw.Rect, ext
     const draws = chrome.ui.paint.paint(snapshot, .{}, &tokens, .sidebar, .{ .ops = &ops }) catch return;
     // over(3) — 모달 배경 quad(layer 1)와 같은 버킷이라 **발행 순서**가 z를 정한다. 이 함수를
     // 오버레이 lowering **뒤에** 부르는 것이 그 규약이다(SV5b에서 앞에 뒀다가 배경에 덮였다).
-    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 3);
+    // SV6b: 오버레이 배경과 **같은 대기 버퍼**로 낸다. 배경 뒤에 놓여야 막대가 보이는 관계는 버퍼 안에서
+    // 그대로 유지되고, 버퍼 전체가 프레임 끝에 flush돼 뒤늦은 터미널 장식(sticky 구분선)보다 위에 남는다.
+    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.overlay_quads, 3);
 }
 
 /// 오버레이 위 휠(SV5d). 팔레트·세팅은 원래 휠이 **없었다** — 목록이 열려 있는데 뒤 터미널이 굴러

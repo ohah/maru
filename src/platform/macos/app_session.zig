@@ -3135,6 +3135,17 @@ pub const AppSession = struct {
     // C4b: chrome rich GPU quad 프리미티브(둥근 박스) — sidebar/모달/divider lowering이 모은다. tui/빈이면
     // 길이 0(렌더 무동작). renderFrame이 replace로 metal_buffer에 넘겨 dupe 소유시킨다(self는 ArrayList 재사용).
     gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
+    /// SV6b: 오버레이(모달·팔레트·세팅·알림)가 내는 over 버킷 quad를 **모아 두었다가 프레임 끝에 한 덩어리로**
+    /// `gpu_quads`에 flush하는 대기 버퍼. 배경(layer 1)·말풍선 caret·스크롤바(layer 3)가 여기로 온다.
+    ///
+    /// 왜 곧장 `gpu_quads`에 넣지 않는가: 렌더러는 layer 1과 3을 **같은 over 버킷**에 넣고 그 안에서는 배열
+    /// 순서가 z다. 그런데 sticky 배너 하단 구분선(layer 3)은 `placeAndDistribute` **뒤**라야 좌표가 나오므로
+    /// 오버레이보다 늦게 append될 수밖에 없고, 그러면 터미널 장식이 열린 오버레이 위에 그어진다
+    /// (find 바 상단 `region.y + ch`와 구분선 `origin_y + ch`가 정확히 같은 행이다).
+    ///
+    /// 순서를 규율로 지키는 대신 **저장소를 나눠 불변식을 구조로 만든다** — 오버레이 quad는 flush 전에는
+    /// `gpu_quads`에 존재할 수 없으므로, 나중에 어떤 over quad를 더해도 오버레이가 그 위에 남는다.
+    overlay_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경 blur. per-frame(모달만, renderFrame이 매 프레임 clear).
     gpu_shadows: std.ArrayList(metal_frame.GpuShadow) = .empty,
     // B1: rich Chrome text의 final pixel glyph placement. 기존 cell DrawList와 분리해 두어 Button/텍스트
@@ -8377,6 +8388,24 @@ pub const AppSession = struct {
             while (i < @min(want, 99)) : (i += 1) {
                 _ = self.pushNotificationHistory("MARU", "self-verify", 0);
             }
+        }
+        // MARU_FORCE_STICKY=1 — 첫 frame에 sticky 명령 배너를 세운다(SV6b 시각 검증). 실제로는 OSC 133 마크가 붙은
+        // 명령 출력이 스크롤백을 채우고 사용자가 위로 굴려야 나타나므로(`core.stickyCommand`: view_offset>0 +
+        // 위쪽에 `.input` 행) 캡처로는 절대 만들 수 없다 — 그래서 훅이 필요하다.
+        //
+        // 이 배너의 **하단 구분선은 layer 3 GPU quad**이고 좌표가 `placeAndDistribute` 산물이라 오버레이보다 늦게
+        // 발행된다. SV6b 전에는 그 순서 때문에 열린 오버레이 위에 선이 그어졌다 — `MARU_OPEN_NOTIFICATIONS`와 함께
+        // 쓰면 그 장면이 한 화면에 잡힌다.
+        if (std.c.getenv("MARU_FORCE_STICKY") != null) {
+            const surface = self.activeSurface();
+            surface.lockCore(self.io);
+            // OSC 133로 명령줄(.input) 한 줄을 마킹하고, 그 뒤에 출력 줄을 뷰포트보다 많이 흘려 스크롤백을 채운다.
+            surface.core.write("\x1b]133;A\x1b\\\x1b]133;B\x1b\\$ zig build test\r\n\x1b]133;C\x1b\\") catch {};
+            var i: usize = 0;
+            while (i < 60) : (i += 1) surface.core.write("output line\r\n") catch {};
+            // 위로 굴려 명령줄을 화면 밖으로 보낸다 — 그래야 배너가 그것을 대신 보여준다.
+            surface.core.scrollViewport(30); // 양수 = 위(과거)로
+            surface.unlockCore(self.io);
         }
         if (std.c.getenv("MARU_FORCE_SPLIT") != null) {
             pane_ops.splitActivePane(self, .horizontal) catch {};
@@ -19321,6 +19350,8 @@ pub const AppSession = struct {
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
             // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
             self.dropQuadsByLayer(1); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
+            // SV6b: 오버레이 대기 버퍼도 per-frame. 이번 프레임에 오버레이가 없으면 비어 있는 채로 flush돼 no-op다.
+            self.overlay_quads.clearRetainingCapacity();
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
@@ -20148,6 +20179,16 @@ pub const AppSession = struct {
                 const dthick: u32 = @max(@as(u32, 1), self.buildChromeTokens().border.line_thickness_px);
                 self.appendSolidQuad(@floatFromInt(pf.origin_x), @floatFromInt(pf.origin_y + dch), @floatFromInt(active_term_rect.w), @floatFromInt(dthick), pane_ops.dividerColor(self), 3);
             }
+            // SV6b: 오버레이 over quad를 **여기서** 한 덩어리로 붓는다 — over 버킷의 마지막이 되어야 한다.
+            //
+            // 이 자리인 이유: 바로 위 sticky 구분선이 오버레이보다 늦게 나올 수밖에 없다(좌표가 `placeAndDistribute`
+            // 결과라 오버레이 lowering보다 뒤다). 그 구분선의 y(`origin_y + ch`)는 find 오버레이 상단
+            // (`overlay_input.findLayout`의 `region.y + ch`)과 **같은 행**이라, 순서를 두면 터미널 장식이 열린
+            // 오버레이 위에 그어진다. 오버레이를 늦추는 쪽이 유일하게 가능한 방향이다.
+            //
+            // 앞으로 over quad를 더하는 코드는 이 flush **앞**에 두면 자동으로 오버레이 아래에 놓인다. 위에 두려면
+            // 그것이 오버레이보다 위여야 하는 근거를 적는다(현재 그런 소비자는 없다).
+            self.gpu_quads.appendSlice(self.allocator, self.overlay_quads.items) catch {};
             // floating 탭 ghost는 **최상위 오버레이 레이어**(replace의 drag_overlay_frame)로 라우팅한다 — pane_frames
             // (터미널 레이어)에 두면 WKWebView에 가려 web pane 위 드래그가 안 보인다(web-panel.md §5). raster는 replace의
             // buildMergedUploadsN drag_raster가 머지한다. built_frames가 소유(view)라 여기서 pane_frames에 안 넣어도 누수 없음.
@@ -21969,9 +22010,10 @@ pub const AppSession = struct {
         if (draws.items.len == 0) return null; // 열린 오버레이/배지 없음 — prep 없음(래퍼가 error.NotOpen으로 환산)
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch, key_hint_badges);
-        // C4b 모달-2b: 모달 배경 quad(layer=1)를 self.gpu_quads(over 패스)에 머지. renderFrame이 매 프레임
-        // dropQuadsByLayer(1)로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayPrep이.
-        self.gpu_quads.appendSlice(self.allocator, raster.gpu_quads.items) catch {};
+        // C4b 모달-2b: 모달 배경 quad(layer=1)를 over 패스로 머지한다. **SV6b: 곧장 gpu_quads가 아니라
+        // overlay_quads(대기 버퍼)로 간다** — 오버레이는 프레임 끝에 한 덩어리로 flush돼야 뒤늦게 나오는
+        // 터미널 장식(sticky 구분선)이 위에 그어지지 않는다. cells 소유권은 finishOverlayPrep이.
+        self.overlay_quads.appendSlice(self.allocator, raster.gpu_quads.items) catch {};
         raster.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.appendSlice(self.allocator, raster.gpu_shadows.items) catch {};
         raster.gpu_shadows.deinit(self.allocator);
@@ -22050,7 +22092,9 @@ pub const AppSession = struct {
         // 말풍선 caret = 패널 배경(surface_bg) 채움 + 두 빗변에 패널과 같은 테두리(border_col). 밑변은 테두리 없이 패널
         // 본문으로 열려, 채움이 패널 상단 테두리를 caret 폭만큼 덮어(overlap) bubble을 연다 → 빗변 테두리가 패널 상단
         // 테두리와 이어져 하나의 말풍선 외곽선이 된다. 채움 삼각형 하나로만 그려 예전 이중 삼각형의 edge-AA 중간톤 뜸을 피한다.
-        self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill, border_w, border_col)) catch {};
+        // SV6b: 패널 배경과 같은 대기 버퍼로 — caret은 패널의 일부라 flush 시점도 같아야 한다(배경 '뒤'에 와야
+        // 상단 테두리를 덮는 painter 관계도 그대로 유지된다).
+        self.overlay_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill, border_w, border_col)) catch {};
     }
 
     /// gradient_kind=3(위 삼각형) GpuQuad 한 개(말풍선 caret 헬퍼). 좌상단 (x,y)·크기 (w,h) backing px,
@@ -22326,6 +22370,7 @@ pub const AppSession = struct {
         self.clearMeasuredTextCaches();
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
+        self.overlay_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
         self.gpu_glyphs.deinit(self.allocator);
         self.kitty_uploaded.deinit(self.allocator);
@@ -41376,6 +41421,69 @@ test "notification scroll view survives the frame that produced it" {
     try std.testing.expect(session.notif_scroll_view == null);
 }
 
+// SV6b: 렌더러는 layer 1(오버레이 배경)과 layer 3(장식·스크롤바·구분선)을 **같은 over 버킷**에 넣고, 그 안에서는
+// `gpu_quads` 배열 순서가 그대로 z다(`maru_metal_renderer.m`: 2=bottom·0=under·4=header·그 밖=over).
+// 그래서 "오버레이 위에 무엇이 그려지는가"는 layer 값이 아니라 **배열 순서**가 정한다.
+//
+// 이 판정자가 잡는 결함: sticky 배너 하단 구분선(layer 3)은 좌표가 `placeAndDistribute` 결과라 오버레이 lowering
+// 보다 늦게 나올 수밖에 없는데, 그 y(`origin_y + ch`)는 find 오버레이 상단(`overlay_input.findLayout`의
+// `region.y + ch`)과 **같은 행**이다. 순서를 두면 터미널 장식이 열린 오버레이 위에 그어진다.
+//
+// 고정하는 불변식은 하나다 — **오버레이 quad(layer 1) 뒤에는 over 버킷 quad가 없다.** 오버레이를 `overlay_quads`
+// 대기 버퍼에 모아 프레임 끝에 붓는 구조가 이걸 보장한다. 판정을 layer 3에 한정하지 않고 "over 버킷 전부"로 두는
+// 이유는, 다음에 새 layer 값이 생겨도(렌더러가 2·0·4 말고는 전부 over로 보내므로) 자동으로 걸리게 하기 위해서다.
+test "no over-bucket quad is appended after the overlay's quads (SV6b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    session.togglePalette();
+    if (!session.chrome_host.palette.open) return error.PaletteDidNotOpen;
+    _ = try session.tick(); // 제품 경로로 한 프레임 — 오버레이 배경·막대·터미널 장식이 모두 이 프레임에서 나온다
+
+    // 렌더러의 버킷 규칙을 여기서 다시 푼다(헬퍼를 부르면 둘이 같이 틀려도 통과한다).
+    const isOver = struct {
+        fn f(layer: u32) bool {
+            return layer != 2 and layer != 0 and layer != 4;
+        }
+    }.f;
+
+    const overlay_span = session.overlay_quads.items.len;
+    try std.testing.expect(overlay_span > 0); // 팔레트가 열렸는데 오버레이 quad가 없다면 이 판정자는 공허하다
+    try std.testing.expect(session.gpu_quads.items.len >= overlay_span);
+
+    // 핵심: `gpu_quads`의 **꼬리**가 오버레이 버퍼와 원소 단위로 같아야 한다. flush 뒤에 무엇이든 하나 더
+    // append되면 꼬리가 밀려 이 비교가 깨진다 — 그것이 곧 "그 quad가 오버레이를 덮는다"는 뜻이다.
+    const tail = session.gpu_quads.items[session.gpu_quads.items.len - overlay_span ..];
+    for (tail, session.overlay_quads.items) |got, want| {
+        try std.testing.expectEqual(want.layer, got.layer);
+        try std.testing.expectEqual(want.x, got.x);
+        try std.testing.expectEqual(want.y, got.y);
+        try std.testing.expectEqual(want.w, got.w);
+        try std.testing.expectEqual(want.h, got.h);
+    }
+
+    // 오버레이 배경(layer 1)이 실제로 그 꼬리 안에 있다 — 꼬리가 장식만이고 배경은 앞에 남아 있으면
+    // 위 비교가 통과해도 배경이 터미널 장식에 덮인다.
+    var bg_in_tail = false;
+    for (tail) |q| {
+        if (q.layer == 1) bg_in_tail = true;
+        try std.testing.expect(isOver(q.layer)); // 대기 버퍼에는 over 버킷만 들어와야 한다
+    }
+    try std.testing.expect(bg_in_tail);
+}
+
 test "palette scrollbar follows stored offset and the wheel, and selection pulls only when out of view" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -41392,12 +41500,13 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
     const max_offset: u32 = @intCast((total - max_visible) * ch);
 
     // ① 맨 위에서 막대가 나온다. layer는 over여야 한다 — layer 2는 모달 배경 quad에 통째로 덮인다.
+    //    SV6b 이후 오버레이 quad는 `overlay_quads` 대기 버퍼에 모였다가 프레임 끝에 flush되므로 여기서 그 버퍼를 본다.
     session.chrome_host.palette.selected = 0;
     session.palette_scroll = .{};
-    session.gpu_quads.clearRetainingCapacity();
+    session.overlay_quads.clearRetainingCapacity();
     scroll_ops.appendPaletteScrollbar(session);
-    try std.testing.expect(session.gpu_quads.items.len >= 2); // track + thumb
-    for (session.gpu_quads.items) |q| try std.testing.expectEqual(@as(u32, 3), q.layer);
+    try std.testing.expect(session.overlay_quads.items.len >= 2); // track + thumb
+    for (session.overlay_quads.items) |q| try std.testing.expectEqual(@as(u32, 3), q.layer);
 
     // ② **휠이 선택과 무관하게** 목록을 움직인다(SV5d의 이유). 한 틱 = 한 줄.
     try std.testing.expect(scroll_ops.scrollOverlayByLines(session, -1));
@@ -41424,7 +41533,7 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
     //    막대 끝과 목록 끝이 어긋난다.
     session.chrome_host.palette.selected = 0;
     session.palette_scroll = .{};
-    session.gpu_quads.clearRetainingCapacity();
+    session.overlay_quads.clearRetainingCapacity();
     scroll_ops.appendPaletteScrollbar(session);
     if (scroll_ops.overlayScrollbarGeometry(session)) |geometry| {
         try std.testing.expect(scroll_ops.beginOverlayScrollbarGesture(
@@ -41462,9 +41571,9 @@ test "palette scrollbar follows stored offset and the wheel, and selection pulls
 
     // ⑧ 팔레트가 닫히면 막대도 없고 휠도 안 먹는다 — 뒤 터미널이 굴러야 한다.
     session.chrome_host.palette.hide();
-    session.gpu_quads.clearRetainingCapacity();
+    session.overlay_quads.clearRetainingCapacity();
     scroll_ops.appendPaletteScrollbar(session);
-    try std.testing.expectEqual(@as(usize, 0), session.gpu_quads.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.overlay_quads.items.len);
     if (!session.chrome_host.settings.open) try std.testing.expect(!scroll_ops.scrollOverlayByLines(session, -1));
 }
 

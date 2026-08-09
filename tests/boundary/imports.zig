@@ -194,7 +194,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // (docs/file-explorer.md §3.5 이관 1단계). count는 4 그대로다 — 캐시 소유권 규칙을 한곳에 모은 것뿐이고,
     // Client 구성·receiver 집합과는 무관하다.
     // SV6a(공용 lowering이 layer를 받는다 — 소비처의 되돌리기 제거)로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "1246fcf980578ee709a946205b8eab8420a03c8ac9406a4826031ee68c6b045f" },
+    // 웹 find 결과의 죽은 사본(`web_find_result`)을 지우며 또 바뀐다. count는 4 그대로다 — 읽는 곳이
+    // 없던 필드를 뺀 것뿐이고, Client 구성·receiver 집합과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "78fac9c43bc0d4c91f9b01ef94084802c58c99b31daa7dfb13b78c085ab65900" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

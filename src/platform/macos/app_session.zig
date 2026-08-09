@@ -3354,8 +3354,6 @@ pub const AppSession = struct {
     /// 웹 탭 A에서 한 번 찾은 뒤 웹 탭 B로 옮겼을 때 B는 영영 검색되지 않는다(실측 결함). 올바른 질문은
     /// "**지금 이 탭에, 지금 이 검색어를** 이미 보냈는가"다.
     web_find_last_surface: u64 = 0,
-    /// 마지막으로 **반영된** 결과. seq가 현재와 다르면 stale이라 안 쓴다.
-    web_find_result: ?struct { seq: u64, found: bool } = null,
     /// 지금 열린 컨텍스트 메뉴가 **브랜치 목록**인지. 선택 처리 분기의 단일 출처다.
     branch_menu_open: bool = false,
     // 메뉴에서 고른 항목 중 **web이 실행할 것**의 1회성 신호. 선택은 문서 안에 있어 native가 범위를 모른다.
@@ -27688,7 +27686,6 @@ pub const AppSession = struct {
         if (self.chrome_host.find.input.query.items.len == 0) {
             // 빈 질의는 보내지 않는다 — WebKit이 뭘 찾을지 정의되지 않고, 하이라이트만 흔든다.
             self.web_find_pending = null;
-            self.web_find_result = null;
             self.web_find_last_surface = 0;
             self.chrome_host.find.page_found = null; // 검색한 것이 없으니 찾음/없음도 없다
             return;
@@ -27746,8 +27743,9 @@ pub const AppSession = struct {
         // 때만 반영한다 — 다르면 어차피 tick이 B로 재제출한다.
         const active = self.activeWebSurfaceIdAnyKind();
         if (active == 0 or active != self.web_find_last_surface) return;
-        self.web_find_result = .{ .seq = seq, .found = found };
-        self.chrome_host.find.page_found = found; // 오버레이 카운터 자리에 찾음/없음으로 나간다
+        // 결과가 사는 곳은 **오버레이 상태 하나**다(`find.page_found`) — 세션에 사본을 또 두면 어느 쪽이
+        // 진짜인지 흐려진다. 초안은 `web_find_result`도 들었는데 아무도 읽지 않는 죽은 상태였다.
+        self.chrome_host.find.page_found = found;
         self.metal_dirty = true;
     }
 
@@ -65708,7 +65706,7 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
     session.dispatchChromeAction(.find_query_changed);
     const ra = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
     const sid_a = ra.surface_id;
-    session.provideWebFindResult(ra.seq, true); // A는 찾음 — 여기서 web_find_result가 채워진다
+    session.provideWebFindResult(ra.seq, true); // A는 찾음
 
     // B로 전환. 같은 검색어를 그 탭에서도 찾아야 한다.
     session.focusTerm(b_idx);

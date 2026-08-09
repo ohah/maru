@@ -1357,6 +1357,22 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       injected zero/1/len-1/full·EINTR 분류, ambiguous partial fail-close, generation teardown actual RPC를 고정하고 generation scroll/core
       direct Client callsite 0과 recovery resync baseline 1을 유지한다. event는 2c3d,
       response-bearing RPC decoder와 실제 socket parity는 2c3e, `RemoteRuntime.client` 필드 제거는 2c4가 소유한다.
+   9. **2c3d one-shot event facade (doc-first):** generation event는 raw `BufferedEvent` 값 반환 대신 caller-final-address
+      `EventOwner`의 event-incarnation별 one-shot lifecycle을 사용한다. inline storage는 정상 release 뒤 pristine으로 재사용하고,
+      ClientNode binding-registry entry의 checked-monotonic `event_generation`이 canonical SSOT이고 `GenerationAttachment` mirror는
+      검증된 projection이므로 owner+attachment bytes의 same-address ABA도 막는다. 짧은 `.event`
+      take/release stream-operation permit과 그 사이의 기존 `ConnectionLease` 기반 node/slot cleanup pin을 분리해 revoked-event의
+      `fenceRevoke`는 허용한다. attachment teardown은 별도 inline lifecycle/generation mirror로 live owner를 `Busy` 처리한다.
+      `takeEvent(out)` 결과는 `idle|ended_pending|taken`, 공통 오류는 `Busy|InvalidOwner|Corrupt|Terminal`이며 무할당이다.
+      GUI ingress는 accepted/unknown 모두의 header·verdict·payload·canonical Client allocator identity를 seal한다.
+      `releaseEvent(owner)`는 connection poison 뒤에도 canonical cleanup을 허용하고 exact-once free하며 callback 뒤 no-fail suffix로
+      permit/reservation/pin/owner를 소비한다. unsafe provenance는 ordinary 후보 검증 뒤 take 때 미리 예약하고 trusted cleanup mirror를
+      owner bytes와 독립 봉인한 `max_gui_attachments=4,096`, retained byte 1 GiB bounded no-free quarantine으로 transfer한다.
+      별도 issuer 없이 `{node incarnation,event generation,owner address}`를 reservation identity로 쓰며 정상 release는 slot을 empty로
+      재사용한다. ended 판정은 예약보다 먼저다.
+      generation pump는 purge-first이고 ordinary take도 ended를 반환하지 않는다. C1 admission/allocator seal·node-canonical reusable owner/generation·ordinary take,
+      C2 release/pin/quarantine/callback closure, C3 generation 제품 drain·ended priority·actual socket/source-zero의 세 PR-size gate로 나누며 각 gate가
+      Debug·ReleaseFast focused sentinel과 boundary를 가진다. 2c3d 완료 전에는 generation event source-zero를 주장하지 않는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

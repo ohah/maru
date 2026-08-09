@@ -994,6 +994,133 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    generation scroll/core direct Client call 0, recovery resync direct Client baseline exact 1, legacy allowlist와 registry layout delta 0을
    고정한다. 이 gate는 event/RPC decoder,
    `RemoteRuntime.client` 제거, resync 재설계를 완료로 주장하지 않는다.
+
+   2c3d의 ordinary event facade는 copy 가능한 `BufferedEvent`나 allocator/Client를 공개하지 않는다. 공개 계약은
+   `EventOwner`, `EventView`, `EventTakeOutcome`, `EventError`, `EventViewError`와 다음 세 메서드로 닫힌다.
+   `takeEvent(out:*EventOwner) EventError!EventTakeOutcome`,
+   `releaseEvent(owner:*EventOwner) EventError!void`,
+   `EventOwner.view(self:*const EventOwner) EventViewError!EventView`가 exact signature다. `EventTakeOutcome`은
+   `idle|ended_pending|taken`, `EventError`는 `Busy|InvalidOwner|Corrupt|Terminal`뿐이다. 두 동작은 무할당이므로
+   `OutOfMemory`를 광고하지 않는다. `EventViewError`는 `InvalidOwner|Terminal`이고 `EventAdmission`은
+   `accepted:runtime_event_wire.EventPreflight|unknown`의 closed union이다. `EventView`의 exact field는
+   `{wire_major:u16,payload:[]const u8,admission:EventAdmission}`이다. transport가 봉인한 stream/binding만 쓰며 stream ID, callback, raw event,
+   allocator, receipt, Client pointer는 인자·결과 어디에도 없다.
+
+   `EventOwner`의 **각 event incarnation**은 caller의 final address에서
+   `pristine -> live -> releasing -> pristine`으로 exact once 소비되며 corrupt handoff만 `live|releasing -> terminal`로 닫힌다.
+   inline storage는 다음 event에 재사용하지만, canonical ClientNode binding-registry entry가
+   `{next_event_generation,active_event_generation,active_owner_addr}`를 소유하고 take마다 checked-monotonic
+   `event_generation`을 발급한다. `GenerationAttachment`의 event-authority mirror는 이 node SSOT의 검증된 projection이며,
+   owner/lease/admission/quarantine reservation seal은 양쪽 generation을 함께 결속한다. generation은 wrap/reuse하지 않으며 max 도달 시
+   binding의 event authority를 sticky terminal로 닫는다. 따라서 owner와 attachment mirror를 함께 이전 bytes로 복원해도 node의
+   active generation과 일치하지 않아 새 event나 다른 cleanup pin을 소비할 수 없다. `ConnectionLease`는 node/slot cleanup pin일 뿐
+   event receipt SSOT가 아니며, 별도 copyable event receipt registry도 만들지 않는다.
+   `takeEvent`는 byte-canonical pristine destination만 받고, copied/moved/stale-generation owner와 occupied destination을
+   `InvalidOwner`/mutation 0으로 거부한다. 성공한 owner의 `view()`는 owner가 live인 동안만 유효한 immutable
+   `EventView`를 빌려 준다. `view()`도 owner bytes의 embedded pointer를 따라가지 않고 registry-resolved ClientNode
+   binding-registry entry의 `active_owner_addr`를 먼저 비교한다. 등록되지 않은 copied/moved/foreign address는 `InvalidOwner`, 등록된 canonical address의 pristine/releasing/terminal 또는
+   active generation/seal drift는 `Terminal`이며 payload 역참조 전에 실패한다. event kind, bound stream, request ID 0, flags 0와 payload length는
+   facade가 queue commit 전에 재검증하므로 public view에 중복 authority로 싣지 않는다. `admission`은 ingress가
+   payload/header와 함께 seal한 accepted/unknown 결과이며 `RemoteRuntime`은 payload를 다시 preflight해 별도 SSOT를 만들지 않는다.
+   GUI ingress는 accepted뿐 아니라 unknown event도 `{header,verdict-tag,payload digest,canonical allocator identity}`로 봉인한다.
+   unknown view는 payload를 semantic decode하지 않고 기존 unknown-ignore 의미로 release-only 처리한다. foreign/malformed/resource-exhausted는
+   기존 ingress 정책대로 live queue에 게시되지 않는다.
+
+   take와 release는 같은 canonical stream-operation arbitration을 쓰지만, operation permit을 semantic processing 전체에
+   걸쳐 잡지 않는다. take permit은 registry-resolved slot/node/binding과 destination, queue descriptor/counters/order,
+   event header/admission seal/payload range/allocator provenance를 검증하고 ordinary event를 제거해 owner를 게시하는 짧은
+   transaction까지만 유지한 뒤 반환 전에 소비한다. 이를 위해 `StreamOperationKind.event`를 추가하며 control/ended-purge kind를
+   재사용하지 않는다. live owner는 기존 `ConnectionLease`를 final-address owner 안의 비독점 cleanup pin으로 재사용하고,
+   canonical binding-registry entry의 exact active generation이 one-shot receipt SSOT다. transport당 live owner cap은 exact 1이다.
+   owner가 live일 때 두 번째 take는 `Busy`/mutation 0이다. event generation 또는 pin counter checked overflow는 take commit 전 queue/out을
+   유지하고 sticky terminal의 `Terminal`로 normalize한다. 이 pin은 node/slot 파괴를 `Busy`로 막지만 ordinary semantic
+   operation은 막지 않는다. 따라서 `controller.revoked`를 borrow한 뒤 release 전에 기존 `fenceRevoke`를 호출할 수 있다.
+   release는 owner/lease/binding/allocator provenance를 검증한 뒤 새 짧은 `.event` release permit을 잡고, owner를
+   `releasing`으로 먼저 tombstone한 다음 pinned canonical Client allocator로 payload를 exact once free한다. GUI generation
+   ingress는 parser/frame allocator가 canonical Client allocator와 exact 같음을 queue publication 전에 검증하고 그 identity를
+   admission/queue seal에 포함한다. `BufferedEvent`에 별도 allocator field를 추가하지 않으며 strict external adoption의 임시 allocator
+   event는 2c3d generation facade 대상이 아니다. replacement, ended purge, generic Client teardown도 이 identity를 검증해 같은
+   allocator만 쓴다. allocator callback 동안
+   같은 canonical `.releasing` owner의 recursive release는 `Terminal`, stale copy/replay release는 `InvalidOwner`이고,
+   input/control/RPC/purge/teardown과 다른 event operation은 `Busy`다. callback 반환 뒤에는
+   release permit→quarantine reservation 반환→ConnectionLease cleanup pin→canonical mirror idle→owner pristine 순서의
+   no-fail suffix만 허용한다. free가 시작된 뒤 fallible lookup,
+   allocation, callback 추가 실행, 다른 allocator 선택은 0이다.
+
+   ended purge는 ordinary event와 event-quarantine capacity보다 항상 우선한다. generation pump는 `purgeEndedStream()`을 먼저 호출하고 `.purged`면
+   즉시 ended를 반환해 이후 event take/metadata apply/input 진행을 0으로 둔다. take 자체도 caller 순서에 의존하지 않고
+   bound stream의 첫 event가 admission-sealed `runtime.ended`면 queue/counter/out을 바꾸지 않은 채 `.ended_pending`을 반환한다.
+   caller는 purge를 다시 실행한다. take의 exact 순서는 binding/queue/admission/head seal preflight → head ended이면
+   `.ended_pending`(queue/out/quarantine mutation 0) → ordinary event일 때만 quarantine slot reserve → queue remove/owner publish다.
+   `purgeEndedStream()`은 event quarantine capacity를 읽지 않는다. ingress는 ended를 append하기 전에 같은 stream의 ordinary pending event를 모두 제거하므로
+   유효한 GUI-generation queue에는 같은 stream의 ordinary event 뒤 ended가 공존하지 않는다. sibling stream event는 ended
+   앞뒤에 있어도 byte-for-byte/order를 보존한다. live ordinary owner가 있으면 purge/attachment teardown은 `Busy`; purge가
+   active/terminal이면 take/release admission은 `Busy|Terminal`로 닫고 서로의 owner를 훔치거나 취소하지 않는다.
+
+   `Busy`는 active operation/cleanup/allocator callback/reentry이며 모든 owner/queue/wire/free mutation이 0이다.
+   public owner 인자의 주소는 owner field를 읽기 전에 binding registry의 `active_owner_addr` 또는 attachment의 canonical inline slot과
+   비교한다. 주소가 다른 copied/moved/foreign owner만 `InvalidOwner`/mutation 0이다. 주소가 canonical이고 node mirror가 active인데
+   owner self-address/raw lifecycle/generation/seal 또는 attachment projection이 current node generation과 다르면 `Corrupt`이며,
+   owner payload/allocator를 읽지 않고 trusted quarantine mirror로 current event를 handoff해 pin을 final-zero로 만든다. node mirror가
+   idle인 canonical slot에 stale bytes를 복원한 경우는 `Terminal`/mutation 0이다. 그 밖의 `InvalidOwner`는
+   stale transport·slot·node·binding·receipt 또는 foreign process/thread이고 stale
+   address를 역참조하거나 새 Client를 poison하지 않는다. `Corrupt`는 canonical live graph의 raw lifecycle, queue
+   descriptor/count/bytes/order, header/seal/provenance/range가 모순인 경우이며 connection을 exact once poison하되 take commit 전
+   queue ownership과 destination은 유지하고 임의 free는 0이다. canonical live owner의 release cleanup authority는 connection
+   poison/terminal보다 우선한다. projection OOM/violation이나 sibling socket failure가 Client를 먼저 poison해도 exact
+   owner/lease/seal/provenance가 유효하면 release는 pinned canonical allocator로 free하고 pin을 final-zero로 만든다.
+   canonical final-address owner의 `.releasing` 재귀 release와 live generation 없이 `.pristine|terminal`인 owner의 double/empty release는
+   `Terminal`이다. 반면 copied/moved/foreign-address stale copy만 `InvalidOwner`다. active canonical slot의 stale generation은 위 규칙대로
+   `Corrupt` handoff이고 idle canonical slot의 stale bytes는 `Terminal`이다. 이 lifecycle-first 분류는 payload나 pin
+   역참조보다 먼저 수행한다.
+   release precommit에서 owner/allocator provenance가 corrupt해 free가 안전하지 않으면 payload free 0으로 process-wide bounded
+   event no-free quarantine의 exact 한 slot에 authority를 transfer하고 cleanup pin과 source owner를 terminal로 만든 뒤
+   `Corrupt`를 반환한다. quarantine slot은 owner의 공개 bytes와 독립된 process-registry cleanup mirror다. ordinary take commit 전에
+   `{reservation/event generation, final owner address, payload address/length, canonical allocator identity, pin owner identity,
+   binding identity}`를 immutable하게 봉인한다. corrupt release는 registry identity와 canonical mirror만 검증하고 손상된 owner의
+   payload/allocator field는 역참조하지 않는다. quarantine은 retained payload를 free하지 않으며 trusted mirror로 pin을 exact once
+   소비한다. capacity는 `max_gui_attachments=max_inventory_runtimes=4,096`에서 derive한다. 별도 reservation ID/issuer는 만들지 않고
+   non-reused `{node_incarnation,event_generation,active_owner_addr}` tuple을 slot identity로 쓴다. event quarantine registry는
+   process-local checked count/byte accounting을 소유하며 retained byte hard cap은
+   `max_inventory_runtimes * protocol.max_control_json = 1 GiB`다. 곱셈은 comptime checked이고 entry는 `<=256 B`, 전체 descriptor table은
+   `<=1 MiB`로 고정한다. 구현은 별도 `max_gui_attachments` 상수를 만들지 않고 `protocol.max_inventory_runtimes`에서 직접 derive한다.
+   다른 module-private quarantine counter를 import하지 않는다. registry의 used/transferred slot count와 retained bytes는 공통 session-host
+   diagnostic DTO/구조화 로그에 노출하고 첫 `transferred_no_free`에서 connection diagnostic latch를 exact once 세우되 payload 주소/내용은 기록하지 않는다.
+   reservation lifecycle은 `empty|reserved|released|transferred_no_free`다. idle/ended_pending 및 모든 take
+   precommit 실패는 reservation 0이고, ordinary 후보가 완전히 검증된 뒤에만 reserve한다. 이후 take commit 실패는 queue/out 변경 전
+   reservation을 no-fail rollback한다. release `Busy`는 reserved를 보존하고, 정상 release는 callback 전 release-ready를 봉인한 뒤
+   callback 후 같은 owner turn의 no-fail suffix에서 `reserved->released->empty`로 간다. `released`는 identity와 trusted descriptor를
+   tombstone해 stale tuple이 canonical match하지 않음을 확인하는 transient state이며 fields zero/reset 뒤 empty를 게시한다.
+   `transferred_no_free`만 영구 점유한다. corrupt handoff만 `reserved->transferred_no_free`다. 빈 slot 또는 byte cap 부족은 ordinary
+   take의 `Busy`/mutation 0이다. event generation exhaustion은 transient permit/pin/reservation을 먼저 원복하고 binding event authority를
+   sticky terminal로 게시한 뒤 `EventError.Terminal`을 반환하며 process 전체 issuer/fail-stop으로 확대하지 않는다.
+   release가 `Busy`면 owner는 계속 live/free 0이다. 제품 owner storage는 stack 임시가 아니라 `GenerationAttachment` inline single
+   slot이므로 pump가 `AdminBusy`로 반환해도 unwind되지 않고 다음 tick에 같은 owner를 재시도한다. attachment teardown도 live owner를
+   먼저 release하거나 pre-reserved quarantine으로 transfer하기 전에는 drop을 시작하지 않는다. `ConnectionLease`는 node/slot 파괴만
+   pin한다. `GenerationAttachment` teardown/move는 canonical inline owner lifecycle과 event generation mirror를 별도로 검사해
+   `live|releasing`이면 `Busy`이고 owner cleanup 뒤에만 attachment lease/drop을 시작한다. copied/stale `InvalidOwner`는
+   canonical inline owner가 아니므로 canonical owner/pin을 바꾸지 않는다. projection/classification 오류가 있어도 release 결과를
+   버리지 않으며 release의 `Corrupt|Terminal`이 projection 오류보다 우선한다.
+
+   2c3d focused gate는 Debug·ReleaseFast에서 final-address lifecycle/raw tag 0...255, copy/move/replay/double release,
+   fork/foreign-thread/stale slot·node·binding·receipt, same-address old-generation restore, attachment의 sibling pin 불변,
+   idle/ordinary/ended_pending, sibling preservation, exact counter decrement,
+   queue/header/admission/allocator/range corruption, connection poison 뒤 release, pre-reserved quarantine transfer,
+   take/release callback reentry와 free exact once, canonical releasing/empty double release `Terminal` 대 stale copy/replay
+   `InvalidOwner`, simultaneous quarantine cap `4,095/4,096/4,097`, 순차 4,096회 정상 take/release 뒤 occupied 0과
+   4,097번째 성공, event generation max-1/max rollback,
+   owner payload pointer/length/allocator/seal 개별 drift 시 mutated descriptor dereference/free 0·trusted mirror retained·pin exact once,
+   canonical slot의 self-address/raw lifecycle/generation/seal 및 attachment projection 개별 drift가 trusted mirror handoff/pin final-zero로
+   수렴하고 idle canonical stale bytes는 `Terminal`인 것, `view Terminal -> release Corrupt -> trusted handoff/pin final-zero`,
+   post-poison cleanup-only node admission,
+   GenerationAttachment live-owner teardown `Busy`를 고정한다. 제품 socket fixture는
+   `take revoked -> borrow/classify -> fenceRevoke success while owner live -> release`, release callback 안의 fence `Busy`,
+   다른 attachment가 마지막 quarantine slot을 보유해도 target ended purge는 성공하는 것,
+   purge-first ended와 sibling 보존을 실행한다. boundary는 generation arm의 direct
+   `Client.takeEventForStream|releaseEvent|dropBufferedStream` callsite 0, legacy baseline, arbitrary stream/allocator/raw Client escape 0을
+   고정한다. public declaration oracle은 transport의 기존 exact 15 메서드에 `takeEvent|releaseEvent`를 포함한 수를 유지하고
+   `EventOwner.view` exact 1 및 DTO/error field set을 별도로 고정한다. 유효한 GUI queue에 same-stream ordinary+ended를 합성해
+   성공시키는 테스트는 금지하며 그런 모양은 corruption fixture다.
    controller mutation authority는 caller-writable transport bool이 아니라 node-local cleanup registry의 raw-tag-guarded
    `unavailable|live|revoke_pending|revoked` 상태가 SSOT다. validated revoke는 canonical stream operation permit을 잡고
    `live -> revoke_pending`으로 input을 먼저 닫은 뒤 payload demotion과 zero/partial pending-wire fence를 수행하고, 모든 반환에서

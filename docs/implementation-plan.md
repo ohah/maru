@@ -1371,7 +1371,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       별도 issuer 없이 `{node incarnation,event generation,owner address}`를 reservation identity로 쓰며 정상 release는 slot을 empty로
       재사용한다. ended 판정은 예약보다 먼저다.
       generation pump는 purge-first이고 ordinary take도 ended를 반환하지 않는다. C1 admission/allocator seal·node-canonical reusable owner/generation·ordinary take는 구현됐고,
-      C2 release/pin/quarantine/callback closure, C3 generation 제품 drain·ended priority·actual socket/source-zero의 세 PR-size gate로 나누며 각 gate가
+      C2 release/pin/quarantine/callback closure는 public `releaseEvent` exact 1개, std/scalar-only 4,096-slot·1 GiB
+      dedicated quarantine leaf, mutex 전 PID/owner-thread gate, binding registry의 one-shot recovery permit과 cleanup-only canonical
+      pin projection이 함께 있어야 하는 damaged-lease recovery, callback 전 전수 검증·모든 mutex 해제와 logical registered-node
+      operation pin 유지, stack final-address completion receipt에 의한 callback 뒤 lookup 없는 binding settlement와 pin-last no-fail
+      suffix를 한 vertical slice로 닫는다. `client_slot`만 transaction을 조정하고 raw Client는
+      canonical resource handoff를 알며, owner-local lifecycle은 기존 import 방향대로 `generation_event_contract`가 소유하고
+      `GenerationTransport.releaseEvent`가 scalar prepare→owner tombstone→resource commit→owner finalize를 조정한다. C2는
+      production-type facade exact 14이고 제품 event callsite는 0이다.
+      C3 generation 제품 drain·ended priority·actual socket/source-zero의 세 PR-size gate로 나누며 각 gate가
       Debug·ReleaseFast focused sentinel과 boundary를 가진다. 2c3d 완료 전에는 generation event source-zero를 주장하지 않는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는

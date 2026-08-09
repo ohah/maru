@@ -1007,7 +1007,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    allocator, receipt, Client pointer는 인자·결과 어디에도 없다.
 
    `EventOwner`의 **각 event incarnation**은 caller의 final address에서
-   `pristine -> live -> releasing -> pristine`으로 exact once 소비되며 corrupt handoff만 `live|releasing -> terminal`로 닫힌다.
+   `pristine -> live -> releasing -> pristine`으로 exact once 소비되며 callback 전 corrupt handoff만 `live -> terminal`로 닫힌다.
    inline storage는 다음 event에 재사용하지만, canonical ClientNode binding-registry entry가
    `{next_event_generation,active_event_generation,active_owner_addr}`를 소유하고 take마다 checked-monotonic
    `event_generation`을 발급한다. `GenerationAttachment`의 event-authority mirror는 이 node SSOT의 검증된 projection이며,
@@ -1015,6 +1015,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    binding의 event authority를 sticky terminal로 닫는다. 따라서 owner와 attachment mirror를 함께 이전 bytes로 복원해도 node의
    active generation과 일치하지 않아 새 event나 다른 cleanup pin을 소비할 수 없다. `ConnectionLease`는 node/slot cleanup pin일 뿐
    event receipt SSOT가 아니며, 별도 copyable event receipt registry도 만들지 않는다.
+   C2 canonical binding `EventAuthorityLifecycle`의 exact tag는 `idle|reserved|live|releasing|terminal`이다.
+   take는 `idle->reserved->live`, precommit 실패는 `reserved->idle`로 active publication을 원복하되 발급 generation은 burn한다.
+   정상 release는 callback 전에 `live->releasing`, callback 뒤 exact completion receipt와 같은 row가 일치할 때
+   `releasing->idle`이다. corrupt handoff는 callback 전 `live->terminal`로만 sticky 전환하면서 active generation/owner identity를
+   one-shot `EventPinRecoveryPermit`으로 이전하고 canonical row의 active fields를 terminal tombstone으로 지운다.
+   `releasing`은 exact matching `PreparedEventReleaseCompletion`만 `idle`로 소비할 수 있고 terminalize/handoff/teardown은 permit 발급·pin/count/free 0의
+   `Busy|Terminal`이다. `releasing`에서 view와 same-owner recursive release는 `Terminal`, 다른 operation은 `Busy`다. C2 gate는 raw tag 0...255,
+   illegal transition, completion/permit replay와 tag/field compile oracle을 고정한다.
    `takeEvent`는 byte-canonical pristine destination만 받고, copied/moved/stale-generation owner와 occupied destination을
    `InvalidOwner`/mutation 0으로 거부한다. 성공한 owner의 `view()`는 owner가 live인 동안만 유효한 immutable
    `EventView`를 빌려 준다. `view()`도 owner bytes의 embedded pointer를 따라가지 않고 registry-resolved ClientNode
@@ -1048,7 +1056,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    allocator만 쓴다. allocator callback 동안
    같은 canonical `.releasing` owner의 recursive release는 `Terminal`, stale copy/replay release는 `InvalidOwner`이고,
    input/control/RPC/purge/teardown과 다른 event operation은 `Busy`다. callback 반환 뒤에는
-   release permit→quarantine reservation 반환→ConnectionLease cleanup pin→canonical mirror idle→owner pristine 순서의
+   release permit/registered-node authority 유지→quarantine reservation 반환→canonical binding mirror idle→마지막 node
+   dereference 뒤 ConnectionLease cleanup pin→owner pristine 순서의
    no-fail suffix만 허용한다. free가 시작된 뒤 fallible lookup,
    allocation, callback 추가 실행, 다른 allocator 선택은 0이다.
 
@@ -1091,12 +1100,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `<=1 MiB`로 고정한다. 구현은 별도 `max_gui_attachments` 상수를 만들지 않고 `protocol.max_inventory_runtimes`에서 직접 derive한다.
    다른 module-private quarantine counter를 import하지 않는다. registry의 used/transferred slot count와 retained bytes는 공통 session-host
    diagnostic DTO/구조화 로그에 노출하고 첫 `transferred_no_free`에서 connection diagnostic latch를 exact once 세우되 payload 주소/내용은 기록하지 않는다.
-   reservation lifecycle은 `empty|reserved|released|transferred_no_free`다. idle/ended_pending 및 모든 take
+   reservation lifecycle은 `empty|reserved_unbound|reserved|releasing|transferring|released|transferred_no_free`다. idle/ended_pending 및 모든 take
    precommit 실패는 reservation 0이고, ordinary 후보가 완전히 검증된 뒤에만 reserve한다. 이후 take commit 실패는 queue/out 변경 전
    reservation을 no-fail rollback한다. release `Busy`는 reserved를 보존하고, 정상 release는 callback 전 release-ready를 봉인한 뒤
-   callback 후 같은 owner turn의 no-fail suffix에서 `reserved->released->empty`로 간다. `released`는 identity와 trusted descriptor를
+   callback 전 `reserved->releasing`, callback 후 같은 owner turn의 no-fail suffix에서 `releasing->released->empty`로 간다. `released`는 identity와 trusted descriptor를
    tombstone해 stale tuple이 canonical match하지 않음을 확인하는 transient state이며 fields zero/reset 뒤 empty를 게시한다.
-   `transferred_no_free`만 영구 점유한다. corrupt handoff만 `reserved->transferred_no_free`다. 빈 slot 또는 byte cap 부족은 ordinary
+   `transferred_no_free`만 영구 점유한다. corrupt handoff만 `reserved->transferring->transferred_no_free`다. 빈 slot 또는 byte cap 부족은 ordinary
    take의 `Busy`/mutation 0이다. event generation exhaustion은 transient permit/pin/reservation을 먼저 원복하고 binding event authority를
    sticky terminal로 게시한 뒤 `EventError.Terminal`을 반환하며 process 전체 issuer/fail-stop으로 확대하지 않는다.
    release가 `Busy`면 owner는 계속 live/free 0이다. 제품 owner storage는 stack 임시가 아니라 `GenerationAttachment` inline single
@@ -1118,7 +1127,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    canonical slot의 self-address/raw lifecycle/generation/seal 및 attachment projection 개별 drift가 trusted mirror handoff/pin final-zero로
    수렴하고 idle canonical stale bytes는 `Terminal`인 것, `view Terminal -> release Corrupt -> trusted handoff/pin final-zero`,
    post-poison cleanup-only node admission,
-   GenerationAttachment live-owner teardown `Busy`를 고정한다. 제품 socket fixture는
+   C2는 transport terminalize/ClientSlot node teardown이 live cleanup pin에서 `Busy`, corrupt mirror에서 trusted handoff로
+   수렴하는 것을 고정한다. `GenerationAttachment` inline lifecycle과 attachment teardown `Busy -> release -> success`는 C3가 고정한다. 제품 socket fixture는
    `take revoked -> borrow/classify -> fenceRevoke success while owner live -> release`, release callback 안의 fence `Busy`,
    다른 attachment가 마지막 quarantine slot을 보유해도 target ended purge는 성공하는 것,
    purge-first ended와 sibling 보존을 실행한다. boundary는 generation arm의 direct
@@ -1139,6 +1149,104 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    넘거나 주소가 봉인된 canonical slot과 exact 일치하지 않으면 compile/admission 단계에서 거부한다.
    public release·cleanup pin·quarantine은 C2,
    `GenerationAttachment` inline owner와 purge-first 제품 drain·actual socket/source-zero는 C3 미구현 범위다.
+   C2는 `GenerationTransport.releaseEvent(owner:*EventOwner) EventError!void` 하나만 public facade에 추가해
+   transport declaration을 exact 14로 만든다. C2의 production-type facade take/release는 test-only settlement를 호출하지 않으며,
+   C3가 소유하는 `GenerationAttachment` 제품 drain·purge orchestration도 선취하지 않는다. C2의 private 구현 경계는
+   `generation_event_contract`의 512-byte opaque owner 확장, `client_slot`의 exact-stream release transaction,
+   그리고 std/scalar만 import하는 별도 `generation_event_quarantine` leaf다. quarantine leaf는 `Client`, `EventOwner`,
+   allocator callback과 socket을 import하지 않고 process/thread/node/event/owner scalar identity와 trusted cleanup mirror만 보존한다.
+
+   `client_slot`은 node/binding/pin/quarantine/payload free의 canonical resource transaction을 조정하는 유일한 owner다.
+   public owner envelope의 local lifecycle은 import 방향을 보존해 `generation_event_contract`가 소유하고
+   `GenerationTransport.releaseEvent`가 두 단계를 조정한다. 먼저 `generation_event_contract`가 owner bytes에서 scalar-only
+   release projection을 만들고, `client_slot.prepareGenerationEventRelease(projection,&prepared)`가 모든 canonical resource를
+   검증하며 caller stack final-address `PreparedEventReleaseCompletion`과 live registered-node operation을 반환한다. 이어
+   `generation_event_contract.publishReleasing(owner,prepared.owner_seal)`이 owner를 no-fail tombstone하고,
+   `client_slot.commitGenerationEventRelease(&prepared)`가 callback과 resource suffix를 끝낸 뒤,
+   `generation_event_contract.finalizeRelease(owner,prepared.disposition)`이 owner를 pristine/terminal로 local no-fail 마감한다.
+   `client_slot`은 `generation_event_contract`/`EventOwner`를 import하지 않고 scalar projection과 final address만 받으며,
+   owner finalize 뒤 node 접근은 0이다. boundary는 이 호출을 각각 exact 1과 역방향 import 0으로 고정한다. C2 take는 원 PID와
+   `GenerationTransport.owner_thread_id`를 registry mutex 또는 owner/quarantine/PinOwner pointer 접근 전에 검증한다. lock 순서는
+   registered node operation→stream permit→quarantine unbound count+byte reservation→cleanup pin prepare→event generation reserve와
+   quarantine row bind→queue
+   commit이다. 각 fallible 단계는 private rollback receipt를 남기고 다음 단계 실패 시 역순으로 mutation 0까지 되돌린다.
+   여기서 mutation 0은 queue/out, pin, quarantine count+bytes와 active binding publication의 원상복구를 뜻하며,
+   checked-monotonic event generation과 registry issuer는 실패해도 burn하고 절대 되감거나 재사용하지 않는다.
+   destination/final-address/512-byte containment·seal storage와 owner publication 가능성까지 queue commit 전에 검증하며,
+   `Client.commitGenerationEventTake`가 마지막 fallible 지점이다. queue commit 뒤 registry publication→owner publish→permit consume은
+   rollback 없는 no-fail suffix다. `idle|ended_pending`은 pin/reservation 0이다. C2 release도 PID/thread를
+   mutex와 pointer dereference 전에 검증하고, binding generation·canonical owner address·lease·stable allocator·trusted mirror를
+   모두 통과한 뒤 owner/mirror를 `releasing`으로 먼저 게시한다. allocator free callback이 시작된 뒤에는 lookup, allocation,
+   allocator 선택, seal 재계산처럼 실패할 수 있는 작업이 없다. callback 직전에는 owner/binding/quarantine row를 `releasing`으로
+   tombstone하고 threadlocal callback latch를 게시한 뒤 **모든 mutex를 해제**한다. 다만 callback 전에 발급한
+   `RegisteredNodeOperation`의 logical ClientSlot-operation pin과 canonical node pointer authority는 callback 전체에 live로 유지한다.
+   이는 mutex 소유가 아니며 node unregister/deinit만 막는다. callback 동안 same-owner release는 mutex 전에
+   `Terminal`, foreign address는 `InvalidOwner`, 그 밖의 같은 transport operation은 `Busy`다. callback 반환 뒤에는 owner/lease/Client
+   bytes를 재검증하거나 registry lookup/reacquire하지 않고 이미 live인 operation authority와 private final-address completion receipt로 quarantine settlement→
+   binding generation settlement→마지막 node dereference→cleanup pin release→owner local finalize 순서의 no-fail suffix만 실행한다.
+
+   completion receipt의 sole owner는 `GenerationTransport.releaseEvent` caller stack의 final-address
+   `PreparedEventReleaseCompletion`이고 type과 canonical mutation은 `client_slot`만 소유한다. exact scalar tuple은
+   `{self address,PID,owner thread incarnation,registered operation id/index,slot/node address+incarnation,binding reservation,
+   event generation,owner address,quarantine slot identity,prepared pin-release identity}`이고 closed lifecycle은
+   `pristine->prepared->callback_active->consumed|terminal`이다. callback 전 binding/quarantine tombstone은 receipt의 exact
+   address와 generation을 봉인한다. copied/moved/replayed/same-address old-generation receipt는 suffix를 시작하지 못하며 ordinary
+   `beginRegisteredNodeOperation` fallback은 0이다. callback 후 mutex 재획득은 각 기존 row를 settle하기 위한 동일 lock-order의
+   infallible wait뿐이고 allocation, 다른 callback, 새 authority 발급은 0이다. mismatch는 외부 typed failure가 아니라 process-fatal
+   private invariant violation이다. registered operation은 pin release까지 유지하고 exact once 끝낸다. 그 뒤 transport가 수행하는
+   owner local finalize는 node/binding/pin/quarantine을 읽지 않는다. completion receipt는 semantic authority나 두 번째 event SSOT가
+   아니라 이미 `releasing`으로 tombstone된 canonical binding/quarantine row의 exact-one continuation proof뿐이다.
+   clean commit은 allocator callback보다 먼저 binding row의 exact completion address/operation id를 one-shot 소비하고,
+   callback 뒤에는 그 소비 결과로만 settlement한다. corrupt commit도 pin 감소보다 먼저 terminal binding row의 exact recovery
+   permit을 one-shot 소비한다. 따라서 copied/moved/same-address replay는 free나 pin 변경을 시작하기 전에 private invariant로 중단된다.
+
+   owner 안의 `ConnectionLease` bytes가 손상됐을 때 그 lease를 receiver로 삼거나 다시 읽어 pin을 소비하지 않는다. C2는
+   두 권위를 분리한다. binding registry는 callback 전 corrupt로 판정한 active `live`
+   `{node_incarnation,event_generation,owner_addr}`만 `terminal`로 one-shot 소비해 `EventPinRecoveryPermit`을 발급하고,
+   `releasing` row에서는 permit을 발급하지 않는다. lease publication은 canonical `PinOwner` 주소와 slot/node incarnation,
+   host/connection generation, stream, PID/process nonce, owner thread, canonical lease address의 cleanup-only scalar projection을
+   quarantine trusted mirror에 봉인한다. projection 단독은 freshness나 pin release 권위가 아니고 event generation/owner를 판정하지 않는다.
+   `client_slot`은 registered-node lookup으로 slot/node incarnation을 먼저 고정한 뒤 registry permit과 projection이 같은 canonical
+   node/lease/pin을 가리킬 때만 `connection_lease`의 module-public·facade-nonexported static generic cleanup primitive를 호출한다.
+   그 primitive는 damaged `*ConnectionLease` receiver, event payload, allocator, `EventOwner`, callback을 받지 않고 validated
+   `*PinOwner`의 pin 하나만 no-fail consume한다. boundary는 barrel/public facade export 0과 `client_slot` production caller exact 1을 고정한다.
+   정상 release는 callback 전에 final-address prepared pin release를 만들고 `PinOwner.active_cleanup=1`을 게시한다. 기존 lease/PinOwner
+   validation이 semantic SSOT지만 fallible `ConnectionLease.release()`를 callback 뒤 다시 호출하지 않고 prepared authority의 unchecked
+   suffix를 사용한다. corrupt handoff는 quarantine row를 `reserved->transferring`으로 먼저 tombstone하고 위 두 권위가 함께
+   유효할 때만 `transferred_no_free`와 pin consume을 commit한다. private registry/quarantine mirror는 callback과 public owner가
+   쓸 수 없는 trusted SSOT이며 raw tag/digest 불일치는 외부 입력 corruption으로 복구를 추측하지 않고 process-fatal invariant violation이다.
+   `PinOwner`와 private completion authority는 allocator에 alias되지 않는 session-host private memory이며 allocator callback의
+   API 재진입은 위 분류로 지원하지만 arbitrary out-of-bounds write로 그 private memory를 바꾸는 것은 Zig memory-safety 위반으로
+   위협 모델 밖이다. callback이 public `EventOwner`/embedded lease bytes를 합법적으로 변조하는 경우는 지원하며 suffix는 이를 재독하지 않는다.
+
+   C2 release 분류는 callback closure까지 고정한다. 같은 canonical `.releasing` owner의 재귀 release는 `Terminal`, 다른 주소의
+   copy/foreign owner는 `InvalidOwner`, callback 중 같은 transport의 다른 event/input/control/RPC/purge/teardown은 `Busy`다.
+   정상 release는 quarantine `reserved->releasing->released->empty`와 pin final-zero 후 owner를 byte-canonical pristine으로 돌려 같은 주소의
+   다음 generation에 재사용한다. canonical live owner의 payload/allocator/lease/lifecycle/generation/seal 한 필드 또는 서로 맞춘
+   coherent forge는 owner bytes를 cleanup authority로 쓰지 않고 trusted mirror를 `transferred_no_free`로 영구 전환해 payload free 0,
+   pin exact once consume, connection poison exact once, owner terminal로 수렴한다. queue에 아직 남은 `BufferedEvent`의 raw Client
+   drop/deinit은 기존 canonical allocator cleanup을 유지한다. owner로 이전된 event는 raw Client가 알거나 직접 handoff하지 않으며,
+   transport terminalize/ClientSlot registered-node teardown만 active generation·pin·trusted mirror를 preflight해 `Busy` 또는 같은
+   quarantine handoff로 닫는다. raw Client deinit은 live cleanup pin 때문에 도달하지 못하며 direct event free 경로를 추가하지 않는다.
+   corrupt handoff의 poison은 registered shared operation 안에서 first reason과 `unusable`을 no-fail 게시하고, fd/external-mode의
+   물리 close는 그 operation이 끝난 뒤 기존 최종 owner teardown이 수행한다. 이 deferred close는 신규 요청을 허용하는 soft poison이 아니다.
+
+   C2 전용 TDD gate는 normal release/reuse, post-poison release, allocator callback 재진입, owner/lease/payload/allocator/seal의
+   one-field·coherent forge, copy/move/address ABA, payload alias/range overflow, simultaneous 4,095/4,096/4,097 slot과 byte cap
+   exact/cap+1, 4,096회 sequential normal release 뒤 occupied 0과 4,097번째 성공, pin/permit counter drift·overflow,
+   fork/foreign-thread/two-thread release, transport/ClientSlot teardown `Busy` 뒤 성공, take rollback과 `ended_pending` reservation 0,
+   callback 직전 모든 mutex의 비소유·callback 중 owner/lease 변조 뒤 재독 0·sibling teardown 격리·binding settlement 전 node 생존을
+   Debug·ReleaseFast exact-count로 고정한다. boundary는 C2 facade 14, `takeEvent` exact 1, `releaseEvent` exact 1,
+   `purgeEndedStream` exact 0, generation product callsite 0, direct generation `Client` event callsite 0,
+   quarantine registry production definition exact 1과 private import allowlist를 고정한다. C1 테스트를 C2 전용 count에 포함하지 않는다.
+   allocator callback의 panic/noreturn은 suffix를 실행할 수 없으므로 지원하지 않는 process-fatal allocator 계약이다. 1 GiB cap은
+   실제 1 GiB RSS를 만들지 않고 logical descriptor로 시험하며 count/bytes checked-add의 어느 한쪽 실패도 mutation 0, replay charge 0,
+   transferred row만 영구 점유, 진단 payload 주소/내용 0을 검증한다. C2-exclusive exact count의 SSOT는 구현 전 RED에서 추가하는
+   `test-session-host-2c3d-c2` build sentinel 하나이고 문서는 그 gate 이름만 참조한다.
+   quarantine row raw lifecycle은 `empty|reserved_unbound|reserved|releasing|transferring|released|transferred_no_free`이며 generation reserve 실패는
+   `reserved_unbound` row, count/bytes와 pin을 모두 0으로 되돌리되 발급을 시도한 monotonic identity만 재사용하지 않는다.
+   PID/thread pre-lock gate는 mutable transport scalar만 믿지 않고 registered-node registry의 canonical
+   `operation_owner_thread_incarnation`과 exact 일치해야 하며 mismatch는 owner/quarantine/PinOwner dereference 0이다.
    controller mutation authority는 caller-writable transport bool이 아니라 node-local cleanup registry의 raw-tag-guarded
    `unavailable|live|revoke_pending|revoked` 상태가 SSOT다. validated revoke는 canonical stream operation permit을 잡고
    `live -> revoke_pending`으로 input을 먼저 닫은 뒤 payload demotion과 zero/partial pending-wire fence를 수행하고, 모든 반환에서

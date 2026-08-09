@@ -793,6 +793,9 @@ const status_bar_height_pt: u32 = 22;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
 const status_bar_edge_pad_pt: u32 = 8;
 const status_bar_gap_pt: u32 = 12;
+/// 상태바 **상단 경계선** 두께(논리 pt). 배경 띠 **안쪽 맨 위**에 그으므로 `dock_layout`이 깎아 둔
+/// 높이는 그대로다 — 선을 추가한다고 작업영역이 줄지 않는다.
+const status_bar_border_pt: u32 = 1;
 /// 호버 배경이 항목 좌우로 넓어지는 여백(논리 pt, 한쪽). 글자에 딱 붙은 배경은 답답해 보인다.
 /// **항목 간격(gap)보다 두 배 이상 작아야** 이웃 호버끼리 겹치지 않는다(4×2 < 12).
 const status_bar_item_pad_pt: u32 = 4;
@@ -16737,6 +16740,7 @@ pub const AppSession = struct {
             // 배열 순서가 painter 순서인 것은 **같은 버킷 안**(탭 밴드·상태바 배경·호버)에서만이다.
             self.appendStatusBarBackground();
             self.appendStatusBarHover(); // 클릭 가능한 항목 위 호버 배경(배경 바로 뒤 = 같은 bottom 버킷 안에서 위)
+            self.appendStatusBarTopBorder(); // 상단 경계선 — 호버 **뒤**라야 호버한 항목 위에서 선이 안 끊긴다
             notification_ops.appendNotificationBadge(self); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             pane_ops.appendPaneScrollbars(self); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             sidebar_ops.appendSidebarScrollbar(self); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
@@ -18858,6 +18862,30 @@ pub const AppSession = struct {
             // (`tokens.statusBarBg`). 예전엔 사이드바와 **같은 색**이라 경계가 안 보였다(사용자 제보).
             // window.opacity는 그대로 반영한다(straight-alpha quad 경로).
             self.chromeQuadBg(packOpaqueRgb(chrome.tokens.statusBarBg(
+                self.appearance.theme.sidebar_background,
+                self.appearance.theme.background,
+            ))),
+            status_bar_layer,
+        );
+    }
+
+    /// 상태바 **상단 경계선**. 띠 **안쪽 맨 위**에 겹쳐 그린다 — 바 밖에 그리면 터미널 마지막 행을 덮고,
+    /// 높이를 늘리면 작업영역이 줄어든다(§4.0). 바가 선보다 얇으면 바 높이로 clamp해 밖으로 새지 않는다.
+    ///
+    /// **호출 순서가 계약이다**: 항목 호버 배경(`appendStatusBarHover`)은 슬롯이 바 전체 높이라 선과 같은
+    /// 자리를 칠한다. 같은 bottom 버킷 안에서는 배열 순서가 painter 순서라, 호버 **뒤에** 내지 않으면
+    /// 호버한 항목 위에서만 선이 끊긴다.
+    fn appendStatusBarTopBorder(self: *AppSession) void {
+        const h = self.statusBarHeightPx();
+        if (h == 0 or self.backing_width_px == 0 or self.backing_height_px == 0) return;
+        const border_h = @min(layout_math.ptToPx(status_bar_border_pt, self.scale_milli), h);
+        if (border_h == 0) return;
+        self.appendSolidQuad(
+            0,
+            @floatFromInt(self.backing_height_px -| h),
+            @floatFromInt(self.backing_width_px),
+            @floatFromInt(border_h),
+            self.chromeQuadBg(packOpaqueRgb(chrome.tokens.statusBarBorder(
                 self.appearance.theme.sidebar_background,
                 self.appearance.theme.background,
             ))),
@@ -49434,9 +49462,11 @@ test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(bottom 
     // **기하로 찾는다.** bottom 버킷은 값 2 하나뿐이라 탭 밴드와 레이어를 공유한다 — 레이어만으로는
     // 상태바를 특정할 수 없다(옛 테스트가 탭 밴드 quad를 잡아 오해를 낳았다).
     const bar_y: f32 = @floatFromInt(session.backing_height_px - h);
+    // 높이까지 본다 — 같은 y·전폭에 **상단 경계선**도 있어서(§4.0) 높이를 안 보면 선을 배경으로 오인한다.
     var found: ?metal_frame.GpuQuad = null;
     for (session.gpu_quads.items) |q| {
-        if (q.y == bar_y and q.w == @as(f32, @floatFromInt(session.backing_width_px))) found = q;
+        if (q.y == bar_y and q.w == @as(f32, @floatFromInt(session.backing_width_px)) and
+            q.h == @as(f32, @floatFromInt(h))) found = q;
     }
     const bar = found orelse return error.StatusBarQuadMissing;
     try std.testing.expectEqual(@as(f32, 0), bar.x); // 창 전폭 — 사이드바 아래까지 지나간다
@@ -49455,9 +49485,86 @@ test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(bottom 
     var still = false;
     const bar_y2: f32 = @floatFromInt(session.backing_height_px - h);
     for (session.gpu_quads.items) |q| {
-        if (q.y == bar_y2 and q.w == @as(f32, @floatFromInt(session.backing_width_px))) still = true;
+        if (q.y == bar_y2 and q.w == @as(f32, @floatFromInt(session.backing_width_px)) and
+            q.h == @as(f32, @floatFromInt(h))) still = true;
     }
     try std.testing.expect(still);
+}
+
+// 상태바 상단 경계선(§4.0). 배경과 **같은 자리**라 기하만으로는 안 갈린다 — 높이·색·순서 셋으로 못박는다.
+test "SB1-S2b: 상태바 상단에 경계선이 서고 배경보다 뒤에 그려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    const h = session.statusBarHeightPx();
+    try std.testing.expect(h > 0);
+    const border_h = layout_math.ptToPx(status_bar_border_pt, session.scale_milli);
+    try std.testing.expect(border_h > 0 and border_h < h);
+
+    const bar_y: f32 = @floatFromInt(session.backing_height_px - h);
+    const full_w: f32 = @floatFromInt(session.backing_width_px);
+    var bg_i: ?usize = null;
+    var line_i: ?usize = null;
+    for (session.gpu_quads.items, 0..) |q, i| {
+        if (q.y != bar_y or q.w != full_w) continue;
+        if (q.h == @as(f32, @floatFromInt(h))) bg_i = i;
+        if (q.h == @as(f32, @floatFromInt(border_h))) line_i = i;
+    }
+    const bi = bg_i orelse return error.StatusBarQuadMissing;
+    const li = line_i orelse return error.StatusBarBorderMissing;
+    try std.testing.expect(li > bi);
+    try std.testing.expectEqual(@as(u32, 2), session.gpu_quads.items[li].layer);
+    // 색: 배경과 달라야 선이 보인다(같으면 그린 게 없는 것과 같다).
+    try std.testing.expect(session.gpu_quads.items[li].fill_color0 != session.gpu_quads.items[bi].fill_color0);
+    // 선은 바 **안**에 있다 — 밖으로 새면 터미널 마지막 행을 덮는다.
+    try std.testing.expect(session.gpu_quads.items[li].y + session.gpu_quads.items[li].h <=
+        @as(f32, @floatFromInt(session.backing_height_px)));
+
+    // **순서 계약을 호버로 실증한다.** 호버 배경은 슬롯이 바 전체 높이라 선과 같은 자리를 칠한다 — 선이
+    // 호버보다 앞에 나가면 호버한 항목 위에서만 선이 끊긴다. 배경보다 뒤라는 것만으로는 이걸 못 잡는다.
+    // 이 스모크 세션은 표시할 항목이 없어 tree가 빈다 — 리소스 표시 문자열을 직접 세워 **실제 항목**을
+    // 하나 만들고(다른 상태바 테스트와 같은 주입 경로) 그 위에 호버를 건다.
+    const ru = maru.session.resource_usage;
+    var text_buf: [ru.text_max_bytes]u8 = undefined;
+    const text = ru.format(&text_buf, .{ .footprint_bytes = 512 * 1024 * 1024, .cpu_permille = 100 });
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    // tree 발행은 `collectStatusBarItems`가 한다 — 다른 상태바 렌더 테스트와 같은 직접 호출 경로다.
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), .{ .default_fg = session.appearance.theme.foreground });
+    const tree = session.statusBarTree();
+    if (tree.entries.len == 0) return error.StatusBarTreeEmpty;
+    session.status_bar_hovered = @enumFromInt(tree.entries[0].id);
+    session.metal_dirty = true; // chrome을 다시 짓게 한다(안 그러면 앞 프레임 quad가 그대로 남는다)
+    _ = try session.tick();
+
+    var hover_i: ?usize = null;
+    var line_i2: ?usize = null;
+    for (session.gpu_quads.items, 0..) |q, i| {
+        if (q.y != bar_y) continue;
+        if (q.w == full_w and q.h == @as(f32, @floatFromInt(border_h))) line_i2 = i;
+        // 호버는 항목 슬롯 폭(전폭보다 좁다) × 바 전체 높이다.
+        if (q.w < full_w and q.h == @as(f32, @floatFromInt(h))) hover_i = i;
+    }
+    const hi = hover_i orelse return error.StatusBarHoverQuadMissing;
+    const li2 = line_i2 orelse return error.StatusBarBorderMissing;
+    try std.testing.expect(li2 > hi);
 }
 
 // SB1-S2a: 상태바 높이의 **단일 권위는 `dock_layout`**이다. ABI로 나가는 값(사이드바 strip을 자르는 값)과

@@ -1471,16 +1471,23 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       nonblocking pump와 pending-output/resync stream은 progress `false`, raw `callOrdered` RPC는 `AdminBusy`, observer resize는 success
       no-op다. owner-retention exact 표의 SSOT는 persistent-session-host.md가 소유한다. future 2c3e RPC execute는 helper signature만 예약하고
       caller 편입은 2c3e gate가 소유한다.
-      **C3-3a3 product activation**이 기존 take/release에 a1을, 현재 존재하는 모든 generation mutation final admission에 a2를 동시에
-      배선한다. queue commit 전 generation/class reserve·bind가 끝나고 `Client` queue commit→existing authority live publication은
-      fallible callback 0의 연속 no-fail suffix이며, live `StreamOperationPermit`과 owner-thread/no-yield가 직렬화한다. registered-node
-      operation은 그 전에 끝나므로 handoff 근거가 아니다. final gate는 검사부터 allocation·queue offset·syscall commit까지 같은
-      family별 existing execution lease를 유지한다. shared pin만으로는 다른 shared mutation을 배제하지 않으므로 직렬화 근거로 쓰지
-      않는다. product activation 전 a1/a2 callsite는 0이므로 반쪽 보호가 사용자 경로에 노출되지 않는다.
+      **C3-3a3 product activation(doc-first 진행, product caller 0)**은 기존 take/release에 a1을, 현재 존재하는 모든 generation mutation
+      consumer에 a2를 동시에 배선한다. take는 blocker producer이므로 target queued event와 자신이 reserve한 aggregate에 다시 막히는 a2
+      consumer predicate를 사용하지 않고 producer 전용 final-address activation transaction을 쓴다. permit→prepare→registered
+      operation→direct execution lease→held validate/borrow 뒤에만 payload를 역참조하고 quarantine/pin/a1을 reserve·bind한다. accepted
+      preflight의 exact `event == .revoked`만 `EventOrderingClass.controller_revoke`이고 unknown 및 다른 accepted event는 `.none`이다.
+      transaction은 canonical receipt lifecycle을 복제하지 않고 final-address seal, closed phase와 live-bit tuple만 rollback orchestration
+      SSOT로 소유한다. held commit 뒤 a1 publish→permit no-fail consume→lease downgrade→transaction consume→operation release는
+      실패·callback 0 suffix다.
+      mutation consumer final gate는 검사부터 allocation·queue offset·syscall commit까지 family별 existing execution lease를 유지한다.
+      shared pin만으로는 다른 shared mutation을 배제하지 않으므로 직렬화 근거로 쓰지 않는다. product activation 전 a1/a2 callsite는 0이다.
+      `idle|ended_pending`은 payload 역참조와 activation transaction/operation/lease/quarantine/pin/a1이 모두 0이다. `idle`은 prepared
+      storage pristine을 유지하고 `ended_pending`만 prepared descriptor를 먼저 tombstone하며 둘 다 permit no-fail consume을 수행한다.
       a3은 Debug·ReleaseFast product runtime 8+actual-socket 2+boundary 1을 실행한다. quarantine reserve→pin reserve→generation
-      reserve→quarantine/cleanup bind의 각 precommit fault와 `Client.commitGenerationEventTake`의
-      `Busy|Terminal|Corrupt|InvalidPrepared`는 reserve 뒤 cache를 exact rollback해
-      `(queue=1,aggregate=0,permit/pin/quarantine/reserved-authority=0)`으로 수렴한다. queue commit 성공 뒤에는
+      reserve→quarantine/cleanup bind의 각 precommit fault와 ClientSlot-only held commit wrapper의
+      `Terminal|Corrupt|InvalidPrepared`는 reserve 뒤 cache를 exact rollback한다. direct lease 획득 `Busy`는 transaction 생성 전
+      public prepared abort/reset→operation release→permit abort로 정산해 reserve 전 mutation 0과
+      `(queue=1,prepared=pristine,aggregate=0,permit/pin/quarantine/reserved-authority=0)`으로 수렴한다. queue commit 성공 뒤에는
       `(queue=0,aggregate=1)`만 허용한다. target pending outbound
       offset 0은 exact free 1/wire 0, partial offset은 no-retry fail-close, sibling pending은 offset/owner 보존·flush 0 뒤 aggregate zero에서
       재개한다. callback/foreign/teardown/check 직후 revoke 경쟁은 allocation/callback/offset/syscall 0과 persistent-session-host.md

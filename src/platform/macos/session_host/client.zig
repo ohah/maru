@@ -9957,6 +9957,34 @@ pub const Client = struct {
         // a typed terminal before any runtime can project the corrupted parsed view.
         for (self.pending_events.items, 0..) |frame, i| {
             if (!frame.sealMatches(self.allocator)) {
+                if (builtin.is_test) {
+                    const seal_value = frame.admission_seal;
+                    std.debug.print(
+                        "client event seal mismatch: stream={d} preflight={s} seal={} header={} allocator={} address={} length={} digest={} admission={}\n",
+                        .{
+                            frame.header.stream_id,
+                            if (frame.preflight == null) "raw" else @tagName(frame.preflight.?),
+                            seal_value != null,
+                            if (seal_value) |seal| std.meta.eql(seal.header, frame.header) else false,
+                            if (seal_value) |seal| std.meta.eql(seal.allocator, self.allocator) else false,
+                            if (seal_value) |seal| seal.payload_addr == @intFromPtr(frame.payload.ptr) else false,
+                            if (seal_value) |seal| seal.payload_len == frame.payload.len else false,
+                            if (seal_value) |seal| blk: {
+                                const digest = runtime_event_wire.payloadDigest(frame.payload);
+                                break :blk std.mem.eql(u8, &seal.payload_digest, &digest);
+                            } else false,
+                            if (seal_value) |seal| blk: {
+                                const verdict = frame.preflight orelse break :blk false;
+                                break :blk switch (verdict) {
+                                    .accepted => |accepted| std.meta.activeTag(seal.admission) == .accepted and
+                                        runtime_event_wire.eventPreflightEql(seal.admission.accepted, accepted),
+                                    .unknown => std.meta.activeTag(seal.admission) == .unknown,
+                                    else => false,
+                                };
+                            } else false,
+                        },
+                    );
+                }
                 const owned = self.pending_events.orderedRemove(i);
                 self.pending_event_bytes -= owned.payload.len;
                 owned.deinit(self.allocator);

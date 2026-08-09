@@ -193,7 +193,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // measured 텍스트 캐시를 소비처별 슬롯 + 공용 헬퍼(hit/store/clear)로 일반화하며 또 바뀐다
     // (docs/file-explorer.md §3.5 이관 1단계). count는 4 그대로다 — 캐시 소유권 규칙을 한곳에 모은 것뿐이고,
     // Client 구성·receiver 집합과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "5d3d5d6edeb4cd1cb3682edea53b4a9a83c5dc8ea220bc216434c851105b99e7" },
+    // SV6a(공용 lowering이 layer를 받는다 — 소비처의 되돌리기 제거)로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "1246fcf980578ee709a946205b8eab8420a03c8ac9406a4826031ee68c6b045f" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -359,6 +359,14 @@ pub fn appendBackgroundQuads(
     origin_x_px: u32,
     origin_y_px: u32,
     out: *std.ArrayList(metal_frame.GpuQuad),
+    /// 이 draws가 놓일 합성 층(SV6a). 기본 2(bottom — 셀·텍스트 **아래**)는 도크·탐색기 배경처럼
+    /// 텍스트 밑에 깔리는 것들의 자리다.
+    ///
+    /// **호출처가 정해야 하는 이유**: 같은 함수를 타면서도 원하는 층이 갈린다. 사이드바·오버레이
+    /// 스크롤바는 각각 렌더러 소유 배경 strip과 모달 배경 quad **위**에 와야 해서 over(3)가 필요하고,
+    /// 그것을 여기서 2로 고정하는 바람에 소비처가 뒤에서 `q.layer = 3`으로 되돌리고 있었다 — 같은
+    /// 역할이 두 층에 흩어진 원인이다(docs/scroll-area.md "판단(2026-08-09)").
+    layer: u32,
 ) void {
     for (draws) |draws_for_layer| for (draws_for_layer.ops) |op| switch (op) {
         .quad => |quad| {
@@ -391,7 +399,7 @@ pub fn appendBackgroundQuads(
                 .fill_color1 = fill,
                 .border_color = border,
                 .gradient_kind = 0,
-                .layer = 2,
+                .layer = layer,
                 // 클리핑은 shader가 한다 — rect를 미리 자르면 잘린 변에 없어야 할 corner radius와 border
                 // stroke가 생긴다. 여기서는 component가 실어 보낸 뷰포트를 backing 좌표로 옮기기만 한다.
                 .clip_x = if (quad.clip) |c| @as(f32, @floatFromInt(c.x)) + @as(f32, @floatFromInt(origin_x_px)) else 0,
@@ -463,7 +471,7 @@ test "Chrome draw lowering preserves an NFD cluster and paints cards behind text
     var quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
     defer quads.deinit(std.testing.allocator);
     const ops = [_]chrome.draw.Op{.{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 10 }, .fill_role = .surface_bg, .alpha = 0x7f } }};
-    appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 11, 13, &quads);
+    appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 11, 13, &quads, 2);
     try std.testing.expectEqual(@as(usize, 1), quads.items.len);
     try std.testing.expectEqual(@as(u32, 2), quads.items[0].layer);
     try std.testing.expectEqual(@as(f32, 11), quads.items[0].x);
@@ -767,4 +775,40 @@ test "rich text fingerprint ignores animated wide icon-only ops" {
         .{ .text = .{ .origin = .{ .x = 30, .y = 7 }, .runs = &spinner_b, .role = .accent_bar, .wide_icons = true } },
     };
     try std.testing.expectEqual(richTextFingerprint(&baseline, &tk, 8, 16, 20, 10, 0), richTextFingerprint(&next, &tk, 8, 16, 20, 10, 0));
+}
+
+// SV6a — 층은 **호출처가 정한다.** 예전에는 이 함수가 layer 2를 고정 출력해, over가 필요한 소비처
+// (사이드바·오버레이 스크롤바)가 뒤에서 `q.layer = 3`으로 되돌렸다. 그 되돌리기가 "같은 역할이 두 층에
+// 흩어진" 증상이었고, 되돌리기를 빠뜨리면 막대가 화면에서 통째로 사라졌다(SV4a·SV5b에서 실제로 그랬다).
+test "appendBackgroundQuads puts every quad on the caller's layer" {
+    const Rgb = maru.color.Rgb;
+    const tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg, .corner_radii = .{ 0, 0, 0, 0 }, .border_widths = .{ 0, 0, 0, 0 } } },
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 4, .w = 10, .h = 4 }, .fill_role = .muted_fg, .corner_radii = .{ 2, 2, 2, 2 }, .border_widths = .{ 0, 0, 0, 0 } } },
+    };
+
+    // 기본 층(2 = bottom, 셀·텍스트 아래) — 도크·탐색기 배경이 쓰는 자리다.
+    var bottom: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    defer bottom.deinit(std.testing.allocator);
+    appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 0, 0, &bottom, 2);
+    try std.testing.expect(bottom.items.len >= 2);
+    for (bottom.items) |q| try std.testing.expectEqual(@as(u32, 2), q.layer);
+
+    // over(3) — 렌더러 소유 표면·모달 배경 **위**에 와야 하는 스크롤바가 쓰는 자리다. 같은 ops를
+    // 넣어도 층만 갈린다(호출처가 정한다는 것이 이 슬라이스의 계약이다).
+    var over: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    defer over.deinit(std.testing.allocator);
+    appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 0, 0, &over, 3);
+    try std.testing.expectEqual(bottom.items.len, over.items.len);
+    for (over.items) |q| try std.testing.expectEqual(@as(u32, 3), q.layer);
+
+    // 층 말고는 아무것도 안 달라진다 — 되돌리기를 없애면서 기하·색이 바뀌면 안 된다.
+    for (bottom.items, over.items) |b, o| {
+        try std.testing.expectEqual(b.x, o.x);
+        try std.testing.expectEqual(b.y, o.y);
+        try std.testing.expectEqual(b.w, o.w);
+        try std.testing.expectEqual(b.h, o.h);
+        try std.testing.expectEqual(b.fill_color0, o.fill_color0);
+    }
 }

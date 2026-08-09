@@ -1210,21 +1210,36 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    C3-3의 실패 정산은 `confirmed/retryable poison effect -> releaseEvent` 순서다. exact-15의
    `GenerationTransport.poison(reason) Error!void` 성공은 `confirmed`, `AdminBusy`는 `busy`다. `confirmed`는 client_slot 내부에서
-   canonical first poison reason, unusable과 `fd == -1`을 함께 증명한 상태다. C3-3에는 retirement queue가 없으므로 fd가 열린
-   deferred-cleanup terminal은 confirmed가 아니며 `busy`다. 적용/기존 terminal 여부는 내부
+   canonical first poison reason, unusable과 `fd == -1`을 함께 증명한 상태다. blocking single-mode Client의 fd가 열린
+   deferred-cleanup terminal은 외부 owner가 없으므로 다음 admitted effect가 같은 suffix에서 fd를 take/close해 confirmed로
+   수렴한다. generation Client의 external mode는 single-mode invariant 위반이므로 `busy`가 아니라 typed terminal/invalid-owner다.
+   적용/기존 terminal 여부는 내부
    oracle만 구분하고 facade 성공 postcondition은 하나로 합친다. `busy` 또는 적용 여부가 불명확한 동안에는 canonical `EventOwner`와 실패 결과를 보존하고 다음 pump에서 effect를
    먼저 재시도한다. poison 적용을 확인하기 전에 event를 release하지 않으며, 별도 poison retry counter·effect owner·deferred-fd
-   상태는 만들지 않는다. 기존 `pending_generation_event_outcome.failed`가 유일한 RemoteRuntime retry state로 error와 optional poison reason을
+   상태는 만들지 않는다. 따라서 blocking deferred terminal을 영구 `busy`로 남기는 구현도 금지한다. 기존
+   `pending_generation_event_outcome.failed`가 유일한 RemoteRuntime retry state로 error와 optional poison reason을
    함께 소유한다. mode-specific adapter는 non-owning stack/value helper이며 callback·vtable·heap·retained storage가 0이다.
 
-   `busy`는 pre-admission 결과이며 callback, syscall, role/fence/poison/fd disposition, event owner와 queue mutation이 모두 0이다.
+   `busy`는 effect pre-admission 결과이며 callback, syscall, role/poison/fd disposition, event owner와 queue의 durable mutation이 모두 0이다.
+   canonical registry/node 검증을 위한 shared receipt는 exact begin/end로 균형 정산될 수 있지만 effect execution lease는 얻지 않는다.
    effect admission 뒤에는 fallible callback 0의 no-fail suffix로 confirmed에 수렴하며 부분 effect를 `busy`로 반환하지 않는다.
    guarded canonical cleanup allocator callback은 허용하지만 Client-wide callback latch가 모든 재진입을 Busy로 막고 exact free 1을
    보장한다. confirmed는
    future I/O admission 0, 기존 first poison reason 보존, pending outbound의 canonical disposition과 cleanup-only event release authority
-   live를 함께 증명한다. fd는 이미 close/take되어 `-1`이어야 한다. 단순 `unusable`이나 fd가 열린 deferred 상태는 confirmed가 아니다. moved/copied/identity drift는 confirmed가
+   live를 함께 증명한다. fd는 이미 close/take되어 `-1`이어야 한다. 단순 `unusable`이나 fd가 열린 deferred 상태는 effect 진입 전에는
+   confirmed가 아니며, blocking/no-external-owner일 때만 같은 effect가 이를 confirmed로 수렴시킨다. moved/copied/identity drift는 confirmed가
    아니라 typed terminal/corrupt 오류다. effect transcript는 requested reason, first reason 전후, unusable, fd/close-owner disposition,
    pending outbound free count, confirmed/busy와 최종 ClientError를 한 oracle로 남긴다.
+   Darwin `close(2)`는 fd를 Client에서 `-1`로 먼저 detach한 뒤 exact once 호출한다. 반환 errno는 fd 번호를 재사용해
+   재시도하지 않으며 confirmed는 OS의 별도 close 성공 증명보다 Maru owner graph에서 descriptor ownership이 소멸했다는 뜻이다.
+   정상 actual socket gate는 peer EOF를 추가로 증명하고, close errno 주입은 syscall seam을 여는 후속 hardening 범위다.
+
+   C3-3의 첫 runtime slice는 `GenerationTransport.poison`을 등록된 ClientSlot/node owner-thread 연산 하나로
+   연결하고, blocking confirmed effect의 pending outbound guarded free, first-reason 보존, deferred fd-open 수렴과
+   `fd == -1` 후조건을 구현했다. `test-session-host-2c3d-c3-3`의 Debug·ReleaseFast actual socketpair가
+   external typed invalid/exclusive Busy의 durable mutation 0, partial pending free exact 1, callback 안 poison/input/control과
+   foreign teardown Busy, effect 뒤 fence 재사용, peer EOF와 idempotent 재호출을
+   고정한다. live revoke row·제품 failure settlement·source-zero와 actual revoked roundtrip은 아직 C3-3 후속 slice다.
 
    accepted revoke의 ordering authority는 두 기존 canonical owner가 이어서 소유한다. take 전에는 sealed `pending_events`와
    `hasBufferedControllerRevoke`가 queue latch이고, take commit은 event generation을 처음 발급하면서 같은 no-fail suffix에서 queue

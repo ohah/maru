@@ -1416,13 +1416,20 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       confirmed한 뒤에만 canonical event를 release한다. `busy`는 기존 pending
       generation outcome에 error+poison reason을 보존하고 다음 tick effect-first로 재시도하며, silent poison 성공·release-first·별도
       retry owner를 금지한다. adapter는 non-owning stack/value helper이고 callback·vtable·heap·저장 상태가 0이다. 같은 Client는 수명 전체에서 legacy 또는 generation attachment만 소유하고 mixed-mode mint/adopt는
-      ClientSlot/node membership을 canonical proof로 source/product oracle에서 거부한다. `busy`는 effect mutation 0인 pre-admission이고,
+      ClientSlot/node membership을 canonical proof로 source/product oracle에서 거부한다. generation external mode는 stable Busy가
+      아니라 typed invalid-owner다. `busy`는 durable effect mutation 0이고 canonical 검증 shared receipt는 exact begin/end로 정산되며,
       admitted effect는 guarded cleanup callback을 허용하되 fallible callback 0의 no-fail confirmed로 수렴한다. sealed queue latch는
       take commit에서 event generation을 발급하며 exact-receipt in-flight `live` row로 원자 이전되고 release commit에서 consumed된다.
       세부 처리 단계는 registry에 복제하지 않고 기존 pending outcome만 retry state로 쓴다. 별도 admission generation은 만들지 않으며 모든 generation mutation의 최종 wire admission을 막고 queue+live-count zero에서만 연다. C3-3은 공통 Client ingress cadence를
       바꾸지 않는 열린-peer actual socket roundtrip까지만 소유한다. 이미 admitted unknown/semantic violation의 typed effect/release는
       C3-3, immediate EOF, admission 뒤 yield 집합, unread RX-first, socket ingress malformed/unknown cadence와 legacy/generation observable
       parity는 2c3e doc-first blocking gate로 남긴다.
+      C3-3 첫 runtime slice는 등록된 ClientSlot/node owner-thread admission을 통해 exact-15 poison을 confirmed effect에
+      연결한다. blocking deferred fd-open은 외부 owner가 없을 때 같은 effect에서 take/close해 영구 Busy 없이 수렴하고,
+      external typed invalid/exclusive Busy는 reason/fd/pending durable mutation 0이다. guarded pending free callback의 poison/input/control과
+      foreign teardown 재진입 Busy, effect 뒤 fence 재사용, exact free 1, peer EOF, first-reason/idempotency를
+      `test-session-host-2c3d-c3-3` Debug·ReleaseFast에서 고정한다.
+      이 slice만으로 live revoke row, 제품 settlement/source-zero, revoked actual-socket roundtrip 완료를 주장하지 않는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

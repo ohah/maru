@@ -28,6 +28,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
 const input_ops = @import("input.zig");
 const web_ops = @import("web.zig");
@@ -1325,7 +1326,7 @@ pub fn requestBranchMenu(self: *AppSession) void {
         return;
     };
     var repo_buf: [1024]u8 = undefined;
-    const repo = self.gitRepoRoot(&repo_buf) orelse {
+    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse {
         self.showNotice("git 저장소가 아닙니다");
         return;
     };

@@ -24,6 +24,7 @@
 | 2026-08-09 (F12) | **57,701** | 키 입력·IME·키바인딩. 그룹 파일 12개 |
 | 2026-08-09 (F13) | **57,169** | 알림·벨. 그룹 파일 13개 |
 | 2026-08-09 (F14) | **56,455** | 에이전트 관측. 그룹 파일 14개 |
+| 2026-08-09 (F15) | **56,131** | git·SCM. 그룹 파일 15개 |
 
 > F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). F10으로 이름 기준 그룹은 전부
 > 끝났고 `app_session.zig`는 **59,124줄**이다. 예측했던 56,000줄대에 닿지 못한 이유는 F8·F10에서
@@ -127,6 +128,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F12** ✅ | 키 입력 · IME · 키바인딩(라우팅·조합 수명·커밋 텍스트·키 힌트·전역 핫키) | 745(메서드) | 낮음 | 2026-08-09 완료 → `app_session/input.zig`, pub 순증 6, ABI facade 11 |
 | **F13** ✅ | 알림 · 벨(OSC 9/777·이력·패널·배지·벨 플래시·원격 폴링) | 434(메서드) | 낮음 | 2026-08-09 완료 → `app_session/notification.zig`, pub 순증 8, ABI facade 5. **이름 함정이 없던 첫 그룹** |
 | **F14** ✅ | 에이전트 관측(상태·종류·트랜스크립트 폴링, 상태줄, 스피너, 사이드바 행, 세션 재개) | 620(메서드) | 낮음 | 2026-08-09 완료 → `app_session/agent.zig`, pub 순증 24, **ABI facade 0** |
+| **F15** ✅ | git · SCM(저장소 탐지·브랜치/상태 갱신·SCM 뷰 행·diff term) | 292(메서드) | 낮음 | 2026-08-09 완료 → `app_session/git.zig`, pub 순증 3, ABI facade 0 |
 
 > **F1과 F3를 합친 이유(2026-08-09 실측).** 문서가 둘을 나눈 기준은 **이름**이었는데 호출 관계는 한 덩어리다.
 > archive 메서드가 도크의 스크롤 앵커·인라인 상세·스모크 프로브를 부르므로, F1만 떼면 그룹 밖 non-pub
@@ -204,6 +206,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > | F12 input | 579 | +6 |
 > | F13 notification | 587 | +8 |
 > | F14 agent | 611 | +24 |
+> | F15 git | 614 | +3 |
 >
 > **원인은 test 잔류가 아니다(2026-08-09 시범 이동으로 기각).** 한때 "test가 허브에 남아 비공개
 > 헬퍼를 부르니 pub이 못 닫힌다"고 적었으나, `pane` test 101개(3,833줄)를 실제로 `pane.zig`로 옮겨
@@ -225,6 +228,15 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > 단위다.** 그룹 파일이 존재하는 것 자체의 비용이다. 다만 그 비용은 그룹마다 크게 다르다 — F9
 > settings는 +60, F11 web은 **+1**이다. 차이는 **도메인 상태가 자기 필드 안에서 닫혀 있는가**다.
 > web은 `web_panel_*`·`addr_*` 필드로 닫혀 있고, settings는 거의 모든 도메인의 값을 읽고 쓴다.
+>
+> **"남의 facade" 함정이 네 번 반복됐다** — F8 `scrollToCurrentMatch`(→`find.zig`), F12 `webKeyRoute`
+> (→`web.zig`), F14 `agentSessionArchive*` 10개(→`agent_dock.zig`), F15 `scmDrawWindow`(→`dock.zig`).
+> 전부 본문이 `<group>_ops.X(self)` 위임 한두 줄인 **이미 분리된 그룹의 ABI 진입점**이다. 이름만 보면
+> 새 그룹 소유처럼 보이지만 옮기면 facade가 원본에서 멀어진다.
+>
+> 그래서 F15부터는 경계 계산에 **얇은 facade 자동 제외**를 넣었다 — 본문의 유효 코드가 3줄 이하이고
+> `<name>_ops.`를 부르면 후보에서 뺀다. F15에서 `scmDrawWindow` 하나를, term/surface 후보 조사에서
+> 9개를 자동으로 걸러 냈다.
 >
 > **pub 예측이 크게 빗나가는 이유를 찾았다(F14).** 하한 3을 예측했는데 실제는 **24**였다. 원인은
 > 흡수 규칙이 **`self.X(` 메서드 호출만** 보기 때문이다 — 그룹이 부르는 **파일 레벨 자유 함수·상수**

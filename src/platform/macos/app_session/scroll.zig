@@ -876,15 +876,19 @@ pub fn overlayScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.
     }
     const t = track orelse return null;
     const h = thumb orelse return null;
-    return .{
+    // 잡는 자리(hit)는 tree에 안 실린다 — entry에는 그린 rect만 담긴다. 거터 폭으로 역산해 채운다.
+    const bar: chrome.ui.scroll_area.ScrollbarGeometry = .{
         .track_x = t.x,
         .track_y = t.y,
         .track_w = t.width,
         .track_h = t.height,
+        .hit_x = t.x,
+        .hit_w = t.width,
         .thumb_y = h.y,
         .thumb_h = h.height,
         .max_offset_px = overlayMaxOffsetPx(self),
     };
+    return bar.withHitSpan(@floatFromInt(overlay_scrollbar_width_px + overlay_scrollbar_inset_px));
 }
 
 /// 지금 열린 오버레이의 스크롤 상한(px). 발행된 막대와 **같은 시점의 값**이라야 드래그가 손가락과 안 어긋난다.

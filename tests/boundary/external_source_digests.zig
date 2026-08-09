@@ -198,7 +198,9 @@ pub const inventory = [_]Proof{
     // 옮긴 블록에 `@field`가 없다. ABI가 부르는 11개는 얇은 facade로 남겼다.
     // 알림·벨을 `app_session/notification.zig`로 떼어내며 또 바뀐다(F13). count는 2 그대로다 —
     // 옮긴 블록에 `@field`가 없다. ABI가 부르는 5개는 얇은 facade로 남겼다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "15af0a5ab8ec8c0835dc974624be7b3584dd28be5dab998a61ea2487ed28464f" },
+    // 스크롤바 잡는 폭을 gutter 전체로 넓히며(그리는 폭과 분리) 또 바뀐다. count는 2 그대로다 —
+    // 더한 것은 거터 상수 값 하나뿐이고, 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "f6e23f8cf23815845ec80e8d4b62ac66abfed4489cfb73057dd2d243f14301c9" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

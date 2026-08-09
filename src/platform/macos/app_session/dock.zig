@@ -338,16 +338,21 @@ pub fn dockListScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area
     }
     const t = track orelse return null;
     const h = thumb orelse return null;
-    return .{
+    // 잡는 자리(hit)는 tree에 안 실린다 — entry에는 **그린 rect만** 담기기 때문이다. 거터 폭으로
+    // 역산해 채운다(`withHitSpan`).
+    const bar: chrome.ui.scroll_area.ScrollbarGeometry = .{
         .track_x = t.x,
         .track_y = t.y,
         .track_w = t.width,
         .track_h = t.height,
+        .hit_x = t.x,
+        .hit_w = t.width,
         .thumb_y = h.y,
         .thumb_h = h.height,
         // 발행 시점에 기록한 상한을 읽는다 — 여기서 다시 계산하면 tree와 다른 값이 될 수 있다.
         .max_offset_px = self.dock_list_scroll_max_offset_px,
     };
+    return bar.withHitSpan(@floatFromInt(dockListScrollGutterPx(self)));
 }
 
 /// 뷰 전환. 같은 뷰면 no-op이라 불필요한 재그리기를 만들지 않는다. 트리를 떠날 때는 키보드 포커스도 함께

@@ -153,6 +153,18 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
      `rebuildSidebar`·탭 바 rebuild는 hover·드래그·탭 전환 등 tick 사이의 수십 개 이벤트 핸들러에서 불린다. 캐시 없이
      옮기면 마우스를 움직일 때마다 CoreText 셰이핑이 돈다. `richTextFingerprint`는 순수 함수라 그대로 재사용할 수 있고,
      `collectMeasuredTextFromCache`도 dest를 받으므로 슬롯만 소비처별로 늘리면 된다.
+
+     **슬롯 하나는 "프레임당 한 번 발행하는 소비처"를 전제한다.** `MeasuredTextCache.store`는 새 아티팩트를 넣기 전에
+     옛 것을 **해제**하는데, `collectMeasuredTextFromCache`는 아티팩트를 복사하지 않고 슬라이스 참조만 `collected`에
+     실어 두었다가 **프레임 말미**에 읽는다(`system_text.appendGpuGlyphs`가 `placements[i]`로 좌표·색을 정한다).
+     그래서 한 소비처가 한 프레임에 두 번 이상 store하면 **뒤 발행이 앞 발행의 아티팩트를 해제**해, 앞의 텍스트가
+     조용히 사라지거나 엉뚱한 좌표로 날아간다. 해제된 버퍼가 다음 셰이핑에 재사용되는지에 따라 갈리므로 레이아웃을
+     조금만 바꿔도 증상이 오락가락하고, 단위 테스트로는 잡히지 않는다(다중 pane 탭 제목에서 실제로 겪었다).
+
+     **소비처가 화면에 여러 개 있으면 슬롯을 늘리지 말고 op을 모아 한 번에 발행한다.** measured op의 origin은 창
+     절대 좌표라 아티팩트 하나가 같은 종류의 모든 인스턴스를 담을 수 있다(pane 탭 제목의 `TabTitleBatch`가 그 예다 —
+     pane 루프는 쌓기만 하고 루프가 끝난 뒤 한 번 셰이핑한다). 인스턴스마다 슬롯을 두면 개수가 가변인 소비처에서
+     슬롯 수명 관리가 따라붙고, 캐시 hit률도 나빠진다.
   2. **오버플로 앵커를 measured 경로에 전달한다.** 입력 줄은 넘칠 때 **앞을 잘라야** 한다 — caret과 방금 친 글자가
      문자열 끝에 있어서, 뒤를 자르면 지금 입력하는 곳이 화면 밖으로 나간다. 셀 경로는 이것을
      `chrome.components.overlay_input.inputLineView`(tail 창 + 선두 `…`)로 풀고 사이드바 검색·find·palette가 공유한다.

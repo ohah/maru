@@ -26,6 +26,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const input_ops = @import("input.zig");
 const dock_layout = app_session_mod.dock_layout;
 const nav_button_w = app_session_mod.nav_button_w;
 const addr_nav_url_cap = app_session_mod.addr_nav_url_cap;
@@ -832,7 +833,7 @@ pub fn dispatchWebAppAction(self: *AppSession, surface_id: u64, event: terminal.
         self.dispatchAppAction(action);
     }
     self.total_app_key_events += 1;
-    self.settleKeyEventSummary();
+    input_ops.settleKeyEventSummary(self);
     return true;
 }
 

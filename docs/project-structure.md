@@ -66,7 +66,8 @@ src/
                         그룹이 가진다), settings.zig(세팅 UI·컨텍스트 메뉴·이름 변경과 바뀐 config를 살아 있는
                         세션에 다시 먹이는 경로, F9), workspace.zig(창 캡처/복원/이동과 창 속성·드래그 영역, F10.
                         24개 중 12개를 Swift 호스트가 직접 부른다), web.zig(web panel·인앱 브라우저 — WKWebView surface
-                        수명·주소창·내비·web term, F11. 52개 중 20개를 호스트가 직접 부른다). 각 파일은 `*AppSession`을 받는
+                        수명·주소창·내비·web term, F11. 52개 중 20개를 호스트가 직접 부른다), input.zig(키 입력·IME·키바인딩 — 라우팅과 소비 판정,
+                        IME 조합 수명, 커밋 텍스트, 키 힌트, 전역 핫키, F12). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
                         그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
                         `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).

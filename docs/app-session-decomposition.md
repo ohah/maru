@@ -30,6 +30,8 @@
 - **(c) core.zig보다 어려운 3가지 난점:**
   1. **허브 횡단**: `tick`/`mouse`/`handleKeyEvent`가 모든 그룹을 횡단한다 → **잔류**(분해 대상 아님, 내부 가독성은 소함수·주석으로).
   2. **가시성(pub) 표면 확대**: 그룹을 free fn 파일로 빼면, 그 함수가 **파일 경계를 넘어 이름으로 참조하는 모든 선언**이 pub이어야 한다. Zig의 privacy는 필드가 아니라 **선언 단위 + 파일 경계**이므로 대상이 accessor에 그치지 않는다 — 메서드(`^    fn ` 1,042개 vs `^    pub fn ` 185개, **84%가 non-pub**), 시그니처·지역에서 이름을 쓰는 타입(`Model`/`Term`/`Pane`/`PaneTree`/`Tab` 등 파일 스코프 `const`), 모듈 전역 `var`(`app_runtime` — 한 번 `pub var`가 되면 다시 좁힐 수단이 없다)가 모두 포함된다. core.zig의 accessor 분리(`absRow` 등, [[core-zig-decomposition-initiative]])와 동형이나 **규모가 다르다**. 실측 예: F1(archive) 하나가 그룹 밖 non-pub 메서드 19개 pub화를 강제하고 그중 12개는 F3(agent dock) 소유다 → 단계 순서가 pub화 소유권과 어긋나면 되돌리는 PR이 생긴다.
+
+     **pub화 개수는 사전 추정으로 못 맞춘다(3회 연속 실패).** F1 test 이동 예측 0 → 실제 78, F2 pub화 예측 26 → 실제 50이었다. 원인은 같다 — 호출을 정규식으로 세면 receiver 형태(`session.`·`s.`·`dst.`)와 **타입 메서드**(`entry.path()`·`map.insert()`·`store()`·`hit()`)를 놓친다. **착수 전 추정치는 하한으로만 쓰고, 실제 값은 옮긴 뒤 컴파일러에게 묻는다.** 그래서 각 그룹 PR은 pub화 목록을 본문에 싣는다.
   3. **test는 잔류가 기본값이다(2026-08-09 실측으로 정정).** 파일 레벨 test 32,762줄(755개)이 `splitActivePane`·`mouse`·`handleKeyEvent`·`tick` 등 **private 메서드를 직접 호출**한다.
 
      원래 이 항목은 "test는 자신이 검증하는 그룹 함수와 동반 이동한다"였다. 그룹 함수가 pub free fn이 되므로 test도 따라가야 캡슐화가 지켜진다는 논리였다. **F1+F3를 실제로 실행해 두 방식을 모두 돌려 보니 정반대였다:**
@@ -99,7 +101,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | 단계 | 그룹 | 메서드 라인 | 위험 | 비고 |
 |---|---|---|---|---|
 | **F1** ✅ | **에이전트 세션 기록 도크**(archive + agent dock) | 1,595(메서드) | 낮음 | **F3를 흡수해 하나로.** 2026-08-09 완료 → `app_session/agent_dock.zig` |
-| **F2** | file tree · file panel | ~4,090 | 중 | 최대 그룹. `file_tree.zig`/`file_panel.zig`로 **반드시 2개 이상 분할** |
+| **F2** ✅ | 파일 탐색기·파일 패널 | 3,840(메서드) | 중 | **한 파일**(`file_panel.zig`)로 — 분할하면 순환 때문에 pub화가 는다(아래). 2026-08-09 완료, pub화 50 |
 | **F4** | pane · split | ~2,350 | 중 | PTY spawn 결합 — 허브 경계 주의 |
 | **F5** | dock | ~1,660 | 낮음 | |
 | **F6** | tab | ~1,590 | 낮음 | |
@@ -116,6 +118,28 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > 실제 결과: `app_session.zig` 73,658 → 71,652(−2,006), `agent_dock.zig` 2,054줄, pub화 13개, test 767개 전원
 > 잔류(§2-c-3), `test-macos-app-host-abi` 2,816 passed / 0 failed.
+
+> **F2를 나누지 않는 이유 — tree↔panel이 순환한다(2026-08-09 실측).** 문서는 원래 "반드시 2개 이상 분할"이라
+> 했다. 크기 때문이었는데, 호출 관계를 재니 **양방향**이다(tree→panel 10건, panel→tree 18건). 두 파일로
+> 나누면 서로의 내부 함수를 열어야 해서 pub화가 **26 → 75개**로 늘고, 경계가 이름뿐이 된다.
+>
+> Zig는 파일 간 순환 import를 허용하므로(함수 본문 lazy 분석 + `*AppSession` 포인터) **컴파일은 된다.**
+> 문제는 pub 표면이다.
+>
+> tree→panel 8개는 조회가 아니라 **명령**이다 — `openFileTreePath`→`openFilePanelPath`(열기),
+> `applyFileTreeRename`→`retireFilePanelSurface`(정리), `begin/releaseFileTreeMutationEditorLocks`→
+> `queueFilePanelDirtySyncAction`·`queueFilePanelCloseUnlock`(락), `focusFileTree`·`restoreFileTreeFocus`→
+> `activateFilePanelDockControl`(포커스), `updateFileTreeMutations`→`openCreatedFilePanel`(생성 후 열기).
+> 즉 탐색기가 패널의 **생명주기를 직접 관리**한다.
+>
+> **이 순환은 분해가 만든 것이 아니라 드러낸 것이다.** 한 파일 안에 있어서 안 보였을 뿐이다.
+>
+> **후속(별도 PR): 의존 방향 정리.** tree가 panel을 직접 부르지 않고 `?FilePanelOpenRequest` 같은 의도를
+> 반환해 호출자가 소비하게 바꾸면 한 방향이 되고, 그때 두 파일로 나눌 수 있다. 다만 그건 8개 지점의
+> **부수효과 순서**를 건드리는 구조 변경이라 이 시리즈의 "동작 변경 0" 범위 밖이다. 순서는 [terminal core
+> 분해](terminal-core-decomposition.md) §2의 선례를 따른다 — 그 문서도 "연산 추출 우선, 구조 변경(Screen
+> struct fold)은 별도 initiative"를 택했고 이유가 같다("고위험 단일 도약"을 피한다). 분리 후에는 같은 변경이
+> 3,840줄 파일 안에서 일어나 리뷰 범위가 73,000줄에서 그만큼 좁아진다.
 
 라인 수치는 **메서드 이름 기준 근사치**다. 각 단계 착수 시 실제 응집도(허브 결합·cross-group accessor)를 코드로 재검증하고 그 결과로 범위를 정정한다 — 이 문서의 사전 추정은 E1·E4·E5에서 세 번 빗나갔다([[roadmap-docs-stale-verify-with-code]]).
 

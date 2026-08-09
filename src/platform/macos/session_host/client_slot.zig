@@ -89,6 +89,17 @@ const RpcSubstrateFailStopTestHook = struct {
 threadlocal var rpc_substrate_fail_stop_test_hook: if (builtin.is_test) RpcSubstrateFailStopTestHook else void =
     if (builtin.is_test) .{} else {};
 
+/// fork한 픽스처 자식을 거둘 때 쓰는 폴링 상한(1ms poll × 이 횟수 ≈ 벽시계 60초 이상).
+///
+/// **왜 이렇게 큰가**: fail-stop을 증명하는 픽스처의 자식은 **패닉으로 죽고**, Zig 패닉 핸들러는 이 거대한
+/// 테스트 바이너리의 DWARF를 읽어 스택 트레이스를 심볼라이즈한다 — 그게 초 단위다. 실측: 로컬(한가한
+/// M-계열) 1.5초, CI 러너 2.3~2.7초. 옛 상한 2000(≈2.3초)은 CI 실측치와 겹쳐 **여유가 0**이었고,
+/// 2.70초가 걸린 런에서 만료돼 간헐 실패했다(2026-08-08 file explorer 잡).
+///
+/// 상한은 "자식이 걸렸을 때 CI를 영원히 붙잡지 않는다"는 목적만 하면 되므로 크게 잡는 값이 옳다 —
+/// 자식이 정상적으로 죽으면 루프는 즉시 빠져나가므로 큰 값에 드는 비용은 0이다.
+const fixture_child_wait_attempts: usize = 60_000;
+
 test "CR3a-2c2b3b quarantine leaf participates in the session-host gate" {
     _ = ended_purge_quarantine;
 }
@@ -129,7 +140,7 @@ test "CR3a-2c2b3b fork child rejects bootstrap before inherited issuer mutex" {
 
     var status: c_int = 0;
     var attempts: usize = 0;
-    while (attempts < 2000) : (attempts += 1) {
+    while (attempts < fixture_child_wait_attempts) : (attempts += 1) {
         const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
         if (waited == child) {
             const wait_status: u32 = @bitCast(status);
@@ -9454,8 +9465,18 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: lease_mod.ConnectionLease = .{};
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4503);
-    defer slot.abortAttachmentBinding(&binding, reservation) catch
-        @panic("suffix mismatch fixture binding cleanup drifted");
+    // **정리 실패가 진짜 실패 원인을 덮어쓰면 안 된다.** 이 테스트가 중간에서 조기 반환하면(자식 대기 만료
+    // 등) 소비 중인 permit이 operation generation을 쥔 채라 여기 abort가 `AdminBusy`로 실패하는 것이
+    // **정상**이다. 무조건 panic하면 그 2차 증상만 로그에 남아 원인을 못 찾는다(실제로 CI에서 그랬다).
+    // 그래서 끝까지 간 경우에만 panic한다 — 그때의 정리 실패는 진짜 드리프트다.
+    var reached_end = false;
+    defer if (slot.abortAttachmentBinding(&binding, reservation)) |_| {} else |err| {
+        if (reached_end) std.debug.panic("suffix mismatch fixture binding cleanup drifted: {s}", .{@errorName(err)});
+        std.debug.print(
+            "(조기 실패 뒤 정리: abortAttachmentBinding={s} — 위의 실제 실패를 보라)\n",
+            .{@errorName(err)},
+        );
+    };
 
     var preparation: EndedPurgePreparation = .{};
     const permit = try slot.prepareStreamOperationPermit(
@@ -9469,6 +9490,18 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
             @panic("suffix mismatch fixture permit cleanup drifted");
     var receipt: ClientSlot.PreparedStreamOperationPermitConsume = .{};
     try slot.prepareStreamOperationPermitConsume(permit, &receipt);
+    // consume을 준비한 뒤에는 permit을 **abort할 수 없다**(`streamOperationPermitLive`가 false가 된다) —
+    // operation generation을 반납하는 길은 consume을 마치는 것뿐이다. 조기 반환 시 이걸 안 하면 정리가
+    // 줄줄이 무너진다: binding abort는 `AdminBusy`, 이어서 `slot.deinit()`이 teardown 불변식 위반으로
+    // panic한다. 그러면 로그엔 3차 증상만 남고 **진짜 원인이 사라진다**(CI에서 실제로 그랬다).
+    var consume_pending = true;
+    defer if (consume_pending) {
+        _ = slot.consumeStreamOperationPermitUnchecked(&receipt);
+        stream_operation_registry[permit.registry_index].state.store(
+            @intFromEnum(StreamOperationRegistryEntry.State.empty),
+            .release,
+        );
+    };
 
     var panic_pipe: [2]c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.pipe(&panic_pipe));
@@ -9492,7 +9525,7 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
 
     var status: c_int = 0;
     var attempts: usize = 0;
-    while (attempts < 2_000) : (attempts += 1) {
+    while (attempts < fixture_child_wait_attempts) : (attempts += 1) {
         const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
         if (waited == child) break;
         if (waited < 0 and std.posix.errno(waited) != .INTR)
@@ -9500,7 +9533,13 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
         var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
         _ = c.poll(@ptrCast(&delay_fd), 0, 1);
     }
-    if (attempts == 2_000) {
+    if (attempts == fixture_child_wait_attempts) {
+        // 여기 오면 자식이 상한 안에 안 죽은 것이다. 그냥 TestUnexpectedResult만 던지면 다음 사람이
+        // "무엇이 만료됐는지" 모른다 — 예전에 이 경로가 정리 panic에 가려 원인 추적이 막혔다.
+        std.debug.print(
+            "\nsuffix mismatch 픽스처: 자식 {d}이 폴링 {d}회(≈{d}초) 안에 죽지 않았다\n",
+            .{ child, attempts, attempts / 1000 },
+        );
         _ = c.kill(child, c.SIG.KILL);
         _ = c.waitpid(child, &status, 0);
         return error.TestUnexpectedResult;
@@ -9519,6 +9558,7 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
     try std.testing.expect(std.mem.indexOf(u8, panic_bytes, "suffix mismatch returned") == null);
 
     try std.testing.expect(slot.consumeStreamOperationPermitUnchecked(&receipt));
+    consume_pending = false; // 성공 경로가 직접 소비했다 — defer가 두 번 하지 않게 한다.
     const entry = &stream_operation_registry[permit.registry_index];
     try std.testing.expectEqual(
         @intFromEnum(StreamOperationRegistryEntry.State.consumed),
@@ -9528,6 +9568,7 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
     // completion path, so it must retire the matching node operation before fixture drop.
     slot.clearStreamOperationPermit();
     entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
+    reached_end = true; // 여기까지 왔으면 permit이 소비됐다 — 이제 binding 정리가 실패하면 진짜 드리프트다.
 }
 
 test "CR3a-2c2b3b B3b-O isolated marker executes drift and aggregate marker only proves exclusion" {
@@ -11864,7 +11905,7 @@ test "B3-0.2 fork child rejects an inherited operation receipt before the inheri
         var status: c_int = 0;
         var attempts: usize = 0;
         var reaped = false;
-        while (attempts < 2000) : (attempts += 1) {
+        while (attempts < fixture_child_wait_attempts) : (attempts += 1) {
             const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
             if (waited == child) {
                 reaped = true;
@@ -11876,6 +11917,10 @@ test "B3-0.2 fork child rejects an inherited operation receipt before the inheri
             _ = std.c.poll(@ptrCast(&delay_fd), 0, 1);
         }
         if (!reaped) {
+            std.debug.print(
+                "\nB3-0.2 픽스처({s}): 자식 {d}이 폴링 {d}회(≈{d}초) 안에 죽지 않았다\n",
+                .{ @tagName(case), child, attempts, attempts / 1000 },
+            );
             _ = std.c.kill(child, std.c.SIG.KILL);
             _ = std.c.waitpid(child, &status, 0);
             return error.TestUnexpectedResult;

@@ -496,13 +496,23 @@ selection이 배열(§3.2)이므로 복사·붙여넣기가 단순하지 않다.
 
 ### 4.1 gutter 기하 — VSCode 배치를 기준으로 삼는다 (2026-08-09 사용자 결정)
 
-§1.1의 "VSCode 사용자가 어색함을 느끼지 않는 것"을 gutter에도 적용한다. **아래 배치는 VSCode 소스에서 확인한 것이지 관찰 추정이 아니다** — `src/vs/editor/common/config/editorOptions.ts`의 레이아웃 계산이 원본이다(MIT, 열람 가능. [project-rules.md](project-rules.md)의 copyleft 열람 금지는 GNOME vte·kitty 같은 터미널 레퍼런스 규율이고 VSCode는 거기 해당하지 않는다. 그래도 **코드 표현을 옮기지 않고 배치 규칙만 취한다**).
+§1.1의 "VSCode 사용자가 어색함을 느끼지 않는 것"을 gutter에도 적용한다. **아래 배치는 소스에서 확인한 것이지 관찰 추정이 아니다**(MIT, 열람 가능. [project-rules.md](project-rules.md)의 copyleft 열람 금지는 GNOME vte·kitty 같은 터미널 레퍼런스 규율이고 여기는 해당하지 않는다. 그래도 **코드 표현을 옮기지 않고 배치 규칙만 취한다**).
 
-VSCode의 누적 계산은 이렇다 — 왼쪽에서 오른쪽으로 네 영역이 차례로 쌓인다.
+**출처가 두 층으로 갈린다는 것을 먼저 밝힌다** — 뭉뚱그려 "VSCode"라고 하면 어디까지가 편집기 코어인지 흐려진다.
+
+| 층 | 경로 | 여기서 가져온 것 |
+|---|---|---|
+| **Monaco 코어** | `src/vs/editor/…/editorOptions.ts` | **gutter 레이아웃 전부**(영역 순서·폭 계산·기본 상수) |
+| VSCode workbench | `src/vs/workbench/contrib/scm/…/quickDiffDecorator.ts` | git 변경 마커가 어느 영역에 그려지는가 |
+| VSCode workbench | `src/vs/workbench/browser/parts/…/editorStatus.ts` · `statusbarModel.ts` | 상태바 우측 항목 순서 |
+
+즉 **gutter 기하는 Monaco 것**이고, git 마커와 상태바는 Monaco에 없는 VSCode 상위 층이다. 우리가 §1.1에서 "VSCode 계열"이라 한 것이 이 둘을 함께 가리키므로 양쪽을 다 본 것이 맞지만, 계약의 성격은 다르다 — 앞은 편집기 컴포넌트의 보편 배치이고 뒤는 제품 관례다.
+
+Monaco의 누적 계산은 이렇다 — 왼쪽에서 오른쪽으로 네 영역이 차례로 쌓인다.
 
 | 영역 | VSCode 폭 | 내용 | 우리의 채택 |
 |---|---|---|---|
-| glyph margin | `lineHeight × laneCount`(정사각형) | breakpoint·디버그 표식 | **두지 않는다** — 디버거가 없다. 생기면 그때 맨 왼쪽에 붙인다(순서를 지금 정해 두는 것이 이 표의 값이다) |
+| glyph margin | `lineHeight × laneCount`(정사각형). **기본 켜짐**(`glyphMargin: true`) | breakpoint·디버그 표식 | **두지 않는다** — 디버거가 없다. VSCode가 기본으로 켜는 자리를 우리는 비우는 것이므로 **이것이 의도적 차이**임을 적어 둔다. 디버거가 생기면 맨 왼쪽에 붙인다(순서를 지금 정해 두는 것이 이 표의 값이다) |
 | line numbers | `max(자릿수, 5) × 최대 숫자 폭` | 줄 번호, **우측 정렬** | 채택. 등폭이라 폭이 곧 **셀 수**이고 `최대 숫자 폭 = cell_width`다 |
 | decorations | `10px` (+ 접기 켜지면 `16px`) | **git 마커와 접기 화살표가 같은 영역을 공유한다** | 채택. 셀 환산은 아래 |
 | content | 나머지 | 본문 | — |
@@ -513,9 +523,13 @@ VSCode의 누적 계산은 이렇다 — 왼쪽에서 오른쪽으로 네 영역
 - **git 마커와 접기 화살표는 한 영역을 공유한다.** VSCode에서 git 변경 표시는 `linesDecorationsClassName`으로 등록돼 decorations 영역에 그려지고, 접기 화살표도 같은 영역을 `+16px`로 넓혀 쓴다. **줄 번호 오른쪽·본문 왼쪽**이며, 둘을 별도 열로 나누지 않는다.
 - **줄 번호와 본문 사이 간격은 decorations 영역 자체다.** VSCode에는 본문 좌측 여백 설정이 따로 없고(그 요청이 이슈로 열려 있다), 이 영역이 그 역할을 겸한다.
 
-**셀 환산이 유일한 번역 지점이다.** VSCode는 px로 계산하지만 우리 gutter는 본문과 같은 셀 격자에 선다(§2.0). `10px + 16px = 26px`는 폰트에 따라 셀 수가 달라지므로 **px를 그대로 옮기지 않고 셀 수로 정한다** — 접기 화살표가 한 셀, git 마커가 한 셀, 본문 앞 여백 한 셀로 **3셀**이 기본 후보다. 이 값은 N1에서 실제 화면을 보고 확정하며 이 문서는 지금 숫자를 주장하지 않는다.
+**셀 환산은 Monaco를 벗어나는 것이 아니라 Monaco가 이미 가진 개념이다.** `lineDecorationsWidth`는 숫자(px)뿐 아니라 **`"2ch"` 같은 문자 폭 배수 문자열**을 받는다 — `validate`가 그것을 음수로 부호화해 두고 `compute`가 `-value × typicalHalfwidthCharacterWidth`로 되돌린다. 즉 **"이 영역을 글자 폭 몇 개로 잡는다"는 표현이 Monaco에 이미 있다.**
 
-**상태바 우측 항목 순서도 같은 기준을 쓴다.** VSCode의 RIGHT 정렬 우선순위가 왼쪽부터 **커서 위치 → 들여쓰기 → 인코딩 → 줄바꿈 → 언어** 순이다(`editorStatus.ts`의 priority 100.5·100.4·100.3·100.2·100.1). §2.2가 내보내는 값 중 그 다섯은 이 순서를 따르고, VSCode에 없는 **읽기 전용·저하 상태**는 그 왼쪽에 둔다(더 중요한 상태이고 §2.2가 "저하를 앞쪽에" 두기로 이미 정했다). **최종 배치·폭 부족 시 버리는 순서는 [status-bar.md](status-bar.md)가 소유한다** — 이 절은 근거를 제공할 뿐이다.
+우리 gutter는 본문과 같은 셀 격자에 서므로(§2.0) 그 `ch` 표현이 곧 셀 수다. 등폭에서는 `typicalHalfwidthCharacterWidth = cell_width`이니 **`ch`와 셀이 같은 단위**가 된다. 따라서 px 기본값(`10px` + 접기 `16px`)을 그대로 옮기지 않고 셀 수로 정하는 것은 이식상의 타협이 아니라 **Monaco가 제공하는 두 표현 중 우리 격자에 맞는 쪽을 고르는 것**이다.
+
+접기 화살표 한 셀, git 마커 한 셀, 본문 앞 여백 한 셀로 **3셀**이 기본 후보다. 이 값은 N1에서 실제 화면을 보고 확정하며 이 문서는 지금 숫자를 주장하지 않는다.
+
+**상태바 우측 항목 순서도 같은 기준을 쓴다.** `editorStatus.ts`가 RIGHT 정렬로 priority 100.5·100.4·100.3·100.2·100.1을 주고, `statusbarModel.ts`의 정렬이 *"higher values move towards the left"*라 **왼쪽부터 커서 위치 → 들여쓰기 → 인코딩 → 줄바꿈 → 언어**가 된다(방향은 그 정렬 규칙으로 확인한 것이지 화면 관찰이 아니다). §2.2가 내보내는 값 중 그 다섯은 이 순서를 따르고, VSCode에 없는 **읽기 전용·저하 상태**는 그 왼쪽에 둔다(더 중요한 상태이고 §2.2가 "저하를 앞쪽에" 두기로 이미 정했다). **최종 배치·폭 부족 시 버리는 순서는 [status-bar.md](status-bar.md)가 소유한다** — 이 절은 근거를 제공할 뿐이다.
 
 ## 5. 하이라이트 스팬
 

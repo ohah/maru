@@ -40,7 +40,9 @@ pub const State = struct {
         self.anchor_x = x;
         self.anchor_y = y;
         self.header_count = @min(header_count, item_count);
-        self.selected = self.header_count;
+        // 머리글이 **전부**면(고를 줄이 없음) `selected = header_count`는 범위를 벗어난다. 지금은 호출부가
+        // 그런 메뉴를 안 열지만, 상태 자체가 유효하지 않으면 다음 호출부가 그 위에서 인덱싱한다.
+        self.selected = @min(self.header_count, item_count -| 1);
         self.item_count = item_count;
         self.open = true;
     }
@@ -290,6 +292,16 @@ test "context_menu 머리글: 고를 수 없고 눌리지 않으며 강조되지
     const y_item: f64 = @floatFromInt(rect.y + 2 * 16 + 4); // 2번 줄
     try std.testing.expect(itemAt(&state, &items, p, cx, y_header) == null);
     try std.testing.expectEqual(@as(?usize, 2), itemAt(&state, &items, p, cx, y_item));
+}
+
+test "context_menu 머리글만 있는 메뉴는 유효하지 않은 선택을 만들지 않는다" {
+    // 고를 줄이 하나도 없는 경우(호출부가 막고 있지만 상태는 스스로 유효해야 한다).
+    var state: State = .{};
+    state.showWithHeaders(0, 0, 2, 2);
+    try std.testing.expect(state.selected < state.item_count); // 범위 안
+    try std.testing.expect(!state.selectable(state.selected)); // 그래도 고를 수는 없다
+    state.moveSelection(1); // 움직여도 범위를 안 벗어난다
+    try std.testing.expect(state.selected < state.item_count);
 }
 
 test "context_menu 머리글 없는 메뉴는 예전과 완전히 같다" {

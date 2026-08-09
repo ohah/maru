@@ -86,27 +86,36 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         const len: u16 = @intCast(@min(text.len, field_cols));
         const col = props.layout.line_numbers.start + (field_cols - len);
 
-        // 문자열 하나로 낸다. 백엔드가 `cell_grid`를 보고 **글자 x를 셀 배수로 스냅**하므로
-        // (`platform/macos/chrome/system_text.zig`) 자리마다 op을 쪼갤 필요가 없다 — 쪼개면 op이
-        // 자릿수만큼 늘고, 그것이 이 파일의 옛 우회였다.
-        if (run_used >= runs.len) return error.OutOfSpace;
-        runs[run_used] = .{ .text = text };
-        const run_slice = runs[run_used .. run_used + 1];
-        run_used += 1;
+        // **자리마다 op을 낸다.** 문자열 하나로 넘기면 백엔드가 measured advance로 이어 붙이는데,
+        // 그 advance가 셀 폭과 미세하게 달라(등폭 폰트도 7.8px vs 셀 8px 같은 차이가 난다) 두 번째
+        // 글자부터 격자를 벗어난다 — 실측에서 `9`와 `10`의 오른쪽 끝이 기본 2px, 큰 폰트 4px
+        // 어긋났다. 폰트 크기를 셀에서 파생해도 이 차이는 남는다(그렇게 해 보고 확인했다).
+        //
+        // op 원점은 우리가 셀 좌표로 주므로 **한 op에 한 글자면 벗어날 수 없다.** 줄 번호는 길어야
+        // 여섯 자라 op 부담이 작고, 본문에는 이 방법을 쓸 수 없다(한 줄 60자면 op이 폭발한다).
+        // 근본 해법은 백엔드가 cluster 폭으로 셀 인덱스를 세어 스냅하는 것이며 별도 작업으로 남는다.
+        const y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px);
+        for (text, 0..) |_, digit_index| {
+            if (run_used >= runs.len) return error.OutOfSpace;
+            runs[run_used] = .{ .text = text[digit_index .. digit_index + 1] };
+            const run_slice = runs[run_used .. run_used + 1];
+            run_used += 1;
 
-        if (op_count >= out.len) return error.OutOfSpace;
-        out[op_count] = .{ .text = .{
-            .origin = .{
-                .x = props.origin_px.x + @as(i32, col) * @as(i32, props.cell_w_px),
-                .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
-            },
-            .runs = run_slice,
-            .role = line_number_role,
-            .max_cols = field_cols,
-            .font_px = props.font_px,
-            .line_height_px = props.cell_h_px,
-        } };
-        op_count += 1;
+            if (op_count >= out.len) return error.OutOfSpace;
+            const digit_col = col + @as(u16, @intCast(digit_index));
+            out[op_count] = .{ .text = .{
+                .origin = .{
+                    .x = props.origin_px.x + @as(i32, digit_col) * @as(i32, props.cell_w_px),
+                    .y = y,
+                },
+                .runs = run_slice,
+                .role = line_number_role,
+                .max_cols = 1,
+                .font_px = props.font_px,
+                .line_height_px = props.cell_h_px,
+            } };
+            op_count += 1;
+        }
     }
 
     return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used };
@@ -170,9 +179,9 @@ test "줄 번호는 우측 정렬된다 — 자릿수가 달라도 본문과의 
 
     try testing.expectEqual(@as(usize, 2), w.ops);
 
-    // 영역이 5셀(0..5)이므로 "1"은 열 4, "100"은 열 2에서 시작한다 — 오른쪽 끝이 같다.
-    try testing.expectEqual(@as(i32, 4 * 8), ops[0].text.origin.x);
-    try testing.expectEqual(@as(i32, 2 * 8), ops[1].text.origin.x);
+    // 여백 1셀 뒤 번호 영역이 열 1~6이므로 "1"은 열 5, "100"은 열 3에서 시작한다 — 오른쪽 끝이 같다.
+    try testing.expectEqual(@as(i32, 5 * 8), ops[0].text.origin.x);
+    try testing.expectEqual(@as(i32, 3 * 8), ops[1].text.origin.x);
     try testing.expectEqualStrings("1", ops[0].text.runs[0].text);
     try testing.expectEqualStrings("100", ops[1].text.runs[0].text);
 }
@@ -206,7 +215,7 @@ test "뷰 원점이 옮겨지면 gutter 전체가 함께 옮겨진다" {
     props.origin_px = .{ .x = 100, .y = 50 };
     _ = try build(props, &ops, &scratch, &runs);
 
-    try testing.expectEqual(@as(i32, 100 + 4 * 8), ops[0].text.origin.x);
+    try testing.expectEqual(@as(i32, 100 + 5 * 8), ops[0].text.origin.x);
     try testing.expectEqual(@as(i32, 50), ops[0].text.origin.y);
 }
 
@@ -270,7 +279,8 @@ test "자릿수가 영역보다 길면 잘라 내지 않고 왼쪽 끝에 맞춘
     var runs: [4]draw.Run = undefined;
     _ = try build(testProps(layout, &rows), &ops, &scratch, &runs);
 
-    try testing.expectEqual(@as(i32, 0), ops[0].text.origin.x);
+    // 여백 1셀 뒤가 번호 영역의 시작이다. 음수로 가서 gutter 밖에 찍히는 것만 막는다.
+    try testing.expectEqual(@as(i32, 1 * 8), ops[0].text.origin.x);
 }
 
 test "각 op이 자기 run을 가리킨다 — 공유 버퍼를 덮어쓰지 않는다" {

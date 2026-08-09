@@ -257,7 +257,3 @@ test "contains: hit-test가 열을 영역으로 되돌린다" {
     try testing.expect(l.content.contains(8));
     try testing.expect(!l.content.contains(7));
 }
-
-test "TEMP-PROBE-editorview-must-fail-if-collected" {
-    try std.testing.expect(false);
-}

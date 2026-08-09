@@ -34,6 +34,19 @@ fn insetBg(panel: Rgb) Rgb {
     return if (lum < 128) darkenRgb(panel, 14) else lightenRgb(panel, 14);
 }
 
+/// 하단 상태바 배경 — 사이드바와 **같은 톤이되 구분은 되게**. 사이드바 색을 **터미널 배경의 반대
+/// 방향으로** 한 단계 옮긴다.
+///
+/// 왜 `insetBg`(루미넌스 기준 recessed)를 안 쓰나: 라이트 테마에서 사이드바는 터미널보다 **어두운데**
+/// insetBg는 밝은 패널을 더 밝게 옮겨 터미널 배경과 붙어 버린다(실측 Solarized: 252,246,227 vs
+/// 터미널 253,246,227 — 차이 0). 상태바는 사이드바와도 터미널과도 달라야 하므로 기준이 루미넌스가
+/// 아니라 **터미널로부터의 방향**이다(사용자 제보: 사이드바와 같고, 터미널과 같아도 구분이 안 된다).
+pub fn statusBarBg(sidebar: Rgb, terminal: Rgb) Rgb {
+    const ls: u16 = (@as(u16, sidebar.r) * 77 + @as(u16, sidebar.g) * 150 + @as(u16, sidebar.b) * 29) >> 8;
+    const lt: u16 = (@as(u16, terminal.r) * 77 + @as(u16, terminal.g) * 150 + @as(u16, terminal.b) * 29) >> 8;
+    return if (ls >= lt) lightenRgb(sidebar, 14) else darkenRgb(sidebar, 14);
+}
+
 /// Panel 경계선은 interactive active color에서 파생하지 않는다. active와 panel의 우연한 조합(예:
 /// panel=40, active=64, active-24=40)이 1px rule을 배경과 완전히 같게 만들어 목록 경계가 사라졌기
 /// 때문이다. 명암 반대 방향의 작은 이동은 dark/light panel 모두에서 semantic divider가 배경과 다름을
@@ -430,4 +443,26 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
     try std.testing.expect(r.space.border_width_px > 0);
     // 비-모양 space(슬롯 높이 비율)는 tui·rich 동일 — 모양만 분리한다.
     try std.testing.expectEqual(t.space.sidebar_slot_height_ratio_milli, r.space.sidebar_slot_height_ratio_milli);
+}
+
+test "statusBarBg: 사이드바와도 터미널과도 구분된다(다크·라이트 모두)" {
+    const cases = [_]struct { name: []const u8, term: Rgb, side: Rgb }{
+        .{ .name = "다크 기본", .term = .{ .r = 40, .g = 44, .b = 52 }, .side = .{ .r = 64, .g = 68, .b = 76 } },
+        .{ .name = "Solarized 라이트", .term = .{ .r = 253, .g = 246, .b = 227 }, .side = .{ .r = 238, .g = 232, .b = 213 } },
+        .{ .name = "Catppuccin 라이트", .term = .{ .r = 239, .g = 241, .b = 245 }, .side = .{ .r = 230, .g = 233, .b = 239 } },
+    };
+    for (cases) |c| {
+        const bar = statusBarBg(c.side, c.term);
+        // **둘 다에서 떨어져야** 한다. 하나라도 붙으면 사용자가 경계를 못 본다.
+        try std.testing.expect(channelDistance(bar, c.side) >= 10);
+        try std.testing.expect(channelDistance(bar, c.term) >= 10);
+    }
+}
+
+/// 채널 평균 거리 — 색 비교용 테스트 도우미.
+fn channelDistance(a: Rgb, b: Rgb) u16 {
+    const dr = if (a.r > b.r) a.r - b.r else b.r - a.r;
+    const dg = if (a.g > b.g) a.g - b.g else b.g - a.g;
+    const db = if (a.b > b.b) a.b - b.b else b.b - a.b;
+    return (@as(u16, dr) + @as(u16, dg) + @as(u16, db)) / 3;
 }

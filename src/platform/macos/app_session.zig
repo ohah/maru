@@ -18854,8 +18854,13 @@ pub const AppSession = struct {
             @floatFromInt(y),
             @floatFromInt(self.backing_width_px),
             @floatFromInt(h),
-            // 사이드바와 같은 chrome 배경색을 쓰되 window.opacity를 반영한다(straight-alpha quad 경로).
-            self.chromeQuadBg(sidebar_ops.sidebarBg(self)),
+            // 사이드바 톤을 따르되 **구분은 되게** — 사이드바 색을 터미널 배경 반대 방향으로 한 단계 옮긴다
+            // (`tokens.statusBarBg`). 예전엔 사이드바와 **같은 색**이라 경계가 안 보였다(사용자 제보).
+            // window.opacity는 그대로 반영한다(straight-alpha quad 경로).
+            self.chromeQuadBg(packOpaqueRgb(chrome.tokens.statusBarBg(
+                self.appearance.theme.sidebar_background,
+                self.appearance.theme.background,
+            ))),
             status_bar_layer,
         );
     }

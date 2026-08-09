@@ -1188,8 +1188,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `error{Busy,InvalidOwner,Corrupt,Terminal}`의 닫힌 집합이다. 임의 stream ID·allocator·raw `Client`는 facade를
    통과하지 않는다.
 
-   제품 generation drain의 순서는 `release_pending -> purge -> take -> view/classify/apply -> release`다. 이전 tick의
-   release가 `Busy`였으면 registry-backed attachment readiness로 canonical live owner를 확인한 뒤 같은 owner release를
+   C3-3까지의 제품 generation drain 순서는
+   `pending_effect_confirmation -> release_pending -> purge -> take -> view/classify/apply/effect -> release`다. 이전 tick의
+   poison effect가 `Busy`였으면 같은 reason으로 confirmation을 먼저 재시도하고, 확인 전에는 release·purge·take·input·output·screen이
+   모두 0이다. release가 `Busy`였으면 registry-backed attachment readiness로 canonical live owner를 확인한 뒤 같은 owner release를
    purge보다 먼저 재시도한다. semantic apply 결과는 owner settlement까지 `RemoteRuntime`의 closed pending outcome에 보존하고
    release 성공 뒤 한 번만 반환하므로 apply를 반복하거나 원래 오류를 잃지 않는다. empty/double release는 추측 호출하지 않는다.
    첫 purge가 `.purged`면
@@ -1205,6 +1207,59 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    revoke fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거한다. capability 입력은
    `GenerationCapabilities` projection, effect는 mode-specific typed
    poison/fence adapter 하나로 바꾸고 pure classify/materialize/apply policy만 공통 SSOT로 남긴다.
+
+   C3-3의 실패 정산은 `confirmed/retryable poison effect -> releaseEvent` 순서다. exact-15의
+   `GenerationTransport.poison(reason) Error!void` 성공은 `confirmed`, `AdminBusy`는 `busy`다. `confirmed`는 client_slot 내부에서
+   canonical first poison reason, unusable과 `fd == -1`을 함께 증명한 상태다. C3-3에는 retirement queue가 없으므로 fd가 열린
+   deferred-cleanup terminal은 confirmed가 아니며 `busy`다. 적용/기존 terminal 여부는 내부
+   oracle만 구분하고 facade 성공 postcondition은 하나로 합친다. `busy` 또는 적용 여부가 불명확한 동안에는 canonical `EventOwner`와 실패 결과를 보존하고 다음 pump에서 effect를
+   먼저 재시도한다. poison 적용을 확인하기 전에 event를 release하지 않으며, 별도 poison retry counter·effect owner·deferred-fd
+   상태는 만들지 않는다. 기존 `pending_generation_event_outcome.failed`가 유일한 RemoteRuntime retry state로 error와 optional poison reason을
+   함께 소유한다. mode-specific adapter는 non-owning stack/value helper이며 callback·vtable·heap·retained storage가 0이다.
+
+   `busy`는 pre-admission 결과이며 callback, syscall, role/fence/poison/fd disposition, event owner와 queue mutation이 모두 0이다.
+   effect admission 뒤에는 fallible callback 0의 no-fail suffix로 confirmed에 수렴하며 부분 effect를 `busy`로 반환하지 않는다.
+   guarded canonical cleanup allocator callback은 허용하지만 Client-wide callback latch가 모든 재진입을 Busy로 막고 exact free 1을
+   보장한다. confirmed는
+   future I/O admission 0, 기존 first poison reason 보존, pending outbound의 canonical disposition과 cleanup-only event release authority
+   live를 함께 증명한다. fd는 이미 close/take되어 `-1`이어야 한다. 단순 `unusable`이나 fd가 열린 deferred 상태는 confirmed가 아니다. moved/copied/identity drift는 confirmed가
+   아니라 typed terminal/corrupt 오류다. effect transcript는 requested reason, first reason 전후, unusable, fd/close-owner disposition,
+   pending outbound free count, confirmed/busy와 최종 ClientError를 한 oracle로 남긴다.
+
+   accepted revoke의 ordering authority는 두 기존 canonical owner가 이어서 소유한다. take 전에는 sealed `pending_events`와
+   `hasBufferedControllerRevoke`가 queue latch이고, take commit은 event generation을 처음 발급하면서 같은 no-fail suffix에서 queue
+   제거와 ClientSlot/node cleanup registry의 in-flight row 게시를 원자 수행한다. in-flight receipt는
+   `{node_incarnation,binding_reservation,stream_id,event_generation}`이고 canonical registry lifecycle은 `live -> consumed`뿐이다.
+   `borrowed/classifying/effect_pending/release_pending`은 RemoteRuntime의 설명용 처리 단계이며 registry에 복제하지 않고, retry phase는
+   `pending_generation_event_outcome` 하나만 소유한다. 별도 admission ID/generation이나 pre-queue row는 만들지 않는다. 여러 sibling revoke는 독립 row로 세며 queued latch와 live revoke count가 모두 0일 때만 connection mutation gate를 다시
+   연다. release Busy·effect Busy·terminal cleanup 동안 row를
+   유지하고 exact receipt consume만 감소시킨다. stale/copy/ABA/double consume과 count overflow/underflow는 aggregate를 바꾸지 않고
+   fail-stop한다. queue OOM/overflow는 in-flight row 발급 전의 기존 canonical event-ingress fail-close이며 queue latch를 게시했다고
+   가장하지 않는다. allocator callback 동안 Client wire entry가 Busy이고 local pending mutation은 이후 connection terminal 정산에서
+   폐기됨을 별도 hostile oracle로 고정한다.
+
+   aggregate gate의 consumer는 blocking/nonblocking input, generation control, pending-output flush, prepared/call execute,
+   resize·mouse·core·scroll·resync와 후속 2c3e RPC execute 전부다. 각 API의 상위 `RemoteRuntime` 검사와 별개로 ClientSlot/transport의
+   최종 queue-offset/syscall admission에서 queued latch와 live revoke count가 모두 0인지 검사한다. 별도 aggregate generation은 없다.
+   ClientSlot의 canonical owner-thread/registered operation fence가 이 검사부터 allocation·queue offset·syscall commit까지 no-yield
+   critical section을 소유하고, event ingress/publication도 같은 owner-thread fence를 거친다. allocator callback 재진입과 foreign thread는
+   검사 전 mutation 0의 `Busy`다. gate 실패는 allocation, local/wire queue offset,
+   callback과 syscall이 모두 0인 `Busy`다. target pending outbound는 offset 0만 취소하고 partial은 connection fail-close하며 sibling
+   pending owner는 aggregate 동안 보존·flush 0, aggregate zero 뒤 재개한다.
+
+   C3-3은 공통 `Client.readOneBatchWithIo|nextStreamFrameWithIo|bufferCanonicalEvent`의 cadence와 legacy observable behavior를
+   바꾸지 않는다. 열린 peer의 actual socket에서 이미 canonical admission된 revoke의 take→classify→fence/effect→release만
+   증명한다. revoke 직후 immediate EOF, admission 뒤 RX yield event 집합, unread revoke와 queued TX의 RX-first arbitration,
+   socket ingress의 malformed/unknown decoder cadence와 legacy/generation observable parity는 2c3e doc-first 및 blocking gate가
+   소유한다. 이미 canonical admission된 unknown/semantic violation owner의 typed confirmed effect→release와 generation raw Client
+   source-zero는 C3-3 소유다. 따라서 C3-3만으로
+   immediate-EOF ordering이나 전체 input→RPC/revoke ordering 완료를 주장하지 않는다.
+
+   한 `Client` connection은 수명 전체에서 `legacy` 또는 `generation` attachment mode 하나만 소유한다. canonical proof는
+   generation의 live ClientSlot/node membership과 legacy의 ClientSlot 미등록 상태이며 ClientSlot registry가 판정 owner다. pool-backed adapter connection에
+   legacy attachment를, direct legacy connection에 generation attachment를 섞지 않으며 같은 Client의 mode 전환도 금지한다.
+   C3-3의 generation in-flight revoke authority와 mutation gate는 이 single-mode invariant를 전제로 하고, 제품 조립·copy/stale
+   hostile oracle이 혼합 mint/adopt를 wire·queue mutation 전에 거부한다. 이 invariant를 열기 전에는 공통 Client latch로 확대하지 않는다.
 
    `client_slot`은 node/binding/pin/quarantine/payload free의 canonical resource transaction을 조정하는 유일한 owner다.
    public owner envelope의 local lifecycle은 import 방향을 보존해 `generation_event_contract`가 소유하고

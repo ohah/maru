@@ -82,28 +82,42 @@ pub fn classifyInText(text: []const u8, index: usize) ?Hazard {
 }
 
 /// ZWJ가 양쪽 그림문자를 잇고 있는가. 한쪽이라도 이모지가 아니거나 줄 끝/처음이면 false.
+///
+/// **VS16(`U+FE0F`)을 건너뛴다.** `❤️‍🔥`(U+2764 U+FE0F U+200D U+1F525)처럼 **변형 선택자가 ZWJ
+/// 바로 앞에 오는 시퀀스**가 있는데, VS16 자체는 그림문자가 아니라 앞 글자를 이모지 표현으로
+/// 만드는 부호다. 건너뛰지 않으면 그 정상 이모지가 위험으로 잡힌다(실제로 그렇게 오탐했다).
+///
+/// 그리고 VS16이 붙은 base(`U+2764` 같은 텍스트 기호)는 `isEmojiPresentation`이 잡지 않으므로
+/// **VS16이 있었다는 사실 자체를 이모지 근거로 쓴다** — 그것이 VS16의 정의다.
 fn zwjJoinsEmoji(text: []const u8, index: usize, zwj_len: usize) bool {
-    const before = prevCodepoint(text, index) orelse return false;
+    const before = beforeIsEmoji(text, index);
     const after_start = index + zwj_len;
     if (after_start >= text.len) return false;
     const after_len = std.unicode.utf8ByteSequenceLength(text[after_start]) catch return false;
     if (after_start + after_len > text.len) return false;
     const after = std.unicode.utf8Decode(text[after_start .. after_start + after_len]) catch return false;
 
-    // 스킨톤 modifier(U+1F3FB~U+1F3FF)와 VS16은 이모지 시퀀스의 일부라 `isEmojiPresentation`이
-    // 이미 포함하거나(전자) 앞 글자에 붙는다(후자). 여기서는 양끝 base만 본다.
-    return width.isEmojiPresentation(before) and width.isEmojiPresentation(after);
+    // 스킨톤 modifier(U+1F3FB~U+1F3FF)는 `isEmojiPresentation` 범위 안이라 그대로 통과한다.
+    return before and width.isEmojiPresentation(after);
 }
 
-/// `index` 바로 앞 codepoint. UTF-8 continuation byte를 거슬러 올라간다.
-fn prevCodepoint(text: []const u8, index: usize) ?u21 {
+/// ZWJ 앞이 이모지인가. VS16이면 그 자체를 근거로 삼고, 아니면 그 codepoint를 판정한다.
+fn beforeIsEmoji(text: []const u8, index: usize) bool {
+    const prev = prevCodepointAt(text, index) orelse return false;
+    if (prev.cp == 0xFE0F) return true; // VS16 = 앞 글자가 이모지 표현이라는 선언
+    return width.isEmojiPresentation(prev.cp);
+}
+
+/// `index` 바로 앞 codepoint와 그 시작 offset. UTF-8 continuation byte를 거슬러 올라간다.
+fn prevCodepointAt(text: []const u8, index: usize) ?struct { cp: u21, start: usize } {
     if (index == 0) return null;
     var start = index - 1;
     // continuation byte(0b10xxxxxx)를 지나 선두 byte까지.
     while (start > 0 and text[start] & 0xC0 == 0x80) start -= 1;
     const len = std.unicode.utf8ByteSequenceLength(text[start]) catch return null;
     if (start + len > text.len) return null;
-    return std.unicode.utf8Decode(text[start .. start + len]) catch null;
+    const cp = std.unicode.utf8Decode(text[start .. start + len]) catch return null;
+    return .{ .cp = cp, .start = start };
 }
 
 /// 이 문서에 위험한 문자가 하나라도 있는가. 상태바 경고 같은 요약에 쓴다.
@@ -269,4 +283,23 @@ test "classifyInText: 문맥이 필요 없는 것은 classify와 같게 답한�
 test "classifyInText: 범위 밖·잘린 시퀀스에서 죽지 않는다" {
     try testing.expectEqual(@as(?Hazard, null), classifyInText("ab", 99));
     try testing.expectEqual(@as(?Hazard, null), classifyInText("\xEA\xB0", 0));
+}
+
+test "ZWJ: VS16이 낀 이모지 시퀀스를 오탐하지 않는다" {
+    // ❤️‍🔥 = U+2764 U+FE0F U+200D U+1F525. ZWJ 앞이 VS16이라, 건너뛰지 않으면
+    // "앞이 이모지가 아니다"로 판정돼 정상 이모지가 경고로 나온다.
+    const heart_fire = "\u{2764}\u{FE0F}\u{200D}\u{1F525}";
+    try testing.expect(!containsAny(heart_fire));
+}
+
+test "ZWJ: 스킨톤 modifier 뒤도 정상이다" {
+    // 👨🏽‍💻 = U+1F468 U+1F3FD U+200D U+1F4BB
+    const dev = "\u{1F468}\u{1F3FD}\u{200D}\u{1F4BB}";
+    try testing.expect(!containsAny(dev));
+}
+
+test "ZWJ: VS16이 있어도 뒤가 글자면 여전히 위험이다" {
+    // VS16을 근거로 앞을 통과시키더라도 뒤가 그림문자가 아니면 시퀀스가 아니다.
+    const bad = "\u{2764}\u{FE0F}\u{200D}x";
+    try testing.expect(containsAny(bad));
 }

@@ -26,6 +26,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const web_ops = @import("web.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
@@ -53,7 +54,7 @@ const sentinelBgCell = app_session_mod.sentinelBgCell;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const CollectDest = AppSession.CollectDest;
 const FileOpenResult = AppSession.FileOpenResult;
-const isBrowserTerm = AppSession.isBrowserTerm;
+const isBrowserTerm = @import("web.zig").isBrowserTerm;
 const pane_grip_cols = AppSession.pane_grip_cols;
 const scrollbarThumbGeom = @import("scroll.zig").scrollbarThumbGeom;
 const AgentKind = app_session_mod.AgentKind;
@@ -77,7 +78,7 @@ const PaneGeometry = AppSession.PaneGeometry;
 const pane_min_tab_cols = AppSession.pane_min_tab_cols;
 const scrollStateOf = @import("scroll.zig").scrollStateOf;
 const termHasRunningJob = AppSession.termHasRunningJob;
-const termIsWebBrowser = AppSession.termIsWebBrowser;
+const termIsWebBrowser = @import("web.zig").termIsWebBrowser;
 const Pane = app_session_mod.Pane;
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
@@ -160,7 +161,7 @@ pub fn openFileTermInActivePane(
         .kind = kind,
         .mode = dock_panel.Mode.defaultFor(kind),
     };
-    const term = try self.createWebTerm(panelKindForEntryKind(kind));
+    const term = try web_ops.createWebTerm(self, panelKindForEntryKind(kind));
     // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
     errdefer self.destroyTerm(term);
     try pane.terms.append(self.allocator, term);
@@ -344,7 +345,7 @@ pub fn createFileTermFromModel(self: *AppSession, m: maru.session.workspace.File
         .kind = m.kind,
         .mode = m.mode,
     };
-    const term = try self.createWebTerm(panelKindForEntryKind(m.kind));
+    const term = try web_ops.createWebTerm(self, panelKindForEntryKind(m.kind));
     // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
     errdefer self.destroyTerm(term);
     term.file_entry = entry;
@@ -1204,7 +1205,7 @@ pub fn endDividerCapture(self: *AppSession) void {
 /// 편집 아님/그 surface가 활성 탭 아님/바 없음이면 null. imeCursorRect(.addr_edit caret)·mouse-down 클릭-어웨이(밴드
 /// 재클릭 판정)가 같은 leaf 기하를 쓰게 한다 — 렌더 "1c"·클릭 ①b의 band(y=full.y+bar_h)와 정합.
 pub fn addrEditPaneBar(self: *AppSession) ?PaneBar {
-    const sid = self.addrEditSurfaceId() orelse return null;
+    const sid = web_ops.addrEditSurfaceId(self) orelse return null;
     var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer leaf_rects.deinit(self.allocator);
     tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
@@ -1603,7 +1604,7 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
             bi -= 1;
             const bt = m.browser_terms[bi];
             const at = @min(bt.insert_after, pane.terms.items.len);
-            const term = self.createWebTerm(.browser) catch continue; // 실패한 record만 버린다(창은 살린다)
+            const term = web_ops.createWebTerm(self, .browser) catch continue; // 실패한 record만 버린다(창은 살린다)
             term.pending_url = self.allocator.dupe(u8, bt.url) catch null;
             pane.terms.insert(self.allocator, at, term) catch {
                 self.destroyTerm(term);
@@ -1989,7 +1990,7 @@ pub fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struc
 /// 롤백이 web Term 생성의 **단일 출처**다(debug 훅이 이 시퀀스를 재구현하지 않게).
 pub fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !u64 {
     const pane = activePane(self);
-    const term = try self.createWebTerm(panel_kind);
+    const term = try web_ops.createWebTerm(self, panel_kind);
     errdefer self.destroyTerm(term);
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)

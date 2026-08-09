@@ -28,6 +28,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const web_ops = @import("web.zig");
 const ctx_group_menu_color_first = app_session_mod.ctx_group_menu_color_first;
 const ctx_group_menu_ungroup = app_session_mod.ctx_group_menu_ungroup;
 const ctx_group_menu_pin = app_session_mod.ctx_group_menu_pin;
@@ -1247,7 +1248,7 @@ pub fn openFileContentMenu(
     const items = content_menu.build(request.target, entry.mode, request.has_selection, &buf);
     if (items.len == 0) return; // 낼 항목이 없으면 빈 메뉴를 띄우지 않는다
 
-    const rect = self.webSurfaceRect(surface_id) orelse return error.Unsupported;
+    const rect = web_ops.webSurfaceRect(self, surface_id) orelse return error.Unsupported;
     const scale: f64 = @as(f64, @floatFromInt(@max(@as(u32, 1), self.scale_milli))) / 1000.0;
     // 좌표는 rect 안으로 clamp한다 — 렌더러가 준 값이라 뷰 밖을 가리킬 수 있고, 그러면 메뉴가 자기 문서와
     // 무관한 자리에 뜬다. clamp는 "고쳐서 통과"가 아니라 **이 surface 안에서만 뜬다**는 계약이다.

@@ -90,16 +90,6 @@ pub const Op = union(enum) {
     /// 한 오버레이에 최대 1개(여러 개면 마지막이 이김). 그리지 않으니 bounding-box·셀에는 영향 없다.
     clip: Rect,
 
-    /// 등폭 셀 격자 파라미터. 배치와 폰트 크기가 **같은 값에서** 나와야 둘이 어긋나지 않는다.
-    pub const CellGrid = struct {
-        /// 한 칸의 device 픽셀 폭. 글자 x는 이 배수로 스냅된다.
-        cell_w_px: u16,
-        /// 한 칸의 device 픽셀 높이. 폰트 크기를 여기서 파생한다(터미널이 폰트→셀인 것의 역이 아니라,
-        /// **호출자가 이미 폰트에서 뽑아 둔 셀 크기를 되돌려 받는 것**이다 — 제품에서는
-        /// `refreshCellMetrics`가 그 출처다).
-        cell_h_px: u16,
-    };
-
     /// 사각 영역 채우기(밴드·탭 배경·hover·drop-zone). alpha<0xFF면 반투명 합성.
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };
     /// **literal RGB** 색 견본(color picker 스와치). 다른 op은 색을 ColorRole(테마 토큰)로 두지만, 스와치는 "이
@@ -128,14 +118,23 @@ pub const Op = union(enum) {
         /// either path from inventing a second title/search truncation policy.
         max_cols: u16 = std.math.maxInt(u16),
         anchor: text_layout.Anchor = .head,
-        /// **등폭 셀 격자에 그린다**(편집기 전용 — docs/native-editor.md §2.0).
+        /// **이 폰트 크기로 그린다**(편집기 전용 — docs/native-editor.md §2.0).
         ///
-        /// 값이 있으면 두 가지가 달라진다. ⑴ 폰트 크기를 `typography` 토큰이 아니라 **이 셀 크기에서**
-        /// 파생한다 — 그래야 편집기 폰트를 키울 때 글자도 함께 커진다(토큰은 pt 고정이라 안 커진다).
-        /// ⑵ 글자 x를 **셀 배수로 스냅**한다 — 폰트 advance가 셀 폭과 미세하게 달라도 격자가 어긋나지
-        /// 않는다. 터미널이 (행, 열)로 그리는 것과 같은 성질을 chrome op으로 얻는 방법이며, 이 값이
-        /// 없으면(도크·탭 등) 기존 measured 배치가 그대로다.
-        cell_grid: ?CellGrid = null,
+        /// `typography` 토큰의 point size는 chrome 고정값(pt)이라 편집기 폰트를 키워도 그대로다.
+        /// 그러면 셀만 커지고 글자는 안 커지는 화면이 된다(실측으로 확인한 결함). 이 값이 있으면
+        /// 그것을 쓰고, 없으면(도크·탭 등) 기존 토큰 경로 그대로다.
+        ///
+        /// **단위는 device 픽셀**이며 백엔드는 여기에 backing scale을 다시 곱하지 않는다 — 호출자가
+        /// 이미 반영해 넘긴다. **셀 높이에서 역산하지 않는 이유**: line height와 폰트 크기의 비율은
+        /// 폰트마다 달라 역산이 근사가 된다. 제품은 사용자 `font.size`를 이미 알고 있으므로 그 값을
+        /// 그대로 주면 되고, 역산이 필요한 쪽(Lab 같은 합성 픽스처)이 스스로 계산해 넘긴다.
+        font_px: ?u16 = null,
+        /// 이 줄의 높이(device px, 편집기 전용). `font_px`와 **짝**이며 둘 다 있거나 둘 다 없다.
+        ///
+        /// 없으면 `typography` 토큰의 line height가 쓰이는데, 그것은 chrome 고정값이라 편집기 폰트를
+        /// 키우면 **글자가 줄 상자보다 커져 래스터가 잘린다**(`raster_height_px`가 이 값에서 나온다).
+        /// 세로 정렬 기준이기도 하므로 폰트와 함께 커져야 한다.
+        line_height_px: ?u16 = null,
         wide_icons: bool = false,
         /// Pixel constraint is needed when the worker centres an icon+label group.  `max_cols`
         /// remains the legacy grid fallback; a rich-only action can preserve the final content

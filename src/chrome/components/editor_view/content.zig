@@ -28,6 +28,8 @@ pub const Props = struct {
     rows: []const Row,
     cell_w_px: u16,
     cell_h_px: u16,
+    /// 이 뷰의 폰트 크기(device px). 셀 크기와 **같은 폰트에서** 나와야 배치와 글자가 어긋나지 않는다.
+    font_px: u16,
     origin_px: draw.Px,
     /// 탭 하나가 밀어내는 칸 수. 탭은 **고정 폭이 아니라 다음 탭스톱까지**다(§4 가로 축).
     tab_width: u16 = 4,
@@ -85,7 +87,8 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
                 // 본문 영역을 넘는 글자는 자른다. 이것이 없으면 긴 줄이 gutter 옆 창 밖까지 그려진다.
                 .max_cols = props.layout.content.width,
                 // 등폭 셀 격자에 그린다(§2.0) — 폰트 크기가 셀에서 나오고 글자 x가 셀 배수로 스냅된다.
-                .cell_grid = .{ .cell_w_px = props.cell_w_px, .cell_h_px = props.cell_h_px },
+                .font_px = props.font_px,
+                .line_height_px = props.cell_h_px,
             },
         };
         op_count += 1;
@@ -223,6 +226,7 @@ fn testProps(layout: geometry.Layout, rows: []const Row) Props {
         .rows = rows,
         .cell_w_px = 8,
         .cell_h_px = 16,
+        .font_px = 13,
         .origin_px = .{ .x = 0, .y = 0 },
     };
 }

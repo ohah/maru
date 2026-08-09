@@ -22781,8 +22781,6 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    term.surface.lockCore(self.io);
-                    term.surface.unlockCore(self.io);
                     self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_ambiguous_wide = wide }, self.io) catch {};
                 }
             }

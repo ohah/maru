@@ -1176,8 +1176,24 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    Debug·ReleaseFast에서 inline address/range·construction rollback, take/mirror, live teardown mutation 0, explicit clean/corrupt
    release 뒤 teardown, copy/move/ABA·reentry와 size budget을 고정한다. C3-1 boundary는 whole `src/**/*.zig`에서 raw Client
    event call, `EventOwner*` pointer surface, attachment helper의 exact reviewed inventory를 고정하고 제품 pump/socket consumer 및
-   purge facade delta 0을 고정한다. C3-2와 C3-3은
-   각각 별도 gate를 만들며 C3-1 증거로 drain/socket 완료를 주장하지 않는다.
+   purge facade delta 0을 고정한다. C3-2와 C3-3은 각각 별도 gate를 만들며 C3-1 증거로 drain/socket 완료를 주장하지 않는다.
+
+   C3-2 focused gate 이름은 `test-session-host-2c3d-c3-2`다. 이 gate는 C3-1 전체를 상속하고
+   Debug·ReleaseFast에서 C3-2 product runtime sentinel 8개와 boundary 1개를 exact-count로 실행한다.
+   C3-2는 기존 `ClientSlot.prepareEndedPurge`/`commitEndedPurge` transaction을 새 큐 구현 없이
+   무인자 `GenerationTransport.purgeEndedStream()`과 `GenerationAttachment` wrapper로만 투영한다. facade는
+   exact 14에서 최종 exact 15로 바뀌며 결과는 `enum{not_ended,purged}`, 오류는
+   `error{Busy,InvalidOwner,Corrupt,Terminal}`의 닫힌 집합이다. 임의 stream ID·allocator·raw `Client`는 facade를
+   통과하지 않는다.
+
+   제품 generation drain의 순서는 `purge -> take -> view/classify/apply -> release`다. 첫 purge가 `.purged`면
+   같은 turn의 take·metadata·input·output·screen은 0이고 즉시 ended를 반환한다. `.not_ended` 뒤 take가
+   `.ended_pending`이면 입력·출력을 진행하지 않고 purge로 되돌아간다. 이 재시도 budget은
+   `protocol.max_client_pending_events`에서 직접 파생하며 magic count를 두지 않는다. budget 소진은 queue나 owner를
+   바꾸지 않는 `Busy`로 다음 pump tick에 넘기고, 다음 tick도 purge-first에서 시작한다. `.taken`만 view하고 모든
+   semantic 성공·실패 경로에서 exact once release한다. legacy arm의 raw drain과 공통 semantic classify/apply SSOT는
+   보존하고 generation 실패의 legacy fallback은 0이다. C3-2는 component/product-type 배선까지만 완료로 세며 actual
+   Darwin socket, revoked→fence→release 왕복과 generation raw Client event source-zero는 C3-3이 소유한다.
 
    `client_slot`은 node/binding/pin/quarantine/payload free의 canonical resource transaction을 조정하는 유일한 owner다.
    public owner envelope의 local lifecycle은 import 방향을 보존해 `generation_event_contract`가 소유하고

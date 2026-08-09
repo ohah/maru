@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const writeExecutableFile = AppSession.writeExecutableFile;
@@ -134,8 +135,8 @@ pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_sessi
     // cwd는 **명령 문자열에 넣지 않고** spawn 작업 디렉터리로만 전달한다 — 셸 메타문자가 명령으로
     // 재해석될 여지를 두지 않는다.
     if (usableRestoreCwd(record.parsed.cwd)) |cwd| req.cwd = cwd;
-    const term = try self.createTerm(req, size, cfg.queue_capacity, provider_command, args[0]);
-    errdefer self.destroyTerm(term);
+    const term = try term_ops.createTerm(self, req, size, cfg.queue_capacity, provider_command, args[0]);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1);
 }

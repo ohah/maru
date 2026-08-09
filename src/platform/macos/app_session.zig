@@ -1,14 +1,15 @@
 const std = @import("std");
+const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
-const agent_ops = @import("app_session/agent.zig");
+pub const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
 const input_ops = @import("app_session/input.zig");
-const web_ops = @import("app_session/web.zig");
-const workspace_ops = @import("app_session/workspace.zig");
-const settings_ops = @import("app_session/settings.zig");
+pub const web_ops = @import("app_session/web.zig");
+pub const workspace_ops = @import("app_session/workspace.zig");
+pub const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
 const sidebar_ops = @import("app_session/sidebar.zig");
-const tab_ops = @import("app_session/tab.zig");
+pub const tab_ops = @import("app_session/tab.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 
@@ -85,9 +86,9 @@ pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 g
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
-const file_panel_ops = @import("app_session/file_panel.zig");
-const pane_ops = @import("app_session/pane.zig");
-const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+pub const file_panel_ops = @import("app_session/file_panel.zig");
+pub const pane_ops = @import("app_session/pane.zig");
+pub const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
@@ -2412,8 +2413,8 @@ pub var app_runtime: app.AppRuntime = .{};
 // 창이 닫혀도 이 연결들은 안 닫는다(routing과 동일) — 창의 원격 Term은 그 창 deinit이 backend.remove로 회수한다. 제품
 // pool 경로에서는 client를 pool이 heap-pin/소유하며 `app_remote_client`는 legacy 단일-host 테스트 전용이다. macOS 전용
 // 타입이라 non-macOS면 void(barrel struct {} 제외 — [[macos-only-code-linux-crosscompile-check]]).
-var app_remote_client: ?RemoteSessionClient = null;
-var app_remote_host_pool: ?RemoteHostPool = null;
+pub var app_remote_client: ?RemoteSessionClient = null;
+pub var app_remote_host_pool: ?RemoteHostPool = null;
 pub var app_remote_backend: ?RemoteSessionBackend = null;
 // P3-e3-6 앱 종료 플래그. Cmd+Q/메뉴/마지막 창 닫기의 종료 확인이 **수락**되면(quit_decision=.accepted) 켜진다. 이후 각 창의
 // deinit이 이걸 보고 host-backed Term을 terminate 대신 **detach**한다 — 앱이 죽어도 host runtime이 살아 재실행 시 재접속한다
@@ -2422,7 +2423,7 @@ pub var app_remote_backend: ?RemoteSessionBackend = null;
 var app_quitting: bool = false;
 // 설정 GUI는 창별 AppSession에 있지만 이 값은 앱 전체 정책이다. 한 창에서 true→false로 바꾼 뒤 다른 창이 stale
 // config를 들고 있어도 새 Term backend와 Quit teardown이 갈리지 않도록 process-global SSOT로 유지한다.
-var app_keep_alive_after_quit: bool = false;
+pub var app_keep_alive_after_quit: bool = false;
 // 첫 AppSession이 디스크 config를 앱 전역 정책으로 채운 뒤에는 새 Window/quick의 stale config snapshot이 이 값을
 // 덮지 않는다. 이후 변경 주체는 settings toggle/reload/reset뿐이다.
 var app_keep_alive_policy_initialized: bool = false;
@@ -2452,7 +2453,7 @@ fn keepAlivePolicyForNewSession(config_value: bool) bool {
 // P4 §6 L291: keep-alive인데 host 연결/spawn이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 알린다("유지된다"
 // 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
-var host_connect_failed: bool = false;
+pub var host_connect_failed: bool = false;
 const HostConnectFailureReason = if (is_macos)
     session_host.host_connect.FailureReason
 else
@@ -2623,6 +2624,39 @@ pub const MeasuredTextCache = struct {
 };
 
 pub const AppSession = struct {
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
+        return term_ops.activateSurfaceById(self, id);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn agentSessionArchiveSmokeActiveSurfaceId(self: *const AppSession) u64 {
+        return term_ops.agentSessionArchiveSmokeActiveSurfaceId(self);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn agentSessionArchiveSmokeTermCount(self: *const AppSession) u32 {
+        return term_ops.agentSessionArchiveSmokeTermCount(self);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn focusTerm(self: *AppSession, term_index: usize) void {
+        return term_ops.focusTerm(self, term_index);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn focusedDockSurface(self: *const AppSession) ?u64 {
+        return term_ops.focusedDockSurface(self);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn ownsSurface(self: *AppSession, id: u64) bool {
+        return term_ops.ownsSurface(self, id);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn setSurfaceClosedCallback(self: *AppSession, context: ?*anyopaque, callback: ?SurfaceClosedCallback) void {
+        return term_ops.setSurfaceClosedCallback(self, context, callback);
+    }
+    /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn totalSurfaceCount(self: *AppSession) usize {
+        return term_ops.totalSurfaceCount(self);
+    }
+
     /// 본문 분리: app_session/notification.zig(F13). ABI가 직접 부르므로 진입만 남긴다.
     pub fn markNotificationsReadBySurface(self: *AppSession, surface_id: u64) void {
         return notification_ops.markNotificationsReadBySurface(self, surface_id);
@@ -4329,31 +4363,9 @@ pub const AppSession = struct {
                 "Maru shell",
                 commandName(config.command_kind),
             );
-            self.finishInitialSurface();
+            term_ops.finishInitialSurface(self);
         }
         self.writeSummaryFromState();
-    }
-
-    /// 첫 live tab이 준비된 뒤에만 renderer/frame loop를 세운다. 일반 init과 deferred workspace apply가 공유해
-    /// "세션 생성 → throwaway shell → restore" 경로를 만들지 않는다.
-    pub fn finishInitialSurface(self: *AppSession) void {
-        if (self.surface_initialized) return;
-        std.debug.assert(self.tabs.items.len > 0);
-        self.surface_initialized = true;
-        // 상태줄 훅을 config에 맞춘다(설치/복원). 사용자 파일을 건드리는 유일한 자리라 시작 시 한 번만 조정하고,
-        // config를 다시 적용할 때 같은 함수가 다시 맞춘다.
-        agent_ops.reconcileAgentStatusline(self);
-        self.renderer_state = renderer.RendererState.init(self.allocator, .{});
-        self.renderer_initialized = true;
-        self.frame_loop = app.AppFrameLoop.init(
-            self.allocator,
-            &self.app_window,
-            self.runtime,
-            &pane_ops.activePane(self).activeTerm().rt.pump,
-            &self.renderer_state,
-            self.io,
-        );
-        pane_ops.recomputeActivePaneRect(self);
     }
 
     /// 턴 스냅샷용 임시 index 경로(없으면 만든다). **저장소 밖**인 캐시 디렉터리에 둔다 — 저장소 안에 두면
@@ -4465,7 +4477,7 @@ pub const AppSession = struct {
             else => null,
         };
         self.clearPointerGesture();
-        if (tab_drag_pane) |pane| self.ensureActiveTermVisible(pane);
+        if (tab_drag_pane) |pane| term_ops.ensureActiveTermVisible(self, pane);
     }
 
     fn beginPointerGesture(self: *AppSession, owner: PointerGestureOwner) void {
@@ -4615,13 +4627,6 @@ pub const AppSession = struct {
     pub const pane_grip_cols: u32 = 3;
     pub const pane_min_tab_cols: u32 = 6;
 
-    pub fn renamingTerm(self: *const AppSession, term: *Term) bool {
-        const r = self.rename orelse return false;
-        return switch (r) {
-            .term => |t| t == term,
-            else => false,
-        };
-    }
     /// 이 그룹 시작 탭의 이름(group_start)을 지금 편집 중인가(SG3c 헤더 rename) — buildSidebarTitleDrawList가 헤더 glyph에
     /// 편집 텍스트를 보일지 판정. renamingWorkspace의 그룹판(같은 규율).
     pub fn renamingGroup(self: *const AppSession, tab: *Tab) bool {
@@ -4632,74 +4637,11 @@ pub const AppSession = struct {
         };
     }
 
-    const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
-    /// term이 속한 pane의 바·그 탭 인덱스(rename caret 위치 계산용). 못 찾으면 null.
-    pub fn termBarLocation(self: *AppSession, term: *Term) ?TermBarLoc {
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
-            // 보이는 순서(드래그 중이면 preview)로 찾는다 — 이 위치는 탭 세그먼트 기하의 근거라 paint와 같은
-            // 순서를 써야 한다(§4.4).
-            for (pane_ops.paneTermOrder(self, lr.leaf), 0..) |t, ti| {
-                if (t == term) {
-                    const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse return null;
-                    return .{ .pb = pb, .tab_index = ti, .count = lr.leaf.terms.items.len, .scroll = lr.leaf.tab_scroll_cols };
-                }
-            }
-        }
-        return null;
-    }
+    pub const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
 
     pub const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
 
     pub const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
-
-    /// layout grid를 이 Term에 적용하는 **단일 출처**.
-    ///
-    /// **계약**: 이 함수가 돌아온 뒤 그 Term의 **표시 grid(core)는 항상 레이아웃 크기**다. runtime(PTY winsize·
-    /// 원격 host)에 전달하지 못하면 그 실패를 error로 **보고**하되, 표시 grid는 그래도 맞춘다. 이 비대칭이
-    /// 핵심이다 — 렌더러는 셀을 `pane origin + col×cell_w`로만 두고 **pane 클리핑이 없어서**
-    /// (maru_metal_renderer.m의 셀 패스에는 scissor가 없다), 옛 grid가 남은 Term은 divider를 넘어 **옆 pane
-    /// 글자 위에 겹쳐 그려진다**. 즉 "runtime에 못 보냈다"는 표시 grid를 낡은 채 두어도 되는 근거가 아니다.
-    ///
-    /// PTY 없는/못 미치는 Term의 갈래를 여기서 모두 갈라, 호출부가 `kind == .web` 스킵을 각자 복사하지 않게 한다.
-    /// - web(4e-2 §6): sentinel이고 WKWebView frame은 surfaceDiff가 따로 sync하므로 대상이 아니다(no-op).
-    /// - §7 종료 placeholder: live link가 없어 `SurfaceRuntime.resize`가 `UnknownSurface`를 낸다(runtime.zig).
-    ///   묘비는 **렌더는 해야 하므로** 그냥 스킵하면 저장 grid에 갇혀 창 크기와 어긋난 화면이 남는다.
-    /// - 자식이 끝난 Term(`process_state == .exited`)·link가 사라진 Term(host runtime 사망): runtime이 dead
-    ///   adapter로의 라우팅을 **문서화된 계약대로** 거부한다([surface-runtime-api.md]). 거부는 runtime 쪽 사실일 뿐
-    ///   레이아웃 사실이 아니므로, 표시 grid는 여기서 직접 맞춘다.
-    pub fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
-        if (term.kind == .web) return;
-        if (term.rt.ended_placeholder) {
-            self.resizeTermCoreToLayout(term, size);
-            return;
-        }
-        self.runtime.resize(term.surface.id, size, self.io) catch |err| {
-            // `UnknownSurface`/`ProcessExited`는 core에 닿기 전에 반환되므로 표시 grid가 옛 크기로 남는다.
-            // `ResizeFailed`(core는 이미 적용, PTY ioctl만 실패)에서도 같은 값을 다시 적용할 뿐이라 무해하다.
-            self.resizeTermCoreToLayout(term, size);
-            return err;
-        };
-    }
-
-    /// 표시 grid(core)만 레이아웃 크기로 맞춘다 — PTY winsize·trace recorder 없이 **reflow만**. 묘비(§7)와
-    /// runtime 전달 실패가 같은 코드를 쓰게 해, "표시 grid는 레이아웃이 소유한다"는 규칙의 구현이 한 곳에 있게 한다.
-    fn resizeTermCoreToLayout(self: *AppSession, term: *Term, size: terminal.Size) void {
-        const grid = terminal.clampGridSize(size); // runtime.resize와 같은 clamp(core는 cols>=2를 요구)
-        {
-            term.surface.lockCore(self.io);
-            defer term.surface.unlockCore(self.io);
-            term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
-        }
-        // 관측 캐시도 함께 옮긴다. 묘비는 `live_initialized == false`라 `refreshTermObservation`이 즉시 반환하므로
-        // 여기서 갱신하지 않으면 생성 시 심은 저장 grid에 영원히 갇힌다 — `captureWorkspaceTab`은 core.size보다
-        // observation.size를 **우선**하므로, 창을 키운 채 종료하면 예전 grid가 저장되고 다음 실행의 새 셸이 창과
-        // 다른 winsize로 떠 시작 프로그램이 잘못된 기하로 레이아웃한다(code-review). 살아 있는 Term에서도 같은
-        // 이유로 맞춰 둔다(runtime이 살아나면 `refreshTermObservation`이 곧 자기 값으로 덮는다).
-        term.rt.observation.size = grid;
-    }
 
     /// 레이아웃 크기를 runtime에 전달하지 못한 사실을 관측 지점에 남긴다. 표시 grid는 이미 맞춰졌으므로 화면은
     /// 정상이지만 자식 프로세스는 옛 winsize를 믿는다 — 원인을 남기지 않으면 "그 pane의 TUI만 어긋난다"를
@@ -4823,67 +4765,6 @@ pub const AppSession = struct {
             break;
         }
         return probe;
-    }
-
-    /// 활성 pane 안에서 보이는 Term(가로 탭)을 term_index로 바꾼다(탭 전환). 활성 Term surface를 탭
-    /// 대표(`surface_ptrs[active_tab]` = `app_window.active()`)에 재바인딩하고 좌표 origin을 다시 계산한다.
-    /// 같은 Term이거나 범위 밖이면 무동작. pane/워크스페이스는 안 바꾼다.
-    /// #2(#505 리뷰): 활성 Term이 가로 스크롤 창 밖이면 보이도록 tab_scroll_cols를 조정한다(focusTerm·⌘[]·클릭 후).
-    /// 안 넘침(has_scroll=false)이면 무동작. 활성 탭 좌단이 창보다 왼쪽이면 좌단으로, 우단이 창보다 오른쪽이면 우단이 보이게.
-    fn ensureActiveTermVisible(self: *AppSession, pane: *Pane) void {
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return;
-        for (leaf_rects.items) |lr| {
-            if (lr.leaf != pane) continue;
-            const pb = pane_ops.paneBar(self, lr.rect, pane) orelse return;
-            const m = barMetrics(pb.tabs, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
-            if (!m.has_scroll) return; // 안 넘침 — 다 보임
-            // **드래그 중에는 스크롤을 건드리지 않는다.** 보이는 슬롯은 preview 공간인데 `tab_scroll_cols`는
-            // model-영속 상태라, 그 값으로 옮겨 두면 순서가 복원돼도 스크롤만 남아 바가 아무것도 가리키지 않는
-            // 구간에 머문다(복원 트리거는 순서와 `active_term`만 되돌린다). 손을 뗀 뒤 다음 `focusTerm`이
-            // model 기준으로 맞춘다 — 끌고 있는 동안 바가 스스로 스크롤하지 않는 편이 조작에도 방해가 없다.
-            if (tab_ops.tabDragTransaction(self, pane) != null) return;
-            const abs_start = @as(u32, @intCast(pane.active_term)) * m.tab_w;
-            if (abs_start < m.scroll_cols) {
-                pane.tab_scroll_cols = abs_start; // 좌단 잘림 → 좌단이 보이게
-            } else if (abs_start + m.tab_w > m.scroll_cols + m.tab_cols) {
-                pane.tab_scroll_cols = abs_start + m.tab_w - m.tab_cols; // 우단 잘림 → 우단이 보이게
-            }
-            return;
-        }
-    }
-
-    pub fn focusTerm(self: *AppSession, term_index: usize) void {
-        const pane = pane_ops.activePane(self);
-        if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
-        self.commitComposition(); // 새 Term으로 확정 바이트/preedit이 넘어가지 않게 target pin을 먼저 비운다.
-        self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
-        pane.active_term = term_index;
-        self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        self.ensureActiveTermVisible(pane); // #2(리뷰): 스크롤 밖 탭 선택 시 보이게 tab_scroll_cols 조정
-        // pane 안 탭 전환도 파일의 가시성을 바꾼다 — 보이지 않게 된 파일의 publish 대기 barrier를 여기서
-        // 버린다(워크스페이스 전환·창 병합과 같은 규칙, code-review max).
-        dock_ops.dropPendingDockFocusIfHidden(self);
-        self.file_tree_rows_dirty = true; // 활성 파일이 바뀌었을 수 있다 — 트리 활성 마커 갱신
-        pane_ops.recomputeActivePaneRect(self);
-        self.metal_dirty = true;
-    }
-
-    /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘⌥]/⌘⌥[). Term이 1개면 무동작.
-    /// **이동은 보이는 순서에서 센다** — 드래그 중이면 탭 바가 preview 순서를 그리므로, model 인덱스로 세면
-    /// "오른쪽 다음 탭"이 화면에서 인접하지 않은 탭이 된다(§4.4 "보이는 것이 조작되는 것").
-    fn focusTermRelative(self: *AppSession, delta: i64) void {
-        const pane = pane_ops.activePane(self);
-        const n = pane.terms.items.len;
-        if (n <= 1) return;
-        const order = pane_ops.paneTermOrder(self, pane);
-        if (order.len != n) return;
-        const cur: i64 = @intCast(pane_ops.paneActiveTermIndex(self, pane));
-        const next_slot: usize = @intCast(@mod(cur + delta, @as(i64, @intCast(n))));
-        // 고른 것은 슬롯이고 `focusTerm`은 model 인덱스를 받는다.
-        self.focusTerm(self.termModelIndex(pane, order[next_slot]) orelse return);
     }
 
     /// 탭 드래그 중 마우스가 올라간 드롭 타겟을 판정한다(④b 하이라이트용 — dropTabAt의 커밋 판정과 같은 우선순위).
@@ -5018,7 +4899,7 @@ pub const AppSession = struct {
         if (cw == 0 or self.cell_height_px == 0) return null;
         const cols: u16 = @intCast(@min(term_rect.w / cw, @as(u32, std.math.maxInt(u16))));
         if (cols == 0) return null;
-        const surface = self.activeSurface();
+        const surface = term_ops.activeSurface(self);
         var text_buf: std.ArrayList(u8) = .empty;
         defer text_buf.deinit(self.allocator);
         var exit: ?i16 = null;
@@ -5074,73 +4955,7 @@ pub const AppSession = struct {
     /// 카드면 null(드롭 아님 — no-op). dropPaneAt(커밋)이 단일 출처로 쓴다.
     pub const PaneDropDest = union(enum) { new_workspace, merge: usize };
 
-    const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
-
-    /// 모든 탭/panel/Term을 순회해 predicate가 처음 참인 Term의 위치를 돌려준다(없으면 null). reap 대상 찾기
-    /// (findTerminatedTerm)와 알림 클릭 역조회(activateSurfaceById)가 같은 3중 순회를 공유하는 단일 출처다 —
-    /// 순회 규칙(탭→panel→Term, 첫 매치 반환)이 한 곳에만 있어 갈릴 여지가 없다. 반환한 *Pane은 heap-pin이라
-    /// 트리 변형 전까지 안정. predicate는 comptime이라 호출부마다 인라인된다(함수 포인터 간접호출 없음).
-    pub fn findTermWhere(self: *AppSession, context: anytype, comptime pred: fn (@TypeOf(context), *Term) bool) ?TermLoc {
-        for (self.tabs.items, 0..) |tab, ti| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items, 0..) |term, tj| {
-                    if (pred(context, term)) return .{ .tab_index = ti, .pane = pane, .term_index = tj };
-                }
-            }
-        }
-        return null;
-    }
-
-    /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
-    /// §7 종료 placeholder는 **후보에서 제외**한다. 묘비는 `terminated=false`로 만들어지므로 지금도 걸리지 않지만,
-    /// reap은 사용자 확인 없이 Term을 닫고 마지막 Term이면 탭까지 닫으므로(closeTermAt → 캐스케이드) 복원해 놓은
-    /// 레이아웃이 조용히 사라지는 경로다. 방어적으로 명시해 나중에 누가 묘비를 terminated로 표시해도 안전하게 둔다.
-    fn findTerminatedTerm(self: *AppSession) ?TermLoc {
-        return self.findTermWhere({}, struct {
-            fn pred(_: void, term: *Term) bool {
-                return term.rt.terminated and !term.rt.ended_placeholder;
-            }
-        }.pred);
-    }
-
-    /// 셸이 exit한 개별 Term을 자동으로 닫는다(exit 자동 collapse, PR5b). 살아있는 Term이 하나라도
-    /// 있으면 죽은 Term을 **Term → pane(빈 pane collapse) → 워크스페이스(빈 탭 close)** cascade로 정리한다.
-    /// 전부 죽었으면(단일/마지막 Term) reap하지 않고 세션 종료 latch(allTabsTerminated)에 맡긴다 — 기존 단일 탭
-    /// exit→창 닫힘 동작을 보존. 구조가 매번 바뀌므로 한 번에 하나씩 닫고 다시 스캔한다(stale 인덱스/포인터 방지).
-    /// guard는 폭주 backstop(정상이면 죽은 Term 수만큼만 돈다). tick의 drain이 종료를 관측한 뒤 부른다.
-    fn reapTerminatedTerms(self: *AppSession) void {
-        if (self.termination_finished) return;
-        var guard: usize = 0;
-        while (guard < 4096) : (guard += 1) {
-            if (self.allTabsTerminated()) return; // 전부 죽음 → 세션 종료가 마지막을 닫는다(여기선 reap 안 함)
-            const loc = self.findTerminatedTerm() orelse return; // 더 닫을 죽은 Term 없음
-            // 닫기 확인 모달이 보류 중이면, 곧 닫을 closeTermAt이 탭/pane 인덱스·활성 선택을 바꿔 보류 표적이 stale가
-            // 된다 → 무효화(.window 제외). 첫 reap에서 한 번 취소하면 이후는 무동작(pending null).
-            self.invalidatePositionalPendingClose();
-            self.closeTermAt(loc.tab_index, loc.pane, loc.term_index);
-        }
-    }
-
-    /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
-    /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
-    /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
-    pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
-        const tab = self.tabs.items[tab_index];
-        self.cancelPointerGestureForTermRemoval(tab_index, pane, term_index);
-        const term = pane.terms.orderedRemove(term_index);
-        self.destroyTerm(term);
-        if (pane.terms.items.len > 0) {
-            // 임의 위치(종료된 Term)를 빼므로 활성 인덱스를 시프트 보정한다(단일 출처 activeIndexAfterRemoval) —
-            // 배경 형제 reap 시 활성이 엉뚱한 Term으로 튀던 버그.
-            pane.active_term = activeIndexAfterRemoval(pane.active_term, term_index, pane.terms.items.len);
-            self.refreshAfterReap(tab_index);
-        } else if (tab.panes.items.len > 1) {
-            pane_ops.collapsePaneIn(self, tab, pane); // 빈 pane을 형제로 collapse(active_pane clamp 포함)
-            self.refreshAfterReap(tab_index);
-        } else {
-            tab_ops.closeTab(self, tab_index); // 탭의 마지막 pane이 비었다 — 워크스페이스 close(대표 surface·active_tab은 closeTab가 처리)
-        }
-    }
+    pub const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
 
     /// reap으로 구조가 바뀐 탭의 대표 surface를 그 탭의 현재 활성 Term으로 재바인딩하고(닫힌 Term을 가리키던
     /// stale/dangling 방지) panel을 새 leaf rect로 resize한다(collapse면 형제가 빈자리 확장 — 배경 탭도 전환
@@ -5199,27 +5014,6 @@ pub const AppSession = struct {
         return detail.record.parsed.provider == .claude and detail.record.parsed.model.len > 0;
     }
 
-    /// Read-only fixture evidence that opening an inline archive disclosure did not replace the
-    /// user's active terminal surface. A zero result means there is no initialized active
-    /// surface, never an archive-detail sentinel.
-    pub fn agentSessionArchiveSmokeActiveSurfaceId(self: *const AppSession) u64 {
-        if (!self.surface_initialized or self.tabs.items.len == 0) return 0;
-        return self.activeSurfaceConst().id;
-    }
-
-    /// Read-only fixture evidence for the same ownership boundary. The count covers every
-    /// visible tab/pane Term, so a former archive-tab implementation would change it when the
-    /// card was activated. Saturation keeps this observer total even for malformed fixtures.
-    pub fn agentSessionArchiveSmokeTermCount(self: *const AppSession) u32 {
-        var count: u32 = 0;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                count = std.math.add(u32, count, @intCast(pane.terms.items.len)) catch return std.math.maxInt(u32);
-            }
-        }
-        return count;
-    }
-
     /// Smoke host가 정적 좌표를 추측하지 않게, 마지막으로 **성공적으로 paint/publish된**
     /// action tree에서만 한 target의 rect를 돌려준다. 이 함수는 refresh, worker, selection,
     /// action resolve를 호출하지 않는 read-only observer다.
@@ -5265,12 +5059,12 @@ pub const AppSession = struct {
         cfg.size = size;
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         if (usableRestoreCwd(tomb.rt.observation.cwd.items)) |c| req.cwd = c;
-        const fresh = try self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        const fresh = try term_ops.createTerm(self, req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
 
         // 여기부터는 실패할 수 없는 구간이다 — 슬롯 교체·해제·대표 surface 재바인딩은 에러를 내지 않는다.
         fresh.surface.custom_name = carried_name; // 소유 이전(번들 deinit이 해제) — 없었으면 null 그대로.
         pane.terms.items[index] = fresh;
-        self.destroyTerm(tomb);
+        term_ops.destroyTerm(self, tomb);
         // focusTerm은 같은 인덱스면 early-return하므로 대표 surface를 직접 갱신한다(탭바·렌더가 이걸 읽는다).
         self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -5278,28 +5072,20 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// P2 seam(docs/persistent-session-host.md §13 P2): 이 창의 terminal runtime 계약 표면. GUI는 이 backend에
-    /// opaque handle(`Term.rt.handle`)을 넘겨 spawn/attach/pump/close/terminate/observe를 수행하고 `*LivePtySession`을
-    /// 직접 만지지 않는다. backend는 참조만 드는 값이라 매번 만들어도 무해하고, 반환된 vtable의 ctx는
-    /// `&self.term_backend`(heap-pin AppSession)라 호출 스코프 안에서 안정적이다.
-    fn termBackend(self: *AppSession) app.TermRuntimeBackend {
-        return self.term_backend.backend();
-    }
-
     /// **새 Term을 어느 backend로 spawn할지**(P3-e3). 원격 backend가 세워져 있으면(keep-alive+연결 성공) 그것, 아니면
     /// in-process. createTerm이 이걸로 backend를 고르고, 그 backend가 준 surface의 `remote` 유무가 이후 `backendFor`의 판정
     /// 근거가 된다. `remote_backend`가 null(기본)이면 항상 in-process라 현행과 동일하다.
-    fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
+    pub fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
         // keep-alive를 끈 즉시 이후 Term은 local이어야 한다. quick은 아직 workspace manifest에 handle을 저장하지 않으므로
         // remote로 만들면 정상 Quit detach 뒤 재접속할 경로가 없는 orphan이 된다.
-        if (!app_keep_alive_after_quit or self.is_quick) return self.termBackend();
+        if (!app_keep_alive_after_quit or self.is_quick) return term_ops.termBackend(self);
         // host_connect_failed면 원격을 안 고른다 — 초기 연결 실패(그땐 backend가 null이라 무해)뿐 아니라, **런타임 중 host가
         // 죽은 뒤**(createTerm이 연결사로 감지해 세움, #3)에도 새 Term은 in-process로 연다. 기존 host-backed Term의 close/remove
         // 라우팅은 `backendFor`(게이트 없음)가 여전히 공유 backend로 보낸다(client-side 회수는 host 없어도 됨).
         if (is_macos and !host_connect_failed) {
             if (app_remote_backend) |*rb| return rb.backend();
         }
-        return self.termBackend();
+        return term_ops.termBackend(self);
     }
 
     /// **기존 Term의 backend**(P3-e3). 원격-backed surface(`surface.remote != null`)면 원격 backend, 아니면 in-process로
@@ -5311,25 +5097,7 @@ pub const AppSession = struct {
                 if (app_remote_backend) |*rb| return rb.backend();
             }
         }
-        return self.termBackend();
-    }
-
-    /// 화면 외 runtime metadata cache를 갱신한다. host-backed Term은 placeholder core를 절대 읽지 않고 remote event
-    /// cache만 복사한다. in-process Term은 core가 곧 runtime SSOT이므로 title_generation(OSC 0/2/7/RIS)을 cheap gate로
-    /// 삼아 sidebar/frame hot path의 불필요한 lock+allocation을 피한다. `force`는 workspace/control snapshot처럼
-    /// semantic_state까지 즉시 coherent해야 하는 저빈도 경로용이다.
-    pub fn refreshTermObservation(self: *AppSession, term: *Term, include_foreground: bool, force: bool) void {
-        if (term.kind != .terminal or !term.rt.live_initialized or term.rt.terminated) return;
-        if (!force) {
-            if (term.surface.remote != null) return; // remote pump/poll이 event cache를 갱신한다.
-            const generation = term.surface.core.title_generation.load(.monotonic);
-            if (term.rt.observation.availability == .current and
-                term.rt.observation.title_generation == generation) return;
-        }
-        self.backendFor(term).readObservation(term.rt.handle, self.allocator, &term.rt.observation, include_foreground) catch {
-            if (term.rt.observation.availability == .current)
-                term.rt.observation.availability = .stale;
-        };
+        return term_ops.termBackend(self);
     }
 
     /// **앱 전역** 원격 backend를 보장한다(§10). 이미 세워져 있으면(다른 창이) 재사용하고, 아니면 connect-or-launch로
@@ -5422,7 +5190,7 @@ pub const AppSession = struct {
     /// `WriteFailed`·`AttachFailed`·`HostNotFound`·`SpawnHostUnavailable` 등)는 host나 runtime이 살아 있을 수 있어
     /// `PersistentRuntimeUnavailable`로 남긴다 — 일시 장애를 영구로 오분류하면 살아 있는 세션이 종료 placeholder로 굳어
     /// 되찾을 길이 사라진다. OOM은 host에 대한 증거가 아니라 우리 쪽 사정이므로 그대로 전파한다.
-    fn classifyAttachError(err: anyerror) anyerror {
+    pub fn classifyAttachError(err: anyerror) anyerror {
         return switch (err) {
             error.RuntimeNotFound, error.StaleHostHandle, error.HostIdentityMismatch => error.PersistentRuntimeGone,
             error.OutOfMemory => error.OutOfMemory,
@@ -5444,7 +5212,7 @@ pub const AppSession = struct {
 
     /// workspace가 가리키는 host가 current spawn host와 다르면 지원하는 N-1 endpoint를 조회해 pool에 추가한다.
     /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
-    fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
+    pub fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
         if (!is_macos) return .unavailable;
         if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return .ready;
         // 같은 창의 Term 여러 개가 같은 죽은 host를 가리키는 것이 §7의 정상 케이스다(예: 12개 Term = 12번 복원).
@@ -5535,7 +5303,7 @@ pub const AppSession = struct {
     /// `FailureReason`이 아니라 **Zig error**로 갈리는 단계(현재 `runtime_death`)를 기록한다. 단계만 남기면
     /// `ConnectionClosed`·`WriteFailed`·`UnsupportedSpawnContract`가 한 값으로 뭉개져, 원인이 host 사망인지
     /// 쓰기 실패인지 계약 불일치인지 구분할 수 없다 — 실제로 그 지점에서 진단이 막혔다.
-    fn markHostConnectFailedError(
+    pub fn markHostConnectFailedError(
         self: *AppSession,
         stage: HostConnectFailureStage,
         err: anyerror,
@@ -5698,343 +5466,6 @@ pub const AppSession = struct {
         return a.dupe(u8, path) catch null;
     }
 
-    /// 한 Term(터미널)을 만든다 — backend가 registry `LiveSurface` 번들 슬롯 소유 + live PTY spawn + surface init을
-    /// 한 단위로 하고(P2 seam), GUI에는 복구 가능한 `*Surface`와 opaque handle만 준다. M3a: `surface`·`live_pty` 소유가
-    /// 둘 다 앱 전역 `live_registry` 번들 슬롯에 있어(안정 heap 슬롯) reader가 잡는 `&live_pty.reader`·`&surface.core`를
-    /// 그 슬롯이 고정한다. Term은 surface를 포인터로 참조하고 runtime은 handle로 다룬다(surface_id·pty_id 발급=앱 전역
-    /// surface_ids). spawn 성공 후 이후 단계 실패는 `errdefer be.remove(id)`로 번들을 회수하고, spawn 자체 실패는 backend
-    /// 내부 2-pass 정리가 맡는다. Pane에 거는 건 호출자(createPane/⌘T)가 한다.
-    pub fn createTerm(
-        self: *AppSession,
-        request: maru.pty.SpawnRequest,
-        size: terminal.Size,
-        queue_capacity: usize,
-        title: []const u8,
-        command: []const u8,
-    ) !*Term {
-        const term = try self.allocator.create(Term);
-        errdefer self.allocator.destroy(term);
-        term.* = .{};
-
-        const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
-        var req = request;
-        req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
-        // P2 seam(docs/persistent-session-host.md §13 P2): terminal runtime 계약 backend로 spawn한다. backend가 앱 전역
-        // registry의 `LiveSurface` 번들 슬롯 생성 + live PTY spawn(live_pty.init) + surface init을 한 단위로(내부 2-pass
-        // 부분-init 정리 포함) 수행하고, GUI에는 복구 가능한 *Surface와 opaque handle(id)만 준다 — GUI는 `*LivePtySession`을
-        // 직접 안 든다. handle 값은 surface_id(=pty_id)와 같지만 backend에 되돌려 주는 불투명 handle로만 다룬다. reader가
-        // 잡는 `&live_pty.reader`·`&surface.core`는 backend 내부에서 registry heap 슬롯이 고정한다(heap-pin 유지 — Term-inline
-        // 시절과 같은 메커니즘). generation=0으로 시작. id는 앱 전역 유일이라 중복 등록 없음.
-        var be = self.backendForNew(); // P3-e3: keep-alive+연결 성공 시 원격 backend, 아니면 in-process(기본). #3 폴백 시 아래서 갱신.
-        // P3-e3-5 재접속: persistent identity가 있으면 host namespace를 먼저 대조한 뒤 attach한다. keep-alive가 켜진
-        // 복원에서 host/runtime이 없거나 달라졌는데 fresh spawn으로 폴백하면 "이어진 세션"처럼 보이는 데이터 손실이므로
-        // loud-fail한다. keep-alive를 끈 복원은 identity를 명시적으로 무시하고 일반 in-process spawn으로 전환한다.
-        const reconnect_host_id = self.restore_runtime_host_id;
-        const reconnect_id = self.restore_runtime_id;
-        self.restore_runtime_host_id = "";
-        self.restore_runtime_id = "";
-        var reconnected = false; // attach(재접속) 경로면 true — errdefer가 terminate 대신 detach로 되돌린다(아래).
-        // 새 host runtime은 reader를 시작하기 전에 이 snapshot을 적용해야 한다. spawn 뒤 별도 RPC만 쓰면 child가
-        // 즉시 낸 첫 출력이 기본 폭/scrollback/theme으로 parse되는 race가 생긴다. in-process도 같은 값으로 시작하고,
-        // 재접속은 아래 attach 뒤 명령으로 현재 GUI config를 다시 맞춘다.
-        const runtime_config: maru.session.core_command.RuntimeConfig = .{
-            .max_scrollback = self.loaded_config.config.scrollback.lines,
-            .ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide,
-            .emoji_wide = self.loaded_config.config.emoji_width == .wide,
-            .palette = self.appearance.theme.palette,
-            .default_colors = .{
-                .foreground = self.appearance.theme.foreground,
-                .background = self.appearance.theme.background,
-            },
-            .cell_metrics = if (self.cell_width_px > 0 and self.cell_height_px > 0) .{
-                .width = self.cell_width_px,
-                .height = self.cell_height_px,
-            } else null,
-            // config cursor.shape — 원격 core는 host 소유라 spawn snapshot에 실어야 첫 출력 전에 기본 모양이 선다
-            // (in-process는 아래 chokepoint가 같은 값을 직접 주입 — 로컬/원격 동일 규칙).
-            .default_cursor_shape = settings_ops.configCursorShape(self),
-        };
-        const surface = surface: {
-            if (is_macos and app_keep_alive_after_quit and reconnect_id.len > 0) {
-                if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
-                var reconnect_host: u128 = 0;
-                if (reconnect_host_id.len > 0) {
-                    if (reconnect_host_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
-                    reconnect_host = std.fmt.parseInt(u128, reconnect_host_id, 16) catch
-                        return error.InvalidPersistentRuntimeIdentity;
-                } else if (app_remote_host_pool) |*pool| {
-                    reconnect_host = pool.spawnHostId() orelse return error.PersistentRuntimeUnavailable;
-                } else if (app_remote_client) |legacy| {
-                    reconnect_host = legacy.host_id;
-                } else {
-                    return error.PersistentRuntimeUnavailable;
-                }
-
-                // Exact saved host를 먼저 복구한다. current host bootstrap 실패로 pool/backend가 없어도 이 함수가
-                // N-1 query-only 연결에서 둘을 만들 수 있어, 새 host 가용성과 기존 세션 복원이 독립적이다.
-                const legacy_matches = app_remote_host_pool == null and
-                    app_remote_client != null and app_remote_client.?.host_id == reconnect_host;
-                if (!legacy_matches and (app_remote_host_pool != null or reconnect_host_id.len > 0)) {
-                    // 여기서 처음으로 "영구"와 "일시"가 갈린다. host 프로세스가 사라졌다는 긍정적 증거(host_gone)만
-                    // PersistentRuntimeGone으로 올린다 — caller가 그 Term만 종료 placeholder로 둘 수 있게 하는 신호다.
-                    // 나머지는 종전처럼 Unavailable(fail-closed)이다. 오분류 비용이 비대칭이라 보수적으로 가른다:
-                    // 영구를 일시로 보면 창 복원이 한 번 실패할 뿐이지만, 일시를 영구로 보면 살아 있는 세션을
-                    // placeholder로 굳혀 사용자가 되찾을 길이 사라진다(§7 접속 실패 행렬).
-                    switch (self.ensureRestoreHostAdapter(reconnect_host)) {
-                        .ready => {},
-                        .host_gone => return error.PersistentRuntimeGone,
-                        .unavailable => return error.PersistentRuntimeUnavailable,
-                    }
-                }
-                const rb = if (app_remote_backend) |*remote| remote else return error.PersistentRuntimeUnavailable;
-                // `backendForNew()`는 이 함수 초입에서 평가된다. current host bootstrap이 실패한 뒤
-                // `ensureRestoreHostAdapter()`가 N-1 pool/backend를 방금 만든 경우에는 그 값이 아직 local backend다.
-                // 기존 runtime attach 뒤의 attach/config/pump/observation도 반드시 같은 remote backend를 써야 하므로
-                // restored runtime의 실제 owner로 다시 고정한다.
-                be = rb.backend();
-                const pooled = app_remote_host_pool != null;
-                const legacy_client = if (!pooled) app_remote_client else null;
-                if (pooled and app_remote_host_pool.?.get(reconnect_host) == null)
-                    return error.PersistentRuntimeUnavailable;
-                var rid: [32]u8 = undefined;
-                @memcpy(&rid, reconnect_id[0..32]);
-                const attached = if (pooled)
-                    rb.attachTermOnHost(reconnect_host, id, rid, size) catch |err| return classifyAttachError(err)
-                else blk: {
-                    if (reconnect_host != legacy_client.?.host_id) return error.PersistentRuntimeUnavailable;
-                    break :blk rb.attachTerm(id, rid, size) catch |err| return classifyAttachError(err);
-                };
-                reconnected = true;
-                // host는 두 번째 controller를 거절하지 않고 **조용히 observer로 강등**한다(§9). attach는 성공으로
-                // 돌아오지만 이 Term은 화면만 받고 입력은 전부 거부된다. 알리지 않으면 사용자는 "화면은 나오는데
-                // 키가 안 먹는" 터미널을 이유도 모른 채 마주한다 — 실제로 그 상태로 한참을 쓰게 된다.
-                if (rb.attachedAsObserver(id)) self.observer_attach_notice_pending = true;
-                break :surface attached;
-            }
-            break :surface be.spawn(.{
-                .handle = id,
-                .request = req,
-                .size = size,
-                .queue_capacity = queue_capacity,
-                .initial_config = runtime_config,
-            }) catch |err| {
-                // #3: keep-alive 원격 backend인데 host 연결이 죽었으면(ConnectionClosed/WriteFailed) createTerm이 실패해 새
-                // 터미널을 못 여는 대신 **in-process로 폴백**한다 — 사용자가 앱 재시작 없이 계속 쓰게. host_connect_failed를 세워
-                // 이후 backendForNew도 죽은 원격을 안 타고, 다음 tick notice가 "유지 안 됨"을 알린다. 원격이 아니거나(로컬 spawn
-                // 실패는 그대로) 연결사 외 에러(OOM 등 — in-process도 실패할 것)는 폴백 없이 전파한다. 기존 host-backed Term은
-                // 각자 pump가 read_error로 관측한다(별도). remote spawn 실패는 backend 내부에서 정리돼 handle을 재사용해도 안전.
-                const remote_dead = is_macos and !reconnected and app_remote_backend != null and !host_connect_failed and
-                    (err == error.ConnectionClosed or err == error.WriteFailed or err == error.UnsupportedSpawnContract);
-                if (!remote_dead) return err;
-                self.markHostConnectFailedError(.runtime_death, err);
-                be = self.termBackend(); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
-                break :surface try be.spawn(.{
-                    .handle = id,
-                    .request = req,
-                    .size = size,
-                    .queue_capacity = queue_capacity,
-                    .initial_config = runtime_config,
-                });
-            };
-        };
-        // spawn 성공 후 이후 단계(config·attach·pump) 실패 시 번들 슬롯을 회수한다(backend.remove = 번들 deinit = live_pty
-        // reader join + surface.deinit + 슬롯 해제). spawn 자체 실패는 backend 내부 2-pass 정리(removeUninitialized)가
-        // 처리하므로 이 errdefer는 spawn 성공 후에만 등록돼 이후 단계 실패만 잡는다.
-        // 단 **재접속(attach)** 성공 경로는 우리가 띄운 게 아니라 기존 host runtime이므로 remove(=terminate)를 쓰면 안 된다 —
-        // 이후 단계 실패 시 detachTerm(client-side만 회수, terminate 없음)으로 되돌려 재접속했던 runtime을 살려 둔다(§7,
-        // deinit pass2와 같은 detach 규율). spawn 경로만 remove(terminate)로 우리가 만든 runtime을 회수한다.
-        errdefer if (is_macos and reconnected) {
-            if (app_remote_backend) |*rb| rb.detachTerm(id);
-        } else {
-            be.remove(id);
-        };
-        term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
-        term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
-        term.rt.live_initialized = true;
-        term.rt.restored_existing = reconnected;
-        term.rt.spawned_at_ns = std.Io.Clock.awake.now(self.io).nanoseconds; // uptime(비정상 시작 사망 grace) 기준 시각
-        // 비정상 시작 사망으로 held된 창에 새 셸이 뜨면 held를 풀어(re-arm), 이 새 세션이 정상 종료할 때 세션 종료
-        // latch가 다시 판정하게 한다(held→⌘T 새 셸→쓰다 exit→정상 앱 종료). 모든 surface spawn의 단일 chokepoint.
-        // held였다면 pending_zombie_reap을 세워, 이 live Term이 붙은 뒤 tick이 남은 죽은 Term을 reap한다(좀비 탭 방지).
-        // 또한 total_output_events를 리셋한다 — holdOnStartupExit의 "usable 미도달=무출력" 신호는 세션 누적 카운터라,
-        // 리셋 안 하면 1차 시도의 출력이 남아 재시도가 조용히 실패해도 "usable"로 오판돼 창이 닫힌다(재시도는 새 시도).
-        if (self.startup_held) {
-            self.pending_zombie_reap = true;
-            self.total_output_events = 0;
-        }
-        self.startup_held = false;
-
-        // config: backend가 돌려준 surface에 GUI가 표시 정책을 적용한다(config는 GUI layout 소유 — backend는 프로세스
-        // 수명만 안다). surface init 자체는 backend.spawn이 이미 했고, 모든 surface가 이 chokepoint를 첫 출력 전에
-        // 지나므로 arena 교체·palette 주입이 안전하다.
-        // 스크롤백 cell arena를 mmap 기반 page_allocator로(§11 P4 — demand-commit + 콜드 OS swap + free 즉시 반납,
-        // history > RAM). 이 chokepoint는 모든 live surface가 첫 출력 전(페이지 0개)에 지나므로 arena 교체가 안전하다.
-        term.surface.core.setScrollbackArena(std.heap.page_allocator);
-        // config 스크롤백 ring 크기를 주입한다(모든 surface가 이 chokepoint를 지난다 — init 첫 탭·새 탭·split·
-        // restore). lazy-alloc(첫 scroll) 전이라 안전. 0이면 스크롤백 비활성.
-        term.surface.core.setMaxScrollback(self.loaded_config.config.scrollback.lines);
-        // EAW Ambiguous(동그란 번호 등) 폭(text.ambiguous-width). 같은 chokepoint라 모든 surface가 일관된 폭으로
-        // putCell한다(grid·커서·렌더 단일 출처). 기본 narrow — wide면 동그란 번호 등을 2칸 advance.
-        term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
-        // 이모지 표현(VS16/키캡) 폭(text.emoji-width, 기본 wide). 같은 chokepoint라 모든 surface가 일관되게 이모지를
-        // 2칸으로 putCell한다 — ❤️·2️⃣가 1칸에 작게 나오던 것을 풀고 TUI 레이아웃과 정합(grid·커서·렌더 단일 출처).
-        term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
-        // config theme.palette(ANSI 16색 base)를 코어에 주입한다 — OSC 4 query 응답이 렌더(metal_frame)와 같은
-        // 우선순위(OSC4 override > config base > xterm256)를 보도록(화면·보고 정합). RIS/OSC104는 override만 리셋.
-        term.surface.core.setConfigPalette(self.appearance.theme.palette);
-        // config cursor.shape를 코어 **기본** 커서 모양으로 주입한다(DECSCUSR 0·RIS 복귀 지점). 앱이 DECSCUSR로
-        // 명시하면 그게 이기고(vim 모드별 bar/block), 거둬들이면 이 값으로 돌아온다. 원격은 위 runtime_config가
-        // 같은 값을 host core에 싣는다 — 여기 직접 주입은 in-process 경로(placeholder core는 host가 덮어씀).
-        term.surface.core.setDefaultCursorShape(settings_ops.configCursorShape(self));
-        term.surface.title = title;
-        term.surface.command = command;
-
-        // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
-        // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
-        _ = try be.attach(id, request.login); // interactive(login)만 process_in_reader — 계약이 attachSurface로 위임
-        // attach 뒤의 backend가 실제 core 소유자다. 신규 spawn은 initial_config를 reader 시작 전에 이미 적용했지만,
-        // 이 재적용은 기존 runtime 재접속과 향후 attach 경로가 현재 GUI config로 수렴하게 한다. attach 전
-        // `term.surface.core`는 원격 client placeholder라 직접 대입만으로 host parser/grid/OSC query는 바뀌지 않는다.
-        try be.enqueueCoreCommand(id, .{ .set_runtime_config = runtime_config }, self.io);
-        // MARU_TRACE: 이 창의 trace 레코더를 방금 attach한 링크에 per-link로 붙인다(모든 surface spawn 단일 chokepoint —
-        // 첫탭·⌘T·split·restore 다 여기). 앱-전역 runtime이라 창끼리 안 섞이도록 싱글톤이 아니라 링크별로 건다(리뷰 [0]).
-        // recorder는 self 소유(안정 주소)라 링크가 든 포인터가 세션 내내 유효하다. 붙는 순간 초기 grid baseline resize 기록.
-        if (self.trace_recorder != null) try self.runtime.setSurfaceTraceRecorder(term.surface.id, &self.trace_recorder.?);
-        // pump를 **앱 전역 라우팅**에 바인딩(M3b) — 창을 옮겨도(M3d) surface_id 키드 라우팅이 그대로 유효하다(§8A.2).
-        // backend가 handle의 live PTY 이벤트 큐로 pump를 만든다(계약이 LivePtySession.pump로 위임).
-        term.rt.pump = try be.pump(id);
-        // 첫 sidebar/title/SSH/agent frame 전에 initial observation을 확보한다. 새 host는 attach response에 full metadata를
-        // 싣고, in-process는 실제 core/PTY를 lock-copy한다. 구 host는 unavailable로 남아 empty와 구분된다.
-        be.readObservation(id, self.allocator, &term.rt.observation, true) catch {};
-        return term;
-    }
-
-    /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_registry.remove(번들 deinit=reader join + custom_name
-    /// 해제 + surface.deinit + 슬롯 해제, M3a) → destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·
-    /// split 실패 정리에 쓴다. (deinit은 surface 정리를 config/appearance 해제 앞에 두려 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
-    pub fn destroyTerm(self: *AppSession, term: *Term) void {
-        const surface_id = term.surface.id;
-        // 탭 드래그 preview는 `*Term`을 **프레임 간 캐시**하는 유일한 자리라, 다른 Term 포인터 보유 상태
-        // (rename·context_menu_target)와 같은 barrier가 여기 필요하다. `cancelPointerGestureForTermRemoval`은
-        // `pane.terms`에서 빼는 경로만 덮는데, **in-place 교체**(respawnEndedPlaceholder·rebuildFileTermSurface)는
-        // 길이를 안 바꾸고 슬롯만 갈아끼운 뒤 옛 Term을 해제한다 — 길이 검사만으로는 그 dangling을 못 잡는다.
-        tab_ops.cancelTabDragForTerm(self, term);
-        self.notifySurfaceClosed(surface_id);
-        // 이 surface로 가던 미전송 입력 큐를 회수한다 — flush는 맵 순회 중이라 엔트리를 못 지우고 비우기만 한다
-        // (pending_pastes 주석). 잔여 바이트는 대상이 사라졌으니 버린다(다시 쓸 수 없다).
-        if (self.pending_pastes.fetchRemove(surface_id)) |kv| {
-            var q = kv.value;
-            q.buf.deinit(self.allocator);
-        }
-        // rename 대상이 이 Term이면 stale 포인터 방지로 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
-        if (self.renamingTerm(term)) {
-            self.rename = null;
-            self.rename_input.clear();
-        }
-        // 컨텍스트 메뉴 대상이 이 Term이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
-        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .term and t.term == term) {
-            self.context_menu_target = null;
-            self.chrome_host.context_menu.hide();
-        };
-        // Phase 7e-2a: 이 Term(web browser)을 주소창 편집 중이면 편집·관련 pending을 정리한다(stale surface_id 방지 —
-        // remove가 슬롯을 해제하기 전에 surface_id로 판정). 비-web·비대상이면 무동작(surface_id 불일치 = no-op).
-        web_ops.dropAddrEditIfSurface(self, term.surfaceId());
-        if (term.pending_url) |u| { // WP-P: 아직 로드 못 한 복원 URL(owned) 회수
-            self.allocator.free(u);
-            term.pending_url = null;
-        }
-        if (term.kind == .web or term.rt.ended_placeholder) {
-            // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
-            // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
-            // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
-            // §7 종료 placeholder도 같은 슬롯 모양(web arm sentinel)이라 여기로 온다. 이 조건에서 빠뜨리면
-            // `live_initialized=false`라 아래 분기도 못 타 슬롯이 누수되고, 반대로 아래로 보내면 handle=0에
-            // `closeAndDetach`를 부른다(둘 다 틀렸다).
-            self.live_registry.remove(surface_id) catch {};
-        } else if (term.rt.live_initialized) {
-            // P2 seam: detach(runtime routing) 선행 → backend.remove가 번들 소유를 teardown(deinit=live_pty reader join →
-            // custom_name 해제 → surface.deinit → 슬롯 해제). backend 계약에 handle을 넘겨 수행하며, GUI는 `*LivePtySession`을
-            // 직접 만지지 않는다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던 `&surface.core`가 번들
-            // deinit의 surface.deinit 순간까지 살아 있다. handle(= surface_id)은 remove 실행 전에 읽었다(remove가 슬롯을
-            // 해제하므로 이후 term.surface/handle deref 금지).
-            if (is_macos and term.rt.restored_existing and term.surface.remote != null) {
-                // restore staging rollback: 기존 runtime의 subscription/client state만 회수한다. terminate는 절대 보내지 않는다.
-                if (app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
-            } else {
-                if (self.runtime_initialized) self.backendFor(term).closeAndDetach(term.rt.handle);
-                self.backendFor(term).remove(term.rt.handle);
-            }
-            term.rt.live_initialized = false;
-        }
-        // 파일 entry(FP16 §1)는 Term 소유다 — 여기서 해제하지 않으면 탭을 닫을 때마다 path와 Entry가 샌다.
-        // 소유권 경계가 여기 하나뿐이라(생성은 파일 열기, 해제는 여기) 중간 상태가 없다.
-        if (term.file_entry) |entry| {
-            self.allocator.free(entry.path);
-            self.freeDiffEntryState(entry);
-            self.allocator.destroy(entry);
-            term.file_entry = null;
-        }
-        // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
-        if (term.git_branch) |b| self.allocator.free(b);
-        if (term.git_branch_cwd) |c| self.allocator.free(c);
-        term.auto_title.deinit(self.allocator);
-        term.rt.observation.deinit(self.allocator);
-        if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // §7 묘비 owned command(deinit과 동기 유지)
-        if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
-        if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
-        self.allocator.destroy(term);
-    }
-
-    /// platform 관찰 훅을 설치한다. 세션/Term 소유권은 바뀌지 않고, callback은 teardown을 시작한 같은 메인 스레드에서
-    /// 동기 호출된다. 테스트와 비-macOS 경로는 기본 null을 유지한다.
-    pub fn setSurfaceClosedCallback(self: *AppSession, context: ?*anyopaque, callback: ?SurfaceClosedCallback) void {
-        self.surface_closed_context = context;
-        self.surface_closed_callback = callback;
-    }
-
-    pub fn notifySurfaceClosed(self: *AppSession, surface_id: u64) void {
-        if (self.surface_closed_callback) |callback| callback(self.surface_closed_context, surface_id);
-    }
-
-    /// surface.id로 그 surface가 속한 (탭, panel, Term)을 찾아 그 자리로 활성화한다(찾으면 true). 데스크톱 알림
-    /// OSC 9/777 클릭이 발신 터미널로 점프하는 단일 경로다 — Swift가 알림 식별자의 (창 토큰,
-    /// surface_id)에서 토큰으로 올바른 창(세션)을 고른 뒤, 이 세션에 surface_id만 넘긴다(surface.id는 이제 앱 전역
-    /// surface_ids로 발급돼 창 간 유일하다 — M0a. 창 토큰은 id 충돌 방지용 복합키가 아니라 대상 창을 빠르게 고르는
-    /// 위치 메타데이터고, 세션 내 (탭·panel·Term) 역조회는 Zig가 분담한다).
-    ///
-    /// **순서가 핵심**: focusPaneByPtr는 활성 탭의 panes만, focusTerm은 활성 pane만 보므로
-    /// switchTab→focusPaneByPtr→focusTerm 순으로 해야 한다 — 먼저 대상 탭을 활성으로 만들지 않으면 focusPaneByPtr가
-    /// 다른 탭의 panes에서 못 찾아 false가 되고, focusTerm도 엉뚱한 pane을 만진다. 이 순서 의존성을 여기 한 곳에
-    /// 가둔다(단일 출처). 세 호출은 같은 자리면 각자 no-op이라 이미 활성인 surface를 다시 눌러도 무해하다.
-    ///
-    /// id는 재사용하지 않으므로(surface_ids 단조 증가) stale id가 다른 surface로 오인 활성화될 위험이 없다 — 알림 후
-    /// 그 Term이 닫혔으면 못 찾아 false(무동작). 클릭 시점에 실시간 3중 순회하므로 알림 도착 후 탭/pane이 재배치돼도
-    /// 인덱스 캐시 없이 정확히 현재 위치로 점프한다.
-    pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
-        const loc = self.findTermWhere(id, struct {
-            fn pred(want: u64, term: *Term) bool {
-                return term.surface.id == want;
-            }
-        }.pred) orelse return false; // 못 찾음(닫힌 Term) → 무동작
-        // 순서가 핵심(위 doc): switchTab으로 대상 탭을 활성으로 만든 뒤라야 focusPaneByPtr가 그 탭의 panes에서
-        // loc.pane을 찾고, 그 뒤라야 focusTerm이 올바른 활성 pane을 만진다.
-        _ = tab_ops.switchTab(self, loc.tab_index);
-        _ = pane_ops.focusPaneByPtr(self, loc.pane);
-        self.focusTerm(loc.term_index);
-        return true;
-    }
-
-    /// Term 배열 mutation 직전의 위치 기반 gesture barrier. 같은 pane의 terminal-tab index는 어느 항목 제거에서도
-    /// shift될 수 있어 전부 취소한다. scrollbar는 현재 active Term 자체가 사라질 때만 취소해 배경 reap은 보존한다.
-    fn cancelPointerGestureForTermRemoval(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
-        switch (self.pointer_gesture_owner) {
-            .terminal_tab => |drag| if (drag.pane == pane) self.finishPointerGesture(),
-            .scrollbar => if (tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and term_index == pane.active_term)
-                self.finishPointerGesture(),
-            else => {},
-        }
-    }
-
     // ── 닫기 확인(실행 중 명령 보호) ────────────────────────────────────────────────────────────
     // 실행 중인 포그라운드 명령이 있는 터미널을 실수로 닫아 데이터를 잃지 않게, 닫기 전에 확인 모달을 띄운다
     // (iTerm2/Terminal.app/Ghostty의 "running process가 있으면 닫기 확인" 관례). 모든 in-app 닫기 경로(close_tab/
@@ -6042,37 +5473,10 @@ pub const AppSession = struct {
     // 그 닫기가 실제 teardown할 Term들만 검사한다(경로별 cascade를 그대로 따라감 — closeTargetHasRunningJob).
     // 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
 
-    /// 이 Term에 셸이 아닌 포그라운드 명령이 실행 중인가 — 닫기 확인의 단위 판정. live_pty 미초기화(attach 전)나
-    /// 이미 종료(exited)면 false(명령 없음). 실행 여부는 코어의 `cursorIsAtPrompt`(셸 통합 OSC 133 + alt 화면,
-    /// OS-중립)로 판정한다 — 프롬프트에 idle하게 있으면 실행 중 아님. pgid syscall을 안 쓰므로 login(1) fork
-    /// (child_pid=login이라 셸 pgid와 영영 불일치) 오판이 없고 Linux·Windows·web에 그대로 이식된다.
-    /// `cursorIsAtPrompt`가 읽는 코어 필드(semantic_state·alt_active)는 reader 스레드가 `core.write`로 갱신하므로,
-    /// 메인 스레드 읽기는 **lockCore 아래**에서 한다(surface.zig 불변식·torn read 방지 — cwd/scrollback 형제와 동일).
-    /// 단일 출처: docs/macos-app-host-boundary.md "닫기 확인", src/terminal/core.zig cursorIsAtPrompt.
-    pub fn termHasRunningJob(term: *Term, io: std.Io) bool {
-        if (!term.rt.live_initialized) return false;
-        if (term.surface.process_state == .exited) return false;
-        // in-process core가 실제 runtime SSOT다. 테스트의 직접 fixture mutate뿐 아니라 닫기 직전 최신 OSC 133 상태를
-        // 별도 cache cadence 없이 즉시 본다.
-        if (term.surface.remote == null) {
-            term.surface.lockCore(io);
-            defer term.surface.unlockCore(io);
-            return !term.surface.core.cursorIsAtPrompt();
-        }
-        if (term.rt.observation.availability != .unavailable) {
-            return term.rt.observation.alt_active or switch (term.rt.observation.semantic_state) {
-                .prompt, .input => false,
-                .command, .unknown => true,
-            };
-        }
-        // 구 remote host/metadata 미확정은 "idle"로 위장하지 않고 확인을 요구한다.
-        return true;
-    }
-
     // ── running 에이전트 판정(카드·탭바 스피너 표시 + 위상 게이트가 공유) ─────────────────────────
     // 옛 동작은 **활성 Term**만 봤다. 사용자 요청으로 **워크스페이스(탭) 안 어느 pane/Term이든** running이면 스피너를
     // 띄운다(백그라운드 pane/Term의 에이전트도 표시). agent_state는 pollAgentKinds가 모든 pane×Term을 갱신하므로
-    // 백그라운드 Term도 최신이다. termHasRunningJob(셸 job)과 **별개** — 이건 claude/codex 에이전트 running 상태다.
+    // 백그라운드 Term도 최신이다. term_ops.termHasRunningJob(셸 job)과 **별개** — 이건 claude/codex 에이전트 running 상태다.
 
     /// 위 개수와 함께 보여줄 에이전트 종류 심볼. 돌고 있는 것 중 **처음 만난 kind**를 쓴다 — 섞여 있을 때
     /// 무엇을 대표로 삼을지는 의미 있는 규칙이 없고(둘 다 돌면 둘 다 중요하다), 개수가 이미 "여럿"을 말해 준다.
@@ -6159,7 +5563,7 @@ pub const AppSession = struct {
     fn scopeHasRunningJob(self: *AppSession, scope: CloseScope) bool {
         return switch (scope) {
             .none => false,
-            .term => termHasRunningJob(pane_ops.activePane(self).activeTerm(), self.io),
+            .term => term_ops.termHasRunningJob(pane_ops.activePane(self).activeTerm(), self.io),
             .pane => pane_ops.paneHasRunningJob(pane_ops.activePane(self), self.io),
             .tab => |idx| tab_ops.tabHasRunningJob(self.tabs.items[idx], self.io),
             .session => self.sessionHasRunningJob(),
@@ -6180,7 +5584,7 @@ pub const AppSession = struct {
                     const pane = t.panes.items[a.pane];
                     switch (scope) {
                         .term => if (a.term < pane.terms.items.len)
-                            return termHasRunningJob(pane.terms.items[a.term], self.io),
+                            return term_ops.termHasRunningJob(pane.terms.items[a.term], self.io),
                         .pane => return pane_ops.paneHasRunningJob(pane, self.io),
                         else => {},
                     }
@@ -6257,14 +5661,14 @@ pub const AppSession = struct {
                 else => {},
             }
             const t = self.tabs.items[a.tab];
-            self.closeTermAt(a.tab, t.panes.items[a.pane], a.term);
+            term_ops.closeTermAt(self, a.tab, t.panes.items[a.pane], a.term);
             sidebar_ops.rebuildSidebar(self) catch {};
             self.metal_dirty = true;
             return;
         }
         switch (self.resolveCloseScope(target)) {
             .none => {},
-            .term => self.closeActiveTerm(),
+            .term => term_ops.closeActiveTerm(self),
             .pane => pane_ops.closeActivePane(self),
             .tab => |idx| tab_ops.closeTab(self, idx),
             .session => if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose(),
@@ -6277,7 +5681,7 @@ pub const AppSession = struct {
     pub fn latchSessionClose(self: *AppSession) void {
         if (file_panel_ops.blockSessionExitForFilePanels(self)) return;
         self.ended_seen = true;
-        self.activeSurface().process_state = .exited;
+        term_ops.activeSurface(self).process_state = .exited;
         self.metal_dirty = true;
     }
 
@@ -6319,16 +5723,7 @@ pub const AppSession = struct {
     fn writeHeldGuidance(self: *AppSession, detail: []const u8) void {
         var buf: [320]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "\r\n\x1b[2m  ▸ 셸이 시작 직후 종료됐습니다 ({s}).\r\n    ⏎ 다시 시도    ⌘, 설정에서 shell.command·shell.args 확인\x1b[0m\r\n", .{detail}) catch return;
-        self.writeSurfaceGuidance(pane_ops.activePane(self).activeTerm().surface, line);
-    }
-
-    /// 죽은/PTY 없는 surface의 core에 안내 텍스트를 쓰는 **락 규율 단일 출처**. 리더가 없거나 이미 멈춘 surface라
-    /// 락 아래 안전하며, `~` 확장·에스케이프는 core가 파싱한다(평범한 텍스트 + SGR). 화면 콘텐츠라 notice 토스트와
-    /// 달리 키 입력으로 사라지지 않는다 — 복구 방법이 계속 보이는 것이 요점이다(#5 지속성).
-    fn writeSurfaceGuidance(self: *AppSession, surface: *maru.session.Surface, line: []const u8) void {
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        surface.core.write(line) catch {};
+        term_ops.writeSurfaceGuidance(self, pane_ops.activePane(self).activeTerm().surface, line);
     }
 
     /// §7 종료 placeholder의 화면에 "이 세션은 끝났고 ⏎로 새 셸을 시작할 수 있다"는 지속 안내를 남긴다. notice는
@@ -6359,7 +5754,7 @@ pub const AppSession = struct {
         const text = w.buffered();
         if (text.len == 0) return; // 한 줄도 못 썼으면 래치를 세우지 않는다 — 다음 호출이 다시 시도한다.
         term.rt.ended_guidance_written = true;
-        self.writeSurfaceGuidance(term.surface, text);
+        term_ops.writeSurfaceGuidance(self, term.surface, text);
     }
 
     /// Cmd+Q/메뉴 "Quit maru"/Dock·로그아웃에 의한 앱 전체 종료 ABI(maru_macos_app_session_request_app_quit)가 부른다.
@@ -6552,17 +5947,6 @@ pub const AppSession = struct {
     // WindowKind). **범위(M3d-2a-i)**: 비-그룹·비-pinned workspace만(그룹 마커 문자열 free·pinned 정규화는 M3d-2a-ii).
     // 단 src 측 잔존 탭 재정규화(normalizePinnedFromGroups 등)는 closeTab tail 그대로 돈다. Swift 창 수명(빈 source
     // close·목적지 focus)은 M3d-2b(ABI outcome 소비).
-
-    /// 이 세션의 모든 워크스페이스 surface 총수 — mergeSessionInto(cross-window)의 참 이동 개수(버퍼 절단과 무관, [6]).
-    pub fn totalSurfaceCount(self: *AppSession) usize {
-        var n: usize = 0;
-        for (self.tabs.items) |tab| n += tab_ops.tabSurfaceCount(tab);
-        var entry_it14 = file_panel_ops.fileEntriesConst(self);
-        while (entry_it14.next()) |entry| if (entry.surface_id != 0) {
-            n += 1;
-        };
-        return n;
-    }
 
     /// 창/세션 종료 전에 해소해야 하는 파일 편집 상태가 하나라도 있는지. source-edit는 native dirty가 최신 CM6
     /// revision보다 늦을 수 있으므로 clean으로 보이더라도 보호한다. 모든 창을 함께 닫는 Cmd+Q는 Swift가 이 getter로
@@ -6760,25 +6144,6 @@ pub const AppSession = struct {
             .revoke_caps = surface_move.crossesTrustBoundary(from_kind, to_kind),
             .source_window_closed = true,
         };
-    }
-
-    /// 활성 pane의 활성 Term(가로 탭)을 닫는다. pane에 Term이 2개 이상일 때만 — teardown(destroyTerm)하고
-    /// terms에서 빼고 active_term을 보정한 뒤 새 활성 Term surface로 재바인딩한다. Term이 1개뿐이면 무동작
-    /// (closeActiveTermOrPane이 pane/워크스페이스 close로 보낸다). tree leaf는 pane이라 Term close엔 안 바뀐다.
-    fn closeActiveTerm(self: *AppSession) void {
-        const pane = pane_ops.activePane(self);
-        if (pane.terms.items.len <= 1) return;
-        const idx = pane.active_term;
-        self.cancelPointerGestureForTermRemoval(self.app_window.active_tab, pane, idx);
-        const closing = pane.terms.items[idx];
-        _ = pane.terms.orderedRemove(idx);
-        self.destroyTerm(closing);
-        // active_term 보정: 닫은 게 마지막이면 이전, 아니면 그 자리로 온 다음 Term(같은 인덱스).
-        pane.active_term = if (idx >= pane.terms.items.len) pane.terms.items.len - 1 else idx;
-        self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        pane_ops.recomputeActivePaneRect(self);
-        self.metal_dirty = true;
     }
 
     /// 카드/마커 위치 i가 속한 그룹의 **최상위(depth 1) 시작 마커 인덱스**(enclosingGroupMarkerTab의 인덱스판 — §2.1 상향
@@ -7813,7 +7178,7 @@ pub const AppSession = struct {
     }
 
     /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
-    fn allTabsTerminated(self: *AppSession) bool {
+    pub fn allTabsTerminated(self: *AppSession) bool {
         if (self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
@@ -7833,47 +7198,6 @@ pub const AppSession = struct {
         return true;
     }
 
-    /// 새 split(팬)·새 Term(서페이스)이 상속할 cwd — 포커스된(활성 pane의 활성) Term이 OSC 7로 보고한 현재
-    /// cwd(절대경로 형식일 때만; usableRestoreCwd 필터)를 **`buf`로 복사해** 돌려준다. 못 받았으면(셸 통합 없음·
-    /// 첫 프롬프트 전) null.
-    ///
-    /// **락**: interactive 세션은 reader 스레드가 core_mutex 아래 `core.write`로 OSC 7을 처리하며 옛 cwd 슬라이스를
-    /// free한다(dispatchOscCwd). 메인 스레드가 그 슬라이스를 락 없이 읽어 들고 있으면, spawn까지의 창에서 reader가
-    /// free·재할당해 use-after-free/torn read가 난다(그 cwd가 자식 chdir로 감). 그래서 lockCore 아래에서 읽고 **즉시
-    /// 복사**해 끊는다 — 반환 슬라이스는 core가 아니라 `buf` 소유라 그 뒤 reader가 core.cwd를 바꿔도 안전하다.
-    /// cwd 상속 출처가 될 Term을 고른다 — 활성 Term이 terminal이면 그것, 활성 Term이 web(sentinel core라 cwd
-    /// 없음)이면 같은 pane의 첫 terminal 형제로 상속한다. web-only pane(터미널 형제 없음)이면 null → 호출자가 root
-    /// 폴백. web Term의 sentinel core를 읽어 cwd 상속이 루트로 떨어지는 4e 회귀를 막는다.
-    fn cwdSourceTerm(self: *AppSession) ?*Term {
-        const pane = pane_ops.activePane(self);
-        const active = pane.activeTerm();
-        if (active.kind == .terminal) return active;
-        for (pane.terms.items) |t| if (t.kind == .terminal) return t; // web 활성이면 pane 내 터미널 형제로 상속
-        return null; // web-only pane: 상속원 없음 → 루트 폴백
-    }
-
-    fn focusedTermCwd(self: *AppSession, buf: []u8) ?[]const u8 {
-        const term = self.cwdSourceTerm() orelse return null;
-        self.refreshTermObservation(term, false, false);
-        if (term.rt.observation.availability == .unavailable) return null;
-        const cwd = usableRestoreCwd(term.rt.observation.cwd.items) orelse return null;
-        if (cwd.len > buf.len) return null; // 방어(usableRestoreCwd가 이미 max_path_bytes 미만 보장)
-        @memcpy(buf[0..cwd.len], cwd); // runtime observation owned cache → spawn용 caller buffer
-        return buf[0..cwd.len];
-    }
-
-    /// 새 surface(탭/Term/split)가 열릴 cwd를 정한다(Ghostty `*-inherit-working-directory` 모델). `inherit`가
-    /// 켜졌고 포커스 Term이 cwd를 보고했으면 그 cwd를 상속(focusedTermCwd), 아니면 고정 `root`로 폴백
-    /// (workspaceRootCwd). 호출자는 surface 종류별 토글(tab_inherit_cwd/split_inherit_cwd)을 `inherit`로 넘긴다.
-    /// 두 경로 모두 결과를 `buf`에 쓰므로(focusedTermCwd는 락 아래 복사, workspaceRootCwd는 ~ 확장/home), 반환
-    /// 슬라이스는 `buf` 또는 config arena 소유 — 호출자가 spawn 호출까지 `buf`를 살린다. null이면 req.cwd 미설정.
-    fn newSurfaceCwd(self: *AppSession, buf: []u8, inherit: bool) ?[]const u8 {
-        if (inherit) {
-            if (self.focusedTermCwd(buf)) |c| return c; // 포커스 Term cwd 상속(켜짐 + 보고됨) — buf로 복사됨
-        }
-        return workspace_ops.workspaceRootCwd(self, buf); // 꺼졌거나 상속할 cwd 없음 → 고정 root
-    }
-
     /// 새 surface spawn 요청에 cwd를 채운다(newSurfaceCwd 결과를 `req.cwd`에 얹는다). 모든 spawn 진입점
     /// (첫 창·새 탭·새 Term·분할)이 공유하는 단일 funnel이다.
     ///
@@ -7882,7 +7206,7 @@ pub const AppSession = struct {
     /// createPane) 호출이 끝날 때까지 살아 있어야 한다 — 헬퍼가 `buf`를 내부 선언하면 반환 시 소멸해 use-after-scope가
     /// 된다. 호출자는 `var root_buf: [std.fs.max_path_bytes]u8 = undefined;`를 spawn과 같은 스코프에 두고 그 포인터를 넘긴다.
     pub fn applySpawnCwd(self: *AppSession, req: *maru.pty.SpawnRequest, buf: []u8, inherit: bool) void {
-        if (self.newSurfaceCwd(buf, inherit)) |c| req.cwd = c;
+        if (term_ops.newSurfaceCwd(self, buf, inherit)) |c| req.cwd = c;
     }
 
     /// 키바인딩이 만든 app action을 디스패치한다(native 최소 — Swift는 키만 보내고 판정·실행은 Zig).
@@ -7975,8 +7299,8 @@ pub const AppSession = struct {
             },
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
-            .next_term => self.focusTermRelative(1),
-            .previous_term => self.focusTermRelative(-1),
+            .next_term => term_ops.focusTermRelative(self, 1),
+            .previous_term => term_ops.focusTermRelative(self, -1),
             .next_pane => pane_ops.focusPaneRelative(self, 1),
             .previous_pane => pane_ops.focusPaneRelative(self, -1),
             // 활성 pane을 통째로 새 단독 워크스페이스로 분리(grip 드래그→사이드바 빈 영역의 키보드/팔릿 버전).
@@ -7997,13 +7321,13 @@ pub const AppSession = struct {
                     return;
                 }
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
-                self.runtime.enqueueCoreCommand(self.activeSurface().id, .select_all, self.io) catch {};
+                self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .select_all, self.io) catch {};
             },
             // 화면+스크롤백 비우기(⌘K). 코어 mutate(셀·스크롤백)는 락 아래(리더 경합 방지, docs/io-render-threading.md
             // PR3). clearScreen이 "셸에 ^L을 보내 프롬프트를 다시 그릴지"를 돌려주면, form-feed는 락 밖에서 보낸다
             // (writeInput은 블로킹 PTY 쓰기 — PR1 패턴). 프롬프트일 때만 true(alt 화면·비프롬프트면 안 보냄).
             .clear_screen => {
-                const s = self.activeSurface();
+                const s = term_ops.activeSurface(self);
                 s.lockCore(self.io);
                 const send_form_feed = s.core.clearScreen();
                 s.unlockCore(self.io);
@@ -8134,7 +7458,7 @@ pub const AppSession = struct {
         // 발행된다. SV6b 전에는 그 순서 때문에 열린 오버레이 위에 선이 그어졌다 — `MARU_OPEN_NOTIFICATIONS`와 함께
         // 쓰면 그 장면이 한 화면에 잡힌다.
         if (std.c.getenv("MARU_FORCE_STICKY") != null) {
-            const surface = self.activeSurface();
+            const surface = term_ops.activeSurface(self);
             surface.lockCore(self.io);
             // OSC 133로 명령줄(.input) 한 줄을 마킹하고, 그 뒤에 출력 줄을 뷰포트보다 많이 흘려 스크롤백을 채운다.
             surface.core.write("\x1b]133;A\x1b\\\x1b]133;B\x1b\\$ zig build test\r\n\x1b]133;C\x1b\\") catch {};
@@ -8523,7 +7847,7 @@ pub const AppSession = struct {
         // Swift가 시스템 클립보드를 읽어 base64 OSC 52 응답을 PTY로 보내는 전 경로를 self-verify(MARU_DEBUG=input 로그로
         // core->pty 응답 확인). deny면 응답 없음(그것도 검증). 클립보드 읽기는 락 아래(리더 경합 방지).
         if (std.c.getenv("MARU_FORCE_OSC52_READ") != null) {
-            const s = self.activeSurface();
+            const s = term_ops.activeSurface(self);
             s.lockCore(self.io);
             s.core.write("\x1b]52;c;?\x1b\\") catch {};
             s.unlockCore(self.io);
@@ -8539,7 +7863,7 @@ pub const AppSession = struct {
             if (d.len > 0 and d[0] == '/') {
                 if (std.fmt.allocPrint(self.allocator, "\x1b]7;file://localhost{s}\x07", .{d})) |seq| {
                     defer self.allocator.free(seq);
-                    const s = self.activeSurface();
+                    const s = term_ops.activeSurface(self);
                     s.lockCore(self.io);
                     s.core.write(seq) catch {};
                     s.unlockCore(self.io);
@@ -8549,7 +7873,7 @@ pub const AppSession = struct {
         // MARU_FORCE_BELL=1 — 첫 frame에 BEL(0x07)을 활성 코어에 흘려 시각 벨(bell.visual) flash를 캡처(self-verify
         // debug-gate). maybeDebugOpenSettings는 tick의 dispatchBell 전에 돌아 같은 frame에 flash quad가 들어간다.
         if (std.c.getenv("MARU_FORCE_BELL") != null) {
-            const s = self.activeSurface();
+            const s = term_ops.activeSurface(self);
             s.lockCore(self.io);
             s.core.write("\x07") catch {};
             s.unlockCore(self.io);
@@ -8565,7 +7889,7 @@ pub const AppSession = struct {
         // MARU_FORCE_STYLED=1 — 첫 frame에 bold/italic/bold-italic/regular SGR 텍스트를 활성 코어에 써 넣어 폰트 face
         // 선택(font.family-bold/italic, F2-3)을 헤드리스 스크린샷으로 캡처(self-verify). italic 슬랜트·bold 굵기가 보인다.
         if (std.c.getenv("MARU_FORCE_STYLED") != null) {
-            const s = self.activeSurface();
+            const s = term_ops.activeSurface(self);
             s.lockCore(self.io);
             s.core.write("\x1b[1mBOLD\x1b[0m \x1b[3mITALIC\x1b[0m \x1b[1;3mBOTH\x1b[0m regular") catch {};
             s.unlockCore(self.io);
@@ -9105,7 +8429,7 @@ pub const AppSession = struct {
                 const entry = term.file_entry orelse continue;
                 if (entry.surface_id != surface_id) continue;
                 if (tab.active_pane != pane_index) pane_ops.focusPane(self, pane_index);
-                self.focusTerm(term_index);
+                term_ops.focusTerm(self, term_index);
                 found = true;
                 break;
             }
@@ -9159,16 +8483,6 @@ pub const AppSession = struct {
 
     pub fn pendingDockFocusSurface(self: *const AppSession) ?u64 {
         return (self.pending_dock_focus orelse return null).expected_surface_id;
-    }
-
-    pub fn focusedDockSurface(self: *const AppSession) ?u64 {
-        if (self.focus_owner != .workspace or self.tabs.items.len == 0) return null;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        if (tab.panes.items.len == 0) return null;
-        const pane = tab.panes.items[@min(tab.active_pane, tab.panes.items.len - 1)];
-        if (pane.terms.items.len == 0) return null;
-        const entry = pane.activeTerm().file_entry orelse return null;
-        return if (entry.surface_id == 0) null else entry.surface_id;
     }
 
     pub fn takeFilePanelCloseUnlockAction(self: *AppSession) ?FilePanelCloseUnlockAction {
@@ -9754,7 +9068,7 @@ pub const AppSession = struct {
     }
 
     /// diff entry가 들고 있는 소유 문자열을 **전부** 푼다(Term 파괴 시). path와 같은 자리에서 부른다.
-    fn freeDiffEntryState(self: *AppSession, entry: *dock_panel.Entry) void {
+    pub fn freeDiffEntryState(self: *AppSession, entry: *dock_panel.Entry) void {
         self.freeDiffPaths(entry);
         self.freeDiffContent(entry);
     }
@@ -9856,7 +9170,7 @@ pub const AppSession = struct {
                         if (pane.terms.items.len > 0) pane.activeTerm() else null;
                     if (self.app_window.active_tab != tab_index) _ = tab_ops.switchTab(self, tab_index);
                     if (tab_ops.activeTab(self).active_pane != pane_index) pane_ops.focusPane(self, pane_index);
-                    self.focusTerm(term_index);
+                    term_ops.focusTerm(self, term_index);
                     return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
                 }
             }
@@ -11220,14 +10534,6 @@ pub const AppSession = struct {
         find_ops.scrollToCurrentMatch(self);
     }
 
-    /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
-    /// `app_window.active_tab`을 따라가므로 멀티-탭(후속 PR)에서 탭을 전환하면 자동으로 활성 탭에
-    /// 라우팅된다. 지금은 단일 탭이라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로
-    /// `surface_initialized`로 가드하므로 `active()`는 non-null이 보장된다.
-    pub fn activeSurface(self: *AppSession) *maru.session.Surface {
-        return self.app_window.active().?;
-    }
-
     /// kitty graphics(K4c): kitty_uploaded(렌더러 업로드 generation 미러)를 live id 집합으로 prune한다 —
     /// live가 아닌(저장소에서 빠진/Swift가 텍스처를 evict할) image_id를 dedup 상태에서도 제거해, 다시
     /// 활성화되면 planImageUploads가 재업로드하게 한다. id 수가 작아 선형 검색으로 충분하다.
@@ -11241,37 +10547,6 @@ pub const AppSession = struct {
             }
         }
         for (to_remove.items) |id| _ = self.kitty_uploaded.remove(id);
-    }
-
-    /// `activeSurface`의 읽기 전용(`*const self`) 변형 — `pxToCell`/`imeCursorRect`처럼 surface를
-    /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다.
-    fn activeSurfaceConst(self: *const AppSession) *const maru.session.Surface {
-        return self.app_window.activeConst().?;
-    }
-
-    /// [4e-2, web-panel.md §6] 활성 탭·활성 pane의 **보이는 Term이 terminal인가**. web이면 활성 render 경로
-    /// (readActiveSnapshot·shapeOnlyBuild·cell_colors·kitty·find·terminal_bg)와 일부 입력 핸들러가 web **sentinel
-    /// core**를 만지지 않도록 gate한다(활성 web = 본문 blank·no-terminal-frame, WKWebView는 4e-3서 채움). 활성 없음
-    /// (surface 미초기화·0탭)은 terminal로 취급해 기존 경로가 그대로 돈다(0탭 조기 반환은 tick 상단이 이미 처리).
-    /// **web Term이 하나도 없으면 항상 true**라 터미널 렌더·입력이 byte-identical이다. `activeSurface()`와 **같은
-    /// active_tab 인덱스**를 봐 정합한다(surface_ptrs[active_tab]가 activePane().activeTerm().surface로 동기 유지 —
-    /// focusTerm/focusPane 등이 재바인딩). `*const`라 mutable tick 경로와 const metalFrame 경로가 함께 쓴다.
-    pub fn activeTermIsTerminal(self: *const AppSession) bool {
-        if (!self.surface_initialized or self.tabs.items.len == 0) return true;
-        const tab = self.tabs.items[self.app_window.active_tab];
-        const pane = tab.panes.items[tab.active_pane];
-        const term = pane.terms.items[pane.active_term];
-        return term.kind == .terminal;
-    }
-
-    /// [4e-2, web-panel.md §6] 활성 Term이 terminal이면 그 surface(=`activeSurface()`), web이면 null. 활성 render
-    /// 경로가 코어를 lock/deref하기 전에 이걸로 gate해 web sentinel deref를 막는다(활성 web = 의도적 no-terminal-frame).
-    /// terminal이면 `if (self.activeTerminalSurface()) |s|`가 `if (self.surface_initialized) { const s = self.activeSurface(); … }`와
-    /// **동형**이라 byte-identical. surface 미초기화면 null(app_window undefined deref 방지 — 옛 `surface_initialized` 가드 동형).
-    fn activeTerminalSurface(self: *AppSession) ?*maru.session.Surface {
-        if (!self.surface_initialized) return null;
-        if (!self.activeTermIsTerminal()) return null;
-        return self.activeSurface();
     }
 
     /// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
@@ -11573,7 +10848,7 @@ pub const AppSession = struct {
     /// 와 같은 PR3 패턴). 입력 인코딩 상태만 바꿔 렌더에 영향이 없으므로 metal_dirty는 세우지 않는다.
     pub fn resetInputModes(self: *AppSession) void {
         if (!self.surface_initialized) return;
-        const surface = self.activeSurface();
+        const surface = term_ops.activeSurface(self);
         // host-backed면 **실제 입력 모드를 든 host core**에 적용해야 한다 — client core는 빈 placeholder라 여기서
         // 리셋해 봐야 원격 앱은 계속 mouse/focus 리포트를 보낸다(⌘⇧R이 원격에서 무동작이던 이유). 명령은 기존
         // core_command 통로로 위임하고 reader가 input barrier 순서대로 적용한다.
@@ -11857,7 +11132,7 @@ pub const AppSession = struct {
         // 스크롤 중이었으면 즉시 다시 그리도록 metal_dirty도 세운다(echo 출력 전에라도 뷰 복귀).
         if (self.surface_initialized) {
             // viewOffset 읽기는 메인 락-아래(§9.1), scrollToBottom mutate는 reader로 위임(full (a), §9 P3-4).
-            const surface = self.activeSurface();
+            const surface = term_ops.activeSurface(self);
             const scrolled = blk: {
                 surface.lockCore(self.io);
                 defer surface.unlockCore(self.io);
@@ -11914,7 +11189,7 @@ pub const AppSession = struct {
                 // 쓴 것과 같은 활성 surface. **평범한 글자 타이핑은 이 경로가 아니라 IME 확정 경로**
                 // (routeCommittedText — macOS NSTextInputClient)로 오므로 거기에도 같은 해제가 있다.
                 if (self.loaded_config.config.input.selection_clear_on_typing or key_event.key == .escape) {
-                    self.clearSurfaceSelection(self.activeSurface().id);
+                    term_ops.clearSurfaceSelection(self, term_ops.activeSurface(self).id);
                 }
             },
             .app_action => |action| {
@@ -11960,7 +11235,7 @@ pub const AppSession = struct {
     /// `ChromeHost`에 더하면서 이 or 체인이나 `InputFocus` 중 하나를 빠뜨릴 수 있었다(`c822b336`).
     /// 이제 역할만 등재하면 두 곳이 함께 따라오므로 누락 자체가 불가능하다. `transient_toast`(지나가는
     /// 토스트)는 입력을 막지 않으므로 제외한다 — 14차 리뷰 [3]의 결론을 역할로 표현한 것이다.
-    fn anyModalOverlayOpen(self: *const AppSession) bool {
+    pub fn anyModalOverlayOpen(self: *const AppSession) bool {
         inline for (std.meta.fields(ChromeHostField)) |field| {
             switch (comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)))) {
                 .routes_text, .blocks_without_text => if (@field(self.chrome_host, field.name).open) return true,
@@ -12050,7 +11325,7 @@ pub const AppSession = struct {
     /// (클릭만 이관됨). 관측에 모드가 없는 구 host는 `mouse_tracking` bool에서 `.normal`로 보수적으로 폴백해
     /// motion을 추측 전송하지 않는다(1000만 켠 앱에 motion을 쏟으면 PTY 부하·오작동).
     pub fn remoteMouseTracking(self: *AppSession, surface_id: u64) terminal.MouseTracking {
-        const loc = self.findTermWhere(surface_id, struct {
+        const loc = term_ops.findTermWhere(self, surface_id, struct {
             fn pred(id: u64, term: *Term) bool {
                 return term.kind == .terminal and term.surface.id == id;
             }
@@ -12059,19 +11334,6 @@ pub const AppSession = struct {
         if (obs.availability == .unavailable) return .none;
         if (obs.mouse_tracking_mode > @intFromEnum(terminal.MouseTracking.any)) return .none; // 손상 방어(범위 밖)
         return @enumFromInt(obs.mouse_tracking_mode);
-    }
-
-    /// 남아 있는 텍스트 선택(하이라이트)을 해제한다 — 코어 mutate라 reader에 위임한다(docs/io-render-threading.md
-    /// §9 P3-4의 선택 위임 규율; host-backed면 명령이 host로 라우팅돼 **진짜 코어**에 적용된다).
-    /// 호출 지점은 "선택을 만든 주체가 아닌 쪽"이 그 선택을 무효로 만드는 곳들이다: 마우스 리포팅 중 버튼
-    /// 이벤트·휠(그 pane의 마우스는 앱이 소유하니 하이라이트만 남으면 유령), alt-scroll 화살표 변환,
-    /// 타이핑·Esc(`input.selection-clear-on-typing`). 이 경로들이 없으면 ⌘A(select_all) 선택을 지울 방법이
-    /// "이동 없는 클릭"과 좌표 무효화(resize reflow·alt 전환)뿐이라, 트래킹 TUI pane에서 하이라이트가 영구히
-    /// 남는다(클릭이 리포팅으로 빠져 선택을 손도 안 댄다). 베이스: Ghostty Surface.zig — 같은 세 지점에서
-    /// `setSelection(null)`. 선택이 없으면 코어의 `selectionClear`가 즉시 return하므로 반복 호출은 무해하다.
-    pub fn clearSurfaceSelection(self: *AppSession, surface_id: u64) void {
-        self.runtime.enqueueCoreCommand(surface_id, .select_clear, self.io) catch {};
-        self.metal_dirty = true; // 해제된 하이라이트가 한 프레임 더 남지 않게(다른 선택 사이트와 같은 규율)
     }
 
     /// 버튼 없는 마우스 이동(hover)을 먼저 bounded SessionDock tree에, 이어 필요할 때만 mouse reporting으로 PTY에
@@ -12093,7 +11355,7 @@ pub const AppSession = struct {
         // this entry point when the terminal has DECSET 1003 enabled. Keep the component state
         // correct in that case without making agent-session hover depend on PTY tracking mode.
         _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
-        const active = self.activeSurface();
+        const active = term_ops.activeSurface(self);
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
         // **host-backed면 관측 모드가 SSOT**다: placeholder core는 항상 `.none`이라 예전 코드는 여기서 항상 빠져
         // 원격 세션의 motion 리포팅(vim/tmux hover 등)이 무동작이었다(클릭 경로만 관측을 쓰고 있었다).
@@ -12133,7 +11395,7 @@ pub const AppSession = struct {
 
     fn pxToCell(self: *const AppSession, x_px: f64, y_px: f64) ?CellHit {
         // 활성 변형: 활성 surface와 그 본문 rect(active_pane_rect)를 일반형에 넘긴다. 클릭·선택·hover·IME가 쓴다.
-        return self.pxToCellIn(self.activeSurfaceConst(), self.active_pane_rect, x_px, y_px);
+        return self.pxToCellIn(term_ops.activeSurfaceConst(self), self.active_pane_rect, x_px, y_px);
     }
 
     /// `pxToCell`의 일반형 — 주어진 surface와 그 터미널 본문 rect(origin·크기) 기준으로 backing 픽셀 좌표를
@@ -12257,7 +11519,7 @@ pub const AppSession = struct {
                 self.finishPointerGesture();
                 // 드래그 중 얼려 뒀던 탭 바 스크롤을 model 기준으로 푼다(취소 경로는 cancelPointerGesture가
                 // 같은 일을 한다) — 안 풀면 넘치는 바에서 활성 탭이 화면 밖에 남는다.
-                self.ensureActiveTermVisible(src);
+                term_ops.ensureActiveTermVisible(self, src);
                 // 재정렬이 없어도 **반드시** 다시 그린다 — 직전 프레임에는 floating 고스트와 drop-target
                 // 하이라이트가 들어 있고 둘 다 `pointer_gesture_owner == .terminal_tab`로 게이트되므로,
                 // 리페인트를 안 걸면 손을 뗀 뒤에도 그 잔상이 화면에 남는다(effect 0은 model 축이지 화면 축이 아니다).
@@ -12587,7 +11849,7 @@ pub const AppSession = struct {
             // 경로로 fall through — 우-down도 리포트해 drag/up과 비대칭이 안 되게). 트래킹이 .none이면 input.right-click
             // (paste|menu|reporting)을 적용한다(F2-5). 트래킹 읽기는 락 아래(리더 core.write와 경합 방지, §9.1).
             const tracking = blk: {
-                const s = self.activeSurface();
+                const s = term_ops.activeSurface(self);
                 // host-backed면 placeholder 대신 관측의 mouse_tracking으로 게이트한다(§입력 패리티).
                 if (s.remote != null) break :blk self.remoteMouseTracking(s.id) != .none;
                 s.lockCore(self.io);
@@ -12912,10 +12174,10 @@ pub const AppSession = struct {
                         const tab = blk: {
                             if (shown_tab_pane != lr.leaf) break :blk slot;
                             if (self.tab_drag_order.items.len != count or slot >= count) break :blk slot;
-                            break :blk self.termModelIndex(lr.leaf, self.tab_drag_order.items[slot]) orelse slot;
+                            break :blk term_ops.termModelIndex(self, lr.leaf, self.tab_drag_order.items[slot]) orelse slot;
                         };
                         _ = pane_ops.focusPaneByPtr(self, lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
-                        self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
+                        term_ops.focusTerm(self, tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
                             self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
@@ -13048,7 +12310,7 @@ pub const AppSession = struct {
         };
         const col = cell.col;
         const row = cell.row;
-        const click_surface = self.activeSurface();
+        const click_surface = term_ops.activeSurface(self);
         const core = &click_surface.core;
         // mouse reporting: 트래킹 모드(DECSET 1000~1003)고 shift·option 미포함이면 셀렉션 대신 앱에 리포트한다 —
         // shift+click은 선형 셀렉션 override, option+click은 블록 override(iTerm2 관례). mods: shift=4·option=8.
@@ -13073,7 +12335,7 @@ pub const AppSession = struct {
             // Surface.zig mouseButtonCallback — "shift 없는 리포팅 버튼 이벤트면 setSelection(null)"과 동형
             // (shift/option은 위 do_report 게이트가 이미 선택 override로 빼놨다). 드래그 motion(kind 2)은
             // 버튼 이벤트가 아니라 제외한다(60~120Hz라 매번 큐에 넣을 일도 아니다 — Ghostty도 cursorPos에선 안 지운다).
-            if (kind != 2) self.clearSurfaceSelection(click_surface.id);
+            if (kind != 2) term_ops.clearSurfaceSelection(self, click_surface.id);
             self.runtime.enqueueCoreCommand(click_surface.id, .{
                 .report_mouse = .{
                     .button = @intCast(button),
@@ -13376,7 +12638,7 @@ pub const AppSession = struct {
         }
         // [4e-2, §6·1-B] 활성 Term이 web이면 터미널 커서(sentinel)가 없다 — 본문 origin 폴백 rect를 준다(WebKit이 웹
         // 포커스 IME 후보창 위치를 자체 관리, 4d). web Term 없으면 이 분기 미진입(byte-identical).
-        if (!self.activeTermIsTerminal()) {
+        if (!term_ops.activeTermIsTerminal(self)) {
             return .{ .x = @floatFromInt(self.active_pane_rect.x), .y = @floatFromInt(self.active_pane_rect.y), .w = cw, .h = ch };
         }
         // [P4-3, §12] 터미널 커서 위치를 **활성 surface 코어에서 lockCore 아래** 읽는다 — 예전 무락 직접
@@ -13393,7 +12655,7 @@ pub const AppSession = struct {
                     .w = cw,
                     .h = ch,
                 };
-            } else self.activeSurface();
+            } else term_ops.activeSurface(self);
             s.lockCore(self.io);
             defer s.unlockCore(self.io);
             break :blk s.baseCursorLocked() orelse {
@@ -13637,7 +12899,7 @@ pub const AppSession = struct {
         // tree/dock-group/overlay input owner에서는 TerminalView가 native responder일 수 있어도 PTY가 대상이 아니다.
         // 특히 surface publish 대기 `.dock_pending`의 Cmd+V가 보이지 않는 셸 명령으로 실행되지 않게 fail-close한다.
         if (self.structuralInputOwner() or self.inputFocus() != .terminal) return;
-        self.pasteTextTo(self.activeSurface().id, bytes, escape_each); // Cmd+V·드롭 즉시 경로 = 지금 활성 surface
+        self.pasteTextTo(term_ops.activeSurface(self).id, bytes, escape_each); // Cmd+V·드롭 즉시 경로 = 지금 활성 surface
     }
 
     /// 지금 **터미널이 아닌 구조 UI**(파일 트리 포커스·surface 대기 중인 빈 dock 그룹)가 입력 소유자인지.
@@ -13659,27 +12921,6 @@ pub const AppSession = struct {
             bytes;
         defer if (escape_each) self.allocator.free(payload);
         self.submitPaste(payload, false, target_id); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
-    }
-
-    pub fn terminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {
-        const loc = self.findTermWhere(id, struct {
-            fn pred(want: u64, term: *Term) bool {
-                return term.surface.id == want;
-            }
-        }.pred) orelse return null;
-        const term = loc.pane.terms.items[loc.term_index];
-        if (term.kind != .terminal) return null;
-        return term.surface;
-    }
-
-    /// 이 세션(트리)이 `id` surface를 소유하는가(terminal·web 무관 — `terminalSurfaceById`와 달리 kind 필터 없음).
-    /// grant 확인 모달을 **대상 web surface 소유 창**에 띄우는 판정(§9.2 target-window 모달, app_host_abi가 소비).
-    pub fn ownsSurface(self: *AppSession, id: u64) bool {
-        return self.findTermWhere(id, struct {
-            fn pred(want: u64, term: *Term) bool {
-                return term.surface.id == want;
-            }
-        }.pred) != null;
     }
 
     /// 붙여넣기 확인 모달 메시지(단일 출처). 아래 미리보기(buildPastePreview)가 붙여넣을 내용을 함께 보여준다.
@@ -13755,7 +12996,7 @@ pub const AppSession = struct {
         // 대상 surface를 **id로** 잡는다(활성이 아니라). 없거나(닫힌 Term) web이면 붙일 PTY가 없으니 no-op —
         // 예전엔 activeSurface를 그때그때 다시 읽어, 확인 모달을 거친 재진입(confirmPendingPaste)에서 그 사이
         // 바뀐 활성 pane에 payload가 주입되거나 web sentinel의 core를 만져 조용히 사라졌다(code-review).
-        const surface = self.terminalSurfaceById(target_id) orelse return;
+        const surface = term_ops.terminalSurfaceById(self, target_id) orelse return;
         var needs_confirm: bool = undefined;
         var bracketed: bool = undefined;
         if (surface.remote != null) {
@@ -13763,7 +13004,7 @@ pub const AppSession = struct {
             // DECSET 2004는 host core만 안다). 관측(RuntimeObservation.bracketed_paste)에서 온 실제 모드로 판정·인코딩해야
             // Claude Code 등이 붙여넣은 파일 경로를 [Image]로 인식한다(§입력 패리티). bracketed는 paste-protection 게이트에도
             // 필요한 클라 판단 모드라 관측으로 스트리밍한다(mouse_tracking과 같은 게이트-모드). 관측은 client cache라 core lock 불요.
-            const loc = self.findTermWhere(surface.id, struct {
+            const loc = term_ops.findTermWhere(self, surface.id, struct {
                 fn pred(id: u64, term: *Term) bool {
                     return term.kind == .terminal and term.surface.id == id;
                 }
@@ -13887,7 +13128,7 @@ pub const AppSession = struct {
         tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return .not_applicable;
         const pane = Model.paneAtPoint(leaf_rects.items, x_px, y_px) orelse return .not_applicable;
         // Term 탭 위면 그 Term, 아니면 그 pane의 현재 활성 Term이 대상이다.
-        const term_index = self.dropTermIndexAt(pane, leaf_rects.items, x_px, y_px) orelse pane.active_term;
+        const term_index = term_ops.dropTermIndexAt(self, pane, leaf_rects.items, x_px, y_px) orelse pane.active_term;
         // web Term과 §7 묘비는 "붙일 PTY가 없다"는 같은 상태다. 묘비를 `.routed`로 돌려주면 포커스만 죽은 pane으로 옮긴
         // 뒤 `handleDroppedFiles`의 묘비 가드가 경로를 버려, 사용자는 살아 있는 셸에서 포커스를 뺏기고 드롭한 내용도
         // 잃는다(위 ② 그대로 — code-review). `.refused`는 포커스를 건드리지 않고 host에도 삽입하지 말라고 알린다.
@@ -13904,39 +13145,8 @@ pub const AppSession = struct {
             self.metal_dirty = true;
         }
         if (!pane_ops.focusPaneByPtr(self, pane)) return .not_applicable;
-        self.focusTerm(term_index); // 같은 Term이면 무동작
+        term_ops.focusTerm(self, term_index); // 같은 Term이면 무동작
         return .routed;
-    }
-
-    /// 드롭 지점이 그 pane의 **Term 탭** 위면 그 Term 인덱스(아니면 null — 본문·grip/라벨·‹›/+ 존). 클릭 경로
-    /// (renameTargetAt)와 같은 paneBar/barMetrics 기하를 쓴다 — 같은 자리를 같은 Term으로 친다.
-    fn dropTermIndexAt(self: *AppSession, pane: *Pane, leaf_rects: []const PaneTree.LeafRect, x_px: f64, y_px: f64) ?usize {
-        const rect = for (leaf_rects) |lr| {
-            if (lr.leaf == pane) break lr.rect;
-        } else return null;
-        const pb = pane_ops.paneBar(self, rect, pane) orelse return null;
-        if (!layout_math.pointInRect(x_px, y_px, pb.full)) return null; // 바 밖(본문) — pane 활성 Term이 대상
-        if (x_px < @as(f64, @floatFromInt(pb.tabs.x))) return null; // grip/라벨 세그먼트
-        const count = pane.terms.items.len;
-        const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return null;
-        if (m.inScrollLeftZone(x_px) or m.inScrollRightZone(x_px) or m.inPlusZone(x_px)) return null; // ‹›/+ 은 대상 아님
-        const tab = m.tabIndex(count, x_px);
-        // 좌표 → **보이는** 슬롯 → 그 Term → model 인덱스. 반환값은 `pane.terms` 인덱스로 소비되므로(호출자가
-        // `terms.items[i]`·`focusTerm(i)`) 변환이 필요하다. renameTargetAt과 같은 자리를 같은 Term으로 치겠다는
-        // 이 함수의 약속은 드래그 중에도 지켜져야 한다 — 그쪽은 보이는 순서로 고른다(§4.4).
-        const order = pane_ops.paneTermOrder(self, pane);
-        if (tab >= order.len) return null;
-        return self.termModelIndex(pane, order[tab]);
-    }
-
-    /// `*Term`의 model 인덱스(`pane.terms` 안 위치). 보이는 슬롯으로 고른 Term을 model 인덱스를 기대하는
-    /// 소비자(focusTerm·moveTermToPane·terms.items[i])에게 넘길 때 쓴다.
-    fn termModelIndex(self: *const AppSession, pane: *const Pane, term: *const Term) ?usize {
-        _ = self;
-        for (pane.terms.items, 0..) |t, i| {
-            if (t == term) return i;
-        }
-        return null;
     }
 
     /// 드롭한 파일들(NUL 구분 경로)을 처리한다. maru ssh 원격 세션이면 각 파일을 control socket으로
@@ -13971,7 +13181,7 @@ pub const AppSession = struct {
         // 원격 업로드는 백그라운드 스레드라 **완료까지 비동기 구간**이 있고, 그 사이 사용자가 pane을 옮기면
         // 옛 코드는 완료 시점의 activeSurface에 경로를 붙였다(드롭한 pane이 아니라). id를 업로드 job에 실어
         // 결과가 원래 pane으로 돌아오게 한다.
-        const target_id = self.activeSurface().id;
+        const target_id = term_ops.activeSurface(self).id;
         const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
         const rup = self.remoteUploadContext() orelse {
             if (known_remote_ssh) {
@@ -14053,7 +13263,7 @@ pub const AppSession = struct {
         };
         // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임). 대상 surface는 지금 고정한다
         // (업로드 완료까지 비동기 구간 — 그 사이 pane이 바뀌어도 원래 pane에 붙는다).
-        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, self.activeSurface().id) catch {
+        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, term_ops.activeSurface(self).id) catch {
             self.showNotice("원격 이미지 전송을 시작하지 못했습니다. 로컬 붙여넣기로 전환하지 않았습니다.");
             return true;
         };
@@ -14179,7 +13389,7 @@ pub const AppSession = struct {
         for (results) |r| {
             defer self.allocator.free(r.path);
             // **드롭 시점에 고정한 대상**에 붙인다(완료 시점의 활성 pane이 아니라) — 업로드 비동기 구간을 묶는다.
-            if (self.terminalSurfaceById(r.target_id) != null) {
+            if (term_ops.terminalSurfaceById(self, r.target_id) != null) {
                 self.pasteTextTo(r.target_id, r.path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
                 continue;
             }
@@ -14784,8 +13994,8 @@ pub const AppSession = struct {
         // §6b-1 host-backed: 선택 텍스트는 **host가 뽑는다**(host가 콘텐츠 소유 = `extractSelection` 단일 출처, soft-wrap 이음·
         // 스크롤백 충실 — "client 렌더/host 해석" 불변식). 하이라이트 span(placeholder core가 렌더용으로 든 것)만 host로 보내
         // host가 자기 core에 적용해 추출한다. 원격 판정 SSOT=surface.remote. placeholder 선택 읽기는 메인스레드라 락 불요.
-        if (is_macos and self.activeSurface().remote != null) {
-            const rs = self.activeSurface();
+        if (is_macos and term_ops.activeSurface(self).remote != null) {
+            const rs = term_ops.activeSurface(self);
             const span = rs.core.selectionViewportSpan() orelse return &.{};
             if (app_remote_backend) |*rb| {
                 if (rb.selectedTextFor(rs.id, span)) |text| {
@@ -14798,7 +14008,7 @@ pub const AppSession = struct {
         // extractSelection은 선택 + 스크롤백을 읽는다 — 락 아래(docs/io-render-threading.md §9.1). full (a)에서 선택이
         // 이제 reader 스레드가 async로 mutate하므로, 락 없이 읽으면 드래그-선택 직후 Cmd+C가 torn/stale 선택을 본다
         // (렌더 경로는 이미 락 아래 selectionViewportSpan을 읽는다 — copyText만 노출됐던 갭). 추출 바이트는 owned이라 unlock 후 안전.
-        const s = self.activeSurface();
+        const s = term_ops.activeSurface(self);
         s.lockCore(self.io);
         const extracted = s.core.extractSelection(self.allocator) catch null;
         s.unlockCore(self.io);
@@ -14824,7 +14034,7 @@ pub const AppSession = struct {
         // host-backed: core는 빈 placeholder라 OSC 52가 안 들어온다. host가 관측 seq로 알려 준 요청만 RPC로
         // 텍스트를 가져온다(텍스트가 커서 관측에 못 싣는다). 정책(write allow)과 NSPasteboard 쓰기는 로컬과
         // 동일하게 client가 한다 — §기능을 어느 쪽에 둘 것인가.
-        if (is_macos and self.activeSurface().remote != null) {
+        if (is_macos and term_ops.activeSurface(self).remote != null) {
             const term = pane_ops.activePane(self).activeTerm();
             const seq = term.rt.observation.clipboard_write_seq;
             const last = term.rt.last_clipboard_write_seq orelse {
@@ -14851,33 +14061,15 @@ pub const AppSession = struct {
             self.clipboard_out_buffer = text; // backend allocator 소유 바이트를 그대로 인계(다음 호출까지 유효)
             return self.clipboard_out_buffer;
         }
-        const pending = self.activeSurface().core.pendingClipboardWrite();
+        const pending = term_ops.activeSurface(self).core.pendingClipboardWrite();
         if (pending.len == 0) return &.{};
         if (self.clipboard_out_buffer.len > 0) {
             self.allocator.free(self.clipboard_out_buffer);
             self.clipboard_out_buffer = &.{};
         }
         self.clipboard_out_buffer = self.allocator.dupe(u8, pending) catch return &.{};
-        self.activeSurface().core.clearClipboardWrite();
+        term_ops.activeSurface(self).core.clearClipboardWrite();
         return self.clipboard_out_buffer;
-    }
-
-    /// OSC 52 클립보드 쓰기가 상한(≈16MB)을 넘어 거부됐으면 notice로 표면화한다 — 무음 폐기 대신 "왜 복사가
-    /// 안 됐는지"를 보여주는 값싼 UX 우위(Ghostty의 무음 폐기를 넘음, terminal-compatibility-policy.md §OSC52).
-    /// pendingClipboard(쓰기 drain)와 같은 활성 surface 스코프. **불청 이벤트라** 오버레이(세팅/find 등)가 열려
-    /// 있으면 건너뛴다 — showNotice가 그 모달을 닫아 사용자를 끊지 않게(정보는 비필수라 유실 무해). flag 읽기·clear는 락 아래.
-    fn surfaceClipboardWriteRejected(self: *AppSession) void {
-        // 인터랙티브 모달(세팅·find·palette·확인 등)이 열려 있으면 건너뛴다 — showNotice가 그걸 닫아 사용자를
-        // 끊지 않게. notice는 제외(anyModalOverlayOpen) — 기존 토스트 위엔 그냥 교체돼도 무방하므로.
-        if (!self.surface_initialized or self.anyModalOverlayOpen()) return;
-        const s = self.activeSurface();
-        s.lockCore(self.io);
-        const rejected = s.core.takeClipboardWriteRejected();
-        s.unlockCore(self.io);
-        if (!rejected) return;
-        var nbuf: [128]u8 = undefined;
-        const mb = terminal.clipboard_max_bytes / 1_000_000;
-        self.showNotice(std.fmt.bufPrint(&nbuf, "클립보드 복사가 너무 커서 취소되었습니다(최대 약 {d}MB).", .{mb}) catch "클립보드 복사가 너무 커서 취소되었습니다.");
     }
 
     /// OSC 52 읽기(`?` 쿼리)가 대기 중이고 정책(osc52.read)이 allow면 true — Swift가 시스템 클립보드를 읽어
@@ -14886,7 +14078,7 @@ pub const AppSession = struct {
     /// = 탈취 방지). target(Pc)은 응답 echo용으로 캡처한다. 코어 읽기·clear는 락 아래(리더 경합 방지). (F2-6)
     pub fn takeClipboardReadRequest(self: *AppSession) bool {
         if (!self.surface_initialized) return false;
-        const s = self.activeSurface();
+        const s = term_ops.activeSurface(self);
         // host-backed: host가 요청을 drain해 관측 seq·target으로 알려 준다(target은 짧아 관측에 싣는다).
         // **정책 게이트는 여기 그대로** — 클립보드 읽기 허용 여부는 client config이고, 응답 바이트는 아래
         // provideClipboardRead가 PTY로 쓰므로(원격이면 host PTY) 추가 왕복이 필요 없다.
@@ -14929,7 +14121,7 @@ pub const AppSession = struct {
         const resp = self.formatOsc52ReadResponse(self.clipboard_read_target_buf.items, bytes) orelse return;
         defer self.allocator.free(resp);
         // 요청 surface PTY로 비차단 전송(paste 큐 재사용 — 순서·#10 데드락 회피). 응답은 program stdin에서 읽힌다.
-        _ = self.enqueueInputBytes(self.activeSurface().id, resp, false); // OOM이면 응답 유실(best-effort)
+        _ = self.enqueueInputBytes(term_ops.activeSurface(self).id, resp, false); // OOM이면 응답 유실(best-effort)
     }
 
     /// 클립보드 바이트를 OSC 52 읽기 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)으로 인코딩한다(owned, 호출자 free).
@@ -15031,7 +14223,7 @@ pub const AppSession = struct {
     pub fn currentCwd(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
         const term = pane_ops.activePane(self).activeTerm();
-        self.refreshTermObservation(term, false, false);
+        term_ops.refreshTermObservation(self, term, false, false);
         if (term.kind != .terminal or term.rt.observation.availability == .unavailable) return &.{};
         return term.rt.observation.cwd.items;
     }
@@ -15062,7 +14254,7 @@ pub const AppSession = struct {
         // 어떤 surface도 focused 아님 — A2가 여러 창을 하나의 CollectorSnapshot으로 합치면 오직 key 창의 활성
         // surface 하나만 focused=true가 된다(전역 정합). activeSurface()==활성 tab·pane·term의 surface(app_window).
         const focused_surface_id: ?u64 = if (self.surface_initialized and self.window_focused)
-            self.activeSurface().id
+            term_ops.activeSurface(self).id
         else
             null;
 
@@ -15108,7 +14300,7 @@ pub const AppSession = struct {
                         });
                         continue; // terminal 경로(core lock·cwd·git·at_prompt) 건너뜀
                     }
-                    self.refreshTermObservation(term, false, true);
+                    term_ops.refreshTermObservation(self, term, false, true);
                     // runtime observation은 in-process core/host event 어느 쪽이든 caller-owned cache다. unavailable은
                     // cwd 없음/idle로 위장하지 않고 null/unknown으로 보낸다.
                     const observation_available = term.rt.observation.availability != .unavailable;
@@ -15343,7 +14535,7 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         // view_offset mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4) — 위임된 scroll과 같은
         // 큐를 타 순서 보존(메인 직접 mutate면 reader scroll과 view_offset race). "스크롤됨" 최적화는 reader 렌더 트리거로 대체.
-        self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .jump_to_prompt = dir }, self.io) catch {};
+        self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .{ .jump_to_prompt = dir }, self.io) catch {};
         self.metal_dirty = true;
     }
 
@@ -15431,8 +14623,8 @@ pub const AppSession = struct {
     /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
     fn logScreenIfDebug(self: *AppSession) void {
         if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
-        if (!self.activeTermIsTerminal()) return; // [4e-2, §6] 활성 web Term은 sentinel core라 화면 덤프 skip
-        const core = &self.activeSurface().core;
+        if (!term_ops.activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel core라 화면 덤프 skip
+        const core = &term_ops.activeSurface(self).core;
         const cols = @min(@as(usize, core.size.cols), 240);
         // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
         if (core.last_command_exit) |code| {
@@ -15485,9 +14677,9 @@ pub const AppSession = struct {
     /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
     fn drainShellEventsForFrame(self: *AppSession) void {
         if (!self.surface_initialized) return;
-        if (!self.activeTermIsTerminal()) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
+        if (!term_ops.activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
         if (pane_ops.activePane(self).activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
-        const core = &self.activeSurface().core;
+        const core = &term_ops.activeSurface(self).core;
         if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
         if (diag_gate.maruDebugEnabled()) {
             for (core.shellEvents()) |ev| switch (ev) {
@@ -16146,7 +15338,7 @@ pub const AppSession = struct {
         // [4e-2, §6] 활성 Term이 web이면 sentinel core를 lock하지 않고 **중립 스냅샷**(전부 기본값=0/false)을 낸다 —
         // blink/sync 게이트가 off로 접혀(sync_output=false·view_offset=0·cursor 안 보임) 활성 web에서 무의미한 blink/sync
         // 재투영이 안 돈다. terminal이면 activeSurface()라 byte-identical.
-        const s = self.activeTerminalSurface() orelse return .{};
+        const s = term_ops.activeTerminalSurface(self) orelse return .{};
         s.lockCore(self.io);
         defer s.unlockCore(self.io);
         const core = &s.core;
@@ -16317,7 +15509,7 @@ pub const AppSession = struct {
         var find_current_span: ?terminal.SelectionSpan = null;
         // [4e-2, §6] 활성 Term이 web이면 스크롤백 Find 재검색·뷰포트 클립을 건너뛴다(sentinel엔 스크롤백/매치 없음) —
         // find_view_spans/current_span은 위에서 비운 상태 유지. terminal이면 activeSurface()라 byte-identical.
-        if (self.activeTerminalSurface()) |fa_surface| {
+        if (term_ops.activeTerminalSurface(self)) |fa_surface| {
             if (is_macos and fa_surface.remote != null) {
                 // §6c host-backed: 검색은 host가(콘텐츠·스크롤백 소유 — placeholder는 빈 셀이라 못 함). output(스크롤도
                 // delta라 포함)/query 변화 시만 host에 재검색(refreshRemoteFind)해 뷰포트 매치 span을 remote_find_spans에
@@ -16472,16 +15664,16 @@ pub const AppSession = struct {
         if (ft_on) ft_drain = std.Io.Clock.awake.now(self.io).nanoseconds; // drain(모든 Term PTY pump) 끝
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
-        self.surfaceClipboardWriteRejected(); // 상한 초과로 거부된 OSC 52 쓰기를 notice로 표면화(무음 실패 방지)
+        term_ops.surfaceClipboardWriteRejected(self); // 상한 초과로 거부된 OSC 52 쓰기를 notice로 표면화(무음 실패 방지)
         // 개별 Term이 exit하면(전부는 아닌) 그 Term을 자동으로 닫는다(계층 cascade: Term→pane→워크스페이스,
         // PR5b). 이번 tick에 새 종료가 관측됐을 때만 — 살아있는 Term이 있으면 같은 tick에 reap되고, 전부 죽으면
         // 아래 세션 종료 latch가 마지막을 맡는다(그래서 reap이 빈 세션을 만들지 않는다).
-        if (drain_summary.ended != null) self.reapTerminatedTerms();
+        if (drain_summary.ended != null) term_ops.reapTerminatedTerms(self);
         // held 창에 새 셸이 붙었으면(createTerm re-arm) 남아 있던 죽은 Term을 이제 reap한다(좀비 탭 방지) — live Term이
         // 생겨 allTabsTerminated가 false가 된 뒤라야 reapTerminatedTerms가 early-return 없이 죽은 Term을 닫는다.
         if (self.pending_zombie_reap and !self.allTabsTerminated()) {
             self.pending_zombie_reap = false;
-            self.reapTerminatedTerms();
+            term_ops.reapTerminatedTerms(self);
         }
         // 세션(창) 종료 vs 비정상 시작 사망(창 유지) 판정 — 단일 출처는 latchSessionEndOrHold(테스트가 직접 구동).
         self.latchSessionEndOrHold(drain_summary.ended, self.last_exit_uptime_ms);
@@ -16524,7 +15716,7 @@ pub const AppSession = struct {
         // 안 사라진다 — 이게 최소 해법이다. blank·이전-탭 잔상을 둘 다 없애려면 per-surface 완성-프레임 스냅샷(큰 변경)이
         // 필요하고 잔상 체감 시에만 값어치가 있다(대안·근거 분석: docs/io-render-threading.md §11.7).
         {
-            const active_id = self.activeSurface().id;
+            const active_id = term_ops.activeSurface(self).id;
             if (active_id != self.last_ticked_surface_id) {
                 self.last_rendered_esu = core_snap.esu;
                 self.last_rendered_view_offset = core_snap.view_offset;
@@ -16606,7 +15798,7 @@ pub const AppSession = struct {
                 // no-terminal-frame(빌드 실패 아님)이라, 아래 active_failed 가드가 activeTermIsTerminal로 좁혀 self-heal을
                 // 트리거하지 않고 chrome+빈 본문을 정상 커밋한다(본문은 blank, WKWebView가 4e-3서 채움). terminal이면
                 // shapeOnlyBuild(activeSurface())라 byte-identical.
-                if (self.activeTermIsTerminal()) {
+                if (term_ops.activeTermIsTerminal(self)) {
                     active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, &self.renderer_state.font_registry, self.io) catch null;
                     // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
                     if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
@@ -16642,25 +15834,25 @@ pub const AppSession = struct {
             // 활성 web일 때 active_result==null(본문 blank)이라 pane_frames에 실리지 않아 **소비되지 않는다**(값 무관).
             // terminal이면 activeSurface()라 byte-identical(옛 무조건 lock 동형).
             var cell_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
-            if (self.activeTerminalSurface()) |cc_surface| {
+            if (term_ops.activeTerminalSurface(self)) |cc_surface| {
                 cc_surface.lockCore(self.io);
                 self.active_palette_copy = cc_surface.core.paletteOverride().*;
                 cell_colors = .{
                     // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
-                    .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
-                    .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
+                    .default_fg = term_ops.activeSurface(self).core.defaultFgOverride() orelse self.appearance.theme.foreground,
+                    .default_bg = term_ops.activeSurface(self).core.defaultBgOverride() orelse self.appearance.theme.background,
                     .palette = &self.active_palette_copy, // 코어 alias 대신 소유 복사본(OSC 4 .indexed 색 풀이)
                     // ANSI 16색 config base(theme.palette). OSC4 override가 없을 때만 index<16에 적용(OSC4 → config → xterm256).
                     // appearance는 세션 동안 불변·소유라 포인터 안전(복사 불필요) — OSC4 복사본과 달리 매 tick 변하지 않는다.
                     .config_palette = &self.appearance.theme.palette,
-                    .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
+                    .screen_reverse = term_ops.activeSurface(self).core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
                     // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
                     // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
                     .blink_on = !self.appearance.blink_text or self.blink_visible,
                     // bold-is-bright(theme.bold-is-bright): bold + indexed 0~7 전경을 bright(8~15)로(render-only).
                     .bold_is_bright = self.appearance.bold_is_bright,
                     .selection_bg = self.appearance.theme.selection,
-                    .selection = self.activeSurface().core.selectionViewportSpan(),
+                    .selection = term_ops.activeSurface(self).core.selectionViewportSpan(),
                     .hover_link = self.hoverLinkSpanFor(cc_surface), // 이 pane에 hover 중일 때만(비활성 pane은 아래 pane_colors가 자기 것을 채운다)
                     // 스크롤백 Find 매치 하이라이트(활성 surface에만 적용 — 비활성 pane은 inactive_colors).
                     .search_match_bg = self.appearance.theme.search_match,
@@ -17063,7 +16255,7 @@ pub const AppSession = struct {
                         // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목(번호 prefix 없음 — 모던 탭은
                         // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
-                        if (self.renamingTerm(term)) {
+                        if (term_ops.renamingTerm(self, term)) {
                             const edit = settings_ops.renameEditText(self, self.allocator) catch continue;
                             defer self.allocator.free(edit);
                             const label = self.allocator.dupe(u8, edit) catch continue;
@@ -17528,7 +16720,7 @@ pub const AppSession = struct {
             const placement_failed = self.placement_failed;
             self.placement_failed = false; // 한 tick 신호(다음 tick이 재시도한다 — metal_dirty는 유지된다)
             const active_failed = builtin.os.tag == .macos and self.surface_initialized and
-                (placement_failed or (self.activeTermIsTerminal() and active_result == null));
+                (placement_failed or (term_ops.activeTermIsTerminal(self) and active_result == null));
             if (builtin.os.tag == .macos and active_result != null) {
                 active_index = self.frame_loop.advanceFrameIndex();
             }
@@ -17579,7 +16771,7 @@ pub const AppSession = struct {
             // [4e-2, §6] 활성 web Term(단일 pane)은 pane_frames가 비어도(터미널 frame 없음) replace를 돌려 chrome
             // (사이드바·탭바)을 커밋한다 — 안 그러면 web 활성 시 chrome이 stale로 남고 metal_dirty가 안 내려가 스핀한다.
             // terminal이면 `!activeTermIsTerminal()`=false라 조건이 `pane_frames.items.len > 0`으로 접혀 byte-identical.
-            if ((pane_frames.items.len > 0 or !self.activeTermIsTerminal()) and !active_failed) {
+            if ((pane_frames.items.len > 0 or !term_ops.activeTermIsTerminal(self)) and !active_failed) {
                 // kitty graphics(K2d): 활성 surface(이 frame을 만든 surface)의 placement를 GpuImage로 환산하고,
                 // generation이 바뀐 이미지만 업로드 채널로 만든다. dest origin은 활성 panel의 픽셀 origin(사이드바
                 // 폭·탭 바 아래)으로 박아 터미널 sub-rect에 그려지게 한다. 비활성 panel 이미지는 후속(단일 활성 기준).
@@ -17593,7 +16785,7 @@ pub const AppSession = struct {
                 defer kg_live_ids.deinit(self.allocator);
                 // [4e-2, §6] 활성 Term이 web이면 kitty 이미지 경로를 건너뛴다(sentinel엔 placement 없음) — terminal이면
                 // activeTerminalSurface()=activeSurface()라 옛 `if (self.surface_initialized)`와 byte-identical.
-                if (self.activeTerminalSurface()) |active_surface| {
+                if (term_ops.activeTerminalSurface(self)) |active_surface| {
                     // 코어 변경(setCellMetrics·setDefaultColors)과 kitty 이미지 읽기(snap.placements/images는
                     // 코어 alias)는 모두 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
                     // buildGpuImages/planImageUploads가 이미지 데이터를 owned 버퍼로 복사하므로(planImageUploads는
@@ -19308,8 +18500,8 @@ pub const AppSession = struct {
         // 패닉하지 않게 한다(그땐 theme 기본 배경으로 폴백).
         // [4e-2, §6] 활성 Term이 web이면 sentinel core 대신 theme 배경 폴백(else 분기 재사용) — 본문 blank의 clear
         // color. web Term 없으면 activeTermIsTerminal=true라 옛 `surface_initialized` 조건과 동일(byte-identical).
-        frame.terminal_bg = if (self.surface_initialized and self.activeTermIsTerminal()) blk: {
-            const active_core = &self.activeSurfaceConst().core;
+        frame.terminal_bg = if (self.surface_initialized and term_ops.activeTermIsTerminal(self)) blk: {
+            const active_core = &term_ops.activeSurfaceConst(self).core;
             const eff_bg = active_core.defaultBgOverride() orelse self.appearance.theme.background;
             const eff_fg = active_core.defaultFgOverride() orelse self.appearance.theme.foreground;
             break :blk packOpaqueRgb(if (active_core.reverseScreen()) eff_fg else eff_bg);
@@ -19570,7 +18762,7 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    self.notifySurfaceClosed(term.surface.id);
+                    term_ops.notifySurfaceClosed(self, term.surface.id);
                     // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
                     // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
@@ -24417,7 +23609,7 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
     session.dispatchAppAction(.new_term);
     const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
-    session.focusTerm(2);
+    term_ops.focusTerm(session, 2);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
 
     var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -24433,7 +23625,7 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
     var px: u32 = pb.tabs.x;
     while (px < pb.tabs.x + pb.tabs.w) : (px += 2) {
         const fx: f64 = @floatFromInt(px);
-        const hit = session.dropTermIndexAt(pane, leaf_rects.items, fx, bar_y) orelse continue;
+        const hit = term_ops.dropTermIndexAt(session, pane, leaf_rects.items, fx, bar_y) orelse continue;
         if (hit == 0 and x0 == null) x0 = fx;
         if (hit == 1 and x1 == null) x1 = fx;
     }
@@ -24451,7 +23643,7 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
     // pane **본문**(탭 바 아래) 드롭 → Term은 안 바뀐다(그 pane의 현재 활성 Term이 대상).
     const body_y: f64 = @floatFromInt(rect.y + rect.h - 10);
     const body_x: f64 = @floatFromInt(rect.x + rect.w / 2);
-    try std.testing.expect(session.dropTermIndexAt(pane, leaf_rects.items, body_x, body_y) == null);
+    try std.testing.expect(term_ops.dropTermIndexAt(session, pane, leaf_rects.items, body_x, body_y) == null);
     try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(body_x, body_y));
     try std.testing.expectEqual(@as(usize, 1), pane.active_term); // 불변
 }
@@ -24505,7 +23697,7 @@ test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused —
     session.chrome_host.settings.open = false;
 
     // 확인 모달도 같은 판정(anyOverlayOpen에 포함).
-    session.showConfirmButtons(.{ .paste = session.activeSurface().id }, AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+    session.showConfirmButtons(.{ .paste = term_ops.activeSurface(session).id }, AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(tx, ty));
     try std.testing.expectEqual(active_pane, pane_ops.activePane(session));
     session.chrome_host.confirm.dismiss();
@@ -24540,7 +23732,7 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
     session.window_padding_px = .{};
     try pane_ops.splitActivePane(session, .horizontal); // 2 pane
 
-    const origin_id = session.activeSurface().id; // 붙여넣기를 시작한(=대상이어야 할) surface
+    const origin_id = term_ops.activeSurface(session).id; // 붙여넣기를 시작한(=대상이어야 할) surface
     // 위험한 payload(개행) → 확인 모달로 보류. 이때 대상이 고정된다.
     session.pasteText("danger\nrm -rf /", false);
     try std.testing.expect(session.chrome_host.confirm.open);
@@ -24550,7 +23742,7 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
 
     // 확인하는 동안 사용자가 다른 pane으로 이동(탭/pane 전환·다른 pane 클릭 등).
     pane_ops.focusPaneRelative(session, 1);
-    const other_id = session.activeSurface().id;
+    const other_id = term_ops.activeSurface(session).id;
     try std.testing.expect(other_id != origin_id);
 
     // 확정 → **원래 pane**으로 간다(활성이 바뀌었어도).
@@ -27432,7 +26624,7 @@ test "에이전트 행 ✕: 실행 중이면 확인 모달을 거치고, 마지�
 
     // 투영은 teardown 중간 상태에서도 안전해야 한다(빈 pane 방어) — 강제로 비운 뒤 재투영해도 패닉하지 않는다.
     const doomed = tab.panes.items[0].terms.orderedRemove(0);
-    session.destroyTerm(doomed);
+    term_ops.destroyTerm(session, doomed);
     sidebar_ops.rebuildSidebar(session) catch {};
 }
 
@@ -27774,7 +26966,7 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
     _ = try tab_ops.newTab(session); // tabs [t0, t1], 활성 t1
     try pane_ops.splitActivePane(session, .horizontal); // t1: pane [p0, p1], 활성 p1
     try pane_ops.newTermInActivePane(session); // p1: term [tm0, tm1], 활성 tm1
-    const target_id = session.activeSurface().id;
+    const target_id = term_ops.activeSurface(session).id;
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
@@ -27784,14 +26976,14 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 
     // 알림 클릭 모사: id로 끝까지(탭→panel→가로탭) 정확히 점프.
-    try std.testing.expect(session.activateSurfaceById(target_id));
+    try std.testing.expect(term_ops.activateSurfaceById(session, target_id));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
-    try std.testing.expectEqual(target_id, session.activeSurface().id);
+    try std.testing.expectEqual(target_id, term_ops.activeSurface(session).id);
 
     // 없는 id(알림 후 그 Term이 닫힌 경우 모사)는 false + 활성 상태 불변 — stale 알림이 엉뚱한 surface를 깨우지 않는다.
-    try std.testing.expect(!session.activateSurfaceById(0xFFFF_FFFF));
+    try std.testing.expect(!term_ops.activateSurfaceById(session, 0xFFFF_FFFF));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 }
@@ -27825,16 +27017,16 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane); // p1 활성
     const bg_term = tab_ops.activeTab(session).panes.items[0].terms.items[0]; // 비활성 p0의 Term(*Term)
     const bg_id = bg_term.surface.id;
-    const active_id = session.activeSurface().id; // 활성 p1의 Term(지금 보는 Term)
+    const active_id = term_ops.activeSurface(session).id; // 활성 p1의 Term(지금 보는 Term)
     try std.testing.expect(bg_id != active_id); // 활성과 다른 surface여야 의미 있음
     // 라벨을 rename으로 명시해 제목 위치 접두를 결정적으로 검증한다(탭 custom_name 없음 → workspaceLabel은 활성 p1
     // Term 라벨로 폴백). deinit이 surface.custom_name을 free.
     bg_term.surface.custom_name = try allocator.dupe(u8, "빌드");
-    session.activeSurface().custom_name = try allocator.dupe(u8, "활성작업");
+    term_ops.activeSurface(session).custom_name = try allocator.dupe(u8, "활성작업");
 
     // 두 Term 모두 OSC 9(iTerm2: ESC ] 9 ; <body> BEL)를 먹인다 — title 없음, body=메시지.
     try bg_term.surface.core.write("\x1b]9;배경 pane 빌드 완료\x07");
-    try session.activeSurface().core.write("\x1b]9;활성 pane 알림\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]9;활성 pane 알림\x07");
 
     // 루프는 p0(배경)→p1(활성) 순. 첫 drain = 배경 Term: surface_id=bg_id, 안 보는 곳이라 **전면 배너 뜸**(=1).
     const n1 = notification_ops.pendingNotification(session) orelse return error.TestExpectedNotification;
@@ -27861,7 +27053,7 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
     try std.testing.expect(notification_ops.pendingNotification(session) == null);
 
     // 배경 Term의 surface_id로 점프하면 비활성 p0로 정확히 활성화된다(알림→점프 전제가 닫힌다).
-    try std.testing.expect(session.activateSurfaceById(bg_id));
+    try std.testing.expect(term_ops.activateSurfaceById(session, bg_id));
     try std.testing.expectEqual(@as(usize, 0), tab_ops.activeTab(session).active_pane);
 }
 
@@ -28129,25 +27321,25 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
     defer session.deinit();
 
     // createTerm이 config 스크롤백(is_test 빈 config → 기본 1000)을 활성 surface core에 주입했다.
-    try std.testing.expectEqual(@as(usize, 1000), session.activeSurface().core.maxScrollback());
+    try std.testing.expectEqual(@as(usize, 1000), term_ops.activeSurface(session).core.maxScrollback());
 
     // audible(기본 true): BEL → dispatchBell이 분배 → takeBell true, 한 번 drain(두 번째는 false). (F2-4: takeBell은
     // 코어가 아니라 dispatchBell이 세운 bell_audible_pending을 본다 — 코어 단일 drain.)
     session.audible_bell = true;
-    try session.activeSurface().core.write("\x07");
+    try term_ops.activeSurface(session).core.write("\x07");
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBell(session));
     try std.testing.expect(!notification_ops.takeBell(session));
 
     // 음소거: BEL → dispatchBell이 코어를 drain하되 audible_pending은 안 켬 → takeBell false(소리 억제, stale 안 쌓임).
     session.audible_bell = false;
-    try session.activeSurface().core.write("\x07");
+    try term_ops.activeSurface(session).core.write("\x07");
     notification_ops.dispatchBell(session);
     try std.testing.expect(!notification_ops.takeBell(session));
 
     // 시각 벨(bell.visual): on이면 BEL이 bell_flash_ticks를 켠다(audible과 독립). (F2-4)
     session.bell_visual = true;
-    try session.activeSurface().core.write("\x07");
+    try term_ops.activeSurface(session).core.write("\x07");
     notification_ops.dispatchBell(session);
     try std.testing.expect(session.bell_flash_ticks > 0);
     session.bell_visual = false;
@@ -28156,11 +27348,11 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
     // Dock 배지(bell.dock-badge): **언포커스 시에만** bell_badge_pending. 포커스 중엔 안 켠다. take_bell_badge는 1회성.
     session.bell_dock_badge = true;
     session.window_focused = true;
-    try session.activeSurface().core.write("\x07");
+    try term_ops.activeSurface(session).core.write("\x07");
     notification_ops.dispatchBell(session);
     try std.testing.expect(!notification_ops.takeBellBadge(session)); // 포커스 중 → 배지 없음
     session.window_focused = false;
-    try session.activeSurface().core.write("\x07");
+    try term_ops.activeSurface(session).core.write("\x07");
     notification_ops.dispatchBell(session);
     try std.testing.expect(notification_ops.takeBellBadge(session)); // 언포커스 → 배지
     try std.testing.expect(!notification_ops.takeBellBadge(session)); // 1회성
@@ -28608,7 +27800,7 @@ test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 
 
     // createTerm이 per-session 카운터가 아니라 앱 전역 SurfaceIdAllocator에서 발급하므로, 서로 다른 창의 첫
     // surface조차 id가 겹치지 않는다(per-session이면 둘 다 1이라 충돌 — 이 단언이 그 회귀를 잡는다).
-    try std.testing.expect(s1.activeSurface().id != s2.activeSurface().id);
+    try std.testing.expect(term_ops.activeSurface(s1).id != term_ops.activeSurface(s2).id);
 }
 
 // M3a LiveSurfaceRegistry 배선 — surface + live PTY 런타임의 **소유**가 Term-inline이 아니라 앱 전역
@@ -28650,8 +27842,8 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
     // 각 창의 첫 Term의 surface·런타임이 그 창의 surface_id로 registry 번들에 소유돼 있고, Term은 surface 포인터(참조)와
     // opaque runtime handle(P2 seam — live_pty 포인터 대신)을 든다. handle이 surface_id와 같아 registry 번들 슬롯을
     // 찾는 키가 된다(소유는 registry, Term은 참조·handle — 이 단언이 M3a 배선 + P2 seam을 못박는다).
-    const sid1 = s1.activeSurface().id;
-    const sid2 = s2.activeSurface().id;
+    const sid1 = term_ops.activeSurface(s1).id;
+    const sid2 = term_ops.activeSurface(s2).id;
     try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
     const b1 = s1.live_registry.findBySurface(sid1).?; // *LiveSurface 번들 슬롯
     const b2 = s2.live_registry.findBySurface(sid2).?;
@@ -28702,8 +27894,8 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
     try std.testing.expectEqual(s1.runtime, s2.runtime);
     try std.testing.expectEqual(&app_runtime.routing, s1.runtime);
 
-    const sid1 = s1.activeSurface().id;
-    const sid2 = s2.activeSurface().id;
+    const sid1 = term_ops.activeSurface(s1).id;
+    const sid2 = term_ops.activeSurface(s2).id;
     try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
 
     // (2) 한 표가 두 창 surface를 모두 surface_id로 보유한다 — 공유 표를 통해 어느 창 surface든 라우팅된다(빈 바이트
@@ -28723,8 +27915,8 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
 fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
     app_keep_alive_after_quit = true;
     session.loaded_config.config.session.keep_alive_after_quit = true;
-    const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
-    errdefer session.destroyTerm(term);
+    const term = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    errdefer term_ops.destroyTerm(session, term);
     try session.tabs.items[0].panes.items[0].terms.append(session.allocator, term);
     return term;
 }
@@ -28813,7 +28005,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
 
         // createTerm으로 /bin/cat을 띄운다 — backendForNew가 이제 원격 backend를 고른다. 반환 Term은 tab에 안 들어가므로
         // 아래 destroyTerm으로 회수한다(원격 라우팅 backendFor(term)을 탄다).
-        const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const term = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(term.surface.remote != null); // **host-backed!**(surface.remote 세팅 = 원격 조립 화면)
 
         // 입력 hot path(self.runtime.writeInput)가 원격 PtyIo→host로 라우팅되고, host echo delta가 pump→화면에 반영되는지.
@@ -28867,18 +28059,19 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         try std.testing.expectEqualStrings("Maru", s2.copyText());
         app_remote_client.?.runtime_selected_text_v1 = true;
 
-        const term2 = try s2.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const term2 = try term_ops.createTerm(s2, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(term2.surface.remote != null); // 두 번째 창의 Term도 host-backed.
         try std.testing.expectEqual(@as(usize, 3), app_remote_backend.?.runtimes.count()); // B 첫 Term과 추가 Term까지 한 backend.
 
-        s2.destroyTerm(term2);
-        session.destroyTerm(term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
+        term_ops.destroyTerm(s2, term2);
+        term_ops.destroyTerm(session, term); // 원격 term 회수(backendFor→remote: remove + SurfaceRuntime detach + rr free).
 
         // 앱 업데이트 전에 떠 있던 구 v2 host는 runtime.spawn_full 이름을 알더라도 새 runtime_config를 조용히
         // 무시할 수 있다. capability 부재를 재현해 RemoteRuntime의 UnsupportedSpawnContract가 AppSession에서
         // 실제 in-process fallback으로 이어지고 잘못된 host runtime을 만들지 않는지 고정한다.
         app_remote_client.?.runtime_core_command_v1 = false;
-        const legacy_fallback = try session.createTerm(
+        const legacy_fallback = try term_ops.createTerm(
+            session,
             .{ .command = "/bin/cat" },
             .{ .cols = 40, .rows = 10 },
             16,
@@ -28887,7 +28080,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         );
         try std.testing.expect(legacy_fallback.surface.remote == null);
         try std.testing.expect(host_connect_failed);
-        session.destroyTerm(legacy_fallback);
+        term_ops.destroyTerm(session, legacy_fallback);
 
         // 블록 끝 defer(LIFO): s2.deinit → destroy(s2) → reset(공유 backend/client) → session.deinit → destroy(session) → host
         // kill. 첫 창 local + 둘째 창 remote 첫 탭과 공유 backend를 누수·크래시 없이 회수한다.
@@ -28972,7 +28165,7 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         }
 
         // host 살아 있을 때: createTerm은 host-backed.
-        const t_live = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const t_live = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(t_live.surface.remote != null);
         try std.testing.expect(!host_connect_failed);
 
@@ -28983,17 +28176,17 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         host_reaped = true;
 
         // host 죽은 뒤 createTerm: **실패 대신 in-process 폴백**. surface.remote == null + host_connect_failed 세워짐.
-        const t_fb = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const t_fb = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(t_fb.surface.remote == null); // in-process로 떴다(폴백).
         try std.testing.expect(host_connect_failed); // 이후 createTerm도 원격 안 탐.
 
         // 세 번째도 바로 in-process(backendForNew가 host_connect_failed로 원격을 건너뜀 — 죽은 RPC 재시도 없음).
-        const t3 = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const t3 = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(t3.surface.remote == null);
 
-        session.destroyTerm(t3);
-        session.destroyTerm(t_fb);
-        session.destroyTerm(t_live); // 원격(죽은 host) — remove의 terminate RPC는 조용히 실패, client-side만 회수.
+        term_ops.destroyTerm(session, t3);
+        term_ops.destroyTerm(session, t_fb);
+        term_ops.destroyTerm(session, t_live); // 원격(죽은 host) — remove의 terminate RPC는 조용히 실패, client-side만 회수.
     } else {
         return error.SkipZigTest;
     }
@@ -29023,7 +28216,7 @@ test "종료 placeholder: 화면 안내가 남고 ⏎만 같은 슬롯을 새 �
         "fedcba0987654321fedcba0987654321",
     );
     try pane.terms.append(a, tomb);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
 
     // 안내가 core에 남는다(멱등 — 두 번 불러도 덧쓰지 않는다).
@@ -29088,7 +28281,7 @@ test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 �
     const pane = pane_ops.activePane(session);
     const tomb = try pane_ops.createEndedPlaceholderTerm(session, "배포 감시", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(a, tomb);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
 
     session.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
@@ -29118,7 +28311,7 @@ test "종료 placeholder: 되살리기가 사용자 rename을 승계한다" {
     const pane = pane_ops.activePane(session);
     const tomb = try pane_ops.createEndedPlaceholderTerm(session, "끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane.terms.append(a, tomb);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     const tomb_index = pane.active_term;
     tomb.surface.custom_name = try session.dupeCustomName("배포 감시");
 
@@ -29174,7 +28367,7 @@ test "종료 placeholder: 레이아웃 resize가 저장될 grid까지 옮긴다"
 
     const tomb = try pane_ops.createEndedPlaceholderTerm(session, "끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane_ops.activePane(session).terms.append(a, tomb);
-    try session.resizeTermForLayout(tomb, .{ .cols = 120, .rows = 40 });
+    try term_ops.resizeTermForLayout(session, tomb, .{ .cols = 120, .rows = 40 });
     try std.testing.expectEqual(@as(u16, 120), tomb.rt.observation.size.cols);
     try std.testing.expectEqual(@as(u16, 40), tomb.rt.observation.size.rows);
 }
@@ -29199,7 +28392,7 @@ test "드롭 라우팅: 묘비 pane은 refused (포커스도 뺏지 않는다)" 
     const dead = tomb_pane.terms.items[tomb_pane.active_term];
     const tomb = try pane_ops.createEndedPlaceholderTerm(session, "끝난 세션", "/tmp", "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     tomb_pane.terms.items[tomb_pane.active_term] = tomb;
-    session.destroyTerm(dead);
+    term_ops.destroyTerm(session, dead);
     session.surface_ptrs.items[session.app_window.active_tab] = pane_ops.activePane(session).activeTerm().surface;
     session.app_window.tabs = session.surface_ptrs.items;
 
@@ -29353,12 +28546,12 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
     // 관문 2: 자동 reap 후보가 아니다(사용자 확인 없이 닫히면 안 된다).
     live_term.rt.terminated = false;
     tomb.rt.terminated = true; // 방어적 이중화 검증 — terminated로 표시돼도 reap 대상이 아니어야 한다
-    try std.testing.expect(session.findTerminatedTerm() == null);
+    try std.testing.expect(term_ops.findTerminatedTerm(session) == null);
     tomb.rt.terminated = false;
 
     // 관문 3: 활성 묘비에서 resize()가 실패하지 않고 sentinel core가 실제로 커진다(1×1에 갇히면 안내가 한 칸만 보이고
     // 그 크기가 checkpoint에 저장돼 복원마다 열화된다).
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     _ = try session.resize(1200, 800, 1000);
     try std.testing.expect(tomb.surface.core.size.cols > 2);
     try std.testing.expect(tomb.surface.core.size.rows > 1);
@@ -29369,9 +28562,9 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
 
     // 관문 5: teardown이 registry 슬롯을 회수한다(누락하면 testing.allocator가 누수로 잡는다). 슬롯 수가 생성 전으로
     // 돌아오는지까지 본다 — remove가 아니라 destroy만 됐으면 여기서 어긋난다.
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     _ = pane.terms.pop();
-    session.destroyTerm(tomb);
+    term_ops.destroyTerm(session, tomb);
     try std.testing.expectEqual(before_slots, session.live_registry.count());
 }
 
@@ -29522,7 +28715,7 @@ test "종료 placeholder: capture가 metadata와 durable runtime tombstone을 �
     try pane.terms.append(allocator, tomb);
     defer {
         _ = pane.terms.pop();
-        session.destroyTerm(tomb);
+        term_ops.destroyTerm(session, tomb);
     }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -29667,7 +28860,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         session.restore_runtime_id = &prev_rid;
         try std.testing.expectError(
             error.PersistentRuntimeUnavailable,
-            session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
+            term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
         );
 
         // 살아 있는 host가 "그 runtime을 모른다"고 응답하면(runtime_not_found) 그 handle은 다시는 붙을 수 없다 →
@@ -29679,7 +28872,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         session.restore_runtime_id = &absent_rid;
         try std.testing.expectError(
             error.PersistentRuntimeGone,
-            session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
+            term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat"),
         );
 
         // restore가 identity 쌍을 세우고 createTerm을 부른다 → spawn 대신 그 runtime에 **attach**(재접속).
@@ -29689,7 +28882,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         defer host_connect_failed = false;
         session.restore_runtime_host_id = current_host;
         session.restore_runtime_id = &prev_rid;
-        const term = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const term = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         host_connect_failed = false;
         try std.testing.expect(term.surface.remote != null); // host-backed
         // **재접속 확인**: 새 Term이 저장된 runtime_id에 붙었다(fresh spawn이면 다른 id였을 것).
@@ -29704,7 +28897,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
 
         // workspace staging rollback을 흉내 낸다. 아직 commit 전(restored_existing=true) destroy는 기존 runtime을
         // terminate하지 않고 detach만 해야 한다. 같은 runtime에 다시 붙으면 실제 host 생존이 증명된다.
-        session.destroyTerm(term);
+        term_ops.destroyTerm(session, term);
         var rollback_probe: session_host.remote_runtime.RemoteRuntime = undefined;
         try rollback_probe.attachExisting(&app_remote_client.?, allocator, io, 99, prev_rid, .{ .cols = 40, .rows = 10 });
         rollback_probe.deinit(); // 검증 끝 — 이제 terminate로 host runtime 정리.
@@ -30365,7 +29558,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         }
 
         app_keep_alive_after_quit = true;
-        const cat = try session.createTerm(.{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        const cat = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
         try std.testing.expect(cat.surface.remote != null); // host-backed
         // pendingNotification이 훑도록 첫 탭 첫 pane에 임시 삽입(cleanup에서 pop 후 destroyTerm).
         try session.tabs.items[0].panes.items[0].terms.append(allocator, cat);
@@ -30382,7 +29575,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         }
         const n = got orelse {
             _ = session.tabs.items[0].panes.items[0].terms.pop();
-            session.destroyTerm(cat);
+            term_ops.destroyTerm(session, cat);
             try std.testing.expect(false);
             return;
         };
@@ -30393,7 +29586,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         try std.testing.expect(session.notification_history.items.len >= 1);
 
         _ = session.tabs.items[0].panes.items[0].terms.pop(); // destroyTerm 전 탭에서 뗀다(dangling 방지).
-        session.destroyTerm(cat);
+        term_ops.destroyTerm(session, cat);
     } else {
         return error.SkipZigTest;
     }
@@ -30506,7 +29699,7 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
         }
     };
     var close_recorder: CloseRecorder = .{};
-    session.setSurfaceClosedCallback(&close_recorder, CloseRecorder.record);
+    term_ops.setSurfaceClosedCallback(session, &close_recorder, CloseRecorder.record);
 
     const keep = session.tabs.items[0].activePane().activeTerm();
     const keep_surface = keep.surface; // 번들 슬롯의 &surface
@@ -32200,28 +31393,28 @@ test "OSC 52 상한 초과 거부: surfaceClipboardWriteRejected가 notice로 �
     defer session.deinit();
 
     // 거부 신호가 없으면 아무 notice도 안 뜬다.
-    session.surfaceClipboardWriteRejected();
+    term_ops.surfaceClipboardWriteRejected(session);
     try std.testing.expect(!session.chrome_host.notice.open);
 
     // 코어가 거부 신호를 세우면 tick 헬퍼가 notice를 띄우고 신호를 소비한다(1회성).
-    session.activeSurface().core.clipboard_write_rejected = true;
-    session.surfaceClipboardWriteRejected();
+    term_ops.activeSurface(session).core.clipboard_write_rejected = true;
+    term_ops.surfaceClipboardWriteRejected(session);
     try std.testing.expect(session.chrome_host.notice.open); // 무음 실패 대신 가시적
-    try std.testing.expect(!session.activeSurface().core.clipboard_write_rejected); // drain됨
+    try std.testing.expect(!term_ops.activeSurface(session).core.clipboard_write_rejected); // drain됨
     session.chrome_host.notice.dismiss();
 
     // 인터랙티브 모달(세팅)이 열려 있으면 억제 — 사용자를 끊지 않는다. 신호도 아직 안 건드린다(락 전 early-return).
     session.chrome_host.settings.open = true;
-    session.activeSurface().core.clipboard_write_rejected = true;
-    session.surfaceClipboardWriteRejected();
+    term_ops.activeSurface(session).core.clipboard_write_rejected = true;
+    term_ops.surfaceClipboardWriteRejected(session);
     try std.testing.expect(!session.chrome_host.notice.open); // 억제됨
-    try std.testing.expect(session.activeSurface().core.clipboard_write_rejected); // 신호 보존(drain 안 함)
+    try std.testing.expect(term_ops.activeSurface(session).core.clipboard_write_rejected); // 신호 보존(drain 안 함)
     session.chrome_host.settings.open = false;
 
     // 모달을 닫으면 다음 표면화에서 정상적으로 뜬다(보존된 신호 소비).
-    session.surfaceClipboardWriteRejected();
+    term_ops.surfaceClipboardWriteRejected(session);
     try std.testing.expect(session.chrome_host.notice.open);
-    try std.testing.expect(!session.activeSurface().core.clipboard_write_rejected);
+    try std.testing.expect(!term_ops.activeSurface(session).core.clipboard_write_rejected);
 }
 
 test "파일 저장 실패는 native notice로 표면화하고 close-save 중엔 억제한다" {
@@ -32290,14 +31483,14 @@ test "OSC 52 read(F2-6): 정책 게이트(deny=무응답·allow=true) + base64 �
     // 그래도 코어 pending은 소비(clear)된다.
     try std.testing.expectEqual(config_mod.theme.Osc52Read.deny, session.loaded_config.config.osc52.read);
     {
-        const s = session.activeSurface();
+        const s = term_ops.activeSurface(session);
         s.lockCore(session.io);
         s.core.write("\x1b]52;c;?\x1b\\") catch {};
         s.unlockCore(session.io);
     }
     try std.testing.expect(!session.takeClipboardReadRequest()); // deny → false
     {
-        const s = session.activeSurface();
+        const s = term_ops.activeSurface(session);
         s.lockCore(session.io);
         const still_pending = s.core.clipboardReadPending();
         s.unlockCore(session.io);
@@ -32307,7 +31500,7 @@ test "OSC 52 read(F2-6): 정책 게이트(deny=무응답·allow=true) + base64 �
     // allow면 true + target 캡처.
     session.loaded_config.config.osc52.read = .allow;
     {
-        const s = session.activeSurface();
+        const s = term_ops.activeSurface(session);
         s.lockCore(session.io);
         s.core.write("\x1b]52;p;?\x1b\\") catch {};
         s.unlockCore(session.io);
@@ -32675,7 +31868,7 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
     // 4) Term rename 중 그 Term을 닫으면 rename이 자동 취소된다(destroyTerm 무효화 — stale 포인터/UAF 방지).
     //    pane에 Term을 하나 더 만들어 닫기가 Term 단위로 끝나게(cascade로 세션 종료 latch를 안 치게) 한다.
     pane_ops.newTermInActivePane(session) catch {};
-    session.focusTerm(0); // 첫 Term을 활성으로
+    term_ops.focusTerm(session, 0); // 첫 Term을 활성으로
     const term0 = pane_ops.activePane(session).activeTerm();
     settings_ops.startRename(session, .{ .term = term0 });
     try std.testing.expect(session.rename != null);
@@ -32708,7 +31901,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
     const term0 = pane_ops.activePane(session).activeTerm();
     session.mouse(4, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0);
-    try std.testing.expect(session.renamingTerm(term0));
+    try std.testing.expect(term_ops.renamingTerm(session, term0));
     settings_ops.closeRename(session);
 
     // ② 사이드바 슬롯 더블클릭 → 그 워크스페이스 rename.
@@ -32754,7 +31947,7 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     const my: f64 = @floatFromInt(session.chrome_host.context_menu.anchor_y + 1);
     session.mouse(1, mx, my, 0, 0);
     try std.testing.expect(!session.chrome_host.context_menu.open);
-    try std.testing.expect(session.renamingTerm(term0));
+    try std.testing.expect(term_ops.renamingTerm(session, term0));
     settings_ops.closeRename(session);
 
     // ③ 터미널 본문(바 아래) 우클릭 → 대상 없음 → 메뉴 안 열림.
@@ -32919,7 +32112,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
     const body = pane_ops.paneTermRect(session, lr.items[0].rect);
-    session.activeSurface().core.mouse_tracking = .normal;
+    term_ops.activeSurface(session).core.mouse_tracking = .normal;
     session.drag_autoscroll = 1;
     session.mouse_drag_selecting = true;
     session.mouse(1, @floatFromInt(body.x + 10), @floatFromInt(body.y + 10), 2, 0); // 본문 우클릭
@@ -32947,7 +32140,7 @@ test "synchronized output(2026) hold: ESU 누락 시 sync timeout을 넘으면 �
     while (i < 150) : (i += 1) _ = try session.tick();
 
     // BSU 상황 모사: 활성 surface가 sync로 진입하고 누적 출력(metal_dirty)이 한 프레임 대기 중.
-    session.activeSurface().core.sync_output = true;
+    term_ops.activeSurface(session).core.sync_output = true;
     session.metal_dirty = true;
     session.sync_hold_ticks = 0;
     const timeout = session.syncTimeoutTicks();
@@ -32963,7 +32156,7 @@ test "synchronized output(2026) hold: ESU 누락 시 sync timeout을 넘으면 �
     try std.testing.expect(!session.metal_dirty);
 
     // ESU 모사: sync가 꺼지면 다음 tick에 hold 카운터가 0으로 리셋된다.
-    session.activeSurface().core.sync_output = false;
+    term_ops.activeSurface(session).core.sync_output = false;
     _ = try session.tick();
     try std.testing.expectEqual(@as(u32, 0), session.sync_hold_ticks);
 }
@@ -33022,9 +32215,9 @@ test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막�
 
     // 사용자가 스크롤백을 위로 본 상태(view_offset>0)에서 직전 렌더보다 더 스크롤했고(2≠1), 활성 surface가
     // 동기 출력(2026) hold에 들어간 상황을 모사한다(scroll-lock으로 라이브 출력 중에도 스크롤 위치 유지).
-    session.activeSurface().core.view_offset = 2;
+    term_ops.activeSurface(session).core.view_offset = 2;
     session.last_rendered_view_offset = 1;
-    session.activeSurface().core.sync_output = true;
+    term_ops.activeSurface(session).core.sync_output = true;
     session.sync_hold_ticks = 0;
     session.metal_dirty = true;
 
@@ -33079,7 +32272,7 @@ test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 �
     session.appearance.cursor.blink_fade_ms = 0; // 하드 토글 — 위상 판정을 blink_visible로 단순화
 
     const bg_id = session.tabs.items[0].panes.items[0].terms.items[0].surface.id; // tab0 = 백그라운드
-    const active_id = session.activeSurface().id;
+    const active_id = term_ops.activeSurface(session).id;
     try std.testing.expect(bg_id != active_id);
 
     session.blink_visible = true;
@@ -33472,7 +32665,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     // 레거시 팝업은 IME 조합 배선이 없어 한글 조합이 숨은 터미널로 샜다.
     input_ops.imeMarked(session, "\xea\xb0\x80"); // 조합 중 "가"
     try std.testing.expectEqualStrings("\xea\xb0\x80", session.chrome_host.palette.input.preedit.items);
-    try std.testing.expect(!session.activeSurface().preedit.active()); // 터미널 Surface overlay로 안 샌다
+    try std.testing.expect(!term_ops.activeSurface(session).preedit.active()); // 터미널 Surface overlay로 안 샌다
     input_ops.imeMarked(session, ""); // 조합 해제(확정 직전)
 
     // "new t" 타이핑(chrome 라우팅 → palette.handle → query_changed → recomputePalette) → "New Terminal"만 남는다.
@@ -33527,7 +32720,7 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     _ = try session.resize(800, 600, 1000); // 메트릭·backing(find.view가 chrome props로 씀)
 
     // 검색 대상 텍스트를 코어에 직접 쓴다(유니크 토큰 2곳 — 셸 출력과 충돌 없게).
-    try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three");
+    try term_ops.activeSurface(session).core.write("MARUFIND one\r\ntwo MARUFIND three");
 
     // 토글로 열린다(chrome find 컴포넌트) — 빈 검색어라 매치 0. 매치 리스트는 session(find_matches) 소유.
     try std.testing.expect(!session.chrome_host.find.open);
@@ -33590,7 +32783,7 @@ test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
-    try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three\r\nMARUFIND four"); // 3곳 매치
+    try term_ops.activeSurface(session).core.write("MARUFIND one\r\ntwo MARUFIND three\r\nMARUFIND four"); // 3곳 매치
 
     // 검색: 열고 타이핑 → 3곳 매치, 현재 0.
     session.dispatchAppAction(.toggle_find);
@@ -33659,8 +32852,8 @@ test "alt screen에서도 maru Find가 열린다(⌘F 동작·진입해도 tick�
     try std.testing.expect(!session.chrome_host.find.open);
 
     // alt screen 진입(DECSET 1049 — vim/less/Claude/Codex).
-    try session.activeSurface().core.write("\x1b[?1049h");
-    try std.testing.expect(session.activeSurface().core.alt_active);
+    try term_ops.activeSurface(session).core.write("\x1b[?1049h");
+    try std.testing.expect(term_ops.activeSurface(session).core.alt_active);
 
     // alt에서도 ⌘F가 Find를 연다 — alt에선 findMatches가 현재 화면만 검색한다(과거엔 iTerm2 관례로 막았음).
     session.dispatchAppAction(.toggle_find);
@@ -33669,11 +32862,11 @@ test "alt screen에서도 maru Find가 열린다(⌘F 동작·진입해도 tick�
     try std.testing.expect(!session.chrome_host.find.open);
 
     // 엣지: 메인에서 Find를 연 뒤 앱이 출력으로 alt에 들어가도 tick이 Find를 닫지 않는다(현재 화면 검색 유지).
-    try session.activeSurface().core.write("\x1b[?1049l"); // 메인 복귀
-    try std.testing.expect(!session.activeSurface().core.alt_active);
+    try term_ops.activeSurface(session).core.write("\x1b[?1049l"); // 메인 복귀
+    try std.testing.expect(!term_ops.activeSurface(session).core.alt_active);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open); // 메인에선 열림
-    try session.activeSurface().core.write("\x1b[?1049h"); // 앱이 alt 진입
+    try term_ops.activeSurface(session).core.write("\x1b[?1049h"); // 앱이 alt 진입
     _ = try session.tick();
     try std.testing.expect(session.chrome_host.find.open); // tick이 닫지 않음(유지)
 }
@@ -33694,14 +32887,14 @@ test "alt screen Find: 실제 쿼리가 현재 화면만 매치하고 ⌘G가 �
     _ = try session.resize(800, 600, 1000);
 
     // primary 스크롤백에 needle "MARUHIT"를 출력한 뒤 화면(6행) 밖으로 밀어낸다(대조군 — alt에선 제외돼야).
-    try session.activeSurface().core.write("MARUHIT primary\r\n");
+    try term_ops.activeSurface(session).core.write("MARUHIT primary\r\n");
     var i: usize = 0;
-    while (i < 10) : (i += 1) try session.activeSurface().core.write("pad\r\n");
+    while (i < 10) : (i += 1) try term_ops.activeSurface(session).core.write("pad\r\n");
 
     // alt 진입 + alt 화면에 needle 한 곳.
-    try session.activeSurface().core.write("\x1b[?1049h");
-    try std.testing.expect(session.activeSurface().core.alt_active);
-    try session.activeSurface().core.write("MARUHIT alt line");
+    try term_ops.activeSurface(session).core.write("\x1b[?1049h");
+    try std.testing.expect(term_ops.activeSurface(session).core.alt_active);
+    try term_ops.activeSurface(session).core.write("MARUHIT alt line");
 
     // Find 열고 "MARUHIT" 타이핑 → recompute가 현재 화면(alt)만 스캔해 1곳 매치(primary 스크롤백 제외).
     session.dispatchAppAction(.toggle_find);
@@ -34247,7 +33440,7 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     const base = session.base_font_size;
     try std.testing.expectEqual(base, session.appearance.font.size);
     const cw0 = session.cell_width_px;
-    const cols0 = session.activeSurface().core.snapshot().size.cols;
+    const cols0 = term_ops.activeSurface(session).core.snapshot().size.cols;
 
     // 폰트 변경 전 baseline: init·resize는 이 플래그를 세우지 않는다(applyMetricsPipeline만 세우고 resize는 그걸
     // 안 탄다) → 이미 false여야 아래 폰트 변경이 세우는 신호를 격리 관측할 수 있다. 이 단언이 깨지면 폰트-무관 경로가
@@ -34260,7 +33453,7 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     session.dispatchAppAction(.increase_font_size);
     try std.testing.expectEqual(base + font_size_step, session.appearance.font.size);
     try std.testing.expect(session.cell_width_px > cw0);
-    const cols1 = session.activeSurface().core.snapshot().size.cols;
+    const cols1 = term_ops.activeSurface(session).core.snapshot().size.cols;
     try std.testing.expect(cols1 <= cols0);
 
     // **atlas를 비웠으니 sync hold를 우회하는 강제 재투영이 예약돼야 한다.** 이게 없으면 hold 중(BSU 후 ESU 지연)에
@@ -34541,7 +33734,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     _ = try session.resize(800, 600, 1000);
 
     // 활성 surface에 cwd(OSC 7) 심기 + split으로 pane 2개 + 새 탭(탭 2개).
-    try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/tmp/proj\x07");
     session.dispatchAppAction(.split_horizontal);
     session.dispatchAppAction(.new_tab);
 
@@ -36080,7 +35273,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
         ) !void {
             try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
             try std.testing.expect(session.tabs.items[0] == before_tab);
-            try std.testing.expect(session.activeSurface() == before_surface);
+            try std.testing.expect(term_ops.activeSurface(session) == before_surface);
             _ = before_entry_id;
             try std.testing.expectEqualStrings(before_root, session.file_tree.rootAt(0).?);
             try std.testing.expectEqual(before_generation, session.file_tree.rootGeneration());
@@ -36102,7 +35295,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     defer if (session_live) session.deinit();
     try Harness.prepare(session, allocator, old_root, old_path);
     const before_tab = session.tabs.items[0];
-    const before_surface = session.activeSurface();
+    const before_surface = term_ops.activeSurface(session);
     const before_entry_id = session.fileEntryAt(0).?.id;
     const before_generation = session.file_tree.rootGeneration();
     const before_rows_ptr = session.file_tree_rows.items.ptr;
@@ -36268,7 +35461,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
 
     // FP16 §3.4: 파일 focus가 곧 `.workspace`(활성 Term이 그 파일)다 — 토글은 workspace ↔ tree 왕복이 된다.
     _ = session.focusFilePanelSurface(sid);
-    try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
+    try std.testing.expectEqual(@as(?u64, sid), term_ops.focusedDockSurface(session));
     session.workspace_focus_pending = false;
     session.dispatchAppAction(.toggle_file_panel_focus);
     try std.testing.expect(session.focus_owner == .file_tree);
@@ -36295,7 +35488,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     const workspace_count = session.tabs.items.len;
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, a_surface));
     // A를 닫으면 pane의 활성 Term이 승계되므로 baseline은 close **뒤**에 잡는다.
-    const terminal_surface = session.activeSurface().id;
+    const terminal_surface = term_ops.activeSurface(session).id;
     const terms_before_blocked_close = pane_ops.activePane(session).terms.items.len;
     // FP16: 파일이 pane 탭이라 close는 pane의 active_term 승계로 끝나고 입력은 workspace로 간다.
     // publish 대기 barrier는 그 다음 "승계된 파일로 focus" 요청이 만든다.
@@ -36304,7 +35497,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     try std.testing.expect(session.pending_dock_focus != null);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
     // sid가 있어도 publish를 추측해 dock_surface로 승격하지 않는다 — typed completion만 승격이다.
-    try std.testing.expect(session.focusedDockSurface() == null);
+    try std.testing.expect(term_ops.focusedDockSurface(session) == null);
     try std.testing.expect(session.inputFocus() == .dock_pending);
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'x' } });
@@ -36322,12 +35515,12 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     try std.testing.expect(file_panel_ops.fileEntryForId(session, b_id) != null);
     try std.testing.expectEqual(workspace_count, session.tabs.items.len);
     try std.testing.expectEqual(terms_before_blocked_close, pane_ops.activePane(session).terms.items.len);
-    try std.testing.expectEqual(terminal_surface, session.activeSurface().id);
+    try std.testing.expectEqual(terminal_surface, term_ops.activeSurface(session).id);
     try std.testing.expect(session.pending_file_panel_close == null);
 
     try std.testing.expect(session.completePendingDockFocus(successor.surface_id));
-    try std.testing.expect(session.focusedDockSurface() == successor.surface_id);
-    try std.testing.expectEqual(successor.surface_id, session.focusedDockSurface().?);
+    try std.testing.expect(term_ops.focusedDockSurface(session) == successor.surface_id);
+    try std.testing.expectEqual(successor.surface_id, term_ops.focusedDockSurface(session).?);
 }
 
 test "FP9 closing pending entry reissues typed focus for its live successor" {
@@ -36353,7 +35546,7 @@ test "FP9 closing pending entry reissues typed focus for its live successor" {
     try std.testing.expectEqual(a_id, session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.completePendingDockFocus(a_surface));
-    try std.testing.expect(session.focusedDockSurface() == a_surface);
+    try std.testing.expect(term_ops.focusedDockSurface(session) == a_surface);
 }
 
 test "FP9 closing a group's final entry collapses the leaf and transfers focus to content" {
@@ -36379,7 +35572,7 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.focus_owner == .dock_pending and session.focus_owner.dock_pending == session.pending_dock_focus.?.entry_id);
     try std.testing.expect(session.completePendingDockFocus(a_surface));
-    try std.testing.expect(session.focusedDockSurface() == a_surface);
+    try std.testing.expect(term_ops.focusedDockSurface(session) == a_surface);
 
     // 마지막 전역 entry까지 닫으면 모델 루트 하나만 남고 input은 workspace로 돌아가지만, 한 번 연 빈 도크는 유지한다.
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, a_surface));
@@ -36470,7 +35663,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     pane_ops.activePane(session).activeTerm().surface.process_state = .exited;
     const terms_before = pane_ops.activePane(session).terms.items.len;
     try std.testing.expect(pane_ops.activePane(session).activeTerm().file_entry == null); // 활성 = 터미널
-    try std.testing.expectEqual(@as(?u64, null), session.focusedDockSurface());
+    try std.testing.expectEqual(@as(?u64, null), term_ops.focusedDockSurface(session));
     _ = try input_ops.handleMetalKeyEvent(session, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(terms_before - 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
@@ -36502,7 +35695,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // browser surface로 되찾아 활성화한다.
     for (pane_ops.activePane(session).terms.items, 0..) |t, ti| {
         if (t.kind == .web and t.surfaceId() == browser_sid) {
-            session.focusTerm(ti);
+            term_ops.focusTerm(session, ti);
             break;
         }
     } else return error.NoBrowserTerm;
@@ -36539,12 +35732,12 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expect(session.pending_file_panel_close == null);
     _ = session.focusFilePanelSurface(sid);
     try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_close_term_sid, close_tab_event));
-    try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
+    try std.testing.expectEqual(@as(?u64, sid), term_ops.focusedDockSurface(session));
 
     // 이미 닫힌/nonactive browser source는 state와 logical owner를 바꾸지 않는다.
     _ = session.focusFilePanelSurface(sid);
     try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
-    try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
+    try std.testing.expectEqual(@as(?u64, sid), term_ops.focusedDockSurface(session));
     try std.testing.expect(session.pending_file_panel_close == null);
 
     // 반대로 WebView direct dispatch는 stale workspace owner가 있어도 event surface의 dirty close만 시작한다.
@@ -36639,7 +35832,7 @@ test "file tree bulk delete visits entries and action queues exactly once" {
         }
     };
     var recorder: CloseRecorder = .{};
-    session.setSurfaceClosedCallback(&recorder, CloseRecorder.record);
+    term_ops.setSurfaceClosedCallback(session, &recorder, CloseRecorder.record);
 
     var counting = std.testing.FailingAllocator.init(allocator, .{});
     session.allocator = counting.allocator();
@@ -36685,7 +35878,7 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
     defer terminal_tab.deinit();
     const pane = pane_ops.activePane(terminal_tab);
     terminal_tab.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane, .index = pane.active_term } };
-    terminal_tab.closeActiveTerm();
+    term_ops.closeActiveTerm(terminal_tab);
     try std.testing.expect(terminal_tab.pointerGestureIs(.none));
     terminal_tab.mouse(2, 20, 20, 0, 0);
     terminal_tab.mouse(3, 20, 20, 0, 0);
@@ -36695,7 +35888,7 @@ test "FP9 source teardown cancels index and implicit-surface pointer payloads be
     defer allocator.destroy(scrollbar);
     defer scrollbar.deinit();
     scrollbar.pointer_gesture_owner = .{ .scrollbar = .{ .grab = 0 } };
-    scrollbar.closeActiveTerm();
+    term_ops.closeActiveTerm(scrollbar);
     try std.testing.expect(scrollbar.pointerGestureIs(.none));
     scrollbar.mouse(2, 20, 20, 0, 0);
     scrollbar.mouse(3, 20, 20, 0, 0);
@@ -36766,7 +35959,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     // 삼켰다. 따라서 브라우저는 보이지만 주소창·탭·터미널 등 왼쪽 영역을 전혀 조작할 수 없었다.
     // FP16: 브라우저·파일이 같은 pane의 탭이라 마지막에 연 beta.html이 활성이다. 주소창 검증이므로
     // 브라우저 탭(터미널 다음)을 다시 활성으로 올린다.
-    session.focusTerm(1);
+    term_ops.focusTerm(session, 1);
     const browser_sid = web_ops.activeWebSurfaceId(session);
     const browser_bar = pane_ops.paneBarForLeaf(session, pane_ops.activePane(session)) orelse return error.NoBrowserBar;
     const address_y: f64 = @floatFromInt(browser_bar.full.y + browser_bar.full.h + browser_bar.full.h / 2);
@@ -36904,7 +36097,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     // 캡처가 "어느 파일이 활성인가"를 싣는지 보려면 파일 탭을 다시 활성으로 둔다(지금은 브라우저가 활성).
-    session.focusTerm(3); // [terminal, browser, alpha.md, beta.html]
+    term_ops.focusTerm(session, 3); // [terminal, browser, alpha.md, beta.html]
     const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
@@ -37302,7 +36495,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     _ = try session.handleKeyEvent(.{ .key = .home });
 
     _ = try session.handleKeyEvent(.{ .key = .escape });
-    try std.testing.expect((session.focusedDockSurface() != null));
+    try std.testing.expect((term_ops.focusedDockSurface(session) != null));
     try std.testing.expectEqual(sid, session.takeFileTreeRestoreSurfaceAction().?);
 
     // restore surface가 tree focus 중 사라지면 Esc는 stale id를 부활시키지 않고 workspace로 fallback한다.
@@ -37368,7 +36561,7 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     // 복원 대상 A는 이미 publish된 surface라 barrier 없이 곧바로 owner가 되고, B의 pending은 취소된다.
     try std.testing.expect(session.pending_dock_focus == null);
-    try std.testing.expect(session.focusedDockSurface() == a_sid);
+    try std.testing.expect(term_ops.focusedDockSurface(session) == a_sid);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
     try std.testing.expectEqual(@as(?u64, a_sid), session.file_panel_mode_pending);
 
@@ -37381,7 +36574,7 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
     file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .escape });
     try std.testing.expect(session.pending_dock_focus == null);
-    try std.testing.expect(session.focusedDockSurface() == a_sid);
+    try std.testing.expect(term_ops.focusedDockSurface(session) == a_sid);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
 }
 
@@ -37807,7 +37000,7 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
     });
     defer session.deinit(); // workspace_buffer 해제 — testing.allocator가 leak을 잡는다
     _ = try session.resize(800, 600, 1000);
-    try session.activeSurface().core.write("\x1b]7;file://h/srv\x07");
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/srv\x07");
 
     const b0 = try workspace_ops.serializeWorkspaceWindow(session, true, null); // 활성 창 → active-window=1 마커(M3e)
     try std.testing.expect(std.mem.startsWith(u8, b0, "window ")); // 헤더 없는 블록(Swift가 헤더 하나로 모음)
@@ -38234,7 +37427,7 @@ test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+
     try std.testing.expect(session.pending_zombie_reap);
     try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len); // [죽은 T0, 새 T1]
     // zombie reap: live 형제(T1)가 생겨 allTabsTerminated=false → 죽은 T0가 닫힌다(좀비 탭 방지).
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // (C) 새 세션이 usable(출력>0)였고 **정상 종료(exit 0, grace 밖)** → 기존대로 세션 종료(ended_seen).
@@ -38347,20 +37540,20 @@ test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inhe
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     // OSC 7 보고 전(셸 통합 없음·첫 프롬프트 전) → 상속할 포커스 cwd 없음(null). focusedTermCwd는 lockCore 아래
     // currentCwd를 buf로 복사해 돌려준다(reader 스레드 OSC 7 free와의 레이스 차단) — 빈 cwd는 그대로 null.
-    try std.testing.expect(session.focusedTermCwd(&buf) == null);
+    try std.testing.expect(term_ops.focusedTermCwd(session, &buf) == null);
     // 테스트는 빈 config로 init(workspace.root="")·정상 cwd(test runner는 `/`가 아님) → root 폴백도 상속(null).
     // 기본 동작 회귀 방지(이 가정은 테스트를 `/`에서 돌리지 않는 한 성립).
     try std.testing.expect(workspace_ops.workspaceRootCwd(session, &buf) == null);
     // 상속할 cwd가 없으면 inherit on/off 둘 다 root 폴백(null) — toggle만으로 갑자기 경로가 안 생긴다.
-    try std.testing.expect(session.newSurfaceCwd(&buf, true) == null);
-    try std.testing.expect(session.newSurfaceCwd(&buf, false) == null);
+    try std.testing.expect(term_ops.newSurfaceCwd(session, &buf, true) == null);
+    try std.testing.expect(term_ops.newSurfaceCwd(session, &buf, false) == null);
 
     // 활성 Term이 OSC 7로 cwd를 보고하면, inherit ON인 새 surface(탭/Term/split)는 그 절대경로를 상속한다.
-    try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07");
-    try std.testing.expectEqualStrings("/tmp/proj", session.focusedTermCwd(&buf).?);
-    try std.testing.expectEqualStrings("/tmp/proj", session.newSurfaceCwd(&buf, true).?);
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/tmp/proj\x07");
+    try std.testing.expectEqualStrings("/tmp/proj", term_ops.focusedTermCwd(session, &buf).?);
+    try std.testing.expectEqualStrings("/tmp/proj", term_ops.newSurfaceCwd(session, &buf, true).?);
     // inherit OFF면 포커스 cwd가 있어도 무시하고 root 폴백(여기선 root 미설정·정상 cwd라 null).
-    try std.testing.expect(session.newSurfaceCwd(&buf, false) == null);
+    try std.testing.expect(term_ops.newSurfaceCwd(session, &buf, false) == null);
 }
 
 test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inherit OFF는 root, ON은 포커스 우선" {
@@ -38386,13 +37579,13 @@ test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inh
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     // 포커스 cwd 없음(OSC 7 전): inherit ON/OFF 둘 다 root로 떨어진다(설정된 절대경로가 그대로 흐른다).
     try std.testing.expectEqualStrings("/tmp/maru-root", workspace_ops.workspaceRootCwd(session, &buf).?);
-    try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, false).?); // 토글 OFF → root
-    try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, true).?); // 토글 ON이나 포커스 없음 → root
+    try std.testing.expectEqualStrings("/tmp/maru-root", term_ops.newSurfaceCwd(session, &buf, false).?); // 토글 OFF → root
+    try std.testing.expectEqualStrings("/tmp/maru-root", term_ops.newSurfaceCwd(session, &buf, true).?); // 토글 ON이나 포커스 없음 → root
 
     // 활성 Term이 OSC 7로 cwd 보고: inherit ON은 포커스 cwd가 root보다 우선, OFF는 여전히 root.
-    try session.activeSurface().core.write("\x1b]7;file://h/work/svc\x07");
-    try std.testing.expectEqualStrings("/work/svc", session.newSurfaceCwd(&buf, true).?); // ON → 포커스 우선
-    try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, false).?); // OFF → 포커스 무시, root
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/work/svc\x07");
+    try std.testing.expectEqualStrings("/work/svc", term_ops.newSurfaceCwd(session, &buf, true).?); // ON → 포커스 우선
+    try std.testing.expectEqualStrings("/tmp/maru-root", term_ops.newSurfaceCwd(session, &buf, false).?); // OFF → 포커스 무시, root
 }
 
 test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {
@@ -38935,7 +38128,7 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
     // 활성 탭은 panel 1개(split 전), active_pane 0, tree는 단일 leaf(= 활성 panel surface).
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).panes.items.len);
     try std.testing.expectEqual(@as(usize, 0), tab_ops.activeTab(session).active_pane);
-    try std.testing.expectEqual(session.activeSurface(), pane_ops.activePane(session).activeTerm().surface);
+    try std.testing.expectEqual(term_ops.activeSurface(session), pane_ops.activePane(session).activeTerm().surface);
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(tab_ops.activeTab(session).tree));
 
     var out: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -38972,7 +38165,7 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
 
     const old_pane = pane_ops.activePane(session);
-    const old_surface = session.activeSurface();
+    const old_surface = term_ops.activeSurface(session);
     try pane_ops.splitActivePane(session, .horizontal);
 
     // 트리/포커스: panel 2개, 새 panel(인덱스 1)이 활성, tree는 horizontal split{a: 기존, b: 새}.
@@ -38980,7 +38173,7 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
     try std.testing.expectEqual(@as(usize, 2), PaneTree.leafCount(tab_ops.activeTab(session).tree));
     const new_pane = pane_ops.activePane(session);
-    const new_surface = session.activeSurface();
+    const new_surface = term_ops.activeSurface(session);
     try std.testing.expect(new_pane != old_pane); // 포커스가 새 panel로 이동
     try std.testing.expect(new_surface != old_surface);
     try std.testing.expectEqual(new_surface, pane_ops.activePane(session).activeTerm().surface);
@@ -39027,17 +38220,17 @@ test "newTab(새 워크스페이스): 직전 활성 탭이 split이어도 새 �
     // 단일 panel 탭의 '전체 영역' grid를 기준으로 잡는다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid가
     // 곧 newTab이 새 단일-panel 탭에 잡아야 할 grid다(둘 다 paneTermRect(termRect) 경로라 정확히 일치해야 한다).
     try pane_ops.resizeActiveTabPanes(session);
-    const full = session.activeSurface().core.size;
+    const full = term_ops.activeSurface(session).core.size;
 
     // 직전 활성 탭을 좌우로 분할 → 활성 surface는 분할된 '한 panel'이라 cols가 전체보다 작아진다.
     try pane_ops.splitActivePane(session, .horizontal);
-    const split_panel = session.activeSurface().core.size;
+    const split_panel = term_ops.activeSurface(session).core.size;
     try std.testing.expect(split_panel.cols < full.cols); // 분할로 폭이 줄었다(테스트 전제 확인)
 
     // 새 워크스페이스(탭)를 연다. 새 탭은 단일 panel(전체 영역)이므로 surface grid가 전체 영역과 같아야 한다 —
     // 회귀 전에는 cfg.size=activeSurface().core.size라 직전 활성 panel(split_panel) 크기를 물려받았다(버그).
     _ = try tab_ops.newTab(session);
-    const new_tab_size = session.activeSurface().core.size;
+    const new_tab_size = term_ops.activeSurface(session).core.size;
     try std.testing.expectEqual(full, new_tab_size); // 전체 영역 복원(직전 panel 크기 아님)
     try std.testing.expect(new_tab_size.cols != split_panel.cols); // 회귀 가드: split panel 크기를 물려받지 않음
 }
@@ -39064,7 +38257,7 @@ test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기
     session.window_padding_px = .{}; // split 기하만 검증(다른 split 테스트와 같은 규율)
 
     try pane_ops.resizeActiveTabPanes(session);
-    const full = session.activeSurface().core.size;
+    const full = term_ops.activeSurface(session).core.size;
 
     // "held 창": 자식이 끝난 Term은 `process_state = .exited`라 `SurfaceRuntime.resize`가 core에 닿기 전에
     // `ProcessExited`로 거부한다(runtime.zig — dead adapter로의 라우팅 거부는 문서화된 계약).
@@ -39075,7 +38268,7 @@ test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기
 
     // 회귀 전에는 거부된 resize가 그대로 삼켜져 dead가 분할 전 폭(full)을 유지했다 → 옆 pane 침범.
     try std.testing.expect(dead.surface.core.size.cols < full.cols);
-    try std.testing.expectEqual(session.activeSurface().core.size, dead.surface.core.size); // 두 pane은 같은 크기(0.5 분할)
+    try std.testing.expectEqual(term_ops.activeSurface(session).core.size, dead.surface.core.size); // 두 pane은 같은 크기(0.5 분할)
 }
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 레이아웃 적용은 한 Term의 runtime 전달 실패로
@@ -39097,7 +38290,7 @@ test "레이아웃 resize: 활성 Term의 runtime 전달 실패가 창 resize �
     defer session.deinit();
     session.window_padding_px = .{};
 
-    session.activeSurface().process_state = .exited; // 활성 Term의 runtime 전달이 거부되는 상태
+    term_ops.activeSurface(session).process_state = .exited; // 활성 Term의 runtime 전달이 거부되는 상태
 
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
@@ -39114,7 +38307,7 @@ test "레이아웃 resize: 활성 Term의 runtime 전달 실패가 창 resize �
         session.active_pane_rect.w,
         session.active_pane_rect.h,
     );
-    try std.testing.expectEqual(pane_grid, session.activeSurface().core.size);
+    try std.testing.expectEqual(pane_grid, term_ops.activeSurface(session).core.size);
 }
 
 test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적 무효화(무관 드래그 보존)·divider도 표적" {
@@ -40315,7 +39508,7 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
     const w1 = try web_ops.createWebTerm(session, .browser);
     const pane = pane_ops.activePane(session);
     try pane.terms.append(allocator, w1);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     // 첫 계산: web1 create(자기 pane 활성 탭이라 visible), 자기 pane 본문 rect는 탭 바 아래라 유한·양수 폭/높이.
     try std.testing.expectEqual(@as(usize, 1), web_ops.webSurfaceTransitionsCount(session));
@@ -40409,14 +39602,14 @@ test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal�
     // markdown web term 새 탭 + 활성 → any_kind = id, 하지만 browser 전용은 0(markdown이라 — 이게 4g-0의 핵심 구분).
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     try std.testing.expectEqual(md.surfaceId(), web_ops.activeWebSurfaceIdAnyKind(session));
     try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceId(session));
 
     // browser web term 새 탭 + 활성 → 둘 다 id.
     const br = try web_ops.createWebTerm(session, .browser);
     try pane.terms.append(allocator, br);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     try std.testing.expectEqual(br.surfaceId(), web_ops.activeWebSurfaceIdAnyKind(session));
     try std.testing.expectEqual(br.surfaceId(), web_ops.activeWebSurfaceId(session));
 }
@@ -40520,7 +39713,7 @@ test "web_surfaces_present는 창 전체 트리에서 매 tick 파생된다(유�
 
     // 그 web Term을 닫으면(closeActiveTerm=terms에서 제거+destroyTerm+재바인딩 — 트리 신호가 정확히 반영되려면 트리에서도
     // 빠져야 하므로 raw destroyTerm이 아닌 close 경로) 신호 off. tick summary=0.
-    session.closeActiveTerm(); // 활성 pane의 활성 Term(web)을 닫는다(pane에 terminal+web 2개라 동작).
+    term_ops.closeActiveTerm(session); // 활성 pane의 활성 Term(web)을 닫는다(pane에 terminal+web 2개라 동작).
     try std.testing.expect(!workspace_ops.windowHasWebTerm(session));
     try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
 }
@@ -40539,9 +39732,9 @@ test "allTabsTerminated: web-only 잔여는 세션을 살려 둔다(web-only 창
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
 
     // 터미널(인덱스 0)을 활성으로 만들어 닫아 web만 남긴다.
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     try std.testing.expect(pane.terms.items[pane.active_term].kind == .terminal);
-    session.closeActiveTerm();
+    term_ops.closeActiveTerm(session);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
     try std.testing.expect(pane.terms.items[0].kind == .web);
 
@@ -40558,7 +39751,7 @@ test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→�
     defer allocator.destroy(session);
     defer session.deinit();
 
-    try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07"); // 터미널에 OSC 7 cwd
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://h/tmp/proj\x07"); // 터미널에 OSC 7 cwd
     const term_sibling = pane_ops.activePane(session).activeTerm();
 
     session.dispatchAppAction(.new_web_tab); // pane=[terminal, web], web 활성
@@ -40566,11 +39759,11 @@ test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→�
     try std.testing.expect(pane.activeTerm().kind == .web);
 
     // cwdSourceTerm은 sentinel(web)이 아니라 terminal 형제를 골라야 한다.
-    try std.testing.expectEqual(term_sibling, session.cwdSourceTerm().?);
+    try std.testing.expectEqual(term_sibling, term_ops.cwdSourceTerm(session).?);
 
     // focusedTermCwd도 web sentinel(빈 cwd) 대신 terminal 형제 cwd를 복사해 돌려준다(수정 전: sentinel→null).
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = session.focusedTermCwd(&buf);
+    const cwd = term_ops.focusedTermCwd(session, &buf);
     try std.testing.expect(cwd != null);
     try std.testing.expectEqualStrings("/tmp/proj", cwd.?);
 }
@@ -40603,8 +39796,8 @@ test "captureWorkspaceTab: URL 있는 브라우저만 있는 pane은 셸 placeho
     session.dispatchAppAction(.new_web_tab);
     const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
-    session.focusTerm(0);
-    session.closeActiveTerm();
+    term_ops.focusTerm(session, 0);
+    term_ops.closeActiveTerm(session);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
     try std.testing.expect(pane.terms.items[0].kind == .web);
 
@@ -40707,8 +39900,8 @@ test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
     }
 
     // (b) web-only pane: 터미널을 닫아 pane=[web]만 → capture는 셸 placeholder 하나(빈 command/agent, sentinel size 유효).
-    session.focusTerm(0);
-    session.closeActiveTerm();
+    term_ops.focusTerm(session, 0);
+    term_ops.closeActiveTerm(session);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(pane_ops.activePane(session).terms.items[0].kind == .web);
     {
@@ -40737,7 +39930,7 @@ test "captureWorkspaceTab: active_term remap — web 스킵 시 활성 터미널
     session.dispatchAppAction(.new_web_tab); // [term0, web], active=web
     session.dispatchAppAction(.new_term); // [term0, web, term2], active=term2
     session.dispatchAppAction(.new_term); // [term0, web, term2, term3], active=term3
-    session.focusTerm(2); // active=term2(터미널, idx 2)
+    term_ops.focusTerm(session, 2); // active=term2(터미널, idx 2)
     const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 4), pane.terms.items.len);
     try std.testing.expect(pane.terms.items[1].kind == .web);
@@ -40814,9 +40007,9 @@ test "ownsSurface: 소유 terminal·web은 true, 미소유 id는 false (target-w
     session.dispatchAppAction(.new_web_tab); // web(browser) Term
     const web_id = pane_ops.activePane(session).activeTerm().surfaceId();
 
-    try std.testing.expect(session.ownsSurface(term_id)); // 소유 terminal
-    try std.testing.expect(session.ownsSurface(web_id)); // 소유 web(kind 필터 없음)
-    try std.testing.expect(!session.ownsSurface(999_999)); // 미소유(다른 창·없는 id)
+    try std.testing.expect(term_ops.ownsSurface(session, term_id)); // 소유 terminal
+    try std.testing.expect(term_ops.ownsSurface(session, web_id)); // 소유 web(kind 필터 없음)
+    try std.testing.expect(!term_ops.ownsSurface(session, 999_999)); // 미소유(다른 창·없는 id)
 }
 
 // [4e review 0] collectWebSurfaces seam inset 검증 헬퍼 — 각 web 본문 rect가 seam(형제 pane 경계) 가장자리서 `seam`만큼,
@@ -41180,7 +40373,7 @@ test "U-tab2: pane Term tab title has no number prefix (rename caret sits right 
     const term = pane_ops.activePane(session).activeTerm();
     settings_ops.startRename(session, .{ .term = term }); // custom_name 없는 새 Term → 편집기 비어 qcols=0
     const caret = settings_ops.renameCaretRect(session) orelse return error.TestUnexpectedResult;
-    const loc = session.termBarLocation(term) orelse return error.TestUnexpectedResult;
+    const loc = term_ops.termBarLocation(session, term) orelse return error.TestUnexpectedResult;
     // 단일 Term이라 tab 0 = 탭 영역 좌단(seg.start_col=0). 번호 prefix 제거 → caret_col=1(좌패딩만).
     const expected_x: i32 = @intCast(loc.pb.tabs.x + session.cell_width_px);
     try std.testing.expectEqual(expected_x, caret.x);
@@ -41496,7 +40689,7 @@ test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인
     const w1 = try web_ops.createWebTerm(session, .browser);
     const pane = pane_ops.activePane(session);
     try pane.terms.append(allocator, w1);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, pane.activeTerm().web_panel_kind);
     try std.testing.expect(!session.closeTargetHasRunningJob(.term_or_pane)); // 셸 명령 없음
     try std.testing.expect(web_ops.scopeHasWebBrowser(session, .term)); // 하지만 브라우저는 있음
@@ -41521,7 +40714,7 @@ test "close-confirm: 마지막 창(is_last_window)에서 세션 닫기는 Cmd+Q�
 
     // 두 Term을 하나로 줄여 이제 단일 Term·단일 pane·단일 탭 = requestClose(.term_or_pane)가 .session으로 해석되게.
     markAllTermsAtPrompt(session);
-    session.closeActiveTerm(); // 2→1 Term(닫기 확인 없이 메커니즘만)
+    term_ops.closeActiveTerm(session); // 2→1 Term(닫기 확인 없이 메커니즘만)
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 
@@ -41551,7 +40744,7 @@ test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기
     defer session.deinit();
 
     markAllTermsAtPrompt(session);
-    session.closeActiveTerm(); // 2→1 Term
+    term_ops.closeActiveTerm(session); // 2→1 Term
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
 
     // is_last_window=false(멀티 창의 비-마지막 창·기본값) → 이 창만 닫기: 종료 확인 안 뜨고 세션 종료 latch.
@@ -41688,7 +40881,7 @@ test "automatic agent sessions dock width reflows the live pane without persisti
     try std.testing.expect(archive_pane.w < explorer_pane.w);
     try std.testing.expectEqual(
         layout_math.gridFromRectPx(session.cell_width_px, session.cell_height_px, archive_pane.w, archive_pane.h),
-        session.activeSurface().core.size,
+        term_ops.activeSurface(session).core.size,
     );
 
     dock_ops.setDockView(session, .explorer);
@@ -41696,7 +40889,7 @@ test "automatic agent sessions dock width reflows the live pane without persisti
     try std.testing.expectEqual(explorer_pane.w, session.active_pane_rect.w);
     try std.testing.expectEqual(
         layout_math.gridFromRectPx(session.cell_width_px, session.cell_height_px, session.active_pane_rect.w, session.active_pane_rect.h),
-        session.activeSurface().core.size,
+        term_ops.activeSurface(session).core.size,
     );
 }
 
@@ -41709,7 +40902,7 @@ test "collector: 단일 term 세션 — 좌표·id·focused·membership·termina
     defer session.deinit();
 
     pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .input; // 프롬프트 idle → at_prompt=true
-    const active_id = session.activeSurface().id;
+    const active_id = term_ops.activeSurface(session).id;
 
     const c = try session.collectSession(allocator, 42, .normal);
     defer c.deinit();
@@ -41745,7 +40938,7 @@ test "collector: 다중 term(가로 탭) — 같은 tab/pane 좌표·구별 id, 
     defer session.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), pane_ops.activePane(session).terms.items.len);
-    const active_id = session.activeSurface().id;
+    const active_id = term_ops.activeSurface(session).id;
 
     const c = try session.collectSession(allocator, 7, .normal);
     defer c.deinit();
@@ -41827,7 +41020,7 @@ test "collector 멀티창: 두 세션을 공유 리스트로 합치면 window별
     defer s_bg.deinit();
     s_bg.window_focused = false; // 이 창은 key가 아님 → 어떤 surface도 focused 아님
 
-    const key_active = s_key.activeSurface().id;
+    const key_active = term_ops.activeSurface(s_key).id;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -41945,7 +41138,7 @@ test "collector→dispatch: 실 snapshot이 sessions.list(self)로 자기 surfac
     defer allocator.destroy(session);
     defer session.deinit();
 
-    const active_id = session.activeSurface().id;
+    const active_id = term_ops.activeSurface(session).id;
     const c = try session.collectSession(allocator, 1, .normal);
     defer c.deinit();
 
@@ -42932,7 +42125,7 @@ test "CIM4b: 드래그 중 ⌘⌥]는 보이는 순서에서 다음 탭으로 �
 
     // 보이는 순서 [T1,T2,T0], 활성은 끌리는 T0(슬롯 2). 오른쪽 다음 = wrap해서 슬롯 0 = T1.
     try std.testing.expectEqual(@as(usize, 2), pane_ops.paneActiveTermIndex(session, f.pane));
-    session.focusTermRelative(1);
+    term_ops.focusTermRelative(session, 1);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[f.pane.active_term]);
     try std.testing.expectEqual(@as(usize, 0), pane_ops.paneActiveTermIndex(session, f.pane)); // 보이는 슬롯 0
 }
@@ -42967,13 +42160,13 @@ test "CIM4b: 드래그 중에는 탭 바 스크롤을 건드리지 않는다(pre
 
     // 드래그 중 탭 전환(⌘⌥])이 일어나도 스크롤은 그대로다 — 보이는 슬롯이 영속 상태로 새지 않는다.
     const scroll_before = pane.tab_scroll_cols;
-    session.focusTermRelative(1);
+    term_ops.focusTermRelative(session, 1);
     try std.testing.expectEqual(scroll_before, pane.tab_scroll_cols);
 
     // 손을 뗀 뒤에는 다시 model 기준으로 맞춘다(드래그가 끝났으므로 게이트가 열린다).
     session.mouse(3, tab0_x, bar_y, 0, 0);
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
-    session.ensureActiveTermVisible(pane);
+    term_ops.ensureActiveTermVisible(session, pane);
     const active_start: u32 = @as(u32, @intCast(pane.active_term)) * m.tab_w;
     try std.testing.expect(pane.tab_scroll_cols <= active_start); // 활성 탭 좌단이 보이는 범위 안
 }
@@ -43133,7 +42326,7 @@ test "CIM4b 복원: 드래그 중 Term이 사라지면 preview를 폐기한다" 
     defer session.deinit();
     const f = try beginTabDragToLastSlot(session, allocator);
 
-    session.closeActiveTerm(); // 활성 = 끌고 있던 T0
+    term_ops.closeActiveTerm(session); // 활성 = 끌고 있던 T0
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
     try std.testing.expectEqual(@as(usize, 2), f.pane.terms.items.len);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
@@ -43446,9 +42639,9 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
-    const old_surface = session.activeSurface();
+    const old_surface = term_ops.activeSurface(session);
     try pane_ops.splitActivePane(session, .horizontal); // 좌우 분할 — 새 panel(오른쪽)이 활성
-    const new_surface = session.activeSurface();
+    const new_surface = term_ops.activeSurface(session);
     try std.testing.expect(new_surface != old_surface);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
 
@@ -43457,7 +42650,7 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     // 왼쪽(기존, 비활성) panel 영역 클릭 → 포커스가 기존 panel로. 좌표 origin도 왼쪽 rect(사이드바 옆)로 갱신.
     const left_x: f64 = @floatFromInt(session.sidebar_width_px + 10);
     session.mouse(1, left_x, click_y, 0, 0);
-    try std.testing.expectEqual(old_surface, session.activeSurface());
+    try std.testing.expectEqual(old_surface, term_ops.activeSurface(session));
     try std.testing.expectEqual(@as(usize, 0), tab_ops.activeTab(session).active_pane);
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
 
@@ -43468,7 +42661,7 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     // 오른쪽(비활성) panel 클릭 → 다시 오른쪽 panel로 포커스.
     const right_x: f64 = @floatFromInt(session.sidebar_width_px + 410);
     session.mouse(1, right_x, click_y, 0, 0);
-    try std.testing.expectEqual(new_surface, session.activeSurface());
+    try std.testing.expectEqual(new_surface, term_ops.activeSurface(session));
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
 }
 
@@ -43532,7 +42725,7 @@ test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     try surface.core.write("X\r\n" ** 200); // 스크롤백 충분히(200줄)
     const body = pane_ops.paneTermRect(session, session.active_pane_rect);
     const cx: f64 = @floatFromInt(body.x + body.w / 2);
@@ -43577,7 +42770,7 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     try surface.core.write("hello\r\n" ** 40); // 선택할 내용 + 스크롤백
     const body = pane_ops.paneTermRect(session, session.active_pane_rect);
     const cx: f64 = @floatFromInt(body.x + body.w / 2);
@@ -43693,7 +42886,7 @@ test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pa
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
     const left_surface = lr.items[0].leaf.activeTerm().surface;
-    try std.testing.expect(left_surface != session.activeSurface()); // 왼쪽 = 비활성
+    try std.testing.expect(left_surface != term_ops.activeSurface(session)); // 왼쪽 = 비활성
 
     // 비활성(왼쪽) pane의 첫 행에만 링크를 둔다. 활성 pane은 빈 화면이라, 옛 동작(활성 고정)이면 무엇을 눌러도 빈 결과다.
     try left_surface.core.write("https://a.co");
@@ -43709,7 +42902,7 @@ test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pa
     // hover: 커서는 link이고, 밑줄 span은 **hover한 pane에만** 달린다(활성 pane엔 null).
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, y, 32));
     try std.testing.expect(session.hoverLinkSpanFor(left_surface) != null);
-    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
+    try std.testing.expect(session.hoverLinkSpanFor(term_ops.activeSurface(session)) == null);
 
     // 활성(오른쪽) pane의 같은 상대 위치는 빈 화면이라 링크가 아니다 — hit-test가 pane을 실제로 가르는지.
     const right_body = pane_ops.paneTermRect(session, lr.items[1].rect);
@@ -43750,8 +42943,8 @@ test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
     // sentinel은 빈 core다(createWebTerm이 1×1 요청 → clampGridSize가 cols 최소 2로 올려 2×1). 화면이 없으니
     // 활성 고정 조회는 좌표와 무관하게 늘 빈 결과였다.
-    try std.testing.expectEqual(@as(u16, 2), session.activeSurface().core.size.cols);
-    try std.testing.expectEqual(@as(u16, 1), session.activeSurface().core.size.rows);
+    try std.testing.expectEqual(@as(u16, 2), term_ops.activeSurface(session).core.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), term_ops.activeSurface(session).core.size.rows);
 
     const body = pane_ops.paneTermRect(session, lr.items[0].rect);
     const cw: f64 = @floatFromInt(session.cell_width_px);
@@ -43783,7 +42976,7 @@ test "링크 조회는 pane chrome(탭 바·여백)을 셀로 접지 않는다" 
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     try surface.core.write("https://a.co"); // 첫 행에 링크
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
@@ -43839,7 +43032,7 @@ test "비활성 pane hover 밑줄이 실제 프레임 셀까지 실린다" {
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
     const left_surface = lr.items[0].leaf.activeTerm().surface;
-    try std.testing.expect(left_surface != session.activeSurface());
+    try std.testing.expect(left_surface != term_ops.activeSurface(session));
     try left_surface.core.write("https://a.co");
 
     // 밑줄 셀(reserved=9 가는 부분 사각형)을 **그 pane 영역 안**에서만 센다 — 개수 자체는 렌더 세부(합성 셀 분할
@@ -43897,7 +43090,7 @@ test "모달 오버레이가 열려 있으면 터미널 링크를 열지 않는�
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try session.activeSurface().core.write("https://a.co");
+    try term_ops.activeSurface(session).core.write("https://a.co");
     const body = session.active_pane_rect; // 이미 본문 rect(탭 바 제외) — paneTermRect를 또 씌우면 어긋난다
     const x = @as(f64, @floatFromInt(body.x)) + 3.5 * @as(f64, @floatFromInt(session.cell_width_px));
     const y = @as(f64, @floatFromInt(body.y)) + 0.5 * @as(f64, @floatFromInt(session.cell_height_px));
@@ -43929,7 +43122,7 @@ test "커서가 멈춘 채 split하면 stale 링크 밑줄이 내려간다" {
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const left = session.activeSurface();
+    const left = term_ops.activeSurface(session);
     try left.core.write("https://a.co"); // 첫 행 왼쪽 끝에 링크
     const body = session.active_pane_rect; // 이미 본문 rect(탭 바 제외)
     const ch: f64 = @floatFromInt(session.cell_height_px);
@@ -44009,7 +43202,7 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
     // ⑥ 브라우저가 **숨은 Term 탭**이면 대상이 아니다 — 안 보이는 패널에 열면 화면이 안 바뀌어 먹통처럼 보인다.
     //    오른쪽 pane으로 돌아가 첫 Term(터미널)을 활성화하면 브라우저 탭은 뒤로 숨는다. auto라 시스템으로 간다.
     try std.testing.expect(pane_ops.focusPaneByPtr(session, tab_ops.activeTab(session).panes.items[1]));
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal);
     try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co"));
 }
@@ -44225,20 +43418,20 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
-    const old_surface = session.activeSurface();
+    const old_surface = term_ops.activeSurface(session);
     try pane_ops.splitActivePane(session, .horizontal); // 좌우 분할 — 오른쪽(새) panel 활성
-    const new_surface = session.activeSurface();
+    const new_surface = term_ops.activeSurface(session);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
 
     const mods: terminal.ModifierSet = .{ .command = true, .option = true };
     // Cmd+Opt+Left → 왼쪽(기존) panel로.
     _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = mods });
-    try std.testing.expectEqual(old_surface, session.activeSurface());
+    try std.testing.expectEqual(old_surface, term_ops.activeSurface(session));
     try std.testing.expectEqual(@as(usize, 0), tab_ops.activeTab(session).active_pane);
 
     // Cmd+Opt+Right → 오른쪽(새) panel로.
     _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = mods });
-    try std.testing.expectEqual(new_surface, session.activeSurface());
+    try std.testing.expectEqual(new_surface, term_ops.activeSurface(session));
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).active_pane);
 
     // Cmd+Opt+Up → 좌우 split이라 위 panel 없음 → 포커스 불변.
@@ -44265,7 +43458,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
-    const left = session.activeSurface(); // 분할 전 surface = 분할 후 왼쪽(기존) panel
+    const left = term_ops.activeSurface(session); // 분할 전 surface = 분할 후 왼쪽(기존) panel
     try pane_ops.splitActivePane(session, .horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), tab_ops.activeTab(session).panes.items.len);
     try std.testing.expect(pane_ops.activeTabHasSplit(session));
@@ -44274,7 +43467,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     // Cmd+W → 활성(오른쪽) panel 닫힘 → 트리가 형제(왼쪽)로 collapse → 1 panel만 남고 그게 활성.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).panes.items.len);
-    try std.testing.expectEqual(left, session.activeSurface());
+    try std.testing.expectEqual(left, term_ops.activeSurface(session));
     try std.testing.expectEqual(@as(usize, 0), tab_ops.activeTab(session).active_pane);
     try std.testing.expect(!pane_ops.activeTabHasSplit(session));
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(tab_ops.activeTab(session).tree));
@@ -44505,11 +43698,11 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
 
     // 배경 Term T0의 셸이 exit → reap. T0만 닫히고 T1이 인덱스 0·활성으로 clamp, 대표 surface = T1.
     pane.terms.items[0].rt.terminated = true;
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
     try std.testing.expectEqual(t1_id, pane.terms.items[0].surface.id);
     try std.testing.expectEqual(@as(usize, 0), pane.active_term);
-    try std.testing.expectEqual(t1_id, session.activeSurface().id);
+    try std.testing.expectEqual(t1_id, term_ops.activeSurface(session).id);
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick(); // 다음 tick 크래시 없음
 }
@@ -44546,11 +43739,11 @@ test "PR5b regression: reaping a lower-indexed sibling keeps the middle-active T
 
     // 배경 T0(인덱스 0 < active_term 1)의 셸이 exit → reap. T1이 인덱스 0으로 당겨지고 active_term도 0으로 보정돼야 한다.
     pane.terms.items[0].rt.terminated = true;
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     try std.testing.expectEqual(@as(usize, 0), pane.active_term); // 1→0 시프트 보정(버그면 1로 남아 T2를 가리킴)
     try std.testing.expectEqual(t1_id, pane.terms.items[pane.active_term].surface.id); // 여전히 T1
-    try std.testing.expectEqual(t1_id, session.activeSurface().id); // 대표 surface도 T1로 재바인딩
+    try std.testing.expectEqual(t1_id, term_ops.activeSurface(session).id); // 대표 surface도 T1로 재바인딩
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick();
 }
@@ -44597,7 +43790,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     try std.testing.expect(session.chrome_host.confirm.open);
 
     pane.terms.items[0].rt.terminated = true; // 배경 Term이 셸 종료
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // T0 reap됨(트리 변경)
     try std.testing.expect(session.pending_confirm == .none); // 보류 취소
     try std.testing.expect(!session.chrome_host.confirm.open); // 모달 닫힘
@@ -44608,7 +43801,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     try std.testing.expectEqual(@as(usize, 2), pane2.terms.items.len);
     session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
     pane2.terms.items[0].rt.terminated = true;
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expect(session.pending_confirm == .close); // .window 유지
     try std.testing.expect(session.chrome_host.confirm.open); // 모달 유지
 }
@@ -44694,10 +43887,10 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     session.backing_height_px = 600;
     session.window_padding_px = .{}; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
 
-    const left = session.activeSurface(); // 분할 전 = 분할 후 왼쪽(기존) pane P0
+    const left = term_ops.activeSurface(session); // 분할 전 = 분할 후 왼쪽(기존) pane P0
     try pane_ops.splitActivePane(session, .horizontal); // 오른쪽(새) pane P1 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), tab_ops.activeTab(session).panes.items.len);
-    const right_id = session.activeSurface().id; // P1(활성)
+    const right_id = term_ops.activeSurface(session).id; // P1(활성)
     try std.testing.expect(left.id != right_id);
 
     // 왼쪽(배경) pane P0의 유일한 Term 셸이 exit → reap → P0 collapse, P1만 전체 폭으로 남고 활성 유지.
@@ -44705,11 +43898,11 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     for (tab_ops.activeTab(session).panes.items) |p| {
         if (p != active_pane) p.terms.items[0].rt.terminated = true; // P0
     }
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 1), tab_ops.activeTab(session).panes.items.len);
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(tab_ops.activeTab(session).tree));
     try std.testing.expect(!pane_ops.activeTabHasSplit(session));
-    try std.testing.expectEqual(right_id, session.activeSurface().id); // P1 유지·활성
+    try std.testing.expectEqual(right_id, term_ops.activeSurface(session).id); // P1 유지·활성
     try std.testing.expectEqual(@as(u32, 800), session.active_pane_rect.w); // 전체 폭으로 확장
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick();
@@ -44749,10 +43942,10 @@ test "PR5b: a background workspace whose last Term exits is closed; the other su
 
     // 배경 탭 0의 유일한 Term이 exit → reap → 탭 0 워크스페이스 닫힘, 탭 1만 남고 active 0으로 보정.
     session.tabs.items[0].activePane().terms.items[0].rt.terminated = true;
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
-    try std.testing.expectEqual(survivor_id, session.activeSurface().id);
+    try std.testing.expectEqual(survivor_id, term_ops.activeSurface(session).id);
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick();
 }
@@ -44775,7 +43968,7 @@ test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
 
     // 단일 탭·단일 pane·단일 Term이 exit → reap 무동작(구조 유지). 세션 종료는 reap이 아니라 tick latch가 한다.
     pane_ops.activePane(session).terms.items[0].rt.terminated = true;
-    session.reapTerminatedTerms();
+    term_ops.reapTerminatedTerms(session);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(!session.ended_seen);
@@ -47784,13 +46977,13 @@ test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌�
     try std.testing.expectEqualStrings("x", session.chrome_host.find.input.query.items);
 
     // 웹 탭에 갔다 와도 오버레이와 검색어가 살아 있다(대상만 갈린다).
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     _ = try session.tick();
     try std.testing.expect(session.chrome_host.find.open);
     try std.testing.expectEqualStrings("x", session.chrome_host.find.input.query.items);
 
     // ⑴ 터미널로 돌아와도 그대로 쓸 수 있다(영구 차단이 아니다).
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     _ = try session.tick();
     try std.testing.expect(session.chrome_host.find.open);
 }
@@ -47859,7 +47052,7 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 �
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1); // 웹 탭으로 전환
+    term_ops.focusTerm(session, pane.terms.items.len - 1); // 웹 탭으로 전환
     _ = try session.tick(); // 불변식은 렌더 전에 돈다
 
     // 슬라이스 ② 이후: 오버레이는 **열린 채로 두고 대상만 페이지로 바꾼다**(닫지 않는다).
@@ -47893,7 +47086,7 @@ test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어�
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     _ = try session.tick(); // 실사용 순서 — 여는 프레임의 tick이 대상을 페이지로 정한다
@@ -47964,7 +47157,7 @@ test "WP-F1 R8 프로브: 웹 탭에서 Enter/Shift+Enter가 페이지 다음·�
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     for ("ab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
@@ -48001,8 +47194,8 @@ test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 스크롤백을 만들고(뷰포트보다 길게) 맨 위쪽에 검색어를 둔다 — 스크롤이 일어나면 view_offset이 변한다.
-    try session.activeSurface().core.write("MARUFIND top\r\n");
-    for (0..60) |_| try session.activeSurface().core.write("filler line\r\n");
+    try term_ops.activeSurface(session).core.write("MARUFIND top\r\n");
+    for (0..60) |_| try term_ops.activeSurface(session).core.write("filler line\r\n");
 
     session.dispatchAppAction(.toggle_find);
     for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
@@ -48010,19 +47203,19 @@ test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤�
     try std.testing.expect(!session.chrome_host.find.open);
 
     // 닫은 뒤 사용자가 스크롤 위치를 정해 둔다(맨 아래).
-    session.activeSurface().core.scrollToBottom();
-    const offset_before = session.activeSurface().core.viewOffset();
+    term_ops.activeSurface(session).core.scrollToBottom();
+    const offset_before = term_ops.activeSurface(session).core.viewOffset();
 
     // 마크다운 탭에 들렀다 돌아온다 — 닫혀 있으므로 화면은 그대로여야 한다.
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     _ = try session.tick();
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     _ = try session.tick();
 
-    try std.testing.expectEqual(offset_before, session.activeSurface().core.viewOffset());
+    try std.testing.expectEqual(offset_before, term_ops.activeSurface(session).core.viewOffset());
 }
 
 // WP-F1 적대적 R6 프로브: **닫힌 동안 탭이 바뀌어도 대상이 굳으면 안 된다.** 대상 동기화가 "열려 있을 때"에만
@@ -48045,7 +47238,7 @@ test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온�
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     _ = try session.tick();
@@ -48054,7 +47247,7 @@ test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온�
     // 닫고 터미널로 옮긴다.
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(!session.chrome_host.find.open);
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     _ = try session.tick();
 
     // 다시 열자마자 그리면 — 페이지 모드로 굳어 있으면 카운터가 없다.
@@ -48082,7 +47275,7 @@ test "WP-F1 R5 프로브: 웹에 들렀다 터미널로 돌아오면 스크롤�
 
     // 터미널 화면에 찾을 글자를 심는다(유니크 토큰 — 셸 출력과 충돌 없게).
     const pane = pane_ops.activePane(session);
-    try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three");
+    try term_ops.activeSurface(session).core.write("MARUFIND one\r\ntwo MARUFIND three");
     session.dispatchAppAction(.toggle_find);
     for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
     const before = session.find_matches.items.len;
@@ -48091,12 +47284,12 @@ test "WP-F1 R5 프로브: 웹에 들렀다 터미널로 돌아오면 스크롤�
     // 마크다운 탭에 들렀다가
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     _ = try session.tick();
     try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len); // 웹 화면엔 남기지 않는다
 
     // 돌아온다 — 같은 검색어로 다시 찾아져 있어야 한다.
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     _ = try session.tick();
     try std.testing.expectEqual(before, session.find_matches.items.len);
 }
@@ -48126,7 +47319,7 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
     const b_idx = pane.terms.items.len - 1;
 
     // (b) 역방향: ⌘⇧G가 backwards=true로 나간다.
-    session.focusTerm(a_idx);
+    term_ops.focusTerm(session, a_idx);
     session.dispatchAppAction(.toggle_find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
@@ -48137,7 +47330,7 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
     try std.testing.expect(back.backwards);
 
     // (a) A의 결과가 오기 전에 B로 전환한다. 그 뒤 도착한 **A의 답**을 B 화면에 붙이면 안 된다.
-    session.focusTerm(b_idx);
+    term_ops.focusTerm(session, b_idx);
     web_ops.provideWebFindResult(session, back.seq, true); // seq는 아직 유효(B 재제출 전) — 그래도 A의 답이다
     try std.testing.expect(session.chrome_host.find.page_found == null);
 }
@@ -48163,7 +47356,7 @@ test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
@@ -48210,7 +47403,7 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
     try pane.terms.append(allocator, b);
     const b_idx = pane.terms.items.len - 1;
 
-    session.focusTerm(a_idx);
+    term_ops.focusTerm(session, a_idx);
     session.dispatchAppAction(.toggle_find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
@@ -48219,7 +47412,7 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
     web_ops.provideWebFindResult(session, ra.seq, true); // A는 찾음
 
     // B로 전환. 같은 검색어를 그 탭에서도 찾아야 한다.
-    session.focusTerm(b_idx);
+    term_ops.focusTerm(session, b_idx);
     _ = try session.tick();
     const rb = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expect(rb.surface_id != sid_a); // A가 아니라 B로 간다
@@ -48260,7 +47453,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     _ = try session.tick();
@@ -48282,7 +47475,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     try std.testing.expect(try findOverlayHasText(allocator, session, "없음"));
 
     // 터미널로 돌아오면 다시 숫자 카운터다(페이지 답이 남지 않는다).
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     _ = try session.tick();
     try std.testing.expectEqual(chrome.components.find.Target.scrollback, session.chrome_host.find.target);
     try std.testing.expect(session.chrome_host.find.page_found == null);
@@ -48338,7 +47531,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
     const pane = pane_ops.activePane(session);
     const br = try web_ops.createWebTerm(session, .browser);
     try pane.terms.append(allocator, br);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     // 슬라이스 ② 이후: browser에서도 **열린다** — 다만 대상이 페이지다. 열린 뒤 tick이 돌면
@@ -48348,7 +47541,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
     try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
 
     // 웹 탭은 그대로 두고 활성만 터미널(0번)로 되돌린다.
-    session.focusTerm(0);
+    term_ops.focusTerm(session, 0);
     try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceIdAnyKind(session)); // 전제
 
     // 전환만으로 닫히지 않는다 — 같은 오버레이가 이제 스크롤백을 본다.
@@ -48386,7 +47579,7 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
 
     // 크래시하지 않고, find 오버레이가 열리지도 않는다.
     session.dispatchAppAction(.find_next);
@@ -48423,7 +47616,7 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지�
     const pane = pane_ops.activePane(session);
     const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
-    session.focusTerm(pane.terms.items.len - 1);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
     const sid = web_ops.activeWebSurfaceIdAnyKind(session);
     try std.testing.expect(sid != 0); // 전제
 
@@ -49872,7 +49065,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
 
     // switchTab으로 활성 탭을 0으로 — activeSurface가 탭 0 surface를 가리킨다(라우팅 전환).
     try std.testing.expect(tab_ops.switchTab(session, 0));
-    try std.testing.expectEqual(session.tabs.items[0].activePane().activeTerm().surface.id, session.activeSurface().id);
+    try std.testing.expectEqual(session.tabs.items[0].activePane().activeTerm().surface.id, term_ops.activeSurface(session).id);
     try std.testing.expect(!tab_ops.switchTab(session, 5)); // 범위 밖이면 false, 활성 불변
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }
@@ -50026,7 +49219,7 @@ test "web app action dispatch bypasses terminal preprocessing and rejects a stal
     try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, web_ops.webKeyRoute(session, browser_sid, line_edit));
     try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_sid, line_edit)); // browser는 이제 background Term이다.
     try std.testing.expectEqual(terms_before_stale + 1, pane_ops.activePane(session).terms.items.len);
-    session.focusTerm(1);
+    term_ops.focusTerm(session, 1);
     try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_sid, line_edit));
     try std.testing.expectEqual(terms_before_stale + 2, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(u64, 3), session.total_app_key_events);
@@ -50364,7 +49557,7 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
             var i: usize = 0;
             while (i < 400) : (i += 1) {
                 _ = try s.tick();
-                const dump = try s.activeSurface().core.dumpUtf8(a);
+                const dump = try term_ops.activeSurface(s).core.dumpUtf8(a);
                 defer a.free(dump);
                 if (std.mem.indexOf(u8, dump, needle) != null) return true;
             }
@@ -50489,7 +49682,7 @@ test "sendTextAsKeys normalizes newlines to CR and imeBegin snaps to bottom" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     const core = &surface.core;
 
     // 스크롤백을 만들고 과거를 본 뒤 imeBegin → 바닥으로 스냅(조합이 보이게).
@@ -50529,7 +49722,7 @@ test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
 
     // 터미널 조합 중 상태를 만든다(inputFocus 기본 .terminal → Surface overlay 세팅).
     input_ops.imeMarked(session, "한");
@@ -50560,12 +49753,12 @@ test "terminal IME pin tombstones a reaped target and never retargets the same t
     defer session.deinit();
     _ = try tab_ops.newTab(session); // 두 번째 탭이 active
 
-    const vanished_id = session.activeSurface().id;
+    const vanished_id = term_ops.activeSurface(session).id;
     input_ops.imeBegin(session);
     input_ops.imeMarked(session, "한");
     try std.testing.expectEqual(@as(?u64, vanished_id), session.ime_terminal_target_id);
     tab_ops.closeTab(session, session.app_window.active_tab); // pin target destroy, 첫 탭이 새 active
-    const survivor = session.activeSurface();
+    const survivor = term_ops.activeSurface(session);
     try std.testing.expect(survivor.id != vanished_id);
 
     input_ops.imeMarked(session, "나"); // missing pin을 null로 바꿔 survivor에 재지정하면 안 된다.
@@ -50593,14 +49786,14 @@ test "terminal IME pin tombstone survives across key transactions and suppresses
     defer session.deinit();
     _ = try tab_ops.newTab(session); // 두 번째 탭이 active
 
-    const vanished_id = session.activeSurface().id;
+    const vanished_id = term_ops.activeSurface(session).id;
     input_ops.imeBegin(session);
     input_ops.imeMarked(session, "한");
     input_ops.imeEnd(session, null); // preedit은 계속 active라 terminal pin도 다음 keyDown까지 유지
     try std.testing.expectEqual(@as(?u64, vanished_id), session.ime_terminal_target_id);
 
     tab_ops.closeTab(session, session.app_window.active_tab); // key transaction 사이에 pinned target reap
-    const survivor = session.activeSurface();
+    const survivor = term_ops.activeSurface(session);
     try std.testing.expect(survivor.id != vanished_id);
     const bytes_before = session.total_terminal_input_bytes;
     const keys_before = session.total_key_events;
@@ -50633,7 +49826,7 @@ test "terminal IME pin wins over a newly opened palette during commit" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
 
     input_ops.imeMarked(session, "한");
     try std.testing.expect(surface.preedit.active());
@@ -50666,7 +49859,7 @@ test "commitComposition sends committed text via non-blocking path, not blocking
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
 
     input_ops.imeMarked(session, "한");
     try std.testing.expect(surface.preedit.active());
@@ -50733,7 +49926,7 @@ test "imeEnd commit and Enter replay remain ordered in one surface FIFO under ba
     });
     defer session.deinit();
 
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     // 자식이 한 번에 소비할 수 없는 선행 입력을 넣어 실제 nonblocking flush 뒤에도 FIFO tail이
     // 남게 한다. 개행이 없어 controlled child는 read에서 살아 있고, suffix로 transaction 순서를 본다.
     var blocked_prefix: [64 * 1024]u8 = undefined;
@@ -50765,7 +49958,7 @@ test "IME commit and replay pair admission is atomic on queue allocation failure
     });
     defer session.deinit();
 
-    const target_id = session.activeSurface().id;
+    const target_id = term_ops.activeSurface(session).id;
     try std.testing.expect(session.queueInputBytes(target_id, "prefix", false));
     const before = session.pending_pastes.get(target_id).?.buf.items.len;
     var large: [512]u8 = undefined;
@@ -50796,7 +49989,7 @@ test "focus-loss commit preserves preedit and pin when ordered queue admission i
     });
     defer session.deinit();
 
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     input_ops.imeMarked(session, "한");
     const target_id = session.ime_terminal_target_id.?;
     try std.testing.expect(surface.preedit.active());
@@ -50816,7 +50009,7 @@ test "focus-loss commit preserves preedit and pin when ordered queue admission i
 }
 
 test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 섞이지 않는다(탭 전환 오라우팅 방지)" {
-    // paste/IME 확정 잔여가 다 빠지기 전 탭/pane이 바뀌면, 과거엔 flushPendingPaste가 self.activeSurface()로
+    // paste/IME 확정 잔여가 다 빠지기 전 탭/pane이 바뀌면, 과거엔 flushPendingPaste가 term_ops.activeSurface(self)로
     // 써 잔여가 새 surface에 입력됐다(선존 버그, code-review max 발견). 이제 대상을 enqueue 시점에
     // pending_paste_target으로 고정한다: 큐가 비었을 때만 현재 활성으로 다시 잡고, 잔여가 있으면 안 바꾼다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -50865,8 +50058,8 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
     const sb_id = sb.id;
     var i: usize = 0;
     while (i < 400) : (i += 1) _ = try session.tick();
-    const surf_a = session.terminalSurfaceById(sa_id) orelse return error.SurfaceUnexpectedlyReaped;
-    const surf_b = session.terminalSurfaceById(sb_id) orelse return error.SurfaceUnexpectedlyReaped;
+    const surf_a = term_ops.terminalSurfaceById(session, sa_id) orelse return error.SurfaceUnexpectedlyReaped;
+    const surf_b = term_ops.terminalSurfaceById(session, sb_id) orelse return error.SurfaceUnexpectedlyReaped;
     const dump_a = try surf_a.core.dumpUtf8(allocator);
     defer allocator.free(dump_a);
     const dump_b = try surf_b.core.dumpUtf8(allocator);
@@ -51274,7 +50467,7 @@ test "moveWorkspaceToSession aborts before detach when active preedit queue admi
 
     try addMoveTestWorkspace(src, "preedit-oom");
     const moved = src.tabs.items[1].activeTerm().surface;
-    const destination = dst.activeSurface();
+    const destination = term_ops.activeSurface(dst);
     try std.testing.expectEqual(@as(usize, 1), src.app_window.active_tab);
     input_ops.imeMarked(src, "한");
     input_ops.imeMarked(dst, "둘");
@@ -51316,7 +50509,7 @@ test "moveWorkspaceToSession destination preedit OOM preserves both owners and r
 
     try addMoveTestWorkspace(src, "destination-preedit-oom");
     const moved = src.tabs.items[1].activeTerm().surface;
-    const destination = dst.activeSurface();
+    const destination = term_ops.activeSurface(dst);
     input_ops.imeMarked(src, "한");
     input_ops.imeMarked(dst, "둘");
     try std.testing.expect(moved.preedit.active());
@@ -51374,7 +50567,7 @@ test "moveWorkspaceToSession transfer preflight OOM occurs before either composi
 
     try addMoveTestWorkspace(src, "transfer-preflight-oom");
     const moved = src.tabs.items[1].activeTerm().surface;
-    const destination = dst.activeSurface();
+    const destination = term_ops.activeSurface(dst);
     input_ops.imeMarked(src, "한");
     input_ops.imeMarked(dst, "둘");
 
@@ -51423,21 +50616,21 @@ test "moveWorkspaceToSession same-session commits only when active owner changes
     try addMoveTestWorkspace(session, "same-session-background");
     session.app_window.active_tab = 0;
     pane_ops.recomputeActivePaneRect(session);
-    const old_active = session.activeSurface();
+    const old_active = term_ops.activeSurface(session);
     const moved = session.tabs.items[1].activeTerm().surface;
     input_ops.imeMarked(session, "전");
     const before = session.total_terminal_input_bytes;
     var moved_buf: [8]u64 = undefined;
     _ = try workspace_ops.moveWorkspaceToSession(session, session, 1, &moved_buf);
     try std.testing.expect(!old_active.preedit.active());
-    try std.testing.expectEqual(moved, session.activeSurface());
+    try std.testing.expectEqual(moved, term_ops.activeSurface(session));
     try std.testing.expectEqual(before + "전".len, session.total_terminal_input_bytes);
 
     input_ops.imeMarked(session, "유");
-    const active_before = session.activeSurface();
+    const active_before = term_ops.activeSurface(session);
     const bytes_before_active_move = session.total_terminal_input_bytes;
     _ = try workspace_ops.moveWorkspaceToSession(session, session, session.app_window.active_tab, &moved_buf);
-    try std.testing.expectEqual(active_before, session.activeSurface());
+    try std.testing.expectEqual(active_before, term_ops.activeSurface(session));
     try std.testing.expect(active_before.preedit.active());
     try std.testing.expectEqual(@as(?u64, active_before.id), session.ime_terminal_target_id);
     try std.testing.expectEqual(bytes_before_active_move, session.total_terminal_input_bytes);
@@ -51453,8 +50646,8 @@ test "mergeSessionInto commits source preedit and preserves destination active o
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    const source = src.activeSurface();
-    const destination = dst.activeSurface();
+    const source = term_ops.activeSurface(src);
+    const destination = term_ops.activeSurface(dst);
     const destination_tab = dst.tabs.items[dst.app_window.active_tab];
     input_ops.imeMarked(src, "원");
     input_ops.imeMarked(dst, "대");
@@ -51509,7 +50702,7 @@ test "mergeSessionInto transfers exact pending input remainder with destination 
     defer allocator.destroy(dst);
     defer dst.deinit();
 
-    const moved_id = src.activeSurface().id;
+    const moved_id = term_ops.activeSurface(src).id;
     try std.testing.expect(src.queueInputBytes(moved_id, "written|MERGE-REMAINDER", false));
     src.pending_pastes.getPtr(moved_id).?.offset = "written|".len;
 
@@ -52930,7 +52123,7 @@ test "file panel focus supersedes a queued workspace first-responder action" {
     session.workspace_focus_pending = true;
     try std.testing.expect(session.focusFilePanelSurface(sid));
     try std.testing.expect(!workspace_ops.takeWorkspaceFocusAction(session));
-    try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
+    try std.testing.expectEqual(@as(?u64, sid), term_ops.focusedDockSurface(session));
 }
 
 test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface를 잃지 않는다" {
@@ -53278,7 +52471,7 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     try std.testing.expectEqual(source_id, dst.pending_dock_focus.?.entry_id);
     try std.testing.expectEqual(source_surface, dst.pending_dock_focus.?.expected_surface_id.?);
     try std.testing.expect(dst.completePendingDockFocus(source_surface));
-    try std.testing.expect(dst.focusedDockSurface() == source_surface);
+    try std.testing.expect(term_ops.focusedDockSurface(dst) == source_surface);
     // A direct click on B supersedes the remapped A focus token. Independent mode-only A refresh
     // remains drainable but cannot move the logical/native focus back from B.
     dock_ops.queuePendingDockFocus(dst, replacement);
@@ -53302,7 +52495,7 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     try std.testing.expectEqual(source_surface, mode_only.surface_id);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, mode_only.mode);
     try std.testing.expect(!dst.completePendingDockFocus(source_surface));
-    try std.testing.expect(dst.focusedDockSurface() == newer_surface);
+    try std.testing.expect(term_ops.focusedDockSurface(dst) == newer_surface);
 }
 
 // host-backed(원격) Term의 Cmd+hover 회귀 가드. 이전에는 hoverCursor가 `activeSurface().core`를 직접 분류했는데,
@@ -53350,7 +52543,7 @@ test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가
         .{ .span = .{ .start = .{ .row = 2, .col = 0 }, .end = .{ .row = 2, .col = 3 }, .block = false }, .kind = .url, .scope = .osc8 },
     };
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null; // Surface.deinit은 remote를 안 건드린다(소유는 주입한 쪽).
 
@@ -53367,17 +52560,17 @@ test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가
     const on_url_x = pxOf(rect.x, cw, 10);
     const row0_y = pxOf(rect.y, ch, 0);
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_url_x, row0_y, 32));
-    const span = session.hoverLinkSpanFor(session.activeSurface()) orelse return error.TestUnexpectedResult;
+    const span = session.hoverLinkSpanFor(term_ops.activeSurface(session)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 5), span.start.col);
     try std.testing.expectEqual(@as(u16, 28), span.end.col);
 
     // 같은 행이라도 span 밖(col 2)이면 링크가 아니다 — 범위 판정이 실제로 걸리는지.
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(pxOf(rect.x, cw, 2), row0_y, 32));
-    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
+    try std.testing.expect(session.hoverLinkSpanFor(term_ops.activeSurface(session)) == null);
 
     // 수식키가 없으면 밑줄을 띄우지 않는다(로컬과 같은 게이트 — urlModifierHeld 단일 판정).
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url_x, row0_y, 0));
-    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
+    try std.testing.expect(session.hoverLinkSpanFor(term_ops.activeSurface(session)) == null);
 }
 
 // host는 client config를 모르므로 **최대 집합**으로 계산해 보내고, 무엇을 그릴지는 client가 정한다. 이 필터가
@@ -53404,7 +52597,7 @@ test "host-backed hover: client가 link-detection 프리셋으로 host 목록을
         .{ .span = .{ .start = .{ .row = 2, .col = 0 }, .end = .{ .row = 2, .col = 3 }, .block = false }, .kind = .url, .scope = .osc8 },
     };
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 }, .links = &links } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
 
@@ -53467,7 +52660,7 @@ test "로컬 hover: client core를 직접 분류해 밑줄과 링크 커서가 �
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     try std.testing.expect(surface.remote == null); // 이 세션은 in-process다(원격 분기가 아님).
     {
         surface.lockCore(session.io);
@@ -53482,15 +52675,15 @@ test "로컬 hover: client core를 직접 분류해 밑줄과 링크 커서가 �
     const row0 = @as(f64, @floatFromInt(rect.y)) + 0.5 * ch;
 
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(on_url, row0, 32));
-    const span = session.hoverLinkSpanFor(session.activeSurface()) orelse return error.TestUnexpectedResult;
+    const span = session.hoverLinkSpanFor(term_ops.activeSurface(session)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 3), span.start.col); // "go " 다음 토큰 전체가 밑줄
     try std.testing.expectEqual(@as(u16, 26), span.end.col);
 
     // 링크 밖·수식키 없음은 밑줄 없음(로컬 게이트도 그대로).
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(@as(f64, @floatFromInt(rect.x)) + 1.5 * cw, row0, 32));
-    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
+    try std.testing.expect(session.hoverLinkSpanFor(term_ops.activeSurface(session)) == null);
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(on_url, row0, 0));
-    try std.testing.expect(session.hoverLinkSpanFor(session.activeSurface()) == null);
+    try std.testing.expect(session.hoverLinkSpanFor(term_ops.activeSurface(session)) == null);
 }
 
 // host-backed(원격) Term의 **버튼 없는 motion 리포팅(DECSET 1003)** 회귀 가드. 클릭 리포팅은 관측(observation)의
@@ -53514,7 +52707,7 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
 
@@ -53565,7 +52758,7 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 10 } } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
 
@@ -53607,7 +52800,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
     defer session.deinit();
 
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
@@ -53662,7 +52855,7 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
     defer session.deinit();
 
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
@@ -53709,7 +52902,7 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     defer session.deinit();
 
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 20, .rows = 5 } } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
@@ -53786,7 +52979,7 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
 
     // 활성 browser 판정도 같은 술어를 공유한다(nav 단축키 게이트).
     try std.testing.expectEqual(browser.surfaceId(), web_ops.activeWebSurfaceId(session));
-    session.focusTerm(1); // markdown을 활성으로
+    term_ops.focusTerm(session, 1); // markdown을 활성으로
     try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceId(session));
 }
 
@@ -53934,7 +53127,7 @@ test "FP16 닫기: 창의 마지막 Term인 파일 탭은 구조를 파괴하지
         const victim = for (pane.terms.items, 0..) |t, i| {
             if (t.file_entry == null) break i;
         } else break;
-        session.closeTermAt(0, pane, victim);
+        term_ops.closeTermAt(session, 0, pane, victim);
     }
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
 
@@ -54017,7 +53210,7 @@ test "host-backed find: 증분 검색과 네비가 둘 다 host 스크롤을 요
     _ = try session.resize(800, 600, 1000);
 
     var fake = FakeLinkScreen{ .snap = .{ .size = .{ .cols = 40, .rows = 6 } } };
-    const surface = session.activeSurface();
+    const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
 
@@ -54470,7 +53663,7 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
     while (index < pane.terms.items.len) : (index += 1) {
         if (pane.terms.items[index] == term) break;
     }
-    session.closeTermAt(session.app_window.active_tab, pane, index);
+    term_ops.closeTermAt(session, session.app_window.active_tab, pane, index);
     try std.testing.expect(git_ops.diffTermFor(session, "/repo/a.txt", .unstaged) == null);
 
     // 늦게 온 결과를 흉내 낸다: 그 request_id를 가진 결과가 도착해도 짝이 없어 그냥 버려져야 한다(크래시·누수 없음).
@@ -55902,7 +55095,7 @@ test "라이브 스크롤바 thumb 드래그는 도크 위를 지나도 소유�
     for (0..200) |i| {
         var buf: [32]u8 = undefined;
         const line = try std.fmt.bufPrint(&buf, "line {d}\r\n", .{i});
-        try session.activeSurface().core.write(line);
+        try term_ops.activeSurface(session).core.write(line);
     }
     const rect = session.active_pane_rect;
     const grab_x: f64 = @floatFromInt(rect.x + rect.w - 2);

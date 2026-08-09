@@ -28,6 +28,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
 const input_ops = @import("input.zig");
@@ -184,7 +185,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             };
         },
         .term => |term| {
-            const loc = self.termBarLocation(term) orelse return null;
+            const loc = term_ops.termBarLocation(self, term) orelse return null;
             const m = barMetrics(loc.pb.tabs, cw, loc.count, self.buildChromeTokens().space.tab_width_cols, loc.scroll) orelse return null;
             const seg = m.segOf(loc.tab_index);
             // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) 뒤(번호 prefix 제거 — U-tab2). **그 탭 세그먼트 우경계(seg.end_col)**로

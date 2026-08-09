@@ -25,6 +25,7 @@
 | 2026-08-09 (F13) | **57,169** | 알림·벨. 그룹 파일 13개 |
 | 2026-08-09 (F14) | **56,455** | 에이전트 관측. 그룹 파일 14개 |
 | 2026-08-09 (F15) | **56,131** | git·SCM. 그룹 파일 15개 |
+| 2026-08-10 (F16) | **55,324** | term·surface. 그룹 파일 16개 |
 
 > F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). F10으로 이름 기준 그룹은 전부
 > 끝났고 `app_session.zig`는 **59,124줄**이다. 예측했던 56,000줄대에 닿지 못한 이유는 F8·F10에서
@@ -129,6 +130,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F13** ✅ | 알림 · 벨(OSC 9/777·이력·패널·배지·벨 플래시·원격 폴링) | 434(메서드) | 낮음 | 2026-08-09 완료 → `app_session/notification.zig`, pub 순증 8, ABI facade 5. **이름 함정이 없던 첫 그룹** |
 | **F14** ✅ | 에이전트 관측(상태·종류·트랜스크립트 폴링, 상태줄, 스피너, 사이드바 행, 세션 재개) | 620(메서드) | 낮음 | 2026-08-09 완료 → `app_session/agent.zig`, pub 순증 24, **ABI facade 0** |
 | **F15** ✅ | git · SCM(저장소 탐지·브랜치/상태 갱신·SCM 뷰 행·diff term) | 292(메서드) | 낮음 | 2026-08-09 완료 → `app_session/git.zig`, pub 순증 3, ABI facade 0 |
+| **F16** ✅ | term · surface(생성/파괴·등록·조회·포커스·종료) | 654(메서드) | 중 | 2026-08-10 완료 → `app_session/term.zig`, pub 순증 6, ABI facade 8. **후보 55개 중 18개를 걸렀다** |
 
 > **F1과 F3를 합친 이유(2026-08-09 실측).** 문서가 둘을 나눈 기준은 **이름**이었는데 호출 관계는 한 덩어리다.
 > archive 메서드가 도크의 스크롤 앵커·인라인 상세·스모크 프로브를 부르므로, F1만 떼면 그룹 밖 non-pub
@@ -207,6 +209,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > | F13 notification | 587 | +8 |
 > | F14 agent | 611 | +24 |
 > | F15 git | 614 | +3 |
+> | F16 term | 620 | +6 |
 >
 > **원인은 test 잔류가 아니다(2026-08-09 시범 이동으로 기각).** 한때 "test가 허브에 남아 비공개
 > 헬퍼를 부르니 pub이 못 닫힌다"고 적었으나, `pane` test 101개(3,833줄)를 실제로 `pane.zig`로 옮겨
@@ -228,6 +231,27 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > 단위다.** 그룹 파일이 존재하는 것 자체의 비용이다. 다만 그 비용은 그룹마다 크게 다르다 — F9
 > settings는 +60, F11 web은 **+1**이다. 차이는 **도메인 상태가 자기 필드 안에서 닫혀 있는가**다.
 > web은 `web_panel_*`·`addr_*` 필드로 닫혀 있고, settings는 거의 모든 도메인의 값을 읽고 쓴다.
+>
+> **소유권 게이트가 파일 경계를 고정한다(F16에서 처음 부딪혔다).** `tests/boundary/imports.zig`의
+> "CR3a-1 ownership capabilities stay in their exact production boundaries"는
+> `RemoteSessionAdapter.initInPlace(`가 **`app_session.zig`에 정확히 2회** 나타나야 한다고 못박는다.
+> F16이 `ensureRestoreHostAdapter`를 옮기자 그 게이트가 깨졌다.
+>
+> **게이트를 느슨하게 하지 않고 함수를 허브에 남기는 쪽을 골랐다.** 그 게이트는 원격 세션 어댑터의
+> 초기화 권한이 어디서 행사되는지를 파일 단위로 잠그는 것이고, refactor의 부수 효과로 완화할 성질이
+> 아니다. `ensureRestoreHostAdapter`·`logRestoreAdapterInitFailure`·`backendForNew` 셋을 제외했다.
+>
+> **F16에서 자동 제외 규칙이 값을 했다.** term·surface는 `Term`·`Surface`가 거의 모든 도메인이
+> 참조하는 핵심 타입이라 이름으로 잡으면 다른 그룹의 진입점이 대량으로 딸려온다. 후보 55개 중
+> **18개**를 걸렀다 — 얇은 facade **9개는 F15에서 넣은 규칙이 손대지 않고** 잡았고(web 4·notification 1·
+> workspace 1·dock 1 등), 내용이 남의 도메인인 6개(file_panel 5·dock 1)와 소유권 게이트가 고정한
+> 3개만 사람이 판단했다.
+>
+> 그 결과 pub 순증이 **6개**다. 가장 결합이 심할 것으로 보였던 그룹이 중간 수준으로 끝났다 —
+> **경계를 정확히 잡으면 핵심 타입 도메인도 비싸지 않다.**
+>
+> 부수로 `@constCast(self).activeSurface()` 형태를 만났다. 리시버가 식별자가 아니라 **표현식**이라
+> 일반 치환이 못 잡고 컴파일 오류로 드러났다 — 치환 규칙에 `@constCast(...)` 패턴을 더했다.
 >
 > **"남의 facade" 함정이 네 번 반복됐다** — F8 `scrollToCurrentMatch`(→`find.zig`), F12 `webKeyRoute`
 > (→`web.zig`), F14 `agentSessionArchive*` 10개(→`agent_dock.zig`), F15 `scmDrawWindow`(→`dock.zig`).

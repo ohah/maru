@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
@@ -544,7 +545,7 @@ pub fn clearStaleUiTargetsForMovedTab(self: *AppSession, tab: *Tab, clear_pendin
     for (tab.panes.items) |pane| {
         pane_ops.invalidateForFreedPane(self, pane); // hovered_tab·tab_drag_pane·pane_drag_pane·rename(pane)·context_menu(pane)·hovered_slot
         for (pane.terms.items) |term| {
-            if (self.renamingTerm(term)) {
+            if (term_ops.renamingTerm(self, term)) {
                 self.rename = null;
                 self.rename_input.clear();
             }
@@ -618,7 +619,7 @@ pub fn resizeAdoptedTabAndCaptureActiveRect(self: *AppSession, tab: *Tab) void {
             const trect = pane_ops.paneTermRect(self, lr.rect);
             const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
             for (lr.leaf.terms.items) |term| {
-                self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
+                term_ops.resizeTermForLayout(self, term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
             }
             if (lr.leaf == active_pane) {
                 self.active_pane_rect = trect; // 상단 탭 바를 뺀 영역(좌표 origin) — recomputeActivePaneRect 동형
@@ -1239,7 +1240,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 continue;
             }
             persisted_index += 1;
-            self.refreshTermObservation(term, false, true);
+            term_ops.refreshTermObservation(self, term, false, true);
             const observed_size = plausibleSurfaceSize(term.rt.observation.size) orelse
                 plausibleSurfaceSize(term.surface.core.size) orelse
                 // metadata unavailable fallback; SurfaceRuntime이 현재 layout grid로 동기화. 둘 다 못 믿으면

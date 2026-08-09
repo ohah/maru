@@ -32,6 +32,7 @@ const icons = maru.icons;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 아직 그쪽 소유(이 PR 한계)
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const agent_ops = @import("agent.zig");
 const tab_ops = @import("tab.zig");
 const dock_ops = @import("dock.zig");
@@ -427,7 +428,7 @@ pub fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?Agent
         .all => unreachable,
     };
     const term = tab_ops.activeTab(self).activeTerm();
-    self.refreshTermObservation(term, false, false);
+    term_ops.refreshTermObservation(self, term, false, false);
     const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) {
         const had_observed_cwd = self.agent_session_archive_scope_observed_cwd != null;
@@ -550,7 +551,7 @@ pub fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
 
 pub fn refreshAgentSessionArchiveProjectScopeForFocus(self: *AppSession) void {
     if (!dock_ops.dockVisible(self) or self.dock.view != .agent_sessions or !self.surface_initialized) return;
-    const surface_id = self.activeSurface().id;
+    const surface_id = term_ops.activeSurface(self).id;
     if (self.agent_session_archive_project_scope_surface_id == surface_id) return;
     self.agent_session_archive_project_scope_surface_id = surface_id;
     refreshAgentSessionArchiveScopeSnapshots(self);

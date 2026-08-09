@@ -20,6 +20,7 @@ const dock_panel = maru.session.dock_panel;
 const dock_layout = maru.session.dock_layout;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
 const scroll_ops = @import("scroll.zig");
@@ -386,7 +387,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     if (view == .source_control) git_ops.refreshGitStatus(self);
     if (view == .agent_sessions) {
         agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
-        self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;
+        self.agent_session_archive_project_scope_surface_id = term_ops.activeSurface(self).id;
         agent_dock.requestAgentSessionArchiveScopeRoots(self, null);
         agent_dock.refreshAgentSessionArchive(self, false);
     }

@@ -26,6 +26,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
@@ -77,7 +78,7 @@ const PaneDropDest = AppSession.PaneDropDest;
 const PaneGeometry = AppSession.PaneGeometry;
 const pane_min_tab_cols = AppSession.pane_min_tab_cols;
 const scrollStateOf = @import("scroll.zig").scrollStateOf;
-const termHasRunningJob = AppSession.termHasRunningJob;
+const termHasRunningJob = @import("term.zig").termHasRunningJob;
 const termIsWebBrowser = @import("web.zig").termIsWebBrowser;
 const Pane = app_session_mod.Pane;
 const Tab = app_session_mod.Tab;
@@ -163,7 +164,7 @@ pub fn openFileTermInActivePane(
     };
     const term = try web_ops.createWebTerm(self, panelKindForEntryKind(kind));
     // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     // 소유권이 여기서 Term으로 넘어간다. 이후 실패 지점이 없으므로 위 errdefer들은 돌지 않는다.
     term.file_entry = entry;
@@ -263,7 +264,7 @@ pub fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface)
     const rs = restoreSpawn(self, sm);
     errdefer clearRestoreRuntimeIdentity(self);
     const cfg = self.new_tab_config;
-    return self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind)) catch |err| {
+    return term_ops.createTerm(self, rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind)) catch |err| {
         _ = try restoreFailureDisposition(err, sm.runtime_host_id.len > 0);
         clearRestoreRuntimeIdentity(self); // createTerm이 이미 소비했지만 멱등 방어
         recordEndedPlaceholder(self, true);
@@ -327,7 +328,7 @@ pub fn resizeTabPanes(self: *AppSession, tab: *Tab) void {
         const trect = paneTermRect(self, lr.rect);
         const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
         for (lr.leaf.terms.items) |term| {
-            self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
+            term_ops.resizeTermForLayout(self, term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
         }
     }
 }
@@ -347,7 +348,7 @@ pub fn createFileTermFromModel(self: *AppSession, m: maru.session.workspace.File
     };
     const term = try web_ops.createWebTerm(self, panelKindForEntryKind(m.kind));
     // 이 시점 term.file_entry는 null이라 destroyTerm이 entry를 건드리지 않는다 — 위 errdefer가 소유를 지킨다.
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     term.file_entry = entry;
     entry.surface_id = term.surfaceId();
     return term;
@@ -362,7 +363,7 @@ pub fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surfa
     pane.* = .{};
     errdefer pane.terms.deinit(self.allocator);
     const term = try createRestoredTerm(self, sm);
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     pane.active_term = 0;
     // 첫 Term(=이 surface)의 사용자 rename 복원. 실패 시 위 errdefer들이 역순으로 정리한다.
@@ -681,7 +682,7 @@ pub fn paneHasWebTerm(pane: *Pane) bool {
 
 pub fn createTermFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
     const term = try createRestoredTerm(self, sm);
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
     return term;
 }
@@ -692,7 +693,7 @@ pub fn createPaneFromFileTerm(self: *AppSession, m: maru.session.workspace.FileT
     errdefer self.allocator.destroy(pane);
     pane.* = .{};
     const term = try createFileTermFromModel(self, m);
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     return pane;
 }
@@ -823,14 +824,15 @@ pub fn newTermInActivePane(self: *AppSession) !void {
     // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
-    const term = try self.createTerm(
+    const term = try term_ops.createTerm(
+        self,
         req,
         size,
         cfg.queue_capacity,
         "Maru",
         commandName(cfg.command_kind),
     );
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
 }
@@ -902,7 +904,7 @@ pub fn splitActivePane(self: *AppSession, direction: maru.session.SplitDirection
     //    grid는 반드시 줄어든다**(resizeTermForLayout 계약) — 안 그러면 그 Term이 divider를 넘어 새 panel 위에
     //    글자를 그린다. 전달 실패는 split을 막지 않고 관측 지점에만 남긴다.
     for (active.terms.items) |term| {
-        self.resizeTermForLayout(term, a_size) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
+        term_ops.resizeTermForLayout(self, term, a_size) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
     }
 
     // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
@@ -1315,7 +1317,7 @@ pub fn resizeActiveTabPanes(self: *AppSession) !void {
             // 그걸 밖으로 전파하면 `resize()`가 `recomputeActivePaneRect`·`last_resize_size`·`metal_dirty`를
             // 스킵한 half-state로 끝난다(활성 pane의 세션이 죽어 있으면 창 크기 조정이 통째로 깨짐).
             // 대신 삼키지 않고 관측 지점에 남긴다(관측 가능성 원칙).
-            self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err);
+            term_ops.resizeTermForLayout(self, term, psize) catch |err| self.noteResizeDeliveryFailure(term, err);
         }
     }
 }
@@ -1402,8 +1404,8 @@ pub fn createPane(
     pane.* = .{};
     errdefer pane.terms.deinit(self.allocator);
 
-    const term = try self.createTerm(request, size, queue_capacity, title, command);
-    errdefer self.destroyTerm(term);
+    const term = try term_ops.createTerm(self, request, size, queue_capacity, title, command);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     pane.active_term = 0;
     return pane;
@@ -1504,7 +1506,7 @@ pub fn paneAgentKind(pane: *Pane) AgentKind {
 /// 해제 직전 구조-무효화 계약(invalidateForFreedPane)을 부른다 — 이 Pane을 가리키던 호버/드래그 포인터를 정리.**
 pub fn destroyPane(self: *AppSession, pane: *Pane) void {
     invalidateForFreedPane(self, pane); // S1: 포인터 비교는 해제 전 주소로(deref 없음) — 흩어진 null화 대체
-    for (pane.terms.items) |term| self.destroyTerm(term);
+    for (pane.terms.items) |term| term_ops.destroyTerm(self, term);
     if (pane.custom_name) |n| self.allocator.free(n); // 사용자 rename(owned) 해제
     pane.terms.deinit(self.allocator);
     self.allocator.destroy(pane);
@@ -1607,7 +1609,7 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
             const term = web_ops.createWebTerm(self, .browser) catch continue; // 실패한 record만 버린다(창은 살린다)
             term.pending_url = self.allocator.dupe(u8, bt.url) catch null;
             pane.terms.insert(self.allocator, at, term) catch {
-                self.destroyTerm(term);
+                term_ops.destroyTerm(self, term);
                 continue;
             };
             // 활성 record면 그 자리를 활성 탭으로. 아니면 삽입으로 밀린 활성 인덱스를 보정한다.
@@ -1991,7 +1993,7 @@ pub fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struc
 pub fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !u64 {
     const pane = activePane(self);
     const term = try web_ops.createWebTerm(self, panel_kind);
-    errdefer self.destroyTerm(term);
+    errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
     self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)

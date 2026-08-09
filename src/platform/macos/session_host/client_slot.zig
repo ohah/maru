@@ -10042,7 +10042,7 @@ test "C3-3a2 owner-query wrapper owns exact operation and validates the canonica
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: lease_mod.ConnectionLease = .{};
-    var owner_storage: [64]u8 = undefined;
+    var owner_storage: [64]u8 align(@alignOf(FinalAdmissionTransaction)) = undefined;
     var transport_storage: u8 = 0;
     var prepared_storage: u8 = 0;
     const reservation = try slot.reserveAttachmentBindingForTest(

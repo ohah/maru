@@ -192,12 +192,15 @@ pub const inventory = [_]Proof{
     // SV6b(오버레이 over quad를 프레임 끝에 한 덩어리로 flush)와 시각 검증용 MARU_FORCE_STICKY 훅으로 또
     // 바뀐다. count는 2 그대로다 — 더한 것은 대기 버퍼 하나와 그 flush 호출, core에 바이트를 쓰는 훅뿐이고,
     // 어느 것도 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6e266afc42005302b32e1c0f7e4fa40c13cf51625ad42b0df1f4aadebcd742bf" },
+    // web panel·인앱 브라우저를 `app_session/web.zig`로 떼어내며 또 바뀐다(F11). count는 2 그대로다 —
+    // 옮긴 블록에 `@field`가 없다. ABI가 부르는 20개는 얇은 facade로 남겼다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "50cb9ddc2b1d3ac094c39071a808b7e9dc5d650f2d776025dbd5451a8493f0be" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
     // 그대로다 — 반사 접근은 손대지 않고 import 줄만 달라졌다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "fb35e4b8985d0b16d3d22283f98ede3960a8694fada31e8e7e2497887d978ad2" },
+    // F11에서 web 함수 alias를 허브 경유 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "a20b241ac9008650b86b113717307102f82dce98692bc1ddd10a26c732ca6991" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

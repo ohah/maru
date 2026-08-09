@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const web_ops = @import("web.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
@@ -801,7 +802,7 @@ pub fn rebuildFileTermSurface(self: *AppSession, entry: *dock_panel.Entry) !void
         for (tab.panes.items) |pane| {
             for (pane.terms.items, 0..) |term, term_index| {
                 if (term.file_entry != entry) continue;
-                const replacement = try self.createWebTerm(panelKindForEntryKind(entry.kind));
+                const replacement = try web_ops.createWebTerm(self, panelKindForEntryKind(entry.kind));
                 // 소유를 먼저 떼어 destroyTerm이 entry·path까지 해제하지 않게 한다.
                 term.file_entry = null;
                 self.destroyTerm(term);
@@ -3230,7 +3231,7 @@ pub fn transferRestoredFileEntries(
     for (entries.items.items) |entry| {
         const heap = try self.allocator.create(dock_panel.Entry);
         errdefer self.allocator.destroy(heap);
-        const term = try self.createWebTerm(panelKindForEntryKind(entry.kind));
+        const term = try web_ops.createWebTerm(self, panelKindForEntryKind(entry.kind));
         heap.* = entry; // path 소유가 목록에서 heap Entry로 이동
         pending.appendAssumeCapacity(.{ .term = term, .heap = heap });
     }

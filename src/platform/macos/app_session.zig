@@ -1,4 +1,5 @@
 const std = @import("std");
+const web_ops = @import("app_session/web.zig");
 const workspace_ops = @import("app_session/workspace.zig");
 const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
@@ -182,8 +183,8 @@ const web_find_query_cap = 512;
 /// [0,3)=back·[3,6)=forward·[6,9)=reload. 렌더(buildPaneAddressBarDrawList)는 각 존 가운데 칸에 글리프를, hit-test
 /// (navButtonAt)는 x_px를 존으로 나눠 클릭 버튼을 판정 — 두 경로가 같은 두 값을 쓰므로 "보이는 버튼 == 클릭되는 버튼"이
 /// 성립한다. URL/편집 텍스트는 nav_end(=존 폭)부터 그려 버튼과 겹치지 않는다.
-const nav_button_w: u16 = 3; // 버튼당 셀 수
-const nav_button_count: u16 = 3; // back·forward·reload
+pub const nav_button_w: u16 = 3; // 버튼당 셀 수
+pub const nav_button_count: u16 = 3; // back·forward·reload
 
 /// Phase 7e-3: 주소창 nav 버튼 식별. web_nav_action_code로 마샬링(0=back·1=forward·2=reload) — ABI take와 정합.
 /// pub: 7e-4 키보드 단축키 ABI(maru_macos_app_session_browser_nav)가 code→NavButton으로 변환해 setBrowserNavAction을 부른다.
@@ -2549,6 +2550,87 @@ pub const MeasuredTextCache = struct {
 };
 
 pub const AppSession = struct {
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn activeWebSurfaceId(self: *AppSession) u64 {
+        return web_ops.activeWebSurfaceId(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn activeWebSurfaceIdAnyKind(self: *AppSession) u64 {
+        return web_ops.activeWebSurfaceIdAnyKind(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn createAdoptedWebTermInActivePane(self: *AppSession) !u64 {
+        return web_ops.createAdoptedWebTermInActivePane(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn dispatchWebAppAction(self: *AppSession, surface_id: u64, event: terminal.KeyEvent) bool {
+        return web_ops.dispatchWebAppAction(self, surface_id, event);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn hasWebSurface(self: *AppSession, surface_id: u64) bool {
+        return web_ops.hasWebSurface(self, surface_id);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
+        return web_ops.maybeDebugOpenWebPanel(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn openTerminalWebLink(self: *AppSession, url: []const u8) bool {
+        return web_ops.openTerminalWebLink(self, url);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn peekWebFindQueryLen(self: *const AppSession) ?usize {
+        return web_ops.peekWebFindQueryLen(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
+        return web_ops.provideWebFindResult(self, seq, found);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn reportWebFindUndeliverable(self: *AppSession, seq: u64) void {
+        return web_ops.reportWebFindUndeliverable(self, seq);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn setBrowserNavAction(self: *AppSession, surface_id: u64, btn: NavButton) void {
+        return web_ops.setBrowserNavAction(self, surface_id, btn);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8) void {
+        return web_ops.setWebNavState(self, surface_id, can_go_back, can_go_forward, url);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWebAddrFocusPull(self: *AppSession) ?u64 {
+        return web_ops.takeWebAddrFocusPull(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWebAddrFocusRestore(self: *AppSession) ?u64 {
+        return web_ops.takeWebAddrFocusRestore(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
+        return web_ops.takeWebAddrNavigate(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeWebFindQuery(self: *AppSession) ?WebFindRequest {
+        return web_ops.takeWebFindQuery(self);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn webKeyRoute(self: *AppSession, surface_id: u64, event: terminal.KeyEvent) config_mod.keybinding.WebKeyRoute {
+        return web_ops.webKeyRoute(self, surface_id, event);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn webNavState(self: *AppSession, surface_id: u64) ?WebNavState {
+        return web_ops.webNavState(self, surface_id);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn webSurfaceTransitionAt(self: *const AppSession, index: usize) WebSurfaceTransition {
+        return web_ops.webSurfaceTransitionAt(self, index);
+    }
+    /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn webSurfaceTransitionsCount(self: *AppSession) usize {
+        return web_ops.webSurfaceTransitionsCount(self);
+    }
+
     /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
     pub fn activeWorkspaceIndex(self: *const AppSession) ?usize {
         return workspace_ops.activeWorkspaceIndex(self);
@@ -4620,41 +4702,6 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 주소창 편집 밴드(탭 바 바로 아래)가 포인트를 포함하는가 — mouse-down 클릭-어웨이(cancelAddrEdit)가 "자기 밴드
-    /// 재클릭(caret 재배치·nav 버튼)"만 살리게 판정한다(그 외 클릭이면 false → 편집 취소). 편집 아님/밴드 없음이면 false.
-    fn addrEditBandContainsPoint(self: *AppSession, x_px: f64, y_px: f64) bool {
-        const pb = pane_ops.addrEditPaneBar(self) orelse return false;
-        const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(렌더 "1c"·클릭 ①b와 동일 소스)
-        const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
-        return layout_math.pointInRect(x_px, y_px, band);
-    }
-
-    /// 주소창 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect .addr_edit)에 쓴다. 렌더 "1c"
-    /// 와 같은 셈법: 밴드 y(full.y+bar_h) + text pad_y, caret_col은 fieldLayout(렌더 emitEditBand 단일 소스, mid-string
-    /// caret·가로 스크롤·ellipsis 반영). 극단적으로 좁은 밴드(cols≤nav_end로 text_area==0=스크롤 없음)면 fieldLayout이
-    /// caret_col을 하한만 클램프해 cols를 넘을 수 있으므로 **cols-1로 상한 클램프**(후보창이 밴드 밖에 뜨는 것 방지). 편집
-    /// surface가 활성 탭인 leaf를 못 찾거나 cell 미상이면 null(imeCursorRect가 본문 origin으로 폴백).
-    fn addrEditCaretRect(self: *AppSession) ?chrome.draw.Rect {
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
-        if (cw == 0 or ch == 0) return null;
-        const pb = pane_ops.addrEditPaneBar(self) orelse return null;
-        const cols: u32 = pb.full.w / cw;
-        if (cols == 0) return null;
-        const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)(navButtonAt·렌더 단일 소스)
-        // caret 열 = fieldLayout(렌더 emitEditBand와 **같은 단일 소스**) — mid-string caret·가로 스크롤·ellipsis 반영.
-        const lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) });
-        const caret_col: u32 = @min(lay.caret_col, cols -| 1); // 밴드 밖(cols 초과)이면 우경계로 상한 클램프
-        const bar_h = pb.full.h;
-        const text_origin_y = pb.full.y + bar_h + self.chromeBarTextOffsetY(bar_h); // 렌더 band_text_origin_y와 동일(밴드 높이 = bar_h)
-        return .{
-            .x = @intCast(pb.full.x + caret_col * cw),
-            .y = @intCast(text_origin_y),
-            .w = @intCast(cw),
-            .h = @intCast(ch),
-        };
-    }
-
     pub const FileHeaderBand = struct { band: maru.session.SplitRect, entry: *dock_panel.Entry };
 
     pub const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
@@ -4792,7 +4839,7 @@ pub const AppSession = struct {
         var wanted: usize = 0;
         var web: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
         defer web.deinit(self.allocator);
-        if (self.collectWebSurfaces(&web)) |_| {
+        if (web_ops.collectWebSurfaces(self, &web)) |_| {
             outer: for (web.items) |surface| {
                 if (surface.seam_edges == 0) continue;
                 const cr = surface.content_rect;
@@ -5095,21 +5142,6 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 이 세션 트리(모든 탭·pane)에 그 web surface_id를 가진 web Term이 존재하는지. 창 간 이동 재부모화(4e-4·web-panel §10)
-    /// 판정용 — Swift가 원본 창 web surface destroy 전이 시 "이 surface가 **다른 창** 세션에 아직 live인가"로 이동↔닫기를
-    /// 구분한다(live=이동→WKWebView 재부모화·`browser.closed` 억제, 부재=진짜 닫힘→파괴). 순수 트리 조회(할당 없음).
-    pub fn hasWebSurface(self: *AppSession, surface_id: u64) bool {
-        if (self.findTermWhere(surface_id, struct {
-            fn pred(id: u64, term: *Term) bool {
-                return term.kind == .web and term.surfaceId() == id;
-            }
-        }.pred) != null) return true;
-        if (!self.dock_initialized) return false;
-        var entry_it = file_panel_ops.fileEntries(self);
-        while (entry_it.next()) |entry| if (entry.surface_id == surface_id) return true;
-        return false;
-    }
-
     /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
     /// §7 종료 placeholder는 **후보에서 제외**한다. 묘비는 `terminated=false`로 만들어지므로 지금도 걸리지 않지만,
     /// reap은 사용자 확인 없이 Term을 닫고 마지막 Term이면 탭까지 닫으므로(closeTermAt → 캐스케이드) 복원해 놓은
@@ -5350,22 +5382,6 @@ pub const AppSession = struct {
         self.app_window.tabs = self.surface_ptrs.items;
         pane_ops.recomputeActivePaneRect(self);
         self.metal_dirty = true;
-    }
-
-    /// Phase 7f-0: 팝업(`WKUIDelegate.createWebViewWith`) adopt용 — Swift가 WebKit이 넘긴 config로 **이미 만든**
-    /// WKWebView를 붙일 browser web Term을 활성 pane에 새 탭으로 만들고 그 surface_id를 돌려준다(Swift-first 동기 생성).
-    /// `newWebTermInActivePane` 미러이되 (1) 팝업은 임의 외부 콘텐츠라 **항상 browser(비신뢰)** 이고 (2) surface_id를
-    /// 반환해 Swift가 pre-created webview를 `webPanels[surface_id]`에 키잉하게 한다(소유·시점 역전: 평소 Zig-first lazy
-    /// 생성과 반대). create 전이는 평소대로 emit되며, Swift drain이 `webPanels[surface_id]` 존재 시 중복 WKWebView 생성을
-    /// 스킵한다(7f-1) — 이 함수는 term/트리만 만든다. 실패는 호출처(ABI)가 0(sentinel)으로 접는다.
-    pub fn createAdoptedWebTermInActivePane(self: *AppSession) !u64 {
-        const pane = pane_ops.activePane(self);
-        const term = try self.createWebTerm(.browser); // 팝업 = untrusted browser 고정(§7 격리)
-        errdefer self.destroyTerm(term); // append 실패 시 방금 만든 term 롤백(newWebTermInActivePane과 동형)
-        try pane.terms.append(self.allocator, term);
-        self.focusTerm(pane.terms.items.len - 1); // 새 탭으로 포커스(사용자가 연 새 창 = 활성)
-        self.metal_dirty = true;
-        return term.surfaceId();
     }
 
     /// P2 seam(docs/persistent-session-host.md §13 P2): 이 창의 terminal runtime 계약 표면. GUI는 이 backend에
@@ -6028,7 +6044,7 @@ pub const AppSession = struct {
         };
         // Phase 7e-2a: 이 Term(web browser)을 주소창 편집 중이면 편집·관련 pending을 정리한다(stale surface_id 방지 —
         // remove가 슬롯을 해제하기 전에 surface_id로 판정). 비-web·비대상이면 무동작(surface_id 불일치 = no-op).
-        self.dropAddrEditIfSurface(term.surfaceId());
+        web_ops.dropAddrEditIfSurface(self, term.surfaceId());
         if (term.pending_url) |u| { // WP-P: 아직 로드 못 한 복원 URL(owned) 회수
             self.allocator.free(u);
             term.pending_url = null;
@@ -6084,30 +6100,6 @@ pub const AppSession = struct {
 
     pub fn notifySurfaceClosed(self: *AppSession, surface_id: u64) void {
         if (self.surface_closed_callback) |callback| callback(self.surface_closed_context, surface_id);
-    }
-
-    /// 4e-1: 한 **web Term**(WKWebView 패널의 first-class surface)을 heap-pin(`create`)으로 만든다 — registry가
-    /// LiveSurface **union web arm** 슬롯을 소유하고, 그 arm의 sentinel `Surface`(빈 core — 4e-1은 렌더/PTY 없음)를
-    /// 제자리 init한다. terminal `createTerm`과 대칭이되 **PTY spawn·attachSurface·pump가 없다**(web-panel.md §6). surface_id는
-    /// 앱 전역 `SurfaceIdAllocator` 발급(비재사용) — sentinel surface의 `id`에 실려 `Term.surface.id`가 web에서도 유효하다
-    /// (surface_ptrs·activeSurface 계약 불변). `kind`·`web_panel_kind`는 모델 Term에 저장(라벨·후속 trust 단일 출처).
-    /// Pane에 거는 건 호출자(maybeDebugOpenWebPanel·후속 command)가 한다. teardown은 `destroyTerm`이 kind로 분기.
-    pub fn createWebTerm(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !*Term {
-        const term = try self.allocator.create(Term);
-        errdefer self.allocator.destroy(term);
-        term.* = .{ .kind = .web, .web_panel_kind = panel_kind };
-
-        const id = self.surface_ids.next(); // 앱 전역 발급(비재사용) — terminal과 같은 네임스페이스, 유일
-        const slot = try self.live_registry.create(id, 0);
-        // union web arm 확정 후 sentinel surface를 제자리 init. init 실패 시 슬롯은 아직 uninit이라(surface undefined)
-        // removeUninitialized로 deinit 없이 슬롯만 해제한다(remove=web arm deinit은 surface inited 가정이라 못 씀).
-        slot.* = .{ .web = .{ .internal_allocator = self.allocator } };
-        term.surface = &slot.web.surface;
-        errdefer self.live_registry.removeUninitialized(id) catch {};
-        // sentinel: 최소 1×1 grid(빈 core, clampGridSize가 최소 보장). 렌더/PTY 없이 id·title만 실어 Term.surface를 유효화.
-        term.surface.* = try maru.session.Surface.init(self.allocator, id, .{ .cols = 1, .rows = 1 });
-        // web Term은 PTY/pump/attach 없음 — rt는 기본값(live_pty=undefined, live_initialized=false). destroyTerm이 kind로 가드.
-        return term;
     }
 
     /// surface.id로 그 surface가 속한 (탭, panel, Term)을 찾아 그 자리로 활성화한다(찾으면 true). 데스크톱 알림
@@ -6299,16 +6291,6 @@ pub const AppSession = struct {
         return false;
     }
 
-    // 닫힐 scope에 browser web term이 있나 — 브라우저 탭 닫기는 실행 중 셸 명령이 없어도(web term=live_initialized=false라
-    // termHasRunningJob=false) "닫을까요?" 확인을 띄운다(제보). running job과 병렬 게이트. markdown web term은 제외(browser만).
-    pub fn termIsWebBrowser(term: *Term) bool {
-        return isBrowserTerm(term); // 판정은 isBrowserTerm 단일 출처(중복 정의 제거)
-    }
-    fn sessionHasWebBrowser(self: *AppSession) bool {
-        for (self.tabs.items) |t| if (tab_ops.tabHasWebBrowser(t)) return true;
-        return false;
-    }
-
     /// `.pane`/`.tab` close가 Term을 파괴하기 전에, 그 범위 안의 **편집 가능한** 파일에 dirty 스냅샷을
     /// 한 번 요청한다. 스냅샷이 돌아오면 `entry.dirty`가 서고 다음 close 시도는 좁은 술어에 걸려 확인
     /// 모달로 간다.
@@ -6345,16 +6327,6 @@ pub const AppSession = struct {
             if (file_panel_ops.markFilePanelDirtySyncPending(self, entry)) requested = true;
         }
         return requested;
-    }
-
-    fn scopeHasWebBrowser(self: *AppSession, scope: CloseScope) bool {
-        return switch (scope) {
-            .none => false,
-            .term => termIsWebBrowser(pane_ops.activePane(self).activeTerm()),
-            .pane => pane_ops.paneHasWebBrowser(pane_ops.activePane(self)),
-            .tab => |idx| tab_ops.tabHasWebBrowser(self.tabs.items[idx]),
-            .session => self.sessionHasWebBrowser(),
-        };
     }
 
     /// 닫기 진입점이 실제로 무엇을 teardown하는지 cascade(Term>pane>탭>창)를 **단일 출처**로 해석한다. 판정
@@ -6424,7 +6396,7 @@ pub const AppSession = struct {
 
     /// 닫기 진입점 게이트(in-app 경로). 닫힐 대상에 실행 중 명령이 있으면 확인 모달을 띄우고 보류, 없으면 즉시 실행.
     /// 창 닫기(빨간 버튼)는 Swift 핸드셰이크가 달라 requestWindowClose가 따로 맡는다.
-    fn requestClose(self: *AppSession, target: PendingClose) void {
+    pub fn requestClose(self: *AppSession, target: PendingClose) void {
         const scope = self.resolveCloseScope(target); // cascade 단일 출처(판정·실행 공유). 아래 두 분기가 이 범위를 함께 쓴다.
         if (scope == .session and file_panel_ops.blockSessionExitForFilePanels(self)) return;
         // FP16: 파일이 pane 탭이 되면서 term/pane/tab scope도 파일 Term을 파괴할 수 있다. 보호 상태 파일이 있으면
@@ -6459,7 +6431,7 @@ pub const AppSession = struct {
                 .window => "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
                 else => "실행 중인 명령이 있습니다. 닫을까요?",
             }, target);
-        } else if (self.scopeHasWebBrowser(scope)) {
+        } else if (web_ops.scopeHasWebBrowser(self, scope)) {
             // 브라우저 탭 닫기 확인(제보): web browser term은 실행 중 셸 명령이 없어(live_initialized=false) 위 게이트를
             // 안 타 조용히 닫혔다. 열린 웹 페이지 = 잃을 수 있는 상태라 running job과 병렬로 "닫을까요?"를 띄운다. accept는
             // 같은 pending_close→executeClose 경로.
@@ -8289,8 +8261,8 @@ pub const AppSession = struct {
             .toggle_find => self.toggleFind(),
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
             // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
-            .find_next => if (self.activeWebSurfaceIdAnyKind() != 0) self.submitWebFind(false) else self.findNavigate(true),
-            .find_previous => if (self.activeWebSurfaceIdAnyKind() != 0) self.submitWebFind(true) else self.findNavigate(false),
+            .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),
+            .find_previous => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, true) else self.findNavigate(false),
             // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
             // 보폭은 고정 1pt(font_size_step 상수). ⌘0 reset은 보폭과 무관하게 base_font_size로 복귀.
             .increase_font_size => self.adjustFontSize(font_size_step),
@@ -8924,27 +8896,6 @@ pub const AppSession = struct {
                 }
             } else |_| {}
         }
-    }
-
-    /// 4e-1 시각/모델 확인 디버그 훅 — MARU_WEB_PANEL=1 env가 설정됐고 surface가 준비됐으면 활성 pane에 web **Term**
-    /// 하나를 만들어 append한다(한 번만). 4c는 이 훅이 활성 pane 본문에 오버레이 WKWebView(app_session.web_panel)를
-    /// 붙였으나, 4e-1은 §6대로 web surface를 **트리의 Term**으로 만든다(4e-2/3 fixture용 — 4e-5서 command 승격). env
-    /// 미설정이면 무동작(표준 macos-app-smoke는 env 미설정이라 이 훅 무동작 = 터미널 빌드 byte-identical). MARU_WEB_PANEL_MARKDOWN=1이면
-    /// markdown, 아니면 browser로 kind를 정한다(라벨·후속 trust 파생).
-    ///
-    /// **[4e-2] 활성 탭으로 전환**: append 후 `focusTerm`으로 web Term을 활성화한다 — 4e-2가 활성 render 경로를
-    /// activeTermIsTerminal/activeTerminalSurface로 gate했으므로 활성 web은 sentinel core를 만지지 않고 본문 blank·
-    /// 크래시 0이다(§6). **[4e-3] WKWebView 부착**: computeWebSurfaceTransitions가 이 web Term을 walk해 create 전이를
-    /// 내면 Swift가 자기 pane 본문 rect에 인라인 흰 HTML WKWebView를 붙인다(about:blank는 다크 모드서 다크로 렌더돼 명시 흰 배경 사용; 그전엔 theme 배경으로 비어 보였다).
-    pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
-        if (self.debug_web_term_opened) return;
-        if (!self.surface_initialized) return;
-        if (std.c.getenv("MARU_WEB_PANEL") == null) return;
-        const kind: web_panel_layout.PanelKind = if (std.c.getenv("MARU_WEB_PANEL_MARKDOWN") != null) .markdown else .browser;
-        // web Term 생성의 create→append→focus 시퀀스(+append 실패 errdefer 롤백)는 newWebTermInActivePane 단일
-        // 출처에 위임한다. 실패면 debug 플래그를 안 세워 다음 tick 재시도한다(pane은 errdefer로 불변).
-        pane_ops.newWebTermInActivePane(self, kind) catch return;
-        self.debug_web_term_opened = true;
     }
 
     pub const FilePanelOpenPathResult = enum(u32) {
@@ -9926,13 +9877,6 @@ pub const AppSession = struct {
         return file_panel_ops.readOpenedFile(self, gpa, file);
     }
 
-    /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
-    /// content view의 backing 높이(backing_height_px)를 y-flip 기준으로 쓴다(§3 — OS 타이틀바 포함 전체 창이 아니라
-    /// pane rect가 사는 그 좌표 공간의 높이).
-    fn webFramePt(self: *const AppSession, rect_px: maru.session.SplitRect) web_panel_layout.RectPt {
-        return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
-    }
-
     // ── 파일 entry 접근 (FP16b 선행 — docs/file-panel.md §10 B-1) ─────────────────────────────────
     //
     // 이 창에 **열린 파일 entry 집합**을 묻는 유일한 창구다. 저장소는 이제 `Term.file_entry`다(FP16b 완료) —
@@ -10356,475 +10300,15 @@ pub const AppSession = struct {
         }
     };
 
-    fn webSurfacesPresent(self: *AppSession) bool {
-        return workspace_ops.windowHasWebTerm(self) or file_panel_ops.dockHasLiveSurface(self);
-    }
-
-    /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
-    /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
-    /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). **비활성 워크스페이스 탭의 web Term도
-    /// 집합에 남는다** — zero rect + `visible=false`로(FP16c, 아래 두 번째 루프). 집합에서 빠지면 surfaceDiff가
-    /// destroyed를 내고 Swift가 WKWebView를 파괴해 미저장 CM6 버퍼가 사라지기 때문이다(docs/file-panel.md §4).
-    /// OOM/미초기화면 error(호출자가 prev 불변 유지).
-    fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
-        if (self.surface_initialized and self.tabs.items.len > 0) {
-            self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)
-            try tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
-            const bar_h = pane_ops.paneBarHeightPx(self);
-            const dt = pane_ops.dividerThicknessPx(self);
-            // seam inset: WKWebView는 native NSView라 자기 frame 안 클릭을 **삼킨다**(터미널처럼 mouse handler가
-            // dividerAtPoint를 먼저 가로챌 수 없다) → 형제 pane과 맞닿는 seam 가장자리서 divider를 **물리적으로 노출**해야
-            // 마우스가 seam에 닿아 드래그 리사이즈된다(web-panel.md §5). 이전 `dt/2`는 기본 dt=1px에서 **0**이라 아무 효과
-            // 없었다(세로·가로 divider가 안 잡히던 회귀 — [4e review 0] 재수정). `divider.hitTest` 허용폭
-            // (chrome/components/divider.zig: cell/2+2)이 넉넉해 divider 선 밖 아주 작은 밴드만 있으면 보이는 선을 겨냥해
-            // 잡히므로, gap을 **최소화**한다 — divider 선(dt) + 1pt 클릭 여유(scale 인지)만 들인다(사용자 요청: 공백 최대 축소).
-            // dt==0(divider 숨김)이면 seam=0(무-inset, 웹뷰가 seam까지 채움).
-            const seam: u32 = if (dt == 0) 0 else dt + @max(@as(u32, 1), self.scale_milli / 1000);
-            const tr = self.termRect();
-            const dg = dock_ops.dockGeometry(self);
-            for (self.web_leaf_rects_scratch.items) |lr| {
-                for (lr.leaf.terms.items, 0..) |term, i| {
-                    if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
-                    // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam** → seam만큼 본문 rect를 들여
-                    // WKWebView가 분할선을 덮지 않게 한다(작은 시각 gap). top seam은 탭 바(bar_h ≫ seam)가 이미 덮으므로 불요.
-                    // seam_edges 비트마스크(L=1·R=2·B=4)를 함께 실어 Swift가 그 가장자리 근처 클릭/hover를 통과시키게 한다
-                    // (넓은 grab 폭 — 시각 gap과 분리). left/right는 x축, bottom은 top-left px 기준 아래(y 큰 쪽).
-                    // **`seam > 0`으로 게이트**: divider 숨김(split.divider-thickness=0 → seam=0)이면 잡을 divider가 없어
-                    // inset도 seam_edges도 0으로 둔다 — 안 그러면 Swift hitTest가 잡을 것 없는 가장자리서 클릭을 헛통과한다
-                    // (10차 review 기각 항목이나 정합상 게이트). seam==0이라 inset.left=seam이 0이어도 비트는 안 세운다.
-                    // 7e-1b: browser(비신뢰) 웹 패널은 탭 바 바로 아래에 읽기전용 주소창 밴드(현재 URL)를 두므로 top inset을
-                    // bar_h + addr_h로 늘려 WKWebView 본문을 그만큼 더 내린다 → 밴드 영역이 웹뷰에서 비워지고, 탭 바 collect
-                    // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
-                    // addr_h는 탭 바 높이(paneBarHeightPx) 재사용 — 단일 소스, 별도 상수 없음. markdown web Term은 주소창이
-                    // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
-                    // FP16d: 파일 Term도 탭 바 아래 헤더 밴드(breadcrumb + 모드 선택기)를 갖는다 — browser의
-                    // 주소창 밴드와 **같은 경로**로 top inset을 한 줄 더 내린다(§3.1).
-                    const addr_h: u32 = if (isBrowserTerm(term) or term.file_entry != null) bar_h else 0;
-                    var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
-                    var seam_edges: u8 = 0;
-                    if (seam > 0 and lr.rect.x > tr.x) {
-                        inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
-                        seam_edges |= 1;
-                    }
-                    const at_right_dock = dock_ops.dockVisible(self) and self.dock.side == .right and
-                        lr.rect.x + lr.rect.w == tr.x + tr.w and dg.divider.w > 0;
-                    if (seam > 0 and (lr.rect.x + lr.rect.w < tr.x + tr.w or at_right_dock)) {
-                        inset.right = seam; // 오른쪽 세로 divider
-                        seam_edges |= 2;
-                    }
-                    const at_bottom_dock = dock_ops.dockVisible(self) and self.dock.side == .bottom and
-                        lr.rect.y + lr.rect.h == tr.y + tr.h and dg.divider.h > 0;
-                    if (seam > 0 and (lr.rect.y + lr.rect.h < tr.y + tr.h or at_bottom_dock)) {
-                        inset.bottom = seam; // 아래 가로 divider
-                        seam_edges |= 4;
-                    }
-                    const content_rect = layout_math.insetRect(web_panel_layout.contentRect(lr.rect, inset), self.window_padding_px);
-                    var grab_bands: web_panel_layout.DividerGrabBandsPt = .{};
-                    if ((seam_edges & 1) != 0) {
-                        grab_bands.left = pane_ops.dividerBandPt(self, content_rect, pane_ops.paneDividerTarget(self, lr.rect, .left), .left);
-                    }
-                    if ((seam_edges & 2) != 0) {
-                        const target = if (at_right_dock)
-                            pane_ops.dividerTargetRect(dock_layout.outerDividerHitRect(dg, .right, pane_ops.dockDividerGrabBandPx(self)))
-                        else
-                            pane_ops.paneDividerTarget(self, lr.rect, .right);
-                        grab_bands.right = pane_ops.dividerBandPt(self, content_rect, target, .right);
-                    }
-                    if ((seam_edges & 4) != 0) {
-                        const target = if (at_bottom_dock)
-                            pane_ops.dividerTargetRect(dock_layout.outerDividerHitRect(dg, .bottom, pane_ops.dockDividerGrabBandPx(self)))
-                        else
-                            pane_ops.paneDividerTarget(self, lr.rect, .bottom);
-                        grab_bands.bottom = pane_ops.dividerBandPt(self, content_rect, target, .bottom);
-                    }
-                    try out.append(self.allocator, .{
-                        .surface_id = term.surfaceId(),
-                        .panel_kind = term.web_panel_kind,
-                        .seam_edges = seam_edges,
-                        .divider_grab_bands_pt = grab_bands,
-                        .content_rect = content_rect,
-                        // AppKit은 mouse-down을 받은 Metal view에 drag/up을 계속 전달한다. 따라서 도크 resize 중에도
-                        // WKWebView를 숨길 필요 없이 surfaceDiff의 reframe으로 라이브 추종할 수 있다.
-                        .visible = i == lr.leaf.active_term,
-                    });
-                }
-            }
-        }
-
-        // FP16c: 비활성 워크스페이스(탭)의 web Term도 집합에 남긴다 — zero rect + hidden. 집합에서 빠지면
-        // surfaceDiff가 destroyed를 내고 Swift가 WKWebView를 파괴해 **미저장 CM6 버퍼가 사라진다**. 도크 분기가
-        // 이미 쓰던 "존재는 유지, 가시성만 끔" 패턴을 워크스페이스 경로로 옮긴 것이다(§4). 적용 범위는 파일뿐
-        // 아니라 web Term 전체라, 브라우저가 전환 뒤 흰 페이지가 되던 결함도 함께 사라진다.
-        if (self.surface_initialized) {
-            for (self.tabs.items, 0..) |tab, ti| {
-                if (ti == self.app_window.active_tab) continue;
-                for (tab.panes.items) |pane| {
-                    for (pane.terms.items) |term| {
-                        if (term.kind != .web) continue;
-                        try out.append(self.allocator, .{
-                            .surface_id = term.surfaceId(),
-                            .panel_kind = term.web_panel_kind,
-                            .seam_edges = 0,
-                            .divider_grab_bands_pt = .{},
-                            .content_rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-                            .visible = false,
-                        });
-                    }
-                }
-            }
-        }
-
-        // FP16: 도크는 **탐색기 전용**이라 WKWebView를 하나도 소유하지 않는다(트리는 전부 GPU 셀 chrome).
-        // 파일 surface는 위 pane walk가 낸다 — 옛 도크 분기와 그에 딸린 도크-aware destroy/presence 예외는 삭제했다.
-
-        // Phase 7e-1a: 이번 tick 활성 탭 web surface 집합(out)에 없는 nav 상태 키를 제거한다 — surface 닫힘/이동/비활성
-        // 탭 이동 시 소유 url 메모리가 세션 끝까지 새지 않게(id는 앱 전역 비재사용이라 stale 오인은 없으나 소유 자원은
-        // 즉시 회수). 흔한 경우 stale 0이라 바깥 while은 1회(스캔서 못 찾으면 break). fetchRemove로 iterator 무효화 없이
-        // 한 건씩 지운다(스캔→break→제거→재스캔). web surface·nav 상태 수는 소수라 O(n·m) 비용 무해.
-        while (self.web_nav_states.count() > 0) {
-            var stale: ?u64 = null;
-            var it = self.web_nav_states.keyIterator();
-            scan: while (it.next()) |key_ptr| {
-                const sid = key_ptr.*;
-                for (out.items) |s| {
-                    if (s.surface_id == sid) continue :scan; // 이번 tick 존재 → 유지
-                }
-                stale = sid; // out에 없음 → 제거 대상
-                break :scan;
-            }
-            const sid = stale orelse break;
-            if (self.web_nav_states.fetchRemove(sid)) |kv| self.allocator.free(kv.value.url);
-        }
-    }
-
-    /// Phase 7e-1a: browser 웹 패널의 WKWebView nav 상태를 per-surface로 upsert한다(Swift KVO → set_web_nav_state ABI).
-    /// 기존 엔트리가 있으면 옛 url을 free하고 새 url을 dup해 교체한다. url dup 또는 맵 성장이 OOM이면 조용히 무시한다
-    /// (nav 상태는 best-effort 표시용 — 실패해도 옛 상태 유지, 크래시 없음). 저장·정책은 Zig 단일 출처.
-    pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8) void {
-        const dup = self.allocator.dupe(u8, url) catch return; // OOM: 상태 미갱신(조용히 무시)
-        const gop = self.web_nav_states.getOrPut(self.allocator, surface_id) catch {
-            self.allocator.free(dup); // 맵 성장 OOM: dup 회수 후 미갱신
-            return;
-        };
-        if (gop.found_existing) {
-            // 값이 실제로 바뀐 tick에만 재렌더 요청 — 주소창 밴드(url)·nav 버튼 활성색(can_go_*)이 이 상태를 소비하므로,
-            // 링크 이동으로 URL/히스토리가 바뀌면 metal_dirty를 세워야 주소창이 갱신된다("이동해도 주소 안 바뀜" 수정).
-            // KVO push는 navStateDirty로 throttle돼 핫루프는 아니지만, 무변화 push(같은 값 재관측)는 재렌더 안 한다.
-            const changed = gop.value_ptr.can_go_back != can_go_back or
-                gop.value_ptr.can_go_forward != can_go_forward or
-                !std.mem.eql(u8, gop.value_ptr.url, url);
-            self.allocator.free(gop.value_ptr.url); // 옛 url 해제 후 교체
-            if (changed) self.metal_dirty = true;
-        } else {
-            self.metal_dirty = true; // 새 상태 = 첫 주소 표시 → 재렌더
-        }
-        gop.value_ptr.* = .{ .can_go_back = can_go_back, .can_go_forward = can_go_forward, .url = dup };
-    }
-
-    /// Phase 7e-1a: surface_id의 저장된 nav 상태(없으면 null). 반환 url 슬라이스는 맵 소유로 다음 mutation까지 유효
-    /// (ABI getter가 즉시 out 버퍼로 복사). 7e-1b 주소창 소비.
-    pub fn webNavState(self: *AppSession, surface_id: u64) ?WebNavState {
-        return self.web_nav_states.get(surface_id);
-    }
-
-    /// Phase 7e-4 후속: 활성 pane의 활성 term이 browser web이면 그 surface_id, 아니면 0. browser nav 단축키
-    /// (⌘←/→/R)를 **키보드 포커스(WKWebView firstResponder) 유무와 무관하게** "지금 활성 탭이 browser면" 동작하게
-    /// 게이트하는 데 쓴다(탭만 열어 보기만 해도 되게 — 브라우저 탭 활성화 시 webView에 자동 포커스를 안 주므로
-    /// isWebPanelFocused만으론 놓친다). split의 비활성 pane 브라우저는 활성 pane이 아니라 0을 반환해 걸러진다.
-    /// 0은 유효 surface_id가 아니므로(1부터 발급) sentinel로 안전.
-    pub fn activeWebSurfaceId(self: *AppSession) u64 {
-        const term = pane_ops.activePane(self).activeTerm();
-        return if (isBrowserTerm(term)) term.surfaceId() else 0;
-    }
-
-    pub fn isBrowserTerm(term: *const Term) bool {
-        // **파일 entry 제외가 여기 있다**(FP16 §8). `.html`/`.pdf` 파일 Term은 격리 config를 쓰려고
-        // `web_panel_kind == .browser`를 갖게 되는데, 그렇다고 browser 기능(주소창 밴드·nav 단축키·URL 편집·
-        // 터미널 링크 착지)이 걸리면 로컬 HTML 파일 뷰가 브라우저처럼 동작한다. PR #1638이 판정 8곳을 이 함수
-        // 하나로 모아 둔 목적이 정확히 이 한 줄을 한 곳에만 넣기 위해서였다.
-        return term.kind == .web and term.file_entry == null and term.web_panel_kind == .browser;
-    }
-
-    /// 지금 **화면에 보이는** browser 패널의 surface_id(없으면 0). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의
-    /// 브라우저에 링크를 띄우면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다. 활성 pane의 browser를 먼저
-    /// 고른다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름이 가장 흔하다). 여럿이면 이 순서의 첫 번째.
-    fn visibleBrowserSurfaceId(self: *AppSession) u64 {
-        const active = self.activeWebSurfaceId();
-        if (active != 0) return active;
-        for (tab_ops.activeTab(self).panes.items) |pane| {
-            const term = pane.activeTerm();
-            if (isBrowserTerm(term)) return term.surfaceId();
-        }
-        return 0;
-    }
-
-    /// 터미널 화면에서 (수식키)+클릭한 **웹 링크(http/https)** 를 `input.link-open-target` 정책대로 연다.
-    /// 인앱(browser 패널)으로 열기로 정했으면 pending action을 세우고 `true`, 시스템 브라우저로 보내야 하면
-    /// `false`를 돌려준다(호출처인 Swift `handleUrlClick`이 `NSWorkspace.open`으로 그 자리에서 연다).
-    ///
-    /// 규칙(docs/link-detection.md §링크를 어디에 여는가):
-    ///  1. `system`이면 false(이전 동작 그대로).
-    ///  2. http/https 리터럴이 아니면 false — 파일 경로·`mailto:`·`ssh://`는 브라우저 패널에 실을 대상이 아니다.
-    ///     검증기는 파일 패널 외부 링크와 **같은** `isExplicitHttpLink`를 공유한다(허용 스킴 판정 단일 출처).
-    ///  3. 보이는 browser 패널이 있으면 그 패널에 띄운다(auto·in-app 공통).
-    ///  4. 없을 때: `auto`(기본)는 false(시스템) — 링크 하나로 탭이 늘어나는 놀람을 피한다. `in-app`은 **새 browser
-    ///     Term을 열어** 그곳에 띄운다(파일 패널 `in-app`과 같은 `appendWebTermInActivePane`).
-    ///
-    /// **왜 즉시 반환이 아니라 pending인가**: 새로 만든 browser Term의 WKWebView는 **다음 tick의 surface 전이
-    /// batch**에서 생성된다. 클릭 시점에 surface_id를 돌려줘도 Swift `webPanels`에는 아직 없어 load가 유실된다.
-    /// 그래서 파일 패널 외부 링크와 **같은 pending 경로**(`takeExternalLinkAction`)를 쓴다 — Swift가 매 tick 전이
-    /// batch를 적용한 **뒤** drain하므로 "생성 → navigate" 순서가 구조적으로 보장된다. 기존 패널 재사용도 같은
-    /// 경로로 보내 분기를 하나로 유지한다(한 tick 지연은 최대 ~16ms).
-    pub fn openTerminalWebLink(self: *AppSession, url: []const u8) bool {
-        const target = self.loaded_config.config.input.link_open_target;
-        if (target == .system) return false;
-        if (!file_panel_bridge.isExplicitHttpLink(url)) return false;
-        // **호출 계약**: `urlAt`이 비어 있지 않은 URL을 돌려준 뒤에만 불린다(Swift handleUrlClick). 그 경로가 이미
-        // surface_initialized와 활성 탭 존재를 통과했으므로 여기서 다시 방어하지 않는다(프로젝트 규칙 "헛방어 금지").
-        const visible = self.visibleBrowserSurfaceId();
-        const surface_id = if (visible != 0) visible else switch (target) {
-            .auto => return false, // 보이는 패널이 없으면 시스템 — auto는 탭을 새로 만들지 않는다
-            // in-app: 없으면 새로 연다. 실패(OOM 등)는 링크를 삼키는 대신 시스템 브라우저로 폴백한다.
-            .in_app => pane_ops.appendWebTermInActivePane(self, .browser) catch return false,
-            .system => unreachable, // 위에서 이미 걸렀다
-        };
-        // 직전 요청이 아직 drain되지 않았으면(같은 tick 안 연타) 이번 클릭은 시스템으로 보낸다 — URL을 덮어써
-        // 앞 요청을 잃거나 목적지 없는 빈 탭을 남기지 않는다(파일 패널 LinkBusy와 같은 규율이되, 터미널 클릭은
-        // 조용히 무시하는 것보다 시스템에서라도 열어 주는 편이 낫다).
-        self.queueExternalLinkAction(url, surface_id) catch return false;
-        return true;
-    }
-
-    /// Phase 4g-0: 활성 pane의 활성 term이 **web term(browser·markdown 무관)** 이면 그 surface_id, 아니면 0. focus-sync
-    /// 불변식(§4.1)의 Direction 1이 "활성 pane이 web이면 그 webview를 firstResponder로" 하려고 쓴다 —
-    /// `activeWebSurfaceId`(browser 전용)와 달리 **markdown web term도 포함**한다(둘 다 WKWebView라 포커스 대상).
-    /// Swift가 surface_id→webPanels로 webview를 조회한다. terminal 활성이면 0(→터미널 뷰 포커스). 0=유효 id 아님(1부터).
-    pub fn activeWebSurfaceIdAnyKind(self: *AppSession) u64 {
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.kind == .web) return term.surfaceId();
-        return 0;
-    }
-
-    /// Phase 7e-3/7e-4: browser 주소창 nav 버튼(back/forward/reload)을 눌러(밴드 클릭 ①b 또는 키보드 단축키 ABI) 이
-    /// surface의 nav action을 세운다 — **활성 버튼일 때만**(back=can_go_back·forward=can_go_forward·reload=항상). 활성이면
-    /// 1회성 pending(surface_id + code 0=back·1=forward·2=reload)을 세우고 metal_dirty. Swift가 매 tick takeWebNavAction으로
-    /// drain해 BrowserControl.goBack/goForward/reload를 실행한다. 클릭(①b)과 키보드(ABI browser_nav)가 이 단일 정책을
-    /// 공유해 "보이는 활성 == 실행되는 액션"이 두 경로에서 동일하다(활성 판정 중복 제거).
-    pub fn setBrowserNavAction(self: *AppSession, surface_id: u64, btn: NavButton) void {
-        const nav_state = self.webNavState(surface_id);
-        const active = switch (btn) {
-            .back => if (nav_state) |st| st.can_go_back else false,
-            .forward => if (nav_state) |st| st.can_go_forward else false,
-            .reload => true, // reload = 항상 활성
-        };
-        if (!active) return; // 비활성 버튼은 no-op(클릭은 소비하되 pending 안 세움 — 호출처가 소비)
-        self.web_nav_action_pending = surface_id;
-        self.web_nav_action_code = switch (btn) {
-            .back => 0,
-            .forward => 1,
-            .reload => 2,
-        };
-        self.metal_dirty = true;
-    }
-
     // ── Phase 7e-2a: browser 웹 패널 주소창 편집 상태·라우팅·신호(정책·상태=Zig, 실행=7e-2b Swift) ──────────────
     // 아래 상태 전이 메서드(enter/append/backspace/commit/cancel)는 **순수하게 addr_edit·pending 필드만** 만진다
     // (metal_dirty·resetCursorBlink 같은 시각 부수효과는 호출처=handleKeyEvent 래퍼/클릭 핸들러가 세운다). 그래야
     // 헤드리스 테스트가 최소-셋업 세션(그 필드만 init)으로 흐름을 검증할 수 있다(handleRenameKey는 시각까지 하지만,
     // 여긴 순수 코어와 시각을 분리해 이식성·테스트성을 확보).
 
-    /// 편집 진입(밴드 클릭). 현재 URL을 초기 버퍼로 시드(UTF-8 경계 절단) + focus-pull pending 세움(키 포커스를 WKWebView
-    /// 에서 뺏어 타이핑이 주소창으로 오게 — 7e-2b Swift가 실행). 이미 편집 중이면 대상을 교체한다(한 번에 하나).
-    fn enterAddrEdit(self: *AppSession, surface_id: u64, current_url: []const u8) void {
-        self.addr_field.setText(self.allocator, current_url) catch self.addr_field.clear(); // 현재 URL 시드(caret=끝)·OOM이면 빈 편집
-        self.addr_edit = surface_id;
-        self.addr_focus_pull_pending = surface_id;
-    }
-
-    /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다(파일 내부 전용, ABI export는
-    /// terminal_owns_input으로 대체돼 더는 pub 아님).
-    pub fn addrEditSurfaceId(self: *const AppSession) ?u64 {
-        return self.addr_edit;
-    }
-
-    /// 현재 편집 확정 텍스트(TextField text, 없으면 빈). 렌더가 URL 대신 이걸(+preedit) 그린다.
-    fn addrEditText(self: *const AppSession) []const u8 {
-        return self.addr_field.text.items;
-    }
-    /// IME 조합 중(preedit) 텍스트 — 렌더가 caret 위치에 겹쳐 조합 중 글자를 보인다(fieldLayout run).
-    fn addrEditPreedit(self: *const AppSession) []const u8 {
-        return self.addr_field.preedit.items;
-    }
-
-    fn addrEditAppend(self: *AppSession, cp: u21) void {
-        if (self.addr_edit == null) return;
-        self.addr_field.insertCp(self.allocator, cp) catch {}; // caret에 삽입(선택 있으면 대체) — 동적 버퍼, OOM이면 무시
-    }
-
-    fn addrEditBackspace(self: *AppSession) void {
-        if (self.addr_edit == null) return;
-        self.addr_field.deleteBackward(); // caret 앞 그래핌 하나(선택 있으면 선택 삭제)
-    }
-
     /// 슬라이스 3: 주소창 URL 단어 구분자(더블클릭·⌥이동 — 컴포넌트에 주입하는 정책). URL 구조 경계(scheme·host·path·
     /// query)를 단어로 끊어 더블클릭이 세그먼트를 잡게 한다. 공백은 TextField가 항상 구분자로 친다.
-    const addr_word_separators = "/:.?&#=@~";
-
-    /// 슬라이스 3: 밴드 클릭 x_px → text 바이트 오프셋(fieldLayout 역함수 caretAtColumn — 렌더 emitEditBand와 같은 단일
-    /// 소스라 그려진 caret == 클릭 caret). 클릭 열은 셀 경계로 반올림(좌반=글자 앞·우반=글자 뒤). 밴드 밖 x는 caretAtColumn이
-    /// 창 경계로 clamp(드래그가 밴드를 벗어나면 시작/끝 방향으로 확장). cw==0이면 현재 caret 유지.
-    fn addrBandOffsetAt(self: *const AppSession, pb: PaneBar, x_px: f64) usize {
-        const cw = self.cell_width_px;
-        if (cw == 0) return self.addr_field.caret;
-        const cols: u32 = pb.full.w / cw;
-        const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
-        const rel = (x_px - @as(f64, @floatFromInt(pb.full.x))) / @as(f64, @floatFromInt(cw));
-        const click_col: i32 = if (rel < 0) 0 else @intFromFloat(@round(rel));
-        return chrome.components.text_field.caretAtColumn(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) }, click_col);
-    }
-
-    /// 슬라이스 3: 편집 중 주소창 밴드 마우스 — 드래그 선택(kind 2/3 캡처)·더블클릭 단어(4)·트리플클릭 전체(5). down(1)의
-    /// caret 배치·드래그 시작은 클릭 핸들러 ①b가 한다(여기선 false 반환). 소비했으면 true(호출자 return). 드래그는 밴드를
-    /// 벗어나도 addr_dragging으로 캡처를 유지한다(스크롤바 드래그와 동형·포커스 불변식 §5.1). 편집 아니면 밴드 없음 → false.
-    fn addrBandMouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64) bool {
-        const pb = pane_ops.addrEditPaneBar(self) orelse return false;
-        const cw = self.cell_width_px;
-        if (cw == 0) return false;
-        const bar_h = pb.full.h;
-        const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
-        const nav_end_x: f64 = @floatFromInt(pb.full.x + @as(u32, nav_button_count) * nav_button_w * cw); // URL 존 시작 px(버튼 존 뒤)
-        const in_url_zone = layout_math.pointInRect(x_px, y_px, band) and x_px >= nav_end_x;
-        switch (kind) {
-            2 => { // drag → 선택 확장(anchor=down 지점, focus=현재). 밴드 밖이면 clamp된 경계로.
-                if (!self.pointerGestureIs(.address_selection)) return false;
-                self.addr_field.selectTo(self.addrBandOffsetAt(pb, x_px));
-                self.metal_dirty = true;
-                return true;
-            },
-            3 => { // up → 드래그 종료.
-                if (!self.pointerGestureIs(.address_selection)) return false;
-                self.finishPointerGesture();
-                return true;
-            },
-            4 => { // 더블클릭 → 단어 선택(URL 존만).
-                if (!in_url_zone) return false;
-                self.addr_field.selectWordAt(self.addrBandOffsetAt(pb, x_px), addr_word_separators);
-                self.metal_dirty = true;
-                return true;
-            },
-            5 => { // 트리플클릭 → 전체 선택(URL 존만 — 더블클릭과 동일 게이트라 nav 버튼 존 트리플클릭이 전체선택 안 하게).
-                if (!in_url_zone) return false;
-                self.addr_field.selectAll();
-                self.metal_dirty = true;
-                return true;
-            },
-            else => return false, // down(1)은 ①b가 처리(caret 배치·드래그 시작)
-        }
-    }
-
-    /// Enter — 편집 텍스트(query)를 resolveNavUrl로 검증. 유효(허용 스킴/프리픽스 가능)하면 navigate pending(surface_id +
-    /// resolved url)을 세우고 편집을 종료(addr_field.clear)+focus-restore를 세운다. **무효(null)면 로드하지 않고 편집을
-    /// 그대로 유지**한다(clear·focus-restore 안 함) — 조용히 지워 무시하지 않고 사용자가 고쳐 재-Enter하거나 Esc로 취소하게
-    /// 한다(제보 "잘못된 주소가 그냥 무시됨"). 상세는 아래 else 분기 주석 참조.
-    fn commitAddrEdit(self: *AppSession) void {
-        if (self.addr_edit) |sid| {
-            // query(편집)에서 읽어 addr_navigate_url_buf(별도 세션 필드)로 쓴다 — aliasing 없음. resolved는 그 버퍼 슬라이스라
-            // 아래 clear/null 후에도 유효(url 바이트는 세션 필드에 남음).
-            if (maru.session.app_scheme.resolveNavUrl(self.addr_field.text.items, &self.addr_navigate_url_buf)) |resolved| {
-                self.addr_navigate_url_len = resolved.len;
-                self.addr_navigate_pending = sid;
-                self.addr_edit = null;
-                self.addr_field.clear();
-                if (self.pointerGestureIs(.address_selection)) self.finishPointerGesture();
-                self.addr_focus_restore_pending = sid;
-            }
-            // else: 잘못된 주소(허용 스킴 아님 — file://·javascript:// 등, 또는 빈 입력). **편집을 유지**한다 — 입력을 지우고
-            // 조용히 종료하지 않아(제보 "그냥 무시 당함") 사용자가 고쳐 다시 Enter하거나 Esc로 취소하게 한다. (bare 도메인은
-            // resolveNavUrl이 https:// 프리픽스로 대부분 통과하므로 여기 걸리는 건 명시적 미허용 스킴·빈 입력뿐.)
-        }
-    }
-
-    /// 편집만 종료(로드 안 함). navigate는 안 세운다. `restore_focus`면 focus-restore pending(→webView) —
-    /// **Esc는 true**(편집 취소 후 브라우저로 복귀), **클릭-어웨이는 false**: 클릭한 target(터미널·다른 pane)이 포커스를
-    /// 정하므로 webView로 되돌리면 터미널을 클릭했는데 포커스가 브라우저로 튄다(제보). false면 focus-pull로 이미 터미널
-    /// 뷰에 있는 firstResponder를 그대로 둬 클릭 처리(focusPaneByPtr 등)가 목표 pane을 포커스한다.
-    fn cancelAddrEdit(self: *AppSession, restore_focus: bool) void {
-        if (self.addr_edit) |sid| {
-            if (restore_focus) self.addr_focus_restore_pending = sid;
-            self.addr_edit = null;
-            self.addr_field.clear();
-            if (self.pointerGestureIs(.address_selection)) self.finishPointerGesture();
-        }
-    }
-
-    /// teardown 훅 — surface_id가 편집 대상이면 편집·관련 pending을 정리한다(stale surface_id 방지). web Term이 닫히거나
-    /// (destroyTerm) 이동할 때 부른다. navigate/restore pending은 이미 종료된 편집의 잔재일 수 있어 대상 일치 시 함께 비운다.
-    fn dropAddrEditIfSurface(self: *AppSession, surface_id: u64) void {
-        if (self.addr_edit) |sid| if (sid == surface_id) {
-            self.addr_edit = null;
-            self.addr_field.clear();
-            if (self.pointerGestureIs(.address_selection)) self.finishPointerGesture();
-        };
-        if (self.addr_focus_pull_pending) |sid| {
-            if (sid == surface_id) self.addr_focus_pull_pending = null;
-        }
-        if (self.addr_navigate_pending) |sid| {
-            if (sid == surface_id) self.addr_navigate_pending = null;
-        }
-        if (self.addr_focus_restore_pending) |sid| {
-            if (sid == surface_id) self.addr_focus_restore_pending = null;
-        }
-        // Phase 7e-3: nav 버튼 클릭 pending도 대상 일치 시 비운다(이미 세워진 채 surface가 닫히면 stale surface_id 방지).
-        if (self.web_nav_action_pending) |sid| {
-            if (sid == surface_id) self.web_nav_action_pending = null;
-        }
-    }
-
-    /// 편집 활성 중 키 처리(handleKeyEvent 래퍼가 호출 — 활성이면 모든 키 소비). handleRenameKey 동형: Enter=확정·
-    /// Esc=취소·Backspace=삭제·평문 글자=추가, 모디파이어 조합·기타 키(↑↓ 등)는 무시(편집기 유지). 시각(metal_dirty·
-    /// blink)은 래퍼가 세운다(순수 코어 분리). IME 조합은 inputFocus=.addr_edit 라우팅으로 addr_field.setPreedit가 처리한다.
-    fn handleAddrEditKey(self: *AppSession, ev: chrome.input.InputEvent) void {
-        switch (ev) {
-            .key => |k| switch (k.key) {
-                .escape => self.cancelAddrEdit(true), // Esc = 편집 취소 후 브라우저(webView)로 포커스 복귀
-                .enter => self.commitAddrEdit(),
-                // 슬라이스 4: caret 이동/선택([key-input-and-shortcuts.md] macOS 줄 편집 정합). shift=선택 확장·option=단어·
-                // command=줄 시작/끝(⌘←/→ — Key enum에 home/end 없어 command+화살표로). Key enum에 delete(⌦)·home·end가
-                // 없어 그 키는 아직 미지원(백스페이스·⌘←/→가 커버).
-                .left => {
-                    if (k.mods.command) self.addr_field.moveHome(k.mods.shift) // ⌘← = 줄 시작(⇧면 선택)
-                    else if (k.mods.option) self.addr_field.moveWordLeft(addr_word_separators, k.mods.shift) // ⌥← = 단어
-                    else self.addr_field.moveLeft(k.mods.shift); // ← / ⇧←
-                },
-                .right => {
-                    if (k.mods.command) self.addr_field.moveEnd(k.mods.shift) // ⌘→ = 줄 끝
-                    else if (k.mods.option) self.addr_field.moveWordRight(addr_word_separators, k.mods.shift) else self.addr_field.moveRight(k.mods.shift);
-                },
-                .backspace => {
-                    if (k.mods.command) self.addr_field.deleteToLineStart() // ⌘⌫ = 줄 시작까지 삭제(macOS deleteToBeginningOfLine)
-                    else if (k.mods.option) self.addr_field.deleteWordBackward(addr_word_separators) // ⌥⌫ = 단어 삭제
-                    else self.addrEditBackspace();
-                },
-                .char => {
-                    if (k.mods.command and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.selectAll(); // ⌘A 전체 선택
-                    if (k.mods.command and (k.codepoint == 'x' or k.codepoint == 'X')) return self.addrEditCut(); // ⌘X 잘라내기(⌘C/⌘V는 Swift가 인터셉트)
-                    if (k.mods.control and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.moveHome(k.mods.shift); // ⌃A 줄 시작(emacs)
-                    if (k.mods.control and (k.codepoint == 'e' or k.codepoint == 'E')) return self.addr_field.moveEnd(k.mods.shift); // ⌃E 줄 끝
-                    if (k.mods.command or k.mods.control or k.mods.option) return; // 그 외 단축키 조합은 편집기에 안 쌓음
-                    self.addrEditAppend(k.codepoint);
-                },
-                .up, .down, .tab, .other => {}, // 무시(편집기 유지)
-            },
-            .pointer => {}, // 주소창 편집기는 포인터를 안 받는다(밴드 클릭 진입은 mouse-down 핸들러가 처리).
-        }
-    }
-
-    /// 편집 진입 시 세운 focus-pull 신호를 drain(1회성). 7e-2b Swift가 매 tick take해 키 포커스를 WKWebView에서 뗀다.
-    pub fn takeWebAddrFocusPull(self: *AppSession) ?u64 {
-        const v = self.addr_focus_pull_pending;
-        self.addr_focus_pull_pending = null;
-        return v;
-    }
+    pub const addr_word_separators = "/:.?&#=@~";
 
     /// commit이 세운 navigate 신호를 drain(1회성). url은 세션 소유 버퍼(addr_navigate_url_buf) 슬라이스라 drain 시 유효
     /// (다음 commit까지 — 7e-2b ABI getter가 즉시 out으로 복사). null=이번 tick 로드할 것 없음.
@@ -10834,51 +10318,6 @@ pub const AppSession = struct {
     /// 다시 본다) — 그래야 `created` 전에 navigate가 나가 유실되지 않는다. 사용자 입력(commit)이 항상 우선이다.
     pub const WebNavigateRequest = struct { surface_id: u64, url: []const u8 };
 
-    pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
-        if (self.addr_navigate_pending) |sid| {
-            self.addr_navigate_pending = null;
-            return .{ .surface_id = sid, .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
-        }
-        return self.takeRestoredBrowserNavigate();
-    }
-
-    /// 복원된 브라우저 하나의 `pending_url`을 소비해 navigate 신호로 바꾼다(WP-P). URL을 세션 버퍼로 옮겨 담아
-    /// 반환 슬라이스 수명을 주소창 경로와 **같게** 맞춘다(호출자가 즉시 복사한다는 계약 공유).
-    fn takeRestoredBrowserNavigate(self: *AppSession) ?WebNavigateRequest {
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    const url = term.pending_url orelse continue;
-                    if (url.len == 0 or url.len > addr_nav_url_cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
-                        self.allocator.free(url);
-                        term.pending_url = null;
-                        continue;
-                    }
-                    // WKWebView가 아직 없으면(created 전) 다음 tick에 다시 본다 — 지금 보내면 Swift가 버린다.
-                    // `web_panel_prev`는 **직전 tick에 Swift로 나간 집합**이므로 여기 있으면 created가 이미 나갔다.
-                    const present = blk: {
-                        for (self.web_panel_prev.items) |p| if (p.surface_id == term.surfaceId()) break :blk true;
-                        break :blk false;
-                    };
-                    if (!present) continue;
-                    @memcpy(self.addr_navigate_url_buf[0..url.len], url);
-                    self.addr_navigate_url_len = url.len;
-                    self.allocator.free(url);
-                    term.pending_url = null;
-                    return .{ .surface_id = term.surfaceId(), .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
-                }
-            }
-        }
-        return null;
-    }
-
-    /// commit/cancel이 세운 focus-restore 신호를 drain(1회성). 7e-2b Swift가 키 포커스를 대상 WKWebView로 되돌린다.
-    pub fn takeWebAddrFocusRestore(self: *AppSession) ?u64 {
-        const v = self.addr_focus_restore_pending;
-        self.addr_focus_restore_pending = null;
-        return v;
-    }
-
     /// Phase 7e-3: nav 버튼(back/forward/reload) 클릭 신호를 drain(1회성). null=이번 tick 없음. 7e-3 Swift가 code에 따라
     /// BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView)를 실행한다. code: 0=back·1=forward·2=reload.
     pub fn takeWebNavAction(self: *AppSession) ?struct { surface_id: u64, code: u8 } {
@@ -10887,62 +10326,6 @@ pub const AppSession = struct {
             return .{ .surface_id = sid, .code = self.web_nav_action_code };
         }
         return null;
-    }
-
-    /// 4a `surfaceDiff` 결과를 self.web_surface_transitions batch로 marshaling한다(§6 전이 열거). created는 visible을
-    /// 실어 Swift가 hidden 생성 여부를 알게 하고, show/reframe은 함의상 보임(visible=true), destroy/hide는 surface_id만.
-    fn marshalWebTransitions(self: *AppSession, diff: *web_panel_layout.SurfaceDiff) !void {
-        for (diff.destroyed.items) |sid| // 먼저 파괴(id 비재사용이라 create와 충돌 없지만 명료성).
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .destroy, .surface_id = sid });
-        for (diff.created.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = s.visible, .seam_edges = s.seam_edges, .divider_grab_bands_pt = s.divider_grab_bands_pt, .frame_pt = self.webFramePt(s.content_rect) });
-        for (diff.hidden.items) |sid|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .hide, .surface_id = sid });
-        for (diff.shown.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .divider_grab_bands_pt = s.divider_grab_bands_pt, .frame_pt = self.webFramePt(s.content_rect) });
-        for (diff.reframed.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .divider_grab_bands_pt = s.divider_grab_bands_pt, .frame_pt = self.webFramePt(s.content_rect) });
-    }
-
-    /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 self.web_surface_transitions에 채운다(§6·§10 4e-3).
-    /// **4a 세 순수함수를 전부 소비**한다: ① `contentRect`(per-pane 본문 rect) ② `surfaceDiff`(prev 집합↔cur 집합
-    /// 전이) ③ `pxTopLeftToPtBottomLeft`(webFramePt, 전이가 실을 본문 rect → WKWebView frame). prev를 cur로 전진시켜
-    /// (Swift가 batch를 적용한다는 전제) 다음 tick이 무변경이면 batch가 빈다(§10 "diff 있을 때만 sync"). 원자성: cur
-    /// 수집·marshal 중 OOM이면 transitions를 비우고 prev도 **안 전진**해 다음 tick이 같은 상태로 재시도한다(부분 적용 없음).
-    fn computeWebSurfaceTransitions(self: *AppSession) void {
-        self.web_surface_transitions.clearRetainingCapacity(); // FP16에서 LRU를 제거했으므로 상한에 의한 해제는 없다(§1 불변식).
-
-        // 영속 scratch 재사용(매 tick fresh 할당 회피). collect 실패(OOM/미초기화)면 batch 빔·prev 불변(재시도) —
-        // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
-        self.web_cur_scratch.clearRetainingCapacity();
-        self.collectWebSurfaces(&self.web_cur_scratch) catch return;
-
-        var diff = web_panel_layout.surfaceDiff(self.allocator, self.web_panel_prev.items, self.web_cur_scratch.items) catch return;
-        defer diff.deinit(self.allocator);
-
-        self.marshalWebTransitions(&diff) catch {
-            self.web_surface_transitions.clearRetainingCapacity(); // 부분 marshal 롤백, prev 불변(원자성).
-            return;
-        };
-
-        // prev ↔ cur: 스토리지 swap(할당 0, marshal이 필요 값을 이미 복사). swap 후 web_panel_prev는 이번 tick cur를
-        // 들어 다음 tick diff 기준이 되고, web_cur_scratch는 옛 prev 버퍼를 들어 다음 tick clearRetainingCapacity로 재사용된다.
-        // 둘 다 세션 deinit이 정확히 한 번씩 해제한다(distinct 스토리지라 double-free/leak 없음).
-        std.mem.swap(std.ArrayList(web_panel_layout.SurfaceLayout), &self.web_panel_prev, &self.web_cur_scratch);
-    }
-
-    /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 개수를 돌려준다(command_catalog식 count+at). Swift가
-    /// tick당 **정확히 한 번** 호출해(계산·prev 전진이 여기서 일어난다) count를 받고, `webSurfaceTransitionAt`로 각
-    /// 전이를 읽어 dict의 WKWebView에 적용한다. 계산이 count에 있는 이유: prev 전진이 tick당 1회여야 하기 때문이다.
-    pub fn webSurfaceTransitionsCount(self: *AppSession) usize {
-        self.computeWebSurfaceTransitions();
-        return self.web_surface_transitions.items.len;
-    }
-
-    /// index번째 전이(webSurfaceTransitionsCount 이후 같은 tick 유효). 범위 밖이면 op=none(무동작).
-    pub fn webSurfaceTransitionAt(self: *const AppSession, index: usize) WebSurfaceTransition {
-        if (index >= self.web_surface_transitions.items.len) return .{ .op = .none };
-        return self.web_surface_transitions.items[index];
     }
 
     /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와
@@ -12097,14 +11480,6 @@ pub const AppSession = struct {
     /// web이 실행할 메뉴 동작(선택에 붙은 것). Swift가 tick마다 drain해 그 surface의 web에 이벤트로 전달한다.
     pub const FileMenuAction = struct { surface_id: u64, item: content_menu.Item };
 
-    /// 지난 tick 레이아웃에서 그 web surface의 본문 rect(backing px). 아직 한 번도 배치되지 않았으면 null이다.
-    pub fn webSurfaceRect(self: *AppSession, surface_id: u64) ?web_panel_layout.Rect {
-        for (self.web_panel_prev.items) |layout| {
-            if (layout.surface_id == surface_id) return layout.content_rect;
-        }
-        return null;
-    }
-
     /// OS 클립보드 1회성 동작을 drain한다(있으면 그 동작, 비우고). Swift가 매 tick 호출해 copy/paste를 실행한다(F2-5).
     pub fn takeClipboardAction(self: *AppSession) ClipboardAction {
         const action = self.pending_clipboard_action;
@@ -12129,13 +11504,13 @@ pub const AppSession = struct {
             .find_close => self.find_matches.clearRetainingCapacity(), // find.hide는 컴포넌트가 이미 — 하이라이트만 정리
             // 웹 탭이면 페이지의 다음/이전 매치로(같은 조작, 다른 대상). 방향은 컴포넌트가 기록한 nav_forward —
             // 페이지 모드는 매치 리스트가 없어 `current`가 안 움직이므로 그것으로는 방향을 알 수 없다.
-            .find_navigated => if (self.activeWebSurfaceIdAnyKind() != 0)
-                self.submitWebFind(!self.chrome_host.find.nav_forward)
+            .find_navigated => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0)
+                web_ops.submitWebFind(self, !self.chrome_host.find.nav_forward)
             else
                 self.scrollToCurrentMatch(),
             // 웹 탭이면 스크롤백을 다시 훑지 않고 페이지 검색을 낸다(같은 입력, 다른 대상).
-            .find_query_changed => if (self.activeWebSurfaceIdAnyKind() != 0)
-                self.submitWebFind(false)
+            .find_query_changed => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0)
+                web_ops.submitWebFind(self, false)
             else
                 self.recomputeFind(),
             .palette_close => {}, // palette.hide는 컴포넌트가 이미 — platform 부수효과 없음
@@ -12684,7 +12059,7 @@ pub const AppSession = struct {
     /// key-down 처리의 공통 종결부 — 요약을 상태에서 다시 쓰고 이벤트 종류를 key_down으로 확정한다.
     /// `handleKeyEvent`의 라우팅 분기는 20개가 넘는데 전부 이 두 줄로 끝나므로, 한 분기만 빠뜨려도
     /// 그 경로의 요약이 이전 이벤트 값을 물고 나간다. 종결을 한 곳에 모아 그 실수를 구조적으로 막는다.
-    fn settleKeyEventSummary(self: *AppSession) void {
+    pub fn settleKeyEventSummary(self: *AppSession) void {
         self.writeSummaryFromState();
         self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
     }
@@ -12777,11 +12152,11 @@ pub const AppSession = struct {
                 else => false,
             };
             if (is_shortcut_chord) {
-                self.cancelAddrEdit(false); // 단축키가 포커스/컨텍스트를 정하므로 focus-restore 안 함(클릭-어웨이와 동일)
+                web_ops.cancelAddrEdit(self, false); // 단축키가 포커스/컨텍스트를 정하므로 focus-restore 안 함(클릭-어웨이와 동일)
                 self.metal_dirty = true;
                 // fall through — 아래 sidebar_search/모달/keybinding 경로가 이 단축키를 실행한다.
             } else {
-                self.handleAddrEditKey(ie);
+                web_ops.handleAddrEditKey(self, ie);
                 self.resetCursorBlink();
                 self.metal_dirty = true;
                 return self.keyConsumedByApp(); // 주소창 편집(앱)이 소비
@@ -13047,83 +12422,7 @@ pub const AppSession = struct {
         return self.last_summary;
     }
 
-    /// 웹 패널 포커스 중 Swift performKeyEquivalent가 같은 resolver의 typed provenance를 **side-effect 없이** 묻는다.
-    /// 사용자 app rebind, explicit unbind/terminal macro consume, editable WebKit default, built-in app action 순서를
-    /// 보존하며 PTY write·상태 변경은 0이다. app_action은 Swift가 범용 handleKeyDown에 재진입시키지 않고 아래
-    /// dispatchWebAppAction으로 직접 실행해 terminal copy/paste·scroll·macro 전처리를 우회한다.
-    fn webContextIsEditable(self: *AppSession, surface_id: u64) bool {
-        return if (self.dock_initialized)
-            if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry|
-                entry.kind.usesEditorBridge() and entry.mode.isEditable()
-            else
-                false
-        else
-            false;
-    }
-
-    pub fn webKeyRoute(self: *AppSession, surface_id: u64, event: terminal.KeyEvent) config_mod.keybinding.WebKeyRoute {
-        return self.loaded_config.keyBindingResolver().resolveWeb(event, self.webContextIsEditable(surface_id));
-    }
-
-    const WebAppActionSource = enum { file_panel, workspace_browser };
-
-    /// WebKeyRoute 조회 뒤 실제 dispatch까지 살아 있는 **active WebView capability**를 다시 증명한다. dock entry
-    /// 존재만으로는 background tab/retired WKWebView를 허용하지 않고, workspace 쪽도 active Term이 browser인 경우만
-    /// 받는다. 모든 app action이 이 한 gate를 지나므로 사용자 rebind된 destructive action도 provenance를 우회하지 못한다.
-    fn webAppActionSource(self: *AppSession, surface_id: u64) ?WebAppActionSource {
-        if (surface_id == 0) return null;
-        if (self.dock_initialized) {
-            if (file_panel_ops.fileEntryForSurfaceId(self, surface_id)) |entry| {
-                if (entry.surface_id != surface_id) return null;
-                // 옛 "그 entry가 group의 active여야 한다"는 capability 재증명의 FP16판. 배경 탭·비활성
-                // 파일 Term의 늦은 WKWebView 키 이벤트가 보이지 않는 surface 기준으로 app action을
-                // 실행하지 못하게 막는다(code-review max).
-                if (!file_panel_ops.fileSurfaceIsVisible(self, surface_id)) return null;
-                return .file_panel;
-            }
-        }
-        if (!self.surface_initialized) return null;
-        const term = pane_ops.activePane(self).activeTerm();
-        if (!termIsWebBrowser(term) or term.surfaceId() != surface_id) return null;
-        if (self.activeSurface().id != surface_id or !self.ownsSurface(surface_id)) return null;
-        return .workspace_browser;
-    }
-
-    /// WebKeyRoute.app_action 실행 전용 경로. Swift terminal key 전처리를 다시 타지 않고 같은 resolver가 돌려준
-    /// Action을 직접 dispatch한다. route 조회 뒤 config가 바뀌었으면 현재 resolver가 app action일 때만 실행한다.
-    pub fn dispatchWebAppAction(self: *AppSession, surface_id: u64, event: terminal.KeyEvent) bool {
-        const source = self.webAppActionSource(surface_id) orelse return false;
-        const action = self.loaded_config.keyBindingResolver().resolveWebAppAction(event, self.webContextIsEditable(surface_id)) orelse return false;
-        if (action == .close_focused) {
-            // 실제 NSEvent를 받은 WebView surface가 이 dispatch의 최신 provenance다. route 조회와 같은 main-actor
-            // 이벤트 안에서도 stale/hidden surface를 방어하고, 별도 FocusOwner를 재읽어 terminal을 닫지 않는다.
-            if (source == .file_panel) {
-                // 실제 NSEvent source를 먼저 공용 native-focus funnel로 logical owner에 반영한다. 이후 dirty
-                // sync/save가 늦게 끝나기 전에 사용자가 다른 곳을 focus하면 그 최신 owner가 close successor보다 이긴다.
-                if (!self.focusFilePanelSurface(surface_id)) return false;
-                file_panel_ops.requestFilePanelClose(self, surface_id);
-            } else {
-                // 실제 NSEvent source가 workspace browser이므로 stale dock owner/publish barrier를 먼저 버린다.
-                // WebView에서 Metal successor로 responder를 넘겨야 하므로 logical owner 정합뿐 아니라 native
-                // one-shot도 함께 요청한다. confirm을 취소해 browser가 남아도 다음 키의 SSOT는 workspace다.
-                workspace_ops.focusWorkspaceInput(self);
-                self.workspace_focus_pending = true;
-                self.requestClose(.term_or_pane);
-            }
-        } else if (action == .close_term) {
-            // 명시적 사용자 바인딩 호환 action이지만 terminal 전용이다. 파일 WebView에서는 resolver가 반환해도
-            // consume-only no-op이고, active browser capability에서만 workspace cascade를 허용한다.
-            if (source != .workspace_browser) return false;
-            workspace_ops.focusWorkspaceInput(self);
-            self.workspace_focus_pending = true;
-            self.requestClose(.term_or_pane);
-        } else {
-            self.dispatchAppAction(action);
-        }
-        self.total_app_key_events += 1;
-        self.settleKeyEventSummary();
-        return true;
-    }
+    pub const WebAppActionSource = enum { file_panel, workspace_browser };
 
     /// macOS Option을 Meta로 쓰는지(config input.option-as-meta 캐시). Swift keyDown이 ABI로 읽어 Option-단독 키를
     /// 입력기 조합 경로로 보낼지(false=조합, true=meta 인코딩) 가른다. config reload로 갱신되는 라이브 값.
@@ -13675,8 +12974,8 @@ pub const AppSession = struct {
         // 안 친 URL로 튀어 놀람). 단 편집 중인 그 밴드 재클릭(caret 재배치·nav 버튼)은 유지 — 아래 ①b 밴드 핸들러가 URL 존
         // 재클릭이면 draft 보존·버튼이면 nav action으로 처리하게 양보한다(addrEditBandContainsPoint가 자기 밴드면 true → 취소
         // 안 함). rename 인터셉트가 안 풀려 모든 키가 보이지 않는 편집기로 가던 하이재킹 수정(리뷰 [1]).
-        if (kind == 1 and self.addr_edit != null and !self.addrEditBandContainsPoint(x_px, y_px)) {
-            self.cancelAddrEdit(false); // 클릭-어웨이 = focus-restore 안 함(클릭한 target이 포커스 소유 — 터미널 클릭인데 webView로 튀는 것 방지, 제보)
+        if (kind == 1 and self.addr_edit != null and !web_ops.addrEditBandContainsPoint(self, x_px, y_px)) {
+            web_ops.cancelAddrEdit(self, false); // 클릭-어웨이 = focus-restore 안 함(클릭한 target이 포커스 소유 — 터미널 클릭인데 webView로 튀는 것 방지, 제보)
             self.metal_dirty = true;
         }
         // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 밖이면 닫는다(다른
@@ -13862,7 +13161,7 @@ pub const AppSession = struct {
         }
         // 슬라이스 3: 주소창 편집 밴드 드래그 선택(2/3 캡처)·더블클릭 단어(4)·트리플 전체(5) — 스크롤바 드래그와 같은 조기
         // 캡처(down(1) caret 배치·드래그 시작은 아래 ①b가). 편집 중일 때만. 소비하면 여기서 끝(터미널 선택/사이드바로 안 샘).
-        if (self.addr_edit != null and self.addrBandMouse(kind, x_px, y_px)) return;
+        if (self.addr_edit != null and web_ops.addrBandMouse(self, kind, x_px, y_px)) return;
         // 접힘 상태 좌상단 알림 종(🔔) 클릭 → 알림 패널(◧ 펼치기보다 먼저 — 별개 영역, 접힘에도 알림 유지).
         if (kind == 1) {
             if (self.collapsedNotificationRect()) |r| {
@@ -14215,7 +13514,7 @@ pub const AppSession = struct {
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
-                        if (isBrowserTerm(addr_term)) {
+                        if (web_ops.isBrowserTerm(addr_term)) {
                             const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(7e-1b addr_bar_h와 동일 소스)
                             const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
                             if (layout_math.pointInRect(x_px, y_px, band)) {
@@ -14224,21 +13523,21 @@ pub const AppSession = struct {
                                 // 보이는 버튼 == 클릭되는 버튼. 활성 판정·pending 세움은 setBrowserNavAction 단일 정책(키보드 단축키 7e-4와
                                 // 공유) — 비활성 버튼은 no-op(클릭만 소비, 편집 진입 안 함).
                                 if (navButtonAt(x_px, band.x, self.cell_width_px)) |btn| {
-                                    self.setBrowserNavAction(addr_term.surfaceId(), btn);
+                                    web_ops.setBrowserNavAction(self, addr_term.surfaceId(), btn);
                                     self.drag_autoscroll = 0;
                                     self.mouse_drag_selecting = false;
                                     return;
                                 }
                                 // URL 존 클릭 → 편집 진입/재배치. 편집 아님/다른 대상이면 현재 nav URL로 새 편집 진입. 슬라이스 3:
                                 // 이미 편집 중이어도 **클릭 위치에 caret 재배치**(caretAtColumn)하고, 드래그 선택을 arm한다(addr_dragging).
-                                const already = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
+                                const already = if (web_ops.addrEditSurfaceId(self)) |sid| sid == addr_term.surfaceId() else false;
                                 if (!already) {
-                                    const cur_url: []const u8 = if (self.webNavState(addr_term.surfaceId())) |st| st.url else "";
-                                    self.enterAddrEdit(addr_term.surfaceId(), cur_url);
+                                    const cur_url: []const u8 = if (web_ops.webNavState(self, addr_term.surfaceId())) |st| st.url else "";
+                                    web_ops.enterAddrEdit(self, addr_term.surfaceId(), cur_url);
                                     self.resetCursorBlink();
                                 }
                                 // 클릭 위치에 caret(선택 해제) + 드래그 선택 시작(이어지는 drag(2)가 selectTo, up(3)이 종료).
-                                self.addr_field.caret = self.addrBandOffsetAt(pb, x_px);
+                                self.addr_field.caret = web_ops.addrBandOffsetAt(self, pb, x_px);
                                 self.addr_field.clearSelection();
                                 self.beginPointerGesture(.address_selection);
                                 self.metal_dirty = true;
@@ -14907,7 +14206,7 @@ pub const AppSession = struct {
             // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
             // 렌더 "1c"와 같은 밴드·nav_end·편집폭 셈법으로 위치 단일 소스). null이면(밴드 못 찾음) 아래 폴백. web term 활성 중
             // (activeTermIsTerminal=false) 본문 origin 폴백은 caret과 어긋나므로 이 rect가 필요하다(리뷰 [4]).
-            .addr_edit => self.addrEditCaretRect(),
+            .addr_edit => web_ops.addrEditCaretRect(self),
             .terminal => null,
         };
         if (overlay_caret) |r| {
@@ -15313,7 +14612,7 @@ pub const AppSession = struct {
         // 현재 ⌘V가 Swift에서 이 경로(pastePasteboardText→sendPasteText→paste_text)로 오는데, web Term은 PTY가 없어
         // 소멸하던 것을 필드로 라우팅(§5.3). 개행은 strip(단일행 URL). paste protection(submitPaste) 우회 = 직접 삽입.
         if (self.addr_edit != null) {
-            self.addrEditPaste(bytes);
+            web_ops.addrEditPaste(self, bytes);
             self.metal_dirty = true;
             return;
         }
@@ -15328,47 +14627,6 @@ pub const AppSession = struct {
     /// PTY로 입력이 새지 않게" 하는 같은 규율이고, 한쪽만 고치면 다른 쪽이 트리의 Enter를 훔친다(code-review).
     fn structuralInputOwner(self: *const AppSession) bool {
         return file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
-    }
-
-    /// 슬라이스 4: ⌘X 잘라내기 — 선택 바이트를 **먼저 클립보드-쓰기 큐에 캡처**한 뒤 선택을 지운다(cut 표준: 바이트를 넘기지
-    /// "지금 선택을 복사해"가 아니라 → 비동기 순서 문제 없음). Swift가 pendingClipboard drain에서 그 바이트를 NSPasteboard에
-    /// 쓴다(OSC52 write와 같은 경로 — 새 ABI 불요). 편집 아님/선택 없음/OOM이면 무동작(선택 보존).
-    fn addrEditCut(self: *AppSession) void {
-        if (self.addr_edit == null) return;
-        const sel = self.addr_field.selection orelse return;
-        const slice = self.addr_field.text.items[sel.lo()..sel.hi()];
-        if (slice.len == 0) return;
-        const captured = self.allocator.dupe(u8, slice) catch return; // OOM이면 cut 안 함(선택 보존)
-        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
-        self.chrome_clipboard_write = captured; // Swift가 다음 tick pendingClipboard drain에서 NSPasteboard에 씀
-        _ = self.addr_field.deleteSelection();
-    }
-
-    /// 슬라이스 4: 클립보드 텍스트를 주소창 편집 필드에 삽입(⌘V) — 위생 처리 후 caret에 insertText(선택 있으면 대체).
-    /// 편집 아님이면 무동작. 큰 붙여넣기도 URL이라 상한 없이 그대로(필드는 동적 버퍼). 위생 처리(리뷰 #3·#7):
-    ///  - **모든 C0 제어문자(<0x20)·DEL(0x7F) 제거** — 단일행 URL 오염 방지(옛 코드는 \r\n\0\t만 걸러 ESC·FF·VT 등이 샜다).
-    ///  - **유효 UTF-8만 삽입**(손상 바이트 skip) — addr_field.text를 항상 유효 UTF-8로 유지해 displayCols(바이트-폴백)와
-    ///    emitEditBand(codepoint 폭)가 어긋나 caret/선택/hit-test가 밀리는 것을 막는다.
-    fn addrEditPaste(self: *AppSession, bytes: []const u8) void {
-        if (self.addr_edit == null) return;
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(self.allocator);
-        buf.ensureTotalCapacity(self.allocator, bytes.len) catch return;
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
-                i += 1; // 손상 lead 바이트 skip
-                continue;
-            };
-            if (i + n > bytes.len) break; // 잘린 멀티바이트(끝) — 버린다
-            const cp = std.unicode.utf8Decode(bytes[i .. i + n]) catch {
-                i += 1; // 손상 시퀀스 skip
-                continue;
-            };
-            if (cp >= 0x20 and cp != 0x7F) buf.appendSlice(self.allocator, bytes[i .. i + n]) catch return; // C0·DEL 제외
-            i += n;
-        }
-        if (buf.items.len > 0) self.addr_field.insertText(self.allocator, buf.items) catch {};
     }
 
     /// pasteText의 **대상 명시** 변형. 대상 surface id를 받아 그 surface에 붙인다 — 원격(ssh) 업로드처럼 드롭
@@ -15633,7 +14891,7 @@ pub const AppSession = struct {
         // 경로에서 이미 고쳤던 "rename 하이재킹"과 같은 상태 — code-review). 주소창 편집도 같다.
         if (self.rename != null) settings_ops.commitRename(self); // 포커스 상실 = 확정(docs/tabs-splits-layout.md)
         if (self.addr_edit != null) {
-            self.cancelAddrEdit(false); // 클릭-어웨이와 같은 취소(현재 URL 복원) — focus-restore 안 함
+            web_ops.cancelAddrEdit(self, false); // 클릭-어웨이와 같은 취소(현재 URL 복원) — focus-restore 안 함
             self.metal_dirty = true;
         }
         if (!pane_ops.focusPaneByPtr(self, pane)) return .not_applicable;
@@ -17061,78 +16319,9 @@ pub const AppSession = struct {
         return pending;
     }
 
-    /// 세팅 window.background-image 행 활성으로 파일 선택창 요청이 대기 중인지 — 1회성 drain(Swift가 매 tick 호출,
-    /// 1이면 NSOpenPanel을 연다). take_bell과 같은 패턴. (배경 이미지 파일 선택 — 사용자 요청)
-    /// 웹 탭 페이지 내 찾기 질의를 낸다(§8 슬라이스 ②). 활성 web 탭이 없으면 무동작.
-    /// 매 호출이 새 `seq`를 달아 **늦게 오는 이전 회신을 무효로** 만든다.
-    fn submitWebFind(self: *AppSession, backwards: bool) void {
-        const sid = self.activeWebSurfaceIdAnyKind();
-        if (sid == 0) return;
-        if (self.chrome_host.find.input.query.items.len == 0) {
-            // 빈 질의는 보내지 않는다 — WebKit이 뭘 찾을지 정의되지 않고, 하이라이트만 흔든다.
-            self.web_find_pending = null;
-            self.web_find_last_surface = 0;
-            self.chrome_host.find.page_found = null; // 검색한 것이 없으니 찾음/없음도 없다
-            return;
-        }
-        const q = self.chrome_host.find.input.query.items;
-        if (q.len > self.web_find_query_buf.len) return; // 상한 초과는 제출하지 않는다(잘라 보내지 않는다)
-        @memcpy(self.web_find_query_buf[0..q.len], q);
-        self.web_find_query_len = q.len;
-        self.web_find_seq +%= 1;
-        self.web_find_last_surface = sid;
-        self.web_find_pending = .{ .seq = self.web_find_seq, .surface_id = sid, .backwards = backwards };
-        self.metal_dirty = true;
-    }
-
     /// Swift가 걷어 간다(1회성). 없으면 null. 질의는 세션 소유 버퍼 슬라이스라 다음 제출 전까지 유효하다
     /// (ABI getter가 즉시 out으로 복사한다 — `takeWebAddrNavigate`와 같은 계약).
     pub const WebFindRequest = struct { seq: u64, surface_id: u64, backwards: bool, query: []const u8 };
-
-    /// 소비하지 않고 길이만 본다 — ABI가 out 용량을 **소비 전에** 검사하려고 쓴다(못 담을 질의를 삼키면
-    /// 검색이 조용히 죽는다).
-    pub fn peekWebFindQueryLen(self: *const AppSession) ?usize {
-        if (self.web_find_pending == null) return null;
-        return self.web_find_query_len;
-    }
-
-    pub fn takeWebFindQuery(self: *AppSession) ?WebFindRequest {
-        const p = self.web_find_pending orelse return null;
-        self.web_find_pending = null;
-        return .{
-            .seq = p.seq,
-            .surface_id = p.surface_id,
-            .backwards = p.backwards,
-            .query = self.web_find_query_buf[0..self.web_find_query_len],
-        };
-    }
-
-    /// Swift가 `WKWebView.find` 결과를 돌려준다.
-    ///
-    /// **늦은 회신은 버린다**: seq가 현재 것과 다르면 그 사이 새 질의가 나갔다는 뜻이고, 오버레이가 닫혔거나
-    /// 활성 탭이 웹이 아니면 반영할 화면 자체가 없다(docs/web-panel.md §8 "비동기 수명").
-    /// Swift가 **전달하지 못했다**고 신고한다(그 surface의 WKWebView가 아직 없음). 걷어 간 질의를 그냥 버리면
-    /// `web_find_last_surface`가 "보냈다"로 남아 tick이 영영 재시도하지 않는다 — 검색이 조용히 죽는 경로다.
-    /// 마커만 지우면 다음 tick이 같은 조건에서 다시 제출한다(패널은 한두 프레임 안에 생긴다 —
-    /// `takeWebAddrNavigate`가 "아직 WKWebView가 없는 Term은 다음 tick에 다시 본다"로 푸는 것과 같은 문제·같은 답).
-    pub fn reportWebFindUndeliverable(self: *AppSession, seq: u64) void {
-        if (seq == 0 or seq != self.web_find_seq) return; // 늦은 신고는 무시(그 사이 새 질의가 나갔다)
-        self.web_find_last_surface = 0;
-    }
-
-    pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
-        if (seq == 0 or seq != self.web_find_seq) return;
-        if (!self.chrome_host.find.open) return;
-        // **seq만으로는 부족하다**: A에서 제출한 뒤 결과가 오기 전에 B로 옮기면 seq는 아직 유효하지만 그 답은
-        // A의 것이다. 그대로 붙이면 B 화면이 A의 찾음/없음을 말한다(실측). 제출 대상과 지금 보이는 탭이 같을
-        // 때만 반영한다 — 다르면 어차피 tick이 B로 재제출한다.
-        const active = self.activeWebSurfaceIdAnyKind();
-        if (active == 0 or active != self.web_find_last_surface) return;
-        // 결과가 사는 곳은 **오버레이 상태 하나**다(`find.page_found`) — 세션에 사본을 또 두면 어느 쪽이
-        // 진짜인지 흐려진다. 초안은 `web_find_result`도 들었는데 아무도 읽지 않는 죽은 상태였다.
-        self.chrome_host.find.page_found = found;
-        self.metal_dirty = true;
-    }
 
     pub fn takeFilePickRequest(self: *AppSession) bool {
         const pending = self.file_pick_pending;
@@ -18867,7 +18056,7 @@ pub const AppSession = struct {
             //
             // **열림 여부로 게이트하지 않는다**: 닫힌 동안 탭이 바뀌면 대상이 굳어, 다시 열자마자 그리는 첫
             // 프레임이 지난 탭의 모드로 나간다(R6 실측 — 터미널인데 카운터가 통째로 비었다).
-            const web_target = self.activeWebSurfaceIdAnyKind() != 0;
+            const web_target = web_ops.activeWebSurfaceIdAnyKind(self) != 0;
             const want: chrome.components.find.Target = if (web_target) .page else .scrollback;
             if (self.chrome_host.find.target != want) {
                 self.chrome_host.find.target = want;
@@ -18882,7 +18071,7 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             }
         }
-        if (self.chrome_host.find.open and self.activeWebSurfaceIdAnyKind() != 0) {
+        if (self.chrome_host.find.open and web_ops.activeWebSurfaceIdAnyKind(self) != 0) {
             if (self.find_matches.items.len > 0) {
                 // 터미널에서 넘어온 매치·카운트는 이 화면과 무관하다 — 남기면 웹 위에서 남의 숫자를 보여 준다.
                 self.find_matches.clearRetainingCapacity();
@@ -18896,10 +18085,10 @@ pub const AppSession = struct {
             // 웹 탭에 갔을 때 그 탭은 검색되지 않는다(R2 실측). 반대로 조건이 없으면 tick마다 재제출해
             // WebKit 하이라이트가 매 프레임 처음으로 튄다 — 그래서 "이미 이 조합을 보냈으면 안 보낸다".
             const q = self.chrome_host.find.input.query.items;
-            const already = self.web_find_last_surface == self.activeWebSurfaceIdAnyKind() and
+            const already = self.web_find_last_surface == web_ops.activeWebSurfaceIdAnyKind(self) and
                 std.mem.eql(u8, q, self.web_find_query_buf[0..self.web_find_query_len]);
             if (self.web_find_pending == null and !already and q.len > 0)
-                self.submitWebFind(false);
+                web_ops.submitWebFind(self, false);
         }
         // MARU_FORCE_BRANCH_MENU=1 — 상태바 브랜치 항목을 누른 것처럼 목록을 요청해 헤드리스로 찍는다.
         // **열릴 때까지 재시도한다**: 저장소 판정이 cwd 관측(OSC 7)에 달려 있어 첫 tick에는 아직 없다.
@@ -19018,7 +18207,7 @@ pub const AppSession = struct {
             );
             self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
             self.quit_decision = .none;
-            self.last_summary.web_surfaces_present = if (self.webSurfacesPresent()) 1 else 0;
+            self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
             return self.last_summary;
         }
         self.runFramePreHousekeeping();
@@ -19769,7 +18958,7 @@ pub const AppSession = struct {
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
-                        if (isBrowserTerm(addr_term)) {
+                        if (web_ops.isBrowserTerm(addr_term)) {
                             const addr_bar_h = pb.full.h; // == paneBarHeightPx()(paneBarRect .h) → addr_h=bar_h, inset과 동일 소스
                             const band_rect: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + addr_bar_h, .w = pb.full.w, .h = addr_bar_h };
                             // 밴드 배경 = 탭 바와 같은 chrome 배경(sidebarBg, window.opacity 반영) — 주소창이 하나의 밴드로 이어져 보이게(quad).
@@ -19777,7 +18966,7 @@ pub const AppSession = struct {
                             // Phase 7e-2a/슬라이스 2·3: 이 surface를 편집 중이면 URL 대신 **편집 텍스트 + mid-string caret**(정적
                             // 반전 블록 셀, emitEditBand)을, 아니면 읽기전용 nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성
                             // 판정. 텍스트·caret은 셀 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만.
-                            const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
+                            const editing = if (web_ops.addrEditSurfaceId(self)) |sid| sid == addr_term.surfaceId() else false;
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             const addr_nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)
                             // 리뷰 #9: fieldLayout을 프레임당 **한 번만** 계산해 선택 quad와 emitEditBand가 공유한다(옛 코드는 여기와
@@ -19800,7 +18989,7 @@ pub const AppSession = struct {
                             // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —
                             // 첫 frame nav 미도착 시 비활성으로 보임). reload는 늘 활성(builder 내부). URL(읽기전용)도 같은 상태에서 읽어
                             // 버튼·URL이 한 번의 조회를 공유한다.
-                            const nav_state = self.webNavState(addr_term.surfaceId());
+                            const nav_state = web_ops.webNavState(self, addr_term.surfaceId());
                             const can_back = if (nav_state) |st| st.can_go_back else false;
                             const can_fwd = if (nav_state) |st| st.can_go_forward else false;
                             // Phase 7e-4: 이 surface의 nav 버튼을 호버 중이고 그 버튼이 **활성**이면 그 3칸 존에 hover 배경 quad를
@@ -20399,7 +19588,7 @@ pub const AppSession = struct {
         // 4e-5: 활성 탭 web Term 존재 신호(Swift drain 게이트용). 매 tick 활성 탭 트리에서 계산(유지 카운터 아님 —
         // 창 간 이동 드리프트 없음, collectWebSurfaces와 같은 활성-탭 범위). writeSummaryFromState가 이 필드를 안
         // 건드리므로(last_summary는 매 tick 덮어쓰기가 아니라 필드별 갱신) epilogue가 quit_decision과 같은 단일 출처로 실는다.
-        self.last_summary.web_surfaces_present = if (self.webSurfacesPresent()) 1 else 0;
+        self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
         return self.last_summary;
     }
 
@@ -20552,7 +19741,7 @@ pub const AppSession = struct {
                 const at = lr.leaf.active_term;
                 if (at >= lr.leaf.terms.items.len) continue;
                 const term = lr.leaf.terms.items[at];
-                if (!isBrowserTerm(term)) continue; // browser 활성 탭만 밴드가 있다
+                if (!web_ops.isBrowserTerm(term)) continue; // browser 활성 탭만 밴드가 있다
                 const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(①b·"1c"와 동일 소스)
                 const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
                 if (!layout_math.pointInRect(x_px, y_px, band)) continue;
@@ -31059,20 +30248,20 @@ test "setWebNavState: upsert + 옛 url free + 조회 + 없는 surface null (7e-1
         while (it.next()) |v| session.allocator.free(v.url);
         session.web_nav_states.deinit(session.allocator);
     }
-    session.setWebNavState(42, true, false, "https://a/");
-    try std.testing.expectEqualStrings("https://a/", session.webNavState(42).?.url);
-    try std.testing.expect(session.webNavState(42).?.can_go_back);
-    try std.testing.expect(!session.webNavState(42).?.can_go_forward);
+    web_ops.setWebNavState(&session, 42, true, false, "https://a/");
+    try std.testing.expectEqualStrings("https://a/", web_ops.webNavState(&session, 42).?.url);
+    try std.testing.expect(web_ops.webNavState(&session, 42).?.can_go_back);
+    try std.testing.expect(!web_ops.webNavState(&session, 42).?.can_go_forward);
     // upsert: 옛 url을 free하고 새 url(다른 길이)로 교체 — 누수/UAF 없어야 통과.
-    session.setWebNavState(42, false, true, "https://b/longer");
-    try std.testing.expectEqualStrings("https://b/longer", session.webNavState(42).?.url);
-    try std.testing.expect(session.webNavState(42).?.can_go_forward);
-    try std.testing.expect(!session.webNavState(42).?.can_go_back);
+    web_ops.setWebNavState(&session, 42, false, true, "https://b/longer");
+    try std.testing.expectEqualStrings("https://b/longer", web_ops.webNavState(&session, 42).?.url);
+    try std.testing.expect(web_ops.webNavState(&session, 42).?.can_go_forward);
+    try std.testing.expect(!web_ops.webNavState(&session, 42).?.can_go_back);
     // 빈 url(url_ptr null ABI 경로) 저장.
-    session.setWebNavState(7, false, false, "");
-    try std.testing.expectEqualStrings("", session.webNavState(7).?.url);
+    web_ops.setWebNavState(&session, 7, false, false, "");
+    try std.testing.expectEqualStrings("", web_ops.webNavState(&session, 7).?.url);
     // 없는 surface → null.
-    try std.testing.expect(session.webNavState(999) == null);
+    try std.testing.expect(web_ops.webNavState(&session, 999) == null);
 }
 
 test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정리 (7e-2a 헤드리스)" {
@@ -31097,57 +30286,57 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     session.web_panel_prev = .empty;
 
     // 1) 편집 진입: 현재 URL 시드 + focus-pull pending(1회성).
-    session.enterAddrEdit(42, "https://old.example/");
+    web_ops.enterAddrEdit(&session, 42, "https://old.example/");
     try std.testing.expect(session.addr_edit != null);
-    try std.testing.expectEqualStrings("https://old.example/", session.addrEditText());
-    try std.testing.expectEqual(@as(?u64, 42), session.takeWebAddrFocusPull());
-    try std.testing.expectEqual(@as(?u64, null), session.takeWebAddrFocusPull()); // 1회성 drain
+    try std.testing.expectEqualStrings("https://old.example/", web_ops.addrEditText(&session));
+    try std.testing.expectEqual(@as(?u64, 42), web_ops.takeWebAddrFocusPull(&session));
+    try std.testing.expectEqual(@as(?u64, null), web_ops.takeWebAddrFocusPull(&session)); // 1회성 drain
 
     // 2) 백스페이스로 비우고 새 bare 도메인 타이핑 → commit이 resolveNavUrl로 https:// 프리픽스.
-    while (session.addrEditText().len > 0) session.addrEditBackspace();
-    try std.testing.expectEqualStrings("", session.addrEditText());
-    for ("example.com") |c| session.addrEditAppend(c);
-    try std.testing.expectEqualStrings("example.com", session.addrEditText());
+    while (web_ops.addrEditText(&session).len > 0) web_ops.addrEditBackspace(&session);
+    try std.testing.expectEqualStrings("", web_ops.addrEditText(&session));
+    for ("example.com") |c| web_ops.addrEditAppend(&session, c);
+    try std.testing.expectEqualStrings("example.com", web_ops.addrEditText(&session));
 
     // 3) commit: navigate pending(surface_id + resolved url) + 편집 종료 + focus-restore. navigate url은 세션 버퍼라 유효.
-    session.commitAddrEdit();
+    web_ops.commitAddrEdit(&session);
     try std.testing.expect(session.addr_edit == null); // 편집 종료
-    const nav = session.takeWebAddrNavigate() orelse return error.TestUnexpectedNull;
+    const nav = web_ops.takeWebAddrNavigate(&session) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqual(@as(u64, 42), nav.surface_id);
     try std.testing.expectEqualStrings("https://example.com", nav.url); // bare → https:// 프리픽스
-    try std.testing.expect(session.takeWebAddrNavigate() == null); // 1회성 drain
-    try std.testing.expectEqual(@as(?u64, 42), session.takeWebAddrFocusRestore());
-    try std.testing.expect(session.takeWebAddrFocusRestore() == null); // 1회성
+    try std.testing.expect(web_ops.takeWebAddrNavigate(&session) == null); // 1회성 drain
+    try std.testing.expectEqual(@as(?u64, 42), web_ops.takeWebAddrFocusRestore(&session));
+    try std.testing.expect(web_ops.takeWebAddrFocusRestore(&session) == null); // 1회성
 
     // 4) 위험 스킴(허용 안 되는 스킴)은 commit해도 navigate 안 세우고 **편집을 유지**한다 — 입력을 지우고 조용히 종료하지
     //    않아(제보 "그냥 무시 당함") 사용자가 고치거나 Esc로 취소하게 한다(이슈2).
-    session.enterAddrEdit(7, "");
-    _ = session.takeWebAddrFocusPull();
-    for ("javascript://evil") |c| session.addrEditAppend(c);
-    session.commitAddrEdit();
+    web_ops.enterAddrEdit(&session, 7, "");
+    _ = web_ops.takeWebAddrFocusPull(&session);
+    for ("javascript://evil") |c| web_ops.addrEditAppend(&session, c);
+    web_ops.commitAddrEdit(&session);
     try std.testing.expect(session.addr_edit != null); // 무효 → 편집 유지(조용히 종료 안 함)
-    try std.testing.expectEqualStrings("javascript://evil", session.addrEditText()); // 입력 보존
-    try std.testing.expect(session.takeWebAddrNavigate() == null); // 무효 스킴 → navigate 없음
-    try std.testing.expect(session.takeWebAddrFocusRestore() == null); // 편집 유지 = focus-restore 안 세움
-    session.cancelAddrEdit(true); // 다음 step 위해 편집 정리(Esc 의미)
-    _ = session.takeWebAddrFocusRestore(); // drain
+    try std.testing.expectEqualStrings("javascript://evil", web_ops.addrEditText(&session)); // 입력 보존
+    try std.testing.expect(web_ops.takeWebAddrNavigate(&session) == null); // 무효 스킴 → navigate 없음
+    try std.testing.expect(web_ops.takeWebAddrFocusRestore(&session) == null); // 편집 유지 = focus-restore 안 세움
+    web_ops.cancelAddrEdit(&session, true); // 다음 step 위해 편집 정리(Esc 의미)
+    _ = web_ops.takeWebAddrFocusRestore(&session); // drain
 
     // 5) cancel(Esc): 편집만 종료, navigate 없음, focus-restore만.
-    session.enterAddrEdit(9, "https://x/");
-    _ = session.takeWebAddrFocusPull();
-    for ("abc") |c| session.addrEditAppend(c);
-    session.cancelAddrEdit(true); // Esc 의미 — focus-restore 세움
+    web_ops.enterAddrEdit(&session, 9, "https://x/");
+    _ = web_ops.takeWebAddrFocusPull(&session);
+    for ("abc") |c| web_ops.addrEditAppend(&session, c);
+    web_ops.cancelAddrEdit(&session, true); // Esc 의미 — focus-restore 세움
     try std.testing.expect(session.addr_edit == null);
-    try std.testing.expect(session.takeWebAddrNavigate() == null); // cancel은 로드 안 함
-    try std.testing.expectEqual(@as(?u64, 9), session.takeWebAddrFocusRestore());
+    try std.testing.expect(web_ops.takeWebAddrNavigate(&session) == null); // cancel은 로드 안 함
+    try std.testing.expectEqual(@as(?u64, 9), web_ops.takeWebAddrFocusRestore(&session));
 
     // 6) teardown 정리: 편집 중 그 surface가 닫히면 addr_edit·관련 pending을 비운다(stale surface_id 방지).
-    session.enterAddrEdit(11, "https://y/");
+    web_ops.enterAddrEdit(&session, 11, "https://y/");
     try std.testing.expect(session.addr_edit != null);
-    session.dropAddrEditIfSurface(999); // 다른 surface → 무동작
+    web_ops.dropAddrEditIfSurface(&session, 999); // 다른 surface → 무동작
     try std.testing.expect(session.addr_edit != null);
-    try std.testing.expectEqual(@as(?u64, 11), session.addrEditSurfaceId());
-    session.dropAddrEditIfSurface(11); // 대상 surface → 정리
+    try std.testing.expectEqual(@as(?u64, 11), web_ops.addrEditSurfaceId(&session));
+    web_ops.dropAddrEditIfSurface(&session, 11); // 대상 surface → 정리
     try std.testing.expect(session.addr_edit == null);
     try std.testing.expect(session.addr_focus_pull_pending == null); // enter가 세운 pull도 대상 일치라 정리
 }
@@ -31168,32 +30357,32 @@ test "슬라이스 4: 주소창 키보드 편집 — 화살표·shift 선택·�
     }.ev;
 
     // ← : 그래핌 이동(7→6). 선택 없음.
-    session.handleAddrEditKey(key(.left, .{}));
+    web_ops.handleAddrEditKey(&session, key(.left, .{}));
     try std.testing.expectEqual(@as(usize, 6), session.addr_field.caret);
     try std.testing.expect(session.addr_field.selection == null);
 
     // ⇧← : 선택 확장(anchor=6, focus=5).
-    session.handleAddrEditKey(key(.left, .{ .shift = true }));
+    web_ops.handleAddrEditKey(&session, key(.left, .{ .shift = true }));
     try std.testing.expectEqual(@as(usize, 5), session.addr_field.caret);
     try std.testing.expectEqual(@as(usize, 5), session.addr_field.selection.?.lo());
     try std.testing.expectEqual(@as(usize, 6), session.addr_field.selection.?.hi());
 
     // → (no shift, 선택 있음): 선택 끝으로 collapse(6).
-    session.handleAddrEditKey(key(.right, .{}));
+    web_ops.handleAddrEditKey(&session, key(.right, .{}));
     try std.testing.expectEqual(@as(usize, 6), session.addr_field.caret);
     try std.testing.expect(session.addr_field.selection == null);
 
     // ⌥← : 단어 시작으로("def" 시작=byte 4). URL 구분자 '/'가 경계.
-    session.handleAddrEditKey(key(.left, .{ .option = true }));
+    web_ops.handleAddrEditKey(&session, key(.left, .{ .option = true }));
     try std.testing.expectEqual(@as(usize, 4), session.addr_field.caret);
 
     // ⌘A : 전체 선택.
-    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{ .command = true } } });
+    web_ops.handleAddrEditKey(&session, .{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{ .command = true } } });
     try std.testing.expectEqual(@as(usize, 0), session.addr_field.selection.?.lo());
     try std.testing.expectEqual(@as(usize, 7), session.addr_field.selection.?.hi());
 
     // 타이핑(선택 대체): 'X' → 선택 전체가 "X"로.
-    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'X' } });
+    web_ops.handleAddrEditKey(&session, .{ .key = .{ .key = .char, .codepoint = 'X' } });
     try std.testing.expectEqualStrings("X", session.addr_field.text.items);
 }
 
@@ -31266,14 +30455,14 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     // ⌘X: 전체 선택 잘라내기 → text에서 제거 + 클립보드-쓰기 큐에 **먼저 캡처**(삭제와 순서 무관). pendingClipboard가
     // 그 바이트를 반환(Swift가 NSPasteboard에 씀 — OSC52 write와 같은 drain). chrome_clipboard_write set이라 터미널 경로 안 탐.
     session.addr_field.selectAll();
-    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
+    web_ops.handleAddrEditKey(&session, .{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
     try std.testing.expectEqualStrings("", session.addr_field.text.items); // 잘려서 비었음
     try std.testing.expect(session.addr_field.selection == null);
     try std.testing.expectEqualStrings("hello", session.pendingClipboard()); // 잘라낸 바이트가 클립보드로
 
     // ⌘X 선택 없으면 무동작(클립보드 큐 안 채움).
     try session.addr_field.setText(std.testing.allocator, "abc");
-    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
+    web_ops.handleAddrEditKey(&session, .{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
     try std.testing.expectEqualStrings("abc", session.addr_field.text.items); // 선택 없어 그대로
     try std.testing.expectEqual(@as(usize, 0), session.chrome_clipboard_write.len);
 }
@@ -31336,9 +30525,9 @@ test "takeWebNavAction: 활성 버튼 클릭이 세운 pending을 1회 drain + t
     // 안 만지므로(대상 addr_edit=null) init 불요 — web_nav_action_pending 정리만 검증.
     session.web_nav_action_pending = 11;
     session.web_nav_action_code = 1;
-    session.dropAddrEditIfSurface(999); // 다른 surface → 무동작
+    web_ops.dropAddrEditIfSurface(&session, 999); // 다른 surface → 무동작
     try std.testing.expectEqual(@as(?u64, 11), session.web_nav_action_pending);
-    session.dropAddrEditIfSurface(11); // 대상 → 정리
+    web_ops.dropAddrEditIfSurface(&session, 11); // 대상 → 정리
     try std.testing.expect(session.web_nav_action_pending == null);
 }
 
@@ -31358,10 +30547,10 @@ test "setBrowserNavAction: 활성 버튼만 pending을 세운다 (7e-3 클릭·7
     }
 
     // 42: can_go_back=true, can_go_forward=false.
-    session.setWebNavState(42, true, false, "https://a/");
+    web_ops.setWebNavState(&session, 42, true, false, "https://a/");
 
     // reload는 nav 상태 무관 항상 활성 → pending=42·code=2·metal_dirty.
-    session.setBrowserNavAction(42, .reload);
+    web_ops.setBrowserNavAction(&session, 42, .reload);
     try std.testing.expectEqual(@as(?u64, 42), session.web_nav_action_pending);
     try std.testing.expectEqual(@as(u8, 2), session.web_nav_action_code);
     try std.testing.expect(session.metal_dirty);
@@ -31369,22 +30558,22 @@ test "setBrowserNavAction: 활성 버튼만 pending을 세운다 (7e-3 클릭·7
     // back: can_go_back=true → 활성 → code=0.
     session.web_nav_action_pending = null;
     session.web_nav_action_code = 9;
-    session.setBrowserNavAction(42, .back);
+    web_ops.setBrowserNavAction(&session, 42, .back);
     try std.testing.expectEqual(@as(?u64, 42), session.web_nav_action_pending);
     try std.testing.expectEqual(@as(u8, 0), session.web_nav_action_code);
 
     // forward: can_go_forward=false → 비활성 → no-op(pending·code 불변, 클릭도 소비만).
     session.web_nav_action_pending = null;
     session.web_nav_action_code = 9;
-    session.setBrowserNavAction(42, .forward);
+    web_ops.setBrowserNavAction(&session, 42, .forward);
     try std.testing.expect(session.web_nav_action_pending == null);
     try std.testing.expectEqual(@as(u8, 9), session.web_nav_action_code);
 
     // nav 상태 없는 surface: back(비활성) no-op, reload(항상 활성)만 세운다.
     session.web_nav_action_pending = null;
-    session.setBrowserNavAction(999, .back);
+    web_ops.setBrowserNavAction(&session, 999, .back);
     try std.testing.expect(session.web_nav_action_pending == null);
-    session.setBrowserNavAction(999, .reload);
+    web_ops.setBrowserNavAction(&session, 999, .reload);
     try std.testing.expectEqual(@as(?u64, 999), session.web_nav_action_pending);
     try std.testing.expectEqual(@as(u8, 2), session.web_nav_action_code);
 }
@@ -31403,21 +30592,21 @@ test "setWebNavState: 값이 바뀔 때만 metal_dirty (링크 이동 주소창 
     }
 
     // 첫 상태 = 새 항목 → metal_dirty(첫 주소 표시).
-    session.setWebNavState(7, false, false, "https://a/");
+    web_ops.setWebNavState(&session, 7, false, false, "https://a/");
     try std.testing.expect(session.metal_dirty);
 
     // 같은 값 재push(무변화 KVO 재관측) → metal_dirty 안 세움(불필요 재렌더 방지).
     session.metal_dirty = false;
-    session.setWebNavState(7, false, false, "https://a/");
+    web_ops.setWebNavState(&session, 7, false, false, "https://a/");
     try std.testing.expect(!session.metal_dirty);
 
     // url 변경(링크 이동) → metal_dirty(주소창 갱신 — 이 슬라이스의 핵심 수정).
-    session.setWebNavState(7, true, false, "https://b/");
+    web_ops.setWebNavState(&session, 7, true, false, "https://b/");
     try std.testing.expect(session.metal_dirty);
 
     // can_go_back만 변경 → metal_dirty(nav 버튼 활성색 갱신).
     session.metal_dirty = false;
-    session.setWebNavState(7, false, false, "https://b/");
+    web_ops.setWebNavState(&session, 7, false, false, "https://b/");
     try std.testing.expect(session.metal_dirty);
 }
 
@@ -33745,9 +32934,9 @@ test "addrEditCaretRect: 주소창 편집 caret이 밴드 안(y) + nav_end 뒤(x
     session.titlebar_strip_px = 0;
 
     // 활성 pane에 browser web 탭을 만들어 활성 term으로(surface_id 반환). 편집 진입 후 caret rect 조회.
-    const sid = try session.createAdoptedWebTermInActivePane();
-    session.enterAddrEdit(sid, "https://x");
-    const r = session.addrEditCaretRect() orelse return error.NoCaret;
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    web_ops.enterAddrEdit(session, sid, "https://x");
+    const r = web_ops.addrEditCaretRect(session) orelse return error.NoCaret;
 
     const pb = pane_ops.addrEditPaneBar(session) orelse return error.NoBar;
     const cw = session.cell_width_px;
@@ -33773,9 +32962,9 @@ test "슬라이스 3: 주소창 밴드 마우스 — 클릭 caret 배치·더블
     session.backing_height_px = 400;
     session.titlebar_strip_px = 0;
 
-    const sid = try session.createAdoptedWebTermInActivePane();
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
     // 편집 진입 후 URL을 알기 쉬운 값으로 교체(구분자 있는 8글자 ASCII — 컬럼=바이트).
-    session.enterAddrEdit(sid, "aa/bb/cc");
+    web_ops.enterAddrEdit(session, sid, "aa/bb/cc");
     try std.testing.expectEqual(@as(usize, 8), session.addr_field.caret); // 시드 후 끝-caret
 
     const pb = pane_ops.addrEditPaneBar(session) orelse return error.NoBar;
@@ -33827,8 +33016,8 @@ test "리뷰 #1: ⌘←/⌘→가 편집을 취소하지 않고 caret을 이동�
     session.backing_height_px = 400;
     session.titlebar_strip_px = 0;
 
-    const sid = try session.createAdoptedWebTermInActivePane();
-    session.enterAddrEdit(sid, "https://example.com"); // caret=끝(19)
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    web_ops.enterAddrEdit(session, sid, "https://example.com"); // caret=끝(19)
     try std.testing.expectEqual(@as(usize, 19), session.addr_field.caret);
 
     // ⌘← : handleKeyEvent 게이트가 편집을 취소하던 버그(리뷰 #1) — 이제 handleAddrEditKey로 흘러 moveHome. 편집 유지.
@@ -33859,8 +33048,8 @@ test "제보: ⌘⌫가 편집을 취소하거나 웹 포커스로 튕기지 않
     session.backing_height_px = 400;
     session.titlebar_strip_px = 0;
 
-    const sid = try session.createAdoptedWebTermInActivePane();
-    session.enterAddrEdit(sid, "https://example.com"); // caret=끝(19)
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    web_ops.enterAddrEdit(session, sid, "https://example.com"); // caret=끝(19)
 
     // caret을 'c'(16) 앞으로 이동(← 3회 = "com" 앞). 화살표는 command/control 없어 게이트서 chord 아님 → moveLeft.
     _ = session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} }) catch return error.KeyFailed;
@@ -33886,8 +33075,8 @@ test "제보: 주소창 IME 한글 — conjoining 자모 마크드/커밋이 완
     session.backing_height_px = 400;
     session.titlebar_strip_px = 0;
 
-    const sid = try session.createAdoptedWebTermInActivePane();
-    session.enterAddrEdit(sid, ""); // 빈 주소창 편집 시작
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    web_ops.enterAddrEdit(session, sid, ""); // 빈 주소창 편집 시작
 
     // macOS IME는 NFD conjoining 자모(초성 U+1100.. + 중성 U+1161..)를 준다(터미널 클러스터가 증명). 주소창은 셀당
     // codepoint라 저장 경계서 완성형으로 합쳐야 한다. 이 테스트는 imeMarked(preedit)·imeInsert/imeEnd(commit) 두
@@ -39133,16 +38322,16 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     // FP16: 파일을 열면 그 파일이 publish 대기 barrier를 갖는다(requestDockEntryFocus). 이 테스트의
     // 주제는 toggle 왕복이므로 workspace baseline에서 시작한다.
     workspace_ops.focusWorkspaceInput(session);
-    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount()); // baseline dock create
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
+    try std.testing.expectEqual(@as(usize, 1), web_ops.webSurfaceTransitionsCount(session)); // baseline dock create
+    try std.testing.expectEqual(@as(usize, 0), web_ops.webSurfaceTransitionsCount(session));
     session.dispatchAppAction(.toggle_file_panel_focus);
     try std.testing.expect(session.focus_owner == .file_tree);
     try std.testing.expect(session.takeFileTreeFocusAction());
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount()); // focus 왕복은 WebView reframe 0
+    try std.testing.expectEqual(@as(usize, 0), web_ops.webSurfaceTransitionsCount(session)); // focus 왕복은 WebView reframe 0
     session.dispatchAppAction(.toggle_file_panel_focus);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.workspace_focus_pending);
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
+    try std.testing.expectEqual(@as(usize, 0), web_ops.webSurfaceTransitionsCount(session));
 
     // FP16 §3.4: 파일 focus가 곧 `.workspace`(활성 Term이 그 파일)다 — 토글은 workspace ↔ tree 왕복이 된다.
     _ = session.focusFilePanelSurface(sid);
@@ -39334,9 +38523,9 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // close_tab을 포함한 모든 app action의 capability gate를 통과하지 못한다.
     const initial_terms = pane_ops.activePane(session).terms.items.len;
     const initial_tabs = session.tabs.items.len;
-    try std.testing.expect(!session.dispatchWebAppAction(sid, close_term_event));
-    try std.testing.expect(!session.dispatchWebAppAction(successor_sid, close_tab_event));
-    try std.testing.expect(!session.dispatchWebAppAction(0, close_tab_event));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, sid, close_term_event));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, successor_sid, close_tab_event));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, 0, close_tab_event));
     try std.testing.expectEqual(initial_terms, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(initial_tabs, session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
@@ -39359,7 +38548,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // 하므로(소유가 곧 활성 Term), 그 상태에서 app action이 Term cascade만 타는지가 남은 계약이다.
     const browser_sid = try pane_ops.appendWebTermInActivePane(session, .browser);
     const browser_terms_before = pane_ops.activePane(session).terms.items.len;
-    try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.pending_dock_focus == null);
@@ -39388,7 +38577,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // 실제로 보이는 파일만 소유한다. 그래서 눈앞의 browser WebView가 낸 app action이 그대로 진행된다.
     dock_ops.requestDockEntryFocus(session, session.fileEntryAt(1).?);
     try std.testing.expect(!dock_ops.pendingDockEntryOwnsInput(session));
-    try std.testing.expect(session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.pending_dock_focus == null);
@@ -39407,7 +38596,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     // 명시적으로 재바인딩한 close_term은 active browser capability에서만 허용되고 같은 workspace cascade를 탄다.
     const browser_close_term_sid = try pane_ops.appendWebTermInActivePane(session, .browser);
     const close_term_terms_before = pane_ops.activePane(session).terms.items.len;
-    try std.testing.expect(session.dispatchWebAppAction(browser_close_term_sid, close_term_event));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_close_term_sid, close_term_event));
     try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(workspace_ops.takeWorkspaceFocusAction(session));
@@ -39416,18 +38605,18 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     try std.testing.expectEqual(close_term_terms_before - 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expect(session.pending_file_panel_close == null);
     _ = session.focusFilePanelSurface(sid);
-    try std.testing.expect(!session.dispatchWebAppAction(browser_close_term_sid, close_tab_event));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_close_term_sid, close_tab_event));
     try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
 
     // 이미 닫힌/nonactive browser source는 state와 logical owner를 바꾸지 않는다.
     _ = session.focusFilePanelSurface(sid);
-    try std.testing.expect(!session.dispatchWebAppAction(browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expectEqual(@as(?u64, sid), session.focusedDockSurface());
     try std.testing.expect(session.pending_file_panel_close == null);
 
     // 반대로 WebView direct dispatch는 stale workspace owner가 있어도 event surface의 dirty close만 시작한다.
     session.focus_owner = .workspace;
-    try std.testing.expect(session.dispatchWebAppAction(sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(session.pending_file_panel_close != null);
     try std.testing.expectEqual(sid, session.pending_file_panel_close.?.surface_id);
     try std.testing.expectEqual(@as(usize, 1), session.file_panel_dirty_sync_actions_len);
@@ -39447,7 +38636,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     file_panel_ops.assignDockSurfaceIds(session);
     const clean_sid = session.fileEntryAt(1).?.surface_id;
     session.focus_owner = .workspace;
-    try std.testing.expect(session.dispatchWebAppAction(clean_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, clean_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, clean_sid) == null);
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
 
@@ -39458,7 +38647,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     const save_sid = session.fileEntryAt(1).?.surface_id;
     session.fileEntryAt(1).?.mode = .source_edit;
     session.fileEntryAt(1).?.dirty = true;
-    try std.testing.expect(session.dispatchWebAppAction(save_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, save_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     const save_sync = session.takeFilePanelDirtySyncActionV2().?;
     try session.reportFilePanelDirty(save_sid, .{ .dirty = true, .revision = 2, .request_id = save_sync.request_id });
     session.dispatchChromeAction(.confirm_accept);
@@ -39608,7 +38797,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
 
     var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
     defer surfaces.deinit(allocator);
-    try session.collectWebSurfaces(&surfaces);
+    try web_ops.collectWebSurfaces(session, &surfaces);
     try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
     // FP16: 브라우저와 두 파일이 **같은 pane의 탭**이라 보이는 건 활성 Term 하나뿐이다(마지막에 연 beta.html).
     // 옛 "workspace 브라우저 + 도크 editor 두 칸 동시 표시"는 도크에 editor leaf가 있을 때의 기하였다.
@@ -39636,8 +38825,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         @as(f64, @floatFromInt(workspace_surface.content_rect.x + workspace_surface.content_rect.w)) - workspace_band_px / 2,
         @floatFromInt(workspace_surface.content_rect.y + workspace_surface.content_rect.h / 2),
     ));
-    try std.testing.expect(session.webSurfacesPresent());
-    try std.testing.expect(session.hasWebSurface(session.fileEntryAt(1).?.surface_id));
+    try std.testing.expect(web_ops.webSurfacesPresent(session));
+    try std.testing.expect(web_ops.hasWebSurface(session, session.fileEntryAt(1).?.surface_id));
 
     // 파일 도크가 열린 상태에서도 workspace 브라우저 주소창 클릭은 도크 hit-test를 통과해 편집으로 들어가야 한다.
     // 수정 전에는 아래 도크 분기가 dockGroupAtPoint(null)을 함수 전체 return으로 처리해, 도크 밖인 workspace 클릭까지
@@ -39645,17 +38834,17 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     // FP16: 브라우저·파일이 같은 pane의 탭이라 마지막에 연 beta.html이 활성이다. 주소창 검증이므로
     // 브라우저 탭(터미널 다음)을 다시 활성으로 올린다.
     session.focusTerm(1);
-    const browser_sid = session.activeWebSurfaceId();
+    const browser_sid = web_ops.activeWebSurfaceId(session);
     const browser_bar = pane_ops.paneBarForLeaf(session, pane_ops.activePane(session)) orelse return error.NoBrowserBar;
     const address_y: f64 = @floatFromInt(browser_bar.full.y + browser_bar.full.h + browser_bar.full.h / 2);
     const address_x: f64 = @floatFromInt(browser_bar.full.x +
         (@as(u32, nav_button_count) * nav_button_w + 2) * session.cell_width_px);
     session.mouse(1, address_x, address_y, 0, 0);
-    try std.testing.expectEqual(@as(?u64, browser_sid), session.addrEditSurfaceId());
+    try std.testing.expectEqual(@as(?u64, browser_sid), web_ops.addrEditSurfaceId(session));
     try std.testing.expect(session.terminalOwnsInput());
-    try std.testing.expectEqual(@as(?u64, browser_sid), session.takeWebAddrFocusPull());
+    try std.testing.expectEqual(@as(?u64, browser_sid), web_ops.takeWebAddrFocusPull(session));
     session.routeCommittedText("example.com");
-    try std.testing.expectEqualStrings("example.com", session.addrEditText());
+    try std.testing.expectEqualStrings("example.com", web_ops.addrEditText(session));
     session.mouse(3, address_x, address_y, 0, 0);
 
     // FP16: 도크에 남은 건 탐색기뿐이라 "tree | editor" 내부 분할선이 없다. 그 분할선 드래그와
@@ -39684,7 +38873,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
 
     session.pointer_gesture_owner = .{ .dock_outer_divider = .{ .offset_px = 0 } };
     surfaces.clearRetainingCapacity();
-    try session.collectWebSurfaces(&surfaces);
+    try web_ops.collectWebSurfaces(session, &surfaces);
     // FP16: 브라우저 탭이 활성이므로 그것만 보인다. divider 드래그 중에도 WKWebView는 파괴되지 않고 live reframe한다.
     try std.testing.expect(surfaces.items[0].visible);
     try std.testing.expect(!surfaces.items[1].visible and !surfaces.items[2].visible);
@@ -39742,7 +38931,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(bottom.workspace.h, chrome_workspace.h);
     try std.testing.expectEqual(bottom.terminal.h + bottom.divider.h + bottom.dock.h, chrome_workspace.h);
     surfaces.clearRetainingCapacity();
-    try session.collectWebSurfaces(&surfaces);
+    try web_ops.collectWebSurfaces(session, &surfaces);
     try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
 
     // titlebar 띠 우측 끝 단일 토글로 닫고 다시 연다(탭바 접기 버튼을 일원화 — 팽창 상태에도 토글 표시).
@@ -39757,7 +38946,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expect(session.dock.collapsed);
     try std.testing.expectEqual(@as(u32, 0), dock_ops.dockGeometry(session).dock.h);
     surfaces.clearRetainingCapacity();
-    try session.collectWebSurfaces(&surfaces);
+    try web_ops.collectWebSurfaces(session, &surfaces);
     try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
     // FP16: 파일 surface는 도크가 아니라 pane에 산다 — 도크를 접어도 파괴되지 않는다(미저장 CM6 버퍼 보존).
     // 지금은 브라우저 탭이 활성이라 이 파일은 안 보일 뿐, 집합에는 그대로 남아야 한다.
@@ -40094,8 +39283,8 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     // 왕복 action은 파일(=workspace)과 tree 사이를 오간다(FP16에서 dock surface 축이 사라졌다).
     try std.testing.expect(!session.anyOverlayOpen());
     file_panel_ops.fileEntryForSurfaceId(session, sid).?.mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
-    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.web_editor, session.webKeyRoute(sid, .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }));
-    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(sid, .{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.web_editor, web_ops.webKeyRoute(session, sid, .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }));
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, web_ops.webKeyRoute(session, sid, .{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
     // FP16 §3.4: 파일 focus가 곧 `.workspace`라, 그 상태에서의 왕복 토글은 tree로 간다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } });
     try std.testing.expect(session.focus_owner == .file_tree);
@@ -43187,17 +42376,17 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // web Term이 없으면 batch가 빈다(터미널만 있는 평시).
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
+    try std.testing.expectEqual(@as(usize, 0), web_ops.webSurfaceTransitionsCount(session));
 
     // 활성 pane에 web Term 하나를 만들어 활성화(디버그 훅과 같은 경로).
-    const w1 = try session.createWebTerm(.browser);
+    const w1 = try web_ops.createWebTerm(session, .browser);
     const pane = pane_ops.activePane(session);
     try pane.terms.append(allocator, w1);
     session.focusTerm(pane.terms.items.len - 1);
 
     // 첫 계산: web1 create(자기 pane 활성 탭이라 visible), 자기 pane 본문 rect는 탭 바 아래라 유한·양수 폭/높이.
-    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
-    const t1 = session.webSurfaceTransitionAt(0);
+    try std.testing.expectEqual(@as(usize, 1), web_ops.webSurfaceTransitionsCount(session));
+    const t1 = web_ops.webSurfaceTransitionAt(session, 0);
     try std.testing.expectEqual(WebSurfaceOp.create, t1.op);
     try std.testing.expectEqual(w1.surfaceId(), t1.surface_id);
     try std.testing.expect(t1.visible);
@@ -43205,20 +42394,20 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
     try std.testing.expect(t1.frame_pt.w > 0 and t1.frame_pt.h > 0);
 
     // 무변경 tick: prev가 전진했으므로 batch가 빈다(§10 "diff 있을 때만 sync").
-    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
+    try std.testing.expectEqual(@as(usize, 0), web_ops.webSurfaceTransitionsCount(session));
 
     // 같은 pane에 web Term 하나 더(비활성 탭 — 활성은 web1 유지) → create + visible=false(hidden 생성해 상태만 유지).
-    const w2 = try session.createWebTerm(.markdown);
+    const w2 = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, w2);
-    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
-    const t2 = session.webSurfaceTransitionAt(0);
+    try std.testing.expectEqual(@as(usize, 1), web_ops.webSurfaceTransitionsCount(session));
+    const t2 = web_ops.webSurfaceTransitionAt(session, 0);
     try std.testing.expectEqual(WebSurfaceOp.create, t2.op);
     try std.testing.expectEqual(w2.surfaceId(), t2.surface_id);
     try std.testing.expect(!t2.visible); // 자기 pane 활성 탭이 아니므로 hidden 생성(§6)
     try std.testing.expectEqual(web_panel_layout.PanelKind.markdown, t2.panel_kind);
 
     // 범위 밖 조회는 op=none(무동작 폴백).
-    try std.testing.expectEqual(WebSurfaceOp.none, session.webSurfaceTransitionAt(5).op);
+    try std.testing.expectEqual(WebSurfaceOp.none, web_ops.webSurfaceTransitionAt(session, 5).op);
 }
 
 test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 + surface_id 반환 (7f-0 헤드리스)" {
@@ -43240,7 +42429,7 @@ test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 
     const terms_before = pane.terms.items.len;
 
     // 팝업 adopt term 생성 → 유효 surface_id 반환(1부터 발급, 0=sentinel).
-    const sid = try session.createAdoptedWebTermInActivePane();
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
     try std.testing.expect(sid != 0);
 
     // 활성 pane에 새 탭이 하나 늘고, 마지막 Term이 browser web이며 focusTerm으로 활성이다.
@@ -43252,11 +42441,11 @@ test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 
     try std.testing.expectEqual(pane.terms.items.len - 1, pane.active_term);
 
     // 반환 id == activeWebSurfaceId(7e-4 nav 단축키 게이트가 소비) — 새 팝업 탭이 활성 browser.
-    try std.testing.expectEqual(sid, session.activeWebSurfaceId());
+    try std.testing.expectEqual(sid, web_ops.activeWebSurfaceId(session));
 
     // create 전이가 이 surface에 emit(활성 탭이라 visible) — Swift drain이 소비하며 7f-1이 중복 WKWebView 생성을 스킵.
-    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
-    const t = session.webSurfaceTransitionAt(0);
+    try std.testing.expectEqual(@as(usize, 1), web_ops.webSurfaceTransitionsCount(session));
+    const t = web_ops.webSurfaceTransitionAt(session, 0);
     try std.testing.expectEqual(WebSurfaceOp.create, t.op);
     try std.testing.expectEqual(sid, t.surface_id);
     try std.testing.expect(t.visible);
@@ -43281,22 +42470,22 @@ test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal�
     const pane = pane_ops.activePane(session);
 
     // 초기: 활성 term = terminal → any_kind 0(browser 전용 activeWebSurfaceId도 0).
-    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceIdAnyKind());
-    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
+    try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceIdAnyKind(session));
+    try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceId(session));
 
     // markdown web term 새 탭 + 활성 → any_kind = id, 하지만 browser 전용은 0(markdown이라 — 이게 4g-0의 핵심 구분).
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
-    try std.testing.expectEqual(md.surfaceId(), session.activeWebSurfaceIdAnyKind());
-    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
+    try std.testing.expectEqual(md.surfaceId(), web_ops.activeWebSurfaceIdAnyKind(session));
+    try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceId(session));
 
     // browser web term 새 탭 + 활성 → 둘 다 id.
-    const br = try session.createWebTerm(.browser);
+    const br = try web_ops.createWebTerm(session, .browser);
     try pane.terms.append(allocator, br);
     session.focusTerm(pane.terms.items.len - 1);
-    try std.testing.expectEqual(br.surfaceId(), session.activeWebSurfaceIdAnyKind());
-    try std.testing.expectEqual(br.surfaceId(), session.activeWebSurfaceId());
+    try std.testing.expectEqual(br.surfaceId(), web_ops.activeWebSurfaceIdAnyKind(session));
+    try std.testing.expectEqual(br.surfaceId(), web_ops.activeWebSurfaceId(session));
 }
 
 // 4e-5: new_web_tab dispatch가 활성 pane에 web Term을 append+활성화(4e-1/2/3 경로 재사용)하고, tick epilogue가
@@ -43498,7 +42687,7 @@ test "captureWorkspaceTab: URL 있는 브라우저만 있는 pane은 셸 placeho
     }
 
     // (b) URL이 관측되면 그 브라우저가 복원되므로 placeholder가 **없어야** 한다.
-    session.setWebNavState(pane.terms.items[0].surfaceId(), false, false, "https://example.com/");
+    web_ops.setWebNavState(session, pane.terms.items[0].surfaceId(), false, false, "https://example.com/");
     {
         const wtab = try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session));
         const wp = wtab.panes[0];
@@ -43668,7 +42857,7 @@ test "collector: web Term url은 web_nav_states에서 채운다(§9.6 browser.li
     session.dispatchAppAction(.new_web_tab); // web(browser) Term
     const web_id = pane_ops.activePane(session).activeTerm().surfaceId();
     // Swift KVO가 하던 nav 상태 upsert를 직접 — collector가 이 url을 DTO에 실어야 한다.
-    session.setWebNavState(web_id, false, false, "https://www.naver.com/");
+    web_ops.setWebNavState(session, web_id, false, false, "https://www.naver.com/");
 
     const c = try session.collectSession(allocator, 7, .normal);
     defer c.deinit();
@@ -43706,7 +42895,7 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &leaves);
     var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
     defer cur.deinit(allocator);
-    try session.collectWebSurfaces(&cur);
+    try web_ops.collectWebSurfaces(session, &cur);
     const tr = session.termRect();
     const bar_h = pane_ops.paneBarHeightPx(session);
     var saw = [3]bool{ false, false, false }; // left, right, bottom seam을 실제 밟았는지(non-vacuous)
@@ -43781,7 +42970,7 @@ test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키�
 
         var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
         defer cur.deinit(allocator);
-        try session.collectWebSurfaces(&cur);
+        try web_ops.collectWebSurfaces(session, &cur);
         var seam_surface: ?web_panel_layout.SurfaceLayout = null;
         for (cur.items) |s| {
             if (s.seam_edges != 0) seam_surface = s;
@@ -43864,7 +43053,7 @@ test "web scratch: 다중 tick 누수/크래시 0(영속 scratch swap 소유 흐
     session.dispatchAppAction(.new_web_tab);
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        _ = session.webSurfaceTransitionsCount(); // computeWebSurfaceTransitions(collect+diff+swap) 반복
+        _ = web_ops.webSurfaceTransitionsCount(session); // computeWebSurfaceTransitions(collect+diff+swap) 반복
         _ = try session.tick();
     }
     try std.testing.expect(workspace_ops.windowHasWebTerm(session));
@@ -44371,13 +43560,13 @@ test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인
 
     // 활성 pane에 browser web Term을 추가·활성화 → pane이 [terminal, browser]라 .term_or_pane이 .term으로 해석되고
     // 활성 term=browser. web term은 live_initialized=false라 running job이 아니다(이게 조용히 닫히던 버그의 핵).
-    const w1 = try session.createWebTerm(.browser);
+    const w1 = try web_ops.createWebTerm(session, .browser);
     const pane = pane_ops.activePane(session);
     try pane.terms.append(allocator, w1);
     session.focusTerm(pane.terms.items.len - 1);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, pane.activeTerm().web_panel_kind);
     try std.testing.expect(!session.closeTargetHasRunningJob(.term_or_pane)); // 셸 명령 없음
-    try std.testing.expect(session.scopeHasWebBrowser(.term)); // 하지만 브라우저는 있음
+    try std.testing.expect(web_ops.scopeHasWebBrowser(session, .term)); // 하지만 브라우저는 있음
 
     // requestClose → 실행 중 명령이 없어도 웹 브라우저라 확인 모달을 띄우고 닫기를 보류(안 닫음).
     const terms_before = pane.terms.items.len;
@@ -46851,14 +46040,14 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
 
     // ① 브라우저가 없으면 false — 기본값 auto는 탭을 새로 만들지 않고 시스템 브라우저로 보낸다.
     try std.testing.expectEqual(config_mod.theme.LinkOpenTarget.auto, session.loaded_config.config.input.link_open_target);
-    try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co"));
     try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null); // pending도 안 남는다
 
     try pane_ops.splitActivePane(session, .horizontal); // 좌(터미널)·우(활성)
     const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser); // 우 pane에 브라우저 탭
 
     // ② 활성 pane이 브라우저면 그 패널이 대상이다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름).
-    try std.testing.expect(session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co"));
     {
         const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(ExternalLinkActionKind.in_app, action.kind);
@@ -46867,21 +46056,21 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
     }
 
     // ③ http(s) 리터럴이 아니면 브라우저로 안 보낸다 — 파일 경로·비-HTTP 스킴은 기본 앱 몫(isExplicitHttpLink 공유).
-    try std.testing.expect(!session.openTerminalWebLink("/tmp/x.txt"));
-    try std.testing.expect(!session.openTerminalWebLink("mailto:a@b.co"));
-    try std.testing.expect(!session.openTerminalWebLink("ssh://host"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "/tmp/x.txt"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "mailto:a@b.co"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "ssh://host"));
     try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
 
     // ④ config system이면 브라우저가 보여도 항상 시스템(이전 동작으로 되돌리는 탈출구).
     session.loaded_config.config.input.link_open_target = .system;
-    try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co"));
     try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
     session.loaded_config.config.input.link_open_target = .auto;
 
     // ⑤ 포커스가 왼쪽 터미널 pane으로 가도 오른쪽 브라우저가 **화면에 보이므로** 여전히 대상이다.
     try std.testing.expect(pane_ops.focusPaneByPtr(session, tab_ops.activeTab(session).panes.items[0]));
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal);
-    try std.testing.expect(session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co"));
     try std.testing.expectEqual(browser_id, (session.takeExternalLinkAction(&url_buf).?).surface_id);
 
     // ⑥ 브라우저가 **숨은 Term 탭**이면 대상이 아니다 — 안 보이는 패널에 열면 화면이 안 바뀌어 먹통처럼 보인다.
@@ -46889,7 +46078,7 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
     try std.testing.expect(pane_ops.focusPaneByPtr(session, tab_ops.activeTab(session).panes.items[1]));
     session.focusTerm(0);
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal);
-    try std.testing.expect(!session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co"));
 }
 
 // input.link-open-target = in-app: 보이는 브라우저 패널이 없으면 **새 browser Term을 열어서** 그곳에 띄운다
@@ -46914,7 +46103,7 @@ test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 brows
     var url_buf: [512]u8 = undefined;
 
     const terms_before = pane_ops.activePane(session).terms.items.len;
-    try std.testing.expect(session.openTerminalWebLink("https://a.co"));
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co"));
 
     // 새 browser Term이 활성 pane에 생기고, pending action이 그 surface를 가리킨다.
     try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
@@ -46926,12 +46115,12 @@ test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 brows
     try std.testing.expectEqualStrings("https://a.co", action.url);
 
     // 두 번째 링크는 방금 만든 브라우저가 **보이므로** 재사용한다 — 클릭마다 탭이 늘지 않는다.
-    try std.testing.expect(session.openTerminalWebLink("https://b.co"));
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://b.co"));
     try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(created.surfaceId(), (session.takeExternalLinkAction(&url_buf).?).surface_id);
 
     // in-app이어도 http(s)가 아니면 브라우저로 안 보내고 탭도 안 만든다.
-    try std.testing.expect(!session.openTerminalWebLink("mailto:a@b.co"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "mailto:a@b.co"));
     try std.testing.expectEqual(terms_before + 1, pane_ops.activePane(session).terms.items.len);
 }
 
@@ -46955,8 +46144,8 @@ test "openTerminalWebLink: drain 전 두 번째 요청은 pending을 덮어쓰�
     _ = try pane_ops.appendWebTermInActivePane(session, .browser);
     var url_buf: [512]u8 = undefined;
 
-    try std.testing.expect(session.openTerminalWebLink("https://first.co"));
-    try std.testing.expect(!session.openTerminalWebLink("https://second.co")); // busy → 호출자가 시스템으로 연다
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://first.co"));
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://second.co")); // busy → 호출자가 시스템으로 연다
     const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("https://first.co", action.url); // 첫 링크가 보존된다
 }
@@ -50650,7 +49839,7 @@ test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
 
     // ⑵ 터미널 활성 — 여러 tick을 돌려도 find가 살아 있고 검색어도 남는다.
@@ -50696,7 +49885,7 @@ test "WP-F1: pane 전환으로 웹이 활성이 돼도 스크롤백 매치가 �
     const panes = session.tabs.items[session.app_window.active_tab].panes.items;
     if (panes.len < 2) return error.SkipZigTest; // split 불가 환경
     const web_pane = panes[1];
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try web_pane.terms.append(allocator, md);
     web_pane.active_term = web_pane.terms.items.len - 1;
 
@@ -50735,7 +49924,7 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 �
     try std.testing.expect(session.chrome_host.find.open); // 터미널에서 열었다
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1); // 웹 탭으로 전환
     _ = try session.tick(); // 불변식은 렌더 전에 돈다
@@ -50769,7 +49958,7 @@ test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
 
@@ -50780,8 +49969,8 @@ test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어�
     for (0..200) |_| _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'Z' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
-    const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
-    session.provideWebFindResult(req.seq, true);
+    const req = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
+    web_ops.provideWebFindResult(session, req.seq, true);
     try std.testing.expectEqual(chrome.components.find.Target.page, session.chrome_host.find.target); // 전제
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -50840,23 +50029,23 @@ test "WP-F1 R8 프로브: 웹 탭에서 Enter/Shift+Enter가 페이지 다음·�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     for ("ab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    _ = session.takeWebFindQuery(); // 타이핑이 낸 질의는 걷어 낸다
+    _ = web_ops.takeWebFindQuery(session); // 타이핑이 낸 질의는 걷어 낸다
 
     // Enter = 다음 매치.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
-    const next = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const next = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expectEqualStrings("ab", next.query);
     try std.testing.expect(!next.backwards);
 
     // Shift+Enter = 이전 매치.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
-    const prev = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const prev = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expect(prev.backwards);
 }
 
@@ -50893,7 +50082,7 @@ test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤�
 
     // 마크다운 탭에 들렀다 돌아온다 — 닫혀 있으므로 화면은 그대로여야 한다.
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
     _ = try session.tick();
@@ -50921,7 +50110,7 @@ test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
 
@@ -50967,7 +50156,7 @@ test "WP-F1 R5 프로브: 웹에 들렀다 터미널로 돌아오면 스크롤�
     try std.testing.expectEqual(@as(usize, 2), before); // 전제 — 스크롤백에서 찾았다
 
     // 마크다운 탭에 들렀다가
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
     _ = try session.tick();
@@ -50996,10 +50185,10 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const a = try session.createWebTerm(.markdown);
+    const a = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, a);
     const a_idx = pane.terms.items.len - 1;
-    const b = try session.createWebTerm(.markdown);
+    const b = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, b);
     const b_idx = pane.terms.items.len - 1;
 
@@ -51008,15 +50197,15 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
     session.dispatchAppAction(.toggle_find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
-    const fwd = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const fwd = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expect(!fwd.backwards);
     session.dispatchAppAction(.find_previous);
-    const back = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const back = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expect(back.backwards);
 
     // (a) A의 결과가 오기 전에 B로 전환한다. 그 뒤 도착한 **A의 답**을 B 화면에 붙이면 안 된다.
     session.focusTerm(b_idx);
-    session.provideWebFindResult(back.seq, true); // seq는 아직 유효(B 재제출 전) — 그래도 A의 답이다
+    web_ops.provideWebFindResult(session, back.seq, true); // seq는 아직 유효(B 재제출 전) — 그래도 A의 답이다
     try std.testing.expect(session.chrome_host.find.page_found == null);
 }
 
@@ -51039,29 +50228,29 @@ test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
-    const first = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const first = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
 
     // Swift가 못 걸었다 — 신고 없이는 다음 tick이 조용하다(이 대비가 이 테스트의 요점이다).
     _ = try session.tick();
-    try std.testing.expect(session.takeWebFindQuery() == null);
+    try std.testing.expect(web_ops.takeWebFindQuery(session) == null);
 
-    session.reportWebFindUndeliverable(first.seq);
+    web_ops.reportWebFindUndeliverable(session, first.seq);
     _ = try session.tick();
-    const again = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const again = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expectEqualStrings("a", again.query);
     try std.testing.expectEqual(first.surface_id, again.surface_id);
 
     // 늦은 신고(그 사이 새 질의가 나갔다)는 무시한다 — 아니면 이미 유효한 제출을 되돌려 무한 재제출이 된다.
-    session.reportWebFindUndeliverable(first.seq);
+    web_ops.reportWebFindUndeliverable(session, first.seq);
     _ = try session.tick();
-    try std.testing.expect(session.takeWebFindQuery() == null);
+    try std.testing.expect(web_ops.takeWebFindQuery(session) == null);
 }
 
 // WP-F1 적대적 R2 프로브: 웹 탭 A에서 찾은 뒤 **웹 탭 B로 옮기면** B도 검색돼야 한다.
@@ -51081,10 +50270,10 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const a = try session.createWebTerm(.markdown);
+    const a = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, a);
     const a_idx = pane.terms.items.len - 1;
-    const b = try session.createWebTerm(.markdown);
+    const b = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, b);
     const b_idx = pane.terms.items.len - 1;
 
@@ -51092,28 +50281,28 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
     session.dispatchAppAction(.toggle_find);
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
-    const ra = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const ra = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     const sid_a = ra.surface_id;
-    session.provideWebFindResult(ra.seq, true); // A는 찾음
+    web_ops.provideWebFindResult(session, ra.seq, true); // A는 찾음
 
     // B로 전환. 같은 검색어를 그 탭에서도 찾아야 한다.
     session.focusTerm(b_idx);
     _ = try session.tick();
-    const rb = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const rb = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expect(rb.surface_id != sid_a); // A가 아니라 B로 간다
     try std.testing.expectEqualStrings("a", rb.query);
 
     // 반대편도 지켜야 한다: **같은 탭·같은 검색어면 다시 보내지 않는다.** 매 tick 재제출하면 WebKit
     // 하이라이트가 프레임마다 첫 매치로 튄다(조건을 없애는 것은 고침이 아니다).
-    session.provideWebFindResult(rb.seq, true);
+    web_ops.provideWebFindResult(session, rb.seq, true);
     _ = try session.tick();
     _ = try session.tick();
-    try std.testing.expect(session.takeWebFindQuery() == null);
+    try std.testing.expect(web_ops.takeWebFindQuery(session) == null);
 
     // 그리고 검색어가 바뀌면 같은 탭이라도 다시 보낸다.
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'b' }, &session.chrome_host.find);
     _ = try session.tick();
-    const rc = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const rc = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expectEqualStrings("ab", rc.query);
 }
 
@@ -51136,7 +50325,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
 
@@ -51151,12 +50340,12 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
     // 찾음/없음이 실제로 **그려진다**(상태만 보면 view가 무시해도 통과한다).
     _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
     session.dispatchChromeAction(.find_query_changed);
-    const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
-    session.provideWebFindResult(req.seq, true);
+    const req = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
+    web_ops.provideWebFindResult(session, req.seq, true);
     try std.testing.expect(try findOverlayHasText(allocator, session, "찾음"));
     try std.testing.expect(!(try findOverlayHasText(allocator, session, "0/0")));
 
-    session.provideWebFindResult(req.seq, false);
+    web_ops.provideWebFindResult(session, req.seq, false);
     try std.testing.expect(try findOverlayHasText(allocator, session, "없음"));
 
     // 터미널로 돌아오면 다시 숫자 카운터다(페이지 답이 남지 않는다).
@@ -51214,7 +50403,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const pane = pane_ops.activePane(session);
-    const br = try session.createWebTerm(.browser);
+    const br = try web_ops.createWebTerm(session, .browser);
     try pane.terms.append(allocator, br);
     session.focusTerm(pane.terms.items.len - 1);
 
@@ -51227,7 +50416,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
 
     // 웹 탭은 그대로 두고 활성만 터미널(0번)로 되돌린다.
     session.focusTerm(0);
-    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceIdAnyKind()); // 전제
+    try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceIdAnyKind(session)); // 전제
 
     // 전환만으로 닫히지 않는다 — 같은 오버레이가 이제 스크롤백을 본다.
     try std.testing.expect(session.chrome_host.find.open);
@@ -51235,7 +50424,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
     try std.testing.expect(!session.chrome_host.find.open); // 토글은 여전히 토글이다
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open); // 터미널에서는 평소대로 열린다
-    try std.testing.expect(session.takeWebFindQuery() == null); // 터미널 활성이면 페이지로 안 나간다
+    try std.testing.expect(web_ops.takeWebFindQuery(session) == null); // 터미널 활성이면 페이지로 안 나간다
 }
 
 // WP-F1 적대적: **⌘G(find_next)는 게이트가 없다.** ⌘F만 막고 ⌘G를 두면, 터미널에서 검색어를 남긴 뒤
@@ -51262,7 +50451,7 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
     session.dispatchAppAction(.toggle_find); // 닫아도 검색어는 남는다
 
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
 
@@ -51299,10 +50488,10 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지�
 
     // 마크다운 웹 탭으로 옮기면 **열리고, 검색어가 페이지로 나간다**(제보된 버그의 회귀 테스트).
     const pane = pane_ops.activePane(session);
-    const md = try session.createWebTerm(.markdown);
+    const md = try web_ops.createWebTerm(session, .markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
-    const sid = session.activeWebSurfaceIdAnyKind();
+    const sid = web_ops.activeWebSurfaceIdAnyKind(session);
     try std.testing.expect(sid != 0); // 전제
 
     session.dispatchAppAction(.toggle_find);
@@ -51314,14 +50503,14 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지�
 
     // peek은 **소비하지 않는다** — ABI 래퍼가 out 용량을 소비 전에 검사할 때 쓰는 계약이다(용량이 모자라
     // 0으로 빠져도 질의는 살아 있어야 한다. 삼키면 그 검색은 영영 안 나간다).
-    try std.testing.expectEqual(@as(usize, 1), session.peekWebFindQueryLen().?);
-    try std.testing.expectEqual(@as(usize, 1), session.peekWebFindQueryLen().?);
+    try std.testing.expectEqual(@as(usize, 1), web_ops.peekWebFindQueryLen(session).?);
+    try std.testing.expectEqual(@as(usize, 1), web_ops.peekWebFindQueryLen(session).?);
 
-    const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const req = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
     try std.testing.expectEqualStrings("a", req.query);
     try std.testing.expectEqual(sid, req.surface_id); // 활성 웹 탭으로 간다
     try std.testing.expect(!req.backwards);
-    try std.testing.expect(session.takeWebFindQuery() == null); // 1회성
+    try std.testing.expect(web_ops.takeWebFindQuery(session) == null); // 1회성
     // 스크롤백은 검색하지 않는다.
     try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
 }
@@ -52583,30 +51772,30 @@ test "web app action dispatch bypasses terminal preprocessing and rejects a stal
     session.loaded_config.keybindings = &user_binds;
     const browser_sid = try pane_ops.appendWebTermInActivePane(session, .browser);
     const copy: terminal.KeyEvent = .{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true } };
-    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(0, copy));
-    try std.testing.expect(!session.dispatchWebAppAction(0, copy)); // invalid sentinel은 action provenance가 아니다.
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, web_ops.webKeyRoute(session, 0, copy));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, 0, copy)); // invalid sentinel은 action provenance가 아니다.
     const tabs_before = session.tabs.items.len;
-    try std.testing.expect(session.dispatchWebAppAction(browser_sid, copy));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_sid, copy));
     try std.testing.expectEqual(tabs_before + 1, session.tabs.items.len);
     try std.testing.expect(tab_ops.switchTab(session, 0)); // browser가 active인 원래 workspace로 복귀한다.
 
     // route 조회 뒤 config가 reload됐다고 가정한다. Swift는 이미 이벤트를 consume하지만 현재 resolver가 더는 app
     // action을 내지 않으므로 stale Action을 실행하지 않는다.
     const paste: terminal.KeyEvent = .{ .key = .{ .char = 'v' }, .modifiers = .{ .command = true } };
-    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(browser_sid, paste));
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, web_ops.webKeyRoute(session, browser_sid, paste));
     session.loaded_config.keybindings = &.{};
     const terms_before_stale = pane_ops.activePane(session).terms.items.len;
-    try std.testing.expect(!session.dispatchWebAppAction(browser_sid, paste));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_sid, paste));
     try std.testing.expectEqual(terms_before_stale, pane_ops.activePane(session).terms.items.len);
 
     session.loaded_config.keybindings = &user_binds;
-    try std.testing.expect(session.dispatchWebAppAction(browser_sid, paste));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_sid, paste));
     const line_edit: terminal.KeyEvent = .{ .key = .backspace, .modifiers = .{ .command = true } };
-    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(browser_sid, line_edit));
-    try std.testing.expect(!session.dispatchWebAppAction(browser_sid, line_edit)); // browser는 이제 background Term이다.
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, web_ops.webKeyRoute(session, browser_sid, line_edit));
+    try std.testing.expect(!web_ops.dispatchWebAppAction(session, browser_sid, line_edit)); // browser는 이제 background Term이다.
     try std.testing.expectEqual(terms_before_stale + 1, pane_ops.activePane(session).terms.items.len);
     session.focusTerm(1);
-    try std.testing.expect(session.dispatchWebAppAction(browser_sid, line_edit));
+    try std.testing.expect(web_ops.dispatchWebAppAction(session, browser_sid, line_edit));
     try std.testing.expectEqual(terms_before_stale + 2, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(@as(u64, 3), session.total_app_key_events);
     try std.testing.expectEqual(@as(u64, 0), session.total_terminal_input_events);
@@ -54154,17 +53343,17 @@ test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동�
     src.dispatchAppAction(.new_web_tab);
     const sid = pane_ops.activePane(src).activeTerm().surfaceId();
     // 이동 전: src에 live, dst엔 없음, 없는 id는 false(이동 판정 3케이스의 기준).
-    try std.testing.expect(src.hasWebSurface(sid));
-    try std.testing.expect(!dst.hasWebSurface(sid));
-    try std.testing.expect(!src.hasWebSurface(sid +% 987654));
+    try std.testing.expect(web_ops.hasWebSurface(src, sid));
+    try std.testing.expect(!web_ops.hasWebSurface(dst, sid));
+    try std.testing.expect(!web_ops.hasWebSurface(src, sid +% 987654));
 
     var buf: [8]u64 = undefined;
     _ = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
 
     // 이동 후: dst에 live(=원본 destroy 전이가 "다른 창 live"로 이동 판정 → 재부모화·browser.closed 억제),
     // src엔 부재(포인터 relocate라 원본 트리서 사라짐). 워크스페이스 전환(같은 창)과 달리 다른 창서 검출됨.
-    try std.testing.expect(dst.hasWebSurface(sid));
-    try std.testing.expect(!src.hasWebSurface(sid));
+    try std.testing.expect(web_ops.hasWebSurface(dst, sid));
+    try std.testing.expect(!web_ops.hasWebSurface(src, sid));
 }
 
 test "commitComposition/setFocused: 빈 세션(merge/move로 비워진 원본)서 패닉 없이 no-op (resignKey IME commit 크래시 방어)" {
@@ -55598,8 +54787,8 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     const outcome = try src.mergeSessionInto(dst, &moved_buf);
     try std.testing.expect(outcome.source_window_closed);
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(src));
-    try std.testing.expect(!src.hasWebSurface(moved_sid));
-    try std.testing.expect(dst.hasWebSurface(moved_sid));
+    try std.testing.expect(!web_ops.hasWebSurface(src, moved_sid));
+    try std.testing.expect(web_ops.hasWebSurface(dst, moved_sid));
     try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
     try std.testing.expectEqualStrings("/destination-workspace", dst.file_tree.rootAt(0).?);
     try std.testing.expectEqualStrings("/source-workspace", src.file_tree.rootAt(0).?);
@@ -55619,7 +54808,7 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     // 옮겨온 파일과 그 dirty 상태·live surface는 그대로 살아 있다(배경일 뿐 사라지지 않는다).
     try std.testing.expect(file_panel_ops.fileEntryForId(dst, moved_entry_id) != null);
     try std.testing.expect(file_panel_ops.fileEntryForId(dst, moved_entry_id).?.dirty);
-    try std.testing.expect(dst.hasWebSurface(moved_sid));
+    try std.testing.expect(web_ops.hasWebSurface(dst, moved_sid));
     // 그 워크스페이스로 전환하면 다시 보이고, 그때 barrier를 새로 걸 수 있다.
     for (dst.tabs.items, 0..) |t, ti| {
         for (t.panes.items) |pane| {
@@ -55761,8 +54950,8 @@ test "FP8 merge carries every source 파일 탭과 live surface를 destination�
     // FP16: 파일이 pane 탭이라 merge가 별도로 entry를 평탄화하지 않는다 — 탭이 옮겨가면 파일도 같이 온다.
     try std.testing.expect(file_panel_ops.fileEntryForPath(dst, "/tmp/fp8-merge-a.md") != null);
     try std.testing.expect(file_panel_ops.fileEntryForPath(dst, "/tmp/fp8-merge-b.html") != null);
-    try std.testing.expect(dst.hasWebSurface(sid_a));
-    try std.testing.expect(dst.hasWebSurface(sid_b));
+    try std.testing.expect(web_ops.hasWebSurface(dst, sid_a));
+    try std.testing.expect(web_ops.hasWebSurface(dst, sid_b));
 }
 
 test "FP6 merge rejects duplicate dirty file panels without mutating either dock" {
@@ -56338,11 +55527,11 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
     try pane_ops.newWebTermInActivePane(session, .markdown);
     const md = pane.activeTerm();
     try std.testing.expect(md.kind == .web and md.web_panel_kind == .markdown);
-    try std.testing.expect(!AppSession.isBrowserTerm(md)); // 술어가 갈라낸다
+    try std.testing.expect(!web_ops.isBrowserTerm(md)); // 술어가 갈라낸다
 
     try pane_ops.newWebTermInActivePane(session, .browser);
     const browser = pane.activeTerm();
-    try std.testing.expect(AppSession.isBrowserTerm(browser));
+    try std.testing.expect(web_ops.isBrowserTerm(browser));
 
     // 소비처 검증: 주소창 밴드는 browser에만 top inset을 더한다(bar_h vs 2*bar_h).
     const bar_h = pane_ops.paneBarHeightPx(session);
@@ -56350,7 +55539,7 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
 
     var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
     defer surfaces.deinit(allocator);
-    try session.collectWebSurfaces(&surfaces);
+    try web_ops.collectWebSurfaces(session, &surfaces);
 
     var md_rect: ?web_panel_layout.Rect = null;
     var browser_rect: ?web_panel_layout.Rect = null;
@@ -56364,9 +55553,9 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
     try std.testing.expectEqual(md_rect.?.h - bar_h, browser_rect.?.h);
 
     // 활성 browser 판정도 같은 술어를 공유한다(nav 단축키 게이트).
-    try std.testing.expectEqual(browser.surfaceId(), session.activeWebSurfaceId());
+    try std.testing.expectEqual(browser.surfaceId(), web_ops.activeWebSurfaceId(session));
     session.focusTerm(1); // markdown을 활성으로
-    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
+    try std.testing.expectEqual(@as(u64, 0), web_ops.activeWebSurfaceId(session));
 }
 
 // FP16b 선행(§10 B-1): 파일 entry 조회 창구가 저장 구조(그룹 트리)를 감추는지 고정한다. FP16b가 소유를 `Term`으로

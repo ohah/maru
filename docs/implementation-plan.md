@@ -1839,8 +1839,10 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
   설계만으로는 안 보이던 것이 거기 있다 — 실제로 이 단계를 diff에 먼저 해 본 결과 `web/src/diff-view.ts`에서
   **본문 화면의 네 상태**(읽는 중·보여 줄 수 없음·변경 없음·비교)·**무한 재시도 금지**·**내부 값 노출 금지**·
   **"jsdom은 iframe·CSS가 없어 레이아웃 결함을 못 잡는다"**는 교훈이 나왔고 전부 native-editor.md에 반영했다.
-  대조 대상: `diff-view.ts`·`diff-layout.ts`·`diff-theme.ts`(diff), `editor.ts`(소스 편집), `content-menu.ts`(메뉴),
-  `file-panel-state.ts`(모드·revision). **"옮긴다"가 아니라 "무엇을 이미 풀었는지 확인한다"**가 목적이다 —
+  대조 대상: `diff-view.ts`·`diff-layout.ts`·`diff-theme.ts`(diff — **완료**), `editor.ts`(소스 편집 — **완료**:
+  문서 가상화 탓에 브라우저 native 선택이 렌더된 줄만 덮어 ⌘A 후 삭제가 일부만 되던 결함을 발견해 §3.2·§10에
+  반영), `content-menu.ts`·`file-panel-state.ts`(**완료** — 브리지 소멸·revision 단조 시계가 이미 계약에 반영돼 있음을
+  확인). **"옮긴다"가 아니라 "무엇을 이미 풀었는지 확인한다"**가 목적이다 —
   코드 표현을 옮기지 않는다([project-rules.md](project-rules.md) clean-room은 외부 레퍼런스 규율이고 이쪽은
   우리 코드지만, 웹 전제(iframe·CSS·브리지)에 묶인 해법을 그대로 가져오면 네이티브에서 틀린 구조가 된다).
 - **N0 — 성능 baseline(코드 변경 없음).** 현행 CM6 경로에서 대형 파일 open·스크롤 프레임타임 p50/p99·타이핑→반영

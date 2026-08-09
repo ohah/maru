@@ -19,12 +19,16 @@
 | 2026-06 | 20,183 | 이 문서 최초 측정 · (b) 결정 시점 |
 | 2026-07 | 35,134 | (b) "일단락" 이후 |
 | 2026-08-08 | **72,317** | (b) 결정 대비 3.6배 |
-| 2026-08-09 (F9까지) | **59,617** | F1·F2·F4·F5·F6·F7·F8·F9로. 그룹 파일 9개 합계 15,394줄 |
+| 2026-08-09 (F10까지) | **59,124** | F 시리즈 전부. 그룹 파일 10개 합계 15,989줄 |
 
-> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). 남은 F10을 이름 기준으로 다 옮겨도
-> `app_session.zig`에는 test 블록 33,000줄대와 허브(`tick`·`mouse`·`handleKeyEvent`)가 남으므로
-> **56,000줄대**가 착지점이다. 그보다 더 줄이려면 test 소유처를 따로 정해야 하고, 그 값은 §2-c-3 실측대로
-> pub화 6배다.
+> F 시리즈가 옮기는 것은 **메서드뿐**이다(test는 잔류 — §2-c-3). F10으로 이름 기준 그룹은 전부
+> 끝났고 `app_session.zig`는 **59,124줄**이다. 예측했던 56,000줄대에 닿지 못한 이유는 F8·F10에서
+> 드러났다 — 늦은 그룹일수록 앞선 그룹이 몫을 가져가 실제 이동이 추정보다 작고(F8 1,440→861,
+> F10 810→491), ABI가 직접 부르는 진입은 facade로 허브에 남는다(F9 8개, F10 12개).
+>
+> 여기서 더 줄이려면 남은 것은 셋이다: test 33,000줄대(§2-c-3 — pub화 6배), 허브
+> (`tick` 1,400 + `mouse` 801 + `handleKeyEvent` 340), 그리고 아직 그룹이 없는 도메인
+> (web-panel·notification·agent 관측 등). 앞의 둘은 의도적으로 남긴 것이다.
 
 **거대 메서드 top(2026-08-08)**: `tick`(1,484)·`mouse`(978)·`maybeDebugOpenSettings`(568)·`handleKeyEvent`(401)·`buildSidebarTitleDrawList`(363)·`deinit`(322)·`rebuildSidebar`(320)·`hoverCursor`(256)·`updateFileTree`(217)·`init`(205). `tick`/`mouse`/`handleKeyEvent`는 **오케스트레이션 허브**(프레임 루프·입력 라우터)다 — `tick`은 멀티 페인 통합 빌드(`collectShaped`→`placeMultiPane`→`placeAndDistribute`, 활성 panel `shapeOnlyBuild` 합류)를 품는다. (`buildSidebarTitleFrame`/`buildChromeOverlayFrame`/`buildFloatingTabFrame`은 통합 후 production 미사용이라 test 전용 free 헬퍼로 분리했다.)
 
@@ -114,7 +118,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **F7** ✅ | 사이드바(행 모델·스크롤·드래그 프리뷰·카드·헤더) | 1,812(메서드) | 중 | 2026-08-09 완료 → `app_session/sidebar.zig`, pub화 44 |
 | **F8** ✅ | 스크롤(휠·페이지 라우팅, 스크롤바 위젯, 오버레이) | 861(메서드) | 낮음 | 2026-08-09 완료 → `app_session/scroll.zig`. 표면별 스크롤은 이미 각 그룹이 가져가 예상보다 작다 |
 | **F9** ✅ | 세팅 · 컨텍스트 메뉴 · 이름 변경 · config 적용 | 1,850(메서드) | 낮음 | 2026-08-09 완료 → `app_session/settings.zig`, ABI facade 8 |
-| **F10** | workspace capture/restore | ~810 | 중 | 캡처=agent PTY·복원=`createPane` spawn(옛 E5 실측) |
+| **F10** ✅ | workspace · window(캡처/복원/이동, 창 속성) | 491(메서드) | 중 | 2026-08-09 완료 → `app_session/workspace.zig`. **ABI facade 12개**로 비중 최고 |
 
 > **F1과 F3를 합친 이유(2026-08-09 실측).** 문서가 둘을 나눈 기준은 **이름**이었는데 호출 관계는 한 덩어리다.
 > archive 메서드가 도크의 스크롤 앵커·인라인 상세·스모크 프로브를 부르므로, F1만 떼면 그룹 밖 non-pub
@@ -168,6 +172,35 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > 그 결과 F5는 **pub화 4개가 예측과 정확히 일치**한 첫 그룹이 됐다(F2 26→50, F4 35→43). 그룹이 작고
 > 경계가 깨끗하면 추정이 맞는다는 뜻이지, 추정 방법이 나아진 것은 아니다 — §2-c-2의 규칙은 그대로다.
 
+> ## pub 표면은 닫히지 않았다 — F10 실측으로 정정한다
+>
+> F1~F9의 PR마다 "pub 증가는 분해가 끝날 때까지의 과도기 비용이고 같은 도메인이 한 파일로 모이면
+> 다시 닫힌다"고 적었다. **F10에서 실측하니 사실이 아니다.**
+>
+> | 시점 | `app_session.zig`의 pub 수 | 증감 |
+> |---|---|---|
+> | E1(`find.zig`) 직후 | 93 | |
+> | F1 agent_dock | 274 | +181 |
+> | F2 file_panel | 343 | +69 |
+> | F4 pane | 407 | +64 |
+> | F5 dock | 415 | +8 |
+> | F6 tab | 446 | +31 |
+> | F7 sidebar | 483 | +37 |
+> | F8 scroll | 497 | +14 |
+> | F9 settings | 557 | +60 |
+> | F10 workspace | **572** | +15 |
+>
+> **열 개 그룹 동안 한 번도 줄지 않았다.** F9가 연 65개 중 F10이 닫은 것은 **1개**(`workspaceHasStatusLine`)뿐이다.
+>
+> 원인은 §2-c-3의 결정 자체다. **test 776개가 허브에 남아 모든 도메인의 비공개 헬퍼를 직접 부르므로,
+> 그 헬퍼들은 그룹 파일로 간 뒤에도 계속 pub이어야 한다.** test 이동이 그룹당 pub화를 6배로 만든다는
+> 실측(§2-c-3)은 여전히 맞지만, 그 대가로 **허브의 pub 표면이 영구히 열린 채 고정된다**는 것이
+> 지금 드러났다. 둘 다 공짜인 선택은 없었다.
+>
+> 이것을 감추지 않고 남긴다 — 이후 누가 "분해했는데 왜 캡슐화가 나아지지 않았나"를 물으면 답은
+> **"줄 수는 목표였고 pub 표면은 목표가 아니었다"**이다. pub 표면까지 닫으려면 test 소유처를 옮겨야
+> 하고, 그 비용은 §2-c-3에 실측되어 있다.
+
 > **F9는 config 재적용을 함께 가진다.** 세팅 UI가 값을 바꾸고 `applyLoadedConfig`·`reapplyConfigPalette`·
 > `reapplyScrollback`·`reapplyAmbiguousWidth`·`reapplyEmojiWidth`·`reapplyDefaultCursorShape`·
 > `applyThemePreset`이 그것을 살아 있는 세션에 반영한다. 편집과 적용이 한 덩어리라 나누면 pub화만 는다.
@@ -200,6 +233,17 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > **분류 함정(F9).** 첫 인자가 `_: *AppSession`인 메서드(`themePresetVariants`)를 "메서드가 아니다"로
 > 분류해 호출부를 잘못 바꿨다. 인자 이름이 `self`/`session`이 아니어도 메서드다 — 타입으로 판정해야 한다.
+
+> **파서 함정(F10에서 처음 잡았다).** `app_session.zig`에는 `AppSession` 말고도 최상위 struct가 있고
+> 그 메서드도 4칸 들여쓰기다 — `ProviderEnvGuard.capture`·`MeasuredTextCache.store`·`FakeLinkScreen.render`
+> 등 **12개**다. 이름만 보고 그룹을 잡는 스크립트는 이들을 `AppSession` 메서드로 착각한다. F1~F9에서
+> 사고가 없었던 것은 이름이 도메인 키워드와 겹치지 않았기 때문이고(실측 0건) 설계가 막아 준 것이
+> 아니다. F10부터는 struct 소유를 보고 거른다.
+>
+> 실제 결과(F10): `app_session.zig` 59,617 → 59,124(−493), `workspace.zig` 595줄(메서드 22 + 순수 2).
+> **24개 중 12개를 Swift 호스트가 직접 부른다** — 창은 호스트가 소유하고 Zig는 캡처·복원·질의하는
+> 쪽이라 그렇다. 그 12개는 얇은 facade로 허브에 남으므로 실제 감소는 옮긴 491줄보다 작다.
+> test 776개 전원 잔류, `test-macos-app-host-abi` 2,849 passed / 0 failed.
 
 > **F8은 예상보다 작다 — 앞선 그룹이 이미 가져갔기 때문이다.** 문서 추정은 1,440줄이었는데 실제
 > 이동은 **861줄**이다. 표면별 스크롤 상태가 이미 각자의 그룹으로 갔기 때문이다 — 사이드바 스크롤은

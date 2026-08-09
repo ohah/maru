@@ -22,6 +22,7 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
@@ -523,7 +524,7 @@ pub fn closeTab(self: *AppSession, index: usize) void {
 /// 창 소유 탭을 조작하는 stale 포인터가 된다 — context_menu_target/rename/divider_drag/hover·drag; code-review [2]).
 pub fn clearStaleUiTargetsForMovedTab(self: *AppSession, tab: *Tab, clear_pending_pastes: bool) void {
     // 워크스페이스/그룹 rename·context_menu (destroyTabStandalone 상단 미러 — 둘 다 *Tab을 든다).
-    if (self.renamingWorkspace(tab) or self.renamingGroup(tab)) {
+    if (workspace_ops.renamingWorkspace(self, tab) or self.renamingGroup(tab)) {
         self.rename = null;
         self.rename_input.clear();
     }
@@ -1361,7 +1362,7 @@ pub fn destroyTabStandalone(self: *AppSession, tab: *Tab) void {
     // destroyPane/destroyTerm 가드가 처리하지만, 워크스페이스·그룹 rename은 여기서. teardown 중이라 직접 null.
     // (renamingGroup은 `r.group == tab`의 **포인터 비교**(1984)라 group_start 유무와 무관하다 — 마커 승계로 group_start가
     //  다음 탭으로 넘어갔어도, 이 *Tab이 편집 대상이면 true다. 이 탭이 지금 파괴되므로 편집을 취소해 dangling *Tab을 안 남긴다.)
-    if (self.renamingWorkspace(tab) or self.renamingGroup(tab)) {
+    if (workspace_ops.renamingWorkspace(self, tab) or self.renamingGroup(tab)) {
         self.rename = null;
         self.rename_input.clear();
     }

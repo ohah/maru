@@ -26,6 +26,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const sidebar_ops = @import("sidebar.zig");
@@ -1462,7 +1463,7 @@ pub fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usiz
     if (source_workspace_removed) {
         // src_tab은 이제 collection 밖의 빈 workspace shell이다. tree의 leaf와 panes 항목은 target이 소유하므로
         // destroyTabStandalone/destroyPane을 쓰지 않고 컨테이너와 owned sidebar metadata만 정리한다.
-        if (self.renamingWorkspace(src_tab) or self.renamingGroup(src_tab)) {
+        if (workspace_ops.renamingWorkspace(self, src_tab) or self.renamingGroup(src_tab)) {
             self.rename = null;
             self.rename_input.clear();
         }

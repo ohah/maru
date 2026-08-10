@@ -5,7 +5,7 @@
 //! 레이아웃을 여기 두면 hit-test가 그것을 복제하게 된다.
 //!
 //! **텍스트는 셀 격자에 놓는다.** 줄 번호는 본문과 같은 등폭 격자에 서므로 advance 누적 배치를 쓰지 않는다
-//! ([native-editor.md](../../../../docs/native-editor.md) §2.0) — 본문 줄과 1:1로 세로 정렬돼야 하고,
+//! ([native-editor-layering.md](../../../../docs/native-editor-layering.md) §2.0) — 본문 줄과 1:1로 세로 정렬돼야 하고,
 //! 편집기 폰트 크기를 키우면 함께 커져야 한다.
 
 const std = @import("std");

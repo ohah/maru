@@ -79,7 +79,7 @@ pub const FontConfig = struct {
     /// 키로 파싱(내부 공백 보존, 각 항목은 trim). 적용은 셰이퍼가 주 폰트에 `kCTFontCascadeListAttribute`로 박는다
     /// (매 글리프 자동 폴백 — 근거: Ghostty도 cascade list 명시).
     ///
-    /// **기본값이 번들 `Jetendard`인 이유는 한글 자간이다**(docs/native-editor.md §4.2). 시스템 cascade는 한글을
+    /// **기본값이 번들 `Jetendard`인 이유는 한글 자간이다**(docs/native-editor-visual-mapping.md §4.2). 시스템 cascade는 한글을
     /// Apple SD Gothic Neo(비례 폰트)로 그리는데, 그 advance는 등폭 격자와 무관하다 — 13pt 실측에서 한글 `가`가
     /// 11.24px인데 격자는 2칸 16px이라 **글자당 4.76px이 빈다**(ASCII는 0.20px). 그 여백이 "한글만 자간이 넓다"로
     /// 보인다. Jetendard는 한글 글리프를 라틴 2배 폭으로 디자인해 **15.60px = cell_w의 정확히 2.00배**라 여백이

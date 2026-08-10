@@ -118,7 +118,7 @@ pub const Op = union(enum) {
         /// either path from inventing a second title/search truncation policy.
         max_cols: u16 = std.math.maxInt(u16),
         anchor: text_layout.Anchor = .head,
-        /// **이 폰트 크기로 그린다**(편집기 전용 — docs/native-editor.md §2.0).
+        /// **이 폰트 크기로 그린다**(편집기 전용 — docs/native-editor-layering.md §2.0).
         ///
         /// `typography` 토큰의 point size는 chrome 고정값(pt)이라 편집기 폰트를 키워도 그대로다.
         /// 그러면 셀만 커지고 글자는 안 커지는 화면이 된다(실측으로 확인한 결함). 이 값이 있으면

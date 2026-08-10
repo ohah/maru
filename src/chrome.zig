@@ -57,7 +57,7 @@ pub const components = struct {
     pub const shortcut_hints = @import("chrome/components/shortcut_hints.zig"); // 모디파이어 홀드 단축키 힌트 HUD(패시브 — 입력 비소비, KH-1)
     pub const dock_view_bar = @import("chrome/components/dock_view_bar.zig"); // 도크 뷰 스위처 한 행 render/hit 공용 순수 geometry
     pub const status_bar = @import("chrome/components/status_bar.zig"); // 창 바닥 상태표시줄 좌/우 슬롯 순수 배치(SB1-S3)
-    /// N1: 네이티브 편집기 L3 뷰(docs/native-editor.md §4.1). 본문·gutter는 셀 격자 경로이고
+    /// N1: 네이티브 편집기 L3 뷰(docs/native-editor-visual-mapping.md §4.1). 본문·gutter는 셀 격자 경로이고
     /// measured 이관 대상이 아니다(§2.0) — 등폭 정렬과 폰트 크기 연동이 기능 요구다.
     pub const editor_view = struct {
         pub const geometry = @import("chrome/components/editor_view/geometry.zig");

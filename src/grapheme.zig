@@ -47,10 +47,28 @@ pub fn isExtendOrZwj(cp: u21) bool {
     return cp == 0x200D or width.isCombiningMark(cp);
 }
 
+/// Fitzpatrick 스킨톤 modifier(U+1F3FB~1F3FF). **UAX#29의 Extend에 포함된다** — 표준 Extend는
+/// `Grapheme_Extend=Yes` *또는* `Emoji_Modifier=Yes`라, 스킨톤은 앞 그림문자에 붙어 한 cluster가 된다.
+/// `width.isCombiningMark`(폭 0 결합 문자)와 분리해 둔 이유는 스킨톤이 **폭을 갖지 않으면서도 combining
+/// mark는 아니기** 때문이다 — 폭 레이어는 이 범위를 wide(2)로 두고 cluster 레이어만 흡수한다.
+pub fn isEmojiModifier(cp: u21) bool {
+    return cp >= 0x1F3FB and cp <= 0x1F3FF;
+}
+
+/// 지역 표시자(U+1F1E6~1F1FF). **둘이 짝을 이뤄 국기 하나**가 된다(GB12/13) — 홀수 번째만 다음 것과
+/// 이어지므로 `clusterEnd`가 개수를 세야 한다(셋이 연달아 오면 앞 둘만 한 cluster다).
+pub fn isRegionalIndicator(cp: u21) bool {
+    return cp >= 0x1F1E6 and cp <= 0x1F1FF;
+}
+
 /// prev 다음에 next가 올 때 **같은 grapheme cluster로 이어지는가**(= cluster boundary가 없는가)?
-/// UAX#29 중 한글 연쇄(GB6/GB7/GB8)와 결합 문자(GB9)만 구현한다. 그 외 조합은 기본 boundary
-/// (GB999 — 매 코드포인트가 새 cluster). emoji ZWJ 시퀀스의 그림문자 잇기(GB11)·국기 RI 쌍
-/// (GB12/13)은 HG2 통합 때 기존 mode 2027 경로(skin-tone·RI)와 합친다.
+/// UAX#29 중 한글 연쇄(GB6/GB7/GB8)와 결합 문자(GB9)를 구현한다. 그 외 조합은 기본 boundary
+/// (GB999 — 매 코드포인트가 새 cluster).
+///
+/// **이 함수는 두 코드포인트만 본다.** GB11(이모지 ZWJ 시퀀스)·GB12/13(RI 쌍)은 "cluster가 그림문자로
+/// 시작했는가", "RI를 몇 개 삼켰는가" 같은 **누적 상태**가 있어야 판정되므로 여기 넣을 수 없고,
+/// `clusterEnd`가 상태를 들고 처리한다. 터미널(`terminal/screen.zig`)은 셀 그리드에 이미 그 상태를
+/// 갖고 있어 이 함수를 GB9/한글 용도로만 쓴다 — 시그니처를 바꾸지 않는 이유다.
 pub fn extendsCluster(prev: u21, next: u21) bool {
     if (isExtendOrZwj(next)) return true; // GB9
     return switch (hangulClass(prev)) {
@@ -92,13 +110,39 @@ pub fn clusterEnd(bytes: []const u8, start: usize) usize {
     const first = decodeOne(bytes, start) orelse return start + 1; // 손상 UTF-8 = 1바이트 cluster
     var prev = first.cp;
     var i = start + first.len;
+    // GB11 상태: 이 cluster가 그림문자로 시작했고 그 뒤로 Extend/ZWJ만 왔는가. ZWJ 하나만 봐서는
+    // `a<ZWJ>b`(문자 사이 ZWJ — §3.8의 공격 입력)와 `👨<ZWJ>👩`를 가를 수 없다.
+    var pictographic = isExtendedPictographic(first.cp);
+    // GB12/13 상태: RI를 몇 개 삼켰는가. 국기 하나는 정확히 둘이고, 셋이 연달아 오면 앞 둘만 묶인다.
+    var ri_seen: usize = @intFromBool(isRegionalIndicator(first.cp));
     while (i < bytes.len) {
         const next = decodeOne(bytes, i) orelse break; // 손상 바이트는 다음 cluster 시작으로 넘긴다
-        if (!extendsCluster(prev, next.cp)) break; // 이 cp는 다음 cluster 시작 — 소비 안 함
+        if (!clusterContinues(prev, next.cp, pictographic, ri_seen)) break; // 다음 cluster 시작 — 소비 안 함
+        if (isRegionalIndicator(next.cp)) ri_seen += 1;
+        if (isExtendedPictographic(next.cp)) {
+            pictographic = true; // ZWJ로 이어붙은 그림문자 — 다음 ZWJ도 이을 수 있다
+        } else if (!isExtendOrZwj(next.cp) and !isEmojiModifier(next.cp)) {
+            pictographic = false; // 그림문자도 Extend도 아닌 것이 끼면 GB11 연쇄가 끊긴다
+        }
         prev = next.cp;
         i += next.len;
     }
     return i;
+}
+
+/// `clusterEnd`의 한 걸음 판정 — 두 코드포인트만으로 되는 규칙(`extendsCluster`)에 **누적 상태가 필요한
+/// 규칙**을 더한다. 분리해 둔 이유는 터미널이 `extendsCluster`를 그대로 써야 하기 때문이다(위 주석).
+fn clusterContinues(prev: u21, next: u21, pictographic: bool, ri_seen: usize) bool {
+    if (extendsCluster(prev, next)) return true; // GB9(Extend·ZWJ) + 한글 GB6/7/8
+    // 스킨톤은 표준 Extend라 어떤 base 뒤든 붙는다. 터미널이 "폭 2 base에만" 제한하는 것은 폭 승격
+    // (promoteLastToEmojiWidth)이 malformed 입력에서 ❤를 1→2로 늘렸던 회귀 때문이고, 여기는 폭을
+    // 승격하지 않으므로 표준대로 둔다.
+    if (isEmojiModifier(next)) return true;
+    // GB11: `\p{ExtPict} Extend* ZWJ × \p{ExtPict}`
+    if (prev == 0x200D and pictographic and isExtendedPictographic(next)) return true;
+    // GB12/13: RI 쌍. 홀수 번째 RI만 다음 RI와 이어진다.
+    if (ri_seen % 2 == 1 and isRegionalIndicator(prev) and isRegionalIndicator(next)) return true;
+    return false;
 }
 
 /// `bytes[i]`에서 시작하는 UTF-8 한 글자(손상이면 null — 호출자가 1바이트로 넘긴다). 슬라이스 전체를 검증하지
@@ -383,4 +427,54 @@ test "isExtendedPictographic: 이모지(가족·❤·손)는 true, 동그란 번
     try expect(!isExtendedPictographic('a'));
     try expect(!isExtendedPictographic(0xAC00)); // 완성형 한글
     try expect(!isExtendedPictographic(0x200D)); // ZWJ 자체는 그림문자 아님
+}
+
+test "clusterEnd: 이모지 ZWJ 가족이 cluster 하나다 (GB11)" {
+    // 왜 중요: 편집기가 이걸 3조각으로 세면 가족 하나가 6칸을 먹어 뒤 글자가 4칸 밀린다.
+    // 실측으로 드러난 회귀다(native-editor.md §4.2) — GB9만 있던 시절 6칸이 나왔다.
+    const family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"; // 👨‍👩‍👧
+    try std.testing.expectEqual(family.len, clusterEnd(family, 0));
+
+    // 두 사람(👨‍👩)도 하나다.
+    const couple = "\u{1F468}\u{200D}\u{1F469}";
+    try std.testing.expectEqual(couple.len, clusterEnd(couple, 0));
+
+    // 가족 뒤에 오는 일반 글자는 **다음** cluster다(다 삼키면 안 된다).
+    const after = family ++ "A";
+    try std.testing.expectEqual(family.len, clusterEnd(after, 0));
+}
+
+test "clusterEnd: 글자 사이 ZWJ는 그림문자를 잇지 않는다 (§3.8 공격 입력)" {
+    // `ad<ZWJ>min`처럼 식별자를 쪼개는 ZWJ는 GB9로 앞 글자에 붙을 뿐, 뒤 글자까지 삼키면 안 된다.
+    // GB11을 "prev==ZWJ"만 보고 적용하면 여기서 m까지 빨려들어간다.
+    const attack = "a\u{200D}b";
+    try std.testing.expectEqual(@as(usize, 4), clusterEnd(attack, 0)); // "a"+ZWJ(3바이트)까지
+}
+
+test "clusterEnd: 스킨톤은 앞 그림문자에 붙는다 (Emoji_Modifier = Extend)" {
+    const thumb = "\u{1F44D}\u{1F3FD}"; // 👍🏽
+    try std.testing.expectEqual(thumb.len, clusterEnd(thumb, 0));
+
+    // 사람마다 스킨톤이 다른 가족도 하나다.
+    const pair = "\u{1F9D1}\u{1F3FB}\u{200D}\u{1F91D}\u{200D}\u{1F9D1}\u{1F3FD}";
+    try std.testing.expectEqual(pair.len, clusterEnd(pair, 0));
+}
+
+test "clusterEnd: 국기는 RI 둘까지만 묶는다 (GB12/13)" {
+    const kr = "\u{1F1F0}\u{1F1F7}"; // 🇰🇷
+    try std.testing.expectEqual(kr.len, clusterEnd(kr, 0));
+
+    // **셋이 연달아 오면 앞 둘만** — 세 번째는 다음 국기의 시작이다. 개수를 안 세면 전부 삼킨다.
+    const three = "\u{1F1F0}\u{1F1F7}\u{1F1FA}";
+    try std.testing.expectEqual(kr.len, clusterEnd(three, 0));
+
+    // 두 국기가 붙어 있으면 각각 하나씩.
+    const two_flags = "\u{1F1F0}\u{1F1F7}\u{1F1FA}\u{1F1F8}"; // 🇰🇷🇺🇸
+    try std.testing.expectEqual(kr.len, clusterEnd(two_flags, 0));
+    try std.testing.expectEqual(two_flags.len, clusterEnd(two_flags, kr.len));
+}
+
+test "clusterEnd: VS16 결합과 그 뒤 ZWJ 시퀀스 (❤️‍🔥)" {
+    const burning = "\u{2764}\u{FE0F}\u{200D}\u{1F525}"; // ❤️‍🔥
+    try std.testing.expectEqual(burning.len, clusterEnd(burning, 0));
 }

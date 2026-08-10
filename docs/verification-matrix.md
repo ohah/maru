@@ -535,7 +535,14 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   SSOT를 사용하고 unsupported target은 zero PID로 닫으며 fork child가 inherited
   authority를 lock/graph 접근 전에 거부한다. source boundary는 의미론적 PID authority의 legacy `macOS ? getpid : 1` 계산을 0으로 고정한다.
   b2a는 capability 전용 API만 내고 cleanup transcript/progress typed method는 b2b가 추가한다.
-- **C3-3b2b immutable preparation(미구현):** focused gate `test-session-host-2c3d-c3-3b2b`는 production-source dormant orchestration을
+- **C3-3b2b0 exact observation(구현):** focused gate `test-session-host-2c3d-c3-3b2b0`는 공용
+  `RuntimeObservation.replace`가 0/1/near-cap 입력과 빈 progress 보존에서 모든 owned list를 exact capacity로 만들고, progress 소비 뒤에도
+  backing을 해제해 zero-length owner는
+  canonical `.empty`를 유지하며, 모든 allocation fail index에서 기존 snapshot을 byte-for-byte 보존하는지 Debug·ReleaseFast로 검증한다.
+  `replace` API와 caller topology는 그대로 사용한다. progress 소비 API는 allocator를 받아 backing까지 해제하도록 의도적으로 바꾸지만
+  session-host pending owner·event lifecycle·제품 caller delta는 0이다. semantic test 3개와
+  app aggregation sentinel 7개, source boundary 1개를 Debug·ReleaseFast로 실행한다.
+- **C3-3b2b1 immutable preparation(미구현):** focused gate `test-session-host-2c3d-c3-3b2b`는 production-source dormant orchestration을
   Debug·ReleaseFast test mode에서 real `GenerationAttachment` take부터 trusted view·snapshot·prepare publication까지 호출한다. normal product
   caller는 0이며 non-test product-body instantiate와 actual pending E2E는 b4가 처음 증명한다. gate는 distinct header/expected major와
   metadata support mirror, final-address/copy/replay, every copy ordinal OOM, exact-capacity 4-part prepare peak와 3-part published rehash,

@@ -727,7 +727,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .osc_progress = observation.agent_progress.items,
         .output_active = output_active,
     });
-    observation.clearAgentProgress();
+    observation.clearAgentProgress(self.allocator);
     const previous = term.agent_state;
     const current = term.agent_stabilizer.observe(detection, now_ms);
     term.agent_state = current;

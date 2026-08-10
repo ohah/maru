@@ -18,6 +18,7 @@ const bridge = @import("../coretext_smoke_bridge.zig");
 const probe = @import("../coretext_probe.zig");
 const metal_frame = renderer.metal_frame;
 const width = maru.width; // Unicode 셀 폭(EAW) — 한글/CJK/이모지=2칸
+const display_width = maru.display_width; // §4.2 표시 폭 — 열을 세는 쪽(content.zig)과 같은 규칙
 
 /// **x 스냅은 두지 않는다**(2026-08-09 실측으로 기각). `x_px`를 셀 배수로 반올림하는 방식은
 /// 글자마다 advance가 다를 때(한글 2칸, fallback 폰트) 여러 글자가 같은 칸으로 몰려 문자열이
@@ -830,7 +831,11 @@ pub fn resolveArtifact(
             }
             const x = @as(f32, @floatFromInt(grid_cell)) * @as(f32, @floatFromInt(cw));
             const cp: u21 = @intCast(@min(glyph.codepoint, std.math.maxInt(u21)));
-            grid_cell += width.cellWidth(cp);
+            // **열을 세는 쪽과 같은 규칙을 써야 한다**(§4.2). `width.cellWidth`만 쓰면 컬러 이모지
+            // (❤️·국기)와 동그란 번호가 1칸으로 전진해, `content.zig`가 2칸으로 센 열과 갈려 뒤
+            // 글자가 밀린다 — 실제로 그렇게 어긋난 캡처를 봤다. `display_width`가 두 경로의 단일
+            // 출처이고, 그 모듈의 교차 검증 테스트가 둘이 같은 답을 내는지 묶어 둔다.
+            grid_cell += display_width.glyphCells(cp, glyph.color_glyph_kind == .color);
             break :blk x;
         } else null;
         const record = &records[record_index];

@@ -1531,7 +1531,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
       public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
-      **C3-3b1 correlation·ordering migration, C3-3b2a process-seal prerequisite와 C3-3b2b의 b2b0·b2b1은 구현됐고, b2b2 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
+      **C3-3b1 correlation·ordering migration, C3-3b2a process-seal prerequisite와 C3-3b2b의 b2b0·b2b1·b2b2는 구현됐고, b2b3 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
       process-domain seal 이전과 immutable preparation을 각각 독립 PR인 **b2a → b2b**로 나누며, 제품 `event_pending` 활성화 전에 async close를 먼저 닫기 위해
       실제 구현 순서는 **b2a → b2b → b3 → b5 → b4 → b6**이다. 각 slice는 앞 slice의 focused
       Debug·ReleaseFast gate와 source boundary를 상속하고, 마지막 slice 전에는 C3-3b 완료나 제품 close parity를 주장하지 않는다.

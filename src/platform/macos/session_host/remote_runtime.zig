@@ -1400,10 +1400,7 @@ pub const RemoteRuntime = struct {
                 .payload = payload,
             },
         ) catch |err| {
-            self.client.poison(if (err == error.OutOfMemory)
-                .local_resource_exhausted
-            else
-                .peer_contract_violation);
+            self.client.poison(eventMaterializationPoisonReason(err));
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.ProtocolError,
@@ -1455,6 +1452,19 @@ pub const RemoteRuntime = struct {
             },
             .ended => result.ended = true,
         }
+    }
+
+    fn eventMaterializationPoisonReason(
+        err: runtime_metadata_wire.EventMaterializationError,
+    ) client_poison.ConnectionReason {
+        return switch (err) {
+            error.OutOfMemory => .local_resource_exhausted,
+            error.LocalInvariant => .local_invariant_violation,
+            error.Malformed,
+            error.ResourceExhausted,
+            error.CapabilityViolation,
+            => .peer_contract_violation,
+        };
     }
 
     fn pumpResyncIntent(self: *RemoteRuntime) client_mod.ClientError!void {
@@ -7128,4 +7138,23 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     try testing.expectEqual(@as(usize, 0), zero.count);
     try testing.expect(zero.cur == null);
     try testing.expectEqual(@as(usize, 0), spans.items.len);
+}
+
+test "C3-3b2b2 compatibility maps event materialization failures by provenance" {
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.local_resource_exhausted,
+        RemoteRuntime.eventMaterializationPoisonReason(error.OutOfMemory),
+    );
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.local_invariant_violation,
+        RemoteRuntime.eventMaterializationPoisonReason(error.LocalInvariant),
+    );
+    inline for (.{
+        error.Malformed,
+        error.ResourceExhausted,
+        error.CapabilityViolation,
+    }) |err| try std.testing.expectEqual(
+        client_poison.ConnectionReason.peer_contract_violation,
+        RemoteRuntime.eventMaterializationPoisonReason(err),
+    );
 }

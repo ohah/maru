@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
 const runtime_event_types = @import("runtime_event_types.zig");
+const runtime_event_preparation = @import("runtime_event_preparation.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_types = @import("runtime_metadata_types.zig");
 
@@ -23,6 +24,8 @@ pub const DecodeError = error{
     ResourceExhausted,
     CapabilityViolation,
 };
+
+pub const EventMaterializationError = DecodeError || error{LocalInvariant};
 
 pub const AttachGenerationSchema = runtime_event_wire.AttachGenerationSchema;
 pub const AttachDecodeProfile = runtime_event_wire.AttachDecodeProfile;
@@ -62,16 +65,8 @@ pub const AttachEnvelope = union(enum) {
 
 pub const SemanticPrompt = runtime_metadata_types.SemanticPrompt;
 
-pub const Process = struct {
-    pid: i32 = 0,
-    len: u8 = 0,
-    bytes: [128]u8 = [_]u8{0} ** 128,
-
-    pub fn slice(self: *const Process) []const u8 {
-        return self.bytes[0..self.len];
-    }
-};
-pub const max_process_name_bytes: usize = @sizeOf(@TypeOf((Process{}).bytes));
+pub const Process = runtime_metadata_types.ProcessValue;
+pub const max_process_name_bytes: usize = runtime_metadata_types.max_process_name_bytes;
 
 pub const OwnedMetadataDto = struct {
     allocator: std.mem.Allocator,
@@ -743,24 +738,6 @@ fn materializePreflight(
     return dto;
 }
 
-fn materializeValidatedEvent(
-    allocator: std.mem.Allocator,
-    payload: []const u8,
-    validated: runtime_event_types.ValidatedMetadataView,
-) DecodeError!OwnedMetadataDto {
-    const preflight = validated.preflight();
-    const metadata = switch (preflight.event) {
-        .metadata => |value| value,
-        else => return error.Malformed,
-    };
-    return materializePreflight(
-        allocator,
-        payload,
-        metadata,
-        preflight.raw_digest,
-    );
-}
-
 pub fn preflightEventMaterialization(
     payload: []const u8,
     preflight: runtime_event_wire.EventPreflight,
@@ -871,28 +848,104 @@ pub fn classifyAndMaterializeEvent(
     authority: runtime_event_types.EventAuthorityView,
     preflight: runtime_event_types.EventPreflightView,
     frame: runtime_event_types.EventFrameView,
-) DecodeError!OwnedEventClassification {
-    return switch (runtime_event_types.classifyEventView(
+) EventMaterializationError!OwnedEventClassification {
+    const classification = runtime_event_types.classifyEventView(
         identity,
         authority,
         preflight,
         frame,
-    )) {
+    );
+    return materializeClassifiedEvent(allocator, classification, frame.payload);
+}
+
+fn materializeClassifiedEvent(
+    allocator: std.mem.Allocator,
+    classification: runtime_event_types.Classification,
+    payload: []const u8,
+) EventMaterializationError!OwnedEventClassification {
+    const recipe = runtime_event_preparation.buildEventPreparationRecipe(
+        classification,
+        payload,
+    ) catch return error.LocalInvariant;
+    return switch (recipe) {
         .violation => |value| .{ .violation = value },
-        .accepted => |event| .{ .accepted = switch (event) {
+        .accepted => |accepted| .{ .accepted = switch (accepted) {
             .revoked => |value| .{ .revoked = value },
             .invalidated => .invalidated,
             .resized => |value| .{ .resized = value },
-            .metadata => |value| .{
-                .metadata = try materializeValidatedEvent(
+            .metadata => |metadata| .{
+                .metadata = try materializePreparedEventMetadata(
                     allocator,
-                    frame.payload,
-                    value,
+                    payload,
+                    classification,
+                    metadata,
                 ),
             },
             .ended => .ended,
         } },
     };
+}
+
+fn materializePreparedEventMetadata(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    classification: runtime_event_types.Classification,
+    recipe: runtime_event_preparation.MetadataPreparationRecipe,
+) EventMaterializationError!OwnedMetadataDto {
+    const backing_len: usize = recipe.backing_bytes;
+    const backing = if (backing_len == 0) null else try allocator.alloc(u8, backing_len);
+    errdefer if (backing) |bytes| allocator.free(bytes);
+
+    var empty_backing: [0]u8 = .{};
+    const destination = backing orelse empty_backing[0..];
+    var processes = [_]Process{.{}} ** max_process_entries;
+    const projection = runtime_event_preparation.fillMetadataRecipe(
+        &recipe,
+        classification,
+        payload,
+        destination,
+        &processes,
+    ) catch return error.LocalInvariant;
+
+    return .{
+        .allocator = allocator,
+        .backing = backing,
+        .revision = recipe.revision,
+        .observer_generation = recipe.observer_generation,
+        .title_generation = recipe.title_generation,
+        .cols = recipe.cols,
+        .rows = recipe.rows,
+        .semantic_state = @enumFromInt(recipe.semantic_state_raw),
+        .alt_active = recipe.alt_active_raw == 1,
+        .app_cursor_keys = recipe.app_cursor_keys_raw == 1,
+        .app_keypad = recipe.app_keypad_raw == 1,
+        .kitty_flags = @intCast(recipe.kitty_flags_raw),
+        .alternate_scroll = recipe.alternate_scroll_raw == 1,
+        .mouse_tracking = recipe.mouse_tracking_raw == 1,
+        .mouse_tracking_mode = recipe.mouse_tracking_mode,
+        .bracketed_paste = recipe.bracketed_paste_raw == 1,
+        .bell_count = recipe.bell_count,
+        .clipboard_write_seq = recipe.clipboard_write_seq,
+        .clipboard_read_seq = recipe.clipboard_read_seq,
+        .foreground_available = recipe.foreground_available_raw == 1,
+        .foreground_pgid = if (recipe.foreground_pgid_present_raw == 1)
+            recipe.foreground_pgid
+        else
+            null,
+        .cwd_range = ownedRange(projection.cwd),
+        .title_range = ownedRange(projection.window_title),
+        .ssh_range = if (projection.ssh_remote_dest_present_raw == 1)
+            ownedRange(projection.ssh_remote_dest)
+        else
+            null,
+        .clipboard_target_range = ownedRange(projection.clipboard_read_target),
+        .processes = processes,
+        .process_count = projection.process_count,
+    };
+}
+
+fn ownedRange(range: runtime_event_preparation.FilledRange) OwnedMetadataDto.Range {
+    return .{ .start = range.start, .len = range.len };
 }
 
 fn copySpan(
@@ -1422,4 +1475,685 @@ test "owned metadata semantic equality ignores poisoned process tail only" {
     try std.testing.expect(a.current.semanticEql(&b.current));
     b.current.processes[0].bytes[1] = 'X';
     try std.testing.expect(!a.current.semanticEql(&b.current));
+}
+
+const c3b2b2_identity: runtime_event_types.EventIdentity = .{
+    .runtime_id = 0xaa,
+    .stream_id = 7,
+};
+const c3b2b2_controller: runtime_event_types.EventAuthorityView = .{
+    .role = .controller,
+    .generation = .{ .tracked = 3 },
+};
+const c3b2b2_metadata_payload =
+    \\{"event":"runtime.metadata","metadata_revision":9,"metadata":{"cwd":"/repo/src",
+    \\"window_title":"work","ssh_remote_dest":"host:22","semantic_state":2,
+    \\"alt_active":true,"app_cursor_keys":true,"app_keypad":true,"kitty_flags":3,
+    \\"alternate_scroll":false,"mouse_tracking":true,"mouse_tracking_mode":2,
+    \\"bracketed_paste":true,"bell_count":4,"clipboard_write_seq":5,
+    \\"clipboard_read_seq":6,"clipboard_read_target":"c",
+    \\"observer_generation":7,"title_generation":8,"cols":120,"rows":40,
+    \\"foreground_available":true,"foreground_pgid":77,
+    \\"processes":[{"pid":77,"name":"codex"}]}}
+;
+const c3b2b2_empty_metadata_payload =
+    \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"",
+    \\"window_title":"","ssh_remote_dest":null,"semantic_state":0,
+    \\"alt_active":false,"app_cursor_keys":false,"app_keypad":false,"kitty_flags":0,
+    \\"alternate_scroll":true,"mouse_tracking":false,"mouse_tracking_mode":0,
+    \\"bracketed_paste":false,"bell_count":0,"clipboard_write_seq":0,
+    \\"clipboard_read_seq":0,"clipboard_read_target":"",
+    \\"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
+    \\"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+;
+
+fn c3b2b2Frame(payload: []const u8) runtime_event_types.EventFrameView {
+    return .{
+        .major = protocol.version_major,
+        .kind = .event,
+        .stream_id = c3b2b2_identity.stream_id,
+        .request_id = 0,
+        .flags = 0,
+        .payload_len = @intCast(payload.len),
+        .payload = payload,
+    };
+}
+
+fn c3b2b2Preflight(payload: []const u8) runtime_event_types.EventPreflightView {
+    return .{
+        .expected_major = protocol.version_major,
+        .metadata_support = .supported,
+        .verdict = runtime_event_wire.preflightEvent(payload, .{}),
+    };
+}
+
+fn c3b2b2Materialize(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+) EventMaterializationError!OwnedEventClassification {
+    return classifyAndMaterializeEvent(
+        allocator,
+        c3b2b2_identity,
+        c3b2b2_controller,
+        c3b2b2Preflight(payload),
+        c3b2b2Frame(payload),
+    );
+}
+
+const C3b2b2CountingAllocator = struct {
+    parent: std.mem.Allocator,
+    allocation_calls: usize = 0,
+    free_calls: usize = 0,
+    fail_next: bool = false,
+    mutate_payload: ?[]u8 = null,
+    mutate_index: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.allocation_calls += 1;
+        if (self.mutate_payload) |payload| payload[self.mutate_index] ^= 1;
+        if (self.fail_next) {
+            self.fail_next = false;
+            return null;
+        }
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, return_address);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, return_address);
+    }
+};
+
+fn c3b2b2DeinitClassification(value: *OwnedEventClassification) void {
+    switch (value.*) {
+        .accepted => |*accepted| switch (accepted.*) {
+            .metadata => |*dto| dto.deinit(),
+            else => {},
+        },
+        .violation => {},
+    }
+}
+
+fn c3b2b2ExpectForwardedViolation(
+    counter: *C3b2b2CountingAllocator,
+    expected: runtime_event_types.Violation,
+) !void {
+    var result = try materializeClassifiedEvent(
+        counter.allocator(),
+        .{ .violation = expected },
+        "violation payload is never reparsed",
+    );
+    defer c3b2b2DeinitClassification(&result);
+    switch (result) {
+        .violation => |actual| try std.testing.expect(std.meta.eql(expected, actual)),
+        .accepted => return error.TestUnexpectedResult,
+    }
+}
+
+fn c3b2b2ReplaceFirst(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    needle: []const u8,
+    replacement: []const u8,
+) ![]u8 {
+    const index = std.mem.indexOf(u8, source, needle) orelse
+        return error.TestUnexpectedResult;
+    const result = try allocator.alloc(u8, source.len - needle.len + replacement.len);
+    @memcpy(result[0..index], source[0..index]);
+    @memcpy(result[index..][0..replacement.len], replacement);
+    @memcpy(result[index + replacement.len ..], source[index + needle.len ..]);
+    return result;
+}
+
+const C3b2b2MetadataMutation = enum {
+    revision,
+    observer_generation,
+    title_generation,
+    cols,
+    rows,
+    semantic_state,
+    alt_active,
+    app_cursor_keys,
+    app_keypad,
+    kitty_flags,
+    alternate_scroll,
+    mouse_tracking,
+    mouse_tracking_mode,
+    bracketed_paste,
+    bell_count,
+    clipboard_write_seq,
+    clipboard_read_seq,
+    foreground_pgid,
+    cwd,
+    window_title,
+    ssh_value,
+    ssh_presence,
+    clipboard_target,
+    process_pid,
+    process_name,
+    process_count,
+    foreground_presence,
+};
+
+test "C3-3b2b2 compatibility keeps non-metadata accepted and violation allocation-free" {
+    const payloads = [_][]const u8{
+        "{\"event\":\"snapshot.invalidated\"}",
+        "{\"event\":\"runtime.ended\"}",
+        "{\"event\":\"runtime.resized\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"cols\":120,\"rows\":40,\"resize_generation\":9,\"reason\":\"controller\"}}",
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        "{\"event\":\"future.event\"}",
+    };
+    var counter: C3b2b2CountingAllocator = .{ .parent = std.testing.allocator };
+    for (payloads, 0..) |payload, index| {
+        var result = try c3b2b2Materialize(counter.allocator(), payload);
+        defer c3b2b2DeinitClassification(&result);
+        switch (index) {
+            0 => switch (result) {
+                .accepted => |accepted| switch (accepted) {
+                    .invalidated => {},
+                    else => return error.TestUnexpectedResult,
+                },
+                .violation => return error.TestUnexpectedResult,
+            },
+            1 => switch (result) {
+                .accepted => |accepted| switch (accepted) {
+                    .ended => {},
+                    else => return error.TestUnexpectedResult,
+                },
+                .violation => return error.TestUnexpectedResult,
+            },
+            2 => switch (result) {
+                .accepted => |accepted| switch (accepted) {
+                    .resized => |resized| {
+                        try std.testing.expectEqual(@as(u128, 0xaa), resized.runtime_id);
+                        try std.testing.expectEqual(@as(u16, 120), resized.cols);
+                        try std.testing.expectEqual(@as(u16, 40), resized.rows);
+                        try std.testing.expectEqual(@as(u64, 9), resized.resize_generation);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                .violation => return error.TestUnexpectedResult,
+            },
+            3 => switch (result) {
+                .accepted => |accepted| switch (accepted) {
+                    .revoked => |generation| try std.testing.expectEqual(@as(u64, 4), generation),
+                    else => return error.TestUnexpectedResult,
+                },
+                .violation => return error.TestUnexpectedResult,
+            },
+            4 => switch (result) {
+                .violation => |violation| switch (violation) {
+                    .unknown_event => {},
+                    else => return error.TestUnexpectedResult,
+                },
+                .accepted => return error.TestUnexpectedResult,
+            },
+            else => unreachable,
+        }
+    }
+
+    inline for (std.meta.fields(runtime_event_types.FrameViolation)) |field| {
+        try c3b2b2ExpectForwardedViolation(
+            &counter,
+            .{ .frame = @enumFromInt(field.value) },
+        );
+    }
+    inline for (std.meta.fields(runtime_event_types.IdentityViolation)) |field| {
+        try c3b2b2ExpectForwardedViolation(
+            &counter,
+            .{ .identity = @enumFromInt(field.value) },
+        );
+    }
+    inline for (std.meta.fields(runtime_event_types.AuthorityViolation)) |field| {
+        try c3b2b2ExpectForwardedViolation(
+            &counter,
+            .{ .authority = @enumFromInt(field.value) },
+        );
+    }
+    inline for (std.meta.fields(runtime_event_types.CapabilityViolation)) |field| {
+        try c3b2b2ExpectForwardedViolation(
+            &counter,
+            .{ .capability = @enumFromInt(field.value) },
+        );
+    }
+    inline for (std.meta.fields(runtime_event_wire.ForeignKind)) |field| {
+        try c3b2b2ExpectForwardedViolation(
+            &counter,
+            .{ .foreign = @enumFromInt(field.value) },
+        );
+    }
+    try c3b2b2ExpectForwardedViolation(&counter, .stale_preflight);
+    try c3b2b2ExpectForwardedViolation(&counter, .unknown_event);
+    try c3b2b2ExpectForwardedViolation(&counter, .malformed);
+    try c3b2b2ExpectForwardedViolation(&counter, .resource_exhausted);
+    try std.testing.expectEqual(@as(usize, 0), counter.allocation_calls);
+    try std.testing.expectEqual(@as(usize, 0), counter.free_calls);
+}
+
+test "C3-3b2b2 compatibility preserves zero or one allocation and metadata semantics" {
+    const recipeFor = struct {
+        fn build(payload: []const u8) !runtime_event_preparation.MetadataPreparationRecipe {
+            const classification = runtime_event_types.classifyEventView(
+                c3b2b2_identity,
+                c3b2b2_controller,
+                c3b2b2Preflight(payload),
+                c3b2b2Frame(payload),
+            );
+            const event_recipe = try runtime_event_preparation.buildEventPreparationRecipe(
+                classification,
+                payload,
+            );
+            return switch (event_recipe) {
+                .accepted => |accepted| switch (accepted) {
+                    .metadata => |metadata| metadata,
+                    else => error.TestUnexpectedResult,
+                },
+                .violation => error.TestUnexpectedResult,
+            };
+        }
+    }.build;
+    var counter: C3b2b2CountingAllocator = .{ .parent = std.testing.allocator };
+    var empty = try c3b2b2Materialize(counter.allocator(), c3b2b2_empty_metadata_payload);
+    defer c3b2b2DeinitClassification(&empty);
+    try std.testing.expectEqual(@as(usize, 0), counter.allocation_calls);
+    const empty_dto = switch (empty) {
+        .accepted => |*accepted| switch (accepted.*) {
+            .metadata => |*dto| dto,
+            else => return error.TestUnexpectedResult,
+        },
+        .violation => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(empty_dto.backing == null);
+    try std.testing.expectEqual(@as(u64, 1), empty_dto.revision);
+    try std.testing.expectEqual(@as(u64, 1), empty_dto.observer_generation);
+    try std.testing.expectEqual(@as(u32, 1), empty_dto.title_generation);
+    try std.testing.expectEqual(@as(u16, 80), empty_dto.cols);
+    try std.testing.expectEqual(@as(u16, 24), empty_dto.rows);
+    try std.testing.expectEqual(SemanticPrompt.unknown, empty_dto.semantic_state);
+    try std.testing.expect(!empty_dto.alt_active);
+    try std.testing.expect(!empty_dto.app_cursor_keys);
+    try std.testing.expect(!empty_dto.app_keypad);
+    try std.testing.expectEqual(@as(u5, 0), empty_dto.kitty_flags);
+    try std.testing.expect(empty_dto.alternate_scroll);
+    try std.testing.expect(!empty_dto.mouse_tracking);
+    try std.testing.expectEqual(@as(u8, 0), empty_dto.mouse_tracking_mode);
+    try std.testing.expect(!empty_dto.bracketed_paste);
+    try std.testing.expectEqual(@as(u64, 0), empty_dto.bell_count);
+    try std.testing.expectEqual(@as(u64, 0), empty_dto.clipboard_write_seq);
+    try std.testing.expectEqual(@as(u64, 0), empty_dto.clipboard_read_seq);
+    try std.testing.expect(!empty_dto.foreground_available);
+    try std.testing.expectEqual(@as(?i32, null), empty_dto.foreground_pgid);
+    try std.testing.expectEqualStrings("", empty_dto.cwd());
+    try std.testing.expectEqualStrings("", empty_dto.windowTitle());
+    try std.testing.expect(empty_dto.sshRemoteDest() == null);
+    try std.testing.expectEqualStrings("", empty_dto.clipboardReadTarget());
+    try std.testing.expectEqual(@as(u8, 0), empty_dto.process_count);
+    try std.testing.expectEqual(@as(usize, 0), empty_dto.foregroundProcesses().len);
+
+    var populated = try c3b2b2Materialize(counter.allocator(), c3b2b2_metadata_payload);
+    try std.testing.expectEqual(@as(usize, 1), counter.allocation_calls);
+    const dto = switch (populated) {
+        .accepted => |*accepted| switch (accepted.*) {
+            .metadata => |*value| value,
+            else => return error.TestUnexpectedResult,
+        },
+        .violation => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(dto.backing != null);
+    try std.testing.expectEqual(@as(u64, 9), dto.revision);
+    try std.testing.expectEqual(@as(u64, 7), dto.observer_generation);
+    try std.testing.expectEqual(@as(u32, 8), dto.title_generation);
+    try std.testing.expectEqual(@as(u16, 120), dto.cols);
+    try std.testing.expectEqual(@as(u16, 40), dto.rows);
+    try std.testing.expectEqual(SemanticPrompt.input, dto.semantic_state);
+    try std.testing.expect(dto.alt_active);
+    try std.testing.expect(dto.app_cursor_keys);
+    try std.testing.expect(dto.app_keypad);
+    try std.testing.expectEqual(@as(u5, 3), dto.kitty_flags);
+    try std.testing.expect(!dto.alternate_scroll);
+    try std.testing.expect(dto.mouse_tracking);
+    try std.testing.expectEqual(@as(u8, 2), dto.mouse_tracking_mode);
+    try std.testing.expect(dto.bracketed_paste);
+    try std.testing.expectEqual(@as(u64, 4), dto.bell_count);
+    try std.testing.expectEqual(@as(u64, 5), dto.clipboard_write_seq);
+    try std.testing.expectEqual(@as(u64, 6), dto.clipboard_read_seq);
+    try std.testing.expect(dto.foreground_available);
+    try std.testing.expectEqual(@as(?i32, 77), dto.foreground_pgid);
+    try std.testing.expectEqualStrings("/repo/src", dto.cwd());
+    try std.testing.expectEqualStrings("work", dto.windowTitle());
+    try std.testing.expectEqualStrings("host:22", dto.sshRemoteDest().?);
+    try std.testing.expectEqualStrings("c", dto.clipboardReadTarget());
+    try std.testing.expectEqual(@as(u8, 1), dto.process_count);
+    try std.testing.expectEqual(@as(i32, 77), dto.processes[0].pid);
+    try std.testing.expectEqualStrings("codex", dto.processes[0].slice());
+
+    var transferred = dto.take();
+    c3b2b2DeinitClassification(&populated);
+    try std.testing.expectEqual(@as(usize, 0), counter.free_calls);
+    transferred.deinit();
+    try std.testing.expectEqual(@as(usize, 1), counter.free_calls);
+    transferred.deinit();
+    try std.testing.expectEqual(@as(usize, 1), counter.free_calls);
+
+    const baseline_recipe = try recipeFor(c3b2b2_metadata_payload);
+    var baseline = try c3b2b2Materialize(std.testing.allocator, c3b2b2_metadata_payload);
+    defer c3b2b2DeinitClassification(&baseline);
+    const baseline_dto = switch (baseline) {
+        .accepted => |*accepted| switch (accepted.*) {
+            .metadata => |*value| value,
+            else => return error.TestUnexpectedResult,
+        },
+        .violation => return error.TestUnexpectedResult,
+    };
+    const mutations = .{
+        .{ C3b2b2MetadataMutation.revision, "\"metadata_revision\":9", "\"metadata_revision\":8" },
+        .{ C3b2b2MetadataMutation.observer_generation, "\"observer_generation\":7", "\"observer_generation\":6" },
+        .{ C3b2b2MetadataMutation.title_generation, "\"title_generation\":8", "\"title_generation\":7" },
+        .{ C3b2b2MetadataMutation.cols, "\"cols\":120", "\"cols\":121" },
+        .{ C3b2b2MetadataMutation.rows, "\"rows\":40", "\"rows\":41" },
+        .{ C3b2b2MetadataMutation.semantic_state, "\"semantic_state\":2", "\"semantic_state\":1" },
+        .{ C3b2b2MetadataMutation.alt_active, "\"alt_active\":true", "\"alt_active\":false" },
+        .{ C3b2b2MetadataMutation.app_cursor_keys, "\"app_cursor_keys\":true", "\"app_cursor_keys\":false" },
+        .{ C3b2b2MetadataMutation.app_keypad, "\"app_keypad\":true", "\"app_keypad\":false" },
+        .{ C3b2b2MetadataMutation.kitty_flags, "\"kitty_flags\":3", "\"kitty_flags\":4" },
+        .{ C3b2b2MetadataMutation.alternate_scroll, "\"alternate_scroll\":false", "\"alternate_scroll\":true" },
+        .{ C3b2b2MetadataMutation.mouse_tracking, "\"mouse_tracking\":true", "\"mouse_tracking\":false" },
+        .{ C3b2b2MetadataMutation.mouse_tracking_mode, "\"mouse_tracking_mode\":2", "\"mouse_tracking_mode\":3" },
+        .{ C3b2b2MetadataMutation.bracketed_paste, "\"bracketed_paste\":true", "\"bracketed_paste\":false" },
+        .{ C3b2b2MetadataMutation.bell_count, "\"bell_count\":4", "\"bell_count\":14" },
+        .{ C3b2b2MetadataMutation.clipboard_write_seq, "\"clipboard_write_seq\":5", "\"clipboard_write_seq\":15" },
+        .{ C3b2b2MetadataMutation.clipboard_read_seq, "\"clipboard_read_seq\":6", "\"clipboard_read_seq\":16" },
+        .{ C3b2b2MetadataMutation.foreground_pgid, "\"foreground_pgid\":77", "\"foreground_pgid\":78" },
+        .{ C3b2b2MetadataMutation.cwd, "\"cwd\":\"/repo/src\"", "\"cwd\":\"/repo/bin\"" },
+        .{ C3b2b2MetadataMutation.window_title, "\"window_title\":\"work\"", "\"window_title\":\"task\"" },
+        .{ C3b2b2MetadataMutation.ssh_value, "\"ssh_remote_dest\":\"host:22\"", "\"ssh_remote_dest\":\"host:23\"" },
+        .{ C3b2b2MetadataMutation.ssh_presence, "\"ssh_remote_dest\":\"host:22\"", "\"ssh_remote_dest\":null" },
+        .{ C3b2b2MetadataMutation.clipboard_target, "\"clipboard_read_target\":\"c\"", "\"clipboard_read_target\":\"d\"" },
+        .{ C3b2b2MetadataMutation.process_pid, "{\"pid\":77,\"name\":\"codex\"}", "{\"pid\":78,\"name\":\"codex\"}" },
+        .{ C3b2b2MetadataMutation.process_name, "\"name\":\"codex\"", "\"name\":\"codec\"" },
+        .{ C3b2b2MetadataMutation.process_count, "\"processes\":[{\"pid\":77,\"name\":\"codex\"}]", "\"processes\":[{\"pid\":77,\"name\":\"codex\"},{\"pid\":78,\"name\":\"zsh\"}]" },
+        // Availability semantically canonicalizes supplied pgid/process values into one closed family.
+        .{ C3b2b2MetadataMutation.foreground_presence, "\"foreground_available\":true", "\"foreground_available\":false" },
+    };
+    inline for (mutations) |mutation| {
+        const variant_payload = try c3b2b2ReplaceFirst(
+            std.testing.allocator,
+            c3b2b2_metadata_payload,
+            mutation[1],
+            mutation[2],
+        );
+        defer std.testing.allocator.free(variant_payload);
+        const variant_recipe = try recipeFor(variant_payload);
+        var variant = try c3b2b2Materialize(std.testing.allocator, variant_payload);
+        defer c3b2b2DeinitClassification(&variant);
+        const variant_dto = switch (variant) {
+            .accepted => |*accepted| switch (accepted.*) {
+                .metadata => |*value| value,
+                else => return error.TestUnexpectedResult,
+            },
+            .violation => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(!std.meta.eql(baseline_recipe, variant_recipe));
+        try std.testing.expect(!baseline_dto.semanticEql(variant_dto));
+        switch (mutation[0]) {
+            .revision => {
+                try std.testing.expectEqual(@as(u64, 8), variant_recipe.revision);
+                try std.testing.expectEqual(@as(u64, 8), variant_dto.revision);
+            },
+            .observer_generation => {
+                try std.testing.expectEqual(@as(u64, 6), variant_recipe.observer_generation);
+                try std.testing.expectEqual(@as(u64, 6), variant_dto.observer_generation);
+            },
+            .title_generation => {
+                try std.testing.expectEqual(@as(u32, 7), variant_recipe.title_generation);
+                try std.testing.expectEqual(@as(u32, 7), variant_dto.title_generation);
+            },
+            .cols => {
+                try std.testing.expectEqual(@as(u16, 121), variant_recipe.cols);
+                try std.testing.expectEqual(@as(u16, 121), variant_dto.cols);
+            },
+            .rows => {
+                try std.testing.expectEqual(@as(u16, 41), variant_recipe.rows);
+                try std.testing.expectEqual(@as(u16, 41), variant_dto.rows);
+            },
+            .semantic_state => {
+                try std.testing.expectEqual(@as(u8, 1), variant_recipe.semantic_state_raw);
+                try std.testing.expectEqual(SemanticPrompt.prompt, variant_dto.semantic_state);
+            },
+            .alt_active => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.alt_active_raw);
+                try std.testing.expect(!variant_dto.alt_active);
+            },
+            .app_cursor_keys => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.app_cursor_keys_raw);
+                try std.testing.expect(!variant_dto.app_cursor_keys);
+            },
+            .app_keypad => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.app_keypad_raw);
+                try std.testing.expect(!variant_dto.app_keypad);
+            },
+            .kitty_flags => {
+                try std.testing.expectEqual(@as(u8, 4), variant_recipe.kitty_flags_raw);
+                try std.testing.expectEqual(@as(u5, 4), variant_dto.kitty_flags);
+            },
+            .alternate_scroll => {
+                try std.testing.expectEqual(@as(u8, 1), variant_recipe.alternate_scroll_raw);
+                try std.testing.expect(variant_dto.alternate_scroll);
+            },
+            .mouse_tracking => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.mouse_tracking_raw);
+                try std.testing.expect(!variant_dto.mouse_tracking);
+            },
+            .mouse_tracking_mode => {
+                try std.testing.expectEqual(@as(u8, 3), variant_recipe.mouse_tracking_mode);
+                try std.testing.expectEqual(@as(u8, 3), variant_dto.mouse_tracking_mode);
+            },
+            .bracketed_paste => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.bracketed_paste_raw);
+                try std.testing.expect(!variant_dto.bracketed_paste);
+            },
+            .bell_count => {
+                try std.testing.expectEqual(@as(u64, 14), variant_recipe.bell_count);
+                try std.testing.expectEqual(@as(u64, 14), variant_dto.bell_count);
+            },
+            .clipboard_write_seq => {
+                try std.testing.expectEqual(@as(u64, 15), variant_recipe.clipboard_write_seq);
+                try std.testing.expectEqual(@as(u64, 15), variant_dto.clipboard_write_seq);
+            },
+            .clipboard_read_seq => {
+                try std.testing.expectEqual(@as(u64, 16), variant_recipe.clipboard_read_seq);
+                try std.testing.expectEqual(@as(u64, 16), variant_dto.clipboard_read_seq);
+            },
+            .foreground_pgid => {
+                try std.testing.expectEqual(@as(i32, 78), variant_recipe.foreground_pgid);
+                try std.testing.expectEqual(@as(?i32, 78), variant_dto.foreground_pgid);
+            },
+            .cwd => {
+                try std.testing.expect(!std.mem.eql(u8, &baseline_recipe.cwd.digest, &variant_recipe.cwd.digest));
+                try std.testing.expectEqualStrings("/repo/bin", variant_dto.cwd());
+            },
+            .window_title => {
+                try std.testing.expect(!std.mem.eql(u8, &baseline_recipe.window_title.digest, &variant_recipe.window_title.digest));
+                try std.testing.expectEqualStrings("task", variant_dto.windowTitle());
+            },
+            .ssh_value => {
+                try std.testing.expect(!std.mem.eql(u8, &baseline_recipe.ssh_remote_dest.digest, &variant_recipe.ssh_remote_dest.digest));
+                try std.testing.expectEqualStrings("host:23", variant_dto.sshRemoteDest().?);
+            },
+            .ssh_presence => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.ssh_remote_dest_present_raw);
+                try std.testing.expect(variant_dto.sshRemoteDest() == null);
+            },
+            .clipboard_target => {
+                try std.testing.expect(!std.mem.eql(u8, &baseline_recipe.clipboard_read_target.digest, &variant_recipe.clipboard_read_target.digest));
+                try std.testing.expectEqualStrings("d", variant_dto.clipboardReadTarget());
+            },
+            .process_pid => {
+                try std.testing.expectEqual(@as(i32, 78), variant_recipe.processes[0].pid);
+                try std.testing.expectEqual(@as(i32, 78), variant_dto.processes[0].pid);
+            },
+            .process_name => {
+                try std.testing.expect(!std.mem.eql(u8, &baseline_recipe.processes[0].name_digest, &variant_recipe.processes[0].name_digest));
+                try std.testing.expectEqualStrings("codec", variant_dto.processes[0].slice());
+            },
+            .process_count => {
+                try std.testing.expectEqual(@as(u8, 2), variant_recipe.process_count);
+                try std.testing.expectEqual(@as(u8, 2), variant_dto.process_count);
+                try std.testing.expectEqual(@as(i32, 78), variant_dto.processes[1].pid);
+                try std.testing.expectEqualStrings("zsh", variant_dto.processes[1].slice());
+            },
+            .foreground_presence => {
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.foreground_available_raw);
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.foreground_pgid_present_raw);
+                try std.testing.expectEqual(@as(u8, 0), variant_recipe.process_count);
+                try std.testing.expect(!variant_dto.foreground_available);
+                try std.testing.expectEqual(@as(?i32, null), variant_dto.foreground_pgid);
+                try std.testing.expectEqual(@as(u8, 0), variant_dto.process_count);
+            },
+        }
+    }
+}
+
+test "C3-3b2b2 compatibility reports OOM only at the owning allocation" {
+    var counter: C3b2b2CountingAllocator = .{
+        .parent = std.testing.allocator,
+        .fail_next = true,
+    };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        c3b2b2Materialize(counter.allocator(), c3b2b2_metadata_payload),
+    );
+    try std.testing.expectEqual(@as(usize, 1), counter.allocation_calls);
+    try std.testing.expectEqual(@as(usize, 0), counter.free_calls);
+}
+
+test "C3-3b2b2 compatibility rejects allocator callback scalar and string drift locally" {
+    var payload = c3b2b2_metadata_payload.*;
+    const revision = std.mem.indexOf(u8, &payload, "metadata_revision\":9").? +
+        "metadata_revision\":".len;
+    var counter: C3b2b2CountingAllocator = .{
+        .parent = std.testing.allocator,
+        .mutate_payload = &payload,
+        .mutate_index = revision,
+    };
+    try std.testing.expectError(
+        error.LocalInvariant,
+        c3b2b2Materialize(counter.allocator(), &payload),
+    );
+    try std.testing.expectEqual(@as(usize, 1), counter.allocation_calls);
+    try std.testing.expectEqual(@as(usize, 1), counter.free_calls);
+
+    var string_payload = c3b2b2_metadata_payload.*;
+    const cwd_byte = std.mem.indexOf(u8, &string_payload, "/repo/src").? + 1;
+    var string_counter: C3b2b2CountingAllocator = .{
+        .parent = std.testing.allocator,
+        .mutate_payload = &string_payload,
+        .mutate_index = cwd_byte,
+    };
+    try std.testing.expectError(
+        error.LocalInvariant,
+        c3b2b2Materialize(string_counter.allocator(), &string_payload),
+    );
+    try std.testing.expectEqual(@as(usize, 1), string_counter.allocation_calls);
+    try std.testing.expectEqual(@as(usize, 1), string_counter.free_calls);
+}
+
+test "C3-3b2b2 compatibility separates peer violation from forged local provenance" {
+    var counter: C3b2b2CountingAllocator = .{ .parent = std.testing.allocator };
+    const malformed = "{\"event\":\"runtime.metadata\",\"metadata\":";
+    var peer = try classifyAndMaterializeEvent(
+        counter.allocator(),
+        c3b2b2_identity,
+        c3b2b2_controller,
+        .{
+            .expected_major = protocol.version_major,
+            .metadata_support = .supported,
+            .verdict = .malformed,
+        },
+        c3b2b2Frame(malformed),
+    );
+    defer c3b2b2DeinitClassification(&peer);
+    switch (peer) {
+        .violation => |violation| try std.testing.expectEqual(
+            .malformed,
+            std.meta.activeTag(violation),
+        ),
+        .accepted => return error.TestUnexpectedResult,
+    }
+
+    var forged = c3b2b2Preflight(c3b2b2_metadata_payload);
+    switch (forged.verdict) {
+        .accepted => |*accepted| switch (accepted.event) {
+            .metadata => |*value| value.revision += 1,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectError(
+        error.LocalInvariant,
+        classifyAndMaterializeEvent(
+            counter.allocator(),
+            c3b2b2_identity,
+            c3b2b2_controller,
+            forged,
+            c3b2b2Frame(c3b2b2_metadata_payload),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), counter.allocation_calls);
+    try std.testing.expectEqual(@as(usize, 0), counter.free_calls);
 }

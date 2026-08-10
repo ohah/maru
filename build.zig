@@ -2261,27 +2261,8 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = b3_optimize,
-        });
-        const event_c3_3b2b2_types_module = b.createModule(.{
-            .root_source_file = b.path(
-                "src/platform/macos/session_host/runtime_event_types.zig",
-            ),
-            .target = target,
-            .optimize = b3_optimize,
-        });
-        const event_c3_3b2b2_wire_module = b.createModule(.{
-            .root_source_file = b.path(
-                "src/platform/macos/session_host/runtime_event_wire.zig",
-            ),
-            .target = target,
-            .optimize = b3_optimize,
-        });
-        const event_c3_3b2b2_protocol_module = b.createModule(.{
-            .root_source_file = b.path(
-                "src/platform/macos/session_host/protocol.zig",
-            ),
-            .target = target,
-            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         const event_c3_3b2b2_metadata_wire_module = b.createModule(.{
             .root_source_file = b.path(
@@ -2289,30 +2270,12 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         const event_c3_3b2b2_recipe_tests = addProjectTest(b, .{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(
-                    "tests/session_host_event_preparation.zig",
-                ),
-                .target = target,
-                .optimize = b3_optimize,
-                .imports = &.{
-                    .{
-                        .name = "runtime_event_preparation",
-                        .module = event_c3_3b2b2_preparation_module,
-                    },
-                    .{
-                        .name = "runtime_event_types",
-                        .module = event_c3_3b2b2_types_module,
-                    },
-                    .{
-                        .name = "runtime_event_wire",
-                        .module = event_c3_3b2b2_wire_module,
-                    },
-                },
-            }),
-            .filters = &.{"C3-3b2b2 recipe"},
+            .root_module = event_c3_3b2b2_preparation_module,
+            .filters = &.{"C3-3b2b2"},
         });
         const run_event_c3_3b2b2_recipe_tests =
             b.addRunArtifact(event_c3_3b2b2_recipe_tests);
@@ -2322,40 +2285,34 @@ pub fn build(b: *std.Build) void {
             &run_event_c3_3b2b2_recipe_tests.step,
         );
         const event_c3_3b2b2_compat_tests = addProjectTest(b, .{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(
-                    "tests/session_host_event_preparation_compat.zig",
-                ),
-                .target = target,
-                .optimize = b3_optimize,
-                .link_libc = true,
-                .imports = &.{
-                    .{
-                        .name = "protocol",
-                        .module = event_c3_3b2b2_protocol_module,
-                    },
-                    .{
-                        .name = "runtime_metadata_wire",
-                        .module = event_c3_3b2b2_metadata_wire_module,
-                    },
-                    .{
-                        .name = "runtime_event_types",
-                        .module = event_c3_3b2b2_types_module,
-                    },
-                    .{
-                        .name = "runtime_event_wire",
-                        .module = event_c3_3b2b2_wire_module,
-                    },
-                },
-            }),
+            .root_module = event_c3_3b2b2_metadata_wire_module,
             .filters = &.{"C3-3b2b2 compatibility"},
         });
         const run_event_c3_3b2b2_compat_tests =
             b.addRunArtifact(event_c3_3b2b2_compat_tests);
-        run_event_c3_3b2b2_compat_tests.addArg("--maru-expect-tests=6");
+        run_event_c3_3b2b2_compat_tests.addArg("--maru-expect-tests=5");
         run_event_c3_3b2b2_compat_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b2b2_step.dependOn(
             &run_event_c3_3b2b2_compat_tests.step,
+        );
+        const event_c3_3b2b2_remote_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/remote_runtime.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3b2b2 compatibility maps"},
+        });
+        const run_event_c3_3b2b2_remote_tests =
+            b.addRunArtifact(event_c3_3b2b2_remote_tests);
+        run_event_c3_3b2b2_remote_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2b2_remote_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b2_step.dependOn(
+            &run_event_c3_3b2b2_remote_tests.step,
         );
         const event_c3_3b2b2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

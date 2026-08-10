@@ -1531,7 +1531,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
       public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
-      **C3-3b1 correlation·ordering migration은 구현됐고, C3-3b2 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 순서대로 닫는다. 각 slice는 앞 slice의 focused
+      **C3-3b1 correlation·ordering migration과 C3-3b2a process-seal prerequisite는 구현됐고, C3-3b2b 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
+      process-domain seal 이전과 immutable preparation을 각각 독립 PR인 **b2a → b2b**로 나누며, 제품 `event_pending` 활성화 전에 async close를 먼저 닫기 위해
+      실제 구현 순서는 **b2a → b2b → b3 → b5 → b4 → b6**이다. 각 slice는 앞 slice의 focused
       Debug·ReleaseFast gate와 source boundary를 상속하고, 마지막 slice 전에는 C3-3b 완료나 제품 close parity를 주장하지 않는다.
 
       1. **C3-3b1 correlation·ordering migration:** canonical take-only opaque `EventCorrelation`, minimal ClientSlot classification context,
@@ -1541,27 +1543,48 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          모든 live non-revoke/unknown event는 `non_revoke_effect`다. benign도 release까지 blocker를 유지하며 sibling TX/RPC는 wire 0,
          queued revoke 뒤에도 RX/demux tail은 진행하는 actual socket oracle을 포함한다. take 당시 `expected_major|metadata_support`는
          canonical quarantine mirror에 immutable snapshot으로 봉인하고 release는 mutable Client current state를 다시 권위로 사용하지 않는다.
-         b1의 RX/correlation projection은 내부 substrate이며 실제 `RemoteRuntime` 제품 pump 연결과 semantic owner handoff는 각각 b4와 b2가 소유한다.
-      2. **C3-3b2 immutable preparation:** final-address `PendingEventOwner`, immutable `RuntimeSemanticSnapshot`, closed `PreparedEvent`와
-         `EffectRequest`, production full-content hash를 구현한다. metadata는 packed DTO pointer adoption 없이 independent next observation을
-         만들며 OOM every-copy-index, owner당 checked `4 * protocol.max_control_json` double-peak와 frame당
-         `16 * 4 * protocol.max_control_json`/16-owner round-robin hash budget, Busy 3회 exact byte/attempt를 고정한다.
-      3. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는
+         b1의 RX/correlation projection은 내부 substrate이며 실제 `RemoteRuntime` 제품 pump 연결과 dormant semantic owner handoff는 각각 b4와 b2b가 소유한다.
+      2. **C3-3b2a process-seal prerequisite:** dependency-neutral `process_identity.zig`를 macOS/Linux 실제 PID의 sole SSOT로 먼저 두고,
+         neutral `process_seal_service.zig`를 별도 PR로 구현하며 기존
+         `operation_thread_identity`의 capability key를 원자적으로 이전한다. ClientSlot process bootstrap의 기존 mutex 아래
+         `nonce -> unpublished service prepare -> registry/issuer no-fail publication -> service ready release` 순서를 단일 transaction으로
+         고정하고, 모든 reader는 PID/process nonce/domain의 ready acquire 검증 전 key·registry mutex를 만지지 않는다. production entropy는
+         neutral `secureEntropy` provider가 service private unpublished storage에 직접 쓰며 raw key는 module 밖으로 나오지 않는다.
+         non-secret cross-target fallback은 두지 않는다. 모든 byte OR가 0이면
+         retry·fallback·`commitReady` 없이 permanent terminal이다. test-only deterministic scalar seed는 local service private seam에서만 내부
+         KDF로 확장하고 seed/output 0을 거부하며 non-test import/caller/storage는 0이다. fork child는 inherited key/lock 전에 PID mismatch로
+         거부한다. 전용 non-test helper의 public singleton을 두 clean exec에서 초기화해 process 간 derived tag 비재사용과 각 process의 typed derivation
+         idempotence를 검증한다. 구 key/storage/lazy initializer/API/callsite는 source 0이며 source-level cutover라 과거 binary의
+         storage zeroization이나 live key migration을 주장하지 않는다. b2a domain API는 capability registry key만 제공하며 b2 cleanup
+         transcript/progress concrete typed input과 seal method는 b2b가 추가한다. raw key나 arbitrary-byte MAC oracle은 제공하지 않는다.
+         service lifecycle은 `uninitialized -> initializing -> ready | terminal`이고 initializing claim 뒤 모든 실패는 terminal release를
+         게시한다. package-private `prepare/commitReady/validateReady/capabilityRegistryKey`의 closed errors와 ClientSlot의
+         `ProcessDomainMismatch|ProcessSealUnavailable` 정규화는 persistent SSOT를 따른다. focused gate는 기존 capability/reader/fork 전수와 동시 최초
+         init·publication boundary pause·entropy/zero·cross-domain/replay를 Debug·ReleaseFast로 고정한다. Client fence, generation transport,
+         initial snapshot owner, generation batch allocator-scope registry와 ended-purge quarantine receipt/proof도 같은 PID leaf로 이관하고
+         unsupported target PID zero fail-close, Linux sentinel 권위와 fork-child
+         inherited-authority acceptance가 0임을 source/process gate로 검증한다.
+      3. **C3-3b2b immutable preparation:** final-address pending owner, immutable Runtime snapshot, closed prepared event/effect와
+         production full-content seal을 구현한다. 공용 `RuntimeObservation.replace`와 기존 cache admission을 exact-capacity로 먼저 닫는다.
+         b2b는 dormant production-source orchestration의 test-mode 호출, 4-part prepare peak,
+         3-part published rehash, fixed failure mapping, typed scratch handoff와 proof-loss cleanup을 닫는다. concrete process-seal cleanup
+         transcript/progress domain도 이 slice에서 추가한다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는
+         [persistent-session-host.md의 C3-3b 계약](persistent-session-host.md#c3-3b-event-settlement와-비동기-close-계약)이며 이 계획은
+         그 계약을 복제하지 않는다.
+      4. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는
          `settlePendingEvent(correlation,effect_request)` transaction을 구현한다. 모든 authority/callback/allocator preflight 뒤
          none·poison·revoke clean/cancel/partial→poison·already-terminal cleanup과 exact release를 같은 no-fail suffix로 닫는다. trusted
          mismatch recovery, sibling exact-own cleanup, first-reason 보존, callback/fork/ABA/proof-loss subprocess를 포함한다.
-      4. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고
+      5. **C3-3b5 common close progress:** 기존 VTable 메서드 수를 늘리지 않고 close 계열 반환을
+         `CloseProgress`, remove를 `RemoveProgress`로 바꾼다. heap-pinned `RemoteRuntime.CloseAuthority`와 backend closing receipt,
+         bounded/fair `CloseSweep`, pending lifecycle readiness, handle ABA와 real AppSession synchronous in-process tab/window close parity를
+         검증한다. b4가 실제 `event_pending`을 활성화하기 전에 dormant pending 상태 전수를 먼저 닫으며 actual generation
+         `event_pending` close E2E는 b4가 소유한다.
+      6. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고
          `idle|event_pending|drained|ended` typed progress를 `RemoteTermBackend.drainRemote`까지 연결한다. settlement/observation cleanup callback
          전후 full seal, `committed_cleanup` read/mutation guard, actual product Busy→next-tick success·surface live E2E와
          `RemoteRuntime` generation semantic arm의 raw `Client` event/effect callsite 0 focused allowlist를 고정한다.
-      5. **C3-3b5 common close progress:** 기존 VTable 메서드 수를 늘리지 않고 close 계열 반환을
-         `CloseProgress`, remove를 `RemoveProgress`로 바꾼다. heap-pinned `RemoteRuntime.CloseAuthority`는 `ready_remove`까지만 소유하고
-         backend가 sealed closing receipt consume→map/handle 제거→Runtime destroy 뒤 `removed` 결과를 소유한다. backend-global 4,096
-         runtime cap/cap+1 admission, disposition lattice, all-or-none layout tombstone, checked monotonic ticket과 frozen-max/cursor
-         `CloseSweep` fairness, `visited*16` fixed selection, 상수-파생 256 KiB 이하 pointer-free `CloseScanReceipt` full collect→iterator close→relookup/generation+`CloseOperationPin`
-         검증→최대 16 act scan, self-reentry Busy, handle ABA와 real AppSession
-         tab/window close를 검증한다. in-process backend는 synchronous complete parity를 유지한다.
-      6. **C3-3b6 app-quit/current+N-1 shutdown:** 모든 outcome의 exact target/attempt `ShutdownAttemptKey`, connection-dependent와
+      7. **C3-3b6 app-quit/current+N-1 shutdown:** 모든 outcome의 exact target/attempt `ShutdownAttemptKey`, connection-dependent와
          post-connection terminal의 one-shot `ShutdownConnectionReceipt{connection,GUI-local lease generation,operation,inventory_attempt}`,
          pre/post `bounded_unconfirmed` evidence matrix와 closed `ShutdownAdminOutcome`,
          exact-host one-shot admin lease barrier, target당 terminate attempt 3회와 app-quit global 15초 deadline, target별 순차 connection과 ambiguous

@@ -1,11 +1,12 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const process_seal_service = @import("process_seal_service.zig");
 
 threadlocal var incarnation: u64 = 0;
 var next_incarnation: std.atomic.Value(u64) = .init(1);
 
 pub fn currentProcessId() u32 {
-    return if (builtin.os.tag == .macos) @intCast(std.c.getpid()) else 1;
+    return process_seal_service.currentProcessId();
 }
 
 pub const MintReceipt = struct {
@@ -377,8 +378,6 @@ var capabilities: [max_capabilities]CapabilityEntry = [_]CapabilityEntry{.{}} **
 var capability_free_slots: [max_capabilities]u16 = initialFreeSlots();
 var capability_free_count: usize = max_capabilities;
 var next_capability_key: u64 = 1;
-var capability_key_secret: [32]u8 = [_]u8{0} ** 32;
-var capability_key_secret_initialized = false;
 const max_reader_pins = 4096;
 var reader_pins: [max_reader_pins]ReaderPinEntry = [_]ReaderPinEntry{.{}} ** max_reader_pins;
 var reader_free_slots: [max_reader_pins]u16 = initialFreeSlots();
@@ -399,17 +398,11 @@ fn capabilityHandleExact(handle: CapabilityHandle, entry: *const CapabilityEntry
         entry.operation_identity == handle.operation_identity;
 }
 
-fn capabilityRegistryKey(counter: u64, index: usize, generation: u64) u64 {
-    var hasher = std.crypto.hash.Blake3.init(.{ .key = capability_key_secret });
-    hasher.update("maru.capability.registry-key.v1");
-    var transcript: [24]u8 = undefined;
-    std.mem.writeInt(u64, transcript[0..8], counter, .little);
-    std.mem.writeInt(u64, transcript[8..16], @intCast(index), .little);
-    std.mem.writeInt(u64, transcript[16..24], generation, .little);
-    hasher.update(&transcript);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return std.mem.readInt(u64, digest[0..8], .little);
+fn processSealReadyForCapabilityRegistry() bool {
+    const pid = currentProcessId();
+    const nonce = registry_process_nonce.load(.acquire);
+    process_seal_service.validateReady(pid, nonce) catch return false;
+    return true;
 }
 
 pub fn publishCapability(fields: CapabilityFields) error{ InvalidOwner, IdentityExhausted, ResourceExhausted }!CapabilityHandle {
@@ -424,6 +417,7 @@ pub fn publishCapability(fields: CapabilityFields) error{ InvalidOwner, Identity
         return error.InvalidOwner;
     if (builtin.is_test and capability_publish_exhaustion_test_hook.swap(false, .acq_rel))
         return error.ResourceExhausted;
+    if (!processSealReadyForCapabilityRegistry()) return error.InvalidOwner;
     while (!capability_mutex.tryLock()) std.atomic.spinLoopHint();
     defer capability_mutex.unlock();
     if (currentProcessId() != current_pid) return error.InvalidOwner;
@@ -437,25 +431,20 @@ pub fn publishCapability(fields: CapabilityFields) error{ InvalidOwner, Identity
         capability_free_count += 1;
         return error.IdentityExhausted;
     }
-    if (!capability_key_secret_initialized) {
-        if (builtin.os.tag == .macos) {
-            std.c.arc4random_buf(&capability_key_secret, capability_key_secret.len);
-        } else {
-            var seed = std.crypto.hash.Blake3.init(.{});
-            var material: [24]u8 = undefined;
-            std.mem.writeInt(u64, material[0..8], fields.owner_process_nonce, .little);
-            std.mem.writeInt(u64, material[8..16], @intFromPtr(&capability_key_secret), .little);
-            std.mem.writeInt(u64, material[16..24], fields.owner_thread_id, .little);
-            seed.update(&material);
-            seed.final(&capability_key_secret);
-        }
-        capability_key_secret_initialized = true;
-    }
-    const key = capabilityRegistryKey(key_counter, index, entry.generation);
-    if (key == 0) {
-        capability_free_count += 1;
-        return error.IdentityExhausted;
-    }
+    const key = process_seal_service.capabilityRegistryKey(
+        fields.owner_process_id,
+        fields.owner_process_nonce,
+        .{
+            .counter = key_counter,
+            .slot_index = @intCast(index),
+            .slot_generation = entry.generation,
+        },
+    ) catch |err| switch (err) {
+        error.ProcessDomainMismatch, error.NotReady, error.Terminal => {
+            capability_free_count += 1;
+            return error.InvalidOwner;
+        },
+    };
     next_capability_key = key_counter + 1;
     entry.* = .{
         .state = .active,
@@ -487,7 +476,8 @@ fn pinCapabilityExact(handle: CapabilityHandle, out: *CapabilityPin, require_own
     if (current_pid == 0 or thread_id == 0 or handle.slot_index >= max_capabilities or
         handle.slot_generation == 0 or handle.registry_key == 0 or
         handle.publication_identity == 0 or handle.operation_identity == 0 or
-        registry_process_id.load(.acquire) != current_pid or !out.pristineExact()) return false;
+        registry_process_id.load(.acquire) != current_pid or !out.pristineExact() or
+        !processSealReadyForCapabilityRegistry()) return false;
     while (!capability_mutex.tryLock()) std.atomic.spinLoopHint();
     defer capability_mutex.unlock();
     const entry = &capabilities[handle.slot_index];
@@ -586,7 +576,8 @@ fn registryProcessCurrent() bool {
 }
 
 fn unpinCapabilityExact(pin: *CapabilityPin, require_owner_thread: bool) bool {
-    if (!registryProcessCurrent() or pin.reader_slot >= max_reader_pins) return false;
+    if (!registryProcessCurrent() or !processSealReadyForCapabilityRegistry() or
+        pin.reader_slot >= max_reader_pins) return false;
     while (!capability_mutex.tryLock()) std.atomic.spinLoopHint();
     defer capability_mutex.unlock();
     if (!registryProcessCurrent()) return false;
@@ -602,7 +593,8 @@ pub fn unpinCapability(pin: *CapabilityPin) bool {
 }
 
 fn closeCapabilityExact(pin: *CapabilityPin, require_owner_thread: bool) bool {
-    if (!registryProcessCurrent() or pin.reader_slot >= max_reader_pins) return false;
+    if (!registryProcessCurrent() or !processSealReadyForCapabilityRegistry() or
+        pin.reader_slot >= max_reader_pins) return false;
     while (!capability_mutex.tryLock()) std.atomic.spinLoopHint();
     if (!registryProcessCurrent()) {
         capability_mutex.unlock();

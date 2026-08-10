@@ -2050,6 +2050,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b1 event correlation and all-event ordering Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b1_step.dependOn(session_host_2c3d_c3_3a3_step);
+    const session_host_2c3d_c3_3b2a_step = b.step(
+        "test-session-host-2c3d-c3-3b2a",
+        "2c3d C3-3b2a process seal migration Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b2a_step.dependOn(session_host_2c3d_c3_3b1_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2470,6 +2475,159 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3b1_runtime_tests.addArg("--maru-expect-tests=2");
         run_event_c3_3b1_runtime_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b1_step.dependOn(&run_event_c3_3b1_runtime_tests.step);
+
+        const event_c3_3b2a_service_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/process_seal_service.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"C3-3b2a process seal"},
+        });
+        const run_event_c3_3b2a_service_tests = b.addRunArtifact(event_c3_3b2a_service_tests);
+        run_event_c3_3b2a_service_tests.addArg("--maru-expect-tests=8");
+        run_event_c3_3b2a_service_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2a_step.dependOn(&run_event_c3_3b2a_service_tests.step);
+
+        const event_c3_3b2a_seal_module = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/process_seal_service.zig",
+            ),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+        });
+        const event_c3_3b2a_fresh_exec_helper = b.addExecutable(.{
+            .name = "maru-session-host-process-seal-fresh-exec-helper",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_process_seal_fresh_exec_helper.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "process_seal_service",
+                    .module = event_c3_3b2a_seal_module,
+                }},
+            }),
+        });
+        const run_event_c3_3b2a_fresh_exec_a =
+            b.addRunArtifact(event_c3_3b2a_fresh_exec_helper);
+        run_event_c3_3b2a_fresh_exec_a.addArg("run-a");
+        const fresh_exec_a = run_event_c3_3b2a_fresh_exec_a.captureStdOut(.{
+            .basename = "process-seal-fresh-exec-a.bin",
+        });
+        const run_event_c3_3b2a_fresh_exec_b =
+            b.addRunArtifact(event_c3_3b2a_fresh_exec_helper);
+        run_event_c3_3b2a_fresh_exec_b.addArg("run-b");
+        const fresh_exec_b = run_event_c3_3b2a_fresh_exec_b.captureStdOut(.{
+            .basename = "process-seal-fresh-exec-b.bin",
+        });
+        const event_c3_3b2a_fresh_exec_oracle_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tests/session_host_process_seal_fresh_exec_oracle.zig",
+            ),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        event_c3_3b2a_fresh_exec_oracle_module.addAnonymousImport(
+            "process_seal_fresh_exec_a",
+            .{ .root_source_file = fresh_exec_a },
+        );
+        event_c3_3b2a_fresh_exec_oracle_module.addAnonymousImport(
+            "process_seal_fresh_exec_b",
+            .{ .root_source_file = fresh_exec_b },
+        );
+        const event_c3_3b2a_fresh_exec_oracle = addProjectTest(b, .{
+            .root_module = event_c3_3b2a_fresh_exec_oracle_module,
+            .filters = &.{"C3-3b2a product singleton is fresh across independent execs"},
+        });
+        const run_event_c3_3b2a_fresh_exec_oracle =
+            b.addRunArtifact(event_c3_3b2a_fresh_exec_oracle);
+        run_event_c3_3b2a_fresh_exec_oracle.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2a_fresh_exec_oracle.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2a_step.dependOn(
+            &run_event_c3_3b2a_fresh_exec_oracle.step,
+        );
+
+        const event_c3_3b2a_identity_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/process_identity.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"macOS and Linux process identity"},
+        });
+        const run_event_c3_3b2a_identity_tests = b.addRunArtifact(event_c3_3b2a_identity_tests);
+        run_event_c3_3b2a_identity_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2a_identity_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2a_step.dependOn(&run_event_c3_3b2a_identity_tests.step);
+
+        inline for (.{
+            .{
+                .path = "src/platform/macos/session_host/client.zig",
+                .filter = "fork child rejects an inherited fence before atomic state access",
+            },
+            .{
+                .path = "src/platform/macos/session_host/generation_batch_registry.zig",
+                .filter = "fork child rejects inherited allocator authority before mutex",
+            },
+            .{
+                .path = "src/platform/macos/session_host/generation_transport.zig",
+                .filter = "capability projection is exact and rejects stale or busy ownership",
+            },
+        }) |fork_case| {
+            const fork_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(fork_case.path),
+                    .target = target,
+                    .optimize = b3_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{fork_case.filter},
+            });
+            const run_fork_tests = b.addRunArtifact(fork_tests);
+            run_fork_tests.addArg("--maru-expect-tests=1");
+            run_fork_tests.setCwd(b.path("."));
+            session_host_2c3d_c3_3b2a_step.dependOn(&run_fork_tests.step);
+        }
+
+        const event_c3_3b2a_bootstrap_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3b2a product bootstrap"},
+        });
+        const run_event_c3_3b2a_bootstrap_tests = b.addRunArtifact(event_c3_3b2a_bootstrap_tests);
+        run_event_c3_3b2a_bootstrap_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2a_bootstrap_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2a_step.dependOn(&run_event_c3_3b2a_bootstrap_tests.step);
+
+        const event_c3_3b2a_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3b2a_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3d C3-3b2a process seal migration boundary"},
+        });
+        const run_event_c3_3b2a_boundary_tests = b.addRunArtifact(event_c3_3b2a_boundary_tests);
+        run_event_c3_3b2a_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2a_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2a_step.dependOn(&run_event_c3_3b2a_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3b2a_boundary_tests.step);
 
         inline for (.{
             "own buffered revoke suppresses newly arriving input before role cache catches up",

@@ -5,6 +5,7 @@
 //! private to this module.
 
 const std = @import("std");
+const process_identity = @import("process_identity.zig");
 const client_mod = @import("client.zig");
 const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
@@ -165,7 +166,7 @@ pub const GenerationTransport = struct {
         const identity = self.binding_reservation.identity;
         if (!rawLifecycleValid(&self.lifecycle) or self.self_addr != @intFromPtr(self) or
             self.lifecycle != .live or self.slot_addr == 0 or self.owner_seal_addr == 0 or
-            self.transport_incarnation == 0 or self.connection_generation != 1 or
+            self.transport_incarnation == 0 or self.connection_generation != 1 or self.pid == 0 or
             self.pid != currentPid() or self.owner_thread_id != std.Thread.getCurrentId() or
             !bindingRoleRawValid(&identity.role) or
             self.slot_incarnation != identity.slot_incarnation or
@@ -529,7 +530,7 @@ pub const GenerationTransport = struct {
         if (!rawLifecycleValid(&self.lifecycle) or self.self_addr != @intFromPtr(self) or
             self.lifecycle != .live or
             self.slot_addr == 0 or self.owner_seal_addr == 0 or self.owner_size == 0 or
-            self.transport_incarnation == 0 or
+            self.transport_incarnation == 0 or self.pid == 0 or
             self.connection_generation != 1 or self.pid != currentPid() or
             self.owner_thread_id != std.Thread.getCurrentId())
             return null;
@@ -585,7 +586,7 @@ pub const GenerationTransport = struct {
         const identity = self.binding_reservation.identity;
         return rawLifecycleValid(&self.lifecycle) and self.self_addr == @intFromPtr(self) and
             self.lifecycle == .live and self.slot_addr != 0 and self.owner_seal_addr != 0 and
-            self.owner_size != 0 and self.transport_incarnation != 0 and
+            self.owner_size != 0 and self.transport_incarnation != 0 and self.pid != 0 and
             self.connection_generation == 1 and self.pid == currentPid() and
             self.owner_thread_id == std.Thread.getCurrentId() and
             bindingRoleRawValid(&identity.role) and
@@ -2009,7 +2010,7 @@ test "CR3a-2c3b reusable response correction forbids work after rearm before ope
 }
 
 fn currentPid() u32 {
-    return if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    return process_identity.currentProcessId();
 }
 
 fn issueIncarnation(issuer: *std.atomic.Value(u64)) error{IdentityExhausted}!u64 {
@@ -2632,7 +2633,7 @@ test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the 
     try std.testing.expect(slot.current.client.firstPoisonReason() != null);
     try std.testing.expect(first_prepared_snapshot_valid);
 
-    if (builtin.os.tag == .macos) {
+    if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
         var stderr_pipe: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
         const child = c.fork();
@@ -3333,7 +3334,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     }
     canonical_client.metadata_support = .unsupported;
 
-    if (builtin.os.tag == .macos) {
+    if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
         const child = c.fork();
         try std.testing.expect(child >= 0);
         if (child == 0) {
@@ -3512,7 +3513,7 @@ test "CR3a-2c3a CR3a-2c3c facade rejects every invalid lifecycle and role byte b
     try std.testing.expect(slot.logicalClient().abortClientSlotTeardownExclusive());
     teardown_exclusive_live = false;
 
-    if (builtin.os.tag == .macos) {
+    if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
         const child = c.fork();
         try std.testing.expect(child >= 0);
         if (child == 0) {

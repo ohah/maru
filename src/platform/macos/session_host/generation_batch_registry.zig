@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const process_identity = @import("process_identity.zig");
 
 pub const max_entries: usize = 4096;
 
@@ -161,7 +162,8 @@ var allocator_scope_authority_generation: u64 = 0;
 var allocator_scope_authority_process_id: std.atomic.Value(u32) = .init(0);
 
 fn allocatorScopeProcessMatches() bool {
-    const current: u32 = if (builtin.os.tag == .macos) @intCast(std.c.getpid()) else 1;
+    const current = process_identity.currentProcessId();
+    if (current == 0) return false;
     const observed = allocator_scope_authority_process_id.load(.acquire);
     if (observed == current) return true;
     if (observed != 0) return false;
@@ -496,7 +498,8 @@ test "CR3a-2c3d C1 allocator authority rejects raw and partial ledger states" {
 }
 
 test "CR3a-2c3d C1 fork child rejects inherited allocator authority before mutex" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux)
+        return error.SkipZigTest;
     try std.testing.expect(allocatorScopeProcessMatches());
     while (!allocator_scope_authority_mutex.tryLock()) std.atomic.spinLoopHint();
     const child = std.c.fork();

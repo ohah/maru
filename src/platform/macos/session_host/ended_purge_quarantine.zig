@@ -1,4 +1,5 @@
 const std = @import("std");
+const process_identity = @import("process_identity.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const max_ended_purge_quarantine_bytes: usize = 64 * 1024 * 1024;
@@ -82,7 +83,7 @@ pub const Registry = struct {
     finalization_consumed: bool = false,
 
     pub fn init() Registry {
-        return .{ .owner_process_id = @intCast(std.c.getpid()) };
+        return .{ .owner_process_id = process_identity.currentProcessId() };
     }
 
     pub fn reserve(
@@ -92,7 +93,7 @@ pub const Registry = struct {
         bytes: usize,
         out: *Reservation,
     ) Error!void {
-        const process_id: u64 = @intCast(std.c.getpid());
+        const process_id: u64 = process_identity.currentProcessId();
         if (self.owner_process_id == 0 or self.owner_process_id != process_id)
             return error.InvalidOwner;
         // The caller supplies final-address authority storage. Reject overlap before reading that
@@ -136,7 +137,7 @@ pub const Registry = struct {
     }
 
     pub fn release(self: *Registry, reservation: *Reservation) bool {
-        const process_id: u64 = @intCast(std.c.getpid());
+        const process_id: u64 = process_identity.currentProcessId();
         if (self.owner_process_id == 0 or self.owner_process_id != process_id or
             objectsOverlap(self, reservation) or
             reservation.process_id != process_id)
@@ -155,7 +156,7 @@ pub const Registry = struct {
         reservation: *Reservation,
         out: *CommitReceipt,
     ) bool {
-        const process_id: u64 = @intCast(std.c.getpid());
+        const process_id: u64 = process_identity.currentProcessId();
         if (self.owner_process_id == 0 or self.owner_process_id != process_id or
             objectsOverlap(self, reservation) or
             objectsOverlap(self, out) or
@@ -198,7 +199,7 @@ pub const Registry = struct {
         receipt: *CommitReceipt,
         out: *ConsumedCommitProof,
     ) bool {
-        const process_id: u64 = @intCast(std.c.getpid());
+        const process_id: u64 = process_identity.currentProcessId();
         if (self.owner_process_id == 0 or self.owner_process_id != process_id or
             objectsOverlap(self, receipt) or
             objectsOverlap(self, out) or
@@ -651,5 +652,5 @@ test "fork child rejects committed receipt before an inherited locked mutex" {
 }
 
 fn physProcessId() u64 {
-    return @intCast(std.c.getpid());
+    return process_identity.currentProcessId();
 }

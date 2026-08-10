@@ -953,7 +953,7 @@ test "CR3a-2c2b3b prepare commit reads PID and callback TLS before graph then re
     ) orelse return error.TestUnexpectedResult;
     const body_start = functionBodyStart(&tree, method) orelse
         return error.TestUnexpectedResult;
-    var getpid_token: ?std.zig.Ast.TokenIndex = null;
+    var process_id_token: ?std.zig.Ast.TokenIndex = null;
     var callback_tls_token: ?std.zig.Ast.TokenIndex = null;
     var first_self_token: ?std.zig.Ast.TokenIndex = null;
     var alias_gate_token: ?std.zig.Ast.TokenIndex = null;
@@ -961,7 +961,8 @@ test "CR3a-2c2b3b prepare commit reads PID and callback TLS before graph then re
     var token = body_start + 1;
     while (token <= tree.lastToken(method)) : (token += 1) {
         const text = tree.tokenSlice(token);
-        if (getpid_token == null and std.mem.eql(u8, text, "getpid")) getpid_token = token;
+        if (process_id_token == null and std.mem.eql(u8, text, "currentProcessId"))
+            process_id_token = token;
         if (callback_tls_token == null and
             std.mem.eql(u8, text, "generationAllocatorCallbackActive"))
             callback_tls_token = token;
@@ -972,7 +973,7 @@ test "CR3a-2c2b3b prepare commit reads PID and callback TLS before graph then re
         if (ledger_gate_token == null and std.mem.eql(u8, text, "prepareDeinitGraph"))
             ledger_gate_token = token;
     }
-    try std.testing.expect(getpid_token.? < callback_tls_token.?);
+    try std.testing.expect(process_id_token.? < callback_tls_token.?);
     try std.testing.expect(callback_tls_token.? < first_self_token.?);
     try std.testing.expect(alias_gate_token.? < ledger_gate_token.?);
     try expectContainerMethodMarkersInOrder(
@@ -1018,14 +1019,15 @@ test "CR3a-2c2b3b finalizer gates PID and raw states before inherited graph acce
     ) orelse return error.TestUnexpectedResult;
     const body_start = functionBodyStart(&tree, method) orelse
         return error.TestUnexpectedResult;
-    var getpid_token: ?std.zig.Ast.TokenIndex = null;
+    var process_id_token: ?std.zig.Ast.TokenIndex = null;
     var proof_pid_token: ?std.zig.Ast.TokenIndex = null;
     var raw_state_gate_token: ?std.zig.Ast.TokenIndex = null;
     var first_fence_token: ?std.zig.Ast.TokenIndex = null;
     var token = body_start + 1;
     while (token <= tree.lastToken(method)) : (token += 1) {
         const text = tree.tokenSlice(token);
-        if (getpid_token == null and std.mem.eql(u8, text, "getpid")) getpid_token = token;
+        if (process_id_token == null and std.mem.eql(u8, text, "currentProcessId"))
+            process_id_token = token;
         if (proof_pid_token == null and std.mem.eql(u8, text, "process_id"))
             proof_pid_token = token;
         if (raw_state_gate_token == null and
@@ -1034,11 +1036,11 @@ test "CR3a-2c2b3b finalizer gates PID and raw states before inherited graph acce
         if (first_fence_token == null and std.mem.eql(u8, text, "operation_fence"))
             first_fence_token = token;
     }
-    try std.testing.expect(getpid_token != null);
+    try std.testing.expect(process_id_token != null);
     try std.testing.expect(proof_pid_token != null);
     try std.testing.expect(raw_state_gate_token != null);
     try std.testing.expect(first_fence_token != null);
-    try std.testing.expect(getpid_token.? < proof_pid_token.?);
+    try std.testing.expect(process_id_token.? < proof_pid_token.?);
     try std.testing.expect(proof_pid_token.? < raw_state_gate_token.?);
     try std.testing.expect(raw_state_gate_token.? < first_fence_token.?);
 }
@@ -1459,6 +1461,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "process_seal_service" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventCorrelationInternal" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EventCorrelation" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventCorrelationInput" },
@@ -2132,7 +2135,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         client_slot,
         "ClientSlot",
         "ProcessRuntimeInitError",
-        &.{"ProcessDomainMismatch"},
+        &.{ "ProcessDomainMismatch", "ProcessSealUnavailable" },
     );
     try expectNestedErrorSetAbsentOrExact(
         allocator,
@@ -2157,8 +2160,12 @@ test "CR3a-2c2b3b quarantine leaf is absent or exposes only the frozen public AP
         "src/platform/macos/session_host/ended_purge_quarantine.zig",
     )) orelse return;
     defer allocator.free(source);
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"process_identity.zig\")"),
+    );
     const expected = [_]DeclarationTuple{
         .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "max_ended_purge_quarantine_bytes" },
         .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Error" },
@@ -2992,7 +2999,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 11),
+        @as(usize, 12),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }

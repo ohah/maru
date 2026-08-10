@@ -118,6 +118,9 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 전체 확인: `mise run check`
 - Zig 테스트 직접 실행: `zig build test`
 
+- 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)
+- 영속 세션 호스트 2c3d C3-3b2b immutable preparation 계획 gate(구현 전 실행 불가): `zig build test-session-host-2c3d-c3-3b2b`. b2b 구현 PR에서 build target과 함께 승격하며 b2a focused gate를 상속하고 Debug·ReleaseFast, proof-loss subprocess와 source-boundary를 실행한다. 이 gate는 dormant production-source orchestration의 test-mode 호출만 증명하며 normal product caller 0과 b4 전 non-test product-body 미증명을 명시적으로 유지한다.
+
 ## 완료 전 확인
 
 코드나 빌드 설정을 바꾼 PR은 기본적으로 다음을 통과해야 한다.

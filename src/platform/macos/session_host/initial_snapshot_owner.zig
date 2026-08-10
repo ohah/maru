@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
+const process_identity = @import("process_identity.zig");
 
 const Lifecycle = enum(u8) { pristine, live, terminal };
 
@@ -252,7 +253,7 @@ pub const InitialSnapshotOwner = struct {
         return self.self_addr == @intFromPtr(self) and self.lifecycle == .live and
             self.bytes != null and self.transport_incarnation != 0 and
             self.slot_incarnation != 0 and self.node_incarnation != 0 and self.host_id != 0 and
-            self.connection_generation != 0 and self.pid == currentPid() and
+            self.connection_generation != 0 and self.pid != 0 and self.pid == currentPid() and
             self.process_nonce != 0 and self.owner_thread_id == std.Thread.getCurrentId() and
             self.stream_id != 0 and self.binding_incarnation != 0 and
             self.binding_storage_addr != 0 and self.binding_reservation_id != 0 and
@@ -276,7 +277,5 @@ fn consumeCanonicalPermit(
 }
 
 fn currentPid() u32 {
-    // Keep the process-domain sentinel identical to ClientSlot/GenerationTransport on
-    // non-macOS test targets. Production macOS always seals the real process ID.
-    return if (builtin.os.tag == .macos) @intCast(std.c.getpid()) else 1;
+    return process_identity.currentProcessId();
 }

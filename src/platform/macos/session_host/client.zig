@@ -5968,7 +5968,7 @@ pub const ClientOperationFence = struct {
         client_addr: usize,
         fence_generation: u64,
     ) bool {
-        const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+        const pid = operation_thread_identity.currentProcessId();
         if (pid == 0 or self.owner_process_id != pid) return false;
         return self.self_addr == @intFromPtr(self) and self.client_addr == client_addr and
             self.slot_incarnation != 0 and self.node_incarnation != 0 and
@@ -6003,7 +6003,7 @@ else
 test "CR3a B3b-F operation fence linearizes shared and exclusive ownership" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 11, 13, 17);
 
     try fence.tryEnterShared(@intFromPtr(&client_storage), 17);
@@ -6030,7 +6030,7 @@ test "CR3a B3b-F operation fence linearizes shared and exclusive ownership" {
 test "CR3a B3b-F operation fence rejects copied and stale identities before state mutation" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 19, 23, 29);
     var copied = fence;
 
@@ -6048,7 +6048,7 @@ test "CR3a B3b-F operation fence rejects copied and stale identities before stat
 test "B3-3 operation execution lease atomically blocks shared and teardown entry" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 31, 37, 41);
 
     try fence.tryAcquireExecutionLease(@intFromPtr(&client_storage), 41);
@@ -6069,7 +6069,7 @@ test "B3-3 operation execution lease atomically blocks shared and teardown entry
 test "B3-3 operation execution lease upgrades and restores one registered shared pin" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 71, 73, 79);
     try fence.tryEnterShared(@intFromPtr(&client_storage), 79);
     try fence.upgradeSingleSharedToExecutionLease(@intFromPtr(&client_storage), 79);
@@ -6087,7 +6087,7 @@ test "B3-3 operation execution lease upgrades and restores one registered shared
 test "CR3a B3b-F nested count overflow and reserved states fail closed" {
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 32, 33, 34);
 
     try fence.tryEnterShared(@intFromPtr(&client_storage), 34);
@@ -6118,7 +6118,7 @@ test "CR3a B3b-F Client rejects rebind and same-address generation ABA" {
     };
     defer client.parser.deinit();
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 36, 37, 38);
     try std.testing.expect(client.bindOperationFence(&fence, 38));
     try std.testing.expect(!client.bindOperationFence(&fence, 38));
@@ -6137,7 +6137,7 @@ test "CR3a B3b-F exclusive fence rejects public Client mutation before graph acc
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 41, 43, 47);
     try std.testing.expect(client.bindOperationFence(&fence, 47));
     try client.tryAcquireEndedPurgeExclusive();
@@ -6173,7 +6173,7 @@ test "CR3a B3b-F exclusive fence rejects a foreign thread Client mutation" {
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 59, 61, 67);
     try std.testing.expect(client.bindOperationFence(&fence, 67));
     try client.tryAcquireEndedPurgeExclusive();
@@ -6198,7 +6198,7 @@ test "CR3a B3b-S publication seal atomically excludes a late intrusion" {
     };
     defer client.parser.deinit();
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 68, 69, 70);
     try std.testing.expect(client.bindOperationFence(&fence, 70));
     try client.tryAcquireEndedPurgeExclusive();
@@ -6224,7 +6224,7 @@ test "CR3a B3b-S mutable terminal observations fail closed behind exclusive fenc
     };
     client.latchFirstPoisonReason(.local_invariant_violation);
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 69, 70, 71);
     try std.testing.expect(client.bindOperationFence(&fence, 71));
     try client.tryAcquireEndedPurgeExclusive();
@@ -6246,7 +6246,7 @@ test "CR3a B3b-F allocator reentry poison defers to exclusive fence" {
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 70, 71, 72);
     try std.testing.expect(client.bindOperationFence(&fence, 72));
     try std.testing.expect(client.enterGenerationAllocatorCallback());
@@ -6269,7 +6269,7 @@ test "CR3a B3b-F deinit-only reentry records exclusive intrusion" {
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 74, 75, 76);
     try std.testing.expect(client.bindOperationFence(&fence, 76));
     try client.tryAcquireEndedPurgeExclusive();
@@ -6300,7 +6300,7 @@ test "CR3a B3b-F foreign shared entry makes exclusive commit fail without waitin
 
     var client_storage: u8 = 0;
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client_storage), pid, 5, 71, 72, 73);
     var entered = std.atomic.Value(bool).init(false);
     var release = std.atomic.Value(bool).init(false);
@@ -6331,7 +6331,7 @@ test "CR3a B3b-F deinit retries only after a shared operation leaves" {
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 75, 76, 77);
     try std.testing.expect(client.bindOperationFence(&fence, 77));
 
@@ -6353,7 +6353,7 @@ test "CR3a B3b-S bound generation Client cannot enter external mode" {
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     var fence: ClientOperationFence = undefined;
-    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    const pid = operation_thread_identity.currentProcessId();
     fence.initInPlace(@intFromPtr(&client), pid, 5, 76, 77, 78);
     try std.testing.expect(client.bindOperationFence(&fence, 78));
 
@@ -6367,7 +6367,8 @@ test "CR3a B3b-S bound generation Client cannot enter external mode" {
 }
 
 test "CR3a B3b-F fork child rejects an inherited fence before atomic state access" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux)
+        return error.SkipZigTest;
     const ChildCleanup = struct {
         fn terminateAndReap(child_pid: c.pid_t) void {
             _ = c.kill(child_pid, c.SIG.KILL);
@@ -11207,7 +11208,7 @@ pub const Client = struct {
         inventory: *const PreparedEndedPurgeInventory,
         out: *PreparedEndedPurgeCommit,
     ) EndedPurgeCommitError!void {
-        const actual_pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+        const actual_pid = operation_thread_identity.currentProcessId();
         if (actual_pid == 0) return error.InvalidOwner;
         // This TLS gate must precede every Client graph read. A hostile allocator callback may
         // have drifted pointer-bearing descriptors before attempting a nested prepare.
@@ -12034,10 +12035,7 @@ pub const Client = struct {
         prepared: *PreparedEndedPurgeCommit,
         quarantine_proof: ended_purge_quarantine.ConsumedCommitProof,
     ) void {
-        const actual_pid: u64 = if (builtin.os.tag == .macos)
-            @intCast(c.getpid())
-        else
-            1;
+        const actual_pid: u64 = operation_thread_identity.currentProcessId();
         // The consumed proof is the only object inspected before the process-domain gate. In a
         // fork child, reject before touching inherited Client/fence atomics or interpreting any
         // callback-writable enum/tag state.

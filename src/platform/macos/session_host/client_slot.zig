@@ -12,6 +12,7 @@ const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
 const batch_registry_mod = @import("generation_batch_registry.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const operation_thread_identity = @import("operation_thread_identity.zig");
+const process_seal_service = @import("process_seal_service.zig");
 const contract = @import("generation_attachment_contract.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -1706,7 +1707,7 @@ fn recordAliasQuarantine() bool {
 }
 
 fn currentPid() u32 {
-    return if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    return process_seal_service.currentProcessId();
 }
 
 fn streamOperationNodeIdle(node: *const ClientNode) bool {
@@ -7992,7 +7993,7 @@ pub const ClientSlot = struct {
     next_binding_incarnation: u64,
     lifecycle: Lifecycle,
 
-    pub const ProcessRuntimeInitError = error{ProcessDomainMismatch};
+    pub const ProcessRuntimeInitError = error{ ProcessDomainMismatch, ProcessSealUnavailable };
     pub const EndedPurgeCommitError = error{
         InvalidOwner,
         InvalidState,
@@ -8055,15 +8056,14 @@ pub const ClientSlot = struct {
             (process_issuer == null) != (generation_event_quarantine_registry == null))
             @panic("process issuer and quarantine registry initialization diverged");
         if (process_issuer == null) {
-            var nonce: u64 = 0;
-            if (builtin.os.tag == .macos) {
-                std.c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-            } else {
-                // The product owner is macOS-only.  This non-secret fallback exists solely so
-                // cross-target compile tests can instantiate the type without a Darwin syscall.
-                nonce = @as(u64, pid) ^ @as(u64, @intFromPtr(&process_issuer));
-            }
-            if (nonce == 0) nonce = 1;
+            const nonce = process_seal_service.generateProcessNonce() catch |err| switch (err) {
+                error.ProcessDomainMismatch => return error.ProcessDomainMismatch,
+                error.EntropyUnavailable, error.ZeroKey, error.Terminal => return error.ProcessSealUnavailable,
+            };
+            const prepared_seal = process_seal_service.prepare(pid, nonce) catch |err| switch (err) {
+                error.ProcessDomainMismatch => return error.ProcessDomainMismatch,
+                error.EntropyUnavailable, error.ZeroKey, error.Terminal => return error.ProcessSealUnavailable,
+            };
             ended_purge_quarantine_registry = ended_purge_quarantine.Registry.init();
             generation_event_quarantine_registry = .{};
             GenerationEventQuarantine.initInPlace(
@@ -8072,6 +8072,12 @@ pub const ClientSlot = struct {
                 @intCast(std.Thread.getCurrentId()),
             ) catch unreachable;
             process_issuer = lease_mod.IdentityIssuer.init(pid, nonce);
+            process_seal_service.commitReady(prepared_seal);
+        } else {
+            process_seal_service.validateReady(pid, process_issuer.?.process_nonce) catch |err| switch (err) {
+                error.ProcessDomainMismatch => return error.ProcessDomainMismatch,
+                error.NotReady, error.Terminal => return error.ProcessSealUnavailable,
+            };
         }
     }
 
@@ -9428,6 +9434,39 @@ pub const ClientSlot = struct {
             @panic("session-host ClientSlot teardown invariant violated");
     }
 };
+
+test "C3-3b2a product bootstrap publishes pins and closes a sealed capability" {
+    try ClientSlot.initializeProcessRuntime();
+    try ClientSlot.initializeProcessRuntime();
+    const pid = currentPid();
+    const nonce = process_issuer.?.process_nonce;
+    const thread_incarnation = try operation_thread_identity.acquire();
+    var receipt: operation_thread_identity.MintReceipt = .{};
+    try operation_thread_identity.issueMintReceipt(
+        &receipt,
+        1,
+        2,
+        pid,
+        nonce,
+        thread_incarnation,
+    );
+    defer if (receipt.live) std.debug.assert(operation_thread_identity.abortMintReceipt(&receipt));
+    const handle = try operation_thread_identity.publishCapability(.{
+        .capability_addr = 3,
+        .publication_identity = 4,
+        .operation_identity = 2,
+        .client_addr = 1,
+        .fence_generation = 5,
+        .fence_incarnation = 6,
+        .owner_process_id = pid,
+        .owner_process_nonce = nonce,
+        .owner_thread_id = @intCast(std.Thread.getCurrentId()),
+        .owner_thread_incarnation = thread_incarnation,
+    });
+    var pin: operation_thread_identity.CapabilityPin = .{};
+    try std.testing.expect(operation_thread_identity.pinCapability(handle, &pin));
+    try std.testing.expect(operation_thread_identity.closeCapability(&pin));
+}
 
 test "CR3a-2a ClientSlot teardown waits for node-local attachment reservations" {
     const allocator = std.testing.allocator;

@@ -1587,7 +1587,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          compatibility adapter를 소유하며 normal b2b3/product caller는 아직 0이다.
          **b2b3**는 final-address `PendingEventOwner`, immutable Runtime snapshot, final closed `PreparedEvent`/effect, typed scratch handoff,
          4-part prepare peak·3-part published rehash와 proof-loss cleanup을 production source에 구현하고 real `GenerationAttachment` take의 test-mode
-         dormant orchestration으로 호출한다. b2b3까지 normal product pump caller는 0이며 b2b0·b2b1·b2b2·b2b3 네 gate가 모두 green일 때만
+         dormant orchestration으로 호출한다. source·operation·destination preflight 뒤 기존 cleanup registry의 exact active
+         `EventAuthority`를 `live -> preparation_pending`으로 바꾸는 것이 begin no-fail suffix의 첫 mutation이다. 이 상태는 canonical
+         preparation view에는 live와 동등하지만 ordinary release·attachment teardown·ended purge에는 `Busy`이고, 별도 pending registry나 owner
+         주소를 registry에 추가하지 않는다. b2b3 제품 코드의 pending settlement/rollback caller는 0이다. focused fixture만 exact identity를
+         재검증한 test-only `preparation_pending -> live` rollback으로 real-take owner를 정리하며, b3의 sole product settlement만 exact release
+         receipt 검증 뒤 `preparation_pending -> releasing`을 연다. b2b3까지 normal product pump caller는 0이며 b2b0·b2b1·b2b2·b2b3 네 gate가 모두 green일 때만
          umbrella C3-3b2b 완료를 주장한다. 이후 b3·b5·b4·b6은 C3-3b event settlement/close의 별도 gate다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는
          [persistent-session-host.md의 C3-3b 계약](persistent-session-host.md#c3-3b-event-settlement와-비동기-close-계약)이며 이 계획은
          그 계약을 복제하지 않는다.

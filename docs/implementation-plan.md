@@ -1574,11 +1574,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          `EventOwner.view()`/`EventView` 계약은 그대로이며 `RemoteRuntime` field와 normal product caller는 0이다. 같은 gate가 named fixed-shape
          cleanup graph(`preparation = DTO backing + next observation 7 owners`, `committed_observation = old observation 7 owners`)와 stateless
          fixed-domain typed 256-bit transcript/progress MAC을 닫는다. generic writer/MAC, raw key, permit registry, persistent expected-MAC mirror는 없다.
-         **b2b2**는 pointer/slice/allocator/owned storage 0인 `EventPreparationRecipe`와 allocation-free metadata recipe/size/fill mapping을
-         추출한다. 기존 allocation-free `classifyEventView`는 바꾸지 않고 기존 owning API와 staged path가 그 `Classification`을 받는 recipe
-         builder를 공유한다. compatibility adapter가 기존 owned metadata DTO를 채워
-         accepted/violation 전 arm·error/OOM·allocation count·DTO 의미 동등성을 보존한다. wire leaf는 `RuntimeObservation`을 import하지
-         않는다. **b2b3**는 final-address `PendingEventOwner`, immutable Runtime snapshot, final closed `PreparedEvent`/effect, typed scratch handoff,
+         **b2b2는 doc-first 설계를 확정했고 구현은 미착수**다. pointer/slice/allocator/owned storage 0인 `EventPreparationRecipe`와
+         allocation-free metadata recipe/size/fill mapping을 추출한다. 기존 allocation-free `classifyEventView`는 바꾸지 않고 기존 owning API와
+         future b2b3 generation-event staged path만 exact provenance를 가진 같은 `Classification` projection을 공유한다. 현재 authority가 없는
+         external materialization path를 재분류하거나 두 번째 recipe를 만들지 않는다. compatibility adapter가 allocator callback 뒤 canonical
+         payload/classification을 재검증하고 caller-owned scratch fill 성공 뒤에만 기존 owned metadata DTO를 조립해 accepted/violation 전 arm,
+         기존 error/OOM 의미, zero/nonzero allocation 0/1, DTO 의미 동등성을 보존한다. event facade에만 local drift/alias를 peer failure와
+         분리하는 `LocalInvariant`를 추가하고 legacy `DecodeError`는 넓히지 않는다. wire leaf는 `RuntimeObservation`을 import하지 않는다. recipe의
+         pointer-free fixed-field shape, raw-first metadata scalar/presence, explicit outer tags, module DAG, two-pass fill·publication atomicity,
+         오류 매핑과 10+6+1 TDD inventory는 persistent SSOT를 따른다.
+         **b2b3**는 final-address `PendingEventOwner`, immutable Runtime snapshot, final closed `PreparedEvent`/effect, typed scratch handoff,
          4-part prepare peak·3-part published rehash와 proof-loss cleanup을 production source에 구현하고 real `GenerationAttachment` take의 test-mode
          dormant orchestration으로 호출한다. b2b3까지 normal product pump caller는 0이며 umbrella C3-3b2b 완료는 세 후속 gate가 모두 green일
          때만 주장한다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는

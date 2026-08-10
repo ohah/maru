@@ -1426,11 +1426,138 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b2b1 파일 경계는 neutral type/validation의 `event_cleanup_seal.zig`, 기존 service에 typed keyed derivation만 더하는
    `process_seal_service.zig`, 위 trusted projection과 private-identity 조합을 각각 소유하는
    `client_slot.zig`/`generation_event_contract.zig`/`generation_transport.zig`다. service-private fixed-order LE
-   encoder 외 generic writer/MAC API는 없다. b2b2의 `runtime_event_preparation.zig`는 wire leaf에서 `RuntimeObservation`을 import하지 않고,
-   기존 allocation-free `classifyEventView`는 변경하지 않는다. 기존 `classifyAndMaterializeEvent`와 새 staged path가 동일한
-   `Classification`을 입력으로 받는 allocation-free metadata recipe builder를 공유하고 compatibility adapter가 caller-provided fill로 기존
-   owned metadata DTO를 채운다.
-   old/new characterization은 accepted/violation 전 arm, malformed/resource/OOM, exact allocation count와 DTO semantic equality를 고정한다.
+   encoder 외 generic writer/MAC API는 없다.
+
+   **b2b2 pure preparation recipe 계약.** `runtime_event_types.classifyEventView`는 계속 유일한 authority classifier이고 signature·본문·caller
+   inventory를 바꾸지 않는다. 새 `runtime_event_preparation.zig`는 `protocol.zig`, `runtime_event_types.zig`, `runtime_event_wire.zig`,
+   `runtime_metadata_types.zig`만 import하는 순수 projection/fill leaf다. 이 leaf는 `Client`, `GenerationAttachment`, `RemoteRuntime`,
+   `RuntimeObservation`, allocator, owned DTO를 import하거나 barrel에서 re-export하지 않는다. `runtime_metadata_wire.zig`만 이 leaf를 import해
+   기존 allocator와 `OwnedMetadataDto` compatibility adapter를 소유한다. 역방향 import는 0이다. 문서에서 말하는 staged path는 현재
+   `external_event_materialization` 경로가 아니라 b2b3가 추가할 generation-event preparation 경로다. b2b2에서 그 staged production caller와
+   `RemoteRuntime` field는 0이며, authority가 없는 external candidate를 observer/untracked로 꾸며 재분류하거나 `EventPreflight`에서 두 번째
+   recipe SSOT를 만들지 않는다.
+
+   recipe는 직렬화 ABI나 authority가 아니라 한 번 분류된 의미를 allocation 전에 정규화하는 pointer-free fixed-field value evidence다.
+   metadata scalar/presence만 raw-first이고 outer tag만 explicit `u8`이다. 재사용하는 `Violation`/`resize_wire.Event`의 implicit nested enum
+   layout까지 고정 폭이라고 주장하지 않는다. SHA-256 digest도 equality/mutation evidence일 뿐 MAC이나 source lease가 아니다.
+   `max_process_name_bytes=128` primitive cap과 pointer-free `ProcessValue{pid:i32,len:u8,bytes:[128]u8}`의 sole definition은
+   `runtime_metadata_types.zig`로 내린다. `runtime_metadata_wire.Process`와 preparation `FilledProcess`는 이 type의 alias이고 별도 mirror를
+   만들지 않는다. 정확한 public-to-package type shape는 다음과 같다. 여기서 `Digest`는 `[32]u8`,
+   `StringRecipe`의 두 destination offset/length scalar는 `protocol.max_control_json` 이하임을 확인한 뒤 `u32`로 변환한다. `Violation`과
+   `resize_wire.Event`는 기존 closed value type을 그대로 재사용하지만 `Classification`, `ValidatedMetadataView`, `EventPreflight`,
+   `MetadataView`, `StringSpan` 자체는 recipe에 저장하지 않는다. payload/semantic digest와 exact recipe equality 외에 두 번째 projection
+   digest나 binding authority를 추가하지 않는다. `payload_digest`는 canonical reparsed preflight의 `raw_digest`, `semantic_digest`는 그
+   `MetadataView.semantic_digest`에서만 만들며 caller가 recipe 입력에서 공급하지 않는다.
+
+   ```zig
+   const StringRecipe = struct {
+       destination_start: u32, decoded_len: u32, digest: Digest,
+   };
+   const ProcessRecipe = struct { pid: i32, name_len: u8, name_digest: Digest };
+   const MetadataPreparationRecipe = struct {
+       payload_digest: Digest, semantic_digest: Digest, backing_bytes: u32,
+       revision: u64, observer_generation: u64, title_generation: u32,
+       cols: u16, rows: u16, semantic_state_raw: u8,
+       alt_active_raw: u8, app_cursor_keys_raw: u8, app_keypad_raw: u8, kitty_flags_raw: u8,
+       alternate_scroll_raw: u8, mouse_tracking_raw: u8, mouse_tracking_mode: u8,
+       bracketed_paste_raw: u8, bell_count: u64,
+       clipboard_write_seq: u64, clipboard_read_seq: u64,
+       foreground_available_raw: u8, foreground_pgid_present_raw: u8, foreground_pgid: i32,
+       cwd: StringRecipe, window_title: StringRecipe,
+       ssh_remote_dest_present_raw: u8, ssh_remote_dest: StringRecipe,
+       clipboard_read_target: StringRecipe,
+       processes: [max_process_entries]ProcessRecipe, process_count: u8,
+   };
+   const AcceptedPreparationTag = enum(u8) {
+       revoked = 1, invalidated = 2, resized = 3, metadata = 4, ended = 5,
+   };
+   const AcceptedPreparationRecipe = union(AcceptedPreparationTag) {
+       revoked: u64, invalidated: void, resized: resize_wire.Event,
+       metadata: MetadataPreparationRecipe, ended: void,
+   };
+   const EventPreparationTag = enum(u8) { accepted = 1, violation = 2 };
+   const EventPreparationRecipe = union(EventPreparationTag) {
+       accepted: AcceptedPreparationRecipe, violation: Violation,
+   };
+   const FilledProcess = runtime_metadata_types.ProcessValue;
+   const FilledRange = struct { start: u32, len: u32 };
+   const MetadataFillProjection = struct {
+       cwd: FilledRange, window_title: FilledRange,
+       ssh_remote_dest_present_raw: u8, ssh_remote_dest: FilledRange,
+       clipboard_read_target: FilledRange, process_count: u8,
+   };
+   ```
+
+   `MetadataPreparationRecipe`의 모든 bool/presence는 raw `u8` 0/1, semantic enum과 mouse mode/kitty flags도 닫힌 raw 범위를 먼저 검증한다.
+   absent SSH span과 사용하지 않는 process tail은 전부 0인 canonical value다. `foreground_available_raw=0`은
+   `foreground_pgid_present_raw=0`, `foreground_pgid=0`, `process_count=0`, process 전 tail 0으로 정규화한다. SSH absent와 present-empty는
+   서로 다른 값이다. `FilledProcess`는 fill target의 caller-owned fixed storage이지 recipe owner가 아니며 사용하지 않는 name tail도 0이다.
+   recursive comptime proof는 `EventPreparationRecipe`에 pointer, slice, allocator, function, optional pointer와 owned storage가 0이고 위 field/tag
+   이름·순서·타입이 exact임을 고정한다. `MetadataFillProjection`도 pointer-free이며 backing/process storage의 lifetime authority를 갖지 않는다.
+
+   package seam은 allocation-free
+   `buildEventPreparationRecipe(classification: Classification, payload: []const u8) RecipeError!EventPreparationRecipe`와
+   `fillMetadataRecipe(recipe: *const MetadataPreparationRecipe, classification: Classification, payload: []const u8, backing: []u8,
+   processes: *[max_process_entries]FilledProcess) FillError!MetadataFillProjection`이다. builder에 들어온 `Classification`은 constructible
+   value이므로 그 자체를 authority로 부르지 않는다. compatibility caller는 `classifyEventView`가 방금 반환한 exact 값을 yield 없이 전달한다.
+   이 경로의 기존 one-call event payload owner는 wrapper 반환까지 borrow를 유지한다. allocator callback 동안 mutation 가능성은 첫 proof로
+   덮지 않고 callback 반환 뒤 canonical payload/preflight/recipe를 다시 획득·검증하며, 이후 fill은 같은 owner thread에서 callback·yield 없이
+   끝난다. future b2b3 caller는 b2b1 `PreparationEventView`와 명시적 source lease 아래 같은 classifier 결과를 전달한다. metadata arm은 builder와 fill에서
+   각각 payload를 `preflightEvent`로 canonical reparse하고 exact `eventPreflightEql` 및 recipe equality를 확인한다. same raw digest를 유지한
+   scalar/span/presence/process/count forge도 거부한다. 다른 accepted arm도 canonical reparse의 event tag/value와 revoked successor,
+   resize projection을 exact 비교한다. 이 lexical replay는 identity/role/capability authority를 재판정하지 못하므로 그 provenance는 위 두
+   package caller boundary가 소유하며 recipe 자체는 effect/release 권위를 만들지 않는다. closed `RecipeError`는
+   `error{Malformed,ResourceExhausted}`, `FillError`는 이에 `DestinationMismatch|DestinationOverlap`만 더한다.
+
+   metadata builder는 `process_count`를 어떤 prefix slice보다 먼저 검사하고 모든 raw offset/end/decoded length, process name, backing 합과
+   `u32<->usize` 변환을 checked 계산한다. source `StringSpan`의 raw offset/end는 각 build/fill 호출의 canonical reparse stack에서만 쓰고
+   recipe나 pending owner에는 저장하지 않는다. recipe의 `destination_start`는 decoded backing의 checked prefix offset이다.
+   `backing_bytes <= protocol.max_control_json`을 allocation 전에 증명한다. pure leaf는
+   `OwnedMetadataDto` 크기나 `resident_bytes`를 계산하지 않으며 compatibility adapter만
+   `@sizeOf(OwnedMetadataDto)+backing_bytes`를 checked-add해 기존 footprint를 보존한다. fill은 recipe pointer가 가리키는 exact value를 같은
+   classification/payload에서 다시 build해 exact equality를 확인하고, destination 길이가 `backing_bytes`와 정확히 같으며 nonempty
+   destination과 process target을 포함한 `(payload, exact recipe extent, backing, processes)` 모든 checked extent가 pairwise disjoint임을
+   backing 길이 0일 때도 첫 write 전에 검사한다. one-past 계산 overflow도 overlap 판정보다 먼저 거부한다. caller는 fill 동안 recipe extent도
+   immutable하게 유지한다. 이어 모든 span과 exact final offset을 전부
+   validation하는 1차 pass 뒤에만 callback-free 2차 decode/fill을 수행하고, 반환 직전 full payload digest를 다시 확인한다. caller는 이 두
+   pass 동안 source lease로 payload immutability를 보장한다. pre-write validation error는 backing과 process target을 모두 바꾸지 않는다.
+   2차 fill 뒤 final digest mismatch만 두 scratch의 bytes가 unspecified일 수 있다. 어떤 error도 `MetadataFillProjection`을 반환하지 않으며
+   publish/adopt는 0이다. nonzero allocation 뒤 failure는 compatibility adapter가 backing을 exact once free하고, success는 backing을 DTO로
+   exact once transfer한 뒤 DTO deinit이 나중에 exact once free한다. zero backing은 allocation/free 0이다. 성공 전
+   `OwnedMetadataDto`, pending owner와 Runtime mutation은 0이다.
+
+   기존 `DecodeError{OutOfMemory,Malformed,ResourceExhausted,CapabilityViolation}`는 attach/observation/legacy metadata API에서 그대로다.
+   event facade만 `EventMaterializationError = DecodeError || error{LocalInvariant}`를 반환한다. 따라서
+   `classifyAndMaterializeEvent(allocator,identity,authority,preflight,frame)`의 parameter/result shape와 sole product caller, 기존 error member의
+   의미는 유지하고 event-local member 하나만 명시적으로 늘린다. 함수는 classifier를 정확히 한 번 호출한 뒤 recipe를 만들고, violation과 네 non-metadata accepted arm은 allocation 0으로 기존
+   `OwnedEventClassification`을 돌려준다. metadata `backing_bytes==0`은 allocation 0과 `backing=null`, nonzero는 requested exact length의 allocation
+   1회다. allocation callback 뒤 fill 직전에 recipe/classification/payload digest와 모든 normalized field를 다시 검증한다. allocator allocation
+   failure만 `EventMaterializationError.OutOfMemory`이다. genuine peer malformed/resource/capability는 recipe에 들어오지 않고 각각 기존
+   `Classification.violation` arm으로 반환된다. accepted metadata
+   뒤 builder의 `Malformed|ResourceExhausted`, allocator callback 뒤 source/classification drift, internal
+   `DestinationMismatch|DestinationOverlap`, fill final digest mismatch는 모두 `EventMaterializationError.LocalInvariant`이다. unsupported metadata는
+   이 facade에서 기존 `Violation.capability.metadata_unsupported`를 유지한다. `decodeMetadataEvent` 등 별도 legacy entry의
+   `DecodeError.CapabilityViolation`은 제거하지 않는다. sole `RemoteRuntime` caller는 `LocalInvariant`를 `.local_invariant_violation` poison으로,
+   `OutOfMemory`만 `.local_resource_exhausted`로, violation arm은 기존 peer contract failure로 매핑한다. builder/fill에는 `OutOfMemory`이 없고
+   allocator에서만 발생한다.
+   allocator callback payload mutation은 backing free 1, DTO publish 0이다. old/new characterization은 accepted 5개, Violation의 frame 8·identity
+   5·authority 2·capability 1·foreign 2와 나머지 top-level `stale_preflight|unknown_event|malformed|resource_exhausted`, malformed/resource/OOM,
+   zero/nonzero exact allocation count, escaped string, SSH absent/present-empty, foreground canonicalization과 DTO semantic equality를 exhaustive
+   switch로 고정한다. 별도 every-field source→recipe→`OwnedMetadataDto` sensitivity oracle은 모든 scalar, raw enum/bool 변환, range와 process를
+   하나씩 바꿔 adapter 누락을 잡는다. canonical event preflight의 process name 128 bytes는 accepted, 129는
+   `Classification.violation.resource_exhausted`라 recipe에 들어오지 않는 경계를 별도로 고정한다. 모든 bool/presence raw 2,
+   semantic/mouse/kitty 범위 밖, absent SSH/foreground와 unused process tail의 nonzero residue는 typed conversion과 첫 write 전에 거부한다.
+   b2b2는 compatibility
+   `MaterializationFootprint{backing_bytes:usize,resident_bytes:usize}` 의미만 보존하며 next/old observation과 4-part peak 계산은 b2b3 범위다.
+
+   b2b2 focused gate의 RED inventory는 recipe semantic 10개, compatibility 6개, boundary 1개다. Debug·ReleaseFast가 같은 17개를 exact-count로
+   실행한다. boundary는 recursive type proof, `classifyEventView` body/signature와 product-source caller inventory delta 0,
+   `buildEventPreparationRecipe`의 external production-source caller는 `runtime_metadata_wire` compatibility wrapper exact 1이고 fill 내부 rebuild는
+   same-module internal caller exact 1이다. `fillMetadataRecipe` external production-source caller도 compatibility wrapper exact 1이며 future b2b3와
+   그 밖의 product caller는 0이다. boundary는 이 repo-wide allowlist, `classifyAndMaterializeEvent` parameter/result shape와 sole
+   `RemoteRuntime` caller 유지, `runtime_metadata_types.max_process_name_bytes`/`ProcessValue` definition exact 1과 두 alias consumer,
+   `runtime_metadata_wire -> runtime_event_preparation` import exact 1, reverse import·barrel re-export·`RuntimeObservation`/Owned DTO size import·
+   b2b3 staged/product caller·새 `RemoteRuntime` field 0을 고정한다.
    b2b3 persisted owner는 callback 손상 뒤 typed enum/union을 먼저 읽지 않도록 lifecycle/phase/step/role/plan tag를 raw `u8`와 fixed payload
    storage로 보존한다. callback 뒤 raw integer 범위를 먼저 검사하고 canonical local typed value를 재구성한 뒤 service에 넘긴다. 따라서
    service가 이미 constructed된 invalid Zig tagged union을 안전하게 읽는다고 주장하지 않으며 raw-tag rejection owner는 b2b3 pre-parser다.

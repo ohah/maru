@@ -555,13 +555,28 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   inventory를 Debug·ReleaseFast로 고정한다. projection 21개 필드의 이름·순서·타입과 recursive pointer/slice 부재를 comptime으로 고정하고,
   exact projection validation 중 재진입이 `Busy`이며 operation 종료 뒤 재조회가 성공하는지 검증한다. recoverable canonicality probe는 test
   binary에만 있고 제품 service는 fatal-only assertion을 쓴다.
-- **C3-3b2b2 pure preparation recipe(미구현):** focused gate `test-session-host-2c3d-c3-3b2b2`는 pointer/slice/allocator/owned storage 0인
-  `EventPreparationRecipe`와 allocation-free metadata recipe/size/fill mapping을 고정한다. 기존 `classifyAndMaterializeEvent` signature·caller·error
-  vocabulary는 compatibility wrapper로 유지한다. 기존 allocation-free classifier는 변경하지 않고 owning API와 staged path가 동일
-  `Classification` 기반 recipe builder/fill을 공유하며 old/new characterization이 모든
-  accepted/violation arm, malformed/resource/OOM, exact allocation count와 DTO semantic equality를 고정한다. metadata wire leaf는 `RuntimeObservation`을 import하지 않는다. closed classification과
-  checked footprint, malformed/protocol/local-resource mapping, live Runtime mutation 0, staged product caller와 `RemoteRuntime` field 0을
-  Debug·ReleaseFast 및 source boundary로 검증한다. 최종 owned `PreparedEvent` 완료는 주장하지 않는다.
+- **C3-3b2b2 pure preparation recipe(doc-first 확정·미구현):** focused gate `test-session-host-2c3d-c3-3b2b2`는 pointer/slice/allocator/function/
+  owned storage 0인 pointer-free fixed-field `EventPreparationRecipe`, raw-first metadata scalar/presence, metadata size/two-pass fill과 pointer-free
+  fill projection을 고정한다. outer tag만 explicit `u8`이며 재사용한 `Violation`/resize nested layout을 serialization ABI로 주장하지 않는다.
+  `runtime_event_types.classifyEventView`는 유일한 classifier로 signature·본문·caller delta 0이고, constructible `Classification`은 authority가
+  아니다. compatibility wrapper의 immediate classifier result와 future b2b3 trusted staged wrapper만 provenance를 소유한다. metadata는
+  canonical lexical reparse+exact preflight/recipe equality로 same-digest scalar/span/presence/process forge를 allocation·fill 전에 거부한다.
+  기존 `classifyAndMaterializeEvent` parameter/result shape·sole `RemoteRuntime` caller와 기존 `DecodeError` member 의미는 유지하되 event facade의
+  `EventMaterializationError`만 `LocalInvariant` 하나를 추가하고, allocator callback 뒤 full source를 재검증한다. fill은
+  payload/recipe/backing/process의 checked pairwise nonoverlap과 모든 span/process를 첫 write 전에 검증하고 반환 직전 payload digest를 다시
+  확인한다. pre-write error는 backing/process byte-preserving이고 post-fill final-digest error만 scratch가 unspecified일 수 있으며, 둘 다
+  DTO/pending/Runtime publish는 0이다. nonzero failure는 adapter free 1, success는 DTO transfer 1과 later deinit free 1, zero는 alloc/free 0이다.
+  accepted 뒤 builder/fill failure와 callback 뒤 source drift·destination/final-digest integrity failure는 `EventMaterializationError.LocalInvariant`를
+  거쳐 sole caller의 `.local_invariant_violation`으로 가며 peer failure로 오분류하지 않는다. legacy `DecodeError`에는 새 member가 없다.
+  violation과 non-metadata accepted는
+  allocation 0, metadata zero backing은 0, nonzero는 exact allocation 1, OOM은 시도 1/publish 0이다. recipe semantic 10개+compatibility 6개+
+  boundary 1개를 Debug·ReleaseFast exact-count로 실행해 accepted 5개, frame 8·identity 5·authority 2·capability 1·foreign 2와
+  `stale_preflight|unknown_event|malformed|resource_exhausted`,
+  overflow, escaped string, SSH absent/present-empty, foreground canonicalization, raw 0/1·enum/mode 범위와 DTO equality를 고정한다. source raw span은
+  recipe에 저장하지 않고 canonical reparse 한 호출에서만 쓰며, primitive process cap/value type은 `runtime_metadata_types`가 단독 소유한다.
+  pure leaf의 `RuntimeObservation`/allocator/
+  owned DTO import, reverse import, barrel re-export, current external staged 재분류, b2b3 staged/product caller와 `RemoteRuntime` field는 0이다.
+  compatibility footprint만 보존하며 next/old observation과 4-part budget, 최종 owned `PreparedEvent` 완료는 주장하지 않는다.
 - **C3-3b2b3 immutable owner preparation(미구현):** focused gate `test-session-host-2c3d-c3-3b2b3`은 production-source dormant orchestration을
   Debug·ReleaseFast test mode에서 real `GenerationAttachment` take부터 trusted projection·snapshot·recipe·final-address owner publication까지
   호출한다. normal product pump caller는 0이다. final-address/copy/replay, every copy ordinal OOM, exact-capacity 4-part prepare peak와 3-part

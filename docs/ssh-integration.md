@@ -216,7 +216,7 @@ flowchart TD
 | 소비처 | 원격 cwd일 때 |
 |---|---|
 | 새 탭·split cwd 상속(`newSurfaceCwd`) | 쓰지 않는다(설정 `workspace.root`로 폴백) |
-| 클릭 경로 resolve(상대경로 join) | 쓰지 않는다(원격 파일을 로컬에서 열 수 없다) |
+| 파일 경로 링크(hover 밑줄·클릭) | **감지 스코프를 끈다**(`linkScopesForTerm` — `absolute_path`·`home_path`·`dot_relative`·`bare_relative`). 웹·스킴 링크는 남긴다 |
 | git 브랜치 조회 | 쓰지 않는다(로컬 `.git` 없음) |
 | 드롭 업로드 대상 경로 | 무관 — 원격이 `$HOME` 기준으로 스스로 정한다(§4) |
 
@@ -232,5 +232,6 @@ maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.termi
 
 - 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host).
 - 소비처: 원격 cwd에서 `newSurfaceCwd`가 null을 내는지, 클릭 resolve가 상대경로를 join하지 않는지, 폴더줄이 브랜치 없이도 `<host>:<path>`를 그리고 `~` 축약이 안 붙는지, 로컬 cwd는 기존 동작이 바이트 그대로인지(회귀).
-- 전달 경로: in-process Term과 host-backed Term **양쪽**에서 host가 GUI observation까지 도달하는지. 한쪽만 배선하면 제품에서 조용히 무동작이 된다(§4.1 2번과 같은 함정).
+- 전달 경로: in-process Term은 배선했다. **host-backed Term(`session.keep-alive-after-quit`, 기본 off)의 wire는 아직 `cwd_host`를 싣지 않는다** — 그 모드에서 host는 늘 빈 문자열이라 §9.2의 "빈 authority = 로컬"로 떨어져 이 문서 이전의 동작으로 degrade한다(새 오표시는 없고 §9.4 안전장치가 안 걸릴 뿐). 후속에서 `server.zig`·`runtime_event_wire.zig`·`runtime_metadata_wire.zig`에 필드를 더하며, 그때 `observationWireValid`의 UTF-8·크기 검증에도 포함해야 한다.
+- **순수 함수 단언만으로는 부족하다.** 폴더줄은 사이드바 **draw list 셀을 직접 읽어** 확인한다 — 조립부가 판정 함수를 안 쓰거나 줄이 빈 문자열로 접히면 단위 테스트는 통과하면서 화면엔 아무것도 안 뜬다. 로컬→원격 전이의 **대조군**을 함께 둔다: 경로가 같고 host만 바뀌는 전이는 `title_generation` bump가 없으면 observation refresh 자체가 스킵돼 옛 host가 계속 그려진다(실제로 그렇게 발견했다).
 - 수동 E2E: 원격 rc에 스니펫을 넣은 뒤 맨 `ssh`와 `maru ssh` 양쪽에서 `cd`가 폴더줄에 반영되는지, 원격 tmux에서 `allow-passthrough` on/off로 값이 오고 끊기는지, ssh를 빠져나오면 로컬 cwd 표시로 복귀하는지.

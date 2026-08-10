@@ -66,7 +66,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 | 층 | 현재 위치 | 사실 |
 |---|---|---|
 | 셀 프리미티브(입력) | `renderer/draw_list.zig` `DrawCell{row,col,codepoint,combining,width,style}` | 터미널 코어→렌더러 **입력 계약**. sentinel/kind/origin/packed-color 없음 |
-| 백엔드 출력 셀 | `metal_frame.zig` `NativeMetalCell`(extern) | 백엔드가 실제로 그리는 셀. `reserved`(0/2~5=부분사각형 kind), UV sentinel(-1=배경만), `origin_x/y`, `foreground`(0x00RRGGBB)/`background`(0xAARRGGBB) |
+| 백엔드 출력 셀 | `metal_frame.zig` `NativeMetalCell`(extern) | 백엔드가 실제로 그리는 셀. `reserved`(0/2~5=부분사각형 kind), UV sentinel(-1=배경만, +2.0=컬러 글리프 — **u0·u1 둘 다**에 실어야 한다. 셰이더가 `uv.x >= 2.0`으로 판정하므로 한쪽만 실으면 정점 보간에서 컬러 분기가 왼쪽 일부에서만 성립해 글리프가 세로 조각으로 잘린다), `origin_x/y`, `foreground`(0x00RRGGBB)/`background`(0xAARRGGBB) |
 | 합성 seam | `MetalFrameBuffer.replace(pane_frames, sidebar_*, pane_chrome_cells, pane_overlay_cells, overlay_frame)` | N-pane + 사이드바 + chrome + 모달을 Z-순서 단일 스트림으로. **chrome가 백엔드를 거쳐 들어오는 자리** |
 | 오버레이 컴포넌트(순수) | `command_palette.zig`·`find_overlay.zig` | `PaletteState`/`FindState` 순수(std+타입만, 헤드리스 테스트). 물리적으로 platform/macos |
 | chrome 렌더·hit-test | `app_session.zig`(chrome fn 다수) | `NativeMetalCell`을 **손으로 직접 구성**(`sentinelBgCell`/`appendVerticalLine`/`BarMetrics`/`sidebarBandCell`). DrawList 안 거침 |

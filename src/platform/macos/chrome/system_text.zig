@@ -14,6 +14,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 const renderer = maru.renderer;
+const colorUv = renderer.metal_frame.colorUv; // 컬러 글리프 UV sentinel 단일 출처(u0·u1 동일 규약)
 const bridge = @import("../coretext_smoke_bridge.zig");
 const probe = @import("../coretext_probe.zig");
 const metal_frame = renderer.metal_frame;
@@ -190,11 +191,15 @@ pub const Artifact = struct {
                 .atlas_y_px = quad.atlas_y_px,
                 .atlas_width_px = quad.atlas_width_px,
                 .atlas_height_px = quad.atlas_height_px,
-                // UV는 `renormalizeGpuGlyphUvs`가 위 슬롯에서 다시 만든다. color sentinel은 그 함수가
-                // 여기 실린 u0의 정수부로 판정하므로 그것만 보존한다.
-                .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
+                // 컬러 글리프는 **u0과 u1 둘 다** sentinel(+2.0)을 싣는다(`metal_frame.colorUv`와 같은 규약).
+                // 예전에는 u0에만 실었는데, 셰이더가 `uv.x >= 2.0`으로 컬러 분기를 판정하므로 정점 보간에서
+                // u가 2.33 → 0.35로 떨어져 **왼쪽 극히 일부만 컬러로 샘플되고 나머지는 일반 분기로 빠졌다**
+                // — 이모지가 몇 픽셀 폭 세로 조각으로 그려졌다(Chrome Lab 캡처). 제품은
+                // `renormalizeGpuGlyphUvs`가 u1까지 다시 만들어 가려졌고, 그 단계를 안 거치는 Lab에서만
+                // 드러났다. 재정규화는 slot에서 UV를 새로 굽고 offset을 다시 더하므로 중복 가산되지 않는다.
+                .u0 = colorUv(uv.u0, glyph.run.cache_key.color_glyph_kind),
                 .v0 = uv.v0,
-                .u1 = uv.u1,
+                .u1 = colorUv(uv.u1, glyph.run.cache_key.color_glyph_kind),
                 .v1 = uv.v1,
                 .foreground = placement.foreground,
                 .layer = 0,

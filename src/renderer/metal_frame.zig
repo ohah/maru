@@ -175,7 +175,7 @@ fn brightenIfBold(c: terminal.Color, bold: bool, enabled: bool) terminal.Color {
 /// AppleColorEmoji 글리프를 고르면 color다(VS16 이모지 ❤️·키캡 2️⃣·default-emoji 🍎 포함; VS15는 텍스트
 /// 폰트라 mono). 예전엔 codepoint+combining 휴리스틱(isColorGlyph·isKeycapCombining)으로 재유도했는데,
 /// 이제 cluster 전체가 셰이퍼에 가 색이 실제로 결정되므로(HG3a 풀) 그 결과를 그대로 쓴다(HG3b).
-fn colorUv(uv: f32, kind: renderer.ColorGlyphKind) f32 {
+pub fn colorUv(uv: f32, kind: renderer.ColorGlyphKind) f32 {
     return if (kind == .color) uv + color_glyph_uv_offset else uv;
 }
 
@@ -2692,10 +2692,26 @@ test "color glyph cells get the +2.0 UV sentinel by color_glyph_kind; monochrome
             .stats = .{},
         }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
         defer allocator.free(cells);
-        // uv.u0=0.1; color면 +2.0 sentinel, monochrome이면 그대로.
+        // uv.u0=0.1, u1=0.3; color면 **둘 다** +2.0 sentinel, monochrome이면 그대로.
         try std.testing.expectApproxEqAbs(@as(f32, if (case.offset) 2.1 else 0.1), cells[0].u0, 0.001);
+        // **u1도 봐야 한다.** 예전엔 u0만 검증해서, chrome 경로가 u1에 sentinel을 안 싣는 버그를 이
+        // 가드가 놓쳤다 — 셰이더는 `uv.x >= 2.0`으로 컬러 분기를 판정하므로 한쪽만 실으면 정점 보간에서
+        // u가 2.1 → 0.3으로 떨어져 **왼쪽 극히 일부만 컬러로 샘플되고** 이모지가 세로 조각으로 잘린다.
+        try std.testing.expectApproxEqAbs(@as(f32, if (case.offset) 2.3 else 0.3), cells[0].u1, 0.001);
         if (case.offset) try std.testing.expectApproxEqAbs(@as(f32, 0.2), cells[0].v0, 0.001); // v는 불변
     }
+}
+
+test "colorUv: 컬러 sentinel은 u0·u1에 같은 규약으로 붙는다 (셰이더 uv.x >= 2.0 판정의 전제)" {
+    // 셀 경로와 chrome 경로가 이 함수를 **공유**해야 두 경로의 UV 규약이 갈리지 않는다. chrome 경로가
+    // 자체 인라인 식(`if (color) uv.u0 + 2.0 else uv.u0`)을 쓰다가 u1을 빠뜨린 것이 실제 회귀였다.
+    try std.testing.expectApproxEqAbs(@as(f32, 2.25), colorUv(0.25, .color), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), colorUv(0.25, .monochrome), 0.0001);
+    // 보간 불변식: 컬러 글리프의 두 끝점이 **모두** sentinel 구간[2,3]에 있어야 조각나지 않는다.
+    const left = colorUv(0.10, .color);
+    const right = colorUv(0.30, .color);
+    try std.testing.expect(left >= color_glyph_uv_offset);
+    try std.testing.expect(right >= color_glyph_uv_offset);
 }
 
 test "appendRaster concatenates pixels and shifts upload offsets into the merged suffix (N-way merge core)" {

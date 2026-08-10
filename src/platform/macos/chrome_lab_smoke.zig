@@ -41,6 +41,14 @@ const cell_height_px: u32 = 16;
 ///
 /// **이 근사가 픽스처에 있는 것이 요점이다.** 백엔드는 폰트 크기를 그대로 받고, 제품은 아는 값을
 /// 그대로 넘기므로 어디에도 역산이 남지 않는다.
+/// 편집기 시나리오의 chrome 텍스트 face. 그 밖은 빈 face(system UI)를 유지한다.
+fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
+    return switch (id) {
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard => .{ .family = variant.family() },
+        else => .{},
+    };
+}
+
 fn fontPxFor(id: lab.ScenarioId) u16 {
     const cell = cellSizeFor(id);
     const px = @as(f32, @floatFromInt(cell.h)) / 1.25;
@@ -218,9 +226,13 @@ pub fn main(init: std.process.Init) !void {
         frame.draws.ops,
         &tokens,
         cell.w,
-        // Lab fixture에는 resolved appearance가 없다. 빈 face = system UI face라, 제품이 사용자 폰트를
-        // 따라가도 이 시각 골든은 설치 폰트에 흔들리지 않는다(docs/font-strategy.md "Chrome 텍스트 face").
-        .{},
+        // **편집기 시나리오는 등폭 face를 명시한다.** 빈 face(system UI)는 등폭이 아니라
+        // advance가 글자마다 다르고(실측 5.95~8.29px) 코드 리거처도 없다 — 그 상태의 캡처는
+        // 제품 편집기를 예고하지 못한다. 저장소에 번들된 폰트라 설치 환경에 흔들리지 않는다.
+        //
+        // 도크 시나리오는 빈 face를 유지한다. 그쪽은 비례 UI 폰트가 맞고, 커밋된 골든도 그
+        // 전제로 잡혀 있다(docs/font-strategy.md "Chrome 텍스트 face").
+        editorFaceFor(scenario_id, font_variant),
         // Lab fixture는 1× 논리 스케일로 고정한다(viewport·cell 크기가 그 전제로 잡혀 있다).
         1000,
     );

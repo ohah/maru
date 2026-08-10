@@ -8,6 +8,15 @@ pub const PtySession = switch (builtin.os.tag) {
     else => UnsupportedPtySession,
 };
 
+/// **이 앱 프로세스 자신**의 자원 표본. 터미널과 달리 세션(PTY)에 매이지 않아 `PtySession` 밖에 둔다 —
+/// 상태바가 "모든 창 공유" 행으로 합계에 넣는 값이다(docs/status-bar.md §4.1). 지원 backend가 없으면 null.
+pub fn selfResourceSample() ?types.ProcessResourceSample {
+    return switch (builtin.os.tag) {
+        .macos => @import("macos.zig").selfResourceSample(),
+        else => null,
+    };
+}
+
 // non-macOS에서도 public facade는 컴파일되어야 한다.
 // 실제 backend가 없다는 사실을 런타임 오류로 노출해 Windows/ConPTY 추가 전까지 import 경계를 안정화한다.
 const UnsupportedPtySession = struct {

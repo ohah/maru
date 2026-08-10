@@ -29,6 +29,10 @@ pub const State = struct {
     /// 키보드가 그 위에 멈추고 Enter가 **없는 동작**을 부른다 — 눌리는 것처럼 보이는데 아무 일도 안 하는
     /// 상태를 이 저장소는 금지한다. 그래서 선택·hit-test·강조가 모두 이 경계를 존중한다.
     header_count: usize = 0,
+    /// **뒤에서부터 이만큼은 꼬리**다 — 리소스 팝오버의 앱 자신 행처럼 **고를 수 없는 마지막 줄**(§4.1).
+    /// 머리글과 같은 이유로 별도 필드다: 컴포넌트는 행이 무엇인지 모르고, 고를 수 없는 줄에 Enter가
+    /// 닿으면 **없는 동작**을 부른다. 0이면 기존 메뉴와 완전히 같다.
+    footer_count: usize = 0,
 
     /// 우클릭 위치(x,y px)와 항목 수로 연다 — 선택은 첫 항목. platform이 항목/대상을 세팅한 뒤 부른다.
     pub fn show(self: *State, x: i32, y: i32, item_count: usize) void {
@@ -37,19 +41,27 @@ pub const State = struct {
 
     /// 앞 `header_count`줄이 머리글인 메뉴를 연다. 선택은 **첫 고를 수 있는 줄**에서 시작한다.
     pub fn showWithHeaders(self: *State, x: i32, y: i32, item_count: usize, header_count: usize) void {
+        self.showWithFooters(x, y, item_count, header_count, 0);
+    }
+
+    /// 머리글 + **꼬리**를 함께 가진 메뉴를 연다. 둘 다 고를 수 없다.
+    pub fn showWithFooters(self: *State, x: i32, y: i32, item_count: usize, header_count: usize, footer_count: usize) void {
         self.anchor_x = x;
         self.anchor_y = y;
         self.header_count = @min(header_count, item_count);
-        // 머리글이 **전부**면(고를 줄이 없음) `selected = header_count`는 범위를 벗어난다. 지금은 호출부가
-        // 그런 메뉴를 안 열지만, 상태 자체가 유효하지 않으면 다음 호출부가 그 위에서 인덱싱한다.
+        // 머리글이 먼저 자리를 갖고, 남는 줄에서만 꼬리를 센다 — 둘을 더한 값이 item_count를 넘으면
+        // `selectable`의 두 경계가 뒤집혀 **모든 줄이 고를 수 없게** 되거나 범위 밖을 가리킨다.
+        self.footer_count = @min(footer_count, item_count - self.header_count);
+        // 머리글·꼬리가 **전부**면(고를 줄이 없음) `selected = header_count`는 고를 수 없는 줄을 가리킨다.
+        // 지금은 호출부가 그런 메뉴를 안 열지만, 상태 자체가 유효하지 않으면 다음 호출부가 그 위에서 인덱싱한다.
         self.selected = @min(self.header_count, item_count -| 1);
         self.item_count = item_count;
         self.open = true;
     }
 
-    /// 이 행이 고를 수 있는가(머리글이 아닌가).
+    /// 이 행이 고를 수 있는가(머리글도 꼬리도 아닌가).
     pub fn selectable(self: *const State, index: usize) bool {
-        return index >= self.header_count and index < self.item_count;
+        return index >= self.header_count and index < self.item_count -| self.footer_count;
     }
 
     pub fn hide(self: *State) void {
@@ -59,8 +71,10 @@ pub const State = struct {
     /// 선택을 delta만큼 이동(clamp, wrap 없음 — 짧은 메뉴라 끝에서 멈춘다). item_count 0이면 무동작.
     pub fn moveSelection(self: *State, delta: i64) void {
         if (self.item_count == 0 or self.header_count >= self.item_count) return;
+        const selectable_end = self.item_count -| self.footer_count;
+        if (self.header_count >= selectable_end) return; // 고를 줄이 하나도 없다
         const first: i64 = @intCast(self.header_count); // 머리글 위로는 못 올라간다
-        const last: i64 = @intCast(self.item_count - 1);
+        const last: i64 = @intCast(selectable_end - 1); // 꼬리 아래로도 못 내려간다
         const cur: i64 = @intCast(self.selected);
         self.selected = @intCast(std.math.clamp(cur + delta, first, last));
     }

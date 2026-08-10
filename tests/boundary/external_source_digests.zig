@@ -215,7 +215,7 @@ pub const inventory = [_]Proof{
     // `app_session/debug_fixtures.zig`로 빼며 또 바뀐다. count는 2 그대로다 — 옮긴 블록에 `@field`가 없다.
     // 호출 그래프로 소유를 확인한 46개(+파일 레벨 7개)를 각 그룹으로 옮기며 또 바뀐다. count는 2
     // 그대로다 — 옮긴 블록에 `@field`가 없고, ABI가 부르는 17개는 얇은 facade로 남겼다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "5adbe3ae18f914b39d45240e9d09d9a041716f7db363676558acaa0079dc8129" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "fd2e484bf1e5048ec5754bcdc382995ae493c441d57bed547613fb22d84b8804" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

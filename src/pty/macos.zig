@@ -87,6 +87,12 @@ pub fn processResourceSample(pid: std.c.pid_t) ?types.ProcessResourceSample {
     };
 }
 
+/// **이 앱 프로세스 자신**의 표본. 터미널 트리와 달리 pid를 받지 않는다 — 셀 자신이라 `getpid()`다.
+/// 상태바가 이 값을 "모든 창 공유" 행으로 합계에 넣는다(docs/status-bar.md §4.1 "앱 자신은 센다").
+pub fn selfResourceSample() ?types.ProcessResourceSample {
+    return processResourceSample(std.c.getpid());
+}
+
 /// `root`와 그 자손의 표본을 `out`에 채우고 개수를 돌려준다(깊이·개수 상한 안에서).
 /// `proc_listchildpids`는 **직속 자식만** 주므로 재귀한다. 상한은 폭주 방어다 — fork 폭탄이나 순환에서
 /// tick을 붙잡지 않는다(docs/status-bar.md §6 "비용과 게이트").

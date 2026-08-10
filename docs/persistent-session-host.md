@@ -1325,7 +1325,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    마지막 owner 뒤에는 `finished(full mask,none)`로 바로 전이한다. absent role은 schedule에서 건너뛰되 그 bit는 완료로 간주한다.
    `finished`는 phase별 full mask와 `next_role=none`에서만 canonical이다. typed input의 mask/role/schedule/descriptor가 noncanonical이면 service는
    seal을 반환하지 않고 callback-free direct `_exit(70)` local fatal integrity로 닫는다. caller의 checked u64 변환·cap 실패는 service 호출
-   전에 local resource failure로 정규화한다. private/test-only validator로 이 전수를 시험할 수 있지만 recoverable public validation API는
+   전에 local resource failure로 정규화한다. neutral module의 제품 surface는 fatal-only typed assertion만 service에 제공하고,
+   recoverable canonicality probe는 `builtin.is_test`인 test binary에만 존재한다. barrel re-export와 recoverable product validation API는
    추가하지 않는다.
 
    observation digest는 opaque caller digest나 독립 authority가 아니다. neutral `event_cleanup_seal.zig`의 allocation-free unkeyed
@@ -1380,7 +1381,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    검사한다. 그 뒤 각 active entry의 raw `len <= 128`을 bytes/tail 접근 전에 전수하고,
    active tail zero와 inactive entry 전체 zero를 검사한 다음 `pid:i32,len:u8,bytes[0..len]`만 순서대로 쓴다. 실제 source의 struct padding과 undefined tail은
    복사하거나 읽지 않는다. optional은 present bit와 canonical absent descriptor/
-   zero digest를 함께 요구한다. publication 전과 cleanup 재검증은 이 함수 하나만 쓰며 every-scalar/descriptor/content mutation과 b2b3 actual
+   zero digest를 함께 요구한다. 따라서 empty string/count=0 helper digest가 nonzero여도 absent owner에는 helper를 호출하지 않고 zero digest를
+   투영하며 helper는 present owner의 content에만 사용한다. publication 전과 cleanup 재검증은 이 함수 하나만 쓰며 every-scalar/descriptor/content mutation과 b2b3 actual
    PTY layout comptime equality boundary가 drift를 막는다. canonical raw vocabulary는 availability `0=unavailable,1=current,2=stale`,
    semantic state `0=unknown,1=prompt,2=input,3=command`, mouse mode `0...4`, kitty flags `0...31`이다. 모든 bool/present는 0 또는 1이고
    `foreground_pgid_present=0`이면 pgid=0, ssh absent이면 descriptor와 content digest가 모두 zero다. adapter는 actual app/terminal enum ordinal과

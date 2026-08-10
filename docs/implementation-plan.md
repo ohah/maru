@@ -1531,7 +1531,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
       public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
-      **C3-3b1 correlation·ordering migration과 C3-3b2a process-seal prerequisite는 구현됐고, C3-3b2b 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
+      **C3-3b1 correlation·ordering migration, C3-3b2a process-seal prerequisite와 C3-3b2b의 b2b0·b2b1은 구현됐고, b2b2 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
       process-domain seal 이전과 immutable preparation을 각각 독립 PR인 **b2a → b2b**로 나누며, 제품 `event_pending` 활성화 전에 async close를 먼저 닫기 위해
       실제 구현 순서는 **b2a → b2b → b3 → b5 → b4 → b6**이다. 각 slice는 앞 slice의 focused
       Debug·ReleaseFast gate와 source boundary를 상속하고, 마지막 slice 전에는 C3-3b 완료나 제품 close parity를 주장하지 않는다.
@@ -1567,7 +1567,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       3. **C3-3b2b immutable preparation:** 이 단계는 **b2b0 exact observation → b2b1 trusted preparation seal prerequisite →
          b2b2 pure preparation recipe → b2b3 immutable owner preparation**의 네 독립 merge gate로 구현한다. **b2b0은 구현 완료**로 공용
          `RuntimeObservation.replace`와 기존 cache admission을 exact-capacity로 먼저 닫았고 session-host event lifecycle이나 제품 caller를
-         변경하지 않는다. **b2b1**은 기존 quarantine trusted mirror와 opaque correlation의 ClientSlot 내부 SSOT를 재사용한다. ClientSlot의
+         변경하지 않는다. **b2b1은 구현 완료**로 기존 quarantine trusted mirror와 opaque correlation의 ClientSlot 내부 SSOT를 재사용한다. ClientSlot의
          exact-correlation validator가 pointer-free instantaneous preparation projection과 canonical binding digest를 만들고 private identity를
          소유한 generation-event contract가 기존 borrowed `EventOwner.view()`와 별도 필드로 조합한다. GenerationTransport는 이 seam만
          호출하며 correlation value는 validation input으로만 쓰고 projection 반환·저장/raw accessor는 0이다. public

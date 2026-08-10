@@ -160,6 +160,16 @@ pub const GenerationTransport = struct {
     rpc_response: rpc_executed_response.RpcExecutedResponse = .{},
     event_correlation: EventCorrelation = .{},
 
+    fn preparationEventView(
+        self: *const GenerationTransport,
+        owner: *const EventOwner,
+    ) generation_event.PreparationEventViewError!generation_event.PreparationEventView {
+        if (self.lifecycle != .live or self.self_addr != @intFromPtr(self) or
+            self.event_owner_addr != @intFromPtr(owner))
+            return error.InvalidOwner;
+        return generation_event.preparationEventView(owner, self.event_correlation);
+    }
+
     pub fn capabilities(
         self: *const GenerationTransport,
     ) CapabilityError!contract.GenerationCapabilities {
@@ -4342,6 +4352,165 @@ test "C3-3b1 correlation rejects token and generation replay but ignores mutable
         slot.current.pin_owner.cleanup_pin_count -= 1;
         binding.lifecycle = .terminal;
     }
+}
+
+test "C3-3b2b1 trusted preparation projection is registry-derived and correlation-bound" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC33B2B01,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xC33B2B01);
+    defer slot.deinit();
+    const logical_client = slot.logicalClient();
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&owner.transport),
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        76,
+    );
+    try reserveEventOwnerInPlace(&owner.transport, &owner.event);
+    try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 76);
+    try logical_client.bufferGenerationEventForTest(
+        76,
+        "{\"event\":\"future.preparation\",\"data\":{}}",
+    );
+    try std.testing.expectEqual(
+        EventTakeOutcome.taken,
+        (try takeEventProjected(&owner.transport, &owner.event)).outcome,
+    );
+
+    const ProjectionReentry = struct {
+        transport: *GenerationTransport,
+        saw_busy: bool = false,
+        expected: ?client_slot_mod.GenerationEventPreparationProjection = null,
+
+        fn run(
+            raw: *anyopaque,
+            expected: client_slot_mod.GenerationEventPreparationProjection,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.saw_busy = preflightTerminalizeOwned(
+                self.transport,
+                self.transport.owner_addr,
+            ) == .busy;
+            self.expected = expected;
+        }
+    };
+    var projection_reentry: ProjectionReentry = .{
+        .transport = &owner.transport,
+    };
+    client_slot_mod.testing.armPreparationProjectionReentry(
+        &projection_reentry,
+        ProjectionReentry.run,
+    );
+    const prepared = try owner.transport.preparationEventView(&owner.event);
+    try std.testing.expect(projection_reentry.saw_busy);
+    try std.testing.expect(std.meta.eql(projection_reentry.expected.?, prepared.trusted));
+    try std.testing.expectEqualStrings(
+        "{\"event\":\"future.preparation\",\"data\":{}}",
+        prepared.event.payload,
+    );
+    try std.testing.expectEqual(reservation.identity.runtime_id, prepared.trusted.runtime_id);
+    try std.testing.expectEqual(@as(u128, 0xC33B2B01), prepared.trusted.host_id);
+    try std.testing.expectEqual(reservation.identity.connection_generation, prepared.trusted.connection_generation);
+    try std.testing.expectEqual(reservation.identity.pid, prepared.trusted.pid);
+    try std.testing.expectEqual(reservation.identity.process_nonce, prepared.trusted.process_nonce);
+    try std.testing.expectEqual(reservation.identity.slot_incarnation, prepared.trusted.slot_incarnation);
+    try std.testing.expectEqual(reservation.identity.node_incarnation, prepared.trusted.owner_node_incarnation);
+    try std.testing.expectEqual(owner.transport.transport_incarnation, prepared.trusted.transport_incarnation);
+    try std.testing.expectEqual(@as(u64, 76), prepared.trusted.stream_id);
+    try std.testing.expect(prepared.trusted.registry_incarnation != 0);
+    try std.testing.expect(prepared.trusted.binding_reservation_id != 0);
+    try std.testing.expect(prepared.trusted.event_node_incarnation != 0);
+    try std.testing.expect(prepared.trusted.event_generation != 0);
+    try std.testing.expectEqual(@intFromPtr(&owner.event), prepared.trusted.event_owner_addr);
+    try std.testing.expect(prepared.trusted.wire_major != 0);
+    try std.testing.expect(prepared.trusted.expected_major != 0);
+    try std.testing.expect(prepared.trusted.metadata_support_raw <= 1);
+    try std.testing.expect(prepared.trusted.admission_tag <= 1);
+    try std.testing.expect(!std.mem.allEqual(u8, &prepared.trusted.payload_digest, 0));
+    try std.testing.expect(!std.mem.allEqual(
+        u8,
+        &prepared.trusted.correlation_binding_digest,
+        0,
+    ));
+
+    const saved_major = logical_client.parser.expected_major;
+    const saved_metadata = logical_client.metadata_support;
+    logical_client.parser.expected_major +%= 1;
+    logical_client.metadata_support = switch (logical_client.metadata_support) {
+        .unsupported => .supported,
+        .supported => .unsupported,
+    };
+    const stable = try owner.transport.preparationEventView(&owner.event);
+    try std.testing.expectEqual(prepared.trusted.expected_major, stable.trusted.expected_major);
+    try std.testing.expectEqual(
+        prepared.trusted.metadata_support_raw,
+        stable.trusted.metadata_support_raw,
+    );
+    logical_client.parser.expected_major = saved_major;
+    logical_client.metadata_support = saved_metadata;
+
+    const correlation = owner.transport.event_correlation;
+    owner.transport.event_correlation.storage[0] ^= 1;
+    try std.testing.expectError(
+        error.Corrupt,
+        owner.transport.preparationEventView(&owner.event),
+    );
+    owner.transport.event_correlation = correlation;
+    var copied_event = owner.event;
+    try std.testing.expectError(
+        error.InvalidOwner,
+        owner.transport.preparationEventView(&copied_event),
+    );
+    var terminal_event: EventOwner = .{};
+    generation_event.publishTerminal(&terminal_event);
+    try std.testing.expectError(
+        error.Terminal,
+        generation_event.preparationEventView(&terminal_event, correlation),
+    );
+    try owner.transport.releaseEvent(&owner.event);
+    try std.testing.expectError(
+        error.InvalidOwner,
+        owner.transport.preparationEventView(&owner.event),
+    );
+
+    try slot.current.cleanup_registry.beginBoundDrop(
+        reservation.cleanup,
+        reservation.identity,
+        76,
+    );
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+    try slot.current.cleanup_registry.completeActiveDrop(
+        reservation.cleanup,
+        reservation.identity,
+        76,
+    );
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
 }
 
 test "CR3a-2c3c control permit rejects allocator callback reentry in both send modes" {

@@ -58,6 +58,10 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
     .{ .path = "src/platform/macos/session_host/client_poison.zig", .function = "outcomeForConnection", .expression = "@field(Outcome,@tagName(tag))", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client_external_turn_authority.zig", .function = "writeSeed", .expression = "@field(seed,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/executed_response.zig", .function = "responseTranscriptDigest", .expression = "@field(response,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/event_cleanup_seal.zig", .function = "writeGraph", .expression = "@field(graph,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/event_cleanup_seal.zig", .function = "descriptorPresentMask", .expression = "@field(value.next_observation,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/event_cleanup_seal.zig", .function = "descriptorPresentMask", .expression = "@field(value.old_observation,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/process_seal_service.zig", .function = "updateGraph", .expression = "@field(graph,field.name)", .count = 1 },
 };
 // external source digest 원장은 데이터 전용 파일로 뗐다(충돌 표면 축소 — 그 파일 머리 주석 참고).
 const external_digests = @import("external_source_digests.zig");
@@ -1461,6 +1465,17 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparationProjectionTestHook" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "preparation_projection_test_hook" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "testing" },
+                .{ .parent = "testing", .kind = "fn", .visibility = "pub", .modifier = "", .name = "armPreparationProjectionReentry" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPreparationProjection" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventPreparationProjectionContract" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "projectionFieldPointerFree" },
+                .{ .parent = "root", .kind = "node", .visibility = "private", .modifier = "", .name = "comptime" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventEvidence" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "validatedGenerationEventEvidence" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventPreparationProjection" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "process_seal_service" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventCorrelationInternal" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EventCorrelation" },
@@ -2999,7 +3014,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 12),
+        @as(usize, 13),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }

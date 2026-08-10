@@ -2,51 +2,51 @@ const std = @import("std");
 
 const max_source_bytes = 8 * 1024 * 1024;
 
-test "CR3a-2c3d C3-3a1 event authority boundary" {
+// C3-3b1 keeps EventAuthority as the sole lifecycle owner while replacing the revoke-only
+// aggregate with one all-event blocker and allowing only ClientSlot's canonical take path to mint
+// the opaque correlation paired with that authority.
+test "CR3a-2c3d C3-3b1 correlation and all-event ordering boundary" {
     const allocator = std.testing.allocator;
     const registry = try readSource(
         allocator,
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(registry);
-    const transport = try readSource(
-        allocator,
-        "src/platform/macos/session_host/generation_transport.zig",
-    );
-    defer allocator.free(transport);
     const slot = try readSource(
         allocator,
         "src/platform/macos/session_host/client_slot.zig",
     );
     defer allocator.free(slot);
+    const transport = try readSource(
+        allocator,
+        "src/platform/macos/session_host/generation_transport.zig",
+    );
+    defer allocator.free(transport);
+    const event_contract = try readSource(
+        allocator,
+        "src/platform/macos/session_host/generation_event_contract.zig",
+    );
+    defer allocator.free(event_contract);
+    const runtime = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
 
-    const production = registry[0 .. std.mem.indexOf(u8, registry, "test \"") orelse
-        return error.TestExpectedEqual];
-    const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
-        return error.TestExpectedEqual;
-    const ordinary_reserve = between(
-        registry,
-        "    pub fn reserveEventGeneration(",
-        "    pub fn reserveEventGenerationWithOrdering(",
+    const facade = between(
+        transport,
+        "pub const GenerationTransport = struct",
+        "fn mapPrepareError(",
     ) orelse return error.TestExpectedEqual;
-    const scan_oracle = between(
-        registry,
-        "    pub fn validateConnectionOrderingBlockerCacheForTest(",
-        "    fn finishEventOrderingNoFail(",
-    ) orelse return error.TestExpectedEqual;
-
     try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
-    try std.testing.expectEqual(@as(usize, 1), count(registry, "pub const EventOrderingClass = enum(u8)"));
-    try std.testing.expectEqual(@as(usize, 1), count(registry, "connection_ordering_blocker_count: usize = 0"));
-    try std.testing.expectEqual(@as(usize, 1), count(production, "pub fn reserveEventGenerationWithOrdering("));
-    try std.testing.expectEqual(@as(usize, 0), count(production, ".reserveEventGenerationWithOrdering("));
-    try std.testing.expectEqual(@as(usize, 0), count(slot, ".reserveEventGeneration("));
-    try std.testing.expectEqual(@as(usize, 2), count(slot, ".reserveEventGenerationWithOrdering("));
-    try std.testing.expectEqual(@as(usize, 1), count(ordinary_reserve, ".non_revoke_effect,"));
-    try std.testing.expectEqual(@as(usize, 1), count(scan_oracle, "if (!builtin.is_test) unreachable;"));
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        try countSessionHostSources(allocator, "pub const EventOrderingClass = enum(u8)"),
+
+    inline for (.{
+        "revoke_blocker_count",
+        "revokeBlockerCount",
+        "validateRevokeBlockerCacheForTest",
+    }) |obsolete| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countSessionHostProductionIdentifiers(allocator, obsolete),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -54,31 +54,75 @@ test "CR3a-2c3d C3-3a1 event authority boundary" {
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        try countSessionHostSources(allocator, "const EventAuthority = struct"),
+        try countSessionHostSources(allocator, "pub const EventCorrelation = extern struct"),
     );
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn mintEventCorrelation("));
     try std.testing.expectEqual(
-        @as(usize, 1),
-        try countSessionHostSources(allocator, "event_authority: EventAuthority = .{}"),
+        @as(usize, 2),
+        countIdentifierOutsideTopLevelTests(slot, "mintEventCorrelation"),
     );
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "mintEventCorrelation"));
+    try std.testing.expectEqual(@as(usize, 0), count(event_contract, "mintEventCorrelation"));
+
+    // RX progress is a narrow lease-held exception to the all-event TX blocker. It must remain a
+    // single ClientSlot-owned route, stay outside the closed 15-method facade, and never acquire
+    // the registry blocker gate or reach a TX helper.
     try std.testing.expectEqual(
         @as(usize, 2),
         try countSessionHostProductionIdentifiers(
             allocator,
-            "reserveEventGenerationWithOrdering",
+            "pumpRxDemuxUnderRegisteredOperationExecutionLease",
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 4),
-        try countSessionHostProductionIdentifiers(allocator, "connectionOrderingBlockerCount"),
+        @as(usize, 2),
+        try countSessionHostProductionIdentifiers(allocator, "pumpGenerationRxDemux"),
     );
-    const interleaved: [:0]const u8 =
-        \\fn reserveEventGenerationWithOrdering() void {}
-        \\test "excluded" { reserveEventGenerationWithOrdering(); }
-        \\fn productAfterTest() void { reserveEventGenerationWithOrdering(); }
-    ;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countIdentifierOutsideTopLevelTests(transport, "pumpRxTailOwned"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "pumpRxTailOwned"));
+    const rx_slot = between(
+        slot,
+        "pub fn pumpGenerationRxDemux(",
+        "pub fn sendGenerationInput(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(rx_slot, "rxDemuxAdmissionTransactionWithOperation("));
+    try std.testing.expectEqual(@as(usize, 0), count(rx_slot, "finalAdmissionTransactionWithOperation("));
+    try std.testing.expectEqual(@as(usize, 0), count(rx_slot, "finalAdmissionTransactionWithOperationAndRegistry("));
+    try std.testing.expectEqual(@as(usize, 0), count(rx_slot, "connectionOrderingBlockerCount"));
+    try std.testing.expectEqual(@as(usize, 0), count(rx_slot, "bufferedControllerRevoke"));
+    inline for (.{ "sendInput", "sendControl", "pumpPendingOutput", "pending_outbound" }) |tx_name|
+        try std.testing.expectEqual(@as(usize, 0), count(rx_slot, tx_name));
+    const rx_admission = between(
+        slot,
+        "fn rxDemuxAdmissionTransactionWithOperation(",
+        "fn finalAdmissionTransactionWithOperationPermitAndRegistry(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(rx_admission, ".rx_demux"));
+    try std.testing.expectEqual(@as(usize, 0), count(rx_admission, "bufferedControllerRevoke"));
     try std.testing.expectEqual(
         @as(usize, 2),
-        countIdentifierOutsideTopLevelTests(interleaved, "reserveEventGenerationWithOrdering"),
+        countIdentifierOutsideTopLevelTests(slot, "rxDemuxAdmissionTransactionWithOperation"),
+    );
+
+    inline for (.{
+        "EventOrderingRegistry",
+        "EventOrderingLifecycle",
+        "EventCorrelationRegistry",
+        "EventCorrelationLifecycle",
+    }) |parallel_authority| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countSessionHostProductionIdentifiers(allocator, parallel_authority),
+    );
+    try std.testing.expectEqual(
+        countIdentifierOutsideTopLevelTests(registry, "EventAuthority"),
+        try countSessionHostProductionIdentifiers(allocator, "EventAuthority"),
+    );
+    try std.testing.expectEqual(
+        countIdentifierOutsideTopLevelTests(registry, "EventAuthorityLifecycle"),
+        try countSessionHostProductionIdentifiers(allocator, "EventAuthorityLifecycle"),
     );
 }
 

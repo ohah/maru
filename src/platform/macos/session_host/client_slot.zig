@@ -1330,8 +1330,104 @@ pub const GenerationEventIdentity = struct {
     receipt: cleanup_registry_mod.EventGenerationReceipt,
 };
 
+const EventCorrelationInternal = extern struct {
+    digest: owner_seal.Digest,
+    expected_major: u16,
+    metadata_support_raw: u8,
+    ordering_class_raw: u8,
+    reserved: [4]u8,
+};
+
+/// Opaque stale-pair token minted only by the canonical event-take publication path. It is not a
+/// cleanup capability: every view and release still revalidates the exact registry receipt first.
+pub const EventCorrelation = extern struct {
+    storage: [@sizeOf(EventCorrelationInternal)]u8 align(@alignOf(EventCorrelationInternal)) =
+        [_]u8{0} ** @sizeOf(EventCorrelationInternal),
+};
+
+const EventCorrelationInput = struct {
+    identity: GenerationEventIdentity,
+    ordering_class: cleanup_registry_mod.EventOrderingClass,
+    expected_major: u16,
+    metadata_support_raw: u8,
+};
+
+fn eventCorrelationInternal(correlation: *EventCorrelation) *EventCorrelationInternal {
+    return @ptrCast(@alignCast(&correlation.storage));
+}
+
+fn eventCorrelationInternalConst(correlation: *const EventCorrelation) *const EventCorrelationInternal {
+    return @ptrCast(@alignCast(&correlation.storage));
+}
+
+fn eventCorrelationDigest(input: EventCorrelationInput) owner_seal.Digest {
+    const owner = input.identity.owner;
+    const receipt = input.identity.receipt;
+    var writer = owner_seal.Writer.init("maru.event-correlation.v1");
+    writer.writeU64(receipt.registry_incarnation);
+    writer.writeU64(receipt.binding_reservation_id);
+    writer.writeU64(receipt.node_incarnation);
+    writer.writeU64(receipt.stream_id);
+    writer.writeU64(receipt.event_generation);
+    writer.writeUsize(receipt.owner_addr);
+    writer.writeU64(owner.slot_incarnation);
+    writer.writeU64(owner.node_incarnation);
+    writer.writeU128(owner.host_id);
+    writer.writeU64(owner.reservation.identity.connection_generation);
+    writer.writeU128(owner.reservation.identity.runtime_id);
+    writer.writeU16(input.expected_major);
+    writer.writeU8(input.metadata_support_raw);
+    writer.writeU8(@intFromEnum(input.ordering_class));
+    writer.writeU64(@intCast(owner.pid));
+    writer.writeU64(owner.process_nonce);
+    return writer.finish();
+}
+
+fn eventCorrelationInputValid(input: EventCorrelationInput) bool {
+    const metadata_max = @intFromEnum(contract.MetadataSupport.supported);
+    return input.identity.receipt.registry_incarnation != 0 and
+        input.identity.receipt.binding_reservation_id != 0 and
+        input.identity.receipt.node_incarnation != 0 and
+        input.identity.receipt.stream_id != 0 and
+        input.identity.receipt.event_generation != 0 and
+        input.identity.receipt.owner_addr != 0 and
+        input.identity.owner.slot_incarnation != 0 and
+        input.identity.owner.node_incarnation != 0 and
+        input.identity.owner.host_id != 0 and
+        input.identity.owner.reservation.identity.connection_generation == 1 and
+        input.identity.owner.reservation.identity.runtime_id != 0 and
+        input.identity.owner.pid != 0 and input.identity.owner.process_nonce != 0 and
+        input.expected_major != 0 and input.metadata_support_raw <= metadata_max and
+        input.ordering_class != .none;
+}
+
+fn mintEventCorrelation(input: EventCorrelationInput) EventCorrelation {
+    if (!eventCorrelationInputValid(input))
+        @panic("event correlation input lost canonical identity");
+    var correlation: EventCorrelation = .{};
+    eventCorrelationInternal(&correlation).* = .{
+        .digest = eventCorrelationDigest(input),
+        .expected_major = input.expected_major,
+        .metadata_support_raw = input.metadata_support_raw,
+        .ordering_class_raw = @intFromEnum(input.ordering_class),
+        .reserved = [_]u8{0} ** 4,
+    };
+    return correlation;
+}
+
+fn eventCorrelationMatches(correlation: EventCorrelation, input: EventCorrelationInput) bool {
+    if (!eventCorrelationInputValid(input)) return false;
+    const state = eventCorrelationInternalConst(&correlation);
+    return state.expected_major == input.expected_major and
+        state.metadata_support_raw == input.metadata_support_raw and
+        state.ordering_class_raw == @intFromEnum(input.ordering_class) and
+        std.mem.allEqual(u8, &state.reserved, 0) and
+        std.mem.eql(u8, &state.digest, &eventCorrelationDigest(input));
+}
+
 pub const GenerationEventPublication = struct {
     identity: GenerationEventIdentity,
+    correlation: EventCorrelation,
     header: protocol.Header,
     payload: []u8,
     admission: runtime_event_wire.Verdict,
@@ -1955,6 +2051,7 @@ fn consumeFinalAdmissionTransactionNoFail(
 }
 
 const FinalAdmissionDecision = enum { blocked, admitted };
+const FinalAdmissionKind = enum { mutation, rx_demux };
 const FinalAdmissionBlockers = struct {
     queued: bool = false,
     aggregate_count: usize = 0,
@@ -2194,6 +2291,7 @@ fn beginFinalAdmissionTransactionCore(
     out: *FinalAdmissionTransaction,
     operation: RegisteredNodeOperation,
     owns_registered_operation: bool,
+    comptime admission_kind: FinalAdmissionKind,
     blockers: FinalAdmissionBlockers,
     protected_ranges: []const FinalAdmissionProtectedRange,
     exact_control_permit: ?StreamOperationPermit,
@@ -2222,10 +2320,14 @@ fn beginFinalAdmissionTransactionCore(
         else => error.InvalidOwner,
     };
     errdefer node.client.endRegisteredOperationExecutionLease(out.execution_handle.?);
-    const queued = node.client.bufferedControllerRevokeUnderRegisteredOperationExecutionLease(
-        out.execution_handle.?,
-    ) catch
-        return error.InvalidOwner;
+    const queued = switch (admission_kind) {
+        .mutation => node.client.bufferedControllerRevokeUnderRegisteredOperationExecutionLease(
+            out.execution_handle.?,
+        ) catch return error.InvalidOwner,
+        // A queued revoke is itself RX state. It blocks every mutation admission but cannot stop
+        // the same lease-held reader from draining later socket frames into bounded demux owners.
+        .rx_demux => false,
+    };
     bindFinalAdmissionTransactionNoFail(
         operation,
         @intFromPtr(out),
@@ -2291,7 +2393,15 @@ fn finalAdmissionTransaction(
             .len = @sizeOf(contract.PreparedAttachmentBinding),
         },
     };
-    return beginFinalAdmissionTransactionCore(out, operation, true, blockers, &protected_ranges, null);
+    return beginFinalAdmissionTransactionCore(
+        out,
+        operation,
+        true,
+        .mutation,
+        blockers,
+        &protected_ranges,
+        null,
+    );
 }
 
 fn finalAdmissionTransactionWithOperation(
@@ -2310,10 +2420,33 @@ fn finalAdmissionTransactionWithOperation(
         out,
         operation.*,
         false,
+        .mutation,
         blockers,
         protected_ranges,
         null,
     );
+}
+
+fn rxDemuxAdmissionTransactionWithOperation(
+    operation: *const RegisteredNodeOperation,
+    out: *FinalAdmissionTransaction,
+) error{ InvalidOwner, Busy }!void {
+    if (byteRangesOverlap(
+        @intFromPtr(out),
+        @sizeOf(FinalAdmissionTransaction),
+        @intFromPtr(operation),
+        @sizeOf(RegisteredNodeOperation),
+    )) return error.InvalidOwner;
+    const decision = try beginFinalAdmissionTransactionCore(
+        out,
+        operation.*,
+        false,
+        .rx_demux,
+        .{},
+        &.{},
+        null,
+    );
+    if (decision != .admitted) unreachable;
 }
 
 fn finalAdmissionTransactionWithOperationPermitAndRegistry(
@@ -2332,12 +2465,13 @@ fn finalAdmissionTransactionWithOperationPermitAndRegistry(
         out,
         operation.*,
         false,
+        .mutation,
         .{},
         protected_ranges,
         permit,
     );
     if (decision == .blocked) return .blocked;
-    const blockers = operation.node.cleanup_registry.revokeBlockerCount() catch {
+    const blockers = operation.node.cleanup_registry.connectionOrderingBlockerCount() catch {
         out.finish() catch @panic("validated aggregate admission settlement failed");
         return error.InvalidOwner;
     };
@@ -2360,7 +2494,7 @@ fn finalAdmissionTransactionWithOperationAndRegistry(
         protected_ranges,
     );
     if (decision == .blocked) return .blocked;
-    const blockers = operation.node.cleanup_registry.revokeBlockerCount() catch {
+    const blockers = operation.node.cleanup_registry.connectionOrderingBlockerCount() catch {
         out.finish() catch @panic("validated aggregate admission settlement failed");
         return error.InvalidOwner;
     };
@@ -6723,9 +6857,16 @@ pub fn takeGenerationEvent(
         .accepted => |accepted| .{
             .tag = 1,
             .digest = runtime_event_wire.eventPreflightProjectionDigest(accepted),
-            .ordering = if (accepted.event == .revoked) .controller_revoke else .none,
+            .ordering = if (accepted.event == .revoked)
+                .controller_revoke
+            else
+                .non_revoke_effect,
         },
-        .unknown => .{ .tag = 0, .digest = [_]u8{0} ** 32, .ordering = .none },
+        .unknown => .{
+            .tag = 0,
+            .digest = [_]u8{0} ** 32,
+            .ordering = .non_revoke_effect,
+        },
         else => {
             slot.current.client.poisonDuringClientSlotOperationNoFail(.local_invariant_violation);
             return error.Corrupt;
@@ -6734,6 +6875,8 @@ pub fn takeGenerationEvent(
     const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
     if (EventTakeActivationTestHook.failAt(.quarantine_reserve)) return error.Busy;
     const thread_id: u64 = @intCast(std.Thread.getCurrentId());
+    const expected_major = slot.current.client.parser.expected_major;
+    const metadata_support_raw = @as(*const u8, @ptrCast(&slot.current.client.metadata_support)).*;
     const quarantine_reservation = quarantine.reserveUnbound(
         currentPid(),
         thread_id,
@@ -6745,7 +6888,9 @@ pub fn takeGenerationEvent(
             .payload_digest = prepared.payload_digest,
             .admission_projection_digest = trusted_admission_projection.digest,
             .wire_major = prepared.header.major,
+            .expected_major = expected_major,
             .admission_tag = trusted_admission_projection.tag,
+            .metadata_support_raw = metadata_support_raw,
             .allocator_ptr = @intFromPtr(slot.current.client.allocator.ptr),
             .allocator_vtable = @intFromPtr(slot.current.client.allocator.vtable),
             .pin_owner_addr = @intFromPtr(&slot.current.pin_owner),
@@ -6819,6 +6964,12 @@ pub fn takeGenerationEvent(
             else => error.InvalidOwner,
         };
     };
+    const correlation = mintEventCorrelation(.{
+        .identity = .{ .owner = request.owner, .receipt = receipt },
+        .ordering_class = trusted_admission_projection.ordering,
+        .expected_major = expected_major,
+        .metadata_support_raw = metadata_support_raw,
+    });
     var reservation_live = true;
     activation.setAuthorityLive(true);
     if (builtin.is_test and EventTakeActivationTestHook.probe_contention) {
@@ -6898,6 +7049,7 @@ pub fn takeGenerationEvent(
     if (builtin.is_test) EventTakeActivationTestHook.suffix_stage = 3;
     return .{ .taken = .{
         .identity = .{ .owner = request.owner, .receipt = receipt },
+        .correlation = correlation,
         .header = event.header,
         .payload = event.payload,
         .admission = event.preflight,
@@ -6954,6 +7106,35 @@ pub fn pumpGenerationPendingOutput(
         error.AdminBusy => error.Busy,
         error.ConnectionClosed => error.InvalidOwner,
         else => error.Terminal,
+    };
+}
+
+/// RX is deliberately admitted without consulting the connection ordering blocker: a live event
+/// owns that blocker precisely so TX cannot overtake it, while the shared socket must continue to
+/// demultiplex sibling frames. The ordinary registered-operation and final-address execution
+/// lease still exclude teardown, allocator reentry, copied owners, and concurrent wire readers.
+pub fn pumpGenerationRxDemux(
+    owner: GenerationTransportOwnerQuery,
+) GenerationEventError!void {
+    const admission = beginGenerationRequestOwner(owner, true) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    var transaction: FinalAdmissionTransaction = .{};
+    rxDemuxAdmissionTransactionWithOperation(
+        &admission.operation,
+        &transaction,
+    ) catch |err| return err;
+    defer transaction.finish() catch
+        @panic("RX demux final admission settlement failed");
+    admission.operation.node.client
+        .pumpRxDemuxUnderRegisteredOperationExecutionLease(
+        transaction.execution_handle.?,
+    ) catch |err| return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.ConnectionClosed => error.Terminal,
+        else => error.Corrupt,
     };
 }
 
@@ -7231,6 +7412,7 @@ pub fn generationEventTrustedView(
 
 pub fn prepareGenerationEventRelease(
     request: GenerationEventReleaseRequest,
+    correlation: EventCorrelation,
     projection: GenerationEventReleaseProjection,
     out: *PreparedGenerationEventRelease,
 ) GenerationEventError!GenerationEventReleasePrepared {
@@ -7308,6 +7490,12 @@ pub fn prepareGenerationEventRelease(
     var corrupt = permit == null or !projection.valid or
         !std.meta.eql(trusted.event, projection.identity.receipt) or
         !std.meta.eql(projection.identity.owner, request.owner) or
+        !eventCorrelationMatches(correlation, .{
+            .identity = projection.identity,
+            .ordering_class = trusted.ordering_class,
+            .expected_major = mirror.expected_major,
+            .metadata_support_raw = mirror.metadata_support_raw,
+        }) or
         projection.self_addr != request.event_owner_addr or
         projection.lease_projection == null or
         projection.payload_addr != mirror.payload_addr or projection.payload_len != mirror.payload_len or
@@ -10371,7 +10559,7 @@ fn runC3a3ProductTakeFaultCase(fault: EventTakeActivationTestHook.Fault, seed: u
     }
     try std.testing.expectError(error.Busy, takeGenerationEvent(request));
     try std.testing.expectEqual(@as(usize, 1), slot.current.client.pending_events.items.len);
-    try std.testing.expectEqual(@as(usize, 0), try slot.current.cleanup_registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.cleanup_registry.connectionOrderingBlockerCount());
     try std.testing.expectEqual(@as(usize, 1), slot.current.pin_owner.cleanup_pin_count);
     const snapshot = try quarantine.snapshot(currentPid(), @intCast(std.Thread.getCurrentId()));
     try std.testing.expectEqual(quarantine_before, snapshot);
@@ -11209,7 +11397,7 @@ test "C3-3a3 product client slot live revoke aggregate blocks final admission un
         if (child < 0) return error.TestUnexpectedResult;
         if (child == 0) {
             _ = std.c.close(2);
-            slot.current.cleanup_registry.revoke_blocker_count = 0;
+            slot.current.cleanup_registry.connection_ordering_blocker_count = 0;
             slot.current.cleanup_registry.rollbackEventGenerationBeforePublishNoFail(
                 reservation.cleanup,
                 reservation.identity,

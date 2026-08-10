@@ -1280,16 +1280,17 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `fd == -1` 후조건을 구현했다. `test-session-host-2c3d-c3-3`의 Debug·ReleaseFast actual socketpair가
    external typed invalid/exclusive Busy의 durable mutation 0, partial pending free exact 1, callback 안 poison/input/control과
    foreign teardown Busy, effect 뒤 fence 재사용, peer EOF와 idempotent 재호출을
-   고정한다. 기존 `EventAuthority`의 product ordering activation은 C3-3a3까지 구현됐고, generic all-event blocker migration,
-   제품 event settlement·source-zero와 actual revoked roundtrip은 C3-3b·C3-3c 후속 slice다.
+   고정한다. 구현 진행과 자동 gate의 상태는 `implementation-plan.md`의 C3-3b 및 `verification-matrix.md`의
+   `CR3a-2c3d one-shot event facade` 행을 단일 출처로 삼는다.
 
    event ordering authority는 기존 canonical owner가 이어서 소유한다. 별도 revoke row, cleanup charge나 admission generation은
    만들지 않고, `AttachmentCleanupRegistry.Entry.event_authority`가 exact receipt와
    `reserved -> live -> releasing -> idle|terminal` lifecycle을 계속 단독 소유한다. cleanup readiness는 이 lifecycle과 기존 cleanup
    pin이 SSOT이며 별도 `owner_effect_charge`를 두지 않는다. 이 authority의 closed ordering class는
    `none|non_revoke_effect|controller_revoke`이고, 모든 taken row가 publication 전에 connection ordering blocker를 하나씩 arm한다.
-   `none`은 live event의 no-special-effect semantic class이며 blocker-unarmed를 뜻하지 않는다. idle/settled row에는 active ordering
-   class 자체가 없다. per-entry class/lifecycle가 SSOT이고 같은
+   `none`은 idle/settled row의 비활성 sentinel이며 live row에는 허용하지 않는다. unknown을 포함한 non-revoke taken event는
+   `non_revoke_effect`, revoke event는 `controller_revoke`다. blocker arm 여부는 ordering class가 아니라 active lifecycle로
+   결정하므로 두 live class가 모두 같은 blocker를 유지한다. per-entry class/lifecycle가 SSOT이고 같은
    registry의 node-local checked `connection_ordering_blocker_count`는 armed `reserved|live|releasing|terminal-recovery` row 수의
    O(1) projection이다. 기존 `revoke_blocker_count` 이름과 revoke-only predicate는 같은 migration에서 제거한다.
    take 전에는 sealed `pending_events`와
@@ -1460,6 +1461,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    `EventCorrelation`은 canonical take publication에서만 발급하는 opaque stale-pair token이다. registry/node/binding/runtime/stream,
    event generation, ordering class, final `EventOwner` address와 ClientSlot-owned `expected_major|metadata_support` snapshot을 묶는다.
+   이 capability snapshot은 take transaction의 canonical quarantine mirror에 payload cleanup metadata와 함께 immutable하게 봉인하며,
+   release는 mutable Client current fields가 아니라 trusted mirror의 snapshot만 correlation과 비교한다.
    current role/controller generation/event-generation tracking은 Runtime-local mutable 의미 상태이므로 correlation에 넣지 않고
    `RuntimeSemanticSnapshot`과 pending seal만 소유한다. correlation은 semantic content integrity나 cleanup capability가 아니며,
    effect/release마다 registry의 exact live receipt와 다시 비교한다. `EventView` 또는 Runtime이 token을 재계산·재발급하지 않는다.

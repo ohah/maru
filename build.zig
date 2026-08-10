@@ -2045,6 +2045,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3a3 revoke ordering activation Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3a3_step.dependOn(session_host_2c3d_c3_3a2_step);
+    const session_host_2c3d_c3_3b1_step = b.step(
+        "test-session-host-2c3d-c3-3b1",
+        "2c3d C3-3b1 event correlation and all-event ordering Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b1_step.dependOn(session_host_2c3d_c3_3a3_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2340,7 +2345,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = b3_optimize,
             }),
-            .filters = &.{"CR3a-2c3d C3-3a1 dormant revoke authority boundary"},
+            .filters = &.{"CR3a-2c3d C3-3a1 event authority boundary"},
         });
         const run_event_c3_3a1_boundary_tests = b.addRunArtifact(event_c3_3a1_boundary_tests);
         run_event_c3_3a1_boundary_tests.addArg("--maru-expect-tests=1");
@@ -2434,6 +2439,37 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3a3_actual_socket_tests.addArg("--maru-expect-tests=2");
         run_event_c3_3a3_actual_socket_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3a3_step.dependOn(&run_event_c3_3a3_actual_socket_tests.step);
+
+        const event_c3_3b1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3b1_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3d C3-3b1 correlation and all-event ordering boundary"},
+        });
+        const run_event_c3_3b1_boundary_tests = b.addRunArtifact(event_c3_3b1_boundary_tests);
+        run_event_c3_3b1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b1_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b1_step.dependOn(&run_event_c3_3b1_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3b1_boundary_tests.step);
+
+        const event_c3_3b1_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/generation_transport.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3b1"},
+        });
+        const run_event_c3_3b1_runtime_tests = b.addRunArtifact(event_c3_3b1_runtime_tests);
+        run_event_c3_3b1_runtime_tests.addArg("--maru-expect-tests=2");
+        run_event_c3_3b1_runtime_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b1_step.dependOn(&run_event_c3_3b1_runtime_tests.step);
 
         inline for (.{
             "own buffered revoke suppresses newly arriving input before role cache catches up",

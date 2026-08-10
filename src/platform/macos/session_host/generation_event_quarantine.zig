@@ -48,7 +48,9 @@ pub fn Registry(
             payload_digest: [32]u8,
             admission_projection_digest: [32]u8,
             wire_major: u16,
+            expected_major: u16,
             admission_tag: u8,
+            metadata_support_raw: u8,
             allocator_ptr: usize,
             allocator_vtable: usize,
             pin_owner_addr: usize,
@@ -348,7 +350,8 @@ pub fn Registry(
         fn mirrorValid(mirror: CleanupMirror, node_incarnation: u64) bool {
             return mirror.payload_addr != 0 and mirror.payload_len != 0 and
                 mirror.payload_len <= protocol_max_control_json and
-                mirror.wire_major != 0 and mirror.admission_tag <= 1 and
+                mirror.wire_major != 0 and mirror.expected_major != 0 and
+                mirror.admission_tag <= 1 and mirror.metadata_support_raw <= 1 and
                 mirror.allocator_ptr != 0 and mirror.allocator_vtable != 0 and
                 mirror.pin_owner_addr != 0 and mirror.lease_addr != 0 and
                 mirror.slot_addr != 0 and mirror.slot_incarnation != 0 and
@@ -398,7 +401,9 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
             .payload_digest = [_]u8{0xA5} ** 32,
             .admission_projection_digest = [_]u8{0x5A} ** 32,
             .wire_major = 1,
+            .expected_major = 1,
             .admission_tag = 1,
+            .metadata_support_raw = 0,
             .allocator_ptr = 1,
             .allocator_vtable = 2,
             .pin_owner_addr = 3,
@@ -434,7 +439,9 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
             .payload_digest = [_]u8{0} ** 32,
             .admission_projection_digest = [_]u8{0} ** 32,
             .wire_major = 1,
+            .expected_major = 1,
             .admission_tag = 0,
+            .metadata_support_raw = 0,
             .allocator_ptr = 1,
             .allocator_vtable = 2,
             .pin_owner_addr = 3,
@@ -466,7 +473,9 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
         .payload_digest = [_]u8{0} ** 32,
         .admission_projection_digest = [_]u8{0} ** 32,
         .wire_major = 1,
+        .expected_major = 1,
         .admission_tag = 0,
+        .metadata_support_raw = 0,
         .allocator_ptr = 1,
         .allocator_vtable = 2,
         .pin_owner_addr = 3,
@@ -499,7 +508,9 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
             .payload_digest = [_]u8{0} ** 32,
             .admission_projection_digest = [_]u8{0} ** 32,
             .wire_major = 1,
+            .expected_major = 1,
             .admission_tag = 0,
+            .metadata_support_raw = 0,
             .allocator_ptr = 1,
             .allocator_vtable = 2,
             .pin_owner_addr = 3,
@@ -526,7 +537,9 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
         .payload_digest = [_]u8{0} ** 32,
         .admission_projection_digest = [_]u8{0} ** 32,
         .wire_major = 1,
+        .expected_major = 1,
         .admission_tag = 0,
+        .metadata_support_raw = 0,
         .allocator_ptr = 1,
         .allocator_vtable = 2,
         .pin_owner_addr = 3,

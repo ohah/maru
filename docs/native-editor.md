@@ -409,6 +409,8 @@ Selections {
 ColumnAnchor { from_row, from_col, to_row, to_col }   // 시각 좌표 — 갱신은 L3 전용
 ```
 
+**IME 조합 상태는 §11이 소유한다.** 브라우저의 `isComposing`에 해당하는 **별도 bool은 두지 않는다** — `markedRange()`의 유효 여부가 곧 그 답이고, `column`의 null이 "지금 열 선택 중이 아니다"를 뜻하는 것과 같은 관례다. §11이 *"primary만 조합하고 확정 시 나머지 커서에 복제한다"*로 이미 정했으므로, 조합 중 상태는 **primary 하나에 딸린다** — 다만 그 marked range를 `Selections`가 들지 IME 계층이 들지는 §11이 판단한다(`NSTextInputClient`와 얽혀 L4 사정이 있다).
+
 **터미널 커서와는 모델을 공유하지 않는다.** 터미널 커서는 셀 그리드 좌표에 **하나**뿐이고 위치를 **앱이 정한다**(우리는 그리기만 한다). 편집기 커서는 byte offset에 **여럿**이고 우리가 소유한다. 공유하는 것은 **렌더 경로**(§2.0 — `metal_frame`의 overlay 종류 block·underline·bar·hollow를 재활용하며, 멀티 커서를 위해 `cursor_start`/`cursor_cells`를 배열로 넓히는 ABI 확장 하나만 든다)와 **스타일·blink 설정**(§9 — 편집기 키가 없으면 터미널 값을 상속한다)뿐이다. 모델을 합치려 하면 셀 그리드와 byte offset이라는 두 축을 한 타입에 넣게 된다.
 
 **caret은 별도 구조가 아니다 — 길이 0인 selection이다.** `focus`가 곧 caret 위치이고, `anchor == focus`면 선택 없이 커서만 있는 상태다. 따라서 **커서 개수 = `items.len`**이고 멀티 커서는 자연히 멀티 selection이다. 둘을 나눠 두면 "커서 셋 + 선택 둘" 같은 불일치가 생기고 편집 연산이 두 배열을 동기화해야 하는데, 실제로는 모든 커서가 선택을 가질 수 있으므로(shift+이동) 나눌 이유가 없다.
@@ -417,6 +419,7 @@ ColumnAnchor { from_row, from_col, to_row, to_col }   // 시각 좌표 — 갱�
 
 - **anchor가 범위인 이유는 word·line 드래그다.** 더블클릭으로 단어를 잡고 드래그하면 그 단어가 **통째로** 유지돼야 하는데, anchor가 점이면 반대 방향으로 끌 때 단어가 잘린다. VSCode도 같은 이유로 `selectionStart`를 `Range`로 들고(`cursorCommon.ts`의 `SingleCursorState`), 우리 규칙은 그 구조에서 유도했다.
 - **`kind`가 없으면 드래그가 항상 글자 단위가 된다.** 더블클릭 뒤 드래그는 단어 단위로, 트리플클릭 뒤 드래그는 줄 단위로 확장돼야 하고, 그 단위는 **처음 잡을 때** 정해진다(VSCode `SelectionStartKind`).
+- **랩 경계에서 offset 하나가 시각 위치 둘을 가리킨다 — 아직 정하지 않았다.** 줄이 랩되면 그 경계의 offset은 **앞 시각행의 끝**이자 **뒷 시각행의 시작**이라, caret을 어디 그릴지가 offset만으로 결정되지 않는다. CM6는 `assoc`(-1=앞 문자에 붙음, 1=뒤, 0=무관)로 이 모호성을 푼다. 우리도 랩이 들어오면 같은 문제를 만나며, `goal`과 같은 규율(L2가 들고 L3가 해석)이 후보다. **랩 슬라이스에서 정한다** — 지금 못 박으면 랩 구현이 어떤 형태를 요구하는지 모른 채 결정하는 셈이다.
 - **goal column이 양끝에 각각 있다.** 선택을 유지한 채 세로로 이동하면 두 끝이 각자 목표 열을 기억해야 하며, 하나만 두면 되돌아올 때 한쪽이 어긋난다(VSCode `selectionStartLeftoverVisibleColumns`).
 - **병합은 anchor를 점으로 되돌린다.** 합쳐진 범위는 원래 잡았던 단어·줄과 대응하지 않으므로 `kind`도 `simple`로 돌아간다. 그대로 두면 이후 드래그가 사라진 단어를 기준으로 확장한다.
 

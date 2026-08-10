@@ -1231,6 +1231,216 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `ProcessDomainMismatch`, 나머지 prepare/ready 실패를 `ProcessSealUnavailable`로 정규화하고 terminal을 재시도하지 않는다. raw key나 generic chosen-message MAC API는 없다. 구 key/storage/lazy initializer/API/callsite는 새 binary
    source에서 0이며 source-level cutover라 과거 binary storage의 runtime wipe나 live key migration을 주장하지 않는다.
 
+   C3-3b2b의 구현 gate는 normative lifecycle을 바꾸지 않고 다음 순서로 증거를 쌓는다. b2b0 exact observation 뒤 b2b1은 기존
+   quarantine trusted mirror와 ClientSlot correlation SSOT를 재사용하는 package-internal instantaneous projection, canonical binding digest,
+   named fixed-shape cleanup graph와 stateless typed transcript/progress seal만 구현한다. public `EventOwner.view()`/`EventView`는 그대로이고
+   correlation의 projection 반환·저장·raw accessor, 두 번째 take authority, generic MAC/writer, permit registry, persistent expected mirror, `RemoteRuntime` field와
+   normal product caller는 0이다. b2b2는 pointer/slice/allocator/owned storage 0인 `EventPreparationRecipe`와 allocation-free metadata
+   recipe/size/fill mapping을 구현한다. b2b3가 final-address `PendingEventOwner`, final owned `PreparedEvent`, exact allocation과 dormant real-take
+   orchestration을 구현하며 이때만 C3-3b2b 완료를 주장한다. 이후 순서는 b3 atomic settlement, b5 close readiness, b4 product activation,
+   b6 shutdown이다.
+
+   b2b1 cleanup seal ABI는 neutral value type으로 고정한다. `CleanupSeal`은 `[32]u8`이고 b2b1이 기존 b2a service에 추가하는
+   cleanup derivation surface는
+   `cleanupTranscriptSeal(pid, process_nonce, CleanupTranscriptInput) ReadyError!CleanupSeal`과
+   `cleanupProgressSeal(pid, process_nonce, CleanupProgressInput) ReadyError!CleanupSeal`뿐이다. domain은 각각
+   `maru.cleanup.transcript.v1`, `maru.cleanup.progress.v1`이며 service private keyed BLAKE3가 아래 필드를 선언 순서대로 명시적
+   little-endian fixed width로 쓴다. `usize`, struct raw bytes, padding, slice/count, caller-chosen domain/bytes와 generic writer는 hash 입력이
+   아니다. 주소·길이·capacity·allocator pointer/vtable은 caller가 checked `u64`로 투영하고 overflow를 local-resource failure로 닫는다.
+   정확한 neutral ABI는 다음 선언과 필드 순서다. enum의 명시하지 않은 raw 값과 union tag는 noncanonical이다.
+
+   ```zig
+   const CleanupSeal = [32]u8;
+   const PendingLifecycle = enum(u8) { idle = 0, preparing = 1, prepared = 2, settling = 3, committed_cleanup = 4 };
+   const CleanupPhase = enum(u8) { preparation = 1, committed_observation = 2 };
+   const CleanupStep = enum(u8) { ready = 1, freeing = 2, freed = 3, finished = 4 };
+   const CleanupRole = enum(u8) {
+       none = 0, dto_backing = 1, cwd = 2, cwd_host = 3, window_title = 4,
+       ssh_remote_dest = 5, clipboard_read_target = 6, foreground_processes = 7, agent_progress = 8,
+   };
+   const CleanupDescriptor = struct {
+       present: u8, address: u64, length_bytes: u64, capacity_bytes: u64,
+       alignment_log2: u8, allocator_ptr: u64, allocator_vtable: u64,
+   };
+   const ObservationCleanupGraph = struct {
+       cwd: CleanupDescriptor, cwd_host: CleanupDescriptor, window_title: CleanupDescriptor,
+       ssh_remote_dest: CleanupDescriptor, clipboard_read_target: CleanupDescriptor,
+       foreground_processes: CleanupDescriptor, agent_progress: CleanupDescriptor,
+   };
+   const CleanupPlanTag = enum(u8) { preparation = 1, committed_observation = 2 };
+   const CleanupPlanInput = union(CleanupPlanTag) {
+       preparation: struct { dto_backing: CleanupDescriptor, next_observation: ObservationCleanupGraph },
+       committed_observation: struct { old_observation: ObservationCleanupGraph },
+   };
+   const CleanupTranscriptInput = struct {
+       host_id: u128, runtime_id: u128, connection_generation: u64,
+       slot_incarnation: u64, owner_node_incarnation: u64, transport_incarnation: u64,
+       registry_incarnation: u64, binding_reservation_id: u64, event_node_incarnation: u64,
+       stream_id: u64, event_generation: u64, event_owner_addr: u64, wire_major: u16, expected_major: u16,
+       metadata_support_raw: u8, admission_tag: u8, correlation_binding_digest: [32]u8,
+       payload_digest: [32]u8, admission_projection_digest: [32]u8,
+       pending_owner_addr: u64, pending_owner_incarnation: u64, cleanup_plan_addr: u64,
+       runtime_addr: u64, observation_addr: u64, observation_revision: u64,
+       observer_generation: u64, title_generation: u32, observation_digest: [32]u8,
+       preparation_attempt: u64, pending_lifecycle: PendingLifecycle, plan: CleanupPlanInput,
+   };
+   const CleanupProgressInput = struct {
+       transcript_input: CleanupTranscriptInput, transcript_seal: CleanupSeal,
+       phase: CleanupPhase, step: CleanupStep,
+       next_role: CleanupRole, completed_mask: u8,
+   };
+   ```
+
+   service는 검증한 함수 인자 `pid:u32, process_nonce:u64`를 각 domain 직후 canonical prefix로 직접 encode하므로 typed input에 process
+   identity를 중복 저장하지 않는다. `CleanupPlanInput`의 raw tag는 `preparation=1`, `committed_observation=2`로 고정한다. descriptor의 모든 length/capacity는 byte 단위다.
+   absent descriptor는 `present=0`이고 나머지 필드가 모두 0이다. present descriptor는 `present=1`, address/length/allocator pointer/vtable이
+   nonzero이고 `capacity_bytes == length_bytes`다. `alignment_log2 <= 63`이고 address는 `1 << alignment_log2`에 정렬돼야 하며 checked
+   one-past-end `address + capacity_bytes`가 nonzero이고 overflow하지 않아야 한다. byte owner와 DTO backing은 `alignment_log2=0`이다.
+   neutral validator는 platform/PTY type을 import하지 않는다. `foreground_processes`의 actual `@alignOf`와 element-size 배수 검증은 b2b3
+   adapter가 실제 `pty.types.ForegroundProcessName`으로 수행한 뒤 neutral graph를 만드는 sole construction path이며 boundary가 이를 고정한다.
+   role과 order는 caller 숫자·array/count가 아니라 위 named field와 closed union이 정한다.
+
+   `CleanupTranscriptInput`은 위 선언 순서 앞에 service가 PID/process nonce prefix를 한 번 쓰므로 process domain 밖에서 재사용할 수 없고, canonical `host_id|runtime_id|connection_generation`, slot/node/transport
+   incarnation, registry/binding/node/stream/event generation과 event-owner address, ClientSlot이 만든 32-byte correlation binding digest,
+   payload/admission digest, pending owner/cleanup plan/RemoteRuntime/observation address, observation revision·observer/title generation과 full
+   semantic/backing digest, nonzero monotonic preparation attempt, pending lifecycle와 `CleanupPlanInput`을 봉인한다. raw correlation storage는
+   포함하거나 노출하지 않는다. attempt overflow는 terminal/fatal이다. 같은 process의 same-address 재사용은 canonical PID/process nonce를
+   유지한 채 pending-owner incarnation 또는 nonzero monotonic preparation attempt가 전진해야만 새 transcript가 된다. cross-process replay는
+   secret이나 owner 접근 전에 canonical PID/nonce mismatch로 거부한다. `CleanupProgressInput`은 canonical transcript input과 그 seal, closed phase
+   `preparation|committed_observation`, closed step `ready|freeing|freed|finished`, 다음 named role과 8-bit completed mask를 봉인한다. phase별
+   허용 role/mask schedule 외 값은 seal을 만들기 전에 거부한다. preparation mask는
+   `bit0 dto_backing, bit1 cwd, bit2 cwd_host, bit3 window_title, bit4 ssh_remote_dest, bit5 clipboard_read_target,
+   bit6 foreground_processes, bit7 agent_progress`이고 full mask는 `0xff`다. committed-observation mask는 DTO 없이
+   `bit0 cwd ... bit6 agent_progress`, bit7=0, full mask `0x7f`다. progress는 독립 lifecycle이나 registry가 아니다.
+
+   progress service는 `transcript_input`으로 transcript seal을 다시 계산해 supplied seal과 constant-time exact match하고
+   `phase=preparation <=> plan tag=preparation`, `phase=committed_observation <=> plan tag=committed_observation`을 확인한 뒤에만 schedule을
+   검사·봉인한다. owner/plan/attempt identity는 transcript input의 canonical 필드만 쓰며 progress input에 복제하지 않는다. phase별
+   `present_mask`는 이 재검증된 transcript descriptor의 `present=1` role bit로만 파생하고
+   `absent_mask = full_mask & ~present_mask`다. reverse cleanup의 유일한 canonical 전이는
+   `ready(mask=absent_mask,next=마지막 present role)`에서 시작하며 present role이 하나도 없으면 곧바로
+   `finished(full mask,none)`다. 각 owner는 callback 전에 local
+   descriptor로 take+tombstone한 뒤 `freeing(prior mask,current role)`을 게시하고 callback을 호출한다. callback 뒤 stored freeing seal을
+   재검증한 다음 `freed(prior|role bit,next role 또는 none)`을 게시한다. 남은 owner가 있으면 같은 mask의 `ready(next role)`로 전이하고,
+   마지막 owner 뒤에는 `finished(full mask,none)`로 바로 전이한다. absent role은 schedule에서 건너뛰되 그 bit는 완료로 간주한다.
+   `finished`는 phase별 full mask와 `next_role=none`에서만 canonical이다. typed input의 mask/role/schedule/descriptor가 noncanonical이면 service는
+   seal을 반환하지 않고 callback-free direct `_exit(70)` local fatal integrity로 닫는다. caller의 checked u64 변환·cap 실패는 service 호출
+   전에 local resource failure로 정규화한다. private/test-only validator로 이 전수를 시험할 수 있지만 recoverable public validation API는
+   추가하지 않는다.
+
+   observation digest는 opaque caller digest나 독립 authority가 아니다. neutral `event_cleanup_seal.zig`의 allocation-free unkeyed
+   `observationCleanupDigest(input: ObservationCleanupDigestInput) [32]u8`가 exact ASCII domain(no NUL)
+   `maru.runtime-observation.cleanup.v1`을 먼저 쓰며, 결과는 keyed transcript의 한 필드로만 사용한다. exact pointer-free input은 아래
+   scalar, `ObservationCleanupGraph`, named seven content digests다. string role의 content digest는 같은 모듈의 closed-role
+   `observationStringDigest(role, bytes)`만 만든다. exact domain은 role 순서대로
+   `maru.runtime-observation.string.cwd.v1`, `maru.runtime-observation.string.cwd-host.v1`,
+   `maru.runtime-observation.string.window-title.v1`, `maru.runtime-observation.string.ssh-remote-dest.v1`,
+   `maru.runtime-observation.string.clipboard-read-target.v1`, `maru.runtime-observation.string.agent-progress.v1`이다. foreground는 exact domain
+   `maru.runtime-observation.foreground-processes.v1`을 쓰며 fixed
+   `ForegroundProcessDigestInput{pid:i32,len:u8,bytes:[128]u8}` 64개와 `count:u8`의 neutral input을 받는 전용
+   `foregroundProcessesDigest`가 만든다. b2b3 adapter는 neutral array 전체를 zero-init하고 실제 source에서는 pid,len,active bytes만 복사해
+   undefined source tail을 읽지 않는다. b2b3 adapter가 아래 3-way count를 먼저 검증하고, neutral validator는 input `count<=64`와 각 active
+   `len<=128`을 확인한 뒤 active tail zero와 inactive entry 전체 zero를 검사한다. 그 다음 count를 `u8` 한 byte로 encode하고 active entry만 hash한다. generic
+   bytes/MAC oracle로 export하지 않는다. exact declaration order는 다음과 같다.
+
+   ```zig
+   const ObservationStringRole = enum(u8) {
+       cwd = 1, cwd_host = 2, window_title = 3, ssh_remote_dest = 4,
+       clipboard_read_target = 5, agent_progress = 6,
+   };
+   const ForegroundProcessDigestInput = struct { pid: i32, len: u8, bytes: [128]u8 };
+   const ForegroundProcessesDigestInput = struct { count: u8, entries: [64]ForegroundProcessDigestInput };
+   const ObservationCleanupDigestInput = struct {
+       availability: u8, revision: u64, observer_generation: u64, title_generation: u32,
+       cols: u16, rows: u16, ssh_remote_dest_present: u8, semantic_state: u8,
+       alt_active: u8, app_cursor_keys: u8, app_keypad: u8, kitty_flags: u8,
+       alternate_scroll: u8, mouse_tracking: u8, mouse_tracking_mode: u8,
+       bracketed_paste: u8, bell_count: u64, clipboard_write_seq: u64,
+       clipboard_read_seq: u64, foreground_available: u8,
+       foreground_pgid_present: u8, foreground_pgid: i32, foreground_process_count: u8,
+       graph: ObservationCleanupGraph,
+       cwd_digest: [32]u8, cwd_host_digest: [32]u8, window_title_digest: [32]u8,
+       ssh_remote_dest_digest: [32]u8, clipboard_read_target_digest: [32]u8,
+       foreground_processes_digest: [32]u8, agent_progress_digest: [32]u8,
+   };
+   pub fn observationStringDigest(role: ObservationStringRole, bytes: []const u8) [32]u8;
+   pub fn foregroundProcessesDigest(input: ForegroundProcessesDigestInput) [32]u8;
+   pub fn observationCleanupDigest(input: ObservationCleanupDigestInput) [32]u8;
+   ```
+
+   observation cleanup digest 본문은 scalar를
+   `availability:u8, revision:u64, observer_generation:u64, title_generation:u32, cols:u16, rows:u16, ssh_remote_dest_present:u8,
+   semantic_state:u8, alt_active:u8, app_cursor_keys:u8, app_keypad:u8, kitty_flags:u8, alternate_scroll:u8, mouse_tracking:u8,
+   mouse_tracking_mode:u8, bracketed_paste:u8, bell_count:u64, clipboard_write_seq:u64, clipboard_read_seq:u64,
+   foreground_available:u8, foreground_pgid_present:u8, foreground_pgid:i32, foreground_process_count:u8` 순서로 LE encode하고, 이어서 일곱 descriptor와 각 role의
+   32-byte content digest를 named order로 쓴다. string content digest는 exact bytes, foreground content digest는 count:u8 한 byte 뒤 각 element의
+   neutral module은 PTY element size를 모른다. b2b3 adapter만 actual foreground descriptor의
+   `length_bytes / @sizeOf(pty.types.ForegroundProcessName)`를 remainder 0으로 checked derive하고, entry/content 접근 전에
+   `derived_count <= 64`, `ForegroundProcessesDigestInput.count`와 `ObservationCleanupDigestInput.foreground_process_count`의 exact equality를
+   검사한다. 그 뒤 각 active entry의 raw `len <= 128`을 bytes/tail 접근 전에 전수하고,
+   active tail zero와 inactive entry 전체 zero를 검사한 다음 `pid:i32,len:u8,bytes[0..len]`만 순서대로 쓴다. 실제 source의 struct padding과 undefined tail은
+   복사하거나 읽지 않는다. optional은 present bit와 canonical absent descriptor/
+   zero digest를 함께 요구한다. publication 전과 cleanup 재검증은 이 함수 하나만 쓰며 every-scalar/descriptor/content mutation과 b2b3 actual
+   PTY layout comptime equality boundary가 drift를 막는다. canonical raw vocabulary는 availability `0=unavailable,1=current,2=stale`,
+   semantic state `0=unknown,1=prompt,2=input,3=command`, mouse mode `0...4`, kitty flags `0...31`이다. 모든 bool/present는 0 또는 1이고
+   `foreground_pgid_present=0`이면 pgid=0, ssh absent이면 descriptor와 content digest가 모두 zero다. adapter는 actual app/terminal enum ordinal과
+   이 값의 comptime equality를 고정하며 post-callback 검증은 bool/enum을 typed load하기 전에 raw byte, foreground derived count와 len을
+   검사한다. count=65, descriptor/count mismatch, nonzero neutral unused entry는 content bytes 접근 전 direct-fatal subprocess로 고정한다.
+
+   trusted projection의 exact 반환 type은 다음 선언 순서이고 pointer/slice/raw correlation을 포함하지 않는다.
+
+   ```zig
+   const GenerationEventPreparationProjection = struct {
+       expected_major: u16, metadata_support_raw: u8,
+       correlation_binding_digest: [32]u8, payload_digest: [32]u8,
+       admission_projection_digest: [32]u8, wire_major: u16, admission_tag: u8,
+       registry_incarnation: u64, binding_reservation_id: u64, event_node_incarnation: u64,
+       stream_id: u64, event_generation: u64, event_owner_addr: u64,
+       slot_incarnation: u64, owner_node_incarnation: u64, transport_incarnation: u64,
+       host_id: u128, runtime_id: u128, connection_generation: u64, pid: u32, process_nonce: u64,
+   };
+   const PreparationEventView = struct { event: EventView, trusted: GenerationEventPreparationProjection };
+   ```
+
+   trusted projection은 기존 public `GenerationEventTrustedView`나 `EventOwner.view()`를 확장·저장하지 않는다. ClientSlot의
+   `generationEventPreparationProjection(identity, correlation, owner_addr)`만 exact live correlation을 내부에서 canonical 재검증하고 다음
+   pointer-free 값만 반환한다: `expected_major:u16`, `metadata_support_raw:u8`,
+   `correlation_binding_digest:[32]u8`, `payload_digest:[32]u8`, `admission_projection_digest:[32]u8`, `wire_major:u16`, `admission_tag:u8`,
+   `registry_incarnation:u64`, `binding_reservation_id:u64`, `event_node_incarnation:u64`, `stream_id:u64`, `event_generation:u64`,
+   `event_owner_addr:u64`, `slot_incarnation:u64`, `owner_node_incarnation:u64`, `transport_incarnation:u64`, `host_id:u128`, `runtime_id:u128`,
+   `connection_generation:u64`, `pid:u32`, `process_nonce:u64`이다. raw correlation/token은 반환하지 않는다.
+   private identity를 소유한 `generation_event_contract.preparationEventView(owner, correlation)`가 ClientSlot projection을 호출하고 기존
+   view 검증과 borrowed `EventView`를 조합한
+   `PreparationEventView{event:EventView, trusted:GenerationEventPreparationProjection}`을 반환한다. closed error set은 기존
+   전용 `PreparationEventViewError = error{Busy,InvalidOwner,Corrupt,Terminal}`을 그대로 전파한다. 기존 public
+   `EventViewError = error{InvalidOwner,Terminal}`와 `EventOwner.view()`는 변경하지 않는다.
+   composite 전체를 pointer-free라고 부르지 않으며 borrowed payload lifetime은 기존 EventView 계약을 따른다. projection
+   copy는 evidence일 뿐 authority가 아니어서 후속 사용마다 canonical owner/correlation을 다시 검증한다. ClientSlot projection의 production
+   source caller는 `generation_event_contract` 하나이고 GenerationTransport는 그 package seam의 sole production-source caller다. 이
+   GenerationTransport caller는 dormant/test-only라 normal product caller는 b2b1에서 0이다. opaque correlation은 exact validation input으로만
+   전달하며 projection 반환·저장·raw accessor는 0이다. cross-file `pub`가 필요해도 barrel re-export는 0이며 boundary allowlist가 이 2-hop
+   caller/import를 고정한다.
+
+   b2b1 파일 경계는 neutral type/validation의 `event_cleanup_seal.zig`, 기존 service에 typed keyed derivation만 더하는
+   `process_seal_service.zig`, 위 trusted projection과 private-identity 조합을 각각 소유하는
+   `client_slot.zig`/`generation_event_contract.zig`/`generation_transport.zig`다. service-private fixed-order LE
+   encoder 외 generic writer/MAC API는 없다. b2b2의 `runtime_event_preparation.zig`는 wire leaf에서 `RuntimeObservation`을 import하지 않고,
+   기존 allocation-free `classifyEventView`는 변경하지 않는다. 기존 `classifyAndMaterializeEvent`와 새 staged path가 동일한
+   `Classification`을 입력으로 받는 allocation-free metadata recipe builder를 공유하고 compatibility adapter가 caller-provided fill로 기존
+   owned metadata DTO를 채운다.
+   old/new characterization은 accepted/violation 전 arm, malformed/resource/OOM, exact allocation count와 DTO semantic equality를 고정한다.
+   b2b3 persisted owner는 callback 손상 뒤 typed enum/union을 먼저 읽지 않도록 lifecycle/phase/step/role/plan tag를 raw `u8`와 fixed payload
+   storage로 보존한다. callback 뒤 raw integer 범위를 먼저 검사하고 canonical local typed value를 재구성한 뒤 service에 넘긴다. 따라서
+   service가 이미 constructed된 invalid Zig tagged union을 안전하게 읽는다고 주장하지 않으며 raw-tag rejection owner는 b2b3 pre-parser다.
+   `remote_runtime_pending_event.zig`는 위 `PendingLifecycle` ordinal을 직접 재사용해 final-address owner를 추가한다.
+
+   cleanup callback 전에는 publication 당시의 stored transcript/progress seal을 현재 canonical state로 먼저 재검증한 뒤 별도 stack mirror로
+   복사한다. mirror와 local descriptor copy는 allocator candidate의 protected range이고 그 주소는 callback context·test hook·observer·
+   `RemoteRuntime`·Pending storage에 전달하지 않는다. callback 동안 service/Client/global lock은 0이다. callback 뒤에는 PID/thread/callback
+   상태, pending final address/incarnation/lifecycle/attempt, stored transcript seal과 stack mirror의 constant-time 일치, progress schedule/seal,
+   remaining descriptor, remaining content 순서로 검증한다. callback 직전 mutable state에서 새 expected seal을 만들어 신뢰 기준으로 삼지
+   않는다.
+
    `.taken`은 live Runtime을 바로 바꾸지 않는다. b2b의 `RemoteRuntime`은 한 시점의 immutable `RuntimeSemanticSnapshot`을 만들고,
    bound stream의 sealed classification context와 payload를 `classifyAndPrepareEvent`에 넘긴다. sealed `EventOwner` view는 frame header
    `wire_major`와 별도의 take-time `expected_major|metadata_support`를 quarantine trusted mirror와 다시 비교한다. 이 함수는 live Runtime에

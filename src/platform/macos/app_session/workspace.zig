@@ -144,7 +144,7 @@ pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, ou
         }
         // 옮겨가는 파일을 destination 탐색기·watch 집합에 등록한다 — 안 하면 그 파일의 외부 변경
         // 감지가 죽고 최근 목록에도 안 뜬다(mergeFilePanelStateInto와 같은 계약, code-review max).
-        try dst.adoptMovedFileTermsIntoExplorer(src.tabs.items[idx], src);
+        try file_panel_ops.adoptMovedFileTermsIntoExplorer(dst, src.tabs.items[idx], src);
     }
     // before(수술 전, 순수): 이동 서브트리 surface_id 수집 + trust kind. surface_id는 이동 중 불변이라 순서만 안정하면 된다.
     const moved = tab_ops.collectTabSurfaceIds(src.tabs.items[idx], out_ids);

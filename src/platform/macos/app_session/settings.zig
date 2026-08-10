@@ -28,6 +28,13 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const setShellArgs = AppSession.setShellArgs;
+const macroRhsString = AppSession.macroRhsString;
+const isExecutablePath = app_session_mod.isExecutablePath;
+const SettingsSectionEntry = AppSession.SettingsSectionEntry;
+const SettingsSectionFields = AppSession.SettingsSectionFields;
+const resolverUnbinds = AppSession.resolverUnbinds;
+const workspace_ops = @import("workspace.zig");
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
@@ -286,14 +293,14 @@ pub fn refreshSettingsFieldCount(self: *AppSession) void {
     // 안 하면 section이 범위를 넘어 계속 커져 ↑가 한참 먹지 않는다(currentSectionFields는 min clamp로 보기만 보정).
     // 네비 맨 아래에 "↺ 초기화" 액션 행(§6.4)이 실제 섹션들 뒤에 하나 더 있으므로 상한은 sections.len(=리셋 행 인덱스)까지
     // 허용한다 — nav_reset_row로 그 인덱스를 컴포넌트에 알려 Enter/클릭이 폼 진입 대신 .reset_all을 내게 한다.
-    if (self.buildSectionList(scratch.allocator())) |sections| {
+    if (buildSectionList(self, scratch.allocator())) |sections| {
         self.chrome_host.settings.nav_reset_row = sections.len;
         if (self.chrome_host.settings.section > sections.len)
             self.chrome_host.settings.section = sections.len;
     } else |_| {
         self.chrome_host.settings.nav_reset_row = null;
     }
-    const cf = self.currentSectionFields(scratch.allocator()) catch return;
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
     self.chrome_host.settings.setFieldCount(cf.total());
 }
 
@@ -388,7 +395,7 @@ pub fn settingsActionHasUserBinding(self: *AppSession, action: config_mod.Action
 
 pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
     const Row = chrome.components.settings.FieldRow;
-    const cf = try self.currentSectionFields(arena);
+    const cf = try currentSectionFields(self, arena);
     const defaults = try buildSettingsDefaults(arena); // §6.11 is_default 판정용(기본 config 대비)
     // 교차 검색(쿼리 있음)이면 행 라벨에 섹션명 접두 — currentSectionFields의 cross 게이트와 같은 조건(단일 출처).
     const cross = self.chrome_host.settings.searchQuery().len > 0;
@@ -484,7 +491,7 @@ pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrom
 
 /// 좌측 네비 라벨 목록(현재 섹션 강조는 컴포넌트가 settings.section으로). arena 소유.
 pub fn buildSettingsSectionLabels(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
-    const sections = try self.buildSectionList(arena);
+    const sections = try buildSectionList(self, arena);
     // +1 = 네비 맨 아래 "↺ 초기화" 액션 행(§6.4). 실제 섹션(폼 매핑=buildSectionList)과 분리해 라벨 목록에만 더한다 —
     // 이 행은 섹션이 아니라 requestResetAll 액션(nav_reset_row=sections.len으로 컴포넌트에 알림). 라벨 글리프는 단일 출처.
     const labels = try arena.alloc([]const u8, sections.len + 1);
@@ -501,7 +508,7 @@ pub fn isDesktopNotificationSettingKey(key: []const u8) bool {
 /// enum/font가 아니면 빈 슬라이스. settings.view/handlePointer에 dropdown_items로 주입해 팝업 목록·hit-test를 그린다.
 pub fn buildSettingsDropdownItems(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
     if (!self.chrome_host.settings.dropdown.open) return &.{};
-    const cf = try self.currentSectionFields(arena);
+    const cf = try currentSectionFields(self, arena);
     const sel = self.chrome_host.settings.selected;
     const after_nums = cf.bools.len + cf.nums.len;
     const after_enums = after_nums + cf.enums.len;
@@ -544,7 +551,7 @@ pub fn settingsPaletteArrowIntercept(self: *AppSession, event: terminal.KeyEvent
     };
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
-    const cf = self.currentSectionFields(scratch.allocator()) catch return false;
+    const cf = currentSectionFields(self, scratch.allocator()) catch return false;
     const pi = cf.paletteRowIndex() orelse return false;
     if (pi != s.selected) return false;
     const gc = @min(s.grid_cell, 15);
@@ -557,7 +564,7 @@ pub fn settingsPaletteArrowIntercept(self: *AppSession, event: terminal.KeyEvent
 pub fn toggleSelectedSetting(self: *AppSession) void {
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
-    const cf = self.currentSectionFields(scratch.allocator()) catch return;
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
     const sel = self.chrome_host.settings.selected;
     if (sel < cf.bools.len) {
         // bool 행 — flip.
@@ -721,7 +728,7 @@ pub fn removeTerminalMacro(self: *AppSession, chord_str: []const u8) void {
 pub fn resetSelectedSettingRow(self: *AppSession) void {
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
-    const cf = self.currentSectionFields(scratch.allocator()) catch return;
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
     const defaults = buildSettingsDefaults(scratch.allocator()) catch return;
     const sel = self.chrome_host.settings.selected;
 
@@ -889,7 +896,7 @@ pub fn markConfigKeyRemoved(self: *AppSession, key: []const u8) void {
 pub fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
-    const cf = self.currentSectionFields(scratch.allocator()) catch return;
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
     const sel = self.chrome_host.settings.selected;
     if (sel < cf.bools.len) return; // bool 행 — ←/→ 무동작
     const after_nums = cf.bools.len + cf.nums.len;
@@ -1563,8 +1570,8 @@ pub fn acceptContextMenu(self: *AppSession) void {
             // GL §13 GL2 — cardPinRole 분기(라벨과 공유). 비마커 멤버=그룹-로컬 위치 고정(toggleLocalPin, 현행 그룹째
             // 위임 되돌림)·마커 카드=그룹째 고정(toggleGroupPin, C2 권위 §12.2 — 개별 pin이면 캐시 desync)·최상위=개별 togglePin.
             switch (tab_ops.cardPinRole(self, tab)) {
-                .group => if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| self.toggleGroupPin(mk),
-                .local => self.toggleLocalPin(tab),
+                .group => if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| tab_ops.toggleGroupPin(self, mk),
+                .local => tab_ops.toggleLocalPin(self, tab),
                 .individual => tab_ops.togglePin(self, tab),
             }
         } else if (sel == ctx_menu_group_create) {
@@ -1592,7 +1599,7 @@ pub fn acceptContextMenu(self: *AppSession) void {
             // 그룹 고정/해제(마커 pinned 토글 → 멤버 동기 → 리전 안착, GP3 §12.10). **top-level 해소**(§12.1
             // pin ⊃ group ⊃ nest): 중첩 subgroup 헤더에서 눌러도 그 subtree만 pin돼 부모에서 떨어지지 않게
             // enclosingGroupMarkerTab(depth 1까지 상향)으로 최상위 마커를 잡는다. 마커는 항상 자기 그룹에 속하니 non-null.
-            if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| self.toggleGroupPin(mk);
+            if (tab_ops.enclosingGroupMarkerTab(self, tab)) |mk| tab_ops.toggleGroupPin(self, mk);
         } else if (sel == ctx_group_menu_ungroup) {
             tab_ops.ungroupTab(self, tab); // 그룹 풀기(헤더가 가리키는 그룹의 시작 마커 제거)
         } else if (sel >= ctx_group_menu_color_first and sel < ctx_group_menu_color_first + tab_color_presets.len) {
@@ -1829,7 +1836,7 @@ pub fn applyThemePreset(self: *AppSession, dir: i8) void {
     const preset: config_mod.theme.ThemePreset = @enumFromInt(@as(usize, @intCast(next)));
     self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
     reapplyLoadedConfig(self);
-    self.persistThemePreset(preset);
+    persistThemePreset(self, preset);
 }
 
 /// 테마 프리셋 드롭다운의 변형 라벨 — 16 프리셋 @tagName(underscore, viewPopup이 dash 변환) + "사용자 지정"(마지막 슬롯).
@@ -2242,5 +2249,440 @@ pub fn settingsMessageOrNotice(self: *AppSession, message: []const u8) void {
         self.metal_dirty = true;
     } else {
         self.showNotice(message);
+    }
+}
+
+// --- 호출 그래프로 소유가 확인돼 옮겨 온 함수 ---
+// 이름에 도메인 단어가 없어 F 시리즈가 못 잡았고, 이 그룹을 과반으로 부르며 만지는 상태도 이 그룹이다.
+
+/// 필드가 있는 섹션만 선언 순으로 모은다(좌측 네비 — config-gui §4). 미지정 필드가 있으면 끝에 "기타". arena 소유.
+pub fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]SettingsSectionEntry {
+    var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+    try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
+    var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+    try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums);
+    var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+    try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums);
+    var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
+    try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts);
+    var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
+    try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors);
+    var list: std.ArrayList(SettingsSectionEntry) = .empty;
+    inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
+        const sec: config_mod.Section = @enumFromInt(ef.value);
+        if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, sec))
+            try list.append(arena, .{ .section = sec, .label = settingsSectionLabel(sec) });
+    }
+    if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, null))
+        try list.append(arena, .{ .section = null, .label = settingsSectionLabel(null) });
+    return list.items;
+}
+
+/// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum→text). arena 소유. 핸들러가 selected를 이 순서로 매핑.
+pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
+    // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
+    // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
+    self.loaded_config.config.session.keep_alive_after_quit = app_session_mod.app_keep_alive_after_quit;
+    const sections = try buildSectionList(self, arena);
+    const sel_sec: ?config_mod.Section = if (sections.len > 0)
+        sections[@min(self.chrome_host.settings.section, sections.len - 1)].section
+    else
+        null;
+    var bools_all: std.ArrayList(config_mod.schema.BoolField) = .empty;
+    try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools_all);
+    var nums_all: std.ArrayList(config_mod.schema.NumberField) = .empty;
+    try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums_all);
+    var enums_all: std.ArrayList(config_mod.schema.EnumField) = .empty;
+    try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums_all);
+    var texts_all: std.ArrayList(config_mod.schema.TextField) = .empty;
+    try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
+    var colors_all: std.ArrayList(config_mod.schema.ColorField) = .empty;
+    try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors_all);
+    // 검색 쿼리(폼 필터 — 라벨/키 부분일치). 모든 행 종류에 같은 settingsRowMatches 규칙을 적용해 view·핸들러 인덱싱이
+    // 일관되게 한다(필터는 여기 단일 출처). 빈 쿼리면 전부 통과. **쿼리가 있으면(cross) 섹션 게이트를 무시**해 전 섹션의
+    // 매칭 행을 보여준다(교차 섹션 검색 — 설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만.
+    const q = self.chrome_host.settings.searchQuery();
+    const cross = q.len > 0;
+    var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+    for (bools_all.items) |b| if (settingsExposesConfigKey(b.key) and (cross or b.section == sel_sec) and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
+    var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+    for (nums_all.items) |n| if (settingsExposesConfigKey(n.key) and (cross or n.section == sel_sec) and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
+    var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+    for (enums_all.items) |e| if (settingsExposesConfigKey(e.key) and (cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
+    // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
+    // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
+    // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
+    if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
+        // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
+        // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
+        const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else "사용자 지정";
+        try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
+    }
+    var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
+    for (texts_all.items) |t| if (settingsExposesConfigKey(t.key) and (cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
+    // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
+    // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
+    if (cross or sel_sec == .terminal) {
+        if (settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
+            try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
+        for (self.loaded_config.config.env) |entry| {
+            const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
+            if (settingsRowMatches(entry[0..eq], "env", q))
+                try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
+        }
+        if (settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
+            try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
+    }
+    // 입력 섹션엔 사용자 터미널 매크로(keybind = chord = text:/esc:/ctrl:)를 rhs 편집 text 행으로 노출한다(env 특수 행
+    // 선례). 라벨=chord 표시(formatChord), 값=rhs config 문자열(macroRhsString, 예 "text:hello"). 키="macro.<chord
+    // config>"로 커밋/삭제 시 chord를 식별한다(toConfigString). 마지막에 "추가" 행(빈 sentinel "macro.").
+    if (cross or sel_sec == .input) {
+        for (self.loaded_config.terminal_bindings) |b| {
+            var disp_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+            const disp = command_catalog.formatChord(b.chord, &disp_buf);
+            if (settingsRowMatches(disp, "macro", q)) {
+                var chord_buf: [64]u8 = undefined; // 매치된 행만 chord config 표기 계산(필터된 행 낭비 제거)
+                const chord_cfg = b.chord.toConfigString(&chord_buf);
+                try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
+            }
+        }
+        if (settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
+            try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
+    }
+    // Workspace 섹션엔 시작 디렉터리(workspace.root)를 합성 text 행으로 노출한다(schema 필드 아님 — loader 명시
+    // 핸들러 특수 키, shell.args 선례). 값=현재 root(빈 값=상속 cwd). 커밋은 setWorkspaceRoot(loader와 형식 검증 공유).
+    if (cross or sel_sec == .workspace) {
+        if (settingsRowMatches("시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", "workspace.root", q))
+            try texts.append(arena, .{ .key = "workspace.root", .doc = "시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", .value = self.loaded_config.config.workspace.root, .section = .workspace });
+    }
+    var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
+    for (colors_all.items) |c| if (settingsExposesConfigKey(c.key) and (cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
+    // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
+    // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
+    // 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 keybindRowStart가 palette 오프셋을 더한다.
+    var keybinds: std.ArrayList(command_catalog.Entry) = .empty;
+    if (cross or sel_sec == .input) {
+        for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
+    }
+    const palette_on = (cross or sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
+    // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
+    // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
+    var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
+    if (cross or sel_sec == .global_hotkey) {
+        for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try globals.append(arena, entry);
+    }
+    return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
+}
+
+/// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용**한다(팝업은 안 닫음). enum=setEnumIndex,
+/// font.family=그 폰트 setText, theme.preset=applyThemePresetIndex. **persist=false면 파일 영속을 예약하지 않는다(인메모리
+/// 라이브만)** — 라이브 프리뷰(↑↓)는 persist=false로, 확정만 persist=true로 부른다. **미리보기가 영속까지 하면 취소해도
+/// 파일엔 미리본 값이 써져 커스텀이 사라지는 데이터 손실**이 났기에(code-review high) 영속은 확정에서만 한다.
+pub fn applyDropdownIndex(self: *AppSession, idx: usize, persist: bool) void {
+    var scratch = std.heap.ArenaAllocator.init(self.allocator);
+    defer scratch.deinit();
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
+    const sel = self.chrome_host.settings.selected;
+    const after_nums = cf.bools.len + cf.nums.len;
+    const after_enums = after_nums + cf.enums.len;
+    const after_texts = after_enums + cf.texts.len;
+    if (sel >= after_nums and sel < after_enums) {
+        const e = cf.enums[sel - after_nums];
+        if (std.mem.eql(u8, e.key, "theme.preset")) {
+            applyThemePresetIndex(self, idx, persist); // synthetic 프리셋 — 절대 인덱스로 적용
+            return;
+        }
+        if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, idx)) {
+            // follow-system preset-light/dark는 라이브 색도 새 프리셋으로 재해석해야 한다(cycle 경로와 동일 특수 처리).
+            if (self.loaded_config.config.theme_follow_system and
+                (std.mem.eql(u8, e.key, "theme.preset-dark") or std.mem.eql(u8, e.key, "theme.preset-light")))
+            {
+                self.follow_applied_dark = null;
+                self.applyFollowSystemTheme();
+            } else {
+                reapplyLoadedConfig(self);
+            }
+            if (persist) markConfigKeyDirty(self, e.key);
+        }
+        return;
+    }
+    if (sel >= after_enums and sel < after_texts) {
+        const ti = sel - after_enums;
+        if (ti < cf.texts.len and std.mem.eql(u8, cf.texts[ti].key, "font.family")) {
+            const fonts = config_mod.theme.bundled_font_families;
+            // idx < fonts.len = 번들 폰트(정적 문자열이라 dupe 불요), idx >= fonts.len = "직접 입력…" 슬롯 → 프리뷰는 원본
+            // 폰트(스냅샷)를 다시 보여준다(선택 표시용, 안 바꿈). "직접 입력" 확정은 applyDropdownSelection이 편집을 연다.
+            const value: []const u8 = if (idx < fonts.len) fonts[idx] else self.dropdown_snapshot_font;
+            if (config_mod.schema.setText(&self.loaded_config.config, "font.family", value)) {
+                reapplyLoadedConfig(self);
+                if (persist and idx < fonts.len) markConfigKeyDirty(self, "font.family");
+            }
+        }
+        return;
+    }
+}
+
+/// 드롭다운 프리뷰를 **열 때 값으로 인메모리 복원**한다(영속 안 함 — 미리보기가 영속을 안 했으니 파일은 원본 그대로).
+/// font/theme.preset은 스냅샷으로, enum은 original 인덱스로 되돌린다(인덱스로 못 되살리는 커스텀 폰트·테마는 스냅샷이 정확히 복원).
+pub fn restoreDropdownSnapshot(self: *AppSession) void {
+    switch (self.dropdown_snapshot_kind) {
+        .font => {
+            if (config_mod.schema.setText(&self.loaded_config.config, "font.family", self.dropdown_snapshot_font))
+                reapplyLoadedConfig(self); // 인메모리만 — markDirty 없음(파일은 원본 폰트 그대로)
+        },
+        .preset => {
+            self.loaded_config.config.theme = self.dropdown_snapshot_theme;
+            self.theme_user_custom = self.dropdown_snapshot_user_custom;
+            reapplyLoadedConfig(self);
+        },
+        .none => applyDropdownIndex(self, self.chrome_host.settings.dropdown.original, false), // enum — 인덱스 복원(persist=false, 안 바뀐 값 영속 안 함)
+    }
+}
+
+/// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
+/// 재resolve + write-back 예약. 편집 종료. 라이브/직렬화가 계속 슬라이스를 읽으므로 loaded_config.arena가 소유한다.
+pub fn commitSelectedText(self: *AppSession) void {
+    self.chrome_host.settings.clearMessage(); // 새 커밋 시도 — 직전 안내 배너 정리(아래 env/macro 검증이 실패 시 다시 세운다)
+    var scratch = std.heap.ArenaAllocator.init(self.allocator);
+    defer scratch.deinit();
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
+    const sel = self.chrome_host.settings.selected;
+    const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
+    const after_texts = after_enums + cf.texts.len;
+    const after_colors = after_texts + cf.colors.len;
+    defer self.chrome_host.settings.cancelEdit(); // 성공/실패 무관 편집 종료(키는 다시 네비로)
+    // 팔레트 그리드 행은 setText가 아니라 setPaletteColor로 커밋(theme.palette.N은 schema 필드가 아님). 그 칸 키를
+    // dirty로 — write-back(serialize)이 set된 palette.N을 이미 직렬화하므로 영속된다.
+    if (cf.paletteRowIndex()) |pi| if (sel == pi) {
+        const gi = @min(self.chrome_host.settings.grid_cell, 15);
+        const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
+        if (config_mod.schema.setPaletteColor(&self.loaded_config.config, gi, owned)) {
+            reapplyLoadedConfig(self);
+            markConfigKeyDirty(self, config_mod.schema.paletteKey(gi));
+        }
+        return;
+    };
+    // number 행(bools.len..after_nums): 입력 박스 편집 버퍼를 f64로 파싱해 setNumber(범위 clamp) + 라이브 적용 + 영속.
+    // 파싱 실패면 값 유지(편집만 종료 — defer cancelEdit). 슬라이더 대체 경로.
+    const after_nums = cf.bools.len + cf.nums.len;
+    if (sel >= cf.bools.len and sel < after_nums) {
+        const ni = sel - cf.bools.len;
+        if (ni >= cf.nums.len) return;
+        const nkey = cf.nums[ni].key;
+        const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, self.chrome_host.settings.editText(), " ")) catch return;
+        if (config_mod.schema.setNumber(&self.loaded_config.config, nkey, parsed)) {
+            reapplyLoadedConfig(self);
+            markConfigKeyDirty(self, nkey);
+        }
+        return;
+    }
+    const editor = self.chrome_host.settings.editText();
+    // text 행(after_enums..after_texts): shell.args·env.*는 특수 setter, 나머지 schema 텍스트(폰트 패밀리·term 등)는 setText.
+    if (sel >= after_enums and sel < after_texts) {
+        const ti = sel - after_enums;
+        if (ti >= cf.texts.len) return;
+        const tkey = cf.texts[ti].key;
+        if (std.mem.eql(u8, tkey, "shell.args")) {
+            self.setShellArgs(editor); // 공백-토큰 분리
+        } else if (std.mem.eql(u8, tkey, "workspace.root")) {
+            workspace_ops.setWorkspaceRoot(self, editor); // 시작 디렉터리 — loader와 형식 검증 공유
+        } else if (std.mem.eql(u8, tkey, "env.")) {
+            addEnvVar(self, editor); // 추가 행 — "KEY=VALUE" 파싱
+            refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
+        } else if (std.mem.startsWith(u8, tkey, "env.")) {
+            self.setEnvVar(tkey["env.".len..], editor); // 기존 env 값 편집
+        } else if (std.mem.eql(u8, tkey, "macro.")) {
+            addTerminalMacro(self, editor); // 추가 행 — "chord = text:..." 파싱
+            refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
+        } else if (std.mem.startsWith(u8, tkey, "macro.")) {
+            setTerminalMacro(self, tkey["macro.".len..], editor); // 기존 매크로 rhs 편집
+        } else {
+            // schema 텍스트(.text) — config arena dupe 후 검증·적용.
+            const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
+            if (config_mod.schema.setText(&self.loaded_config.config, tkey, owned)) {
+                reapplyLoadedConfig(self);
+                markConfigKeyDirty(self, tkey);
+                // 셸 경로가 실행 불가능하면(없는 경로·`~`·상대경로·디렉터리·비실행 파일) spawn 시 기본 셸로
+                // 폴백된다(resolveConfiguredShell). 저장은 그대로 두되 즉시 안내해, 예전처럼 다음 실행에 앱이 조용히
+                // 종료되지 않음을 알린다. `~`/시작 디렉터리는 이 필드가 아니라 config workspace.root임을 함께 안내.
+                if (std.mem.eql(u8, tkey, "shell.command")) {
+                    // setText는 validatedText로 **trim해 저장**하므로(schema.zig) 안내는 저장된 값을 검사한다 —
+                    // owned(untrimmed)를 쓰면 "/bin/zsh "처럼 공백이 섞인 유효 경로를 실행 불가로 오탐한다.
+                    const stored = self.loaded_config.config.shell.command;
+                    if (stored.len > 0 and !isExecutablePath(stored))
+                        self.chrome_host.settings.setMessage("셸 실행 파일을 찾을 수 없어 기본 셸로 실행됩니다 (실행 파일 절대경로 필요 · 시작 위치는 이 필드가 아님)");
+                }
+            }
+        }
+        return;
+    }
+    // color hex 행(after_texts..after_colors): setText로 커밋(hex 검증).
+    if (sel >= after_texts and sel < after_colors) {
+        const ci = sel - after_texts;
+        if (ci >= cf.colors.len) return;
+        const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
+        if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, owned)) {
+            reapplyLoadedConfig(self);
+            markConfigKeyDirty(self, cf.colors[ci].key);
+        }
+        return;
+    }
+}
+
+/// HSV picker 확정(Enter → settings_color_picked) — settings.pickerRgb()를 #rrggbb로 직렬화해 선택 color 행 키에
+/// setText로 적용(commitSelectedText의 color 분기와 같은 인덱스 매핑·setter). 라이브 재resolve + write-back 예약 후
+/// picker 닫기. hex 문자열은 loaded_config.arena 소유(라이브/직렬화가 계속 읽는다). picker 외 행이면 무동작.
+pub fn commitPickerColor(self: *AppSession) void {
+    defer self.chrome_host.settings.closePicker(); // 성공/실패 무관 picker 종료(폼 복귀)
+    var scratch = std.heap.ArenaAllocator.init(self.allocator);
+    defer scratch.deinit();
+    const cf = currentSectionFields(self, scratch.allocator()) catch return;
+    const sel = self.chrome_host.settings.selected;
+    const after_texts = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
+    const after_colors = after_texts + cf.colors.len;
+    // sel<after_texts면 다음 줄 `sel - after_texts`가 usize 언더플로(panic)라 그 범위 가드는 필수다(방어가 아니라
+    // 언더플로 안전). picker는 color 행에서만 열리므로 sel은 [after_texts, after_colors)이지만, 호출 계약을 코드로 못박는다.
+    if (sel < after_texts or sel >= after_colors) return;
+    const ci = sel - after_texts;
+    if (ci >= cf.colors.len) return;
+    const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;
+    if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, hex)) {
+        reapplyLoadedConfig(self);
+        markConfigKeyDirty(self, cf.colors[ci].key);
+    }
+}
+
+/// env 추가 행 커밋 — "KEY=VALUE" 텍스트를 파싱해 setEnvVar로 upsert. '=' 없거나 KEY(양끝 trim)가 비면 notice.
+pub fn addEnvVar(self: *AppSession, text: []const u8) void {
+    const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
+        settingsMessageOrNotice(self, "환경 변수는 KEY=VALUE 형식이어야 합니다");
+        return;
+    };
+    const name = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
+    if (name.len == 0) {
+        settingsMessageOrNotice(self, "환경 변수 KEY가 비어 있습니다");
+        return;
+    }
+    self.setEnvVar(name, text[eq + 1 ..]);
+}
+
+/// 터미널 매크로 upsert(rhs 편집·추가 공유) — chord_str(config 표기)에 rhs(text:/esc:/ctrl:)를 묶는다. rhs 파싱 실패·
+/// chord 표기 오류·충돌이면 notice(미적용). 성공 시 loaded_config.terminal_bindings를 라이브 교체(resolver가 즉시 반영)
+/// + write-back 예약(config_terminal_macros). config-gui §6.7.
+pub fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []const u8) void {
+    const a = self.loaded_config.arena.allocator();
+    const rhs_trim = std.mem.trim(u8, rhs_str, &std.ascii.whitespace);
+    const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch {
+        settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
+        return;
+    };
+    const macro = config_mod.parseMacroRhs(a, rhs_trim) orelse {
+        settingsMessageOrNotice(self, "매크로는 text:/esc:/ctrl: 형식이어야 합니다");
+        return;
+    };
+    // 같은 chord면 교체, 없으면 추가(한 chord=한 매크로).
+    var list: std.ArrayList(config_mod.keybinding.TerminalBinding) = .empty;
+    var found = false;
+    for (self.loaded_config.terminal_bindings) |b| {
+        if (b.chord.eql(chord)) {
+            list.append(a, .{ .chord = chord, .input = macro }) catch return;
+            found = true;
+        } else list.append(a, b) catch return;
+    }
+    if (!found) list.append(a, .{ .chord = chord, .input = macro }) catch return;
+    const new_binds = list.toOwnedSlice(a) catch return;
+    // 충돌 검증(app↔terminal·중복 chord) — 새 셋으로 resolver를 만들어 validate. 실패면 적용 안 함(best-effort 경고).
+    var probe = self.loaded_config.keyBindingResolver();
+    probe.terminal_bindings = new_binds;
+    probe.validate() catch {
+        settingsMessageOrNotice(self, "다른 단축키와 충돌해 적용하지 못했습니다");
+        return;
+    };
+    // validate는 **사용자** 바인딩만 본다(loaded_config.keybindings엔 빌트인 없음, default_*는 resolve 내부에만).
+    // 그래서 빌트인 chord(Cmd+T 등)는 위 검증을 통과해 매크로가 조용히 빌트인을 가린다 — 차단은 아니고(오버라이드는
+    // 사용자 의도, rebind 충돌 경고와 동일 last-wins) **경고**로 알린다(code-review max). unbinds로 죽인 chord는 제외.
+    if (!resolverUnbinds(self.loaded_config.unbinds, chord) and input_ops.chordShadowsBuiltin(chord))
+        settingsMessageOrNotice(self, "기본 단축키를 매크로가 덮어씁니다");
+    self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
+    // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
+    // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
+    self.clearStaleUnbind(chord);
+    // write-back 예약 — 같은 chord 대기 예약(추가/삭제)을 먼저 비워 중복·모순을 막고 새로 단다. chord·rhs는
+    // loaded_config.arena 소유(serialize drain까지 유효).
+    self.cancelPendingMacro(chord_str);
+    const chord_owned = a.dupe(u8, chord_str) catch return;
+    const rhs_owned = a.dupe(u8, rhs_trim) catch return;
+    self.config_terminal_macros.append(self.allocator, .{ .chord = chord_owned, .rhs = rhs_owned }) catch return;
+    self.metal_dirty = true;
+}
+
+/// 매크로 추가 행 커밋 — "chord = text:..." 텍스트를 파싱(첫 `=`로 chord/rhs 분리, chord 정규화)해 setTerminalMacro로
+/// upsert. `=` 없거나 chord가 비면 notice.
+pub fn addTerminalMacro(self: *AppSession, text: []const u8) void {
+    const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
+        settingsMessageOrNotice(self, "매크로는 'chord = text:...' 형식이어야 합니다");
+        return;
+    };
+    const chord_part = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
+    if (chord_part.len == 0) {
+        settingsMessageOrNotice(self, "단축키가 비어 있습니다");
+        return;
+    }
+    // chord 정규화(파싱 → toConfigString) — 행 키·write-back 줄이 표준 표기를 쓰게.
+    const chord = config_mod.keybinding.KeyChord.parse(chord_part) catch {
+        settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
+        return;
+    };
+    var chord_buf: [64]u8 = undefined;
+    setTerminalMacro(self, chord.toConfigString(&chord_buf), text[eq + 1 ..]);
+}
+
+/// 테마 프리셋을 **절대 인덱스**로 적용한다(드롭다운 팝업 — applyThemePreset의 dir-순환 짝). idx가 프리셋 수 이상
+/// (="사용자 지정")이면 **열 때 스냅샷한 원본 커스텀 색으로 복원** + 잠금 해제(예전엔 잠금만 풀어 미리본 프리셋 색이
+/// 남던 데이터 손실 — code-review high 수정). idx<n이면 그 프리셋 색을 깔고 라이브 적용, persist=true일 때만 파일 영속.
+pub fn applyThemePresetIndex(self: *AppSession, idx: usize, persist: bool) void {
+    const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+    if (idx >= n) {
+        // "사용자 지정" — 원본 커스텀 색(스냅샷)으로 되돌리고 잠금 해제. 커스텀은 theme.preset 줄을 안 남기므로 별도 영속 없음
+        // (미리보기가 persist를 안 했으니 파일의 커스텀 색 줄이 그대로라, 여기선 인메모리 복원만 하면 파일도 정합).
+        self.loaded_config.config.theme = self.dropdown_snapshot_theme;
+        self.theme_user_custom = true;
+        reapplyLoadedConfig(self);
+        return;
+    }
+    self.theme_user_custom = false;
+    const preset: config_mod.theme.ThemePreset = @enumFromInt(idx);
+    self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
+    reapplyLoadedConfig(self);
+    if (persist) persistThemePreset(self, preset); // 확정에서만 파일에 theme.preset 예약(미리보기는 인메모리만)
+}
+
+/// 프리셋을 **통째로 영속**한다(4색만 쓰던 옛 한계 해소 — ANSI 16색 팔레트·파생색 포함, 리뷰). `theme.preset = <name>`
+/// 한 줄을 쓰도록 예약하고(serializeConfig가 set/update), 그 줄과 충돌할 개별 theme.* 색·palette override 줄은 제거
+/// 예약한다 — 로더가 theme.preset을 통째 프리셋 색으로 펼치므로 남은 override가 위에 덮어쓰면 반쪽만 적용되기 때문.
+pub fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePreset) void {
+    const a = self.loaded_config.arena.allocator();
+    // @tagName은 underscore(gruvbox_dark), config 파일은 dash(gruvbox-dark) — 로더 parseEnum이 받는 형식으로 변환.
+    self.theme_preset_persist = std.mem.replaceOwned(u8, a, @tagName(preset), "_", "-") catch null;
+    // 개별 override 줄 제거(theme.preset이 base를 깔므로 남으면 충돌). 4 주 색 + 16 팔레트.
+    markConfigKeyRemoved(self, "theme.background");
+    markConfigKeyRemoved(self, "theme.foreground");
+    markConfigKeyRemoved(self, "theme.cursor");
+    markConfigKeyRemoved(self, "theme.selection");
+    for (0..16) |i| {
+        const k = std.fmt.allocPrint(a, "theme.palette.{d}", .{i}) catch continue;
+        markConfigKeyRemoved(self, k);
+    }
+}
+
+/// Swift NSOpenPanel이 고른 파일의 절대경로를 받아 window.background-image에 적용한다 — config arena에 dupe해 setText,
+/// 라이브 반영(reapplyLoadedConfig가 metal_dirty → 다음 frame ensureBackgroundImage가 새 경로 디코드) + 영속 예약
+/// (markConfigKeyDirty). 빈 경로(취소 등)면 무동작 — 지우기는 행 Backspace가 담당. (배경 이미지 파일 선택)
+pub fn providePickedFile(self: *AppSession, path: []const u8) void {
+    if (path.len == 0) return;
+    const owned = self.loaded_config.arena.allocator().dupe(u8, path) catch return;
+    if (config_mod.schema.setText(&self.loaded_config.config, "window.background-image", owned)) {
+        reapplyLoadedConfig(self);
+        markConfigKeyDirty(self, "window.background-image");
     }
 }

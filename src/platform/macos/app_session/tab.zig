@@ -22,11 +22,15 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const projectRowsCore = app_session_mod.projectRowsCore;
+const DropPlan = AppSession.DropPlan;
+const DropTarget = app_session_mod.DropTarget;
+const GroupNestPlan = AppSession.GroupNestPlan;
+const LocalPinBounds = AppSession.LocalPinBounds;
 const CardPinRole = AppSession.CardPinRole;
 const GroupMoveResult = AppSession.GroupMoveResult;
 const PinRegion = AppSession.PinRegion;
 const VirtualLayout = AppSession.VirtualLayout;
-const groupBlockPermutation = app_session_mod.groupBlockPermutation;
 const group_normalize = app_session_mod.group_normalize;
 const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
@@ -2050,4 +2054,313 @@ pub fn groupSubtreeEnd(self: *AppSession, m: usize, order: ?[]const usize, group
         if (t.group_start != null and kd <= eff_m) break;
     }
     return k;
+}
+
+// --- 호출 그래프로 소유가 확인돼 옮겨 온 함수 ---
+// 이름에 도메인 단어가 없어 F 시리즈가 못 잡았고, 이 그룹을 과반으로 부르며 만지는 상태도 이 그룹이다.
+
+/// 탭 드래그 중 마우스가 올라간 드롭 타겟을 판정한다(④b 하이라이트용 — dropTabAt의 커밋 판정과 같은 우선순위).
+/// 다른 pane 탭 바 위 → {pane, zone=null}(이동). 자기 바 → null(재정렬, 드롭 아님). pane 본문 → {pane, zone}
+/// (그 방향 split) — 단, target==src인데 Term 1개뿐이면 무동작이라 null. 레이아웃 실패면 null.
+pub fn computeDropTarget(self: *AppSession, x_px: f64, y_px: f64) ?DropTarget {
+    const src = switch (self.pointer_gesture_owner) {
+        .terminal_tab => |drag| drag.pane,
+        else => return null,
+    };
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(self.allocator);
+    activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
+    for (leaf_rects.items) |lr| {
+        const bar = pane_ops.paneBarRect(self, lr.rect) orelse continue;
+        if (layout_math.pointInRect(x_px, y_px, bar)) {
+            if (lr.leaf == src) return null; // 자기 바 — 재정렬(드롭 아님)
+            return .{ .pane = lr.leaf, .zone = null };
+        }
+    }
+    for (leaf_rects.items) |lr| {
+        const body = pane_ops.paneTermRect(self, lr.rect);
+        if (layout_math.paneDropZone(body, x_px, y_px)) |zone| {
+            if (lr.leaf == src and src.terms.items.len <= 1) return null; // 자기-split 무의미
+            return .{ .pane = lr.leaf, .zone = zone };
+        }
+    }
+    return null;
+}
+
+/// 카드/마커 위치 i가 속한 그룹의 **최상위(depth 1) 시작 마커 인덱스**(enclosingGroupMarkerTab의 인덱스판 — §2.1 상향
+/// 파생 + 중첩 상향 클램프). 최상위 카드(그룹 미소속)면 null. "그룹 뒤 빈 gap" 드롭(§14.6 SR5 요구2)이 "이 카드가 속한
+/// **최상위 그룹**의 subtree 끝"을 알아야 top카드를 그 그룹 밖 gap에 정확히 착지시킨다(중첩 subgroup의 마지막 멤버여도
+/// 부모 최상위 그룹 끝 기준). 상향 스캔은 effectiveDepthAt>1이면 부모 마커로 계속 올라간다(mi strictly 감소라 종료 보장).
+pub fn topLevelGroupMarkerIndex(self: *AppSession, i: usize) ?usize {
+    // 옛 구현은 `while effectiveDepthAt(mi)>1`로 부모 마커를 한 칸씩 올라가며 **매 반복 effectiveDepthAt(O(n))를 다시
+    // 계산**해 O(depth·n)이었다(code-review 핫패스 — 드래그 프레임마다 호출). 여기선 effectiveDepthAt과 **동형 단일 스캔**으로
+    // 0..i를 한 번 훑어 depth 스택에 **마커 인덱스**를 함께 쌓고(핀 리전·top_level edge 리셋 동일), i 지점의 스택 바닥
+    // (=depth 1 마커)을 돌려준다 — O(n) 1회. 스택 바닥은 항상 parent+1=1이라 최상위 마커다. i가 그룹 밖(스택 비어있음·
+    // top카드·핀 리전 경계 뒤·그룹 전무)이면 null(옛 enclosing null·climb과 동일 답).
+    if (i >= self.tabs.items.len) return null;
+    var marker_stack: [max_group_nesting]usize = undefined;
+    var depth_stack: [max_group_nesting]u8 = undefined;
+    var top: usize = 0;
+    var prev_pinned: ?bool = null; // 핀 리전 경계 추적(§12 GP1 — effectiveDepthAt과 동형)
+    var k: usize = 0;
+    while (k <= i) : (k += 1) {
+        const t = self.tabs.items[k];
+        if (prev_pinned) |pp| if (t.pinned != pp) {
+            top = 0; // 핀 리전 경계 → 스택 리셋(subtree는 리전을 못 넘는다)
+        };
+        if (t.top_level) top = 0; // §2.1 재설계(§14) top_level edge — 최상위 복귀(effectiveDepthAt과 동형)
+        prev_pinned = t.pinned;
+        if (t.group_start != null) {
+            const dd: u8 = @max(@as(u8, 1), t.group_depth);
+            while (top > 0 and depth_stack[top - 1] >= dd) top -= 1;
+            const parent: u8 = if (top > 0) depth_stack[top - 1] else 0;
+            if (top < depth_stack.len) {
+                depth_stack[top] = parent + 1;
+                marker_stack[top] = k;
+                top += 1;
+            }
+        }
+    }
+    if (top == 0) return null; // i가 그룹 밖
+    return marker_stack[0]; // depth 1 마커(스택 바닥)
+}
+
+/// SG5-4: 드롭 row가 **다른 그룹의 헤더**면 그 그룹(G)의 자식으로 중첩할 계획을 낸다 — insert_before=G의 subtree 끝
+/// (마지막 자식 자리라 "부모 직접 카드가 자식 앞" §2.1 유지), target_depth=G의 eff_depth+1. 그 외(카드 드롭·자기 헤더·
+/// 자기 subtree·과깊이 max_group_nesting)는 null → groupDragPreviewFrame이 형제 경계 이동으로 처리(헤더=넣기·카드=형제 분리).
+pub fn groupNestPlan(self: *AppSession, raw_row: usize, m: usize) ?GroupNestPlan {
+    if (raw_row >= self.sidebar_rows.items.len) return null;
+    const gh = switch (self.sidebar_rows.items[raw_row]) {
+        .group_header => |h| h,
+        .agent_toggle, .agent => return null, // 목록 행 드롭은 그룹 경계 판정 대상이 아니다
+        .card => return null, // 카드 드롭 = 형제 경계(SG5-1 보존)
+    };
+    const g = gh.tab;
+    const len = self.tabs.items.len;
+    if (g >= len or m >= len) return null;
+    if (g == m) return null; // 자기 그룹 헤더 — 무동작
+    // **고정(pinned) 그룹은 흡수 불가(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 대상 그룹 마커가 pinned면
+    // 어느 그룹에도(고정 그룹 포함) 중첩하지 않는다 → null(groupDragPreviewFrame이 형제 경계 이동으로 폴백, Cmd nest도 차단).
+    // 고정 그룹은 고정 리전 안 **독립(top-level) 그룹**으로만 존재하며 다른 그룹의 자식이 될 수 없다. 아래 다른-pin 리전
+    // 차단(GP3)보다 강한 규칙(같은 고정 리전 안 고정↔고정 중첩도 금지)이라 먼저 건다. 비고정 그룹은 기존 중첩 동작 유지.
+    if (self.tabs.items[m].pinned) return null;
+    // 그룹 고정 C2(§12.6 GP3): pin이 **다른** 그룹엔 중첩 불가 → null로 형제 폴백(clampGroupMoveToRegion이 리전에
+    // 가둔다). 멤버가 다른 pin 리전 마커에 소속되면 C3(멤버별 pin)=I1×I2 모순이 재발하므로 원천 차단한다.
+    if (self.tabs.items[g].pinned != self.tabs.items[m].pinned) return null;
+    // 타겟 g가 드래그 subtree [m, my_end) 안이면(자기 자손) 자기 안으로 넣기 불가 — null(형제 경로도 self-guard로 no-op).
+    const my_end = groupSubtreeEnd(self, m, null, null);
+    if (g >= m and g < my_end) return null;
+    const g_depth = effectiveDepthAt(self, g, null, null);
+    if (@as(usize, g_depth) + 1 > max_group_nesting) return null; // 과깊이 방지
+    return .{ .insert_before = groupSubtreeEnd(self, g, null, null), .target_depth = g_depth + 1 };
+}
+
+pub fn localPinPrefixBounds(self: *AppSession, origin: usize) ?LocalPinBounds {
+    if (origin >= self.tabs.items.len) return null;
+    const t = self.tabs.items[origin];
+    if (!t.local_pinned or t.group_start != null) return null; // 로컬 pin **직접 leaf 멤버**만(마커·비-pin은 무변경)
+    const mi = enclosingGroupMarkerIndex(self, origin) orelse return null; // 그룹 소속이어야(최상위 로컬 pin은 무의미)
+    const e = groupSubtreeEnd(self, mi, null, null);
+    var count: usize = 0;
+    var scan = mi + 1;
+    while (scan < e) {
+        if (self.tabs.items[scan].group_start != null) {
+            scan = groupSubtreeEnd(self, scan, null, null); // 자식 subgroup 통째 skip(직접 멤버만 셈 — float 단위)
+        } else {
+            if (self.tabs.items[scan].local_pinned) count += 1;
+            scan += 1;
+        }
+    }
+    if (count == 0) return null; // 방어(origin이 local_pinned라 ≥1이지만 desync면 clamp 무의미)
+    return .{ .lo = mi + 1, .hi = mi + count }; // 프리픽스 [mi+1, mi+1+count) 내부 인덱스
+}
+
+pub fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std.mem.Allocator) !VirtualLayout {
+    const n = self.tabs.items.len;
+    // identity order + 라이브 group_depth(위치별 선언 depth) + 라이브 top_level(위치별 최상위 복귀 비트, §14.6 SR4).
+    // 카드/그룹 이동이 이 위에서 순열·relevel한다.
+    const order = try arena.alloc(usize, n);
+    const group_depth = try arena.alloc(u8, n);
+    const top_level = try arena.alloc(bool, n);
+    for (self.tabs.items, 0..) |tab, i| {
+        order[i] = i;
+        group_depth[i] = tab.group_depth;
+        top_level[i] = tab.top_level;
+    }
+    switch (plan) {
+        .none => return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = 0, .ghost_hi = 0 },
+        .card => |c| {
+            // moveTab과 동일 코어: clampMoveToGroup(핀 정직)로 목표를 같은 핀 그룹에 가두고 rotateMove로 순열.
+            // group_depth·top_level은 카드 이동이 위치별 선언값을 안 바꾸므로 order와 lockstep 회전(탭을 따라감).
+            if (origin >= n or c.target_tab >= n) // 범위 밖 = moveTab의 무동작 가드 — 제자리(고스트=origin 자리)
+                return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = @min(origin, n), .ghost_hi = @min(origin +| 1, n) };
+            var to = clampMoveToGroup(c.target_tab, self.tabs.items[origin].pinned, countPinnedTabs(self), n);
+            // 그룹-로컬 pin(GL §13.5 보강6): 로컬 pin 멤버는 subtree-로컬 프리픽스 [marker+1, local_pin_end)에 **더**
+            // 가둔다(전역 clampMoveToGroup이 핀 리전에 가두는 것과 **대칭**, 한 단계 안쪽). clamp를 **여기 simulateDrop
+            // 카드 경로에만** 굽고(이동 함수 moveTab엔 안 넣음), 확정은 commitSidebarDragPreview가 moveTab **뒤** floatLocalPins
+            // 로 다시 float해 같은 프리픽스로 snap-back한다(re-partition-on-commit, §13.5 — 프리뷰=확정 SG8 불변식 B).
+            // 프리픽스 ⊂ 핀 리전(pin ⊃ group)이라 전역 clamp 결과를 로컬로 좁히면 되고, 비-로컬-pin 멤버는 bounds=null → 무변경.
+            if (localPinPrefixBounds(self, origin)) |b| to = std.math.clamp(to, b.lo, b.hi);
+            if (origin != to) {
+                // §14 경계 유지(finding #2): origin이 top_level 경계 홀더면 뒤 sticky follower에 경계 재확립(가상 — commit과
+                // **같은 조건**이라 프리뷰=확정). order가 아직 identity라 self.tabs 직접 검사(origin+1 == 가상 origin+1).
+                // rotateMove **전**에 세팅해 follower 플래그가 블록과 함께 회전한다. origin==to(제자리)면 이 블록을 안 타 무변경.
+                if (origin > 0 and origin + 1 < n and self.tabs.items[origin].top_level and
+                    self.tabs.items[origin + 1].group_start == null and !self.tabs.items[origin + 1].top_level and
+                    self.tabs.items[origin + 1].pinned == self.tabs.items[origin].pinned and
+                    enclosingGroupMarkerIndex(self, origin - 1) != null)
+                    top_level[origin + 1] = true;
+                rotateMove(usize, order, origin, to);
+                rotateMove(u8, group_depth, origin, to);
+                rotateMove(bool, top_level, origin, to);
+                // §14.6 SR4 model-2: 드롭 컨텍스트로 top_level을 **직접 전이**한다(가상). 의도(c.top_level = 그룹 밖 gap
+                // 드롭이면 true)를 meaningfulness 게이트(hasGroupMarkerAboveInRegion — 그룹 마커가 리전 안 위에 있을 때만
+                // flag가 흡수 방지에 실제 필요)와 AND해 **최소 표현**으로 굽는다: leading/flat(마커 없음)·top-run(위가 이미
+                // top break)은 flag 없이도 depth 0이라 override가 no-op → byte-identical(회귀 0). 그룹 안 드롭(c.top_level
+                // =false)은 항상 false write라 top카드가 멤버로 흡수될 때 stale flag를 clear한다. origin==to(제자리)는
+                // 위치·소속 불변이라 override 안 함(전이 없음). commit이 같은 게이트를 post-move self.tabs에 적용해 프리뷰=확정.
+                // **고정 흡수 금지(프리뷰)**: 소스 pinned면 top_level 강제 true(cardDropPlan과 동일 규칙). self.tabs 불변이라
+                // origin의 라이브 pinned가 드래그 내내 안정하고, commit이 같은 source_pinned를 OR해 프리뷰=확정(대칭).
+                top_level[to] = (c.top_level or self.tabs.items[origin].pinned) and self.hasGroupMarkerAboveInRegion(to, order, top_level);
+            }
+            return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = to, .ghost_hi = to + 1 };
+        },
+        .group_sibling => |g| return simulateGroupMove(self, arena, order, group_depth, top_level, origin, g.insert_before, null),
+        .group_nest => |g| return simulateGroupMove(self, arena, order, group_depth, top_level, origin, g.insert_before, g.target_depth),
+    }
+}
+
+/// SG8c 프리뷰 재투영 진입점(docs/sidebar-groups.md §9) — plan을 simulateDrop으로 **비커밋 가상 배치**(self.tabs 불변)
+/// 하고, 그 order/group_depth를 projectRowsCore(프리뷰 모드)로 sidebar_preview_rows에 투영한다. 고스트 [lo,hi) 구간은
+/// 접힘 게이트 예외로 강제 방출되고(사라짐 방지), 그 고스트를 담은 접힌 그룹 헤더는 collapsed=false로 flip된다.
+/// member_count는 가상 order 위에서 order-aware directCardCount로 계산돼 고스트를 반영한다(self.tabs 직접 스캔 안 함 —
+/// 드래그 중 self.tabs가 불변이라 직접 스캔하면 고스트가 안 보인다). ghost range는 sidebar_drag_preview에 함께 보관해
+/// 렌더(SG8d)가 파생한다. **실제 드래그 핸들러 호출은 SG8d** — 지금은 함수만 두고 헤드리스로 검증한다(렌더 미배선).
+/// arena=simulateDrop 중간 버퍼(order/group_depth/perm) 정리용(호출자 소유 — 프레임 스크래치).
+pub fn refreshDragPreview(self: *AppSession, origin: usize, plan: DropPlan, cursor_y: f64, arena: std.mem.Allocator) !void {
+    const vl = try simulateDrop(self, origin, plan, arena);
+    // (3) 드래그 대상이 **접힌 그룹**이면 고스트를 subtree 전체가 아니라 접힌 헤더로만 낸다(force-emit 억제). 그룹 통째
+    // 드래그(group_sibling/group_nest)이고 origin 마커가 group_collapsed일 때만 true — 카드 드래그(대상=카드)는 항상 false라
+    // 접힌 **타깃** 그룹 안 드롭 시의 force-emit(사라짐 방지)은 그대로 유지된다(대상/타깃 구분).
+    const dragged_collapsed = switch (plan) {
+        .group_sibling, .group_nest => origin < self.tabs.items.len and self.tabs.items[origin].group_start != null and self.tabs.items[origin].group_collapsed,
+        else => false,
+    };
+    // 가상 order/depth를 프리뷰 모드로 투영 — 고스트 [lo,hi)는 접힘 게이트 예외로 강제 방출(사라짐 방지)·헤더 flip.
+    // 반환 range는 vl.ghost(order 위치 도메인)를 방출 후 **표시-row 도메인**으로 옮긴 것(렌더가 그대로 씀).
+    const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, vl.top_level, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi, .dragged_collapsed = dragged_collapsed });
+    // subtree 길이(카드=1·그룹=groupSubtreeEnd-origin·none=0). 프리뷰 상태 메타(확정·origin 안정성 문서화용).
+    const origin_len: usize = switch (plan) {
+        .none => 0,
+        .card => 1,
+        .group_sibling, .group_nest => if (origin < self.tabs.items.len) groupSubtreeEnd(self, origin, null, null) - origin else 0,
+    };
+    self.sidebar_drag_preview = .{
+        .origin = origin,
+        .origin_len = origin_len,
+        .plan = plan,
+        .cursor_y = cursor_y,
+        .ghost_lo = rng.lo,
+        .ghost_hi = rng.hi,
+    };
+}
+
+/// 그룹을 **통째로** 고정/해제한다(togglePin의 그룹판, 그룹 고정 C2 — docs/sidebar-groups.md §12.6·§12.10 GP3).
+/// `marker`는 그룹 시작 마커 탭(헤더 우클릭 대상 또는 멤버 카드가 위임한 enclosing 마커). 순서:
+///  1. **토글 전** 구조 subtree [mi, e)를 잡는다 — 개별 pin 입구가 막혀(§12.7 보강5) desync가 없으니 마커·멤버 pin이
+///     아직 일치해 `groupSubtreeEnd`(pin 인식)가 완전 subtree를 낸다.
+///  2. 마커+멤버 pin을 새 값으로 **직접 동기**한다 — `normalizePinnedFromGroups`의 suffix-exclusion은 전량 flip된
+///     직후(마커만 새 pin, 멤버 전부 옛 pin)를 "꼬리"로 보고 안 흡수하므로, 멤버 동기는 여기서 명시적으로 한다.
+///  3. `stablePartitionPinned`로 그룹(연속·uniform-pin 블록)을 목표 리전 경계에 안착한다 — 고정=(다른 고정 뒤)프리픽스
+///     끝, 비고정=비고정 리전 시작. **복원과 같은 프리픽스 정렬**이라 그룹이 리전 양쪽에 다른 고정 단위가 있어도(예:
+///     고정 그룹 앞에 다른 고정 그룹) 프리픽스 불변식을 항상 지킨다(moveGroupRange 단일 insert_before로는 표현 못 하는
+///     경계 케이스 — 연속 블록이라 stable 수집이 그룹 통째를 붙여 옮기고 파티션 무결이 유지된다).
+///  4. `normalize`(idempotent 확인) 후 1회 rebuild.
+pub fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
+    var mi_opt: ?usize = null;
+    for (self.tabs.items, 0..) |t, i| if (t == marker) {
+        mi_opt = i;
+        break;
+    };
+    const mi = mi_opt orelse return;
+    if (marker.group_start == null) return; // 마커여야 한다(멤버 위임은 호출 전 enclosing 마커로 해석)
+
+    const e = groupSubtreeEnd(self, mi, null, null); // 토글 전 subtree(마커·멤버 pin 일치라 완전 범위)
+    const new_pinned = !marker.pinned;
+    var k = mi;
+    while (k < e) : (k += 1) {
+        self.tabs.items[k].pinned = new_pinned; // 마커+멤버 pin 직접 동기(§12.5 정합의 유일한 flip 동기원)
+        // **그룹 고정 해제(off) = 그룹 pin 상태 리셋**(사용자 리포트 버그2): 멤버의 그룹-로컬 pin(§13)도 함께 클리어한다.
+        // 안 그러면 로컬 pin 멤버가 `sidebarRowShowsPin`의 local_pinned 선두 분기(§13.6)로 **📌를 유지**해, 그룹을 통째
+        // 해제했는데도 자식이 개별 고정(📌)으로 남는다("해제하면 그냥 그룹 멤버로 복귀해야"). 로컬 pin은 그룹째 고정과
+        // **직교**(§13.1)라 **고정 켜는 동안엔 보존**(위 keystone float 유지)하되, **끄는 순간** 그룹을 깨끗한 멤버 상태로
+        // 되돌린다(리셋 시맨틱 — subtree [mi,e) 통째라 중첩 자식 로컬 pin까지 함께 리셋). 아래 floatLocalPins가 이제 로컬
+        // pin 0개를 보고 재배열을 안 해, 멤버는 해제 직전 위치(마커 직후)에 그대로 남되 📌만 사라진다.
+        if (!new_pinned) self.tabs.items[k].local_pinned = false;
+    }
+    stablePartitionPinned(self); // 그룹 블록을 목표 리전 경계로 안착(프리픽스 불변식 — 복원과 같은 정렬)
+    self.normalizePinnedFromGroups(); // 안착 후 canonical 확인(멤버 이미 동기 → idempotent)
+    self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 (3) — 항상 stablePartitionPinned 뒤, keystone 보존)
+    sidebar_ops.rebuildSidebar(self) catch {};
+    self.metal_dirty = true;
+    if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
+}
+
+/// 그룹 안 **멤버** 카드의 그룹-로컬 pin을 토글한다(그룹 내 위치 고정, GL §13 GL2). 전역 pin(togglePin, 리스트 앞
+/// 고정 프리픽스)·그룹째 고정(toggleGroupPin, 전역 [고정][비고정] 리전)과 **직교하는 새 축**이다 — `member.local_pinned`만
+/// 뒤집고 그 멤버의 **enclosing(nearest) 마커** subtree 안에서만 `stablePartitionSubtree`로 재배열한다(로컬 pin=마커
+/// 직후로 stable float, 해제=나머지와 함께 원 상대순서). 전역 파티션·그룹 소속(§2.1 I2·중첩 I3)은 안 건드린다(§13.1
+/// keystone). 최상위 카드(그룹 미소속)면 no-op — 로컬 pin이 무의미하므로 호출처(acceptContextMenu)가 최상위는 togglePin,
+/// 마커 카드는 toggleGroupPin으로 분기한다(cardPinRole). 활성 탭 포인터는 reorderTabs가 추적해 유지된다(stablePartitionSubtree).
+/// 드래그 게이트(§13.4 보강6)는 stablePartitionSubtree 내부가 처리(프리뷰 중이면 float 생략, 플래그만 세팅).
+pub fn toggleLocalPin(self: *AppSession, member: *Tab) void {
+    var idx: ?usize = null;
+    for (self.tabs.items, 0..) |t, i| if (t == member) {
+        idx = i;
+        break;
+    };
+    const ix = idx orelse return;
+    const mi = enclosingGroupMarkerIndex(self, ix) orelse return; // 그룹 미소속(최상위) → no-op(로컬 pin 무의미)
+    member.local_pinned = !member.local_pinned;
+    stablePartitionSubtree(self, mi); // subtree-로컬 float(마커 직후) — 배선 표준 순서 (3)단계와 동형(여긴 전역 축 불변이라 (1)(2) 불요)
+    sidebar_ops.rebuildSidebar(self) catch {};
+    self.metal_dirty = true;
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+/// 블록 [m,j)를 Rest(=[m,j) 제외 원소들)의 `rest_insert`번째 앞에 끼우는 순열을 `perm`(길이 n, dst 위치 w → src 위치)에
+/// 채우고 블록 시작(새 마커)의 dst 위치를 반환한다(docs/sidebar-groups.md §9 SG8b). **tab_ops.moveGroupRange**(self.tabs/
+/// surface_ptrs 적용)와 **simulateDrop**(가상 order/group_depth 적용)의 **단일 순열 출처** — 프리뷰(비커밋)와 확정(커밋)이
+/// 같은 순열 코어를 써 이중경로 divergence를 없앤다. 옛 tab_ops.moveGroupRange 인라인 블록-fill을 그대로 추출한 것(회귀 0).
+/// caller가 `m<=j<=n`·`rest_insert<=Rest 길이`를 보장한다(tab_ops.moveGroupRange/simulateGroupMove의 no-op 가드가 앞서 거른다).
+pub fn groupBlockPermutation(perm: []usize, n: usize, m: usize, j: usize, rest_insert: usize) usize {
+    var w: usize = 0;
+    var new_marker: usize = 0;
+    var rest_idx: usize = 0;
+    var src: usize = 0;
+    while (src < n) : (src += 1) {
+        if (src >= m and src < j) continue; // 블록은 건너뛴다(따로 삽입)
+        if (rest_idx == rest_insert) { // 이 Rest 원소 앞에 블록 삽입
+            new_marker = w;
+            var k: usize = m;
+            while (k < j) : (k += 1) {
+                perm[w] = k;
+                w += 1;
+            }
+        }
+        perm[w] = src;
+        w += 1;
+        rest_idx += 1;
+    }
+    if (rest_idx == rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
+        new_marker = w;
+        var k: usize = m;
+        while (k < j) : (k += 1) {
+            perm[w] = k;
+            w += 1;
+        }
+    }
+    return new_marker;
 }

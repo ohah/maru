@@ -765,7 +765,7 @@ pub fn captureKeybindRecording(self: *AppSession, event: terminal.KeyEvent) void
     const chord = config_mod.KeyChord.fromKeyEvent(event) orelse return; // 매핑 불가 키는 무시(녹음만 끝남)
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
-    const cf = self.currentSectionFields(scratch.allocator()) catch return;
+    const cf = settings_ops.currentSectionFields(self, scratch.allocator()) catch return;
     const sel = self.chrome_host.settings.selected;
     // in-app keybind 행이면 그 액션에 rebind, 전역 단축키 행이면 글로벌 분기로 rebind(둘은 selected 구간으로 갈린다).
     if (cf.keybindRowStart()) |start| {

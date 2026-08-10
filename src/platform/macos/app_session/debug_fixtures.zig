@@ -144,7 +144,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             self.tabs.items[0].pinned = true; // t0 = 고정 최상위 카드(개별 pin — 그룹 고정과 직교, 📌 유지 대조)
             // A 마커 포인터는 heap-pin이라 toggleGroupPin의 stablePartition 재배치 후에도 안정 — 토글 전에 잡는다.
             const a_marker = self.tabs.items[1];
-            self.toggleGroupPin(a_marker); // A를 그룹째 고정 → 프리픽스로 안착·멤버 pin 동기(§12.10 GP3)
+            tab_ops.toggleGroupPin(self, a_marker); // A를 그룹째 고정 → 프리픽스로 안착·멤버 pin 동기(§12.10 GP3)
             sidebar_ops.rebuildSidebar(self) catch {};
         }
     }
@@ -186,7 +186,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
                 .agent_toggle, .agent => {},
                 .card => {},
             };
-            if (self.groupNestPlan(b_row, 1)) |plan| {
+            if (tab_ops.groupNestPlan(self, b_row, 1)) |plan| {
                 _ = tab_ops.moveGroupNesting(self, 1, plan.insert_before, plan.target_depth);
             }
             sidebar_ops.rebuildSidebar(self) catch {};
@@ -210,7 +210,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
                 var arena_state = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena_state.deinit();
                 self.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 1 } };
-                self.refreshDragPreview(1, .{ .card = .{ .target_tab = target_tab } }, 0, arena_state.allocator()) catch {};
+                tab_ops.refreshDragPreview(self, 1, .{ .card = .{ .target_tab = target_tab } }, 0, arena_state.allocator()) catch {};
             }
             sidebar_ops.rebuildSidebar(self) catch {}; // 렌더가 preview_rows로 고스트+삽입선을 그린다
         }
@@ -249,14 +249,14 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             const plan: DropPlan = if (std.c.getenv("MARU_FORCE_GROUP_DRAGGHOST_SIBLING") != null) blk_plan: {
                 const boundary = sidebar_ops.sidebarGroupDropBoundary(self, b_row, 1) orelse break :blk_plan .none;
                 break :blk_plan .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(1, boundary) } };
-            } else if (self.groupNestPlan(b_row, 1)) |np|
+            } else if (tab_ops.groupNestPlan(self, b_row, 1)) |np|
                 .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
             else
                 .none;
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             self.pointer_gesture_owner = .{ .sidebar_group = .{ .phase = .dragging, .marker = 1, .slot = b_row, .down_y = 0 } };
-            self.refreshDragPreview(1, plan, 0, arena_state.allocator()) catch {};
+            tab_ops.refreshDragPreview(self, 1, plan, 0, arena_state.allocator()) catch {};
             sidebar_ops.rebuildSidebar(self) catch {}; // 렌더가 preview_rows로 A subtree 고스트+삽입선을 그린다
         }
     }
@@ -273,11 +273,11 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         if (self.tabs.items.len >= 5) {
             tab_ops.createGroupAbsorbForTab(self, self.tabs.items[1]); // A = [t1(마커), t2, t3, t4] — t0는 최상위 카드
             const t3 = self.tabs.items[3]; // 그룹 A의 (중간) 멤버 — heap-pin이라 float 재배치 후에도 안정
-            self.toggleLocalPin(t3); // t3 로컬 pin → 마커 t1 직후(그룹 내 상단)로 float, 📌
+            tab_ops.toggleLocalPin(self, t3); // t3 로컬 pin → 마커 t1 직후(그룹 내 상단)로 float, 📌
             if (std.c.getenv("MARU_FORCE_GROUP_LOCALPIN_GROUPPIN") != null) {
                 // 공존: A를 그룹째 고정(전역 프리픽스로 안착 — keystone §13.1로 subtree 내 로컬 float 순서 보존).
                 const a_marker = self.tabs.items[1]; // 마커 heap-pin — toggleGroupPin의 stablePartition 후에도 안정
-                self.toggleGroupPin(a_marker);
+                tab_ops.toggleGroupPin(self, a_marker);
             }
             if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[1].group_collapsed = true; // A 접힘 → 헤더만
             if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
@@ -300,8 +300,8 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             tab_ops.createGroupAbsorbForTab(self, self.tabs.items[3]); // t3은 A 안(d1 카드) → 자식 B(d2) = [t3, t4, t5], A 직접 = t2
             const t2 = self.tabs.items[2]; // A 직접 멤버(heap-pin — float 재배치 후에도 안정)
             const t5 = self.tabs.items[5]; // 자식 B leaf 멤버
-            self.toggleLocalPin(t2); // A 직접 로컬 pin → A 마커 직후로 float, 📌
-            self.toggleLocalPin(t5); // B leaf 로컬 pin → B 마커 직후로 float(자식 subtree 안), 📌
+            tab_ops.toggleLocalPin(self, t2); // A 직접 로컬 pin → A 마커 직후로 float, 📌
+            tab_ops.toggleLocalPin(self, t5); // B leaf 로컬 pin → B 마커 직후로 float(자식 subtree 안), 📌
             if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
                 self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
                 self.tabs.items[3].group_color = 0xC44A7B; // B 자홍(중첩 색 구분)
@@ -356,7 +356,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
                 var arena_state = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena_state.deinit();
                 self.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 3 } };
-                self.refreshDragPreview(3, .{ .card = .{ .target_tab = tt, .top_level = sidebar_ops.sidebarCardDropTopLevel(self, into_row) } }, 0, arena_state.allocator()) catch {};
+                tab_ops.refreshDragPreview(self, 3, .{ .card = .{ .target_tab = tt, .top_level = sidebar_ops.sidebarCardDropTopLevel(self, into_row) } }, 0, arena_state.allocator()) catch {};
             }
             sidebar_ops.rebuildSidebar(self) catch {}; // 렌더가 preview_rows로 고스트+삽입선(X의 최상위/멤버 depth)을 그린다
         }
@@ -387,7 +387,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             self.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 3 } };
-            self.refreshDragPreview(3, .{ .card = .{ .target_tab = target, .top_level = true } }, 0, arena_state.allocator()) catch {};
+            tab_ops.refreshDragPreview(self, 3, .{ .card = .{ .target_tab = target, .top_level = true } }, 0, arena_state.allocator()) catch {};
             sidebar_ops.rebuildSidebar(self) catch {}; // 렌더가 preview_rows로 그룹 밖 top카드 고스트(depth 0)를 그린다
         }
     }
@@ -606,7 +606,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
     if (std.c.getenv("MARU_OPEN_SETTINGS_PICK") != null) {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
-        if (self.currentSectionFields(scratch.allocator())) |cf| {
+        if (settings_ops.currentSectionFields(self, scratch.allocator())) |cf| {
             if (cf.colors.len > 0) {
                 self.chrome_host.settings.selected = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
                 settings_ops.toggleSelectedSetting(self);

@@ -2,7 +2,7 @@
 
 파일 패널에서 드래그로 고른 부분을 옆 터미널에서 돌고 있는 코딩 에이전트 CLI에 넘기는 기능의 단일 출처
 문서다. 파일 패널의 모드·저장 계약은 [file-panel.md](file-panel.md), 브리지 신뢰 게이트는
-[control-plane.md](control-plane.md) §8.1·§11, 에이전트 세션 판별은 [agent-session.md](agent-session.md)와
+[control-plane-security.md](control-plane-security.md) §8.1·[control-plane-implementation.md](control-plane-implementation.md) §11, 에이전트 세션 판별은 [agent-session.md](agent-session.md)와
 [sidebar-agent-list.md](sidebar-agent-list.md)를 단일 출처로 두고 재서술하지 않는다.
 
 > 결정은 2026-07-29 사용자 승인. 아래 §1은 그 자리에서 고른 조합이고, 고르지 않은 대안은 §7에 근거와 함께 남긴다.
@@ -12,7 +12,7 @@
 - **1급 정책: 선택은 web이 수집하고, 정책·대상·주입은 native가 한다.** web은 "무엇이 선택됐는지"(줄 범위와
   그 텍스트)만 브리지로 올린다. 어느 터미널에 보낼지, 어떤 바이트로 쓸지, 보내도 되는지는 전부 Zig가 정한다.
   **web이 임의 경로나 임의 대상 surface를 지정할 수 없다** — 경로는 native가 그 Term에 핀된 값에서 파생하고,
-  대상은 사용자가 native UI에서 고른 것만 쓴다([control-plane.md] §11의 "정책은 Zig, Swift는 어댑터"와 같은 규율).
+  대상은 사용자가 native UI에서 고른 것만 쓴다([control-plane-implementation.md] §11의 "정책은 Zig, Swift는 어댑터"와 같은 규율).
 - **대상은 읽기·소스 두 모드다. 리치는 1차 비목표다.** 읽기는 렌더 HTML에 이미 원본 offset이 박혀 있고
   소스는 CM6가 줄 번호를 직접 준다. 리치는 문서모델이라 원문 줄과의 대응이 끊겨 역매핑을 새로 만들어야 한다.
 - **트리거는 컨텍스트 메뉴다.** 선택 후 우클릭하면 "선택 영역을 에이전트에 보내기"가 뜬다. 부동 툴바·드래그&드롭은

@@ -1,5 +1,5 @@
 //! control_capability — 컨트롤 플레인 **capability fd 인가 코어**(L2 순수, OS-중립).
-//! Track C slice 1e. 단일 출처: docs/control-plane.md §8.3(capability 종류 + §6 line 111 method↔scope 매핑)·
+//! Track C slice 1e. 단일 출처: docs/control-plane-security.md §8.3(capability 종류 + §6 line 111 method↔scope 매핑)·
 //! §8.5(capability 발급: `hash(nonce) -> {surface_id, generation, scopes, expires_at?, revoked}`, constant-time
 //! 비교, fd payload magic/version, **headline 위협: capability fd는 셸 서브트리 ambient grant**)·§11(slice 1e).
 //!

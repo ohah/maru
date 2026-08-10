@@ -550,7 +550,7 @@ final class MaruMetalOverlayView: NSView {
 // (WKScriptMessageHandlerWithReply — async reply, macOS 11+). page-world JS(md sanitizer 우회 mXSS 등)는 다른 JS
 // global이라 window.maru에 못 닿는다(2026-06 spike 실측: isolated world만 접근). 단 **메시지 핸들러 등록은 world-scope
 // 라 프레임/origin을 안 가리므로**, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin` exact-pin을 검사한다
-// (서브프레임 clickjacking·origin 위장 차단 — control-plane.md §8.1.1 ②). 통과한 요청만 Zig 정책 코어(5b-1
+// (서브프레임 clickjacking·origin 위장 차단 — control-plane-security.md §8.1.1 ②). 통과한 요청만 Zig 정책 코어(5b-1
 // dispatchBridge)로 넘긴다 — **정책=Zig, 어댑터=Swift**(world·핸들러·origin 검증·shim). browser(비신뢰) 패널엔 이
 // 브리지를 애초에 미등록(§8.1 (c)). 5b 최소: maru.hello()→server_version. 실 window.maru.* API는 5d+/Phase 7.
 @MainActor
@@ -816,7 +816,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
 
 // MARK: - Phase 5d: browser.* 제어 코어 (WKWebView API 실행 — L4 어댑터)
 //
-// control-plane.md §9.1 ④의 제어 코어를 실 WKWebView API로 채운다. web surface의 webView를 받아 §9 매핑대로 호출만
+// control-plane-browser.md §9.1 ④의 제어 코어를 실 WKWebView API로 채운다. web surface의 webView를 받아 §9 매핑대로 호출만
 // 한다(라우팅·매핑·wire는 Zig control_browser). **정책=Zig, 어댑터=Swift**. 핵심 3개(navigate=`load`, getUrl=`.url`,
 // executeScript=`evaluateJavaScript`); screenshot/back/forward/… 는 5f 후속. **라이브 배선 완료(5e-2b)**: 인가된 소켓
 // browser.* 요청이 dispatchAuthenticated→browserOpFromRequest→§5-async marshal→Zig op 큐→`drainBrowserOps`가 매 tick

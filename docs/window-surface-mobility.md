@@ -56,7 +56,7 @@ macOS Host
 - `AppRuntime`: registry와 graph를 함께 갱신하는 단일 정책 소유자다. 빈 source window 처리, active focus, capability scope 재평가를 여기서 결정한다.
 - macOS host: NSWindow, responder, native drag session, WKWebView subview reparent, Metal renderer 연결을 수행한다.
 
-레이어 배치([세션 컨트롤 플레인](control-plane.md) §11 코드 배치 게이트와 일치): `SurfaceIdAllocator`, `WindowMembershipSnapshot`, `WindowGraph`와 move/merge·capability 재평가 **정책 판정**은 L2 중립 코드(`src/session/`)에 두고 `app`/`pty`/`platform` import 0을 유지한다. allocator instance와 live membership 수집은 L4 coordinator가 소유한다. `LiveSurfaceRegistry`는 **L2 generic 골격**(`src/session/live_surface_registry.zig`, `LiveSurfaceRegistry(comptime Rt)` — 핸들을 모르는 순수 소유 컨테이너, M2a 완료)이고, 실제 `LivePtySession`/WKWebView 핸들로 **인스턴스화**한 registry만 L4 platform이다(`session_model.Model`이 L2 generic이고 platform이 `TermRuntime`을 넣어 인스턴스화하는 것과 같은 분리 — §8 M2a). `AppRuntime`은 L4 coordinator로, 핸들 수명은 직접 들되 이동 가부·drop target·capability scope 같은 정책은 L2 함수를 호출해 결정한다 — 정책과 플랫폼 핸들을 한 god object에 섞지 않는다.
+레이어 배치([세션 컨트롤 플레인](control-plane-implementation.md) §11 코드 배치 게이트와 일치): `SurfaceIdAllocator`, `WindowMembershipSnapshot`, `WindowGraph`와 move/merge·capability 재평가 **정책 판정**은 L2 중립 코드(`src/session/`)에 두고 `app`/`pty`/`platform` import 0을 유지한다. allocator instance와 live membership 수집은 L4 coordinator가 소유한다. `LiveSurfaceRegistry`는 **L2 generic 골격**(`src/session/live_surface_registry.zig`, `LiveSurfaceRegistry(comptime Rt)` — 핸들을 모르는 순수 소유 컨테이너, M2a 완료)이고, 실제 `LivePtySession`/WKWebView 핸들로 **인스턴스화**한 registry만 L4 platform이다(`session_model.Model`이 L2 generic이고 platform이 `TermRuntime`을 넣어 인스턴스화하는 것과 같은 분리 — §8 M2a). `AppRuntime`은 L4 coordinator로, 핸들 수명은 직접 들되 이동 가부·drop target·capability scope 같은 정책은 L2 함수를 호출해 결정한다 — 정책과 플랫폼 핸들을 한 god object에 섞지 않는다.
 
 ## 4. 이동 단위와 UX
 
@@ -115,7 +115,7 @@ Zig/AppRuntime이 맡는 것:
 
 `surface_id`는 이동해도 유지된다. 따라서 surface 기준 capability(`read-output:self`, `write:self` 등)는 generation이 유지되는 한 그대로 유효할 수 있다. 반면 window 기준 capability(`metadata:window`)는 이동 후 현재 window membership을 기준으로 다시 평가한다.
 
-**trust boundary 교차 시 surface-scope cap 재평가(적대적 리뷰 반영)**: surface-scope cap이 이동 중 generation 불변으로 유지되면, 저신뢰 창에서 (capability fd 상속 등으로, [control-plane.md] §8.5) 새어나간 `read-output`/`write` nonce가 그 surface를 "secure" 창이나 main 작업 창으로 detach/merge한 뒤에도 살아 있다. 따라서 surface가 **trust boundary를 넘으면**(예: quick↔일반, 신뢰 등급이 다른 창) surface-scope cap을 re-mint/revoke한다. 최소한, 이동이 이전에 새어나간 capability를 **격리하지 못한다**는 점을 명시한다.
+**trust boundary 교차 시 surface-scope cap 재평가(적대적 리뷰 반영)**: surface-scope cap이 이동 중 generation 불변으로 유지되면, 저신뢰 창에서 (capability fd 상속 등으로, [control-plane-security.md] §8.5) 새어나간 `read-output`/`write` nonce가 그 surface를 "secure" 창이나 main 작업 창으로 detach/merge한 뒤에도 살아 있다. 따라서 surface가 **trust boundary를 넘으면**(예: quick↔일반, 신뢰 등급이 다른 창) surface-scope cap을 re-mint/revoke한다. 최소한, 이동이 이전에 새어나간 capability를 **격리하지 못한다**는 점을 명시한다.
 
 **이동 이벤트는 원자 트랜잭션**: cross-window move는 `WindowGraph` 변경과 **영향받은 모든 구독의 scope 재평가를 같은 main-thread 트랜잭션 안에서 동기 수행**한다(lazy 재평가면 이동 직후 옛-창 구독자가 떠난 surface 이벤트를 계속 받거나 새 창 surface를 잠깐 엿본다). 트랜잭션 경계를 넘는 이벤트가 stale scope로 새지 않게 한다. 구독 유지/해제/`removed` 이벤트 중 무엇인지는 [control-plane.md] §13 열린 질문이었고 **§8A.3에서 확정**: window-scope 구독은 **유지**하고 옮겨진 surface에 대해 `session.movedOut`/`movedIn`(membership-changed) notification을 방출한다(`removed`/`closed` 아님 — surface는 살아 있음). `metadata:self`는 surface_id 불변이라 무영향(응답 메타 window 필드만 갱신).
 
@@ -162,11 +162,11 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 - **Phase 5~7 순서 영향 없음**: bridge, WebDriver adapter, markdown content는 새 ID와 WindowGraph membership을 소비한다. 하위호환 bridge/API adapter를 만들지 않는다.
 - **Workspace restore 영향 있음**: cross-window 이동 배치는 이미 v1(창별 블록)으로 재시작 후 유지되고, M3e는 활성(key) 창 보존만 `maru.workspace.v1` 옵션 additive 필드 `active-window`로 더한다(하위호환 — 헤더 bump·마이그레이션·구버전 reject 없음, `group-collapsed` 패턴). 손상·미지 파일은 조용한 기본 창 폴백.
 
-각 단계는 [세션 컨트롤 플레인](control-plane.md) §11의 Phase 시작 gate와 같은 방식으로, 시작 전에 사용자에게 scope·파일 후보·권한 변화·검증 gate를 설명하고 직전 단계 regression gate를 재실행한다.
+각 단계는 [세션 컨트롤 플레인](control-plane-implementation.md) §11의 Phase 시작 gate와 같은 방식으로, 시작 전에 사용자에게 scope·파일 후보·권한 변화·검증 gate를 설명하고 직전 단계 regression gate를 재실행한다.
 
 ## 8A. M3 구체 설계 (대수술 — Surface 소유권 이동 + 하위 슬라이스 분해)
 
-§8의 5번 "M3 command 기반 이동"은 한 슬라이스로 하기엔 너무 크다(대수술). 이 절은 코드 현실(drift gate)에 근거해 M3을 **관찰 가능한 한 디딤돌씩** M3a~M3e로 분해하고, 여섯 어려운 문제의 **구체 해법**(추상론 말고 실제 코드 구조)을 못박는다. 착수 전 각 슬라이스는 §8·[control-plane.md] §11의 drift gate와 직전 슬라이스 regression gate를 재실행한다.
+§8의 5번 "M3 command 기반 이동"은 한 슬라이스로 하기엔 너무 크다(대수술). 이 절은 코드 현실(drift gate)에 근거해 M3을 **관찰 가능한 한 디딤돌씩** M3a~M3e로 분해하고, 여섯 어려운 문제의 **구체 해법**(추상론 말고 실제 코드 구조)을 못박는다. 착수 전 각 슬라이스는 §8·[control-plane-implementation.md] §11의 drift gate와 직전 슬라이스 regression gate를 재실행한다.
 
 ### 8A.0 M2b 후 코드 현실 (drift gate 정정 — §3·§8의 M3 시작점)
 
@@ -259,7 +259,7 @@ cross-window move는 AppRuntime가 **한 메인-스레드 트랜잭션**으로 �
 
 ### 8A.5 trust boundary cap 재평가 (문제 5)
 
-surface-scope cap(`read-output`/`write`)이 이동 중 generation 불변으로 유지되면 저신뢰 창에서 새어나간 nonce가 고신뢰 창으로 따라간다(§6·[control-plane.md] §8.5). **정직한 v1 범위**: v1의 유일한 trust boundary는 quick↔normal(`window_kind`)인데 **quick은 이동 단위·대상에서 제외**(§4)라 **지원되는 v1 이동 중 trust boundary를 넘는 경로는 없다**. 따라서 이 문제의 v1 산출물은 **가드 + 훅**이다:
+surface-scope cap(`read-output`/`write`)이 이동 중 generation 불변으로 유지되면 저신뢰 창에서 새어나간 nonce가 고신뢰 창으로 따라간다(§6·[control-plane-security.md] §8.5). **정직한 v1 범위**: v1의 유일한 trust boundary는 quick↔normal(`window_kind`)인데 **quick은 이동 단위·대상에서 제외**(§4)라 **지원되는 v1 이동 중 trust boundary를 넘는 경로는 없다**. 따라서 이 문제의 v1 산출물은 **가드 + 훅**이다:
 
 - AppRuntime 이동 트랜잭션(8A.3 4단계)이 `source_window.trust_class`와 `dest_window.trust_class`를 비교한다.
 - 다르면 그 surface의 outstanding `read-output`/`write` cap을 **revoke**(cap 저장소에 `revoked` 표시 — §8.5가 dispatch·chunk 경계·outbound 큐에서 이미 재검증·purge)하고, **re-mint는 안 한다**(fresh grant UX 필요). `metadata:self`는 OS-관측 origin이라 per-request 재증명되므로 생존.
@@ -292,7 +292,7 @@ surface-scope cap(`read-output`/`write`)이 이동 중 generation 불변으로 �
 - **고스트 피드백**: 드래그 payload(surface/pane/workspace 판정은 Zig)의 floating preview를 AppKit drag image로. hover는 매 frame 대량 snapshot 금지, **target 변경 시에만** highlight 갱신(§9 성능 gate).
 - **drop target 계산**: Zig가 유효성·target(같은/다른 pane tabbar, pane 본문 split drop-zone, sidebar, 창 밖 빈 공간)·의미를 결정하고, AppKit은 좌표 변환·NSWindow 생성/focus·(M6) WKWebView reparent만. drop이 확정되면 AppRuntime의 해당 move 트랜잭션(8A.3) 호출.
 - **modifier 충돌**(§4 마지막 줄): 같은 sidebar 안 Cmd=그룹 중첩 제스처와 cross-window 드래그가 안 충돌하게 M5에서 modifier 의미 재확인(기존 결정 유지).
-- **GUI 손 테스트 슬라이스**: M4(same-window drag 재연결), M5(cross-window native drag). 스크린샷 하니스로 자동화 못 하는 AppKit drag lifecycle은 spike → 수동 artifact → 최소 회귀([control-plane.md] §11 TDD gate).
+- **GUI 손 테스트 슬라이스**: M4(same-window drag 재연결), M5(cross-window native drag). 스크린샷 하니스로 자동화 못 하는 AppKit drag lifecycle은 spike → 수동 artifact → 최소 회귀([control-plane-implementation.md] §11 TDD gate).
 
 ### 8A.8 M3 하위 슬라이스 분해 (M3a~M3e — 의존·관찰가능·리스크·GUI 손 테스트·종료 gate)
 

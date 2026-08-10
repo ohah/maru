@@ -1,4 +1,4 @@
-//! Track C 5b: 신뢰 웹 브리지(`window.maru.*`) 디스패치 코어 — **L2 순수·헤드리스**([control-plane.md] §8.1.1).
+//! Track C 5b: 신뢰 웹 브리지(`window.maru.*`) 디스패치 코어 — **L2 순수·헤드리스**([control-plane-security.md] §8.1.1).
 //!
 //! Swift(L4)가 신뢰(markdown) 패널의 isolated `WKContentWorld` 메시지 핸들러 진입에서 **`frameInfo.isMainFrame` +
 //! `securityOrigin`(=`maru-app://app`) exact-pin**을 **먼저** 검증(신뢰 게이트 = transport 층, §8.1.1 ②)한 뒤, 통과한

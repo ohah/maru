@@ -1,5 +1,5 @@
 //! control_outbound — per-connection outbound 프레임 큐(L2 순수, 헤드리스). Track C 5f-0b.
-//! 단일 출처: docs/control-plane.md §9.5.1(통합 outbound 큐: 응답+이벤트)·§9.5.6(purge API·응답 포화 정책)·
+//! 단일 출처: docs/control-plane-browser-session.md §9.5.1(통합 outbound 큐: 응답+이벤트)·§9.5.6(purge API·응답 포화 정책)·
 //! §8.5(revoke 시 outbound 잔여 프레임 즉시 폐기 규범).
 //!
 //! **역할**: 연결당 outbound 프레임(응답 | 이벤트 notification)의 **bounded FIFO**. mechanism만 소유 —

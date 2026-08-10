@@ -1,5 +1,5 @@
 //! control_socket — 세션 컨트롤 플레인 L4 unix domain socket 부트스트랩 (Track C slice 1b).
-//! 단일 출처: docs/control-plane.md §4.1(hello)·§4.2(발견·stale·flock)·§8.2(권한·peer-cred)·§11(1b gate)·§16(위치).
+//! 단일 출처: docs/control-plane-protocol.md §4.1(hello)·§4.2(발견·stale·flock)·§8.2(권한·peer-cred)·§11(1b gate)·§16(위치).
 //!
 //! **범위(1b = 소켓 부트스트랩 + hello, dispatch 없음):**
 //!  - unix domain socket 서버: bind(0700 dir + 0600 socket via chmod(path)), listen, accept, peer uid 검증(§8.2),

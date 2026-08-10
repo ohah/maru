@@ -812,7 +812,7 @@ Chrome Lab 도구 확장을 자기 범위로 선언한다.
 
 ## 구현 전 TDD 절단 원칙
 
-세션 컨트롤 플레인과 웹 패널은 [control-plane.md](control-plane.md) §11의 micro-slice를 기본 구현 단위로 삼는다. Phase 1~7은 제품 milestone이고, 구현 PR 하나가 통째로 한 Phase를 끝내는 것을 기본값으로 보지 않는다.
+세션 컨트롤 플레인과 웹 패널은 [control-plane-implementation.md](control-plane-implementation.md) §11의 micro-slice를 기본 구현 단위로 삼는다. Phase 1~7은 제품 milestone이고, 구현 PR 하나가 통째로 한 Phase를 끝내는 것을 기본값으로 보지 않는다.
 
 - 각 micro-slice는 먼저 실패하는 단위/fixture/통합 테스트 또는 spike artifact를 만든 뒤 구현한다.
 - 새 capability, transport, CLI 명령, WebView bridge, sanitizer, WebDriver endpoint는 parser/authz/help/docs가 같은 micro-slice 안에서 닫혀야 한다.

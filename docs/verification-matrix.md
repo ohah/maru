@@ -569,7 +569,7 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   accepted 뒤 builder/fill failure와 callback 뒤 source drift·destination/final-digest integrity failure는 `EventMaterializationError.LocalInvariant`를
   거쳐 sole caller의 `.local_invariant_violation`으로 가며 peer failure로 오분류하지 않는다. legacy `DecodeError`에는 새 member가 없다.
   violation과 non-metadata accepted는
-  allocation 0, metadata zero backing은 0, nonzero는 exact allocation 1, OOM은 시도 1/publish 0이다. recipe semantic 10개+compatibility 6개+
+  allocation 0, metadata zero backing은 0, nonzero는 exact allocation 1, OOM은 시도 1/publish 0이다. recipe semantic 10개+compatibility adapter 5개+RemoteRuntime mapping 1개+
   boundary 1개를 Debug·ReleaseFast exact-count로 실행해 accepted 5개, frame 8·identity 5·authority 2·capability 1·foreign 2와
   `stale_preflight|unknown_event|malformed|resource_exhausted`,
   overflow, escaped string, SSH absent/present-empty, foreground canonicalization, raw 0/1·enum/mode 범위와 DTO equality를 고정한다. source raw span은
@@ -577,11 +577,13 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   pure leaf는 `resize_wire.Event`를 위해 `resize_wire.zig`를 명시적으로 import하고 이를 감추는 barrel re-export는 0이다. 그 밖의 `RuntimeObservation`/allocator/
   owned DTO import, reverse import, barrel re-export, current external staged 재분류, b2b3 staged/product caller와 `RemoteRuntime` field는 0이다.
   compatibility footprint만 보존하며 next/old observation과 4-part budget, 최종 owned `PreparedEvent` 완료는 주장하지 않는다.
-- **C3-3b2b3 immutable owner preparation(미구현):** focused gate `test-session-host-2c3d-c3-3b2b3`은 production-source dormant orchestration을
+- **C3-3b2b3 immutable owner preparation(doc-first 확정, 구현 전):** focused gate `test-session-host-2c3d-c3-3b2b3`은 production-source dormant orchestration을
   Debug·ReleaseFast test mode에서 real `GenerationAttachment` take부터 trusted projection·snapshot·recipe·final-address owner publication까지
   호출한다. normal product pump caller는 0이다. final-address/copy/replay, every copy ordinal OOM, exact-capacity 4-part prepare peak와 3-part
   published rehash, non-exact old cache 거부, reduced failure, queue/content guard, allocator callback drift/alias/provenance, final `PreparedEvent`
-  handoff를 고정한다. publication 당시 봉인된 transcript/progress seal을 cleanup entry에서 검증한 뒤 callback-inaccessible stack mirror로
+  handoff를 고정한다. 구현은 prepared types/policy/budget 7+owner lifecycle/raw-tag/attempt 8+preparation/OOM/rollback 10+
+  callback drift/protected-range/source-lease 5+fork/proof-loss subprocess 2+real-take dormant/non-test compile-only topology 3+boundary 1의
+  exact-36이며 각 표 기반 test 내부 case 수도 고정한다. publication 당시 봉인된 transcript/progress seal을 cleanup entry에서 검증한 뒤 callback-inaccessible stack mirror로
   복사하고 protected range에 포함한다. proof exact이면 reverse exact-once cleanup 뒤 fatal, proof loss면 remaining dereference/free 0,
   addressless evidence 0~1과 direct `_exit` subprocess로 닫는다. 실제 settlement와 Busy retry는 b3, close readiness는 b5, product activation은
   b4가 소유한다. 이 gate가 green일 때만 umbrella `test-session-host-2c3d-c3-3b2b`와 C3-3b2b 완료를 주장한다.

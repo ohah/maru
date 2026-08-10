@@ -9,6 +9,7 @@ pub const PtySession = session.PtySession;
 pub const SpawnRequest = types.SpawnRequest;
 pub const plannedBackendForMacOS = types.plannedBackendForMacOS;
 pub const resolveInteractiveShell = types.resolveInteractiveShell;
+pub const selfResourceSample = session.selfResourceSample;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

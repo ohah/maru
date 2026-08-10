@@ -760,6 +760,16 @@ const resource_row_name_cols: u32 = 28;
 /// 팝오버 앞머리의 **고를 수 없는** 줄 수: ⓪ 제목+합계 ① 열 이름. 레퍼런스 화면이 그 둘을 가졌고,
 /// 없으면 우클릭 메뉴 한 줄과 구별되지 않는다(사용자 지적). 선택·클릭·강조가 이 줄들을 건너뛴다.
 pub const resource_header_rows: usize = 2;
+/// 팝오버 **꼬리**의 고를 수 없는 줄 수: 앱 자신 한 줄. 탭 행과 섞지 않는다 — 무거운 순 정렬에 넣으면
+/// 값에 따라 떠다니고 행 상한에 걸려 사라지는데, 앱은 항상 있으므로 항상 보여야 한다(§4.1). 클릭 대상도
+/// 없다(점프할 탭이 없다) — 그래서 머리글과 같이 **선택 불가**다.
+pub const resource_footer_rows: usize = 1;
+/// 앱 자신 행의 그룹 키. Term surface_id와 절대 겹치지 않아야 해서 최대값을 센티넬로 쓴다 — id는 1부터
+/// 증가하며 재사용하지 않으므로(session-local) 이 값에 도달하지 않는다.
+const resource_app_key: u64 = std.math.maxInt(u64);
+/// 앱 자신 행 라벨. **"모든 창 공유"를 이름에 박는다** — 창이 여럿이면 각 창이 같은 값을 보여주므로,
+/// 두 창의 숫자를 더하면 이중으로 잡힌다는 사실이 화면에서 드러나야 한다(§4.1의 남는 결함).
+const resource_app_label = "Maru(앱 · 모든 창 공유)";
 
 /// `bytes`를 표시 칸 `max_cols` 안으로 줄여 `buf`에 쓴다(EAW 기준 — 한글 한 자 2칸). 넘치면 끝에 `…`.
 /// `overlay_input.truncateToCols`는 arena를 받는데 여기는 tick 경로라 할당을 피한다 — 같은 규칙을 버퍼에 쓴다.
@@ -1868,7 +1878,9 @@ comptime {
     // 라벨 버퍼는 **공유**다(`context_menu_items_buf`). 그룹 메뉴엔 이 가드가 있었는데 브랜치·리소스엔 없었다 —
     // 넘치면 버퍼 밖에 쓴다. 상한을 늘릴 때 여기서 멈추게 한다.
     if (max_branch_menu_items > ctx_menu_count) @compileError("branch menu exceeds context_menu_items_buf");
-    if (max_resource_rows > ctx_menu_count) @compileError("resource rows exceed context_menu_items_buf");
+    // 라벨 슬라이스는 머리글 2줄 + 탭 행 + 앱 행이 **함께** 들어간다 — 행만 재면 3만큼 낙관적이다.
+    if (max_resource_rows + resource_header_rows + resource_footer_rows > ctx_menu_count)
+        @compileError("resource rows + headers + app row exceed context_menu_items_buf");
 }
 
 // 그룹 헤더 우클릭 메뉴(context_menu_target == .group) 인덱스 — 워크스페이스 카드 메뉴와 **별개의 compact 레이아웃**.
@@ -3739,16 +3751,16 @@ pub const AppSession = struct {
     resource_text_buf: [maru.session.resource_usage.text_max_bytes]u8 = undefined,
     resource_text_len: usize = 0,
     /// 탭별 최신 읽기값(팝오버 행의 값 출처). 키는 Term의 surface_id다.
-    resource_rows: [max_resource_rows]maru.session.resource_usage.GroupReading = undefined,
+    resource_rows: [max_resource_rows + resource_footer_rows]maru.session.resource_usage.GroupReading = undefined,
     resource_rows_len: usize = 0,
     /// 팝오버가 열려 있는가. `closeContextMenu`가 내린다(다른 메뉴 종류 플래그와 같은 규율).
     resource_menu_open: bool = false,
     /// **열 때 고정한 행 순서**(surface_id). 값은 갱신하되 순서·개수는 얼린다 — 무거운 순 재정렬이 일어나면
     /// 누르려던 줄이 손가락 밑에서 다른 탭이 된다(docs/status-bar.md §6).
-    resource_menu_keys: [max_resource_rows]u64 = undefined,
+    resource_menu_keys: [max_resource_rows + resource_footer_rows]u64 = undefined,
     resource_menu_len: usize = 0,
     /// 행 문자열 저장소. `context_menu_items_buf`는 슬라이스만 들므로 실제 바이트는 여기 산다.
-    resource_menu_text: [max_resource_rows + resource_header_rows][resource_row_max_bytes]u8 = undefined,
+    resource_menu_text: [max_resource_rows + resource_header_rows + resource_footer_rows][resource_row_max_bytes]u8 = undefined,
     /// 활동 시각 재렌더 tick 카운터(agent_ops.agent_age_repaint_interval_ms).
     agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
@@ -11507,9 +11519,18 @@ pub const AppSession = struct {
         }
 
         var samples: [max_resource_samples_per_term * 4]maru.session.resource_usage.Sample = undefined;
-        var groups: [max_resource_rows]maru.session.resource_usage.Group = undefined;
+        var groups: [max_resource_rows + resource_footer_rows]maru.session.resource_usage.Group = undefined;
         var n: usize = 0;
         var group_n: usize = 0;
+        // **앱 자신을 먼저 넣는다**(§4.1). 뒤에 넣으면 탭이 많을 때 공유 고정 버퍼에 자리가 없다 — 앞에 넣어도
+        // 각 그룹이 자기 `start`를 기록하므로 탭 행 계산은 그대로다. 그리고 이 표본은 **자기 그룹을 하나 갖는다**:
+        // 합계(=`samples` 전체)에 들어가면서 팝오버 꼬리 행의 값도 같은 산술에서 나온다.
+        if (maru.pty.selfResourceSample()) |own| {
+            samples[0] = .{ .pid = own.pid, .footprint_bytes = own.footprint_bytes, .cpu_ns = own.cpu_ns };
+            n = 1;
+            groups[0] = .{ .key = resource_app_key, .start = 0, .len = 1 };
+            group_n = 1;
+        }
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -11529,7 +11550,8 @@ pub const AppSession = struct {
             }
         }
 
-        if (n == 0) { // 터미널이 없거나(웹 탭만) 표본을 하나도 못 얻었다 — 0을 그리지 않고 항목을 내린다
+        // 앱 자신 표본까지 실패했고 터미널도 없다(웹 탭만) — 0을 그리지 않고 항목을 내린다.
+        if (n == 0) {
             self.clearResourceReading();
             return;
         }
@@ -11583,10 +11605,15 @@ pub const AppSession = struct {
         }
         if (!anchored) return;
 
-        // 무거운 순 정렬 — 값이 없는 행(표본 0)은 뒤로.
-        var order: [max_resource_rows]usize = undefined;
+        // 무거운 순 정렬 — 값이 없는 행(표본 0)은 뒤로. **앱 행은 넣지 않는다**(정렬 밖 고정, 아래에서 맨 뒤에 붙인다).
+        var order: [max_resource_rows + resource_footer_rows]usize = undefined;
         var count: usize = 0;
+        var app_row: ?usize = null;
         for (0..self.resource_rows_len) |i| {
+            if (self.resource_rows[i].key == resource_app_key) {
+                app_row = i;
+                continue;
+            }
             order[count] = i;
             count += 1;
         }
@@ -11607,13 +11634,21 @@ pub const AppSession = struct {
             self.resource_menu_keys[self.resource_menu_len] = self.resource_rows[row_index].key;
             self.resource_menu_len += 1;
         }
+        // 앱 행은 **잘리는 상한 뒤**에 붙는다 — 탭이 넘쳐도 사라지지 않는다(§4.1 "항상 있으므로 항상 보여야").
+        var footer: usize = 0;
+        if (app_row != null) {
+            self.resource_menu_keys[self.resource_menu_len] = resource_app_key;
+            self.resource_menu_len += 1;
+            footer = resource_footer_rows;
+        }
         self.resource_menu_open = true;
         self.refreshResourceMenuRows();
-        self.chrome_host.context_menu.showWithHeaders(
+        self.chrome_host.context_menu.showWithFooters(
             @intFromFloat(anchor_x),
             @intFromFloat(anchor_y),
             resource_header_rows + self.resource_menu_len,
             resource_header_rows,
+            footer,
         );
         self.metal_dirty = true;
     }
@@ -11643,7 +11678,10 @@ pub const AppSession = struct {
         const ru = maru.session.resource_usage;
         const cols = chrome.components.overlay_input.displayCols;
 
-        const title = &self.resource_menu_text[max_resource_rows];
+        // 머리글 버퍼는 **행 슬롯 뒤**에 온다. 행은 탭(max_resource_rows) + 앱(resource_footer_rows)까지
+        // 쓰므로, 예전처럼 `[max_resource_rows]`를 제목으로 쓰면 **12번째 탭 행과 제목이 같은 버퍼**를
+        // 나눠 쓴다(행이 꽉 찬 창에서만 드러나는 종류의 손상).
+        const title = &self.resource_menu_text[max_resource_rows + resource_footer_rows];
         var used: usize = copyClamped(title[0..], "리소스");
         if (self.resource_text_len > 0) {
             var pad = resource_row_name_cols -| cols("리소스");
@@ -11656,7 +11694,7 @@ pub const AppSession = struct {
         }
         self.context_menu_items_buf[0] = title[0..used];
 
-        const head = &self.resource_menu_text[max_resource_rows + 1];
+        const head = &self.resource_menu_text[max_resource_rows + resource_footer_rows + 1];
         var n: usize = copyClamped(head[0..], "이름");
         var pad2 = resource_row_name_cols -| cols("이름");
         while (pad2 > 0 and n < head.len) : (pad2 -= 1) {
@@ -11701,6 +11739,8 @@ pub const AppSession = struct {
 
     /// 이 행이 가리키는 Term의 `탭 › 팬` 라벨. 못 찾으면(그 사이 닫힘) 마지막으로 알던 이름이 없으므로 물음표.
     fn resourceRowLabel(self: *AppSession, buf: []u8, key: u64) []const u8 {
+        // 앱 자신 행은 Term이 아니다 — 탭 목록에서 못 찾는 게 정상이라 먼저 가른다(§4.1).
+        if (key == resource_app_key) return resource_app_label;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -44418,6 +44458,49 @@ test "SB-R: 리소스 항목은 첫 표본에 안 뜨고 두 번째 표본부터
     try std.testing.expect(try statusBarHasText(allocator, session, "512 MB"));
 }
 
+// SB-A: 앱 자신 표본이 **실제 폴링 경로**에서 합계에 들어가고 자기 행을 갖는다. 위 SB-A가 팝오버 배치를
+// 봤다면 이건 **값의 출처**를 본다 — 행만 있고 합계에 안 들어가면 "왜 활성 모니터와 다른가"에 여전히 못 답한다.
+test "SB-A: 폴링이 앱 자신을 표본에 넣고 합계에 반영한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expect(session.statusBarHeightPx() > 0); // 전제: 게이트가 열려 있다
+
+    // 두 번 재야 CPU 차분이 나온다(첫 표본은 값 없음). 주기 도달을 강제한다.
+    // **사이를 띄운다** — 두 폴링이 같은 밀리초에 들어가면 `gap_ms == 0`이라 Meter가 나눌 수 없어
+    // null을 돌려주고, 이 테스트는 기능이 멀쩡해도 실패한다(첫 작성에서 실제로 그렇게 실패했다).
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+    const start_ms = monotonicMs();
+    while (monotonicMs() -| start_ms < 5) _ = usleep(1_000); // 파일 상단 extern 선언 재사용(std에 Thread.sleep 없음)
+    session.resource_poll_ticks = std.math.maxInt(u32) / 2;
+    session.pollResourceUsage();
+
+    // 앱 행이 **자기 그룹**으로 서 있다. 이 스모크 세션에는 산 터미널이 없으므로 앱이 유일한 행이다 —
+    // 즉 예전 규칙("터미널이 없으면 항목 없음")이 뒤집혔다는 것도 함께 고정한다(§4.1).
+    var app_row: ?maru.session.resource_usage.GroupReading = null;
+    for (session.resource_rows[0..session.resource_rows_len]) |row| {
+        if (row.key == resource_app_key) app_row = row;
+    }
+    const row = app_row orelse return error.TestExpectedAppRow;
+    const app_reading = row.reading orelse return error.TestExpectedAppReading;
+    try std.testing.expect(app_reading.footprint_bytes > 0); // 우리 프로세스는 메모리를 쓴다
+
+    // 그리고 그 값이 **합계에 들어간다** — 합계가 앱 행보다 작을 수 없다.
+    const total = session.resource_reading orelse return error.TestExpectedTotal;
+    try std.testing.expect(total.footprint_bytes >= app_reading.footprint_bytes);
+}
+
 // SB-R 적대적: **표시가 그대로면 다시 그리지 않는다.** 원값은 매초 흔들리지만 표시 문자열이 같으면
 // 재렌더할 이유가 없다 — 초당 전체 프레임을 다시 그리는 비용은 배터리에 그대로 실린다.
 test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
@@ -44464,6 +44547,60 @@ test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
         // 글자가 바뀌었다면 재렌더가 **있어야** 한다(반대 방향도 계약이다).
         try std.testing.expect(session.metal_dirty);
     }
+}
+
+// SB-A: 앱 자신은 **합계에 들어가고**, 팝오버에서는 정렬 밖 **맨 아래 고정 행**이며 **고를 수 없다**(§4.1).
+// 세 성질이 함께 있어야 의미가 있다 — 합계에만 넣고 행을 안 보이면 "왜 커졌나"에 답하지 못하고, 행을
+// 정렬에 섞으면 값에 따라 떠다니다 상한에 잘려 사라진다.
+test "SB-A: 앱 행은 무거운 순 정렬 밖에서 맨 아래 고정이고 선택 대상이 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 앱 행을 **가장 무겁게** 심는다. 정렬에 섞였다면 맨 위로 올라올 값이다 — 그런데 맨 아래여야 한다.
+    session.resource_rows[0] = .{ .key = resource_app_key, .reading = .{ .footprint_bytes = 9_000_000, .cpu_permille = 5 } };
+    session.resource_rows[1] = .{ .key = 111, .reading = .{ .footprint_bytes = 10, .cpu_permille = 0 } };
+    session.resource_rows[2] = .{ .key = 222, .reading = .{ .footprint_bytes = 900, .cpu_permille = 0 } };
+    session.resource_rows_len = 3;
+
+    const text = "  512 MB ·   10%";
+    @memcpy(session.resource_text_buf[0..text.len], text);
+    session.resource_text_len = text.len;
+    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+
+    session.openResourceMenu();
+    try std.testing.expect(session.resource_menu_open);
+    try std.testing.expectEqual(@as(usize, 3), session.resource_menu_len);
+    // 탭은 무거운 순(222 → 111), 앱은 **그 뒤**다.
+    try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
+    try std.testing.expectEqual(@as(u64, 111), session.resource_menu_keys[1]);
+    try std.testing.expectEqual(resource_app_key, session.resource_menu_keys[2]);
+
+    // 컴포넌트가 꼬리를 **고를 수 없는 줄**로 안다.
+    const menu = &session.chrome_host.context_menu;
+    try std.testing.expectEqual(resource_footer_rows, menu.footer_count);
+    const last = resource_header_rows + session.resource_menu_len - 1;
+    try std.testing.expect(!menu.selectable(last)); // 앱 행
+    try std.testing.expect(menu.selectable(last - 1)); // 그 위 탭 행은 고를 수 있다
+    // 키보드로도 못 내려간다 — 아무리 눌러도 마지막 **고를 수 있는** 줄에서 멈춘다.
+    menu.moveSelection(99);
+    try std.testing.expect(menu.selectable(menu.selected));
+    try std.testing.expectEqual(last - 1, menu.selected);
+
+    // 행 문자열에 "모든 창 공유"가 박혀 있다 — 창이 여럿일 때 더하면 안 된다는 사실이 화면에 있어야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[last], "모든 창 공유") != null);
+    // 그리고 그 행은 제목 버퍼를 침범하지 않는다(행 슬롯과 머리글 슬롯이 갈려 있다).
+    try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], "리소스") != null);
 }
 
 // SB-P: 팝오버는 **열 때 순서·개수를 얼리고 값만 갱신한다.** 무거운 순 정렬이라 갱신마다 다시 정렬하면

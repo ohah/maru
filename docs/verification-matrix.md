@@ -583,7 +583,11 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   published rehash, non-exact old cache 거부, reduced failure, queue/content guard, allocator callback drift/alias/provenance, final `PreparedEvent`
   handoff를 고정한다. 구현은 prepared types/policy/budget 7+owner lifecycle/raw-tag/attempt 8+preparation/OOM/rollback 10+
   callback drift/protected-range/source-lease 5+fork/proof-loss subprocess 2+real-take dormant/non-test compile-only topology 3+boundary 1의
-  exact-36이며 각 표 기반 test 내부 case 수도 고정한다. publication 당시 봉인된 transcript/progress seal을 cleanup entry에서 검증한 뒤 callback-inaccessible stack mirror로
+  exact-36이며 각 표 기반 test 내부 case 수도 고정한다. real-take gate는 source·operation·destination preflight 전 registry mutation 0,
+  begin no-fail suffix 첫 mutation의 exact active `EventAuthority live -> preparation_pending`, pending 동안 canonical view 유지와 ordinary
+  release·attachment teardown·ended purge의 `Busy`를 함께 검증한다. 별도 pending registry/owner-address row는 0이고 b2b3 제품
+  `preparation_pending -> live|releasing` caller도 0이다. fixture cleanup만 exact identity를 재검증한 test-only pending→live rollback 뒤 기존
+  release를 수행하며, b3 gate가 exact release receipt 기반 sole product pending→releasing caller를 추가한다. publication 당시 봉인된 transcript/progress seal을 cleanup entry에서 검증한 뒤 callback-inaccessible stack mirror로
   복사하고 protected range에 포함한다. proof exact이면 reverse exact-once cleanup 뒤 fatal, proof loss면 remaining dereference/free 0,
   addressless evidence 0~1과 direct `_exit` subprocess로 닫는다. 실제 settlement와 Busy retry는 b3, close readiness는 b5, product activation은
   b4가 소유한다. 이 gate가 green일 때만 umbrella `test-session-host-2c3d-c3-3b2b`와 C3-3b2b 완료를 주장한다.

@@ -1734,7 +1734,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    process-seal domain이고 live=1/consumed=2 raw state, final owner address/incarnation/attempt를 모두 묶는다.
    실제 `EventOwner`는 GenerationAttachment가 계속 소유하며 b3의 correlation-based settlement만 이 receipt를 소비해 exact once release한다.
    b3는 release 전 seal과 canonical EventOwner/correlation/attachment row를 다시 검증하고 copy/replay/ABA에서는 release 0이다.
-   Attachment direct release는 pending receipt가 live이면 Busy다. semantic failure(OOM/cap/peer/connection)는 정상 failure publication이므로
+   Attachment direct release는 pending receipt가 live이면 Busy다. 이를 위해 기존 cleanup registry의 canonical `EventAuthority` lifecycle에
+   `preparation_pending`을 추가한다. source·operation·destination preflight가 모두 성공한 뒤
+   `beginPrepareAndMintSourceLease` no-fail suffix의 첫 mutation이 exact active generation의 `live->preparation_pending`을 수행한다.
+   이 상태는 active generation/owner/order blocker를 그대로 보존하고 immutable `preparationEventView` 재검증에는 live와 동등하지만,
+   일반 event release·attachment teardown·ended purge에는 Busy다. 별도 pending registry나 Pending owner 주소를 registry에 저장하지 않는다.
+   transition 전 실패는 `live` mutation 0이고 transition 뒤 suffix의 실패는 recoverable return 없이 fatal이다. b2b3 제품 코드에는
+   `preparation_pending->live|releasing` caller가 0이며, focused fixture cleanup만 exact identity를 재검증한 test-only
+   `preparation_pending->live` rollback을 쓴다. b3가 exact release receipt를 검증한 뒤 쓰는 sole product settlement만
+   `preparation_pending->releasing`을 허용한다. semantic failure(OOM/cap/peer/connection)는 정상 failure publication이므로
    source lease를 consumed로 이전한다. publication을 만들지 않는 integrity-fatal exact-proof 경로만 scratch cleanup 뒤 `active->aborted`로
    tombstone하고 즉시 fatal로 끝난다. copied/moved/ABA/reentry/fork는
    mutation 0이다. active 동안 direct input/control compaction·clear·observation replacement·event release·runtime destroy는 Busy다.

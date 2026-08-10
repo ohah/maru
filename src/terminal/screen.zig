@@ -475,13 +475,11 @@ fn decSpecial(codepoint: u21) u21 {
 // 스킨톤 modifier 부착·지역표시자(RI) 페어링·wide 이모지 승격 판정. 같은 파일의 print 경로(writeCodepoint·
 // putCell·promoteLastToEmojiWidth, 16/N서 이리로 이동)가 호출한다. last_print·cells·index(grid)에 의존한다.
 
-pub fn isSkinToneModifier(codepoint: u21) bool {
-    return codepoint >= 0x1F3FB and codepoint <= 0x1F3FF; // Fitzpatrick modifiers
-}
-
-pub fn isRegionalIndicator(codepoint: u21) bool {
-    return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
-}
+// 범위 판정은 grapheme.zig가 단일 출처다 — chrome의 바이트 walk(`clusterEnd`)와 터미널의 셀 그리드가
+// **같은 문자 집합**을 봐야 국기·스킨톤이 두 경로에서 다르게 묶이지 않는다. 이름은 이 파일의 print 경로
+// 서술을 유지하려고 그대로 둔다(Fitzpatrick = Emoji_Modifier).
+const isSkinToneModifier = grapheme.isEmojiModifier;
+const isRegionalIndicator = grapheme.isRegionalIndicator;
 
 /// mode 2027에서 직전 출력 셀의 emoji cluster가 cp로 이어지는가 — 흡수 판정의 단일 출처.
 /// 스킨톤(GB9 modifier)·국기(GB12/13 RI 쌍)·ZWJ 시퀀스(GB11)가 서로 다른 UAX#29 규칙이지만 여기서

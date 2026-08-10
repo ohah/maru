@@ -53,6 +53,10 @@ pub const Goal = union(enum) {
 
 /// 열/블록 선택의 **원본 사각형**([native-editor.md](../../../docs/native-editor.md) §3.2a).
 ///
+/// **단수인 이유는 마우스가 하나이기 때문이다** — 두 사각형을 동시에 끌 수 없다. "줄마다 selection
+/// 하나"인 **파생 결과**만 배열이며, 두 번째 드래그는 앞의 원본을 **대체**한다(⌥클릭으로 커서를
+/// 추가하는 것과 다르다 — 그쪽은 결과 배열에 쌓인다).
+///
 /// 드래그 중 매 프레임 selection 배열을 다시 파생해야 하는데, **결과만 봐서는 "지금 열 선택 중인가"도
 /// "어디서 시작했는가"도 알 수 없다**(우연히 같은 모양이 나올 수 있다). 그래서 원본을 따로 든다.
 ///
@@ -626,4 +630,17 @@ test "undo 복원은 열 선택 원본을 되살리지 않는다 (§3.3)" {
     try testing.expectEqual(@as(usize, 2), sels.count());
     try testing.expectEqual(@as(usize, 1), sels.primary);
     try testing.expectEqual(@as(usize, 7), sels.items[0].focus);
+}
+
+test "열 선택 원본은 누적되지 않고 대체된다 (§3.2a)" {
+    // 마우스가 하나라 두 사각형을 동시에 끌 수 없다. 두 번째 드래그는 앞의 원본을 덮어쓴다 —
+    // ⌥클릭으로 커서를 **추가**하는 것(결과 배열에 쌓임)과 다르다.
+    var items = [_]Selection{ Selection.at(0), Selection.at(10) };
+    var sels = Selections.init(&items, 0);
+
+    sels.column = .{ .from_row = 0, .from_col = 0, .to_row = 2, .to_col = 5 };
+    sels.column = .{ .from_row = 8, .from_col = 1, .to_row = 9, .to_col = 3 };
+
+    try testing.expectEqual(@as(u32, 8), sels.column.?.from_row); // 두 번째만 남는다
+    try testing.expectEqual(@as(usize, 2), sels.count()); // 결과 배열은 그대로
 }

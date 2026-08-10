@@ -35,7 +35,7 @@
 
 이 개정이 무효화하는 것은 아래 §1.1a의 **엔진 선택**과, 그것을 전제한 §3~§11의 "CM6/MergeView" 서술이다(§7.1 번들 항목, §10.0의 0b·2번을 포함한다 — 각 지점에 개정 표기를 달았다). **무효화하지 않는 것**: `EditorGrant`·`DocumentRegistry`·safe-save CAS·revision 3축·외부 변경 감시·git/LSP adapter·§3.5 소스 컨트롤 뷰는 엔진과 무관하게 그대로 유효하다.
 
-**대가를 명시한다.** 아래 원문이 CM6를 고른 근거 중 하나가 `@codemirror/merge`의 `acceptChunk`/`rejectChunk` 내장이었다 — hunk stage/unstage를 직접 구현해야 한다([native-editor.md](native-editor.md) §7). 읽기 전용 v1의 범위 밖이라 당장의 손실은 없지만 되찾는 비용이 CM6에서는 0이었다.
+**대가를 명시한다.** 아래 원문이 CM6를 고른 근거 중 하나가 `@codemirror/merge`의 `acceptChunk`/`rejectChunk` 내장이었다 — hunk stage/unstage를 직접 구현해야 한다([native-editor-ui.md](native-editor-ui.md) §7). 읽기 전용 v1의 범위 밖이라 당장의 손실은 없지만 되찾는 비용이 CM6에서는 0이었다.
 
 **`EditorGrant`의 성격이 바뀐다(중요).** §3.5는 "grant는 *웹 브리지*가 넘는 경계를 게이트하는 장치이고 도크는 웹이 아니다. 반대로 **diff 본문을 그리는 파일 Term은 웹이므로** `diff.open`은 grant 게이트를 통과해야 한다"는 비대칭 위에 서 있었다. **diff 본문이 네이티브가 되면 그 비대칭이 사라진다** — 목록도 본문도 in-process다.
 
@@ -466,7 +466,7 @@ v1은 위 네 시점으로 충분하고, 그중 ⑶이 "터미널에서 에이�
 
 ## 4. 문서 권위와 저장 CAS
 
-> **2026-08-09 개정 — 이 절의 전제가 바뀌었다.** 아래는 "native가 전체 text 정본을 보유하지 않는다"를 전제로 쓰였으나, [native-editor.md](native-editor.md) §2·§3.0이 **버퍼를 L2에 두어 정확히 그 정본을 만든다.** 두 귀결이 따라온다 — ⑴ **`writable CM6 owner surface 하나` 제약이 diff·코드 편집 축에서 소멸**하고, 같은 문서를 두 뷰가 공유할 수 있다([native-editor.md](native-editor.md) §2.4가 그 계약을 소유하며 `file-panel.md` §1 불변식에 명시 명령 예외가 붙는다), ⑵ **문서 text·undo·selection의 소유자가 CM6가 아니라 L2 모델**이다. 아래 `DocumentState`의 revision·fingerprint·conflict 3축은 **엔진과 무관하게 그대로 유효**하다. 마크다운 축에서는 원문이 계속 맞다.
+> **2026-08-09 개정 — 이 절의 전제가 바뀌었다.** 아래는 "native가 전체 text 정본을 보유하지 않는다"를 전제로 쓰였으나, [native-editor-layering.md](native-editor-layering.md) §2·[native-editor-document-model.md](native-editor-document-model.md) §3.0이 **버퍼를 L2에 두어 정확히 그 정본을 만든다.** 두 귀결이 따라온다 — ⑴ **`writable CM6 owner surface 하나` 제약이 diff·코드 편집 축에서 소멸**하고, 같은 문서를 두 뷰가 공유할 수 있다([native-editor.md](native-editor.md) §2.4가 그 계약을 소유하며 `file-panel.md` §1 불변식에 명시 명령 예외가 붙는다), ⑵ **문서 text·undo·selection의 소유자가 CM6가 아니라 L2 모델**이다. 아래 `DocumentState`의 revision·fingerprint·conflict 3축은 **엔진과 무관하게 그대로 유효**하다. 마크다운 축에서는 원문이 계속 맞다.
 
 CM6가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다(file-panel의 CM6 소스 편집과 같은 엔진). file-panel은 이미 **dirty를 브리지 신호로 Zig에 미러**하는데(file-panel §3), editor는 그 dirty 신호를 **revision/fingerprint/conflict가 있는 `DocumentRegistry`로 확장**한다 — 단일 핀 파일이 아니라 grant-root 안 여러 문서를 다루므로 identity·CAS가 필요하다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
 
@@ -773,7 +773,7 @@ formatter/linter와 LSP는 모두 저장소의 config/plugin/binary를 실행할
 
 **번들은 크기가 허락하지 않는다.** 실측: `Maru.app` 전체가 80MB인데 `rust-analyzer` 하나가 11MB(배포판에 따라 40~50MB)다. 서버 5~10개를 넣으면 앱이 2~5배가 되고, **사용자가 어떤 언어를 쓸지 모르는 채로** 전부 넣는 것이라 대부분이 낭비다.
 
-**tree-sitter grammar와 갈리는 지점이 여기다.** grammar는 `parser.c` 수백KB~수MB라 번들할 수 있고(그래서 [native-editor.md](native-editor.md) §5의 1층이 **항상** 동작한다), 언어 서버는 언어마다 별개 프로세스에 수십MB라 번들할 수 없다.
+**tree-sitter grammar와 갈리는 지점이 여기다.** grammar는 `parser.c` 수백KB~수MB라 번들할 수 있고(그래서 [native-editor-visual-mapping.md](native-editor-visual-mapping.md) §5의 1층이 **항상** 동작한다), 언어 서버는 언어마다 별개 프로세스에 수십MB라 번들할 수 없다.
 
 **우리가 바이너리를 받지 않는다.** 대신 **패키지 매니저 명령을 터미널에 입력해 주고, 실행은 사용자가 한다.**
 
@@ -788,7 +788,7 @@ formatter/linter와 LSP는 모두 저장소의 config/plugin/binary를 실행할
 흐름:
 
 1. 파일을 연다 → 서버 탐색 실패
-2. **상태바가 알린다** — [native-editor.md](native-editor.md) §2.2가 *"조용히 줄어들면 사용자는 버그로 읽는다"*며 저하 표시 자리를 이미 잡아 두었다
+2. **상태바가 알린다** — [native-editor-layering.md](native-editor-layering.md) §2.2가 *"조용히 줄어들면 사용자는 버그로 읽는다"*며 저하 표시 자리를 이미 잡아 두었다
 3. 클릭하면 무엇이 없는지와 설치 명령을 보여준다
 4. **새 터미널 탭을 열어 명령을 입력만 한다 — Enter는 사용자가 누른다**
    - **현재 탭에 넣지 않는다.** 그 탭이 셸 프롬프트라는 보장이 없다 — `vim`·REPL·`less`가 떠 있으면 명령이 그리로 들어가 사용자가 하던 작업을 망친다. 탭 하나가 느는 비용이 그 위험보다 싸다.

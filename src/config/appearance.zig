@@ -486,7 +486,7 @@ test "appearance resolver trims font family and preserves cursor options" {
     try std.testing.expectEqualStrings("Menlo", resolved.font.family);
     try std.testing.expectEqualStrings("Apple SD Gothic Neo, Apple Color Emoji", resolved.font.fallback); // 폴백 CSV는 raw 전파(split은 ObjC) — F1-2
     // 설정이 없으면 **번들 Jetendard**가 기본 폴백이다(theme.FontConfig.fallback) — 한글을 라틴 2배 폭으로
-    // 디자인한 등폭 폰트라 격자에 맞는다(docs/native-editor.md §4.2). 값을 여기 박지 않고 기본값에서
+    // 디자인한 등폭 폰트라 격자에 맞는다(docs/native-editor-visual-mapping.md §4.2). 값을 여기 박지 않고 기본값에서
     // 읽어 단일 출처를 지킨다.
     try std.testing.expectEqualStrings(
         (theme.FontConfig{}).fallback,

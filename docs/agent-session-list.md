@@ -1,6 +1,6 @@
 # 에이전트 세션 기록 도크 (Codex·Claude)
 
-우측 도크의 `agent_sessions` 뷰가 보이는 **로컬 과거 세션 기록**의 단일 출처다. 진행·검증 상태는 [검증 매트릭스](verification-matrix.md)의 "에이전트 세션 기록 도크" 행, 구현 순서는 [실제 구현 계획](implementation-plan.md)의 AS1~AS4가 소유한다.
+우측 도크의 `agent_sessions` 뷰가 보이는 **로컬 과거 세션 기록**의 단일 출처다. 진행·검증 상태는 [검증 매트릭스](verification-matrix.md)의 "에이전트 세션 기록 도크" 행, 구현 순서는 [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)의 AS1~AS4가 소유한다.
 
 ## 1. 목표와 경계
 

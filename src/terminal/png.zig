@@ -2,7 +2,7 @@
 //! color type 2(RGB, bpp=3)·6(RGBA, bpp=4), bit depth 8, non-interlaced. 나머지 변종
 //! (grayscale 0/4·palette 3·16-bit·Adam7 interlace)은 `error.Unsupported`로 graceful 거부한다
 //! (깨진 이미지/크래시 대신). 풀 PNG(전 color type·16-bit)는 라이브러리 벤더링 백로그
-//! (docs/implementation-plan.md "kitty graphics PNG 백로그") — Ghostty도 wuffs C 라이브러리로 처리한다.
+//! (docs/plans/terminal-input-and-protocols.md "kitty graphics PNG 백로그") — Ghostty도 wuffs C 라이브러리로 처리한다.
 //!
 //! clean-room: PNG 명세(W3C PNG, RFC 2083)에서 직접 작성했다 — 청크 구조(length+type+data+CRC),
 //! IHDR 필드, IDAT zlib 스트림, 스캔라인 필터(None/Sub/Up/Average/Paeth). IDAT 압축 해제는 Zig

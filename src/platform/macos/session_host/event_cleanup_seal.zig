@@ -1,0 +1,554 @@
+//! Pointer-free cleanup ownership transcripts used by the session-host preparation path.
+//!
+//! This leaf owns canonical fixed-width encoding only. It deliberately has no process secret,
+//! allocator, runtime, PTY, or event authority dependency; the process seal service adds keyed
+//! authentication and higher layers project their concrete owners into these neutral values.
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+pub const CleanupSeal = [32]u8;
+pub const Digest = [32]u8;
+
+pub const PendingLifecycle = enum(u8) {
+    idle = 0,
+    preparing = 1,
+    prepared = 2,
+    settling = 3,
+    committed_cleanup = 4,
+};
+
+pub const CleanupPhase = enum(u8) {
+    preparation = 1,
+    committed_observation = 2,
+};
+
+pub const CleanupStep = enum(u8) {
+    ready = 1,
+    freeing = 2,
+    freed = 3,
+    finished = 4,
+};
+
+pub const CleanupRole = enum(u8) {
+    none = 0,
+    dto_backing = 1,
+    cwd = 2,
+    cwd_host = 3,
+    window_title = 4,
+    ssh_remote_dest = 5,
+    clipboard_read_target = 6,
+    foreground_processes = 7,
+    agent_progress = 8,
+};
+
+pub const CleanupDescriptor = struct {
+    present: u8 = 0,
+    address: u64 = 0,
+    length_bytes: u64 = 0,
+    capacity_bytes: u64 = 0,
+    alignment_log2: u8 = 0,
+    allocator_ptr: u64 = 0,
+    allocator_vtable: u64 = 0,
+};
+
+pub const ObservationCleanupGraph = struct {
+    cwd: CleanupDescriptor = .{},
+    cwd_host: CleanupDescriptor = .{},
+    window_title: CleanupDescriptor = .{},
+    ssh_remote_dest: CleanupDescriptor = .{},
+    clipboard_read_target: CleanupDescriptor = .{},
+    foreground_processes: CleanupDescriptor = .{},
+    agent_progress: CleanupDescriptor = .{},
+};
+
+pub const CleanupPlanTag = enum(u8) {
+    preparation = 1,
+    committed_observation = 2,
+};
+
+pub const CleanupPlanInput = union(CleanupPlanTag) {
+    preparation: struct {
+        dto_backing: CleanupDescriptor,
+        next_observation: ObservationCleanupGraph,
+    },
+    committed_observation: struct {
+        old_observation: ObservationCleanupGraph,
+    },
+};
+
+pub const CleanupProgressState = struct {
+    phase: CleanupPhase,
+    step: CleanupStep,
+    next_role: CleanupRole,
+    completed_mask: u8,
+};
+
+pub const CleanupTranscriptInput = struct {
+    host_id: u128,
+    runtime_id: u128,
+    connection_generation: u64,
+    slot_incarnation: u64,
+    owner_node_incarnation: u64,
+    transport_incarnation: u64,
+    registry_incarnation: u64,
+    binding_reservation_id: u64,
+    event_node_incarnation: u64,
+    stream_id: u64,
+    event_generation: u64,
+    event_owner_addr: u64,
+    wire_major: u16,
+    expected_major: u16,
+    metadata_support_raw: u8,
+    admission_tag: u8,
+    correlation_binding_digest: Digest,
+    payload_digest: Digest,
+    admission_projection_digest: Digest,
+    pending_owner_addr: u64,
+    pending_owner_incarnation: u64,
+    cleanup_plan_addr: u64,
+    runtime_addr: u64,
+    observation_addr: u64,
+    observation_revision: u64,
+    observer_generation: u64,
+    title_generation: u32,
+    observation_digest: Digest,
+    preparation_attempt: u64,
+    pending_lifecycle: PendingLifecycle,
+    plan: CleanupPlanInput,
+};
+
+pub const CleanupProgressInput = struct {
+    transcript_input: CleanupTranscriptInput,
+    transcript_seal: CleanupSeal,
+    phase: CleanupPhase,
+    step: CleanupStep,
+    next_role: CleanupRole,
+    completed_mask: u8,
+};
+
+pub const ObservationStringRole = enum(u8) {
+    cwd = 1,
+    cwd_host = 2,
+    window_title = 3,
+    ssh_remote_dest = 4,
+    clipboard_read_target = 5,
+    agent_progress = 6,
+};
+
+pub const ForegroundProcessDigestInput = struct {
+    pid: i32 = 0,
+    len: u8 = 0,
+    bytes: [128]u8 = [_]u8{0} ** 128,
+};
+
+pub const ForegroundProcessesDigestInput = struct {
+    count: u8 = 0,
+    entries: [64]ForegroundProcessDigestInput =
+        [_]ForegroundProcessDigestInput{.{}} ** 64,
+};
+
+pub const ObservationCleanupDigestInput = struct {
+    availability: u8,
+    revision: u64,
+    observer_generation: u64,
+    title_generation: u32,
+    cols: u16,
+    rows: u16,
+    ssh_remote_dest_present: u8,
+    semantic_state: u8,
+    alt_active: u8,
+    app_cursor_keys: u8,
+    app_keypad: u8,
+    kitty_flags: u8,
+    alternate_scroll: u8,
+    mouse_tracking: u8,
+    mouse_tracking_mode: u8,
+    bracketed_paste: u8,
+    bell_count: u64,
+    clipboard_write_seq: u64,
+    clipboard_read_seq: u64,
+    foreground_available: u8,
+    foreground_pgid_present: u8,
+    foreground_pgid: i32,
+    foreground_process_count: u8,
+    graph: ObservationCleanupGraph,
+    cwd_digest: Digest,
+    cwd_host_digest: Digest,
+    window_title_digest: Digest,
+    ssh_remote_dest_digest: Digest,
+    clipboard_read_target_digest: Digest,
+    foreground_processes_digest: Digest,
+    agent_progress_digest: Digest,
+};
+
+const string_domains = [_][]const u8{
+    "maru.runtime-observation.string.cwd.v1",
+    "maru.runtime-observation.string.cwd-host.v1",
+    "maru.runtime-observation.string.window-title.v1",
+    "maru.runtime-observation.string.ssh-remote-dest.v1",
+    "maru.runtime-observation.string.clipboard-read-target.v1",
+    "maru.runtime-observation.string.agent-progress.v1",
+};
+const foreground_domain = "maru.runtime-observation.foreground-processes.v1";
+const observation_domain = "maru.runtime-observation.cleanup.v1";
+
+fn fatalNonCanonical() noreturn {
+    switch (@import("builtin").os.tag) {
+        .macos, .linux => std.c._exit(70),
+        else => @trap(),
+    }
+}
+
+fn hashDomain(domain: []const u8) std.crypto.hash.Blake3 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update(domain);
+    return hasher;
+}
+
+fn writeInt(hasher: *std.crypto.hash.Blake3, comptime T: type, value: T) void {
+    var bytes: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn finish(hasher: *std.crypto.hash.Blake3) Digest {
+    var digest: Digest = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn cleanupDescriptorCanonical(value: CleanupDescriptor) bool {
+    if (value.present == 0) return value.address == 0 and value.length_bytes == 0 and
+        value.capacity_bytes == 0 and value.alignment_log2 == 0 and
+        value.allocator_ptr == 0 and value.allocator_vtable == 0;
+    if (value.present != 1 or value.address == 0 or value.length_bytes == 0 or
+        value.capacity_bytes != value.length_bytes or value.alignment_log2 > 63 or
+        value.allocator_ptr == 0 or value.allocator_vtable == 0)
+        return false;
+    const alignment = @as(u64, 1) << @intCast(value.alignment_log2);
+    if (value.address & (alignment - 1) != 0) return false;
+    const end = std.math.add(u64, value.address, value.capacity_bytes) catch return false;
+    return end != 0;
+}
+
+fn graphCanonical(graph: ObservationCleanupGraph) bool {
+    return cleanupDescriptorCanonical(graph.cwd) and
+        cleanupDescriptorCanonical(graph.cwd_host) and
+        cleanupDescriptorCanonical(graph.window_title) and
+        cleanupDescriptorCanonical(graph.ssh_remote_dest) and
+        cleanupDescriptorCanonical(graph.clipboard_read_target) and
+        cleanupDescriptorCanonical(graph.foreground_processes) and
+        cleanupDescriptorCanonical(graph.agent_progress);
+}
+
+fn cleanupPlanCanonical(plan: CleanupPlanInput) bool {
+    return switch (plan) {
+        .preparation => |value| cleanupDescriptorCanonical(value.dto_backing) and
+            graphCanonical(value.next_observation),
+        .committed_observation => |value| graphCanonical(value.old_observation),
+    };
+}
+
+fn digestNonzero(value: Digest) bool {
+    return !std.mem.allEqual(u8, &value, 0);
+}
+
+fn cleanupTranscriptInputCanonical(input: CleanupTranscriptInput) bool {
+    return input.host_id != 0 and input.runtime_id != 0 and
+        input.connection_generation != 0 and input.slot_incarnation != 0 and
+        input.owner_node_incarnation != 0 and input.transport_incarnation != 0 and
+        input.registry_incarnation != 0 and input.binding_reservation_id != 0 and
+        input.event_node_incarnation != 0 and input.stream_id != 0 and
+        input.event_generation != 0 and input.event_owner_addr != 0 and
+        input.wire_major != 0 and input.expected_major != 0 and
+        input.metadata_support_raw <= 1 and input.admission_tag <= 1 and
+        digestNonzero(input.correlation_binding_digest) and
+        digestNonzero(input.payload_digest) and
+        ((input.admission_tag == 0 and
+            !digestNonzero(input.admission_projection_digest)) or
+            (input.admission_tag == 1 and
+                digestNonzero(input.admission_projection_digest))) and
+        input.pending_owner_addr != 0 and input.pending_owner_incarnation != 0 and
+        input.cleanup_plan_addr != 0 and input.runtime_addr != 0 and
+        input.observation_addr != 0 and digestNonzero(input.observation_digest) and
+        input.preparation_attempt != 0 and cleanupPlanCanonical(input.plan) and
+        switch (input.plan) {
+            .preparation => input.pending_lifecycle == .preparing,
+            .committed_observation => input.pending_lifecycle == .committed_cleanup,
+        };
+}
+
+fn cleanupProgressInputCanonical(input: CleanupProgressInput) bool {
+    if (!cleanupTranscriptInputCanonical(input.transcript_input)) return false;
+    return progressCanonical(input.transcript_input.plan, .{
+        .phase = input.phase,
+        .step = input.step,
+        .next_role = input.next_role,
+        .completed_mask = input.completed_mask,
+    });
+}
+
+pub fn observationStringDigest(role: ObservationStringRole, bytes: []const u8) Digest {
+    var hasher = hashDomain(string_domains[@intFromEnum(role) - 1]);
+    hasher.update(bytes);
+    return finish(&hasher);
+}
+
+fn foregroundProcessesInputCanonical(input: ForegroundProcessesDigestInput) bool {
+    if (input.count > input.entries.len) return false;
+    for (input.entries[0..input.count]) |entry| {
+        if (entry.len > entry.bytes.len) return false;
+        if (!std.mem.allEqual(u8, entry.bytes[entry.len..], 0)) return false;
+    }
+    for (input.entries[input.count..]) |entry| {
+        if (entry.pid != 0 or entry.len != 0 or !std.mem.allEqual(u8, &entry.bytes, 0))
+            return false;
+    }
+    return true;
+}
+
+pub fn foregroundProcessesDigest(input: ForegroundProcessesDigestInput) Digest {
+    if (!foregroundProcessesInputCanonical(input)) fatalNonCanonical();
+    var hasher = hashDomain(foreground_domain);
+    writeInt(&hasher, u8, input.count);
+    for (input.entries[0..input.count]) |entry| {
+        writeInt(&hasher, i32, entry.pid);
+        writeInt(&hasher, u8, entry.len);
+        hasher.update(entry.bytes[0..entry.len]);
+    }
+    return finish(&hasher);
+}
+
+fn boolRawValid(value: u8) bool {
+    return value <= 1;
+}
+
+fn descriptorDigestCoupled(descriptor: CleanupDescriptor, digest: Digest) bool {
+    return (descriptor.present == 0) == std.mem.allEqual(u8, &digest, 0);
+}
+
+fn observationCleanupInputCanonical(input: ObservationCleanupDigestInput) bool {
+    if (input.availability > 2 or input.semantic_state > 3 or
+        input.mouse_tracking_mode > 4 or input.kitty_flags > 31 or
+        input.foreground_process_count > 64 or
+        !boolRawValid(input.ssh_remote_dest_present) or
+        !boolRawValid(input.alt_active) or !boolRawValid(input.app_cursor_keys) or
+        !boolRawValid(input.app_keypad) or !boolRawValid(input.alternate_scroll) or
+        !boolRawValid(input.mouse_tracking) or !boolRawValid(input.bracketed_paste) or
+        !boolRawValid(input.foreground_available) or
+        !boolRawValid(input.foreground_pgid_present) or !graphCanonical(input.graph))
+        return false;
+    if (input.foreground_pgid_present == 0 and input.foreground_pgid != 0) return false;
+    if (input.ssh_remote_dest_present != input.graph.ssh_remote_dest.present or
+        !descriptorDigestCoupled(input.graph.cwd, input.cwd_digest) or
+        !descriptorDigestCoupled(input.graph.cwd_host, input.cwd_host_digest) or
+        !descriptorDigestCoupled(input.graph.window_title, input.window_title_digest) or
+        !descriptorDigestCoupled(input.graph.ssh_remote_dest, input.ssh_remote_dest_digest) or
+        !descriptorDigestCoupled(
+            input.graph.clipboard_read_target,
+            input.clipboard_read_target_digest,
+        ) or
+        !descriptorDigestCoupled(
+            input.graph.foreground_processes,
+            input.foreground_processes_digest,
+        ) or
+        !descriptorDigestCoupled(input.graph.agent_progress, input.agent_progress_digest))
+        return false;
+    if ((input.foreground_process_count == 0) !=
+        (input.graph.foreground_processes.present == 0)) return false;
+    return true;
+}
+
+fn writeDescriptor(hasher: *std.crypto.hash.Blake3, value: CleanupDescriptor) void {
+    writeInt(hasher, u8, value.present);
+    writeInt(hasher, u64, value.address);
+    writeInt(hasher, u64, value.length_bytes);
+    writeInt(hasher, u64, value.capacity_bytes);
+    writeInt(hasher, u8, value.alignment_log2);
+    writeInt(hasher, u64, value.allocator_ptr);
+    writeInt(hasher, u64, value.allocator_vtable);
+}
+
+fn writeGraph(hasher: *std.crypto.hash.Blake3, graph: ObservationCleanupGraph) void {
+    inline for (std.meta.fields(ObservationCleanupGraph)) |field|
+        writeDescriptor(hasher, @field(graph, field.name));
+}
+
+fn observationCleanupDigestUnchecked(input: ObservationCleanupDigestInput) Digest {
+    var hasher = hashDomain(observation_domain);
+    inline for (.{
+        .{ u8, input.availability },
+        .{ u64, input.revision },
+        .{ u64, input.observer_generation },
+        .{ u32, input.title_generation },
+        .{ u16, input.cols },
+        .{ u16, input.rows },
+        .{ u8, input.ssh_remote_dest_present },
+        .{ u8, input.semantic_state },
+        .{ u8, input.alt_active },
+        .{ u8, input.app_cursor_keys },
+        .{ u8, input.app_keypad },
+        .{ u8, input.kitty_flags },
+        .{ u8, input.alternate_scroll },
+        .{ u8, input.mouse_tracking },
+        .{ u8, input.mouse_tracking_mode },
+        .{ u8, input.bracketed_paste },
+        .{ u64, input.bell_count },
+        .{ u64, input.clipboard_write_seq },
+        .{ u64, input.clipboard_read_seq },
+        .{ u8, input.foreground_available },
+        .{ u8, input.foreground_pgid_present },
+        .{ i32, input.foreground_pgid },
+        .{ u8, input.foreground_process_count },
+    }) |item| writeInt(&hasher, item[0], item[1]);
+    writeGraph(&hasher, input.graph);
+    inline for (.{
+        input.cwd_digest,
+        input.cwd_host_digest,
+        input.window_title_digest,
+        input.ssh_remote_dest_digest,
+        input.clipboard_read_target_digest,
+        input.foreground_processes_digest,
+        input.agent_progress_digest,
+    }) |digest| hasher.update(&digest);
+    return finish(&hasher);
+}
+
+pub fn observationCleanupDigest(input: ObservationCleanupDigestInput) Digest {
+    if (!observationCleanupInputCanonical(input)) fatalNonCanonical();
+    return observationCleanupDigestUnchecked(input);
+}
+
+fn descriptorPresentMask(plan: CleanupPlanInput) u8 {
+    var mask: u8 = 0;
+    switch (plan) {
+        .preparation => |value| {
+            if (value.dto_backing.present == 1) mask |= 1 << 0;
+            inline for (std.meta.fields(ObservationCleanupGraph), 1..) |field, bit| {
+                if (@field(value.next_observation, field.name).present == 1) {
+                    mask |= @as(u8, 1) << @intCast(bit);
+                }
+            }
+        },
+        .committed_observation => |value| {
+            inline for (std.meta.fields(ObservationCleanupGraph), 0..) |field, bit| {
+                if (@field(value.old_observation, field.name).present == 1) {
+                    mask |= @as(u8, 1) << @intCast(bit);
+                }
+            }
+        },
+    }
+    return mask;
+}
+
+fn fullMask(plan: CleanupPlanInput) u8 {
+    return switch (plan) {
+        .preparation => 0xff,
+        .committed_observation => 0x7f,
+    };
+}
+
+fn phaseFor(plan: CleanupPlanInput) CleanupPhase {
+    return switch (plan) {
+        .preparation => .preparation,
+        .committed_observation => .committed_observation,
+    };
+}
+
+fn roleForBit(plan: CleanupPlanInput, bit: u3) CleanupRole {
+    return switch (plan) {
+        .preparation => @enumFromInt(@as(u8, bit) + 1),
+        .committed_observation => @enumFromInt(@as(u8, bit) + 2),
+    };
+}
+
+fn lastPresentRole(plan: CleanupPlanInput, present_mask: u8) CleanupRole {
+    var bit: i8 = switch (plan) {
+        .preparation => 7,
+        .committed_observation => 6,
+    };
+    while (bit >= 0) : (bit -= 1) {
+        const shift: u3 = @intCast(bit);
+        if (present_mask & (@as(u8, 1) << shift) != 0) return roleForBit(plan, shift);
+    }
+    return .none;
+}
+
+pub fn initialProgress(plan: CleanupPlanInput) CleanupProgressState {
+    if (!cleanupPlanCanonical(plan)) fatalNonCanonical();
+    const present = descriptorPresentMask(plan);
+    const full = fullMask(plan);
+    if (present == 0) return .{
+        .phase = phaseFor(plan),
+        .step = .finished,
+        .next_role = .none,
+        .completed_mask = full,
+    };
+    return .{
+        .phase = phaseFor(plan),
+        .step = .ready,
+        .next_role = lastPresentRole(plan, present),
+        .completed_mask = full & ~present,
+    };
+}
+
+fn bitForRole(plan: CleanupPlanInput, role: CleanupRole) ?u3 {
+    const raw = @intFromEnum(role);
+    return switch (plan) {
+        .preparation => if (raw >= 1 and raw <= 8) @intCast(raw - 1) else null,
+        .committed_observation => if (raw >= 2 and raw <= 8) @intCast(raw - 2) else null,
+    };
+}
+
+fn progressCanonical(plan: CleanupPlanInput, state: CleanupProgressState) bool {
+    if (!cleanupPlanCanonical(plan) or state.phase != phaseFor(plan)) return false;
+    const present = descriptorPresentMask(plan);
+    const full = fullMask(plan);
+    if (state.step == .finished)
+        return state.next_role == .none and state.completed_mask == full;
+    const absent = full & ~present;
+    if (state.completed_mask & absent != absent) return false;
+    if (state.completed_mask & ~full != 0) return false;
+    const remaining = present & ~state.completed_mask;
+    const completed_present = state.completed_mask & present;
+    const expected_next = lastPresentRole(plan, remaining);
+    if (remaining != 0) {
+        const next_bit = bitForRole(plan, expected_next) orelse return false;
+        const lower_mask = (@as(u8, 1) << next_bit) - 1;
+        if ((state.completed_mask & present & lower_mask) != 0) return false;
+    } else if ((state.completed_mask & present) != present) return false;
+    return switch (state.step) {
+        .ready, .freeing => remaining != 0 and state.next_role == expected_next,
+        .freed => completed_present != 0 and state.next_role == expected_next,
+        .finished => unreachable,
+    };
+}
+
+pub fn assertCleanupTranscriptCanonical(input: CleanupTranscriptInput) void {
+    if (!cleanupTranscriptInputCanonical(input)) fatalNonCanonical();
+}
+
+pub fn assertCleanupProgressCanonical(input: CleanupProgressInput) void {
+    if (!cleanupProgressInputCanonical(input)) fatalNonCanonical();
+}
+
+/// Recoverable canonicality probes exist only in test binaries; product callers get fatal asserts.
+const testCleanupDescriptorCanonical = cleanupDescriptorCanonical;
+const testCleanupPlanCanonical = cleanupPlanCanonical;
+const testCleanupTranscriptInputCanonical = cleanupTranscriptInputCanonical;
+const testCleanupProgressInputCanonical = cleanupProgressInputCanonical;
+const testForegroundProcessesInputCanonical = foregroundProcessesInputCanonical;
+const testObservationCleanupInputCanonical = observationCleanupInputCanonical;
+const testObservationCleanupDigestUnchecked = observationCleanupDigestUnchecked;
+const testProgressCanonical = progressCanonical;
+pub const testing = if (builtin.is_test) struct {
+    pub const cleanupDescriptorCanonical = testCleanupDescriptorCanonical;
+    pub const cleanupPlanCanonical = testCleanupPlanCanonical;
+    pub const cleanupTranscriptInputCanonical = testCleanupTranscriptInputCanonical;
+    pub const cleanupProgressInputCanonical = testCleanupProgressInputCanonical;
+    pub const foregroundProcessesInputCanonical = testForegroundProcessesInputCanonical;
+    pub const observationCleanupInputCanonical = testObservationCleanupInputCanonical;
+    pub const observationCleanupDigestUnchecked = testObservationCleanupDigestUnchecked;
+    pub const progressCanonical = testProgressCanonical;
+} else struct {};

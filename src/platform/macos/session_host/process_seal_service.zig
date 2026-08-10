@@ -6,10 +6,17 @@
 
 const builtin = @import("builtin");
 const std = @import("std");
+const cleanup_seal = @import("event_cleanup_seal.zig");
 const process_identity = @import("process_identity.zig");
 
 const secret_len = 32;
 const capability_domain = "maru.capability.registry-key.v2";
+const cleanup_transcript_domain = "maru.cleanup.transcript.v1";
+const cleanup_progress_domain = "maru.cleanup.progress.v1";
+
+pub const CleanupSeal = cleanup_seal.CleanupSeal;
+pub const CleanupTranscriptInput = cleanup_seal.CleanupTranscriptInput;
+pub const CleanupProgressInput = cleanup_seal.CleanupProgressInput;
 
 pub const PrepareError = error{
     ProcessDomainMismatch,
@@ -221,7 +228,133 @@ const Service = struct {
         if (key == 0) fatalInvalidReceipt();
         return key;
     }
+
+    fn cleanupTranscriptSealAfterReady(
+        self: *const Service,
+        pid: u32,
+        process_nonce: u64,
+        input: CleanupTranscriptInput,
+    ) CleanupSeal {
+        cleanup_seal.assertCleanupTranscriptCanonical(input);
+        var hasher = std.crypto.hash.Blake3.init(.{ .key = self.secret });
+        hasher.update(cleanup_transcript_domain);
+        updateInt(&hasher, u32, pid);
+        updateInt(&hasher, u64, process_nonce);
+        updateCleanupTranscript(&hasher, input);
+        var result: CleanupSeal = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
+    fn cleanupTranscriptSeal(
+        self: *const Service,
+        pid: u32,
+        process_nonce: u64,
+        input: CleanupTranscriptInput,
+    ) ReadyError!CleanupSeal {
+        try self.validateReady(pid, process_nonce);
+        return self.cleanupTranscriptSealAfterReady(pid, process_nonce, input);
+    }
+
+    fn cleanupProgressSeal(
+        self: *const Service,
+        pid: u32,
+        process_nonce: u64,
+        input: CleanupProgressInput,
+    ) ReadyError!CleanupSeal {
+        try self.validateReady(pid, process_nonce);
+        cleanup_seal.assertCleanupProgressCanonical(input);
+        const transcript = self.cleanupTranscriptSealAfterReady(
+            pid,
+            process_nonce,
+            input.transcript_input,
+        );
+        if (!std.crypto.timing_safe.eql(CleanupSeal, transcript, input.transcript_seal))
+            fatalInvalidReceipt();
+        var hasher = std.crypto.hash.Blake3.init(.{ .key = self.secret });
+        hasher.update(cleanup_progress_domain);
+        updateInt(&hasher, u32, pid);
+        updateInt(&hasher, u64, process_nonce);
+        updateCleanupTranscript(&hasher, input.transcript_input);
+        hasher.update(&input.transcript_seal);
+        updateInt(&hasher, u8, @intFromEnum(input.phase));
+        updateInt(&hasher, u8, @intFromEnum(input.step));
+        updateInt(&hasher, u8, @intFromEnum(input.next_role));
+        updateInt(&hasher, u8, input.completed_mask);
+        var result: CleanupSeal = undefined;
+        hasher.final(&result);
+        return result;
+    }
 };
+
+fn updateInt(hasher: *std.crypto.hash.Blake3, comptime T: type, value: T) void {
+    var bytes: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn updateDescriptor(hasher: *std.crypto.hash.Blake3, value: cleanup_seal.CleanupDescriptor) void {
+    updateInt(hasher, u8, value.present);
+    updateInt(hasher, u64, value.address);
+    updateInt(hasher, u64, value.length_bytes);
+    updateInt(hasher, u64, value.capacity_bytes);
+    updateInt(hasher, u8, value.alignment_log2);
+    updateInt(hasher, u64, value.allocator_ptr);
+    updateInt(hasher, u64, value.allocator_vtable);
+}
+
+fn updateGraph(hasher: *std.crypto.hash.Blake3, graph: cleanup_seal.ObservationCleanupGraph) void {
+    inline for (std.meta.fields(cleanup_seal.ObservationCleanupGraph)) |field|
+        updateDescriptor(hasher, @field(graph, field.name));
+}
+
+fn updatePlan(hasher: *std.crypto.hash.Blake3, plan: cleanup_seal.CleanupPlanInput) void {
+    updateInt(hasher, u8, @intFromEnum(std.meta.activeTag(plan)));
+    switch (plan) {
+        .preparation => |value| {
+            updateDescriptor(hasher, value.dto_backing);
+            updateGraph(hasher, value.next_observation);
+        },
+        .committed_observation => |value| updateGraph(hasher, value.old_observation),
+    }
+}
+
+fn updateCleanupTranscript(
+    hasher: *std.crypto.hash.Blake3,
+    input: CleanupTranscriptInput,
+) void {
+    updateInt(hasher, u128, input.host_id);
+    updateInt(hasher, u128, input.runtime_id);
+    updateInt(hasher, u64, input.connection_generation);
+    updateInt(hasher, u64, input.slot_incarnation);
+    updateInt(hasher, u64, input.owner_node_incarnation);
+    updateInt(hasher, u64, input.transport_incarnation);
+    updateInt(hasher, u64, input.registry_incarnation);
+    updateInt(hasher, u64, input.binding_reservation_id);
+    updateInt(hasher, u64, input.event_node_incarnation);
+    updateInt(hasher, u64, input.stream_id);
+    updateInt(hasher, u64, input.event_generation);
+    updateInt(hasher, u64, input.event_owner_addr);
+    updateInt(hasher, u16, input.wire_major);
+    updateInt(hasher, u16, input.expected_major);
+    updateInt(hasher, u8, input.metadata_support_raw);
+    updateInt(hasher, u8, input.admission_tag);
+    hasher.update(&input.correlation_binding_digest);
+    hasher.update(&input.payload_digest);
+    hasher.update(&input.admission_projection_digest);
+    updateInt(hasher, u64, input.pending_owner_addr);
+    updateInt(hasher, u64, input.pending_owner_incarnation);
+    updateInt(hasher, u64, input.cleanup_plan_addr);
+    updateInt(hasher, u64, input.runtime_addr);
+    updateInt(hasher, u64, input.observation_addr);
+    updateInt(hasher, u64, input.observation_revision);
+    updateInt(hasher, u64, input.observer_generation);
+    updateInt(hasher, u32, input.title_generation);
+    hasher.update(&input.observation_digest);
+    updateInt(hasher, u64, input.preparation_attempt);
+    updateInt(hasher, u8, @intFromEnum(input.pending_lifecycle));
+    updatePlan(hasher, input.plan);
+}
 
 var process_service: Service = .{};
 
@@ -255,6 +388,324 @@ pub fn capabilityRegistryKey(
     input: CapabilityKeyInput,
 ) ReadyError!u64 {
     return process_service.capabilityRegistryKey(pid, process_nonce, input);
+}
+
+pub fn cleanupTranscriptSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: CleanupTranscriptInput,
+) ReadyError!CleanupSeal {
+    return process_service.cleanupTranscriptSeal(pid, process_nonce, input);
+}
+
+pub fn cleanupProgressSeal(
+    pid: u32,
+    process_nonce: u64,
+    input: CleanupProgressInput,
+) ReadyError!CleanupSeal {
+    return process_service.cleanupProgressSeal(pid, process_nonce, input);
+}
+
+fn testCleanupDescriptor(address: u64) cleanup_seal.CleanupDescriptor {
+    return .{
+        .present = 1,
+        .address = address,
+        .length_bytes = 8,
+        .capacity_bytes = 8,
+        .alignment_log2 = 3,
+        .allocator_ptr = 0x8000,
+        .allocator_vtable = 0x9000,
+    };
+}
+
+fn testCleanupTranscript() CleanupTranscriptInput {
+    var graph: cleanup_seal.ObservationCleanupGraph = .{};
+    graph.cwd = testCleanupDescriptor(0x1000);
+    return .{
+        .host_id = 1,
+        .runtime_id = 2,
+        .connection_generation = 3,
+        .slot_incarnation = 4,
+        .owner_node_incarnation = 5,
+        .transport_incarnation = 6,
+        .registry_incarnation = 7,
+        .binding_reservation_id = 8,
+        .event_node_incarnation = 9,
+        .stream_id = 10,
+        .event_generation = 11,
+        .event_owner_addr = 0x2000,
+        .wire_major = 2,
+        .expected_major = 2,
+        .metadata_support_raw = 1,
+        .admission_tag = 1,
+        .correlation_binding_digest = [_]u8{1} ** 32,
+        .payload_digest = [_]u8{2} ** 32,
+        .admission_projection_digest = [_]u8{3} ** 32,
+        .pending_owner_addr = 0x3000,
+        .pending_owner_incarnation = 12,
+        .cleanup_plan_addr = 0x4000,
+        .runtime_addr = 0x5000,
+        .observation_addr = 0x6000,
+        .observation_revision = 13,
+        .observer_generation = 14,
+        .title_generation = 15,
+        .observation_digest = [_]u8{4} ** 32,
+        .preparation_attempt = 16,
+        .pending_lifecycle = .preparing,
+        .plan = .{ .preparation = .{
+            .dto_backing = testCleanupDescriptor(0x7000),
+            .next_observation = graph,
+        } },
+    };
+}
+
+fn testEncodedTranscript(input: CleanupTranscriptInput) CleanupSeal {
+    var hasher = std.crypto.hash.Blake3.init(.{ .key = [_]u8{0x5a} ** 32 });
+    hasher.update(cleanup_transcript_domain);
+    updateInt(&hasher, u32, 1234);
+    updateInt(&hasher, u64, 906);
+    updateCleanupTranscript(&hasher, input);
+    var result: CleanupSeal = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+test "C3-3b2b1 cleanup seal transcript is deterministic and binds process domain" {
+    const pid = currentProcessId();
+    var service: Service = .{};
+    const receipt = try service.prepareWithEntropy(pid, 901, .{ .scalar_seed = 77 });
+    service.commitReady(receipt);
+    const input = testCleanupTranscript();
+    const first = try service.cleanupTranscriptSeal(pid, 901, input);
+    const replay = try service.cleanupTranscriptSeal(pid, 901, input);
+    try std.testing.expectEqualSlices(u8, &first, &replay);
+    try std.testing.expectError(
+        error.ProcessDomainMismatch,
+        service.cleanupTranscriptSeal(pid, 902, input),
+    );
+}
+
+test "C3-3b2b1 cleanup seal transcript binds identity plan and attempt" {
+    const pid = currentProcessId();
+    var service: Service = .{};
+    const receipt = try service.prepareWithEntropy(pid, 903, .{ .scalar_seed = 78 });
+    service.commitReady(receipt);
+    const baseline_input = testCleanupTranscript();
+    const baseline = try service.cleanupTranscriptSeal(pid, 903, baseline_input);
+
+    var changed = baseline_input;
+    changed.event_generation += 1;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &baseline,
+        &try service.cleanupTranscriptSeal(pid, 903, changed),
+    ));
+    changed = baseline_input;
+    changed.preparation_attempt += 1;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &baseline,
+        &try service.cleanupTranscriptSeal(pid, 903, changed),
+    ));
+    changed = baseline_input;
+    changed.plan.preparation.dto_backing.address += 8;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &baseline,
+        &try service.cleanupTranscriptSeal(pid, 903, changed),
+    ));
+}
+
+test "C3-3b2b1 cleanup seal progress revalidates transcript and separates domain" {
+    const pid = currentProcessId();
+    var service: Service = .{};
+    const receipt = try service.prepareWithEntropy(pid, 904, .{ .scalar_seed = 79 });
+    service.commitReady(receipt);
+    const transcript_input = testCleanupTranscript();
+    const transcript = try service.cleanupTranscriptSeal(pid, 904, transcript_input);
+    const initial = cleanup_seal.initialProgress(transcript_input.plan);
+    const progress = try service.cleanupProgressSeal(pid, 904, .{
+        .transcript_input = transcript_input,
+        .transcript_seal = transcript,
+        .phase = initial.phase,
+        .step = initial.step,
+        .next_role = initial.next_role,
+        .completed_mask = initial.completed_mask,
+    });
+    try std.testing.expect(!std.mem.eql(u8, &transcript, &progress));
+    try std.testing.expectEqualSlices(
+        u8,
+        &progress,
+        &try service.cleanupProgressSeal(pid, 904, .{
+            .transcript_input = transcript_input,
+            .transcript_seal = transcript,
+            .phase = initial.phase,
+            .step = initial.step,
+            .next_role = initial.next_role,
+            .completed_mask = initial.completed_mask,
+        }),
+    );
+}
+
+test "C3-3b2b1 cleanup seal unknown admission has a canonical zero projection" {
+    const pid = currentProcessId();
+    var service: Service = .{};
+    const receipt = try service.prepareWithEntropy(pid, 905, .{ .scalar_seed = 80 });
+    service.commitReady(receipt);
+    var input = testCleanupTranscript();
+    input.admission_tag = 0;
+    input.admission_projection_digest = [_]u8{0} ** 32;
+    _ = try service.cleanupTranscriptSeal(pid, 905, input);
+}
+
+test "C3-3b2b1 cleanup seal transcript fixed encoding has a golden digest" {
+    const actual = testEncodedTranscript(testCleanupTranscript());
+    const expected = [_]u8{
+        0x0c, 0x65, 0x75, 0x4b, 0x82, 0xe8, 0xb0, 0xcf,
+        0x62, 0x41, 0xc6, 0xbf, 0x8d, 0x52, 0x18, 0xf9,
+        0x9a, 0xda, 0x95, 0x33, 0x14, 0xc7, 0x89, 0x38,
+        0x4a, 0x9e, 0x15, 0x44, 0x0f, 0xa3, 0xe0, 0x71,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+
+    const progress_state = cleanup_seal.initialProgress(testCleanupTranscript().plan);
+    var progress_hasher = std.crypto.hash.Blake3.init(.{ .key = [_]u8{0x5a} ** 32 });
+    progress_hasher.update(cleanup_progress_domain);
+    updateInt(&progress_hasher, u32, 1234);
+    updateInt(&progress_hasher, u64, 906);
+    updateCleanupTranscript(&progress_hasher, testCleanupTranscript());
+    progress_hasher.update(&actual);
+    updateInt(&progress_hasher, u8, @intFromEnum(progress_state.phase));
+    updateInt(&progress_hasher, u8, @intFromEnum(progress_state.step));
+    updateInt(&progress_hasher, u8, @intFromEnum(progress_state.next_role));
+    updateInt(&progress_hasher, u8, progress_state.completed_mask);
+    var progress_actual: CleanupSeal = undefined;
+    progress_hasher.final(&progress_actual);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x74, 0x09, 0xe9, 0xf2, 0xf5, 0x53, 0xa6, 0x13,
+        0xf9, 0x01, 0xaf, 0x62, 0xf5, 0x44, 0xb8, 0x14,
+        0x34, 0x4f, 0xbe, 0x5a, 0x31, 0xec, 0xed, 0x6f,
+        0xb7, 0x2c, 0x8c, 0x68, 0x80, 0xe0, 0xd6, 0xfd,
+    }, &progress_actual);
+}
+
+test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
+    const baseline_input = testCleanupTranscript();
+    const baseline = testEncodedTranscript(baseline_input);
+    inline for (std.meta.fields(CleanupTranscriptInput)) |field| {
+        var changed = baseline_input;
+        if (comptime std.mem.eql(u8, field.name, "pending_lifecycle")) {
+            changed.pending_lifecycle = .prepared;
+        } else if (comptime std.mem.eql(u8, field.name, "plan")) {
+            changed.plan = .{ .committed_observation = .{ .old_observation = .{} } };
+        } else switch (@typeInfo(field.type)) {
+            .int => @field(changed, field.name) +%= 1,
+            .array => @field(changed, field.name)[0] ^= 1,
+            else => @compileError("unhandled cleanup transcript field type: " ++ field.name),
+        }
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            &baseline,
+            &testEncodedTranscript(changed),
+        ));
+    }
+}
+
+test "C3-3b2b1 cleanup seal transcript encoder binds every nested cleanup descriptor" {
+    const baseline_input = testCleanupTranscript();
+    const baseline = testEncodedTranscript(baseline_input);
+    inline for (std.meta.fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
+        var changed = baseline_input;
+        @field(changed.plan.preparation.dto_backing, descriptor_field.name) +%= 1;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &testEncodedTranscript(changed)));
+    }
+    inline for (std.meta.fields(cleanup_seal.ObservationCleanupGraph)) |owner_field| {
+        inline for (std.meta.fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
+            var changed = baseline_input;
+            @field(
+                @field(changed.plan.preparation.next_observation, owner_field.name),
+                descriptor_field.name,
+            ) +%= 1;
+            try std.testing.expect(!std.mem.eql(
+                u8,
+                &baseline,
+                &testEncodedTranscript(changed),
+            ));
+        }
+    }
+    var committed_input = baseline_input;
+    committed_input.plan = .{ .committed_observation = .{
+        .old_observation = baseline_input.plan.preparation.next_observation,
+    } };
+    const committed_baseline = testEncodedTranscript(committed_input);
+    inline for (std.meta.fields(cleanup_seal.ObservationCleanupGraph)) |owner_field| {
+        inline for (std.meta.fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
+            var changed = committed_input;
+            @field(
+                @field(changed.plan.committed_observation.old_observation, owner_field.name),
+                descriptor_field.name,
+            ) +%= 1;
+            try std.testing.expect(!std.mem.eql(
+                u8,
+                &committed_baseline,
+                &testEncodedTranscript(changed),
+            ));
+        }
+    }
+}
+
+test "C3-3b2b1 cleanup seal invalid transcript and progress fail-stop" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var case_id: u8 = 0;
+    while (case_id < 4) : (case_id += 1) {
+        const child = std.c.fork();
+        if (child < 0) return error.TestUnexpectedResult;
+        if (child == 0) {
+            const pid = currentProcessId();
+            var service: Service = .{};
+            const receipt = service.prepareWithEntropy(
+                pid,
+                907,
+                .{ .scalar_seed = 82 },
+            ) catch std.c._exit(125);
+            service.commitReady(receipt);
+            var transcript_input = testCleanupTranscript();
+            const transcript = service.cleanupTranscriptSeal(
+                pid,
+                907,
+                transcript_input,
+            ) catch std.c._exit(125);
+            var progress = cleanup_seal.initialProgress(transcript_input.plan);
+            var supplied = transcript;
+            switch (case_id) {
+                0 => supplied[0] ^= 1,
+                1 => transcript_input.event_generation += 1,
+                2 => progress.completed_mask = 0,
+                3 => {
+                    transcript_input.admission_tag = 1;
+                    transcript_input.admission_projection_digest = [_]u8{0} ** 32;
+                },
+                else => unreachable,
+            }
+            _ = service.cleanupProgressSeal(pid, 907, .{
+                .transcript_input = transcript_input,
+                .transcript_seal = supplied,
+                .phase = progress.phase,
+                .step = progress.step,
+                .next_role = progress.next_role,
+                .completed_mask = progress.completed_mask,
+            }) catch std.c._exit(125);
+            std.c._exit(124);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        const unsigned_status: u32 = @bitCast(status);
+        try std.testing.expect(std.c.W.IFEXITED(unsigned_status));
+        try std.testing.expectEqual(
+            @as(u8, 70),
+            @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned_status))),
+        );
+    }
 }
 
 test "C3-3b2a process seal publishes ready last and derives domain key" {

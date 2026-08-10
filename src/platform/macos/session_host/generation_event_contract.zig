@@ -20,6 +20,11 @@ pub const EventView = struct {
 pub const EventTakeOutcome = enum { idle, ended_pending, taken };
 pub const EventError = error{ Busy, InvalidOwner, Corrupt, Terminal };
 pub const EventViewError = error{ InvalidOwner, Terminal };
+pub const PreparationEventViewError = error{ Busy, InvalidOwner, Corrupt, Terminal };
+pub const PreparationEventView = struct {
+    event: EventView,
+    trusted: client_slot.GenerationEventPreparationProjection,
+};
 
 const Lifecycle = enum(u8) { pristine, live, releasing, terminal };
 const AdmissionTag = enum(u8) { unknown, accepted };
@@ -209,6 +214,46 @@ fn viewOwner(owner: *const EventOwner) EventViewError!EventView {
             error.InvalidOwner, error.Busy => error.InvalidOwner,
             error.Corrupt, error.Terminal => error.Terminal,
         };
+    return viewOwnerWithTrusted(
+        owner,
+        trusted.payload_digest,
+        trusted.admission_projection_digest,
+        trusted.wire_major,
+        trusted.admission_tag,
+    );
+}
+
+pub fn preparationEventView(
+    owner: *const EventOwner,
+    correlation: client_slot.EventCorrelation,
+) PreparationEventViewError!PreparationEventView {
+    const state = internalConst(owner);
+    if (terminalExact(owner)) return error.Terminal;
+    const trusted = try client_slot.generationEventPreparationProjection(
+        state.identity,
+        correlation,
+        @intFromPtr(owner),
+    );
+    return .{
+        .event = try viewOwnerWithTrusted(
+            owner,
+            trusted.payload_digest,
+            trusted.admission_projection_digest,
+            trusted.wire_major,
+            trusted.admission_tag,
+        ),
+        .trusted = trusted,
+    };
+}
+
+fn viewOwnerWithTrusted(
+    owner: *const EventOwner,
+    payload_digest: runtime_event_wire.Digest,
+    admission_projection_digest: runtime_event_wire.Digest,
+    wire_major: u16,
+    admission_tag: u8,
+) EventViewError!EventView {
+    const state = internalConst(owner);
     if (!lifecycleRawValid(&state.lifecycle) or !admissionRawValid(&state.admission_tag) or
         state.self_addr != @intFromPtr(owner) or state.lifecycle != .live or
         state.identity.receipt.owner_addr != @intFromPtr(owner) or
@@ -218,9 +263,9 @@ fn viewOwner(owner: *const EventOwner) EventViewError!EventView {
         !std.mem.eql(u8, &state.seal, &sealFor(state)))
         return error.Terminal;
     const digest = runtime_event_wire.payloadDigest(state.payload);
-    if (!std.mem.eql(u8, &digest, &trusted.payload_digest) or
-        trusted.wire_major != state.wire_major or
-        trusted.admission_tag != @intFromEnum(state.admission_tag))
+    if (!std.mem.eql(u8, &digest, &payload_digest) or
+        wire_major != state.wire_major or
+        admission_tag != @intFromEnum(state.admission_tag))
         return error.Terminal;
     const admission: EventAdmission = switch (state.admission_tag) {
         // Admission identity was sealed at ingress; replay only reconstructs the allocation-free
@@ -230,7 +275,7 @@ fn viewOwner(owner: *const EventOwner) EventViewError!EventView {
             .accepted => |accepted| if (std.mem.eql(
                 u8,
                 &runtime_event_wire.eventPreflightProjectionDigest(accepted),
-                &trusted.admission_projection_digest,
+                &admission_projection_digest,
             ))
                 .{ .accepted = accepted }
             else

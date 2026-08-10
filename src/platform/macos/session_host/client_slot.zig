@@ -125,6 +125,29 @@ const RpcSubstrateFailStopTestHook = struct {
 threadlocal var rpc_substrate_fail_stop_test_hook: if (builtin.is_test) RpcSubstrateFailStopTestHook else void =
     if (builtin.is_test) .{} else {};
 
+const PreparationProjectionTestHook = struct {
+    context: ?*anyopaque = null,
+    callback: ?*const fn (*anyopaque, GenerationEventPreparationProjection) void = null,
+    armed: bool = false,
+};
+
+threadlocal var preparation_projection_test_hook: if (builtin.is_test) PreparationProjectionTestHook else void =
+    if (builtin.is_test) .{} else {};
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn armPreparationProjectionReentry(
+        context: *anyopaque,
+        callback: *const fn (*anyopaque, GenerationEventPreparationProjection) void,
+    ) void {
+        if (preparation_projection_test_hook.armed) @panic("preparation projection hook replayed");
+        preparation_projection_test_hook = .{
+            .context = context,
+            .callback = callback,
+            .armed = true,
+        };
+    }
+} else struct {};
+
 /// fork한 픽스처 자식을 거둘 때 쓰는 폴링 상한(1ms poll × 이 횟수 ≈ 벽시계 60초 이상).
 ///
 /// **왜 이렇게 큰가**: fail-stop을 증명하는 픽스처의 자식은 **패닉으로 죽고**, Zig 패닉 핸들러는 이 거대한
@@ -1456,6 +1479,76 @@ pub const GenerationEventTrustedView = struct {
     wire_major: u16,
     admission_tag: u8,
 };
+
+pub const GenerationEventPreparationProjection = struct {
+    expected_major: u16,
+    metadata_support_raw: u8,
+    correlation_binding_digest: runtime_event_wire.Digest,
+    payload_digest: runtime_event_wire.Digest,
+    admission_projection_digest: runtime_event_wire.Digest,
+    wire_major: u16,
+    admission_tag: u8,
+    registry_incarnation: u64,
+    binding_reservation_id: u64,
+    event_node_incarnation: u64,
+    stream_id: u64,
+    event_generation: u64,
+    event_owner_addr: u64,
+    slot_incarnation: u64,
+    owner_node_incarnation: u64,
+    transport_incarnation: u64,
+    host_id: u128,
+    runtime_id: u128,
+    connection_generation: u64,
+    pid: u32,
+    process_nonce: u64,
+};
+
+const GenerationEventPreparationProjectionContract = struct {
+    expected_major: u16,
+    metadata_support_raw: u8,
+    correlation_binding_digest: runtime_event_wire.Digest,
+    payload_digest: runtime_event_wire.Digest,
+    admission_projection_digest: runtime_event_wire.Digest,
+    wire_major: u16,
+    admission_tag: u8,
+    registry_incarnation: u64,
+    binding_reservation_id: u64,
+    event_node_incarnation: u64,
+    stream_id: u64,
+    event_generation: u64,
+    event_owner_addr: u64,
+    slot_incarnation: u64,
+    owner_node_incarnation: u64,
+    transport_incarnation: u64,
+    host_id: u128,
+    runtime_id: u128,
+    connection_generation: u64,
+    pid: u32,
+    process_nonce: u64,
+};
+
+fn projectionFieldPointerFree(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .bool, .float, .@"enum" => true,
+        .array => |array| projectionFieldPointerFree(array.child),
+        else => false,
+    };
+}
+
+comptime {
+    const actual = std.meta.fields(GenerationEventPreparationProjection);
+    const expected = std.meta.fields(GenerationEventPreparationProjectionContract);
+    if (actual.len != expected.len)
+        @compileError("generation event preparation projection field count drifted");
+    for (actual, expected) |actual_field, expected_field| {
+        if (!std.mem.eql(u8, actual_field.name, expected_field.name) or
+            actual_field.type != expected_field.type)
+            @compileError("generation event preparation projection ABI drifted");
+        if (!projectionFieldPointerFree(actual_field.type))
+            @compileError("generation event preparation projection gained ownership");
+    }
+}
 
 pub const GenerationEventReleaseProjection = struct {
     identity: GenerationEventIdentity,
@@ -7368,10 +7461,16 @@ pub fn generationEventOwnerCurrent(
     if (!current) return error.Terminal;
 }
 
-pub fn generationEventTrustedView(
+const GenerationEventEvidence = struct {
+    trusted_view: GenerationEventTrustedView,
+    preparation: ?GenerationEventPreparationProjection,
+};
+
+fn validatedGenerationEventEvidence(
     identity: GenerationEventIdentity,
     owner_addr: usize,
-) GenerationEventError!GenerationEventTrustedView {
+    correlation: ?EventCorrelation,
+) GenerationEventError!GenerationEventEvidence {
     if (owner_addr == 0 or identity.receipt.owner_addr != owner_addr)
         return error.InvalidOwner;
     const admission = beginGenerationRequestOwner(identity.owner, false) catch |err| return switch (err) {
@@ -7403,12 +7502,96 @@ pub fn generationEventTrustedView(
         reservation,
         quarantine_identity,
     ) catch return error.Corrupt;
-    return .{
-        .payload_digest = mirror.payload_digest,
-        .admission_projection_digest = mirror.admission_projection_digest,
-        .wire_major = mirror.wire_major,
-        .admission_tag = mirror.admission_tag,
+    const correlation_input: EventCorrelationInput = .{
+        .identity = identity,
+        .ordering_class = trusted.ordering_class,
+        .expected_major = mirror.expected_major,
+        .metadata_support_raw = mirror.metadata_support_raw,
     };
+    const correlation_binding_digest: ?runtime_event_wire.Digest = if (correlation) |value| digest: {
+        if (!eventCorrelationMatches(value, correlation_input)) return error.Corrupt;
+        break :digest eventCorrelationDigest(correlation_input);
+    } else null;
+    if (builtin.is_test and preparation_projection_test_hook.armed) {
+        const callback = preparation_projection_test_hook.callback orelse
+            @panic("preparation projection hook lost callback");
+        const context = preparation_projection_test_hook.context orelse
+            @panic("preparation projection hook lost context");
+        preparation_projection_test_hook = .{};
+        callback(context, .{
+            .expected_major = mirror.expected_major,
+            .metadata_support_raw = mirror.metadata_support_raw,
+            .correlation_binding_digest = correlation_binding_digest orelse
+                @panic("preparation projection hook requires correlation"),
+            .payload_digest = mirror.payload_digest,
+            .admission_projection_digest = mirror.admission_projection_digest,
+            .wire_major = mirror.wire_major,
+            .admission_tag = mirror.admission_tag,
+            .registry_incarnation = trusted.event.registry_incarnation,
+            .binding_reservation_id = trusted.event.binding_reservation_id,
+            .event_node_incarnation = trusted.event.node_incarnation,
+            .stream_id = trusted.event.stream_id,
+            .event_generation = trusted.event.event_generation,
+            .event_owner_addr = @intCast(trusted.event.owner_addr),
+            .slot_incarnation = identity.owner.slot_incarnation,
+            .owner_node_incarnation = identity.owner.node_incarnation,
+            .transport_incarnation = identity.owner.transport_incarnation,
+            .host_id = identity.owner.host_id,
+            .runtime_id = identity.owner.reservation.identity.runtime_id,
+            .connection_generation = identity.owner.reservation.identity.connection_generation,
+            .pid = identity.owner.reservation.identity.pid,
+            .process_nonce = identity.owner.reservation.identity.process_nonce,
+        });
+    }
+    // Materialize only pointer-free evidence while the registered-node operation pins the graph.
+    return .{
+        .trusted_view = .{
+            .payload_digest = mirror.payload_digest,
+            .admission_projection_digest = mirror.admission_projection_digest,
+            .wire_major = mirror.wire_major,
+            .admission_tag = mirror.admission_tag,
+        },
+        .preparation = if (correlation_binding_digest) |correlation_digest| .{
+            .expected_major = mirror.expected_major,
+            .metadata_support_raw = mirror.metadata_support_raw,
+            .correlation_binding_digest = correlation_digest,
+            .payload_digest = mirror.payload_digest,
+            .admission_projection_digest = mirror.admission_projection_digest,
+            .wire_major = mirror.wire_major,
+            .admission_tag = mirror.admission_tag,
+            .registry_incarnation = trusted.event.registry_incarnation,
+            .binding_reservation_id = trusted.event.binding_reservation_id,
+            .event_node_incarnation = trusted.event.node_incarnation,
+            .stream_id = trusted.event.stream_id,
+            .event_generation = trusted.event.event_generation,
+            .event_owner_addr = @intCast(trusted.event.owner_addr),
+            .slot_incarnation = identity.owner.slot_incarnation,
+            .owner_node_incarnation = identity.owner.node_incarnation,
+            .transport_incarnation = identity.owner.transport_incarnation,
+            .host_id = identity.owner.host_id,
+            .runtime_id = identity.owner.reservation.identity.runtime_id,
+            .connection_generation = identity.owner.reservation.identity.connection_generation,
+            .pid = identity.owner.reservation.identity.pid,
+            .process_nonce = identity.owner.reservation.identity.process_nonce,
+        } else null,
+    };
+}
+
+pub fn generationEventTrustedView(
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+) GenerationEventError!GenerationEventTrustedView {
+    const evidence = try validatedGenerationEventEvidence(identity, owner_addr, null);
+    return evidence.trusted_view;
+}
+
+pub fn generationEventPreparationProjection(
+    identity: GenerationEventIdentity,
+    correlation: EventCorrelation,
+    owner_addr: usize,
+) GenerationEventError!GenerationEventPreparationProjection {
+    return (try validatedGenerationEventEvidence(identity, owner_addr, correlation)).preparation orelse
+        return error.Corrupt;
 }
 
 pub fn prepareGenerationEventRelease(

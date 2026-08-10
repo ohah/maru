@@ -56,21 +56,21 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/attach_product_resolver.zig", .product = 0, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 14 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 5, .top_level_test = 13 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 5, .top_level_test = 14 },
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 2 },
     });
     try expectSourceIdentifierInventory(allocator, "EventOwner", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 3 },
-        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 31, .top_level_test = 1 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 22, .top_level_test = 14 },
+        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 33, .top_level_test = 1 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 23, .top_level_test = 16 },
     });
     try expectEventOwnerPointerInventory(allocator, &.{
-        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 20, .mutable_test = 0, .const_product = 9, .const_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 10, .mutable_test = 0, .const_product = 4, .const_test = 4 },
+        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 20, .mutable_test = 0, .const_product = 11, .const_test = 0 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 10, .mutable_test = 0, .const_product = 5, .const_test = 4 },
     });
     try expectSourceIdentifierInventory(allocator, "takeEventProjected", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 4 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 5 },
     });
     try expectSourceIdentifierInventory(allocator, "eventReadinessOwned", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 3, .top_level_test = 0 },

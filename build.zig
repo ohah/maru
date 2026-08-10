@@ -2060,6 +2060,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b2b0 exact RuntimeObservation Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b2b0_step.dependOn(session_host_2c3d_c3_3b2a_step);
+    const session_host_2c3d_c3_3b2b1_step = b.step(
+        "test-session-host-2c3d-c3-3b2b1",
+        "2c3d C3-3b2b1 trusted preparation seal Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b2b1_step.dependOn(session_host_2c3d_c3_3b2b0_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2159,6 +2164,91 @@ pub fn build(b: *std.Build) void {
             &run_event_c3_3b2b0_boundary_tests.step,
         );
         boundary_step.dependOn(&run_event_c3_3b2b0_boundary_tests.step);
+
+        const event_c3_3b2b1_seal_module = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/event_cleanup_seal.zig",
+            ),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        const event_c3_3b2b1_seal_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_event_cleanup_seal.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "event_cleanup_seal",
+                    .module = event_c3_3b2b1_seal_module,
+                }},
+            }),
+            .filters = &.{"C3-3b2b1 cleanup seal"},
+        });
+        const run_event_c3_3b2b1_seal_tests =
+            b.addRunArtifact(event_c3_3b2b1_seal_tests);
+        run_event_c3_3b2b1_seal_tests.addArg("--maru-expect-tests=9");
+        run_event_c3_3b2b1_seal_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b1_step.dependOn(
+            &run_event_c3_3b2b1_seal_tests.step,
+        );
+        const event_c3_3b2b1_service_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/process_seal_service.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"C3-3b2b1 cleanup seal"},
+        });
+        const run_event_c3_3b2b1_service_tests =
+            b.addRunArtifact(event_c3_3b2b1_service_tests);
+        run_event_c3_3b2b1_service_tests.addArg("--maru-expect-tests=8");
+        run_event_c3_3b2b1_service_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b1_step.dependOn(
+            &run_event_c3_3b2b1_service_tests.step,
+        );
+        const event_c3_3b2b1_projection_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/generation_transport.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"C3-3b2b1 trusted preparation"},
+        });
+        const run_event_c3_3b2b1_projection_tests =
+            b.addRunArtifact(event_c3_3b2b1_projection_tests);
+        run_event_c3_3b2b1_projection_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2b1_projection_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b1_step.dependOn(
+            &run_event_c3_3b2b1_projection_tests.step,
+        );
+        const event_c3_3b2b1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_2c3d_c3_3b2b1_boundary.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"C3-3b2b1 trusted preparation seal boundary"},
+        });
+        const run_event_c3_3b2b1_boundary_tests =
+            b.addRunArtifact(event_c3_3b2b1_boundary_tests);
+        run_event_c3_3b2b1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2b1_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b1_step.dependOn(
+            &run_event_c3_3b2b1_boundary_tests.step,
+        );
+        boundary_step.dependOn(&run_event_c3_3b2b1_boundary_tests.step);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

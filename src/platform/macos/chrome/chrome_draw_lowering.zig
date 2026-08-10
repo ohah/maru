@@ -10,6 +10,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 const renderer = maru.renderer;
+const colorUv = renderer.metal_frame.colorUv; // 컬러 글리프 UV sentinel 단일 출처(u0·u1 동일 규약)
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
 const system_text = @import("system_text.zig");
@@ -67,9 +68,12 @@ pub const RichTextArtifact = struct {
                 // NativeMetalCell reserves u+2 for a CoreText-selected color glyph. The
                 // independent pixel pass uses the same fragment shader, so preserve that
                 // renderer contract rather than recoloring emoji with the text foreground.
-                .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
+                //
+                // **u0과 u1 둘 다** 실어야 한다 — 셰이더가 `uv.x >= 2.0`으로 판정하므로 한쪽만 실으면
+                // 정점 보간에서 컬러 분기가 왼쪽 일부에서만 성립해 글리프가 세로 조각으로 잘린다.
+                .u0 = colorUv(uv.u0, glyph.run.cache_key.color_glyph_kind),
                 .v0 = uv.v0,
-                .u1 = uv.u1,
+                .u1 = colorUv(uv.u1, glyph.run.cache_key.color_glyph_kind),
                 .v1 = uv.v1,
                 .foreground = placement.foreground,
                 .layer = 0,

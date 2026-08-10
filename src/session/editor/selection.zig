@@ -188,9 +188,13 @@ pub const Selection = struct {
 /// 커서 개수 상한([native-editor.md](../../../docs/native-editor.md) §3.2).
 ///
 /// 정규식 검색의 "모두 선택"은 매치 수만큼 커서를 만들므로 한 번의 조작이 수만 개를 낳을 수 있고,
-/// 그 상태에서는 **편집마다 모든 커서의 offset을 매핑**해야 해 입력이 멈춘다. VSCode도
-/// `multiCursorLimit`으로 자른다. 넘으면 앞에서부터 남기고 **잘랐다는 사실을 알린다** — 조용히
-/// 자르면 사용자는 뒤쪽 매치가 왜 안 바뀌었는지 알 수 없다.
+/// 그 상태에서는 **편집마다 모든 커서의 offset을 매핑**해야 해 입력이 멈춘다. 넘으면 앞에서부터
+/// 남기고 **잘랐다는 사실을 알린다** — 조용히 자르면 사용자는 뒤쪽 매치가 왜 안 바뀌었는지 모른다.
+///
+/// **이 값은 잠정이다 — 우리 측정이 아니라 VSCode `multiCursorLimit`의 기본값을 빌려 왔다.**
+/// §3.0(버퍼 표현)·§4.2(폰트 advance)가 "구현 전 실측"을 규율로 세웠는데 여기서는 수치를 그대로
+/// 가져다 썼으므로, **N2에서 매핑 비용을 재고 다시 고른다**(§3.2). 계약인 것은 **상한이 존재한다는
+/// 것과 잘림을 알린다는 것**이고, 숫자 자체는 아니다.
 pub const max_cursors: usize = 10_000;
 
 /// selection 배열. **항상 1개 이상**이고 `primary`는 그 안의 유효한 인덱스다.
@@ -211,7 +215,12 @@ pub const Selections = struct {
     pub fn init(items: []Selection, primary: usize) Selections {
         std.debug.assert(items.len > 0);
         std.debug.assert(primary < items.len);
-        return .{ .items = items, .primary = primary };
+        const self = Selections{ .items = items, .primary = primary };
+        // **정렬을 여기서 강제한다.** `isSorted`를 만들어 놓고 아무도 부르지 않으면 그것은 불변식이
+        // 아니라 관례다 — 편집을 뒤에서부터 적용하는 전제(§3.3)가 조용히 깨진다. `mergeOverlapping`의
+        // 결과는 항상 이 조건을 만족하므로 정상 경로에서는 걸리지 않는다.
+        std.debug.assert(self.isSorted());
+        return self;
     }
 
     /// primary selection. 스크롤 추종·상태바 위치 표시의 기준이다(§3.2).
@@ -695,10 +704,15 @@ test "정렬 불변식: mergeOverlapping의 결과는 항상 정렬돼 있다 (�
     try testing.expectEqual(@as(usize, 10), sels.items[0].start());
 }
 
-test "정렬되지 않은 배열은 isSorted가 잡는다" {
-    var items = [_]Selection{ Selection.at(40), Selection.at(10) };
-    const sels = Selections.init(&items, 0);
-    try testing.expect(!sels.isSorted());
+test "정렬 판정: 뒤집힌 배열을 isSorted가 구분한다" {
+    // `init`이 assert로 강제하므로 여기서는 판정 함수만 직접 확인한다 — 정렬되지 않은 배열로
+    // `init`을 부르는 것 자체가 계약 위반이고 Debug에서 즉시 멈춘다.
+    var bad = [_]Selection{ Selection.at(40), Selection.at(10) };
+    const unchecked = Selections{ .items = &bad, .primary = 0 };
+    try testing.expect(!unchecked.isSorted());
+
+    var good = [_]Selection{ Selection.at(10), Selection.at(40) };
+    try testing.expect(Selections.init(&good, 0).isSorted());
 }
 
 test "가로 이동은 goal을 재설정하되 열 선택 원본은 건드리지 않는다 (§3.2)" {

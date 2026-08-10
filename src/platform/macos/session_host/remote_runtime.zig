@@ -5288,7 +5288,7 @@ test "C3-3a3 product remote runtime observer remains a local no-op while aggrega
     defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
     try adapter.logicalClient().bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
     try takeAggregateRevokeForFixture(&runtime);
-    try testing.expectEqual(@as(usize, 1), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    try testing.expectEqual(@as(usize, 1), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     try runtime.direct_input.appendSlice(testing.allocator, "observer-retained");
     runtime.attachment.statePtr().role = .observer;
     try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
@@ -5296,7 +5296,7 @@ test "C3-3a3 product remote runtime observer remains a local no-op while aggrega
     try testing.expectEqualStrings("observer-retained", runtime.direct_input.items);
     try testing.expect(adapter.logicalClient().pending_outbound == null);
     try runtime.attachment.generation.releaseEvent();
-    try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     try testing.expectEqualStrings("observer-retained", runtime.direct_input.items);
 }
 
@@ -5340,7 +5340,7 @@ test "C3-3a3 actual socket target offset zero is cancelled and aggregate settles
     const drained = try runtime.drainObservationEvents();
     try testing.expect(drained.metadata);
     try testing.expect(adapter.logicalClient().pending_outbound == null);
-    try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+    try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     const filler = try testing.allocator.alloc(u8, filler_len);
     defer testing.allocator.free(filler);
     try readRemoteTestExact(fds[1], filler);
@@ -5381,7 +5381,7 @@ test "C3-3a3 actual socket partial target fails closed and sibling owner resumes
         try testing.expectError(error.ConnectionClosed, runtime.drainObservationEvents());
         try testing.expect(adapter.logicalClient().unusable);
         try testing.expect(adapter.logicalClient().pending_outbound == null);
-        try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+        try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     }
     {
         var fds: [2]c.fd_t = undefined;
@@ -5419,7 +5419,7 @@ test "C3-3a3 actual socket partial target fails closed and sibling owner resumes
         try testing.expectEqual(@as(u64, 8), preserved.stream_id);
         try testing.expectEqual(@as(usize, 0), preserved.offset);
         try testing.expectEqual(sibling_addr, @intFromPtr(preserved.frame.ptr));
-        try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.revokeBlockerCount());
+        try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
         const filler = try testing.allocator.alloc(u8, filler_len);
         defer testing.allocator.free(filler);
         try readRemoteTestExact(fds[1], filler);

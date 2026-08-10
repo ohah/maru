@@ -10205,27 +10205,14 @@ pub const Client = struct {
                 .stream_id = want_stream_id,
                 .transfer_id = transfer_id,
                 .out = out,
-            }) catch |err| switch (err) {
+            }, .public) catch |err| switch (err) {
                 error.ConnectionClosed => return .terminal,
                 error.DeadlineExceeded => unreachable,
                 else => |typed| return typed,
             };
             if (!out.pristine()) return .committed;
             const batch = maybe_batch orelse return .idle;
-            if (self.pending_batches.items.len +|
-                self.generation_batch_accounting.ledger.?.item_count >= protocol.max_client_screen_items or
-                self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
-            {
-                batch.deinit();
-                self.poison(.event_queue_overflow);
-                return error.EventQueueFull;
-            }
-            self.pending_batches.append(self.allocator, batch) catch {
-                batch.deinit();
-                self.poison(.local_resource_exhausted);
-                return error.OutOfMemory;
-            };
-            self.pending_batch_bytes += batch.bytes.len;
+            try self.bufferPendingScreenBatch(batch);
         }
     }
 
@@ -10250,7 +10237,7 @@ pub const Client = struct {
         }
         // 2) 소켓에서 완성 배치를 읽는다. 내 것이면 반환, 남의 것이면 버퍼하고 계속(내 것/idle까지).
         while (true) {
-            const batch = (self.readOneBatchWithIo(io, null) catch |err| switch (err) {
+            const batch = (self.readOneBatchWithIo(io, null, .public) catch |err| switch (err) {
                 error.CapacityExhausted,
                 error.DestinationOccupied,
                 error.IdentityExhausted,
@@ -10270,30 +10257,36 @@ pub const Client = struct {
                 }
                 return batch;
             }
-            if (self.pending_batches.items.len +|
-                (if (self.generation_batch_accounting.ledger) |ledger| ledger.item_count else 0) >=
-                protocol.max_client_screen_items or
-                self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
-            {
-                batch.deinit();
-                self.poison(.event_queue_overflow);
-                return error.EventQueueFull;
-            }
-            // 남의 stream 배치 — 그 runtime pump가 소비하도록 버퍼. append 실패 시 이 배치 bytes를 회수(누수 방지).
-            self.pending_batches.append(self.allocator, batch) catch {
-                batch.deinit();
-                self.poison(.local_resource_exhausted);
-                return error.OutOfMemory;
-            };
-            self.pending_batch_bytes += batch.bytes.len;
+            // 남의 stream 배치 — 그 runtime pump가 소비하도록 canonical inbox에 보존한다.
+            try self.bufferPendingScreenBatch(batch);
         }
+    }
+
+    fn bufferPendingScreenBatch(self: *Client, batch: StreamBatch) ClientError!void {
+        const ledger_items = if (self.generation_batch_accounting.ledger) |ledger|
+            ledger.item_count
+        else
+            0;
+        if (self.pending_batches.items.len +| ledger_items >= protocol.max_client_screen_items or
+            self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
+        {
+            batch.deinit();
+            self.poison(.event_queue_overflow);
+            return error.EventQueueFull;
+        }
+        self.pending_batches.append(self.allocator, batch) catch {
+            batch.deinit();
+            self.poison(.local_resource_exhausted);
+            return error.OutOfMemory;
+        };
+        self.pending_batch_bytes += batch.bytes.len;
     }
 
     /// 소켓/`pending_stream`에서 완성 stream 배치 하나를 `end_stream`까지 읽어 돌려준다(stream_id 무관). **논블로킹**: 배치가
     /// 아직 없으면 `null`(recv timeout을 세션 종료로 오인 안 함, §9). host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push한다
     /// (SnapshotRequired). demux는 상위 `readStreamBatch`가 한다 — 여기선 순수하게 "다음 배치 하나".
     fn readOneBatch(self: *Client) ClientError!?StreamBatch {
-        return self.readOneBatchWithIo(.polling, null) catch |err| switch (err) {
+        return self.readOneBatchWithIo(.polling, null, .public) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
             error.CapacityExhausted,
             error.DestinationOccupied,
@@ -10315,10 +10308,13 @@ pub const Client = struct {
         out: *generation_batch_registry.OwnedBatch,
     };
 
+    const StreamFenceMode = enum { public, registered_execution };
+
     fn readOneBatchWithIo(
         self: *Client,
         io: StreamIo,
         generation: ?GenerationReadDestination,
+        fence_mode: StreamFenceMode,
     ) (DeadlineClientError || generation_batch_registry.Error)!?StreamBatch {
         if (generation) |destination| {
             if (destination.stream_id == 0) return error.InvalidStream;
@@ -10339,6 +10335,7 @@ pub const Client = struct {
                 started,
                 io,
                 &actual_payload_allocator,
+                fence_mode,
             )) orelse {
                 if (started) {
                     self.partial_batch = state;
@@ -12429,7 +12426,7 @@ pub const Client = struct {
     /// 첫 frame과 continuation 모두 `pollReadable`로 논블로킹 확인하고, 데이터가 없으면 partial batch를 caller가 보존하도록
     /// `null`을 돌려준다. UI frame pump에서 socket timeout까지 기다리지 않는다.
     fn nextStreamFrame(self: *Client, _: bool) ClientError!?framing.Frame {
-        return self.nextStreamFrameWithIo(false, .polling, null) catch |err| switch (err) {
+        return self.nextStreamFrameWithIo(false, .polling, null, .public) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
             else => |client_err| client_err,
         };
@@ -12440,8 +12437,16 @@ pub const Client = struct {
         _: bool,
         io: StreamIo,
         payload_allocator_out: ?*std.mem.Allocator,
+        fence_mode: StreamFenceMode,
     ) DeadlineClientError!?framing.Frame {
-        const operation_fence_held = try self.ensureUsable();
+        const operation_fence_held = switch (fence_mode) {
+            .public => try self.ensureUsable(),
+            .registered_execution => blk: {
+                if (checkedAllocatorReentry(self)) return error.AdminBusy;
+                if (self.ownership == .moved or self.unusable) return error.ConnectionClosed;
+                break :blk false;
+            },
+        };
         defer if (operation_fence_held) self.endPublicMutation();
         if (payload_allocator_out) |out| out.* = self.allocator;
         if (self.pending_stream.items.len > 0) {
@@ -12862,6 +12867,33 @@ pub const Client = struct {
     ) ClientError!bool {
         try self.requireRegisteredOperationExecutionCapability(capability);
         return self.pumpPendingOutputGuarded(true);
+    }
+
+    /// Active generation events block every TX admission, but the shared socket still has to
+    /// demultiplex incoming frames so sibling runtimes do not stall behind the event owner. The
+    /// caller must already own ClientSlot's registered-operation execution lease; this path reads
+    /// only RX and preserves any completed screen batch in the canonical bounded inbox.
+    pub fn pumpRxDemuxUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+    ) ClientError!void {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        if (self.ownership == .moved or self.unusable) return error.ConnectionClosed;
+        const batch = self.readOneBatchWithIo(.polling, null, .registered_execution) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            error.CapacityExhausted,
+            error.DestinationOccupied,
+            error.IdentityExhausted,
+            error.InvalidDescriptor,
+            error.InvalidIdentity,
+            error.InvalidReservation,
+            error.InvalidState,
+            error.InvalidStream,
+            error.MovedOrCopied,
+            => unreachable,
+            else => |client_err| return client_err,
+        };
+        if (batch) |owned| try self.bufferPendingScreenBatch(owned);
     }
 
     pub const RevokeFence = enum {

@@ -444,6 +444,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "sendScrollToBottomUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "sendCoreCommandUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "pumpPendingOutputUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "pumpRxDemuxUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "beginConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "endConfirmedGenerationPoisonExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "releaseEndedPurgeExclusiveClean", .receiver_type = mutable, .class = .unchecked },
@@ -1409,6 +1410,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readCorrelatedPreparedResponse" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnderExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnchecked" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferPendingScreenBatch" },
+                .{ .parent = "Client", .kind = "const", .visibility = "private", .modifier = "", .name = "StreamFenceMode" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpRxDemuxUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "poisonDuringClientSlotOperationNoFail" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markDeferredPoisonForTest" },
@@ -1455,6 +1459,18 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventCorrelationInternal" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EventCorrelation" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventCorrelationInput" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "eventCorrelationInternal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "eventCorrelationInternalConst" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "eventCorrelationDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "eventCorrelationInputValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "mintEventCorrelation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "eventCorrelationMatches" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinalAdmissionKind" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rxDemuxAdmissionTransactionWithOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpGenerationRxDemux" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "operation_thread_identity" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "mintRegisteredOperationExecutionReceipt" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "runtime_event_wire" },
@@ -2976,7 +2992,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 10),
+        @as(usize, 11),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }

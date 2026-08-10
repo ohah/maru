@@ -45,6 +45,7 @@ const EventAuthorityLifecycle = enum(u8) {
 
 pub const EventOrderingClass = enum(u8) {
     none,
+    non_revoke_effect,
     controller_revoke,
 };
 
@@ -188,6 +189,7 @@ pub const EventTrustedCleanup = struct {
     event: EventGenerationReceipt,
     quarantine_slot_index: u16,
     quarantine_reservation_generation: u64,
+    ordering_class: EventOrderingClass,
     state: State,
 };
 
@@ -295,7 +297,7 @@ pub const AttachmentCleanupRegistry = struct {
     incarnation: u64 = 0,
     next_reservation_id: u64 = 1,
     live_count: usize = 0,
-    revoke_blocker_count: usize = 0,
+    connection_ordering_blocker_count: usize = 0,
     active_rpc_recovery_entry_plus_one: u16 = 0,
     lifecycle: RegistryLifecycle = .pristine,
     entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
@@ -306,12 +308,12 @@ pub const AttachmentCleanupRegistry = struct {
         switch (out.lifecycle) {
             .pristine => {
                 if (out.self_addr != 0 or out.incarnation != 0 or out.live_count != 0 or
-                    out.revoke_blocker_count != 0)
+                    out.connection_ordering_blocker_count != 0)
                     return error.InvalidState;
             },
             .dead => {
                 if (out.self_addr != @intFromPtr(out) or out.live_count != 0 or
-                    out.revoke_blocker_count != 0)
+                    out.connection_ordering_blocker_count != 0)
                     return error.InvalidState;
                 if (out.incarnation == incarnation) return error.InvalidIdentity;
             },
@@ -330,7 +332,7 @@ pub const AttachmentCleanupRegistry = struct {
             self.incarnation != 0 and
             self.next_reservation_id != 0 and
             self.live_count <= max_entries and
-            self.revoke_blocker_count <= self.live_count and
+            self.connection_ordering_blocker_count <= self.live_count and
             self.active_rpc_recovery_entry_plus_one <= max_entries and
             self.lifecycle == .live;
     }
@@ -340,12 +342,12 @@ pub const AttachmentCleanupRegistry = struct {
         return self.live_count;
     }
 
-    pub fn revokeBlockerCount(self: *const AttachmentCleanupRegistry) Error!usize {
+    pub fn connectionOrderingBlockerCount(self: *const AttachmentCleanupRegistry) Error!usize {
         if (!self.valid()) return error.MovedOrCopied;
-        return self.revoke_blocker_count;
+        return self.connection_ordering_blocker_count;
     }
 
-    pub fn validateRevokeBlockerCacheForTest(
+    pub fn validateConnectionOrderingBlockerCacheForTest(
         self: *const AttachmentCleanupRegistry,
     ) Error!bool {
         if (!builtin.is_test) unreachable;
@@ -357,19 +359,19 @@ pub const AttachmentCleanupRegistry = struct {
                 !eventAuthorityLifecycleRawValid(&authority.lifecycle) or
                 !eventOrderingClassRawValid(&authority.ordering_class))
                 return error.InvalidState;
-            if (authority.ordering_class == .controller_revoke) {
-                const blocks = switch (authority.lifecycle) {
-                    .reserved, .live, .releasing => true,
-                    .terminal => authority.completion_addr != 0 and
-                        authority.registered_operation_id != 0,
-                    .idle => false,
-                };
-                if (!blocks) return error.InvalidState;
+            const blocks = switch (authority.lifecycle) {
+                .reserved, .live, .releasing => true,
+                .terminal => authority.completion_addr != 0 and
+                    authority.registered_operation_id != 0,
+                .idle => false,
+            };
+            if (blocks) {
+                if (authority.ordering_class == .none) return error.InvalidState;
                 scanned = std.math.add(usize, scanned, 1) catch
                     return error.InvalidState;
-            }
+            } else if (authority.ordering_class != .none) return error.InvalidState;
         }
-        return scanned == self.revoke_blocker_count;
+        return scanned == self.connection_ordering_blocker_count;
     }
 
     fn finishEventOrderingNoFail(
@@ -378,11 +380,11 @@ pub const AttachmentCleanupRegistry = struct {
     ) void {
         if (!eventOrderingClassRawValid(&authority.ordering_class))
             @panic("event ordering class drifted");
-        if (authority.ordering_class == .controller_revoke) {
-            if (self.revoke_blocker_count == 0)
-                @panic("event revoke blocker cache underflow");
-            self.revoke_blocker_count -= 1;
-        }
+        if (authority.ordering_class == .none)
+            @panic("active event lost ordering class");
+        if (self.connection_ordering_blocker_count == 0)
+            @panic("event connection ordering blocker cache underflow");
+        self.connection_ordering_blocker_count -= 1;
         authority.ordering_class = .none;
     }
 
@@ -1154,7 +1156,7 @@ pub const AttachmentCleanupRegistry = struct {
             identity,
             stream_id,
             owner_addr,
-            .none,
+            .non_revoke_effect,
         );
     }
 
@@ -1184,7 +1186,8 @@ pub const AttachmentCleanupRegistry = struct {
         ordering_class: EventOrderingClass,
     ) Error!EventGenerationReceipt {
         if (stream_id == 0) return error.InvalidStream;
-        if (owner_addr == 0 or !eventOrderingClassRawValid(&ordering_class))
+        if (owner_addr == 0 or !eventOrderingClassRawValid(&ordering_class) or
+            ordering_class == .none)
             return error.InvalidIdentity;
         const entry = try self.exactEntry(reservation, identity);
         const authority = &entry.event_authority;
@@ -1198,8 +1201,7 @@ pub const AttachmentCleanupRegistry = struct {
             authority.lifecycle = .terminal;
             return error.IdentityExhausted;
         }
-        if (ordering_class == .controller_revoke and
-            self.revoke_blocker_count == max_entries)
+        if (self.connection_ordering_blocker_count == max_entries)
             return error.CapacityExhausted;
 
         authority.next_generation = generation + 1;
@@ -1207,7 +1209,7 @@ pub const AttachmentCleanupRegistry = struct {
         authority.active_owner_addr = owner_addr;
         authority.ordering_class = ordering_class;
         authority.lifecycle = .reserved;
-        if (ordering_class == .controller_revoke) self.revoke_blocker_count += 1;
+        self.connection_ordering_blocker_count += 1;
         return .{
             .registry_incarnation = self.incarnation,
             .binding_reservation_id = identity.binding_reservation_id,
@@ -1509,6 +1511,7 @@ pub const AttachmentCleanupRegistry = struct {
             },
             .quarantine_slot_index = authority.quarantine_slot_index,
             .quarantine_reservation_generation = authority.quarantine_reservation_generation,
+            .ordering_class = authority.ordering_class,
             .state = if (authority.lifecycle == .live) .live else .releasing,
         };
     }
@@ -1653,7 +1656,7 @@ pub const AttachmentCleanupRegistry = struct {
             return if (self.self_addr == @intFromPtr(self)) .already_dead else .corrupt;
         }
         if (!self.valid()) return .corrupt;
-        if (self.live_count != 0 or self.revoke_blocker_count != 0 or
+        if (self.live_count != 0 or self.connection_ordering_blocker_count != 0 or
             self.active_rpc_recovery_entry_plus_one != 0) return .busy;
         for (&self.entries) |*entry| {
             if (!entryLifecycleRawValid(&entry.lifecycle) or
@@ -3162,8 +3165,8 @@ test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
 }
 
-test "C3-3a1 ordering class is closed and ordinary events do not block" {
-    const expected = [_][]const u8{ "none", "controller_revoke" };
+test "C3-3a1 ordering class remains closed and ordinary events join the all-event blocker" {
+    const expected = [_][]const u8{ "none", "non_revoke_effect", "controller_revoke" };
     const actual = std.meta.fields(EventOrderingClass);
     try std.testing.expectEqual(expected.len, actual.len);
     inline for (actual, 0..) |field, index|
@@ -3203,16 +3206,27 @@ test "C3-3a1 ordering class is closed and ordinary events do not block" {
             invalid_ordering,
         ),
     );
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        registry.reserveEventGenerationWithOrdering(
+            bound.reservation,
+            bound.identity,
+            0x3A11,
+            0x3A1110,
+            .none,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
     const ordinary = try registry.reserveEventGeneration(
         bound.reservation,
         bound.identity,
         0x3A11,
         0x3A1110,
     );
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     registry.rollbackEventGenerationBeforePublishNoFail(bound.reservation, bound.identity, ordinary);
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
     try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3A11);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3A11);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
@@ -3235,12 +3249,12 @@ test "C3-3a1 revoke reserve and rollback are exact cached transitions" {
         registry.preflightBoundDrop(bound.reservation, bound.identity, 0x3A12),
     );
     var copied = registry;
-    try std.testing.expectError(error.MovedOrCopied, copied.revokeBlockerCount());
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectError(error.MovedOrCopied, copied.connectionOrderingBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     registry.rollbackEventGenerationBeforePublishNoFail(bound.reservation, bound.identity, revoke);
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3A12);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3A12);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
@@ -3274,12 +3288,12 @@ test "C3-3a1 clean release blocks through releasing and decrements at finish" {
         error.InvalidState,
         registry.preflightBoundDrop(bound.reservation, bound.identity, 0x3A13),
     );
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
     registry.consumeEventReleaseContinuationNoFail(bound.reservation, bound.identity, continuation);
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
     registry.finishEventReleaseNoFail(bound.reservation, bound.identity, continuation);
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3A13);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3A13);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
@@ -3309,11 +3323,11 @@ test "C3-3a1 corrupt recovery keeps blocker until permit consume" {
         error.InvalidState,
         registry.preflightBoundDrop(bound.reservation, bound.identity, 0x3A14),
     );
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     registry.consumeEventPinRecoveryPermitNoFail(bound.reservation, bound.identity, recovery);
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3A14);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3A14);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
@@ -3340,12 +3354,12 @@ test "C3-3a1 sibling revoke authorities aggregate independently" {
         0x3A1530,
         .controller_revoke,
     );
-    try std.testing.expectEqual(@as(usize, 2), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 2), try registry.connectionOrderingBlockerCount());
     registry.rollbackEventGenerationBeforePublishNoFail(first.reservation, first.identity, first_revoke);
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
     registry.rollbackEventGenerationBeforePublishNoFail(second.reservation, second.identity, second_revoke);
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
     try registry.beginBoundDrop(first.reservation, first.identity, 0x3A15);
     try registry.completeActiveDrop(first.reservation, first.identity, 0x3A15);
     try registry.beginBoundDrop(second.reservation, second.identity, 0x3A16);
@@ -3373,14 +3387,14 @@ test "C3-3a1 stale and double settlement cannot change blocker cache" {
         error.InvalidState,
         registry.settleEventGenerationForTest(bound.reservation, bound.identity, stale),
     );
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
     try registry.settleEventGenerationForTest(bound.reservation, bound.identity, revoke);
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
     try std.testing.expectError(
         error.InvalidState,
         registry.settleEventGenerationForTest(bound.reservation, bound.identity, revoke),
     );
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
     const reincarnated = try registry.reserveEventGenerationWithOrdering(
         bound.reservation,
         bound.identity,
@@ -3397,9 +3411,9 @@ test "C3-3a1 stale and double settlement cannot change blocker cache" {
         error.InvalidState,
         registry.settleEventGenerationForTest(bound.reservation, bound.identity, revoke),
     );
-    try std.testing.expectEqual(@as(usize, 1), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
     try registry.settleEventGenerationForTest(bound.reservation, bound.identity, reincarnated);
-    try std.testing.expectEqual(@as(usize, 0), try registry.revokeBlockerCount());
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
     try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3A16);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3A16);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
@@ -3417,13 +3431,13 @@ test "C3-3a1 cache bounds fail closed and test scan detects drift" {
         0x3A1710,
         .controller_revoke,
     );
-    try std.testing.expect(try registry.validateRevokeBlockerCacheForTest());
-    registry.revoke_blocker_count = 0;
-    try std.testing.expect(!(try registry.validateRevokeBlockerCacheForTest()));
-    registry.revoke_blocker_count = 1;
-    registry.revoke_blocker_count = max_entries + 1;
-    try std.testing.expectError(error.MovedOrCopied, registry.revokeBlockerCount());
-    registry.revoke_blocker_count = 1;
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
+    registry.connection_ordering_blocker_count = 0;
+    try std.testing.expect(!(try registry.validateConnectionOrderingBlockerCacheForTest()));
+    registry.connection_ordering_blocker_count = 1;
+    registry.connection_ordering_blocker_count = max_entries + 1;
+    try std.testing.expectError(error.MovedOrCopied, registry.connectionOrderingBlockerCount());
+    registry.connection_ordering_blocker_count = 1;
     registry.rollbackEventGenerationBeforePublishNoFail(bound.reservation, bound.identity, revoke);
     try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3A17);
     try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3A17);

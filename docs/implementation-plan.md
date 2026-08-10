@@ -1531,15 +1531,17 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
       public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
-      **C3-3b event settlement와 비동기 close는 미구현**이며 다음 TDD slice를 순서대로 닫는다. 각 slice는 앞 slice의 focused
+      **C3-3b1 correlation·ordering migration은 구현됐고, C3-3b2 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 순서대로 닫는다. 각 slice는 앞 slice의 focused
       Debug·ReleaseFast gate와 source boundary를 상속하고, 마지막 slice 전에는 C3-3b 완료나 제품 close parity를 주장하지 않는다.
 
       1. **C3-3b1 correlation·ordering migration:** canonical take-only opaque `EventCorrelation`, minimal ClientSlot classification context,
          `EventOrderingClass.none|non_revoke_effect|controller_revoke`와 모든 taken event의
          `connection_ordering_blocker_count`를 먼저 red→green으로 만든다. 기존 revoke-only counter/query identifier는 0으로 만들고,
-         EventAuthority lifecycle+cleanup pin을 sole cleanup SSOT로 유지한다. `none`도 live no-special-effect class일 뿐 blocker-unarmed가 아니며,
-         idle/settled에는 active class가 없다. benign도 release까지 blocker를 유지하며 sibling TX/RPC는 wire 0,
-         RX/demux tail은 진행하는 actual socket oracle을 포함한다.
+         EventAuthority lifecycle+cleanup pin을 sole cleanup SSOT로 유지한다. `none`은 idle/settled row 전용 inactive sentinel이며,
+         모든 live non-revoke/unknown event는 `non_revoke_effect`다. benign도 release까지 blocker를 유지하며 sibling TX/RPC는 wire 0,
+         queued revoke 뒤에도 RX/demux tail은 진행하는 actual socket oracle을 포함한다. take 당시 `expected_major|metadata_support`는
+         canonical quarantine mirror에 immutable snapshot으로 봉인하고 release는 mutable Client current state를 다시 권위로 사용하지 않는다.
+         b1의 RX/correlation projection은 내부 substrate이며 실제 `RemoteRuntime` 제품 pump 연결과 semantic owner handoff는 각각 b4와 b2가 소유한다.
       2. **C3-3b2 immutable preparation:** final-address `PendingEventOwner`, immutable `RuntimeSemanticSnapshot`, closed `PreparedEvent`와
          `EffectRequest`, production full-content hash를 구현한다. metadata는 packed DTO pointer adoption 없이 independent next observation을
          만들며 OOM every-copy-index, owner당 checked `4 * protocol.max_control_json` double-peak와 frame당

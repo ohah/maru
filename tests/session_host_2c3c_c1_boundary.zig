@@ -6,6 +6,8 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     const allocator = std.testing.allocator;
     const contract = try readSource(allocator, "src/platform/macos/session_host/generation_attachment_contract.zig");
     defer allocator.free(contract);
+    const control_types = try readSource(allocator, "src/platform/macos/session_host/runtime_control_types.zig");
+    defer allocator.free(control_types);
     const transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport);
     const attachment = try readSource(allocator, "src/platform/macos/session_host/generation_attachment.zig");
@@ -15,22 +17,25 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime);
 
-    const control_contract = between(contract, "pub const RuntimeControlTag", "const RuntimeRequestPayload") orelse
+    const control_contract = between(control_types, "pub const RuntimeControlTag", "test \"") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(control_contract, "pub const RuntimeControl = extern struct"));
     try std.testing.expectEqual(@as(usize, 1), count(control_contract, "pub const ValidatedRuntimeControl = union(RuntimeControlTag)"));
-    const validated = between(contract, "pub const ValidatedRuntimeControl", "const RuntimeRequestPayload") orelse
+    const validated = between(control_types, "pub const ValidatedRuntimeControl", "fn encodeRawOptional") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(validated, "scroll_to_bottom,"));
     try std.testing.expectEqual(@as(usize, 1), count(validated, "core_command: CoreCommandRequest,"));
     inline for (.{ "method:", "stream_id", "Allocator", "[]u8", "*anyopaque" }) |forbidden|
         try std.testing.expectEqual(@as(usize, 0), count(control_contract, forbidden));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "const RawCoreCommand = extern struct"));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "fn encodeRawCoreCommandInto("));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "fn encodeRawCoreCommand("));
-    try std.testing.expectEqual(@as(usize, 1), count(contract, "fn decodeRawCoreCommand("));
-    try std.testing.expectEqual(@as(usize, 3), count(contract, "encodeRawCoreCommandInto("));
-    try std.testing.expectEqual(@as(usize, 3), count(contract, "decodeRawCoreCommand("));
+    try std.testing.expectEqual(@as(usize, 1), count(control_types, "pub const RawCoreCommand = extern struct"));
+    try std.testing.expectEqual(@as(usize, 1), count(control_types, "pub fn encodeRawCoreCommandInto("));
+    try std.testing.expectEqual(@as(usize, 1), count(control_types, "pub fn encodeRawCoreCommand("));
+    try std.testing.expectEqual(@as(usize, 1), count(control_types, "pub fn decodeRawCoreCommand("));
+    try std.testing.expectEqual(@as(usize, 3), count(control_types, "encodeRawCoreCommandInto("));
+    try std.testing.expectEqual(@as(usize, 2), count(control_types, "decodeRawCoreCommand("));
+    try std.testing.expectEqual(@as(usize, 1), count(contract, "runtime_control_types.decodeRawCoreCommand("));
+    try std.testing.expectEqual(@as(usize, 1), count(contract, "pub const RuntimeControl = runtime_control_types.RuntimeControl;"));
+    try std.testing.expectEqual(@as(usize, 0), count(contract, "pub const RuntimeControl = extern struct"));
 
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.sendGenerationControl(self.controlOperation(control))"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.sendGenerationControlNonBlocking(self.controlOperation(control))"));
@@ -96,7 +101,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".sendControlNonBlocking("));
     const admission = between(runtime, "    fn admitControl(", "    fn normalizeGenerationControlError(") orelse
         return error.TestExpectedEqual;
-    const generation_arm = between(admission, "if (self.attachment == .generation)", "        return switch (control.op)") orelse
+    const generation_arm = between(admission, "if (self.attachment == .generation)", "        return switch (control.control)") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(generation_arm, ".sendControlNonBlocking("));
     try std.testing.expectEqual(@as(usize, 0), count(generation_arm, "self.client.send"));
@@ -105,7 +110,7 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     const blocking_generation_arm = between(
         blocking_admission,
         "if (self.attachment == .generation)",
-        "        switch (control.op)",
+        "        switch (control.control)",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(blocking_generation_arm, ".sendControl("));
     try std.testing.expectEqual(@as(usize, 0), count(blocking_generation_arm, "self.client.send"));

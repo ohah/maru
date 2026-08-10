@@ -2271,8 +2271,9 @@ test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
     defer allocator.free(source);
     // The leaf carries scalar identities only. In particular, a stored address is never turned
     // back into an owner pointer here; only the node-specific adapter may access backing owners.
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"runtime_control_types.zig\")"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, "@ptrFromInt"));
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",

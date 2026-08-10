@@ -5,6 +5,7 @@
 //! attachment binding without exporting either backing owner.
 
 const std = @import("std");
+const runtime_control_types = @import("runtime_control_types.zig");
 
 pub const PurgeEndedOutcome = enum { not_ended, purged };
 pub const PurgeEndedError = error{ Busy, InvalidOwner, Corrupt, Terminal };
@@ -549,33 +550,7 @@ pub const SelectRequest = struct { kind: SelectKind, row: u16, col: u16 };
 
 /// Closed mirror of the host core-command wire. It deliberately contains no method string,
 /// encoded JSON, stream id, allocator, or process-local pointer.
-pub const CoreCommandRequest = union(enum) {
-    scroll: i64,
-    scroll_to_bottom,
-    scroll_to_abs: u64,
-    scroll_to_offset: u64,
-    report_focus: bool,
-    set_cell_metrics: struct { width: u32, height: u32 },
-    set_default_colors: struct { foreground: u32, background: u32 },
-    set_config_palette: [16]?u32,
-    set_max_scrollback: u64,
-    set_ambiguous_wide: bool,
-    set_emoji_wide: bool,
-    set_default_cursor_shape: u8,
-    set_runtime_config: struct {
-        max_scrollback: u64,
-        ambiguous_wide: bool,
-        emoji_wide: bool,
-        palette: [16]?u32,
-        foreground: u32,
-        background: u32,
-        cell_width: u32,
-        cell_height: u32,
-        cursor_shape: u8,
-    },
-    jump_to_prompt: i8,
-    reset_input_modes,
-};
+pub const CoreCommandRequest = runtime_control_types.CoreCommandRequest;
 
 pub const MouseReportRequest = struct {
     button: u8,
@@ -588,7 +563,6 @@ pub const MouseReportRequest = struct {
     mods: u8,
 };
 
-const RawOptionalU32 = extern struct { present: u8, value: u32 };
 const RawSelectedTextRequest = extern struct {
     start_row: u64,
     start_col: u64,
@@ -613,71 +587,10 @@ const RawMouseReportRequest = extern struct {
     motion: u8,
     mods: u8,
 };
-const RawRuntimeConfig = extern struct {
-    max_scrollback: u64,
-    ambiguous_wide: u8,
-    emoji_wide: u8,
-    palette: [16]RawOptionalU32,
-    foreground: u32,
-    background: u32,
-    cell_width: u32,
-    cell_height: u32,
-    cursor_shape: u8,
-};
-const RawCorePayload = extern union {
-    empty: u8,
-    scroll: i64,
-    unsigned: u64,
-    flag: u8,
-    cell_metrics: extern struct { width: u32, height: u32 },
-    colors: extern struct { foreground: u32, background: u32 },
-    palette: [16]RawOptionalU32,
-    shape: u8,
-    runtime_config: RawRuntimeConfig,
-    direction: i8,
-};
-const RawCoreCommand = extern struct { tag: u8, payload: RawCorePayload };
-pub const RuntimeControlTag = enum(u8) { scroll_to_bottom, core_command };
-const RawRuntimeControlPayload = extern union {
-    empty: u8,
-    core_command: RawCoreCommand,
-};
-
-/// Raw-first boundary for response-free stream controls.  The explicit byte tag lets the
-/// canonical adapter reject corrupted storage before switching a Zig tagged union.
-pub const RuntimeControl = extern struct {
-    tag: u8,
-    payload: RawRuntimeControlPayload,
-
-    pub fn scrollToBottom() RuntimeControl {
-        var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
-        result.tag = @intFromEnum(RuntimeControlTag.scroll_to_bottom);
-        result.payload.empty = 0;
-        return result;
-    }
-
-    pub fn coreCommand(command: CoreCommandRequest) RuntimeControl {
-        var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
-        result.tag = @intFromEnum(RuntimeControlTag.core_command);
-        encodeRawCoreCommandInto(&result.payload.core_command, command);
-        return result;
-    }
-
-    pub fn decode(self: *const RuntimeControl) ?ValidatedRuntimeControl {
-        return switch (self.tag) {
-            @intFromEnum(RuntimeControlTag.scroll_to_bottom) => .scroll_to_bottom,
-            @intFromEnum(RuntimeControlTag.core_command) => .{
-                .core_command = decodeRawCoreCommand(&self.payload.core_command) orelse return null,
-            },
-            else => null,
-        };
-    }
-};
-
-pub const ValidatedRuntimeControl = union(RuntimeControlTag) {
-    scroll_to_bottom,
-    core_command: CoreCommandRequest,
-};
+const RawCoreCommand = runtime_control_types.RawCoreCommand;
+pub const RuntimeControlTag = runtime_control_types.RuntimeControlTag;
+pub const RuntimeControl = runtime_control_types.RuntimeControl;
+pub const ValidatedRuntimeControl = runtime_control_types.ValidatedRuntimeControl;
 const RuntimeRequestPayload = extern union {
     empty: u8,
     resize: ResizeRequest,
@@ -745,7 +658,7 @@ pub const RuntimeRequest = extern struct {
     }
     pub fn coreCommand(value: CoreCommandRequest) RuntimeRequest {
         return .{ .tag = @intFromEnum(RuntimeRequestTag.core_command), .payload = .{
-            .core_command = encodeRawCoreCommand(value),
+            .core_command = runtime_control_types.encodeRawCoreCommand(value),
         } };
     }
     pub fn reportMouse(value: MouseReportRequest) RuntimeRequest {
@@ -814,7 +727,7 @@ pub const RuntimeRequest = extern struct {
                 break :blk .{ .select_op = .{ .kind = kind, .row = value.row, .col = value.col } };
             },
             @intFromEnum(RuntimeRequestTag.core_command) => .{
-                .core_command = decodeRawCoreCommand(&self.payload.core_command) orelse return null,
+                .core_command = runtime_control_types.decodeRawCoreCommand(&self.payload.core_command) orelse return null,
             },
             @intFromEnum(RuntimeRequestTag.report_mouse) => blk: {
                 const value = self.payload.report_mouse;
@@ -861,161 +774,6 @@ pub const ValidatedRuntimeRequest = union(RuntimeRequestTag) {
         };
     }
 };
-
-fn encodeRawOptional(value: ?u32) RawOptionalU32 {
-    return if (value) |color|
-        .{ .present = 1, .value = color }
-    else
-        .{ .present = 0, .value = 0 };
-}
-
-fn encodeRawPalette(values: [16]?u32) [16]RawOptionalU32 {
-    var result: [16]RawOptionalU32 = undefined;
-    for (&result, values) |*out, value| out.* = encodeRawOptional(value);
-    return result;
-}
-
-fn decodeRawPalette(values: *const [16]RawOptionalU32) ?[16]?u32 {
-    var result: [16]?u32 = undefined;
-    for (values, &result) |value, *out| {
-        out.* = switch (value.present) {
-            0 => null,
-            1 => value.value,
-            else => return null,
-        };
-    }
-    return result;
-}
-
-fn encodeRawCoreCommandInto(out: *RawCoreCommand, value: CoreCommandRequest) void {
-    out.* = std.mem.zeroes(RawCoreCommand);
-    const Tag = std.meta.Tag(CoreCommandRequest);
-    switch (value) {
-        .scroll => |arg| {
-            out.tag = @intFromEnum(Tag.scroll);
-            out.payload.scroll = arg;
-        },
-        .scroll_to_bottom => out.tag = @intFromEnum(Tag.scroll_to_bottom),
-        .scroll_to_abs => |arg| {
-            out.tag = @intFromEnum(Tag.scroll_to_abs);
-            out.payload.unsigned = arg;
-        },
-        .scroll_to_offset => |arg| {
-            out.tag = @intFromEnum(Tag.scroll_to_offset);
-            out.payload.unsigned = arg;
-        },
-        .report_focus => |flag| {
-            out.tag = @intFromEnum(Tag.report_focus);
-            out.payload.flag = @intFromBool(flag);
-        },
-        .set_cell_metrics => |metrics| {
-            out.tag = @intFromEnum(Tag.set_cell_metrics);
-            out.payload.cell_metrics = .{ .width = metrics.width, .height = metrics.height };
-        },
-        .set_default_colors => |colors| {
-            out.tag = @intFromEnum(Tag.set_default_colors);
-            out.payload.colors = .{ .foreground = colors.foreground, .background = colors.background };
-        },
-        .set_config_palette => |palette| {
-            out.tag = @intFromEnum(Tag.set_config_palette);
-            out.payload.palette = encodeRawPalette(palette);
-        },
-        .set_max_scrollback => |lines| {
-            out.tag = @intFromEnum(Tag.set_max_scrollback);
-            out.payload.unsigned = lines;
-        },
-        .set_ambiguous_wide => |flag| {
-            out.tag = @intFromEnum(Tag.set_ambiguous_wide);
-            out.payload.flag = @intFromBool(flag);
-        },
-        .set_emoji_wide => |flag| {
-            out.tag = @intFromEnum(Tag.set_emoji_wide);
-            out.payload.flag = @intFromBool(flag);
-        },
-        .set_default_cursor_shape => |shape| {
-            out.tag = @intFromEnum(Tag.set_default_cursor_shape);
-            out.payload.shape = shape;
-        },
-        .set_runtime_config => |config| {
-            out.tag = @intFromEnum(Tag.set_runtime_config);
-            out.payload.runtime_config = .{
-                .max_scrollback = config.max_scrollback,
-                .ambiguous_wide = @intFromBool(config.ambiguous_wide),
-                .emoji_wide = @intFromBool(config.emoji_wide),
-                .palette = encodeRawPalette(config.palette),
-                .foreground = config.foreground,
-                .background = config.background,
-                .cell_width = config.cell_width,
-                .cell_height = config.cell_height,
-                .cursor_shape = config.cursor_shape,
-            };
-        },
-        .jump_to_prompt => |direction| {
-            out.tag = @intFromEnum(Tag.jump_to_prompt);
-            out.payload.direction = direction;
-        },
-        .reset_input_modes => out.tag = @intFromEnum(Tag.reset_input_modes),
-    }
-}
-
-fn encodeRawCoreCommand(value: CoreCommandRequest) RawCoreCommand {
-    var result: RawCoreCommand = undefined;
-    encodeRawCoreCommandInto(&result, value);
-    return result;
-}
-
-fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
-    const Tag = std.meta.Tag(CoreCommandRequest);
-    return switch (raw.tag) {
-        @intFromEnum(Tag.scroll) => .{ .scroll = raw.payload.scroll },
-        @intFromEnum(Tag.scroll_to_bottom) => .scroll_to_bottom,
-        @intFromEnum(Tag.scroll_to_abs) => .{ .scroll_to_abs = raw.payload.unsigned },
-        @intFromEnum(Tag.scroll_to_offset) => .{ .scroll_to_offset = raw.payload.unsigned },
-        @intFromEnum(Tag.report_focus) => if (raw.payload.flag <= 1)
-            .{ .report_focus = raw.payload.flag == 1 }
-        else
-            null,
-        @intFromEnum(Tag.set_cell_metrics) => .{ .set_cell_metrics = .{
-            .width = raw.payload.cell_metrics.width,
-            .height = raw.payload.cell_metrics.height,
-        } },
-        @intFromEnum(Tag.set_default_colors) => .{ .set_default_colors = .{
-            .foreground = raw.payload.colors.foreground,
-            .background = raw.payload.colors.background,
-        } },
-        @intFromEnum(Tag.set_config_palette) => .{
-            .set_config_palette = decodeRawPalette(&raw.payload.palette) orelse return null,
-        },
-        @intFromEnum(Tag.set_max_scrollback) => .{ .set_max_scrollback = raw.payload.unsigned },
-        @intFromEnum(Tag.set_ambiguous_wide) => if (raw.payload.flag <= 1)
-            .{ .set_ambiguous_wide = raw.payload.flag == 1 }
-        else
-            null,
-        @intFromEnum(Tag.set_emoji_wide) => if (raw.payload.flag <= 1)
-            .{ .set_emoji_wide = raw.payload.flag == 1 }
-        else
-            null,
-        @intFromEnum(Tag.set_default_cursor_shape) => .{ .set_default_cursor_shape = raw.payload.shape },
-        @intFromEnum(Tag.set_runtime_config) => blk: {
-            const config = raw.payload.runtime_config;
-            if (config.ambiguous_wide > 1 or config.emoji_wide > 1) break :blk null;
-            break :blk .{ .set_runtime_config = .{
-                .max_scrollback = config.max_scrollback,
-                .ambiguous_wide = config.ambiguous_wide == 1,
-                .emoji_wide = config.emoji_wide == 1,
-                .palette = decodeRawPalette(&config.palette) orelse break :blk null,
-                .foreground = config.foreground,
-                .background = config.background,
-                .cell_width = config.cell_width,
-                .cell_height = config.cell_height,
-                .cursor_shape = config.cursor_shape,
-            } };
-        },
-        @intFromEnum(Tag.jump_to_prompt) => .{ .jump_to_prompt = raw.payload.direction },
-        @intFromEnum(Tag.reset_input_modes) => .reset_input_modes,
-        else => null,
-    };
-}
 
 /// Capability projection exposed by GenerationTransport. Optional feature
 /// support is represented as booleans; no Client or wire storage escapes.

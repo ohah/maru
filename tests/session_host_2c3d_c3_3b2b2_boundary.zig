@@ -34,6 +34,7 @@ test "C3-3b2b2 pure preparation recipe boundary" {
 
     inline for (.{
         "protocol.zig",
+        "resize_wire.zig",
         "runtime_event_types.zig",
         "runtime_event_wire.zig",
         "runtime_metadata_types.zig",

@@ -574,7 +574,7 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   `stale_preflight|unknown_event|malformed|resource_exhausted`,
   overflow, escaped string, SSH absent/present-empty, foreground canonicalization, raw 0/1·enum/mode 범위와 DTO equality를 고정한다. source raw span은
   recipe에 저장하지 않고 canonical reparse 한 호출에서만 쓰며, primitive process cap/value type은 `runtime_metadata_types`가 단독 소유한다.
-  pure leaf의 `RuntimeObservation`/allocator/
+  pure leaf는 `resize_wire.Event`를 위해 `resize_wire.zig`를 명시적으로 import하고 이를 감추는 barrel re-export는 0이다. 그 밖의 `RuntimeObservation`/allocator/
   owned DTO import, reverse import, barrel re-export, current external staged 재분류, b2b3 staged/product caller와 `RemoteRuntime` field는 0이다.
   compatibility footprint만 보존하며 next/old observation과 4-part budget, 최종 owned `PreparedEvent` 완료는 주장하지 않는다.
 - **C3-3b2b3 immutable owner preparation(미구현):** focused gate `test-session-host-2c3d-c3-3b2b3`은 production-source dormant orchestration을

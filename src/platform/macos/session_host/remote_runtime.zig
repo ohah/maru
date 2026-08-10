@@ -23,6 +23,7 @@ const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
+const runtime_pending_control = @import("runtime_pending_control.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const generation_attachment_mod = @import("generation_attachment.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
@@ -348,7 +349,7 @@ pub const RemoteRuntime = struct {
     // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
     direct_input_offset: usize,
-    pending_controls: std.ArrayListUnmanaged(PendingControl),
+    pending_controls: std.ArrayListUnmanaged(runtime_pending_control.RawQueuedRuntimeControl),
     // A blocking drain owns both mutation queues until it either commits or returns an error.
     // Allocator callbacks and other same-thread callbacks must not recursively consume the
     // front item while the outer drain still holds a copied value for that item.
@@ -819,13 +820,15 @@ pub const RemoteRuntime = struct {
         const barrier = self.direct_input.items.len;
         if (self.pending_controls.items.len > 0) {
             const last = self.pending_controls.items[self.pending_controls.items.len - 1];
-            if (last.barrier == barrier and last.op == .scroll_to_bottom) {
+            const decoded = runtime_pending_control.decode(&last) orelse return self.failControlAdmission();
+            if (decoded.barrier == std.math.cast(u64, barrier) and decoded.control == .scroll_to_bottom) {
                 _ = try self.pumpQueuedInput();
                 return;
             }
         }
         if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
-        self.pending_controls.append(self.allocator, .{ .barrier = barrier, .op = .scroll_to_bottom }) catch
+        self.pending_controls.append(self.allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(barrier) orelse
+            return self.failControlAdmission()) catch
             return self.failControlAdmission();
         _ = try self.pumpQueuedInput();
     }
@@ -842,10 +845,10 @@ pub const RemoteRuntime = struct {
             .generation => {},
         }
         if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
-        self.pending_controls.append(self.allocator, .{
-            .barrier = self.direct_input.items.len,
-            .op = .{ .core_command = command },
-        }) catch return self.failControlAdmission();
+        self.pending_controls.append(self.allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+            self.direct_input.items.len,
+            command,
+        ) orelse return self.failControlAdmission()) catch return self.failControlAdmission();
         _ = try self.pumpQueuedInput();
     }
 
@@ -860,26 +863,20 @@ pub const RemoteRuntime = struct {
         return error.ConnectionClosed;
     }
 
-    const PendingControl = struct {
-        barrier: usize,
-        op: union(enum) {
-            scroll_to_bottom,
-            core_command: core_command_wire.Command,
-        },
-    };
-
-    fn admitControl(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!bool {
+    fn admitControl(self: *RemoteRuntime, raw: runtime_pending_control.RawQueuedRuntimeControl) client_mod.ClientError!bool {
         if (!self.mutationAllowed()) return error.Unauthorized;
+        const control = runtime_pending_control.decode(&raw) orelse return error.ProtocolError;
         if (self.attachment == .generation) {
-            return self.attachment.generation.sendControlNonBlocking(projectGenerationControl(control)) catch |err|
+            return self.attachment.generation.sendControlNonBlocking(raw.control) catch |err|
                 return normalizeGenerationControlError(err);
         }
-        return switch (control.op) {
+        return switch (control.control) {
             .scroll_to_bottom => self.client.sendScrollToBottomNonBlocking(self.attachment.streamId()) catch |err| switch (err) {
                 error.OutOfMemory => false,
                 else => return err,
             },
-            .core_command => |command| blk: {
+            .core_command => |raw_command| blk: {
+                const command = runtime_pending_control.toCoreCommand(raw_command);
                 const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch break :blk false;
                 defer self.allocator.free(params);
                 break :blk self.client.sendCoreCommandNonBlocking(self.attachment.streamId(), params) catch |err| switch (err) {
@@ -917,53 +914,6 @@ pub const RemoteRuntime = struct {
         };
     }
 
-    fn projectGenerationControl(control: PendingControl) generation_contract.RuntimeControl {
-        return switch (control.op) {
-            .scroll_to_bottom => generation_contract.RuntimeControl.scrollToBottom(),
-            .core_command => |command| generation_contract.RuntimeControl.coreCommand(
-                projectGenerationCoreCommand(command),
-            ),
-        };
-    }
-
-    fn projectGenerationCoreCommand(
-        command: core_command_wire.Command,
-    ) generation_contract.CoreCommandRequest {
-        return switch (command) {
-            .scroll => |value| .{ .scroll = value },
-            .scroll_to_bottom => .scroll_to_bottom,
-            .scroll_to_abs => |value| .{ .scroll_to_abs = value },
-            .scroll_to_offset => |value| .{ .scroll_to_offset = value },
-            .report_focus => |value| .{ .report_focus = value },
-            .set_cell_metrics => |value| .{ .set_cell_metrics = .{
-                .width = value.width,
-                .height = value.height,
-            } },
-            .set_default_colors => |value| .{ .set_default_colors = .{
-                .foreground = value.foreground,
-                .background = value.background,
-            } },
-            .set_config_palette => |value| .{ .set_config_palette = value },
-            .set_max_scrollback => |value| .{ .set_max_scrollback = value },
-            .set_ambiguous_wide => |value| .{ .set_ambiguous_wide = value },
-            .set_emoji_wide => |value| .{ .set_emoji_wide = value },
-            .set_default_cursor_shape => |value| .{ .set_default_cursor_shape = value },
-            .set_runtime_config => |value| .{ .set_runtime_config = .{
-                .max_scrollback = value.max_scrollback,
-                .ambiguous_wide = value.ambiguous_wide,
-                .emoji_wide = value.emoji_wide,
-                .palette = value.palette,
-                .foreground = value.default_colors.foreground,
-                .background = value.default_colors.background,
-                .cell_width = if (value.cell_metrics) |metrics| metrics.width else 0,
-                .cell_height = if (value.cell_metrics) |metrics| metrics.height else 0,
-                .cursor_shape = value.cursor_shape,
-            } },
-            .jump_to_prompt => |value| .{ .jump_to_prompt = value },
-            .reset_input_modes => .reset_input_modes,
-        };
-    }
-
     fn compactDirectInput(self: *RemoteRuntime) void {
         if (self.direct_input_offset == 0) return;
         // 모든 control barrier는 아직 소비하지 않은 byte suffix 안에 있다. suffix를 앞으로 당길 때 같은 양만큼
@@ -974,7 +924,7 @@ pub const RemoteRuntime = struct {
         self.direct_input.items.len = remaining.len;
         for (self.pending_controls.items) |*control| {
             std.debug.assert(control.barrier >= consumed);
-            control.barrier -= consumed;
+            control.barrier -= @intCast(consumed);
         }
         self.direct_input_offset = 0;
     }
@@ -993,7 +943,7 @@ pub const RemoteRuntime = struct {
         while (true) {
             if (self.pending_controls.items.len > 0) {
                 const control = self.pending_controls.items[0];
-                const barrier = control.barrier;
+                const barrier = std.math.cast(usize, control.barrier) orelse return error.ProtocolError;
                 if (self.direct_input_offset < barrier) {
                     const accepted = self.attachment.sendInputNonBlocking(
                         self.client,
@@ -1043,7 +993,7 @@ pub const RemoteRuntime = struct {
         while (true) {
             if (self.pending_controls.items.len > 0) {
                 const control = self.pending_controls.items[0];
-                const barrier = control.barrier;
+                const barrier = std.math.cast(usize, control.barrier) orelse return error.ProtocolError;
                 if (self.direct_input_offset < barrier) {
                     try self.attachment.sendInput(
                         self.client,
@@ -1070,15 +1020,17 @@ pub const RemoteRuntime = struct {
         }
     }
 
-    fn flushControlBlocking(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!void {
+    fn flushControlBlocking(self: *RemoteRuntime, raw: runtime_pending_control.RawQueuedRuntimeControl) client_mod.ClientError!void {
+        const control = runtime_pending_control.decode(&raw) orelse return error.ProtocolError;
         if (self.attachment == .generation) {
-            self.attachment.generation.sendControl(projectGenerationControl(control)) catch |err|
+            self.attachment.generation.sendControl(raw.control) catch |err|
                 return normalizeGenerationBlockingControlError(err);
             return;
         }
-        switch (control.op) {
+        switch (control.control) {
             .scroll_to_bottom => try self.client.sendScrollToBottom(self.attachment.streamId()),
-            .core_command => |command| {
+            .core_command => |raw_command| {
+                const command = runtime_pending_control.toCoreCommand(raw_command);
                 const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch
                     return error.OutOfMemory;
                 defer self.allocator.free(params);
@@ -2463,7 +2415,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
         @typeInfo(generation_contract.CoreCommandRequest).@"union".fields.len,
     );
     for (commands, expected) |command, oracle| {
-        const projected = RemoteRuntime.projectGenerationCoreCommand(command);
+        const projected = runtime_pending_control.projectCoreCommand(command);
         try testing.expect(std.meta.eql(oracle, projected));
         const decoded = generation_contract.RuntimeControl.coreCommand(projected).decode() orelse
             return error.TestExpectedEqual;
@@ -2475,7 +2427,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             },
         ));
     }
-    const without_metrics = RemoteRuntime.projectGenerationCoreCommand(.{
+    const without_metrics = runtime_pending_control.projectCoreCommand(.{
         .set_runtime_config = .{
             .max_scrollback = 14,
             .ambiguous_wide = false,
@@ -3677,14 +3629,14 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expect(!adapter.logicalClient().unusable);
     while (!(try rr.pumpQueuedInput())) {}
     try rr.direct_input.appendSlice(allocator, "CD");
-    try rr.pending_controls.append(allocator, .{
-        .barrier = 1,
-        .op = .{ .core_command = .{ .report_focus = true } },
-    });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+        1,
+        .{ .report_focus = true },
+    ).?);
     try rr.flushQueuedInputBlocking();
     try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
-    try rr.pending_controls.append(allocator, .{ .barrier = 0, .op = .scroll_to_bottom });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(0).?);
     var blocking_reentry = BlockingControlReentryAllocator{
         .parent = allocator,
         .runtime = &rr,
@@ -3701,7 +3653,7 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expectEqual(@as(usize, 1), blocking_reentry.observed_queue_len);
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
     adapter.logicalClient().async_scroll_to_bottom_v1 = false;
-    try rr.pending_controls.append(allocator, .{ .barrier = 0, .op = .scroll_to_bottom });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(0).?);
     try rr.flushQueuedInputBlocking();
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
     blocking_unsupported_ready.store(1, .release);
@@ -3713,10 +3665,10 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
         try adapter.logicalClient().sendInputNonBlocking(7, "E"),
     );
     try rr.direct_input.appendSlice(allocator, "F");
-    try rr.pending_controls.append(allocator, .{
-        .barrier = 0,
-        .op = .{ .core_command = .{ .jump_to_prompt = -1 } },
-    });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+        0,
+        .{ .jump_to_prompt = -1 },
+    ).?);
     var blocking_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     const blocking_saved_allocator = adapter.logicalClient().allocator;
     adapter.logicalClient().allocator = blocking_failing.allocator();
@@ -3732,10 +3684,10 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
     try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
     try rr.direct_input.appendSlice(allocator, "G");
-    try rr.pending_controls.append(allocator, .{
-        .barrier = 0,
-        .op = .{ .core_command = .{ .report_focus = true } },
-    });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+        0,
+        .{ .report_focus = true },
+    ).?);
     var terminate_failing = OneShotFailAllocator{ .parent = allocator };
     const terminate_saved_allocator = adapter.logicalClient().allocator;
     adapter.logicalClient().allocator = terminate_failing.allocator();
@@ -3793,10 +3745,10 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expect(scroll_and_suffix_ok);
     try std.testing.expect(unsupported_wire_zero);
     try std.testing.expect(blocking_unsupported_wire_zero);
-    try rr.pending_controls.append(allocator, .{
-        .barrier = 0,
-        .op = .{ .core_command = .{ .report_focus = true } },
-    });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+        0,
+        .{ .report_focus = true },
+    ).?);
     try std.testing.expectError(error.ConnectionClosed, rr.flushQueuedInputBlocking());
     try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
     try std.testing.expect(adapter.logicalClient().unusable);
@@ -5106,10 +5058,7 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
     runtime.pending_controls = .empty;
     runtime.blocking_flush_active = false;
     defer runtime.pending_controls.deinit(allocator);
-    try runtime.pending_controls.append(allocator, .{
-        .barrier = 6,
-        .op = .scroll_to_bottom,
-    });
+    try runtime.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(6).?);
     runtime.observation = .{};
 
     const drained = try runtime.drainObservationEvents();
@@ -5483,10 +5432,9 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
     sibling.pending_controls = .empty;
     sibling.blocking_flush_active = false;
     defer sibling.pending_controls.deinit(allocator);
-    try sibling.pending_controls.append(allocator, .{
-        .barrier = "preserve-me-new".len,
-        .op = .scroll_to_bottom,
-    });
+    try sibling.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(
+        "preserve-me-new".len,
+    ).?);
     sibling.resync_needed = false;
     sibling.observation = .{};
 
@@ -5723,10 +5671,10 @@ test "CR3a-2c3c C2 remote runtime control cap overflow fail-closes instead of si
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
     for (0..RemoteRuntime.max_pending_controls) |_| {
-        try rr.pending_controls.append(allocator, .{
-            .barrier = 0,
-            .op = .{ .core_command = .{ .report_focus = true } },
-        });
+        try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+            0,
+            .{ .report_focus = true },
+        ).?);
     }
     try testing.expectError(error.ConnectionClosed, rr.queueCoreCommand(.{ .report_focus = false }));
     try testing.expect(client.unusable);
@@ -5830,7 +5778,7 @@ test "remote runtime compaction rebases a pending scroll barrier" {
     defer rr.pending_controls.deinit(allocator);
     try rr.direct_input.appendSlice(allocator, "ABC");
     rr.direct_input_offset = 1;
-    try rr.pending_controls.append(allocator, .{ .barrier = 2, .op = .scroll_to_bottom });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(2).?);
     rr.compactDirectInput();
     try testing.expectEqualStrings("BC", rr.direct_input.items);
     try testing.expectEqual(@as(usize, 0), rr.direct_input_offset);
@@ -5998,10 +5946,10 @@ test "CR3a-2c3c C3 terminate OOM discards superseded queued mutation before clea
     defer rr.direct_input.deinit(allocator);
     defer rr.pending_controls.deinit(allocator);
     try rr.direct_input.appendSlice(allocator, "superseded");
-    try rr.pending_controls.append(allocator, .{
-        .barrier = 0,
-        .op = .{ .core_command = .{ .report_focus = true } },
-    });
+    try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
+        0,
+        .{ .report_focus = true },
+    ).?);
 
     rr.terminateBestEffort();
     try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);

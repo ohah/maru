@@ -266,6 +266,28 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > `<name>_ops.`를 부르면 후보에서 뺀다. F15에서 `scmDrawWindow` 하나를, term/surface 후보 조사에서
 > 9개를 자동으로 걸러 냈다.
 >
+> ## 알림 배지 기하는 chrome으로 올리지 않는다 — 레이어 경계(2026-08-10)
+>
+> F13 PR에서 "알림 배지 기하를 chrome 컴포넌트로 올리면 pub이 닫힌다"고 후속으로 등록했다.
+> **검토 결과 하지 않는다.** 두 가지가 틀렸다.
+>
+> **① 레이어 경계를 깬다.** `collapsedBellCol`은 **신호등(traffic lights) 클리어런스**에 의존한다.
+>
+> ```zig
+> const clearance_px = layout_math.ptToPx(traffic_light_clearance_pt, self.scale_milli);
+> return @min(clearance_px / self.cell_width_px + collapsed_toggle_gap_cells + collapsed_badge_max_cells, ...);
+> ```
+>
+> [레이어링과 이식성](layering-and-portability.md)의 "창 chrome 분해"가 이미 정했다 — **신호등만 남기는
+> 창 스타일 inset은 L4 macOS 전용**이고 헤더 레이아웃만 L3 chrome이다. 실제로 `src/chrome/` 전체에
+> `traffic_light`이라는 말이 **한 번도 없다**. 배지 col은 "신호등 오른쪽 여백부터"라는 macOS 창 chrome에
+> 종속된 값이라 **L4에 있는 것이 맞다.**
+>
+> **② pub 진단이 부정확했다.** 지금 열려 있는 것은 **허브 pub이 아니라 `notification.zig`의 pub**이고,
+> `sidebar.zig`가 부르기 때문에 필요한 정상적인 그룹 간 pub이다. chrome으로 올려도 허브는 그대로다.
+>
+> 순수한 부분(`notificationBadgeCol(bell_col) = bell_col + 2`)만 올릴 수는 있으나 한 줄이라 값이 없다.
+
 > ## 호출 그래프로 소유를 확인해 46개를 옮겼다(2026-08-10)
 >
 > 이름으로 잡히는 도메인이 F16으로 소진된 뒤, **어느 그룹을 과반으로 부르는가**로 잔여 메서드의 소유를

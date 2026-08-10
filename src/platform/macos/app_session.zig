@@ -1024,6 +1024,11 @@ pub fn termCwdIsRemote(term: *const Term) bool {
 ///
 /// hover 밑줄과 클릭이 **같은 함수**를 봐야 "밑줄 보이는 곳 = 열리는 곳" 불변식이 유지된다. 단일 출처는
 /// docs/ssh-integration.md §9.4.
+///
+/// **여기서 observation을 refresh하지 말 것.** 두 호출자(urlAt·hover)는 이미 `lockCore`를 쥔 채 이 함수를 부르고,
+/// `refreshTermObservation`은 backend가 같은 core를 다시 lock하므로 재진입 데드락이 된다. 그래서 관측 캐시를 그대로
+/// 읽으며, 그 값은 최대 한 observer 주기(100ms)만큼 뒤처질 수 있다 — ssh를 막 드나든 직후의 좁은 창에서 판정이
+/// 한 틱 늦는다. 그 대가로 얻는 것이 락 안전이고, 늦어도 다음 틱에 수렴한다.
 pub fn linkScopesForTerm(self: *const AppSession, term: *const Term) terminal.LinkScopes {
     var scopes = settings_ops.linkScopesFromConfig(self);
     if (!termCwdIsRemote(term)) return scopes;

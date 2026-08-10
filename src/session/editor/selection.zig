@@ -51,6 +51,26 @@ pub const Goal = union(enum) {
     }
 };
 
+/// 열/블록 선택의 **원본 사각형**([native-editor.md](../../../docs/native-editor.md) §3.2a).
+///
+/// 드래그 중 매 프레임 selection 배열을 다시 파생해야 하는데, **결과만 봐서는 "지금 열 선택 중인가"도
+/// "어디서 시작했는가"도 알 수 없다**(우연히 같은 모양이 나올 수 있다). 그래서 원본을 따로 든다.
+///
+/// **좌표가 시각 행·열이다** — 랩·접힘·뷰 폭에 의존하므로 §3.1의 byte offset 축이 아니다. `goal`과 같은
+/// 규율으로 **L2는 들고만 있고 갱신·해석은 L3**가 한다.
+///
+/// VSCode는 이것을 selection과 별도로 두지만(`IColumnSelectData`), 그것은 공개 API `Selection`에 필드를
+/// 추가할 수 없어서다. 우리 `Selection`은 내부 타입이라 그 제약이 없고, §2.4가 selection 자체를 **뷰
+/// 상태**로 정했으므로 열 선택 원본과 생명주기가 같다 — 그래서 `Selections`가 직접 든다.
+pub const ColumnAnchor = struct {
+    /// 드래그를 시작한 시각 행·열.
+    from_row: u32,
+    from_col: u32,
+    /// 지금 끌고 있는 시각 행·열.
+    to_row: u32,
+    to_col: u32,
+};
+
 /// 선택 하나.
 ///
 /// 저장하는 것은 **anchor 범위 + focus 점**이고, 실제 선택 범위는 그 둘에서 **파생**한다(`start`/`end`).
@@ -164,6 +184,11 @@ pub const Selection = struct {
 pub const Selections = struct {
     items: []Selection,
     primary: usize,
+    /// 열/블록 선택의 원본. **드래그 중에만 있다**(§3.2a).
+    ///
+    /// **`null`이 VSCode `isReal`을 대신한다** — 별도 bool을 들면 "없음"과 "있지만 가짜"라는 두 표현이
+    /// 생겨 읽는 쪽이 어느 것이 진짜인지 판단해야 한다.
+    column: ?ColumnAnchor = null,
 
     /// 불변식을 지키며 만든다. **여기를 거치지 않고 리터럴로 만들면 그 불변식이 없다** — 빈 배열이나
     /// 범위 밖 primary는 `primarySelection()`에서 밟는다.
@@ -179,6 +204,18 @@ pub const Selections = struct {
         std.debug.assert(self.items.len > 0);
         std.debug.assert(self.primary < self.items.len);
         return self.items[self.primary];
+    }
+
+    /// **시각 좌표가 무의미해졌을 때 부른다** — 뷰 폭 변경·랩 토글·접힘 변경(§3.2a).
+    ///
+    /// 그 순간 옛 시각 행·열은 다른 위치를 가리키므로, 그대로 두면 다음 프레임의 파생이 사용자가 잡은
+    /// 것과 다른 사각형을 만든다. `goal`이 같은 이유로 무효화되는 것과 한 규율이다.
+    pub fn invalidateVisualState(self: *Selections) void {
+        self.column = null;
+        for (self.items) |*s| {
+            s.goal = .none;
+            s.anchor_goal = .none;
+        }
     }
 
     /// 커서 개수. 상태바가 "여럿이면 커서 개수"를 표시할 때 쓴다(§2.2).
@@ -510,4 +547,51 @@ test "anchor 범위가 선택 밖으로 나갈 수 있고, 겹침 판정은 그�
     // 겹침은 선택 범위 기준이라 [4,6)과 닿지 않는다 — anchor_end(5)가 그 안에 있어도 그렇다.
     const other = Selection.fromPoints(4, 6);
     try testing.expect(!s.touches(other));
+}
+
+test "caret은 별도 구조가 아니라 길이 0인 selection이다" {
+    // 커서 개수 = items.len. 둘을 나눠 두면 "커서 셋 + 선택 둘" 같은 불일치가 생긴다(§3.2).
+    var items = [_]Selection{ Selection.at(10), Selection.fromPoints(20, 25), Selection.at(40) };
+    const sels = Selections.init(&items, 0);
+
+    try testing.expectEqual(@as(usize, 3), sels.count()); // 커서 셋
+    try testing.expect(items[0].isEmpty()); // caret만
+    try testing.expect(!items[1].isEmpty()); // 선택 있음
+    try testing.expectEqual(@as(usize, 10), items[0].focus); // focus가 곧 caret 위치
+    try testing.expectEqual(@as(usize, 5), sels.totalSelected()); // 선택된 byte는 가운데 것뿐
+}
+
+test "열 선택 원본은 Selections가 든다 — null이 isReal을 대신한다" {
+    var items = [_]Selection{Selection.at(0)};
+    var sels = Selections.init(&items, 0);
+
+    // 드래그 전에는 열 선택이 아니다. 별도 bool 없이 optional 하나로 표현된다(§3.2a).
+    try testing.expect(sels.column == null);
+
+    sels.column = .{ .from_row = 2, .from_col = 4, .to_row = 5, .to_col = 9 };
+    try testing.expect(sels.column != null);
+    try testing.expectEqual(@as(u32, 2), sels.column.?.from_row);
+    try testing.expectEqual(@as(u32, 9), sels.column.?.to_col);
+}
+
+test "시각 상태 무효화는 열 원본과 goal을 함께 지운다" {
+    // **같은 구조체에 있으므로 한 번에 묶인다** — 이것이 L3에 따로 두는 대비 실질 이득이다(§3.2a).
+    // 뷰 폭이 바뀌면 옛 시각 행·열은 다른 위치를 가리킨다.
+    var items = [_]Selection{
+        .{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .{ .col = 12 }, .anchor_goal = .line_end },
+        .{ .anchor_start = 20, .anchor_end = 20, .focus = 20, .goal = .line_end },
+    };
+    var sels = Selections.init(&items, 0);
+    sels.column = .{ .from_row = 1, .from_col = 2, .to_row = 3, .to_col = 4 };
+
+    sels.invalidateVisualState();
+
+    try testing.expect(sels.column == null);
+    for (sels.items) |s| {
+        try testing.expect(s.goal.eql(.none));
+        try testing.expect(s.anchor_goal.eql(.none));
+    }
+    // **byte offset은 건드리지 않는다** — 그 축은 뷰 폭과 무관하다(§3.1).
+    try testing.expectEqual(@as(usize, 5), sels.items[0].focus);
+    try testing.expectEqual(@as(usize, 20), sels.items[1].focus);
 }

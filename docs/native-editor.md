@@ -397,13 +397,19 @@ caret·selection·span·편집 연산의 위치는 전부 **UTF-8 byte offset**�
 ```text
 Selection {
   anchor_start: usize, anchor_end: usize,   // anchor는 점이 아니라 범위다(아래)
-  focus: usize,                             // 움직이는 끝
+  focus: usize,                             // 움직이는 끝 = caret 위치
   kind: simple | word | line,               // anchor를 무엇으로 잡았는가
   goal: Goal, anchor_goal: Goal,            // 양끝이 각자 — 갱신은 L3 전용
 }
 Goal = none | col(u32) | line_end          // line_end는 "줄 끝에 붙는다"(아래)
-Selections { items: []Selection, primary: usize }           // items는 항상 1개 이상
+Selections {
+  items: []Selection, primary: usize,       // items는 항상 1개 이상
+  column: ?ColumnAnchor,                    // 열/블록 선택 원본 — 드래그 중에만(§3.2a)
+}
+ColumnAnchor { from_row, from_col, to_row, to_col }   // 시각 좌표 — 갱신은 L3 전용
 ```
+
+**caret은 별도 구조가 아니다 — 길이 0인 selection이다.** `focus`가 곧 caret 위치이고, `anchor == focus`면 선택 없이 커서만 있는 상태다. 따라서 **커서 개수 = `items.len`**이고 멀티 커서는 자연히 멀티 selection이다. 둘을 나눠 두면 "커서 셋 + 선택 둘" 같은 불일치가 생기고 편집 연산이 두 배열을 동기화해야 하는데, 실제로는 모든 커서가 선택을 가질 수 있으므로(shift+이동) 나눌 이유가 없다.
 
 **실제 선택 범위는 저장하지 않고 파생한다.** 저장하는 것은 anchor 범위 + focus이고, 고정단은 드래그 방향이 정한다 — 오른쪽으로 끌면 anchor 범위의 **시작**이, 왼쪽으로 끌면 **끝**이 고정된다. 파생으로 두면 방향이 바뀔 때 상태를 고쳐 쓸 필요가 없다.
 
@@ -419,17 +425,29 @@ Selections { items: []Selection, primary: usize }           // items는 항상 1
 - **편집 연산은 전체 selection에 동시 적용**되고, 그 결과는 undo 하나다(§3.3).
 - **선택의 렌더 범위와 연산 범위를 혼동하지 않는다.** §4가 뷰포트 컬링을 하므로 **하이라이트 rect는 보이는 시각행에 대해서만** 만든다(전 문서 rect를 만들면 낭비다). 그러나 **복사·삭제·바꾸기는 언제나 모델 전체 범위**에 작용한다 — 이 둘을 섞으면 "긴 문서에서 ⌘A 후 삭제했는데 화면에 보이던 부분만 지워지는" 결함이 난다. 기존 CM6 구현이 정확히 그것을 겪었고(문서 가상화 때문에 브라우저 native 선택이 렌더된 줄만 덮었다) `drawSelection()`으로 모델 선택을 따로 그려 해결했다. **우리 구조는 selection이 byte offset이라 원리적으로 안전하지만**(§3.1), 렌더 최적화를 넣을 때 연산이 같은 범위를 쓰지 않도록 주의한다.
 
-### 3.2a 열/블록 선택의 파생 원본은 L3가 든다
+### 3.2a 열/블록 선택의 원본은 `Selections` 안에 둔다 (2026-08-10 사용자 결정)
 
 §1.1이 열/블록 선택의 **결과**를 "줄마다 range 하나"로 파생한다고 정했다. 그 파생이 이어지려면 **원본 사각형**이 있어야 한다 — 드래그 중 매 프레임 다시 파생해야 하는데, 결과인 selection 배열만 봐서는 "지금 열 선택 중인가"도 "어디서 시작했는가"도 알 수 없다(우연히 같은 모양이 나올 수 있다).
 
-VSCode도 `IColumnSelectData`를 selection과 **별도로** 든다: `isReal`(실제 열 선택 중인가)과 시작·현재의 시각 행/열 넷.
+**VSCode는 이것을 selection과 별도로 든다(`IColumnSelectData`). 우리는 그러지 않는다** — 그 분리는 VSCode의 **공개 API 제약**에서 나온 것이고 우리에겐 그 제약이 없다.
 
-**이 상태는 L2가 아니라 L3에 둔다.** 좌표가 **시각 행·시각 열**이기 때문이다 — 랩·접힘·뷰 폭에 의존하므로 §3.1의 "byte offset 단일 축"에 넣을 수 없다. `goal`을 L2가 들고만 있고 환산은 L3가 하는 것과 같은 논리이며, 여기서는 값 자체가 L3 소유다.
+| | VSCode | Maru |
+|---|---|---|
+| selection 타입 | `export class Selection`(확장 API 표면, `anchor`·`active` **점 둘**) | 내부 타입 |
+| 필드 추가 | **불가** — `readonly selections: readonly Selection[]`을 확장이 읽는다 | 가능 |
+| 내부 상태를 어디 두나 | `SingleCursorState`·`IColumnSelectData`로 **분리** | `Selection`·`Selections`가 **직접 든다** |
 
-- **뷰 폭·랩 토글·접힘이 바뀌면 무효화한다.** 그 순간 옛 시각 좌표는 다른 위치를 가리킨다(`goal`과 같은 규율).
-- **파생 결과는 일반 selection 배열이다.** 즉 편집·복사·undo는 열 선택인지 모르고 동작하며, 그것이 "별도 모델을 만들지 않는다"의 뜻이다.
-- **구현 시점은 마우스 드래그가 붙는 단계**다(N2). 이 상태는 독립적이라 나중에 더해도 기존 selection 연산을 건드리지 않는다 — anchor를 범위로 넓히는 것과 성격이 다르다(그쪽은 모든 편집 연산의 전제라 먼저 서야 했다).
+우리 `Selection`은 이미 VSCode의 **내부** `SingleCursorState`에 대응한다(anchor가 범위, `kind`, goal column). 공개 API가 아니므로 열 선택 원본도 같은 자리에 둔다.
+
+**결정적 근거는 생명주기다.** §2.4가 **selection 자체를 뷰 상태로** 정했다(*"독립(뷰 상태다): selection·caret·스크롤·랩 토글·접힘 상태"*). 열 선택 원본도 같은 뷰 상태이고, 뷰 폭이 바뀌면 **둘 다** 무효화 대상이며, 뷰를 닫으면 **둘 다** 사라진다. 생명주기가 같은 것을 다른 곳에 두면 동기화 책임만 늘어난다.
+
+**시각 좌표라는 것은 분리 근거가 되지 못한다** — `goal`이 이미 시각 열(`col: u32`)이고, §3.2가 *"L2는 들고만 있고 갱신은 L3 전용"*이라는 규율을 이미 세웠다. 열 선택 원본에 같은 규율을 적용한다. 처음에는 이것을 L3에 두기로 적었는데, 그 논거(*"byte offset 단일 축에 넣을 수 없다"*)가 `goal`과 모순이었다.
+
+- **뷰 폭·랩 토글·접힘이 바뀌면 `column`을 지운다.** 그 순간 옛 시각 좌표는 다른 위치를 가리킨다(`goal`과 같은 규율). **같은 구조체에 있으므로 그 무효화를 `goal`과 함께 테스트로 묶을 수 있다** — 이것이 분리 대비 실질 이득이다.
+- **`?ColumnAnchor`의 null이 VSCode `isReal`을 대신한다.** 별도 bool을 들지 않는다 — "없음"과 "있지만 가짜"라는 두 표현이 생기면 어느 쪽이 진짜인지 읽는 쪽이 판단해야 한다.
+- **파생 결과는 일반 selection 배열이다.** 즉 편집·복사·undo는 열 선택인지 모르고 동작하며, 그것이 "별도 모델을 만들지 않는다"의 뜻이다. **이 성질은 원본을 어디 두든 그대로다.**
+- **원자적으로 움직인다.** selection 배열과 함께 저장·복원되므로 "selection은 갱신했는데 열 원본은 안 했다"가 나오기 어렵다.
+- **구현 시점은 마우스 드래그가 붙는 단계**다(N2). 필드와 무효화 규칙은 지금 세워 두되 소비자는 그때 생긴다 — anchor를 범위로 넓힌 것과 같은 이유다(모든 편집 연산의 전제라 먼저 서야 한다).
 
 ### 3.3 undo/redo
 

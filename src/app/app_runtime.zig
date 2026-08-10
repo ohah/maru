@@ -49,7 +49,7 @@ pub const AppRuntime = struct {
     routing: runtime_mod.SurfaceRuntime = .{ .allocator = std.heap.smp_allocator },
 
     /// FP10c1 Mermaid helper의 앱 전역 정책 소유자. platform은 여기서 나온 bounded action만 실행하고
-    /// admission/coalesce/deadline/failure latch를 다시 판단하지 않는다(docs/file-panel.md §3).
+    /// admission/coalesce/deadline/failure latch를 다시 판단하지 않는다(docs/file-panel-dock-ui.md §3).
     mermaid_queue: mermaid_coordinator.MermaidCoordinatorState = .{},
 };
 

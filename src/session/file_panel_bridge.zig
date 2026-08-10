@@ -10,7 +10,7 @@ const std = @import("std");
 pub const max_file_bytes: usize = 8 * 1024 * 1024;
 
 /// 사용자가 도크로 열 수 있는 파일 종류. 확장자 분류를 Zig 한 곳에 두어 터미널 링크·NSOpenPanel·트리·CLI가
-/// 서로 다른 파일 집합을 열지 않게 한다(docs/file-panel.md §2.2·§6). **정책(FP12, 사용자 결정 2026-07-22)**:
+/// 서로 다른 파일 집합을 열지 않게 한다(docs/file-panel-kinds.md §2.2, docs/file-panel.md §6). **정책(FP12, 사용자 결정 2026-07-22)**:
 /// VSCode처럼 `.md`/`.html`과 알려진 바이너리를 뺀 **나머지는 전부 `text`로 연다**. 알려진 확장자는 문법
 /// 하이라이트, 그 외 text는 plain 편집이다. image·media·pdf는 FP14~FP15에서 바이너리 집합의 일부를 자기 kind로 뺀다.
 pub const OpenKind = enum { markdown, html, text, svg, image, media, pdf };

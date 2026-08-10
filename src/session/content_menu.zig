@@ -1,4 +1,4 @@
-//! 파일 Term 본문 우클릭 메뉴의 **항목 정책**(L2 순수, docs/file-panel.md §2.6).
+//! 파일 Term 본문 우클릭 메뉴의 **항목 정책**(L2 순수, docs/file-panel-kinds.md §2.6).
 //!
 //! 메뉴 자체는 Zig chrome이 이미 가진 경로(`context_menu_items_buf` + `itemAt`/`draws`/`accept`)로 그린다 —
 //! 터미널 본문·파일 트리·사이드바 ⚙가 쓰는 그 경로다. 이 모듈은 그 경로에 **무엇을 담을지**만 정한다.
@@ -82,7 +82,7 @@ pub const Owner = enum { native, web };
 /// chrome 쪽 `context_menu_items_buf` 상한을 넘지 않게 여기서 못 박는다.
 pub const max_items: usize = 6;
 
-/// 대상 × 모드 × 선택 유무 → 항목(docs/file-panel.md §2.6 표).
+/// 대상 × 모드 × 선택 유무 → 항목(docs/file-panel-kinds.md §2.6 표).
 ///
 /// **읽기 모드에는 편집 항목이 없다**(잘라내기·붙여넣기). 문서를 못 고치는 화면에서 고치는 항목을 보여 주면
 /// 눌러 보고 아무 일도 안 일어나는 것이 정상 동작이 된다.

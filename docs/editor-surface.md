@@ -95,7 +95,7 @@
     "FP6 예정이라 코드에 아직 없다"는 서술은 무효다.
   - **zntc pin은 `0.1.4`**이고 CM6를 포함한 번들이 실제로 나온다(`web/package.json`). "`0.1.3`은 CM6 번들 불가"라는
     한계는 해소됐다.
-  - **웹 스택은 React + Tailwind + shadcn/ui**로 바뀌었다([file-panel.md](file-panel.md) §2.1, 2026-07-29 사용자 결정).
+  - **웹 스택은 React + Tailwind + shadcn/ui**로 바뀌었다([file-panel-web-stack.md](file-panel-web-stack.md) §2.1, 2026-07-29 사용자 결정).
     "프레임워크 없음"을 전제한 §7.1 서술은 무효다.
   - **CM6 스타일 문제는 file-panel이 FP12b에서 이미 풀었다.** §1.1이 남긴 `unsafe-inline` 항목은 app origin 한정 완화로
     해소됐고(위 CSP 항목), 그 완화가 **정확히 CM6 style-mod 주입** 때문이라는 것이 결정 주석에 적혀 있다. editor가 새로
@@ -173,7 +173,7 @@ L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit �
 **형태는 (a′)로 좁혀졌다**(§10.0) — 목록은 도크 뷰, 본문은 diff kind **파일 Term**이다. 따라서 이 절이 정하는 것은 새 surface
 종류가 아니라 **파일 entry kind 하나**와 그 kind에 붙는 grant다.
 
-- 파일 entry의 `EntryKind`([file-panel.md](file-panel.md) §2)에 `diff`를 additive로 더한다. 새 top-level `PanelKind`가 아니다 —
+- 파일 entry의 `EntryKind`([file-panel-kinds.md](file-panel-kinds.md) §2)에 `diff`를 additive로 더한다. 새 top-level `PanelKind`가 아니다 —
   FP16이 확인했듯 `PanelKind`는 `{markdown, browser}` 2값 = trust/config 선택자이고, 값을 더하면 Swift의
   `let trusted = (panelKind == 0)` 파생이 조용히 깨진다. `diff` kind는 `.markdown`(신뢰 shell)으로 파생한다.
 - 목록 UI는 web이 아니라 GPU chrome이라 origin/CSP 결정이 아예 없다(§3).
@@ -709,7 +709,7 @@ git 기준(HEAD/index/worktree) 외에 **"에이전트가 방금 바꾼 것"**�
 ### 7.1 툴체인
 
 - self-host asset만 사용하고 CDN은 금지한다.
-- **웹 스택은 file-panel을 그대로 따른다 — 현재 React + Tailwind + shadcn/ui다**([file-panel.md](file-panel.md) §2.1,
+- **웹 스택은 file-panel을 그대로 따른다 — 현재 React + Tailwind + shadcn/ui다**([file-panel-web-stack.md](file-panel-web-stack.md) §2.1,
   2026-07-29 사용자 결정). 이 문서 초판의 "UI 프레임워크를 도입하지 않는다(vanilla TS)"는 그 결정으로 **무효**다. 단
   **도크 변경 목록은 애초에 웹이 아니라 GPU chrome**이므로(§3) 이 결정의 영향 범위는 diff 본문 화면뿐이다. CM6·remark류는
   프레임워크가 아니라 **DOM 마운트 라이브러리**라 이 결정과 직교하며, 편집기를 React 컴포넌트로 다시 쓰지 않는다.
@@ -896,7 +896,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - E1의 **도크 소스 컨트롤 뷰**(§3.5)는 도크에 **뷰 스위처**가 필요하다 — 지금 도크는 탐색기 하나만 담는다. 이 배관은
   [file-explorer.md](file-explorer.md)와 같은 PR에서 정합한다.
 - E1의 **diff 파일 Term**은 파일 entry에 `diff` kind를 더한다 — `EntryKind`→`PanelKind` 파생과 mode 선택기(`modesForKind`)를
-  함께 갱신한다([file-panel.md](file-panel.md) §2).
+  함께 갱신한다([file-panel-kinds.md](file-panel-kinds.md) §2).
 
 ### E0.5A — 제품 WebKit feasibility (범위 축소: MergeView만)
 

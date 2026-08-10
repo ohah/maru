@@ -41,7 +41,7 @@
 
 ### 1.1 결정
 
-- **편집 경로의 정본은 네이티브 GPU다.** 사용자가 코드를 보고 고치는 실제 경로(텍스트/코드 편집기·git diff 본문·그 위의 토큰·LSP 표시·미니맵)는 Zig + Metal이 그린다. **웹은 보조 수단**이다 — 테스트·미리보기 피드백·디버깅(CEF 백엔드 plugin 후보 — [web-panel.md](web-panel.md) §1)·인앱 브라우저·trace inspector·마크다운 렌더가 그 자리다(§1.0의 목록과 같다). 이 결정은 [file-panel.md](file-panel.md) §1의 "소스 편집기 = CodeMirror 6"와 [editor-surface.md](editor-surface.md) §1.1의 "엔진 = CM6 확정"을 대체하되, **범위는 `text` kind**([file-panel.md](file-panel.md) §2.2 — `.md`/`.html`과 바이너리를 뺀 모든 파일)**와 diff까지다.** `.md`의 소스 모드는 대체 대상이 **아니라 미결**이고(§12), 마크다운 읽기·리치 렌더는 계속 웹이다. 두 문서의 해당 항목은 이 범위 구분과 함께 이 문서를 가리킨다.
+- **편집 경로의 정본은 네이티브 GPU다.** 사용자가 코드를 보고 고치는 실제 경로(텍스트/코드 편집기·git diff 본문·그 위의 토큰·LSP 표시·미니맵)는 Zig + Metal이 그린다. **웹은 보조 수단**이다 — 테스트·미리보기 피드백·디버깅(CEF 백엔드 plugin 후보 — [web-panel.md](web-panel.md) §1)·인앱 브라우저·trace inspector·마크다운 렌더가 그 자리다(§1.0의 목록과 같다). 이 결정은 [file-panel.md](file-panel.md) §1의 "소스 편집기 = CodeMirror 6"와 [editor-surface.md](editor-surface.md) §1.1의 "엔진 = CM6 확정"을 대체하되, **범위는 `text` kind**([file-panel-kinds.md](file-panel-kinds.md) §2.2 — `.md`/`.html`과 바이너리를 뺀 모든 파일)**와 diff까지다.** `.md`의 소스 모드는 대체 대상이 **아니라 미결**이고(§12), 마크다운 읽기·리치 렌더는 계속 웹이다. 두 문서의 해당 항목은 이 범위 구분과 함께 이 문서를 가리킨다.
 
 - **경계 기준은 "터미널과 같은 계열이냐"다.** 등폭 격자로 표현되는 콘텐츠(터미널·코드·소스·diff)는 네이티브가 그리고, 흐름 레이아웃이 필요한 문서 콘텐츠(마크다운 렌더·임의 웹페이지)는 WKWebView가 그린다. 이는 [file-panel.md](file-panel.md) §1 아키텍처 B("chrome은 Zig+GPU, WKWebView는 콘텐츠만")의 정교화다 — chrome 경계는 그대로 두고, **콘텐츠를 두 계열로 나눈다.**
 

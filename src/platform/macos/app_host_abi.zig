@@ -1540,7 +1540,7 @@ pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppS
     return @intCast(@intFromEnum(action.mode));
 }
 
-/// 파일 본문 우클릭 메뉴에서 고른 항목 중 **web이 실행할 것**을 drain한다(docs/file-panel.md §2.6).
+/// 파일 본문 우클릭 메뉴에서 고른 항목 중 **web이 실행할 것**을 drain한다(docs/file-panel-kinds.md §2.6).
 /// 반환은 동작 코드(0=없음·1=복사·2=잘라내기·3=붙여넣기·4=전체 선택)이고 대상 surface는 out으로 준다.
 /// 선택 범위는 문서 안에 있어 native가 모르므로, Swift가 그 web에 이벤트로 되돌려 보낸다.
 pub export fn maru_macos_app_session_take_file_menu_action(session: ?*AppSession, surface_id_out: ?*u64) u32 {

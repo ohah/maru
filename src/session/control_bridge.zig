@@ -39,7 +39,7 @@ pub const file_renderer_ready_method = "maru.file.rendererReady";
 /// entry(경로, base)가 이미 정하고 있고, 웹이 경로를 고를 수 있게 하면 그 순간 이 method가 "아무 파일이나 읽는
 /// 창구"가 된다. 자기 것만 읽는 `readSelfImage`와 같은 최소 capability 규율이다.
 pub const diff_open_method = "maru.diff.open";
-/// 본문 우클릭 → **메뉴는 Zig chrome이 연다**(docs/file-panel.md §2.6). web은 "무엇을 눌렀는지"만 답한다.
+/// 본문 우클릭 → **메뉴는 Zig chrome이 연다**(docs/file-panel-kinds.md §2.6). web은 "무엇을 눌렀는지"만 답한다.
 pub const menu_open_method = "maru.menu.open";
 /// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
 pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
@@ -1223,7 +1223,7 @@ test "diff.open 직렬화 비용과 응답 크기(8 MiB 한쪽 기준)" {
 }
 
 test "dispatchBridge: menu.open은 대상과 좌표만 받고, 모드는 받지 않는다" {
-    // 어느 모드인지는 그 Term의 entry가 이미 안다 — web에서도 받으면 두 출처가 갈린다(docs/file-panel.md §2.6).
+    // 어느 모드인지는 그 Term의 entry가 이미 안다 — web에서도 받으면 두 출처가 갈린다(docs/file-panel-kinds.md §2.6).
     const Fake = struct {
         last: ?MenuRequest = null,
         calls: usize = 0,

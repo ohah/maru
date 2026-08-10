@@ -1015,6 +1015,25 @@ pub fn termCwdIsRemote(term: *const Term) bool {
     return !terminal.TerminalCore.hostIsLocal(term.rt.observation.cwd_host.items, localHostname());
 }
 
+/// 그 Term에 적용할 링크 감지 스코프 — config 프리셋에서 시작하되 **원격 cwd 세션에서는 파일 경로 스코프를 끈다**.
+///
+/// 파일 경로 링크는 상대경로를 cwd 기준으로 resolve하고 `access(F_OK)`로 존재를 검증한 뒤 여는데, 그 resolve도
+/// 존재 검증도 **로컬 파일시스템**에서 일어난다. 원격 cwd를 그대로 쓰면 로컬에 같은 경로가 있을 때 **엉뚱한 로컬
+/// 파일이 조용히 열린다** — 같은 사용자가 로컬과 원격에 같은 프로젝트를 두는 흔한 배치에서 그대로 재현된다
+/// (적대적 검증에서 발견). 웹·스킴 링크는 어차피 로컬 브라우저로 여는 것이 맞으므로 남긴다.
+///
+/// hover 밑줄과 클릭이 **같은 함수**를 봐야 "밑줄 보이는 곳 = 열리는 곳" 불변식이 유지된다. 단일 출처는
+/// docs/ssh-integration.md §9.4.
+pub fn linkScopesForTerm(self: *const AppSession, term: *const Term) terminal.LinkScopes {
+    var scopes = settings_ops.linkScopesFromConfig(self);
+    if (!termCwdIsRemote(term)) return scopes;
+    scopes.absolute_path = false;
+    scopes.home_path = false;
+    scopes.dot_relative = false;
+    scopes.bare_relative = false;
+    return scopes;
+}
+
 pub fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
     if (cwd.len == 0) return allocator.dupe(u8, "");
@@ -10797,7 +10816,9 @@ pub const AppSession = struct {
                         // 로컬: URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
                         // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
                         // 클립(아래 hoverLinkSpanFor)되므로 stale·OOB가 안 생긴다.
-                        if (s.core.urlAnchorAt(cell.row, cell.col, settings_ops.linkScopesFromConfig(self))) |a| {
+                        // 스코프는 **클릭(urlAt)과 같은 단일 출처**를 쓴다 — 원격 세션에서 파일 경로 스코프가 꺼지므로
+                        // 밑줄도 함께 사라져야 "밑줄 보이는 곳 = 열리는 곳"이 유지된다(§9.4).
+                        if (s.core.urlAnchorAt(cell.row, cell.col, linkScopesForTerm(self, hit.term))) |a| {
                             next = a;
                             next_surface_id = s.id;
                         }
@@ -10930,7 +10951,7 @@ pub const AppSession = struct {
             return &.{};
         }
         s.lockCore(self.io);
-        const ext = s.core.extractUrlAt(self.allocator, cell.row, cell.col, settings_ops.linkScopesFromConfig(self)) catch null;
+        const ext = s.core.extractUrlAt(self.allocator, cell.row, cell.col, linkScopesForTerm(self, hit.term)) catch null;
         s.unlockCore(self.io);
         const e = ext orelse return &.{};
         self.url_buffer = e.text;
@@ -34428,6 +34449,102 @@ test "sidebarCwdPath/sidebarFolderLineShown: 원격 cwd는 host를 붙이고 rep
     const local_path = try sidebarCwdPath(allocator, term);
     defer allocator.free(local_path);
     try std.testing.expectEqualStrings("/tmp/local-proj", local_path);
+}
+
+// 원격 세션에서 **파일 경로 링크를 열지 않는다**(§9.4). 상대경로 resolve도 존재 검증(access)도 로컬 파일시스템에서
+// 일어나므로, 로컬에 같은 경로가 있으면 엉뚱한 로컬 파일이 조용히 열린다 — 같은 사용자가 로컬·원격에 같은 프로젝트를
+// 두면 그대로 재현된다. hover 밑줄과 클릭이 같은 판정을 봐야 "밑줄 보이는 곳 = 열리는 곳"도 유지된다.
+/// 사이드바 draw list의 셀을 행 순서대로 이어 붙여 **실제로 그려지는 텍스트**를 만든다. 순수 함수 단언만으로는
+/// "값은 맞는데 그리는 자리가 다른" 결함을 못 잡으므로, 제품 렌더 경로가 낸 셀을 그대로 읽는다.
+fn testSidebarText(session: *AppSession, allocator: std.mem.Allocator) ![]u8 {
+    var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl.deinit(allocator);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buf: [4]u8 = undefined;
+    for (dl.cells) |cell| {
+        const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
+        try out.appendSlice(allocator, buf[0..n]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+// **제품 렌더 경로**가 원격 폴더줄을 실제로 그리는지. `sidebarFolderLineShown`/`sidebarCwdPath` 단위 테스트는
+// 값만 보므로, 조립부가 그 함수를 안 쓰거나 줄이 빈 문자열로 접히면 통과하면서도 화면엔 아무것도 안 뜬다
+// (이 저장소에서 반복된 결함 모양이다). 그래서 draw list 셀을 직접 읽어 확인한다.
+test "사이드바 draw list: 원격 cwd 폴더줄이 host 접두와 함께 실제로 그려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 셀 배치
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1200, 800, 1000); // 사이드바가 보일 만큼 넓게
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/srv/app\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+
+    const remote_text = try testSidebarText(session, allocator);
+    defer allocator.free(remote_text);
+    // repo 밖(원격이라 로컬 `.git`이 없다)인데도 폴더줄이 그려지고 host 접두가 붙는다. 기본 사이드바 폭에서는
+    // 경로 뒤가 말줄임되므로(실측 `󰀊 build-box:…`) **접두까지**를 단언한다 — 전체 경로를 요구하면 폭 정책이
+    // 바뀔 때마다 깨지는 취약한 테스트가 된다.
+    try std.testing.expect(std.mem.indexOf(u8, remote_text, "build-box:") != null);
+
+    // 대조군: 로컬 cwd면 같은 자리에 host 접두가 붙지 않는다(원격 표시가 로컬로 새지 않는지).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///srv/app\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    const local_text = try testSidebarText(session, allocator);
+    defer allocator.free(local_text);
+    try std.testing.expect(std.mem.indexOf(u8, local_text, "build-box:") == null);
+}
+
+test "linkScopesForTerm: 원격 cwd면 파일 경로 스코프만 끄고 웹·스킴은 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    session.loaded_config.config.input.link_detection = .full; // 파일 경로까지 감지하는 프리셋
+
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // 로컬: 프리셋 그대로(회귀 방지 — 이 변경이 로컬 링크를 조용히 끄면 안 된다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/proj\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    const local_scopes = linkScopesForTerm(session, term);
+    try std.testing.expect(local_scopes.absolute_path and local_scopes.bare_relative);
+    try std.testing.expect(local_scopes.dot_relative and local_scopes.home_path);
+
+    // 원격: 파일 경로 4종만 꺼지고 웹·스킴은 유지된다(웹 링크는 로컬 브라우저로 여는 게 맞다).
+    try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/srv/app\x07");
+    term_ops.refreshTermObservation(session, term, false, false);
+    const remote_scopes = linkScopesForTerm(session, term);
+    try std.testing.expect(!remote_scopes.absolute_path and !remote_scopes.bare_relative);
+    try std.testing.expect(!remote_scopes.dot_relative and !remote_scopes.home_path);
+    try std.testing.expect(remote_scopes.web and remote_scopes.extra_schemes);
+
+    // 그 스코프로는 화면의 파일 경로가 링크로 추출되지 않는다(스코프가 실제 추출을 가른다는 배선 확인).
+    const core = &term_ops.activeSurface(session).core;
+    try core.write("\r\nsrc/main.zig\r\n");
+    const row = core.screen.cursor.row -| 1;
+    try std.testing.expect((core.extractUrlAt(allocator, row, 2, remote_scopes) catch null) == null);
 }
 
 test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inherit OFF는 root, ON은 포커스 우선" {

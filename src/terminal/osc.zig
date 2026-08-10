@@ -228,12 +228,23 @@ pub fn dispatchCwd(self: *TerminalCore, body: []const u8) void {
     };
     // cwd가 **실제로 바뀔 때만** title_generation을 올린다 — 셸 통합(VTE/iTerm precmd)은 cd 안 해도 매 프롬프트 OSC 7을
     // 동일 경로로 재보고하므로, 무조건 bump하면 매 프롬프트 syncAutoTitles가 헛 lock+복사해 P4-1을 무력화한다(code-review [0]).
+    //
+    // **host 변경도 "바뀜"으로 친다.** 이 generation은 창 제목 재sync만이 아니라 **runtime observation refresh의
+    // 게이트**이기도 하다(app_session term.refreshTermObservation). host만 달라진 전이(로컬 `/srv/app` ↔ 원격
+    // `/srv/app` — ssh로 같은 경로에 들어가거나 빠져나오는, 같은 레이아웃을 쓰는 사람에겐 평범한 이동)에서 bump를
+    // 빼면 observation이 통째로 갱신되지 않아 **폴더줄이 옛 host를 계속 그리고 cwd 상속·링크 스코프도 옛 판정에
+    // 머문다**(적대적 검증에서 제품 렌더 경로 테스트로 발견). 경로나 host가 바뀔 때만이라 헛 sync는 여전히 없다.
     const cwd_changed = if (self.cwd) |old| !std.mem.eql(u8, old, decoded) else true;
+    const host_changed = blk: {
+        const old = self.cwd_host orelse "";
+        const new = host_copy orelse "";
+        break :blk !std.mem.eql(u8, old, new);
+    };
     if (self.cwd) |old| self.allocator.free(old);
     self.cwd = decoded;
     if (self.cwd_host) |old| self.allocator.free(old);
     self.cwd_host = host_copy;
-    if (cwd_changed) self.bumpTitleGeneration(); // title이 null이면 windowTitle(cwd basename)이 바뀌므로 라벨 재sync 유도(P4-1, §12)
+    if (cwd_changed or host_changed) self.bumpTitleGeneration(); // title이 null이면 windowTitle(cwd basename)이 바뀌므로 라벨 재sync 유도(P4-1, §12)
     self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시(recordShellEvent: core, pub)
 }
 

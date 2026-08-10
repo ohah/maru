@@ -44,7 +44,7 @@ const cell_height_px: u32 = 16;
 /// 편집기 시나리오의 chrome 텍스트 face. 그 밖은 빈 face(system UI)를 유지한다.
 fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
     return switch (id) {
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard => .{ .family = variant.family() },
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph => .{ .family = variant.family() },
         else => .{},
     };
 }
@@ -507,6 +507,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-scrolled")) return .editor_scrolled;
     if (std.mem.eql(u8, raw, "editor-font-large")) return .editor_font_large;
     if (std.mem.eql(u8, raw, "editor-hazard")) return .editor_hazard;
+    if (std.mem.eql(u8, raw, "editor-wide-glyph")) return .editor_wide_glyph;
     return null;
 }
 
@@ -531,6 +532,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_scrolled => "editor-scrolled",
         .editor_font_large => "editor-font-large",
         .editor_hazard => "editor-hazard",
+        .editor_wide_glyph => "editor-wide-glyph",
     };
 }
 

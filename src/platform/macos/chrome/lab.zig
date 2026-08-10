@@ -55,6 +55,10 @@ pub const ScenarioId = enum {
     /// 실제로 가시화되는지 픽셀로 본다. 가시화가 꺼지면 그 줄들이 멀쩡해 보이므로(그것이 공격의
     /// 목적이다) 골든이 유일한 자동 가드다.
     editor_hazard,
+    /// N1 §4.2 — **표시 폭**. 이모지 ZWJ 시퀀스·스킨톤·국기·VS16·동그란 번호가 각각 몇 칸을
+    /// 차지하는지 픽셀로 본다. 줄마다 같은 열에 `|`를 두었으므로 **폭 계산이 틀리면 그 막대가
+    /// 어긋난다** — 숫자를 읽지 않아도 캡처만으로 회귀가 보이는 것이 이 fixture의 요점이다.
+    editor_wide_glyph,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -123,7 +127,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -202,6 +206,23 @@ const editor_hazard_lines = [_][]const u8{
     "// 위에 숨은 문자가 있다(가족 이모지 줄은 정상)",
 };
 
+/// §4.2 표시 폭 fixture. **라벨은 모두 8칸, 내용은 4칸 또는 6칸, `|`는 20열**이 되도록 짰다 —
+/// 폭 규칙이 하나라도 틀리면 그 줄의 막대만 어긋나므로 **어느 규칙이 깨졌는지까지** 캡처가 말한다.
+///
+/// 내용 칸 수 근거(§4.2): 이모지·가족·스킨톤·국기·VS16은 각 2칸이라 둘이면 4칸, 한글과 동그란
+/// 번호는 각 2칸이라 셋이면 6칸이다. `MMMM`은 ASCII 4칸.
+const editor_width_lines = [_][]const u8{
+    "// | 가 한 열에 서야 한다",
+    "ascii   MMMM        |",
+    "hangul  가나다      |",
+    "emoji   \u{1F600}\u{1F600}        |",
+    "family  \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}        |",
+    "skin    \u{1F44D}\u{1F3FD}\u{1F44D}\u{1F3FD}        |",
+    "flag    \u{1F1F0}\u{1F1F7}\u{1F1F0}\u{1F1F7}        |",
+    "vs16    \u{2764}\u{FE0F}\u{26A0}\u{FE0F}        |",
+    "circle  \u{2460}\u{2461}\u{2462}      |",
+};
+
 /// N1 §4.1 — 편집기 gutter와 본문을 실제 draw op으로 내려 픽셀까지 보낸다.
 ///
 /// 이 시나리오가 증명하려는 것은 문서 내용이 아니라 **기하**다 — 줄 번호가 우측 정렬로 같은 오른쪽
@@ -215,10 +236,11 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
     const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
     const total_cols: u16 = @intCast(viewport_w / cell_w_px);
-    const lines: []const []const u8 = if (scenario.id == .editor_hazard)
-        &editor_hazard_lines
-    else
-        &editor_fixture_lines;
+    const lines: []const []const u8 = switch (scenario.id) {
+        .editor_hazard => &editor_hazard_lines,
+        .editor_wide_glyph => &editor_width_lines,
+        else => &editor_fixture_lines,
+    };
     const line_count: usize = lines.len;
 
     // 스크롤 시나리오는 **화면을 일부러 좁힌다.** fixture를 화면보다 길게 늘리는 것보다 이쪽이
@@ -367,7 +389,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

@@ -12,7 +12,7 @@ const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
 const text_layout = @import("../../text_layout.zig"); // 텍스트 셀 배치 단일 출처(cluster 분절·폭)
-const hazard = @import("../../../session/editor/hazard.zig"); // §3.8 적대적 입력 판정(L2 순수)
+const hazard = @import("../../../hazard.zig"); // §3.8 적대적 입력 판정 — 순수 유니코드(레이어 무관 중립)
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;

@@ -2606,6 +2606,79 @@ test "OSC 7 keeps host and path paired across updates, RIS, and empty authority"
     try std.testing.expectEqualStrings("", core.currentCwdHost());
 }
 
+// cwd와 host는 한 쌍이다. "path는 새 값인데 host는 옛 값"(또는 빈 값)이 되면 로컬 경로에 원격 host가 붙거나 그
+// 반대가 되어, 표시·cwd 상속·링크 스코프가 **전부 반대로** 판정된다. 갱신 도중 어느 할당이 실패해도 쌍이 깨지지
+// 않는지 실패 지점을 하나씩 옮겨 가며 확인한다.
+//
+// `checkAllAllocationFailures`는 쓸 수 없다 — 그 헬퍼는 "할당이 실패했으면 함수도 OutOfMemory를 반환해야 한다"고
+// 요구하는데, `dispatchCwd`는 **의도적으로 OOM을 삼키고 이전 값을 유지**하는 계약이라 곧바로
+// `SwallowedOutOfMemoryError`가 된다(실제로 그렇게 실패했다). 그래서 실패 인덱스를 직접 돌린다.
+test "OSC 7 never leaves a half-updated (host, path) pair under allocation failure" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    try core.write("\x1b]7;file://host-a/a\x07"); // 정상 할당으로 첫 쌍을 세운다
+
+    // dispatchCwd 한 번의 할당은 percent-decode(ArrayList grow)와 host dupe 몇 회뿐이라 상한을 넉넉히 덮는다.
+    var fail_index: usize = 0;
+    while (fail_index < 8) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        core.allocator = failing.allocator();
+        core.write("\x1b]7;file://host-b/b\x07") catch {};
+        core.allocator = std.testing.allocator; // 이후 free는 같은 backing이라 안전하다
+
+        const cwd = core.currentCwd();
+        const host = core.currentCwdHost();
+        const first = std.mem.eql(u8, cwd, "/a") and std.mem.eql(u8, host, "host-a");
+        const second = std.mem.eql(u8, cwd, "/b") and std.mem.eql(u8, host, "host-b");
+        if (!(first or second)) {
+            std.debug.print("\n[half-updated pair @fail_index={d}] cwd=\"{s}\" host=\"{s}\"\n", .{ fail_index, cwd, host });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// authority는 셸이 `${HOST}`로 채우지만 그 값을 터미널이 통제할 수는 없다(사용자 설정·컨테이너·악의적 출력).
+// 이상한 authority가 와도 파싱이 무너지거나 로컬/원격 판정이 뒤집히지 않아야 한다 — 뒤집히면 원격 경로가 로컬
+// spawn·링크로 새거나(위험) 로컬 세션의 cwd 상속이 통째로 꺼진다(기능 상실).
+test "OSC 7 tolerates unusual authorities without breaking the pair or the local/remote verdict" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    // authority만 있고 path가 없으면 형식 위반 → 이전 값 유지(여기선 아직 없음).
+    try core.write("\x1b]7;file://onlyhost\x07");
+    try std.testing.expectEqualStrings("", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost());
+
+    // path가 루트 하나뿐이어도 정상 보고다.
+    try core.write("\x1b]7;file:///\x07");
+    try std.testing.expectEqualStrings("/", core.currentCwd());
+    try std.testing.expectEqualStrings("", core.currentCwdHost());
+    try std.testing.expect(TerminalCore.hostIsLocal(core.currentCwdHost(), "box")); // 빈 authority = 로컬
+
+    // IPv6 리터럴은 대괄호째 authority가 된다(첫 '/' 앞이라 파싱이 갈리지 않는다). 로컬 이름과 다르므로 원격으로
+    // 본다 — `[::1]`이 실제로는 로컬이지만, 오판 방향이 "원격으로 봄"이라 안전한 쪽이다(§9.2 보수적 기본).
+    try core.write("\x1b]7;file://[::1]/srv\x07");
+    try std.testing.expectEqualStrings("/srv", core.currentCwd());
+    try std.testing.expectEqualStrings("[::1]", core.currentCwdHost());
+    try std.testing.expect(!TerminalCore.hostIsLocal(core.currentCwdHost(), "box"));
+
+    // authority의 percent-escape는 **디코드하지 않는다**(hostname에 인코딩이 오지 않고, 디코드하면 `%`가 든 이름이
+    // 다른 호스트로 바뀐다). 값이 그대로 보존되는지 고정.
+    try core.write("\x1b]7;file://my%20host/p\x07");
+    try std.testing.expectEqualStrings("my%20host", core.currentCwdHost());
+
+    // 경로가 `//`로 시작해도 authority 경계는 첫 '/'라 host가 먹히지 않는다.
+    try core.write("\x1b]7;file://h//double\x07");
+    try std.testing.expectEqualStrings("//double", core.currentCwd());
+    try std.testing.expectEqualStrings("h", core.currentCwdHost());
+
+    // 매우 긴 authority도 쌍을 유지한다(표시 측 말줄임이 폭을 책임진다).
+    const long_host = "a" ** 300;
+    try core.write("\x1b]7;file://" ++ long_host ++ "/deep\x07");
+    try std.testing.expectEqualStrings("/deep", core.currentCwd());
+    try std.testing.expectEqual(@as(usize, 300), core.currentCwdHost().len);
+}
+
 // 로컬 판정은 순수 함수다 — 이 판정 하나가 폴더줄 표시·cwd 상속·경로 resolve를 모두 가른다.
 // 특히 짧은 이름 대 FQDN 비대칭은 실제로 흔해서(셸은 `${HOST}`에 짧은 이름을 싣고 로컬은 `.local`이
 // 붙는다), 그대로 비교하면 **자기 자신을 원격으로 오인**해 로컬 세션의 cwd 상속이 조용히 꺼진다.

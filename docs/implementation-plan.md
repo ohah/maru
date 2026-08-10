@@ -1564,13 +1564,24 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          initial snapshot owner, generation batch allocator-scope registry와 ended-purge quarantine receipt/proof도 같은 PID leaf로 이관하고
          unsupported target PID zero fail-close, Linux sentinel 권위와 fork-child
          inherited-authority acceptance가 0임을 source/process gate로 검증한다.
-      3. **C3-3b2b immutable preparation:** 이 단계는 **b2b0 exact observation → b2b1 dormant preparation**의 두 독립 merge gate로
-         구현한다. **b2b0은 구현 완료**로 공용 `RuntimeObservation.replace`와 기존 cache admission을 exact-capacity로 먼저 닫았고 session-host event
-         lifecycle이나 제품 caller를 변경하지 않는다. b2b1은 final-address pending owner, immutable Runtime snapshot, closed prepared event/effect와
-         production full-content seal을 구현한다.
-         b2b는 dormant production-source orchestration의 test-mode 호출, 4-part prepare peak,
-         3-part published rehash, fixed failure mapping, typed scratch handoff와 proof-loss cleanup을 닫는다. concrete process-seal cleanup
-         transcript/progress domain도 이 slice에서 추가한다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는
+      3. **C3-3b2b immutable preparation:** 이 단계는 **b2b0 exact observation → b2b1 trusted preparation seal prerequisite →
+         b2b2 pure preparation recipe → b2b3 immutable owner preparation**의 네 독립 merge gate로 구현한다. **b2b0은 구현 완료**로 공용
+         `RuntimeObservation.replace`와 기존 cache admission을 exact-capacity로 먼저 닫았고 session-host event lifecycle이나 제품 caller를
+         변경하지 않는다. **b2b1**은 기존 quarantine trusted mirror와 opaque correlation의 ClientSlot 내부 SSOT를 재사용한다. ClientSlot의
+         exact-correlation validator가 pointer-free instantaneous preparation projection과 canonical binding digest를 만들고 private identity를
+         소유한 generation-event contract가 기존 borrowed `EventOwner.view()`와 별도 필드로 조합한다. GenerationTransport는 이 seam만
+         호출하며 correlation value는 validation input으로만 쓰고 projection 반환·저장/raw accessor는 0이다. public
+         `EventOwner.view()`/`EventView` 계약은 그대로이며 `RemoteRuntime` field와 normal product caller는 0이다. 같은 gate가 named fixed-shape
+         cleanup graph(`preparation = DTO backing + next observation 7 owners`, `committed_observation = old observation 7 owners`)와 stateless
+         fixed-domain typed 256-bit transcript/progress MAC을 닫는다. generic writer/MAC, raw key, permit registry, persistent expected-MAC mirror는 없다.
+         **b2b2**는 pointer/slice/allocator/owned storage 0인 `EventPreparationRecipe`와 allocation-free metadata recipe/size/fill mapping을
+         추출한다. 기존 allocation-free `classifyEventView`는 바꾸지 않고 기존 owning API와 staged path가 그 `Classification`을 받는 recipe
+         builder를 공유한다. compatibility adapter가 기존 owned metadata DTO를 채워
+         accepted/violation 전 arm·error/OOM·allocation count·DTO 의미 동등성을 보존한다. wire leaf는 `RuntimeObservation`을 import하지
+         않는다. **b2b3**는 final-address `PendingEventOwner`, immutable Runtime snapshot, final closed `PreparedEvent`/effect, typed scratch handoff,
+         4-part prepare peak·3-part published rehash와 proof-loss cleanup을 production source에 구현하고 real `GenerationAttachment` take의 test-mode
+         dormant orchestration으로 호출한다. b2b3까지 normal product pump caller는 0이며 umbrella C3-3b2b 완료는 세 후속 gate가 모두 green일
+         때만 주장한다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는
          [persistent-session-host.md의 C3-3b 계약](persistent-session-host.md#c3-3b-event-settlement와-비동기-close-계약)이며 이 계획은
          그 계약을 복제하지 않는다.
       4. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는

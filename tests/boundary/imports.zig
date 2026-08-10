@@ -5098,6 +5098,11 @@ test "validated metadata token construction and materialization stay in classifi
             entry.path,
             "platform/macos/session_host/runtime_metadata_wire.zig",
         );
+        const is_event_preparation = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/runtime_event_preparation.zig",
+        );
         const is_remote_runtime = std.mem.eql(
             u8,
             entry.path,
@@ -5121,7 +5126,7 @@ test "validated metadata token construction and materialization stay in classifi
         }
         const type_refs = std.mem.count(u8, source, "ValidatedMetadataView");
         if (type_refs != 0) {
-            try std.testing.expect(is_types or is_metadata_wire);
+            try std.testing.expect(is_types or is_metadata_wire or is_event_preparation);
             validated_type_count += type_refs;
         }
         if (std.mem.indexOf(u8, source, "decodeMetadataEvent") != null)
@@ -5158,7 +5163,7 @@ test "validated metadata token construction and materialization stay in classifi
         const private_materializer_refs = std.mem.count(
             u8,
             source,
-            "materializeValidatedEvent",
+            "materializePreparedEventMetadata",
         );
         if (private_materializer_refs != 0) {
             try std.testing.expect(is_metadata_wire);
@@ -5171,7 +5176,11 @@ test "validated metadata token construction and materialization stay in classifi
         );
         if (product_classifier_refs != 0) {
             if (is_metadata_wire) {
-                product_classifier_definition_count += product_classifier_refs;
+                product_classifier_definition_count += std.mem.count(
+                    u8,
+                    source,
+                    "pub fn classifyAndMaterializeEvent(",
+                );
             } else if (is_remote_runtime) {
                 product_classifier_call_count += product_classifier_refs;
             } else return error.TestUnexpectedResult;

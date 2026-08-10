@@ -414,7 +414,7 @@ test "palette view/caret: 긴 검색어는 tail 창(선두 …)으로 오른쪽 
 
 // SV5b — 스크롤바 gutter는 **밴드와 단축키가 함께** 비켜 준다. 하나만 빼면 그 요소만 막대를 덮는데,
 // 실제로 두 번 그렇게 나갔다(먼저 단축키가, 고친 뒤엔 선택 밴드가). gutter를 손으로 빼는 구조가 남아
-// 있는 한 이 판정자가 그 자리를 지킨다 — 장기 답은 레이아웃 엔진이 빼는 것이다(implementation-plan SV5b).
+// 있는 한 이 판정자가 그 자리를 지킨다 — 장기 답은 레이아웃 엔진이 빼는 것이다(plans/scroll-area.md SV5b).
 test "palette reserves the scrollbar gutter for both the selection band and the binding column" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };

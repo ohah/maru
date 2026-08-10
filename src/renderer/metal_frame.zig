@@ -919,7 +919,7 @@ pub const GpuGlyph = extern struct {
 /// 파이프라인(textured quad)이고, 셀 그리드와 무관하게 backing 픽셀 사각형으로 그린다. 좌표·UV는
 /// `buildGpuImages`가 placement(뷰포트 상대 셀 좌표) + 이미지 픽셀 크기 + 셀 메트릭으로 환산한다 —
 /// **픽셀→셀 환산은 렌더러 책임**(K1 결정). 텍스처는 image_id로 K2d Swift가 캐시한다. 설계:
-/// docs/implementation-plan.md "kitty graphics K2 렌더 설계". 베이스: kitty graphics protocol display.
+/// docs/plans/terminal-input-and-protocols.md "kitty graphics K2 렌더 설계". 베이스: kitty graphics protocol display.
 pub const GpuImage = extern struct {
     // 그릴 이미지(K2d가 image_id로 MTLTexture를 찾는다).
     image_id: u32,

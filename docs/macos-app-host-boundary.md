@@ -89,7 +89,7 @@
 
 - plugin/Wasm
 - IME/입력 인코딩 중 일부(조합/확정·preedit 표시·레이아웃 독립 단축키·판정 상태 머신 Zig 이전·후보창 커서 위치 배치(ABI v22)·dead key는 완료; function key F1~F12·CSI-u/kitty·키패드 application 모드(DECKPAM) 인코딩도 완료 — 아래 "이미 구현된 것" 참조. 잔여는 F13+뿐(`input.zig functionKeySequence`가 표준 갈림을 이유로 거부, Ghostty도 todo))
-- full VT parser 잔여 갭(alternate screen·scroll region·mouse mode는 구현; DECOM·ICH/DCH·SS2/SS3·British charset 등 잔여는 implementation-plan.md G-시리즈가 단일 출처)
+- full VT parser 잔여 갭(alternate screen·scroll region·mouse mode는 구현; DECOM·ICH/DCH·SS2/SS3·British charset 등 잔여는 plans/terminal-input-and-protocols.md G-시리즈가 단일 출처)
 
 이미 구현된 것(과거 이 목록에 있던 항목): 탭/분할 UI(세로 사이드바 탭·가로 탭 바·split 멀티 panel — 아래 "남은 한계" 단락 끝), workspace restore([workspace-restore.md] R1~R6, `captureWorkspaceWindow`/`restoreSpawn`), settings UI(`toggle_settings` ⌘, → schema-주도 세팅 모달, [config-gui.md])·runtime reload(ABI v56 `reloadConfig`), global shortcut(ABI v28 `GlobalHotkey` — 위 "C ABI 규칙" 참조). SGR 4 밑줄 등 텍스트 장식선 overlay 렌더(`draw_list.zig`가 `cell.style.underline`에 `.underline` LineOverlay 방출 → `metal_frame.zig`가 reserved kind로 투영(밑줄=reserved 9) → `maru_metal_renderer.m`가 reserved==9를 셀 하단 가는 띠로 그림 — 커서·hover 밑줄과 같은 부분-사각형 기법 재사용). function key F1~F12(`input.zig encodeKey`의 `.function`→`functionKeySequence`, F1~F4 SS3·F5~F12 CSI `~`)와 CSI-u/kitty 인코딩(`encodeKitty`)도 구현 — Swift는 `app_host_abi.zig keyEventFromAbi`로 f1~f12·home/end 등을 `terminal.KeyEvent`로 매핑한다.
 

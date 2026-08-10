@@ -15,7 +15,7 @@
 - 셀/행 저장 구조(`Cell`, `RowCodepoints`): `src/terminal/types.zig`, `src/terminal/screen.zig`
 - 셰이핑·래스터(CoreText): `src/platform/macos/coretext_smoke.m`, `src/renderer/coretext_shaper.zig`
 - 폭/combining 검증 매트릭스 항목: [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목
-- 단계별 구현 순서: [실제 구현 계획](implementation-plan.md)의 "한글 Grapheme Cluster 렌더링" 절
+- 단계별 구현 순서: [터미널 입력과 VT 프로토콜 구현 이력](plans/terminal-input-and-protocols.md)의 "한글 Grapheme Cluster 렌더링" 절
 
 이 문서는 **NFD conjoining 자모를 한 셀로 재결합해 정확한 폭·셰이핑으로 렌더**하는 메커니즘만 다룬다. 이미 완료된 East Asian wide(완성형 NFC 한글 2칸)·box/block 합성은 다루지 않는다.
 

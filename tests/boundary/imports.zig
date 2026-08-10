@@ -3515,13 +3515,13 @@ test "session host owner projection capability stays in its reviewed mechanics f
     }
 }
 
-// 이 테스트는 docs/implementation-plan.md의 facade import 경계를 강제한다.
+// 이 테스트는 docs/plans/core-slices.md의 facade import 경계를 강제한다.
 // Maru 아키텍처 전체는 TerminalCore가 PTY/platform/renderer를 모른다는 전제 위에
 // 서 있다(clean-room VT 코어를 교체 가능하고 headless로 테스트 가능하게 유지하기
 // 위해서다). "리뷰에서 조심한다"는 규칙만으로는 이를 보장할 수 없으므로, 한 레이어가
 // 금지된 레이어를 import하는 순간 빌드를 실패시킨다.
 //
-// 금지에는 두 종류가 있다(implementation-plan.md "1단계 boundary checker 최소 요구사항"의 초기 금지 규칙).
+// 금지에는 두 종류가 있다(plans/core-slices.md "1단계 boundary checker 최소 요구사항"의 초기 금지 규칙).
 //   - 레이어 전체 금지: 공개 barrel("layer.zig")과 구현 디렉터리("layer/...") 모두 금지.
 //     예) terminal -> pty/platform/renderer, renderer -> pty, plugin -> pty.
 //   - private 구현만 금지: 구현 디렉터리("layer/...")만 금지하고 공개 barrel은 허용.

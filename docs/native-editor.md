@@ -19,7 +19,7 @@
 - 파일 `Term` 호스팅·entry kind·mode 전환·`maru.file.*` 브리지·마크다운 렌더는 [file-panel.md](file-panel.md)가 소유한다.
 - 레이어 경계는 [layering-and-portability.md](layering-and-portability.md), chrome 컴포넌트 규율은 [chrome-strategy.md](chrome-strategy.md)·[metal-ui-layout.md](metal-ui-layout.md)를 따른다.
 - 그래핌 경계는 [grapheme-clustering.md](grapheme-clustering.md), 폰트 face 해석은 [font-strategy.md](font-strategy.md)를 단일 출처로 둔다.
-- 진행·검증 상태는 이 문서가 아니라 [검증 매트릭스](verification-matrix.md)와 [실제 구현 계획](implementation-plan.md)이 소유한다.
+- 진행·검증 상태는 이 문서가 아니라 [검증 매트릭스](verification-matrix.md)와 [네이티브 편집기 구현 계획](plans/native-editor.md)이 소유한다.
 
 ## 1. 확정 결정 (2026-08-09 사용자 결정)
 
@@ -63,7 +63,7 @@
 
   **단 목업이 유일한 조달 경로는 아니다(2026-08-09 사용자 결정).** VSCode는 오픈 소스이므로 **배치를 소스에서 직접 확인할 수 있고**, 그렇게 얻은 값은 목업보다 정확하다(관찰 추정이 아니라 계산식 자체다). N1 몫인 gutter·상태바 배치는 이 방법으로 확정해 §4.1에 적었다. **목업이 여전히 필요한 것은 소스에 답이 없는 것들**이다 — 우리 고유 요소(저하 상태 표시), Maru 팔레트와의 조화, VSCode에 대응물이 없는 배치.
   - **새로 정할 범위는 좁다** — 색은 이미 확정(`syntax_theme.zig` 파생, §5)이고 떠 있는 UI는 기존 컴포넌트 스타일을 따르므로(§2.0), 목업이 필요한 것은 **편집기 본문과 그 주변**뿐이다.
-  - **한 번에 다 받을 필요는 없다.** ~~읽기 전용 뷰 전의 gutter·본문 여백·상태바 순서~~는 **§4.1이 소스 확인으로 대신했다**(위 항목). 남은 것은 diff 본문 전의 **좌우 배치와 구분선**, LSP·미니맵이 붙기 전의 **호버 박스·미니맵 폭과 위치·진단 마커 폭**이다. 어느 슬라이스에서 받을지는 [implementation-plan.md](implementation-plan.md)가 소유한다.
+  - **한 번에 다 받을 필요는 없다.** ~~읽기 전용 뷰 전의 gutter·본문 여백·상태바 순서~~는 **§4.1이 소스 확인으로 대신했다**(위 항목). 남은 것은 diff 본문 전의 **좌우 배치와 구분선**, LSP·미니맵이 붙기 전의 **호버 박스·미니맵 폭과 위치·진단 마커 폭**이다. 어느 슬라이스에서 받을지는 [네이티브 편집기 구현 계획](plans/native-editor.md)가 소유한다.
 
 - **지향 수준은 "VSCode 사용자가 어색함을 느끼지 않는 것"이다**(2026-08-09 사용자 결정). 이것은 기능 목록의 패리티가 아니라 **일상 편집 동작의 무회귀**를 뜻한다 — 손에 익은 키와 반응이 그대로여야 하고, 없으면 "이 편집기는 그게 안 되네"가 되는 것들이 기준선이다.
 
@@ -296,7 +296,7 @@ N2 이후로 미룬다.** 인레이 힌트·ghost text가 "편집기 폰트 크�
 
 **활성 pane이 편집기일 때만 나타난다.** 상태바는 **창 전폭 띠**라 항상 떠 있으면 터미널을 쓰는 동안에도 기존 항목(브랜치·cwd·에이전트 수)을 밀어낸다 — `status-bar.md`의 "폭이 부족하면 뒤쪽부터 통째로 버린다" 규칙 아래에서는 **밀려난 항목이 사라진다는 뜻**이다. 편집기 항목은 조건부이며, 터미널 pane이 활성이면 하나도 내보내지 않는다.
 
-**`ItemId` 확장이 필요하다.** 그 enum은 닫힌 목록(`git_branch`·`cwd`·`running_agents`·`notifications`·`blocked_agents`)이라 편집기 항목마다 값을 더해야 하고, **더하는 순서가 곧 폭 부족 시 버려지는 순서**다. 위 표의 항목을 한꺼번에 다 더하지 않고 **읽기 단계에 커서 위치 → 편집 단계에 선택 크기 → 이후 나머지** 순으로 넣는다(슬라이스 배정은 [implementation-plan.md](implementation-plan.md)).
+**`ItemId` 확장이 필요하다.** 그 enum은 닫힌 목록(`git_branch`·`cwd`·`running_agents`·`notifications`·`blocked_agents`)이라 편집기 항목마다 값을 더해야 하고, **더하는 순서가 곧 폭 부족 시 버려지는 순서**다. 위 표의 항목을 한꺼번에 다 더하지 않고 **읽기 단계에 커서 위치 → 편집 단계에 선택 크기 → 이후 나머지** 순으로 넣는다(슬라이스 배정은 [네이티브 편집기 구현 계획](plans/native-editor.md)).
 
 **저하 상태를 여기서 알린다.** §3.0의 큰 파일 기능 축소(미니맵·랩·구문 파싱이 꺼짐)와 §2.1의 "결과가 아직 없어 없는 대로 그림"은 §10.1이 관측 가능해야 한다고 요구하는데, **사용자에게 보이는 자리가 상태바다.** 조용히 줄어들면 사용자는 버그로 읽는다. `status-bar.md`의 "폭이 부족하면 뒤쪽부터 버린다" 규칙에서 **이 항목은 앞쪽에 둔다** — 평소에는 비어 있다가 축소가 일어났을 때만 나타나므로 자리를 상시 점유하지 않는다.
 
@@ -956,9 +956,9 @@ SyntaxProvider                        // 문서 하나당 하나, 상태를 스�
 **[project-rules.md](project-rules.md) §의존성이 "런타임 의존성은 기본 0, 추가하려면 먼저 사용자와 논의한다"고 요구했고, 그 논의를 거친 결정이다.** 후보 비교와 기각 근거는 §12가 기록으로 보관한다.
 
 - **채택 근거**: 파서를 우리가 만들지 않는다(런타임도 grammar도 완성품) · grammar 자산을 얻어 언어 커버리지가 노동에 비례하지 않는다 · 구문 트리라 근사 방식보다 정확하다. 대안인 자체 lexer는 **언어마다 상태 머신을 설계하고 영구히 유지**해야 했고, TextMate는 정규식 엔진과 해석기를 **둘 다 만들어야** 했다.
-- **배포 형태는 C다.** 런타임은 순수 C이고 grammar는 `grammar.js` → `tree-sitter generate` → `parser.c`로 생성된 C다. wasm 배포(`web-tree-sitter`)는 **maru에 wasm 런타임이 없어**([implementation-plan.md](implementation-plan.md) 10단계) 더 비싸다.
+- **배포 형태는 C다.** 런타임은 순수 C이고 grammar는 `grammar.js` → `tree-sitter generate` → `parser.c`로 생성된 C다. wasm 배포(`web-tree-sitter`)는 **maru에 wasm 런타임이 없어**([Workspace restore와 Plugin/Wasm 구현 계획](plans/workspace-restore.md) 10단계) 더 비싸다.
 - **라이선스**: tree-sitter 코어는 MIT이고 주요 grammar들도 permissive다(MIT·Apache-2.0·BSD·ISC). **grammar마다 개별 확인**하고 copyleft는 채택하지 않는다. 바이너리에 링크되어 배포물에 들어가므로 [third-party-licenses.md](third-party-licenses.md)가 attribution을 소유한다.
-- **지원 언어는 열린 집합이 아니다.** grammar마다 `parser.c`가 붙어 바이너리가 커지므로 **번들할 언어를 명시 목록으로 관리**하고, 추가는 크기 영향과 함께 판단한다. 목록과 추가 절차는 [implementation-plan.md](implementation-plan.md)가 소유한다.
+- **지원 언어는 열린 집합이 아니다.** grammar마다 `parser.c`가 붙어 바이너리가 커지므로 **번들할 언어를 명시 목록으로 관리**하고, 추가는 크기 영향과 함께 판단한다. 목록과 추가 절차는 [네이티브 편집기 구현 계획](plans/native-editor.md)가 소유한다.
 - **grammar가 없으면 무색이다**(§5). 자체 lexer fallback을 두지 않는다.
 - **파서를 신뢰 입력으로 다루지 않는다.** grammar는 제3자 C 코드이고 문서 내용은 적대적일 수 있다(§3.8) — 파싱 대상 크기·시간 상한을 두고, 파서 실패가 편집기를 죽이지 않게 격리한다. §3.0의 큰 파일 축소 단계에 **파싱 중단**이 포함된다.
 
@@ -1162,7 +1162,7 @@ SyntaxProvider                        // 문서 하나당 하나, 상태를 스�
   - **우리 구조는 Zed 쪽이다**(§3.0 persistent rope + §2.1 파싱 분리). 그래서 §3.0의 축소에서 파싱 중단을 **마지막 순서로** 두었다.
   - **그러나 첫 파싱 지연은 남는다.** 분리해도 결과가 늦게 올 뿐이며 그동안은 무색이다. 얼마나 늦는지는 **N4(토큰) 구현 시점에** 확인하고, Zed의 주장과 다르면 축소 순서를 다시 본다.
 - **런타임 의존성이 처음 생긴다**(§5.3 tree-sitter). [project-rules.md](project-rules.md)가 지켜 온 "런타임 의존성 0"이 깨지는 첫 사례이며, 딸려오는 것이 셋이다 — ⑴ **제3자 C 코드가 바이너리에 들어간다**(파서 실패가 편집기를 죽이지 않게 격리하고 파싱 상한을 둔다, §5.3), ⑵ **grammar마다 라이선스·attribution 관리**([third-party-licenses.md](third-party-licenses.md)), ⑶ **번들 크기가 지원 언어 수에 비례**한다. 이 셋은 언어를 추가할 때마다 다시 판단해야 하는 지속 비용이다.
-- **범위가 크다.** 편집기·토큰·LSP·diff·미니맵이 각각 독립 기능이고, 중간에 멈추면 "일부 파일만 네이티브"라는 어중간한 상태가 사용자에게 노출된다. 단계 경계와 각 단계의 출하 가능 여부는 [실제 구현 계획](implementation-plan.md)이 소유한다.
+- **범위가 크다.** 편집기·토큰·LSP·diff·미니맵이 각각 독립 기능이고, 중간에 멈추면 "일부 파일만 네이티브"라는 어중간한 상태가 사용자에게 노출된다. 단계 경계와 각 단계의 출하 가능 여부는 [네이티브 편집기 구현 계획](plans/native-editor.md)이 소유한다.
 
 ## 12. 이 계약 밖
 
@@ -1173,7 +1173,7 @@ SyntaxProvider                        // 문서 하나당 하나, 상태를 스�
   - **이 미결이 §1.1의 "VSCode 무회귀" 기준과 부딪힌다는 점을 명시한다.** "소스는 CM6 유지"를 택하면 사용자는 **파일 종류에 따라 다른 편집기**를 쓰게 된다 — `.py`는 네이티브, `.md` 소스는 CM6이고 그 둘은 키·선택·undo·검색이 미묘하게 다르다. 같은 앱 안에서 편집 경험이 갈리는 것은 그 기준이 막으려던 바로 그 어색함이다. **따라서 이 미결을 오래 두지 않는다** — 결정을 미루는 동안은 두 편집기가 공존하는 과도기이고, 그 상태가 기본값이 되어서는 안 된다.
 - **modal editing**(vim/emacs 키 모델).
 - **편집 상태의 workspace 복원 범위.** 파일 Term의 **경로**가 복원된다는 것은 [file-panel.md](file-panel.md)·[workspace-restore.md](workspace-restore.md)가 이미 정했지만, **커서 위치·스크롤·접힘·undo 스택**을 함께 되살릴지는 그 문서들이 정할 문제이고 이 문서가 앞서 결정하지 않는다. 다만 두 가지는 미리 못박는다 — **undo 스택은 복원 대상이 아니다**(저장되지 않은 편집을 되살리는 것이 되어 dirty 계약과 충돌한다), **diff Term은 애초에 저장되지 않는다**([editor-surface.md](editor-surface.md) §3.5).
-- **편집기 plugin 확장점.** 이 문서는 스팬 provider(§5)·완성 provider(§8.2)를 **내부 인터페이스**로 정의할 뿐, 그것을 plugin에 여는 것은 [plugin boundary](implementation-plan.md) 결정이다. 여는 순간 신뢰 경계가 생기므로([project-rules.md](project-rules.md) "plugin/extension boundary를 앞당기거나 늦추는 경우"는 사용자 논의 대상) 이 문서가 임의로 열지 않는다.
+- **편집기 plugin 확장점.** 이 문서는 스팬 provider(§5)·완성 provider(§8.2)를 **내부 인터페이스**로 정의할 뿐, 그것을 plugin에 여는 것은 [plugin boundary](plans/workspace-restore.md) 결정이다. 여는 순간 신뢰 경계가 생기므로([project-rules.md](project-rules.md) "plugin/extension boundary를 앞당기거나 늦추는 경우"는 사용자 논의 대상) 이 문서가 임의로 열지 않는다.
 - **구조 기반 선택 확장** — 구문 트리가 이제 있으므로(§5.3) **기술적 장벽은 없고 소비처만 없다.** 계약 안으로 올릴지는 별도 판단이며, tree-sitter 쿼리 또는 LSP `selectionRange` 어느 쪽으로도 구현 가능하다.
   - **다만 이것만은 `Selection`에 담기지 않는다는 것을 미리 적는다.** 확장(⌃⇧⌘→)한 뒤 **축소**(⌃⇧⌘←)하려면 지나온 범위들을 기억해야 하므로 **커서마다 범위 스택 + 현재 인덱스**가 필요하다(VSCode `SmartSelectController`의 `_state: SelectionRanges[]`). 그리고 **사용자가 커서를 움직이면 그 스택을 버려야 한다** — 안 버리면 무관한 위치에서 옛 이력으로 축소된다(VSCode도 `onDidChangeCursorPosition`으로 폐기한다). 즉 계약 안으로 올릴 때 필요한 것은 selection 구조 변경이 아니라 **별도 상태와 그 무효화 규칙**이며, 그래서 지금 `Selection`에 자리를 비워 두지 않는다.
   - **정정: 들여쓰기 증감과 자동 닫기는 파서를 요구하지 않는다.** 초판은 이것들을 "구문 트리가 필요한 편집 보조"로 묶었으나 **VSCode는 언어별 선언적 설정으로 한다** — `language-configuration.json`의 `autoClosingPairs`(`notIn: ["string","comment"]`로 문맥 제외까지)·`surroundingPairs`·`indentationRules`(`increaseIndentPattern`/`decreaseIndentPattern` 정규식)·`onEnterRules`(`beforeText`/`afterText`/`previousLineText` 정규식)이며 **파서도 LSP도 아니다.** 따라서 §3.7의 타이핑 보조와 "`{` 뒤 한 단계 더 들여쓰기"는 **언어당 작은 설정 데이터로 계약 안에 들어올 수 있고, 1층 선택과 독립이다.** 붙여넣기 시 들여쓰기 재조정도 같은 규칙으로 근사할 수 있다.
@@ -1195,10 +1195,10 @@ SyntaxProvider                        // 문서 하나당 하나, 상태를 스�
   - **TextMate는 실질적으로 탈락한다.** 유일한 명분이 "C 의존성 없이 grammar 자산을 얻는 것"인데, ⑴ Zig 표준 라이브러리에 정규식이 없어(이 저장소도 쓰지 않는다 — §5.1) 엔진을 **가져오거나 직접 만들어야** 하므로 그 명분이 서지 않고, ⑵ `patterns`/`begin`-`end` 스택 해석기까지 만들어야 하며(VSCode는 `vscode-textmate` 별도 라이브러리, 정규식은 `vscode-oniguruma`로 Oniguruma를 **wasm 컴파일**해 쓴다), ⑶ 결과 품질은 정규식 근사라 tree-sitter보다 낮다. **C를 받아들일 거면 tree-sitter가 모든 축에서 낫다.**
   - **tree-sitter의 인터페이스 차이는 일회성 설계이지 지속 비용이 아니다.** §5의 `SpanProvider`는 `(시작 상태, 줄 bytes) → {spans, 끝 상태}`로 **호출자가 상태를 들고 다니는** lexer 모델이고(`vscode-textmate`의 `tokenizeLine` + `StateStack`과 동형), tree-sitter는 **상태가 문서 트리라 provider가 소유**하며 증분 파싱을 위해 편집 통지가 필요하다 — `init(문서)` / `onEdit(범위, 바이트)` / `spansForRange(범위)` 정도의 다른 모양이다. **함수 셋짜리 배선을 한 번 만드는 일**이며, 언어마다 상태 머신을 설계하고 영구히 유지하는 것과 비교 대상이 아니다.
   - **따라서 선택은 하나로 좁혀진다 — C 런타임 의존성을 받아들이는가.** 받으면 tree-sitter가 구현·품질·자산 모두에서 낫고, 받지 않으면 자체 lexer가 유일하다. 이 판단은 [project-rules.md](project-rules.md) §의존성의 사용자 논의 대상이다.
-  - **wasm 경로가 더 비싸다.** `web-tree-sitter`는 C 런타임을 wasm으로 컴파일한 브라우저용 배포이고, **maru에는 wasm 런타임이 없다**([implementation-plan.md](implementation-plan.md) 10단계: "v1에는 Wasm runtime을 넣지 않는다"). Zig 네이티브 앱에서는 C 경로가 자연스럽다.
+  - **wasm 경로가 더 비싸다.** `web-tree-sitter`는 C 런타임을 wasm으로 컴파일한 브라우저용 배포이고, **maru에는 wasm 런타임이 없다**([Workspace restore와 Plugin/Wasm 구현 계획](plans/workspace-restore.md) 10단계: "v1에는 Wasm runtime을 넣지 않는다"). Zig 네이티브 앱에서는 C 경로가 자연스럽다.
   - **따라서 실질 선택지는 둘이다** — **자체 lexer(의존성 0, 커버리지는 우리가 쓴 만큼)** 대 **tree-sitter(C 의존성, 자산과 정확도를 함께 얻음)**.
 
-  - **wasm 경로가 더 비싸다.** `web-tree-sitter`는 C 런타임을 wasm으로 컴파일한 브라우저용 배포이고, **maru에는 wasm 런타임이 없다**([implementation-plan.md](implementation-plan.md) 10단계: "v1에는 Wasm runtime을 넣지 않는다"). Zig 네이티브 앱에서는 C 경로가 자연스럽다.
+  - **wasm 경로가 더 비싸다.** `web-tree-sitter`는 C 런타임을 wasm으로 컴파일한 브라우저용 배포이고, **maru에는 wasm 런타임이 없다**([Workspace restore와 Plugin/Wasm 구현 계획](plans/workspace-restore.md) 10단계: "v1에는 Wasm runtime을 넣지 않는다"). Zig 네이티브 앱에서는 C 경로가 자연스럽다.
   - **VSCode는 TextMate grammar를 만들지 않고 물려받았다** — 그 포맷은 macOS 에디터 TextMate(2004)의 것이고, Sublime Text가 따르면서 20년 가까이 커뮤니티 자산이 쌓였다. 우리가 같은 위치에 서려면 그 자산을 **읽을 수 있어야** 하는데, 그 비용이 위 표의 셋째 행이다.
   - **tree-sitter가 주는 것은 "정확도"이지 "1층의 존재"가 아니다.** 아래 이득 목록은 그 전제 위에서 읽는다.
   - **LSP와의 관계를 정확히 둔다 — tree-sitter는 *구문*, LSP는 *의미*다.** 겹치는 것은 넷(접힘·구조 선택 확장·심볼 목록·하이라이트)이고 그중 **하이라이트는 LSP가 더 낫다**(tree-sitter는 `foo`가 호출 형태인지는 알지만 함수인지 변수인지는 정의를 봐야 안다). 즉 **LSP를 붙이면 겹치는 넷에서 tree-sitter의 이득이 줄어든다.**

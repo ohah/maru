@@ -1,4 +1,4 @@
-//! mermaid 다이어그램 색을 **Maru 터미널 색상 테마**에서 파생한다(docs/file-panel.md §2.2 "프리뷰 렌더 개선").
+//! mermaid 다이어그램 색을 **Maru 터미널 색상 테마**에서 파생한다(docs/file-panel-kinds.md §2.2 "프리뷰 렌더 개선").
 //! 시스템 light/dark만 따르던 것을 `ResolvedTheme`의 fg/bg/accent/sidebar 색에 매핑해, 다이어그램이 옆 터미널과
 //! 같은 팔레트를 쓴다(사용자 요청 2026-07-23). 순수 함수라 헤드리스 테스트로 매핑을 고정한다.
 //!

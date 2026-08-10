@@ -231,7 +231,7 @@ pub const abi_version: u32 = 169;
 // 151: agent-session archive detail fixture의 loading→stale 전이를 실제 AppKit host 경로에서
 // 재현하기 위한 one-way smoke gate export 두 개를 추가한다. production 입력은 이 gate를 arm할 수
 // 없고, host는 detail/action/session source를 읽거나 변경하지 않는다.
-// 150: 파일 패널 리치 편집 모드(raw 2)를 추가한다 — markdown 전용 문서모델 WYSIWYG(docs/file-panel.md §2.5).
+// 150: 파일 패널 리치 편집 모드(raw 2)를 추가한다 — markdown 전용 문서모델 WYSIWYG(docs/file-panel-rich-edit.md §2.5).
 // 149: 파일 패널 mode를 surface_id로 설정하는 export를 추가한다(헤더 클릭과 같은 경로·같은 pending action).
 // 148: 라이브 프리뷰 폐기 — file panel mode 2(live-preview)와 앱 전역 live-preview worker budget ABI를 제거하고
 //      `maru.file.livePreviewReady`를 `maru.file.rendererReady`로 개명한다. app origin CSP는 worker-src 'none'.
@@ -1498,7 +1498,7 @@ const FocusOwner = union(enum) {
     workspace,
     /// Entry가 존재하지만 native surface publish를 기다리는 동안만 쓰는 fail-closed 파일 entry identity.
     /// FP16 이전엔 도크 group runtime_id를 들었지만, entry가 Term으로 옮겨가 그룹이 없어진 뒤로는
-    /// PendingDockFocus와 같은 축(EntryId)을 든다 — barrier의 의미는 그대로다(docs/file-panel.md §3.4).
+    /// PendingDockFocus와 같은 축(EntryId)을 든다 — barrier의 의미는 그대로다(docs/file-panel-dock-ui.md §3.4).
     dock_pending: dock_panel.EntryId,
     file_tree: FileTreeFocusOwner,
 };
@@ -2691,7 +2691,7 @@ pub const AppSession = struct {
     base_font_size: f32 = 0,
     // 폰트 크기(⌘+/−·config)가 바뀌면 세우는 1회성 신호. Swift tick이 take_file_panel_zoom_dirty로 drain해
     // 열린 파일 패널 webview 크기를 재적용한다(편집기 폰트 pt 재주입 + 프리뷰/HTML·PDF 페이지 줌). take_bell·
-    // command_catalog_dirty와 같은 drain 패턴 — 파일 패널이 없어도 무해(drain만 하고 무동작). 단일 출처=docs/file-panel.md §2.3.
+    // command_catalog_dirty와 같은 drain 패턴 — 파일 패널이 없어도 무해(drain만 하고 무동작). 단일 출처=docs/file-panel-web-stack.md §2.3.
     file_panel_zoom_dirty: bool = false,
     // serializeWorkspaceWindow가 돌려주는 workspace 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 — cwd ABI와 같은
     // 소유 규칙). Swift가 멀티 창 저장에서 세션마다 한 번 읽는다.
@@ -3193,7 +3193,7 @@ pub const AppSession = struct {
     // 복사/붙여넣기 메뉴다(rename 대상·view_options와 배타). buildContextMenuItems/acceptContextMenu/closeContextMenu가
     // 이 플래그로 분기한다. 항목 선택 시 pending_clipboard_action을 세워 Swift가 OS 클립보드 동작을 한다(F2-5).
     terminal_context_menu: bool = false,
-    // 파일 Term 본문 우클릭 메뉴(docs/file-panel.md §2.6). 다른 메뉴들과 chrome_host.context_menu를 공유하되
+    // 파일 Term 본문 우클릭 메뉴(docs/file-panel-kinds.md §2.6). 다른 메뉴들과 chrome_host.context_menu를 공유하되
     // 이게 non-null이면 그 분기다. web이 올린 대상·좌표로 항목을 정하고, 실행 주인은 항목마다 갈린다.
     file_content_menu: ?FileContentMenu = null,
     /// 상태바 브랜치 항목을 눌러 연 브랜치 목록. 이름 슬라이스는 `branch_menu_text`(owned)를 빌린다 —
@@ -6369,7 +6369,7 @@ pub const AppSession = struct {
     }
 
     /// openKindForPath 결과를 도크 EntryKind로 옮기는 단일 지점. 새 kind(svg·image·media·pdf, FP13~)는 여기서
-    /// 한 번만 매핑을 넓힌다(docs/file-panel.md §2.2). 이름이 1:1이라도 두 enum(bridge OpenKind·dock EntryKind)의
+    /// 한 번만 매핑을 넓힌다(docs/file-panel-kinds.md §2.2). 이름이 1:1이라도 두 enum(bridge OpenKind·dock EntryKind)의
     /// 레이어 경계를 유지한다.
     pub fn entryKindForOpenKind(open_kind: file_panel_bridge.OpenKind) dock_panel.EntryKind {
         return switch (open_kind) {
@@ -7659,7 +7659,7 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 파일 Term 본문 우클릭 메뉴 상태(docs/file-panel.md §2.6). `href`는 소유 버퍼다 — 렌더러가 준 문자열이라
+    /// 파일 Term 본문 우클릭 메뉴 상태(docs/file-panel-kinds.md §2.6). `href`는 소유 버퍼다 — 렌더러가 준 문자열이라
     /// 메뉴가 열려 있는 동안 web이 문서를 바꿔도 우리가 든 값이 그대로여야 한다.
     pub const FileContentMenu = struct {
         surface_id: u64,
@@ -8463,7 +8463,7 @@ pub const AppSession = struct {
     /// Session Dock 검색도 같은 이유로 여기 있어야 한다 — `InputFocus`에만 넣으면 Zig는 키를 도크로 라우팅하는데
     /// reconcileWebFocus는 override 없이 활성 web term의 WKWebView를 firstResponder로 되돌린다(매 tick self-heal).
     pub fn terminalOwnsInput(self: *const AppSession) bool {
-        // **파일 본문 우클릭 메뉴는 예외다**(docs/file-panel.md §2.6). 그 메뉴가 뜨는 동안 firstResponder를 터미널로
+        // **파일 본문 우클릭 메뉴는 예외다**(docs/file-panel-kinds.md §2.6). 그 메뉴가 뜨는 동안 firstResponder를 터미널로
         // 옮기면 WKWebView가 포커스를 잃고, WebKit은 포커스 없는 문서의 선택을 **아예 안 그린다** — 사용자가 방금
         // 겨냥한 블록이 우클릭하는 순간 사라진다(실제로 그랬다). 선택을 우리가 흉내 내 그리는 길은 리스트 마커처럼
         // 텍스트 노드가 아닌 것을 덮어 버려 접었다(§2.6). 그래서 그리게 두는 대신 **포커스를 안 뺏는다.**
@@ -48781,7 +48781,7 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     _ = try pane_ops.openFileTermInActivePane(session, link_path, .markdown);
     session.fileEntryAt(2).?.surface_id = 903;
     // markdown 기본 모드는 읽기이며, 편집·write·mermaid 게이트를 모두 그 제품 경로에서 검증한다
-    // (읽기로 전환해도 CM6 buffer가 살아 있어 ⌘S 저장이 성립한다 — docs/file-panel.md §2.4).
+    // (읽기로 전환해도 CM6 buffer가 살아 있어 ⌘S 저장이 성립한다 — docs/file-panel-web-stack.md §2.4).
 
     const doc_epoch = try file_panel_ops.beginFilePanelDocument(session, 901, 1);
     try std.testing.expect(session.filePanelMermaidDocumentActive(901, doc_epoch));

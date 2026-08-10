@@ -52,7 +52,7 @@
 - [세션 컨트롤 플레인(CLI·웹뷰 IPC)](docs/control-plane.md) — 절별 소유: [transport·프로토콜](docs/control-plane-protocol.md)·[보안](docs/control-plane-security.md)·[`browser.*` 코어와 CLI](docs/control-plane-browser.md)·[라이브 배선](docs/control-plane-browser-wiring.md)·[프로토콜 리뷰](docs/control-plane-browser-review.md)·[지속 세션](docs/control-plane-browser-session.md)·[구현 Phase와 검증](docs/control-plane-implementation.md)
 - [웹 패널 인프라(WKWebView 합성)](docs/web-panel.md)
 - [텍스트 필드 에디터(주소창 caret·선택·마우스 편집)](docs/text-field-editor.md)
-- [파일 패널(마크다운·HTML 뷰어/편집기)](docs/file-panel.md)
+- [파일 패널(마크다운·HTML 뷰어/편집기)](docs/file-panel.md) — 절별 소유: [kind 분기](docs/file-panel-kinds.md)·[웹 스택과 렌더](docs/file-panel-web-stack.md)·[리치 편집 모드](docs/file-panel-rich-edit.md)·[도크 UI](docs/file-panel-dock-ui.md)·[테스트·검증](docs/file-panel-verification.md)
 - [파일 탐색기(도크 트리·watcher·root)](docs/file-explorer.md)
 - [선택 영역을 에이전트에 보내기(파일 패널 → 터미널 CLI)](docs/send-selection-to-agent.md)
 - [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md)

@@ -1,4 +1,4 @@
-//! text kind 소스 편집기(docs/file-panel.md §2.2·§2.3)의 CM6 하이라이트 색을 **Maru 터미널 색상 테마**에서
+//! text kind 소스 편집기(docs/file-panel-kinds.md §2.2, docs/file-panel-web-stack.md §2.3)의 CM6 하이라이트 색을 **Maru 터미널 색상 테마**에서
 //! 파생한다. 시스템 light/dark가 아니라 `ResolvedTheme`의 ANSI 16색 + fg/bg를 각 syntax 역할에 매핑해, 편집기
 //! 색이 옆 터미널과 같은 팔레트를 쓴다(사용자 결정 2026-07-22). 순수 함수라 헤드리스 테스트로 매핑을 고정한다.
 //!
@@ -214,7 +214,7 @@ test "fromTheme darkens vivid colors on a light background" {
 
 test "syntax colors follow the terminal theme instead of a fixed palette" {
     // 왜 중요한가: 편집기·읽기 프리뷰의 코드 색은 시스템 light/dark가 아니라 **터미널 색상 테마**에서 파생한다
-    // (docs/file-panel.md §2.3). 테마를 바꿨는데 같은 색이 나온다면 파생이 끊겨 옆 터미널과 색이 어긋난다.
+    // (docs/file-panel-web-stack.md §2.3). 테마를 바꿨는데 같은 색이 나온다면 파생이 끊겨 옆 터미널과 색이 어긋난다.
     // 라이브 프리뷰 폐기로 web 모듈이 크게 바뀌었어도 이 파생 자체는 그대로여야 한다.
     var dark: appearance.ResolvedTheme = undefined;
     dark.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };

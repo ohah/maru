@@ -110,7 +110,7 @@ WKWebView를 하나도 소유하지 않고, 파일 본문은 위의 web Term 경
 따라서 terminal grid와 웹 콘텐츠는 같은 수준의 여백을 갖되 tab/header와
 split·dock divider 자체는 padding 때문에 안쪽으로 밀리지 않는다. `paneBarRect`/`paneTermRect`는 `PaneGeometry`
 accessor일 뿐 bar/padding 산술을 복제하지 않는다. focus border의 상태·z-order·테마와 비-key/OOM fail-close 계약은
-[file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
+[file-panel-dock-ui.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
 
 **표시 grid는 레이아웃이 소유한다**: 위 `.grid`에서 나온 크기는 그 Term의 표시 grid에 **항상** 적용된다
 (`AppSession.resizeTermForLayout`이 단일 출처). 이건 편의가 아니라 렌더가 서는 근거다 — 렌더러는 셀을

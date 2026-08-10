@@ -162,7 +162,7 @@ Command+B      -> 초기에는 오류
 
 ### 파일 도크·트리 키 소유권과 우선순위
 
-Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·browser·파일 Term 공통), `.dock_pending { EntryId }`(파일 WebView publish를 기다리는 짧은 fail-closed barrier), `.file_tree { restore_surface }` 셋이다. FP16(2026-07-28)에서 `.dock_surface { surface_id }`와 `.dock_group { runtime_id }`는 사라졌다 — 파일이 워크스페이스 pane 탭이 되면서 "어느 파일 WebView가 native focus인가"는 별도 축이 아니라 **활성 pane의 활성 Term**에서 파생된다(docs/file-panel.md §3.4).
+Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·browser·파일 Term 공통), `.dock_pending { EntryId }`(파일 WebView publish를 기다리는 짧은 fail-closed barrier), `.file_tree { restore_surface }` 셋이다. FP16(2026-07-28)에서 `.dock_surface { surface_id }`와 `.dock_group { runtime_id }`는 사라졌다 — 파일이 워크스페이스 pane 탭이 되면서 "어느 파일 WebView가 native focus인가"는 별도 축이 아니라 **활성 pane의 활성 Term**에서 파생된다(docs/file-panel-dock-ui.md §3.4).
 
 1. confirm·notice·palette·rename 같은 modal/overlay input owner가 자신의 Enter/Esc/편집 키를 먼저 소비한다.
 2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveFileTree`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
@@ -174,7 +174,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·
 
 | 키 | action/소유자 | 의미 |
 |---|---|---|
-| `⌘W` | `close_focused` | 도크 WebView가 이벤트를 받으면 그 surface의 파일 탭, 트리 포커스면 포커스 group의 active 파일 탭, terminal/browser pane이면 기존 Term close cascade. Metal terminal key entry와 stale dock owner가 충돌하면 interactive overlay·tree·surface-publish 대기를 보존한 뒤 terminal provenance가 이긴다. browser WebView가 source이면 stale dock owner를 버리고 workspace owner와 Metal responder intent를 먼저 세우므로 확인창을 취소하거나 승인한 뒤 다음 `⌘W`도 눈앞의 workspace cascade를 따른다. dirty close는 [file-panel.md](file-panel.md) §3.2를 따른다. |
+| `⌘W` | `close_focused` | 도크 WebView가 이벤트를 받으면 그 surface의 파일 탭, 트리 포커스면 포커스 group의 active 파일 탭, terminal/browser pane이면 기존 Term close cascade. Metal terminal key entry와 stale dock owner가 충돌하면 interactive overlay·tree·surface-publish 대기를 보존한 뒤 terminal provenance가 이긴다. browser WebView가 source이면 stale dock owner를 버리고 workspace owner와 Metal responder intent를 먼저 세우므로 확인창을 취소하거나 승인한 뒤 다음 `⌘W`도 눈앞의 workspace cascade를 따른다. dirty close는 [file-panel-dock-ui.md](file-panel-dock-ui.md) §3.2를 따른다. |
 | `⌘⇧E` | `toggle_file_panel_focus` | workspace terminal/browser에서 project tree로 들어가고, 파일 도크 본문/트리에서는 활성 workspace pane으로 돌아간다. 완전히 빈 도크는 picker를 열지 않고 no-op notice. 사용자 rebind/unbind 우선. |
 | `⌘S` | Markdown CM6 | 라이브·소스에서 현재 revision을 pathless atomic write로 저장한다. 성공한 같은 revision에서만 dirty를 내리며 autosave는 없다. |
 | `⌘F` | Markdown CM6 | 라이브·소스에서는 Maru의 작은 CM6 search extension이 문서 검색을 연다. 검색은 explicit 사용자 동작에서만 source 문자열을 만들 수 있으며 새 runtime package는 추가하지 않는다. read/HTML/terminal에서는 기존 context resolver 의미를 유지한다. |

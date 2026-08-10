@@ -69,7 +69,7 @@ L3는 L2 캐시를 **복사하지 않고 읽는다** — chrome이 session을 pr
 | **자동완성 팝업** | **재활용** `dropdown.zig`의 팝업 부분(`State`/`viewPopup`/`handle`/`itemAt`) | §8의 공통 규칙 넷(앵커·화면 clamp·↑↓/Enter 키 가로채기·modal 오버레이 규율)을 **이미 전부 갖고 있다** |
 | 스크롤바 | **재활용** `ui/scroll_area.zig`(`ScrollbarMetrics`·`ScrollbarGeometry`·`Drag`) | §4 뷰포트 |
 | 상태바 항목 | **확장** `status_bar.zig` — `ItemId` 추가 | §2.2 |
-| 탭·dirty 표시 | **자동** — 파일이 `Term`이라 pane 탭바가 그대로 그린다. **단 탭 이름 편집은 예외**(아래) | [file-panel.md](file-panel.md) §1 · §2.3 |
+| 탭·dirty 표시 | **자동** — 파일이 `Term`이라 pane 탭바가 그대로 그린다. **단 탭 이름 편집은 예외**(아래) | [file-panel.md](file-panel.md) §1 · [file-panel-web-stack.md](file-panel-web-stack.md) §2.3 |
 | diff 좌우 분할선 | **재활용** `divider.zig` | §7 |
 | 진단 밑줄 | **확장** — 셀 하단 밑줄 장식이 이미 있다(Cmd+hover URL 경로). **물결만 추가** | §5 |
 | **커서·선택·블록 선택 렌더** | **재활용** — chrome 컴포넌트가 아니라 **렌더러 셀 속성**이다. `metal_frame`의 overlay 종류(block=전체 사각형·underline·bar·hollow)가 이미 있고, 블록 선택은 터미널 `selection.zig`에 선례가 있다(`selection_anchor/head/block`). **멀티 커서를 위해 새 UI를 만들 필요가 없다** — `cursor_start`/`cursor_cells` 단일 구간을 배열로 넓히는 ABI 확장 하나뿐이다 | §1.1·§3.2 |

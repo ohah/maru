@@ -30,7 +30,7 @@ pub const max_entries: usize = 256;
 /// 한 창 도크의 editor group 상한. 분할 UI는 보통 한 자릿수지만 workspace 입력이 빈 leaf를 무한히 만들지
 /// 못하게 모델과 reader가 같은 bound를 쓴다. 64 groups면 preorder node도 최대 127개로 고정된다.
 /// 콘텐츠 종류는 WebKit 구성 선택에 쓰이는 L2 정책 값이다. 브라우저 탭을 도크로 보내는 후속 확장은 이 닫힌 목록에
-/// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1·§2.2). `text`는 markdown과 같은
+/// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1, docs/file-panel-kinds.md §2.2). `text`는 markdown과 같은
 /// 신뢰 shell·`maru.file.read/write` 브리지를 쓰지만 라이브 프리뷰·mode 선택기·링크가 없는 소스 전용 편집기다(FP12).
 pub const EntryKind = enum {
     markdown,
@@ -183,7 +183,7 @@ pub const Entry = struct {
     dirty_sync_pending: bool = false,
     /// scope close(`.pane`/`.tab`)가 파괴 전 dirty 스냅샷을 **이미 한 번 요청했나**. 브릿지가 영영 답하지
     /// 않아도 두 번째 시도는 그냥 진행하게 하는 once-only 래치다 — 없으면 편집 가능 파일이 든 pane이
-    /// 영원히 안 닫힌다(docs/file-panel.md §3.2).
+    /// 영원히 안 닫힌다(docs/file-panel-dock-ui.md §3.2).
     close_snapshot_requested: bool = false,
     /// shell이 보고한 CM6 문서 revision. close request의 request_id/revision ack와 함께 stale clean/save 완료를 거부한다.
     editor_revision: u64 = 0,

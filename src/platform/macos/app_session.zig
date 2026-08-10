@@ -775,9 +775,12 @@ const max_agent_rows: usize = 12;
 pub const agent_header_rows: usize = 2;
 /// 에이전트 행에서 **이름이 쓸 수 있는 표시 칸**. "마지막 활동" 열이 고정 폭이라 이름만 예산을 먹는다.
 const agent_row_name_cols: u32 = 24;
-/// "마지막 활동" 열 폭(표시 칸). `formatAgentSessionArchiveRelativeAge`가 내는 가장 긴 문자열("N시간 전")이
-/// 들어갈 만큼이다 — 값 열이 흔들리면 이름 예산도 흔들린다.
-const agent_age_cols: u32 = 8;
+/// "마지막 활동" 열의 머리글 문자열. 폭의 **단일 출처**다 — 아래 `agent_age_cols`가 이걸로부터 나온다.
+const agent_age_header = "마지막 활동";
+/// 값 열 폭(표시 칸) = **머리글 폭**. 값을 이 폭 안에서 오른쪽 정렬하면 값과 열 이름과 제목의 개수가
+/// 모두 **같은 칸에서 끝난다**. 상수를 따로 박으면(예전 8) 머리글(11칸)보다 좁아 열이 어긋난다 —
+/// 리소스 팝오버가 `formatHeader`로 푼 것과 같은 문제이고, 여기서는 폭을 머리글에서 파생시켜 푼다.
+const agent_age_cols: u32 = chrome.components.overlay_input.displayCols(agent_age_header);
 
 /// 앱 자신 행 라벨. **"모든 창 공유"를 이름에 박는다** — 창이 여럿이면 각 창이 같은 값을 보여주므로,
 /// 두 창의 숫자를 더하면 이중으로 잡힌다는 사실이 화면에서 드러나야 한다(§4.1의 남는 결함).
@@ -11845,6 +11848,13 @@ pub const AppSession = struct {
         used += copyClamped(title[used..], "  ");
         var count_buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buf, "{d}개", .{self.agent_menu_len}) catch "";
+        // 제목의 개수도 값 열과 **같은 오른쪽 끝**에 맞춘다 — 세 줄(제목·열 이름·값)의 끝이 어긋나면
+        // 목록이 정렬돼 보이지 않는다(사용자 지적).
+        var cpad = agent_age_cols -| cols(count);
+        while (cpad > 0 and used < title.len) : (cpad -= 1) {
+            title[used] = ' ';
+            used += 1;
+        }
         used += copyClamped(title[used..], count);
         self.context_menu_items_buf[0] = title[0..used];
 
@@ -11856,7 +11866,7 @@ pub const AppSession = struct {
             m += 1;
         }
         m += copyClamped(head[m..], "  ");
-        m += copyClamped(head[m..], "마지막 활동");
+        m += copyClamped(head[m..], agent_age_header);
         self.context_menu_items_buf[1] = head[0..m];
     }
 
@@ -45690,6 +45700,38 @@ test "SB-AG: 에이전트가 하나면 메뉴 없이 그 Term으로 점프한다
     try std.testing.expectEqual(target_id, term_ops.activeSurfaceConst(session).id);
     // 도크는 열리지 않는다(옛 동작이 남아 있지 않다).
     try std.testing.expect(!session.dock.presented);
+}
+
+// SB-AG: 팝오버의 **오른쪽 열이 한 줄로 맞아야** 목록으로 읽힌다(사용자 지적). 제목의 개수·열 이름·값이
+// 모두 같은 칸에서 끝난다 — 값 열 폭을 머리글 폭에서 파생시키기 때문이다. 상수를 따로 박으면 머리글이
+// 더 넓어져 어긋난다(실제로 그랬다: 폭 8 vs 머리글 11칸).
+test "SB-AG: 제목·열 이름·값이 같은 칸에서 끝난다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try tab_ops.newTab(session);
+
+    const t0 = session.tabs.items[0].panes.items[0].terms.items[0];
+    const t1 = session.tabs.items[1].panes.items[0].terms.items[0];
+    for ([_]*Term{ t0, t1 }) |t| {
+        t.agent_state = .running;
+        t.agent_last_output_ms = session.awakeMs();
+    }
+    try std.testing.expect(try statusBarHasText(allocator, session, "2"));
+    session.activateStatusBarItem(.running_agents);
+    try std.testing.expect(session.agent_menu_open);
+
+    // 네 줄(제목·열 이름·행 2개)의 **표시 칸 폭**이 모두 같아야 한다 — 끝이 맞는다는 뜻이다.
+    const cols = chrome.components.overlay_input.displayCols;
+    const want = cols(session.context_menu_items_buf[0]);
+    try std.testing.expect(want > 0);
+    for (session.context_menu_items_buf[0..session.context_menu_items_len]) |line| {
+        try std.testing.expectEqual(want, cols(line));
+    }
+    // 값 열 폭이 머리글에서 나왔다 — 상수를 박으면 이 단언이 깨진다.
+    try std.testing.expectEqual(cols(agent_age_header), agent_age_cols);
 }
 
 // SB-AG: 정렬 규칙이 두 항목에서 **다르다**(§4). 막힌 것은 처리 대기열이라 오래 기다린 순, 실행 중은 훑는

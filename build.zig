@@ -2096,6 +2096,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b2b immutable event preparation umbrella gate",
     );
     session_host_2c3d_c3_3b2b_step.dependOn(session_host_2c3d_c3_3b2b3_step);
+    const session_host_2c3d_c3_3b3_step = b.step(
+        "test-session-host-2c3d-c3-3b3",
+        "2c3d C3-3b3 atomic pending event settlement Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b3_step.dependOn(session_host_2c3d_c3_3b2b_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2468,6 +2473,59 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3b2b3_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b2b3_step.dependOn(&run_event_c3_3b2b3_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b2b3_boundary_tests.step);
+
+        const event_c3_3b3_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/pending_event_settlement.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const B3SettlementTest = struct {
+            fn add(
+                bld: *std.Build,
+                step: *std.Build.Step,
+                module: *std.Build.Module,
+                filter: []const u8,
+                expected: u8,
+            ) void {
+                const artifact = addProjectTest(bld, .{
+                    .root_module = module,
+                    .filters = &.{filter},
+                });
+                const run = bld.addRunArtifact(artifact);
+                run.addArg(bld.fmt("--maru-expect-tests={d}", .{expected}));
+                run.setCwd(bld.path("."));
+                step.dependOn(&run.step);
+            }
+        };
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 lease owner", 6);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 closed outcome", 6);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 authority receipt", 6);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 retry callback", 6);
+
+        const event_c3_3b3_subprocess_tests = addProjectTest(b, .{
+            .root_module = event_c3_3b3_module,
+            .filters = &.{"C3-3b3 subprocess"},
+        });
+        const run_event_c3_3b3_subprocess_tests = b.addRunArtifact(event_c3_3b3_subprocess_tests);
+        run_event_c3_3b3_subprocess_tests.addArg("--maru-expect-tests=3");
+        run_event_c3_3b3_subprocess_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b3_step.dependOn(&run_event_c3_3b3_subprocess_tests.step);
+
+        const event_c3_3b3_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3b3_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"C3-3b3 atomic settlement boundary"},
+        });
+        const run_event_c3_3b3_boundary_tests = b.addRunArtifact(event_c3_3b3_boundary_tests);
+        run_event_c3_3b3_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b3_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b3_step.dependOn(&run_event_c3_3b3_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3b3_boundary_tests.step);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

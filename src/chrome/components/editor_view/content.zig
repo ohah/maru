@@ -12,6 +12,7 @@ const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
 const text_layout = @import("../../text_layout.zig"); // 텍스트 셀 배치 단일 출처(cluster 분절·폭)
+const display_width = @import("../../../display_width.zig"); // §4.2 표시 폭 — 셀 배치(system_text)와 같은 규칙
 const hazard = @import("../../../hazard.zig"); // §3.8 적대적 입력 판정 — 순수 유니코드(레이어 무관 중립)
 
 const draw = chrome.draw;
@@ -199,7 +200,9 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8) !Expanded {
         if (used + n > out.len) return error.OutOfSpace;
         @memcpy(out[used..][0..n], bytes[i..][0..n]);
         used += n;
-        col += text_layout.clusterCols(base.cp, null);
+        // **cluster 전체를 넘긴다**(§4.2) — base 코드포인트만 보면 VS16(❤️)과 국기를 1칸으로 세어
+        // 컬러 글리프가 절반 크기로 그려진다. 터미널의 `width.cellWidth`와 갈리는 지점이다.
+        col += display_width.clusterCols(bytes, i, end);
         i += n;
     }
     return .{ .text = out[0..used], .scratch_used = used };

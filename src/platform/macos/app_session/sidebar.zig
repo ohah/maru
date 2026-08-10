@@ -19,6 +19,9 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const DropPlan = AppSession.DropPlan;
+const GroupNestPlan = AppSession.GroupNestPlan;
+const coretext_bridge = app_session_mod.coretext_bridge;
 const dock_list_scrollbar_inset_px = app_session_mod.dock_list_scrollbar_inset_px;
 const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
 const dock_list_scrollbar_width_px = app_session_mod.dock_list_scrollbar_width_px;
@@ -63,7 +66,6 @@ const packOpaqueRgb = app_session_mod.packOpaqueRgb;
 const renderer = app_session_mod.renderer;
 const scrollbar_alpha_full = app_session_mod.scrollbar_alpha_full;
 const sidebarCwdPath = app_session_mod.sidebarCwdPath;
-const sidebar_max_pt = app_session_mod.sidebar_max_pt;
 const sidebar_scroll_max_entries = app_session_mod.sidebar_scroll_max_entries;
 const tab_ops = @import("tab.zig");
 
@@ -238,7 +240,7 @@ pub fn sidebarCardDropAfterGroup(self: *AppSession, raw_row: usize, from: usize,
     const mj: struct { m: usize, j: usize } = switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| blk: {
             if (c.tab >= len) return null;
-            const tl = self.topLevelGroupMarkerIndex(c.tab) orelse return null; // 그룹 밖 카드 → gap 아님
+            const tl = tab_ops.topLevelGroupMarkerIndex(self, c.tab) orelse return null; // 그룹 밖 카드 → gap 아님
             if (tab_ops.groupSubtreeEnd(self, tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
             break :blk .{ .m = tl, .j = c.tab + 1 }; // 위 가드가 j==c.tab+1 확립 → 재사용
         },
@@ -748,7 +750,7 @@ pub fn commitSidebarDragPreview(self: *AppSession) void {
             // clearSidebarDragPreview가 안 건드려(프리뷰 상태만 clear) moveTab 직전까지 canonical이라 clamp가 정직하다.
             var target = c.target_tab;
             if (origin < self.tabs.items.len and target < self.tabs.items.len) {
-                if (self.localPinPrefixBounds(origin)) |b| {
+                if (tab_ops.localPinPrefixBounds(self, origin)) |b| {
                     const region = clampMoveToGroup(target, self.tabs.items[origin].pinned, tab_ops.countPinnedTabs(self), self.tabs.items.len);
                     target = std.math.clamp(region, b.lo, b.hi);
                 }
@@ -2347,3 +2349,263 @@ pub const spinner_bar_phase = [_]u8{ 0, 4, 8, 12 };
 
 /// 블록 글리프 베이스 codepoint(U+2580). 높이 h(1~8)를 더하면 ▁(U+2581)~█(U+2588). emit(sidebar_ops.spinnerBarCp)·색칠 게이트(sidebar_ops.isAgentSpinnerCp)의 단일 출처.
 pub const spinner_block_base: u21 = 0x2580;
+
+// --- 호출 그래프로 소유가 확인돼 옮겨 온 함수 ---
+// 이름에 도메인 단어가 없어 F 시리즈가 못 잡았고, 이 그룹을 과반으로 부르며 만지는 상태도 이 그룹이다.
+
+/// **(A) 카드 드래그 한 프레임의 드롭 plan을 커서 y(backing px)에서 산출한다 — mouse 핸들러와 헤드리스 테스트의 단일
+/// 출처**(y_px→raw_row→plan 실경로). 두 단계로 판정한다:
+///  1. **"그룹 뒤 top_level 탈출"(sidebarCardDropAfterGroup)** — 드래그 소스 카드가 프리뷰에서 자기 자리를 비워 그 아래
+///     콘텐츠가 소스 높이만큼 위로 밀리는 **프리뷰 시프트**를 보정한 `y_esc`로 판정한다. hit-test는 불변 원본 sidebar_rows
+///     (소스가 아직 자기 자리에 있음)로 하는데 사용자는 소스가 빠진 프리뷰를 보므로, 보정 없이는 "사용자가 그룹 꼬리를
+///     겨냥해도 원본 좌표론 멤버 행 중앙에 떨어져 흡수"됐다(증상 A). 소스가 raw_row **위**면(드래그 다운) y에 소스 행 높이를
+///     더해, 프리뷰의 그룹 꼬리를 겨냥한 커서가 원본 마지막 멤버의 하단 경계(탈출 존)에 맞게 한다.
+///  2. **일반 위치 판정(sidebarGroupDropTargetTab + sidebarCardDropTopLevel)** — 보정 **없는** raw_row로. moveTab의 from/to가
+///     소스 제거를 이미 보정하므로 여기에 시프트를 더하면 이중 보정으로 flat 재정렬이 어긋난다(그래서 탈출 판정에만 보정).
+/// 유효 드롭 없음(범위 밖·마커)이면 .none(제자리 프리뷰). MARU_DEBUG면 실값(raw_row·y_esc·gap·top_level)을 로깅해
+/// 실앱 드래그에서 왜 흡수(top_level=false)인지 자기검증한다(관측 가능성 — diag.zig 단일 게이트).
+pub fn cardDropPlan(self: *AppSession, origin: usize, y_px: f64) DropPlan {
+    const rows = self.sidebar_rows.items;
+    // 목록 행에 떨어졌으면 **소속 카드 row로 접는다** — 목록은 카드의 부속이라 그 위 드롭은 "그 워크스페이스에
+    // 떨어뜨렸다"가 자연스럽고, 접지 않으면 목록 높이만큼이 드롭 사각지대가 된다(code-review max).
+    const raw_row = sidebarCardRowFor(self, chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, sidebarMetrics(self), self.sidebar_scroll_offset_px));
+    // 프리뷰 시프트 보정: 소스 카드 행이 raw_row **위**면(드래그 다운) 프리뷰가 그 아래 콘텐츠를 소스 높이만큼 위로 당긴다.
+    // **카드 + 그 에이전트 목록 행 전체**가 함께 들리므로(projectRowsCore가 묶음으로 옮긴다) 그 합만큼 보정해야
+    // 한다 — 카드 높이만 더하면 목록이 있는 워크스페이스에서 보정이 모자라 그룹 탈출 판정이 어긋난다(code-review max).
+    var y_esc = y_px;
+    if (self.displaySlotOf(origin)) |os| if (os < raw_row) {
+        // 들리는 높이 = 카드 span 높이. **누적을 여기서 다시 굴리지 않는다** — 밴드·tint·accent 막대가 쓰는
+        // `cardSpanEnd`+`spanRect`와 같은 함수를 부른다(docs/sidebar-agent-list.md §3.3). 예전엔 이 자리에
+        // 같은 while 누적 사본이 남아 있어, span 소속 규칙이 바뀌면 렌더는 따라오는데 이 보정만 안 따라와
+        // 그룹 탈출 판정이 어긋났다(code-review max — 같은 계열 회귀를 이미 한 번 겪은 자리다).
+        const span = chrome.components.sidebar.spanRect(rows, os, chrome.components.sidebar.cardSpanEnd(rows, os), self.sidebar_width_px, sidebarMetrics(self));
+        y_esc = y_px + @as(f64, @floatFromInt(span.h));
+    };
+    // y_esc가 y_px와 같으면(드래그 업/동일 슬롯 — os >= raw_row라 보정이 없음) dragTargetSlot 결과도 raw_row와 동일하므로
+    // 재계산을 건너뛰고 재사용한다(code-review 효율 — 드래그 다운일 때만 재계산). 부동소수 == 비교라도 보정을 안 한 경로면
+    // 두 값이 **같은 리터럴**(y_esc = y_px 대입)이라 정확히 같다.
+    const raw_esc = if (y_esc != y_px)
+        sidebarCardRowFor(self, chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, sidebarMetrics(self), self.sidebar_scroll_offset_px))
+    else
+        raw_row;
+    // **고정(pinned) 흡수 금지(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 소스 카드가 pinned면 드롭 위치가
+    // 그룹 한복판이어도 top_level=true를 **무조건** 낸다(위치 판정과 무관). 고정 탭은 고정 리전 안 top_level 서브파티션으로만
+    // 존재해야 하므로(고정 그룹과 인터리브), 위치 기반 sidebarCardDropTopLevel(그룹 멤버=false)을 OR로 덮어 흡수를 원천 차단한다.
+    // 비고정 소스는 기존 위치 판정 유지(그룹 안=멤버·밖=top_level). simulateDrop/commit도 같은 source_pinned를 OR해 프리뷰=확정.
+    // (착지 위치의 고정 리전 clamp는 simulateDrop/moveTab의 clampMoveToGroup이 별도로 보장 — 고정 소스는 [0,pinned_count)에 갇힌다.)
+    const source_pinned = origin < self.tabs.items.len and self.tabs.items[origin].pinned;
+    const gap = sidebarCardDropAfterGroup(self, raw_esc, origin, y_esc);
+    const plan: DropPlan = if (gap) |g|
+        // §14.6 SR5 요구2: "그룹 뒤/사이 gap" 드롭 = 그룹 밖 top카드로 착지(top_level=true, 흡수 아님).
+        .{ .card = .{ .target_tab = g.target_tab, .top_level = g.top_level or source_pinned } }
+    else if (tab_ops.sidebarGroupDropTargetTab(self, raw_row, origin)) |target_tab| blk: {
+        // §14.6 SR4 model-2: 착지 위치 + 드롭 컨텍스트 top_level 의도(타깃이 최상위 카드면 true·그룹 멤버면 false). 고정 소스는 강제 true.
+        // **[2] 고정 탭은 그룹 안에 착지 금지(§14.9 정합 — "흡수 금지"가 "그룹 split"이 되면 안 됨)**: source_pinned가
+        // 그룹 멤버 사이(subtree 한복판)에 착지하면 위 top_level 강제가 그 자리에 top_level break를 써 **뒤 멤버를 그룹에서
+        // eject**(그룹 쪼갬)한다. 착지 target을 그룹 subtree **밖 경계**로 clamp해 고정 탭이 그룹 경계에만 착지하게 한다 —
+        // 그러면 top_level break가 그룹 무결을 안 깬다(경계 뒤엔 자를 멤버가 없다). 방향: 소스가 그룹 **위**(origin<gm)면
+        // 그룹 **뒤 끝**(ge-1, moveTab from<to가 그룹 다음 자리에 안착), 소스가 그룹 **아래/안**이면 그룹 **앞 마커**(gm,
+        // from>to가 마커 앞에 안착). topLevelGroupMarkerIndex가 null(타깃이 그룹 밖 top카드)이면 clamp 없음 — 고정 top카드
+        // 옆 인터리브(SR4(d))는 무변경. 비고정 소스는 이 clamp를 안 타 그룹 흡수 능력 보존.
+        var tt = target_tab;
+        if (source_pinned) {
+            if (tab_ops.topLevelGroupMarkerIndex(self, tt)) |gm| {
+                const ge = tab_ops.groupSubtreeEnd(self, gm, null, null);
+                tt = if (origin < gm) ge - 1 else gm;
+            }
+        }
+        break :blk .{ .card = .{ .target_tab = tt, .top_level = sidebarCardDropTopLevel(self, raw_row) or source_pinned } };
+    } else .none;
+    if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
+        "cardDropPlan: origin={d} y={d:.1} raw_row={d} y_esc={d:.1} raw_esc={d} gap_target={?} src_pinned={} plan_top_level={}",
+        .{ origin, y_px, raw_row, y_esc, raw_esc, if (gap) |g| g.target_tab else null, source_pinned, switch (plan) {
+            .card => |c| c.top_level,
+            else => false,
+        } },
+    );
+    return plan;
+}
+
+/// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 **원본 sidebar_rows(불변)**로
+/// hit-test하고, 라이브 tab_ops.moveGroupNesting/Sibling 커밋을 **제거**한 **비커밋 프리뷰**(SG8e — docs/sidebar-groups.md §9)를
+/// 재투영한다: 드롭 컨텍스트로 plan만 계산해(헤더 드롭=`.group_nest`·카드/최상위 드롭=`.group_sibling`·무효=`.none`)
+/// refreshDragPreview로 subtree 고스트를 sidebar_preview_rows에 투영한다(self.tabs 불변이라 yo-yo 원천 차단). up이 이
+/// 마지막 plan을 실제 move로 **정확히 1회** 커밋한다(commitSidebarDragPreview). self.tabs가 불변이라 마커 인덱스가 드래그
+/// 내내 안정해 **호출자의 마커를 갱신할 필요가 없다** — SG8f: 옛 라이브 팔로우의 새-마커 추적·반환값 대입 잔재를 걷어내 void.
+///
+/// **중첩 vs 형제 = Cmd(⌘) modifier로 구분(사용자 확정 정책)**: `cmd_held`면 드롭 row가 **다른 그룹의 헤더**일 때 그 그룹의
+/// 자식으로 **중첩**(`groupNestPlan` → `.group_nest{insert_before, target_depth}`, dragged 마커 depth=타겟 그룹 depth+1,
+/// subtree 상대 depth 유지 = "폴더 안에 넣기"). `cmd_held`가 **아니면 nest를 아예 시도하지 않아**(nest=null) 헤더 드롭이라도
+/// **형제 경계 이동**만 된다(중첩 절대 안 됨). 헤더가 아닌 카드/최상위 드롭은 Cmd 유무와 무관하게 **형제 경계 이동**
+/// (`sidebarGroupDropBoundary` → `.group_sibling{insert_before}`)으로, 얕은 위치면 자연 eff depth로 **빼기(un-nest)**가
+/// 확정 시 gap-clamp+relevel로 반영된다. (과거 SG5-4는 modifier 없이 헤더 드롭=넣기였으나, 사용자 요청으로 Cmd 게이트를 얹었다 —
+/// 확정 경로 tab_ops.moveGroupNesting/Sibling과 동일 plan.)
+pub fn groupDragPreviewFrame(self: *AppSession, marker: usize, y_px: f64, cmd_held: bool) void {
+    const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, sidebarMetrics(self), self.sidebar_scroll_offset_px);
+    // plan 판정(사용자 확정 정책): **Cmd(⌘) 눌림 = 중첩 시도(안으로 넣기)**, **Cmd 없음 = 항상 형제(중첩 절대 안 함)**.
+    //  - Cmd O: 헤더 드롭이면 groupNestPlan이 `.group_nest`를 내고(그 그룹의 자식으로), 헤더가 아닌 카드/최상위 드롭이면
+    //           groupNestPlan이 null이라 아래 형제 경계로 폴백한다(N4 — Cmd라도 넣을 헤더가 없으면 형제).
+    //  - Cmd X: nest를 아예 시도하지 않아(nest=null) 헤더 드롭이라도 `.group_sibling`(단순 위치 변경)만 된다(N1).
+    // hit-test는 원본 sidebar_rows(불변)로. Cmd 없이는 중첩이 불가능하다는 게 이 함수의 핵심 게이트다.
+    const nest: ?GroupNestPlan = if (cmd_held) tab_ops.groupNestPlan(self, raw_row, marker) else null;
+    const plan: DropPlan = if (nest) |np|
+        .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
+    else if (sidebarGroupDropBoundary(self, raw_row, marker)) |boundary|
+        // 그룹 고정 C2(§12.6 GP3): insert_before를 **plan에 굽기 전** 드래그 그룹의 pin 리전으로 clamp한다 —
+        // 이동 함수(tab_ops.moveGroupRange/tab_ops.simulateGroupMove)가 아니라 여기 단일 지점이라 프리뷰=확정이 같은 clamp 값을
+        // 재사용해 SG8 이중경로 divergence가 없다. (nest는 groupNestPlan이 same-pin 그룹만 내므로 이미 리전 안이다.)
+        .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(marker, boundary) } }
+    else
+        .none;
+    // MARU_DEBUG 관측(관측 가능성 원칙, diag.zig 단일 게이트): 실제 앱 드래그에서 **Cmd 없이=형제 / Cmd=중첩**이 지켜지는지
+    // 자기검증한다 — 헤드리스 N1~N6가 mouse(mods) 직접 시뮬로 커버하지 못하는 **Swift 드래그 경로**(mouseDragged→handleMouse→
+    // modsBits→maru_macos_app_session_mouse→mouse의 cmd_held)를 실측으로 잇는 단일 로그. Cmd 없이 드래그인데 plan=group_nest면
+    // Swift mods 오전달(command 비트 32 오염) 확정, plan=group_sibling이면 게이트 정상. 미설정이면 분기 하나(캐시 히트)뿐.
+    if (diag_gate.maruDebugEnabled()) std.log.scoped(.group_drag).info(
+        "groupDragPreviewFrame: marker={d} raw_row={d} cmd_held={} plan={s}",
+        .{ marker, raw_row, cmd_held, @tagName(plan) },
+    );
+    // 비커밋 프리뷰 재투영(self.tabs 불변). 카드 드래그(SG8d)와 동형 — 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를
+    // 주므로 세팅하지 않는다(subtree 고스트+삽입선이 하이라이트를 대체). 매 프레임 재투영이라 rebuild + dirty.
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    tab_ops.refreshDragPreview(self, marker, plan, y_px, arena_state.allocator()) catch {};
+    rebuildSidebar(self) catch {};
+    self.metal_dirty = true;
+}
+
+/// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
+/// 뽑아 갱신한다. 분수 scale을 그대로 곱한 device 픽셀 font size로 조회한다. macOS가
+/// 아니거나(테스트/CI) 조회 실패면 같은 device 픽셀 font size의 정사각으로 대체한다.
+/// scale_milli가 바뀌는 resize에서도 호출한다.
+pub fn refreshCellMetrics(self: *AppSession) void {
+    const device_font_size = renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli);
+    const square: u32 = @intFromFloat(@round(device_font_size));
+    self.cell_width_px = square;
+    self.cell_height_px = square;
+    // extern native 호출은 macOS에서만 컴파일/링크한다(.m을 링크하지 않는 Linux 계약
+    // 빌드에서 undefined symbol이 되지 않게 comptime으로 막는다).
+    if (builtin.os.tag == .macos) {
+        var metrics: coretext_bridge.CellMetricsResult = .{};
+        coretext_bridge.maru_macos_coretext_font_cell_metrics(
+            self.appearance.font.family.ptr,
+            self.appearance.font.family.len,
+            device_font_size,
+            &metrics,
+        );
+        if (metrics.status == 0 and metrics.cell_width_px > 0 and metrics.cell_height_px > 0) {
+            self.cell_width_px = metrics.cell_width_px;
+            self.cell_height_px = metrics.cell_height_px;
+        }
+    }
+    // line-height(행간)·letter-spacing(자간) config를 적용한다 — native/fallback이 base cell 크기를 정한 '직후',
+    // grid·atlas·hit-test·IME가 파생되기 '전'. **자간은 cell_width_px(grid advance=셀 배치 간격)에만 가산하고,
+    // 글리프 비트맵 폭(glyph_cell_width_px=atlas slot·화면 quad 폭)은 자연폭(base) 그대로 둔다**(applyFontSpacing
+    // 단일 출처). 이렇게 분리해야 음수 자간이 slot을 좁혀 일반 글자를 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다
+    // 세로 흔들림)시키던 버그가 사라진다 — 글리프는 자연폭 slot에 온전히 그려지고, 좁힘은 셀 배치 step에만 반영돼
+    // 이웃 글자와 겹친다(Ghostty식). line-height는 cell_height_px에 곱한다. 기본값(1.0/0.0)이면 둘 다 base.
+    const spaced = applyFontSpacing(
+        self.cell_width_px,
+        self.cell_height_px,
+        self.appearance.font.line_height,
+        self.appearance.font.letter_spacing,
+        self.scale_milli,
+    );
+    self.cell_width_px = spaced.advance_width_px;
+    self.glyph_cell_width_px = spaced.glyph_width_px;
+    self.cell_height_px = spaced.height_px;
+    // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
+    // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
+    // **폰트/DPI가 바뀌어 cell 폭이 커지면 헤더 아이콘 하한(sidebarMinPt)이 올라가므로**, 저장된 폭을 그 하한 이상으로
+    // 끌어올린다(드래그 경로뿐 아니라 메트릭 변경 경로도 겹침 방지 — 단일 출처). 기본값 180pt가 하한 미만이 되는 큰-폰트
+    // 첫 실행도 여기서 보정된다. cap(sidebar_max_pt)도 sidebarMinPt가 보장.
+    self.sidebar_width_pt = std.math.clamp(self.sidebar_width_pt, sidebarMinPt(self), sidebar_max_pt);
+    // minimal 세션(quick terminal)·접힘(사용자 토글)이면 사이드바 폭 0 고정(터미널이 전폭). 폭(pt)은 보존돼 펼치면 복원.
+    self.sidebar_width_px = if (self.chrome_minimal or self.sidebar_collapsed) 0 else layout_math.ptToPx(self.sidebar_width_pt, self.scale_milli);
+    // window padding도 같은 단일 출처(논리 pt × 분수 scale)로 backing px 환산 — DPI 변경에도 유지된다.
+    // termRect/gridFromBacking이 이 px를 inset으로 쓴다(렌더 origin·hit-test·IME 자동 정합). minimal 세션도
+    // 동일 적용(터미널 콘텐츠 inset이라 chrome 유무와 무관).
+    self.window_padding_px = .{
+        .left = layout_math.ptToPx(self.appearance.window_padding_left, self.scale_milli),
+        .right = layout_math.ptToPx(self.appearance.window_padding_right, self.scale_milli),
+        .top = layout_math.ptToPx(self.appearance.window_padding_top, self.scale_milli),
+        .bottom = layout_math.ptToPx(self.appearance.window_padding_bottom, self.scale_milli),
+    };
+    // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
+    // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
+    self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
+    self.sidebar_header_row_h_px = self.cell_height_px * sidebar_header_row_h_ratio_milli / 1000; // 그룹 헤더 row(얇은 한 줄; SG3b-2-ii)
+    // 카드 높이는 줄 수 기반이라 cell·헤더 높이가 바뀔 때마다 함께 파생한다(줄 기하 공식은 chrome이 소유).
+    self.sidebar_metrics = .init(self.cell_height_px, self.sidebar_header_row_h_px);
+    // 상단 타이틀바 띠(신호등·헤더 아이콘 줄, 탭 바는 그 아래). 펼침=한 줄, 접힘=신호등 높이 확보(computeTitlebarStripPx).
+    self.titlebar_strip_px = self.computeTitlebarStripPx();
+    // 헤더 높이는 **띠 + 상단 바**다 — 사이드바 헤더의 두 줄이 창 오른쪽의 두 밴드(신호등 띠 / pane 탭 바·도크 뷰
+    // 스위처)와 한 줄로 읽혀야 하기 때문이다(docs/file-explorer.md §3.5). 그래서 `titlebar_strip_px`·
+    // `chromeBarHeightPx` 뒤에 계산한다.
+    //
+    // 예전에는 `cell_height × 3.0`이었고 그래서 **왼쪽만 terminal 폰트에 묶여** 있었다: 14pt에서 검색 줄 중심이
+    // 45pt인데 탭 바 중심은 48pt였고, 헤더 하단 54pt와 상단 바 하단 68pt가 갈렸다. 고정 오차가 아니라 단위계
+    // 불일치라 폰트를 키우면 벌어진다(24pt면 헤더만 93pt). 오른쪽 두 바가 이미 쓰던 계약에서 사이드바 헤더만
+    // 빠져 있던 것이 원인이다(사용자 보고 2026-08-09).
+    self.sidebar_header_height_px = sidebarHeaderHeightPx(self);
+    // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
+    rebuildSidebar(self) catch {};
+    // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
+    // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
+    if (self.surface_initialized) {
+        // Phase 3 위임(docs/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
+        // 직접 mutate 없음). 모든 Term에 보내 inactive host runtime도 다음 kitty 출력 전에 새 metric을 보게 한다.
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.kind != .terminal) continue;
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_cell_metrics = .{
+                        .width = self.cell_width_px,
+                        .height = self.cell_height_px,
+                    } }, self.io) catch {};
+                }
+            }
+        }
+    }
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+pub const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
+
+// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 5200 = 5.2× — 최대 4줄 카드(이름·브랜치·
+// 경로·상태, 각 1×cell = 4×cell)를 위아래 여백 두고 담을 큰 슬롯. 1~3줄 탭도 같은 슬롯에 블록 세로 중앙(빈 줄
+// 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠고, 4줄 카드 하단 여백이 빡빡하다는 피드백으로 4.6×→5.2×
+// 로 더 키웠다(4줄 상·하 여백 각 0.3×→0.6×cell로 배증; 균일 슬롯이라 1~3줄 카드도 함께 여유가 는다). refreshCellMetrics가
+// cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
+pub const sidebar_slot_height_ratio_milli: u32 = 5200;
+
+// 그룹 헤더 row 높이 = cell 높이 × 3.0(위아래 여백 넉넉히; 카드 슬롯 5.2×보다는 얇다). 가변 높이의 헤더
+// 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 사용자 요청으로 1.5→3.0(위아래 높이 2배, 텍스트 크기는 불변 — glyph는 밴드 중앙).
+pub const sidebar_header_row_h_ratio_milli: u32 = 3000;
+
+/// font.line-height(배수)·font.letter-spacing(논리 pt)을 base cell px에 적용한다(refreshCellMetrics의 단일
+/// 적용점이 호출하는 순수 helper — OS·CoreText 없이 곱/가산 산술을 단위 테스트로 못박는다). line-height는
+/// cell_height_px에 곱하고, letter-spacing은 논리 pt를 backing px(× scale_milli/1000, padding px 환산과 동형)로
+/// 바꿔 cell_width_px에 가산한다(음수 가능 → 최소 1px로 saturate해 0폭 grid를 막는다). 두 px가 grid·atlas·
+/// hit-test의 진실 소스라, 여기 한 곳만 바꾸면 나머지가 자동 정합한다. 기본값(1.0/0.0)이면 입력 그대로 통과.
+pub fn applyFontSpacing(
+    base_width_px: u32,
+    base_height_px: u32,
+    line_height: f32,
+    letter_spacing_pt: f32,
+    scale_milli: u32,
+) struct { advance_width_px: u32, glyph_width_px: u32, height_px: u32 } {
+    const height_px: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(base_height_px)) * line_height));
+    // 논리 pt → backing px(분수 scale 그대로). padding px 환산(× scale_milli / 1000)과 같은 방식.
+    const spacing_px: f32 = letter_spacing_pt * @as(f32, @floatFromInt(scale_milli)) / 1000.0;
+    // i64로 가산해(음수 spacing) 1px 미만이면 1로 saturate — 0폭이면 grid가 div-by-cell에서 폭주한다.
+    const width_i: i64 = @as(i64, base_width_px) + @as(i64, @intFromFloat(@round(spacing_px)));
+    const advance_width_px: u32 = @intCast(@max(@as(i64, 1), width_i));
+    // **자간은 grid advance(셀 간격)만 바꾸고, 글리프 비트맵 폭은 자연폭(base) 그대로 둔다.** 음수 자간이 slot을
+    // 좁혀 일반 글자가 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다 세로 흔들림)되던 버그를 끊는다(code-review).
+    // 즉 글리프 래스터·atlas slot·화면 quad 폭 = glyph_width_px(자연), 셀 배치 step = advance_width_px(자간 반영).
+    // Ghostty도 일반 텍스트를 자연 bearing으로 두고 셀폭 조정은 배치에만 적용한다(face.zig "left-aligned within the cell").
+    return .{ .advance_width_px = advance_width_px, .glyph_width_px = base_width_px, .height_px = height_px };
+}

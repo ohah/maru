@@ -41,7 +41,7 @@ pub const input_math = maru.session.input_math;
 pub const rotateMove = input_math.rotateMove;
 pub const clampMoveToGroup = input_math.clampMoveToGroup;
 const pageScrollDelta = input_math.pageScrollDelta;
-const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(keep-alive면 원격 backend로 배선)
+pub const session_host = @import("session_host.zig"); // P3-e3: 영속 세션 host(keep-alive면 원격 backend로 배선)
 // 영속 세션 host의 Client/RemoteTermBackend는 macOS 전용 syscall을 써서 barrel이 non-macOS에서 `struct {}`로 제외한다.
 // app_session은 ABI 테스트로 **Linux에서도 컴파일**되므로(실행은 macOS만) 필드 타입과 사용을 comptime gate한다 —
 // non-macOS에선 void로 두고 모든 원격 경로를 `if (is_macos)` 블록(comptime 가지치기)에 둔다([[macos-only-code-linux-crosscompile-check]]).
@@ -681,20 +681,10 @@ test "archive relative age uses the worker mtime without filesystem access" {
 // 우측 경계를 드래그해 바꾸면 `AppSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
 // DPI 변경(refreshCellMetrics)에도 살아남는다.
 const default_sidebar_width_pt: u32 = 180;
-pub const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
-// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 5200 = 5.2× — 최대 4줄 카드(이름·브랜치·
-// 경로·상태, 각 1×cell = 4×cell)를 위아래 여백 두고 담을 큰 슬롯. 1~3줄 탭도 같은 슬롯에 블록 세로 중앙(빈 줄
-// 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠고, 4줄 카드 하단 여백이 빡빡하다는 피드백으로 4.6×→5.2×
-// 로 더 키웠다(4줄 상·하 여백 각 0.3×→0.6×cell로 배증; 균일 슬롯이라 1~3줄 카드도 함께 여유가 는다). refreshCellMetrics가
-// cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
-const sidebar_slot_height_ratio_milli: u32 = 5200;
 // 사이드바 상단 헤더(검색바 + 사이드바 접기·view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 3.0(아이콘 줄 +
 // 검색 줄 + 패딩). 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
 const sidebar_header_height_ratio_milli: u32 = 3000;
-// 그룹 헤더 row 높이 = cell 높이 × 3.0(위아래 여백 넉넉히; 카드 슬롯 5.2×보다는 얇다). 가변 높이의 헤더
-// 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 사용자 요청으로 1.5→3.0(위아래 높이 2배, 텍스트 크기는 불변 — glyph는 밴드 중앙).
-const sidebar_header_row_h_ratio_milli: u32 = 3000;
 // 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 같은 1.7이
 // 렌더러 quad(.m)에도 있어, 여기에 또 상수를 두면 세 곳이 어긋날 수 있다.
 const header_icon_scale = chrome.ui.icon;
@@ -1002,31 +992,6 @@ pub fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
 // 순수 레이아웃 기하(layout_math.PaddingPx·gridFromBacking·gridFromRectPx·ptToPx)는 session/layout_math.zig로 이동(b1).
 // 호출은 layout_math.X로 위임 — 다른 OS 어댑터도 같은 grid·환산을 재사용한다(이식 기여).
 
-/// font.line-height(배수)·font.letter-spacing(논리 pt)을 base cell px에 적용한다(refreshCellMetrics의 단일
-/// 적용점이 호출하는 순수 helper — OS·CoreText 없이 곱/가산 산술을 단위 테스트로 못박는다). line-height는
-/// cell_height_px에 곱하고, letter-spacing은 논리 pt를 backing px(× scale_milli/1000, padding px 환산과 동형)로
-/// 바꿔 cell_width_px에 가산한다(음수 가능 → 최소 1px로 saturate해 0폭 grid를 막는다). 두 px가 grid·atlas·
-/// hit-test의 진실 소스라, 여기 한 곳만 바꾸면 나머지가 자동 정합한다. 기본값(1.0/0.0)이면 입력 그대로 통과.
-fn applyFontSpacing(
-    base_width_px: u32,
-    base_height_px: u32,
-    line_height: f32,
-    letter_spacing_pt: f32,
-    scale_milli: u32,
-) struct { advance_width_px: u32, glyph_width_px: u32, height_px: u32 } {
-    const height_px: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(base_height_px)) * line_height));
-    // 논리 pt → backing px(분수 scale 그대로). padding px 환산(× scale_milli / 1000)과 같은 방식.
-    const spacing_px: f32 = letter_spacing_pt * @as(f32, @floatFromInt(scale_milli)) / 1000.0;
-    // i64로 가산해(음수 spacing) 1px 미만이면 1로 saturate — 0폭이면 grid가 div-by-cell에서 폭주한다.
-    const width_i: i64 = @as(i64, base_width_px) + @as(i64, @intFromFloat(@round(spacing_px)));
-    const advance_width_px: u32 = @intCast(@max(@as(i64, 1), width_i));
-    // **자간은 grid advance(셀 간격)만 바꾸고, 글리프 비트맵 폭은 자연폭(base) 그대로 둔다.** 음수 자간이 slot을
-    // 좁혀 일반 글자가 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다 세로 흔들림)되던 버그를 끊는다(code-review).
-    // 즉 글리프 래스터·atlas slot·화면 quad 폭 = glyph_width_px(자연), 셀 배치 step = advance_width_px(자간 반영).
-    // Ghostty도 일반 텍스트를 자연 bearing으로 두고 셀폭 조정은 배치에만 적용한다(face.zig "left-aligned within the cell").
-    return .{ .advance_width_px = advance_width_px, .glyph_width_px = base_width_px, .height_px = height_px };
-}
-
 test "workspace_ops.effectiveWindowBlur: opacity 게이트 — 불투명이면 0, 투명일 때만 반경" {
     // 블러 0이면 opacity 무관하게 0.
     try std.testing.expectEqual(@as(u32, 0), workspace_ops.effectiveWindowBlur(0, 0.5));
@@ -1093,7 +1058,7 @@ fn paneBarBgCell(bar: maru.session.SplitRect, cell_width_px: u32, bg: u32) ?meta
 
 /// 탭 드래그 중 드롭 타겟(④b 하이라이트·④ 커밋 공유 판정). `pane`은 마우스가 올라간 대상 pane, `zone`이 null이면
 /// 그 pane 탭 바(드롭 시 Term 이동, PR-E2), set이면 본문 절반(그 방향으로 새 split, ④).
-const DropTarget = struct { pane: *Pane, zone: ?layout_math.PaneDropZone };
+pub const DropTarget = struct { pane: *Pane, zone: ?layout_math.PaneDropZone };
 
 /// 0xAARRGGBB 색을 alpha로 **premultiply**한다(rgb를 alpha/255로 곱하고 alpha를 A로). 렌더러가 premultiplied-
 /// alpha over로 블렌딩하므로(maru_metal_shader), 반투명 하이라이트는 이렇게 미리 곱해 넘겨야 색이 안 뜬다. 순수.
@@ -1194,14 +1159,6 @@ fn tabbarHighlightCell(m: chrome.components.tabbar.Metrics, tab_index: usize, bg
 // tab_ops.adjustActiveForMove·rotateMove·tab_ops.reselectAfterClose·wheelDeltaToLines는 session core로 추출됐다 — 위 file-scope
 // alias(input_math.*)로 bare 이름 그대로 호출한다. 정의·단위 테스트는 src/session/input_math.zig.
 
-// 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
-// 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
-// MARU_DEBUG 게이트는 diag.zig가 단일 출처로 소유한다.
-const screen_diag = std.log.scoped(.screen);
-// 셸 의미 이벤트(OSC 133/7) 진단 logger. MARU_DEBUG일 때 frame마다 core가 기록한 명령 경계
-// 이벤트를 구조화 한 줄씩 찍는다 — 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
-// drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
-const shell_diag = std.log.scoped(.shell);
 // synchronized output(DECSET 2026) 게이트 진단 logger. MARU_DEBUG일 때 tick마다 sync hold/투영 결정
 // (활성 sync·hold tick·grid/chrome 투영·ESU 누적·view_offset)을 구조화 한 줄씩 찍어, 폴링 렌더 루프가
 // 라이브 프레임을 언제 붙잡고 언제 flush하는지 실환경에서 관측한다(shouldProjectFrame 게이트의 각 안전판—
@@ -1722,7 +1679,7 @@ pub const FileTreeRootOutcome = enum(u8) {
     committed_add,
     committed_remove,
 };
-const PendingFileTreeRootValidation = struct {
+pub const PendingFileTreeRootValidation = struct {
     request_id: u64,
     expected_root_generation: u64,
     operation: FileTreeRootOperation,
@@ -1888,40 +1845,6 @@ fn anyCollapsedInStack(entries: []const GroupStackEntry) bool {
     return false;
 }
 
-/// 블록 [m,j)를 Rest(=[m,j) 제외 원소들)의 `rest_insert`번째 앞에 끼우는 순열을 `perm`(길이 n, dst 위치 w → src 위치)에
-/// 채우고 블록 시작(새 마커)의 dst 위치를 반환한다(docs/sidebar-groups.md §9 SG8b). **tab_ops.moveGroupRange**(self.tabs/
-/// surface_ptrs 적용)와 **simulateDrop**(가상 order/group_depth 적용)의 **단일 순열 출처** — 프리뷰(비커밋)와 확정(커밋)이
-/// 같은 순열 코어를 써 이중경로 divergence를 없앤다. 옛 tab_ops.moveGroupRange 인라인 블록-fill을 그대로 추출한 것(회귀 0).
-/// caller가 `m<=j<=n`·`rest_insert<=Rest 길이`를 보장한다(tab_ops.moveGroupRange/simulateGroupMove의 no-op 가드가 앞서 거른다).
-pub fn groupBlockPermutation(perm: []usize, n: usize, m: usize, j: usize, rest_insert: usize) usize {
-    var w: usize = 0;
-    var new_marker: usize = 0;
-    var rest_idx: usize = 0;
-    var src: usize = 0;
-    while (src < n) : (src += 1) {
-        if (src >= m and src < j) continue; // 블록은 건너뛴다(따로 삽입)
-        if (rest_idx == rest_insert) { // 이 Rest 원소 앞에 블록 삽입
-            new_marker = w;
-            var k: usize = m;
-            while (k < j) : (k += 1) {
-                perm[w] = k;
-                w += 1;
-            }
-        }
-        perm[w] = src;
-        w += 1;
-        rest_idx += 1;
-    }
-    if (rest_idx == rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
-        new_marker = w;
-        var k: usize = m;
-        while (k < j) : (k += 1) {
-            perm[w] = k;
-            w += 1;
-        }
-    }
-    return new_marker;
-}
 pub const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, bg_first..=배경, accent_first..=바(buildContextMenuItems 순서와 단일 출처).
 pub const ctx_menu_bg_first: usize = 2;
 pub const ctx_menu_accent_first: usize = ctx_menu_bg_first + tab_bg_labels.len; // 배경 프리셋 다음(=8)부터 accent 막대 프리셋
@@ -2216,6 +2139,90 @@ pub const WebNavAction = struct { surface_id: u64, code: u8 };
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
 
 pub const AppSession = struct {
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
+        return file_panel_ops.beginFilePanelDocument(self, surface_id, document_id);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id: u64, revision: u64, success: bool) void {
+        return file_panel_ops.completeFilePanelSaveClose(self, surface_id, request_id, revision, success);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn completeFileTreeTrash(
+        self: *AppSession,
+        id: u64,
+        outcome: FileTreeTrashOutcome,
+        recovery_path: ?[]const u8,
+    ) void {
+        return file_panel_ops.completeFileTreeTrash(self, id, outcome, recovery_path);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn failFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: u64) void {
+        return file_panel_ops.failFilePanelCloseUnlock(self, surface_id, request_id);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
+        return file_panel_ops.failFilePanelDirtySync(self, surface_id, request_id);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
+        return file_panel_ops.filePanelDocumentTerminated(self, surface_id);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn openFilePanelLink(
+        self: *AppSession,
+        surface_id: u64,
+        href: []const u8,
+        force_system: bool,
+    ) FilePanelLinkError!void {
+        return file_panel_ops.openFilePanelLink(self, surface_id, href, force_system);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
+        return file_panel_ops.openFilePanelPath(self, path);
+    }
+    /// 본문 분리: app_session/term.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn pendingClipboard(self: *AppSession) []const u8 {
+        return term_ops.pendingClipboard(self);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
+        return file_panel_ops.provideFileTreeRootPick(self, path);
+    }
+    /// 본문 분리: app_session/settings.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn providePickedFile(self: *AppSession, path: []const u8) void {
+        return settings_ops.providePickedFile(self, path);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
+        return file_panel_ops.readFilePanel(self, gpa, surface_id, editor_epoch);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn readFilePanelAsset(
+        self: *AppSession,
+        gpa: std.mem.Allocator,
+        surface_id: u64,
+        raw_path: []const u8,
+    ) FilePanelReadError![]u8 {
+        return file_panel_ops.readFilePanelAsset(self, gpa, surface_id, raw_path);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
+        return file_panel_ops.reportFilePanelDirty(self, surface_id, report);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeFilePanelSaveCloseAction(self: *AppSession) ?FilePanelSaveCloseAction {
+        return file_panel_ops.takeFilePanelSaveCloseAction(self);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn takeFileTreeReloadAction(self: *AppSession) ?FileTreeReloadAction {
+        return file_panel_ops.takeFileTreeReloadAction(self);
+    }
+    /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
+    pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
+        return file_panel_ops.writeFilePanel(self, surface_id, editor_epoch, content);
+    }
+
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
     pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenFilePanel(self);
@@ -2784,7 +2791,7 @@ pub const AppSession = struct {
     // 한 cell의 device 픽셀 크기. **cell_width_px = grid advance(셀 배치 간격, 자간 반영)** — renderer fixed-cell
     // layout·hit-test·cursor·selection·cols 계산이 모두 이 값을 쓴다. **glyph_cell_width_px = 글리프 비트맵 폭(자연폭,
     // 자간 무관)** — atlas slot 크기·화면 글리프 quad 폭에 쓴다. 자간 0이면 둘이 같다. 둘을 분리해야 음수 자간이
-    // 글리프 slot을 좁혀 세로 흔들림/찌그러짐을 내던 버그가 사라진다(applyFontSpacing·refreshCellMetrics 단일 출처).
+    // 글리프 slot을 좁혀 세로 흔들림/찌그러짐을 내던 버그가 사라진다(sidebar_ops.applyFontSpacing·refreshCellMetrics 단일 출처).
     // 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다(둘 다).
     cell_width_px: u32 = 0,
     glyph_cell_width_px: u32 = 0,
@@ -2800,7 +2807,7 @@ pub const AppSession = struct {
     // new_tab/new_term을 무동작으로 막는다(사이드바·탭 바가 없어 안 보이는 탭 생성 차단). true면 허용(파워유저).
     // chrome_minimal=false면 tabsBlocked()가 항상 false라 full 모드 탭은 이 값과 무관하게 동작한다.
     minimal_tabs: bool = false,
-    // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_ops.sidebar_min_pt, sidebar_max_pt]로
+    // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_ops.sidebar_min_pt, sidebar_ops.sidebar_max_pt]로
     // 갱신된다. backing 픽셀 폭은 scale을 곱해 구하므로 pt로 들면 DPI가 바뀌어도(refreshCellMetrics) 유지된다.
     sidebar_width_pt: u32 = default_sidebar_width_pt,
     // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
@@ -3939,7 +3946,7 @@ pub const AppSession = struct {
         // 저장된 사이드바 폭(sidebar.width, pt)을 런타임 폭으로 seed한다 — 아래 refreshCellMetrics가 동적 하한으로
         // clamp하고 backing px로 환산한다(단일 출처). config 키가 없으면 기본 180이라 struct 기본값과 같아 현 동작 그대로다.
         self.sidebar_width_pt = self.loaded_config.config.sidebar.width_pt;
-        self.refreshCellMetrics();
+        sidebar_ops.refreshCellMetrics(self);
 
         // 첫 spawn 크기 = 창 backing px가 오면 cell 메트릭으로 grid 계산(실제 창 크기), 아니면 cols/rows(헤드리스
         // 테스트·창 미상) 폴백. gridFromBacking은 resize 경로와 같은 단일 출처라 첫 grid와 이후 resize가 일치한다.
@@ -4107,45 +4114,6 @@ pub const AppSession = struct {
         self.file_tree_root_pick_pending = .none;
         if (operation != .none) self.file_tree_root_picker_inflight = operation;
         return operation;
-    }
-
-    pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
-        const operation = self.file_tree_root_picker_inflight;
-        self.file_tree_root_picker_inflight = .none;
-        if (operation == .none or path.len == 0) {
-            file_panel_ops.reportFileTreeRootOutcome(self, .picker_canceled, null);
-            return;
-        }
-        if (path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) {
-            file_panel_ops.reportFileTreeRootOutcome(self, .invalid_path, "선택한 폴더 경로가 올바르지 않습니다.");
-            return;
-        }
-        if (self.file_tree_root_request_id == std.math.maxInt(u64)) {
-            file_panel_ops.reportFileTreeRootOutcome(self, .request_id_exhausted, "폴더 선택 요청 번호를 더 발급할 수 없습니다.");
-            return;
-        }
-        const owned = self.allocator.dupe(u8, path) catch {
-            file_panel_ops.reportFileTreeRootOutcome(self, .allocation_failed, "폴더 선택 상태를 준비할 수 없습니다.");
-            return;
-        };
-        self.file_tree_root_request_id += 1;
-        const pending: PendingFileTreeRootValidation = .{
-            .request_id = self.file_tree_root_request_id,
-            .expected_root_generation = self.file_tree.rootGeneration(),
-            .operation = operation,
-        };
-        if (!self.file_tree_backend.submitRootValidation(
-            owned,
-            pending.request_id,
-            pending.expected_root_generation,
-            @intFromEnum(operation),
-            0,
-        )) {
-            self.allocator.free(owned);
-            file_panel_ops.reportFileTreeRootOutcome(self, .backend_busy, "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.");
-            return;
-        }
-        self.file_tree_root_validation = pending;
     }
 
     /// 사이드바와 파일 도크를 뺀 터미널 영역. split 레이아웃·resize·렌더·hit-test가
@@ -4378,34 +4346,6 @@ pub const AppSession = struct {
         return probe;
     }
 
-    /// 탭 드래그 중 마우스가 올라간 드롭 타겟을 판정한다(④b 하이라이트용 — dropTabAt의 커밋 판정과 같은 우선순위).
-    /// 다른 pane 탭 바 위 → {pane, zone=null}(이동). 자기 바 → null(재정렬, 드롭 아님). pane 본문 → {pane, zone}
-    /// (그 방향 split) — 단, target==src인데 Term 1개뿐이면 무동작이라 null. 레이아웃 실패면 null.
-    fn computeDropTarget(self: *AppSession, x_px: f64, y_px: f64) ?DropTarget {
-        const src = switch (self.pointer_gesture_owner) {
-            .terminal_tab => |drag| drag.pane,
-            else => return null,
-        };
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
-        for (leaf_rects.items) |lr| {
-            const bar = pane_ops.paneBarRect(self, lr.rect) orelse continue;
-            if (layout_math.pointInRect(x_px, y_px, bar)) {
-                if (lr.leaf == src) return null; // 자기 바 — 재정렬(드롭 아님)
-                return .{ .pane = lr.leaf, .zone = null };
-            }
-        }
-        for (leaf_rects.items) |lr| {
-            const body = pane_ops.paneTermRect(self, lr.rect);
-            if (layout_math.paneDropZone(body, x_px, y_px)) |zone| {
-                if (lr.leaf == src and src.terms.items.len <= 1) return null; // 자기-split 무의미
-                return .{ .pane = lr.leaf, .zone = zone };
-            }
-        }
-        return null;
-    }
-
     fn dropTargetEql(a: ?DropTarget, b: ?DropTarget) bool {
         if (a == null and b == null) return true;
         if (a == null or b == null) return false;
@@ -4567,23 +4507,6 @@ pub const AppSession = struct {
     pub const PaneDropDest = union(enum) { new_workspace, merge: usize };
 
     pub const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
-
-    /// reap으로 구조가 바뀐 탭의 대표 surface를 그 탭의 현재 활성 Term으로 재바인딩하고(닫힌 Term을 가리키던
-    /// stale/dangling 방지) panel을 새 leaf rect로 resize한다(collapse면 형제가 빈자리 확장 — 배경 탭도 전환
-    /// 즉시 올바른 크기). 활성 탭이면 좌표 origin도 재계산하고 redraw를 표시한다(배경 탭 변경은 화면에 안 보임).
-    pub fn refreshAfterReap(self: *AppSession, tab_index: usize) void {
-        const tab = self.tabs.items[tab_index];
-        self.surface_ptrs.items[tab_index] = tab.activeTerm().surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        pane_ops.resizeTabPanes(self, tab);
-        self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
-        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
-        self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
-        if (tab_index == self.app_window.active_tab) {
-            pane_ops.recomputeActivePaneRect(self);
-            self.metal_dirty = true;
-        }
-    }
 
     /// The AppKit archive smoke is allowed to coordinate a deterministic detail
     /// read, but production configuration and normal input never arm this
@@ -5757,118 +5680,7 @@ pub const AppSession = struct {
         };
     }
 
-    /// 카드/마커 위치 i가 속한 그룹의 **최상위(depth 1) 시작 마커 인덱스**(enclosingGroupMarkerTab의 인덱스판 — §2.1 상향
-    /// 파생 + 중첩 상향 클램프). 최상위 카드(그룹 미소속)면 null. "그룹 뒤 빈 gap" 드롭(§14.6 SR5 요구2)이 "이 카드가 속한
-    /// **최상위 그룹**의 subtree 끝"을 알아야 top카드를 그 그룹 밖 gap에 정확히 착지시킨다(중첩 subgroup의 마지막 멤버여도
-    /// 부모 최상위 그룹 끝 기준). 상향 스캔은 tab_ops.effectiveDepthAt>1이면 부모 마커로 계속 올라간다(mi strictly 감소라 종료 보장).
-    pub fn topLevelGroupMarkerIndex(self: *AppSession, i: usize) ?usize {
-        // 옛 구현은 `while tab_ops.effectiveDepthAt(mi)>1`로 부모 마커를 한 칸씩 올라가며 **매 반복 tab_ops.effectiveDepthAt(O(n))를 다시
-        // 계산**해 O(depth·n)이었다(code-review 핫패스 — 드래그 프레임마다 호출). 여기선 effectiveDepthAt과 **동형 단일 스캔**으로
-        // 0..i를 한 번 훑어 depth 스택에 **마커 인덱스**를 함께 쌓고(핀 리전·top_level edge 리셋 동일), i 지점의 스택 바닥
-        // (=depth 1 마커)을 돌려준다 — O(n) 1회. 스택 바닥은 항상 parent+1=1이라 최상위 마커다. i가 그룹 밖(스택 비어있음·
-        // top카드·핀 리전 경계 뒤·그룹 전무)이면 null(옛 enclosing null·climb과 동일 답).
-        if (i >= self.tabs.items.len) return null;
-        var marker_stack: [max_group_nesting]usize = undefined;
-        var depth_stack: [max_group_nesting]u8 = undefined;
-        var top: usize = 0;
-        var prev_pinned: ?bool = null; // 핀 리전 경계 추적(§12 GP1 — effectiveDepthAt과 동형)
-        var k: usize = 0;
-        while (k <= i) : (k += 1) {
-            const t = self.tabs.items[k];
-            if (prev_pinned) |pp| if (t.pinned != pp) {
-                top = 0; // 핀 리전 경계 → 스택 리셋(subtree는 리전을 못 넘는다)
-            };
-            if (t.top_level) top = 0; // §2.1 재설계(§14) top_level edge — 최상위 복귀(effectiveDepthAt과 동형)
-            prev_pinned = t.pinned;
-            if (t.group_start != null) {
-                const dd: u8 = @max(@as(u8, 1), t.group_depth);
-                while (top > 0 and depth_stack[top - 1] >= dd) top -= 1;
-                const parent: u8 = if (top > 0) depth_stack[top - 1] else 0;
-                if (top < depth_stack.len) {
-                    depth_stack[top] = parent + 1;
-                    marker_stack[top] = k;
-                    top += 1;
-                }
-            }
-        }
-        if (top == 0) return null; // i가 그룹 밖
-        return marker_stack[0]; // depth 1 마커(스택 바닥)
-    }
-
     pub const GapDropPlan = struct { target_tab: usize, top_level: bool };
-
-    /// **(A) 카드 드래그 한 프레임의 드롭 plan을 커서 y(backing px)에서 산출한다 — mouse 핸들러와 헤드리스 테스트의 단일
-    /// 출처**(y_px→raw_row→plan 실경로). 두 단계로 판정한다:
-    ///  1. **"그룹 뒤 top_level 탈출"(sidebarCardDropAfterGroup)** — 드래그 소스 카드가 프리뷰에서 자기 자리를 비워 그 아래
-    ///     콘텐츠가 소스 높이만큼 위로 밀리는 **프리뷰 시프트**를 보정한 `y_esc`로 판정한다. hit-test는 불변 원본 sidebar_rows
-    ///     (소스가 아직 자기 자리에 있음)로 하는데 사용자는 소스가 빠진 프리뷰를 보므로, 보정 없이는 "사용자가 그룹 꼬리를
-    ///     겨냥해도 원본 좌표론 멤버 행 중앙에 떨어져 흡수"됐다(증상 A). 소스가 raw_row **위**면(드래그 다운) y에 소스 행 높이를
-    ///     더해, 프리뷰의 그룹 꼬리를 겨냥한 커서가 원본 마지막 멤버의 하단 경계(탈출 존)에 맞게 한다.
-    ///  2. **일반 위치 판정(sidebarGroupDropTargetTab + sidebarCardDropTopLevel)** — 보정 **없는** raw_row로. moveTab의 from/to가
-    ///     소스 제거를 이미 보정하므로 여기에 시프트를 더하면 이중 보정으로 flat 재정렬이 어긋난다(그래서 탈출 판정에만 보정).
-    /// 유효 드롭 없음(범위 밖·마커)이면 .none(제자리 프리뷰). MARU_DEBUG면 실값(raw_row·y_esc·gap·top_level)을 로깅해
-    /// 실앱 드래그에서 왜 흡수(top_level=false)인지 자기검증한다(관측 가능성 — diag.zig 단일 게이트).
-    fn cardDropPlan(self: *AppSession, origin: usize, y_px: f64) DropPlan {
-        const rows = self.sidebar_rows.items;
-        // 목록 행에 떨어졌으면 **소속 카드 row로 접는다** — 목록은 카드의 부속이라 그 위 드롭은 "그 워크스페이스에
-        // 떨어뜨렸다"가 자연스럽고, 접지 않으면 목록 높이만큼이 드롭 사각지대가 된다(code-review max).
-        const raw_row = sidebar_ops.sidebarCardRowFor(self, chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px));
-        // 프리뷰 시프트 보정: 소스 카드 행이 raw_row **위**면(드래그 다운) 프리뷰가 그 아래 콘텐츠를 소스 높이만큼 위로 당긴다.
-        // **카드 + 그 에이전트 목록 행 전체**가 함께 들리므로(projectRowsCore가 묶음으로 옮긴다) 그 합만큼 보정해야
-        // 한다 — 카드 높이만 더하면 목록이 있는 워크스페이스에서 보정이 모자라 그룹 탈출 판정이 어긋난다(code-review max).
-        var y_esc = y_px;
-        if (self.displaySlotOf(origin)) |os| if (os < raw_row) {
-            // 들리는 높이 = 카드 span 높이. **누적을 여기서 다시 굴리지 않는다** — 밴드·tint·accent 막대가 쓰는
-            // `cardSpanEnd`+`spanRect`와 같은 함수를 부른다(docs/sidebar-agent-list.md §3.3). 예전엔 이 자리에
-            // 같은 while 누적 사본이 남아 있어, span 소속 규칙이 바뀌면 렌더는 따라오는데 이 보정만 안 따라와
-            // 그룹 탈출 판정이 어긋났다(code-review max — 같은 계열 회귀를 이미 한 번 겪은 자리다).
-            const span = chrome.components.sidebar.spanRect(rows, os, chrome.components.sidebar.cardSpanEnd(rows, os), self.sidebar_width_px, sidebar_ops.sidebarMetrics(self));
-            y_esc = y_px + @as(f64, @floatFromInt(span.h));
-        };
-        // y_esc가 y_px와 같으면(드래그 업/동일 슬롯 — os >= raw_row라 보정이 없음) dragTargetSlot 결과도 raw_row와 동일하므로
-        // 재계산을 건너뛰고 재사용한다(code-review 효율 — 드래그 다운일 때만 재계산). 부동소수 == 비교라도 보정을 안 한 경로면
-        // 두 값이 **같은 리터럴**(y_esc = y_px 대입)이라 정확히 같다.
-        const raw_esc = if (y_esc != y_px)
-            sidebar_ops.sidebarCardRowFor(self, chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px))
-        else
-            raw_row;
-        // **고정(pinned) 흡수 금지(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 소스 카드가 pinned면 드롭 위치가
-        // 그룹 한복판이어도 top_level=true를 **무조건** 낸다(위치 판정과 무관). 고정 탭은 고정 리전 안 top_level 서브파티션으로만
-        // 존재해야 하므로(고정 그룹과 인터리브), 위치 기반 sidebarCardDropTopLevel(그룹 멤버=false)을 OR로 덮어 흡수를 원천 차단한다.
-        // 비고정 소스는 기존 위치 판정 유지(그룹 안=멤버·밖=top_level). simulateDrop/commit도 같은 source_pinned를 OR해 프리뷰=확정.
-        // (착지 위치의 고정 리전 clamp는 simulateDrop/moveTab의 clampMoveToGroup이 별도로 보장 — 고정 소스는 [0,pinned_count)에 갇힌다.)
-        const source_pinned = origin < self.tabs.items.len and self.tabs.items[origin].pinned;
-        const gap = sidebar_ops.sidebarCardDropAfterGroup(self, raw_esc, origin, y_esc);
-        const plan: DropPlan = if (gap) |g|
-            // §14.6 SR5 요구2: "그룹 뒤/사이 gap" 드롭 = 그룹 밖 top카드로 착지(top_level=true, 흡수 아님).
-            .{ .card = .{ .target_tab = g.target_tab, .top_level = g.top_level or source_pinned } }
-        else if (tab_ops.sidebarGroupDropTargetTab(self, raw_row, origin)) |target_tab| blk: {
-            // §14.6 SR4 model-2: 착지 위치 + 드롭 컨텍스트 top_level 의도(타깃이 최상위 카드면 true·그룹 멤버면 false). 고정 소스는 강제 true.
-            // **[2] 고정 탭은 그룹 안에 착지 금지(§14.9 정합 — "흡수 금지"가 "그룹 split"이 되면 안 됨)**: source_pinned가
-            // 그룹 멤버 사이(subtree 한복판)에 착지하면 위 top_level 강제가 그 자리에 top_level break를 써 **뒤 멤버를 그룹에서
-            // eject**(그룹 쪼갬)한다. 착지 target을 그룹 subtree **밖 경계**로 clamp해 고정 탭이 그룹 경계에만 착지하게 한다 —
-            // 그러면 top_level break가 그룹 무결을 안 깬다(경계 뒤엔 자를 멤버가 없다). 방향: 소스가 그룹 **위**(origin<gm)면
-            // 그룹 **뒤 끝**(ge-1, moveTab from<to가 그룹 다음 자리에 안착), 소스가 그룹 **아래/안**이면 그룹 **앞 마커**(gm,
-            // from>to가 마커 앞에 안착). topLevelGroupMarkerIndex가 null(타깃이 그룹 밖 top카드)이면 clamp 없음 — 고정 top카드
-            // 옆 인터리브(SR4(d))는 무변경. 비고정 소스는 이 clamp를 안 타 그룹 흡수 능력 보존.
-            var tt = target_tab;
-            if (source_pinned) {
-                if (self.topLevelGroupMarkerIndex(tt)) |gm| {
-                    const ge = tab_ops.groupSubtreeEnd(self, gm, null, null);
-                    tt = if (origin < gm) ge - 1 else gm;
-                }
-            }
-            break :blk .{ .card = .{ .target_tab = tt, .top_level = sidebar_ops.sidebarCardDropTopLevel(self, raw_row) or source_pinned } };
-        } else .none;
-        if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
-            "cardDropPlan: origin={d} y={d:.1} raw_row={d} y_esc={d:.1} raw_esc={d} gap_target={?} src_pinned={} plan_top_level={}",
-            .{ origin, y_px, raw_row, y_esc, raw_esc, if (gap) |g| g.target_tab else null, source_pinned, switch (plan) {
-                .card => |c| c.top_level,
-                else => false,
-            } },
-        );
-        return plan;
-    }
 
     // ── SG5-1: 그룹 통째 드래그(헤더/마커 카드를 잡아 그룹 전체를 재정렬) ─────────────────────────────────────
     // docs/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
@@ -5890,98 +5702,20 @@ pub const AppSession = struct {
         return @max(insert_before, pinned_count); // 비고정 → 비고정 리전 [pinned_count, len]
     }
 
-    /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 **원본 sidebar_rows(불변)**로
-    /// hit-test하고, 라이브 tab_ops.moveGroupNesting/Sibling 커밋을 **제거**한 **비커밋 프리뷰**(SG8e — docs/sidebar-groups.md §9)를
-    /// 재투영한다: 드롭 컨텍스트로 plan만 계산해(헤더 드롭=`.group_nest`·카드/최상위 드롭=`.group_sibling`·무효=`.none`)
-    /// refreshDragPreview로 subtree 고스트를 sidebar_preview_rows에 투영한다(self.tabs 불변이라 yo-yo 원천 차단). up이 이
-    /// 마지막 plan을 실제 move로 **정확히 1회** 커밋한다(commitSidebarDragPreview). self.tabs가 불변이라 마커 인덱스가 드래그
-    /// 내내 안정해 **호출자의 마커를 갱신할 필요가 없다** — SG8f: 옛 라이브 팔로우의 새-마커 추적·반환값 대입 잔재를 걷어내 void.
-    ///
-    /// **중첩 vs 형제 = Cmd(⌘) modifier로 구분(사용자 확정 정책)**: `cmd_held`면 드롭 row가 **다른 그룹의 헤더**일 때 그 그룹의
-    /// 자식으로 **중첩**(`groupNestPlan` → `.group_nest{insert_before, target_depth}`, dragged 마커 depth=타겟 그룹 depth+1,
-    /// subtree 상대 depth 유지 = "폴더 안에 넣기"). `cmd_held`가 **아니면 nest를 아예 시도하지 않아**(nest=null) 헤더 드롭이라도
-    /// **형제 경계 이동**만 된다(중첩 절대 안 됨). 헤더가 아닌 카드/최상위 드롭은 Cmd 유무와 무관하게 **형제 경계 이동**
-    /// (`sidebarGroupDropBoundary` → `.group_sibling{insert_before}`)으로, 얕은 위치면 자연 eff depth로 **빼기(un-nest)**가
-    /// 확정 시 gap-clamp+relevel로 반영된다. (과거 SG5-4는 modifier 없이 헤더 드롭=넣기였으나, 사용자 요청으로 Cmd 게이트를 얹었다 —
-    /// 확정 경로 tab_ops.moveGroupNesting/Sibling과 동일 plan.)
-    fn groupDragPreviewFrame(self: *AppSession, marker: usize, y_px: f64, cmd_held: bool) void {
-        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px);
-        // plan 판정(사용자 확정 정책): **Cmd(⌘) 눌림 = 중첩 시도(안으로 넣기)**, **Cmd 없음 = 항상 형제(중첩 절대 안 함)**.
-        //  - Cmd O: 헤더 드롭이면 groupNestPlan이 `.group_nest`를 내고(그 그룹의 자식으로), 헤더가 아닌 카드/최상위 드롭이면
-        //           groupNestPlan이 null이라 아래 형제 경계로 폴백한다(N4 — Cmd라도 넣을 헤더가 없으면 형제).
-        //  - Cmd X: nest를 아예 시도하지 않아(nest=null) 헤더 드롭이라도 `.group_sibling`(단순 위치 변경)만 된다(N1).
-        // hit-test는 원본 sidebar_rows(불변)로. Cmd 없이는 중첩이 불가능하다는 게 이 함수의 핵심 게이트다.
-        const nest: ?GroupNestPlan = if (cmd_held) self.groupNestPlan(raw_row, marker) else null;
-        const plan: DropPlan = if (nest) |np|
-            .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
-        else if (sidebar_ops.sidebarGroupDropBoundary(self, raw_row, marker)) |boundary|
-            // 그룹 고정 C2(§12.6 GP3): insert_before를 **plan에 굽기 전** 드래그 그룹의 pin 리전으로 clamp한다 —
-            // 이동 함수(tab_ops.moveGroupRange/tab_ops.simulateGroupMove)가 아니라 여기 단일 지점이라 프리뷰=확정이 같은 clamp 값을
-            // 재사용해 SG8 이중경로 divergence가 없다. (nest는 groupNestPlan이 same-pin 그룹만 내므로 이미 리전 안이다.)
-            .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(marker, boundary) } }
-        else
-            .none;
-        // MARU_DEBUG 관측(관측 가능성 원칙, diag.zig 단일 게이트): 실제 앱 드래그에서 **Cmd 없이=형제 / Cmd=중첩**이 지켜지는지
-        // 자기검증한다 — 헤드리스 N1~N6가 mouse(mods) 직접 시뮬로 커버하지 못하는 **Swift 드래그 경로**(mouseDragged→handleMouse→
-        // modsBits→maru_macos_app_session_mouse→mouse의 cmd_held)를 실측으로 잇는 단일 로그. Cmd 없이 드래그인데 plan=group_nest면
-        // Swift mods 오전달(command 비트 32 오염) 확정, plan=group_sibling이면 게이트 정상. 미설정이면 분기 하나(캐시 히트)뿐.
-        if (diag_gate.maruDebugEnabled()) std.log.scoped(.group_drag).info(
-            "groupDragPreviewFrame: marker={d} raw_row={d} cmd_held={} plan={s}",
-            .{ marker, raw_row, cmd_held, @tagName(plan) },
-        );
-        // 비커밋 프리뷰 재투영(self.tabs 불변). 카드 드래그(SG8d)와 동형 — 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를
-        // 주므로 세팅하지 않는다(subtree 고스트+삽입선이 하이라이트를 대체). 매 프레임 재투영이라 rebuild + dirty.
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        self.refreshDragPreview(marker, plan, y_px, arena_state.allocator()) catch {};
-        sidebar_ops.rebuildSidebar(self) catch {};
-        self.metal_dirty = true;
-    }
-
     // ── SG5-4: 드래그로 중첩 넣기/빼기 — 드롭 컨텍스트의 depth로 group_depth를 조정한다 ─────────────────────────
     // docs/sidebar-groups.md §9 SG5-4. 그룹 드래그는 (1)다른 그룹 헤더에 드롭=그 그룹의 자식으로 중첩(depth+1),
     // (2)카드/최상위 드롭=형제 경계 이동(+얕으면 빼기)로 나뉜다. 중첩은 **위치 이동 + subtree 마커들의 group_depth
     // relevel**을 함께 한다(이동만으로는 dragged 마커가 부모를 pop해 형제가 되므로 depth를 명시 조정해야 자식이 된다).
     // 빼기는 gap-clamp로 eff가 자동으로 얕아지고, releveel이 저장 depth도 자연 eff로 맞춰 gap을 없앤다.
 
-    const GroupNestPlan = struct { insert_before: usize, target_depth: u8 };
+    pub const GroupNestPlan = struct { insert_before: usize, target_depth: u8 };
     pub const GroupMoveResult = struct { marker: usize, changed: bool };
-
-    /// SG5-4: 드롭 row가 **다른 그룹의 헤더**면 그 그룹(G)의 자식으로 중첩할 계획을 낸다 — insert_before=G의 subtree 끝
-    /// (마지막 자식 자리라 "부모 직접 카드가 자식 앞" §2.1 유지), target_depth=G의 eff_depth+1. 그 외(카드 드롭·자기 헤더·
-    /// 자기 subtree·과깊이 max_group_nesting)는 null → groupDragPreviewFrame이 형제 경계 이동으로 처리(헤더=넣기·카드=형제 분리).
-    pub fn groupNestPlan(self: *AppSession, raw_row: usize, m: usize) ?GroupNestPlan {
-        if (raw_row >= self.sidebar_rows.items.len) return null;
-        const gh = switch (self.sidebar_rows.items[raw_row]) {
-            .group_header => |h| h,
-            .agent_toggle, .agent => return null, // 목록 행 드롭은 그룹 경계 판정 대상이 아니다
-            .card => return null, // 카드 드롭 = 형제 경계(SG5-1 보존)
-        };
-        const g = gh.tab;
-        const len = self.tabs.items.len;
-        if (g >= len or m >= len) return null;
-        if (g == m) return null; // 자기 그룹 헤더 — 무동작
-        // **고정(pinned) 그룹은 흡수 불가(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 대상 그룹 마커가 pinned면
-        // 어느 그룹에도(고정 그룹 포함) 중첩하지 않는다 → null(groupDragPreviewFrame이 형제 경계 이동으로 폴백, Cmd nest도 차단).
-        // 고정 그룹은 고정 리전 안 **독립(top-level) 그룹**으로만 존재하며 다른 그룹의 자식이 될 수 없다. 아래 다른-pin 리전
-        // 차단(GP3)보다 강한 규칙(같은 고정 리전 안 고정↔고정 중첩도 금지)이라 먼저 건다. 비고정 그룹은 기존 중첩 동작 유지.
-        if (self.tabs.items[m].pinned) return null;
-        // 그룹 고정 C2(§12.6 GP3): pin이 **다른** 그룹엔 중첩 불가 → null로 형제 폴백(clampGroupMoveToRegion이 리전에
-        // 가둔다). 멤버가 다른 pin 리전 마커에 소속되면 C3(멤버별 pin)=I1×I2 모순이 재발하므로 원천 차단한다.
-        if (self.tabs.items[g].pinned != self.tabs.items[m].pinned) return null;
-        // 타겟 g가 드래그 subtree [m, my_end) 안이면(자기 자손) 자기 안으로 넣기 불가 — null(형제 경로도 self-guard로 no-op).
-        const my_end = tab_ops.groupSubtreeEnd(self, m, null, null);
-        if (g >= m and g < my_end) return null;
-        const g_depth = tab_ops.effectiveDepthAt(self, g, null, null);
-        if (@as(usize, g_depth) + 1 > max_group_nesting) return null; // 과깊이 방지
-        return .{ .insert_before = tab_ops.groupSubtreeEnd(self, g, null, null), .target_depth = g_depth + 1 };
-    }
 
     // ── SG8b: 드롭 프리뷰 순수 코어 — self.tabs를 커밋하지 않고 가상 배치를 낸다 ────────────────────────────────
     // docs/sidebar-groups.md §9 SG8. 라이브 드래그가 매 프레임 self.tabs를 mutate하던 것을 대신할 **비커밋 프리뷰**의
     // 토대다: plan을 arena order/group_depth에 재현하고(순열·relevel), 옮겨진 subtree의 가상 위치 [ghost_lo, ghost_hi)를
     // 함께 낸다. 프리뷰(SG8c)와 확정(기존 move 함수)이 **같은 순수 코어**를 공유한다 — 카드는 clampMoveToGroup+rotateMove,
-    // 그룹은 groupBlockPermutation+tab_ops.relevelBlockCore(+order-aware tab_ops.groupSubtreeEnd/tab_ops.effectiveDepthAt). 이중경로 divergence는
+    // 그룹은 tab_ops.groupBlockPermutation+tab_ops.relevelBlockCore(+order-aware tab_ops.groupSubtreeEnd/tab_ops.effectiveDepthAt). 이중경로 divergence는
     // 이 공유 코어 + 등가 테스트(simulateDrop 산출 == 실제 move 후 read)로 고정한다.
 
     /// 드롭 계획(어떤 이동인가) — 프리뷰 hit-test가 산출하고 확정이 재사용한다(docs §9 SG8). 옮길 subtree 시작(origin)은
@@ -6032,81 +5766,7 @@ pub const AppSession = struct {
     /// 구간 `[mi+1, mi+1+count)`이고, 그 안 인덱스 = `[mi+1, mi+count]`. `count`는 subtree `[mi+1, tab_ops.groupSubtreeEnd)`의
     /// 직접 멤버 카드 중 local_pinned 수(자식 subgroup은 통째 skip — tab_ops.stablePartitionSubtree float 단위와 동일). 드래그 중
     /// self.tabs는 canonical(직전 commit이 floatLocalPins로 재float)이라 로컬 pin 멤버가 이미 `[mi+1, mi+count]`에 연속이다.
-    const LocalPinBounds = struct { lo: usize, hi: usize };
-    pub fn localPinPrefixBounds(self: *AppSession, origin: usize) ?LocalPinBounds {
-        if (origin >= self.tabs.items.len) return null;
-        const t = self.tabs.items[origin];
-        if (!t.local_pinned or t.group_start != null) return null; // 로컬 pin **직접 leaf 멤버**만(마커·비-pin은 무변경)
-        const mi = tab_ops.enclosingGroupMarkerIndex(self, origin) orelse return null; // 그룹 소속이어야(최상위 로컬 pin은 무의미)
-        const e = tab_ops.groupSubtreeEnd(self, mi, null, null);
-        var count: usize = 0;
-        var scan = mi + 1;
-        while (scan < e) {
-            if (self.tabs.items[scan].group_start != null) {
-                scan = tab_ops.groupSubtreeEnd(self, scan, null, null); // 자식 subgroup 통째 skip(직접 멤버만 셈 — float 단위)
-            } else {
-                if (self.tabs.items[scan].local_pinned) count += 1;
-                scan += 1;
-            }
-        }
-        if (count == 0) return null; // 방어(origin이 local_pinned라 ≥1이지만 desync면 clamp 무의미)
-        return .{ .lo = mi + 1, .hi = mi + count }; // 프리픽스 [mi+1, mi+1+count) 내부 인덱스
-    }
-
-    fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std.mem.Allocator) !VirtualLayout {
-        const n = self.tabs.items.len;
-        // identity order + 라이브 group_depth(위치별 선언 depth) + 라이브 top_level(위치별 최상위 복귀 비트, §14.6 SR4).
-        // 카드/그룹 이동이 이 위에서 순열·relevel한다.
-        const order = try arena.alloc(usize, n);
-        const group_depth = try arena.alloc(u8, n);
-        const top_level = try arena.alloc(bool, n);
-        for (self.tabs.items, 0..) |tab, i| {
-            order[i] = i;
-            group_depth[i] = tab.group_depth;
-            top_level[i] = tab.top_level;
-        }
-        switch (plan) {
-            .none => return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = 0, .ghost_hi = 0 },
-            .card => |c| {
-                // moveTab과 동일 코어: clampMoveToGroup(핀 정직)로 목표를 같은 핀 그룹에 가두고 rotateMove로 순열.
-                // group_depth·top_level은 카드 이동이 위치별 선언값을 안 바꾸므로 order와 lockstep 회전(탭을 따라감).
-                if (origin >= n or c.target_tab >= n) // 범위 밖 = moveTab의 무동작 가드 — 제자리(고스트=origin 자리)
-                    return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = @min(origin, n), .ghost_hi = @min(origin +| 1, n) };
-                var to = clampMoveToGroup(c.target_tab, self.tabs.items[origin].pinned, tab_ops.countPinnedTabs(self), n);
-                // 그룹-로컬 pin(GL §13.5 보강6): 로컬 pin 멤버는 subtree-로컬 프리픽스 [marker+1, local_pin_end)에 **더**
-                // 가둔다(전역 clampMoveToGroup이 핀 리전에 가두는 것과 **대칭**, 한 단계 안쪽). clamp를 **여기 simulateDrop
-                // 카드 경로에만** 굽고(이동 함수 moveTab엔 안 넣음), 확정은 commitSidebarDragPreview가 moveTab **뒤** floatLocalPins
-                // 로 다시 float해 같은 프리픽스로 snap-back한다(re-partition-on-commit, §13.5 — 프리뷰=확정 SG8 불변식 B).
-                // 프리픽스 ⊂ 핀 리전(pin ⊃ group)이라 전역 clamp 결과를 로컬로 좁히면 되고, 비-로컬-pin 멤버는 bounds=null → 무변경.
-                if (self.localPinPrefixBounds(origin)) |b| to = std.math.clamp(to, b.lo, b.hi);
-                if (origin != to) {
-                    // §14 경계 유지(finding #2): origin이 top_level 경계 홀더면 뒤 sticky follower에 경계 재확립(가상 — commit과
-                    // **같은 조건**이라 프리뷰=확정). order가 아직 identity라 self.tabs 직접 검사(origin+1 == 가상 origin+1).
-                    // rotateMove **전**에 세팅해 follower 플래그가 블록과 함께 회전한다. origin==to(제자리)면 이 블록을 안 타 무변경.
-                    if (origin > 0 and origin + 1 < n and self.tabs.items[origin].top_level and
-                        self.tabs.items[origin + 1].group_start == null and !self.tabs.items[origin + 1].top_level and
-                        self.tabs.items[origin + 1].pinned == self.tabs.items[origin].pinned and
-                        tab_ops.enclosingGroupMarkerIndex(self, origin - 1) != null)
-                        top_level[origin + 1] = true;
-                    rotateMove(usize, order, origin, to);
-                    rotateMove(u8, group_depth, origin, to);
-                    rotateMove(bool, top_level, origin, to);
-                    // §14.6 SR4 model-2: 드롭 컨텍스트로 top_level을 **직접 전이**한다(가상). 의도(c.top_level = 그룹 밖 gap
-                    // 드롭이면 true)를 meaningfulness 게이트(hasGroupMarkerAboveInRegion — 그룹 마커가 리전 안 위에 있을 때만
-                    // flag가 흡수 방지에 실제 필요)와 AND해 **최소 표현**으로 굽는다: leading/flat(마커 없음)·top-run(위가 이미
-                    // top break)은 flag 없이도 depth 0이라 override가 no-op → byte-identical(회귀 0). 그룹 안 드롭(c.top_level
-                    // =false)은 항상 false write라 top카드가 멤버로 흡수될 때 stale flag를 clear한다. origin==to(제자리)는
-                    // 위치·소속 불변이라 override 안 함(전이 없음). commit이 같은 게이트를 post-move self.tabs에 적용해 프리뷰=확정.
-                    // **고정 흡수 금지(프리뷰)**: 소스 pinned면 top_level 강제 true(cardDropPlan과 동일 규칙). self.tabs 불변이라
-                    // origin의 라이브 pinned가 드래그 내내 안정하고, commit이 같은 source_pinned를 OR해 프리뷰=확정(대칭).
-                    top_level[to] = (c.top_level or self.tabs.items[origin].pinned) and self.hasGroupMarkerAboveInRegion(to, order, top_level);
-                }
-                return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = to, .ghost_hi = to + 1 };
-            },
-            .group_sibling => |g| return tab_ops.simulateGroupMove(self, arena, order, group_depth, top_level, origin, g.insert_before, null),
-            .group_nest => |g| return tab_ops.simulateGroupMove(self, arena, order, group_depth, top_level, origin, g.insert_before, g.target_depth),
-        }
-    }
+    pub const LocalPinBounds = struct { lo: usize, hi: usize };
 
     /// §14.6 SR4 model-2 — 착지 위치 `landing`이 그룹 마커에 흡수될 위치인가(= top_level flag가 **의미 있는가**). 리전 안에서
     /// landing 바로 위로 스캔해 (1) 먼저 **top_level break**(이미 최상위 run 개시 카드)를 만나면 false(landing은 flag 없이도
@@ -6130,41 +5790,6 @@ pub const AppSession = struct {
             if (t.group_start != null) return true; // 위에 그룹 마커 → flag 없으면 흡수(전이가 meaningful)
         }
         return false;
-    }
-
-    /// SG8c 프리뷰 재투영 진입점(docs/sidebar-groups.md §9) — plan을 simulateDrop으로 **비커밋 가상 배치**(self.tabs 불변)
-    /// 하고, 그 order/group_depth를 projectRowsCore(프리뷰 모드)로 sidebar_preview_rows에 투영한다. 고스트 [lo,hi) 구간은
-    /// 접힘 게이트 예외로 강제 방출되고(사라짐 방지), 그 고스트를 담은 접힌 그룹 헤더는 collapsed=false로 flip된다.
-    /// member_count는 가상 order 위에서 order-aware directCardCount로 계산돼 고스트를 반영한다(self.tabs 직접 스캔 안 함 —
-    /// 드래그 중 self.tabs가 불변이라 직접 스캔하면 고스트가 안 보인다). ghost range는 sidebar_drag_preview에 함께 보관해
-    /// 렌더(SG8d)가 파생한다. **실제 드래그 핸들러 호출은 SG8d** — 지금은 함수만 두고 헤드리스로 검증한다(렌더 미배선).
-    /// arena=simulateDrop 중간 버퍼(order/group_depth/perm) 정리용(호출자 소유 — 프레임 스크래치).
-    pub fn refreshDragPreview(self: *AppSession, origin: usize, plan: DropPlan, cursor_y: f64, arena: std.mem.Allocator) !void {
-        const vl = try self.simulateDrop(origin, plan, arena);
-        // (3) 드래그 대상이 **접힌 그룹**이면 고스트를 subtree 전체가 아니라 접힌 헤더로만 낸다(force-emit 억제). 그룹 통째
-        // 드래그(group_sibling/group_nest)이고 origin 마커가 group_collapsed일 때만 true — 카드 드래그(대상=카드)는 항상 false라
-        // 접힌 **타깃** 그룹 안 드롭 시의 force-emit(사라짐 방지)은 그대로 유지된다(대상/타깃 구분).
-        const dragged_collapsed = switch (plan) {
-            .group_sibling, .group_nest => origin < self.tabs.items.len and self.tabs.items[origin].group_start != null and self.tabs.items[origin].group_collapsed,
-            else => false,
-        };
-        // 가상 order/depth를 프리뷰 모드로 투영 — 고스트 [lo,hi)는 접힘 게이트 예외로 강제 방출(사라짐 방지)·헤더 flip.
-        // 반환 range는 vl.ghost(order 위치 도메인)를 방출 후 **표시-row 도메인**으로 옮긴 것(렌더가 그대로 씀).
-        const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, vl.top_level, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi, .dragged_collapsed = dragged_collapsed });
-        // subtree 길이(카드=1·그룹=tab_ops.groupSubtreeEnd-origin·none=0). 프리뷰 상태 메타(확정·origin 안정성 문서화용).
-        const origin_len: usize = switch (plan) {
-            .none => 0,
-            .card => 1,
-            .group_sibling, .group_nest => if (origin < self.tabs.items.len) tab_ops.groupSubtreeEnd(self, origin, null, null) - origin else 0,
-        };
-        self.sidebar_drag_preview = .{
-            .origin = origin,
-            .origin_len = origin_len,
-            .plan = plan,
-            .cursor_y = cursor_y,
-            .ghost_lo = rng.lo,
-            .ghost_hi = rng.hi,
-        };
     }
 
     /// 모든 그룹 마커 subtree에 stablePartitionSubtree를 적용한다(그룹-로컬 pin 배선, GL §13.4). 배선 표준 순서
@@ -6226,68 +5851,6 @@ pub const AppSession = struct {
     pub fn normalizePinnedFromGroups(self: *AppSession) void {
         if (self.sidebar_drag_preview != null) return; // SG8 드래그 게이트(L4 잔류 — §8A.4): 프리뷰 중 self.tabs.pinned 불변
         group_normalize.normalizePinnedFromGroups(Tab, self.tabs.items); // L2 리프트(M3c) — suffix-exclusion 정규화 코어로 위임
-    }
-
-    /// 그룹을 **통째로** 고정/해제한다(togglePin의 그룹판, 그룹 고정 C2 — docs/sidebar-groups.md §12.6·§12.10 GP3).
-    /// `marker`는 그룹 시작 마커 탭(헤더 우클릭 대상 또는 멤버 카드가 위임한 enclosing 마커). 순서:
-    ///  1. **토글 전** 구조 subtree [mi, e)를 잡는다 — 개별 pin 입구가 막혀(§12.7 보강5) desync가 없으니 마커·멤버 pin이
-    ///     아직 일치해 `tab_ops.groupSubtreeEnd`(pin 인식)가 완전 subtree를 낸다.
-    ///  2. 마커+멤버 pin을 새 값으로 **직접 동기**한다 — `normalizePinnedFromGroups`의 suffix-exclusion은 전량 flip된
-    ///     직후(마커만 새 pin, 멤버 전부 옛 pin)를 "꼬리"로 보고 안 흡수하므로, 멤버 동기는 여기서 명시적으로 한다.
-    ///  3. `tab_ops.stablePartitionPinned`로 그룹(연속·uniform-pin 블록)을 목표 리전 경계에 안착한다 — 고정=(다른 고정 뒤)프리픽스
-    ///     끝, 비고정=비고정 리전 시작. **복원과 같은 프리픽스 정렬**이라 그룹이 리전 양쪽에 다른 고정 단위가 있어도(예:
-    ///     고정 그룹 앞에 다른 고정 그룹) 프리픽스 불변식을 항상 지킨다(tab_ops.moveGroupRange 단일 insert_before로는 표현 못 하는
-    ///     경계 케이스 — 연속 블록이라 stable 수집이 그룹 통째를 붙여 옮기고 파티션 무결이 유지된다).
-    ///  4. `normalize`(idempotent 확인) 후 1회 rebuild.
-    pub fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
-        var mi_opt: ?usize = null;
-        for (self.tabs.items, 0..) |t, i| if (t == marker) {
-            mi_opt = i;
-            break;
-        };
-        const mi = mi_opt orelse return;
-        if (marker.group_start == null) return; // 마커여야 한다(멤버 위임은 호출 전 enclosing 마커로 해석)
-
-        const e = tab_ops.groupSubtreeEnd(self, mi, null, null); // 토글 전 subtree(마커·멤버 pin 일치라 완전 범위)
-        const new_pinned = !marker.pinned;
-        var k = mi;
-        while (k < e) : (k += 1) {
-            self.tabs.items[k].pinned = new_pinned; // 마커+멤버 pin 직접 동기(§12.5 정합의 유일한 flip 동기원)
-            // **그룹 고정 해제(off) = 그룹 pin 상태 리셋**(사용자 리포트 버그2): 멤버의 그룹-로컬 pin(§13)도 함께 클리어한다.
-            // 안 그러면 로컬 pin 멤버가 `sidebarRowShowsPin`의 local_pinned 선두 분기(§13.6)로 **📌를 유지**해, 그룹을 통째
-            // 해제했는데도 자식이 개별 고정(📌)으로 남는다("해제하면 그냥 그룹 멤버로 복귀해야"). 로컬 pin은 그룹째 고정과
-            // **직교**(§13.1)라 **고정 켜는 동안엔 보존**(위 keystone float 유지)하되, **끄는 순간** 그룹을 깨끗한 멤버 상태로
-            // 되돌린다(리셋 시맨틱 — subtree [mi,e) 통째라 중첩 자식 로컬 pin까지 함께 리셋). 아래 floatLocalPins가 이제 로컬
-            // pin 0개를 보고 재배열을 안 해, 멤버는 해제 직전 위치(마커 직후)에 그대로 남되 📌만 사라진다.
-            if (!new_pinned) self.tabs.items[k].local_pinned = false;
-        }
-        tab_ops.stablePartitionPinned(self); // 그룹 블록을 목표 리전 경계로 안착(프리픽스 불변식 — 복원과 같은 정렬)
-        self.normalizePinnedFromGroups(); // 안착 후 canonical 확인(멤버 이미 동기 → idempotent)
-        self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 (3) — 항상 tab_ops.stablePartitionPinned 뒤, keystone 보존)
-        sidebar_ops.rebuildSidebar(self) catch {};
-        self.metal_dirty = true;
-        if (builtin.mode == .Debug) tab_ops.assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
-    }
-
-    /// 그룹 안 **멤버** 카드의 그룹-로컬 pin을 토글한다(그룹 내 위치 고정, GL §13 GL2). 전역 pin(tab_ops.togglePin, 리스트 앞
-    /// 고정 프리픽스)·그룹째 고정(toggleGroupPin, 전역 [고정][비고정] 리전)과 **직교하는 새 축**이다 — `member.local_pinned`만
-    /// 뒤집고 그 멤버의 **enclosing(nearest) 마커** subtree 안에서만 `tab_ops.stablePartitionSubtree`로 재배열한다(로컬 pin=마커
-    /// 직후로 stable float, 해제=나머지와 함께 원 상대순서). 전역 파티션·그룹 소속(§2.1 I2·중첩 I3)은 안 건드린다(§13.1
-    /// keystone). 최상위 카드(그룹 미소속)면 no-op — 로컬 pin이 무의미하므로 호출처(acceptContextMenu)가 최상위는 tab_ops.togglePin,
-    /// 마커 카드는 toggleGroupPin으로 분기한다(tab_ops.cardPinRole). 활성 탭 포인터는 reorderTabs가 추적해 유지된다(tab_ops.stablePartitionSubtree).
-    /// 드래그 게이트(§13.4 보강6)는 tab_ops.stablePartitionSubtree 내부가 처리(프리뷰 중이면 float 생략, 플래그만 세팅).
-    pub fn toggleLocalPin(self: *AppSession, member: *Tab) void {
-        var idx: ?usize = null;
-        for (self.tabs.items, 0..) |t, i| if (t == member) {
-            idx = i;
-            break;
-        };
-        const ix = idx orelse return;
-        const mi = tab_ops.enclosingGroupMarkerIndex(self, ix) orelse return; // 그룹 미소속(최상위) → no-op(로컬 pin 무의미)
-        member.local_pinned = !member.local_pinned;
-        tab_ops.stablePartitionSubtree(self, mi); // subtree-로컬 float(마커 직후) — 배선 표준 순서 (3)단계와 동형(여긴 전역 축 불변이라 (1)(2) 불요)
-        sidebar_ops.rebuildSidebar(self) catch {};
-        self.metal_dirty = true;
     }
 
     /// 워크스페이스 카드 우클릭 "위치 고정"의 **역할** — 라벨(buildContextMenuItems)과 dispatch(acceptContextMenu)가 공유하는
@@ -6603,27 +6166,12 @@ pub const AppSession = struct {
 
     pub const FileTreeReloadAction = struct { surface_id: u64, conflict: bool };
 
-    pub fn takeFileTreeReloadAction(self: *AppSession) ?FileTreeReloadAction {
-        while (self.file_tree_reload_actions_len != 0) {
-            self.file_tree_reload_actions_len -= 1;
-            const action = self.file_tree_reload_actions[self.file_tree_reload_actions_len];
-            if (action.conflict) return action;
-            const entry = file_panel_ops.fileEntryForSurfaceId(self, action.surface_id) orelse continue;
-            if (entry.dirty or entry.dirty_sync_pending or entry.external_change) {
-                file_panel_ops.markExternalFileChange(self, entry);
-                continue;
-            }
-            return action;
-        }
-        return null;
-    }
-
     pub fn bumpExternalFileChange(entry: *dock_panel.Entry) void {
         entry.external_change_generation +%= 1;
         if (entry.external_change_generation == 0) entry.external_change_generation = 1;
     }
 
-    fn latchExternalFileChange(self: *AppSession, entry: *dock_panel.Entry) void {
+    pub fn latchExternalFileChange(self: *AppSession, entry: *dock_panel.Entry) void {
         bumpExternalFileChange(entry);
         entry.external_change = true;
         self.metal_dirty = true;
@@ -6703,39 +6251,6 @@ pub const AppSession = struct {
         );
     }
 
-    fn beginFileConflictReload(self: *AppSession, surface_id: u64) void {
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return;
-        if (!entry.external_change or entry.conflict_reload_pending) return;
-        entry.conflict_reload_pending = true;
-        entry.conflict_reload_generation = entry.external_change_generation;
-        file_panel_ops.queueFileTreeReload(self, surface_id, true);
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-    }
-
-    /// web shell이 실제 read + editor replacement를 마친 뒤에만 conflict 보호를 해제한다. 실패 ack는 pending만
-    /// 내리고 원래 dirty buffer/conflict/save guard를 그대로 둬 사용자가 재시도하거나 복사할 수 있게 한다.
-    pub fn completeFileConflictReload(self: *AppSession, surface_id: u64, success: bool) FilePanelWriteError!void {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
-        if (!entry.conflict_reload_pending) {
-            if (!success) self.latchExternalFileChange(entry); // clean auto-reload가 편집 중단/실패를 보고한 보수적 latch.
-            return;
-        }
-        entry.conflict_reload_pending = false;
-        const unchanged = entry.external_change_generation == entry.conflict_reload_generation;
-        entry.conflict_reload_generation = 0;
-        if (success and unchanged) {
-            entry.dirty = false;
-            entry.dirty_sync_pending = false;
-            entry.external_change = false;
-            file_panel_ops.removeFilePanelDirtySyncAction(self, surface_id);
-        }
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-    }
-
     /// openKindForPath 결과를 도크 EntryKind로 옮기는 단일 지점. 새 kind(svg·image·media·pdf, FP13~)는 여기서
     /// 한 번만 매핑을 넓힌다(docs/file-panel.md §2.2). 이름이 1:1이라도 두 enum(bridge OpenKind·dock EntryKind)의
     /// 레이어 경계를 유지한다.
@@ -6764,82 +6279,6 @@ pub const AppSession = struct {
         if (pending.taken) return null;
         pending.taken = true;
         return .{ .id = pending.id, .path = pending.staged, .identity = pending.identity };
-    }
-
-    pub fn completeFileTreeTrash(
-        self: *AppSession,
-        id: u64,
-        outcome: FileTreeTrashOutcome,
-        recovery_path: ?[]const u8,
-    ) void {
-        if (self.file_tree_trash_queue_len == 0) return;
-        const pending = self.file_tree_trash_queue[0];
-        // Only the native adapter that took the head action may acknowledge it. This rejects stale,
-        // guessed, or duplicate callbacks without releasing the namespace reservation early.
-        if (pending.id != id or !pending.taken or pending.restoring) return;
-        if (outcome == .moved_verified) {
-            file_panel_ops.clearFileTreeMutationReservation(self, pending.id);
-            const protected_now = file_panel_ops.fileTreePathProtectedNow(self, pending.original, pending.id);
-            if (protected_now) {
-                // The native destination mapping proves the staged object reached Trash, but a
-                // late editor/external-change signal means closing the buffer could lose data. Reflect
-                // the filesystem removal while keeping the protected tab available for recovery/save.
-                file_panel_ops.releaseFileTreeMutationEditorLocks(self, pending.id, true);
-                self.showNotice("휴지통 이동은 완료됐지만 편집 상태가 바뀌어 열린 탭은 유지합니다.");
-            } else {
-                _ = file_panel_ops.removeDeletedDockEntries(self, pending.original);
-                file_panel_ops.releaseFileTreeMutationEditorLocks(self, pending.id, false);
-            }
-            self.file_tree.removeRecentWithin(pending.original);
-            if (std.fs.path.dirname(pending.original)) |parent| self.file_tree.invalidatePath(parent) catch {};
-            if (self.file_tree_selection.generation == pending.selection_generation) {
-                const selected_path = self.file_tree_selection.path();
-                if (self.file_tree_selection.kind == pending.row_kind and selected_path != null and
-                    std.mem.eql(u8, selected_path.?, pending.original)) file_panel_ops.clearFileTreeSelection(self);
-            }
-        } else if (outcome == .not_moved) {
-            if (!file_panel_ops.enqueueFileTreeDeleteRestore(
-                self,
-                pending.id,
-                pending.root,
-                pending.staged,
-                pending.original,
-                pending.identity,
-                pending.parent_identity,
-                pending.root_identity,
-            )) {
-                file_panel_ops.clearFileTreeMutationReservation(self, pending.id);
-                file_panel_ops.releaseFileTreeMutationEditorLocks(self, pending.id, true);
-                const retained = file_panel_ops.takePendingTrashStaged(self, pending.id) orelse return;
-                file_panel_ops.finishPendingTrashRecord(self, pending.id);
-                file_panel_ops.retainFileTreeRecoveryPath(self, retained);
-                return;
-            }
-            self.file_tree_trash_queue[0].restoring = true;
-            self.file_tree_mutation_backend.pump();
-            return;
-        } else {
-            // The OS moved some directory entry but its destination identity could not be proven. Never
-            // roll back the now-ambiguous staged path: preserve the destination if known and keep the
-            // session fail-closed without pretending a nonexistent source is recoverable.
-            const owned_recovery = if (recovery_path) |path|
-                if (path.len != 0) self.allocator.dupe(u8, path) catch null else null
-            else
-                null;
-            file_panel_ops.finishPendingTrashRecord(self, pending.id);
-            if (owned_recovery) |path| {
-                file_panel_ops.retainFileTreeRecoveryPath(self, path);
-            } else {
-                file_panel_ops.retainFileTreeUnknownRecovery(self);
-            }
-            self.file_tree_rows_dirty = true;
-            self.metal_dirty = true;
-            return;
-        }
-        file_panel_ops.finishPendingTrashRecord(self, pending.id);
-        self.file_tree_mutation_backend.pump();
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
     }
 
     /// 탐색기 스크롤 좌표계의 세 값. **한 자리에서 함께** 만든다 — content와 viewport가 따로 계산되면
@@ -6885,17 +6324,6 @@ pub const AppSession = struct {
         return self.file_tree_external_open;
     }
 
-    /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
-    /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
-    pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
-        if (file_panel_ops.fileTreeFileMutationBusy(self) or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
-            !std.unicode.utf8ValidateSlice(path)) return .failed;
-        const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
-        const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
-        if (stat.kind != .file) return .failed;
-        return file_panel_ops.openFilePanelPathAfterValidation(self, path, open_kind, null);
-    }
-
     pub const FilePanelLinkError = std.mem.Allocator.Error || error{
         SurfaceNotFound,
         WrongKind,
@@ -6919,27 +6347,6 @@ pub const AppSession = struct {
         self.external_link_kind = if (surface_id == 0) .system else .in_app;
     }
 
-    /// 격리 Markdown renderer 또는 로컬 HTML delegate가 활성화한 링크를 source surface에 고정해 처리한다.
-    /// 명시적 HTTP(S)는 config/⌘⇧ disposition에 따라 browser Term 또는 시스템 브라우저 action으로 보내고,
-    /// Markdown의 로컬 문서 링크는 source group에서 연다. 최종 regular-file 검증은 공용 open 경로가 맡는다.
-    pub fn openFilePanelLink(
-        self: *AppSession,
-        surface_id: u64,
-        href: []const u8,
-        force_system: bool,
-    ) FilePanelLinkError!void {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const source = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (file_panel_bridge.isExplicitHttpLink(href)) return file_panel_ops.queueExternalLink(self, href, force_system);
-        if (source.kind != .markdown) return error.WrongKind;
-        const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidLink => return error.InvalidLink,
-        };
-        defer self.allocator.free(target);
-        if (self.openFilePanelPath(target) != .opened) return error.OpenFailed;
-    }
-
     /// Trusted Markdown shell bridge entry. The document epoch remains part of the capability until the native
     /// action admission, so a late request cannot resolve a relative path against a replacement document.
     pub fn openFilePanelDocumentLink(
@@ -6954,7 +6361,7 @@ pub const AppSession = struct {
         if (source.kind != .markdown) return error.WrongKind;
         if (!source.editor_document_active or source.editor_epoch != editor_epoch)
             return error.StaleDocument;
-        return self.openFilePanelLink(surface_id, href, force_system);
+        return file_panel_ops.openFilePanelLink(self, surface_id, href, force_system);
     }
 
     /// 외부 링크 action을 caller-owned 버퍼로 복사한 뒤 1회 소비한다. 버퍼가 작으면 pending을 보존해 재시도할 수 있다.
@@ -7099,22 +6506,6 @@ pub const AppSession = struct {
         return self.file_panel_close_unlock_actions[self.file_panel_close_unlock_actions_len];
     }
 
-    /// request-scoped unlock 자체를 실행할 panel/JS가 사라졌을 때의 terminal ack. 같은 surface의 새 close가 이미
-    /// 시작됐으면 이전 request 실패는 무시하고, 아니면 clean으로 추정하지 않도록 dirty를 보수적으로 latch한 뒤
-    /// sync reservation만 회수한다.
-    pub fn failFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: u64) void {
-        if (self.pending_file_panel_close) |pending| {
-            if (pending.surface_id == surface_id and pending.request_id != request_id) return;
-        }
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return;
-        entry.dirty = true;
-        entry.dirty_sync_pending = false;
-        file_panel_ops.removeFilePanelDirtySyncAction(self, surface_id);
-        self.file_tree_rows_dirty = true;
-        self.metal_dirty = true;
-        self.showNotice("편집 상태를 다시 확인할 수 없어 파일 탭을 보호했습니다.");
-    }
-
     /// 워크스페이스 순회 순서(탭→pane→Term)에서 `index`번째 파일 entry.
     /// FP16 이전의 `group.entries.items[index]` 자리를 그대로 대신한다 — 도크가
     /// 그룹 배열을 들고 있을 때의 "열린 순서"가 이제 pane 안 Term 순서이기 때문이다.
@@ -7126,43 +6517,6 @@ pub const AppSession = struct {
             n += 1;
         }
         return null;
-    }
-
-    pub fn takeFilePanelSaveCloseAction(self: *AppSession) ?FilePanelSaveCloseAction {
-        const action = self.file_panel_save_close_pending orelse return null;
-        self.file_panel_save_close_pending = null;
-        const pending = self.pending_file_panel_close orelse return null;
-        if (pending.surface_id != action.surface_id or pending.request_id != action.request_id or
-            pending.phase != .saving) return null;
-        if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
-            file_panel_ops.abortStaleFilePanelClose(self);
-            return null;
-        }
-        return action;
-    }
-
-    pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id: u64, revision: u64, success: bool) void {
-        const pending = self.pending_file_panel_close orelse return;
-        if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .saving) return;
-        if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
-            file_panel_ops.abortStaleFilePanelClose(self);
-            return;
-        }
-        if (!success) {
-            file_panel_ops.cancelFilePanelClose(self);
-            self.showNotice("파일을 저장할 수 없어 탭을 닫지 않았습니다.");
-            return;
-        }
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse {
-            file_panel_ops.cancelFilePanelClose(self);
-            return;
-        };
-        if (entry.editor_revision != revision or entry.dirty or entry.dirty_sync_pending or entry.external_change) {
-            file_panel_ops.cancelFilePanelClose(self);
-            self.showNotice("저장 후 편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
-            return;
-        }
-        _ = file_panel_ops.closeFilePanelSurfaceNow(self, surface_id);
     }
 
     pub const FilePanelReadError = error{
@@ -7180,47 +6534,6 @@ pub const AppSession = struct {
         OutOfMemory,
     };
 
-    /// surface가 핀한 Markdown 파일을 읽는다. web 쪽에서 경로를 지정할 수 없고, 단일 파일 상한은 8 MiB다.
-    pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
-        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
-        if (entry.editor_recovery_required) return error.RecoveryRequired;
-        if (entry.mutation_pending_id != 0) return error.MutationPending;
-
-        const cwd = std.Io.Dir.cwd();
-        const file = try file_panel_ops.openFilePanelRead(cwd, entry.path, !entry.initial_file_identity_pending);
-        defer file.close(self.io);
-        if (entry.initial_file_identity_pending) {
-            const actual = try file_panel_ops.openedFileIdentity(self, file);
-            const expected: file_tree.Identity = .{
-                .device = entry.initial_file_identity_device,
-                .inode = entry.initial_file_identity_inode,
-                .kind = entry.initial_file_identity_kind,
-            };
-            if (!actual.eql(expected)) return error.NotFound;
-        }
-        const before = file.stat(self.io) catch return error.NotFound;
-        const bytes = try file_panel_ops.readOpenedFile(self, gpa, file);
-        errdefer gpa.free(bytes);
-        const after = file.stat(self.io) catch return error.NotFound;
-        if (before.kind != .file or after.kind != .file or before.inode != after.inode or before.size != after.size or
-            !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.NotFound;
-        if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
-        // size-query/fill 사이에 새 document가 시작되거나 WebContent가 종료됐으면 이전 read가 새 save baseline을
-        // 덮지 못한다. byte 반환과 token commit을 같은 epoch/active 검사로 묶는다.
-        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
-        if (entry.editor_recovery_required) return error.RecoveryRequired;
-        entry.initial_file_identity_pending = false;
-        entry.initial_file_identity_device = 0;
-        entry.initial_file_identity_inode = 0;
-        entry.initial_file_identity_kind = 0;
-        entry.disk_content_hash = std.hash.Wyhash.hash(0, bytes);
-        entry.disk_content_hash_valid = true;
-        return bytes;
-    }
-
     pub const FilePanelWriteError = error{
         SurfaceNotFound,
         WrongKind,
@@ -7237,81 +6550,6 @@ pub const AppSession = struct {
         RecoveryRequired,
     };
 
-    /// 신뢰 shell document가 새로 생길 때마다 발급하는 generation. surface id는 WebContent reload에서 유지되므로
-    /// revision만으로는 이전 document와 새 document를 구분할 수 없다.
-    pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
-        if (document_id == 0) return error.StaleDocument;
-
-        // stale/멱등 begin은 close transaction을 포함한 어떤 상태도 바꾸지 않는다. 동일 active document의
-        // 재시도는 namespace mutation 중에도 새 문서를 만들지 않으므로 기존 epoch만 반환할 수 있다.
-        if (entry.editor_surface_id == surface_id) {
-            if (document_id < entry.editor_document_id or
-                (document_id == entry.editor_document_id and !entry.editor_document_active)) return error.StaleDocument;
-            if (document_id == entry.editor_document_id) return entry.editor_epoch;
-        }
-        if (entry.mutation_pending_id != 0) return error.MutationPending;
-        if (entry.editor_epoch >= maru.session.control_bridge.max_js_safe_integer) return error.IdentityExhausted;
-
-        // document_id는 surface-local이다. LRU/rename으로 새 surface id가 생기면 이전 WebView의 request는 이미
-        // surface lookup에서 거부되므로 새 surface는 1부터 다시 시작할 수 있다.
-        if (entry.editor_surface_id != surface_id) {
-            entry.editor_surface_id = surface_id;
-            entry.editor_document_id = 0;
-            entry.editor_document_active = false;
-        }
-        // 여기부터는 실제 새 document 승인이다. 이전 close의 lock/snapshot 예약은 새 page가 소유할 수 없으므로
-        // 이 전이에서만 취소한다.
-        if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
-            file_panel_ops.cancelFilePanelClose(self);
-
-        const had_editor_document = entry.editor_document_active;
-        entry.editor_document_id = document_id;
-        entry.editor_document_active = true;
-        entry.editor_epoch += 1;
-        entry.editor_revision = 0;
-        // 새 document가 자신의 epoch-scoped read를 끝내기 전에는 이전 document의 disk token으로 저장할 수 없다.
-        entry.disk_content_hash_valid = false;
-        // 새 document 교체는 crash와 같은 데이터 수명 경계다. editable mode에서는 마지막 CM6 transaction이 아직
-        // native dirty ACK에 도달하지 않았을 수 있으므로 native mirror가 clean이어도 보수적으로 recovery한다.
-        // read mode도 이전 editable buffer의 dirty/pending 보호가 남아 있으면 동일하게 latch한다.
-        if (had_editor_document and (entry.mode.isEditable() or entry.dirty or entry.dirty_sync_pending)) {
-            entry.editor_recovery_required = true;
-            entry.dirty = true;
-            entry.dirty_sync_pending = true;
-            self.showNotice("편집 중 웹 콘텐츠가 다시 시작되어 자동 복구 전까지 파일 작업을 차단했습니다.");
-        }
-        return entry.editor_epoch;
-    }
-
-    /// 정확히 현재 surface의 editable WebContent가 종료되면 page→native dirty ACK 직전 편집도 보존 대상으로 본다.
-    /// 새 document begin 전까지 active=false로 이전 page의 모든 read/write/ACK를 즉시 무효화한다.
-    pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
-        if (!self.dock_initialized) return 0;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return 0;
-        if (!entry.kind.usesEditorBridge()) return 0;
-        // LRU/rename이 새 surface id를 발급한 뒤 첫 begin 전이면 Entry에 남은 active flag는 이전 surface 문서다.
-        // 새 WebView의 조기 종료를 그 문서 손실로 오인하지 않고 safe reload만 허용한다.
-        if (entry.editor_surface_id != surface_id) return 1;
-        // 최초 begin 전 crash는 잃을 editor가 없어 reload만 허용한다. 이미 종료 처리한 document의 중복 callback은
-        // 다시 reload하지 않는다.
-        if (!entry.editor_document_active) return if (entry.editor_document_id == 0) 1 else 0;
-        entry.editor_document_active = false;
-        // read 전환은 CM6 buffer를 파괴하지 않으며 dirty snapshot ACK 전 pending 보호도 유지한다. 현재 표시 mode만
-        // 보고 safe reload로 분류하면 source/live→read 직후 crash에서 편집을 잃으므로 보호 상태도 함께 본다.
-        if (!entry.mode.isEditable() and !entry.dirty and !entry.dirty_sync_pending) return 1;
-        entry.editor_recovery_required = true;
-        entry.dirty = true;
-        entry.dirty_sync_pending = true;
-        if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
-            file_panel_ops.cancelFilePanelClose(self);
-        self.showNotice("편집 중 웹 콘텐츠가 종료되어 자동 복구 전까지 파일 작업을 차단했습니다.");
-        self.metal_dirty = true;
-        return 2;
-    }
-
     pub fn completeFileConflictReloadForDocument(
         self: *AppSession,
         surface_id: u64,
@@ -7322,7 +6560,7 @@ pub const AppSession = struct {
         if (!entry.kind.usesEditorBridge()) return error.WrongKind;
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
-        return self.completeFileConflictReload(surface_id, success);
+        return file_panel_ops.completeFileConflictReload(self, surface_id, success);
     }
 
     pub const PinnedFilePanelParent = struct {
@@ -7349,37 +6587,6 @@ pub const AppSession = struct {
         return hash.final();
     }
 
-    /// 신뢰 shell이 핀한 Markdown 파일 하나만 원자 교체한다. 웹 요청에는 경로 인자가 없고 surface→entry 경로를
-    /// 여기서 다시 해소한다. 원본 권한을 보존한 동일 디렉터리 임시 파일을 fsync한 뒤 rename-replace하므로 실패 시
-    /// 기존 파일이 부분 내용으로 노출되지 않는다. dirty 최종값은 저장 중 재편집과 직렬화한 shell의 setDirty가 내리며,
-    /// write 자체는 true를 false로 바꾸지 않아 저장 완료와 재편집 사이 eviction race를 만들지 않는다.
-    pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
-        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
-        if (entry.editor_recovery_required) return error.RecoveryRequired;
-        if (entry.mutation_pending_id != 0) return error.MutationPending;
-        if (entry.external_change) return error.ExternalConflict;
-        if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
-        if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
-        if (!entry.disk_content_hash_valid) return error.ExternalConflict;
-
-        const pinned = try file_panel_ops.openPinnedFilePanelParent(self.io, entry.path);
-        defer pinned.dir.close(self.io);
-        var original = file_panel_ops.openFilePanelRead(pinned.dir, pinned.basename, false) catch return error.NotFound;
-        defer original.close(self.io);
-        const stat = original.stat(self.io) catch return error.NotFound;
-        if (stat.kind != .file) return error.NotRegularFile;
-        try file_panel_ops.writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, entry.disk_content_hash, content);
-        entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
-        entry.self_write_hash = std.hash.Wyhash.hash(0, content);
-        entry.disk_content_hash = entry.self_write_hash;
-        entry.disk_content_hash_valid = true;
-        entry.self_write_verifications = 0;
-        self.metal_dirty = true;
-    }
-
     /// bridge write 실패를 사용자에게 알린다. ⌘S 등 일반 저장 실패는 chrome native notice로 띄운다(웹뷰 안에
     /// sticky 텍스트를 박던 방식은 한 번 뜨면 안 사라져 자연스럽지 않았다 — 사용자 요청 2026-07-23). close-save
     /// 실패는 completeFilePanelSaveClose가 "…탭을 닫지 않았습니다" notice를 이미 띄우므로 중복을 피해 억제한다.
@@ -7392,73 +6599,6 @@ pub const AppSession = struct {
             error.TooLarge => "파일이 너무 커서 저장할 수 없습니다.",
             else => "파일을 저장할 수 없습니다.",
         });
-    }
-
-    pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (!entry.kind.usesEditorBridge()) return error.WrongKind;
-        // 기존 headless policy fixtures만 zero/zero sentinel을 쓴다. 제품 빌드에는 이 seam 자체가 없고 JSON bridge도
-        // non-positive epoch을 거부한다.
-        const test_unbound = builtin.is_test and report.editor_epoch == 0 and entry.editor_epoch == 0 and !entry.editor_document_active;
-        if (!test_unbound and (!entry.editor_document_active or report.editor_epoch != entry.editor_epoch))
-            return error.StaleDocument;
-        if (entry.editor_recovery_required) return error.RecoveryRequired;
-        const mutation_lock = if (report.request_id != 0) file_panel_ops.fileTreeMutationEditorLock(self, surface_id, report.request_id) else null;
-        if (entry.mutation_pending_id != 0 and mutation_lock == null) return error.MutationPending;
-        var close_pending: ?PendingFilePanelClose = null;
-        if (report.request_id != 0 and mutation_lock == null) {
-            const pending = self.pending_file_panel_close orelse return;
-            if (pending.surface_id != surface_id or pending.phase != .syncing or pending.request_id != report.request_id) return;
-            if (file_panel_ops.filePanelCloseEntry(self, pending) == null) {
-                file_panel_ops.abortStaleFilePanelClose(self);
-                return;
-            }
-            close_pending = pending;
-        }
-        if (report.revision < entry.editor_revision) return error.StaleDocument;
-        entry.editor_revision = report.revision;
-        const protected_clean_ack = entry.external_change and !report.dirty;
-        const changed = (!protected_clean_ack and entry.dirty != report.dirty) or entry.dirty_sync_pending;
-        if (!protected_clean_ack) entry.dirty = report.dirty;
-        const close_match = close_pending != null;
-        if (self.pending_file_panel_close == null or self.pending_file_panel_close.?.surface_id != surface_id or close_match) {
-            entry.dirty_sync_pending = false;
-            file_panel_ops.removeFilePanelDirtySyncAction(self, surface_id);
-        }
-        if (changed) self.metal_dirty = true;
-        if (changed) self.file_tree_rows_dirty = true;
-        if (mutation_lock) |lock| {
-            if (entry.external_change or report.dirty) {
-                const mutation_id = lock.mutation_id;
-                file_panel_ops.abortWaitingFileTreeMutation(self, mutation_id, "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.");
-                return;
-            }
-            lock.acknowledged = true;
-            _ = file_panel_ops.submitWaitingFileTreeMutation(self, lock.mutation_id);
-            return;
-        }
-        if (close_pending) |pending| {
-            var pinned = pending;
-            pinned.revision = report.revision;
-            if (!entry.dirty and !entry.external_change) {
-                _ = file_panel_ops.closeFilePanelSurfaceNow(self, surface_id);
-                return;
-            }
-            file_panel_ops.showFilePanelCloseChoices(self, pinned, entry);
-        }
-    }
-
-    pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
-        if (file_panel_ops.fileTreeMutationEditorLock(self, surface_id, request_id)) |lock| {
-            const mutation_id = lock.mutation_id;
-            file_panel_ops.abortWaitingFileTreeMutation(self, mutation_id, "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.");
-            return;
-        }
-        const pending = self.pending_file_panel_close orelse return;
-        if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .syncing) return;
-        file_panel_ops.cancelFilePanelClose(self);
-        self.showNotice("편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
     }
 
     pub fn filePanelMode(self: *AppSession, surface_id: u64) ?dock_panel.Mode {
@@ -7505,50 +6645,6 @@ pub const AppSession = struct {
         return action;
     }
 
-    /// 핀된 Markdown 경로의 lexical parent도 root fd부터 component별 no-follow로 연 뒤, 상대 asset의 모든 하위
-    /// component를 같은 capability 아래에서 순회한다. 최초 parent 재개방까지 symlink를 거부해야 열린 문서의
-    /// ancestor가 교체된 뒤에도 새 namespace나 root 밖 파일을 읽지 않는다.
-    pub fn readFilePanelAsset(
-        self: *AppSession,
-        gpa: std.mem.Allocator,
-        surface_id: u64,
-        raw_path: []const u8,
-    ) FilePanelReadError![]u8 {
-        if (!self.dock_initialized) return error.SurfaceNotFound;
-        const entry = file_panel_ops.fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
-        if (entry.kind != .markdown) return error.WrongKind;
-
-        var normalized_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const normalized = file_panel_bridge.normalizeAssetPath(raw_path, &normalized_buf) catch return error.InvalidPath;
-        const pinned = file_panel_ops.openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
-        defer pinned.dir.close(self.io);
-
-        var opened_dirs: [std.fs.max_path_bytes / 2]std.Io.Dir = undefined;
-        var opened_count: usize = 0;
-        defer while (opened_count > 0) {
-            opened_count -= 1;
-            opened_dirs[opened_count].close(self.io);
-        };
-
-        var current = pinned.dir;
-        if (std.fs.path.dirname(normalized)) |subdir| {
-            var components = std.mem.splitScalar(u8, subdir, '/');
-            while (components.next()) |component| {
-                const next = current.openDir(self.io, component, .{ .follow_symlinks = false }) catch |err| switch (err) {
-                    error.FileNotFound => return error.NotFound,
-                    else => return error.OutsideRoot,
-                };
-                opened_dirs[opened_count] = next;
-                opened_count += 1;
-                current = next;
-            }
-        }
-
-        const file = try file_panel_ops.openFilePanelRead(current, std.fs.path.basename(normalized), false);
-        defer file.close(self.io);
-        return file_panel_ops.readOpenedFile(self, gpa, file);
-    }
-
     // ── 파일 entry 접근 (FP16b 선행 — docs/file-panel.md §10 B-1) ─────────────────────────────────
     //
     // 이 창에 **열린 파일 entry 집합**을 묻는 유일한 창구다. 저장소는 이제 `Term.file_entry`다(FP16b 완료) —
@@ -7579,56 +6675,6 @@ pub const AppSession = struct {
             self.items.deinit(gpa);
         }
     };
-
-    /// 파일 entry를 닫는다 = 그 파일 **Term을 닫는다**(FP16). entry의 소유가 Term이므로 `destroyTerm`이
-    /// entry·path까지 해제한다 — 옛 `group.remove` + `allocator.free(path)` 쌍을 대체한다.
-    ///
-    /// pane의 마지막 Term이면 닫지 않고 false를 돌려준다. pane은 항상 Term ≥1이라는 모델 불변식
-    /// (`session_model.Pane`)을 파일 경로가 깨면 안 되고, 그 경우의 cascade(빈 pane collapse·워크스페이스 닫기)는
-    /// `executeClose`가 소유하는 별도 정책이다.
-    /// 창 간 이동으로 들어오는 파일들을 이 창의 탐색기 recent·watch 집합에 등록한다. 실패하면 아무것도
-    /// 바꾸지 않는다(후보 트리에 다 쓴 뒤 무실패 commit) — 호출자는 detach 전에 이걸 부른다.
-    pub fn adoptMovedFileTermsIntoExplorer(dst: *AppSession, tab: *Tab, src: *AppSession) !void {
-        var candidate = try dst.file_tree.clone();
-        defer candidate.deinit();
-        var extras: [dock_panel.max_entries]([]const u8) = undefined;
-        var extra_count: usize = 0;
-        var dst_it = file_panel_ops.fileEntries(dst);
-        while (dst_it.next()) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
-            if (extra_count >= extras.len) break;
-            extras[extra_count] = parent;
-            extra_count += 1;
-        };
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |term| {
-                const entry = term.file_entry orelse continue;
-                const parent = std.fs.path.dirname(entry.path) orelse continue;
-                // 양쪽이 inferred면 source가 파일을 열 때 정한 project root가 dirname보다 정확하다.
-                var inferred_root = parent;
-                if (candidate.rootMode() == .inferred and src.file_tree.rootMode() == .inferred) {
-                    var authority: ?[]const u8 = null;
-                    for (0..src.file_tree.rootCount()) |ri| {
-                        const root = src.file_tree.rootAt(ri).?;
-                        if (!file_tree.Tree.pathWithinRoot(entry.path, root)) continue;
-                        if (authority == null or root.len > authority.?.len) authority = root;
-                    }
-                    if (authority) |root| inferred_root = root;
-                }
-                try candidate.recordOpened(entry.path, inferred_root);
-                if (extra_count < extras.len) {
-                    extras[extra_count] = parent;
-                    extra_count += 1;
-                }
-            }
-        }
-        try candidate.resetWatchRequests(extras[0..extra_count]);
-        var rows: std.ArrayList(file_tree.Row) = .empty;
-        defer rows.deinit(dst.allocator);
-        try file_panel_ops.prepareFileTreeRowStaging(dst, &rows, file_panel_ops.countTabFileEntries(tab));
-        file_panel_ops.buildPreparedFileTreeRows(dst, &candidate, &rows);
-        file_panel_ops.commitFileTreeCandidate(dst, &candidate, &rows);
-        dst.file_tree_rows_dirty = true;
-    }
 
     pub fn panelKindForEntryKind(kind: dock_panel.EntryKind) web_panel_layout.PanelKind {
         return if (file_panel_ops.filePanelKindIsIsolated(kind)) .browser else .markdown;
@@ -7893,10 +6939,10 @@ pub const AppSession = struct {
     }
 
     /// 좌측 네비 한 항목 — 섹션 enum(미지정=null) + 표시 라벨.
-    const SettingsSectionEntry = struct { section: ?config_mod.Section, label: []const u8 };
+    pub const SettingsSectionEntry = struct { section: ?config_mod.Section, label: []const u8 };
 
     /// 현재 선택 섹션의 필드(bool→num→enum→text→color 순). buildSettingsFields·핸들러 공유 단일 출처라 selected 인덱싱이 일치.
-    const SettingsSectionFields = struct {
+    pub const SettingsSectionFields = struct {
         bools: []config_mod.schema.BoolField,
         nums: []config_mod.schema.NumberField,
         enums: []config_mod.schema.EnumField,
@@ -7932,125 +6978,6 @@ pub const AppSession = struct {
             return if (self.global_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len else null;
         }
     };
-
-    /// 필드가 있는 섹션만 선언 순으로 모은다(좌측 네비 — config-gui §4). 미지정 필드가 있으면 끝에 "기타". arena 소유.
-    pub fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]SettingsSectionEntry {
-        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
-        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums);
-        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums);
-        var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts);
-        var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors);
-        var list: std.ArrayList(SettingsSectionEntry) = .empty;
-        inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
-            const sec: config_mod.Section = @enumFromInt(ef.value);
-            if (settings_ops.settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, sec))
-                try list.append(arena, .{ .section = sec, .label = settings_ops.settingsSectionLabel(sec) });
-        }
-        if (settings_ops.settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, null))
-            try list.append(arena, .{ .section = null, .label = settings_ops.settingsSectionLabel(null) });
-        return list.items;
-    }
-
-    /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum→text). arena 소유. 핸들러가 selected를 이 순서로 매핑.
-    pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
-        // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
-        // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
-        self.loaded_config.config.session.keep_alive_after_quit = app_keep_alive_after_quit;
-        const sections = try self.buildSectionList(arena);
-        const sel_sec: ?config_mod.Section = if (sections.len > 0)
-            sections[@min(self.chrome_host.settings.section, sections.len - 1)].section
-        else
-            null;
-        var bools_all: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools_all);
-        var nums_all: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums_all);
-        var enums_all: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums_all);
-        var texts_all: std.ArrayList(config_mod.schema.TextField) = .empty;
-        try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
-        var colors_all: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors_all);
-        // 검색 쿼리(폼 필터 — 라벨/키 부분일치). 모든 행 종류에 같은 settingsRowMatches 규칙을 적용해 view·핸들러 인덱싱이
-        // 일관되게 한다(필터는 여기 단일 출처). 빈 쿼리면 전부 통과. **쿼리가 있으면(cross) 섹션 게이트를 무시**해 전 섹션의
-        // 매칭 행을 보여준다(교차 섹션 검색 — 설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만.
-        const q = self.chrome_host.settings.searchQuery();
-        const cross = q.len > 0;
-        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        for (bools_all.items) |b| if (settings_ops.settingsExposesConfigKey(b.key) and (cross or b.section == sel_sec) and settings_ops.settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
-        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        for (nums_all.items) |n| if (settings_ops.settingsExposesConfigKey(n.key) and (cross or n.section == sel_sec) and settings_ops.settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
-        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        for (enums_all.items) |e| if (settings_ops.settingsExposesConfigKey(e.key) and (cross or e.section == sel_sec) and settings_ops.settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
-        // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
-        // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
-        // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
-        if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settings_ops.settingsRowMatches("테마 프리셋", "theme.preset", q)) {
-            // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
-            // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
-            const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else "사용자 지정";
-            try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
-        }
-        var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        for (texts_all.items) |t| if (settings_ops.settingsExposesConfigKey(t.key) and (cross or t.section == sel_sec) and settings_ops.settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
-        // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
-        // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
-        if (cross or sel_sec == .terminal) {
-            if (settings_ops.settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
-                try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
-            for (self.loaded_config.config.env) |entry| {
-                const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
-                if (settings_ops.settingsRowMatches(entry[0..eq], "env", q))
-                    try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
-            }
-            if (settings_ops.settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
-                try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
-        }
-        // 입력 섹션엔 사용자 터미널 매크로(keybind = chord = text:/esc:/ctrl:)를 rhs 편집 text 행으로 노출한다(env 특수 행
-        // 선례). 라벨=chord 표시(formatChord), 값=rhs config 문자열(macroRhsString, 예 "text:hello"). 키="macro.<chord
-        // config>"로 커밋/삭제 시 chord를 식별한다(toConfigString). 마지막에 "추가" 행(빈 sentinel "macro.").
-        if (cross or sel_sec == .input) {
-            for (self.loaded_config.terminal_bindings) |b| {
-                var disp_buf: [command_catalog.max_chord_display_len]u8 = undefined;
-                const disp = command_catalog.formatChord(b.chord, &disp_buf);
-                if (settings_ops.settingsRowMatches(disp, "macro", q)) {
-                    var chord_buf: [64]u8 = undefined; // 매치된 행만 chord config 표기 계산(필터된 행 낭비 제거)
-                    const chord_cfg = b.chord.toConfigString(&chord_buf);
-                    try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
-                }
-            }
-            if (settings_ops.settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
-                try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
-        }
-        // Workspace 섹션엔 시작 디렉터리(workspace.root)를 합성 text 행으로 노출한다(schema 필드 아님 — loader 명시
-        // 핸들러 특수 키, shell.args 선례). 값=현재 root(빈 값=상속 cwd). 커밋은 setWorkspaceRoot(loader와 형식 검증 공유).
-        if (cross or sel_sec == .workspace) {
-            if (settings_ops.settingsRowMatches("시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", "workspace.root", q))
-                try texts.append(arena, .{ .key = "workspace.root", .doc = "시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", .value = self.loaded_config.config.workspace.root, .section = .workspace });
-        }
-        var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        for (colors_all.items) |c| if (settings_ops.settingsExposesConfigKey(c.key) and (cross or c.section == sel_sec) and settings_ops.settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
-        // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
-        // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
-        // 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 keybindRowStart가 palette 오프셋을 더한다.
-        var keybinds: std.ArrayList(command_catalog.Entry) = .empty;
-        if (cross or sel_sec == .input) {
-            for (command_catalog.entries) |entry| if (settings_ops.settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
-        }
-        const palette_on = (cross or sel_sec == .theme) and settings_ops.settingsRowMatches("ANSI 팔레트", "theme.palette", q);
-        // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
-        // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
-        var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
-        if (cross or sel_sec == .global_hotkey) {
-            for (command_catalog.global_entries) |entry| if (settings_ops.settingsRowMatches(entry.title, entry.key, q)) try globals.append(arena, entry);
-        }
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
-    }
 
     /// 기본 config(theme.Config{})의 스키마 필드 값 — 항목별 리셋(§6.11)의 "기본과 다른가" 판정·리셋 대상 값의 단일 출처.
     /// buildSettingsFields(is_default 주입)와 resetSelectedSettingRow(기본값 적용)가 같은 순회 결과를 키로 룩업한다.
@@ -8095,58 +7022,10 @@ pub const AppSession = struct {
     /// font.family 드롭다운의 마지막 슬롯 라벨 — 목록 밖 임의 설치 폰트를 인라인 편집으로 넣는 진입점(선택 시 편집 열림).
     pub const font_direct_input_label = "직접 입력…";
 
-    /// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용**한다(팝업은 안 닫음). enum=setEnumIndex,
-    /// font.family=그 폰트 setText, theme.preset=applyThemePresetIndex. **persist=false면 파일 영속을 예약하지 않는다(인메모리
-    /// 라이브만)** — 라이브 프리뷰(↑↓)는 persist=false로, 확정만 persist=true로 부른다. **미리보기가 영속까지 하면 취소해도
-    /// 파일엔 미리본 값이 써져 커스텀이 사라지는 데이터 손실**이 났기에(code-review high) 영속은 확정에서만 한다.
-    fn applyDropdownIndex(self: *AppSession, idx: usize, persist: bool) void {
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-        const after_nums = cf.bools.len + cf.nums.len;
-        const after_enums = after_nums + cf.enums.len;
-        const after_texts = after_enums + cf.texts.len;
-        if (sel >= after_nums and sel < after_enums) {
-            const e = cf.enums[sel - after_nums];
-            if (std.mem.eql(u8, e.key, "theme.preset")) {
-                self.applyThemePresetIndex(idx, persist); // synthetic 프리셋 — 절대 인덱스로 적용
-                return;
-            }
-            if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, idx)) {
-                // follow-system preset-light/dark는 라이브 색도 새 프리셋으로 재해석해야 한다(cycle 경로와 동일 특수 처리).
-                if (self.loaded_config.config.theme_follow_system and
-                    (std.mem.eql(u8, e.key, "theme.preset-dark") or std.mem.eql(u8, e.key, "theme.preset-light")))
-                {
-                    self.follow_applied_dark = null;
-                    self.applyFollowSystemTheme();
-                } else {
-                    settings_ops.reapplyLoadedConfig(self);
-                }
-                if (persist) settings_ops.markConfigKeyDirty(self, e.key);
-            }
-            return;
-        }
-        if (sel >= after_enums and sel < after_texts) {
-            const ti = sel - after_enums;
-            if (ti < cf.texts.len and std.mem.eql(u8, cf.texts[ti].key, "font.family")) {
-                const fonts = config_mod.theme.bundled_font_families;
-                // idx < fonts.len = 번들 폰트(정적 문자열이라 dupe 불요), idx >= fonts.len = "직접 입력…" 슬롯 → 프리뷰는 원본
-                // 폰트(스냅샷)를 다시 보여준다(선택 표시용, 안 바꿈). "직접 입력" 확정은 applyDropdownSelection이 편집을 연다.
-                const value: []const u8 = if (idx < fonts.len) fonts[idx] else self.dropdown_snapshot_font;
-                if (config_mod.schema.setText(&self.loaded_config.config, "font.family", value)) {
-                    settings_ops.reapplyLoadedConfig(self);
-                    if (persist and idx < fonts.len) settings_ops.markConfigKeyDirty(self, "font.family");
-                }
-            }
-            return;
-        }
-    }
-
     /// 드롭다운 ↑↓ — highlighted 변형을 **라이브 적용(인메모리만, 영속 안 함)**한다(팝업 유지, 바로 반영). 영속을 안 하는 게
     /// 핵심 — 미리보기가 영속하면 취소해도 파일에 미리본 값이 남아 커스텀이 사라진다(code-review high 데이터 손실 수정).
     fn applyDropdownPreview(self: *AppSession) void {
-        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected, false); // persist=false
+        settings_ops.applyDropdownIndex(self, self.chrome_host.settings.dropdown.selected, false); // persist=false
         self.metal_dirty = true;
     }
 
@@ -8154,14 +7033,14 @@ pub const AppSession = struct {
     /// 슬롯을 고르면 적용 대신 원본 폰트(스냅샷)로 되돌린 뒤 **인라인 편집을 연다**(목록 밖 임의 폰트 타이핑 — 편집 커밋이 영속).
     fn applyDropdownSelection(self: *AppSession) void {
         if (self.dropdownDirectInputSelected()) {
-            self.restoreDropdownSnapshot(); // 프리뷰로 바뀐 폰트를 원본으로(인메모리), 그 값으로 편집 시작
+            settings_ops.restoreDropdownSnapshot(self); // 프리뷰로 바뀐 폰트를 원본으로(인메모리), 그 값으로 편집 시작
             self.chrome_host.settings.dropdown.hide();
             self.chrome_host.settings.enterEdit(self.loaded_config.config.font.family);
             self.dropdown_snapshot_kind = .none;
             self.metal_dirty = true;
             return;
         }
-        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected, true); // persist=true — 확정에서만 파일 영속
+        settings_ops.applyDropdownIndex(self, self.chrome_host.settings.dropdown.selected, true); // persist=true — 확정에서만 파일 영속
         self.chrome_host.settings.dropdown.hide();
         self.dropdown_snapshot_kind = .none;
         self.metal_dirty = true;
@@ -8170,7 +7049,7 @@ pub const AppSession = struct {
     /// 드롭다운 취소(Esc/바깥 클릭) — **열 때의 원본으로 인메모리 복원**하고 팝업을 닫는다(↑↓ 프리뷰 되돌리기). 미리보기가
     /// 영속을 안 했으므로 파일은 이미 원본 상태라, 여기선 인메모리 복원만 하면 파일도 정합(영속·markDirty 없음).
     fn cancelDropdownSelection(self: *AppSession) void {
-        self.restoreDropdownSnapshot();
+        settings_ops.restoreDropdownSnapshot(self);
         self.chrome_host.settings.dropdown.hide();
         self.dropdown_snapshot_kind = .none;
         self.metal_dirty = true;
@@ -8182,140 +7061,10 @@ pub const AppSession = struct {
             self.chrome_host.settings.dropdown.selected >= config_mod.theme.bundled_font_families.len;
     }
 
-    /// 드롭다운 프리뷰를 **열 때 값으로 인메모리 복원**한다(영속 안 함 — 미리보기가 영속을 안 했으니 파일은 원본 그대로).
-    /// font/theme.preset은 스냅샷으로, enum은 original 인덱스로 되돌린다(인덱스로 못 되살리는 커스텀 폰트·테마는 스냅샷이 정확히 복원).
-    fn restoreDropdownSnapshot(self: *AppSession) void {
-        switch (self.dropdown_snapshot_kind) {
-            .font => {
-                if (config_mod.schema.setText(&self.loaded_config.config, "font.family", self.dropdown_snapshot_font))
-                    settings_ops.reapplyLoadedConfig(self); // 인메모리만 — markDirty 없음(파일은 원본 폰트 그대로)
-            },
-            .preset => {
-                self.loaded_config.config.theme = self.dropdown_snapshot_theme;
-                self.theme_user_custom = self.dropdown_snapshot_user_custom;
-                settings_ops.reapplyLoadedConfig(self);
-            },
-            .none => self.applyDropdownIndex(self.chrome_host.settings.dropdown.original, false), // enum — 인덱스 복원(persist=false, 안 바뀐 값 영속 안 함)
-        }
-    }
-
-    /// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
-    /// 재resolve + write-back 예약. 편집 종료. 라이브/직렬화가 계속 슬라이스를 읽으므로 loaded_config.arena가 소유한다.
-    fn commitSelectedText(self: *AppSession) void {
-        self.chrome_host.settings.clearMessage(); // 새 커밋 시도 — 직전 안내 배너 정리(아래 env/macro 검증이 실패 시 다시 세운다)
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-        const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
-        const after_texts = after_enums + cf.texts.len;
-        const after_colors = after_texts + cf.colors.len;
-        defer self.chrome_host.settings.cancelEdit(); // 성공/실패 무관 편집 종료(키는 다시 네비로)
-        // 팔레트 그리드 행은 setText가 아니라 setPaletteColor로 커밋(theme.palette.N은 schema 필드가 아님). 그 칸 키를
-        // dirty로 — write-back(serialize)이 set된 palette.N을 이미 직렬화하므로 영속된다.
-        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
-            const gi = @min(self.chrome_host.settings.grid_cell, 15);
-            const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
-            if (config_mod.schema.setPaletteColor(&self.loaded_config.config, gi, owned)) {
-                settings_ops.reapplyLoadedConfig(self);
-                settings_ops.markConfigKeyDirty(self, config_mod.schema.paletteKey(gi));
-            }
-            return;
-        };
-        // number 행(bools.len..after_nums): 입력 박스 편집 버퍼를 f64로 파싱해 setNumber(범위 clamp) + 라이브 적용 + 영속.
-        // 파싱 실패면 값 유지(편집만 종료 — defer cancelEdit). 슬라이더 대체 경로.
-        const after_nums = cf.bools.len + cf.nums.len;
-        if (sel >= cf.bools.len and sel < after_nums) {
-            const ni = sel - cf.bools.len;
-            if (ni >= cf.nums.len) return;
-            const nkey = cf.nums[ni].key;
-            const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, self.chrome_host.settings.editText(), " ")) catch return;
-            if (config_mod.schema.setNumber(&self.loaded_config.config, nkey, parsed)) {
-                settings_ops.reapplyLoadedConfig(self);
-                settings_ops.markConfigKeyDirty(self, nkey);
-            }
-            return;
-        }
-        const editor = self.chrome_host.settings.editText();
-        // text 행(after_enums..after_texts): shell.args·env.*는 특수 setter, 나머지 schema 텍스트(폰트 패밀리·term 등)는 setText.
-        if (sel >= after_enums and sel < after_texts) {
-            const ti = sel - after_enums;
-            if (ti >= cf.texts.len) return;
-            const tkey = cf.texts[ti].key;
-            if (std.mem.eql(u8, tkey, "shell.args")) {
-                self.setShellArgs(editor); // 공백-토큰 분리
-            } else if (std.mem.eql(u8, tkey, "workspace.root")) {
-                workspace_ops.setWorkspaceRoot(self, editor); // 시작 디렉터리 — loader와 형식 검증 공유
-            } else if (std.mem.eql(u8, tkey, "env.")) {
-                self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
-                settings_ops.refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
-            } else if (std.mem.startsWith(u8, tkey, "env.")) {
-                self.setEnvVar(tkey["env.".len..], editor); // 기존 env 값 편집
-            } else if (std.mem.eql(u8, tkey, "macro.")) {
-                self.addTerminalMacro(editor); // 추가 행 — "chord = text:..." 파싱
-                settings_ops.refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
-            } else if (std.mem.startsWith(u8, tkey, "macro.")) {
-                self.setTerminalMacro(tkey["macro.".len..], editor); // 기존 매크로 rhs 편집
-            } else {
-                // schema 텍스트(.text) — config arena dupe 후 검증·적용.
-                const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
-                if (config_mod.schema.setText(&self.loaded_config.config, tkey, owned)) {
-                    settings_ops.reapplyLoadedConfig(self);
-                    settings_ops.markConfigKeyDirty(self, tkey);
-                    // 셸 경로가 실행 불가능하면(없는 경로·`~`·상대경로·디렉터리·비실행 파일) spawn 시 기본 셸로
-                    // 폴백된다(resolveConfiguredShell). 저장은 그대로 두되 즉시 안내해, 예전처럼 다음 실행에 앱이 조용히
-                    // 종료되지 않음을 알린다. `~`/시작 디렉터리는 이 필드가 아니라 config workspace.root임을 함께 안내.
-                    if (std.mem.eql(u8, tkey, "shell.command")) {
-                        // setText는 validatedText로 **trim해 저장**하므로(schema.zig) 안내는 저장된 값을 검사한다 —
-                        // owned(untrimmed)를 쓰면 "/bin/zsh "처럼 공백이 섞인 유효 경로를 실행 불가로 오탐한다.
-                        const stored = self.loaded_config.config.shell.command;
-                        if (stored.len > 0 and !isExecutablePath(stored))
-                            self.chrome_host.settings.setMessage("셸 실행 파일을 찾을 수 없어 기본 셸로 실행됩니다 (실행 파일 절대경로 필요 · 시작 위치는 이 필드가 아님)");
-                    }
-                }
-            }
-            return;
-        }
-        // color hex 행(after_texts..after_colors): setText로 커밋(hex 검증).
-        if (sel >= after_texts and sel < after_colors) {
-            const ci = sel - after_texts;
-            if (ci >= cf.colors.len) return;
-            const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
-            if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, owned)) {
-                settings_ops.reapplyLoadedConfig(self);
-                settings_ops.markConfigKeyDirty(self, cf.colors[ci].key);
-            }
-            return;
-        }
-    }
-
-    /// HSV picker 확정(Enter → settings_color_picked) — settings.pickerRgb()를 #rrggbb로 직렬화해 선택 color 행 키에
-    /// setText로 적용(commitSelectedText의 color 분기와 같은 인덱스 매핑·setter). 라이브 재resolve + write-back 예약 후
-    /// picker 닫기. hex 문자열은 loaded_config.arena 소유(라이브/직렬화가 계속 읽는다). picker 외 행이면 무동작.
-    fn commitPickerColor(self: *AppSession) void {
-        defer self.chrome_host.settings.closePicker(); // 성공/실패 무관 picker 종료(폼 복귀)
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-        const after_texts = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
-        const after_colors = after_texts + cf.colors.len;
-        // sel<after_texts면 다음 줄 `sel - after_texts`가 usize 언더플로(panic)라 그 범위 가드는 필수다(방어가 아니라
-        // 언더플로 안전). picker는 color 행에서만 열리므로 sel은 [after_texts, after_colors)이지만, 호출 계약을 코드로 못박는다.
-        if (sel < after_texts or sel >= after_colors) return;
-        const ci = sel - after_texts;
-        if (ci >= cf.colors.len) return;
-        const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;
-        if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, hex)) {
-            settings_ops.reapplyLoadedConfig(self);
-            settings_ops.markConfigKeyDirty(self, cf.colors[ci].key);
-        }
-    }
-
     /// shell.args(셸 argv) 텍스트를 공백으로 토큰 분리해 config에 적용 + 영속 예약. 따옴표 미지원(loader와 같은 규칙 —
     /// 셸 플래그는 단순). spawn 시점에만 쓰이므로 라이브 재적용 없음(이미 뜬 셸엔 영향 없고 다음 새 Term부터 적용).
     /// 토큰은 loaded_config.arena 소유(라이브/직렬화가 계속 읽는다). 키 "shell.args"는 정적 리터럴.
-    fn setShellArgs(self: *AppSession, text: []const u8) void {
+    pub fn setShellArgs(self: *AppSession, text: []const u8) void {
         const a = self.loaded_config.arena.allocator();
         var list: std.ArrayList([]const u8) = .empty;
         var it = std.mem.tokenizeAny(u8, text, &std.ascii.whitespace);
@@ -8328,7 +7077,7 @@ pub const AppSession = struct {
     /// (내부 공백 보존 — loader와 같은 규칙). 영속 예약(write-back이 env.KEY로 직렬화). dirty 키 "env.KEY"는 동적이라
     /// 세션 arena에 둬 안정 포인터로 보관(serializeConfig drain까지 유효). spawn 시점 전용이라 라이브 재적용 없음.
     /// 삭제/KEY 변경은 updateConfigText의 줄 삭제 확장이 필요해 후속(현재는 upsert만 — config-gui §6.6).
-    fn setEnvVar(self: *AppSession, name: []const u8, value: []const u8) void {
+    pub fn setEnvVar(self: *AppSession, name: []const u8, value: []const u8) void {
         if (name.len == 0) return;
         const a = self.loaded_config.arena.allocator();
         const v = std.mem.trim(u8, value, &std.ascii.whitespace);
@@ -8348,23 +7097,9 @@ pub const AppSession = struct {
         settings_ops.markConfigKeyDirty(self, dirty_key);
     }
 
-    /// env 추가 행 커밋 — "KEY=VALUE" 텍스트를 파싱해 setEnvVar로 upsert. '=' 없거나 KEY(양끝 trim)가 비면 notice.
-    fn addEnvVar(self: *AppSession, text: []const u8) void {
-        const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-            settings_ops.settingsMessageOrNotice(self, "환경 변수는 KEY=VALUE 형식이어야 합니다");
-            return;
-        };
-        const name = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
-        if (name.len == 0) {
-            settings_ops.settingsMessageOrNotice(self, "환경 변수 KEY가 비어 있습니다");
-            return;
-        }
-        self.setEnvVar(name, text[eq + 1 ..]);
-    }
-
     /// 터미널 매크로를 config rhs 표기로 되돌린다(행 값 표시·편집 시드). text:/esc:/ctrl: — esc는 앞 ESC(0x1b)를 떼고,
     /// ctrl은 codepoint를 UTF-8로. parseMacroRhs(loader)의 역. arena 소유(이 프레임만). 단일 출처: loader.parseTerminalMacro.
-    fn macroRhsString(arena: std.mem.Allocator, macro: config_mod.TerminalInputMacro) ![]const u8 {
+    pub fn macroRhsString(arena: std.mem.Allocator, macro: config_mod.TerminalInputMacro) ![]const u8 {
         return switch (macro) {
             .send_text => |t| try std.fmt.allocPrint(arena, "text:{s}", .{t}),
             .send_escape_sequence => |s| try std.fmt.allocPrint(arena, "esc:{s}", .{if (s.len > 0) s[1..] else s}), // 저장 바이트는 ESC+payload — 앞 ESC 제거
@@ -8377,7 +7112,7 @@ pub const AppSession = struct {
     }
 
     /// chord가 unbinds(사용자가 죽인 chord)에 들어 있나 — 죽인 chord는 더는 빌트인으로 동작 안 하니 shadow 경고 제외.
-    fn resolverUnbinds(unbinds: []const config_mod.keybinding.KeyChord, chord: config_mod.keybinding.KeyChord) bool {
+    pub fn resolverUnbinds(unbinds: []const config_mod.keybinding.KeyChord, chord: config_mod.keybinding.KeyChord) bool {
         for (unbinds) |u| if (u.eql(chord)) return true;
         return false;
     }
@@ -8397,77 +7132,6 @@ pub const AppSession = struct {
                 _ = self.config_terminal_macro_removes.orderedRemove(i);
             } else i += 1;
         }
-    }
-
-    /// 터미널 매크로 upsert(rhs 편집·추가 공유) — chord_str(config 표기)에 rhs(text:/esc:/ctrl:)를 묶는다. rhs 파싱 실패·
-    /// chord 표기 오류·충돌이면 notice(미적용). 성공 시 loaded_config.terminal_bindings를 라이브 교체(resolver가 즉시 반영)
-    /// + write-back 예약(config_terminal_macros). config-gui §6.7.
-    fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []const u8) void {
-        const a = self.loaded_config.arena.allocator();
-        const rhs_trim = std.mem.trim(u8, rhs_str, &std.ascii.whitespace);
-        const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch {
-            settings_ops.settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
-            return;
-        };
-        const macro = config_mod.parseMacroRhs(a, rhs_trim) orelse {
-            settings_ops.settingsMessageOrNotice(self, "매크로는 text:/esc:/ctrl: 형식이어야 합니다");
-            return;
-        };
-        // 같은 chord면 교체, 없으면 추가(한 chord=한 매크로).
-        var list: std.ArrayList(config_mod.keybinding.TerminalBinding) = .empty;
-        var found = false;
-        for (self.loaded_config.terminal_bindings) |b| {
-            if (b.chord.eql(chord)) {
-                list.append(a, .{ .chord = chord, .input = macro }) catch return;
-                found = true;
-            } else list.append(a, b) catch return;
-        }
-        if (!found) list.append(a, .{ .chord = chord, .input = macro }) catch return;
-        const new_binds = list.toOwnedSlice(a) catch return;
-        // 충돌 검증(app↔terminal·중복 chord) — 새 셋으로 resolver를 만들어 validate. 실패면 적용 안 함(best-effort 경고).
-        var probe = self.loaded_config.keyBindingResolver();
-        probe.terminal_bindings = new_binds;
-        probe.validate() catch {
-            settings_ops.settingsMessageOrNotice(self, "다른 단축키와 충돌해 적용하지 못했습니다");
-            return;
-        };
-        // validate는 **사용자** 바인딩만 본다(loaded_config.keybindings엔 빌트인 없음, default_*는 resolve 내부에만).
-        // 그래서 빌트인 chord(Cmd+T 등)는 위 검증을 통과해 매크로가 조용히 빌트인을 가린다 — 차단은 아니고(오버라이드는
-        // 사용자 의도, rebind 충돌 경고와 동일 last-wins) **경고**로 알린다(code-review max). unbinds로 죽인 chord는 제외.
-        if (!resolverUnbinds(self.loaded_config.unbinds, chord) and input_ops.chordShadowsBuiltin(chord))
-            settings_ops.settingsMessageOrNotice(self, "기본 단축키를 매크로가 덮어씁니다");
-        self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
-        // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
-        // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
-        self.clearStaleUnbind(chord);
-        // write-back 예약 — 같은 chord 대기 예약(추가/삭제)을 먼저 비워 중복·모순을 막고 새로 단다. chord·rhs는
-        // loaded_config.arena 소유(serialize drain까지 유효).
-        self.cancelPendingMacro(chord_str);
-        const chord_owned = a.dupe(u8, chord_str) catch return;
-        const rhs_owned = a.dupe(u8, rhs_trim) catch return;
-        self.config_terminal_macros.append(self.allocator, .{ .chord = chord_owned, .rhs = rhs_owned }) catch return;
-        self.metal_dirty = true;
-    }
-
-    /// 매크로 추가 행 커밋 — "chord = text:..." 텍스트를 파싱(첫 `=`로 chord/rhs 분리, chord 정규화)해 setTerminalMacro로
-    /// upsert. `=` 없거나 chord가 비면 notice.
-    fn addTerminalMacro(self: *AppSession, text: []const u8) void {
-        const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-            settings_ops.settingsMessageOrNotice(self, "매크로는 'chord = text:...' 형식이어야 합니다");
-            return;
-        };
-        const chord_part = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
-        if (chord_part.len == 0) {
-            settings_ops.settingsMessageOrNotice(self, "단축키가 비어 있습니다");
-            return;
-        }
-        // chord 정규화(파싱 → toConfigString) — 행 키·write-back 줄이 표준 표기를 쓰게.
-        const chord = config_mod.keybinding.KeyChord.parse(chord_part) catch {
-            settings_ops.settingsMessageOrNotice(self, "단축키 표기를 읽지 못했습니다");
-            return;
-        };
-        var chord_buf: [64]u8 = undefined;
-        self.setTerminalMacro(chord.toConfigString(&chord_buf), text[eq + 1 ..]);
     }
 
     /// ABI 마우스 이벤트(kind/button/mods)를 chrome `PointerEvent`로 변환한다 — `chromeInputFromKeyEvent`의 포인터 짝
@@ -8570,7 +7234,7 @@ pub const AppSession = struct {
     /// 프리뷰, null=라이브라 tab.top_level 직접). 카드 드래그가 착지 위치의 top_level을 override하므로 pass1/pass2 리셋과
     /// pass2 subtree 헬퍼(subtreeHasMatch·directCardCount·ghostOverlapsSubtree)가 이 가상 배열을 읽어야 프리뷰가 "그룹 밖
     /// 최상위" 전이를 정확히 반영한다. null이면 옛 tab.top_level 경로와 byte-identical(라이브 회귀 0).
-    fn projectRowsCore(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), order: []const usize, group_depth: []const u8, top_level: ?[]const bool, preview: ?PreviewCtx) PreviewRange {
+    pub fn projectRowsCore(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), order: []const usize, group_depth: []const u8, top_level: ?[]const bool, preview: ?PreviewCtx) PreviewRange {
         out.clearRetainingCapacity();
         const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
         const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
@@ -8974,7 +7638,7 @@ pub const AppSession = struct {
                         app_quit_keep_alive = app_keep_alive_after_quit;
                         app_quitting = true; // P3-e3-6: 앱 종료 확정 → 각 창 deinit이 host-backed Term을 terminate 대신 detach(runtime 생존).
                     },
-                    .file_conflict_reload => |surface_id| self.beginFileConflictReload(surface_id),
+                    .file_conflict_reload => |surface_id| file_panel_ops.beginFileConflictReload(self, surface_id),
                     .reset => settings_ops.resetAllSettings(self),
                     .paste => |target_id| self.confirmPendingPaste(target_id),
                     .close => |target| self.executeClose(target),
@@ -9018,7 +7682,7 @@ pub const AppSession = struct {
                 settings_ops.refreshSettingsFieldCount(self);
                 self.metal_dirty = true;
             },
-            .settings_text_commit => self.commitSelectedText(), // 인라인 편집 Enter — editText→setText + 적용 + 영속
+            .settings_text_commit => settings_ops.commitSelectedText(self), // 인라인 편집 Enter — editText→setText + 적용 + 영속
             .settings_search_changed => {
                 // 검색 쿼리 변경 — 필터된 행 수를 다시 주입(setFieldCount가 selected를 clamp) + 재렌더.
                 settings_ops.refreshSettingsFieldCount(self);
@@ -9027,7 +7691,7 @@ pub const AppSession = struct {
             .settings_delete_row => settings_ops.resetSelectedSettingRow(self), // 선택 행 Backspace — env/macro/keybind 삭제·스칼라 기본값 복원(§6.11)
             .settings_reset_field => settings_ops.resetSelectedSettingRow(self), // 선택 행 ↺ 클릭 — 그 항목만 기본값 복원(§6.11, Backspace와 같은 경로)
             .settings_reset_all => self.requestResetAll(), // 네비 "↺ 초기화" — 전체 리셋 확인 모달(§6.4, 커맨드 팔레트·메뉴와 같은 경로)
-            .settings_color_picked => self.commitPickerColor(), // HSV picker Enter — pickerRgb()→#rrggbb로 선택 color 행 커밋
+            .settings_color_picked => settings_ops.commitPickerColor(self), // HSV picker Enter — pickerRgb()→#rrggbb로 선택 color 행 커밋
             .settings_eyedropper => self.color_sample_pending = true, // HSV picker `i` — Swift가 NSColorSampler 열도록 신호
         }
     }
@@ -9099,101 +7763,6 @@ pub const AppSession = struct {
         for (to_remove.items) |id| _ = self.kitty_uploaded.remove(id);
     }
 
-    /// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
-    /// 뽑아 갱신한다. 분수 scale을 그대로 곱한 device 픽셀 font size로 조회한다. macOS가
-    /// 아니거나(테스트/CI) 조회 실패면 같은 device 픽셀 font size의 정사각으로 대체한다.
-    /// scale_milli가 바뀌는 resize에서도 호출한다.
-    fn refreshCellMetrics(self: *AppSession) void {
-        const device_font_size = renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli);
-        const square: u32 = @intFromFloat(@round(device_font_size));
-        self.cell_width_px = square;
-        self.cell_height_px = square;
-        // extern native 호출은 macOS에서만 컴파일/링크한다(.m을 링크하지 않는 Linux 계약
-        // 빌드에서 undefined symbol이 되지 않게 comptime으로 막는다).
-        if (builtin.os.tag == .macos) {
-            var metrics: coretext_bridge.CellMetricsResult = .{};
-            coretext_bridge.maru_macos_coretext_font_cell_metrics(
-                self.appearance.font.family.ptr,
-                self.appearance.font.family.len,
-                device_font_size,
-                &metrics,
-            );
-            if (metrics.status == 0 and metrics.cell_width_px > 0 and metrics.cell_height_px > 0) {
-                self.cell_width_px = metrics.cell_width_px;
-                self.cell_height_px = metrics.cell_height_px;
-            }
-        }
-        // line-height(행간)·letter-spacing(자간) config를 적용한다 — native/fallback이 base cell 크기를 정한 '직후',
-        // grid·atlas·hit-test·IME가 파생되기 '전'. **자간은 cell_width_px(grid advance=셀 배치 간격)에만 가산하고,
-        // 글리프 비트맵 폭(glyph_cell_width_px=atlas slot·화면 quad 폭)은 자연폭(base) 그대로 둔다**(applyFontSpacing
-        // 단일 출처). 이렇게 분리해야 음수 자간이 slot을 좁혀 일반 글자를 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다
-        // 세로 흔들림)시키던 버그가 사라진다 — 글리프는 자연폭 slot에 온전히 그려지고, 좁힘은 셀 배치 step에만 반영돼
-        // 이웃 글자와 겹친다(Ghostty식). line-height는 cell_height_px에 곱한다. 기본값(1.0/0.0)이면 둘 다 base.
-        const spaced = applyFontSpacing(
-            self.cell_width_px,
-            self.cell_height_px,
-            self.appearance.font.line_height,
-            self.appearance.font.letter_spacing,
-            self.scale_milli,
-        );
-        self.cell_width_px = spaced.advance_width_px;
-        self.glyph_cell_width_px = spaced.glyph_width_px;
-        self.cell_height_px = spaced.height_px;
-        // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
-        // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
-        // **폰트/DPI가 바뀌어 cell 폭이 커지면 헤더 아이콘 하한(sidebarMinPt)이 올라가므로**, 저장된 폭을 그 하한 이상으로
-        // 끌어올린다(드래그 경로뿐 아니라 메트릭 변경 경로도 겹침 방지 — 단일 출처). 기본값 180pt가 하한 미만이 되는 큰-폰트
-        // 첫 실행도 여기서 보정된다. cap(sidebar_max_pt)도 sidebarMinPt가 보장.
-        self.sidebar_width_pt = std.math.clamp(self.sidebar_width_pt, sidebar_ops.sidebarMinPt(self), sidebar_max_pt);
-        // minimal 세션(quick terminal)·접힘(사용자 토글)이면 사이드바 폭 0 고정(터미널이 전폭). 폭(pt)은 보존돼 펼치면 복원.
-        self.sidebar_width_px = if (self.chrome_minimal or self.sidebar_collapsed) 0 else layout_math.ptToPx(self.sidebar_width_pt, self.scale_milli);
-        // window padding도 같은 단일 출처(논리 pt × 분수 scale)로 backing px 환산 — DPI 변경에도 유지된다.
-        // termRect/gridFromBacking이 이 px를 inset으로 쓴다(렌더 origin·hit-test·IME 자동 정합). minimal 세션도
-        // 동일 적용(터미널 콘텐츠 inset이라 chrome 유무와 무관).
-        self.window_padding_px = .{
-            .left = layout_math.ptToPx(self.appearance.window_padding_left, self.scale_milli),
-            .right = layout_math.ptToPx(self.appearance.window_padding_right, self.scale_milli),
-            .top = layout_math.ptToPx(self.appearance.window_padding_top, self.scale_milli),
-            .bottom = layout_math.ptToPx(self.appearance.window_padding_bottom, self.scale_milli),
-        };
-        // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
-        // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
-        self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
-        self.sidebar_header_row_h_px = self.cell_height_px * sidebar_header_row_h_ratio_milli / 1000; // 그룹 헤더 row(얇은 한 줄; SG3b-2-ii)
-        // 카드 높이는 줄 수 기반이라 cell·헤더 높이가 바뀔 때마다 함께 파생한다(줄 기하 공식은 chrome이 소유).
-        self.sidebar_metrics = .init(self.cell_height_px, self.sidebar_header_row_h_px);
-        // 상단 타이틀바 띠(신호등·헤더 아이콘 줄, 탭 바는 그 아래). 펼침=한 줄, 접힘=신호등 높이 확보(computeTitlebarStripPx).
-        self.titlebar_strip_px = self.computeTitlebarStripPx();
-        // 헤더 높이는 **띠 + 상단 바**다 — 사이드바 헤더의 두 줄이 창 오른쪽의 두 밴드(신호등 띠 / pane 탭 바·도크 뷰
-        // 스위처)와 한 줄로 읽혀야 하기 때문이다(docs/file-explorer.md §3.5). 그래서 `titlebar_strip_px`·
-        // `chromeBarHeightPx` 뒤에 계산한다.
-        //
-        // 예전에는 `cell_height × 3.0`이었고 그래서 **왼쪽만 terminal 폰트에 묶여** 있었다: 14pt에서 검색 줄 중심이
-        // 45pt인데 탭 바 중심은 48pt였고, 헤더 하단 54pt와 상단 바 하단 68pt가 갈렸다. 고정 오차가 아니라 단위계
-        // 불일치라 폰트를 키우면 벌어진다(24pt면 헤더만 93pt). 오른쪽 두 바가 이미 쓰던 계약에서 사이드바 헤더만
-        // 빠져 있던 것이 원인이다(사용자 보고 2026-08-09).
-        self.sidebar_header_height_px = sidebar_ops.sidebarHeaderHeightPx(self);
-        // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
-        sidebar_ops.rebuildSidebar(self) catch {};
-        // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
-        // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
-        if (self.surface_initialized) {
-            // Phase 3 위임(docs/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
-            // 직접 mutate 없음). 모든 Term에 보내 inactive host runtime도 다음 kitty 출력 전에 새 metric을 보게 한다.
-            for (self.tabs.items) |tab| {
-                for (tab.panes.items) |pane| {
-                    for (pane.terms.items) |term| {
-                        if (term.kind != .terminal) continue;
-                        self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_cell_metrics = .{
-                            .width = self.cell_width_px,
-                            .height = self.cell_height_px,
-                        } }, self.io) catch {};
-                    }
-                }
-            }
-        }
-    }
-
     /// 폰트 크기를 delta(pt)만큼 조절한다(⌘+/⌘-). setFontSize가 클램프·메트릭·grid를 처리한다.
     fn adjustFontSize(self: *AppSession, delta: f32) void {
         self.setFontSize(self.appearance.font.size + delta);
@@ -9230,7 +7799,7 @@ pub const AppSession = struct {
     /// + 각 pane resize(resize 본문과 동일한 reflow). 아직 첫 resize 전(backing 0)이면 grid는 스킵 — 곧 올 Swift
     /// resize가 새 메트릭으로 grid를 잡는다.
     pub fn applyMetricsPipeline(self: *AppSession) void {
-        self.refreshCellMetrics();
+        sidebar_ops.refreshCellMetrics(self);
         _ = self.renderer_state.atlas.invalidate(.font_size_changed);
         // The renderer's FontId registry deliberately lives as long as the atlas. A font family
         // switch may retain identical cell metrics, so metric-only fingerprinting is insufficient:
@@ -9311,44 +7880,6 @@ pub const AppSession = struct {
                 std.ascii.eqlIgnoreCase(t.cursor, pc.cursor) and std.ascii.eqlIgnoreCase(t.selection, pc.selection)) return p;
         }
         return null;
-    }
-
-    /// 테마 프리셋을 **절대 인덱스**로 적용한다(드롭다운 팝업 — applyThemePreset의 dir-순환 짝). idx가 프리셋 수 이상
-    /// (="사용자 지정")이면 **열 때 스냅샷한 원본 커스텀 색으로 복원** + 잠금 해제(예전엔 잠금만 풀어 미리본 프리셋 색이
-    /// 남던 데이터 손실 — code-review high 수정). idx<n이면 그 프리셋 색을 깔고 라이브 적용, persist=true일 때만 파일 영속.
-    fn applyThemePresetIndex(self: *AppSession, idx: usize, persist: bool) void {
-        const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
-        if (idx >= n) {
-            // "사용자 지정" — 원본 커스텀 색(스냅샷)으로 되돌리고 잠금 해제. 커스텀은 theme.preset 줄을 안 남기므로 별도 영속 없음
-            // (미리보기가 persist를 안 했으니 파일의 커스텀 색 줄이 그대로라, 여기선 인메모리 복원만 하면 파일도 정합).
-            self.loaded_config.config.theme = self.dropdown_snapshot_theme;
-            self.theme_user_custom = true;
-            settings_ops.reapplyLoadedConfig(self);
-            return;
-        }
-        self.theme_user_custom = false;
-        const preset: config_mod.theme.ThemePreset = @enumFromInt(idx);
-        self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
-        settings_ops.reapplyLoadedConfig(self);
-        if (persist) self.persistThemePreset(preset); // 확정에서만 파일에 theme.preset 예약(미리보기는 인메모리만)
-    }
-
-    /// 프리셋을 **통째로 영속**한다(4색만 쓰던 옛 한계 해소 — ANSI 16색 팔레트·파생색 포함, 리뷰). `theme.preset = <name>`
-    /// 한 줄을 쓰도록 예약하고(serializeConfig가 set/update), 그 줄과 충돌할 개별 theme.* 색·palette override 줄은 제거
-    /// 예약한다 — 로더가 theme.preset을 통째 프리셋 색으로 펼치므로 남은 override가 위에 덮어쓰면 반쪽만 적용되기 때문.
-    pub fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePreset) void {
-        const a = self.loaded_config.arena.allocator();
-        // @tagName은 underscore(gruvbox_dark), config 파일은 dash(gruvbox-dark) — 로더 parseEnum이 받는 형식으로 변환.
-        self.theme_preset_persist = std.mem.replaceOwned(u8, a, @tagName(preset), "_", "-") catch null;
-        // 개별 override 줄 제거(theme.preset이 base를 깔므로 남으면 충돌). 4 주 색 + 16 팔레트.
-        settings_ops.markConfigKeyRemoved(self, "theme.background");
-        settings_ops.markConfigKeyRemoved(self, "theme.foreground");
-        settings_ops.markConfigKeyRemoved(self, "theme.cursor");
-        settings_ops.markConfigKeyRemoved(self, "theme.selection");
-        for (0..16) |i| {
-            const k = std.fmt.allocPrint(a, "theme.palette.{d}", .{i}) catch continue;
-            settings_ops.markConfigKeyRemoved(self, k);
-        }
     }
 
     /// Swift가 macOS 시스템 외관(NSAppearance light/dark)을 알려준다(생성 직후·외관 변경마다). 마지막 값을 기억하고,
@@ -9988,10 +8519,10 @@ pub const AppSession = struct {
                     // 커밋한다. self.tabs가 불변이라 sidebar_drag_index(=origin)도 드래그 내내 안정(옛 landed 팔로우 불필요).
                     const origin = drag.index;
                     // (A) y_px→raw_row→plan 실경로 단일 출처(프리뷰 시프트 보정 포함) — 헤드리스 테스트가 같은 함수를 탄다.
-                    const plan = self.cardDropPlan(origin, y_px);
+                    const plan = sidebar_ops.cardDropPlan(self, origin, y_px);
                     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
                     defer arena_state.deinit();
-                    self.refreshDragPreview(origin, plan, y_px, arena_state.allocator()) catch {};
+                    tab_ops.refreshDragPreview(self, origin, plan, y_px, arena_state.allocator()) catch {};
                     // 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를 주므로 세팅하지 않는다(고스트+삽입선이 대체, 위 rebuild의
                     // drop_slot 게이트도 프리뷰 중 null). 매 프레임 재투영이 필요하므로 rebuild + dirty.
                     sidebar_ops.rebuildSidebar(self) catch {};
@@ -10004,7 +8535,7 @@ pub const AppSession = struct {
                     // 투영한다(self.tabs 불변). up이 마지막 plan(group_sibling/group_nest)을 1회 커밋한다(commitSidebarDragPreview).
                     // self.tabs 불변이라 drag_index(=origin 마커)가 드래그 내내 안정 — SG8f: 옛 새-마커 반환값 대입 잔재 제거.
                     // cmd_held: Cmd 눌림이면 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
-                    self.groupDragPreviewFrame(drag.index, y_px, cmd_held);
+                    sidebar_ops.groupDragPreviewFrame(self, drag.index, y_px, cmd_held);
                 }
             } else if (kind == 3) {
                 // SG8d 카드 + SG8e 그룹(마커 카드 = 그룹 통째) 확정 — 프리뷰가 있으면 마지막 plan을 실제 move로 정확히 1회
@@ -10036,7 +8567,7 @@ pub const AppSession = struct {
                     if (self.tabs.items[drag.marker].group_start != null) {
                         // self.tabs 불변이라 마커 인덱스가 안정 — SG8f: 옛 반환값 대입 잔재 제거(호출자 마커 갱신 불필요).
                         // cmd_held: Cmd 눌림이면 다른 그룹 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
-                        self.groupDragPreviewFrame(drag.marker, y_px, cmd_held);
+                        sidebar_ops.groupDragPreviewFrame(self, drag.marker, y_px, cmd_held);
                     }
                 }
             } else { // kind == 3 (up)
@@ -10059,7 +8590,7 @@ pub const AppSession = struct {
         if (self.pointerGestureIs(.terminal_tab) and (kind == 2 or kind == 3)) {
             if (kind == 2) {
                 tab_ops.dragTabTo(self, x_px); // pane 내 live 재정렬(PR-E1)
-                self.setDropTarget(self.computeDropTarget(x_px, y_px)); // 드롭 타겟 하이라이트(④b)
+                self.setDropTarget(tab_ops.computeDropTarget(self, x_px, y_px)); // 드롭 타겟 하이라이트(④b)
                 self.pointer_gesture_owner.terminal_tab.x = x_px;
                 self.pointer_gesture_owner.terminal_tab.y = y_px;
                 self.metal_dirty = true;
@@ -11390,11 +9921,11 @@ pub const AppSession = struct {
         else
             bytes;
         defer if (escape_each) self.allocator.free(payload);
-        self.submitPaste(payload, false, target_id); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
+        term_ops.submitPaste(self, payload, false, target_id); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
     }
 
     /// 붙여넣기 확인 모달 메시지(단일 출처). 아래 미리보기(buildPastePreview)가 붙여넣을 내용을 함께 보여준다.
-    const paste_confirm_message = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?";
+    pub const paste_confirm_message = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?";
     const paste_preview_max_lines = 6; // 미리보기에 보여줄 앞 줄 수(넘으면 "…N줄 더"로 요약 — Ghostty 스크롤 뷰의 근사)
     const paste_preview_max_cols = 56; // 한 줄 표시폭 상한(넘으면 … 절단) — 모달이 너무 넓어지지 않게
 
@@ -11428,7 +9959,7 @@ pub const AppSession = struct {
     /// 붙여넣을 payload에서 확인 모달 미리보기 줄들(세션 소유)을 만든다 — 개행(\n/\r, CRLF는 한 번)으로 줄 분리해
     /// 앞 max_lines줄을 sanitize·절단해 담고, 남는 줄은 "…N줄 더"로 요약한다. confirm.State.body가 이 슬라이스를
     /// 가리킨다. Ghostty가 붙여넣기 내용을 확인창 텍스트 뷰로 보여주는 것을 셀-그리드로 근사한 것(스크롤 대신 요약).
-    fn buildPastePreview(self: *AppSession, payload: []const u8) []const []const u8 {
+    pub fn buildPastePreview(self: *AppSession, payload: []const u8) []const []const u8 {
         var used: usize = 0;
         var count: usize = 0;
         var total_lines: usize = 0;
@@ -11458,79 +9989,12 @@ pub const AppSession = struct {
         return self.paste_preview_lines[0..count];
     }
 
-    /// 최종 payload(escape 적용 후 평문)를 인코딩해 PTY 큐에 넣는다. allow_unsafe=false면 paste protection
-    /// 게이트를 먼저 통과해야 하고, 위험(개행/ESC[201~ 인젝션)하면 payload를 세션 소유 버퍼에 보관하고 확인
-    /// 모달을 띄운 뒤 반환한다(confirmPendingPaste가 allow_unsafe=true로 재호출). 게이트 판정은 core가 단일
-    /// 출처(pasteNeedsConfirmation — bracketed 상태·설정 반영). 큐/flush는 기존 non-blocking 경로 그대로.
-    fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, target_id: u64) void {
-        // 대상 surface를 **id로** 잡는다(활성이 아니라). 없거나(닫힌 Term) web이면 붙일 PTY가 없으니 no-op —
-        // 예전엔 activeSurface를 그때그때 다시 읽어, 확인 모달을 거친 재진입(confirmPendingPaste)에서 그 사이
-        // 바뀐 활성 pane에 payload가 주입되거나 web sentinel의 core를 만져 조용히 사라졌다(code-review).
-        const surface = term_ops.terminalSurfaceById(self, target_id) orelse return;
-        var needs_confirm: bool = undefined;
-        var bracketed: bool = undefined;
-        if (surface.remote != null) {
-            // host-backed(영속 세션): placeholder core에는 bracketed-paste 모드가 없다(진짜 코어는 host 프로세스라
-            // DECSET 2004는 host core만 안다). 관측(RuntimeObservation.bracketed_paste)에서 온 실제 모드로 판정·인코딩해야
-            // Claude Code 등이 붙여넣은 파일 경로를 [Image]로 인식한다(§입력 패리티). bracketed는 paste-protection 게이트에도
-            // 필요한 클라 판단 모드라 관측으로 스트리밍한다(mouse_tracking과 같은 게이트-모드). 관측은 client cache라 core lock 불요.
-            const loc = term_ops.findTermWhere(self, surface.id, struct {
-                fn pred(id: u64, term: *Term) bool {
-                    return term.kind == .terminal and term.surface.id == id;
-                }
-            }.pred) orelse return;
-            const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
-            bracketed = obs.availability != .unavailable and obs.bracketed_paste;
-            needs_confirm = !allow_unsafe and maru.terminal.pasteNeedsConfirmationWith(
-                bracketed,
-                payload,
-                self.loaded_config.config.input.paste_protection,
-                self.loaded_config.config.input.bracketed_paste_is_safe,
-            );
-        } else {
-            // **로컬 코어 접근은 lockCore 하에서** — 대상이 활성 pane이 아닐 수 있고(대상 고정), 그 pane의 PTY reader
-            // 스레드가 같은 코어를 쓴다. 판정(pasteNeedsConfirmation)과 인코딩에 필요한 bracketed를 한 번에 잠금 안에서
-            // 끝내고, 모달 열기·큐 적재는 잠금 밖에서 한다(모달/할당을 잠금 안에서 하지 않는다 — 경합 시간 최소).
-            surface.lockCore(self.io);
-            needs_confirm = !allow_unsafe and surface.core.pasteNeedsConfirmation(
-                payload,
-                self.loaded_config.config.input.paste_protection,
-                self.loaded_config.config.input.bracketed_paste_is_safe,
-            );
-            bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
-            surface.unlockCore(self.io);
-        }
-        // **인코딩은 락 밖에서**: 멀티MB payload의 할당·복사를 코어 뮤텍스 안에서 하면 그동안 그 pane의 PTY
-        // reader 스레드가 막힌다(code-review). 순수 변형(encodePasteWith)이 bool 하나만 받는다.
-        const encoded_opt: ?[]u8 = if (needs_confirm) null else (maru.terminal.encodePasteWith(bracketed, self.allocator, payload) catch null);
-        if (needs_confirm) {
-            // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
-            // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
-            self.showConfirmButtons(.{ .paste = target_id }, paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
-            // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
-            self.chrome_host.confirm.body = self.buildPastePreview(payload);
-            self.pending_paste_confirm.clearRetainingCapacity();
-            self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
-                // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
-                self.pending_paste_confirm.clearRetainingCapacity();
-                self.chrome_host.confirm.dismiss();
-            };
-            return;
-        }
-        const encoded = encoded_opt orelse return; // 인코딩 실패(OOM) — 조용히 버린다
-        defer self.allocator.free(encoded);
-        // 대상 surface 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
-        // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
-        // 동결되던 것을 없앤다. 큐는 surface별 FIFO라 bracketed paste 감싸기 순서는 깨지지 않는다.
-        _ = self.enqueueInputBytes(target_id, encoded, false); // OOM이면 유실(best-effort — 크래시보다 낫다)
-    }
-
     /// 확인 모달에서 "붙여넣기"를 고른 뒤 보관한 payload를 실제로 붙여넣는다(allow_unsafe로 게이트 우회 —
     /// 사용자가 이미 확인). **모달을 띄울 때 고정한 대상**으로 붙인다 — 확인하는 동안 사용자가 탭/pane을
     /// 옮겼어도 payload는 원래 pane으로 간다(그 사이 그 Term이 닫혔으면 submitPaste가 no-op으로 버린다).
     /// submitPaste는 allow_unsafe면 payload를 안 건드리므로 소비 후 버퍼를 비운다.
     fn confirmPendingPaste(self: *AppSession, target_id: u64) void {
-        self.submitPaste(self.pending_paste_confirm.items, true, target_id);
+        term_ops.submitPaste(self, self.pending_paste_confirm.items, true, target_id);
         self.pending_paste_confirm.clearRetainingCapacity();
     }
 
@@ -12486,62 +10950,6 @@ pub const AppSession = struct {
         return self.copy_buffer;
     }
 
-    /// OSC 52 클립보드 쓰기 요청을 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
-    /// **정책**(terminal-compatibility-policy.md §OSC52, 사용자 결정 2026-06-20): write는 기본 `allow` — 로컬
-    /// 단일 사용자 데스크톱 터미널이라 트래킹 앱의 드래그 복사를 시스템 클립보드에 반영한다(iTerm2/Ghostty도 유사).
-    /// **read**는 클립보드 탈취 방지로 계속 deny한다 — core가 `?` 쿼리에 응답하지 않아 read 요청은 여기 안 온다.
-    /// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다. ask(요청별 확인 UI)는 후속.
-    pub fn pendingClipboard(self: *AppSession) []const u8 {
-        if (!self.surface_initialized) return &.{};
-        // 슬라이스 4: 주소창 ⌘X가 넣은 클립보드 쓰기가 있으면 우선 반환(OSC52 write와 같은 drain 경로 — Swift가 NSPasteboard에
-        // 씀). 소유권을 clipboard_out_buffer로 이전해 반환 수명(다음 pendingClipboard까지) 계약을 그대로 만족한다.
-        if (self.chrome_clipboard_write.len > 0) {
-            if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
-            self.clipboard_out_buffer = self.chrome_clipboard_write;
-            self.chrome_clipboard_write = &.{};
-            return self.clipboard_out_buffer;
-        }
-        // host-backed: core는 빈 placeholder라 OSC 52가 안 들어온다. host가 관측 seq로 알려 준 요청만 RPC로
-        // 텍스트를 가져온다(텍스트가 커서 관측에 못 싣는다). 정책(write allow)과 NSPasteboard 쓰기는 로컬과
-        // 동일하게 client가 한다 — §기능을 어느 쪽에 둘 것인가.
-        if (is_macos and term_ops.activeSurface(self).remote != null) {
-            const term = pane_ops.activePane(self).activeTerm();
-            const seq = term.rt.observation.clipboard_write_seq;
-            const last = term.rt.last_clipboard_write_seq orelse {
-                term.rt.last_clipboard_write_seq = seq; // 첫 관측 = 기준선(재접속 시 지난 복사 재생 금지)
-                return &.{};
-            };
-            if (seq <= last) {
-                term.rt.last_clipboard_write_seq = seq; // 감소(host exec 재시작)면 조용히 맞춘다
-                return &.{};
-            }
-            const rb = &(app_remote_backend orelse return &.{});
-            const fetched = rb.clipboardWriteFor(term.rt.handle) orelse return &.{}; // 실패면 seq 유지 → 다음 tick 재시도
-            // **가져온 뒤에** seq를 전진시킨다 — 먼저 올리면 전송 실패가 요청을 소비해 복사가 영영 사라진다.
-            term.rt.last_clipboard_write_seq = seq;
-            if (fetched.too_large) {
-                // 로컬의 오버사이즈 안내와 같은 자리(조용한 유실 금지). 텍스트는 없다.
-                var nbuf: [128]u8 = undefined;
-                const kb = session_host.runtime_manager.max_clipboard_wire_bytes / 1024;
-                self.showNotice(std.fmt.bufPrint(&nbuf, "원격 세션의 클립보드 복사가 너무 커서 전달되지 않았습니다(최대 약 {d}KB).", .{kb}) catch "원격 클립보드 복사가 너무 커서 전달되지 않았습니다.");
-                return &.{};
-            }
-            const text = fetched.text orelse return &.{};
-            if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
-            self.clipboard_out_buffer = text; // backend allocator 소유 바이트를 그대로 인계(다음 호출까지 유효)
-            return self.clipboard_out_buffer;
-        }
-        const pending = term_ops.activeSurface(self).core.pendingClipboardWrite();
-        if (pending.len == 0) return &.{};
-        if (self.clipboard_out_buffer.len > 0) {
-            self.allocator.free(self.clipboard_out_buffer);
-            self.clipboard_out_buffer = &.{};
-        }
-        self.clipboard_out_buffer = self.allocator.dupe(u8, pending) catch return &.{};
-        term_ops.activeSurface(self).core.clearClipboardWrite();
-        return self.clipboard_out_buffer;
-    }
-
     /// OSC 52 읽기(`?` 쿼리)가 대기 중이고 정책(osc52.read)이 allow면 true — Swift가 시스템 클립보드를 읽어
     /// provideClipboardRead로 돌려준다. **정책 게이트는 여기**다(write의 platform 게이트와 대칭): 코어는 쿼리만
     /// 파싱하고 pending을 세우며, deny여도 pending을 소비(clear)하되 클립보드는 읽지 않는다(allow일 때만 Swift가 읽음
@@ -12659,18 +11067,6 @@ pub const AppSession = struct {
         const pending = self.file_panel_pick_pending;
         self.file_panel_pick_pending = false;
         return pending;
-    }
-
-    /// Swift NSOpenPanel이 고른 파일의 절대경로를 받아 window.background-image에 적용한다 — config arena에 dupe해 setText,
-    /// 라이브 반영(reapplyLoadedConfig가 metal_dirty → 다음 frame ensureBackgroundImage가 새 경로 디코드) + 영속 예약
-    /// (markConfigKeyDirty). 빈 경로(취소 등)면 무동작 — 지우기는 행 Backspace가 담당. (배경 이미지 파일 선택)
-    pub fn providePickedFile(self: *AppSession, path: []const u8) void {
-        if (path.len == 0) return;
-        const owned = self.loaded_config.arena.allocator().dupe(u8, path) catch return;
-        if (config_mod.schema.setText(&self.loaded_config.config, "window.background-image", owned)) {
-            settings_ops.reapplyLoadedConfig(self);
-            settings_ops.markConfigKeyDirty(self, "window.background-image");
-        }
     }
 
     /// HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중인지 — 1회성 drain(Swift가 매 tick 호출, 1이면
@@ -13030,7 +11426,7 @@ pub const AppSession = struct {
         // 다시 뽑는다. grid 계산이 placeholder가 아니라 실제 cell 크기를 쓰도록 순서가 중요하다.
         if (scale_changed) {
             self.scale_milli = next_scale;
-            self.refreshCellMetrics();
+            sidebar_ops.refreshCellMetrics(self);
             // B1 text artifacts key both pixel placement and glyph raster scale. Rebuild from
             // the resolved appearance rather than replaying a 1x/2x shaped-record cache.
             self.clearMeasuredTextCaches();
@@ -13086,86 +11482,6 @@ pub const AppSession = struct {
         self.writeSummaryFromState();
         self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
         return self.last_summary;
-    }
-
-    /// MARU_DEBUG일 때 활성 surface의 cell 격자를 찍는다. CJK 등 비-ASCII는 텍스트 줄에서
-    /// 공백으로 보이지만 배경 줄(b...)의 'B'로 영역을 알 수 있어, 파란 배경 줄과 프롬프트 줄이
-    /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
-    fn logScreenIfDebug(self: *AppSession) void {
-        if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
-        if (!term_ops.activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel core라 화면 덤프 skip
-        const core = &term_ops.activeSurface(self).core;
-        const cols = @min(@as(usize, core.size.cols), 240);
-        // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
-        if (core.last_command_exit) |code| {
-            screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) last_exit={d} ===", .{
-                core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col, code,
-            });
-        } else {
-            screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
-                core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col,
-            });
-        }
-        // 창 제목/사이드바와 같은 runtime observation cwd를 찍는다(host-backed placeholder core 오진 방지).
-        const cwd = pane_ops.activePane(self).activeTerm().rt.observation.cwd.items;
-        if (cwd.len > 0) screen_diag.info("cwd={s}", .{cwd});
-        var text: [240]u8 = undefined;
-        var bg: [240]u8 = undefined;
-        const grid_cols: usize = core.size.cols;
-        for (0..core.size.rows) |row| {
-            var any = false;
-            for (0..cols) |col| {
-                const cell = core.screen.cells[row * grid_cols + col];
-                const cp = cell.codepoint;
-                text[col] = if (cp >= 0x20 and cp < 0x7f) @intCast(cp) else ' ';
-                const has_bg = switch (cell.style.background) {
-                    .default => false,
-                    else => true,
-                };
-                bg[col] = if (has_bg) 'B' else '.';
-                if ((cp != 0 and cp != ' ') or has_bg) any = true;
-            }
-            // soft-wrap 플래그를 함께 찍는다(w=다음 줄로 이어짐, .=hard 줄끝). reflow 피드백 루프
-            // 회귀는 hard 줄(프롬프트)이 w로 잘못 찍히는 것으로 드러나므로, wrapped인 빈 줄도 보인다.
-            const w_mark: u8 = if (row < core.screen.wrapped.len and core.screen.wrapped[row]) 'w' else '.';
-            // OSC 133 semantic 분류(P=프롬프트 I=입력 C=명령출력 ·=미분류). 셸 통합이 마커를 emit하면
-            // 채워진다 — 프롬프트/입력/출력이 어떤 행으로 잡히는지 데이터로 본다(거터 PR 전 조기 확인).
-            const p_mark: u8 = if (row < core.screen.prompt_marks.len) switch (core.screen.prompt_marks[row].kind) {
-                .unknown => '.',
-                .prompt => 'P',
-                .input => 'I',
-                .command => 'C',
-            } else '.';
-            if (!any and w_mark != 'w' and p_mark == '.') continue;
-            screen_diag.info("r{d:0>2} {c}{c} t|{s}|", .{ row, w_mark, p_mark, text[0..cols] });
-            screen_diag.info("r{d:0>2} {c}{c} b|{s}|", .{ row, w_mark, p_mark, bg[0..cols] });
-        }
-    }
-
-    /// 프레임마다 셸 의미 이벤트(OSC 133/7)를 소비한다 — MARU_DEBUG면 명령 경계를 구조화 한 줄씩
-    /// 찍고, 항상 비워 core의 이벤트 버퍼를 bounded하게 유지한다(누구도 drain 안 하면 cap에서 드롭).
-    /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
-    fn drainShellEventsForFrame(self: *AppSession) void {
-        if (!self.surface_initialized) return;
-        if (!term_ops.activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
-        if (pane_ops.activePane(self).activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
-        const core = &term_ops.activeSurface(self).core;
-        if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
-        if (diag_gate.maruDebugEnabled()) {
-            for (core.shellEvents()) |ev| switch (ev) {
-                .prompt_start => |r| shell_diag.info("shell.prompt-start row={d}", .{r}),
-                .input_start => |r| shell_diag.info("shell.input-start row={d}", .{r}),
-                .command_start => |r| shell_diag.info("shell.command-start row={d}", .{r}),
-                .command_end => |ce| if (ce.exit) |code|
-                    shell_diag.info("shell.command-end row={d} exit={d}", .{ ce.row, code })
-                else
-                    shell_diag.info("shell.command-end row={d} exit=?", .{ce.row}),
-                .cwd_changed => shell_diag.info("shell.cwd-changed cwd={s}", .{core.currentCwd()}),
-            };
-            // 조용한 손실 방지: cap을 넘어 드롭된 이벤트가 있으면 보고한다.
-            if (core.shellEventsOverflowed()) shell_diag.info("shell.events OVERFLOW: cap 초과로 일부 이벤트 드롭", .{});
-        }
-        core.clearShellEvents();
     }
 
     /// 각 Term의 포그라운드 프로세스(claude/codex)를 throttled로 polling해 agent_kind를 갱신한다. 매 tick
@@ -15354,8 +13670,8 @@ pub const AppSession = struct {
             } else {
                 self.writeSummaryFromState();
             }
-            self.logScreenIfDebug();
-            self.drainShellEventsForFrame();
+            term_ops.logScreenIfDebug(self);
+            term_ops.drainShellEventsForFrame(self);
         } else if (project_chrome) {
             // [A: chrome 독립 present] sync hold가 grid 본문 투영을 막는 동안 사이드바 스피너(chrome_dirty)만 진행한다.
             // 활성 grid는 마지막 완성 프레임(self.cells)을 유지하고, 사이드바 셀만 재-shape→place→replaceSidebar로
@@ -17410,7 +15726,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
 /// 신뢰한다. **디렉터리 배제**: `access(X_OK)`는 디렉터리(검색권 비트)도 통과시키지만 홈/작업 디렉터리를 셸에
 /// 넣으면 execve가 실패한다(EACCES). 경로 끝에 `/`를 붙여 access하면 정규 파일은 ENOTDIR로 실패하므로(예:
 /// `/bin/sh/`) 이 실패를 정규 파일 신호로 쓴다(stat 불필요 — std.c.access 단일 의존). 심링크는 access가 따라간다.
-fn isExecutablePath(path: []const u8) bool {
+pub fn isExecutablePath(path: []const u8) bool {
     // 절대경로만 신뢰(빈 값·`~`·상대경로를 access 이전에 차단 — 위 docstring의 CWD 불일치 회피).
     if (!std.fs.path.isAbsolute(path)) return false;
     // buf는 `<path>/` + NUL까지 담아야 하므로 max_path_bytes+1(디렉터리 판정용 뒤 `/` 여유) — 길이 max_path_bytes-1
@@ -18181,54 +16497,54 @@ test "quickTerminalFrames/quickTerminalConfig: 설정 변경을 라이브로 반
 
 // refreshCellMetrics의 단일 적용점이 호출하는 line-height·letter-spacing 산술을 못박는다(OS·CoreText 없이 곱/가산
 // 검증 — 비-macOS CI에서도 돈다). 이 두 px가 grid·atlas·hit-test의 진실 소스라, 여기 곱/가산이 맞으면 나머지가 자동 정합.
-test "applyFontSpacing: line-height multiplies height, letter-spacing adds to advance (scaled, saturating)" {
+test "sidebar_ops.applyFontSpacing: line-height multiplies height, letter-spacing adds to advance (scaled, saturating)" {
     // 기본값(1.0/0.0)은 base 그대로 — advance·glyph 폭 모두 base.
     {
-        const r = applyFontSpacing(8, 18, 1.0, 0.0, 1000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 1.0, 0.0, 1000);
         try std.testing.expectEqual(@as(u32, 8), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 8), r.glyph_width_px);
         try std.testing.expectEqual(@as(u32, 18), r.height_px);
     }
     // line-height 2.0 → 높이 2배(18→36), 폭은 letter-spacing 0이라 불변.
     {
-        const r = applyFontSpacing(8, 18, 2.0, 0.0, 1000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 2.0, 0.0, 1000);
         try std.testing.expectEqual(@as(u32, 8), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 36), r.height_px);
     }
     // line-height 1.5 → 18×1.5=27(round). letter-spacing 4pt @1x → advance +4px(8→12).
     {
-        const r = applyFontSpacing(8, 18, 1.5, 4.0, 1000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 1.5, 4.0, 1000);
         try std.testing.expectEqual(@as(u32, 12), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 27), r.height_px);
     }
     // letter-spacing은 논리 pt × 분수 scale로 환산 — 2x(scale 2000)에서 4pt는 advance +8px(8→16). 높이는 1.0이라 불변.
     {
-        const r = applyFontSpacing(8, 18, 1.0, 4.0, 2000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 1.0, 4.0, 2000);
         try std.testing.expectEqual(@as(u32, 16), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 18), r.height_px);
     }
     // 음수 letter-spacing → advance 좁힘(8 + (-3) = 5). round(half-away): -3.
     {
-        const r = applyFontSpacing(8, 18, 1.0, -3.0, 1000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 1.0, -3.0, 1000);
         try std.testing.expectEqual(@as(u32, 5), r.advance_width_px);
     }
     // 큰 음수 letter-spacing이 advance를 1 미만으로 끌어내려도 1px로 saturate(0폭 grid div 폭주 방지).
     {
-        const r = applyFontSpacing(8, 18, 1.0, -100.0, 1000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 1.0, -100.0, 1000);
         try std.testing.expectEqual(@as(u32, 1), r.advance_width_px);
     }
     // 정확히 base를 0으로 만드는 음수도 1로 saturate(8 + (-8) = 0 → 1).
     {
-        const r = applyFontSpacing(8, 18, 1.0, -8.0, 1000);
+        const r = sidebar_ops.applyFontSpacing(8, 18, 1.0, -8.0, 1000);
         try std.testing.expectEqual(@as(u32, 1), r.advance_width_px);
     }
     // **핵심(슬롯 분리)**: 자간은 advance만 바꾸고 **글리프 비트맵 폭(glyph_width_px)은 자연폭 base 불변**이다 —
     // 음수든 양수든 큰 음수든. 이 불변식이 깨지면 음수 자간에서 slot이 좁아져 글자가 세로로 흔들리는 버그가 재발한다.
     {
-        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 1.0, -3.0, 1000).glyph_width_px);
-        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 1.0, 4.0, 1000).glyph_width_px);
-        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 1.0, -100.0, 1000).glyph_width_px); // saturate 무관: 자연폭 유지
-        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 2.0, 4.0, 2000).glyph_width_px); // line-height·scale 무관
+        try std.testing.expectEqual(@as(u32, 8), sidebar_ops.applyFontSpacing(8, 18, 1.0, -3.0, 1000).glyph_width_px);
+        try std.testing.expectEqual(@as(u32, 8), sidebar_ops.applyFontSpacing(8, 18, 1.0, 4.0, 1000).glyph_width_px);
+        try std.testing.expectEqual(@as(u32, 8), sidebar_ops.applyFontSpacing(8, 18, 1.0, -100.0, 1000).glyph_width_px); // saturate 무관: 자연폭 유지
+        try std.testing.expectEqual(@as(u32, 8), sidebar_ops.applyFontSpacing(8, 18, 2.0, 4.0, 2000).glyph_width_px); // line-height·scale 무관
     }
 }
 
@@ -19490,7 +17806,7 @@ test "GP3(c): toggleGroupPin — 그룹 통째 고정→프리픽스 끝 이동�
     const g = session.tabs.items[2];
     const m = session.tabs.items[3];
 
-    session.toggleGroupPin(g); // 그룹째 고정
+    tab_ops.toggleGroupPin(session, g); // 그룹째 고정
     try std.testing.expect(g.pinned and m.pinned); // 멤버 pin 동기(0→1)
     try std.testing.expect(p0.pinned and !utop.pinned); // p0 고정 유지·u0 비고정 top카드 보존(안 흡수)
     try std.testing.expectEqual(p0, session.tabs.items[0]); // 기존 고정 카드가 앞
@@ -19499,7 +17815,7 @@ test "GP3(c): toggleGroupPin — 그룹 통째 고정→프리픽스 끝 이동�
     try std.testing.expectEqual(utop, session.tabs.items[3]); // 비고정 top카드는 뒤로
     try std.testing.expectEqual(@as(usize, 3), tab_ops.groupSubtreeEnd(session, 1, null, null)); // G=[1,3) 통째 고정
 
-    session.toggleGroupPin(g); // 해제 = 역
+    tab_ops.toggleGroupPin(session, g); // 해제 = 역
     try std.testing.expect(!g.pinned and !m.pinned); // 멤버 pin 역동기(1→0)
     try std.testing.expect(p0.pinned and !utop.pinned); // p0 개별 고정은 불변(그룹 토글과 직교)
     try std.testing.expectEqual(p0, session.tabs.items[0]); // 고정 프리픽스 [0,1) 유지
@@ -19532,7 +17848,7 @@ test "GP3(c2): toggleGroupPin unpin — 다른 고정 그룹 앞의 그룹을 �
     const pg2 = session.tabs.items[2];
     const pm2 = session.tabs.items[3];
 
-    session.toggleGroupPin(pg1); // PG1 해제 — tab_ops.moveGroupRange 단일 insert_before로는 못 옮기는 경계(stablePartition 정렬)
+    tab_ops.toggleGroupPin(session, pg1); // PG1 해제 — tab_ops.moveGroupRange 단일 insert_before로는 못 옮기는 경계(stablePartition 정렬)
     try std.testing.expect(!pg1.pinned and !pm1.pinned); // PG1 비고정
     try std.testing.expect(pg2.pinned and pm2.pinned); // PG2 고정 유지
     // 프리픽스 무결: [PG2, pm2, PG1, pm1] = [1,1,0,0](복원식 stable 정렬로 고정이 앞·그룹 연속).
@@ -19564,7 +17880,7 @@ test "ungroup-pin: 고정 그룹 ungroup — 그룹째 고정이 멤버에 인�
     const m = session.tabs.items[0];
     const a1 = session.tabs.items[1];
     const a2 = session.tabs.items[2];
-    session.toggleGroupPin(m); // 그룹째 고정 — 마커+멤버 모두 pinned=1
+    tab_ops.toggleGroupPin(session, m); // 그룹째 고정 — 마커+멤버 모두 pinned=1
     try std.testing.expect(m.pinned and a1.pinned and a2.pinned);
     tab_ops.ungroupTab(session, a1); // 멤버 a1 ungroup = enclosing 마커 m 제거(그룹 소멸)
     try std.testing.expect(m.group_start == null); // 그룹 소멸
@@ -19582,9 +17898,9 @@ test "ungroup-pin: 고정 그룹 ungroup — 그룹째 고정이 멤버에 인�
 
     // ── (c) 로컬 pin 멤버 있던 고정 그룹 ungroup → local_pinned도 정리(+ pinned 클리어).
     tab_ops.createGroupAbsorbForTab(session, m); // C={m,a1,a2}
-    session.toggleLocalPin(a1); // a1 그룹-로컬 pin(그룹째 고정과 직교)
+    tab_ops.toggleLocalPin(session, a1); // a1 그룹-로컬 pin(그룹째 고정과 직교)
     try std.testing.expect(a1.local_pinned);
-    session.toggleGroupPin(m); // 그룹째 고정 — 로컬 pin은 고정 켜는 동안 보존
+    tab_ops.toggleGroupPin(session, m); // 그룹째 고정 — 로컬 pin은 고정 켜는 동안 보존
     try std.testing.expect(m.pinned and a1.pinned and a2.pinned and a1.local_pinned);
     tab_ops.ungroupTab(session, m); // 마커 카드 자체 ungroup
     try std.testing.expect(m.group_start == null);
@@ -19799,7 +18115,7 @@ test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인
     tab_ops.createGroupAbsorbForTab(session, session.tabs.items[1]); // A
     tab_ops.createSiblingGroupAbsorbForTab(session, session.tabs.items[3]); // B(형제, depth1)
     session.tabs.items[0].pinned = true; // 고정 최상위 카드(개별 pin — 그룹과 직교)
-    session.toggleGroupPin(session.tabs.items[1]); // A 그룹째 고정 → 프리픽스로·멤버 pin 동기(§12.10 GP3)
+    tab_ops.toggleGroupPin(session, session.tabs.items[1]); // A 그룹째 고정 → 프리픽스로·멤버 pin 동기(§12.10 GP3)
     tab_ops.recomputeVisibleTabs(session);
 
     // 표시 rows: [card t0, header A, card A마커, card A멤버, header B, card B마커, card B멤버]
@@ -20245,7 +18561,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
     }.f;
 
     // ── 1) 그룹 A를 **먼저** 통째 고정(toggleGroupPin) → 프리픽스로 안착([A마커,멤버,멤버] + 비고정 [t0,t1]) ──
-    session.toggleGroupPin(a_marker);
+    tab_ops.toggleGroupPin(session, a_marker);
     try std.testing.expect(a_marker.pinned and a_m1.pinned and a_m2.pinned); // 그룹째 고정(멤버 pin 동기)
     try std.testing.expect(!x1.pinned and !x2.pinned); // 독립 top카드는 아직 비고정(그룹 토글과 직교)
     // tabs = [A마커, m1, m2, t0(X1), t1(X2)] — X1은 지금 고정 그룹 subtree **뒤**(비고정 리전).
@@ -20329,7 +18645,7 @@ fn expectDropEquivalent(session: *AppSession, origin: usize, plan: AppSession.Dr
     }
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const vl = try session.simulateDrop(origin, plan, arena.allocator());
+    const vl = try tab_ops.simulateDrop(session, origin, plan, arena.allocator());
     // (2) self.tabs 불변 단언 — 순서·group_depth가 그대로(비커밋).
     for (session.tabs.items, 0..) |t, i| {
         try std.testing.expectEqual(before[i], t);
@@ -20363,7 +18679,7 @@ fn expectCardDropTopLevelEquivalent(session: *AppSession, origin: usize, plan: A
     for (session.tabs.items, 0..) |t, i| before[i] = t;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const vl = try session.simulateDrop(origin, plan, arena.allocator());
+    const vl = try tab_ops.simulateDrop(session, origin, plan, arena.allocator());
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변(비커밋 SG8)
     // 확정 — 실제 commit 경로(moveTab + top_level write + normalize/float/sweep).
     session.sidebar_drag_preview = .{ .origin = origin, .origin_len = 1, .plan = plan, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
@@ -20551,7 +18867,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
     {
         var arena2 = std.heap.ArenaAllocator.init(allocator);
         defer arena2.deinit();
-        try session.refreshDragPreview(3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena2.allocator());
+        try tab_ops.refreshDragPreview(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena2.allocator());
         var hdrs: usize = 0;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
             .agent_toggle, .agent => {},
@@ -20588,7 +18904,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
     // clampMoveToGroup 정합: X(고정, index2)를 비고정 t4(index4)로 끌어도 고정 리전 [0,4)에 clamp(비고정 못 감).
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const vl = try session.simulateDrop(2, .{ .card = .{ .target_tab = 4, .top_level = false } }, arena.allocator());
+    const vl = try tab_ops.simulateDrop(session, 2, .{ .card = .{ .target_tab = 4, .top_level = false } }, arena.allocator());
     try std.testing.expectEqual(@as(usize, 3), vl.ghost_lo); // raw 4가 아니라 고정 리전 끝(pinned_count-1=3)으로 clamp
 }
 
@@ -20615,7 +18931,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     // 프리뷰: X(origin=3)를 TOP1(t2) 옆으로 — 가상 top_level[to]=true. refreshDragPreview가 preview_rows에 투영.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    try session.refreshDragPreview(3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena.allocator());
+    try tab_ops.refreshDragPreview(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena.allocator());
     // 프리뷰 고스트(X)가 depth 0(그룹 밖 최상위)로 투영되는가 — 가상 top_level[]이 pass1 depth를 몰았는지.
     var preview_depth: u8 = 255;
     for (session.sidebar_preview_rows.items) |row| switch (row) {
@@ -20924,9 +19240,9 @@ test "SR5(e): 중첩 안 top_level — subgroup 뒤 top카드는 depth 0(부모 
     try std.testing.expectEqual(@as(usize, 4), tab_ops.groupSubtreeEnd(session, 2, null, null));
     // directCardCount: TOP이 (N) 배지에 안 세짐(top_level break — OR=min). A 직접=a1 1개.
     // topLevelGroupMarkerIndex: 중첩 subgroup B의 멤버 b1(index3)도 **최상위 A(0)**로 상향(gap 드롭이 부모 그룹 끝 기준).
-    try std.testing.expectEqual(@as(usize, 0), session.topLevelGroupMarkerIndex(3).?);
-    try std.testing.expectEqual(@as(usize, 0), session.topLevelGroupMarkerIndex(2).?); // 중첩 마커 B → 최상위 A
-    try std.testing.expect(session.topLevelGroupMarkerIndex(4) == null); // TOP 최상위 카드 → null
+    try std.testing.expectEqual(@as(usize, 0), tab_ops.topLevelGroupMarkerIndex(session, 3).?);
+    try std.testing.expectEqual(@as(usize, 0), tab_ops.topLevelGroupMarkerIndex(session, 2).?); // 중첩 마커 B → 최상위 A
+    try std.testing.expect(tab_ops.topLevelGroupMarkerIndex(session, 4) == null); // TOP 최상위 카드 → null
 }
 
 test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs 불변 (simulateDrop == moveTab)" {
@@ -20949,7 +19265,7 @@ test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
         // 핀 없음 → clamp 무영향, rotateMove(0→3): order [0,1,2,3] → [1,2,3,0]. 카드는 위치 3에 착지.
         try std.testing.expectEqualSlices(usize, &[_]usize{ 1, 2, 3, 0 }, vl.order);
         try std.testing.expectEqual(@as(usize, 3), vl.ghost_lo);
@@ -20986,7 +19302,7 @@ test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(3, .{ .card = .{ .target_tab = 0 } }, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 3, .{ .card = .{ .target_tab = 0 } }, arena.allocator());
         try std.testing.expectEqual(@as(usize, 2), vl.ghost_lo); // raw 0이 아니라 clamp된 2에 착지
         try std.testing.expectEqual(@as(usize, 3), vl.ghost_hi);
         try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3, 2 }, vl.order); // t3가 비고정 영역 시작(2)으로만
@@ -20998,7 +19314,7 @@ test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
         try std.testing.expectEqual(@as(usize, 1), vl.ghost_lo); // 고정 영역 끝(1)으로 clamp
     }
     try expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
@@ -21027,7 +19343,7 @@ test "SG8b: 그룹 통째 형제 이동 등가 (SG5-1, simulateDrop == tab_ops.m
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(0, .{ .group_sibling = .{ .insert_before = 4 } }, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 0, .{ .group_sibling = .{ .insert_before = 4 } }, arena.allocator());
         // Rest=[t2,t3,t4,t5], 블록 [0,2)=(t0,t1)을 rest_insert=4-2=2 앞에 → [t2,t3,t0,t1,t4,t5].
         try std.testing.expectEqualSlices(usize, &[_]usize{ 2, 3, 0, 1, 4, 5 }, vl.order);
         try std.testing.expectEqual(@as(usize, 2), vl.ghost_lo); // A 블록이 위치 2에 착지
@@ -21060,7 +19376,7 @@ test "SG8b: 중첩 넣기 등가 (SG5-4, simulateDrop == tab_ops.moveGroupNestin
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(0, .{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } }, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 0, .{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } }, arena.allocator());
         // 블록 [0,4)=(A,·,C,·)을 B(=[4,6)) 뒤로 → order [4,5,0,1,2,3]. A는 위치 2에서 시작.
         try std.testing.expectEqualSlices(usize, &[_]usize{ 4, 5, 0, 1, 2, 3 }, vl.order);
         try std.testing.expectEqual(@as(usize, 2), vl.ghost_lo);
@@ -21095,7 +19411,7 @@ test "SG8b: 형제 빼기 등가 — gap-clamp로 depth 얕아짐 (SG5-4 un-nest
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(3, .{ .group_sibling = .{ .insert_before = 1 } }, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 3, .{ .group_sibling = .{ .insert_before = 1 } }, arena.allocator());
         // Rest=[t0,t1,t2], 블록 [3,5)=(t3,t4)을 rest_insert=1(t1) 앞에 → [t0, t3,t4, t1,t2].
         try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 3, 4, 1, 2 }, vl.order);
         try std.testing.expectEqual(@as(usize, 1), vl.ghost_lo); // B 블록이 위치 1에 착지
@@ -21126,7 +19442,7 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const vl = try session.simulateDrop(0, .none, arena.allocator());
+        const vl = try tab_ops.simulateDrop(session, 0, .none, arena.allocator());
         try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, vl.order);
         try std.testing.expectEqual(vl.ghost_lo, vl.ghost_hi); // 고스트 없음
     }
@@ -21194,7 +19510,7 @@ test "SG8c: 카드를 접힌 그룹에 드롭 → preview 고스트 존재(원�
     defer arena.deinit();
     // plan: t0(index0)를 A 안(t2 자리 index2)으로 = 접힌 그룹 안 드롭.
     const plan = AppSession.DropPlan{ .card = .{ .target_tab = 2 } };
-    const vl = try session.simulateDrop(0, plan, arena.allocator());
+    const vl = try tab_ops.simulateDrop(session, 0, plan, arena.allocator());
 
     // (원본=커밋 레이아웃) 프리뷰 예외 없이 가상 order를 그대로 투영하면 t0가 접힘 게이트로 **사라진다**(라이브 확정 시 증상).
     session.projectRowsFrom(vl.order, vl.group_depth);
@@ -21202,7 +19518,7 @@ test "SG8c: 카드를 접힌 그룹에 드롭 → preview 고스트 존재(원�
     try std.testing.expect(sg8cFindHeader(session.sidebar_rows.items, 1).?.group_header.collapsed); // flip 없음(접힘 그대로)
 
     // (프리뷰) 고스트 강제 방출 + 헤더 flip + order-aware member_count.
-    try session.refreshDragPreview(0, plan, 0, arena.allocator());
+    try tab_ops.refreshDragPreview(session, 0, plan, 0, arena.allocator());
     const prows = session.sidebar_preview_rows.items;
     try std.testing.expectEqual(@as(?u8, 1), sg8cFindCardDepth(prows, 0)); // (a) 고스트 존재 + depth 정확(A 안=depth 1)
     const phdr = sg8cFindHeader(prows, 1).?.group_header;
@@ -21253,7 +19569,7 @@ test "SG8c: 펼친 그룹 nest 프리뷰 → subtree 고스트 상대 depth(A=2�
     defer arena.deinit();
     // A(m=0)를 B 헤더에 드롭 → B 자식으로 중첩(target_depth=B eff1+1=2, insert_before=tab_ops.groupSubtreeEnd(B)=6).
     const plan = AppSession.DropPlan{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } };
-    try session.refreshDragPreview(0, plan, 0, arena.allocator());
+    try tab_ops.refreshDragPreview(session, 0, plan, 0, arena.allocator());
     const prows = session.sidebar_preview_rows.items;
 
     // 상대 depth 유지: A(마커 tab0)=2(B 자식), C(마커 tab2)=3(A 자식). 헤더·카드 모두.
@@ -21300,7 +19616,7 @@ test "SG8c: none plan 프리뷰 → preview_rows == 원본 rows·ghost range 비
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    try session.refreshDragPreview(0, .none, 0, arena.allocator());
+    try tab_ops.refreshDragPreview(session, 0, .none, 0, arena.allocator());
     const prows = session.sidebar_preview_rows.items;
 
     // preview == 라이브(byte-identical) — 태그·핵심 필드.
@@ -22383,7 +20699,7 @@ test "GL2(a): toggleLocalPin — 멤버가 마커 직후로 float·그룹 연속
     session.app_window.active_tab = 3; // 활성 = t3(포인터 보존 검증용)
 
     // ── float: **마지막** 멤버 t3 로컬 pin → 마커 직후(index 1)로 stable float. 비-pin 멤버는 상대순서로 뒤에.
-    session.toggleLocalPin(t3);
+    tab_ops.toggleLocalPin(session, t3);
     try std.testing.expect(t3.local_pinned);
     try std.testing.expectEqual(t0, session.tabs.items[0]); // 마커 앵커(제자리)
     try std.testing.expectEqual(t3, session.tabs.items[1]); // ★ 로컬 pin 멤버 = 마커 직후
@@ -22393,7 +20709,7 @@ test "GL2(a): toggleLocalPin — 멤버가 마커 직후로 float·그룹 연속
     try std.testing.expectEqual(t3, session.tabs.items[session.app_window.active_tab]); // ★ 활성 *Tab 포인터 보존(인덱스 보정)
 
     // ── 재토글(off): 로컬 pin 해제. 전역 pinned는 직교(안 건드림) — 여전히 그룹 안(연속 유지).
-    session.toggleLocalPin(t3);
+    tab_ops.toggleLocalPin(session, t3);
     try std.testing.expect(!t3.local_pinned);
     try std.testing.expect(!t3.pinned); // ★ 전역 pin과 직교
     try std.testing.expectEqual(@as(usize, 4), tab_ops.groupSubtreeEnd(session, 0, null, null));
@@ -22402,14 +20718,14 @@ test "GL2(a): toggleLocalPin — 멤버가 마커 직후로 float·그룹 연속
     var snap: [4]*Tab = undefined;
     for (session.tabs.items, 0..) |t, i| snap[i] = t;
     const adj = session.tabs.items[1]; // 현재 마커 직후 멤버
-    session.toggleLocalPin(adj); // pin → 이미 마커 직후라 float no-op
-    session.toggleLocalPin(adj); // unpin → no-op
+    tab_ops.toggleLocalPin(session, adj); // pin → 이미 마커 직후라 float no-op
+    tab_ops.toggleLocalPin(session, adj); // unpin → no-op
     try std.testing.expect(!adj.local_pinned);
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(snap[i], t); // ★ 원위치(byte-identical)
 
     // ── 최상위 카드 no-op: ungroup 후 그룹 미소속 카드는 enclosingGroupMarkerIndex=null → toggleLocalPin 무동작.
     tab_ops.ungroupTab(session, t0); // 전부 최상위
-    session.toggleLocalPin(t1); // 최상위 → no-op(플래그도 안 세팅)
+    tab_ops.toggleLocalPin(session, t1); // 최상위 → no-op(플래그도 안 세팅)
     try std.testing.expect(!t1.local_pinned);
 }
 
@@ -22436,17 +20752,17 @@ test "GL2(c): 드래그 clamp — 로컬 pin 멤버가 subtree-로컬 프리픽�
     session.floatLocalPinsAllGroups(); // canonical: t1·t2 = 프리픽스 [1,3)(이미 그 자리라 no-op)
 
     // 프리픽스 경계 단위 단언: 로컬 pin leaf = [mi+1, mi+count] inclusive, 비-pin/마커 = null(clamp 무변경).
-    try std.testing.expectEqual(@as(usize, 1), session.localPinPrefixBounds(1).?.lo);
-    try std.testing.expectEqual(@as(usize, 2), session.localPinPrefixBounds(1).?.hi); // 프리픽스 [1,3) → 인덱스 1·2
-    try std.testing.expect(session.localPinPrefixBounds(3) == null); // ★ 비-로컬-pin 멤버 → clamp 무변경
-    try std.testing.expect(session.localPinPrefixBounds(0) == null); // 마커 → null
+    try std.testing.expectEqual(@as(usize, 1), tab_ops.localPinPrefixBounds(session, 1).?.lo);
+    try std.testing.expectEqual(@as(usize, 2), tab_ops.localPinPrefixBounds(session, 1).?.hi); // 프리픽스 [1,3) → 인덱스 1·2
+    try std.testing.expect(tab_ops.localPinPrefixBounds(session, 3) == null); // ★ 비-로컬-pin 멤버 → clamp 무변경
+    try std.testing.expect(tab_ops.localPinPrefixBounds(session, 0) == null); // 마커 → null
 
     // ── 프리뷰(simulateDrop): 로컬 pin t1(index 1)을 프리픽스 **밖(index 4)** 으로 드래그 → 프리픽스 끝(index 2)에 clamp.
     var before: [5]*Tab = undefined;
     for (session.tabs.items, 0..) |t, i| before[i] = t;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const vl = try session.simulateDrop(1, .{ .card = .{ .target_tab = 4 } }, arena.allocator());
+    const vl = try tab_ops.simulateDrop(session, 1, .{ .card = .{ .target_tab = 4 } }, arena.allocator());
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변(SG8)
     try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 2, 1, 3, 4 }, vl.order); // ★ t1이 프리픽스 밖 못 가고 index 2에 clamp
 
@@ -22464,7 +20780,7 @@ test "GL2(c): 드래그 clamp — 로컬 pin 멤버가 subtree-로컬 프리픽�
     for (session.tabs.items, 0..) |t, i| before2[i] = t; // 현재 [t0,t2,t1,t3,t4]
     var arena2 = std.heap.ArenaAllocator.init(allocator);
     defer arena2.deinit();
-    const vl2 = try session.simulateDrop(3, .{ .card = .{ .target_tab = 4 } }, arena2.allocator());
+    const vl2 = try tab_ops.simulateDrop(session, 3, .{ .card = .{ .target_tab = 4 } }, arena2.allocator());
     try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2, 4, 3 }, vl2.order); // clamp 무적용 — t3↔t4 자유 swap
     _ = tab_ops.moveTab(session, 3, 4);
     session.normalizePinnedFromGroups();
@@ -22493,7 +20809,7 @@ test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 
     const t3 = session.tabs.items[3];
 
     tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커), t2, t3, t4] — t0는 최상위 카드
-    session.toggleLocalPin(t3); // t3 로컬 pin → 마커 t1 직후(그룹 내 상단)로 float
+    tab_ops.toggleLocalPin(session, t3); // t3 로컬 pin → 마커 t1 직후(그룹 내 상단)로 float
     try std.testing.expectEqual(t3, session.tabs.items[2]); // ★ float: 마커(index1) 직후 index2로
 
     tab_ops.recomputeVisibleTabs(session);
@@ -22560,8 +20876,8 @@ test "GL3(a2): 공존 렌더 — 그룹째 고정 그룹 안 로컬 pin 멤버 =
     const t3 = session.tabs.items[3];
 
     tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커), t2, t3, t4]
-    session.toggleLocalPin(t3); // t3 로컬 pin → 마커 직후
-    session.toggleGroupPin(t1); // A를 그룹째 고정(전역 프리픽스 안착 — keystone §13.1로 subtree 내 float 순서 보존)
+    tab_ops.toggleLocalPin(session, t3); // t3 로컬 pin → 마커 직후
+    tab_ops.toggleGroupPin(session, t1); // A를 그룹째 고정(전역 프리픽스 안착 — keystone §13.1로 subtree 내 float 순서 보존)
     // t3은 여전히 마커 직후(그룹 내 상단)이고 local_pinned 유지(그룹째 고정과 직교).
     try std.testing.expect(t3.local_pinned);
     try std.testing.expect(t1.pinned); // 그룹째 고정 = 마커 pinned
@@ -22610,7 +20926,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
         tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커=idx1), t2, t3, t4]
-        session.toggleLocalPin(t3); // t3 → idx2(마커 직후로 float)
+        tab_ops.toggleLocalPin(session, t3); // t3 → idx2(마커 직후로 float)
         try std.testing.expectEqual(t3, session.tabs.items[2]);
         tab_ops.recomputeVisibleTabs(session);
         const rows = session.sidebar_rows.items;
@@ -22667,7 +20983,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         // 로컬 pin t2(origin idx2)를 t4(idx4) 위로 드래그 → 프리픽스 끝(idx3)에 clamp(프리픽스 밖 못 감).
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        try session.refreshDragPreview(2, .{ .card = .{ .target_tab = 4 } }, 0, arena.allocator());
+        try tab_ops.refreshDragPreview(session, 2, .{ .card = .{ .target_tab = 4 } }, 0, arena.allocator());
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
@@ -22719,7 +21035,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         // 그룹 A(마커 idx1)를 **최상위(insert_before=0)** 로 통째 이동 — 마커 카드 드래그(SG5)와 같은 코어.
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        try session.refreshDragPreview(1, .{ .group_sibling = .{ .insert_before = 0 } }, 0, arena.allocator());
+        try tab_ops.refreshDragPreview(session, 1, .{ .group_sibling = .{ .insert_before = 0 } }, 0, arena.allocator());
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
@@ -22775,7 +21091,7 @@ test "GL3(b1): 위생 ungroup — 로컬 pin 멤버가 그룹 해제로 top-leve
     const t0 = session.tabs.items[0];
     const t1 = session.tabs.items[1];
     tab_ops.createGroupAbsorbForTab(session, t0); // A = [t0(마커), t1, t2]
-    session.toggleLocalPin(t1);
+    tab_ops.toggleLocalPin(session, t1);
     try std.testing.expect(t1.local_pinned);
     tab_ops.ungroupTab(session, t1); // A 해제 → t0·t1·t2 전부 top-level
     try std.testing.expect(!t1.local_pinned); // ★ 위생: top-level 전이 → 클리어
@@ -22800,8 +21116,8 @@ test "GL3(b2): 위생 removeFromGroup — 빠진 로컬 pin 멤버만 클리어�
     const t1 = session.tabs.items[1];
     const t2 = session.tabs.items[2];
     tab_ops.createGroupAbsorbForTab(session, t0); // A = [t0(마커), t1, t2]
-    session.toggleLocalPin(t1);
-    session.toggleLocalPin(t2); // t1·t2 둘 다 로컬 pin
+    tab_ops.toggleLocalPin(session, t1);
+    tab_ops.toggleLocalPin(session, t2); // t1·t2 둘 다 로컬 pin
     try std.testing.expect(t1.local_pinned and t2.local_pinned);
     tab_ops.removeFromGroupForTab(session, t1); // t1만 빼기 → top-level
     try std.testing.expect(!t1.local_pinned); // ★ 빠진 카드 = 클리어
@@ -22829,7 +21145,7 @@ test "GL3(b3): 위생 드래그 out — commitSidebarDragPreview 스윕이 top-l
     const c0 = session.tabs.items[0];
     tab_ops.createGroupAbsorbForTab(session, session.tabs.items[2]); // A = [t2(마커), t3] — c0·c1 최상위 카드
     const t3 = session.tabs.items[3];
-    session.toggleLocalPin(t3); // 진짜 그룹 멤버 로컬 pin(보존 대상)
+    tab_ops.toggleLocalPin(session, t3); // 진짜 그룹 멤버 로컬 pin(보존 대상)
     c0.local_pinned = true; // stale: top-level 카드에 남은 로컬 pin(전이 잔재 시뮬레이션)
     // c0(top-level, origin=0)을 c1(index1)로 드래그 = top-level↔top-level. commit이 위생 스윕으로 c0 stale 클리어.
     session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = .{ .card = .{ .target_tab = 1 } }, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
@@ -22855,8 +21171,8 @@ test "GL3(b4): 위생 create group — 로컬 pin 멤버로 그룹 생성 시 �
     tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[Gm=t0, m1=t1, m2=t2]
     const m1 = session.tabs.items[1];
     const m2 = session.tabs.items[2];
-    session.toggleLocalPin(m1); // m1 로컬 pin(leaf 멤버 — float은 이미 마커 직후라 제자리)
-    session.toggleLocalPin(m2); // m2 로컬 pin
+    tab_ops.toggleLocalPin(session, m1); // m1 로컬 pin(leaf 멤버 — float은 이미 마커 직후라 제자리)
+    tab_ops.toggleLocalPin(session, m2); // m2 로컬 pin
     try std.testing.expect(m1.local_pinned and m2.local_pinned); // 사전: 둘 다 leaf 로컬 pin
 
     // m1로 (중첩) 그룹 생성 → m1은 마커(leaf 아님), break_next가 다음 카드 m2에 top_level write(그룹 밖 leaf 아님).
@@ -22889,8 +21205,8 @@ test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위
     t3.local_pinned = true;
     session.floatLocalPinsAllGroups(); // canonical: t2·t3 = 프리픽스 [2,4)(이미 그 자리라 no-op)
     // 프리픽스 경계: 로컬 pin leaf t2(index2) → [mi+1, mi+count] = [2,3].
-    try std.testing.expectEqual(@as(usize, 2), session.localPinPrefixBounds(2).?.lo);
-    try std.testing.expectEqual(@as(usize, 3), session.localPinPrefixBounds(2).?.hi);
+    try std.testing.expectEqual(@as(usize, 2), tab_ops.localPinPrefixBounds(session, 2).?.lo);
+    try std.testing.expectEqual(@as(usize, 3), tab_ops.localPinPrefixBounds(session, 2).?.hi);
 
     // ── 마커 자기 카드(index1) 위로 t2(origin=2, 로컬 pin) 드래그 → 프리픽스 시작(index2)에 clamp(마커 앞 eject 금지).
     var before: [5]*Tab = undefined;
@@ -22898,7 +21214,7 @@ test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const plan: AppSession.DropPlan = .{ .card = .{ .target_tab = 1 } }; // 마커 카드 = index1
-    const vl = try session.simulateDrop(2, plan, arena.allocator());
+    const vl = try tab_ops.simulateDrop(session, 2, plan, arena.allocator());
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변(SG8)
     try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2, 3, 4 }, vl.order); // 프리뷰: t2가 마커 앞 못 가고 index2 유지
 
@@ -22941,14 +21257,14 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
 
     tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커 d1), t2, t3, t4, t5] — t0는 **비고정 최상위 카드**(전역 partition의 대조)
     // 두 멤버(t4·t5)를 로컬 pin → 마커 직후로 float(상대순서 t4,t5 유지). 그룹 안 상단 프리픽스 [1,3) = t4·t5.
-    session.toggleLocalPin(t4);
-    session.toggleLocalPin(t5);
+    tab_ops.toggleLocalPin(session, t4);
+    tab_ops.toggleLocalPin(session, t5);
     try std.testing.expectEqual(t4, session.tabs.items[2]); // t4 = 마커 직후
     try std.testing.expectEqual(t5, session.tabs.items[3]); // t5 = 그 다음(로컬 float 상대순서)
 
     // ── ★ keystone: A를 그룹째 고정. stablePartitionPinned가 pinned 블록[t1,t4,t5,t2,t3]을 프리픽스로 옮기고 t0(비고정)를
     //    뒤로 민다. 블록 **내부 순서 보존**이라 t4·t5가 여전히 마커 직후. float((3)단계)는 이미 그 자리라 no-op.
-    session.toggleGroupPin(t1);
+    tab_ops.toggleGroupPin(session, t1);
     try std.testing.expectEqual(t1, session.tabs.items[0]); // 그룹 마커 = 전역 프리픽스 선두(그룹이 앞으로 이동)
     try std.testing.expectEqual(t4, session.tabs.items[1]); // ★ 로컬 pin float 보존(마커 직후) — keystone
     try std.testing.expectEqual(t5, session.tabs.items[2]); // ★ 로컬 pin float 상대순서 보존
@@ -23001,7 +21317,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     //    시맨틱). 로컬 pin은 그룹째 고정과 직교라 **고정 켜는 동안엔 보존**(위 keystone)하되, **끄는 순간** 그룹을 깨끗한
     //    멤버 상태로 되돌려 자식이 개별 📌로 남지 않게 한다. self.tabs 위치는 float된 자리(마커 직후)에 그대로 남되(재배열
     //    안 함) local_pinned=false·📌 억제로 "그냥 그룹 멤버"가 된다.
-    session.toggleGroupPin(t1);
+    tab_ops.toggleGroupPin(session, t1);
     try std.testing.expect(!t1.pinned); // 그룹째 고정 해제
     try std.testing.expect(!t4.pinned and !t5.pinned); // 멤버 파생 캐시도 해제
     try std.testing.expect(!t4.local_pinned and !t5.local_pinned); // ★ 그룹 해제 = 로컬 pin 리셋(개별 📌 제거, 버그2)
@@ -23132,7 +21448,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
         tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커), t2, t3]
-        session.toggleLocalPin(t3); // t3 → 마커 직후(index2)
+        tab_ops.toggleLocalPin(session, t3); // t3 → 마커 직후(index2)
         try std.testing.expectEqual(t3, session.tabs.items[2]);
         tab_ops.setGroupColorForTab(session, t3, 0x4A7BC4); // 색은 enclosing 마커(t1)에 저장
         try std.testing.expectEqual(@as(u32, 0x4A7BC4), t1.group_color); // ★ 색 얹힘
@@ -23150,7 +21466,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
         tab_ops.createGroupAbsorbForTab(session, t1);
-        session.toggleLocalPin(t3);
+        tab_ops.toggleLocalPin(session, t3);
         var snap: [4]*Tab = undefined;
         for (session.tabs.items, 0..) |t, i| snap[i] = t;
         tab_ops.startRenameGroupForTab(session, t3); // 그룹 A 이름 인라인 편집 시작(마커 t1)
@@ -23170,7 +21486,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
         tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커), t2, t3]
-        session.toggleLocalPin(t3); // t3 → 마커 직후(index2)
+        tab_ops.toggleLocalPin(session, t3); // t3 → 마커 직후(index2)
         t3.custom_name = try allocator.dupe(u8, "findlp"); // 검색 매치용 이름(session.deinit이 free)
         session.sidebar_search_active = true;
         try session.sidebar_search_input.query.appendSlice(allocator, "findlp");
@@ -23208,7 +21524,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         const t1 = session.tabs.items[1];
         const t2 = session.tabs.items[2];
         tab_ops.createGroupAbsorbForTab(session, t1); // A = [t1(마커), t2] — t0 최상위(분리 소스로 쓴다)
-        session.toggleLocalPin(t2); // t2 로컬 pin → 마커 직후(index2, 이미 그 자리)
+        tab_ops.toggleLocalPin(session, t2); // t2 로컬 pin → 마커 직후(index2, 이미 그 자리)
         try std.testing.expect(t2.local_pinned);
         // 최상위 t0(index0)을 활성으로 만들고 split → 2 pane → 그 새 pane을 새 워크스페이스로 분리.
         session.app_window.active_tab = 0;
@@ -23346,7 +21662,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         defer session.deinit();
         inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1,t2]
-        session.toggleGroupPin(session.tabs.items[0]); // G 고정 → 프리픽스
+        tab_ops.toggleGroupPin(session, session.tabs.items[0]); // G 고정 → 프리픽스
         const y = try tab_ops.newTab(session); // 새 top카드 — 고정 프리픽스 뒤(비고정 리전)
         try std.testing.expect(tab_ops.cardPinRole(session, y) == .individual); // 비고정 리전 top카드(고정 그룹 뒤) = 개별
         rightClickPin(session, y); // pin → 고정 그룹 **앞**으로(흡수 없음)
@@ -23408,10 +21724,10 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
         inline for (0..2) |_| _ = try tab_ops.newTab(session);
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1,t2]
         const g = session.tabs.items[0];
-        session.toggleGroupPin(g);
+        tab_ops.toggleGroupPin(session, g);
         try std.testing.expect(g.pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned); // 멤버 pinned=1
         try std.testing.expectEqual(@as(usize, 0), countCardPins(session)); // 카드 📌 0(멤버 억제·헤더 인디케이터가 표시)
-        session.toggleGroupPin(g); // 해제
+        tab_ops.toggleGroupPin(session, g); // 해제
         try std.testing.expect(!g.pinned and !session.tabs.items[1].pinned and !session.tabs.items[2].pinned); // 멤버 pinned=0
         try std.testing.expect(!session.tabs.items[1].local_pinned and !session.tabs.items[2].local_pinned); // local_pinned 오염 없음
         try std.testing.expectEqual(@as(usize, 0), countCardPins(session)); // ★ 해제 후 카드 📌 0(그냥 그룹 멤버)
@@ -23429,12 +21745,12 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1,t2]
         const g = session.tabs.items[0];
         const member = session.tabs.items[2];
-        session.toggleLocalPin(member); // 멤버 로컬 pin(📌·마커 직후 float)
+        tab_ops.toggleLocalPin(session, member); // 멤버 로컬 pin(📌·마커 직후 float)
         try std.testing.expect(member.local_pinned);
         try std.testing.expectEqual(@as(usize, 1), countCardPins(session)); // 로컬 pin 카드 1개 📌(비고정 그룹)
-        session.toggleGroupPin(g); // 그룹째 고정(로컬 pin은 켜는 동안 보존 — keystone)
+        tab_ops.toggleGroupPin(session, g); // 그룹째 고정(로컬 pin은 켜는 동안 보존 — keystone)
         try std.testing.expect(member.local_pinned); // 고정 중 보존
-        session.toggleGroupPin(g); // ★ 해제 = 그룹 리셋
+        tab_ops.toggleGroupPin(session, g); // ★ 해제 = 그룹 리셋
         try std.testing.expect(!member.pinned); // 파생 pin 해제
         try std.testing.expect(!member.local_pinned); // ★ 로컬 pin도 클리어(버그2 fix — 개별 📌 잔류 방지)
         try std.testing.expectEqual(@as(usize, 0), countCardPins(session)); // ★ 해제 후 카드 📌 0(그냥 그룹 멤버)
@@ -23455,9 +21771,9 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     const top = session.tabs.items[0];
     const marker = session.tabs.items[1];
     const lp = session.tabs.items[3];
-    session.toggleLocalPin(lp); // A 멤버 로컬 pin
+    tab_ops.toggleLocalPin(session, lp); // A 멤버 로컬 pin
     rightClickPin(session, top); // t0 개별 전역 pin(.individual)
-    session.toggleGroupPin(marker); // A 그룹째 고정
+    tab_ops.toggleGroupPin(session, marker); // A 그룹째 고정
     // 세 축 독립: 개별 pin(top.pinned)·그룹째(marker.pinned)·로컬(lp.local_pinned) 공존.
     try std.testing.expect(top.pinned and top.group_start == null); // 개별 최상위
     try std.testing.expect(marker.pinned); // 그룹째 고정 권위
@@ -23652,7 +21968,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     const raw_uncomp = chrome.components.sidebar.dragTargetSlot(y_tail, session.sidebar_header_height_px, session.sidebar_rows.items, sidebar_ops.sidebarMetrics(session), session.sidebar_scroll_offset_px);
     try std.testing.expect(sidebar_ops.sidebarCardDropAfterGroup(session, raw_uncomp, 0, y_tail) == null); // 보정 없으면 탈출 안 함(흡수)
     // 새 경로(cardDropPlan, 프리뷰 시프트 보정) → top_level 탈출.
-    const plan_tail = session.cardDropPlan(0, y_tail);
+    const plan_tail = sidebar_ops.cardDropPlan(session, 0, y_tail);
     switch (plan_tail) {
         .card => |c| {
             try std.testing.expect(c.top_level); // ★ 흡수 아님 — 그룹 밖 top_level
@@ -23697,7 +22013,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     s2.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 0 } };
     const a0_row = cardRowOf(s2, 1); // a0(첫 멤버) row
     const y_head = sidebarDragScreenY(s2, a0_row, 0.2); // 첫 멤버 상단 = 그룹 안이지만 고정 소스라 흡수 금지
-    const plan_head = s2.cardDropPlan(0, y_head);
+    const plan_head = sidebar_ops.cardDropPlan(s2, 0, y_head);
     switch (plan_head) {
         .card => |c| try std.testing.expect(c.top_level), // ★ 고정 소스 = 그룹 안 드롭이어도 흡수 금지(top_level 강제)
         else => return error.TestUnexpectedResult,
@@ -23747,7 +22063,7 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
     const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
     // ① mouseMoved 산출(cardDropPlan): 고정 소스라 흡수 금지(top_level=true 강제) + **[2] 그룹 안 착지 금지** — target을
     // 그룹 A subtree 밖 경계로 clamp. origin=0(그룹 위)이라 그룹 뒤 끝(ge-1=3)으로 착지(한복판 2가 아니라 경계).
-    const plan_mid = session.cardDropPlan(0, y_mid);
+    const plan_mid = sidebar_ops.cardDropPlan(session, 0, y_mid);
     switch (plan_mid) {
         .card => |c| {
             try std.testing.expectEqual(@as(usize, 3), c.target_tab); // ★ [2] 그룹 subtree 밖 경계(뒤 끝)로 clamp(한복판 2 아님)
@@ -23758,7 +22074,7 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
     // ② refreshDragPreview가 그 plan을 sidebar_drag_preview.plan에 **저장**(실 핸들러 mouseMoved의 저장 지점).
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
-    try session.refreshDragPreview(0, plan_mid, y_mid, arena_state.allocator());
+    try tab_ops.refreshDragPreview(session, 0, plan_mid, y_mid, arena_state.allocator());
     try std.testing.expect(session.sidebar_drag_preview != null);
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .card);
     try std.testing.expect(session.sidebar_drag_preview.?.plan.card.top_level); // ★ 저장된 plan에 top_level=true 온전
@@ -23806,7 +22122,7 @@ test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유
     session.pointer_gesture_owner = .{ .sidebar_tab = .{ .index = 0 } };
     const a1_row = cardRowOf(session, 2);
     const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
-    const plan_mid = session.cardDropPlan(0, y_mid);
+    const plan_mid = sidebar_ops.cardDropPlan(session, 0, y_mid);
     switch (plan_mid) {
         .card => |c| {
             try std.testing.expectEqual(@as(usize, 2), c.target_tab);
@@ -23817,7 +22133,7 @@ test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유
     // 전체 경로 확정 후에도 흡수(그룹 A 멤버).
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
-    try session.refreshDragPreview(0, plan_mid, y_mid, arena_state.allocator());
+    try tab_ops.refreshDragPreview(session, 0, plan_mid, y_mid, arena_state.allocator());
     sidebar_ops.commitSidebarDragPreview(session);
     try std.testing.expect(!session.tabs.items[2].top_level); // 멤버(흡수)
     try std.testing.expect(tab_ops.enclosingGroupMarkerIndex(session, 2) != null); // ★ 그룹 A에 흡수됨(비고정 능력 보존)
@@ -23852,10 +22168,10 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
             .card => {},
         };
         // groupNestPlan 직접: 드래그 그룹 마커(0)가 고정이라 nest 불가 → null(형제 폴백).
-        try std.testing.expect(session.groupNestPlan(b_header_row, 0) == null); // ★ 고정 그룹 nest 금지
+        try std.testing.expect(tab_ops.groupNestPlan(session, b_header_row, 0) == null); // ★ 고정 그룹 nest 금지
         // 전체 프레임(Cmd 눌림): nest 시도해도 sibling으로 폴백.
         const y_b = sidebarDragScreenY(session, b_header_row, 0.5);
-        session.groupDragPreviewFrame(0, y_b, true); // cmd_held=true
+        sidebar_ops.groupDragPreviewFrame(session, 0, y_b, true); // cmd_held=true
         try std.testing.expect(session.sidebar_drag_preview != null);
         try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // ★ Cmd여도 sibling(중첩 아님)
         sidebar_ops.clearSidebarDragPreview(session);
@@ -23884,9 +22200,9 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
             },
             .card => {},
         };
-        try std.testing.expect(session.groupNestPlan(b_header_row, 0) != null); // 비고정 = nest 가능(기존 동작)
+        try std.testing.expect(tab_ops.groupNestPlan(session, b_header_row, 0) != null); // 비고정 = nest 가능(기존 동작)
         const y_b = sidebarDragScreenY(session, b_header_row, 0.5);
-        session.groupDragPreviewFrame(0, y_b, true); // cmd_held=true
+        sidebar_ops.groupDragPreviewFrame(session, 0, y_b, true); // cmd_held=true
         try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_nest); // ★ 비고정 Cmd = 중첩(회귀 0)
         sidebar_ops.clearSidebarDragPreview(session);
     }
@@ -23923,10 +22239,10 @@ test "SR-PIN4: 고정 탭을 비고정 리전 위치로 드래그 → 고정 리
     // X(고정)를 u2(비고정, position 2) 위로 드래그. target=2(비고정 리전)여도 clampMoveToGroup이 고정 리전 끝(1)로 가둔다.
     const u2_row = cardRowOf(session, 2);
     const y_u2 = sidebarDragScreenY(session, u2_row, 0.5);
-    const plan = session.cardDropPlan(0, y_u2);
+    const plan = sidebar_ops.cardDropPlan(session, 0, y_u2);
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
-    try session.refreshDragPreview(0, plan, y_u2, arena_state.allocator());
+    try tab_ops.refreshDragPreview(session, 0, plan, y_u2, arena_state.allocator());
     sidebar_ops.commitSidebarDragPreview(session);
     // X는 고정 리전 끝(position 1)까지만 — 비고정(position 2)으로 못 넘어간다. u2는 여전히 position 2.
     try std.testing.expectEqual(x_ptr, session.tabs.items[1]); // ★ X가 고정 리전 끝(1)로 clamp
@@ -23984,7 +22300,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const insert_before = tab_ops.groupSubtreeEnd(session, 2, null, null);
-        try session.refreshDragPreview(0, .{ .group_sibling = .{ .insert_before = insert_before } }, 0, arena_state.allocator());
+        try tab_ops.refreshDragPreview(session, 0, .{ .group_sibling = .{ .insert_before = insert_before } }, 0, arena_state.allocator());
         var a_header_rows: usize = 0;
         var a_card_rows: usize = 0;
         var a_header_collapsed = false;
@@ -24024,7 +22340,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         defer arena_state.deinit();
         // X(t2)를 접힌 B 끝으로 드롭(카드 드래그, dragged_collapsed=false).
         const target = tab_ops.groupSubtreeEnd(session, 0, null, null) - 1; // 접힌 B subtree 끝
-        try session.refreshDragPreview(2, .{ .card = .{ .target_tab = target } }, 0, arena_state.allocator());
+        try tab_ops.refreshDragPreview(session, 2, .{ .card = .{ .target_tab = target } }, 0, arena_state.allocator());
         var x_visible = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
             .agent_toggle, .agent => {},
@@ -24319,7 +22635,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
         },
         .card => {},
     };
-    const plan = session.groupNestPlan(b_header_row, 0).?; // B 헤더 → 중첩 계획
+    const plan = tab_ops.groupNestPlan(session, b_header_row, 0).?; // B 헤더 → 중첩 계획
     try std.testing.expectEqual(@as(u8, 2), plan.target_depth); // B eff1 + 1
     const r = tab_ops.moveGroupNesting(session, 0, plan.insert_before, plan.target_depth);
     try std.testing.expect(r.changed);
@@ -24374,7 +22690,7 @@ test "SG5-4: 중첩 그룹을 최상위 카드에 드롭 → 빼기(depth 1) (ta
 
     // ── 드래그: B(마커 index3)를 최상위 카드 t0(row0)에 드롭 → 빼기(최상위 depth1로). 카드 드롭이라 형제 경로.
     tab_ops.recomputeVisibleTabs(session); // [c t0(0), hA(1), c t1(2), c t2(3), hB(4), c t3(5), c t4(6)]
-    try std.testing.expect(session.groupNestPlan(0, 3) == null); // row0=카드 → 중첩 아님(형제 경로)
+    try std.testing.expect(tab_ops.groupNestPlan(session, 0, 3) == null); // row0=카드 → 중첩 아님(형제 경로)
     const boundary = sidebar_ops.sidebarGroupDropBoundary(session, 0, 3).?; // 최상위 카드 → 첫 그룹 앞
     const r = tab_ops.moveGroupSibling(session, 3, boundary);
     try std.testing.expect(r.changed);
@@ -25998,7 +24314,7 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     web_ops.handleAddrEditKey(&session, .{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
     try std.testing.expectEqualStrings("", session.addr_field.text.items); // 잘려서 비었음
     try std.testing.expect(session.addr_field.selection == null);
-    try std.testing.expectEqualStrings("hello", session.pendingClipboard()); // 잘라낸 바이트가 클립보드로
+    try std.testing.expectEqualStrings("hello", term_ops.pendingClipboard(&session)); // 잘라낸 바이트가 클립보드로
 
     // ⌘X 선택 없으면 무동작(클립보드 큐 안 채움).
     try session.addr_field.setText(std.testing.allocator, "abc");
@@ -32270,14 +30586,14 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try std.testing.expectEqual(FileTreeRootOutcome.picker_requested, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
     try std.testing.expectEqual(FileTreeRootOperation.none, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(&.{}); // AppKit cancel
+    file_panel_ops.provideFileTreeRootPick(session, &.{}); // AppKit cancel
     try std.testing.expectEqual(FileTreeRootOutcome.picker_canceled, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 
     file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick("relative");
+    file_panel_ops.provideFileTreeRootPick(session, "relative");
     try std.testing.expectEqual(FileTreeRootOutcome.invalid_path, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
@@ -32429,7 +30745,7 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
     const outside = try std.fs.path.join(allocator, &.{ tmp_root, "outside.md" });
     defer allocator.free(outside);
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(outside));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, outside));
     const entry = file_panel_ops.fileEntryForPath(session, outside).?;
     entry.dirty = true;
     entry.external_change = true;
@@ -32438,7 +30754,7 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
 
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(root_a);
+    file_panel_ops.provideFileTreeRootPick(session, root_a);
     try testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
@@ -32446,14 +30762,14 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
 
     file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(root_b);
+    file_panel_ops.provideFileTreeRootPick(session, root_b);
     try testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_add, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 2), session.file_tree.rootCount());
 
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(root_c);
+    file_panel_ops.provideFileTreeRootPick(session, root_c);
     try testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
@@ -32462,7 +30778,7 @@ test "file tree root picker replaces adds repeats and rejects stale completion w
     // A completion issued against C must not publish after an intervening root generation change.
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(root_a);
+    file_panel_ops.provideFileTreeRootPick(session, root_a);
     try session.file_tree.replaceExplicitRoots(&.{root_b});
     try testWaitForFileTreeRootCompletion(session);
     try std.testing.expectEqual(FileTreeRootOutcome.stale_generation, file_panel_ops.fileTreeRootOutcome(session));
@@ -32509,7 +30825,7 @@ test "file tree root validation completion projects live dock open close state a
     const live_path = try std.fs.path.join(allocator, &.{ live_parent, "live.md" });
     defer allocator.free(live_path);
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(closed_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, closed_path));
     const closed_surface = file_panel_ops.fileEntryForPath(session, closed_path).?.surface_id;
     // Keep the namespace explicit so opening an outside file during validation does not itself change
     // root_generation and turn this freshness case into the separate stale-generation case.
@@ -32517,11 +30833,11 @@ test "file tree root validation completion projects live dock open close state a
     const validation_generation = session.file_tree.rootGeneration();
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(selected_root);
+    file_panel_ops.provideFileTreeRootPick(session, selected_root);
     try std.testing.expect(session.file_tree_root_validation != null);
 
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, closed_surface));
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(live_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, live_path));
     try std.testing.expectEqual(validation_generation, session.file_tree.rootGeneration());
     try testWaitForFileTreeRootCompletion(session);
 
@@ -32576,7 +30892,7 @@ test "file tree retained first scan is published but stale namespace row activat
 
     file_panel_ops.requestFileTreeRootPick(session, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(selected);
+    file_panel_ops.provideFileTreeRootPick(session, selected);
 
     var attempts: usize = 0;
     while ((session.file_tree_root_validation == null or session.file_tree_root_validation.?.round == 0) and attempts < 2_000) : (attempts += 1) {
@@ -32655,8 +30971,8 @@ test "file tree markdown activation pins first hydration identity across leaf re
 
     try tmp.dir.rename("root/doc.md", tmp.dir, "root/moved.md", session.io);
     try tmp.dir.writeFile(session.io, .{ .sub_path = "root/doc.md", .data = "# replacement" });
-    const epoch = try session.beginFilePanelDocument(entry.surface_id, 1);
-    try std.testing.expectError(error.NotFound, session.readFilePanel(allocator, entry.surface_id, epoch));
+    const epoch = try file_panel_ops.beginFilePanelDocument(session, entry.surface_id, 1);
+    try std.testing.expectError(error.NotFound, file_panel_ops.readFilePanel(session, allocator, entry.surface_id, epoch));
     try std.testing.expect(entry.initial_file_identity_pending);
 }
 
@@ -32705,7 +31021,7 @@ test "pending file tree root validation rejects merge and workspace restore befo
 
     file_panel_ops.requestFileTreeRootPick(src, .replace);
     try std.testing.expectEqual(FileTreeRootOperation.replace, src.takeFileTreeRootPickRequest());
-    src.provideFileTreeRootPick(selected_root);
+    file_panel_ops.provideFileTreeRootPick(src, selected_root);
     try std.testing.expect(src.file_tree_root_validation != null);
 
     var moved_buf: [16]u64 = undefined;
@@ -32759,7 +31075,7 @@ test "file tree header and populated blank left click are inert while right clic
     session.chrome_host.context_menu.selected = 1;
     settings_ops.acceptContextMenu(session);
     try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
-    session.provideFileTreeRootPick(&.{});
+    file_panel_ops.provideFileTreeRootPick(session, &.{});
 
     session.mouse(1, header_x, blank_y, 2, 0);
     try std.testing.expect(session.file_tree_background_menu);
@@ -34011,7 +32327,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(file_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, file_path));
     const sid = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
     try std.testing.expect(dock_ops.dockVisible(session)); // recent/project tree content는 남아 있다.
@@ -34164,7 +32480,7 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
 
     // 비동기 dirty 확인 뒤 discard해도 event surface provenance가 남아 정확한 successor로 native focus를 넘긴다.
     const sync = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
     session.dispatchChromeAction(.confirm_alternate);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
@@ -34190,12 +32506,12 @@ test "close_focused uses the actual Metal or WebView key source across a stale o
     session.fileEntryAt(1).?.dirty = true;
     try std.testing.expect(web_ops.dispatchWebAppAction(session, save_sid, .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }));
     const save_sync = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(save_sid, .{ .dirty = true, .revision = 2, .request_id = save_sync.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, save_sid, .{ .dirty = true, .revision = 2, .request_id = save_sync.request_id });
     session.dispatchChromeAction(.confirm_accept);
-    const save_action = session.takeFilePanelSaveCloseAction().?;
-    try session.reportFilePanelDirty(save_sid, .{ .dirty = false, .revision = 2 });
+    const save_action = file_panel_ops.takeFilePanelSaveCloseAction(session).?;
+    try file_panel_ops.reportFilePanelDirty(session, save_sid, .{ .dirty = false, .revision = 2 });
     workspace_ops.focusWorkspaceInput(session);
-    session.completeFilePanelSaveClose(save_sid, save_action.request_id, 2, true);
+    file_panel_ops.completeFilePanelSaveClose(session, save_sid, save_action.request_id, 2, true);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, save_sid) == null);
     // FP16: 입력 소유가 활성 Term에서 파생되므로, 그 파일을 닫으면 pane이 승계한 **다음 파일**로 barrier가
     // 다시 발급된다. 어느 쪽이든 받아들이면 승계 회귀를 못 잡으므로 결과를 고정한다 — 남은 파일이 하나이니
@@ -34548,7 +32864,7 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expect(session.takeFilePanelPickRequest());
     try std.testing.expect(!session.takeFilePanelPickRequest());
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, md_path));
     try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
     const md_surface_id = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(md_surface_id != 0);
@@ -34558,30 +32874,30 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     file_panel_ops.assignDockSurfaceIds(session);
     // FP16: source group 개념이 없어져, 링크는 source 파일이 있는 pane의 새 탭으로 열린다
     // (옛 "다른 group이 focus여도 source group에 연다" 대조 자리).
-    try session.openFilePanelLink(md_surface_id, "two.html#preview", false);
+    try file_panel_ops.openFilePanelLink(session, md_surface_id, "two.html#preview", false);
     try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(html_path, session.fileEntryAt(1).?.path);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
     // text kind(§2.2): 로컬 텍스트 링크도 markdown과 같은 정책으로 source 파일이 있는 pane에 연다.
-    try session.openFilePanelLink(md_surface_id, "three.txt", false);
+    try file_panel_ops.openFilePanelLink(session, md_surface_id, "three.txt", false);
     try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqualStrings(text_path, session.fileEntryAt(2).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.text, session.fileEntryAt(2).?.kind);
     try std.testing.expectEqual(session.fileEntryAt(2).?.id, session.pending_dock_focus.?.entry_id);
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, html_path));
     try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     const html_surface_id = session.fileEntryAt(1).?.surface_id;
     try std.testing.expectEqual(dock_panel.EntryKind.html, session.filePanelEntryInfo(html_surface_id).?.kind);
     try std.testing.expectEqual(session.fileEntryAt(1).?.id, session.pending_dock_focus.?.entry_id);
-    try std.testing.expectError(error.WrongKind, session.openFilePanelLink(html_surface_id, "one.md", false));
-    try std.testing.expectError(error.SurfaceNotFound, session.openFilePanelLink(999_999, "one.md", false));
-    try std.testing.expectError(error.OpenFailed, session.openFilePanelLink(md_surface_id, "missing.md", false));
+    try std.testing.expectError(error.WrongKind, file_panel_ops.openFilePanelLink(session, html_surface_id, "one.md", false));
+    try std.testing.expectError(error.SurfaceNotFound, file_panel_ops.openFilePanelLink(session, 999_999, "one.md", false));
+    try std.testing.expectError(error.OpenFailed, file_panel_ops.openFilePanelLink(session, md_surface_id, "missing.md", false));
     try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
 
     var external_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const first_editor_epoch = try session.beginFilePanelDocument(md_surface_id, 1001);
-    const current_editor_epoch = try session.beginFilePanelDocument(md_surface_id, 1002);
+    const first_editor_epoch = try file_panel_ops.beginFilePanelDocument(session, md_surface_id, 1001);
+    const current_editor_epoch = try file_panel_ops.beginFilePanelDocument(session, md_surface_id, 1002);
     try std.testing.expectError(
         error.StaleDocument,
         session.openFilePanelDocumentLink(md_surface_id, first_editor_epoch, "https://stale.example", false),
@@ -34594,26 +32910,26 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expect(in_app.surface_id != 0);
     try std.testing.expectEqualStrings("https://example.com/guide?q=1#usage", in_app.url);
 
-    try session.openFilePanelLink(html_surface_id, "http://example.com", true);
+    try file_panel_ops.openFilePanelLink(session, html_surface_id, "http://example.com", true);
     const forced = session.takeExternalLinkAction(&external_buf).?;
     try std.testing.expectEqual(ExternalLinkActionKind.system, forced.kind);
     try std.testing.expectEqual(@as(u64, 0), forced.surface_id);
 
     session.loaded_config.config.file_panel.external_link_target = .system;
-    try session.openFilePanelLink(md_surface_id, "https://example.com", false);
-    try std.testing.expectError(error.LinkBusy, session.openFilePanelLink(md_surface_id, "https://example.org", false));
+    try file_panel_ops.openFilePanelLink(session, md_surface_id, "https://example.com", false);
+    try std.testing.expectError(error.LinkBusy, file_panel_ops.openFilePanelLink(session, md_surface_id, "https://example.org", false));
     const configured = session.takeExternalLinkAction(&external_buf).?;
     try std.testing.expectEqual(ExternalLinkActionKind.system, configured.kind);
-    try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "javascript:alert(1)", false));
+    try std.testing.expectError(error.InvalidLink, file_panel_ops.openFilePanelLink(session, md_surface_id, "javascript:alert(1)", false));
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, md_path));
     try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
     try std.testing.expectEqual(session.fileEntryAt(0).?.id, session.pending_dock_focus.?.entry_id);
     // three.txt는 이제 text kind(§2.2)이고 이미 열려 있어 새 탭 없이 기존 탭을 활성화한다(duplicate).
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(text_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, text_path));
     try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(dir_path));
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath("relative.md"));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, file_panel_ops.openFilePanelPath(session, dir_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, file_panel_ops.openFilePanelPath(session, "relative.md"));
     try std.testing.expect(session.filePanelEntryInfo(999_999) == null);
 }
 
@@ -34636,19 +32952,19 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(dirty_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, dirty_path));
     const watched = session.takeFileTreeWatchRoot().?;
     defer allocator.free(watched);
     try std.testing.expectEqualStrings(root, watched);
     const dirty_sid = session.fileEntryAt(0).?.surface_id;
-    const dirty_epoch = try session.beginFilePanelDocument(dirty_sid, 1);
-    const dirty_initial = try session.readFilePanel(allocator, dirty_sid, dirty_epoch);
+    const dirty_epoch = try file_panel_ops.beginFilePanelDocument(session, dirty_sid, 1);
+    const dirty_initial = try file_panel_ops.readFilePanel(session, allocator, dirty_sid, dirty_epoch);
     allocator.free(dirty_initial);
     try file_panel_ops.setFilePanelDirty(session, dirty_sid, true);
     session.fileTreeChanged(dirty_path);
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
-    try std.testing.expect(session.takeFileTreeReloadAction() == null);
-    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(dirty_sid, dirty_epoch, "# mine"));
+    try std.testing.expect(file_panel_ops.takeFileTreeReloadAction(session) == null);
+    try std.testing.expectError(error.ExternalConflict, file_panel_ops.writeFilePanel(session, dirty_sid, dirty_epoch, "# mine"));
 
     session.requestFileConflictReload(dirty_sid);
     try std.testing.expect(session.chrome_host.confirm.open);
@@ -34656,7 +32972,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     session.dispatchChromeAction(.confirm_cancel);
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
-    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+    try std.testing.expect(file_panel_ops.takeFileTreeReloadAction(session) == null);
 
     session.requestFileConflictReload(dirty_sid);
     session.chrome_host.confirm.dismiss();
@@ -34664,10 +32980,10 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
     try std.testing.expect(session.fileEntryAt(0).?.conflict_reload_pending);
-    const failed_reload = session.takeFileTreeReloadAction().?;
+    const failed_reload = file_panel_ops.takeFileTreeReloadAction(session).?;
     try std.testing.expectEqual(dirty_sid, failed_reload.surface_id);
     try std.testing.expect(failed_reload.conflict);
-    try session.completeFileConflictReload(dirty_sid, false); // read 실패면 원래 buffer 보호를 유지한다.
+    try file_panel_ops.completeFileConflictReload(session, dirty_sid, false); // read 실패면 원래 buffer 보호를 유지한다.
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
     try std.testing.expect(!session.fileEntryAt(0).?.conflict_reload_pending);
@@ -34677,30 +32993,30 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     session.requestFileConflictReload(dirty_sid);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
-    _ = session.takeFileTreeReloadAction();
+    _ = file_panel_ops.takeFileTreeReloadAction(session);
     session.fileTreeChanged(dirty_path); // read와 성공 ack 사이 새 외부 event는 이전 generation 성공으로 지우지 않는다.
-    try session.completeFileConflictReload(dirty_sid, true);
+    try file_panel_ops.completeFileConflictReload(session, dirty_sid, true);
     try std.testing.expect(session.fileEntryAt(0).?.external_change);
     session.requestFileConflictReload(dirty_sid);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
-    _ = session.takeFileTreeReloadAction();
-    try session.completeFileConflictReload(dirty_sid, true);
+    _ = file_panel_ops.takeFileTreeReloadAction(session);
+    try file_panel_ops.completeFileConflictReload(session, dirty_sid, true);
     try std.testing.expect(!session.fileEntryAt(0).?.external_change);
     try std.testing.expect(!session.fileEntryAt(0).?.dirty);
 
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(clean_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, clean_path));
     const clean_sid = session.fileEntryAt(1).?.surface_id;
-    const clean_epoch = try session.beginFilePanelDocument(clean_sid, 1);
-    const initial_clean = try session.readFilePanel(allocator, clean_sid, clean_epoch);
+    const clean_epoch = try file_panel_ops.beginFilePanelDocument(session, clean_sid, 1);
+    const initial_clean = try file_panel_ops.readFilePanel(session, allocator, clean_sid, clean_epoch);
     allocator.free(initial_clean);
     try file_panel_ops.setFilePanelDirty(session, clean_sid, true);
-    try session.writeFilePanel(clean_sid, clean_epoch, "# saved");
+    try file_panel_ops.writeFilePanel(session, clean_sid, clean_epoch, "# saved");
     try file_panel_ops.setFilePanelDirty(session, clean_sid, false); // 정상 순서: clean ack가 200ms FSEvent보다 먼저 도착한다.
     try file_panel_ops.setFilePanelDirty(session, clean_sid, true); // 그 사이 재편집해도 자기 저장 event는 conflict가 아니다.
     session.fileTreeChanged(clean_path);
     try std.testing.expect(!session.fileEntryAt(1).?.external_change);
-    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+    try std.testing.expect(file_panel_ops.takeFileTreeReloadAction(session) == null);
     var verify_attempts: usize = 0;
     while (session.fileEntryAt(1).?.self_write_verifications != 0 and verify_attempts < 100) : (verify_attempts += 1) {
         try file_panel_ops.updateFileTree(session);
@@ -34711,24 +33027,24 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     try file_panel_ops.setFilePanelDirty(session, clean_sid, false);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# externally changed" });
     session.fileTreeChanged(clean_path);
-    const clean_reload = session.takeFileTreeReloadAction().?;
+    const clean_reload = file_panel_ops.takeFileTreeReloadAction(session).?;
     try std.testing.expectEqual(clean_sid, clean_reload.surface_id);
     try std.testing.expect(!clean_reload.conflict);
-    try session.completeFileConflictReload(clean_sid, true); // clean auto-reload 성공 ack는 no-op 성공이다.
+    try file_panel_ops.completeFileConflictReload(session, clean_sid, true); // clean auto-reload 성공 ack는 no-op 성공이다.
     try std.testing.expect(!session.fileEntryAt(1).?.external_change);
     session.fileTreeChanged(clean_path);
-    _ = session.takeFileTreeReloadAction();
-    try session.completeFileConflictReload(clean_sid, false); // read 실패는 무한 재queue 대신 conflict로 latch한다.
+    _ = file_panel_ops.takeFileTreeReloadAction(session);
+    try file_panel_ops.completeFileConflictReload(session, clean_sid, false); // read 실패는 무한 재queue 대신 conflict로 latch한다.
     try std.testing.expect(session.fileEntryAt(1).?.external_change);
-    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+    try std.testing.expect(file_panel_ops.takeFileTreeReloadAction(session) == null);
     session.requestFileConflictReload(clean_sid);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
-    _ = session.takeFileTreeReloadAction();
-    const reloaded_clean = try session.readFilePanel(allocator, clean_sid, clean_epoch);
+    _ = file_panel_ops.takeFileTreeReloadAction(session);
+    const reloaded_clean = try file_panel_ops.readFilePanel(session, allocator, clean_sid, clean_epoch);
     allocator.free(reloaded_clean);
-    try session.completeFileConflictReload(clean_sid, true);
-    try session.writeFilePanel(clean_sid, clean_epoch, "# saved again");
+    try file_panel_ops.completeFileConflictReload(session, clean_sid, true);
+    try file_panel_ops.writeFilePanel(session, clean_sid, clean_epoch, "# saved again");
     try file_panel_ops.setFilePanelDirty(session, clean_sid, false);
     try file_panel_ops.setFilePanelDirty(session, clean_sid, true);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# external inside grace" });
@@ -34742,8 +33058,8 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     session.requestFileConflictReload(clean_sid);
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
-    _ = session.takeFileTreeReloadAction();
-    try session.completeFileConflictReload(clean_sid, true);
+    _ = file_panel_ops.takeFileTreeReloadAction(session);
+    try file_panel_ops.completeFileConflictReload(session, clean_sid, true);
     try file_panel_ops.setFilePanelDirty(session, clean_sid, true);
     session.fileTreeChanged(root); // dropped-event coarse recovery는 열린 하위 dirty entry도 conflict로 승격한다.
     try std.testing.expect(session.fileEntryAt(1).?.external_change);
@@ -34952,7 +33268,7 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, a_path));
     const a_sid = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(session.completePendingDockFocus(a_sid));
     const scan = session.file_tree.takeScanRequest().?;
@@ -35032,7 +33348,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(anchor));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, anchor));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
     try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{.{
@@ -35080,7 +33396,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     // request-scoped CM6 lock reports its latest revision as clean.
     try std.testing.expect(session.file_tree_mutation_waiting_request != null);
     const editor_lock = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(editor_lock.surface_id, .{
+    try file_panel_ops.reportFilePanelDirty(session, editor_lock.surface_id, .{
         .dirty = false,
         .revision = 1,
         .request_id = editor_lock.request_id,
@@ -35089,7 +33405,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     try std.testing.expect(session.hasProtectedFilePanelsForExit());
     // A duplicate/late CM6 acknowledgement cannot reacquire the waiting lock after submission and
     // therefore cannot clear the mutation reservation or unlock the editor while the worker runs.
-    try std.testing.expectError(error.MutationPending, session.reportFilePanelDirty(editor_lock.surface_id, .{
+    try std.testing.expectError(error.MutationPending, file_panel_ops.reportFilePanelDirty(session, editor_lock.surface_id, .{
         .dirty = false,
         .revision = 1,
         .request_id = editor_lock.request_id,
@@ -35148,7 +33464,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     session.dispatchChromeAction(.confirm_accept);
     const delete_lock = session.takeFilePanelDirtySyncActionV2().?;
     const delete_revision = file_panel_ops.fileEntryForSurfaceId(session, delete_lock.surface_id).?.editor_revision + 1;
-    try session.reportFilePanelDirty(delete_lock.surface_id, .{
+    try file_panel_ops.reportFilePanelDirty(session, delete_lock.surface_id, .{
         .dirty = false,
         .revision = delete_revision,
         .request_id = delete_lock.request_id,
@@ -35161,8 +33477,8 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     const peeked = session.peekFileTreeTrashAction().?;
     try std.testing.expect(session.hasProtectedFilePanelsForExit());
     // A completion that precedes native ownership, or names another operation, cannot commit model state.
-    session.completeFileTreeTrash(peeked.id, .not_moved, null);
-    session.completeFileTreeTrash(peeked.id +% 1, .moved_verified, null);
+    file_panel_ops.completeFileTreeTrash(session, peeked.id, .not_moved, null);
+    file_panel_ops.completeFileTreeTrash(session, peeked.id +% 1, .moved_verified, null);
     try std.testing.expect(session.peekFileTreeTrashAction() != null);
     _ = try std.Io.Dir.cwd().statFile(io, peeked.path, .{});
     try std.testing.expect(std.fs.path.basename(peeked.path)[0] != '.');
@@ -35176,11 +33492,11 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     try std.testing.expect(session.takeFileTreeTrashAction() == null);
     // Until the native terminal ack, the original namespace is reserved globally. This keeps an app-side
     // replacement open or ancestor rename from invalidating the file-reference identity handoff.
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(anchor));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, file_panel_ops.openFilePanelPath(session, anchor));
     session.dispatchAppAction(.new_file);
     try std.testing.expect(session.rename == null);
-    session.completeFileTreeTrash(taken.id, .not_moved, null);
-    session.completeFileTreeTrash(taken.id, .moved_verified, null); // duplicate late callback is a no-op
+    file_panel_ops.completeFileTreeTrash(session, taken.id, .not_moved, null);
+    file_panel_ops.completeFileTreeTrash(session, taken.id, .moved_verified, null); // duplicate late callback is a no-op
     attempts = 0;
     while (attempts < 500) : (attempts += 1) {
         file_panel_ops.updateFileTreeMutations(session);
@@ -35201,7 +33517,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     session.dispatchChromeAction(.confirm_accept);
     const success_delete_lock = session.takeFilePanelDirtySyncActionV2().?;
     const success_delete_revision = file_panel_ops.fileEntryForSurfaceId(session, success_delete_lock.surface_id).?.editor_revision + 1;
-    try session.reportFilePanelDirty(success_delete_lock.surface_id, .{
+    try file_panel_ops.reportFilePanelDirty(session, success_delete_lock.surface_id, .{
         .dirty = false,
         .revision = success_delete_revision,
         .request_id = success_delete_lock.request_id,
@@ -35217,7 +33533,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     // Simulate the one-entry, identity-matched destination reported by NSWorkspace: the staged object is
     // already absent from the project before Zig commits tree/recent/tab state.
     try std.Io.Dir.cwd().deleteFile(io, success_action.path);
-    session.completeFileTreeTrash(success_action.id, .moved_verified, null);
+    file_panel_ops.completeFileTreeTrash(session, success_action.id, .moved_verified, null);
     try std.testing.expect(file_panel_ops.fileEntryForPath(session, renamed) == null);
 
     // A destination mapping with an unverified identity is already an OS move, not a rollback case.
@@ -35237,7 +33553,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     };
     session.file_tree_trash_queue_len = 1;
     const last_known_destination = "/Users/user/.Trash/renamed.md.maru-trash-test";
-    session.completeFileTreeTrash(unverified_id, .moved_unverified, last_known_destination);
+    file_panel_ops.completeFileTreeTrash(session, unverified_id, .moved_unverified, last_known_destination);
     try std.testing.expectEqual(@as(usize, 0), session.file_tree_trash_queue_len);
     try std.testing.expectEqual(@as(usize, 1), session.file_tree_manual_recovery_paths_len);
     try std.testing.expectEqualStrings(last_known_destination, session.file_tree_manual_recovery_paths[0]);
@@ -35264,7 +33580,7 @@ test "file tree rename changes supported panel kind and removes unsupported pane
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(markdown));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, markdown));
     const markdown_location = file_panel_ops.fileEntryForPath(session, markdown).?;
     const old_surface = markdown_location.surface_id;
     try std.testing.expect(session.completePendingDockFocus(old_surface));
@@ -36454,7 +34770,7 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.
         try std.testing.expectEqual(session.sidebar_width_px, frame.terminal_origin_x_px);
         // 탭 슬롯 높이는 cell 높이 × 비율(큰 슬롯, 2줄 카드 수용) — 단일 출처 상수에서 파생, cell 높이보다 크다.
-        try std.testing.expectEqual(session.cell_height_px * sidebar_slot_height_ratio_milli / 1000, frame.sidebar_slot_height_px);
+        try std.testing.expectEqual(session.cell_height_px * sidebar_ops.sidebar_slot_height_ratio_milli / 1000, frame.sidebar_slot_height_px);
         try std.testing.expect(frame.sidebar_slot_height_px > session.cell_height_px);
     }
 
@@ -38258,7 +36574,7 @@ test "captureWorkspaceTab: 활성 브라우저가 마지막 탭이어도 active-
     try tmp.dir.writeFile(io, .{ .sub_path = "keep.md", .data = "# keep" });
     const path = try std.fs.path.join(allocator, &.{ root, "keep.md" });
     defer allocator.free(path);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, path));
     session.dispatchAppAction(.new_web_tab);
     const pane = pane_ops.activePane(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
@@ -39774,13 +38090,13 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
     const ar = arena_inst.allocator();
 
     // 추가: 라이브 binding 1개 + write-back 예약 1개. rhs round-trip.
-    session.setTerminalMacro("Ctrl+G", "text:hello");
+    settings_ops.setTerminalMacro(session, "Ctrl+G", "text:hello");
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len);
     try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macros.items.len);
     try std.testing.expectEqualStrings("text:hello", try AppSession.macroRhsString(ar, session.loaded_config.terminal_bindings[0].input));
 
     // 같은 chord 편집: 교체(추가 아님) — binding 여전히 1개, 예약도 dedup돼 1개, rhs 갱신.
-    session.setTerminalMacro("Ctrl+G", "text:bye");
+    settings_ops.setTerminalMacro(session, "Ctrl+G", "text:bye");
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len);
     try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macros.items.len); // dedup
     try std.testing.expectEqualStrings("text:bye", try AppSession.macroRhsString(ar, session.loaded_config.terminal_bindings[0].input));
@@ -39792,14 +38108,14 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
     try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macro_removes.items.len);
 
     // 잘못된 rhs는 거부(라이브 미반영) — 비매크로 접두사.
-    session.setTerminalMacro("Ctrl+J", "not_a_macro");
+    settings_ops.setTerminalMacro(session, "Ctrl+J", "not_a_macro");
     try std.testing.expectEqual(@as(usize, 0), session.loaded_config.terminal_bindings.len);
 
     // code-review max #3: 빌트인 chord(Cmd+T=new_term)에 매크로를 묶으면 **차단이 아니라 경고**하고 적용한다
     // (validate는 user 바인딩만 보므로 chordShadowsBuiltin가 별도로 경고). 라이브 반영 + notice 표시.
     session.chrome_host.notice.dismiss();
     try std.testing.expect(input_ops.chordShadowsBuiltin(try config_mod.keybinding.KeyChord.parse("Cmd+T"))); // Cmd+T는 빌트인
-    session.setTerminalMacro("Cmd+T", "text:hi");
+    settings_ops.setTerminalMacro(session, "Cmd+T", "text:hi");
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len); // 적용됨(차단 아님)
     try std.testing.expect(session.chrome_host.notice.open); // 덮어쓰기 경고 표시
 }
@@ -42716,17 +41032,17 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
 
     // 극단값 clamp(직접 호출): 아주 넓게 → max_pt, 아주 좁게 → min_pt.
     sidebar_ops.setSidebarWidthPx(session, 1_000_000);
-    try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
+    try std.testing.expectEqual(sidebar_ops.sidebar_max_pt, session.sidebar_width_pt);
     sidebar_ops.setSidebarWidthPx(session, 0);
     // 좁게 → 헤더 아이콘(신호등 + 🔔/◧/⚙/+ 과 배지)이 겹치지 않는 동적 최소(sidebarMinPt, 13칸)로 clamp. 독립 검증: [sidebar_ops.sidebar_min_pt, max] 안.
     try std.testing.expectEqual(sidebar_ops.sidebarMinPt(session), session.sidebar_width_pt);
-    try std.testing.expect(session.sidebar_width_pt >= sidebar_ops.sidebar_min_pt and session.sidebar_width_pt <= sidebar_max_pt);
+    try std.testing.expect(session.sidebar_width_pt >= sidebar_ops.sidebar_min_pt and session.sidebar_width_pt <= sidebar_ops.sidebar_max_pt);
     // cap: cell 폭이 거대해 헤더 하한이 max를 넘어도 pt는 sidebar_max_pt를 안 넘는다(clamp lower>upper assert 패닉 방지 —
     // code-review). 고정 식과 무관한 독립 oracle(상한 == max).
     const saved_cw = session.cell_width_px;
     session.cell_width_px = 100_000; // 비현실적으로 큰 cell → 헤더 하한 ≫ max
     sidebar_ops.setSidebarWidthPx(session, 0);
-    try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
+    try std.testing.expectEqual(sidebar_ops.sidebar_max_pt, session.sidebar_width_pt);
     session.cell_width_px = saved_cw;
     _ = try session.tick(); // 폭 변경 후 다음 tick 크래시 없음
 }
@@ -42752,7 +41068,7 @@ test "③a-2: applying config sidebar.width drives the runtime sidebar width (co
     try std.testing.expect(session.sidebar_width_px > 0);
 
     // 메모리 config의 폭을 동적 하한 위·max 아래의 값으로 바꾸고 재적용 → 런타임 폭이 그대로 따라온다(clamp 무영향 구간).
-    const want: u32 = std.math.clamp(@as(u32, 300), sidebar_ops.sidebarMinPt(session), sidebar_max_pt);
+    const want: u32 = std.math.clamp(@as(u32, 300), sidebar_ops.sidebarMinPt(session), sidebar_ops.sidebar_max_pt);
     session.loaded_config.config.sidebar.width_pt = want;
     settings_ops.reapplyLoadedConfig(session);
     try std.testing.expectEqual(want, session.sidebar_width_pt);
@@ -42969,17 +41285,17 @@ test "settings hides legacy TUI chrome selector while preserving loaded config" 
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     for (sections, 0..) |entry, index| if (entry.section == .theme) {
         session.chrome_host.settings.section = index;
     };
-    const no_search = try session.currentSectionFields(scratch.allocator());
+    const no_search = try settings_ops.currentSectionFields(session, scratch.allocator());
     for (no_search.enums) |field|
         try std.testing.expect(!std.mem.eql(u8, field.key, "chrome.theme"));
 
     session.chrome_host.settings.startSearch();
     for ("chrome") |cp| session.chrome_host.settings.appendSearchCp(cp);
-    const cross_search = try session.currentSectionFields(scratch.allocator());
+    const cross_search = try settings_ops.currentSectionFields(session, scratch.allocator());
     for (cross_search.enums) |field|
         try std.testing.expect(!std.mem.eql(u8, field.key, "chrome.theme"));
     try std.testing.expectEqual(config_mod.theme.ChromeTheme.tui, session.loaded_config.config.chrome_theme);
@@ -43007,13 +41323,13 @@ test "settings 드롭다운 통합: enum 행 활성→팝업 열림·변형 목�
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     // 실제 스키마 enum(theme.preset synthetic 제외)이 있는 섹션·행을 찾는다(bool→num→enum 순 인덱싱).
     var enum_row: ?usize = null;
     var enum_key: []const u8 = "";
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         for (cf.enums, 0..) |e, ei| {
             if (std.mem.eql(u8, e.key, "theme.preset")) continue; // synthetic — 별도 경로
             enum_row = cf.bools.len + cf.nums.len + ei;
@@ -43067,13 +41383,13 @@ test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 co
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var num_row: ?usize = null;
     var num_key: []const u8 = "";
     var num_max: f64 = 0;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         if (cf.nums.len > 0) {
             num_row = cf.bools.len; // 첫 number(bool 다음)
             num_key = cf.nums[0].key;
@@ -43090,13 +41406,13 @@ test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 co
     settings_ops.toggleSelectedSetting(session);
     try std.testing.expect(session.chrome_host.settings.editing);
     session.chrome_host.settings.enterEdit("999999"); // 범위 초과
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expect(!session.chrome_host.settings.editing); // 커밋 후 편집 종료
     try std.testing.expect(settings_ops.takeConfigDirty(session)); // 영속 예약
 
     // config number가 max로 clamp됐는지 — 재빌드해 그 키의 값 확인(f32 저장 반올림 허용).
     session.chrome_host.settings.selected = num_row.?;
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     var found = false;
     for (cf2.nums) |n| {
         if (std.mem.eql(u8, n.key, num_key)) {
@@ -43126,11 +41442,11 @@ test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이�
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var pal_row: ?usize = null;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         if (cf.paletteRowIndex()) |pi| {
             pal_row = pi;
             break;
@@ -43191,7 +41507,7 @@ test "settingsPaletteArrowIntercept: 검색 중에도 팔레트 ←→ 셀 이�
     // 필터된 필드에서 팔레트 행 인덱스를 찾아 selected로(검색 필터가 적용된 인덱스라 intercept와 정합).
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     const pi = cf.paletteRowIndex() orelse return error.TestUnexpectedResult;
     s.selected = pi;
     s.nav_focused = false;
@@ -43228,11 +41544,11 @@ test "settings 폰트 드롭다운 취소: 커스텀(번들 밖) 폰트 복원 (
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var font_row: ?usize = null;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         for (cf.texts, 0..) |t, tii| if (std.mem.eql(u8, t.key, "font.family")) {
             font_row = cf.bools.len + cf.nums.len + cf.enums.len + tii;
         };
@@ -43279,11 +41595,11 @@ test "settings 테마 프리셋 드롭다운 취소: 커스텀 테마 색·잠�
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var preset_row: ?usize = null;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         for (cf.enums, 0..) |e, ei| if (std.mem.eql(u8, e.key, "theme.preset")) {
             preset_row = cf.bools.len + cf.nums.len + ei;
         };
@@ -43336,11 +41652,11 @@ test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 �
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var preset_row: ?usize = null;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         for (cf.enums, 0..) |e, ei| if (std.mem.eql(u8, e.key, "theme.preset")) {
             preset_row = cf.bools.len + cf.nums.len + ei;
         };
@@ -43383,11 +41699,11 @@ test "settings enum 드롭다운 취소: 안 바뀐 값은 dirty로 영속 안 �
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var enum_row: ?usize = null;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         for (cf.enums, 0..) |e, ei| {
             if (std.mem.eql(u8, e.key, "theme.preset")) continue;
             enum_row = cf.bools.len + cf.nums.len + ei;
@@ -43429,11 +41745,11 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
     // Section 네비(CS-4): 폼은 선택 섹션 필드만(bool→num→enum)이라 bool이 있는 섹션을 찾아 그 섹션·첫 행(bool)으로 간다.
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var found_section = false;
     for (sections, 0..) |_, si| {
         session.chrome_host.settings.section = si;
-        const cf = try session.currentSectionFields(scratch.allocator());
+        const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
         if (cf.bools.len > 0) {
             found_section = true;
             break;
@@ -43441,7 +41757,7 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
     }
     try std.testing.expect(found_section); // bool 필드가 있는 섹션이 존재
     settings_ops.refreshSettingsFieldCount(session);
-    const cf0 = try session.currentSectionFields(scratch.allocator());
+    const cf0 = try settings_ops.currentSectionFields(session, scratch.allocator());
     const first_key = cf0.bools[0].key; // 섹션 내 bool은 맨 앞(buildSettingsFields 순서)
     const first_val = cf0.bools[0].value;
 
@@ -43449,7 +41765,7 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
     settings_ops.toggleSelectedSetting(session);
 
     // (1) 메모리 config가 flip됐다 — 같은 섹션을 다시 열거해 첫 bool 값이 뒤집혔는지 본다.
-    const cf1 = try session.currentSectionFields(scratch.allocator());
+    const cf1 = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expectEqual(!first_val, cf1.bools[0].value);
 
     // (2) persist 예약 — 그 키가 config_dirty_keys에 들어갔다(Swift가 drain해 파일에 atomic write).
@@ -43483,7 +41799,7 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
 
     // 폰트 섹션 선택(font.size number 행 보유). 열면서 nav_reset_row가 실제 섹션 수로 세팅되는지도 본다(§6.4).
     settings_ops.toggleSettings(session);
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var font_idx: ?usize = null;
     for (sections, 0..) |s, i| if (s.section == .font) {
         font_idx = i;
@@ -43501,7 +41817,7 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
     }
 
     // font.size number 행을 찾아 selected로. 결합 순서상 number 구간은 bool 다음(buildSettingsFields·resetSelectedSettingRow 공유).
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     var ni: ?usize = null;
     for (cf.nums, 0..) |n, i| if (std.mem.eql(u8, n.key, "font.size")) {
         ni = i;
@@ -43555,13 +41871,13 @@ test "settings notifications.osc toggle requests macOS authorization once" {
     settings_ops.toggleSettings(session);
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     for (sections, 0..) |section, i| if (section.section == .terminal) {
         session.chrome_host.settings.section = i;
         break;
     };
     settings_ops.refreshSettingsFieldCount(session);
-    const fields = try session.currentSectionFields(scratch.allocator());
+    const fields = try settings_ops.currentSectionFields(session, scratch.allocator());
     var found = false;
     for (fields.bools, 0..) |field, i| if (std.mem.eql(u8, field.key, "notifications.osc")) {
         session.chrome_host.settings.selected = i;
@@ -43594,7 +41910,7 @@ test "settings theme.preset 행: follow-system on이면 숨김, off면 표시 (�
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     // theme 섹션 인덱스를 찾는다.
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var theme_si: ?usize = null;
     for (sections, 0..) |s, si| if (s.section == .theme) {
         theme_si = si;
@@ -43611,11 +41927,11 @@ test "settings theme.preset 행: follow-system on이면 숨김, off면 표시 (�
 
     // follow-system OFF(기본): theme.preset synthetic 행이 보인다.
     session.loaded_config.config.theme_follow_system = false;
-    try std.testing.expect(hasPreset(try session.currentSectionFields(scratch.allocator())));
+    try std.testing.expect(hasPreset(try settings_ops.currentSectionFields(session, scratch.allocator())));
 
     // follow-system ON: 색을 preset-light/dark가 정하므로 theme.preset 행은 숨는다.
     session.loaded_config.config.theme_follow_system = true;
-    try std.testing.expect(!hasPreset(try session.currentSectionFields(scratch.allocator())));
+    try std.testing.expect(!hasPreset(try settings_ops.currentSectionFields(session, scratch.allocator())));
 }
 
 test "settings window.background-image: 행 활성→파일 선택창 요청, provide→적용, Backspace→지우기 (v81)" {
@@ -43635,7 +41951,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     // window 섹션 + background-image text 행 인덱스 찾기.
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var win_si: ?usize = null;
     for (sections, 0..) |s, si| if (s.section == .window) {
         win_si = si;
@@ -43643,7 +41959,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     try std.testing.expect(win_si != null);
     session.chrome_host.settings.section = win_si.?;
     settings_ops.refreshSettingsFieldCount(session);
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     var tix: ?usize = null;
     for (cf.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, "window.background-image")) {
         tix = i;
@@ -43659,7 +41975,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     try std.testing.expect(!session.takeFilePickRequest()); // 1회성
 
     // (2) Swift NSOpenPanel이 고른 경로를 provide → config에 적용 + 영속 예약.
-    session.providePickedFile("/Users/me/Pictures/bg.png");
+    settings_ops.providePickedFile(session, "/Users/me/Pictures/bg.png");
     try std.testing.expectEqualStrings("/Users/me/Pictures/bg.png", session.loaded_config.config.window_background_image);
     try std.testing.expect(settings_ops.takeConfigDirty(session));
 
@@ -43668,7 +41984,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     try std.testing.expectEqualStrings("", session.loaded_config.config.window_background_image);
 
     // (4) 빈 경로 provide(취소 등)는 무동작 — 직전 빈 값 유지.
-    session.providePickedFile("");
+    settings_ops.providePickedFile(session, "");
     try std.testing.expectEqualStrings("", session.loaded_config.config.window_background_image);
 }
 
@@ -43720,7 +42036,7 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     // theme 섹션 선택(네비에서 theme 인덱스 찾기 — 기본 config 기준).
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var theme_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .theme) {
         theme_idx = i;
@@ -43729,7 +42045,7 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     session.chrome_host.settings.section = theme_idx;
 
     // 팔레트 그리드 행은 theme 섹션 마지막(color 뒤). paletteRowIndex로 selected 설정.
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expect(cf.has_palette);
     const pi = cf.paletteRowIndex().?;
     session.chrome_host.settings.selected = pi;
@@ -43742,7 +42058,7 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     // 편집 버퍼를 새 hex로 바꿔 커밋 → palette[5]=#abcdef, dirty=theme.palette.5(write-back이 직렬화).
     session.chrome_host.settings.enterEdit("#abcdef");
     session.config_dirty_keys.clearRetainingCapacity();
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expect(session.loaded_config.config.theme.palette[5] != null);
     try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?);
     try std.testing.expect(!session.chrome_host.settings.editing); // 커밋 후 편집 종료
@@ -43763,7 +42079,7 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     session.chrome_host.settings.selected = pi;
     session.chrome_host.settings.grid_cell = 5;
     session.chrome_host.settings.enterEdit("#gggggg");
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?); // 거부 — 유지
 }
 
@@ -43783,7 +42099,7 @@ test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerR
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var theme_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .theme) {
         theme_idx = i;
@@ -43792,7 +42108,7 @@ test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerR
     session.chrome_host.settings.section = theme_idx;
 
     // theme 섹션 첫 color 행 선택(bool+num+enum+text 다음).
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expect(cf.colors.len > 0);
     const first_color = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
     session.chrome_host.settings.selected = first_color;
@@ -43807,7 +42123,7 @@ test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerR
     session.chrome_host.settings.pick_s = 100;
     session.chrome_host.settings.pick_v = 100;
     session.config_dirty_keys.clearRetainingCapacity();
-    session.commitPickerColor();
+    settings_ops.commitPickerColor(session);
     try std.testing.expect(!session.chrome_host.settings.picking); // 커밋 후 닫힘(폼 복귀)
     var found = false;
     for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, key)) {
@@ -43816,7 +42132,7 @@ test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerR
     try std.testing.expect(found);
 
     // 재빌드한 color 값이 빨강으로 갱신(포맷/대소문자 무관하게 parse해 RGB 비교).
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     const rgb = try config_mod.appearance.parseHexColor(cf2.colors[0].value);
     try std.testing.expectEqual(@as(u8, 255), rgb.r);
     try std.testing.expectEqual(@as(u8, 0), rgb.g);
@@ -43840,14 +42156,14 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
     // 입력 섹션 선택.
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var input_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .input) {
         input_idx = i;
     };
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = input_idx;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expect(cf.keybind_entries.len == command_catalog.entries.len); // 쿼리 없으면 전부
     const ks = cf.keybindRowStart().?;
 
@@ -43896,7 +42212,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
     // .global_hotkey 섹션은 schema 필드가 없어도 좌측 네비에 강제로 들어간다.
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var gh_idx: ?usize = null;
     for (sections, 0..) |s, i| if (s.section == .global_hotkey) {
         gh_idx = i;
@@ -43905,7 +42221,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
 
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = gh_idx.?;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     // 전역 행 3개(toggle_window/show_window/toggle_quick_terminal), schema·keybind 행 없음.
     try std.testing.expectEqual(@as(usize, 3), cf.global_entries.len);
     try std.testing.expectEqual(@as(usize, 0), cf.keybind_entries.len);
@@ -43941,7 +42257,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
     try std.testing.expect((try config_mod.KeyChord.parse("Cmd+Alt+Space")).eql(command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window).?));
 
     // Backspace로 해제 → global_bindings에서 제거 + 줄 제거 예약 + 펜딩 rebind 취소.
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?; // toggle_window 행
     settings_ops.resetSelectedSettingRow(session);
     try std.testing.expect(command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window) == null);
@@ -43974,14 +42290,14 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
     // GUI 녹음으로 toggle_window를 Cmd+Alt+Space에 rebind → rebuildGlobalHotkeys가 descriptor 1개를 만들고 dirty=true.
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var gh_idx: ?usize = null;
     for (sections, 0..) |s, i| if (s.section == .global_hotkey) {
         gh_idx = i;
     };
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = gh_idx.?;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     const gs = cf.globalKeybindRowStart().?;
     session.chrome_host.settings.selected = gs; // toggle_window 행
     settings_ops.toggleSelectedSetting(session); // 녹음 시작
@@ -44007,7 +42323,7 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
     settings_ops.toggleSelectedSetting(session);
     input_ops.captureKeybindRecording(session, .{ .key = .{ .char = ' ' }, .modifiers = .{ .command = true, .option = true } });
     _ = session.takeGlobalHotkeysDirty(); // rebind dirty 소비
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?;
     settings_ops.resetSelectedSettingRow(session);
     try std.testing.expect(session.global_hotkeys_dirty); // unbind가 dirty 세움
@@ -44045,7 +42361,7 @@ test "reloadConfig: 옛 arena 문자열을 가리키는 write-back 대기열을 
     // 옛 loaded_config arena의 문자열을 가리키는 두 큐를 시드한다(이 리뷰가 다룬 UAF 부류):
     //  ① theme_preset_persist — persistThemePreset이 arena에 프리셋 이름을 dupe.
     //  ② config_keybind_unbind_removed — arena dupe한 chord 문자열.
-    session.persistThemePreset(.gruvbox_dark);
+    settings_ops.persistThemePreset(session, .gruvbox_dark);
     try std.testing.expect(session.theme_preset_persist != null);
     const a = session.loaded_config.arena.allocator();
     try session.config_keybind_unbind_removed.append(allocator, try a.dupe(u8, "cmd+shift+x"));
@@ -44076,14 +42392,14 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var input_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .input) {
         input_idx = i;
     };
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = input_idx;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     const ks = cf.keybindRowStart().?;
     session.chrome_host.settings.selected = ks; // entries[0]=new_term
 
@@ -44115,7 +42431,7 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     try std.testing.expect(settings_ops.takeConfigDirty(session));
 
     // 이미 해제된 액션을 다시 unbind 시도 → notice 경로(무동작, keybindings 불변).
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     session.chrome_host.settings.selected = cf2.keybindRowStart().?;
     const len_before = session.loaded_config.keybindings.len;
     settings_ops.resetSelectedSettingRow(session);
@@ -44138,14 +42454,14 @@ test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind �
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var input_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .input) {
         input_idx = i;
     };
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = input_idx;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     session.chrome_host.settings.selected = cf.keybindRowStart().?; // entries[0]=new_term
 
     // new_term을 close_term의 빌트인 Cmd+W로 rebind → 충돌(다른 액션에 이미 묶임) → 폼 상단 배너 경고(세팅 유지).
@@ -44175,14 +42491,14 @@ test "settings 전역 단축키 등록 불가 키: 폼 상단 배너(세팅 유�
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var global_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .global_hotkey) {
         global_idx = i;
     };
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = global_idx;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     session.chrome_host.settings.selected = cf.globalKeybindRowStart().?; // 첫 전역 액션 행
 
     // Cmd+Plus는 가상 키코드 매핑이 없어 전역 등록 불가(global_hotkey.descriptorFor=null) → 폼 상단 배너 거부(세팅 유지).
@@ -44215,14 +42531,14 @@ test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var input_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .input) {
         input_idx = i;
     };
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = input_idx;
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     const ks = cf.keybindRowStart().?;
     // next_tab은 빌트인 chord가 2개(⇧⌘] 와 ⇧⌘}) — 그 행을 찾아 Backspace.
     var nt_sel: ?usize = null;
@@ -44374,7 +42690,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var input_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .input) {
         input_idx = i;
@@ -44387,7 +42703,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     // FP16: 도크 group split 액션 2개가 사라져 keybind 매칭은 pane split 2개뿐이다.
     session.chrome_host.settings.startSearch();
     for ("split") |c| session.chrome_host.settings.appendSearchCp(c);
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expectEqual(@as(usize, 0), cf.enums.len); // "split" 미매칭
     try std.testing.expect(cf.bools.len >= 1); // 교차 섹션: workspace.split-inherit-cwd(다른 섹션) 매칭
     try std.testing.expectEqual(@as(usize, 2), cf.keybind_entries.len); // pane split 2개
@@ -44406,7 +42722,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
 
     // 빈 쿼리(검색 종료)면 현재 섹션(input)만 복귀 — keybind 전부 + input enum.
     session.chrome_host.settings.endSearch();
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
     try std.testing.expect(cf2.enums.len > 0); // input dropdown 복귀
     try std.testing.expectEqual(@as(usize, 6), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) + keyhint.enabled(KH-3) + paste-protection + bracketed-paste-is-safe + selection-clear-on-typing 6개(split bool은 workspace라 검색 끝나 사라짐)
@@ -44464,7 +42780,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var term_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .terminal) {
         term_idx = i;
@@ -44478,7 +42794,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
     try std.testing.expectEqual(@as(usize, 2), session.loaded_config.config.env.len);
 
     // env.FOO 행을 selected로(text 구간에서 key=="env.FOO" 찾기).
-    const cf = try session.currentSectionFields(scratch.allocator());
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
     var foo_sel: ?usize = null;
     for (cf.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, "env.FOO")) {
@@ -44499,7 +42815,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
     try std.testing.expect(saw);
 
     // 추가 sentinel 행("env.")이나 shell.args 행에서 삭제 시도 → 무동작(env 변화 없음).
-    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const cf2 = try settings_ops.currentSectionFields(session, scratch.allocator());
     const after_enums2 = cf2.bools.len + cf2.nums.len + cf2.enums.len;
     var sa_sel: ?usize = null;
     for (cf2.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, "shell.args")) {
@@ -44527,7 +42843,7 @@ test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args
     // terminal 섹션 선택.
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const sections = try session.buildSectionList(scratch.allocator());
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
     var term_idx: usize = 0;
     for (sections, 0..) |s, i| if (s.section == .terminal) {
         term_idx = i;
@@ -44538,7 +42854,7 @@ test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args
     // text 행 key로 selected 인덱스를 찾는 헬퍼(인라인): selected = bools+nums+enums + (cf.texts 안 인덱스).
     const selForTextKey = struct {
         fn f(s: *AppSession, a: std.mem.Allocator, key: []const u8) ?usize {
-            const c = s.currentSectionFields(a) catch return null;
+            const c = settings_ops.currentSectionFields(s, a) catch return null;
             const base = c.bools.len + c.nums.len + c.enums.len;
             for (c.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, key)) return base + i;
             return null;
@@ -44549,7 +42865,7 @@ test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args
     session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "shell.args").?;
     session.chrome_host.settings.enterEdit("-i -l");
     session.config_dirty_keys.clearRetainingCapacity();
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expectEqual(@as(usize, 2), session.loaded_config.config.shell.args.len);
     try std.testing.expectEqualStrings("-i", session.loaded_config.config.shell.args[0]);
     try std.testing.expectEqualStrings("-l", session.loaded_config.config.shell.args[1]);
@@ -44563,7 +42879,7 @@ test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args
     session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "env.").?;
     session.chrome_host.settings.enterEdit("FOO=bar");
     session.config_dirty_keys.clearRetainingCapacity();
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len);
     try std.testing.expectEqualStrings("FOO=bar", session.loaded_config.config.env[0]);
     var saw_foo = false;
@@ -44575,14 +42891,14 @@ test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args
     // 이제 "env.FOO" 행이 생겼다 — 값만 "baz"로 편집 → upsert(교체, 추가 아님).
     session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "env.FOO").?;
     session.chrome_host.settings.enterEdit("baz");
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 교체 — 개수 그대로
     try std.testing.expectEqualStrings("FOO=baz", session.loaded_config.config.env[0]);
 
     // 추가 행에 '=' 없는 입력 → 무시(env 변화 없음).
     session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "env.").?;
     session.chrome_host.settings.enterEdit("INVALID");
-    session.commitSelectedText();
+    settings_ops.commitSelectedText(session);
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 그대로
 }
 
@@ -44763,7 +43079,7 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
     // 세팅 폼(테마 섹션): 프리셋이 첫 dropdown(최상단)이고, 활성이라 색 행은 전부 disabled.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const secs = try session.buildSectionList(arena.allocator());
+    const secs = try settings_ops.buildSectionList(session, arena.allocator());
     for (secs, 0..) |s, idx| if (s.section == .theme) {
         session.chrome_host.settings.section = idx;
     };
@@ -49564,14 +47880,14 @@ test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
     session.fileEntryAt(0).?.editor_epoch = 1;
     session.fileEntryAt(0).?.editor_document_active = true;
 
-    const content = try session.readFilePanel(allocator, 701, 1);
+    const content = try file_panel_ops.readFilePanel(session, allocator, 701, 1);
     defer allocator.free(content);
     try std.testing.expectEqualStrings("# FP4\n\n![diagram](images/a.png)\n", content);
-    const asset = try session.readFilePanelAsset(allocator, 701, "./images//a.png");
+    const asset = try file_panel_ops.readFilePanelAsset(session, allocator, 701, "./images//a.png");
     defer allocator.free(asset);
     try std.testing.expectEqualStrings("PNG", asset);
-    try std.testing.expectError(error.InvalidPath, session.readFilePanelAsset(allocator, 701, "../secret"));
-    try std.testing.expectError(error.SurfaceNotFound, session.readFilePanel(allocator, 999, 1));
+    try std.testing.expectError(error.InvalidPath, file_panel_ops.readFilePanelAsset(session, allocator, 701, "../secret"));
+    try std.testing.expectError(error.SurfaceNotFound, file_panel_ops.readFilePanel(session, allocator, 999, 1));
 }
 
 test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected" {
@@ -49600,12 +47916,12 @@ test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected
     session.fileEntryAt(0).?.editor_epoch = 1;
     session.fileEntryAt(0).?.editor_document_active = true;
 
-    const exact = try session.readFilePanel(allocator, 751, 1);
+    const exact = try file_panel_ops.readFilePanel(session, allocator, 751, 1);
     defer allocator.free(exact);
     try std.testing.expectEqual(file_panel_bridge.max_file_bytes, exact.len);
 
     try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = payload });
-    try std.testing.expectError(error.TooLarge, session.readFilePanel(allocator, 751, 1));
+    try std.testing.expectError(error.TooLarge, file_panel_ops.readFilePanel(session, allocator, 751, 1));
 }
 
 test "FP4 file panel read: FIFOs are rejected without blocking" {
@@ -49638,8 +47954,8 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
     _ = try pane_ops.openFileTermInActivePane(session, doc_path, .markdown);
     session.fileEntryAt(1).?.surface_id = 777;
 
-    try std.testing.expectError(error.NotRegularFile, session.readFilePanel(allocator, 776, 1));
-    try std.testing.expectError(error.NotRegularFile, session.readFilePanelAsset(allocator, 777, "pipe.png"));
+    try std.testing.expectError(error.NotRegularFile, file_panel_ops.readFilePanel(session, allocator, 776, 1));
+    try std.testing.expectError(error.NotRegularFile, file_panel_ops.readFilePanelAsset(session, allocator, 777, "pipe.png"));
 }
 
 test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
@@ -49677,10 +47993,10 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     _ = try pane_ops.openFileTermInActivePane(session, html_path, .html);
     session.fileEntryAt(1).?.surface_id = 802;
 
-    try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape.png"));
-    try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
-    try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802, 1));
-    try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
+    try std.testing.expectError(error.OutsideRoot, file_panel_ops.readFilePanelAsset(session, allocator, 801, "escape.png"));
+    try std.testing.expectError(error.OutsideRoot, file_panel_ops.readFilePanelAsset(session, allocator, 801, "escape-dir/secret.png"));
+    try std.testing.expectError(error.WrongKind, file_panel_ops.readFilePanel(session, allocator, 802, 1));
+    try std.testing.expectError(error.WrongKind, file_panel_ops.readFilePanelAsset(session, allocator, 802, "escape.png"));
 }
 
 test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
@@ -49714,7 +48030,7 @@ test "FP4 file panel readAsset: replaced lexical parent symlink is denied" {
     try root_tmp.dir.symLink(io, outside, "pinned", .{});
     try std.testing.expectError(
         error.OutsideRoot,
-        session.readFilePanelAsset(allocator, 803, "secret.png"),
+        file_panel_ops.readFilePanelAsset(session, allocator, 803, "secret.png"),
     );
 }
 
@@ -49751,28 +48067,28 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     // markdown 기본 모드는 읽기이며, 편집·write·mermaid 게이트를 모두 그 제품 경로에서 검증한다
     // (읽기로 전환해도 CM6 buffer가 살아 있어 ⌘S 저장이 성립한다 — docs/file-panel.md §2.4).
 
-    const doc_epoch = try session.beginFilePanelDocument(901, 1);
+    const doc_epoch = try file_panel_ops.beginFilePanelDocument(session, 901, 1);
     try std.testing.expect(session.filePanelMermaidDocumentActive(901, doc_epoch));
     try std.testing.expect(!session.filePanelMermaidDocumentActive(901, doc_epoch + 1));
-    const initial_doc = try session.readFilePanel(allocator, 901, doc_epoch);
+    const initial_doc = try file_panel_ops.readFilePanel(session, allocator, 901, doc_epoch);
     allocator.free(initial_doc);
     try file_panel_ops.setFilePanelDirty(session, 901, true);
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
-    try session.writeFilePanel(901, doc_epoch, "# 저장\n한글");
+    try file_panel_ops.writeFilePanel(session, 901, doc_epoch, "# 저장\n한글");
     try std.testing.expect(session.fileEntryAt(0).?.dirty); // shell ack 전 write가 eviction 보호를 내리지 않는다.
     try file_panel_ops.setFilePanelDirty(session, 901, false);
     try std.testing.expect(!session.fileEntryAt(0).?.dirty);
     const after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
     defer allocator.free(after);
     try std.testing.expectEqualStrings("# 저장\n한글", after);
-    try std.testing.expectError(error.WrongKind, session.writeFilePanel(902, 0, "escape"));
+    try std.testing.expectError(error.WrongKind, file_panel_ops.writeFilePanel(session, 902, 0, "escape"));
     const html_after = try tmp.dir.readFileAlloc(io, "page.html", allocator, .limited(1024));
     defer allocator.free(html_after);
     try std.testing.expectEqualStrings("<p>before</p>", html_after);
-    const link_epoch = try session.beginFilePanelDocument(903, 1);
-    const link_doc = try session.readFilePanel(allocator, 903, link_epoch);
+    const link_epoch = try file_panel_ops.beginFilePanelDocument(session, 903, 1);
+    const link_doc = try file_panel_ops.readFilePanel(session, allocator, 903, link_epoch);
     allocator.free(link_doc);
-    try std.testing.expectError(error.NotFound, session.writeFilePanel(903, link_epoch, "symlink replacement"));
+    try std.testing.expectError(error.NotFound, file_panel_ops.writeFilePanel(session, 903, link_epoch, "symlink replacement"));
     const target_after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
     defer allocator.free(target_after);
     try std.testing.expectEqualStrings("# 저장\n한글", target_after);
@@ -49791,15 +48107,15 @@ test "file panel save rejects same-inode external content changed after hydratio
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, path));
     const sid = session.fileEntryAt(0).?.surface_id;
-    const epoch = try session.beginFilePanelDocument(sid, 1);
-    const hydrated = try session.readFilePanel(allocator, sid, epoch);
+    const epoch = try file_panel_ops.beginFilePanelDocument(session, sid, 1);
+    const hydrated = try file_panel_ops.readFilePanel(session, allocator, sid, epoch);
     defer allocator.free(hydrated);
 
     // FSEvent가 아직 도착하지 않은 같은-inode truncate/write도 마지막 read token과 달라 저장할 수 없다.
     try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "external" });
-    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(sid, epoch, "mine"));
+    try std.testing.expectError(error.ExternalConflict, file_panel_ops.writeFilePanel(session, sid, epoch, "mine"));
     const preserved = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(64));
     defer allocator.free(preserved);
     try std.testing.expectEqualStrings("external", preserved);
@@ -49815,24 +48131,24 @@ test "file panel document epoch rejects stale reload reports and latches dirty c
     file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
 
-    const first = try session.beginFilePanelDocument(sid, 1);
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .editor_epoch = first, .revision = 10 });
+    const first = try file_panel_ops.beginFilePanelDocument(session, sid, 1);
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .editor_epoch = first, .revision = 10 });
     session.fileEntryAt(0).?.mode = .read; // clean read-only document replacement은 recovery 없이 허용한다.
-    const second = try session.beginFilePanelDocument(sid, 2);
+    const second = try file_panel_ops.beginFilePanelDocument(session, sid, 2);
     try std.testing.expect(second > first);
-    try std.testing.expectError(error.StaleDocument, session.reportFilePanelDirty(sid, .{
+    try std.testing.expectError(error.StaleDocument, file_panel_ops.reportFilePanelDirty(session, sid, .{
         .dirty = false,
         .editor_epoch = first,
         .revision = 11,
     }));
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .editor_epoch = second, .revision = 1 });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .editor_epoch = second, .revision = 1 });
     session.fileEntryAt(0).?.mode = .source_edit; // 라이브 백로그 → 편집은 소스 모드
     try std.testing.expect(session.fileEntryAt(0).?.dirty);
 
-    const third = try session.beginFilePanelDocument(sid, 3);
+    const third = try file_panel_ops.beginFilePanelDocument(session, sid, 3);
     try std.testing.expect(third > second);
     try std.testing.expect(session.fileEntryAt(0).?.editor_recovery_required);
-    try std.testing.expectError(error.RecoveryRequired, session.reportFilePanelDirty(sid, .{
+    try std.testing.expectError(error.RecoveryRequired, file_panel_ops.reportFilePanelDirty(session, sid, .{
         .dirty = false,
         .editor_epoch = third,
         .revision = 1,
@@ -49854,13 +48170,13 @@ test "file panel first document pending is not recovery and begin is document-id
     const sid = entry.surface_id;
 
     entry.dirty_sync_pending = true; // renderer/hydration 전의 정상 tab-leave intent
-    const first = try session.beginFilePanelDocument(sid, 1);
+    const first = try file_panel_ops.beginFilePanelDocument(session, sid, 1);
     try std.testing.expect(!entry.editor_recovery_required);
-    try std.testing.expectEqual(first, try session.beginFilePanelDocument(sid, 1));
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .editor_epoch = first, .revision = 0 });
+    try std.testing.expectEqual(first, try file_panel_ops.beginFilePanelDocument(session, sid, 1));
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .editor_epoch = first, .revision = 0 });
     try std.testing.expect(!entry.dirty_sync_pending);
-    try std.testing.expectError(error.StaleDocument, session.beginFilePanelDocument(sid, 0));
-    const replacement = try session.beginFilePanelDocument(sid, 2);
+    try std.testing.expectError(error.StaleDocument, file_panel_ops.beginFilePanelDocument(session, sid, 0));
+    const replacement = try file_panel_ops.beginFilePanelDocument(session, sid, 2);
     try std.testing.expect(replacement > first);
     try std.testing.expect(entry.editor_recovery_required); // editable clean mirror도 unacked transaction 가능성을 보존한다.
 }
@@ -49883,7 +48199,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
     const pending_request_id = session.pending_file_panel_close.?.request_id;
     const sync_actions = session.file_panel_dirty_sync_actions_len;
 
-    try std.testing.expectError(error.IdentityExhausted, session.beginFilePanelDocument(entry.surface_id, 1));
+    try std.testing.expectError(error.IdentityExhausted, file_panel_ops.beginFilePanelDocument(session, entry.surface_id, 1));
     try std.testing.expectEqual(maru.session.control_bridge.max_js_safe_integer, entry.editor_epoch);
     try std.testing.expectEqual(@as(u64, 0), entry.editor_document_id);
     try std.testing.expect(!entry.editor_document_active);
@@ -49905,24 +48221,24 @@ test "file panel document begin changes pending close only for an accepted repla
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집/close 경로는 소스 모드
     const sid = entry.surface_id;
-    const epoch = try session.beginFilePanelDocument(sid, 2);
+    const epoch = try file_panel_ops.beginFilePanelDocument(session, sid, 2);
 
     file_panel_ops.requestFilePanelClose(session, sid);
     const pending_request_id = session.pending_file_panel_close.?.request_id;
     const sync_actions = session.file_panel_dirty_sync_actions_len;
     const unlock_actions = session.file_panel_close_unlock_actions_len;
 
-    try std.testing.expectError(error.StaleDocument, session.beginFilePanelDocument(sid, 1));
+    try std.testing.expectError(error.StaleDocument, file_panel_ops.beginFilePanelDocument(session, sid, 1));
     try std.testing.expectEqual(pending_request_id, session.pending_file_panel_close.?.request_id);
     try std.testing.expectEqual(sync_actions, session.file_panel_dirty_sync_actions_len);
     try std.testing.expectEqual(unlock_actions, session.file_panel_close_unlock_actions_len);
 
-    try std.testing.expectEqual(epoch, try session.beginFilePanelDocument(sid, 2));
+    try std.testing.expectEqual(epoch, try file_panel_ops.beginFilePanelDocument(session, sid, 2));
     try std.testing.expectEqual(pending_request_id, session.pending_file_panel_close.?.request_id);
     try std.testing.expectEqual(sync_actions, session.file_panel_dirty_sync_actions_len);
     try std.testing.expectEqual(unlock_actions, session.file_panel_close_unlock_actions_len);
 
-    const replacement = try session.beginFilePanelDocument(sid, 3);
+    const replacement = try file_panel_ops.beginFilePanelDocument(session, sid, 3);
     try std.testing.expect(replacement > epoch);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
@@ -49942,23 +48258,23 @@ test "file panel termination invalidates current document and latches unacked ed
     const entry = session.fileEntryAt(0).?;
     entry.mode = .source_edit; // 라이브 백로그: markdown 편집 경로는 소스 모드
     const sid = entry.surface_id;
-    const first = try session.beginFilePanelDocument(sid, 1);
+    const first = try file_panel_ops.beginFilePanelDocument(session, sid, 1);
 
     // native dirty ACK가 아직 오지 않은 clean mirror에서도 editable document crash는 보수적으로 보호한다.
-    try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(sid));
+    try std.testing.expectEqual(@as(u32, 2), file_panel_ops.filePanelDocumentTerminated(session, sid));
     try std.testing.expect(!entry.editor_document_active);
     try std.testing.expect(entry.editor_recovery_required);
     try std.testing.expect(entry.dirty);
     try std.testing.expect(entry.dirty_sync_pending);
-    try std.testing.expectEqual(@as(u32, 0), session.filePanelDocumentTerminated(sid)); // 같은 종료 callback은 1회만 latch
-    try std.testing.expectError(error.StaleDocument, session.reportFilePanelDirty(sid, .{
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.filePanelDocumentTerminated(session, sid)); // 같은 종료 callback은 1회만 latch
+    try std.testing.expectError(error.StaleDocument, file_panel_ops.reportFilePanelDirty(session, sid, .{
         .dirty = false,
         .editor_epoch = first,
         .revision = 1,
     }));
-    try std.testing.expectError(error.StaleDocument, session.beginFilePanelDocument(sid, 1));
-    const replacement = try session.beginFilePanelDocument(sid, 2);
-    try std.testing.expectError(error.RecoveryRequired, session.reportFilePanelDirty(sid, .{
+    try std.testing.expectError(error.StaleDocument, file_panel_ops.beginFilePanelDocument(session, sid, 1));
+    const replacement = try file_panel_ops.beginFilePanelDocument(session, sid, 2);
+    try std.testing.expectError(error.RecoveryRequired, file_panel_ops.reportFilePanelDirty(session, sid, .{
         .dirty = false,
         .editor_epoch = replacement,
         .revision = 0,
@@ -49968,8 +48284,8 @@ test "file panel termination invalidates current document and latches unacked ed
     const read_entry = session.fileEntryAt(1).?;
     read_entry.mode = .read;
     file_panel_ops.assignDockSurfaceIds(session);
-    _ = try session.beginFilePanelDocument(read_entry.surface_id, 1);
-    try std.testing.expectEqual(@as(u32, 1), session.filePanelDocumentTerminated(read_entry.surface_id));
+    _ = try file_panel_ops.beginFilePanelDocument(session, read_entry.surface_id, 1);
+    try std.testing.expectEqual(@as(u32, 1), file_panel_ops.filePanelDocumentTerminated(session, read_entry.surface_id));
     try std.testing.expect(!read_entry.editor_recovery_required);
     try std.testing.expect(!read_entry.dirty);
 
@@ -49977,18 +48293,18 @@ test "file panel termination invalidates current document and latches unacked ed
     const dirty_read = session.fileEntryAt(2).?;
     dirty_read.mode = .read;
     file_panel_ops.assignDockSurfaceIds(session);
-    _ = try session.beginFilePanelDocument(dirty_read.surface_id, 1);
+    _ = try file_panel_ops.beginFilePanelDocument(session, dirty_read.surface_id, 1);
     dirty_read.dirty = true;
-    try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(dirty_read.surface_id));
+    try std.testing.expectEqual(@as(u32, 2), file_panel_ops.filePanelDocumentTerminated(session, dirty_read.surface_id));
     try std.testing.expect(dirty_read.editor_recovery_required);
 
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/pending-read-document.md", .markdown);
     const pending_read = session.fileEntryAt(3).?;
     pending_read.mode = .read;
     file_panel_ops.assignDockSurfaceIds(session);
-    _ = try session.beginFilePanelDocument(pending_read.surface_id, 1);
+    _ = try file_panel_ops.beginFilePanelDocument(session, pending_read.surface_id, 1);
     pending_read.dirty_sync_pending = true;
-    try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(pending_read.surface_id));
+    try std.testing.expectEqual(@as(u32, 2), file_panel_ops.filePanelDocumentTerminated(session, pending_read.surface_id));
     try std.testing.expect(pending_read.editor_recovery_required);
 }
 
@@ -50005,24 +48321,24 @@ test "file panel stale document read cannot replace current disk hash baseline" 
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, path));
     const entry = session.fileEntryAt(0).?;
     // 이 테스트는 stale read가 현재 hash baseline을 덮지 않는지만 검증한다. editable document 교체는
     // ACK 직전 입력 손실 가능성 때문에 별도 fail-close 회귀 테스트가 담당하므로 clean read mode로 고정한다.
     entry.mode = .read;
     const sid = entry.surface_id;
-    const first = try session.beginFilePanelDocument(sid, 1);
-    const first_bytes = try session.readFilePanel(allocator, sid, first);
+    const first = try file_panel_ops.beginFilePanelDocument(session, sid, 1);
+    const first_bytes = try file_panel_ops.readFilePanel(session, allocator, sid, first);
     allocator.free(first_bytes);
-    const second = try session.beginFilePanelDocument(sid, 2);
-    const second_bytes = try session.readFilePanel(allocator, sid, second);
+    const second = try file_panel_ops.beginFilePanelDocument(session, sid, 2);
+    const second_bytes = try file_panel_ops.readFilePanel(session, allocator, sid, second);
     allocator.free(second_bytes);
     const current_hash = entry.disk_content_hash;
 
     try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "B" });
-    try std.testing.expectError(error.StaleDocument, session.readFilePanel(allocator, sid, first));
+    try std.testing.expectError(error.StaleDocument, file_panel_ops.readFilePanel(session, allocator, sid, first));
     try std.testing.expectEqual(current_hash, entry.disk_content_hash);
-    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(sid, second, "mine"));
+    try std.testing.expectError(error.ExternalConflict, file_panel_ops.writeFilePanel(session, sid, second, "mine"));
     const preserved = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(16));
     defer allocator.free(preserved);
     try std.testing.expectEqualStrings("B", preserved);
@@ -50038,18 +48354,18 @@ test "file panel new surface termination before begin does not consume old clean
     file_panel_ops.assignDockSurfaceIds(session);
     const entry = session.fileEntryAt(0).?;
     const old_surface = entry.surface_id;
-    const old_epoch = try session.beginFilePanelDocument(old_surface, 1);
+    const old_epoch = try file_panel_ops.beginFilePanelDocument(session, old_surface, 1);
     entry.mode = .read;
-    try session.reportFilePanelDirty(old_surface, .{ .dirty = false, .editor_epoch = old_epoch, .revision = 1 });
+    try file_panel_ops.reportFilePanelDirty(session, old_surface, .{ .dirty = false, .editor_epoch = old_epoch, .revision = 1 });
 
     entry.surface_id = session.surface_ids.next();
     const new_surface = entry.surface_id;
-    try std.testing.expectEqual(@as(u32, 1), session.filePanelDocumentTerminated(new_surface));
+    try std.testing.expectEqual(@as(u32, 1), file_panel_ops.filePanelDocumentTerminated(session, new_surface));
     try std.testing.expect(!entry.editor_recovery_required);
     try std.testing.expect(!entry.dirty);
     try std.testing.expect(!entry.dirty_sync_pending);
-    try std.testing.expectEqual(@as(u32, 0), session.filePanelDocumentTerminated(old_surface));
-    const new_epoch = try session.beginFilePanelDocument(new_surface, 1);
+    try std.testing.expectEqual(@as(u32, 0), file_panel_ops.filePanelDocumentTerminated(session, old_surface));
+    const new_epoch = try file_panel_ops.beginFilePanelDocument(session, new_surface, 1);
     try std.testing.expect(new_epoch > old_epoch);
     try std.testing.expectEqual(new_surface, entry.editor_surface_id);
 }
@@ -50209,7 +48525,7 @@ test "file panel close syncs dirty state then handles clean discard save failure
     file_panel_ops.requestFilePanelClose(session, sid);
     var sync_action = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expectEqual(sid, sync_action.surface_id);
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 1, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = 1, .request_id = sync_action.request_id });
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session)); // 마지막 탭이어도 group 유지
 
@@ -50219,42 +48535,42 @@ test "file panel close syncs dirty state then handles clean discard save failure
     session.fileEntryAt(0).?.mode = .source_edit;
     file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_dirty, session.pending_file_panel_close.?.phase);
     session.dispatchChromeAction(.confirm_cancel);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
 
     file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 2, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 2, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
-    var save_action = session.takeFilePanelSaveCloseAction().?;
+    var save_action = file_panel_ops.takeFilePanelSaveCloseAction(session).?;
     try std.testing.expectEqual(sid, save_action.surface_id);
-    session.completeFilePanelSaveClose(sid, save_action.request_id, 2, false);
+    file_panel_ops.completeFilePanelSaveClose(session, sid, save_action.request_id, 2, false);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
 
     file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
-    save_action = session.takeFilePanelSaveCloseAction().?;
+    save_action = file_panel_ops.takeFilePanelSaveCloseAction(session).?;
     const stale_save_request_id = save_action.request_id;
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 3 });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = 3 });
     const saved_revision = file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision;
-    session.completeFilePanelSaveClose(sid, save_action.request_id, saved_revision - 1, true);
+    file_panel_ops.completeFilePanelSaveClose(session, sid, save_action.request_id, saved_revision - 1, true);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null); // stale save ack는 닫지 않는다.
     try std.testing.expectEqual(sid, session.takeFilePanelCloseUnlockAction().?.surface_id);
 
     file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = saved_revision + 1, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = saved_revision + 1, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
-    save_action = session.takeFilePanelSaveCloseAction().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = saved_revision + 1 });
+    save_action = file_panel_ops.takeFilePanelSaveCloseAction(session).?;
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = saved_revision + 1 });
     const final_revision = file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision;
-    session.completeFilePanelSaveClose(sid, stale_save_request_id, final_revision, true);
+    file_panel_ops.completeFilePanelSaveClose(session, sid, stale_save_request_id, final_revision, true);
     try std.testing.expectEqual(FilePanelClosePhase.saving, session.pending_file_panel_close.?.phase);
-    session.completeFilePanelSaveClose(sid, save_action.request_id, final_revision, true);
+    file_panel_ops.completeFilePanelSaveClose(session, sid, save_action.request_id, final_revision, true);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/close-conflict.md", .markdown);
@@ -50265,15 +48581,15 @@ test "file panel close syncs dirty state then handles clean discard save failure
     session.fileEntryAt(0).?.external_change = true;
     file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_conflict, session.pending_file_panel_close.?.phase);
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 2 });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 2 });
     session.dispatchChromeAction(.confirm_accept);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null); // conflict discard도 stale revision 거부
     _ = session.takeFilePanelCloseUnlockAction();
     file_panel_ops.requestFilePanelClose(session, sid);
     sync_action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
     session.dispatchChromeAction(.confirm_accept);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
 }
@@ -50297,27 +48613,27 @@ test "file panel read-mode dirty pending and conflict close through the snapshot
     var sync = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expectEqual(sid, sync.surface_id);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_dirty, session.pending_file_panel_close.?.phase);
     session.dispatchChromeAction(.confirm_cancel);
     _ = session.takeFilePanelCloseUnlockAction();
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 2 });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = 2 });
 
     // source→read 전환의 generic sync가 아직 pending이면 native clean이어도 새 close request가 그 snapshot을 supersede한다.
     entry.dirty_sync_pending = true;
     file_panel_ops.requestFilePanelClose(session, sid);
     sync = session.takeFilePanelDirtySyncActionV2().?;
     try std.testing.expect(sync.request_id != 0);
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 3, .request_id = sync.request_id });
     session.dispatchChromeAction(.confirm_cancel);
     _ = session.takeFilePanelCloseUnlockAction();
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 4 });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 4 });
 
     // read mode external conflict는 저장 선택지를 열지 않고 discard/cancel 2-choice로 제한한다.
     entry.external_change = true;
     file_panel_ops.requestFilePanelClose(session, sid);
     sync = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 5, .request_id = sync.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 5, .request_id = sync.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.confirm_conflict, session.pending_file_panel_close.?.phase);
     session.dispatchChromeAction(.confirm_accept);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) == null);
@@ -50376,7 +48692,7 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     try std.testing.expectEqual(@as(u64, 1), first.request_id);
 
     // 다른 요청의 snapshot은 모델 dirty/revision과 현재 close transaction을 전혀 바꾸지 않는다.
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 1, .request_id = first.request_id + 1 });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = 1, .request_id = first.request_id + 1 });
     try std.testing.expectEqual(FilePanelClosePhase.syncing, session.pending_file_panel_close.?.phase);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     try std.testing.expectEqual(@as(u64, 0), file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision);
@@ -50394,32 +48710,32 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     session.dispatchChromeAction(.confirm_cancel);
     file_panel_ops.requestFilePanelClose(session, sid);
     const second = session.takeFilePanelDirtySyncActionV2().?;
-    session.failFilePanelCloseUnlock(sid, first_unlock.request_id);
+    file_panel_ops.failFilePanelCloseUnlock(session, sid, first_unlock.request_id);
     try std.testing.expectEqual(second.request_id, session.pending_file_panel_close.?.request_id);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
 
     // 이미 무효화된 request 1 ack가 늦게 와도 request 2 transaction을 완료하거나 탭을 닫지 않는다.
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 2, .request_id = first.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = 2, .request_id = first.request_id });
     try std.testing.expectEqual(FilePanelClosePhase.syncing, session.pending_file_panel_close.?.phase);
     try std.testing.expectEqual(@as(u64, 0), file_panel_ops.fileEntryForSurfaceId(session, sid).?.editor_revision);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = second.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 3, .request_id = second.request_id });
     session.dispatchChromeAction(.confirm_cancel);
     const second_unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(second.request_id, second_unlock.request_id);
-    session.failFilePanelCloseUnlock(sid, second_unlock.request_id);
+    file_panel_ops.failFilePanelCloseUnlock(session, sid, second_unlock.request_id);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
 
     // host가 panel/JavaScript를 찾지 못한 경로도 pending과 lock을 명시적으로 회수한다.
     file_panel_ops.requestFilePanelClose(session, sid);
     const third = session.takeFilePanelDirtySyncActionV2().?;
-    session.failFilePanelDirtySync(sid, third.request_id);
+    file_panel_ops.failFilePanelDirtySync(session, sid, third.request_id);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
     const third_unlock = session.takeFilePanelCloseUnlockAction().?;
     try std.testing.expectEqual(sid, third_unlock.surface_id);
     try std.testing.expectEqual(third.request_id, third_unlock.request_id);
-    session.failFilePanelCloseUnlock(sid, third_unlock.request_id);
+    file_panel_ops.failFilePanelCloseUnlock(session, sid, third_unlock.request_id);
     try std.testing.expect(!file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty_sync_pending);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid).?.dirty); // 실패 시 clean 추정 금지
     try std.testing.expect(session.chrome_host.notice.open);
@@ -50428,7 +48744,7 @@ test "file panel close pins request identity and a superseding confirm unlocks w
     file_panel_ops.requestFilePanelClose(session, sid);
     const fourth = session.takeFilePanelDirtySyncActionV2().?;
     file_panel_ops.fileEntryForSurfaceId(session, sid).?.external_change_generation +%= 1;
-    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 4, .request_id = fourth.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = false, .revision = 4, .request_id = fourth.request_id });
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     try std.testing.expect(session.pending_file_panel_close == null);
 
@@ -50455,9 +48771,9 @@ test "file panel dirty close alternate discards only the pinned tab" {
 
     file_panel_ops.requestFilePanelClose(session, background_sid);
     const action = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 1, .request_id = action.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, background_sid, .{ .dirty = true, .revision = 1, .request_id = action.request_id });
     try std.testing.expect(session.pending_confirm == .file_panel_close);
-    try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 2 }); // confirm 뒤 늦은 editor 전진
+    try file_panel_ops.reportFilePanelDirty(session, background_sid, .{ .dirty = true, .revision = 2 }); // confirm 뒤 늦은 editor 전진
     session.dispatchChromeAction(.confirm_alternate);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, background_sid) != null); // stale snapshot discard 거부
     const stale_unlock = session.takeFilePanelCloseUnlockAction().?;
@@ -50465,7 +48781,7 @@ test "file panel dirty close alternate discards only the pinned tab" {
 
     file_panel_ops.requestFilePanelClose(session, background_sid);
     const current = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 3, .request_id = current.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, background_sid, .{ .dirty = true, .revision = 3, .request_id = current.request_id });
     session.dispatchChromeAction(.confirm_alternate);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, background_sid) == null);
     try std.testing.expectEqual(active_sid, session.fileEntryAt(0).?.surface_id);
@@ -50484,13 +48800,13 @@ test "file panel save action identity mismatch aborts and unlocks instead of sti
     session.fileEntryAt(0).?.mode = .source_edit;
     file_panel_ops.requestFilePanelClose(session, sid);
     const sync = session.takeFilePanelDirtySyncActionV2().?;
-    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
+    try file_panel_ops.reportFilePanelDirty(session, sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
     session.dispatchChromeAction(.confirm_accept);
     const entry = file_panel_ops.fileEntryForSurfaceId(session, sid).?;
     const old_path = entry.path;
     entry.path = try allocator.dupe(u8, "/tmp/save-drain-other.md");
     allocator.free(old_path); // coordinator는 독립 expected_path를 소유하므로 이제 old entry path가 없어도 안전하다.
-    try std.testing.expect(session.takeFilePanelSaveCloseAction() == null);
+    try std.testing.expect(file_panel_ops.takeFilePanelSaveCloseAction(session) == null);
     try std.testing.expect(session.pending_file_panel_close == null);
     try std.testing.expect(file_panel_ops.fileEntryForSurfaceId(session, sid) != null);
     const unlock = session.takeFilePanelCloseUnlockAction().?;
@@ -50572,7 +48888,7 @@ test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface
         const name = try std.fmt.bufPrint(&name_buf, "lru-{d}.md", .{opened});
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "# x" });
         paths[opened] = try std.fs.path.join(allocator, &.{ root, name });
-        try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(paths[opened]));
+        try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, paths[opened]));
     }
 
     // 전 entry가 surface_id를 갖고 있고 서로 다르다(비재사용).
@@ -50608,8 +48924,8 @@ test "FP6 merge transfers dirty file state and live surface ownership before sou
     defer allocator.free(src_path);
     const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.md", .{root});
     defer allocator.free(dst_path);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, src.openFilePanelPath(src_path));
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, dst.openFilePanelPath(dst_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(src, src_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(dst, dst_path));
     try src.file_tree.replaceExplicitRoots(&.{"/source-workspace"});
     try dst.file_tree.replaceExplicitRoots(&.{"/destination-workspace"});
     try std.testing.expect(src.completePendingDockFocus(src.fileEntryAt(0).?.surface_id));
@@ -51334,7 +49650,7 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
     notification_ops.dispatchBell(session);
     try std.testing.expect(!notification_ops.takeBell(session)); // 지난 벨을 울리지 않는다
     try std.testing.expect(!session.takeClipboardReadRequest()); // 클립보드를 읽지 않는다(유출 금지)
-    try std.testing.expectEqual(@as(usize, 0), session.pendingClipboard().len); // 지난 복사를 재생하지 않는다
+    try std.testing.expectEqual(@as(usize, 0), term_ops.pendingClipboard(session).len); // 지난 복사를 재생하지 않는다
 
     // 기준선을 잡은 뒤의 **새** 요청은 정상 동작한다.
     term.rt.observation.bell_count = 13;
@@ -52275,7 +50591,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
     const doc = try std.fs.path.join(allocator, &.{ tmp_root, "doc.md" });
     defer allocator.free(doc);
-    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(doc));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, doc));
     const entry = file_panel_ops.fileEntryForPath(session, doc).?;
     const surface_id = entry.surface_id;
 

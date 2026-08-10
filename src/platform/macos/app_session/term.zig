@@ -29,6 +29,10 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const buildPastePreview = AppSession.buildPastePreview;
+const session_host = app_session_mod.session_host;
+const diag_gate = app_session_mod.diag_gate;
+const paste_confirm_message = AppSession.paste_confirm_message;
 const markHostConnectFailedError = app_session_mod.markHostConnectFailedError;
 const freeDiffEntryState = app_session_mod.freeDiffEntryState;
 const ensureRestoreHostAdapter = app_session_mod.ensureRestoreHostAdapter;
@@ -268,10 +272,10 @@ pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index:
         // 임의 위치(종료된 Term)를 빼므로 활성 인덱스를 시프트 보정한다(단일 출처 activeIndexAfterRemoval) —
         // 배경 형제 reap 시 활성이 엉뚱한 Term으로 튀던 버그.
         pane.active_term = activeIndexAfterRemoval(pane.active_term, term_index, pane.terms.items.len);
-        self.refreshAfterReap(tab_index);
+        refreshAfterReap(self, tab_index);
     } else if (tab.panes.items.len > 1) {
         pane_ops.collapsePaneIn(self, tab, pane); // 빈 pane을 형제로 collapse(active_pane clamp 포함)
-        self.refreshAfterReap(tab_index);
+        refreshAfterReap(self, tab_index);
     } else {
         tab_ops.closeTab(self, tab_index); // 탭의 마지막 pane이 비었다 — 워크스페이스 close(대표 surface·active_tab은 closeTab가 처리)
     }
@@ -899,3 +903,239 @@ pub fn surfaceClipboardWriteRejected(self: *AppSession) void {
     const mb = terminal.clipboard_max_bytes / 1_000_000;
     self.showNotice(std.fmt.bufPrint(&nbuf, "클립보드 복사가 너무 커서 취소되었습니다(최대 약 {d}MB).", .{mb}) catch "클립보드 복사가 너무 커서 취소되었습니다.");
 }
+
+// --- 호출 그래프로 소유가 확인돼 옮겨 온 함수 ---
+// 이름에 도메인 단어가 없어 F 시리즈가 못 잡았고, 이 그룹을 과반으로 부르며 만지는 상태도 이 그룹이다.
+
+/// reap으로 구조가 바뀐 탭의 대표 surface를 그 탭의 현재 활성 Term으로 재바인딩하고(닫힌 Term을 가리키던
+/// stale/dangling 방지) panel을 새 leaf rect로 resize한다(collapse면 형제가 빈자리 확장 — 배경 탭도 전환
+/// 즉시 올바른 크기). 활성 탭이면 좌표 origin도 재계산하고 redraw를 표시한다(배경 탭 변경은 화면에 안 보임).
+pub fn refreshAfterReap(self: *AppSession, tab_index: usize) void {
+    const tab = self.tabs.items[tab_index];
+    self.surface_ptrs.items[tab_index] = tab.activeTerm().surface;
+    self.app_window.tabs = self.surface_ptrs.items;
+    pane_ops.resizeTabPanes(self, tab);
+    self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+    self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
+    self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
+    if (tab_index == self.app_window.active_tab) {
+        pane_ops.recomputeActivePaneRect(self);
+        self.metal_dirty = true;
+    }
+}
+
+/// 최종 payload(escape 적용 후 평문)를 인코딩해 PTY 큐에 넣는다. allow_unsafe=false면 paste protection
+/// 게이트를 먼저 통과해야 하고, 위험(개행/ESC[201~ 인젝션)하면 payload를 세션 소유 버퍼에 보관하고 확인
+/// 모달을 띄운 뒤 반환한다(confirmPendingPaste가 allow_unsafe=true로 재호출). 게이트 판정은 core가 단일
+/// 출처(pasteNeedsConfirmation — bracketed 상태·설정 반영). 큐/flush는 기존 non-blocking 경로 그대로.
+pub fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, target_id: u64) void {
+    // 대상 surface를 **id로** 잡는다(활성이 아니라). 없거나(닫힌 Term) web이면 붙일 PTY가 없으니 no-op —
+    // 예전엔 activeSurface를 그때그때 다시 읽어, 확인 모달을 거친 재진입(confirmPendingPaste)에서 그 사이
+    // 바뀐 활성 pane에 payload가 주입되거나 web sentinel의 core를 만져 조용히 사라졌다(code-review).
+    const surface = terminalSurfaceById(self, target_id) orelse return;
+    var needs_confirm: bool = undefined;
+    var bracketed: bool = undefined;
+    if (surface.remote != null) {
+        // host-backed(영속 세션): placeholder core에는 bracketed-paste 모드가 없다(진짜 코어는 host 프로세스라
+        // DECSET 2004는 host core만 안다). 관측(RuntimeObservation.bracketed_paste)에서 온 실제 모드로 판정·인코딩해야
+        // Claude Code 등이 붙여넣은 파일 경로를 [Image]로 인식한다(§입력 패리티). bracketed는 paste-protection 게이트에도
+        // 필요한 클라 판단 모드라 관측으로 스트리밍한다(mouse_tracking과 같은 게이트-모드). 관측은 client cache라 core lock 불요.
+        const loc = findTermWhere(self, surface.id, struct {
+            fn pred(id: u64, term: *Term) bool {
+                return term.kind == .terminal and term.surface.id == id;
+            }
+        }.pred) orelse return;
+        const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
+        bracketed = obs.availability != .unavailable and obs.bracketed_paste;
+        needs_confirm = !allow_unsafe and maru.terminal.pasteNeedsConfirmationWith(
+            bracketed,
+            payload,
+            self.loaded_config.config.input.paste_protection,
+            self.loaded_config.config.input.bracketed_paste_is_safe,
+        );
+    } else {
+        // **로컬 코어 접근은 lockCore 하에서** — 대상이 활성 pane이 아닐 수 있고(대상 고정), 그 pane의 PTY reader
+        // 스레드가 같은 코어를 쓴다. 판정(pasteNeedsConfirmation)과 인코딩에 필요한 bracketed를 한 번에 잠금 안에서
+        // 끝내고, 모달 열기·큐 적재는 잠금 밖에서 한다(모달/할당을 잠금 안에서 하지 않는다 — 경합 시간 최소).
+        surface.lockCore(self.io);
+        needs_confirm = !allow_unsafe and surface.core.pasteNeedsConfirmation(
+            payload,
+            self.loaded_config.config.input.paste_protection,
+            self.loaded_config.config.input.bracketed_paste_is_safe,
+        );
+        bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
+        surface.unlockCore(self.io);
+    }
+    // **인코딩은 락 밖에서**: 멀티MB payload의 할당·복사를 코어 뮤텍스 안에서 하면 그동안 그 pane의 PTY
+    // reader 스레드가 막힌다(code-review). 순수 변형(encodePasteWith)이 bool 하나만 받는다.
+    const encoded_opt: ?[]u8 = if (needs_confirm) null else (maru.terminal.encodePasteWith(bracketed, self.allocator, payload) catch null);
+    if (needs_confirm) {
+        // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
+        // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
+        self.showConfirmButtons(.{ .paste = target_id }, paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+        // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
+        self.chrome_host.confirm.body = self.buildPastePreview(payload);
+        self.pending_paste_confirm.clearRetainingCapacity();
+        self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
+            // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
+            self.pending_paste_confirm.clearRetainingCapacity();
+            self.chrome_host.confirm.dismiss();
+        };
+        return;
+    }
+    const encoded = encoded_opt orelse return; // 인코딩 실패(OOM) — 조용히 버린다
+    defer self.allocator.free(encoded);
+    // 대상 surface 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
+    // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
+    // 동결되던 것을 없앤다. 큐는 surface별 FIFO라 bracketed paste 감싸기 순서는 깨지지 않는다.
+    _ = self.enqueueInputBytes(target_id, encoded, false); // OOM이면 유실(best-effort — 크래시보다 낫다)
+}
+
+/// OSC 52 클립보드 쓰기 요청을 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
+/// **정책**(terminal-compatibility-policy.md §OSC52, 사용자 결정 2026-06-20): write는 기본 `allow` — 로컬
+/// 단일 사용자 데스크톱 터미널이라 트래킹 앱의 드래그 복사를 시스템 클립보드에 반영한다(iTerm2/Ghostty도 유사).
+/// **read**는 클립보드 탈취 방지로 계속 deny한다 — core가 `?` 쿼리에 응답하지 않아 read 요청은 여기 안 온다.
+/// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다. ask(요청별 확인 UI)는 후속.
+pub fn pendingClipboard(self: *AppSession) []const u8 {
+    if (!self.surface_initialized) return &.{};
+    // 슬라이스 4: 주소창 ⌘X가 넣은 클립보드 쓰기가 있으면 우선 반환(OSC52 write와 같은 drain 경로 — Swift가 NSPasteboard에
+    // 씀). 소유권을 clipboard_out_buffer로 이전해 반환 수명(다음 pendingClipboard까지) 계약을 그대로 만족한다.
+    if (self.chrome_clipboard_write.len > 0) {
+        if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+        self.clipboard_out_buffer = self.chrome_clipboard_write;
+        self.chrome_clipboard_write = &.{};
+        return self.clipboard_out_buffer;
+    }
+    // host-backed: core는 빈 placeholder라 OSC 52가 안 들어온다. host가 관측 seq로 알려 준 요청만 RPC로
+    // 텍스트를 가져온다(텍스트가 커서 관측에 못 싣는다). 정책(write allow)과 NSPasteboard 쓰기는 로컬과
+    // 동일하게 client가 한다 — §기능을 어느 쪽에 둘 것인가.
+    if (is_macos and activeSurface(self).remote != null) {
+        const term = pane_ops.activePane(self).activeTerm();
+        const seq = term.rt.observation.clipboard_write_seq;
+        const last = term.rt.last_clipboard_write_seq orelse {
+            term.rt.last_clipboard_write_seq = seq; // 첫 관측 = 기준선(재접속 시 지난 복사 재생 금지)
+            return &.{};
+        };
+        if (seq <= last) {
+            term.rt.last_clipboard_write_seq = seq; // 감소(host exec 재시작)면 조용히 맞춘다
+            return &.{};
+        }
+        const rb = &(app_session_mod.app_remote_backend orelse return &.{});
+        const fetched = rb.clipboardWriteFor(term.rt.handle) orelse return &.{}; // 실패면 seq 유지 → 다음 tick 재시도
+        // **가져온 뒤에** seq를 전진시킨다 — 먼저 올리면 전송 실패가 요청을 소비해 복사가 영영 사라진다.
+        term.rt.last_clipboard_write_seq = seq;
+        if (fetched.too_large) {
+            // 로컬의 오버사이즈 안내와 같은 자리(조용한 유실 금지). 텍스트는 없다.
+            var nbuf: [128]u8 = undefined;
+            const kb = session_host.runtime_manager.max_clipboard_wire_bytes / 1024;
+            self.showNotice(std.fmt.bufPrint(&nbuf, "원격 세션의 클립보드 복사가 너무 커서 전달되지 않았습니다(최대 약 {d}KB).", .{kb}) catch "원격 클립보드 복사가 너무 커서 전달되지 않았습니다.");
+            return &.{};
+        }
+        const text = fetched.text orelse return &.{};
+        if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+        self.clipboard_out_buffer = text; // backend allocator 소유 바이트를 그대로 인계(다음 호출까지 유효)
+        return self.clipboard_out_buffer;
+    }
+    const pending = activeSurface(self).core.pendingClipboardWrite();
+    if (pending.len == 0) return &.{};
+    if (self.clipboard_out_buffer.len > 0) {
+        self.allocator.free(self.clipboard_out_buffer);
+        self.clipboard_out_buffer = &.{};
+    }
+    self.clipboard_out_buffer = self.allocator.dupe(u8, pending) catch return &.{};
+    activeSurface(self).core.clearClipboardWrite();
+    return self.clipboard_out_buffer;
+}
+
+/// MARU_DEBUG일 때 활성 surface의 cell 격자를 찍는다. CJK 등 비-ASCII는 텍스트 줄에서
+/// 공백으로 보이지만 배경 줄(b...)의 'B'로 영역을 알 수 있어, 파란 배경 줄과 프롬프트 줄이
+/// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
+pub fn logScreenIfDebug(self: *AppSession) void {
+    if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
+    if (!activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel core라 화면 덤프 skip
+    const core = &activeSurface(self).core;
+    const cols = @min(@as(usize, core.size.cols), 240);
+    // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
+    if (core.last_command_exit) |code| {
+        screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) last_exit={d} ===", .{
+            core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col, code,
+        });
+    } else {
+        screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
+            core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col,
+        });
+    }
+    // 창 제목/사이드바와 같은 runtime observation cwd를 찍는다(host-backed placeholder core 오진 방지).
+    const cwd = pane_ops.activePane(self).activeTerm().rt.observation.cwd.items;
+    if (cwd.len > 0) screen_diag.info("cwd={s}", .{cwd});
+    var text: [240]u8 = undefined;
+    var bg: [240]u8 = undefined;
+    const grid_cols: usize = core.size.cols;
+    for (0..core.size.rows) |row| {
+        var any = false;
+        for (0..cols) |col| {
+            const cell = core.screen.cells[row * grid_cols + col];
+            const cp = cell.codepoint;
+            text[col] = if (cp >= 0x20 and cp < 0x7f) @intCast(cp) else ' ';
+            const has_bg = switch (cell.style.background) {
+                .default => false,
+                else => true,
+            };
+            bg[col] = if (has_bg) 'B' else '.';
+            if ((cp != 0 and cp != ' ') or has_bg) any = true;
+        }
+        // soft-wrap 플래그를 함께 찍는다(w=다음 줄로 이어짐, .=hard 줄끝). reflow 피드백 루프
+        // 회귀는 hard 줄(프롬프트)이 w로 잘못 찍히는 것으로 드러나므로, wrapped인 빈 줄도 보인다.
+        const w_mark: u8 = if (row < core.screen.wrapped.len and core.screen.wrapped[row]) 'w' else '.';
+        // OSC 133 semantic 분류(P=프롬프트 I=입력 C=명령출력 ·=미분류). 셸 통합이 마커를 emit하면
+        // 채워진다 — 프롬프트/입력/출력이 어떤 행으로 잡히는지 데이터로 본다(거터 PR 전 조기 확인).
+        const p_mark: u8 = if (row < core.screen.prompt_marks.len) switch (core.screen.prompt_marks[row].kind) {
+            .unknown => '.',
+            .prompt => 'P',
+            .input => 'I',
+            .command => 'C',
+        } else '.';
+        if (!any and w_mark != 'w' and p_mark == '.') continue;
+        screen_diag.info("r{d:0>2} {c}{c} t|{s}|", .{ row, w_mark, p_mark, text[0..cols] });
+        screen_diag.info("r{d:0>2} {c}{c} b|{s}|", .{ row, w_mark, p_mark, bg[0..cols] });
+    }
+}
+
+/// 프레임마다 셸 의미 이벤트(OSC 133/7)를 소비한다 — MARU_DEBUG면 명령 경계를 구조화 한 줄씩
+/// 찍고, 항상 비워 core의 이벤트 버퍼를 bounded하게 유지한다(누구도 drain 안 하면 cap에서 드롭).
+/// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
+pub fn drainShellEventsForFrame(self: *AppSession) void {
+    if (!self.surface_initialized) return;
+    if (!activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
+    if (pane_ops.activePane(self).activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
+    const core = &activeSurface(self).core;
+    if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
+    if (diag_gate.maruDebugEnabled()) {
+        for (core.shellEvents()) |ev| switch (ev) {
+            .prompt_start => |r| shell_diag.info("shell.prompt-start row={d}", .{r}),
+            .input_start => |r| shell_diag.info("shell.input-start row={d}", .{r}),
+            .command_start => |r| shell_diag.info("shell.command-start row={d}", .{r}),
+            .command_end => |ce| if (ce.exit) |code|
+                shell_diag.info("shell.command-end row={d} exit={d}", .{ ce.row, code })
+            else
+                shell_diag.info("shell.command-end row={d} exit=?", .{ce.row}),
+            .cwd_changed => shell_diag.info("shell.cwd-changed cwd={s}", .{core.currentCwd()}),
+        };
+        // 조용한 손실 방지: cap을 넘어 드롭된 이벤트가 있으면 보고한다.
+        if (core.shellEventsOverflowed()) shell_diag.info("shell.events OVERFLOW: cap 초과로 일부 이벤트 드롭", .{});
+    }
+    core.clearShellEvents();
+}
+
+// --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---
+// 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
+
+// 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
+// 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
+// MARU_DEBUG 게이트는 diag.zig가 단일 출처로 소유한다.
+pub const screen_diag = std.log.scoped(.screen);
+
+// 셸 의미 이벤트(OSC 133/7) 진단 logger. MARU_DEBUG일 때 frame마다 core가 기록한 명령 경계
+// 이벤트를 구조화 한 줄씩 찍는다 — 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
+// drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
+pub const shell_diag = std.log.scoped(.shell);

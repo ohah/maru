@@ -26,6 +26,11 @@ const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig"); // 공용 test 하네스·상수는 그쪽 소유
 const AppSession = app_session_mod.AppSession;
+const latchExternalFileChange = app_session_mod.latchExternalFileChange;
+const FilePanelSaveCloseAction = app_session_mod.FilePanelSaveCloseAction;
+const FileTreeReloadAction = AppSession.FileTreeReloadAction;
+const FileTreeTrashOutcome = app_session_mod.FileTreeTrashOutcome;
+const PendingFileTreeRootValidation = app_session_mod.PendingFileTreeRootValidation;
 const headerIconRasterExtentPx = app_session_mod.headerIconRasterExtentPx;
 const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
@@ -43,9 +48,7 @@ const PinnedFilePanelParent = AppSession.PinnedFilePanelParent;
 const bumpExternalFileChange = AppSession.bumpExternalFileChange;
 const entryKindForOpenKind = AppSession.entryKindForOpenKind;
 const file_tree_backend = app_session_mod.file_tree_backend;
-const openFilePanelPath = AppSession.openFilePanelPath;
 const panelKindForEntryKind = AppSession.panelKindForEntryKind;
-const reportFilePanelDirty = AppSession.reportFilePanelDirty;
 const rowFileIdentity = AppSession.rowFileIdentity;
 const stableOpenedFileHash = AppSession.stableOpenedFileHash;
 const CloseScope = app_session_mod.CloseScope;
@@ -803,7 +806,7 @@ pub fn rebuildFileTermSurface(self: *AppSession, entry: *dock_panel.Entry) !void
                 entry.surface_id = replacement.surfaceId();
                 pane.terms.items[term_index] = replacement;
                 // 대표 surface·leaf rect 재바인딩(닫힌 Term을 가리키던 stale 포인터 방지).
-                self.refreshAfterReap(tab_index);
+                term_ops.refreshAfterReap(self, tab_index);
                 self.metal_dirty = true;
                 return;
             }
@@ -3738,3 +3741,562 @@ pub const FileTreeDockRemovalStats = struct {
     unlock_visits: usize = 0,
     reload_visits: usize = 0,
 };
+
+// --- 호출 그래프로 소유가 확인돼 옮겨 온 함수 ---
+// 이름에 도메인 단어가 없어 F 시리즈가 못 잡았고, 이 그룹을 과반으로 부르며 만지는 상태도 이 그룹이다.
+
+pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
+    const operation = self.file_tree_root_picker_inflight;
+    self.file_tree_root_picker_inflight = .none;
+    if (operation == .none or path.len == 0) {
+        reportFileTreeRootOutcome(self, .picker_canceled, null);
+        return;
+    }
+    if (path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) {
+        reportFileTreeRootOutcome(self, .invalid_path, "선택한 폴더 경로가 올바르지 않습니다.");
+        return;
+    }
+    if (self.file_tree_root_request_id == std.math.maxInt(u64)) {
+        reportFileTreeRootOutcome(self, .request_id_exhausted, "폴더 선택 요청 번호를 더 발급할 수 없습니다.");
+        return;
+    }
+    const owned = self.allocator.dupe(u8, path) catch {
+        reportFileTreeRootOutcome(self, .allocation_failed, "폴더 선택 상태를 준비할 수 없습니다.");
+        return;
+    };
+    self.file_tree_root_request_id += 1;
+    const pending: PendingFileTreeRootValidation = .{
+        .request_id = self.file_tree_root_request_id,
+        .expected_root_generation = self.file_tree.rootGeneration(),
+        .operation = operation,
+    };
+    if (!self.file_tree_backend.submitRootValidation(
+        owned,
+        pending.request_id,
+        pending.expected_root_generation,
+        @intFromEnum(operation),
+        0,
+    )) {
+        self.allocator.free(owned);
+        reportFileTreeRootOutcome(self, .backend_busy, "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.");
+        return;
+    }
+    self.file_tree_root_validation = pending;
+}
+
+pub fn takeFileTreeReloadAction(self: *AppSession) ?FileTreeReloadAction {
+    while (self.file_tree_reload_actions_len != 0) {
+        self.file_tree_reload_actions_len -= 1;
+        const action = self.file_tree_reload_actions[self.file_tree_reload_actions_len];
+        if (action.conflict) return action;
+        const entry = fileEntryForSurfaceId(self, action.surface_id) orelse continue;
+        if (entry.dirty or entry.dirty_sync_pending or entry.external_change) {
+            markExternalFileChange(self, entry);
+            continue;
+        }
+        return action;
+    }
+    return null;
+}
+
+pub fn beginFileConflictReload(self: *AppSession, surface_id: u64) void {
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return;
+    if (!entry.external_change or entry.conflict_reload_pending) return;
+    entry.conflict_reload_pending = true;
+    entry.conflict_reload_generation = entry.external_change_generation;
+    queueFileTreeReload(self, surface_id, true);
+    self.file_tree_rows_dirty = true;
+    self.metal_dirty = true;
+}
+
+/// web shell이 실제 read + editor replacement를 마친 뒤에만 conflict 보호를 해제한다. 실패 ack는 pending만
+/// 내리고 원래 dirty buffer/conflict/save guard를 그대로 둬 사용자가 재시도하거나 복사할 수 있게 한다.
+pub fn completeFileConflictReload(self: *AppSession, surface_id: u64, success: bool) FilePanelWriteError!void {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.conflict_reload_pending) {
+        if (!success) self.latchExternalFileChange(entry); // clean auto-reload가 편집 중단/실패를 보고한 보수적 latch.
+        return;
+    }
+    entry.conflict_reload_pending = false;
+    const unchanged = entry.external_change_generation == entry.conflict_reload_generation;
+    entry.conflict_reload_generation = 0;
+    if (success and unchanged) {
+        entry.dirty = false;
+        entry.dirty_sync_pending = false;
+        entry.external_change = false;
+        removeFilePanelDirtySyncAction(self, surface_id);
+    }
+    self.file_tree_rows_dirty = true;
+    self.metal_dirty = true;
+}
+
+pub fn completeFileTreeTrash(
+    self: *AppSession,
+    id: u64,
+    outcome: FileTreeTrashOutcome,
+    recovery_path: ?[]const u8,
+) void {
+    if (self.file_tree_trash_queue_len == 0) return;
+    const pending = self.file_tree_trash_queue[0];
+    // Only the native adapter that took the head action may acknowledge it. This rejects stale,
+    // guessed, or duplicate callbacks without releasing the namespace reservation early.
+    if (pending.id != id or !pending.taken or pending.restoring) return;
+    if (outcome == .moved_verified) {
+        clearFileTreeMutationReservation(self, pending.id);
+        const protected_now = fileTreePathProtectedNow(self, pending.original, pending.id);
+        if (protected_now) {
+            // The native destination mapping proves the staged object reached Trash, but a
+            // late editor/external-change signal means closing the buffer could lose data. Reflect
+            // the filesystem removal while keeping the protected tab available for recovery/save.
+            releaseFileTreeMutationEditorLocks(self, pending.id, true);
+            self.showNotice("휴지통 이동은 완료됐지만 편집 상태가 바뀌어 열린 탭은 유지합니다.");
+        } else {
+            _ = removeDeletedDockEntries(self, pending.original);
+            releaseFileTreeMutationEditorLocks(self, pending.id, false);
+        }
+        self.file_tree.removeRecentWithin(pending.original);
+        if (std.fs.path.dirname(pending.original)) |parent| self.file_tree.invalidatePath(parent) catch {};
+        if (self.file_tree_selection.generation == pending.selection_generation) {
+            const selected_path = self.file_tree_selection.path();
+            if (self.file_tree_selection.kind == pending.row_kind and selected_path != null and
+                std.mem.eql(u8, selected_path.?, pending.original)) clearFileTreeSelection(self);
+        }
+    } else if (outcome == .not_moved) {
+        if (!enqueueFileTreeDeleteRestore(
+            self,
+            pending.id,
+            pending.root,
+            pending.staged,
+            pending.original,
+            pending.identity,
+            pending.parent_identity,
+            pending.root_identity,
+        )) {
+            clearFileTreeMutationReservation(self, pending.id);
+            releaseFileTreeMutationEditorLocks(self, pending.id, true);
+            const retained = takePendingTrashStaged(self, pending.id) orelse return;
+            finishPendingTrashRecord(self, pending.id);
+            retainFileTreeRecoveryPath(self, retained);
+            return;
+        }
+        self.file_tree_trash_queue[0].restoring = true;
+        self.file_tree_mutation_backend.pump();
+        return;
+    } else {
+        // The OS moved some directory entry but its destination identity could not be proven. Never
+        // roll back the now-ambiguous staged path: preserve the destination if known and keep the
+        // session fail-closed without pretending a nonexistent source is recoverable.
+        const owned_recovery = if (recovery_path) |path|
+            if (path.len != 0) self.allocator.dupe(u8, path) catch null else null
+        else
+            null;
+        finishPendingTrashRecord(self, pending.id);
+        if (owned_recovery) |path| {
+            retainFileTreeRecoveryPath(self, path);
+        } else {
+            retainFileTreeUnknownRecovery(self);
+        }
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+        return;
+    }
+    finishPendingTrashRecord(self, pending.id);
+    self.file_tree_mutation_backend.pump();
+    self.file_tree_rows_dirty = true;
+    self.metal_dirty = true;
+}
+
+/// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
+/// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
+pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
+    if (fileTreeFileMutationBusy(self) or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
+        !std.unicode.utf8ValidateSlice(path)) return .failed;
+    const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
+    const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
+    if (stat.kind != .file) return .failed;
+    return openFilePanelPathAfterValidation(self, path, open_kind, null);
+}
+
+/// 격리 Markdown renderer 또는 로컬 HTML delegate가 활성화한 링크를 source surface에 고정해 처리한다.
+/// 명시적 HTTP(S)는 config/⌘⇧ disposition에 따라 browser Term 또는 시스템 브라우저 action으로 보내고,
+/// Markdown의 로컬 문서 링크는 source group에서 연다. 최종 regular-file 검증은 공용 open 경로가 맡는다.
+pub fn openFilePanelLink(
+    self: *AppSession,
+    surface_id: u64,
+    href: []const u8,
+    force_system: bool,
+) FilePanelLinkError!void {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const source = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (file_panel_bridge.isExplicitHttpLink(href)) return queueExternalLink(self, href, force_system);
+    if (source.kind != .markdown) return error.WrongKind;
+    const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidLink => return error.InvalidLink,
+    };
+    defer self.allocator.free(target);
+    if (openFilePanelPath(self, target) != .opened) return error.OpenFailed;
+}
+
+/// request-scoped unlock 자체를 실행할 panel/JS가 사라졌을 때의 terminal ack. 같은 surface의 새 close가 이미
+/// 시작됐으면 이전 request 실패는 무시하고, 아니면 clean으로 추정하지 않도록 dirty를 보수적으로 latch한 뒤
+/// sync reservation만 회수한다.
+pub fn failFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: u64) void {
+    if (self.pending_file_panel_close) |pending| {
+        if (pending.surface_id == surface_id and pending.request_id != request_id) return;
+    }
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return;
+    entry.dirty = true;
+    entry.dirty_sync_pending = false;
+    removeFilePanelDirtySyncAction(self, surface_id);
+    self.file_tree_rows_dirty = true;
+    self.metal_dirty = true;
+    self.showNotice("편집 상태를 다시 확인할 수 없어 파일 탭을 보호했습니다.");
+}
+
+pub fn takeFilePanelSaveCloseAction(self: *AppSession) ?FilePanelSaveCloseAction {
+    const action = self.file_panel_save_close_pending orelse return null;
+    self.file_panel_save_close_pending = null;
+    const pending = self.pending_file_panel_close orelse return null;
+    if (pending.surface_id != action.surface_id or pending.request_id != action.request_id or
+        pending.phase != .saving) return null;
+    if (filePanelCloseEntry(self, pending) == null) {
+        abortStaleFilePanelClose(self);
+        return null;
+    }
+    return action;
+}
+
+pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id: u64, revision: u64, success: bool) void {
+    const pending = self.pending_file_panel_close orelse return;
+    if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .saving) return;
+    if (filePanelCloseEntry(self, pending) == null) {
+        abortStaleFilePanelClose(self);
+        return;
+    }
+    if (!success) {
+        cancelFilePanelClose(self);
+        self.showNotice("파일을 저장할 수 없어 탭을 닫지 않았습니다.");
+        return;
+    }
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse {
+        cancelFilePanelClose(self);
+        return;
+    };
+    if (entry.editor_revision != revision or entry.dirty or entry.dirty_sync_pending or entry.external_change) {
+        cancelFilePanelClose(self);
+        self.showNotice("저장 후 편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
+        return;
+    }
+    _ = closeFilePanelSurfaceNow(self, surface_id);
+}
+
+/// surface가 핀한 Markdown 파일을 읽는다. web 쪽에서 경로를 지정할 수 없고, 단일 파일 상한은 8 MiB다.
+pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+    if (entry.editor_recovery_required) return error.RecoveryRequired;
+    if (entry.mutation_pending_id != 0) return error.MutationPending;
+
+    const cwd = std.Io.Dir.cwd();
+    const file = try openFilePanelRead(cwd, entry.path, !entry.initial_file_identity_pending);
+    defer file.close(self.io);
+    if (entry.initial_file_identity_pending) {
+        const actual = try openedFileIdentity(self, file);
+        const expected: file_tree.Identity = .{
+            .device = entry.initial_file_identity_device,
+            .inode = entry.initial_file_identity_inode,
+            .kind = entry.initial_file_identity_kind,
+        };
+        if (!actual.eql(expected)) return error.NotFound;
+    }
+    const before = file.stat(self.io) catch return error.NotFound;
+    const bytes = try readOpenedFile(self, gpa, file);
+    errdefer gpa.free(bytes);
+    const after = file.stat(self.io) catch return error.NotFound;
+    if (before.kind != .file or after.kind != .file or before.inode != after.inode or before.size != after.size or
+        !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.NotFound;
+    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+    // size-query/fill 사이에 새 document가 시작되거나 WebContent가 종료됐으면 이전 read가 새 save baseline을
+    // 덮지 못한다. byte 반환과 token commit을 같은 epoch/active 검사로 묶는다.
+    if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+    if (entry.editor_recovery_required) return error.RecoveryRequired;
+    entry.initial_file_identity_pending = false;
+    entry.initial_file_identity_device = 0;
+    entry.initial_file_identity_inode = 0;
+    entry.initial_file_identity_kind = 0;
+    entry.disk_content_hash = std.hash.Wyhash.hash(0, bytes);
+    entry.disk_content_hash_valid = true;
+    return bytes;
+}
+
+/// 신뢰 shell document가 새로 생길 때마다 발급하는 generation. surface id는 WebContent reload에서 유지되므로
+/// revision만으로는 이전 document와 새 document를 구분할 수 없다.
+pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (document_id == 0) return error.StaleDocument;
+
+    // stale/멱등 begin은 close transaction을 포함한 어떤 상태도 바꾸지 않는다. 동일 active document의
+    // 재시도는 namespace mutation 중에도 새 문서를 만들지 않으므로 기존 epoch만 반환할 수 있다.
+    if (entry.editor_surface_id == surface_id) {
+        if (document_id < entry.editor_document_id or
+            (document_id == entry.editor_document_id and !entry.editor_document_active)) return error.StaleDocument;
+        if (document_id == entry.editor_document_id) return entry.editor_epoch;
+    }
+    if (entry.mutation_pending_id != 0) return error.MutationPending;
+    if (entry.editor_epoch >= maru.session.control_bridge.max_js_safe_integer) return error.IdentityExhausted;
+
+    // document_id는 surface-local이다. LRU/rename으로 새 surface id가 생기면 이전 WebView의 request는 이미
+    // surface lookup에서 거부되므로 새 surface는 1부터 다시 시작할 수 있다.
+    if (entry.editor_surface_id != surface_id) {
+        entry.editor_surface_id = surface_id;
+        entry.editor_document_id = 0;
+        entry.editor_document_active = false;
+    }
+    // 여기부터는 실제 새 document 승인이다. 이전 close의 lock/snapshot 예약은 새 page가 소유할 수 없으므로
+    // 이 전이에서만 취소한다.
+    if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
+        cancelFilePanelClose(self);
+
+    const had_editor_document = entry.editor_document_active;
+    entry.editor_document_id = document_id;
+    entry.editor_document_active = true;
+    entry.editor_epoch += 1;
+    entry.editor_revision = 0;
+    // 새 document가 자신의 epoch-scoped read를 끝내기 전에는 이전 document의 disk token으로 저장할 수 없다.
+    entry.disk_content_hash_valid = false;
+    // 새 document 교체는 crash와 같은 데이터 수명 경계다. editable mode에서는 마지막 CM6 transaction이 아직
+    // native dirty ACK에 도달하지 않았을 수 있으므로 native mirror가 clean이어도 보수적으로 recovery한다.
+    // read mode도 이전 editable buffer의 dirty/pending 보호가 남아 있으면 동일하게 latch한다.
+    if (had_editor_document and (entry.mode.isEditable() or entry.dirty or entry.dirty_sync_pending)) {
+        entry.editor_recovery_required = true;
+        entry.dirty = true;
+        entry.dirty_sync_pending = true;
+        self.showNotice("편집 중 웹 콘텐츠가 다시 시작되어 자동 복구 전까지 파일 작업을 차단했습니다.");
+    }
+    return entry.editor_epoch;
+}
+
+/// 정확히 현재 surface의 editable WebContent가 종료되면 page→native dirty ACK 직전 편집도 보존 대상으로 본다.
+/// 새 document begin 전까지 active=false로 이전 page의 모든 read/write/ACK를 즉시 무효화한다.
+pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
+    if (!self.dock_initialized) return 0;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return 0;
+    if (!entry.kind.usesEditorBridge()) return 0;
+    // LRU/rename이 새 surface id를 발급한 뒤 첫 begin 전이면 Entry에 남은 active flag는 이전 surface 문서다.
+    // 새 WebView의 조기 종료를 그 문서 손실로 오인하지 않고 safe reload만 허용한다.
+    if (entry.editor_surface_id != surface_id) return 1;
+    // 최초 begin 전 crash는 잃을 editor가 없어 reload만 허용한다. 이미 종료 처리한 document의 중복 callback은
+    // 다시 reload하지 않는다.
+    if (!entry.editor_document_active) return if (entry.editor_document_id == 0) 1 else 0;
+    entry.editor_document_active = false;
+    // read 전환은 CM6 buffer를 파괴하지 않으며 dirty snapshot ACK 전 pending 보호도 유지한다. 현재 표시 mode만
+    // 보고 safe reload로 분류하면 source/live→read 직후 crash에서 편집을 잃으므로 보호 상태도 함께 본다.
+    if (!entry.mode.isEditable() and !entry.dirty and !entry.dirty_sync_pending) return 1;
+    entry.editor_recovery_required = true;
+    entry.dirty = true;
+    entry.dirty_sync_pending = true;
+    if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
+        cancelFilePanelClose(self);
+    self.showNotice("편집 중 웹 콘텐츠가 종료되어 자동 복구 전까지 파일 작업을 차단했습니다.");
+    self.metal_dirty = true;
+    return 2;
+}
+
+/// 신뢰 shell이 핀한 Markdown 파일 하나만 원자 교체한다. 웹 요청에는 경로 인자가 없고 surface→entry 경로를
+/// 여기서 다시 해소한다. 원본 권한을 보존한 동일 디렉터리 임시 파일을 fsync한 뒤 rename-replace하므로 실패 시
+/// 기존 파일이 부분 내용으로 노출되지 않는다. dirty 최종값은 저장 중 재편집과 직렬화한 shell의 setDirty가 내리며,
+/// write 자체는 true를 false로 바꾸지 않아 저장 완료와 재편집 사이 eviction race를 만들지 않는다.
+pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+    if (entry.editor_recovery_required) return error.RecoveryRequired;
+    if (entry.mutation_pending_id != 0) return error.MutationPending;
+    if (entry.external_change) return error.ExternalConflict;
+    if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
+    if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
+    if (!entry.disk_content_hash_valid) return error.ExternalConflict;
+
+    const pinned = try openPinnedFilePanelParent(self.io, entry.path);
+    defer pinned.dir.close(self.io);
+    var original = openFilePanelRead(pinned.dir, pinned.basename, false) catch return error.NotFound;
+    defer original.close(self.io);
+    const stat = original.stat(self.io) catch return error.NotFound;
+    if (stat.kind != .file) return error.NotRegularFile;
+    try writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, entry.disk_content_hash, content);
+    entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
+    entry.self_write_hash = std.hash.Wyhash.hash(0, content);
+    entry.disk_content_hash = entry.self_write_hash;
+    entry.disk_content_hash_valid = true;
+    entry.self_write_verifications = 0;
+    self.metal_dirty = true;
+}
+
+pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (!entry.kind.usesEditorBridge()) return error.WrongKind;
+    // 기존 headless policy fixtures만 zero/zero sentinel을 쓴다. 제품 빌드에는 이 seam 자체가 없고 JSON bridge도
+    // non-positive epoch을 거부한다.
+    const test_unbound = builtin.is_test and report.editor_epoch == 0 and entry.editor_epoch == 0 and !entry.editor_document_active;
+    if (!test_unbound and (!entry.editor_document_active or report.editor_epoch != entry.editor_epoch))
+        return error.StaleDocument;
+    if (entry.editor_recovery_required) return error.RecoveryRequired;
+    const mutation_lock = if (report.request_id != 0) fileTreeMutationEditorLock(self, surface_id, report.request_id) else null;
+    if (entry.mutation_pending_id != 0 and mutation_lock == null) return error.MutationPending;
+    var close_pending: ?PendingFilePanelClose = null;
+    if (report.request_id != 0 and mutation_lock == null) {
+        const pending = self.pending_file_panel_close orelse return;
+        if (pending.surface_id != surface_id or pending.phase != .syncing or pending.request_id != report.request_id) return;
+        if (filePanelCloseEntry(self, pending) == null) {
+            abortStaleFilePanelClose(self);
+            return;
+        }
+        close_pending = pending;
+    }
+    if (report.revision < entry.editor_revision) return error.StaleDocument;
+    entry.editor_revision = report.revision;
+    const protected_clean_ack = entry.external_change and !report.dirty;
+    const changed = (!protected_clean_ack and entry.dirty != report.dirty) or entry.dirty_sync_pending;
+    if (!protected_clean_ack) entry.dirty = report.dirty;
+    const close_match = close_pending != null;
+    if (self.pending_file_panel_close == null or self.pending_file_panel_close.?.surface_id != surface_id or close_match) {
+        entry.dirty_sync_pending = false;
+        removeFilePanelDirtySyncAction(self, surface_id);
+    }
+    if (changed) self.metal_dirty = true;
+    if (changed) self.file_tree_rows_dirty = true;
+    if (mutation_lock) |lock| {
+        if (entry.external_change or report.dirty) {
+            const mutation_id = lock.mutation_id;
+            abortWaitingFileTreeMutation(self, mutation_id, "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.");
+            return;
+        }
+        lock.acknowledged = true;
+        _ = submitWaitingFileTreeMutation(self, lock.mutation_id);
+        return;
+    }
+    if (close_pending) |pending| {
+        var pinned = pending;
+        pinned.revision = report.revision;
+        if (!entry.dirty and !entry.external_change) {
+            _ = closeFilePanelSurfaceNow(self, surface_id);
+            return;
+        }
+        showFilePanelCloseChoices(self, pinned, entry);
+    }
+}
+
+pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
+    if (fileTreeMutationEditorLock(self, surface_id, request_id)) |lock| {
+        const mutation_id = lock.mutation_id;
+        abortWaitingFileTreeMutation(self, mutation_id, "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.");
+        return;
+    }
+    const pending = self.pending_file_panel_close orelse return;
+    if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .syncing) return;
+    cancelFilePanelClose(self);
+    self.showNotice("편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
+}
+
+/// 핀된 Markdown 경로의 lexical parent도 root fd부터 component별 no-follow로 연 뒤, 상대 asset의 모든 하위
+/// component를 같은 capability 아래에서 순회한다. 최초 parent 재개방까지 symlink를 거부해야 열린 문서의
+/// ancestor가 교체된 뒤에도 새 namespace나 root 밖 파일을 읽지 않는다.
+pub fn readFilePanelAsset(
+    self: *AppSession,
+    gpa: std.mem.Allocator,
+    surface_id: u64,
+    raw_path: []const u8,
+) FilePanelReadError![]u8 {
+    if (!self.dock_initialized) return error.SurfaceNotFound;
+    const entry = fileEntryForSurfaceId(self, surface_id) orelse return error.SurfaceNotFound;
+    if (entry.kind != .markdown) return error.WrongKind;
+
+    var normalized_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const normalized = file_panel_bridge.normalizeAssetPath(raw_path, &normalized_buf) catch return error.InvalidPath;
+    const pinned = openPinnedFilePanelParent(self.io, entry.path) catch return error.OutsideRoot;
+    defer pinned.dir.close(self.io);
+
+    var opened_dirs: [std.fs.max_path_bytes / 2]std.Io.Dir = undefined;
+    var opened_count: usize = 0;
+    defer while (opened_count > 0) {
+        opened_count -= 1;
+        opened_dirs[opened_count].close(self.io);
+    };
+
+    var current = pinned.dir;
+    if (std.fs.path.dirname(normalized)) |subdir| {
+        var components = std.mem.splitScalar(u8, subdir, '/');
+        while (components.next()) |component| {
+            const next = current.openDir(self.io, component, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                error.FileNotFound => return error.NotFound,
+                else => return error.OutsideRoot,
+            };
+            opened_dirs[opened_count] = next;
+            opened_count += 1;
+            current = next;
+        }
+    }
+
+    const file = try openFilePanelRead(current, std.fs.path.basename(normalized), false);
+    defer file.close(self.io);
+    return readOpenedFile(self, gpa, file);
+}
+
+/// 파일 entry를 닫는다 = 그 파일 **Term을 닫는다**(FP16). entry의 소유가 Term이므로 `destroyTerm`이
+/// entry·path까지 해제한다 — 옛 `group.remove` + `allocator.free(path)` 쌍을 대체한다.
+///
+/// pane의 마지막 Term이면 닫지 않고 false를 돌려준다. pane은 항상 Term ≥1이라는 모델 불변식
+/// (`session_model.Pane`)을 파일 경로가 깨면 안 되고, 그 경우의 cascade(빈 pane collapse·워크스페이스 닫기)는
+/// `executeClose`가 소유하는 별도 정책이다.
+/// 창 간 이동으로 들어오는 파일들을 이 창의 탐색기 recent·watch 집합에 등록한다. 실패하면 아무것도
+/// 바꾸지 않는다(후보 트리에 다 쓴 뒤 무실패 commit) — 호출자는 detach 전에 이걸 부른다.
+pub fn adoptMovedFileTermsIntoExplorer(dst: *AppSession, tab: *Tab, src: *AppSession) !void {
+    var candidate = try dst.file_tree.clone();
+    defer candidate.deinit();
+    var extras: [dock_panel.max_entries]([]const u8) = undefined;
+    var extra_count: usize = 0;
+    var dst_it = fileEntries(dst);
+    while (dst_it.next()) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
+        if (extra_count >= extras.len) break;
+        extras[extra_count] = parent;
+        extra_count += 1;
+    };
+    for (tab.panes.items) |pane| {
+        for (pane.terms.items) |term| {
+            const entry = term.file_entry orelse continue;
+            const parent = std.fs.path.dirname(entry.path) orelse continue;
+            // 양쪽이 inferred면 source가 파일을 열 때 정한 project root가 dirname보다 정확하다.
+            var inferred_root = parent;
+            if (candidate.rootMode() == .inferred and src.file_tree.rootMode() == .inferred) {
+                var authority: ?[]const u8 = null;
+                for (0..src.file_tree.rootCount()) |ri| {
+                    const root = src.file_tree.rootAt(ri).?;
+                    if (!file_tree.Tree.pathWithinRoot(entry.path, root)) continue;
+                    if (authority == null or root.len > authority.?.len) authority = root;
+                }
+                if (authority) |root| inferred_root = root;
+            }
+            try candidate.recordOpened(entry.path, inferred_root);
+            if (extra_count < extras.len) {
+                extras[extra_count] = parent;
+                extra_count += 1;
+            }
+        }
+    }
+    try candidate.resetWatchRequests(extras[0..extra_count]);
+    var rows: std.ArrayList(file_tree.Row) = .empty;
+    defer rows.deinit(dst.allocator);
+    try prepareFileTreeRowStaging(dst, &rows, countTabFileEntries(tab));
+    buildPreparedFileTreeRows(dst, &candidate, &rows);
+    commitFileTreeCandidate(dst, &candidate, &rows);
+    dst.file_tree_rows_dirty = true;
+}

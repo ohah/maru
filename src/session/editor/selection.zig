@@ -206,6 +206,18 @@ pub const Selections = struct {
         return self.items[self.primary];
     }
 
+    /// **undo/redo가 selection을 복원할 때 부른다**(§3.3).
+    ///
+    /// 텍스트와 selection 배열·primary는 되돌리지만 **`column`은 되돌리지 않는다** — 그것은 문서
+    /// 상태가 아니라 **진행 중인 제스처**이고, undo로 드래그가 부활하면 마우스를 놓은 사용자가
+    /// 여전히 열 선택 중인 화면을 본다. `goal`도 같은 이유다(다음 세로 이동이 옛 목표 열로 튄다).
+    ///
+    /// 지금은 `invalidateVisualState`와 같은 일을 하지만 **이름을 나눠 둔다** — 부르는 이유가 다르고
+    /// (한쪽은 뷰가 바뀌어서, 한쪽은 시간을 되감아서), 나중에 한쪽만 규칙이 달라질 수 있다.
+    pub fn clearGestureState(self: *Selections) void {
+        self.invalidateVisualState();
+    }
+
     /// **시각 좌표가 무의미해졌을 때 부른다** — 뷰 폭 변경·랩 토글·접힘 변경(§3.2a).
     ///
     /// 그 순간 옛 시각 행·열은 다른 위치를 가리키므로, 그대로 두면 다음 프레임의 파생이 사용자가 잡은
@@ -594,4 +606,24 @@ test "시각 상태 무효화는 열 원본과 goal을 함께 지운다" {
     // **byte offset은 건드리지 않는다** — 그 축은 뷰 폭과 무관하다(§3.1).
     try testing.expectEqual(@as(usize, 5), sels.items[0].focus);
     try testing.expectEqual(@as(usize, 20), sels.items[1].focus);
+}
+
+test "undo 복원은 열 선택 원본을 되살리지 않는다 (§3.3)" {
+    // 열 선택 원본은 **진행 중인 제스처**이지 문서 상태가 아니다. undo로 드래그가 부활하면
+    // 마우스를 놓은 사용자가 여전히 열 선택 중인 화면을 본다.
+    var items = [_]Selection{
+        .{ .anchor_start = 0, .anchor_end = 0, .focus = 7, .goal = .{ .col = 3 } },
+        .{ .anchor_start = 30, .anchor_end = 30, .focus = 30, .goal = .line_end },
+    };
+    var sels = Selections.init(&items, 1);
+    sels.column = .{ .from_row = 0, .from_col = 0, .to_row = 4, .to_col = 8 };
+
+    sels.clearGestureState();
+
+    try testing.expect(sels.column == null);
+    for (sels.items) |s| try testing.expect(s.goal.eql(.none));
+    // **복원된 selection 자체는 남는다** — undo가 되돌리는 것은 텍스트와 커서 배열이다.
+    try testing.expectEqual(@as(usize, 2), sels.count());
+    try testing.expectEqual(@as(usize, 1), sels.primary);
+    try testing.expectEqual(@as(usize, 7), sels.items[0].focus);
 }

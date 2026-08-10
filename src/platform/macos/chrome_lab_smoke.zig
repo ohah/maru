@@ -42,9 +42,18 @@ const cell_height_px: u32 = 16;
 /// **이 근사가 픽스처에 있는 것이 요점이다.** 백엔드는 폰트 크기를 그대로 받고, 제품은 아는 값을
 /// 그대로 넘기므로 어디에도 역산이 남지 않는다.
 /// 편집기 시나리오의 chrome 텍스트 face. 그 밖은 빈 face(system UI)를 유지한다.
+///
+/// **fallback을 제품 기본값에서 가져온다.** Lab이 자체 상수를 들면 캡처가 제품을 예고하지 못한다 —
+/// 실제로 이 함수가 빈 face를 넘기던 동안 모든 편집기 캡처가 비례 폰트 렌더였고, 그 위에서 세운
+/// 가설들이 틀렸다. `FontConfig{}`의 기본값을 그대로 읽어 단일 출처를 유지한다.
 fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
     return switch (id) {
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph => .{ .family = variant.family() },
+        .editor_gutter,
+        .editor_scrolled,
+        .editor_font_large,
+        .editor_hazard,
+        .editor_wide_glyph,
+        => .{ .family = variant.family(), .fallback = (maru.config.theme.FontConfig{}).fallback },
         else => .{},
     };
 }
@@ -128,6 +137,9 @@ pub fn main(init: std.process.Init) !void {
     const font_variant = try readFontVariant();
     var font_postscript_name_buf: [128]u8 = undefined;
     const font_postscript_name = try registerLabFont(font_variant, &font_postscript_name_buf);
+    // primary를 등록한 **뒤에** 나머지를 올린다 — fallback 후보(font.fallback 기본값)가 프로세스에
+    // 있어야 캡처가 제품을 예고한다. 순서가 중요하다: 먼저 전부 올리면 primary가 중복 등록으로 실패한다.
+    registerRemainingBundledFonts(font_variant);
     var scenario_name_buf: [96]u8 = undefined;
     const scenario_name = if (font_variant == .jetbrains_mono)
         artifactName(scenario_id)
@@ -469,6 +481,22 @@ fn fontVariantFromValue(value: []const u8) ?FontVariant {
     if (std.mem.eql(u8, value, "cascadia-code")) return .cascadia_code;
     if (std.mem.eql(u8, value, "hack")) return .hack;
     return null;
+}
+
+/// **번들 폰트를 전부 등록한다** — 제품이 `ATSApplicationFontsPath`로 `Contents/Resources/Fonts`의
+/// 모든 `.ttf`를 자동 등록하므로, Lab이 선택한 변종 하나만 등록하면 캡처가 제품을 예고하지 못한다.
+/// 실제로 `font.fallback` 기본값(Jetendard)이 등록되지 않아 한글이 시스템 폴백으로 그려졌고, 골든이
+/// "변화 없음"으로 통과해 그 사실을 덮었다.
+///
+/// 등록 실패는 무시한다 — 여기서 필요한 것은 **fallback 후보를 프로세스에 존재하게** 만드는 것뿐이고,
+/// primary 등록 실패는 `registerLabFont`가 별도로 에러를 낸다.
+fn registerRemainingBundledFonts(primary: FontVariant) void {
+    inline for (comptime std.enums.values(FontVariant)) |variant| {
+        if (variant != primary) {
+            var scratch: [128]u8 = undefined;
+            _ = registerLabFont(variant, &scratch) catch {};
+        }
+    }
 }
 
 fn registerLabFont(variant: FontVariant, postscript_name_out: []u8) ![]const u8 {

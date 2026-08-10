@@ -111,7 +111,7 @@ font.family = "JetBrains Mono"
 font.size = 14
 font.line-height = 1.0
 font.letter-spacing = 0.0
-font.fallback = ""
+font.fallback = "Jetendard"
 font.family-bold = ""
 font.family-italic = ""
 ```
@@ -124,7 +124,11 @@ font.family-italic = ""
 - `font.letter-spacing`은 자간(논리 pt, 음수 허용 — 칸 좁힘)이다. 기본 0.0.
   - **렌더 모델(자간 적용)**: 자간은 **grid advance(셀 배치 간격)에만** 반영하고, **폰트 글리프 비트맵 폭은 자연폭(자간 무관)**으로 둔다 — `applyFontSpacing`이 `advance_width_px`(spaced, 배치·hit-test·커서)와 `glyph_cell_width_px`(natural, atlas slot·글리프 quad)를 분리 반환하고, `TextLayoutConfig.slotCellWidthPx`가 글리프별로 slot 폭을 고른다. **합성 글리프(box/block/Powerline·notdef = `glyph_id==0`)는 셀에 꽉 차 이음매 없이 타일링돼야 하므로 advance(셀폭) 그대로** 쓴다. 근거: 음수 자간이 폰트 글리프 slot을 좁히면 글리프가 "셀보다 넓다"로 오판→축소+ink세로중앙 경로로 빠져 **글자마다 세로로 흔들리고/찌그러지던** 버그가 났다(code-review). Ghostty도 일반 텍스트를 자연 bearing 좌측정렬로 두고 셀폭 조정은 배치에만 적용한다(`face.zig` "left-aligned within the cell"). 좁힘 시 글리프는 자연폭으로 온전히 그려지고 배치 step만 줄어 이웃과 겹친다.
   - **화면 quad(A, 완료)**: 렌더러(`maru_metal_renderer.m`)가 터미널 셀을 **셀당 2 quad**(인접: 배경 quad[셀폭, UV=-1] + 전경 quad)로 그린다. 같은 cell 인덱스에 인접 배치하므로 **cell 순서가 보존**돼(장식 셀=글리프 뒤=위, 커서 셀의 불투명 배경이 원래 글자를 덮음) draw-pass 구조·모달/scissor/이미지 z·페인터 순서가 불변이다 — 셀당 vertex만 ×2(오프셋 ×12). 전경: **모든 일반 텍스트 글리프(불투명 bg 포함)를 자연폭**(`cell.atlas_width_px`, 좌측정렬, 투명 bg)으로 그린다 → 선택영역·SGR48 색배경·**블록 커서 밑 글자**의 자간 왜곡/breathing이 사라진다(셰이더 premultiplied라 전경이 배경 quad에 over-blend). 장식/커서 바(reserved!=0)·헤더아이콘/종(확대)은 전경 quad에 그 띠/글리프(투명 bg), 빈셀은 전경 없음. **box-drawing 등 합성 글리프는 `glyph_id==0`로 slot이 셀폭**이라 자연폭=셀폭으로 그려져 타일링 보존. 음수 자간=이웃과 겹침·양수=우측 여백, **squish/stretch 없음**. **알려진 한계**: 자연폭 글리프가 불투명 bg 이웃으로 넘칠 때 색 경계서 미세 clip, 그리고 split pane 경계에서 음수 자간 마지막 칸이 divider로 약간 bleed(per-pane scissor 미적용 — 후속).
-- `font.fallback`은 폴백 폰트 패밀리 목록(쉼표 구분)이다. primary `family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 자동 cascade(`kCTFontCascadeListAttribute`)를 뒤에 잇는다. 빈 값(기본)이면 CoreText 기본 cascade만 쓴다.
+- `font.fallback`은 폴백 폰트 패밀리 목록(쉼표 구분)이다. primary `family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 자동 cascade(`kCTFontCascadeListAttribute`)를 뒤에 잇는다. 빈 값이면 CoreText 기본 cascade만 쓴다.
+  - **기본값은 번들 `Jetendard`다**(2026-08-10 사용자 결정). 이유는 한글 자간이다 — 시스템 cascade는 한글을 Apple SD Gothic Neo(비례 폰트)로 그리고 그 advance는 등폭 격자와 무관해서, 13pt 실측에서 한글 `가`가 11.24px인데 격자는 2칸 16px이라 **글자당 4.76px이 빈다**(ASCII는 0.20px). Jetendard는 한글을 라틴 2배 폭으로 디자인해 **15.60px = cell_w의 정확히 2.00배**라 여백이 0.40px로 준다. 근거와 대안 검토는 [native-editor.md](native-editor.md) §4.2가 소유한다.
+  - **글리프를 키워 맞추는 길은 없다.** 폭을 격자에 맞추려면 1.42배가 필요하고 그러면 세로가 셀 높이를 30% 넘는다(실측) — 비례 폰트의 종횡비가 셀과 달라 종횡비를 유지하는 한 둘 다 만족할 수 없다.
+  - **적용 범위는 터미널만이 아니다.** 이 설정은 chrome UI 텍스트에도 흘러가므로 도크·사이드바 라벨의 한글도 이 폰트로 그려진다(골든 `expanded-actions`가 그 변화를 잡는다). 한글만 등폭이 되는 셈이라, UI에서 분리하려면 chrome 텍스트 face가 이 값을 상속하지 않게 해야 한다 — 지금은 **일관성을 택해 상속시킨다**.
+  - **Jetendard는 한글만 가져간다.** 한자·가나·이모지·동그란 번호에는 글리프가 없어 자동 cascade로 넘어간다(실측). 즉 CJK 자간은 여전히 벌어지며, 그것까지 맞추려면 한자를 담은 등폭 폰트가 따로 필요하다.
 - `font.family-bold`/`font.family-italic`은 bold(SGR 1)/italic(SGR 3) 글자에 쓸 별도 패밀리다. 빈 값(기본)이면 primary `family`의 bold/italic variant를 쓰고, variant가 없으면 regular로 대체한다(합성/faux 안 함).
 - raw `FontConfig`는 `ResolvedFontRequest`로 먼저 검증한다. 빈 family와 1px 미만 또는 512px 초과 font size는 renderer로 보내지 않는다.
 - family가 설치되어 있지 않으면 앱은 죽지 않고 system monospaced font로 fallback한다.

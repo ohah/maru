@@ -75,10 +75,24 @@ pub const FontConfig = struct {
     /// 여백이 된다(grid 자동 정합). 범위는 아래 const(-8~32 pt — 음수 허용).
     letter_spacing: f32 = 0.0,
     /// 폴백 폰트 패밀리 목록(쉼표 구분, 예: `Apple SD Gothic Neo, Apple Color Emoji`). 주 `family`에 없는 글리프(한글·
-    /// 이모지·기호 등)를 그릴 때 **이 목록을 앞에 두고** CoreText 자동 cascade를 뒤에 잇는다. 빈 값(기본)이면 CoreText
-    /// 기본 cascade만 쓴다(현행). loader가 `font.fallback` 키로 파싱(내부 공백 보존, 각 항목은 trim). 적용은 셰이퍼가
-    /// 주 폰트에 `kCTFontCascadeListAttribute`로 박는다(매 글리프 자동 폴백 — 근거: Ghostty도 cascade list 명시).
-    fallback: []const u8 = "",
+    /// 이모지·기호 등)를 그릴 때 **이 목록을 앞에 두고** CoreText 자동 cascade를 뒤에 잇는다. loader가 `font.fallback`
+    /// 키로 파싱(내부 공백 보존, 각 항목은 trim). 적용은 셰이퍼가 주 폰트에 `kCTFontCascadeListAttribute`로 박는다
+    /// (매 글리프 자동 폴백 — 근거: Ghostty도 cascade list 명시).
+    ///
+    /// **기본값이 번들 `Jetendard`인 이유는 한글 자간이다**(docs/native-editor.md §4.2). 시스템 cascade는 한글을
+    /// Apple SD Gothic Neo(비례 폰트)로 그리는데, 그 advance는 등폭 격자와 무관하다 — 13pt 실측에서 한글 `가`가
+    /// 11.24px인데 격자는 2칸 16px이라 **글자당 4.76px이 빈다**(ASCII는 0.20px). 그 여백이 "한글만 자간이 넓다"로
+    /// 보인다. Jetendard는 한글 글리프를 라틴 2배 폭으로 디자인해 **15.60px = cell_w의 정확히 2.00배**라 여백이
+    /// 0.40px로 준다.
+    ///
+    /// **글리프를 키워 맞추는 길은 없다.** 폭을 격자에 맞추려면 1.42배가 필요한데 그러면 세로가 22.20px가 되어
+    /// 셀 높이 17px를 30% 넘는다(실측) — 비례 폰트의 종횡비가 셀과 달라 종횡비를 유지하는 한 둘 다 만족할 수 없다.
+    /// 그래서 폰트 선택이 유일한 해법이다.
+    ///
+    /// **Jetendard는 한글만 가져간다.** 한자·가나·이모지·동그란 번호에는 글리프가 없어 그대로 자동 cascade로
+    /// 넘어간다(실측 확인). 즉 이 기본값은 한글 외의 폴백 동작을 바꾸지 않는다 — CJK 자간은 여전히 벌어지며,
+    /// 그것까지 맞추려면 한자를 담은 등폭 폰트가 따로 필요하다.
+    fallback: []const u8 = "Jetendard",
     /// bold(SGR 1) 글자에 쓸 별도 폰트 패밀리. 빈 값(기본)이면 주 `family`의 bold variant를 쓴다(현행 — variant가
     /// 없으면 regular 폴백, 합성 안 함). 설정하면 이 패밀리로 bold cell을 그려 주 family와 다른 글꼴로 강조할 수 있다.
     /// 셰이퍼가 cascade(fallback)를 상속시켜 bold 한글·이모지도 폴백한다. loader가 `font.family-bold` 키로 파싱.

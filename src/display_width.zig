@@ -1,4 +1,4 @@
-//! 편집기 본문의 **표시 폭** — 몇 칸을 차지하는가([native-editor.md](../docs/native-editor.md) §4.2).
+//! 편집기 본문의 **표시 폭** — 몇 칸을 차지하는가([native-editor-visual-mapping.md](../docs/native-editor-visual-mapping.md) §4.2).
 //!
 //! **터미널과 갈리는 지점이다.** 터미널은 셸·앱과 폭을 합의해야 해서(상대가 자기 `wcwidth`로 커서를
 //! 계산한다) 보수적으로 센다 — mode 2027 협상과 `text.ambiguous-width` 설정이 그래서 있다. 편집기가

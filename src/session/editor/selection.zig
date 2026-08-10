@@ -1,4 +1,4 @@
-//! caret과 선택 범위 — **항상 배열이다**([native-editor.md](../../../docs/native-editor.md) §3.2).
+//! caret과 선택 범위 — **항상 배열이다**([native-editor-document-model.md](../../../docs/native-editor-document-model.md) §3.2).
 //!
 //! 멀티 커서가 1급 결정이라 단수 selection을 두었다가 나중에 배열로 넓히면 편집 연산을 전부
 //! 재작성해야 한다. 그래서 커서가 하나뿐인 N1에서도 배열로 시작한다.
@@ -51,7 +51,7 @@ pub const Goal = union(enum) {
     }
 };
 
-/// 열/블록 선택의 **원본 사각형**([native-editor.md](../../../docs/native-editor.md) §3.2a).
+/// 열/블록 선택의 **원본 사각형**([native-editor-document-model.md](../../../docs/native-editor-document-model.md) §3.2a).
 ///
 /// **단수인 이유는 마우스가 하나이기 때문이다** — 두 사각형을 동시에 끌 수 없다. "줄마다 selection
 /// 하나"인 **파생 결과**만 배열이며, 두 번째 드래그는 앞의 원본을 **대체**한다(⌥클릭으로 커서를
@@ -185,7 +185,7 @@ pub const Selection = struct {
     }
 };
 
-/// 커서 개수 상한([native-editor.md](../../../docs/native-editor.md) §3.2).
+/// 커서 개수 상한([native-editor-document-model.md](../../../docs/native-editor-document-model.md) §3.2).
 ///
 /// 정규식 검색의 "모두 선택"은 매치 수만큼 커서를 만들므로 한 번의 조작이 수만 개를 낳을 수 있고,
 /// 그 상태에서는 **편집마다 모든 커서의 offset을 매핑**해야 해 입력이 멈춘다. 넘으면 앞에서부터

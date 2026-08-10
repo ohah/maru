@@ -1,7 +1,7 @@
 //! 편집기 **본문 텍스트**를 draw op으로 낸다 — gutter 오른쪽에 파일 내용을 그리는 부분.
 //!
 //! 자리는 [geometry.zig](geometry.zig)의 `content` 영역이고(§4.1), 배치는 **셀 격자**다
-//! ([native-editor.md](../../../../docs/native-editor.md) §2.0) — 등폭 고정이 세로 정렬·블록 선택·
+//! ([native-editor-layering.md](../../../../docs/native-editor-layering.md) §2.0) — 등폭 고정이 세로 정렬·블록 선택·
 //! goal column의 전제이므로 measured 경로를 쓰지 않는다.
 //!
 //! **N1 범위**: 랩·접힘·가상 텍스트가 없다. 그래서 시각 행 하나가 논리 줄 하나에 대응하고, §4의

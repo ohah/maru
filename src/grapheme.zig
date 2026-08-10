@@ -431,7 +431,7 @@ test "isExtendedPictographic: 이모지(가족·❤·손)는 true, 동그란 번
 
 test "clusterEnd: 이모지 ZWJ 가족이 cluster 하나다 (GB11)" {
     // 왜 중요: 편집기가 이걸 3조각으로 세면 가족 하나가 6칸을 먹어 뒤 글자가 4칸 밀린다.
-    // 실측으로 드러난 회귀다(native-editor.md §4.2) — GB9만 있던 시절 6칸이 나왔다.
+    // 실측으로 드러난 회귀다(native-editor-visual-mapping.md §4.2) — GB9만 있던 시절 6칸이 나왔다.
     const family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"; // 👨‍👩‍👧
     try std.testing.expectEqual(family.len, clusterEnd(family, 0));
 

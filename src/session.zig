@@ -87,7 +87,7 @@ pub const surface = @import("session/surface.zig");
 pub const window = @import("session/window.zig");
 pub const core_command = @import("session/core_command.zig");
 
-/// N1: 네이티브 편집기 L2 문서 모델(docs/native-editor.md §3). 위치 정본은 UTF-8 byte offset이고
+/// N1: 네이티브 편집기 L2 문서 모델(docs/native-editor-document-model.md §3). 위치 정본은 UTF-8 byte offset이고
 /// 화면 좌표로의 변환은 L3(chrome)가 맡는다 — 이 네임스페이스는 플랫폼·렌더를 import하지 않는다.
 pub const editor = struct {
     pub const line_index = @import("session/editor/line_index.zig");

@@ -1,4 +1,4 @@
-//! 파일을 문서로 여는 계약 — **원문을 바꾸지 않는다**([native-editor.md](../../../docs/native-editor.md) §3.5).
+//! 파일을 문서로 여는 계약 — **원문을 바꾸지 않는다**([native-editor-document-model.md](../../../docs/native-editor-document-model.md) §3.5).
 //!
 //! 편집기가 파일을 열었다 저장하기만 해도 내용이 달라지면 diff가 통째로 물들고 사용자는 자기가
 //! 무엇을 바꿨는지 알 수 없게 된다. 그래서 이 모듈은 **무엇을 보존해야 하는지를 값으로 만든다** —

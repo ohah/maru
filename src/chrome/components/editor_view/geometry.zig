@@ -1,6 +1,6 @@
 //! 편집기 뷰의 **가로 영역 분할** — gutter와 본문이 어디서 시작하고 얼마나 넓은가.
 //!
-//! 계약은 [native-editor.md](../../../../docs/native-editor.md) §4.1이고, 배치는 Monaco의 누적 계산을
+//! 계약은 [native-editor-visual-mapping.md](../../../../docs/native-editor-visual-mapping.md) §4.1이고, 배치는 Monaco의 누적 계산을
 //! 그대로 따른다(왼쪽부터 진단 → 줄 번호 → decorations → 본문). Monaco는 px로 계산하지만 우리 gutter는
 //! **본문과 같은 셀 격자**에 서므로(§2.0) 여기서는 전부 **셀 수**로 센다 — Monaco도 `lineDecorationsWidth`에
 //! `"2ch"` 같은 문자 폭 배수를 허용하므로 이는 이식상의 타협이 아니라 같은 개념의 다른 표현이다.

@@ -371,7 +371,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func hasMarkedText() -> Bool {
-        return !markedTextBuffer.isEmpty
+        let has = !markedTextBuffer.isEmpty
+        imeLog("? hasMarkedText -> \(has)")
+        return has
     }
 
     // NSNotFound가 아니라 빈 NSRange를 돌려준다(Ghostty와 동일). NSNotFound를 주면 입력기가
@@ -379,16 +381,20 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 마지막 자모에서 Backspace가 자모 삭제 대신 확정(insertText)으로 처리돼 삭제에 키가 한 번
     // 더 들었다(라이브: 가ㄴ -> BS -> 가ㄴ -> BS -> 가).
     func markedRange() -> NSRange {
-        return markedTextBuffer.isEmpty
+        let r = markedTextBuffer.isEmpty
             ? NSRange()
             : NSRange(location: 0, length: markedTextBuffer.utf16.count)
+        imeLog("? markedRange -> loc=\(r.location) len=\(r.length)")
+        return r
     }
 
     func selectedRange() -> NSRange {
+        imeLog("? selectedRange -> (빈 NSRange — 터미널 구현)")
         return NSRange()
     }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        imeLog("? attributedSubstring loc=\(range.location) len=\(range.length) -> nil")
         return nil
     }
 
@@ -402,6 +408,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         guard let window else { return .zero }
         // Zig가 커서 셀 사각형을 backing px(좌상단 원점)로 준다. view points(y-flip) -> window
         // -> screen으로 변환해 입력기 후보창이 커서 위치에 뜨게 한다.
+        imeLog("? firstRect loc=\(range.location) len=\(range.length)")
         guard let (x, y, w, h) = controller?.imeCursorRectPx() else {
             return window.convertToScreen(convert(NSRect(x: 0, y: 0, width: 1, height: 16), to: nil))
         }
@@ -420,6 +427,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func characterIndex(for point: NSPoint) -> Int {
+        imeLog("? characterIndex(point) -> 0 (터미널 구현)")
         return 0
     }
 

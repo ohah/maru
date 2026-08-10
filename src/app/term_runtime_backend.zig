@@ -161,18 +161,44 @@ pub const RuntimeObservation = struct {
             .foreground_pgid = snapshot.foreground_pgid,
         };
         errdefer next.deinit(allocator);
-        try next.cwd.appendSlice(allocator, snapshot.cwd);
-        try next.cwd_host.appendSlice(allocator, snapshot.cwd_host); // cwd와 같은 트랜잭션에서만 갱신(쌍 유지)
-        try next.window_title.appendSlice(allocator, snapshot.window_title);
-        if (snapshot.ssh_remote_dest) |dest| try next.ssh_remote_dest.appendSlice(allocator, dest);
-        try next.clipboard_read_target.appendSlice(allocator, snapshot.clipboard_read_target);
-        try next.foreground_processes.appendSlice(allocator, snapshot.foreground_processes);
-        if (snapshot.agent_progress.len != 0)
-            try next.agent_progress.appendSlice(allocator, snapshot.agent_progress)
-        else
-            try next.agent_progress.appendSlice(allocator, self.agent_progress.items);
+        // Staged session-host preparation seals actual backing extents, not merely semantic
+        // lengths. Precise allocation here makes every cache produced by the common path canonical
+        // without adding a session-host-only normalization copy later. Zero length remains the
+        // allocation-free `.empty` representation.
+        next.cwd = try exactOwnedCopy(u8, allocator, snapshot.cwd);
+        next.cwd_host = try exactOwnedCopy(u8, allocator, snapshot.cwd_host); // cwd와 같은 트랜잭션에서만 갱신(쌍 유지)
+        next.window_title = try exactOwnedCopy(u8, allocator, snapshot.window_title);
+        if (snapshot.ssh_remote_dest) |dest|
+            next.ssh_remote_dest = try exactOwnedCopy(u8, allocator, dest);
+        next.clipboard_read_target = try exactOwnedCopy(u8, allocator, snapshot.clipboard_read_target);
+        next.foreground_processes = try exactOwnedCopy(
+            pty.types.ForegroundProcessName,
+            allocator,
+            snapshot.foreground_processes,
+        );
+        next.agent_progress = try exactOwnedCopy(
+            u8,
+            allocator,
+            if (snapshot.agent_progress.len != 0)
+                snapshot.agent_progress
+            else
+                self.agent_progress.items,
+        );
         self.deinit(allocator);
         self.* = next;
+    }
+
+    fn exactOwnedCopy(
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        source: []const T,
+    ) !std.ArrayListUnmanaged(T) {
+        var out: std.ArrayListUnmanaged(T) = .empty;
+        errdefer out.deinit(allocator);
+        if (source.len == 0) return out;
+        try out.ensureTotalCapacityPrecise(allocator, source.len);
+        out.appendSliceAssumeCapacity(source);
+        return out;
     }
 
     /// 캐시(소유 버퍼)를 호출 동안만 유효한 view로 편다.
@@ -202,8 +228,11 @@ pub const RuntimeObservation = struct {
         return out;
     }
 
-    pub fn clearAgentProgress(self: *RuntimeObservation) void {
-        self.agent_progress.clearRetainingCapacity();
+    /// 1회성 progress를 소비하고 backing도 함께 버린다. 빈 owned slice는 canonical `.empty`여야
+    /// staged session-host preparation이 semantic length와 실제 backing extent를 같은 값으로 seal할 수 있다.
+    pub fn clearAgentProgress(self: *RuntimeObservation, allocator: std.mem.Allocator) void {
+        self.agent_progress.deinit(allocator);
+        self.agent_progress = .empty;
     }
 };
 
@@ -671,7 +700,7 @@ test "term runtime backend: unknown handle attach is rejected, not routed to ano
     try std.testing.expectError(error.UnknownSurface, be.attach(2, false));
 }
 
-test "runtime observation: replacement owns strings and preserves unconsumed progress" {
+test "C3-3b2b0 runtime observation replacement owns strings and preserves unconsumed progress" {
     const allocator = std.testing.allocator;
     var observation: RuntimeObservation = .{};
     defer observation.deinit(allocator);
@@ -693,6 +722,7 @@ test "runtime observation: replacement owns strings and preserves unconsumed pro
     cwd[1] = 'X'; // source 수명이 끝나거나 바뀌어도 cache는 독립 owned copy다.
     try std.testing.expectEqualStrings("/old", observation.cwd.items);
     try std.testing.expectEqualStrings("claude", observation.foreground_processes.items[0].slice());
+    try expectObservationOwnedCapacitiesExact(&observation);
 
     // stable metadata poll의 빈 progress는 아직 observer가 소비하지 않은 1회성 값을 지우지 않는다.
     try observation.replace(allocator, .{
@@ -703,11 +733,13 @@ test "runtime observation: replacement owns strings and preserves unconsumed pro
     });
     try std.testing.expectEqualStrings("/new", observation.cwd.items);
     try std.testing.expectEqualStrings("waiting", observation.agent_progress.items);
-    observation.clearAgentProgress();
+    try expectObservationOwnedCapacitiesExact(&observation);
+    observation.clearAgentProgress(allocator);
     try std.testing.expectEqual(@as(usize, 0), observation.agent_progress.items.len);
+    try std.testing.expectEqual(@as(usize, 0), observation.agent_progress.capacity);
 }
 
-test "runtime observation: every replacement allocation failure preserves the previous coherent snapshot" {
+test "C3-3b2b0 runtime observation every replacement allocation failure preserves the previous coherent snapshot" {
     const allocator = std.testing.allocator;
     var process = pty.types.ForegroundProcessName{ .pid = 99, .len = 5 };
     @memcpy(process.bytes[0..5], "codex");
@@ -718,9 +750,22 @@ test "runtime observation: every replacement allocation failure preserves the pr
         .title_generation = 3,
         .size = .{ .cols = 120, .rows = 40 },
         .cwd = "/next",
+        .cwd_host = "next-host",
         .window_title = "next title",
         .ssh_remote_dest = "next-box",
         .semantic_state = .command,
+        .alt_active = true,
+        .app_cursor_keys = true,
+        .app_keypad = true,
+        .kitty_flags = 3,
+        .alternate_scroll = false,
+        .mouse_tracking = true,
+        .mouse_tracking_mode = 4,
+        .bracketed_paste = true,
+        .bell_count = 8,
+        .clipboard_write_seq = 9,
+        .clipboard_read_seq = 10,
+        .clipboard_read_target = "c",
         .foreground_available = true,
         .foreground_pgid = 99,
         .foreground_processes = &.{process},
@@ -738,35 +783,136 @@ test "runtime observation: every replacement allocation failure preserves the pr
     for (0..allocation_count) |fail_index| {
         var observation: RuntimeObservation = .{};
         defer observation.deinit(allocator);
-        try observation.replace(allocator, .{
+        const old: RuntimeObservationView = .{
             .availability = .current,
             .revision = 1,
             .observer_generation = 11,
             .title_generation = 1,
             .size = .{ .cols = 80, .rows = 24 },
             .cwd = "/old",
+            .cwd_host = "old-host",
             .window_title = "old title",
             .ssh_remote_dest = "old-box",
             .semantic_state = .prompt,
+            .alt_active = true,
+            .app_cursor_keys = true,
+            .app_keypad = true,
+            .kitty_flags = 5,
+            .alternate_scroll = false,
+            .mouse_tracking = true,
+            .mouse_tracking_mode = 3,
+            .bracketed_paste = true,
+            .bell_count = 18,
+            .clipboard_write_seq = 19,
+            .clipboard_read_seq = 20,
+            .clipboard_read_target = "p",
             .foreground_available = true,
             .foreground_pgid = 77,
             .foreground_processes = &.{process},
             .agent_progress = "waiting",
-        });
+        };
+        try observation.replace(allocator, old);
+        const cwd_ptr = observation.cwd.items.ptr;
+        const cwd_host_ptr = observation.cwd_host.items.ptr;
+        const title_ptr = observation.window_title.items.ptr;
+        const ssh_ptr = observation.ssh_remote_dest.items.ptr;
+        const clipboard_ptr = observation.clipboard_read_target.items.ptr;
+        const processes_ptr = observation.foreground_processes.items.ptr;
+        const progress_ptr = observation.agent_progress.items.ptr;
 
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, observation.replace(failing.allocator(), next));
         try std.testing.expect(failing.has_induced_failure);
-        try std.testing.expectEqual(@as(u64, 1), observation.revision);
-        try std.testing.expectEqual(@as(u64, 11), observation.observer_generation);
-        try std.testing.expectEqualStrings("/old", observation.cwd.items);
-        try std.testing.expectEqualStrings("old title", observation.window_title.items);
-        try std.testing.expect(observation.ssh_remote_dest_present);
-        try std.testing.expectEqualStrings("old-box", observation.ssh_remote_dest.items);
-        try std.testing.expectEqual(@as(?i32, 77), observation.foreground_pgid);
-        try std.testing.expectEqualStrings("codex", observation.foreground_processes.items[0].slice());
-        try std.testing.expectEqualStrings("waiting", observation.agent_progress.items);
+        try std.testing.expectEqualDeep(old, observation.view());
+        try expectObservationOwnedCapacitiesExact(&observation);
+        try std.testing.expectEqual(cwd_ptr, observation.cwd.items.ptr);
+        try std.testing.expectEqual(cwd_host_ptr, observation.cwd_host.items.ptr);
+        try std.testing.expectEqual(title_ptr, observation.window_title.items.ptr);
+        try std.testing.expectEqual(ssh_ptr, observation.ssh_remote_dest.items.ptr);
+        try std.testing.expectEqual(clipboard_ptr, observation.clipboard_read_target.items.ptr);
+        try std.testing.expectEqual(processes_ptr, observation.foreground_processes.items.ptr);
+        try std.testing.expectEqual(progress_ptr, observation.agent_progress.items.ptr);
     }
+
+    // 빈 incoming progress도 old progress를 재소유하므로 그 별도 allocation ordinal 전부에서 같은 원자성을 요구한다.
+    var preserved_progress_next = next;
+    preserved_progress_next.agent_progress = "";
+    var preserved_counting = std.testing.FailingAllocator.init(allocator, .{});
+    var preserved_counted: RuntimeObservation = .{};
+    try preserved_counted.replace(preserved_counting.allocator(), .{ .agent_progress = "old-progress" });
+    const preserved_baseline = preserved_counting.alloc_index;
+    try preserved_counted.replace(preserved_counting.allocator(), preserved_progress_next);
+    const preserved_allocation_count = preserved_counting.alloc_index - preserved_baseline;
+    preserved_counted.deinit(preserved_counting.allocator());
+    for (0..preserved_allocation_count) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = preserved_baseline + fail_index });
+        var observation: RuntimeObservation = .{};
+        defer observation.deinit(failing.allocator());
+        try observation.replace(failing.allocator(), .{ .agent_progress = "old-progress" });
+        try std.testing.expectError(error.OutOfMemory, observation.replace(failing.allocator(), preserved_progress_next));
+        try std.testing.expectEqualStrings("old-progress", observation.agent_progress.items);
+        try expectObservationOwnedCapacitiesExact(&observation);
+    }
+}
+
+test "C3-3b2b0 runtime observation uses canonical empty and exact near-capacity owners" {
+    const host_protocol = @import("../session/host_protocol.zig");
+    const allocator = std.testing.allocator;
+
+    var empty: RuntimeObservation = .{};
+    defer empty.deinit(allocator);
+    try empty.replace(allocator, .{ .availability = .current, .revision = 1 });
+    try expectObservationOwnedCapacitiesExact(&empty);
+
+    const one = [_]u8{'x'};
+    var one_process = pty.types.ForegroundProcessName{ .pid = 100, .len = 1 };
+    one_process.bytes[0] = 'p';
+    var one_observation: RuntimeObservation = .{};
+    defer one_observation.deinit(allocator);
+    try one_observation.replace(allocator, .{
+        .cwd = &one,
+        .cwd_host = &one,
+        .window_title = &one,
+        .ssh_remote_dest = &one,
+        .clipboard_read_target = &one,
+        .foreground_processes = &.{one_process},
+        .agent_progress = &one,
+    });
+    try expectObservationOwnedCapacitiesExact(&one_observation);
+
+    const near_cap_len = host_protocol.max_control_json - 3;
+    try std.testing.expect(near_cap_len < host_protocol.max_control_json);
+    try std.testing.expect(near_cap_len + 4 > host_protocol.max_control_json);
+    const bytes = try allocator.alloc(u8, near_cap_len);
+    defer allocator.free(bytes);
+    @memset(bytes, 'x');
+    var process = pty.types.ForegroundProcessName{ .pid = 101, .len = 1 };
+    process.bytes[0] = 'p';
+
+    var observation: RuntimeObservation = .{};
+    defer observation.deinit(allocator);
+    try observation.replace(allocator, .{
+        .availability = .current,
+        .revision = 2,
+        .cwd = bytes,
+        .cwd_host = bytes,
+        .window_title = bytes,
+        .ssh_remote_dest = bytes,
+        .clipboard_read_target = bytes,
+        .foreground_processes = &.{process},
+        .agent_progress = bytes,
+    });
+    try expectObservationOwnedCapacitiesExact(&observation);
+}
+
+fn expectObservationOwnedCapacitiesExact(observation: *const RuntimeObservation) !void {
+    try std.testing.expectEqual(observation.cwd.items.len, observation.cwd.capacity);
+    try std.testing.expectEqual(observation.cwd_host.items.len, observation.cwd_host.capacity);
+    try std.testing.expectEqual(observation.window_title.items.len, observation.window_title.capacity);
+    try std.testing.expectEqual(observation.ssh_remote_dest.items.len, observation.ssh_remote_dest.capacity);
+    try std.testing.expectEqual(observation.clipboard_read_target.items.len, observation.clipboard_read_target.capacity);
+    try std.testing.expectEqual(observation.foreground_processes.items.len, observation.foreground_processes.capacity);
+    try std.testing.expectEqual(observation.agent_progress.items.len, observation.agent_progress.capacity);
 }
 
 // view()가 관측 스칼라를 하나라도 빠뜨리면 그 기능이 제품에서 조용히 무동작한다 — 실제로 mouse_tracking_mode·

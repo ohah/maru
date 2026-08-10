@@ -2055,6 +2055,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b2a process seal migration Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b2a_step.dependOn(session_host_2c3d_c3_3b1_step);
+    const session_host_2c3d_c3_3b2b0_step = b.step(
+        "test-session-host-2c3d-c3-3b2b0",
+        "2c3d C3-3b2b0 exact RuntimeObservation Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b2b0_step.dependOn(session_host_2c3d_c3_3b2a_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2108,6 +2113,53 @@ pub fn build(b: *std.Build) void {
     session_host_b3_4_5_step.dependOn(&run_b3_4_5_boundary_tests.step);
     boundary_step.dependOn(&run_b3_4_5_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
+        const event_c3_3b2b0_observation_module = b.createModule(.{
+            .root_source_file = b.path("src/app.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+        });
+        event_c3_3b2b0_observation_module.addAnonymousImport(
+            "maru_terminfo",
+            .{ .root_source_file = b.path("terminfo/maru.terminfo") },
+        );
+        event_c3_3b2b0_observation_module.addAnonymousImport(
+            "config_doc_md",
+            .{ .root_source_file = b.path("docs/configuration.md") },
+        );
+        const event_c3_3b2b0_observation_tests = addProjectTest(b, .{
+            .root_module = event_c3_3b2b0_observation_module,
+            .filters = &.{"C3-3b2b0 runtime observation"},
+        });
+        const run_event_c3_3b2b0_observation_tests =
+            b.addRunArtifact(event_c3_3b2b0_observation_tests);
+        // app.zig aggregates seven layer sentinels in addition to the three filtered semantic
+        // tests. The exact count makes losing either the semantic tests or the aggregation roots
+        // visible instead of silently shrinking this focused gate.
+        run_event_c3_3b2b0_observation_tests.addArg("--maru-expect-tests=10");
+        run_event_c3_3b2b0_observation_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b0_step.dependOn(
+            &run_event_c3_3b2b0_observation_tests.step,
+        );
+        const event_c3_3b2b0_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_2c3d_c3_3b2b0_boundary.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"C3-3b2b0 RuntimeObservation exact-capacity boundary"},
+        });
+        const run_event_c3_3b2b0_boundary_tests =
+            b.addRunArtifact(event_c3_3b2b0_boundary_tests);
+        run_event_c3_3b2b0_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2b0_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b0_step.dependOn(
+            &run_event_c3_3b2b0_boundary_tests.step,
+        );
+        boundary_step.dependOn(&run_event_c3_3b2b0_boundary_tests.step);
+
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

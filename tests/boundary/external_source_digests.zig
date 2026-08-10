@@ -21,7 +21,9 @@ pub const inventory = [_]Proof{
     // 더했을 뿐이고 Client 구성이나 receiver 집합과는 무관하다.
     // OSC 7 authority(`cwd_host`)가 관측 view/owned cache에 실리면서 또 바뀐다. count는 3 그대로다 — 더한 것은
     // 문자열 필드 하나와 그 복사·해제뿐이고, Client 구성이나 receiver 집합과는 무관하다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "126976851381b384081701659b4bb3d717f7fc373eaf1c2aa6a9b789a8d32bd3" },
+    // RuntimeObservation의 일곱 owned buffer가 exact-capacity copy를 쓰고 progress 소비가 backing까지 해제하도록 바뀌었다.
+    // import/Client 경계는 그대로라 @field count는 3을 유지한다.
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "4a71d9525267956725943ca0fb3eb3de35bafbb7a80710dfcd0da6d161268309" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "6a7538dfdc98ece9f85c70584a2500e505f7d278d84716190780585fa198a7d6" },

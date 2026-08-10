@@ -1564,8 +1564,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          initial snapshot owner, generation batch allocator-scope registry와 ended-purge quarantine receipt/proof도 같은 PID leaf로 이관하고
          unsupported target PID zero fail-close, Linux sentinel 권위와 fork-child
          inherited-authority acceptance가 0임을 source/process gate로 검증한다.
-      3. **C3-3b2b immutable preparation:** final-address pending owner, immutable Runtime snapshot, closed prepared event/effect와
-         production full-content seal을 구현한다. 공용 `RuntimeObservation.replace`와 기존 cache admission을 exact-capacity로 먼저 닫는다.
+      3. **C3-3b2b immutable preparation:** 이 단계는 **b2b0 exact observation → b2b1 dormant preparation**의 두 독립 merge gate로
+         구현한다. **b2b0은 구현 완료**로 공용 `RuntimeObservation.replace`와 기존 cache admission을 exact-capacity로 먼저 닫았고 session-host event
+         lifecycle이나 제품 caller를 변경하지 않는다. b2b1은 final-address pending owner, immutable Runtime snapshot, closed prepared event/effect와
+         production full-content seal을 구현한다.
          b2b는 dormant production-source orchestration의 test-mode 호출, 4-part prepare peak,
          3-part published rehash, fixed failure mapping, typed scratch handoff와 proof-loss cleanup을 닫는다. concrete process-seal cleanup
          transcript/progress domain도 이 slice에서 추가한다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는

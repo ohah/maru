@@ -75,6 +75,10 @@ src/
                         free fn 모음이고 `app_session.zig`는 ABI가 직접 부르는 진입만 얇은 facade로 남긴다.
                         그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
                         `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).
+                        **이 17개는 독립 모듈이 아니라 한 모듈(`AppSession`)의 조각이다** — 필드를
+                        공유하므로 서로를 부르고, 실측상 양방향 쌍이 39개다(43% 밀도). 순환은 결함이
+                        아니라 이 구조의 성질이고, 얻은 것은 모듈 경계가 아니라 **탐색성**이다
+                        (docs/app-session-decomposition.md "그룹 파일 17개는 독립 모듈이 아니다").
                         **test는 그룹 파일로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측).
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.

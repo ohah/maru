@@ -1551,7 +1551,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b2b2는 compatibility
    `MaterializationFootprint{backing_bytes:usize,resident_bytes:usize}` 의미만 보존하며 next/old observation과 4-part peak 계산은 b2b3 범위다.
 
-   b2b2 focused gate의 RED inventory는 recipe semantic 10개, compatibility 6개, boundary 1개다. Debug·ReleaseFast가 같은 17개를 exact-count로
+   b2b2 focused gate의 RED inventory는 recipe semantic 10개, compatibility adapter 5개+RemoteRuntime mapping 1개, boundary 1개다.
+   Debug·ReleaseFast가 같은 17개를 exact-count로
    실행한다. boundary는 recursive type proof, `classifyEventView` body/signature와 product-source caller inventory delta 0,
    `buildEventPreparationRecipe`의 external production-source caller는 `runtime_metadata_wire` compatibility wrapper exact 1이고 fill 내부 rebuild는
    same-module internal caller exact 1이다. `fillMetadataRecipe` external production-source caller도 compatibility wrapper exact 1이며 future b2b3와
@@ -1562,7 +1563,321 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b2b3 persisted owner는 callback 손상 뒤 typed enum/union을 먼저 읽지 않도록 lifecycle/phase/step/role/plan tag를 raw `u8`와 fixed payload
    storage로 보존한다. callback 뒤 raw integer 범위를 먼저 검사하고 canonical local typed value를 재구성한 뒤 service에 넘긴다. 따라서
    service가 이미 constructed된 invalid Zig tagged union을 안전하게 읽는다고 주장하지 않으며 raw-tag rejection owner는 b2b3 pre-parser다.
-   `remote_runtime_pending_event.zig`는 위 `PendingLifecycle` ordinal을 직접 재사용해 final-address owner를 추가한다.
+   b2b3는 한 파일의 대형 상태 머신을 만들지 않는다. `runtime_event_prepared_types.zig`는 pointer/allocator/Client/Runtime import가 없는
+   closed projection/policy type과 pure budget만, `pending_event_owner.zig`는 final-address lifecycle/raw storage와 owning observation envelope만,
+   `pending_event_preparation.zig`는 stack scratch·allocation·rollback orchestration만 소유한다.
+   `remote_runtime_pending_event.zig`는 이 세 모듈을 조합하는 `RemoteRuntime` package adapter이며 policy나 별도 state를 소유하지 않는다.
+   기존 nested `PendingControl`은 reverse import와 invalid tagged-union read를 함께 피하도록 dependency-small
+   `runtime_control_types.zig`가 explicit `RuntimeControl{tag:u8,payload:RawRuntimeControlPayload}`와 raw-first `decode()`/canonical encoder를
+   소유하고, `runtime_pending_control.zig`가 `RawQueuedRuntimeControl{barrier:u64,control:RuntimeControl}`만 저장한다. raw payload는 항상
+   zero-initialize 뒤 tag별 field encoder로 채우며 선택 tag의 canonical byte mask 밖 bytes는 0이어야 한다. `generation_attachment_contract.zig`는 이 neutral
+   RuntimeControl을 alias/import하고 자체 복제 codec은 0이다. RemoteRuntime은 queue admission에서 `usize` barrier를 checked u64로 바꾸고
+   snapshot/callback 뒤에는 tag range와 raw payload canonicality를 먼저 검사한 후에만 typed command를 재구성한다. 기존
+   scroll/core-command wire 의미는 바꾸지 않는다.
+   exact raw ABI는 기존 generation contract에서 byte-for-byte 이동하는
+   `RawOptionalU32=extern struct{present:u8,value:u32}`,
+   `RawRuntimeConfig=extern struct{max_scrollback:u64,ambiguous_wide:u8,emoji_wide:u8,palette:[16]RawOptionalU32,
+   foreground:u32,background:u32,cell_width:u32,cell_height:u32,cursor_shape:u8}`,
+   `RawCorePayload=extern union{empty:u8,scroll:i64,unsigned:u64,flag:u8,cell_metrics:extern struct{width:u32,height:u32},
+   colors:extern struct{foreground:u32,background:u32},palette:[16]RawOptionalU32,shape:u8,runtime_config:RawRuntimeConfig,direction:i8}`,
+   `RawCoreCommand=extern struct{tag:u8,payload:RawCorePayload}`,
+   `RawRuntimeControlPayload=extern union{empty:u8,core_command:RawCoreCommand}`,
+   `RuntimeControl=extern struct{tag:u8,payload:RawRuntimeControlPayload}`다. outer/control/core tag를 raw 범위 검사하기 전 union field read는 0이다.
+   encoder는 full RuntimeControl을 zero-init한 뒤 active fields만 쓴다. union의 겹친 다른 arm을 “inactive bytes”로 읽지 않으며, decoder는
+   validated tag가 정한 active field의 canonical byte mask 밖 tail/alignment padding이 모두 0인지와 각 command raw bool/enum/range를 확인한다.
+   `RawOptionalU32` 내부 padding도 이 zero mask에 포함한다. reflection field/order/size, every control/core arm의 golden bytes+canonical mask,
+   invalid outer/core tag와 mask 밖 residue test를 고정한다.
+   `GenerationAttachment`/`GenerationTransport`는 Runtime semantic type을 import하지 않고 기존 `PreparationEventView`만 제공한다.
+
+   **b2b3 exact type/ownership ABI:** 다음 선언의 필드·tag·error set이 이 slice의 normative schema다. 정렬 padding과 target별
+   `@sizeOf`는 ABI가 아니며 reflection gate는 field/tag 이름·순서·타입과 pointer/allocator 부재를 고정한다.
+
+   ```zig
+   const PreparedEventTag = enum(u8) {
+       ignored = 0, ended = 1, invalidated = 2, resize_noop = 3,
+       resize_commit = 4, metadata_noop = 5, metadata_commit = 6,
+       revoked = 7, failure = 8,
+   };
+   const EffectTag = enum(u8) { none = 0, poison = 1, revoke_fence = 2 };
+   const PreparationFailure = enum(u8) {
+       out_of_memory = 1, local_resource_exhausted = 2,
+       protocol_error = 3, connection_closed = 4,
+   };
+   const EffectRequest = union(EffectTag) {
+       none, poison: ConnectionReason, revoke_fence: u64,
+   };
+   const PreparedEventProjection = union(PreparedEventTag) {
+       ignored, ended, invalidated, resize_noop,
+       resize_commit: terminal.Size,
+       metadata_noop,
+       metadata_commit,
+       revoked: u64,
+       failure: PreparationFailure,
+   };
+   const PrepareError = error{
+       Busy, InvalidOwner,
+   };
+   ```
+
+   이 projection은 metadata commit의 owning payload를 담지 않는다. `pending_event_owner.zig`가 persisted
+   `RawPreparedEventStorage{prepared_tag_raw:u8,effect_tag_raw:u8,failure_raw:u8,connection_reason_raw:u8,reserved:[4]u8,
+   cols:u16,rows:u16,revoke_fence:u64,next_observation:RuntimeObservation}`를 소유한다. raw tag/scalar를 모두 검증한 뒤에만
+   `borrowPrepared`가 stack-local `PreparedEvent`를 재구성하며, 그 union의 metadata_commit payload는
+   `*const RuntimeObservation` borrow이고 owner 밖으로 저장/escape하지 않는다. raw storage가
+   `metadata_commit`일 때만 seven-owner exact-capacity observation을 소유하고 다른 tag에서는 canonical `.empty`여야 한다. pure leaf의
+   recursive pointer/allocator 부재와 owner envelope의 허용 owner graph exact 7을 서로 다른 reflection gate로 고정한다. 나머지 arm은 allocation 0이고 `resize_commit`과
+   `revoked`만 위 fixed scalar를 가진다. persisted owner에는 typed `PreparedEventProjection|EffectRequest` union을 저장하지 않는다. `ignored|resize_noop|
+   metadata_noop`은 `.none`, `ended|invalidated`는 `.none`, `resize_commit|metadata_commit`은 `.none`, `revoked`는 event가 봉인한
+   successor fence의 `.revoke_fence`, failure의 `out_of_memory|local_resource_exhausted`는
+   `.poison(.local_resource_exhausted)`, `protocol_error`는 `.poison(.peer_contract_violation)`, `connection_closed`는 `.none`이다.
+   peer malformed/oversized/unsupported/stale는 classifier의 기존 violation/reject 정책을 거쳐 `failure(.protocol_error)`만 만들며 local
+   OOM/cap과 섞이지 않는다.
+
+   `PendingEventOwner`와 별도 `runtime_lifetime_owner.zig`의 `RuntimeLifetimeOwner`는 `RemoteRuntime`의 inline final-address field이며 공통
+   `initializePendingEventOwner`가 둘을 `initInPlace`한다.
+   이 helper의 제품 caller는 `spawnWithOwner`와 `attachExistingWithOwner` exact 2이고 두 constructor의 partial-failure cleanup도 pristine owner만
+   보게 한다. init 뒤 move/copy는 금지한다.
+   `deinit|detachClientSide|terminate|writeInput|queue control|blocking/nonblocking drain|observation replace`의 모든 entry는 package adapter의
+   `admitRuntimeOperation`을 먼저 호출한다. lifecycle이 `preparing`이면 fallible mutation은 `Busy`; 반환값이 없는 destructive
+   `deinit|detachClientSide|terminate` reentry는 조용히 성공하거나 owner를 파괴하지 않고 `fatalIntegrity(.destructive_reentry)`로 닫는다.
+   b2b3 dormant caller에서는 이 `preparing` guard까지 실제 활성화하고 `prepared|settling|committed_cleanup`의 사용자 close/read 결과는
+   b3/b4/b5가 각각 활성화한다. callback 전에 얻은 final-address `RuntimeOperationLease`가 runtime address, owner address,
+   process identity, thread identity, owner incarnation, operation incarnation과 lifecycle을 봉인하며 rollback/publication 종료까지
+   `RemoteRuntime` 수명을 pin한다. callback 후에는 이 lease를 PID-first로 검증하기 전 Runtime/owner를 dereference하지 않는다.
+   lease authority는 allocation/전역 capacity가 없는 inline `RuntimeLifetimeOwner`가 소유한다. raw row schema는
+   `{state_raw:u8,operation_kind_raw:u8,reader_count:u16,reserved:[4]u8,self_addr:u64,runtime_addr:u64,pending_owner_addr:u64,pid:u32,reserved_pid:u32,
+   process_nonce:u64,thread_id:u64,owner_incarnation:u64,next_operation_incarnation:u64,active_operation_incarnation:u64,
+   close_generation:u64,operation_seal:[32]u8}`다. state는 idle=0/exclusive_active=1/closing=2, operation kind는
+   none=0/preparation=1/close=2다. b2b3는 idle+none ↔ exclusive_active+preparation과 reader_count=0만 허용하고 closing/close product caller는
+   exact 0이다. next operation은 checked nonzero로 acquire 즉시 burn한다. final-address
+   `RuntimeOperationLease` receipt는
+   `{lifetime_owner_addr:u64,runtime_addr:u64,pending_owner_addr:u64,pid:u32,reserved_pid:u32,process_nonce:u64,thread_id:u64,
+   owner_incarnation:u64,operation_incarnation:u64,operation_kind_raw:u8,consumed_raw:u8,reserved:[6]u8,operation_seal:[32]u8}`다.
+   `RuntimeOperationIdentity`는 이 receipt에서 consumed/reserved만 제외한 exact value다. `acquireRuntimeOperation`은 PID/TLS와 raw owner seal을
+   검사한 뒤 `idle->active`, counter burn과 receipt mint를 한 callback-free no-fail suffix로 수행한다. `validateAfterCallback`은 Runtime을 읽기
+   전에 PID와 final lifetime row/receipt를 재검증한다. `consume|abort`는 active exact identity를 확인해 row를 idle로 만들고 receipt를 exact once
+   tombstone한다. overflow/copy/move/ABA/proof loss는 row를 추측해 clear하지 않고 fatal이다. destructive entry는 self의 다른 field 전에
+   lifetime owner raw header를 검사해 active면 fatal이고 fallible entry는 Busy다. fork child는 row/seal보다 PID mismatch에서 거부한다.
+   RemoteRuntime은 owner thread 전용이라 cross-thread product access는 기존 계약대로 거부한다. b5 `CloseAuthority`는 이 같은
+   `RuntimeLifetimeOwner`의 이미 예약된 close/closing/reader fields를 활성화하며 schema를 교체하거나 두 번째 lifetime registry를 만들지 않는다.
+   `event_cleanup_seal.zig`의 pointer-free `PendingOperationSealInput`은 RuntimeLifetimeOwner raw row에서 `operation_seal`을 제외한 exact
+   field order이고, `PendingReleaseSealInput`은 `PendingEventReleaseReceipt`에서 `release_seal`을 제외한 exact field order다.
+   `process_seal_service.zig`는
+   `maru.pending-operation.v1`/`maru.pending-release.v1` typed 256-bit seal method만 추가한다. source에는 별도
+   `PendingSourceReceiptSealInput`(아래 receipt에서 seal 제외 exact field order)과 `PendingSourceLeaseSealInput`
+   `{receipt:PendingSourceReceiptSealInput,state_raw:u8,reserved:[7]u8,attempt:u64}`를 두고
+   `maru.pending-source-receipt.v1`/`maru.pending-source-lease.v1` typed method를 사용한다. frame은 별도
+   `PendingPreparationFrameSealInput{frame_addr:u64,runtime_addr:u64,lifetime_owner_addr:u64,pending_owner_addr:u64,
+   observation_addr:u64,direct_input_addr:u64,pending_controls_addr:u64,source_owner_addr:u64,operation_preflight:RuntimeOperationPreflight,
+   operation_identity:RuntimeOperationIdentity,source_receipt:PendingSourceReceiptSealInput,source_lease:PendingSourceLeaseSealInput,
+   snapshot_digest:[32]u8,recipe_digest:[32]u8,scratch_graph_digest:[32]u8,transcript_mirror:[32]u8,progress_mirror:[32]u8,
+   cleanup_descriptor:CleanupDescriptor,protected_ranges_digest:[32]u8,allocator_context_addr:u64,allocator_context_projection_digest:[32]u8}`와
+   `maru.pending-preparation-frame.v1` typed method를 쓴다. 다섯 domain의 같은 scalar 입력도 seal이 서로 달라야 하며 cross-domain/phase replay를
+   거부한다. 다섯 input은 reflection every-field sensitivity와 little-endian golden encoding 대상이다.
+   generic MAC/raw key API는 0이다.
+   mutation-free `RuntimeOperationPreflight` exact schema는
+   `{lifetime_owner_addr:u64,runtime_addr:u64,pending_owner_addr:u64,pid:u32,reserved_pid:u32,process_nonce:u64,thread_id:u64,
+   owner_incarnation:u64,expected_next_operation:u64,expected_operation_seal:[32]u8}`다. no-fail suffix가 keyed row seal/counter를 yield 없이 다시 확인한다.
+
+   b2b3 boundary는 `RemoteRuntime` receiver entry를 다음 closed inventory로 고정한다. active preparation 중 read-only exact 3은
+   `runtimeIdHex|attachedAsObserver|usesGenerationAttachment`이고 기존 의미대로 허용한다. mutable pointer escape `surfacePtr`와 void destructive
+   `deinit|detachClientSide|terminate` exact 4는 active lifetime row에서 fatal이다. fallible/wire/mutation exact 16은
+   `sendInput|sendInputNonBlocking|requestScrollToBottom|queueCoreCommand|resize|pumpDelta|requestResync|refreshObservation|selectedText|linkAt|
+   clipboardWrite|find|selectContentAware|sendCoreCommandBlocking|sendMouseReport|takeNotification`이며 active row에서 wire/allocation/mutation 0의
+   `Busy`로 정규화한다. public constructors exact 5(`spawn|spawnWithConfig|spawnWithAdapter|attachExisting|attachExistingWithAdapter`)는
+   unpublished object만 다루므로 active inventory 밖이다. private owner constructors는 `spawnWithOwner|attachExistingWithOwner` exact 2이고
+   둘만 common init을 호출한다. 나열되지 않은 private mutator/wire leaf는 이 guarded
+   public entry 또는 b2b3 orchestration에서만 exact caller를 가지며 boundary가 unguarded external caller 0과 inventory source digest를 고정한다.
+
+   owner의 persisted schema는 `{lifecycle_raw:u8,reserved:[7]u8,self_addr:u64,owner_incarnation:u64,next_attempt:u64,
+   active_attempt:u64,operation_incarnation:u64,source_lease_incarnation:u64,event_identity:PendingEventIdentity,
+   prepared:RawPreparedEventStorage,source_lease:PendingEventSourceLease,release_receipt:PendingEventReleaseReceipt,
+   cleanup_graph:event_cleanup_seal.ObservationCleanupGraph,transcript_seal:[32]u8,progress_seal:[32]u8}` exact field order다.
+   prepared tag/effect/failure/reason/resize/revoke/next observation은 `RawPreparedEventStorage` 안에만 있고 outer header에 중복 저장하지 않는다.
+   raw tag를 범위 검사해 stack의
+   canonical typed value로 재구성하기 전 union payload나 owned observation을 읽지 않는다. pristine owner는 lifecycle 0, 모든 raw tag/scalar/
+   digest 0, observation seven owner `.empty`다. `initInPlace`, `beginPrepare`, `publishPrepared`, `abortPrepare`, `borrowPrepared`는 package-private이고
+   각각 `idle->preparing`, `preparing->prepared`, `preparing->idle`, `prepared` read-only만 수행한다. b3만
+   `beginSettlement(prepared->settling)`과 `commitEffect(settling->committed_cleanup)`, b4만
+   `finishCommitted(committed_cleanup->idle)`의 최초 caller를 추가한다. b2b3에서 이 세 future API의 product caller는 0이다.
+
+   위 “correlation/event identity”의 exact `PendingEventIdentity` schema는 b2b1 projection과 같은 순서의
+   `{expected_major:u16,metadata_support_raw:u8,correlation_binding_digest:[32]u8,payload_digest:[32]u8,
+   admission_projection_digest:[32]u8,wire_major:u16,admission_tag:u8,registry_incarnation:u64,binding_reservation_id:u64,
+   event_node_incarnation:u64,stream_id:u64,event_generation:u64,event_owner_addr:u64,slot_incarnation:u64,
+   owner_node_incarnation:u64,transport_incarnation:u64,host_id:u128,runtime_id:u128,connection_generation:u64,pid:u32,
+   process_nonce:u64}`다. b2b1 `GenerationEventPreparationProjection`에서 field-for-field 복사하며 추가/생략/reorder는
+   reflection/every-field gate 실패다.
+
+   preparation attempt는 owner-local checked nonzero `u64` issuer다. PID/process-domain과 canonical final address를 먼저 확인한 뒤 raw header의
+   range/seal만 읽고, typed payload/owned graph/Client lock 전에 `beginPrepare`가 checked value를 발급한다. 발급 즉시 성공/실패와 무관하게
+   burn하며 같은 주소 재사용 ABA를 owner incarnation+attempt 쌍으로 막는다. 0/overflow, fork child PID mismatch, copied owner는
+   `fatalIntegrity`로 닫는다. `fatalIntegrity(reason)`은 proof-loss의 유일한 callback-free `noreturn` leaf이며 preallocated
+   addressless atomic evidence slot에 `cmpxchg`로 최대 1회 fixed scalar를 기록하고 POSIX `_exit(86)`를 exact once 호출한다.
+
+   **source lease:** canonical dormant orchestration은 mutation 0의 `preflightPendingEventSource`를 먼저 호출한다. 이 preflight는 real
+   `GenerationAttachment.takeEvent`의 `EventOwner` final address, `PreparationEventView` projection, payload extent, correlation,
+   runtime operation preflight를 입력으로 ClientSlot verdict와 pointer-free `PendingEventSourceReceipt`를 만든다. yield/callback 없이 이어지는
+   `beginPrepareAndMintSourceLease`가 inline lifetime row의 no-fail claim, attempt burn, `idle->preparing`, receipt 재검증과 source lease mint를 하나의
+   no-fail suffix로 수행한다. 따라서 source Busy/invalid는 owner mutation 0이고 begin 뒤 source-mint 실패 상태는 존재하지 않는다.
+   `PendingEventSourceReceipt`의 exact schema는
+   `{event_identity:PendingEventIdentity,runtime_addr:u64,pending_owner_addr:u64,payload_addr:u64,payload_len:u64,
+   runtime_incarnation:u64,pending_owner_incarnation:u64,source_lease_incarnation:u64,pid:u32,process_nonce:u64,thread_id:u64,
+   receipt_seal:[32]u8}`다. persisted lease는 이 receipt 전체와
+   `{state_raw:u8,reserved:[7]u8,attempt:u64,lease_seal:[32]u8}` exact fields를 가지며 state ordinal은
+   pristine=0, active=1, consumed=2, aborted=3이다. slice나 Client pointer는 저장하지 않는다.
+   preflight와 no-fail mint는 ClientSlot package validator가 반환한 verdict만 사용한다. callback마다
+   PID/thread/callback -> operation lease -> source lease raw/seal -> canonical `preparationEventView`/payload descriptor+digest 순으로 재검증한다.
+   publication은 `consumeForPublication`으로 lease를 tombstone하고 Pending owner에 pointer-free
+   `PendingEventReleaseReceipt{event_identity:PendingEventIdentity,pending_owner_addr:u64,pending_owner_incarnation:u64,
+   source_lease_incarnation:u64,attempt:u64,state_raw:u8,reserved:[7]u8,release_seal:[32]u8}`를 옮긴다. release seal은 위 typed
+   process-seal domain이고 live=1/consumed=2 raw state, final owner address/incarnation/attempt를 모두 묶는다.
+   실제 `EventOwner`는 GenerationAttachment가 계속 소유하며 b3의 correlation-based settlement만 이 receipt를 소비해 exact once release한다.
+   b3는 release 전 seal과 canonical EventOwner/correlation/attachment row를 다시 검증하고 copy/replay/ABA에서는 release 0이다.
+   Attachment direct release는 pending receipt가 live이면 Busy다. semantic failure(OOM/cap/peer/connection)는 정상 failure publication이므로
+   source lease를 consumed로 이전한다. publication을 만들지 않는 integrity-fatal exact-proof 경로만 scratch cleanup 뒤 `active->aborted`로
+   tombstone하고 즉시 fatal로 끝난다. copied/moved/ABA/reentry/fork는
+   mutation 0이다. active 동안 direct input/control compaction·clear·observation replacement·event release·runtime destroy는 Busy다.
+
+   prepare의 failure transition은 다음 표가 전부다. 표 밖 state/result 쌍은 recoverable error로 추측하지 않고 `fatalIntegrity`다.
+
+   | 시작/사건 | scratch/lease 처리 | owner 결과 | 반환/종료 |
+   | --- | --- | --- | --- |
+   | `idle`, operation/source preflight Busy·invalid | allocation·owner mutation 0, lease 미발급 | `idle` | `Busy|InvalidOwner` |
+   | `preparing`, classifier peer violation | partial owner 0, active lease consume | `prepared failure(protocol_error)` | success publication |
+   | `preparing`, allocator null | scratch reverse cleanup, active lease consume | `prepared failure(out_of_memory)` | success publication |
+   | `preparing`, checked cap/overflow | scratch reverse cleanup, active lease consume | `prepared failure(local_resource_exhausted)` | success publication |
+   | `preparing`, declared callback failure/connection close | scratch reverse cleanup, active lease consume | `prepared failure(connection_closed)` | success publication |
+   | `preparing`, source drift/reentry/candidate alias with exact proof | candidate adopt/write/free 0, prior scratch reverse cleanup, lease abort | `idle` | fatal integrity |
+   | `preparing`, owner/lease/transcript/progress proof loss | candidate와 remaining owner dereference/free 0, lease/owner write 0 | 변경을 주장하지 않음 | evidence 0~1, `_exit(86)` |
+   | `preparing`, successful no-allocation/metadata preparation | DTO cleanup, next observation만 move+tombstone, lease consume | `prepared` exact arm/effect | success publication |
+
+   `preparing`을 `idle` 또는 `prepared`로 바꾸는 sole caller는 owner module의 `abortPrepare`/`publishPrepared`다. allocator/callback orchestration은
+   이 두 no-fail commit leaf를 직접 호출할 뿐 lifecycle raw byte를 쓰지 않는다.
+
+   classification 정책은 아래 표가 전부다. resize baseline/generation/size와 metadata revision/content digest는 immutable snapshot 값만
+   사용하며 별도 재분류 helper는 만들지 않는다.
+
+   | classifier 결과와 snapshot predicate | projection | effect | allocation |
+   | --- | --- | --- | --- |
+   | accepted `ended` | `ended` | none | 0 |
+   | accepted `invalidated` | `invalidated` | none | 0 |
+   | accepted resize, baseline 없음 또는 generation 증가 | `resize_commit(size)` | none | 0 |
+   | accepted resize, generation 감소 또는 동일 generation+동일 size | `resize_noop` | none | 0 |
+   | accepted resize, 동일 generation+다른 size | `failure(protocol_error)` | poison peer-contract | 0 |
+   | accepted metadata, revision 감소 | `ignored` | none | 0 |
+   | accepted metadata, revision 동일+semantic/content 동일 | `metadata_noop` | none | DTO 최대 1(0-byte backing은 0) 뒤 cleanup, next 0 |
+   | accepted metadata, revision 동일+semantic/content 다름 | `failure(protocol_error)` | poison peer-contract | DTO 최대 1(0-byte backing은 0) 뒤 cleanup, next 0 |
+   | accepted metadata, revision 증가 | `metadata_commit` | none | DTO 최대 1+next 최대 7 |
+   | accepted revoked, trusted successor fence valid | `revoked(fence)` | revoke fence | 0 |
+   | accepted revoked, successor fence invalid | `failure(protocol_error)` | poison peer-contract | 0 |
+   | 모든 `Classification.violation` arm | `failure(protocol_error)` | poison peer-contract | 0 |
+   | source connection이 preparation 전에 terminal | `failure(connection_closed)` | none | 0 |
+   | local allocator null / checked capacity | `failure(out_of_memory|local_resource_exhausted)` | poison local-resource | ordinal까지 |
+
+   `ignored`는 stale accepted metadata에만 쓰며 violation을 숨기는 catch-all이 아니다. policy helper는 exhaustive switch이고 table의 각 행과
+   accepted 5종/Violation 전 arm case count를 comptime/test assertion으로 고정한다.
+
+   **protected ranges:** callback 동안 살아 있는 context, source/operation receipt, snapshot, recipe, transcript/progress mirror, cleanup descriptor,
+   scratch header/count/tombstone, range-builder storage와 `PreparationAllocatorContext`는 stack final-address `PreparationFrame` exact 한 field graph에
+   들어간다. 어떤 nested field 주소도 callback context/test hook에 노출하지 않는다. 매 allocation 직전
+   `ProtectedRangeBuilder(max_inputs=21)`가 raw role 입력을 checked `addr+len`으로 받아 address 순서의 disjoint canonical interval union
+   (`max_segments=21`)으로 만든다. base raw roles는 `remote_runtime`, `source_payload`, `direct_input_backing`, `pending_controls_backing`, old
+   observation의 seven backing, full `preparation_frame`, captured allocator vtable의 exact extent까지 exact 13개다. 여기에 현재 live scratch의
+   `dto_backing`과 next observation seven backing 최대 8개를 role 순서로 추가한다. opaque underlying allocator
+   context 전체를 보호한다고 주장하지 않으며 allocator pointer+vtable은 scalar provenance seal로만 비교한다.
+   `ProtectedRangeBuilder` persisted stack schema는 `{inputs:[21]ProtectedRange,input_count:u8,segments:[21]ProtectedRange,
+   segment_count:u8}`이고 `ProtectedRange`는 `{role_raw:u8,reserved:[7]u8,start:u64,end_exclusive:u64}`다. unused tail은 zero다.
+   `PreparationFrame`과 allocator vtable extent는 각각 `@sizeOf(PreparationFrame)`과 `@sizeOf(std.mem.Allocator.VTable)`이다. allocator
+   pointer+vtable equality는 scalar provenance 검증이고 vtable 메모리 extent 자체도 candidate alias 금지 range다. wrapper schema는
+   `{self_addr:u64,allocator:std.mem.Allocator,expected_role_raw:u8,callback_active_raw:u8,reserved:[6]u8,requested_len:u64,
+   alignment_log2:u8,callback_ordinal:u8,reserved_tail:[6]u8}`이고 final address와 이 projection을 포함한 keyed frame seal을 callback 전후
+   검사한다. zero length는 canonical absent로
+   생략하고 one-past overflow·role 중복·21 input 초과는 allocation 전에 local integrity failure다.
+   overlap과 adjacency는 하나의 interval로 합치므로 canonical segments는 항상 pairwise disjoint다. allocator candidate는 checked extent와
+   required alignment를 검증한 뒤 모든 canonical segment와 non-overlap이어야 한다. ClientSlot private range는 이 목록으로 raw 주소를
+   내보내지 않고 package validator 내부에서 같은 candidate extent를 검사해 verdict만 반환한다. cap/cap+1, zero, adjacency, nesting,
+   overflow와 candidate alias를 focused gate가 고정한다.
+
+   `RuntimeSemanticSnapshot`은 pointer/slice를 저장하지 않는 fixed value다. exact fields는
+   `{runtime_addr:u64,observation_addr:u64,runtime_incarnation:u64,allocator_ptr:u64,allocator_vtable:u64,
+   observation:event_cleanup_seal.ObservationCleanupDigestInput,direct_input:BufferSnapshot,direct_input_offset:u64,
+   pending_controls:BufferSnapshot,blocking_flush_active_raw:u8,resize_generation:u64,resize_baseline_present_raw:u8,
+   operation_identity:RuntimeOperationIdentity,source_identity:PendingEventIdentity}`다. `BufferSnapshot`은
+   `{address:u64,length_bytes:u64,capacity_bytes:u64,content_digest:[32]u8}`이고 operation identity는 lifetime receipt의 pointer-free scalar에서
+   consumed byte를 제외한 canonical identity다. pending-controls digest는 raw struct/padding을 hash하지 않는다. admission에서 checked 변환돼
+   저장된 `barrier:u64` little-endian 뒤 `runtime_control_types` sole canonical encoder bytes를 순서대로
+   `maru.pending-controls.snapshot.v1` domain에 넣는다. invalid tag/payload는 snapshot 전
+   local invariant다. `cwd_host|agent_progress`는 length/capacity 0과 canonical empty digest만 허용한다. reflection every-field sensitivity와
+   exact-capacity rejection을 gate가 고정한다. snapshot은 validation evidence일 뿐 serialization 권위는 pending guard/operation lease다.
+
+   `PreparationScratch` exact schema는 stack-only
+   `{dto_backing:std.ArrayListUnmanaged(u8),next_observation:RuntimeObservation,descriptors:[8]CleanupDescriptor,
+   live_mask:u8,tombstone_mask:u8}`다. dto allocator pointer/vtable와 role은 descriptor[0]이 소유하고 observation descriptor는 role 1..7과
+   field-for-field 대응한다. masks의 high/overlap bit는 invalid다. copy/move/escape는 금지하고 callback context/hook에 주소를 전달하지 않는다. `publishPrepared`는
+   metadata DTO를 먼저 typed cleanup하고 exact-capacity next observation만 owner로 move한 뒤 scratch의 해당 fields를 tombstone한다.
+   `abortPrepare`는 exact proof 아래 reverse cleanup 뒤 lease abort와 owner idle을 no-fail로 함께 수행한다.
+
+   allocation schedule은 role ordinal `dto_backing(0) -> cwd(1) -> cwd_host(2) -> window_title(3) -> ssh_remote_dest(4) ->
+   clipboard_read_target(5) -> foreground_processes(6) -> agent_progress(7)` exact 순서다. semantic byte length 0은 allocator callback 없이
+   canonical empty owner로 skip하고 nonzero만 ordinal callback을 소비한다. 일반 model의 최대 callback은 8이고 fail-index 0..7을 모두
+   실행한다. 현재 b2b3 product precondition은 cwd_host/agent_progress가 empty라 real-take fixture의 최대 callback은 6이지만 schedule/model에서
+   두 role을 삭제하지 않는다. 각 callback 직전 base13+그 시점의 live scratch 최대8을 다시 canonicalize해 allocator가 이전 allocation과
+   exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
+
+   `PendingEventOwner`는 `@alignOf <= 16`, `@sizeOf <= 4096`; `RuntimeLifetimeOwner`는 `@alignOf <= 16`, `@sizeOf <= 256`을 compile-time
+   budget으로 둔다. 최대 4,096 runtime에서 두 inline owner의 aggregate 상한은 17 MiB이며 target별 실제 size와 RemoteRuntime 증가량을
+   focused artifact에 기록한다. 이 budget 증가는 별도 문서 변경 없이는 허용하지 않는다.
+
+   hostile table의 case count도 고정한다. callback drift는 8 role × 6 mutation class(owner header, operation row/receipt, source lease,
+   transcript/progress, snapshot/queue descriptor, allocator provenance) = 48행이다. real allocation schedule candidate alias는 ordinal i 앞의
+   `base13+i live scratch`만 존재하므로 `sum(i=0..7,13+i) × 4 shape(exact,left,right,nested) = 528`행이다. 별도 builder standalone은
+   callback이 없는 max-cap graph의 protected role 21 × shape 4 = 84행으로 full union을 고정한다. 두 표를 합쳐 impossible future scratch
+   owner를 actual callback oracle로 주장하지 않으면서 Runtime/source/queue/old observation/full frame/vtable/live scratch 전체를 덮는다.
+   zero/adjacency/nesting/one-past overflow는 별도 8행이다.
+   source lease는 pristine/active/consumed/aborted의 copy·ABA·wrong-thread 12행, Runtime admission은 read-only 3+fatal 4+Busy 16 =
+   23행이다. fork subprocess는 pristine/operation-active/source-active/prepared exact 4 inherited-state case를 한 bounded child test에서 실행한다.
+   각 category test가 이 exact row count를 assert하며 행 삭제나 catch-all 합치기는 count 감소로 실패한다.
+
+   pure `PreparationBudgetInput`은 `payload_len`, `dto_capacity`, next/old seven backing의 capacity bytes만 받는다. fixed owner/snapshot/
+   descriptor stack bytes는 bounded inline storage라 JSON budget에 더하지 않는다. borrowed payload도 retained live allocation이므로 peak에는
+   `len`으로 포함한다. checked-add한 `payload_len + dto_capacity + next_capacity + old_capacity <= 4 * max_control_json`, publish 전 DTO cleanup
+   뒤 `payload_len + next_capacity + old_capacity <= 3 * max_control_json`을 모두 만족해야 한다. element capacity는 checked
+   `capacity * @sizeOf(Element)` byte로 환산한다. overflow, individual component cap 초과, non-exact old owner는 allocation 0의
+   `local_resource_exhausted`/local invariant로 각각 분리한다.
+
+   `RuntimePreparationContext`와 full `PreparationFrame`의 sole declaration owner는 `pending_event_preparation.zig`다. frame exact schema는
+   `{self_addr:u64,context:RuntimePreparationContext,operation_preflight:RuntimeOperationPreflight,operation_lease:RuntimeOperationLease,
+   source_receipt:PendingEventSourceReceipt,source_lease_mirror:PendingEventSourceLease,snapshot:RuntimeSemanticSnapshot,
+   recipe:EventPreparationRecipe,scratch:PreparationScratch,transcript_mirror:[32]u8,progress_mirror:[32]u8,
+   cleanup_descriptor:CleanupDescriptor,protected_ranges:ProtectedRangeBuilder,allocator_context:PreparationAllocatorContext,
+   frame_seal:[32]u8}`다. pristine/init/tombstone reflection은 모든 field를 고정한다. 이 module은 adapter를
+   import하지 않는다. `remote_runtime_pending_event.zig`는 preparation module을 단방향 import해 facade를 제공하고 `RemoteRuntime`은 두 module을
+   import하되 reverse import는 0이다. package-private context의 exact fields는
+   `{runtime_addr:u64,allocator:std.mem.Allocator,lifetime_owner:*RuntimeLifetimeOwner,pending_owner:*PendingEventOwner,
+   observation:*const term_backend.RuntimeObservation,direct_input:*const std.ArrayListUnmanaged(u8),direct_input_offset:*const usize,
+   pending_controls:*const std.ArrayListUnmanaged(RawQueuedRuntimeControl),blocking_flush_active:*const bool,resize_generation:*const u64,
+   resize_baseline_present:*const bool,source_owner:*const EventOwner,source_view:PreparationEventView,correlation:EventCorrelation}`다. live Runtime
+   state는 전부 `*const` revalidation view이고 mutation 가능한 pointer는 final owner/lifetime owner 두 개뿐이다. context는
+   stack `PreparationFrame` 안에서 final-address이고 const/borrow scope는 한 prepare 호출이며 저장/return/copy 0이다. typed pointer/allocator
+   허용 목록을 reflection으로 고정한다. `RemoteRuntime.classifyAndPrepareEvent(owner,source_view,correlation)` method가 caller stack에 full
+   `PreparationFrame`을 final-address로 한 번만 만들고 그 안의 context/receipt/scratch를 in-place 초기화한 뒤 adapter의
+   `prepareTakenEvent(frame:*PreparationFrame)`를 호출한다. adapter는 `frame.context`를 복사하지 않고 parent self-address seal을 먼저
+   검증하며 allocation마다 frame 전체 extent를 보호한다. 따라서 reverse import/cycle은 0이다. 실제 호출 방향은
+   `RemoteRuntime/test fixture -> GenerationAttachment.takeEvent -> GenerationTransport.preparationEventView ->
+   RemoteRuntime.classifyAndPrepareEvent -> remote_runtime_pending_event.prepareTakenEvent -> pending_event_preparation.prepare ->
+   runtime_event_preparation`의 세로 경로 하나다. b2b3에서는 `builtin.is_test` dormant real-take fixture와 non-test compile-only instantiation만
+   각각 test caller 1/`@TypeOf(prepareTakenEvent)` compile-only sentinel 1이며 normal frame/product pump invocation은 0이다. test seam은 allocator/fatal sink만 바꾸고 authority/lease/validator 경로를
+   우회하지 않는다.
+
+   **b2b3 exact RED/green inventory:** `test-session-host-2c3d-c3-3b2b3`은 b2b2 gate를 선행하고 Debug·ReleaseFast에서 똑같이 다음
+   exact-36 tests를 실행한다: prepared types/policy/budget 7, owner lifecycle/raw-tag/attempt 8, preparation success·all allocation ordinal OOM·
+   reverse rollback 10, callback drift/protected-range/source-lease hostile matrix 5, fork/proof-loss `_exit(86)` subprocess 2, real
+   `GenerationAttachment` take dormant + non-test compile-only topology 3, source boundary 1. 각 test는 표 기반 case 수를 별도 assertion으로
+   고정한다. 첫 RED commit에서 이 count와 filter/build target을 만들며 GREEN에서 count를 줄이지 않는다. boundary는 control-types/
+   pending-control/prepared-types/owner/preparation/adapter/lifetime-owner 일곱 모듈의 import DAG,
+   exact final owner field 1, orchestration declaration/caller, normal product pump caller 0, GenerationAttachment semantic import 0,
+   b3 settlement API caller 0과 old b2b2 exact-17을 함께 고정한다.
 
    cleanup callback 전에는 publication 당시의 stored transcript/progress seal을 현재 canonical state로 먼저 재검증한 뒤 별도 stack mirror로
    복사한다. mirror와 local descriptor copy는 allocator candidate의 protected range이고 그 주소는 callback context·test hook·observer·
@@ -1575,12 +1890,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    bound stream의 sealed classification context와 payload를 `classifyAndPrepareEvent`에 넘긴다. sealed `EventOwner` view는 frame header
    `wire_major`와 별도의 take-time `expected_major|metadata_support`를 quarantine trusted mirror와 다시 비교한다. 이 함수는 live Runtime에
    대해 mutation-free이며, `ignored|ended|invalidated|resize_noop|resize_commit|metadata_noop|metadata_commit|revoked|failure`의 닫힌
-   `PreparedEvent`를 만든다. metadata commit은 DTO backing을 `RuntimeObservation`에 adopt하지 않고 exact-capacity independently-owned next
+   stack `PreparedEvent` borrow를 만든다. metadata commit은 DTO backing을 `RuntimeObservation`에 adopt하지 않고 exact-capacity independently-owned next
    observation을 만든다.
 
    `PendingEventOwner` lifecycle은 `idle -> preparing -> prepared -> settling -> committed_cleanup -> idle`이다. `preparing`은 첫
-   allocator/callback 전에 동기 no-yield로 게시하고 같은 prepare 호출을 벗어나지 않는 최소 reentry guard이며 event cleanup, correlation,
-   payload, DTO, partial backing 또는 retry cursor를 소유하지 않는다. stack `PreparationScratch`만 partial typed allocation을 소유한다.
+   allocator/callback 전에 동기 no-yield로 게시하고 같은 prepare 호출을 벗어나지 않는 최소 reentry guard다. 이때 owner는 pointer-free
+   event identity/source lease/lifetime operation identity만 소유하고 payload slice, DTO, partial backing 또는 retry cursor를 소유하지 않는다.
+   stack `PreparationScratch`만 partial typed allocation을 소유한다.
    metadata/observation의 allocation-free semantic recipe+fill은 ordinary와 staged의 mapping SSOT지만 lifetime/allocator orchestration은
    공유하지 않는다. staged plan은 final-address opaque source-lease-bound storage이고 stored slice를 dereference하지 않는다. fill 직전
    canonical source를 다시 받아 pointer-free length/presence/scalar/offset과 digest를 재검증한다.

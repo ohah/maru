@@ -1,5 +1,5 @@
 //! control_capture — 컨트롤 플레인 **session.capture 프로토콜 코어**(L2 순수, OS-중립, 헤드리스).
-//! Track C slice 1f. 단일 출처: docs/control-plane.md §4.3(대형 응답 chunk 계약)·§6(`session.capture {id, scrollback?}`)·
+//! Track C slice 1f. 단일 출처: docs/control-plane-protocol.md §4.3(대형 응답 chunk 계약)·§6(`session.capture {id, scrollback?}`)·
 //! §8.3(read-output scope)·§8.5(in-flight capture revoke 종료)·§11(slice 1f)·§16(코어 L2 = src/session/).
 //!
 //! **1a/1c/1d/1e와의 관계**: 1a(control_plane.zig)=wire 프리미티브(JSON-RPC parse/serialize/framer/error-model),

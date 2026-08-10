@@ -1,5 +1,5 @@
 //! control_browser — 컨트롤 플레인 **`browser.*` wire 스키마 + 디스패치 + authz**(L2 순수, OS-중립).
-//! Track C slice 5a(Phase 5 첫 슬라이스). 단일 출처: docs/control-plane.md §9.1(5a browser core)·§9(browser.*
+//! Track C slice 5a(Phase 5 첫 슬라이스). 단일 출처: docs/control-plane-browser.md §9.1(5a browser core)·§9(browser.*
 //! 매핑)·§8.3(균일 unauthorized)·§6 line 111(method↔scope)·§11(slice 5a·코드 배치 gate)·§16(코어 L2 = src/session/).
 //!
 //! **1a/1c/1e/1d와의 관계**: 1a(control_plane.zig)=wire 프리미티브(JSON-RPC parse/serialize/framer/error-model·

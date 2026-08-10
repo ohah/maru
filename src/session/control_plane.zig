@@ -1,5 +1,6 @@
 //! control_plane — 세션 컨트롤 플레인 wire 프로토콜의 L2 순수 코어 (schema/parser/framing/error-model).
-//! Track C slice 1a. 단일 출처: docs/control-plane.md §1·§4.1·§4.3·§10·§16.
+//! Track C slice 1a. 단일 출처: docs/control-plane.md §1·§10, docs/control-plane-protocol.md §4.1·§4.3,
+//! docs/control-plane-implementation.md §16.
 //!
 //! **베이스와 결정(clean-room, docs/control-plane.md §10):**
 //! - **메커니즘 = JSON-RPC 2.0** over 로컬 socket(LSP/DAP/CDP가 공유하는 그 메커니즘만 빌린다). request/response는
@@ -28,7 +29,7 @@ const std = @import("std");
 // ── 상수 ──────────────────────────────────────────────────────────────────────────────────────────────────
 /// JSON-RPC 2.0 version 태그. 모든 message의 `jsonrpc` 필드는 정확히 이 값이어야 한다(§10).
 pub const jsonrpc_version = "2.0";
-/// 핸드셰이크가 광고하는 프로토콜 식별자(docs/control-plane.md §4.1). 버전 skew 감지에 쓴다.
+/// 핸드셰이크가 광고하는 프로토콜 식별자(docs/control-plane-protocol.md §4.1). 버전 skew 감지에 쓴다.
 pub const protocol_id = "maru.control.v1";
 /// `hello` notification의 method 이름(§4.1).
 pub const hello_method = "hello";

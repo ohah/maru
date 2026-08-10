@@ -1,5 +1,5 @@
 //! control_dispatch — 컨트롤 플레인 **read-only 바이트→바이트 디스패치 라우터**(L2 순수, OS-중립).
-//! Track C slice 1d. 단일 출처: docs/control-plane.md §4.1(네임스페이스)·§6(sessions.list·session.get)·
+//! Track C slice 1d. 단일 출처: docs/control-plane-protocol.md §4.1(네임스페이스)·§6(sessions.list·session.get)·
 //! §8.3(균일 unauthorized)·§11(slice 1d·CLI help gate·코드 배치 gate)·§16(코어 L2 = src/session/).
 //!
 //! **1a/1c와의 관계**: 1a(control_plane.zig)는 wire 프리미티브(JSON-RPC parse/serialize/framer/error-model),

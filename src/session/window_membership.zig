@@ -1,5 +1,6 @@
 //! WindowMembershipSnapshot — window↔surface membership 최소 DTO + `metadata:{self|window|all}` scope 판정
-//! (L2 순수, OS-중립). M0b(docs/window-surface-mobility.md §8, docs/control-plane.md §3·§8.3~§8.4).
+//! (L2 순수, OS-중립). M0b(docs/window-surface-mobility.md §8, docs/control-plane.md §3,
+//! docs/control-plane-security.md §8.3~§8.4).
 //!
 //! full `WindowGraph`(M1)를 짓기 전에, control-plane Phase 1이 소비할 두 계약 — `metadata:window` scope 판정과
 //! "2-window+quick 전역 surface_id 비충돌" — 을 검증하기 위한 최소 형태다. `WindowGraph` 도입 후엔 같은 membership
@@ -23,7 +24,7 @@ pub const WindowKind = enum {
     /// 일반 창(사이드바·탭 바가 있는 full chrome). 앱 전역 surface_id 공간을 quick과 공유한다.
     normal,
     /// quick terminal(싱글톤 dropdown, `chrome_minimal`). 별도 window 위치 메타데이터를 가지되 같은 surface 모델이다.
-    /// `metadata:all` 같은 명시 grant가 있을 때만 일반 창 열거에 포함된다(docs/control-plane.md §3·§8.4).
+    /// `metadata:all` 같은 명시 grant가 있을 때만 일반 창 열거에 포함된다(docs/control-plane.md §3, docs/control-plane-security.md §8.4).
     quick,
 };
 
@@ -45,7 +46,7 @@ pub const WindowMembershipSnapshot = struct {
     }
 };
 
-/// metadata 열거/조회 scope(docs/control-plane.md §8.3). 이 파일은 **판정만** 한다 — grant는 Phase 1 auth.
+/// metadata 열거/조회 scope(docs/control-plane-security.md §8.3). 이 파일은 **판정만** 한다 — grant는 Phase 1 auth.
 pub const MetadataScope = enum {
     /// 자기 surface 하나(호출 surface_id). `sessions.list`/`get`/`subscribe`가 자기 (surface_id) 하나로 필터링.
     self,

@@ -99,7 +99,7 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
-[control-plane.md §4.4](control-plane.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.
+[control-plane-protocol.md §4.4](control-plane.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.
 
 | 항목 | Track 5 16 MiB 완료 예산 | 실패 시 |
 | --- | --- | --- |
@@ -211,7 +211,7 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 
 ## Micro-slice 성능 운영
 
-세션 컨트롤 플레인과 웹 패널 구현은 [control-plane.md](control-plane.md) §11의 micro-slice 단위로 진행한다. 각 slice가 hot path를 건드리면 PR 본문에 다음을 남긴다.
+세션 컨트롤 플레인과 웹 패널 구현은 [control-plane-implementation.md](control-plane-implementation.md) §11의 micro-slice 단위로 진행한다. 각 slice가 hot path를 건드리면 PR 본문에 다음을 남긴다.
 
 - 어떤 경로가 새로 반복 호출되는가(frame tick, PTY pump, socket dispatch, WebView bridge, zntc watch 등).
 - 새 allocation/copy/lock/thread hop/I/O가 bounded인지, 어떤 테스트나 artifact로 확인했는가.

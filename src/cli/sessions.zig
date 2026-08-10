@@ -1,5 +1,5 @@
 //! `maru sessions` / `maru session` 서브커맨드의 **순수 CLI 로직** — 인자 파싱, `--help` 텍스트, client wire
-//! (요청 바이트 조립·응답 포맷). Track C slice 1d. 단일 출처: docs/control-plane.md §6·§11(CLI help gate·코드
+//! (요청 바이트 조립·응답 포맷). Track C slice 1d. 단일 출처: docs/control-plane.md §6·docs/control-plane-implementation.md §11(CLI help gate·코드
 //! 배치 gate)·§16(CLI = src/cli.zig).
 //!
 //! **무엇을 하나**: read-only 메타데이터 조회 CLI다.

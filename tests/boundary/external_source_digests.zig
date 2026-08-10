@@ -239,6 +239,9 @@ pub const inventory = [_]Proof{
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
     .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "4d52157e57ed879ed84d3118348ae0ed0af2332f6d0b3c9129b4aa1c50e27e15" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
-    .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
+    // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
+    // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
+    // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.
+    .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "b86809f9b52d6fc794ef73387b65eac18dc48d179c8ed00ca58f7cc9c3fa33eb" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },
 };

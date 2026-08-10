@@ -1,5 +1,5 @@
 //! control_events — browser 이벤트 채널 코어(L2 순수, 헤드리스). Track C 5f-0.
-//! 단일 출처: docs/control-plane.md §9.5.2(EventBroker)·§9.5.6(revoke/close 수명)·§9.4 D2·§7(events).
+//! 단일 출처: docs/control-plane-browser-session.md §9.5.2(EventBroker)·§9.5.6(revoke/close 수명)·§9.4 D2·§7(events).
 //!
 //! **역할**: 서버→클라 push 이벤트(`browser.navigated`/`loadState`/`dialog`/`crashed`/`closed`)의 **구독 레지스트리 +
 //! 매칭 + notification 직렬화 + coalesce 분류**를 순수하게 소유한다. 실 이벤트 소스(WKWebView KVO/delegate)는 L4가

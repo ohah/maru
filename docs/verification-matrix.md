@@ -603,6 +603,36 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   authority drift validator 전수이며, 23행은 제품 entry inventory의 static boundary와 3 read-only/16 Busy/4 copied-owner lifetime decision을 결합한 증거다.
   실제 settlement와 Busy retry는 b3, close readiness는 b5, product activation은
   b4가 소유한다. umbrella `test-session-host-2c3d-c3-3b2b`는 b2b0~b2b3 focused gate 전체를 상속하며 이 범위의 완료 증거다.
+  b3 focused `test-session-host-2c3d-c3-3b3`은 기존 b2b umbrella를 상속하고 Debug·ReleaseFast에서
+  final-address settlement lease의 prepare/second-settlement 상호 배제와 close-kind reserved compatibility,
+  `prepared -> settling`, exact pending receipt 기반
+  `preparation_pending -> releasing -> idle`, none·poison·revoke clean/cancel/partial→poison·already-terminal의 closed plan,
+  fd detach-before-close, first-reason 보존, target exact-own cleanup과 sibling 불변을 검증한다. same-owner pre-admission Busy는 세 호출 모두
+  mutation 0이고 네 번째 호출만 같은 attempt로 성공해야 하며 내부 retry/yield는 0이다. copy/move/cross-owner/fork/ABA/replay,
+  one-field receipt/effect drift, callback reentry, allocator callsite 0과 exact-proof/proof-loss `_exit(86)` subprocess를 포함한다.
+  boundary는 Attachment의 Runtime semantic import 0, 일반 live release 계약 변경 0, persistent per-stage done/effect/registry
+  mirror와 두 번째 cleanup owner 0, sole sealed `SettlementDisposition` exact 1, b3 normal product pump caller 0,
+  b4-owned semantic publication/reset caller 0을 고정한다. close compatibility는 기존 ordinal
+  `none=0/preparation=1/close=2` 불변, 새 `settlement=3`, raw close 상태에서 settlement acquire `Busy`인 sealed fixture와 unknown
+  raw tag mutation-0 거부까지만 검증하며 실제 close acquire 경쟁은 b5에 남긴다. 실제 product event pump와
+  `settling -> committed_cleanup -> idle`은 b4 증거이므로 이 gate만으로 C3-3b 완료를 주장하지 않는다.
+  output별 non-pristine, exact/양방향 partial overlap, cross-output/permit/owner/lease/Client/registry alias, same-address output ABA,
+  disposition outside-owner/wrong-inline-offset/other-owner same-offset/canonical field 밖 owner-subrange overlap,
+  prepared-before-seal·one-field-unwritten·partial publication은 authority 0으로 거부한다. attachment paired preflight의
+  first/second failure는 permit/output pristine이고 Pending preflight failure는 paired permit exact pre-admission abort 뒤 lease
+  abort, product post-admission abort caller 0이다. boundary는 coordinator의 direct
+  ClientSlot/registry import와 raw pointer getter 0, attachment/transport의 canonical projection exact-one을 함께 고정한다.
+  pure scratch-range preflight는 lease/evidence/permit pairwise 및 lifetime/Pending/attachment protected-range 관계를 integer-only로
+  검사한다. non-pristine, exact·partial alias, disposition wrong containment, copied/moved destination과 same-address stale storage는
+  acquire 전 `InvalidOwner`, owner row/counter와 모든 scratch byte mutation 0이다. range proof 뒤 byte drift-before-pristine과
+  pristine proof 뒤 `lease_out` drift-before-acquire는 counter mutation 0이다. 그 밖의 scratch drift-after-pristine과 acquire 뒤
+  drift-before-final-preflight는 attachment/Pending final preflight의 exact abort+incarnation burn으로 분리하고 성공 lease는 original
+  final address에서만 abort/consume 가능한지 검증한다.
+  preliminary precheck 뒤 경쟁 prepare/settlement exact finish와 same-address next-attempt race는 lease 아래 final preflight에서
+  typed reject하고 process 생존·domain mutation 0·operation incarnation burn만 검증한다. RED inventory는 최적화 모드당
+  component 24개(lease/owner 6, closed outcome 6, authority/receipt 6, retry/callback 6; receipt replay 포함),
+  fresh subprocess 3개(pre-admission fork, post-admission proof loss, post-callback proof loss), boundary 1개다.
+  각 artifact는 `--maru-expect-tests`로 exact count를 고정하며 GREEN에서 범주를 합치거나 줄이지 않는다.
 - **b2b focused-count 규율:** 각 구현 PR은 첫 RED commit에서 semantic/projection/seal 또는 recipe/compat 또는 owner/OOM test와
   proof-loss subprocess, boundary test의 exact inventory를 `--maru-expect-tests`로 고정한다. 같은 PR의 GREEN 단계에서 count를 줄이거나
   범주를 합쳐 통과시키지 않으며 Debug·ReleaseFast가 같은 semantic count를 실행한다.

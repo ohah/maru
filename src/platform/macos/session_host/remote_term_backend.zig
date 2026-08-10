@@ -356,6 +356,7 @@ pub const RemoteTermBackend = struct {
         client.poison(.local_invariant_violation);
 
         var rr: RemoteRuntime = undefined;
+        try remote_runtime.testing_api.initializePendingOwners(&rr);
         rr.client = &client;
         rr.allocator = allocator;
         rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
@@ -395,17 +396,28 @@ pub const RemoteTermBackend = struct {
         client.pending_event_bytes = ended.payload.len;
 
         var rr: RemoteRuntime = undefined;
+        try remote_runtime.testing_api.initializePendingOwners(&rr);
         rr.client = &client;
+        rr.generation_adapter = null;
         rr.allocator = allocator;
         rr.io = std.testing.io;
+        rr.runtime_id_hex = "00000000000000000000000000000001".*;
         rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
+        rr.resize_seq = 0;
         rr.direct_input = .empty;
         defer rr.direct_input.deinit(allocator);
         rr.direct_input_offset = 0;
         rr.pending_controls = .empty;
         defer rr.pending_controls.deinit(allocator);
+        rr.blocking_flush_active = false;
         rr.pump_ended = false;
         rr.resync_needed = false;
+        rr.observation = .{};
+        defer rr.observation.deinit(allocator);
+        rr.event_generation_tracking = .tracked;
+        rr.pending_generation_event_outcome = .none;
+        rr.resize_generation = 0;
+        rr.resize_baseline_present = false;
         rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
         defer rr.surface.deinit();
         rr.surface.process_state = .running;

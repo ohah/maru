@@ -15,6 +15,17 @@ extern "c" fn alarm(seconds: c_uint) c_uint;
 
 pub const max_entries: usize = 4096;
 
+pub const testing = if (builtin.is_test) struct {
+    pub fn rollbackEventPreparationPending(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) Error!void {
+        return self.rollbackEventPreparationPendingForTest(reservation, identity, receipt);
+    }
+} else struct {};
+
 const RegistryLifecycle = enum(u8) {
     pristine,
     live,
@@ -39,6 +50,7 @@ const EventAuthorityLifecycle = enum(u8) {
     idle,
     reserved,
     live,
+    preparation_pending,
     releasing,
     terminal,
 };
@@ -193,6 +205,16 @@ pub const EventTrustedCleanup = struct {
     state: State,
 };
 
+/// Pointer-free evidence for immutable event preparation.  Keeping this projection separate from
+/// EventTrustedCleanup prevents ordinary release and recovery callers from treating a pending
+/// preparation as callback-free live authority.
+pub const EventTrustedPreparation = struct {
+    event: EventGenerationReceipt,
+    quarantine_slot_index: u16,
+    quarantine_reservation_generation: u64,
+    ordering_class: EventOrderingClass,
+};
+
 const EventAuthority = struct {
     next_generation: u64 = 1,
     active_generation: u64 = 0,
@@ -235,7 +257,7 @@ const EventAuthority = struct {
         return switch (self.lifecycle) {
             .idle => self.next_generation != 0,
             .terminal => self.next_generation == std.math.maxInt(u64),
-            .reserved, .live, .releasing => false,
+            .reserved, .live, .preparation_pending, .releasing => false,
         };
     }
 };
@@ -360,7 +382,7 @@ pub const AttachmentCleanupRegistry = struct {
                 !eventOrderingClassRawValid(&authority.ordering_class))
                 return error.InvalidState;
             const blocks = switch (authority.lifecycle) {
-                .reserved, .live, .releasing => true,
+                .reserved, .live, .preparation_pending, .releasing => true,
                 .terminal => authority.completion_addr != 0 and
                     authority.registered_operation_id != 0,
                 .idle => false,
@@ -1089,7 +1111,7 @@ pub const AttachmentCleanupRegistry = struct {
         if (!eventAuthorityLifecycleRawValid(&entry.event_authority.lifecycle)) return .invalid;
         if (!entry.event_authority.settledExact()) {
             return switch (entry.event_authority.lifecycle) {
-                .reserved, .live, .releasing => .busy,
+                .reserved, .live, .preparation_pending, .releasing => .busy,
                 .idle, .terminal => .invalid,
             };
         }
@@ -1248,7 +1270,7 @@ pub const AttachmentCleanupRegistry = struct {
         if (!eventAuthorityLifecycleRawValid(&authority.lifecycle)) return error.InvalidState;
         return switch (authority.lifecycle) {
             .live => .live,
-            .reserved => .busy,
+            .reserved, .preparation_pending => .busy,
             .idle, .releasing, .terminal => .terminal,
         };
     }
@@ -1268,7 +1290,7 @@ pub const AttachmentCleanupRegistry = struct {
         return switch (authority.lifecycle) {
             .idle, .terminal => if (generation_mirror == 0) .ready else .invalid,
             .reserved => .busy,
-            .live, .releasing => if (generation_mirror != 0 and
+            .live, .preparation_pending, .releasing => if (generation_mirror != 0 and
                 generation_mirror == authority.active_generation and
                 owner_addr != 0 and owner_addr == authority.active_owner_addr)
                 .busy
@@ -1292,11 +1314,49 @@ pub const AttachmentCleanupRegistry = struct {
         return switch (authority.lifecycle) {
             .idle, .terminal => .ready,
             .reserved => .busy,
-            .live, .releasing => if (authority.active_owner_addr == owner_addr)
+            .live, .preparation_pending, .releasing => if (authority.active_owner_addr == owner_addr)
                 .busy
             else
                 error.InvalidState,
         };
+    }
+
+    /// Linearizes immutable preparation against release, teardown, and ended purge.  Every
+    /// rejection happens before the sole lifecycle mutation; the existing event identity and
+    /// ordering blocker remain canonical throughout the pending interval.
+    pub fn beginEventPreparationPending(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) Error!void {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            authority.lifecycle != .live or
+            !eventReceiptMatches(self, entry, authority, identity, receipt) or
+            authority.completion_addr != 0 or authority.registered_operation_id != 0)
+            return error.InvalidState;
+        authority.lifecycle = .preparation_pending;
+    }
+
+    /// Focused fixtures must restore ordinary live authority before using the existing release
+    /// path.  Product settlement remains owned exclusively by the later b3 transaction.
+    fn rollbackEventPreparationPendingForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+    ) Error!void {
+        if (!builtin.is_test) unreachable;
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            authority.lifecycle != .preparation_pending or
+            !eventReceiptMatches(self, entry, authority, identity, receipt) or
+            authority.completion_addr != 0 or authority.registered_operation_id != 0)
+            return error.InvalidState;
+        authority.lifecycle = .live;
     }
 
     pub fn beginEventReleaseNoFail(
@@ -1513,6 +1573,34 @@ pub const AttachmentCleanupRegistry = struct {
             .quarantine_reservation_generation = authority.quarantine_reservation_generation,
             .ordering_class = authority.ordering_class,
             .state = if (authority.lifecycle == .live) .live else .releasing,
+        };
+    }
+
+    pub fn trustedEventPreparation(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        owner_addr: usize,
+    ) Error!EventTrustedPreparation {
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            (authority.lifecycle != .live and authority.lifecycle != .preparation_pending) or
+            authority.active_generation == 0 or authority.active_owner_addr != owner_addr or
+            owner_addr == 0 or authority.quarantine_reservation_generation == 0)
+            return error.InvalidState;
+        return .{
+            .event = .{
+                .registry_incarnation = self.incarnation,
+                .binding_reservation_id = identity.binding_reservation_id,
+                .node_incarnation = identity.node_incarnation,
+                .stream_id = entry.stream_id,
+                .event_generation = authority.active_generation,
+                .owner_addr = owner_addr,
+            },
+            .quarantine_slot_index = authority.quarantine_slot_index,
+            .quarantine_reservation_generation = authority.quarantine_reservation_generation,
+            .ordering_class = authority.ordering_class,
         };
     }
 
@@ -3042,7 +3130,14 @@ test "CR3a-2c3d C1 event generation exhaustion is sticky and mutation free" {
 }
 
 test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
-    const expected_tags = [_][]const u8{ "idle", "reserved", "live", "releasing", "terminal" };
+    const expected_tags = [_][]const u8{
+        "idle",
+        "reserved",
+        "live",
+        "preparation_pending",
+        "releasing",
+        "terminal",
+    };
     const actual_tags = std.meta.fields(EventAuthorityLifecycle);
     try std.testing.expectEqual(expected_tags.len, actual_tags.len);
     inline for (actual_tags, 0..) |actual, index|
@@ -3087,6 +3182,72 @@ test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
         0xD700,
     );
     registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, live);
+
+    // A copied or stale receipt cannot enter pending preparation and must leave both the
+    // canonical lifecycle and the cached connection-ordering blocker unchanged.
+    var stale = live;
+    stale.event_generation += 1;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.beginEventPreparationPending(
+            bound.reservation,
+            bound.identity,
+            stale,
+        ),
+    );
+    try std.testing.expect(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        live,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+
+    try registry.beginEventPreparationPending(
+        bound.reservation,
+        bound.identity,
+        live,
+    );
+    try std.testing.expectEqual(
+        EventReleaseReadiness.busy,
+        try registry.eventReleaseReadiness(bound.reservation, bound.identity),
+    );
+    try std.testing.expectEqual(
+        EventAttachmentReadiness.busy,
+        try registry.eventAttachmentReadiness(
+            bound.reservation,
+            bound.identity,
+            live.owner_addr,
+            live.event_generation,
+        ),
+    );
+    try std.testing.expectEqual(
+        EventAttachmentReadiness.busy,
+        try registry.eventPurgeReadiness(
+            bound.reservation,
+            bound.identity,
+            live.owner_addr,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(!(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        live,
+    )));
+
+    try testing.rollbackEventPreparationPending(
+        &registry,
+        bound.reservation,
+        bound.identity,
+        live,
+    );
+    try std.testing.expect(try registry.eventGenerationCurrent(
+        bound.reservation,
+        bound.identity,
+        live,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+
     const continuation = registry.beginEventReleaseNoFail(
         bound.reservation,
         bound.identity,

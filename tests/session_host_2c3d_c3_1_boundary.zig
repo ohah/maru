@@ -23,7 +23,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 3), count(attachment, "generation_transport_mod.eventReadinessOwned("));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".takeEvent("));
     // C3-2 adds the generation product drain while preserving the legacy owner path.
-    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".releaseEvent("));
+    // b2b3 adds one test-only real-take Busy probe; the three product release callsites remain.
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, ".releaseEvent("));
     try std.testing.expectEqual(@as(usize, 3), count(runtime, "dropBufferedStream("));
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
@@ -56,21 +57,26 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/attach_product_resolver.zig", .product = 0, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 14 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 5, .top_level_test = 14 },
-        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 2 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 6, .top_level_test = 14 },
+        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 3 },
     });
     try expectSourceIdentifierInventory(allocator, "EventOwner", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 3 },
-        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 33, .top_level_test = 1 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 23, .top_level_test = 16 },
+        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 36, .top_level_test = 1 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 25, .top_level_test = 17 },
+        .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .product = 2, .top_level_test = 2 },
+        // b2b3's dormant RemoteRuntime orchestration names the canonical source owner once.
+        .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
     });
     try expectEventOwnerPointerInventory(allocator, &.{
-        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 20, .mutable_test = 0, .const_product = 11, .const_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 10, .mutable_test = 0, .const_product = 5, .const_test = 4 },
+        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 20, .mutable_test = 0, .const_product = 14, .const_test = 0 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 10, .mutable_test = 1, .const_product = 6, .const_test = 4 },
+        .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .mutable_product = 0, .mutable_test = 0, .const_product = 1, .const_test = 1 },
+        .{ .path = "platform/macos/session_host/remote_runtime.zig", .mutable_product = 1, .mutable_test = 0, .const_product = 0, .const_test = 0 },
     });
     try expectSourceIdentifierInventory(allocator, "takeEventProjected", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 5 },
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 2, .top_level_test = 5 },
     });
     try expectSourceIdentifierInventory(allocator, "eventReadinessOwned", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 3, .top_level_test = 0 },
@@ -486,13 +492,19 @@ fn reviewedEventOwnerComposite(path: []const u8, name: []const u8, init_head: []
         return std.mem.eql(u8, name, "GenerationAttachment") and std.mem.eql(u8, init_head, "struct");
     if (std.mem.eql(u8, path, "platform/macos/session_host/generation_event_contract.zig"))
         return std.mem.eql(u8, name, "EventOwner") and std.mem.eql(u8, init_head, "extern");
+    if (std.mem.eql(u8, path, "platform/macos/session_host/pending_event_preparation.zig"))
+        return std.mem.eql(u8, name, "RuntimePreparationContext") and
+            std.mem.eql(u8, init_head, "struct");
+    if (std.mem.eql(u8, path, "platform/macos/session_host/remote_runtime.zig"))
+        return std.mem.eql(u8, name, "RemoteRuntime") and std.mem.eql(u8, init_head, "struct");
     if (!std.mem.eql(u8, path, "platform/macos/session_host/generation_transport.zig") or
         !std.mem.eql(u8, init_head, "struct")) return false;
     return std.mem.eql(u8, name, "GenerationTransport") or
         std.mem.eql(u8, name, "Owner") or
         std.mem.eql(u8, name, "EventReleaseReentryAllocator") or
         std.mem.eql(u8, name, "EventForeignThreadReleaseProbe") or
-        std.mem.eql(u8, name, "Fixture");
+        std.mem.eql(u8, name, "Fixture") or
+        std.mem.eql(u8, name, "CanonicalHarnessProbe");
 }
 
 fn initializerOnlyUsesEventOwnerInLayoutQueries(

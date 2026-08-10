@@ -45,7 +45,10 @@ test "CR3a-2c3d C1 event facade remains closed and product-unwired" {
     try std.testing.expectEqual(@as(usize, 0), count(attachment_product, ".transport.takeEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "takeGenerationEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(attachment, "takeGenerationEvent("));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "client_slot_mod"));
+    // b2b3's dormant final-address orchestration names the canonical EventCorrelation type, but it
+    // still cannot call ClientSlot's event take/release registry directly.
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, "client_slot_mod"));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "client_slot_mod.takeGenerationEvent("));
 
     try std.testing.expectEqual(@as(usize, 1), count(client, "try self.bufferCanonicalEvent(frame)"));
     try std.testing.expectEqual(@as(usize, 0), count(client, "try self.bufferLegacyEventForTest("));

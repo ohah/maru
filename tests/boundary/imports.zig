@@ -62,6 +62,15 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
     .{ .path = "src/platform/macos/session_host/event_cleanup_seal.zig", .function = "descriptorPresentMask", .expression = "@field(value.next_observation,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/event_cleanup_seal.zig", .function = "descriptorPresentMask", .expression = "@field(value.old_observation,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/process_seal_service.zig", .function = "updateGraph", .expression = "@field(graph,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/process_seal_service.zig", .function = "updateFixedValue", .expression = "@field(value,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .function = "pendingIdentity", .expression = "@field(result,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .function = "pendingIdentity", .expression = "@field(value,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .function = "cleanupIdentity", .expression = "@field(result,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .function = "cleanupIdentity", .expression = "@field(value,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_owner.zig", .function = "identityForSeal", .expression = "@field(out,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_owner.zig", .function = "identityForSeal", .expression = "@field(value,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_owner.zig", .function = "projectionFromRaw", .expression = "@field(projection,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_owner.zig", .function = "projectionFromRaw", .expression = "@field(raw,field.name)", .count = 2 },
 };
 // external source digest 원장은 데이터 전용 파일로 뗐다(충돌 표면 축소 — 그 파일 머리 주석 참고).
 const external_digests = @import("external_source_digests.zig");
@@ -1469,6 +1478,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "preparation_projection_test_hook" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "testing" },
                 .{ .parent = "testing", .kind = "fn", .visibility = "pub", .modifier = "", .name = "armPreparationProjectionReentry" },
+                .{ .parent = "testing", .kind = "fn", .visibility = "pub", .modifier = "", .name = "rollbackGenerationEventPreparationPending" },
+                .{ .parent = "testing", .kind = "const", .visibility = "pub", .modifier = "", .name = "AttachmentLease" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationEventPreparationProjection" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventPreparationProjectionContract" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "projectionFieldPointerFree" },
@@ -1476,6 +1487,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationEventEvidence" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "validatedGenerationEventEvidence" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventPreparationProjection" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginGenerationEventPreparationPending" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackGenerationEventPreparationPendingForTest" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TrustedGenerationEventEvidence" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationEventPreparationCandidateAllowed" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "process_seal_service" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "EventCorrelationInternal" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EventCorrelation" },
@@ -2734,7 +2749,8 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
     try std.testing.expectEqual(
         // One declaration plus the reviewed direct accesses sealed below. C3-3a2 adds four
         // transaction-registry accesses and three whole-registry fail-stop/alias references.
-        @as(usize, 20),
+        // b2b3 adds one registered-operation lookup for candidate-range revalidation.
+        @as(usize, 21),
         countIdentifierOutsideTopLevelTests(slot_product, "registered_node_operations"),
     );
     const registered_operation_direct_accesses = [_]struct {
@@ -5104,6 +5120,11 @@ test "validated metadata token construction and materialization stay in classifi
             entry.path,
             "platform/macos/session_host/runtime_event_preparation.zig",
         );
+        const is_pending_event_preparation = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/pending_event_preparation.zig",
+        );
         const is_remote_runtime = std.mem.eql(
             u8,
             entry.path,
@@ -5122,7 +5143,7 @@ test "validated metadata token construction and materialization stay in classifi
 
         const field_refs = std.mem.count(u8, source, "classifier_preflight");
         if (field_refs != 0) {
-            try std.testing.expect(is_types);
+            try std.testing.expect(is_types or is_pending_event_preparation);
             classifier_field_count += field_refs;
         }
         const type_refs = std.mem.count(u8, source, "ValidatedMetadataView");
@@ -5187,7 +5208,7 @@ test "validated metadata token construction and materialization stay in classifi
             } else return error.TestUnexpectedResult;
         }
     }
-    try std.testing.expectEqual(@as(usize, 3), classifier_field_count);
+    try std.testing.expectEqual(@as(usize, 4), classifier_field_count);
     try std.testing.expectEqual(@as(usize, 5), validated_type_count);
     try std.testing.expectEqual(@as(usize, 2), private_materializer_count);
     try std.testing.expectEqual(@as(usize, 1), product_classifier_definition_count);
@@ -7210,7 +7231,7 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             // movable owners may not name the cleanup capability. C3-3a3 adds one exact
             // event-lease destination range to the activation transaction preflight.
             const expected_lease_count: usize = if (is_client_slot)
-                16
+                17
             else if (is_host_adapter)
                 4
             else if (is_generation_attachment)
@@ -7241,7 +7262,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
         );
         try std.testing.expectEqual(
-            @as(usize, if (is_generation_transport) 4 else if (is_generation_attachment) 1 else 0),
+            // b2b3's canonical real-take harness owns one additional test-only terminalization.
+            @as(usize, if (is_generation_transport) 5 else if (is_generation_attachment) 1 else 0),
             countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
         );
         if (is_generation_transport) {
@@ -7257,9 +7279,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             transport_count: usize,
             attachment_count: usize = 1,
         }{
-            // The correction and B3-6 actual-transport fixtures are top-level test helpers and own
-            // two lexical calls; there is still one product-facade callsite.
-            .{ .name = "bindCommittedStreamOwned", .transport_count = 3 },
+            // The correction, B3-6, and b2b3 real-take fixtures are top-level test helpers and own
+            // three lexical calls; there is still one product-facade callsite.
+            .{ .name = "bindCommittedStreamOwned", .transport_count = 4 },
             .{ .name = "beginControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },

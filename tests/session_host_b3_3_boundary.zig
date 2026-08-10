@@ -21,7 +21,8 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn rpcExecutionAuthoritiesTerminalForTest("));
     // Five pre-existing RPC/event mutation seams plus the C3-3a1 bounded revoke-cache oracle.
-    try std.testing.expectEqual(@as(usize, 6), count(registry, "if (!builtin.is_test) unreachable;"));
+    // b2b3 adds one exact test-only pending-preparation rollback; product settlement stays b3-owned.
+    try std.testing.expectEqual(@as(usize, 7), count(registry, "if (!builtin.is_test) unreachable;"));
     try std.testing.expectEqual(@as(usize, 1), count(registry, ".exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "pub fn exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "if (!builtin.is_test) unreachable;"));

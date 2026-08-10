@@ -135,6 +135,15 @@ threadlocal var preparation_projection_test_hook: if (builtin.is_test) Preparati
     if (builtin.is_test) .{} else {};
 
 pub const testing = if (builtin.is_test) struct {
+    pub const AttachmentLease = lease_mod.ConnectionLease;
+
+    pub fn rollbackGenerationEventPreparationPending(
+        identity: GenerationEventIdentity,
+        owner_addr: usize,
+    ) GenerationEventError!void {
+        return rollbackGenerationEventPreparationPendingForTest(identity, owner_addr);
+    }
+
     pub fn armPreparationProjectionReentry(
         context: *anyopaque,
         callback: *const fn (*anyopaque, GenerationEventPreparationProjection) void,
@@ -7461,9 +7470,60 @@ pub fn generationEventOwnerCurrent(
     if (!current) return error.Terminal;
 }
 
+/// Atomically changes the exact registered event from ordinary live authority to preparation
+/// pending.  The registered-node operation is the linearization boundary against release,
+/// teardown, and ended purge; no Client graph pointer escapes it.
+pub fn beginGenerationEventPreparationPending(
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+) GenerationEventError!void {
+    if (owner_addr == 0 or identity.receipt.owner_addr != owner_addr)
+        return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(identity.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    admission.operation.node.cleanup_registry.beginEventPreparationPending(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        identity.receipt,
+    ) catch |err| return switch (err) {
+        error.InvalidState => error.Busy,
+        else => error.InvalidOwner,
+    };
+}
+
+fn rollbackGenerationEventPreparationPendingForTest(
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+) GenerationEventError!void {
+    if (!builtin.is_test) unreachable;
+    if (owner_addr == 0 or identity.receipt.owner_addr != owner_addr)
+        return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(identity.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    cleanup_registry_mod.testing.rollbackEventPreparationPending(
+        &admission.operation.node.cleanup_registry,
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        identity.receipt,
+    ) catch return error.InvalidOwner;
+}
+
 const GenerationEventEvidence = struct {
     trusted_view: GenerationEventTrustedView,
     preparation: ?GenerationEventPreparationProjection,
+};
+
+const TrustedGenerationEventEvidence = struct {
+    event: cleanup_registry_mod.EventGenerationReceipt,
+    quarantine_slot_index: u16,
+    quarantine_reservation_generation: u64,
+    ordering_class: cleanup_registry_mod.EventOrderingClass,
 };
 
 fn validatedGenerationEventEvidence(
@@ -7478,11 +7538,31 @@ fn validatedGenerationEventEvidence(
         else => error.InvalidOwner,
     };
     defer endRegisteredNodeOperation(admission.operation);
-    const trusted = admission.operation.node.cleanup_registry.trustedEventCleanup(
-        identity.owner.reservation.cleanup,
-        identity.owner.reservation.identity,
-        owner_addr,
-    ) catch return error.Corrupt;
+    const trusted: TrustedGenerationEventEvidence = if (correlation != null) pending: {
+        const value = admission.operation.node.cleanup_registry.trustedEventPreparation(
+            identity.owner.reservation.cleanup,
+            identity.owner.reservation.identity,
+            owner_addr,
+        ) catch return error.Corrupt;
+        break :pending .{
+            .event = value.event,
+            .quarantine_slot_index = value.quarantine_slot_index,
+            .quarantine_reservation_generation = value.quarantine_reservation_generation,
+            .ordering_class = value.ordering_class,
+        };
+    } else cleanup: {
+        const value = admission.operation.node.cleanup_registry.trustedEventCleanup(
+            identity.owner.reservation.cleanup,
+            identity.owner.reservation.identity,
+            owner_addr,
+        ) catch return error.Corrupt;
+        break :cleanup .{
+            .event = value.event,
+            .quarantine_slot_index = value.quarantine_slot_index,
+            .quarantine_reservation_generation = value.quarantine_reservation_generation,
+            .ordering_class = value.ordering_class,
+        };
+    };
     if (!std.meta.eql(trusted.event, identity.receipt)) return error.Corrupt;
     const reservation: GenerationEventQuarantine.Reservation = .{
         .slot_index = trusted.quarantine_slot_index,
@@ -7592,6 +7672,34 @@ pub fn generationEventPreparationProjection(
 ) GenerationEventError!GenerationEventPreparationProjection {
     return (try validatedGenerationEventEvidence(identity, owner_addr, correlation)).preparation orelse
         return error.Corrupt;
+}
+
+/// Package verdict for a preparation allocator candidate. Private ClientSlot/ClientNode and
+/// registered-operation addresses never escape this boundary.
+pub fn generationEventPreparationCandidateAllowed(
+    identity: GenerationEventIdentity,
+    owner_addr: usize,
+    start: usize,
+    len: usize,
+) GenerationEventError!bool {
+    if (owner_addr == 0 or identity.receipt.owner_addr != owner_addr or start == 0 or len == 0)
+        return false;
+    _ = std.math.add(usize, start, len) catch return false;
+    const admission = beginGenerationRequestOwner(identity.owner, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    const trusted = admission.operation.node.cleanup_registry.trustedEventPreparation(
+        identity.owner.reservation.cleanup,
+        identity.owner.reservation.identity,
+        owner_addr,
+    ) catch return error.Corrupt;
+    if (!std.meta.eql(trusted.event, identity.receipt)) return error.Corrupt;
+    const operation_entry = &registered_node_operations[admission.operation.registry_index];
+    return !byteRangesOverlap(start, len, identity.owner.slot_addr, @sizeOf(ClientSlot)) and
+        !byteRangesOverlap(start, len, @intFromPtr(admission.operation.node), @sizeOf(ClientNode)) and
+        !byteRangesOverlap(start, len, @intFromPtr(operation_entry), @sizeOf(RegisteredNodeOperationEntry));
 }
 
 pub fn prepareGenerationEventRelease(

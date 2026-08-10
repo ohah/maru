@@ -84,10 +84,14 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         transport,
         "pub const PreparationEventView",
     ));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "PreparationEventView"));
+    // b2b3 adds the dormant RemoteRuntime orchestration signature while keeping the normal pump
+    // caller at zero; b2b1 still owns the sole projection type and validation path.
+    try std.testing.expectEqual(@as(usize, 1), countIdentifierOutsideTopLevelTests(runtime, "PreparationEventView"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "cleanupTranscriptSeal"));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        // b2b3's lifetime owner, preparation substrate, and shared observation-digest leaf
+        // consume the neutral seal types.
+        @as(usize, 5),
         try countProductSources(allocator, "@import(\"event_cleanup_seal.zig\")"),
     );
     try std.testing.expectEqual(
@@ -98,16 +102,19 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 6),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
     inline for (.{
         .{ "generationEventPreparationProjection", 2 },
-        .{ "GenerationEventPreparationProjection", 7 },
-        .{ "preparationEventView", 3 },
-        .{ "PreparationEventView", 3 },
-        .{ "cleanupTranscriptSeal", 3 },
-        .{ "cleanupProgressSeal", 3 },
+        .{ "GenerationEventPreparationProjection", 8 },
+        .{ "preparationEventView", 6 },
+        // b2b3 adds the dormant RemoteRuntime orchestration signature.
+        .{ "PreparationEventView", 10 },
+        // b2b3 persists and revalidates the exact transcript input at the final owner.
+        .{ "cleanupTranscriptSeal", 7 },
+        // b2b3 seals the projected post-publication transfer before its no-fail owner write.
+        .{ "cleanupProgressSeal", 8 },
     }) |entry| try std.testing.expectEqual(
         @as(usize, entry[1]),
         try countProductIdentifiers(allocator, entry[0]),

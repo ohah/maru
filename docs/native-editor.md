@@ -409,7 +409,26 @@ Selections {
 ColumnAnchor { from_row, from_col, to_row, to_col }   // 시각 좌표 — 갱신은 L3 전용
 ```
 
-**IME 조합 상태는 §11이 소유한다.** 브라우저의 `isComposing`에 해당하는 **별도 bool은 두지 않는다** — `markedRange()`의 유효 여부가 곧 그 답이고, `column`의 null이 "지금 열 선택 중이 아니다"를 뜻하는 것과 같은 관례다. §11이 *"primary만 조합하고 확정 시 나머지 커서에 복제한다"*로 이미 정했으므로, 조합 중 상태는 **primary 하나에 딸린다** — 다만 그 marked range를 `Selections`가 들지 IME 계층이 들지는 §11이 판단한다(`NSTextInputClient`와 얽혀 L4 사정이 있다).
+#### IME marked range를 어디 두는가 — 구현 전 실측으로 정한다 (2026-08-10 사용자 결정)
+
+§3.0(버퍼 표현)·§4.2(폰트 advance)와 **같은 규율**이다. 구조를 짐작으로 정하지 않고, 플랫폼이 실제로 무엇을 요구하는지 재고 나서 고른다.
+
+**재는 것은 "입력기가 언제 무엇을 묻는가"다.** `MARU_IME_DEBUG=1`로 앱을 띄우면 `NSTextInputClient` 콜백이 stderr에 찍힌다. 입력 방향(`keyDown`·`setMarkedText`·`insertText`·`unmarkText`·`doCommand:`)은 이미 찍고 있었고, **결정에 필요한 질의 방향**(`hasMarkedText`·`markedRange`·`selectedRange`·`attributedSubstring`·`firstRect`·`characterIndex`)을 이번에 더했다.
+
+**결정 기준을 미리 적는다** — 그래야 실측이 결정을 이끌고, 결과를 보고 근거를 지어내지 않는다.
+
+| 관측 | 결론 |
+|---|---|
+| `markedRange()`와 `selectedRange()`가 **같은 이벤트 사이클에 연달아** 불린다 | 둘이 한 상태다 → `Selections`가 든다 |
+| `markedRange()`만 독립적으로, 훨씬 잦게 불린다(프레임마다 등) | 갱신 주기가 다르다 → IME 계층이 따로 든다 |
+| `firstRect(forCharacterRange:)`가 marked range를 좌표로 바꾸라고 요구한다 | 이미 있는 caret 좌표 변환(§4)을 타야 한다 → selection과 같은 경로 |
+| 조합 중 `selectedRange()`가 marked **안의** 위치를 요구한다 | 조합 중 caret이 selection과 다른 축이다 → 분리 |
+
+**GUI 손 테스트가 유일한 안전망이다**(§11) — firstResponder·IME는 헤드리스로 검증되지 않으므로, 이 실측은 사람이 한글을 직접 쳐야 나온다. 재현 절차는 §11이 기록한 회귀 사례(`가ㄴ` → Backspace)를 포함한다.
+
+**이 결정 전에는 `Selections`에 필드를 더하지 않는다.** 지금 넣으면 실제 구현이 다른 형태를 요구할 때 되돌려야 하고, 그것은 §3.2가 anchor를 범위로 미리 넓힌 것과 성격이 다르다 — 그쪽은 모든 편집 연산의 전제라 먼저 서야 했고, 이쪽은 플랫폼 제약이 형태를 정한다.
+
+**IME 조합 상태의 동작은 §11이 이미 정했다.** 브라우저의 `isComposing`에 해당하는 **별도 bool은 두지 않는다** — `markedRange()`의 유효 여부가 곧 그 답이고, `column`의 null이 "지금 열 선택 중이 아니다"를 뜻하는 것과 같은 관례다. §11이 *"primary만 조합하고 확정 시 나머지 커서에 복제한다"*로 이미 정했으므로, 조합 중 상태는 **primary 하나에 딸린다** — 다만 그 marked range를 `Selections`가 들지 IME 계층이 들지는 §11이 판단한다(`NSTextInputClient`와 얽혀 L4 사정이 있다).
 
 **터미널 커서와는 모델을 공유하지 않는다.** 터미널 커서는 셀 그리드 좌표에 **하나**뿐이고 위치를 **앱이 정한다**(우리는 그리기만 한다). 편집기 커서는 byte offset에 **여럿**이고 우리가 소유한다. 공유하는 것은 **렌더 경로**(§2.0 — `metal_frame`의 overlay 종류 block·underline·bar·hollow를 재활용하며, 멀티 커서를 위해 `cursor_start`/`cursor_cells`를 배열로 넓히는 ABI 확장 하나만 든다)와 **스타일·blink 설정**(§9 — 편집기 키가 없으면 터미널 값을 상속한다)뿐이다. 모델을 합치려 하면 셀 그리드와 byte offset이라는 두 축을 한 타입에 넣게 된다.
 

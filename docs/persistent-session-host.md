@@ -901,7 +901,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `sendInput|sendInputNonBlocking|pumpPendingOutput|fenceRevoke`와 모든 public entry의 raw lifecycle admission을,
    **2c3b**는 capability projection과 closed RPC transaction을, **2c3c**는
    `sendControl|sendControlNonBlocking`을, **2c3d**는 one-shot event owner의
-   `takeEvent|releaseEvent`와 ended purge 우선순위를, **2c3e**는 generation 제품 callsite source-zero와 actual socket
+   `takeEvent|releaseEvent`와 ended purge 우선순위를, **2c3e**는 generation 제품 RPC/decoder direct-call source-zero와 immediate
+   EOF·unread RX-first를 포함한 actual socket
    parity를 닫는다. 2c3a~e가 모두 green이기 전에는 2c3 또는 2c 전체 완료를 주장하지 않는다. 중간 gate는 legacy
    `Client` 경로를 바꾸지 않고 generation arm에서 자기가 맡은 direct `Client` 호출만 단조 감소시키며, facade 실패를
    legacy로 fallback하지 않는다. 2c3은 generation arm의 direct `logicalClient()`/`Client` method callsite 0을,
@@ -1189,36 +1190,76 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    통과하지 않는다.
 
    C3-3까지의 제품 generation drain 순서는
-   `pending_effect_confirmation -> release_pending -> purge -> take -> view/classify/apply/effect -> release`다. 이전 tick의
-   poison effect가 `Busy`였으면 같은 reason으로 confirmation을 먼저 재시도하고, 확인 전에는 release·purge·take·input·output·screen이
-   모두 0이다. release가 `Busy`였으면 registry-backed attachment readiness로 canonical live owner를 확인한 뒤 같은 owner release를
-   purge보다 먼저 재시도한다. semantic apply 결과는 owner settlement까지 `RemoteRuntime`의 closed pending outcome에 보존하고
-   release 성공 뒤 한 번만 반환하므로 apply를 반복하거나 원래 오류를 잃지 않는다. empty/double release는 추측 호출하지 않는다.
+   `pending settlement -> purge -> take -> immutable snapshot -> classify/prepare -> effect+release settlement -> semantic commit`이다.
+   이전 tick의 settlement가 `Busy`였으면 purge보다 먼저 같은 final-address owner를 재시도한다. 이 재시도는 오류로 빠져
+   surface를 종료하지 않고 `event_pending` progress를 반환하며, 다음 frame tick도 settlement-first로 시작한다. pending 동안
+   해당 Runtime의 input/control/resize/refresh/resync/screen apply/role transition과 semantic cursor는 append·allocation·RPC 전에
+   멈춘다. shared connection의 socket RX와 bounded demux tail append는 계속할 수 있지만 현재 head identity와 `EventCorrelation`,
+   `RuntimeSemanticSnapshot`은 바뀌지 않는다. connection ordering blocker가 하나라도 남아 있으면 sibling Runtime도 bounded local
+   input을 보존할 수 있을 뿐 TX/control/RPC flush는 0이다.
+
+   `.taken`은 live Runtime을 바로 바꾸지 않는다. `RemoteRuntime`은 한 시점의 immutable `RuntimeSemanticSnapshot`을 만들고,
+   bound stream의 sealed classification context와 payload를 `classifyAndPrepareEvent`에 넘긴다. 이 함수는 live Runtime에 대해
+   mutation-free이며, `ignored|ended|invalidated|resize_noop|resize_commit|metadata_noop|metadata_commit|revoked|failure`의 닫힌
+   `PreparedEvent`를 만든다. metadata commit은 `OwnedMetadataDto`의 packed backing을 `RuntimeObservation`의 여러
+   `ArrayList`로 pointer-adopt하지 않는다. protocol 상한 안에서 독립된 next observation을 전부 복사한 뒤에만 pending owner를
+   게시하며, OOM 어느 지점에서도 old observation은 그대로이고 DTO/next backing만 exact once 회수한다.
+
+   `PendingEventOwner`는 Runtime의 final address에 고정된 semantic owner다. lifecycle은
+   `idle -> prepared -> settling -> committed_cleanup -> idle`이고 registry event lifecycle을 복제하지 않는다. seal은
+   `EventCorrelation`, immutable snapshot/precondition, prepared variant와 모든 scalar, owned buffer의 length/content digest/allocator
+   provenance, `EffectRequest`와 poison reason을 묶는다. 매 `prepared -> settling` 시도는 Busy 재시도를 포함해 production에서
+   variable bytes 전체를 정확히 한 번 다시 hash한다. 한 owner의 `sealed_variable_bytes`는 event payload, owned DTO, next observation과
+   old observation 각각의 aggregate string bytes를 합친 값이며 각 항은 `protocol.max_control_json` 이하, checked sum은
+   `4 * protocol.max_control_json` 이하이다. prepare 동안 이 네 backing을 동시에 보유하는 double-peak hard cap도 같은 값이고,
+   scalar/고정 배열은 `@sizeOf` 기반 별도 compile-time 상한으로 센다. 초과는 publication 전 `ResourceExhausted`라 old observation과
+   owner를 바꾸지 않는다. 비용은 O(`sealed_variable_bytes`)이며 allocation은 0이다. shared backend의 frame-scoped round-robin
+   `SettlementWorkBudget`은 `16 * 4 * protocol.max_control_json` hash bytes와 owner attempt 16개 중 먼저 닿는 상한까지만 허용한다.
+   다음 owner가 남은 byte budget을 넘으면 그 owner를 다음 tick의 round-robin 시작점으로 보존한다. owner hard cap이 frame byte cap보다
+   작으므로 다음 tick에는 반드시 admission된다. budget을 받지 못한 owner는 hash 없이 `event_pending`을 반환한다. Debug·ReleaseFast gate는 연속 Busy 3회에서 attempt/hash byte
+   exact count, allocation 0과 round-robin 0/1/16/17·최대 Runtime liveness를 고정한다. CI wall-clock은 부하 편차 때문에 correctness
+   threshold로 쓰지 않고 ReleaseFast ns/byte artifact만 기록한다. raw tag/address/pointer/
+   length/provenance/content seal이 깨지면 손상된 pointer를 읽거나 free하지 않고 diagnostic 뒤 process fail-stop한다.
+
+   effect와 release는 package-private `settlePendingEvent(correlation,effect_request)` transaction 하나가 소유한다. Attachment는
+   `PreparedEvent`, `EventDrain`, observation 또는 Runtime precondition을 import하거나 받지 않고 registry/Client 권위와
+   `EventCorrelation`·`EffectRequest`만 검증한다. exact owner/quarantine/pin/ordering blocker/correlation, allocator provenance와
+   callback continuation, Client state를 모두 preflight한 뒤에만 no-fail suffix로 `none`, poison, revoke fence 또는 이미 terminal인
+   connection cleanup을 confirm하고 같은 owner를 release한다. revoke fence는 outbound를
+   `clean|cancel_before_write|partial_then_poison(outbound_partial_write)`로 내부 정규화하며 partial도 같은 transaction에서 poison과
+   release까지 끝낸다. effect 성공 뒤 release `Busy`나 재실행 가능한 중간 상태는 없다.
+
+   settlement 성공 뒤 Runtime은 pending seal과 같은 live precondition을 allocation 없이 다시 검증한다. metadata는 fully-owned next
+   observation과 old observation을 pointer/list swap한 뒤 pending을 `committed_cleanup`으로 두고, private stack cleanup owner가 old
+   buffers를 exact once 해제한다. 이 callback 동안 public read/mutation/destruction은 Busy 또는 unavailable이고, callback 뒤 새
+   semantic seal과 pending identity를 다시 검증한 뒤에만 `EventDrain`을 exact once publish하고 `idle`로 돌아간다. event가 이미
+   settled된 뒤의 impossible drift도 guessed rollback/free 대신 fail-stop한다. 별도 poison retry owner나 모든 단계를 복제하는 대형
+   상태 머신은 만들지 않는다.
+
    첫 purge가 `.purged`면
    같은 turn의 take·metadata·input·output·screen은 0이고 즉시 ended를 반환한다. `.not_ended` 뒤 take가
    `.ended_pending`이면 입력·출력을 진행하지 않고 purge로 되돌아간다. 이 재시도 budget은
    `protocol.max_client_pending_events`에서 직접 파생하며 magic count를 두지 않는다. budget 소진은 queue나 owner를
    바꾸지 않는 `Busy`로 다음 pump tick에 넘기고, 다음 tick도 purge-first에서 시작한다. `.taken`만 view하고 모든
-   semantic 성공·실패 경로에서 exact once release한다. release `Busy`는 owner/mirror와 pending semantic outcome을 보존한 채
-   다음 tick release-first로 수렴하고 `Corrupt|Terminal`은 typed fail-close한다. legacy arm의 raw drain과 공통 semantic classify/apply SSOT는
+   semantic 성공·실패 경로에서 exact once settlement한다. settlement `Busy`는 owner/mirror와 sealed `PendingEventOwner`를 보존한 채
+   다음 tick settlement-first로 수렴하고 structural corruption은 diagnostic fail-stop, trusted mismatch는 fixed local-invariant poison과
+   exact recovery settlement로 닫는다. legacy arm의 raw drain과 공통 semantic classification policy는
    보존하고 generation 실패의 legacy fallback은 0이다. C3-2는 component/product-type 배선까지만 완료로 세며 actual
    Darwin socket, revoked→fence→release 왕복과 generation raw Client event source-zero는 C3-3이 소유한다.
    C3-3은 `applyObservationEvent`의 generation arm에서 raw `self.client.wire_major`, `metadata_support`, `poison`과 raw Client
-   revoke fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거한다. capability 입력은
-   `GenerationCapabilities` projection, effect는 mode-specific typed
-   poison/fence adapter 하나로 바꾸고 pure classify/materialize/apply policy만 공통 SSOT로 남긴다.
+   revoke fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거한다. classification context는 registry/ClientSlot이
+   실제 소유하는 exact event/binding identity와 `expected_major|metadata_support`만 `EventCorrelation`에 묶는다. mutable current
+   role/controller generation/event-generation tracking은 Runtime snapshot과 pending seal만 소유하며 correlation이 그 의미 권위를
+   주장하지 않는다.
 
-   C3-3의 실패 정산은 `confirmed/retryable poison effect -> releaseEvent` 순서다. exact-15의
-   `GenerationTransport.poison(reason) Error!void` 성공은 `confirmed`, `AdminBusy`는 `busy`다. `confirmed`는 client_slot 내부에서
+   C3-3의 실패 정산에서 poison은 settlement transaction의 closed effect다. confirmed poison은 client_slot 내부에서
    canonical first poison reason, unusable과 `fd == -1`을 함께 증명한 상태다. blocking single-mode Client의 fd가 열린
    deferred-cleanup terminal은 외부 owner가 없으므로 다음 admitted effect가 같은 suffix에서 fd를 take/close해 confirmed로
    수렴한다. generation Client의 external mode는 single-mode invariant 위반이므로 `busy`가 아니라 typed terminal/invalid-owner다.
-   적용/기존 terminal 여부는 내부
-   oracle만 구분하고 facade 성공 postcondition은 하나로 합친다. `busy` 또는 적용 여부가 불명확한 동안에는 canonical `EventOwner`와 실패 결과를 보존하고 다음 pump에서 effect를
-   먼저 재시도한다. poison 적용을 확인하기 전에 event를 release하지 않으며, 별도 poison retry counter·effect owner·deferred-fd
-   상태는 만들지 않는다. 따라서 blocking deferred terminal을 영구 `busy`로 남기는 구현도 금지한다. 기존
-   `pending_generation_event_outcome.failed`가 유일한 RemoteRuntime retry state로 error와 optional poison reason을
-   함께 소유한다. mode-specific adapter는 non-owning stack/value helper이며 callback·vtable·heap·retained storage가 0이다.
+   적용/기존 terminal 여부는 내부 oracle만 구분하고 facade 성공 postcondition은 하나로 합친다. preflight `Busy`는 effect, owner,
+   queue, pending bytes를 모두 보존하고 다음 pump에서 whole settlement를 재시도한다. admitted 뒤에는 poison/fence confirmation과
+   event release가 분리되지 않는다. Client가 이미 terminal이면 caller의 sealed effect request를 바꾸지 않고 내부
+   `terminal_cleanup_preserve_first_reason` plan으로 정규화해 caller effect 0, sibling exact-own cleanup만 수행한다.
 
    `busy`는 effect pre-admission 결과이며 callback, syscall, role/poison/fd disposition, event owner와 queue의 durable mutation이 모두 0이다.
    canonical registry/node 검증을 위한 shared receipt는 exact begin/end로 균형 정산될 수 있지만 effect execution lease는 얻지 않는다.
@@ -1239,25 +1280,26 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `fd == -1` 후조건을 구현했다. `test-session-host-2c3d-c3-3`의 Debug·ReleaseFast actual socketpair가
    external typed invalid/exclusive Busy의 durable mutation 0, partial pending free exact 1, callback 안 poison/input/control과
    foreign teardown Busy, effect 뒤 fence 재사용, peer EOF와 idempotent 재호출을
-   고정한다. 기존 `EventAuthority` revoke class/derived cache·제품 failure settlement·source-zero와 actual revoked roundtrip은 아직
-   C3-3 후속 slice다.
+   고정한다. 기존 `EventAuthority`의 product ordering activation은 C3-3a3까지 구현됐고, generic all-event blocker migration,
+   제품 event settlement·source-zero와 actual revoked roundtrip은 C3-3b·C3-3c 후속 slice다.
 
-   accepted revoke의 ordering authority는 두 기존 canonical owner가 이어서 소유한다. 별도 revoke row나 admission generation은
-   만들지 않고, 기존 `AttachmentCleanupRegistry.Entry.event_authority`가 exact receipt와
-   `reserved -> live -> releasing -> idle|terminal` lifecycle을 계속 단독 소유한다. 이 authority에 closed
-   `none|controller_revoke` ordering class를 봉인한다. per-entry class/lifecycle가 SSOT이고 같은 registry의 node-local checked
-   derived cache는 `reserved|live|releasing` revoke 수의 O(1) projection일 뿐이다. production은 affected row의 exact
-   lifecycle/receipt와 checked counter bound/transition만 O(1)으로 검증하고 invalid raw lifecycle/receipt 또는 counter bound 위반을
-   fail-closed한다. Debug·ReleaseFast test-only invariant oracle만 bounded full scan으로 cache 일치를 확인하며, 임의 row/cache bit drift의
-   전수 탐지는 주장하지 않는다.
+   event ordering authority는 기존 canonical owner가 이어서 소유한다. 별도 revoke row, cleanup charge나 admission generation은
+   만들지 않고, `AttachmentCleanupRegistry.Entry.event_authority`가 exact receipt와
+   `reserved -> live -> releasing -> idle|terminal` lifecycle을 계속 단독 소유한다. cleanup readiness는 이 lifecycle과 기존 cleanup
+   pin이 SSOT이며 별도 `owner_effect_charge`를 두지 않는다. 이 authority의 closed ordering class는
+   `none|non_revoke_effect|controller_revoke`이고, 모든 taken row가 publication 전에 connection ordering blocker를 하나씩 arm한다.
+   `none`은 live event의 no-special-effect semantic class이며 blocker-unarmed를 뜻하지 않는다. idle/settled row에는 active ordering
+   class 자체가 없다. per-entry class/lifecycle가 SSOT이고 같은
+   registry의 node-local checked `connection_ordering_blocker_count`는 armed `reserved|live|releasing|terminal-recovery` row 수의
+   O(1) projection이다. 기존 `revoke_blocker_count` 이름과 revoke-only predicate는 같은 migration에서 제거한다.
    take 전에는 sealed `pending_events`와
    `hasBufferedControllerRevoke`가 queue latch다. take transaction은 queue commit 전에 event generation과 trusted ordering class를
    reserve/bind하고, 이어지는 `Client` queue commit→existing authority live publication의 연속 no-fail suffix가 queue owner를
    in-flight row로 이전한다. in-flight receipt는
    `{node_incarnation,binding_reservation,stream_id,event_generation}`이고 canonical registry lifecycle은 위 기존
    `reserved -> live -> releasing -> idle|terminal`뿐이다.
-   `borrowed/classifying/effect_pending/release_pending`은 RemoteRuntime의 설명용 처리 단계이며 registry에 복제하지 않고, retry phase는
-   `pending_generation_event_outcome` 하나만 소유한다. accepted 분류는 현재 ClientSlot take가 canonical payload를 재검증해 얻은
+   `borrowed/classifying/prepared/settling/committed_cleanup`은 Runtime semantic owner의 처리 단계이며 registry lifecycle에 복제하지
+   않는다. accepted 분류는 현재 ClientSlot take가 canonical payload를 재검증해 얻은
    trusted preflight 결과를 reserve 입력으로 소비하며 aggregate query에서 payload를 다시 파싱하지 않는다. queue 제거부터 registry publication까지 계속 live인
    `StreamOperationPermit`과 owner-thread/no-yield suffix가 handoff를 직렬화한다. C3-3a3에서는 registered-node operation을 direct execution
    lease의 shared pin으로 publication 뒤까지 유지하지만 operation 자체가 아니라 execution lease와 aggregate overlap이 원자성 근거다.
@@ -1270,28 +1312,29 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    held leaf는 Client graph를 읽기 전에 TLS와 final-address body를 검증하고 acquire로 published tuple과 대조한다. 종료는 exact address를
    CAS consume한 뒤 tuple을 0으로 release하고 fence를 shared로 내린다. issuer max, copied/foreign receipt·capability, callback TLS와
    publication 중 teardown PoC는 `ConnectionClosed|AdminBusy` 또는 fail-stop으로 닫고 mutation 0을 검증한다.
-   derived aggregate는 reserved/live/releasing revoke를 모두 blocker로 세어 관측 가능한 queue 0/aggregate 0
-   틈을 만들지 않는다. pre-reserve 실패는 cache `0 -> 0`, revoke reserve는 `0 -> 1`, reserve 뒤 abort는 `0 -> 1 -> 0`이고
-   live publication과 releasing 시작은 delta 0이다. 여러 sibling revoke는 기존 binding별 authority의 독립 row로 세며 queued latch와
-   revoke aggregate가 모두 0일 때만 connection mutation gate를 다시 연다. release Busy·effect Busy·terminal cleanup과 allocator
-   callback 동안 row/count를 유지한다. 정상 release는 allocator callback/quarantine settlement 뒤 `finishEventReleaseNoFail`에서
-   감소하며 그 뒤 permit consume까지 live `StreamOperationPermit`이 mutation을 계속 막는다. corrupt recovery는 terminalize에서 감소하지
-   않고 recovery permit 최종 consume 뒤 감소한다. teardown은 live/releasing event를 정산하지 않고 explicit release까지 `Busy`다.
+   derived aggregate는 모든 reserved/live/releasing event를 blocker로 세어 관측 가능한 queue 0/count 0 틈을 만들지 않는다.
+   pre-reserve 실패는 cache `0 -> 0`, 모든 event reserve는 `0 -> 1`, reserve 뒤 abort는 `0 -> 1 -> 0`이고 live publication과
+   releasing 시작은 delta 0이다. benign/unknown도 preparation 또는 settlement `Busy` 뒤 tick을 넘는 동안 armed 상태를 유지한다.
+   live row의 ordering을 미리 downgrade하면 다음 tick의 pending corruption이 sibling TX 뒤에 발견될 수 있으므로 금지한다. 여러 sibling
+   event는 기존 binding별 authority의 독립 row로 세며 queued latch와 ordering aggregate가 모두 0일 때만 connection mutation gate를
+   다시 연다. effect/release settlement `Busy`, terminal cleanup과 allocator callback 동안 row/count를 유지한다. 정상 settlement는
+   allocator callback/quarantine settlement 뒤 `finishEventReleaseNoFail`의 같은 suffix에서 감소한다. corrupt recovery는 terminalize에서
+   감소하지 않고 recovery permit 최종 consume 뒤 감소한다. teardown은 live/releasing event를 추측 정산하지 않는다.
    stale/copy/ABA/double consume과 unauthorized underflow는 aggregate delta 0으로
    fail-stop한다. queue OOM/overflow는 in-flight row 발급 전의 기존 canonical event-ingress fail-close이며 queue latch를 게시했다고
    가장하지 않는다. allocator callback 동안 Client wire entry가 Busy이고 local pending mutation은 이후 connection terminal 정산에서
    폐기됨을 별도 hostile oracle로 고정한다.
 
-   aggregate gate의 현재 consumer는 blocking/nonblocking input, generation control, pending-output flush, 현재 raw
+   ordering aggregate gate의 현재 consumer는 blocking/nonblocking input, generation control, pending-output flush, 현재 raw
    `callOrdered` RPC 전체와 resync stream-frame이다. `callOrdered`에는 resize·mouse·core·scroll·resync뿐 아니라
    clipboard write, scroll을 동반한 find/select 및 observation/selected-text/link/notification 조회가 함께 있다. 현행
-   `Client.callWithIo`가 같은 Client operation fence 안에서 connection-wide queued revoke를 먼저 검사하고 pending mutation frame을
-   flush하므로, a3도 method 의미를 임의 분류하지 않고 **모든 `callOrdered` wire admission**을 aggregate 동안 멈춘다. read-only RPC를
+   `Client.callWithIo`가 같은 Client operation fence 안에서 connection-wide queued event를 먼저 검사하고 pending mutation frame을
+   flush하므로, method 의미를 임의 분류하지 않고 **모든 `callOrdered` wire admission**을 aggregate 동안 멈춘다. read-only RPC를
    세분화하는 것은 2c3e typed RPC inventory가 소유한다. attach lifecycle의 prepared request/execute는 제품 mutation consumer가 아니라
    기존 owner/fence 회귀 대상으로만 상속하고, future 2c3e typed execute는 같은 helper 계약을 재사용하되 caller 편입과 source
    inventory는 2c3e gate가 소유한다. resync는 coalesced nonblocking stream-frame과 response-bearing raw RPC를 별도 행으로 센다.
    각 API의 상위 `RemoteRuntime` 검사와 별개로 ClientSlot/transport의
-   최종 queue-offset/syscall admission에서 queued latch와 revoke aggregate가 모두 0인지 검사한다. 별도 aggregate generation은 없다.
+   최종 queue-offset/syscall admission에서 queued latch와 ordering aggregate가 모두 0인지 검사한다. 별도 aggregate generation은 없다.
    오류 우선순위와 owner 보존은 아래 closed 표가 소유하며 현행 observable을 보존한다. raw identity/role/corruption은 mutation
    권위를 만들기 전에 거부하고, capability가 없는 generation control은 `Unsupported`를 유지한 뒤 blocker를 검사한다.
 
@@ -1299,7 +1342,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    | --- | --- | --- |
    | blocking generation input/control | transport `Busy`(RemoteRuntime blocking drain에서는 기존 mapping대로 `AdminBusy`) | direct-input/control FIFO와 barrier, caller payload, Client pending frame/offset |
    | nonblocking generation input/control | transport typed `Busy`; check 뒤 aggregate가 생기는 경쟁에서도 public input은 `0`, public control은 성공 반환+FIFO 유지, internal pump는 progress `false` | direct-input/control FIFO와 barrier, caller payload, Client pending frame/offset |
-   | connection-wide pending-output pump | active permit/execution-lease contention은 typed `Busy`; queued/aggregate revoke는 progress `false` | pending frame backing, stream owner와 exact offset |
+   | connection-wide pending-output pump | active permit/execution-lease contention은 typed `Busy`; queued event/ordering aggregate는 progress `false` | pending frame backing, stream owner와 exact offset |
    | 모든 raw `callOrdered` RPC(두 번째 resync 포함) | 현행 `Client.callWithIo`와 같은 `AdminBusy` | RemoteRuntime input/control queue·intent, Client pending frame/offset, request-id, prepared RPC storage와 response destination |
    | coalesced nonblocking resync stream-frame | progress `false` | `resync_needed=true`, Client pending frame/offset |
    | observer resize | 기존 success no-op(제품 final-admission transaction에 진입하지 않음) | observer view와 resize sequence |
@@ -1314,8 +1357,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    C3-3a1 authority와 C3-3a2 final-admission substrate는 C3-3a3에서 함께 product activation됐다. a1 authority는 product
    take/release에, a2 final-admission
    transaction을 현재 mutation consumer에 원자적으로 함께 배선한다. event take는 blocker producer이므로 target queued event와 자신이
-   reserve한 aggregate를 다시 검사하는 a2 consumer predicate를 사용하지 않는다. accepted preflight의 exact `event == .revoked`만
-   `EventOrderingClass.controller_revoke`이고 unknown 및 다른 accepted event는 `.none`이다. permit prepare와 public take prepare 뒤
+   reserve한 aggregate를 다시 검사하는 a2 consumer predicate를 사용하지 않는다. accepted preflight의 exact `event == .revoked`는
+   `EventOrderingClass.controller_revoke`, 다른 accepted event는 `.non_revoke_effect`, unknown은 sealed release-only 의미를 가진
+   `.non_revoke_effect`다. `.none`은 idle/settled row에만 허용한다. permit prepare와 public take prepare 뒤
    registered operation을 열고 즉시 queued/aggregate 재조회 없는 direct execution lease로 승격한다. held validation/borrow core가 queue
    addr/len/capacity/bytes, exact event/payload pointer·digest·preflight를 재검증한 뒤에만 payload parse와 quarantine→pin→a1 reserve/bind를
    수행한다. lease 전에는 prepared scalar/address를 저장할 뿐 payload를 역참조하지 않는다.
@@ -1399,8 +1443,193 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    고정한다. public nonblocking input은 `0`, public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. boundary는 새 revoke
    registry/lifecycle 0, 기존 `EventAuthority` sole SSOT, exact-15 facade, a3 이전 a1/a2 product caller 0과 a3 이후 exact activated caller
    inventory, producer activation helper와 현재 mutation
-   family의 exact caller inventory를 고정한다. future 2c3e caller 편입은 2c3e gate가 소유한다. C3-3b failure settlement와 C3-3c
+   family의 exact caller inventory를 고정한다. future 2c3e caller 편입은 2c3e gate가 소유한다. C3-3b event settlement와 C3-3c
    actual socket/source-zero가 green이 되기 전에는 C3-3 완료를 주장하지 않는다.
+
+   #### C3-3b event settlement와 비동기 close 계약
+
+   C3-3b는 하나의 큰 상태 머신을 추가하지 않는다. 서로 다른 권위를 가진 다음 owner가 자기 전이만 소유한다.
+
+   | owner | canonical state | 소유하는 것 | 소유하지 않는 것 |
+   | --- | --- | --- | --- |
+   | `AttachmentCleanupRegistry.EventAuthority` | `idle -> reserved -> live -> releasing -> idle`, trusted recovery의 `live -> terminal` | exact event receipt, final owner address, ordering class/blocker, quarantine·pin settlement | metadata/resize/UI 결과, poison reason retry |
+   | `RemoteRuntime.PendingEventOwner` | `idle -> prepared -> settling -> committed_cleanup -> idle` | immutable semantic snapshot, owned `PreparedEvent`, effect request, content/provenance seal | registry lifecycle, connection fd/first poison reason |
+   | `Client` | `usable -> unusable`, first poison reason과 fd/outbound disposition | connection-wide poison/fence 결과 | sibling event owner·payload·blocker cleanup |
+   | `RemoteRuntime.CloseAuthority` | `open -> routing_tombstoned -> settling -> ready_remove`, disposition `open -> committed` | close disposition, pinned Runtime/host identity, request/attempt generation, shutdown admin outcome | layout membership, event semantic 결과, 파괴 뒤 `removed` 결과 |
+   | `RemoteTermBackend.CloseSweep` | `inactive -> active{max_ticket,cursor_after_ticket} -> inactive` | current sweep 방문 경계·순서와 bounded fairness | Runtime 수명, close disposition/effect, event cleanup |
+
+   `EventCorrelation`은 canonical take publication에서만 발급하는 opaque stale-pair token이다. registry/node/binding/runtime/stream,
+   event generation, ordering class, final `EventOwner` address와 ClientSlot-owned `expected_major|metadata_support` snapshot을 묶는다.
+   current role/controller generation/event-generation tracking은 Runtime-local mutable 의미 상태이므로 correlation에 넣지 않고
+   `RuntimeSemanticSnapshot`과 pending seal만 소유한다. correlation은 semantic content integrity나 cleanup capability가 아니며,
+   effect/release마다 registry의 exact live receipt와 다시 비교한다. `EventView` 또는 Runtime이 token을 재계산·재발급하지 않는다.
+
+   Runtime snapshot은 role/controller generation, resize baseline/generation/size, observation revision과 bounded content digest,
+   resync intent, direct-input/control queue generation·length·digest를 한 시점에 잡는다. classify/prepare와 precondition seal은 같은
+   snapshot만 소비한다. connection RX/demux tail은 snapshot 밖이며 현재 event head/correlation을 바꾸지 않고 append할 수 있다.
+   prepare와 각 settlement admission 직전에는 callback/yield가 없고, `Busy` 뒤 다음 tick yield는 허용한다. next tick까지의 정상
+   local mutation은 pending lifecycle guard가 막으므로 snapshot mismatch는 사용자 입력이 아니라 invariant failure다.
+
+   `EffectRequest`는 `none|poison(ConnectionReason)|revoke_fence(u64)`의 closed union이다. Runtime semantic 성공/실패 조합도 private
+   constructor가 허용한 `PreparedEvent` variant로만 만든다. error tag는 `out_of_memory|protocol_error|connection_closed`로 좁히고,
+   poison reason은 별도 exact field로 보존한다. registry에는 outcome tag나 UI 데이터를 저장하지 않는다. 같은 tag에서 metadata/
+   ended/error/reason bytes만 바꾸는 drift도 full content rehash가 잡는다. max-size metadata와 direct mutation queue의 Busy 비용은 위
+   `SettlementWorkBudget`과 연속 3회 exact-count gate가 고정한다.
+
+   settlement의 preflight는 raw effect tag/extent, exact owner/correlation, quarantine/pin/blocker, allocator/callback continuation과 Client
+   terminal 상태를 effect보다 먼저 검사한다. terminal Client fast path도 malformed effect나 stale correlation을 정상 cleanup으로 숨기지
+   않는다. 구조 검증이 끝난 뒤에만 original request의 실행을 internal `terminal_cleanup_preserve_first_reason`으로 대체한다. connection-wide
+   poison은 sibling row를 scan/free하지 않는다. A가 connection을 닫으면 B/C Runtime이 각자 original sealed request를 보존한 채 terminal
+   postcondition을 확인하고 자기 owner만 release하며 prepared semantics는 publish하지 않고 자기 pending owner가 회수한다.
+
+   제품 pump의 closed progress는 `idle|event_pending|drained(EventDrain)|ended`를 구분한다. event settlement `Busy`는
+   `ClientError.AdminBusy`로 올라가지 않고 `event_pending`으로 frame loop에 전달된다. `RemoteTermBackend.drainRemote`는
+   `pump_ended=false`, process state live, semantic 성공 bit 0을 유지하고 같은 tick busy-spin 없이 반환한다. 다음 tick은 pending
+   settlement를 한 번만 먼저 시도한다. input/control/RPC final admission은 ordering blocker가 0일 때만 wire를 진행하며, nonblocking
+   local queue는 기존 cap 안에서 보존할 수 있다.
+
+   terminal close는 즉시 파괴하는 `void` 계약이 아니다. 공통 `TermRuntimeBackend.VTable`의 기존 메서드 수는 유지하되
+   `close_and_detach|close|finish_after_termination`은 `CloseProgress{complete,event_pending}`, `remove`는
+   `RemoveProgress{removed,event_pending,invalid}`를 반환한다. generation handle/surface는 `removed`에서만 무효가 된다. in-process backend는
+   기존 동기 close를 수행하고 항상 complete/removed로 수렴한다. generation backend는 pinned `RemoteRuntime.CloseAuthority`를 SSOT로
+   사용한다. close request는 AppSession scheduling reservation과 authority publication을 layout 제거 전에 all-or-none으로 끝내며 OOM이면
+   UI/routing/backend가 모두 그대로다. layout에서 사라진 Term의 scheduler projection은 authority가 아니다.
+   backend-global `max_remote_backend_runtimes = protocol.max_inventory_runtimes`(4,096)는 current/N-1 모든 host의 합계다.
+   spawn/attach/restore는 4,097번째 map admission을 allocation·layout/routing/map mutation 전에 typed `ResourceExhausted`로 거부하며 기존
+   Runtime과 요청 전 UI/layout을 그대로 둔다. backend runtime이 하나라도 있으면 매 maintenance tick 모든 map entry를 fixed stack
+   `[max_remote_backend_runtimes]CloseScanReceipt`에 collect하고 iterator를 닫은 뒤 최대 16개 authority를 진행한다. scratch는
+   `@sizeOf(CloseScanReceipt) * max_remote_backend_runtimes <= 256 KiB`를 compile-time assert한다. close admission은 backend의 checked
+   monotonic `close_schedule_ticket`을 authority에 exact once 봉인한다. issuer 범위는 `1...maxInt(u64)`이고 0은 발급하지 않는다. backend
+   `CloseSweep = inactive | active{max_ticket,cursor_after_ticket}`에서 active 최초 cursor 0은 before-first sentinel이다. sweep 시작 때
+   현재 live ticket 최댓값을 고정한다. 매 tick `cursor_after_ticket < ticket <= max_ticket`인 가장 작은 receipt 최대 16개를 fixed top-16
+   insertion으로 고르고, 성공/Busy와 무관하게 마지막 시도 ticket 뒤로 cursor를 전진시킨다. candidate가 없으면 sweep를 끝내고 다음 tick에
+   새 max/cursor로 시작한다. sweep 중 생긴 더 큰 ticket은 다음 sweep만 참여하므로 static 4,096 owner는 최대 256 tick 안에 모두 한 번
+   시도되고 무한 신규 churn도 현재 sweep를 늘리지 않는다. selection 비교는 `visited_count * 16` 이하, heap allocation은 0이다. ticket은
+   재시도에도 바뀌지 않는 identity이며 `maxInt(u64)` ticket 선택은 덧셈하지 않고 state를 `inactive`로 바꾼다. empty start도 inactive를
+   유지한다. ticket 발급 exhaustion은
+   publication 전 `fatal_integrity` fail-stop이며 mutation 0이다.
+   `CloseScanReceipt`는 pointer-free `{handle,runtime_generation,close_request_generation,close_schedule_ticket}`이고, act 직전에 map에서 다시 찾아 네 값과
+   final-address CloseAuthority seal을 검증하면서 allocation-free one-shot `CloseOperationPin`을 원자 획득한 뒤에만 Runtime을 역참조한다.
+   raw lookup과 pin 획득 사이에는 callback/reentry가 0이다. pin은 authority advance 전체와 callback 동안 Runtime/map row를 non-removable로
+   유지하고, 같은 target의 close/remove/replace 재진입은 `event_pending`이다. backend removal은 outer act가 pin을 exact once release한
+   다음 tick 이후에만 closing receipt를 consume한다.
+   앞 owner의 callback이 뒤 receipt 대상을 제거·교체해도 stale receipt는 dereference/mutation 0으로 skip되고 새 generation은 다음 scan이
+   수집한다. scratch allocation은 0이고 map mutation은 scan 뒤에만 실행한다.
+   exact 0/1/16/17/4,096 visited/advanced count와 4,096 closing owner eventual visit를 deterministic gate로 고정한다. wall-clock은 위와
+   마찬가지로 ReleaseFast artifact만 기록한다. `closing_count`는 telemetry/scan 검증용일 뿐 scan skip/liveness authority가 아니다.
+   authority가 `ready_remove`가 되면 backend가 sealed closing receipt를 consume하고 map/handle identity를 제거한 다음 Runtime과 그 안의
+   authority storage를 파괴해 `RemoveProgress.removed`를 반환한다. 따라서 `removed`는 파괴된 authority의 저장 상태가 아니라 backend
+   absence+consumed receipt로 증명하는 결과다.
+
+   `CloseDisposition`은 `detach_preserve_host|terminate_host`다. 최초 request가 exact host/runtime/final address와 request generation에
+   봉인된다. terminate owner는 여기에 endpoint, protocol major, manifest host/build/epoch, compatibility profile row/digest와 monotonic
+   attempt generation을 더 봉인한다. 각 attempt는 immutable
+   `ShutdownAttemptKey{close_request_generation,target_digest,attempt_generation}`를 만들고, 실제 connection을 열 때 opaque one-shot
+   `ShutdownConnectionReceipt{attempt_key,connection_identity,lease_generation,operation,inventory_attempt}`를 발급한다. 여기서
+   `lease_generation`은 server wire field가 아니라 CloseAuthority가 successful compatible admin hello마다 발급하는 checked-monotonic
+   GUI-local generation이다. 이전 connection canonical deinit 전에는 다음 generation을 발급하지 않는다. generation overflow는
+   connection/request 0 상태에서 아래 fatal integrity transition으로 들어간다. `operation`은
+   `terminate|inventory`, `inventory_attempt`은 inventory일 때만 `initial|retry`다. retry receipt는 initial connection canonical deinit과
+   lease generation 전진 뒤에만 발급한다. `ShutdownAdminOutcome`은
+   `not_sent|request_in_flight|sent_ambiguous|awaiting_admin_barrier|inventory_in_flight|terminate_confirmed|absence_confirmed|bounded_unconfirmed`의
+   closed union이다. `bounded_unconfirmed` evidence는
+   `pre_connection{reason,attempt_key}|post_connection{reason,attempt_key,consumed_connection}`으로 닫는다. pre reason은
+   `attempt_cap_before_send|deadline_before_send|profile_incompatible`, post reason은
+   `attempt_cap_after_send|deadline_after_send|inventory_retry_ambiguous|n1_sent_ambiguous`이며 다른 조합은 구성할 수 없다. 모든 variant가 exact
+   attempt key를 가지고 connection-dependent variant와 post-connection terminal만 live 또는 consumed connection receipt transcript를
+   가진다. transition API는 connection receipt를 exact once consume하고 old/copy/double/cross-target outcome은
+   mutation 0이다. membership present로 attempt를 증가시킬 때 이전 receipt를 먼저 invalidate한
+   뒤에만 새 connection을 연다. 같은 disposition은 멱등이고, explicit user close의
+   detach→terminate 승격은 disposition-dependent effect admission 전의
+   `open`에서만 허용한다. terminate→detach downgrade와 committed 뒤 변경은 금지한다. app quit의 bulk detach는 기존 explicit terminate를
+   덮지 않는다. maintenance는 caller가 mode를 다시 전달하지 않고 sealed receipt만 사용한다. handle/runtime ID는 removed 전 재사용하지
+   않는다.
+
+   앱 전체 종료는 다음 순서를 쓴다.
+
+   ```mermaid
+   flowchart TD
+     A["모든 Runtime admission과 UI routing tombstone"] --> B["owner-thread operation과 callback quiescence 확인"]
+     B --> C["terminate_host intent를 exact-host one-shot control connection으로 확정"]
+     C --> D["terminalizeSharedConnectionNoDestroy로 data fd만 terminal"]
+     D --> E["각 Pending EventOwner terminal cleanup"]
+     E --> F["blocker pin quarantine zero 검증"]
+     F --> G["Runtime backend graph destroy"]
+     G --> H["HostAdapter ClientSlot Client allocator destroy"]
+   ```
+
+   generation GUI socket pump는 owner-thread synchronous이며 background blocking reader가 없음을 source inventory로 고정한다. 이 조건이
+   바뀌면 fd-only wake/shutdown 뒤 join을 먼저 구현하기 전에는 gate가 실패한다. `terminalizeSharedConnectionNoDestroy`는 Client를
+   unusable/fd=-1로 만들고 pending outbound만 정산하며 ClientSlot/node/registry/quarantine/allocator/backend map은 유지한다. local cleanup과
+   zero assertion 뒤에만 graph를 파괴한다. host는 GUI EOF를 detach로 처리하므로 `detach_preserve_host` runtime은 재접속 대상에 남는다.
+
+   current host의 terminate는 기존 one-shot admin transport를 target당 새 connection 하나씩 순차 사용한다. `AdminAdmission`은 compatible
+   admin hello에서 host-global lease를 얻고 canonical server `Connection.deinit`에서만 해제되며, terminate effect는 그 lease가 live인 dispatch
+   안에서 동기 실행된다. ambiguous 뒤 exact-host inventory connection이 `resource_exhausted`면 이전 lease가 남은 것이므로 pending이며 request
+   0이다. 후속 hello가 같은 lease를 획득한 뒤에는 이전 connection이 나중에 effect를 실행할 수 없다. 이 barrier 뒤 membership absent는
+   confirmed, present는 새 attempt generation을 허용한다. B가 lease를 얻었어도 inventory response가 partial/EOF/malformed이거나
+   sealed host identity가 drift하면 absence evidence가 아니다. canonical B deinit 뒤 새 lease로 `inventory_attempt=retry`인 read-only
+   inventory receipt를 같은 terminate attempt generation에서 한 번만 발급하며 terminate request는 0이다. retry도 ambiguous면 그 exact
+   receipt의 `bounded_unconfirmed(.inventory_retry_ambiguous)`로 닫고 새 destructive request 없이 다음 target으로 진행한다. target 사이에서도
+   이전 lease release를 확인한 뒤 다음 connection을 연다.
+   destructive terminate attempt는 target당 `max_shutdown_terminate_attempts=3`, 전체 app-quit shutdown은 첫 tombstone에서 시작한 absolute
+   15초 deadline을 공유한다. attempt generation은 checked no-wrap이다. cap·deadline은 현재 exact attempt key를
+   `bounded_unconfirmed`로 소비해 새 connection/request를 0으로 만들고 다음 target으로 진행한다. global deadline 뒤 남은 target도 같은
+   terminal 결과로 닫아 local graph-last teardown을 계속한다. fatal integrity reason
+   (`receipt_or_seal_drift|attempt_generation_overflow|lease_generation_overflow`)은 outcome에 publish하지 않는다. transition 내부가
+   test/subprocess sentinel을 남기고 noreturn process fail-stop하므로 CloseAuthority cleanup/removal은 실행되지 않는다. bounded 결과는
+   host-side 종료 성공을 위조하지 않는다. CloseAuthority는 close-request admission에서 deadline과 같은 injected monotonic clock의
+   `diagnostic_started_at_ns`를 exact once 봉인한다. `bucketShutdownElapsed(now,start)`는 clock regression을 0으로 clamp하고 checked
+   saturating `now-start`를 아래 bucket으로 바꾸는 유일한 conversion owner다. `RemoteTermBackend.ShutdownDiagnosticSink`은
+   `ShutdownDiagnostic{reason,target_ordinal,attempt_count,elapsed_bucket,app_quit}`만 받는 allocation-free facade다. `elapsed_bucket`은
+   `lt100ms|lt500ms|lt1s|lt5s|lt15s|ge15s`의 closed enum이다. secret, host/runtime ID, path, endpoint와 raw 오류 문자열은 DTO에 없다.
+   CloseAuthority seal의 `diagnostic_emitted`가 close-request별 exact once admission을 소유한다. sink는 drain 전 첫 64개 detail을 FIFO로
+   보존하고, full 뒤 들어온 detail은 drop하면서 reason별 `dropped_count:u32`를 sticky-max saturating increment한다. max에서 추가 drop이
+   오면 `counter_saturated=true`를 sticky로 세운다. backend는 이 observational queue까지만 소유하고 UI/logger를 import하거나 호출하지
+   않는다. app-host composition의 `ShutdownDiagnosticBridge` 하나만 `drainBatch`의 sole consumer다. bridge는 주입된 neutral
+   `ShutdownDiagnosticConsumerPort{project_notice,log}` value callback만 호출하며 app/platform logger나 UI concrete type을 import하지 않는다.
+   app-host owner가 live 때 AppSession notice callback+logger callback, quit 때 logger callback만 조립한다. `src/app`과 backend의
+   platform/logger/UI direct import·call은 source boundary에서 0이다. drain은 detail FIFO와 reason별
+   `ShutdownDiagnosticOverflow{dropped_count,counter_saturated}` snapshot을 stack/value batch로 옮기고 backend slot/count/bit를 no-fail
+   reset한다. bridge는 live context에서 각 값을 UI notice와 app-host observability logger에 동기 best-effort fan-out하고, app-quit에서는
+   UI를 건너뛰어 logger만 호출한다. 어느 consumer가 실패해도 batch를 재삽입·재시도하지 않고 slot은 이미 회수됐으므로 quit과 후속 진단을
+   막지 않는다. elapsed는 100ms/500ms/1s/5s/15s 각각의 1ns 전·exact·1ns 후, `now < start`, delta 최대값을 전수한다. ring은
+   0/64/65, injected count max-1/max/max+1, fan-out 한쪽/양쪽 실패와 reset 뒤 재사용을 고정한다. durable record나 다음 실행
+   notice를 주장하지 않는다.
+
+   supported N-1은 current-only `connectCurrent`/admin을 쓰지 않는다. `compatibility.Profile`에는 compile-time frozen
+   `ShutdownProfile{artifact_sha256,wire_major,gui_runtime_list,gui_runtime_terminate,cross_connection_admin_barrier}` row를 둔다.
+   frozen N-1 row는 signed release manifest가 고정한 exact artifact digest·major와 실제 product PoC transcript로 list/terminate
+   response·membership semantics를 증명하고 `gui_runtime_list=true`, `gui_runtime_terminate=true`,
+   `cross_connection_admin_barrier=false`를 명시한다. runtime별 endpoint/host_id/epoch는 profile이 아니라 CloseAuthority의 manifest seal만
+   소유한다. runtime dispatch는 그 exact runtime identity와 profile row를 함께 봉인해 소비하며 method probe,
+   successful response나 다른 artifact transcript로 capability/barrier를 추론하지 않는다. splice/wrong artifact·major·semantics와 false
+   barrier elevation은 request 0의 typed incompatible다. endpoint drift는 runtime manifest revalidation 실패로 별도 거부한다. 이 profile이 완전할
+   때만 attachment-free internal GUI maintenance connection을 쓴다.
+   capability가 없으면 mutation 0 typed incompatible 뒤 `bounded_unconfirmed(.profile_incompatible)`로 닫는다. N-1에는 current admin의 global barrier가
+   없으므로 `sent_ambiguous`는 자동 retry하거나 inventory present를 absence proof로 해석하지 않고
+   `bounded_unconfirmed(.n1_sent_ambiguous)`로 at-most-once 종료한다.
+   current CLI의 admin UX/confirmation 계약은 바뀌지 않는다.
+
+   C3-3b TDD gate는 최소 다음을 Debug·ReleaseFast와 actual socket/product path에서 고정한다.
+
+   - 모든 event kind의 prepare/settlement Busy·mismatch에서 live semantic state mutation 0, retry exact once
+   - same-tag content/reason/provenance drift, correlation copy/zero/bitflip/stale, tracking snapshot TOCTOU와 proof-loss subprocess fail-stop
+   - revoke clean/cancel/partial→poison, first reason 보존, callback reentry/owner raw drift, effect 뒤 retryable failure 0
+   - A poison과 B/C live owner의 independent terminal cleanup, sibling owner/count mutation 0
+   - metadata copy OOM every allocation index, double-peak byte cap, old observation cleanup callback과 postcommit seal
+   - event pending real backend pump가 surface를 종료하지 않고 다음 tick settlement-first로 수렴하는 E2E
+   - backend-global runtime cap/cap+1 multi-host admission, stable ticket sweep fairness/overflow와 pointer-free scan receipt
+   - permanent Busy 16+success 17, 4,096/256-tick sweep, zero/empty/max sentinel, gap/remove/reinsert/new churn, selection comparison 상한
+   - A callback의 B remove/reuse, same-target self-remove/replace의 operation pin Busy, quit/maintenance race
+   - close reservation OOM, layout 제거 뒤 authority progress, map rehash/ABA, 0/1/16/17/4,096 always-scan과 scan 후 mutation
+   - explicit terminate/app-quit detach lattice, pre/post terminal evidence matrix와 delayed/copy/cross-target outcome 거부
+   - current barrier·initial/retry ambiguous inventory, terminate attempt 3/4·15초 deadline과 sibling progression
+   - elapsed 5경계 -1/exact/+1·regression·max, diagnostic exact-once/0·64·65/max, neutral-port sole-drain fan-out/reuse
+   - N-1 transcript splice/wrong artifact·major/false barrier elevation 정책
+   - app quit fd-only terminalization 전후 registry/pin/quarantine address·count 보존, host EOF 뒤 detach runtime 재접속
+   - b4의 `RemoteRuntime` generation semantic arm raw `Client` event/effect callsite 0, C3-3c의 repo-wide product event/effect source-zero
+   - generation immediate close→remove caller 0과 common facade caller migration exact inventory
 
    execution lease mint의 canonical SSOT는 `operation_thread_identity`의 process-global bounded 4,096-slot registry다. allocation은
    mutex 아래 free-stack pop, 검증·회수는 receipt의 `slot_index` direct lookup이므로 정상 issue/consume/abort는 O(1)이다. registry row와

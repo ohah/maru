@@ -181,6 +181,17 @@ PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mi
 
 정상 workload의 12/16 MiB 초과 또는 base64/copy 병목이 §4.4 trigger를 만족한 경우에만 64/128/256 MiB를 순서대로 연구한다. 현재 parser와 hello는 이 tier를 허용하지 않으므로 stress 하니스는 production capability를 조용히 변경하지 않고 **test-only effective-max override**를 명시해야 한다. 각 tier와 cap+1을 실제 WKWebView에서 실행해 위 표의 tick·queue·RSS·lifecycle 예산을 그대로 적용하고, reserved 256 MiB ceiling을 실제 parser/admission에 연결한다면 hard-ceiling unit도 함께 추가한다. 연구 통과는 상한 확대나 binary/fd attachment의 자동 채택이 아니며 별도 설계 결정이 필요하다.
 
+## Session-host event settlement·close maintenance 예산
+
+[영속 터미널 세션 호스트](persistent-session-host.md)의 C3-3b owner 계약을 수치화한다. correctness gate는 러너 부하에 흔들리는
+절대 시간 대신 실제로 읽은 byte·시도한 owner·allocation 수를 판정하고, ReleaseFast wall-clock은 ns/byte artifact로만 기록한다.
+
+| 경로 | hard gate | 실패 조건·구현 제약 |
+| --- | --- | --- |
+| `PendingEventOwner` prepare peak | owner당 variable backing checked sum ≤ `4 * protocol.max_control_json` | event payload·owned DTO·next observation·old observation의 aggregate string bytes를 각각 control-frame cap 안에서 센다. scalar/fixed array는 `@sizeOf` compile-time 상한으로 별도 계상한다. cap 초과는 pending publication과 live semantic mutation 0의 `ResourceExhausted`다. |
+| `SettlementWorkBudget` frame | hash bytes ≤ `16 * 4 * protocol.max_control_json`, attempted owner ≤ 16 | backend-global round-robin을 사용한다. 다음 owner가 남은 byte budget을 넘으면 그 owner를 다음 tick 시작점으로 보존한다. owner hard cap이 frame cap보다 작아 다음 tick admission이 보장된다. budget 미획득 owner는 bytes read/hash/allocation 0의 `event_pending`이다. 연속 Busy 3회와 0/1/16/17·최대 Runtime fixture가 exact byte/attempt와 eventual visit를 검증한다. |
+| `CloseAuthority` maintenance | backend-global runtime ≤ 4,096, map visit ≤ 4,096, authority advance ≤ 16, selection compare ≤ `visited * 16`, scratch ≤ 256 KiB, heap allocation = 0 | current/N-1 multi-host 합산 cap/cap+1을 admission 전에 검사한다. fixed stack `[max_remote_backend_runtimes]CloseScanReceipt`에 pointer-free handle/runtime/request/ticket을 collect하고 iterator를 닫는다. frozen sweep max/cursor 범위의 다음 16개를 fixed top-16 insertion으로 고르고 Busy에도 cursor를 전진시킨 뒤 매 act 직전 relookup+seal+`CloseOperationPin`을 획득한다. permanent Busy 16+success 17, 4,096/256 tick, ticket 0 미발급·empty start·max-1/max end sentinel, gap/remove/reinsert/new churn, map rehash/ABA, A callback의 B remove/reuse와 same-target self-remove Busy를 검증한다. `closing_count`로 scan을 생략하면 실패한다. |
+
 ## 아직 예산이 없는 영역
 
 | 영역 | 이유 | 예정 측정 |

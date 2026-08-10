@@ -1028,7 +1028,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    exact input/revoke/output-progress facade, raw lifecycle admission, canonical controller authority와
    bound-drop transaction을 Debug·ReleaseFast `test-session-host` 및 boundary gate로 닫았다. 내부 순서는 2c3a
    input/revoke/output-progress+raw lifecycle admission, 2c3b capability+closed RPC, 2c3c control, 2c3d one-shot event,
-   2c3e generation 제품 source-zero+socket parity다. 2c3a~e가 모두 green일 때만 generation arm의 direct
+   2c3e generation 제품 RPC/decoder direct-call source-zero+immediate EOF/unread RX-first socket parity다. event/effect repo-wide
+   source-zero와 admitted-event socket parity는 2c3d C3-3c가 소유한다. 2c3a~e가 모두 green일 때만 generation arm의 direct
    `logicalClient()`/`Client` method 사용 0을 주장한다. **2c3b-1 capability facade 구현 완료**: const receiver의 raw-first admission과
    registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
@@ -1400,27 +1401,27 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `test-session-host-2c3d-c3-2`이며 C3-1 전체와 Debug·ReleaseFast attachment runtime sentinel 8+
       actual generation `RemoteRuntime` product drain 1+boundary 1을
       exact-count로 실행한다. C3-3까지의 generation drain은
-      `pending_effect_confirmation -> release_pending -> purge -> take -> view/classify/apply/effect -> release` 하나뿐이고,
-      release `Busy` 뒤에는 registry-backed attachment readiness로 같은 canonical owner release를 다음 tick의 purge보다 먼저
-      재시도한다. semantic apply 결과는 settlement까지 runtime의 closed pending outcome에 보존해 중복 apply와 오류 소실을 막는다.
+      `pending settlement -> purge -> take -> immutable snapshot -> classify/prepare -> effect+release settlement -> semantic commit`이며,
+      settlement `Busy` 뒤에는 같은 canonical owner와 sealed `PendingEventOwner`를 다음 tick의 purge보다 먼저 재시도한다.
+      `event_pending`은 제품 error/ended가 아니라 process-state live인 progress이고, pending 동안 해당 Runtime semantic mutation과
+      connection TX/RPC flush를 멈추되 shared RX/demux tail append는 허용한다.
       `.ended_pending`은 `protocol.max_client_pending_events`에서 파생한 유계 budget 안에서 purge로 되돌아간다.
       budget 소진은 입력·출력·화면 진전 0의 `Busy`로 다음 tick에 넘긴다. legacy raw acquisition과 공통 semantic
       classify/apply SSOT는 분리하며 generation 실패의 legacy fallback은 0이다. **C3-3**은 actual socket의
       revoked→borrow/classify→fence→release와 generation raw Client event source-zero를 소유한다. C3-1에는 제품 pump/socket
       consumer가 0이고, C3-3 전에는 2c3d 완료나 generation event source-zero를 주장하지 않는다.
       C3-3은 `applyObservationEvent` generation arm의 raw `self.client.wire_major`, `metadata_support`, `poison`과 raw Client
-      revoke-fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거하고
-      `GenerationCapabilities`+mode-specific typed effect adapter로 대체한다. 공통
-      classify/materialize/apply policy만 mode-neutral SSOT로 남긴다.
-      exact-15 `poison(reason) Error!void`의 성공은 fd disposition까지 확인한 `confirmed`, `AdminBusy`는 `busy`다. 실패 effect를
-      confirmed한 뒤에만 canonical event를 release한다. `busy`는 기존 pending
-      generation outcome에 error+poison reason을 보존하고 다음 tick effect-first로 재시도하며, silent poison 성공·release-first·별도
-      retry owner를 금지한다. adapter는 non-owning stack/value helper이고 callback·vtable·heap·저장 상태가 0이다. 같은 Client는 수명 전체에서 legacy 또는 generation attachment만 소유하고 mixed-mode mint/adopt는
+      revoke-fence 인자, `settlePendingGenerationEvent`의 raw `self.client.poison`을 제거한다. registry/ClientSlot identity와
+      `expected_major|metadata_support`만 opaque `EventCorrelation`에 묶고 mutable role/controller generation/tracking은
+      `RuntimeSemanticSnapshot`과 final-address pending owner가 소유한다. classify/materialize는 live Runtime mutation 0의 owned
+      `PreparedEvent`를 만들고, package-private settlement가 poison/fence/terminal cleanup과 exact release를 한 preflight+no-fail
+      transaction으로 닫은 뒤에만 semantic state를 no-fail commit한다. 같은 Client는 수명 전체에서 legacy 또는 generation attachment만 소유하고 mixed-mode mint/adopt는
       ClientSlot/node membership을 canonical proof로 source/product oracle에서 거부한다. generation external mode는 stable Busy가
       아니라 typed invalid-owner다. `busy`는 durable effect mutation 0이고 canonical 검증 shared receipt는 exact begin/end로 정산되며,
-      admitted effect는 guarded cleanup callback을 허용하되 fallible callback 0의 no-fail confirmed로 수렴한다. sealed queue latch는
-      take commit에서 event generation을 발급하며 exact-receipt in-flight `live` row로 원자 이전되고 release commit에서 consumed된다.
-      세부 처리 단계는 registry에 복제하지 않고 기존 pending outcome만 retry state로 쓴다. 별도 admission generation은 만들지 않으며 모든 generation mutation의 최종 wire admission을 막고 queue+live-count zero에서만 연다. C3-3은 공통 Client ingress cadence를
+      admitted settlement는 guarded cleanup callback을 허용하되 effect 성공 뒤 release Busy가 없는 no-fail suffix로 수렴한다. sealed queue
+      latch는 take commit에서 event generation과 connection ordering blocker를 발급하며 exact-receipt in-flight `live` row로 원자 이전되고
+      settlement commit에서 consumed된다. 모든 taken event가 settlement까지 blocker를 유지하며 기존 EventAuthority lifecycle과 cleanup
+      pin 외 별도 cleanup charge는 만들지 않는다. C3-3은 공통 Client ingress cadence를
       바꾸지 않는 열린-peer actual socket roundtrip까지만 소유한다. 이미 admitted unknown/semantic violation의 typed effect/release는
       C3-3, immediate EOF, admission 뒤 yield 집합, unread RX-first, socket ingress malformed/unknown cadence와 legacy/generation observable
       parity는 2c3e doc-first blocking gate로 남긴다.
@@ -1530,10 +1531,49 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
       public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
-      **C3-3b failure settlement**는 generation arm의 raw capability/poison/fence 접근을 typed adapter로 치환한다. effect confirmation을
-      먼저 재시도하고 confirmed 뒤 release하며, release가 Busy면 다음 tick의 purge/take보다 release를 먼저 재시도하는 상태만 제품
-      `pending_generation_event_outcome`에 둔다. **C3-3c product socket/source-zero**는 열린 peer에서
-      revoked/unknown/semantic failure roundtrip과 generation raw Client event source-zero를 닫는다. immediate EOF·unread RX-first와
+      **C3-3b event settlement와 비동기 close는 미구현**이며 다음 TDD slice를 순서대로 닫는다. 각 slice는 앞 slice의 focused
+      Debug·ReleaseFast gate와 source boundary를 상속하고, 마지막 slice 전에는 C3-3b 완료나 제품 close parity를 주장하지 않는다.
+
+      1. **C3-3b1 correlation·ordering migration:** canonical take-only opaque `EventCorrelation`, minimal ClientSlot classification context,
+         `EventOrderingClass.none|non_revoke_effect|controller_revoke`와 모든 taken event의
+         `connection_ordering_blocker_count`를 먼저 red→green으로 만든다. 기존 revoke-only counter/query identifier는 0으로 만들고,
+         EventAuthority lifecycle+cleanup pin을 sole cleanup SSOT로 유지한다. `none`도 live no-special-effect class일 뿐 blocker-unarmed가 아니며,
+         idle/settled에는 active class가 없다. benign도 release까지 blocker를 유지하며 sibling TX/RPC는 wire 0,
+         RX/demux tail은 진행하는 actual socket oracle을 포함한다.
+      2. **C3-3b2 immutable preparation:** final-address `PendingEventOwner`, immutable `RuntimeSemanticSnapshot`, closed `PreparedEvent`와
+         `EffectRequest`, production full-content hash를 구현한다. metadata는 packed DTO pointer adoption 없이 independent next observation을
+         만들며 OOM every-copy-index, owner당 checked `4 * protocol.max_control_json` double-peak와 frame당
+         `16 * 4 * protocol.max_control_json`/16-owner round-robin hash budget, Busy 3회 exact byte/attempt를 고정한다.
+      3. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는
+         `settlePendingEvent(correlation,effect_request)` transaction을 구현한다. 모든 authority/callback/allocator preflight 뒤
+         none·poison·revoke clean/cancel/partial→poison·already-terminal cleanup과 exact release를 같은 no-fail suffix로 닫는다. trusted
+         mismatch recovery, sibling exact-own cleanup, first-reason 보존, callback/fork/ABA/proof-loss subprocess를 포함한다.
+      4. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고
+         `idle|event_pending|drained|ended` typed progress를 `RemoteTermBackend.drainRemote`까지 연결한다. settlement/observation cleanup callback
+         전후 full seal, `committed_cleanup` read/mutation guard, actual product Busy→next-tick success·surface live E2E와
+         `RemoteRuntime` generation semantic arm의 raw `Client` event/effect callsite 0 focused allowlist를 고정한다.
+      5. **C3-3b5 common close progress:** 기존 VTable 메서드 수를 늘리지 않고 close 계열 반환을
+         `CloseProgress`, remove를 `RemoveProgress`로 바꾼다. heap-pinned `RemoteRuntime.CloseAuthority`는 `ready_remove`까지만 소유하고
+         backend가 sealed closing receipt consume→map/handle 제거→Runtime destroy 뒤 `removed` 결과를 소유한다. backend-global 4,096
+         runtime cap/cap+1 admission, disposition lattice, all-or-none layout tombstone, checked monotonic ticket과 frozen-max/cursor
+         `CloseSweep` fairness, `visited*16` fixed selection, 상수-파생 256 KiB 이하 pointer-free `CloseScanReceipt` full collect→iterator close→relookup/generation+`CloseOperationPin`
+         검증→최대 16 act scan, self-reentry Busy, handle ABA와 real AppSession
+         tab/window close를 검증한다. in-process backend는 synchronous complete parity를 유지한다.
+      6. **C3-3b6 app-quit/current+N-1 shutdown:** 모든 outcome의 exact target/attempt `ShutdownAttemptKey`, connection-dependent와
+         post-connection terminal의 one-shot `ShutdownConnectionReceipt{connection,GUI-local lease generation,operation,inventory_attempt}`,
+         pre/post `bounded_unconfirmed` evidence matrix와 closed `ShutdownAdminOutcome`,
+         exact-host one-shot admin lease barrier, target당 terminate attempt 3회와 app-quit global 15초 deadline, target별 순차 connection과 ambiguous
+         membership/inventory reconciliation, exact artifact/major와 list/terminate/barrier bool을 가진 frozen
+         `compatibility.Profile.ShutdownProfile`, runtime-manifest-only endpoint seal, N-1 ambiguous at-most-once bounded 종료,
+         non-published noreturn fatal integrity, 5경계 전후 monotonic elapsed bucket과 backend-neutral fixed-64
+         `ShutdownDiagnosticSink`→neutral consumer port만 쓰는 sole app-host `ShutdownDiagnosticBridge` value fan-out/reset,
+         `terminalizeSharedConnectionNoDestroy`,
+         per-owner cleanup→zero assertion→graph-last destroy, host EOF detach/reconnect actual socket을
+         닫는다. generation GUI background blocking reader source 0도 boundary로 고정하며 생기면 fd wake-before-join 선행 gate를 요구한다.
+
+      **C3-3c product socket/source-zero**는 열린 peer에서
+      revoked/unknown/semantic failure roundtrip과 transport 구현·test fixture를 제외한 `src/**/*.zig` 제품 전체 generation raw `Client`
+      event/effect source-zero를 닫는다. RPC/decoder direct-call inventory는 2c3e가 소유한다. immediate EOF·unread RX-first와
       decoder cadence/parity는 계속 2c3e 범위다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는

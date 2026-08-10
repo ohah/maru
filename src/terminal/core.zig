@@ -2588,6 +2588,18 @@ test "OSC 7 keeps host and path paired across updates, RIS, and empty authority"
     try std.testing.expectEqualStrings("/c", core.currentCwd());
     try std.testing.expectEqualStrings("other", core.currentCwdHost());
 
+    // **경로가 같고 host만 바뀌는 전이**에서도 generation이 오른다. 이 값이 observation refresh의 게이트라,
+    // 안 오르면 폴더줄이 옛 host를 계속 그리고 cwd 상속·링크 스코프도 옛 판정에 머문다(적대적 검증에서 발견).
+    try core.write("\x1b]7;file://host-a/same\x07");
+    const gen_before = core.title_generation.load(.monotonic);
+    try core.write("\x1b]7;file://host-b/same\x07"); // 경로 동일, host만 교체
+    try std.testing.expectEqualStrings("host-b", core.currentCwdHost());
+    try std.testing.expect(core.title_generation.load(.monotonic) > gen_before);
+    // 값이 완전히 같은 재보고(셸이 매 프롬프트 보내는 것)는 여전히 bump하지 않는다 — 헛 sync 방지 계약 유지.
+    const gen_same = core.title_generation.load(.monotonic);
+    try core.write("\x1b]7;file://host-b/same\x07");
+    try std.testing.expectEqual(gen_same, core.title_generation.load(.monotonic));
+
     // RIS는 cwd와 host를 함께 공장 초기화한다.
     try core.write("\x1bc");
     try std.testing.expectEqualStrings("", core.currentCwd());

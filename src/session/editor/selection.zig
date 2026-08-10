@@ -165,7 +165,11 @@ pub const Selection = struct {
         return self.start() == self.end();
     }
 
-    /// focus가 고정단보다 앞인가(위로 끌고 있는가). 병합이 방향을 보존할 때 쓴다.
+    /// focus가 고정단보다 **문서 앞쪽**인가. 병합이 방향을 보존할 때 쓴다.
+    ///
+    /// **좌우와 위아래를 가르지 않는다** — 위치가 byte offset 하나뿐이라(§3.1) 두 방향이 같은 축이다.
+    /// 같은 줄에서 왼쪽으로 끌든 윗줄로 끌든 focus가 작아지므로 둘 다 여기서 참이다. 화면상의 방향이
+    /// 필요한 곳은 L3이고, 그쪽은 offset을 시각 행·열로 환산한 뒤 본다.
     pub fn isReversed(self: Selection) bool {
         return self.focus < self.fixedEnd();
     }

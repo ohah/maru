@@ -6,9 +6,139 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const decision_seal = @import("runtime_prepared_decision_seal.zig");
 
 pub const CleanupSeal = [32]u8;
 pub const Digest = [32]u8;
+
+/// Stable event identity copied from the trusted take projection.  This value deliberately owns
+/// no pointer: addresses are identities only and must never be dereferenced by this leaf.
+pub const PendingEventIdentity = struct {
+    expected_major: u16,
+    metadata_support_raw: u8,
+    correlation_binding_digest: Digest,
+    payload_digest: Digest,
+    admission_projection_digest: Digest,
+    wire_major: u16,
+    admission_tag: u8,
+    registry_incarnation: u64,
+    binding_reservation_id: u64,
+    event_node_incarnation: u64,
+    stream_id: u64,
+    event_generation: u64,
+    event_owner_addr: u64,
+    slot_incarnation: u64,
+    owner_node_incarnation: u64,
+    transport_incarnation: u64,
+    host_id: u128,
+    runtime_id: u128,
+    connection_generation: u64,
+    pid: u32,
+    process_nonce: u64,
+};
+
+pub const PendingOperationSealInput = struct {
+    state_raw: u8,
+    operation_kind_raw: u8,
+    reader_count: u16,
+    reserved: [4]u8,
+    self_addr: u64,
+    runtime_addr: u64,
+    pending_owner_addr: u64,
+    pid: u32,
+    reserved_pid: u32,
+    process_nonce: u64,
+    thread_id: u64,
+    owner_incarnation: u64,
+    next_operation_incarnation: u64,
+    active_operation_incarnation: u64,
+    close_generation: u64,
+};
+
+pub const RuntimeOperationIdentity = struct {
+    lifetime_owner_addr: u64,
+    runtime_addr: u64,
+    pending_owner_addr: u64,
+    pid: u32,
+    reserved_pid: u32,
+    process_nonce: u64,
+    thread_id: u64,
+    owner_incarnation: u64,
+    operation_incarnation: u64,
+    operation_kind_raw: u8,
+    operation_seal: CleanupSeal,
+};
+
+pub const RuntimeOperationPreflight = struct {
+    lifetime_owner_addr: u64,
+    runtime_addr: u64,
+    pending_owner_addr: u64,
+    pid: u32,
+    reserved_pid: u32,
+    process_nonce: u64,
+    thread_id: u64,
+    owner_incarnation: u64,
+    expected_next_operation: u64,
+    expected_operation_seal: CleanupSeal,
+};
+
+pub const PendingReleaseSealInput = struct {
+    event_identity: PendingEventIdentity,
+    pending_owner_addr: u64,
+    pending_owner_incarnation: u64,
+    source_lease_incarnation: u64,
+    attempt: u64,
+    state_raw: u8,
+    reserved: [7]u8,
+};
+
+pub const PendingSourceReceiptSealInput = struct {
+    event_identity: PendingEventIdentity,
+    runtime_addr: u64,
+    pending_owner_addr: u64,
+    payload_addr: u64,
+    payload_len: u64,
+    runtime_incarnation: u64,
+    pending_owner_incarnation: u64,
+    source_lease_incarnation: u64,
+    pid: u32,
+    process_nonce: u64,
+    thread_id: u64,
+};
+
+pub const PendingSourceLeaseSealInput = struct {
+    receipt: PendingSourceReceiptSealInput,
+    state_raw: u8,
+    reserved: [7]u8,
+    attempt: u64,
+};
+
+pub const PendingPreparationFrameSealInput = struct {
+    frame_addr: u64,
+    runtime_addr: u64,
+    lifetime_owner_addr: u64,
+    pending_owner_addr: u64,
+    observation_addr: u64,
+    direct_input_addr: u64,
+    pending_controls_addr: u64,
+    source_owner_addr: u64,
+    operation_preflight: RuntimeOperationPreflight,
+    operation_identity: RuntimeOperationIdentity,
+    source_receipt: PendingSourceReceiptSealInput,
+    source_lease: PendingSourceLeaseSealInput,
+    snapshot_digest: Digest,
+    recipe_digest: Digest,
+    scratch_graph_digest: Digest,
+    dto_content_digest: Digest,
+    transfer_projection_mask: u8,
+    transfer_observation_digest: Digest,
+    transcript_mirror: Digest,
+    progress_mirror: Digest,
+    cleanup_descriptor: CleanupDescriptor,
+    protected_ranges_digest: Digest,
+    allocator_context_addr: u64,
+    allocator_context_projection_digest: Digest,
+};
 
 pub const PendingLifecycle = enum(u8) {
     idle = 0,
@@ -125,6 +255,8 @@ pub const CleanupProgressInput = struct {
     step: CleanupStep,
     next_role: CleanupRole,
     completed_mask: u8,
+    retained_observation_digest: Digest = [_]u8{0} ** 32,
+    decision: decision_seal.Projection = .{},
 };
 
 pub const ObservationStringRole = enum(u8) {
@@ -281,12 +413,20 @@ fn cleanupTranscriptInputCanonical(input: CleanupTranscriptInput) bool {
 
 fn cleanupProgressInputCanonical(input: CleanupProgressInput) bool {
     if (!cleanupTranscriptInputCanonical(input.transcript_input)) return false;
-    return progressCanonical(input.transcript_input.plan, .{
+    if (!progressCanonical(input.transcript_input.plan, .{
         .phase = input.phase,
         .step = input.step,
         .next_role = input.next_role,
         .completed_mask = input.completed_mask,
-    });
+    })) return false;
+    return decisionProjectionCanonical(input);
+}
+
+fn decisionProjectionCanonical(input: CleanupProgressInput) bool {
+    return decision_seal.canonical(
+        input.decision,
+        digestNonzero(input.retained_observation_digest),
+    );
 }
 
 pub fn observationStringDigest(role: ObservationStringRole, bytes: []const u8) Digest {
@@ -538,6 +678,7 @@ const testCleanupDescriptorCanonical = cleanupDescriptorCanonical;
 const testCleanupPlanCanonical = cleanupPlanCanonical;
 const testCleanupTranscriptInputCanonical = cleanupTranscriptInputCanonical;
 const testCleanupProgressInputCanonical = cleanupProgressInputCanonical;
+const testDecisionProjectionCanonical = decisionProjectionCanonical;
 const testForegroundProcessesInputCanonical = foregroundProcessesInputCanonical;
 const testObservationCleanupInputCanonical = observationCleanupInputCanonical;
 const testObservationCleanupDigestUnchecked = observationCleanupDigestUnchecked;
@@ -547,6 +688,7 @@ pub const testing = if (builtin.is_test) struct {
     pub const cleanupPlanCanonical = testCleanupPlanCanonical;
     pub const cleanupTranscriptInputCanonical = testCleanupTranscriptInputCanonical;
     pub const cleanupProgressInputCanonical = testCleanupProgressInputCanonical;
+    pub const decisionProjectionCanonical = testDecisionProjectionCanonical;
     pub const foregroundProcessesInputCanonical = testForegroundProcessesInputCanonical;
     pub const observationCleanupInputCanonical = testObservationCleanupInputCanonical;
     pub const observationCleanupDigestUnchecked = testObservationCleanupDigestUnchecked;

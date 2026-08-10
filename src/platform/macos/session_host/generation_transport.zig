@@ -700,6 +700,95 @@ pub fn takeEventProjected(
     return transport.takeEventProjectedInternal(out);
 }
 
+/// Owner-bound preparation view for the dormant b2b3 path. The caller must present the exact
+/// EventOwner populated by this transport; no Runtime semantic or owning payload escapes here.
+pub fn preparationEventViewOwned(
+    transport: *const GenerationTransport,
+    owner: *const EventOwner,
+) generation_event.PreparationEventViewError!generation_event.PreparationEventView {
+    if (!transport.requestIdentityValid()) return error.InvalidOwner;
+    return transport.preparationEventView(owner);
+}
+
+/// Test-only canonical real-take harness for the dormant runtime adapter. The callback borrows
+/// every argument only for its invocation; this helper releases the event and terminalizes the
+/// attachment before returning, so tests cannot substitute copied owner or projection bytes.
+fn withTakenPreparationForTest(payload: []const u8, callback_context: anytype, callback: anytype) !void {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC33B2B03,
+        .parser = framing.FrameParser.init(allocator),
+        .metadata_support = .supported,
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xC33B2B03);
+    defer slot.deinit();
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: client_slot_mod.testing.AttachmentLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&owner.transport),
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        78,
+    );
+    try reserveEventOwnerInPlace(&owner.transport, &owner.event);
+    try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 78);
+    try slot.logicalClient().bufferGenerationEventForTest(78, payload);
+    try std.testing.expectEqual(
+        EventTakeOutcome.taken,
+        (try takeEventProjected(&owner.transport, &owner.event)).outcome,
+    );
+    const view = try preparationEventViewOwned(&owner.transport, &owner.event);
+    const correlation = owner.transport.event_correlation;
+
+    const callback_result = callback(
+        callback_context,
+        &owner.transport,
+        &owner.event,
+        view,
+        correlation,
+    );
+
+    try owner.transport.releaseEvent(&owner.event);
+    try slot.current.cleanup_registry.beginBoundDrop(
+        reservation.cleanup,
+        reservation.identity,
+        78,
+    );
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+    try slot.current.cleanup_registry.completeActiveDrop(
+        reservation.cleanup,
+        reservation.identity,
+        78,
+    );
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+    try callback_result;
+}
+
+pub const testing = if (builtin.is_test) struct {
+    pub const withTakenPreparation = withTakenPreparationForTest;
+} else struct {};
+
 fn mapPrepareError(err: client_slot_mod.GenerationRequestError) PrepareError {
     return switch (err) {
         error.Busy => error.Busy,
@@ -4426,7 +4515,7 @@ test "C3-3b2b1 trusted preparation projection is registry-derived and correlatio
         &projection_reentry,
         ProjectionReentry.run,
     );
-    const prepared = try owner.transport.preparationEventView(&owner.event);
+    const prepared = try preparationEventViewOwned(&owner.transport, &owner.event);
     try std.testing.expect(projection_reentry.saw_busy);
     try std.testing.expect(std.meta.eql(projection_reentry.expected.?, prepared.trusted));
     try std.testing.expectEqualStrings(
@@ -4457,6 +4546,22 @@ test "C3-3b2b1 trusted preparation projection is registry-derived and correlatio
         &prepared.trusted.correlation_binding_digest,
         0,
     ));
+    try std.testing.expect(!(try generation_event.preparationCandidateAllowed(
+        &owner.event,
+        @intFromPtr(&slot),
+        1,
+    )));
+    var disjoint_candidate: u8 = 0;
+    try std.testing.expect(try generation_event.preparationCandidateAllowed(
+        &owner.event,
+        @intFromPtr(&disjoint_candidate),
+        1,
+    ));
+    try std.testing.expect(!(try generation_event.preparationCandidateAllowed(
+        &owner.event,
+        std.math.maxInt(usize),
+        2,
+    )));
 
     const saved_major = logical_client.parser.expected_major;
     const saved_metadata = logical_client.metadata_support;
@@ -4465,7 +4570,7 @@ test "C3-3b2b1 trusted preparation projection is registry-derived and correlatio
         .unsupported => .supported,
         .supported => .unsupported,
     };
-    const stable = try owner.transport.preparationEventView(&owner.event);
+    const stable = try preparationEventViewOwned(&owner.transport, &owner.event);
     try std.testing.expectEqual(prepared.trusted.expected_major, stable.trusted.expected_major);
     try std.testing.expectEqual(
         prepared.trusted.metadata_support_raw,
@@ -4478,13 +4583,13 @@ test "C3-3b2b1 trusted preparation projection is registry-derived and correlatio
     owner.transport.event_correlation.storage[0] ^= 1;
     try std.testing.expectError(
         error.Corrupt,
-        owner.transport.preparationEventView(&owner.event),
+        preparationEventViewOwned(&owner.transport, &owner.event),
     );
     owner.transport.event_correlation = correlation;
     var copied_event = owner.event;
     try std.testing.expectError(
         error.InvalidOwner,
-        owner.transport.preparationEventView(&copied_event),
+        preparationEventViewOwned(&owner.transport, &copied_event),
     );
     var terminal_event: EventOwner = .{};
     generation_event.publishTerminal(&terminal_event);
@@ -4495,7 +4600,7 @@ test "C3-3b2b1 trusted preparation projection is registry-derived and correlatio
     try owner.transport.releaseEvent(&owner.event);
     try std.testing.expectError(
         error.InvalidOwner,
-        owner.transport.preparationEventView(&owner.event),
+        preparationEventViewOwned(&owner.transport, &owner.event),
     );
 
     try slot.current.cleanup_registry.beginBoundDrop(
@@ -4511,6 +4616,31 @@ test "C3-3b2b1 trusted preparation projection is registry-derived and correlatio
     );
     slot.current.pin_owner.cleanup_pin_count -= 1;
     binding.lifecycle = .terminal;
+
+    const CanonicalHarnessProbe = struct {
+        fn run(
+            _: void,
+            transport: *GenerationTransport,
+            event_owner: *EventOwner,
+            view: generation_event.PreparationEventView,
+            event_correlation: EventCorrelation,
+        ) !void {
+            try std.testing.expectEqual(@intFromPtr(event_owner), view.trusted.event_owner_addr);
+            try std.testing.expect(std.meta.eql(
+                event_correlation,
+                transport.event_correlation,
+            ));
+            try std.testing.expect(std.meta.eql(
+                view,
+                try preparationEventViewOwned(transport, event_owner),
+            ));
+        }
+    };
+    try testing.withTakenPreparation(
+        "{\"event\":\"future.adapter\",\"data\":{}}",
+        {},
+        CanonicalHarnessProbe.run,
+    );
 }
 
 test "CR3a-2c3c control permit rejects allocator callback reentry in both send modes" {

@@ -8,6 +8,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const seal = @import("event_cleanup_seal");
 
+fn emptyDecisionProgress() seal.CleanupProgressInput {
+    var value: seal.CleanupProgressInput = undefined;
+    value.retained_observation_digest = [_]u8{0} ** 32;
+    value.decision = .{};
+    return value;
+}
+
 fn descriptor(address: u64) seal.CleanupDescriptor {
     return .{
         .present = 1,
@@ -198,6 +205,51 @@ test "C3-3b2b1 cleanup seal progress accepts only the exact sparse reverse prefi
     try std.testing.expectEqual(seal.CleanupStep.finished, forged_empty.step);
     forged_empty.step = .freed;
     try std.testing.expect(!seal.testing.progressCanonical(empty, forged_empty));
+
+    // These literals are the stable raw ABI oracle. Semantic PreparedDecision parity is exercised
+    // separately through the typed sealProjection path in pending_event_preparation.zig.
+    const canonical_decisions = [_]struct {
+        retained_observation: bool = false,
+        decision: @TypeOf(emptyDecisionProgress().decision),
+    }{
+        .{ .decision = .{} },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 0 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 1 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 2 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 3 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 4, .cols = 80, .rows = 24 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 5 } },
+        .{ .retained_observation = true, .decision = .{ .bound_raw = 1, .prepared_tag_raw = 6 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 7, .effect_tag_raw = 2, .revoke_fence = 1 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 8, .effect_tag_raw = 1, .failure_raw = 1, .connection_reason_raw = 9 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 8, .effect_tag_raw = 1, .failure_raw = 2, .connection_reason_raw = 9 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 8, .effect_tag_raw = 1, .failure_raw = 3, .connection_reason_raw = 12 } },
+        .{ .decision = .{ .bound_raw = 1, .prepared_tag_raw = 8, .failure_raw = 4 } },
+    };
+    for (canonical_decisions) |entry| {
+        var decision = emptyDecisionProgress();
+        decision.decision = entry.decision;
+        if (entry.retained_observation) decision.retained_observation_digest[0] = 1;
+        try std.testing.expect(seal.testing.decisionProjectionCanonical(decision));
+    }
+
+    var decision = emptyDecisionProgress();
+    decision.decision.bound_raw = 2;
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
+    decision.decision = .{ .bound_raw = 1, .prepared_tag_raw = 4, .cols = 1, .rows = 24 };
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
+    decision.decision.cols = 80;
+    decision.decision.rows = 0;
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
+    decision.decision = .{ .bound_raw = 1, .prepared_tag_raw = 8, .effect_tag_raw = 1, .failure_raw = 1, .connection_reason_raw = 12 };
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
+    decision.decision = .{ .bound_raw = 1, .prepared_tag_raw = 7, .effect_tag_raw = 2 };
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
+    decision.decision = .{ .bound_raw = 1, .prepared_tag_raw = 6 };
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
+    decision.retained_observation_digest[0] = 1;
+    decision.decision.prepared_tag_raw = 5;
+    try std.testing.expect(!seal.testing.decisionProjectionCanonical(decision));
 }
 
 test "C3-3b2b1 cleanup seal observation couples every owner and digest" {

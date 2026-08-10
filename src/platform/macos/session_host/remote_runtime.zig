@@ -15,6 +15,7 @@ const terminal = maru.terminal;
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
+const client_slot_mod = @import("client_slot.zig");
 const client_poison = @import("client_poison.zig");
 const control_response_wire = @import("control_response_wire.zig");
 const protocol = @import("protocol.zig");
@@ -24,11 +25,36 @@ const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const runtime_pending_control = @import("runtime_pending_control.zig");
+const pending_event_owner_mod = @import("pending_event_owner.zig");
+const runtime_lifetime_owner_mod = @import("runtime_lifetime_owner.zig");
+const process_seal_service = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const generation_attachment_mod = @import("generation_attachment.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
+const generation_event_contract_mod = @import("generation_event_contract.zig");
+const pending_event_preparation_mod = @import("pending_event_preparation.zig");
+const remote_runtime_pending_event_mod = @import("remote_runtime_pending_event.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
+
+var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
+
+fn nextRemoteRuntimeOwnerIncarnation() ?u64 {
+    var current = remote_runtime_owner_incarnation_issuer.load(.monotonic);
+    while (current != 0 and current != std.math.maxInt(u64)) {
+        if (remote_runtime_owner_incarnation_issuer.cmpxchgWeak(
+            current,
+            current + 1,
+            .monotonic,
+            .monotonic,
+        )) |observed| {
+            current = observed;
+            continue;
+        }
+        return current;
+    }
+    return null;
+}
 
 const RuntimeAttachment = union(enum) {
     legacy: remote_attachment.RemoteAttachment,
@@ -359,6 +385,8 @@ pub const RemoteRuntime = struct {
     pump_ended: bool,
     resync_needed: bool,
     pending_generation_event_outcome: PendingGenerationEventOutcome,
+    pending_event_owner: pending_event_owner_mod.PendingEventOwner,
+    runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
 
@@ -448,6 +476,9 @@ pub const RemoteRuntime = struct {
         self.blocking_flush_active = false;
         self.pump_ended = false;
         self.resync_needed = false;
+        self.pending_event_owner = .{};
+        self.runtime_lifetime = .{};
+        try self.initializePendingEventOwner(generation_adapter);
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
 
@@ -538,11 +569,113 @@ pub const RemoteRuntime = struct {
         self.blocking_flush_active = false;
         self.pump_ended = false;
         self.resync_needed = false;
+        self.pending_event_owner = .{};
+        self.runtime_lifetime = .{};
+        try self.initializePendingEventOwner(generation_adapter);
         self.observation = .{};
         errdefer self.observation.deinit(allocator);
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
         try self.attachAndAssemble(surface_id, size);
+    }
+
+    fn initializePendingEventOwner(
+        self: *RemoteRuntime,
+        generation_adapter: ?*host_adapter_mod.HostAdapter,
+    ) anyerror!void {
+        // Both legacy and generation runtimes share one process-seal domain. Generation identity
+        // is an additional equality check, never the source of a legacy pristine bypass.
+        try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+        const process_identity = try process_seal_service.currentReadyIdentity();
+        if (generation_adapter) |adapter| {
+            const adapter_identity = adapter.slot.generationBatchAdapterIdentity() catch
+                return error.InvalidOwner;
+            if (adapter_identity.pid != process_identity.pid or
+                adapter_identity.process_nonce != process_identity.process_nonce)
+                return error.InvalidOwner;
+        }
+        const owner_incarnation = nextRemoteRuntimeOwnerIncarnation() orelse
+            return error.OwnerIncarnationExhausted;
+        // The lifetime row performs the only recoverable readiness check before publication.
+        try self.runtime_lifetime.initInPlace(
+            @intFromPtr(self),
+            @intFromPtr(&self.pending_event_owner),
+            process_identity.process_nonce,
+            owner_incarnation,
+        );
+        self.pending_event_owner.initInPlace(owner_incarnation) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+    }
+
+    /// Dormant b2b3 orchestration seam. It owns the sole final-address PreparationFrame and
+    /// snapshots this RemoteRuntime without publishing any live semantic mutation. The product
+    /// event pump remains intentionally unwired until b4; the focused real-take fixture instantiates
+    /// this exact body so future activation cannot grow a second frame-construction path.
+    fn classifyAndPrepareEvent(
+        self: *RemoteRuntime,
+        source_owner: *generation_event_contract_mod.EventOwner,
+        source_view: generation_event_contract_mod.PreparationEventView,
+        correlation: client_slot_mod.EventCorrelation,
+    ) pending_event_preparation_mod.PrepareError!void {
+        const context: pending_event_preparation_mod.RuntimePreparationContext = .{
+            .runtime_addr = @intFromPtr(self),
+            .allocator = self.allocator,
+            .lifetime_owner = &self.runtime_lifetime,
+            .pending_owner = &self.pending_event_owner,
+            .observation = &self.observation,
+            .direct_input = &self.direct_input,
+            .direct_input_offset = &self.direct_input_offset,
+            .pending_controls = &self.pending_controls,
+            .blocking_flush_active = &self.blocking_flush_active,
+            .resize_generation = &self.resize_generation,
+            .resize_baseline_present = &self.resize_baseline_present,
+            .source_owner = source_owner,
+            .source_view = source_view,
+            .correlation = correlation,
+        };
+        const operation_preflight = self.runtime_lifetime.preflightPreparation() catch |err| return switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+        };
+        const source_identity = pending_event_preparation_mod.sourceIdentityFromView(source_view) catch
+            return error.InvalidOwner;
+        const source_receipt = pending_event_preparation_mod.preflightSource(
+            context,
+            source_view,
+            operation_preflight,
+        ) catch return error.InvalidOwner;
+        const snapshot = pending_event_preparation_mod.snapshotRuntimeContext(
+            context,
+            operation_preflight.owner_incarnation,
+            std.mem.zeroes(@FieldType(
+                pending_event_preparation_mod.RuntimeSemanticSnapshot,
+                "operation_identity",
+            )),
+            source_identity,
+        ) catch return error.InvalidOwner;
+        const recipe = pending_event_preparation_mod.recipeFromSourceView(source_view) catch
+            return error.InvalidOwner;
+        var frame: pending_event_preparation_mod.PreparationFrame = undefined;
+        pending_event_preparation_mod.initFrameInPlace(&frame, .{
+            .context = context,
+            .operation_preflight = operation_preflight,
+            .source_receipt = source_receipt,
+            .snapshot = snapshot,
+            .recipe = recipe,
+        }, @sizeOf(RemoteRuntime));
+        try remote_runtime_pending_event_mod.prepareTakenEvent(&frame);
+    }
+
+    fn admitRuntimeOperation(self: *const RemoteRuntime) client_mod.ClientError!void {
+        _ = self.runtime_lifetime.preflightPreparation() catch |err| return switch (err) {
+            error.Busy => error.AdminBusy,
+            error.InvalidOwner => error.ProtocolError,
+        };
+    }
+
+    fn admitDestructiveRuntimeOperation(self: *const RemoteRuntime) void {
+        self.admitRuntimeOperation() catch
+            process_seal_service.fatalIntegrity(.destructive_reentry);
     }
 
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
@@ -733,6 +866,7 @@ pub const RemoteRuntime = struct {
 
     /// runtime을 종료하고(host `runtime.terminate`) client-side 자원을 회수한다. 멱등 시도(종료 실패는 무시).
     pub fn deinit(self: *RemoteRuntime) void {
+        self.admitDestructiveRuntimeOperation();
         self.terminateBestEffort();
         // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
         self.surface.deinit();
@@ -747,6 +881,7 @@ pub const RemoteRuntime = struct {
     /// Term을 이걸로 정리하면 runtime이 host에 남아(연결 EOF를 host가 detach로 처리해 유지, §6 app-quit=detach) GUI 재실행 시
     /// `attachExisting`으로 재접속한다. `deinit`과 대칭이되 terminate만 뺀다.
     pub fn detachClientSide(self: *RemoteRuntime) void {
+        self.admitDestructiveRuntimeOperation();
         // shared connection은 앱 종료 전까지 EOF가 오지 않을 수 있다. RPC detach 없이 로컬 객체만 버리면 host의 controller
         // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
         self.detachBestEffort();
@@ -778,6 +913,7 @@ pub const RemoteRuntime = struct {
 
     /// 렌더/입력 라우팅에 쓸 Surface(GUI가 in-process처럼 다룬다).
     pub fn surfacePtr(self: *RemoteRuntime) *Surface {
+        self.admitDestructiveRuntimeOperation();
         return &self.surface;
     }
 
@@ -787,6 +923,7 @@ pub const RemoteRuntime = struct {
 
     /// terminal input을 host runtime으로 보낸다(controller). 응답 없는 fire-and-forget.
     pub fn sendInput(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         if (bytes.len == 0) return;
         // SurfaceRuntime가 이 권위 거부를 InputSuppressed로 바꿔 trace 0과 paste 영구 폐기를
         // 함께 보장한다. 성공으로 숨기면 실제 PTY에 안 간 입력이 trace에 기록된다.
@@ -803,6 +940,7 @@ pub const RemoteRuntime = struct {
     /// UI tick의 입력을 client 연결의 bounded pending frame에 맡긴다. 반환값은 wire write량이 아니라 client가 소유권을
     /// 인수한 payload 길이라 caller가 partial socket write를 같은 입력으로 재시도하지 않는다.
     pub fn sendInputNonBlocking(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!usize {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!(try self.pumpQueuedInput())) return 0;
         return self.attachment.sendInputNonBlocking(self.client, bytes);
@@ -812,6 +950,7 @@ pub const RemoteRuntime = struct {
     /// bounded control FIFO에 넣은 뒤 DONTWAIT admission을 한 번 시도한다. 같은 byte barrier의 연속 scroll은
     /// coalesce하고, 슬롯이 다른 frame으로 막혔으면 tick/input 경로가 다시 시도한다.
     pub fn requestScrollToBottom(self: *RemoteRuntime) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         switch (self.attachment) {
             .legacy => if (!self.client.async_scroll_to_bottom_v1) return,
@@ -836,6 +975,7 @@ pub const RemoteRuntime = struct {
     /// focus/config/prompt 등 host-authoritative 명령을 input과 같은 stream-local 시간축에 넣는다. queue가 인수한 뒤
     /// socket backpressure가 생겨도 다음 frame tick이 재시도하며, bounded cap을 넘으면 명시적으로 실패한다.
     pub fn queueCoreCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         switch (self.attachment) {
             .legacy => if (!self.client.runtime_core_command_v1) {
@@ -1082,6 +1222,7 @@ pub const RemoteRuntime = struct {
     }
 
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
+        try self.admitRuntimeOperation();
         // Observer viewport follows the controller's canonical runtime size; local window changes
         // are acknowledged as a no-op instead of becoming an infinite GUI retry.
         if (!self.mutationAllowed()) return;
@@ -1126,6 +1267,7 @@ pub const RemoteRuntime = struct {
     pub fn pumpDelta(
         self: *RemoteRuntime,
     ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
+        try self.admitRuntimeOperation();
         // Revoke/ended events fence mutation. Consume already-buffered authority events before
         // advancing any input/control that was accepted on a previous UI turn.
         var events = try self.drainObservationEvents();
@@ -1482,6 +1624,7 @@ pub const RemoteRuntime = struct {
     /// host runtime을 종료한다(client-side 자원은 남긴다 — 회수는 `deinit`). `TermRuntimeBackend.close_and_detach`/`close`가
     /// 부른다(계약: routing 끊고 프로세스 kill). 멱등(host가 없는 id 무시). client 객체는 이후 `remove`→`deinit`에서 회수한다.
     pub fn terminate(self: *RemoteRuntime) void {
+        self.admitDestructiveRuntimeOperation();
         self.terminateBestEffort();
     }
 
@@ -1489,6 +1632,7 @@ pub const RemoteRuntime = struct {
     /// 경로가 부른다. host가 다음 delta tick에 현재 full snapshot을 snapshot_chunk로 push하고, 그걸 `pumpDelta`의 applySnapshot이
     /// 받아 generation을 리셋해 복구한다(delta는 base_generation이 현재라 stale client를 못 고쳐 snapshot이 유일한 복구). 응답 무시.
     pub fn requestResync(self: *RemoteRuntime) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         var buf: [64]u8 = undefined;
         const encoded = control_response_wire.encodeParams(&buf, .{ .resync = .{
             .stream_id = self.attachment.streamId(),
@@ -1505,6 +1649,7 @@ pub const RemoteRuntime = struct {
     /// 직전에 호출한다. host가 subscription revision/base와 같은 원자 상태에서 응답하므로 성공 뒤 observation은 host가
     /// 응답을 만든 시점의 full-state다.
     pub fn refreshObservation(self: *RemoteRuntime) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
         const before = self.observation.revision;
@@ -1552,6 +1697,7 @@ pub const RemoteRuntime = struct {
     /// 한다. 단 앱보다 먼저 떠 계속 살아 있는 구 host는 이 RPC를 모르므로 capability가 없을 때만 현재 client 화면 projection의
     /// 보이는 선택을 추출한다. 반환 텍스트는 caller 소유(빈 선택/오류면 null). `block`은 std.fmt가 true/false로 찍어 유효 JSON.
     pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
+        try self.admitRuntimeOperation();
         if (!self.client.runtime_selected_text_v1) return self.selectedTextFromProjection(span);
         var buf: [160]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
@@ -1597,6 +1743,7 @@ pub const RemoteRuntime = struct {
     pub const RemoteLink = struct { text: []u8, kind: terminal.LinkKind };
 
     pub fn linkAt(self: *RemoteRuntime, row: u16, col: u16, scopes: u8) client_mod.ClientError!?RemoteLink {
+        try self.admitRuntimeOperation();
         if (!self.client.runtime_link_at_v1) return null;
         var buf: [160]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.attachment.streamId(), row, col, scopes }) catch return error.OutOfMemory;
@@ -1670,6 +1817,7 @@ pub const RemoteRuntime = struct {
     /// **base64로 받는다**: OSC 52 데이터는 임의 바이트라 JSON 문자열로 그대로 오면 strict 디코더의 UTF-8 검증에
     /// 걸려 connection이 fail-close된다(복사 한 번에 앱 전역 연결이 끊긴다). host가 base64로 싣고 여기서 푼다.
     pub fn clipboardWrite(self: *RemoteRuntime) client_mod.ClientError!?ClipboardWrite {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.client.runtime_clipboard_v1) return null;
         var buf: [64]u8 = undefined;
@@ -1737,6 +1885,7 @@ pub const RemoteRuntime = struct {
     pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan, voff: ?u64 };
 
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
+        try self.admitRuntimeOperation();
         if (scroll and !self.mutationAllowed()) return error.Unauthorized;
         out_spans.clearRetainingCapacity();
         var hexbuf: [512]u8 = undefined;
@@ -1760,6 +1909,7 @@ pub const RemoteRuntime = struct {
     /// 선택 span을 받는다(빈 placeholder는 경계를 모른다 = 선택 의미론 host 단일 출처). caller는 이 span을 placeholder에 적용해
     /// 하이라이트한다(복사는 #6b-1 selectedText가 그 span으로 host 추출). `op`는 고정 리터럴("word"/"line"). 선택 없으면 null.
     pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16) client_mod.ClientError!?terminal.SelectionSpan {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.attachment.streamId(), op, row, col }) catch return error.OutOfMemory;
@@ -1777,6 +1927,7 @@ pub const RemoteRuntime = struct {
     /// host-authoritative core command를 strict bounded codec으로 보낸다. 구 host는 scroll 4종만 이해하므로 capability가
     /// 없는 연결에는 그 legacy subset만 보내고 focus/config/prompt는 unknown RPC를 시험하지 않고 degraded no-op으로 둔다.
     pub fn sendCoreCommandBlocking(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!shouldSendCoreCommand(self.client.runtime_core_command_v1, command)) return;
         const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch return error.OutOfMemory;
@@ -1788,6 +1939,7 @@ pub const RemoteRuntime = struct {
     /// host-backed 마우스 리포트(§ 입력 패리티): 마우스 이벤트를 host로 보내 host core가 자기 mouse_tracking/format으로
     /// SGR 리포트를 인코딩·PTY 주입하게 한다. 인코딩 모드가 host에만 있어 client는 raw 이벤트만 전달한다(방식 B).
     pub fn sendMouseReport(self: *RemoteRuntime, m: maru.session.core_command.MouseReport) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         var buf: [192]u8 = undefined;
         const params = std.fmt.bufPrint(
@@ -1803,6 +1955,7 @@ pub const RemoteRuntime = struct {
     /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(app_session이 surfacing).
     /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
     pub fn takeNotification(self: *RemoteRuntime) client_mod.ClientError!?Notification {
+        try self.admitRuntimeOperation();
         // Capability 없는 same-major 구 host는 runtime_id-only RPC를 exact subscription으로
         // authorize하지 못한다. Observer가 shared pending event를 소비하지 않도록 fail-closed한다.
         if (!self.client.notification_stream_auth_v1) return null;
@@ -2218,6 +2371,17 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
     return runtime_core_command_v1 or command.isLegacyScroll();
 }
 
+pub const testing_api = struct {
+    /// Test fixtures must exercise the same process identity, final-address seal, and owner
+    /// incarnation path as product constructors; this is initialization, not an authority bypass.
+    pub fn initializePendingOwners(runtime: *RemoteRuntime) !void {
+        if (!@import("builtin").is_test) unreachable;
+        runtime.pending_event_owner = .{};
+        runtime.runtime_lifetime = .{};
+        try runtime.initializePendingEventOwner(null);
+    }
+};
+
 test "f3c0 remote runtime resize reply preserves stale size and uses host-clamped applied size" {
     try std.testing.expectEqual(
         control_response_wire.ResizeReply.stale,
@@ -2333,6 +2497,9 @@ test "remote runtime fails the shared connection on an immediately consumed fore
 
     var runtime: RemoteRuntime = undefined;
     runtime.client = &client;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(null);
     runtime.allocator = allocator;
     runtime.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
     runtime.event_generation_tracking = .tracked;
@@ -2551,6 +2718,9 @@ test "remote runtime: advertised selected-text capability with a missing respons
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
 
     try std.testing.expectError(
@@ -2574,6 +2744,9 @@ test "remote runtime: clipboardWrite는 base64로 임의 바이트를 복원하�
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
 
     // 0xFF 같은 non-UTF-8 바이트도 그대로 복원된다(예전 구현은 여기서 연결을 죽였다).
@@ -2823,6 +2996,9 @@ fn expectGuiMetadataProjectionFailurePreservesCache(
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(allocator, .{
         .runtime_id = 0xaa,
@@ -3025,6 +3201,9 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
@@ -3113,6 +3292,9 @@ test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
@@ -3580,6 +3762,9 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
@@ -3844,6 +4029,9 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
@@ -3962,6 +4150,9 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
@@ -4166,6 +4357,9 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
     rr.generation_adapter = &adapter;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(&adapter);
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
@@ -4254,6 +4448,9 @@ test "remote runtime: actual GUI metadata event is atomic across every projectio
         defer client.deinit();
         var rr: RemoteRuntime = undefined;
         rr.client = &client;
+        rr.pending_event_owner = .{};
+        rr.runtime_lifetime = .{};
+        try rr.initializePendingEventOwner(null);
         rr.attachment = .init(allocator, .{
             .runtime_id = 0xaa,
             .stream_id = 7,
@@ -4335,6 +4532,9 @@ fn expectObservationBarrierDisposition(
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(allocator, .{
         .runtime_id = 0xaa,
@@ -5003,6 +5203,9 @@ test "remote runtime actual resize response and event reject equal-generation co
 
 test "remote runtime observer locally consumes input and sends no resize mutation" {
     var runtime: RemoteRuntime = undefined;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(null);
     runtime.attachment = .init(testing.allocator, .{
         .runtime_id = 0xaa,
         .stream_id = 7,
@@ -5042,6 +5245,9 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
 
     var runtime: RemoteRuntime = undefined;
     runtime.client = &client;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(null);
     runtime.allocator = allocator;
     runtime.attachment = .init(allocator, .{
         .runtime_id = 0xaa,
@@ -5093,6 +5299,9 @@ test "remote runtime rejects revoke when attach generation is untracked" {
 
     var runtime: RemoteRuntime = undefined;
     runtime.client = &client;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(null);
     runtime.allocator = allocator;
     runtime.attachment = .init(allocator, .{
         .runtime_id = 0xaa,
@@ -5125,6 +5334,9 @@ test "own buffered revoke suppresses newly arriving input before role cache catc
 
     var runtime: RemoteRuntime = undefined;
     runtime.client = &client;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(null);
     runtime.allocator = allocator;
     runtime.attachment = .init(allocator, .{
         .runtime_id = 0xaa,
@@ -5183,6 +5395,9 @@ fn initGenerationRuntimeAggregateFixture(
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
     runtime.resize_generation = 0;
     runtime.resize_baseline_present = false;
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(adapter);
 }
 
 fn deinitGenerationRuntimeAggregateFixture(
@@ -5204,6 +5419,348 @@ fn deinitGenerationAttachmentFixture(
         generation_attachment_mod.DeinitOutcome.cleaned,
         attachment.tryDeinit(adapter),
     ) catch @panic("generation attachment fixture cleanup failed");
+}
+
+const PreparationDtoDriftAllocator = struct {
+    parent: std.mem.Allocator,
+    first_allocation: ?[]u8 = null,
+    allocation_count: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.allocation_count += 1;
+        // The first b2b3 metadata allocation is the filled DTO. Mutate it from the next
+        // allocator callback to prove that the frame authenticates content, not just its slice.
+        if (self.allocation_count == 2) {
+            const dto = self.first_allocation orelse return null;
+            dto[0] ^= 1;
+        }
+        const candidate = self.parent.rawAlloc(len, alignment, ra) orelse return null;
+        if (self.allocation_count == 1) self.first_allocation = candidate[0..len];
+        return candidate;
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.parent.rawFree(memory, alignment, ra);
+    }
+};
+
+fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
+    const generation_transport_mod = @import("generation_transport.zig");
+    const Probe = struct {
+        fn run(
+            _: void,
+            _: *generation_transport_mod.GenerationTransport,
+            source_owner: anytype,
+            view: anytype,
+            correlation: anytype,
+        ) !void {
+            var hostile = PreparationDtoDriftAllocator{ .parent = testing.allocator };
+            var runtime: RemoteRuntime = undefined;
+            runtime.allocator = hostile.allocator();
+            runtime.direct_input = .empty;
+            runtime.direct_input_offset = 0;
+            runtime.pending_controls = .empty;
+            runtime.blocking_flush_active = false;
+            runtime.resize_generation = 0;
+            runtime.resize_baseline_present = false;
+            runtime.observation = .{};
+            runtime.pending_event_owner = .{};
+            runtime.runtime_lifetime = .{};
+            try runtime.initializePendingEventOwner(null);
+            try runtime.classifyAndPrepareEvent(source_owner, view, correlation);
+            return error.TestUnexpectedResult;
+        }
+    };
+    generation_transport_mod.testing.withTakenPreparation(metadata, {}, Probe.run) catch
+        std.c._exit(125);
+    std.c._exit(124);
+}
+
+test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
+    try testing.expectEqual(@as(usize, 2512), @sizeOf(pending_event_owner_mod.PendingEventOwner));
+    const expected_runtime_size: usize = switch (builtin.mode) {
+        .Debug => 8528,
+        .ReleaseFast => 8464,
+        else => unreachable,
+    };
+    const expected_runtime_remainder: usize = switch (builtin.mode) {
+        .Debug => 6016,
+        .ReleaseFast => 5952,
+        else => unreachable,
+    };
+    try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
+    try testing.expectEqual(
+        expected_runtime_remainder,
+        @sizeOf(RemoteRuntime) - @sizeOf(pending_event_owner_mod.PendingEventOwner),
+    );
+    try testing.expectEqual(
+        @as(usize, 10_289_152),
+        @sizeOf(pending_event_owner_mod.PendingEventOwner) * 4096,
+    );
+    const generation_transport_mod = @import("generation_transport.zig");
+    const Probe = struct {
+        fn run(
+            fail_index: usize,
+            transport: *generation_transport_mod.GenerationTransport,
+            source_owner: anytype,
+            view: anytype,
+            correlation: anytype,
+        ) !void {
+            var runtime: RemoteRuntime = undefined;
+            var failing = testing.FailingAllocator.init(
+                testing.allocator,
+                .{ .fail_index = fail_index },
+            );
+            runtime.allocator = failing.allocator();
+            runtime.direct_input = .empty;
+            defer runtime.direct_input.deinit(runtime.allocator);
+            runtime.direct_input_offset = 0;
+            runtime.pending_controls = .empty;
+            defer runtime.pending_controls.deinit(runtime.allocator);
+            runtime.blocking_flush_active = false;
+            runtime.resize_generation = 0;
+            runtime.resize_baseline_present = false;
+            runtime.observation = .{};
+            defer runtime.observation.deinit(runtime.allocator);
+            runtime.pending_event_owner = .{};
+            runtime.runtime_lifetime = .{};
+            try runtime.initializePendingEventOwner(null);
+
+            try runtime.classifyAndPrepareEvent(source_owner, view, correlation);
+            const prepared = try runtime.pending_event_owner.borrowPrepared();
+            if (fail_index < 5) {
+                switch (prepared.event) {
+                    .failure => |failure| try testing.expectEqual(
+                        @import("runtime_event_prepared_types.zig").PreparationFailure.out_of_memory,
+                        failure,
+                    ),
+                    else => return error.TestUnexpectedResult,
+                }
+                // Both values are semantically valid and share the same poison effect. Only the
+                // keyed publication transcript may distinguish this coherent raw-storage rewrite.
+                const original_failure = runtime.pending_event_owner.prepared.failure_raw;
+                runtime.pending_event_owner.prepared.failure_raw = @intFromEnum(
+                    @import("runtime_event_prepared_types.zig").PreparationFailure.local_resource_exhausted,
+                );
+                try testing.expectError(
+                    error.InvalidOwner,
+                    runtime.pending_event_owner.borrowPrepared(),
+                );
+                runtime.pending_event_owner.prepared.failure_raw = original_failure;
+                const original_raw = runtime.pending_event_owner.prepared;
+                runtime.pending_event_owner.prepared.prepared_tag_raw = @intFromEnum(
+                    @import("runtime_event_prepared_types.zig").PreparedEventTag.ignored,
+                );
+                runtime.pending_event_owner.prepared.effect_tag_raw = @intFromEnum(
+                    @import("runtime_event_prepared_types.zig").EffectTag.none,
+                );
+                runtime.pending_event_owner.prepared.failure_raw = 0;
+                runtime.pending_event_owner.prepared.connection_reason_raw = 0;
+                try testing.expectError(
+                    error.InvalidOwner,
+                    runtime.pending_event_owner.borrowPrepared(),
+                );
+                runtime.pending_event_owner.prepared = original_raw;
+            } else {
+                switch (prepared.event) {
+                    .metadata_commit => |observation| {
+                        try testing.expectEqual(@as(u64, 3), observation.revision);
+                        try testing.expectEqualStrings("/next/repo", observation.cwd.items);
+                        try testing.expectEqualStrings("next work", observation.window_title.items);
+                        try testing.expectEqualStrings("next-host", observation.ssh_remote_dest.items);
+                        try testing.expectEqual(@as(usize, 1), observation.foreground_processes.items.len);
+                    },
+                    else => return error.TestUnexpectedResult,
+                }
+                try testing.expectEqual(
+                    @intFromEnum(@import("pending_event_owner.zig").PendingSourceLeaseState.consumed),
+                    runtime.pending_event_owner.source_lease.state_raw,
+                );
+                try testing.expectEqual(
+                    @intFromEnum(@import("pending_event_owner.zig").PendingReleaseState.live),
+                    runtime.pending_event_owner.release_receipt.state_raw,
+                );
+                try testing.expectEqual(
+                    @intFromEnum(@import("runtime_lifetime_owner.zig").State.idle),
+                    runtime.runtime_lifetime.state_raw,
+                );
+                try testing.expect(runtime.pending_event_owner.cleanup_graph.cwd.address != 0);
+                try testing.expect(runtime.pending_event_owner.cleanup_graph.window_title.address != 0);
+                try testing.expect(runtime.pending_event_owner.cleanup_graph.ssh_remote_dest.address != 0);
+                try testing.expect(runtime.pending_event_owner.cleanup_graph.foreground_processes.address != 0);
+
+                const source_lease = runtime.pending_event_owner.source_lease;
+                runtime.pending_event_owner.source_lease.state_raw =
+                    @intFromEnum(@import("pending_event_owner.zig").PendingSourceLeaseState.active);
+                try testing.expectError(
+                    error.InvalidOwner,
+                    runtime.pending_event_owner.borrowPrepared(),
+                );
+                runtime.pending_event_owner.source_lease = source_lease;
+
+                const release_receipt = runtime.pending_event_owner.release_receipt;
+                runtime.pending_event_owner.release_receipt.state_raw =
+                    @intFromEnum(@import("pending_event_owner.zig").PendingReleaseState.consumed);
+                try testing.expectError(
+                    error.InvalidOwner,
+                    runtime.pending_event_owner.borrowPrepared(),
+                );
+                runtime.pending_event_owner.release_receipt = release_receipt;
+
+                var spliced = runtime.pending_event_owner;
+                spliced.self_addr = @intFromPtr(&spliced);
+                try testing.expectError(error.InvalidOwner, spliced.borrowPrepared());
+            }
+            try testing.expectError(error.Busy, transport.releaseEvent(source_owner));
+            try testing.expectEqual(
+                generation_transport_mod.TerminalizeReadiness.busy,
+                generation_transport_mod.preflightTerminalizeOwned(transport, transport.owner_addr),
+            );
+            try testing.expectError(error.Busy, transport.purgeEndedStream());
+
+            if (fail_index >= 5) {
+                const cwd = runtime.pending_event_owner.prepared.next_observation.cwd.items;
+                cwd[0] ^= 1;
+                try testing.expectError(error.InvalidOwner, runtime.pending_event_owner.borrowPrepared());
+                cwd[0] ^= 1;
+                _ = try runtime.pending_event_owner.borrowPrepared();
+                try pending_event_owner_mod.testing.discardPreparedForFixture(
+                    &runtime.pending_event_owner,
+                    runtime.allocator,
+                );
+                try testing.expectError(
+                    error.InvalidOwner,
+                    pending_event_owner_mod.testing.discardPreparedForFixture(
+                        &runtime.pending_event_owner,
+                        runtime.allocator,
+                    ),
+                );
+            }
+
+            // b2b3 has no product settlement. Restore live authority only so the canonical harness
+            // can use the existing release path to reclaim its real attachment fixture.
+            try generation_event_contract_mod.testing.rollbackPreparationPending(source_owner);
+        }
+    };
+
+    const metadata =
+        \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/next/repo","window_title":"next work","ssh_remote_dest":"next-host","semantic_state":2,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":false,"observer_generation":10,"title_generation":5,"cols":132,"rows":43,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"codex"}]}}
+    ;
+    // The aggregate test process has already initialized process-bound seals. A fork from there
+    // must reject inherited authority, so only the build-owned exact-one artifact runs this probe.
+    // Its runner also checks `--maru-expect-tests=1`; the aggregate copy still executes every
+    // allocation and ownership row below without relying on mutable process environment markers.
+    if ((builtin.os.tag == .macos or builtin.os.tag == .linux) and
+        builtin.test_functions.len == 1)
+    {
+        const child = std.c.fork();
+        if (child < 0) return error.TestUnexpectedResult;
+        if (child == 0) runPreparationDtoDriftChild(metadata);
+        var status: c_int = 0;
+        try testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        const unsigned: u32 = @bitCast(status);
+        try testing.expect(std.c.W.IFEXITED(unsigned));
+        try testing.expectEqual(@as(u8, 86), @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned))));
+    }
+    // dto backing plus cwd, window title, SSH destination, and process array are the five actual
+    // nonzero allocations for this canonical metadata event. Ordinals 0..4 publish OOM; ordinal 5
+    // is the first-success sentinel and proves that the schedule has no undocumented sixth callback.
+    for (0..6) |fail_index|
+        try generation_transport_mod.testing.withTakenPreparation(metadata, fail_index, Probe.run);
+}
+
+test "C3-3b2b3 integration adapter rejects every preflight before source mutation" {
+    const generation_transport_mod = @import("generation_transport.zig");
+    const RejectProbe = struct {
+        fn run(
+            scenario: usize,
+            transport: *generation_transport_mod.GenerationTransport,
+            source_owner: anytype,
+            original_view: anytype,
+            correlation: anytype,
+        ) !void {
+            var runtime: RemoteRuntime = undefined;
+            runtime.allocator = testing.allocator;
+            runtime.direct_input = .empty;
+            defer runtime.direct_input.deinit(runtime.allocator);
+            runtime.direct_input_offset = 0;
+            runtime.pending_controls = .empty;
+            defer runtime.pending_controls.deinit(runtime.allocator);
+            runtime.blocking_flush_active = false;
+            runtime.resize_generation = 0;
+            runtime.resize_baseline_present = false;
+            runtime.observation = .{};
+            defer runtime.observation.deinit(runtime.allocator);
+            runtime.pending_event_owner = .{};
+            runtime.runtime_lifetime = .{};
+            try runtime.initializePendingEventOwner(null);
+
+            var view = original_view;
+            var operation_lease: ?runtime_lifetime_owner_mod.RuntimeOperationLease = null;
+            defer if (operation_lease) |*lease| runtime.runtime_lifetime.abort(lease);
+            switch (scenario) {
+                0 => {
+                    const preflight = try runtime.runtime_lifetime.preflightPreparation();
+                    operation_lease = try runtime.runtime_lifetime.acquirePreparation(preflight);
+                    try testing.expectError(
+                        error.Busy,
+                        runtime.classifyAndPrepareEvent(source_owner, view, correlation),
+                    );
+                },
+                1 => {
+                    view.event.payload = view.event.payload[0 .. view.event.payload.len - 1];
+                    try testing.expectError(
+                        error.InvalidOwner,
+                        runtime.classifyAndPrepareEvent(source_owner, view, correlation),
+                    );
+                },
+                2 => {
+                    runtime.direct_input_offset = 1;
+                    try testing.expectError(
+                        error.InvalidOwner,
+                        runtime.classifyAndPrepareEvent(source_owner, view, correlation),
+                    );
+                },
+                else => unreachable,
+            }
+
+            try testing.expectEqual(
+                @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle),
+                runtime.pending_event_owner.lifecycle_raw,
+            );
+            if (scenario != 0) try testing.expectEqual(
+                @intFromEnum(runtime_lifetime_owner_mod.State.idle),
+                runtime.runtime_lifetime.state_raw,
+            );
+            const after = try generation_transport_mod.preparationEventViewOwned(transport, source_owner);
+            try testing.expect(std.meta.eql(original_view, after));
+        }
+    };
+
+    const metadata =
+        \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/next/repo","window_title":"next work","ssh_remote_dest":"next-host","semantic_state":2,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":false,"observer_generation":10,"title_generation":5,"cols":132,"rows":43,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"codex"}]}}
+    ;
+    for (0..3) |scenario|
+        try generation_transport_mod.testing.withTakenPreparation(metadata, scenario, RejectProbe.run);
 }
 
 fn takeAggregateRevokeForFixture(runtime: *RemoteRuntime) !void {
@@ -5416,6 +5973,9 @@ test "sibling runtime cannot flush a stream whose buffered revoke is not consume
 
     var sibling: RemoteRuntime = undefined;
     sibling.client = &client;
+    sibling.pending_event_owner = .{};
+    sibling.runtime_lifetime = .{};
+    try sibling.initializePendingEventOwner(null);
     sibling.allocator = allocator;
     sibling.io = testing.io;
     sibling.attachment = .init(allocator, .{
@@ -5542,6 +6102,9 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5605,6 +6168,9 @@ test "remote runtime preserves input core-command input order under socket backp
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5662,6 +6228,9 @@ test "CR3a-2c3c C2 remote runtime control cap overflow fail-closes instead of si
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5699,6 +6268,9 @@ test "CR3a-2c3c C2 remote runtime control allocation failure also fail-closes in
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = failing.allocator();
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 10, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5732,6 +6304,9 @@ test "remote runtime owns exact-cap key after client encode OOM and rejects cap 
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 11, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5803,6 +6378,9 @@ test "remote runtime flushes key and scroll barrier before mouse RPC" {
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 13, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5894,6 +6472,9 @@ test "CR3a-2c3c C3 detach OOM sends no RPC and fail-closes for host lease cleanu
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 17, .role = .controller, .controller_generation = 1 });
     rr.direct_input = .empty;
@@ -5931,6 +6512,9 @@ test "CR3a-2c3c C3 terminate OOM discards superseded queued mutation before clea
     defer client.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = failing.allocator();
     rr.runtime_id_hex = "00000000000000000000000000000001".*;
     rr.attachment = .init(testing.allocator, .{
@@ -5982,6 +6566,9 @@ test "CR3a-2c3a CR3a-2c3c C3 detach Busy fail-closes without mutation or RPC wir
 
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.attachment = .init(testing.allocator, .{
         .runtime_id = 1,
@@ -6583,6 +7170,9 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     client.pending_event_bytes = event.payload.len;
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.io = testing.io;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
@@ -6634,6 +7224,9 @@ test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막
 
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.io = testing.io;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
@@ -6683,6 +7276,9 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     client.pending_batch_bytes = "stale".len + "sibling".len;
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.io = testing.io;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
@@ -6734,6 +7330,9 @@ test "remote runtime: resync intent survives occupied outbound slot and emits on
     client.pending_event_bytes = event.payload.len;
     var rr: RemoteRuntime = undefined;
     rr.client = &client;
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner(null);
     rr.allocator = allocator;
     rr.io = testing.io;
     rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });

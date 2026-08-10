@@ -13,10 +13,20 @@ const secret_len = 32;
 const capability_domain = "maru.capability.registry-key.v2";
 const cleanup_transcript_domain = "maru.cleanup.transcript.v1";
 const cleanup_progress_domain = "maru.cleanup.progress.v1";
+const pending_operation_domain = "maru.pending-operation.v1";
+const pending_release_domain = "maru.pending-release.v1";
+const pending_source_receipt_domain = "maru.pending-source-receipt.v1";
+const pending_source_lease_domain = "maru.pending-source-lease.v1";
+const pending_preparation_frame_domain = "maru.pending-preparation-frame.v1";
 
 pub const CleanupSeal = cleanup_seal.CleanupSeal;
 pub const CleanupTranscriptInput = cleanup_seal.CleanupTranscriptInput;
 pub const CleanupProgressInput = cleanup_seal.CleanupProgressInput;
+pub const PendingOperationSealInput = cleanup_seal.PendingOperationSealInput;
+pub const PendingReleaseSealInput = cleanup_seal.PendingReleaseSealInput;
+pub const PendingSourceReceiptSealInput = cleanup_seal.PendingSourceReceiptSealInput;
+pub const PendingSourceLeaseSealInput = cleanup_seal.PendingSourceLeaseSealInput;
+pub const PendingPreparationFrameSealInput = cleanup_seal.PendingPreparationFrameSealInput;
 
 pub const PrepareError = error{
     ProcessDomainMismatch,
@@ -31,6 +41,27 @@ pub const ReadyError = error{
     Terminal,
 };
 
+pub const IntegrityReason = enum(u8) {
+    invalid_runtime_lifetime = 1,
+    invalid_source_authority = 2,
+    invalid_preparation_frame = 3,
+    callback_drift = 4,
+    counter_exhausted = 5,
+    destructive_reentry = 6,
+    proof_loss = 7,
+};
+
+// Diagnostic evidence only: it grants no cleanup or recovery authority, and the first reason wins.
+var integrity_evidence: std.atomic.Value(u8) = .init(0);
+
+pub fn fatalIntegrity(reason: IntegrityReason) noreturn {
+    _ = integrity_evidence.cmpxchgStrong(0, @intFromEnum(reason), .acq_rel, .acquire);
+    switch (builtin.os.tag) {
+        .macos, .linux => std.c._exit(86),
+        else => @trap(),
+    }
+}
+
 pub const PreparedReceipt = struct {
     pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -42,6 +73,11 @@ pub const CapabilityKeyInput = struct {
     counter: u64,
     slot_index: u16,
     slot_generation: u64,
+};
+
+pub const ReadyIdentity = struct {
+    pid: u32,
+    process_nonce: u64,
 };
 
 const State = enum(u8) {
@@ -208,6 +244,19 @@ const Service = struct {
             return error.ProcessDomainMismatch;
     }
 
+    fn currentReadyIdentity(self: *const Service) ReadyError!ReadyIdentity {
+        const pid = currentProcessId();
+        if (pid == 0) return error.ProcessDomainMismatch;
+        switch (self.loadState(.acquire)) {
+            .uninitialized, .initializing => return error.NotReady,
+            .terminal => return error.Terminal,
+            .ready => {},
+        }
+        // A ready service rejects a fork before returning inherited process-domain material.
+        if (self.owner_pid != pid or self.owner_nonce == 0) return error.ProcessDomainMismatch;
+        return .{ .pid = pid, .process_nonce = self.owner_nonce };
+    }
+
     fn capabilityRegistryKey(
         self: *const Service,
         pid: u32,
@@ -275,12 +324,25 @@ const Service = struct {
         hasher.update(cleanup_progress_domain);
         updateInt(&hasher, u32, pid);
         updateInt(&hasher, u64, process_nonce);
-        updateCleanupTranscript(&hasher, input.transcript_input);
-        hasher.update(&input.transcript_seal);
-        updateInt(&hasher, u8, @intFromEnum(input.phase));
-        updateInt(&hasher, u8, @intFromEnum(input.step));
-        updateInt(&hasher, u8, @intFromEnum(input.next_role));
-        updateInt(&hasher, u8, input.completed_mask);
+        updateCleanupProgress(&hasher, input);
+        var result: CleanupSeal = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
+    fn pendingSeal(
+        self: *const Service,
+        pid: u32,
+        process_nonce: u64,
+        domain: []const u8,
+        input: anytype,
+    ) ReadyError!CleanupSeal {
+        try self.validateReady(pid, process_nonce);
+        var hasher = std.crypto.hash.Blake3.init(.{ .key = self.secret });
+        hasher.update(domain);
+        updateInt(&hasher, u32, pid);
+        updateInt(&hasher, u64, process_nonce);
+        updateFixedValue(&hasher, input);
         var result: CleanupSeal = undefined;
         hasher.final(&result);
         return result;
@@ -291,6 +353,32 @@ fn updateInt(hasher: *std.crypto.hash.Blake3, comptime T: type, value: T) void {
     var bytes: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, .little);
     hasher.update(&bytes);
+}
+
+fn updateCleanupProgress(hasher: *std.crypto.hash.Blake3, input: CleanupProgressInput) void {
+    updateCleanupTranscript(hasher, input.transcript_input);
+    hasher.update(&input.transcript_seal);
+    updateInt(hasher, u8, @intFromEnum(input.phase));
+    updateInt(hasher, u8, @intFromEnum(input.step));
+    updateInt(hasher, u8, @intFromEnum(input.next_role));
+    updateInt(hasher, u8, input.completed_mask);
+    hasher.update(&input.retained_observation_digest);
+    updateFixedValue(hasher, input.decision);
+}
+
+/// Canonical, padding-free encoder for the closed pointer-free seal input graph.
+fn updateFixedValue(hasher: *std.crypto.hash.Blake3, value: anytype) void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .int => updateInt(hasher, T, value),
+        .array => |array| {
+            if (array.child != u8) @compileError("seal arrays must contain bytes");
+            hasher.update(&value);
+        },
+        .@"struct" => inline for (std.meta.fields(T)) |field|
+            updateFixedValue(hasher, @field(value, field.name)),
+        else => @compileError("pending seal inputs must remain pointer-free fixed values"),
+    }
 }
 
 fn updateDescriptor(hasher: *std.crypto.hash.Blake3, value: cleanup_seal.CleanupDescriptor) void {
@@ -382,6 +470,10 @@ pub fn validateReady(pid: u32, process_nonce: u64) ReadyError!void {
     return process_service.validateReady(pid, process_nonce);
 }
 
+pub fn currentReadyIdentity() ReadyError!ReadyIdentity {
+    return process_service.currentReadyIdentity();
+}
+
 pub fn capabilityRegistryKey(
     pid: u32,
     process_nonce: u64,
@@ -404,6 +496,26 @@ pub fn cleanupProgressSeal(
     input: CleanupProgressInput,
 ) ReadyError!CleanupSeal {
     return process_service.cleanupProgressSeal(pid, process_nonce, input);
+}
+
+pub fn pendingOperationSeal(pid: u32, process_nonce: u64, input: PendingOperationSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_operation_domain, input);
+}
+
+pub fn pendingReleaseSeal(pid: u32, process_nonce: u64, input: PendingReleaseSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_release_domain, input);
+}
+
+pub fn pendingSourceReceiptSeal(pid: u32, process_nonce: u64, input: PendingSourceReceiptSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_source_receipt_domain, input);
+}
+
+pub fn pendingSourceLeaseSeal(pid: u32, process_nonce: u64, input: PendingSourceLeaseSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_source_lease_domain, input);
+}
+
+pub fn pendingPreparationFrameSeal(pid: u32, process_nonce: u64, input: PendingPreparationFrameSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_preparation_frame_domain, input);
 }
 
 fn testCleanupDescriptor(address: u64) cleanup_seal.CleanupDescriptor {
@@ -465,6 +577,17 @@ fn testEncodedTranscript(input: CleanupTranscriptInput) CleanupSeal {
     updateInt(&hasher, u32, 1234);
     updateInt(&hasher, u64, 906);
     updateCleanupTranscript(&hasher, input);
+    var result: CleanupSeal = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn testEncodedProgress(input: CleanupProgressInput) CleanupSeal {
+    var hasher = std.crypto.hash.Blake3.init(.{ .key = [_]u8{0x5a} ** 32 });
+    hasher.update(cleanup_progress_domain);
+    updateInt(&hasher, u32, 1234);
+    updateInt(&hasher, u64, 906);
+    updateCleanupProgress(&hasher, input);
     var result: CleanupSeal = undefined;
     hasher.final(&result);
     return result;
@@ -569,23 +692,19 @@ test "C3-3b2b1 cleanup seal transcript fixed encoding has a golden digest" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 
     const progress_state = cleanup_seal.initialProgress(testCleanupTranscript().plan);
-    var progress_hasher = std.crypto.hash.Blake3.init(.{ .key = [_]u8{0x5a} ** 32 });
-    progress_hasher.update(cleanup_progress_domain);
-    updateInt(&progress_hasher, u32, 1234);
-    updateInt(&progress_hasher, u64, 906);
-    updateCleanupTranscript(&progress_hasher, testCleanupTranscript());
-    progress_hasher.update(&actual);
-    updateInt(&progress_hasher, u8, @intFromEnum(progress_state.phase));
-    updateInt(&progress_hasher, u8, @intFromEnum(progress_state.step));
-    updateInt(&progress_hasher, u8, @intFromEnum(progress_state.next_role));
-    updateInt(&progress_hasher, u8, progress_state.completed_mask);
-    var progress_actual: CleanupSeal = undefined;
-    progress_hasher.final(&progress_actual);
+    const progress_actual = testEncodedProgress(.{
+        .transcript_input = testCleanupTranscript(),
+        .transcript_seal = actual,
+        .phase = progress_state.phase,
+        .step = progress_state.step,
+        .next_role = progress_state.next_role,
+        .completed_mask = progress_state.completed_mask,
+    });
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        0x74, 0x09, 0xe9, 0xf2, 0xf5, 0x53, 0xa6, 0x13,
-        0xf9, 0x01, 0xaf, 0x62, 0xf5, 0x44, 0xb8, 0x14,
-        0x34, 0x4f, 0xbe, 0x5a, 0x31, 0xec, 0xed, 0x6f,
-        0xb7, 0x2c, 0x8c, 0x68, 0x80, 0xe0, 0xd6, 0xfd,
+        0xa7, 0x1b, 0x26, 0x01, 0x52, 0x90, 0x1b, 0x40,
+        0xc6, 0x5c, 0x4d, 0x1e, 0xb0, 0x73, 0x5b, 0xc9,
+        0x59, 0x18, 0x6c, 0x6d, 0x39, 0x73, 0x79, 0x4b,
+        0x48, 0x45, 0xff, 0x15, 0x67, 0x3d, 0x44, 0x6f,
     }, &progress_actual);
 }
 
@@ -607,6 +726,46 @@ test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
             u8,
             &baseline,
             &testEncodedTranscript(changed),
+        ));
+    }
+
+    const progress_state = cleanup_seal.initialProgress(baseline_input.plan);
+    const progress_input: CleanupProgressInput = .{
+        .transcript_input = baseline_input,
+        .transcript_seal = baseline,
+        .phase = progress_state.phase,
+        .step = progress_state.step,
+        .next_role = progress_state.next_role,
+        .completed_mask = progress_state.completed_mask,
+    };
+    const progress_baseline = testEncodedProgress(progress_input);
+    inline for (std.meta.fields(CleanupProgressInput)) |field| {
+        var changed = progress_input;
+        if (comptime std.mem.eql(u8, field.name, "transcript_input")) {
+            changed.transcript_input.host_id +%= 1;
+        } else if (comptime std.mem.eql(u8, field.name, "decision")) {
+            changed.decision.bound_raw +%= 1;
+        } else switch (@typeInfo(field.type)) {
+            .int => @field(changed, field.name) +%= 1,
+            .array => @field(changed, field.name)[0] ^= 1,
+            .@"enum" => @field(changed, field.name) = @enumFromInt(
+                @intFromEnum(@field(changed, field.name)) +% 1,
+            ),
+            else => @compileError("unhandled cleanup progress field type: " ++ field.name),
+        }
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            &progress_baseline,
+            &testEncodedProgress(changed),
+        ));
+    }
+    inline for (std.meta.fields(@TypeOf(progress_input.decision))) |field| {
+        var changed = progress_input;
+        @field(changed.decision, field.name) +%= 1;
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            &progress_baseline,
+            &testEncodedProgress(changed),
         ));
     }
 }

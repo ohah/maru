@@ -26,6 +26,14 @@ pub const PreparationEventView = struct {
     trusted: client_slot.GenerationEventPreparationProjection,
 };
 
+pub const testing = if (builtin.is_test) struct {
+    // Keep the test namespace from becoming another lexical EventOwner pointer authority. The
+    // private typed leaf below is the sole signature and rejects every other type at comptime.
+    pub fn rollbackPreparationPending(owner: anytype) !void {
+        return rollbackPreparationPendingForTest(owner);
+    }
+} else struct {};
+
 const Lifecycle = enum(u8) { pristine, live, releasing, terminal };
 const AdmissionTag = enum(u8) { unknown, accepted };
 pub const owner_storage_size = 512;
@@ -244,6 +252,54 @@ pub fn preparationEventView(
         ),
         .trusted = trusted,
     };
+}
+
+/// Claims the canonical registry lifecycle for immutable preparation.  The EventOwner remains
+/// borrowed and retains its bytes; only ClientSlot may mutate the registered authority row.
+pub fn beginPreparationPending(owner: *const EventOwner) PreparationEventViewError!void {
+    const state = internalConst(owner);
+    if (terminalExact(owner)) return error.Terminal;
+    client_slot.beginGenerationEventPreparationPending(
+        state.identity,
+        @intFromPtr(owner),
+    ) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.Corrupt => error.Corrupt,
+        error.Terminal => error.Terminal,
+    };
+}
+
+fn rollbackPreparationPendingForTest(owner: *const EventOwner) PreparationEventViewError!void {
+    if (!builtin.is_test) unreachable;
+    const state = internalConst(owner);
+    if (terminalExact(owner)) return error.Terminal;
+    client_slot.testing.rollbackGenerationEventPreparationPending(
+        state.identity,
+        @intFromPtr(owner),
+    ) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.Corrupt => error.Corrupt,
+        error.Terminal => error.Terminal,
+    };
+}
+
+/// Returns only a typed overlap verdict after revalidating the canonical event authority.
+/// ClientSlot and node addresses remain private to client_slot.zig.
+pub fn preparationCandidateAllowed(
+    owner: *const EventOwner,
+    start: usize,
+    len: usize,
+) PreparationEventViewError!bool {
+    const state = internalConst(owner);
+    if (terminalExact(owner)) return error.Terminal;
+    return client_slot.generationEventPreparationCandidateAllowed(
+        state.identity,
+        @intFromPtr(owner),
+        start,
+        len,
+    );
 }
 
 fn viewOwnerWithTrusted(

@@ -2075,6 +2075,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b2b3 immutable pending event preparation Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b2b3_step.dependOn(session_host_2c3d_c3_3b2b2_step);
+    const session_host_2c3d_c3_3b2b_step = b.step(
+        "test-session-host-2c3d-c3-3b2b",
+        "2c3d C3-3b2b immutable event preparation umbrella gate",
+    );
+    session_host_2c3d_c3_3b2b_step.dependOn(session_host_2c3d_c3_3b2b3_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2381,7 +2386,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         const event_c3_3b2b3_adapter_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime_pending_event.zig"),
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
@@ -2412,8 +2417,27 @@ pub fn build(b: *std.Build) void {
         B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_owner_module, "C3-3b2b3 owner", 7);
         B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 preparation", 10);
         B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 hostile", 5);
-        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 subprocess", 2);
-        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_adapter_module, "C3-3b2b3 integration adapter", 1);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 subprocess", 3);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 callback subprocess", 1);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_adapter_module, "C3-3b2b3 integration adapter", 2);
+
+        // The aggregate artifact has inherited process-keyed seal state by the time it reaches
+        // this test. Run the destructive DTO callback probe in a fresh exact-filter artifact so
+        // its child inherits pristine state; the aggregate copy still executes every non-fork row.
+        const event_c3_3b2b3_dto_drift_tests = addProjectTest(b, .{
+            .root_module = event_c3_3b2b3_adapter_module,
+            .filters = &.{"C3-3b2b3 integration adapter prepares a canonical real-take event"},
+        });
+        const run_event_c3_3b2b3_dto_drift_tests =
+            b.addRunArtifact(event_c3_3b2b3_dto_drift_tests);
+        run_event_c3_3b2b3_dto_drift_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2b3_dto_drift_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b3_step.dependOn(
+            &run_event_c3_3b2b3_dto_drift_tests.step,
+        );
+        run_session_host_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
+        run_core_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
+        run_exe_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_tests.step);
 
         const event_c3_3b2b3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

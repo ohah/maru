@@ -1531,7 +1531,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host.md closed 7-row의 `Busy|AdminBusy|false|observer success no-op`와 queue/pending owner retention을 고정한다.
       public nonblocking input은 `0`,
       public control은 성공 반환+FIFO 유지, internal pump는 progress `false`다. public `GenerationTransport`는 세 gate 모두 exact 15다.
-      **C3-3b1 correlation·ordering migration, C3-3b2a process-seal prerequisite와 C3-3b2b의 b2b0·b2b1·b2b2는 구현됐고, b2b3 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
+      **C3-3b1 correlation·ordering migration, C3-3b2a process-seal prerequisite와 C3-3b2b의 b2b0·b2b1·b2b2·b2b3는 구현됐고, b3 이후 event settlement와 비동기 close는 미구현**이다. 다음 TDD slice를 닫는다. b2는
       process-domain seal 이전과 immutable preparation을 각각 독립 PR인 **b2a → b2b**로 나누며, 제품 `event_pending` 활성화 전에 async close를 먼저 닫기 위해
       실제 구현 순서는 **b2a → b2b → b3 → b5 → b4 → b6**이다. 각 slice는 앞 slice의 focused
       Debug·ReleaseFast gate와 source boundary를 상속하고, 마지막 slice 전에는 C3-3b 완료나 제품 close parity를 주장하지 않는다.
@@ -1585,15 +1585,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          오류 매핑과 recipe 10+compatibility 5+RemoteRuntime mapping 1+boundary 1의 exact-17 TDD inventory를 persistent SSOT대로
          Debug·ReleaseFast에서 통과했다. `runtime_event_preparation.zig`가 pure recipe/fill을, `runtime_metadata_wire.zig`가 기존 owning API의
          compatibility adapter를 소유하며 normal b2b3/product caller는 아직 0이다.
-         **b2b3**는 final-address `PendingEventOwner`, immutable Runtime snapshot, final closed `PreparedEvent`/effect, typed scratch handoff,
-         4-part prepare peak·3-part published rehash와 proof-loss cleanup을 production source에 구현하고 real `GenerationAttachment` take의 test-mode
+         **b2b3는 구현 완료**다. final-address `PendingEventOwner`, immutable Runtime snapshot, final closed `PreparedEvent`/effect, typed scratch handoff,
+         4-part prepare peak·3-part published rehash와 proof-loss cleanup을 production source에 구현했고 real `GenerationAttachment` take의 test-mode
          dormant orchestration으로 호출한다. source·operation·destination preflight 뒤 기존 cleanup registry의 exact active
          `EventAuthority`를 `live -> preparation_pending`으로 바꾸는 것이 begin no-fail suffix의 첫 mutation이다. 이 상태는 canonical
          preparation view에는 live와 동등하지만 ordinary release·attachment teardown·ended purge에는 `Busy`이고, 별도 pending registry나 owner
          주소를 registry에 추가하지 않는다. b2b3 제품 코드의 pending settlement/rollback caller는 0이다. focused fixture만 exact identity를
          재검증한 test-only `preparation_pending -> live` rollback으로 real-take owner를 정리하며, b3의 sole product settlement만 exact release
-         receipt 검증 뒤 `preparation_pending -> releasing`을 연다. b2b3까지 normal product pump caller는 0이며 b2b0·b2b1·b2b2·b2b3 네 gate가 모두 green일 때만
-         umbrella C3-3b2b 완료를 주장한다. 이후 b3·b5·b4·b6은 C3-3b event settlement/close의 별도 gate다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는
+         receipt 검증 뒤 `preparation_pending -> releasing`을 연다. b2b3까지 normal product pump caller는 0이며 b2b0·b2b1·b2b2·b2b3 네 gate와
+         umbrella `test-session-host-2c3d-c3-3b2b`가 이를 검증한다. 이후 b3·b5·b4·b6은 C3-3b event settlement/close의 별도 gate다. 세부 lifecycle·allocation 순서·seal 입력·fatal 경계의 SSOT는
          [persistent-session-host.md의 C3-3b 계약](persistent-session-host.md#c3-3b-event-settlement와-비동기-close-계약)이며 이 계획은
          그 계약을 복제하지 않는다.
       4. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는

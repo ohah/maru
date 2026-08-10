@@ -96,6 +96,8 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         &.{
             "platform/macos/session_host/runtime_event_preparation.zig",
             "platform/macos/session_host/runtime_metadata_wire.zig",
+            // b2b3 owns the first immutable owner-preparation caller.
+            "platform/macos/session_host/pending_event_preparation.zig",
         },
     ));
     try std.testing.expectEqual(@as(usize, 1), count(
@@ -116,6 +118,8 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         &.{
             "platform/macos/session_host/runtime_event_preparation.zig",
             "platform/macos/session_host/runtime_metadata_wire.zig",
+            // b2b3 owns the first immutable owner-preparation caller.
+            "platform/macos/session_host/pending_event_preparation.zig",
         },
     ));
 
@@ -235,7 +239,7 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         "=> .peer_contract_violation",
     }) |mapping| try std.testing.expectEqual(@as(usize, 1), count(mapper, mapping));
     try std.testing.expectEqual(@as(usize, 0), count(mapper, "else =>"));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, "event_preparation"));
+    try std.testing.expectEqual(@as(usize, 0), countIdentifierOutsideTopLevelTests(runtime, "event_preparation"));
     try std.testing.expectEqual(@as(usize, 1), count(
         event_types,
         "pub fn classifyEventView(",
@@ -261,7 +265,7 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         u8,
         build,
         b2b2_build_start,
-        "const control_c1_runtime_tests",
+        "const event_c3_3b2b3_control_types_module",
     ).?;
     const b2b2_build = build[b2b2_build_start..b2b2_build_end];
     try std.testing.expectEqual(@as(usize, 1), count(

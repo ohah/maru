@@ -181,6 +181,14 @@ pub const Selection = struct {
     }
 };
 
+/// 커서 개수 상한([native-editor.md](../../../docs/native-editor.md) §3.2).
+///
+/// 정규식 검색의 "모두 선택"은 매치 수만큼 커서를 만들므로 한 번의 조작이 수만 개를 낳을 수 있고,
+/// 그 상태에서는 **편집마다 모든 커서의 offset을 매핑**해야 해 입력이 멈춘다. VSCode도
+/// `multiCursorLimit`으로 자른다. 넘으면 앞에서부터 남기고 **잘랐다는 사실을 알린다** — 조용히
+/// 자르면 사용자는 뒤쪽 매치가 왜 안 바뀌었는지 알 수 없다.
+pub const max_cursors: usize = 10_000;
+
 /// selection 배열. **항상 1개 이상**이고 `primary`는 그 안의 유효한 인덱스다.
 ///
 /// 0개를 허용하면 모든 소비처가 "커서 없음" 분기를 져야 한다. 편집기는 빈 파일에도 커서를 보이므로
@@ -208,6 +216,30 @@ pub const Selections = struct {
         std.debug.assert(self.items.len > 0);
         std.debug.assert(self.primary < self.items.len);
         return self.items[self.primary];
+    }
+
+    /// 문서 순서로 정렬돼 있는가. **편집을 뒤에서부터 적용하려면 필요한 불변식이다**(§3.2) —
+    /// 순서가 없으면 앞쪽 offset이 밀린 뒤에 뒤쪽을 적용하게 된다. `mergeOverlapping`의 결과는
+    /// 항상 이 조건을 만족하므로, 그것을 거쳐 만든 배열은 따로 확인할 필요가 없다.
+    pub fn isSorted(self: Selections) bool {
+        if (self.items.len < 2) return true;
+        var i: usize = 1;
+        while (i < self.items.len) : (i += 1) {
+            if (self.items[i].start() < self.items[i - 1].start()) return false;
+        }
+        return true;
+    }
+
+    /// **가로 이동 뒤에 부른다**(§3.2). 세로 이동만 goal을 유지한다 — 좌우로 움직인 뒤에도 옛 목표
+    /// 열이 남으면 다음 위/아래 이동이 사용자가 방금 떠난 열로 튄다.
+    ///
+    /// `invalidateVisualState`와 **사건이 다르다**: 그쪽은 "좌표계가 바뀌어서"(뷰 폭 변경)라 열
+    /// 선택 원본까지 지우고, 이쪽은 "사용자가 열을 새로 정해서"라 goal만 건드린다.
+    pub fn resetGoalsAfterHorizontalMove(self: *Selections) void {
+        for (self.items) |*s| {
+            s.goal = .none;
+            s.anchor_goal = .none;
+        }
     }
 
     /// **undo/redo가 selection을 복원할 때 부른다**(§3.3).
@@ -643,4 +675,47 @@ test "열 선택 원본은 누적되지 않고 대체된다 (§3.2a)" {
 
     try testing.expectEqual(@as(u32, 8), sels.column.?.from_row); // 두 번째만 남는다
     try testing.expectEqual(@as(usize, 2), sels.count()); // 결과 배열은 그대로
+}
+
+test "정렬 불변식: mergeOverlapping의 결과는 항상 정렬돼 있다 (§3.2)" {
+    // **편집을 뒤에서부터 적용하려면 필요하다** — 순서가 없으면 앞쪽 offset이 밀린 뒤에 뒤쪽을
+    // 적용하게 되어 두 번째 삽입이 엉뚱한 자리에 간다.
+    var items = [_]Selection{
+        Selection.fromPoints(50, 55),
+        Selection.at(10),
+        Selection.fromPoints(30, 35),
+    };
+    const merged = mergeOverlapping(&items, 0);
+    const sels = Selections.init(items[0..merged.len], merged.primary);
+    try testing.expect(sels.isSorted());
+    try testing.expectEqual(@as(usize, 10), sels.items[0].start());
+}
+
+test "정렬되지 않은 배열은 isSorted가 잡는다" {
+    var items = [_]Selection{ Selection.at(40), Selection.at(10) };
+    const sels = Selections.init(&items, 0);
+    try testing.expect(!sels.isSorted());
+}
+
+test "가로 이동은 goal을 재설정하되 열 선택 원본은 건드리지 않는다 (§3.2)" {
+    // 무효화(뷰 폭 변경)와 **다른 사건**이다 — 그쪽은 좌표계가 바뀌어서, 이쪽은 사용자가 열을
+    // 새로 정해서다. 열 선택 드래그 중 좌우 이동은 사각형을 유지해야 한다.
+    var items = [_]Selection{
+        .{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .{ .col = 12 }, .anchor_goal = .line_end },
+    };
+    var sels = Selections.init(&items, 0);
+    sels.column = .{ .from_row = 1, .from_col = 2, .to_row = 3, .to_col = 4 };
+
+    sels.resetGoalsAfterHorizontalMove();
+
+    try testing.expect(sels.items[0].goal.eql(.none));
+    try testing.expect(sels.items[0].anchor_goal.eql(.none));
+    try testing.expect(sels.column != null); // 원본은 살아 있다
+}
+
+test "커서 상한이 있다 — 검색 '모두 선택'이 입력을 멈추지 않게" {
+    try testing.expect(max_cursors > 0);
+    // 상한은 "얼마나 많으면 매핑이 입력을 멈추는가"에서 나온 값이다. 정확한 수치보다 **상한이
+    // 존재한다는 것**이 계약이며, 넘었을 때 잘랐다는 사실을 알리는 것도 함께다(§3.2).
+    try testing.expectEqual(@as(usize, 10_000), max_cursors);
 }

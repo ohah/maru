@@ -219,7 +219,7 @@ pub const inventory = [_]Proof{
     // 그대로다 — 옮긴 블록에 `@field`가 없고, ABI가 부르는 17개는 얇은 facade로 남겼다.
     // 원격 cwd 판정(`localHostname`·`termCwdIsRemote`)과 그 소비처(폴더줄 host 접두·`linkScopesForTerm`)가 붙어
     // 또 바뀐다. count는 2 그대로다 — 새 코드는 관측 캐시의 문자열을 값으로 비교할 뿐 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3e848fbf6c897152e8e649244dc032dedf86d58c4e434fe50be2a56234c6c9db" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "52545564908428388bd64f5016189ccf607676692b276dc060ce4a7d01938a10" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -235,7 +235,7 @@ pub const inventory = [_]Proof{
     // 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다 — 이사한 반사를 여기 등재해 짝을 맞춘다.
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 위 주석이 "등재한다"고
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "56ec1a2be065c284e56ac82ccaf9eb3870da1dd24b9fab9ea2014ab817fdda2b" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "4d52157e57ed879ed84d3118348ae0ed0af2332f6d0b3c9129b4aa1c50e27e15" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

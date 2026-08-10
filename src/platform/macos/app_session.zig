@@ -767,6 +767,18 @@ pub const resource_footer_rows: usize = 1;
 /// 앱 자신 행의 그룹 키. Term surface_id와 절대 겹치지 않아야 해서 최대값을 센티넬로 쓴다 — id는 1부터
 /// 증가하며 재사용하지 않으므로(session-local) 이 값에 도달하지 않는다.
 const resource_app_key: u64 = std.math.maxInt(u64);
+/// 에이전트 팝오버가 띄우는 최대 행 수. 리소스와 같은 공유 라벨 버퍼(`context_menu_items_buf`)를 쓰므로
+/// 같은 급의 상한과 comptime 가드를 둔다. 넘치면 정렬 순 상위만 보인다.
+const max_agent_rows: usize = 12;
+/// 에이전트 팝오버 앞머리의 **고를 수 없는** 줄 수: ⓪ 제목+개수 ① 열 이름. 리소스 팝오버(§4.2)와 같은 형태다 —
+/// 없으면 우클릭 메뉴 한 줄과 구별되지 않는다.
+pub const agent_header_rows: usize = 2;
+/// 에이전트 행에서 **이름이 쓸 수 있는 표시 칸**. "마지막 활동" 열이 고정 폭이라 이름만 예산을 먹는다.
+const agent_row_name_cols: u32 = 24;
+/// "마지막 활동" 열 폭(표시 칸). `formatAgentSessionArchiveRelativeAge`가 내는 가장 긴 문자열("N시간 전")이
+/// 들어갈 만큼이다 — 값 열이 흔들리면 이름 예산도 흔들린다.
+const agent_age_cols: u32 = 8;
+
 /// 앱 자신 행 라벨. **"모든 창 공유"를 이름에 박는다** — 창이 여럿이면 각 창이 같은 값을 보여주므로,
 /// 두 창의 숫자를 더하면 이중으로 잡힌다는 사실이 화면에서 드러나야 한다(§4.1의 남는 결함).
 const resource_app_label = "Maru(앱 · 모든 창 공유)";
@@ -1936,6 +1948,8 @@ comptime {
     // 라벨 슬라이스는 머리글 2줄 + 탭 행 + 앱 행이 **함께** 들어간다 — 행만 재면 3만큼 낙관적이다.
     if (max_resource_rows + resource_header_rows + resource_footer_rows > ctx_menu_count)
         @compileError("resource rows + headers + app row exceed context_menu_items_buf");
+    if (max_agent_rows + agent_header_rows > ctx_menu_count)
+        @compileError("agent rows + headers exceed context_menu_items_buf");
 }
 
 // 그룹 헤더 우클릭 메뉴(context_menu_target == .group) 인덱스 — 워크스페이스 카드 메뉴와 **별개의 compact 레이아웃**.
@@ -3816,6 +3830,16 @@ pub const AppSession = struct {
     resource_menu_len: usize = 0,
     /// 행 문자열 저장소. `context_menu_items_buf`는 슬라이스만 들므로 실제 바이트는 여기 산다.
     resource_menu_text: [max_resource_rows + resource_header_rows + resource_footer_rows][resource_row_max_bytes]u8 = undefined,
+    /// 에이전트 팝오버가 열려 있는가(§4 "에이전트 항목을 누르면"). `closeContextMenu`가 내린다.
+    agent_menu_open: bool = false,
+    /// 어느 항목이 열었나 — 실행 중과 막힌 것은 **각자 목록**이라 정렬 규칙도 다르다(§4).
+    agent_menu_blocked: bool = false,
+    /// **열 때 고정한 행 순서**(surface_id). 활동 시각은 초 단위로 움직이므로 갱신마다 재정렬하면 누르려던
+    /// 줄이 손가락 밑에서 다른 탭이 된다(리소스 팝오버와 같은 규율).
+    agent_menu_keys: [max_agent_rows]u64 = undefined,
+    agent_menu_len: usize = 0,
+    /// 행 문자열 저장소. 머리글 버퍼는 **행 슬롯 뒤**에 온다(리소스에서 겪은 슬롯 충돌을 되풀이하지 않는다).
+    agent_menu_text: [max_agent_rows + agent_header_rows][resource_row_max_bytes]u8 = undefined,
     /// 활동 시각 재렌더 tick 카운터(agent_ops.agent_age_repaint_interval_ms).
     agent_age_repaint_ticks: u32 = 0,
     agent_observer_poll_ticks: u32 = 0,
@@ -11714,6 +11738,175 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 에이전트 개수 항목을 눌렀을 때 — **그 에이전트로 간다**(docs/status-bar.md §4).
+    ///
+    /// 옛 동작은 우측 `agent_sessions` 도크를 여는 것이었는데, 그 도크는 "현재 열려 있는 Term의 보조 목록이
+    /// 아니라 로컬에 남은 과거 세션 전체의 최근 목록"이다(docs/agent-session-list.md). 상태바 숫자는 반대로
+    /// **지금 이 창에서 살아 돌고 있는 Term 수**다 — 누른 것과 열리는 것이 다른 것을 가리키고 있었다.
+    ///
+    /// 1개면 바로 점프한다(알림 클릭과 **같은** `activateSurfaceById` 경로). 2개 이상이면 항목에 앵커한
+    /// 팝오버로 고르게 한다 — 리소스 팝오버와 같은 기계다.
+    fn openAgentMenu(self: *AppSession, blocked: bool) void {
+        const want: maru.session.agent_observer.State = if (blocked) .blocked else .running;
+
+        // 후보를 **탭 순서 그대로** 모은다. 실행 중 목록은 이 순서가 곧 최종 순서다(§4: 훑는 목록이라
+        // 위치 예측 가능성이 신선도보다 유용하다). 막힌 목록만 아래에서 다시 정렬한다.
+        var keys: [max_agent_rows]u64 = undefined;
+        var ages: [max_agent_rows]u64 = undefined;
+        var n: usize = 0;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.agent_state != want) continue;
+                    if (n >= keys.len) break;
+                    keys[n] = term.surfaceId();
+                    ages[n] = term.agent_last_output_ms;
+                    n += 1;
+                }
+            }
+        }
+        if (n == 0) return; // 항목이 서 있는데 후보가 0 — 그 사이 끝났다. 조용히 무동작(빈 메뉴를 띄우지 않는다).
+        if (n == 1) {
+            _ = self.activateSurfaceById(keys[0]);
+            self.metal_dirty = true;
+            return;
+        }
+
+        // **막힌 것은 오래 기다린 순**이다 — 처리 대기열이라 오래 방치될수록 시급하고, 맨 위 행이 곧
+        // Enter 한 번의 대상이 된다. 활동 시각이 없는 것(0)은 관측 전이라 뒤로 보낸다.
+        var order: [max_agent_rows]usize = undefined;
+        for (0..n) |i| order[i] = i;
+        if (blocked) {
+            const Ctx = struct {
+                ages: []const u64,
+                fn olderFirst(ctx: @This(), a: usize, b: usize) bool {
+                    const av = if (ctx.ages[a] == 0) std.math.maxInt(u64) else ctx.ages[a];
+                    const bv = if (ctx.ages[b] == 0) std.math.maxInt(u64) else ctx.ages[b];
+                    return av < bv;
+                }
+            };
+            std.sort.pdq(usize, order[0..n], Ctx{ .ages = ages[0..n] }, Ctx.olderFirst);
+        }
+
+        // **앵커가 있어야 연다** — 브랜치·리소스와 같은 규율(바가 사라진 뒤 열면 창 바닥에 붙는다).
+        const want_id: chrome.components.status_bar.ItemId = if (blocked) .blocked_agents else .running_agents;
+        var anchor_x: f64 = 0;
+        var anchor_y: f64 = 0;
+        var anchored = false;
+        for (self.statusBarTree().entries) |e| {
+            if (e.id != @intFromEnum(want_id)) continue;
+            anchor_x = e.rect.x;
+            anchor_y = e.rect.y;
+            anchored = true;
+        }
+        if (!anchored) return;
+
+        settings_ops.closeContextMenu(self);
+        self.agent_menu_len = 0;
+        for (order[0..n]) |idx| {
+            if (self.agent_menu_len >= max_agent_rows) break;
+            self.agent_menu_keys[self.agent_menu_len] = keys[idx];
+            self.agent_menu_len += 1;
+        }
+        self.agent_menu_open = true;
+        self.agent_menu_blocked = blocked;
+        self.refreshAgentMenuRows();
+        self.chrome_host.context_menu.showWithHeaders(
+            @intFromFloat(anchor_x),
+            @intFromFloat(anchor_y),
+            agent_header_rows + self.agent_menu_len,
+            agent_header_rows,
+        );
+        self.metal_dirty = true;
+    }
+
+    /// 얼린 행 순서 그대로 **값만** 다시 조립한다 — 리소스 팝오버와 같은 이유로 `show`를 다시 부르지 않는다.
+    fn refreshAgentMenuRows(self: *AppSession) void {
+        self.buildAgentHeaderRows();
+        const now_ms = self.awakeMs();
+        for (0..self.agent_menu_len) |i| {
+            self.context_menu_items_buf[agent_header_rows + i] = self.formatAgentRow(i, self.agent_menu_keys[i], now_ms);
+        }
+        self.context_menu_items_len = agent_header_rows + self.agent_menu_len;
+    }
+
+    /// 앞머리 두 줄 — ⓪ `실행 중 | 막힘  <개수>개` ① `이름 … 마지막 활동`.
+    fn buildAgentHeaderRows(self: *AppSession) void {
+        const cols = chrome.components.overlay_input.displayCols;
+        const title_text = if (self.agent_menu_blocked) "막힘" else "실행 중";
+
+        const title = &self.agent_menu_text[max_agent_rows];
+        var used: usize = copyClamped(title[0..], title_text);
+        var pad = agent_row_name_cols -| cols(title_text);
+        while (pad > 0 and used < title.len) : (pad -= 1) {
+            title[used] = ' ';
+            used += 1;
+        }
+        used += copyClamped(title[used..], "  ");
+        var count_buf: [16]u8 = undefined;
+        const count = std.fmt.bufPrint(&count_buf, "{d}개", .{self.agent_menu_len}) catch "";
+        used += copyClamped(title[used..], count);
+        self.context_menu_items_buf[0] = title[0..used];
+
+        const head = &self.agent_menu_text[max_agent_rows + 1];
+        var m: usize = copyClamped(head[0..], "이름");
+        var pad2 = agent_row_name_cols -| cols("이름");
+        while (pad2 > 0 and m < head.len) : (pad2 -= 1) {
+            head[m] = ' ';
+            m += 1;
+        }
+        m += copyClamped(head[m..], "  ");
+        m += copyClamped(head[m..], "마지막 활동");
+        self.context_menu_items_buf[1] = head[0..m];
+    }
+
+    /// 한 행 = `탭 › 팬` + 마지막 활동. 라벨은 **알림과 같은 함수**(`notificationLocation`)를 쓴다 — 구분자
+    /// 규약이 앱 전체에서 하나여야 한다. 상대시간도 기존 포맷터를 재사용한다(문구가 두 벌이 되지 않게).
+    fn formatAgentRow(self: *AppSession, slot: usize, key: u64, now_ms: u64) []const u8 {
+        var loc_buf: [notification_location_buf_len]u8 = undefined;
+        var age_buf: [32]u8 = undefined;
+        var label: []const u8 = "(닫힌 탭)";
+        var age: []const u8 = "—";
+        outer: for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.surfaceId() != key) continue;
+                    label = notificationLocation(&loc_buf, tab, term);
+                    if (term.agent_last_output_ms != 0) {
+                        age = agent_dock.formatAgentSessionArchiveRelativeAge(
+                            @as(i128, now_ms) * std.time.ns_per_ms,
+                            @as(i96, @intCast(term.agent_last_output_ms)) * std.time.ns_per_ms,
+                            &age_buf,
+                        );
+                    }
+                    break :outer;
+                }
+            }
+        }
+
+        var name_buf: [resource_row_max_bytes]u8 = undefined;
+        const shown = truncateColsInto(&name_buf, label, agent_row_name_cols);
+        const name_cols = chrome.components.overlay_input.displayCols(shown);
+
+        var out = &self.agent_menu_text[slot];
+        var used: usize = 0;
+        used += copyClamped(out[used..], shown);
+        var pad = agent_row_name_cols -| name_cols;
+        while (pad > 0 and used < out.len) : (pad -= 1) {
+            out[used] = ' ';
+            used += 1;
+        }
+        used += copyClamped(out[used..], "  ");
+        // 값 열은 오른쪽 정렬 — 숫자 자릿수가 달라도 끝이 맞아야 훑기 쉽다.
+        var vpad = agent_age_cols -| chrome.components.overlay_input.displayCols(age);
+        while (vpad > 0 and used < out.len) : (vpad -= 1) {
+            out[used] = ' ';
+            used += 1;
+        }
+        used += copyClamped(out[used..], age);
+        return out[0..used];
+    }
+
     /// 얼린 행 순서 그대로 **값만** 다시 조립한다(`show`를 다시 부르지 않는다 — 선택이 리셋된다).
     fn refreshResourceMenuRows(self: *AppSession) void {
         const ru = maru.session.resource_usage;
@@ -12361,6 +12554,7 @@ pub const AppSession = struct {
             }
         }
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
+        debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -12369,6 +12563,18 @@ pub const AppSession = struct {
             for (self.statusBarTree().entries) |e| {
                 if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
                 self.openResourceMenu();
+                break;
+            }
+        }
+        // MARU_FORCE_AGENT_MENU=running|blocked — 에이전트 개수 항목을 누른 것처럼 팝오버를 연다(§4).
+        // 같은 규율: 가짜 행을 심지 않고 **항목이 실제로 선 뒤에만** 진짜 경로(`openAgentMenu`)로 연다.
+        if (!self.agent_menu_open) blk: {
+            const raw = std.c.getenv("MARU_FORCE_AGENT_MENU") orelse break :blk;
+            const want_blocked = std.mem.eql(u8, std.mem.span(raw), "blocked");
+            const want_id: chrome.components.status_bar.ItemId = if (want_blocked) .blocked_agents else .running_agents;
+            for (self.statusBarTree().entries) |e| {
+                if (e.id != @intFromEnum(want_id)) continue;
+                self.openAgentMenu(want_blocked);
                 break;
             }
         }
@@ -14883,7 +15089,9 @@ pub const AppSession = struct {
     fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar.ItemId) void {
         switch (id) {
             .notifications => notification_ops.openNotificationPanel(self),
-            .running_agents, .blocked_agents => dock_ops.openDockTo(self, .agent_sessions),
+            // **그 에이전트로 간다**(§4). 옛 동작(기록 도크 열기)은 누른 것과 다른 것을 가리켰다.
+            .running_agents => self.openAgentMenu(false),
+            .blocked_agents => self.openAgentMenu(true),
             .cwd => dock_ops.openDockTo(self, .explorer),
             .git_branch => settings_ops.requestBranchMenu(self), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
             // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
@@ -45457,6 +45665,81 @@ test "SB1: 항목이 없는 상태바 구간은 텍스트 커서를 주지 않�
     try std.testing.expect(cursor != .text);
 }
 
+// SB-AG: 에이전트 개수 항목은 **그 에이전트로 간다**(§4). 옛 동작(기록 도크 열기)은 누른 것과 다른 것을
+// 가리켰다 — 숫자는 "지금 이 창에서 도는 Term 수"인데 도크는 "로컬에 남은 과거 세션 목록"이다.
+test "SB-AG: 에이전트가 하나면 메뉴 없이 그 Term으로 점프한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try tab_ops.newTab(session); // [t0, t1] — 다른 탭으로 가야 점프가 관찰된다
+
+    // 첫 탭의 Term을 running으로 세우고, 활성은 두 번째 탭에 둔다.
+    const target = session.tabs.items[0].panes.items[0].terms.items[0];
+    target.agent_state = .running;
+    const target_id = target.surfaceId();
+    _ = tab_ops.switchTab(session, 1);
+    try std.testing.expect(term_ops.activeSurfaceConst(session).id != target_id);
+
+    session.activateStatusBarItem(.running_agents);
+
+    // 메뉴를 띄우지 않고 바로 갔다 — 하나뿐인데 목록을 한 번 더 띄우면 클릭만 는다.
+    try std.testing.expect(!session.agent_menu_open);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
+    try std.testing.expectEqual(target_id, term_ops.activeSurfaceConst(session).id);
+    // 도크는 열리지 않는다(옛 동작이 남아 있지 않다).
+    try std.testing.expect(!session.dock.presented);
+}
+
+// SB-AG: 정렬 규칙이 두 항목에서 **다르다**(§4). 막힌 것은 처리 대기열이라 오래 기다린 순, 실행 중은 훑는
+// 목록이라 탭 순서다. 한 테스트에서 둘 다 본다 — 규칙이 갈린다는 것 자체가 계약이라 따로 두면 짝이 흐려진다.
+test "SB-AG: 막힘은 오래 기다린 순, 실행 중은 탭 순서로 목록을 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2]
+
+    const t0 = session.tabs.items[0].panes.items[0].terms.items[0];
+    const t1 = session.tabs.items[1].panes.items[0].terms.items[0];
+    const t2 = session.tabs.items[2].panes.items[0].terms.items[0];
+    // 활동 시각은 **탭 순서와 반대로** 심는다 — 정렬이 실제로 도는지(또는 안 도는지) 갈리게 하려는 값이다.
+    t0.agent_last_output_ms = 30_000; // 가장 최근
+    t1.agent_last_output_ms = 20_000;
+    t2.agent_last_output_ms = 10_000; // 가장 오래 기다림
+
+    // 상태바 항목이 서야 앵커가 생긴다 — 실제로 한 번 그린다.
+    for ([_]*Term{ t0, t1, t2 }) |t| t.agent_state = .blocked;
+    try std.testing.expect(try statusBarHasText(allocator, session, "3"));
+    session.activateStatusBarItem(.blocked_agents);
+    try std.testing.expect(session.agent_menu_open);
+    try std.testing.expectEqual(@as(usize, 3), session.agent_menu_len);
+    // 오래 기다린 순 — t2(10s) → t1(20s) → t0(30s). 맨 위가 Enter 한 번의 대상이다.
+    try std.testing.expectEqual(t2.surfaceId(), session.agent_menu_keys[0]);
+    try std.testing.expectEqual(t1.surfaceId(), session.agent_menu_keys[1]);
+    try std.testing.expectEqual(t0.surfaceId(), session.agent_menu_keys[2]);
+    settings_ops.closeContextMenu(session);
+
+    // 같은 값인데 실행 중이면 **탭 순서**다 — 시간이 아니라 위치가 기준이다.
+    for ([_]*Term{ t0, t1, t2 }) |t| t.agent_state = .running;
+    try std.testing.expect(try statusBarHasText(allocator, session, "3"));
+    session.activateStatusBarItem(.running_agents);
+    try std.testing.expect(session.agent_menu_open);
+    try std.testing.expectEqual(t0.surfaceId(), session.agent_menu_keys[0]);
+    try std.testing.expectEqual(t1.surfaceId(), session.agent_menu_keys[1]);
+    try std.testing.expectEqual(t2.surfaceId(), session.agent_menu_keys[2]);
+
+    // 머리글 두 줄이 앞에 붙고, 고르면 그 Term으로 간다(리소스 팝오버와 같은 규율 — 인덱스에서 머리글을 뺀다).
+    try std.testing.expectEqual(agent_header_rows, session.chrome_host.context_menu.header_count);
+    try std.testing.expectEqual(agent_header_rows + 3, session.context_menu_items_len);
+    session.chrome_host.context_menu.selected = agent_header_rows + 2; // 세 번째 행 = t2
+    settings_ops.acceptContextMenu(session);
+    try std.testing.expect(!session.agent_menu_open);
+    try std.testing.expectEqual(t2.surfaceId(), term_ops.activeSurfaceConst(session).id);
+}
+
 // SB1: **도크를 여는 클릭은 레이아웃 후속까지 해야 한다.** 필드(`presented`·`collapsed`)만 세우면 도크는
 // 나타나는데 pane rect가 옛 폭 그대로라 다음 resize 전까지 어긋난다. 특히 **이미 그 뷰였으면**
 // `setDockView`가 조기 반환하므로 그쪽 resize 경로도 안 탄다 — 그때가 가장 잘 드러난다.
@@ -45476,12 +45759,16 @@ test "SB1: 상태바로 도크를 열면 pane 레이아웃도 함께 갱신된�
     _ = try session.resize(1000, 700, 1000);
 
     // 도크는 닫혀 있고 **뷰는 이미 목적지**다 — `setDockView`가 조기 반환하는 최악의 경우.
+    //
+    // **대상이 `.cwd`인 이유**: 에이전트 개수 항목은 더 이상 도크를 열지 않는다(§4 — 그 에이전트로 점프한다).
+    // 이 테스트가 못박는 것은 "에이전트"가 아니라 **도크를 여는 클릭의 레이아웃 후속**이므로, 지금도 도크를
+    // 여는 항목으로 옮긴다. 계약을 지우는 대신 살아 있는 소비자에게 붙인다.
     session.dock.presented = false;
-    session.dock.view = .agent_sessions;
+    session.dock.view = .explorer;
     session.last_resize_size = .{ .cols = 1, .rows = 1 };
     const before = session.active_pane_rect;
 
-    session.activateStatusBarItem(.running_agents);
+    session.activateStatusBarItem(.cwd);
 
     try std.testing.expect(session.dock.presented);
     try std.testing.expect(!session.dock.collapsed);

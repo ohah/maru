@@ -71,6 +71,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         t.agent_state = .running;
         t.agent_kind = .claude;
     }
+    reapplyForcedAgentStates(self);
     if (std.c.getenv("MARU_FORCE_NOTIFICATIONS")) |raw| {
         const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
         var i: usize = 0;
@@ -617,6 +618,41 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 
 /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
 /// 열어 WKWebView surface diff·크롬·resize를 실제 app-host 경로로 검증한다. FP4 전이라 본문은 placeholder다.
+/// 강제된 에이전트 상태를 **여러 Term에** 다시 세운다(캡처 전용).
+///
+/// 두 가지를 해결한다. ⑴ `pollAgentKinds`가 매 tick 관측으로 상태를 되돌리므로 첫 frame에 한 번 세운
+/// 값은 렌더까지 살아남지 못한다 — 그래서 tick의 폴링 **뒤에서도** 한 번 더 부른다. ⑵ 값이 `<n>`이면
+/// 앞에서부터 n개 Term을 세워 **목록이 필요한 상태**(2개 이상)를 만든다. 없는 값이면 1로 본다.
+///
+/// 실제 상태는 셸 화면 관측이 정한다 — 그것을 캡처로 만들 방법이 없어서 훅이 필요하다(MARU_FORCE_AGENT와
+/// 같은 성격). env 미설정이면 무동작이라 일반 실행에 영향이 없다.
+pub fn reapplyForcedAgentStates(self: *AppSession) void {
+    const running_raw = std.c.getenv("MARU_FORCE_AGENT");
+    const blocked_raw = std.c.getenv("MARU_FORCE_BLOCKED");
+    if (running_raw == null and blocked_raw == null) return;
+    const want: maru.session.agent_observer.State = if (blocked_raw != null) .blocked else .running;
+    const raw = blocked_raw orelse running_raw.?;
+    const want_n = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
+
+    var n: usize = 0;
+    var stamp: u64 = 0;
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (n >= want_n) return;
+                term.agent_state = want;
+                term.agent_kind = .claude;
+                // 활동 시각은 **앞 Term이 가장 최근**이 되게 심는다 — 그래야 두 정렬이 화면에서 갈린다.
+                // 탭 순서면 [방금, 1분 전], 오래 기다린 순이면 [1분 전, 방금]이다. 같은 방향으로 심으면
+                // 두 목록이 똑같이 나와 정렬이 도는지 캡처로 못 가른다(첫 픽스처가 그래서 쓸모없었다).
+                term.agent_last_output_ms = self.awakeMs() -| (n * 60_000);
+                stamp += 1;
+                n += 1;
+            }
+        }
+    }
+}
+
 pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
     if (self.debug_file_panel_opened or !self.dock_initialized) return;
     const raw = std.c.getenv("MARU_FILE_PANEL") orelse return;

@@ -1429,8 +1429,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    encoder 외 generic writer/MAC API는 없다.
 
    **b2b2 pure preparation recipe 계약.** `runtime_event_types.classifyEventView`는 계속 유일한 authority classifier이고 signature·본문·caller
-   inventory를 바꾸지 않는다. 새 `runtime_event_preparation.zig`는 `protocol.zig`, `runtime_event_types.zig`, `runtime_event_wire.zig`,
-   `runtime_metadata_types.zig`만 import하는 순수 projection/fill leaf다. 이 leaf는 `Client`, `GenerationAttachment`, `RemoteRuntime`,
+   inventory를 바꾸지 않는다. 새 `runtime_event_preparation.zig`는 `protocol.zig`, `resize_wire.zig`, `runtime_event_types.zig`,
+   `runtime_event_wire.zig`, `runtime_metadata_types.zig`만 import하는 순수 projection/fill leaf다. `resize_wire.zig`는 accepted resize recipe가
+   저장하는 기존 `resize_wire.Event`의 명시적 leaf dependency이며, 그 타입을 감추기 위한 barrel re-export를 만들지 않는다. 이 leaf는 `Client`, `GenerationAttachment`, `RemoteRuntime`,
    `RuntimeObservation`, allocator, owned DTO를 import하거나 barrel에서 re-export하지 않는다. `runtime_metadata_wire.zig`만 이 leaf를 import해
    기존 allocator와 `OwnedMetadataDto` compatibility adapter를 소유한다. 역방향 import는 0이다. 문서에서 말하는 staged path는 현재
    `external_event_materialization` 경로가 아니라 b2b3가 추가할 generation-event preparation 경로다. b2b2에서 그 staged production caller와

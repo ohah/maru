@@ -1393,6 +1393,8 @@ pub fn closeContextMenu(self: *AppSession) void {
     self.branch_menu_open = false; // 목록 텍스트는 다음 요청까지 살려 둔다(재열기 비용 절약)
     self.resource_menu_open = false; // 얼린 행 순서도 여기서 놓는다(다음에 열 때 다시 정렬한다)
     self.resource_menu_len = 0;
+    self.agent_menu_open = false; // 에이전트 팝오버도 같은 규율 — 플래그를 빠뜨리면 다음 메뉴의 accept가 엉뚱한 분기로 간다
+    self.agent_menu_len = 0;
     clearFileContentMenu(self);
     self.metal_dirty = true;
 }
@@ -1419,6 +1421,19 @@ pub fn acceptContextMenu(self: *AppSession) void {
         else
             null;
         closeContextMenu(self); // 먼저 닫는다 — 점프 뒤 메뉴가 남지 않게
+        if (key) |k| _ = self.activateSurfaceById(k);
+        return;
+    }
+    // 에이전트 팝오버 — 고른 행의 Term으로 점프한다. 리소스와 **같은 경로**이고, 인덱스에서 머리글을 빼는
+    // 규율도 같다(빼지 않으면 한 칸 밀린 탭으로 간다).
+    if (self.agent_menu_open) {
+        const selected = self.chrome_host.context_menu.selected;
+        const row = selected -| app_session_mod.agent_header_rows;
+        const key: ?u64 = if (selected >= app_session_mod.agent_header_rows and row < self.agent_menu_len)
+            self.agent_menu_keys[row]
+        else
+            null;
+        closeContextMenu(self);
         if (key) |k| _ = self.activateSurfaceById(k);
         return;
     }

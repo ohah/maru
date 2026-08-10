@@ -1,5 +1,5 @@
 //! **문서 내용은 신뢰 입력이 아니다** — 보이는 것과 실제가 달라지게 만드는 문자를 가려낸다
-//! ([native-editor.md](../../../docs/native-editor.md) §3.8).
+//! ([native-editor.md](../docs/native-editor.md) §3.8).
 //!
 //! 편집기의 첫 제품 가치가 "에이전트가 만든 변경을 검토"하는 것이므로, **화면에 보이는 것과 파일의
 //! 실제 내용이 달라지면 그 가치가 무너진다.** 이 모듈은 그 불변식을 깨는 codepoint를 판정한다.
@@ -11,7 +11,7 @@
 //! 그것을 어떻게 그릴지(색·스팬 role)는 L3와 §5가 정한다.
 
 const std = @import("std");
-const width = @import("../../width.zig"); // 이모지 판정 단일 출처(§3.8 ZWJ 문맥)
+const width = @import("width.zig"); // 이모지 판정 단일 출처(§3.8 ZWJ 문맥)
 
 /// 위험한 codepoint의 종류. 왜 위험한지가 곧 분류다.
 pub const Hazard = enum {

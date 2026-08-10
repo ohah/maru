@@ -2070,6 +2070,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b2b2 pure event preparation recipe Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b2b2_step.dependOn(session_host_2c3d_c3_3b2b1_step);
+    const session_host_2c3d_c3_3b2b3_step = b.step(
+        "test-session-host-2c3d-c3-3b2b3",
+        "2c3d C3-3b2b3 immutable pending event preparation Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b2b3_step.dependOn(session_host_2c3d_c3_3b2b2_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2332,6 +2337,97 @@ pub fn build(b: *std.Build) void {
             &run_event_c3_3b2b2_boundary_tests.step,
         );
         boundary_step.dependOn(&run_event_c3_3b2b2_boundary_tests.step);
+
+        const event_c3_3b2b3_control_types_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/runtime_control_types.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b2b3_pending_control_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/runtime_pending_control.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b2b3_prepared_types_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/runtime_event_prepared_types.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b2b3_lifetime_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/runtime_lifetime_owner.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b2b3_owner_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/pending_event_owner.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b2b3_preparation_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/pending_event_preparation.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b2b3_adapter_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime_pending_event.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const B2b3Test = struct {
+            fn add(
+                bld: *std.Build,
+                step: *std.Build.Step,
+                module: *std.Build.Module,
+                filter: []const u8,
+                expected: u8,
+            ) void {
+                const artifact = addProjectTest(bld, .{
+                    .root_module = module,
+                    .filters = &.{filter},
+                });
+                const run = bld.addRunArtifact(artifact);
+                run.addArg(bld.fmt("--maru-expect-tests={d}", .{expected}));
+                run.setCwd(bld.path("."));
+                step.dependOn(&run.step);
+            }
+        };
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_control_types_module, "C3-3b2b3 integration runtime control", 1);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_pending_control_module, "C3-3b2b3 integration queued controls", 1);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_prepared_types_module, "C3-3b2b3 prepared", 7);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_lifetime_module, "C3-3b2b3 runtime lifetime", 1);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_owner_module, "C3-3b2b3 owner", 7);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 preparation", 10);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 hostile", 5);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 subprocess", 2);
+        B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_adapter_module, "C3-3b2b3 integration adapter", 1);
+
+        const event_c3_3b2b3_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3b2b3_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"C3-3b2b3 immutable pending preparation boundary"},
+        });
+        const run_event_c3_3b2b3_boundary_tests = b.addRunArtifact(event_c3_3b2b3_boundary_tests);
+        run_event_c3_3b2b3_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b2b3_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b3_step.dependOn(&run_event_c3_3b2b3_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3b2b3_boundary_tests.step);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

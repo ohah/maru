@@ -2735,7 +2735,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    `RemoteTermBackend`는 제품에서 AppRuntime이 소유하는 단일 final-address GUI-thread backend다. process-sealed
    `RemoteBackendSingletonOwner`는 `{pid,process_nonce,backend_addr,owner_generation,lifecycle_raw}`와
-   `pristine -> claimed -> released`를 소유한다. 제품 `initAttachOnlyWithPool|initWithPool`은 같은 private claim helper의 exact 두 caller이고,
+   `pristine -> claimed -> released`를 소유한다. 생성자가 값을 반환하는 동안에는 final address가 아니므로 제품
+   `initAttachOnlyWithPool|initWithPool` 결과를 `app_remote_backend` 전역 슬롯에 설치한 직후 exact 두 호출부가 같은 private
+   claim helper를 호출한다. claim 실패는 방금 설치한 backend와 pool을 publication 전에 함께 rollback한다.
    legacy borrowed-client `init`은 `builtin.is_test` fixture 밖 제품 caller가 0이며 singleton claim을 우회하지 않는다.
    초기화 실패는 publication 전에 claim을 abort한다. 정상 deinit은 runtime/reservation/pin 0을 확인한 뒤 release하며 같은 process의
    다음 backend는 새 generation으로 재생성할 수 있다. fork child는 PID/process nonce mismatch를 lock/map 접근 전에 거부하고 상속 claim을

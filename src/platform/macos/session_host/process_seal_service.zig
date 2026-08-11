@@ -35,6 +35,7 @@ const close_authority_identity_domain = "maru.close-authority-identity.v1";
 const close_authority_state_domain = "maru.close-authority-state.v1";
 const close_operation_pin_domain = "maru.close-operation-pin.v1";
 const runtime_admission_domain = "maru.runtime-admission.v1";
+const remote_backend_singleton_domain = "maru.remote-backend-singleton.v1";
 
 pub const CleanupSeal = cleanup_seal.CleanupSeal;
 pub const CleanupTranscriptInput = cleanup_seal.CleanupTranscriptInput;
@@ -61,6 +62,7 @@ pub const CloseAuthorityIdentitySealInput = cleanup_seal.CloseAuthorityIdentityS
 pub const CloseAuthorityStateSealInput = cleanup_seal.CloseAuthorityStateSealInput;
 pub const CloseOperationPinSealInput = cleanup_seal.CloseOperationPinSealInput;
 pub const RuntimeAdmissionSealInput = cleanup_seal.RuntimeAdmissionSealInput;
+pub const RemoteBackendSingletonSealInput = cleanup_seal.RemoteBackendSingletonSealInput;
 
 pub const PrepareError = error{
     ProcessDomainMismatch,
@@ -621,6 +623,10 @@ pub fn closeOperationPinSeal(pid: u32, process_nonce: u64, input: CloseOperation
 
 pub fn runtimeAdmissionSeal(pid: u32, process_nonce: u64, input: RuntimeAdmissionSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, runtime_admission_domain, input);
+}
+
+pub fn remoteBackendSingletonSeal(pid: u32, process_nonce: u64, input: RemoteBackendSingletonSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, remote_backend_singleton_domain, input);
 }
 
 fn testCleanupDescriptor(address: u64) cleanup_seal.CleanupDescriptor {

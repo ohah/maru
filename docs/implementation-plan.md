@@ -903,7 +903,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          reservation/subpermit을 먼저 완성한 뒤 callback·allocation·failure 0인 publication suffix로 authority와 routing을 함께 게시한다.
          backend-global runtime admission도 host RPC·allocator·layout보다 먼저 one-shot reservation한다. CloseAuthority는
          `CloseRequestKind`와 disposition을 immutable identity seal에 봉인하고 lifecycle은 별도 checked-monotonic state seal로 관리한다.
-         RemoteTermBackend의 process-sealed singleton owner와 단일 GUI-thread operation owner가 map relookup부터
+         RemoteTermBackend의 process-sealed singleton owner는 movable 생성자 반환값을 AppSession 전역 슬롯에 설치한 직후
+         exact 두 제품 호출부에서 final address를 claim하고, 단일 GUI-thread operation owner가 map relookup부터
          final-address `CloseOperationPin` publication까지 선형화한다. b5의 dormant `advanceClosePinned`는 pending semantic call 0인
          readiness projection만 반환하며 b4가 그 함수 내부 exact-one settlement adapter를 활성화한다.
       6. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고

@@ -4848,6 +4848,14 @@ pub const AppSession = struct {
                 self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
+            app_remote_backend.?.claimProductSingleton() catch {
+                app_remote_backend.?.deinit();
+                app_remote_backend = null;
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+                self.markHostConnectFailedReason(.adapter, .resource_exhausted);
+                return;
+            };
         }
     }
 
@@ -4949,6 +4957,13 @@ pub const AppSession = struct {
                 &app_remote_host_pool.?,
                 self.runtime,
             );
+            app_remote_backend.?.claimProductSingleton() catch {
+                app_remote_backend.?.deinit();
+                app_remote_backend = null;
+                app_remote_host_pool.?.deinit();
+                app_remote_host_pool = null;
+                return .unavailable;
+            };
         }
         return .ready;
     }

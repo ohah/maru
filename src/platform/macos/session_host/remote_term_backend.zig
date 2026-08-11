@@ -53,6 +53,26 @@ const B5TestState = if (builtin.is_test) struct {
     threadlocal var skip_destroy: bool = false;
 } else struct {};
 
+pub const RemoteBackendSingletonLifecycle = enum(u8) {
+    pristine = 0,
+    claimed = 1,
+    released = 2,
+};
+
+pub const RemoteBackendSingletonOwner = struct {
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    thread_id: u64 = 0,
+    backend_addr: u64 = 0,
+    owner_generation: u64 = 0,
+    lifecycle_raw: u8 = 0,
+    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+};
+
+var remote_backend_singleton_mutex: std.atomic.Mutex = .unlocked;
+var remote_backend_singleton_addr: u64 = 0;
+var remote_backend_singleton_generation: u64 = 0;
+
 pub const RuntimeAdmissionReservation = struct {
     self_addr: u64 = 0,
     backend_addr: u64 = 0,
@@ -102,6 +122,7 @@ pub const RemoteTermBackend = struct {
     close_ticket_issuer: close_contract.CloseTicketIssuer = .{},
     close_operation_owner: close_authority.CloseOperationOwner = .{},
     close_sweep: close_contract.CloseSweep = .inactive,
+    singleton_owner: RemoteBackendSingletonOwner = .{},
 
     const vtable = term_backend.VTable{
         .spawn = spawn,
@@ -156,7 +177,52 @@ pub const RemoteTermBackend = struct {
             self.destroyRuntimeEntry(kv.key_ptr.*, kv.value_ptr.*, .terminate);
         }
         self.runtimes.deinit(self.allocator);
+        if (self.reserved_runtime_count != 0 or self.close_operation_owner.active)
+            process_seal.fatalIntegrity(.proof_loss);
+        self.releaseProductSingleton();
         self.* = undefined;
+    }
+
+    /// AppSession 전역 슬롯에 설치된 뒤에만 제품 singleton을 claim한다. 반환형 생성자 안에서 봉인하면
+    /// 대입 이동이 final address를 바꾸므로, 이 호출의 exact 두 제품 caller가 설치와 publication 사이를 소유한다.
+    pub fn claimProductSingleton(self: *RemoteTermBackend) !void {
+        if (!std.meta.eql(self.singleton_owner, RemoteBackendSingletonOwner{})) return error.InvalidSingletonOwner;
+        const ready = try process_seal.currentReadyIdentity();
+        const thread_id: u64 = @intCast(std.Thread.getCurrentId());
+        if (thread_id == 0) return error.InvalidSingletonOwner;
+        while (!remote_backend_singleton_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer remote_backend_singleton_mutex.unlock();
+        if (remote_backend_singleton_addr != 0) return error.RemoteBackendAlreadyClaimed;
+        const generation = std.math.add(u64, remote_backend_singleton_generation, 1) catch
+            return error.SingletonGenerationExhausted;
+        self.singleton_owner = .{
+            .pid = ready.pid,
+            .process_nonce = ready.process_nonce,
+            .thread_id = thread_id,
+            .backend_addr = @intFromPtr(self),
+            .owner_generation = generation,
+            .lifecycle_raw = @intFromEnum(RemoteBackendSingletonLifecycle.claimed),
+        };
+        errdefer self.singleton_owner = .{};
+        self.singleton_owner.seal = try remoteBackendSingletonSeal(&self.singleton_owner);
+        if (!validRemoteBackendSingleton(&self.singleton_owner, @intFromPtr(self))) return error.InvalidSingletonOwner;
+        remote_backend_singleton_generation = generation;
+        remote_backend_singleton_addr = @intFromPtr(self);
+    }
+
+    fn releaseProductSingleton(self: *RemoteTermBackend) void {
+        if (std.meta.eql(self.singleton_owner, RemoteBackendSingletonOwner{})) return;
+        if (!validRemoteBackendSingleton(&self.singleton_owner, @intFromPtr(self)))
+            process_seal.fatalIntegrity(.proof_loss);
+        while (!remote_backend_singleton_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer remote_backend_singleton_mutex.unlock();
+        if (remote_backend_singleton_addr != @intFromPtr(self) or
+            remote_backend_singleton_generation != self.singleton_owner.owner_generation)
+            process_seal.fatalIntegrity(.proof_loss);
+        self.singleton_owner.lifecycle_raw = @intFromEnum(RemoteBackendSingletonLifecycle.released);
+        self.singleton_owner.seal = remoteBackendSingletonSeal(&self.singleton_owner) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        remote_backend_singleton_addr = 0;
     }
 
     const DestroyMode = enum { terminate, detach };
@@ -1011,6 +1077,26 @@ fn b5TestBackend(allocator: std.mem.Allocator) RemoteTermBackend {
     };
 }
 
+fn remoteBackendSingletonSeal(owner: *const RemoteBackendSingletonOwner) process_seal.ReadyError!process_seal.CleanupSeal {
+    return process_seal.remoteBackendSingletonSeal(owner.pid, owner.process_nonce, .{
+        .self_addr = @intFromPtr(owner),
+        .backend_addr = owner.backend_addr,
+        .thread_id = owner.thread_id,
+        .owner_generation = owner.owner_generation,
+        .lifecycle_raw = owner.lifecycle_raw,
+    });
+}
+
+fn validRemoteBackendSingleton(owner: *const RemoteBackendSingletonOwner, backend_addr: u64) bool {
+    if (backend_addr == 0 or owner.backend_addr != backend_addr or owner.owner_generation == 0 or
+        owner.lifecycle_raw != @intFromEnum(RemoteBackendSingletonLifecycle.claimed) or
+        owner.thread_id != @as(u64, @intCast(std.Thread.getCurrentId()))) return false;
+    const ready = process_seal.currentReadyIdentity() catch return false;
+    if (owner.pid != ready.pid or owner.process_nonce != ready.process_nonce) return false;
+    const expected = remoteBackendSingletonSeal(owner) catch return false;
+    return std.crypto.timing_safe.eql(process_seal.CleanupSeal, expected, owner.seal);
+}
+
 fn b5FillSyntheticRows(backend_value: *RemoteTermBackend, count_value: usize) !void {
     const runtime_ptr: *RemoteRuntime = @ptrFromInt(@alignOf(RemoteRuntime));
     for (0..count_value) |index| {
@@ -1024,6 +1110,17 @@ fn b5FillSyntheticRows(backend_value: *RemoteTermBackend, count_value: usize) !v
 
 test "C3-3b5 remote backend는 두 host 합계 runtime 4096개만 허용한다" {
     try HostAdapter.initializeProcessRuntime();
+    var first_singleton = b5TestBackend(testing.allocator);
+    var second_singleton = b5TestBackend(testing.allocator);
+    try first_singleton.claimProductSingleton();
+    const first_generation = first_singleton.singleton_owner.owner_generation;
+    const copied_owner = first_singleton.singleton_owner;
+    try testing.expect(!validRemoteBackendSingleton(&copied_owner, @intFromPtr(&first_singleton)));
+    try testing.expectError(error.RemoteBackendAlreadyClaimed, second_singleton.claimProductSingleton());
+    first_singleton.releaseProductSingleton();
+    try second_singleton.claimProductSingleton();
+    try testing.expect(second_singleton.singleton_owner.owner_generation > first_generation);
+    second_singleton.releaseProductSingleton();
     var backend_value = b5TestBackend(testing.allocator);
     defer backend_value.runtimes.deinit(testing.allocator);
     try b5FillSyntheticRows(&backend_value, max_remote_backend_runtimes);

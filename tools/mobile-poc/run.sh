@@ -19,6 +19,17 @@ mkdir -p "$OUT"
 
 # Zig 는 .a 까지만 만든다. iOS 용 libSystem 링크를 Zig 가 못 해서(실측) 링크는
 # 플랫폼 툴체인(clang/NDK)이 맡는다 — 실제 앱에서도 이 구조가 된다.
+# 호스트에서 한글·영어 글리프 아틀라스를 만든다. Android NDK 에는 폰트 래스터가 없고,
+# 두 플랫폼이 **같은 아틀라스**를 쓰면 렌더 결과를 1:1 로 비교할 수 있다. 실제 제품에서는
+# 각 플랫폼이 자기 폰트 스택으로 래스터한다(iOS CoreText, Android FreeType/HarfBuzz).
+ATLAS_CHARS='$ zig build test All 11 passed.git status --shortM src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch한글 터미널 세션 목록 설정 검색 알림'
+make_atlas() {
+    [ -f "$OUT/atlas.idx" ] && return 0
+    clang -fobjc-arc "$POC/make_atlas.m" -framework Foundation -framework CoreText \
+        -framework CoreGraphics -o "$OUT/make_atlas"
+    "$OUT/make_atlas" "$OUT" "$ATLAS_CHARS"
+}
+
 build_lib() {
     target=$1
     extra=$2
@@ -102,12 +113,15 @@ features-android)
     $ADB shell /data/local/tmp/features-vk
     ;;
 chrome-ios)
+    make_atlas
+    # 모듈 루트는 maru.zig 하나다 — chrome·renderer 를 따로 주면 icons.zig 가 두 모듈에 걸린다.
     zig build-lib -target aarch64-ios-simulator -OReleaseFast -static \
         -femit-bin="$OUT/libchrome.a" \
-        --dep chrome -Mroot="$POC/chrome_probe.zig" -Mchrome="$ROOT/src/chrome.zig"
+        --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
     APP="$OUT/MaruChrome.app"
     rm -rf "$APP" && mkdir -p "$APP"
     sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$POC/Info.plist.in" > "$APP/Info.plist"
+    cp "$OUT/atlas.gray" "$OUT/atlas.idx" "$APP/"
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
         "$POC/chrome_app.m" "$OUT/libchrome.a" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
@@ -126,13 +140,16 @@ chrome-android)
     ADB=${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}
     TC="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
     GLSLC="$NDK/shader-tools/darwin-x86_64/glslc"
+    make_atlas
     zig build-lib -target aarch64-linux-android -OReleaseFast -static -fPIC \
         -femit-bin="$OUT/libchrome-android.a" \
-        --dep chrome -Mroot="$POC/chrome_probe.zig" -Mchrome="$ROOT/src/chrome.zig"
+        --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
     for s in chrome.vert chrome.frag; do
         "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
         $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
+    $ADB push "$OUT/atlas.gray" /data/local/tmp/atlas.gray >/dev/null
+    $ADB push "$OUT/atlas.idx" /data/local/tmp/atlas.idx >/dev/null
     "$TC/aarch64-linux-android30-clang" "$POC/chrome_vk.c" "$OUT/libchrome-android.a" \
         -lvulkan -o "$OUT/chrome-vk"
     $ADB push "$OUT/chrome-vk" /data/local/tmp/chrome-vk >/dev/null

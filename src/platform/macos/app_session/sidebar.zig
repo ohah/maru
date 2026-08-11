@@ -1769,28 +1769,21 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 // 1행: 상태 마커 + 종류 이름 + 상태 문구. 시각(우측 정렬)은 폭 계산이 필요해 후속 슬라이스로 미룬다.
                 // 라벨은 owned라 **중간 변수로 받아 반드시 해제**한다 — 예전엔 allocPrint 인자로 바로 넘겨
                 // 바깥 문자열만 names가 소유하고 안쪽이 매 rebuild마다 누수됐다(code-review max).
-                // 두 배치를 config로 고른다(`sidebar.session-icon-gutter`). **인라인**(기본)은 아이콘을
-                // 이름줄 선두에 두고 빌더가 이름줄만 민다 — 여기서 공백으로 밀면 보조줄까지 따라 밀린다.
-                // **gutter**는 옛 배치로, 아이콘이 왼쪽 독립 열에 서고 모든 줄이 그만큼 밀리므로 이름줄에도
-                // 보조줄과 같은 2칸을 붙여 좌단을 맞춘다.
-                const icon_gutter = self.loaded_config.config.sidebar.session_icon_gutter;
                 if (aterm) |t| {
                     const label = try agentRowLabelOwned(self, t);
                     defer self.allocator.free(label);
-                    try names.append(self.allocator, if (icon_gutter)
-                        try std.fmt.allocPrint(self.allocator, "{s}  {s}", .{ ind, label })
-                    else
-                        try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ind, label }));
+                    // 아이콘 자리는 **빌더가 이름줄만** 밀어 준다(inline_icons) — 여기서 공백으로 밀면
+                    // 보조줄까지 따라 밀린다. 그래서 라벨은 indent만 붙이고 그대로 넘긴다.
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ind, label }));
                 } else {
                     try names.append(self.allocator, try self.allocator.dupe(u8, ""));
                 }
                 // 2·3행: 그 Term의 폴더와 브랜치(§2.1 — 항상 표시, 카드 헤더와 달리 **그 에이전트가 도는 자리**).
                 // **한 줄에 합치지 않는다**: 사이드바 폭에서 폴더+브랜치를 한 줄에 넣으면 브랜치가 잘린다(실측).
-                // 보조줄 좌단을 **이름 본문**(아이콘 뒤)에 맞춘다. 보조줄 포맷이 indent 뒤에 2칸을 이미 붙이므로,
-                // 인라인 모드에서는 한 칸을 더 줘야 아이콘 폭(2)+간격(1)과 합이 맞는다. gutter 모드는 모든 줄이
-                // 같은 text_col에서 출발하므로 그대로 둔다.
+                // 보조줄 좌단을 **이름 본문**(아이콘 뒤)에 맞춘다. 보조줄 포맷이 indent 뒤에 2칸을 이미
+                // 붙이므로 한 칸을 더 줘야 아이콘 폭(2)+간격(1)과 합이 맞는다.
                 var aux_indent_buf: [64]u8 = undefined;
-                const aux_ind: []const u8 = if (icon_gutter) ind else blk: {
+                const aux_ind: []const u8 = blk: {
                     if (ind.len + 1 > aux_indent_buf.len) break :blk ind;
                     @memcpy(aux_indent_buf[0..ind.len], ind);
                     aux_indent_buf[ind.len] = ' ';
@@ -1812,10 +1805,12 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 // 종류 아이콘은 **이름줄 선두**에 인라인으로 둔다 — 옛 왼쪽 gutter는 글리프 하나 때문에 행의
                 // 모든 줄에서 3칸을 뺏고(폭의 7%), 슬롯 세로 중앙에 놓여 줄 수가 다른 행끼리 열도 못 이뤘다
                 // (사용자 피드백). gutter는 접기 토글 삼각만 계속 쓴다.
-                // 아이콘이 없는 일반 터미널 행도 `inline_icon_reserve`로 **자리는 잡아** 라벨 좌단을 맞춘다.
+                // 아이콘이 없는 일반 터미널 행도 `icon_slot_reserve`로 **자리는 잡아** 라벨 좌단을 맞춘다.
                 const row_icon: u21 = if (aterm) |t| sessionRowIconCodepoint(t) else 0;
-                try agents.append(self.allocator, if (icon_gutter) row_icon else 0);
-                try inline_icons.append(self.allocator, if (icon_gutter) 0 else (if (row_icon == 0) coretext_frame_builder.inline_icon_reserve else row_icon));
+                // 아이콘 없는 행도 **자리는 잡아야** 한다 — 안 그러면 그 행만 라벨이 아이콘 폭만큼 왼쪽으로
+                // 튀어 목록 좌단이 어긋난다(사용자 제보).
+                try agents.append(self.allocator, 0); // gutter는 접기 토글 삼각 전용
+                try inline_icons.append(self.allocator, if (row_icon == 0) coretext_frame_builder.icon_slot_reserve else row_icon);
                 try pins.append(self.allocator, false);
                 try card_kinds.append(self.allocator, if (aterm) |t| t.agent_kind else .none);
                 try card_running.append(self.allocator, if (aterm) |t| (t.agent_state == .running) else false);

@@ -18,7 +18,8 @@ typedef struct {
 extern unsigned int maru_chrome_build(unsigned int width, unsigned int height);
 extern const CQuad *maru_chrome_quads(void);
 extern const char *maru_chrome_last_error(void);
-extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row);
+extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row, unsigned int advance);
+extern void maru_atlas_geometry(unsigned int cell_w, unsigned int cell_h);
 extern unsigned int maru_icon_build(void);
 extern const unsigned char *maru_icon_atlas(void);
 extern unsigned int maru_icon_slot_px(void);
@@ -97,6 +98,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         unsigned int W = head[0].intValue, H = head[1].intValue;
         unsigned int cw = head[2].intValue, ch = head[3].intValue;
         _atlasCols = W / cw; _atlasRows = H / ch;
+        maru_atlas_geometry(cw, ch);
         NSData *gray = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"atlas.gray"]];
         if (gray.length >= W * H) {
             MTLTextureDescriptor *td =
@@ -107,8 +109,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
                            withBytes:gray.bytes bytesPerRow:W];
             for (NSUInteger i = 1; i < lines.count; i++) {
                 NSArray<NSString *> *f = [lines[i] componentsSeparatedByString:@" "];
-                if (f.count < 3) continue;
-                maru_atlas_add(f[0].intValue, f[1].intValue, f[2].intValue);
+                if (f.count < 4) continue;
+                maru_atlas_add(f[0].intValue, f[1].intValue, f[2].intValue, f[3].intValue);
             }
         }
         NSLog(@"MARU_CHROME atlas=%ux%u cols=%u rows=%u", W, H, _atlasCols, _atlasRows);

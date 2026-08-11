@@ -153,41 +153,62 @@ tab panes=1 ... group-start="infra" group-collapsed=1
 
 ```zig
 /// 사이드바 화면 한 줄. host가 projectRows로 tabs+마커+search를 이 리스트로 투영한다.
+/// **이 union은 그룹만의 것이 아니다** — `agent_toggle`·`agent` row는
+/// [사이드바 에이전트 목록](sidebar-agent-list.md)이 소유하며, 여기서는 그룹이 쓰는 둘만 적는다.
 pub const Row = union(enum) {
+    card: struct {
+        tab: usize,          // 원본 self.tabs 인덱스(visibleTab의 일반화)
+        label: []const u8,
+        active: bool,
+        depth: u8 = 0,       // 0=최상위, 1=그룹 안(들여쓰기 = depth * tokens.space.group_indent_px)
+        pin_derived: bool = false,   // 그룹째 고정에서 파생된 멤버 — 카드 📌를 억제한다(§12.8)
+        local_pinned: bool = false,  // 그룹-로컬 pin(§13.6) — 선두 분기가 이 값으로 📌를 낸다
+        lines: u8 = 1,       // 카드가 쓰는 줄 수(이름·브랜치·경로·상태). 높이가 여기서 파생된다
+    },
     group_header: struct {
-        tab: usize,          // 소스 group-start 탭 인덱스 — 헤더 glyph가 self.tabs[tab].group_start를 **live** 읽어(borrowed UAF #8 해소), 접기 토글·rename 타깃 겸용
         collapsed: bool,
         label: []const u8,   // 레거시(이제 tab에서 live 읽어 load-bearing 아님)
         member_count: u16,   // 접힘 시 "▸ name (N)" 표시용 — 이 그룹 **직접 카드 수**(중첩 자식 그룹 안 카드는 제외, SG5-3)
+        tab: usize,          // 소스 group-start 탭 인덱스 — 헤더 glyph가 self.tabs[tab].group_start를 **live** 읽어(borrowed UAF #8 해소), 접기 토글·rename 타깃 겸용
         depth: u8 = 0,       // 정규화 중첩 깊이(SG5-3, 1=최상위·2=중첩·…). 헤더 삼각/이름 glyph를 (depth-1)*group_indent 들여씀(카드는 depth*group_indent). 밴드(view)는 depth 무관 전폭
         has_color: bool = false, // 그룹 색(SG5-2)이 지정됐는가 — **헤더 밴드를 낼지의 유일 스위치**(아래 헤더 밴드 정책). host가 tab.group_color!=0로 채운다
     },
-    card: struct {
-        tab: usize,          // 원본 self.tabs 인덱스(visibleTab의 일반화)
-        active: bool,
-        label: []const u8,
-        depth: u8,           // 0=최상위, 1=그룹 안(들여쓰기 = depth * tokens.space.group_indent_px)
-    },
+    // agent_toggle · agent — sidebar-agent-list.md 소유
 };
 
-// hit-test: **가변 row 높이**(카드=slot_h, 헤더=header_row_h). y↔row를 고정 나눗셈이 아니라 rows를 순회하며
-// 각 row 높이를 누적해 환산한다(순수 함수 — headless 테스트 가능). rows를 받아 종류로 높이를 판별한다.
-pub fn rowHeight(row: Row, card_slot_h: u32, header_row_h: u32) u32; // card→slot_h, group_header→header_row_h
-pub fn slotAt(y_px: f64, header_height_px: u32, rows: []const Row, card_slot_h: u32, header_row_h: u32, scroll_offset_px: u32) ?usize;
-pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, card_slot_h: u32, header_row_h: u32, scroll_offset_px: u32) i64; // 옛 slotTop의 누적판
-pub fn contentHeight(rows: []const Row, card_slot_h: u32, header_row_h: u32) u32; // 스크롤 clamp용(옛 rows.len*slot_h)
-pub fn dragTargetSlot(...) usize;  // 후속(드래그 단계)에서 그룹 경계 인지 확장
+/// 높이 값은 **낱개로 나르지 않고 `Metrics` 하나로 묶는다.** row 종류마다 쓰는 값이 다르고(카드는
+/// 줄 수 × 줄 간격 + 여백, 헤더는 고정 한 줄), 호출부가 늘 때마다 인자가 불어나기 때문이다.
+/// 카드 높이는 `card.lines`에서 파생되므로 "카드 슬롯 높이"라는 단일 상수는 없다.
+pub const Metrics = struct {
+    line_h: u32,        // 한 줄(글자) 높이 = cell 높이
+    line_step: u32,     // 줄과 줄 사이 세로 스텝(line_h + 여유)
+    card_pad_v: u32,    // 카드 위/아래 **각각**의 여백
+    header_row_h: u32,  // 그룹 헤더 row 높이(얇은 한 줄 — 카드 줄 수와 무관한 별도 값)
+    content_pad_v: u32, // 목록 **전체**의 위/아래 여백
+    list_pad_v: u32,    // 에이전트 목록 행의 위/아래 여백(카드보다 촘촘)
+
+    pub fn init(cell_height_px: u32, header_row_h: u32) Metrics;
+};
+
+// hit-test: **가변 row 높이**(카드=줄 수에서 파생, 헤더=header_row_h). y↔row를 고정 나눗셈이 아니라
+// rows를 순회하며 각 row 높이를 누적해 환산한다(순수 함수 — headless 테스트 가능).
+pub fn rowHeight(row: Row, m: Metrics) u32;
+pub fn slotAt(y_px: f64, header_height_px: u32, rows: []const Row, m: Metrics, scroll_offset_px: u32) ?usize;
+pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, m: Metrics, scroll_offset_px: u32) i64; // 옛 slotTop의 누적판
+pub fn contentHeight(rows: []const Row, m: Metrics) u32; // 스크롤 clamp용(옛 rows.len*slot_h)
+pub fn dragTargetSlot(y_px: f64, header_height_px: u32, rows: []const Row, m: Metrics, scroll_offset_px: u32) usize;
 
 // view: rows를 순회하며 header row엔 헤더 밴드+삼각(▾/▸), card row엔 기존 카드 밴드(depth 들여쓰기).
-pub fn view(rows: []const Row, hovered: ?usize, drop: ?usize, p: props.ChromeProps, arena, out) !void;
+pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena, out) !void;
 
 // 그룹 헤더 hit — 헤더 row 전체가 접기 토글 클릭 영역(closeButton과 같은 결의 순수 함수).
 pub fn onGroupHeader(rows: []const Row, row_index: usize) bool;
 ```
 
-**핵심(§5.4 레이아웃 단일 소스 유지) — 가변 row 높이(사용자 결정)**: row는 종류별로 높이가 다르다 — **카드=`slot_h`**
-(≈cell 3.8×, 이름·브랜치·경로 3줄), **그룹 헤더=`header_row_h`**(≈cell 1줄, 촘촘하게). hit-test(`slotAt`/`rowTop`)는
-고정 `y/slot_h` 나눗셈 대신 **rows를 순회하며 각 row 높이를 누적**해 y↔row를 환산한다(여전히 순수 함수라 headless
+**핵심(§5.4 레이아웃 단일 소스 유지) — 가변 row 높이(사용자 결정)**: row는 종류별로 높이가 다르다 — **카드는
+`card.lines`에서 파생**(줄 수 × `line_step` + 위아래 `card_pad_v`, 이름·브랜치·경로·상태), **그룹 헤더=`header_row_h`**
+(≈cell 1줄, 촘촘하게). hit-test(`slotAt`/`rowTop`)는 고정 나눗셈 대신 **rows를 순회하며 각 row 높이를 누적**해
+y↔row를 환산한다(여전히 순수 함수라 headless
 테스트 가능). view도 **같은 누적 레이아웃 함수**(`rowTop`)로 밴드 y를 내야 정합이 유지된다(§5.4 — view와 hit-test가
 한 레이아웃 소스 공유). **베이스/결정**: 브라우저 탭 그룹·VSCode 폴더가 헤더를 얇은 한 줄로 둬 촘촘한 게 접이식 그룹의
 핵심 가치라, 균일 격자(구현 단순)보다 **가변 높이(시각 우선)**를 택했다.
@@ -214,10 +235,11 @@ host(projectRows)가 `tab.group_color!=0`로 채운다(chrome은 role 기반이�
 op 있음, **색 호버 헤더=색 밴드(.tab_hover_bg)와 다른 role(.tab_active_bg) 밴드가 겹침**을 단언; 색 유지는 `MARU_FORCE_GROUP`
 (무색: 밴드 없는 깔끔한 헤더)·`MARU_FORCE_GROUP_COLOR`(파랑 밴드 tint 유지) 제품 스크린샷으로 확인.)
 
-**메트릭 출처(SG3b에서 확정)**: `card_slot_h` = 기존 `props.metrics.sidebar_slot_height_px`(그대로 재사용). `header_row_h` =
-**신규 메트릭** — 헤더 한 줄이므로 `≈ cell_height_px`(+세로 패딩 약간)로 두고 `CellMetrics`에 추가한다(platform이 채움).
-`group_indent_px`(card.depth 들여쓰기 폭) = **신규 spacing 토큰**(`tokens.space`), rich에서 ≈1ch. 셋 다 hit-test·view가
-공유하는 단일 값이라, 값이 흩어지지 않게 한 곳(props/tokens)에서만 정의한다(§5.4 레이아웃 단일 소스).
+**메트릭 출처**: 높이 값은 `Metrics.init(cell_height_px, header_row_h)`가 cell 높이에서 파생한다 — 줄 스텝은
+`cell_height_px + max(1, 15%)`, 카드 여백·목록 여백도 같은 cell 높이의 비율이다. `header_row_h`만 platform이 따로
+넘긴다(헤더는 카드 줄 수와 무관한 얇은 한 줄이라 파생 대상이 아니다). `group_indent_px`(card.depth 들여쓰기 폭)는
+spacing 토큰(`tokens.space`)이고 rich에서 ≈1ch다. **낱개 상수를 여기저기 두지 않고 `Metrics` 하나가 나르는 것이
+핵심**이다 — hit-test와 view가 같은 값을 봐야 "보이는 곳 = 눌리는 곳"이 유지된다(§5.4 레이아웃 단일 소스).
 
 **파급 — glyph 세로 위치 인코딩(§10 리스크)**: 현재 `coretext_frame_builder.sidebarGlyphRow`의 `slot*32` 인코딩은 `.m`
 렌더러가 `slot*slot_h`로 디코드해 **균일 높이를 가정**한다(단일 출처). 가변 높이면 이 곱셈이 깨지므로 SG3에서 `.m`이
@@ -302,8 +324,8 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
 
 - **컴포넌트 단위(헤드리스)**: `projectRows`가 순수 함수라(입력 tabs/마커/search → Row[]) **헤드리스 단언**이 1급이다:
   접힘 시 카드 row 제외·헤더 member_count·검색 시 접힘 무시·소속 파생(위 마커)·depth·**빈 그룹 규칙**(접힘=헤더만 뜸 /
-  검색 매치 0=헤더째 사라짐). 가변 높이 hit-test(`slotAt`/`rowTop`/`contentHeight`)를 **헤더 섞인 row 배열 + 서로 다른
-  card_slot_h/header_row_h**로 확장해 **누적 y ↔ row** 정합을 단언(카드만이면 누적=균일이라 SG3a 동작 보존도 같은 테스트로).
+  검색 매치 0=헤더째 사라짐). 가변 높이 hit-test(`slotAt`/`rowTop`/`contentHeight`)를 **헤더 섞인 row 배열 + 카드 줄 수가
+  서로 다른 `Metrics`**로 확장해 **누적 y ↔ row** 정합을 단언(카드가 모두 같은 줄 수면 누적=균일이라 동작 보존도 같은 테스트로).
 - **직렬화 round-trip**: `group-start`·`group-collapsed`가 serialize→parse→serialize 고정점(workspace.zig 기존 테스트 확장).
   하위호환: 두 키 없는 옛 파일이 flat으로 정상 복원(기존 "key-addressed 하위호환" 테스트 확장).
 - **E2E/스냅샷**: 접힌/펼친 사이드바 셀 스냅샷. 헤더 glyph(삼각+이름)·들여쓰기는 macOS 제품 스크린샷으로 고정

@@ -1671,7 +1671,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b3는 기존 receipt schema를 바꾸지 않고 `runtime_lifetime_owner.zig`의 별도 final-address
    `RuntimeSettlementLease{self_addr:u64,lifecycle_raw:u8,reserved:[7]u8,operation:RuntimeOperationLease,
    ranges_digest:[32]u8,pristine_digest:[32]u8,preflight_proof_seal_digest:[32]u8,lease_seal:[32]u8}`로 감싼다.
-   lifecycle은 pristine=0/prepared=1/consumed=2다. `lease_seal`은
+   lifecycle은 pristine=0/prepared=1/admitted=2/consumed=3이다. `lease_seal`은
    `maru.runtime-settlement-lease.v1` domain에서 exact self address/extent/alignment, prepared lifecycle과 embedded full
    `RuntimeOperationIdentity`와 세 preflight digest를 봉인한다. acquire는 final destination에 embedded receipt를 직접 mint하고 lease seal 뒤
    lifecycle prepared를 마지막에 게시한다. validator는 original self address와 active owner row, embedded operation seal,
@@ -1679,9 +1679,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    검증된 wrapper에서만 발급하는 pointer-free `RuntimeSettlementLeaseBinding{lease_addr:u64,lifetime_owner_addr:u64,
    operation_identity:RuntimeOperationIdentity,ranges_digest:[32]u8,pristine_digest:[32]u8,
    preflight_proof_seal_digest:[32]u8,lease_seal_digest:[32]u8,binding_seal:[32]u8}`는 복사 가능한 비권위 projection이다. owner와 original
-   final-address lease의 active/self/full-seal 검증과 함께 사용할 때만 의미가 있고 raw constructor/storage/getter는 0이다.
+   final-address lease의 active/self/full-seal 및 exact lifecycle 검증과 함께 사용할 때만 의미가 있고 raw constructor/storage/getter는 0이다.
    acquire가 wrapper prepared-last publication 직후 callback/failure 0의 suffix에서 이 projection과 keyed binding seal을 계산해
-   값으로 반환한다. Attachment/Pending preflight는 binding seal과 process/thread, wrapper/operation/proof digest를 검증한 뒤 같은
+   값으로 반환한다. Attachment/Pending preflight는 Runtime owner가 original prepared wrapper와 binding equality를 검증한 뒤 같은
+   digest를 permit에 봉인하고, arm은 owner가 admitted wrapper와 binding equality를 다시 검증하며
    digest를 permit에 봉인하며 caller가 재구성한 raw scalar를 받지 않는다.
    RemoteRuntime은 owner thread 전용이라 cross-thread product access는 기존 계약대로 거부한다. b5 `CloseAuthority`는 이 같은
    `RuntimeLifetimeOwner`의 이미 예약된 close/closing/reader fields를 활성화하며 schema를 교체하거나 두 번째 lifetime registry를 만들지 않는다.
@@ -2044,7 +2045,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    authority가 아니다. exact pending owner incarnation/attempt/event generation은 별도 Pending owner seal과 borrow preflight가
    소유하고 lease schema에 복제하지 않는다. close kind의 enum 호환 자리는 보존하지만 실제 close acquire와
    close-vs-settlement product 검증은 b5가 소유한다.
-   `PendingEventOwner`는 그 lease를 저장하거나 복제하지 않고 자기 lifecycle의 `prepared -> settling` 전이만
+   `PendingEventOwner`는 그 lease를 저장하거나 복제하지 않고 Runtime owner의 admitted 검증 아래 자기 lifecycle의 `prepared -> settling` 전이만
    소유한다. transaction은 persistent `*_done` boolean, raw correlation/effect mirror, registry entry pointer를
    만들지 않으며 한 호출의 stack-local opaque preflight/continuation만 사용한다.
 
@@ -2074,16 +2075,64 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b4 admission까지 보존한다.
 
    effect executor는 Runtime semantic type을 모르는 neutral closed action permit을 ClientSlot이 preflight하고 no-fail
-   commit evidence를 반환한다. permit은 `none | poison | revoke_clean | revoke_cancel |
+   commit evidence를 반환한다. `ClientSlot.deriveCanonicalEffectPlan`은 sealed original `EffectRequest`, exact correlation과
+   callback 전 canonical Client PRE state에서 plan을 **한 번만** 산출한다. caller가 action/outcome을 고르는 입력은 0이고,
+   commit 뒤 terminal 상태를 다시 분류하지 않는다. neutral leaf의 `validCanonicalEffectPlanShape`는 Client 타입을 import하지 않고
+   raw tag·closed structural matrix만 검증하며, `ClientSlot.validateCanonicalEffectPoststate`가 sealed plan과 실제 POST state를
+   exact 비교한다. 두 검증을 모두 통과하지 않은 context-free evidence validator의 product publication caller는 0이다.
+   permit은 `none | poison | revoke_clean | revoke_cancel |
    revoke_partial_poison | terminal_cleanup`뿐이고, commit evidence만
    `none_confirmed | poison_confirmed | revoke_clean | revoke_cancelled | revoke_partial_poisoned |
    terminal_cleanup_confirmed`가 될 수 있으며 caller가 outcome을 고르지 않는다. revoke의 outbound
    offset 0은 exact free 1·wire 0, `0 < offset < len`은 fd detach-before-close 뒤 first reason
    `outbound_partial_write` poison, pending descriptor가 없으면 clean이다. 제품 write path는 `offset == len` 즉시
    descriptor를 free/tombstone하므로 live descriptor의 canonical 범위는 `offset < len`이다. 따라서 non-null descriptor의
-   `offset == len` 또는 `offset > len`은 local structural corruption이며 clean/cancel로 숨기지 않는다. terminal plan은 original sealed
-   request를 바꾸지 않고 기존 first reason을 보존하며 해당 event의 exact-own cleanup만 수행한다. sibling scan/free와
-   poison retry owner는 0이다. 모든 allocator/callback/descriptor disposition을 effect보다 먼저 preflight하고 b3의 allocation
+   `offset == len` 또는 `offset > len`은 local structural corruption이며 clean/cancel로 숨기지 않는다.
+
+   canonical plan/evidence는 optional first reason을 `{present_raw:u8,reason_raw:u8}`로 표현한다. absent는 raw 0만,
+   present는 실제 `ConnectionReason` enum tag만 허용하므로 `null`과 ordinal 0 `connection_eof`를 혼동하지 않는다.
+   `unusable_before/after`도 closed 0/1로 봉인한다. `none|revoke_clean|revoke_cancel`은 `0 -> 0`,
+   `poison|revoke_partial_poison`은 `0 -> 1`, `terminal_cleanup`은 `1 -> 1`이다. before reason이 present면 poison·partial·terminal
+   모두 exact preserve하고, absent poison만 requested reason을, absent partial만 `outbound_partial_write`를 최초 reason으로 latch한다.
+   terminal은 canonical invariant상 present reason만 허용한다.
+
+   outbound는 `OutboundRelation{absent,target,sibling}`과
+   `OutboundDisposition{absent,preserved,freed,cancelled,partial_poisoned}`를 따로 봉인한다. descriptor digest는 stream id,
+   frame address/length/offset과 allocator provenance를 포함하며 digest만 보고 relation을 추측하지 않는다. closed matrix는 다음과 같다.
+
+   | action | PRE outbound | reason/unusable | fd | disposition / allocator cleanup |
+   | --- | --- | --- | --- | --- |
+   | `none` | absent, target 또는 sibling | absent, `0 -> 0` | open exact preserve | absent 또는 byte/address/offset exact preserved, 0 |
+   | `poison` | absent, target 또는 sibling | preserve existing 또는 requested latch, `0 -> 1` | open → detached | absent 0 또는 connection-owned descriptor freed 1 |
+   | `revoke_clean` | absent 또는 sibling | absent, `0 -> 0` | open exact preserve | absent 0 또는 sibling exact preserved 0; target는 금지 |
+   | `revoke_cancel` | target, `offset == 0 < len` | absent, `0 -> 0` | open exact preserve | cancelled, 1; sibling은 금지 |
+   | `revoke_partial_poison` | target, `0 < offset < len` | preserve existing 또는 partial reason latch, `0 -> 1` | open → detached | partial_poisoned, 1; sibling은 금지 |
+   | `terminal_cleanup` | absent, target 또는 sibling | present exact preserve, `1 -> 1` | `-1` 유지 또는 deferred open → detached | absent 0 또는 connection-owned descriptor relation 불문 freed 1 |
+
+   `terminal_cleanup` 권위는 event-owned buffer가 아니라 preflight가 봉인한 exact canonical Client connection owner에서 온다.
+   따라서 connection-wide `pending_outbound`는 target/sibling relation과 무관하게 회수하지만 event sibling payload·registry owner는
+   변경하지 않는다. `cleanup_count`는 allocator free callback 횟수만 0/1로 세며 fd close는 포함하지 않는다.
+   `FdDisposition{preserved,already_detached,detached_close_attempted}`와 `close_attempt_count:0|1`가 fd owner-graph 정산을
+   별도로 기록한다. close 성공을 주장하지 않고, canonical fd를 `-1`로 detach한 뒤 같은 fd 번호를 retry하지 않는 direct close
+   attempt만 exact once 증명한다.
+
+   terminal/poison suffix의 고정 순서는 final validation → first-reason latch/preserve·unusable publication·outbound stack move와
+   source tombstone·fd detach의 callback-free store-only cluster → direct no-retry close attempt → allocator free callback →
+   pointer-free remaining owner/lease/registry proof 재검증 → evidence publication이다. 첫 callback 전에 canonical semantic POST state,
+   `fd == -1`, `pending_outbound == null`이 모두 관측 가능해야 한다. none/revoke의 preserve 행은 이 store cluster에서 해당 field를
+   변경하지 않는다. ordered `cleanup_completion_digest`는 permit seal, action/outcome, reason/unusable/fd 전후, relation과 descriptor
+   preimage/disposition, close/allocator role 순서와 exact count를 결속하며 callback 없는 행도 transaction-bound empty schedule을
+   생성한다. 별도 close-result/fd-owner/provenance digest는 permit과 중복되므로 만들지 않고, 실제 callback strategy를 주입하는 경우에만
+   기존 typed callback provenance에 close role을 추가한다.
+
+   confirmed effect digest는 authority/evidence seal을 제외한 위 canonical POST transcript와 ordered cleanup completion을 봉인한다.
+   `commit_authority_digest = H(domain, permit seal, admitted binding seal, lease seal, exact evidence destination
+   address/extent/alignment/pristine digest, confirmed effect digest)`를 계산하고, 마지막에 evidence seal이 commit authority를 포함한
+   전체 evidence를 봉인한다. raw evidence validator는 syntax/self-seal만 검사하며 Pending publication은 admitted owner·original
+   lease·binding·permit과 actual Client POST state를 받는 contextual validator만 호출한다. 이 순서로 digest 순환과 permit/evidence
+   splice를 막는다.
+
+   모든 allocator/callback/descriptor disposition을 effect보다 먼저 preflight하고 b3의 allocation
    callsite는 0이다. 첫 durable mutation 뒤에는 allocation, fallible lookup, callback admission, syscall retry와 recoverable
    return이 0인 suffix만 허용한다. cleanup callback이 필요한 descriptor는 callback-inaccessible stack owner로 move하고
    canonical source를 먼저 tombstone한 뒤 callback을 실행한다. callback 뒤 Pending owner, settlement lease, prepared registry permit과
@@ -2099,12 +2148,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `preflightSettlementScratchPristine(range_proof, ...)` →
    `lease_binding = acquireSettlement(lease_out, preflight_proof)` → attachment의 단일
    `preflightPendingSettlementTransport(... effect_permit, release_permit)` paired all-or-none publication →
-   `pending_owner.preflightSettlement(... pending_permit)` → Pending arm/admission 순서다. Attachment 내부의 Client effect/registry
+   `pending_owner.preflightSettlement(... pending_permit)` → paired Pending arm 내부의 lifetime lease admission → Pending lifecycle publish 순서다. Attachment 내부의 Client effect/registry
    release preflight는 private scratch일 뿐 top-level permit producer가 아니며, 어느 내부 preflight가 실패해도 scratch discard와
    두 permit/output pristine을 보장한다. 세 permit은 lease identity에 봉인된다.
    acquire `Busy`는 모든 mutation 0이다. final preflight의 stale/ordinary race는 effect/registry/Pending mutation 0으로 lease를
-   exact abort하고 `Busy|InvalidOwner`를 반환하며 checked operation incarnation burn만 보존한다. Pending
-   `prepared -> settling` arm이 admission linearization point다. 그 뒤 no-fail suffix는 Client effect commit/callback → Registry
+   exact abort하고 `Busy|InvalidOwner`를 반환하며 checked operation incarnation burn만 보존한다.
+   `PendingEventOwner.armSettlementNoFail`은 양쪽 prepared 상태를 먼저 검증한 뒤 분기·반환 없는 단일 suffix에서
+   `RuntimeSettlementLease prepared -> admitted`를 admission linearization point로 게시하고 바로 Pending
+   `prepared -> settling`을 게시한다. low-level lease admit의 이 함수 밖 product caller는 0이다. 그 뒤 no-fail suffix는 Client effect commit/callback → Registry
    `preparation_pending -> releasing -> idle` commit과 `RegistryReleaseCompletion` 산출 → Pending receipt
    `live -> consumed`와 sealed disposition 동시 publish → lifetime lease consume 순서다. effect callback이 관측할 수 있는
    canonical 상태는 settlement lease active, Pending settling, registry preparation_pending와 ordering blocker active다.
@@ -2119,8 +2170,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    padding은 wire/ABI가 아니므로 normative하지 않고 code-private다. 모든 permit/evidence는
    `{self_addr,lifecycle_raw,consumed_raw,pid,process_nonce,thread_id,authority_digest,seal}` 공통 header를 선언 순서대로
    갖는다. `PreparedEffectPermit`은 owner incarnation/attempt/correlation/prepared-effect digest,
-   ClientSlot/node/binding/transport incarnation, action tag, first-reason 전후 기대값, fd/outbound descriptor와 cleanup callback
-   provenance digest, exact `EffectCommitEvidence` destination address/extent/alignment/pristine digest를 추가한다.
+   ClientSlot/node/binding/transport incarnation, sealed original effect request, action tag, optional first-reason 전후 projection,
+   unusable 전후, fd 전후와 disposition/close-attempt count, outbound relation/descriptor/disposition와 allocator cleanup schedule,
+   exact `EffectCommitEvidence` destination address/extent/alignment/pristine digest를 추가한다.
    `PreparedRegistryReleasePermit`은 registry/binding/event incarnation과 stream/event generation, final EventOwner address,
    ordering class/blocker 기대값, exact `RegistryReleaseCompletion` destination identity/pristine digest를 추가한다.
    `PreparedPendingSettlementPermit`은 Pending/source-lease/release-receipt incarnation과 inline
@@ -2128,8 +2180,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    세 permit 모두 같은 `scratch_ranges_digest`, `scratch_pristine_digest`, `preflight_proof_seal_digest`를 named field로 보존한다.
    `RegistryReleaseCompletion`은 pointer/allocator/callback 0인 final-address output으로 registry/binding/event incarnation, stream/event generation,
    final EventOwner address, consumed blocker count와 completion seal을 갖는다. `EffectCommitEvidence`는 confirmed outcome tag,
-   first reason before/after, fd before/after, outbound descriptor disposition, cleanup count, callback post-proof digest와 authority
-   digest를 갖는 final-address one-shot output이다. `SettlementDisposition`은 위 Pending identity와
+   optional first reason 전후, unusable 전후, fd 전후/disposition/close-attempt count, outbound relation/descriptor disposition,
+   allocator cleanup count, ordered cleanup completion digest와 commit authority digest를 갖는 final-address one-shot output이다.
+   context-free validator는 이 evidence의 syntax/self-seal만 증명하며 semantic publication은 sealed plan과 실제 Client POST state를
+   함께 받는 ClientSlot contextual validator만 소유한다. `SettlementDisposition`은 위 Pending identity와
    confirmed outcome tag, effect evidence digest, registry completion digest, source/pending receipt consumed digest와 disposition
    seal을 갖는다. opaque consumer 외 raw field getter와 caller constructor는 0이고 copied/moved/spliced/replayed/double-consumed
    authority는 mutation 0 또는 admission 뒤 proof-loss로 닫는다.
@@ -2168,29 +2222,51 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      release_out: *const RegistryReleaseCompletion, effect_permit: *const PreparedEffectPermit,
      release_permit: *const PreparedRegistryReleasePermit,
      pending_permit: *const PreparedPendingSettlementPermit,
-     pending_owner: *const PendingEventOwner) error{InvalidOwner}!SettlementScratchPreflightProof`
+     lifetime_owner: *const RuntimeLifetimeOwner, pending_owner: *const PendingEventOwner,
+     attachment: *const GenerationAttachment) error{InvalidOwner}!SettlementScratchPreflightProof`
+
+   pristine digest transcript는 각 record마다 고정 `role_tag`, `schema_version`, `extent`, `alignment`,
+   `record length`와 타입별 명시적 field allowlist, padding-free field-by-field canonical default value digest를 순서대로 기록한다.
+   domain과 role은 NUL 또는 length prefix로 구분한다. 실제 record는 padding byte를 읽지 않고
+   semantic default와 먼저 비교한 뒤 같은 `T{}`의 모든 선언 field 이름·canonical type identity·값을 role별 digest에 기록한다. 따라서 compiler padding이나
+   선언 순서 reflection은 digest 입력이 아니며, field 추가·삭제는 allowlist count compile-time gate를 갱신하지 않으면 실패한다.
    - `RuntimeLifetimeOwner.acquireSettlement(self: *RuntimeLifetimeOwner,
      out: *RuntimeSettlementLease,
      preflight_proof: SettlementScratchPreflightProof) error{Busy,InvalidOwner}!RuntimeSettlementLeaseBinding`
+   - `RuntimeLifetimeOwner.validatePreparedSettlementBinding(self: *const RuntimeLifetimeOwner,
+     lease: *const RuntimeSettlementLease, binding: RuntimeSettlementLeaseBinding) bool`
+   - `RuntimeLifetimeOwner.admitSettlementNoFail(self: *RuntimeLifetimeOwner,
+     lease: *RuntimeSettlementLease, binding: RuntimeSettlementLeaseBinding) void`
+   - `RuntimeLifetimeOwner.validateAdmittedSettlementBinding(self: *const RuntimeLifetimeOwner,
+     lease: *const RuntimeSettlementLease, binding: RuntimeSettlementLeaseBinding) bool`
    - `RuntimeLifetimeOwner.abortSettlementPreAdmissionNoFail(self: *RuntimeLifetimeOwner,
      lease: *RuntimeSettlementLease) void`
    - `RuntimeLifetimeOwner.consumeSettlementNoFail(self: *RuntimeLifetimeOwner,
      lease: *RuntimeSettlementLease) void`
    - `GenerationAttachment.preflightPendingSettlementTransport(self: *GenerationAttachment, correlation: EventCorrelation,
-     expected_effect: EffectRequest, lease: RuntimeSettlementLeaseBinding, effect_out: *EffectCommitEvidence,
+     expected_effect: EffectRequest, lifetime_owner: *const RuntimeLifetimeOwner,
+     lease: *const RuntimeSettlementLease, binding: RuntimeSettlementLeaseBinding, effect_out: *EffectCommitEvidence,
      release_out: *RegistryReleaseCompletion, effect_permit: *PreparedEffectPermit,
      release_permit: *PreparedRegistryReleasePermit) error{Busy,InvalidOwner}!void`
    - `GenerationAttachment.abortPendingSettlementTransportPreAdmissionNoFail(self: *GenerationAttachment,
      effect_permit: *PreparedEffectPermit, release_permit: *PreparedRegistryReleasePermit) void`
-   - `GenerationAttachment.commitPendingEffectNoFail(self: *GenerationAttachment, permit: *PreparedEffectPermit,
+   - `GenerationAttachment.commitPendingEffectNoFail(self: *GenerationAttachment,
+     lifetime_owner: *const RuntimeLifetimeOwner, lease: *const RuntimeSettlementLease,
+     binding: RuntimeSettlementLeaseBinding, permit: *PreparedEffectPermit,
      out: *EffectCommitEvidence) void`
-   - `GenerationAttachment.commitPendingReleaseNoFail(self: *GenerationAttachment, permit: *PreparedRegistryReleasePermit,
+   - `GenerationAttachment.commitPendingReleaseNoFail(self: *GenerationAttachment,
+     lifetime_owner: *const RuntimeLifetimeOwner, lease: *const RuntimeSettlementLease,
+     binding: RuntimeSettlementLeaseBinding, permit: *PreparedRegistryReleasePermit,
      out: *RegistryReleaseCompletion) void`
-   - `PendingEventOwner.preflightSettlement(self: *PendingEventOwner, input: PendingSettlementInput,
+   - `PendingEventOwner.preflightSettlement(self: *PendingEventOwner, lifetime_owner: *const RuntimeLifetimeOwner,
+     lease: *const RuntimeSettlementLease, input: PendingSettlementInput,
      out: *PreparedPendingSettlementPermit) error{Busy,InvalidOwner}!void`
-   - `PendingEventOwner.armSettlementNoFail(self: *PendingEventOwner, permit: *PreparedPendingSettlementPermit,
-     lease: RuntimeSettlementLeaseBinding) void`
-   - `PendingEventOwner.publishSettlementNoFail(self: *PendingEventOwner, permit: *PreparedPendingSettlementPermit,
+   - `PendingEventOwner.armSettlementNoFail(self: *PendingEventOwner, lifetime_owner: *RuntimeLifetimeOwner,
+     lease: *RuntimeSettlementLease, permit: *PreparedPendingSettlementPermit,
+     binding: RuntimeSettlementLeaseBinding) void`
+   - `PendingEventOwner.publishSettlementNoFail(self: *PendingEventOwner,
+     lifetime_owner: *const RuntimeLifetimeOwner, lease: *const RuntimeSettlementLease,
+     binding: RuntimeSettlementLeaseBinding, permit: *PreparedPendingSettlementPermit,
      effect: *EffectCommitEvidence, release: *RegistryReleaseCompletion) void`
 
    Attachment facade가 private transport owner query에서 ClientSlot/node/binding/transport identity와 registry
@@ -2200,6 +2276,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    두 permit 뒤 Pending final preflight가 실패하면 attachment abort가 두 permit을 exact consumed/tombstone한 다음 lifetime lease를
    abort한다. 이 pre-admission abort의 Client/registry/effect mutation은 0이고 post-admission caller는 0이다. attachment final
    address/incarnation은 두 permit seal에 들어가며 commit은 `self`와 exact permit owner를 검증한다.
+   Runtime lifetime 타입은 Registry leaf로 내려가지 않는다. Attachment/ClientSlot commit facade가 original admitted
+   owner+lease+binding을 재검증한 직후 분기·callback 없는 suffix에서 Registry commit을 호출하며, Registry preflight/commit의
+   session-host product caller는 이 단일 검증 경로 exact 1이다. Registry permit의 lease digest는 subordinate proof이지 standalone
+   admission authority가 아니다.
    `preflightSettlementScratchRanges`는 각 인자의 checked integer address/extent/alignment만 보고 dereference 0으로
    lease/effect/release evidence와 세 permit의 pairwise disjoint, Pending inline disposition canonical containment,
    lifetime/Pending/attachment protected range 관계를 검증한다. 성공 proof는 process-domain seal을 가진 pointer-free value로
@@ -2218,10 +2298,17 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    correlation/effect/ClientSlot-node-binding-transport identity,
    Pending release 공통 registry projection, Pending owner/incarnation/attempt/source lease/release receipt와 exact
    `RuntimeSettlementLeaseBinding`의 wrapper address/operation identity/세 proof digest/lease seal digest만
-   가진다. settlement lease output도 acquire 전에 pristine final address/extent/alignment/non-alias를 검증하고 별도
+   가진다. 이 binding은 단독 권위가 아니다. 모든 Attachment/Pending preflight와 arm은 exact
+   `RuntimeLifetimeOwner`와 live `RuntimeSettlementLease`를 함께 받아 owner의 prepared/admitted validator로 binding equality를
+   재확인한다. contract leaf의 binding seal은 문법 검증용일 뿐 admission authority가 아니고, Runtime owner 없이 binding만
+   검증만으로 admission을 결정하는 product/preflight caller는 0이다. subordinate leaf가 이미 검증된 binding의 문법·digest를
+   다시 확인해 permit에 결속하는 것은 admission 결정이 아니다. settlement lease output도 acquire 전에 pristine final address/extent/alignment/non-alias를 검증하고 별도
    `RuntimeSettlementLease.lease_seal`에 destination identity를 결속한다. `acquireSettlement` 실패와 세 final preflight 실패만 recoverable하다.
-   abort는 Pending arm 전 exact 한 경로,
-   consume은 publication 뒤 exact 한 경로이고 post-admission abort/ordinary lifetime `consume|abort` 우회 caller는 0이다.
+   lease lifecycle은 `pristine=0/prepared=1/admitted=2/consumed=3`의 closed 상태다. abort는 `prepared`에서만 exact 한 경로,
+   admit은 모든 final preflight 뒤 exact 한 경로, consume은 publication 뒤 `admitted`에서만 exact 한 경로다.
+   `admitted` lease에 abort를 시도하거나 `prepared` lease를 consume하는 것은 recoverable return이 아니라 proof loss로 닫고,
+   effect commit/callback과 Pending publication은 original admitted owner+lease+binding을 다시 검증한다.
+   post-admission abort/ordinary lifetime `consume|abort` 우회 caller는 0이다.
 
    세 output과 세 permit은 final preflight에서 exact address/extent/alignment/pristine bytes를 검증하고 output identity/digest를
    해당 permit seal과 settlement lease identity에 결속한다. `EffectCommitEvidence`와 `RegistryReleaseCompletion`은 서로 및
@@ -2300,7 +2387,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    적용/기존 terminal 여부는 내부 oracle만 구분하고 facade 성공 postcondition은 하나로 합친다. preflight `Busy`는 effect, owner,
    queue, pending bytes를 모두 보존하고 다음 pump에서 whole settlement를 재시도한다. admitted 뒤에는 poison/fence confirmation과
    event release가 분리되지 않는다. Client가 이미 terminal이면 caller의 sealed effect request를 바꾸지 않고 내부
-   `terminal_cleanup_preserve_first_reason` plan으로 정규화해 caller effect 0, 현재 target exact-own cleanup만 수행하고 sibling은 보존한다.
+   `terminal_cleanup_preserve_first_reason` plan으로 정규화해 caller effect 0, exact Client connection-owned pending outbound를
+   relation과 무관하게 정산하고 event sibling payload·registry owner는 보존한다.
 
    `busy`는 effect pre-admission 결과이며 callback, syscall, role/poison/fd disposition, event owner와 queue의 durable mutation이 모두 0이다.
    canonical registry/node 검증을 위한 shared receipt는 exact begin/end로 균형 정산될 수 있지만 effect execution lease는 얻지 않는다.

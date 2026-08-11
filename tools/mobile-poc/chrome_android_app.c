@@ -15,6 +15,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
+
+#define PACE_WARMUP 20
+#define PACE_SAMPLES 60
 
 #define TAG "MaruChrome"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -66,6 +70,10 @@ static struct {
     int inset_top, inset_bottom;
     int ready;
     int frames;
+    double last_ms;
+    double pace_ms[PACE_SAMPLES];
+    int n_pace;
+    int pace_done;
 } g;
 
 static uint8_t *g_glyph_px = NULL;
@@ -450,6 +458,25 @@ static void drawFrame(void) {
     vkQueuePresentKHR(g.queue, &pi);
     vkWaitForFences(g.dev, 1, &g.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(g.dev, 1, &g.fence);
+
+    // **present 페이싱은 재서 판정한다.** FIFO 모드를 골랐다는 사실은 근거가 못 된다 —
+    // 실제 프레젠트 간격의 중앙값을 봐야 vsync 에 물렸는지 알 수 있다. iOS 쪽도 같은
+    // 기준(표시 클럭 간격의 중앙값)으로 판정한다.
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+    if (g.frames >= PACE_WARMUP && g.last_ms > 0 && g.n_pace < PACE_SAMPLES)
+        g.pace_ms[g.n_pace++] = now - g.last_ms;
+    g.last_ms = now;
+    if (g.n_pace == PACE_SAMPLES && !g.pace_done) {
+        g.pace_done = 1;
+        for (int i = 1; i < PACE_SAMPLES; i++) {
+            double k = g.pace_ms[i]; int j = i - 1;
+            while (j >= 0 && g.pace_ms[j] > k) { g.pace_ms[j + 1] = g.pace_ms[j]; j--; }
+            g.pace_ms[j + 1] = k;
+        }
+        LOGI("MARU_PACE fifo_median_ms=%.2f n=%d", g.pace_ms[PACE_SAMPLES / 2], PACE_SAMPLES);
+    }
     g.frames++;
 }
 

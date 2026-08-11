@@ -935,20 +935,24 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
     const retry_after_switch = self.file_tree_auto_follow_reveal_pending and same_as_followed;
     self.file_tree_auto_follow_reveal_pending = false;
     if (!retry_after_switch and same_as_followed) return;
-    const owned = self.allocator.dupe(u8, cwd) catch return;
-    const reveal = self.file_tree.revealDirectory(owned) catch {
-        self.allocator.free(owned);
-        return; // OOM이면 이전 CWD를 보존해 다음 tick에 재시도한다.
-    };
+    // **여기서 dupe하지 않는다.** `revealDirectory`는 자기 몫을 따로 복사하고, 우리 복사본은 아래에서
+    // `followed_cwd`로 **보관할 때만** 필요하다. 미리 뜨면 전환을 미루는 상태(소스 컨트롤 뷰를 보는 동안 등)가
+    // 이어질 때 프레임마다 alloc+free가 돌아, tick의 할당 예산을 이유 없이 갉는다.
+    const reveal = self.file_tree.revealDirectory(cwd) catch return; // OOM이면 다음 tick에 재시도한다
     // **root 밖이면 root를 갈아끼운다**(2026-08-11 사용자 결정 — file-explorer.md §1). 이전에는 여기서 아무것도
     // 하지 않았는데, 소스 컨트롤 뷰가 어느 저장소로든 따라가게 되면서 두 뷰가 서로 다른 곳을 가리키게 됐다.
     if (reveal == .rejected and !retry_after_switch and !followRootSwitch(self, cwd)) {
         // 검증 슬롯이 차 있어 **못 걸었다**. 여기서 `followed_cwd`를 갱신하면 이 cwd는 "따라간 것"으로
         // 표시돼 다음 `cd` 전까지 영영 재시도되지 않는다 — 시작 직후 복원 검증이 도는 동안 첫 따라가기가
         // 통째로 사라지는 것이 그 경로다. 갱신하지 않고 두면 다음 tick이 자연히 다시 시도한다.
-        self.allocator.free(owned);
+        //
+        // **scroll pending은 끄고 나간다.** 아래 `switch (reveal)`의 `.rejected` 갈래가 하던 일이라, 그냥
+        // 돌아가면 직전 reveal이 남긴 pending이 살아 있어 지금 cwd와 무관한 **옛 대상으로 스크롤**한다.
+        self.file_tree_follow_scroll_pending = false;
         return;
     }
+    // 여기서부터는 이 cwd를 "따라간 것"으로 기록한다 — 그때 처음 복사한다.
+    const owned = self.allocator.dupe(u8, cwd) catch return;
     if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
     self.file_tree_followed_cwd = owned;
     // root 밖이면 Tree의 이전 file-open reveal intent는 그대로 두되, 그것을 새 CWD의 scroll 대상으로
@@ -975,6 +979,11 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
 /// **in-flight면 건너뛴다.** 검증은 비동기라 tick마다 다시 밀어 넣으면 요청이 쌓인다. 호출자가 `followed_cwd`를
 /// 이미 갱신했으므로 같은 cwd로는 다시 오지 않고, 다음 `cd`가 자연히 재시도가 된다.
 fn followRootSwitch(self: *AppSession, cwd: []const u8) bool {
+    // **탐색기를 보고 있을 때만 바꾼다.** 도크는 보이지만 view가 소스 컨트롤·에이전트면 트리는 화면에
+    // 없다. 그때 root를 갈면 **보이지도 않는 트리**의 접힘·스크롤을 버리고 `dock-tree-roots` 영속까지
+    // 덮는다 — 사용자가 탐색기를 열어 본 적도 없는데. reveal은 비파괴적이라 상관없었지만 교체는 다르다.
+    // 여기서 false를 돌려주면 `followed_cwd`가 갱신되지 않아, 탐색기로 돌아온 tick이 자연히 전환한다.
+    if (self.dock.view != .explorer) return false;
     // **사용자 picker와 같은 busy 판정을 쓴다.** 손으로 세 조건만 적었더니 파일 mutation(이름 변경·삭제·
     // 휴지통 롤백·수동 복구)이 빠져, 그 도중에도 root가 갈릴 수 있었다 — 문서가 "그때는 replace/add/remove
     // commit을 거부한다"고 정한 바로 그 상황이다(file-explorer.md §2). 판정을 재구현하지 않고 그대로 쓴다.

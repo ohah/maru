@@ -33,7 +33,8 @@ test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를
     );
 
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn advancePendingEventForClose("));
-    try std.testing.expectEqual(@as(usize, 1), count(backend, ".advancePendingEventForClose()"));
+    // frame close sweep, detach-preserve graph-last, end-all target cursor만 prepared Pending을 제품 경로에서 소비한다.
+    try std.testing.expectEqual(@as(usize, 3), count(backend, ".advancePendingEventForClose()"));
     try std.testing.expectEqual(@as(usize, 0), count(app, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn maintenanceEventTick("));
     try std.testing.expectEqual(@as(usize, 1), count(app, "backend.maintenanceEventTick()"));
@@ -58,7 +59,7 @@ test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를
     );
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"MARU_C3B4_PROOF_LOSS\""));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "std.c.getenv(\"MARU_C3B4_PROOF_LOSS\")"));
-    try std.testing.expectEqual(@as(usize, 2), count(build, "fresh-artifact-v1") + count(runtime, "fresh-artifact-v1"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "fresh-artifact-v1"));
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

@@ -29,6 +29,10 @@ const pending_event_owner = @import("pending_event_owner.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const host_pool_mod = @import("host_pool.zig");
 const host_adapter_mod = @import("host_adapter.zig");
+const shutdown_attempt = @import("shutdown_attempt_authority.zig");
+const shutdown_connector = @import("shutdown_admin_connector.zig");
+const shutdown_current_admin = @import("shutdown_current_admin.zig");
+const client_deadline = @import("client_deadline.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
@@ -54,6 +58,11 @@ const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
     threadlocal var skip_destroy: bool = false;
     threadlocal var event_pump_hook: ?*const fn (RuntimeHandle, *RemoteRuntime) DrainSummary = null;
+    threadlocal var app_quit_routing_target_count: usize = 0;
+    threadlocal var app_quit_runtime_count_at_terminalize: usize = 0;
+    threadlocal var app_quit_runtime_count_at_owner_settlement: usize = 0;
+    threadlocal var app_quit_pending_idle_count: usize = 0;
+    threadlocal var app_quit_source_zero_count: usize = 0;
 } else struct {};
 
 pub const RemoteBackendSingletonLifecycle = enum(u8) {
@@ -141,6 +150,14 @@ pub const RemoteTermBackend = struct {
     close_sweep: close_contract.CloseSweep = .inactive,
     event_pump_cursor: usize = 0,
     singleton_owner: RemoteBackendSingletonOwner = .{},
+    app_quit_routing_tombstoned: bool = false,
+    app_quit_connections_terminalized: bool = false,
+    app_quit_owner_graphs_settled: bool = false,
+    app_quit_shutdown_started_at_ns: u64 = 0,
+    app_quit_shutdown_deadline_ns: u64 = 0,
+    app_quit_first_ticket: u64 = 0,
+    app_quit_target_count: u32 = 0,
+    next_shutdown_connection_identity: u64 = 0,
 
     const vtable = term_backend.VTable{
         .spawn = spawn,
@@ -416,6 +433,429 @@ pub const RemoteTermBackend = struct {
             selected_count,
         ) catch process_seal.fatalIntegrity(.proof_loss);
     }
+
+    /// app-quit은 Runtime graph를 해제하기 전에 target host별 shared data connection을 한 번만 terminalize한다.
+    /// 모든 host를 먼저 preflight하므로 한 host의 Busy가 앞 host fd만 닫는 partial suffix를 만들지 않는다.
+    pub fn terminalizeSharedConnectionsNoDestroy(self: *RemoteTermBackend) bool {
+        if (self.app_quit_connections_terminalized) return true;
+        if (!self.app_quit_routing_tombstoned) return false;
+        if (self.close_operation_owner.active) return false;
+        if (builtin.is_test) B5TestState.app_quit_runtime_count_at_terminalize = self.runtimes.count();
+        if (self.host_pool == null) {
+            const client = self.client orelse {
+                if (self.runtimes.count() != 0) return false;
+                self.app_quit_connections_terminalized = true;
+                return true;
+            };
+            if (!client.canTerminalizeSharedConnectionNoDestroy()) return false;
+            if (!client.terminalizeSharedConnectionNoDestroy()) process_seal.fatalIntegrity(.proof_loss);
+            self.app_quit_connections_terminalized = true;
+            return true;
+        }
+
+        var host_ids: [max_remote_backend_runtimes]u128 = undefined;
+        var host_count: usize = 0;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |entry| {
+            const host_id = entry.value_ptr.host_id;
+            var seen = false;
+            for (host_ids[0..host_count]) |existing| if (existing == host_id) {
+                seen = true;
+                break;
+            };
+            if (seen) continue;
+            host_ids[host_count] = host_id;
+            host_count += 1;
+        }
+        for (host_ids[0..host_count]) |host_id| {
+            const adapter = self.host_pool.?.get(host_id) orelse process_seal.fatalIntegrity(.proof_loss);
+            if (!adapter.canTerminalizeSharedConnectionNoDestroy()) return false;
+        }
+        for (host_ids[0..host_count]) |host_id| {
+            const adapter = self.host_pool.?.get(host_id) orelse process_seal.fatalIntegrity(.proof_loss);
+            if (!adapter.terminalizeSharedConnectionNoDestroy()) process_seal.fatalIntegrity(.proof_loss);
+        }
+        self.app_quit_connections_terminalized = true;
+        return true;
+    }
+
+    /// data fd가 닫힌 뒤 각 Runtime의 이미 게시된 Pending을 정산한다. 새 event를 take하지 않으며,
+    /// 하나라도 아직 Busy이면 map과 Runtime을 그대로 둬 다음 owner-thread tick이 같은 graph를 재시도하게 한다.
+    pub fn settlePendingOwnersForAppQuit(self: *RemoteTermBackend) bool {
+        if (self.app_quit_owner_graphs_settled) return true;
+        if (!self.app_quit_connections_terminalized) return false;
+
+        var it = self.runtimes.valueIterator();
+        while (it.next()) |entry| {
+            if (entry.runtime.advancePendingEventForClose() != .complete) return false;
+            if (builtin.is_test) {
+                if (remote_runtime.testing_api.appQuitOwnerSnapshot(entry.runtime)) |snapshot| {
+                    if (snapshot.pending_idle and snapshot.owner_pristine and snapshot.correlation_pristine and
+                        snapshot.event_generation_mirror == 0)
+                        B5TestState.app_quit_pending_idle_count += 1;
+                } else |_| {}
+            }
+        }
+        if (builtin.is_test) B5TestState.app_quit_runtime_count_at_owner_settlement = self.runtimes.count();
+        self.app_quit_owner_graphs_settled = true;
+        return true;
+    }
+
+    /// 첫 app-quit routing tombstone이 current와 previous target 모두가 공유할 절대 deadline을 한 번만 만든다.
+    /// 후속 창 teardown은 같은 값을 재사용하며 target별 clock 재시작을 허용하지 않는다.
+    pub fn beginAppQuitShutdown(self: *RemoteTermBackend, now_ns: i128) bool {
+        if (self.app_quit_shutdown_deadline_ns != 0)
+            return self.app_quit_shutdown_started_at_ns != 0;
+        if (self.app_quit_routing_tombstoned or now_ns <= 0 or now_ns > std.math.maxInt(u64)) return false;
+        const started_at_ns: u64 = @intCast(now_ns);
+        const deadline_ns = std.math.add(u64, started_at_ns, 15 * std.time.ns_per_s) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        self.app_quit_shutdown_started_at_ns = started_at_ns;
+        self.app_quit_shutdown_deadline_ns = deadline_ns;
+        return true;
+    }
+
+    /// shutdown connector와 target attempt authority는 이 값만 소비한다. target별 상대 timeout 계산은 금지한다.
+    pub fn appQuitShutdownDeadline(self: *const RemoteTermBackend) ?u64 {
+        return if (self.app_quit_shutdown_started_at_ns != 0 and self.app_quit_shutdown_deadline_ns != 0)
+            self.app_quit_shutdown_deadline_ns
+        else
+            null;
+    }
+
+    /// end-all 확인은 모든 target을 먼저 검증한 뒤 close ticket, routing tombstone, shutdown authority를
+    /// allocation/callback 없는 한 suffix에서 함께 게시한다. 반환한 개수가 AppSession cursor의 닫힌 범위다.
+    pub fn prepareAppQuitEndAll(self: *RemoteTermBackend, now_ns: i128) !u32 {
+        if (self.app_quit_target_count != 0 or self.app_quit_first_ticket != 0)
+            return self.app_quit_target_count;
+        if (!self.beginAppQuitShutdown(now_ns)) return error.InvalidAppQuitShutdown;
+        if (self.runtimes.count() == 0) return 0;
+
+        var handles: [max_remote_backend_runtimes]RuntimeHandle = undefined;
+        var target_digests: [max_remote_backend_runtimes]process_seal.CleanupSeal = undefined;
+        var count: usize = 0;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |row| {
+            const runtime = row.value_ptr.runtime;
+            if (!std.meta.eql(runtime.shutdown_attempt_authority, shutdown_attempt.ShutdownAttemptAuthority{}) or
+                runtime.close_authority.lifecycle_raw != @intFromEnum(close_authority.Lifecycle.pristine))
+                return error.InvalidAppQuitShutdown;
+            handles[count] = row.key_ptr.*;
+            target_digests[count] = appQuitTargetDigest(row.key_ptr.*, row.value_ptr.*);
+            count += 1;
+        }
+        std.mem.sort(RuntimeHandle, handles[0..count], {}, std.sort.asc(RuntimeHandle));
+        // 정렬 뒤 digest도 같은 target 순서로 다시 계산한다. HashMap 순서는 shutdown ordinal의 권위가 아니다.
+        for (handles[0..count], 0..) |handle, index| {
+            const row = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.proof_loss);
+            target_digests[index] = appQuitTargetDigest(handle, row);
+        }
+
+        var reservation: WindowCloseTicketReservation = .{};
+        try self.reserveWindowCloseTickets(handles[0..count], &reservation);
+        const first_ticket = reservation.first_ticket;
+        self.publishWindowCloseAuthoritiesNoFail(handles[0..count], &reservation);
+        for (handles[0..count], 0..) |handle, index| {
+            const row = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.proof_loss);
+            shutdown_attempt.prepare(
+                &row.runtime.shutdown_attempt_authority,
+                first_ticket + @as(u64, @intCast(index)),
+                target_digests[index],
+                .terminate_host,
+                self.app_quit_shutdown_deadline_ns,
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+        }
+        self.app_quit_first_ticket = first_ticket;
+        self.app_quit_target_count = @intCast(count);
+        return self.app_quit_target_count;
+    }
+
+    fn appQuitTargetDigest(handle: RuntimeHandle, row: RuntimeEntry) process_seal.CleanupSeal {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update("maru.app-quit.target.v1");
+        var scalar: [8]u8 = undefined;
+        std.mem.writeInt(u64, &scalar, handle, .little);
+        hasher.update(&scalar);
+        std.mem.writeInt(u64, &scalar, row.runtime_generation, .little);
+        hasher.update(&scalar);
+        var host: [16]u8 = undefined;
+        std.mem.writeInt(u128, &host, row.host_id, .little);
+        hasher.update(&host);
+        hasher.update(&row.runtime.appQuitRuntimeId());
+        if (row.runtime.appQuitShutdownManifest()) |manifest| {
+            std.mem.writeInt(u128, &host, manifest.host_id, .little);
+            hasher.update(&host);
+            std.mem.writeInt(u64, &scalar, manifest.upgrade_epoch, .little);
+            hasher.update(&scalar);
+            std.mem.writeInt(u64, &scalar, manifest.protocol_major, .little);
+            hasher.update(&scalar);
+            std.mem.writeInt(u64, &scalar, manifest.screen_codec_version, .little);
+            hasher.update(&scalar);
+            hasher.update(&.{@intFromEnum(manifest.lifecycle)});
+            std.mem.writeInt(u64, &scalar, manifest.build_id.len, .little);
+            hasher.update(&scalar);
+            hasher.update(manifest.build_id);
+            std.mem.writeInt(u64, &scalar, manifest.endpoint.len, .little);
+            hasher.update(&scalar);
+            hasher.update(manifest.endpoint);
+        } else {
+            hasher.update("manifest-unavailable");
+        }
+        return hasher.finalResult();
+    }
+
+    /// frame tick 하나는 현재 ordinal의 admin 상태를 한 단계만 진행한다. confirmed/bounded terminal 뒤에도
+    /// Pending owner가 source-zero가 될 때까지 같은 ordinal을 유지해 AppSession graph가 먼저 파괴되지 않게 한다.
+    pub fn advanceAppQuitEndAllTarget(self: *RemoteTermBackend, ordinal: u32, now_ns: u64) bool {
+        if (self.app_quit_target_count == 0 or ordinal >= self.app_quit_target_count or
+            self.app_quit_first_ticket == 0 or self.app_quit_shutdown_deadline_ns == 0)
+            process_seal.fatalIntegrity(.proof_loss);
+        const ticket = self.app_quit_first_ticket + ordinal;
+        const row = self.appQuitRowForTicket(ticket) orelse process_seal.fatalIntegrity(.proof_loss);
+        const authority = &row.runtime.shutdown_attempt_authority;
+        if (!shutdown_attempt.valid(authority) or authority.close_request_generation != ticket)
+            process_seal.fatalIntegrity(.proof_loss);
+
+        if (authority.lifecycle_raw != @intFromEnum(shutdown_attempt.Lifecycle.terminal)) {
+            if (now_ns >= self.app_quit_shutdown_deadline_ns) {
+                shutdown_attempt.publishOutcome(authority, shutdown_attempt.key(authority), shutdownOutcomeDigest(authority, 1)) catch
+                    process_seal.fatalIntegrity(.proof_loss);
+            } else if (row.runtime.appQuitShutdownManifest()) |manifest| {
+                if (manifest.protocol_major == protocol.version_major) {
+                    self.advanceCurrentShutdownTarget(row.runtime, manifest, now_ns);
+                } else if (shutdown_connector.exactPreviousManifestEligible(manifest)) {
+                    self.advancePreviousShutdownTarget(row.runtime, manifest, now_ns);
+                } else {
+                    shutdown_attempt.publishOutcome(authority, shutdown_attempt.key(authority), shutdownOutcomeDigest(authority, 2)) catch
+                        process_seal.fatalIntegrity(.proof_loss);
+                }
+            } else {
+                shutdown_attempt.publishOutcome(authority, shutdown_attempt.key(authority), shutdownOutcomeDigest(authority, 3)) catch
+                    process_seal.fatalIntegrity(.proof_loss);
+            }
+        }
+        if (authority.lifecycle_raw != @intFromEnum(shutdown_attempt.Lifecycle.terminal)) return false;
+
+        const close_owner = &row.runtime.close_authority;
+        if (close_owner.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.routing_tombstoned))
+            close_authority.advance(close_owner, .routing_tombstoned, .settling) catch
+                process_seal.fatalIntegrity(.proof_loss);
+        if (close_owner.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.settling)) {
+            const readiness = row.runtime.advancePendingEventForClose();
+            const ready = close_authority.publishReadyRemove(close_owner, readiness == .complete) catch
+                process_seal.fatalIntegrity(.proof_loss);
+            if (!ready) return false;
+        }
+        return close_owner.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.ready_remove);
+    }
+
+    fn advanceCurrentShutdownTarget(
+        self: *RemoteTermBackend,
+        runtime: *RemoteRuntime,
+        manifest: @import("host_manifest.zig").Descriptor,
+        now_ns: u64,
+    ) void {
+        const authority = &runtime.shutdown_attempt_authority;
+        const coordinator = &runtime.shutdown_current_admin;
+        const deadline = client_deadline.AbsoluteDeadline.fromInjected(.{
+            .context = self,
+            .now_ns = appQuitClockNow,
+        }, self.app_quit_shutdown_deadline_ns);
+        switch (coordinator.phase) {
+            .ready => {
+                var admin = switch (shutdown_connector.connectExactCurrentUntil(self.allocator, manifest, deadline)) {
+                    .connected => |client| client,
+                    .unavailable => return,
+                };
+                defer admin.deinit();
+                var params_buf: [64]u8 = undefined;
+                const runtime_id = runtime.appQuitRuntimeId();
+                const params = std.fmt.bufPrint(&params_buf, "{{\"runtime_id\":\"{s}\"}}", .{&runtime_id}) catch
+                    process_seal.fatalIntegrity(.proof_loss);
+                var storage: client_mod.PreparedBlockingRpcStorage = .{};
+                _ = admin.prepareBlockingRpcStorage(&storage, "runtime.terminate", params) catch return;
+                var receipt: maru.app.shutdown_wire_contract.ShutdownConnectionReceipt = .{};
+                coordinator.beginTerminate(authority, &receipt, now_ns, self.issueShutdownConnectionIdentity()) catch return;
+                switch (admin.executePreparedBlockingRpcStorageUntil(&storage, self.allocator, deadline)) {
+                    .accepted => |accepted| {
+                        defer accepted.payload_allocator.free(accepted.payload);
+                        if (std.mem.indexOf(u8, accepted.payload, "\"terminated\":true") != null)
+                            coordinator.terminateConfirmed(authority, &receipt) catch
+                                process_seal.fatalIntegrity(.proof_loss)
+                        else
+                            coordinator.terminateAmbiguous(authority, &receipt) catch
+                                process_seal.fatalIntegrity(.proof_loss);
+                    },
+                    .not_executed => {
+                        admin.abortPreparedBlockingRpcStorage(&storage) catch {};
+                        coordinator.terminateNotExecuted(authority, &receipt) catch
+                            process_seal.fatalIntegrity(.proof_loss);
+                    },
+                    .uncertain => coordinator.terminateAmbiguous(authority, &receipt) catch
+                        process_seal.fatalIntegrity(.proof_loss),
+                }
+            },
+            .awaiting_barrier => {
+                var admin = switch (shutdown_connector.connectExactCurrentUntil(self.allocator, manifest, deadline)) {
+                    .connected => |client| client,
+                    .unavailable => return,
+                };
+                defer admin.deinit();
+                var receipt: maru.app.shutdown_wire_contract.ShutdownConnectionReceipt = .{};
+                coordinator.beginInventory(authority, &receipt, now_ns, self.issueShutdownConnectionIdentity(), true) catch return;
+                switch (admin.runtimeInventoryUntil(deadline)) {
+                    .inventory => |inventory_value| switch (inventory_value) {
+                        .unavailable => coordinator.inventoryInvalid(authority, &receipt) catch
+                            process_seal.fatalIntegrity(.proof_loss),
+                        .complete => |complete_value| {
+                            var complete = complete_value;
+                            defer complete.deinit(self.allocator);
+                            const runtime_id = runtime.appQuitRuntimeId();
+                            const runtime_value = std.fmt.parseInt(u128, &runtime_id, 16) catch
+                                process_seal.fatalIntegrity(.proof_loss);
+                            var membership: shutdown_current_admin.Membership = .absent;
+                            for (complete.runtime_ids) |candidate| if (candidate == runtime_value) {
+                                membership = .present;
+                                break;
+                            };
+                            coordinator.inventoryConfirmed(authority, &receipt, membership) catch
+                                process_seal.fatalIntegrity(.proof_loss);
+                        },
+                    },
+                    .not_executed => coordinator.inventoryInvalid(authority, &receipt) catch
+                        process_seal.fatalIntegrity(.proof_loss),
+                    .uncertain => {
+                        _ = coordinator.inventoryAmbiguous(authority, &receipt) catch
+                            process_seal.fatalIntegrity(.proof_loss);
+                    },
+                }
+            },
+            .terminate_live, .inventory_live => process_seal.fatalIntegrity(.proof_loss),
+            .terminal => {},
+        }
+    }
+
+    fn advancePreviousShutdownTarget(
+        self: *RemoteTermBackend,
+        runtime: *RemoteRuntime,
+        manifest: @import("host_manifest.zig").Descriptor,
+        now_ns: u64,
+    ) void {
+        const deadline = client_deadline.AbsoluteDeadline.fromInjected(.{
+            .context = self,
+            .now_ns = appQuitClockNow,
+        }, self.app_quit_shutdown_deadline_ns);
+        const runtime_id = runtime.appQuitRuntimeId();
+        _ = shutdown_connector.terminateExactPreviousUntil(
+            self.allocator,
+            &runtime.shutdown_attempt_authority,
+            manifest,
+            &runtime_id,
+            now_ns,
+            self.issueShutdownConnectionIdentity(),
+            deadline,
+        );
+    }
+
+    fn appQuitRowForTicket(self: *RemoteTermBackend, ticket: u64) ?*RuntimeEntry {
+        var iterator = self.runtimes.valueIterator();
+        while (iterator.next()) |row| if (row.runtime.close_authority.close_schedule_ticket == ticket) return row;
+        return null;
+    }
+
+    fn issueShutdownConnectionIdentity(self: *RemoteTermBackend) u64 {
+        self.next_shutdown_connection_identity = std.math.add(u64, self.next_shutdown_connection_identity, 1) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        if (self.next_shutdown_connection_identity == 0) process_seal.fatalIntegrity(.proof_loss);
+        return self.next_shutdown_connection_identity;
+    }
+
+    fn appQuitClockNow(context: *anyopaque) i128 {
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(context));
+        return std.Io.Clock.awake.now(self.io).nanoseconds;
+    }
+
+    fn shutdownOutcomeDigest(authority: *const shutdown_attempt.ShutdownAttemptAuthority, reason: u8) process_seal.CleanupSeal {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update("maru.app-quit.shutdown-outcome.v1");
+        hasher.update(&authority.target_digest);
+        hasher.update(&.{reason});
+        return hasher.finalResult();
+    }
+
+    /// detach-preserve app quit은 어느 Runtime도 free하기 전에 모든 GUI routing을 먼저 끊는다.
+    pub fn tombstoneAllRoutingForAppQuit(self: *RemoteTermBackend) bool {
+        if (self.app_quit_routing_tombstoned) return true;
+        if (self.app_quit_shutdown_deadline_ns == 0 or self.close_operation_owner.active or
+            self.app_quit_connections_terminalized) return false;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |entry| {
+            const handle = entry.key_ptr.*;
+            const runtime = entry.value_ptr.runtime;
+            if (!self.surface_runtime.linkMatches(handle, &runtime.surface, handle, runtime)) return false;
+        }
+        iterator = self.runtimes.iterator();
+        while (iterator.next()) |entry| self.surface_runtime.detachSurface(entry.key_ptr.*);
+        if (builtin.is_test) B5TestState.app_quit_routing_target_count = self.runtimes.count();
+        self.app_quit_routing_tombstoned = true;
+        return true;
+    }
+
+    pub const testing_api = if (builtin.is_test) struct {
+        pub const AppQuitSnapshot = struct {
+            routing_tombstoned: bool,
+            connections_terminalized: bool,
+            routing_target_count: usize,
+            runtime_count_at_terminalize: usize,
+            runtime_count_at_owner_settlement: usize,
+            owner_graphs_settled: bool,
+            pending_idle_count: usize,
+            source_zero_count: usize,
+            remaining_runtime_count: usize,
+            shutdown_started_at_ns: u64,
+            shutdown_deadline_ns: u64,
+        };
+
+        pub fn appQuitSnapshot(remote_backend: *const RemoteTermBackend) AppQuitSnapshot {
+            return .{
+                .routing_tombstoned = remote_backend.app_quit_routing_tombstoned,
+                .connections_terminalized = remote_backend.app_quit_connections_terminalized,
+                .routing_target_count = B5TestState.app_quit_routing_target_count,
+                .runtime_count_at_terminalize = B5TestState.app_quit_runtime_count_at_terminalize,
+                .runtime_count_at_owner_settlement = B5TestState.app_quit_runtime_count_at_owner_settlement,
+                .owner_graphs_settled = remote_backend.app_quit_owner_graphs_settled,
+                .pending_idle_count = B5TestState.app_quit_pending_idle_count,
+                .source_zero_count = B5TestState.app_quit_source_zero_count,
+                .remaining_runtime_count = remote_backend.runtimes.count(),
+                .shutdown_started_at_ns = remote_backend.app_quit_shutdown_started_at_ns,
+                .shutdown_deadline_ns = remote_backend.app_quit_shutdown_deadline_ns,
+            };
+        }
+
+        pub fn appQuitTargetDeadline(remote_backend: *const RemoteTermBackend, kind: host_adapter_mod.Kind) ?u64 {
+            _ = kind;
+            if (remote_backend.app_quit_shutdown_started_at_ns == 0 or remote_backend.app_quit_shutdown_deadline_ns == 0)
+                return null;
+            return remote_backend.app_quit_shutdown_deadline_ns;
+        }
+
+        pub fn resetAppQuitSnapshot() void {
+            B5TestState.app_quit_routing_target_count = 0;
+            B5TestState.app_quit_runtime_count_at_terminalize = 0;
+            B5TestState.app_quit_runtime_count_at_owner_settlement = 0;
+            B5TestState.app_quit_pending_idle_count = 0;
+            B5TestState.app_quit_source_zero_count = 0;
+        }
+
+        pub fn preparePendingOwnerForAppQuit(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+            payload: []const u8,
+        ) !void {
+            const entry = remote_backend.runtimes.get(handle) orelse return error.InvalidHandle;
+            try remote_runtime.testing_api.preparePendingEventForClose(entry.runtime, payload);
+        }
+    } else struct {};
 
     /// **이미 host에 있는 runtime에 재접속**해 원격-backed Surface를 만든다(§7 GUI 재접속, e3-5). spawn과 달리 새 runtime을
     /// 안 띄우고 저장된 `runtime_id_hex`에 붙는다. runtime이 없으면(host 재시작 등) attachExisting이 error를 내고
@@ -983,9 +1423,28 @@ pub const RemoteTermBackend = struct {
     /// controller를 detach로 처리해 유지). 앱 quit 시 host-backed Term에 쓴다(윈도우/탭 명시 close는 `remove`=terminate).
     /// **vtable 밖** — app_session deinit이 app_quitting일 때 직접 부른다.
     pub fn detachTerm(self: *RemoteTermBackend, handle: RuntimeHandle) void {
-        if (self.runtimes.fetchRemove(handle)) |kv| {
-            self.destroyRuntimeEntry(handle, kv.value, .detach);
+        const entry = self.runtimes.get(handle) orelse return;
+        if ((self.app_quit_routing_tombstoned or self.app_quit_connections_terminalized) and
+            !self.app_quit_owner_graphs_settled)
+            process_seal.fatalIntegrity(.proof_loss);
+
+        // Runtime owner와 attachment graph를 map membership이 살아 있는 동안 먼저 닫는다. 이 호출 뒤에는 callback과
+        // fallible 작업이 없으며, exact row를 제거한 다음 allocation과 host lease만 마지막으로 회수한다.
+        const generation_adapter = entry.runtime.generation_adapter;
+        self.surface_runtime.detachSurface(handle);
+        entry.runtime.detachClientSide();
+        if (builtin.is_test) {
+            if (generation_adapter) |adapter| {
+                if (remote_runtime.testing_api.appQuitSourceZero(adapter))
+                    B5TestState.app_quit_source_zero_count += 1;
+            }
         }
+        const removed = self.runtimes.fetchRemove(handle) orelse process_seal.fatalIntegrity(.proof_loss);
+        if (removed.value.runtime != entry.runtime or removed.value.host_id != entry.host_id or
+            removed.value.runtime_generation != entry.runtime_generation)
+            process_seal.fatalIntegrity(.proof_loss);
+        self.allocator.destroy(removed.value.runtime);
+        if (self.host_pool) |pool| pool.release(removed.value.host_id);
     }
 
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
@@ -1246,6 +1705,33 @@ fn b5TestBackend(allocator: std.mem.Allocator) RemoteTermBackend {
         .client = null,
         .surface_runtime = @ptrFromInt(@alignOf(SurfaceRuntime)),
     };
+}
+
+test "shared connection terminalize는 backend runtime map을 파괴하지 않는다" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    defer client.deinit();
+    var backend_value = RemoteTermBackend.init(
+        testing.allocator,
+        testing.io,
+        &client,
+        @ptrFromInt(@alignOf(SurfaceRuntime)),
+    );
+    defer backend_value.runtimes.deinit(testing.allocator);
+    try testing.expect(backend_value.beginAppQuitShutdown(1));
+    try testing.expect(backend_value.tombstoneAllRoutingForAppQuit());
+    try testing.expect(backend_value.terminalizeSharedConnectionsNoDestroy());
+    try testing.expectEqual(@as(usize, 0), backend_value.runtimes.count());
+    try testing.expect(client.unusable);
+    try testing.expectEqual(@as(std.c.fd_t, -1), client.fd);
 }
 
 fn remoteBackendSingletonSeal(owner: *const RemoteBackendSingletonOwner) process_seal.ReadyError!process_seal.CleanupSeal {

@@ -179,6 +179,19 @@ pub const PreparedBlockingRpcExecution = union(enum) {
     uncertain: PreparedBlockingRpcError,
 };
 
+pub const DeadlinePreparedBlockingRpcError = PreparedBlockingRpcError || error{DeadlineExceeded};
+pub const DeadlinePreparedBlockingRpcExecution = union(enum) {
+    accepted: ExecutedBlockingRpcResponse,
+    not_executed: DeadlinePreparedBlockingRpcError,
+    uncertain: DeadlinePreparedBlockingRpcError,
+};
+
+pub const DeadlineRuntimeInventoryExecution = union(enum) {
+    inventory: RuntimeInventory,
+    not_executed: DeadlinePreparedBlockingRpcError,
+    uncertain: DeadlinePreparedBlockingRpcError,
+};
+
 const ObservedPreparedBlockingRpcExecution = union(enum) {
     accepted: ExecutedBlockingRpcResponse,
     not_executed: ObservedPreparedBlockingRpcExecutionError,
@@ -1722,7 +1735,7 @@ test "external transfer profile field inventory seals every compatibility input"
         @typeInfo(AttachmentCapabilities).@"struct".fields.len,
     );
     try testing.expectEqual(
-        @as(usize, 5),
+        @as(usize, 6),
         @typeInfo(compatibility.Profile).@"struct".fields.len,
     );
 }
@@ -6574,6 +6587,45 @@ pub const Client = struct {
         return requireAdminCapability(try connect(allocator, socket_path, .admin));
     }
 
+    pub fn connectAdminUntil(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError!Client {
+        return requireAdminCapability(try connectUntil(
+            allocator,
+            socket_path,
+            .admin,
+            protocol.version_major,
+            deadline,
+        ));
+    }
+
+    /// exact artifact manifest로 먼저 인증한 frozen N-1 종료 연결만 legacy hello의 screen fingerprint 부재를
+    /// 허용한다. 일반 attach와 current admin은 이 경로를 호출할 수 없고 기존 fingerprint 검증을 유지한다.
+    pub fn connectFrozenShutdownUntil(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        wire_major: u16,
+        artifact_sha256: [32]u8,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError!Client {
+        const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
+        const shutdown = profile.shutdown_profile orelse return error.IncompatibleVersion;
+        if (profile.kind != .previous or !shutdown.complete() or
+            !std.mem.eql(u8, &shutdown.artifact_sha256, &artifact_sha256))
+            return error.IncompatibleVersion;
+        return connectMajorUntilWithOpsPolicy(
+            allocator,
+            socket_path,
+            .gui,
+            wire_major,
+            deadline,
+            client_deadline.posix_ops,
+            true,
+        );
+    }
+
     fn requireAdminCapability(candidate: Client) ClientError!Client {
         var client = candidate;
         if (!client.admin_one_shot_v1) {
@@ -6656,6 +6708,26 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError!Client {
+        return connectMajorUntilWithOpsPolicy(
+            allocator,
+            socket_path,
+            connection_profile,
+            wire_major,
+            deadline,
+            ops,
+            false,
+        );
+    }
+
+    fn connectMajorUntilWithOpsPolicy(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        connection_profile: ConnectionProfile,
+        wire_major: u16,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+        allow_attested_legacy_hello: bool,
+    ) DeadlineClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         const connected = client_deadline.connectUnixUntil(
             ops,
@@ -6702,7 +6774,7 @@ pub const Client = struct {
         const ack = try self.readFrameUntil(deadline, ops);
         defer ack.deinit(allocator);
         connected.restoreBlocking(ops) catch return error.ConnectionClosed;
-        try self.finishHello(connection_profile, profile, ack);
+        try self.finishHelloWithPolicy(connection_profile, profile, ack, allow_attested_legacy_hello);
         if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
         return self;
     }
@@ -6722,6 +6794,16 @@ pub const Client = struct {
         profile: compatibility.Profile,
         ack: framing.Frame,
     ) ClientError!void {
+        return self.finishHelloWithPolicy(connection_profile, profile, ack, false);
+    }
+
+    fn finishHelloWithPolicy(
+        self: *Client,
+        connection_profile: ConnectionProfile,
+        profile: compatibility.Profile,
+        ack: framing.Frame,
+        allow_attested_legacy_hello: bool,
+    ) ClientError!void {
         if (ack.header.kind != .hello_ack) return error.HandshakeFailed;
         if (std.mem.indexOf(u8, ack.payload, "incompatible_version") != null) return error.IncompatibleVersion;
         if (std.mem.indexOf(u8, ack.payload, "\"error\":\"resource_exhausted\"") != null)
@@ -6732,8 +6814,12 @@ pub const Client = struct {
         // 과거 개발 중 같은 MRSH v1 아래 screen body 의미가 여러 번 바뀌었다. build identity가 없는 untagged v1을
         // current body로 추측하면 structurally-valid silent misrender가 가능하므로, frozen release가 명시한
         // capability가 있는 직전 major만 연다. current major는 major bump 자체가 screen v2 경계다.
-        if (profile.required_fingerprint) |fingerprint| if (!payloadHasCapability(ack.payload, fingerprint))
-            return error.IncompatibleVersion;
+        if (profile.required_fingerprint) |fingerprint| if (!payloadHasCapability(ack.payload, fingerprint)) {
+            const shutdown = profile.shutdown_profile orelse return error.IncompatibleVersion;
+            if (!allow_attested_legacy_hello or connection_profile != .gui or
+                profile.kind != .previous or !shutdown.complete())
+                return error.IncompatibleVersion;
+        };
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
         const build_id = try parseStringFieldAlloc(self.allocator, ack.payload, "build_id");
         errdefer if (build_id) |owned| self.allocator.free(owned);
@@ -9406,6 +9492,83 @@ pub const Client = struct {
         );
     }
 
+    /// 앱 종료 admin request의 전송 여부 분류와 절대 deadline을 한 경계에서 보존한다. timeout 시 prepared가
+    /// 그대로면 재시도 가능한 미전송이고, executing 이후면 destructive retry를 막아야 하는 uncertain이다.
+    pub fn executePreparedBlockingRpcStorageUntil(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        allocator: std.mem.Allocator,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlinePreparedBlockingRpcExecution {
+        // 이미 끝난 종료 deadline은 Client fence나 fd flag를 건드리기 전에 미전송으로 닫는다. caller는 같은
+        // prepared backing을 canonical abort할 수 있고, 다음 독립 operation에서 connection을 계속 사용할 수 있다.
+        if (deadline.remainingNs() <= 0) return .{ .not_executed = error.DeadlineExceeded };
+        const operation_fence_held = self.beginPublicMutation() catch |err|
+            return .{ .not_executed = switch (err) {
+                error.AdminBusy => error.AdminBusy,
+                else => error.ConnectionClosed,
+            } };
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (checkedAllocatorReentry(self) or self.bufferedControllerRevokeForStreamUnchecked(null))
+            return .{ .not_executed = error.AdminBusy };
+        const prepared = preparedRpcFromStorage(storage);
+        if (self.pending_outbound != null or !std.meta.eql(self.allocator, allocator) or
+            !self.parser.usesAllocator(allocator)) return .{ .not_executed = error.InvalidPreparedRpc };
+        const ops = client_deadline.posix_ops;
+        const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
+            self.poison(.local_invariant_violation);
+            return .{ .not_executed = error.WriteFailed };
+        };
+        const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+        if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
+            self.poison(.local_invariant_violation);
+            return .{ .not_executed = error.WriteFailed };
+        }
+        const execution_fd = self.fd;
+        const response = self.executePreparedWithIo(
+            prepared,
+            .{ .deadline = .{ .absolute = deadline, .ops = ops } },
+            false,
+            allocator,
+            null,
+            false,
+        ) catch |err| {
+            const classified: DeadlinePreparedBlockingRpcError = switch (err) {
+                error.PayloadProvenanceRejected => error.ProtocolError,
+                else => |execution_err| execution_err,
+            };
+            const request_not_executed = prepared.lifecycle == .prepared;
+            if (self.fd == execution_fd and !ops.set_flags(ops.context, self.fd, saved_flags)) {
+                self.poison(.local_invariant_violation);
+                return if (request_not_executed)
+                    .{ .not_executed = error.ConnectionClosed }
+                else
+                    .{ .uncertain = error.ConnectionClosed };
+            }
+            if (self.fd != execution_fd and !(self.fd == -1 and self.unusable)) {
+                self.poison(.local_invariant_violation);
+                return if (request_not_executed)
+                    .{ .not_executed = error.ConnectionClosed }
+                else
+                    .{ .uncertain = error.ConnectionClosed };
+            }
+            if (request_not_executed) return .{ .not_executed = classified };
+            if (self.fd == execution_fd) self.poison(.response_correlation_lost);
+            return .{ .uncertain = classified };
+        };
+        if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
+            response.payload_allocator.free(response.payload);
+            self.poison(.local_invariant_violation);
+            return .{ .uncertain = error.ConnectionClosed };
+        }
+        if (deadline.remainingNs() <= 0) {
+            response.payload_allocator.free(response.payload);
+            self.poison(.response_correlation_lost);
+            return .{ .uncertain = error.DeadlineExceeded };
+        }
+        return .{ .accepted = response };
+    }
+
     fn executePreparedBlockingRpcStorageWithAllocatorInternal(
         self: *Client,
         storage: *PreparedBlockingRpcStorage,
@@ -9801,6 +9964,157 @@ pub const Client = struct {
         defer if (operation_fence_held) self.endPublicMutation();
         var consumed: u8 = 0;
         return self.runtimeInventoryBounded(protocol.max_inventory_pages, &consumed);
+    }
+
+    /// shutdown barrier는 connection별 상대 timeout을 만들지 않고 모든 inventory page가 같은 절대 deadline을
+    /// 소비한다. 어느 page라도 write 뒤 불확실해지면 앞 page prefix를 membership 증거로 반환하지 않는다.
+    pub fn runtimeInventoryUntil(
+        self: *Client,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineRuntimeInventoryExecution {
+        if (deadline.remainingNs() <= 0) return .{ .not_executed = error.DeadlineExceeded };
+        const operation_fence_held = self.requireBlockingMode() catch |err|
+            return .{ .not_executed = switch (err) {
+                error.AdminBusy => error.AdminBusy,
+                else => error.ConnectionClosed,
+            } };
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (!self.runtime_inventory_v1) return .{ .inventory = .{ .unavailable = .{
+            .reason = .unsupported,
+            .page_count = 0,
+        } } };
+        var ids: std.ArrayListUnmanaged(u128) = .empty;
+        errdefer ids.deinit(self.allocator);
+        var cursor: []const u8 = "";
+        var cursor_buf: [32]u8 = undefined;
+        var generation: u64 = 0;
+        var expected_total: ?usize = null;
+        var page_count: usize = 0;
+
+        while (true) {
+            page_count += 1;
+            if (page_count > protocol.max_inventory_pages) {
+                ids.deinit(self.allocator);
+                return .{ .inventory = .{ .unavailable = .{
+                    .reason = .malformed,
+                    .page_count = @intCast(page_count - 1),
+                } } };
+            }
+            var params: std.Io.Writer.Allocating = .init(self.allocator);
+            defer params.deinit();
+            var js: std.json.Stringify = .{ .writer = &params.writer, .options = .{} };
+            js.write(.{
+                .cursor = cursor,
+                .limit = @as(u16, @intCast(protocol.max_inventory_page_runtimes)),
+                .membership_generation = generation,
+            }) catch {
+                ids.deinit(self.allocator);
+                return .{ .not_executed = error.OutOfMemory };
+            };
+            var storage: PreparedBlockingRpcStorage = .{};
+            _ = self.prepareBlockingRpcStorage(&storage, "runtime.inventory", params.written()) catch |err| {
+                ids.deinit(self.allocator);
+                return .{ .not_executed = err };
+            };
+            const execution = self.executePreparedBlockingRpcStorageUntil(&storage, self.allocator, deadline);
+            const response = switch (execution) {
+                .accepted => |accepted| accepted,
+                .not_executed => |err| {
+                    self.abortPreparedBlockingRpcStorage(&storage) catch {};
+                    ids.deinit(self.allocator);
+                    return .{ .not_executed = err };
+                },
+                .uncertain => |err| {
+                    ids.deinit(self.allocator);
+                    return .{ .uncertain = err };
+                },
+            };
+            defer response.payload_allocator.free(response.payload);
+            if (parseInventoryError(response.payload)) |code| {
+                ids.deinit(self.allocator);
+                return .{ .inventory = .{ .unavailable = .{
+                    .reason = inventoryUnavailableFor(code),
+                    .page_count = @intCast(page_count),
+                } } };
+            }
+            const page = parseInventoryPage(self.allocator, response.payload) catch |err| {
+                ids.deinit(self.allocator);
+                return switch (err) {
+                    error.OutOfMemory => .{ .not_executed = error.OutOfMemory },
+                    error.Malformed => .{ .inventory = .{ .unavailable = .{
+                        .reason = .malformed,
+                        .page_count = @intCast(page_count),
+                    } } },
+                };
+            };
+            defer page.deinit(self.allocator);
+            if (page.upgrade_epoch != self.upgrade_epoch or page.authority_generation != self.authority_generation) {
+                ids.deinit(self.allocator);
+                return .{ .inventory = .{ .unavailable = .{
+                    .reason = .authority_changed,
+                    .page_count = @intCast(page_count),
+                } } };
+            }
+            if (generation == 0) {
+                generation = page.membership_generation;
+                expected_total = page.total;
+            } else if (page.membership_generation != generation or page.total != expected_total.?) {
+                ids.deinit(self.allocator);
+                return .{ .inventory = .{ .unavailable = .{
+                    .reason = .malformed,
+                    .page_count = @intCast(page_count),
+                } } };
+            }
+            if (!std.mem.eql(u8, page.cursor, cursor) or ids.items.len + page.runtime_ids.len > page.total or
+                (ids.items.len != 0 and page.runtime_ids.len != 0 and ids.items[ids.items.len - 1] >= page.runtime_ids[0]))
+            {
+                ids.deinit(self.allocator);
+                return .{ .inventory = .{ .unavailable = .{
+                    .reason = .malformed,
+                    .page_count = @intCast(page_count),
+                } } };
+            }
+            ids.appendSlice(self.allocator, page.runtime_ids) catch {
+                ids.deinit(self.allocator);
+                return .{ .not_executed = error.OutOfMemory };
+            };
+            if (page.done) {
+                if (page.next_cursor.len != 0 or ids.items.len != page.total) {
+                    ids.deinit(self.allocator);
+                    return .{ .inventory = .{ .unavailable = .{
+                        .reason = .malformed,
+                        .page_count = @intCast(page_count),
+                    } } };
+                }
+                return .{ .inventory = .{ .complete = .{
+                    .membership_generation = generation,
+                    .upgrade_epoch = page.upgrade_epoch,
+                    .authority_generation = page.authority_generation,
+                    .page_count = @intCast(page_count),
+                    .runtime_ids = ids.toOwnedSlice(self.allocator) catch {
+                        ids.deinit(self.allocator);
+                        return .{ .not_executed = error.OutOfMemory };
+                    },
+                } } };
+            }
+            if (page.runtime_ids.len != protocol.max_inventory_page_runtimes or ids.items.len >= page.total or
+                page.runtime_ids[page.runtime_ids.len - 1] != (parseExactInventoryId(page.next_cursor) orelse {
+                    ids.deinit(self.allocator);
+                    return .{ .inventory = .{ .unavailable = .{
+                        .reason = .malformed,
+                        .page_count = @intCast(page_count),
+                    } } };
+                }))
+            {
+                ids.deinit(self.allocator);
+                return .{ .inventory = .{ .unavailable = .{
+                    .reason = .malformed,
+                    .page_count = @intCast(page_count),
+                } } };
+            }
+            @memcpy(&cursor_buf, page.next_cursor);
+            cursor = &cursor_buf;
+        }
     }
 
     pub fn runtimeInventoryBounded(
@@ -13604,12 +13918,56 @@ pub const Client = struct {
         std.debug.assert(self.terminalReasonInvariant());
     }
 
+    /// app-quit graph가 backend와 allocator를 살려 둔 채 shared data socket만 먼저 끊을 때 쓴다.
+    /// 이 단계가 실패하면 뒤 owner를 추측해 파괴할 수 없으므로 caller는 graph destroy를 진행하지 않는다.
+    pub fn canTerminalizeSharedConnectionNoDestroy(self: *Client) bool {
+        const operation_fence_held = self.beginPublicMutation() catch return false;
+        defer if (operation_fence_held) self.endPublicMutation();
+        return !checkedAllocatorReentry(self) and self.ownership != .moved;
+    }
+
+    pub fn terminalizeSharedConnectionNoDestroy(self: *Client) bool {
+        const operation_fence_held = self.beginPublicMutation() catch return false;
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (checkedAllocatorReentry(self)) return false;
+        self.latchFirstPoisonReason(.connection_eof);
+        if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
+        return self.unusable and self.fd == -1 and self.pending_outbound == null;
+    }
+
     pub fn firstPoisonReason(self: *const Client) ?client_poison.ConnectionReason {
         const operation_fence_held = self.beginPublicMutation() catch return null;
         defer if (operation_fence_held) self.endPublicMutation();
         return self.first_poison_reason;
     }
 };
+
+test "shared connection terminalize는 Client graph를 보존하고 fd와 pending outbound만 정리한다" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    client.pending_outbound = .{
+        .frame = try std.testing.allocator.dupe(u8, "app-quit-pending"),
+        .stream_id = 7,
+    };
+    const client_addr = @intFromPtr(&client);
+    try std.testing.expect(client.terminalizeSharedConnectionNoDestroy());
+    try std.testing.expectEqual(client_addr, @intFromPtr(&client));
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expect(client.pending_outbound == null);
+    try std.testing.expectEqual(client_poison.ConnectionReason.connection_eof, client.first_poison_reason.?);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
 
 const client_source_schema_field_allowlist = [_][]const u8{
     "allocator",

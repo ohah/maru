@@ -360,10 +360,12 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "preflightPreparedBlockingRpcStorageExecution", .receiver_type = mutable, .class = .guarded },
         .{ .name = "executePreparedBlockingRpcStorageWithAllocator", .receiver_type = mutable, .class = .guarded },
         .{ .name = "executePreparedBlockingRpcStorageWithAllocatorObserved", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "executePreparedBlockingRpcStorageUntil", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preparedBlockingRpcStorageMatches", .receiver_type = immutable, .class = .guarded },
         .{ .name = "refreshBufferedAuthorityEvidence", .receiver_type = mutable, .class = .guarded },
         .{ .name = "runtimeInventory", .receiver_type = mutable, .class = .guarded },
         .{ .name = "runtimeInventoryBounded", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "runtimeInventoryUntil", .receiver_type = mutable, .class = .guarded },
         .{ .name = "prepareUpgrade", .receiver_type = mutable, .class = .guarded },
         .{ .name = "upgradeStatus", .receiver_type = mutable, .class = .guarded },
         .{ .name = "readSnapshot", .receiver_type = mutable, .class = .guarded },
@@ -394,6 +396,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "poison", .receiver_type = mutable, .class = .guarded },
         .{ .name = "markDeferredPoisonForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "firstPoisonReason", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "canTerminalizeSharedConnectionNoDestroy", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "terminalizeSharedConnectionNoDestroy", .receiver_type = mutable, .class = .guarded },
 
         .{ .name = "canMoveToGenerationNode", .receiver_type = immutable, .class = .construction },
         .{ .name = "bindGenerationAccountingLedger", .receiver_type = mutable, .class = .construction },
@@ -506,10 +510,12 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "preflightPreparedBlockingRpcStorageExecution", .funnel = "preflightPreparedBlockingRpcStorageExecution", .gate = "ensureUsable" },
         .{ .receiver = "executePreparedBlockingRpcStorageWithAllocator", .funnel = "executePreparedBlockingRpcStorageWithAllocatorInternal", .gate = "beginPublicMutation" },
         .{ .receiver = "executePreparedBlockingRpcStorageWithAllocatorObserved", .funnel = "executePreparedBlockingRpcStorageWithAllocatorInternal", .gate = "beginPublicMutation" },
+        .{ .receiver = "executePreparedBlockingRpcStorageUntil", .funnel = "executePreparedBlockingRpcStorageUntil", .gate = "beginPublicMutation" },
         .{ .receiver = "preparedBlockingRpcStorageMatches", .funnel = "preparedBlockingRpcStorageMatches", .gate = "beginPublicMutation" },
         .{ .receiver = "refreshBufferedAuthorityEvidence", .funnel = "refreshBufferedAuthorityEvidence", .gate = "requireBlockingMode" },
         .{ .receiver = "runtimeInventory", .funnel = "runtimeInventory", .gate = "requireBlockingMode" },
         .{ .receiver = "runtimeInventoryBounded", .funnel = "runtimeInventoryBounded", .gate = "requireBlockingMode" },
+        .{ .receiver = "runtimeInventoryUntil", .funnel = "runtimeInventoryUntil", .gate = "requireBlockingMode" },
         .{ .receiver = "prepareUpgrade", .funnel = "prepareUpgrade", .gate = "requireBlockingMode" },
         .{ .receiver = "upgradeStatus", .funnel = "upgradeStatus", .gate = "requireBlockingMode" },
         .{ .receiver = "readSnapshot", .funnel = "readSnapshotWithIo", .gate = "requireBlockingMode" },
@@ -540,6 +546,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "poison", .funnel = "poison", .gate = "beginPublicMutation" },
         .{ .receiver = "markDeferredPoisonForTest", .funnel = "markDeferredPoisonForTest", .gate = "beginPublicMutation" },
         .{ .receiver = "firstPoisonReason", .funnel = "firstPoisonReason", .gate = "beginPublicMutation" },
+        .{ .receiver = "canTerminalizeSharedConnectionNoDestroy", .funnel = "canTerminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
+        .{ .receiver = "terminalizeSharedConnectionNoDestroy", .funnel = "terminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
     const client_path = "src/platform/macos/session_host/client.zig";
@@ -1280,6 +1288,17 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurgeExclusiveTerminal" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginPublicMutation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endPublicMutation" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "canTerminalizeSharedConnectionNoDestroy" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizeSharedConnectionNoDestroy" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlinePreparedBlockingRpcError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlinePreparedBlockingRpcExecution" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlineRuntimeInventoryExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectAdminUntil" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectFrozenShutdownUntil" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "connectMajorUntilWithOpsPolicy" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishHelloWithPolicy" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executePreparedBlockingRpcStorageUntil" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "runtimeInventoryUntil" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeCompleteOwnerSeal" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeFinalizationSeal" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeRawFinalizerStateValid" },
@@ -7443,8 +7462,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     );
     defer allocator.free(pool);
 
+    // 제품 restore caller 두 곳과 C3-3b6 실제 AppSession fixture 두 곳만 허용한다.
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 4),
         countOccurrences(app, "RemoteSessionAdapter.initInPlace("),
     );
     try std.testing.expectEqual(

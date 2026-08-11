@@ -20,6 +20,10 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     defer allocator.free(batch_registry);
     const quarantine = try readSource(allocator, "src/platform/macos/session_host/ended_purge_quarantine.zig");
     defer allocator.free(quarantine);
+    const shutdown_attempt = try readSource(allocator, "src/platform/macos/session_host/shutdown_attempt_authority.zig");
+    defer allocator.free(shutdown_attempt);
+    const shutdown_connector = try readSource(allocator, "src/platform/macos/session_host/shutdown_admin_connector.zig");
+    defer allocator.free(shutdown_connector);
     const fresh_exec_helper = try readSource(allocator, "tests/session_host_process_seal_fresh_exec_helper.zig");
     defer allocator.free(fresh_exec_helper);
     const fresh_exec_oracle = try readSource(allocator, "tests/session_host_process_seal_fresh_exec_oracle.zig");
@@ -64,7 +68,10 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // b2b3 adds pending preparation, lifetime, and runtime consumers to the three b2a owners.
     // C3-3b3의 final-address receipt/permit owner 7개도 service를 모듈당 한 번만 가져오며 inline 중복은 허용하지 않는다.
     // C3-3b5 close authority, backend admission, window close graph가 같은 process-seal 경계를 직접 사용한다.
-    try std.testing.expectEqual(@as(usize, 16), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // C3-3b6 shutdown attempt authority, backend suffix와 admin connector도 같은 process domain을 직접 검증한다.
+    try std.testing.expectEqual(@as(usize, 19), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(shutdown_attempt, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(shutdown_connector, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(identity, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 0), count(service, "pub fn raw"));

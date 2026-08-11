@@ -14,6 +14,7 @@ const generation_transport = @import("generation_transport.zig");
 const generation_batch_adapter = @import("generation_batch_adapter.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
 const connection_lease = @import("connection_lease.zig");
+const host_manifest = @import("host_manifest.zig");
 
 pub const Kind = enum {
     current,
@@ -23,6 +24,32 @@ pub const Kind = enum {
 pub const HostAdapter = struct {
     slot: client_slot_mod.ClientSlot,
     kind: Kind,
+    shutdown_manifest: ShutdownManifest = .{},
+
+    pub const ShutdownManifest = struct {
+        host_id: u128 = 0,
+        build_id: [host_manifest.max_build_id_bytes]u8 = [_]u8{0} ** host_manifest.max_build_id_bytes,
+        build_id_len: u8 = 0,
+        protocol_major: u16 = 0,
+        screen_codec_version: u16 = 0,
+        upgrade_epoch: u64 = 0,
+        lifecycle: host_manifest.Lifecycle = .ready,
+        endpoint: [host_manifest.max_endpoint_bytes]u8 = [_]u8{0} ** host_manifest.max_endpoint_bytes,
+        endpoint_len: u8 = 0,
+
+        pub fn descriptor(self: *const ShutdownManifest) ?host_manifest.Descriptor {
+            if (self.host_id == 0 or self.build_id_len == 0 or self.endpoint_len == 0) return null;
+            return .{
+                .host_id = self.host_id,
+                .build_id = self.build_id[0..self.build_id_len],
+                .protocol_major = self.protocol_major,
+                .screen_codec_version = self.screen_codec_version,
+                .upgrade_epoch = self.upgrade_epoch,
+                .lifecycle = self.lifecycle,
+                .endpoint = self.endpoint[0..self.endpoint_len],
+            };
+        }
+    };
 
     pub const InitError = client_slot_mod.InitError || error{UnsupportedProtocol};
 
@@ -56,10 +83,38 @@ pub const HostAdapter = struct {
             source.host_id,
         );
         out.kind = kind;
+        out.shutdown_manifest = .{};
+    }
+
+    /// GUI hello만으로는 endpoint provenance를 복원할 수 없으므로 discovery가 검증한 exact manifest를 adapter의
+    /// 고정 길이 저장소에 복사한다. 종료 attempt는 이후 disk discovery를 반복하지 않고 이 snapshot만 소비한다.
+    pub fn bindShutdownManifest(self: *HostAdapter, descriptor: host_manifest.Descriptor) error{InvalidManifest}!void {
+        if (descriptor.host_id != self.hostId() or descriptor.protocol_major != self.wireMajor() or
+            descriptor.build_id.len == 0 or descriptor.build_id.len > host_manifest.max_build_id_bytes or
+            descriptor.endpoint.len == 0 or descriptor.endpoint.len > host_manifest.max_endpoint_bytes)
+            return error.InvalidManifest;
+        var snapshot: ShutdownManifest = .{
+            .host_id = descriptor.host_id,
+            .build_id_len = @intCast(descriptor.build_id.len),
+            .protocol_major = descriptor.protocol_major,
+            .screen_codec_version = descriptor.screen_codec_version,
+            .upgrade_epoch = descriptor.upgrade_epoch,
+            .lifecycle = descriptor.lifecycle,
+            .endpoint_len = @intCast(descriptor.endpoint.len),
+        };
+        @memcpy(snapshot.build_id[0..descriptor.build_id.len], descriptor.build_id);
+        @memcpy(snapshot.endpoint[0..descriptor.endpoint.len], descriptor.endpoint);
+        self.shutdown_manifest = snapshot;
+    }
+
+    pub fn shutdownManifest(self: *const HostAdapter) ?host_manifest.Descriptor {
+        if (!self.slot.valid()) @panic("copied HostAdapter shutdown manifest access");
+        return self.shutdown_manifest.descriptor();
     }
 
     pub fn deinit(self: *HostAdapter) void {
         self.slot.deinit();
+        self.shutdown_manifest = .{};
         self.kind = undefined;
     }
 
@@ -83,6 +138,14 @@ pub const HostAdapter = struct {
     /// Client 내부의 selected wire major와 bounded screen reader가 current logical DTO로 normalize한다.
     pub fn logicalClient(self: *HostAdapter) *client_mod.Client {
         return self.slot.logicalClient();
+    }
+
+    pub fn canTerminalizeSharedConnectionNoDestroy(self: *HostAdapter) bool {
+        return self.logicalClient().canTerminalizeSharedConnectionNoDestroy();
+    }
+
+    pub fn terminalizeSharedConnectionNoDestroy(self: *HostAdapter) bool {
+        return self.logicalClient().terminalizeSharedConnectionNoDestroy();
     }
 
     pub fn mintGenerationTransport(
@@ -187,7 +250,7 @@ pub const HostAdapter = struct {
 };
 
 comptime {
-    const expected_fields = [_][]const u8{ "slot", "kind" };
+    const expected_fields = [_][]const u8{ "slot", "kind", "shutdown_manifest" };
     const fields = @typeInfo(HostAdapter).@"struct".fields;
     if (fields.len != expected_fields.len)
         @compileError("HostAdapter ownership inventory changed; update CR3a SSOT first");
@@ -285,7 +348,7 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
     const copied = original;
     original.deinit();
 
-    const Entry = enum { host_id, wire_major, inventory, logical_client, call, deinit };
+    const Entry = enum { host_id, wire_major, inventory, shutdown_manifest, logical_client, call, deinit };
     for (std.enums.values(Entry)) |entry| {
         const child = std.c.fork();
         try std.testing.expect(child >= 0);
@@ -300,6 +363,7 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
                 .host_id => _ = local.hostId(),
                 .wire_major => _ = local.wireMajor(),
                 .inventory => _ = local.supportsRuntimeInventory(),
+                .shutdown_manifest => _ = local.shutdownManifest(),
                 .logical_client => _ = local.logicalClient(),
                 .call => _ = local.call("host.info", null) catch {},
                 .deinit => local.deinit(),
@@ -312,4 +376,63 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
         // SIGABRT (6); pinning that signal distinguishes the intended fail-stop from a UAF SIGSEGV.
         try std.testing.expectEqual(@as(c_int, 6), status & 0x7f);
     }
+}
+
+test "C3-3b6 HostAdapter는 종료 manifest를 고정 길이 값으로 복사해 원본 수명과 분리한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B6,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: HostAdapter = undefined;
+    try HostAdapter.initInPlace(&adapter, allocator, &source);
+    defer adapter.deinit();
+    var endpoint = "/tmp/maru-c3b6.sock".*;
+    var build_id = "sha256:c3b6".*;
+    try adapter.bindShutdownManifest(.{
+        .host_id = 0xC3B6,
+        .build_id = &build_id,
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 7,
+        .lifecycle = .ready,
+        .endpoint = &endpoint,
+    });
+    @memset(&endpoint, 'x');
+    @memset(&build_id, 'y');
+    const bound = adapter.shutdownManifest() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("/tmp/maru-c3b6.sock", bound.endpoint);
+    try std.testing.expectEqualStrings("sha256:c3b6", bound.build_id);
+    try std.testing.expectEqual(@as(u64, 7), bound.upgrade_epoch);
+}
+
+test "C3-3b6 HostAdapter는 다른 host manifest를 종료 target으로 결속하지 않는다" {
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B6,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: HostAdapter = undefined;
+    try HostAdapter.initInPlace(&adapter, allocator, &source);
+    defer adapter.deinit();
+    try std.testing.expectError(error.InvalidManifest, adapter.bindShutdownManifest(.{
+        .host_id = 0xBAD,
+        .build_id = "sha256:bad",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = "/tmp/bad.sock",
+    }));
+    try std.testing.expect(adapter.shutdownManifest() == null);
 }

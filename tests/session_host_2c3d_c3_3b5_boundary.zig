@@ -42,13 +42,16 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     // 두 대형 aggregate는 exact marker로 중복 실행만 건너뛰며, 전용 filter 8개는 그대로 유지한다.
     try std.testing.expectEqual(@as(usize, 1), count(backend_source, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
     try std.testing.expectEqual(@as(usize, 2), count(build_source, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
-    try std.testing.expectEqual(@as(usize, 1), count(build_source, "event_c3_3b5_remote_backend_module, \"C3-3b5 remote backend\", 8"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_source, "\"C3-3b5 remote backend\""));
+    try std.testing.expectEqual(@as(usize, 2), count(build_source, "event_c3_3b5_remote_backend_module"));
+    try std.testing.expectEqual(@as(usize, 7), count(build_source, "previous_actual_host_run"));
     try std.testing.expectEqual(@as(usize, 2), count(close_graph_source, "test \"C3-3b5 close graph"));
     try std.testing.expectEqual(@as(usize, 4), count(app_source, "test \"C3-3b5 AppSession"));
     try std.testing.expectEqual(@as(usize, 42), count(red_source, "test \"C3-3b5 ") + count(backend_source, "test \"C3-3b5 remote backend") + count(close_graph_source, "test \"C3-3b5 close graph") + count(app_source, "test \"C3-3b5 AppSession"));
     // b4가 dormant seam의 유일한 semantic adapter를 활성화한다. backend sweep 밖 caller는 계속 금지한다.
     try std.testing.expectEqual(@as(usize, 1), count(runtime_source, "pub fn advancePendingEventForClose("));
-    try std.testing.expectEqual(@as(usize, 1), count(backend_source, ".advancePendingEventForClose()"));
+    // b5 sweep, detach-preserve graph-last, b6 app-quit target만 제품 Pending을 전진시킨다.
+    try std.testing.expectEqual(@as(usize, 3), count(backend_source, ".advancePendingEventForClose()"));
     try std.testing.expectEqual(@as(usize, 0), count(app_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.windowCloseReadiness(term.rt.handle)"));
     try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.reserveWindowCloseTickets("));

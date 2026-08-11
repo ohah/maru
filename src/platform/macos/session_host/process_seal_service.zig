@@ -40,6 +40,9 @@ const window_close_ticket_reservation_domain = "maru.window-close-ticket-reserva
 const remote_backend_singleton_domain = "maru.remote-backend-singleton.v1";
 const pending_term_close_domain = "maru.pending-term-close.v1";
 const pending_term_close_graph_domain = "maru.pending-term-close-graph.v1";
+const shutdown_attempt_authority_domain = "maru.shutdown-attempt-authority.v1";
+const shutdown_connection_receipt_domain = "maru.shutdown-connection-receipt.v1";
+const pending_app_quit_shutdown_domain = "maru.pending-app-quit-shutdown.v1";
 
 pub const CleanupSeal = cleanup_seal.CleanupSeal;
 pub const CleanupTranscriptInput = cleanup_seal.CleanupTranscriptInput;
@@ -71,6 +74,9 @@ pub const WindowCloseTicketReservationSealInput = cleanup_seal.WindowCloseTicket
 pub const RemoteBackendSingletonSealInput = cleanup_seal.RemoteBackendSingletonSealInput;
 pub const PendingTermCloseSealInput = cleanup_seal.PendingTermCloseSealInput;
 pub const PendingTermCloseGraphSealInput = cleanup_seal.PendingTermCloseGraphSealInput;
+pub const ShutdownAttemptAuthoritySealInput = cleanup_seal.ShutdownAttemptAuthoritySealInput;
+pub const ShutdownConnectionReceiptSealInput = cleanup_seal.ShutdownConnectionReceiptSealInput;
+pub const PendingAppQuitShutdownSealInput = cleanup_seal.PendingAppQuitShutdownSealInput;
 
 pub const PrepareError = error{
     ProcessDomainMismatch,
@@ -651,6 +657,18 @@ pub fn pendingTermCloseSeal(pid: u32, process_nonce: u64, input: PendingTermClos
 
 pub fn pendingTermCloseGraphSeal(pid: u32, process_nonce: u64, input: PendingTermCloseGraphSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, pending_term_close_graph_domain, input);
+}
+
+pub fn shutdownAttemptAuthoritySeal(pid: u32, process_nonce: u64, input: ShutdownAttemptAuthoritySealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, shutdown_attempt_authority_domain, input);
+}
+
+pub fn shutdownConnectionReceiptSeal(pid: u32, process_nonce: u64, input: ShutdownConnectionReceiptSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, shutdown_connection_receipt_domain, input);
+}
+
+pub fn pendingAppQuitShutdownSeal(pid: u32, process_nonce: u64, input: PendingAppQuitShutdownSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_app_quit_shutdown_domain, input);
 }
 
 fn testCleanupDescriptor(address: u64) cleanup_seal.CleanupDescriptor {

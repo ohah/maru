@@ -2973,19 +2973,77 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    0/64/65, injected count max-1/max/max+1, fan-out 한쪽/양쪽 실패와 reset 뒤 재사용을 고정한다. durable record나 다음 실행
    notice를 주장하지 않는다.
 
-   supported N-1은 current-only `connectCurrent`/admin을 쓰지 않는다. `compatibility.Profile`에는 compile-time frozen
-   `ShutdownProfile{artifact_sha256,wire_major,gui_runtime_list,gui_runtime_terminate,cross_connection_admin_barrier}` row를 둔다.
-   frozen N-1 row는 signed release manifest가 고정한 exact artifact digest·major와 실제 product PoC transcript로 list/terminate
+   AppKit의 기존 `applicationShouldTerminate -> terminateLater` 보류 구간이 app-quit shutdown의 제품 실행 owner다. 사용자가
+   종료를 수락해도 terminate 대상이 하나라도 있으면 `AppSession.quit_decision`을 즉시 `accepted`로 게시하지 않는다.
+   final-address `PendingAppQuitShutdown`이
+   `{self_addr,app_session_addr,backend_addr,pid,process_nonce,thread_id,started_at_ns,deadline_ns,
+   target_count,target_cursor,lifecycle_raw}`를 봉인하고, frame tick마다 현재 target의 exact 한 admin 전이만 진행한다.
+   target별 `ShutdownAttemptAuthority` 저장소는 movable backend map row가 아니라 heap-pin된 `RemoteRuntime` inline이며,
+   backend가 CloseAuthority의 manifest identity와 공통 deadline을 함께 검증한 뒤 final address에서 한 번만 준비한다.
+   current connector와 N-1 connector는 이 authority가 봉인한 deadline만 소비하고 상대 timeout을 다시 시작하지 않는다.
+   target이 confirmed 또는 `bounded_unconfirmed`로 terminal이 되면 cursor를 한 번 전진하며, 모든 target을 소진하거나 공통
+   deadline으로 남은 target을 request 0의 bounded 결과로 닫은 뒤에만 `quit_decision=accepted`를 one-shot 게시한다.
+   detach-only app quit처럼 terminate target이 0이면 기존 tick에서 즉시 accepted다. 취소·파일 보호 재검사·다른 modal supersede는
+   authority publication 전이면 mutation 0으로 abort하며, publication 뒤에는 취소로 되돌리지 않고 bounded shutdown 뒤 종료한다.
+   Swift/AppKit은 기존 `.terminateLater`와 `NSApp.reply`만 사용하고 별도 15초 timer나 target별 clock을 소유하지 않는다.
+
+   supported N-1은 current-only `connectCurrent`/admin을 쓰지 않는다.
+   `compatibility.ShutdownProfile{artifact_sha256,wire_major,gui_runtime_list,gui_runtime_terminate,cross_connection_admin_barrier}`를
+   `compatibility.Profile.shutdown_profile`이 단일 출처로 소유한다. 배포된 session-host 사용자가 없으므로
+   C3-3b5 제품 커밋 `314b7912613c2e84cbf11e2cc8b0775e9e3f99fb`에 저장소의 `source.patch`로
+   wire/codec major만 1로 낮춘 기준을 이전 wire 회귀 행으로 동결한다. 이는 사용자 설치본 호환성 정책이 아니라
+   ambiguous destructive request의 at-most-once 성질을 실제 이전 wire 제품으로 검증하기 위한 오라클이다. 저장소의 universal Mach-O와 manifest는
+   base commit·patch SHA-256과 실제 제품 `runtime.list`/`runtime.terminate` transcript,
+   ad-hoc code-signature 검증, artifact SHA-256, wire major와 두 architecture를 함께 고정한다. 이는 과거 공개 릴리스라고
+   부르지 않으며 Mach-O 재빌드 재현성을 주장하지 않고 저장한 binary digest를 identity로 삼는다. frozen row는
+   exact artifact digest·major와 실제 product PoC transcript로 list/terminate
    response·membership semantics를 증명하고 `gui_runtime_list=true`, `gui_runtime_terminate=true`,
    `cross_connection_admin_barrier=false`를 명시한다. runtime별 endpoint/host_id/epoch는 profile이 아니라 CloseAuthority의 manifest seal만
    소유한다. runtime dispatch는 그 exact runtime identity와 profile row를 함께 봉인해 소비하며 method probe,
    successful response나 다른 artifact transcript로 capability/barrier를 추론하지 않는다. splice/wrong artifact·major·semantics와 false
    barrier elevation은 request 0의 typed incompatible다. endpoint drift는 runtime manifest revalidation 실패로 별도 거부한다. 이 profile이 완전할
    때만 attachment-free internal GUI maintenance connection을 쓴다.
-   capability가 없으면 mutation 0 typed incompatible 뒤 `bounded_unconfirmed(.profile_incompatible)`로 닫는다. N-1에는 current admin의 global barrier가
+   baseline manifest가 없거나 digest·signature·architecture·transcript가 하나라도 다르면 mutation 0 typed incompatible 뒤
+   `bounded_unconfirmed(.profile_incompatible)`로 닫는다. N-1에는 current admin의 global barrier가
    없으므로 `sent_ambiguous`는 자동 retry하거나 inventory present를 absence proof로 해석하지 않고
    `bounded_unconfirmed(.n1_sent_ambiguous)`로 at-most-once 종료한다.
    current CLI의 admin UX/confirmation 계약은 바뀌지 않는다.
+
+   C3-3b6의 첫 RED는 최적화 모드마다 shutdown 중립 계약 8개, attempt/outcome 권위 10개,
+   종료 manifest snapshot 2개, app-quit transaction owner 2개, current admin connector 3개,
+   current-host admin 조정 9개, N-1 profile/at-most-once 7개, 진단 sink/bridge 8개,
+   AppSession app-quit/graph-last teardown 8개인 unique component 57개와 actual-socket product replay 4개,
+   fresh proof-loss subprocess 3개, boundary 1개를 고정한다. 각 범주는 다음 증거를 독립적으로 소유하며
+   다른 범주의 hand-mint fixture나 digest 일치만으로 대체하지 않는다.
+
+   - 중립 계약 8개는 closed raw enum, pointer-free `ShutdownAttemptKey`와 `ShutdownConnectionReceipt`,
+     pre/post `bounded_unconfirmed` shape, exact attempt/connection 결속, `ShutdownProfile` exact field/boolean 조합,
+     redacted diagnostic DTO, elapsed bucket 전 경계를 각각 검증한다.
+   - attempt/outcome 10개는 final target/copy/cross-target/replay, connection receipt generation과 operation/inventory
+     조합, detach/terminate lattice, initial/retry consume exact once, attempt 1..3과 4번째 request 0,
+     global deadline 전후 sibling 진행, max attempt의 outcome publication 0을 고정한다. receipt·attempt·lease generation의
+     실제 no-wrap overflow fail-stop은 별도 fresh subprocess 세 행이 소유한다.
+   - current-host 9개는 terminate confirmed, ambiguous 뒤 barrier+absence, membership present 뒤 새 attempt,
+     barrier busy request 0, initial inventory ambiguity 뒤 retry, retry ambiguity bounded 종료, malformed/identity drift의
+     absence proof 0, target별 순차 connection, actual one-shot admin lease release를 검증한다.
+   - N-1 7개는 frozen artifact/major/profile exact match, endpoint manifest revalidation, list/terminate capability,
+     false barrier elevation과 transcript splice, incompatible mutation 0, sent-ambiguous at-most-once를 검증한다.
+   - 진단 8개는 중립 계약이 계산한 elapsed bucket만 받는지, FIFO 0/64/65, reason별 saturating drop summary,
+     exact-once emission, drain-before-callback reset, live notice+logger와 quit logger-only fan-out,
+     overflow value fan-out, 한쪽/양쪽 consumer 실패 뒤 재삽입 0·즉시 재사용을 검증한다.
+   - AppSession 8개는 detach-preserve와 explicit terminate 우선순위, 모든 target의 routing tombstone 뒤
+     fd-only terminalization, pending cleanup과 blocker/pin/quarantine zero, per-owner cleanup 뒤 graph-last destroy,
+     current/N-1 혼합 target의 15초 공통 deadline, background blocking reader source 0,
+     host EOF detach 뒤 동일 runtime 재접속을 실제 제품 entry에서 검증한다.
+
+   actual-socket replay 네 행은 current confirmed, current sent-ambiguous→barrier/inventory,
+   N-1 sent-ambiguous at-most-once, detach-preserve host EOF→fresh GUI reconnect를 별도 process/socket에서 실행한다.
+   subprocess 세 행은 receipt/seal drift, attempt generation overflow, lease generation overflow가 outcome·diagnostic·cleanup을
+   게시하지 않고 공통 `fatalIntegrity` leaf의 exact exit로 끝나는지 증명한다. boundary는 제품 app-quit sole caller,
+   direct legacy terminate/detach allowlist, current CLI transport 재사용 0, N-1 current-only connector 사용 0,
+   background blocking reader 0, neutral DTO의 app/platform/logger import 0과 bridge sole drain consumer를 고정한다.
+   Debug·ReleaseFast의 test name과 개수는 동일하며 GREEN 단계에서 범주를 합치거나 actual replay를 component fixture로
+   낮추지 않는다.
 
    C3-3b TDD gate는 최소 다음을 Debug·ReleaseFast와 actual socket/product path에서 고정한다.
 

@@ -3,8 +3,26 @@
 //! MRSH major, exact screen codec, frozen-release fingerprint를 Client와 HostAdapter가 각자 추론하면 다음 major bump에서
 //! 한쪽만 갱신될 수 있다. 지원 범위를 이 작은 표로 고정하고, 표에 없는 조합은 handshake 전에 fail-close한다.
 
+const std = @import("std");
 const protocol = @import("protocol.zig");
 const screen_stream = @import("screen_stream.zig");
+const shutdown_n1_baseline = @import("shutdown_n1_baseline.zig");
+
+pub const ShutdownProfile = struct {
+    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    wire_major: u32 = 0,
+    gui_runtime_list: bool = false,
+    gui_runtime_terminate: bool = false,
+    cross_connection_admin_barrier: bool = false,
+
+    pub fn complete(self: ShutdownProfile) bool {
+        return !std.mem.eql(u8, &self.artifact_sha256, &([_]u8{0} ** 32)) and
+            self.wire_major != 0 and
+            self.gui_runtime_list and
+            self.gui_runtime_terminate and
+            !self.cross_connection_admin_barrier;
+    }
+};
 
 pub const Kind = enum {
     current,
@@ -22,6 +40,7 @@ pub const Profile = struct {
     screen_codec_version: u16,
     required_fingerprint: ?[]const u8,
     attach_schema: AttachSchema,
+    shutdown_profile: ?ShutdownProfile,
 };
 
 // 공개된 release row는 산술로 추론하지 않는다. 다음 major/codec bump는 먼저 이 표와 frozen fixture를 갱신해야
@@ -33,6 +52,7 @@ pub const profiles = [_]Profile{
         .screen_codec_version = 2,
         .required_fingerprint = null,
         .attach_schema = .granted_roles,
+        .shutdown_profile = null,
     },
     .{
         .kind = .previous,
@@ -40,6 +60,13 @@ pub const profiles = [_]Profile{
         .screen_codec_version = 1,
         .required_fingerprint = "screen_stream_v1_current_body",
         .attach_schema = .frozen_controller_only,
+        .shutdown_profile = .{
+            .artifact_sha256 = shutdown_n1_baseline.artifact_sha256,
+            .wire_major = shutdown_n1_baseline.wire_major,
+            .gui_runtime_list = shutdown_n1_baseline.gui_runtime_list,
+            .gui_runtime_terminate = shutdown_n1_baseline.gui_runtime_terminate,
+            .cross_connection_admin_barrier = shutdown_n1_baseline.cross_connection_admin_barrier,
+        },
     },
 };
 
@@ -56,16 +83,20 @@ pub fn profileForMajor(wire_major: u16) ?Profile {
 }
 
 test "compatibility table has one exact current and one fingerprinted N-1 profile" {
-    const std = @import("std");
     const current = profileForMajor(protocol.version_major).?;
     try std.testing.expectEqual(Kind.current, current.kind);
     try std.testing.expectEqual(screen_stream.codec_version, current.screen_codec_version);
     try std.testing.expectEqual(AttachSchema.granted_roles, current.attach_schema);
     try std.testing.expect(current.required_fingerprint == null);
+    try std.testing.expect(current.shutdown_profile == null);
     const previous = profileForMajor(1).?;
     try std.testing.expectEqual(Kind.previous, previous.kind);
     try std.testing.expectEqual(@as(u16, 1), previous.screen_codec_version);
     try std.testing.expectEqualStrings("screen_stream_v1_current_body", previous.required_fingerprint.?);
     try std.testing.expectEqual(AttachSchema.frozen_controller_only, previous.attach_schema);
+    const shutdown = previous.shutdown_profile.?;
+    try std.testing.expect(shutdown.complete());
+    try std.testing.expectEqual(@as(u32, 1), shutdown.wire_major);
+    try std.testing.expectEqualSlices(u8, &shutdown_n1_baseline.artifact_sha256, &shutdown.artifact_sha256);
     try std.testing.expect(profileForMajor(0) == null);
 }

@@ -153,6 +153,33 @@ pub fn rowsForVisual(visual: []const visual_map.VisualRow, first_line: usize, ou
 
 const testing = std.testing;
 
+test "랩 + 세로 스크롤: 뷰포트가 문서 중간부터여도 번호가 맞는다" {
+    // **이 조합에 가드가 없었다.** 랩 테스트는 first_row=0이고 스크롤 캡처는 랩이 꺼져 있어,
+    // 둘이 겹치는 자리를 아무도 보지 않았다. `first_line + v.line + 1`이 그 자리다.
+    //
+    // 문서 5줄 중 **줄 1부터** 보이고, 그 줄이 좁은 본문에서 세 조각으로 접힌 상황이다.
+    const visual = [_]visual_map.VisualRow{
+        .{ .line = 0, .piece = 0 }, // 문서의 줄 1 → 번호 2
+        .{ .line = 0, .piece = 1 }, // 이어짐 → 번호 없음
+        .{ .line = 0, .piece = 2 },
+        .{ .line = 1, .piece = 0 }, // 번호 3
+        .{ .line = 2, .piece = 0 }, // 번호 4
+    };
+    var buf: [8]Row = undefined;
+    const rows = rowsForVisual(&visual, 1, &buf); // first_line = 1
+
+    try testing.expectEqual(@as(usize, 5), rows.len);
+    try testing.expectEqual(@as(usize, 2), rows[0].number.?);
+    try testing.expect(rows[1].number == null);
+    try testing.expect(rows[2].number == null);
+    try testing.expectEqual(@as(usize, 3), rows[3].number.?);
+    try testing.expectEqual(@as(usize, 4), rows[4].number.?);
+
+    // 시각 행 인덱스는 **화면 기준 0부터**다 — 스크롤 위치를 더하면 안 된다.
+    try testing.expectEqual(@as(u16, 0), rows[0].visual_row);
+    try testing.expectEqual(@as(u16, 4), rows[4].visual_row);
+}
+
 fn testProps(layout: geometry.Layout, rows: []const Row) Props {
     return .{
         .layout = layout,

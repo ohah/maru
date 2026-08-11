@@ -1875,6 +1875,20 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
         @intFromEnum(pending_event_owner.PendingLifecycle.prepared),
         be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw,
     );
+    // 실제 frame은 close 재시도 전에 semantic pump를 돌린다. terminate가 만든 runtime.ended까지
+    // 관측해야 느린 runner에서도 queued event를 남긴 채 Runtime을 제거하지 않는다.
+    var saw_close_ended = false;
+    attempts = 0;
+    while (attempts < 100 and !saw_close_ended) : (attempts += 1) {
+        const summary = try pump_b.drainAvailable();
+        saw_close_ended = summary.ended != null;
+        if (!saw_close_ended) _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_close_ended);
+    try testing.expectEqual(
+        @intFromEnum(pending_event_owner.PendingLifecycle.idle),
+        be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw,
+    );
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(33));
     try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));

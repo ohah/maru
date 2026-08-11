@@ -29,7 +29,8 @@ pub const inventory = [_]Proof{
     // io-render-threading.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§9 →
     // plans/io-render-threading.md). count는 3 그대로다 — 주석 문자열만 달라졌다. 같은 종류가
     // app_session.zig 항목에도 있다(거기 주석 참조 — 문서가 커지는 한 반복된다).
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "17f2cc3db9bc64e1ea9ab6f5b5462e54e301ec1781d20b428390ea254b7e1be1" },
+    // C3-3b5가 공통 close/remove progress enum을 추가했다. 값 타입 선언뿐이라 기존 `@field` 세 곳과 Client receiver는 그대로다.
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "00fcdb5baea9ecbb9b409f30808362bfbe529eaae43978c0dc12fb5b4d2d2b61" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —

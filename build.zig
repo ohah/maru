@@ -2637,7 +2637,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"C3-3b5 common close progress boundary"},
         });
         const run_event_c3_3b5_boundary_tests = b.addRunArtifact(event_c3_3b5_boundary_tests);
-        run_event_c3_3b5_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b5_boundary_tests.addArg("--maru-expect-tests=" ++ "1");
         run_event_c3_3b5_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b5_step.dependOn(&run_event_c3_3b5_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b5_boundary_tests.step);

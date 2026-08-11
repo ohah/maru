@@ -1235,11 +1235,8 @@ pub fn buildViewOptionsMenuItems(self: *AppSession) []const []const u8 {
     const sb = self.loaded_config.config.sidebar;
     self.context_menu_items_buf[0] = if (sb.show_branch) "\u{2713} 브랜치 표시" else "  브랜치 표시";
     self.context_menu_items_buf[1] = if (sb.show_folder) "\u{2713} 폴더 표시" else "  폴더 표시";
-    // 세션 목록 아이콘 배치(인라인 ↔ 왼쪽 열). 위 둘과 달리 "무엇을 보일지"가 아니라 "어디에 둘지"라
-    // 라벨을 표시 토글처럼 적지 않고 배치 이름을 그대로 쓴다(docs/configuration.md `sidebar.session-icon-gutter`).
-    self.context_menu_items_buf[2] = if (sb.session_icon_gutter) "\u{2713} 세션 아이콘 왼쪽 열" else "  세션 아이콘 왼쪽 열";
-    self.context_menu_items_len = 3;
-    return self.context_menu_items_buf[0..3];
+    self.context_menu_items_len = 2;
+    return self.context_menu_items_buf[0..2];
 }
 
 /// 터미널 본문 우클릭 메뉴 항목(input.right-click=menu) — 복사/붙여넣기. rename·view_options와 같은
@@ -1519,7 +1516,6 @@ pub fn acceptContextMenu(self: *AppSession) void {
         switch (self.chrome_host.context_menu.selected) {
             0 => self.loaded_config.config.sidebar.show_branch = !self.loaded_config.config.sidebar.show_branch,
             1 => self.loaded_config.config.sidebar.show_folder = !self.loaded_config.config.sidebar.show_folder,
-            2 => self.loaded_config.config.sidebar.session_icon_gutter = !self.loaded_config.config.sidebar.session_icon_gutter,
             else => {},
         }
         _ = buildViewOptionsMenuItems(self); // 라벨 체크마크 갱신(메뉴 열린 채)
@@ -1527,7 +1523,6 @@ pub fn acceptContextMenu(self: *AppSession) void {
         // config 파일 persist 예약(앱→config) — 두 사이드바 표시 키를 dirty 집합에 넣는다(옛 동작과 동일하게 둘 다 기록).
         markConfigKeyDirty(self, "sidebar.show-branch");
         markConfigKeyDirty(self, "sidebar.show-folder");
-        markConfigKeyDirty(self, "sidebar.session-icon-gutter");
         self.metal_dirty = true;
         return;
     }

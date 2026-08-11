@@ -252,15 +252,16 @@ pub const sidebar_close_glyph: u21 = 0x2715;
 /// 이모지라 외형(빨간 핀)이 cell fg와 무관하다(스타일 색은 영향 없음). 옛 설계는 이름 prefix("📌 ")로 선두에 박았다.
 pub const sidebar_pin_glyph: u21 = 0x1F4CC;
 
-/// `buildSidebarDrawList`의 `inline_icons` 센티널 — **이름줄 선두 자리만 잡고 글리프는 안 그린다**.
-/// 아이콘 자산이 없는 일반 터미널 행이 쓴다(0이면 그 행만 라벨이 3칸 왼쪽으로 튀어 목록 좌단이 어긋난다).
-/// 공백(U+0020)을 쓰는 이유는 "그릴 것이 없다"가 값 자체로 읽히기 때문이고, 실제 방출은 건너뛴다.
-pub const inline_icon_reserve: u21 = ' ';
+/// `buildSidebarDrawList`의 아이콘 배열(`agents`·`inline_icons`) **공용 센티널** — 자리만 잡고 글리프는
+/// 안 그린다. 아이콘 자산이 없는 일반 터미널 행이 쓴다: 0으로 두면 **그 행만** 라벨이 아이콘 폭만큼 왼쪽으로
+/// 튀어 같은 목록 안에서 좌단이 어긋난다(gutter·인라인 양쪽에서 실측). 공백(U+0020)을 쓰는 이유는
+/// "그릴 것이 없다"가 값 자체로 읽히기 때문이고, 실제 방출은 건너뛴다.
+pub const icon_slot_reserve: u21 = ' ';
 
 /// 세션 목록 행(= `inline_icons`를 쓰는 행)의 **행 전체 들여쓰기**(칸). 카드 하위 목록이라는 위계를 보이게 한다 —
 /// 0이면 카드와 목록이 같은 좌단에서 시작해 "카드 아래 펼쳐진 목록"으로 안 읽혔다(사용자 피드백).
 /// 아이콘이 이 열에 오고 이름 본문은 여기서 `icon_cols`만큼 더 간다. 보조줄은 호출자가 같은 자리에 맞춘다.
-pub const session_row_indent_cols: u16 = 2;
+pub const session_row_indent_cols: u16 = 1;
 
 /// 카드 보조줄(branch/folder)에 maru가 의도적으로 박은 아이콘을 **렌더 폭 2칸**으로 치는 규칙 —
 /// `text_layout`(L3)이 renderer를 import할 수 없어(경계 가드) predicate로 주입한다. advance(cellWidth)는 1이지만
@@ -468,7 +469,7 @@ pub fn buildSidebarDrawList(
     /// 2칸으로 커지는 걸 막는 규칙). 아이콘을 이름 문자열 앞에 붙이면 그 규칙에 걸려 1칸으로 쪼그라든다 —
     /// 예전에 "깃 아이콘이 너무 작다"고 받은 그 현상이다. 핀(📌)과 같은 방식으로 셀을 따로 낸다.
     ///
-    /// `inline_icon_reserve`는 **자리만 잡고 아무것도 안 그린다**. 아이콘 자산이 없는 일반 터미널 행이 쓴다 —
+    /// `icon_slot_reserve`는 **자리만 잡고 아무것도 안 그린다**. 아이콘 자산이 없는 일반 터미널 행이 쓴다 —
     /// 0으로 두면 그 행만 이름이 3칸 왼쪽에서 시작해 같은 목록 안에서 라벨 좌단이 들쭉날쭉해진다.
     inline_icons: []const u21,
     pinned: []const bool, // pinned[i]=true면 그 슬롯 이름줄 우측 끝에 📌(빈 슬라이스=핀 없음)
@@ -498,7 +499,7 @@ pub fn buildSidebarDrawList(
         // 인라인 아이콘이 있는 행 = 카드 **하위 목록**이므로 행 전체를 `session_row_indent_cols`만큼 들여쓴다
         // (사용자 요청 — 카드와 목록의 위계가 안 보였다). gutter 행은 종전대로 아이콘 자리만큼만 민다.
         const text_col: u16 = if (agent_cp != 0) icon_cols else if (inline_cp0 != 0) session_row_indent_cols else 0;
-        if (agent_cp != 0) {
+        if (agent_cp != 0 and agent_cp != icon_slot_reserve) {
             const icon_row = sidebarGlyphRow(i, 0, 1);
             try cells.append(allocator, .{ .row = icon_row, .col = 0, .codepoint = agent_cp, .width = 2, .style = style });
             max_row = @max(max_row, icon_row);
@@ -581,7 +582,7 @@ pub fn buildSidebarDrawList(
         // 이름줄 선두 아이콘 셀. 색은 `style`(브랜드 색칠 루프가 codepoint로 다시 집는다) — 활성 행의
         // active_fg+bold는 **글자에만** 적용한다(아이콘을 bold로 만들면 셰이퍼가 다른 face를 고른다).
         // 이름줄이 아이콘조차 못 담는 폭이면 생략한다(핀의 degrade와 같은 규율).
-        if (inline_cp != 0 and inline_cp != inline_icon_reserve and name_text_col <= cols) {
+        if (inline_cp != 0 and inline_cp != icon_slot_reserve and name_text_col <= cols) {
             try cells.append(allocator, .{ .row = name_row, .col = text_col, .codepoint = inline_cp, .width = 2, .style = style });
             max_row = @max(max_row, name_row);
         }
@@ -1895,13 +1896,13 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
 // 세션 목록 행의 종류 아이콘은 **이름줄 선두**에 인라인으로 놓인다(gutter가 아니라). 옛 gutter는 글리프 하나
 // 때문에 행의 **모든 줄**에서 3칸을 뺏고, 슬롯 세로 중앙에 놓여 줄 수가 다른 행끼리 열도 못 이뤘다(사용자
 // 피드백). 이 테스트가 고정하는 것: (1) 아이콘이 이름줄 행(count=n)에 width 2로 오고, (2) 이름줄 텍스트만
-// icon_cols만큼 밀리며, (3) **보조줄은 안 밀린다**(gutter와의 결정적 차이), (4) `inline_icon_reserve`는
+// icon_cols만큼 밀리며, (3) **보조줄은 안 밀린다**(gutter와의 결정적 차이), (4) `icon_slot_reserve`는
 // 글리프를 안 내면서도 이름줄을 똑같이 밀어 아이콘 없는 행의 라벨 좌단을 맞춘다.
 test "buildSidebarDrawList inline_icons: name line only shifts; aux lines keep full width" {
     const allocator = std.testing.allocator;
     const names = [_][]const u8{ "maru", "zsh" };
     const branches = [_][]const u8{ "~/dev/maru", "" };
-    const inline_icons = [_]u21{ icons.codepoint(.sparkle), inline_icon_reserve };
+    const inline_icons = [_]u21{ icons.codepoint(.sparkle), icon_slot_reserve };
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &inline_icons, &[_]bool{}, 30, .default, &.{}, &.{}, null, null, .default, null);
     defer dl.deinit(allocator);
 
@@ -1937,7 +1938,7 @@ test "buildSidebarDrawList inline_icons: name line only shifts; aux lines keep f
     try std.testing.expect(aux_unshifted);
 
     // (4) reserve 행: 글리프 셀은 안 나오지만 이름은 같은 열에서 시작한다(라벨 좌단 정렬).
-    for (dl.cells) |c| try std.testing.expect(c.codepoint != inline_icon_reserve or c.row != sidebarGlyphRow(1, 0, 1));
+    for (dl.cells) |c| try std.testing.expect(c.codepoint != icon_slot_reserve or c.row != sidebarGlyphRow(1, 0, 1));
     var reserved_shifted = false;
     for (dl.cells) |c| {
         if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) {
@@ -1946,6 +1947,45 @@ test "buildSidebarDrawList inline_icons: name line only shifts; aux lines keep f
         }
     }
     try std.testing.expect(reserved_shifted);
+}
+
+// 아이콘이 **없는** 행도 자리를 잡아야 같은 목록 안에서 라벨 좌단이 맞는다. gutter·인라인 두 배치 모두
+// `icon_slot_reserve`가 그 역할을 한다 — 0으로 두면 그 행만 아이콘 폭만큼 왼쪽으로 튄다(사용자 제보:
+// "왼쪽 정렬이 이상하다" — 에이전트 행과 일반 터미널 행의 좌단이 갈렸다).
+test "buildSidebarDrawList icon_slot_reserve: icon-less rows keep the same label column in both layouts" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "maru", "zsh" };
+
+    // gutter 배치: agents[0]=아이콘, agents[1]=센티널. 둘 다 icon_cols만큼 밀려 라벨 좌단이 같다.
+    {
+        const agents = [_]u21{ icons.codepoint(.sparkle), icon_slot_reserve };
+        var dl = try buildSidebarDrawList(allocator, &names, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &agents, &[_]u21{}, &[_]bool{}, 30, .default, &.{}, &.{}, null, null, .default, null);
+        defer dl.deinit(allocator);
+        var m_col: ?u16 = null;
+        var z_col: ?u16 = null;
+        for (dl.cells) |c| {
+            if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 0, 1)) m_col = c.col;
+            if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) z_col = c.col;
+            // 센티널은 글리프를 내지 않는다.
+            try std.testing.expect(c.codepoint != icon_slot_reserve);
+        }
+        try std.testing.expectEqual(m_col, z_col);
+    }
+
+    // 인라인 배치: 같은 규율이 이름줄 선두 아이콘에도 적용된다.
+    {
+        const inline_icons = [_]u21{ icons.codepoint(.sparkle), icon_slot_reserve };
+        var dl = try buildSidebarDrawList(allocator, &names, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &inline_icons, &[_]bool{}, 30, .default, &.{}, &.{}, null, null, .default, null);
+        defer dl.deinit(allocator);
+        var m_col: ?u16 = null;
+        var z_col: ?u16 = null;
+        for (dl.cells) |c| {
+            if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 0, 1)) m_col = c.col;
+            if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) z_col = c.col;
+            try std.testing.expect(c.codepoint != icon_slot_reserve);
+        }
+        try std.testing.expectEqual(m_col, z_col);
+    }
 }
 
 // 카드 줄 안에 인라인으로 박힌 maru 아이콘(브랜치줄 octocat 0xF0009·폴더줄 0xF000A)은 **width 2(~16px)**로

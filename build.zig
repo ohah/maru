@@ -2101,6 +2101,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b3 atomic pending event settlement Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b3_step.dependOn(session_host_2c3d_c3_3b2b_step);
+    const session_host_2c3d_c3_3b5_step = b.step(
+        "test-session-host-2c3d-c3-3b5",
+        "2c3d C3-3b5 common close progress Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b5_step.dependOn(session_host_2c3d_c3_3b3_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2585,6 +2590,36 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3b3_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b3_step.dependOn(&run_event_c3_3b3_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b3_boundary_tests.step);
+
+        const event_c3_3b5_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3d_c3_3b5_red.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        inline for (.{
+            .{ "C3-3b5 중립 계약", 6 },
+            .{ "C3-3b5 close readiness", 6 },
+            .{ "C3-3b5 close authority", 8 },
+            .{ "C3-3b5 close sweep", 8 },
+            .{ "C3-3b5 remote backend", 7 },
+            .{ "C3-3b5 AppSession", 4 },
+        }) |entry| {
+            B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_module, entry[0], entry[1]);
+        }
+
+        const event_c3_3b5_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3b5_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"C3-3b5 common close progress boundary"},
+        });
+        const run_event_c3_3b5_boundary_tests = b.addRunArtifact(event_c3_3b5_boundary_tests);
+        run_event_c3_3b5_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_c3_3b5_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b5_step.dependOn(&run_event_c3_3b5_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3b5_boundary_tests.step);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

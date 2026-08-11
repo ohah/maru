@@ -18,7 +18,10 @@ on:
   # 체크가 영원히 pending으로 머지를 막는다). perf job은 ~30s로 짧다. 이번 reflow perf 회귀가 PR
   # 체크에 없어 main에 들어간 일을 막기 위함이다. 코드가 안 바뀐 PR은 아래 job이 건너뛴다 —
   # 조건으로 skip된 job은 required 컨텍스트에서 통과로 보고된다.
+  # draft 를 푸는 순간을 잡으려면 ready_for_review 가 필요하다 — 기본 types 에는 없어서
+  # 그 전환에 아무 이벤트도 안 오고, draft 동안 건너뛴 job 이 영영 안 돈다.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # 같은 ref·같은 트리거에서 새 실행이 오면 이전 실행만 취소한다. group에
 # event_name을 포함하지 않으면 main push가 진행 중인 주간 schedule 실행을
@@ -49,7 +52,7 @@ jobs:
   core-performance-budget:
     name: core performance budget
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

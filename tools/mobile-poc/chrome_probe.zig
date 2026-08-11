@@ -77,54 +77,69 @@ fn push(rect: draw.Rect, rgb: anytype, alpha: u8, radius: u16, kind: u32) void {
 var atlas_cp: [256]u32 = undefined;
 var atlas_col: [256]u32 = undefined;
 var atlas_row: [256]u32 = undefined;
+var atlas_adv: [256]u32 = undefined;
 var atlas_n: usize = 0;
+/// 아틀라스 셀 크기(px). 종횡비를 지켜 그려야 글자가 안 늘어난다.
+var atlas_cell_w: u32 = 24;
+var atlas_cell_h: u32 = 32;
 
-export fn maru_atlas_add(cp: u32, col: u32, row: u32) void {
+export fn maru_atlas_geometry(cell_w: u32, cell_h: u32) void {
+    atlas_cell_w = cell_w;
+    atlas_cell_h = cell_h;
+}
+
+export fn maru_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
     if (atlas_n == atlas_cp.len) return;
     atlas_cp[atlas_n] = cp;
     atlas_col[atlas_n] = col;
     atlas_row[atlas_n] = row;
+    atlas_adv[atlas_n] = advance;
     atlas_n += 1;
 }
 
-fn atlasCell(cp: u21) ?struct { col: u32, row: u32 } {
-    for (0..atlas_n) |i| if (atlas_cp[i] == cp) return .{ .col = atlas_col[i], .row = atlas_row[i] };
+fn atlasCell(cp: u21) ?struct { col: u32, row: u32, adv: u32 } {
+    for (0..atlas_n) |i| if (atlas_cp[i] == cp)
+        return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
     return null;
 }
 
 /// 문자열을 글자 quad 로 분해한다. **폭은 maru 의 EAW 규칙을 따른다** — 한글은 2셀이다.
-fn pushText(text: []const u8, x0: i32, y0: i32, cell_w: i32, cell_h: i32, rgb: anytype) void {
+fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void {
+    // 셀 종횡비를 지킨다 — 임의 크기 상자에 셀을 넣으면 글자가 늘어난다.
+    const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
+    const draw_w: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale);
     var pen = x0;
     var view = std.unicode.Utf8View.init(text) catch return;
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
-        // 폭은 EAW 규칙을 따른다 — 한글/CJK 는 2셀이다. 실제 이식에서는 `src/width.zig` 를
-        // 그대로 쓴다(여기서는 chrome 이 그 파일을 상대 경로로 이미 들고 있어 모듈 중복이
-        // 나므로 판정만 인라인으로 둔다).
-        const w: u8 = if ((cp >= 0xAC00 and cp <= 0xD7A3) or (cp >= 0x4E00 and cp <= 0x9FFF) or
-            (cp >= 0x3040 and cp <= 0x30FF) or (cp >= 0xFF01 and cp <= 0xFF60)) 2 else 1;
+        const cell = atlasCell(cp);
+        // 진행 폭은 **폰트 advance** 다. 셀 폭을 쓰면 자간이 벌어진다(실측).
+        const adv_px: i32 = if (cell) |c|
+            @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale)
+        else
+            @divTrunc(draw_w, 2);
         if (cp != ' ') {
-            if (atlasCell(cp)) |cell| {
+            if (cell) |c| {
                 if (quad_count < quad_buf.len) {
                     quad_buf[quad_count] = .{
                         .x = @floatFromInt(pen),
                         .y = @floatFromInt(y0),
-                        .w = @floatFromInt(cell_w * @as(i32, @intCast(@max(1, w)))),
-                        .h = @floatFromInt(cell_h),
+                        .w = @floatFromInt(draw_w),
+                        .h = @floatFromInt(font_px),
                         .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
                         .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
                         .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
                         .a = 1.0,
                         .radius = 0,
                         .kind = 1,
-                        .cell_x = cell.col,
-                        .cell_y = cell.row,
+                        .cell_x = c.col,
+                        .cell_y = c.row,
                     };
                     quad_count += 1;
                 }
             }
         }
-        pen += cell_w * @as(i32, @intCast(@max(1, w)));
+        pen += @max(1, adv_px);
     }
 }
 
@@ -179,13 +194,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .{tree.text(.{ .id = 113, .style = tab_label_style, .value = "logs", .tone = .muted })},
     };
     const tabs = [_]tree.UiNode{
-        tree.card(.{ .id = 101, .style = .{ .width = .{ .px = 132.0 }, .height = .{ .px = 34.0 },
+        tree.card(.{ .id = 101, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 },
                                             .margin = .{ .right = 6.0 } },
                      .variant = .selected }, &tab_kids[0]),
-        tree.card(.{ .id = 102, .style = .{ .width = .{ .px = 132.0 }, .height = .{ .px = 34.0 },
+        tree.card(.{ .id = 102, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 },
                                             .margin = .{ .right = 6.0 } },
                      .variant = .surface }, &tab_kids[1]),
-        tree.card(.{ .id = 103, .style = .{ .width = .{ .px = 132.0 }, .height = .{ .px = 34.0 } },
+        tree.card(.{ .id = 103, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 } },
                      .variant = .surface }, &tab_kids[2]),
     };
     const tab_bar = tree.container(.{ .id = 100, .direction = .row,
@@ -206,12 +221,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         })};
         c.* = tree.card(.{
             .id = @intCast(210 + i),
-            .style = .{ .height = .{ .px = 52.0 }, .margin = .{ .bottom = 8.0 } },
+            .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = 52.0 },
+                        .margin = .{ .bottom = 8.0 } },
             .variant = if (i == 1) .selected else .surface,
         }, &side_kids[i]);
     }
     const sidebar = tree.container(.{ .id = 200, .direction = .column,
-                                      .style = .{ .width = .{ .px = 208.0 },
+                                      .style = .{ .width = .{ .percent = 0.34 },
                                                   .padding = .{ .left = 10.0, .right = 10.0, .top = 10.0, .bottom = 10.0 } } },
                                    &side_children);
 
@@ -229,7 +245,9 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     for (&lines, 0..) |*l, i| {
         l.* = tree.text(.{
             .id = @intCast(310 + i),
-            .style = .{ .width = .{ .px = @floatFromInt(output[i].len * 7) },
+            // column 안에서 width 는 cross axis 다 — `.fill` 은 main axis 전용이라 거부된다
+            // (FillOnCrossAxis). 폭을 화면에 맞추려면 percent 를 쓴다.
+            .style = .{ .width = .{ .percent = 1.0 },
                         .height = .{ .px = 15.0 }, .margin = .{ .bottom = 7.0 } },
             .value = output[i],
             .tone = if (output[i][0] == '$') .accent else .primary,
@@ -248,10 +266,10 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
                                      .style = .{ .height = .{ .px = 26.0 },
                                                  .padding = .{ .left = 12.0, .right = 12.0, .top = 5.0, .bottom = 5.0 } } },
                                   &.{
-        tree.card(.{ .id = 401, .style = .{ .width = .{ .px = 92.0 }, .height = .{ .px = 16.0 },
+        tree.card(.{ .id = 401, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 16.0 },
                                             .margin = .{ .right = 10.0 } },
                      .variant = .raised }, &.{}),
-        tree.card(.{ .id = 402, .style = .{ .width = .{ .px = 140.0 }, .height = .{ .px = 16.0 } },
+        tree.card(.{ .id = 402, .style = .{ .flex = .{ .grow = 1.4 }, .height = .{ .px = 16.0 } },
                      .variant = .raised }, &.{}),
     });
 
@@ -300,17 +318,19 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             },
             else => .surface_fg,
         };
-        pushText(label, @intFromFloat(entry.rect.x), @intFromFloat(entry.rect.y), 8, 15, tk.get(tone_role));
+        pushText(label, @intFromFloat(entry.rect.x), @intFromFloat(entry.rect.y), 15, tk.get(tone_role));
     }
 
     // **SVG 아이콘**: maru 의 등록 아이콘을 그대로 얹는다. coverage 는 Zig 가 만들고
     // (renderer/icon_glyph) 플랫폼은 텍스처로 올려 샘플링만 한다 — 자산이 이식된다는 증거다.
-    const icon_y: i32 = @intFromFloat(@max(0, height_f - 22));
+    const icon_y: i32 = @intFromFloat(@max(0, height_f - 24));
+    const icon_step: i32 = 26;
+    const icon_x0: i32 = @as(i32, @intCast(width)) - icon_step * 6 - 12;
     for (0..6) |i| {
         if (quad_count == quad_buf.len) break;
         const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);
         quad_buf[quad_count] = .{
-            .x = @floatFromInt(@as(i32, @intCast(260 + i * 26))),
+            .x = @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i))),
             .y = @floatFromInt(icon_y),
             .w = 18,
             .h = 18,

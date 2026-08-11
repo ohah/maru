@@ -41,7 +41,7 @@ pub const Projection = struct {
     connection_reason_raw: u8 = 0,
     cols: u16 = 0,
     rows: u16 = 0,
-    revoke_fence: u64 = 0,
+    semantic_generation: u64 = 0,
 };
 
 pub fn canonical(value: Projection, retained_observation: bool) bool {
@@ -52,27 +52,27 @@ pub fn canonical(value: Projection, retained_observation: bool) bool {
     return switch (tag) {
         .ignored, .ended, .invalidated, .resize_noop, .metadata_noop => !retained_observation and effect == .none and value.failure_raw == 0 and
             value.connection_reason_raw == 0 and value.cols == 0 and value.rows == 0 and
-            value.revoke_fence == 0,
+            value.semantic_generation == 0,
         .resize_commit => !retained_observation and effect == .none and
             value.failure_raw == 0 and value.connection_reason_raw == 0 and
-            value.cols >= 2 and value.rows != 0 and value.revoke_fence == 0,
+            value.cols >= 2 and value.rows != 0 and value.semantic_generation != 0,
         .metadata_commit => retained_observation and effect == .none and
             value.failure_raw == 0 and value.connection_reason_raw == 0 and
-            value.cols == 0 and value.rows == 0 and value.revoke_fence == 0,
+            value.cols == 0 and value.rows == 0 and value.semantic_generation == 0,
         .revoked => !retained_observation and effect == .revoke_fence and
             value.failure_raw == 0 and value.connection_reason_raw == 0 and
-            value.cols == 0 and value.rows == 0 and value.revoke_fence != 0,
-        .failure => !retained_observation and value.cols == 0 and value.rows == 0 and
-            value.revoke_fence == 0 and switch (std.enums.fromInt(
-            PreparationFailure,
-            value.failure_raw,
-        ) orelse return false) {
-            .out_of_memory, .local_resource_exhausted => effect == .poison and
-                value.connection_reason_raw == local_resource_exhausted_reason_raw,
-            .protocol_error => effect == .poison and
-                value.connection_reason_raw == peer_contract_violation_reason_raw,
-            .connection_closed => effect == .none and value.connection_reason_raw == 0,
-        },
+            value.cols == 0 and value.rows == 0 and value.semantic_generation != 0,
+        .failure => !retained_observation and value.cols == 0 and value.rows == 0 and value.semantic_generation == 0 and
+            switch (std.enums.fromInt(
+                PreparationFailure,
+                value.failure_raw,
+            ) orelse return false) {
+                .out_of_memory, .local_resource_exhausted => effect == .poison and
+                    value.connection_reason_raw == local_resource_exhausted_reason_raw,
+                .protocol_error => effect == .poison and
+                    value.connection_reason_raw == peer_contract_violation_reason_raw,
+                .connection_closed => effect == .none and value.connection_reason_raw == 0,
+            },
     };
 }
 

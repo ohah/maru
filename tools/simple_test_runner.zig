@@ -11,6 +11,11 @@ const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 
+// 전용 C3-3b3 runner가 값을 채우지 않는 일반 test artifact도 링크될 수 있도록 pristine 채널을 제공한다.
+pub export var maru_c3b3_death_stage_raw: u8 = 0;
+pub export var maru_c3b3_death_child_path: [1024]u8 = [_]u8{0} ** 1024;
+pub export var maru_c3b3_death_child_path_len: usize = 0;
+
 pub const std_options: std.Options = .{
     .logFn = log,
 };

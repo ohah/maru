@@ -424,6 +424,23 @@ pub const SettlementDispositionSealInput = struct {
     consumed_receipt_digest: Digest,
 };
 
+pub const PreparedSemanticCommitSealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    pending_owner_addr: u64,
+    owner_incarnation: u64,
+    attempt: u64,
+    event_generation: u64,
+    disposition_seal: Digest,
+    prepared_seal: Digest,
+    prepared_tag_raw: u8,
+    publish_raw: u8,
+    resize_generation: u64,
+    phase_raw: u8,
+    observation_moved_raw: u8,
+    semantic_post_digest: Digest,
+};
+
 pub const RuntimeOperationPreflight = struct {
     lifetime_owner_addr: u64,
     runtime_addr: u64,

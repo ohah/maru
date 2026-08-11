@@ -1970,7 +1970,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `.taken`은 live Runtime을 바로 바꾸지 않는다. b2b의 `RemoteRuntime`은 한 시점의 immutable `RuntimeSemanticSnapshot`을 만들고,
    bound stream의 sealed classification context와 payload를 `classifyAndPrepareEvent`에 넘긴다. sealed `EventOwner` view는 frame header
    `wire_major`와 별도의 take-time `expected_major|metadata_support`를 quarantine trusted mirror와 다시 비교한다. 이 함수는 live Runtime에
-   대해 mutation-free이며, `ignored|ended|invalidated|resize_noop|resize_commit|metadata_noop|metadata_commit|revoked|failure`의 닫힌
+   대해 mutation-free이며, `ignored|ended|invalidated|resize_noop|resize_commit{size,resize_generation}|metadata_noop|metadata_commit|revoked|failure`의 닫힌
    stack `PreparedEvent` borrow를 만든다. metadata commit은 DTO backing을 `RuntimeObservation`에 adopt하지 않고 exact-capacity independently-owned next
    observation을 만든다.
 
@@ -2772,6 +2772,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    prepare와 각 settlement admission 직전에는 callback/yield가 없고, `Busy` 뒤 다음 tick yield는 허용한다. next tick까지의 정상
    local mutation은 pending lifecycle guard가 막으므로 snapshot mismatch는 사용자 입력이 아니라 invariant failure다.
 
+   `resize_commit`은 legacy full-state 적용과 동일하게 size와 take-time incoming resize generation을 함께 process-keyed progress seal에
+   봉인하며 b4는 둘을 한 semantic publication에서만 갱신한다. generation을 Runtime current 값에서 추측하거나 `+1`로 합성하지 않는다.
    `EffectRequest`는 `none|poison(ConnectionReason)|revoke_fence(u64)`의 closed union이다. Runtime semantic 성공/실패 조합도 private
    constructor가 허용한 `PreparedEvent` variant로만 만든다. error tag는
    `out_of_memory|local_resource_exhausted|protocol_error|connection_closed`로 좁히고,

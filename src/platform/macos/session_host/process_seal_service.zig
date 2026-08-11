@@ -23,6 +23,7 @@ const runtime_settlement_lease_domain = "maru.runtime-settlement-lease.v1";
 const runtime_settlement_binding_domain = "maru.runtime-settlement-binding.v1";
 const pending_settlement_permit_domain = "maru.pending-settlement-permit.v1";
 const settlement_disposition_domain = "maru.settlement-disposition.v1";
+const prepared_semantic_commit_domain = "maru.prepared-semantic-commit.v1";
 const prepared_event_release_permit_domain = "maru.prepared-event-release-permit.v2";
 const event_release_completion_domain = "maru.event-release-completion.v2";
 const settlement_scratch_range_domain = "maru.settlement-scratch-range.v1";
@@ -53,6 +54,7 @@ pub const RuntimeSettlementLeaseSealInput = cleanup_seal.RuntimeSettlementLeaseS
 pub const RuntimeSettlementBindingSealInput = cleanup_seal.RuntimeSettlementBindingSealInput;
 pub const PendingSettlementPermitSealInput = cleanup_seal.PendingSettlementPermitSealInput;
 pub const SettlementDispositionSealInput = cleanup_seal.SettlementDispositionSealInput;
+pub const PreparedSemanticCommitSealInput = cleanup_seal.PreparedSemanticCommitSealInput;
 pub const PreparedEventReleasePermitSealInput = cleanup_seal.PreparedEventReleasePermitSealInput;
 pub const EventReleaseCompletionSealInput = cleanup_seal.EventReleaseCompletionSealInput;
 pub const SettlementScratchRangeSealInput = cleanup_seal.SettlementScratchRangeSealInput;
@@ -582,6 +584,10 @@ pub fn pendingSettlementPermitSeal(pid: u32, process_nonce: u64, input: PendingS
 
 pub fn settlementDispositionSeal(pid: u32, process_nonce: u64, input: SettlementDispositionSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, settlement_disposition_domain, input);
+}
+
+pub fn preparedSemanticCommitSeal(pid: u32, process_nonce: u64, input: PreparedSemanticCommitSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, prepared_semantic_commit_domain, input);
 }
 
 pub fn preparedEventReleasePermitSeal(pid: u32, process_nonce: u64, input: PreparedEventReleasePermitSealInput) ReadyError!CleanupSeal {

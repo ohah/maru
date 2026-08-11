@@ -911,7 +911,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       6. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고
          `idle|event_pending|drained|ended` typed progress를 `RemoteTermBackend.drainRemote`까지 연결한다. settlement/observation cleanup callback
          전후 full seal, `committed_cleanup` read/mutation guard, actual product Busy→next-tick success·surface live E2E와
-         `RemoteRuntime` generation semantic arm의 raw `Client` event/effect callsite 0 focused allowlist를 고정한다.
+         `RemoteRuntime` generation semantic arm의 raw `Client` event/effect callsite 0 focused allowlist를 고정한다. focused gate
+         `test-session-host-2c3d-c3-3b4`는 최적화 모드마다 중립 pump 계약 6개, Pending semantic commit 9개,
+         실제 Runtime event kind 9개, pump·round-robin 8개, async close parity 4개인 unique component 36개와
+         callback 뒤 proof-loss subprocess 3개, boundary 1개를 exact-count한다.
       7. **C3-3b6 app-quit/current+N-1 shutdown:** 모든 outcome의 exact target/attempt `ShutdownAttemptKey`, connection-dependent와
          post-connection terminal의 one-shot `ShutdownConnectionReceipt{connection,GUI-local lease generation,operation,inventory_attempt}`,
          pre/post `bounded_unconfirmed` evidence matrix와 closed `ShutdownAdminOutcome`,

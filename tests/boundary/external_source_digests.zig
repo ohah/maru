@@ -277,7 +277,8 @@ pub const inventory = [_]Proof{
     // 두 곳과 그 대상은 바뀌지 않았고, 새 권위는 별도 process-sealed leaf가 검증한다.
     // 창 닫기 graph의 scalar 저장 형식을 Linux ABI 교차 빌드에도 유지하도록 조건부 void 별칭을 없앴다.
     // 읽는 reflection 두 곳은 그대로이고, syscall과 RemoteRuntime 실행 경로는 계속 macOS에만 남는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "7d945698682358abd59cf532b221af8b010f68bddff13f55b7dd0f5f7ca8f54e" },
+    // b4는 frame 시작의 backend pump와 실제 async close parity 테스트만 더하며 기존 반사 owner 둘은 유지한다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "2d26f0f73f868aa41dea2c41097590edbd9d497d716358fbd1435520e778ebd0" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

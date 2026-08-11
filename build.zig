@@ -2106,6 +2106,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b5 common close progress Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b5_step.dependOn(session_host_2c3d_c3_3b3_step);
+    const session_host_2c3d_c3_3b4_step = b.step(
+        "test-session-host-2c3d-c3-3b4",
+        "2c3d C3-3b4 product semantic commit and pump Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b4_step.dependOn(session_host_2c3d_c3_3b5_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2662,6 +2667,120 @@ pub fn build(b: *std.Build) void {
         run_event_c3_3b5_boundary_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b5_step.dependOn(&run_event_c3_3b5_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b5_boundary_tests.step);
+
+        const event_c3_3b4_proof_loss_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const event_c3_3b4_proof_loss_tests = addProjectTest(b, .{
+            .root_module = event_c3_3b4_proof_loss_module,
+            .filters = &.{"C3-3b4 proof-loss subprocess"},
+        });
+        const run_event_c3_3b4_proof_loss_tests = b.addRunArtifact(event_c3_3b4_proof_loss_tests);
+        run_event_c3_3b4_proof_loss_tests.addArg("--maru-expect-tests=3");
+        // 이 subprocess는 process seal이 아직 pristine인 전용 artifact에서만 증명한다.
+        run_event_c3_3b4_proof_loss_tests.setEnvironmentVariable(
+            "MARU_C3B4_PROOF_LOSS",
+            "fresh-artifact-v1",
+        );
+        run_event_c3_3b4_proof_loss_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b4_step.dependOn(&run_event_c3_3b4_proof_loss_tests.step);
+        const event_c3_3b4_async_close_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        if (target.result.os.tag == .macos) {
+            event_c3_3b4_async_close_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/coretext_smoke.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            event_c3_3b4_async_close_module.linkFramework("Foundation", .{});
+            event_c3_3b4_async_close_module.linkFramework("CoreText", .{});
+            event_c3_3b4_async_close_module.linkFramework("CoreGraphics", .{});
+        }
+        // app_session root의 무명 module sentinel 3개가 filter와 함께 materialize되며, named 제품 행은 4개다.
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b4_step,
+            event_c3_3b4_async_close_module,
+            "C3-3b4 async close parity",
+            7,
+        );
+        const event_c3_3b4_runtime_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b4_step,
+            event_c3_3b4_runtime_module,
+            "C3-3b4 실제 Runtime event",
+            9,
+        );
+        const event_c3_3b4_backend_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b4_step,
+            event_c3_3b4_backend_module,
+            "C3-3b4 pump round-robin",
+            8,
+        );
+        const event_c3_3b4_contract_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_event_pump_contract.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b4_step,
+            event_c3_3b4_contract_module,
+            "C3-3b4 중립 pump 계약",
+            6,
+        );
+        const event_c3_3b4_pending_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/pending_event_owner.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b4_step,
+            event_c3_3b4_pending_module,
+            "C3-3b4 Pending semantic commit",
+            9,
+        );
+        const event_c3_3b4_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3d_c3_3b4_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"C3-3b4 product semantic pump boundary"},
+        });
+        const run_event_c3_3b4_boundary_tests = b.addRunArtifact(event_c3_3b4_boundary_tests);
+        // b3의 exact-one gate inventory와 섞이지 않도록 후속 슬라이스 인자는 조각으로 유지한다.
+        run_event_c3_3b4_boundary_tests.addArg("--maru-expect-tests=" ++ "1");
+        run_event_c3_3b4_boundary_tests.setCwd(b.path("."));
+        session_host_2c3d_c3_3b4_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
+        boundary_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

@@ -39,8 +39,9 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     try std.testing.expectEqual(@as(usize, 2), count(close_graph_source, "test \"C3-3b5 close graph"));
     try std.testing.expectEqual(@as(usize, 4), count(app_source, "test \"C3-3b5 AppSession"));
     try std.testing.expectEqual(@as(usize, 42), count(red_source, "test \"C3-3b5 ") + count(backend_source, "test \"C3-3b5 remote backend") + count(close_graph_source, "test \"C3-3b5 close graph") + count(app_source, "test \"C3-3b5 AppSession"));
-    try std.testing.expectEqual(@as(usize, 0), count(runtime_source, "advancePendingEventForClose("));
-    try std.testing.expectEqual(@as(usize, 0), count(backend_source, "advancePendingEventForClose("));
+    // b4가 dormant seam의 유일한 semantic adapter를 활성화한다. backend sweep 밖 caller는 계속 금지한다.
+    try std.testing.expectEqual(@as(usize, 1), count(runtime_source, "pub fn advancePendingEventForClose("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend_source, ".advancePendingEventForClose()"));
     try std.testing.expectEqual(@as(usize, 0), count(app_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.windowCloseReadiness(term.rt.handle)"));
     try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.reserveWindowCloseTickets("));

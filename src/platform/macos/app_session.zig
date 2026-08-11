@@ -30967,6 +30967,59 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 }
 
+// 적대적 검증이 잡은 셋을 고정한다. 셋 다 "조용히 안 따라간다"로만 드러나 눈으로는 구분되지 않는다.
+test "file tree ET-CWD: 자동 root 전환은 mutation 중엔 미루고, 미룬 cwd를 다시 시도하며, one-shot이 다른 cwd에 삼켜지지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "project", .default_dir);
+    try tmp.dir.createDir(session.io, "away", .default_dir);
+    try tmp.dir.createDir(session.io, "other", .default_dir);
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const project = try std.fs.path.join(allocator, &.{ tmp_root, "project" });
+    defer allocator.free(project);
+    const away = try std.fs.path.join(allocator, &.{ tmp_root, "away" });
+    defer allocator.free(away);
+    const other = try std.fs.path.join(allocator, &.{ tmp_root, "other" });
+    defer allocator.free(other);
+
+    file_panel_ops.activateFilePanelDockControl(session);
+    try session.file_tree.replaceExplicitRoots(&.{project});
+    const initial_scan = session.file_tree.takeScanRequest().?;
+    allocator.free(initial_scan);
+
+    // ① **파일 mutation 중에는 전환하지 않는다.** root 교체는 그때 거부되는 동작이고(file-explorer.md §2),
+    //    자동 경로가 `provideFileTreeRootPick`을 직접 불러 그 게이트를 우회하고 있었다.
+    session.file_tree_edit_inflight = true;
+    try testWriteActiveTermCwd(session, away);
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation == null);
+    // ② **미룬 cwd는 "따라간 것"으로 표시되지 않는다.** 표시하면 다음 `cd` 전까지 영영 재시도되지 않아
+    //    시작 직후처럼 슬롯이 잠깐 바쁜 순간의 첫 따라가기가 통째로 사라진다.
+    try std.testing.expect(session.file_tree_followed_cwd == null);
+
+    session.file_tree_edit_inflight = false;
+    try file_panel_ops.updateFileTree(session); // 같은 cwd 그대로 — 이제는 걸려야 한다
+    const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pending.auto);
+    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?);
+
+    // ③ **커밋 뒤 재시도 one-shot은 그 cwd의 것이다.** 도크가 숨어 있으면 소비되지 않고 남는데, 그 사이
+    //    `cd`가 일어나면 다른 cwd가 그것을 먹고 자기 전환을 억제당한 채 followed로 표시돼 버렸다.
+    session.file_tree_root_validation = null; // 검증 완료를 흉내내고
+    session.file_tree_auto_follow_reveal_pending = true; // one-shot만 남긴다
+    try testWriteActiveTermCwd(session, other); // 그 사이 다른 곳으로 이동
+    try file_panel_ops.updateFileTree(session);
+    const after = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+    try std.testing.expect(after.auto); // one-shot에 삼켜지지 않고 제 전환을 건다
+    try std.testing.expectEqualStrings(other, session.file_tree_followed_cwd.?);
+}
+
 fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
     // 실제 OSC 7→core observation 경로를 쓴다. cache를 직접 바꾸면 updateFileTree가 renderer보다 먼저
     // observation을 refresh해야 한다는 제품 불변을 증명하지 못한다.

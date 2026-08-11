@@ -2401,7 +2401,7 @@ pub fn resolveAppAsset(io: std.Io, role: maru.session.app_scheme.AppAssetRole, r
 
 // maru-app:// asset resolve C-ABI(5c-2b): Swift WKURLSchemeHandler(5c-2c)가 요청 경로를 안전한 절대 경로로 resolve한다.
 // 정책(경로 샌드박스·realpath 탈출 방어)은 여기 Zig가 소유하고, Swift는 반환 경로의 바이트를 읽어 CSP와 서빙만 한다
-// (docs/web-panel.md §10 "정책은 테스트 가능한 Zig, Swift는 WebKit 어댑터"). 반환: **>=0** = `out`에 쓴 canonical 절대
+// (docs/plans/web-panel.md §10 "정책은 테스트 가능한 Zig, Swift는 WebKit 어댑터"). 반환: **>=0** = `out`에 쓴 canonical 절대
 // 경로 길이. **음수** = 에러 코드(-1 Reject=문자열 거부, -2 NotFound=부재/디렉터리, -3 OutsideRoot=symlink 탈출,
 // -4 null 포인터). AppSession I/O singleton과 분리된 이 인스턴스는 export mutex 아래에서만 사용한다.
 var app_asset_io: std.Io.Threaded = .init_single_threaded;

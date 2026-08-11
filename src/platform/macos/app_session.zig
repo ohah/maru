@@ -32,7 +32,7 @@ pub const git_backend_mod = @import("git_backend.zig");
 pub const scm_view = maru.session.scm_view;
 pub const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
-pub const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
+pub const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/plans/web-panel.md §10 4c·§14)
 
 // L2 session core(src/session)로 추출한 순수 입력/재정렬 수학. 내부 호출처는 bare 이름을 유지하도록 file-scope
 // alias로 재노출한다(docs/layering-and-portability.md §3 — 2차 추출 슬라이스 1). 정의·테스트는 session/input_math.zig.
@@ -116,7 +116,7 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 // 매 tick 4a `surfaceDiff`로 직전 tick 집합과 diff해 **batch 전이**(created/destroyed/reframed/hidden/shown 여러 개)를
 // 낸다. 4c의 "단일 패널·활성 pane 추종"을 완전히 대체한다 — 각 웹뷰는 **자기 pane 본문 rect**에 고정되고, 같은 pane의
 // 활성 Term만 show·비활성 탭 web Term은 hidden(상태 유지). 비활성 워크스페이스 탭의 web Term은 집합 밖이라 destroy된다
-// (§6 "destroy 또는 미포함"). docs/web-panel.md §2·§6·§10 4e-3.
+// (§6 "destroy 또는 미포함"). docs/web-panel.md §2·§6, docs/plans/web-panel.md §10 4e-3.
 
 /// web surface 전이 op(§6 surfaceDiff 전이). 값은 ABI(app_host_abi.h)의 u32와 정합해야 한다.
 pub const WebSurfaceOp = enum(u32) { none = 0, create = 1, destroy = 2, reframe = 3, hide = 4, show = 5 };
@@ -338,7 +338,7 @@ pub const abi_version: u32 = 169;
 // 109: Phase 7f-0 — 새 창/팝업 adopt: create_adopted_web_term export 1개(Swift `WKUIDelegate.createWebViewWith`가
 // WebKit config로 만든 WKWebView를 붙일 browser web Term을 활성 pane에 새 탭으로 만들고 surface_id 반환 — Swift-first
 // 동기 생성, 소유·시점 역전). Swift가 id로 pre-created webview를 webPanels에 키잉, drain은 존재 시 중복 생성 스킵(7f-1).
-// 신규 export만 — 구조체 offset 불변. docs/web-panel.md §8 7f.
+// 신규 export만 — 구조체 offset 불변. docs/web-panel-features.md §8 7f.
 // 108: Phase 7e-4 후속 — active_web_surface_id getter 1개(활성 pane 활성 term이 browser면 surface_id, 아니면 0). Swift
 // performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 WKWebView 키보드 포커스 유무와 무관하게 "지금 활성 탭이
 // browser면" 동작하게 게이트하는 데 쓴다(브라우저 탭 활성화 시 webView 자동 포커스가 없어 isWebPanelFocused만으론
@@ -373,7 +373,7 @@ pub const abi_version: u32 = 169;
 // **web Term마다** 본문 rect·visible(자기 pane 활성 탭인가)을 계산하고 직전 tick 집합과 surfaceDiff한 batch를 낸다 —
 // 각 WKWebView가 **자기 pane 본문 rect에 고정**(4c의 활성 pane 추종 완전 제거). WebSurfaceTransitionAbi에 `visible`
 // (create 시 hidden 생성 여부) 필드 추가(op 뒤 pad 자리라 size 불변). Swift는 webPanels[surface_id] dict에 op을 적용.
-// docs/web-panel.md §2·§6·§10 4e-3·§14.
+// docs/web-panel.md §2·§6, docs/plans/web-panel.md §10 4e-3·§14.
 // 100: Phase 4c/4d code-review — maru_macos_app_session_key_is_app_action(순수 조회 u32 getter) 추가. 웹 패널
 // 포커스 중 Swift performKeyEquivalent가 Cmd 조합이 maru 앱 바인딩(app_action)인지 side-effect 없이 물어, app_action
 // (⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·⌘,·⌘A·⌘K …)만 가로채 keyDown으로 라우팅하고 나머지(⌘Q/H/M 메뉴 전용·⌘C/V WebKit 편집·
@@ -385,7 +385,7 @@ pub const abi_version: u32 = 169;
 // 계산(contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 매 tick diff해 단일 전이 op(none/create/destroy/reframe/
 // hide/show)로 export한다. Swift가 그 op만 기계적으로 적용(웹뷰 삽입=터미널<웹뷰<오버레이 중간, frame=pt 좌하단).
 // 콘텐츠·브리지·보안(Phase 5)·입력/IME(4d)는 범위 밖(빈 웹뷰는 hitTest→nil로 입력 통과). 새 export 1개 + 새 struct
-// 추가 — 기존 struct offset·인자 순서 불변. docs/web-panel.md §2·§6·§10 4c·§14.
+// 추가 — 기존 struct offset·인자 순서 불변. docs/web-panel.md §2·§6, docs/plans/web-panel.md §10 4c·§14.
 // 96: maru_macos_app_session_quick_terminal_frames + QuickTerminalFrames(extern struct, quick_terminal_geometry.zig로 분리) —
 // quick 패널 보임/숨김 사각형을 세션의 **현재** config로 매 호출 라이브 계산(위치별 가장자리 슬라이드·center 페이드, 순수
 // quick_terminal_geometry.compute + 단위 테스트). quick_terminal_config(세션-불변 스냅샷)와 달리 매 토글 재조회라 설정 GUI 변경이
@@ -6217,7 +6217,7 @@ pub const AppSession = struct {
             .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
             // Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState). **여는 UI는 하나이고, 질의가
             // 가는 곳만 갈린다** — 활성 탭이 터미널이면 스크롤백, 웹(마크다운 뷰어·browser)이면 그 페이지다
-            // (docs/web-panel.md §8). 예전에는 웹 탭에서도 스크롤백 find가 열려, 우상단에 검색창이 뜨는데 페이지는
+            // (docs/web-panel-features.md §8). 예전에는 웹 탭에서도 스크롤백 find가 열려, 우상단에 검색창이 뜨는데 페이지는
             // 검색되지 않았다(사용자 제보).
             //
             // 판정은 **포커스가 아니라 활성 pane의 web 탭**이다(`activeWebSurfaceIdAnyKind`) — §7e-4가 ⌘R에서
@@ -44829,7 +44829,7 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
 // WP-F1: **웹 탭에서 ⌘F가 스크롤백 find를 열면 안 된다.** 그 오버레이는 터미널 스크롤백만 검색하므로,
 // 마크다운 뷰어에서 열리면 우상단에 검색창이 뜨는데 페이지는 검색되지 않는다(사용자 제보).
 // 판정 기준이 `activeWebSurfaceIdAnyKind`인 것이 핵심이다 — browser 전용 함수를 쓰면 **마크다운이 빠져**
-// 제보된 그 버그가 그대로 남는다(docs/web-panel.md §8).
+// 제보된 그 버그가 그대로 남는다(docs/web-panel-features.md §8).
 test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지로 나간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

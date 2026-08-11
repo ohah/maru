@@ -11,7 +11,7 @@ pub const Action = union(enum) {
     // 스페이스로 cascade), ⌘]/⌘[=다음/이전 Term. 워크스페이스(위)와 modifier(shift 유무)로 갈린다.
     new_term,
     // 활성 pane에 web(브라우저) Term을 생성한다 — new_term의 web 버전(PTY/셸 없이 WKWebView surface). 4c/4e의 디버그
-    // env 훅 MARU_WEB_PANEL을 사용자 command/메뉴로 승격(docs/web-panel.md §10 4e-5). panel_kind는 .browser(markdown은
+    // env 훅 MARU_WEB_PANEL을 사용자 command/메뉴로 승격(docs/plans/web-panel.md §10 4e-5). panel_kind는 .browser(markdown은
     // 후속). 기본 키바인딩 **⌘⌥T**(⌘T=new_term의 web 버전, ⌥로 구분 — ⌘⇧T=new_tab 워크스페이스와도 구분). 메뉴 File·커맨드 팔릿에도 노출.
     new_web_tab,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와

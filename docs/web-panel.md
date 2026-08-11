@@ -6,6 +6,17 @@
 
 > **spike로 실측한 범위(2026-06)**: ① 투명 Metal 오버레이가 WKWebView 위에 합성되는 **z-order 순서**(GUI), ② isolated `WKContentWorld`에서 임의 page-world JS가 브리지에 못 닿음(headless). **그 둘만** 확인했다. 입력/firstResponder 라우팅·실제 셀 모달 합성·드래그 인터랙션·per-pane 좌표계는 **미검증 리스크**(§12)다.
 
+## 계약 문서 구성
+
+웹 패널 계약은 아래 문서가 나눠 소유한다. **절 번호는 파일을 넘어 이어진다** — 다른 문서와 코드 주석이
+`web-panel.md §7.1`처럼 절 번호로 가리키므로 재번호하지 않는다.
+
+| 절 | 문서 | 소유 |
+|---|---|---|
+| §1~§7 · §9 · §11~§13 | 이 문서 | 확정 결정, 합성 계층, 좌표계, 입력·키 라우팅, chrome 인터랙션 제약, surface ABI, 보안, 베이스와 결정, 검증, 리스크, CEF 백엔드(범위 밖) |
+| §8 | [빠진 기능](web-panel-features.md) | 제품으로 서기 위해 채워야 하는 기능의 계약 |
+| §10 · §14 | [구현 계획](plans/web-panel.md) | Phase 순서·코드 위치·기능별 슬라이스 이력 |
+
 ## 1. 확정 결정
 
 - **웹 패널 = WKWebView subview, 모달 = 별도 Metal 오버레이 레이어.** 단일 contentView를 컨테이너로 바꾸고 3겹으로 합성한다(§2).
@@ -22,7 +33,7 @@
 현재 `contentView`는 단일 `MaruMetalTerminalView`(CAMetalLayer)이고, 이 뷰가 firstResponder로 keyDown·IME·마우스·DnD·hover를 전부 받는다. 웹 패널을 위해 **contentView를 컨테이너 NSView로 바꾸고** 세 겹을 쌓는다:
 
 1. **터미널 Metal layer**(맨 아래): 기존 셀·사이드바·탭바·pane chrome. `isOpaque`는 무조건 true가 아니다 — `window.opacity<1`이면 현재 코드가 metalLayer·window의 `isOpaque`를 모두 false로 내리고 chrome 배경(`chromeCellBg`/`chromeQuadBg`)까지 반투명이다. WKWebView와의 정합은 §8.
-2. **WKWebView subview(들)**(중간): web Term마다 하나, **본문 rect**에만(§5). split이면 여러 개. **(4e-3 구현 완료)**:
+2. **WKWebView subview(들)**(중간): web Term마다 하나, **본문 rect**에만(§5). split이면 여러 개:
    활성 워크스페이스 탭의 pane 트리를 walk해 **web Term마다** WKWebView(`MaruWebPanelView` 래퍼) 하나를 붙이고, 각 웹뷰를
    **자기 pane 본문 rect에 고정**한다(4c의 활성 pane 추종을 완전 제거 — 사용자 관찰 해소). 같은 pane의 활성 Term만 show·
    비활성 탭 web Term은 hidden(상태 유지), 비활성 워크스페이스 탭의 web Term은 destroy. Swift는 `webPanels[surface_id]`
@@ -66,7 +77,7 @@
   2. **터미널 IME 무회귀**: 웹 래퍼(`MaruWebPanelView`)의 override는 **웹이 포커스일 때만** 동작하고(그 외엔 `false`만 반환) 터미널 뷰의 keyDown/`NSTextInputClient`/`performKeyEquivalent`를 **한 줄도 건드리지 않는다**. local event monitor는 매 keystroke(한글 조합 포함)를 앱 전역에서 가로채는 병렬 경로라 터미널 IME 폭발반경이 크고, 현행 performKeyEquivalent+`anyOverlayOpen` 패턴과도 이질적이라 기각.
   3. **모달 responder 전이**: 웹 포커스 중 모달이 열리면(`anyOverlayOpen` false→true 엣지) `makeFirstResponder(터미널 뷰)`로 전이해 모달 입력·IME preedit가 터미널 `NSTextInputClient`로 흐르고, 닫히면(true→false) 직전 웹뷰로 복원한다. 전이는 **기존** `becomeFirstResponder`(imeFocus true)/`resignFirstResponder`(commitComposition)를 그대로 태운다 — 새 IME 로직 없음. 엣지는 매 tick + 모달 여는 조합 직후 동기로 조정한다(조합 직후 타이핑이 웹뷰로 새지 않게).
   - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
-  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 구현 완료(2026-07-21)** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find는 **§8 슬라이스 ①②로 구현 완료**다(라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind` — §8이 그 이유를 적는다). 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
+  - **포커스 기준 분기(웹 소유 키 → WebKit 양보)**: **클립보드 키 `⌘C`/`⌘V`/`⌘A`는 WebKit이 받는다** — 웹 패널 포커스 시 메뉴바 편집 항목이 표준 셀렉터를 WebKit responder chain으로 넘긴다(§4.2 단일 출처). `⌘F` 페이지 내 find는 **[빠진 기능](web-panel-features.md) §8이 계약을 소유**한다(라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind` — §8이 그 이유를 적는다). 초기 4d 최소 spike는 빈 about:blank라 Cmd-조합을 전부 maru로 라우팅했고(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해), 실콘텐츠에서 이 분기 정책은 Zig/config와 §4.2가 소유한다.
 
 ### 4.1 웹↔터미널 포커스 동기 불변식 (4g — 흩어진 포커스 패치 통합)
 
@@ -93,10 +104,7 @@
 
 **필요 표면**: `activate_surface`(v78, 있음). **활성 web surface getter 확장** — 현 `activeWebSurfaceId`는 browser 전용(0=아님)이라, Direction 1이 활성 pane이 **어떤 web kind든**(browser·markdown) 그 webview를 포커스하려면 "활성 pane 활성 term이 web이면 surface_id + kind, 아니면 0"이 필요하다(신규 getter 또는 확장, Zig 순수·헤드리스 테스트). Swift는 surface_id→webPanels로 webview 조회.
 
-**분해**:
-- **4g-0 (Zig — 구현 완료)**: `activeWebSurfaceIdAnyKind` getter(활성 term이 web[browser·markdown]이면 surface_id, 아니면 0, ABI v112) + 헤드리스 테스트(터미널=0·browser/markdown=id·browser-only는 markdown서 0=핵심 구분).
-- **4g-1 (Swift — 구현 완료, GUI 손 테스트 통과)**: explicit `webPanelPrimaryDown`/typed completion이 Zig owner를 먼저 바꾸고, 통합 `reconcileWebFocus`는 override 뒤 Zig owner→firstResponder 단방향으로만 맞춘다. `reconcileWebModalFocus`·`reconcileWebFocusActivation`과 passive rising-edge cache는 **대체·삭제**했다. override용 `addr_edit_surface` getter(ABI v113). 손 테스트: 모달 Enter·터미널/브라우저 클릭·키보드 pane/탭 전환·주소 편집·팝업·터미널 IME 무회귀 전부 통과.
-- **4g-2 (정리 — 완료)**: **검토 결론**: `addr_focus_restore_pending`(주소 편집 종료 후 webview 복원)·⌘R `activeWebSurfaceId` 게이트는 불변식 Direction 1에 **subsume**되지만(D1이 복원·브라우저 탭 활성 시 webview 포커스), **제거 시 ABI export 제거+체인+손 테스트인데 동작 이득 0**(D1과 same-tick 복원)이라 **belt-and-suspenders로 유지**(harmless 중복 — 즉시 복원 fast-path/견고한 게이트, D1이 authority; 향후 저우선 cleanup서 제거 가능). ⌘R KVO `assumeIsolated`(13차 리뷰 [7] PLAUSIBLE)=**유지**(WKWebView nav KVO는 WebKit 메인 스레드 갱신·off-main 미관측 + 코드베이스 확립 패턴[NSColorSampler 등 7곳] + 근거 없는 방어 지양; 실 크래시 관측 시 dispatch 전환). 주석에 근거 명시.
+슬라이스와 완료 이력은 [웹 패널 구현 계획](plans/web-panel.md)이 소유한다.
 - **4g-3 (14차 리뷰 후속 — 완료)**: override 판정을 `anyOverlayOpen ∪ addr_edit`에서 **`terminalOwnsInput` 단일 출처**로 교체(ABI `addr_edit_surface`→`terminal_owns_input`, v113→v114). 옛 override는 ⑴ **rename·사이드바 검색을 빠뜨려** web pane 활성 중 그 편집 키가 웹뷰로 샜고(리뷰 [0]) ⑵ **notice까지 세어** 비-모달 토스트가 편집 responder를 뺏었다(리뷰 [3]). 겸사로 Zig 키 intercept 3개(rename/addr_edit/sidebar_search)도 `anyOverlayOpen`→`anyModalOverlayOpen`으로 일치, 주소창 편집 chord 처리는 **⌘A/C/V/X/Z를 제외**해 ⌘V가 편집을 통째 날리던 회귀 수정([1], 소비 no-op으로 편집 보존·실 붙여넣기는 후속), 잘못된 주소 무효 시 편집 유지 docstring 정정([5]), `focusTerminalView` 재downcast→바인딩된 `tv` 재사용([8]). **헤드리스**: 브라우저 web term 닫기 확인([4]) + `terminal_owns_input(null)=0` ABI 테스트. **GUI 손 테스트 필요**: web pane 위 rename/사이드바 검색이 웹뷰로 안 새는지, 주소창서 ⌘V가 편집을 안 지우는지, 모달 Enter·키보드 pane 전환 무회귀.
 - **4g-4 (파일 도크 교차 영역 입력 회귀 — 완료, 2026-07-18)**: 도크가 열린 mouse-down 경로의 `dockGroupAtPoint(...) orelse return`이 도크 밖 클릭까지 함수 전체에서 종료해, workspace browser는 보이지만 주소창·탭·터미널을 조작할 수 없었다. group hit는 조건부로 처리하고 **실제 dock rect 안** Metal 클릭만 소비하도록 바꿔 바깥 클릭은 workspace hit-test로 흐른다. 도크를 연 browser 주소창 클릭→`addr_edit_surface`/`terminalOwnsInput`→문자 입력까지 red→green 통합 테스트로 고정했다.
 
@@ -110,7 +118,7 @@
 
 **모드별 결과**: `live`·`source` 마크다운은 CM6가 복사·붙여넣기·전체 선택을 모두 처리한다. `read` 마크다운·`html`은 편집기가 아니므로 **선택 텍스트 복사(⌘C)와 전체 선택(⌘A)만** WebKit이 수행하고 붙여넣기(⌘V)는 삽입 대상이 없어 no-op이다. 이는 [key-input-and-shortcuts.md](key-input-and-shortcuts.md)의 `web_editor`/`pass_through` "WebKit에 양보" 계약을 **메뉴바 축에서 실제로 성립**시키는 보완이다.
 
-**베이스·결정**: responder chain 표준 셀렉터 dispatch(macOS 관용 — WKWebView는 `copy:`/`paste:`/`selectAll:`을 이미 지원). 대안인 "터미널 Metal 뷰에 `copy:`/`paste:`/`selectAll:` NSResponder 구현 + 메뉴 `target=nil` 표준 체인 전환"은 가장 관용적이나 **가장 민감한 터미널 입력·IME 경로**를 건드려 블라스트 반경이 커 기각(사용자 결정 2026-07-21). `⌘F` 페이지 내 find는 §8이 소유한다(포커스가 아니라 `activeWebSurfaceIdAnyKind` 기준 — 구현 완료).
+**베이스·결정**: responder chain 표준 셀렉터 dispatch(macOS 관용 — WKWebView는 `copy:`/`paste:`/`selectAll:`을 이미 지원). 대안인 "터미널 Metal 뷰에 `copy:`/`paste:`/`selectAll:` NSResponder 구현 + 메뉴 `target=nil` 표준 체인 전환"은 가장 관용적이나 **가장 민감한 터미널 입력·IME 경로**를 건드려 블라스트 반경이 커 기각(사용자 결정 2026-07-21). `⌘F` 페이지 내 find는 §8이 소유한다(포커스가 아니라 `activeWebSurfaceIdAnyKind` 기준).
 
 **검증**: firstResponder는 AppKit이라 헤드리스 불가 — **GUI 손 테스트가 유일 안전망**(§11). ⑴ 도크 `read` `.md`·`.html`에서 텍스트 선택 후 `⌘C`→외부 앱 붙여넣기로 확인, ⑵ `live`/`source`에서 `⌘C`/`⌘V`/`⌘A`가 CM6에 작용, ⑶ 터미널 포커스에서 `⌘C`/`⌘V`/`⌘A`가 기존대로 터미널에 동작(무회귀), ⑷ 모달 열림·`.dock_group` publish 대기 중에는 터미널 경로.
 
@@ -130,7 +138,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 현 ABI는 활성 surface 1개(`FrameSummary.surface_id`)만 노출한다. 여러 WKWebView를 관리하려면 신규가 필요하다:
 
 - 매 tick **surface diff**: "어느 surface_id ↔ 어느 NSView, url/panel_kind/trust, 생성/숨김/파괴" — [control-plane.md] §3 엔티티·`panel.open` 생애주기와 직접 커플링.
-- web surface는 **Term**이다(leaf=Pane이 아니라 Pane 안 Term). 한 Pane이 terminal Term + web Term을 가로 탭으로 섞을 수 있고, per-pane 탭바가 둘을 같이 보인다. **web Term마다 WKWebView**(한 leaf에 N개 가능, 활성만 show, 비활성 hidden으로 상태 유지). **(4e-1 구현 완료 — 모델 토대)**: `session_model.Term.kind`(terminal|web) + `LiveSurface` `union(SurfaceKind)`(web arm=sentinel surface)로 web Term을 트리에 담고, `createWebTerm`이 PTY 없이 생성한다. **(4e-3 구현 완료 — per-Term WKWebView 호스팅)**: `computeWebSurfaceTransitions`가 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(각 `{surface_id, panel_kind, 자기 pane 본문 rect, visible=자기 pane 활성 탭인가}`)을 만들고 직전 tick 집합과 `surfaceDiff`한 **batch 전이**(count+at ABI, v101)를 낸다. Swift가 `webPanels[surface_id]` dict에 create/destroy/reframe/hide/show를 적용해 web Term마다 WKWebView를 자기 pane 본문 rect에 고정한다(활성 pane 추종 완전 제거). Term 이동 시 **재부모화**는 4e-4(§10).
+- web surface는 **Term**이다(leaf=Pane이 아니라 Pane 안 Term). 한 Pane이 terminal Term + web Term을 가로 탭으로 섞을 수 있고, per-pane 탭바가 둘을 같이 보인다. **web Term마다 WKWebView**(한 leaf에 N개 가능, 활성만 show, 비활성 hidden으로 상태 유지). **모델 토대**: `session_model.Term.kind`(terminal|web) + `LiveSurface` `union(SurfaceKind)`(web arm=sentinel surface)로 web Term을 트리에 담고, `createWebTerm`이 PTY 없이 생성한다. **per-Term WKWebView 호스팅**: `computeWebSurfaceTransitions`가 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(각 `{surface_id, panel_kind, 자기 pane 본문 rect, visible=자기 pane 활성 탭인가}`)을 만들고 직전 tick 집합과 `surfaceDiff`한 **batch 전이**(count+at ABI, v101)를 낸다. Swift가 `webPanels[surface_id]` dict에 create/destroy/reframe/hide/show를 적용해 web Term마다 WKWebView를 자기 pane 본문 rect에 고정한다(활성 pane 추종 완전 제거). Term 이동 시 **재부모화**는 4e-4(§10).
 - Term 탭을 다른 pane으로 이동하면 WKWebView **재부모화·재프레임**.
 - **터미널 링크의 착지점**(v147): 터미널에서 Cmd+클릭한 http(s) 링크는 `input.link-open-target`이 `auto`(기본)·`in-app`일 때 이 브라우저 패널로 들어온다 — 활성 탭에서 **보이는** browser Term을 재사용하고, 없으면 `auto`는 시스템 브라우저·`in-app`은 새 browser Term을 연다. 정책은 Zig(`openTerminalWebLink`)가 소유하고, 인앱 대상은 파일 패널 외부 링크와 **같은 pending action**으로 실려 Swift가 매 tick surface 전이 batch를 적용한 **뒤** drain해 `BrowserControl.navigate`한다(새 패널의 WKWebView가 준비된 다음에 load되도록 하는 순서 계약). 단일 출처는 [링크 감지](link-detection.md) §링크를 어디에 여는가.
 
@@ -168,112 +176,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 
 **⑥ 슬라이스 경계** — 5c=스킴·경로 샌드박스, 5b=exact app-origin bridge, FP2=실 UI build, FP4=제품 asset·read bridge·격리 renderer 결합.
 
-**⑦ 구현 완료(5c-1·5c-2a/b/c)** — 세 번째 슬라이스를 세 조각으로 나눠 각각 헤드리스 게이트 후 머지했다:
-- **5c-1(경로 샌드박스, L2 순수)**: `src/session/app_scheme.zig` — `validateAppPath`(traversal `..` segment·whitelist `[a-zA-Z0-9._/-]`로 `%`·backslash·null·제어문자 거부·정규화 불변식) + `csp_header` 상수(③ 단일 출처). adversarial 헤드리스 테스트 6개.
-- **5c-2a(realpath 탈출 방어 보안 코어, L4 platform I/O)**: `app_host_abi.zig` `resolveAppAsset(io, root, req, out)` — 5c-1 문자열 검증 후 candidate·root를 각각 `realPathFile`로 canonicalize해 candidate가 root **아래**(`pathIsUnder`)인지 확인(symlink가 root 밖을 가리키면 거부). `statFile.kind != .file`→NotFound. tmpDir adversarial 4개(정상·traversal·symlink 탈출·부재/디렉터리).
-- **5c-2b(C-ABI export)**: 현행은 `maru_macos_app_resolve_app_asset`(>=0=경로 길이, 음수=−1 Reject/−2 NotFound/−3 OutsideRoot/−4 NULL) + 단일 `maru_macos_app_csp_header`다. FP10a에서 `AppAssetRole(u32) { app=0, render=1 }`를 인자로 받는 role-aware resolve/CSP export로 대체하고 C/Zig/Swift raw 값과 worker asset app-only 규칙을 ABI test로 고정한다. 정책=Zig, Swift는 전달·header 부착만 담당한다.
-- **5c-2c + FP4 제품 연결**: `MaruAppSchemeHandler`가 안전 경로의 번들 asset을 CSP와 서빙하고 `MaruWebPanelView`는 markdown config에서만 scheme handler + exact-origin bridge를 등록한다. FP4는 placeholder `src/platform/macos/web/*`를 제거하고 zntc 생성물 `web/dist`를 `Resources/web/`에 복사한다. `maru-app://app/index.html` shell은 `maru-app://render/render.html` iframe을 오케스트레이션하며, macos smoke가 실제 fixture와 bridge/renderer 격리를 자동 단언한다.
-
-## 8. 빠진 기능 (구현 시 필수)
-
-- **browser chrome UI (주소창·nav — `browser` kind 전용, 슬라이스 7e)**: WKWebView는 **네비게이션 UI를 제공하지 않는다**(Safari.app의 주소창·버튼은 Safari 앱 자체 chrome이지 WKWebView가 아님; SFSafariViewController의 내장 chrome은 iOS 전용·모달이라 embed 불가). 단 **nav 함수는 공짜**다 — `goBack()`/`goForward()`/`canGoBack`/`canGoForward`/`reload()`/`load(URLRequest)`/`url`/`title`/`backForwardList`/`estimatedProgress`를 WKWebView가 주고 WebKit이 히스토리·백스택을 소유한다. 그래서 maru는 **UI 껍데기만** 만든다: "chrome=Zig+GPU" 원칙대로 **탭바처럼 GPU 셀로 back/forward/reload 버튼 + 주소창**을 그리고, 버튼→ABI→WKWebView API를 호출한다(`canGoBack`/`canGoForward`로 버튼 활성/비활성). **주소창 2모드**: **① 비활성(읽기전용)** = 현재 `url`만 표시(입력 불가 — 위치 확인용, 임의 URL 입력 보안면 없음), **② 편집** = URL 입력 → `load`(임의 웹 로드라 §7 보안 — untrusted 프로세스 격리·`decidePolicyForNavigationAction` 링크 라우팅 — 동반, Phase 5 security 이후). `panel.navigated`(control §11 이벤트)/navigation delegate로 URL·progress 갱신. markdown kind는 주소창 불요라 kind별 분기(닫힌 열거).
-
-  **7e 슬라이스 계획(인프라 근거 — 텍스트 입력은 `OverlayInput`[chrome/components/overlay_input.zig, find.zig 컴포넌트 형태] 재사용, chrome 렌더는 ChromeDraw[find/sidebar] + tabbar `Metrics` 존 hit-test 재사용, 본문 rect는 `web_panel_layout.contentRect` inset 확장, nav 상태는 최대 greenfield=신규 ABI). 순서=격리 먼저(사용자 결정 2026-07-10). 편집 텍스트 범위=MVP(입력·백스페이스·붙여넣기·Enter/Esc; mid-string 커서·선택은 후속=[text-field-editor.md] 상세 설계):**
-  - **7e-0(untrusted 데이터 격리 — 구현 완료)**: browser(비신뢰) 패널 config에 **공유 ephemeral `WKWebsiteDataStore.nonPersistent()`**(`MaruWebPanelView.browserDataStore`) — 쿠키·localStorage·캐시 비영속(종료 시 소멸) + 신뢰 콘텐츠(maru-app://, 기본 persistent store)와 격리(§7 untrusted 격리). browser 탭들끼리는 공유(브라우저 세션 시맨틱). 스킴 핸들러·브리지는 미등록(신뢰 전용) 유지. smoke: `web_panel_data_store_persistent`=browser false·trusted true. **WKProcessPool은 최신 WebKit서 자동 관리(deprecated)라 명시 안 함.** 스킴 화이트리스트(http/https 허용·file:/javascript: 차단)는 실제 URL 로드가 생기는 **7e-2 navigate 경로(Zig 정책)**에.
-  - **7e-1(nav 상태 ABI + 읽기전용 주소창)** — 둘로 분리:
-    - **7e-1a(nav 상태 파이프라인 — 구현 완료)**: `MaruWebPanelView`가 browser(panelKind==1) 패널만 WKWebView `url`/`canGoBack`/`canGoForward`를 **block-based KVO**로 관측 → 값 저장 + dirty → tick drain(`drainWebSurfaceTransition` 끝)이 dirty만 `maru_macos_app_session_set_web_nav_state`(ABI v104)로 Zig에 push. Zig `AppSession.web_nav_states`(surface_id → `WebNavState{can_go_back, can_go_forward, url}`, url gpa 소유)에 upsert 저장하고, `collectWebSurfaces`가 매 tick 활성 탭 web 집합에 없는 키를 prune(닫힘/이동 stale url 회수). getter `web_nav_url_at`. 헤드리스 단위 테스트(upsert·옛 url free·빈 url·없는 surface) + smoke 왕복(`web_nav_url_swift`/`web_nav_url_zig`=5d fixture data: URL). 소비는 7e-1b.
-    - **7e-1b(읽기전용 주소창 밴드 렌더 — 구현 완료)**: browser web Term의 `collectWebSurfaces` `inset.top`을 `bar_h + addr_h`(addr_h=`paneBarHeightPx()`, 단일 소스)로 늘려 WKWebView 본문을 탭 바+주소창 밴드 아래로 내리고, 탭 바 collect 루프(app_session.zig ~15189 "1c")가 pane의 **활성 탭이 browser web Term일 때** 밴드 `[full.y+bar_h, +2·bar_h]`(웹뷰 top과 정확히 abut)에 배경 quad(`appendBarBgQuad`, 탭 바와 같은 sidebarBg) + URL 셀(`buildPaneAddressBarDrawList` — `buildPaneLabelDrawList` 미러, `.head` 앵커, muted fg)을 그린다. URL은 7e-1a `webNavState(surfaceId).url`(없으면 빈 밴드). **셀 정렬 텍스트**(quad 금지). markdown/터미널 탭은 밴드 없음(byte-identical). 헤드리스 단위 테스트(`buildPaneAddressBarDrawList`) + seam-inset 테스트를 panel-kind aware로 갱신 + 오프스크린 스크린샷(밴드가 탭 바 아래 렌더 — chrome이라 캡처됨). **버튼은 7e-3, 편집은 7e-2**.
-  - **7e-2(편집 모드 = 브라우징)** — 둘로 분리:
-    - **7e-2a(Zig 편집 코어 — 구현 완료)**: 스킴 정책 `app_scheme.resolveNavUrl`(L2 순수 — "://" 있으면 http/https만 허용·나머지 거부, 없으면 https 프리픽스, 위험 스킴 무해화). `AppSession.addr_edit`(편집 중 surface_id, 한 번에 하나) + **텍스트 입력은 find/palette/rename과 같은 공유 `OverlayInput`(`addr_input`) 재사용**(query/preedit[IME 조합]·EAW 단일 출처 — 별도 버퍼 재구현 안 함, DRY; **단 `OverlayInput`은 끝-caret 전용이라 mid-string caret·선택·가로 스크롤은 미소유**[표시 caret·가로 스크롤은 coretext `appendEllipsizedTitle` tail 앵커 소산] — 그 편집 모델은 [text-field-editor.md]의 `TextField`가 소유한다 — 주소창 텍스트는 `addr_input`이 아니라 `AppSession.addr_field`에 살고, mid-string caret·선택·드래그·⌘C/X/V·IME preedit-at-caret이 그 계약이다. 아래 서술의 `addr_input`·tail 앵커·"char→append"는 7e-2a 당시 구조다) + `enterAddrEdit`/`commitAddrEdit`(→navigate pending·세션 소유 url_buf)/`cancelAddrEdit`/`dropAddrEditIfSurface`(destroyTerm teardown). 클릭 라우팅(mouse-down에서 밴드 rect hit-test=7e-1b band, browser 활성탭만 → enterAddrEdit + focus-pull pending). keyDown 라우팅(`handleKeyEvent`에서 rename 인터셉트처럼 addr_edit 활성이면 `handleAddrEditKey`로 모든 키 소비: char→append·backspace·Enter=commit·Esc=cancel). 렌더 "1c"가 편집 중이면 query+preedit(조합 중 한글 표시) + block caret(셀 정렬)·tail 앵커. IME 조합은 `inputFocus`에 `.addr_edit` 추가로 `imeSetPreedit`/`commitComposition`이 addr_input에 라우팅(find/palette 동형 — 조합 중 글자가 밴드에 보임). 신호 getter 3개(`takeWebAddrFocusPull`/`takeWebAddrNavigate`/`takeWebAddrFocusRestore`, 1회성). 헤드리스 테스트(resolveNavUrl adversarial·AddrEdit 흐름·commit/cancel/teardown·caret). **ABI·Swift 무변경**(이 슬라이스는 상태·정책·라우팅·렌더까지).
-    - **7e-2b(Swift 포커스 전이 + navigate 배선 — 구현 완료)**: 신호 getter 3개의 ABI export(`take_web_addr_focus_pull`/`take_web_addr_navigate`/`take_web_addr_focus_restore`, v105) + Swift tick drain(`drainWebSurfaceTransition` 끝): focus-pull→`focusTerminalView`(편집 keyDown이 Zig로), navigate→`BrowserControl.navigate`(5d, webPanels[surface_id].webView), focus-restore→`makeFirstResponder(webView)`. 편집 진입은 밴드 클릭이 터미널 뷰를 firstResponder로 만들고 focus-pull이 확정, 커밋/취소 후 웹뷰 복귀. reconcile은 모달 엣지에서만 동작해 편집 중 비간섭. **여기서 실제 브라우징 동작**(주소창 클릭→URL 타이핑→Enter→로드→KVO가 새 URL을 주소창에 반영). IME preedit(url-edit 타깃)·caret 이동은 후속. **GUI 손 테스트 필수**(포커스 전이·타이핑·로드는 스모크 밖).
-  - **7e-3(nav 버튼 back/forward/reload — 구현 완료)**: 주소창 밴드 좌측 [0, nav_end) 셀에 `←`(back)·`→`(forward)·`⟳`(reload) 버튼(각 `nav_button_w`=3칸, 존 가운데 글리프). **NavBarMetrics 단일 소스**를 렌더(coretext `buildPaneAddressBarDrawList`)와 hit-test(`navButtonAt`)가 공유 → 보이는 버튼 == 클릭되는 버튼. URL은 `[nav_end, cols-1)`로 밀려 안 겹침. 활성: back=`webNavState.can_go_back`·forward=`can_go_forward`·reload=항상(비활성=dim·클릭 no-op). 클릭 ①b가 버튼 존이면 활성 버튼만 `web_nav_action_pending`(surface_id+code), URL 존이면 enterAddrEdit. C-ABI `take_web_nav_action`(v106) → Swift drain → `BrowserControl.goBack/goForward/reload`. 헤드리스 테스트 + 스크린샷(3버튼·back/forward dim·reload 밝음). **GUI 손 테스트**: 버튼 클릭→실 뒤로/앞으로/새로고침.
-  - **7e-4(nav 버튼 폴리시 + 키보드 단축키 — 구현 완료)**: hover 커서(밴드 nav 버튼 위 pointingHand, `navButtonHoverAt`)·hover 하이라이트(`hovered_nav_button` → **활성** 버튼 3칸 존 배경 quad)·키보드 단축키 `⌘←`(back)·`⌘→`(forward)·`⌘R`(reload). 단축키 게이트는 **활성 pane의 browser 탭**(신규 getter `activeWebSurfaceId` == 이 패널 surface_id, ABI v108)이라 **WKWebView 키보드 포커스 유무와 무관**하다 — 브라우저 탭을 활성화해도 webView에 자동 포커스를 안 주므로 `isWebPanelFocused`만 보면 "탭 열어 보기만 하면 ⌘R 안 됨" 버그가 난다(제보). R은 레이아웃 무관 keyCode 15로 판정. 클릭 ①b·키보드가 `setBrowserNavAction`(활성 판정: back=`can_go_back`·forward=`can_go_forward`·reload=항상) 단일 정책을 공유한다. **동반 수정 3건(GUI 손 테스트 전용 — AppKit firstResponder·hover·키 이벤트라 헤드리스 불가)**: (a) 링크 이동 시 주소 미갱신 → `setWebNavState`가 **값이 실제 바뀐 tick에만 `metal_dirty`**(url·can_go_* 비교)로 주소창 재렌더; (b) **모달 최상위** — browser 패널을 보던 중 `⌘Q` 종료 모달이 Enter로 안 닫히던 것: maru 모달은 Zig가 오버레이 레이어에 그려 시각적으론 최상위지만 입력은 터미널 뷰→`handleKeyEvent` 경로라, WKWebView가 firstResponder를 쥐면 Enter/Esc가 WebKit으로 샌다 → `reconcileWebModalFocus`를 **열림 엣지 전용에서 self-heal로**(모달 열린 내내 firstResponder≠터미널 뷰면 되돌림, `isWebPanelFocused` 탐지에 안 기댐) + `applicationShouldTerminate`가 모달 연 직후 **동기 전이**(⌘Q는 시스템 메뉴 경로라 maru keyDown 안 거침).
-- **새 창/팝업 (`target=_blank`·`window.open`) — browser kind, 슬라이스 7f (계획)**: WKWebView는 페이지가 새 창을 요청하면 `WKUIDelegate.webView(_:createWebViewWithConfiguration:for:windowFeatures:)`를 **동기 호출**한다(§8 링크 라우팅 `decidePolicyForNavigationAction`은 **같은 뷰 내 top-level 이동**만 — 새 창은 이 **다른 경로**다). 현재 maru엔 `WKUIDelegate`가 없어 새 창이 **무동작**이다(7e 범위 밖 — 단일 패널 브라우징만).
-
-  **결정: adopt(1급 surface화) — '같은 패널 대체' 기각(근거).** 같은 패널에 새 URL을 덮으면 (a) "새창 열고 다시 리턴"이 불가하고, (b) 에이전트가 주소지정할 별도 대상이 없다 → 목표(일반 브라우저 새창 UX **+ 에이전트 제어**)에 미달. → **`createWebViewWith`가 만든 WKWebView를 maru web term/surface로 등록**해, 사용자에겐 새 browser **탭**, 에이전트에겐 `surface_id`로 **addressable**하게 한다. 이 둘을 동시에 주는 유일한 방식이다.
-
-  **베이스(WebKit 계약)**: 넘어온 `configuration`은 발신 webview config의 **복사본**이고, `window.opener`·named-window·`postMessage` 링크가 성립하려면 반환 WKWebView를 **그 config 그대로**(수정 금지) 생성해야 한다. browser 패널 config는 공유 ephemeral `browserDataStore`(7e-0)를 **config 레벨**에 두므로, 팝업 config 복사본이 같은 데이터스토어를 이어받아 **세션·쿠키 공유(OAuth 연속성)** 가 성립한다(검증 완료). 스킴 핸들러는 browser 패널엔 미등록이라 무관.
-
-  **소유·시점 역전(핵심 난점)**: maru 정상 흐름은 *Zig가 term 생성 → tick → Swift가 maru config로 WKWebView lazy 생성*이다. 팝업은 반대 — Swift가 **동기**로 WebKit config webview를 만들어 반환하고, 그걸 Zig 트리에 **사후 등록(adopt)** 해야 한다. 따라서 (i) **Swift-first '외부 생성 web term 등록' ABI**(활성 pane 탭에 browser web Term 삽입 + `surface_id` 반환), (ii) `drainWebSurfaceTransition`의 create 전이가 이 surface_id엔 WKWebView를 **중복 생성 안 함**(이미 Swift가 만든 것 존재), (iii) `MaruWebPanelView`의 **adopt init**(주어진 webview 채택 + 인스턴스 설정[`navigationDelegate`·`navObservers`·autoresizing·`seamEdges`] 재적용)이 필요하다.
-
-  **행선지·생애주기·보안**: 새 **탭**에 넣는다(maru는 터미널 — 떠다니는 창이 아니라 탭 모델; `windowFeatures` 크기·위치 힌트는 무시). opener↔팝업 **쌍**은 둘 다 1급 surface라 hide/show(배경 탭)·move(reparent 4e-4)·close가 기존 전이 모델로 처리된다(`isHidden`은 web 프로세스를 안 죽여 opener 유지). 팝업도 untrusted 격리(공유 ephemeral store)·`decidePolicyForNavigationAction` 스킴 화이트리스트를 적용하고, `createWebViewWith` 게이트로 **browser(비신뢰) 패널의 http/https 대상만** 허용한다(신뢰 maru-app UI의 창 생성 차단; user-gesture 없는 팝업은 팝업 차단기처럼 게이트/알림).
-
-  **분해**: **7f-0(Zig: Swift-first web term 등록 ABI — 구현 완료, `create_adopted_web_term` v109·헤드리스: term 삽입·surface_id 발급)** · **7f-1(Swift: `WKUIDelegate.createWebViewWith` → 7f-0 ABI로 term 등록 + adopt init + drain `.create` 멱등[중복 WKWebView 생성 스킵=opener 링크 보존] + 새 탭 활성화 — 구현 완료, GUI 손 테스트 통과: ⌘+클릭·target=_blank·window.open이 새 브라우저 탭으로 열리고 리턴)** · **7f-2(팝업 정책 게이트 — 구현 완료, `popupTargetAllowed` v111: about/http/https/빈만 허용, javascript·file·data·blob·maru-app 거부, adversarial 헤드리스; Swift `createWebViewWith`가 팝업 생성 전 호출)**. **opener/OAuth 검증**: WebKit 계약(`createWebViewWith`에 넘어온 config=부모 복사본 → 그 config로 만든 webview라 `window.opener`·named window·`postMessage` 링크 성립·공유 데이터스토어 승계)으로 **구조적 보장** + 7f-1 GUI 손 테스트(window.open 팝업이 열림 = opener 링크 성립)로 검증. **자동 round-trip 스모크는 보류**: 무-네트워크 스모크 하니스에서 data:/about:blank 팝업의 same-origin(opaque origin) 제약으로 부모↔팝업 postMessage 왕복을 깔끔히 구성하기 어렵다 — 실 OAuth 로그인은 GUI 손 테스트로 확인. WKWebView 팝업 생성·opener·포커스는 스모크 밖이라 GUI 손 테스트로 검증(7e-2b/7e-3 동형; 스크린샷은 WKWebView 픽셀 못 잡음).
-
-  **에이전트 제어와의 연결**: 팝업을 1급 surface(`surface_id`)로 adopt하는 것이 곧 **에이전트가 팝업까지 제어**할 수 있는 전제다 — host-mediated 브라우저 MCP가 각 surface(팝업 adopt 포함)를 `surface_id`로 주소지정한다. 프로토콜 결정·구현 완료 상태·남은 5f 재슬라이싱은 [control-plane-browser-wiring.md](control-plane-browser-wiring.md) §9.2~§9.5를 **단일 출처**로 따르며, 이 문단에서 진행 상태를 복제하지 않는다. §13의 host-mediated vs Web Inspector 분기도 같은 경계를 따른다.
-- **파일 패널(마크다운·HTML 뷰어/편집기)**: 로컬 `.md`/`.html`을 여는 파일 패널 — 파일 탭·헤더 밴드·파일 트리 = GPU chrome, 브리지 `file.read/write`, CodeMirror 6 편집 — 은 [file-panel.md](file-panel.md)를 단일 출처로 둔다(§7 브리지 origin 격리·§4 포커스 불변식과 상호작용). **현행(FP1~FP15)**은 창 레벨 전역 도크 슬롯(우측|하단)이라 워크스페이스 pane 트리 밖이고 §2 destroy 규칙의 비대상이다. **FP16 목표**는 파일을 워크스페이스 Term(`web_panel_kind = .file`)으로 옮기고 도크를 탐색기 전용으로 축소하는 것이며, 그 때 파일 패널은 §2 규칙의 **정상 대상이 되고 대신 그 규칙의 destroy가 hidden 보존으로 바뀐다**(§2 FP16 항목). 웹 브라우저(`browser` kind)는 이 문서 그대로 워크스페이스 term이고, 전환 시 흰 페이지가 되던 문제는 FP16 §4가 함께 해소한다(별도 URL 기억·재로드 백로그는 폐기).
-- **배경 정합**: 신뢰 Markdown 파일 패널의 **초기 paint**는 [file-panel.md](file-panel.md) §1 계약대로 생성 시 공개 API `underPageBackgroundColor`와 hash-pinned critical CSS를 함께 써 기본 흰 backing을 노출하지 않는다. 반면 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 임의 browser/로컬 HTML 본문까지 투명화할지는 여전히 별도 결정이다. 그 경우에도 공개 API `underPageBackgroundColor`(macOS 12+)만 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
-- **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
-- **⌘F 분기(구현 완료 — 슬라이스 ①②)**: 예전에는 **웹/마크다운 탭에서도 ⌘F가 터미널 스크롤백 find를 열었다**
-  (우상단 오버레이). `toggleFind`가 활성 서페이스 종류를 보지 않았고, 그 오버레이는 웹 콘텐츠를 검색하지 못했다
-  (사용자 제보). 지금은 **같은 오버레이가 대상만 바꾼다** — 활성 탭이 웹이면 질의가 그 페이지로 나간다.
-
-  - **라우팅 기준은 포커스가 아니라 `activeWebSurfaceIdAnyKind`(활성 pane의 web 탭, browser·markdown 모두)다.**
-    ⚠️ `activeWebSurfaceId`가 **아니다** — 그건 browser 전용이라 **마크다운 뷰어 탭에서 0을 돌려주고**, 제보된 그 버그가
-    그대로 남는다(제보는 마크다운 탭이었다). 위 §8의 원래 서술("포커스 기준")을
-    **정정한다** — §7e-4가 ⌘R에서 같은 함정을 이미 겪었다: 브라우저 탭을 활성화해도 webView에 자동 포커스를 주지
-    않으므로 `isWebPanelFocused`로 게이트하면 **"탭 열어 보기만 하면 안 됨"**이 된다(제보로 드러났다). ⌘F도 같다.
-  - **UI는 기존 find 오버레이를 재사용한다.** 새 검색 UI를 만들지 않는다 — 사용자가 아는 입력·Enter/Shift+Enter·⌘G
-    네비게이션을 그대로 쓰고, **질의를 어디로 보낼지만** 활성 서페이스가 정한다(상태바 브랜치 메뉴가 "이미 있는
-    표면을 재사용"한 것과 같은 규율). 대상은 `find.State.target`(scrollback|page)이 들고, **tick이 매 프레임
-    동기화한다** — 전환 경로(탭·pane·창·탭 닫기)마다 세우면 반드시 빠뜨리는 문이 남기 때문이다. **열림 여부로
-    게이트하지 않는다**: 닫힌 동안 탭이 바뀌면 대상이 굳어, 다시 열자마자 그리는 첫 프레임이 지난 탭 모드로 나간다.
-    - 대상이 페이지로 바뀌면 스크롤백 매치를 버리고(그 화면 것이 아니다), **터미널로 돌아오면 다시 찾는다**.
-      단 재검색은 **하이라이트를 실제로 그리는 상태**(오버레이가 열렸거나 ⌘G 네비 중)에서만 한다 —
-      `recomputeFind`가 `scrollToCurrentMatch`까지 부르므로, 닫아 둔 find에서 돌리면 탭 복귀만으로 화면이 점프한다.
-  - **검색·하이라이트는 WebKit이 한다**(`WKWebView.findString(_:configuration:completionHandler:)`).
-    **페이지에 스크립트를 주입하지 않는다.**
-    > ⚠️ 앞선 초안은 그 근거를 "markdown/browser에서 bridge 부재"로 적었는데 **오독이었다** — 그 문장은
-    > [editor-surface.md]의 **CM6 page-world 브리지**가 없다는 뜻이지 우리 코드가 없다는 뜻이 아니다.
-    > 마크다운 뷰어는 **우리가 만든 페이지**(`web/src/main.ts`, 거기서 `contextmenu`를 이미 가로챈다)라
-    > JS 검색이 기술적으로 **가능하다**. 주입하지 않는 진짜 이유는 아래 "왜 네이티브 단일 경로인가"다.
-
-  - **왜 네이티브 단일 경로인가**: JS 검색은 **마크다운에서만** 되고 browser 탭(외부 콘텐츠)에서는 안 된다.
-    거기서 갈라 놓으면 같은 ⌘F가 탭 종류에 따라 다르게 동작해 **한 기능에 규약이 둘**이 된다.
-    네이티브 `find`는 두 종류가 **똑같이** 동작하고 페이지에 아무것도 넣지 않는다.
-
-  - **매치 개수는 넣지 않는다(제약).** `WKFindResult`에는 `matchFound: Bool`뿐이고 **개수 필드가 없다**.
-    배포 하한이 macOS 11(`build.zig`)이라 더 새 API도 쓸 수 없다. 반복 호출로 세는 우회는 매치마다 선택·스크롤이
-    움직여 화면이 튀므로 하지 않는다. 웹 탭은 **찾음/없음**만 표시한다.
-    - **"cur/total" 자리를 비워 두지 않고 찾음/없음을 그린다.** 그 자리에 `0/0`을 남기면 WebKit이 노랗게
-      하이라이트한 화면과 정면으로 모순돼 "못 찾았다"로 읽힌다. 결과가 오기 전에는 아무것도 그리지 않는다
-      (빈 자리 < 틀린 숫자). 나중에 마크다운 한정 JS 카운트를 붙이면 **덧붙이기**로 끝나고 재설계가 아니다.
-
-  - **비동기 수명이 핵심 위험이다.** `find`는 completion handler다 — 질의를 보낸 뒤 결과가 오기 전에 사용자가
-    **탭을 바꾸거나 오버레이를 닫을 수 있다**. 늦게 온 결과를 그대로 반영하면 "누른 적 없는 상태"가 화면에 뜬다.
-    상태바 브랜치 메뉴에서 **실제로 그 결함이 났다**(요청 중 상태바가 사라져도 메뉴가 떴다) — 같은 규율을 쓴다:
-    - 질의마다 **request id**를 싣고, 회신이 그 id와 다르면 **버린다**.
-    - 오버레이가 닫혔으면 반영하지 않는다.
-    - **id만으로는 부족하다**: A에서 제출한 뒤 결과가 오기 전에 B로 옮기면 id는 아직 유효한데 그 답은 A의 것이다.
-      그대로 붙이면 B 화면이 A의 찾음/없음을 말한다(실측). **제출 대상과 지금 보이는 탭이 같을 때만** 반영한다.
-    - Swift도 **제출한 그 surface의 세션**으로만 돌려준다(weak surface). 활성 창으로 다시 찾으면 남의 세션에
-      결과를 주게 되고, id는 세션마다 0에서 시작하므로 우연히 맞아떨어질 수 있다.
-
-  - **재제출 판정은 "대상 탭 + 검색어"다.** "결과를 아직 못 받았는가"로 게이트하면 같은 검색어로 다른 웹 탭에
-    갔을 때 그 탭은 **영영 검색되지 않는다**(실측). 반대로 조건이 없으면 tick마다 재제출해 WebKit 하이라이트가
-    매 프레임 첫 매치로 튄다.
-
-  - **전달 실패는 신고해야 한다.** 방금 만든 웹 탭은 WKWebView가 아직 없어 drain이 질의를 걸지 못한다. 그때 그냥
-    버리면 Zig의 제출 마커가 "보냈다"로 남아 tick이 재시도하지 않고 그 탭의 검색은 **조용히 죽는다**. Swift가
-    `web_find_undeliverable(seq)`로 신고하면 마커가 지워져 다음 tick이 다시 낸다(주소창 navigate가 "아직
-    WKWebView가 없는 Term은 다음 tick에 다시 본다"로 푸는 것과 같은 문제·같은 답).
-
-  - **하이라이트 해제는 할 일이 없다(실기기 확인 완료 — 2026-08-09).** 오버레이를 Esc로 닫으면 페이지
-    하이라이트는 **남지 않는다.** WebKit이 알아서 정리한다(find indicator는 원래 일시적이고, 검색창이 떠
-    있는 동안 키보드 포커스는 터미널 뷰라 WKWebView가 first responder도 아니다).
-    > ⚠️ 이 문서는 한동안 **"clear API가 없으니 하이라이트가 남는다"**고 단언했는데 **틀렸다.**
-    > "지울 수단이 없다"에서 "안 지워진다"로 건너뛴 비약이었다(WebKit이 스스로 정리하는 경우를 빼먹었다).
-    > 설계 때는 "남는지 확인하고"라는 열린 질문으로 적어 놓고, 구현을 마치며 확인 없이 단정문으로
-    > 승격시킨 것이 원인이다. **API 부재는 동작의 근거가 아니다** — 실기기로 봐야 한다.
-
-  - **슬라이스**: ① Zig 라우팅(**완료**) → ② ABI+Swift 배선 + 찾음/없음 표시 + Enter/⌘G 양방향(**완료**).
-    ③(닫을 때 하이라이트 정리)은 **필요 없어 취소**했다 — 위 확인 결과.
-  - **범위 밖**: 편집기(CM6) 표면의 find는 [editor-surface.md] Phase 0.5A가 소유한다(CM6 자체 검색). 이 항목은
-    **뷰어(markdown)·browser 탭**만 다룬다.
-- **컨텍스트 메뉴(구현 완료)**: WKWebView 기본 우클릭 메뉴(Inspect Element·**Reload** 포함)는 "chrome는 Zig" 원칙·보안과 충돌하고, 특히 Reload는 편집 중 WebContent를 재시작해 editor recovery latch로 파일 작업을 차단한다 → **신뢰 maru-app 콘텐츠(파일 패널 셸+렌더 iframe)의 셸 entry(`main.ts`)에서 `contextmenu` preventDefault로 억제**한다(브라우저 패널=외부 콘텐츠는 `main.ts`를 로드하지 않아 무영향). 복사·붙여넣기는 메뉴바/⌘ 단축키(§4.2)가 소유한다. maru 자체 메뉴로 대체는 후속.
-- **접근성(AX)**: WKWebView는 네이티브 AX 트리, 터미널·모달(Metal)은 없음 → 혼합 상태. 마크다운 편집기에 AX 필요.
-- **콘텐츠 프로세스 크래시 복구**: `webContentProcessDidTerminate` 시 reload·에러 상태.
-- **폰트/줌·인쇄**: 저우선.
+슬라이스와 완료 이력은 [웹 패널 구현 계획](plans/web-panel.md)이 소유한다.
 
 ## 9. 베이스와 결정 (clean-room)
 
@@ -281,75 +184,6 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 - 모달 오버레이 z-order는 CALayer 합성 + `hitTest` 라우팅 표준.
 - **`maru-app://` 스킴 이름 확정 (근거)**: 베이스는 URI 문법 표준 [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.1) §3.1로, `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`이다. 즉 하이픈(`-`)은 스킴 이름의 유효 문자이고(첫 글자만 `ALPHA` 강제), `maru-app`은 이 문법을 만족한다. `WKURLSchemeHandler`(`WKWebViewConfiguration.setURLSchemeHandler(_:forURLScheme:)`)는 built-in/특수 스킴(`http`·`https`·`file`·`about`·`data`·`blob`·`ws`·`wss` 등)에 대한 커스텀 핸들러 등록만 예외로 거부하므로, 커스텀 스킴 `maru-app`은 등록 가능하다. 스킴은 대소문자를 구분하지 않고 WebKit이 소문자로 정규화하므로 코드·CSP·핸들러 문자열은 전부 소문자 `maru-app`으로 고정한다(하이픈은 CSP source expression `maru-app:`에서도 유효). 결정: `maruapp`(하이픈 제거)이나 역-DNS(`app.maru`)로 바꾸지 않고 `maru-app://` 그대로 확정한다 — 사람이 읽을 때 maru 앱 내부 스킴임이 분명하고, 단일 라벨 커스텀 스킴이라 충돌 위험도 없다.
 - maru 독립 설계: 모달을 Metal 오버레이로(GPU chrome 일관성), surface 생애주기 ABI, web 특유 보안 게이트.
-
-## 10. 구현 ([control-plane.md] Phase 4~5와 연계)
-
-- **Phase 4(껍데기)**: 컨테이너 contentView + 입력 responder 재편(§4) + 모달 레이어 분리 두 리팩터(§2) + surface 생애주기 ABI(§6) + per-pane rect(§3) + 빈 WKWebView가 본문 rect 추종. 착수 전 M0 ID/scope foundation이 완료됐고 `WindowGraph`/`LiveSurfaceRegistry`가 surface 생애주기 단일 출처인지 확인한다. → [control-plane-implementation.md] §11 Phase 4가 이 규모(특히 모달 분리·입력 재편)를 포함하도록 정합.
-- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane-security.md] §8.1 `browser.*` 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane-implementation.md] Phase 7와 함께 — §11. WebDriver 어댑터는 첫 콘텐츠의 필수 선행이 아니며, 기본 E2E는 `evaluateJavaScript` 하니스로 먼저 닫는다.)
-
-Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane-implementation.md] §11의 micro-slice를 따른다:
-- 4a: rect/surface lifecycle ABI를 순수 계산 테스트로 먼저 고정한다. **(구현 완료 — `src/session/web_panel_layout.zig`: `contentRect`·`pxTopLeftToPtBottomLeft`·`surfaceDiff`, 헤드리스 TDD·§14.)**
-- 4b: 모달 renderer 2-pass와 overlay layer 계약을 웹뷰 없이 먼저 고정한다.
-- 4c: 빈 WKWebView를 붙이고 frame/NSView 계층 값 단언 + GUI z-order artifact로 닫는다. **(구현 완료 — 최소 범위)**: 라이브
-  web-Term 모델(트리·탭 혼합·재부모화)은 후속으로 미루고, **활성 pane 본문에 바인딩된 단일 빈 WKWebView**를 hosting 증명으로
-  붙였다(app_session에 `web_panel` 필드 하나, split/Term 트리 미진입). 생성 경로는 디버그 env 훅 `MARU_WEB_PANEL=1`(kind는
-  `MARU_WEB_PANEL_MARKDOWN=1`이면 markdown, 기본 browser — 4c 빈 웹뷰라 시각 무영향). 매 tick 4a 세 순수함수(`contentRect`·
-  `pxTopLeftToPtBottomLeft`·`surfaceDiff`)를 **Zig가 전부 소비**해 단일 전이(none/create/destroy/reframe/hide/show)를 계산하고
-  ABI(`maru_macos_app_session_web_surface_transition`, v99)로 export하면, Swift가 그 op만 기계적으로 적용한다. 웹뷰는 컨테이너
-  z-order **중간**(터미널<웹뷰<오버레이)에 삽입되고 본문 rect(pt·좌하단)를 추종한다. **입력 통과(4d 전)**: 웹뷰를 hitTest→nil
-  래퍼 NSView(`MaruWebPanelView`)로 감싸 마우스가 아래 터미널로 통과하고 빈 웹뷰가 firstResponder를 훔치지 않는다(WKWebView
-  서브클래스 override 대신 검증된 래퍼 메커니즘 — MaruMetalOverlayView와 동일). §3 드래그 중 hide는 4c 생략(빈 페이지라 jitter
-  무해 — 후속). 콘텐츠·URL·브리지·스킴 핸들러·CSP·데이터스토어 격리는 **Phase 5**, IME/firstResponder 전이는 4d. 자동 검증:
-  ABI struct 계약 테스트(size/offset·op enum 값) + 4a 순수 계산 단위 테스트 + macos-app-smoke의 `web_panel_subview_order_ok`/
-  `web_panel_present`/`web_panel_hittest_in_web`(4d가 4c의 `_nil`을 focusable 전환하며 rename·의미 반전 — 웹 자손을 돌려주는가)
-  값 단언(스모크 scripted resize가 **실 창 콘텐츠 크기**를 보내므로 web 패널 frame이 창 안에 정확히 맞는다 — 예전 하드코딩
-  1200×720 resize는 창 960×600과 불일치해 web 패널이 창 밖으로 삐져나왔다[런치 시 크기 안 맞음], `sendSmokeDevEvents`가
-  `resizeAppSessionFromWindow`를 쓰도록 수정. 픽셀 합성·입력 통과의 최종 눈 확인은 여전히 GUI 손 테스트가 닫는다).
-- 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다. **(입력 responder 전이 spike 구현 완료 — 최소 범위, ABI 무변경·Swift 전용)**: 4c의 hitTest→nil 완전 통과를
-  **focusable**로 전환하고(모달 닫힘=`super.hitTest`로 웹뷰가 클릭 받아 WKWebView firstResponder→WebKit 자체 IME; 모달
-  열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합을
-  ABI v132 typed `WebKeyRoute`로 조회한다. `app_action`만 가로채 같은 resolver의 `Action`을 전용 direct-dispatch ABI로 실행하고,
-  `web_editor`/`pass_through`는 메뉴바 keyEquivalent 또는 WebKit에 양보하며 `consume_unbound`와 unknown raw는 fail-closed 소비한다.
-  단 메뉴바 편집 항목(Copy ⌘C·Paste ⌘V·Select All ⌘A)은 자체 keyEquivalent가 first responder와 무관하게 발화하므로, 웹 포커스 시 표준 편집 셀렉터를 WebKit responder chain으로 넘기는 **§4.2 분기**가 이 "양보"를 메뉴바 축에서 실제로 성립시킨다(없으면 그 메뉴가 무조건 터미널로 복사/붙여넣기).
-  direct dispatch는 범용 `handleKeyDown`의 terminal copy/paste·scroll·macro 전처리와 PTY write를 타지 않고, route 뒤 config/mode가
-  달라졌으면 action 0회다. 따라서 사용자 rebind된 ⌘C/⌘V/⌘Backspace도 정확한 app action 하나만 실행하고 셸로 새지 않는다.
-  옛 spike는 **모든** Cmd 조합을 가로채 셸로 흘려 ⌘Q가 종료 안 되고 키보드가 갇혔었다[code-review 4c/4d]. 웹 포커스가
-  아니면 무동작이라 터미널 IME/keyDown 경로 무회귀 — §4 spike 확정 근거). **모달 responder 전이**는
-  `reconcileWebModalFocus`가 `anyOverlayOpen` 엣지로 조정한다(웹 포커스 중
-  모달 열림→터미널 뷰로 makeFirstResponder, 닫힘→직전 웹뷰 복원; 전이는 기존 becomeFirstResponder/resignFirstResponder를
-  그대로 태워 새 IME 로직 0). 전부 **MARU_WEB_PANEL 훅 뒤**(웹 패널 없으면 무동작)라 평시 터미널 빌드 동작 불변. 자동
-  검증: swift-check·macos-app-build·macos-app-smoke(`web_panel_focused=false` — 웹이 firstResponder 안 훔침)·ABI 계약
-  테스트·zig test·check-boundaries·fmt green. **실 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손
-  테스트가 닫는다**(§11 수동 gate — 자동 불가). 웹 소유 키 포커스-분기(§8)·드래그 통과(§5)·web-Term lifecycle 포커스는 후속.
-  **알려진 한계(4c/4d 오버레이 focusable)**: 4c 웹 패널은 활성 pane에 얹힌 빈 `about:blank` 오버레이라, 클릭해 웹을 포커스한
-  뒤 평문 타이핑은 빈 페이지로 들어가고(셸 아님) 그 상태에서 키보드만으로 터미널에 곧장 되돌아갈 전용 키는 없다. 단
-  ⌘-nav(⌘1-9·⌘T·⌘⇧P 등 app_action)와 다른 창/탭 클릭은 위 `performKeyEquivalent` 앱-바인딩 가로채기로 **작동**하므로
-  포커스 전환으로 복귀 가능하다. 이 한계는 web surface를 Term(탭)으로 만들어 포커스가 터미널/웹 Term을 오가게 하는 **4e가
-  근본 해소**한다(빈 오버레이가 아니라 first-class surface).
-- 4e(웹 Term 통합 — 4c "후속"의 명시 슬라이스, §6): 4c는 web 패널을 활성 pane에 얹은 **디버그 오버레이**라 가려진 터미널이 뒤에서 계속 렌더된다(낭비·못 씀). 4e는 §6대로 **web surface를 Term(탭)으로 split/Term 트리에 넣어**(활성 Term만 렌더 → 터미널 대체, per-pane 탭바가 terminal/web Term을 같이 보임, Term 탭 재부모화) **first-class surface**로 만든다. **순서 권장**: 콘텐츠(Phase 5)를 오버레이 위에 쌓기 전에 4e로 surface 모델을 먼저 확정하는 게 낫다([control-plane-implementation.md] §11 "나중에 소유권 갈아엎기 회피" 정신) — 단 Phase 5 bridge는 per-WKWebView라 4e와 강결합은 아니어서 순서는 유연하다. 생성 경로도 4c의 env 훅에서 **메뉴/command로 승격**(웹 Term 열기)한다.
-
-  **결정된 실행 순서(2026-07-10, 사용자 승인)**: `4e-1·4e-2·4e-3(완료)` → **`4e-5`(생성 command화, 다음)** → **`Phase 5`(콘텐츠)** → **`4e-4`(재부모화, Phase 5 콘텐츠와 함께)**. 근거: ⑴ 4e-5(생성 command화)는 지금 바로 실사용 가치가 있다(env 훅 없이 사용자가 웹 탭을 여는 게 "실사용 가능"의 전제). ⑵ 4e-4(재부모화)의 이득은 **창 간 이동 시 WKWebView 상태 보존**인데, 이는 실제 웹 콘텐츠가 있어야 관찰·검증된다 — 지금 빈 흰 페이지론 destroy+recreate해도 잃을 상태가 없어 회귀 테스트가 vacuous(리로드해도 같은 흰 페이지). 따라서 Phase 5 콘텐츠 후에 하는 게 non-vacuous. ⑶ 이 미룸은 계획 이탈이 아니다 — 계획서가 "**reparent UX는 Phase 4 이후에 따라와도 된다**"(§ "웹 패널 전에 필요한 이동성 foundation만")·"**순서는 유연하다**"(위)라고 이미 명시했고, 반드시 선행이어야 할 것은 UX가 아니라 소유권 토대(`WindowGraph`/`LiveSurfaceRegistry`, [control-plane-implementation.md] §11 Phase 4)인데 그건 M0~M3에서 완료됐다. ⑷ 창 **안** pane↔pane 이동은 4e-3의 reframe이 이미 처리한다(같은 컨테이너라 WKWebView가 새 pane rect로 따라감·상태 보존) — 4e-4가 남긴 건 **창 간** 이동 상태 보존뿐이다.
-  - **4e-1(웹 Term 모델 토대 — 구현 완료, 렌더·WKWebView·ABI 무변경 = 터미널 byte-identical)**: `session_model.Term`에 `kind: SurfaceKind = .terminal`(기본값이라 terminal Term 생성부 무변경) + `web_panel_kind: PanelKind`(web 라벨·후속 trust 단일 출처) + `surfaceId()`/`webPanelLabel()` accessor를 더하고, `LiveSurface`를 `union(SurfaceKind)`(terminal arm=M3a 번들 그대로, web arm=**sentinel surface**만 — 빈 1×1 core, 렌더/PTY 없음)로 승격했다. 두 arm이 모두 `surface: Surface`를 노출해 `Term.surface: *Surface`가 web에서도 유효 → surface_ptrs 재바인딩·`activeSurface()` 계약 **불변**(sentinel `id`가 web surface_id). `createWebTerm(panel_kind)`가 web Term을 만들고(PTY spawn·attach·pump 없음), `destroyTerm`/deinit이 `kind`로 teardown 분기(web=경량 registry.remove). 4c의 `maybeDebugOpenWebPanel`(MARU_WEB_PANEL 훅)은 오버레이(app_session.web_panel — dormant화) 대신 활성 pane에 web Term을 **비활성 탭**으로 append한다(활성은 터미널 유지 = 무회귀; 활성 전환·렌더 skip은 4e-2). 헤드리스 TDD: `Model(FakeRt)` 혼합 Pane·surfaceId/webPanelLabel 분기, `LiveSurface` web arm sentinel teardown 누수 0. **범위 밖**: 활성 Term 렌더 skip(4e-2)·per-Term WKWebView(4e-3)·탭 혼합 UX/재부모화(4e-4)·command 생성(4e-5).
-  - **4e-2(활성 web Term 렌더 skip — 구현 완료)**: 활성 render·입력 경로(readActiveSnapshot·shapeOnlyBuild·cell_colors·kitty·find·terminal_bg 등)를 `activeTermIsTerminal()`/`activeTerminalSurface()`로 gate해 활성 web은 sentinel core를 만지지 않게 하고(본문 blank·no-terminal-frame·크래시 0), `maybeDebugOpenWebPanel`이 web Term을 `focusTerm`으로 **활성화**한다(터미널을 대체 — 4c의 낭비 오버레이 제거). web Term 없으면 항상 terminal 취급이라 byte-identical.
-  - **4e-3(per-Term WKWebView 호스팅 — 구현 완료)**: `computeWebSurfaceTransitions`(app_session.zig)가 활성 워크스페이스 탭 pane 트리를 walk해 web Term마다 `SurfaceLayout{surface_id, panel_kind, **자기 pane 본문 rect**(contentRect(leaf, {top=탭 바})), visible=자기 pane 활성 탭인가}`을 만들고 직전 tick 집합(`web_panel_prev`)과 4a `surfaceDiff`한 뒤 **batch**로 marshaling한다(4c의 단일 op·활성 pane 추종을 완전 대체 — 각 웹뷰가 자기 pane에 고정). ABI는 단일 op → **count+at**(command_catalog 선례): `maru_macos_app_session_web_surface_transitions_count` + `..._transition_at(index)`, `WebSurfaceTransitionAbi`에 `visible`(create 시 hidden 생성 여부) 추가, **v101**. Swift는 `TerminalSurface.webPanels: [UInt64: MaruWebPanelView]` dict에 batch op을 적용하고(create=insert+인라인 흰 HTML·isHidden=!visible / destroy=remove / reframe=frame / hide·show=isHidden), 4d 입력 전이(`reconcileWebModalFocus`·`surfaceOwning`)를 dict로 재배선한다. 비활성 워크스페이스 탭 web Term은 집합 밖이라 destroy(§6 "destroy 또는 미포함"). 자동 검증: ABI 계약 테스트(visible offset·op enum) + per-Term batch 헤드리스 test(walk·visible·prev 전진) + macos-app-smoke(`web_panel_present`/`_count`/`_subview_order_ok`, MARU_WEB_PANEL). **흰 화면 시각·split 제자리 고정·z-order·IME 무회귀는 GUI 손 테스트**(§11 — WKWebView는 Metal 스크린샷 밖). placeholder는 `about:blank`가 아니라 **인라인 흰 HTML**을 로드한다 — WKWebView가 배경 미지정 문서(about:blank)를 시스템 appearance로 렌더해 macOS 다크 모드에선 다크가 되어 아래 다크 터미널과 구분되지 않기 때문(명시 흰 배경 CSS로 appearance 무관 흰 rect 보장; Phase 5 실콘텐츠가 이 load를 대체). **범위 밖**: Term 이동 재부모화(4e-4)·command 생성(4e-5)·콘텐츠/브리지/CSP(Phase 5).
-  - **4e-5(생성 command화 — 구현 완료)**: 4c/4e의 디버그 env 훅 `MARU_WEB_PANEL`(`maybeDebugOpenWebPanel`)을 **사용자가 부르는 command/메뉴로 승격**한다. 새 액션 `new_web_tab`(`config/action.zig`)이 `newWebTermInActivePane`(`newTermInActivePane` 미러 — `createWebTerm(.browser)` → `pane.terms.append` → `focusTerm`, PTY 없음)을 실행한다(env 훅과 같은 3단계지만 트리거가 사용자·`tabsBlocked()` 가드). command 카탈로그(`command_catalog.zig` `.{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab" }`)·메뉴바(`buildMainMenu`의 File 메뉴 `catalogMenuItem("new_web_tab", catalog)`)에 배선한다. 기본 키바인딩은 **⌘⌥T**(⌘T=new_term의 web 버전, ⌥로 구분 — ⌘⇧T=new_tab 워크스페이스와도 구분; ⌘⌥G/⌘⌥] 선례와 동형. 발견성은 메뉴·커맨드 팔릿에도). `panel_kind`는 `.browser`(markdown kind는 후속 — 링크 클릭 라우팅이 생길 때). **게이트 정정(핵심)**: 4e-3의 Swift `drainWebSurfaceTransition` 게이트는 `webPanelHookEnabled`(env-only 상수)라 command 생성 web Term을 못 그린다. `computeWebSurfaceTransitions`는 web Term 0개여도 매 tick `activeTabLeafRects` 등을 **할당**하므로(code-review [8] 최적화 대상) 게이트를 그냥 제거하면 안 된다. 대신 **`FrameSummary`에 `web_surfaces_present: u32` 추가**(매 tick 폴링 구조체라 추가 FFI 0, quit_decision 뒤 4B tail padding을 채워 struct size 176 불변·offset 대조) → Swift 게이트를 `surface.latestFrameSummary.web_surfaces_present != 0 || !surface.webPanels.isEmpty`(존재 신호 + teardown 지속)로 바꾼다. **신호 출처는 유지 카운터가 아니라 활성 워크스페이스 탭 트리 파생**(`activeTabHasWebTerm` = `split_tree.anyLeaf`로 활성 탭 leaf에 web Term이 있는지 alloc-free 계산): 유지 카운터(`createWebTerm`+1/`destroyTerm`−1)는 **창 간 이동**(`moveWorkspaceToSession`=`detachTabForMove`/`adoptTab`이 web Term을 destroy/create 없이 **포인터 relocate**)에서 원본 stuck-high·대상 stuck-0으로 드리프트해 이동한 web 패널이 대상 창에 안 뜬다(4e-3 env-gate엔 없던 회귀). tree-derived 신호는 `collectWebSurfaces`(활성 탭만 walk)와 **같은 범위**라 이동·재부모화·닫기에 자동 정합한다. 헤드리스 검증: `new_web_tab` dispatch → 활성 pane에 web Term append+활성화(4e-1/2/3 경로 재사용)·`parseAction` 왕복·`activeTabHasWebTerm`/`web_surfaces_present` **활성-탭 신호 test(web Term을 비활성 탭으로 전환하면 off — 카운터로는 불가능)** + `anyLeaf` split_tree 단위 test + ABI 계약(FrameSummary size v102) + macos-app-smoke web 계층 단언(env 없이 command로도 부착). **GUI 손 테스트**: File 메뉴/팔레트로 브라우저 탭이 열리고 흰 화면(4e-3 픽스)·`⌘⌥[`로 터미널 복귀. **범위 밖**: 재부모화(4e-4)·콘텐츠(Phase 5).
-  - **4e-4(창 간 이동 재부모화 — 구현 착수 2026-07-15, 실콘텐츠 전제 충족)**: 웹 Term을 **다른 창**으로 옮길 때 기존 WKWebView를 원본 컨테이너에서 대상 창 컨테이너로 **재부모화(NSView 이동)해 상태(스크롤·로드된 페이지·폼)를 보존**한다. 현재(4e-3)는 원본 세션 `collectWebSurfaces`가 그 web Term을 더는 못 봐 destroy + 대상 세션이 create = **파괴·재생성(상태 손실)**. 창 **안** pane↔pane 이동은 이미 4e-3 reframe이 상태 보존한다(같은 컨테이너). **전제 충족**: 7e 주소창 + `browser.navigate`로 실 URL을 로드하므로 이제 이동 전후 상태 동일성이 non-vacuous하게 관찰된다(옛 "Phase 5 콘텐츠와 함께" 미룸의 vacuous 근거 해소). 재부모화 identity는 M6 spike에서 실증됨(`union(SurfaceKind)` LiveSurface 채택 근거).
-
-    **구현(컨트롤러 조율 재부모화 — 사용자 승인 2026-07-15)**: WKWebView는 Swift/AppKit 객체라 단일 `MaruAppHostController`가 모든 창(`TerminalSurface.webPanels` 창별 dict)을 전역 소유한다. 이 컨트롤러가 창 간 이동을 조율한다 — **§8A.1 AppRuntime registry lift(Zig 소유 구조 이관)는 직교·불필요**(올바른 재부모화엔 컨트롤러 조율로 충분, band-aid 아님; registry lift는 별개 구조 후속). destroy+recreate의 원인은 per-window 독립 tick이 각자 dict에 create/destroy를 적용하는 것이므로, drain을 **재부모화-aware**로 만든다:
-    - **`create` X(대상 창 W)**: X의 WKWebView가 **다른 창에 이미 살아있으면**(`surfaceOwning(byId:)` 전역 스캔) → **훔쳐 재부모화**(removeFromSuperview → 원본 dict 제거 → W 컨테이너 `insertWebPanel` → W dict 등록 → reframe). 없으면 fresh 생성. fresh 뷰가 아니라 **같은 뷰 재사용**이라 상태 보존.
-    - **`destroy` X(원본 창 W)**: X가 **다른 창 모델에 여전히 live면**(신규 ABI `has_web_surface`) → 이동이므로 그 **대상 창 dict로 이관**(`reparentWebPanelToOwningWindow` — removeFromSuperview + 대상 dict 등록·원본 dict 제거, 파괴·`browser.closed` 억제; 대상의 후속 create/show가 adopt 브랜치로 컨테이너 insert). 아니면 진짜 close(파괴 + `browser.closed`).
-    - **경로별 정합·창 닫힘 안전(코드리뷰 [1] HIGH 정정)**: **① `Move Workspace to Window`**(활성 워크스페이스, 원본 창 유지) — `adoptTab`이 대상서 그 워크스페이스를 **활성**으로 세우므로 `finishCrossWindowMove`의 대상 창 renderTick이 create를 내고 **create-steal**(`detachWebPanelForReparent`)로 재부모화, 원본 destroy는 dict에 X 없어 no-op. **② `Merge Window`**(전 워크스페이스, 원본 창 닫힘) — 대상은 자기 활성 워크스페이스를 유지해 옮긴 것들이 **비활성 탭으로 착지 → create 안 뜸 → steal 미발생**이다(초판이 "create-steal이 처리"라 본 오판); 그래서 원본 창 close의 `teardownWebPanels`가 파괴 대신 **이관**(`reparentWebPanelToOwningWindow`)해 상태를 보존한다. `moveWorkspaceToSession`이 `*Tab`을 **동기 relocate**하므로 두 경로 모두 `has_web_surface`가 이동을 정확히 판정. **destroy move-out**(이관)은 create가 먼저 안 도는 미래 경로(drag M5)용 **순서 독립 안전장치**(원본 park 아니라 대상 이관이라 nav-state 오라우팅 없음 — 코드리뷰 [2]).
-    - **재적용 최소**: 재부모화는 **같은 view**라 `controller`·`navObservers`·`navigationDelegate`·autoresizing 불변, `seamEdges`/frame은 reframe 전이가 갱신.
-
-    **신규 ABI**: `maru_macos_app_session_has_web_surface(session, surface_id)`(그 세션 트리에 그 web surface_id가 존재하는지 — additive export → 버전 불변). 헤드리스 유닛으로 존재/부재 판정.
-
-    **검증**: 재부모화·상태 보존·z-order·focus·IME는 **GUI 손 테스트 전용**(WKWebView 상태·NSView 컨테이너는 헤드리스 밖 — §11): 브라우저 탭에서 실 페이지 로드→스크롤/폼 입력→"Move Workspace to Window"로 다른 창 이동→**같은 스크롤·폼·페이지 유지** + 이동 시 spurious `browser.closed` 없음. 헤드리스: `has_web_surface` ABI + 이동 판정 로직. 단일 출처 [window-surface-mobility.md] M6 WKWebView reparent.
-- 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
-- 7e(browser chrome UI — §8): `browser` kind용 **주소창 + back/forward/reload** nav chrome. WKWebView가 nav 함수(`goBack`/`goForward`/`reload`/`load`/`canGoBack`)를 공짜로 주므로 **UI 껍데기만** 만든다(mechanics=WebKit). GPU 셀(탭바처럼 Zig 렌더), 버튼→ABI→WKWebView API. **주소창 2모드**: ① 비활성=현재 URL 표시만 ② 편집=URL 입력→`load`. 편집 모드의 임의 URL 로드는 §7 보안(untrusted 격리·링크 라우팅)이 걸리므로 Phase 5(security) 이후. markdown kind는 주소창 불요라 kind별 분기.
-
-각 slice는 안정성·성능 영향을 같이 닫는다. WKWebView frame sync는 pane rect diff가 있을 때만 수행하고, 매 frame 무조건 `evaluateJavaScript`/snapshot/navigation을 호출하지 않는다. bridge는 bounded message size와 dispatch backpressure를 갖고, `browser.*` 호출은 main tick을 오래 점유하면 chunk/yield 또는 비동기 완료로 분리한다. z-order/IME처럼 wall-clock 성능 숫자가 흔들리는 영역은 frame 값, responder 전이 순서, message count, dropped/coalesced count 같은 결정적 artifact를 남긴다.
-
-코드 배치는 [control-plane-implementation.md](control-plane-implementation.md) §11의 코드 배치·컨벤션 gate를 따른다. 특히 Swift의 `WKURLSchemeHandler`/`WKWebView` 코드는 WebKit API 어댑터로만 두고, 어떤 URL·파일·origin·capability를 허용할지의 정책 판정은 테스트 가능한 Zig 또는 `web/` 패키지 코드에 둔다. 마크다운 sanitizer는 Phase 7의 웹 콘텐츠 패키지가 Bun test로 소유하며, Swift에 HTML sanitizer나 bridge trust 정책을 넣지 않는다.
 
 ## 11. 테스트·검증
 
@@ -407,35 +241,3 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 - CEF 기본 브리지는 page-world 주입이라(WKWebView와 정반대) "임의 페이지가 브리지에 못 닿음"을 CEF에서 **WKWebView와 동일 강도로 재검증**해야 한다. agent-browser 호환도 CDP endpoint 존재만으로 통과 처리하지 말고 위 subset smoke로 증명한다.
 
 **결정 미정**: 위 blocker(특히 공증)를 spike로 검증하기 전엔 도입을 확정하지 않는다.
-
-## 14. 코드 위치 (구현 시 채움)
-
-- **웹 Term 모델 토대(4e-1, 구현 완료 — 렌더·WKWebView·ABI 무변경)**: L2 = `src/session/session_model.zig`(`Term.kind: SurfaceKind`·`web_panel_kind: PanelKind` 필드 + `surfaceId()`/`webPanelLabel()` accessor + `SurfaceKind`/`PanelKind` 별칭; 헤드리스 TDD로 혼합 Pane·kind 분기 고정). app = `src/app/live_pty.zig`(`LiveSurface` struct→`union(SurfaceKind)`: terminal arm=M3a 번들, web arm=sentinel `Surface`; `deinit`이 arm 분기; web arm sentinel teardown 헤드리스 테스트). platform = `src/platform/macos/app_session.zig`(`createTerm` terminal arm 접근, 신규 `createWebTerm`, `destroyTerm`/deinit teardown `kind` 분기, `termLabel` web 분기, `maybeDebugOpenWebPanel`이 web Term을 비활성 탭으로 append). 활성 렌더 skip·per-Term WKWebView·ABI 배선은 4e-2/4e-3.
-- 합성·WKWebView·입력: 계획상 `src/platform/macos/web_panel.{zig,swift}`였으나, **최소 범위라 전용 파일 없이 기존 host
-  파일에 통합**했다(전용 모듈 분리는 Phase 5 브리지/스킴 핸들러가 붙어 표면이 커질 때 한다). **4e-3 실제 위치**:
-  `MaruAppHost.swift`(`MaruWebPanelView` = 조건부 hitTest·performKeyEquivalent 래퍼 + 인라인 흰 HTML WKWebView,
-  `MaruTerminalContainerView.insertWebPanel` = z-order 중간 삽입, `TerminalSurface.webPanels: [UInt64: MaruWebPanelView]` dict,
-  `drainWebSurfaceTransition` = batch(count+at) op 적용), `app_session.zig`(`web_panel_prev`(prev 집합)·`web_surface_transitions`
-  (batch) 상태, `maybeDebugOpenWebPanel` env 훅, `collectWebSurfaces`(pane 트리 walk → web Term 집합)·`marshalWebTransitions`·
-  `computeWebSurfaceTransitions`·`webSurfaceTransitionsCount`/`webSurfaceTransitionAt`·`webFramePt` = 4a 3함수 소비). 4c의
-  단일 `web_panel`·`active_pane_leaf_rect` 캐시·단일 `webSurfaceTransition`은 제거(per-Term 트리 walk가 대체).
-- **입력 responder 전이(4d 시작, FP10/ABI v132 현행)**: `MaruWebPanelView`에 `weak controller` + 조건부 `hitTest`(모달
-  닫힘=super/열림=nil) + `performKeyEquivalent` override가 있다. 현행 키 경로는 `webPanelKeyRoute`의 typed 4-state 결과를
-  소비하고, `app_action`이면 `dispatchWebPanelAppAction` → `maru_macos_app_session_dispatch_web_app_action`이 같은 resolver를
-  다시 평가한 현재 `Action`만 직접 실행한다. terminal 전처리·PTY write는 타지 않으며 stale config/mode면 action 0회다.
-  컨트롤러의 `isWebPanelFocused`,
-  `reconcileWebModalFocus`(`anyOverlayOpen` 엣지→웹↔터미널 firstResponder 전이·복원, renderTick 매 tick 호출). 전이 추적 상태
-  (`lastOverlayOpen`·`stashedWebFocusSurfaceId`)는 `TerminalSurface`(세션별 — 4e-3서 여러 web Term 중 복원 대상을 surface_id로
-  기억). 키바인딩 정책의 단일 출처는 Zig `KeyBindingResolver.resolveWebDetailed`이고 Swift는 raw route 상수만 소비한다.
-  4d의 `any_overlay_open` v80 재사용 뒤 FP10이 typed route/direct dispatch를 ABI v132에 추가했다.
-- **surface 생애주기·per-pane rect 순수 계산(4a, 구현 완료)**: `src/session/web_panel_layout.zig`(L2, OS-중립). 본문 rect(`contentRect` — pane rect − chrome inset), backing px·좌상단 → pt·좌하단 y-flip(`pxTopLeftToPtBottomLeft`), surface 생애주기 diff(`surfaceDiff` — created/destroyed/reframed/hidden/shown 전이)의 **단일 출처**다. chrome 제거 뒤 terminal과 동일한 window padding은 `layout_math.insetRect`가 terminal grid와 WebView 양쪽의 단일 출처다. 헤드리스 단위 테스트로 고정(§11)하고 `check-boundaries`가 L2 중립(app/pty/platform/AppKit import 0·OS 타입명 0)을 강제한다. y-flip 생산 적용(ABI export 또는 Swift 미러)은 이 함수를 단일 출처로 두고 4c가 배선한다.
-- surface 생애주기·per-pane rect ABI wiring(**4e-3 구현 완료 — batch**): `src/platform/macos/app_host_abi.{zig,h}` — 위 순수
-  계산을 export/marshaling. v101에서 v99 단일 op(`maru_macos_app_session_web_surface_transition`)를 제거하고 **count+at**
-  (`..._web_surface_transitions_count` + `..._web_surface_transition_at(index)`)로 대체(command_catalog 선례). `MaruAppHostWebSurfaceTransition`
-  (extern struct: op·**visible**·surface_id·panel_kind·frame_pt_{x,y,w,h}) — `visible`은 op 뒤 pad 자리라 struct size v99와 동일.
-  Zig가 pane 트리 walk + `surfaceDiff`로 계산한 batch를 marshaling만 하고(NSView 연산은 Swift), struct size/offset(visible 포함)·
-  op enum 값을 헤드리스 계약 테스트가 강제한다.
-- 모달 레이어 분리: `src/platform/macos/maru_metal_renderer.{h,m}`(별도 오버레이 layer·2패스), `src/renderer/metal_frame.zig`
-- `maru-app://` OS 어댑터: `MaruAppHost.swift`의 `MaruAppSchemeHandler` + `MaruWebPanelView` trust 분기·surface-pinned bridge. ABI marshaling·CSP getter·FP4 dynamic bridge dispatch는 `app_host_abi.{zig,h}`(ABI v120). 제품 asset은 `web/src`→zntc `web/dist`→`Resources/web/` 경로이며 생성물은 커밋하지 않는다.
-- `maru-app://` 보안 정책(**5c-1·5c-2a 구현 완료**): CSP 상수·경로 문자열 검증(traversal·whitelist·정규화 불변식)은 L2 순수 `src/session/app_scheme.zig`(`csp_header`·`validateAppPath`)가 단일 출처. realpath/symlink 탈출 거부는 실 FS I/O라 `src/platform/macos/app_host_abi.zig`의 `resolveAppAsset`(5c-1 문자열 검증을 소비 + realpath canonical containment). origin/frame allowlist(exact-origin pin)는 5b 브리지가 더한다.
-- markdown sanitizer·웹 콘텐츠 보안: `web/` 패키지(zntc build, Bun `web:test`). sanitizer fixture와 렌더러 순수 로직은 Swift가 아니라 웹 패키지가 소유한다.

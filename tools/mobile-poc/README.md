@@ -138,11 +138,38 @@ Android 도 `NativeActivity` + Vulkan swapchain 으로 **에뮬레이터 화면�
 |---|---|---|
 | 래스터 | CoreText | `android.graphics.Paint`/`Canvas`/`Bitmap` (JNI) |
 | 결과 | `atlas_ondevice=384x128 glyphs=49` | `atlas_ondevice=384x128 glyphs=49` |
-| 한글 폴백 | AppleSDGothicNeo | 시스템 폰트가 알아서 |
+| 폰트 | **동봉 Jetendard**(OFL) | **동봉 Jetendard**(같은 파일) |
+| 한글 폴백 | 불필요(한 파일에 있음) | 불필요 |
 
 **NDK 에는 폰트 래스터가 없다.** 있는 것은 폰트 *탐색*(`AFontMatcher`)뿐이라 FreeType 을
 넣어야 하는 줄 알기 쉬운데, JNI 로 `Paint` 를 부르면 안드로이드 자체 폰트 스택으로 굽는다
 — `-ljnigraphics` 의 `AndroidBitmap_lockPixels` 로 픽셀을 그대로 읽어 온다.
+
+**폰트는 시스템 것이 아니라 동봉한 것을 쓴다.** maru 는 이미 `assets/fonts/` 에 OFL 폰트를
+싣고 있고 그중 **Jetendard** 는 영문과 한글을 한 파일에 담아 폴백이 필요 없다. 시스템 폰트
+(Menlo·AppleSDGothicNeo)를 쓰면 플랫폼마다 글자가 갈리는 데다, 그 폰트들은 라이선스 때문에
+옮길 수도 없다. iOS 는 번들 리소스, Android 는 `/data/local/tmp` 의 **같은 파일**을 읽는다.
+
+### 같은 폰트일 때 남는 픽셀 차이 (PoC 13)
+
+두 플랫폼이 **같은 ttf** 로 구운 아틀라스를 그대로 꺼내 바이트 대조했다
+(`atlas_diff.py`). 남는 것은 순수한 **래스터라이저 차이**(CoreText/CoreGraphics vs Skia)다.
+
+| 항목 | 값 | 뜻 |
+|---|---|---|
+| 무게중심 0.5px 초과로 밀린 셀 | **0/64** (최대 0.28px) | **글자 위치·크기가 같다** — 격자가 안 밀린다 |
+| 값이 다른 칸 | 4904 (ink 의 77.4%) | 대부분 가장자리 |
+| 평균 \|Δ\| | **17.5 / 255** (6.9%) | AA 커버리지 차이 |
+| 눈에 띄는 차이(\|Δ\|>32) | 656 (ink 의 10.4%) | 획 경계 한두 픽셀 |
+
+![아틀라스 대조](out/atlas-diff.png)
+
+위=iOS(초록), 가운데=Android(자홍), 아래=차이를 **3배 증폭**한 것. 증폭했는데도 차이가
+**글자 테두리에만** 있고 획 안쪽은 검다.
+
+**판단**: 폰트를 동봉하는 것만으로 실질적 문제(폴백이 갈리는 것)가 사라진다. 남는 것은
+안티에일리어싱뿐이라, "래스터까지 우리가 가져와야 하는가"의 답은 **골든 픽셀 테스트를 OS
+넘어 공유하고 싶을 때만 그렇다**이다. 화면 품질 때문은 아니다.
 
 ### 입력 (PoC 11)
 

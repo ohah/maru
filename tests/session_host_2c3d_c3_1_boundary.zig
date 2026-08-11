@@ -29,7 +29,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
+    // C3-3b3 settlement이 추가한 product owner API 13개를 별도 테스트 facade와 섞지 않고 고정한다.
+    try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn purgeEndedStream("));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub const ProjectedEventTake = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub const EventReadiness = enum"));
@@ -62,15 +63,19 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     });
     try expectSourceIdentifierInventory(allocator, "EventOwner", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 3 },
-        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 36, .top_level_test = 1 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 25, .top_level_test = 17 },
+        // C3-3b3 source tombstone과 phase receipt projection이 canonical EventOwner 참조 3개를 추가한다.
+        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 39, .top_level_test = 1 },
+        // C3-3b3 tombstone owner API의 mutable owner 인자와 final validation의 const owner 인자가 각각 하나씩 추가된다.
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 27, .top_level_test = 17 },
         .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .product = 2, .top_level_test = 2 },
         // b2b3's dormant RemoteRuntime orchestration names the canonical source owner once.
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
     });
     try expectEventOwnerPointerInventory(allocator, &.{
-        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 20, .mutable_test = 0, .const_product = 14, .const_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 10, .mutable_test = 1, .const_product = 6, .const_test = 4 },
+        // 보수적 lexical inventory에는 builtin.is_test facade 2개와 product release consume 1개가 함께 잡힌다.
+        .{ .path = "platform/macos/session_host/generation_event_contract.zig", .mutable_product = 23, .mutable_test = 0, .const_product = 14, .const_test = 0 },
+        // C3-3b3 tombstone owner API와 final validation이 canonical owner를 변경 가능 pointer로 각각 하나씩 받는다.
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .mutable_product = 12, .mutable_test = 1, .const_product = 6, .const_test = 4 },
         .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .mutable_product = 0, .mutable_test = 0, .const_product = 1, .const_test = 1 },
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .mutable_product = 1, .mutable_test = 0, .const_product = 0, .const_test = 0 },
     });
@@ -491,7 +496,8 @@ fn reviewedEventOwnerComposite(path: []const u8, name: []const u8, init_head: []
     if (std.mem.eql(u8, path, "platform/macos/session_host/generation_attachment.zig"))
         return std.mem.eql(u8, name, "GenerationAttachment") and std.mem.eql(u8, init_head, "struct");
     if (std.mem.eql(u8, path, "platform/macos/session_host/generation_event_contract.zig"))
-        return std.mem.eql(u8, name, "EventOwner") and std.mem.eql(u8, init_head, "extern");
+        return (std.mem.eql(u8, name, "EventOwner") and std.mem.eql(u8, init_head, "extern")) or
+            (std.mem.eql(u8, name, "testing") and std.mem.eql(u8, init_head, "if"));
     if (std.mem.eql(u8, path, "platform/macos/session_host/pending_event_preparation.zig"))
         return std.mem.eql(u8, name, "RuntimePreparationContext") and
             std.mem.eql(u8, init_head, "struct");

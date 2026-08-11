@@ -20,9 +20,11 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn settleRpcResponseExecutionTerminal("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn rpcExecutionAuthoritiesTerminalForTest("));
-    // Five pre-existing RPC/event mutation seams plus the C3-3a1 bounded revoke-cache oracle.
-    // b2b3 adds one exact test-only pending-preparation rollback; product settlement stays b3-owned.
-    try std.testing.expectEqual(@as(usize, 7), count(registry, "if (!builtin.is_test) unreachable;"));
+    // 기존 일곱 seam과 C3-3b3 registry fixture helper 세 개만 test build에서 열린다.
+    try std.testing.expectEqual(@as(usize, 10), count(registry, "if (!builtin.is_test) unreachable;"));
+    try std.testing.expectEqual(@as(usize, 1), count(registry, "fn ensureSettlementSealReadyForTest()"));
+    try std.testing.expectEqual(@as(usize, 1), count(registry, "fn fixturePendingRegistryReceipt("));
+    try std.testing.expectEqual(@as(usize, 1), count(registry, "fn fixtureRegistrySettlementBinding("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, ".exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "pub fn exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "if (!builtin.is_test) unreachable;"));

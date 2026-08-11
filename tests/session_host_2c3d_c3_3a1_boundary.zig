@@ -35,7 +35,9 @@ test "CR3a-2c3d C3-3a1 event authority boundary" {
         "    fn finishEventOrderingNoFail(",
     ) orelse return error.TestExpectedEqual;
 
-    try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
+    // C3-3b3 product settlement 5개와 test-only facade 16개를 반영한 net +13 source inventory다.
+    // C3-3b3 settlement이 추가한 product owner API 13개를 별도 테스트 facade와 섞지 않고 고정한다.
+    try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub const EventOrderingClass = enum(u8)"));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "connection_ordering_blocker_count: usize = 0"));
     try std.testing.expectEqual(@as(usize, 1), count(production, "pub fn reserveEventGenerationWithOrdering("));
@@ -68,7 +70,8 @@ test "CR3a-2c3d C3-3a1 event authority boundary" {
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 4),
+        // C3-3b3 settlement preflight가 connection ordering blocker를 read-only로 한 번 더 확인한다.
+        @as(usize, 5),
         try countSessionHostProductionIdentifiers(allocator, "connectionOrderingBlockerCount"),
     );
     const interleaved: [:0]const u8 =

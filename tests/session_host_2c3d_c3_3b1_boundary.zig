@@ -38,7 +38,9 @@ test "CR3a-2c3d C3-3b1 correlation and all-event ordering boundary" {
         "pub const GenerationTransport = struct",
         "fn mapPrepareError(",
     ) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
+    // C3-3b3 product settlement 5개와 test-only facade 16개를 반영한 net +13 source inventory다.
+    // C3-3b3 settlement이 추가한 product owner API 13개를 별도 테스트 facade와 섞지 않고 고정한다.
+    try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
 
     inline for (.{
         "revoke_blocker_count",

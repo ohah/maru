@@ -11,13 +11,44 @@ const connection_lease = @import("connection_lease.zig");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const generation_transport_mod = @import("generation_transport.zig");
+const generation_event = @import("generation_event_contract.zig");
 const generation_batch_adapter_mod = @import("generation_batch_adapter.zig");
 const framing = @import("framing.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
+const process_seal = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const screen_assembler = @import("screen_assembler.zig");
 const screen_stream = @import("screen_stream.zig");
+const settlement = @import("pending_event_settlement_contract.zig");
+const runtime_lifetime = @import("runtime_lifetime_owner.zig");
+const SettlementDeathCheckpoint = struct { attachment_addr: usize, marker_fd: std.c.fd_t, stage_raw: u8 };
+threadlocal var settlement_death_checkpoint: if (builtin.is_test) ?SettlementDeathCheckpoint else void =
+    if (builtin.is_test) null else {};
+
+fn writeDeathMarker(fd: std.c.fd_t, byte: u8) void {
+    const marker: [1]u8 = .{byte};
+    while (true) {
+        const written = std.c.write(fd, &marker, marker.len);
+        if (written == 1) return;
+        if (written < 0 and std.posix.errno(written) == .INTR) continue;
+        std.c._exit(126);
+    }
+}
+
+fn payloadExtentExcludesProtected(payload_addr: usize, payload_len: usize, protected: anytype) bool {
+    if (payload_addr == 0 or payload_len == 0) return false;
+    const payload_end = std.math.add(usize, payload_addr, payload_len) catch return false;
+    if (payload_end == 0) return false;
+    inline for (protected) |pointer| {
+        const Pointer = @TypeOf(pointer);
+        const start = @intFromPtr(pointer);
+        const extent = @sizeOf(@typeInfo(Pointer).pointer.child);
+        const end = std.math.add(usize, start, extent) catch return false;
+        if (payload_addr < end and start < payload_end) return false;
+    }
+    return true;
+}
 
 pub const Lifecycle = enum(u8) {
     pristine,
@@ -46,6 +77,9 @@ pub const DeinitOutcome = enum {
 };
 
 pub const GenerationAttachment = struct {
+    pub fn pendingEventReleaseCallbackActive(self: *const GenerationAttachment) bool {
+        return self.transport.pendingEventReleaseCallbackActive();
+    }
     self_addr: usize = 0,
     lifecycle: Lifecycle = .pristine,
     transport: generation_transport_mod.GenerationTransport = .{},
@@ -462,6 +496,126 @@ pub const GenerationAttachment = struct {
         return self.payloadConst().streamId();
     }
 
+    pub fn preflightPendingSettlementTransport(
+        self: *GenerationAttachment,
+        correlation: generation_transport_mod.EventCorrelation,
+        projection: settlement.PendingEffectProjection,
+        lifetime_owner: *const runtime_lifetime.RuntimeLifetimeOwner,
+        lease: *const runtime_lifetime.RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        effect_out: *settlement.EffectCommitEvidence,
+        release_out: *settlement.EventReleaseCompletion,
+        effect_permit: *settlement.PreparedEffectPermit,
+        release_permit: *settlement.PreparedEventReleasePermit,
+        pending_permit: *settlement.PreparedPendingSettlementPermit,
+        begun: *generation_transport_mod.PendingEventReleaseBegun,
+        pending_owner: anytype,
+    ) error{ Busy, InvalidOwner }!void {
+        if (!self.valid() or self.lifecycle != .attached or
+            !lifetime_owner.validatePreparedSettlementBinding(lease, binding) or
+            projection.pending_owner_addr == 0 or projection.owner_incarnation == 0 or
+            projection.attempt == 0 or projection.event_generation == 0 or
+            projection.release.pending_owner_addr != projection.pending_owner_addr or
+            projection.release.pending_owner_incarnation != projection.owner_incarnation or
+            projection.release.attempt != projection.attempt)
+            return error.InvalidOwner;
+        const correlation_digest = self.transport.settlementCorrelationDigest(&correlation) catch
+            return error.InvalidOwner;
+        self.transport.preflightPendingEffect(.{
+            .pending_owner_addr = projection.pending_owner_addr,
+            .owner_incarnation = projection.owner_incarnation,
+            .attempt = projection.attempt,
+            .event_generation = projection.event_generation,
+            .correlation_digest = correlation_digest,
+            .prepared_effect_digest = projection.prepared_effect_digest,
+            .effect_request = projection.effect_request,
+            .target_stream_id = self.streamId(),
+            .effect_out_addr = @intFromPtr(effect_out),
+            .effect_out_extent = @sizeOf(settlement.EffectCommitEvidence),
+            .effect_out_alignment = @alignOf(settlement.EffectCommitEvidence),
+            .effect_out_pristine_digest = settlement.pristineEffectCommitEvidenceDigest(),
+            .lease = binding,
+        }, effect_out, effect_permit) catch |err| return err;
+        errdefer self.transport.abortPendingEffectPreAdmissionNoFail(effect_permit);
+        const event_projection = generation_event.releaseProjection(&self.event_owner) catch
+            return error.InvalidOwner;
+        if (@intFromPtr(pending_owner) != projection.pending_owner_addr or
+            !payloadExtentExcludesProtected(event_projection.payload_addr, event_projection.payload_len, .{
+                lease,          effect_out, release_out,    effect_permit, release_permit,
+                pending_permit, begun,      lifetime_owner, pending_owner, self,
+            })) return error.InvalidOwner;
+        self.transport.preflightPendingEventReleaseUnderEffect(
+            effect_permit,
+            projection.release,
+            event_projection,
+            binding,
+            release_out,
+            release_permit,
+            begun,
+        ) catch return error.InvalidOwner;
+    }
+
+    pub fn abortPendingSettlementTransportPreAdmissionNoFail(
+        self: *GenerationAttachment,
+        effect_permit: *settlement.PreparedEffectPermit,
+        release_permit: *settlement.PreparedEventReleasePermit,
+    ) void {
+        if (release_permit.lifecycle_raw == @intFromEnum(settlement.AuthorityLifecycle.prepared))
+            release_permit.* = .{};
+        self.transport.abortPendingEffectPreAdmissionNoFail(effect_permit);
+    }
+
+    pub fn commitPendingEffectNoFail(
+        self: *GenerationAttachment,
+        lifetime_owner: *const runtime_lifetime.RuntimeLifetimeOwner,
+        lease: *const runtime_lifetime.RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        permit: *settlement.PreparedEffectPermit,
+        out: *settlement.EffectCommitEvidence,
+    ) void {
+        if (builtin.is_test) if (settlement_death_checkpoint) |checkpoint| {
+            if (checkpoint.attachment_addr != @intFromPtr(self)) std.c._exit(126);
+            writeDeathMarker(checkpoint.marker_fd, 0x42);
+            if (checkpoint.stage_raw == 1) {
+                permit.seal[0] ^= 1;
+                writeDeathMarker(checkpoint.marker_fd, 0x47);
+            }
+        };
+        if (!lifetime_owner.validateAdmittedSettlementBinding(lease, binding))
+            process_seal.fatalIntegrity(.proof_loss);
+        self.transport.commitPendingEffectNoFail(permit, binding, out);
+    }
+
+    pub fn commitPendingReleaseNoFail(
+        self: *GenerationAttachment,
+        lifetime_owner: *const runtime_lifetime.RuntimeLifetimeOwner,
+        lease: *const runtime_lifetime.RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        effect_permit: *settlement.PreparedEffectPermit,
+        effect_out: *const settlement.EffectCommitEvidence,
+        permit: *settlement.PreparedEventReleasePermit,
+        begun: *generation_transport_mod.PendingEventReleaseBegun,
+        out: *settlement.EventReleaseCompletion,
+    ) void {
+        if (!lifetime_owner.validateAdmittedSettlementBinding(lease, binding))
+            process_seal.fatalIntegrity(.proof_loss);
+        if (!self.transport.validatePendingEventReleaseFinal(
+            &self.event_owner,
+            effect_permit,
+            effect_out,
+            permit,
+            binding,
+            out,
+        )) process_seal.fatalIntegrity(.proof_loss);
+        self.transport.preparePendingEventReleaseBegunNoFail(effect_permit, permit, begun);
+        self.transport.tombstonePendingEventOwnerNoFail(&self.event_owner, permit, begun);
+        self.transport.beginPendingEventReleaseResourcesNoFail(effect_permit, permit, begun);
+        self.transport.tombstonePendingEventCorrelationNoFail(begun);
+        self.event_generation_mirror = 0;
+        self.transport.markPendingEventMirrorTombstonedNoFail(self.event_generation_mirror, begun);
+        self.transport.finishPendingEventReleaseNoFail(effect_permit, permit, begun, out);
+    }
+
     pub fn allowsMutation(self: *const GenerationAttachment) bool {
         if (!self.payloadConst().allowsMutation()) return false;
         return generation_transport_mod.mutationAllowedOwned(
@@ -584,7 +738,245 @@ fn rawLifecycleValid(value: *const Lifecycle) bool {
     return raw <= @intFromEnum(Lifecycle.terminal);
 }
 
+fn recursivelyContainsPointer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer, .@"fn" => true,
+        .array => |info| recursivelyContainsPointer(info.child),
+        .optional => |info| recursivelyContainsPointer(info.child),
+        .error_union => |info| recursivelyContainsPointer(info.payload),
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 pub const testing_api = if (builtin.is_test) struct {
+    pub const EventReleasePostSnapshot = client_slot_mod.EventReleasePostSnapshot;
+    pub const EventReleaseSourceSnapshot = client_slot_mod.testing.EventReleaseSourceSnapshot;
+    pub const ForkRejectedClientProjection = client_slot_mod.testing.ForkRejectedClientProjection;
+
+    pub fn initializeProcessRuntime() !void {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    }
+
+    pub fn eventReleaseSourceSnapshot(
+        adapter: *host_adapter_mod.HostAdapter,
+    ) !EventReleaseSourceSnapshot {
+        return client_slot_mod.testing.eventReleaseSourceSnapshot(&adapter.slot);
+    }
+
+    pub fn forkRejectedClientProjection(
+        adapter: *const host_adapter_mod.HostAdapter,
+    ) ForkRejectedClientProjection {
+        return client_slot_mod.testing.forkRejectedClientProjection(&adapter.slot);
+    }
+
+    pub fn pendingEventPayloadCallbackCount() usize {
+        return client_slot_mod.testing.pendingEventPayloadCallbackCount();
+    }
+
+    pub fn armSettlementProofLossMarker(fd: std.c.fd_t, stage_raw: u8) void {
+        client_slot_mod.testing.armEventReleaseProofLossMarker(fd, stage_raw);
+    }
+
+    pub fn armSettlementDeathCheckpoint(
+        attachment: *GenerationAttachment,
+        fd: std.c.fd_t,
+        stage_raw: u8,
+    ) void {
+        if (settlement_death_checkpoint != null or stage_raw < 1 or stage_raw > 3)
+            @panic("settlement death checkpoint replayed");
+        settlement_death_checkpoint = .{
+            .attachment_addr = @intFromPtr(attachment),
+            .marker_fd = fd,
+            .stage_raw = stage_raw,
+        };
+    }
+
+    pub fn takeEventReleasePostSnapshot() ?EventReleasePostSnapshot {
+        return client_slot_mod.testing.takeEventReleasePostSnapshot();
+    }
+
+    pub const EventPayloadRange = struct { address: usize, len: usize };
+    pub const EffectStateSnapshot = struct {
+        first_reason_present: bool,
+        first_reason_raw: u8,
+        unusable: bool,
+        outbound_addr: usize,
+        outbound_len: usize,
+        outbound_offset: usize,
+        outbound_stream_id: u64,
+        outbound_byte_len: u8,
+        outbound_bytes: [64]u8,
+        outbound_digest: [32]u8,
+    };
+
+    pub fn eventPayloadRange(attachment: *GenerationAttachment) !EventPayloadRange {
+        const projection = try generation_event.releaseProjection(&attachment.event_owner);
+        return .{ .address = projection.payload_addr, .len = projection.payload_len };
+    }
+
+    pub fn seedFirstReason(adapter: *host_adapter_mod.HostAdapter, raw: u8) !void {
+        const client = adapter.logicalClient();
+        const Reason = @typeInfo(@TypeOf(client.first_poison_reason)).optional.child;
+        client.first_poison_reason = std.enums.fromInt(Reason, raw) orelse return error.InvalidOwner;
+    }
+
+    pub fn seedSiblingOutbound(
+        adapter: *host_adapter_mod.HostAdapter,
+        bytes: []const u8,
+        offset: usize,
+        stream_id: u64,
+    ) !void {
+        const client = adapter.logicalClient();
+        if (offset >= bytes.len or client.pending_outbound != null) return error.InvalidOwner;
+        client.pending_outbound = .{
+            .frame = try client.allocator.dupe(u8, bytes),
+            .offset = offset,
+            .stream_id = stream_id,
+        };
+    }
+
+    pub fn effectStateSnapshot(adapter: *host_adapter_mod.HostAdapter) EffectStateSnapshot {
+        const client = adapter.logicalClient();
+        var result: EffectStateSnapshot = .{
+            .first_reason_present = client.first_poison_reason != null,
+            .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@intFromEnum(reason)) else 0,
+            .unusable = client.unusable,
+            .outbound_addr = 0,
+            .outbound_len = 0,
+            .outbound_offset = 0,
+            .outbound_stream_id = 0,
+            .outbound_byte_len = 0,
+            .outbound_bytes = [_]u8{0} ** 64,
+            .outbound_digest = [_]u8{0} ** 32,
+        };
+        if (client.pending_outbound) |pending| {
+            result.outbound_addr = @intFromPtr(pending.frame.ptr);
+            result.outbound_len = pending.frame.len;
+            result.outbound_offset = pending.offset;
+            result.outbound_stream_id = pending.stream_id;
+            result.outbound_byte_len = @intCast(@min(pending.frame.len, result.outbound_bytes.len));
+            @memcpy(result.outbound_bytes[0..result.outbound_byte_len], pending.frame[0..result.outbound_byte_len]);
+            var hasher = std.crypto.hash.Blake3.init(.{});
+            hasher.update(pending.frame);
+            hasher.final(&result.outbound_digest);
+        }
+        return result;
+    }
+
+    pub fn payloadExcludesProtected(
+        payload_addr: usize,
+        payload_len: usize,
+        protected: anytype,
+    ) bool {
+        return payloadExtentExcludesProtected(payload_addr, payload_len, protected);
+    }
+
+    pub fn replaceEventPayload(
+        attachment: *GenerationAttachment,
+        address: usize,
+        len: usize,
+    ) []u8 {
+        return generation_event.testing.replacePayload(&attachment.event_owner, address, len);
+    }
+
+    pub fn restoreEventPayload(attachment: *GenerationAttachment, payload: []u8) void {
+        generation_event.testing.restorePayload(&attachment.event_owner, payload);
+    }
+
+    pub const PreparedSettlement = struct {
+        correlation: generation_transport_mod.EventCorrelation,
+        event_generation: u64,
+    };
+
+    pub fn preparePendingSettlement(
+        attachment: *GenerationAttachment,
+        allocator: std.mem.Allocator,
+        lifetime_owner: anytype,
+        pending_owner: anytype,
+        runtime_addr: usize,
+        runtime_extent: usize,
+        observation: anytype,
+        direct_input: anytype,
+        direct_input_offset: *usize,
+        pending_controls: anytype,
+        blocking_flush_active: *bool,
+        resize_generation: *u64,
+        resize_baseline_present: *bool,
+    ) !PreparedSettlement {
+        const preparation = @import("pending_event_preparation.zig");
+        if (!attachment.valid() or attachment.lifecycle != .attached or
+            attachment.event_generation_mirror == 0)
+            return error.InvalidOwner;
+        const view = try generation_transport_mod.preparationEventViewOwned(
+            &attachment.transport,
+            &attachment.event_owner,
+        );
+        const context: preparation.RuntimePreparationContext = .{
+            .runtime_addr = runtime_addr,
+            .allocator = allocator,
+            .lifetime_owner = lifetime_owner,
+            .pending_owner = pending_owner,
+            .observation = observation,
+            .direct_input = direct_input,
+            .direct_input_offset = direct_input_offset,
+            .pending_controls = pending_controls,
+            .blocking_flush_active = blocking_flush_active,
+            .resize_generation = resize_generation,
+            .resize_baseline_present = resize_baseline_present,
+            .source_owner = &attachment.event_owner,
+            .source_view = view,
+            .correlation = attachment.transport.event_correlation,
+        };
+        const operation_preflight = try lifetime_owner.preflightPreparation();
+        const source_identity = try preparation.sourceIdentityFromView(view);
+        const source_receipt = try preparation.preflightSource(context, view, operation_preflight);
+        const snapshot = try preparation.snapshotRuntimeContext(
+            context,
+            operation_preflight.owner_incarnation,
+            std.mem.zeroes(@FieldType(preparation.RuntimeSemanticSnapshot, "operation_identity")),
+            source_identity,
+        );
+        const recipe = try preparation.recipeFromSourceView(view);
+        var frame: preparation.PreparationFrame = undefined;
+        preparation.initFrameInPlace(&frame, .{
+            .context = context,
+            .operation_preflight = operation_preflight,
+            .source_receipt = source_receipt,
+            .snapshot = snapshot,
+            .recipe = recipe,
+        }, runtime_extent);
+        try @import("remote_runtime_pending_event.zig").prepareTakenEvent(&frame);
+        return .{
+            .correlation = attachment.transport.event_correlation,
+            .event_generation = view.trusted.event_generation,
+        };
+    }
+
+    pub const SettlementSourceSnapshot = struct {
+        owner_pristine: bool,
+        correlation_pristine: bool,
+        event_generation_mirror: u64,
+    };
+
+    pub fn settlementSourceSnapshot(attachment: *const GenerationAttachment) SettlementSourceSnapshot {
+        return .{
+            .owner_pristine = generation_event.pristineExact(&attachment.event_owner),
+            .correlation_pristine = std.meta.eql(
+                attachment.transport.event_correlation,
+                generation_transport_mod.EventCorrelation{},
+            ),
+            .event_generation_mirror = attachment.event_generation_mirror,
+        };
+    }
+
     pub fn initAttached(
         attachment: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
@@ -648,6 +1040,10 @@ pub const testing_api = if (builtin.is_test) struct {
         }, allocator);
     }
 } else struct {};
+
+test "C3-3b3 preparation facade 결과는 재귀적으로 pointer-free다" {
+    try std.testing.expect(!recursivelyContainsPointer(testing_api.PreparedSettlement));
+}
 
 test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseFast" {
     var attachment: GenerationAttachment = .{};

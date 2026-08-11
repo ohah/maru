@@ -12,6 +12,8 @@ const client_poison = @import("client_poison.zig");
 const cleanup = @import("event_cleanup_seal.zig");
 const process_seal = @import("process_seal_service.zig");
 const observation_digest = @import("runtime_observation_digest.zig");
+const settlement = @import("pending_event_settlement_contract.zig");
+const lifetime = @import("runtime_lifetime_owner.zig");
 
 const RuntimeObservation = maru.app.RuntimeObservation;
 const zero_digest = [_]u8{0} ** 32;
@@ -168,6 +170,7 @@ pub const PendingEventOwner = struct {
     progress_input: ?cleanup.CleanupProgressInput = null,
     transcript_seal: cleanup.CleanupSeal = zero_digest,
     progress_seal: cleanup.CleanupSeal = zero_digest,
+    settlement_disposition: settlement.SettlementDisposition = .{},
 
     pub fn initInPlace(self: *PendingEventOwner, owner_incarnation: u64) OwnerError!void {
         if (owner_incarnation == 0) return error.InvalidOwner;
@@ -305,6 +308,222 @@ pub const PendingEventOwner = struct {
 
     pub fn borrowPrepared(self: *const PendingEventOwner) OwnerError!BorrowedPrepared {
         return self.borrowPreparedImpl(true);
+    }
+
+    pub fn settlementEffectProjection(self: *const PendingEventOwner) OwnerError!settlement.PendingEffectProjection {
+        const borrowed = try self.borrowPreparedImpl(true);
+        if (!releaseReceiptValid(self, self.active_attempt, &self.release_receipt) or
+            std.mem.allEqual(u8, &self.progress_seal, 0))
+            return error.InvalidOwner;
+        const effect_request: settlement.EffectRequestProjection = switch (borrowed.effect) {
+            .none => .{},
+            .poison => |reason| .{
+                .tag_raw = @intFromEnum(settlement.EffectRequestTag.poison),
+                .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(reason) },
+            },
+            .revoke_fence => |fence| .{
+                .tag_raw = @intFromEnum(settlement.EffectRequestTag.revoke_fence),
+                .revoke_fence = fence,
+            },
+        };
+        return .{
+            .pending_owner_addr = self.self_addr,
+            .owner_incarnation = self.owner_incarnation,
+            .attempt = self.active_attempt,
+            .event_generation = self.event_identity.event_generation,
+            .prepared_effect_digest = self.progress_seal,
+            .effect_request = effect_request,
+            .release = .{
+                .event_identity = identityForSeal(self.release_receipt.event_identity),
+                .pending_owner_addr = self.release_receipt.pending_owner_addr,
+                .pending_owner_incarnation = self.release_receipt.pending_owner_incarnation,
+                .source_lease_incarnation = self.release_receipt.source_lease_incarnation,
+                .attempt = self.release_receipt.attempt,
+                .state_raw = self.release_receipt.state_raw,
+                .reserved = self.release_receipt.reserved,
+                .release_seal = self.release_receipt.release_seal,
+            },
+        };
+    }
+
+    /// lifecycle과 receipt를 바꾸지 않고 Pending-owned settlement 절반을 준비한다.
+    pub fn preflightSettlement(
+        self: *PendingEventOwner,
+        lifetime_owner: *const lifetime.RuntimeLifetimeOwner,
+        lease: *const lifetime.RuntimeSettlementLease,
+        input: settlement.PendingSettlementInput,
+        out: *settlement.PreparedPendingSettlementPermit,
+    ) OwnerError!void {
+        try self.validateAddress();
+        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.prepared)) return error.Busy;
+        if (!std.meta.eql(out.*, settlement.PreparedPendingSettlementPermit{}) or
+            !std.meta.eql(self.settlement_disposition, settlement.SettlementDisposition{}))
+            return error.InvalidOwner;
+        if (!lifetime_owner.validatePreparedSettlementBinding(lease, input.lease) or
+            input.pending_owner_addr != self.self_addr or
+            input.owner_incarnation != self.owner_incarnation or input.attempt != self.active_attempt or
+            input.source_lease_incarnation != self.source_lease_incarnation or
+            input.event_generation != self.event_identity.event_generation or
+            input.lease.operation_identity.pending_owner_addr != self.self_addr or
+            input.lease.operation_identity.pid != self.event_identity.pid or
+            input.lease.operation_identity.process_nonce != self.event_identity.process_nonce or
+            input.lease.operation_identity.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+            input.effect_out_addr == 0 or input.release_out_addr == 0 or
+            input.effect_out_addr == input.release_out_addr or
+            !sourceLeaseValidState(self, self.active_attempt, &self.source_lease, .consumed) or
+            !releaseReceiptValid(self, self.active_attempt, &self.release_receipt) or
+            !std.crypto.timing_safe.eql(
+                settlement.Digest,
+                input.release_receipt_digest,
+                self.release_receipt.release_seal,
+            )) return error.InvalidOwner;
+
+        var permit: settlement.PreparedPendingSettlementPermit = .{
+            .self_addr = @intFromPtr(out),
+            .pid = self.event_identity.pid,
+            .process_nonce = self.event_identity.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .pending_owner_addr = self.self_addr,
+            .owner_incarnation = self.owner_incarnation,
+            .attempt = self.active_attempt,
+            .source_lease_incarnation = self.source_lease_incarnation,
+            .event_generation = self.event_identity.event_generation,
+            .effect_out_addr = input.effect_out_addr,
+            .release_out_addr = input.release_out_addr,
+            .disposition_addr = @intFromPtr(&self.settlement_disposition),
+            .scratch_ranges_digest = input.lease.ranges_digest,
+            .scratch_pristine_digest = input.lease.pristine_digest,
+            .preflight_proof_seal_digest = input.lease.preflight_proof_seal_digest,
+            .lease_seal_digest = input.lease.lease_seal_digest,
+            .release_receipt_digest = input.release_receipt_digest,
+        };
+        permit.seal = settlement.sealPendingSettlementPermit(permit) catch return error.InvalidOwner;
+        out.* = permit;
+        // lifecycle byte만 ready marker이며 일부만 기록된 permit은 항상 invalid다.
+        out.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+    }
+
+    pub fn armSettlementNoFail(
+        self: *PendingEventOwner,
+        lifetime_owner: *lifetime.RuntimeLifetimeOwner,
+        lease: *lifetime.RuntimeSettlementLease,
+        permit: *settlement.PreparedPendingSettlementPermit,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+    ) void {
+        if (!lifetime_owner.validatePreparedSettlementBinding(lease, binding) or
+            !self.settlementArmPreflightValid(permit, binding))
+            process_seal.fatalIntegrity(.proof_loss);
+        // paired admission은 두 owner 사이에 branch, callback, recoverable return이 없다.
+        lifetime_owner.admitSettlementNoFail(lease, binding);
+        if (!lifetime_owner.validateAdmittedSettlementBinding(lease, binding))
+            process_seal.fatalIntegrity(.proof_loss);
+        self.lifecycle_raw = @intFromEnum(PendingLifecycle.settling);
+    }
+
+    fn settlementArmPreflightValid(
+        self: *const PendingEventOwner,
+        permit: *const settlement.PreparedPendingSettlementPermit,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+    ) bool {
+        _ = self.borrowPreparedImpl(true) catch return false;
+        return self.pendingSettlementPermitMatches(permit, binding) and
+            std.meta.eql(self.settlement_disposition, settlement.SettlementDisposition{}) and
+            std.crypto.timing_safe.eql(
+                settlement.Digest,
+                permit.release_receipt_digest,
+                self.release_receipt.release_seal,
+            );
+    }
+
+    pub fn publishSettlementNoFail(
+        self: *PendingEventOwner,
+        lifetime_owner: *const lifetime.RuntimeLifetimeOwner,
+        lease: *const lifetime.RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        permit: *settlement.PreparedPendingSettlementPermit,
+        effect_permit: *settlement.PreparedEffectPermit,
+        effect: *settlement.EffectCommitEvidence,
+        release: *settlement.EventReleaseCompletion,
+    ) void {
+        if (!lifetime_owner.validateAdmittedSettlementBinding(lease, binding) or
+            self.lifecycle_raw != @intFromEnum(PendingLifecycle.settling) or
+            !self.pendingSettlementPermitMatches(permit, binding) or
+            permit.pending_owner_addr != self.self_addr or permit.owner_incarnation != self.owner_incarnation or
+            permit.attempt != self.active_attempt or permit.effect_out_addr != @intFromPtr(effect) or
+            permit.release_out_addr != @intFromPtr(release) or
+            !settlement.validEffectCommitEvidenceFor(effect_permit, binding, effect) or
+            !settlement.validEventReleaseCompletion(release) or
+            !settlementEvidenceMatches(self, effect) or !settlementEvidenceMatches(self, release) or
+            !releaseReceiptValid(self, self.active_attempt, &self.release_receipt) or
+            !std.crypto.timing_safe.eql(
+                settlement.Digest,
+                permit.release_receipt_digest,
+                self.release_receipt.release_seal,
+            ))
+            process_seal.fatalIntegrity(.proof_loss);
+
+        const outcome = std.enums.fromInt(settlement.ConfirmedEffectOutcome, effect.outcome_raw) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        const recovery = std.enums.fromInt(settlement.EffectRecovery, effect.recovery_raw) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        const disposition_tag: settlement.SettlementDispositionTag = if (recovery == .trusted_local_invariant)
+            .suppress_local_invariant
+        else if (outcome == .terminal_cleanup_confirmed)
+            .suppress_terminal
+        else
+            .publish_prepared;
+        var consumed = self.release_receipt;
+        consumed.state_raw = @intFromEnum(PendingReleaseState.consumed);
+        consumed.release_seal = process_seal.pendingReleaseSeal(
+            consumed.event_identity.pid,
+            consumed.event_identity.process_nonce,
+            releaseSealInput(consumed),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+
+        var disposition: settlement.SettlementDisposition = .{
+            .self_addr = @intFromPtr(&self.settlement_disposition),
+            .disposition_raw = @intFromEnum(disposition_tag),
+            .pid = self.event_identity.pid,
+            .process_nonce = self.event_identity.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .pending_owner_addr = self.self_addr,
+            .owner_incarnation = self.owner_incarnation,
+            .attempt = self.active_attempt,
+            .event_generation = self.event_identity.event_generation,
+            .effect_evidence_digest = effect.seal,
+            .registry_completion_digest = release.seal,
+            .consumed_receipt_digest = consumed.release_seal,
+        };
+        disposition.seal = settlement.sealSettlementDisposition(
+            disposition,
+            self.event_identity.pid,
+            self.event_identity.process_nonce,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+
+        self.release_receipt = consumed;
+        self.settlement_disposition = disposition;
+        self.settlement_disposition.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        permit.consumed_raw = 1;
+        permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
+        effect_permit.consumed_raw = 1;
+        effect_permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
+    }
+
+    fn pendingSettlementPermitMatches(
+        self: *const PendingEventOwner,
+        permit: *const settlement.PreparedPendingSettlementPermit,
+        lease: settlement.RuntimeSettlementLeaseBinding,
+    ) bool {
+        return settlement.validPendingSettlementPermit(permit) and
+            settlement.validRuntimeSettlementBinding(lease) and
+            permit.pending_owner_addr == self.self_addr and permit.owner_incarnation == self.owner_incarnation and
+            permit.attempt == self.active_attempt and permit.source_lease_incarnation == self.source_lease_incarnation and
+            permit.event_generation == self.event_identity.event_generation and
+            permit.disposition_addr == @intFromPtr(&self.settlement_disposition) and
+            std.crypto.timing_safe.eql(settlement.Digest, permit.scratch_ranges_digest, lease.ranges_digest) and
+            std.crypto.timing_safe.eql(settlement.Digest, permit.scratch_pristine_digest, lease.pristine_digest) and
+            std.crypto.timing_safe.eql(settlement.Digest, permit.preflight_proof_seal_digest, lease.preflight_proof_seal_digest) and
+            std.crypto.timing_safe.eql(settlement.Digest, permit.lease_seal_digest, lease.lease_seal_digest);
     }
 
     fn borrowPreparedForOwnerUnitTest(self: *const PendingEventOwner) OwnerError!BorrowedPrepared {
@@ -610,6 +829,102 @@ pub const PendingEventOwner = struct {
 };
 
 pub const testing = if (builtin.is_test) struct {
+    pub fn initPreparedForSettlement(
+        owner: *PendingEventOwner,
+        identity: PendingEventIdentity,
+        decision: prepared_types.PreparedDecision,
+        seed: u8,
+    ) !void {
+        try owner.initInPlace(0xA000 + @as(u64, seed));
+        const attempt = try owner.beginPrepare(identity);
+        try owner.publishNoAllocation(attempt, decision);
+        const transcript: cleanup.CleanupTranscriptInput = .{
+            .host_id = identity.host_id,
+            .runtime_id = identity.runtime_id,
+            .connection_generation = identity.connection_generation,
+            .slot_incarnation = identity.slot_incarnation,
+            .owner_node_incarnation = identity.owner_node_incarnation,
+            .transport_incarnation = identity.transport_incarnation,
+            .registry_incarnation = identity.registry_incarnation,
+            .binding_reservation_id = identity.binding_reservation_id,
+            .event_node_incarnation = identity.event_node_incarnation,
+            .stream_id = identity.stream_id,
+            .event_generation = identity.event_generation,
+            .event_owner_addr = identity.event_owner_addr,
+            .wire_major = identity.wire_major,
+            .expected_major = identity.expected_major,
+            .metadata_support_raw = identity.metadata_support_raw,
+            .admission_tag = identity.admission_tag,
+            .correlation_binding_digest = identity.correlation_binding_digest,
+            .payload_digest = identity.payload_digest,
+            .admission_projection_digest = identity.admission_projection_digest,
+            .pending_owner_addr = owner.self_addr,
+            .pending_owner_incarnation = owner.owner_incarnation,
+            .cleanup_plan_addr = 0xA100 + @as(u64, seed),
+            .runtime_addr = 0xA200 + @as(u64, seed),
+            .observation_addr = 0xA300 + @as(u64, seed),
+            .observation_revision = 0,
+            .observer_generation = 0,
+            .title_generation = 0,
+            .observation_digest = [_]u8{0x71 +% seed} ** 32,
+            .preparation_attempt = attempt,
+            .pending_lifecycle = .preparing,
+            .plan = .{ .preparation = .{ .dto_backing = .{}, .next_observation = .{} } },
+        };
+        const transcript_seal = try process_seal.cleanupTranscriptSeal(identity.pid, identity.process_nonce, transcript);
+        const progress: cleanup.CleanupProgressInput = .{
+            .transcript_input = transcript,
+            .transcript_seal = transcript_seal,
+            .phase = .preparation,
+            .step = .finished,
+            .next_role = .none,
+            .completed_mask = 0xff,
+            .decision = prepared_types.sealProjection(decision),
+        };
+        owner.progress_input = progress;
+        owner.transcript_seal = transcript_seal;
+        owner.progress_seal = try process_seal.cleanupProgressSeal(identity.pid, identity.process_nonce, progress);
+        owner.source_lease_incarnation = 1;
+        var source_receipt: PendingEventSourceReceipt = .{
+            .event_identity = identity,
+            .runtime_addr = transcript.runtime_addr,
+            .pending_owner_addr = owner.self_addr,
+            .pending_owner_incarnation = owner.owner_incarnation,
+            .source_lease_incarnation = 1,
+            .pid = identity.pid,
+            .process_nonce = identity.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+        };
+        source_receipt.receipt_seal = try process_seal.pendingSourceReceiptSeal(
+            identity.pid,
+            identity.process_nonce,
+            sourceReceiptSealInput(source_receipt),
+        );
+        owner.source_lease = .{
+            .receipt = source_receipt,
+            .state_raw = @intFromEnum(PendingSourceLeaseState.consumed),
+            .attempt = attempt,
+        };
+        owner.source_lease.lease_seal = try process_seal.pendingSourceLeaseSeal(
+            identity.pid,
+            identity.process_nonce,
+            sourceLeaseSealInput(owner.source_lease),
+        );
+        owner.release_receipt = .{
+            .event_identity = identity,
+            .pending_owner_addr = owner.self_addr,
+            .pending_owner_incarnation = owner.owner_incarnation,
+            .source_lease_incarnation = 1,
+            .attempt = attempt,
+            .state_raw = @intFromEnum(PendingReleaseState.live),
+        };
+        owner.release_receipt.release_seal = try process_seal.pendingReleaseSeal(
+            identity.pid,
+            identity.process_nonce,
+            releaseSealInput(owner.release_receipt),
+        );
+    }
+
     fn descriptorUsesAllocator(
         descriptor: cleanup.CleanupDescriptor,
         allocator: std.mem.Allocator,
@@ -648,6 +963,7 @@ pub const testing = if (builtin.is_test) struct {
         owner.progress_input = null;
         owner.transcript_seal = zero_digest;
         owner.progress_seal = zero_digest;
+        owner.settlement_disposition = .{};
         owner.active_attempt = 0;
         owner.operation_incarnation = 0;
         owner.event_identity = .{};
@@ -763,6 +1079,16 @@ fn releaseReceiptValid(
         releaseSealInput(receipt.*),
     ) catch return false;
     return std.crypto.timing_safe.eql(cleanup.CleanupSeal, expected, receipt.release_seal);
+}
+
+fn settlementEvidenceMatches(owner: *const PendingEventOwner, evidence: anytype) bool {
+    return evidence.pid == owner.event_identity.pid and
+        evidence.process_nonce == owner.event_identity.process_nonce and
+        evidence.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and
+        evidence.pending_owner_addr == owner.self_addr and
+        evidence.owner_incarnation == owner.owner_incarnation and
+        evidence.attempt == owner.active_attempt and
+        evidence.event_generation == owner.event_identity.event_generation;
 }
 
 fn sourceReceiptSealInput(receipt: PendingEventSourceReceipt) cleanup.PendingSourceReceiptSealInput {
@@ -960,7 +1286,7 @@ test "C3-3b2b3 owner initializes pristine at its final address" {
     try std.testing.expect(rawStoragePristine(&owner.prepared));
     try std.testing.expect(@alignOf(PendingEventOwner) <= 16);
     try std.testing.expect(@sizeOf(PendingEventOwner) <= 4096);
-    try std.testing.expectEqual(@as(usize, 16), std.meta.fields(PendingEventOwner).len);
+    try std.testing.expectEqual(@as(usize, 17), std.meta.fields(PendingEventOwner).len);
 }
 
 test "C3-3b2b3 owner burns attempts and rejects busy begin" {
@@ -1019,4 +1345,415 @@ test "C3-3b2b3 owner rejects copied replayed and invalid raw tags" {
     try owner.publishNoAllocation(attempt, prepared_types.decide(.ended));
     owner.prepared.prepared_tag_raw = 255;
     try std.testing.expectError(error.InvalidOwner, owner.borrowPreparedForOwnerUnitTest());
+}
+
+const SettlementFixture = struct {
+    owner: PendingEventOwner = .{},
+    lifetime_owner: lifetime.RuntimeLifetimeOwner = .{},
+    lease: lifetime.RuntimeSettlementLease = .{},
+    permit: settlement.PreparedPendingSettlementPermit = .{},
+    effect_permit: settlement.PreparedEffectPermit = .{},
+    effect: settlement.EffectCommitEvidence = .{},
+    completion: settlement.EventReleaseCompletion = .{},
+    binding: settlement.RuntimeSettlementLeaseBinding = .{},
+
+    fn init(self: *SettlementFixture, seed: u8) !void {
+        const ready = try ensureSettlementReady();
+        try self.owner.initInPlace(0x3000 + @as(u64, seed));
+        var identity = testIdentity();
+        identity.pid = process_seal.currentProcessId();
+        identity.process_nonce = ready;
+        identity.event_generation = 0x5000 + @as(u64, seed);
+        identity.wire_major = identity.expected_major;
+        identity.connection_generation = 0x5050 + @as(u64, seed);
+        identity.slot_incarnation = 0x5060 + @as(u64, seed);
+        identity.owner_node_incarnation = 0x5070 + @as(u64, seed);
+        identity.transport_incarnation = 0x5080 + @as(u64, seed);
+        identity.correlation_binding_digest = [_]u8{0x59 +% seed} ** 32;
+        identity.payload_digest = [_]u8{0x69 +% seed} ** 32;
+        identity.registry_incarnation = 0x5100 + @as(u64, seed);
+        identity.binding_reservation_id = 0x5200 + @as(u64, seed);
+        identity.event_node_incarnation = 0x5300 + @as(u64, seed);
+        identity.event_owner_addr = 0x5400 + @as(u64, seed);
+        const attempt = try self.owner.beginPrepare(identity);
+        const decision = prepared_types.decide(.ended);
+        try self.owner.publishNoAllocation(attempt, decision);
+        const transcript: cleanup.CleanupTranscriptInput = .{
+            .host_id = identity.host_id,
+            .runtime_id = identity.runtime_id,
+            .connection_generation = identity.connection_generation,
+            .slot_incarnation = identity.slot_incarnation,
+            .owner_node_incarnation = identity.owner_node_incarnation,
+            .transport_incarnation = identity.transport_incarnation,
+            .registry_incarnation = identity.registry_incarnation,
+            .binding_reservation_id = identity.binding_reservation_id,
+            .event_node_incarnation = identity.event_node_incarnation,
+            .stream_id = identity.stream_id,
+            .event_generation = identity.event_generation,
+            .event_owner_addr = identity.event_owner_addr,
+            .wire_major = identity.wire_major,
+            .expected_major = identity.expected_major,
+            .metadata_support_raw = identity.metadata_support_raw,
+            .admission_tag = identity.admission_tag,
+            .correlation_binding_digest = identity.correlation_binding_digest,
+            .payload_digest = identity.payload_digest,
+            .admission_projection_digest = identity.admission_projection_digest,
+            .pending_owner_addr = self.owner.self_addr,
+            .pending_owner_incarnation = self.owner.owner_incarnation,
+            .cleanup_plan_addr = 0x5500 + @as(u64, seed),
+            .runtime_addr = 0x5600 + @as(u64, seed),
+            .observation_addr = 0x5700 + @as(u64, seed),
+            .observation_revision = 0,
+            .observer_generation = 0,
+            .title_generation = 0,
+            .observation_digest = [_]u8{0x58 +% seed} ** 32,
+            .preparation_attempt = attempt,
+            .pending_lifecycle = .preparing,
+            .plan = .{ .preparation = .{ .dto_backing = .{}, .next_observation = .{} } },
+        };
+        const transcript_seal = try process_seal.cleanupTranscriptSeal(
+            identity.pid,
+            identity.process_nonce,
+            transcript,
+        );
+        const progress: cleanup.CleanupProgressInput = .{
+            .transcript_input = transcript,
+            .transcript_seal = transcript_seal,
+            .phase = .preparation,
+            .step = .finished,
+            .next_role = .none,
+            .completed_mask = 0xff,
+            .decision = prepared_types.sealProjection(decision),
+        };
+        const progress_seal = try process_seal.cleanupProgressSeal(
+            identity.pid,
+            identity.process_nonce,
+            progress,
+        );
+        self.owner.progress_input = progress;
+        self.owner.transcript_seal = transcript_seal;
+        self.owner.progress_seal = progress_seal;
+
+        self.owner.source_lease_incarnation = 1;
+        var source_receipt: PendingEventSourceReceipt = .{
+            .event_identity = identity,
+            .runtime_addr = 0x6000 + @as(u64, seed),
+            .pending_owner_addr = self.owner.self_addr,
+            .pending_owner_incarnation = self.owner.owner_incarnation,
+            .source_lease_incarnation = 1,
+            .pid = identity.pid,
+            .process_nonce = identity.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+        };
+        source_receipt.receipt_seal = try process_seal.pendingSourceReceiptSeal(
+            identity.pid,
+            identity.process_nonce,
+            sourceReceiptSealInput(source_receipt),
+        );
+        self.owner.source_lease = .{
+            .receipt = source_receipt,
+            .state_raw = @intFromEnum(PendingSourceLeaseState.consumed),
+            .attempt = attempt,
+        };
+        self.owner.source_lease.lease_seal = try process_seal.pendingSourceLeaseSeal(
+            identity.pid,
+            identity.process_nonce,
+            sourceLeaseSealInput(self.owner.source_lease),
+        );
+        self.owner.release_receipt = .{
+            .event_identity = identity,
+            .pending_owner_addr = self.owner.self_addr,
+            .pending_owner_incarnation = self.owner.owner_incarnation,
+            .source_lease_incarnation = 1,
+            .attempt = attempt,
+            .state_raw = @intFromEnum(PendingReleaseState.live),
+        };
+        self.owner.release_receipt.release_seal = try process_seal.pendingReleaseSeal(
+            identity.pid,
+            identity.process_nonce,
+            releaseSealInput(self.owner.release_receipt),
+        );
+
+        try self.lifetime_owner.initInPlace(
+            source_receipt.runtime_addr,
+            self.owner.self_addr,
+            identity.process_nonce,
+            0x8000 + @as(u64, seed),
+        );
+        var proof: settlement.SettlementScratchPreflightProof = .{
+            .pid = identity.pid,
+            .process_nonce = identity.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .ranges_digest = [_]u8{seed +% 1} ** 32,
+            .pristine_digest = [_]u8{seed +% 2} ** 32,
+        };
+        proof.proof_seal = try settlement.sealScratchPreflightProof(proof);
+        self.binding = try self.lifetime_owner.acquireSettlement(&self.lease, proof);
+        try self.owner.preflightSettlement(&self.lifetime_owner, &self.lease, .{
+            .lease = self.binding,
+            .pending_owner_addr = self.owner.self_addr,
+            .owner_incarnation = self.owner.owner_incarnation,
+            .attempt = attempt,
+            .source_lease_incarnation = 1,
+            .event_generation = identity.event_generation,
+            .effect_out_addr = @intFromPtr(&self.effect),
+            .release_out_addr = @intFromPtr(&self.completion),
+            .release_receipt_digest = self.owner.release_receipt.release_seal,
+        }, &self.permit);
+    }
+
+    fn arm(self: *SettlementFixture) void {
+        self.owner.armSettlementNoFail(&self.lifetime_owner, &self.lease, &self.permit, self.binding);
+    }
+
+    fn prepareEvidence(self: *SettlementFixture, disposition: settlement.SettlementDispositionTag) !void {
+        const common = .{
+            .pid = self.owner.event_identity.pid,
+            .process_nonce = self.owner.event_identity.process_nonce,
+            .thread_id = @as(u64, @intCast(std.Thread.getCurrentId())),
+            .pending_owner_addr = self.owner.self_addr,
+            .owner_incarnation = self.owner.owner_incarnation,
+            .attempt = self.owner.active_attempt,
+            .event_generation = self.owner.event_identity.event_generation,
+        };
+        self.effect_permit = fixtureEffectPermit(disposition);
+        self.effect_permit.self_addr = @intFromPtr(&self.effect_permit);
+        self.effect_permit.pid = common.pid;
+        self.effect_permit.process_nonce = common.process_nonce;
+        self.effect_permit.thread_id = common.thread_id;
+        self.effect_permit.pending_owner_addr = common.pending_owner_addr;
+        self.effect_permit.owner_incarnation = common.owner_incarnation;
+        self.effect_permit.attempt = common.attempt;
+        self.effect_permit.event_generation = common.event_generation;
+        self.effect_permit.correlation_digest = self.owner.event_identity.correlation_binding_digest;
+        self.effect_permit.prepared_effect_digest = self.owner.progress_seal;
+        self.effect_permit.slot_incarnation = self.owner.event_identity.slot_incarnation;
+        self.effect_permit.node_incarnation = self.owner.event_identity.owner_node_incarnation;
+        self.effect_permit.binding_incarnation = self.owner.event_identity.binding_reservation_id;
+        self.effect_permit.transport_incarnation = self.owner.event_identity.transport_incarnation;
+        self.effect_permit.operation_node_addr = 0x9100;
+        self.effect_permit.operation_registry_index = 1;
+        self.effect_permit.operation_id = 1;
+        self.effect_permit.target_stream_id = self.owner.event_identity.stream_id;
+        self.effect_permit.effect_out_addr = @intFromPtr(&self.effect);
+        self.effect_permit.effect_out_extent = @sizeOf(settlement.EffectCommitEvidence);
+        self.effect_permit.effect_out_alignment = @alignOf(settlement.EffectCommitEvidence);
+        self.effect_permit.effect_out_pristine_digest = [_]u8{0x91} ** 32;
+        self.effect_permit.scratch_ranges_digest = self.binding.ranges_digest;
+        self.effect_permit.scratch_pristine_digest = self.binding.pristine_digest;
+        self.effect_permit.preflight_proof_seal_digest = self.binding.preflight_proof_seal_digest;
+        self.effect_permit.lease_seal_digest = self.binding.lease_seal_digest;
+        self.effect_permit.preflight_authority_digest = [_]u8{0x92} ** 32;
+        self.effect_permit.seal = try settlement.sealPreparedEffectPermit(self.effect_permit);
+        self.effect_permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        if (disposition != .suppress_local_invariant) {
+            settlement.publishEffectCommitEvidenceNoFail(
+                &self.effect_permit,
+                self.binding,
+                &self.effect,
+            );
+        } else self.effect = .{
+            .self_addr = @intFromPtr(&self.effect),
+            .outcome_raw = @intFromEnum(settlement.ConfirmedEffectOutcome.poison_confirmed),
+            .recovery_raw = @intFromEnum(settlement.EffectRecovery.trusted_local_invariant),
+            .pid = common.pid,
+            .process_nonce = common.process_nonce,
+            .thread_id = common.thread_id,
+            .pending_owner_addr = common.pending_owner_addr,
+            .owner_incarnation = common.owner_incarnation,
+            .attempt = common.attempt,
+            .event_generation = common.event_generation,
+            .commit_authority_digest = [_]u8{0xa1} ** 32,
+            .cleanup_completion_digest = [_]u8{0xa2} ** 32,
+            .confirmed_effect_digest = [_]u8{0xa3} ** 32,
+        };
+        if (disposition == .suppress_local_invariant) {
+            self.effect.seal = try settlement.sealEffectCommitEvidence(self.effect);
+            self.effect.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        }
+        self.completion = .{
+            .self_addr = @intFromPtr(&self.completion),
+            .pid = common.pid,
+            .process_nonce = common.process_nonce,
+            .thread_id = common.thread_id,
+            .pending_owner_addr = common.pending_owner_addr,
+            .owner_incarnation = common.owner_incarnation,
+            .attempt = common.attempt,
+            .event_generation = common.event_generation,
+            .registry_incarnation = self.owner.event_identity.registry_incarnation,
+            .binding_reservation_id = self.owner.event_identity.binding_reservation_id,
+            .event_node_incarnation = self.owner.event_identity.event_node_incarnation,
+            .stream_id = self.owner.event_identity.stream_id,
+            .event_owner_addr = self.owner.event_identity.event_owner_addr,
+            .source_lease_incarnation = self.owner.source_lease_incarnation,
+            .ordering_class_raw = 1,
+            .release_receipt_digest = self.owner.release_receipt.release_seal,
+            .permit_digest = self.permit.seal,
+            .consumed_blocker_count = 1,
+            .freed_payload_count = 1,
+            .consumed_pin_count = 1,
+            .settled_quarantine_count = 1,
+            .post_transcript_digest = [_]u8{0xb3} ** 32,
+        };
+        self.completion.authority_digest = settlement.eventReleaseCompletionAuthorityDigest(self.completion);
+        self.completion.seal = try settlement.sealEventReleaseCompletion(self.completion);
+        self.completion.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+    }
+};
+
+fn fixtureEffectPermit(disposition: settlement.SettlementDispositionTag) settlement.PreparedEffectPermit {
+    if (disposition != .suppress_terminal) return .{
+        .action_raw = @intFromEnum(settlement.EffectAction.none),
+        .fd_before = 9,
+        .fd_after = 9,
+    };
+    return .{
+        .action_raw = @intFromEnum(settlement.EffectAction.terminal_cleanup),
+        .first_reason_before = .{ .present_raw = 1, .reason_raw = 0 },
+        .first_reason_after = .{ .present_raw = 1, .reason_raw = 0 },
+        .unusable_before_raw = 1,
+        .unusable_after_raw = 1,
+        .fd_before = -1,
+        .fd_after = -1,
+        .fd_disposition_raw = @intFromEnum(settlement.FdDisposition.already_detached),
+    };
+}
+
+fn ensureSettlementReady() !u64 {
+    if (process_seal.currentReadyIdentity()) |identity| return identity.process_nonce else |err| switch (err) {
+        error.NotReady => {},
+        else => return err,
+    }
+    const nonce: u64 = 0xc33b_3300_0000_0001;
+    const receipt = try process_seal.prepare(process_seal.currentProcessId(), nonce);
+    process_seal.commitReady(receipt);
+    return nonce;
+}
+
+test "C3-3b3 authority receipt는 range와 pristine 상태를 봉인한다" {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(1);
+    try std.testing.expect(settlement.validPendingSettlementPermit(&fixture.permit));
+    try std.testing.expect(std.crypto.timing_safe.eql(settlement.Digest, fixture.binding.ranges_digest, fixture.permit.scratch_ranges_digest));
+    try fixture.prepareEvidence(.publish_prepared);
+    const canonical_seal = fixture.effect.seal;
+    fixture.effect.reserved[0] = 0xff;
+    const padding_independent = try settlement.sealEffectCommitEvidence(fixture.effect);
+    try std.testing.expect(std.crypto.timing_safe.eql(settlement.Digest, canonical_seal, padding_independent));
+    try std.testing.expect(!settlement.validEffectCommitEvidence(&fixture.effect));
+}
+
+test "C3-3b3 authority receipt는 pending release projection을 봉인한다" {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(2);
+    var replay = fixture.permit;
+    replay.release_receipt_digest[0] ^= 1;
+    try std.testing.expect(!settlement.validPendingSettlementPermit(&replay));
+    try std.testing.expectEqual(@intFromEnum(PendingReleaseState.live), fixture.owner.release_receipt.state_raw);
+    try fixture.prepareEvidence(.publish_prepared);
+    fixture.effect.recovery_raw = @intFromEnum(settlement.EffectRecovery.trusted_local_invariant);
+    fixture.effect.outcome_raw = @intFromEnum(settlement.ConfirmedEffectOutcome.none_confirmed);
+    fixture.effect.seal = try settlement.sealEffectCommitEvidence(fixture.effect);
+    try std.testing.expect(!settlement.validEffectCommitEvidence(&fixture.effect));
+}
+
+test "C3-3b3 authority receipt는 exact event release completion만 허용한다" {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(3);
+    fixture.arm();
+    try fixture.prepareEvidence(.publish_prepared);
+    try std.testing.expect(settlement.validEventReleaseCompletion(&fixture.completion));
+    try std.testing.expect(fixture.lifetime_owner.validateAdmittedSettlementBinding(&fixture.lease, fixture.binding));
+    try std.testing.expect(fixture.owner.pendingSettlementPermitMatches(&fixture.permit, fixture.binding));
+    try std.testing.expect(settlementEvidenceMatches(&fixture.owner, &fixture.completion));
+    try std.testing.expect(releaseReceiptValid(&fixture.owner, fixture.owner.active_attempt, &fixture.owner.release_receipt));
+    try std.testing.expect(settlement.validEffectCommitEvidence(&fixture.effect));
+    try std.testing.expect(settlementEvidenceMatches(&fixture.owner, &fixture.effect));
+    try std.testing.expectEqual(@intFromPtr(&fixture.effect), fixture.permit.effect_out_addr);
+    try std.testing.expectEqual(@intFromPtr(&fixture.completion), fixture.permit.release_out_addr);
+    try std.testing.expect(std.crypto.timing_safe.eql(
+        settlement.Digest,
+        fixture.permit.release_receipt_digest,
+        fixture.owner.release_receipt.release_seal,
+    ));
+    fixture.owner.publishSettlementNoFail(
+        &fixture.lifetime_owner,
+        &fixture.lease,
+        fixture.binding,
+        &fixture.permit,
+        &fixture.effect_permit,
+        &fixture.effect,
+        &fixture.completion,
+    );
+    try std.testing.expectEqual(@intFromEnum(PendingReleaseState.consumed), fixture.owner.release_receipt.state_raw);
+    try std.testing.expectEqual(@as(u16, 1), fixture.completion.consumed_blocker_count);
+}
+
+test "C3-3b3 authority receipt는 disposition을 마지막에 ready로 게시한다" {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(4);
+    fixture.arm();
+    try fixture.prepareEvidence(.suppress_terminal);
+    fixture.owner.publishSettlementNoFail(
+        &fixture.lifetime_owner,
+        &fixture.lease,
+        fixture.binding,
+        &fixture.permit,
+        &fixture.effect_permit,
+        &fixture.effect,
+        &fixture.completion,
+    );
+    try std.testing.expectEqual(@intFromEnum(settlement.AuthorityLifecycle.prepared), fixture.owner.settlement_disposition.lifecycle_raw);
+    try std.testing.expectEqual(@intFromEnum(settlement.SettlementDispositionTag.suppress_terminal), fixture.owner.settlement_disposition.disposition_raw);
+}
+
+test "C3-3b3 authority receipt는 copy splice replay를 거부한다" {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(5);
+    var copied = fixture.permit;
+    try std.testing.expect(!settlement.validPendingSettlementPermit(&copied));
+    fixture.permit.attempt +%= 1;
+    try std.testing.expect(!settlement.validPendingSettlementPermit(&fixture.permit));
+
+    fixture.permit = copied;
+    fixture.lifetime_owner.abortSettlementPreAdmissionNoFail(&fixture.lease);
+    fixture.lease = .{};
+    var next_proof: settlement.SettlementScratchPreflightProof = .{
+        .pid = fixture.owner.event_identity.pid,
+        .process_nonce = fixture.owner.event_identity.process_nonce,
+        .thread_id = @intCast(std.Thread.getCurrentId()),
+        .ranges_digest = [_]u8{0xc1} ** 32,
+        .pristine_digest = [_]u8{0xc2} ** 32,
+    };
+    next_proof.proof_seal = try settlement.sealScratchPreflightProof(next_proof);
+    const next_binding = try fixture.lifetime_owner.acquireSettlement(&fixture.lease, next_proof);
+    try std.testing.expect(!fixture.owner.pendingSettlementPermitMatches(&fixture.permit, next_binding));
+    fixture.lifetime_owner.abortSettlementPreAdmissionNoFail(&fixture.lease);
+}
+
+test "C3-3b3 authority receipt는 protected range alias를 거부한다" {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(6);
+    var occupied: settlement.PreparedPendingSettlementPermit = .{};
+    const input: settlement.PendingSettlementInput = .{
+        .lease = fixture.binding,
+        .pending_owner_addr = fixture.owner.self_addr,
+        .owner_incarnation = fixture.owner.owner_incarnation,
+        .attempt = fixture.owner.active_attempt,
+        .source_lease_incarnation = fixture.owner.source_lease_incarnation,
+        .event_generation = fixture.owner.event_identity.event_generation,
+        .effect_out_addr = @intFromPtr(&fixture.effect),
+        .release_out_addr = @intFromPtr(&fixture.effect),
+        .release_receipt_digest = fixture.owner.release_receipt.release_seal,
+    };
+    try std.testing.expectError(error.InvalidOwner, fixture.owner.preflightSettlement(
+        &fixture.lifetime_owner,
+        &fixture.lease,
+        input,
+        &occupied,
+    ));
+    try std.testing.expect(std.meta.eql(occupied, settlement.PreparedPendingSettlementPermit{}));
+    fixture.owner.lifecycle_raw = @intFromEnum(PendingLifecycle.preparing);
+    try std.testing.expect(!fixture.owner.settlementArmPreflightValid(&fixture.permit, fixture.binding));
+    try std.testing.expect(fixture.lifetime_owner.validatePreparedSettlementBinding(&fixture.lease, fixture.binding));
 }

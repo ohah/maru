@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const settlement = @import("pending_event_settlement_contract.zig");
+const process_seal = @import("process_seal_service.zig");
 
 var cleanup_quarantine_events: std.atomic.Value(u64) = .init(0);
 
@@ -246,6 +248,59 @@ pub fn consumeCanonicalPinUnchecked(
         pin_owner.active_cleanup != 0 or pin_owner.cleanup_pin_count == 0)
         @panic("canonical event pin recovery drifted");
     pin_owner.cleanup_pin_count -= 1;
+}
+
+/// 자체 registered operation으로 node를 이미 직렬화한 composite owner의 read-only 최종 조건이다.
+/// `active_cleanup`을 reserve하지 않으며 caller는 바로 이어지는 no-fail suffix에서
+/// `consumeCanonicalPinUnchecked`로 소비해야 한다.
+pub fn canonicalPinReleaseReady(
+    projection: CanonicalPinProjection,
+    pin_owner: *PinOwner,
+    current_pid: u32,
+) bool {
+    if (!projectionMatches(projection, pin_owner, current_pid) or
+        pin_owner.active_cleanup != 0 or pin_owner.cleanup_pin_count == 0)
+        return false;
+    const lease: *const ConnectionLease = @ptrFromInt(projection.lease_addr);
+    return lease.canRelease(current_pid);
+}
+
+pub fn canonicalPinConsumed(
+    projection: CanonicalPinProjection,
+    pin_owner: *PinOwner,
+    count_before: usize,
+    current_pid: u32,
+) bool {
+    if (!projectionMatches(projection, pin_owner, current_pid) or count_before == 0 or
+        pin_owner.active_cleanup != 0) return false;
+    return pin_owner.cleanup_pin_count == count_before - 1;
+}
+
+pub fn consumeCanonicalPinWithReceiptUnchecked(
+    projection: CanonicalPinProjection,
+    pin_owner: *PinOwner,
+    current_pid: u32,
+) settlement.EventReleaseLeafReceipt {
+    const count_before = pin_owner.cleanup_pin_count;
+    consumeCanonicalPinUnchecked(projection, pin_owner, current_pid);
+    const ready = process_seal.currentReadyIdentity() catch process_seal.fatalIntegrity(.proof_loss);
+    var receipt: settlement.EventReleaseLeafReceipt = .{
+        .pid = ready.pid,
+        .process_nonce = ready.process_nonce,
+        .thread_id = @intCast(std.Thread.getCurrentId()),
+        .role_raw = @intFromEnum(settlement.EventReleaseLeafRole.pin),
+        .identity_a = projection.pin_owner_addr,
+        .identity_b = projection.lease_addr,
+        .identity_c = projection.node_incarnation,
+        .identity_d = projection.stream_id,
+        .identity_e = projection.slot_addr,
+        .identity_f = projection.connection_generation,
+        .before_a = count_before,
+        .after_a = pin_owner.cleanup_pin_count,
+    };
+    receipt.seal = settlement.sealEventReleaseLeafReceipt(receipt) catch
+        process_seal.fatalIntegrity(.proof_loss);
+    return receipt;
 }
 
 fn projectionFor(

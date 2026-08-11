@@ -865,6 +865,21 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          b3 내부 retry loop는 두지 않는다. focused gate는 `test-session-host-2c3d-c3-3b3`이고 Debug·ReleaseFast와 boundary,
          callback/fork/ABA/proof-loss subprocess를 모두 통과하기 전 b3 완료를 표시하지 않는다. connection-wide terminalization은
          Client의 단일 connection-owned outbound를 target/sibling relation과 무관하게 정산하되 event sibling payload·registry owner는 보존한다.
+         payload suffix는 final validation 뒤 `EventOwner tombstone -> registry/quarantine/pin begin -> correlation tombstone ->
+         attachment mirror tombstone -> callback` 순서다. caller-provided final-address `PendingEventReleaseBegun`이 process-sealed
+         closed phase로 각 전이를 결속하고 callback TLS도 이 typed authority만 가리킨다. callback 뒤 begun/TLS drift는 `_exit(86)`이며,
+         후속 scratch-range proof 승격 때 continuation ABI를 바꾸지 않는다.
+         begun을 coordinator의 일곱 번째 external scratch로 편입하고 actual payload extent가 일곱 scratch와 세 owner 모두에 대해
+         exact/partial/overflow non-overlap임을 arm 전에 검증한다. completion POST transcript는 registry/quarantine/pin/callback/
+         owner/correlation/mirror의 ordered closed receipt만 봉인하며 allocator 성공을 주장하지 않는다. 전체 completion publisher는
+         ClientSlot 하나이고 registry 계층의 stale whole-graph naming은 제거한다.
+         각 leaf/phase primitive가 actual before/after와 lifecycle/TLS invocation을 담은 typed process-sealed receipt 원문을
+         반환하고, contextual validator가 composite permit identity와 3 leaf + 4 phase receipt를 직접 대조한다. quarantine은
+         lock 내부 retained `-payload_len`/occupied `-1` receipt로 종결하며 unlock 뒤 empty-slot 재조회는 하지 않는다.
+         phase after-zero는 magic marker 없이 actual canonical zero/TLS-cleared projection으로 계산하고, owner/correlation/mirror
+         PRE identity와 begun/full pin projection까지 context에 보존해 coherent re-sealed splice를 contextual-only로 거부한다.
+         ClientSlot production suffix는 이 context를 actual receipt/permit에서 항상 구성해 completion publication 직전 exact once
+         검증하며, test snapshot은 검증된 pointer-free context의 복사본만 가진다.
       5. **C3-3b5 common close progress:** 기존 VTable 메서드 수를 늘리지 않고 close 계열 반환을
          `CloseProgress`, remove를 `RemoveProgress`로 바꾼다. heap-pinned `RemoteRuntime.CloseAuthority`와 backend closing receipt,
          bounded/fair `CloseSweep`, pending lifecycle readiness, handle ABA와 real AppSession synchronous in-process tab/window close parity를

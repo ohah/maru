@@ -11,8 +11,10 @@ const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
+const process_seal = @import("process_seal_service.zig");
 const rpc_executed_response = @import("rpc_executed_response.zig");
 const generation_event = @import("generation_event_contract.zig");
+const settlement = @import("pending_event_settlement_contract.zig");
 const client_poison = @import("client_poison.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -120,6 +122,7 @@ pub const EventAdmission = generation_event.EventAdmission;
 pub const EventError = generation_event.EventError;
 pub const EventViewError = generation_event.EventViewError;
 pub const EventCorrelation = client_slot_mod.EventCorrelation;
+pub const PendingEventReleaseBegun = client_slot_mod.PendingEventReleaseBegun;
 pub const PurgeEndedOutcome = contract.PurgeEndedOutcome;
 pub const PurgeEndedError = contract.PurgeEndedError;
 pub const ProjectedEventTake = struct {
@@ -138,6 +141,9 @@ var transport_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 const generation_transport_size_budget: usize = 2048;
 
 pub const GenerationTransport = struct {
+    pub fn pendingEventReleaseCallbackActive(_: *const GenerationTransport) bool {
+        return client_slot_mod.pendingEventReleaseCallbackActive();
+    }
     self_addr: usize = 0,
     owner_addr: usize = 0,
     owner_size: usize = 0,
@@ -534,6 +540,152 @@ pub const GenerationTransport = struct {
                 error.InvalidOwner => error.MovedOrCopied,
                 error.ConnectionClosed => error.ConnectionClosed,
             };
+    }
+
+    pub fn preflightPendingEffect(
+        self: *GenerationTransport,
+        input: settlement.EffectPreflightInput,
+        effect_out: *settlement.EffectCommitEvidence,
+        permit_out: *settlement.PreparedEffectPermit,
+    ) error{ Busy, InvalidOwner }!void {
+        if (!self.requestIdentityValid() or input.target_stream_id != self.bound_stream_id)
+            return error.InvalidOwner;
+        return client_slot_mod.preflightPendingEffect(self.ownerQuery(), input, effect_out, permit_out);
+    }
+
+    pub fn settlementCorrelationDigest(
+        self: *GenerationTransport,
+        correlation: *const EventCorrelation,
+    ) error{InvalidOwner}!settlement.Digest {
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        return client_slot_mod.pendingEventCorrelationDigest(correlation) orelse error.InvalidOwner;
+    }
+
+    pub fn preflightPendingEventReleaseUnderEffect(
+        self: *GenerationTransport,
+        effect_permit: *const settlement.PreparedEffectPermit,
+        pending: settlement.PendingRegistryReleaseReceipt,
+        event_projection: client_slot_mod.GenerationEventReleaseProjection,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        completion_out: *settlement.EventReleaseCompletion,
+        permit_out: *settlement.PreparedEventReleasePermit,
+        begun: *PendingEventReleaseBegun,
+    ) error{InvalidOwner}!void {
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        return client_slot_mod.preflightPendingEventReleaseUnderEffect(
+            self.ownerQuery(),
+            effect_permit,
+            pending,
+            event_projection,
+            binding,
+            completion_out,
+            permit_out,
+            begun,
+        );
+    }
+
+    pub fn abortPendingEffectPreAdmissionNoFail(
+        _: *GenerationTransport,
+        permit: *settlement.PreparedEffectPermit,
+    ) void {
+        client_slot_mod.abortPendingEffectPreAdmissionNoFail(permit);
+    }
+
+    pub fn commitPendingEffectNoFail(
+        _: *GenerationTransport,
+        permit: *settlement.PreparedEffectPermit,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        effect_out: *settlement.EffectCommitEvidence,
+    ) void {
+        client_slot_mod.commitPendingEffectNoFail(permit, binding, effect_out);
+    }
+
+    pub fn preparePendingEventReleaseBegunNoFail(
+        _: *GenerationTransport,
+        effect_permit: *settlement.PreparedEffectPermit,
+        release_permit: *settlement.PreparedEventReleasePermit,
+        begun: *PendingEventReleaseBegun,
+    ) void {
+        client_slot_mod.preparePendingEventReleaseBegunNoFail(effect_permit, release_permit, begun);
+    }
+
+    pub fn tombstonePendingEventOwnerNoFail(
+        _: *GenerationTransport,
+        owner: *EventOwner,
+        release_permit: *settlement.PreparedEventReleasePermit,
+        begun: *PendingEventReleaseBegun,
+    ) void {
+        generation_event.consumePreparedReleaseNoFail(owner, release_permit.event_owner_seal);
+        if (!generation_event.pristineExact(owner))
+            process_seal.fatalIntegrity(.proof_loss);
+        const receipt = settlement.makeEventReleasePhaseReceipt(.owner, begun.lifecycle_raw, begun.lifecycle_raw + 1, release_permit.event_owner_addr, release_permit.event_generation, @intFromPtr(begun), release_permit.event_owner_seal, settlement.canonicalEventReleasePhaseAfterDigest(.owner, @intFromPtr(begun), release_permit.event_owner_addr, release_permit.event_generation, begun.lifecycle_raw + 1), release_permit.seal, settlement.zero_digest) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        client_slot_mod.markPendingEventOwnerTombstonedNoFail(begun, receipt);
+    }
+
+    pub fn beginPendingEventReleaseResourcesNoFail(
+        _: *GenerationTransport,
+        effect_permit: *settlement.PreparedEffectPermit,
+        release_permit: *settlement.PreparedEventReleasePermit,
+        begun: *PendingEventReleaseBegun,
+    ) void {
+        client_slot_mod.beginPendingEventReleaseResourcesNoFail(effect_permit, release_permit, begun);
+    }
+
+    pub fn tombstonePendingEventCorrelationNoFail(
+        self: *GenerationTransport,
+        begun: *PendingEventReleaseBegun,
+    ) void {
+        self.event_correlation = .{};
+        if (!std.meta.eql(self.event_correlation, EventCorrelation{}))
+            process_seal.fatalIntegrity(.proof_loss);
+        const receipt = settlement.makeEventReleasePhaseReceipt(.correlation, begun.lifecycle_raw, begun.lifecycle_raw + 1, begun.event_owner_addr, begun.event_generation, @intFromPtr(begun), begun.correlation_digest, settlement.canonicalEventReleasePhaseAfterDigest(.correlation, @intFromPtr(begun), begun.event_owner_addr, begun.event_generation, begun.lifecycle_raw + 1), begun.release_permit_seal, settlement.zero_digest) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        client_slot_mod.markPendingEventCorrelationTombstonedNoFail(begun, receipt);
+    }
+
+    pub fn markPendingEventMirrorTombstonedNoFail(
+        _: *GenerationTransport,
+        event_generation_mirror: u64,
+        begun: *PendingEventReleaseBegun,
+    ) void {
+        if (event_generation_mirror != 0)
+            process_seal.fatalIntegrity(.proof_loss);
+        const before = settlement.canonicalEventReleaseMirrorBeforeDigest(begun.event_generation);
+        const receipt = settlement.makeEventReleasePhaseReceipt(.mirror, begun.lifecycle_raw, begun.lifecycle_raw + 1, begun.event_owner_addr, begun.event_generation, @intFromPtr(begun), before, settlement.canonicalEventReleasePhaseAfterDigest(.mirror, @intFromPtr(begun), begun.event_owner_addr, begun.event_generation, begun.lifecycle_raw + 1), begun.release_permit_seal, settlement.zero_digest) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        client_slot_mod.markPendingEventMirrorTombstonedNoFail(begun, receipt);
+    }
+
+    pub fn validatePendingEventReleaseFinal(
+        self: *GenerationTransport,
+        owner: *EventOwner,
+        effect_permit: *const settlement.PreparedEffectPermit,
+        effect_out: *const settlement.EffectCommitEvidence,
+        release_permit: *const settlement.PreparedEventReleasePermit,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        completion_out: *const settlement.EventReleaseCompletion,
+    ) bool {
+        if (!self.requestIdentityValid() or self.event_owner_addr != @intFromPtr(owner)) return false;
+        const projection = generation_event.releaseProjection(owner) catch return false;
+        return client_slot_mod.validatePendingEventReleaseFinal(
+            effect_permit,
+            effect_out,
+            release_permit,
+            projection,
+            binding,
+            completion_out,
+        );
+    }
+
+    pub fn finishPendingEventReleaseNoFail(
+        _: *GenerationTransport,
+        effect_permit: *settlement.PreparedEffectPermit,
+        release_permit: *settlement.PreparedEventReleasePermit,
+        begun: *client_slot_mod.PendingEventReleaseBegun,
+        completion_out: *settlement.EventReleaseCompletion,
+    ) void {
+        client_slot_mod.finishPendingEventReleaseNoFail(effect_permit, release_permit, begun, completion_out);
     }
 
     fn borrowClient(self: *GenerationTransport) ?*client_mod.Client {

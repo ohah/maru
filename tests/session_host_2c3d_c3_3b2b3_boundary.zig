@@ -63,7 +63,14 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 0), count(adapter, "@import(\"remote_runtime.zig\")"));
     try std.testing.expectEqual(@as(usize, 0), count(control_types, "generation_attachment_contract.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(pending_control, "generation_attachment_contract.zig"));
-    try std.testing.expectEqual(@as(usize, 0), count(attachment, "PreparedEvent"));
+    try std.testing.expectEqual(@as(usize, 0), count(attachment, "PreparedRuntimeEvent"));
+    const prepared_settlement_start = std.mem.indexOf(u8, attachment, "pub const PreparedSettlement = struct {") orelse
+        return error.MissingPreparedSettlement;
+    const prepared_settlement_end = std.mem.indexOfPos(u8, attachment, prepared_settlement_start, "pub fn preparePendingSettlement(") orelse
+        return error.MissingPreparedSettlementEnd;
+    const prepared_settlement = attachment[prepared_settlement_start..prepared_settlement_end];
+    try std.testing.expectEqual(@as(usize, 0), count(prepared_settlement, "*"));
+    try std.testing.expectEqual(@as(usize, 0), count(prepared_settlement, "PreparationEventView"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pending_event_owner: pending_event_owner_mod.PendingEventOwner"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner"));
     try std.testing.expectEqual(@as(usize, 2), countProductCalls(runtime, "try self.initializePendingEventOwner(generation_adapter);"));
@@ -93,9 +100,10 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     const gate_start = std.mem.indexOf(u8, build, "const event_c3_3b2b3_control_types_module") orelse return error.MissingGateStart;
     const gate_end = std.mem.indexOfPos(u8, build, gate_start, "const control_c1_runtime_tests") orelse return error.MissingGateEnd;
     const gate = build[gate_start..gate_end];
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests={d}"));
-    try std.testing.expectEqual(@as(usize, 4), count(gate, ", 1);"));
-    try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests={d}"));
+    // 상속 gate에는 b3의 pointer-free facade와 ClientSlot focused 4개가 추가된다.
+    try std.testing.expectEqual(@as(usize, 11), count(gate, ", 1);"));
+    try std.testing.expectEqual(@as(usize, 3), count(gate, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(
         gate,
         "session_host_2c3d_c3_3b2b3_step.dependOn(\n            &run_event_c3_3b2b3_dto_drift_tests.step,\n        );",
@@ -104,7 +112,7 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(gate, ", 10);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, ", 5);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, ", 3);"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, ", 2);"));
+    try std.testing.expectEqual(@as(usize, 2), count(gate, ", 2);"));
     const unique_per_mode: usize = 7 + 1 + 7 + 10 + 5 + 3 + 1 + 1 + 1 + 2 + 1;
     const fresh_replay_per_mode: usize = 1;
     try std.testing.expectEqual(@as(usize, 39), unique_per_mode);

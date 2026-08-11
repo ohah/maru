@@ -18,6 +18,19 @@ const pending_release_domain = "maru.pending-release.v1";
 const pending_source_receipt_domain = "maru.pending-source-receipt.v1";
 const pending_source_lease_domain = "maru.pending-source-lease.v1";
 const pending_preparation_frame_domain = "maru.pending-preparation-frame.v1";
+const settlement_scratch_proof_domain = "maru.settlement-scratch-proof.v1";
+const runtime_settlement_lease_domain = "maru.runtime-settlement-lease.v1";
+const runtime_settlement_binding_domain = "maru.runtime-settlement-binding.v1";
+const pending_settlement_permit_domain = "maru.pending-settlement-permit.v1";
+const settlement_disposition_domain = "maru.settlement-disposition.v1";
+const prepared_event_release_permit_domain = "maru.prepared-event-release-permit.v2";
+const event_release_completion_domain = "maru.event-release-completion.v2";
+const settlement_scratch_range_domain = "maru.settlement-scratch-range.v1";
+const prepared_effect_permit_domain = "maru.prepared-effect-permit.v1";
+const effect_commit_evidence_domain = "maru.effect-commit-evidence.v1";
+const pending_event_release_begun_domain = "maru.pending-event-release-begun.v1";
+const event_release_leaf_receipt_domain = "maru.event-release-leaf-receipt.v1";
+const event_release_phase_receipt_domain = "maru.event-release-phase-receipt.v1";
 
 pub const CleanupSeal = cleanup_seal.CleanupSeal;
 pub const CleanupTranscriptInput = cleanup_seal.CleanupTranscriptInput;
@@ -27,6 +40,19 @@ pub const PendingReleaseSealInput = cleanup_seal.PendingReleaseSealInput;
 pub const PendingSourceReceiptSealInput = cleanup_seal.PendingSourceReceiptSealInput;
 pub const PendingSourceLeaseSealInput = cleanup_seal.PendingSourceLeaseSealInput;
 pub const PendingPreparationFrameSealInput = cleanup_seal.PendingPreparationFrameSealInput;
+pub const SettlementScratchProofSealInput = cleanup_seal.SettlementScratchProofSealInput;
+pub const RuntimeSettlementLeaseSealInput = cleanup_seal.RuntimeSettlementLeaseSealInput;
+pub const RuntimeSettlementBindingSealInput = cleanup_seal.RuntimeSettlementBindingSealInput;
+pub const PendingSettlementPermitSealInput = cleanup_seal.PendingSettlementPermitSealInput;
+pub const SettlementDispositionSealInput = cleanup_seal.SettlementDispositionSealInput;
+pub const PreparedEventReleasePermitSealInput = cleanup_seal.PreparedEventReleasePermitSealInput;
+pub const EventReleaseCompletionSealInput = cleanup_seal.EventReleaseCompletionSealInput;
+pub const SettlementScratchRangeSealInput = cleanup_seal.SettlementScratchRangeSealInput;
+pub const PreparedEffectPermitSealInput = cleanup_seal.PreparedEffectPermitSealInput;
+pub const EffectCommitEvidenceSealInput = cleanup_seal.EffectCommitEvidenceSealInput;
+pub const PendingEventReleaseBegunSealInput = cleanup_seal.PendingEventReleaseBegunSealInput;
+pub const EventReleaseLeafReceiptSealInput = cleanup_seal.EventReleaseLeafReceiptSealInput;
+pub const EventReleasePhaseReceiptSealInput = cleanup_seal.EventReleasePhaseReceiptSealInput;
 
 pub const PrepareError = error{
     ProcessDomainMismatch,
@@ -516,6 +542,57 @@ pub fn pendingSourceLeaseSeal(pid: u32, process_nonce: u64, input: PendingSource
 
 pub fn pendingPreparationFrameSeal(pid: u32, process_nonce: u64, input: PendingPreparationFrameSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, pending_preparation_frame_domain, input);
+}
+
+pub fn settlementScratchProofSeal(pid: u32, process_nonce: u64, input: SettlementScratchProofSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, settlement_scratch_proof_domain, input);
+}
+
+pub fn runtimeSettlementLeaseSeal(pid: u32, process_nonce: u64, input: RuntimeSettlementLeaseSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, runtime_settlement_lease_domain, input);
+}
+
+pub fn runtimeSettlementBindingSeal(pid: u32, process_nonce: u64, input: RuntimeSettlementBindingSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, runtime_settlement_binding_domain, input);
+}
+
+pub fn pendingSettlementPermitSeal(pid: u32, process_nonce: u64, input: PendingSettlementPermitSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_settlement_permit_domain, input);
+}
+
+pub fn settlementDispositionSeal(pid: u32, process_nonce: u64, input: SettlementDispositionSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, settlement_disposition_domain, input);
+}
+
+pub fn preparedEventReleasePermitSeal(pid: u32, process_nonce: u64, input: PreparedEventReleasePermitSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, prepared_event_release_permit_domain, input);
+}
+
+pub fn eventReleaseCompletionSeal(pid: u32, process_nonce: u64, input: EventReleaseCompletionSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, event_release_completion_domain, input);
+}
+
+pub fn settlementScratchRangeSeal(pid: u32, process_nonce: u64, input: SettlementScratchRangeSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, settlement_scratch_range_domain, input);
+}
+
+pub fn preparedEffectPermitSeal(pid: u32, process_nonce: u64, input: PreparedEffectPermitSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, prepared_effect_permit_domain, input);
+}
+
+pub fn effectCommitEvidenceSeal(pid: u32, process_nonce: u64, input: EffectCommitEvidenceSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, effect_commit_evidence_domain, input);
+}
+
+pub fn pendingEventReleaseBegunSeal(pid: u32, process_nonce: u64, input: PendingEventReleaseBegunSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, pending_event_release_begun_domain, input);
+}
+
+pub fn eventReleaseLeafReceiptSeal(pid: u32, process_nonce: u64, input: EventReleaseLeafReceiptSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, event_release_leaf_receipt_domain, input);
+}
+pub fn eventReleasePhaseReceiptSeal(pid: u32, process_nonce: u64, input: EventReleasePhaseReceiptSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, event_release_phase_receipt_domain, input);
 }
 
 fn testCleanupDescriptor(address: u64) cleanup_seal.CleanupDescriptor {

@@ -44,7 +44,8 @@ test "CR3a-2c3d C3-3a2 dormant final admission boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub const ClientOperationFence = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "const max_final_admission_protected_ranges = 4;"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "\n    owns_registered_operation_raw: u8 = 0"));
-    try std.testing.expectEqual(@as(usize, 2), count(slot, "lifecycle_raw: u8 = @intFromEnum"));
+    // Pending event release begun scratch의 닫힌 lifecycle이 세 번째 raw lifecycle owner다.
+    try std.testing.expectEqual(@as(usize, 3), count(slot, "lifecycle_raw: u8 = @intFromEnum"));
     try std.testing.expectEqual(@as(usize, 0), count(slot, "FinalAdmissionMutex"));
     try std.testing.expectEqual(@as(usize, 0), count(slot, "FinalAdmissionGeneration"));
 }

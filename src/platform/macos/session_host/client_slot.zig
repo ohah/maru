@@ -27,6 +27,7 @@ const rpc_executed_response = @import("rpc_executed_response.zig");
 const response_payload_allocation = @import("response_payload_allocation.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const generation_event_quarantine = @import("generation_event_quarantine.zig");
+const settlement_contract = @import("pending_event_settlement_contract.zig");
 
 const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
@@ -41,6 +42,46 @@ var process_runtime_pid: std.atomic.Value(u32) = .init(0);
 threadlocal var prepared_execution_cleanup_active_addr: usize = 0;
 threadlocal var finish_permit_alias_case_for_test: u8 = 0;
 threadlocal var generation_event_release_callback_active_addr: usize = 0;
+threadlocal var event_release_proof_loss_marker_fd: if (builtin.is_test) ?std.c.fd_t else void =
+    if (builtin.is_test) null else {};
+threadlocal var event_release_death_stage_raw: if (builtin.is_test) u8 else void =
+    if (builtin.is_test) 0 else {};
+
+pub fn pendingEventReleaseCallbackActive() bool {
+    return pending_event_release_callback_binding.begun_addr != 0;
+}
+
+fn writeEventReleaseDeathMarker(byte: u8) void {
+    const fd = event_release_proof_loss_marker_fd orelse std.c._exit(126);
+    const marker: [1]u8 = .{byte};
+    while (true) {
+        const written = std.c.write(fd, &marker, marker.len);
+        if (written == 1) return;
+        if (written < 0 and std.posix.errno(written) == .INTR) continue;
+        std.c._exit(126);
+    }
+}
+const PendingEventReleaseCallbackBinding = struct {
+    begun_addr: usize = 0,
+    begun_seal: settlement_contract.Digest = settlement_contract.zero_digest,
+};
+threadlocal var pending_event_release_callback_binding: PendingEventReleaseCallbackBinding = .{};
+pub const EventReleasePostSnapshot = struct {
+    permit_seal: settlement_contract.Digest,
+    post: settlement_contract.EventReleasePostProjection,
+    transcript_digest: settlement_contract.Digest,
+    completion: settlement_contract.EventReleaseCompletion,
+    context: settlement_contract.EventReleasePostContext,
+};
+threadlocal var event_release_post_snapshot: if (builtin.is_test) ?EventReleasePostSnapshot else void =
+    if (builtin.is_test) null else {};
+threadlocal var pending_event_payload_callback_count: if (builtin.is_test) u64 else void =
+    if (builtin.is_test) 0 else {};
+
+fn anyGenerationEventReleaseCallbackActive() bool {
+    return generation_event_release_callback_active_addr != 0 or
+        pending_event_release_callback_binding.begun_addr != 0;
+}
 
 const EventTakeActivationTestHook = struct {
     const Fault = enum(u8) { none, quarantine_reserve, pin_reserve, authority_reserve, cleanup_bind };
@@ -136,6 +177,104 @@ threadlocal var preparation_projection_test_hook: if (builtin.is_test) Preparati
 
 pub const testing = if (builtin.is_test) struct {
     pub const AttachmentLease = lease_mod.ConnectionLease;
+    pub const EventReleaseSourceSnapshot = struct {
+        pin_count: usize,
+        blocker_count: usize,
+        quarantine_occupied: usize,
+        quarantine_retained_bytes: usize,
+    };
+    pub const ForkRejectedClientProjection = struct {
+        slot_self_addr: usize,
+        slot_pid: u32,
+        slot_incarnation: u64,
+        node_incarnation: u64,
+        slot_lifecycle_raw: u8,
+        fd: std.c.fd_t,
+        unusable: bool,
+        first_reason_present: bool,
+        first_reason_raw: u8,
+        outbound_addr: usize,
+        outbound_len: usize,
+        outbound_offset: usize,
+        outbound_stream_id: u64,
+        outbound_byte_len: u8,
+        outbound_bytes: [64]u8,
+        pin_count: usize,
+        pin_active_cleanup: u1,
+        registry_live_count: usize,
+        registry_blocker_count: usize,
+        quarantine_occupied: usize,
+        quarantine_retained_bytes: usize,
+        global_generation: u64,
+        callback_count: u64,
+    };
+
+    /// fork 뒤 PID 봉인이 불일치한 상태에서도 key 조회·lock·authority mint 없이 변경 0만 비교한다.
+    pub fn forkRejectedClientProjection(slot: *const ClientSlot) ForkRejectedClientProjection {
+        const node = slot.current;
+        const client = &node.client;
+        var result: ForkRejectedClientProjection = .{
+            .slot_self_addr = slot.self_addr,
+            .slot_pid = slot.pid,
+            .slot_incarnation = slot.incarnation.tagged,
+            .node_incarnation = node.incarnation.tagged,
+            .slot_lifecycle_raw = @intFromEnum(slot.lifecycle),
+            .fd = client.fd,
+            .unusable = client.unusable,
+            .first_reason_present = client.first_poison_reason != null,
+            .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@intFromEnum(reason)) else 0,
+            .outbound_addr = 0,
+            .outbound_len = 0,
+            .outbound_offset = 0,
+            .outbound_stream_id = 0,
+            .outbound_byte_len = 0,
+            .outbound_bytes = [_]u8{0} ** 64,
+            .pin_count = node.pin_owner.cleanup_pin_count,
+            .pin_active_cleanup = node.pin_owner.active_cleanup,
+            .registry_live_count = node.cleanup_registry.live_count,
+            .registry_blocker_count = node.cleanup_registry.connection_ordering_blocker_count,
+            .quarantine_occupied = if (generation_event_quarantine_registry) |*registry| registry.occupied_slots else 0,
+            .quarantine_retained_bytes = if (generation_event_quarantine_registry) |*registry| registry.retained_bytes else 0,
+            .global_generation = generation_response_incarnation_issuer.load(.acquire),
+            .callback_count = pending_event_payload_callback_count,
+        };
+        if (client.pending_outbound) |outbound| {
+            result.outbound_addr = @intFromPtr(outbound.frame.ptr);
+            result.outbound_len = outbound.frame.len;
+            result.outbound_offset = outbound.offset;
+            result.outbound_stream_id = outbound.stream_id;
+            result.outbound_byte_len = @intCast(@min(outbound.frame.len, result.outbound_bytes.len));
+            @memcpy(result.outbound_bytes[0..result.outbound_byte_len], outbound.frame[0..result.outbound_byte_len]);
+        }
+        return result;
+    }
+
+    pub fn eventReleaseSourceSnapshot(slot: *ClientSlot) !EventReleaseSourceSnapshot {
+        const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
+        const snapshot = try quarantine.snapshot(currentPid(), @intCast(std.Thread.getCurrentId()));
+        return .{
+            .pin_count = slot.current.pin_owner.cleanup_pin_count,
+            .blocker_count = try slot.current.cleanup_registry.connectionOrderingBlockerCount(),
+            .quarantine_occupied = snapshot.occupied_slots,
+            .quarantine_retained_bytes = snapshot.retained_bytes,
+        };
+    }
+
+    pub fn takeEventReleasePostSnapshot() ?EventReleasePostSnapshot {
+        const snapshot = event_release_post_snapshot;
+        event_release_post_snapshot = null;
+        return snapshot;
+    }
+
+    pub fn pendingEventPayloadCallbackCount() u64 {
+        return pending_event_payload_callback_count;
+    }
+
+    pub fn armEventReleaseProofLossMarker(fd: std.c.fd_t, stage_raw: u8) void {
+        if (event_release_proof_loss_marker_fd != null) @panic("event release proof-loss marker replayed");
+        event_release_proof_loss_marker_fd = fd;
+        event_release_death_stage_raw = stage_raw;
+    }
 
     pub fn rollbackGenerationEventPreparationPending(
         identity: GenerationEventIdentity,
@@ -1393,6 +1532,15 @@ fn eventCorrelationInternalConst(correlation: *const EventCorrelation) *const Ev
     return @ptrCast(@alignCast(&correlation.storage));
 }
 
+pub fn pendingEventCorrelationDigest(correlation: *const EventCorrelation) ?owner_seal.Digest {
+    const value = eventCorrelationInternalConst(correlation);
+    if (std.mem.allEqual(u8, &value.digest, 0) or value.expected_major == 0 or
+        value.metadata_support_raw > 1 or
+        value.ordering_class_raw > @intFromEnum(cleanup_registry_mod.EventOrderingClass.controller_revoke) or
+        !std.mem.allEqual(u8, &value.reserved, 0)) return null;
+    return value.digest;
+}
+
 fn eventCorrelationDigest(input: EventCorrelationInput) owner_seal.Digest {
     const owner = input.identity.owner;
     const receipt = input.identity.receipt;
@@ -2323,7 +2471,7 @@ fn beginEventTakeActivationTransaction(
     if (!finalAdmissionDestinationValid(&out.admission, operation.*, protected_ranges))
         return error.InvalidOwner;
     if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
-        generation_event_release_callback_active_addr != 0)
+        anyGenerationEventReleaseCallbackActive())
         return error.Busy;
     mintRegisteredOperationExecutionReceipt(
         &out.admission.mint_receipt,
@@ -2410,7 +2558,7 @@ fn beginFinalAdmissionTransactionCore(
     else
         streamOperationNodeIdle(node);
     if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
-        generation_event_release_callback_active_addr != 0 or !stream_operation_valid)
+        anyGenerationEventReleaseCallbackActive() or !stream_operation_valid)
         return error.Busy;
     mintRegisteredOperationExecutionReceipt(&out.mint_receipt, operation, operation_owner) catch
         return error.InvalidOwner;
@@ -2621,7 +2769,7 @@ fn beginGenerationRequestOwner(
     comptime allow_active_cleanup: bool,
 ) GenerationRequestError!GenerationRequestOwner {
     if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
-        generation_event_release_callback_active_addr != 0)
+        anyGenerationEventReleaseCallbackActive())
         return error.Busy;
     if (request.slot_addr == 0 or request.slot_incarnation == 0 or
         request.node_incarnation == 0 or request.host_id == 0 or request.pid != currentPid() or
@@ -7724,6 +7872,10 @@ pub fn prepareGenerationEventRelease(
             return error.Terminal;
         return error.Busy;
     }
+    // pending-settlement callback은 다른 continuation type이다. 그 주소를
+    // `PreparedGenerationEventRelease`로 재해석하지 않으며, ordinary 동일 대상/형제 release는
+    // callback이 반환할 때까지 registered operation을 Busy로만 관찰한다.
+    if (pending_event_release_callback_binding.begun_addr != 0) return error.Busy;
     const admission = beginGenerationRequestOwner(request.owner, false) catch |err| return switch (err) {
         error.Busy => error.Busy,
         else => error.InvalidOwner,
@@ -7879,7 +8031,7 @@ pub fn prepareGenerationEventRelease(
 pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
     const state = preparedEventRelease(out);
     if (state.self_addr != @intFromPtr(out) or state.lifecycle != .prepared or
-        generation_event_release_callback_active_addr != 0 or
+        anyGenerationEventReleaseCallbackActive() or
         (state.disposition == .clean and state.permit_state != .consume_prepared) or
         (state.permit_state == .identity_exhausted and state.disposition != .corrupt))
         @panic("generation event release continuation drifted");
@@ -7901,7 +8053,7 @@ pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
             const payload = @as([*]u8, @ptrFromInt(state.mirror.payload_addr))[0..state.mirror.payload_len];
             allocator.free(payload);
             generation_event_release_callback_active_addr = 0;
-            quarantine.settleRelease(
+            _ = quarantine.settleRelease(
                 currentPid(),
                 @intCast(std.Thread.getCurrentId()),
                 state.quarantine_reservation,
@@ -8006,7 +8158,7 @@ pub fn discardGenerationEventForTest(
         continuation,
     );
     operation.node.client.allocator.free(payload);
-    quarantine.settleRelease(
+    _ = quarantine.settleRelease(
         currentPid(),
         thread_id,
         quarantine_reservation,
@@ -8125,6 +8277,1146 @@ pub fn poisonGenerationConnection(
     if (client.first_poison_reason == null or !client.unusable or client.fd != -1 or
         client.pending_outbound != null or client.io_mode != .blocking)
         @panic("confirmed generation poison postcondition drifted");
+}
+
+fn reasonProjection(reason: ?client_poison.ConnectionReason) settlement_contract.ReasonProjection {
+    return if (reason) |value|
+        .{ .present_raw = 1, .reason_raw = @intFromEnum(value) }
+    else
+        .{};
+}
+
+fn settlementDigest(comptime domain: []const u8, values: []const u64) settlement_contract.Digest {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update(domain);
+    for (values) |value| {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .little);
+        hasher.update(&bytes);
+    }
+    var digest: settlement_contract.Digest = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+/// sealed request와 canonical PRE 상태에서 유일하게 허용되는 effect를 도출한다. commit은 이 값을
+/// permit에 저장하고 POST를 대조하며, Client가 terminal이 된 뒤 두 번째 plan을 도출하지 않는다.
+fn deriveCanonicalEffectPlan(
+    client: *const client_mod.Client,
+    request: settlement_contract.EffectRequestProjection,
+    target_stream_id: u64,
+) error{InvalidOwner}!settlement_contract.CanonicalEffectPlan {
+    if (client.ownership == .moved or client.io_mode != .blocking or
+        std.enums.fromInt(settlement_contract.EffectRequestTag, request.tag_raw) == null)
+        return error.InvalidOwner;
+    const request_tag: settlement_contract.EffectRequestTag = @enumFromInt(request.tag_raw);
+    if ((request_tag == .none and (request.requested_reason.present_raw != 0 or request.revoke_fence != 0)) or
+        (request_tag == .poison and (request.requested_reason.present_raw != 1 or request.revoke_fence != 0 or
+            std.enums.fromInt(client_poison.ConnectionReason, request.requested_reason.reason_raw) == null)) or
+        (request_tag == .revoke_fence and
+            (request.requested_reason.present_raw != 0 or request.revoke_fence == 0)))
+        return error.InvalidOwner;
+    if (client.fd < -1 or (!client.unusable and client.fd < 0)) return error.InvalidOwner;
+
+    var plan: settlement_contract.CanonicalEffectPlan = .{
+        .effect_request = request,
+        .first_reason_before = reasonProjection(client.first_poison_reason),
+        .first_reason_after = reasonProjection(client.first_poison_reason),
+        .unusable_before_raw = @intFromBool(client.unusable),
+        .unusable_after_raw = @intFromBool(client.unusable),
+        .fd_before = client.fd,
+        .fd_after = client.fd,
+    };
+    if (client.pending_outbound) |pending| {
+        if (pending.frame.len == 0 or pending.offset >= pending.frame.len) return error.InvalidOwner;
+        plan.outbound_relation_raw = @intFromEnum(if (pending.stream_id == target_stream_id)
+            settlement_contract.OutboundRelation.target
+        else
+            settlement_contract.OutboundRelation.sibling);
+        plan.outbound_disposition_raw = @intFromEnum(settlement_contract.OutboundDisposition.preserved);
+        plan.outbound_offset = pending.offset;
+        plan.outbound_len = pending.frame.len;
+        plan.outbound_descriptor_digest = settlementDigest("maru.effect-outbound-descriptor.v1", &.{
+            @intFromPtr(pending.frame.ptr),    pending.frame.len,                    pending.offset, pending.stream_id,
+            @intFromPtr(client.allocator.ptr), @intFromPtr(client.allocator.vtable),
+        });
+    }
+
+    const relation: settlement_contract.OutboundRelation = @enumFromInt(plan.outbound_relation_raw);
+    if (client.unusable) {
+        if (client.first_poison_reason == null) return error.InvalidOwner;
+        plan.action_raw = @intFromEnum(settlement_contract.EffectAction.terminal_cleanup);
+        plan.fd_after = -1;
+        if (client.fd < 0) {
+            plan.fd_disposition_raw = @intFromEnum(settlement_contract.FdDisposition.already_detached);
+        } else {
+            plan.fd_disposition_raw = @intFromEnum(settlement_contract.FdDisposition.detached_close_attempted);
+            plan.close_attempt_count = 1;
+        }
+        if (relation != .absent) setPlanAllocatorCleanup(client, &plan, .freed);
+    } else switch (request_tag) {
+        .none => plan.action_raw = @intFromEnum(settlement_contract.EffectAction.none),
+        .poison => {
+            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.poison);
+            if (plan.first_reason_before.present_raw == 0)
+                plan.first_reason_after = request.requested_reason;
+            setPlanTerminalFd(&plan);
+            if (relation != .absent) setPlanAllocatorCleanup(client, &plan, .freed);
+        },
+        .revoke_fence => if (relation != .target) {
+            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.revoke_clean);
+        } else if (plan.outbound_offset == 0) {
+            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.revoke_cancel);
+            setPlanAllocatorCleanup(client, &plan, .cancelled);
+        } else {
+            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.revoke_partial_poison);
+            if (plan.first_reason_before.present_raw == 0)
+                plan.first_reason_after = reasonProjection(.outbound_partial_write);
+            setPlanTerminalFd(&plan);
+            setPlanAllocatorCleanup(client, &plan, .partial_poisoned);
+        },
+    }
+    if (!settlement_contract.validCanonicalEffectPlanShape(&plan)) return error.InvalidOwner;
+    return plan;
+}
+
+fn setPlanTerminalFd(plan: *settlement_contract.CanonicalEffectPlan) void {
+    plan.unusable_after_raw = 1;
+    plan.fd_after = -1;
+    plan.fd_disposition_raw = @intFromEnum(settlement_contract.FdDisposition.detached_close_attempted);
+    plan.close_attempt_count = 1;
+}
+
+fn setPlanAllocatorCleanup(
+    client: *const client_mod.Client,
+    plan: *settlement_contract.CanonicalEffectPlan,
+    disposition: settlement_contract.OutboundDisposition,
+) void {
+    plan.outbound_disposition_raw = @intFromEnum(disposition);
+    plan.cleanup_mode_raw = @intFromEnum(settlement_contract.CleanupMode.allocator_free);
+    plan.cleanup_count = 1;
+    plan.cleanup_callback_provenance_digest = settlementDigest("maru.effect-cleanup-callback.v1", &.{
+        @intFromPtr(client.allocator.ptr),             @intFromPtr(client.allocator.vtable),
+        @as(u64, @intCast(@intFromEnum(disposition))),
+    });
+}
+
+fn descriptorMatchesPlan(
+    client: *const client_mod.Client,
+    pending: anytype,
+    plan: settlement_contract.CanonicalEffectPlan,
+    target_stream_id: u64,
+) bool {
+    const relation: settlement_contract.OutboundRelation = @enumFromInt(plan.outbound_relation_raw);
+    const expected_relation: settlement_contract.OutboundRelation = if (pending.stream_id == target_stream_id) .target else .sibling;
+    if (relation != expected_relation or pending.frame.len != plan.outbound_len or pending.offset != plan.outbound_offset)
+        return false;
+    const digest = settlementDigest("maru.effect-outbound-descriptor.v1", &.{
+        @intFromPtr(pending.frame.ptr),    pending.frame.len,                    pending.offset, pending.stream_id,
+        @intFromPtr(client.allocator.ptr), @intFromPtr(client.allocator.vtable),
+    });
+    return std.crypto.timing_safe.eql(settlement_contract.Digest, digest, plan.outbound_descriptor_digest);
+}
+
+fn validateCanonicalEffectPrestate(
+    plan: settlement_contract.CanonicalEffectPlan,
+    client: *const client_mod.Client,
+    target_stream_id: u64,
+) bool {
+    if (!settlement_contract.validCanonicalEffectPlanShape(&plan) or
+        !std.meta.eql(reasonProjection(client.first_poison_reason), plan.first_reason_before) or
+        @intFromBool(client.unusable) != plan.unusable_before_raw or client.fd != plan.fd_before)
+        return false;
+    const relation: settlement_contract.OutboundRelation = @enumFromInt(plan.outbound_relation_raw);
+    if (client.pending_outbound) |pending|
+        return relation != .absent and descriptorMatchesPlan(client, pending, plan, target_stream_id);
+    return relation == .absent and std.mem.allEqual(u8, &plan.outbound_descriptor_digest, 0);
+}
+
+fn validateCanonicalEffectPoststate(
+    plan: settlement_contract.CanonicalEffectPlan,
+    client: *const client_mod.Client,
+    target_stream_id: u64,
+) bool {
+    if (!std.meta.eql(reasonProjection(client.first_poison_reason), plan.first_reason_after) or
+        @intFromBool(client.unusable) != plan.unusable_after_raw or client.fd != plan.fd_after)
+        return false;
+    const disposition: settlement_contract.OutboundDisposition = @enumFromInt(plan.outbound_disposition_raw);
+    return switch (disposition) {
+        .absent, .freed, .cancelled, .partial_poisoned => client.pending_outbound == null,
+        .preserved => if (client.pending_outbound) |pending|
+            descriptorMatchesPlan(client, pending, plan, target_stream_id)
+        else
+            false,
+    };
+}
+
+fn executeCanonicalEffectPlanNoFail(
+    client: *client_mod.Client,
+    plan: settlement_contract.CanonicalEffectPlan,
+    target_stream_id: u64,
+) void {
+    if (!validateCanonicalEffectPrestate(plan, client, target_stream_id))
+        @panic("C3-3b3 effect PRE state drifted after admission");
+
+    const disposition: settlement_contract.OutboundDisposition = @enumFromInt(plan.outbound_disposition_raw);
+    const releases_outbound = switch (disposition) {
+        .freed, .cancelled, .partial_poisoned => true,
+        .absent, .preserved => false,
+    };
+    const moved_outbound = if (releases_outbound) client.pending_outbound else null;
+
+    // 첫 external close/free 전에 모든 semantic/store-only publication을 끝낸다.
+    if (plan.first_reason_after.present_raw == 1 and client.first_poison_reason == null)
+        client.first_poison_reason = @enumFromInt(plan.first_reason_after.reason_raw);
+    client.unusable = plan.unusable_after_raw == 1;
+    if (releases_outbound) client.pending_outbound = null;
+    const detached_fd = if (plan.fd_disposition_raw == @intFromEnum(settlement_contract.FdDisposition.detached_close_attempted))
+        client.fd
+    else
+        -1;
+    client.fd = plan.fd_after;
+
+    // callback proof loss가 열린 descriptor를 고아로 남기지 않도록 close를 allocator callback보다 먼저 한다.
+    if (detached_fd >= 0) _ = c.close(detached_fd);
+    if (moved_outbound) |pending| {
+        if (builtin.is_test and event_release_death_stage_raw == 3) {
+            writeEventReleaseDeathMarker(0x44);
+            writeEventReleaseDeathMarker(0x45);
+        }
+        if (!client.enterGenerationAllocatorCallback())
+            @panic("C3-3b3 allocator callback latch admission drifted");
+        client.allocator.free(pending.frame);
+        client.leaveGenerationAllocatorCallbackUnchecked();
+        if (builtin.is_test and event_release_death_stage_raw == 3) {
+            writeEventReleaseDeathMarker(0x46);
+            client.unusable = !client.unusable;
+            writeEventReleaseDeathMarker(0x47);
+        }
+    }
+    if (!validateCanonicalEffectPoststate(plan, client, target_stream_id))
+        effectProofLoss();
+}
+
+fn effectProofLoss() noreturn {
+    if (builtin.is_test) if (event_release_proof_loss_marker_fd) |fd| {
+        const marker: [1]u8 = .{0x48};
+        while (true) {
+            const written = std.c.write(fd, &marker, marker.len);
+            if (written == 1) break;
+            if (written < 0 and std.posix.errno(written) == .INTR) continue;
+            std.c._exit(126);
+        }
+        event_release_proof_loss_marker_fd = null;
+    };
+    process_seal_service.fatalIntegrity(.proof_loss);
+}
+
+pub fn preflightPendingEffect(
+    request: GenerationTransportOwnerQuery,
+    input: settlement_contract.EffectPreflightInput,
+    effect_out: *settlement_contract.EffectCommitEvidence,
+    out: *settlement_contract.PreparedEffectPermit,
+) error{ Busy, InvalidOwner }!void {
+    if (!std.meta.eql(out.*, settlement_contract.PreparedEffectPermit{}) or
+        !std.meta.eql(effect_out.*, settlement_contract.EffectCommitEvidence{}) or
+        input.pending_owner_addr == 0 or input.owner_incarnation == 0 or input.attempt == 0 or
+        input.event_generation == 0 or input.target_stream_id == 0 or
+        std.mem.allEqual(u8, &input.correlation_digest, 0) or
+        std.mem.allEqual(u8, &input.prepared_effect_digest, 0) or
+        input.effect_out_addr != @intFromPtr(effect_out) or
+        input.effect_out_extent != @sizeOf(settlement_contract.EffectCommitEvidence) or
+        input.effect_out_alignment != @alignOf(settlement_contract.EffectCommitEvidence) or
+        std.mem.allEqual(u8, &input.effect_out_pristine_digest, 0) or
+        !settlement_contract.validRuntimeSettlementBinding(input.lease))
+        return error.InvalidOwner;
+    const admission = beginGenerationRequestOwner(request, false) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    var operation_live = true;
+    defer if (operation_live) endRegisteredNodeOperation(admission.operation);
+    const plan = deriveCanonicalEffectPlan(
+        &admission.operation.node.client,
+        input.effect_request,
+        input.target_stream_id,
+    ) catch return error.InvalidOwner;
+    out.* = .{
+        .self_addr = @intFromPtr(out),
+        .pid = currentPid(),
+        .process_nonce = input.lease.operation_identity.process_nonce,
+        .thread_id = @intCast(std.Thread.getCurrentId()),
+        .pending_owner_addr = input.pending_owner_addr,
+        .owner_incarnation = input.owner_incarnation,
+        .attempt = input.attempt,
+        .event_generation = input.event_generation,
+        .correlation_digest = input.correlation_digest,
+        .prepared_effect_digest = input.prepared_effect_digest,
+        .slot_incarnation = request.slot_incarnation,
+        .node_incarnation = request.node_incarnation,
+        .binding_incarnation = request.reservation.identity.binding_incarnation,
+        .transport_incarnation = request.transport_incarnation,
+        .operation_node_addr = @intFromPtr(admission.operation.node),
+        .operation_id = admission.operation.operation_id,
+        .operation_registry_index = admission.operation.registry_index,
+        .target_stream_id = input.target_stream_id,
+        .effect_out_addr = input.effect_out_addr,
+        .effect_out_extent = input.effect_out_extent,
+        .effect_out_alignment = input.effect_out_alignment,
+        .effect_out_pristine_digest = input.effect_out_pristine_digest,
+        .scratch_ranges_digest = input.lease.ranges_digest,
+        .scratch_pristine_digest = input.lease.pristine_digest,
+        .preflight_proof_seal_digest = input.lease.preflight_proof_seal_digest,
+        .lease_seal_digest = input.lease.lease_seal_digest,
+    };
+    settlement_contract.applyEffectPlanToPermit(out, plan);
+    out.preflight_authority_digest = settlement_contract.preflightEffectAuthorityDigest(
+        plan,
+        input.lease,
+        input.effect_out_addr,
+        input.effect_out_extent,
+        input.effect_out_alignment,
+        input.effect_out_pristine_digest,
+    );
+    out.seal = settlement_contract.sealPreparedEffectPermit(out.*) catch return error.InvalidOwner;
+    out.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.prepared);
+    if (!settlement_contract.validPreparedEffectPermit(out)) return error.InvalidOwner;
+    operation_live = false;
+}
+
+fn operationFromEffectPermit(permit: *const settlement_contract.PreparedEffectPermit) RegisteredNodeOperation {
+    return .{
+        .node = @ptrFromInt(permit.operation_node_addr),
+        .registry_index = permit.operation_registry_index,
+        .operation_id = permit.operation_id,
+        .pid = permit.pid,
+    };
+}
+
+pub fn abortPendingEffectPreAdmissionNoFail(permit: *settlement_contract.PreparedEffectPermit) void {
+    if (!settlement_contract.validPreparedEffectPermit(permit)) effectProofLoss();
+    const operation = operationFromEffectPermit(permit);
+    if (resolveRegisteredNodeOperation(operation) != operation.node) effectProofLoss();
+    endRegisteredNodeOperation(operation);
+    permit.* = .{};
+}
+
+pub fn commitPendingEffectNoFail(
+    permit: *settlement_contract.PreparedEffectPermit,
+    binding: settlement_contract.RuntimeSettlementLeaseBinding,
+    effect_out: *settlement_contract.EffectCommitEvidence,
+) void {
+    if (!settlement_contract.validPreparedEffectPermit(permit) or
+        !settlement_contract.validRuntimeSettlementBinding(binding) or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, permit.lease_seal_digest, binding.lease_seal_digest))
+        effectProofLoss();
+    const operation = operationFromEffectPermit(permit);
+    const client = resolveRegisteredNodeOperation(operation) orelse effectProofLoss();
+    if (client != operation.node or @intFromPtr(client) != permit.operation_node_addr) effectProofLoss();
+    const plan = settlement_contract.effectPlanFromPermit(permit);
+    if (!validateCanonicalEffectPrestate(plan, &client.client, permit.target_stream_id)) effectProofLoss();
+    executeCanonicalEffectPlanNoFail(&client.client, plan, permit.target_stream_id);
+    if (!validateCanonicalEffectPoststate(plan, &client.client, permit.target_stream_id)) effectProofLoss();
+    settlement_contract.publishEffectCommitEvidenceNoFail(permit, binding, effect_out);
+    if (!settlement_contract.validEffectCommitEvidenceFor(permit, binding, effect_out)) effectProofLoss();
+}
+
+pub fn preflightPendingEventReleaseUnderEffect(
+    request: GenerationTransportOwnerQuery,
+    effect_permit: *const settlement_contract.PreparedEffectPermit,
+    pending: settlement_contract.PendingRegistryReleaseReceipt,
+    event_projection: GenerationEventReleaseProjection,
+    binding: settlement_contract.RuntimeSettlementLeaseBinding,
+    completion_out: *settlement_contract.EventReleaseCompletion,
+    permit_out: *settlement_contract.PreparedEventReleasePermit,
+    begun: *PendingEventReleaseBegun,
+) error{InvalidOwner}!void {
+    if (!settlement_contract.validPreparedEffectPermit(effect_permit) or
+        request.slot_incarnation != effect_permit.slot_incarnation or
+        request.node_incarnation != effect_permit.node_incarnation or
+        request.transport_incarnation != effect_permit.transport_incarnation or
+        request.reservation.identity.binding_incarnation != effect_permit.binding_incarnation or
+        !begun.pristineExact())
+        return error.InvalidOwner;
+    const operation = operationFromEffectPermit(effect_permit);
+    const node = resolveRegisteredNodeOperation(operation) orelse return error.InvalidOwner;
+    if (node != operation.node) return error.InvalidOwner;
+    if (!event_projection.valid or event_projection.owner_addr != pending.event_identity.event_owner_addr or
+        event_projection.self_addr != pending.event_identity.event_owner_addr or
+        event_projection.payload_addr == 0 or event_projection.payload_len == 0)
+        return error.InvalidOwner;
+    const receipt: cleanup_registry_mod.EventGenerationReceipt = .{
+        .registry_incarnation = pending.event_identity.registry_incarnation,
+        .binding_reservation_id = pending.event_identity.binding_reservation_id,
+        .node_incarnation = pending.event_identity.event_node_incarnation,
+        .stream_id = pending.event_identity.stream_id,
+        .event_generation = pending.event_identity.event_generation,
+        .owner_addr = pending.event_identity.event_owner_addr,
+    };
+    var registry_permit: cleanup_registry_mod.PreparedRegistryEventRelease = .{};
+    node.cleanup_registry.preflightPreparedEventRelease(
+        request.reservation.cleanup,
+        request.reservation.identity,
+        receipt,
+        pending,
+        binding,
+        &registry_permit,
+    ) catch return error.InvalidOwner;
+    permit_out.* = .{
+        .self_addr = @intFromPtr(permit_out),
+        .pid = effect_permit.pid,
+        .process_nonce = effect_permit.process_nonce,
+        .thread_id = effect_permit.thread_id,
+        .registry_addr = registry_permit.registry_addr,
+        .registry_incarnation = registry_permit.registry_incarnation,
+        .binding_reservation_id = registry_permit.binding_reservation_id,
+        .entry_index = registry_permit.entry_index,
+        .event_node_incarnation = registry_permit.event_node_incarnation,
+        .stream_id = registry_permit.stream_id,
+        .event_generation = registry_permit.event_generation,
+        .event_owner_addr = registry_permit.event_owner_addr,
+        .pending_owner_addr = pending.pending_owner_addr,
+        .pending_owner_incarnation = pending.pending_owner_incarnation,
+        .source_lease_incarnation = pending.source_lease_incarnation,
+        .attempt = pending.attempt,
+        .ordering_class_raw = registry_permit.ordering_class_raw,
+        .expected_blocker_count = registry_permit.expected_blocker_count,
+        .completion_addr = @intFromPtr(completion_out),
+        .completion_extent = @sizeOf(settlement_contract.EventReleaseCompletion),
+        .completion_alignment = @alignOf(settlement_contract.EventReleaseCompletion),
+        .completion_pristine_digest = settlement_contract.pristineEventReleaseCompletionDigest(),
+        .begun_addr = @intFromPtr(begun),
+        .begun_extent = @sizeOf(PendingEventReleaseBegun),
+        .begun_alignment = @alignOf(PendingEventReleaseBegun),
+        .begun_pristine_digest = pristinePendingEventReleaseBegunDigest(),
+        .scratch_ranges_digest = binding.ranges_digest,
+        .scratch_pristine_digest = binding.pristine_digest,
+        .preflight_proof_seal_digest = binding.preflight_proof_seal_digest,
+        .lease_seal_digest = binding.lease_seal_digest,
+        .release_receipt_digest = pending.release_seal,
+    };
+    errdefer permit_out.* = .{};
+    const trusted = node.cleanup_registry.trustedEventPreparation(
+        request.reservation.cleanup,
+        request.reservation.identity,
+        pending.event_identity.event_owner_addr,
+    ) catch return error.InvalidOwner;
+    if (!std.meta.eql(trusted.event, receipt) or
+        trusted.quarantine_reservation_generation == 0 or
+        event_projection.payload_addr == 0 or event_projection.payload_len == 0 or
+        event_projection.lease_projection == null)
+        return error.InvalidOwner;
+    const quarantine_reservation: GenerationEventQuarantine.Reservation = .{
+        .slot_index = trusted.quarantine_slot_index,
+        .reservation_generation = trusted.quarantine_reservation_generation,
+        .node_incarnation = trusted.event.node_incarnation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine_identity: GenerationEventQuarantine.Identity = .{
+        .node_incarnation = trusted.event.node_incarnation,
+        .event_generation = trusted.event.event_generation,
+        .owner_addr = trusted.event.owner_addr,
+    };
+    const quarantine = &(generation_event_quarantine_registry orelse return error.InvalidOwner);
+    const mirror = quarantine.trustedMirror(
+        currentPid(),
+        @intCast(std.Thread.getCurrentId()),
+        quarantine_reservation,
+        quarantine_identity,
+    ) catch return error.InvalidOwner;
+    const pin_projection = pinProjectionFromMirror(mirror);
+    if (!std.meta.eql(event_projection.lease_projection.?, pin_projection) or
+        event_projection.payload_addr != mirror.payload_addr or
+        event_projection.payload_len != mirror.payload_len or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, pending.event_identity.payload_digest, mirror.payload_digest))
+        return error.InvalidOwner;
+    permit_out.event_owner_seal = event_projection.owner_seal;
+    permit_out.payload_addr = mirror.payload_addr;
+    permit_out.payload_len = mirror.payload_len;
+    permit_out.payload_digest = mirror.payload_digest;
+    permit_out.allocator_ptr = mirror.allocator_ptr;
+    permit_out.allocator_vtable = mirror.allocator_vtable;
+    permit_out.pin_owner_addr = pin_projection.pin_owner_addr;
+    permit_out.lease_addr = pin_projection.lease_addr;
+    permit_out.slot_addr = pin_projection.slot_addr;
+    permit_out.node_addr = pin_projection.node_addr;
+    permit_out.pin_slot_incarnation = pin_projection.slot_incarnation;
+    permit_out.pin_node_incarnation = pin_projection.node_incarnation;
+    permit_out.host_id = pin_projection.host_id;
+    permit_out.connection_generation = pin_projection.connection_generation;
+    permit_out.pin_process_nonce = pin_projection.process_nonce;
+    permit_out.quarantine_slot_index = quarantine_reservation.slot_index;
+    permit_out.quarantine_reservation_generation = quarantine_reservation.reservation_generation;
+    permit_out.source_authority_digest = settlement_contract.eventReleaseSourceAuthorityDigest(permit_out.*);
+    permit_out.seal = settlement_contract.sealPreparedEventReleasePermit(permit_out.*) catch return error.InvalidOwner;
+    // seal은 lifecycle을 제외한다. registry/payload/pin/quarantine 필드가 모두 final address에
+    // 고정된 뒤에만 완성된 composite를 게시한다.
+    permit_out.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.prepared);
+    if (!settlement_contract.validPreparedEventReleasePermit(permit_out)) return error.InvalidOwner;
+}
+
+const PendingEventReleaseBegunLifecycle = enum(u8) {
+    pristine,
+    prepared,
+    owner_tombstoned,
+    resources_begun,
+    correlation_tombstoned,
+    mirror_tombstoned,
+    callback_active,
+    callback_returned,
+    sources_settled,
+    finished,
+};
+
+pub const PendingEventReleaseBegun = struct {
+    self_addr: usize = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    thread_id: u64 = 0,
+    effect_permit_addr: usize = 0,
+    release_permit_addr: usize = 0,
+    operation_id: u64 = 0,
+    event_owner_addr: usize = 0,
+    event_generation: u64 = 0,
+    pin_count_before: u64 = 0,
+    correlation_digest: settlement_contract.Digest = settlement_contract.zero_digest,
+    effect_permit_seal: settlement_contract.Digest = settlement_contract.zero_digest,
+    release_permit_seal: settlement_contract.Digest = settlement_contract.zero_digest,
+    pin_receipt: settlement_contract.EventReleaseLeafReceipt = .{},
+    owner_tombstone_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
+    correlation_tombstone_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
+    mirror_tombstone_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
+    callback_returned_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
+    lifecycle_raw: u8 = @intFromEnum(PendingEventReleaseBegunLifecycle.pristine),
+    callback_active_raw: u8 = 0,
+    seal: settlement_contract.Digest = settlement_contract.zero_digest,
+
+    pub fn pristineExact(self: *const PendingEventReleaseBegun) bool {
+        return std.meta.eql(self.*, PendingEventReleaseBegun{});
+    }
+};
+
+pub fn pristinePendingEventReleaseBegunDigest() settlement_contract.Digest {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.pending-event-release-begun.pristine.v1\x00");
+    hashInt(&hasher, u64, @sizeOf(PendingEventReleaseBegun));
+    hashInt(&hasher, u64, @alignOf(PendingEventReleaseBegun));
+    hashInt(&hasher, u64, std.meta.fields(PendingEventReleaseBegun).len);
+    var result: settlement_contract.Digest = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn pendingEventReleaseBegunSeal(value: PendingEventReleaseBegun) settlement_contract.Digest {
+    return process_seal_service.pendingEventReleaseBegunSeal(value.pid, value.process_nonce, .{
+        .self_addr = value.self_addr,
+        .thread_id = value.thread_id,
+        .effect_permit_addr = value.effect_permit_addr,
+        .release_permit_addr = value.release_permit_addr,
+        .operation_id = value.operation_id,
+        .event_owner_addr = value.event_owner_addr,
+        .event_generation = value.event_generation,
+        .pin_count_before = value.pin_count_before,
+        .correlation_digest = value.correlation_digest,
+        .effect_permit_seal = value.effect_permit_seal,
+        .release_permit_seal = value.release_permit_seal,
+        .pin_receipt_seal = value.pin_receipt.seal,
+        .owner_tombstone_receipt = value.owner_tombstone_receipt.seal,
+        .correlation_tombstone_receipt = value.correlation_tombstone_receipt.seal,
+        .mirror_tombstone_receipt = value.mirror_tombstone_receipt.seal,
+        .callback_returned_receipt = value.callback_returned_receipt.seal,
+        .lifecycle_raw = value.lifecycle_raw,
+        .callback_active_raw = value.callback_active_raw,
+    }) catch effectProofLoss();
+}
+
+fn validPendingEventReleaseBegun(value: *const PendingEventReleaseBegun) bool {
+    const lifecycle = std.enums.fromInt(PendingEventReleaseBegunLifecycle, value.lifecycle_raw) orelse return false;
+    if (lifecycle == .pristine or value.self_addr != @intFromPtr(value) or value.pid != currentPid() or
+        value.process_nonce == 0 or value.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+        value.effect_permit_addr == 0 or value.release_permit_addr == 0 or value.operation_id == 0 or
+        value.event_owner_addr == 0 or value.event_generation == 0 or value.pin_count_before == 0 or
+        std.mem.allEqual(u8, &value.correlation_digest, 0) or
+        std.mem.allEqual(u8, &value.effect_permit_seal, 0) or
+        std.mem.allEqual(u8, &value.release_permit_seal, 0) or
+        value.callback_active_raw != @intFromBool(lifecycle == .callback_active)) return false;
+    const expected = pendingEventReleaseBegunSeal(value.*);
+    if (!std.crypto.timing_safe.eql(settlement_contract.Digest, expected, value.seal)) return false;
+    const ordinal = @intFromEnum(lifecycle);
+    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned) and
+        !settlement_contract.validEventReleasePhaseReceipt(value.owner_tombstone_receipt, .owner)) return false;
+    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.resources_begun)) {
+        if (!settlement_contract.validEventReleaseLeafReceipt(value.pin_receipt, .pin)) return false;
+    }
+    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.correlation_tombstoned) and
+        !settlement_contract.validEventReleasePhaseReceipt(value.correlation_tombstone_receipt, .correlation)) return false;
+    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.mirror_tombstoned) and
+        !settlement_contract.validEventReleasePhaseReceipt(value.mirror_tombstone_receipt, .mirror)) return false;
+    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.callback_returned) and
+        !settlement_contract.validEventReleasePhaseReceipt(value.callback_returned_receipt, .callback)) return false;
+    return true;
+}
+
+fn advancePendingEventReleaseBegunNoFail(
+    value: *PendingEventReleaseBegun,
+    expected: PendingEventReleaseBegunLifecycle,
+    next: PendingEventReleaseBegunLifecycle,
+) void {
+    if (!validPendingEventReleaseBegun(value) or value.lifecycle_raw != @intFromEnum(expected))
+        effectProofLoss();
+    value.lifecycle_raw = @intFromEnum(next);
+    value.callback_active_raw = @intFromBool(next == .callback_active);
+    value.seal = pendingEventReleaseBegunSeal(value.*);
+}
+
+/// effect callback 뒤 payload-source tombstone 전에 수행하는 마지막 fallible/read-only 검사다.
+/// 여기서는 권위를 얻지 않으며, 이미 보유한 registered operation과 admitted runtime settlement
+/// lease가 바로 이어지는 no-fail suffix를 직렬화한다.
+pub fn validatePendingEventReleaseFinal(
+    effect_permit: *const settlement_contract.PreparedEffectPermit,
+    effect_out: *const settlement_contract.EffectCommitEvidence,
+    release_permit: *const settlement_contract.PreparedEventReleasePermit,
+    event_projection: GenerationEventReleaseProjection,
+    binding: settlement_contract.RuntimeSettlementLeaseBinding,
+    completion_out: *const settlement_contract.EventReleaseCompletion,
+) bool {
+    if (!settlement_contract.validPreparedEffectPermit(effect_permit) or
+        !settlement_contract.validEffectCommitEvidenceFor(effect_permit, binding, effect_out) or
+        !settlement_contract.validPreparedEventReleasePermit(release_permit) or
+        release_permit.completion_addr != @intFromPtr(completion_out) or
+        !std.meta.eql(completion_out.*, settlement_contract.EventReleaseCompletion{}) or
+        !std.crypto.timing_safe.eql(
+            settlement_contract.Digest,
+            release_permit.completion_pristine_digest,
+            settlement_contract.pristineEventReleaseCompletionDigest(),
+        ) or
+        !event_projection.valid or event_projection.self_addr != release_permit.event_owner_addr or
+        event_projection.owner_addr != release_permit.event_owner_addr or
+        event_projection.payload_addr != release_permit.payload_addr or
+        event_projection.payload_len != release_permit.payload_len or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, event_projection.owner_seal, release_permit.event_owner_seal))
+        return false;
+    const operation = operationFromEffectPermit(effect_permit);
+    const node = resolveRegisteredNodeOperation(operation) orelse return false;
+    if (node != operation.node or
+        !validateCanonicalEffectPoststate(
+            settlement_contract.effectPlanFromPermit(effect_permit),
+            &node.client,
+            effect_permit.target_stream_id,
+        )) return false;
+    const registry_permit = registryEventReleaseFromComposite(release_permit);
+    if (!node.cleanup_registry.preparedEventReleaseCurrent(registry_permit)) return false;
+    const quarantine = &(generation_event_quarantine_registry orelse return false);
+    const reservation: GenerationEventQuarantine.Reservation = .{
+        .slot_index = release_permit.quarantine_slot_index,
+        .reservation_generation = release_permit.quarantine_reservation_generation,
+        .node_incarnation = release_permit.event_node_incarnation,
+        .owner_addr = release_permit.event_owner_addr,
+    };
+    const identity: GenerationEventQuarantine.Identity = .{
+        .node_incarnation = release_permit.event_node_incarnation,
+        .event_generation = release_permit.event_generation,
+        .owner_addr = release_permit.event_owner_addr,
+    };
+    const mirror = quarantine.trustedMirror(
+        currentPid(),
+        @intCast(std.Thread.getCurrentId()),
+        reservation,
+        identity,
+    ) catch return false;
+    if (mirror.payload_addr != release_permit.payload_addr or mirror.payload_len != release_permit.payload_len or
+        mirror.allocator_ptr != release_permit.allocator_ptr or mirror.allocator_vtable != release_permit.allocator_vtable or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, mirror.payload_digest, release_permit.payload_digest))
+        return false;
+    const pin_projection = pinProjectionFromEventReleasePermit(release_permit);
+    return event_projection.lease_projection != null and
+        std.meta.eql(event_projection.lease_projection.?, pin_projection) and
+        lease_mod.canonicalPinReleaseReady(pin_projection, &node.pin_owner, currentPid());
+}
+
+pub fn preparePendingEventReleaseBegunNoFail(
+    effect_permit: *settlement_contract.PreparedEffectPermit,
+    release_permit: *settlement_contract.PreparedEventReleasePermit,
+    begun: *PendingEventReleaseBegun,
+) void {
+    if (!settlement_contract.validPreparedEffectPermit(effect_permit) or
+        !settlement_contract.validPreparedEventReleasePermit(release_permit) or
+        release_permit.begun_addr != @intFromPtr(begun) or
+        release_permit.begun_extent != @sizeOf(PendingEventReleaseBegun) or
+        release_permit.begun_alignment != @alignOf(PendingEventReleaseBegun) or
+        !std.crypto.timing_safe.eql(
+            settlement_contract.Digest,
+            release_permit.begun_pristine_digest,
+            pristinePendingEventReleaseBegunDigest(),
+        ) or !begun.pristineExact()) effectProofLoss();
+    const operation = operationFromEffectPermit(effect_permit);
+    const node = resolveRegisteredNodeOperation(operation) orelse effectProofLoss();
+    if (node != operation.node) effectProofLoss();
+    begun.* = .{
+        .self_addr = @intFromPtr(begun),
+        .pid = effect_permit.pid,
+        .process_nonce = effect_permit.process_nonce,
+        .thread_id = effect_permit.thread_id,
+        .effect_permit_addr = @intFromPtr(effect_permit),
+        .release_permit_addr = @intFromPtr(release_permit),
+        .operation_id = operation.operation_id,
+        .event_owner_addr = release_permit.event_owner_addr,
+        .event_generation = release_permit.event_generation,
+        .pin_count_before = node.pin_owner.cleanup_pin_count,
+        .correlation_digest = effect_permit.correlation_digest,
+        .effect_permit_seal = effect_permit.seal,
+        .release_permit_seal = release_permit.seal,
+        .lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.prepared),
+    };
+    begun.seal = pendingEventReleaseBegunSeal(begun.*);
+    if (!validPendingEventReleaseBegun(begun)) effectProofLoss();
+}
+
+pub fn markPendingEventOwnerTombstonedNoFail(begun: *PendingEventReleaseBegun, receipt: settlement_contract.EventReleasePhaseReceipt) void {
+    if (!settlement_contract.validEventReleasePhaseReceipt(receipt, .owner)) effectProofLoss();
+    begun.owner_tombstone_receipt = receipt;
+    begun.seal = pendingEventReleaseBegunSeal(begun.*);
+    advancePendingEventReleaseBegunNoFail(begun, .prepared, .owner_tombstoned);
+}
+
+pub fn beginPendingEventReleaseResourcesNoFail(
+    effect_permit: *settlement_contract.PreparedEffectPermit,
+    release_permit: *settlement_contract.PreparedEventReleasePermit,
+    begun: *PendingEventReleaseBegun,
+) void {
+    if (!validPendingEventReleaseBegun(begun) or
+        begun.lifecycle_raw != @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned) or
+        begun.effect_permit_addr != @intFromPtr(effect_permit) or
+        begun.release_permit_addr != @intFromPtr(release_permit) or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.effect_permit_seal, effect_permit.seal) or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.release_permit_seal, release_permit.seal))
+        effectProofLoss();
+    const operation = operationFromEffectPermit(effect_permit);
+    const node = resolveRegisteredNodeOperation(operation) orelse effectProofLoss();
+    if (node != operation.node or operation.operation_id != begun.operation_id) effectProofLoss();
+    const quarantine = &(generation_event_quarantine_registry orelse effectProofLoss());
+    const reservation: GenerationEventQuarantine.Reservation = .{
+        .slot_index = release_permit.quarantine_slot_index,
+        .reservation_generation = release_permit.quarantine_reservation_generation,
+        .node_incarnation = release_permit.event_node_incarnation,
+        .owner_addr = release_permit.event_owner_addr,
+    };
+    const identity: GenerationEventQuarantine.Identity = .{
+        .node_incarnation = release_permit.event_node_incarnation,
+        .event_generation = release_permit.event_generation,
+        .owner_addr = release_permit.event_owner_addr,
+    };
+    node.cleanup_registry.beginPreparedEventReleaseNoFail(registryEventReleaseFromComposite(release_permit));
+    const mirror = quarantine.beginRelease(
+        currentPid(),
+        @intCast(std.Thread.getCurrentId()),
+        reservation,
+        identity,
+    ) catch effectProofLoss();
+    if (mirror.payload_addr != release_permit.payload_addr or mirror.payload_len != release_permit.payload_len or
+        mirror.allocator_ptr != release_permit.allocator_ptr or mirror.allocator_vtable != release_permit.allocator_vtable or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, mirror.payload_digest, release_permit.payload_digest))
+        effectProofLoss();
+    begun.pin_receipt = lease_mod.consumeCanonicalPinWithReceiptUnchecked(
+        pinProjectionFromEventReleasePermit(release_permit),
+        &node.pin_owner,
+        currentPid(),
+    );
+    if (!settlement_contract.validEventReleaseLeafReceipt(begun.pin_receipt, .pin)) effectProofLoss();
+    begun.seal = pendingEventReleaseBegunSeal(begun.*);
+    advancePendingEventReleaseBegunNoFail(begun, .owner_tombstoned, .resources_begun);
+}
+
+pub fn markPendingEventCorrelationTombstonedNoFail(begun: *PendingEventReleaseBegun, receipt: settlement_contract.EventReleasePhaseReceipt) void {
+    if (!settlement_contract.validEventReleasePhaseReceipt(receipt, .correlation)) effectProofLoss();
+    begun.correlation_tombstone_receipt = receipt;
+    begun.seal = pendingEventReleaseBegunSeal(begun.*);
+    advancePendingEventReleaseBegunNoFail(begun, .resources_begun, .correlation_tombstoned);
+}
+
+pub fn markPendingEventMirrorTombstonedNoFail(begun: *PendingEventReleaseBegun, receipt: settlement_contract.EventReleasePhaseReceipt) void {
+    if (!settlement_contract.validEventReleasePhaseReceipt(receipt, .mirror)) effectProofLoss();
+    begun.mirror_tombstone_receipt = receipt;
+    begun.seal = pendingEventReleaseBegunSeal(begun.*);
+    advancePendingEventReleaseBegunNoFail(begun, .correlation_tombstoned, .mirror_tombstoned);
+}
+
+pub fn finishPendingEventReleaseNoFail(
+    effect_permit: *settlement_contract.PreparedEffectPermit,
+    release_permit: *settlement_contract.PreparedEventReleasePermit,
+    begun: *PendingEventReleaseBegun,
+    completion_out: *settlement_contract.EventReleaseCompletion,
+) void {
+    if (!settlement_contract.validPreparedEffectPermit(effect_permit) or
+        !settlement_contract.validPreparedEventReleasePermit(release_permit) or
+        release_permit.completion_addr != @intFromPtr(completion_out) or
+        begun.self_addr != @intFromPtr(begun) or begun.effect_permit_addr != @intFromPtr(effect_permit) or
+        begun.release_permit_addr != @intFromPtr(release_permit) or
+        begun.operation_id != effect_permit.operation_id or
+        !validPendingEventReleaseBegun(begun) or
+        begun.lifecycle_raw != @intFromEnum(PendingEventReleaseBegunLifecycle.mirror_tombstoned) or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.effect_permit_seal, effect_permit.seal) or
+        !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.release_permit_seal, release_permit.seal) or
+        !std.meta.eql(completion_out.*, settlement_contract.EventReleaseCompletion{})) effectProofLoss();
+    const operation = operationFromEffectPermit(effect_permit);
+    const node = resolveRegisteredNodeOperation(operation) orelse effectProofLoss();
+    const allocator: std.mem.Allocator = .{
+        .ptr = @ptrFromInt(release_permit.allocator_ptr),
+        .vtable = @ptrFromInt(release_permit.allocator_vtable),
+    };
+    const payload = @as([*]u8, @ptrFromInt(release_permit.payload_addr))[0..release_permit.payload_len];
+    if (!std.meta.eql(pending_event_release_callback_binding, PendingEventReleaseCallbackBinding{}))
+        effectProofLoss();
+    advancePendingEventReleaseBegunNoFail(begun, .mirror_tombstoned, .callback_active);
+    if (builtin.is_test and event_release_death_stage_raw == 2) writeEventReleaseDeathMarker(0x43);
+    pending_event_release_callback_binding = .{
+        .begun_addr = @intFromPtr(begun),
+        .begun_seal = begun.seal,
+    };
+    if (builtin.is_test) {
+        pending_event_payload_callback_count += 1;
+        if (event_release_death_stage_raw == 1 or
+            (event_release_death_stage_raw == 2 and pending_event_payload_callback_count > 1))
+            writeEventReleaseDeathMarker(0x49);
+    }
+    allocator.free(payload);
+    if (builtin.is_test and event_release_death_stage_raw == 2) {
+        writeEventReleaseDeathMarker(0x47);
+        begun.seal[0] ^= 1;
+    }
+    if (!validPendingEventReleaseBegun(begun) or
+        pending_event_release_callback_binding.begun_addr != @intFromPtr(begun) or
+        !std.crypto.timing_safe.eql(
+            settlement_contract.Digest,
+            pending_event_release_callback_binding.begun_seal,
+            begun.seal,
+        )) effectProofLoss();
+    const returned_binding = pending_event_release_callback_binding;
+    pending_event_release_callback_binding = .{};
+    begun.callback_returned_receipt = settlement_contract.makeEventReleasePhaseReceipt(
+        .callback,
+        @intFromEnum(PendingEventReleaseBegunLifecycle.callback_active),
+        @intFromEnum(PendingEventReleaseBegunLifecycle.callback_returned),
+        begun.event_owner_addr,
+        begun.event_generation,
+        @intFromPtr(begun),
+        returned_binding.begun_seal,
+        settlement_contract.canonicalEventReleasePhaseAfterDigest(.callback, @intFromPtr(begun), begun.event_owner_addr, begun.event_generation, @intFromEnum(PendingEventReleaseBegunLifecycle.callback_returned)),
+        begun.release_permit_seal,
+        returned_binding.begun_seal,
+    ) catch effectProofLoss();
+    begun.seal = pendingEventReleaseBegunSeal(begun.*);
+    advancePendingEventReleaseBegunNoFail(begun, .callback_active, .callback_returned);
+    if (resolveRegisteredNodeOperation(operation) != node or
+        !settlement_contract.validPreparedEventReleasePermit(release_permit)) effectProofLoss();
+    const quarantine = &(generation_event_quarantine_registry orelse effectProofLoss());
+    const quarantine_receipt = quarantine.settleRelease(
+        currentPid(),
+        @intCast(std.Thread.getCurrentId()),
+        .{
+            .slot_index = release_permit.quarantine_slot_index,
+            .reservation_generation = release_permit.quarantine_reservation_generation,
+            .node_incarnation = release_permit.event_node_incarnation,
+            .owner_addr = release_permit.event_owner_addr,
+        },
+        .{
+            .node_incarnation = release_permit.event_node_incarnation,
+            .event_generation = release_permit.event_generation,
+            .owner_addr = release_permit.event_owner_addr,
+        },
+    ) catch effectProofLoss();
+    const permit_seal = release_permit.seal;
+    const registry_receipt = node.cleanup_registry.finishPreparedEventReleaseNoFail(registryEventReleaseFromComposite(release_permit));
+    advancePendingEventReleaseBegunNoFail(begun, .callback_returned, .sources_settled);
+    if (!node.cleanup_registry.preparedEventReleaseSettled(registryEventReleaseFromComposite(release_permit)) or
+        !lease_mod.canonicalPinConsumed(
+            pinProjectionFromEventReleasePermit(release_permit),
+            &node.pin_owner,
+            begun.pin_count_before,
+            currentPid(),
+        )) effectProofLoss();
+    if (!settlement_contract.validEventReleaseLeafReceipt(registry_receipt, .registry) or
+        !settlement_contract.validEventReleaseLeafReceipt(quarantine_receipt, .quarantine) or
+        !settlement_contract.validEventReleaseLeafReceipt(begun.pin_receipt, .pin)) effectProofLoss();
+    const callback_count: u8 = begun.callback_returned_receipt.invocation_count;
+    const source_count: u8 = @intFromBool(
+        settlement_contract.validEventReleasePhaseReceipt(begun.owner_tombstone_receipt, .owner) and
+            settlement_contract.validEventReleasePhaseReceipt(begun.correlation_tombstone_receipt, .correlation) and
+            settlement_contract.validEventReleasePhaseReceipt(begun.mirror_tombstone_receipt, .mirror),
+    );
+    const post: settlement_contract.EventReleasePostProjection = .{
+        .registry_closed_digest = registry_receipt.seal,
+        .quarantine_closed_digest = quarantine_receipt.seal,
+        .pin_consumed_digest = begun.pin_receipt.seal,
+        .callback_invoked_digest = begun.callback_returned_receipt.seal,
+        .owner_tombstoned_digest = begun.owner_tombstone_receipt.seal,
+        .correlation_tombstoned_digest = begun.correlation_tombstone_receipt.seal,
+        .mirror_tombstoned_digest = begun.mirror_tombstone_receipt.seal,
+        .callback_invocation_count = callback_count,
+        .source_tombstone_count = source_count,
+    };
+    const post_transcript_digest = settlement_contract.eventReleasePostTranscriptDigest(permit_seal, post) orelse
+        effectProofLoss();
+    release_permit.consumed_raw = 1;
+    release_permit.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.consumed);
+    var completion: settlement_contract.EventReleaseCompletion = .{
+        .self_addr = @intFromPtr(completion_out),
+        .pid = release_permit.pid,
+        .process_nonce = release_permit.process_nonce,
+        .thread_id = release_permit.thread_id,
+        .pending_owner_addr = release_permit.pending_owner_addr,
+        .owner_incarnation = release_permit.pending_owner_incarnation,
+        .attempt = release_permit.attempt,
+        .event_generation = release_permit.event_generation,
+        .registry_incarnation = release_permit.registry_incarnation,
+        .binding_reservation_id = release_permit.binding_reservation_id,
+        .event_node_incarnation = release_permit.event_node_incarnation,
+        .stream_id = release_permit.stream_id,
+        .event_owner_addr = release_permit.event_owner_addr,
+        .source_lease_incarnation = release_permit.source_lease_incarnation,
+        .ordering_class_raw = release_permit.ordering_class_raw,
+        .release_receipt_digest = release_permit.release_receipt_digest,
+        .permit_digest = permit_seal,
+        .consumed_blocker_count = 1,
+        .freed_payload_count = 1,
+        .consumed_pin_count = 1,
+        .settled_quarantine_count = 1,
+        .post_transcript_digest = post_transcript_digest,
+    };
+    completion.authority_digest = settlement_contract.eventReleaseCompletionAuthorityDigest(completion);
+    completion.seal = settlement_contract.sealEventReleaseCompletion(completion) catch effectProofLoss();
+    const post_context: settlement_contract.EventReleasePostContext = .{
+        .registry_incarnation = release_permit.registry_incarnation,
+        .binding_reservation_id = release_permit.binding_reservation_id,
+        .event_node_incarnation = release_permit.event_node_incarnation,
+        .event_generation = release_permit.event_generation,
+        .event_owner_addr = release_permit.event_owner_addr,
+        .payload_len = release_permit.payload_len,
+        .permit_seal = permit_seal,
+        .begun_addr = @intFromPtr(begun),
+        .quarantine_slot_index = release_permit.quarantine_slot_index,
+        .quarantine_reservation_generation = release_permit.quarantine_reservation_generation,
+        .pin_owner_addr = release_permit.pin_owner_addr,
+        .lease_addr = release_permit.lease_addr,
+        .pin_node_incarnation = release_permit.pin_node_incarnation,
+        .pin_stream_id = release_permit.stream_id,
+        .pin_slot_addr = release_permit.slot_addr,
+        .pin_connection_generation = release_permit.connection_generation,
+        .owner_pre_seal = release_permit.event_owner_seal,
+        .correlation_pre_digest = begun.correlation_digest,
+        .mirror_pre_digest = settlement_contract.canonicalEventReleaseMirrorBeforeDigest(begun.event_generation),
+        .registry = registry_receipt,
+        .quarantine = quarantine_receipt,
+        .pin = begun.pin_receipt,
+        .owner = begun.owner_tombstone_receipt,
+        .correlation = begun.correlation_tombstone_receipt,
+        .mirror = begun.mirror_tombstone_receipt,
+        .callback = begun.callback_returned_receipt,
+    };
+    if (!settlement_contract.validEventReleasePostContext(post_context, post, completion)) effectProofLoss();
+    if (builtin.is_test) event_release_post_snapshot = .{
+        .permit_seal = permit_seal,
+        .post = post,
+        .transcript_digest = post_transcript_digest,
+        .completion = completion,
+        .context = post_context,
+    };
+    if (builtin.is_test and event_release_death_stage_raw != 0) writeEventReleaseDeathMarker(0x4A);
+    completion_out.* = completion;
+    completion_out.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.prepared);
+    advancePendingEventReleaseBegunNoFail(begun, .sources_settled, .finished);
+    endRegisteredNodeOperation(operation);
+}
+
+fn pinProjectionFromEventReleasePermit(
+    permit: *const settlement_contract.PreparedEventReleasePermit,
+) lease_mod.CanonicalPinProjection {
+    return .{
+        .pin_owner_addr = permit.pin_owner_addr,
+        .lease_addr = permit.lease_addr,
+        .slot_addr = permit.slot_addr,
+        .node_addr = permit.node_addr,
+        .slot_incarnation = permit.pin_slot_incarnation,
+        .node_incarnation = permit.pin_node_incarnation,
+        .host_id = permit.host_id,
+        .connection_generation = permit.connection_generation,
+        .stream_id = permit.stream_id,
+        .pid = permit.pid,
+        .process_nonce = permit.pin_process_nonce,
+    };
+}
+
+fn hashInt(hasher: *std.crypto.hash.Blake3, comptime T: type, value: T) void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn registryEventReleaseFromComposite(
+    permit: *const settlement_contract.PreparedEventReleasePermit,
+) cleanup_registry_mod.PreparedRegistryEventRelease {
+    return .{
+        .registry_addr = permit.registry_addr,
+        .registry_incarnation = permit.registry_incarnation,
+        .binding_reservation_id = permit.binding_reservation_id,
+        .entry_index = permit.entry_index,
+        .event_node_incarnation = permit.event_node_incarnation,
+        .stream_id = permit.stream_id,
+        .event_generation = permit.event_generation,
+        .event_owner_addr = permit.event_owner_addr,
+        .ordering_class_raw = permit.ordering_class_raw,
+        .expected_blocker_count = permit.expected_blocker_count,
+    };
+}
+
+test "C3-3b3 pending payload callback 중 동일 대상과 형제 release는 Busy이고 pristine이다" {
+    try std.testing.expectEqual(@as(usize, 0), pending_event_release_callback_binding.begun_addr);
+    pending_event_release_callback_binding.begun_addr = 0xC33B_3CB0;
+    defer pending_event_release_callback_binding = .{};
+    const owner_query = std.mem.zeroes(GenerationTransportOwnerQuery);
+    var same_out: PreparedGenerationEventRelease = .{};
+    var sibling_out: PreparedGenerationEventRelease = .{};
+    const projection: GenerationEventReleaseProjection = .{
+        .identity = undefined,
+        .owner_addr = 0xC33B_3CB1,
+        .self_addr = 0xC33B_3CB1,
+        .lease_projection = null,
+        .payload_addr = 0,
+        .payload_len = 0,
+        .wire_major = 0,
+        .admission_tag = 0,
+        .owner_seal = [_]u8{0} ** 32,
+        .valid = false,
+    };
+    try std.testing.expectError(error.Busy, prepareGenerationEventRelease(.{
+        .owner = owner_query,
+        .bound_stream_id = 1,
+        .event_owner_addr = projection.owner_addr,
+    }, .{}, projection, &same_out));
+    try std.testing.expectError(error.Busy, prepareGenerationEventRelease(.{
+        .owner = owner_query,
+        .bound_stream_id = 2,
+        .event_owner_addr = projection.owner_addr,
+    }, .{}, projection, &sibling_out));
+    try std.testing.expect(same_out.pristineExact());
+    try std.testing.expect(sibling_out.pristineExact());
+}
+
+test "C3-3b3 begun authority는 copied address와 unsealed phase를 거부한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const ready = try process_seal_service.currentReadyIdentity();
+    var begun: PendingEventReleaseBegun = .{
+        .self_addr = 0,
+        .pid = ready.pid,
+        .process_nonce = ready.process_nonce,
+        .thread_id = @intCast(std.Thread.getCurrentId()),
+        .effect_permit_addr = 0xC33B_3D01,
+        .release_permit_addr = 0xC33B_3D02,
+        .operation_id = 7,
+        .event_owner_addr = 0xC33B_3D03,
+        .event_generation = 11,
+        .pin_count_before = 1,
+        .correlation_digest = [_]u8{0x41} ** 32,
+        .effect_permit_seal = [_]u8{0x42} ** 32,
+        .release_permit_seal = [_]u8{0x43} ** 32,
+        .lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.prepared),
+    };
+    begun.self_addr = @intFromPtr(&begun);
+    begun.seal = pendingEventReleaseBegunSeal(begun);
+    try std.testing.expect(validPendingEventReleaseBegun(&begun));
+    var copied = begun;
+    try std.testing.expect(!validPendingEventReleaseBegun(&copied));
+    begun.lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned);
+    try std.testing.expect(!validPendingEventReleaseBegun(&begun));
+    begun.lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.prepared);
+    try std.testing.expect(validPendingEventReleaseBegun(&begun));
+    begun.owner_tombstone_receipt = try settlement_contract.makeEventReleasePhaseReceipt(
+        .owner,
+        @intFromEnum(PendingEventReleaseBegunLifecycle.prepared),
+        @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned),
+        begun.event_owner_addr,
+        begun.event_generation,
+        begun.self_addr,
+        [_]u8{0x51} ** 32,
+        settlement_contract.canonicalEventReleasePhaseAfterDigest(
+            .owner,
+            begun.self_addr,
+            begun.event_owner_addr,
+            begun.event_generation,
+            @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned),
+        ),
+        begun.release_permit_seal,
+        settlement_contract.zero_digest,
+    );
+    begun.seal = pendingEventReleaseBegunSeal(begun);
+    advancePendingEventReleaseBegunNoFail(&begun, .prepared, .owner_tombstoned);
+    try std.testing.expect(validPendingEventReleaseBegun(&begun));
+}
+
+test "C3-3b3 canonical effect plan은 닫힌 Client PRE matrix를 모두 검증한다" {
+    var client = fixtureClient(std.testing.allocator, 0xC33B_3001);
+    defer client.deinit();
+    client.fd = 17;
+
+    const none = try deriveCanonicalEffectPlan(&client, .{}, 41);
+    try std.testing.expectEqual(settlement_contract.EffectAction.none, @as(settlement_contract.EffectAction, @enumFromInt(none.action_raw)));
+
+    const poison_request: settlement_contract.EffectRequestProjection = .{
+        .tag_raw = @intFromEnum(settlement_contract.EffectRequestTag.poison),
+        .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(client_poison.ConnectionReason.local_resource_exhausted) },
+    };
+    const poison = try deriveCanonicalEffectPlan(&client, poison_request, 41);
+    try std.testing.expectEqual(settlement_contract.EffectAction.poison, @as(settlement_contract.EffectAction, @enumFromInt(poison.action_raw)));
+    try std.testing.expectEqual(@as(u8, 1), poison.unusable_after_raw);
+    try std.testing.expectEqual(@as(i32, -1), poison.fd_after);
+
+    const pending = try std.testing.allocator.dupe(u8, "pending-outbound");
+    client.pending_outbound = .{ .frame = pending, .stream_id = 99 };
+    const revoke_request: settlement_contract.EffectRequestProjection = .{
+        .tag_raw = @intFromEnum(settlement_contract.EffectRequestTag.revoke_fence),
+        .revoke_fence = 71,
+    };
+    const sibling = try deriveCanonicalEffectPlan(&client, revoke_request, 41);
+    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_clean, @as(settlement_contract.EffectAction, @enumFromInt(sibling.action_raw)));
+    try std.testing.expectEqual(settlement_contract.OutboundDisposition.preserved, @as(settlement_contract.OutboundDisposition, @enumFromInt(sibling.outbound_disposition_raw)));
+    const cancel = try deriveCanonicalEffectPlan(&client, revoke_request, 99);
+    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_cancel, @as(settlement_contract.EffectAction, @enumFromInt(cancel.action_raw)));
+    client.pending_outbound.?.offset = 1;
+    const partial = try deriveCanonicalEffectPlan(&client, revoke_request, 99);
+    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_partial_poison, @as(settlement_contract.EffectAction, @enumFromInt(partial.action_raw)));
+
+    client.unusable = true;
+    client.first_poison_reason = .connection_eof;
+    const terminal = try deriveCanonicalEffectPlan(&client, .{}, 41);
+    try std.testing.expectEqual(settlement_contract.EffectAction.terminal_cleanup, @as(settlement_contract.EffectAction, @enumFromInt(terminal.action_raw)));
+    try std.testing.expectEqual(settlement_contract.OutboundDisposition.freed, @as(settlement_contract.OutboundDisposition, @enumFromInt(terminal.outbound_disposition_raw)));
+    client.pending_outbound = null;
+    std.testing.allocator.free(pending);
+    client.fd = -1;
+}
+
+test "C3-3b3 canonical effect executor는 poison을 적용하고 exact 한 번 정리한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = fixtureClient(std.testing.allocator, 0xC33B_3002);
+    defer client.deinit();
+    client.fd = fds[0];
+    const pending = try std.testing.allocator.dupe(u8, "effect-executor-pending");
+    client.pending_outbound = .{ .frame = pending, .stream_id = 51 };
+    const request: settlement_contract.EffectRequestProjection = .{
+        .tag_raw = @intFromEnum(settlement_contract.EffectRequestTag.poison),
+        .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(client_poison.ConnectionReason.local_resource_exhausted) },
+    };
+    const plan = try deriveCanonicalEffectPlan(&client, request, 51);
+    executeCanonicalEffectPlanNoFail(&client, plan, 51);
+    try std.testing.expect(validateCanonicalEffectPoststate(plan, &client, 51));
+    try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expect(client.pending_outbound == null);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }
 
 fn mapGenerationRequestClientError(err: client_mod.PreparedBlockingRpcError) GenerationRequestError {

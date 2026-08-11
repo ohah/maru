@@ -4,13 +4,25 @@
 //! and reader fields now, while this slice permits only idle <-> exclusive preparation.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const seal_types = @import("event_cleanup_seal.zig");
 const process_seal = @import("process_seal_service.zig");
+const settlement = @import("pending_event_settlement_contract.zig");
 
 pub const State = enum(u8) { idle = 0, exclusive_active = 1, closing = 2 };
-pub const OperationKind = enum(u8) { none = 0, preparation = 1, close = 2 };
+pub const OperationKind = enum(u8) { none = 0, preparation = 1, close = 2, settlement = 3 };
 
 pub const AcquireError = error{ Busy, InvalidOwner };
+const SettlementContention = struct {
+    remaining: usize = 0,
+    fn consume(self: *SettlementContention) bool {
+        if (self.remaining == 0) return false;
+        self.remaining -= 1;
+        return true;
+    }
+};
+threadlocal var settlement_contention: if (builtin.is_test) SettlementContention else void =
+    if (builtin.is_test) .{} else {};
 
 pub const RuntimeOperationLease = struct {
     lifetime_owner_addr: u64 = 0,
@@ -44,6 +56,19 @@ pub const RuntimeOperationLease = struct {
     }
 };
 
+pub const RuntimeSettlementLease = struct {
+    self_addr: u64 = 0,
+    lifecycle_raw: u8 = 0,
+    reserved: [7]u8 = [_]u8{0} ** 7,
+    operation: RuntimeOperationLease = .{},
+    ranges_digest: settlement.Digest = settlement.zero_digest,
+    pristine_digest: settlement.Digest = settlement.zero_digest,
+    preflight_proof_seal_digest: settlement.Digest = settlement.zero_digest,
+    lease_seal: settlement.Digest = settlement.zero_digest,
+};
+
+const SettlementLifecycle = enum(u8) { pristine = 0, prepared = 1, admitted = 2, consumed = 3 };
+
 pub const RuntimeLifetimeOwner = struct {
     state_raw: u8 = 0,
     operation_kind_raw: u8 = 0,
@@ -61,6 +86,11 @@ pub const RuntimeLifetimeOwner = struct {
     active_operation_incarnation: u64 = 0,
     close_generation: u64 = 0,
     operation_seal: seal_types.CleanupSeal = [_]u8{0} ** 32,
+
+    pub fn currentProcessDomainMatches(self: *const RuntimeLifetimeOwner) bool {
+        return self.pid == process_seal.currentProcessId() and
+            self.thread_id == @as(u64, @intCast(std.Thread.getCurrentId()));
+    }
 
     pub fn initInPlace(
         self: *RuntimeLifetimeOwner,
@@ -154,6 +184,142 @@ pub const RuntimeLifetimeOwner = struct {
             process_seal.fatalIntegrity(.invalid_runtime_lifetime);
     }
 
+    pub fn acquireSettlement(
+        self: *RuntimeLifetimeOwner,
+        out: *RuntimeSettlementLease,
+        proof: settlement.SettlementScratchPreflightProof,
+    ) AcquireError!settlement.RuntimeSettlementLeaseBinding {
+        if (builtin.is_test and settlement_contention.consume()) return error.Busy;
+        if (!self.validRawAndSeal() or !settlementLeasePristine(out) or
+            !settlement.validScratchPreflightProof(proof) or proof.pid != self.pid or
+            proof.process_nonce != self.process_nonce or proof.thread_id != self.thread_id)
+            return error.InvalidOwner;
+        if (self.state_raw != @intFromEnum(State.idle)) return error.Busy;
+        const incarnation = self.next_operation_incarnation;
+        if (incarnation == 0 or incarnation == std.math.maxInt(u64))
+            process_seal.fatalIntegrity(.counter_exhausted);
+
+        self.next_operation_incarnation = incarnation + 1;
+        self.active_operation_incarnation = incarnation;
+        self.state_raw = @intFromEnum(State.exclusive_active);
+        self.operation_kind_raw = @intFromEnum(OperationKind.settlement);
+        self.operation_seal = process_seal.pendingOperationSeal(
+            self.pid,
+            self.process_nonce,
+            self.sealInput(),
+        ) catch process_seal.fatalIntegrity(.invalid_runtime_lifetime);
+
+        out.self_addr = @intFromPtr(out);
+        out.operation = self.operationReceipt(incarnation, .settlement);
+        out.ranges_digest = proof.ranges_digest;
+        out.pristine_digest = proof.pristine_digest;
+        out.preflight_proof_seal_digest = digestValue(proof.proof_seal);
+        out.lease_seal = settlement.sealRuntimeSettlementLease(
+            self.pid,
+            self.process_nonce,
+            out.self_addr,
+            @sizeOf(RuntimeSettlementLease),
+            @alignOf(RuntimeSettlementLease),
+            out.operation.identity(),
+            out.ranges_digest,
+            out.pristine_digest,
+            out.preflight_proof_seal_digest,
+        ) catch process_seal.fatalIntegrity(.invalid_runtime_lifetime);
+        out.lifecycle_raw = @intFromEnum(SettlementLifecycle.prepared);
+
+        var binding: settlement.RuntimeSettlementLeaseBinding = .{
+            .lease_addr = out.self_addr,
+            .lifetime_owner_addr = self.self_addr,
+            .operation_identity = out.operation.identity(),
+            .ranges_digest = out.ranges_digest,
+            .pristine_digest = out.pristine_digest,
+            .preflight_proof_seal_digest = out.preflight_proof_seal_digest,
+            .lease_seal_digest = digestValue(out.lease_seal),
+        };
+        binding.binding_seal = settlement.sealRuntimeSettlementBinding(binding) catch
+            process_seal.fatalIntegrity(.invalid_runtime_lifetime);
+        return binding;
+    }
+
+    pub fn abortSettlementPreAdmissionNoFail(self: *RuntimeLifetimeOwner, lease: *RuntimeSettlementLease) void {
+        self.finishSettlement(lease, .prepared);
+    }
+
+    pub fn consumeSettlementNoFail(self: *RuntimeLifetimeOwner, lease: *RuntimeSettlementLease) void {
+        self.finishSettlement(lease, .admitted);
+    }
+
+    pub fn validateSettlement(self: *const RuntimeLifetimeOwner, lease: *const RuntimeSettlementLease) bool {
+        return self.validateSettlementAtLifecycle(lease, .prepared);
+    }
+
+    pub fn validatePreparedSettlementBinding(
+        self: *const RuntimeLifetimeOwner,
+        lease: *const RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+    ) bool {
+        return self.validateSettlementBindingAtLifecycle(lease, binding, .prepared);
+    }
+
+    pub fn admitSettlementNoFail(
+        self: *RuntimeLifetimeOwner,
+        lease: *RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+    ) void {
+        if (!self.validateSettlementBindingAtLifecycle(lease, binding, .prepared))
+            process_seal.fatalIntegrity(.invalid_runtime_lifetime);
+        lease.lifecycle_raw = @intFromEnum(SettlementLifecycle.admitted);
+    }
+
+    pub fn validateAdmittedSettlementBinding(
+        self: *const RuntimeLifetimeOwner,
+        lease: *const RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+    ) bool {
+        return self.validateSettlementBindingAtLifecycle(lease, binding, .admitted);
+    }
+
+    fn validateSettlementAtLifecycle(
+        self: *const RuntimeLifetimeOwner,
+        lease: *const RuntimeSettlementLease,
+        lifecycle: SettlementLifecycle,
+    ) bool {
+        if (!self.validRawAndSeal() or lease.self_addr != @intFromPtr(lease) or
+            lease.lifecycle_raw != @intFromEnum(lifecycle) or
+            !std.mem.allEqual(u8, &lease.reserved, 0) or lease.operation.consumed_raw != 0 or
+            !std.mem.allEqual(u8, &lease.operation.reserved, 0) or
+            self.operation_kind_raw != @intFromEnum(OperationKind.settlement) or
+            !operationReceiptMatches(self, &lease.operation, .settlement)) return false;
+        const expected = settlement.sealRuntimeSettlementLease(
+            self.pid,
+            self.process_nonce,
+            lease.self_addr,
+            @sizeOf(RuntimeSettlementLease),
+            @alignOf(RuntimeSettlementLease),
+            lease.operation.identity(),
+            lease.ranges_digest,
+            lease.pristine_digest,
+            lease.preflight_proof_seal_digest,
+        ) catch return false;
+        return std.crypto.timing_safe.eql(settlement.Digest, expected, lease.lease_seal);
+    }
+
+    fn validateSettlementBindingAtLifecycle(
+        self: *const RuntimeLifetimeOwner,
+        lease: *const RuntimeSettlementLease,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        lifecycle: SettlementLifecycle,
+    ) bool {
+        if (!self.validateSettlementAtLifecycle(lease, lifecycle) or
+            !settlement.validRuntimeSettlementBinding(binding)) return false;
+        return binding.lease_addr == lease.self_addr and binding.lifetime_owner_addr == self.self_addr and
+            std.meta.eql(binding.operation_identity, lease.operation.identity()) and
+            std.crypto.timing_safe.eql(settlement.Digest, binding.ranges_digest, lease.ranges_digest) and
+            std.crypto.timing_safe.eql(settlement.Digest, binding.pristine_digest, lease.pristine_digest) and
+            std.crypto.timing_safe.eql(settlement.Digest, binding.preflight_proof_seal_digest, lease.preflight_proof_seal_digest) and
+            std.crypto.timing_safe.eql(settlement.Digest, binding.lease_seal_digest, digestValue(lease.lease_seal));
+    }
+
     pub fn validateAfterCallback(
         self: *const RuntimeLifetimeOwner,
         lease: *const RuntimeOperationLease,
@@ -196,6 +362,44 @@ pub const RuntimeLifetimeOwner = struct {
         lease.consumed_raw = 1;
     }
 
+    fn finishSettlement(
+        self: *RuntimeLifetimeOwner,
+        lease: *RuntimeSettlementLease,
+        lifecycle: SettlementLifecycle,
+    ) void {
+        if (!self.validateSettlementAtLifecycle(lease, lifecycle))
+            process_seal.fatalIntegrity(.invalid_runtime_lifetime);
+        self.finishOperation(&lease.operation);
+        lease.lifecycle_raw = @intFromEnum(SettlementLifecycle.consumed);
+    }
+
+    fn finishOperation(self: *RuntimeLifetimeOwner, lease: *RuntimeOperationLease) void {
+        self.state_raw = @intFromEnum(State.idle);
+        self.operation_kind_raw = @intFromEnum(OperationKind.none);
+        self.active_operation_incarnation = 0;
+        self.operation_seal = process_seal.pendingOperationSeal(
+            self.pid,
+            self.process_nonce,
+            self.sealInput(),
+        ) catch process_seal.fatalIntegrity(.invalid_runtime_lifetime);
+        lease.consumed_raw = 1;
+    }
+
+    fn operationReceipt(self: *const RuntimeLifetimeOwner, incarnation: u64, kind: OperationKind) RuntimeOperationLease {
+        return .{
+            .lifetime_owner_addr = self.self_addr,
+            .runtime_addr = self.runtime_addr,
+            .pending_owner_addr = self.pending_owner_addr,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .thread_id = self.thread_id,
+            .owner_incarnation = self.owner_incarnation,
+            .operation_incarnation = incarnation,
+            .operation_kind_raw = @intFromEnum(kind),
+            .operation_seal = self.operation_seal,
+        };
+    }
+
     fn pristine(self: *const RuntimeLifetimeOwner) bool {
         // Do not inspect struct padding: it is not semantic state and may be undefined.
         return self.state_raw == 0 and self.operation_kind_raw == 0 and self.reader_count == 0 and
@@ -235,10 +439,14 @@ pub const RuntimeLifetimeOwner = struct {
             self.owner_incarnation == 0 or self.next_operation_incarnation == 0 or
             self.reserved_pid != 0 or !std.mem.allEqual(u8, &self.reserved, 0) or
             self.reader_count != 0 or self.close_generation != 0 or self.state_raw > 2 or
-            self.operation_kind_raw > 2) return false;
+            self.operation_kind_raw > 3) return false;
         const shape_ok = (self.state_raw == 0 and self.operation_kind_raw == 0 and self.active_operation_incarnation == 0) or
-            (self.state_raw == 1 and self.operation_kind_raw == 1 and self.active_operation_incarnation != 0);
-        if (!shape_ok) return false; // closing/close remain dormant in b2b3.
+            (self.state_raw == 1 and
+                (self.operation_kind_raw == @intFromEnum(OperationKind.preparation) or
+                    self.operation_kind_raw == @intFromEnum(OperationKind.settlement)) and
+                self.active_operation_incarnation != 0);
+        // 이 owner는 closing/close를 authorize하지 못하며 이후 lifecycle owner가 따로 mint해야 한다.
+        if (!shape_ok) return false;
         const expected = process_seal.pendingOperationSeal(
             self.pid,
             self.process_nonce,
@@ -258,6 +466,13 @@ pub const RuntimeLifetimeOwner = struct {
     }
 };
 
+pub const testing = if (builtin.is_test) struct {
+    pub fn armSettlementContention(count: usize) void {
+        if (settlement_contention.remaining != 0) @panic("settlement contention seam replayed");
+        settlement_contention.remaining = count;
+    }
+} else struct {};
+
 fn preflightMatches(owner: *const RuntimeLifetimeOwner, value: seal_types.RuntimeOperationPreflight) bool {
     return value.lifetime_owner_addr == owner.self_addr and value.runtime_addr == owner.runtime_addr and
         value.pending_owner_addr == owner.pending_owner_addr and value.pid == owner.pid and
@@ -265,6 +480,41 @@ fn preflightMatches(owner: *const RuntimeLifetimeOwner, value: seal_types.Runtim
         value.thread_id == owner.thread_id and value.owner_incarnation == owner.owner_incarnation and
         value.expected_next_operation == owner.next_operation_incarnation and
         std.crypto.timing_safe.eql(seal_types.CleanupSeal, value.expected_operation_seal, owner.operation_seal);
+}
+
+fn settlementLeasePristine(lease: *const RuntimeSettlementLease) bool {
+    return lease.self_addr == 0 and lease.lifecycle_raw == 0 and
+        std.mem.allEqual(u8, &lease.reserved, 0) and
+        std.meta.eql(lease.operation, RuntimeOperationLease{}) and
+        std.mem.allEqual(u8, &lease.ranges_digest, 0) and
+        std.mem.allEqual(u8, &lease.pristine_digest, 0) and
+        std.mem.allEqual(u8, &lease.preflight_proof_seal_digest, 0) and
+        std.mem.allEqual(u8, &lease.lease_seal, 0);
+}
+
+fn operationReceiptMatches(
+    owner: *const RuntimeLifetimeOwner,
+    lease: *const RuntimeOperationLease,
+    kind: OperationKind,
+) bool {
+    return process_seal.currentProcessId() == lease.pid and
+        owner.state_raw == @intFromEnum(State.exclusive_active) and
+        lease.lifetime_owner_addr == owner.self_addr and lease.runtime_addr == owner.runtime_addr and
+        lease.pending_owner_addr == owner.pending_owner_addr and lease.pid == owner.pid and
+        lease.reserved_pid == 0 and lease.process_nonce == owner.process_nonce and
+        lease.thread_id == owner.thread_id and lease.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and
+        lease.owner_incarnation == owner.owner_incarnation and
+        lease.operation_incarnation == owner.active_operation_incarnation and
+        lease.operation_kind_raw == @intFromEnum(kind) and lease.operation_kind_raw == owner.operation_kind_raw and
+        std.crypto.timing_safe.eql(seal_types.CleanupSeal, lease.operation_seal, owner.operation_seal);
+}
+
+fn digestValue(value: settlement.Digest) settlement.Digest {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update(&value);
+    var result: settlement.Digest = undefined;
+    hasher.final(&result);
+    return result;
 }
 
 comptime {

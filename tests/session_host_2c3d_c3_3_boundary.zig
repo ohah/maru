@@ -27,10 +27,11 @@ test "CR3a-2c3d C3-3 confirmed poison boundary" {
     const confirmed = between(
         slot,
         "pub fn poisonGenerationConnection(",
-        "fn mapGenerationRequestClientError(",
+        "fn reasonProjection(",
     ) orelse return error.TestExpectedEqual;
 
-    try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
+    // C3-3b3 settlement이 추가한 product owner API 13개를 별도 테스트 facade와 섞지 않고 고정한다.
+    try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
     try std.testing.expectEqual(
         @as(usize, 1),
         count(poison, "client_slot_mod.poisonGenerationConnection("),

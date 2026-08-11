@@ -573,7 +573,9 @@ pub fn settlePendingEvent(
     var pending_permit: contract.PreparedPendingSettlementPermit = .{};
     var begun: generation_transport.PendingEventReleaseBegun = .{};
     var replaced_payload: ?[]u8 = null;
-    defer if (replaced_payload) |payload| attachment_mod.testing_api.restoreEventPayload(attachment, payload);
+    defer if (builtin.is_test) {
+        if (replaced_payload) |payload| attachment_mod.testing_api.restoreEventPayload(attachment, payload);
+    };
     if (builtin.is_test) if (settlement_alias_injection) |injection| {
         const inventory = try settlementScratchInventory(
             &lease_out,

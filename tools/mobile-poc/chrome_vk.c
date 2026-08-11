@@ -22,7 +22,8 @@ typedef struct {
 extern unsigned int maru_chrome_build(unsigned int width, unsigned int height);
 extern const CQuad *maru_chrome_quads(void);
 extern const char *maru_chrome_last_error(void);
-extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row);
+extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row, unsigned int advance);
+extern void maru_atlas_geometry(unsigned int cell_w, unsigned int cell_h);
 extern unsigned int maru_icon_build(void);
 extern const unsigned char *maru_icon_atlas(void);
 extern unsigned int maru_icon_slot_px(void);
@@ -58,10 +59,11 @@ static void loadAtlas(const char *dir) {
     uint32_t cw, ch, n;
     if (fscanf(f, "%u %u %u %u %u", &g_gw, &g_gh, &cw, &ch, &n) != 5) { fclose(f); return; }
     g_cols = g_gw / cw; g_rows = g_gh / ch;
+    maru_atlas_geometry(cw, ch);
     for (uint32_t i = 0; i < n; i++) {
-        uint32_t cp, col, row;
-        if (fscanf(f, "%u %u %u", &cp, &col, &row) != 3) break;
-        maru_atlas_add(cp, col, row);
+        uint32_t cp, col, row, adv;
+        if (fscanf(f, "%u %u %u %u", &cp, &col, &row, &adv) != 4) break;
+        maru_atlas_add(cp, col, row, adv);
     }
     fclose(f);
     FILE *g = fopen(p2, "rb");

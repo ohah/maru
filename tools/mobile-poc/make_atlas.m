@@ -50,6 +50,8 @@ int main(int argc, char **argv) {
         char idxPath[512];
         snprintf(idxPath, sizeof idxPath, "%s/atlas.idx", outDir);
         idx = fopen(idxPath, "w");
+        // 셀 크기 + 글자 수. 각 줄은 `cp col row advance_px` — **advance 가 있어야 자간이 맞는다**
+        // (셀 폭을 그대로 쓰면 영문이 24px 칸에 갇혀 자간이 벌어진다. 실측으로 드러났다).
         fprintf(idx, "%lu %lu %d %d %lu\n", (unsigned long)W, (unsigned long)H, CELL_W, CELL_H, (unsigned long)n);
 
         for (NSUInteger i = 0; i < n; i++) {
@@ -62,9 +64,14 @@ int main(int argc, char **argv) {
                 font = korean;
                 CTFontGetGlyphsForCharacters(font, &c, &glyph, 1);
             }
-            CGPoint pos = CGPointMake(col * CELL_W + 2, H - (row + 1) * CELL_H + 8);
+            CGPoint pos = CGPointMake(col * CELL_W + 1, H - (row + 1) * CELL_H + 8);
             if (glyph) CTFontDrawGlyphs(font, &glyph, &pos, 1, ctx);
-            fprintf(idx, "%u %lu %lu\n", (unsigned)c, (unsigned long)col, (unsigned long)row);
+            // 폰트가 알려주는 실제 진행 폭. 이 값으로 다음 글자 위치를 정해야 자간이 자연스럽다.
+            CGSize adv = CGSizeZero;
+            if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+            int advance = (int)(adv.width + 0.5);
+            if (advance <= 0) advance = CELL_W / 2;
+            fprintf(idx, "%u %lu %lu %d\n", (unsigned)c, (unsigned long)col, (unsigned long)row, advance);
         }
         fclose(idx);
 

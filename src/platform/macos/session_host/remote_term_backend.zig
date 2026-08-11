@@ -48,6 +48,11 @@ const HostAdapter = host_adapter_mod.HostAdapter;
 const AdapterPool = host_pool_mod.HostPool(HostAdapter);
 pub const max_remote_backend_runtimes: usize = 4096;
 
+const B5TestState = if (builtin.is_test) struct {
+    threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
+    threadlocal var skip_destroy: bool = false;
+} else struct {};
+
 pub const RuntimeAdmissionReservation = struct {
     self_addr: u64 = 0,
     backend_addr: u64 = 0,
@@ -157,6 +162,7 @@ pub const RemoteTermBackend = struct {
     const DestroyMode = enum { terminate, detach };
 
     fn destroyRuntimeEntry(self: *RemoteTermBackend, handle: RuntimeHandle, entry: RuntimeEntry, mode: DestroyMode) void {
+        if (builtin.is_test and B5TestState.skip_destroy) return;
         self.surface_runtime.detachSurface(handle);
         switch (mode) {
             .terminate => entry.runtime.deinit(),
@@ -253,6 +259,9 @@ pub const RemoteTermBackend = struct {
                 };
                 receipt_count += 1;
             }
+        }
+        if (builtin.is_test) {
+            if (B5TestState.scan_hook) |hook| hook(self);
         }
         var selected: [16]close_contract.CloseScanReceipt = undefined;
         const selected_count = close_contract.selectCloseSweep(&self.close_sweep, receipts[0..receipt_count], &selected);
@@ -978,6 +987,136 @@ fn addOwnedClient(pool: *AdapterPool, allocator: std.mem.Allocator, source: *cli
     const host_id = adapter.hostId();
     try pool.addOwned(host_id, adapter);
     return host_id;
+}
+
+fn b5TestBackend(allocator: std.mem.Allocator) RemoteTermBackend {
+    return .{
+        .allocator = allocator,
+        .io = testing.io,
+        .client = null,
+        .surface_runtime = @ptrFromInt(@alignOf(SurfaceRuntime)),
+    };
+}
+
+fn b5FillSyntheticRows(backend_value: *RemoteTermBackend, count_value: usize) !void {
+    const runtime_ptr: *RemoteRuntime = @ptrFromInt(@alignOf(RemoteRuntime));
+    for (0..count_value) |index| {
+        try backend_value.runtimes.put(backend_value.allocator, @intCast(index + 1), .{
+            .runtime = runtime_ptr,
+            .host_id = if (index % 2 == 0) 11 else 22,
+            .runtime_generation = @intCast(index + 1),
+        });
+    }
+}
+
+test "C3-3b5 remote backend는 두 host 합계 runtime 4096개만 허용한다" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    try b5FillSyntheticRows(&backend_value, max_remote_backend_runtimes);
+    try testing.expectEqual(@as(usize, max_remote_backend_runtimes), backend_value.runtimes.count());
+    var reservation: RuntimeAdmissionReservation = .{};
+    try testing.expectError(error.ResourceExhausted, backend_value.reserveRuntimeAdmission(&reservation));
+    try testing.expectEqual(RuntimeAdmissionReservation{}, reservation);
+}
+
+test "C3-3b5 remote backend는 4097번째를 allocator와 host RPC 전에 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    try b5FillSyntheticRows(&backend_value, max_remote_backend_runtimes);
+    const generation_before = backend_value.next_admission_generation;
+    var reservation: RuntimeAdmissionReservation = .{};
+    try testing.expectError(error.ResourceExhausted, backend_value.reserveRuntimeAdmission(&reservation));
+    try testing.expectEqual(generation_before, backend_value.next_admission_generation);
+    try testing.expectEqual(@as(usize, 0), backend_value.reserved_runtime_count);
+}
+
+test "C3-3b5 remote backend는 spawn 실패 reservation을 회수해 capacity를 재사용한다" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const size: maru.terminal.Size = .{ .cols = 10, .rows = 4 };
+    try testing.expectError(error.HostNotFound, backend_value.backend().spawn(.{
+        .handle = 1,
+        .request = .{ .command = "/bin/true", .size = size },
+        .size = size,
+        .queue_capacity = 1,
+    }));
+    try testing.expectEqual(@as(usize, 0), backend_value.reserved_runtime_count);
+    var reservation: RuntimeAdmissionReservation = .{};
+    try backend_value.reserveRuntimeAdmission(&reservation);
+    backend_value.abortRuntimeAdmission(&reservation);
+}
+
+test "C3-3b5 remote backend는 attach와 restore 실패 reservation을 회수해 capacity를 재사용한다" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    try testing.expectError(error.HostNotFound, backend_value.attachTermOnHost(9, 1, [_]u8{'0'} ** 32, .{ .cols = 10, .rows = 4 }));
+    try testing.expectEqual(@as(usize, 0), backend_value.reserved_runtime_count);
+    var reservation: RuntimeAdmissionReservation = .{};
+    try backend_value.reserveRuntimeAdmission(&reservation);
+    backend_value.abortRuntimeAdmission(&reservation);
+}
+
+test "C3-3b5 remote backend scan scratch는 256 KiB 이하이고 callback allocation이 없다" {
+    try testing.expect(@sizeOf(close_contract.CloseScanReceipt) * max_remote_backend_runtimes <= 256 * 1024);
+    var fixed_storage: [1]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_storage);
+    var backend_value = b5TestBackend(fixed.allocator());
+    const before = fixed.end_index;
+    const stats = backend_value.maintenanceCloseTick();
+    try testing.expectEqual(before, fixed.end_index);
+    try testing.expectEqual(CloseMaintenanceStats{}, stats);
+}
+
+test "C3-3b5 remote backend는 iterator를 닫은 뒤에만 relookup과 callback을 수행한다" {
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const Hook = struct {
+        fn run(target: *RemoteTermBackend) void {
+            b5FillSyntheticRows(target, 1) catch @panic("scan hook insertion failed");
+        }
+    };
+    B5TestState.scan_hook = Hook.run;
+    defer B5TestState.scan_hook = null;
+    const stats = backend_value.maintenanceCloseTick();
+    try testing.expectEqual(@as(usize, 0), stats.visited_count);
+    try testing.expectEqual(@as(usize, 1), backend_value.runtimes.count());
+}
+
+test "C3-3b5 remote backend는 active pin 제거를 보류하고 다음 tick에 exact once 회수한다" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const runtime_ptr = try testing.allocator.create(RemoteRuntime);
+    defer testing.allocator.destroy(runtime_ptr);
+    runtime_ptr.close_authority = .{};
+    try close_authority.prepareCurrent(&runtime_ptr.close_authority, .{
+        .runtime_addr = @intFromPtr(runtime_ptr),
+        .handle = 7,
+        .runtime_generation = 1,
+        .host_id = 9,
+        .close_request_generation = 1,
+        .close_schedule_ticket = 1,
+        .request_kind = .finish_after_termination,
+        .disposition = .terminate_host,
+    });
+    try close_authority.advance(&runtime_ptr.close_authority, .open, .routing_tombstoned);
+    try close_authority.advance(&runtime_ptr.close_authority, .routing_tombstoned, .settling);
+    try testing.expect(try close_authority.publishReadyRemove(&runtime_ptr.close_authority, true));
+    try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = runtime_ptr, .host_id = 9, .runtime_generation = 1 });
+    backend_value.close_operation_owner.active = true;
+    try testing.expectEqual(term_backend.RemoveProgress.event_pending, RemoteTermBackend.remove(&backend_value, 7));
+    try testing.expect(backend_value.runtimes.contains(7));
+    backend_value.close_operation_owner = .{};
+    B5TestState.skip_destroy = true;
+    defer B5TestState.skip_destroy = false;
+    const stats = backend_value.maintenanceCloseTick();
+    try testing.expectEqual(@as(usize, 1), stats.removed_count);
+    try testing.expect(!backend_value.runtimes.contains(7));
+    try testing.expectEqual(@as(usize, 0), backend_value.maintenanceCloseTick().removed_count);
 }
 
 test "remote term backend: drives a real host runtime through the TermRuntimeBackend contract" {

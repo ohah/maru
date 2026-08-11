@@ -2614,11 +2614,17 @@ pub fn build(b: *std.Build) void {
             .{ "C3-3b5 close readiness", 6 },
             .{ "C3-3b5 close authority", 8 },
             .{ "C3-3b5 close sweep", 8 },
-            .{ "C3-3b5 remote backend", 7 },
             .{ "C3-3b5 AppSession", 4 },
         }) |entry| {
             B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_module, entry[0], entry[1]);
         }
+        const event_c3_3b5_remote_backend_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_remote_backend_module, "C3-3b5 remote backend", 7);
 
         const event_c3_3b5_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

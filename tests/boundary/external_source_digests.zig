@@ -242,7 +242,7 @@ pub const inventory = [_]Proof{
     // file-panel.md 분할로 주석 여섯 곳의 단일 출처 경로가 바뀌어 움직였다(§2.2·§2.6 → file-panel-kinds.md,
     // §2.3·§2.4 → file-panel-web-stack.md, §2.5 → file-panel-rich-edit.md, §3.4 → file-panel-dock-ui.md).
     // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3437701c10a47e930bb7308b11384103c22c65090029b1d24bed2e688eea3d3f" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b5eb6d34e438b80a3bd4757fc70e67133436dc195b368c7cfcc626a1ffff9a05" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -263,7 +263,7 @@ pub const inventory = [_]Proof{
     .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "4301cca35ff96464f4fcf2279c708920776acc5cdb2539bc5d7bc6d6bb5a0ce6" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "76d735b5c05625096e34dad6f9523d1fc286f9848ca4eccc4baee69693c40bdf" },
     // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.

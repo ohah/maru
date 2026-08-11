@@ -1,7 +1,8 @@
 const std = @import("std");
 const maru = @import("maru");
-const close_contract = @import("close_contract");
-const pending_owner = @import("pending_owner");
+const close_authority = @import("close_authority");
+const close_contract = close_authority.contract;
+const pending_owner = close_authority.pending_owner;
 
 fn red() !void {
     return error.C3B5NotImplemented;
@@ -95,28 +96,109 @@ test "C3-3b5 close readiness invalid raw는 전용 fatal leaf로 닫힌다" {
 }
 
 test "C3-3b5 close authority는 final address copy와 move를 거부한다" {
-    try red();
+    var authority: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&authority, .close_and_detach, .terminate_host, 1);
+    try std.testing.expect(close_authority.valid(&authority));
+    var copied = authority;
+    try std.testing.expect(!close_authority.valid(&copied));
 }
 test "C3-3b5 close authority는 old request generation과 replay를 mutation 0으로 거부한다" {
-    try red();
+    var authority: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&authority, .close_and_detach, .terminate_host, 2);
+    const old_state = authority.state_seal;
+    try close_authority.advance(&authority, .open, .routing_tombstoned);
+    authority.state_seal = old_state;
+    try std.testing.expect(!close_authority.valid(&authority));
+    var occupied = authority;
+    try std.testing.expectError(error.InvalidOwner, prepareCloseAuthority(&occupied, .close_and_detach, .terminate_host, 3));
 }
 test "C3-3b5 close authority는 request kind와 disposition 조합만 허용한다" {
-    try red();
+    var valid_close: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&valid_close, .close_and_detach, .terminate_host, 4);
+    var invalid_close: close_authority.CloseAuthority = .{};
+    try std.testing.expectError(error.InvalidRequest, prepareCloseAuthority(&invalid_close, .close_and_detach, .detach_preserve_host, 5));
+    var rollback: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&rollback, .close_without_routing, .detach_preserve_host, 6);
+    var terminated: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&terminated, .finish_after_termination, .terminate_host, 7);
 }
 test "C3-3b5 close authority는 ticket 0과 exhaustion을 publication 전에 거부한다" {
-    try red();
+    var authority: close_authority.CloseAuthority = .{};
+    const ready = try close_authority.testing.ensureSealReady();
+    try std.testing.expectError(error.InvalidRequest, close_authority.prepare(&authority, ready, closeParams(.close_and_detach, .terminate_host, 8, 0)));
+    try std.testing.expectEqual(close_authority.CloseAuthority{}, authority);
+    var issuer: close_contract.CloseTicketIssuer = .{ .last_issued = std.math.maxInt(u64) - 1 };
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), issuer.issue());
+    try std.testing.expect(issuer.issue() == null);
 }
 test "C3-3b5 close authority는 routing을 먼저 tombstone하고 callback 재진입을 보류한다" {
-    try red();
+    var authority: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&authority, .close_and_detach, .terminate_host, 9);
+    try close_authority.advance(&authority, .open, .routing_tombstoned);
+    var owner: close_authority.CloseOperationOwner = .{};
+    var pin: close_authority.CloseOperationPin = .{};
+    try close_authority.acquirePin(&owner, &pin, 0xB500, &authority);
+    var nested: close_authority.CloseOperationPin = .{};
+    try std.testing.expectError(error.Busy, close_authority.acquirePin(&owner, &nested, 0xB500, &authority));
+    try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.routing_tombstoned), authority.lifecycle_raw);
 }
 test "C3-3b5 close authority operation pin은 same target과 cross target 재진입을 보류하고 exact once 해제된다" {
-    try red();
+    var first: close_authority.CloseAuthority = .{};
+    var second: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&first, .close_and_detach, .terminate_host, 10);
+    try prepareCloseAuthority(&second, .close_and_detach, .terminate_host, 11);
+    var owner: close_authority.CloseOperationOwner = .{};
+    var pin: close_authority.CloseOperationPin = .{};
+    try close_authority.acquirePin(&owner, &pin, 0xB501, &first);
+    var same: close_authority.CloseOperationPin = .{};
+    var cross: close_authority.CloseOperationPin = .{};
+    try std.testing.expectError(error.Busy, close_authority.acquirePin(&owner, &same, 0xB501, &first));
+    try std.testing.expectError(error.Busy, close_authority.acquirePin(&owner, &cross, 0xB501, &second));
+    try close_authority.consumePin(&owner, &pin, &first);
+    try std.testing.expectError(error.InvalidOwner, close_authority.consumePin(&owner, &pin, &first));
 }
 test "C3-3b5 close authority는 pending readiness와 shutdown outcome 뒤에만 ready_remove가 된다" {
-    try red();
+    var authority: close_authority.CloseAuthority = .{};
+    try prepareCloseAuthority(&authority, .close_and_detach, .terminate_host, 12);
+    try close_authority.advance(&authority, .open, .routing_tombstoned);
+    try close_authority.advance(&authority, .routing_tombstoned, .settling);
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.prepared)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, try close_authority.publishReadyRemove(&authority, .event_pending));
+    try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.settling), authority.lifecycle_raw);
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.idle)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, try close_authority.publishReadyRemove(&authority, .complete));
+    try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.ready_remove), authority.lifecycle_raw);
 }
 test "C3-3b5 close authority receipt는 backend absence를 증명하며 exact once 소비된다" {
     try red();
+}
+
+fn closeParams(
+    kind: close_authority.CloseRequestKind,
+    disposition: close_authority.CloseDisposition,
+    request_generation: u64,
+    ticket: u64,
+) close_authority.PrepareParams {
+    return .{
+        .runtime_addr = 0xCAFE_0000 + request_generation,
+        .handle = 100 + request_generation,
+        .runtime_generation = 40 + request_generation,
+        .host_id = 0xB5,
+        .close_request_generation = request_generation,
+        .close_schedule_ticket = ticket,
+        .request_kind = kind,
+        .disposition = disposition,
+    };
+}
+
+fn prepareCloseAuthority(
+    authority: *close_authority.CloseAuthority,
+    kind: close_authority.CloseRequestKind,
+    disposition: close_authority.CloseDisposition,
+    request_generation: u64,
+) !void {
+    const ready = try close_authority.testing.ensureSealReady();
+    return close_authority.prepare(authority, ready, closeParams(kind, disposition, request_generation, request_generation));
 }
 
 test "C3-3b5 close sweep은 empty와 closing 0에서 inactive다" {

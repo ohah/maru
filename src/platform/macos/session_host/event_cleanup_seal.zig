@@ -11,6 +11,42 @@ const decision_seal = @import("runtime_prepared_decision_seal.zig");
 pub const CleanupSeal = [32]u8;
 pub const Digest = [32]u8;
 
+pub const CloseAuthorityIdentitySealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    runtime_addr: u64,
+    handle: u64,
+    runtime_generation: u64,
+    host_id: u128,
+    close_request_generation: u64,
+    close_schedule_ticket: u64,
+    request_kind_raw: u8,
+    disposition_raw: u8,
+};
+
+pub const CloseAuthorityStateSealInput = struct {
+    self_addr: u64,
+    state_generation: u64,
+    lifecycle_raw: u8,
+    identity_seal: CleanupSeal,
+};
+
+pub const CloseOperationPinSealInput = struct {
+    self_addr: u64,
+    backend_addr: u64,
+    thread_id: u64,
+    operation_generation: u64,
+    handle: u64,
+    runtime_addr: u64,
+    runtime_generation: u64,
+    close_request_generation: u64,
+    close_schedule_ticket: u64,
+    expected_state_generation: u64,
+    expected_lifecycle_raw: u8,
+    lifecycle_raw: u8,
+    identity_seal: CleanupSeal,
+};
+
 /// Stable event identity copied from the trusted take projection.  This value deliberately owns
 /// no pointer: addresses are identities only and must never be dereferenced by this leaf.
 pub const PendingEventIdentity = struct {

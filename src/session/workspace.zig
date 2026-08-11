@@ -145,20 +145,20 @@ pub const Tab = struct {
     // flat 정상 복원(forward·backward 양쪽 호환). group_collapsed는 group_start!=null일 때만 의미. 기본 null/false.
     group_start: ?[]const u8 = null,
     group_collapsed: bool = false,
-    // 중첩 그룹 깊이(SG5-3 — docs/sidebar-groups.md §9·§4). group_start!=null일 때만 의미(1=최상위 그룹, 2=중첩, …).
+    // 중첩 그룹 깊이(SG5-3 — docs/plans/sidebar-groups.md §9, docs/sidebar-groups.md §4). group_start!=null일 때만 의미(1=최상위 그룹, 2=중첩, …).
     // 순수 additive 스칼라. 기본 1이면 writer가 키를 **생략**해(round-trip 고정점·옛 파일 flat 정상) 옛 리더가 미지
     // 키로 skip하는 forward-compat도 유지한다. reader는 없으면 1(최상위 그룹)로 폴백. 소속·정규화는 위치 파생이 정한다.
     group_depth: u8 = 1,
-    // 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음 — docs/sidebar-groups.md §9 SG5-2·§4). group_start!=null일 때만 의미.
+    // 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음 — docs/plans/sidebar-groups.md §9 SG5-2·§4). group_start!=null일 때만 의미.
     // 순수 additive 스칼라(그룹 시작 탭에만 저장 — 소속은 위치 파생). null=색 없음=키 생략(옛 리더가 미지 키로 skip해
     // flat 정상 복원, 양쪽 호환). 그룹 색은 헤더 밴드·소속 카드 막대 층이라 개별 카드 background-color와 안 겹친다. 기본 0.
     group_color: u32 = 0,
-    // 그룹-로컬 pin(GL — docs/sidebar-groups.md §13). 그룹 안 leaf 멤버가 자기 subtree 안에서 위로 고정됐는가. 전역
+    // 그룹-로컬 pin(GL — docs/sidebar-groups-pinning.md §13). 그룹 안 leaf 멤버가 자기 subtree 안에서 위로 고정됐는가. 전역
     // 핀(pinned = [고정][비고정] 리전)과 직교하는 별개 축이라 전역 파티션이 안 읽는다. 순수 additive 스칼라 —
     // false(기본)면 writer가 키를 **생략**해(round-trip 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는
     // forward-compat도 유지한다. reader는 없으면 false. 마커·top-level 카드에선 무의미(멤버 카드에만 실린다). 기본 false.
     local_pinned: bool = false,
-    // §2.1 재설계 서브파티션 마커(top_level — docs/sidebar-groups.md §14). 한 핀 리전 안에서 이 카드부터 최상위(depth 0)로
+    // §2.1 재설계 서브파티션 마커(top_level — docs/sidebar-groups-top-level.md §14). 한 핀 리전 안에서 이 카드부터 최상위(depth 0)로
     // 복귀하는 리딩 break 신호(pin 플립과 동형). 순수 additive 스칼라 — false(기본)면 writer가 키를 **생략**해(round-trip
     // 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는 forward-compat도 유지한다. reader는 없으면 false. 비마커 leaf
     // 카드에만 의미(마커·최상위-run 뒷카드는 위치 파생). 전 탭 false면 byte-identical. 기본 false.
@@ -1609,7 +1609,7 @@ test "workspace round-trip: tab group_start·group_collapsed 보존(위치 파�
 }
 
 test "workspace round-trip: tab group_color 보존(SG5-2 — 비영은 group-color 키, 0은 키 생략)" {
-    // 그룹 공통 색(docs/sidebar-groups.md §9 SG5-2): 그룹 시작 탭에만 group_color를 저장하고, 소속 카드는 위치
+    // 그룹 공통 색(docs/plans/sidebar-groups.md §9 SG5-2): 그룹 시작 탭에만 group_color를 저장하고, 소속 카드는 위치
     // 파생으로 그 색을 따른다(별도 저장 없음). writer는 비영 group-color만 쓰고(0=키 생략, additive), 색 없는
     // 그룹/무색 탭 라인은 안 바꾼다. round-trip이 이 인코딩(0↔키부재·비영↔키존재)을 고정하는지 검증.
     const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
@@ -1650,7 +1650,7 @@ test "workspace round-trip: tab group_color 보존(SG5-2 — 비영은 group-col
 }
 
 test "workspace round-trip: tab group_depth 보존(SG5-3 중첩 — >1은 group-depth 키, 1은 키 생략)" {
-    // 중첩 그룹 깊이(docs/sidebar-groups.md §9 SG5-3): 마커 탭에만 group_depth를 저장하고(1=최상위 그룹, 2=중첩, …),
+    // 중첩 그룹 깊이(docs/plans/sidebar-groups.md §9 SG5-3): 마커 탭에만 group_depth를 저장하고(1=최상위 그룹, 2=중첩, …),
     // 소속은 위치 파생이 정한다. writer는 >1일 때만 group-depth 키를 쓰고(1=키 생략, additive), 옛 파일/비중첩 그룹의
     // 라인을 안 바꾼다. round-trip이 이 인코딩(1↔키부재·>1↔키존재)을 고정하는지 + 하위호환(없으면 1)을 검증.
     const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
@@ -1689,7 +1689,7 @@ test "workspace round-trip: tab group_depth 보존(SG5-3 중첩 — >1은 group-
 }
 
 test "workspace round-trip: tab local_pinned 보존(GL §13 — true는 local-pinned 키, false는 키 생략)" {
-    // 그룹-로컬 pin(docs/sidebar-groups.md §13): 그룹 안 leaf 멤버가 subtree 안에서 위로 고정됐는가. 전역 pinned와
+    // 그룹-로컬 pin(docs/sidebar-groups-pinning.md §13): 그룹 안 leaf 멤버가 subtree 안에서 위로 고정됐는가. 전역 pinned와
     // 직교하는 별개 축이라 group_start와 무관하게(멤버 카드에) 실린다. writer는 true만 쓰고(false=키 생략, additive),
     // 옛 파일/비-로컬-pin 카드 라인은 안 바꾼다. round-trip이 이 인코딩(false↔키부재·true↔키존재)을 고정하는지 검증.
     const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
@@ -1728,7 +1728,7 @@ test "workspace round-trip: tab local_pinned 보존(GL §13 — true는 local-pi
 }
 
 test "workspace round-trip: tab top_level 보존(§2.1 재설계 §14 — true는 top-level 키, false는 키 생략)" {
-    // §2.1 재설계 서브파티션 마커(docs/sidebar-groups.md §14): 한 핀 리전 안에서 이 카드부터 최상위(depth 0) 복귀.
+    // §2.1 재설계 서브파티션 마커(docs/sidebar-groups-top-level.md §14): 한 핀 리전 안에서 이 카드부터 최상위(depth 0) 복귀.
     // 전역 pinned·group_start와 직교하는 리딩 break 스칼라라 group 블록 밖에 실린다. writer는 true만 쓰고(false=키 생략,
     // additive), 옛 파일/비-top 카드 라인은 안 바꾼다. round-trip이 이 인코딩(false↔키부재·true↔키존재)을 고정하는지 검증.
     const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};

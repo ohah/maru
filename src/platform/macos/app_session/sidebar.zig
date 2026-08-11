@@ -161,7 +161,7 @@ pub fn toggleSidebarCollapsed(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-/// SG4 — 사이드바 카드 드래그로 그룹에 넣기/빼기(docs/sidebar-groups.md §9·§10). 드롭 타겟 표시 row(raw_row)와
+/// SG4 — 사이드바 카드 드래그로 그룹에 넣기/빼기(docs/plans/sidebar-groups.md §9, docs/sidebar-groups.md §10). 드롭 타겟 표시 row(raw_row)와
 /// 드래그 중 원본 탭(from)을 받아 `moveTab`에 넘길 **목표 탭 인덱스**를 계산한다. 소속은 저장하지 않고 self.tabs
 /// 순서에서 파생하므로(§2.1) "어느 위치로 옮기느냐가 곧 소속"이다 — 여기선 드롭 row를 그 위치로 번역하기만 한다.
 /// 규칙:
@@ -700,7 +700,7 @@ pub fn clampSidebarScroll(self: *AppSession) void {
     if (self.sidebar_scroll_offset_px > max) self.sidebar_scroll_offset_px = max;
 }
 
-/// SG8d — 렌더가 소비하는 표시 행(docs/sidebar-groups.md §9 SG8, 렌더/hit-test 도메인 분리). **카드 드래그 프리뷰**
+/// SG8d — 렌더가 소비하는 표시 행(docs/plans/sidebar-groups.md §9 SG8, 렌더/hit-test 도메인 분리). **카드 드래그 프리뷰**
 /// 중(sidebar_drag_preview!=null)엔 고스트를 담은 `sidebar_preview_rows`를, 아니면 원본 `sidebar_rows`를 돌려준다.
 /// hit-test(slotAt·dragTargetSlot·visibleTab·sidebarGroupDropTargetTab)는 **항상 원본 sidebar_rows**를 봐 드래그 중
 /// self.tabs·plan 계산 기준이 불변이라 yo-yo가 원천 차단된다 — 오직 렌더 소비자(view·glyph·py_top·tint/accent·⌘배지)만
@@ -709,7 +709,7 @@ pub fn sidebarRenderRows(self: *const AppSession) []const chrome.components.side
     return if (self.sidebar_drag_preview != null) self.sidebar_preview_rows.items else self.sidebar_rows.items;
 }
 
-/// 사이드바 표시 row가 고정 핀(📌)을 그리는가(그룹 고정 C2 — docs/sidebar-groups.md §12.8 GP4). buildSidebarTitleFrame이
+/// 사이드바 표시 row가 고정 핀(📌)을 그리는가(그룹 고정 C2 — docs/sidebar-groups-pinning.md §12.8 GP4). buildSidebarTitleFrame이
 /// `pins[]`를 채울 때와 헤드리스 테스트가 공유하는 **단일 출처**(rename 억제는 호출처 몫 — 편집 폭 보존). 규칙:
 ///  · **group_header row = 그룹 고정 인디케이터**: 마커 탭(gh.tab) pinned이면 📌(헤더 이름줄 우측 끝). "이 그룹 고정됨"을
 ///    헤더 하나에만 표시한다(멤버 카드마다 뜨는 노이즈 대신). 마커 = 그룹 고정 권위(§12.2)라 라이브 pinned가 곧 그룹 고정.
@@ -741,7 +741,7 @@ pub fn clearSidebarDragPreview(self: *AppSession) void {
     self.sidebar_preview_rows.clearRetainingCapacity();
 }
 
-/// SG8d/e 드래그 프리뷰 확정(docs/sidebar-groups.md §9 SG8) — 마지막 plan을 실제 move로 **정확히 1회** 커밋하고 프리뷰를
+/// SG8d/e 드래그 프리뷰 확정(docs/plans/sidebar-groups.md §9 SG8) — 마지막 plan을 실제 move로 **정확히 1회** 커밋하고 프리뷰를
 /// 정리한다(재계산 금지 = up-시점 재계산은 프리뷰-확정 타이밍 divergence). 카드(moveTab)·그룹 형제(moveGroupSibling)·
 /// 중첩(moveGroupNesting)·none(제자리) 모두 처리한다 — simulateDrop이 이 함수들과 등가임을 SG8b 헤드리스가 고정해
 /// 프리뷰(고스트)와 확정이 갈리지 않는다. 프리뷰를 **먼저** 비워 move 내부 rebuild가 원본(preview=null) 레이아웃 위에
@@ -2442,7 +2442,7 @@ pub fn cardDropPlan(self: *AppSession, origin: usize, y_px: f64) DropPlan {
 }
 
 /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 **원본 sidebar_rows(불변)**로
-/// hit-test하고, 라이브 tab_ops.moveGroupNesting/Sibling 커밋을 **제거**한 **비커밋 프리뷰**(SG8e — docs/sidebar-groups.md §9)를
+/// hit-test하고, 라이브 tab_ops.moveGroupNesting/Sibling 커밋을 **제거**한 **비커밋 프리뷰**(SG8e — docs/plans/sidebar-groups.md §9)를
 /// 재투영한다: 드롭 컨텍스트로 plan만 계산해(헤더 드롭=`.group_nest`·카드/최상위 드롭=`.group_sibling`·무효=`.none`)
 /// refreshDragPreview로 subtree 고스트를 sidebar_preview_rows에 투영한다(self.tabs 불변이라 yo-yo 원천 차단). up이 이
 /// 마지막 plan을 실제 move로 **정확히 1회** 커밋한다(commitSidebarDragPreview). self.tabs가 불변이라 마커 인덱스가 드래그

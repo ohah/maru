@@ -3167,7 +3167,7 @@ pub const AppSession = struct {
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
     /// SG8c 드래그 프리뷰 — 드래그 중 `sidebar_rows`(원본, 불변, hit-test·plan 계산이 봄)와 분리된 **렌더 전용 투영**
-    /// (고스트 포함, docs/sidebar-groups.md §9 SG8). 라이브 재배치(매 프레임 self.tabs 커밋) 대신 비커밋 프리뷰:
+    /// (고스트 포함, docs/plans/sidebar-groups.md §9 SG8). 라이브 재배치(매 프레임 self.tabs 커밋) 대신 비커밋 프리뷰:
     /// simulateDrop이 낸 가상 order/group_depth를 projectRowsCore(프리뷰 모드)로 투영한다. 고스트 [lo,hi) 구간은 접힘
     /// 게이트 예외로 강제 방출돼 "접힌 그룹 드롭 시 드래그 중 사라짐"을 없앤다. **렌더 소비자 배선은 SG8d**(지금은
     /// 채우기·헤드리스 검증만 — sidebar_rows가 여전히 렌더 소스). move(순열) 모델이라 preview_rows.len == sidebar_rows.len
@@ -5800,7 +5800,7 @@ pub const AppSession = struct {
     pub const GapDropPlan = struct { target_tab: usize, top_level: bool };
 
     // ── SG5-1: 그룹 통째 드래그(헤더/마커 카드를 잡아 그룹 전체를 재정렬) ─────────────────────────────────────
-    // docs/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
+    // docs/plans/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
     // 그룹 이동 = 그 구간을 **하나의 블록으로** 다른 그룹 경계(다른 group_start 인덱스·최상위 다음·끝)에 끼우는 것이다.
     // 삽입 위치를 항상 그룹 경계로 clamp하면(sidebarGroupDropBoundary) 어떤 이동이든 그룹이 다른 그룹을 관통해 쪼개지지
     // 않아 연속 파티션 불변식이 유지된다(그룹 중간엔 다른 group_start가 안 들어간다).
@@ -5820,7 +5820,7 @@ pub const AppSession = struct {
     }
 
     // ── SG5-4: 드래그로 중첩 넣기/빼기 — 드롭 컨텍스트의 depth로 group_depth를 조정한다 ─────────────────────────
-    // docs/sidebar-groups.md §9 SG5-4. 그룹 드래그는 (1)다른 그룹 헤더에 드롭=그 그룹의 자식으로 중첩(depth+1),
+    // docs/plans/sidebar-groups.md §9 SG5-4. 그룹 드래그는 (1)다른 그룹 헤더에 드롭=그 그룹의 자식으로 중첩(depth+1),
     // (2)카드/최상위 드롭=형제 경계 이동(+얕으면 빼기)로 나뉜다. 중첩은 **위치 이동 + subtree 마커들의 group_depth
     // relevel**을 함께 한다(이동만으로는 dragged 마커가 부모를 pop해 형제가 되므로 depth를 명시 조정해야 자식이 된다).
     // 빼기는 gap-clamp로 eff가 자동으로 얕아지고, releveel이 저장 depth도 자연 eff로 맞춰 gap을 없앤다.
@@ -5829,7 +5829,7 @@ pub const AppSession = struct {
     pub const GroupMoveResult = struct { marker: usize, changed: bool };
 
     // ── SG8b: 드롭 프리뷰 순수 코어 — self.tabs를 커밋하지 않고 가상 배치를 낸다 ────────────────────────────────
-    // docs/sidebar-groups.md §9 SG8. 라이브 드래그가 매 프레임 self.tabs를 mutate하던 것을 대신할 **비커밋 프리뷰**의
+    // docs/plans/sidebar-groups.md §9 SG8. 라이브 드래그가 매 프레임 self.tabs를 mutate하던 것을 대신할 **비커밋 프리뷰**의
     // 토대다: plan을 arena order/group_depth에 재현하고(순열·relevel), 옮겨진 subtree의 가상 위치 [ghost_lo, ghost_hi)를
     // 함께 낸다. 프리뷰(SG8c)와 확정(기존 move 함수)이 **같은 순수 코어**를 공유한다 — 카드는 clampMoveToGroup+rotateMove,
     // 그룹은 tab_ops.groupBlockPermutation+tab_ops.relevelBlockCore(+order-aware tab_ops.groupSubtreeEnd/tab_ops.effectiveDepthAt). 이중경로 divergence는
@@ -5859,7 +5859,7 @@ pub const AppSession = struct {
     /// 이동(tab_ops.simulateGroupMove)은 top_level을 블록과 함께 순열만 하고 override 없음(그룹 드래그는 top_level 불변). arena 소유.
     pub const VirtualLayout = struct { order: []usize, group_depth: []u8, top_level: []bool, ghost_lo: usize, ghost_hi: usize };
 
-    /// SG8c 드래그 프리뷰 상태(docs/sidebar-groups.md §9 SG8). self.tabs 불변이라 origin/origin_len가 드래그 내내
+    /// SG8c 드래그 프리뷰 상태(docs/plans/sidebar-groups.md §9 SG8). self.tabs 불변이라 origin/origin_len가 드래그 내내
     /// 안정하다(포인터 셔플은 확정 경로 전용). plan은 매 프레임 원본 sidebar_rows hit-test로 재계산되고 마지막 값이
     /// up 확정(정확히 1회 move)에 재사용된다. ghost_lo/hi는 preview_rows 표시 위치 도메인의 고스트 연속 구간 — 상태
     /// mask 배열(길이 정합 함정)이 아니라 **range 파생**이라(SG8 결정 ⑤), 렌더(SG8d)가 `ghost_lo<=row<ghost_hi`로 판정한다.
@@ -5872,7 +5872,7 @@ pub const AppSession = struct {
         ghost_hi: usize, // 고스트 구간 끝(배타) — lo==hi면 고스트 없음(none)
     };
 
-    /// plan을 `self.tabs`에 **커밋하지 않고** 이동 후 가상 순열/depth를 arena에 낸다(docs/sidebar-groups.md §9 SG8b). 프리뷰는
+    /// plan을 `self.tabs`에 **커밋하지 않고** 이동 후 가상 순열/depth를 arena에 낸다(docs/plans/sidebar-groups.md §9 SG8b). 프리뷰는
     /// `simulateDrop(origin, plan)` → `projectRowsFrom(vl.order, vl.group_depth)`로 렌더 rows를 만들고(SG8c), 확정은 마지막
     /// plan으로 기존 move를 1회 부른다 — 둘이 같은 순수 코어를 써 divergence가 없다. **clampMoveToGroup을 카드 경로에 포함**해
     /// 프리뷰가 핀 경계에서 정직하게 멈춘 착지를 보인다. self.tabs·surface_ptrs·active_tab은 만지지 않는다(포인터 셔플은
@@ -5937,7 +5937,7 @@ pub const AppSession = struct {
         group_normalize.clearStaleLocalPins(Tab, self.tabs.items); // L2 리프트(M3c) — self.tabs.items(`[]*Tab`)로 위임
     }
 
-    /// 그룹 멤버 카드의 `pinned`를 **enclosing 그룹 마커의 pinned로 재기록**한다(그룹 고정 C2, docs/sidebar-groups.md §12.5 GP2).
+    /// 그룹 멤버 카드의 `pinned`를 **enclosing 그룹 마커의 pinned로 재기록**한다(그룹 고정 C2, docs/sidebar-groups-pinning.md §12.5 GP2).
     /// 모델(§12.2): **마커 탭 pinned = 그룹 고정 권위**(group_color/group_depth와 같은 층), **멤버 카드 pinned = 파생 캐시**.
     /// countPinnedTabs·tab_ops.stablePartitionPinned·clampMoveToGroup이 per-tab pinned를 읽으므로, 마커만 토글하고 멤버를 안 맞추면
     /// stablePartition이 마커만 앞으로 옮겨 그룹을 **shred**한다. 이 함수가 멤버를 마커 값으로 동기해 기존 per-tab 핀 머신을
@@ -6017,7 +6017,7 @@ pub const AppSession = struct {
     /// "그룹 안 다음 카드") 소유권을 이전하고 true를 반환한다(from.group_start는 null화 — double-free 방지). 승계 불가
     /// (다음 없음·이미 마커 = 그룹이 이 탭 하나뿐/마지막)면 false를 반환하고 from.group_start는 그대로 둔다(호출자가 free
     /// 또는 destroyTab에 위임 — 그룹 소멸). 소속 카드는 위치 파생이라 별도 이전 없음(§2.1). from은 유효 인덱스라 가정.
-    /// **pinned 승계(그룹 고정 C2, docs/sidebar-groups.md §12.7 보강 6)**: 마커 pinned = 그룹 고정 권위(§12.2)라, 마커 카드가
+    /// **pinned 승계(그룹 고정 C2, docs/sidebar-groups-pinning.md §12.7 보강 6)**: 마커 pinned = 그룹 고정 권위(§12.2)라, 마커 카드가
     /// 닫혀/빠져 다음 카드로 마커가 넘어갈 때 pinned도 함께 승계해야 승계 과정에서 그룹 고정이 소실되지 않는다(고정 그룹의
     /// 첫 카드를 닫아도 승계 마커가 pinned=1을 유지 → 남은 그룹이 고정 리전에 그대로). next는 소속 멤버라 정규화 후엔
     /// pinned가 이미 src와 같지만, desync 상태(승계 시점 정규화 전)에서도 권위값을 명시 이전해 안전하게 둔다.
@@ -6031,7 +6031,7 @@ pub const AppSession = struct {
     }
 
     /// 핀 리전 [lo, hi) 안의 첫 group_start 마커 인덱스 — firstGroupStartIndex(§2.1)의 **핀 리전 국소화**(그룹 고정 C2,
-    /// docs/sidebar-groups.md §12). 그룹 고정은 리스트를 `[고정][비고정]` 2리전으로 나누고, 각 리전 안에서 §2.1 연속
+    /// docs/sidebar-groups-pinning.md §12). 그룹 고정은 리스트를 `[고정][비고정]` 2리전으로 나누고, 각 리전 안에서 §2.1 연속
     /// 파티션(최상위 카드 = 그 리전의 첫 마커 이전)이 다시 성립한다. lo/hi로 리전을 국한해 그 리전의 앵커만 찾는다.
     /// 리전을 [0, len)로 주면(고정 그룹 0개면 모든 마커가 비고정이라 사실상 항상 그렇다) 전역 첫 마커 = 옛 동작과 동일.
     pub fn firstGroupStartInRegion(self: *const AppSession, lo: usize, hi: usize) ?usize {
@@ -7342,7 +7342,7 @@ pub const AppSession = struct {
         if (pm.ghost) ghost_row_hi.* = out.items.len; // 그룹 통째 드래그면 마커 카드 row까지 고스트 range 확장
     }
 
-    /// 순열/depth 순수 투영 코어(SG8a — docs/sidebar-groups.md §9). `order`(표시 위치 i → 원본 tab 인덱스 순열)와
+    /// 순열/depth 순수 투영 코어(SG8a — docs/plans/sidebar-groups.md §9). `order`(표시 위치 i → 원본 tab 인덱스 순열)와
     /// `group_depth`(order 위치별 마커 선언 depth)를 self.tabs에 투영해 `out`(라이브=sidebar_rows·프리뷰=sidebar_preview_rows)를
     /// 채운다. 프리뷰(비커밋 가상 배치)와
     /// 라이브 확정이 이 한 코어를 공유한다(등가 안전화). 규칙: (1) group_start 탭에서 group_header row 삽입 + 그 그룹 카드는
@@ -7385,7 +7385,7 @@ pub const AppSession = struct {
             var prev_pinned: bool = false;
             for (order, 0..) |tab_idx, i| {
                 const tab = self.tabs.items[tab_idx];
-                // 핀 리전 경계(그룹 고정 C2, docs/sidebar-groups.md §12 GP1): per-position pinned가 이전 위치와 다르면
+                // 핀 리전 경계(그룹 고정 C2, docs/sidebar-groups-pinning.md §12 GP1): per-position pinned가 이전 위치와 다르면
                 // 새 핀 리전이 시작한다 → depth 스택 리셋. pin ⊃ group ⊃ nest 계층상 그룹 subtree는 한 리전 통째라
                 // 리전 경계를 그룹이 넘을 수 없다("고정 그룹 + 비고정 최상위 카드" 인접에서 비고정 카드가 고정 subtree에
                 // 삼켜지는 것을 막는다). 경계 도메인 = order-공간 per-position pinned(고정 count 아님). 고정 그룹 0개면
@@ -8634,7 +8634,7 @@ pub const AppSession = struct {
             if (kind == 2 and drag.index < self.tabs.items.len) {
                 if (self.tabs.items[drag.index].group_start == null) {
                     // 마커 없는 카드 = SG4 넣기/빼기. **SG8d 고스트 프리뷰**: 라이브 moveTab 커밋 대신 **비커밋 프리뷰**를
-                    // 재투영한다(docs/sidebar-groups.md §9 SG8). hit-test는 **원본 sidebar_rows**(불변)로 드롭 목표 탭을
+                    // 재투영한다(docs/plans/sidebar-groups.md §9 SG8). hit-test는 **원본 sidebar_rows**(불변)로 드롭 목표 탭을
                     // 계산하고(sidebarGroupDropTargetTab — 카드 row=그 자리, 펼친 헤더=그룹 최상단, 접힌 헤더=그룹 끝),
                     // 그 plan을 refreshDragPreview에 넘겨 sidebar_preview_rows에 고스트를 투영한다(self.tabs 불변). 렌더는
                     // sidebarRenderRows()=preview_rows로 반투명 고스트+삽입선을 그리고, up이 이 마지막 plan을 정확히 1회
@@ -17032,7 +17032,7 @@ test "projectRows: group_start가 group_header row를 삽입하고 카드는 dep
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[0].group_header.member_count);
 }
 
-// SG8a 동작 보존 단언(docs/sidebar-groups.md §9): recomputeVisibleTabs를 projectRowsFrom(order, group_depth) 순수 코어
+// SG8a 동작 보존 단언(docs/plans/sidebar-groups.md §9): recomputeVisibleTabs를 projectRowsFrom(order, group_depth) 순수 코어
 // 위의 얇은 래퍼로 일반화했으므로, **identity order + 라이브 group_depth**를 직접 넘긴 코어 산출이 래퍼 산출과
 // byte-identical(모든 Row 태그·필드)임을 헤드리스로 고정한다 — 순수 리팩터가 옛 flat/그룹 투영을 바꾸지 않았다는 증명.
 test "SG8a: projectRowsFrom(identity)가 recomputeVisibleTabs와 byte-identical row를 낸다(동작 보존)" {
@@ -17129,7 +17129,7 @@ test "SG8a: projectRowsFrom가 order 순열을 존중한다(SG8b 프리뷰 토�
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
 }
 
-// GP1(그룹 고정 C2 — pin-region-aware 파생 토대, docs/sidebar-groups.md §12). "고정 그룹(마커 pinned=1) + 비고정 최상위
+// GP1(그룹 고정 C2 — pin-region-aware 파생 토대, docs/sidebar-groups-pinning.md §12). "고정 그룹(마커 pinned=1) + 비고정 최상위
 // 카드 + 비고정 그룹" 배치를 인위로 만들어 7개 subtree-스캔 경계가 **핀 리전 경계(per-position pinned 플립)**에서 멈추는지
 // 단언한다. Phase A(모든 탭 비고정=고정 그룹 0개)는 pin 리셋이 **inert**해 옛 §2.1 연속 파티션 그대로(비고정 카드가 그룹에
 // 흡수·member_count 포함) — 동작 보존. Phase B(마커+멤버 pin)는 pin 플립에서 리전이 갈라져 비고정 카드가 고정 subtree에
@@ -17199,7 +17199,7 @@ test "GP1: pin-region 경계가 7개 subtree-스캔을 리전에서 멈춘다(�
     try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[1].card.depth);
 }
 
-// SR1(§2.1 재설계 — top_level 저장·파생 토대, docs/sidebar-groups.md §14). `top_level` 카드가 한 핀 리전 안에서
+// SR1(§2.1 재설계 — top_level 저장·파생 토대, docs/sidebar-groups-top-level.md §14). `top_level` 카드가 한 핀 리전 안에서
 // **최상위(depth 0)로 복귀**하는 리딩 break 신호임을 7 파생 경계에서 헤드리스로 고정한다: (#1 pass1 depth·#2 pass2
 // cstack shred 방지·#3 tab_ops.effectiveDepthAt·#4 tab_ops.groupSubtreeEnd·#5 subtreeHasMatch·#6 directCardCount 배지·#7
 // ghostOverlapsSubtree) + tab_ops.enclosingGroupMarkerIndex 상향 클램프·tabIsInGroup 정확. 배치 [A(마커), a1, TOP(top_level),
@@ -17878,7 +17878,7 @@ test "SR3(e): createGroupAbsorb 다중 멤버 byte-identical 재현(회귀 0) + 
     try std.testing.expect(!s2.tabs.items[1].top_level); // ★ 카드→마커 전이 시 top_level clear(마커는 leaf-only상 top_level 금지)
 }
 
-// GP2(그룹 고정 C2 — normalizePinnedFromGroups + 복원 순서 + 마커 승계, docs/sidebar-groups.md §12.5·§12.7·§12.9).
+// GP2(그룹 고정 C2 — normalizePinnedFromGroups + 복원 순서 + 마커 승계, docs/sidebar-groups-pinning.md §12.5·§12.7·§12.9).
 // 마커 pinned = 그룹 고정 권위, 멤버 카드 pinned = 파생 캐시. normalize가 멤버를 마커 값으로 재기록해 stablePartition이
 // 그룹을 통째 옮기게 한다(정규화 누락 = shred). 아래 (a)shred방지·(b)복원순서·(c)마커승계·(d)드래그불변 4케이스.
 test "GP2: normalizePinnedFromGroups가 멤버 pinned를 마커 기준 canonical화한다(desync→shred 방지) + stablePartition 통째 프리픽스" {
@@ -18530,7 +18530,7 @@ test "GP4(b): assert 확장 tab_ops.pinBoundariesAlignGroups — canonical 정�
     try std.testing.expect(tab_ops.pinBoundariesAlignGroups(session)); // 흡수 후 정렬 복귀
 }
 
-// ── 그룹 고정 리뷰 회귀(/code-review max confirmed 8건, docs/sidebar-groups.md §9 SG8·§12 C2) ──────────────────
+// ── 그룹 고정 리뷰 회귀(/code-review max confirmed 8건, docs/plans/sidebar-groups.md §9 SG8·§12 C2) ──────────────────
 // pin ⊃ group ⊃ nest 설계에서 파생 코어·마커 조작·드래그가 핀 리전을 존중하는지 헤드리스로 고정한다. 각 테스트는
 // "옛(버그) 동작이면 실패"하도록 단언을 골랐다(수정이 회귀하면 즉시 red).
 
@@ -18970,7 +18970,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
     try std.testing.expectEqual(@as(usize, 2), card_pins); // X1·X2만
 }
 
-/// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와
+/// SG8b 등가 헬퍼(docs/plans/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와
 /// 일치함을 단언한다: (1) move 전 탭 포인터·선언 depth 스냅샷, (2) simulateDrop → vl(+ self.tabs 불변 단언), (3) plan에
 /// 대응하는 실제 move를 **정확히 1회**, (4) 모든 위치 i에서 `before[vl.order[i]]==tabs[i]`(같은 탭이 같은 위치에)·
 /// `vl.group_depth[i]==tabs[i].group_depth`(같은 depth). 프리뷰(비커밋)와 확정(커밋)이 한 순수 코어로 수렴함을 고정한다.
@@ -19817,7 +19817,7 @@ fn sg8cFindHeader(rows: []const chrome.components.sidebar.Row, tab: usize) ?chro
     return null;
 }
 
-// SG8c 1급 헤드리스(docs/sidebar-groups.md §9 SG8c): 카드를 **접힌 그룹**에 드롭하는 plan을 프리뷰 투영하면 그 카드
+// SG8c 1급 헤드리스(docs/plans/sidebar-groups.md §9 SG8c): 카드를 **접힌 그룹**에 드롭하는 plan을 프리뷰 투영하면 그 카드
 // 고스트가 sidebar_preview_rows에 **강제 방출**된다(원본=커밋 레이아웃 투영에선 접힘 게이트로 사라짐 = SG8이 없애려는
 // 증상). 또 타겟 헤더가 collapsed=false로 flip되고(▸ 삼각 아래 카드 보임 모순 방지), member_count가 고스트를 반영하며
 // (order-aware), self.tabs는 불변이고, move(순열) 모델이라 preview_rows.len == 원본 rows.len(접힘으로 빠질 행 되메움).
@@ -21131,7 +21131,7 @@ test "GL2(c): 드래그 clamp — 로컬 pin 멤버가 subtree-로컬 프리픽�
     for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before2[vl2.order[i]], t); // 프리뷰=확정(비-pin도 프리픽스 밖이라 일치)
 }
 
-// GL3(그룹-로컬 pin 렌더 📌 + 위생 + 드래그 프리뷰=확정 엣지 — docs/sidebar-groups.md §13.6·§13.7). 문서 §13.10은 render+
+// GL3(그룹-로컬 pin 렌더 📌 + 위생 + 드래그 프리뷰=확정 엣지 — docs/sidebar-groups-pinning.md §13.6·§13.7). 문서 §13.10은 render+
 // 위생을 GL4로 라벨하지만, 이 작업은 GL3로 통합해 구현한다. 스크린샷(MARU_FORCE_GROUP_LOCALPIN)은 시각 마감 1급 검증으로 별도.
 test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 멤버 억제(pin_derived 직교)·마커/최상위 억제(§13.6)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -21571,7 +21571,7 @@ test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위
     try std.testing.expectEqual(@as(usize, 5), tab_ops.groupSubtreeEnd(session, 1, null, null)); // 그룹 A=[1,5) 연속 유지
 }
 
-// GL4(a) — 공존(그룹째 고정 C2 × 그룹-로컬 pin GL)의 keystone 보조정리 실증(docs/sidebar-groups.md §13.1·§13.4). 그룹째
+// GL4(a) — 공존(그룹째 고정 C2 × 그룹-로컬 pin GL)의 keystone 보조정리 실증(docs/sidebar-groups-pinning.md §13.1·§13.4). 그룹째
 // 고정은 그룹 subtree를 **전역 [고정][비고정] 프리픽스**로 통째 옮기고(tab_ops.stablePartitionPinned), 그 안 로컬 pin float는
 // **마커 직후**를 유지해야 한다. keystone: stablePartitionPinned는 pin-uniform 블록의 **내부 상대순서를 보존**(stable)하므로
 // subtree 축 위에서 무연산 → 로컬 float가 살아남는다. 배선 순서(§13.4): (1)normalize→(2)tab_ops.stablePartitionPinned→(3)float가
@@ -21684,7 +21684,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     try std.testing.expectEqual(@as(usize, 0), member_pins_after); // 해제 후 카드 📌 0(그냥 그룹 멤버)
 }
 
-// GL4(b) — 중첩(자식 subgroup 안 leaf 멤버 로컬 pin)의 하드닝(docs/sidebar-groups.md §13.3·§13.6.1·§13.8). `floatLocalPinsAllGroups`
+// GL4(b) — 중첩(자식 subgroup 안 leaf 멤버 로컬 pin)의 하드닝(docs/sidebar-groups-pinning.md §13.3·§13.6.1·§13.8). `floatLocalPinsAllGroups`
 // 가 부모→자식 **순차 스캔**(= 포인터 재탐색 동형, §13.4)으로 부모 A·자식 B 두 subtree를 각자 float하고, 마커 위 배치가
 // 자식 그룹서도 성립(자식 마커 카드 위로 자식 로컬 pin)하며 I3(중첩 depth)이 보존됨을 검증한다. **subgroup-as-member는 범위
 // 밖(GL5)** — 여기선 leaf 멤버만.

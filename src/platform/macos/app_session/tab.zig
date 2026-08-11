@@ -1138,7 +1138,7 @@ pub fn firstMatchingTab(self: *AppSession) ?usize {
 }
 
 /// 검색 필터·그룹 마커·접힘을 self.tabs에 투영해 sidebar_rows(표시 행)를 채운다 — **identity order + 라이브 group_depth**를
-/// 순열/depth 순수 코어 projectRowsFrom에 넘기는 얇은 래퍼(docs/sidebar-groups.md §9 SG8a). SG8b simulateDrop이 여기
+/// 순열/depth 순수 코어 projectRowsFrom에 넘기는 얇은 래퍼(docs/plans/sidebar-groups.md §9 SG8a). SG8b simulateDrop이 여기
 /// order/group_depth를 가상 배치(고스트 프리뷰)로 갈아끼워 같은 코어를 재사용한다 — identity면 옛 flat 투영과
 /// **byte-identical row 산출**(동작 보존). order[i]=i, group_depth[i]=마커 저장 depth(비마커는 pass1에서 안 읽힘).
 pub fn recomputeVisibleTabs(self: *AppSession) void {
@@ -1695,7 +1695,7 @@ pub fn relevelBlock(self: *AppSession, start: usize, count: usize, target_depth:
     return relevelBlockCore(self, start, count, target_depth, null, null);
 }
 
-/// relevelBlock의 order-aware 코어(SG8b — docs/sidebar-groups.md §9). `order`/`group_depth`가 non-null이면 **가상
+/// relevelBlock의 order-aware 코어(SG8b — docs/plans/sidebar-groups.md §9). `order`/`group_depth`가 non-null이면 **가상
 /// 배치**(simulateDrop, self.tabs 불변) 위에서 relevel하고 결과를 `group_depth[p]`에 쓰고, **둘 다 null이면 라이브
 /// self.tabs**를 relevel한다(effectiveDepthAt/groupSubtreeEnd의 null=라이브 패턴 동형). null 경로는 옛 relevelBlock과
 /// byte-identical. 스택 pop 판정은 **옛 declared**(가상=group_depth[p]·라이브=tab.group_depth)로 하고 현재 마커는 판정
@@ -1795,7 +1795,7 @@ pub fn stablePartitionPinned(self: *AppSession) void {
 }
 
 /// 그룹-로컬 pin(GL §13) — 마커 `mi`의 subtree `[mi+1, groupSubtreeEnd(mi))` **안에서만** `local_pinned` 직접 멤버
-/// 카드를 마커 직후로 stable float한다(docs/sidebar-groups.md §13 GL1). 전역 pin(stablePartitionPinned = [고정][비고정]
+/// 카드를 마커 직후로 stable float한다(docs/sidebar-groups-pinning.md §13 GL1). 전역 pin(stablePartitionPinned = [고정][비고정]
 /// 2리전)과 **직교하는 축**이다 — 여긴 한 그룹 subtree 내부 순서만 바꾸고 전역 파티션·소속(§2.1 그룹 연속 I2·중첩 I3)은
 /// 불변이다(재배열이 [mi+1, e) **안에서만** 일어나 subtree 끝·형제/얕은 마커 경계를 안 넘음 — keystone 보조정리 §13).
 ///
@@ -1904,7 +1904,7 @@ pub fn assertPinnedPrefixRuntime(self: *AppSession) void {
     std.debug.assert(pinBoundariesAlignGroups(self));
 }
 
-/// 핀 경계가 그룹 subtree **중간**을 자르지 않는가(그룹 고정 C2 — docs/sidebar-groups.md §12.11 보강9). 판정 구조는
+/// 핀 경계가 그룹 subtree **중간**을 자르지 않는가(그룹 고정 C2 — docs/sidebar-groups-pinning.md §12.11 보강9). 판정 구조는
 /// normalizePinnedFromGroups와 **동형**(suffix-exclusion): 각 최상위 그룹의 구조 subtree [i, e)(pin 무시)에서 마커 pin이
 /// **마지막으로 일치**하는 위치 last_match까지가 진짜 멤버 범위이고, 그 뒤 [last_match+1, e)는 다음 핀 리전의 최상위 카드
 /// 꼬리(§12.1 "고정 그룹 + 비고정 top카드")라 **정상**이다. 위반 = 진짜 멤버 범위 [i+1, last_match] 안에 마커 pin과 다른
@@ -2233,7 +2233,7 @@ pub fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std
     }
 }
 
-/// SG8c 프리뷰 재투영 진입점(docs/sidebar-groups.md §9) — plan을 simulateDrop으로 **비커밋 가상 배치**(self.tabs 불변)
+/// SG8c 프리뷰 재투영 진입점(docs/plans/sidebar-groups.md §9) — plan을 simulateDrop으로 **비커밋 가상 배치**(self.tabs 불변)
 /// 하고, 그 order/group_depth를 projectRowsCore(프리뷰 모드)로 sidebar_preview_rows에 투영한다. 고스트 [lo,hi) 구간은
 /// 접힘 게이트 예외로 강제 방출되고(사라짐 방지), 그 고스트를 담은 접힌 그룹 헤더는 collapsed=false로 flip된다.
 /// member_count는 가상 order 위에서 order-aware directCardCount로 계산돼 고스트를 반영한다(self.tabs 직접 스캔 안 함 —
@@ -2268,7 +2268,7 @@ pub fn refreshDragPreview(self: *AppSession, origin: usize, plan: DropPlan, curs
     };
 }
 
-/// 그룹을 **통째로** 고정/해제한다(togglePin의 그룹판, 그룹 고정 C2 — docs/sidebar-groups.md §12.6·§12.10 GP3).
+/// 그룹을 **통째로** 고정/해제한다(togglePin의 그룹판, 그룹 고정 C2 — docs/sidebar-groups-pinning.md §12.6·§12.10 GP3).
 /// `marker`는 그룹 시작 마커 탭(헤더 우클릭 대상 또는 멤버 카드가 위임한 enclosing 마커). 순서:
 ///  1. **토글 전** 구조 subtree [mi, e)를 잡는다 — 개별 pin 입구가 막혀(§12.7 보강5) desync가 없으니 마커·멤버 pin이
 ///     아직 일치해 `groupSubtreeEnd`(pin 인식)가 완전 subtree를 낸다.
@@ -2334,7 +2334,7 @@ pub fn toggleLocalPin(self: *AppSession, member: *Tab) void {
 // 이 그룹만 쓰고 허브 제품 경로는 쓰지 않는다(실측). 허브에 두면 그 pub 표면만 넓힌다.
 
 /// 블록 [m,j)를 Rest(=[m,j) 제외 원소들)의 `rest_insert`번째 앞에 끼우는 순열을 `perm`(길이 n, dst 위치 w → src 위치)에
-/// 채우고 블록 시작(새 마커)의 dst 위치를 반환한다(docs/sidebar-groups.md §9 SG8b). **tab_ops.moveGroupRange**(self.tabs/
+/// 채우고 블록 시작(새 마커)의 dst 위치를 반환한다(docs/plans/sidebar-groups.md §9 SG8b). **tab_ops.moveGroupRange**(self.tabs/
 /// surface_ptrs 적용)와 **simulateDrop**(가상 order/group_depth 적용)의 **단일 순열 출처** — 프리뷰(비커밋)와 확정(커밋)이
 /// 같은 순열 코어를 써 이중경로 divergence를 없앤다. 옛 tab_ops.moveGroupRange 인라인 블록-fill을 그대로 추출한 것(회귀 0).
 /// caller가 `m<=j<=n`·`rest_insert<=Rest 길이`를 보장한다(tab_ops.moveGroupRange/simulateGroupMove의 no-op 가드가 앞서 거른다).

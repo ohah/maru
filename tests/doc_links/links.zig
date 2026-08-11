@@ -448,10 +448,15 @@ test "절 번호 참조: 파일명 뒤의 §N이 그 문서에 실재한다" {
     for (try collectRefSourcePaths(arena)) |from| {
         const text = cwd.readFileAlloc(std.testing.io, from, arena, .limited(8 * 1024 * 1024)) catch continue;
         for (try collectSectionRefs(arena, text)) |ref| {
-            // 문서끼리는 상대 경로지만 **소스 주석은 저장소 루트 기준**(`docs/foo.md`)을 쓴다.
-            // 둘 다 시도하고, 실제로 맞은 경로를 이후 판정(등재 조회)에 그대로 쓴다.
+            // 문서끼리는 상대 경로지만 **소스 주석은 저장소 루트 기준**(`docs/plans/foo.md`)을 쓴다.
+            // 셋을 순서대로 시도하고, 실제로 맞은 경로를 이후 판정(등재 조회)에 그대로 쓴다.
+            // basename 폴백을 먼저 두면 `docs/plans/x.md`가 동명인 `docs/x.md`로 잘못 풀린다(실측).
             var doc = try resolveRelative(arena, from, ref.path);
             var owned = sections.get(doc);
+            if (owned == null and sections.get(ref.path) != null) {
+                doc = ref.path; // 루트 기준 경로를 그대로 쓴 참조
+                owned = sections.get(doc);
+            }
             if (owned == null) {
                 doc = try std.fmt.allocPrint(arena, "docs/{s}", .{std.fs.path.basename(ref.path)});
                 owned = sections.get(doc);

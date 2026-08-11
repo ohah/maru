@@ -20,12 +20,12 @@ pub const layer = draw.Layer.sidebar;
 pub const Row = union(enum) {
     /// 워크스페이스 카드. tab=원본 self.tabs 인덱스(옛 visibleTab 값), active=활성 워크스페이스,
     /// depth=그룹 안이면 1(들여쓰기 — SG3). label은 제목 glyph 완전 이주(후속) 시 view가 text op으로 쓸 자리다.
-    /// pin_derived=이 카드의 `tab.pinned`가 **그룹 고정에서 파생된 캐시**(멤버)인가(그룹 고정 C2 — docs/sidebar-groups.md §12.8).
+    /// pin_derived=이 카드의 `tab.pinned`가 **그룹 고정에서 파생된 캐시**(멤버)인가(그룹 고정 C2 — docs/sidebar-groups-pinning.md §12.8).
     /// 멤버 카드 pinned는 enclosing 마커의 권위를 미러한 값이라(§12.2), 그대로 렌더하면 모든 멤버에 📌 노이즈가 뜬다.
     /// projectRowsCore가 order-aware로(depth/member_count와 동형) 채운다 — **비마커 그룹 멤버=true**(파생 억제 대상),
     /// **그룹 마커 카드·최상위 개별 pin 카드=false**(마커는 권위·헤더가 인디케이터, 최상위는 자기 pin). buildSidebarDrawList가
     /// live `tab.pinned` 대신 이 힌트를 읽어 멤버 📌를 억제한다. depth와 달리 "마커 카드 vs 멤버 카드"를 구별한다(둘 다 depth>0).
-    /// local_pinned=이 카드가 **그룹-로컬 pin된 멤버**(그룹 내 위치 고정, GL — docs/sidebar-groups.md §13.6)인가. pin_derived가
+    /// local_pinned=이 카드가 **그룹-로컬 pin된 멤버**(그룹 내 위치 고정, GL — docs/sidebar-groups-pinning.md §13.6)인가. pin_derived가
     /// 모든 멤버 📌를 억제하는 것과 달리, 로컬 pin은 **실제 사용자 pin**이라 sidebarRowShowsPin이 **선두 분기**(pin_derived보다
     /// 먼저)로 📌를 살린다. projectRowsCore가 비마커 그룹 멤버 카드에만 `tab.local_pinned`로 채운다(마커 카드·최상위 카드=false —
     /// 로컬 pin은 leaf 멤버에서만 의미, §13.8). pin_derived와 **직교**한다(그룹째 고정 그룹 안 로컬 pin 멤버는 둘 다 true 가능).

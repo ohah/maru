@@ -242,7 +242,10 @@ pub const inventory = [_]Proof{
     // file-panel.md 분할로 주석 여섯 곳의 단일 출처 경로가 바뀌어 움직였다(§2.2·§2.6 → file-panel-kinds.md,
     // §2.3·§2.4 → file-panel-web-stack.md, §2.5 → file-panel-rich-edit.md, §3.4 → file-panel-dock-ui.md).
     // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b5eb6d34e438b80a3bd4757fc70e67133436dc195b368c7cfcc626a1ffff9a05" },
+    // sidebar-groups.md 분할로 주석의 단일 출처 경로가 바뀌어 움직였다(§9 → plans/sidebar-groups.md,
+    // §12~§13 → sidebar-groups-pinning.md, §14 → sidebar-groups-top-level.md).
+    // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "cad1001eb5f89612dda06fd882bf5f6fecdb380a3880e6a16e7b81d6346d36e5" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

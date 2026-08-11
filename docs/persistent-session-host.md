@@ -616,7 +616,7 @@ conflict는 같은 incident의 child event이며 최초 `poison_reason`을 덮�
   incident reason을 바꾸지 않고 `storage=emergency` child metadata만 남긴다.
 - 같은 원인의 반복 artifact와 사용자 notice는 rate-limit하되 occurrence count와 first/last time은 유지한다. disk record는
   emergency eviction 대상이 아니고 ring은 first-N immutable slot과 bounded fingerprint overflow bucket을 분리한다. ID,
-  cache 경로, mode, quota와 aggregate fingerprint의 단일 출처는 [Trace와 Replay](trace-replay.md#connectionincident-진단-artifact-계획)다.
+  cache 경로, mode, quota와 aggregate fingerprint의 단일 출처는 [Trace와 Replay](trace-replay.md#connectionincident-진단-artifact)다.
   구조화 로그와 future inspector는 같은 `ConnectionIncident` DTO를 소비한다.
 
 #### 소유 구조: stable shell + generation bundle

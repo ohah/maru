@@ -260,13 +260,17 @@ run = "python3 tools/svg_to_coverage.py --check"
 description = "Check config docs against the real loader keys"
 run = "zig build check-config-docs"
 
+[tasks.check-doc-links]
+description = "Check cross-document links and section anchors"
+run = "zig build check-doc-links"
+
 [tasks."ci:changed-areas-check"]
 description = "Verify the CI changed-area classifier (which jobs a diff must run)"
 run = "sh tools/ci/changed-areas.test.sh"
 
 [tasks.check]
-description = "Check format, tests, boundaries, config docs, and build"
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-config-docs", "build"]
+description = "Check format, tests, boundaries, config docs, doc links, and build"
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-config-docs", "check-doc-links", "build"]
 
 [tasks."web:build"]
 description = "Build the file-panel web bundle and verify its SRI"

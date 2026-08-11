@@ -20,6 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const session_host = @import("../session_host.zig");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
@@ -50,7 +51,9 @@ const sidebar_ops = @import("sidebar.zig");
 const surface_move = app_session_mod.surface_move;
 const tab_ops = @import("tab.zig");
 const termLabel = app_session_mod.termLabel;
-const close_graph = if (builtin.os.tag == .macos) app_session_mod.session_host.pending_term_close_graph else struct {};
+// close graph는 syscall 없는 scalar leaf라 ABI 교차 빌드에서도 실제 타입으로 분석해야 한다. 제품 backend
+// 실행만 advanceWindowClose의 comptime macOS 가지가 소유한다.
+const close_graph = app_session_mod.session_host.pending_term_close_graph;
 const max_window_close_targets = app_session_mod.session_host.protocol.max_inventory_runtimes;
 
 /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
@@ -129,11 +132,21 @@ fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProg
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
             if (!windowCloseGraphTarget(term, true)) continue;
             if (!std.meta.eql(term.rt.pending_close, close_graph.PendingTermClose{})) close_graph.fatalProofLoss();
-            if (term.surface.remote != null and backend.windowCloseReadiness(term.rt.handle) == .event_pending)
-                return .event_pending;
+            if (term.surface.remote != null) _ = backend.windowCloseReadiness(term.rt.handle);
         };
         const graph_generation = std.math.add(u64, self.next_window_close_graph_generation, 1) catch
             close_graph.fatalProofLoss();
+        var remote_handles: [max_window_close_targets]u64 = undefined;
+        var remote_count: usize = 0;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!windowCloseGraphTarget(term, true) or term.surface.remote == null) continue;
+            remote_handles[remote_count] = term.rt.handle;
+            remote_count += 1;
+        };
+        var ticket_reservation: session_host.remote_term_backend.WindowCloseTicketReservation = .{};
+        if (remote_count != 0)
+            backend.reserveWindowCloseTickets(remote_handles[0..remote_count], &ticket_reservation) catch
+                close_graph.fatalProofLoss();
         close_graph.prepareGraph(
             &self.pending_window_close_graph,
             @intFromPtr(self),
@@ -154,6 +167,8 @@ fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProg
             ) catch close_graph.fatalProofLoss();
             target_index += 1;
         };
+        if (remote_count != 0)
+            backend.publishWindowCloseAuthoritiesNoFail(remote_handles[0..remote_count], &ticket_reservation);
         self.next_window_close_graph_generation = graph_generation;
     } else if (!close_graph.validGraph(&self.pending_window_close_graph, @intFromPtr(self), targets)) {
         close_graph.fatalProofLoss();

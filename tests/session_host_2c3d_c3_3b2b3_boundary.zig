@@ -109,7 +109,8 @@ test "C3-3b2b3 immutable pending preparation boundary" {
         "session_host_2c3d_c3_3b2b3_step.dependOn(\n            &run_event_c3_3b2b3_dto_drift_tests.step,\n        );",
     ));
     // b5 backend 소유 테스트 7개도 중앙 RED fixture를 거치지 않고 실제 모듈에서 실행한다.
-    try std.testing.expectEqual(@as(usize, 4), count(gate, ", 7);"));
+    // C3-3b5 remote backend가 batch publication oracle 한 행을 더 가져 7개 filter 하나가 8개로 독립 이동했다.
+    try std.testing.expectEqual(@as(usize, 3), count(gate, ", 7);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, ", 10);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, ", 5);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, ", 3);"));

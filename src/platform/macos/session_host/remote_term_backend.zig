@@ -84,6 +84,20 @@ pub const RuntimeAdmissionReservation = struct {
     seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
 };
 
+pub const WindowCloseTicketReservation = struct {
+    self_addr: u64 = 0,
+    backend_addr: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    thread_id: u64 = 0,
+    first_ticket: u64 = 0,
+    last_ticket: u64 = 0,
+    target_count: u32 = 0,
+    target_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    state_raw: u8 = 0,
+    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+};
+
 pub const CloseMaintenanceStats = struct {
     visited_count: usize = 0,
     selected_count: usize = 0,
@@ -807,6 +821,105 @@ pub const RemoteTermBackend = struct {
         return if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.ready_remove)) .complete else .event_pending;
     }
 
+    /// 모든 target의 authority identity와 ticket 범위를 먼저 고정한다. 이 호출이 성공한 뒤에는 caller가
+    /// AppSession graph destination을 봉인하고 `publishWindowCloseAuthoritiesNoFail`만 호출해야 한다.
+    pub fn reserveWindowCloseTickets(
+        self: *RemoteTermBackend,
+        handles: []const RuntimeHandle,
+        out: *WindowCloseTicketReservation,
+    ) !void {
+        if (!std.meta.eql(out.*, WindowCloseTicketReservation{}) or handles.len == 0 or
+            handles.len > std.math.maxInt(u32) or self.close_operation_owner.active)
+            return error.InvalidReservation;
+        const digest = self.windowCloseTargetDigest(handles) orelse return error.InvalidReservation;
+        const count: u64 = @intCast(handles.len);
+        if (self.close_ticket_issuer.terminal or count > std.math.maxInt(u64) - self.close_ticket_issuer.last_issued)
+            process_seal.fatalIntegrity(.close_ticket_exhausted);
+        const first = self.close_ticket_issuer.last_issued + 1;
+        const last = self.close_ticket_issuer.last_issued + count;
+        const ready = try process_seal.currentReadyIdentity();
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .backend_addr = @intFromPtr(self),
+            .pid = ready.pid,
+            .process_nonce = ready.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .first_ticket = first,
+            .last_ticket = last,
+            .target_count = @intCast(handles.len),
+            .target_digest = digest,
+            .state_raw = 1,
+        };
+        errdefer out.* = .{};
+        out.seal = try windowCloseTicketReservationSeal(out);
+        self.close_ticket_issuer.last_issued = last;
+        self.close_ticket_issuer.terminal = last == std.math.maxInt(u64);
+    }
+
+    /// ticket reservation 뒤에는 실패 가능한 작업을 두지 않는다. 모든 authority와 routing tombstone을 같은
+    /// callback/allocation 0 suffix에서 게시하고 reservation을 exact once 소비한다.
+    pub fn publishWindowCloseAuthoritiesNoFail(
+        self: *RemoteTermBackend,
+        handles: []const RuntimeHandle,
+        reservation: *WindowCloseTicketReservation,
+    ) void {
+        if (!self.validWindowCloseTicketReservation(handles, reservation))
+            process_seal.fatalIntegrity(.proof_loss);
+        for (handles, 0..) |handle, index| {
+            const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
+            const ticket = reservation.first_ticket + @as(u64, @intCast(index));
+            close_authority.prepareCurrent(&entry.runtime.close_authority, .{
+                .runtime_addr = @intFromPtr(entry.runtime),
+                .handle = handle,
+                .runtime_generation = entry.runtime_generation,
+                .host_id = entry.host_id,
+                .close_request_generation = ticket,
+                .close_schedule_ticket = ticket,
+                .request_kind = .close_and_detach,
+                .disposition = .terminate_host,
+            }) catch process_seal.fatalIntegrity(.proof_loss);
+            self.surface_runtime.detachSurface(handle);
+            close_authority.advance(&entry.runtime.close_authority, .open, .routing_tombstoned) catch
+                process_seal.fatalIntegrity(.proof_loss);
+        }
+        reservation.state_raw = 2;
+        reservation.seal = [_]u8{0} ** 32;
+    }
+
+    fn validWindowCloseTicketReservation(
+        self: *const RemoteTermBackend,
+        handles: []const RuntimeHandle,
+        reservation: *const WindowCloseTicketReservation,
+    ) bool {
+        const digest = self.windowCloseTargetDigest(handles) orelse return false;
+        const expected = windowCloseTicketReservationSeal(reservation) catch return false;
+        return reservation.self_addr == @intFromPtr(reservation) and reservation.backend_addr == @intFromPtr(self) and
+            reservation.pid == process_seal.currentProcessId() and
+            reservation.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and reservation.state_raw == 1 and
+            reservation.target_count == handles.len and reservation.first_ticket != 0 and
+            reservation.last_ticket == reservation.first_ticket + handles.len - 1 and
+            reservation.last_ticket == self.close_ticket_issuer.last_issued and
+            std.mem.eql(u8, &reservation.target_digest, &digest) and
+            std.crypto.timing_safe.eql(process_seal.CleanupSeal, expected, reservation.seal);
+    }
+
+    fn windowCloseTargetDigest(self: *const RemoteTermBackend, handles: []const RuntimeHandle) ?process_seal.CleanupSeal {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hashWindowCloseInt(&hasher, u32, @intCast(handles.len));
+        for (handles, 0..) |handle, index| {
+            const entry = self.runtimes.get(handle) orelse return null;
+            if (entry.runtime.close_authority.lifecycle_raw != @intFromEnum(close_authority.Lifecycle.pristine)) return null;
+            _ = pending_event_owner.closeReadiness(&entry.runtime.pending_event_owner);
+            if (!self.surface_runtime.linkMatches(handle, &entry.runtime.surface, handle, entry.runtime)) return null;
+            for (handles[0..index]) |previous| if (previous == handle) return null;
+            hashWindowCloseInt(&hasher, u64, handle);
+            hashWindowCloseInt(&hasher, u64, @intFromPtr(entry.runtime));
+            hashWindowCloseInt(&hasher, u64, entry.runtime_generation);
+            hashWindowCloseInt(&hasher, u128, entry.host_id);
+        }
+        return hasher.finalResult();
+    }
+
     /// 원격 Term을 **terminate 없이** 회수한다(§6 app-quit=detach, e3-6). `remove`와 대칭이되 host `runtime.terminate`를 안
     /// 보낸다 — 라우팅 link를 떼고 client-side rr만 free하므로 runtime이 host에 남아 재접속 대상이 된다(연결이 닫히면 host가
     /// controller를 detach로 처리해 유지). 앱 quit 시 host-backed Term에 쓴다(윈도우/탭 명시 close는 `remove`=terminate).
@@ -1087,6 +1200,27 @@ fn remoteBackendSingletonSeal(owner: *const RemoteBackendSingletonOwner) process
     });
 }
 
+fn windowCloseTicketReservationSeal(
+    reservation: *const WindowCloseTicketReservation,
+) process_seal.ReadyError!process_seal.CleanupSeal {
+    return process_seal.windowCloseTicketReservationSeal(reservation.pid, reservation.process_nonce, .{
+        .self_addr = @intFromPtr(reservation),
+        .backend_addr = reservation.backend_addr,
+        .thread_id = reservation.thread_id,
+        .first_ticket = reservation.first_ticket,
+        .last_ticket = reservation.last_ticket,
+        .target_count = reservation.target_count,
+        .target_digest = reservation.target_digest,
+        .state_raw = reservation.state_raw,
+    });
+}
+
+fn hashWindowCloseInt(hasher: *std.crypto.hash.sha2.Sha256, comptime T: type, value: T) void {
+    var encoded: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &encoded, value, .little);
+    hasher.update(&encoded);
+}
+
 fn validRemoteBackendSingleton(owner: *const RemoteBackendSingletonOwner, backend_addr: u64) bool {
     if (backend_addr == 0 or owner.backend_addr != backend_addr or owner.owner_generation == 0 or
         owner.lifecycle_raw != @intFromEnum(RemoteBackendSingletonLifecycle.claimed) or
@@ -1357,7 +1491,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     try testing.expectError(error.UnknownSurface, surface_runtime.writeInput(1, .{ .bytes = "x" }));
 }
 
-test "remote term backend: two daemon pool routes exact hosts and retiring A preserves B" {
+test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending target까지 routing을 일괄 게시한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
@@ -1479,9 +1613,6 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     try testing.expect(be_impl.runtimes.get(33).?.runtime.usesGenerationAttachment());
     _ = try be.attach(33, true);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
-    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(33));
-    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(33));
-    try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
     try surface_runtime.writeInput(22, .{ .bytes = "after\n" });
     var saw_after = false;
@@ -1499,6 +1630,36 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     }
     try testing.expect(saw_after);
 
+    be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw =
+        @intFromEnum(pending_event_owner.PendingLifecycle.preparing);
+    const duplicate_handles = [_]RuntimeHandle{ 33, 33 };
+    var rejected_reservation: WindowCloseTicketReservation = .{};
+    const issuer_before_reject = be_impl.close_ticket_issuer;
+    try testing.expectError(error.InvalidReservation, be_impl.reserveWindowCloseTickets(&duplicate_handles, &rejected_reservation));
+    try testing.expectEqual(issuer_before_reject, be_impl.close_ticket_issuer);
+    try testing.expectEqual(WindowCloseTicketReservation{}, rejected_reservation);
+
+    const handles = [_]RuntimeHandle{ 33, 22 };
+    var reservation: WindowCloseTicketReservation = .{};
+    try be_impl.reserveWindowCloseTickets(&handles, &reservation);
+    try testing.expectEqual(@as(u64, 1), reservation.first_ticket);
+    try testing.expectEqual(@as(u64, 2), reservation.last_ticket);
+    try testing.expect(be_impl.validWindowCloseTicketReservation(&handles, &reservation));
+    var copied_reservation = reservation;
+    try testing.expect(!be_impl.validWindowCloseTicketReservation(&handles, &copied_reservation));
+    const reversed_handles = [_]RuntimeHandle{ 22, 33 };
+    try testing.expect(!be_impl.validWindowCloseTicketReservation(&reversed_handles, &reservation));
+    be_impl.publishWindowCloseAuthoritiesNoFail(&handles, &reservation);
+    try testing.expectEqual(@as(u8, 2), reservation.state_raw);
+    try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.routing_tombstoned)), be_impl.runtimes.get(33).?.runtime.close_authority.lifecycle_raw);
+    try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.routing_tombstoned)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
+    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(33));
+    try testing.expectEqual(term_backend.CloseProgress.event_pending, be.closeAndDetach(22));
+    try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.settling)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
+    be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw =
+        @intFromEnum(pending_event_owner.PendingLifecycle.idle);
+    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(33));
+    try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(22));
     try testing.expect(try pool.remove(host_b));

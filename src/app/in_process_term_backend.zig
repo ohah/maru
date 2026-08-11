@@ -347,9 +347,9 @@ test "in-process term backend: contract drives a controlled command to terminati
     try std.testing.expect(summary.ended != null);
 
     // terminate + reclaim: 종료 관측 후 finish(reader join) → detach → 슬롯 회수. 누수 없이 끝나야 한다.
-    be.finishAfterTermination(handle);
-    be.closeAndDetach(handle);
-    be.remove(handle);
+    try std.testing.expectEqual(CloseProgress.complete, be.finishAfterTermination(handle));
+    try std.testing.expectEqual(CloseProgress.complete, be.closeAndDetach(handle));
+    try std.testing.expectEqual(RemoveProgress.removed, be.remove(handle));
 
     // 회수 후 같은 handle 조회는 없음(null) — 슬롯이 실제로 사라졌다.
     try std.testing.expect(registry.findBySurface(handle) == null);
@@ -374,9 +374,9 @@ test "in-process term backend: web-arm handle is not treated as a terminal runti
     try std.testing.expectError(error.UnknownSurface, be.attach(handle, false));
     try std.testing.expectError(error.UnknownSurface, be.pump(handle));
     try std.testing.expectEqual(@as(?i32, null), be.foregroundProcessGroup(handle));
-    be.closeAndDetach(handle); // no-op(패닉/오조작 없이 통과)
+    try std.testing.expectEqual(CloseProgress.complete, be.closeAndDetach(handle)); // no-op(패닉/오조작 없이 통과)
 
     // web 슬롯 정리(remove가 web arm deinit = sentinel surface.deinit + 슬롯 해제).
-    be.remove(handle);
+    try std.testing.expectEqual(RemoveProgress.removed, be.remove(handle));
     try std.testing.expect(registry.findBySurface(handle) == null);
 }

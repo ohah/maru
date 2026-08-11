@@ -894,13 +894,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          bounded/fair `CloseSweep`, pending lifecycle readiness, handle ABA와 real AppSession synchronous in-process tab/window close parity를
          검증한다. b4가 실제 `event_pending`을 활성화하기 전에 dormant pending 상태 전수를 먼저 닫으며 actual generation
          `event_pending` close E2E는 b4가 소유한다. focused gate `test-session-host-2c3d-c3-3b5`는 최적화 모드마다
-         neutral contract 6개, lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 7개,
-         close graph 2개와 AppSession parity 4개인 unique component 41개와 boundary 1개를 exact-count한다. RED 이후 GREEN에서 범주를
+         neutral contract 6개, lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 8개,
+         close graph 2개와 AppSession parity 4개인 unique component 42개와 boundary 1개를 exact-count한다. RED 이후 GREEN에서 범주를
          합치거나 이름만 남기지 않으며, 각 테스트명은 실제로 관측하는 불변식을 한글로 기술한다. AppSession은
          stable Term membership과 request generation을 봉인한 `PendingTermClose`와 all-or-none `PendingTermCloseGraph`를
          topology mutation 전에 preflight한다. window close는 `windowShouldClose`까지 전달한 공통 `CloseProgress`로 닫기를 막고,
          graph가 전부 removed가 된 뒤에만 one-shot programmatic close latch를 발행한다. graph는 모든 target의 fallible
-         reservation/subpermit을 먼저 완성한 뒤 callback·allocation·failure 0인 publication suffix로 authority와 routing을 함께 게시한다.
+         AppSession reservation과 process-sealed `WindowCloseTicketReservation`을 먼저 완성한 뒤
+         `publishWindowCloseAuthoritiesNoFail`의 callback·allocation·failure 0 suffix로 authority와 routing을 함께 게시한다.
          backend-global runtime admission도 host RPC·allocator·layout보다 먼저 one-shot reservation한다. CloseAuthority는
          `CloseRequestKind`와 disposition을 immutable identity seal에 봉인하고 lifecycle은 별도 checked-monotonic state seal로 관리한다.
          RemoteTermBackend의 process-sealed singleton owner는 movable 생성자 반환값을 AppSession 전역 슬롯에 설치한 직후

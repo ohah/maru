@@ -16,6 +16,7 @@ const StatInfo = struct {
     mode: c.mode_t,
     uid: c.uid_t,
     size: u64,
+    ctime_ns: i128,
 };
 const staged_image = @import("staged_image.zig");
 const host_identity = @import("host_identity.zig");
@@ -92,6 +93,7 @@ pub const Published = struct {
     const FileIdentity = struct {
         dev: posix.dev_t,
         ino: posix.ino_t,
+        ctime_ns: i128,
     };
 
     allocator: std.mem.Allocator,
@@ -136,6 +138,14 @@ pub const Published = struct {
         try validateDescriptor(descriptor, session_dir);
         self.identity = writeAtomic(self.allocator, self.host_dir, self.manifest_path, descriptor, self.identity) catch |err| {
             if (err == error.AuthorityPoisoned) self.poisoned = true;
+            // rollback rename도 ctime을 바꾸므로, durable old generation으로 복귀한 SyncFailed만
+            // pathname을 다시 읽어 기존 owner의 exact identity를 갱신한다.
+            if (err == error.SyncFailed) {
+                self.identity = fileIdentity(self.manifest_path) catch {
+                    self.poisoned = true;
+                    return error.AuthorityPoisoned;
+                };
+            }
             return err;
         };
     }
@@ -170,8 +180,7 @@ pub const PreparedAdoption = struct {
             self.manifest.host_id,
         );
         defer actual.manifest.deinit();
-        if (actual.identity.dev != self.publication.identity.dev or
-            actual.identity.ino != self.publication.identity.ino or
+        if (!sameIdentity(actual.identity, self.publication.identity) or
             !sameDescriptor(actual.manifest.descriptor(), self.manifest.descriptor()))
             return error.InvalidManifest;
         self.state = .validated;
@@ -445,7 +454,7 @@ fn loadExact(
     try validateDescriptor(manifest.descriptor(), session_dir);
     return .{
         .manifest = manifest,
-        .identity = .{ .dev = stat.dev, .ino = stat.ino },
+        .identity = identityFromStat(stat),
     };
 }
 
@@ -556,6 +565,10 @@ fn writeAtomic(
     defer if (tmp_holds_new) unlinkIfIdentity(tmp_path, new_identity);
     _ = c.close(fd);
     open = false;
+    if (expected_old) |old_identity| {
+        const current = fileIdentity(manifest_path) catch return error.InvalidManifest;
+        if (!sameIdentity(current, old_identity)) return error.InvalidManifest;
+    }
     const renamed = if (expected_old != null)
         renameExchange(tmp_path, manifest_path)
     else
@@ -572,13 +585,13 @@ fn writeAtomic(
             try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
             return error.AuthorityPoisoned;
         };
-        if (!sameIdentity(displaced, old_identity) or !sameIdentity(installed, new_identity)) {
+        if (!sameInode(displaced, old_identity) or !sameInode(installed, new_identity)) {
             try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
             return error.InvalidManifest;
         }
     } else {
         const installed = fileIdentity(manifest_path) catch return error.AuthorityPoisoned;
-        if (!sameIdentity(installed, new_identity)) return error.AuthorityPoisoned;
+        if (!sameInode(installed, new_identity)) return error.AuthorityPoisoned;
     }
 
     if ((builtin.is_test and (test_failpoint == .before_commit_sync or test_failpoint == .rollback_sync)) or
@@ -595,16 +608,18 @@ fn writeAtomic(
         return error.SyncFailed;
     }
 
+    const committed_identity = fileIdentity(manifest_path) catch return error.AuthorityPoisoned;
+    if (!sameInode(committed_identity, new_identity)) return error.AuthorityPoisoned;
     if (expected_old) |old_identity| {
         // 여기부터 new generation은 durable commit됐다. old temp 회수 실패는 authority 실패가 아니라 bounded residue다.
         if (builtin.is_test and test_failpoint == .post_commit_cleanup) {
-            unlinkIfIdentity(tmp_path, old_identity);
-            return new_identity;
+            unlinkIfInode(tmp_path, old_identity);
+            return committed_identity;
         }
-        unlinkIfIdentity(tmp_path, old_identity);
+        unlinkIfInode(tmp_path, old_identity);
         _ = c.fsync(dir_fd);
     }
-    return new_identity;
+    return committed_identity;
 }
 
 fn fileIdentity(path: [:0]const u8) Error!Published.FileIdentity {
@@ -619,11 +634,19 @@ fn fileIdentityFd(fd: c.fd_t) Error!Published.FileIdentity {
     if (statFd(fd, &stat) != .SUCCESS or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
         (stat.mode & 0o777) != 0o600)
         return error.InvalidManifest;
-    return .{ .dev = stat.dev, .ino = stat.ino };
+    return identityFromStat(stat);
 }
 
 fn sameIdentity(a: Published.FileIdentity, b: Published.FileIdentity) bool {
+    return sameInode(a, b) and a.ctime_ns == b.ctime_ns;
+}
+
+fn sameInode(a: Published.FileIdentity, b: Published.FileIdentity) bool {
     return a.dev == b.dev and a.ino == b.ino;
+}
+
+fn identityFromStat(stat: StatInfo) Published.FileIdentity {
+    return .{ .dev = stat.dev, .ino = stat.ino, .ctime_ns = stat.ctime_ns };
 }
 
 fn rollbackSwapOrPoison(
@@ -645,7 +668,7 @@ fn rollbackSwapTracked(
 ) Error!void {
     rollbackSwapOrPoison(dir_fd, tmp_path, manifest_path) catch |err| {
         if (fileIdentity(tmp_path)) |identity| {
-            tmp_holds_new.* = sameIdentity(identity, new_identity);
+            tmp_holds_new.* = sameInode(identity, new_identity);
         } else |_| {}
         return err;
     };
@@ -655,6 +678,11 @@ fn rollbackSwapTracked(
 fn unlinkIfIdentity(path: [:0]const u8, identity: Published.FileIdentity) void {
     const current = fileIdentity(path) catch return;
     if (sameIdentity(current, identity)) _ = c.unlink(path.ptr);
+}
+
+fn unlinkIfInode(path: [:0]const u8, identity: Published.FileIdentity) void {
+    const current = fileIdentity(path) catch return;
+    if (sameInode(current, identity)) _ = c.unlink(path.ptr);
 }
 
 fn withdrawExact(
@@ -678,7 +706,7 @@ fn withdrawExact(
     defer allocator.free(tomb);
     if (!renameNoReplace(path, tomb)) return error.RenameFailed;
     const moved = fileIdentity(tomb) catch return error.AuthorityPoisoned;
-    if (!sameIdentity(moved, expected)) {
+    if (!sameInode(moved, expected)) {
         if (!renameNoReplace(tomb, path)) return error.AuthorityPoisoned;
         if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
         return .replaced;
@@ -724,7 +752,15 @@ fn statFd(fd: c.fd_t, out: *StatInfo) posix.E {
     var stat: posix.Stat = undefined;
     const err = posix.errno(c.fstat(fd, &stat));
     if (err != .SUCCESS) return err;
-    out.* = .{ .dev = stat.dev, .ino = stat.ino, .mode = stat.mode, .uid = stat.uid, .size = @intCast(stat.size) };
+    const ctime = stat.ctime();
+    out.* = .{
+        .dev = stat.dev,
+        .ino = stat.ino,
+        .mode = stat.mode,
+        .uid = stat.uid,
+        .size = @intCast(stat.size),
+        .ctime_ns = @as(i128, ctime.sec) * std.time.ns_per_s + ctime.nsec,
+    };
     return .SUCCESS;
 }
 
@@ -756,13 +792,28 @@ fn statAtNoFollow(dir_fd: c.fd_t, path: [:0]const u8, out: *StatInfo) posix.E {
     var stat: posix.Stat = undefined;
     const err = posix.errno(c.fstatat(dir_fd, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW));
     if (err != .SUCCESS) return err;
-    out.* = .{ .dev = stat.dev, .ino = stat.ino, .mode = stat.mode, .uid = stat.uid, .size = @intCast(stat.size) };
+    const ctime = stat.ctime();
+    out.* = .{
+        .dev = stat.dev,
+        .ino = stat.ino,
+        .mode = stat.mode,
+        .uid = stat.uid,
+        .size = @intCast(stat.size),
+        .ctime_ns = @as(i128, ctime.sec) * std.time.ns_per_s + ctime.nsec,
+    };
     return .SUCCESS;
 }
 
 fn statInfoFromLinux(stat: std.os.linux.Statx) StatInfo {
     const dev = (@as(u64, stat.dev_major) << 32) | stat.dev_minor;
-    return .{ .dev = @intCast(dev), .ino = @intCast(stat.ino), .mode = @intCast(stat.mode), .uid = stat.uid, .size = stat.size };
+    return .{
+        .dev = @intCast(dev),
+        .ino = @intCast(stat.ino),
+        .mode = @intCast(stat.mode),
+        .uid = stat.uid,
+        .size = stat.size,
+        .ctime_ns = @as(i128, stat.ctime.sec) * std.time.ns_per_s + stat.ctime.nsec,
+    };
 }
 
 fn validateDescriptor(descriptor: Descriptor, session_dir: []const u8) Error!void {

@@ -31,7 +31,7 @@
 
 ### 1.1 엔진 결정 — 2026-08-09 개정: 네이티브 등폭 GPU 뷰
 
-**diff 본문과 코드 편집의 엔진은 CM6가 아니라 네이티브 Zig + Metal이다**(사용자 결정 2026-08-09). 계약은 [native-editor.md](native-editor.md)가 단일 출처이며, diff 본문의 소유 관계는 그 문서 §7이 적는다 — **변경 목록(§3.5)은 계속 이 문서가 소유**하고 네이티브 chrome 그대로다.
+**diff 본문과 코드 편집의 엔진은 CM6가 아니라 네이티브 Zig + Metal이다**(사용자 결정 2026-08-09). 계약은 [native-editor.md](native-editor.md)가 단일 출처이며, diff 본문의 소유 관계는 [native-editor-ui.md](native-editor-ui.md) §7이 적는다 — **변경 목록(§3.5)은 계속 이 문서가 소유**하고 네이티브 chrome 그대로다.
 
 이 개정이 무효화하는 것은 아래 §1.1a의 **엔진 선택**과, 그것을 전제한 §3~§11의 "CM6/MergeView" 서술이다(§7.1 번들 항목, §10.0의 0b·2번을 포함한다 — 각 지점에 개정 표기를 달았다). **무효화하지 않는 것**: `EditorGrant`·`DocumentRegistry`·safe-save CAS·revision 3축·외부 변경 감시·git/LSP adapter·§3.5 소스 컨트롤 뷰는 엔진과 무관하게 그대로 유효하다.
 

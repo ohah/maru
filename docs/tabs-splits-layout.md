@@ -110,7 +110,7 @@ WKWebView를 하나도 소유하지 않고, 파일 본문은 위의 web Term 경
 따라서 terminal grid와 웹 콘텐츠는 같은 수준의 여백을 갖되 tab/header와
 split·dock divider 자체는 padding 때문에 안쪽으로 밀리지 않는다. `paneBarRect`/`paneTermRect`는 `PaneGeometry`
 accessor일 뿐 bar/padding 산술을 복제하지 않는다. focus border의 상태·z-order·테마와 비-key/OOM fail-close 계약은
-[file-panel-dock-ui.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
+[file-panel-dock-ui.md §3.4](file-panel-dock-ui.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
 
 **표시 grid는 레이아웃이 소유한다**: 위 `.grid`에서 나온 크기는 그 Term의 표시 grid에 **항상** 적용된다
 (`AppSession.resizeTermForLayout`이 단일 출처). 이건 편의가 아니라 렌더가 서는 근거다 — 렌더러는 셀을
@@ -272,12 +272,12 @@ Node = leaf(Pane)
   **도메인 경계**: `tab_drag_*`는 `termRect()` 안의 terminal pane tree만 target으로 탐색한다. 오른쪽/하단 파일 도크와
   terminal↔dock outer divider는 drop target이 아니며, 그 위에서는 하이라이트를 지우고 mouse-up을 no-op으로 끝낸다.
   반대로 파일 탭도 terminal pane으로 들어오지 않는다. 파일 도크 내부 재정렬·그룹 이동·split 계약은
-  [파일 패널 §3.3](file-panel.md#33-파일-탭-드래그도크-내부-분할)을 단일 출처로 둔다.
+  [파일 패널 §3.3](file-panel-dock-ui.md#33-파일-탭-드래그도크-내부-분할)을 단일 출처로 둔다.
   단 현행 terminal 탭은 source pane 안에서 pointer x를 따라 live reorder하므로, 도크에 놓아도 cross-domain 이동은 0이지만
   도크로 나가기 전에 이미 보인 source 내부 순서는 유지한다. 즉 cross-domain drop의 no-op은 원래 순서로 rollback한다는 뜻이 아니다.
   **FP16 목표**: 파일이 워크스페이스 Term이 되면 이 "도메인 경계" 자체가 소멸한다 — 파일 탭 드래그가 terminal 탭 드래그에
   흡수돼 금지할 반대 도메인이 없어지고, 탐색기 도크는 콘텐츠 탭이 없어 drop target 후보에서 자연히 빠진다. terminal↔dock
-  outer divider가 크기 조절만 소유한다는 규칙은 그대로다. 단일 출처는 [파일 패널 §3.3](file-panel.md#33-파일-탭-드래그도크-내부-분할).
+  outer divider가 크기 조절만 소유한다는 규칙은 그대로다. 단일 출처는 [파일 패널 §3.3](file-panel-dock-ui.md#33-파일-탭-드래그도크-내부-분할).
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, pane grip=✋ openHand(드래그 손잡이), 탭/"+"=손가락(pointingHand), 터미널=I-beam.
 
 ### Pane을 워크스페이스로 분리·합치기 (드래그, 구현됨)

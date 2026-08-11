@@ -2813,6 +2813,9 @@ pub const AppSession = struct {
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
     pending_confirm: PendingConfirm = .none,
+    // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
+    // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
+    window_close_pending: bool = false,
     // 붙여넣기 보호(input.paste-protection) 확인 모달의 보류. 위험한 붙여넣기(개행/ESC[201~ 인젝션)를 감지하면
     // 바로 PTY로 안 보내고 이 버퍼에 최종 payload(escape 적용 후)를 세션 소유로 보관한 뒤 확인 모달을 연다.
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
@@ -5335,7 +5338,12 @@ pub const AppSession = struct {
             .term => term_ops.closeActiveTerm(self),
             .pane => pane_ops.closeActivePane(self),
             .tab => |idx| tab_ops.closeTab(self, idx),
-            .session => if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose(),
+            .session => if (!file_panel_ops.blockSessionExitForFilePanels(self)) {
+                if (target == .window)
+                    workspace_ops.confirmWindowClose(self)
+                else
+                    self.latchSessionClose();
+            },
         }
     }
 
@@ -12711,6 +12719,7 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
+        workspace_ops.advancePendingWindowClose(self);
         const ft_on = diag_gate.maruDebugEnabled();
         const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         var ft_pre: i128 = ft_start;
@@ -47025,24 +47034,45 @@ test "C3-3b5 AppSession은 in-process multi-Term complete 뒤에만 topology를 
     try std.testing.expectEqual(before - 1, pane.terms.items.len);
 }
 
-test "C3-3b5 AppSession은 remote pending window를 보류하고 graph 완료 뒤 close intent를 한 번 발행한다" {
+test "C3-3b5 AppSession은 runtime pending window와 확인 수락을 tick 재시도 뒤에만 종료한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try initSmokeSessionTwoTerms(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
     defer app.term_runtime_backend.testing.clear();
-    markAllTermsAtPrompt(session);
-    const tabs_before = session.tabs.items.len;
-    const terms_before = pane_ops.activePane(session).terms.items.len;
-    app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
-    try std.testing.expect(session.requestWindowClose());
-    try std.testing.expectEqual(tabs_before, session.tabs.items.len);
-    try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len);
-    try std.testing.expect(!session.ended_seen);
-    app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
-    try std.testing.expect(!session.requestWindowClose());
-    for (pane_ops.activePane(session).terms.items) |term| term.rt.close_complete = false;
+    {
+        const session = try initSmokeSessionTwoTerms(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        markAllTermsAtPrompt(session);
+        const tabs_before = session.tabs.items.len;
+        const terms_before = pane_ops.activePane(session).terms.items.len;
+        app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
+        try std.testing.expect(session.requestWindowClose());
+        try std.testing.expect(session.window_close_pending);
+        try std.testing.expectEqual(tabs_before, session.tabs.items.len);
+        try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len);
+        try std.testing.expect(!session.ended_seen);
+        app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+        workspace_ops.advancePendingWindowClose(session);
+        try std.testing.expect(!session.window_close_pending);
+        try std.testing.expect(session.ended_seen);
+    }
+    app.term_runtime_backend.testing.clear();
+    {
+        const session = try initSmokeSessionTwoTerms(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        pane_ops.activePane(session).activeTerm().surface.core.alt_active = true;
+        app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
+        try std.testing.expect(session.requestWindowClose());
+        try std.testing.expect(session.pending_confirm == .close);
+        session.dispatchChromeAction(.confirm_accept);
+        try std.testing.expect(session.window_close_pending);
+        try std.testing.expect(!session.ended_seen);
+        app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+        workspace_ops.advancePendingWindowClose(session);
+        try std.testing.expect(!session.window_close_pending);
+        try std.testing.expect(session.ended_seen);
+    }
 }
 
 test "C3-3b5 AppSession은 termination finish와 remove가 끝난 뒤에만 cascade한다" {

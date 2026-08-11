@@ -71,27 +71,52 @@ pub fn resolveWorkspaceScope(self: *AppSession) CloseScope {
 /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
 /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
 /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
+fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProgress {
+    // remote target 하나라도 pending이면 어느 target의 routing/authority도 먼저 게시하지 않는다.
+    if (builtin.os.tag == .macos) {
+        if (app_session_mod.app_remote_backend) |*backend| {
+            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                if (term.surface.remote == null or term.rt.close_complete) continue;
+                if (backend.windowCloseReadiness(term.rt.handle) == .event_pending) return .event_pending;
+            };
+        }
+    }
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (!term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder or term.rt.close_complete) continue;
+        if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending) return .event_pending;
+        term.rt.close_complete = true;
+    };
+    return .complete;
+}
+
+/// 확인을 이미 통과했거나 확인이 필요 없는 창 닫기를 한 단계 진행한다. pending이면 tick만 같은 요청을
+/// 재시도하고, 모든 runtime이 complete가 된 뒤에만 programmatic window-close latch를 게시한다.
+pub fn advancePendingWindowClose(self: *AppSession) void {
+    if (!self.window_close_pending) return;
+    if (advanceWindowClose(self) == .event_pending) return;
+    self.window_close_pending = false;
+    self.latchSessionClose();
+}
+
 pub fn requestWindowClose(self: *AppSession) bool {
     if (file_panel_ops.blockSessionExitForFilePanels(self)) return true;
+    if (self.window_close_pending) {
+        advancePendingWindowClose(self);
+        return !self.ended_seen;
+    }
     if (!self.closeTargetHasRunningJob(.window)) {
-        // remote target 하나라도 pending이면 어느 target의 routing/authority도 먼저 게시하지 않는다.
-        if (builtin.os.tag == .macos) {
-            if (app_session_mod.app_remote_backend) |*backend| {
-                for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-                    if (term.surface.remote == null or term.rt.close_complete) continue;
-                    if (backend.windowCloseReadiness(term.rt.handle) == .event_pending) return true;
-                };
-            }
-        }
-        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-            if (!term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder or term.rt.close_complete) continue;
-            if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending) return true;
-            term.rt.close_complete = true;
-        };
-        return false;
+        if (advanceWindowClose(self) == .complete) return false;
+        self.window_close_pending = true;
+        return true;
     }
     self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
     return true;
+}
+
+/// 실행 중 명령 확인을 수락한 window 요청을 일반 session latch로 우회시키지 않고 같은 runtime close graph에 넣는다.
+pub fn confirmWindowClose(self: *AppSession) void {
+    self.window_close_pending = true;
+    advancePendingWindowClose(self);
 }
 
 /// 이 창의 trust 분류(§8A.5) — chrome_minimal이면 quick, 아니면 normal. cross-window 이동의 trust boundary

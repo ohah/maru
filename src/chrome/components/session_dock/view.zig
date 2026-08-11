@@ -22,7 +22,7 @@ const types = @import("types.zig");
 // cannot promise the size or optical centre of a Chrome header affordance.
 // Dock controls select shared semantic icons with `Fit.tight` rather than dock-specific names: all
 // lower through `iconInRect`/`leading_icon_group` into the same 18pt logical slot (never a terminal
-// cell — agent-session-list.md §2.1.1; `headerRefresh`'s `!wide_icon` fallback is the one dormant cell
+// cell — agent-session-list-layout.md §2.1.1; `headerRefresh`'s `!wide_icon` fallback is the one dormant cell
 // path and its only caller passes `true`), and the tight assets fill that slot more (`search`/`reset` tighten the view box,
 // the chevrons keep it and thicken the stroke) so their optical size stays consistent with cards.
 //
@@ -257,14 +257,14 @@ const Writer = struct {
     }
 
     /// 카드의 disclosure chevron. 등록 SVG affordance는 `icon_in_rect`의 명시 slot으로만 lower한다는
-    /// 계약(docs/agent-session-list.md §2.1.1)을 이 아이콘만 지키지 않고 legacy cell 경로(`wide_icons`)에
+    /// 계약(docs/agent-session-list-layout.md §2.1.1)을 이 아이콘만 지키지 않고 legacy cell 경로(`wide_icons`)에
     /// 남아 있었다. 그 경로는 measured artifact를 타지 않아 어떤 clip도 닿지 않으므로, 카드가 스크롤로
     /// 목록 위를 벗어나면 chevron만 고정 chrome 위에 그려졌다. 다른 affordance(refresh·search·group
     /// chevron)와 같은 경로로 합류시켜 clip을 함께 받는다.
     fn cardDisclosure(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics) ViewError!void {
         const extent = metrics.group_disclosure_extent;
         // 우측 inset은 카드가 이미 소유한 logical content inset이다. 예전에는 terminal cell 폭을 썼는데,
-        // 그러면 터미널 폰트를 바꾸는 것만으로 chevron이 좌우로 움직여 docs/agent-session-list.md §2.1.1의
+        // 그러면 터미널 폰트를 바꾸는 것만으로 chevron이 좌우로 움직여 docs/agent-session-list-layout.md §2.1.1의
         // "도크 기하는 terminal cell에서 결정하지 않는다"를 어긴다. 좌측 텍스트 inset과 같은 값을 써서
         // chevron의 우측 여백이 카드 좌측 여백과 시각적으로 맞도록 한다.
         const inset: f32 = @floatFromInt(metrics.card_inset_x);

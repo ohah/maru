@@ -175,7 +175,7 @@ pub fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
         // (layering-and-portability 금지).
         //
         // 대신 두 바가 **공유 logical token**(`space.bar_height_pt`)을 통해 같은 높이를 낸다 —
-        // docs/agent-session-list.md §2.1.3이 "정렬이 필요하면 terminal 쪽이 아니라 두 chrome이 공유하는
+        // docs/agent-session-list-layout.md §2.1.3이 "정렬이 필요하면 terminal 쪽이 아니라 두 chrome이 공유하는
         // logical token을 새로 만든다"고 예고한 해법이다. 방향이 반대라는 점이 핵심이다: 도크가 터미널
         // 식을 물려받는 게 아니라, 터미널 탭 바가 도크가 쓰던 40pt를 함께 본다. 모든 뷰가 이 값 하나를
         // 쓰므로 뷰 전환도, 터미널 폰트 변경도 아이콘 위치를 움직이지 않는다.

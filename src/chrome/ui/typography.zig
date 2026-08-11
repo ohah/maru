@@ -28,7 +28,7 @@ pub const Token = struct {
 
 /// 사용자 보고(2026-08-05): 도크 텍스트가 같은 화면의 터미널 글자보다 눈에 띄게 컸다. Chrome **scale**은
 /// terminal `font.size`/line spacing과 의도적으로 독립이지만(그 독립성이 계약이다 —
-/// docs/agent-session-list.md §2.1.1), 절대값 자체는 조정 가능한 결정이라 두 단계 낮춘다. 이 값은
+/// docs/agent-session-list-layout.md §2.1.1), 절대값 자체는 조정 가능한 결정이라 두 단계 낮춘다. 이 값은
 /// `DockMetrics`가 카드/행 높이를 계산하는 입력이기도 해서 목록 밀도도 함께 조금 촘촘해진다.
 ///
 /// **face는 그 독립성의 대상이 아니다.** 어느 폰트로 그릴지는 여기서 정하지 않고 platform adapter가

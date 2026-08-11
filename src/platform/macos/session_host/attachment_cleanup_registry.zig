@@ -21,6 +21,10 @@ fn ensureSettlementSealReadyForTest() !process_seal.ReadyIdentity {
     if (!builtin.is_test) unreachable;
     return process_seal.currentReadyIdentity() catch |err| switch (err) {
         error.NotReady => blk: {
+            const focused_z = std.c.getenv("MARU_SESSION_HOST_C3B3_REGISTRY_FIXTURE") orelse
+                return error.SkipZigTest;
+            if (!std.mem.eql(u8, std.mem.span(focused_z), "prepared-release-v1"))
+                return error.SkipZigTest;
             const pid = process_seal.currentProcessId();
             const prepared = try process_seal.prepare(pid, 0x3B33_0001);
             process_seal.commitReady(prepared);

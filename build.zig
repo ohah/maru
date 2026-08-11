@@ -2427,6 +2427,10 @@ pub fn build(b: *std.Build) void {
                 });
                 const run = bld.addRunArtifact(artifact);
                 run.addArg(bld.fmt("--maru-expect-tests={d}", .{expected}));
+                run.setEnvironmentVariable(
+                    "MARU_SESSION_HOST_C3B3_REGISTRY_FIXTURE",
+                    "prepared-release-v1",
+                );
                 run.setCwd(bld.path("."));
                 step.dependOn(&run.step);
             }
@@ -2514,6 +2518,19 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_attachment_module, "C3-3b3 preparation facade 결과", 1);
+        const event_c3_3b3_registry_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/attachment_cleanup_registry.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b3_step,
+            event_c3_3b3_registry_module,
+            "C3-3b3 prepared registry release",
+            2,
+        );
         const event_c3_3b3_client_slot_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
             .target = target,

@@ -37,7 +37,7 @@ L4  src/platform/macos/          셀·quad lowering · 입력 이벤트 · IME(�
 
 **L3를 단일 파일로 두지 않는 이유**: 시각 매핑·뷰포트·기하·gutter·미니맵은 서로 다른 이유로 바뀐다. [project-rules.md](project-rules.md) §구조와 파일 분리("한 모듈이 서로 무관한 책임을 갖기 시작하면 모듈을 분리한다")와 [project-structure.md](project-structure.md)의 "폴더가 domain, 파일명이 그 안의 한 책임" 규칙을 그대로 적용한다. 단 **`geometry.zig`는 쪼개지 않는다** — 그리기와 hit-test가 한 레이아웃 소스를 공유해야 한다는 [chrome-strategy.md](chrome-strategy.md) §5.4 MUST가 그 둘을 같은 파일에 묶는 근거다.
 
-**L2가 모델을 갖는 근거**: L2 session core의 책임에 이미 "scroll/reorder 수학"이 들어 있고, [editor-surface.md](editor-surface-structure.md) §3.4가 `src/session/editor/`를 editor L2 코어 자리로 이미 정해 두었다. 문서 모델은 그 옆에 선다.
+**L2가 모델을 갖는 근거**: L2 session core의 책임에 이미 "scroll/reorder 수학"이 들어 있고, [editor-surface-structure.md](editor-surface-structure.md) §3.4가 `src/session/editor/`를 editor L2 코어 자리로 이미 정해 두었다. 문서 모델은 그 옆에 선다.
 
 **L3가 표시를 갖는 근거**: 표시에 필요한 것이 전부 chrome 소유다 — 색·폰트 토큰(테마 일관성), 스크롤바·포커스 테두리(사이드바·도크와 같아 보여야 함), gutter·미니맵 프레임, pointer 상태 관리. [layering-and-portability.md](layering-and-portability.md)의 "chrome이 session을 props로만 읽음" 패턴을 그대로 쓴다.
 
@@ -75,7 +75,7 @@ L3는 L2 캐시를 **복사하지 않고 읽는다** — chrome이 session을 pr
 | **커서·선택·블록 선택 렌더** | **재활용** — chrome 컴포넌트가 아니라 **렌더러 셀 속성**이다. `metal_frame`의 overlay 종류(block=전체 사각형·underline·bar·hollow)가 이미 있고, 블록 선택은 터미널 `selection.zig`에 선례가 있다(`selection_anchor/head/block`). **멀티 커서를 위해 새 UI를 만들 필요가 없다** — `cursor_start`/`cursor_cells` 단일 구간을 배열로 넓히는 ABI 확장 하나뿐이다 | §1.1·§3.2 |
 | 저장 실패·충돌 알림 | **재활용** `notice.zig` | [editor-surface.md](editor-surface.md) 저장 계약 |
 | dirty 상태로 닫기 확인 | **재활용** `confirm.zig`(스스로 "재사용 가능한 디자인 시스템 컴포넌트"라 선언) | [file-panel.md](file-panel.md) dirty 게이트 |
-| 진행 표시(로딩·검색 중) | **컴포넌트 불요 — 텍스트로 낸다.** 저장소에 스피너·프로그레스가 없고(`input_box` 주석: "프로그레스바 대신 인풋박스"), [editor-surface.md](editor-surface-dock.md) §3.5가 `읽는 중…` 텍스트 선례를 갖는다. §2.2 상태바로 내보낸다 | §2.1·§2.2 |
+| 진행 표시(로딩·검색 중) | **컴포넌트 불요 — 텍스트로 낸다.** 저장소에 스피너·프로그레스가 없고(`input_box` 주석: "프로그레스바 대신 인풋박스"), [editor-surface-dock.md](editor-surface-dock.md) §3.5가 `읽는 중…` 텍스트 선례를 갖는다. §2.2 상태바로 내보낸다 | §2.1·§2.2 |
 | **바꾸기 입력 필드** | **신규(작음)** — `find.zig`는 입력이 **하나뿐**(`overlay_input` 검색어)이라 바꿀 문자열 자리가 없다. 같은 오버레이에 두 번째 입력을 더한다 | §5.1 |
 | **호버·시그니처 박스** | **신규** — `modal_box.zig`는 **중앙** 모달 프리미티브라 caret 옆 소형 박스에 맞지 않고, `dropdown` 팝업은 "목록"이라 텍스트 블록과 형태가 다르다. **LSP가 마크다운을 반환하므로 최소 서식 해석이 딸린다**(§8.3) — 기하는 재활용하되 내용 처리가 있어 "작음"으로 보지 않는다 | §8.3 |
 | **본문 텍스트 렌더** | **신규**(단, 터미널 셀 렌더 경로를 그대로 탄다) | §2 L3/L4 |

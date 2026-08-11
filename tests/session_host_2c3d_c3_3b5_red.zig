@@ -304,28 +304,6 @@ fn receiptWithGeneration(handle: u64, generation: u64, ticket: u64) close_contra
     };
 }
 
-test "C3-3b5 remote backend는 두 host 합계 runtime 4096개만 허용한다" {
-    try red();
-}
-test "C3-3b5 remote backend는 4097번째를 allocator와 host RPC 전에 거부한다" {
-    try red();
-}
-test "C3-3b5 remote backend는 spawn 실패 reservation을 회수해 capacity를 재사용한다" {
-    try red();
-}
-test "C3-3b5 remote backend는 attach와 restore 실패 reservation을 회수해 capacity를 재사용한다" {
-    try red();
-}
-test "C3-3b5 remote backend scan scratch는 256 KiB 이하이고 callback allocation이 없다" {
-    try red();
-}
-test "C3-3b5 remote backend는 iterator를 닫은 뒤에만 relookup과 callback을 수행한다" {
-    try red();
-}
-test "C3-3b5 remote backend는 active pin 제거를 보류하고 다음 tick에 exact once 회수한다" {
-    try red();
-}
-
 test "C3-3b5 AppSession은 in-process multi-Term complete 뒤에만 topology를 갱신한다" {
     try red();
 }

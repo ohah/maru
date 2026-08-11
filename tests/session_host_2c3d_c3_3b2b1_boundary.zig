@@ -101,8 +101,8 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         ),
     );
     try std.testing.expectEqual(
-        // C3-3b3 receipt/permit owner 7개가 process domain을 자체 모듈 경계에서 검증한다.
-        @as(usize, 13),
+        // C3-3b3 receipt/permit과 b5 close authority/admission owner가 process domain을 자체 경계에서 검증한다.
+        @as(usize, 15),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
     inline for (.{

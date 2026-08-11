@@ -778,6 +778,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // 이 정적 라이브러리는 Zig가 아니라 Swift가 최종 링크한다. Zig 0.16 JSON/float 경로가 쓰는
+    // compiler-rt 보조 심볼을 archive에 포함해야 Swift linker가 별도 Zig runtime을 추측하지 않는다.
+    macos_app_host_abi_lib.bundle_compiler_rt = true;
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
     // build_options 모듈(위에서 생성)을 app host lib에도 주입 — 계약 테스트 모듈과 같은 모듈을 공유한다.
     macos_app_host_abi_lib.root_module.addImport("build_options", build_options_mod);
@@ -834,6 +837,8 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        // smoke ABI도 Swift가 직접 링크하므로 제품 ABI와 같은 compiler-rt 소유 규칙을 따른다.
+        macos_mermaid_smoke_abi_lib.bundle_compiler_rt = true;
         macos_mermaid_smoke_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
         macos_mermaid_smoke_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),

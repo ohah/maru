@@ -2595,6 +2595,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/session_host_2c3d_c3_3b5_red.zig"),
             .target = target,
             .optimize = b3_optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{
+                    .name = "close_contract",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/remote_close_contract.zig"),
+                        .target = target,
+                        .optimize = b3_optimize,
+                    }),
+                },
+            },
         });
         inline for (.{
             .{ "C3-3b5 중립 계약", 6 },

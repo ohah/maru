@@ -38,6 +38,19 @@ const core_command = @import("../session/core_command.zig");
 /// (docs/persistent-session-host.md §4 `runtime_id`).
 pub const RuntimeHandle = u64;
 
+/// close가 같은 호출에서 끝났는지 다음 maintenance tick이 이어야 하는지 나타낸다.
+pub const CloseProgress = enum(u8) {
+    complete,
+    event_pending,
+};
+
+/// backend map row 제거의 닫힌 결과다. `invalid`는 살아 있는 row의 stale 요청에만 쓴다.
+pub const RemoveProgress = enum(u8) {
+    removed,
+    event_pending,
+    invalid,
+};
+
 /// 화면(`RenderSnapshot`)과 별개인 runtime 관측의 가용성. host-backed client가 구 host에 붙었거나 아직 initial
 /// metadata를 못 받은 상태를 "cwd 없음/foreground 없음"으로 오인하지 않도록 empty 값과 unavailable을 구분한다.
 pub const ObservationAvailability = enum {

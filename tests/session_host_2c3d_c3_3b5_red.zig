@@ -1,21 +1,47 @@
+const std = @import("std");
+const maru = @import("maru");
+const close_contract = @import("close_contract");
+
 fn red() !void {
     return error.C3B5NotImplemented;
 }
 
 test "C3-3b5 중립 계약 CloseProgress는 complete와 event_pending만 허용한다" {
-    try red();
+    const Progress = maru.app.term_runtime_backend.CloseProgress;
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Progress.complete));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Progress.event_pending));
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(Progress).@"enum".fields.len);
 }
 test "C3-3b5 중립 계약 RemoveProgress는 removed와 event_pending과 invalid만 허용한다" {
-    try red();
+    const Progress = maru.app.term_runtime_backend.RemoveProgress;
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Progress.removed));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Progress.event_pending));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(Progress.invalid));
+    try std.testing.expectEqual(@as(usize, 3), @typeInfo(Progress).@"enum".fields.len);
 }
 test "C3-3b5 중립 계약 CloseScanReceipt는 재귀 pointer-free exact schema다" {
-    try red();
+    const fields = @typeInfo(close_contract.CloseScanReceipt).@"struct".fields;
+    try std.testing.expectEqual(@as(usize, 4), fields.len);
+    try std.testing.expectEqualStrings("handle", fields[0].name);
+    try std.testing.expectEqualStrings("runtime_generation", fields[1].name);
+    try std.testing.expectEqualStrings("close_request_generation", fields[2].name);
+    try std.testing.expectEqualStrings("close_schedule_ticket", fields[3].name);
+    try std.testing.expect(close_contract.recursivelyPointerFree(close_contract.CloseScanReceipt));
 }
 test "C3-3b5 중립 계약 CloseSweep active shape는 max ticket과 cursor만 봉인한다" {
-    try red();
+    const active_fields = @typeInfo(close_contract.CloseSweep.Active).@"struct".fields;
+    try std.testing.expectEqual(@as(usize, 2), active_fields.len);
+    try std.testing.expectEqualStrings("max_ticket", active_fields[0].name);
+    try std.testing.expectEqualStrings("cursor_after_ticket", active_fields[1].name);
+    try std.testing.expect(close_contract.recursivelyPointerFree(close_contract.CloseSweep));
 }
 test "C3-3b5 중립 계약 close ticket은 1과 max를 허용하고 0과 exhaustion을 거부한다" {
-    try red();
+    try std.testing.expect(!close_contract.validCloseScheduleTicket(0));
+    try std.testing.expect(close_contract.validCloseScheduleTicket(1));
+    try std.testing.expect(close_contract.validCloseScheduleTicket(std.math.maxInt(u64)));
+    var issuer: close_contract.CloseTicketIssuer = .{ .last_issued = std.math.maxInt(u64) - 1 };
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), issuer.issue());
+    try std.testing.expect(issuer.issue() == null);
 }
 test "C3-3b5 중립 계약 VTable은 field 순서를 유지하고 close 반환형만 바꾼다" {
     try red();

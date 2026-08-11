@@ -276,6 +276,28 @@ const cases = [_]Case{
         .contract = "랩으로 이어진 행은 번호가 비고, 논리 줄 번호는 1..7로 밀리지 않는다",
         .rect = .{ .x = 0, .y = 0, .w = 60, .h = 215 },
     },
+    // §4 — **가로 스크롤**(`first_col = 20`). 같은 fixture를 랩 대신 밀어서 본다.
+    //
+    // **자 줄(y<16)은 일부러 뺐다.** `0123456789`가 10주기라 20열을 밀어도 그림이 같아서, 그 줄을
+    // 넣으면 스크롤이 통째로 죽어도 통과하는 rect가 된다. 대신 `fn wrap(...)`·주석 줄들이 앞을
+    // 잘라낸 채 시작하는 것을 본다.
+    .{
+        .name = "editor-hscroll-body",
+        .capture = "editor-hscroll.ppm",
+        .contract = "본문이 first_col만큼 밀려 그려진다(앞 20열이 화면에 없다)",
+        .rect = .{ .x = 0, .y = 16, .w = 480, .h = 64 },
+    },
+    // **gutter가 제자리인 것은 위 rect가 함께 본다**(x가 0부터라 번호 열을 포함한다). 따로 case를
+    // 두었다가 지웠다 — gutter는 `first_col`을 아예 받지 않아 밀릴 수가 없고, 그래서 그 case가
+    // 잡을 회귀가 지금은 없다. gutter가 가로 위치를 알게 되면 그때 다시 넣는다.
+    // 2칸 글자가 **왼쪽** 경계에 걸치는 자리(51칸 ASCII + 한글). 오른쪽 경계는 랩이 보고, 이쪽은
+    // 가로 스크롤이 본다 — 반쪽을 그릴 수 없으므로 통째로 빼고 한 칸이 빈다.
+    .{
+        .name = "editor-hscroll-wide-boundary",
+        .capture = "editor-hscroll.ppm",
+        .contract = "밀린 뒤에도 2칸 글자가 쪼개지지 않는다(왼쪽 경계에 걸치면 통째로 뺀다)",
+        .rect = .{ .x = 0, .y = 140, .w = 480, .h = 24 },
+    },
     .{
         .name = "editor-wide-glyph-bars",
         .capture = "editor-wide-glyph.ppm",

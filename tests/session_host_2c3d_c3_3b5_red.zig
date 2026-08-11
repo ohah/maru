@@ -1,6 +1,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const close_contract = @import("close_contract");
+const pending_owner = @import("pending_owner");
 
 fn red() !void {
     return error.C3B5NotImplemented;
@@ -48,19 +49,19 @@ test "C3-3b5 중립 계약 VTable은 field 순서를 유지하고 close 반환�
 }
 
 test "C3-3b5 close readiness idle은 complete다" {
-    try red();
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.idle)));
 }
 test "C3-3b5 close readiness preparing은 event_pending이다" {
-    try red();
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.preparing)));
 }
 test "C3-3b5 close readiness prepared는 event_pending이다" {
-    try red();
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.prepared)));
 }
 test "C3-3b5 close readiness settling은 event_pending이다" {
-    try red();
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.settling)));
 }
 test "C3-3b5 close readiness committed_cleanup은 event_pending이다" {
-    try red();
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.committed_cleanup)));
 }
 test "C3-3b5 close readiness invalid raw는 전용 fatal leaf로 닫힌다" {
     try red();

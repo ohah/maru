@@ -16,6 +16,7 @@ const settlement = @import("pending_event_settlement_contract.zig");
 const lifetime = @import("runtime_lifetime_owner.zig");
 
 const RuntimeObservation = maru.app.RuntimeObservation;
+const CloseProgress = maru.app.term_runtime_backend.CloseProgress;
 const zero_digest = [_]u8{0} ** 32;
 
 pub const PendingLifecycle = enum(u8) {
@@ -25,6 +26,21 @@ pub const PendingLifecycle = enum(u8) {
     settling = 3,
     committed_cleanup = 4,
 };
+
+/// close sweep는 b4 전에는 semantic event를 실행하지 않고 이 readiness만 읽는다.
+/// invalid raw를 pending으로 숨기면 파괴가 영구 보류되므로 dedicated fail-stop으로 닫는다.
+pub fn closeReadinessRaw(lifecycle_raw: u8) CloseProgress {
+    const lifecycle = std.enums.fromInt(PendingLifecycle, lifecycle_raw) orelse
+        process_seal.fatalIntegrity(.invalid_pending_close_lifecycle);
+    return switch (lifecycle) {
+        .idle => .complete,
+        .preparing, .prepared, .settling, .committed_cleanup => .event_pending,
+    };
+}
+
+pub fn closeReadiness(self: *const PendingEventOwner) CloseProgress {
+    return closeReadinessRaw(self.lifecycle_raw);
+}
 
 pub const PendingEventIdentity = struct {
     expected_major: u16 = 0,

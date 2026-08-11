@@ -75,6 +75,10 @@ pub const IntegrityReason = enum(u8) {
     counter_exhausted = 5,
     destructive_reentry = 6,
     proof_loss = 7,
+    invalid_pending_close_lifecycle = 8,
+    close_ticket_exhausted = 9,
+    close_runtime_absent = 10,
+    active_close_operation = 11,
 };
 
 // Diagnostic evidence only: it grants no cleanup or recovery authority, and the first reason wins.

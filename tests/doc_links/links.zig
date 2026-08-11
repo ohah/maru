@@ -222,9 +222,17 @@ const SectionRef = struct { path: []const u8, sec: []const u8, line: usize };
 
 /// 파일명과 § 사이에 허용하는 것: 링크 닫기 `)`, 백틱, 공백, 중점(`·`). 그 이상 끼면
 /// "이 문서가 소유하고, 그 안의 §N은…" 같은 **진입점 참조**라 대상이 다르다(실측 오탐의 절반).
-fn sectionRefAt(line: []const u8, md_end: usize) ?[]const u8 {
+///
+/// **절이 이어지면 전부 모은다.** `foo.md §2·§6·§10`은 셋 다 같은 문서를 가리키므로, 첫 절만 보면
+/// 뒤쪽이 조용히 어긋난다 — 웹 패널 분할에서 실제로 `§2`가 유효해 통과한 자리에 `§10`이 죽어 있었다.
+/// 구분자(`·`·`,`) 없이 다른 토큰이 오면 거기서 멈춘다(`§10 4e-3.`의 `4e-3`을 절로 오인하지 않게).
+fn collectChainedSections(arena: std.mem.Allocator, line: []const u8, md_end: usize, out: *std.ArrayList([]const u8)) !void {
+    const stops = [_]u8{ ' ', ')', ',', '.', '·', 0xEA, 0xC2, 0xEB, 0xEC, 0xED };
+
+    // ① 파일명 뒤에서 첫 `§`를 찾는다.
     var i = md_end;
     var gap: usize = 0;
+    var found = false;
     while (i < line.len and gap < 4) {
         const c = line[i];
         if (c == ')' or c == '`') {
@@ -242,11 +250,46 @@ fn sectionRefAt(line: []const u8, md_end: usize) ?[]const u8 {
             continue;
         }
         if (c == 0xC2 and i + 1 < line.len and line[i + 1] == 0xA7) { // '§'
-            return leadingNumber(line[i + 2 ..], &.{ ' ', ')', ',', '.', '·', 0xEA, 0xC2, 0xEB, 0xEC, 0xED });
+            i += 2;
+            found = true;
+            break;
         }
-        return null;
+        return;
     }
-    return null;
+    if (!found) return;
+
+    // ② `§N` 하나를 읽고, 뒤에 `·§`/`,§`가 이어지는 동안 반복한다.
+    while (true) {
+        const num = leadingNumber(line[i..], &stops) orelse return;
+        try out.append(arena, num);
+        i += num.len;
+
+        var j = i;
+        var saw_sep = false;
+        while (j < line.len) {
+            if (line[j] == ' ') {
+                j += 1;
+                continue;
+            }
+            if (line[j] == ',') {
+                saw_sep = true;
+                j += 1;
+                continue;
+            }
+            if (line[j] == 0xC2 and j + 1 < line.len and line[j + 1] == 0xB7) { // '·'
+                saw_sep = true;
+                j += 2;
+                continue;
+            }
+            break;
+        }
+        if (!saw_sep) return;
+        if (j + 1 < line.len and line[j] == 0xC2 and line[j + 1] == 0xA7) { // '§'
+            i = j + 2;
+            continue;
+        }
+        return;
+    }
 }
 
 fn collectSectionRefs(arena: std.mem.Allocator, text: []const u8) ![]SectionRef {
@@ -269,7 +312,9 @@ fn collectSectionRefs(arena: std.mem.Allocator, text: []const u8) ![]SectionRef 
         while (std.mem.indexOfPos(u8, line, i, ".md")) |md| {
             const end = md + 3;
             i = end;
-            const sec = sectionRefAt(line, end) orelse continue;
+            var secs: std.ArrayList([]const u8) = .empty;
+            try collectChainedSections(arena, line, end, &secs);
+            if (secs.items.len == 0) continue;
             // 파일명 앞으로 되짚어 경로를 뽑는다(`[라벨](docs/a.md)` 의 경로 부분, 또는 평문 `docs/a.md`).
             var s = md;
             while (s > 0) {
@@ -279,7 +324,9 @@ fn collectSectionRefs(arena: std.mem.Allocator, text: []const u8) ![]SectionRef 
                 s -= 1;
             }
             if (s == md) continue;
-            try refs.append(arena, .{ .path = line[s..end], .sec = sec, .line = line_no });
+            for (secs.items) |sec| {
+                try refs.append(arena, .{ .path = line[s..end], .sec = sec, .line = line_no });
+            }
         }
     }
     return refs.items;
@@ -558,6 +605,32 @@ test "절 참조 수집: 파일명 바로 뒤만 보고 진입점 참조는 거�
     try std.testing.expectEqualStrings("4.2", refs[0].sec);
     try std.testing.expectEqualStrings("3", refs[1].sec);
     try std.testing.expectEqualStrings("2.1", refs[2].sec);
+}
+
+test "절 참조 수집: 이어지는 절을 모두 모으고 구분자가 끊기면 멈춘다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // `·`로 이어지면 셋 다 같은 문서를 가리킨다.
+    const chain = try collectSectionRefs(arena, "모델은 docs/a.md §2·§6·§10 4e-3이 정한다.");
+    try std.testing.expectEqual(@as(usize, 3), chain.len);
+    try std.testing.expectEqualStrings("2", chain[0].sec);
+    try std.testing.expectEqualStrings("6", chain[1].sec);
+    try std.testing.expectEqualStrings("10", chain[2].sec);
+
+    // **`§10` 뒤의 `4e-3`은 절이 아니다** — 구분자 없이 다른 토큰이 오면 거기서 끝난다.
+    // 이 경계가 없으면 본문 숫자를 절로 오인해 오탐이 쏟아진다.
+    for (chain) |r| try std.testing.expect(!std.mem.eql(u8, r.sec, "3"));
+
+    // 쉼표와 소수점 절 번호도 같은 규칙.
+    const commas = try collectSectionRefs(arena, "`docs/b.md` §13.3, §13.6.1, §13.8 참고.");
+    try std.testing.expectEqual(@as(usize, 3), commas.len);
+    try std.testing.expectEqualStrings("13.6.1", commas[1].sec);
+
+    // 단일 절은 그대로 하나.
+    const one = try collectSectionRefs(arena, "[문서](docs/c.md) §4.2가 소유한다.");
+    try std.testing.expectEqual(@as(usize, 1), one.len);
 }
 
 test "상대 경로 해석: plans/ 하위에서 ../ 가 docs/ 로 올라간다" {

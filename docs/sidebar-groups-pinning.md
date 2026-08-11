@@ -195,21 +195,9 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
   GL §13 로컬 pin으로 정정)·`toggleGroupPin`·`clampGroupMoveToRegion` 프리뷰=확정(GP3). ④ **렌더**: `pin_derived`·`sidebarRowShowsPin`·
   `pinBoundariesAlignGroups` desync 검출/흡수(GP4).
 
-### 12.12 단계 GP1~5
+### 12.12 단계 분해
 
-1. **GP1 — pin-region-aware 파생 토대(동작 보존, 그룹 고정 토글 없음) ✅**: 7 subtree-스캔에 pin-region 리셋/경계 +
-   `firstGroupStartInRegion`·`pinRegionBounds`·`enclosingGroupMarkerIndex` 핀 클램프 + 8 호출처. 고정 그룹 0개면 byte-identical(§12.11 ①),
-   인위 배치로 7 경계 단언(§12.11 ②). `toggleGroupPin`·정규화·clamp·`pin_derived`·UX는 **미포함**(파생 코어가 pin-region을
-   **인식**하는 토대만).
-2. **GP2 — `normalizePinnedFromGroups` + 복원 순서(§12.5) ✅**: shred → canonical(suffix-exclusion). `stablePartition`/`togglePin`
-   회귀 0. 복원은 normalize→`stablePartitionPinned` 순서, 마커 pinned 승계(`inheritGroupMarker`), 드래그 게이트.
-3. **GP3 — `toggleGroupPin` + plan 산출부 단일 clamp(§12.6) + 헤더 항목 ✅**: 고정 그룹 비고정 드래그 → `clampGroupMoveToRegion`
-   (SG8 등가 확장, 프리뷰=확정). 토글은 `stablePartitionPinned` 안착. 개별 pin 입구 차단·removeFromGroup unpin 선행.
-4. **GP4 — UX(§12.8·§12.10) ✅**: `pin_derived`+`sidebarRowShowsPin`으로 멤버·마커 카드 📌 억제·헤더 인디케이터, `assertPinnedPrefixRuntime`
-   확장(`pinBoundariesAlignGroups`), pane/remove 리전 정정 + macOS 스크린샷. 훅 `MARU_FORCE_GROUP_PIN`.
-5. **GP5 — 잔재/문서 ✅**: §10 백로그 "그룹 고정" → C2 해소, §12 최종 동기화(§12.5 suffix-exclusion·§12.6 `stablePartitionPinned`·
-   §12.8 `sidebarRowShowsPin`·§12.11 `pinBoundariesAlignGroups`), dead code 없음 확인, 회귀 매트릭스(GP1~4+SG3~SG8+pin) green.
-
+[사이드바 그룹 단계 분해](plans/sidebar-groups.md)가 소유한다 — 단계와 완료 이력은 계획 문서 몫이다.
 ### 12.13 리스크
 
 - **[약점 최상]** "고정 그룹 + 비고정 최상위 카드"(§12.1) — C2 2앵커만 해소. **정정: 파생 2차 일반화 폭발은 없다**(§12.4 —
@@ -394,33 +382,9 @@ pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 �
 ==null) 밖에서 쓴다. **true만 기록·false=키 생략**(round-trip 고정점·옛 파일 flat 정상·옛 리더 미지 키 skip으로 forward-compat).
 캡처/복원 왕복(`local_pinned`)도 additive. 로컬 pin 0개면 기존 파일 **byte-identical**.
 
-### 13.10 단계 GL1~5 — 각 단계 독립 동작·green
+### 13.10 단계 분해
 
-1. **GL1 — 저장·파생 토대(동작 보존) ✅**: `Tab.local_pinned`(session_model + workspace 모델) + `local-pinned` 직렬화(additive,
-   false=키 생략) + 캡처/복원 왕복 + `stablePartitionSubtree`(reorderTabs 재사용·unit-aware·포인터 재탐색·드래그 게이트) 코어.
-   **아직 배선(mutation 지점)·토글·UX·렌더·위생 없음**. 로컬 pin 0개면 no-op → 기존 그룹/pin/SG8 **byte-identical**(회귀 0).
-   헤드리스: leaf 멤버 float→마커 직후·자식 subgroup 통째 skip·groupSubtreeEnd/effectiveDepthAt 보존·드래그 게이트·round-trip.
-2. **GL2 — 배선 + 토글 + 드래그 clamp + 멤버 우클릭 UX ✅**(구현 커밋이 초안 GL2·GL3를 합침): §13.4 표준 순서로
-   `stablePartitionSubtree`를 mutation 지점(+복원)에 배선(각 마커 재귀·게이트) + `toggleLocalPin`(멤버) + `simulateDrop`
-   subtree-로컬 clamp(§13.5) + **그룹 안 멤버 우클릭 "그룹 내 위치 고정"/"고정 해제"**(`cardPinRole` 분기 — 마커=그룹째·
-   최상위=개별 전역 pin·멤버=로컬, 현행 그룹째 위임 되돌림). 헤드리스: 멤버 pin→float·드래그 clamp 프리뷰=확정·카드 pin 라우팅.
-3. **GL3 — 렌더 📌 + 위생 + 드래그 프리뷰=확정 엣지 완성 + 마커 카드 로컬 pin 뒤 배치 ✅**(초안 GL4 = 렌더+위생을 이 단계로
-   통합): `Row.card.local_pinned` 힌트 + `sidebarRowShowsPin` 선두 분기(§13.6, 멤버 📌 부활, pin_derived 직교) + 전이 3경로 위생
-   스윕 `clearStaleLocalPins`(§13.7) + **확정 클램프**(§13.5 — `commitSidebarDragPreview`가 마커-eject 엣지에서 프리뷰=확정을 완성)
-   + **마커 자기 카드 렌더 위치 = 로컬 pin 뒤**(§13.6.1 — `projectRowsCore` 버퍼링·재방출로 로컬 pin이 그룹 절대 최상단; self.tabs
-   불변·hit-test row.tab 정합·프리뷰=확정·로컬 pin 0개 byte-identical). macOS 제품 스크린샷(신규 훅 `MARU_FORCE_GROUP_LOCALPIN`·
-   공존 `_GROUPPIN`). 헤드리스: GL3(a)·(a2 공존)·(b1/b2/b3 위생)·(c 드래그 엣지)·(d 마커 카드 순서·hit-test·byte-identical·프리뷰=확정).
-4. **GL4 — 공존·중첩 하드닝 + 버그 2건 수정 ✅**: 그룹째×로컬 공존 헤드리스(§13.4 keystone — GL4(a): 그룹째 고정이 로컬 pin
-   그룹을 전역 프리픽스로 옮겨도 subtree float 보존·배선 순서·재토글·idempotent·렌더) + 중첩 재귀 float(GL4(b): 자식 subgroup
-   안 leaf float, 부모→자식 순차·자식 마커 카드 위 배치·I3 depth 보존) + 회귀 매트릭스(GL4(c): 그룹 색·rename·검색·pane 분리
-   공존). **버그 2건 수정**(별도 fix 커밋): **버그1** = 최상위 카드가 그룹에 흡수(`createTab`이 `firstGroupStartInRegion(pinned_count,
-   len)` 앞 삽입 — `promotePaneToNewWorkspace`와 공유, §2.1)·**버그2** = 그룹째 고정 해제 시 멤버 로컬 pin 리셋(§13.1·§13.7 —
-   초안 "직교 survival"을 "고정 켜는 동안 직교·해제 시 리셋"으로 뒤집음). 회귀: pin매트릭스 #1(버그1)·#2(버그2)·#3(개별 pin +
-   그룹째 + 로컬 3축 독립 공존).
-5. **GL5 — 확장(다음, 범위 제외)**: **subgroup-as-member/마커 로컬 pin 확장**(§13.8 — 자식 subgroup 마커 자체를 부모 멤버로서
-   로컬 pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float) + 그 트리거·의미 확정. `stablePartitionSubtree`의 unit-aware
-   통째-이동이 이미 구조상 수용하나(§13.8), 트리거·시맨틱 확정은 미착수.
-
+[사이드바 그룹 단계 분해](plans/sidebar-groups.md)가 소유한다 — 단계와 완료 이력은 계획 문서 몫이다.
 ### 13.11 리스크
 
 - **[최상] 멤버 `Tab.pinned`가 전역 파티션 신호**(§13.2 보강1) — 새 필드 `local_pinned`로 격리(전역 머신이 안 읽음)해 닫힘.

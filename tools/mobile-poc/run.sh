@@ -158,6 +158,24 @@ chrome-android)
     $ADB pull /data/local/tmp/maru-chrome-android.ppm "$OUT/maru-chrome-android.ppm" >/dev/null 2>&1 \
         && python3 "$POC/ppm2png.py" "$OUT/maru-chrome-android.ppm" "$OUT/maru-chrome-android.png"
     ;;
+present-ios)
+    # 여섯 기능 중 마지막. 오프스크린에는 "표시 시각"이 없어 앱으로만 판정된다.
+    APP="$OUT/MaruPace.app"
+    rm -rf "$APP" && mkdir -p "$APP"
+    sed 's/@@NAME@@/MaruPace/; s/dev.maru.poc/dev.maru.pace/' "$POC/Info.plist.in" > "$APP/Info.plist"
+    xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
+        "$POC/present_ios.m" \
+        -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
+        -o "$APP/MaruPace"
+    codesign --force --sign - "$APP"
+    DEV=$(xcrun simctl list devices available | grep -m1 'iPhone' | sed 's/.*(\([A-F0-9-]*\)).*/\1/')
+    xcrun simctl boot "$DEV" 2>/dev/null || true
+    xcrun simctl install "$DEV" "$APP"
+    xcrun simctl launch "$DEV" dev.maru.pace
+    sleep 12
+    xcrun simctl spawn "$DEV" log show --last 30s --predicate 'eventMessage CONTAINS "MARU_PACE"' \
+        --style compact 2>/dev/null | grep -o 'MARU_PACE.*'
+    ;;
 chrome-android-app)
     # 앞의 chrome-android 는 오프스크린 텍스처를 PPM 으로 뽑는다. 이건 **에뮬레이터 화면에**
     # 그린다 — NativeActivity + Vulkan swapchain 이라 iOS 시뮬레이터와 같은 조건이 되고,

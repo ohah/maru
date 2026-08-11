@@ -650,8 +650,8 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   invalid raw tag -> fatal integrity를 전수하고 direct void deinit/detach 전용 source boundary를 고정한다. 실제 product `event_pending` close
   parity는 b4 activation 뒤에만 완료로 센다.
 - **b5 RED inventory:** `test-session-host-2c3d-c3-3b5`는 Debug·ReleaseFast 각각 neutral contract 6개,
-  lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 7개, AppSession parity 4개인
-  unique component 39개와 boundary 1개를 실행한다. neutral 범주는 closed raw enum·VTable method-count 유지·pointer-free
+  lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 7개, close graph 2개, AppSession parity 4개인
+  unique component 41개와 boundary 1개를 실행한다. neutral 범주는 closed raw enum·VTable method-count 유지·pointer-free
   receipt·ticket 범위·progress shape를, readiness는 `idle|preparing|prepared|settling|committed_cleanup|invalid raw` 전수를,
   authority는 final-address/copy/replay/disposition/request generation/ticket/pin/callback/ready-remove를,
   sweep는 empty와 0/1/16/17/4,096 owner·frozen max·churn·stale replacement를 검증한다. backend 범주는

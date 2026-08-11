@@ -273,7 +273,9 @@ pub const inventory = [_]Proof{
     // ET-CWD가 root 밖 cwd에서 **root를 갈아끼우게** 되며 또 바뀐다(2026-08-11 사용자 결정 —
     // docs/file-explorer.md §1). 자동 전환 표시 필드(`auto`·재시도 one-shot)와 회귀 단언을 더했을 뿐
     // `@field` 반사는 없다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "692cca6cee7331e0d87754fb863e798078835513b42fcfcb289ac3bc42b90b81" },
+    // C3-3b5가 Term별 close generation/reservation과 AppSession inline close graph를 추가했다. 기존 reflection
+    // 두 곳과 그 대상은 바뀌지 않았고, 새 권위는 별도 process-sealed leaf가 검증한다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "e40ae45ba591412a56918cff8389cfe15af801393b439b75f17e25d5bac7facf" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

@@ -520,6 +520,19 @@ pub fn closeTab(self: *AppSession, index: usize) void {
     self.metal_dirty = true;
 }
 
+/// window close graph가 모든 runtime을 backend에서 `removed`까지 수렴시킨 뒤에만 호출한다. 마지막 탭도 일반
+/// `closeTab`처럼 latch만 남기지 않고 실제 topology를 비워, native window teardown이 direct backend close를 우회하지 않는다.
+pub fn destroyAllTabsForApprovedWindowClose(self: *AppSession) void {
+    self.cancelPointerGesture();
+    for (self.tabs.items) |tab| destroyTabStandalone(self, tab);
+    self.tabs.clearRetainingCapacity();
+    self.surface_ptrs.clearRetainingCapacity();
+    self.app_window.tabs = self.surface_ptrs.items;
+    self.app_window.active_tab = 0;
+    self.ended_seen = true;
+    self.metal_dirty = true;
+}
+
 /// src 트리에서 `index` 워크스페이스(탭)를 **destroy 없이** 떼어 `*Tab`을 반환한다(dst가 소유 승계) — closeTab tail과
 /// 동형이되 `destroyTabStandalone`을 **생략**한다. 담긴 Term/surface/PTY는 heap-pin + 앱-전역 registry 소유라 그대로
 /// 따라온다(이동이지 파괴가 아님). 잔존(src) 측은 closeTab처럼 재정규화·reselect·사이드바 재빌드한다. 마지막 워크스페이스를

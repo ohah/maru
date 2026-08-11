@@ -895,7 +895,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          검증한다. b4가 실제 `event_pending`을 활성화하기 전에 dormant pending 상태 전수를 먼저 닫으며 actual generation
          `event_pending` close E2E는 b4가 소유한다. focused gate `test-session-host-2c3d-c3-3b5`는 최적화 모드마다
          neutral contract 6개, lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 7개,
-         AppSession parity 4개인 unique component 39개와 boundary 1개를 exact-count한다. RED 이후 GREEN에서 범주를
+         close graph 2개와 AppSession parity 4개인 unique component 41개와 boundary 1개를 exact-count한다. RED 이후 GREEN에서 범주를
          합치거나 이름만 남기지 않으며, 각 테스트명은 실제로 관측하는 불변식을 한글로 기술한다. AppSession은
          stable Term membership과 request generation을 봉인한 `PendingTermClose`와 all-or-none `PendingTermCloseGraph`를
          topology mutation 전에 preflight한다. window close는 `windowShouldClose`까지 전달한 공통 `CloseProgress`로 닫기를 막고,

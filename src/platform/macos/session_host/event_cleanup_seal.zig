@@ -63,6 +63,30 @@ pub const RemoteBackendSingletonSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const PendingTermCloseSealInput = struct {
+    self_addr: u64,
+    app_session_addr: u64,
+    app_session_generation: u64,
+    term_addr: u64,
+    surface_id: u64,
+    handle: u64,
+    term_close_generation: u64,
+    request_generation: u64,
+    request_kind_raw: u8,
+    phase_raw: u8,
+    graph_seal: CleanupSeal,
+};
+
+pub const PendingTermCloseGraphSealInput = struct {
+    self_addr: u64,
+    app_session_addr: u64,
+    app_session_generation: u64,
+    graph_generation: u64,
+    target_count: u32,
+    target_digest: Digest,
+    lifecycle_raw: u8,
+};
+
 /// Stable event identity copied from the trusted take projection.  This value deliberately owns
 /// no pointer: addresses are identities only and must never be dereferenced by this leaf.
 pub const PendingEventIdentity = struct {

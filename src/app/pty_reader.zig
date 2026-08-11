@@ -9,7 +9,7 @@ extern "c" fn usleep(usec: c_uint) c_int;
 /// 유발 출력(CPR·DA·OSC 10/11 등)을 쏟으면 out_buf가 무한 증가하던 경로(버그헌트 감사서 확정)를 막는다 — pending(미전송
 /// 응답)이 이 값을 넘으면 추가 응답을 드롭하고(자식이 안 읽어 어차피 전달 불가 — 기존 OOM best-effort `catch {}`와 같은
 /// 의미), 소비된 prefix도 이 값마다 compact해 점유를 ~2×response_buffer_capacity 이내로 bound한다.
-/// 결정·근거의 단일 출처는 docs/io-render-threading.md §8.8(3)이다(옛 "응답 드롭은 OOM만, capping은 실측 근거 시 재검토"를
+/// 결정·근거의 단일 출처는 docs/plans/io-render-threading.md §8.8(3)이다(옛 "응답 드롭은 OOM만, capping은 실측 근거 시 재검토"를
 /// 이 확정 버그 + 사용자 승인으로 갱신 — 추가 전 상의 완료, [[no-defensive-code-without-consult]]). 값은 write_queue cap과 같다.
 pub const response_buffer_capacity: usize = 1 << 18; // 256 KiB
 const PauseState = enum(u8) { running, requested, reached, terminal };
@@ -223,7 +223,7 @@ pub const PtyEventQueue = struct {
     }
 };
 
-/// PTY **입력 방향** 단일-writer 큐(docs/io-render-threading.md §8 Phase 2 — P2-1). 메인 스레드가 PTY로 보낼
+/// PTY **입력 방향** 단일-writer 큐(docs/plans/io-render-threading.md §8 Phase 2 — P2-1). 메인 스레드가 PTY로 보낼
 /// 입력(키/paste/스크롤/질의 응답)을 `enqueueBlocking`으로 넣고, I/O 스레드(PtyReader)가 `drainChunk`로 빼
 /// master에 write한다 — **유일한 writer**라 동시 write 인터리브가 없다(PtyEventQueue=출력 방향과 대칭).
 /// bounded 바이트 FIFO + mutex. 포화 시 enqueue가 backpressure(셸이 입력을 안 읽으면 생산자를 늦춘다).
@@ -356,7 +356,7 @@ pub const PtyWriteQueue = struct {
 };
 
 /// 메인발 비-PTY 코어 mutate(스크롤·선택·리포팅·config)를 I/O 스레드(reader)로 위임하는 명령
-/// (docs/io-render-threading.md §9 Phase 3, (a) 단일책임). reader가 `runProcessing` write 단계에서 drain해
+/// (docs/plans/io-render-threading.md §9 Phase 3, (a) 단일책임). reader가 `runProcessing` write 단계에서 drain해
 /// 코어 락 아래 적용한다 — 출력 `core.write`와 같은 스레드·같은 락이라 메인이 코어를 직접 mutate하지 않게 된다.
 /// 현재 명령은 전부 inline POD다. IME marked text는 client-local `Surface` 상태라 이 큐를 통과하지 않는다.
 /// 명령 타입·적용 로직은 중립 모듈(`core_command.zig`)에 둔다 — runtime·live_pty가 순환 import 없이 공유.
@@ -504,11 +504,11 @@ pub const PtyReader = struct {
     core: ?*terminal.TerminalCore = null,
     core_mutex: ?*std.Io.Mutex = null,
     io: std.Io = undefined,
-    // 단일 writer(docs/io-render-threading.md §8 P2-3b): processing 경로에서 메인 입력(키/paste/스크롤)이
+    // 단일 writer(docs/plans/io-render-threading.md §8 P2-3b): processing 경로에서 메인 입력(키/paste/스크롤)이
     // 이 큐로 들어오면 runProcessing이 같은 poll 루프에서 drain해 PTY로 write한다 — 메인은 직접 안 쓴다.
     // 옵셔널(null이면 메인 입력 drain 없이 응답만 — controlled smoke/단위 테스트 경로). start() 전 주입.
     write_queue: ?*PtyWriteQueue = null,
-    // Phase 3 단일책임(docs/io-render-threading.md §9 P3-2~): 메인발 코어 mutate(IME·스크롤 등)가 이 명령 큐로
+    // Phase 3 단일책임(docs/plans/io-render-threading.md §9 P3-2~): 메인발 코어 mutate(IME·스크롤 등)가 이 명령 큐로
     // 들어오면 runProcessing이 같은 poll 루프에서 pop해 코어 락 아래 적용한다 — 메인은 코어를 직접 mutate 안 한다.
     // 옵셔널(null이면 위임 없음 — controlled smoke/단위 테스트는 직접 경로). setProcessing/start() 전 주입.
     command_queue: ?*CoreCommandQueue = null,
@@ -778,7 +778,7 @@ pub const PtyReader = struct {
         }
     }
 
-    /// reader-processing 통합 I/O 루프(docs/io-render-threading.md §8 Phase 2 — P2-3a/b). 한 poll로
+    /// reader-processing 통합 I/O 루프(docs/plans/io-render-threading.md §8 Phase 2 — P2-3a/b). 한 poll로
     /// read+write(+wake)를 인터리브한다: 출력을 직접 코어에 적용(락 아래)하고, 두 outbound 소스를
     /// **POLLOUT일 때 비차단으로** 흘려보낸다 — (1) 코어가 만든 query 응답(OSC 10/11·CPR·DA)을
     /// reader-로컬 버퍼에, (2) 메인 입력(키/paste/스크롤)을 공유 write_queue에서. write가 막혀도 read가
@@ -805,7 +805,7 @@ pub const PtyReader = struct {
         var readbuf: [4096]u8 = undefined;
         var writebuf: [512]u8 = undefined; // write_queue drain 청크(writeInputNonBlocking이 ≤512B 쓰므로)
         while (true) {
-            // 명령 단계(docs/io-render-threading.md §9 P3-2): prior input fence에 도달한 명령만 적용한다.
+            // 명령 단계(docs/plans/io-render-threading.md §9 P3-2): prior input fence에 도달한 명령만 적용한다.
             // 이 단계를 poll/write보다 먼저 두면 focus/config가 만든 응답은 같은 fence 뒤 suffix input보다 먼저 나간다.
             if (self.command_queue) |cq| {
                 const consumed_input = if (self.write_queue) |wq| wq.consumedTotal() else std.math.maxInt(u64);
@@ -1260,7 +1260,7 @@ test "PtyWriteQueue: enqueueSome — 상한까지만 넣고 넘침은 0(안 막�
 }
 
 test "PtyWriteQueue: enqueueBlocking 대기 중 close → QueueClosed로 깨어남(무한 대기 없음, P2-4)" {
-    // 단일 writer close-with-pending(docs/io-render-threading.md §8 P2-4): 소비자(I/O 스레드)가 멈춰 큐가 가득
+    // 단일 writer close-with-pending(docs/plans/io-render-threading.md §8 P2-4): 소비자(I/O 스레드)가 멈춰 큐가 가득
     // 찬 채 생산자(메인)가 enqueueBlocking backpressure로 대기 중일 때, close가 그 대기를 QueueClosed로 풀어야
     // 한다(앱 종료/탭 close 시 메인이 영영 안 막히게). 풀리지 않으면 thread.join()이 영원히 hang → 테스트 실패(teeth).
     var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 4); // cap 4

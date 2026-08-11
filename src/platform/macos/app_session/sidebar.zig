@@ -2568,7 +2568,7 @@ pub fn refreshCellMetrics(self: *AppSession) void {
     // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
     // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
     if (self.surface_initialized) {
-        // Phase 3 위임(docs/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
+        // Phase 3 위임(docs/plans/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
         // 직접 mutate 없음). 모든 Term에 보내 inactive host runtime도 다음 kitty 출력 전에 새 metric을 보게 한다.
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {

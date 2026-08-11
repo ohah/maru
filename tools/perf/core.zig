@@ -72,7 +72,7 @@ const budgets = struct {
     // 할당)는 잡는다. perf는 머신 의존이라 budget 여유가 원칙(다른 벤치와 동일한 2s).
     const render_build_drawlist_ns = 2 * std.time.ns_per_s;
     const render_build_scrolled_ns = 2 * std.time.ns_per_s;
-    // I/O–렌더 스레딩 Phase 3(docs/io-render-threading.md §9.7): 메인발 코어 mutate를 I/O 스레드로 위임하는
+    // I/O–렌더 스레딩 Phase 3(docs/plans/io-render-threading.md §9.7): 메인발 코어 mutate를 I/O 스레드로 위임하는
     // CoreCommandQueue 1건 라운드트립(enqueue→pop→free) 비용 — 위임 latency의 바닥(락+append/pop+dupe).
     // UI 이벤트 빈도(스크롤·마우스 60~120Hz)에서 무시 가능해야 한다. 100k회 2s=회당 20µs 상한(구조 회귀만 잡는 여유).
     const core_command_queue_ns = 2 * std.time.ns_per_s;
@@ -402,7 +402,7 @@ fn measureRenderBuildScrolled(allocator: std.mem.Allocator, io: std.Io) !Budget 
 }
 
 fn measureCoreCommandQueue(allocator: std.mem.Allocator, io: std.Io) !Budget {
-    // Phase 3(docs/io-render-threading.md §9.7): 메인이 코어 mutate를 명령으로 위임하고 reader가 빼는
+    // Phase 3(docs/plans/io-render-threading.md §9.7): 메인이 코어 mutate를 명령으로 위임하고 reader가 빼는
     // CoreCommandQueue의 1건 라운드트립 비용을 잰다 — enqueue(락+append)→pop(락+head 전진).
     // 위임 적용 지연의 바닥이며, 이게 UI 이벤트 빈도에서 작아야 (a) 단일책임 모델이 latency를 안 만든다.
     // scroll(payload 없음)으로 큐 기계 비용 자체를 잰다. MARU_DEBUG 미설정이라 타임스탬프 클럭 읽기는 없다.

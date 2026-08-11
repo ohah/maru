@@ -1896,7 +1896,7 @@ pub fn reapplyConfigPalette(self: *AppSession) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                // Phase 3 위임(docs/io-render-threading.md §9 P3-3): config 재적용도 메인이 직접 mutate 안 하고
+                // Phase 3 위임(docs/plans/io-render-threading.md §9 P3-3): config 재적용도 메인이 직접 mutate 안 하고
                 // reader로 위임한다(interactive면 큐, 아니면 enqueueCoreCommand 내부 직접 폴백). reload는 attach 후라
                 // 링크 존재(없으면 UnknownSurface로 스킵 — best-effort).
                 self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_config_palette = palette }, self.io) catch {};

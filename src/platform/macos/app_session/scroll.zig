@@ -193,7 +193,7 @@ pub fn scroll(self: *AppSession, delta_up: i32) void {
     // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상(스크롤백)이 없다(sentinel) — no-op(웹 스크롤은 WKWebView 소유).
     if (!self.surface_initialized or !term_ops.activeTermIsTerminal(self)) return;
     const surface = term_ops.activeSurface(self);
-    // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
+    // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
     self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, delta_up) }, self.io) catch {};
     self.metal_dirty = true;
 }
@@ -355,7 +355,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
     // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
     // mouse_tracking 읽기는 메인 락-아래(읽기 위임 안 함, §9.1). reportMouse(코어 mutate+응답)는 full (a)
-    // (docs/io-render-threading.md §9 P3-4)로 reader에 위임 — 휠 lines만큼 반복 enqueue, reader가 각 적용 후
+    // (docs/plans/io-render-threading.md §9 P3-4)로 reader에 위임 — 휠 lines만큼 반복 enqueue, reader가 각 적용 후
     // pendingResponse를 PTY로 흘린다.
     // host-backed(원격)면 placeholder core엔 mouse_tracking이 없으므로(진짜 코어는 host) 관측에서 온 실제
     // 모드로 게이트하고, 아래 enqueueCoreCommand(report_mouse)가 host로 라우팅돼 host가 인코딩·PTY 주입한다(§입력 패리티).
@@ -512,7 +512,7 @@ pub fn applyDragAutoscroll(self: *AppSession) void {
         break :blk core.size.rows;
     };
     const row: u16 = if (self.drag_autoscroll > 0) 0 else rows - 1;
-    // scroll+extend는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임 — **kind-2 드래그 extend와
+    // scroll+extend는 full (a)(docs/plans/io-render-threading.md §9 P3-4)로 reader에 위임 — **kind-2 드래그 extend와
     // 같은 명령 큐를 타 순서 보존**(둘이 다른 스레드면 선택이 어긋날 수 있다). 원래의 "변화 시만 재투영" 최적화는
     // reader 렌더 트리거로 대체한다(스크롤백 끝에서 포인터를 grid 밖에 둘 때 cheap render tick 몇 개 — §9 trade-off).
     self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_and_extend = .{ .delta = @as(isize, self.drag_autoscroll), .row = row, .col = self.last_drag_col } }, self.io) catch {};

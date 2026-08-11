@@ -99,7 +99,7 @@ pub const PtyIo = struct {
     resize_fn: *const fn (ctx: *anyopaque, size: terminal.Size) anyerror!void,
     // non-blocking 변형(없으면 writeInputNonBlocking이 blocking으로 폴백). 실제 PTY만 채운다.
     write_input_nb: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!usize = null,
-    // Phase 3 위임 채널(docs/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 reader로 보낸다. interactive
+    // Phase 3 위임 채널(docs/plans/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 reader로 보낸다. interactive
     // 백엔드(live_pty WriteQueueIo)만 채운다 — null이면 위임 경로 없음(runtime이 직접 적용으로 폴백). 순환 import를
     // 피해 명령 타입은 중립 `core_command`에 둔다(opaque ctx로 큐 타입은 백엔드가 숨김).
     enqueue_command: ?*const fn (ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void = null,
@@ -282,7 +282,7 @@ pub const SurfaceRuntime = struct {
         return written;
     }
 
-    /// Phase 3 단일책임(docs/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 위임한다. interactive
+    /// Phase 3 단일책임(docs/plans/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 위임한다. interactive
     /// (reader-processing)면 명령 큐로 enqueue + reader wake(`pty_io.enqueue_command`)해 reader가 락 아래 적용하고,
     /// 메인은 코어를 직접 mutate하지 않는다(§9.3 재진입 구조적 불가). non-interactive(직접 경로 — controlled
     /// smoke/단위 테스트, reader 없음)면 호출 스레드가 코어 락 아래 직접 적용한다(폴백 — 단일 스레드라 경합 없음).

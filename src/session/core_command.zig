@@ -1,7 +1,7 @@
 const std = @import("std");
 const terminal = @import("../terminal.zig");
 
-/// 메인발 비-PTY 코어 mutate를 I/O 스레드(reader)로 위임하는 명령(docs/io-render-threading.md §9 Phase 3,
+/// 메인발 비-PTY 코어 mutate를 I/O 스레드(reader)로 위임하는 명령(docs/plans/io-render-threading.md §9 Phase 3,
 /// (a) 단일책임). runtime·pty_reader·live_pty가 공유하므로 순환 import를 피해 **중립 위치**에 둔다(terminal만
 /// 의존). 큐는 `pty_reader.CoreCommandQueue`, 적용은 `apply`(여기) — reader drain과 non-interactive 직접 폴백이
 /// 같은 적용 로직을 공유한다. 명령 집합은 §9.2를 따라 scroll·선택·리포팅·config까지 단계 확장됐다.

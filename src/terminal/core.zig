@@ -211,7 +211,7 @@ pub const TerminalCore = struct {
     sync_esu_count: u64 = 0,
     // synchronized output(2026): 리더가 처리한 BSU(set=hold 시작) 누적 횟수. ESU 짝(sync_esu_count)과 함께 .sync
     // 관측 로거가 노출해 "리더가 처리한 transition vs 메인 per-tick 샘플링(sync_output)"의 갭을 본다 — maru ssh에서
-    // SSH 바이트 fragmentation으로 sync 투영이 어긋나는(원격 bubbletea 깨짐, docs/io-render-threading.md §11.6·§sync)
+    // SSH 바이트 fragmentation으로 sync 투영이 어긋나는(원격 bubbletea 깨짐, docs/io-render-present.md §11.6·§sync)
     // 미해결 이슈 추적용. always-on 증분(단순 +%=, 분기 비용 0).
     sync_bsu_count: u64 = 0,
     /// kitty keyboard protocol flag 스택(CSI > flags u=push / < n u=pop / = flags;mode u=set로 앱이 제어).
@@ -438,7 +438,7 @@ pub const TerminalCore = struct {
     // 무시). core가 소유한다. 셸/앱이 지정하면 창 제목에 우선 쓰고, 없으면 cwd basename으로 폴백한다
     // (windowTitle). 빈 제목(OSC 2 ; ST)은 해제(null)로 본다. RIS에서 공장 초기화. 그리드엔 안 보인다.
     title: ?[]u8 = null,
-    // windowTitle() 결과가 바뀔 때(title 또는 cwd 변경)마다 리더가 +1하는 generation(P4-1, docs/io-render-threading.md §12).
+    // windowTitle() 결과가 바뀔 때(title 또는 cwd 변경)마다 리더가 +1하는 generation(P4-1, docs/plans/io-render-threading.md §12).
     // 메인의 syncAutoTitles가 **lock 없이** 이 값을 읽어 직전 반영 값과 다를 때만 lock+windowTitle 복사한다 — 매 tick 전-Term
     // lock을 제목이 실제 바뀐 term에만 국한(대부분 tick lock 0회). ordering은 `.monotonic`으로 충분(변경-감지 카운터일 뿐;
     // title/cwd 버퍼는 core_mutex 아래에서만 읽어 mutex가 가시성 보장 — bumpTitleGeneration 참조, code-review [7]).
@@ -1009,7 +1009,7 @@ pub const TerminalCore = struct {
     /// 정규화 → access(F_OK) 존재 검증. cwd가 비면 상대 경로는 resolve 불가(null). 단일 출처: docs/link-detection.md.
     /// 파일 I/O는 코어 책임(순수 분류 레이어 selection.zig엔 stat을 두지 않는다). cwd(currentCwd)와 스크롤백을 읽으므로
     /// 호출자(app_session.urlAt)가 lockCore 아래에서 부른다 — reader 스레드가 OSC 7로 cwd를 free+realloc하는 race를
-    /// 막는다(focusedTermCwd 선례). access(F_OK)는 빠른 syscall이라 락 아래 허용(docs/io-render-threading.md §9.1).
+    /// 막는다(focusedTermCwd 선례). access(F_OK)는 빠른 syscall이라 락 아래 허용(docs/plans/io-render-threading.md §9.1).
     fn resolveClickedPath(self: *const TerminalCore, allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
         // 끝의 ":<digits>(:<digits>)?"(에디터 줄/열 점프 관례)를 떼고 순수 경로만 — 1차는 파일만 연다(줄 점프는 후속).
         var path_end = raw.len;

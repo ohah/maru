@@ -130,7 +130,7 @@ TerminalCore
 
 ## input write 정책
 
-input은 작다. 사용자가 누른 key나 paste 일부가 대부분이다. 그러나 PTY로 보내는 write의 **소유 스레드**가 둘이면(메인 입력 + I/O 스레드 응답) master fd에 동시 write가 생긴다 — 그래서 interactive 세션은 **단일 writer**로 모은다([I/O–렌더 스레딩 분리](io-render-threading.md) §8 Phase 2).
+input은 작다. 사용자가 누른 key나 paste 일부가 대부분이다. 그러나 PTY로 보내는 write의 **소유 스레드**가 둘이면(메인 입력 + I/O 스레드 응답) master fd에 동시 write가 생긴다 — 그래서 interactive 세션은 **단일 writer**로 모은다([I/O–렌더 스레딩 Phase 2 계획](plans/io-render-threading.md) §8).
 
 **단일 writer 모델(interactive, `attachSurface(process_in_reader=true)`)**: 메인 스레드는 PTY에 직접 쓰지 않는다. `SurfaceRuntime.writeInput`/`writeInputNonBlocking`은 `LivePtySession.ptyIo(true)`가 돌려준 write-queue-backed `PtyIo`(`WriteQueueIo`)를 거쳐 입력을 `PtyWriteQueue`에 enqueue하고 `PtySession.signalWrite`로 I/O 스레드(reader)를 깨운다. 실제 master write는 **reader만** 한다 — reader가 `runProcessing`의 한 poll 루프 write 단계에서 (1) 코어가 만든 query 응답(reader-로컬 버퍼)을 먼저, (2) 그 다음 `PtyWriteQueue`를 비차단으로 drain한다. 이렇게 reader가 유일한 PTY writer가 돼 메인·I/O 동시 write 인터리브가 사라진다.
 
@@ -184,7 +184,7 @@ close (child가 아직 살아 있을 때)
 
 reader thread가 blocking `readEvent`에 들어간 상태도 `PtyReader.stopAndJoin`으로 정리한다. 순서는 `queue.close -> session.close -> reader.join`이다. queue를 먼저 닫는 이유는 사용자가 닫은 pane에 새 output/read_error event를 더 쌓지 않기 위해서다. session close는 child를 reap하고, reader를 깨운다. master fd 자체는 여기서 닫지 않고 reader가 join된 뒤 `deinit`에서 닫는다. reader가 아직 그 fd 번호로 poll/read 중일 때 닫으면 OS가 번호를 재사용해 reader가 엉뚱한 fd를 읽을 수 있기 때문이다.
 
-단일 writer 모델에서는 `LivePtySession.close`/`finishAfterTermination`이 event queue·session에 더해 `PtyWriteQueue`도 닫는다. 메인이 큐 포화로 `enqueueBlocking` backpressure 대기 중일 때 close가 그 대기를 `QueueClosed`로 풀어주지 않으면, 닫는 스레드와 입력 스레드가 다를 경우 메인이 영영 막힌다. reader는 `PtyWriteQueue`를 비차단으로 drain하므로 큐에서 대기하지 않고, `session.close`의 self-pipe wake로 `waitIo`에서 깨어나 종료한다(write 대기 중 close에서도 무UAF/좀비 — io-render-threading.md §8 P2-4).
+단일 writer 모델에서는 `LivePtySession.close`/`finishAfterTermination`이 event queue·session에 더해 `PtyWriteQueue`도 닫는다. 메인이 큐 포화로 `enqueueBlocking` backpressure 대기 중일 때 close가 그 대기를 `QueueClosed`로 풀어주지 않으면, 닫는 스레드와 입력 스레드가 다를 경우 메인이 영영 막힌다. reader는 `PtyWriteQueue`를 비차단으로 drain하므로 큐에서 대기하지 않고, `session.close`의 self-pipe wake로 `waitIo`에서 깨어나 종료한다(write 대기 중 close에서도 무UAF/좀비 — plans/io-render-threading.md §8 P2-4).
 
 app host, smoke, demo 코드는 `PtySession`, `PtyEventQueue`, `PtyReader`를 각각 조립하지 않고 `LivePtySession` owner를 사용한다. 이유는 정상 종료 경로와 close/error cleanup 경로가 같은 reader를 서로 다른 방식으로 만지기 시작하면, 이미 join된 reader를 다시 stop하거나 반대로 실패 경로에서 reader thread를 놓치는 버그가 생기기 쉽기 때문이다. `LivePtySession.finishAfterTermination`은 정상 종료 뒤 reader join과 queue close를 한 번만 기록하고, `LivePtySession.close`/`deinit`은 아직 join되지 않은 경우에만 `PtyReader.stopAndJoin`을 호출한다. tab/window close처럼 surface도 함께 사라지는 경로는 `LivePtyRegistry`가 active surface의 live PTY mapping을 찾고 link 불변식을 검증한 뒤 `LivePtySession.closeAndDetach`를 호출한다. 이 함수는 닫힌 pane으로 늦게 도착한 output이나 input이 흘러가지 않도록 `SurfaceRuntime.detachSurface`를 먼저 수행하고, 그 다음 같은 PTY close 순서를 탄다. registry mapping은 close 성공 뒤 제거하고, 검증 실패 시에는 원인 분석을 위해 보존한다.
 

@@ -1,7 +1,7 @@
 //! control_server — 세션 컨트롤 플레인 **라이브 서버**(Track C A2b). 앱 인스턴스 전역 소켓을 열고, accept 스레드가
 //! 요청을 **메인 프레임루프로 marshal**해 실 collector/dispatch로 응답하게 배선한다. 단일 출처:
 //! docs/control-plane.md §5(단일 디스패치=메인 marshal·출력 직송 제외)·§8.4(A2b auth 한계)·§16, docs/
-//! io-render-threading.md §8.8(lock-order·교차큐 데드락 선례).
+//! docs/plans/io-render-threading.md §8.8(lock-order·교차큐 데드락 선례).
 //!
 //! **범위(A2b = 라이브 서버 + marshal, 이 파일):**
 //!  - 앱 전역 unix socket bind + accept 스레드(heap-pin — 스레드가 &self를 잡으므로 caller가 주소를 고정).

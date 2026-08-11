@@ -158,7 +158,7 @@ font family·line spacing은 dock geometry·pointer hit rect의 입력이 아니
 capture해 새 metric projection으로 restore하며, card가 없거나 materialize되지 않으면 기존 bounded numeric
 offset만 새 상한으로 clamp한다. typed layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font
 capture 판정은
-[Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
+[Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout-button.md#logical-spacing과-component-metric)이 소유한다.
 이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
 
 이 독립성은 카드 내부에만 한정하지 않는다. terminal font family/line spacing은 terminal grid/title icon에는

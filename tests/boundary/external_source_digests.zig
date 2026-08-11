@@ -239,15 +239,11 @@ pub const inventory = [_]Proof{
     // 코드 리뷰 뒤 walk-up 캐시 필드와 원격 세션 회귀 테스트가 붙고, diff 본문 두 쪽을 backend allocator로
     // 해제하도록 고치며 또 바뀐다(그 두 버퍼만 `DiffResult`에서 소유권을 넘겨받은 것이라 세션 allocator로
     // 풀면 heap이 깨진다 — 실측: Invalid free). count는 2 그대로다.
-    // file-panel.md 분할로 주석 여섯 곳의 단일 출처 경로가 바뀌어 움직였다(§2.2·§2.6 → file-panel-kinds.md,
-    // §2.3·§2.4 → file-panel-web-stack.md, §2.5 → file-panel-rich-edit.md, §3.4 → file-panel-dock-ui.md).
-    // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.
-    // sidebar-groups.md 분할로 주석의 단일 출처 경로가 바뀌어 움직였다(§9 → plans/sidebar-groups.md,
-    // §12~§13 → sidebar-groups-pinning.md, §14 → sidebar-groups-top-level.md).
-    // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.
-    // agent-session-list.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§2.1.3 →
-    // agent-session-list-layout.md). count는 2 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "27bc74661fef7912cc5c2e63626ca971da5bebdbc117a453d9debef8f460629b" },
+    // **문서 분할이 이 항목을 반복해 움직인다.** 이 파일의 doc comment가 단일 출처 문서를 경로로 적고 있어,
+    // 그 문서를 가를 때마다 문자열이 바뀐다(file-panel·sidebar-groups·agent-session-list·metal-ui-layout에서
+    // 차례로 겪었다 — 여기까지 네 번이고, 문서가 커지는 한 또 온다). 매번 count는 2 그대로인데, `@field` 반사도
+    // 선언도 손대지 않고 주석 문자열만 달라지기 때문이다. 개별 이력은 git이 가지므로 사유를 여기 쌓지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "06726cb1f87c3cd318905e06916958f0698c4cde3ed7d583f3367cbcac8f2e42" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

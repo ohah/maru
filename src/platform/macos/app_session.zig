@@ -14345,7 +14345,7 @@ pub const AppSession = struct {
     /// 헤드리스 단위 테스트 가능. content = 표시 탭 수 × 슬롯 높이, viewport = backing 높이 − 헤더(카드 아래 "+"는
     /// 헤더로 이동해 콘텐츠에 없음). content ≤ viewport(또는 슬롯 0)면 0(스크롤 불필요). u64로 계산해 곱셈 overflow 회피.
     /// 사이드바 셀을 자를 세로 구간 `[top, bottom)`(backing px). **렌더러는 이 값을 그대로 쓴다** —
-    /// 게이트·클램프가 전부 여기 있어 `.m`에는 산술이 남지 않는다(docs/metal-ui-layout.md §5 "배치를 아는
+    /// 게이트·클램프가 전부 여기 있어 `.m`에는 산술이 남지 않는다(docs/metal-ui-layout-paint.md §5 "배치를 아는
     /// 곳은 하나"). `bottom <= top`이면 scissor 없음(전체 그리기)이라는 뜻이다.
     ///
     /// 자르는 이유가 위아래 서로 다르다:

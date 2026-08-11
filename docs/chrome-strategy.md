@@ -24,7 +24,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 쪽(`notifications`·`palette`·`find`·`notice`·`context_menu`·`settings`·`sidebar`·`tabbar`). 후자는 "보이는
 것 == 눌리는 것"을 자료구조가 아니라 **규약**(같은 헬퍼를 view·hitTest가 함께 부른다)으로 지키므로 한쪽만
 고치면 어긋난다. 목표는 전자이며, 새 컴포넌트는 후자를 새로 만들지 않는다. 이주 단계와 블로커는
-`metal-ui-layout.md` §8 ML6.
+`plans/metal-ui-layout.md` §8 ML6.
 
 이 문서는 chrome 레이어(L3)의 **목표 구조와 점진 경로**를 정의한다. chrome이 속한 4층 위상(renderer 계약·session core·chrome·platform 어댑터), 두 번의 추출(chrome + session core), 전체 시퀀싱, 이식성 현실은 상위 단일 출처 [레이어링과 이식성 전략](layering-and-portability.md)을 따른다. 단일 출처: 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
@@ -41,7 +41,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
   제거 비용만 커진다.
 - **모든 chrome 컴포넌트는 최종적으로 `chrome/ui/` 프리미티브 조합으로 구현한다.** 즉 컴포넌트가 rect를 직접
   계산해 ops를 내고 짝이 되는 `hitTest`를 따로 유지하는 지금의 방식은 **전환기 형태**이지 목표가 아니다. 목표
-  형태와 남은 격차는 `metal-ui-layout.md` §8 ML6이 소유한다.
+  형태와 남은 격차는 `plans/metal-ui-layout.md` §8 ML6이 소유한다.
 - `app_session.zig`(이 문서 작성 시점 7,600줄 — 2026-08-08 실측 72,317줄)의 chrome를 `src/chrome/`로 옮겨 세션은 "세션 코어(수명·입력·워크스페이스·ABI)"로 줄인다. **단, 이 문서가 소유하는 건 chrome 컴포넌트의 *형태*(순수 State+view+hitTest → 최종적으로 `chrome/ui/` 프리미티브 조합)이지 `app_session.zig`의 *크기*가 아니다.** 그 파일을 무엇을 언제 얼마나 줄일지는 [app-session-decomposition.md](app-session-decomposition.md)가 단일 출처이며(2026-08-08 (c) 기준 — 읽기·편집 비용을 판단 기준에 추가), chrome 이주로 인한 감소는 그 계획의 부수효과로 계상한다. 두 경로의 순서·비배타성은 그 문서 §7이 정한다.
 
 ## 2. 베이스·결정 (왜 이 구조인가)

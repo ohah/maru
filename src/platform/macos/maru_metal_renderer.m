@@ -980,7 +980,7 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     //    뒤 패스(그림자·모달)를 위해 full drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
     //    **자를 구간은 호스트가 정해 준다**(`sidebar_scissor_top/bottom_px`). 게이트("스크롤됐나", "상태바가
     //    있나")와 클램프가 전부 Zig의 `sidebarScissorPx`에 있어 여기엔 산술이 없다 — 배치를 아는 곳을 하나로
-    //    두는 규율이다(docs/metal-ui-layout.md §5). bottom <= top이면 scissor 없음.
+    //    두는 규율이다(docs/metal-ui-layout-paint.md §5). bottom <= top이면 scissor 없음.
     const NSUInteger scissor_top = (NSUInteger)c->sidebar_scissor_top_px;
     const NSUInteger scissor_bottom = (NSUInteger)c->sidebar_scissor_bottom_px;
     const bool sidebar_clip = (c->sidebar_cells_n > 0 && scissor_bottom > scissor_top);

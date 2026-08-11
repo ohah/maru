@@ -1199,7 +1199,7 @@ pub const MetalFrame = extern struct {
     gpu_glyphs: ?[*]const GpuGlyph = null,
     gpu_glyph_count: usize = 0,
     // SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 렌더러는 **사이드바 배경 strip을 이만큼 위에서
-    // 끝낸다** — strip은 `.m`이 높이를 직접 정하는 몇 안 되는 표면이라(docs/metal-ui-layout.md §5 승인 예외)
+    // 끝낸다** — strip은 `.m`이 높이를 직접 정하는 몇 안 되는 표면이라(docs/metal-ui-layout-paint.md §5 승인 예외)
     // Zig가 값을 실어 알려 주는 것 말고는 그 바닥을 옮길 방법이 없다. 상태바 자신의 배경·글자는 GpuQuad·
     // GpuGlyph로 host가 그리므로 이 필드는 **렌더러가 소유한 표면을 상태바 위에서 끊는 용도**다 — 지금은
     // strip 하나뿐이고, 사이드바 셀 scissor(`[header_h, drawable_h]`)도 S2b에서 같은 값을 쓴다.

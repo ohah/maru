@@ -53,7 +53,7 @@ pub const Geometry = struct {
     ///
     /// **기본값을 일부러 안 준다.** 기본값을 주면 아래 조기 반환 셋(`!visible`·`dock_w==0`·`dock_h==0`)이
     /// 컴파일 에러 없이 빈 rect를 흘려, 가장 흔한 상태에서만 상태바가 조용히 사라진다
-    /// (docs/metal-ui-layout.md §5 "rect를 더하는 것과 자리를 예약하는 것은 다르다"). `terminal`과 같은 규칙이다.
+    /// (docs/metal-ui-layout-paint.md §5 "rect를 더하는 것과 자리를 예약하는 것은 다르다"). `terminal`과 같은 규칙이다.
     status_bar: Rect,
     dock_size_px: u32 = 0,
 };
@@ -655,7 +655,7 @@ test "SB1-S1: status_bar_px가 0이면 나머지 기하가 seam 이전과 같다
 }
 
 // 높이가 실제로 서면(S2가 할 일) 그 높이만큼 **작업영역이 짧아져야** 한다 — rect만 더하고 자리를 안 빼면
-// 상태바가 터미널 위에 겹쳐 그려진다(docs/metal-ui-layout.md §5). seam 단계에서 그 계약을 미리 고정한다.
+// 상태바가 터미널 위에 겹쳐 그려진다(docs/metal-ui-layout-paint.md §5). seam 단계에서 그 계약을 미리 고정한다.
 test "SB1-S1: status_bar_px는 작업영역·도크·divider를 그만큼 짧게 만든다" {
     const base = Input{
         .backing_width_px = 1600,

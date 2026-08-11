@@ -40,6 +40,13 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 ## 필수 CI 체크
 
+**draft PR 에서는 실행 job 을 건너뛴다.** 초안을 올려 놓고 고치는 동안 macOS 러너 다섯 대가 매 푸시마다 도는 것은 낭비다. 가드는 job-level `if` 의 `github.event.pull_request.draft != true` 이고, 스킵된 job 은 conclusion=skipped 로 보고돼 branch protection 이 통과로 취급한다. 두 가지가 함께 필요하다.
+
+- **`changes` 판정 job 은 가드에서 제외한다.** 그것까지 스킵하면 `needs.changes.result != 'success'` 가 되어 소비 job 들이 fail-safe 로 **오히려 다 돈다**.
+- **트리거에 `ready_for_review` 를 넣는다.** 기본 types(opened·synchronize·reopened)에는 없어서, draft 를 푸는 순간 아무 이벤트도 오지 않아 건너뛴 job 이 영영 안 돈다.
+
+`require label and assignee=ohah`(pr-metadata.yml)는 가드하지 않는다 — 가볍고, 라벨 누락을 초안 단계에서 미리 알려주는 편이 낫다.
+
 `main` branch protection의 required status check는 이 절을 단일 출처로 둔다. 문서에 hard gate·"머지할 수 없다"로 적힌 검사는 이 목록에 있어야 하고, 목록과 실제 `required_status_checks.contexts`가 어긋나면 이 표를 기준으로 맞춘다.
 
 | required 컨텍스트 | 생성 워크플로 · job | 실행 조건 |

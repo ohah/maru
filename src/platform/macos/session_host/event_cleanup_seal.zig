@@ -47,6 +47,14 @@ pub const CloseOperationPinSealInput = struct {
     identity_seal: CleanupSeal,
 };
 
+pub const RuntimeAdmissionSealInput = struct {
+    self_addr: u64,
+    backend_addr: u64,
+    thread_id: u64,
+    request_generation: u64,
+    state_raw: u8,
+};
+
 /// Stable event identity copied from the trusted take projection.  This value deliberately owns
 /// no pointer: addresses are identities only and must never be dereferenced by this leaf.
 pub const PendingEventIdentity = struct {

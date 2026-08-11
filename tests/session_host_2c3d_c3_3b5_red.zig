@@ -163,14 +163,18 @@ test "C3-3b5 close authority는 pending readiness와 shutdown outcome 뒤에만 
     try close_authority.advance(&authority, .open, .routing_tombstoned);
     try close_authority.advance(&authority, .routing_tombstoned, .settling);
     try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.prepared)));
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, try close_authority.publishReadyRemove(&authority, .event_pending));
+    try std.testing.expect(!try close_authority.publishReadyRemove(&authority, false));
     try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.settling), authority.lifecycle_raw);
     try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.idle)));
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, try close_authority.publishReadyRemove(&authority, .complete));
+    try std.testing.expect(try close_authority.publishReadyRemove(&authority, true));
     try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.ready_remove), authority.lifecycle_raw);
 }
 test "C3-3b5 close authority receipt는 backend absence를 증명하며 exact once 소비된다" {
-    try red();
+    const scan = receiptWithGeneration(19, 7, 13);
+    var closing: close_contract.ClosingReceipt = .{ .scan = scan };
+    try std.testing.expect(!close_contract.consumeClosingReceipt(&closing, scan, true));
+    try std.testing.expect(close_contract.consumeClosingReceipt(&closing, scan, false));
+    try std.testing.expect(!close_contract.consumeClosingReceipt(&closing, scan, false));
 }
 
 fn closeParams(

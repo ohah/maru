@@ -1475,8 +1475,10 @@ pub const RuntimeManager = struct {
         });
         // 여기부터 실패하면 방금 만든 runtime을 회수한다(closeAndDetach로 PTY/자식/reader 종료 → remove로 reader join+슬롯 해제).
         errdefer {
-            be.closeAndDetach(handle);
-            be.remove(handle);
+            if (be.closeAndDetach(handle) == .event_pending)
+                @panic("runtime manager teardown reached pending close state");
+            if (be.remove(handle) != .removed)
+                @panic("runtime manager teardown lost its runtime");
         }
         if (self.output_metrics_enabled) {
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse
@@ -1510,8 +1512,10 @@ pub const RuntimeManager = struct {
         };
         const handle: RuntimeHandle = @intFromPtr(slot);
         const be = self.backend_impl.backend();
-        be.closeAndDetach(handle); // PTY/자식/reader 종료 + routing detach(멱등).
-        be.remove(handle); // reader join → surface/live_pty 번들 deinit → 슬롯 회수.
+        if (be.closeAndDetach(handle) == .event_pending)
+            @panic("runtime manager teardown reached pending close state"); // PTY/자식/reader 종료 + routing detach(멱등).
+        if (be.remove(handle) != .removed)
+            @panic("runtime manager teardown lost its runtime"); // reader join → surface/live_pty 번들 deinit → 슬롯 회수.
         _ = self.foreground_cache.remove(handle);
         _ = self.bell_counts.remove(handle);
         // 클립보드 텍스트는 최대 160 KiB라 닫힌 runtime마다 남기면 영속 데몬 메모리가 단조 증가한다(버퍼도 해제).

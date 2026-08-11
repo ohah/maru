@@ -13,6 +13,11 @@ pub const CloseScanReceipt = struct {
     close_schedule_ticket: u64,
 };
 
+pub const ClosingReceipt = struct {
+    scan: CloseScanReceipt,
+    consumed: bool = false,
+};
+
 pub const CloseSweep = union(enum(u8)) {
     inactive,
     active: Active,
@@ -87,6 +92,12 @@ pub fn selectCloseSweep(
 
 pub fn sameCloseScanReceipt(a: CloseScanReceipt, b: CloseScanReceipt) bool {
     return std.meta.eql(a, b);
+}
+
+pub fn consumeClosingReceipt(receipt: *ClosingReceipt, expected: CloseScanReceipt, backend_present_after: bool) bool {
+    if (receipt.consumed or backend_present_after or !sameCloseScanReceipt(receipt.scan, expected)) return false;
+    receipt.consumed = true;
+    return true;
 }
 
 pub fn recursivelyPointerFree(comptime T: type) bool {

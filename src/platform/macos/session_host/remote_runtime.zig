@@ -26,6 +26,7 @@ const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const runtime_pending_control = @import("runtime_pending_control.zig");
 const pending_event_owner_mod = @import("pending_event_owner.zig");
+const remote_close_authority = @import("remote_close_authority.zig");
 const runtime_lifetime_owner_mod = @import("runtime_lifetime_owner.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
@@ -386,6 +387,7 @@ pub const RemoteRuntime = struct {
     resync_needed: bool,
     pending_generation_event_outcome: PendingGenerationEventOutcome,
     pending_event_owner: pending_event_owner_mod.PendingEventOwner,
+    close_authority: remote_close_authority.CloseAuthority = .{},
     runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
@@ -477,6 +479,7 @@ pub const RemoteRuntime = struct {
         self.pump_ended = false;
         self.resync_needed = false;
         self.pending_event_owner = .{};
+        self.close_authority = .{};
         self.runtime_lifetime = .{};
         try self.initializePendingEventOwner(generation_adapter);
         self.observation = .{};
@@ -570,6 +573,7 @@ pub const RemoteRuntime = struct {
         self.pump_ended = false;
         self.resync_needed = false;
         self.pending_event_owner = .{};
+        self.close_authority = .{};
         self.runtime_lifetime = .{};
         try self.initializePendingEventOwner(generation_adapter);
         self.observation = .{};

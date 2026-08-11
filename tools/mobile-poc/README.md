@@ -10,7 +10,9 @@ sh tools/mobile-poc/run.sh android           # 에뮬레이터 실행 + Vulkan �
 sh tools/mobile-poc/run.sh features-ios      # Metal 로 여섯 기능 판정
 sh tools/mobile-poc/run.sh features-android  # Vulkan 으로 같은 여섯 기능 판정
 sh tools/mobile-poc/run.sh chrome-ios        # **실제 chrome 컴포넌트**를 시뮬레이터에
-sh tools/mobile-poc/run.sh chrome-android    # 같은 draw-list 를 Vulkan 으로
+sh tools/mobile-poc/run.sh chrome-android    # 같은 draw-list 를 Vulkan 으로(오프스크린)
+sh tools/mobile-poc/run.sh chrome-android-app # **에뮬레이터 화면에** NativeActivity+swapchain
+sh tools/mobile-poc/run.sh present-ios       # present 페이싱을 표시 클럭으로 실측
 ```
 
 ## 무엇을 판정하는가
@@ -38,13 +40,32 @@ sh tools/mobile-poc/run.sh chrome-android    # 같은 draw-list 를 Vulkan 으�
 | 3. per-draw blend (premul↔straight) | **PASS** | **PASS** |
 | 4. 아틀라스 부분 업데이트 | **PASS** | **PASS** |
 | 5. 자연폭 quad | **PASS** | **PASS** |
-| 6. present 페이싱 | 미확인 | **PASS**(FIFO=vsync) |
+| 6. present 페이싱 | **PASS** | **PASS** |
 
 **두 백엔드가 픽셀 단위로 같은 값을 낸다** — opacity `G=64,128,191,255`, 자연폭 구간
-`26,64,39,90px` 가 동일하다. 6번은 스왑체인이 있어야 판정되므로 오프스크린으로는 못 봤고,
-Android 를 실제 창에 띄우면서 `VK_PRESENT_MODE_FIFO_KHR`(vsync, 항상 지원 보장)로 확인했다.
-iOS 는 같은 자리가 `CAMetalLayer` 의 `maximumDrawableCount`·`presentAfterMinimumDuration`
-이라 별도 측정이 필요하다.
+`26,64,39,90px` 가 동일하다. 6번은 스왑체인이 있어야 존재하는 항목이라 오프스크린으로는
+못 봤고, 두 플랫폼을 실제 창에 띄운 뒤 아래처럼 **간격을 재서** 판정했다.
+
+### present 페이싱 실측 (PoC 8)
+
+**요청은 근거가 아니다.** "30Hz 로 설정했다"가 아니라 표시 간격의 중앙값이 판정 기준이다.
+
+| | iOS (`present-ios`) | Android (`chrome-android-app`) |
+|---|---|---|
+| 계측 시계 | `CADisplayLink.timestamp`(직전 vsync) | `CLOCK_MONOTONIC` present 간격 |
+| 자유 실행 | **16.67 ms** (60Hz) | **16.66 ms** (FIFO=vsync) |
+| 30Hz 요청 | **33.33 ms** | 미시도(아래) |
+| 판정 | **PASS** | **PASS**(vsync 잠금) |
+
+**iOS 의 페이싱 API 는 macOS 와 다르다.** `presentAfterMinimumDuration:`·`presentedTime`·
+`addPresentedHandler:` 는 **iOS SDK 에 없다** — iPhoneSimulator26.2.sdk 의 `MTLDrawable` 에는
+`present`/`presentAtTime:` 둘뿐이다(실측). iOS 에서 주기를 정하는 것은 `CADisplayLink` 의
+`preferredFrameRateRange` 이고, Metal 쪽 수단은 `presentDrawable:atTime:` 와
+`CAMetalLayer.maximumDrawableCount`(큐 깊이)다. maru 의 30Hz present(comfort)는 이 경로로 선다.
+
+**Android 는 vsync 잠금까지만 측정했다.** FIFO 가 실제로 16.66ms 에 물리는 것은 확인했지만,
+Vulkan 에는 "30Hz 모드"가 없어 하위 주기는 앱이 프레임을 거르거나 `AChoreographer` 로
+맞춰야 한다 — 그건 재보지 않았다.
 
 ### chrome 컴포넌트 + 텍스트 + 아이콘 (PoC 6)
 
@@ -137,8 +158,8 @@ UI 가 들어간다. 데스크톱에서 타이틀바 inset 을 다루는 것과 
 
 ## 범위 밖
 
-iOS present 페이싱, **각 플랫폼의 자체 폰트 래스터**(지금은 호스트 아틀라스를 공유한다),
-실기기, 입력·IME, 백그라운드 생명주기.
+**각 플랫폼의 자체 폰트 래스터**(지금은 호스트 아틀라스를 공유한다), Android 하위 주기
+페이싱(`AChoreographer`), 실기기, 입력·IME, 백그라운드 생명주기.
 
 에뮬레이터 GPU 가 `llvmpipe`(소프트웨어)라 **실제 Android 드라이버에서 같은 결과가
 나오는지는 실기기로 확인해야 한다.**

@@ -62,19 +62,41 @@ struct MermaidHelperSmoke {
         checks["cap_plus_one_copy_zero"] = before.admission_copies == after.admission_copies
 
         // 정상 fence는 helper의 실제 WKWebView Mermaid 실행과 sanitizer를 거쳐 one-shot SVG가 된다.
-        maru_macos_mermaid_test_reset()
-        let rendering = MermaidRenderCoordinator(validation: .smoke(helperURL))
-        precondition(admit(widget: 90, source: Data("```mermaid\ngraph TD\nA --> B\n```".utf8)) == 0)
-        // cold 경로가 실제로 몇 ms 걸리는지 남긴다. deadline(5초)에 얼마나 근접한지가 이 게이트의
-        // flakiness를 판단하는 유일한 근거인데, 지금까지 알 수 있는 것은 "만료됨" 뿐이었다 —
-        // 로컬 571ms인데 CI에서 5초를 넘는 이유를 값 없이 추정할 수 없었다.
-        let coldStart = Date()
-        pump(rendering, until: {
-            var snapshot = MaruMermaidCoordinatorSnapshot()
-            maru_macos_mermaid_snapshot(&snapshot)
-            return snapshot.accepted_results == 1
-        }, timeout: 7.0)
-        checks["actual_mermaid_cold_ms"] = Int(Date().timeIntervalSince(coldStart) * 1000)
+        //
+        // **cold deadline 스파이크를 한 번 흡수한다.** 이 게이트가 보는 것은 "SVG가 나오고
+        // sanitize되고 외부를 안 부르는가"이지 **"5초 안에 되는가"가 아니다**(성능은 아래 perf
+        // 시나리오가 따로 본다). 실측하면 cold는 로컬 571ms·CI 정상 1,064ms로 deadline(5,000ms)의
+        // 21%인데, 공유 러너에서 간헐적으로 5배 넘게 튀어 파이프라인이 멀쩡한데도 게이트가 죽었다
+        // (2026-08-11 하루에 여덟 번). deadline 상수를 올리는 것은 틀린 처방이다 — 5초는 이미
+        // 정상의 5배이고, 사용자가 다이어그램을 기다리는 시간이라는 제품 정책이다.
+        //
+        // 두 번 연속 실패는 그대로 실패시킨다. 스파이크는 반복되지 않지만 진짜 결함은 반복된다.
+        // 재시도 횟수를 결과에 실어, 이 값이 상시 1이 되면 그것 자체가 신호가 되게 한다.
+        var rendering = MermaidRenderCoordinator(validation: .smoke(helperURL))
+        var coldMs = 0
+        var coldRetries = 0
+        var renderedOnce = false
+        for attempt in 0..<2 {
+            maru_macos_mermaid_test_reset()
+            if attempt > 0 {
+                rendering = MermaidRenderCoordinator(validation: .smoke(helperURL))
+                coldRetries += 1
+            }
+            precondition(admit(widget: 90, source: Data("```mermaid\ngraph TD\nA --> B\n```".utf8)) == 0)
+            let coldStart = Date()
+            pump(rendering, until: {
+                var snapshot = MaruMermaidCoordinatorSnapshot()
+                maru_macos_mermaid_snapshot(&snapshot)
+                return snapshot.accepted_results == 1
+            }, timeout: 7.0)
+            coldMs = Int(Date().timeIntervalSince(coldStart) * 1000)
+            var probe = MaruMermaidCoordinatorSnapshot()
+            maru_macos_mermaid_snapshot(&probe)
+            renderedOnce = probe.accepted_results == 1
+            if renderedOnce { break }
+        }
+        checks["actual_mermaid_cold_ms"] = coldMs
+        checks["actual_mermaid_cold_retries"] = coldRetries
         var accepted = MaruMermaidAcceptedResult()
         var svg = [UInt8](repeating: 0, count: Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES))
         let takeStatus = svg.withUnsafeMutableBufferPointer {

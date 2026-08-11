@@ -250,7 +250,7 @@ pub const inventory = [_]Proof{
     // 왼쪽 gutter에서 이름줄 인라인으로 옮겨가며 또 바뀐다(docs/sidebar-agent-list.md §1·§2). count는 2 그대로다 —
     // `WorkspaceAgent` → `WorkspaceSession` 개명, 테스트 둘(신규 1 + 기존 1 보정), `buildSidebarDrawList`에
     // `inline_icons` 인자가 붙은 호출부 둘뿐이고, 전부 평범한 타입·인자 전달이라 `@field` 반사와 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c2deb4f4bc3ef35e1258b4615c357de53de7e65d00f8a1dc82d602a4cd59afdf" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "55c88c6d4457a4be8e010a218c0e0d4046d6154bacbc8d3dadcaa5527745431e" },
     // file-panel.md 분할로 주석 여섯 곳의 단일 출처 경로가 바뀌어 움직였다(§2.2·§2.6 → file-panel-kinds.md,
     // §2.3·§2.4 → file-panel-web-stack.md, §2.5 → file-panel-rich-edit.md, §3.4 → file-panel-dock-ui.md).
     // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.

@@ -1547,6 +1547,14 @@ const EnvStorage = struct {
             // persistent child처럼 null이면 selector 자체가 없어야 한다. maru를 maru 팬 안에서 띄웠을 때 바깥
             // 팬 id를 상속하면 다른 surface를 self로 오인한다. 이게 #1131 env-상속 오염을 원천 차단하는 지점이다.
             if (isPaneSelectorEntry(slice)) continue;
+            // 바깥 **터미널 멀티플렉서**의 신원도 같은 이유로 떨군다. maru가 spawn하는 셸은 tmux pane이
+            // **아닌데**, maru를 tmux 팬 안에서 띄우면(`zig build run`·`nohup ./Maru.app/...`) 그 셸이 바깥
+            // 서버의 `TMUX`/`TMUX_PANE`를 물려받아 "나는 tmux 안"이라고 착각한다. 그 거짓말을 믿는 도구가
+            // 오작동한다 — 실측: 셸 통합/프롬프트가 OSC를 **DCS passthrough**(`\ePtmux;…`)로 감싸 내보내는데
+            // 바깥 maru는 tmux가 아니라 그걸 못 풀어, cwd 보고(OSC 7)가 통째로 유실되고 사이드바의 경로·git
+            // 브랜치 줄이 사라졌다(OSC 133은 감싸지 않는 구현이라 도착해, 원인이 한참 가려졌다). `tmux` 명령이
+            // 엉뚱한 서버를 조작하는 것도 같은 뿌리다. `MARU_PANE_ID`를 떨구는 것과 **같은 부류**의 오염 차단이다.
+            if (isMultiplexerEntry(slice)) continue;
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
             try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, slice));
         }
@@ -1585,6 +1593,12 @@ const EnvStorage = struct {
 
     fn isPaneSelectorEntry(entry: []const u8) bool {
         return std.mem.startsWith(u8, entry, "MARU_PANE_ID=");
+    }
+
+    /// 바깥 터미널 멀티플렉서가 자기 pane 안 프로세스에만 세우는 신원 변수인가. maru가 그 안에서 실행됐어도
+    /// **maru가 spawn하는 셸은 그 pane이 아니므로** 상속하면 거짓이 된다(위 호출부 주석이 실측 증상의 단일 출처).
+    fn isMultiplexerEntry(entry: []const u8) bool {
+        return std.mem.startsWith(u8, entry, "TMUX=") or std.mem.startsWith(u8, entry, "TMUX_PANE=");
     }
 
     // 두 init 경로 모두 owned envp를 만든다(빈 env면 부모 복사 + TERM 덮어쓰기, 명시 env면 그대로).
@@ -2185,6 +2199,34 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
         try std.testing.expect(!std.mem.startsWith(u8, slice, "FORCE_COLOR="));
     }
     try std.testing.expect(i >= 2); // 나머지 부모 env는 그대로 물려받았다
+}
+
+test "EnvStorage strips the outer multiplexer identity (TMUX/TMUX_PANE)" {
+    // maru를 tmux 팬 안에서 띄우면(`zig build run`·터미널에서 직접 실행) 그 신원이 자식 셸까지 흘러
+    // "나는 tmux 안"이라는 거짓이 된다 — maru가 spawn한 셸은 그 pane이 아니다. 실측 증상: 셸 통합/프롬프트가
+    // OSC를 DCS passthrough(`\ePtmux;…`)로 감싸 내보내 바깥 maru가 못 풀고, cwd 보고(OSC 7)가 통째로 유실돼
+    // 사이드바의 경로·git 브랜치 줄이 사라졌다. `MARU_PANE_ID`와 같은 부류의 상속 오염이라 같이 떨군다.
+    _ = setenv("TMUX", "/private/tmp/tmux-501/default,1591,2", 1);
+    _ = setenv("TMUX_PANE", "%2", 1);
+    defer {
+        _ = unsetenv("TMUX");
+        _ = unsetenv("TMUX_PANE");
+    }
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+    defer storage.deinit();
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const slice = std.mem.span(entry);
+        try std.testing.expect(!std.mem.startsWith(u8, slice, "TMUX="));
+        try std.testing.expect(!std.mem.startsWith(u8, slice, "TMUX_PANE="));
+    }
+    try std.testing.expect(i >= 2); // 나머지 부모 env는 그대로 물려받았다
+
+    // **명시 env는 그대로 통과한다** — 호출자가 준 env는 상속 오염이 아니라 의도된 값이다(기존 계약 보존).
+    var explicit = try EnvStorage.init(std.testing.allocator, &.{"TMUX=explicit"}, &.{}, "xterm-256color", null, null, null);
+    defer explicit.deinit();
+    try std.testing.expectEqualStrings("TMUX=explicit", std.mem.span(explicit.envpPtr()[0].?));
 }
 
 test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {

@@ -7,22 +7,28 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define W 900
-#define H 560
+#define W 540
+#define H 1140   // 폰 비율(세로) — iOS 쪽과 같은 모양으로 비교한다
 #define VK(x, m) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { printf("VULKAN %s=%d\n", m, r_); return 1; } } while (0)
 
 typedef struct {
     float x, y, w, h;
     float r, g, b, a;
     float radius;
-    unsigned int is_text;
+    unsigned int kind;      // 0=단색 1=아틀라스 글리프 2=아이콘
+    unsigned int cell_x, cell_y;
 } CQuad;
 
 extern unsigned int maru_chrome_build(unsigned int width, unsigned int height);
 extern const CQuad *maru_chrome_quads(void);
 extern const char *maru_chrome_last_error(void);
+extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row);
+extern unsigned int maru_icon_build(void);
+extern const unsigned char *maru_icon_atlas(void);
+extern unsigned int maru_icon_slot_px(void);
+extern unsigned int maru_icon_count(void);
 
-typedef struct { float rect_px[4]; float color[4]; float misc[4]; } Push;
+typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Push;
 
 static VkShaderModule loadSpv(VkDevice dev, const char *path) {
     FILE *f = fopen(path, "rb");
@@ -39,7 +45,121 @@ static VkShaderModule loadSpv(VkDevice dev, const char *path) {
     return m;
 }
 
+// 호스트가 만든 글리프 아틀라스(atlas.gray/idx)를 읽어 Zig 쪽 매핑에 넣는다.
+static uint8_t *g_glyph = NULL;
+static uint32_t g_gw = 0, g_gh = 0, g_cols = 0, g_rows = 0;
+
+static void loadAtlas(const char *dir) {
+    char p1[512], p2[512];
+    snprintf(p1, sizeof p1, "%s/atlas.idx", dir);
+    snprintf(p2, sizeof p2, "%s/atlas.gray", dir);
+    FILE *f = fopen(p1, "r");
+    if (!f) { printf("ATLAS missing=%s\n", p1); return; }
+    uint32_t cw, ch, n;
+    if (fscanf(f, "%u %u %u %u %u", &g_gw, &g_gh, &cw, &ch, &n) != 5) { fclose(f); return; }
+    g_cols = g_gw / cw; g_rows = g_gh / ch;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t cp, col, row;
+        if (fscanf(f, "%u %u %u", &cp, &col, &row) != 3) break;
+        maru_atlas_add(cp, col, row);
+    }
+    fclose(f);
+    FILE *g = fopen(p2, "rb");
+    if (!g) return;
+    g_glyph = malloc(g_gw * g_gh);
+    if (fread(g_glyph, 1, g_gw * g_gh, g) != (size_t)(g_gw * g_gh)) { free(g_glyph); g_glyph = NULL; }
+    fclose(g);
+    printf("ATLAS %ux%u cols=%u rows=%u\n", g_gw, g_gh, g_cols, g_rows);
+}
+
+
+// 픽셀 버퍼를 샘플링 가능한 이미지로 올린다(스테이징 → copy → layout 전이).
+static int uploadTexture(VkDevice dev, VkPhysicalDevice pd, VkQueue queue, VkCommandPool pool,
+                         const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t bpp,
+                         VkFormat fmt, VkImageView *outView) {
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = fmt, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VkImage img;
+    if (vkCreateImage(dev, &ci, NULL, &img) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(dev, img, &mr);
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    uint32_t mt = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+        if ((mr.memoryTypeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt = i; break; }
+    VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                .allocationSize = mr.size, .memoryTypeIndex = mt};
+    VkDeviceMemory mem;
+    if (vkAllocateMemory(dev, &mai, NULL, &mem) != VK_SUCCESS) return 0;
+    vkBindImageMemory(dev, img, mem, 0);
+
+    VkDeviceSize bytes = (VkDeviceSize)w * h * bpp;
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
+                              .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VkBuffer stage;
+    if (vkCreateBuffer(dev, &bci, NULL, &stage) != VK_SUCCESS) return 0;
+    VkMemoryRequirements bmr; vkGetBufferMemoryRequirements(dev, stage, &bmr);
+    uint32_t bmt = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        int want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if ((bmr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want) { bmt = i; break; }
+    }
+    VkMemoryAllocateInfo bmai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                 .allocationSize = bmr.size, .memoryTypeIndex = bmt};
+    VkDeviceMemory bmem;
+    if (vkAllocateMemory(dev, &bmai, NULL, &bmem) != VK_SUCCESS) return 0;
+    vkBindBufferMemory(dev, stage, bmem, 0);
+    void *map = NULL;
+    vkMapMemory(dev, bmem, 0, VK_WHOLE_SIZE, 0, &map);
+    memcpy(map, pixels, bytes);
+    vkUnmapMemory(dev, bmem);
+
+    VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                        .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                        .commandBufferCount = 1};
+    VkCommandBuffer cb;
+    vkAllocateCommandBuffers(dev, &cbai, &cb);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(cb, &bi);
+    VkImageMemoryBarrier tb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                               .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                               .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                               .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = img,
+                               .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                               .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &tb);
+    VkBufferImageCopy region = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                .imageExtent = {w, h, 1}};
+    vkCmdCopyBufferToImage(cb, stage, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    tb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    tb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    tb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    tb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &tb);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    VkImageViewCreateInfo ivci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
+                                  .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    return vkCreateImageView(dev, &ivci, NULL, outView) == VK_SUCCESS;
+}
+
 int main(void) {
+    const char *adir = getenv("ATLAS_DIR"); if (!adir) adir = "/data/local/tmp";
+    loadAtlas(adir);
+    unsigned int icons_filled = maru_icon_build();
+    printf("ICONS filled=%u/%u\n", icons_filled, maru_icon_count());
     unsigned int n = maru_chrome_build(W, H);
     printf("MARU_CHROME quads=%u err=%s\n", n, maru_chrome_last_error());
     if (n == 0) return 1;
@@ -118,7 +238,48 @@ int main(void) {
     if (!vs || !fs) return 1;
 
     VkPushConstantRange pcr = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push)};
+    // 커맨드 풀을 먼저 만든다 — 텍스처 업로드가 커맨드 버퍼를 쓴다.
+    VkCommandPoolCreateInfo cpci0 = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf};
+    VkCommandPool pool; VK(vkCreateCommandPool(dev, &cpci0, NULL, &pool), "pool");
+
+    VkImageView glyphView = VK_NULL_HANDLE, iconView = VK_NULL_HANDLE;
+    if (g_glyph) uploadTexture(dev, pd, queue, pool, g_glyph, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &glyphView);
+    uint32_t islot = maru_icon_slot_px(), icount = maru_icon_count();
+    uploadTexture(dev, pd, queue, pool, maru_icon_atlas(), islot, islot * icount, 4,
+                  VK_FORMAT_R8G8B8A8_UNORM, &iconView);
+    printf("TEX glyph=%d icon=%d\n", glyphView != VK_NULL_HANDLE, iconView != VK_NULL_HANDLE);
+
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                               .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
+    VkSampler samp; VK(vkCreateSampler(dev, &sci, NULL, &samp), "sampler");
+
+    VkDescriptorSetLayoutBinding binds[2] = {
+        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT}};
+    VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                             .bindingCount = 2, .pBindings = binds};
+    VkDescriptorSetLayout dsl; VK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl), "dsl");
+    VkDescriptorPoolSize dps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+    VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                       .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps};
+    VkDescriptorPool dpool; VK(vkCreateDescriptorPool(dev, &dpci, NULL, &dpool), "dpool");
+    VkDescriptorSetAllocateInfo dsai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool = dpool, .descriptorSetCount = 1, .pSetLayouts = &dsl};
+    VkDescriptorSet dset; VK(vkAllocateDescriptorSets(dev, &dsai, &dset), "dset");
+    VkDescriptorImageInfo dii[2] = {
+        {samp, glyphView ? glyphView : iconView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {samp, iconView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet wds[2] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = 0,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = 1,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1]}};
+    vkUpdateDescriptorSets(dev, 2, wds, 0, NULL);
+
     VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                       .setLayoutCount = 1, .pSetLayouts = &dsl,
                                        .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
     VkPipelineLayout layout; VK(vkCreatePipelineLayout(dev, &plci, NULL, &layout), "layout");
 
@@ -158,8 +319,6 @@ int main(void) {
                                        .layout = layout, .renderPass = rp};
     VkPipeline pipe; VK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipe), "pipeline");
 
-    VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf};
-    VkCommandPool pool; VK(vkCreateCommandPool(dev, &cpci, NULL, &pool), "pool");
     VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                                         .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                         .commandBufferCount = 1};
@@ -178,13 +337,17 @@ int main(void) {
     VkRect2D sc = {{0, 0}, {W, H}};
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &dset, 0, NULL);
 
     // **chrome 이 준 op 을 그대로 그린다.** 플랫폼은 배치를 모른다.
     for (unsigned int i = 0; i < n; i++) {
         const CQuad *q = &quads[i];
+        float cols = (q->kind == 2) ? 1.0f : (float)g_cols;
+        float rows = (q->kind == 2) ? (float)maru_icon_count() : (float)g_rows;
         Push p = {{q->x, q->y, q->x + q->w, q->y + q->h},
                   {q->r, q->g, q->b, q->a},
-                  {q->radius, (float)W, (float)H, (float)q->is_text}};
+                  {q->radius, (float)W, (float)H, (float)q->kind},
+                  {(float)q->cell_x, (float)q->cell_y, cols, rows}};
         vkCmdPushConstants(cb, layout, pcr.stageFlags, 0, sizeof p, &p);
         vkCmdDraw(cb, 4, 1, 0, 0);
     }

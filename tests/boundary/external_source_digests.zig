@@ -246,7 +246,7 @@ pub const inventory = [_]Proof{
     // 그 문서를 가를 때마다 문자열이 바뀐다(file-panel·sidebar-groups·agent-session-list·metal-ui-layout에서
     // 차례로 겪었다 — 여기까지 네 번이고, 문서가 커지는 한 또 온다). 매번 count는 2 그대로인데, `@field` 반사도
     // 선언도 손대지 않고 주석 문자열만 달라지기 때문이다. 개별 이력은 git이 가지므로 사유를 여기 쌓지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "06726cb1f87c3cd318905e06916958f0698c4cde3ed7d583f3367cbcac8f2e42" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c2deb4f4bc3ef35e1258b4615c357de53de7e65d00f8a1dc82d602a4cd59afdf" },
     // file-panel.md 분할로 주석 여섯 곳의 단일 출처 경로가 바뀌어 움직였다(§2.2·§2.6 → file-panel-kinds.md,
     // §2.3·§2.4 → file-panel-web-stack.md, §2.5 → file-panel-rich-edit.md, §3.4 → file-panel-dock-ui.md).
     // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.

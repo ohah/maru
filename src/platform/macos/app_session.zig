@@ -1765,6 +1765,9 @@ pub const PendingFileTreeRootValidation = struct {
     operation: FileTreeRootOperation,
     round: u8 = 0,
     identity: ?file_tree.Identity = null,
+    /// 사용자가 고른 것이 아니라 **활성 터미널을 따라가느라** 자동으로 건 전환인가(file-explorer.md §1).
+    /// 자동 전환은 사용자 조작보다 항상 아래다 — 사용자가 폴더를 고르려 하면 이건 버려지고 자리를 내준다.
+    auto: bool = false,
 };
 
 pub const FileTreeTrashAction = struct {
@@ -3466,6 +3469,9 @@ pub const AppSession = struct {
     file_tree_reload_actions_len: usize = 0,
     file_tree_watch_reset_pending: bool = false,
     file_tree_root_pick_pending: FileTreeRootOperation = .none,
+    /// 다음 `provideFileTreeRootPick`가 **자동 따라가기**임을 알리는 one-shot. 그 호출이 소비한다.
+    /// 자동 경로는 실패해도 알림을 띄우지 않는다 — 사용자가 시킨 적 없는 동작의 실패를 알릴 이유가 없다.
+    file_tree_root_auto_follow: bool = false,
     file_tree_root_picker_inflight: FileTreeRootOperation = .none,
     file_tree_root_validation: ?PendingFileTreeRootValidation = null,
     file_tree_root_request_id: u64 = 0,
@@ -31026,15 +31032,30 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try std.testing.expectEqual(2 * session.cell_height_px, session.file_tree_scroll.offset_y_px);
     try std.testing.expect(!session.file_tree_watch_reset_pending);
 
-    // root 밖 CWD는 Tree의 기존 one reveal을 보존하지만, 그것을 outside의 scroll pending으로 바꾸면 안 된다.
+    // **root 밖 CWD는 root 전환을 건다**(2026-08-11 결정 — docs/file-explorer.md §1). 예전에는 무동작이었다.
+    // 전환은 사용자가 "폴더 열기…"로 고를 때와 같은 검증 파이프라인을 타므로 **비동기**다 — 이 시점의 트리는
+    // 아직 그대로이고, 바뀐 것은 "자동 전환이 걸렸다"는 사실이다. 그 사실을 단언하지 않으면 이 테스트는
+    // 옛 계약("root 밖 무동작")을 그대로 통과시켜 회귀를 못 잡는다.
     try testWriteActiveTermCwd(session, outside);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
     try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
+    const auto_pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+    try std.testing.expect(auto_pending.auto); // 사용자 조작이 아니라 따라가기다
+    try std.testing.expectEqual(FileTreeRootOperation.replace, auto_pending.operation);
+    // 아직 적용 전이라 트리·watcher는 그대로다(적용은 검증 완료 뒤 `updateFileTree`가 한다).
     try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
     try std.testing.expectEqual(root_count, session.file_tree.rootCount());
     try std.testing.expect(!session.file_tree_watch_reset_pending);
+
+    // **사용자 조작이 자동 전환을 밀어낸다.** 자동 검증이 슬롯을 잡은 채로 폴더 열기를 거절하면, 사용자는
+    // 방금 누른 메뉴가 왜 안 먹는지 알 수 없다(docs/file-explorer.md §1.1).
+    file_panel_ops.requestFileTreeRootPick(session, .add);
+    try std.testing.expect(session.file_tree_root_validation == null); // 자동 검증은 자리를 내준다
+    try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
+    file_panel_ops.provideFileTreeRootPick(session, &.{}); // picker 취소로 정리
+    session.file_tree_root_outcome = .none;
 
     // 기존 file-open intent와 같은 CWD로 돌아와도 root 밖 거부와 혼동하면 안 된다. offscreen scroll 위치를
     // 강제로 만들어, `already_target`이 실제 viewport 보정을 다시 요청하는지 증명한다. fixture의 행은

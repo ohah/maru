@@ -158,8 +158,58 @@ chrome-android)
     $ADB pull /data/local/tmp/maru-chrome-android.ppm "$OUT/maru-chrome-android.ppm" >/dev/null 2>&1 \
         && python3 "$POC/ppm2png.py" "$OUT/maru-chrome-android.ppm" "$OUT/maru-chrome-android.png"
     ;;
+chrome-android-app)
+    # 앞의 chrome-android 는 오프스크린 텍스처를 PPM 으로 뽑는다. 이건 **에뮬레이터 화면에**
+    # 그린다 — NativeActivity + Vulkan swapchain 이라 iOS 시뮬레이터와 같은 조건이 되고,
+    # 남아 있던 present 페이싱(FIFO=vsync)도 이 경로에서만 판정된다.
+    NDK=${ANDROID_NDK:-$HOME/Library/Android/sdk/ndk/27.1.12297006}
+    SDK=${ANDROID_SDK:-$HOME/Library/Android/sdk}
+    ADB=${ADB:-$SDK/platform-tools/adb}
+    BT="$SDK/build-tools/34.0.0"
+    TC="$NDK/toolchains/llvm/prebuilt/darwin-x86_64"
+    GLUE="$NDK/sources/android/native_app_glue"
+    GLSLC="$NDK/shader-tools/darwin-x86_64/glslc"
+    # apksigner·keytool 은 JVM 이 필요하다. 별도 JDK 없이 Android Studio 번들 JBR 을 쓴다.
+    JBR="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+    [ -d "$JBR" ] && { JAVA_HOME="$JBR"; export JAVA_HOME; PATH="$JBR/bin:$PATH"; export PATH; }
+    make_atlas
+    zig build-lib -target aarch64-linux-android -OReleaseFast -static -fPIC \
+        -femit-bin="$OUT/libchrome-android.a" \
+        --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
+    "$TC/bin/clang" -target aarch64-linux-android28 -fPIC -c "$GLUE/android_native_app_glue.c" \
+        -o "$OUT/glue.o" -I"$GLUE"
+    # `-u ANativeActivity_onCreate` 가 없으면 glue 의 진입점이 --gc-sections 로 잘려
+    # 앱이 "네이티브 진입점 없음"으로 죽는다.
+    "$TC/bin/clang" -target aarch64-linux-android28 -fPIC -shared -O2 \
+        "$POC/chrome_android_app.c" "$OUT/glue.o" "$OUT/libchrome-android.a" \
+        -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -lm \
+        -o "$OUT/libmaruchrome.so"
+    for s in chrome.vert chrome.frag; do
+        "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
+        $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+    done
+    $ADB push "$OUT/atlas.gray" /data/local/tmp/atlas.gray >/dev/null
+    $ADB push "$OUT/atlas.idx" /data/local/tmp/atlas.idx >/dev/null
+    # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
+    "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
+        --manifest "$POC/AndroidManifest.xml" -o "$OUT/base.apk" --auto-add-overlay
+    python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.close()' \
+        "$OUT/base.apk" "$OUT/libmaruchrome.so"
+    [ -f "$OUT/debug.keystore" ] || keytool -genkeypair -keystore "$OUT/debug.keystore" \
+        -alias a -storepass android -keypass android -keyalg RSA -validity 3650 -dname CN=maru
+    "$BT/zipalign" -f 4 "$OUT/base.apk" "$OUT/maru-chrome.apk"
+    "$BT/apksigner" sign --ks "$OUT/debug.keystore" --ks-pass pass:android \
+        --key-pass pass:android "$OUT/maru-chrome.apk"
+    $ADB install -r "$OUT/maru-chrome.apk"
+    $ADB logcat -c
+    $ADB shell am start -n dev.maru.chrome/android.app.NativeActivity >/dev/null
+    sleep 5
+    $ADB exec-out screencap -p > "$OUT/maru-chrome-android-app.png"
+    $ADB logcat -d -s MaruChrome | tail -6
+    echo "스크린샷: $OUT/maru-chrome-android-app.png"
+    ;;
 *)
-    echo "usage: $0 [ios|ios-app|android|features-ios|features-android|chrome-ios|chrome-android]" >&2
+    echo "usage: $0 [ios|ios-app|android|features-ios|features-android|chrome-ios|chrome-android|chrome-android-app]" >&2
     exit 2
     ;;
 esac

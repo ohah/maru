@@ -139,12 +139,24 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)22.0f);
     (*env)->CallVoidMethod(env, paint,
         (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
+    // **번들한 폰트를 쓴다.** maru 가 이미 `assets/fonts/` 에 OFL 폰트를 동봉하고 있고,
+    // Jetendard 는 영문과 한글을 한 파일에 담아 폴백이 필요 없다 — iOS 와 **같은 파일**을
+    // 읽으므로 글자 모양과 advance 가 플랫폼을 넘어 같아진다.
     jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
-    jobject mono = (*env)->GetStaticObjectField(env, tfCls,
-        (*env)->GetStaticFieldID(env, tfCls, "MONOSPACE", "Landroid/graphics/Typeface;"));
+    jobject face = NULL;
+    jstring fpath = (*env)->NewStringUTF(env, "/data/local/tmp/Jetendard-Regular.ttf");
+    jmethodID mFromFile = (*env)->GetStaticMethodID(env, tfCls, "createFromFile",
+        "(Ljava/lang/String;)Landroid/graphics/Typeface;");
+    face = (*env)->CallStaticObjectMethod(env, tfCls, mFromFile, fpath);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
+    if (!face) {  // 조용히 다른 글꼴이 되지 않게 남긴다
+        LOGI("bundled_font_missing fallback=MONOSPACE");
+        face = (*env)->GetStaticObjectField(env, tfCls,
+            (*env)->GetStaticFieldID(env, tfCls, "MONOSPACE", "Landroid/graphics/Typeface;"));
+    }
     (*env)->CallObjectMethod(env, paint,
         (*env)->GetMethodID(env, pCls, "setTypeface",
-                            "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), mono);
+                            "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), face);
 
     jmethodID mDraw = (*env)->GetMethodID(env, cvCls, "drawText",
         "(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
@@ -175,6 +187,14 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         memcpy(buf + y * W, (uint8_t *)pixels + y * info.stride, W);
     AndroidBitmap_unlockPixels(env, bmp);
     (*vm)->DetachCurrentThread(vm);
+
+    // 래스터 결과를 그대로 남긴다 — 두 플랫폼의 픽셀 차이를 재려면 원본이 필요하다.
+    // 앱은 /data/local/tmp 에 못 쓴다(샌드박스) — 자기 내부 경로에 남기고 run-as 로 꺼낸다.
+    char dump_path[512];
+    snprintf(dump_path, sizeof dump_path, "%s/atlas_ondevice.gray",
+             app->activity->internalDataPath ? app->activity->internalDataPath : "/data/local/tmp");
+    FILE *df = fopen(dump_path, "wb");
+    if (df) { fwrite(buf, 1, W * H, df); fclose(df); LOGI("atlas_dump=%s", dump_path); }
 
     *out = buf; *ow = W; *oh = H;
     g.atlas_cols = COLS;

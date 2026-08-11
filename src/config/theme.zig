@@ -10,7 +10,7 @@ pub const Widget = enum { auto, toggle, number, dropdown, text, color };
 
 /// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1. `.global_hotkey`는 schema 필드가 없는
 /// 특수 섹션(전역 OS 단축키 녹음 행만 — app_session이 강제로 목록에 넣고 라벨을 준다).
-pub const Section = enum { font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar, global_hotkey };
+pub const Section = enum { font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar, global_hotkey, editor };
 
 /// 한 필드의 메타. 값은 평범한 Zig 필드로 두고(직접 접근 보존), 메타만 sub-struct `schema` decl에 comptime으로 둔다.
 pub const Meta = struct {
@@ -918,6 +918,22 @@ pub const SidebarConfig = struct {
 /// **왜 끌 수 있어야 하나**: 바는 창 높이를 실제로 먹어 터미널 행이 줄어든다(docs/status-bar.md §1).
 /// 정보보다 행 수가 중요한 사용자에게 되돌릴 길이 없으면 안 된다. 끄면 높이가 0이 되어 작업영역·도크·
 /// 사이드바 뷰포트가 그만큼 되돌아온다 — 게이트가 `statusBarHeightPx` 하나라 소비처가 자동으로 따라온다.
+/// 네이티브 파일 편집기(N1) 표시 옵션. loader가 `editor.*` 키로 파싱(스키마-주도).
+pub const EditorConfig = struct {
+    /// 본문 폭을 넘는 줄을 다음 시각 행으로 접을지
+    /// ([native-editor-visual-mapping.md](../../docs/native-editor-visual-mapping.md) §4 세로 축).
+    ///
+    /// **기본 true인데, 그 문서의 기본 방침(*"가로 스크롤이 기본이고 랩은 토글"*)과 반대다.** 이유는
+    /// 하나다 — **가로 스크롤이 아직 없다.** 랩을 끄면 본문 폭에서 잘린 뒤를 볼 수단이 전혀 없어서,
+    /// 기본값을 방침대로 두면 긴 줄이 읽을 수 없는 상태로 나간다. 가로 스크롤이 붙으면 이 기본값을
+    /// 방침에 맞춰 `false`로 되돌린다.
+    wrap: bool = true,
+
+    pub const schema = .{ // 키: editor.wrap
+        .wrap = Meta{ .doc = "긴 줄 자동 줄바꿈", .widget = .toggle, .section = .editor },
+    };
+};
+
 pub const StatusBarConfig = struct {
     /// 하단 상태표시줄을 표시할지(기본 true — 현행 동작).
     show: bool = true,
@@ -992,6 +1008,8 @@ pub const Config = struct {
     sidebar: SidebarConfig = .{},
     /// 하단 상태표시줄 표시 옵션. loader가 `status-bar.*` 키로 파싱(스키마-주도).
     status_bar: StatusBarConfig = .{},
+    /// 네이티브 파일 편집기(N1) 표시 옵션. loader가 `editor.*` 키로 파싱(스키마-주도).
+    editor: EditorConfig = .{},
     /// 단축키 힌트 HUD(모디파이어 홀드 시 활성 pane 우상단에 현재 단축키 표시). loader가 `keyhint.*` 키로 파싱(스키마-주도).
     keyhint: KeyHintConfig = .{},
     /// 영속 터미널 세션(GUI 종료 후 host에서 유지) 설정. loader가 `session.*` 키로 파싱(스키마-주도).

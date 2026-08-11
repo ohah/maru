@@ -325,6 +325,7 @@ pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
         .quick_terminal => "퀵 터미널",
         .sidebar => "사이드바",
         .global_hotkey => "글로벌 핫키",
+        .editor => "편집기",
     };
 }
 

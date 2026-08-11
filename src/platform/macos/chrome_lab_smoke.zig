@@ -53,6 +53,7 @@ fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
         .editor_font_large,
         .editor_hazard,
         .editor_wide_glyph,
+        .editor_wrap,
         => .{ .family = variant.family(), .fallback = (maru.config.theme.FontConfig{}).fallback },
         else => .{},
     };
@@ -536,6 +537,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-font-large")) return .editor_font_large;
     if (std.mem.eql(u8, raw, "editor-hazard")) return .editor_hazard;
     if (std.mem.eql(u8, raw, "editor-wide-glyph")) return .editor_wide_glyph;
+    if (std.mem.eql(u8, raw, "editor-wrap")) return .editor_wrap;
     return null;
 }
 
@@ -561,6 +563,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_font_large => "editor-font-large",
         .editor_hazard => "editor-hazard",
         .editor_wide_glyph => "editor-wide-glyph",
+        .editor_wrap => "editor-wrap",
     };
 }
 

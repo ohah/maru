@@ -59,6 +59,13 @@ pub const ScenarioId = enum {
     /// 차지하는지 픽셀로 본다. 줄마다 같은 열에 `|`를 두었으므로 **폭 계산이 틀리면 그 막대가
     /// 어긋난다** — 숫자를 읽지 않아도 캡처만으로 회귀가 보이는 것이 이 fixture의 요점이다.
     editor_wide_glyph,
+    /// N1 §4 세로 축 — **랩**. 본문 폭을 넘는 줄이 다음 시각 행으로 이어지는지, 그리고 **이어진
+    /// 행에 줄 번호가 비는지**를 픽셀로 본다. 후자가 단위 테스트로 안 보이는 부분이다 — 본문과
+    /// gutter가 각자 행을 세면 숫자는 다 그려지지만 **본문과 어긋난다**.
+    ///
+    /// fixture에 **한글 줄을 넣은 이유**가 있다. ASCII만이면 `ceil(폭/열수)` 근사와 실제 분할이
+    /// 일치해서, 분할이 틀려도 캡처가 같다. 2칸 글자는 행 끝에 한 칸을 남기므로 그 차이를 드러낸다.
+    editor_wrap,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -127,7 +134,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -220,6 +227,25 @@ const editor_hazard_lines = [_][]const u8{
 ///
 /// 내용 칸 수 근거(§4.2): 이모지·가족·스킨톤·국기·VS16은 각 2칸이라 둘이면 4칸, 한글과 동그란
 /// 번호는 각 2칸이라 셋이면 6칸이다. `MMMM`은 ASCII 4칸.
+/// §4 랩 fixture. **길이를 본문 폭(약 55열) 기준으로 잡았다** — 넘지 않으면 랩이 안 일어나고
+/// 캡처가 랩 없는 상태와 같아진다.
+///
+/// 줄 2는 ASCII라 근사와 실제가 일치하고, 줄 3은 한글이라 **행마다 한 칸이 남아 근사가 틀리는**
+/// 경우다. 둘을 나란히 두면 어느 쪽이 깨졌는지 캡처에서 갈린다. 줄 4의 빈 줄은 **빈 줄이 행 하나를
+/// 지키는지**(caret 자리) 보고, 줄 5는 그 뒤 번호가 밀리지 않았는지 보여준다.
+const editor_wrap_lines = [_][]const u8{
+    // **자.** 랩이 몇 열에서 접히는지 캡처에서 **읽을 수 있게** 한다 — 글자가 화면 오른쪽에 닿아
+    // 끝나면 "폭에 맞게 접혔는지"와 "넘쳐서 잘렸는지"가 그림상 같아 보인다. 이어지는 행의 첫 숫자가
+    // 앞 행 마지막 숫자 다음이면 조각이 정확히 맞물린 것이다.
+    "0123456789" ** 12,
+    "fn wrap(text: []const u8) void {",
+    "    // This ASCII comment is deliberately longer than the content width so it folds onto the next visual row.",
+    "    // 한글 주석도 본문 폭을 넘도록 길게 씁니다. 두 칸짜리 글자는 행 끝에 한 칸을 남기므로 나눗셈 근사와 어긋납니다.",
+    "",
+    "    return;",
+    "}",
+};
+
 const editor_width_lines = [_][]const u8{
     "// | 가 한 열에 서야 한다",
     "ascii   MMMM        |",
@@ -248,6 +274,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const lines: []const []const u8 = switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
+        .editor_wrap => &editor_wrap_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -269,8 +296,34 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
 
     // gutter와 본문이 같은 저장소를 나눠 쓴다. **쓴 양은 각 build가 돌려준 값으로만** 넘긴다 —
     // 호출자가 다시 계산하면 그쪽 내부 규칙을 복제하게 된다.
+    // **본문을 먼저 그린다.** 랩이 켜지면 어느 논리 줄이 몇 행으로 접히는지는 전개해서 나눠 본
+    // 쪽만 알기 때문에(§4 세로 축), 본문이 시각 배치를 정하고 gutter가 그것을 따른다. 둘이 각자
+    // 세면 랩된 줄에서 번호가 본문과 어긋난다.
+    var content_rows: [row_capacity]editor_view.content.Row = undefined;
+    var n: u16 = 0;
+    while (n < visible) : (n += 1) {
+        content_rows[n] = .{ .bytes = lines[vp.first_row + n] };
+    }
+
+    var visual_rows: [row_capacity]editor_view.visual_map.VisualRow = undefined;
+    // 랩이 켜지면 논리 줄 하나가 화면 여럿을 덮으므로 **그릴 수 있는 행 수**로 상한을 준다.
+    const visual_budget = @min(vp.rows, row_capacity);
+    const cw = try editor_view.content.build(.{
+        .layout = layout,
+        .rows = content_rows[0..visible],
+        .wrap = scenario.id == .editor_wrap,
+        .cell_w_px = cell_w_px,
+        .cell_h_px = cell_h_px,
+        .origin_px = .{ .x = 0, .y = 0 },
+        .font_px = scenario.font_px,
+    }, buffers.ops, buffers.text_bytes, buffers.text_runs, visual_rows[0..visual_budget]);
+
     var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
-    const grows = editor_view.gutter.rowsForRange(vp.first_row, visible, &gutter_rows);
+    const grows = editor_view.gutter.rowsForVisual(
+        visual_rows[0..cw.visual_rows],
+        vp.first_row,
+        &gutter_rows,
+    );
     const gw = try editor_view.gutter.build(.{
         .layout = layout,
         .rows = grows,
@@ -278,22 +331,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
         .font_px = scenario.font_px,
-    }, buffers.ops, buffers.text_bytes, buffers.text_runs);
-
-    var content_rows: [row_capacity]editor_view.content.Row = undefined;
-    var n: u16 = 0;
-    while (n < visible) : (n += 1) {
-        content_rows[n] = .{ .bytes = lines[vp.first_row + n], .visual_row = n };
-    }
-
-    const cw = try editor_view.content.build(.{
-        .layout = layout,
-        .rows = content_rows[0..visible],
-        .cell_w_px = cell_w_px,
-        .cell_h_px = cell_h_px,
-        .origin_px = .{ .x = 0, .y = 0 },
-        .font_px = scenario.font_px,
-    }, buffers.ops[gw.ops..], buffers.text_bytes[gw.bytes..], buffers.text_runs[gw.runs..]);
+    }, buffers.ops[cw.ops..], buffers.text_bytes[cw.bytes..], buffers.text_runs[cw.runs..]);
 
     return .{
         // 아직 hit-test 대상이 없다(줄 번호 클릭은 N2의 줄 선택, 본문 클릭은 캐럿 배치다). 빈 트리를 낸다.
@@ -398,7 +436,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

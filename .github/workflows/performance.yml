@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.areas.outputs.code }}
+      runtime: ${{ steps.areas.outputs.runtime }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,7 +49,7 @@ jobs:
   core-performance-budget:
     name: core performance budget
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -56,16 +56,20 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 ### 변경 영역별 실행(job-level 게이트)
 
-문서 한 줄을 고친 PR에 macOS 러너 4대와 외부 오라클을 태우지 않는다. 어떤 축을 실행할지는 **`tools/ci/changed-areas.sh`가 단일 출처**이고, 워크플로는 그 결과(`code`·`web`·`docs`)만 소비한다. 축은 서로 독립이다 — Zig만 바꾸면 `web:check`를 돌리지 않고, web만 바꾸면 Zig 게이트를 돌리지 않는다.
+문서 한 줄을 고친 PR에 macOS 러너 4대와 외부 오라클을 태우지 않는다. 어떤 축을 실행할지는 **`tools/ci/changed-areas.sh`가 단일 출처**이고, 워크플로는 그 결과(`code`·`runtime`·`web`·`docs`)만 소비한다. 축은 서로 독립이다 — Zig만 바꾸면 `web:check`를 돌리지 않고, web만 바꾸면 Zig 게이트를 돌리지 않는다.
 
-| 변경 경로 | `code` | `web` | `docs` |
-| --- | --- | --- | --- |
-| `docs/configuration.md` | ✓ | | |
-| `docs/**`, `*.md`, `LICENSE`, `.claude/**` | | | ✓ |
-| `src/**`, `tests/**`, `tools/**`, `terminfo/**`, `assets/**`, `build.zig`, `build.zig.zon` | ✓ | | |
-| `web/**` | | ✓ | |
-| `.mise.toml`, `.github/**`, `tools/ci/**` | ✓ | ✓ | |
-| 그 밖의 모든 경로(미분류) | ✓ | ✓ | |
+| 변경 경로 | `code` | `runtime` | `web` | `docs` |
+| --- | --- | --- | --- | --- |
+| `docs/configuration.md` | ✓ | ✓ | | |
+| `docs/**`, `*.md`, `LICENSE`, `.claude/**` | | | | ✓ |
+| `src/**`, `tests/**`, `tools/**`(ci 제외), `terminfo/**`, `assets/**`, `build.zig`, `build.zig.zon` | ✓ | 주석 전용이면 ✗ | | |
+| `web/**` | | | ✓ | |
+| `.mise.toml`, `.github/**`, `tools/ci/**` | ✓ | ✓ | ✓ | |
+| 그 밖의 모든 경로(미분류) | ✓ | ✓ | ✓ | |
+
+**`code`와 `runtime`을 나누는 이유.** 분류기는 확장자로만 영역을 가르므로 **주석 한 줄**만 고쳐도 `.zig`라는 이유로 macOS 러너 다섯 대가 돈다(실측: 문서 분할 PR 여덟 건이 전부 그랬고, 그때마다 cold-render 플래키에 노출됐다). 주석은 런타임 동작을 바꾸지 않으므로 macOS·오라클·성능 job은 `runtime`을 본다. **`check`(ubuntu)는 계속 `code`를 본다** — `check-boundaries`의 external source digest가 doc comment(`///`·`//!`)를 잠가서, 주석만 고쳐도 digest가 움직이고 그 게이트를 건너뛰면 값이 깨진 채 머지된다.
+
+주석 판정은 `*.zig`·`*.swift`·`*.m`·`*.h`에만 적용하고, 추가·삭제된 줄이 **전부 줄 시작 `//` 또는 빈 줄**일 때만 주석 전용으로 본다. 문자열 안의 `//`(`"https://…"`)는 줄 시작이 아니라 걸리지 않고, 한 줄이라도 코드가 섞이면 즉시 `runtime`을 켠다. `.mise.toml`·`.github/**`·`tools/ci/**`는 주석이 무해한지 겉으로 알 수 없어 판정 없이 항상 켠다.
 
 **workflow-level `paths` 필터는 여전히 쓰지 않는다.** required 워크플로에 `paths`를 두면 무관한 PR에서 워크플로 자체가 트리거되지 않아 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면 job-level `if:`로 건너뛴 job은 GitHub이 `conclusion=skipped`로 **보고**하고 branch protection은 이를 통과로 취급한다. 그래서 `pull_request` 트리거는 모든 PR에 열어 두고 job 단위로 거른다.
 

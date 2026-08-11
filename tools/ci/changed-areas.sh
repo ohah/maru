@@ -14,9 +14,19 @@
 # 사용법: sh tools/ci/changed-areas.sh <base-sha> <head-sha> >> "$GITHUB_OUTPUT"
 #
 # 출력(GitHub Actions output 형식):
-#   code=true|false   Zig/빌드/테스트 등 제품 코드 경로가 바뀌었는가
-#   web=true|false    web/ 번들 경로가 바뀌었는가
-#   docs=true|false   문서 경로가 바뀌었는가(config 문서 드리프트 게이트를 켜는 축)
+#   code=true|false     Zig/빌드/테스트 등 제품 코드 경로가 바뀌었는가
+#   runtime=true|false  그 코드 변경이 **런타임 동작을 바꿀 수 있는가**(주석만 고쳤으면 false)
+#   web=true|false      web/ 번들 경로가 바뀌었는가
+#   docs=true|false     문서 경로가 바뀌었는가(config 문서 드리프트 게이트를 켜는 축)
+#
+# `code`와 `runtime`을 가르는 이유: 분류기는 확장자로만 영역을 나누므로, 문서 경로를 가리키는
+# **주석 한 줄**만 고쳐도 `.zig`라는 이유로 macOS 러너 다섯 대가 돈다(실측: 문서 정리 PR 여덟 건이
+# 전부 그랬고, 그때마다 cold-render 플래키에 노출됐다). 주석은 런타임 동작을 바꾸지 않으므로
+# 그 잡들은 `runtime`을 본다.
+#
+# **`check`(ubuntu)는 계속 `code`를 본다.** `check-boundaries`의 external source digest가 doc
+# comment(`///`·`//!`)를 잠그기 때문이다 — 주석만 고쳐도 digest가 움직이고, 그 게이트를 건너뛰면
+# 값이 깨진 채 머지된다(이번 문서 정리에서 실제로 여러 번 갱신이 필요했다).
 #
 # 세 축은 서로 독립이다 — Zig만 바꾸면 web:check를 돌리지 않고, web만 바꾸면 Zig 게이트를 돌리지
 # 않는다. 양쪽에 걸치는 파일(.mise.toml·.github/*·tools/ci/*)과 분류되지 않은 파일만 둘 다 켠다.
@@ -32,6 +42,7 @@ head="${2:-}"
 
 emit_all() {
 	echo "code=true"
+	echo "runtime=true"
 	echo "web=true"
 	echo "docs=true"
 }
@@ -64,8 +75,26 @@ if [ -z "$files" ]; then
 fi
 
 code=false
+runtime=false
 web=false
 docs=false
+
+# 이 파일의 diff가 **주석·빈 줄만** 건드렸는가(0=그렇다). 소스 확장자에만 쓴다.
+#
+# `+++`/`---` 헤더는 건너뛴다. 판정은 **줄 시작**이 `//`인지만 보므로 문자열 안의 `//`(예:
+# `"https://…"`)는 걸리지 않는다. 빈 줄을 허용하는 것은 주석 블록을 재배치할 때 딸려 오기 때문이고,
+# 빈 줄 역시 동작을 바꾸지 않는다. 하나라도 코드 줄이 섞이면 즉시 코드 변경으로 본다.
+comment_only_diff() {
+	git -c core.quotePath=false diff -U0 --no-renames "$base...$head" -- "$1" 2>/dev/null | awk '
+		/^(\+\+\+|---)/ { next }
+		/^[+-]/ {
+			line = substr($0, 2)
+			sub(/^[ \t]*/, "", line)
+			if (line != "" && line !~ /^\/\//) { found_code = 1; exit }
+		}
+		END { exit (found_code ? 1 : 0) }
+	'
+}
 
 # 분류 규칙은 fail-safe다. 아래 어느 패턴에도 걸리지 않는 파일은 code·web을 **둘 다** 켠다.
 # 새 최상위 디렉터리가 생겼는데 목록을 갱신하지 않으면 CI가 더 도는 쪽으로 틀린다(안전한 방향).
@@ -78,6 +107,7 @@ while IFS= read -r path; do
 	# 이 파일은 문서가 아니라 코드로 취급해야 게이트가 열리지 않는다.
 	docs/configuration.md)
 		code=true
+		runtime=true
 		;;
 	# 문서·라이선스와 에이전트 로컬 설정. 제품 빌드에도 파이프라인에도 들어가지 않는다.
 	# docs/*.md는 check-config-docs와 check-doc-links가 런타임에 훑으므로 `check` job의 축소 실행이 계속 검증한다
@@ -86,8 +116,10 @@ while IFS= read -r path; do
 		docs=true
 		;;
 	# 파이프라인 정의 자체. 어느 축에 영향을 줄지 파일 안을 봐야 알 수 있으므로 둘 다 켠다.
+	# 주석 판정도 하지 않는다 — 워크플로/태스크 정의는 주석이 무해한지 겉으로 알 수 없다.
 	.mise.toml | .github/* | tools/ci/*)
 		code=true
+		runtime=true
 		web=true
 		;;
 	# web 번들(bun build/test/lint/license). Zig 게이트는 이 경로를 읽지 않는다.
@@ -95,11 +127,22 @@ while IFS= read -r path; do
 		web=true
 		;;
 	# Zig 제품 코드·테스트·빌드. web:check는 이 경로를 읽지 않는다.
+	# 소스 확장자는 주석 전용 변경이면 `runtime`을 켜지 않는다(위 헤더 참조). 그 밖의 경로
+	# (terminfo·assets·build.zig.zon 등)는 주석 개념이 없거나 형식이 달라 항상 켠다.
 	src/* | tests/* | tools/* | terminfo/* | assets/* | build.zig | build.zig.zon)
 		code=true
+		case "$path" in
+		*.zig | *.swift | *.m | *.h)
+			comment_only_diff "$path" || runtime=true
+			;;
+		*)
+			runtime=true
+			;;
+		esac
 		;;
 	*)
 		code=true
+		runtime=true
 		web=true
 		;;
 	esac
@@ -107,9 +150,10 @@ done <<EOF
 $files
 EOF
 
-echo "changed-areas: code=$code web=$web docs=$docs" >&2
+echo "changed-areas: code=$code runtime=$runtime web=$web docs=$docs" >&2
 echo "$files" | sed 's/^/changed-areas:   /' >&2
 
 echo "code=$code"
+echo "runtime=$runtime"
 echo "web=$web"
 echo "docs=$docs"

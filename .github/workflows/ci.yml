@@ -17,6 +17,11 @@ jobs:
   # 변경 영역 판정. 문서만 고친 PR에서 macOS 러너 4대와 외부 오라클까지 도는 것은 순수한 낭비다.
   # 분류 정책의 단일 출처는 tools/ci/changed-areas.sh이고, 아래 job들은 그 플래그만 소비한다.
   #
+  # `code`와 `runtime`을 나눠 쓴다. macOS·오라클·성능 job은 `runtime`을 보므로 **주석만 고친 코드
+  # 변경에서는 건너뛴다**(분류기는 확장자로만 영역을 가르는 탓에, 문서 경로를 가리키는 주석 한 줄에
+  # 러너 다섯 대가 돌던 문제다). 반면 `check`는 `code`를 그대로 봐야 한다 — check-boundaries의
+  # external source digest가 doc comment를 잠그기 때문이다.
+  #
   # workflow-level `paths` 필터가 아니라 job-level `if`인 이유: required 워크플로에 `paths`를 두면
   # 무관한 PR에서 트리거 자체가 안 돼 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면
   # 조건으로 건너뛴 job은 conclusion=skipped로 보고되고 branch protection은 이를 통과로 취급한다.
@@ -30,6 +35,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.areas.outputs.code }}
+      runtime: ${{ steps.areas.outputs.runtime }}
       web: ${{ steps.areas.outputs.web }}
       docs: ${{ steps.areas.outputs.docs }}
     steps:
@@ -123,7 +129,7 @@ jobs:
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     # 15 → 25. AppSession 전수 스위트(아래 "Run the macOS AppSession test suite")가 붙으면서 늘렸다.
     # 실측은 웜 캐시 로컬에서 2분 29초이고, 콜드 러너는 이 모듈을 필터 없이 처음 컴파일하므로 더 든다.
@@ -212,7 +218,7 @@ jobs:
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -262,7 +268,7 @@ jobs:
     # (실측: 잡 8개 합계 24분 46초 중 이 잡 하나가 8분 14초).
     # ⚠️ 이 잡은 branch protection의 **필수 체크**였다 — PR에서 안 돌게 하려면 그 목록에서도 빼야 한다
     # (필수인데 실행되지 않으면 PR이 영영 pending으로 막힌다). 이 PR과 함께 설정을 바꾼다.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -309,7 +315,7 @@ jobs:
   mermaid-macos:
     name: mermaid macOS product path
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.web == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.web == 'true') }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -356,7 +362,7 @@ jobs:
   session-host-slow-observer-macos:
     name: session host slow observer macOS
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -404,7 +410,7 @@ jobs:
   oracles:
     name: external oracles (libvterm, Alacritty)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

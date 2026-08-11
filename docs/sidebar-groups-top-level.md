@@ -240,45 +240,9 @@ mutation/render 경로가 이 경계를 유지**해야 한다. `/code-review max
 **리전** = clamp 2함수. 셋 다 preview=commit이라 실앱 드래그가 프리뷰대로 확정된다. **검증**: 헤드리스 SR-PIN1~5(전체 마우스
 경로 preview→commit, commit 직접 호출 아님)·부정검증, commit MARU_DEBUG 로그(`src_pinned`·`top_level_written`).
 
-### 14.10 단계 SR1~5 — 각 단계 독립 동작·green
+### 14.10 단계 분해
 
-1. **SR1 — 저장·파생 토대(동작 보존, byte-identical) ✅**: `Tab.top_level`(session_model + workspace 모델) + `top-level`
-   직렬화(additive, false=키 생략) + 캡처/복원 왕복 + §14.3의 7 경계 리셋/break + `enclosingGroupMarkerIndex` 상향 클램프 +
-   `tabIsInGroup` 재작성 + §14.2 렌더(자동). top_level
-   0개면 7 경계 no-op → 기존 그룹/pin/GL/SG8 **byte-identical**(회귀 0). 헤드리스: 7 경계 인터리빙 파생(`[A,a1,TOP,B,b1]` depth
-   1,1,0,1,1·`groupSubtreeEnd(A)=[0,2)`·`directCardCount(A)=2`·`effectiveDepthAt(TOP)=0`·`enclosing(TOP)=null`·`tabIsInGroup(TOP)
-   =false`·subtreeHasMatch/ghostOverlapsSubtree top_level break·pass2 접힘 shred 방지) + 직렬화 round-trip.
-2. **SR2 — C2 정합 재작성(최고 위험, §14.4) ✅**: `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` 구조 subtree에 top_level
-   하드 break + **suffix-exclusion 유지(재기록이 pin flip 존중 — exact-full-rewrite는 리전 넘어 오염이라 폐기 PR#1197)** + align top_level 인식. 헤드리스: 고정 리전 인터리브 canonical·idempotent·
-   align 통과 + **"top_level 앞 desync 멤버 흡수"**(손상 치유 회귀 게이트, 초안 오진 정정 반영).
-3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5) ✅**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
-   카드→마커 전이 시 top_level clear + inline depth stack `or t.top_level` 리셋 + "여기서 최상위로 분리"(promote-in-place) 액션 +
-   재흡수 + hygiene(§14.5). 정책(b: 단일+뒤탭 promote) 확정. 스크린샷 훅 `MARU_FORCE_INTERLEAVE`.
-4. **SR4 — model-2 드래그 가상화(요구2, §14.6, SG8급) ✅**: `VirtualLayout.top_level[]` + `DropPlan.top_level` + `simulateDrop`
-   순열 + 프리뷰 가상 read + **프리뷰=확정 등가 테스트** + `sidebarGroupDropBoundary`/`DropTargetTab` 인터리빙 드롭 타깃.
-   스크린샷 훅 `MARU_FORCE_SR4_DRAG`(+`_INTO`).
-5. **SR5 — 빈 gap 제스처·잔재/문서/중첩 하드닝 ✅**: (1) **"그룹 뒤 빈 gap" 첫 인터리브**(요구2 완성) — 마지막 멤버/접힌
-   최상위 헤더의 **아래 경계 영역** 드롭으로 그룹 밖 top카드 착지(`sidebarCardDropAfterGroup` — 위치는 접힌 헤더 드롭과 동형
-   방향 보정, top_level만 다름, 커밋 게이트=`hasGroupMarkerAboveInRegion` 공유). SR4가 기존 top카드 **옆** 드롭만 열었던
-   한계(빈 gap 불가)를 닫는다. (2) **pin×top_level×local_pin 3축 공존** 헤드리스(고정 그룹 안 정합·렌더 힌트 3축) + **중첩 안
-   top_level**(subgroup 뒤 top카드 = **depth 0**, sticky-reset이 depth를 항상 0으로만 되돌려 "부모 depth 복귀"는 안 되는
-   §14.7 제약 명문화) + `topLevelGroupMarkerIndex` 상향(중첩 멤버 gap 드롭이 부모 최상위 그룹 끝 기준). (3) **두 UX 결정**:
-   (a) **마커 카드 promote 숨김** — 마커에선 "여기서 최상위로 분리"를 안 띄운다(`promoteTabToTopLevelInPlace`가 leaf-only §13.8상
-   no-op이라 죽은 항목 방지; remove는 마커에서도 nested subgroup 빼기로 유효해 유지 — 메뉴가 한 칸 짧아져 sel이 promote 인덱스
-   미도달). (b) **중간 promote cascade** 문서 명시(§14.5). (4) **§2.1 본문·§10 경계 제약 해소 서술**. 스크린샷 훅
-   `MARU_FORCE_GAP_DROP`(+`_COLLAPSED`)·`MARU_FORCE_SR5_3AXIS`(+`_PIN`/`_COLLAPSED`/`_COLOR`)·`MARU_FORCE_SR5_NESTED_TOP`.
-   헤드리스: `SR5(a)` 빈 gap 드롭·`SR5(b)` 접힌 헤더 gap+skip 엣지·`SR5(c)` promote 마커 숨김·`SR5(d)` 3축 공존·`SR5(e)` 중첩 top_level.
-6. **CR — 기존 경로의 top_level 경계 유지(code-review PR#1197, §14.8) ✅**: `/code-review max`가 잡은 9건 — inheritGroupMarker
-   `!next.top_level`·top_level 카드 제거(closeTab·드래그 commit) 경계 재확립·normalize/align exact-full-rewrite→suffix-exclusion
-   (§14.4 정정)·removeFromGroupForTab `!tabIsInGroup`·sidebarGroupDropBoundary run_hi `!top_level`·accent current_group_color
-   리셋 + 효율 3건(topLevelGroupMarkerIndex O(n)·cardDropPlan 중복 dragTargetSlot·sidebarCardDropAfterGroup groupSubtreeEnd
-   재사용). 헤드리스 CR#1~6(각 revert-fail, #3은 8테스트 load-bearing). build·fmt·boundaries·check·macos EXIT 0, 회귀 0.
-7. **PIN — 고정 정책 "고정 요소는 흡수 불가"(사용자 규칙, §14.9) ✅**: 고정 탭 top_level 강제(cardDropPlan에 `source_pinned`
-   OR·simulateDrop·commit gate도 OR = 3레이어 대칭 preview=commit)·고정 그룹 nest 금지(groupNestPlan 마커 pinned→`return null`,
-   Cmd nest여도 sibling 폴백)·고정 리전 clamp(clampMoveToGroup/clampGroupMoveToRegion `[0,pinned_count)` — 테스트 잠금). 근본
-   정정: commit divergence 아니었음(commit은 plan.top_level 이미 replay) — 실증상은 cardDropPlan이 드롭 위치 따라 top_level을
-   다르게 냄. 헤드리스 SR-PIN1~5(전체 마우스 경로 preview→commit)·부정검증. build·fmt·boundaries·check·macos EXIT 0, 회귀 0.
-
+[사이드바 그룹 단계 분해](plans/sidebar-groups.md)가 소유한다 — 단계와 완료 이력은 계획 문서 몫이다.
 ### 14.11 규모·리스크
 
 - **규모 = GP1+SG8급**(초안 GP1 과소평가 정정): 코어 7 경계 + effectiveDepthAt(2) + enclosingGroupMarkerIndex + tabIsInGroup +

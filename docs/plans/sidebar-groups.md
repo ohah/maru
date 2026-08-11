@@ -250,3 +250,84 @@ SG1~SG8의 단계 분해와 완료 이력이다. 계약은 [사이드바 그룹]
    - **리스크**: [높음] 이중경로 divergence(→ 등가 테스트→코어 단일화, SG8a가 첫 단추). [중] 도메인 분리 이주 누락(렌더 소비자를
      preview_rows로, hit-test는 sidebar_rows로 정확히 — ⌘1-9 배지·IME caret 포함). [중] 스크롤 중 드래그 프리뷰 재투영·삽입선 트리거
      (autoscroll 없음=기존 한계). [낮] pane grip 별도 경로(상호배타)·rename 중 드래그 confirm 게이트가 up 삼키면 프리뷰 잔류(정리 경로 필요).
+
+### 12.12 단계 GP1~5
+
+1. **GP1 — pin-region-aware 파생 토대(동작 보존, 그룹 고정 토글 없음) ✅**: 7 subtree-스캔에 pin-region 리셋/경계 +
+   `firstGroupStartInRegion`·`pinRegionBounds`·`enclosingGroupMarkerIndex` 핀 클램프 + 8 호출처. 고정 그룹 0개면 byte-identical(§12.11 ①),
+   인위 배치로 7 경계 단언(§12.11 ②). `toggleGroupPin`·정규화·clamp·`pin_derived`·UX는 **미포함**(파생 코어가 pin-region을
+   **인식**하는 토대만).
+2. **GP2 — `normalizePinnedFromGroups` + 복원 순서(§12.5) ✅**: shred → canonical(suffix-exclusion). `stablePartition`/`togglePin`
+   회귀 0. 복원은 normalize→`stablePartitionPinned` 순서, 마커 pinned 승계(`inheritGroupMarker`), 드래그 게이트.
+3. **GP3 — `toggleGroupPin` + plan 산출부 단일 clamp(§12.6) + 헤더 항목 ✅**: 고정 그룹 비고정 드래그 → `clampGroupMoveToRegion`
+   (SG8 등가 확장, 프리뷰=확정). 토글은 `stablePartitionPinned` 안착. 개별 pin 입구 차단·removeFromGroup unpin 선행.
+4. **GP4 — UX(§12.8·§12.10) ✅**: `pin_derived`+`sidebarRowShowsPin`으로 멤버·마커 카드 📌 억제·헤더 인디케이터, `assertPinnedPrefixRuntime`
+   확장(`pinBoundariesAlignGroups`), pane/remove 리전 정정 + macOS 스크린샷. 훅 `MARU_FORCE_GROUP_PIN`.
+5. **GP5 — 잔재/문서 ✅**: §10 백로그 "그룹 고정" → C2 해소, §12 최종 동기화(§12.5 suffix-exclusion·§12.6 `stablePartitionPinned`·
+   §12.8 `sidebarRowShowsPin`·§12.11 `pinBoundariesAlignGroups`), dead code 없음 확인, 회귀 매트릭스(GP1~4+SG3~SG8+pin) green.
+
+### 13.10 단계 GL1~5 — 각 단계 독립 동작·green
+
+1. **GL1 — 저장·파생 토대(동작 보존) ✅**: `Tab.local_pinned`(session_model + workspace 모델) + `local-pinned` 직렬화(additive,
+   false=키 생략) + 캡처/복원 왕복 + `stablePartitionSubtree`(reorderTabs 재사용·unit-aware·포인터 재탐색·드래그 게이트) 코어.
+   **아직 배선(mutation 지점)·토글·UX·렌더·위생 없음**. 로컬 pin 0개면 no-op → 기존 그룹/pin/SG8 **byte-identical**(회귀 0).
+   헤드리스: leaf 멤버 float→마커 직후·자식 subgroup 통째 skip·groupSubtreeEnd/effectiveDepthAt 보존·드래그 게이트·round-trip.
+2. **GL2 — 배선 + 토글 + 드래그 clamp + 멤버 우클릭 UX ✅**(구현 커밋이 초안 GL2·GL3를 합침): §13.4 표준 순서로
+   `stablePartitionSubtree`를 mutation 지점(+복원)에 배선(각 마커 재귀·게이트) + `toggleLocalPin`(멤버) + `simulateDrop`
+   subtree-로컬 clamp(§13.5) + **그룹 안 멤버 우클릭 "그룹 내 위치 고정"/"고정 해제"**(`cardPinRole` 분기 — 마커=그룹째·
+   최상위=개별 전역 pin·멤버=로컬, 현행 그룹째 위임 되돌림). 헤드리스: 멤버 pin→float·드래그 clamp 프리뷰=확정·카드 pin 라우팅.
+3. **GL3 — 렌더 📌 + 위생 + 드래그 프리뷰=확정 엣지 완성 + 마커 카드 로컬 pin 뒤 배치 ✅**(초안 GL4 = 렌더+위생을 이 단계로
+   통합): `Row.card.local_pinned` 힌트 + `sidebarRowShowsPin` 선두 분기(§13.6, 멤버 📌 부활, pin_derived 직교) + 전이 3경로 위생
+   스윕 `clearStaleLocalPins`(§13.7) + **확정 클램프**(§13.5 — `commitSidebarDragPreview`가 마커-eject 엣지에서 프리뷰=확정을 완성)
+   + **마커 자기 카드 렌더 위치 = 로컬 pin 뒤**(§13.6.1 — `projectRowsCore` 버퍼링·재방출로 로컬 pin이 그룹 절대 최상단; self.tabs
+   불변·hit-test row.tab 정합·프리뷰=확정·로컬 pin 0개 byte-identical). macOS 제품 스크린샷(신규 훅 `MARU_FORCE_GROUP_LOCALPIN`·
+   공존 `_GROUPPIN`). 헤드리스: GL3(a)·(a2 공존)·(b1/b2/b3 위생)·(c 드래그 엣지)·(d 마커 카드 순서·hit-test·byte-identical·프리뷰=확정).
+4. **GL4 — 공존·중첩 하드닝 + 버그 2건 수정 ✅**: 그룹째×로컬 공존 헤드리스(§13.4 keystone — GL4(a): 그룹째 고정이 로컬 pin
+   그룹을 전역 프리픽스로 옮겨도 subtree float 보존·배선 순서·재토글·idempotent·렌더) + 중첩 재귀 float(GL4(b): 자식 subgroup
+   안 leaf float, 부모→자식 순차·자식 마커 카드 위 배치·I3 depth 보존) + 회귀 매트릭스(GL4(c): 그룹 색·rename·검색·pane 분리
+   공존). **버그 2건 수정**(별도 fix 커밋): **버그1** = 최상위 카드가 그룹에 흡수(`createTab`이 `firstGroupStartInRegion(pinned_count,
+   len)` 앞 삽입 — `promotePaneToNewWorkspace`와 공유, §2.1)·**버그2** = 그룹째 고정 해제 시 멤버 로컬 pin 리셋(§13.1·§13.7 —
+   초안 "직교 survival"을 "고정 켜는 동안 직교·해제 시 리셋"으로 뒤집음). 회귀: pin매트릭스 #1(버그1)·#2(버그2)·#3(개별 pin +
+   그룹째 + 로컬 3축 독립 공존).
+5. **GL5 — 확장(다음, 범위 제외)**: **subgroup-as-member/마커 로컬 pin 확장**(§13.8 — 자식 subgroup 마커 자체를 부모 멤버로서
+   로컬 pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float) + 그 트리거·의미 확정. `stablePartitionSubtree`의 unit-aware
+   통째-이동이 이미 구조상 수용하나(§13.8), 트리거·시맨틱 확정은 미착수.
+
+### 14.10 단계 SR1~5 — 각 단계 독립 동작·green
+
+1. **SR1 — 저장·파생 토대(동작 보존, byte-identical) ✅**: `Tab.top_level`(session_model + workspace 모델) + `top-level`
+   직렬화(additive, false=키 생략) + 캡처/복원 왕복 + §14.3의 7 경계 리셋/break + `enclosingGroupMarkerIndex` 상향 클램프 +
+   `tabIsInGroup` 재작성 + §14.2 렌더(자동). top_level
+   0개면 7 경계 no-op → 기존 그룹/pin/GL/SG8 **byte-identical**(회귀 0). 헤드리스: 7 경계 인터리빙 파생(`[A,a1,TOP,B,b1]` depth
+   1,1,0,1,1·`groupSubtreeEnd(A)=[0,2)`·`directCardCount(A)=2`·`effectiveDepthAt(TOP)=0`·`enclosing(TOP)=null`·`tabIsInGroup(TOP)
+   =false`·subtreeHasMatch/ghostOverlapsSubtree top_level break·pass2 접힘 shred 방지) + 직렬화 round-trip.
+2. **SR2 — C2 정합 재작성(최고 위험, §14.4) ✅**: `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` 구조 subtree에 top_level
+   하드 break + **suffix-exclusion 유지(재기록이 pin flip 존중 — exact-full-rewrite는 리전 넘어 오염이라 폐기 PR#1197)** + align top_level 인식. 헤드리스: 고정 리전 인터리브 canonical·idempotent·
+   align 통과 + **"top_level 앞 desync 멤버 흡수"**(손상 치유 회귀 게이트, 초안 오진 정정 반영).
+3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5) ✅**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
+   카드→마커 전이 시 top_level clear + inline depth stack `or t.top_level` 리셋 + "여기서 최상위로 분리"(promote-in-place) 액션 +
+   재흡수 + hygiene(§14.5). 정책(b: 단일+뒤탭 promote) 확정. 스크린샷 훅 `MARU_FORCE_INTERLEAVE`.
+4. **SR4 — model-2 드래그 가상화(요구2, §14.6, SG8급) ✅**: `VirtualLayout.top_level[]` + `DropPlan.top_level` + `simulateDrop`
+   순열 + 프리뷰 가상 read + **프리뷰=확정 등가 테스트** + `sidebarGroupDropBoundary`/`DropTargetTab` 인터리빙 드롭 타깃.
+   스크린샷 훅 `MARU_FORCE_SR4_DRAG`(+`_INTO`).
+5. **SR5 — 빈 gap 제스처·잔재/문서/중첩 하드닝 ✅**: (1) **"그룹 뒤 빈 gap" 첫 인터리브**(요구2 완성) — 마지막 멤버/접힌
+   최상위 헤더의 **아래 경계 영역** 드롭으로 그룹 밖 top카드 착지(`sidebarCardDropAfterGroup` — 위치는 접힌 헤더 드롭과 동형
+   방향 보정, top_level만 다름, 커밋 게이트=`hasGroupMarkerAboveInRegion` 공유). SR4가 기존 top카드 **옆** 드롭만 열었던
+   한계(빈 gap 불가)를 닫는다. (2) **pin×top_level×local_pin 3축 공존** 헤드리스(고정 그룹 안 정합·렌더 힌트 3축) + **중첩 안
+   top_level**(subgroup 뒤 top카드 = **depth 0**, sticky-reset이 depth를 항상 0으로만 되돌려 "부모 depth 복귀"는 안 되는
+   §14.7 제약 명문화) + `topLevelGroupMarkerIndex` 상향(중첩 멤버 gap 드롭이 부모 최상위 그룹 끝 기준). (3) **두 UX 결정**:
+   (a) **마커 카드 promote 숨김** — 마커에선 "여기서 최상위로 분리"를 안 띄운다(`promoteTabToTopLevelInPlace`가 leaf-only §13.8상
+   no-op이라 죽은 항목 방지; remove는 마커에서도 nested subgroup 빼기로 유효해 유지 — 메뉴가 한 칸 짧아져 sel이 promote 인덱스
+   미도달). (b) **중간 promote cascade** 문서 명시(§14.5). (4) **§2.1 본문·§10 경계 제약 해소 서술**. 스크린샷 훅
+   `MARU_FORCE_GAP_DROP`(+`_COLLAPSED`)·`MARU_FORCE_SR5_3AXIS`(+`_PIN`/`_COLLAPSED`/`_COLOR`)·`MARU_FORCE_SR5_NESTED_TOP`.
+   헤드리스: `SR5(a)` 빈 gap 드롭·`SR5(b)` 접힌 헤더 gap+skip 엣지·`SR5(c)` promote 마커 숨김·`SR5(d)` 3축 공존·`SR5(e)` 중첩 top_level.
+6. **CR — 기존 경로의 top_level 경계 유지(code-review PR#1197, §14.8) ✅**: `/code-review max`가 잡은 9건 — inheritGroupMarker
+   `!next.top_level`·top_level 카드 제거(closeTab·드래그 commit) 경계 재확립·normalize/align exact-full-rewrite→suffix-exclusion
+   (§14.4 정정)·removeFromGroupForTab `!tabIsInGroup`·sidebarGroupDropBoundary run_hi `!top_level`·accent current_group_color
+   리셋 + 효율 3건(topLevelGroupMarkerIndex O(n)·cardDropPlan 중복 dragTargetSlot·sidebarCardDropAfterGroup groupSubtreeEnd
+   재사용). 헤드리스 CR#1~6(각 revert-fail, #3은 8테스트 load-bearing). build·fmt·boundaries·check·macos EXIT 0, 회귀 0.
+7. **PIN — 고정 정책 "고정 요소는 흡수 불가"(사용자 규칙, §14.9) ✅**: 고정 탭 top_level 강제(cardDropPlan에 `source_pinned`
+   OR·simulateDrop·commit gate도 OR = 3레이어 대칭 preview=commit)·고정 그룹 nest 금지(groupNestPlan 마커 pinned→`return null`,
+   Cmd nest여도 sibling 폴백)·고정 리전 clamp(clampMoveToGroup/clampGroupMoveToRegion `[0,pinned_count)` — 테스트 잠금). 근본
+   정정: commit divergence 아니었음(commit은 plan.top_level 이미 replay) — 실증상은 cardDropPlan이 드롭 위치 따라 top_level을
+   다르게 냄. 헤드리스 SR-PIN1~5(전체 마우스 경로 preview→commit)·부정검증. build·fmt·boundaries·check·macos EXIT 0, 회귀 0.

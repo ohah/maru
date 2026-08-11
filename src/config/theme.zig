@@ -903,11 +903,20 @@ pub const SidebarConfig = struct {
     ///
     /// codex는 해당 없다 — 외부 스크립트를 실행하는 상태줄/훅 설정이 없어 자식 신원 경로만 쓴다.
     agent_transcript_hook: bool = true,
+    /// 세션 목록 행의 **종류 아이콘을 왼쪽 gutter에 둘지**(기본 false = 이름줄 선두 인라인).
+    /// loader `sidebar.session-icon-gutter`.
+    ///
+    /// 기본이 인라인인 이유는 gutter가 글리프 하나 때문에 행의 **모든 줄**에서 3칸(좁은 사이드바 폭의 ~7%)을
+    /// 뺏으면서, 슬롯 세로 중앙 배치라 줄 수가 다른 행끼리 아이콘 열도 못 이뤄 그 대가를 회수하지 못하기
+    /// 때문이다. 다만 gutter는 "아이콘이 본문과 완전히 분리된 열에 있다"는 또렷함이 있어 취향이 갈린다 —
+    /// 그래서 지우지 않고 옵션으로 남긴다(docs/sidebar-agent-list.md §2).
+    session_icon_gutter: bool = false,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
         .show_branch = Meta{ .doc = "사이드바 카드에 git 브랜치 표시", .widget = .toggle, .section = .sidebar },
         .show_folder = Meta{ .doc = "사이드바 카드에 폴더 경로 표시", .widget = .toggle, .section = .sidebar },
         .agent_transcript_hook = Meta{ .doc = "에이전트 대화 표시용 claude 상태줄 훅 설치", .widget = .toggle, .section = .sidebar },
+        .session_icon_gutter = Meta{ .doc = "세션 목록 아이콘을 왼쪽 열에 분리 표시", .widget = .toggle, .section = .sidebar },
         // 필드명은 width_pt지만 키는 `sidebar.width`(key_seg). u32라 range 메타 필수(파서 검증 + GUI number 위젯 공유).
         .width_pt = Meta{ .key_seg = "width", .doc = "사이드바 폭(pt)", .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },
     };

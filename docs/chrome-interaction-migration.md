@@ -75,8 +75,16 @@ pointer capture의 권위는 현재 **둘**이다. 대부분의 Chrome drag는 `
 `PointerGestureOwner`가 소유하고, Session Dock은 이미 `chrome.ui.interaction.InteractionState`가
 소유한다. 이 문서는 어느 쪽도 즉시 삭제하라고 요구하지 않는다. adapter 단계에서 shared
 interaction 결과를 기존 effect path로 변환하고, 각 consumer가 migration gate를 통과할 때에만
-해당 `PointerGestureOwner` variant를 줄인다. 위 표의 variant를 **전부** 소진해 union이 `none`만
-남기 전에는 interaction 이관을 완료로 표시하지 않는다.
+해당 `PointerGestureOwner` variant를 줄인다. 위 표의 variant를 — **`address_selection`을 제외하고** —
+전부 소진하기 전에는 interaction 이관을 완료로 표시하지 않는다.
+
+`address_selection`을 제외하는 이유는 같은 표가 그 행을 "이관하지 않는다"로 못박았기 때문이다. 이 축의
+다른 variant와 달리 그것은 reorder도 resize도 아닌 caret/selection **편집**이고, 권위가 L3 `TextField`
+모델과 AppKit first responder/IME bridge에 있어 [텍스트 필드 에디터](text-field-editor.md)가 소유한다
+(그 문서 §2.2의 "새 컴포넌트, 이관 0" 결정). 따라서 union은 이 축의 이관이 끝난 뒤에도 `none`과
+`address_selection`만 남은 형태로 **존속한다** — "union이 `none`만 남는다"를 완료 조건으로 쓰면 도달
+불가능한 기준이 된다. 그 variant까지 걷어낼지는 이 문서가 아니라 text-field-editor 트랙의 별도 결정이며,
+현재 어느 문서도 그것을 계획하고 있지 않다.
 
 두 권위가 공존하는 동안 §4.2의 "한 pointer stream에 capture owner는 하나"는 다음 순서로 보장한다.
 

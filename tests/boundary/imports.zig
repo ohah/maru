@@ -2536,7 +2536,7 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         return error.TestUnexpectedResult;
     const runtime_product = runtime_source[0..runtime_first_test];
     const raw_baseline = [_]struct { name: []const u8, count: usize }{
-        .{ .name = "wire_major", .count = 3 },
+        .{ .name = "wire_major", .count = 2 },
         .{ .name = "screen_codec_version", .count = 2 },
         .{ .name = "metadata_support", .count = 4 },
         .{ .name = "peer_attach_generation", .count = 1 },
@@ -2550,6 +2550,10 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
     };
     for (raw_baseline) |entry|
         try std.testing.expectEqual(entry.count, countOccurrences(runtime_product, entry.name));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime_product, ".expected_major = self.client.wire_major"),
+    );
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(runtime_product, "self.client.compatibility_profile"),
@@ -7394,8 +7398,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             // The correction, B3-6, and b2b3 real-take fixtures are top-level test helpers and own
             // three lexical calls; there is still one product-facade callsite.
             .{ .name = "bindCommittedStreamOwned", .transport_count = 4 },
-            .{ .name = "beginControllerRevokeOwned", .transport_count = 1 },
-            .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
+            // 기존 fallible revoke와 b4의 이미 확정된 effect suffix가 같은 권위를 한 번씩 연다.
+            .{ .name = "beginControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
+            .{ .name = "finishControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
             // Shell and attached teardown each own one terminalization fence.

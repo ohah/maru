@@ -22,12 +22,17 @@ pub const EffectRequest = union(EffectTag) {
     revoke_fence: u64,
 };
 
+pub const PreparedResizeCommit = struct {
+    size: terminal_types.Size,
+    resize_generation: u64,
+};
+
 pub const PreparedEventProjection = union(PreparedEventTag) {
     ignored,
     ended,
     invalidated,
     resize_noop,
-    resize_commit: terminal_types.Size,
+    resize_commit: PreparedResizeCommit,
     metadata_noop,
     metadata_commit,
     revoked: u64,
@@ -55,11 +60,12 @@ pub fn sealProjection(value: PreparedDecision) DecisionSealProjection {
         .effect_tag_raw = @intFromEnum(std.meta.activeTag(value.effect)),
     };
     switch (value.projection) {
-        .resize_commit => |size| {
-            out.cols = size.cols;
-            out.rows = size.rows;
+        .resize_commit => |resize| {
+            out.cols = resize.size.cols;
+            out.rows = resize.size.rows;
+            out.semantic_generation = resize.resize_generation;
         },
-        .revoked => |fence| out.revoke_fence = fence,
+        .revoked => |fence| out.semantic_generation = fence,
         .failure => |failure_value| out.failure_raw = @intFromEnum(failure_value),
         else => {},
     }
@@ -131,7 +137,10 @@ pub fn decide(input: PolicyInput) PreparedDecision {
 
 fn decideResize(input: ResizePolicyInput) PreparedDecision {
     if (!input.baseline_present or input.incoming_generation > input.current_generation)
-        return decision(.{ .resize_commit = input.incoming_size }, .none);
+        return decision(.{ .resize_commit = .{
+            .size = input.incoming_size,
+            .resize_generation = input.incoming_generation,
+        } }, .none);
     if (input.incoming_generation < input.current_generation or
         std.meta.eql(input.incoming_size, input.current_size))
         return decision(.resize_noop, .none);

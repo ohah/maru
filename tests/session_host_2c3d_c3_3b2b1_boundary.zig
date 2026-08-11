@@ -116,7 +116,8 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         .{ "cleanupTranscriptSeal", 9 },
         // b2b3 seals the projected post-publication transfer before its no-fail owner write.
         // C3-3b3 event release completion의 준비와 contextual 재검증이 progress seal도 각각 한 번 계산한다.
-        .{ "cleanupProgressSeal", 10 },
+        // b4 semantic commit이 callback 전후 POST continuation을 한 번 더 봉인한다.
+        .{ "cleanupProgressSeal", 11 },
     }) |entry| try std.testing.expectEqual(
         @as(usize, entry[1]),
         try countProductIdentifiers(allocator, entry[0]),

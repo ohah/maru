@@ -38,6 +38,7 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(prepared_types, "@import(\"runtime_prepared_decision_seal.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(cleanup_seal, "@import(\"runtime_prepared_decision_seal.zig\")"));
     try std.testing.expectEqual(
+        // b4 Runtime과 Pending이 같은 neutral decision projection을 직접 공유한다.
         @as(usize, 2),
         try countProductSources(allocator, "@import(\"runtime_prepared_decision_seal.zig\")"),
     );
@@ -50,7 +51,8 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(owner, "@import(\"runtime_observation_digest.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(preparation, "@import(\"runtime_observation_digest.zig\")"));
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // b4 제품 Runtime이 callback 전후 semantic POST를 같은 canonical digest로 비교한다.
+        @as(usize, 3),
         try countProductSources(allocator, "@import(\"runtime_observation_digest.zig\")"),
     );
     try std.testing.expectEqual(@as(usize, 1), count(observation_digest, "pub fn digest("));
@@ -66,8 +68,14 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 0), count(attachment, "PreparedRuntimeEvent"));
     const prepared_settlement_start = std.mem.indexOf(u8, attachment, "pub const PreparedSettlement = struct {") orelse
         return error.MissingPreparedSettlement;
-    const prepared_settlement_end = std.mem.indexOfPos(u8, attachment, prepared_settlement_start, "pub fn preparePendingSettlement(") orelse
+    const prepared_settlement_end_marker = std.mem.indexOfPos(
+        u8,
+        attachment,
+        prepared_settlement_start,
+        "    };",
+    ) orelse
         return error.MissingPreparedSettlementEnd;
+    const prepared_settlement_end = prepared_settlement_end_marker + "    };".len;
     const prepared_settlement = attachment[prepared_settlement_start..prepared_settlement_end];
     try std.testing.expectEqual(@as(usize, 0), count(prepared_settlement, "*"));
     try std.testing.expectEqual(@as(usize, 0), count(prepared_settlement, "PreparationEventView"));
@@ -77,17 +85,15 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn preparationEventViewOwned("));
     try std.testing.expectEqual(@as(usize, 0), countProductCalls(runtime, "preparationEventViewOwned("));
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareTakenEvent("));
-    // One dormant product-source orchestration body owns the adapter call. Its own caller remains
-    // test-only until b4, so the normal product pump cannot bypass this single construction seam.
+    // b4 제품 pump와 test-only close fixture가 같은 단일 construction seam을 사용한다.
     try std.testing.expectEqual(@as(usize, 1), countProductCalls(runtime, "prepareTakenEvent("));
-    try std.testing.expectEqual(@as(usize, 1), countProductCalls(runtime, "classifyAndPrepareEvent("));
-    // The hostile DTO drift probe adds one test-only call while remaining outside the product
-    // RemoteRuntime declaration counted above.
-    try std.testing.expectEqual(@as(usize, 6), count(runtime, "classifyAndPrepareEvent("));
+    try std.testing.expectEqual(@as(usize, 2), countProductCalls(runtime, "classifyAndPrepareEvent("));
+    // 제품 caller 1개와 test-only fixture caller 1개 외에는 preparation을 직접 열 수 없다.
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, "classifyAndPrepareEvent("));
     const prepare_entry = function(runtime, "classifyAndPrepareEvent") orelse return error.MissingRuntimeEntry;
     try std.testing.expectEqual(@as(usize, 1), count(
         prepare_entry,
-        ") pending_event_preparation_mod.PrepareError!void {",
+        ") pending_event_preparation_mod.PrepareError!generation_attachment_mod.GenerationAttachment.PreparedSettlement {",
     ));
     try std.testing.expectEqual(@as(usize, 0), count(prepare_entry, "anyerror"));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn abortPrepare(self: *PendingEventOwner, attempt: u64) noreturn"));

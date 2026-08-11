@@ -2027,20 +2027,25 @@ test "C3-3b3 proof-loss child는 선택된 허용 stage를 dispatch한다" {
 }
 
 test "C3-3b3 subprocess는 fork inherited authority를 admission 전에 거부한다" {
+    if (ProofLossRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
     try std.testing.expect(!forkProjectionContainsPointer(ForkRejectedSettlementProjection));
     try verifyRejectedSettlementArgvMatrix();
     try runActualPreparedSettlement(.{ .pre_admission_fork = true });
 }
 test "C3-3b3 subprocess는 post-admission proof loss에서 fail-stop한다" {
+    if (ProofLossRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
     try runSettlementDeathChild(.post_admission, &.{ 0x41, 0x42, 0x47, 0x48 });
 }
 test "C3-3b3 subprocess는 post-callback proof loss에서 fail-stop한다" {
+    if (ProofLossRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
     try runSettlementDeathChild(.post_callback, &.{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 });
 }
 test "C3-3b3 subprocess는 Client POST callback drift에서 fail-stop한다" {
+    if (ProofLossRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
     try runSettlementDeathChild(.client_post_callback, &.{ 0x41, 0x42, 0x44, 0x45, 0x46, 0x47, 0x48 });
 }
 test "C3-3b3 subprocess watchdog은 무응답·열린 pipe·EOF 이후 hang·exact cap EOF·trailing marker·signal을 구분한다" {
+    if (ProofLossRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
     const no_byte = try observeSettlementDeathChild(.first_byte_hang);
     try std.testing.expectEqual(@as(usize, 0), no_byte.transcript_len);
     try expectSettlementDeadlineKill(no_byte);

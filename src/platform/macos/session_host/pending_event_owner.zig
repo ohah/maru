@@ -88,7 +88,7 @@ pub const RawPreparedEventStorage = struct {
     reserved: [4]u8 = [_]u8{0} ** 4,
     cols: u16 = 0,
     rows: u16 = 0,
-    revoke_fence: u64 = 0,
+    semantic_generation: u64 = 0,
     next_observation: RuntimeObservation = .{},
 };
 
@@ -144,7 +144,7 @@ pub const PreparedEvent = union(prepared_types.PreparedEventTag) {
     ended,
     invalidated,
     resize_noop,
-    resize_commit: maru.terminal.Size,
+    resize_commit: prepared_types.PreparedResizeCommit,
     metadata_noop,
     metadata_commit: *const RuntimeObservation,
     revoked: u64,
@@ -154,6 +154,51 @@ pub const PreparedEvent = union(prepared_types.PreparedEventTag) {
 pub const BorrowedPrepared = struct {
     event: PreparedEvent,
     effect: prepared_types.EffectRequest,
+};
+
+pub const SemanticCommitPhase = enum(u8) {
+    pristine = 0,
+    prepared = 1,
+    observation_moved = 2,
+    post_recorded = 3,
+    consumed = 4,
+};
+
+pub const SemanticCommitDecision = struct {
+    prepared_tag_raw: u8,
+    publish_raw: u8,
+    disposition_raw: u8,
+    reserved: [5]u8 = [_]u8{0} ** 5,
+    cols: u16 = 0,
+    rows: u16 = 0,
+    resize_generation: u64 = 0,
+    revoke_fence: u64 = 0,
+    failure_raw: u8 = 0,
+    reserved_tail: [7]u8 = [_]u8{0} ** 7,
+};
+
+pub const PreparedSemanticCommit = struct {
+    self_addr: u64 = 0,
+    pid: u32 = 0,
+    reserved_pid: u32 = 0,
+    process_nonce: u64 = 0,
+    thread_id: u64 = 0,
+    pending_owner_addr: u64 = 0,
+    owner_incarnation: u64 = 0,
+    attempt: u64 = 0,
+    event_generation: u64 = 0,
+    disposition_seal: cleanup.CleanupSeal = zero_digest,
+    prepared_seal: cleanup.CleanupSeal = zero_digest,
+    decision: SemanticCommitDecision = .{
+        .prepared_tag_raw = 0,
+        .publish_raw = 0,
+        .disposition_raw = 0,
+    },
+    phase_raw: u8 = @intFromEnum(SemanticCommitPhase.pristine),
+    observation_moved_raw: u8 = 0,
+    reserved: [6]u8 = [_]u8{0} ** 6,
+    semantic_post_digest: cleanup.CleanupSeal = zero_digest,
+    seal: cleanup.CleanupSeal = zero_digest,
 };
 
 pub const PublicationEvidence = struct {
@@ -525,6 +570,169 @@ pub const PendingEventOwner = struct {
         effect_permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
     }
 
+    /// b3가 게시한 disposition과 prepared bytes를 한 번 검증해 b4 의미 commit 권위로 바꾼다.
+    /// 이 전이 뒤에는 Runtime read/mutation이 continuation을 제시하는 commit suffix로만 가능하다.
+    pub fn beginSemanticCommit(
+        self: *PendingEventOwner,
+        out: *PreparedSemanticCommit,
+    ) OwnerError!SemanticCommitDecision {
+        if (!std.meta.eql(out.*, PreparedSemanticCommit{})) return error.InvalidOwner;
+        const borrowed = try self.borrowStoredPreparedImpl(true, .settling);
+        if (!self.validSettlementDisposition()) return error.InvalidOwner;
+        const disposition = std.enums.fromInt(
+            settlement.SettlementDispositionTag,
+            self.settlement_disposition.disposition_raw,
+        ) orelse return error.InvalidOwner;
+        const decision: SemanticCommitDecision = .{
+            .prepared_tag_raw = @intFromEnum(std.meta.activeTag(borrowed.event)),
+            .publish_raw = @intFromBool(disposition == .publish_prepared),
+            .disposition_raw = @intFromEnum(disposition),
+            .cols = switch (borrowed.event) {
+                .resize_commit => |resize| resize.size.cols,
+                else => 0,
+            },
+            .rows = switch (borrowed.event) {
+                .resize_commit => |resize| resize.size.rows,
+                else => 0,
+            },
+            .resize_generation = switch (borrowed.event) {
+                .resize_commit => |resize| resize.resize_generation,
+                else => 0,
+            },
+            .revoke_fence = switch (borrowed.event) {
+                .revoked => |fence| fence,
+                else => 0,
+            },
+            .failure_raw = switch (borrowed.event) {
+                .failure => |failure| @intFromEnum(failure),
+                else => 0,
+            },
+        };
+        var prepared: PreparedSemanticCommit = .{
+            .self_addr = @intFromPtr(out),
+            .pid = self.event_identity.pid,
+            .process_nonce = self.event_identity.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .pending_owner_addr = self.self_addr,
+            .owner_incarnation = self.owner_incarnation,
+            .attempt = self.active_attempt,
+            .event_generation = self.event_identity.event_generation,
+            .disposition_seal = self.settlement_disposition.seal,
+            .prepared_seal = self.progress_seal,
+            .decision = decision,
+            .phase_raw = @intFromEnum(SemanticCommitPhase.prepared),
+        };
+        prepared.seal = semanticCommitSeal(prepared) catch return error.InvalidOwner;
+
+        self.lifecycle_raw = @intFromEnum(PendingLifecycle.committed_cleanup);
+        self.settlement_disposition.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
+        out.* = prepared;
+        return decision;
+    }
+
+    /// metadata backing을 callback 전에 caller의 stack owner로 이동하고 public Pending source를 즉시 tombstone한다.
+    pub fn moveCommittedObservationNoFail(
+        self: *PendingEventOwner,
+        permit: *PreparedSemanticCommit,
+        out: *RuntimeObservation,
+    ) void {
+        if (!self.validSemanticCommit(permit, .prepared) or
+            permit.decision.prepared_tag_raw != @intFromEnum(prepared_types.PreparedEventTag.metadata_commit) or
+            !observationIsCanonicalEmpty(out) or permit.observation_moved_raw != 0)
+            process_seal.fatalIntegrity(.proof_loss);
+        out.* = self.prepared.next_observation;
+        self.prepared.next_observation = .{};
+        permit.observation_moved_raw = 1;
+        permit.phase_raw = @intFromEnum(SemanticCommitPhase.observation_moved);
+        permit.seal = semanticCommitSeal(permit.*) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    /// Runtime owner가 실제 semantic POST를 검증한 뒤 그 digest만 continuation에 기록한다.
+    pub fn recordSemanticPostNoFail(
+        self: *PendingEventOwner,
+        permit: *PreparedSemanticCommit,
+        semantic_post_digest: cleanup.CleanupSeal,
+    ) void {
+        const tag = std.enums.fromInt(prepared_types.PreparedEventTag, permit.decision.prepared_tag_raw) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        const expected_phase: SemanticCommitPhase = if (tag == .metadata_commit)
+            .observation_moved
+        else
+            .prepared;
+        if (!self.validSemanticCommit(permit, expected_phase) or
+            std.mem.allEqual(u8, &semantic_post_digest, 0))
+            process_seal.fatalIntegrity(.proof_loss);
+        permit.semantic_post_digest = semantic_post_digest;
+        permit.phase_raw = @intFromEnum(SemanticCommitPhase.post_recorded);
+        permit.seal = semanticCommitSeal(permit.*) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    /// callback 뒤 exact continuation과 tombstone을 다시 확인한 뒤 owner를 다음 event용 idle로 되돌린다.
+    pub fn finishSemanticCommitNoFail(
+        self: *PendingEventOwner,
+        permit: *PreparedSemanticCommit,
+    ) void {
+        if (!self.validSemanticCommit(permit, .post_recorded))
+            process_seal.fatalIntegrity(.proof_loss);
+        const tag = std.enums.fromInt(prepared_types.PreparedEventTag, permit.decision.prepared_tag_raw) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        if (tag == .metadata_commit and
+            (!observationIsCanonicalEmpty(&self.prepared.next_observation) or permit.observation_moved_raw != 1))
+            process_seal.fatalIntegrity(.proof_loss);
+
+        self.prepared = .{};
+        self.source_lease = .{};
+        self.release_receipt = .{};
+        self.cleanup_graph = .{};
+        self.progress_input = null;
+        self.transcript_seal = zero_digest;
+        self.progress_seal = zero_digest;
+        self.settlement_disposition = .{};
+        self.active_attempt = 0;
+        self.operation_incarnation = 0;
+        self.event_identity = .{};
+        self.lifecycle_raw = @intFromEnum(PendingLifecycle.idle);
+        permit.phase_raw = @intFromEnum(SemanticCommitPhase.consumed);
+        permit.seal = semanticCommitSeal(permit.*) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    fn validSettlementDisposition(self: *const PendingEventOwner) bool {
+        const value = self.settlement_disposition;
+        if (value.lifecycle_raw != @intFromEnum(settlement.AuthorityLifecycle.prepared) or
+            std.enums.fromInt(settlement.SettlementDispositionTag, value.disposition_raw) == null or
+            !std.mem.allEqual(u8, &value.reserved, 0) or value.reserved_pid != 0 or
+            value.self_addr != @intFromPtr(&self.settlement_disposition) or
+            value.pid != self.event_identity.pid or value.process_nonce != self.event_identity.process_nonce or
+            value.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+            value.pending_owner_addr != self.self_addr or value.owner_incarnation != self.owner_incarnation or
+            value.attempt != self.active_attempt or value.event_generation != self.event_identity.event_generation or
+            !std.crypto.timing_safe.eql(cleanup.CleanupSeal, value.consumed_receipt_digest, self.release_receipt.release_seal) or
+            std.mem.allEqual(u8, &value.effect_evidence_digest, 0) or
+            std.mem.allEqual(u8, &value.registry_completion_digest, 0)) return false;
+        const expected = settlement.sealSettlementDisposition(value, value.pid, value.process_nonce) catch return false;
+        return std.crypto.timing_safe.eql(cleanup.CleanupSeal, expected, value.seal);
+    }
+
+    fn validSemanticCommit(
+        self: *const PendingEventOwner,
+        permit: *const PreparedSemanticCommit,
+        expected_phase: SemanticCommitPhase,
+    ) bool {
+        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.committed_cleanup) or
+            permit.self_addr != @intFromPtr(permit) or permit.pid != self.event_identity.pid or
+            permit.process_nonce != self.event_identity.process_nonce or permit.reserved_pid != 0 or
+            permit.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+            permit.pending_owner_addr != self.self_addr or permit.owner_incarnation != self.owner_incarnation or
+            permit.attempt != self.active_attempt or permit.event_generation != self.event_identity.event_generation or
+            permit.phase_raw != @intFromEnum(expected_phase) or !std.mem.allEqual(u8, &permit.reserved, 0) or
+            !std.mem.allEqual(u8, &permit.decision.reserved, 0) or
+            !std.mem.allEqual(u8, &permit.decision.reserved_tail, 0) or
+            !std.crypto.timing_safe.eql(cleanup.CleanupSeal, permit.disposition_seal, self.settlement_disposition.seal) or
+            !std.crypto.timing_safe.eql(cleanup.CleanupSeal, permit.prepared_seal, self.progress_seal)) return false;
+        const expected = semanticCommitSeal(permit.*) catch return false;
+        return std.crypto.timing_safe.eql(cleanup.CleanupSeal, expected, permit.seal);
+    }
+
     fn pendingSettlementPermitMatches(
         self: *const PendingEventOwner,
         permit: *const settlement.PreparedPendingSettlementPermit,
@@ -548,16 +756,30 @@ pub const PendingEventOwner = struct {
     }
 
     fn borrowPreparedImpl(self: *const PendingEventOwner, validate_authority: bool) OwnerError!BorrowedPrepared {
+        return self.borrowStoredPreparedImpl(validate_authority, .prepared);
+    }
+
+    fn borrowStoredPreparedImpl(
+        self: *const PendingEventOwner,
+        validate_authority: bool,
+        expected_lifecycle: PendingLifecycle,
+    ) OwnerError!BorrowedPrepared {
         try self.validateAddress();
-        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.prepared))
+        if (self.lifecycle_raw != @intFromEnum(expected_lifecycle))
             return error.InvalidOwner;
         if (self.active_attempt == 0) return error.InvalidOwner;
         if (!allZero(&self.reserved) or !allZero(&self.prepared.reserved))
             return error.InvalidOwner;
-        if (validate_authority and
-            (!sourceLeaseValidState(self, self.active_attempt, &self.source_lease, .consumed) or
-                !releaseReceiptValid(self, self.active_attempt, &self.release_receipt)))
-            return error.InvalidOwner;
+        if (validate_authority) {
+            const release_state: PendingReleaseState = if (expected_lifecycle == .settling or
+                expected_lifecycle == .committed_cleanup)
+                .consumed
+            else
+                .live;
+            if (!sourceLeaseValidState(self, self.active_attempt, &self.source_lease, .consumed) or
+                !releaseReceiptValidState(self, self.active_attempt, &self.release_receipt, release_state))
+                return error.InvalidOwner;
+        }
 
         const tag = std.enums.fromInt(
             prepared_types.PreparedEventTag,
@@ -587,12 +809,12 @@ pub const PendingEventOwner = struct {
                 break :blk .resize_noop;
             },
             .resize_commit => blk: {
-                if (self.prepared.failure_raw != 0 or self.prepared.revoke_fence != 0 or
+                if (self.prepared.failure_raw != 0 or self.prepared.semantic_generation == 0 or
                     !observationIsCanonicalEmpty(&self.prepared.next_observation))
                     return error.InvalidOwner;
                 break :blk .{ .resize_commit = .{
-                    .cols = self.prepared.cols,
-                    .rows = self.prepared.rows,
+                    .size = .{ .cols = self.prepared.cols, .rows = self.prepared.rows },
+                    .resize_generation = self.prepared.semantic_generation,
                 } };
             },
             .metadata_noop => blk: {
@@ -601,7 +823,7 @@ pub const PendingEventOwner = struct {
             },
             .metadata_commit => blk: {
                 if (self.prepared.failure_raw != 0 or self.prepared.cols != 0 or
-                    self.prepared.rows != 0 or self.prepared.revoke_fence != 0)
+                    self.prepared.rows != 0 or self.prepared.semantic_generation != 0)
                     return error.InvalidOwner;
                 break :blk .{ .metadata_commit = &self.prepared.next_observation };
             },
@@ -610,11 +832,12 @@ pub const PendingEventOwner = struct {
                     self.prepared.rows != 0 or
                     !observationIsCanonicalEmpty(&self.prepared.next_observation))
                     return error.InvalidOwner;
-                break :blk .{ .revoked = self.prepared.revoke_fence };
+                if (self.prepared.semantic_generation == 0) return error.InvalidOwner;
+                break :blk .{ .revoked = self.prepared.semantic_generation };
             },
             .failure => blk: {
                 if (self.prepared.cols != 0 or self.prepared.rows != 0 or
-                    self.prepared.revoke_fence != 0 or
+                    self.prepared.semantic_generation != 0 or
                     !observationIsCanonicalEmpty(&self.prepared.next_observation))
                     return error.InvalidOwner;
                 break :blk .{ .failure = std.enums.fromInt(
@@ -633,7 +856,7 @@ pub const PendingEventOwner = struct {
                 client_poison.ConnectionReason,
                 self.prepared.connection_reason_raw,
             ) orelse return error.InvalidOwner },
-            .revoke_fence => .{ .revoke_fence = self.prepared.revoke_fence },
+            .revoke_fence => .{ .revoke_fence = self.prepared.semantic_generation },
         };
         if (!effectMatchesEvent(event, effect)) return error.InvalidOwner;
         return .{ .event = event, .effect = effect };
@@ -673,11 +896,12 @@ pub const PendingEventOwner = struct {
         raw.prepared_tag_raw = @intFromEnum(std.meta.activeTag(value.projection));
         raw.effect_tag_raw = @intFromEnum(std.meta.activeTag(value.effect));
         switch (value.projection) {
-            .resize_commit => |size| {
-                raw.cols = size.cols;
-                raw.rows = size.rows;
+            .resize_commit => |resize| {
+                raw.cols = resize.size.cols;
+                raw.rows = resize.size.rows;
+                raw.semantic_generation = resize.resize_generation;
             },
-            .revoked => |fence| raw.revoke_fence = fence,
+            .revoked => |fence| raw.semantic_generation = fence,
             .failure => |failure_value| raw.failure_raw = @intFromEnum(failure_value),
             .metadata_commit => {
                 const observation = next_observation orelse return error.InvalidOwner;
@@ -690,7 +914,7 @@ pub const PendingEventOwner = struct {
             .none => {},
             .poison => |reason| raw.connection_reason_raw = @intFromEnum(reason),
             .revoke_fence => |fence| {
-                if (raw.revoke_fence != fence) return error.InvalidOwner;
+                if (raw.semantic_generation != fence) return error.InvalidOwner;
             },
         }
         if (evidence) |proof| {
@@ -808,7 +1032,7 @@ pub const PendingEventOwner = struct {
 
     fn expectInactiveScalars(self: *const PendingEventOwner) OwnerError!void {
         if (self.prepared.failure_raw != 0 or self.prepared.cols != 0 or
-            self.prepared.rows != 0 or self.prepared.revoke_fence != 0 or
+            self.prepared.rows != 0 or self.prepared.semantic_generation != 0 or
             !observationIsCanonicalEmpty(&self.prepared.next_observation))
             return error.InvalidOwner;
     }
@@ -843,6 +1067,25 @@ pub const PendingEventOwner = struct {
         return .{ consumed, release };
     }
 };
+
+fn semanticCommitSeal(value: PreparedSemanticCommit) process_seal.ReadyError!cleanup.CleanupSeal {
+    return process_seal.preparedSemanticCommitSeal(value.pid, value.process_nonce, .{
+        .self_addr = value.self_addr,
+        .thread_id = value.thread_id,
+        .pending_owner_addr = value.pending_owner_addr,
+        .owner_incarnation = value.owner_incarnation,
+        .attempt = value.attempt,
+        .event_generation = value.event_generation,
+        .disposition_seal = value.disposition_seal,
+        .prepared_seal = value.prepared_seal,
+        .prepared_tag_raw = value.decision.prepared_tag_raw,
+        .publish_raw = value.decision.publish_raw,
+        .resize_generation = value.decision.resize_generation,
+        .phase_raw = value.phase_raw,
+        .observation_moved_raw = value.observation_moved_raw,
+        .semantic_post_digest = value.semantic_post_digest,
+    });
+}
 
 pub const testing = if (builtin.is_test) struct {
     pub fn initPreparedForSettlement(
@@ -1011,7 +1254,7 @@ fn rawStoragePristine(raw: *const RawPreparedEventStorage) bool {
     return raw.prepared_tag_raw == 0 and raw.effect_tag_raw == 0 and
         raw.failure_raw == 0 and raw.connection_reason_raw == 0 and
         allZero(&raw.reserved) and raw.cols == 0 and raw.rows == 0 and
-        raw.revoke_fence == 0 and observationIsCanonicalEmpty(&raw.next_observation);
+        raw.semantic_generation == 0 and observationIsCanonicalEmpty(&raw.next_observation);
 }
 
 fn sourceLeasePristine(lease: *const PendingEventSourceLease) bool {
@@ -1084,7 +1327,16 @@ fn releaseReceiptValid(
     attempt: u64,
     receipt: *const PendingEventReleaseReceipt,
 ) bool {
-    if (receipt.state_raw != @intFromEnum(PendingReleaseState.live) or receipt.attempt != attempt or
+    return releaseReceiptValidState(owner, attempt, receipt, .live);
+}
+
+fn releaseReceiptValidState(
+    owner: *const PendingEventOwner,
+    attempt: u64,
+    receipt: *const PendingEventReleaseReceipt,
+    state: PendingReleaseState,
+) bool {
+    if (receipt.state_raw != @intFromEnum(state) or receipt.attempt != attempt or
         !allZero(&receipt.reserved) or receipt.pending_owner_addr != owner.self_addr or
         receipt.pending_owner_incarnation != owner.owner_incarnation or
         receipt.source_lease_incarnation != owner.source_lease_incarnation or
@@ -1232,9 +1484,8 @@ fn rawDecisionMatchesProgress(
     return std.meta.eql(projectionFromRaw(raw), progress.decision);
 }
 
-/// The persisted owner has additional storage fields, but every sealed decision scalar keeps the
-/// same name and type. Reflection makes a future projection field an immediate compile failure
-/// instead of silently omitting it from borrow-time authentication.
+/// persisted owner와 sealed projection의 scalar 이름과 타입을 exact 대조한다.
+/// resize generation과 revoke fence는 서로 배타적인 tag가 쓰는 `semantic_generation` 하나를 공유한다.
 fn projectionFromRaw(raw: RawPreparedEventStorage) prepared_types.DecisionSealProjection {
     var projection: prepared_types.DecisionSealProjection = .{ .bound_raw = 1 };
     inline for (std.meta.fields(prepared_types.DecisionSealProjection)) |field| {
@@ -1522,6 +1773,55 @@ const SettlementFixture = struct {
         self.owner.armSettlementNoFail(&self.lifetime_owner, &self.lease, &self.permit, self.binding);
     }
 
+    fn replaceDecision(self: *SettlementFixture, decision: prepared_types.PreparedDecision) !void {
+        self.owner.prepared = .{};
+        self.owner.prepared.prepared_tag_raw = @intFromEnum(std.meta.activeTag(decision.projection));
+        self.owner.prepared.effect_tag_raw = @intFromEnum(std.meta.activeTag(decision.effect));
+        switch (decision.projection) {
+            .resize_commit => |resize| {
+                self.owner.prepared.cols = resize.size.cols;
+                self.owner.prepared.rows = resize.size.rows;
+                self.owner.prepared.semantic_generation = resize.resize_generation;
+            },
+            .revoked => |fence| self.owner.prepared.semantic_generation = fence,
+            .failure => |failure| self.owner.prepared.failure_raw = @intFromEnum(failure),
+            .metadata_commit => self.owner.prepared.next_observation.revision = 17,
+            else => {},
+        }
+        switch (decision.effect) {
+            .none => {},
+            .poison => |reason| self.owner.prepared.connection_reason_raw = @intFromEnum(reason),
+            .revoke_fence => |fence| self.owner.prepared.semantic_generation = fence,
+        }
+        var progress = self.owner.progress_input.?;
+        progress.decision = prepared_types.sealProjection(decision);
+        progress.retained_observation_digest = if (std.meta.activeTag(decision.projection) == .metadata_commit)
+            try observation_digest.digest(&self.owner.prepared.next_observation, .{})
+        else
+            zero_digest;
+        self.owner.progress_input = progress;
+        self.owner.progress_seal = try process_seal.cleanupProgressSeal(
+            self.owner.event_identity.pid,
+            self.owner.event_identity.process_nonce,
+            progress,
+        );
+    }
+
+    fn settle(self: *SettlementFixture, disposition: settlement.SettlementDispositionTag) !void {
+        self.arm();
+        try self.prepareEvidence(disposition);
+        self.owner.publishSettlementNoFail(
+            &self.lifetime_owner,
+            &self.lease,
+            self.binding,
+            &self.permit,
+            &self.effect_permit,
+            &self.effect,
+            &self.completion,
+        );
+        self.lifetime_owner.consumeSettlementNoFail(&self.lease);
+    }
+
     fn prepareEvidence(self: *SettlementFixture, disposition: settlement.SettlementDispositionTag) !void {
         const common = .{
             .pid = self.owner.event_identity.pid,
@@ -1616,6 +1916,95 @@ const SettlementFixture = struct {
         self.completion.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
     }
 };
+
+fn expectSemanticCommit(
+    seed: u8,
+    decision: prepared_types.PreparedDecision,
+    disposition: settlement.SettlementDispositionTag,
+) !void {
+    var fixture: SettlementFixture = .{};
+    try fixture.init(seed);
+    try fixture.replaceDecision(decision);
+    try fixture.settle(disposition);
+    var permit: PreparedSemanticCommit = .{};
+    const commit = try fixture.owner.beginSemanticCommit(&permit);
+    try std.testing.expectEqual(@intFromEnum(std.meta.activeTag(decision.projection)), commit.prepared_tag_raw);
+    try std.testing.expectEqual(@intFromBool(disposition == .publish_prepared), commit.publish_raw);
+    var moved: RuntimeObservation = .{};
+    if (std.meta.activeTag(decision.projection) == .metadata_commit)
+        fixture.owner.moveCommittedObservationNoFail(&permit, &moved);
+    fixture.owner.recordSemanticPostNoFail(&permit, [_]u8{seed +% 0xd0} ** 32);
+    fixture.owner.finishSemanticCommitNoFail(&permit);
+    try std.testing.expectEqual(@intFromEnum(PendingLifecycle.idle), fixture.owner.lifecycle_raw);
+    try std.testing.expectEqual(@intFromEnum(SemanticCommitPhase.consumed), permit.phase_raw);
+    moved.deinit(std.testing.allocator);
+}
+
+test "C3-3b4 Pending semantic commit은 ignored를 exact once 소비한다" {
+    try expectSemanticCommit(31, prepared_types.decide(.{ .metadata = .{
+        .current_revision = 2,
+        .incoming_revision = 1,
+        .semantic_equal = false,
+        .content_equal = false,
+    } }), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 ended를 exact once 소비한다" {
+    try expectSemanticCommit(32, prepared_types.decide(.ended), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 invalidated를 exact once 소비한다" {
+    try expectSemanticCommit(33, prepared_types.decide(.invalidated), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 resize_noop을 exact once 소비한다" {
+    try expectSemanticCommit(34, prepared_types.decide(.{ .resize = .{
+        .baseline_present = true,
+        .current_generation = 4,
+        .current_size = .{ .cols = 80, .rows = 24 },
+        .incoming_generation = 3,
+        .incoming_size = .{ .cols = 100, .rows = 30 },
+    } }), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 resize_commit을 exact once 소비한다" {
+    try expectSemanticCommit(35, prepared_types.decide(.{ .resize = .{
+        .baseline_present = false,
+        .current_generation = 0,
+        .current_size = .{ .cols = 80, .rows = 24 },
+        .incoming_generation = 1,
+        .incoming_size = .{ .cols = 100, .rows = 30 },
+    } }), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 metadata_noop을 exact once 소비한다" {
+    try expectSemanticCommit(36, prepared_types.decide(.{ .metadata = .{
+        .current_revision = 2,
+        .incoming_revision = 2,
+        .semantic_equal = true,
+        .content_equal = true,
+    } }), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 metadata_commit 소유권을 exact once 이전한다" {
+    try expectSemanticCommit(37, prepared_types.decide(.{ .metadata = .{
+        .current_revision = 2,
+        .incoming_revision = 3,
+        .semantic_equal = false,
+        .content_equal = false,
+    } }), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 revoked를 exact once 소비한다" {
+    try expectSemanticCommit(38, prepared_types.decide(.{ .revoked = .{
+        .successor_fence = 9,
+        .successor_fence_valid = true,
+    } }), .publish_prepared);
+}
+
+test "C3-3b4 Pending semantic commit은 failure를 suppress disposition에 맞춰 소비한다" {
+    try expectSemanticCommit(39, prepared_types.decide(.connection_closed), .suppress_terminal);
+}
 
 fn fixtureEffectPermit(disposition: settlement.SettlementDispositionTag) settlement.PreparedEffectPermit {
     if (disposition != .suppress_terminal) return .{

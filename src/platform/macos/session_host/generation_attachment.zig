@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const maru = @import("maru");
 const client_slot_mod = @import("client_slot.zig");
 const connection_lease = @import("connection_lease.zig");
 const contract = @import("generation_attachment_contract.zig");
@@ -22,6 +23,9 @@ const screen_assembler = @import("screen_assembler.zig");
 const screen_stream = @import("screen_stream.zig");
 const settlement = @import("pending_event_settlement_contract.zig");
 const runtime_lifetime = @import("runtime_lifetime_owner.zig");
+const pending_event_owner_mod = @import("pending_event_owner.zig");
+const pending_event_preparation = @import("pending_event_preparation.zig");
+const runtime_pending_control = @import("runtime_pending_control.zig");
 const SettlementDeathCheckpoint = struct { attachment_addr: usize, marker_fd: std.c.fd_t, stage_raw: u8 };
 threadlocal var settlement_death_checkpoint: if (builtin.is_test) ?SettlementDeathCheckpoint else void =
     if (builtin.is_test) null else {};
@@ -411,6 +415,104 @@ pub const GenerationAttachment = struct {
         return true;
     }
 
+    pub const PreparedSettlement = struct {
+        correlation: generation_transport_mod.EventCorrelation,
+        event_generation: u64,
+    };
+
+    pub const PendingSettlementPreparationContext = struct {
+        allocator: std.mem.Allocator,
+        lifetime_owner: *runtime_lifetime.RuntimeLifetimeOwner,
+        pending_owner: *pending_event_owner_mod.PendingEventOwner,
+        runtime_addr: usize,
+        runtime_extent: usize,
+        observation: *maru.app.RuntimeObservation,
+        direct_input: *std.ArrayListUnmanaged(u8),
+        direct_input_offset: *usize,
+        pending_controls: *std.ArrayListUnmanaged(runtime_pending_control.RawQueuedRuntimeControl),
+        blocking_flush_active: *bool,
+        resize_generation: *u64,
+        resize_baseline_present: *bool,
+    };
+
+    /// canonical take owner를 attachment 안에서만 빌려 immutable Pending owner publication까지 끝낸다.
+    /// EventOwner pointer나 preparation view는 caller로 반환하지 않아 제품 pump가 source authority를 복제할 수 없다.
+    pub fn preparePendingSettlement(
+        self: *GenerationAttachment,
+        input: PendingSettlementPreparationContext,
+    ) pending_event_preparation.PrepareError!PreparedSettlement {
+        if (!self.valid() or self.lifecycle != .attached or self.event_generation_mirror == 0)
+            return error.InvalidOwner;
+        const view = generation_transport_mod.preparationEventViewOwned(
+            &self.transport,
+            &self.event_owner,
+        ) catch return error.InvalidOwner;
+        const context: pending_event_preparation.RuntimePreparationContext = .{
+            .runtime_addr = input.runtime_addr,
+            .allocator = input.allocator,
+            .lifetime_owner = input.lifetime_owner,
+            .pending_owner = input.pending_owner,
+            .observation = input.observation,
+            .direct_input = input.direct_input,
+            .direct_input_offset = input.direct_input_offset,
+            .pending_controls = input.pending_controls,
+            .blocking_flush_active = input.blocking_flush_active,
+            .resize_generation = input.resize_generation,
+            .resize_baseline_present = input.resize_baseline_present,
+            .source_owner = &self.event_owner,
+            .source_view = view,
+            .correlation = self.transport.event_correlation,
+        };
+        const operation_preflight = input.lifetime_owner.preflightPreparation() catch |err| return switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+        };
+        const source_identity = pending_event_preparation.sourceIdentityFromView(view) catch
+            return error.InvalidOwner;
+        const source_receipt = pending_event_preparation.preflightSource(
+            context,
+            view,
+            operation_preflight,
+        ) catch return error.InvalidOwner;
+        const snapshot = pending_event_preparation.snapshotRuntimeContext(
+            context,
+            operation_preflight.owner_incarnation,
+            std.mem.zeroes(@FieldType(pending_event_preparation.RuntimeSemanticSnapshot, "operation_identity")),
+            source_identity,
+        ) catch return error.InvalidOwner;
+        const recipe = pending_event_preparation.recipeFromSourceView(view) catch
+            return error.InvalidOwner;
+        var frame: pending_event_preparation.PreparationFrame = undefined;
+        pending_event_preparation.initFrameInPlace(&frame, .{
+            .context = context,
+            .operation_preflight = operation_preflight,
+            .source_receipt = source_receipt,
+            .snapshot = snapshot,
+            .recipe = recipe,
+        }, input.runtime_extent);
+        try pending_event_preparation.prepare(&frame);
+        return .{
+            .correlation = self.transport.event_correlation,
+            .event_generation = view.trusted.event_generation,
+        };
+    }
+
+    /// Busy 재시도는 preparation을 다시 실행하지 않고 live source의 같은 identity만 재사용한다.
+    pub fn preparedSettlementIdentity(
+        self: *GenerationAttachment,
+    ) pending_event_preparation.PrepareError!PreparedSettlement {
+        if (!self.valid() or self.lifecycle != .attached or self.event_generation_mirror == 0)
+            return error.InvalidOwner;
+        const view = generation_transport_mod.preparationEventViewOwned(
+            &self.transport,
+            &self.event_owner,
+        ) catch return error.InvalidOwner;
+        return .{
+            .correlation = self.transport.event_correlation,
+            .event_generation = view.trusted.event_generation,
+        };
+    }
+
     pub fn purgeEndedStream(
         self: *GenerationAttachment,
     ) generation_transport_mod.PurgeEndedError!generation_transport_mod.PurgeEndedOutcome {
@@ -710,6 +812,25 @@ pub const GenerationAttachment = struct {
         return self.transport.fenceRevoke();
     }
 
+    /// b3가 Client revoke fence를 이미 확정한 뒤 attachment 의미 상태만 같은 generation으로 닫는다.
+    /// fence를 다시 호출하면 sibling outbound까지 두 번 처리할 수 있으므로 이 suffix에는 callback이 없다.
+    pub fn applyPreparedRevokedNoFail(
+        self: *GenerationAttachment,
+        generation: u64,
+    ) void {
+        const permit = generation_transport_mod.beginControllerRevokeOwned(
+            &self.transport,
+            @intFromPtr(self),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        self.payloadMut().applyValidatedRevoked(generation) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        generation_transport_mod.finishControllerRevokeOwned(
+            &self.transport,
+            @intFromPtr(self),
+            permit,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
     fn valid(self: *const GenerationAttachment) bool {
         return rawLifecycleValid(&self.lifecycle) and
             self.self_addr == @intFromPtr(self) and self.lifecycle != .pristine;
@@ -891,10 +1012,7 @@ pub const testing_api = if (builtin.is_test) struct {
         generation_event.testing.restorePayload(&attachment.event_owner, payload);
     }
 
-    pub const PreparedSettlement = struct {
-        correlation: generation_transport_mod.EventCorrelation,
-        event_generation: u64,
-    };
+    pub const PreparedSettlement = GenerationAttachment.PreparedSettlement;
 
     pub fn preparePendingSettlement(
         attachment: *GenerationAttachment,
@@ -911,19 +1029,12 @@ pub const testing_api = if (builtin.is_test) struct {
         resize_generation: *u64,
         resize_baseline_present: *bool,
     ) !PreparedSettlement {
-        const preparation = @import("pending_event_preparation.zig");
-        if (!attachment.valid() or attachment.lifecycle != .attached or
-            attachment.event_generation_mirror == 0)
-            return error.InvalidOwner;
-        const view = try generation_transport_mod.preparationEventViewOwned(
-            &attachment.transport,
-            &attachment.event_owner,
-        );
-        const context: preparation.RuntimePreparationContext = .{
-            .runtime_addr = runtime_addr,
+        return attachment.preparePendingSettlement(.{
             .allocator = allocator,
             .lifetime_owner = lifetime_owner,
             .pending_owner = pending_owner,
+            .runtime_addr = runtime_addr,
+            .runtime_extent = runtime_extent,
             .observation = observation,
             .direct_input = direct_input,
             .direct_input_offset = direct_input_offset,
@@ -931,33 +1042,7 @@ pub const testing_api = if (builtin.is_test) struct {
             .blocking_flush_active = blocking_flush_active,
             .resize_generation = resize_generation,
             .resize_baseline_present = resize_baseline_present,
-            .source_owner = &attachment.event_owner,
-            .source_view = view,
-            .correlation = attachment.transport.event_correlation,
-        };
-        const operation_preflight = try lifetime_owner.preflightPreparation();
-        const source_identity = try preparation.sourceIdentityFromView(view);
-        const source_receipt = try preparation.preflightSource(context, view, operation_preflight);
-        const snapshot = try preparation.snapshotRuntimeContext(
-            context,
-            operation_preflight.owner_incarnation,
-            std.mem.zeroes(@FieldType(preparation.RuntimeSemanticSnapshot, "operation_identity")),
-            source_identity,
-        );
-        const recipe = try preparation.recipeFromSourceView(view);
-        var frame: preparation.PreparationFrame = undefined;
-        preparation.initFrameInPlace(&frame, .{
-            .context = context,
-            .operation_preflight = operation_preflight,
-            .source_receipt = source_receipt,
-            .snapshot = snapshot,
-            .recipe = recipe,
-        }, runtime_extent);
-        try @import("remote_runtime_pending_event.zig").prepareTakenEvent(&frame);
-        return .{
-            .correlation = attachment.transport.event_correlation,
-            .event_generation = view.trusted.event_generation,
-        };
+        });
     }
 
     pub const SettlementSourceSnapshot = struct {

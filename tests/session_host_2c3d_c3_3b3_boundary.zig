@@ -70,7 +70,8 @@ test "C3-3b3 atomic settlement boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(settlement, "pub fn settlePendingEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(settlement, "const SettlementDeathStage = enum(u8)"));
     try std.testing.expectEqual(@as(usize, 1), count(settlement, "fn writeSettlementDeathMarker("));
-    try std.testing.expectEqual(@as(usize, 0), countProductCalls(runtime_adapter, "settlePendingEvent("));
+    // b4가 유일한 Runtime adapter를 활성화했으며 다른 제품 caller는 계속 허용하지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), countProductCalls(runtime_adapter, "settlePendingEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn preflightPendingSettlementTransport("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "test \"C3-3b3 preparation facade 결과는 재귀적으로 pointer-free다\""));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "pub fn commitPendingEffectNoFail("));

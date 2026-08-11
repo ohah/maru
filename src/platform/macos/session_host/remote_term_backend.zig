@@ -19,9 +19,11 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const client_mod = @import("client.zig");
 const framing = @import("framing.zig");
+const protocol = @import("protocol.zig");
 const remote_runtime = @import("remote_runtime.zig");
 const close_authority = @import("remote_close_authority.zig");
 const close_contract = @import("remote_close_contract.zig");
+const event_pump_contract = @import("remote_event_pump_contract.zig");
 const process_seal = @import("process_seal_service.zig");
 const pending_event_owner = @import("pending_event_owner.zig");
 const core_command_wire = @import("core_command_wire.zig");
@@ -51,6 +53,7 @@ pub const max_remote_backend_runtimes: usize = 4096;
 const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
     threadlocal var skip_destroy: bool = false;
+    threadlocal var event_pump_hook: ?*const fn (RuntimeHandle, *RemoteRuntime) DrainSummary = null;
 } else struct {};
 
 pub const RemoteBackendSingletonLifecycle = enum(u8) {
@@ -136,6 +139,7 @@ pub const RemoteTermBackend = struct {
     close_ticket_issuer: close_contract.CloseTicketIssuer = .{},
     close_operation_owner: close_authority.CloseOperationOwner = .{},
     close_sweep: close_contract.CloseSweep = .inactive,
+    event_pump_cursor: usize = 0,
     singleton_owner: RemoteBackendSingletonOwner = .{},
 
     const vtable = term_backend.VTable{
@@ -369,6 +373,50 @@ pub const RemoteTermBackend = struct {
         return stats;
     }
 
+    /// AppSession frame이 모든 Term pump를 부르기 전에 원격 owner를 최대 16개만 선택한다.
+    /// 각 Term pump는 여기서 준비한 summary를 소비하므로 같은 frame의 Busy owner를 다시 실행하지 않는다.
+    pub fn maintenanceEventTick(self: *RemoteTermBackend) void {
+        var pending_iterator = self.runtimes.iterator();
+        while (pending_iterator.next()) |row| {
+            // 여러 AppSession window가 같은 backend를 순서대로 tick해도 앞 window가 만든 frame을 덮지 않는다.
+            if (row.value_ptr.runtime.frame_summary_ready) return;
+        }
+        var handles: [max_remote_backend_runtimes]RuntimeHandle = undefined;
+        var handle_count: usize = 0;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |row| {
+            row.value_ptr.runtime.frame_summary = .{};
+            row.value_ptr.runtime.frame_summary_ready = true;
+            handles[handle_count] = row.key_ptr.*;
+            handle_count += 1;
+        }
+        if (handle_count == 0) {
+            self.event_pump_cursor = 0;
+            return;
+        }
+        std.mem.sort(RuntimeHandle, handles[0..handle_count], {}, std.sort.asc(RuntimeHandle));
+        if (self.event_pump_cursor >= handle_count) self.event_pump_cursor = 0;
+        const selected_count = @min(handle_count, event_pump_contract.max_owners_per_frame);
+        _ = event_pump_contract.frameBudget(
+            selected_count,
+            selected_count * event_pump_contract.retained_parts_per_owner * protocol.max_control_json,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        for (0..selected_count) |offset| {
+            const index = (self.event_pump_cursor + offset) % handle_count;
+            const entry = self.runtimes.get(handles[index]) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            entry.runtime.frame_summary = if (builtin.is_test and B5TestState.event_pump_hook != null)
+                B5TestState.event_pump_hook.?(handles[index], entry.runtime)
+            else
+                drainRemoteNow(entry.runtime);
+        }
+        self.event_pump_cursor = event_pump_contract.nextCursor(
+            self.event_pump_cursor,
+            handle_count,
+            selected_count,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
     /// **이미 host에 있는 runtime에 재접속**해 원격-backed Surface를 만든다(§7 GUI 재접속, e3-5). spawn과 달리 새 runtime을
     /// 안 띄우고 저장된 `runtime_id_hex`에 붙는다. runtime이 없으면(host 재시작 등) attachExisting이 error를 내고
     /// app_session restore는 동일 세션인 척 fresh spawn하지 않고 fail-closed한다. **vtable 밖 — host 전용**이라
@@ -544,6 +592,16 @@ pub const RemoteTermBackend = struct {
     /// frame loop가 surface를 exited로 표시하게 한다(로컬 read_error 계약과 동형 — host 연결 끊김 = 세션 종료).
     fn drainRemote(ctx: *anyopaque) DrainSummary {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
+        if (rr.frame_summary_ready) {
+            const summary = rr.frame_summary;
+            rr.frame_summary = .{};
+            rr.frame_summary_ready = false;
+            return summary;
+        }
+        return drainRemoteNow(rr);
+    }
+
+    fn drainRemoteNow(rr: *RemoteRuntime) DrainSummary {
         var summary: DrainSummary = .{};
         if (rr.pump_ended) return summary;
         while (true) {
@@ -572,6 +630,7 @@ pub const RemoteTermBackend = struct {
             };
             switch (result) {
                 .idle => break,
+                .event_pending => break,
                 .metadata => continue,
                 .screen => summary.output_events += 1,
                 .ended => {
@@ -659,7 +718,6 @@ pub const RemoteTermBackend = struct {
         rr.observation = .{};
         defer rr.observation.deinit(allocator);
         rr.event_generation_tracking = .tracked;
-        rr.pending_generation_event_outcome = .none;
         rr.resize_generation = 0;
         rr.resize_baseline_present = false;
         rr.surface = try Surface.init(allocator, 77, .{ .cols = 20, .rows = 3 });
@@ -797,7 +855,7 @@ pub const RemoteTermBackend = struct {
                 process_seal.fatalIntegrity(.proof_loss);
         }
         if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.settling)) {
-            const readiness = pending_event_owner.closeReadiness(&entry.runtime.pending_event_owner);
+            const readiness = entry.runtime.advancePendingEventForClose();
             const ready_remove = close_authority.publishReadyRemove(authority, readiness == .complete) catch
                 process_seal.fatalIntegrity(.proof_loss);
             if (!ready_remove) return .event_pending;
@@ -1365,6 +1423,156 @@ test "C3-3b5 remote backend는 active pin 제거를 보류하고 다음 tick에 
     try testing.expectEqual(@as(usize, 0), backend_value.maintenanceCloseTick().removed_count);
 }
 
+test "C3-3b4 async close parity는 prepared event를 다음 tick settlement 뒤 제거한다" {
+    var fixture: remote_runtime.testing_api.SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    try fixture.prepareForClose(
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":4,\"metadata\":{" ++
+            "\"cwd\":\"/close\",\"window_title\":\"close\",\"ssh_remote_dest\":null," ++
+            "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+            "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
+            "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+            "\"foreground_pgid\":null,\"processes\":[]}}",
+    );
+
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    try backend_value.runtimes.put(testing.allocator, 41, .{
+        .runtime = &fixture.runtime,
+        .host_id = 1,
+        .runtime_generation = 1,
+    });
+    B5TestState.skip_destroy = true;
+    defer B5TestState.skip_destroy = false;
+    remote_runtime.testing_api.armSettlementContention(1);
+
+    try testing.expectEqual(term_backend.CloseProgress.event_pending, backend_value.backend().finishAfterTermination(41));
+    try testing.expectEqual(
+        @intFromEnum(pending_event_owner.PendingLifecycle.prepared),
+        fixture.runtime.pending_event_owner.lifecycle_raw,
+    );
+    try testing.expectEqual(term_backend.CloseProgress.complete, backend_value.backend().finishAfterTermination(41));
+    try testing.expectEqual(
+        @intFromEnum(pending_event_owner.PendingLifecycle.idle),
+        fixture.runtime.pending_event_owner.lifecycle_raw,
+    );
+    try testing.expectEqual(term_backend.RemoveProgress.removed, RemoteTermBackend.remove(&backend_value, 41));
+    try testing.expect(!backend_value.runtimes.contains(41));
+}
+
+const B4SemanticCleanupProbe = struct {
+    parent: std.mem.Allocator,
+    backend: ?*RemoteTermBackend = null,
+    runtime: ?*RemoteRuntime = null,
+    handle: RuntimeHandle = 0,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    armed: bool = false,
+    callback_count: usize = 0,
+    saw_committed_cleanup: bool = false,
+    reentrant_remove: ?term_backend.RemoveProgress = null,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed and @intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len) {
+            self.armed = false;
+            self.callback_count += 1;
+            const runtime = self.runtime orelse @panic("b4 semantic cleanup runtime가 없다");
+            self.saw_committed_cleanup = runtime.pending_event_owner.lifecycle_raw ==
+                @intFromEnum(pending_event_owner.PendingLifecycle.committed_cleanup);
+            self.reentrant_remove = RemoteTermBackend.remove(
+                self.backend orelse @panic("b4 semantic cleanup backend가 없다"),
+                self.handle,
+            );
+        }
+        self.parent.rawFree(memory, alignment, ra);
+    }
+};
+
+test "C3-3b4 async close parity는 committed cleanup callback 뒤에만 제거한다" {
+    var probe = B4SemanticCleanupProbe{ .parent = testing.allocator };
+    var fixture: remote_runtime.testing_api.SemanticFixture = undefined;
+    try fixture.initInPlaceWithAllocator(probe.allocator());
+    defer fixture.deinit();
+    _ = try fixture.publish(
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":4,\"metadata\":{" ++
+            "\"cwd\":\"/old-close-owner\",\"window_title\":\"old\",\"ssh_remote_dest\":null," ++
+            "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+            "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
+            "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+            "\"foreground_pgid\":null,\"processes\":[]}}",
+    );
+    try fixture.prepareForClose(
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":5,\"metadata\":{" ++
+            "\"cwd\":\"/new-close-owner\",\"window_title\":\"new\",\"ssh_remote_dest\":null," ++
+            "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+            "\"alternate_scroll\":true,\"observer_generation\":2,\"title_generation\":2," ++
+            "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+            "\"foreground_pgid\":null,\"processes\":[]}}",
+    );
+
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    try backend_value.runtimes.put(testing.allocator, 42, .{
+        .runtime = &fixture.runtime,
+        .host_id = 1,
+        .runtime_generation = 1,
+    });
+    B5TestState.skip_destroy = true;
+    defer B5TestState.skip_destroy = false;
+    probe.backend = &backend_value;
+    probe.runtime = &fixture.runtime;
+    probe.handle = 42;
+    probe.target_addr = @intFromPtr(fixture.runtime.observation.cwd.items.ptr);
+    probe.target_len = fixture.runtime.observation.cwd.items.len;
+    probe.armed = true;
+
+    try testing.expectEqual(term_backend.CloseProgress.complete, backend_value.backend().finishAfterTermination(42));
+    try testing.expectEqual(@as(usize, 1), probe.callback_count);
+    try testing.expect(probe.saw_committed_cleanup);
+    try testing.expectEqual(term_backend.RemoveProgress.event_pending, probe.reentrant_remove.?);
+    try testing.expect(backend_value.runtimes.contains(42));
+    try testing.expectEqual(term_backend.RemoveProgress.removed, RemoteTermBackend.remove(&backend_value, 42));
+    try testing.expect(!backend_value.runtimes.contains(42));
+}
+
 test "remote term backend: drives a real host runtime through the TermRuntimeBackend contract" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try HostAdapter.initializeProcessRuntime();
@@ -1663,4 +1871,110 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(22));
     try testing.expect(try pool.remove(host_b));
+}
+
+const B4PumpFixture = struct {
+    backend: RemoteTermBackend,
+    runtimes: [17]RemoteRuntime = undefined,
+
+    fn init(self: *@This(), count: usize) !void {
+        self.backend = RemoteTermBackend.init(
+            testing.allocator,
+            testing.io,
+            undefined,
+            undefined,
+        );
+        for (0..count) |index| {
+            self.runtimes[index].frame_summary_ready = false;
+            self.runtimes[index].frame_summary = .{};
+            try self.backend.runtimes.put(testing.allocator, index + 1, .{
+                .runtime = &self.runtimes[index],
+                .host_id = 1,
+                .runtime_generation = index + 1,
+            });
+        }
+    }
+
+    fn deinit(self: *@This()) void {
+        B5TestState.event_pump_hook = null;
+        self.backend.runtimes.deinit(testing.allocator);
+    }
+
+    fn consumeFrame(self: *@This(), count: usize) void {
+        for (0..count) |index| {
+            self.runtimes[index].frame_summary_ready = false;
+            self.runtimes[index].frame_summary = .{};
+        }
+    }
+};
+
+const B4PumpProbe = struct {
+    threadlocal var count: usize = 0;
+    threadlocal var seen: [17]u8 = [_]u8{0} ** 17;
+
+    fn reset() void {
+        count = 0;
+        seen = [_]u8{0} ** 17;
+    }
+
+    fn run(handle: RuntimeHandle, _: *RemoteRuntime) DrainSummary {
+        count += 1;
+        seen[handle - 1] += 1;
+        return .{};
+    }
+};
+
+test "C3-3b4 pump round-robin은 빈 queue를 idle로 반환한다" {
+    var fixture: B4PumpFixture = undefined;
+    try fixture.init(0);
+    defer fixture.deinit();
+    B4PumpProbe.reset();
+    B5TestState.event_pump_hook = B4PumpProbe.run;
+    fixture.backend.maintenanceEventTick();
+    try testing.expectEqual(@as(usize, 0), B4PumpProbe.count);
+    try testing.expectEqual(@as(usize, 0), fixture.backend.event_pump_cursor);
+}
+
+test "C3-3b4 pump round-robin은 16 owner를 한 tick에 한 번씩 진행한다" {
+    var fixture: B4PumpFixture = undefined;
+    try fixture.init(16);
+    defer fixture.deinit();
+    B4PumpProbe.reset();
+    B5TestState.event_pump_hook = B4PumpProbe.run;
+    fixture.backend.maintenanceEventTick();
+    try testing.expectEqual(@as(usize, 16), B4PumpProbe.count);
+    for (B4PumpProbe.seen[0..16]) |value| try testing.expectEqual(@as(u8, 1), value);
+}
+
+test "C3-3b4 pump round-robin은 17번째 owner를 다음 tick에 진행한다" {
+    var fixture: B4PumpFixture = undefined;
+    try fixture.init(17);
+    defer fixture.deinit();
+    B4PumpProbe.reset();
+    B5TestState.event_pump_hook = B4PumpProbe.run;
+    fixture.backend.maintenanceEventTick();
+    try testing.expectEqual(@as(u8, 0), B4PumpProbe.seen[16]);
+    fixture.consumeFrame(17);
+    fixture.backend.maintenanceEventTick();
+    try testing.expectEqual(@as(u8, 1), B4PumpProbe.seen[16]);
+}
+
+test "C3-3b4 pump round-robin은 frame retained bytes 상한을 넘지 않는다" {
+    const maximum = event_pump_contract.max_owners_per_frame *
+        event_pump_contract.retained_parts_per_owner * protocol.max_control_json;
+    try testing.expectEqual(maximum, (try event_pump_contract.frameBudget(16, maximum)).retained_bytes);
+    try testing.expectError(error.ResourceExhausted, event_pump_contract.frameBudget(16, maximum + 1));
+}
+
+test "C3-3b4 pump round-robin은 지속 유입에서도 기존 owner를 굶기지 않는다" {
+    var fixture: B4PumpFixture = undefined;
+    try fixture.init(17);
+    defer fixture.deinit();
+    B4PumpProbe.reset();
+    B5TestState.event_pump_hook = B4PumpProbe.run;
+    for (0..17) |_| {
+        fixture.backend.maintenanceEventTick();
+        fixture.consumeFrame(17);
+    }
+    for (B4PumpProbe.seen) |value| try testing.expect(value >= 16);
 }

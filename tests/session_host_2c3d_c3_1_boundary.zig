@@ -21,7 +21,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.reserveEventOwnerInPlace("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.takeEventProjected("));
     try std.testing.expectEqual(@as(usize, 3), count(attachment, "generation_transport_mod.eventReadinessOwned("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".takeEvent("));
+    // b4의 test-only 실제 close fixture가 제품과 같은 take를 한 번 더 실행한다.
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".takeEvent("));
     // C3-2 adds the generation product drain while preserving the legacy owner path.
     // b2b3 adds one test-only real-take Busy probe; the three product release callsites remain.
     try std.testing.expectEqual(@as(usize, 4), count(runtime, ".releaseEvent("));
@@ -87,8 +88,7 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 3, .top_level_test = 0 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 1, .top_level_test = 0 },
     });
-    // Raw Client event ownership is narrower than its file inventory. Pin the exact production
-    // functions so a legacy call cannot migrate into a generation branch at the same path/count.
+    // raw Client event ownership을 실제 함수별로 좁혀 legacy 호출이 generation branch로 되돌아오지 못하게 한다.
     try expectIdentifierCountInFunction(allocator, runtime, "attachmentDropStream", "dropBufferedStream", 1);
     try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "takeEventForStream", 1);
     try expectIdentifierCountInFunction(allocator, runtime, "drainLegacyObservationEvents", "releaseEvent", 1);
@@ -98,8 +98,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "dropBufferedStream", 0);
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "purgeEndedStream", 1);
     try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "takeEvent", 1);
-    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "viewEvent", 1);
-    try expectIdentifierCountInFunction(allocator, runtime, "settlePendingGenerationEvent", "releasePendingEvent", 1);
+    try expectIdentifierCountInFunction(allocator, runtime, "drainGenerationObservationEventsWithHook", "viewEvent", 0);
+    try expectIdentifierCountInFunction(allocator, runtime, "settleAndCommitPreparedEvent", "settlePreparedEvent", 1);
     const client = try readSource(allocator, "src/platform/macos/session_host/client.zig");
     defer allocator.free(client);
     try expectIdentifierCountInFunction(allocator, client, "dropBufferedStream", "dropBufferedStream", 1);

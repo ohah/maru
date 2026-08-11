@@ -14,6 +14,7 @@ const maru = @import("maru");
 const terminal = maru.terminal;
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
+const runtime_pump_mod = maru.app.runtime_pump;
 const client_mod = @import("client.zig");
 const client_slot_mod = @import("client_slot.zig");
 const client_poison = @import("client_poison.zig");
@@ -35,10 +36,22 @@ const generation_contract = @import("generation_attachment_contract.zig");
 const generation_event_contract_mod = @import("generation_event_contract.zig");
 const pending_event_preparation_mod = @import("pending_event_preparation.zig");
 const remote_runtime_pending_event_mod = @import("remote_runtime_pending_event.zig");
+const runtime_event_prepared_types_mod = @import("runtime_event_prepared_types.zig");
+const runtime_observation_digest_mod = @import("runtime_observation_digest.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
 
 var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
+
+const B4SemanticProofLossStage = enum(u8) {
+    none = 0,
+    observation_drift = 1,
+    continuation_drift = 2,
+};
+
+const B4SemanticProofLossTestState = if (builtin.is_test) struct {
+    threadlocal var stage: B4SemanticProofLossStage = .none;
+} else struct {};
 
 fn nextRemoteRuntimeOwnerIncarnation() ?u64 {
     var current = remote_runtime_owner_incarnation_issuer.load(.monotonic);
@@ -160,6 +173,13 @@ const RuntimeAttachment = union(enum) {
                 .partial_frame_requires_close => .partial_frame_requires_close,
             },
         };
+    }
+
+    fn applyPreparedRevokedNoFail(self: *RuntimeAttachment, generation: u64) void {
+        switch (self.*) {
+            .legacy => process_seal_service.fatalIntegrity(.proof_loss),
+            .generation => |*value| value.applyPreparedRevokedNoFail(generation),
+        }
     }
 
     fn sendInput(
@@ -356,12 +376,6 @@ fn metadataDtoMatchesObservation(
 /// 한 원격 runtime. self-referential(`surface.remote`가 attachment screen을 가리킴)이라 **in-place `spawn`**을 쓴다
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
-    const PendingGenerationEventOutcome = union(enum) {
-        none,
-        applied: EventDrain,
-        failed: client_mod.ClientError,
-    };
-
     client: *client_mod.Client, // borrowed — 여러 runtime이 한 connection을 공유한다(stream_id로 구분).
     generation_adapter: ?*host_adapter_mod.HostAdapter,
     allocator: std.mem.Allocator,
@@ -385,7 +399,8 @@ pub const RemoteRuntime = struct {
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
     pump_ended: bool,
     resync_needed: bool,
-    pending_generation_event_outcome: PendingGenerationEventOutcome,
+    frame_summary_ready: bool = false,
+    frame_summary: runtime_pump_mod.DrainSummary = .{},
     pending_event_owner: pending_event_owner_mod.PendingEventOwner,
     close_authority: remote_close_authority.CloseAuthority = .{},
     runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner,
@@ -611,16 +626,34 @@ pub const RemoteRuntime = struct {
             process_seal_service.fatalIntegrity(.proof_loss);
     }
 
-    /// Dormant b2b3 orchestration seam. It owns the sole final-address PreparationFrame and
-    /// snapshots this RemoteRuntime without publishing any live semantic mutation. The product
-    /// event pump remains intentionally unwired until b4; the focused real-take fixture instantiates
-    /// this exact body so future activation cannot grow a second frame-construction path.
+    /// Attachment가 source authority를 밖으로 내보내지 않은 채 Runtime snapshot을 immutable Pending으로 게시한다.
     fn classifyAndPrepareEvent(
+        self: *RemoteRuntime,
+    ) pending_event_preparation_mod.PrepareError!generation_attachment_mod.GenerationAttachment.PreparedSettlement {
+        return self.attachment.generation.preparePendingSettlement(.{
+            .allocator = self.allocator,
+            .lifetime_owner = &self.runtime_lifetime,
+            .pending_owner = &self.pending_event_owner,
+            .runtime_addr = @intFromPtr(self),
+            .runtime_extent = @sizeOf(RemoteRuntime),
+            .observation = &self.observation,
+            .direct_input = &self.direct_input,
+            .direct_input_offset = &self.direct_input_offset,
+            .pending_controls = &self.pending_controls,
+            .blocking_flush_active = &self.blocking_flush_active,
+            .resize_generation = &self.resize_generation,
+            .resize_baseline_present = &self.resize_baseline_present,
+        });
+    }
+
+    /// 기존 preparation 단위 테스트가 실제 source view 변조를 주입할 때만 쓰는 격리 helper다.
+    fn classifyAndPrepareEventFromSourceForTest(
         self: *RemoteRuntime,
         source_owner: *generation_event_contract_mod.EventOwner,
         source_view: generation_event_contract_mod.PreparationEventView,
         correlation: client_slot_mod.EventCorrelation,
     ) pending_event_preparation_mod.PrepareError!void {
+        if (!builtin.is_test) unreachable;
         const context: pending_event_preparation_mod.RuntimePreparationContext = .{
             .runtime_addr = @intFromPtr(self),
             .allocator = self.allocator,
@@ -685,7 +718,8 @@ pub const RemoteRuntime = struct {
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
-        self.pending_generation_event_outcome = .none;
+        self.frame_summary_ready = false;
+        self.frame_summary = .{};
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
@@ -1266,7 +1300,7 @@ pub const RemoteRuntime = struct {
     /// drain이 이걸로 `RuntimeEventPump.drainAvailable`과 같은 의미를 만든다). client가 `stream_id`로 demux하므로 여기 도달한
     /// 배치는 **항상 내 것**이다(예전엔 남의 배치를 free해 유실 — code-review #1; 이제 client가 남의 것은 버퍼해 그 runtime pump로
     /// 보낸다). host가 grid/alt 변화 시 delta 대신 fresh snapshot을 push하므로 둘 다 처리한다(is_snapshot이면 리셋, 아니면 증분).
-    pub const PumpResult = enum { idle, metadata, screen, ended };
+    pub const PumpResult = enum { idle, event_pending, metadata, screen, ended };
 
     pub fn pumpDelta(
         self: *RemoteRuntime,
@@ -1274,7 +1308,10 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         // Revoke/ended events fence mutation. Consume already-buffered authority events before
         // advancing any input/control that was accepted on a previous UI turn.
-        var events = try self.drainObservationEvents();
+        var events = self.drainObservationEvents() catch |err| switch (err) {
+            error.AdminBusy => return .event_pending,
+            else => return err,
+        };
         if (events.ended) return .ended;
         // 마지막 non-blocking input 뒤에 새 입력/RPC가 영원히 없더라도 frame-loop pump가 연결의 bounded pending frame을
         // 계속 DONTWAIT로 진전시킨다. Client 하나를 여러 runtime이 공유하므로 어느 runtime pump가 호출해도 충분하다.
@@ -1285,7 +1322,10 @@ pub const RemoteRuntime = struct {
         switch (try self.attachment.pumpScreen(self.io)) {
             .idle => {
                 // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
-                const after_read = try self.drainObservationEvents();
+                const after_read = self.drainObservationEvents() catch |err| switch (err) {
+                    error.AdminBusy => return .event_pending,
+                    else => return err,
+                };
                 if (after_read.ended) return .ended;
                 events.metadata = after_read.metadata or events.metadata;
                 return if (events.metadata) .metadata else .idle;
@@ -1296,7 +1336,10 @@ pub const RemoteRuntime = struct {
             // activity on this connection.
             .recovery_commit_pending, .terminal => return error.ProtocolError,
         }
-        const after_screen = try self.drainObservationEvents();
+        const after_screen = self.drainObservationEvents() catch |err| switch (err) {
+            error.AdminBusy => return .event_pending,
+            else => return err,
+        };
         if (after_screen.ended) return .ended;
         return .screen;
     }
@@ -1352,15 +1395,25 @@ pub const RemoteRuntime = struct {
         comptime hook: ?GenerationDrainHook,
     ) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
-        var retries_remaining = protocol.max_client_pending_events;
         while (true) {
             const generation = &self.attachment.generation;
-            try self.settlePendingGenerationEvent(
-                generation,
-                &result,
-                .before_pending_release,
-                hook,
-            );
+            const pending_lifecycle = std.enums.fromInt(
+                pending_event_owner_mod.PendingLifecycle,
+                self.pending_event_owner.lifecycle_raw,
+            ) orelse process_seal_service.fatalIntegrity(.proof_loss);
+            if (pending_lifecycle == .prepared) {
+                const prepared = generation.preparedSettlementIdentity() catch
+                    return error.ProtocolError;
+                try self.settleAndCommitPreparedEvent(
+                    prepared,
+                    &result,
+                    .before_pending_release,
+                    hook,
+                );
+                continue;
+            }
+            if (pending_lifecycle != .idle)
+                process_seal_service.fatalIntegrity(.proof_loss);
             if (hook) |run| _ = run(self, .before_purge);
             switch (generation.purgeEndedStream() catch |err|
                 return mapGenerationPurgeError(err)) {
@@ -1374,49 +1427,15 @@ pub const RemoteRuntime = struct {
             }
             switch (generation.takeEvent() catch |err| return mapGenerationEventError(err)) {
                 .idle => return result,
-                .ended_pending => {
-                    if (retries_remaining == 0) return error.AdminBusy;
-                    retries_remaining -= 1;
-                    continue;
-                },
+                .ended_pending => return error.AdminBusy,
                 .taken => {},
             }
-            const view = generation.viewEvent() catch |err| {
-                self.pending_generation_event_outcome = .{ .failed = switch (err) {
-                    error.InvalidOwner => error.ProtocolError,
-                    error.Terminal => error.ConnectionClosed,
-                } };
-                try self.settlePendingGenerationEvent(
-                    generation,
-                    &result,
-                    .before_current_release,
-                    hook,
-                );
-                unreachable;
+            const prepared = self.classifyAndPrepareEvent() catch |err| return switch (err) {
+                error.Busy => error.AdminBusy,
+                error.InvalidOwner => error.ProtocolError,
             };
-            const verdict: runtime_event_wire.Verdict = switch (view.admission) {
-                .accepted => |accepted| .{ .accepted = accepted },
-                .unknown => .unknown,
-            };
-            var event_result: EventDrain = .{};
-            self.applyObservationEvent(
-                &event_result,
-                .{
-                    .major = view.wire_major,
-                    .kind = .event,
-                    .stream_id = self.attachment.streamId(),
-                    .payload_len = @intCast(view.payload.len),
-                },
-                view.payload,
-                verdict,
-            ) catch |err| {
-                self.pending_generation_event_outcome = .{ .failed = err };
-            };
-            if (hook) |run| _ = run(self, .after_current_apply);
-            if (self.pending_generation_event_outcome == .none)
-                self.pending_generation_event_outcome = .{ .applied = event_result };
-            try self.settlePendingGenerationEvent(
-                generation,
+            try self.settleAndCommitPreparedEvent(
+                prepared,
                 &result,
                 .before_current_release,
                 hook,
@@ -1424,38 +1443,161 @@ pub const RemoteRuntime = struct {
         }
     }
 
-    fn settlePendingGenerationEvent(
+    fn settleAndCommitPreparedEvent(
         self: *RemoteRuntime,
-        generation: *generation_attachment_mod.GenerationAttachment,
+        prepared: generation_attachment_mod.GenerationAttachment.PreparedSettlement,
         result: *EventDrain,
         stage: GenerationDrainHookStage,
         comptime hook: ?GenerationDrainHook,
     ) client_mod.ClientError!void {
-        const released = blk: {
-            if (hook) |run| if (run(self, stage) == .busy) break :blk error.Busy;
-            break :blk generation.releasePendingEvent();
-        } catch |err| {
-            if (err != error.Busy) self.pending_generation_event_outcome = .none;
-            return mapGenerationEventError(err);
+        const borrowed = self.pending_event_owner.borrowPrepared() catch
+            return error.ProtocolError;
+        if (hook) |run| if (run(self, stage) == .busy) return error.AdminBusy;
+        remote_runtime_pending_event_mod.settlePreparedEvent(
+            &self.runtime_lifetime,
+            &self.pending_event_owner,
+            &self.attachment.generation,
+            prepared.correlation,
+            borrowed.effect,
+        ) catch |err| return switch (err) {
+            error.Busy => error.AdminBusy,
+            error.InvalidOwner => error.ProtocolError,
         };
-        if (!released) {
-            if (self.pending_generation_event_outcome != .none) {
-                self.pending_generation_event_outcome = .none;
-                self.client.poison(.local_invariant_violation);
-                return error.ProtocolError;
-            }
-            return;
+        try self.commitPreparedSemanticEvent(result);
+        if (hook) |run| _ = run(self, .after_current_apply);
+    }
+
+    fn commitPreparedSemanticEvent(
+        self: *RemoteRuntime,
+        result: *EventDrain,
+    ) client_mod.ClientError!void {
+        var permit: pending_event_owner_mod.PreparedSemanticCommit = .{};
+        const decision = self.pending_event_owner.beginSemanticCommit(&permit) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        const tag = std.enums.fromInt(
+            runtime_event_prepared_types_mod.PreparedEventTag,
+            decision.prepared_tag_raw,
+        ) orelse process_seal_service.fatalIntegrity(.proof_loss);
+        const publish = decision.publish_raw == 1;
+        if (decision.publish_raw > 1)
+            process_seal_service.fatalIntegrity(.proof_loss);
+
+        var moved_observation: term_backend.RuntimeObservation = .{};
+        defer moved_observation.deinit(self.allocator);
+        if (tag == .metadata_commit) {
+            self.pending_event_owner.moveCommittedObservationNoFail(
+                &permit,
+                &moved_observation,
+            );
+            if (publish) std.mem.swap(
+                term_backend.RuntimeObservation,
+                &self.observation,
+                &moved_observation,
+            );
         }
-        const outcome = self.pending_generation_event_outcome;
-        self.pending_generation_event_outcome = .none;
-        switch (outcome) {
-            .none => {},
-            .applied => |applied| {
-                result.metadata = result.metadata or applied.metadata;
-                result.ended = result.ended or applied.ended;
+
+        if (publish) switch (tag) {
+            .ignored, .resize_noop, .metadata_noop, .metadata_commit => {
+                result.metadata = result.metadata or tag == .metadata_commit;
             },
-            .failed => |err| return err,
+            .ended => result.ended = true,
+            .invalidated => self.resync_needed = true,
+            .resize_commit => {
+                self.observation.size = .{ .cols = decision.cols, .rows = decision.rows };
+                self.resize_generation = decision.resize_generation;
+                self.resize_baseline_present = true;
+                result.metadata = true;
+            },
+            .revoked => {
+                self.attachment.applyPreparedRevokedNoFail(decision.revoke_fence);
+                self.discardQueuedMutations();
+                result.metadata = true;
+            },
+            .failure => {},
+        };
+
+        const expected_post_digest = self.semanticPostDigest(result);
+
+        // 이전 observation의 allocator callback이 바꿀 수 있는 모든 공개 상태를 POST 증명에 포함해야 한다.
+        // callback을 Pending finish 뒤로 미루면 이미 게시한 semantic completion이 callback drift를 놓친다.
+        moved_observation.deinit(self.allocator);
+        if (builtin.is_test) switch (B4SemanticProofLossTestState.stage) {
+            .none => {},
+            .observation_drift => {
+                B4SemanticProofLossTestState.stage = .none;
+                self.observation.revision +%= 1;
+            },
+            .continuation_drift => {
+                B4SemanticProofLossTestState.stage = .none;
+                permit.seal[0] ^= 1;
+            },
+        };
+        const post_digest = self.semanticPostDigest(result);
+        if (!std.crypto.timing_safe.eql(
+            process_seal_service.CleanupSeal,
+            expected_post_digest,
+            post_digest,
+        )) process_seal_service.fatalIntegrity(.proof_loss);
+        self.pending_event_owner.recordSemanticPostNoFail(&permit, post_digest);
+        self.pending_event_owner.finishSemanticCommitNoFail(&permit);
+
+        if (tag == .failure) {
+            const failure = std.enums.fromInt(
+                runtime_event_prepared_types_mod.PreparationFailure,
+                decision.failure_raw,
+            ) orelse process_seal_service.fatalIntegrity(.proof_loss);
+            return switch (failure) {
+                .out_of_memory, .local_resource_exhausted => error.OutOfMemory,
+                .protocol_error => error.ProtocolError,
+                .connection_closed => error.ConnectionClosed,
+            };
         }
+    }
+
+    fn semanticPostDigest(self: *RemoteRuntime, result: *const EventDrain) process_seal_service.CleanupSeal {
+        const graph = runtime_observation_digest_mod.cleanupGraph(
+            &self.observation,
+            self.allocator,
+        ) catch process_seal_service.fatalIntegrity(.proof_loss);
+        const observation_digest = runtime_observation_digest_mod.digest(
+            &self.observation,
+            graph,
+        ) catch process_seal_service.fatalIntegrity(.proof_loss);
+        const attachment_state = self.attachment.statePtr();
+        return runtime_observation_digest_mod.semanticPostDigest(.{
+            .observation_digest = observation_digest,
+            .resync_needed = self.resync_needed,
+            .resize_generation = self.resize_generation,
+            .resize_baseline_present = self.resize_baseline_present,
+            .attachment_role_raw = @intFromEnum(attachment_state.role),
+            .controller_generation = attachment_state.controller_generation,
+            .metadata_published = result.metadata,
+            .ended_published = result.ended,
+        });
+    }
+
+    /// close sweep는 새 event를 take하지 않고 이미 게시된 Pending만 tick당 한 번 전진시킨다.
+    pub fn advancePendingEventForClose(self: *RemoteRuntime) term_backend.CloseProgress {
+        const lifecycle = std.enums.fromInt(
+            pending_event_owner_mod.PendingLifecycle,
+            self.pending_event_owner.lifecycle_raw,
+        ) orelse process_seal_service.fatalIntegrity(.proof_loss);
+        switch (lifecycle) {
+            .idle => return .complete,
+            .preparing, .settling, .committed_cleanup => return .event_pending,
+            .prepared => {},
+        }
+        const prepared = self.attachment.generation.preparedSettlementIdentity() catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        var result: EventDrain = .{};
+        self.settleAndCommitPreparedEvent(prepared, &result, .before_pending_release, null) catch |err| return switch (err) {
+            error.AdminBusy => .event_pending,
+            else => process_seal_service.fatalIntegrity(.proof_loss),
+        };
+        return if (pending_event_owner_mod.closeReadiness(&self.pending_event_owner) == .complete)
+            .complete
+        else
+            .event_pending;
     }
 
     fn applyObservationEvent(
@@ -2375,16 +2517,28 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
     return runtime_core_command_v1 or command.isLegacyScroll();
 }
 
-pub const testing_api = struct {
-    /// Test fixtures must exercise the same process identity, final-address seal, and owner
-    /// incarnation path as product constructors; this is initialization, not an authority bypass.
+pub const testing_api = if (builtin.is_test) struct {
+    pub const SemanticFixture = B4SemanticFixture;
+
+    /// 테스트 fixture도 제품 constructor와 같은 process identity와 final-address owner 경로를 사용한다.
     pub fn initializePendingOwners(runtime: *RemoteRuntime) !void {
-        if (!@import("builtin").is_test) unreachable;
         runtime.pending_event_owner = .{};
         runtime.runtime_lifetime = .{};
         try runtime.initializePendingEventOwner(null);
     }
-};
+
+    pub fn armSettlementContention(count: usize) void {
+        runtime_lifetime_owner_mod.testing.armSettlementContention(count);
+    }
+
+    pub fn armSemanticProofLoss(stage_raw: u8) void {
+        const stage = std.enums.fromInt(B4SemanticProofLossStage, stage_raw) orelse
+            @panic("알 수 없는 b4 semantic proof-loss stage");
+        if (stage == .none or B4SemanticProofLossTestState.stage != .none)
+            @panic("b4 semantic proof-loss stage가 이미 활성 상태다");
+        B4SemanticProofLossTestState.stage = stage;
+    }
+} else struct {};
 
 test "f3c0 remote runtime resize reply preserves stale size and uses host-clamped applied size" {
     try std.testing.expectEqual(
@@ -4179,7 +4333,6 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     const Hook = struct {
         var force_release_busy = false;
         var inject_ended_after_purge = false;
-        var inject_apply_error = false;
         var exhaust_retry_budget = false;
         var ended_pending_count: usize = 0;
 
@@ -4202,10 +4355,6 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
             if (stage == .before_purge and exhaust_retry_budget and ended_pending_count != 0) {
                 runtime.client.dropBufferedStream(runtime.attachment.streamId());
             }
-            if (stage == .after_current_apply and inject_apply_error) {
-                inject_apply_error = false;
-                runtime.pending_generation_event_outcome = .{ .failed = error.ProtocolError };
-            }
             return .proceed;
         }
     };
@@ -4227,19 +4376,15 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
 
     Hook.force_release_busy = true;
-    Hook.inject_apply_error = true;
     try rr.client.bufferGenerationEventForTest(7, "{\"event\":\"snapshot.invalidated\"}");
     try std.testing.expectError(
         error.AdminBusy,
         rr.drainGenerationObservationEventsWithHook(Hook.run),
     );
-    try std.testing.expectEqual(
-        error.ProtocolError,
-        rr.pending_generation_event_outcome.failed,
-    );
     try std.testing.expect(rr.attachment.generation.event_generation_mirror != 0);
-    try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
-    try std.testing.expect(rr.pending_generation_event_outcome == .none);
+    const invalidated = try rr.drainObservationEvents();
+    try std.testing.expect(!invalidated.ended);
+    try std.testing.expect(rr.resync_needed);
     try std.testing.expectEqual(@as(u64, 0), rr.attachment.generation.event_generation_mirror);
 
     try rr.direct_input.appendSlice(allocator, "budget-must-not-send");
@@ -4251,7 +4396,7 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
         rr.drainGenerationObservationEventsWithHook(Hook.run),
     );
     try std.testing.expectEqual(
-        @as(usize, protocol.max_client_pending_events + 1),
+        @as(usize, 1),
         Hook.ended_pending_count,
     );
     try std.testing.expectEqualStrings("budget-must-not-send", rr.direct_input.items);
@@ -4277,6 +4422,10 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     rr.client.pending_batch_bytes = "stale-target".len + "sibling".len;
 
     Hook.inject_ended_after_purge = true;
+    try std.testing.expectError(
+        error.AdminBusy,
+        rr.drainGenerationObservationEventsWithHook(Hook.run),
+    );
     const ended = try rr.drainGenerationObservationEventsWithHook(Hook.run);
     try std.testing.expect(ended.ended);
     try std.testing.expectEqual(@as(usize, 1), rr.client.pending_events.items.len);
@@ -4303,6 +4452,440 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
 
     rr.surface.deinit();
     rr.attachment.deinitWithAdapter(&adapter);
+}
+
+const B4SemanticFixture = struct {
+    allocator: std.mem.Allocator,
+    client: client_mod.Client,
+    adapter: host_adapter_mod.HostAdapter,
+    runtime: RemoteRuntime,
+
+    pub fn initInPlace(self: *@This()) !void {
+        return self.initInPlaceWithAllocator(std.testing.allocator);
+    }
+
+    pub fn initInPlaceWithAllocator(self: *@This(), allocator: std.mem.Allocator) !void {
+        try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+        const response = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = 1 },
+            "{\"result\":{\"stream_id\":7,\"controller_generation\":3," ++
+                "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+                "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+        );
+        defer allocator.free(response);
+        var records: std.ArrayListUnmanaged(u8) = .empty;
+        defer records.deinit(allocator);
+        const meta = try screen_stream.encodeScreenMeta(
+            allocator,
+            .{ .kind = .screen_meta, .generation = 1 },
+            .{ .cols = 1, .rows = 1, .cursor = .{} },
+        );
+        defer allocator.free(meta);
+        try screen_stream.appendRecord(&records, allocator, meta);
+        var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+        const row = try screen_stream.encodeRow(
+            allocator,
+            .{ .kind = .row, .generation = 1 },
+            .{ .row_index = 0, .runs = &runs },
+        );
+        defer allocator.free(row);
+        try screen_stream.appendRecord(&records, allocator, row);
+        const snapshot = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+            records.items,
+        );
+        defer allocator.free(snapshot);
+        const Peer = struct {
+            fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+                defer _ = c.close(fd);
+                const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+                defer std.heap.page_allocator.free(request.payload);
+                socket_server.writeAll(fd, response_wire) catch return;
+                socket_server.writeAll(fd, snapshot_wire) catch return;
+            }
+        };
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+        self.allocator = allocator;
+        self.client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+            .attachment_capabilities = .{ .peer_attach_generation = true },
+            .metadata_support = .supported,
+            .compatibility_profile = @import("compatibility.zig").profileForMajor(
+                protocol.version_major,
+            ).?,
+        };
+        try host_adapter_mod.HostAdapter.initInPlace(&self.adapter, allocator, &self.client);
+        self.runtime.client = self.adapter.logicalClient();
+        self.runtime.generation_adapter = &self.adapter;
+        self.runtime.pending_event_owner = .{};
+        self.runtime.runtime_lifetime = .{};
+        try self.runtime.initializePendingEventOwner(&self.adapter);
+        self.runtime.allocator = allocator;
+        self.runtime.io = std.testing.io;
+        self.runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+        self.runtime.resize_seq = 0;
+        self.runtime.resize_generation = 0;
+        self.runtime.resize_baseline_present = false;
+        self.runtime.direct_input = .empty;
+        self.runtime.direct_input_offset = 0;
+        self.runtime.pending_controls = .empty;
+        self.runtime.blocking_flush_active = false;
+        self.runtime.pump_ended = false;
+        self.runtime.resync_needed = false;
+        self.runtime.observation = .{};
+        self.runtime.close_authority = .{};
+        try self.runtime.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
+        peer.join();
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.runtime.surface.deinit();
+        self.runtime.direct_input.deinit(self.allocator);
+        self.runtime.pending_controls.deinit(self.allocator);
+        self.runtime.observation.deinit(self.allocator);
+        self.runtime.attachment.deinitWithAdapter(&self.adapter);
+        self.adapter.deinit();
+    }
+
+    pub fn publish(self: *@This(), payload: []const u8) !RemoteRuntime.EventDrain {
+        try self.runtime.client.bufferGenerationEventForTest(7, payload);
+        return self.runtime.drainObservationEvents();
+    }
+
+    pub fn prepareForClose(self: *@This(), payload: []const u8) !void {
+        try self.runtime.client.bufferGenerationEventForTest(7, payload);
+        switch (try self.runtime.attachment.generation.takeEvent()) {
+            .taken => {},
+            else => return error.TestUnexpectedResult,
+        }
+        _ = try self.runtime.classifyAndPrepareEvent();
+    }
+};
+
+const B4SemanticProofLossAllocator = struct {
+    parent: std.mem.Allocator,
+    runtime: ?*RemoteRuntime = null,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    armed: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed and @intFromPtr(memory.ptr) == self.target_addr and memory.len == self.target_len) {
+            self.armed = false;
+            const runtime = self.runtime orelse @panic("b4 proof-loss runtime가 없다");
+            runtime.pending_event_owner.progress_seal[0] ^= 1;
+        }
+        self.parent.rawFree(memory, alignment, ra);
+    }
+};
+
+const B4ProofLossCase = enum {
+    old_owner_callback,
+    observation,
+    continuation,
+};
+
+fn runB4ProofLossChild(case: B4ProofLossCase) noreturn {
+    var allocator_probe = B4SemanticProofLossAllocator{ .parent = std.testing.allocator };
+    var fixture: B4SemanticFixture = undefined;
+    fixture.initInPlaceWithAllocator(allocator_probe.allocator()) catch std.c._exit(125);
+    _ = fixture.publish(b4_metadata_base) catch std.c._exit(125);
+    fixture.prepareForClose(
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":5,\"metadata\":{" ++
+            "\"cwd\":\"/proof-loss\",\"window_title\":\"proof\",\"ssh_remote_dest\":null," ++
+            "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+            "\"alternate_scroll\":true,\"observer_generation\":2,\"title_generation\":2," ++
+            "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+            "\"foreground_pgid\":null,\"processes\":[]}}",
+    ) catch std.c._exit(125);
+    switch (case) {
+        .old_owner_callback => {
+            allocator_probe.runtime = &fixture.runtime;
+            allocator_probe.target_addr = @intFromPtr(fixture.runtime.observation.cwd.items.ptr);
+            allocator_probe.target_len = fixture.runtime.observation.cwd.items.len;
+            allocator_probe.armed = true;
+        },
+        .observation => testing_api.armSemanticProofLoss(@intFromEnum(B4SemanticProofLossStage.observation_drift)),
+        .continuation => testing_api.armSemanticProofLoss(@intFromEnum(B4SemanticProofLossStage.continuation_drift)),
+    }
+    _ = fixture.runtime.advancePendingEventForClose();
+    std.c._exit(124);
+}
+
+fn expectB4ProofLoss(case: B4ProofLossCase) !void {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    const enabled = std.c.getenv("MARU_C3B4_PROOF_LOSS") orelse return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(enabled), "fresh-artifact-v1")) return error.SkipZigTest;
+    const child = std.c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) runB4ProofLossChild(case);
+    var status: c_int = 0;
+    try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    const unsigned: u32 = @bitCast(status);
+    try std.testing.expect(std.c.W.IFEXITED(unsigned));
+    try std.testing.expectEqual(@as(u8, 86), @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned))));
+}
+
+const b4_metadata_base =
+    "{\"event\":\"runtime.metadata\",\"metadata_revision\":4,\"metadata\":{" ++
+    "\"cwd\":\"/base\",\"window_title\":\"base\",\"ssh_remote_dest\":null," ++
+    "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+    "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
+    "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+    "\"foreground_pgid\":null,\"processes\":[]}}";
+const b4_metadata_stale =
+    "{\"event\":\"runtime.metadata\",\"metadata_revision\":3,\"metadata\":{" ++
+    "\"cwd\":\"/stale\",\"window_title\":\"stale\",\"ssh_remote_dest\":null," ++
+    "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+    "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
+    "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+    "\"foreground_pgid\":null,\"processes\":[]}}";
+
+test "C3-3b4 proof-loss subprocess는 metadata old owner callback 뒤 seal drift를 fail-stop한다" {
+    try expectB4ProofLoss(.old_owner_callback);
+}
+
+test "C3-3b4 proof-loss subprocess는 새 observation semantic drift를 fail-stop한다" {
+    try expectB4ProofLoss(.observation);
+}
+
+test "C3-3b4 proof-loss subprocess는 committed cleanup continuation drift를 fail-stop한다" {
+    try expectB4ProofLoss(.continuation);
+}
+
+test "C3-3b4 실제 Runtime event ignored는 live 의미 상태를 바꾸지 않는다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    _ = try fixture.publish(b4_metadata_base);
+    const before = try runtime_observation_digest_mod.digest(
+        &fixture.runtime.observation,
+        try runtime_observation_digest_mod.cleanupGraph(&fixture.runtime.observation, fixture.allocator),
+    );
+    const result = try fixture.publish(b4_metadata_stale);
+    const after = try runtime_observation_digest_mod.digest(
+        &fixture.runtime.observation,
+        try runtime_observation_digest_mod.cleanupGraph(&fixture.runtime.observation, fixture.allocator),
+    );
+    try std.testing.expect(!result.metadata and !result.ended);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+}
+
+test "C3-3b4 실제 Runtime event ended는 settlement 뒤 종료를 게시한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    try std.testing.expect((try fixture.publish("{\"event\":\"runtime.ended\"}")).ended);
+    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
+}
+
+test "C3-3b4 실제 Runtime event invalidated는 settlement 뒤 resync intent를 게시한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    const result = try fixture.publish("{\"event\":\"snapshot.invalidated\"}");
+    try std.testing.expect(!result.ended and fixture.runtime.resync_needed);
+}
+
+test "C3-3b4 실제 Runtime event resize_noop은 기존 크기를 보존한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    fixture.runtime.resize_generation = 10;
+    fixture.runtime.resize_baseline_present = true;
+    fixture.runtime.observation.size = .{ .cols = 90, .rows = 30 };
+    const result = try fixture.publish(
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":120,\"rows\":40,\"resize_generation\":9,\"reason\":\"controller\"}}",
+    );
+    try std.testing.expect(!result.metadata);
+    try std.testing.expectEqual(terminal.Size{ .cols = 90, .rows = 30 }, fixture.runtime.observation.size);
+}
+
+test "C3-3b4 실제 Runtime event resize_commit은 generation과 크기를 함께 게시한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    const result = try fixture.publish(
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":120,\"rows\":40,\"resize_generation\":10,\"reason\":\"controller\"}}",
+    );
+    try std.testing.expect(result.metadata);
+    try std.testing.expectEqual(@as(u64, 10), fixture.runtime.resize_generation);
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 40 }, fixture.runtime.observation.size);
+}
+
+test "C3-3b4 실제 Runtime event metadata_noop은 기존 observation을 보존한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    _ = try fixture.publish(b4_metadata_base);
+    const before = fixture.runtime.observation.revision;
+    const result = try fixture.publish(b4_metadata_base);
+    try std.testing.expect(!result.metadata);
+    try std.testing.expectEqual(before, fixture.runtime.observation.revision);
+    try std.testing.expectEqualStrings("/base", fixture.runtime.observation.cwd.items);
+}
+
+test "C3-3b4 실제 Runtime event metadata_commit은 새 observation을 원자 게시한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    const result = try fixture.publish(b4_metadata_base);
+    try std.testing.expect(result.metadata);
+    try std.testing.expectEqual(@as(u64, 4), fixture.runtime.observation.revision);
+    try std.testing.expectEqualStrings("/base", fixture.runtime.observation.cwd.items);
+}
+
+test "C3-3b4 실제 Runtime event revoked는 fence effect 뒤 의미 결과를 게시한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    const result = try fixture.publish(
+        "{\"event\":\"controller.revoked\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
+    try std.testing.expect(result.metadata);
+    try std.testing.expectEqual(remote_attachment.Role.observer, fixture.runtime.attachment.statePtr().role);
+    try std.testing.expectEqual(@as(u64, 4), fixture.runtime.attachment.statePtr().controller_generation);
+}
+
+test "C3-3b4 실제 Runtime event failure는 confirmed effect 뒤 prepared 의미를 억제한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    fixture.runtime.resize_generation = 10;
+    fixture.runtime.resize_baseline_present = true;
+    fixture.runtime.observation.size = .{ .cols = 90, .rows = 30 };
+    try std.testing.expectError(error.ProtocolError, fixture.publish(
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":120,\"rows\":40,\"resize_generation\":10,\"reason\":\"controller\"}}",
+    ));
+    try std.testing.expectEqual(terminal.Size{ .cols = 90, .rows = 30 }, fixture.runtime.observation.size);
+    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
+}
+
+const B4BusyHook = struct {
+    threadlocal var busy_once: bool = false;
+    threadlocal var inject_ended_once: bool = false;
+
+    fn run(
+        runtime: *RemoteRuntime,
+        stage: RemoteRuntime.GenerationDrainHookStage,
+    ) RemoteRuntime.GenerationDrainHookDecision {
+        if (stage == .before_current_release and busy_once) {
+            busy_once = false;
+            return .busy;
+        }
+        if (stage == .after_purge_not_ended and inject_ended_once) {
+            inject_ended_once = false;
+            runtime.client.bufferGenerationEventForTest(
+                runtime.attachment.streamId(),
+                "{\"event\":\"runtime.ended\"}",
+            ) catch @panic("b4 ended race fixture publication failed");
+        }
+        return .proceed;
+    }
+};
+
+test "C3-3b4 pump round-robin은 Busy owner를 같은 tick에 재시도하지 않는다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    B4BusyHook.busy_once = true;
+    try fixture.runtime.client.bufferGenerationEventForTest(
+        7,
+        "{\"event\":\"snapshot.invalidated\"}",
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        fixture.runtime.drainGenerationObservationEventsWithHook(B4BusyHook.run),
+    );
+    try std.testing.expect(fixture.runtime.attachment.generation.event_generation_mirror != 0);
+    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.prepared), fixture.runtime.pending_event_owner.lifecycle_raw);
+    _ = try fixture.runtime.drainObservationEvents();
+}
+
+test "C3-3b4 pump round-robin은 Busy owner를 다음 tick에 exact once 완료한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    B4BusyHook.busy_once = true;
+    try fixture.runtime.client.bufferGenerationEventForTest(
+        7,
+        "{\"event\":\"snapshot.invalidated\"}",
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        fixture.runtime.drainGenerationObservationEventsWithHook(B4BusyHook.run),
+    );
+    _ = try fixture.runtime.drainObservationEvents();
+    try std.testing.expect(fixture.runtime.resync_needed);
+    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
+}
+
+test "C3-3b4 pump round-robin은 purge ended를 take보다 먼저 게시한다" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    B4BusyHook.inject_ended_once = true;
+    try std.testing.expectError(
+        error.AdminBusy,
+        fixture.runtime.drainGenerationObservationEventsWithHook(B4BusyHook.run),
+    );
+    try std.testing.expect((try fixture.runtime.drainObservationEvents()).ended);
+    try std.testing.expectEqual(@as(u64, 0), fixture.runtime.attachment.generation.event_generation_mirror);
 }
 
 test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rollback" {
@@ -5395,7 +5978,6 @@ fn initGenerationRuntimeAggregateFixture(
     runtime.resync_needed = false;
     runtime.observation = .{};
     runtime.event_generation_tracking = .tracked;
-    runtime.pending_generation_event_outcome = .none;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
     runtime.resize_generation = 0;
     runtime.resize_baseline_present = false;
@@ -5490,7 +6072,7 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
             runtime.pending_event_owner = .{};
             runtime.runtime_lifetime = .{};
             try runtime.initializePendingEventOwner(null);
-            try runtime.classifyAndPrepareEvent(source_owner, view, correlation);
+            try runtime.classifyAndPrepareEventFromSourceForTest(source_owner, view, correlation);
             return error.TestUnexpectedResult;
         }
     };
@@ -5502,13 +6084,13 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 8896,
-        .ReleaseFast => 8832,
+        .Debug => 8928,
+        .ReleaseFast => 8880,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
-        .Debug => 6176,
-        .ReleaseFast => 6112,
+        .Debug => 6208,
+        .ReleaseFast => 6160,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -5549,7 +6131,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             runtime.runtime_lifetime = .{};
             try runtime.initializePendingEventOwner(null);
 
-            try runtime.classifyAndPrepareEvent(source_owner, view, correlation);
+            try runtime.classifyAndPrepareEventFromSourceForTest(source_owner, view, correlation);
             const prepared = try runtime.pending_event_owner.borrowPrepared();
             if (fail_index < 5) {
                 switch (prepared.event) {
@@ -5727,21 +6309,21 @@ test "C3-3b2b3 integration adapter rejects every preflight before source mutatio
                     operation_lease = try runtime.runtime_lifetime.acquirePreparation(preflight);
                     try testing.expectError(
                         error.Busy,
-                        runtime.classifyAndPrepareEvent(source_owner, view, correlation),
+                        runtime.classifyAndPrepareEventFromSourceForTest(source_owner, view, correlation),
                     );
                 },
                 1 => {
                     view.event.payload = view.event.payload[0 .. view.event.payload.len - 1];
                     try testing.expectError(
                         error.InvalidOwner,
-                        runtime.classifyAndPrepareEvent(source_owner, view, correlation),
+                        runtime.classifyAndPrepareEventFromSourceForTest(source_owner, view, correlation),
                     );
                 },
                 2 => {
                     runtime.direct_input_offset = 1;
                     try testing.expectError(
                         error.InvalidOwner,
-                        runtime.classifyAndPrepareEvent(source_owner, view, correlation),
+                        runtime.classifyAndPrepareEventFromSourceForTest(source_owner, view, correlation),
                     );
                 },
                 else => unreachable,

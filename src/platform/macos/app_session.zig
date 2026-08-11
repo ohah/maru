@@ -12776,6 +12776,8 @@ pub const AppSession = struct {
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
+        // 전역 remote backend가 frame owner 집합을 한 번만 선택해야 Term별 pump 순서가 Busy owner를 재실행하지 않는다.
+        if (is_macos) if (app_remote_backend) |*backend| backend.maintenanceEventTick();
         // 활성 surface **자신의** 출력만 따로 센다(커서 blink 리셋 판정용 — 아래 루프 주석). 활성 탭이 없는 빈 창
         // (마지막 워크스페이스를 옮겨 비운 창)은 `active()`가 null이라 id 비교를 건너뛴다(그 창엔 그릴 커서도 없다).
         const active_surface_id: ?u64 = if (self.app_window.active()) |s| s.id else null;
@@ -47058,6 +47060,58 @@ test "C3-3b5 AppSession은 in-process multi-Term complete 뒤에만 topology를 
     const before = pane.terms.items.len;
     term_ops.closeTermAt(session, session.app_window.active_tab, pane, pane.active_term);
     try std.testing.expectEqual(before - 1, pane.terms.items.len);
+}
+
+test "C3-3b4 async close parity는 실제 AppSession tab topology를 pending 동안 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    markAllTermsAtPrompt(session);
+    const pane = pane_ops.activePane(session);
+    const target = pane.activeTerm();
+    const terms_before = pane.terms.items.len;
+    const active_before = pane.active_term;
+
+    app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
+    term_ops.closeTermAt(session, session.app_window.active_tab, pane, pane.active_term);
+    try std.testing.expectEqual(terms_before, pane.terms.items.len);
+    try std.testing.expectEqual(active_before, pane.active_term);
+    try std.testing.expectEqual(target, pane.activeTerm());
+    try std.testing.expect(!target.rt.close_complete);
+
+    app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
+    term_ops.closeTermAt(session, session.app_window.active_tab, pane, pane.active_term);
+    try std.testing.expectEqual(terms_before - 1, pane.terms.items.len);
+}
+
+test "C3-3b4 async close parity는 native window close를 보류하고 exact once 재개한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    markAllTermsAtPrompt(session);
+    const tabs_before = session.tabs.items.len;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
+
+    app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
+    try std.testing.expect(session.requestWindowClose());
+    try std.testing.expect(session.window_close_pending);
+    try std.testing.expectEqual(tabs_before, session.tabs.items.len);
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len);
+    try std.testing.expect(!session.ended_seen);
+
+    app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+    workspace_ops.advancePendingWindowClose(session);
+    try std.testing.expect(!session.window_close_pending);
+    try std.testing.expect(session.ended_seen);
+    const ended_after_first_resume = session.ended_seen;
+    workspace_ops.advancePendingWindowClose(session);
+    try std.testing.expectEqual(ended_after_first_resume, session.ended_seen);
 }
 
 test "C3-3b5 AppSession은 runtime pending window와 확인 수락을 tick 재시도 뒤에만 종료한다" {

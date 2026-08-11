@@ -172,7 +172,7 @@ Node = leaf(Pane)
    이동은 binding을 보존한다. 제품 완료 범위 P1~P5와 무인 gate는 [영속 터미널 세션 호스트](persistent-session-host.md)
    §13~14를 따른다. tmux-CC 양방향 layout 매핑과 P6 전체 workspace TUI는 이 단계의 완료 조건이 아니다.
 
-### split 키·방향·포커스 (구현됨, PR3b-1b)
+### split 키·방향·포커스
 
 - **키**: `Cmd+D` = 좌우 분할(`split_horizontal`), `Cmd+Shift+D` = 상하 분할(`split_vertical`). **베이스**: iTerm2의 기본
   Split 키(Cmd+D=나란히 좌우, Cmd+Shift+D=위아래)를 그대로 따른다 — macOS 터미널 사용자에게 가장 익숙한 매핑이라
@@ -280,7 +280,7 @@ Node = leaf(Pane)
   outer divider가 크기 조절만 소유한다는 규칙은 그대로다. 단일 출처는 [파일 패널 §3.3](file-panel-dock-ui.md#33-파일-탭-드래그도크-내부-분할).
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, pane grip=✋ openHand(드래그 손잡이), 탭/"+"=손가락(pointingHand), 터미널=I-beam.
 
-### Pane을 워크스페이스로 분리·합치기 (드래그, 구현됨)
+### Pane을 워크스페이스로 분리·합치기 (드래그)
 
 Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스 영역)로 끌어 **새 워크스페이스로 분리**하거나
 **기존 워크스페이스에 합칠** 수 있다. ④(split 재배치)가 pane **본문** 안에서의 이동이라면, 이건 pane을 사이드바로

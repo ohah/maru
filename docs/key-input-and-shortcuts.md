@@ -246,7 +246,7 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - `Ctrl+B`, `Ctrl+C`, `Ctrl+D`, `Ctrl+R`, `Ctrl+Z`, `Esc` 같은 terminal 관용 조합을 app/global shortcut으로 등록하면 경고다.
 - 사용자가 경고를 명시적으로 허용하지 않으면 기본 설정 파일 생성이나 GUI 설정 화면에서 저장하지 않는다.
 
-## 글로벌 핫키 현황 (구현됨)
+## 글로벌 핫키
 
 글로벌 핫키는 구현되어 있다. 제품 정책은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#global-shortcut)을 따른다.
 

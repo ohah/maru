@@ -5502,13 +5502,13 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 8736,
-        .ReleaseFast => 8672,
+        .Debug => 8896,
+        .ReleaseFast => 8832,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
-        .Debug => 6016,
-        .ReleaseFast => 5952,
+        .Debug => 6176,
+        .ReleaseFast => 6112,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));

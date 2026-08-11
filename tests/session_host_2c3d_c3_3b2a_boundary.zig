@@ -63,7 +63,8 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // b2b3 adds the neutral inline runtime lifetime owner as the third typed consumer.
     // b2b3 adds pending preparation, lifetime, and runtime consumers to the three b2a owners.
     // C3-3b3의 final-address receipt/permit owner 7개도 service를 모듈당 한 번만 가져오며 inline 중복은 허용하지 않는다.
-    try std.testing.expectEqual(@as(usize, 13), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // C3-3b5 close authority와 backend admission reservation이 같은 process-seal 경계를 직접 사용한다.
+    try std.testing.expectEqual(@as(usize, 15), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(identity, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 0), count(service, "pub fn raw"));

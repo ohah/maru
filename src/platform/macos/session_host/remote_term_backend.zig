@@ -1229,7 +1229,7 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     _ = try be.attach(33, true);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(33));
-    be.remove(33);
+    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(33));
     try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
     try surface_runtime.writeInput(22, .{ .bytes = "after\n" });
@@ -1249,6 +1249,6 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     try testing.expect(saw_after);
 
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));
-    be.remove(22);
+    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(22));
     try testing.expect(try pool.remove(host_b));
 }

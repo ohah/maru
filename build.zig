@@ -1950,6 +1950,22 @@ pub fn build(b: *std.Build) void {
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);
 
+    // 문서 간 참조 가드. 링크 대상 파일뿐 아니라 **`#절-앵커`가 그 문서에 실재하는지**까지 본다 — 계약 문서를
+    // 여러 파일로 가르면 파일은 그대로 있고 절만 옮겨가므로, 파일 존재만 보는 검사는 통과하는데 링크는 죽는다
+    // (실측: 분할 한 번에 이 종류로만 8건). config-docs 게이트와 같은 구조로 cwd를 루트에 고정한다.
+    const doc_link_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/doc_links/links.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_doc_link_tests = b.addRunArtifact(doc_link_tests);
+    run_doc_link_tests.setCwd(b.path("."));
+
+    const doc_links_step = b.step("check-doc-links", "Check cross-document links and section anchors");
+    doc_links_step.dependOn(&run_doc_link_tests.step);
+
     // session-host MRSH codec/framing 단위 테스트(P3). codec(protocol/framing/screen_stream/registry/server)은 std만
     // 쓰는 순수 계층이지만, macOS 전용 `runtime_manager`(P3-e2b)가 `@import("maru")`로 app InProcessTermBackend를
     // 재사용하므로 `maru` 모듈을 import로 준다(non-macOS 크로스컴파일에선 barrel이 runtime_manager를 제외해 maru가

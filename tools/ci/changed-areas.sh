@@ -80,8 +80,8 @@ while IFS= read -r path; do
 		code=true
 		;;
 	# 문서·라이선스와 에이전트 로컬 설정. 제품 빌드에도 파이프라인에도 들어가지 않는다.
-	# docs/*.md는 check-config-docs가 런타임에 훑으므로 `check` job의 축소 실행이 계속 검증한다
-	# (tests/config_docs/keys.zig).
+	# docs/*.md는 check-config-docs와 check-doc-links가 런타임에 훑으므로 `check` job의 축소 실행이 계속 검증한다
+	# (tests/config_docs/keys.zig·tests/doc_links/links.zig).
 	docs/* | *.md | LICENSE | .claude/*)
 		docs=true
 		;;

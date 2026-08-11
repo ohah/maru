@@ -51,9 +51,10 @@ jobs:
   # 기본 게이트: fmt-check, unit, e2e, recorded oracle, stress, facade import 경계와 build를
   # 한 번에 검증한다. SVG hash/C·Zig registry는 외부 도구 없이 Zig test가 검증한다.
   #
-  # 이 job만 조건부 skip이 아니라 **항상 실행**하고 안에서 범위를 줄인다. check-config-docs가
-  # docs/*.md를 런타임에 훑는 게이트라(tests/config_docs/keys.zig) 문서만 바뀐 PR에서도 실행돼야
-  # 한다 — 문서가 없는 config 키를 설정처럼 소개하는 드리프트는 이 검사만 잡는다. web만 바뀐 PR은
+  # 이 job만 조건부 skip이 아니라 **항상 실행**하고 안에서 범위를 줄인다. check-config-docs와
+  # check-doc-links가 docs/*.md를 런타임에 훑는 게이트라(tests/config_docs/keys.zig·
+  # tests/doc_links/links.zig) 문서만 바뀐 PR에서도 실행돼야 한다 — 문서가 없는 config 키를
+  # 설정처럼 소개하는 드리프트와, 절이 다른 파일로 옮겨가 죽은 `#앵커`는 이 둘만 잡는다. web만 바뀐 PR은
   # 검사할 것이 없어 즉시 통과한다(Zig 툴체인조차 세우지 않는다).
   check:
     name: check
@@ -92,8 +93,9 @@ jobs:
           if [ "$CHANGES_RESULT" != "success" ] || [ "$CODE" = "true" ]; then
             mise run check
           elif [ "$DOCS" = "true" ]; then
-            echo "문서 전용 변경 — Zig 게이트 대신 config 문서 드리프트만 검사한다"
+            echo "문서 전용 변경 — Zig 게이트 대신 문서 드리프트와 문서 간 링크만 검사한다"
             mise run check-config-docs
+            mise run check-doc-links
           else
             echo "이 job이 소유한 게이트를 건드리지 않은 변경(web 전용 등) — 실행할 검사가 없다"
           fi

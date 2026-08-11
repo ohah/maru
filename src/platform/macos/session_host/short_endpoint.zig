@@ -5,8 +5,11 @@
 //! same-UID, exact 0700으로 검증한다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+// namespace 검증도 Linux에서는 `statx`, macOS에서는 libc stat을 사용해 같은 의미로 투영한다.
+const StatInfo = struct { mode: c.mode_t, uid: c.uid_t };
 
 pub const Error = error{
     InvalidHostId,
@@ -50,8 +53,8 @@ pub fn prepareCurrentUserNamespace() Error!void {
 fn ensureExactOwnerDir(path: [:0]const u8) Error!void {
     const rc = c.mkdir(path.ptr, 0o700);
     if (rc != 0 and posix.errno(rc) != .EXIST) return error.InvalidDirectory;
-    var stat: posix.Stat = undefined;
-    if (c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
+    var stat: StatInfo = undefined;
+    if (statAtNoFollow(path, &stat) != .SUCCESS or
         !posix.S.ISDIR(stat.mode) or stat.uid != c.getuid() or (stat.mode & 0o777) != 0o700)
         return error.InvalidDirectory;
 }
@@ -71,9 +74,28 @@ test "short endpoint namespace is owner-only" {
     try prepareCurrentUserNamespace();
     var dir_buf: [112]u8 = undefined;
     const dir = try socketDirPathIn(&dir_buf, c.getuid());
-    var stat: posix.Stat = undefined;
-    try std.testing.expect(c.fstatat(posix.AT.FDCWD, dir.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) == 0);
+    var stat: StatInfo = undefined;
+    try std.testing.expectEqual(
+        posix.E.SUCCESS,
+        statAtNoFollow(dir, &stat),
+    );
     try std.testing.expect(posix.S.ISDIR(stat.mode));
     try std.testing.expectEqual(c.getuid(), stat.uid);
     try std.testing.expectEqual(@as(c.mode_t, 0o700), stat.mode & 0o777);
+}
+
+fn statAtNoFollow(path: [:0]const u8, out: *StatInfo) posix.E {
+    if (builtin.os.tag == .linux) {
+        var stat: std.os.linux.Statx = undefined;
+        const rc = c.statx(posix.AT.FDCWD, path.ptr, posix.AT.SYMLINK_NOFOLLOW, .BASIC_STATS, &stat);
+        const err = posix.errno(rc);
+        if (err != .SUCCESS) return err;
+        out.* = .{ .mode = @intCast(stat.mode), .uid = stat.uid };
+        return .SUCCESS;
+    }
+    var stat: posix.Stat = undefined;
+    const err = posix.errno(c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW));
+    if (err != .SUCCESS) return err;
+    out.* = .{ .mode = stat.mode, .uid = stat.uid };
+    return .SUCCESS;
 }

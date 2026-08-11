@@ -226,12 +226,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIViewController *vc = [UIViewController new];
     vc.view = [[ChromeView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(14, 54, 360, 40)];
-    lb.numberOfLines = 2;
-    lb.textColor = UIColor.whiteColor;
-    lb.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-    lb.text = [NSString stringWithFormat:@"maru chrome on iOS — %u quads %s\nchrome.ui.tree + paint → Metal", n, maru_chrome_last_error()];
-    [vc.view addSubview:lb];
+    // 화면에는 chrome 이 그린 것만 남긴다 — 디버그 배너는 UI 를 덮고 자기 숫자도 낡는다.
+    // 판정에 필요한 값(quad 수·에러)은 위에서 로그로 이미 나간다.
     self.window.rootViewController = vc;
     [self.window makeKeyAndVisible];
     return YES;

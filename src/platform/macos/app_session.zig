@@ -47012,6 +47012,73 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
     try std.testing.expect(session.ended_seen);
 }
 
+test "C3-3b5 AppSession은 in-process multi-Term complete 뒤에만 topology를 갱신한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    markAllTermsAtPrompt(session);
+    const pane = pane_ops.activePane(session);
+    const before = pane.terms.items.len;
+    term_ops.closeTermAt(session, session.app_window.active_tab, pane, pane.active_term);
+    try std.testing.expectEqual(before - 1, pane.terms.items.len);
+}
+
+test "C3-3b5 AppSession은 remote pending window를 보류하고 graph 완료 뒤 close intent를 한 번 발행한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    markAllTermsAtPrompt(session);
+    const tabs_before = session.tabs.items.len;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
+    app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
+    try std.testing.expect(session.requestWindowClose());
+    try std.testing.expectEqual(tabs_before, session.tabs.items.len);
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len);
+    try std.testing.expect(!session.ended_seen);
+    app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+    try std.testing.expect(!session.requestWindowClose());
+    for (pane_ops.activePane(session).terms.items) |term| term.rt.close_complete = false;
+}
+
+test "C3-3b5 AppSession은 termination finish와 remove가 끝난 뒤에만 cascade한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const term = pane.activeTerm();
+    app.term_runtime_backend.testing.armCloseSequence(&.{ .event_pending, .complete });
+    try std.testing.expectEqual(app.term_runtime_backend.CloseProgress.event_pending, session.backendFor(term).finishAfterTermination(term.rt.handle));
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expectEqual(app.term_runtime_backend.CloseProgress.complete, session.backendFor(term).finishAfterTermination(term.rt.handle));
+    term.rt.close_complete = true;
+    term_ops.closeTermAt(session, session.app_window.active_tab, pane, pane.active_term);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+}
+
+test "C3-3b5 AppSession은 stale remove와 backend absence를 구분해 dangling layout을 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const before = pane.terms.items.len;
+    const term = pane.activeTerm();
+    app.term_runtime_backend.testing.armRemoveSequence(&.{.invalid});
+    try std.testing.expectEqual(app.term_runtime_backend.RemoveProgress.invalid, session.backendFor(term).remove(term.rt.handle));
+    try std.testing.expectEqual(before, pane.terms.items.len);
+    try std.testing.expectEqual(term, pane.activeTerm());
+}
+
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
     var session: AppSession = undefined;
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])

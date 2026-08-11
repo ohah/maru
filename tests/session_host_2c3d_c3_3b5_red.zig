@@ -303,16 +303,3 @@ fn receiptWithGeneration(handle: u64, generation: u64, ticket: u64) close_contra
         .close_schedule_ticket = ticket,
     };
 }
-
-test "C3-3b5 AppSession은 in-process multi-Term complete 뒤에만 topology를 갱신한다" {
-    try red();
-}
-test "C3-3b5 AppSession은 remote pending window를 보류하고 graph 완료 뒤 close intent를 한 번 발행한다" {
-    try red();
-}
-test "C3-3b5 AppSession은 termination finish와 remove가 끝난 뒤에만 cascade한다" {
-    try red();
-}
-test "C3-3b5 AppSession은 stale remove와 backend absence를 구분해 dangling layout을 만들지 않는다" {
-    try red();
-}

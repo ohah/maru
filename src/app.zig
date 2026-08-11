@@ -15,6 +15,7 @@ pub const term_runtime_backend = @import("app/term_runtime_backend.zig");
 pub const in_process_term_backend = @import("app/in_process_term_backend.zig");
 pub const trace_recorder = @import("app/trace_recorder.zig");
 pub const smoke_drain = @import("app/smoke_drain.zig");
+pub const shutdown_wire_contract = @import("shutdown_wire_contract.zig");
 
 pub const AppRuntime = app_runtime.AppRuntime;
 pub const AppHostFrame = host.AppHostFrame;

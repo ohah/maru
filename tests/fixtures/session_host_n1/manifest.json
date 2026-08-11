@@ -1,0 +1,16 @@
+{
+  "schema": "maru.session-host-n1-baseline.v1",
+  "source_commit": "314b7912613c2e84cbf11e2cc8b0775e9e3f99fb",
+  "source_commit_date": "2026-08-11T20:15:39+09:00",
+  "source_patch_sha256": "bb9a180c4e085859dc35c4ff264fc0b90c0692f98810c56b6cd5982d5b106fb4",
+  "artifact_sha256": "4004256667fee2b40d41c7fe678ef44c7b5385fd4ff25410c40a9198344ce64c",
+  "signature_kind": "adhoc",
+  "architectures": ["arm64", "x86_64"],
+  "wire_major": 1,
+  "screen_codec_version": 1,
+  "gui_runtime_list": true,
+  "gui_runtime_terminate": true,
+  "cross_connection_admin_barrier": false,
+  "list_semantics_sha256": "4812c7ec3c0e58b9fcec61a1ee7064dc85e667de4bd216d10150324e1fea964a",
+  "terminate_semantics_sha256": "266581757fd62858e9ea1d66eeb5a5ccec9945e222c7ca55c7c48c58ae16971b"
+}

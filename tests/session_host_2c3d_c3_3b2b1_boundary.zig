@@ -31,6 +31,21 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(runtime);
+    const shutdown_attempt = try readSource(
+        allocator,
+        "src/platform/macos/session_host/shutdown_attempt_authority.zig",
+    );
+    defer allocator.free(shutdown_attempt);
+    const remote_backend = try readSource(
+        allocator,
+        "src/platform/macos/session_host/remote_term_backend.zig",
+    );
+    defer allocator.free(remote_backend);
+    const shutdown_connector = try readSource(
+        allocator,
+        "src/platform/macos/session_host/shutdown_admin_connector.zig",
+    );
+    defer allocator.free(shutdown_connector);
 
     try std.testing.expectEqual(@as(usize, 1), count(
         service,
@@ -101,10 +116,22 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         ),
     );
     try std.testing.expectEqual(
-        // C3-3b3 receipt/permit과 b5 close authority/admission/window graph owner가 process domain을 자체 경계에서 검증한다.
-        @as(usize, 16),
+        // C3-3b3 receipt/permit, b5 close owner와 b6 shutdown attempt/backend/connector가 process domain을 자체 경계에서 검증한다.
+        @as(usize, 19),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
+    try std.testing.expectEqual(@as(usize, 1), count(
+        remote_backend,
+        "@import(\"process_seal_service.zig\")",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        shutdown_attempt,
+        "@import(\"process_seal_service.zig\")",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        shutdown_connector,
+        "@import(\"process_seal_service.zig\")",
+    ));
     inline for (.{
         .{ "generationEventPreparationProjection", 2 },
         .{ "GenerationEventPreparationProjection", 8 },

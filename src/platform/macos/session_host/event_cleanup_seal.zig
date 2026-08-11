@@ -98,6 +98,46 @@ pub const PendingTermCloseGraphSealInput = struct {
     lifecycle_raw: u8,
 };
 
+pub const ShutdownAttemptAuthoritySealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    close_request_generation: u64,
+    target_digest: Digest,
+    attempt_generation: u64,
+    disposition_raw: u8,
+    lifecycle_raw: u8,
+    connection_lease_generation: u64,
+    deadline_ns: u64,
+    outcome_digest: Digest,
+};
+
+pub const ShutdownConnectionReceiptSealInput = struct {
+    self_addr: u64,
+    authority_addr: u64,
+    thread_id: u64,
+    close_request_generation: u64,
+    target_digest: Digest,
+    attempt_generation: u64,
+    connection_identity: u64,
+    lease_generation: u64,
+    operation_raw: u8,
+    inventory_attempt_raw: u8,
+    consumed_raw: u8,
+    transcript_digest: Digest,
+};
+
+pub const PendingAppQuitShutdownSealInput = struct {
+    self_addr: u64,
+    app_session_addr: u64,
+    backend_addr: u64,
+    thread_id: u64,
+    started_at_ns: u64,
+    deadline_ns: u64,
+    target_count: u32,
+    target_cursor: u32,
+    lifecycle_raw: u8,
+};
+
 /// Stable event identity copied from the trusted take projection.  This value deliberately owns
 /// no pointer: addresses are identities only and must never be dereferenced by this leaf.
 pub const PendingEventIdentity = struct {

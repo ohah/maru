@@ -920,12 +920,27 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          pre/post `bounded_unconfirmed` evidence matrix와 closed `ShutdownAdminOutcome`,
          exact-host one-shot admin lease barrier, target당 terminate attempt 3회와 app-quit global 15초 deadline, target별 순차 connection과 ambiguous
          membership/inventory reconciliation, exact artifact/major와 list/terminate/barrier bool을 가진 frozen
-         `compatibility.Profile.ShutdownProfile`, runtime-manifest-only endpoint seal, N-1 ambiguous at-most-once bounded 종료,
+         `compatibility.ShutdownProfile`을 단일 출처로 참조하는 `compatibility.Profile.shutdown_profile`,
+         C3-3b5 제품 커밋 `314b7912`와 frozen `source.patch`로 만든 wire-major 1 ad-hoc signed
+         universal 회귀 baseline manifest와 실제 list/terminate transcript를 사용한다. 이 baseline은 배포 사용자 호환성이나
+         과거 공개 릴리스를 뜻하지 않고 ambiguous destructive request의 at-most-once 회귀만 증명한다. baseline provenance가
+         없거나 불일치한 previous row는 request 0 incompatible로 닫고,
+         runtime-manifest-only endpoint seal,
+         N-1 ambiguous at-most-once bounded 종료,
          non-published noreturn fatal integrity, 5경계 전후 monotonic elapsed bucket과 backend-neutral fixed-64
          `ShutdownDiagnosticSink`→neutral consumer port만 쓰는 sole app-host `ShutdownDiagnosticBridge` value fan-out/reset,
          `terminalizeSharedConnectionNoDestroy`,
          per-owner cleanup→zero assertion→graph-last destroy, host EOF detach/reconnect actual socket을
          닫는다. generation GUI background blocking reader source 0도 boundary로 고정하며 생기면 fd wake-before-join 선행 gate를 요구한다.
+         기존 AppKit `terminateLater` 보류 구간에서 final-address `PendingAppQuitShutdown`을 frame tick당 exact 한 target씩
+         진행하고, heap-pin된 Runtime inline attempt authority가 backend-global 15초 deadline을 소비한 뒤에만
+         `quit_decision=accepted`를 게시한다. detach-only target 0은 기존처럼 즉시 승인한다.
+         focused gate `test-session-host-2c3d-c3-3b6`는 최적화 모드마다 중립 계약 8개, attempt/outcome 권위 10개,
+         종료 manifest snapshot 2개, app-quit transaction owner 2개, current admin connector 3개,
+         current-host admin 9개, N-1 profile 7개, 진단 sink/bridge 8개, AppSession app-quit 8개인 unique component 57개,
+         actual-socket product replay 4개, fresh proof-loss subprocess 3개, boundary 1개를 exact-count한다.
+         세부 행과 actual replay·subprocess·source-boundary의 증거 범위는 persistent-session-host의 C3-3b6 첫 RED 인벤토리를
+         단일 출처로 삼는다.
 
       **C3-3c product socket/source-zero**는 열린 peer에서
       revoked/unknown/semantic failure roundtrip과 transport 구현·test fixture를 제외한 `src/**/*.zig` 제품 전체 generation raw `Client`

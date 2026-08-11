@@ -28,6 +28,8 @@ const core_command_wire = @import("core_command_wire.zig");
 const runtime_pending_control = @import("runtime_pending_control.zig");
 const pending_event_owner_mod = @import("pending_event_owner.zig");
 const remote_close_authority = @import("remote_close_authority.zig");
+const shutdown_attempt_authority_mod = @import("shutdown_attempt_authority.zig");
+const shutdown_current_admin_mod = @import("shutdown_current_admin.zig");
 const runtime_lifetime_owner_mod = @import("runtime_lifetime_owner.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
@@ -40,6 +42,7 @@ const runtime_event_prepared_types_mod = @import("runtime_event_prepared_types.z
 const runtime_observation_digest_mod = @import("runtime_observation_digest.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
+const host_manifest_mod = @import("host_manifest.zig");
 
 var remote_runtime_owner_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
@@ -403,9 +406,22 @@ pub const RemoteRuntime = struct {
     frame_summary: runtime_pump_mod.DrainSummary = .{},
     pending_event_owner: pending_event_owner_mod.PendingEventOwner,
     close_authority: remote_close_authority.CloseAuthority = .{},
+    shutdown_attempt_authority: shutdown_attempt_authority_mod.ShutdownAttemptAuthority = .{},
+    shutdown_current_admin: shutdown_current_admin_mod.CurrentAdminCoordinator = .{},
     runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner,
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
+
+    /// app-quit 준비는 disk discovery를 다시 하지 않고 runtime이 이미 붙잡은 exact adapter snapshot만 읽는다.
+    pub fn appQuitShutdownManifest(self: *const RemoteRuntime) ?host_manifest_mod.Descriptor {
+        const adapter = self.generation_adapter orelse return null;
+        return adapter.shutdownManifest();
+    }
+
+    /// shutdown authority의 target transcript는 host/runtime identity를 고정 길이 값으로만 받는다.
+    pub fn appQuitRuntimeId(self: *const RemoteRuntime) [32]u8 {
+        return self.runtime_id_hex;
+    }
 
     /// host에 runtime을 띄우고(`runtime.spawn`) controller로 attach한 뒤 첫 snapshot을 조립해 원격 Surface를 세운다.
     /// 실패 시 이미 띄운 host runtime을 회수한다(orphan 방지). `argv`/`size`는 spawn할 셸 스펙이다.
@@ -495,6 +511,8 @@ pub const RemoteRuntime = struct {
         self.resync_needed = false;
         self.pending_event_owner = .{};
         self.close_authority = .{};
+        self.shutdown_attempt_authority = .{};
+        self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
         try self.initializePendingEventOwner(generation_adapter);
         self.observation = .{};
@@ -589,6 +607,8 @@ pub const RemoteRuntime = struct {
         self.resync_needed = false;
         self.pending_event_owner = .{};
         self.close_authority = .{};
+        self.shutdown_attempt_authority = .{};
+        self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
         try self.initializePendingEventOwner(generation_adapter);
         self.observation = .{};
@@ -2519,6 +2539,44 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wi
 
 pub const testing_api = if (builtin.is_test) struct {
     pub const SemanticFixture = B4SemanticFixture;
+
+    pub const AppQuitOwnerSnapshot = struct {
+        pending_idle: bool,
+        owner_pristine: bool,
+        correlation_pristine: bool,
+        event_generation_mirror: u64,
+        blocker_count: usize,
+        pin_count: usize,
+        quarantine_occupied: usize,
+        quarantine_retained_bytes: usize,
+    };
+
+    pub fn appQuitOwnerSnapshot(runtime: *RemoteRuntime) !AppQuitOwnerSnapshot {
+        const adapter = runtime.generation_adapter orelse return error.InvalidOwner;
+        const attachment = switch (runtime.attachment) {
+            .generation => |*value| value,
+            .legacy => return error.InvalidOwner,
+        };
+        const source = try generation_attachment_mod.testing_api.eventReleaseSourceSnapshot(adapter);
+        const settlement = generation_attachment_mod.testing_api.settlementSourceSnapshot(attachment);
+        return .{
+            .pending_idle = runtime.pending_event_owner.lifecycle_raw ==
+                @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle),
+            .owner_pristine = settlement.owner_pristine,
+            .correlation_pristine = settlement.correlation_pristine,
+            .event_generation_mirror = settlement.event_generation_mirror,
+            .blocker_count = source.blocker_count,
+            .pin_count = source.pin_count,
+            .quarantine_occupied = source.quarantine_occupied,
+            .quarantine_retained_bytes = source.quarantine_retained_bytes,
+        };
+    }
+
+    pub fn appQuitSourceZero(adapter: *host_adapter_mod.HostAdapter) bool {
+        const source = generation_attachment_mod.testing_api.eventReleaseSourceSnapshot(adapter) catch return false;
+        return source.blocker_count == 0 and source.pin_count == 0 and
+            source.quarantine_occupied == 0 and source.quarantine_retained_bytes == 0;
+    }
 
     /// 테스트 fixture도 제품 constructor와 같은 process identity와 final-address owner 경로를 사용한다.
     pub fn initializePendingOwners(runtime: *RemoteRuntime) !void {
@@ -4554,6 +4612,8 @@ const B4SemanticFixture = struct {
         self.runtime.resync_needed = false;
         self.runtime.observation = .{};
         self.runtime.close_authority = .{};
+        self.runtime.shutdown_attempt_authority = .{};
+        self.runtime.shutdown_current_admin = .{};
         try self.runtime.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
         peer.join();
     }
@@ -6094,13 +6154,13 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 8928,
-        .ReleaseFast => 8880,
+        .Debug => 9120,
+        .ReleaseFast => 9056,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
-        .Debug => 6208,
-        .ReleaseFast => 6160,
+        .Debug => 6400,
+        .ReleaseFast => 6336,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));

@@ -46,10 +46,15 @@ pub fn build(b: *std.Build) void {
         break :blk if (trimmed.len > 0) trimmed else null;
     } else null;
 
+    const shutdown_wire_contract_mod = b.createModule(.{
+        .root_source_file = b.path("src/shutdown_wire_contract.zig"),
+        .target = target,
+    });
     const maru_mod = b.addModule("maru", .{
         .root_source_file = b.path("src/maru.zig"),
         .target = target,
         .link_libc = true,
+        .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
     });
     // terminfo 소스는 src/ 밖(terminfo/maru.terminfo — tools/·docs가 공유하는 단일 출처)이라 @embedFile이
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
@@ -2119,6 +2124,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b4 product semantic commit and pump Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b4_step.dependOn(session_host_2c3d_c3_3b5_step);
+    const session_host_2c3d_c3_3b6_step = b.step(
+        "test-session-host-2c3d-c3-3b6",
+        "2c3d C3-3b6 app quit and current plus N-1 shutdown Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3b6_step.dependOn(session_host_2c3d_c3_3b4_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2171,6 +2181,7 @@ pub fn build(b: *std.Build) void {
     run_b3_4_5_boundary_tests.setCwd(b.path("."));
     session_host_b3_4_5_step.dependOn(&run_b3_4_5_boundary_tests.step);
     boundary_step.dependOn(&run_b3_4_5_boundary_tests.step);
+    var previous_actual_host_run: ?*std.Build.Step = null;
     inline for (b3_debug_release_modes) |b3_optimize| {
         const event_c3_3b2b0_observation_module = b.createModule(.{
             .root_source_file = b.path("src/app.zig"),
@@ -2511,14 +2522,27 @@ pub fn build(b: *std.Build) void {
                 filter: []const u8,
                 expected: u8,
             ) void {
+                _ = addRun(bld, step, module, filter, expected);
+            }
+
+            fn addRun(
+                bld: *std.Build,
+                step: *std.Build.Step,
+                module: *std.Build.Module,
+                filter: []const u8,
+                expected: u8,
+            ) *std.Build.Step {
                 const artifact = addProjectTest(bld, .{
                     .root_module = module,
                     .filters = &.{filter},
                 });
                 const run = bld.addRunArtifact(artifact);
                 run.addArg(bld.fmt("--maru-expect-tests={d}", .{expected}));
+                if (std.mem.eql(u8, filter, "C3-3b6 proof-loss subprocess"))
+                    run.setEnvironmentVariable("MARU_C3B6_PROOF_LOSS", "fresh-artifact-v1");
                 run.setCwd(bld.path("."));
                 step.dependOn(&run.step);
+                return &run.step;
             }
         };
         B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 lease owner", 6);
@@ -2542,7 +2566,7 @@ pub fn build(b: *std.Build) void {
             .optimize = b3_optimize,
             .link_libc = true,
         });
-        B3SettlementTest.add(
+        B2b3Test.add(
             b,
             session_host_2c3d_c3_3b3_step,
             event_c3_3b3_registry_module,
@@ -2636,7 +2660,17 @@ pub fn build(b: *std.Build) void {
             .optimize = b3_optimize,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
-        B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_remote_backend_module, "C3-3b5 remote backend", 8);
+        const run_event_c3_3b5_remote_backend_tests = B3SettlementTest.addRun(
+            b,
+            session_host_2c3d_c3_3b5_step,
+            event_c3_3b5_remote_backend_module,
+            "C3-3b5 remote backend",
+            8,
+        );
+        // 실제 daemon을 띄우는 행은 같은 머신의 socket/process 자원을 다투지 않게 최적화 모드까지 직렬화한다.
+        if (previous_actual_host_run) |previous|
+            run_event_c3_3b5_remote_backend_tests.dependOn(previous);
+        previous_actual_host_run = run_event_c3_3b5_remote_backend_tests;
         const event_c3_3b5_close_graph_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/pending_term_close_graph.zig"),
             .target = target,
@@ -2750,13 +2784,15 @@ pub fn build(b: *std.Build) void {
         );
         // 실제 daemon을 fork하는 process-global fixture는 거대 aggregate와 process seal을
         // 공유하지 않고 전용 artifact에서 정확히 한 번 실행한다.
-        B3SettlementTest.add(
+        const run_event_c3_3b4_actual_host = B3SettlementTest.addRun(
             b,
             session_host_2c3d_c3_3b4_step,
             event_c3_3b4_backend_module,
             "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다",
             1,
         );
+        run_event_c3_3b4_actual_host.dependOn(previous_actual_host_run.?);
+        previous_actual_host_run = run_event_c3_3b4_actual_host;
         const event_c3_3b4_contract_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/remote_event_pump_contract.zig"),
             .target = target,
@@ -2799,6 +2835,196 @@ pub fn build(b: *std.Build) void {
         session_host_2c3d_c3_3b4_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
 
+        const event_c3_3b6_compatibility_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/compatibility.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        const event_c3_3b6_contract_module = b.createModule(.{
+            .root_source_file = b.path("src/app/shutdown_contract.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{
+                .{ .name = "session_host_compatibility", .module = event_c3_3b6_compatibility_module },
+                .{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod },
+            },
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_contract_module,
+            "C3-3b6 중립 계약",
+            8,
+        );
+        const event_c3_3b6_diagnostic_module = b.createModule(.{
+            .root_source_file = b.path("src/app/shutdown_diagnostic.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{
+                .{ .name = "session_host_compatibility", .module = event_c3_3b6_compatibility_module },
+                .{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod },
+            },
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_diagnostic_module,
+            "C3-3b6 진단",
+            8,
+        );
+        const event_c3_3b6_profile_module = b.createModule(.{
+            .root_source_file = b.path("src/app/shutdown_profile.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{
+                .{ .name = "session_host_compatibility", .module = event_c3_3b6_compatibility_module },
+                .{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod },
+            },
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_profile_module,
+            "C3-3b6 N-1 profile",
+            7,
+        );
+        const event_c3_3b6_attempt_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/shutdown_attempt_authority.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_attempt_module,
+            "C3-3b6 attempt 권위",
+            10,
+        );
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_attempt_module,
+            "C3-3b6 proof-loss subprocess",
+            3,
+        );
+        const event_c3_3b6_adapter_manifest_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/host_adapter.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_adapter_manifest_module,
+            "C3-3b6 HostAdapter는",
+            2,
+        );
+        const event_c3_3b6_app_quit_owner_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/pending_app_quit_shutdown.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_app_quit_owner_module,
+            "C3-3b6 app quit owner는",
+            2,
+        );
+        const event_c3_3b6_current_admin_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/shutdown_current_admin.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_current_admin_module,
+            "C3-3b6 current admin model",
+            9,
+        );
+        const event_c3_3b6_admin_connector_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/shutdown_admin_connector.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_admin_connector_module,
+            "C3-3b6 current admin connector는",
+            3,
+        );
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_admin_connector_module,
+            "C3-3b6 actual socket은 current",
+            2,
+        );
+        const run_event_c3_3b6_reconnect = B3SettlementTest.addRun(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_admin_connector_module,
+            "C3-3b6 actual socket은 detach host EOF",
+            1,
+        );
+        run_event_c3_3b6_reconnect.dependOn(previous_actual_host_run.?);
+        const run_event_c3_3b6_n1 = B3SettlementTest.addRun(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_admin_connector_module,
+            "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하지 않는다",
+            1,
+        );
+        run_event_c3_3b6_n1.dependOn(run_event_c3_3b6_reconnect);
+        previous_actual_host_run = run_event_c3_3b6_n1;
+        const event_c3_3b6_app_session_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        if (target.result.os.tag == .macos) {
+            event_c3_3b6_app_session_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/coretext_smoke.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            event_c3_3b6_app_session_module.linkFramework("Foundation", .{});
+            event_c3_3b6_app_session_module.linkFramework("CoreText", .{});
+            event_c3_3b6_app_session_module.linkFramework("CoreGraphics", .{});
+        }
+        // app_session root의 무명 module sentinel 3개와 b6 제품 행 8개가 함께 materialize된다.
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_app_session_module,
+            "C3-3b6 AppSession은",
+            11,
+        );
+        const event_c3_3b6_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3d_c3_3b6_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b6_step,
+            event_c3_3b6_boundary_module,
+            "C3-3b6 shutdown boundary는",
+            1,
+        );
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

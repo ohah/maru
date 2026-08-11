@@ -1,0 +1,26 @@
+diff --git a/src/platform/macos/session_host/compatibility.zig b/src/platform/macos/session_host/compatibility.zig
+index db725611..87e228fb 100644
+--- a/src/platform/macos/session_host/compatibility.zig
++++ b/src/platform/macos/session_host/compatibility.zig
+@@ -32,2 +32,2 @@ pub const profiles = [_]Profile{
+-        .wire_major = 2,
+-        .screen_codec_version = 2,
++        .wire_major = 1,
++        .screen_codec_version = 1,
+@@ -47 +47 @@ comptime {
+-    if (protocol.version_major != 2 or screen_stream.codec_version != 2)
++    if (protocol.version_major != 1 or screen_stream.codec_version != 1)
+diff --git a/src/platform/macos/session_host/protocol.zig b/src/platform/macos/session_host/protocol.zig
+index 823758ec..7fe1cf8d 100644
+--- a/src/platform/macos/session_host/protocol.zig
++++ b/src/platform/macos/session_host/protocol.zig
+@@ -29 +29 @@ pub const header_size = 32;
+-pub const version_major: u16 = 2;
++pub const version_major: u16 = 1;
+diff --git a/src/platform/macos/session_host/screen_stream.zig b/src/platform/macos/session_host/screen_stream.zig
+index 93decdea..f02b6543 100644
+--- a/src/platform/macos/session_host/screen_stream.zig
++++ b/src/platform/macos/session_host/screen_stream.zig
+@@ -25 +25 @@ const std = @import("std");
+-pub const codec_version: u16 = 2;
++pub const codec_version: u16 = 1;

@@ -2074,6 +2074,31 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    Pending owner가 completion evidence를 검증해 자기 receipt를 `live -> consumed`로 exact once 전이하고, consumed receipt는
    b4 admission까지 보존한다.
 
+   Registry row 정산만으로 event release가 끝난 것으로 보지 않는다. Registry는 registry-only private
+   subpermit/continuation만 소유하고, ClientSlot의 top-level composite `PreparedEventReleasePermit`과
+   `EventReleaseCompletion`이 전체 source-zero 의미의 단일 권위다. composite permit은 preparation 때 소비된
+   `PendingEventSourceReceipt`와 canonical EventOwner projection을 함께 검증해 source payload address/length/digest,
+   allocator pointer/vtable, ConnectionLease pin projection, quarantine reservation/identity와 owner seal을 전부 봉인한다.
+   preflight는 기존 live-release helper를 재호출하지 않고 read-only `preparation_pending` 전용 registry/quarantine/pin
+   continuation을 만들며, payload free나
+   pin/quarantine/registry mutation은 0이다. no-fail suffix는 EventOwner `live -> releasing`과 payload source tombstone을 먼저
+   게시하고, registry ordering authority `preparation_pending -> releasing`, quarantine release, ConnectionLease pin consume을
+   callback 전에 모두 canonical state로 전이한다. pin consume 뒤에는 public EventOwner 전체와 transport correlation,
+   Attachment mirror도 callback 전에 tombstone하며 callback 이후 이 public storage를 다시 읽지 않는다. 그 뒤 frozen payload
+   owner를 allocator callback으로 exact once free하고, callback 이후 남은 ClientSlot operation과 pointer-free private
+   registry/quarantine proof를 재검증한 다음 quarantine settle, registry `releasing -> idle`과
+   `EventReleaseCompletion` publication을 완료한다. allocator callback이 reenter하면
+   같은 Client operation fence에서 `Busy`이며, callback 뒤 proof loss는 second free·pin release·registry 추측 0의 `_exit(86)`이다.
+   effect cleanup callback과 payload callback은 별도 단계이므로, effect callback 반환 직후 payload source를 move/tombstone하기
+   전에 admitted lease·effect evidence·composite release permit·EventOwner/registry/quarantine/pin PRE proof를 다시 검증한다.
+   여기서 drift하면 payload callback과 source mutation은 0으로 `_exit(86)`한다. `PendingEventSourceReceipt`는 payload free
+   capability가 아니라 canonical owner graph를 pending attempt에 결속하는 proof일 뿐이다. 따라서 completion은 ordering
+   blocker만 0이라는 증거가 아니라 payload bytes, quarantine slot, canonical pin과 inline
+   EventOwner까지 한 번에 source-zero가 되었다는 증거다. 이 owner graph가 composite permit에 없으면 b3 success로 인정하지 않는다.
+
+   b3 payload callback 재진입은 same target와 sibling 모두 held Client operation fence에서 `Busy`다. ordinary live-release의
+   same-target `Terminal` callback 정책은 변경하지 않으며 두 callback latch를 의미상 혼용하지 않는다.
+
    effect executor는 Runtime semantic type을 모르는 neutral closed action permit을 ClientSlot이 preflight하고 no-fail
    commit evidence를 반환한다. `ClientSlot.deriveCanonicalEffectPlan`은 sealed original `EffectRequest`, exact correlation과
    callback 전 canonical Client PRE state에서 plan을 **한 번만** 산출한다. caller가 action/outcome을 고르는 입력은 0이고,

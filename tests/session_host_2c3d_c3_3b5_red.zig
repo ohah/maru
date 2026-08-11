@@ -103,28 +103,102 @@ test "C3-3b5 close authority receipt는 backend absence를 증명하며 exact on
 }
 
 test "C3-3b5 close sweep은 empty와 closing 0에서 inactive다" {
-    try red();
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    try std.testing.expectEqual(@as(usize, 0), close_contract.selectCloseSweep(&sweep, &.{}, &out));
+    try std.testing.expect(sweep == .inactive);
 }
 test "C3-3b5 close sweep은 owner 1개를 exact once 방문한다" {
-    try red();
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    const receipts = [_]close_contract.CloseScanReceipt{receipt(7, 1)};
+    try std.testing.expectEqual(@as(usize, 1), close_contract.selectCloseSweep(&sweep, &receipts, &out));
+    try std.testing.expectEqual(@as(u64, 7), out[0].handle);
+    try std.testing.expect(sweep == .inactive);
 }
 test "C3-3b5 close sweep은 owner 16개를 같은 tick에 한 번씩 방문한다" {
-    try red();
+    var receipts: [16]close_contract.CloseScanReceipt = undefined;
+    for (&receipts, 0..) |*item, i| item.* = receipt(@intCast(16 - i), @intCast(16 - i));
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    try std.testing.expectEqual(@as(usize, 16), close_contract.selectCloseSweep(&sweep, &receipts, &out));
+    for (out, 1..) |item, ticket| try std.testing.expectEqual(@as(u64, @intCast(ticket)), item.close_schedule_ticket);
+    try std.testing.expect(sweep == .inactive);
 }
 test "C3-3b5 close sweep은 owner 17개를 두 tick에 16과 1로 방문한다" {
-    try red();
+    var receipts: [17]close_contract.CloseScanReceipt = undefined;
+    for (&receipts, 0..) |*item, i| item.* = receipt(@intCast(i + 1), @intCast(i + 1));
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    try std.testing.expectEqual(@as(usize, 16), close_contract.selectCloseSweep(&sweep, &receipts, &out));
+    try std.testing.expectEqual(@as(usize, 1), close_contract.selectCloseSweep(&sweep, &receipts, &out));
+    try std.testing.expectEqual(@as(u64, 17), out[0].close_schedule_ticket);
+    try std.testing.expect(sweep == .inactive);
 }
 test "C3-3b5 close sweep은 owner 4096개를 256 tick 안에 한 번씩 방문한다" {
-    try red();
+    var receipts: [4096]close_contract.CloseScanReceipt = undefined;
+    for (&receipts, 0..) |*item, i| item.* = receipt(@intCast(i + 1), @intCast(i + 1));
+    var visited = [_]bool{false} ** 4096;
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    for (0..256) |_| {
+        try std.testing.expectEqual(@as(usize, 16), close_contract.selectCloseSweep(&sweep, &receipts, &out));
+        for (out) |item| {
+            const index: usize = @intCast(item.close_schedule_ticket - 1);
+            try std.testing.expect(!visited[index]);
+            visited[index] = true;
+        }
+    }
+    try std.testing.expect(sweep == .inactive);
+    for (visited) |value| try std.testing.expect(value);
 }
 test "C3-3b5 close sweep은 시작 뒤 발급된 ticket을 다음 sweep까지 동결한다" {
-    try red();
+    var receipts: [18]close_contract.CloseScanReceipt = undefined;
+    for (receipts[0..17], 0..) |*item, i| item.* = receipt(@intCast(i + 1), @intCast(i + 1));
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    try std.testing.expectEqual(@as(usize, 16), close_contract.selectCloseSweep(&sweep, receipts[0..17], &out));
+    receipts[17] = receipt(18, 18);
+    try std.testing.expectEqual(@as(usize, 1), close_contract.selectCloseSweep(&sweep, &receipts, &out));
+    try std.testing.expectEqual(@as(u64, 17), out[0].close_schedule_ticket);
+    try std.testing.expect(sweep == .inactive);
+    try std.testing.expectEqual(@as(usize, 16), close_contract.selectCloseSweep(&sweep, &receipts, &out));
 }
 test "C3-3b5 close sweep은 무한 신규 churn에서도 기존 frozen set을 끝낸다" {
-    try red();
+    var receipts: [64]close_contract.CloseScanReceipt = undefined;
+    for (receipts[0..32], 0..) |*item, i| item.* = receipt(@intCast(i + 1), @intCast(i + 1));
+    var len: usize = 32;
+    var sweep: close_contract.CloseSweep = .inactive;
+    var out: [16]close_contract.CloseScanReceipt = undefined;
+    var original_seen = [_]bool{false} ** 32;
+    for (0..2) |_| {
+        const count = close_contract.selectCloseSweep(&sweep, receipts[0..len], &out);
+        try std.testing.expectEqual(@as(usize, 16), count);
+        for (out[0..count]) |item| original_seen[@intCast(item.close_schedule_ticket - 1)] = true;
+        receipts[len] = receipt(@intCast(len + 1), @intCast(len + 1));
+        len += 1;
+    }
+    try std.testing.expect(sweep == .inactive);
+    for (original_seen) |value| try std.testing.expect(value);
 }
-test "C3-3b5 close sweep은 stale replacement를 건너뛰고 새 generation을 다음 scan에만 방문한다" {
-    try red();
+test "C3-3b5 close sweep은 stale replacement receipt를 거부하고 새 generation receipt만 인정한다" {
+    const captured = receiptWithGeneration(9, 3, 1);
+    const replacement = receiptWithGeneration(9, 4, 2);
+    try std.testing.expect(!close_contract.sameCloseScanReceipt(captured, replacement));
+    try std.testing.expect(close_contract.sameCloseScanReceipt(replacement, replacement));
+}
+
+fn receipt(handle: u64, ticket: u64) close_contract.CloseScanReceipt {
+    return receiptWithGeneration(handle, 1, ticket);
+}
+
+fn receiptWithGeneration(handle: u64, generation: u64, ticket: u64) close_contract.CloseScanReceipt {
+    return .{
+        .handle = handle,
+        .runtime_generation = generation,
+        .close_request_generation = generation,
+        .close_schedule_ticket = ticket,
+    };
 }
 
 test "C3-3b5 remote backend는 두 host 합계 runtime 4096개만 허용한다" {

@@ -43,6 +43,52 @@ pub fn validCloseScheduleTicket(ticket: u64) bool {
     return ticket != 0;
 }
 
+/// 한 tick에서 frozen max 이하의 다음 ticket을 최대 `out.len`개 오름차순으로 고른다.
+/// map iterator 순서에 기대지 않고 callback 전에 receipt 값만 읽으며, 활성 sweep에는 새 ticket을 편입하지 않는다.
+pub fn selectCloseSweep(
+    sweep: *CloseSweep,
+    receipts: []const CloseScanReceipt,
+    out: []CloseScanReceipt,
+) usize {
+    if (out.len == 0) return 0;
+    if (sweep.* == .inactive) {
+        var max_ticket: u64 = 0;
+        for (receipts) |receipt| {
+            if (validCloseScheduleTicket(receipt.close_schedule_ticket))
+                max_ticket = @max(max_ticket, receipt.close_schedule_ticket);
+        }
+        if (max_ticket == 0) return 0;
+        sweep.* = .{ .active = .{ .max_ticket = max_ticket, .cursor_after_ticket = 0 } };
+    }
+
+    const frozen_max = sweep.active.max_ticket;
+    var cursor = sweep.active.cursor_after_ticket;
+    var selected: usize = 0;
+    while (selected < out.len) {
+        var next: ?CloseScanReceipt = null;
+        for (receipts) |receipt| {
+            const ticket = receipt.close_schedule_ticket;
+            if (ticket <= cursor or ticket > frozen_max) continue;
+            if (next == null or ticket < next.?.close_schedule_ticket) next = receipt;
+        }
+        const receipt = next orelse break;
+        out[selected] = receipt;
+        selected += 1;
+        cursor = receipt.close_schedule_ticket;
+    }
+
+    if (cursor >= frozen_max or selected == 0) {
+        sweep.* = .inactive;
+    } else {
+        sweep.active.cursor_after_ticket = cursor;
+    }
+    return selected;
+}
+
+pub fn sameCloseScanReceipt(a: CloseScanReceipt, b: CloseScanReceipt) bool {
+    return std.meta.eql(a, b);
+}
+
 pub fn recursivelyPointerFree(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer, .error_union, .optional => false,

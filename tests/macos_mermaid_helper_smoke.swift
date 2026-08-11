@@ -65,11 +65,16 @@ struct MermaidHelperSmoke {
         maru_macos_mermaid_test_reset()
         let rendering = MermaidRenderCoordinator(validation: .smoke(helperURL))
         precondition(admit(widget: 90, source: Data("```mermaid\ngraph TD\nA --> B\n```".utf8)) == 0)
+        // cold 경로가 실제로 몇 ms 걸리는지 남긴다. deadline(5초)에 얼마나 근접한지가 이 게이트의
+        // flakiness를 판단하는 유일한 근거인데, 지금까지 알 수 있는 것은 "만료됨" 뿐이었다 —
+        // 로컬 571ms인데 CI에서 5초를 넘는 이유를 값 없이 추정할 수 없었다.
+        let coldStart = Date()
         pump(rendering, until: {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.accepted_results == 1
         }, timeout: 7.0)
+        checks["actual_mermaid_cold_ms"] = Int(Date().timeIntervalSince(coldStart) * 1000)
         var accepted = MaruMermaidAcceptedResult()
         var svg = [UInt8](repeating: 0, count: Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES))
         let takeStatus = svg.withUnsafeMutableBufferPointer {

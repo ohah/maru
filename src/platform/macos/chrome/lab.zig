@@ -66,6 +66,12 @@ pub const ScenarioId = enum {
     /// fixture에 **한글 줄을 넣은 이유**가 있다. ASCII만이면 `ceil(폭/열수)` 근사와 실제 분할이
     /// 일치해서, 분할이 틀려도 캡처가 같다. 2칸 글자는 행 끝에 한 칸을 남기므로 그 차이를 드러낸다.
     editor_wrap,
+    /// N1 §4 — **가로 스크롤.** 랩이 꺼진 상태에서 본문을 `first_col`만큼 밀어 그린다. 같은 fixture를
+    /// 쓰는 `editor-wrap`과 나란히 놓으면 두 방식(접기 / 밀기)이 같은 줄을 어떻게 다루는지 갈린다.
+    ///
+    /// **gutter가 함께 밀리지 않는지**가 이 시나리오의 핵심이다 — 줄 번호와 diff 색 띠는 늘 보여야
+    /// 하는데(§7), 본문과 같은 오프셋을 먹이면 화면 밖으로 나간다.
+    editor_hscroll,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -134,7 +140,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -251,6 +257,13 @@ const editor_wrap_lines = [_][]const u8{
     // `col`이 짝수로만 늘어 52에서 정확히 떨어지므로, 경계 판정을 `col + w > 폭`에서 `col >= 폭`으로
     // 바꿔도 그림이 같다(적대적 검증이 실제로 그 상태를 통과시켰다).
     ("x" ** 51) ++ "가나다",
+    // **왼쪽 경계에 2칸 글자가 걸치는 줄.** `editor-hscroll`이 20열을 밀므로, 19칸 뒤의 한글이
+    // 열 19~20을 요구해 **첫 칸이 화면 밖**이 된다 — 반쪽을 그릴 수 없으니 통째로 빼야 한다.
+    //
+    // 위 `x*51` 줄로는 이것을 못 본다. 그 줄의 한글은 열 51부터라 경계와 무관하고, **1칸 글자에서는
+    // `col >= start`와 `col + w > start`가 같은 결과를 내기** 때문이다(적대적 검증이 그 반증을
+    // 통과시켰다). 오른쪽 경계(랩)와 정확히 대칭인 상황이다.
+    ("y" ** 19) ++ "가나다",
     // **랩 + 초장문.** 적대적 검증이 잡은 결함의 회귀 가드다 — 랩은 한 줄에 `남은 행 × 뷰 열수`만큼
     // 저장소를 쓸 수 있어서, 이 줄이 저장소를 다 삼키면 `expandTabs`가 `OutOfSpace`를 올리고
     // **캡처가 통째로 안 만들어졌다**(#2086이 고친 결함이 랩에서 되살아났던 것이다).
@@ -287,7 +300,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const lines: []const []const u8 = switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
-        .editor_wrap => &editor_wrap_lines,
+        .editor_wrap, .editor_hscroll => &editor_wrap_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -297,6 +310,9 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 늘 일어나는 상태다.
     const vp: editor_view.viewport.Viewport = switch (scenario.id) {
         .editor_scrolled => .{ .first_row = 5, .rows = 6 },
+        // **20열 밀어 둔다.** 0이면 안 민 것과 그림이 같아 시나리오가 아무것도 증명하지 못하고,
+        // 너무 크면 fixture의 짧은 줄들이 전부 비어 gutter만 남는다.
+        .editor_hscroll => .{ .first_row = 0, .first_col = 20, .rows = @intCast(viewport_h / cell_h_px) },
         else => .{ .first_row = 0, .rows = @intCast(viewport_h / cell_h_px) },
     };
 
@@ -344,6 +360,8 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .layout = layout,
         .rows = content_rows[0..visible],
         .wrap = scenario.id == .editor_wrap,
+        .first_col = vp.first_col,
+
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
@@ -468,7 +486,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

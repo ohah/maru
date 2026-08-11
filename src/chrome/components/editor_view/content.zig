@@ -35,8 +35,16 @@ pub const Props = struct {
     layout: geometry.Layout,
     rows: []const Row,
     /// 랩. 켜지면 논리 줄 하나가 본문 폭에서 접혀 시각 행 여럿이 된다(§4 세로 축).
-    /// 꺼지면 줄이 본문 폭에서 잘리고 그 너머는 가로 스크롤로 본다 — **가로 스크롤은 아직 없다.**
+    /// 꺼지면 줄이 본문 폭에서 잘리고 그 너머는 `first_col`로 본다.
     wrap: bool = false,
+    /// **가로 스크롤 위치**(§4). 본문의 이 열부터 그린다. gutter는 이 값에 밀리지 않는다 —
+    /// 줄 번호와 diff 색 띠는 늘 보여야 한다.
+    ///
+    /// **랩이 켜지면 0이어야 한다.** 줄이 폭 안에 들어와 스크롤할 것이 없기 때문인데, 이 모듈은
+    /// 그것을 강제하지 않는다 — §4가 정한 대로 **범위 clamp가 처리할 몫**이고(랩이면 최대 범위가
+    /// 0이 되어 위치가 0으로 눌린다) 그 clamp는 스크롤바 슬라이스에 속한다. 여기서 따로 0을 박으면
+    /// 규칙이 두 곳에 생긴다.
+    first_col: u16 = 0,
     cell_w_px: u16,
     cell_h_px: u16,
     /// 이 뷰의 폰트 크기(device px). 셀 크기와 **같은 폰트에서** 나와야 배치와 글자가 어긋나지 않는다.
@@ -105,7 +113,7 @@ pub fn build(
 
         // **전개는 실패하지 않는다.** 저장소가 모자라면 거기까지만 만들고 `truncated`로 알린다 —
         // 긴 줄 하나가 프레임 전체를 지우던 결함(#2086)이 랩에서 되살아나지 않게 하는 자리다.
-        const r = expandTabs(row.bytes, props.tab_width, text_scratch[scratch_used..], expand_cols);
+        const r = expandTabs(row.bytes, props.tab_width, text_scratch[scratch_used..], .{ .start = props.first_col, .count = expand_cols });
         const expanded = r.text;
         // **탭이 없으면 scratch를 쓰지 않았다.** 그때도 길이를 더하면 저장소가 실제보다 빨리 차서
         // 아래쪽 줄이 근거 없이 OutOfSpace로 죽고, 호출자에게 보고하는 `bytes`도 과대해진다.
@@ -201,7 +209,19 @@ pub const Expanded = struct {
 /// 결합 문자를 수백 개 붙인 cluster는 **1열에 수백 byte**라 상한이 없다. 그래서 환산 대신 여기서
 /// 경계를 지킨다 — 화면에 덜 나오는 것과 편집기가 안 그려지는 것 중 전자를 고른다(§3.8이 "초장문·극단
 /// 입력에서 기능을 줄인다"고 허용한 범위다).
-pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, max_cols: u16) Expanded {
+/// 그릴 열 구간. `start`는 **가로 스크롤 위치**(§4)이고, 랩이 켜지면 계약상 늘 0이다.
+pub const ColRange = struct {
+    /// 이 열 앞은 만들지 않는다.
+    start: u16 = 0,
+    /// 이 열수만큼 만든다.
+    count: u16,
+
+    fn stop(self: ColRange) usize {
+        return @as(usize, self.start) + @as(usize, self.count);
+    }
+};
+
+pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange) Expanded {
     // **판정에도 상한이 있어야 한다.** 탭·위험 문자가 없으면 원본을 빌려주는 최적화는 유지하되,
     // 그 판정을 **줄 전체가 아니라 화면에 닿을 만큼만** 본다. 초판은 상한이 없어 `indexOfScalar`와
     // `containsAny`(UTF-8 디코드)가 줄 끝까지 갔고, minified JS처럼 한 줄이 수 MB인 파일에서 매
@@ -211,9 +231,12 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, max_cols: u16) E
     // 정확히 환산하려면 결국 훑어야 하므로, UTF-8 최대 4byte를 열마다 가정해 넉넉히 잡는다.
     // 결합 문자를 수백 개 붙인 적대적 입력에서는 이 범위가 `max_cols` 열을 못 채워 오른쪽이 빌 수
     // 있는데, 그것은 §3.8이 "초장문·극단 입력에서 기능을 줄인다"고 허용한 범위다.
-    const scan_limit = utf8BoundaryAtMost(bytes, @as(usize, max_cols) * 4 + 8);
+    const scan_limit = utf8BoundaryAtMost(bytes, range.stop() * 4 + 8);
     const head = bytes[0..scan_limit];
-    if (std.mem.indexOfScalar(u8, head, '\t') == null and !hazard.containsAny(head)) {
+    // **원본을 빌려주는 길은 `start == 0`일 때만이다.** 가로로 밀린 상태에서는 앞을 잘라내야 하는데,
+    // 열↔byte 환산이 문자마다 달라(한글 1.5, 이모지 2) byte로 자르면 어긋난다. 밀렸으면 훑는다 —
+    // 비용은 여전히 **화면 폭에 비례**한다(`scan_limit`이 `start + count`로 묶여 있다).
+    if (range.start == 0 and std.mem.indexOfScalar(u8, head, '\t') == null and !hazard.containsAny(head)) {
         return .{ .text = head, .scratch_used = 0 };
     }
 
@@ -234,10 +257,13 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, max_cols: u16) E
         // 상한을 두면 복사량이 화면 폭 수준(수백 바이트)이라 early return이 아끼던 것보다 싸고,
         // **scratch 사용량에 상한이 생겨 OutOfSpace가 구조적으로 사라진다.** §3.8의 "초장문 줄 축소"가
         // 요구하는 기능 축소는 별개이며(임계는 §10에서 잰다), 이 상한은 임계 없이도 서는 장치다.
-        if (col >= max_cols) break;
+        if (col >= range.stop()) break;
         if (bytes[i] == '\t') {
             const stop = ((col / stop_width) + 1) * stop_width;
-            const pad = stop - col;
+            // **가로로 밀린 만큼은 만들지 않는다.** 탭은 공백이라 걸쳐도 잘라 낼 수 있다 —
+            // 아래 일반 cluster와 다른 점이고, 그래서 왼쪽 경계에 탭이 걸리면 빈칸이 생기지 않는다.
+            const from = @max(col, @as(usize, range.start));
+            const pad = if (stop > from) stop - from else 0;
             if (used + pad > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
             @memset(out[used..][0..pad], ' ');
             used += pad;
@@ -282,15 +308,22 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, max_cols: u16) E
                     const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
                     var mark: [hazard.max_display_len]u8 = undefined;
                     const shown = hazard.displayText(cp, &mark);
-                    if (used + shown.len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
-                    @memcpy(out[used..][0..shown.len], shown);
-                    used += shown.len;
+                    // 가로로 밀린 앞부분은 **열만 세고 만들지 않는다**(아래 일반 cluster와 같은 규칙).
+                    if (col >= range.start) {
+                        if (used + shown.len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
+                        @memcpy(out[used..][0..shown.len], shown);
+                        used += shown.len;
+                    }
                     // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
                     col += shown.len;
                 } else {
-                    if (used + cp_len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
-                    @memcpy(out[used..][0..cp_len], bytes[cp_i .. cp_i + cp_len]);
-                    used += cp_len;
+                    // **열 누적은 조건 밖이다.** 밀린 앞부분에서 `col`이 안 늘면 `range.start`에
+                    // 영영 닿지 못해 줄 전체가 사라진다.
+                    if (col >= range.start) {
+                        if (used + cp_len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
+                        @memcpy(out[used..][0..cp_len], bytes[cp_i .. cp_i + cp_len]);
+                        used += cp_len;
+                    }
                     const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
                     col += text_layout.clusterCols(cp, null);
                 }
@@ -300,12 +333,18 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, max_cols: u16) E
             continue;
         }
 
-        if (used + n > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
-        @memcpy(out[used..][0..n], bytes[i..][0..n]);
-        used += n;
         // **cluster 전체를 넘긴다**(§4.2) — base 코드포인트만 보면 VS16(❤️)과 국기를 1칸으로 세어
         // 컬러 글리프가 절반 크기로 그려진다. 터미널의 `width.cellWidth`와 갈리는 지점이다.
-        col += display_width.clusterCols(bytes, i, end);
+        const w = display_width.clusterCols(bytes, i, end);
+
+        // **가로로 밀린 앞부분은 열만 세고 만들지 않는다.** 경계에 2칸 글자가 걸치면 **통째로 뺀다**
+        // (왼쪽에 한 칸이 빈다) — 셀 격자라 반쪽을 그릴 수 없고, 랩의 오른쪽 경계와 같은 규칙이다.
+        if (col >= range.start) {
+            if (used + n > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
+            @memcpy(out[used..][0..n], bytes[i..][0..n]);
+            used += n;
+        }
+        col += w;
         i += n;
     }
     return .{ .text = out[0..used], .scratch_used = used };
@@ -322,7 +361,7 @@ const test_max_cols: u16 = 999;
 
 test "expandTabs: 탭이 없으면 원본을 그대로 빌려준다" {
     var out: [32]u8 = undefined;
-    const r = expandTabs("hello", 4, &out, test_max_cols);
+    const r = expandTabs("hello", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("hello", r.text);
     // 저장소를 쓰지 않았다 — 이 값을 길이로 추정하면 호출자의 회계가 어긋난다.
     try testing.expectEqual(@as(usize, 0), r.scratch_used);
@@ -332,53 +371,53 @@ test "expandTabs: 탭스톱까지 채운다 — 고정 폭이 아니다" {
     var out: [64]u8 = undefined;
 
     // 열 0의 탭은 4칸, 열 1의 탭은 3칸이다. 고정 4칸이면 둘 다 4가 되어 들여쓰기가 어긋난다.
-    try testing.expectEqualStrings("    x", (expandTabs("\tx", 4, &out, test_max_cols)).text);
+    try testing.expectEqualStrings("    x", (expandTabs("\tx", 4, &out, .{ .count = test_max_cols })).text);
     var out2: [64]u8 = undefined;
-    try testing.expectEqualStrings("a   x", (expandTabs("a\tx", 4, &out2, test_max_cols)).text);
+    try testing.expectEqualStrings("a   x", (expandTabs("a\tx", 4, &out2, .{ .count = test_max_cols })).text);
     var out3: [64]u8 = undefined;
-    try testing.expectEqualStrings("abc x", (expandTabs("abc\tx", 4, &out3, test_max_cols)).text);
+    try testing.expectEqualStrings("abc x", (expandTabs("abc\tx", 4, &out3, .{ .count = test_max_cols })).text);
     var out4: [64]u8 = undefined;
-    try testing.expectEqualStrings("abcd    x", (expandTabs("abcd\tx", 4, &out4, test_max_cols)).text);
+    try testing.expectEqualStrings("abcd    x", (expandTabs("abcd\tx", 4, &out4, .{ .count = test_max_cols })).text);
 }
 
 test "expandTabs: 연속 탭" {
     var out: [64]u8 = undefined;
-    const r = expandTabs("\t\tx", 4, &out, test_max_cols);
+    const r = expandTabs("\t\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("        x", r.text);
     try testing.expectEqual(@as(usize, 9), r.scratch_used); // 전개했으므로 길이만큼 썼다
 }
 
 test "expandTabs: 탭 폭 0은 1로 본다 — 0으로 나누지 않는다" {
     var out: [32]u8 = undefined;
-    try testing.expectEqualStrings(" x", (expandTabs("\tx", 0, &out, test_max_cols)).text);
+    try testing.expectEqualStrings(" x", (expandTabs("\tx", 0, &out, .{ .count = test_max_cols })).text);
 }
 
 test "expandTabs: 한글은 두 칸이다 — 글자 수로 세면 정렬이 한 칸 어긋난다" {
     var out: [64]u8 = undefined;
     // "가"는 3 byte, 1글자, **2칸**이다. 탭은 열 2에서 시작하므로 다음 탭스톱(4)까지 2칸.
     // byte 수로 세면 3칸을 건너뛰고, 글자 수로 세면 3칸을 넣는다 — 둘 다 틀린다.
-    const r = expandTabs("가\tx", 4, &out, test_max_cols);
+    const r = expandTabs("가\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("가  x", r.text);
 }
 
 test "expandTabs: 전각 둘이면 탭스톱을 이미 채운다" {
     var out: [64]u8 = undefined;
     // "가나"는 4칸이라 열 4 = 탭스톱 경계. 탭은 다음 스톱(8)까지 4칸을 넣는다.
-    const r = expandTabs("가나\tx", 4, &out, test_max_cols);
+    const r = expandTabs("가나\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("가나    x", r.text);
 }
 
 test "expandTabs: 결합 문자는 0칸이다" {
     var out: [64]u8 = undefined;
     // U+0301(combining acute)은 앞 글자에 붙으므로 열을 차지하지 않는다. "e" 1칸 + 결합 0칸 = 열 1.
-    const r = expandTabs("e\u{0301}\tx", 4, &out, test_max_cols);
+    const r = expandTabs("e\u{0301}\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("e\u{0301}   x", r.text);
 }
 
 test "expandTabs: 잘린 UTF-8에서도 죽지 않는다 — 화면이 통째로 비면 안 된다" {
     var out: [64]u8 = undefined;
     // "가"의 첫 두 byte만. §3.5가 열 때 거부하므로 정상 경로엔 없지만 여기서 죽으면 안 된다.
-    const r = expandTabs("\xEA\xB0\tx", 4, &out, test_max_cols);
+    const r = expandTabs("\xEA\xB0\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expect(r.text.len > 0);
 }
 
@@ -387,14 +426,14 @@ test "expandTabs: 저장소가 모자라면 거기까지만 만들고 truncated�
     // 실패로 다뤄서 긴 줄 하나가 편집기를 통째로 지웠다(#2086). 랩이 붙자 같은 일이 되살아났고
     // (한 줄이 `남은 행 × 뷰 열수`만큼 저장소를 쓸 수 있다) 적대적 검증이 그것을 잡았다.
     var out: [6]u8 = undefined;
-    const r = expandTabs("\tabc", 4, &out, test_max_cols);
+    const r = expandTabs("\tabc", 4, &out, .{ .count = test_max_cols });
     try testing.expect(r.truncated);
     try testing.expectEqualStrings("    ab", r.text); // 탭 4칸 + 두 글자까지, `c`는 못 넣었다
 
     // **탭은 통째로 넣거나 안 넣는다.** 남은 자리에 맞춰 일부만 채우면 탭스톱이 깨져 그 뒤 들여쓰기가
     // 전부 어긋난다 — 덜 그리는 편이 낫다.
     var tight: [2]u8 = undefined;
-    const t = expandTabs("\tabc", 4, &tight, test_max_cols);
+    const t = expandTabs("\tabc", 4, &tight, .{ .count = test_max_cols });
     try testing.expect(t.truncated);
     try testing.expectEqual(@as(usize, 0), t.text.len);
 }
@@ -425,12 +464,68 @@ test "저장소가 모자라도 build는 성공하고 나머지 줄을 계속 �
     try testing.expect(w.truncated_rows > 0);
 }
 
+test "가로 스크롤: 시작 열 앞은 만들지 않는다" {
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("0123456789", expandTabs("0123456789", 4, &out, .{ .count = 20 }).text);
+    try testing.expectEqualStrings("56789", expandTabs("0123456789", 4, &out, .{ .start = 5, .count = 20 }).text);
+    // 시작 열 + 폭이 함께 창을 만든다.
+    try testing.expectEqualStrings("567", expandTabs("0123456789", 4, &out, .{ .start = 5, .count = 3 }).text);
+    // 줄 끝을 넘어가면 빈다 — 아래쪽이 비는 세로 스크롤과 같다.
+    try testing.expectEqualStrings("", expandTabs("0123456789", 4, &out, .{ .start = 20, .count = 5 }).text);
+}
+
+test "가로 스크롤: 2칸 글자가 경계에 걸치면 통째로 뺀다 — 반쪽을 그릴 수 없다" {
+    var out: [64]u8 = undefined;
+    // "a가나": a(열0) 가(열1~2) 나(열3~4)
+    try testing.expectEqualStrings("가나", expandTabs("a가나", 4, &out, .{ .start = 1, .count = 10 }).text);
+    // start=2는 `가`의 **둘째 칸**이다. 반쪽은 못 그리므로 통째로 빼고 왼쪽 한 칸이 빈다.
+    try testing.expectEqualStrings("나", expandTabs("a가나", 4, &out, .{ .start = 2, .count = 10 }).text);
+    try testing.expectEqualStrings("나", expandTabs("a가나", 4, &out, .{ .start = 3, .count = 10 }).text);
+}
+
+test "가로 스크롤: 탭은 걸쳐도 잘라 낸다 — 공백이라 반쪽이 없다" {
+    var out: [64]u8 = undefined;
+    // "\tx" → 탭이 열 0~3(4칸), x가 열 4
+    try testing.expectEqualStrings("    x", expandTabs("\tx", 4, &out, .{ .count = 10 }).text);
+    try testing.expectEqualStrings("  x", expandTabs("\tx", 4, &out, .{ .start = 2, .count = 10 }).text);
+    try testing.expectEqualStrings("x", expandTabs("\tx", 4, &out, .{ .start = 4, .count = 10 }).text);
+}
+
+test "가로 스크롤: 탭스톱은 줄 처음부터 센다 — 밀린 위치에서 다시 세지 않는다" {
+    var out: [64]u8 = undefined;
+    // "ab\tc": 탭이 열 2에서 시작해 열 4까지(2칸), c는 열 4.
+    try testing.expectEqualStrings("ab  c", expandTabs("ab\tc", 4, &out, .{ .count = 10 }).text);
+    // start=1에서 다시 세면 탭이 3칸이 되어 `c`가 한 칸 밀린다. 그러면 화면을 가로로 밀 때
+    // **들여쓰기가 흔들려** 코드가 다르게 보인다.
+    try testing.expectEqualStrings("b  c", expandTabs("ab\tc", 4, &out, .{ .start = 1, .count = 10 }).text);
+}
+
+test "가로 스크롤: 위험 문자 표기도 밀린다 — 앞은 열만 센다 (§3.8)" {
+    var out: [64]u8 = undefined;
+    const line = "ab\u{202E}cd"; // BiDi 제어 문자가 `<U+202E>` 표기로 나온다
+    const full = expandTabs(line, 4, &out, .{ .count = 40 }).text;
+    try testing.expect(std.mem.indexOf(u8, full, "<U+202E>") != null);
+    // 표기는 8칸이다. 그 앞 2칸(ab)을 밀면 표기부터 나온다.
+    var out2: [64]u8 = undefined;
+    const shifted = expandTabs(line, 4, &out2, .{ .start = 2, .count = 40 }).text;
+    try testing.expectEqualStrings("<U+202E>cd", shifted);
+}
+
+test "가로 스크롤: 밀린 줄도 UTF-8이 온전하다" {
+    var out: [64]u8 = undefined;
+    const line = "가나다라마바사";
+    for (0..14) |start| {
+        const r = expandTabs(line, 4, &out, .{ .start = @intCast(start), .count = 6 });
+        try testing.expect(std.unicode.utf8ValidateSlice(r.text));
+    }
+}
+
 test "절단은 UTF-8을 깨지 않는다 — 반쪽 글자를 그리면 안 된다" {
     // 저장소 크기를 바꿔 가며 **모든 절단 지점**을 훑는다. 한 지점만 보면 우연히 경계에 맞을 수 있다.
     const line = "\t가나다라마바사아자차";
     for (4..40) |cap| {
         var buf: [64]u8 = undefined;
-        const r = expandTabs(line, 4, buf[0..cap], 200);
+        const r = expandTabs(line, 4, buf[0..cap], .{ .count = 200 });
         try testing.expect(std.unicode.utf8ValidateSlice(r.text));
     }
 }
@@ -623,7 +718,7 @@ test "expandTabs: 여러 codepoint로 된 cluster도 한 단위로 센다" {
     var out: [64]u8 = undefined;
     // "e" + U+0301(결합 악센트)는 cluster 하나이고 1칸이다. codepoint로 세면 2칸이 되어
     // 탭이 한 칸 덜 들어간다.
-    const r = expandTabs("e\u{0301}\tx", 4, &out, test_max_cols);
+    const r = expandTabs("e\u{0301}\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("e\u{0301}   x", r.text);
 }
 
@@ -631,27 +726,27 @@ test "expandTabs: 지역표시자 국기는 한 cluster다" {
     var out: [64]u8 = undefined;
     // U+1F1F0 U+1F1F7(KR)은 codepoint 둘이지만 화면에서 한 cluster(2칸)다.
     // codepoint로 세면 4칸으로 계산돼 탭 위치가 어긋난다.
-    const r = expandTabs("\u{1F1F0}\u{1F1F7}\tx", 4, &out, test_max_cols);
+    const r = expandTabs("\u{1F1F0}\u{1F1F7}\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("\u{1F1F0}\u{1F1F7}  x", r.text);
 }
 
 test "expandTabs: BiDi 제어 문자를 보이는 표기로 바꾼다 — Trojan Source 방어" {
     var out: [128]u8 = undefined;
     // U+202E(RLO)는 폭 0이라 보이지 않으면서 뒤 텍스트를 역순으로 보이게 한다.
-    const r = expandTabs("// \u{202E}x", 4, &out, test_max_cols);
+    const r = expandTabs("// \u{202E}x", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("// <U+202E>x", r.text);
 }
 
 test "expandTabs: 제어 문자도 보이게 한다 — 편집기에 온 ESC는 파일의 바이트다" {
     var out: [128]u8 = undefined;
-    const r = expandTabs("a\x1bb", 4, &out, test_max_cols);
+    const r = expandTabs("a\x1bb", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("a<U+001B>b", r.text);
 }
 
 test "expandTabs: 위험 문자만 있고 탭이 없어도 전개된다" {
     var out: [128]u8 = undefined;
     // 탭 유무로만 판단하면 이 줄이 원본 그대로 나가 숨은 문자가 안 보인다.
-    const r = expandTabs("\u{200B}", 4, &out, test_max_cols);
+    const r = expandTabs("\u{200B}", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("<U+200B>", r.text);
     try testing.expect(r.scratch_used > 0);
 }
@@ -659,13 +754,13 @@ test "expandTabs: 위험 문자만 있고 탭이 없어도 전개된다" {
 test "expandTabs: 표기 폭이 열 계산에 반영된다 — 뒤따르는 탭이 어긋나지 않는다" {
     var out: [128]u8 = undefined;
     // "<U+200B>"는 8칸이다. 그 뒤 탭은 열 8에서 시작하므로 다음 탭스톱(12)까지 4칸.
-    const r = expandTabs("\u{200B}\tx", 4, &out, test_max_cols);
+    const r = expandTabs("\u{200B}\tx", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("<U+200B>    x", r.text);
 }
 
 test "expandTabs: 평범한 줄은 여전히 원본을 빌려준다 — 저장소를 쓰지 않는다" {
     var out: [8]u8 = undefined;
-    const r = expandTabs("const x = 1;", 4, &out, test_max_cols);
+    const r = expandTabs("const x = 1;", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("const x = 1;", r.text);
     try testing.expectEqual(@as(usize, 0), r.scratch_used);
 }
@@ -674,14 +769,14 @@ test "expandTabs: cluster 안에 묻힌 ZWJ도 드러낸다 — GB9가 앞 글�
     var out: [128]u8 = undefined;
     // `ad<ZWJ>min`은 화면에서 `admin`과 같아 보인다. UAX#29가 ZWJ를 `d`의 cluster로 흡수하므로
     // cluster 단위로만 훑으면 이 문자를 놓친다.
-    const r = expandTabs("ad\u{200D}min", 4, &out, test_max_cols);
+    const r = expandTabs("ad\u{200D}min", 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings("ad<U+200D>min", r.text);
 }
 
 test "expandTabs: 이모지 가족은 그대로 둔다 — 정상 ZWJ까지 표기로 바꾸면 안 된다" {
     var out: [128]u8 = undefined;
     const family = "\u{1F468}\u{200D}\u{1F469}";
-    const r = expandTabs(family, 4, &out, test_max_cols);
+    const r = expandTabs(family, 4, &out, .{ .count = test_max_cols });
     try testing.expectEqualStrings(family, r.text);
 }
 
@@ -693,7 +788,7 @@ test "긴 줄은 화면 폭에서 멈춘다 — 비용이 줄 길이가 아니�
     long[0] = '\t'; // 탭이 있어야 전개 경로로 간다(없으면 열 계산만 하고 지나간다)
 
     var out: [64]u8 = undefined;
-    const r = expandTabs(&long, 4, &out, 16);
+    const r = expandTabs(&long, 4, &out, .{ .count = 16 });
     // 상한 16칸이면 탭 4칸 + 'a' 12개 = 16칸까지만 만든다. 4096바이트를 전개하지 않는다.
     try testing.expectEqual(@as(usize, 16), r.text.len);
     try testing.expect(r.scratch_used <= 64);
@@ -727,7 +822,7 @@ test "상한이 있으면 작은 scratch로도 긴 줄이 통과한다 — build
 
 test "상한에 안 닿는 줄은 전과 같다" {
     var out: [64]u8 = undefined;
-    const r = expandTabs("a\tb", 4, &out, 80);
+    const r = expandTabs("a\tb", 4, &out, .{ .count = 80 });
     try testing.expectEqualStrings("a   b", r.text);
 }
 
@@ -737,7 +832,7 @@ test "판정도 상한까지만 훑는다 — 긴 줄에서 비용이 줄 길이
     @memset(&long, 'a');
     var out: [8]u8 = undefined;
 
-    const r = expandTabs(&long, 4, &out, 20);
+    const r = expandTabs(&long, 4, &out, .{ .count = 20 });
     try testing.expectEqual(@as(usize, 0), r.scratch_used); // 여전히 빌려준다
     // **줄 전체를 돌려주지 않는다** — 화면 폭 기준 상한까지만이라 뒤쪽은 보지도 않았다.
     try testing.expect(r.text.len < long.len);
@@ -751,7 +846,7 @@ test "상한이 UTF-8 중간을 자르지 않는다" {
     while (i + 3 <= buf.len) : (i += 3) @memcpy(buf[i..][0..3], "가");
     var out: [8]u8 = undefined;
 
-    const r = expandTabs(buf[0..i], 4, &out, 10);
+    const r = expandTabs(buf[0..i], 4, &out, .{ .count = 10 });
     // 3의 배수여야 한글 경계에서 잘린 것이다.
     try testing.expectEqual(@as(usize, 0), r.text.len % 3);
     try testing.expect(std.unicode.utf8ValidateSlice(r.text));

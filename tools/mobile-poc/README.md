@@ -97,6 +97,17 @@ clang/NDK 가 맡는다 — 실제 앱에서도 이 구조가 된다.
 **모듈 루트는 `maru.zig` 하나여야 한다.** `chrome` 과 `renderer` 를 따로 주면 둘 다
 `icons.zig` 를 상대 경로로 끌어와 "file exists in two modules" 로 깨진다.
 
+**글리프 폭은 셀이 아니라 폰트 advance 로 정한다.** 셀 폭(24px)을 진행 폭으로 쓰면 영문이
+그 칸에 갇혀 **자간이 벌어진다**. quad 크기도 셀 종횡비(24:32)를 지켜야 글자가 안 늘어난다.
+
+**폭을 늘릴 때는 `.fill` 이 아니라 `flex.grow` 다.** `card` 의 기본 `direction` 은 `column`
+이라 자기 기준으로 width 가 **cross axis** 가 되고, `.fill` 은 main axis 전용이라
+`FillOnCrossAxis` 로 거부된다. 부모(row)가 폭을 나눠 주게 하려면 grow 를 쓴다.
+
+**아이콘 크기는 자산마다 다르다.** `fillCoverage` 는 모두 같은 슬롯에 중앙 배치하지만 SVG
+여백이 달라 시각 크기가 갈린다. maru 는 이걸 `icons.Fit`(standard/tight)으로 다루고
+`search-tight` 같은 별도 자산이 그 증거다 — 모바일에서도 같은 축이 필요하다.
+
 **iOS 는 safe area 를 반영해야 한다.** 창 전체에 그리면 상태바·다이내믹 아일랜드 밑으로
 UI 가 들어간다. 데스크톱에서 타이틀바 inset 을 다루는 것과 같은 종류이고, 실제 이식에서는
 이 inset 을 L1 DTO 로 chrome 에 전달해야 한다.

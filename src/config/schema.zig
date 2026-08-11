@@ -1374,3 +1374,21 @@ test "parseDocRange: 괄호·백틱·음수·설명 위치 range를 모두 파�
     // range가 없으면 null(bool/enum 등은 애초에 이 가드 대상 아님).
     try std.testing.expect(parseDocRange("| `k` | `true`\\|`false` | `true` | 설명") == null);
 }
+test "editor.wrap이 설정 UI 필드로 노출된다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var list: std.ArrayList(BoolField) = .empty;
+    try appendBoolFields(arena, .{}, &list);
+
+    var found = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "editor.wrap")) {
+            found = true;
+            try std.testing.expectEqual(theme.Section.editor, f.section.?);
+            try std.testing.expectEqual(true, f.value); // 기본값
+        }
+    }
+    // 설정 파일을 손으로 고치는 것 말고 **UI에서 끌 수 있어야** 한다는 것이 이 키의 요구였다.
+    try std.testing.expect(found);
+}

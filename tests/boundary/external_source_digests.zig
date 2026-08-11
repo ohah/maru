@@ -280,7 +280,9 @@ pub const inventory = [_]Proof{
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
     // git backend가 프로세스 수명 allocator를 스스로 고정하면서 `Backend.init`이 인자를 잃어 호출부가 바뀐다.
     // count는 2 그대로다 — 호출 한 줄뿐이고 반사 접근은 건드리지 않았다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8b5d5e0121b603cb54f5a985220fee475b8dc52a3f707a9682780f7625cbc539" },
+    // 편집기 설정 섹션(`editor.wrap` 랩 토글)이 붙어 바뀐다. count는 2 그대로다 — 더한 것은
+    // `settingsSectionLabel`의 분기 한 줄("편집기")뿐이고, 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "1c0783521f3ef6495bbcab342afa71a4a6d174fdd5ceee97f900a7d2d70a5469" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →

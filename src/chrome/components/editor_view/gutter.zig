@@ -11,6 +11,7 @@
 const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
+const visual_map = @import("visual_map.zig"); // §4 세로 축 — 본문이 정한 시각 배치를 따른다
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -121,6 +122,28 @@ pub fn rowsForRange(first_line: usize, count: u16, out: []Row) []Row {
     var i: u16 = 0;
     while (i < n) : (i += 1) {
         out[i] = .{ .number = first_line + i + 1, .visual_row = i }; // 화면 표시는 1-based
+    }
+    return out[0..n];
+}
+
+/// 본문이 정한 시각 배치를 gutter 행으로 옮긴다 — **랩이 켜졌을 때 쓴다.**
+///
+/// 랩이 켜지면 시각 행과 논리 줄이 1:1이 아니므로 `rowsForRange`처럼 순서대로 셀 수 없다. 어디서
+/// 접혔는지는 본문을 전개해 나눠 본 쪽만 알기 때문에(`content.build` → `visual_map.VisualRow`),
+/// **본문이 답을 내고 gutter가 따른다.** 둘이 각자 세면 번호가 본문과 어긋난다.
+///
+/// `first_line`은 뷰포트 첫 논리 줄의 0-based 인덱스다.
+pub fn rowsForVisual(visual: []const visual_map.VisualRow, first_line: usize, out: []Row) []Row {
+    const n = @min(visual.len, out.len);
+    var i: u16 = 0;
+    while (i < n) : (i += 1) {
+        const v = visual[i];
+        out[i] = .{
+            // **랩으로 이어진 행은 번호를 비운다**(§4). 판정은 `VisualRow`가 소유한다 — 여기서
+            // `piece == 0`을 다시 쓰면 규칙이 두 곳에 생긴다.
+            .number = if (v.showsLineNumber()) first_line + v.line + 1 else null,
+            .visual_row = i,
+        };
     }
     return out[0..n];
 }

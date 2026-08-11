@@ -4,6 +4,32 @@ SG1~SG8의 단계 분해와 완료 이력이다. 계약은 [사이드바 그룹]
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§12.5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§8·§10·§11 [sidebar-groups.md](../sidebar-groups.md) · §9 [단계 분해](../sidebar-groups.md) · §12~§13 [그룹 고정과 로컬 pin](../sidebar-groups-pinning.md) · §14 [top_level 재설계](../sidebar-groups-top-level.md)
 
+> **현황**: **SG1~SG8 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
+> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +
+> **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)** +
+> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: `Cmd(⌘)` 눌러야 헤더 드롭=중첩·Cmd 없으면 항상 형제·최상위로 드롭=빼기)** +
+> **UX 조정(SG6 — 우클릭 "그룹에서 빼기"(카드 하나만 최상위로)·헤더 기본 밴드 제거(화살표+이름만, 색·hover만 밴드 유지))** +
+> **SG7 폐기**(드래그 depth "작게" 프리뷰는 적대검증이 전제를 반박 → §9-7 결론이 SG8로 수렴) +
+> **고스트+삽입선 드래그 프리뷰(SG8a~f 완료 — 사이드바 드래그를 라이브 재배치에서 비커밋 고스트+드롭 1회 확정으로 전환:
+> 접힌 그룹 카드 사라짐·헤더 통과 yo-yo 근본 해결, subtree 고스트 depth 프리뷰)** +
+> **그룹 고정(핀+그룹 통합, C2 — §12): GP1~5 완료** — 그룹 통째 고정/해제(헤더 우클릭, 마커 `pinned`가 그룹 고정 권위)·
+> 핀-리전 인식 파생·**suffix-exclusion 정규화**·`toggleGroupPin`+plan clamp·`pin_derived` 렌더(멤버 📌 억제·헤더 고정
+> 인디케이터)·`assertPinnedPrefixRuntime` 확장, 제품 스크린샷(`MARU_FORCE_GROUP_PIN`) 검증. +
+> **그룹-로컬 pin(멤버 그룹 내 위치 고정, GL — §13): GL1~4 완료**(GL5 subgroup-as-member 확장은 범위 밖) — 새 축
+> `Tab.local_pinned`·subtree-로컬 float·`sidebarRowShowsPin` 선두 분기·마커 카드 로컬 pin 뒤 배치. +
+> **§2.1 재설계(top_level 인터리빙 + 선택 탭만 그룹, §14): SR1~5 완료** — 리딩 break 플래그 `Tab.top_level`로 한 핀 리전 안을
+> `[탑카드, 그룹, 탑카드, 그룹]` 서브파티션으로 일반화(7 파생 경계 리셋/break)·createGroup "선택 탭만 그룹"(break_next)·
+> model-2 드래그(top_level 직접 전이, SG8 가상화)·"그룹 뒤 빈 gap" 제스처. **+ code-review PR#1197 경계 유지**(기존
+> mutation/render 경로가 top_level 경계를 유지 — inherit·removal·normalize·guard·run_hi·accent, §14.8) **+ 고정 정책**(사용자
+> 규칙 "고정된 건 어디에도 흡수 안 됨" — 고정 탭 top_level 강제·고정 그룹 nest 금지·고정 리전 clamp, 3레이어 대칭
+> preview=commit, §14.9). **+ 그룹 정규화 L2 리프트**(이동성 M3c — [window-surface-mobility.md](../window-surface-mobility.md)
+> §8A.4): `inheritGroupMarker`·`normalizePinnedFromGroups`·`effectiveDepthAt`·`clearStaleLocalPins`·`enclosingGroupMarkerIndex`의
+> 정규화 코어를 `src/session/group_normalize.zig`에 **generic 순수 함수**로 올렸다(OS-중립). L4 `app_session`의 그 다섯
+> 메서드는 이제 본문을 L2 위임으로 교체했을 뿐(시그니처·동작 불변, drag-preview 게이트는 `normalizePinnedFromGroups`
+> wrapper에 잔류)이라 이 문서의 §12·§13·§14 규칙 기술은 그대로 유효하고, `WindowGraph.moveWorkspace`(창 간 이동)가
+> 같은 코어를 재사용해 §4 (a)~(d) 정규화를 한다.
+> 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](../project-rules.md#문서와-설명)).
+
 ## 9. 단계 분해 — 각 단계 독립 동작·green
 
 근본 모델(§2.2 Row 투영)을 **먼저** 깔고, 그 위에 그룹을 얹는다. 모델 이주는 동작 보존(그룹 0개면 현재와 동일)이라 위험이 낮다.

@@ -75,8 +75,8 @@ edge는 리셋이라 pin 리셋 뒤 무순, break는 min이라 pin/marker break�
 top카드는 null)로 교체해 닫는다. top_level=false면 enclosing(상향 최근접 마커)과 "리전 첫 마커 이후"가 동치라 byte-identical.
 
 **동작 보존**: 전 탭 top_level=false ⇒ edge `or top_level`는 never-flip·break·클램프는 never-fire ⇒ 7 경계 no-op ⇒ 기존
-그룹/pin/GL/SG8 투영과 **byte-identical**(GP1/GL1 identity 안전망). ✅ SR1에서 구현·헤드리스 고정("SR1: top_level이 7 파생
-경계에서 최상위 복귀 서브파티션을 만든다").
+그룹/pin/GL/SG8 투영과 **byte-identical**(GP1/GL1 identity 안전망). 이 동작 보존은 헤드리스 단언으로 고정한다 —
+top_level이 7 파생 경계에서 최상위 복귀 서브파티션을 만든다는 것.
 
 ### 14.4 C2 정합 재작성 — `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` (**보강 2**, SR2 — 최고 위험대)
 

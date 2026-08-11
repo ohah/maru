@@ -6,31 +6,7 @@
 사이드바 자체(카드 레이아웃·헤더·검색·드래그·스크롤)의 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)이고,
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
-> **현황**: **SG1~SG8 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
-> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +
-> **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)** +
-> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: `Cmd(⌘)` 눌러야 헤더 드롭=중첩·Cmd 없으면 항상 형제·최상위로 드롭=빼기)** +
-> **UX 조정(SG6 — 우클릭 "그룹에서 빼기"(카드 하나만 최상위로)·헤더 기본 밴드 제거(화살표+이름만, 색·hover만 밴드 유지))** +
-> **SG7 폐기**(드래그 depth "작게" 프리뷰는 적대검증이 전제를 반박 → §9-7 결론이 SG8로 수렴) +
-> **고스트+삽입선 드래그 프리뷰(SG8a~f 완료 — 사이드바 드래그를 라이브 재배치에서 비커밋 고스트+드롭 1회 확정으로 전환:
-> 접힌 그룹 카드 사라짐·헤더 통과 yo-yo 근본 해결, subtree 고스트 depth 프리뷰)** +
-> **그룹 고정(핀+그룹 통합, C2 — §12): GP1~5 완료** — 그룹 통째 고정/해제(헤더 우클릭, 마커 `pinned`가 그룹 고정 권위)·
-> 핀-리전 인식 파생·**suffix-exclusion 정규화**·`toggleGroupPin`+plan clamp·`pin_derived` 렌더(멤버 📌 억제·헤더 고정
-> 인디케이터)·`assertPinnedPrefixRuntime` 확장, 제품 스크린샷(`MARU_FORCE_GROUP_PIN`) 검증. +
-> **그룹-로컬 pin(멤버 그룹 내 위치 고정, GL — §13): GL1~4 완료**(GL5 subgroup-as-member 확장은 범위 밖) — 새 축
-> `Tab.local_pinned`·subtree-로컬 float·`sidebarRowShowsPin` 선두 분기·마커 카드 로컬 pin 뒤 배치. +
-> **§2.1 재설계(top_level 인터리빙 + 선택 탭만 그룹, §14): SR1~5 완료** — 리딩 break 플래그 `Tab.top_level`로 한 핀 리전 안을
-> `[탑카드, 그룹, 탑카드, 그룹]` 서브파티션으로 일반화(7 파생 경계 리셋/break)·createGroup "선택 탭만 그룹"(break_next)·
-> model-2 드래그(top_level 직접 전이, SG8 가상화)·"그룹 뒤 빈 gap" 제스처. **+ code-review PR#1197 경계 유지**(기존
-> mutation/render 경로가 top_level 경계를 유지 — inherit·removal·normalize·guard·run_hi·accent, §14.8) **+ 고정 정책**(사용자
-> 규칙 "고정된 건 어디에도 흡수 안 됨" — 고정 탭 top_level 강제·고정 그룹 nest 금지·고정 리전 clamp, 3레이어 대칭
-> preview=commit, §14.9). **+ 그룹 정규화 L2 리프트**(이동성 M3c — [window-surface-mobility.md](window-surface-mobility.md)
-> §8A.4): `inheritGroupMarker`·`normalizePinnedFromGroups`·`effectiveDepthAt`·`clearStaleLocalPins`·`enclosingGroupMarkerIndex`의
-> 정규화 코어를 `src/session/group_normalize.zig`에 **generic 순수 함수**로 올렸다(OS-중립). L4 `app_session`의 그 다섯
-> 메서드는 이제 본문을 L2 위임으로 교체했을 뿐(시그니처·동작 불변, drag-preview 게이트는 `normalizePinnedFromGroups`
-> wrapper에 잔류)이라 이 문서의 §12·§13·§14 규칙 기술은 그대로 유효하고, `WindowGraph.moveWorkspace`(창 간 이동)가
-> 같은 코어를 재사용해 §4 (a)~(d) 정규화를 한다.
-> 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
+> 어느 슬라이스까지 구현됐는지는 [단계 분해](plans/sidebar-groups.md)가 소유한다 — 이 문서는 계약만 현재형으로 적는다.
 
 ## 1. 목표 UX
 
@@ -175,11 +151,6 @@ tab panes=1 ... group-start="infra" group-collapsed=1
 컴포넌트는 여전히 **무상태 순수 함수**(hit-test + view)다. `Tab`(라벨·활성)을 **`Row`(union)로 대체**하고, 모든 함수가
 `tab_count: usize` 대신 `rows: []const Row`를 받게 일반화한다. host(platform)가 `projectRows`로 Row 배열을 채운다.
 
-> **이 절은 SG3까지의 목표 계약이다(현재 코드와 다름).** SG1(✅)은 `Row` union(card+group_header)과 `view`를 넣되
-> hit-test는 아직 **고정 높이·count 기반**(`slotAt(y, header, slot_height_px, scroll, row_count)`·`slotTop`·`dragTargetSlot`)을
-> 유지한다(헤더가 없어 충분 — 카드만이면 누적=균일). 아래 **가변 높이 시그니처**(`rowHeight`/`rowTop`/`contentHeight`, `slotAt`이
-> `rows`+두 높이를 받는 형태)와 `onGroupHeader`는 **SG3a/b/c에서** 이 계약으로 이주한다. 즉 아래 코드 스케치는 SG3 완료 시점의 모습이다.
-
 ```zig
 /// 사이드바 화면 한 줄. host가 projectRows로 tabs+마커+search를 이 리스트로 투영한다.
 pub const Row = union(enum) {
@@ -289,18 +260,18 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 
 ## 7. 인터랙션 (접기 우선)
 
-| 동작 | 단계 | UX | 구현 경로(베이스) |
-|---|---|---|---|
-| **그룹 접기/펴기** | **우선** | 헤더 줄 클릭(삼각 ▾/▸) | `onGroupHeader` → 그 그룹 시작 탭의 `group_collapsed` 토글 → `projectRows` 재투영 + 영속(§4) |
-| **그룹 만들기(중첩)** | **우선** | 우클릭 "새 그룹으로 묶기" · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성/클릭 탭에 `group_start` 세팅. **그룹 안 카드면 depth+1 중첩**(§9), 최상위면 depth 1. 아래 연속 카드가 자동 소속(위치 파생) |
-| **형제 그룹으로 분리** | ✅ SG5-3 | 우클릭 "형제 그룹으로 분리" · **단축키 `Cmd+Opt+Shift+G`** · 팔레트 "New Sibling Group" | `create_sibling_group` 액션 → 그 카드에 `group_start` 세팅 + `group_depth=현재 그룹과 같은 depth`(형제, 중첩 아님). 최상위면 depth 1(create_group과 결과 동일). create_group의 미러 — depth 계산만 다르다(§10 tension 해소) |
-| **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 · **헤더 우클릭 "Rename"**(SG5-2-header) | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename). 헤더 우클릭 메뉴의 "Rename"도 같은 `startRename(.group)`(대상=group_start 마커)이라 더블클릭과 동일 |
-| **그룹 해제** | **우선** | 카드 우클릭 "그룹 풀기" · **헤더 우클릭 "그룹 풀기"**(SG5-2-header) · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속. 헤더 우클릭은 대상이 그 헤더의 마커 탭이라 `enclosingGroupMarkerIndex`가 자기 자신을 찾아 카드 경로와 동일 결과 |
-| **그룹에서 빼기** | ✅ | 우클릭 "그룹에서 빼기"(**그룹 소속 카드에만** 노출·최상위 카드엔 안 보임) · 팔레트 "Remove from Group"(기본 키 없음) | `remove_from_group` 액션 → `removeFromGroupForTab`: 그 카드를 **첫 `group_start` 마커 직전**(§2.1 최상위 구간)으로 `moveTab`(중첩 깊이 무관 완전 최상위). ungroup(그룹 통째 해제)과 달리 **이 카드 하나만** 뺀다 — 그룹은 유지(마커 카드면 다음 소속 카드로 마커 **승계** = closeTab과 동형, 마지막 멤버면 그룹 소멸). 이미 최상위면 no-op. 주입 조건 = `tabIsInGroup`(첫 마커 이후 = 그룹 안). 위치 파생이라 별도 소속 편집 없음 |
-| **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
-| **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
-| **드래그로 중첩 넣기/빼기** | ✅ SG5-4 (+Cmd 게이트) | **`Cmd(⌘)` 누른 채** 그룹 헤더를 다른 그룹 헤더에 드롭=자식으로 **중첩**. **`Cmd` 없이는 항상 형제**(헤더 드롭이라도 단순 위치 변경, 중첩 절대 안 됨). 카드/최상위 드롭=형제 재정렬(+얕으면 빼기) | `groupDragPreviewFrame(cmd_held)`가 게이트: `cmd_held`면 헤더 드롭 시 `groupNestPlan`(target_depth=타겟 depth+1·insert=타겟 subtree 끝)→`moveGroupNesting`, 아니면 nest 미시도(`sidebarGroupDropBoundary`→`moveGroupSibling`, 형제/빼기). 카드 드롭은 Cmd 유무 무관 형제(N4 폴백). **modifier 전달**: Swift `modsBits`가 command=32 추가, 터미널 리포트 경로(`mouse`/`mouseMoved`)는 `mods & ~32`로 마스킹(SGR motion 비트 32 충돌 회피). 고스트 피드백: nest=타깃 그룹 하이라이트+들여쓴 고스트, sibling=삽입선만 |
-| 그룹 색 | ✅ SG5-2 | **카드 우클릭 "그룹 색: …"** 프리셋(카드 색과 같은 팔레트) · **헤더 우클릭 "그룹 색: …"**(SG5-2-header, 같은 라벨·팔레트·`setGroupColorForTab` 재사용) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략). 헤더/카드가 같은 색 메뉴를 공유해 사용자가 헤더에서도 색을 찾는다(피드백 반영) |
+| 동작 | UX | 구현 경로(베이스) |
+|---|---|---|
+| **그룹 접기/펴기** | 헤더 줄 클릭(삼각 ▾/▸) | `onGroupHeader` → 그 그룹 시작 탭의 `group_collapsed` 토글 → `projectRows` 재투영 + 영속(§4) |
+| **그룹 만들기(중첩)** | 우클릭 "새 그룹으로 묶기" · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성/클릭 탭에 `group_start` 세팅. **그룹 안 카드면 depth+1 중첩**(§9), 최상위면 depth 1. 아래 연속 카드가 자동 소속(위치 파생) |
+| **형제 그룹으로 분리** | 우클릭 "형제 그룹으로 분리" · **단축키 `Cmd+Opt+Shift+G`** · 팔레트 "New Sibling Group" | `create_sibling_group` 액션 → 그 카드에 `group_start` 세팅 + `group_depth=현재 그룹과 같은 depth`(형제, 중첩 아님). 최상위면 depth 1(create_group과 결과 동일). create_group의 미러 — depth 계산만 다르다(§10 tension 해소) |
+| **그룹 이름 바꾸기** | 헤더 더블클릭 · **헤더 우클릭 "Rename"**(SG5-2-header) | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename). 헤더 우클릭 메뉴의 "Rename"도 같은 `startRename(.group)`(대상=group_start 마커)이라 더블클릭과 동일 |
+| **그룹 해제** | 카드 우클릭 "그룹 풀기" · **헤더 우클릭 "그룹 풀기"**(SG5-2-header) · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속. 헤더 우클릭은 대상이 그 헤더의 마커 탭이라 `enclosingGroupMarkerIndex`가 자기 자신을 찾아 카드 경로와 동일 결과 |
+| **그룹에서 빼기** | 우클릭 "그룹에서 빼기"(**그룹 소속 카드에만** 노출·최상위 카드엔 안 보임) · 팔레트 "Remove from Group"(기본 키 없음) | `remove_from_group` 액션 → `removeFromGroupForTab`: 그 카드를 **첫 `group_start` 마커 직전**(§2.1 최상위 구간)으로 `moveTab`(중첩 깊이 무관 완전 최상위). ungroup(그룹 통째 해제)과 달리 **이 카드 하나만** 뺀다 — 그룹은 유지(마커 카드면 다음 소속 카드로 마커 **승계** = closeTab과 동형, 마지막 멤버면 그룹 소멸). 이미 최상위면 no-op. 주입 조건 = `tabIsInGroup`(첫 마커 이후 = 그룹 안). 위치 파생이라 별도 소속 편집 없음 |
+| **카드 드래그로 넣기/빼기** | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
+| **그룹 통째 드래그** | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
+| **드래그로 중첩 넣기/빼기** | **`Cmd(⌘)` 누른 채** 그룹 헤더를 다른 그룹 헤더에 드롭=자식으로 **중첩**. **`Cmd` 없이는 항상 형제**(헤더 드롭이라도 단순 위치 변경, 중첩 절대 안 됨). 카드/최상위 드롭=형제 재정렬(+얕으면 빼기) | `groupDragPreviewFrame(cmd_held)`가 게이트: `cmd_held`면 헤더 드롭 시 `groupNestPlan`(target_depth=타겟 depth+1·insert=타겟 subtree 끝)→`moveGroupNesting`, 아니면 nest 미시도(`sidebarGroupDropBoundary`→`moveGroupSibling`, 형제/빼기). 카드 드롭은 Cmd 유무 무관 형제(N4 폴백). **modifier 전달**: Swift `modsBits`가 command=32 추가, 터미널 리포트 경로(`mouse`/`mouseMoved`)는 `mods & ~32`로 마스킹(SGR motion 비트 32 충돌 회피). 고스트 피드백: nest=타깃 그룹 하이라이트+들여쓴 고스트, sibling=삽입선만 |
+| 그룹 색 | **카드 우클릭 "그룹 색: …"** 프리셋(카드 색과 같은 팔레트) · **헤더 우클릭 "그룹 색: …"**(SG5-2-header, 같은 라벨·팔레트·`setGroupColorForTab` 재사용) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략). 헤더/카드가 같은 색 메뉴를 공유해 사용자가 헤더에서도 색을 찾는다(피드백 반영) |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
 세 경로에 **자동으로** 뜬다 — (1) 커맨드 팔레트, (2) 설정 화면(⌘,) Input 섹션의 **키바인딩 리바인더**(행 클릭 → 녹음

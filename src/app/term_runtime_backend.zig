@@ -51,6 +51,42 @@ pub const RemoveProgress = enum(u8) {
     invalid,
 };
 
+pub const testing = if (@import("builtin").is_test) struct {
+    threadlocal var close_sequence: []const CloseProgress = &.{};
+    threadlocal var close_index: usize = 0;
+    threadlocal var remove_sequence: []const RemoveProgress = &.{};
+    threadlocal var remove_index: usize = 0;
+
+    pub fn armCloseSequence(sequence: []const CloseProgress) void {
+        close_sequence = sequence;
+        close_index = 0;
+    }
+
+    pub fn armRemoveSequence(sequence: []const RemoveProgress) void {
+        remove_sequence = sequence;
+        remove_index = 0;
+    }
+
+    pub fn clear() void {
+        close_sequence = &.{};
+        close_index = 0;
+        remove_sequence = &.{};
+        remove_index = 0;
+    }
+
+    fn takeClose() ?CloseProgress {
+        if (close_index >= close_sequence.len) return null;
+        defer close_index += 1;
+        return close_sequence[close_index];
+    }
+
+    fn takeRemove() ?RemoveProgress {
+        if (remove_index >= remove_sequence.len) return null;
+        defer remove_index += 1;
+        return remove_sequence[remove_index];
+    }
+} else struct {};
+
 /// 화면(`RenderSnapshot`)과 별개인 runtime 관측의 가용성. host-backed client가 구 host에 붙었거나 아직 initial
 /// metadata를 못 받은 상태를 "cwd 없음/foreground 없음"으로 오인하지 않도록 empty 값과 unavailable을 구분한다.
 pub const ObservationAvailability = enum {
@@ -381,6 +417,7 @@ pub const TermRuntimeBackend = struct {
     }
 
     pub fn closeAndDetach(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        if (@import("builtin").is_test) if (testing.takeClose()) |progress| return progress;
         return self.vtable.close_and_detach(self.ctx, handle);
     }
 
@@ -389,10 +426,12 @@ pub const TermRuntimeBackend = struct {
     }
 
     pub fn finishAfterTermination(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        if (@import("builtin").is_test) if (testing.takeClose()) |progress| return progress;
         return self.vtable.finish_after_termination(self.ctx, handle);
     }
 
     pub fn remove(self: TermRuntimeBackend, handle: RuntimeHandle) RemoveProgress {
+        if (@import("builtin").is_test) if (testing.takeRemove()) |progress| return progress;
         return self.vtable.remove(self.ctx, handle);
     }
 

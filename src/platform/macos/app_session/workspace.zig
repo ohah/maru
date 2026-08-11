@@ -73,7 +73,14 @@ pub fn resolveWorkspaceScope(self: *AppSession) CloseScope {
 /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
 pub fn requestWindowClose(self: *AppSession) bool {
     if (file_panel_ops.blockSessionExitForFilePanels(self)) return true;
-    if (!self.closeTargetHasRunningJob(.window)) return false;
+    if (!self.closeTargetHasRunningJob(.window)) {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder or term.rt.close_complete) continue;
+            if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending) return true;
+            term.rt.close_complete = true;
+        };
+        return false;
+    }
     self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
     return true;
 }

@@ -2614,7 +2614,6 @@ pub fn build(b: *std.Build) void {
             .{ "C3-3b5 close readiness", 6 },
             .{ "C3-3b5 close authority", 8 },
             .{ "C3-3b5 close sweep", 8 },
-            .{ "C3-3b5 AppSession", 4 },
         }) |entry| {
             B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_module, entry[0], entry[1]);
         }
@@ -2625,6 +2624,24 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_remote_backend_module, "C3-3b5 remote backend", 7);
+        const event_c3_3b5_app_session_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        if (target.result.os.tag == .macos) {
+            event_c3_3b5_app_session_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/coretext_smoke.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            event_c3_3b5_app_session_module.linkFramework("Foundation", .{});
+            event_c3_3b5_app_session_module.linkFramework("CoreText", .{});
+            event_c3_3b5_app_session_module.linkFramework("CoreGraphics", .{});
+        }
+        // app_session root의 세 무명 module sentinel도 Zig filter와 함께 항상 materialize된다.
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_app_session_module, "C3-3b5 AppSession", 7);
 
         const event_c3_3b5_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

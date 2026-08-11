@@ -841,10 +841,17 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       4. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는
          개념상 `settlePendingEvent(correlation,effect_request)`인 transaction을 구현하며 exact coordinator signature는
          persistent-session-host의 C3-3b3 API 표를 따른다. 모든 authority/callback/allocator preflight 뒤
-         none·poison·revoke clean/cancel/partial→poison·already-terminal cleanup과 exact release를 같은 no-fail suffix로 닫는다. trusted
-         mismatch recovery, target exact-own cleanup과 sibling 불변, first-reason 보존, callback/fork/ABA/proof-loss subprocess를 포함한다.
+         none·poison·revoke clean/cancel/partial→poison·already-terminal cleanup과 exact release를 같은 no-fail suffix로 닫는다.
+         sealed PRE state에서 canonical plan을 한 번만 산출하고 POST state는 재분류하지 않으며, optional first-reason presence,
+         unusable 전후, target/sibling relation, fd disposition/close-attempt와 ordered allocator cleanup을 evidence에 결속한다.
+         revoke sibling은 byte-exact 보존하고 poison/terminal은 connection-owned outbound를 정산한다. deferred terminal fd는
+         callback 전 detach하고 direct no-retry close를 exact 한 번 시도한다. trusted
+         mismatch recovery, first-reason 보존, callback/fork/ABA/proof-loss subprocess를 포함한다.
          직렬화는 기존 final-address `RuntimeLifetimeOwner`의 새 closed `settlement` lease가 prepare·다른 settlement와 상호 배제하고,
-         `PendingEventOwner`는 `prepared -> settling`만 소유한다. b3 성공 뒤 registry/ordering blocker와 pending release receipt는
+         Pending의 단일 paired arm suffix 안에서 lease의 `prepared -> admitted`가 recoverable 경계를 닫고 즉시 Pending을
+         `prepared -> settling`으로 게시한다. low-level admit의 paired arm 밖 product caller는 0이다. Attachment/Pending은 복사 가능한 binding만으로 admission하지 않고
+         exact Runtime owner와 original live lease를 함께 재검증하며, `PendingEventOwner`는 그 admitted lease 아래
+         `prepared -> settling`만 소유한다. b3 성공 뒤 registry/ordering blocker와 pending release receipt는
          exact once 닫히지만 prepared semantics는 유지하며, `settling -> committed_cleanup -> idle`과 제품 pump는 b4만 소유한다.
          b3는 b4 admission용 sealed closed `SettlementDisposition`만 Pending owner에 남긴다. 실제 close acquire와
          close-vs-settlement 검증은 b5가 소유한다.
@@ -852,8 +859,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          `preparation_pending -> releasing` continuation을 추가한다. ClientSlot은 neutral closed effect plan의 preflight/no-fail commit만
          소유한다. 같은 owner의 Busy 세 번은 각각 mutation 0이고 네 번째 호출이 prepare 재실행 없이 성공하는 회귀 oracle이며
          b3 내부 retry loop는 두지 않는다. focused gate는 `test-session-host-2c3d-c3-3b3`이고 Debug·ReleaseFast와 boundary,
-         callback/fork/ABA/proof-loss subprocess를 모두 통과하기 전 b3 완료를 표시하지 않는다. connection-wide terminalization도
-         현재 target exact-own cleanup만 수행하며 sibling은 보존한다.
+         callback/fork/ABA/proof-loss subprocess를 모두 통과하기 전 b3 완료를 표시하지 않는다. connection-wide terminalization은
+         Client의 단일 connection-owned outbound를 target/sibling relation과 무관하게 정산하되 event sibling payload·registry owner는 보존한다.
       5. **C3-3b5 common close progress:** 기존 VTable 메서드 수를 늘리지 않고 close 계열 반환을
          `CloseProgress`, remove를 `RemoveProgress`로 바꾼다. heap-pinned `RemoteRuntime.CloseAuthority`와 backend closing receipt,
          bounded/fair `CloseSweep`, pending lifecycle readiness, handle ABA와 real AppSession synchronous in-process tab/window close parity를

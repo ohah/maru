@@ -605,9 +605,12 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   b4가 소유한다. umbrella `test-session-host-2c3d-c3-3b2b`는 b2b0~b2b3 focused gate 전체를 상속하며 이 범위의 완료 증거다.
   b3 focused `test-session-host-2c3d-c3-3b3`은 기존 b2b umbrella를 상속하고 Debug·ReleaseFast에서
   final-address settlement lease의 prepare/second-settlement 상호 배제와 close-kind reserved compatibility,
-  `prepared -> settling`, exact pending receipt 기반
+  original owner+lease 검증 없는 binding 단독 권위 0, paired arm 단일 no-fail suffix의 lease `prepared -> admitted` 뒤 Pending `prepared -> settling`, exact pending receipt 기반
   `preparation_pending -> releasing -> idle`, none·poison·revoke clean/cancel/partial→poison·already-terminal의 closed plan,
-  fd detach-before-close, first-reason 보존, target exact-own cleanup과 sibling 불변을 검증한다. same-owner pre-admission Busy는 세 호출 모두
+  PRE one-shot plan/POST exact validation, optional reason ordinal-0 구분, unusable 전후, outbound absent/target/sibling와
+  absent/preserved/freed/cancelled/partial disposition의 canonical matrix를 검증한다. revoke sibling은 byte/address/offset을 보존하고
+  poison/terminal은 connection-owned descriptor를 exact 0|1회 정산한다. deferred terminal fd는 callback 전 detach하며
+  direct no-retry close-attempt exact 1, allocator cleanup exact 0|1과 fixed close-before-free schedule을 검증한다. same-owner pre-admission Busy는 세 호출 모두
   mutation 0이고 네 번째 호출만 같은 attempt로 성공해야 하며 내부 retry/yield는 0이다. copy/move/cross-owner/fork/ABA/replay,
   one-field receipt/effect drift, callback reentry, allocator callsite 0과 exact-proof/proof-loss `_exit(86)` subprocess를 포함한다.
   boundary는 Attachment의 Runtime semantic import 0, 일반 live release 계약 변경 0, persistent per-stage done/effect/registry
@@ -620,7 +623,7 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   disposition outside-owner/wrong-inline-offset/other-owner same-offset/canonical field 밖 owner-subrange overlap,
   prepared-before-seal·one-field-unwritten·partial publication은 authority 0으로 거부한다. attachment paired preflight의
   first/second failure는 permit/output pristine이고 Pending preflight failure는 paired permit exact pre-admission abort 뒤 lease
-  abort, product post-admission abort caller 0이다. boundary는 coordinator의 direct
+  abort를 검증한다. low-level admit의 paired arm 밖 product caller 0, admitted lease의 abort와 prepared lease의 consume은 proof loss이며 product post-admission abort caller 0이다. boundary는 coordinator의 direct
   ClientSlot/registry import와 raw pointer getter 0, attachment/transport의 canonical projection exact-one을 함께 고정한다.
   pure scratch-range preflight는 lease/evidence/permit pairwise 및 lifetime/Pending/attachment protected-range 관계를 integer-only로
   검사한다. non-pristine, exact·partial alias, disposition wrong containment, copied/moved destination과 same-address stale storage는

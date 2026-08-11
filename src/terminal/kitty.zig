@@ -14,7 +14,7 @@
 //!
 //! 키보드 protocol(KittyFlags/KittyFlagStack)은 별개 subsystem이라 core에 남는다(parser가 씀). kitty graphics
 //! protocol을 베이스로 하되 image storage(map+total_bytes·LRU evict·320MB 한계)는 maru 단순 설계다 — 단일 출처:
-//! docs/terminal-core-decomposition.md §8.
+//! docs/plans/terminal-core-decomposition.md §8.
 
 const std = @import("std");
 const core = @import("core.zig");

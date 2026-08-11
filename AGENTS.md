@@ -61,7 +61,7 @@
 ## 설계 문서
 
 - [초기 아키텍처](docs/architecture.md)
-- [TerminalCore(core.zig) 분해: Parser/Screen 분리](docs/terminal-core-decomposition.md)
+- [TerminalCore(core.zig) 분해: Parser/Screen 분리](docs/terminal-core-decomposition.md) — [분해 기록](docs/plans/terminal-core-decomposition.md) · [Screen struct fold](docs/plans/screen-struct-fold.md) · [page-aligned storage](docs/plans/page-aligned-storage.md)
 - [렌더러 전략](docs/renderer-strategy.md)
 - [레이어링과 이식성 전략](docs/layering-and-portability.md)
 - [폰트 전략](docs/font-strategy.md)

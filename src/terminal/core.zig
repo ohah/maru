@@ -302,7 +302,7 @@ pub const TerminalCore = struct {
     // grapheme_id를 복사해도 dangling이 없다(link과 동일). 이 전역 dedup store가 메모리를 distinct
     // cluster 수로 bound하는 **standing 답**이다 — 화면에서 사라진 cluster까지 회수하는 page-local
     // **구조적 회수**는 활성 grid 페이징(§11 B)을 vehicle로 삼았으나 **B가 A2와 충돌해 불가**해져 보류다
-    // (terminal-core-decomposition.md §11.8 §595 정정 — 측정된 grapheme 메모리 병목 없음). 재개가
+    // (plans/page-aligned-storage.md §11.8 §595 정정 — 측정된 grapheme 메모리 병목 없음). 재개가
     // 필요하면 활성 grid를 안 건드리는 split 모델(스크롤백만 page-local)로 — 전역 refcount/GC는 flat
     // cells:[]Cell+memcpy 위에서 위험해 도입하지 않는다.
     grapheme_store: std.ArrayListUnmanaged([]u21) = .empty,

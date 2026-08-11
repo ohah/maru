@@ -556,11 +556,11 @@ fn writeAtomic(
     defer if (tmp_holds_new) unlinkIfIdentity(tmp_path, new_identity);
     _ = c.close(fd);
     open = false;
-    if (renamex_np(
-        tmp_path.ptr,
-        manifest_path.ptr,
-        if (expected_old != null) RENAME_SWAP else RENAME_EXCL,
-    ) != 0) return error.RenameFailed;
+    const renamed = if (expected_old != null)
+        renameExchange(tmp_path, manifest_path)
+    else
+        renameNoReplace(tmp_path, manifest_path);
+    if (!renamed) return error.RenameFailed;
     tmp_holds_new = false;
 
     if (expected_old) |old_identity| {
@@ -587,7 +587,7 @@ fn writeAtomic(
         if (expected_old != null) {
             try rollbackSwapTracked(dir_fd, tmp_path, manifest_path, new_identity, &tmp_holds_new);
         } else {
-            if (renamex_np(manifest_path.ptr, tmp_path.ptr, RENAME_EXCL) != 0)
+            if (!renameNoReplace(manifest_path, tmp_path))
                 return error.AuthorityPoisoned;
             tmp_holds_new = true;
             if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
@@ -631,7 +631,7 @@ fn rollbackSwapOrPoison(
     tmp_path: [:0]const u8,
     manifest_path: [:0]const u8,
 ) Error!void {
-    if (renamex_np(tmp_path.ptr, manifest_path.ptr, RENAME_SWAP) != 0) return error.AuthorityPoisoned;
+    if (!renameExchange(tmp_path, manifest_path)) return error.AuthorityPoisoned;
     if (builtin.is_test and test_failpoint == .rollback_sync) return error.AuthorityPoisoned;
     if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
 }
@@ -676,10 +676,10 @@ fn withdrawExact(
         0,
     ) catch return error.OutOfMemory;
     defer allocator.free(tomb);
-    if (renamex_np(path.ptr, tomb.ptr, RENAME_EXCL) != 0) return error.RenameFailed;
+    if (!renameNoReplace(path, tomb)) return error.RenameFailed;
     const moved = fileIdentity(tomb) catch return error.AuthorityPoisoned;
     if (!sameIdentity(moved, expected)) {
-        if (renamex_np(tomb.ptr, path.ptr, RENAME_EXCL) != 0) return error.AuthorityPoisoned;
+        if (!renameNoReplace(tomb, path)) return error.AuthorityPoisoned;
         if (c.fsync(dir_fd) != 0) return error.AuthorityPoisoned;
         return .replaced;
     }
@@ -726,6 +726,22 @@ fn statFd(fd: c.fd_t, out: *StatInfo) posix.E {
     if (err != .SUCCESS) return err;
     out.* = .{ .dev = stat.dev, .ino = stat.ino, .mode = stat.mode, .uid = stat.uid, .size = @intCast(stat.size) };
     return .SUCCESS;
+}
+
+fn renameNoReplace(from: [:0]const u8, to: [:0]const u8) bool {
+    if (builtin.os.tag == .linux) {
+        const rc = std.os.linux.renameat2(posix.AT.FDCWD, from.ptr, posix.AT.FDCWD, to.ptr, .{ .NOREPLACE = true });
+        return std.os.linux.errno(rc) == .SUCCESS;
+    }
+    return renamex_np(from.ptr, to.ptr, RENAME_EXCL) == 0;
+}
+
+fn renameExchange(from: [:0]const u8, to: [:0]const u8) bool {
+    if (builtin.os.tag == .linux) {
+        const rc = std.os.linux.renameat2(posix.AT.FDCWD, from.ptr, posix.AT.FDCWD, to.ptr, .{ .EXCHANGE = true });
+        return std.os.linux.errno(rc) == .SUCCESS;
+    }
+    return renamex_np(from.ptr, to.ptr, RENAME_SWAP) == 0;
 }
 
 fn statAtNoFollow(dir_fd: c.fd_t, path: [:0]const u8, out: *StatInfo) posix.E {

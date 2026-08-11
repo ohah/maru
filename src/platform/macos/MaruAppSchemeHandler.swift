@@ -12,7 +12,7 @@ import WebKit
 // 받으면 Zig `maru_macos_app_read_app_asset`이 flat role allowlist를 판정하고 root-relative no-follow open한 같은 fd에서
 // 읽은 bytes만 돌려준다. Swift는 그 bytes에 **role별 엄격 CSP 헤더**(단일 출처=Zig AppAssetRole)를 붙여 응답한다.
 // 거부(샌드박스·symlink·부재)는 정보 노출 없이 404. **정책·파일 identity는 Zig, 여기는 WebKit 응답 조립만** 한다
-// (docs/web-panel.md §10). 비신뢰(browser) 패널엔 이 핸들러를 애초에 등록하지 않는다
+// (docs/plans/web-panel.md §10). 비신뢰(browser) 패널엔 이 핸들러를 애초에 등록하지 않는다
 // (origin 위장 탈취 1차 차단 — §7 ④·§8.1(c), 2차는 browser 패널의 maru-app:// 네비 차단).
 final class MaruSchemeSmokeTask: NSObject, WKURLSchemeTask {
     let request: URLRequest

@@ -925,7 +925,7 @@ pub fn takeWebFindQuery(self: *AppSession) ?WebFindRequest {
 /// Swift가 `WKWebView.find` 결과를 돌려준다.
 ///
 /// **늦은 회신은 버린다**: seq가 현재 것과 다르면 그 사이 새 질의가 나갔다는 뜻이고, 오버레이가 닫혔거나
-/// 활성 탭이 웹이 아니면 반영할 화면 자체가 없다(docs/web-panel.md §8 "비동기 수명").
+/// 활성 탭이 웹이 아니면 반영할 화면 자체가 없다(docs/web-panel-features.md §8 "비동기 수명").
 /// Swift가 **전달하지 못했다**고 신고한다(그 surface의 WKWebView가 아직 없음). 걷어 간 질의를 그냥 버리면
 /// `web_find_last_surface`가 "보냈다"로 남아 tick이 영영 재시도하지 않는다 — 검색이 조용히 죽는 경로다.
 /// 마커만 지우면 다음 tick이 같은 조건에서 다시 제출한다(패널은 한두 프레임 안에 생긴다 —

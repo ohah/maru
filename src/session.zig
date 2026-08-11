@@ -7,7 +7,7 @@
 
 pub const input_math = @import("session/input_math.zig");
 pub const layout_math = @import("session/layout_math.zig");
-pub const web_panel_layout = @import("session/web_panel_layout.zig"); // Phase 4a: 웹 패널 rect(본문 rect)·px↔pt y-flip·surface 생애주기 diff 순수 계산(docs/web-panel.md §10 4a·§11·§14)
+pub const web_panel_layout = @import("session/web_panel_layout.zig"); // Phase 4a: 웹 패널 rect(본문 rect)·px↔pt y-flip·surface 생애주기 diff 순수 계산(docs/plans/web-panel.md §10 4a·§11·§14)
 pub const resource_usage = @import("session/resource_usage.zig"); // 상태바 리소스 항목: pid 표본 합산·CPU 차분·고정 폭 포맷(순수 — syscall 없음, docs/status-bar.md §6)
 pub const surface_id = @import("session/surface_id.zig"); // M0a: 앱 전역 surface_id allocator(순수 타입, 인스턴스 소유는 L4)
 pub const SurfaceIdAllocator = surface_id.SurfaceIdAllocator;

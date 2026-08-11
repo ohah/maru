@@ -5615,7 +5615,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 웹 패널 생성 디버그 env 훅(MARU_WEB_PANEL — maybeDebugOpenWebPanel). 4e-5부터 web Term 생성은 command/메뉴
     // (new_web_tab)로 승격돼 drainWebSurfaceTransition 게이트는 Zig FrameSummary.web_surfaces_present(생성 신호)로
     // 판정한다(env 무관). 이 상수는 이제 **스모크 요약 경로**(writeSmokeSummary의 web 계층 단언 — env 훅으로 web Term을
-    // 여는 디버그 시나리오에서만 web NSView 계층·개수·frame을 기록)에서만 쓴다(docs/web-panel.md §10 4e-5·§11).
+    // 여는 디버그 시나리오에서만 web NSView 계층·개수·frame을 기록)에서만 쓴다(docs/plans/web-panel.md §10 4e-5·§11).
     private let webPanelHookEnabled = ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil
     private let filePanelHookEnabled = ProcessInfo.processInfo.environment["MARU_FILE_PANEL"] != nil
 
@@ -7086,7 +7086,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Zig가 매 tick 실은 web_surfaces_present(살아 있는 web Term 존재 = 생성 신호) **OR** webPanels 비어있지 않음
         // (마지막 web Term이 닫힌 뒤 destroy 전이를 처리해 뷰를 제거할 때까지 지속)으로 판정한다. 둘 다 false면 batch가 늘
         // 비므로 FFI(count)+pane 트리 walk를 통째로 건너뛴다(평시 렌더 핫패스 0-FFI). 한 tick 지연(직전 tick summary)은
-        // 무해하다(web Term은 여러 tick 지속, create 전이는 다음 tick 처리). — docs/web-panel.md §10 4e-5 "게이트 정정".
+        // 무해하다(web Term은 여러 tick 지속, create 전이는 다음 tick 처리). — docs/plans/web-panel.md §10 4e-5 "게이트 정정".
         guard surface.latestFrameSummary.web_surfaces_present != 0 || !surface.webPanels.isEmpty else { return }
         // count가 이번 tick batch를 계산(prev 전진 = tick당 1회)한다. 이어서 at(i)로 각 전이를 읽어 적용한다.
         let count = maru_macos_app_session_web_surface_transitions_count(session)
@@ -10031,7 +10031,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 터미널과 오버레이 **사이**(z-order 중간)에 있고 개수가 dict와 맞는지 단언 + webview.frame(pt) + 4d 계약(모달
         // 닫힘 시 웹 focusable·시작 시 터미널 포커스 유지)을 기록한다. **스모크는 backing=0이라 frame·hitTest 좌표가
         // degenerate**라 hard 단언이 아니라 값 기록이다(실제 전이는 GUI 손 테스트). env 미설정이면 무동작(요약 계약 불변).
-        // docs/web-panel.md §10 4e-3·4d·§11. (4e-5: 이 스모크 web 계층 단언이 webPanelHookEnabled 상수의 유일 소비처다.)
+        // docs/plans/web-panel.md §10 4e-3·4d·§11. (4e-5: 이 스모크 web 계층 단언이 webPanelHookEnabled 상수의 유일 소비처다.)
         if webPanelHookEnabled || filePanelHookEnabled {
             let container = activeSurface?.window?.contentView as? MaruTerminalContainerView
             let panels = activeSurface?.webPanels ?? [:]

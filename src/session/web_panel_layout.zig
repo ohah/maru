@@ -1,5 +1,5 @@
 //! L2 session core — 웹 패널(WKWebView) rect·surface **생애주기 순수 계산**(OS·platform 무관). Phase 4a
-//! (docs/web-panel.md §10 4a·§11): WKWebView·렌더러·Swift를 건드리기 전에 "본문 rect 산출 / backing-px→pt
+//! (docs/plans/web-panel.md §10 4a·§11): WKWebView·렌더러·Swift를 건드리기 전에 "본문 rect 산출 / backing-px→pt
 //! y-flip / surface diff"의 수학을 헤드리스 단위 테스트로 먼저 못박는다. 이 모듈이 그 세 계산의 **단일 출처**다.
 //!
 //! **좌표계 계약(§3·§11)**: 모든 ABI/backing 좌표는 **backing 픽셀·좌상단 원점**(y가 아래로 증가)이고,

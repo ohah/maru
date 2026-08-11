@@ -26,7 +26,7 @@ fn counterCols(state: *const State) u32 {
     return numDigits(cur) + 1 + numDigits(total); // "cur" + "/" + "total"
 }
 
-/// 페이지 검색은 **매치 수를 알 수 없다** — `WKFindResult`가 `matchFound`만 준다(docs/web-panel.md §8).
+/// 페이지 검색은 **매치 수를 알 수 없다** — `WKFindResult`가 `matchFound`만 준다(docs/web-panel-features.md §8).
 /// 그래서 "cur/total" 자리에 찾음/없음만 낸다. 그 자리에 "0/0"을 그리면 WebKit이 노랗게 하이라이트한 화면과
 /// 정면으로 모순된다("매치 0개"로 읽힌다). 결과가 아직 없으면(제출 전·응답 대기) 아무것도 그리지 않는다.
 fn pageIndicator(state: *const State) ?[]const u8 {
@@ -55,7 +55,7 @@ fn textCols(state: *const State, panel_cols: u32) u32 {
 /// match_count=session이 setMatchCount로 동기화하는 전체 매치 수(next/prev wrap·카운터에 필요 — 매치 리스트 자체는
 /// session 소유). input의 query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤 preedit으로 보인다.
 /// 이 오버레이가 지금 **무엇을 검색하는지**. 활성 탭이 웹이면 페이지, 아니면 스크롤백이다(session이 tick마다
-/// 동기화 — docs/web-panel.md §8). 카운터 표시가 이 값에 따라 갈린다.
+/// 동기화 — docs/web-panel-features.md §8). 카운터 표시가 이 값에 따라 갈린다.
 pub const Target = enum { scrollback, page };
 
 pub const State = struct {

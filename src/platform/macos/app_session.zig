@@ -23630,6 +23630,40 @@ test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 �
     }
 }
 
+// 세션 행의 **폴더·브랜치 줄**이 관측 cwd에서 실제로 나오는지 고정한다. 목록을 Term 전수로 넓히면서
+// (2026-08-11) "행에 폴더·브랜치가 안 보인다"는 제보를 받았고, 그것이 코드 회귀인지 관측이 비어서인지
+// 가르는 축이 없었다. 이 테스트가 그 축이다 — cwd가 있으면 줄이 붙는다는 것을 코드 수준에서 못박아,
+// 실제 앱에서 안 보이면 원인이 **관측(OSC 7)** 쪽임을 역으로 확정할 수 있다.
+test "사이드바 세션 행: 관측 cwd가 있으면 폴더·브랜치 줄이 붙는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const term = tab.panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    term.agent_state = .idle;
+
+    // 관측이 비어 있으면(기본) 라벨 한 줄뿐이다 — 실제 앱에서 보이던 그 모습.
+    try std.testing.expectEqual(@as(u8, 1), sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }));
+
+    // cwd를 심는다. 스모크 세션은 `live_initialized=false`라 refreshTermObservation이 early-return하므로
+    // 이 값이 덮이지 않는다. git repo가 **아닌** 경로를 쓰는 이유는 결정성 때문이다 — 테스트가 어디서
+    // 돌든 같은 답을 내야 한다. 브랜치 줄은 repo 안에서만 붙고 그 파생은 git.zig가 따로 검증한다.
+    try term.rt.observation.cwd.appendSlice(a, "/tmp");
+    term.rt.observation.availability = .current;
+
+    // 폴더 줄이 하나 는다(라벨 1 + 폴더 1 = 2). 이 줄이 안 붙으면 행 높이가 1이라 폴더가 그려져도
+    // 다음 행에 먹힌다 — 제보된 "폴더가 안 보인다"의 코드 쪽 원인은 여기뿐이다.
+    try std.testing.expectEqual(@as(u8, 2), sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }));
+    const folder = try sidebar_ops.agentRowFolderOwned(session, term, "");
+    defer a.free(folder);
+    try std.testing.expect(folder.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, folder, "tmp") != null);
+}
+
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;

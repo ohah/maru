@@ -257,6 +257,11 @@ pub const sidebar_pin_glyph: u21 = 0x1F4CC;
 /// 공백(U+0020)을 쓰는 이유는 "그릴 것이 없다"가 값 자체로 읽히기 때문이고, 실제 방출은 건너뛴다.
 pub const inline_icon_reserve: u21 = ' ';
 
+/// 세션 목록 행(= `inline_icons`를 쓰는 행)의 **행 전체 들여쓰기**(칸). 카드 하위 목록이라는 위계를 보이게 한다 —
+/// 0이면 카드와 목록이 같은 좌단에서 시작해 "카드 아래 펼쳐진 목록"으로 안 읽혔다(사용자 피드백).
+/// 아이콘이 이 열에 오고 이름 본문은 여기서 `icon_cols`만큼 더 간다. 보조줄은 호출자가 같은 자리에 맞춘다.
+pub const session_row_indent_cols: u16 = 2;
+
 /// 카드 보조줄(branch/folder)에 maru가 의도적으로 박은 아이콘을 **렌더 폭 2칸**으로 치는 규칙 —
 /// `text_layout`(L3)이 renderer를 import할 수 없어(경계 가드) predicate로 주입한다. advance(cellWidth)는 1이지만
 /// 1칸(~8px)에 다운스케일하면 octocat·폴더 실루엣이 뭉개져 안 보였다(사용자 피드백) — 에이전트 gutter 아이콘
@@ -489,7 +494,10 @@ pub fn buildSidebarDrawList(
         // 에이전트 아이콘: 슬롯 세로 중앙(count=1) col 0에 따로 — 3줄 블록과 무관하게 워크스페이스 가운데 고정.
         // 텍스트 줄은 아이콘이 있으면 icon_cols만큼 우측에서 시작(아이콘과 안 겹치게).
         const agent_cp: u21 = if (i < agents.len) agents[i] else 0;
-        const text_col: u16 = if (agent_cp != 0) icon_cols else 0;
+        const inline_cp0: u21 = if (i < inline_icons.len) inline_icons[i] else 0;
+        // 인라인 아이콘이 있는 행 = 카드 **하위 목록**이므로 행 전체를 `session_row_indent_cols`만큼 들여쓴다
+        // (사용자 요청 — 카드와 목록의 위계가 안 보였다). gutter 행은 종전대로 아이콘 자리만큼만 민다.
+        const text_col: u16 = if (agent_cp != 0) icon_cols else if (inline_cp0 != 0) session_row_indent_cols else 0;
         if (agent_cp != 0) {
             const icon_row = sidebarGlyphRow(i, 0, 1);
             try cells.append(allocator, .{ .row = icon_row, .col = 0, .codepoint = agent_cp, .width = 2, .style = style });
@@ -497,7 +505,7 @@ pub fn buildSidebarDrawList(
         }
         // 이름줄 선두 아이콘(gutter의 대안 — 위 `inline_icons` 문서 참조). 아이콘은 `text_col`에 놓고 **이름줄만**
         // 그만큼 밀어, 보조줄(폴더·브랜치·응답)은 3칸을 그대로 쓴다. gutter처럼 모든 줄을 밀지 않는 것이 요점이다.
-        const inline_cp: u21 = if (i < inline_icons.len) inline_icons[i] else 0;
+        const inline_cp: u21 = inline_cp0;
         const name_text_col: u16 = if (inline_cp != 0) text_col +| icon_cols else text_col;
         // 이 탭의 줄 모으기: 이름(항상) + 브랜치(있으면) + 경로(있으면) + 상태(에이전트면). 순서대로 line_index
         // 0,1,2,3을 부여. 빈 보조줄("")은 건너뛰어 1~4줄이 된다.
@@ -1897,40 +1905,43 @@ test "buildSidebarDrawList inline_icons: name line only shifts; aux lines keep f
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &inline_icons, &[_]bool{}, 30, .default, &.{}, &.{}, null, null, .default, null);
     defer dl.deinit(allocator);
 
-    // (1) 아이콘은 이름줄과 **같은 행**(2줄 카드의 idx0)에 col 0·width 2. 옛 gutter처럼 count=1 중앙이 아니다.
+    // 인라인 행은 카드 하위 목록이라 행 전체가 session_row_indent_cols만큼 들여써진다.
+    const ind = session_row_indent_cols;
+    // (1) 아이콘은 이름줄과 **같은 행**(2줄 카드의 idx0)에 들여쓰기 열·width 2. 옛 gutter처럼 count=1 중앙이 아니다.
     var icon_on_name_row = false;
     for (dl.cells) |c| {
         if (c.codepoint == icons.codepoint(.sparkle)) {
             try std.testing.expectEqual(sidebarGlyphRow(0, 0, 2), c.row);
-            try std.testing.expectEqual(@as(u16, 0), c.col);
+            try std.testing.expectEqual(ind, c.col);
             try std.testing.expectEqual(@as(u16, 2), c.width);
             icon_on_name_row = true;
         }
     }
     try std.testing.expect(icon_on_name_row);
 
-    // (2) 이름줄 'm'은 icon_cols(3)만큼 밀린다. (3) 보조줄 '~'는 **안 밀린다**(col 0) — gutter였다면 둘 다 밀렸다.
+    // (2) 이름줄 'm'은 아이콘 자리(icon_cols=3)만큼 **더** 밀린다. (3) 보조줄 '~'는 들여쓰기까지만 —
+    // 아이콘 폭은 안 먹는다. gutter였다면 둘 다 같은 만큼 밀려 보조줄이 3칸을 잃었다.
     var name_shifted = false;
     var aux_unshifted = false;
     for (dl.cells) |c| {
         if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 0, 2)) {
-            try std.testing.expectEqual(@as(u16, 3), c.col);
+            try std.testing.expectEqual(ind + 3, c.col);
             name_shifted = true;
         }
         if (c.codepoint == '~' and c.row == sidebarGlyphRow(0, 1, 2)) {
-            try std.testing.expectEqual(@as(u16, 0), c.col);
+            try std.testing.expectEqual(ind, c.col);
             aux_unshifted = true;
         }
     }
     try std.testing.expect(name_shifted);
     try std.testing.expect(aux_unshifted);
 
-    // (4) reserve 행: 글리프 셀은 안 나오지만 이름은 같은 col 3에서 시작한다(라벨 좌단 정렬).
+    // (4) reserve 행: 글리프 셀은 안 나오지만 이름은 같은 열에서 시작한다(라벨 좌단 정렬).
     for (dl.cells) |c| try std.testing.expect(c.codepoint != inline_icon_reserve or c.row != sidebarGlyphRow(1, 0, 1));
     var reserved_shifted = false;
     for (dl.cells) |c| {
         if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) {
-            try std.testing.expectEqual(@as(u16, 3), c.col);
+            try std.testing.expectEqual(ind + 3, c.col);
             reserved_shifted = true;
         }
     }

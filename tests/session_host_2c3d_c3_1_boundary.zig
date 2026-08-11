@@ -21,8 +21,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.reserveEventOwnerInPlace("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "generation_transport_mod.takeEventProjected("));
     try std.testing.expectEqual(@as(usize, 3), count(attachment, "generation_transport_mod.eventReadinessOwned("));
-    // b4의 test-only 실제 close fixture가 제품과 같은 take를 한 번 더 실행한다.
-    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".takeEvent("));
+    // b4와 b5의 test-only 실제 close fixture가 제품과 같은 take를 각각 한 번 실행한다.
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, ".takeEvent("));
     // C3-2 adds the generation product drain while preserving the legacy owner path.
     // b2b3 adds one test-only real-take Busy probe; the three product release callsites remain.
     try std.testing.expectEqual(@as(usize, 4), count(runtime, ".releaseEvent("));

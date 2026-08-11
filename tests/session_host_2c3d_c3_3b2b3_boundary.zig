@@ -87,9 +87,10 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareTakenEvent("));
     // b4 제품 pump와 test-only close fixture가 같은 단일 construction seam을 사용한다.
     try std.testing.expectEqual(@as(usize, 1), countProductCalls(runtime, "prepareTakenEvent("));
-    try std.testing.expectEqual(@as(usize, 2), countProductCalls(runtime, "classifyAndPrepareEvent("));
-    // 제품 caller 1개와 test-only fixture caller 1개 외에는 preparation을 직접 열 수 없다.
-    try std.testing.expectEqual(@as(usize, 3), count(runtime, "classifyAndPrepareEvent("));
+    // 제품 caller 둘과 b4/b5 test-only 실제 close fixture 둘만 preparation을 직접 연다.
+    try std.testing.expectEqual(@as(usize, 3), countProductCalls(runtime, "classifyAndPrepareEvent("));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "classifyAndPrepareEvent("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn preparePendingEventForClose("));
     const prepare_entry = function(runtime, "classifyAndPrepareEvent") orelse return error.MissingRuntimeEntry;
     try std.testing.expectEqual(@as(usize, 1), count(
         prepare_entry,

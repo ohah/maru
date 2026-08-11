@@ -1838,8 +1838,14 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     }
     try testing.expect(saw_after);
 
-    be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw =
-        @intFromEnum(pending_event_owner.PendingLifecycle.preparing);
+    try remote_runtime.testing_api.preparePendingEventForClose(
+        be_impl.runtimes.get(22).?.runtime,
+        "{\"event\":\"snapshot.invalidated\"}",
+    );
+    try testing.expectEqual(
+        @intFromEnum(pending_event_owner.PendingLifecycle.prepared),
+        be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw,
+    );
     const duplicate_handles = [_]RuntimeHandle{ 33, 33 };
     var rejected_reservation: WindowCloseTicketReservation = .{};
     const issuer_before_reject = be_impl.close_ticket_issuer;
@@ -1861,11 +1867,14 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try testing.expectEqual(@as(u8, 2), reservation.state_raw);
     try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.routing_tombstoned)), be_impl.runtimes.get(33).?.runtime.close_authority.lifecycle_raw);
     try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.routing_tombstoned)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
+    remote_runtime.testing_api.armSettlementContention(1);
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(33));
     try testing.expectEqual(term_backend.CloseProgress.event_pending, be.closeAndDetach(22));
     try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.settling)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
-    be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw =
-        @intFromEnum(pending_event_owner.PendingLifecycle.idle);
+    try testing.expectEqual(
+        @intFromEnum(pending_event_owner.PendingLifecycle.prepared),
+        be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw,
+    );
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(33));
     try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));

@@ -42,14 +42,14 @@ test "CR3a-2c3d C1 event facade remains closed and product-unwired" {
 
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.takeGenerationEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn takeGenerationEvent("));
-    // 제품 pump의 canonical take 하나와 test fixture의 직접 take 둘을 분리해 고정한다.
-    const runtime_product = between(runtime, "pub const RemoteRuntime = struct", "const B4SemanticFixture = struct") orelse
+    // 제품 pump의 canonical take 하나와 test-only close fixture의 직접 take 셋을 분리해 고정한다.
+    const runtime_product = between(runtime, "pub const RemoteRuntime = struct", "pub const testing_api = if (builtin.is_test) struct") orelse
         return error.TestExpectedEqual;
-    const runtime_tests = runtime[(std.mem.indexOf(u8, runtime, "const B4SemanticFixture = struct") orelse
+    const runtime_tests = runtime[(std.mem.indexOf(u8, runtime, "pub const testing_api = if (builtin.is_test) struct") orelse
         return error.TestExpectedEqual)..];
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, ".takeEvent("));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime_tests, ".takeEvent("));
-    try std.testing.expectEqual(@as(usize, 3), count(runtime, ".takeEvent("));
+    try std.testing.expectEqual(@as(usize, 3), count(runtime_tests, ".takeEvent("));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, ".takeEvent("));
     const attachment_product = between(
         attachment,
         "pub const GenerationAttachment = struct",

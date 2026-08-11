@@ -14,7 +14,7 @@
 
 이 문서에 없는 결정이 필요하면 임의로 진행하지 않고 사용자와 먼저 논의한다([필수 프로젝트 규칙](project-rules.md)).
 
-## 1. 현황: `maru ssh` terminfo·자기식별·ControlMaster 스택 (구현 완료)
+## 1. `maru ssh` terminfo·자기식별·ControlMaster 스택
 
 > 이 절은 이미 구현된 동작의 기록이다. 단일 출처는 코드(`src/cli/ssh.zig`, `src/terminal/core.zig`)이고, 여기서는 설계 의도를 보존한다.
 

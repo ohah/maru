@@ -74,7 +74,7 @@ consumer 영향:
   replay, inspector, golden, artifact reader가 영향을 받는지
 ```
 
-## 초기 테스트 (구현됨 — `observability/snapshot.zig`)
+## 초기 테스트 (`observability/snapshot.zig`)
 
 - snapshot text 첫 줄에 schema가 있다(writer 테스트).
 - **round-trip**: writer가 낸 v3 텍스트를 `parseSnapshot`으로 되읽으면 직렬화된 필드(size·cursor·dirty·행 텍스트·wide/grapheme cell-metadata·styled-cells)가 구조로 복원된다.

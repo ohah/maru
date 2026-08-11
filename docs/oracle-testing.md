@@ -64,7 +64,7 @@ ANSI fixture
 
 fixture와 golden 파일의 저장 형식은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 
-## 외부 오라클 (opt-in, 구현됨)
+## 외부 오라클 (opt-in)
 
 실제 reference VT 엔진과 비교하는 외부 오라클은 opt-in으로만 실행하며, 기본 경로(`mise run check`)에는 넣지 않아 외부 의존성 없이도 개발할 수 있다. 현재 세 reference를 지원한다.
 

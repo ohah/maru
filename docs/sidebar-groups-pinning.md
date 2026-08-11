@@ -54,7 +54,7 @@ suffix-exclusion 정규화(GP2)·`toggleGroupPin`+plan clamp(GP3)·`pin_derived`
 pin이 최외곽 2리전을 만들고, 리전 안은 §2.1, 그룹 안은 중첩이다. 불변식: I1 자명(pinned_count=고정 리전 끝, 항상 최상위
 단위 경계 정렬 — normalize가 보장). I2 **리전별 first-marker**. I3 subtree가 한 리전 통째(핀 균일).
 
-### 12.4 파생 코어 — pin-region 인식(보강 1·8, 정정 ①) — **GP1 완료**
+### 12.4 파생 코어 — pin-region 인식(보강 1·8, 정정 ①)
 
 **정정 ①(pass1 폭발 아님)**: 초안은 "pass1에 pin-region 리셋을 넣으면 상태(스택,order,group_depth,region)가 폭발"을 최대
 리스크로 봤다. 검증 결과, 리셋은 **pass1 하나가 아니라 7개 subtree-스캔 경계 전부**에 필요하고, 각 경계는 "인접(또는
@@ -88,7 +88,7 @@ order-공간 per-position `self.tabs.items[order[i]].pinned`**(고정 count 아�
 그러면 마커는 전부 비고정 리전이라 **리전 경계 = 리스트 양끝**이 되고, 7 경계의 pin 리셋/break는 flip 지점에서 스택이
 비어 **no-op** → 기존 `projectRows` 산출과 **byte-identical**이다. 헤드리스 검증(§12.11)이 이를 고정한다.
 
-### 12.5 정규화 — `normalizePinnedFromGroups`(보강 2, 정정 ②) — **GP2 완료**
+### 12.5 정규화 — `normalizePinnedFromGroups`(보강 2, 정정 ②)
 
 **정정 ②(chokepoint 단일화 불가)**: 초안은 "정규화를 rebuild 직전 단일 chokepoint(`recomputeVisibleTabs` 안)로 모으자"
 했으나 세 이유로 불가다 — ⓐ `recomputeVisibleTabs`는 매 rebuild O(n) 스택워크라 여기서 `self.tabs.pinned`를 mutate하면
@@ -108,7 +108,7 @@ enclosingMarker.pinned`를 재기록"(marker-propagation)이었으나, 그러면
 뒤에서 재등장)는 **흡수**한다. 이렇게 하면 canonical 상태에서 GP1 렌더와 **동일 답**(top카드 안 흡수·idempotent)을 내면서, 손상/
 레거시 혼합 파일(멤버 pinned=1·마커=0, 또는 desync)은 여전히 마커 기준으로 canonical화해 **shred를 막는다**(누락 시 shred가 실패 모드).
 
-### 12.6 이동/드래그(정정 ③) — **GP3 완료**
+### 12.6 이동/드래그(정정 ③)
 
 **정정 ③(clamp는 이동 함수가 아니라 plan 산출부)**: 초안은 `moveGroupRange`/`simulateGroupMove`에 `clampGroupMoveToRegion`을
 넣자 했으나, 두 함수는 프리뷰/확정 **이중 경로**라 양쪽에 넣으면 divergence(SG8 이중경로 위험)가 재발한다. 대신 **`groupDragPreviewFrame`의
@@ -138,7 +138,7 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 - **`inheritGroupMarker` pinned 승계(보강 6)**: 마커 승계(`closeTab`·removeFromGroup) 시 `group_start/collapsed/depth/color`에
   더해 **`pinned`도 승계**해야 승계 과정에서 그룹 고정이 소실되지 않는다.
 
-### 12.8 렌더 힌트 `pin_derived`(보강 7) — **GP4 완료**
+### 12.8 렌더 힌트 `pin_derived`(보강 7)
 
 멤버 캐시 `pinned=1`을 그대로 렌더하면 **모든 멤버에 📌가 떠 노이즈**다. `Row.card`에 **`pin_derived: bool` 힌트**를 실어
 (`chrome/components/sidebar.zig`: `card: struct { …, pin_derived }`) `projectRows`가 비마커 멤버 카드엔 `true`, 최상위 카드·

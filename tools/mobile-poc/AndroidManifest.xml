@@ -8,7 +8,8 @@
           package="dev.maru.chrome">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
-    <application android:label="MaruChrome" android:hasCode="false">
+    <!-- debuggable 은 PoC 전용이다 — run-as 로 앱 내부의 래스터 결과를 꺼내 대조한다. -->
+    <application android:label="MaruChrome" android:hasCode="false" android:debuggable="true">
         <activity android:name="android.app.NativeActivity"
                   android:label="MaruChrome"
                   android:screenOrientation="portrait"

@@ -243,6 +243,7 @@ mutation/render 경로가 이 경계를 유지**해야 한다. `/code-review max
 ### 14.10 단계 분해
 
 [사이드바 그룹 단계 분해](plans/sidebar-groups.md)가 소유한다 — 단계와 완료 이력은 계획 문서 몫이다.
+
 ### 14.11 규모·리스크
 
 - **규모 = GP1+SG8급**(초안 GP1 과소평가 정정): 코어 7 경계 + effectiveDepthAt(2) + enclosingGroupMarkerIndex + tabIsInGroup +

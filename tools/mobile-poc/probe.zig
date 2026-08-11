@@ -5,6 +5,12 @@
 const std = @import("std");
 const terminal = @import("terminal");
 
+/// **iOS 시뮬레이터에서 ReleaseSafe 를 쓰려면 이게 필요하다.** 기본 panic 핸들러는
+/// 스택 트레이스를 찍으려고 `_dyld_get_image_header_containing_address` 를 부르는데
+/// 그 심볼이 시뮬레이터 SDK 에 없어 링크가 깨진다(실측). `simple_panic` 은 메시지만
+/// 내고 그 경로를 통째로 안 들여온다 — 안전 검사(overflow·bounds)는 그대로 산다.
+pub const panic = std.debug.simple_panic;
+
 /// 컴파일만 되고 링크에서 깨지는 경우가 있어 실제로 파싱까지 돌린다.
 export fn maru_poc_smoke() u32 {
     var buf: [1024 * 1024]u8 = undefined;

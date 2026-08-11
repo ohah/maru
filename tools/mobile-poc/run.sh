@@ -4,6 +4,8 @@
 #   sh tools/mobile-poc/run.sh ios       오프스크린 Metal + PNG
 #   sh tools/mobile-poc/run.sh ios-app   시뮬레이터에 설치·실행 + 스크린샷
 #   sh tools/mobile-poc/run.sh android   에뮬레이터 실행 + Vulkan 오프스크린 → PNG
+#   sh tools/mobile-poc/run.sh features-ios      Metal 로 여섯 기능 판정
+#   sh tools/mobile-poc/run.sh features-android  Vulkan 으로 같은 여섯 기능 판정
 #
 # **판정 기준**: 화면이 뜨는 것으로는 부족하다. 픽셀을 읽거나 디바이스 수를 세어
 # "실제로 그려졌다"를 확인한다.
@@ -76,8 +78,29 @@ android)
     $ADB pull /data/local/tmp/maru-android-poc.ppm "$OUT/maru-android-poc.ppm" >/dev/null 2>&1 \
         && python3 "$POC/ppm2png.py" "$OUT/maru-android-poc.ppm" "$OUT/maru-android-poc.png"
     ;;
+features-ios)
+    xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
+        "$POC/features_ios.m" -framework Foundation -framework Metal -o "$OUT/features-ios"
+    DEV=$(xcrun simctl list devices available | grep -m1 'iPhone' | sed 's/.*(\([A-F0-9-]*\)).*/\1/')
+    xcrun simctl boot "$DEV" 2>/dev/null || true
+    xcrun simctl spawn "$DEV" "$OUT/features-ios"
+    ;;
+features-android)
+    NDK=${ANDROID_NDK:-$HOME/Library/Android/sdk/ndk/27.1.12297006}
+    ADB=${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}
+    TC="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+    GLSLC="$NDK/shader-tools/darwin-x86_64/glslc"
+    for s in quad.vert solid.frag tex.frag; do
+        "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
+        $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+    done
+    "$TC/aarch64-linux-android30-clang" "$POC/features_vk.c" -lvulkan -o "$OUT/features-vk"
+    $ADB push "$OUT/features-vk" /data/local/tmp/features-vk >/dev/null
+    $ADB shell chmod 755 /data/local/tmp/features-vk
+    $ADB shell /data/local/tmp/features-vk
+    ;;
 *)
-    echo "usage: $0 [ios|ios-app|android]" >&2
+    echo "usage: $0 [ios|ios-app|android|features-ios|features-android]" >&2
     exit 2
     ;;
 esac

@@ -295,17 +295,17 @@ pub const VTable = struct {
     resize: *const fn (ctx: *anyopaque, handle: RuntimeHandle, size: terminal.Size, io: std.Io) anyerror!void,
 
     /// runtime routing을 끊고(late output 거부) PTY/자식/reader를 종료한다. 멱등 — 실제 탭/창 close의 수명 경계.
-    close_and_detach: *const fn (ctx: *anyopaque, handle: RuntimeHandle) void,
+    close_and_detach: *const fn (ctx: *anyopaque, handle: RuntimeHandle) CloseProgress,
 
     /// PTY/자식/reader를 종료하되 runtime routing detach는 하지 않는다(routing이 이미 없는 조기 실패/앱 종료 경로).
-    close: *const fn (ctx: *anyopaque, handle: RuntimeHandle) void,
+    close: *const fn (ctx: *anyopaque, handle: RuntimeHandle) CloseProgress,
 
     /// exit/read_error 관측 후 reader join + 큐 close로 마무리한다. `close`와 달리 "이미 종료가 관측된" 경로용.
-    finish_after_termination: *const fn (ctx: *anyopaque, handle: RuntimeHandle) void,
+    finish_after_termination: *const fn (ctx: *anyopaque, handle: RuntimeHandle) CloseProgress,
 
     /// runtime의 소유 슬롯(surface + live PTY 번들)을 해제한다. `close_and_detach`/`close`로 종료를 끝낸 뒤 부른다.
     /// 이 호출 뒤 handle과 `spawn`이 돌려준 surface 포인터는 무효다(dangling — 이후 접근 금지).
-    remove: *const fn (ctx: *anyopaque, handle: RuntimeHandle) void,
+    remove: *const fn (ctx: *anyopaque, handle: RuntimeHandle) RemoveProgress,
 
     /// 포그라운드 process group id(agent observer용). runtime이 없거나 PTY가 없으면 null. 관통 관측이지 제어가 아니다.
     foreground_process_group: *const fn (ctx: *anyopaque, handle: RuntimeHandle) ?i32,
@@ -380,20 +380,20 @@ pub const TermRuntimeBackend = struct {
         return self.vtable.resize(self.ctx, handle, size, io);
     }
 
-    pub fn closeAndDetach(self: TermRuntimeBackend, handle: RuntimeHandle) void {
-        self.vtable.close_and_detach(self.ctx, handle);
+    pub fn closeAndDetach(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        return self.vtable.close_and_detach(self.ctx, handle);
     }
 
-    pub fn close(self: TermRuntimeBackend, handle: RuntimeHandle) void {
-        self.vtable.close(self.ctx, handle);
+    pub fn close(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        return self.vtable.close(self.ctx, handle);
     }
 
-    pub fn finishAfterTermination(self: TermRuntimeBackend, handle: RuntimeHandle) void {
-        self.vtable.finish_after_termination(self.ctx, handle);
+    pub fn finishAfterTermination(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        return self.vtable.finish_after_termination(self.ctx, handle);
     }
 
-    pub fn remove(self: TermRuntimeBackend, handle: RuntimeHandle) void {
-        self.vtable.remove(self.ctx, handle);
+    pub fn remove(self: TermRuntimeBackend, handle: RuntimeHandle) RemoveProgress {
+        return self.vtable.remove(self.ctx, handle);
     }
 
     pub fn foregroundProcessGroup(self: TermRuntimeBackend, handle: RuntimeHandle) ?i32 {
@@ -569,26 +569,29 @@ const FakeTermBackend = struct {
         return self.runtime.resize(handle, size, io);
     }
 
-    fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {
         const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
         if (self.find(handle)) |rt| {
             self.runtime.detachSurface(handle);
             rt.detached = true;
             rt.closed = true;
         }
+        return .complete;
     }
 
-    fn close(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn close(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {
         const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
         if (self.find(handle)) |rt| rt.closed = true;
+        return .complete;
     }
 
-    fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {
         const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
         if (self.find(handle)) |rt| rt.closed = true;
+        return .complete;
     }
 
-    fn remove(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn remove(ctx: *anyopaque, handle: RuntimeHandle) RemoveProgress {
         const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
         for (self.entries.items, 0..) |e, i| {
             if (e.handle == handle) {
@@ -597,9 +600,10 @@ const FakeTermBackend = struct {
                 self.allocator.destroy(e.rt.surface);
                 self.allocator.destroy(e.rt);
                 _ = self.entries.orderedRemove(i);
-                return;
+                return .removed;
             }
         }
+        return .invalid;
     }
 
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {

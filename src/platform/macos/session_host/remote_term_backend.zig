@@ -464,27 +464,32 @@ pub const RemoteTermBackend = struct {
         return rr.resize(size.cols, size.rows);
     }
 
-    fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.CloseProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.get(handle)) |entry| entry.runtime.terminate(); // host runtime kill(멱등). client 객체는 remove가 회수.
+        return .complete;
     }
 
-    fn close(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn close(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.CloseProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.get(handle)) |entry| entry.runtime.terminate();
+        return .complete;
     }
 
-    fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.CloseProgress {
         _ = ctx;
         _ = handle;
         // 원격은 join할 로컬 reader 스레드가 없다(host가 소유). 종료는 drainRemote의 ended로 관측된다 — no-op.
+        return .complete;
     }
 
-    fn remove(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn remove(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.RemoveProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.runtimes.fetchRemove(handle)) |kv| {
             self.destroyRuntimeEntry(handle, kv.value, .terminate);
+            return .removed;
         }
+        return .invalid;
     }
 
     /// 원격 Term을 **terminate 없이** 회수한다(§6 app-quit=detach, e3-6). `remove`와 대칭이되 host `runtime.terminate`를 안

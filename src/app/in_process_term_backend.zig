@@ -30,6 +30,8 @@ const term_backend = @import("term_runtime_backend.zig");
 const TermRuntimeBackend = term_backend.TermRuntimeBackend;
 const RuntimeHandle = term_backend.RuntimeHandle;
 const SpawnParams = term_backend.SpawnParams;
+const CloseProgress = term_backend.CloseProgress;
+const RemoveProgress = term_backend.RemoveProgress;
 
 /// 앱 전역 `LiveSurface` 소유 레지스트리 타입 — `AppRuntime.live_registry`와 **같은** 인스턴스화라야 handle이
 /// 같은 슬롯을 가리킨다(app_runtime.zig가 이 타입으로 필드를 둔다).
@@ -168,26 +170,30 @@ pub const InProcessTermBackend = struct {
         return self.runtime.resize(handle, size, io);
     }
 
-    fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         if (self.terminalSlot(handle)) |t| t.live_pty.closeAndDetach(self.runtime);
+        return .complete;
     }
 
-    fn close(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn close(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         if (self.terminalSlot(handle)) |t| t.live_pty.close();
+        return .complete;
     }
 
-    fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         if (self.terminalSlot(handle)) |t| t.live_pty.finishAfterTermination();
+        return .complete;
     }
 
-    fn remove(ctx: *anyopaque, handle: RuntimeHandle) void {
+    fn remove(ctx: *anyopaque, handle: RuntimeHandle) RemoveProgress {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         // 번들 deinit(reader join → custom_name 해제 → surface.deinit → 슬롯 해제). closeAndDetach/close로 종료를
         // 끝낸 뒤 부른다. 미등록 handle이면 registry가 error를 돌려주고 여기서 무시한다(멱등 teardown).
-        self.registry.remove(handle) catch {};
+        self.registry.remove(handle) catch return .invalid;
+        return .removed;
     }
 
     fn foregroundProcessGroup(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {

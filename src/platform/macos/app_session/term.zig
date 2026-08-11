@@ -476,7 +476,7 @@ pub fn createTerm(
     errdefer if (is_macos and reconnected) {
         if (app_session_mod.app_remote_backend) |*rb| rb.detachTerm(id);
     } else {
-        be.remove(id);
+        if (be.remove(id) != .removed) @panic("construction rollback lost its terminal runtime");
     };
     term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
     term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
@@ -591,8 +591,10 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
             // restore staging rollback: 기존 runtime의 subscription/client state만 회수한다. terminate는 절대 보내지 않는다.
             if (app_session_mod.app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
         } else {
-            if (self.runtime_initialized) self.backendFor(term).closeAndDetach(term.rt.handle);
-            self.backendFor(term).remove(term.rt.handle);
+            if (self.runtime_initialized and self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
+                @panic("term destruction bypassed a pending close operation");
+            if (self.backendFor(term).remove(term.rt.handle) != .removed)
+                @panic("term destruction lost its terminal runtime");
         }
         term.rt.live_initialized = false;
     }

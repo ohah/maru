@@ -12770,7 +12770,7 @@ pub const AppSession = struct {
                     if (ds.ended) |ended| {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
-                                self.backendFor(term).finishAfterTermination(term.rt.handle);
+                                if (self.backendFor(term).finishAfterTermination(term.rt.handle) == .event_pending) continue;
                                 term.rt.terminated = true;
                                 // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
                                 // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).
@@ -14115,6 +14115,7 @@ pub const AppSession = struct {
 
     pub fn close(self: *AppSession) FrameSummary {
         self.total_close_events += 1;
+        var runtime_close_pending = false;
         // 창 close — 모든 탭의 모든 panel PTY를 정리한다(활성만이 아니라). runtime이 살아 있으면 detach까지,
         // 아니면 close만.
         for (self.tabs.items) |tab| {
@@ -14126,14 +14127,14 @@ pub const AppSession = struct {
                     // deinit pass2 detachTerm이 client-side만). P4 "종료 및 세션 끝내기"(app_quit_end_all)면 막지 않고 종료한다.
                     if (self.shouldDetachRemoteOnAppQuit(term)) continue;
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        self.backendFor(term).closeAndDetach(term.rt.handle);
+                        runtime_close_pending = self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending or runtime_close_pending;
                     } else if (term.rt.live_initialized) {
-                        self.backendFor(term).close(term.rt.handle);
+                        runtime_close_pending = self.backendFor(term).close(term.rt.handle) == .event_pending or runtime_close_pending;
                     }
                 }
             }
         }
-        if (self.surface_initialized) {
+        if (self.surface_initialized and !runtime_close_pending) {
             // App/window close는 더 이상 이 surface가 live input/output을 받을 수 없다는
             // 뜻이다. exit event를 기다리지 않고 close가 child를 정리한 경우에도 summary가
             // running으로 남으면 close lifecycle을 오해하므로 app session summary에서는
@@ -15880,7 +15881,8 @@ pub const AppSession = struct {
                         // 남겨야 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 단 P4 "종료 및 세션
                         // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach.
                         if (self.shouldDetachRemoteOnAppQuit(term)) continue;
-                        self.backendFor(term).closeAndDetach(term.rt.handle);
+                        if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
+                            @panic("process teardown reached an active terminal close operation");
                     }
                 }
             }
@@ -15929,7 +15931,8 @@ pub const AppSession = struct {
                         if (self.shouldDetachRemoteOnAppQuit(term)) {
                             if (app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
                         } else {
-                            self.backendFor(term).remove(term.rt.handle);
+                            if (self.backendFor(term).remove(term.rt.handle) != .removed)
+                                @panic("approved window teardown lost its terminal runtime");
                         }
                         term.rt.live_initialized = false;
                     } else if (term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder) {

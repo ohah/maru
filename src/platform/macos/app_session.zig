@@ -1438,6 +1438,9 @@ const TermRuntime = struct {
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
+    // backend close가 complete를 게시했지만 layout/remove suffix는 아직 실행 전일 수 있다. 이 래치가 있어야
+    // topology를 보존한 재시도와 destroy 단계가 같은 close request를 두 번 발행하지 않는다.
+    close_complete: bool = false,
     // 이 Term의 셸을 spawn한 시각(ns, `std.Io.Clock.awake` 단조 시계 — 코드베이스 선례). 종료 시 uptime(=exit−spawn)을
     // 재 비정상 시작 사망(grace window) 판정에 쓴다. createTerm이 스탬프. 0이면 미스탬프(테스트 등)로 취급 — uptime 판정 생략.
     spawned_at_ns: i128 = 0,
@@ -12771,6 +12774,7 @@ pub const AppSession = struct {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
                                 if (self.backendFor(term).finishAfterTermination(term.rt.handle) == .event_pending) continue;
+                                term.rt.close_complete = true;
                                 term.rt.terminated = true;
                                 // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
                                 // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).

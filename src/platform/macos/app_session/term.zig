@@ -265,6 +265,11 @@ pub fn reapTerminatedTerms(self: *AppSession) void {
 /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
 pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
     const tab = self.tabs.items[tab_index];
+    const target = pane.terms.items[term_index];
+    if (target.rt.live_initialized and target.kind != .web and !target.rt.ended_placeholder and !target.rt.close_complete) {
+        if (self.backendFor(target).closeAndDetach(target.rt.handle) == .event_pending) return;
+        target.rt.close_complete = true;
+    }
     cancelPointerGestureForTermRemoval(self, tab_index, pane, term_index);
     const term = pane.terms.orderedRemove(term_index);
     destroyTerm(self, term);
@@ -591,7 +596,7 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
             // restore staging rollback: 기존 runtime의 subscription/client state만 회수한다. terminate는 절대 보내지 않는다.
             if (app_session_mod.app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
         } else {
-            if (self.runtime_initialized and self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
+            if (!term.rt.close_complete and self.runtime_initialized and self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
                 @panic("term destruction bypassed a pending close operation");
             if (self.backendFor(term).remove(term.rt.handle) != .removed)
                 @panic("term destruction lost its terminal runtime");

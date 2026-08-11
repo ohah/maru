@@ -658,6 +658,29 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   multi-host 합산 cap/cap+1, 256 KiB scratch, iterator 종료 뒤 relookup, pin 뒤 다음 tick removal과 `closing_count` 비권위를,
   AppSession 범주는 in-process tab/window close·termination finish·invalid remove의 동기 수렴을 실제 제품 호출부에서 검증한다.
   b4 전 generation `event_pending` pump와 async close E2E는 component 수에 넣지 않는다.
+  AppSession 네 행은 (1) in-process multi-Term close의 complete 뒤 topology commit, (2) mixed tab/window에서 remote pending이면
+  sibling·active index·surface pointer·rename/paste는 byte-exact 보존하고 target routing만 exact once tombstone되며 이후
+  input/control이 mutation 0인지, native `windowShouldClose`는 deferred로 창/teardown을 보류하고 모든 target removed 뒤
+  programmatic close intent를 exact once 발행하는지, (3) termination finish의 complete→removed exact-once,
+  (4) 현존 row의 stale remove는 layout을 보존하는 typed invalid이고 backend absence/replacement는 dedicated fatal leaf인지 각각 소유한다. window 주장은 pane-only fixture가 아니라 실제
+  window-close intent/ABI를 통과한 non-last multi-window 행만 증거로 센다. 실행 중 명령 확인 전에는 graph mutation 0이고 confirm accept
+  뒤에만 같은 close owner가 graph를 시작한다. 마지막 일반 창의 app-quit 경로는 b6 전에는 새 activation 0이다. authority 여덟 행은 final-address/copy, request generation replay,
+  request-kind/disposition 표, ticket 경계, callback reentry, pin exact-once, ready-remove, closing receipt consume을 각각 고정한다.
+  identity/state seal을 분리하고 pin이 exact PRE state generation과 허용된 POST만 인정하는지, active owner 중 same/cross-target
+  callback close/remove/replace가 모두 `event_pending`·mutation 0인지 함께 검증한다.
+  sweep 여덟 행은 empty+0을 한 행으로 묶고 1/16/17/4,096, frozen max, 무한 churn, stale replacement를 독립 실행한다.
+  backend cap 행은 process-sealed singleton의 제품 `initAttachOnlyWithPool|initWithPool` exact claim, legacy `init` 제품 caller 0,
+  init 실패 abort, deinit release·재생성, fork child 선거부와
+  isolated fixture가 product singleton과 동시에 live일 수 없음을 포함하고 current/N-1 두 host의 committed+reserved
+  합계가 4,096일 때까지만 허용한다. 4,097번째는 host RPC·allocator·map·routing·layout counter가 모두 0인 채 거부되고
+  spawn과 attach/restore 실패 reservation은 각각 exact once abort된다. boundary는 `advanceClosePinned` 내부 semantic adapter caller 0,
+  frame pump/close sweep의 direct settlement caller 0, direct void teardown exact allowlist와 일반 AppSession caller 0,
+  VTable field count/name/order 불변을 함께 고정한다. ticket max 다음 발급과 invalid Pending raw는 서로 다른 전용
+  fatal-integrity reason/subprocess origin을 사용한다.
+  mixed tab/window 행은 `PendingTermCloseGraph`의 target별 preflight fault index `0..N-1`에서 reservation·backend authority·routing·topology가
+  모두 pristine이고, 최초 성공의 callback/allocation/error/branch 0 no-fail publication에서 CloseAuthority와 target routing 전체가 함께
+  tombstone되는지 검증한다. retry마다 app-session generation과 Term surface/handle의 현재 graph membership을 다시 증명하고
+  Tab/Pane pointer를 identity로 사용하지 않는다.
 
 ### 파일 탐색기 후속 두 PR gate (PR 1·PR 2 구현 완료)
 

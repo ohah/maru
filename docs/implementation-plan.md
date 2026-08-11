@@ -896,7 +896,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          `event_pending` close E2E는 b4가 소유한다. focused gate `test-session-host-2c3d-c3-3b5`는 최적화 모드마다
          neutral contract 6개, lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 7개,
          AppSession parity 4개인 unique component 39개와 boundary 1개를 exact-count한다. RED 이후 GREEN에서 범주를
-         합치거나 이름만 남기지 않으며, 각 테스트명은 실제로 관측하는 불변식을 한글로 기술한다.
+         합치거나 이름만 남기지 않으며, 각 테스트명은 실제로 관측하는 불변식을 한글로 기술한다. AppSession은
+         stable Term membership과 request generation을 봉인한 `PendingTermClose`와 all-or-none `PendingTermCloseGraph`를
+         topology mutation 전에 preflight한다. window close는 `windowShouldClose`까지 전달한 공통 `CloseProgress`로 닫기를 막고,
+         graph가 전부 removed가 된 뒤에만 one-shot programmatic close latch를 발행한다. graph는 모든 target의 fallible
+         reservation/subpermit을 먼저 완성한 뒤 callback·allocation·failure 0인 publication suffix로 authority와 routing을 함께 게시한다.
+         backend-global runtime admission도 host RPC·allocator·layout보다 먼저 one-shot reservation한다. CloseAuthority는
+         `CloseRequestKind`와 disposition을 immutable identity seal에 봉인하고 lifecycle은 별도 checked-monotonic state seal로 관리한다.
+         RemoteTermBackend의 process-sealed singleton owner와 단일 GUI-thread operation owner가 map relookup부터
+         final-address `CloseOperationPin` publication까지 선형화한다. b5의 dormant `advanceClosePinned`는 pending semantic call 0인
+         readiness projection만 반환하며 b4가 그 함수 내부 exact-one settlement adapter를 활성화한다.
       6. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고
          `idle|event_pending|drained|ended` typed progress를 `RemoteTermBackend.drainRemote`까지 연결한다. settlement/observation cleanup callback
          전후 full seal, `committed_cleanup` read/mutation guard, actual product Busy→next-tick success·surface live E2E와

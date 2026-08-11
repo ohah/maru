@@ -43,11 +43,26 @@ sh tools/mobile-poc/run.sh chrome-android    # 같은 draw-list 를 Vulkan 으�
 **두 백엔드가 픽셀 단위로 같은 값을 낸다** — opacity `G=64,128,191,255`, 자연폭 구간
 `26,64,39,90px` 가 동일하다. 6번은 스왑체인·CAMetalLayer 가 있어야 해 오프스크린 밖이다.
 
-### chrome 컴포넌트 (PoC 6)
+### chrome 컴포넌트 + 텍스트 + 아이콘 (PoC 6)
 
 `chrome_probe.zig` 가 `chrome.ui.tree` 로 탭 바·사이드바·본문·상태바를 조립하고
 `tree.build` → `paint` 로 ChromeDraw 를 얻은 뒤, 플랫폼이 그 op 만 그린다.
 **플랫폼은 배치를 모른다** — 화면 크기만 넘기고 quad 목록을 받는다.
+
+| | iOS (Metal) | Android (Vulkan) |
+|---|---|---|
+| chrome 레이아웃 | OK | OK |
+| **한글·영어 글리프** | OK | OK |
+| **SVG 아이콘 6종** | OK (6/6) | OK (6/6) |
+| safe area | 반영 | N/A(오프스크린) |
+
+**아이콘은 Zig 가 만든다.** `renderer/icon_glyph.fillCoverage` 가 등록된 SVG 자산을
+coverage 로 펴고 플랫폼은 텍스처로 올려 샘플링만 한다 — **자산이 플랫폼 코드 0줄로
+이식된다**는 증거다.
+
+**텍스트는 호스트 아틀라스를 쓴다.** Android NDK 에 폰트 래스터가 없어 macOS CoreText 로
+아틀라스를 만들어 양쪽이 같은 것을 읽는다(`make_atlas.m`). 실제 제품은 각 플랫폼이 자기
+폰트 스택으로 래스터한다. 한글 폭은 EAW 규칙대로 2셀이다.
 
 ## 실측으로 드러난 제약
 
@@ -73,11 +88,23 @@ clang/NDK 가 맡는다 — 실제 앱에서도 이 구조가 된다.
 튄다 — 증상이 원인을 안 가리키는 종류라 값을 찍어 보고서야 알았다.
 
 **`ui.paint` 는 텍스트 op 을 내지 않는다.** `resolveText` 결과를 버리고 typography/lowering
-이 따로 맡는 구조다. PoC 는 레이아웃 트리의 text entry rect 를 직접 읽어 자리를 표시한다 —
-실제 이식에서는 CoreText/FreeType 아틀라스를 샘플링해야 한다.
+이 따로 맡는 구조다. PoC 는 레이아웃 트리의 text entry rect 를 읽어 그 자리에 글리프를 그린다.
+
+**아이콘 coverage 는 RGBA8 버퍼를 요구한다.** `glyph_pixels.slotFits` 가
+`bytes_per_row >= width*4` 를 검사하는데, 단일 채널을 주면 **조용히 0을 돌려준다** —
+`filled=0/6` 이 나와도 오류가 아니라 성공처럼 보인다. 셰이더는 alpha 를 coverage 로 읽는다.
+
+**모듈 루트는 `maru.zig` 하나여야 한다.** `chrome` 과 `renderer` 를 따로 주면 둘 다
+`icons.zig` 를 상대 경로로 끌어와 "file exists in two modules" 로 깨진다.
+
+**iOS 는 safe area 를 반영해야 한다.** 창 전체에 그리면 상태바·다이내믹 아일랜드 밑으로
+UI 가 들어간다. 데스크톱에서 타이틀바 inset 을 다루는 것과 같은 종류이고, 실제 이식에서는
+이 inset 을 L1 DTO 로 chrome 에 전달해야 한다.
 
 ## 범위 밖
 
-present 페이싱, 글리프 아틀라스(진짜 텍스트), 실기기, 입력·IME, 백그라운드 생명주기,
-Android 화면 표시. 에뮬레이터 GPU 가 `llvmpipe`(소프트웨어)라 **실제 Android 드라이버에서
-같은 결과가 나오는지는 실기기로 확인해야 한다.**
+present 페이싱, **각 플랫폼의 자체 폰트 래스터**(지금은 호스트 아틀라스를 공유한다),
+실기기, 입력·IME, 백그라운드 생명주기, Android 화면 표시(오프스크린까지만).
+
+에뮬레이터 GPU 가 `llvmpipe`(소프트웨어)라 **실제 Android 드라이버에서 같은 결과가
+나오는지는 실기기로 확인해야 한다.**

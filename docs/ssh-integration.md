@@ -31,7 +31,7 @@
 ### 1.1 현재 한계 (이 문서가 다루는 출발점)
 
 - **원격 호스트 식별이 약하다.** OSC 7 cwd 보고는 `file://<host>/<path>`의 **host(authority)를 버리고 path만** 저장한다(`plans/terminal-input-and-protocols.md` ⑥, 로컬 단일 호스트 가정). 원격/로컬 cwd 구분과 호스트 인식은 후속으로 미뤄져 있다.
-- **원격 셸은 OSC 7을 보내지 않는다.** maru의 셸 통합(`shell_integration.zig`의 `_maru_osc7` precmd 훅)은 로컬 spawn 때 ZDOTDIR 주입으로만 들어가고, `maru ssh`가 원격에 심는 것은 terminfo뿐이다(`remote_install` = `infocmp`/`tic`). 따라서 ssh 세션 동안 `TerminalCore.cwd`는 접속 직전 값에 멈춰 있고, 원격 rc에 보고자가 이미 있는 환경(배포판 `vte.sh` 등)에서만 값이 온다. 원격에 보고자를 심는 것은 원격 rc 수정을 수반하므로 별도 결정 사항이다.
+- **원격 셸은 OSC 7을 보내지 않는다.** maru의 셸 통합(`shell_integration.zig`의 `_maru_osc7` precmd 훅)은 로컬 spawn 때 ZDOTDIR 주입으로만 들어가고, `maru ssh`가 원격에 심는 것은 terminfo뿐이다(`remote_install` = `infocmp`/`tic`). 따라서 ssh 세션 동안 `TerminalCore.cwd`는 접속 직전 값에 멈춰 있고, 원격 rc에 보고자가 이미 있는 환경(배포판 `vte.sh` 등)에서만 값이 온다. 원격에 보고자를 심는 것은 원격 rc 수정을 수반하므로 별도 결정 사항이다. **로컬에 있는 커널 cwd 폴백도 여기엔 안 통한다**([editor-surface.md §3.5](editor-surface.md)) — 그 폴백은 이 프로세스가 소유한 자식 프로세스를 `proc_pidinfo`로 조회하는 것이라, cwd가 원격 호스트에 있는 ssh 세션에는 애초에 물어볼 대상이 없다. 같은 이유로 session-host keep-alive의 원격 runtime도 폴백 대상이 아니다(PTY 자식이 host 데몬 프로세스 소유).
 - **tmux는 OSC를 흡수한다 — passthrough는 옵션에 매인다.** tmux는 안쪽 애플리케이션의 OSC 7을 자기 pane 경로로 흡수하고 바깥 터미널로 전달하지 않는다(`input.c`의 `case 7:` → `screen_set_path`). 타이틀·provider 알림도 같다. DCS passthrough(`ESC P tmux; …`)로 감싼 시퀀스만 통과하며 그것도 **`allow-passthrough`가 기본 off**다(`options-table.c`의 `.default_num = 0`). 즉 아래 §4의 OSC 5379 통지는 tmux 안에서 그 옵션이 켜져 있을 때만 도달하고, 꺼져 있으면 원격 인지와 그에 딸린 드롭 업로드가 함께 조용히 비활성이 된다. 이 전제는 사용자 환경 설정이라 maru가 보장할 수 없다.
 - **control socket이 세션 내내 유지되지 않는다.** `$ctl`은 `mktemp -u`로 만든 **랜덤 경로**라 로컬 Maru(터미널 앱)가 그 경로를 모른다. 게다가 **캐시 hit 경로**(재접속)에서는 control socket을 아예 만들지 않고 `exec ssh "$@"`로 끝난다 — 즉 첫 설치 접속에만 잠깐 존재한다.
 

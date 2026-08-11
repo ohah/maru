@@ -3438,6 +3438,25 @@ pub const AppSession = struct {
     git_watch_request: ?[]u8 = null,
     /// 지금 감시 중인 `.git` 경로. 저장소가 바뀌면 새로 요청한다(같은 경로면 다시 요청하지 않는다).
     git_watch_path: ?[]u8 = null,
+    /// **커널 cwd 폴백 캐시**(OSC 7이 없는 셸·TUI 실행 중 — docs/editor-surface.md §3.5). `proc_pidinfo`는
+    /// syscall이라 매 프레임 부를 수 없어 저주기로만 갱신하고, 그 사이에는 이 값을 그대로 쓴다. 경로는 길이가
+    /// 정해져 있으므로(PATH_MAX) 인라인 배열이다 — 프레임마다 도는 경로에 할당을 두지 않는다.
+    proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
+    /// 캐시에 든 경로 길이(0 = 커널도 모른다/아직 안 물었다).
+    proc_cwd_len: usize = 0,
+    /// 그 캐시가 **어느 Term의 값인가.** 활성 Term이 바뀌면 주기를 기다리지 않고 즉시 다시 묻는다 —
+    /// 안 그러면 탭을 옮긴 직후 최대 한 주기 동안 이전 터미널의 폴더로 남의 저장소를 보여 준다.
+    proc_cwd_surface_id: u64 = 0,
+    /// 마지막으로 커널에 물어본 시각(awake clock ns). **tick 카운터가 아니라 시각인 이유**는 git.zig의
+    /// `proc_cwd_poll_interval_ns` 주석에 있다 — 한 프레임에 여러 번 불리는 경로라 카운터로는 주기가 안 지켜진다.
+    proc_cwd_polled_ns: i128 = 0,
+    /// **저장소 루트 walk-up 캐시**(git.zig `repoRootForCached`). `repoRootFor`는 경로 구성요소마다 `access(2)`를
+    /// 쓰는데 그 walk가 매 프레임 돌면 blocking syscall이 초당 수천 번이 된다. 키는 cwd 문자열이고, 결과 root는
+    /// 항상 그 접두라 **길이만** 들고 있는다(별도 버퍼가 필요 없다). 0 = 저장소 아님.
+    repo_root_cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
+    repo_root_cwd_len: usize = 0,
+    repo_root_len: usize = 0,
+    repo_root_walked_ns: i128 = 0,
     /// 마지막 읽기가 실패했는가. 재시도로 성공하면 풀린다 — 실패를 '읽는 중'으로 위장하지 않는다.
     git_failed: bool = false,
     /// git 실행 파일을 못 찾았는가. 뷰를 다시 고르면 재판정한다(설치 후 껐다 켜지 않아도 되게).
@@ -6821,9 +6840,14 @@ pub const AppSession = struct {
     }
 
     /// 본문 두 쪽만 푼다. **`diff_rel_path`는 남긴다** — 새로 고칠 때 다시 읽을 대상이 그 값이다.
+    ///
+    /// **backend allocator로 푼다.** 이 두 버퍼만은 세션이 만든 것이 아니라 `DiffResult`에서 소유권을 그대로
+    /// 넘겨받은 것이다(git.zig의 diff 결과 처리). 같은 entry의 `diff_rel_path`·`diff_repo`는 세션이 dupe한
+    /// 것이라 세션 allocator로 푼다 — 한 구조체 안에서 출처가 갈리므로 여기서 섞으면 heap이 깨진다.
     pub fn freeDiffContent(self: *AppSession, entry: *dock_panel.Entry) void {
-        if (entry.diff_original.len > 0) self.allocator.free(entry.diff_original);
-        if (entry.diff_modified.len > 0) self.allocator.free(entry.diff_modified);
+        _ = self;
+        if (entry.diff_original.len > 0) git_backend_mod.worker_allocator.free(entry.diff_original);
+        if (entry.diff_modified.len > 0) git_backend_mod.worker_allocator.free(entry.diff_modified);
         entry.diff_original = &.{};
         entry.diff_modified = &.{};
     }
@@ -6847,7 +6871,7 @@ pub const AppSession = struct {
             return;
         };
         if (self.git_backend == null) {
-            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch {
+            self.git_backend = git_backend_mod.Backend.init(self.io) catch {
                 entry.diff_failed = true;
                 return;
             };
@@ -12505,7 +12529,7 @@ pub const AppSession = struct {
         agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
-        git_ops.drainGitStatus(self); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
+        git_ops.drainGitStatus(self); // 완료된 git 읽기를 싣는다 + 활성 터미널이 옮겨 갔는지 확인(저주기 cwd 조회)
         // **웹이 활성인 동안 스크롤백 매치가 살아 있으면 안 된다**(불변식). 슬라이스 ①에서는 오버레이를 통째로
         // 닫았지만, ②가 웹 탭에도 find를 주므로 이제 **닫지 않고 대상만 바꾼다** — 남겨야 할 것은 오버레이가
         // 아니라 "보이지도 않는 스크롤백을 검색하지 않는다"는 원래 의도다.
@@ -15634,7 +15658,7 @@ pub const AppSession = struct {
         // 끝난 뒤 정리된다. 결과·감시 경로도 세션 소유라 함께 푼다(이 셋은 세션 수명과 정확히 같다).
         if (self.git_backend) |*backend| backend.deinit();
         self.git_backend = null;
-        if (self.git_result) |*result| result.deinit(self.allocator);
+        if (self.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
         self.git_result = null;
         if (self.git_watch_request) |path| self.allocator.free(path);
         self.git_watch_request = null;
@@ -50791,6 +50815,136 @@ test "소스 컨트롤: 저장소의 .git을 감시 목록에 올리고 그 이�
     try std.testing.expect(!git_ops.isGitInternalPath("/repo/one/src/main.zig"));
 }
 
+// [사용자 보고 2026-08-10] "깃 히스토리 추적이 제대로 안 된다 / 활성 터미널 폴더 기준으로 추론되어야 한다".
+// 원인은 `gitRepoRoot`가 **탐색기 root를 먼저** 훑고 터미널을 폴백으로만 봤다는 것 — 탐색기에 다른 저장소를
+// 열어 두면 터미널을 아무리 옮겨도 목록이 안 따라왔다. 아래 둘이 그 순서와 재읽기 트리거를 고정한다.
+test "소스 컨트롤: 대상 저장소는 활성 터미널 cwd가 먼저다(직전 저장소보다 우선)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 이 테스트 프로세스의 cwd는 maru 저장소이고, 활성 Term은 실제 PTY라 그 자식의 cwd도 같은 곳이다.
+    // 셸 통합이 없는 테스트 PTY라 **OSC 7이 한 번도 안 온다** — 그래도 커널 폴백으로 잡혀야 한다(그게 이
+    // 슬라이스의 핵심이다: bash/fish나 claude·codex가 떠 있어도 감지되어야 한다).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const from_terminal = git_ops.gitRepoRoot(session, &buf) orelse return error.SkipZigTest; // 저장소 밖에서 돌면 건너뛴다
+    var expect_buf: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(expect_buf[0..from_terminal.len], from_terminal);
+    const expected = expect_buf[0..from_terminal.len];
+
+    // 실재하는 **다른** 저장소를 직전 값으로 기억시켜도 터미널이 이긴다(존재하지 않는 경로를 쓰면 어차피
+    // 해석에 실패해 우선순위를 증명하지 못한다 — 그래서 진짜 저장소를 하나 만든다).
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    var other_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const other = std.fmt.bufPrint(&other_buf, "{s}/.zig-cache/tmp-scm-priority", .{expected}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{other}) catch return error.SkipZigTest;
+    _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", other })) return error.SkipZigTest;
+
+    git_ops.rememberGitRepo(session, other);
+    const still = git_ops.gitRepoRoot(session, &buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, still); // 터미널 > 직전 저장소
+
+    // **사용자가 실제로 보고한 상황이 이것이다**: 탐색기에 다른 저장소를 열어 둔 채 터미널을 옮겼는데 목록이
+    // 안 따라왔다. 옛 구현은 `file_tree.roots`를 **먼저** 훑어 탐색기가 이겼다. 터미널이 이겨야 한다.
+    var opened_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const opened = try std.fmt.bufPrint(&opened_buf, "{s}/README.md", .{other});
+    try session.file_tree.recordOpened(opened, other);
+    try std.testing.expect(session.file_tree.rootCount() > 0); // 탐색기 root가 실제로 섰는지 먼저 확인한다
+    try std.testing.expectEqualStrings(other, session.file_tree.rootAt(0).?);
+    const with_root = git_ops.gitRepoRoot(session, &buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, with_root); // 터미널 > 탐색기 root
+
+    // 반대로 **터미널이 답을 못 줄 때만** 아래 순위가 산다. 활성 Term을 파일 Term으로 바꾸면(= diff를 연 상태)
+    // 터미널 기준이 사라지고 2순위(직전 저장소)가 대상을 잡는다 — 이게 없으면 diff를 여는 순간 목록이 튄다.
+    git_ops.openDiffTerm(session, other, opened, "README.md", null, .unstaged);
+    const after_diff = git_ops.gitRepoRoot(session, &buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(other, after_diff);
+}
+
+test "소스 컨트롤: 원격 세션 터미널은 로컬 저장소를 가리키지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // OSC 7은 host authority를 버리고 경로만 남기고, 커널 조회는 로컬 `ssh` 클라이언트의 cwd를 답한다. 둘 다
+    // 원격 경로를 **로컬 파일시스템에 대고** 해석하게 만들어, 로컬에 같은 경로가 있으면 남의 저장소를 원격인 척
+    // 보여 준다 — 거기서 stage/discard 하면 보고 있지도 않은 로컬 파일이 바뀐다(링크 감지가 겪은 같은 함정).
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 로컬 상태에서는 터미널이 답을 준다(이게 성립해야 아래 단언이 의미를 갖는다).
+    _ = git_ops.activeTerminalCwd(session, &buf) orelse return error.SkipZigTest;
+
+    // **관측 캐시를 손으로 조작하지 않고 실제 이스케이프로 몬다.** 직접 필드를 쓰면 다음 `refreshTermObservation`이
+    // 코어에서 다시 읽어 덮을 수 있어, 통과해도 그 이유를 믿을 수 없다(그 갱신이 안 도는 순간에만 통과한다).
+    const term = pane_ops.activePane(session).activeTerm();
+
+    // maru ssh 진입 통지 → 터미널은 더 이상 답하지 않는다(커널 폴백도 막힌다 — ssh 클라이언트의 로컬 cwd다).
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    try std.testing.expect(git_ops.activeTerminalCwd(session, &buf) == null);
+
+    // **끝나면 다시 답한다.** 이 flag가 sticky면 그 터미널에서 소스 컨트롤이 영영 죽는다.
+    try term.surface.core.write("\x1b]5379;ssh-end\x07");
+    _ = git_ops.activeTerminalCwd(session, &buf) orelse return error.TestUnexpectedResult;
+
+    // 원격 host가 보고한 OSC 7도 마찬가지다 — authority가 로컬이 아니면 그 경로는 원격 것이다.
+    try term.surface.core.write("\x1b]7;file://build-box.example.com/srv/app\x07");
+    try std.testing.expect(git_ops.activeTerminalCwd(session, &buf) == null);
+}
+
+test "소스 컨트롤: 활성 터미널이 다른 저장소로 옮겨 가면 목록·감시를 그쪽으로 옮긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    // 실제 git을 띄우지 않는다(검증 대상은 "무효화·감시 이동"이지 목록 내용이 아니다). 뷰를 켜기 전에 세워야
+    // `refreshGitStatus`가 워커를 띄우지 않는다.
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = git_ops.gitRepoRoot(session, &buf) orelse return error.SkipZigTest;
+
+    // 옛 저장소의 목록이 실려 있는 상태를 만든다(다른 저장소에서 읽어 온 결과).
+    git_ops.rememberGitRepo(session, "/somewhere/else");
+    git_ops.ensureGitWatch(session, "/somewhere/else");
+    if (session.takeFileTreeWatchRoot()) |taken| allocator.free(taken);
+    session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    session.git_failed = true;
+    session.scm_selected_row = 3;
+
+    git_ops.followActiveTerminalRepo(session);
+
+    // 남의 저장소 상태가 화면에 남으면 안 된다 — 결과·실패·선택을 전부 버리고 새 저장소로 갈아탄다.
+    try std.testing.expect(session.git_result == null);
+    try std.testing.expect(!session.git_failed);
+    try std.testing.expect(session.scm_selected_row == null);
+    try std.testing.expectEqualStrings(repo, session.git_repo.?);
+    var want_watch: [std.fs.max_path_bytes]u8 = undefined;
+    const watch = try std.fmt.bufPrint(&want_watch, "{s}/.git", .{repo});
+    try std.testing.expectEqualStrings(watch, session.peekFileTreeWatchRoot().?);
+
+    // **같은 저장소면 아무것도 하지 않는다.** 매 tick 도는 경로라 여기서 무효화가 반복되면 목록이 영영 안 뜬다.
+    if (session.takeFileTreeWatchRoot()) |taken| allocator.free(taken);
+    session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    git_ops.followActiveTerminalRepo(session);
+    try std.testing.expect(session.git_result != null);
+    try std.testing.expect(session.peekFileTreeWatchRoot() == null);
+}
+
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". **좌표 클릭부터** 그대로 태워 재현한다 — 세션 API를 직접
 // 부르는 것으로는 히트테스트·라우팅 결함이 안 잡힌다.
 // SV3a·SV3b — 소스 컨트롤 목록의 스크롤 좌표가 픽셀이 되고(SV3a) 없던 스크롤바가 생겼다(SV3b).
@@ -50851,9 +51005,9 @@ test "scm list scrolls in pixels under a fixed header and gets its own scrollbar
         try numstat.appendSlice(allocator, try std.fmt.bufPrint(&line, "1\t0\tf{d}.txt\n", .{i}));
     }
     session.git_result = .{
-        .status = try allocator.dupe(u8, status.items),
-        .numstat_staged = try allocator.dupe(u8, ""),
-        .numstat_worktree = try allocator.dupe(u8, numstat.items),
+        .status = try git_backend_mod.worker_allocator.dupe(u8, status.items),
+        .numstat_staged = try git_backend_mod.worker_allocator.dupe(u8, ""),
+        .numstat_worktree = try git_backend_mod.worker_allocator.dupe(u8, numstat.items),
         .ok = true,
     };
 
@@ -50975,11 +51129,6 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
-    // 도크를 열고 소스 컨트롤 뷰로.
-    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
-    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
-    dock_ops.setDockView(session, .source_control);
-
     // 검증 대상은 좌표→행 매핑과 "두 번째 클릭도 diff Term을 연다"이지 git 실행이 아니다. 그런데 diff Term을
     // 열면 `requestDiffContent`가 백그라운드 `diffWorker`를 띄우고, 그 스레드는 **detach라 테스트가 기다릴 수
     // 없다**. 테스트 함수가 반환할 때 워커가 아직 `git show` 중이면 그 argv 버퍼가 leak으로 판정돼 테스트가
@@ -50988,14 +51137,23 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     // backend를 미리 만들고 `shutting_down`을 세워 `submitDiff`가 워커를 **띄우지 않게** 한다. 실제 git
     // 프로세스를 fork하고 기다리는 것보다 빠르고, 환경(git 설치 여부·PATH)에 의존하지 않는다.
     // PATH를 비우는 방법은 통하지 않는다 — `git_locate`가 PATH 뒤에 `fallback_dirs`(/usr/bin 등)를 훑는다.
-    session.git_backend = try git_backend_mod.Backend.init(allocator, session.io);
+    //
+    // **이 준비는 도크를 소스 컨트롤로 바꾸기 전에 해야 한다.** 뷰 전환은 곧바로 `refreshGitStatus`를 부르고,
+    // 그 안의 `gitRepoRoot`는 활성 터미널의 cwd(= 테스트 프로세스의 cwd = maru 저장소)를 잡아 목록 워커를
+    // 띄운다. 뒤에서 backend를 새로 만들면 그 워커를 붙든 backend를 통째로 버려 leak/ABRT가 된다.
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
+
+    // 도크를 열고 소스 컨트롤 뷰로.
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
 
     // 실제 git 없이 목록만 채운다(클릭 경로 검증이 목적).
     session.git_result = .{
-        .status = try allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
-        .numstat_staged = try allocator.dupe(u8, ""),
-        .numstat_worktree = try allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
+        .numstat_staged = try git_backend_mod.worker_allocator.dupe(u8, ""),
+        .numstat_worktree = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
         .ok = true,
     };
 
@@ -51048,7 +51206,7 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
 
     // 위 테스트와 같은 이유로 backend를 `shutting_down` 상태로 미리 만든다 — diff Term을 열면 detach된
     // `diffWorker`가 뜨는데 테스트가 그 완료를 기다릴 수 없어, 반환 시점에 워커의 argv 버퍼가 leak으로 판정된다.
-    session.git_backend = try git_backend_mod.Backend.init(allocator, session.io);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
     session.git_backend.?.state.?.shutting_down = true;
 
     // gitRepoRoot가 이 저장소를 찾도록 탐색기 root 대신 임시 저장소를 흉내 낼 수는 없으므로, 클릭 경로의
@@ -51159,11 +51317,18 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    // 저장소를 목록의 root로 세운다 — 제품에서 파일을 열면 root가 추론되는 그 경로다(gitRepoRoot가 root부터 본다).
+    // 저장소를 목록의 root로 세운다 — 제품에서 파일을 열면 root가 추론되는 그 경로다.
     var opened_buf: [std.fs.max_path_bytes]u8 = undefined;
     const opened = try std.fmt.bufPrint(&opened_buf, "{s}/kept.txt", .{repo});
     try session.file_tree.recordOpened(opened, repo);
     git_ops.rememberGitRepo(session, repo);
+
+    // **대상 저장소는 이제 활성 터미널이 정한다**(docs/editor-surface.md §3.5). 이 테스트 프로세스의 터미널은
+    // maru 저장소에 서 있으므로, 그대로 두면 목록이 임시 저장소가 아니라 maru를 읽어 턴 범위가 비어 버린다.
+    // 그래서 **diff를 연 상태**를 만든다 — 활성 Term이 파일 Term이 되어 터미널 기준이 사라지고, §3.5의 2순위
+    // (직전에 목록을 읽은 저장소)가 대상을 고정한다. 제품에서 목록을 보다 diff를 연 바로 그 상태이고,
+    // 이 테스트가 그 2순위 규칙의 회귀 가드도 겸한다.
+    git_ops.openDiffTerm(session, repo, opened, "kept.txt", null, .unstaged);
 
     // 턴이 끝났다 — 그 순간의 작업트리를 굳힌다(에이전트 상태 전이가 부르는 바로 그 함수).
     agent_ops.captureTurnSnapshot(session, 1);

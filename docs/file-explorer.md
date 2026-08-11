@@ -11,6 +11,8 @@
 
 활성 터미널의 작업 디렉터리가 바뀌면 탐색기가 **그 자리를 펼쳐 보여준다**(reveal). 사용자 요청은 "탐색기가 활성 터미널 베이스 경로를 따라가면 좋겠다"였고, 구현 모델은 **root 교체가 아니라 reveal**이다.
 
+**cwd를 어디서 얻는가는 이 문서가 소유하지 않는다.** 해석 지점은 소스 컨트롤 뷰와 공유하며(`git_ops.activeTerminalCwd`), 규칙은 [editor-surface.md §3.5](editor-surface.md)의 "대상 저장소를 정하는 규칙"이 단일 출처다. 요약하면 **OSC 7 → 커널 조회** 2단이다. 2026-08-10 전까지 이 기능은 OSC 7 단독이었고, 그래서 셸 통합이 없는 셸(bash/fish)이나 화면을 리셋하는 전체화면 TUI(claude·codex)가 떠 있는 터미널에서는 **reveal이 조용히 동작하지 않았다**. 커널 폴백이 그 빈칸을 메운다. 두 뷰가 같은 지점을 쓰는 이유는 단순하다 — 탐색기가 펼친 폴더와 목록이 보는 저장소가 달라지면 안 된다.
+
 **왜 root를 갈지 않는가.** `replaceExplicitRoots`는 주석 그대로 *"기존 expanded snapshot은 root 변경의 correctness 권위가 아니므로 버리고 새 lazy scan을 예약한다"* — 즉 root 교체는 **접힘·펼침 상태를 통째로 버리고** `root_generation`을 올리며 watcher를 재등록한다. cwd는 `cd` 한 번에 바뀌는 값이라, 그걸 root에 묶으면:
 
 | 문제 | 내용 |

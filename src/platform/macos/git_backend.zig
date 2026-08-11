@@ -16,6 +16,17 @@ const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
 
+/// **이 backend가 쓰는 유일한 allocator.** State·job·argv·결과 버퍼가 전부 여기서 나온다.
+///
+/// 왜 프로세스 수명이어야 하는가: worker는 detach라 자기를 만든 창 세션보다 오래 살 수 있고, 그동안 계속
+/// 할당·해제한다. State를 refcount로 붙드는 것만으로는 부족하다 — **refcount는 객체를 붙들 뿐 그 객체가 나온
+/// allocator를 붙들지 못한다.** 세션 수명 allocator를 쓰면 세션이 먼저 끝나는 순간 worker가 파괴된 allocator를
+/// 만진다(실측: 누수 2건 + segfault).
+///
+/// **결과 버퍼도 여기서 나온다** — `Result`/`DiffResult`/`SnapshotResult`/`BranchesResult`를 넘겨받은 쪽은
+/// 반드시 이 allocator로 해제해야 한다(세션 allocator로 해제하면 heap이 깨진다). 그래서 pub이다.
+pub const worker_allocator: std.mem.Allocator = std.heap.smp_allocator;
+
 /// git 실행 파일 경로를 찾는다. **없으면 null** — 호출자는 그 사실을 화면에 말하고 실행을 시도하지 않는다.
 /// 후보 순서는 `git_locate`(순수)가 정하고, 여기서는 존재·실행권만 본다.
 pub fn locate(buf: []u8) ?[]const u8 {
@@ -199,13 +210,28 @@ pub const DiffResult = struct {
 pub const Backend = struct {
     state: ?*State = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Backend {
-        const state = try allocator.create(State);
-        errdefer allocator.destroy(state);
-        state.* = .{ .allocator = allocator, .io = io };
+    /// **allocator를 받지 않는다.** 이 backend의 worker는 detach되어 소유자(창 세션)보다 오래 살 수 있고,
+    /// 살아 있는 동안 계속 할당·해제한다. 그래서 필요한 것은 "State를 refcount로 붙드는 것"이 아니라
+    /// **allocator 자체가 worker보다 오래 사는 것**이다 — refcount는 객체를 붙들 뿐 allocator를 붙들지 못한다.
+    ///
+    /// 그 요구를 호출자에게 맡기면 조용히 어길 수 있다(실제로 테스트가 `testing.allocator`를 넘겨 어겼고,
+    /// worker가 파괴된 allocator로 argv를 할당·해제하다 누수 2건 + segfault가 났다). 그래서 **인자에서 없애고**
+    /// 프로세스 수명 allocator를 여기서 고정한다 — 이제 어길 수 있는 호출자가 존재하지 않는다.
+    ///
+    /// 대가(정직하게): 이 backend가 쓰는 메모리는 `testing.allocator`의 누수 검출 대상이 아니다. 대신 해제는
+    /// refcount가 보장하고 할당 크기가 유계다(출력 상한·`--count=200`). 이건 detach 설계가 원래 택한 대가이고,
+    /// 창을 닫을 때 background 작업을 기다리지 않는다는 이득과 맞바꾼 것이다.
+    pub fn init(io: std.Io) !Backend {
+        const state = try worker_allocator.create(State);
+        errdefer worker_allocator.destroy(state);
+        state.* = .{ .allocator = worker_allocator, .io = io };
         return .{ .state = state };
     }
 
+    /// **기다리지 않는다.** 돌고 있는 worker는 detach된 채 두고 자기 ref만 놓는다 — 창을 닫는 경로라 여기서
+    /// background 작업의 완료를 기다리면 그만큼 UI가 멈춘다. 기다릴 이유도 없다: `shutting_down`이 켜졌으니
+    /// 그 결과는 어차피 버려지고, worker가 쓰는 allocator는 프로세스 수명이라(`init` 참고) 우리가 사라져도 유효하다.
+    /// 마지막 ref를 놓는 쪽이 State를 회수한다.
     pub fn deinit(self: *Backend) void {
         const state = self.state orelse return;
         state.mutex.lockUncancelable(state.io);
@@ -955,7 +981,7 @@ test "제출 없이 열고 닫아도 안전하다(수명 계약)" {
     // 실제 spawn을 테스트에서 돌리지 않는다 — worker가 detached라 테스트 종료와 경합해 결과가 비결정적이 된다.
     // 여기서 고정하는 것은 **수명**뿐이고, argv·env는 `session.git_command`가, 파싱은 `session.git_status`가
     // 각각 헤드리스로 전수 검증한다.
-    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     backend.deinit();
     try testing.expect(backend.state == null);
 }
@@ -986,7 +1012,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
     const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
-    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
     try testing.expect(backend.submit(exe, repo, "", "", 7));
 
@@ -995,7 +1021,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
     while (spins < 1000) : (spins += 1) {
         if (backend.takeResult()) |taken| {
             var result = taken;
-            defer result.deinit(testing.allocator);
+            defer result.deinit(worker_allocator);
             try testing.expectEqual(@as(u64, 7), result.request_id);
             try testing.expect(result.ok);
             try testing.expect(std.mem.startsWith(u8, result.status, "# branch."));
@@ -1016,7 +1042,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
-    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
 
     // 커밋돼 있는 파일이라 `HEAD:` 와 작업트리 양쪽에서 읽힌다. 내용 자체가 아니라 **비지 않았는지**를 본다
@@ -1024,7 +1050,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .staged, 1));
     const staged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var staged_result = staged;
-    defer staged_result.deinit(testing.allocator);
+    defer staged_result.deinit(worker_allocator);
     try testing.expect(staged_result.ok);
     try testing.expect(staged_result.original.len > 0); // HEAD:build.zig
     try testing.expect(staged_result.modified.len > 0); // :build.zig(index)
@@ -1032,7 +1058,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .unstaged, 2));
     const unstaged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var unstaged_result = unstaged;
-    defer unstaged_result.deinit(testing.allocator);
+    defer unstaged_result.deinit(worker_allocator);
     try testing.expect(unstaged_result.ok);
     try testing.expect(unstaged_result.modified.len > 0); // 작업트리 파일(git을 안 거친다)
 
@@ -1040,7 +1066,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .untracked, 3));
     const untracked = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var untracked_result = untracked;
-    defer untracked_result.deinit(testing.allocator);
+    defer untracked_result.deinit(worker_allocator);
     try testing.expect(untracked_result.ok);
     try testing.expectEqual(@as(usize, 0), untracked_result.original.len);
     try testing.expect(untracked_result.modified.len > 0);
@@ -1049,7 +1075,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", "", .staged, 4));
     const missing = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var missing_result = missing;
-    defer missing_result.deinit(testing.allocator);
+    defer missing_result.deinit(worker_allocator);
     try testing.expect(!missing_result.ok);
 }
 
@@ -1071,19 +1097,19 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
-    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
 
     // 목록 읽기가 merge-base를 함께 준다 — 브랜치 섹션의 왼쪽이 그 커밋이다.
     try testing.expect(backend.submit(exe, repo, "", "", 1));
     var listed = waitForList(&backend) orelse return error.ListNeverCompleted;
-    defer listed.deinit(testing.allocator);
+    defer listed.deinit(worker_allocator);
     if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다
     const merge_base = std.mem.trim(u8, listed.merge_base, " \t\r\n");
 
     try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", merge_base, .branch, 2));
     var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
-    defer result.deinit(testing.allocator);
+    defer result.deinit(worker_allocator);
     try testing.expect(result.ok);
     try testing.expect(result.original.len > 0); // merge-base:build.zig
     try testing.expect(result.modified.len > 0); // HEAD:build.zig
@@ -1091,7 +1117,7 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     // hex가 아닌 rev는 애초에 spec이 안 만들어져 실패한다(인자 주입 차단이 실제로 걸리는지).
     try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", .branch, 3));
     var bad = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
-    defer bad.deinit(testing.allocator);
+    defer bad.deinit(worker_allocator);
     try testing.expectEqual(@as(usize, 0), bad.original.len);
 }
 
@@ -1125,11 +1151,11 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
 
     if (!makeConflictRepo(exe, repo)) return error.SkipZigTest;
 
-    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
     try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", .conflict, 1));
     var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
-    defer result.deinit(testing.allocator);
+    defer result.deinit(worker_allocator);
 
     try testing.expect(result.ok);
     try testing.expect(result.original.len > 0); // HEAD:f.txt — 비어 있으면 전부 추가로 보인다

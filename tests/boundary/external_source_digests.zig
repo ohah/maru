@@ -23,10 +23,21 @@ pub const inventory = [_]Proof{
     // 문자열 필드 하나와 그 복사·해제뿐이고, Client 구성이나 receiver 집합과는 무관하다.
     // RuntimeObservation의 일곱 owned buffer가 exact-capacity copy를 쓰고 progress 소비가 backing까지 해제하도록 바뀌었다.
     // import/Client 경계는 그대로라 @field count는 3을 유지한다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "4a71d9525267956725943ca0fb3eb3de35bafbb7a80710dfcd0da6d161268309" },
+    // 커널 cwd 폴백 seam(`process_cwd`)이 붙어 또 바뀐다(docs/editor-surface.md §3.5 — OSC 7이 없는 셸·TUI에서
+    // 활성 터미널의 폴더를 알아내는 경로). count는 3 그대로다 — vtable 항목 하나와 래퍼, fake 구현·계약 테스트를
+    // 더했을 뿐이고 `@field` 반사 접근이나 Client 구성·receiver 집합은 건드리지 않는다.
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "a874c6e9172164e771aa7a0b61a73e821f7b95750fee789056d21c3548e04ed2" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "6a7538dfdc98ece9f85c70584a2500e505f7d278d84716190780585fa198a7d6" },
+    // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —
+    // 더한 것은 그 대기 루프 하나뿐이다. 왜 필요한가: `shutting_down`은 새 결과를 버리게 할 뿐 돌고 있는
+    // worker를 멈추지 않아, 소유자가 자기 allocator보다 먼저 사라지는 문맥에서 그 worker의 argv 할당이
+    // 누수로 잡히고 이어지는 free가 파괴된 allocator를 건드렸다(실측: 누수 2건 + segfault).
+    // 코드 리뷰 뒤 **그 대기를 통째로 걷어내며** 또 바뀐다. count는 2 그대로다. 대기는 루트커즈가 아니었다 —
+    // 진짜 원인은 "refcount가 객체는 붙들지만 그 객체가 나온 allocator는 못 붙든다"였고, 요구되는 프로세스 수명
+    // allocator를 호출자에게 맡겨 두어 테스트가 조용히 어길 수 있었다. 이제 `init`이 인자를 받지 않고
+    // `worker_allocator`를 고정하므로 어길 호출자가 없고, 창 닫기는 예전처럼 기다리지 않는다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "744c6fa9af14adc434abbf719c145853dc2533876f5bc36566bfedb829fd3d17" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -221,7 +232,14 @@ pub const inventory = [_]Proof{
     // 그대로다 — 옮긴 블록에 `@field`가 없고, ABI가 부르는 17개는 얇은 facade로 남겼다.
     // 원격 cwd 판정(`localHostname`·`termCwdIsRemote`)과 그 소비처(폴더줄 host 접두·`linkScopesForTerm`)가 붙어
     // 또 바뀐다. count는 2 그대로다 — 새 코드는 관측 캐시의 문자열을 값으로 비교할 뿐 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "238ac6fc586896c20595859a79cadab3315b9b940ab48a40051b354e341626dd" },
+    // 커널 cwd 폴백 캐시 필드(`proc_cwd_*`)와 소스 컨트롤 저장소 판정 회귀 테스트 둘이 붙어 또 바뀐다.
+    // count는 2 그대로다 — 더한 것은 인라인 버퍼/스칼라 필드와 테스트뿐이고 `@field` 반사는 없다.
+    // 적대적 검증에서 폴백 캐시를 tick 카운터 → awake clock 시각으로 바꾸고(한 프레임에 여러 번 불리는 경로라
+    // 카운터로는 주기가 안 지켜졌다) 탐색기 root·diff 열림 회귀 단언을 더하며 또 바뀐다. count는 2 그대로다.
+    // 코드 리뷰 뒤 walk-up 캐시 필드와 원격 세션 회귀 테스트가 붙고, diff 본문 두 쪽을 backend allocator로
+    // 해제하도록 고치며 또 바뀐다(그 두 버퍼만 `DiffResult`에서 소유권을 넘겨받은 것이라 세션 allocator로
+    // 풀면 heap이 깨진다 — 실측: Invalid free). count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3437701c10a47e930bb7308b11384103c22c65090029b1d24bed2e688eea3d3f" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -237,7 +255,9 @@ pub const inventory = [_]Proof{
     // 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다 — 이사한 반사를 여기 등재해 짝을 맞춘다.
     // F9가 `app_session.zig`에서 옮긴 반사 둘이 여기 산다(위 항목의 4 → 2와 짝). 위 주석이 "등재한다"고
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "4d52157e57ed879ed84d3118348ae0ed0af2332f6d0b3c9129b4aa1c50e27e15" },
+    // git backend가 프로세스 수명 allocator를 스스로 고정하면서 `Backend.init`이 인자를 잃어 호출부가 바뀐다.
+    // count는 2 그대로다 — 호출 한 줄뿐이고 반사 접근은 건드리지 않았다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "4301cca35ff96464f4fcf2279c708920776acc5cdb2539bc5d7bc6d6bb5a0ce6" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

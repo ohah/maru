@@ -110,6 +110,14 @@ const UnsupportedPtySession = struct {
         return null;
     }
 
+    /// 비-macOS 스텁 — macOS backend의 processCwd와 구조 동기. 커널 조회 경로가 없으므로 null이고,
+    /// 호출자는 OSC 7이 준 cwd만 쓰게 된다(폴백이 없을 뿐 동작은 성립한다).
+    pub fn processCwd(self: *UnsupportedPtySession, out: []u8) ?[]const u8 {
+        _ = self;
+        _ = out;
+        return null;
+    }
+
     pub fn currentSize(self: *UnsupportedPtySession) !terminal.Size {
         _ = self;
         return error.UnsupportedPlatform;

@@ -57,6 +57,7 @@ pub const InProcessTermBackend = struct {
         .foreground_process_group = foregroundProcessGroup,
         .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
+        .process_cwd = processCwd,
         .read_observation = readObservation,
         .refresh_observation = readObservation,
         .dump_recent_text = dumpRecentText,
@@ -217,6 +218,14 @@ pub const InProcessTermBackend = struct {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         const t = self.terminalSlot(handle) orelse return 0;
         return t.live_pty.session.foregroundProcessNames(out);
+    }
+
+    /// 커널에게 이 PTY의 cwd를 직접 묻는다(OSC 7이 없는 셸·TUI 실행 중의 폴백). 세션 자체가 규칙을 갖고 있으므로
+    /// 여기서는 위임만 한다 — 파일 Term·브라우저 Term은 PTY가 없어 `terminalSlot`이 null이고 그대로 null이 된다.
+    fn processCwd(ctx: *anyopaque, handle: RuntimeHandle, out: []u8) ?[]const u8 {
+        const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
+        const t = self.terminalSlot(handle) orelse return null;
+        return t.live_pty.session.processCwd(out);
     }
 
     fn readObservation(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *term_backend.RuntimeObservation, include_foreground: bool) anyerror!void {

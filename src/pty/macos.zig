@@ -124,6 +124,48 @@ fn collectProcessTree(pid: std.c.pid_t, out: []types.ProcessResourceSample, n: *
     }
 }
 extern "c" fn getpgid(pid: c_int) c_int;
+// proc_pidinfo + PROC_PIDVNODEPATHINFO: pid 하나의 **현재 작업 디렉터리**를 커널에서 직접 읽는다. 공개 libproc
+// API(<libproc.h>)이고 iTerm2·Ghostty가 같은 목적(OSC 7이 없는 셸의 cwd 추정)으로 쓰는 사실상 표준 경로다
+// (clean-room: 공개 API 호출만 하고 레퍼런스 코드 표현은 옮기지 않는다 — docs/project-rules.md).
+//
+// **왜 필요한가**: `TerminalCore.currentCwd()`는 OSC 7 전용이고 그 보고자는 maru의 zsh precmd 훅뿐이다. 그래서
+// ⑴ bash/fish는 cwd가 처음부터 없고, ⑵ claude·codex 같은 전체화면 TUI가 시작하며 RIS(ESC c)를 보내면
+// `fullReset`이 cwd를 지워 그 프로그램이 떠 있는 내내 빈 값이 된다(실측). 커널을 물어보면 셸 종류·화면 리셋과
+// 무관하게 답이 나온다.
+extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: ?*anyopaque, buffersize: c_int) c_int;
+const proc_pidvnodepathinfo: c_int = 9;
+
+// `struct proc_vnodepathinfo`를 **손으로 미러하지 않는다.** 그 안의 `vinfo_stat`은 필드가 20개가 넘어,
+// `RusageInfoV0`(96 B·11필드) 주석이 경고한 "컴파일러가 못 잡고 값만 조용히 쓰레기가 되는" 위험이 훨씬 크다.
+// 우리가 쓰는 건 첫 멤버 `pvi_cdir`의 `vip_path` 하나뿐이므로 **바이트 버퍼 + 오프셋 상수 + 반환 크기 검증**으로
+// 읽는다. 상수 유도(<sys/proc_info.h>):
+//   vinfo_stat      = 136  (dev4+mode2+nlink2+ino8+uid4+gid4 + i64×10 + blksize4+flags4+gen4+rdev4 + qspare16)
+//   vnode_info      = 152  (vinfo_stat 136 + vi_type 4 + vi_pad 4 + fsid_t 8)
+//   vnode_info_path = 1176 (vnode_info 152 + vip_path[MAXPATHLEN=1024])
+//   proc_vnodepathinfo = 2352 (pvi_cdir + pvi_rdir)
+// 오프셋이 틀어져도 조용히 넘어가지 않도록, ⑴ `proc_pidinfo` 반환 바이트가 **정확히 2352**일 때만 읽고
+// ⑵ 아래 "자기 pid의 cwd가 getcwd와 같다" 테스트가 레이아웃 드리프트를 실행 시점에 잡는다.
+const vnodepathinfo_size: c_int = 2352;
+const vnodepathinfo_cdir_path_offset: usize = 152;
+const vnodepathinfo_max_path: usize = 1024;
+
+/// `pid`의 현재 작업 디렉터리를 `out`에 채워 돌려준다. 못 얻으면 null — **부분 경로를 돌려주지 않는다**
+/// (자른 경로로 엉뚱한 디렉터리를 저장소 루트로 오인하면 남의 저장소 상태를 보여 주게 된다).
+///
+/// 죽은 pid·권한 밖·다른 사용자 프로세스는 실패가 정상이다(호출자가 다음 후보로 넘어간다).
+pub fn processCwdForPid(pid: std.c.pid_t, out: []u8) ?[]const u8 {
+    if (pid <= 0) return null;
+    var info: [@as(usize, @intCast(vnodepathinfo_size))]u8 = undefined;
+    const rc = proc_pidinfo(@intCast(pid), proc_pidvnodepathinfo, 0, &info, vnodepathinfo_size);
+    // 부분 응답(rc < size)은 구조체가 덜 채워졌다는 뜻이라 경로 자리가 쓰레기다. 크기가 정확할 때만 읽는다.
+    if (rc != vnodepathinfo_size) return null;
+    const raw = info[vnodepathinfo_cdir_path_offset..][0..vnodepathinfo_max_path];
+    const len = std.mem.indexOfScalar(u8, raw, 0) orelse return null; // NUL이 없으면 잘린 응답이다
+    if (len == 0 or raw[0] != '/') return null; // 절대경로가 아니면 우리가 쓸 수 있는 값이 아니다
+    if (len > out.len) return null; // 자르지 않는다 — 다른 디렉터리를 가리키게 된다
+    @memcpy(out[0..len], raw[0..len]);
+    return out[0..len];
+}
 // KERN_PROCARGS2: pid의 argv/envp 덤프(공개 macOS sysctl — ps·libproc도 같은 방식). codex처럼 `#!/usr/bin/env node`
 // 스크립트로 도는 에이전트는 proc_name이 "node"라 미감지되므로, comm이 인터프리터면 argv[1] 스크립트 basename
 // ("codex")으로 분류한다. clean-room: 공개 sysctl API 사용(코드 표현 복사 아님).
@@ -1016,6 +1058,43 @@ pub const PtySession = struct {
         return if (pgid > 0) pgid else null;
     }
 
+    /// 이 터미널이 **서 있는 폴더**를 커널에서 읽는다(OSC 7이 없거나 지워졌을 때의 권위 있는 출처).
+    ///
+    /// **foreground PGID를 그대로 PID로 쓰면 안 된다.** 제품 spawn은 `/usr/bin/login`이 wrapper로 남고 실제
+    /// 셸이 같은 그룹의 child로 도는데(위 `foregroundProcessNames` 주석·테스트가 같은 사실을 고정한다), leader만
+    /// 조회하면 **login wrapper의 cwd(홈 등)** 를 읽어 "터미널이 서 있는 폴더"가 통째로 틀린다. 그러면 소스
+    /// 컨트롤 뷰가 남의 저장소를 보여 준다 — 실측으로 재현했고 아래 login wrapper 테스트가 그 회귀를 막는다.
+    ///
+    /// 조회 순서:
+    /// 1. **foreground group의 leader가 아닌 구성원** — login wrapper 아래의 실제 셸·에이전트가 여기 있다.
+    ///    파이프라인(`a | b`)이면 구성원이 여럿이지만 전부 같은 셸에서 나와 cwd를 물려받으므로 아무나 맞다.
+    /// 2. **leader 자신** — claude·vim처럼 자기 프로세스 그룹을 만든 경우 구성원이 하나뿐이고 그게 정답이다.
+    /// 3. **child_pid** — foreground를 못 얻는 과도기(그룹 전환 중, tcgetpgrp 실패)의 폴백. 이 세션의 뿌리다.
+    ///
+    /// 열거와 조회 사이의 PID 재사용은 `getpgid` 재확인으로 막는다 — 그 사이 죽은 pid 자리에 들어온 **무관한
+    /// 프로세스의 cwd**를 읽으면 조용히 엉뚱한 저장소가 잡힌다(`foregroundProcessNames`와 같은 규율).
+    ///
+    /// 닫히는 중이거나 이미 종료한 세션은 조회하지 않는다 — 죽은 pid를 훑어 봐야 실패만 쌓인다.
+    /// syscall이 있으므로 **매 프레임 부르지 않는다**(호출자가 OSC 7이 빈 경우로 한정하고 저주기로 캐시한다).
+    pub fn processCwd(self: *PtySession, out: []u8) ?[]const u8 {
+        if (out.len == 0 or self.closing.load(.acquire) or self.exited.load(.acquire)) return null;
+        if (self.foregroundProcessGroup()) |pgid| {
+            var pids: [64]c_int = undefined;
+            const listed = proc_listpgrppids(pgid, &pids, @intCast(@sizeOf(@TypeOf(pids))));
+            if (listed > 0) {
+                const count = @min(@as(usize, @intCast(listed)), pids.len);
+                for (pids[0..count]) |pid| {
+                    if (pid <= 0 or pid == pgid or getpgid(pid) != pgid) continue;
+                    if (processCwdForPid(pid, out)) |cwd| return cwd;
+                }
+            }
+            if (getpgid(pgid) == pgid) {
+                if (processCwdForPid(pgid, out)) |cwd| return cwd;
+            }
+        }
+        return processCwdForPid(self.child_pid, out);
+    }
+
     fn activeMasterFd(self: *PtySession) !std.posix.fd_t {
         // close()는 master fd를 닫지 않고 closing 플래그만 올린다(close 주석 참고).
         // 그래서 닫힌 세션 여부는 fd 음수가 아니라 closing으로 판단한다.
@@ -1098,6 +1177,35 @@ test "processResourceSample: 없는 pid는 null이다(쓰레기값을 읽지 않
     // pid 0은 커널 자리라 rusage가 실패한다. 실패를 null로 돌려주지 않으면 미초기화 구조체를 읽어
     // 7.6e12 MB 같은 값이 나온다(실측).
     try std.testing.expect(processResourceSample(0) == null);
+}
+
+test "processCwdForPid: 자기 pid의 cwd가 getcwd와 정확히 같다(레이아웃 드리프트 감지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // `proc_vnodepathinfo`를 손으로 미러하지 않고 **오프셋 상수**로 읽으므로, 그 상수가 틀리면 컴파일러가 못 잡는다.
+    // 이 테스트가 그 안전망이다 — 커널이 우리에게 준 경로와 libc가 아는 cwd가 바이트 단위로 같아야 한다.
+    // macOS SDK가 구조체 레이아웃을 바꾸면 여기서 먼저 깨진다(제품에서 남의 저장소를 보여 주기 전에).
+    // 저장소가 쓰는 libc getcwd 패턴 그대로다(`git_backend.zig` 테스트들과 동일 — std.Io엔 getcwd가 없다).
+    var expect_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const expect_ptr = std.c.getcwd(&expect_buf, expect_buf.len) orelse return error.TestUnexpectedResult;
+    const expected = std.mem.span(@as([*:0]u8, @ptrCast(expect_ptr)));
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const got = processCwdForPid(std.c.getpid(), &buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "processCwdForPid: 못 읽는 pid와 좁은 버퍼는 null이다(자른 경로를 돌려주지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // pid 0은 커널 자리라 조회가 실패한다. 실패를 null로 접지 않으면 미초기화 버퍼를 경로로 읽는다.
+    try std.testing.expect(processCwdForPid(0, &buf) == null);
+    try std.testing.expect(processCwdForPid(-1, &buf) == null);
+
+    // **자르지 않는다.** cwd가 `/Users/me/work/repo`인데 `/Users/me`로 잘라 주면 호출자가 엉뚱한 상위
+    // 디렉터리를 저장소 루트로 잡아 **남의 저장소 상태**를 보여 준다. 그래서 모자라면 실패다.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expect(processCwdForPid(std.c.getpid(), &tiny) == null);
+    var none: [0]u8 = undefined;
+    try std.testing.expect(processCwdForPid(std.c.getpid(), &none) == null);
 }
 
 test "processTreeSamples: 뿌리뿐 아니라 **자손까지** 담는다" {
@@ -1899,6 +2007,79 @@ test "foregroundProcessNames: login group leader가 사라져도 같은 foregrou
 
     try std.testing.expect(count >= 1);
     try std.testing.expect(saw_group_child);
+}
+
+// **제품 spawn 경로(login wrapper)에서 cwd를 맞게 집는가.** 위 `foregroundProcessNames` 테스트가 증명하듯
+// login 아래에서는 실제 명령이 **PGID와 다른 PID**로 돈다. foreground PGID를 그대로 pid로 써서 조회하면
+// login wrapper 자신의 cwd(홈 등)를 읽어, "터미널이 서 있는 폴더"가 통째로 틀린다 — 그러면 소스 컨트롤 뷰가
+// 남의 저장소를 보여 준다. 자식이 실제로 `cd`한 자리를 돌려주는지 고정한다.
+test "processCwd: login wrapper 아래에서도 PGID가 아니라 실제 child의 cwd를 집는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // `/` 는 어떤 테스트 실행 위치와도 다르므로, wrapper의 cwd를 읽었는지 자식의 cwd를 읽었는지 구분된다.
+    var session = try PtySession.spawn(allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "cd / && sleep 2" },
+        .login = true,
+        .size = .{ .cols = 20, .rows = 3 },
+    });
+    defer session.deinit();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var attempt: usize = 0;
+    var got: ?[]const u8 = null;
+    while (attempt < 2000) : (attempt += 1) {
+        if (session.processCwd(&buf)) |cwd| {
+            if (std.mem.eql(u8, cwd, "/")) {
+                got = cwd;
+                break;
+            }
+        }
+        sleepMillis(1); // login이 command child를 fork/exec하고 cd할 시간을 bounded하게 기다린다.
+    }
+    try std.testing.expect(got != null);
+}
+
+// **`cd` 하면 따라오는가.** 사용자가 다른 저장소로 옮기는 가장 흔한 방법이 `cd`인데, cwd를 spawn 시점에 한 번만
+// 읽고 캐시하면 영영 안 따라온다. 살아 있는 셸에 실제로 `cd`를 쳐 넣어 값이 **바뀌는지**를 본다 — 한 번 읽어
+// 맞는 것과 변화를 추적하는 것은 다르다(GUI 없이 검증할 수 있는 가장 깊은 지점).
+test "processCwd: 살아 있는 셸이 cd하면 그 자리를 따라간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var session = try PtySession.spawn(allocator, .{
+        .command = "/bin/sh",
+        .size = .{ .cols = 20, .rows = 3 },
+    });
+    defer session.deinit();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 먼저 시작 cwd(= 테스트 프로세스의 cwd)가 보이는지 확인한다. 이게 `/`가 아니어야 아래 단언이 의미를 갖는다.
+    var attempt: usize = 0;
+    var saw_start = false;
+    while (attempt < 2000) : (attempt += 1) {
+        if (session.processCwd(&buf)) |cwd| {
+            if (!std.mem.eql(u8, cwd, "/")) {
+                saw_start = true;
+                break;
+            }
+        }
+        sleepMillis(1);
+    }
+    if (!saw_start) return error.SkipZigTest; // 저장소가 `/`에 있는 비정상 환경
+
+    try session.writeInput("cd /\n");
+    attempt = 0;
+    var followed = false;
+    while (attempt < 2000) : (attempt += 1) {
+        if (session.processCwd(&buf)) |cwd| {
+            if (std.mem.eql(u8, cwd, "/")) {
+                followed = true;
+                break;
+            }
+        }
+        sleepMillis(1);
+    }
+    try std.testing.expect(followed);
 }
 
 // 실제 Darwin proc_listchildpids + KERN_PROCARGS2 경로를 고정한다. 순수 parseEnvValue 테스트만으로는

@@ -41,8 +41,20 @@ pub fn refreshGitStatus(self: *AppSession) void {
     if (self.git_inflight != 0) return;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = gitRepoRoot(self, &repo_buf) orelse return;
+    submitGitRead(self, repo);
+}
+
+/// **이미 해석한 저장소로** 읽기를 건다. `gitRepoRoot`를 다시 부르지 않는 진입점이라, 저장소를 방금 판정한
+/// 호출자(`followActiveTerminalRepo`)가 같은 walk-up과 같은 기록을 두 번 하지 않는다.
+fn submitGitRead(self: *AppSession, repo: []const u8) void {
+    if (self.dock.view != .source_control) return;
+    if (self.git_inflight != 0) return;
+    // **기억·감시를 실행 파일 탐색보다 먼저** 한다. git이 없어 아래에서 돌아가더라도 "지금 보는 저장소"는
+    // 확정된 사실이고, 여기서 안 남기면 호출자가 매 tick 다시 "저장소가 바뀌었다"로 읽어 무효화가 반복된다.
+    rememberGitRepo(self, repo);
+    ensureGitWatch(self, repo);
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     // 실행 파일을 먼저 확정한다. 못 찾으면 **실행을 시도하지 않고** 미설치로 표시한다(docs/editor-surface.md §6).
     // 후보 열거에만 PATH를 쓰고 exec는 확정된 절대경로로 한다(셸·execvp 경유 없음 = PATH hijack 차단 유지).
@@ -53,10 +65,16 @@ pub fn refreshGitStatus(self: *AppSession) void {
         return;
     };
     self.git_missing = false;
-    ensureGitWatch(self, repo);
-    rememberGitRepo(self, repo);
     self.git_request_seq += 1;
-    const snapshot = if (self.turn_ring.latest()) |snap| snap.oid() else "";
+    // **턴 스냅샷은 그것을 뜬 저장소에서만 유효하다.** 다른 저장소에 그 tree OID를 넘기면 `git diff <남의 tree>`가
+    // 그 저장소 안에서 해석돼 "이번 턴에 바뀐 것" 섹션이 엉뚱한 diff로 채워진다(같은 프로젝트의 다른 clone·
+    // worktree면 object DB에 그 tree가 실제로 있어 조용히 성공한다). `captureTurnSnapshot`이 링을 만들 때 같은
+    // 이유로 저장소를 대조하는데, **소비하는 쪽에도** 있어야 저장소를 바꾸는 모든 경로가 덮인다.
+    const snapshot = blk: {
+        const ring_repo = self.turn_ring_repo orelse break :blk "";
+        if (!std.mem.eql(u8, ring_repo, repo)) break :blk "";
+        break :blk if (self.turn_ring.latest()) |snap| snap.oid() else "";
+    };
     if (self.git_backend.?.submit(git_exe, repo, snapshot, self.turnIndexPath() orelse "", self.git_request_seq)) {
         self.git_inflight = self.git_request_seq;
     }
@@ -97,8 +115,49 @@ pub fn isGitInternalPath(path: []const u8) bool {
     return std.mem.indexOf(u8, path, "/.git/") != null;
 }
 
-/// 완료된 git 결과를 받아 세션에 싣는다. frame tick에서 호출해도 syscall이 없다.
+/// **활성 터미널이 다른 저장소로 옮겨 갔으면 목록을 다시 읽는다**(docs/editor-surface.md §3.5).
+///
+/// 이게 없으면 `refreshGitStatus`를 부르는 트리거가 도크 뷰 전환·`.git` 감시·턴 스냅샷뿐이라, 탭을 옮기거나
+/// `cd`로 다른 저장소에 들어가도 목록이 옛 저장소에 멈춰 있고 감시자도 옛 `.git`을 계속 본다.
+///
+/// 정책은 파일 탐색기의 `followActiveTerminalCwd`(file_panel.zig)와 **같은 넷**을 쓴다 — 축이 하나여야 두 뷰가
+/// 같은 저장소를 본다: ⑴ 뷰가 보일 때만 ⑵ 활성 pane·활성 Term만 ⑶ **모르면 직전 값 유지** ⑷ 바뀔 때만.
+///
+/// ⑶이 특히 중요하다: diff를 열면 활성 Term이 웹 Term이 되어 cwd가 없어지는데, 그걸 "저장소 없음"으로 읽으면
+/// 목록이 사라지거나 탐색기 root로 튄다. `gitRepoRoot`가 그 경우 직전 저장소를 유지하므로 여기서도 no-op이 된다.
+pub fn followActiveTerminalRepo(self: *AppSession) void {
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = gitRepoRoot(self, &repo_buf) orelse return; // 모르면 직전 판단을 유지한다
+    if (self.git_repo) |current| if (std.mem.eql(u8, current, repo)) return; // 바뀔 때만
+
+    // 저장소가 갈렸다. 옛 결과를 그대로 두면 새 저장소의 목록이 도착할 때까지 **남의 저장소 상태**가 화면에 남는다.
+    if (self.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
+    self.git_result = null;
+    self.git_failed = false; // 옛 저장소의 실패를 새 저장소에 물려주지 않는다
+    self.scm_scroll = .{}; // 다른 목록이므로 스크롤·선택은 의미가 없다(엉뚱한 행이 선택돼 보인다)
+    self.scm_selected_row = null;
+    // **옛 저장소로 날아간 요청을 포기한다.** 이게 없으면 두 가지가 동시에 깨진다: ⑴ `refreshGitStatus`가
+    // in-flight를 보고 그냥 돌아가 새 저장소를 영영 안 읽고, ⑵ 뒤늦게 도착한 옛 응답이 `request_id ==
+    // git_inflight`로 통과해 남의 저장소 목록으로 화면을 채운다. 0으로 두면 기존 "늦게 온 응답은 버린다"
+    // 규칙이 그대로 그 응답을 걸러낸다.
+    self.git_inflight = 0;
+    self.metal_dirty = true;
+    // 이미 해석한 저장소를 그대로 넘긴다 — `refreshGitStatus`를 부르면 같은 walk-up을 한 번 더 한다.
+    // 기억·감시 이동도 저쪽이 (실행 파일 탐색보다 먼저) 하므로 여기서 중복하지 않는다.
+    submitGitRead(self, repo);
+}
+
+/// 완료된 git 결과를 받아 세션에 싣는다(큐에서 꺼내기만 — 결과 처리 자체엔 I/O가 없다).
+///
+/// **다만 syscall이 0은 아니다.** 앞의 `followActiveTerminalRepo`가 활성 터미널의 폴더를 확인하는데, OSC 7이 없는
+/// 셸에서는 그게 커널 조회로 내려간다(≈0.5초 주기로 캐시 — `proc_cwd_poll_interval_ns`). 그리고 저장소가 바뀌었거나
+/// 아직 결과가 없으면 `refreshGitStatus`가 git 프로세스를 띄운다. 둘 다 이 함수가 생기기 전부터 tick이 지던
+/// 책임이지만("재요청은 tick이 소유한다"), 주기적 syscall이 새로 들어온 것은 사실이라 여기 적어 둔다.
 pub fn drainGitStatus(self: *AppSession) void {
+    // 활성 터미널이 다른 저장소로 옮겨 갔는지 먼저 본다 — 아래 "결과가 없으면 한 번 건다"보다 앞이어야
+    // 옛 저장소로 요청을 걸어 두고 곧바로 버리는 낭비가 없다.
+    followActiveTerminalRepo(self);
     // 복원으로 소스 컨트롤 뷰가 켜진 채 시작하면 `setDockView`를 거치지 않아 첫 읽기가 안 걸린다(실측).
     // 결과도 없고 in-flight도 없을 때만 한 번 건다 — 조건이 결과 도착으로 스스로 닫히므로 폴링이 아니다.
     if (self.dock.view == .source_control and self.git_result == null and self.git_inflight == 0 and !self.git_failed and !self.git_missing) refreshGitStatus(self);
@@ -116,20 +175,27 @@ pub fn drainGitStatus(self: *AppSession) void {
     while (backend.takeBranchesResult()) |taken| {
         var res = taken;
         self.branch_menu_pending = false;
+        defer res.deinit(git_backend_mod.worker_allocator); // backend가 준 버퍼는 backend allocator로만 해제한다
         if (!res.ok or res.text.len == 0) {
-            res.deinit(self.allocator);
             self.showNotice("브랜치 목록을 읽지 못했습니다"); // 조용히 아무 일도 안 일어나는 것보다 낫다
             continue;
         }
+        // **소유권을 인수하지 않고 복사한다.** `branch_menu_text`는 세션 소유 필드이고(테스트도 세션 allocator로
+        // 채운다) `clearBranchMenuText`가 세션 allocator로 해제한다. backend 버퍼를 그대로 실으면 한 필드에 두
+        // allocator의 메모리가 섞여, 어느 쪽으로 해제해도 한쪽이 heap을 깬다. 복사는 `--count=200`으로 유계다.
+        const owned = self.allocator.dupe(u8, res.text) catch {
+            self.showNotice("브랜치 목록을 읽지 못했습니다");
+            continue;
+        };
         settings_ops.clearBranchMenuText(self);
-        self.branch_menu_text = res.text; // 소유권 인수 — 이름 슬라이스가 이 버퍼를 빌린다
+        self.branch_menu_text = owned;
         self.branch_menu_len = git_command.collectBranches(self.branch_menu_text, &self.branch_menu_names);
         settings_ops.openBranchMenu(self);
     }
     while (backend.takeSnapshotResult()) |taken| {
         var snapshot = taken;
         self.turn_ring.push(snapshot.tree, snapshot.surface_id);
-        snapshot.deinit(self.allocator);
+        snapshot.deinit(git_backend_mod.worker_allocator);
         // 새 기준이 생겼으니 목록을 다시 읽는다(그 섹션이 이제 나온다).
         refreshGitStatus(self);
     }
@@ -155,25 +221,25 @@ pub fn drainGitStatus(self: *AppSession) void {
             }
         }
         // 짝이 없으면(그 사이 Term이 닫혔다) 결과를 그냥 버린다 — 아래 deinit이 어느 경우든 해제한다.
-        diff_result.deinit(self.allocator);
+        diff_result.deinit(git_backend_mod.worker_allocator);
         self.metal_dirty = true;
     }
     while (backend.takeResult()) |taken| {
         var result = taken;
         if (result.request_id != self.git_inflight) {
-            result.deinit(self.allocator); // 늦게 온 응답이 최신 화면을 덮지 않는다
+            result.deinit(git_backend_mod.worker_allocator); // 늦게 온 응답이 최신 화면을 덮지 않는다
             continue;
         }
         self.git_inflight = 0;
         if (!result.ok) {
             // 실패한 읽기는 결과로 삼지 않는다(섹션이 옛 시점과 섞이지 않게). in-flight만 풀고 상태를 남긴다.
-            result.deinit(self.allocator);
+            result.deinit(git_backend_mod.worker_allocator);
             self.git_failed = true;
             self.metal_dirty = true;
             continue;
         }
         self.git_failed = false;
-        if (self.git_result) |*old| old.deinit(self.allocator);
+        if (self.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
         self.git_result = result;
         // 목록이 짧아졌으면 offset을 창 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번
         // 유계화하지만 **raw 값은 그대로 남아**, 목록이 다시 길어질 때 그 자리로 튄다. 탐색기가
@@ -189,22 +255,150 @@ pub fn drainGitStatus(self: *AppSession) void {
     }
 }
 
-/// 소스 컨트롤 뷰가 볼 저장소. **탐색기 root → 활성 터미널 cwd** 순으로 찾는다.
+/// 커널 cwd 폴백을 다시 물어보는 주기. syscall이라 매 프레임 돌릴 수 없고, `cd` 반영이 사람 눈에 즉각적으로
+/// 보일 만큼은 자주여야 한다 — 에이전트 감지가 쓰는 주기와 같은 급이다(app_session.zig의 `agent_poll_ticks` 주석).
 ///
-/// 탐색기를 먼저 보는 이유는 사용자가 트리로 고른 것이 명시적 의사이기 때문이고, 없을 때 활성 터미널 cwd로
-/// 내려가는 이유는 탐색기가 애초에 그 cwd를 따라가기 때문이다(file-explorer.md §1 ET-CWD). 폴더를 열지 않은
-/// 창에서도 "지금 일하는 저장소"가 보이는 게 맞다 — 그러지 않으면 터미널이 저장소 안인데도 "git 저장소가
-/// 아닙니다"가 뜬다(손 확인에서 실제로 그랬다).
+/// **tick 카운터가 아니라 시각으로 잰다.** `activeTerminalCwd`는 한 프레임에 여러 번 불린다(탐색기 reveal +
+/// 소스 컨트롤 판정 + `refreshGitStatus` 안의 재판정). 호출마다 카운터를 올리면 실효 주기가 호출 수만큼 짧아져
+/// 주석이 주장하는 값과 달라진다 — 시각으로 재면 호출 빈도와 무관하게 이 값이 그대로 지켜진다.
+const proc_cwd_poll_interval_ns: i128 = 500 * std.time.ns_per_ms;
+
+/// **활성 터미널이 서 있는 폴더.** 소스 컨트롤 뷰와 파일 탐색기가 공유하는 단일 해석 지점이다.
 ///
-/// 결과 슬라이스는 `buf`에 담아 돌려준다(walk-up 중간 경로라 어디도 소유하지 않는다).
+/// 출처가 둘이고 순서가 있다:
+/// 1. **OSC 7**(셸이 프롬프트마다 보고). 가장 싸고 정확하다 — syscall이 없다.
+/// 2. **커널 조회**(`processCwd` seam). OSC 7이 비었을 때의 폴백이다. 비는 경우가 드물지 않다:
+///    maru의 셸 통합은 zsh 전용이라 bash/fish는 아예 안 보내고, claude·codex 같은 전체화면 TUI가 시작하며
+///    RIS(ESC c)를 보내면 `TerminalCore.fullReset`이 보고된 cwd를 지워 그 프로그램이 떠 있는 내내 비어 있다.
+///
+/// **터미널이 아닌 Term(파일·브라우저·diff)은 null이다.** 여기서 억지로 값을 만들면, diff를 여는 순간 활성 Term이
+/// 웹 Term으로 바뀌면서 저장소가 엉뚱하게 갈린다(`git_repo` 필드 주석이 적은 그 회귀다). 호출자는 null을
+/// "모른다 = 직전 판단을 유지한다"로 읽어야 하고, "저장소 없음"으로 읽으면 안 된다.
+///
+/// **원격 세션도 null이다.** 두 출처 모두 원격에서는 로컬을 가리키기 때문이다: OSC 7은 host authority를 버리고
+/// 경로만 남기므로 원격 경로가 로컬 경로처럼 보이고, 커널 조회는 애초에 로컬 `ssh` 클라이언트 프로세스의 cwd를
+/// 답한다. 그대로 쓰면 **로컬에 같은 경로가 있을 때 남의 저장소를 원격인 척 보여 주고**, 거기서 stage/discard 하면
+/// 보고 있지도 않은 로컬 파일이 바뀐다. 링크 감지가 정확히 같은 함정을 이미 겪었고 같은 판정으로 막았다
+/// (`linkScopesForTerm`·docs/ssh-integration.md §9.4). 저장소 목록은 그보다 더 위험하므로 같은 규율을 따른다.
+///
+/// **한계(정직하게)**: maru 통합을 거치지 않은 맨 `ssh`이고 원격에 OSC 7 보고자도 없으면 두 신호가 다 비어
+/// 원격임을 알 수 없다. 링크 감지와 같은 한계이며, 그 경우 커널 폴백이 로컬 cwd를 답한다.
+///
+/// **버퍼 크기를 타입으로 고정한다**(`[]u8`이 아니라 `*[max_path_bytes]u8`). 아래에서 OSC 7 보고가 버퍼보다 길면
+/// 커널 조회로 내려가는데, 그 선택은 "버퍼가 `PATH_MAX`이므로 그보다 긴 보고는 어떤 syscall도 받지 않는 경로다"에
+/// 기대고 있다. 호출자가 더 작은 버퍼를 주면 그 전제가 깨져 **멀쩡한 OSC 7 값이 조용히 버려지고** TUI 실행 중
+/// 커널이 답하는 다른 폴더가 대신 쓰인다. 관례로 두지 않고 타입으로 못 박는다 — 호출부는 이미 이 크기를 넘긴다.
+pub fn activeTerminalCwd(self: *AppSession, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    if (self.tabs.items.len == 0) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return null;
+    term_ops.refreshTermObservation(self, term, false, false);
+    // OSC 7 authority가 로컬이 아니다 → 보고된 경로는 원격 것이다.
+    if (app_session_mod.termCwdIsRemote(term)) return null;
+    // 보고자가 없어도 maru가 아는 ssh 세션이면 커널 폴백이 ssh 클라이언트를 가리키므로 물어보지 않는다.
+    if (term.rt.observation.ssh_remote_dest_present) return null;
+    if (term.rt.observation.availability != .unavailable) {
+        const cwd = term.rt.observation.cwd.items;
+        // `cwd.len > buf.len`이면 커널 조회로 내려간다. 버퍼는 `PATH_MAX`라, 그보다 긴 보고는 **실제로 열 수 없는
+        // 경로**다(어떤 syscall도 받지 않는다). 그런 값을 쓰느니 커널이 아는 진짜 cwd를 쓰는 편이 맞다.
+        if (cwd.len > 0 and cwd.len <= buf.len) {
+            @memcpy(buf[0..cwd.len], cwd);
+            return buf[0..cwd.len];
+        }
+    }
+    return procCwdCached(self, term, buf);
+}
+
+/// 커널 cwd 폴백 + 저주기 캐시. 매 프레임 `proc_pidinfo`를 부르면 OSC 7이 없는 셸에서 프레임마다 syscall이 된다.
+/// **Term이 바뀌면 주기를 기다리지 않고 즉시 다시 묻는다** — 탭을 옮겼는데 이전 터미널의 폴더가 최대 0.5초
+/// 남아 있으면 그 사이 목록이 남의 저장소를 보여 준다.
+fn procCwdCached(self: *AppSession, term: *Term, buf: []u8) ?[]const u8 {
+    const id = term.surface.id;
+    const stale_surface = self.proc_cwd_surface_id != id;
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+    if (stale_surface or now - self.proc_cwd_polled_ns >= proc_cwd_poll_interval_ns) {
+        self.proc_cwd_polled_ns = now;
+        self.proc_cwd_surface_id = id;
+        self.proc_cwd_len = 0;
+        if (self.backendFor(term).processCwd(term.rt.handle, &self.proc_cwd_buf)) |cwd| {
+            self.proc_cwd_len = cwd.len;
+        }
+    }
+    if (self.proc_cwd_len == 0 or self.proc_cwd_len > buf.len) return null;
+    @memcpy(buf[0..self.proc_cwd_len], self.proc_cwd_buf[0..self.proc_cwd_len]);
+    return buf[0..self.proc_cwd_len];
+}
+
+/// 목록이 대상으로 삼을 **저장소 루트**. 우선순위가 곧 제품 동작이라 순서를 지킨다
+/// (docs/editor-surface.md §3.5 "대상 저장소를 정하는 규칙").
+///
+/// 1. **활성 터미널의 cwd.** 사용자가 "지금 보고 있는 것"의 권위다. 파일 탐색기도 같은 축으로 움직인다
+///    (docs/file-explorer.md §1 — 활성 터미널 cwd를 따라 reveal한다). 두 뷰가 다른 저장소를 보면 안 된다.
+/// 2. **직전에 목록을 읽은 저장소**(`git_repo`). 터미널이 cwd를 모를 때 쓴다 — 특히 **diff를 열면 활성 Term이
+///    웹 Term이 되어 1번이 null**이 되는데, 그때 3번으로 떨어지면 열려 있는 diff와 목록이 다른 저장소를 가리킨다.
+/// 3. **파일 탐색기 root.** 터미널이 아직 아무것도 보고하지 않은 첫 진입(창을 열자마자 도크를 편 경우)의 바닥값.
+///
+/// 셋 다 실패하면 null이고 뷰는 빈 안내를 낸다.
 pub fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (activeTerminalCwd(self, &cwd_buf)) |cwd| {
+        // **터미널이 답했으면 그 답으로 끝난다.** 그 폴더가 저장소가 아니면 결론은 "저장소 없음"이지
+        // "아래 순위로 내려간다"가 아니다 — 내려가면 저장소 아닌 곳으로 `cd` 했을 때 옛 저장소에 영영
+        // 고정돼(2·3순위가 계속 답을 준다) 탐색기는 새 폴더를, 목록은 옛 저장소를 가리키게 된다.
+        // 아래 두 순위는 **터미널이 답을 못 준 경우**(파일 Term·원격 세션)의 것이다.
+        return repoRootForCached(self, cwd, buf);
+    }
+    // **2순위도 캐시를 거친다.** diff를 열어 둔 상태(활성 Term이 파일 Term)는 흔한데, 그때 1순위가 null이라
+    // 매 tick 여기로 내려온다 — 캐시 없이 두면 walk-up syscall이 그 상태에서 프레임마다 그대로 돈다.
+    if (self.git_repo) |current| {
+        if (repoRootForCached(self, current, buf)) |found| return found;
+    }
+    // 3순위는 캐시하지 않는다 — 1·2순위가 **둘 다** 답을 못 준 첫 진입에만 도는 경로라 매 프레임 반복되지 않고,
+    // root가 여러 개면 캐시 슬롯 하나로는 오히려 서로를 밀어낸다.
     for (self.file_tree.roots.items) |root| {
         if (repoRootFor(root.path, buf)) |found| return found;
     }
-    const term = tab_ops.activeTab(self).activeTerm();
-    term_ops.refreshTermObservation(self, term, false, false);
-    const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
-    return repoRootFor(cwd, buf);
+    return null;
+}
+
+/// `repoRootFor`의 walk-up을 저주기로 캐시한다. **매 프레임 도는 경로이기 때문**이다: `repoRootFor`는 루트까지
+/// 올라가며 경로 구성요소마다 `access(2)`를 한 번씩 쓴다(깊은 cwd면 호출당 여덟 번쯤). tick이 이걸 프레임마다
+/// 돌리면 blocking syscall이 초당 수천 번이 되어 프레임 페이싱과 배터리를 갉는다.
+///
+/// 캐시 키는 cwd 문자열이고, cwd가 그대로여도 `proc_cwd_poll_interval_ns`마다 다시 걷는다 — 같은 폴더에서
+/// `git init`을 하면 답이 바뀌므로 영구 캐시는 틀린다. 이 주기가 그 반영 지연의 상한이다.
+///
+/// 결과는 항상 cwd의 **접두**다(walk-up이 상위로만 간다). 그래서 root를 따로 저장하지 않고 길이만 들고 있는다.
+fn repoRootForCached(self: *AppSession, cwd: []const u8, buf: []u8) ?[]const u8 {
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+    const same_cwd = self.repo_root_cwd_len == cwd.len and
+        std.mem.eql(u8, self.repo_root_cwd_buf[0..self.repo_root_cwd_len], cwd);
+    if (!same_cwd or now - self.repo_root_walked_ns >= proc_cwd_poll_interval_ns) {
+        self.repo_root_walked_ns = now;
+        self.repo_root_cwd_len = 0;
+        self.repo_root_len = 0;
+        if (cwd.len <= self.repo_root_cwd_buf.len) {
+            @memcpy(self.repo_root_cwd_buf[0..cwd.len], cwd);
+            self.repo_root_cwd_len = cwd.len;
+            var probe: [std.fs.max_path_bytes]u8 = undefined;
+            if (repoRootFor(cwd, &probe)) |root| {
+                // **접두임을 확인하고서만 길이로 줄인다.** walk-up이 상위로만 가므로 접두인 것이 맞지만,
+                // 그 가정이 틀리면 `cwd[0..len]`은 조용히 **실재하는 다른 디렉터리**가 되어 남의 저장소를
+                // 보여 준다. 가정을 검사로 바꾼다 — 어긋나면 캐시하지 않고 이번 답만 그대로 쓴다.
+                if (root.len <= cwd.len and std.mem.eql(u8, root, cwd[0..root.len])) {
+                    self.repo_root_len = root.len;
+                } else {
+                    self.repo_root_cwd_len = 0; // 캐시 무효 — 다음 호출도 직접 걷는다
+                    if (root.len > buf.len) return null;
+                    @memcpy(buf[0..root.len], root);
+                    return buf[0..root.len];
+                }
+            }
+        }
+    }
+    if (self.repo_root_len == 0 or self.repo_root_len > buf.len) return null;
+    @memcpy(buf[0..self.repo_root_len], self.repo_root_cwd_buf[0..self.repo_root_len]);
+    return buf[0..self.repo_root_len];
 }
 
 /// 소스 컨트롤 목록에서 그 좌표의 **파일 행**을 찾는다(섹션 헤더는 null). 렌더와 같은 모델을 같은 입력으로

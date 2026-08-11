@@ -70,7 +70,7 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     _ = self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id);
 }

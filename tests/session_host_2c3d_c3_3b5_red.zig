@@ -64,7 +64,17 @@ test "C3-3b5 close readiness committed_cleanup은 event_pending이다" {
     try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.committed_cleanup)));
 }
 test "C3-3b5 close readiness invalid raw는 전용 fatal leaf로 닫힌다" {
-    try red();
+    const child = std.c.fork();
+    try std.testing.expect(child >= 0);
+    if (child == 0) {
+        _ = pending_owner.closeReadinessRaw(0xff);
+        std.c._exit(0);
+    }
+    var status: c_int = 0;
+    try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    const unsigned_status: u32 = @bitCast(status);
+    try std.testing.expect(std.c.W.IFEXITED(unsigned_status));
+    try std.testing.expectEqual(@as(u32, 86), std.c.W.EXITSTATUS(unsigned_status));
 }
 
 test "C3-3b5 close authority는 final address copy와 move를 거부한다" {

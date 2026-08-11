@@ -460,6 +460,120 @@ test "문서 링크 정합성: 대상 파일과 절 앵커가 실재한다" {
     try std.testing.expectEqual(@as(usize, 0), violations);
 }
 
+fn isNameChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_' or c == '/';
+}
+
+/// 링크 텍스트가 `foo.md`처럼 **파일명을 적었는가**. 적었다면 그중 하나는 URL이 가리키는
+/// 파일이어야 한다(아래 판정).
+fn textNamesSomeDoc(text: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, ".md")) |at| {
+        i = at + 3;
+        // `.md` 앞에 파일명 몸통이 있어야 파일 언급이다(그냥 "md"나 문장 끝 마침표가 아니라).
+        if (at == 0) continue;
+        const prev = text[at - 1];
+        if (!std.ascii.isAlphanumeric(prev) and prev != '-' and prev != '_') continue;
+        // 뒤가 이름 문자로 이어지면 `foo.mdx` 같은 다른 확장자다.
+        if (i < text.len and std.ascii.isAlphanumeric(text[i])) continue;
+        return true;
+    }
+    return false;
+}
+
+/// 링크 텍스트가 `want`(URL의 basename)를 파일명 경계로 언급하는가.
+fn textMentionsFile(text: []const u8, want: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, want)) |at| {
+        i = at + want.len;
+        const before_ok = at == 0 or !std.ascii.isAlphanumeric(text[at - 1]) and text[at - 1] != '-' and text[at - 1] != '_';
+        const after_ok = i >= text.len or !isNameChar(text[i]);
+        if (before_ok and after_ok) return true;
+    }
+    return false;
+}
+
+const LabelRef = struct { text: []const u8, url: []const u8, line: usize };
+
+/// 링크 텍스트와 URL을 **함께** 모은다. `collectLinks`는 URL만 보므로 별도로 둔다 —
+/// 텍스트가 가리키는 문서와 URL이 가리키는 문서가 갈리는 결함은 그 셋(파일 존재·앵커·절 번호)
+/// 어디에도 걸리지 않는다.
+fn collectLabeledLinks(arena: std.mem.Allocator, text: []const u8) ![]LabelRef {
+    var refs: std.ArrayList(LabelRef) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var line_no: usize = 0;
+    var in_fence = false;
+    while (lines.next()) |line| {
+        line_no += 1;
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if (in_fence) continue;
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, line, i, "](")) |open| {
+            i = open + 2;
+            const close = std.mem.indexOfScalarPos(u8, line, i, ')') orelse break;
+            const target = line[i..close];
+            i = close + 1;
+            if (target.len == 0) continue;
+            if (std.mem.startsWith(u8, target, "http")) continue;
+            if (target[0] == '#') continue;
+            if (std.mem.indexOfScalar(u8, target, ' ') != null) continue;
+            const hash = std.mem.indexOfScalar(u8, target, '#');
+            const path = if (hash) |h| target[0..h] else target;
+            if (!std.mem.endsWith(u8, path, ".md")) continue;
+            // 텍스트는 `[`부터 이 `](` 사이. 중첩 `[`는 마지막 것을 연다.
+            const label_open = std.mem.lastIndexOfScalar(u8, line[0..open], '[') orelse continue;
+            try refs.append(arena, .{
+                .text = line[label_open + 1 .. open],
+                .url = path,
+                .line = line_no,
+            });
+        }
+    }
+    return refs.items;
+}
+
+test "링크 텍스트가 적은 문서와 URL이 같은 문서를 가리킨다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+    var violations: usize = 0;
+    for (try collectDocPaths(arena)) |from| {
+        const body = try cwd.readFileAlloc(std.testing.io, from, arena, .limited(8 * 1024 * 1024));
+        for (try collectLabeledLinks(arena, body)) |ref| {
+            if (!textNamesSomeDoc(ref.text)) continue; // 사람이 읽는 제목이면 판정하지 않는다
+            const base = std.fs.path.basename(ref.url);
+            // **하나라도 맞으면 통과.** "A.md와 B.md의 차이는 [B.md 쪽](B.md)" 같은 문장이
+            // 정당하므로, 첫 파일명만 보고 판정하면 오탐이 된다.
+            if (textMentionsFile(ref.text, base)) continue;
+            std.debug.print(
+                "{s}:{d}: 링크 텍스트와 URL이 다른 문서를 가리킨다 — 텍스트 \"{s}\" vs URL {s}\n",
+                .{ from, ref.line, ref.text, ref.url },
+            );
+            violations += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
+test "링크 라벨 판정: 파일명 언급과 사람이 읽는 제목을 가른다" {
+    // 파일명을 적은 텍스트만 판정 대상이다.
+    try std.testing.expect(textNamesSomeDoc("foo-bar.md §3"));
+    try std.testing.expect(!textNamesSomeDoc("에디터 Surface 계약"));
+    try std.testing.expect(!textNamesSomeDoc("표를 md 형식으로")); // 몸통 없는 `md`
+    try std.testing.expect(!textNamesSomeDoc("foo.mdx 확장자"));
+
+    // 경계를 지켜 언급을 찾는다.
+    try std.testing.expect(textMentionsFile("plans/foo.md §9", "foo.md"));
+    try std.testing.expect(textMentionsFile("a.md와 b.md 비교", "b.md"));
+    try std.testing.expect(!textMentionsFile("foo-dock.md §3", "foo.md")); // 접미사가 다른 파일
+    try std.testing.expect(!textMentionsFile("foo.md.bak", "foo.md")); // 이름이 이어지면 다른 파일
+}
+
 /// 절 참조를 쓰는 쪽: 문서뿐 아니라 소스 주석도 `docs/foo.md §4.2`로 계약을 가리킨다.
 fn collectRefSourcePaths(arena: std.mem.Allocator) ![][]const u8 {
     var paths = try std.ArrayList([]const u8).initCapacity(arena, 64);

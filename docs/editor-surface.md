@@ -529,7 +529,7 @@ v1은 위 네 시점으로 충분하고, 그중 ⑶이 "터미널에서 에이�
 
 ## 4. 문서 권위와 저장 CAS
 
-> **2026-08-09 개정 — 이 절의 전제가 바뀌었다.** 아래는 "native가 전체 text 정본을 보유하지 않는다"를 전제로 쓰였으나, [native-editor-layering.md](native-editor-layering.md) §2·[native-editor-document-model.md](native-editor-document-model.md) §3.0이 **버퍼를 L2에 두어 정확히 그 정본을 만든다.** 두 귀결이 따라온다 — ⑴ **`writable CM6 owner surface 하나` 제약이 diff·코드 편집 축에서 소멸**하고, 같은 문서를 두 뷰가 공유할 수 있다([native-editor.md](native-editor.md) §2.4가 그 계약을 소유하며 `file-panel.md` §1 불변식에 명시 명령 예외가 붙는다), ⑵ **문서 text·undo·selection의 소유자가 CM6가 아니라 L2 모델**이다. 아래 `DocumentState`의 revision·fingerprint·conflict 3축은 **엔진과 무관하게 그대로 유효**하다. 마크다운 축에서는 원문이 계속 맞다.
+> **2026-08-09 개정 — 이 절의 전제가 바뀌었다.** 아래는 "native가 전체 text 정본을 보유하지 않는다"를 전제로 쓰였으나, [native-editor-layering.md](native-editor-layering.md) §2·[native-editor-document-model.md](native-editor-document-model.md) §3.0이 **버퍼를 L2에 두어 정확히 그 정본을 만든다.** 두 귀결이 따라온다 — ⑴ **`writable CM6 owner surface 하나` 제약이 diff·코드 편집 축에서 소멸**하고, 같은 문서를 두 뷰가 공유할 수 있다([native-editor-layering.md](native-editor-layering.md) §2.4가 그 계약을 소유하며 `file-panel.md` §1 불변식에 명시 명령 예외가 붙는다), ⑵ **문서 text·undo·selection의 소유자가 CM6가 아니라 L2 모델**이다. 아래 `DocumentState`의 revision·fingerprint·conflict 3축은 **엔진과 무관하게 그대로 유효**하다. 마크다운 축에서는 원문이 계속 맞다.
 
 CM6가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다(file-panel의 CM6 소스 편집과 같은 엔진). file-panel은 이미 **dirty를 브리지 신호로 Zig에 미러**하는데(file-panel §3), editor는 그 dirty 신호를 **revision/fingerprint/conflict가 있는 `DocumentRegistry`로 확장**한다 — 단일 핀 파일이 아니라 grant-root 안 여러 문서를 다루므로 identity·CAS가 필요하다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
 

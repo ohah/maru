@@ -1059,7 +1059,7 @@ pub fn build(b: *std.Build) void {
         const macos_mermaid_helper_smoke_step = b.step("macos-mermaid-helper-smoke", "Run the isolated Mermaid helper lifecycle smoke");
         macos_mermaid_helper_smoke_step.dependOn(&macos_mermaid_smoke_assert.step);
 
-        // ── E0.5A: 제품 WKWebView editor 게이트(docs/editor-surface.md §7.4).
+        // ── E0.5A: 제품 WKWebView editor 게이트(docs/editor-surface-tooling.md §7.4).
         // 하니스 asset root는 제품 dist와 분리해 스모크 전용으로 만든다 — 검증 경로(스킴 핸들러·CSP·WKWebView)는
         // 제품 그대로이고 제품 자산 집합은 건드리지 않는다.
         const macos_editor_smoke_assets = b.addSystemCommand(&.{

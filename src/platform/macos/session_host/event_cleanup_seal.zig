@@ -55,6 +55,14 @@ pub const RuntimeAdmissionSealInput = struct {
     state_raw: u8,
 };
 
+pub const RemoteBackendSingletonSealInput = struct {
+    self_addr: u64,
+    backend_addr: u64,
+    thread_id: u64,
+    owner_generation: u64,
+    lifecycle_raw: u8,
+};
+
 /// Stable event identity copied from the trusted take projection.  This value deliberately owns
 /// no pointer: addresses are identities only and must never be dereferenced by this leaf.
 pub const PendingEventIdentity = struct {

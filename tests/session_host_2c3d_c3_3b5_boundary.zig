@@ -36,6 +36,8 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     try std.testing.expectEqual(@as(usize, 0), count(backend_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 0), count(app_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.windowCloseReadiness(term.rt.handle)"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_source, "app_remote_backend.?.claimProductSingleton()"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend_source, "pub fn claimProductSingleton("));
     try std.testing.expectEqual(@as(usize, 1), count(app_source, "workspace_ops.advancePendingWindowClose(self);"));
     try std.testing.expectEqual(@as(usize, 1), count(term_source, "self.allocator.create(Term)"));
     const remote_spawn = std.mem.indexOf(u8, term_source, "rb.attachTermOnHost(") orelse return error.TestUnexpectedResult;

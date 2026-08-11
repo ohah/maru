@@ -415,7 +415,7 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     try w.writeAll("\"");
     // 파일 Term은 `surface` 줄이 아니라 이 줄의 반복 필드다(§5.0). `surfaces` 개수 필드는 **PTY surface 수**로
     // 남는다 — 옛 리더가 그 수만큼 `surface` 줄을 읽는 계약이라 건드리면 하위호환이 깨진다.
-    // diff Term은 저장하지 않는다(docs/editor-surface.md §3.5 — 그 시점 git 상태의 비교 결과라 되살리면 다른 것을
+    // diff Term은 저장하지 않는다(docs/editor-surface-dock.md §3.5 — 그 시점 git 상태의 비교 결과라 되살리면 다른 것을
     // 같은 것처럼 보여 준다). **제외는 capture 단계에서 한다** — 여기서만 빼면 이미 부여된 index가 줄어든 총계와
     // 어긋나 복원 시 그 창 전체가 fail-close된다. 여기 검사는 잘못된 입력을 그대로 흘리지 않기 위한 두 번째 방어다.
     for (pane.file_terms) |ft| if (ft.kind != .diff) try writeFileTerm(w, ft);
@@ -2544,7 +2544,7 @@ test "workspace FP16: 모르는 kind의 file-term은 그 항목만 버리고 창
 
 test "diff 파일 Term은 저장되지 않고 파일에서 읽히지도 않는다" {
     // diff는 그 시점 git 상태의 비교 결과다. 되살리면 저장할 때 보던 것과 다른 화면을 같은 것처럼 보여 주므로
-    // 저장 대상이 아니다(docs/editor-surface.md §3.5). 대신 소스 컨트롤 목록에서 다시 연다.
+    // 저장 대상이 아니다(docs/editor-surface-dock.md §3.5). 대신 소스 컨트롤 목록에서 다시 연다.
     const allocator = std.testing.allocator;
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();

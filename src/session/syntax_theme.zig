@@ -68,7 +68,7 @@ pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
     };
 }
 
-/// diff 본문의 추가·삭제 색(docs/editor-surface.md §3). syntax와 같은 규율으로 **터미널 팔레트에서 파생**한다 —
+/// diff 본문의 추가·삭제 색(docs/editor-surface-structure.md §3). syntax와 같은 규율으로 **터미널 팔레트에서 파생**한다 —
 /// 사용자가 테마를 바꾸면 diff도 같이 바뀌어야 한 창 안에서 색 언어가 갈리지 않는다. 초록=추가·빨강=삭제는
 /// git/GitHub과 같은 관례이고, 팔레트의 그 자리(bright green/red)를 그대로 쓴다.
 pub const DiffColors = struct { added: color.Rgb, removed: color.Rgb };

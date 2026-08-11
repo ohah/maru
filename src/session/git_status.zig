@@ -1,6 +1,6 @@
 //! `git status --porcelain=v2 --branch`와 `git diff --numstat` 출력의 **순수 파서**(L2, I/O 없음).
 //!
-//! 도크 소스 컨트롤 뷰(docs/editor-surface.md §3.5)가 그리는 네 섹션과 행의 데이터가 전부 여기서 나온다. git 실행은
+//! 도크 소스 컨트롤 뷰(docs/editor-surface-dock.md §3.5)가 그리는 네 섹션과 행의 데이터가 전부 여기서 나온다. git 실행은
 //! platform adapter가 하고 이 모듈은 **바이트만** 본다 — 그래야 헤드리스로 전수 검증이 되고, 파싱 실수가 프로세스
 //! 실행 코드와 섞이지 않는다.
 //!
@@ -91,7 +91,7 @@ pub const Entry = struct {
 };
 
 /// `# branch.*` 헤더. upstream이 없으면 `upstream`/`ahead`/`behind`가 비고, 그때는 "브랜치에 COMMIT 됨" 섹션을
-/// 계산할 기준이 없다(docs/editor-surface.md §3.5 — 그 섹션만 숨긴다).
+/// 계산할 기준이 없다(docs/editor-surface-dock.md §3.5 — 그 섹션만 숨긴다).
 pub const Head = struct {
     branch: ?[]const u8 = null,
     upstream: ?[]const u8 = null,
@@ -206,7 +206,7 @@ pub fn iterate(text: []const u8) Iterator {
 }
 
 /// `git diff --numstat` 한 줄. binary는 git이 `-\t-\t<경로>`로 주므로 숫자 대신 그 사실을 싣는다 —
-/// **0/0으로 거짓 표시하지 않는다**(docs/editor-surface.md §3.5).
+/// **0/0으로 거짓 표시하지 않는다**(docs/editor-surface-dock.md §3.5).
 pub const LineDelta = struct {
     added: u32 = 0,
     removed: u32 = 0,
@@ -398,7 +398,7 @@ test "손상 입력은 조용히 건너뛴다(부분 표시가 잘못된 표시�
 /// `git diff --name-status` 한 줄: 상태 문자 + 경로(rename이면 옛 경로와 새 경로 둘).
 ///
 /// **왜 별도 파서인가**: porcelain v2(`iterate`)는 작업트리·index 상태를 말하고, 이건 **커밋 범위**가 바꾼 것을
-/// 말한다("브랜치에 COMMIT 됨" 섹션 — docs/editor-surface.md §3.5). 같은 파일이 두 곳에 다른 상태로 나올 수 있어
+/// 말한다("브랜치에 COMMIT 됨" 섹션 — docs/editor-surface-dock.md §3.5). 같은 파일이 두 곳에 다른 상태로 나올 수 있어
 /// 하나의 파서로 뭉개면 안 된다.
 pub const NameStatusEntry = struct {
     /// `M`·`A`·`D`·`R`(rename)·`C`(copy) 등 git이 준 첫 글자.

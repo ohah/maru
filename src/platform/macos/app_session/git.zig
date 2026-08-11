@@ -56,7 +56,7 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
-    // 실행 파일을 먼저 확정한다. 못 찾으면 **실행을 시도하지 않고** 미설치로 표시한다(docs/editor-surface.md §6).
+    // 실행 파일을 먼저 확정한다. 못 찾으면 **실행을 시도하지 않고** 미설치로 표시한다(docs/editor-surface-tooling.md §6).
     // 후보 열거에만 PATH를 쓰고 exec는 확정된 절대경로로 한다(셸·execvp 경유 없음 = PATH hijack 차단 유지).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse {
@@ -115,7 +115,7 @@ pub fn isGitInternalPath(path: []const u8) bool {
     return std.mem.indexOf(u8, path, "/.git/") != null;
 }
 
-/// **활성 터미널이 다른 저장소로 옮겨 갔으면 목록을 다시 읽는다**(docs/editor-surface.md §3.5).
+/// **활성 터미널이 다른 저장소로 옮겨 갔으면 목록을 다시 읽는다**(docs/editor-surface-dock.md §3.5).
 ///
 /// 이게 없으면 `refreshGitStatus`를 부르는 트리거가 도크 뷰 전환·`.git` 감시·턴 스냅샷뿐이라, 탭을 옮기거나
 /// `cd`로 다른 저장소에 들어가도 목록이 옛 저장소에 멈춰 있고 감시자도 옛 `.git`을 계속 본다.
@@ -247,7 +247,7 @@ pub fn drainGitStatus(self: *AppSession) void {
         scroll_ops.clampScmScroll(self);
         self.metal_dirty = true;
         // 진단은 **수치만** 남긴다 — 경로·브랜치명·상태 원문은 사용자 저장소 내용이라 로그에 넣지 않는다
-        // (docs/editor-surface.md §8.3의 민감정보 경계와 같은 규율).
+        // (docs/editor-surface-tooling.md §8.3의 민감정보 경계와 같은 규율).
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.scm).info(
             "git status bytes={d}/{d}/{d} truncated={} req={d}",
             .{ result.status.len, result.numstat_staged.len, result.numstat_worktree.len, result.truncated, result.request_id },
@@ -330,7 +330,7 @@ fn procCwdCached(self: *AppSession, term: *Term, buf: []u8) ?[]const u8 {
 }
 
 /// 목록이 대상으로 삼을 **저장소 루트**. 우선순위가 곧 제품 동작이라 순서를 지킨다
-/// (docs/editor-surface.md §3.5 "대상 저장소를 정하는 규칙").
+/// (docs/editor-surface-dock.md §3.5 "대상 저장소를 정하는 규칙").
 ///
 /// 1. **활성 터미널의 cwd.** 사용자가 "지금 보고 있는 것"의 권위다. 파일 탐색기도 같은 축으로 움직인다
 ///    (docs/file-explorer.md §1 — 활성 터미널 cwd를 따라 reveal한다). 두 뷰가 다른 저장소를 보면 안 된다.
@@ -500,7 +500,7 @@ pub fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
 }
 
 /// 소스 컨트롤 행을 눌렀을 때 그 비교를 여는 지점. **유일성 키는 `(경로, kind, base)`**라 같은 파일의
-/// 스테이지·미스테이지 diff가 서로를 덮지 않는다(docs/editor-surface.md §3.5).
+/// 스테이지·미스테이지 diff가 서로를 덮지 않는다(docs/editor-surface-dock.md §3.5).
 pub fn openDiffTerm(
     self: *AppSession,
     repo: []const u8,

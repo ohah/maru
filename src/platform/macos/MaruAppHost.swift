@@ -692,7 +692,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           }
         },
         diff: {
-          // E1: 인자가 없다 — 무엇을 비교할지는 그 Term의 entry가 정한다(docs/editor-surface.md §6).
+          // E1: 인자가 없다 — 무엇을 비교할지는 그 Term의 entry가 정한다(docs/editor-surface-tooling.md §6).
           open: function () { return window.maru.request("maru.diff.open"); }
         },
         menu: {

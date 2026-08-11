@@ -1216,7 +1216,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         var persisted_index: usize = 0;
         for (pane.terms.items, 0..) |term, term_i| {
             if (term.file_entry) |entry| {
-                // **diff는 persisted 시퀀스에 들지 않는다**(docs/editor-surface.md §3.5 — 저장하지 않는다).
+                // **diff는 persisted 시퀀스에 들지 않는다**(docs/editor-surface-dock.md §3.5 — 저장하지 않는다).
                 // 여기서 빼지 않고 writer에서만 빼면, 이미 부여한 index가 줄어든 총계와 안 맞아 복원 시
                 // `index >= total`로 **그 창 전체가 fail-close**된다(리뷰에서 잡힌 결함). 자리를 아예 만들지
                 // 않으므로 브라우저 `insert_after`도 같은 기준을 본다.

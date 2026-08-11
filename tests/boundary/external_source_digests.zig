@@ -23,7 +23,7 @@ pub const inventory = [_]Proof{
     // 문자열 필드 하나와 그 복사·해제뿐이고, Client 구성이나 receiver 집합과는 무관하다.
     // RuntimeObservation의 일곱 owned buffer가 exact-capacity copy를 쓰고 progress 소비가 backing까지 해제하도록 바뀌었다.
     // import/Client 경계는 그대로라 @field count는 3을 유지한다.
-    // 커널 cwd 폴백 seam(`process_cwd`)이 붙어 또 바뀐다(docs/editor-surface.md §3.5 — OSC 7이 없는 셸·TUI에서
+    // 커널 cwd 폴백 seam(`process_cwd`)이 붙어 또 바뀐다(docs/editor-surface-dock.md §3.5 — OSC 7이 없는 셸·TUI에서
     // 활성 터미널의 폴더를 알아내는 경로). count는 3 그대로다 — vtable 항목 하나와 래퍼, fake 구현·계약 테스트를
     // 더했을 뿐이고 `@field` 반사 접근이나 Client 구성·receiver 집합은 건드리지 않는다.
     .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "a874c6e9172164e771aa7a0b61a73e821f7b95750fee789056d21c3548e04ed2" },
@@ -37,7 +37,7 @@ pub const inventory = [_]Proof{
     // 진짜 원인은 "refcount가 객체는 붙들지만 그 객체가 나온 allocator는 못 붙든다"였고, 요구되는 프로세스 수명
     // allocator를 호출자에게 맡겨 두어 테스트가 조용히 어길 수 있었다. 이제 `init`이 인자를 받지 않고
     // `worker_allocator`를 고정하므로 어길 호출자가 없고, 창 닫기는 예전처럼 기다리지 않는다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "744c6fa9af14adc434abbf719c145853dc2533876f5bc36566bfedb829fd3d17" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "e7bf4d877f416a39ae241622d618a21ae4a94457889868bcb4ddbce0845f1214" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -245,7 +245,7 @@ pub const inventory = [_]Proof{
     // sidebar-groups.md 분할로 주석의 단일 출처 경로가 바뀌어 움직였다(§9 → plans/sidebar-groups.md,
     // §12~§13 → sidebar-groups-pinning.md, §14 → sidebar-groups-top-level.md).
     // count는 2 그대로다 — `@field` 반사도 선언도 손대지 않았고 바뀐 것은 주석 문자열뿐이다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "cad1001eb5f89612dda06fd882bf5f6fecdb380a3880e6a16e7b81d6346d36e5" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "775126cecc501fa012e9cfb69705a64153a6dbcfa9a029d8ffeca7d0aca91725" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -263,10 +263,12 @@ pub const inventory = [_]Proof{
     // 했는데 항목이 없어, 리소스 팝오버가 이 파일을 건드리자 미등재로 걸렸다.
     // git backend가 프로세스 수명 allocator를 스스로 고정하면서 `Backend.init`이 인자를 잃어 호출부가 바뀐다.
     // count는 2 그대로다 — 호출 한 줄뿐이고 반사 접근은 건드리지 않았다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "4301cca35ff96464f4fcf2279c708920776acc5cdb2539bc5d7bc6d6bb5a0ce6" },
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "8b5d5e0121b603cb54f5a985220fee475b8dc52a3f707a9682780f7625cbc539" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
-    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "76d735b5c05625096e34dad6f9523d1fc286f9848ca4eccc4baee69693c40bdf" },
+    // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →
+    // editor-surface-structure.md, §9 → plans/editor-surface.md). count는 1 그대로다 — 주석 문자열만 달라졌다.
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "0f097f6549b745484f6decde55037ab082b1b8e2b7e12dbb34c5fd5d52a2139c" },
     // control-plane.md 분할로 모듈 주석의 단일 출처 경로가 바뀌어 움직였다(§4.1·§4.3 → control-plane-protocol.md,
     // §16 → control-plane-implementation.md). digest는 비-test 토큰 전체를 잠그므로 주석만 고쳐도 값이 바뀐다.
     // count는 1 그대로다 — `@field` 반사는 늘지도 줄지도 않았고 선언은 한 줄도 안 건드렸다.

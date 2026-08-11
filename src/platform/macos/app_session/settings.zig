@@ -1370,7 +1370,7 @@ pub fn openBranchMenu(self: *AppSession) void {
 }
 
 /// 고른 브랜치를 **활성 터미널에 명령으로 넣어 준다.** 우리가 checkout을 실행하지 않는 이유는
-/// `docs/editor-surface.md` §6의 읽기 전용 계약이다 — hook 실행·index 쓰기는 그 밖이고, 실행 주체가
+/// `docs/editor-surface-tooling.md` §6의 읽기 전용 계약이다 — hook 실행·index 쓰기는 그 밖이고, 실행 주체가
 /// 셸이어야 dirty tree·충돌·hook 출력이 평소처럼 사용자에게 보인다. 엔터는 사용자가 친다.
 pub fn applyBranchMenuSelection(self: *AppSession, index: usize) void {
     if (index >= self.branch_menu_len) return;

@@ -35,7 +35,7 @@ pub const file_open_link_method = "maru.file.openLink";
 pub const file_render_mermaid_method = "maru.file.renderMermaid";
 pub const file_revoke_mermaid_method = "maru.file.revokeMermaid";
 pub const file_renderer_ready_method = "maru.file.rendererReady";
-/// E1: diff 본문 두 쪽을 가져온다(docs/editor-surface.md §6). **인자가 없다** — 무엇을 비교할지는 그 Term의
+/// E1: diff 본문 두 쪽을 가져온다(docs/editor-surface-tooling.md §6). **인자가 없다** — 무엇을 비교할지는 그 Term의
 /// entry(경로, base)가 이미 정하고 있고, 웹이 경로를 고를 수 있게 하면 그 순간 이 method가 "아무 파일이나 읽는
 /// 창구"가 된다. 자기 것만 읽는 `readSelfImage`와 같은 최소 capability 규율이다.
 pub const diff_open_method = "maru.diff.open";

@@ -1,4 +1,4 @@
-//! E0.5A **제품 WKWebView 게이트**(docs/editor-surface.md §7.4).
+//! E0.5A **제품 WKWebView 게이트**(docs/editor-surface-tooling.md §7.4).
 //!
 //! 제품 스킴 핸들러(`MaruAppSchemeHandler`)·제품 CSP(Zig `AppAssetRole`)·실제 `WKWebView`로 diff 하니스를 로드해
 //! `@codemirror/merge`가 도는지 처음 확인한다. 하니스 asset root만 스모크 소유이고 **경로는 제품 그대로**다.

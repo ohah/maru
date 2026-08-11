@@ -153,7 +153,7 @@ config가 이미 소유한다. 그것도 "기본값이 실제로 불편하다"�
 로컬 브랜치 목록(`for-each-ref --sort=-committerdate`, 최근 순 상한 200개 중 메뉴에는 12개)을 컨텍스트 메뉴로 띄우고,
 고르면 활성 터미널에 **`git switch <name>`을 입력해 준다.** 엔터는 사용자가 친다.
 
-**우리가 checkout을 실행하지 않는 이유**는 `docs/editor-surface.md` §6의 읽기 전용 계약이다 — write git은
+**우리가 checkout을 실행하지 않는 이유**는 `docs/editor-surface-tooling.md` §6의 읽기 전용 계약이다 — write git은
 `git_read` grant 밖이고, hook 실행·index 쓰기를 우리가 하지 않겠다고 정해 둔 것이다. 실행 주체가 셸이면
 dirty tree·충돌·hook 출력이 **평소처럼 사용자에게 보인다**는 이점도 같이 온다.
 

@@ -531,6 +531,12 @@ pub fn updateFileTree(self: *AppSession) !void {
         if (result.kind == .root_validation) {
             root_result: {
                 const pending = self.file_tree_root_validation orelse break :root_result;
+                // **자동 전환이면 이 블록의 모든 알림을 끈다.** submit 시점 one-shot은 그때 소비돼 여기까진
+                // 안 온다 — 그대로 두면 사용자가 고른 적 없는 전환이 실패했을 때 "선택한 폴더를 열 수
+                // 없습니다"가 뜬다(고른 적이 없으니 무엇을 잘못했는지 알 수 없는 알림이다).
+                const restore_auto = self.file_tree_root_auto_follow;
+                self.file_tree_root_auto_follow = pending.auto;
+                defer self.file_tree_root_auto_follow = restore_auto;
                 if (pending.request_id != result.request_id or
                     pending.expected_root_generation != result.expected_root_generation or
                     @intFromEnum(pending.operation) != result.root_operation or
@@ -638,6 +644,11 @@ pub fn updateFileTree(self: *AppSession) !void {
                 }
                 result.validated_dir = null; // first scan worker now owns the descriptor capability.
                 commitFileTreeCandidate(self, &candidate, &candidate_rows);
+                // **자동 전환이 커밋되면 그 cwd로 한 번 더 reveal한다.** 전환은 비동기라 요청 시점엔 새 root가
+                // 없었고, 그때의 reveal은 거절됐다. 여기서 재시도하지 않으면 `~/repo/src/deep`에서 `cd` 했을 때
+                // 트리가 `repo`에 접힌 채로 멈춘다. **one-shot이라 루프가 되지 않는다** — 새 root가 realpath로
+                // 정규화돼 cwd를 안 품는 경우(심볼릭 링크)에도 재시도는 정확히 한 번이다.
+                if (pending.auto) self.file_tree_auto_follow_reveal_pending = true;
                 reportFileTreeRootOutcome(self, switch (pending.operation) {
                     .replace => .committed_replace,
                     .add => .committed_add,
@@ -898,11 +909,14 @@ pub fn openProjectedFileTreePath(
 
 /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 blocking
 /// path lookup/read는 worker에만 있고, main actor는 queue/snapshot 작업과 result descriptor close만 수행한다.
-/// ET-CWD(docs/file-explorer.md §1): 활성 터미널 cwd가 **바뀌면** 탐색기에서 그 자리를 펼친다(reveal).
-/// root를 갈지 않으므로 접힘 상태·watcher·영속이 그대로다 — 그 판단의 근거는 file-explorer §1의 기각 표에 있다.
+/// ET-CWD(docs/file-explorer.md §1): 활성 터미널 cwd가 **바뀌면** 탐색기가 그 자리를 보여 준다.
+///
+/// **root 안이면 reveal, root 밖이면 root 교체**다(2026-08-11 사용자 결정). 안쪽 이동은 접힘 상태·watcher·영속을
+/// 하나도 안 건드리고(옛 기각 표가 지키려던 것), 바깥으로 나갈 때만 그 대가를 치른다 — 그렇게 하지 않으면 소스
+/// 컨트롤 뷰는 저장소 B로 가는데 트리는 A에 남아 두 뷰가 갈린다.
 ///
 /// 정책 넷을 여기서 전부 집행한다: 도크가 보일 때만 / 활성 pane·활성 Term의 cwd만 / cwd가 없으면 직전
-/// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다). root 밖 경로는 `revealDirectory`가 무시한다.
+/// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다).
 pub fn followActiveTerminalCwd(self: *AppSession) void {
     if (!dock_ops.dockVisible(self)) return;
     if (self.tabs.items.len == 0) return;
@@ -912,7 +926,12 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
     // 파일·브라우저 탭은 cwd가 없어 null이고 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = git_ops.activeTerminalCwd(self, &cwd_buf) orelse return;
-    if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
+    // 방금 커밋된 자동 전환의 재시도 one-shot. 같은 cwd라도 이번 한 번은 통과시켜 새 root 안에서 펼친다.
+    const retry_after_switch = self.file_tree_auto_follow_reveal_pending;
+    self.file_tree_auto_follow_reveal_pending = false;
+    if (!retry_after_switch) {
+        if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
+    }
     const owned = self.allocator.dupe(u8, cwd) catch return;
     const reveal = self.file_tree.revealDirectory(owned) catch {
         self.allocator.free(owned);
@@ -920,7 +939,13 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
     };
     // **root 밖이면 root를 갈아끼운다**(2026-08-11 사용자 결정 — file-explorer.md §1). 이전에는 여기서 아무것도
     // 하지 않았는데, 소스 컨트롤 뷰가 어느 저장소로든 따라가게 되면서 두 뷰가 서로 다른 곳을 가리키게 됐다.
-    if (reveal == .rejected) followRootSwitch(self, cwd);
+    if (reveal == .rejected and !retry_after_switch and !followRootSwitch(self, cwd)) {
+        // 검증 슬롯이 차 있어 **못 걸었다**. 여기서 `followed_cwd`를 갱신하면 이 cwd는 "따라간 것"으로
+        // 표시돼 다음 `cd` 전까지 영영 재시도되지 않는다 — 시작 직후 복원 검증이 도는 동안 첫 따라가기가
+        // 통째로 사라지는 것이 그 경로다. 갱신하지 않고 두면 다음 tick이 자연히 다시 시도한다.
+        self.allocator.free(owned);
+        return;
+    }
     if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
     self.file_tree_followed_cwd = owned;
     // root 밖이면 Tree의 이전 file-open reveal intent는 그대로 두되, 그것을 새 CWD의 scroll 대상으로
@@ -946,14 +971,16 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
 ///
 /// **in-flight면 건너뛴다.** 검증은 비동기라 tick마다 다시 밀어 넣으면 요청이 쌓인다. 호출자가 `followed_cwd`를
 /// 이미 갱신했으므로 같은 cwd로는 다시 오지 않고, 다음 `cd`가 자연히 재시도가 된다.
-fn followRootSwitch(self: *AppSession, cwd: []const u8) void {
-    if (self.file_tree_root_validation != null) return;
-    if (self.file_tree_root_picker_inflight != .none) return; // 사용자가 연 picker를 가로채지 않는다
+fn followRootSwitch(self: *AppSession, cwd: []const u8) bool {
+    if (self.file_tree_root_validation != null) return false;
+    if (self.file_tree_root_picker_inflight != .none) return false; // 사용자가 연 picker를 가로채지 않는다
+    if (self.file_tree_root_pick_pending != .none) return false; // 사용자가 막 요청한 picker보다 뒤다
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = AppSession.repoRootFor(cwd, &root_buf) orelse cwd;
     self.file_tree_root_picker_inflight = .replace;
     self.file_tree_root_auto_follow = true;
     provideFileTreeRootPick(self, target);
+    return true;
 }
 
 /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·

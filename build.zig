@@ -2605,6 +2605,16 @@ pub fn build(b: *std.Build) void {
                         .optimize = b3_optimize,
                     }),
                 },
+                .{
+                    .name = "pending_owner",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/pending_event_owner.zig"),
+                        .target = target,
+                        .optimize = b3_optimize,
+                        .link_libc = true,
+                        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                    }),
+                },
             },
         });
         inline for (.{

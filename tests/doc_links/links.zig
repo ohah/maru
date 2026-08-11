@@ -535,6 +535,56 @@ fn collectLabeledLinks(arena: std.mem.Allocator, text: []const u8) ![]LabelRef {
     return refs.items;
 }
 
+// 계획 문서는 인덱스에서 도달할 수 있어야 한다.
+//
+// `pr-checklist.md` "문서 상태 표기 규율"이 **"implementation-plan.md의 인덱스가 가리키는
+// `docs/plans/*.md`"** 를 계획 진행의 출처로 정한다. 인덱스에 없으면 그 계획은 규율이 정한
+// 자리 밖에 있다.
+//
+// **앞선 세 검사가 구조적으로 못 잡는 종류다.** 그것들은 "이 링크가 도달하는가"를 보는데,
+// 여기서 깨지는 것은 **"도달해야 할 파일을 아무도 안 가리키는가"** 다. 링크 무결성이 완벽해도
+// 인덱스는 비어 있을 수 있다(실측: 분할 12건을 마친 시점에 20개 중 9개가 빠져 있었다).
+//
+// 반대 방향(인덱스가 없는 파일을 가리킴)은 위 A 검사가 이미 잡으므로 여기서 보지 않는다.
+test "계획 문서는 implementation-plan.md 인덱스가 가리킨다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+    const index = try cwd.readFileAlloc(
+        std.testing.io,
+        "docs/implementation-plan.md",
+        arena,
+        .limited(4 * 1024 * 1024),
+    );
+
+    // 인덱스가 링크로 가리키는 계획 파일 집합. 산문에 이름만 적힌 것은 인덱스가 아니다.
+    var linked = std.StringHashMap(void).init(arena);
+    for (try collectLinks(arena, index)) |ref| {
+        if (!std.mem.startsWith(u8, ref.path, "plans/")) continue;
+        try linked.put(std.fs.path.basename(ref.path), {});
+    }
+
+    var dir = try cwd.openDir(std.testing.io, "docs/plans", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+
+    var violations: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".md")) continue;
+        if (linked.contains(std.fs.path.basename(entry.path))) continue;
+        std.debug.print(
+            "docs/plans/{s}: 계획 인덱스에 없다 — docs/implementation-plan.md에 링크를 더해라\n",
+            .{entry.path},
+        );
+        violations += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
 test "링크 텍스트가 적은 문서와 URL이 같은 문서를 가리킨다" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

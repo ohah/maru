@@ -74,6 +74,15 @@ pub fn resolveWorkspaceScope(self: *AppSession) CloseScope {
 pub fn requestWindowClose(self: *AppSession) bool {
     if (file_panel_ops.blockSessionExitForFilePanels(self)) return true;
     if (!self.closeTargetHasRunningJob(.window)) {
+        // remote target 하나라도 pending이면 어느 target의 routing/authority도 먼저 게시하지 않는다.
+        if (builtin.os.tag == .macos) {
+            if (app_session_mod.app_remote_backend) |*backend| {
+                for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                    if (term.surface.remote == null or term.rt.close_complete) continue;
+                    if (backend.windowCloseReadiness(term.rt.handle) == .event_pending) return true;
+                };
+            }
+        }
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
             if (!term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder or term.rt.close_complete) continue;
             if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending) return true;

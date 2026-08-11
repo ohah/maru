@@ -20,6 +20,8 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     defer allocator.free(backend_source);
     const app_source = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_source);
+    const workspace_source = try readSource(allocator, "src/platform/macos/app_session/workspace.zig");
+    defer allocator.free(workspace_source);
 
     try std.testing.expectEqual(@as(usize, 6), count(red_source, "test \"C3-3b5 중립 계약"));
     try std.testing.expectEqual(@as(usize, 6), count(red_source, "test \"C3-3b5 close readiness"));
@@ -31,6 +33,7 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     try std.testing.expectEqual(@as(usize, 0), count(runtime_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 0), count(backend_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 0), count(app_source, "advancePendingEventForClose("));
+    try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.windowCloseReadiness(term.rt.handle)"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {

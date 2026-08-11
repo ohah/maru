@@ -239,7 +239,7 @@ pub fn snapshotRuntimeContext(
 
 fn classificationFromSourceView(view: generation_event.PreparationEventView) event_types.Classification {
     return switch (view.event.admission) {
-        .unknown => .{ .violation = .stale_preflight },
+        .unknown => .{ .violation = .unknown_event },
         .accepted => |preflight| .{ .accepted = switch (preflight.event) {
             .revoked => |value| .{ .revoked = value.controller_generation },
             .invalidated => .invalidated,

@@ -3045,6 +3045,23 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    Debug·ReleaseFast의 test name과 개수는 동일하며 GREEN 단계에서 범주를 합치거나 actual replay를 component fixture로
    낮추지 않는다.
 
+   C3-3c는 열린 peer의 실제 event frame을 `Client.readStreamBatch`로 받아 generation 제품 drain에 넘긴다. revoked,
+   unknown, 동일 resize generation의 다른 크기로 만든 semantic failure를 각각 독립 실행하며 test-only buffered-event
+   주입은 사용하지 않는다. 세 행 모두 settlement 뒤 Pending idle, EventOwner pristine, correlation pristine,
+   event-generation mirror 0, Client event queue 0, event 전 live attachment의 registry blocker/pin/quarantine 기준선 복귀와
+   payload allocator callback exact 1회를 같은 제품 호출의 POST로 검증한다. revoked는 observer와 새 controller generation을
+   게시하고 connection을 보존한다. unknown은 peer-contract violation으로 poison하며 semantic state를 보존한다. semantic
+   failure는 prepared resize를 게시하지 않은 채 peer-contract violation으로 닫는다.
+
+   `test-session-host-2c3d-c3-3c`는 최적화 모드마다 위 actual-socket component 3개, 봉인된 unknown event가 ended 빠른
+   판별에서 mutation 없이 `not_ended`로 남는 Client 회귀 1개와 boundary 1개를 exact-count하고 b6
+   gate를 상속한다. boundary는 `src/**/*.zig`의 top-level test 바깥 raw `takeEventForStream`·`releaseEvent`·
+   `dropBufferedStream`을 Client/ClientSlot/generation transport·attachment 구현과 `RemoteRuntime`의 exact legacy drain
+   owner에만 허용한다. effect preflight/commit/release-under-effect는 ClientSlot·generation transport·attachment·settlement의
+   exact owner에만 허용한다. generation drain에는 raw event 호출이 0이어야 하고 C3-3c 세 행에는 actual wire write/read가 각각
+   exact 1회, `bufferGenerationEventForTest`가 0이어야 한다. RPC/decoder direct-call inventory, immediate EOF와 unread
+   RX-first, decoder cadence/parity는 2c3e가 소유하므로 이 경계를 넓혀 대신 완료 처리하지 않는다.
+
    C3-3b TDD gate는 최소 다음을 Debug·ReleaseFast와 actual socket/product path에서 고정한다.
 
    - 모든 event kind의 prepare/settlement Busy·mismatch에서 live semantic state mutation 0, retry exact once

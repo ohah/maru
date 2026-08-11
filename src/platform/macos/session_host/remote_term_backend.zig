@@ -20,6 +20,10 @@ const maru = @import("maru");
 const client_mod = @import("client.zig");
 const framing = @import("framing.zig");
 const remote_runtime = @import("remote_runtime.zig");
+const close_authority = @import("remote_close_authority.zig");
+const close_contract = @import("remote_close_contract.zig");
+const process_seal = @import("process_seal_service.zig");
+const pending_event_owner = @import("pending_event_owner.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const host_pool_mod = @import("host_pool.zig");
 const host_adapter_mod = @import("host_adapter.zig");
@@ -42,6 +46,24 @@ const nonblocking_input_chunk: usize = 16 * 1024;
 const RemoteRuntime = remote_runtime.RemoteRuntime;
 const HostAdapter = host_adapter_mod.HostAdapter;
 const AdapterPool = host_pool_mod.HostPool(HostAdapter);
+pub const max_remote_backend_runtimes: usize = 4096;
+
+pub const RuntimeAdmissionReservation = struct {
+    self_addr: u64 = 0,
+    backend_addr: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    thread_id: u64 = 0,
+    request_generation: u64 = 0,
+    state_raw: u8 = 0,
+    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+};
+
+pub const CloseMaintenanceStats = struct {
+    visited_count: usize = 0,
+    selected_count: usize = 0,
+    removed_count: usize = 0,
+};
 
 /// 한 host connection 위의 원격 term backend. legacy 단일-host 모드의 `client`는 borrowed이고 pool 모드는
 /// `host_pool`만 권위로 사용한다. **`RemoteRuntime`은 self-referential**(surface.remote가 자기 조립기를 가리킴)이라
@@ -55,6 +77,7 @@ pub const RemoteTermBackend = struct {
     const RuntimeEntry = struct {
         runtime: *RemoteRuntime,
         host_id: u128,
+        runtime_generation: u64,
     };
 
     allocator: std.mem.Allocator,
@@ -68,6 +91,12 @@ pub const RemoteTermBackend = struct {
     // in-process Term은 write_queue PtyIo로 등록되는 것과 대칭. `remove`가 뗀다.
     surface_runtime: *SurfaceRuntime,
     runtimes: std.AutoHashMapUnmanaged(RuntimeHandle, RuntimeEntry) = .empty,
+    next_runtime_generation: u64 = 0,
+    next_admission_generation: u64 = 0,
+    reserved_runtime_count: usize = 0,
+    close_ticket_issuer: close_contract.CloseTicketIssuer = .{},
+    close_operation_owner: close_authority.CloseOperationOwner = .{},
+    close_sweep: close_contract.CloseSweep = .inactive,
 
     const vtable = term_backend.VTable{
         .spawn = spawn,
@@ -142,6 +171,115 @@ pub const RemoteTermBackend = struct {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
+    pub fn reserveRuntimeAdmission(self: *RemoteTermBackend, out: *RuntimeAdmissionReservation) !void {
+        if (!std.meta.eql(out.*, RuntimeAdmissionReservation{})) return error.InvalidReservation;
+        if (self.runtimes.count() + self.reserved_runtime_count >= max_remote_backend_runtimes)
+            return error.ResourceExhausted;
+        self.next_admission_generation = std.math.add(u64, self.next_admission_generation, 1) catch
+            return error.AdmissionGenerationExhausted;
+        const ready = try process_seal.currentReadyIdentity();
+        errdefer out.* = .{};
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .backend_addr = @intFromPtr(self),
+            .pid = ready.pid,
+            .process_nonce = ready.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .request_generation = self.next_admission_generation,
+            .state_raw = 1,
+        };
+        out.seal = try runtimeAdmissionSeal(out);
+        self.reserved_runtime_count += 1;
+    }
+
+    pub fn abortRuntimeAdmission(self: *RemoteTermBackend, reservation: *RuntimeAdmissionReservation) void {
+        if (!self.validRuntimeAdmission(reservation) or self.reserved_runtime_count == 0)
+            process_seal.fatalIntegrity(.proof_loss);
+        self.reserved_runtime_count -= 1;
+        reservation.state_raw = 3;
+        reservation.seal = [_]u8{0} ** 32;
+    }
+
+    fn consumeRuntimeAdmission(self: *RemoteTermBackend, reservation: *RuntimeAdmissionReservation) void {
+        if (!self.validRuntimeAdmission(reservation) or self.reserved_runtime_count == 0)
+            process_seal.fatalIntegrity(.proof_loss);
+        self.reserved_runtime_count -= 1;
+        reservation.state_raw = 2;
+        reservation.seal = [_]u8{0} ** 32;
+    }
+
+    fn validRuntimeAdmission(self: *const RemoteTermBackend, reservation: *const RuntimeAdmissionReservation) bool {
+        const expected_seal = runtimeAdmissionSeal(reservation) catch return false;
+        return reservation.self_addr == @intFromPtr(reservation) and reservation.backend_addr == @intFromPtr(self) and
+            reservation.pid == process_seal.currentProcessId() and
+            reservation.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and
+            reservation.request_generation != 0 and reservation.state_raw == 1 and
+            std.crypto.timing_safe.eql(process_seal.CleanupSeal, expected_seal, reservation.seal);
+    }
+
+    fn runtimeAdmissionSeal(reservation: *const RuntimeAdmissionReservation) process_seal.ReadyError!process_seal.CleanupSeal {
+        return process_seal.runtimeAdmissionSeal(reservation.pid, reservation.process_nonce, .{
+            .self_addr = @intFromPtr(reservation),
+            .backend_addr = reservation.backend_addr,
+            .thread_id = reservation.thread_id,
+            .request_generation = reservation.request_generation,
+            .state_raw = reservation.state_raw,
+        });
+    }
+
+    fn issueRuntimeGeneration(self: *RemoteTermBackend) !u64 {
+        self.next_runtime_generation = std.math.add(u64, self.next_runtime_generation, 1) catch
+            return error.RuntimeGenerationExhausted;
+        if (self.next_runtime_generation == 0) return error.RuntimeGenerationExhausted;
+        return self.next_runtime_generation;
+    }
+
+    pub fn maintenanceCloseTick(self: *RemoteTermBackend) CloseMaintenanceStats {
+        var stats: CloseMaintenanceStats = .{};
+        var receipts: [max_remote_backend_runtimes]close_contract.CloseScanReceipt = undefined;
+        var receipt_count: usize = 0;
+        {
+            var iterator = self.runtimes.iterator();
+            while (iterator.next()) |row| {
+                stats.visited_count += 1;
+                const authority = &row.value_ptr.runtime.close_authority;
+                if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.pristine)) continue;
+                if (!close_authority.valid(authority)) process_seal.fatalIntegrity(.proof_loss);
+                receipts[receipt_count] = .{
+                    .handle = row.key_ptr.*,
+                    .runtime_generation = row.value_ptr.runtime_generation,
+                    .close_request_generation = authority.close_request_generation,
+                    .close_schedule_ticket = authority.close_schedule_ticket,
+                };
+                receipt_count += 1;
+            }
+        }
+        var selected: [16]close_contract.CloseScanReceipt = undefined;
+        const selected_count = close_contract.selectCloseSweep(&self.close_sweep, receipts[0..receipt_count], &selected);
+        stats.selected_count = selected_count;
+        for (selected[0..selected_count]) |receipt| {
+            const row = self.runtimes.get(receipt.handle) orelse continue;
+            const authority = &row.runtime.close_authority;
+            if (row.runtime_generation != receipt.runtime_generation or
+                authority.close_request_generation != receipt.close_request_generation or
+                authority.close_schedule_ticket != receipt.close_schedule_ticket) continue;
+            if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.ready_remove)) {
+                if (remove(self, receipt.handle) == .removed) stats.removed_count += 1;
+                continue;
+            }
+            const kind: close_authority.CloseRequestKind = switch (authority.request_kind_raw) {
+                1...3 => @enumFromInt(authority.request_kind_raw),
+                else => process_seal.fatalIntegrity(.proof_loss),
+            };
+            const disposition: close_authority.CloseDisposition = switch (authority.disposition_raw) {
+                1...2 => @enumFromInt(authority.disposition_raw),
+                else => process_seal.fatalIntegrity(.proof_loss),
+            };
+            _ = self.requestRuntimeClose(receipt.handle, kind, disposition);
+        }
+        return stats;
+    }
+
     /// **이미 host에 있는 runtime에 재접속**해 원격-backed Surface를 만든다(§7 GUI 재접속, e3-5). spawn과 달리 새 runtime을
     /// 안 띄우고 저장된 `runtime_id_hex`에 붙는다. runtime이 없으면(host 재시작 등) attachExisting이 error를 내고
     /// app_session restore는 동일 세션인 척 fresh spawn하지 않고 fail-closed한다. **vtable 밖 — host 전용**이라
@@ -163,6 +301,9 @@ pub const RemoteTermBackend = struct {
         size: maru.terminal.Size,
     ) anyerror!*Surface {
         if (self.runtimes.contains(handle)) return error.RuntimeAlreadyRegistered;
+        var admission: RuntimeAdmissionReservation = .{};
+        try self.reserveRuntimeAdmission(&admission);
+        errdefer self.abortRuntimeAdmission(&admission);
         var retained = false;
         errdefer if (retained) self.host_pool.?.release(host_id);
         var selected_adapter: ?*HostAdapter = null;
@@ -186,7 +327,12 @@ pub const RemoteTermBackend = struct {
         // client-side(surface/screen)만 회수한다. spawn 경로는 방금 우리가 띄운 runtime이라 deinit(terminate)이 맞지만
         // attach는 남의 runtime이므로 detachClientSide로 되돌려야 재접속 실패가 세션을 죽이지 않는다.
         errdefer rr.detachClientSide();
-        try self.runtimes.put(self.allocator, handle, .{ .runtime = rr, .host_id = host_id });
+        try self.runtimes.put(self.allocator, handle, .{
+            .runtime = rr,
+            .host_id = host_id,
+            .runtime_generation = try self.issueRuntimeGeneration(),
+        });
+        self.consumeRuntimeAdmission(&admission);
         return &rr.surface;
     }
 
@@ -251,6 +397,9 @@ pub const RemoteTermBackend = struct {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (self.mode == .attach_only) return error.SpawnHostUnavailable;
         if (self.runtimes.contains(params.handle)) return error.RuntimeAlreadyRegistered;
+        var admission: RuntimeAdmissionReservation = .{};
+        try self.reserveRuntimeAdmission(&admission);
+        errdefer self.abortRuntimeAdmission(&admission);
         var selected_host_id: u128 = 0;
         var retained = false;
         errdefer if (retained) self.host_pool.?.release(selected_host_id);
@@ -275,7 +424,12 @@ pub const RemoteTermBackend = struct {
         else
             try rr.spawnWithConfig(selected_client, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
-        try self.runtimes.put(self.allocator, params.handle, .{ .runtime = rr, .host_id = selected_host_id });
+        try self.runtimes.put(self.allocator, params.handle, .{
+            .runtime = rr,
+            .host_id = selected_host_id,
+            .runtime_generation = try self.issueRuntimeGeneration(),
+        });
+        self.consumeRuntimeAdmission(&admission);
         return &rr.surface;
     }
 
@@ -466,30 +620,103 @@ pub const RemoteTermBackend = struct {
 
     fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.CloseProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        if (self.runtimes.get(handle)) |entry| entry.runtime.terminate(); // host runtime kill(멱등). client 객체는 remove가 회수.
-        return .complete;
+        return self.requestRuntimeClose(handle, .close_and_detach, .terminate_host);
     }
 
     fn close(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.CloseProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        if (self.runtimes.get(handle)) |entry| entry.runtime.terminate();
-        return .complete;
+        return self.requestRuntimeClose(handle, .close_without_routing, .terminate_host);
     }
 
     fn finishAfterTermination(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.CloseProgress {
-        _ = ctx;
-        _ = handle;
-        // 원격은 join할 로컬 reader 스레드가 없다(host가 소유). 종료는 drainRemote의 ended로 관측된다 — no-op.
-        return .complete;
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        return self.requestRuntimeClose(handle, .finish_after_termination, .terminate_host);
     }
 
     fn remove(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.RemoveProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
-        if (self.runtimes.fetchRemove(handle)) |kv| {
-            self.destroyRuntimeEntry(handle, kv.value, .terminate);
-            return .removed;
+        if (self.close_operation_owner.active) return .event_pending;
+        const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
+        if (!close_authority.valid(&entry.runtime.close_authority))
+            process_seal.fatalIntegrity(.proof_loss);
+        if (entry.runtime.close_authority.lifecycle_raw != @intFromEnum(close_authority.Lifecycle.ready_remove))
+            return .event_pending;
+        var pin: close_authority.CloseOperationPin = .{};
+        close_authority.acquirePin(&self.close_operation_owner, &pin, @intFromPtr(self), &entry.runtime.close_authority) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        close_authority.advance(&entry.runtime.close_authority, .ready_remove, .consumed) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        var closing_receipt: close_contract.ClosingReceipt = .{ .scan = .{
+            .handle = handle,
+            .runtime_generation = entry.runtime_generation,
+            .close_request_generation = entry.runtime.close_authority.close_request_generation,
+            .close_schedule_ticket = entry.runtime.close_authority.close_schedule_ticket,
+        } };
+        close_authority.consumePin(&self.close_operation_owner, &pin, &entry.runtime.close_authority) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        const removed = self.runtimes.fetchRemove(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
+        if (removed.value.runtime != entry.runtime or removed.value.runtime_generation != entry.runtime_generation)
+            process_seal.fatalIntegrity(.close_runtime_absent);
+        if (!close_contract.consumeClosingReceipt(&closing_receipt, closing_receipt.scan, self.runtimes.contains(handle)))
+            process_seal.fatalIntegrity(.proof_loss);
+        self.destroyRuntimeEntry(handle, removed.value, .terminate);
+        return .removed;
+    }
+
+    fn requestRuntimeClose(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        kind: close_authority.CloseRequestKind,
+        disposition: close_authority.CloseDisposition,
+    ) term_backend.CloseProgress {
+        if (self.close_operation_owner.active) return .event_pending;
+        const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
+        const authority = &entry.runtime.close_authority;
+        if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.pristine)) {
+            const ticket = self.close_ticket_issuer.issue() orelse
+                process_seal.fatalIntegrity(.close_ticket_exhausted);
+            close_authority.prepareCurrent(authority, .{
+                .runtime_addr = @intFromPtr(entry.runtime),
+                .handle = handle,
+                .runtime_generation = entry.runtime_generation,
+                .host_id = entry.host_id,
+                .close_request_generation = ticket,
+                .close_schedule_ticket = ticket,
+                .request_kind = kind,
+                .disposition = disposition,
+            }) catch process_seal.fatalIntegrity(.proof_loss);
         }
-        return .invalid;
+        if (!close_authority.valid(authority) or authority.handle != handle or
+            authority.runtime_generation != entry.runtime_generation or authority.request_kind_raw != @intFromEnum(kind))
+            process_seal.fatalIntegrity(.proof_loss);
+        var pin: close_authority.CloseOperationPin = .{};
+        close_authority.acquirePin(&self.close_operation_owner, &pin, @intFromPtr(self), authority) catch |err| switch (err) {
+            error.Busy => return .event_pending,
+            else => process_seal.fatalIntegrity(.proof_loss),
+        };
+        defer close_authority.consumePin(&self.close_operation_owner, &pin, authority) catch
+            process_seal.fatalIntegrity(.proof_loss);
+
+        if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.open)) {
+            if (kind == .close_and_detach) self.surface_runtime.detachSurface(handle);
+            close_authority.advance(authority, .open, .routing_tombstoned) catch
+                process_seal.fatalIntegrity(.proof_loss);
+        }
+        if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.routing_tombstoned)) {
+            if (kind != .finish_after_termination) entry.runtime.terminate();
+            close_authority.advance(authority, .routing_tombstoned, .settling) catch
+                process_seal.fatalIntegrity(.proof_loss);
+        }
+        if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.settling)) {
+            const readiness = pending_event_owner.closeReadiness(&entry.runtime.pending_event_owner);
+            const ready_remove = close_authority.publishReadyRemove(authority, readiness == .complete) catch
+                process_seal.fatalIntegrity(.proof_loss);
+            if (!ready_remove) return .event_pending;
+        }
+        return if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.ready_remove))
+            .complete
+        else
+            .event_pending;
     }
 
     /// 원격 Term을 **terminate 없이** 회수한다(§6 app-quit=detach, e3-6). `remove`와 대칭이되 host `runtime.terminate`를 안
@@ -865,8 +1092,8 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     // resize도 hot path(self.runtime.resize)로 원격 PtyIo→resize RPC에 도달한다(에러 없이 위임).
     try surface_runtime.resize(1, .{ .cols = 80, .rows = 24 }, io);
 
-    be.closeAndDetach(1);
-    be.remove(1); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
+    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(1));
+    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(1)); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
     try testing.expectEqual(@as(usize, 0), be_impl.runtimes.count());
     try testing.expect(try pool.remove(host_id));
     try testing.expectError(error.SpawnHostUnavailable, be.spawn(.{
@@ -1001,7 +1228,7 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     try testing.expect(be_impl.runtimes.get(33).?.runtime.usesGenerationAttachment());
     _ = try be.attach(33, true);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
-    be.closeAndDetach(33);
+    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(33));
     be.remove(33);
     try testing.expect(try pool.remove(host_a));
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
@@ -1021,7 +1248,7 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     }
     try testing.expect(saw_after);
 
-    be.closeAndDetach(22);
+    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));
     be.remove(22);
     try testing.expect(try pool.remove(host_b));
 }

@@ -8,7 +8,6 @@ const builtin = @import("builtin");
 pub const contract = @import("remote_close_contract.zig");
 pub const pending_owner = @import("pending_event_owner.zig");
 const process_seal = @import("process_seal_service.zig");
-const term_backend = @import("maru").app.term_runtime_backend;
 
 pub const CloseRequestKind = enum(u8) {
     close_and_detach = 1,
@@ -124,6 +123,10 @@ pub fn prepare(out: *CloseAuthority, ready: process_seal.ReadyIdentity, params: 
     if (!valid(out)) return error.InvalidOwner;
 }
 
+pub fn prepareCurrent(out: *CloseAuthority, params: PrepareParams) Error!void {
+    return prepare(out, try process_seal.currentReadyIdentity(), params);
+}
+
 pub fn valid(authority: *const CloseAuthority) bool {
     if (@intFromPtr(authority) == 0 or authority.pid == 0 or authority.process_nonce == 0 or
         authority.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or authority.state_generation == 0) return false;
@@ -155,10 +158,10 @@ pub fn advance(authority: *CloseAuthority, expected: Lifecycle, next: Lifecycle)
     authority.state_seal = try stateSeal(authority);
 }
 
-pub fn publishReadyRemove(authority: *CloseAuthority, readiness: term_backend.CloseProgress) Error!term_backend.CloseProgress {
-    if (readiness == .event_pending) return .event_pending;
+pub fn publishReadyRemove(authority: *CloseAuthority, readiness_complete: bool) Error!bool {
+    if (!readiness_complete) return false;
     try advance(authority, .settling, .ready_remove);
-    return .complete;
+    return true;
 }
 
 pub fn acquirePin(
@@ -226,18 +229,24 @@ fn validTransition(expected: Lifecycle, next: Lifecycle) bool {
 }
 
 fn pinStateMatches(pin: *const CloseOperationPin, authority: *const CloseAuthority) bool {
-    if (authority.state_generation == pin.expected_state_generation)
-        return authority.lifecycle_raw == pin.expected_lifecycle_raw;
-    if (authority.state_generation != pin.expected_state_generation + 1) return false;
-    const expected: Lifecycle = switch (pin.expected_lifecycle_raw) {
-        0...5 => @enumFromInt(pin.expected_lifecycle_raw),
-        else => return false,
-    };
-    const current: Lifecycle = switch (authority.lifecycle_raw) {
-        0...5 => @enumFromInt(authority.lifecycle_raw),
-        else => return false,
-    };
-    return validTransition(expected, current);
+    if (authority.state_generation < pin.expected_state_generation or
+        authority.lifecycle_raw < pin.expected_lifecycle_raw) return false;
+    const state_delta = authority.state_generation - pin.expected_state_generation;
+    const lifecycle_delta = authority.lifecycle_raw - pin.expected_lifecycle_raw;
+    if (state_delta != lifecycle_delta) return false;
+    var raw = pin.expected_lifecycle_raw;
+    while (raw < authority.lifecycle_raw) : (raw += 1) {
+        const expected: Lifecycle = switch (raw) {
+            0...5 => @enumFromInt(raw),
+            else => return false,
+        };
+        const next: Lifecycle = switch (raw + 1) {
+            0...5 => @enumFromInt(raw + 1),
+            else => return false,
+        };
+        if (!validTransition(expected, next)) return false;
+    }
+    return true;
 }
 
 fn identitySeal(authority: *const CloseAuthority) process_seal.ReadyError!process_seal.CleanupSeal {

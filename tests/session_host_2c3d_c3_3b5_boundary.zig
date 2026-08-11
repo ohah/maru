@@ -18,6 +18,8 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     defer allocator.free(runtime_source);
     const backend_source = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend_source);
+    const close_graph_source = try readSource(allocator, "src/platform/macos/session_host/pending_term_close_graph.zig");
+    defer allocator.free(close_graph_source);
     const app_source = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_source);
     const workspace_source = try readSource(allocator, "src/platform/macos/app_session/workspace.zig");
@@ -30,14 +32,16 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     try std.testing.expectEqual(@as(usize, 8), count(red_source, "test \"C3-3b5 close authority"));
     try std.testing.expectEqual(@as(usize, 8), count(red_source, "test \"C3-3b5 close sweep"));
     try std.testing.expectEqual(@as(usize, 7), count(backend_source, "test \"C3-3b5 remote backend"));
+    try std.testing.expectEqual(@as(usize, 2), count(close_graph_source, "test \"C3-3b5 close graph"));
     try std.testing.expectEqual(@as(usize, 4), count(app_source, "test \"C3-3b5 AppSession"));
-    try std.testing.expectEqual(@as(usize, 39), count(red_source, "test \"C3-3b5 ") + count(backend_source, "test \"C3-3b5 remote backend") + count(app_source, "test \"C3-3b5 AppSession"));
+    try std.testing.expectEqual(@as(usize, 41), count(red_source, "test \"C3-3b5 ") + count(backend_source, "test \"C3-3b5 remote backend") + count(close_graph_source, "test \"C3-3b5 close graph") + count(app_source, "test \"C3-3b5 AppSession"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 0), count(backend_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 0), count(app_source, "advancePendingEventForClose("));
     try std.testing.expectEqual(@as(usize, 1), count(workspace_source, "backend.windowCloseReadiness(term.rt.handle)"));
     try std.testing.expectEqual(@as(usize, 2), count(app_source, "app_remote_backend.?.claimProductSingleton()"));
     try std.testing.expectEqual(@as(usize, 1), count(backend_source, "pub fn claimProductSingleton("));
+    try std.testing.expectEqual(@as(usize, 1), count(close_graph_source, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(app_source, "workspace_ops.advancePendingWindowClose(self);"));
     try std.testing.expectEqual(@as(usize, 1), count(term_source, "self.allocator.create(Term)"));
     const remote_spawn = std.mem.indexOf(u8, term_source, "rb.attachTermOnHost(") orelse return error.TestUnexpectedResult;

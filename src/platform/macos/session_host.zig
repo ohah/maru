@@ -76,6 +76,10 @@ pub const recovery_discovery = if (builtin.os.tag == .macos)
 else
     struct {};
 pub const connection_slot = @import("session_host/connection_slot.zig");
+pub const pending_term_close_graph = if (builtin.os.tag == .macos)
+    @import("session_host/pending_term_close_graph.zig")
+else
+    struct {};
 pub const subscription_identity = @import("session_host/subscription_identity.zig");
 pub const connection_turn = if (builtin.os.tag == .macos)
     @import("session_host/connection_turn.zig")

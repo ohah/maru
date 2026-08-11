@@ -2885,7 +2885,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    이 allowlist를 직접 호출하는 reference는 0이고 그 밖의 product direct deinit/detach caller도 0이다.
 
    C3-3b5의 첫 RED는 최적화 모드마다 neutral contract 6개, lifecycle readiness 6개, close authority 8개,
-   close sweep 8개, remote backend 7개, AppSession parity 4개인 unique component 39개와 boundary 1개를 고정한다.
+   close sweep 8개, remote backend 7개, final-address close graph 2개, AppSession parity 4개인 unique component 41개와 boundary 1개를 고정한다.
    각 범주는 다른 범주의 digest나 수동 fixture 성공으로 대체하지 않는다. 특히 AppSession parity는 VTable fake만 호출하지 않고
    실제 tab/window close 호출부가 `complete|removed`를 받은 뒤에만 layout과 handle을 버리는지 검증하며, remote backend 범주는
    4,097번째 admission이 allocator·map·routing·layout mutation 전에 거부되는 실제 owner 경계를 사용한다. b4 전에는

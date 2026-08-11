@@ -50,6 +50,8 @@ const sidebar_ops = @import("sidebar.zig");
 const surface_move = app_session_mod.surface_move;
 const tab_ops = @import("tab.zig");
 const termLabel = app_session_mod.termLabel;
+const close_graph = if (builtin.os.tag == .macos) app_session_mod.session_host.pending_term_close_graph else struct {};
+const max_window_close_targets = app_session_mod.session_host.protocol.max_inventory_runtimes;
 
 /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
 pub fn renamingWorkspace(self: *const AppSession, tab: *Tab) bool {
@@ -71,21 +73,130 @@ pub fn resolveWorkspaceScope(self: *AppSession) CloseScope {
 /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
 /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
 /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
-fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProgress {
-    // remote target 하나라도 pending이면 어느 target의 routing/authority도 먼저 게시하지 않는다.
-    if (builtin.os.tag == .macos) {
-        if (app_session_mod.app_remote_backend) |*backend| {
-            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-                if (term.surface.remote == null or term.rt.close_complete) continue;
-                if (backend.windowCloseReadiness(term.rt.handle) == .event_pending) return .event_pending;
-            };
-        }
-    }
+fn windowCloseTarget(term: *app_session_mod.Term) bool {
+    return term.rt.live_initialized and term.kind != .web and !term.rt.ended_placeholder and !term.rt.close_complete;
+}
+
+fn windowCloseGraphTarget(term: *app_session_mod.Term, preparing: bool) bool {
+    if (preparing) return windowCloseTarget(term);
+    return !std.meta.eql(term.rt.pending_close, close_graph.PendingTermClose{});
+}
+
+fn collectWindowCloseTargets(
+    self: *AppSession,
+    out: *[max_window_close_targets]close_graph.TargetProjection,
+    preparing: bool,
+) ?[]const close_graph.TargetProjection {
+    var count: usize = 0;
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-        if (!term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder or term.rt.close_complete) continue;
-        if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending) return .event_pending;
-        term.rt.close_complete = true;
+        if (!windowCloseGraphTarget(term, preparing)) continue;
+        if (count == out.len) return null;
+        const generation = if (preparing)
+            std.math.add(u64, term.rt.close_generation, 1) catch return null
+        else
+            term.rt.close_generation;
+        out[count] = .{
+            .term_addr = @intFromPtr(term),
+            .surface_id = term.surface.id,
+            .handle = term.rt.handle,
+            .term_close_generation = generation,
+        };
+        count += 1;
     };
+    return out[0..count];
+}
+
+fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProgress {
+    if (builtin.os.tag != .macos or app_session_mod.app_remote_backend == null) {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!windowCloseGraphTarget(term, true)) continue;
+            if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending) return .event_pending;
+            term.rt.close_complete = true;
+        };
+        return .complete;
+    }
+
+    var target_storage: [max_window_close_targets]close_graph.TargetProjection = undefined;
+    const graph_pristine = std.meta.eql(self.pending_window_close_graph, close_graph.PendingTermCloseGraph{});
+    const targets = collectWindowCloseTargets(self, &target_storage, graph_pristine) orelse
+        close_graph.fatalProofLoss();
+    if (targets.len == 0) return .complete;
+
+    const backend = &app_session_mod.app_remote_backend.?;
+    if (graph_pristine) {
+        // 모든 fallible readiness와 destination pristine 검증을 먼저 끝내야 뒤 target 실패가 앞 target routing을
+        // 반쯤 tombstone하는 rollback 불가능 상태가 생기지 않는다.
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!windowCloseGraphTarget(term, true)) continue;
+            if (!std.meta.eql(term.rt.pending_close, close_graph.PendingTermClose{})) close_graph.fatalProofLoss();
+            if (term.surface.remote != null and backend.windowCloseReadiness(term.rt.handle) == .event_pending)
+                return .event_pending;
+        };
+        const graph_generation = std.math.add(u64, self.next_window_close_graph_generation, 1) catch
+            close_graph.fatalProofLoss();
+        close_graph.prepareGraph(
+            &self.pending_window_close_graph,
+            @intFromPtr(self),
+            self.close_session_generation,
+            graph_generation,
+            targets,
+        ) catch close_graph.fatalProofLoss();
+        close_graph.publishGraph(&self.pending_window_close_graph, targets) catch close_graph.fatalProofLoss();
+        var target_index: usize = 0;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!windowCloseTarget(term)) continue;
+            term.rt.close_generation = targets[target_index].term_close_generation;
+            close_graph.prepareTerm(
+                &term.rt.pending_close,
+                &self.pending_window_close_graph,
+                targets[target_index],
+                graph_generation,
+            ) catch close_graph.fatalProofLoss();
+            target_index += 1;
+        };
+        self.next_window_close_graph_generation = graph_generation;
+    } else if (!close_graph.validGraph(&self.pending_window_close_graph, @intFromPtr(self), targets)) {
+        close_graph.fatalProofLoss();
+    }
+
+    var target_index: usize = 0;
+    var pending = false;
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (!windowCloseGraphTarget(term, false)) continue;
+        const target = targets[target_index];
+        if (!close_graph.validTerm(&term.rt.pending_close, &self.pending_window_close_graph, target))
+            close_graph.fatalProofLoss();
+        const phase = std.enums.fromInt(close_graph.TermLifecycle, term.rt.pending_close.phase_raw) orelse
+            close_graph.fatalProofLoss();
+        if (phase == .backend_complete) {
+            target_index += 1;
+            continue;
+        }
+        const progress = self.backendFor(term).closeAndDetach(term.rt.handle);
+        close_graph.advanceTerm(
+            &term.rt.pending_close,
+            &self.pending_window_close_graph,
+            target,
+            if (progress == .complete) .backend_complete else .backend_pending,
+        ) catch close_graph.fatalProofLoss();
+        if (progress == .complete) term.rt.close_complete = true else pending = true;
+        target_index += 1;
+    };
+    if (pending) return .event_pending;
+    target_index = 0;
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (!windowCloseGraphTarget(term, false)) continue;
+        close_graph.advanceTerm(
+            &term.rt.pending_close,
+            &self.pending_window_close_graph,
+            targets[target_index],
+            .consumed,
+        ) catch close_graph.fatalProofLoss();
+        target_index += 1;
+    };
+    close_graph.advanceGraph(&self.pending_window_close_graph, targets, .complete) catch close_graph.fatalProofLoss();
+    close_graph.advanceGraph(&self.pending_window_close_graph, targets, .consumed) catch close_graph.fatalProofLoss();
+    tab_ops.destroyAllTabsForApprovedWindowClose(self);
     return .complete;
 }
 
@@ -95,7 +206,7 @@ pub fn advancePendingWindowClose(self: *AppSession) void {
     if (!self.window_close_pending) return;
     if (advanceWindowClose(self) == .event_pending) return;
     self.window_close_pending = false;
-    self.latchSessionClose();
+    if (!self.ended_seen) self.latchSessionClose();
 }
 
 pub fn requestWindowClose(self: *AppSession) bool {

@@ -32,7 +32,7 @@ pub const inventory = [_]Proof{
     // C3-3b5가 공통 close/remove progress enum을 추가했다. 값 타입 선언뿐이라 기존 `@field` 세 곳과 Client receiver는 그대로다.
     // AppSession close 순서를 실제 제품 래퍼에서 검증하는 test-only progress sequence가 붙었다. 제품 vtable과
     // `@field` 세 곳은 그대로이고, 조건부 testing facade 밖의 Client receiver도 늘지 않는다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "1acbf572ddf217bbb1967290523c82c9b885890e2cddfe203ed0cb421af20b37" },
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "17ae7e01906456140e04adbc121993e89acfdf4509c785cfb8aaea0a6b86e340" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —
@@ -275,7 +275,9 @@ pub const inventory = [_]Proof{
     // `@field` 반사는 없다. count는 2 그대로다.
     // C3-3b5가 Term별 close generation/reservation과 AppSession inline close graph를 추가했다. 기존 reflection
     // 두 곳과 그 대상은 바뀌지 않았고, 새 권위는 별도 process-sealed leaf가 검증한다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "e40ae45ba591412a56918cff8389cfe15af801393b439b75f17e25d5bac7facf" },
+    // 창 닫기 graph의 scalar 저장 형식을 Linux ABI 교차 빌드에도 유지하도록 조건부 void 별칭을 없앴다.
+    // 읽는 reflection 두 곳은 그대로이고, syscall과 RemoteRuntime 실행 경로는 계속 macOS에만 남는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "7d945698682358abd59cf532b221af8b010f68bddff13f55b7dd0f5f7ca8f54e" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

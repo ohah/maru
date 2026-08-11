@@ -4,10 +4,23 @@
 //! 투영하고, 이 leaf는 그 scalar projection과 허용된 lifecycle 전이만 process seal로 인증한다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const process_seal = @import("process_seal_service.zig");
 
 pub const Seal = process_seal.CleanupSeal;
 pub const Digest = [32]u8;
+
+fn ensureSealReadyForTest() !process_seal.ReadyIdentity {
+    if (!builtin.is_test) unreachable;
+    return process_seal.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => blk: {
+            const prepared = try process_seal.prepare(process_seal.currentProcessId(), 0x3B35_0002);
+            process_seal.commitReady(prepared);
+            break :blk try process_seal.currentReadyIdentity();
+        },
+        else => err,
+    };
+}
 
 pub const RequestKind = enum(u8) {
     close_and_detach = 1,
@@ -239,7 +252,10 @@ fn hashInt(hasher: *std.crypto.hash.sha2.Sha256, comptime T: type, value: T) voi
 }
 
 test "C3-3b5 close graph는 final address와 exact target membership을 봉인한다" {
-    _ = try @import("remote_close_authority.zig").testing.ensureSealReady();
+    // Linux aggregate는 제품 ClientSlot bootstrap을 소유하지 않는다. 임의 nonce로 전역 seal을 먼저 준비하면
+    // 뒤 authority 테스트의 canonical bootstrap을 오염하므로 실제 owner가 있는 macOS focused gate만 실행한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = try ensureSealReadyForTest();
     var graph: PendingTermCloseGraph = .{};
     const targets = [_]TargetProjection{
         .{ .term_addr = 0x1000, .surface_id = 1, .handle = 11, .term_close_generation = 7 },
@@ -255,7 +271,8 @@ test "C3-3b5 close graph는 final address와 exact target membership을 봉인�
 }
 
 test "C3-3b5 close graph의 Term reservation은 복사와 phase replay를 거부한다" {
-    _ = try @import("remote_close_authority.zig").testing.ensureSealReady();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = try ensureSealReadyForTest();
     var graph: PendingTermCloseGraph = .{};
     const targets = [_]TargetProjection{
         .{ .term_addr = 0x3000, .surface_id = 3, .handle = 33, .term_close_generation = 10 },

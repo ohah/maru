@@ -50,8 +50,8 @@ const RemoteSessionClient = if (is_macos) session_host.client.Client else void;
 const RemoteSessionAdapter = if (is_macos) session_host.host_adapter.HostAdapter else void;
 const RemoteSessionBackend = if (is_macos) session_host.remote_term_backend.RemoteTermBackend else void;
 const RemoteHostPool = if (is_macos) session_host.host_pool.HostPool(RemoteSessionAdapter) else void;
-const PendingTermClose = if (is_macos) session_host.pending_term_close_graph.PendingTermClose else void;
-const PendingTermCloseGraph = if (is_macos) session_host.pending_term_close_graph.PendingTermCloseGraph else void;
+const PendingTermClose = session_host.pending_term_close_graph.PendingTermClose;
+const PendingTermCloseGraph = session_host.pending_term_close_graph.PendingTermCloseGraph;
 extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
 pub const coretext_bridge = @import("coretext_smoke_bridge.zig");
 pub const coretext_frame_builder = @import("coretext_frame_builder.zig");
@@ -1446,7 +1446,7 @@ const TermRuntime = struct {
     // 창 close graph가 이 Term의 현재 membership과 backend request를 final address에 봉인한다. bool close_complete만으로는
     // allocator reuse나 다른 창으로 이동한 Term을 같은 재시도로 오인할 수 있어 별도 checked generation을 둔다.
     close_generation: u64 = 0,
-    pending_close: PendingTermClose = if (is_macos) .{} else {},
+    pending_close: PendingTermClose = .{},
     // 이 Term의 셸을 spawn한 시각(ns, `std.Io.Clock.awake` 단조 시계 — 코드베이스 선례). 종료 시 uptime(=exit−spawn)을
     // 재 비정상 시작 사망(grace window) 판정에 쓴다. createTerm이 스탬프. 0이면 미스탬프(테스트 등)로 취급 — uptime 판정 생략.
     spawned_at_ns: i128 = 0,
@@ -2826,7 +2826,7 @@ pub const AppSession = struct {
     // final address에 남아 tick retry가 같은 membership만 진행하게 하고, 단순 bool은 Swift 호환 latch로만 유지한다.
     close_session_generation: u64 = 1,
     next_window_close_graph_generation: u64 = 0,
-    pending_window_close_graph: PendingTermCloseGraph = if (is_macos) .{} else {},
+    pending_window_close_graph: PendingTermCloseGraph = .{},
     // 붙여넣기 보호(input.paste-protection) 확인 모달의 보류. 위험한 붙여넣기(개행/ESC[201~ 인젝션)를 감지하면
     // 바로 PTY로 안 보내고 이 버퍼에 최종 payload(escape 적용 후)를 세션 소유로 보관한 뒤 확인 모달을 연다.
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.

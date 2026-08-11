@@ -2623,7 +2623,7 @@ pub fn build(b: *std.Build) void {
             .optimize = b3_optimize,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
-        B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_remote_backend_module, "C3-3b5 remote backend", 7);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_remote_backend_module, "C3-3b5 remote backend", 8);
         const event_c3_3b5_close_graph_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/pending_term_close_graph.zig"),
             .target = target,

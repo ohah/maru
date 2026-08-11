@@ -793,7 +793,7 @@ test "term runtime backend: closeAndDetach through the contract rejects late inp
     try be.writeInput(3, "before");
 
     // terminate: routing을 끊는다. 이후 같은 handle로 온 입력은 살아 있는 다른 surface로 새지 않고 거부된다.
-    be.closeAndDetach(3);
+    try std.testing.expectEqual(CloseProgress.complete, be.closeAndDetach(3));
     try std.testing.expectError(error.UnknownSurface, be.writeInput(3, "late"));
 
     // 죽은 handle의 관측은 null/0(없음)을 돌려준다.

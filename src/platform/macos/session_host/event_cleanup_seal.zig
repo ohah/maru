@@ -55,6 +55,17 @@ pub const RuntimeAdmissionSealInput = struct {
     state_raw: u8,
 };
 
+pub const WindowCloseTicketReservationSealInput = struct {
+    self_addr: u64,
+    backend_addr: u64,
+    thread_id: u64,
+    first_ticket: u64,
+    last_ticket: u64,
+    target_count: u32,
+    target_digest: Digest,
+    state_raw: u8,
+};
+
 pub const RemoteBackendSingletonSealInput = struct {
     self_addr: u64,
     backend_addr: u64,

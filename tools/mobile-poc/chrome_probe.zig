@@ -36,8 +36,118 @@ pub const CQuad = extern struct {
     cell_y: u32,
 };
 
-var quad_buf: [512]CQuad = undefined;
+var quad_buf: [2048]CQuad = undefined;
 var quad_count: usize = 0;
+
+// ── 본문용 터미널 코어 ────────────────────────────────────────────────────────
+// 앞 단계 본문은 하드코딩 문자열이었다. 여기서는 **VT 파서를 실제로 태운다** — 색은
+// SGR 에서, 한글 2셀 폭은 코어의 EAW 판정에서 나온다. 즉 화면에 보이는 본문이
+// "maru 터미널이 실제로 계산한 격자"다.
+const terminal = maru.terminal;
+const color = maru.color;
+
+var term_buf: [512 * 1024]u8 = undefined;
+var term_fba = std.heap.FixedBufferAllocator.init(&term_buf);
+var term_core: ?terminal.core.TerminalCore = null;
+var term_cols: u16 = 0;
+var term_rows: u16 = 0;
+
+/// 실제 셸 세션이 낼 법한 바이트열. 색·굵기·한글이 섞여 있어야 코어를 통과했다는 게
+/// 화면에서 드러난다.
+const term_feed =
+    "$ zig build test\r\n" ++
+    "\x1b[32mAll 11 passed.\x1b[0m\r\n" ++
+    "$ git status --short\r\n" ++
+    "\x1b[33m M \x1b[0msrc/chrome/ui/tree.zig\r\n" ++
+    "$ maru \x1b[36m0.1.0\x1b[0m (arm64)\r\n" ++
+    "\x1b[35m한글 터미널\x1b[0m 세션 목록\r\n" ++
+    "$ \x1b[1m설정 검색 알림\x1b[0m\r\n";
+
+// ── 입력 ─────────────────────────────────────────────────────────────────────
+// 플랫폼이 키를 받아 **바이트로** 넘긴다. 코어는 그것을 PTY 에서 온 것과 구분하지 않는다 —
+// 그게 터미널의 계약이고, 모바일에서도 같은 계약이 서는지 보는 자리다.
+var input_buf: [512]u8 = undefined;
+var input_len: usize = 0;
+
+export fn maru_term_input(ptr: [*]const u8, len: usize) u32 {
+    const n = @min(len, input_buf.len - input_len);
+    if (n == 0) return @intCast(input_len);
+    @memcpy(input_buf[input_len..][0..n], ptr[0..n]);
+    input_len += n;
+    // 코어가 이미 서 있으면 바로 먹인다. 없으면 다음 init 때 feed 뒤에 붙는다.
+    if (term_core) |*c| c.write(ptr[0..n]) catch {};
+    return @intCast(input_len);
+}
+
+/// 셀 색을 RGB 로 푼다. indexed 는 maru 자체 팔레트(`color.xterm256`)를 쓴다 —
+/// 모바일용으로 색표를 새로 만들지 않는다.
+fn cellRgb(style: terminal.types.Style, tk: anytype) color.Rgb {
+    return switch (style.foreground) {
+        .default => tk.get(.surface_fg),
+        .indexed => |i| color.xterm256(i),
+        .rgb => |c| c,
+    };
+}
+
+/// 본문 사각형을 터미널 격자로 채운다.
+fn pushTerminal(rect: anytype, tk: anytype) void {
+    const font_px: i32 = 15;
+    const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
+    const cw: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale);
+    const line_h: i32 = font_px + 7;
+    const cols_f = @divTrunc(@as(i32, @intFromFloat(rect.width)), @max(1, @divTrunc(cw, 2)));
+    const rows_f = @divTrunc(@as(i32, @intFromFloat(rect.height)), line_h);
+    const cols: u16 = @intCast(@max(8, @min(200, cols_f)));
+    const rows: u16 = @intCast(@max(2, @min(60, rows_f)));
+
+    // 화면 크기가 바뀌면 코어도 그 크기로 다시 세운다 — 반응형이 코어까지 간다.
+    if (term_core == null or term_cols != cols or term_rows != rows) {
+        if (term_core) |*c| c.deinit();
+        term_fba.reset();
+        term_core = terminal.core.TerminalCore.init(term_fba.allocator(),
+                                                    .{ .cols = cols, .rows = rows }) catch {
+            term_core = null;
+            return;
+        };
+        term_cols = cols;
+        term_rows = rows;
+        term_core.?.write(term_feed) catch {};
+        // 재생성이면 그동안 받은 입력도 다시 먹인다 — 화면이 되돌아가지 않는다.
+        if (input_len > 0) term_core.?.write(input_buf[0..input_len]) catch {};
+    }
+    const core = &(term_core orelse return);
+
+    var row: u16 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u16 = 0;
+        while (col < cols) : (col += 1) {
+            const cell = core.screen.cells[core.index(row, col)];
+            if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
+            if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
+            const glyph = atlasCell(cell.codepoint) orelse continue;
+            if (quad_count == quad_buf.len) return;
+            const rgb = cellRgb(cell.style, tk);
+            // 진행 폭은 코어가 정한 셀 폭을 따른다 — 한글이 2셀이라는 판정이 코어 것이다.
+            const x = @as(i32, @intFromFloat(rect.x)) + @as(i32, col) * @divTrunc(cw, 2);
+            const y = @as(i32, @intFromFloat(rect.y)) + @as(i32, row) * line_h;
+            quad_buf[quad_count] = .{
+                .x = @floatFromInt(x),
+                .y = @floatFromInt(y),
+                .w = @floatFromInt(if (cell.width == 2) cw else @divTrunc(cw, 2) + 2),
+                .h = @floatFromInt(font_px),
+                .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+                .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+                .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+                .a = 1.0,
+                .radius = 0,
+                .kind = 1,
+                .cell_x = glyph.col,
+                .cell_y = glyph.row,
+            };
+            quad_count += 1;
+        }
+    }
+}
 
 /// 데스크톱 기본 테마에 가까운 값. 실제 제품은 config 에서 오지만 PoC 는 고정한다.
 fn themeColors() tokens.ThemeColors {
@@ -231,32 +341,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
                                                   .padding = .{ .left = 10.0, .right = 10.0, .top = 10.0, .bottom = 10.0 } } },
                                    &side_children);
 
-    // ── 본문: 터미널 영역(카드 하나) + 그 안의 텍스트 줄들
-    const output = [_][]const u8{
-        "$ zig build test",
-        "  All 11 passed.",
-        "$ git status --short",
-        "  M src/chrome/ui/tree.zig",
-        "  한글 터미널 세션",
-        "$ maru 0.1.0 (arm64)",
-        "  목록 설정 검색 알림",
-    };
-    var lines: [7]tree.UiNode = undefined;
-    for (&lines, 0..) |*l, i| {
-        l.* = tree.text(.{
-            .id = @intCast(310 + i),
-            // column 안에서 width 는 cross axis 다 — `.fill` 은 main axis 전용이라 거부된다
-            // (FillOnCrossAxis). 폭을 화면에 맞추려면 percent 를 쓴다.
-            .style = .{ .width = .{ .percent = 1.0 },
-                        .height = .{ .px = 15.0 }, .margin = .{ .bottom = 7.0 } },
-            .value = output[i],
-            .tone = if (output[i][0] == '$') .accent else .primary,
-        });
-    }
+    // ── 본문: **진짜 터미널 화면**이다. 자식 없이 자리만 잡고, 그 사각형을
+    // `TerminalCore` 의 셀 격자로 채운다(아래 `pushTerminal`). 앞 단계의 하드코딩
+    // 문자열과 달리 VT 파서를 실제로 태우므로 SGR 색·한글 2셀 폭이 코어에서 나온다.
     const body = tree.container(.{ .id = 300, .direction = .column,
                                    .style = .{ .flex = .{ .grow = 1 },
                                                .padding = .{ .left = 16.0, .right = 16.0, .top = 14.0, .bottom = 14.0 } } },
-                                &lines);
+                                &.{});
 
     const middle = tree.container(.{ .id = 20, .direction = .row, .style = .{ .flex = .{ .grow = 1 } } },
                                   &.{ sidebar, body });
@@ -321,6 +412,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         pushText(label, @intFromFloat(entry.rect.x), @intFromFloat(entry.rect.y), 15, tk.get(tone_role));
     }
 
+    // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
+    for (built.entries) |entry| {
+        if (entry.id != 300) continue;
+        pushTerminal(entry.rect, tk);
+        break;
+    }
+
     // **SVG 아이콘**: maru 의 등록 아이콘을 그대로 얹는다. coverage 는 Zig 가 만들고
     // (renderer/icon_glyph) 플랫폼은 텍스처로 올려 샘플링만 한다 — 자산이 이식된다는 증거다.
     const icon_y: i32 = @intFromFloat(@max(0, height_f - 24));
@@ -359,13 +457,7 @@ fn labelFor(id: u64) ?[]const u8 {
         232 => "docs",
         233 => "infra",
         234 => "scratch",
-        310 => "$ zig build test",
-        311 => "  All 11 passed.",
-        312 => "$ git status --short",
-        313 => "  M src/chrome/ui/tree.zig",
-        314 => "  한글 터미널 세션",
-        315 => "$ maru 0.1.0 (arm64)",
-        316 => "  목록 설정 검색 알림",
+        // 본문 줄은 여기 없다 — TerminalCore 격자가 소유한다(pushTerminal).
         else => null,
     };
 }

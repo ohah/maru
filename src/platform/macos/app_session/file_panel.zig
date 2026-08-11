@@ -39,6 +39,7 @@ const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const PendingDockFocus = app_session_mod.PendingDockFocus;
 const dock_ops = @import("dock.zig");
+const git_ops = @import("git.zig"); // 활성 터미널 cwd 해석을 소스 컨트롤 뷰와 공유한다(followActiveTerminalCwd)
 const pane_ops = @import("pane.zig");
 const renameatx_np = AppSession.renameatx_np;
 const FilePanelOpenPathResult = AppSession.FilePanelOpenPathResult;
@@ -905,15 +906,12 @@ pub fn openProjectedFileTreePath(
 pub fn followActiveTerminalCwd(self: *AppSession) void {
     if (!dock_ops.dockVisible(self)) return;
     if (self.tabs.items.len == 0) return;
-    const term = pane_ops.activePane(self).activeTerm();
-    // updateFileTree는 renderer보다 먼저 tick에서 돈다. 여기서 observation을 새로 읽지 않으면 OSC 7의
-    // cwd 변경을 아직 보지 못해 한 번도 reveal하지 않는 frame이 생긴다. readObservation은 runtime cache만
-    // 갱신하며 filesystem scan은 worker 경계에 그대로 남는다.
-    term_ops.refreshTermObservation(self, term, false, false);
-    // 파일·브라우저 탭은 cwd가 없다 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
-    if (term.rt.observation.availability == .unavailable) return;
-    const cwd = term.rt.observation.cwd.items;
-    if (cwd.len == 0) return;
+    // cwd 해석은 **소스 컨트롤 뷰와 같은 지점**(`git_ops.activeTerminalCwd`)을 쓴다. 축이 갈리면 탐색기가 펼친
+    // 폴더와 목록이 보는 저장소가 서로 다른 곳을 가리킨다. 그 함수가 observation 갱신(OSC 7)과 커널 폴백을
+    // 둘 다 맡으므로, bash/fish나 claude·codex가 떠 있어 OSC 7이 없는 터미널에서도 reveal이 동작한다.
+    // 파일·브라우저 탭은 cwd가 없어 null이고 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.activeTerminalCwd(self, &cwd_buf) orelse return;
     if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
     const owned = self.allocator.dupe(u8, cwd) catch return;
     const reveal = self.file_tree.revealDirectory(owned) catch {

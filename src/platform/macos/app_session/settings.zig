@@ -1322,7 +1322,7 @@ pub fn requestBranchMenu(self: *AppSession) void {
     // 백엔드는 **지연 생성**이다(소스 컨트롤을 연 적 없으면 없다). 없으면 조용히 무시되던 것을 여기서 만든다 —
     // `refreshGitStatus`와 같은 규율. 안 그러면 도크를 한 번도 안 연 사용자에겐 브랜치 클릭이 아무 일도 안 한다.
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch {
             self.showNotice("git 백엔드를 시작하지 못했습니다");
             return;
         };

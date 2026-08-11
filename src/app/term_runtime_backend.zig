@@ -309,6 +309,17 @@ pub const VTable = struct {
     /// 포그라운드 프로세스 이름들을 `out`에 채우고 채운 개수를 돌려준다(agent kind 분류용). 고정 버퍼라 alloc 없음.
     foreground_process_names: *const fn (ctx: *anyopaque, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize,
 
+    /// 이 터미널이 **서 있는 폴더**를 OS에 직접 물어 `out`에 채운다. 못 얻으면 null(자른 경로는 절대 돌려주지 않는다).
+    ///
+    /// **왜 `read_observation`과 별개인가**: observation의 cwd는 OSC 7(셸이 보고)이 출처라 셸 통합이 없거나
+    /// (bash/fish) 전체화면 TUI가 RIS로 화면을 리셋하면 비어 버린다. 이건 그 빈칸을 커널 조회로 메우는
+    /// **폴백 질의**다. observation 경로에 넣으면 ⑴ 관측 캐시가 title generation으로 early-return해 정작
+    /// 필요한 순간 안 돌고 ⑵ 매 프레임 syscall이 된다 — 그래서 호출자가 필요할 때만 부르는 별도 seam이다.
+    ///
+    /// **이 seam으로 넘기는 이유**는 `resource_samples`와 같다: pid·libproc을 `app_session`이 직접 만지지 않게 한다.
+    /// host-backed 터미널은 PTY가 host 프로세스에 있어 앱에서 조회할 수 없고, 그 구현은 null을 돌려준다.
+    process_cwd: *const fn (ctx: *anyopaque, handle: RuntimeHandle, out: []u8) ?[]const u8,
+
     /// cwd/title/semantic/SSH destination/foreground를 한 시점에 caller-owned cache로 복사한다. `include_foreground=false`면
     /// 구현은 비싼 OS process 열거를 생략할 수 있다. unavailable은 empty와 구분해 `out.availability`에 기록한다.
     read_observation: *const fn (ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void,
@@ -384,6 +395,10 @@ pub const TermRuntimeBackend = struct {
         return self.vtable.resource_samples(self.ctx, handle, out);
     }
 
+    pub fn processCwd(self: TermRuntimeBackend, handle: RuntimeHandle, out: []u8) ?[]const u8 {
+        return self.vtable.process_cwd(self.ctx, handle, out);
+    }
+
     pub fn readObservation(self: TermRuntimeBackend, handle: RuntimeHandle, allocator: std.mem.Allocator, out: *RuntimeObservation, include_foreground: bool) anyerror!void {
         return self.vtable.read_observation(self.ctx, handle, allocator, out, include_foreground);
     }
@@ -441,6 +456,8 @@ const FakeTermBackend = struct {
     allocator: std.mem.Allocator,
     runtime: runtime_mod.SurfaceRuntime,
     entries: std.ArrayList(Entry) = .empty,
+    /// `process_cwd`가 돌려줄 값(테스트가 세팅). 실 backend에서는 커널이 주는 값이라 여기서만 흉내낸다.
+    fake_process_cwd: []const u8 = "",
 
     const Entry = struct { handle: RuntimeHandle, rt: *FakeBackendRuntime };
 
@@ -459,6 +476,7 @@ const FakeTermBackend = struct {
         .foreground_process_group = foregroundProcessGroup,
         .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
+        .process_cwd = processCwd,
         .read_observation = readObservation,
         .refresh_observation = readObservation,
         .dump_recent_text = dumpRecentText,
@@ -584,6 +602,16 @@ const FakeTermBackend = struct {
         return 1;
     }
 
+    /// 테스트가 주입한 커널 cwd를 그대로 돌려준다(실 프로세스가 없으므로 조회 자체는 흉내낼 수 없다).
+    /// `fake_process_cwd`가 비면 null — "OSC 7도 없고 커널도 모른다"는 경우를 표현한다.
+    fn processCwd(ctx: *anyopaque, handle: RuntimeHandle, out: []u8) ?[]const u8 {
+        const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
+        if (self.find(handle) == null) return null;
+        if (self.fake_process_cwd.len == 0 or self.fake_process_cwd.len > out.len) return null;
+        @memcpy(out[0..self.fake_process_cwd.len], self.fake_process_cwd);
+        return out[0..self.fake_process_cwd.len];
+    }
+
     /// 테스트용 고정 표본 — 실 프로세스가 없으므로 "표본 하나가 온다"는 배관만 증명한다.
     fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []resource_usage.Sample) usize {
         const self: *FakeTermBackend = @ptrCast(@alignCast(ctx));
@@ -659,6 +687,38 @@ test "term runtime backend: fake drives spawn/attach/input/resize through the co
     try std.testing.expectEqual(@as(?i32, 4242), be.foregroundProcessGroup(7));
     var names: [4]pty.types.ForegroundProcessName = undefined;
     try std.testing.expectEqual(@as(usize, 1), be.foregroundProcessNames(7, &names));
+}
+
+test "term runtime backend: processCwd는 계약을 통해서만 오고 모르는 handle·좁은 버퍼는 null이다" {
+    // 이 seam이 왜 있는가: OSC 7(셸 보고)이 유일한 cwd 출처면 bash/fish 셸이나 화면을 리셋하는 TUI(claude·codex)
+    // 아래에서 "이 터미널이 어느 폴더에 있는가"를 영영 모르게 된다. 그 빈칸을 커널 조회로 메우는 폴백이고,
+    // 여기서는 **계약 표면**(handle 라우팅·실패 시 null·자르지 않음)만 고정한다. 실제 조회는 pty/macos.zig가 한다.
+    const allocator = std.testing.allocator;
+    var fake = FakeTermBackend.init(allocator);
+    defer fake.deinit();
+    fake.fake_process_cwd = "/Users/me/work/repo";
+    const be = fake.backend();
+
+    _ = try be.spawn(.{
+        .handle = 11,
+        .request = .{ .command = "/bin/sh" },
+        .size = .{ .cols = 10, .rows = 3 },
+        .queue_capacity = 4,
+    });
+
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("/Users/me/work/repo", be.processCwd(11, &buf).?);
+
+    // 모르는 handle은 살아 있는 다른 runtime의 cwd로 새지 않는다 — 새면 남의 저장소 상태를 보여 주게 된다.
+    try std.testing.expect(be.processCwd(999, &buf) == null);
+
+    // **자르지 않는다.** 잘린 경로는 조용히 상위 디렉터리를 가리켜 다른 저장소를 잡는다.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expect(be.processCwd(11, &tiny) == null);
+
+    // 커널도 모르는 경우(원격 runtime 등)는 null이고, 호출자는 OSC 7 값으로 남는다.
+    fake.fake_process_cwd = "";
+    try std.testing.expect(be.processCwd(11, &buf) == null);
 }
 
 test "term runtime backend: closeAndDetach through the contract rejects late input" {

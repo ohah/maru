@@ -252,20 +252,31 @@ pub fn dispatchCwd(self: *TerminalCore, body: []const u8) void {
 /// `<서브커맨드>;<인자...>`. `ssh;<dest>`는 maru ssh 진입, `ssh-end`는 그 foreground ssh가 끝나 로컬 shell로
 /// 돌아온 경계다. Maru는 dest로 cli.ssh.controlSocketPath를 계산해 드롭 파일을 그 control socket으로 업로드한다.
 /// 알 수 없는 서브커맨드나 빈 dest는 무시하고(기존 상태 유지), OOM이면 갱신하지 않는다.
+/// **dest가 실제로 바뀌면 title_generation을 올린다.** `ssh_remote_dest`는 runtime observation의 필드이고, 그
+/// generation이 곧 observation refresh의 게이트다(위 OSC 7 주석의 같은 논지). bump가 없으면 periodic 관측이
+/// "current"인 채 옛 값을 들고 있어, ssh에 들어가고 나오는 순간을 소비자가 **다음 cwd/title 변화 때까지 모른다**.
+/// 원격 세션 동안에는 로컬 OSC 7이 오지 않으므로 그 공백이 길어질 수 있다 — 그 사이 저장소 판정이 원격 세션을
+/// 로컬로 보고 남의 저장소를 보여 준다(적대적 검증에서 발견). barrier(`refreshObservation`)를 쓰는 소비자는
+/// 원래 안전했고, 이 bump는 **periodic 경로도** 제때 보게 만든다. 값이 그대로면 올리지 않는다(헛 sync 방지).
 pub fn dispatchMaru(self: *TerminalCore, body: []const u8) void {
     var it = std.mem.splitScalar(u8, body, ';');
     const sub = it.next() orelse return;
     if (std.mem.eql(u8, sub, "ssh-end")) {
-        if (self.ssh_remote_dest) |old| self.allocator.free(old);
+        if (self.ssh_remote_dest) |old| {
+            self.allocator.free(old);
+            self.bumpTitleGeneration(); // 지울 게 있었을 때만(멱등 clear가 헛 sync를 만들지 않게)
+        }
         self.ssh_remote_dest = null;
         return;
     }
     if (!std.mem.eql(u8, sub, "ssh")) return; // 알 수 없는 서브커맨드는 무시(소비만)
     const dest = it.rest(); // 첫 필드(sub) 뒤 나머지 전체 = dest(목적지 문자열)
     if (dest.len == 0) return; // 빈 dest는 무시(기존 dest 유지)
+    const changed = if (self.ssh_remote_dest) |old| !std.mem.eql(u8, old, dest) else true;
     const dup = self.allocator.dupe(u8, dest) catch return; // OOM이면 기존 dest 유지
     if (self.ssh_remote_dest) |old| self.allocator.free(old);
     self.ssh_remote_dest = dup;
+    if (changed) self.bumpTitleGeneration();
 }
 
 /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.

@@ -43,6 +43,15 @@ macOS 로컬 shell 1개 surface
 - [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md)
+- [에디터 Surface 단계 계획](plans/editor-surface.md)
+- [에이전트 세션 도크 카드 구현 계획](plans/agent-session-list.md)
+- [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
+- [웹 패널 구현 계획](plans/web-panel.md)
+- [Metal UI 구현·검증 순서](plans/metal-ui-layout.md)
+- [I/O–렌더 스레딩 Phase 2~4](plans/io-render-threading.md)
+- [TerminalCore 분해 기록](plans/terminal-core-decomposition.md)
+- [Screen struct fold (방향 B)](plans/screen-struct-fold.md)
+- [page-aligned storage](plans/page-aligned-storage.md)
 
 설계 **계약**은 계획 문서가 아니라 각 영역의 설계 문서가 소유한다([AGENTS.md](../AGENTS.md) 참조).
 계획 문서는 그 계약을 어떤 순서로 구현했고 무엇이 남았는지만 기록한다.

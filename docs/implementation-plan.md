@@ -893,7 +893,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
          `CloseProgress`, remove를 `RemoveProgress`로 바꾼다. heap-pinned `RemoteRuntime.CloseAuthority`와 backend closing receipt,
          bounded/fair `CloseSweep`, pending lifecycle readiness, handle ABA와 real AppSession synchronous in-process tab/window close parity를
          검증한다. b4가 실제 `event_pending`을 활성화하기 전에 dormant pending 상태 전수를 먼저 닫으며 actual generation
-         `event_pending` close E2E는 b4가 소유한다.
+         `event_pending` close E2E는 b4가 소유한다. focused gate `test-session-host-2c3d-c3-3b5`는 최적화 모드마다
+         neutral contract 6개, lifecycle readiness 6개, close authority 8개, close sweep 8개, remote backend 7개,
+         AppSession parity 4개인 unique component 39개와 boundary 1개를 exact-count한다. RED 이후 GREEN에서 범주를
+         합치거나 이름만 남기지 않으며, 각 테스트명은 실제로 관측하는 불변식을 한글로 기술한다.
       6. **C3-3b4 product semantic commit/pump:** 모든 event kind를 mutation-free prepare→settle→no-fail commit으로 전환하고
          `idle|event_pending|drained|ended` typed progress를 `RemoteTermBackend.drainRemote`까지 연결한다. settlement/observation cleanup callback
          전후 full seal, `committed_cleanup` read/mutation guard, actual product Busy→next-tick success·surface live E2E와

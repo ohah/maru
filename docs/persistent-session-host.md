@@ -2792,6 +2792,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    명시한 direct void deinit/detach 경로만 process teardown 또는 construction rollback 전용이며 제품의 일반 terminal close 우회로로
    호출할 수 없다.
 
+   C3-3b5의 첫 RED는 최적화 모드마다 neutral contract 6개, lifecycle readiness 6개, close authority 8개,
+   close sweep 8개, remote backend 7개, AppSession parity 4개인 unique component 39개와 boundary 1개를 고정한다.
+   각 범주는 다른 범주의 digest나 수동 fixture 성공으로 대체하지 않는다. 특히 AppSession parity는 VTable fake만 호출하지 않고
+   실제 tab/window close 호출부가 `complete|removed`를 받은 뒤에만 layout과 handle을 버리는지 검증하며, remote backend 범주는
+   4,097번째 admission이 allocator·map·routing·layout mutation 전에 거부되는 실제 owner 경계를 사용한다. b4 전에는
+   generation `event_pending`의 실제 pump 성공을 흉내 내는 test-only 분기를 두지 않는다.
+
    `CloseDisposition`은 `detach_preserve_host|terminate_host`다. 최초 request가 exact host/runtime/final address와 request generation에
    봉인된다. terminate owner는 여기에 endpoint, protocol major, manifest host/build/epoch, compatibility profile row/digest와 monotonic
    attempt generation을 더 봉인한다. 각 attempt는 immutable

@@ -4275,7 +4275,7 @@ pub const AppSession = struct {
     /// 두 바는 같은 y에서 시작하므로, 높이를 공유해야 아래 경계선이 한 줄로 맞는다(사용자 보고: 어긋남).
     ///
     /// 높이는 chrome 토큰(`space.bar_height_pt`)이 정한다 — 그것이 두 chrome이 공유하는 유일한 정렬 계약이기
-    /// 때문이다(docs/agent-session-list.md §2.1.3). **terminal cell을 `@max`로도 섞지 않는다**: 한때
+    /// 때문이다(docs/agent-session-list-layout.md §2.1.3). **terminal cell을 `@max`로도 섞지 않는다**: 한때
     /// `@max(pt, cell + 2*pad)`였는데 그러면 terminal 폰트가 도크 기하를 정하게 되어(layering-and-portability
     /// 금지) `font-scale-rects` fixture가 실제로 깨졌다(14pt↔24pt 도크 rect 12px 이동, 1x↔2x 비례 이탈).
     ///

@@ -156,7 +156,7 @@ pub const Spacing = struct {
     // **여기 있는 이유**: 이 값은 두 chrome이 공유하는 정렬 계약이다. 도크 뷰 스위처는 예전에
     // `DockMetrics.view_switcher_h`(40pt)를, 터미널 탭 바는 셀 파생 높이를 따로 써서 두 바의 아래 경계선이
     // 어긋나 있었다(사용자 보고). 두 소비자가 이 token 하나를 보면 어떤 값이든 정렬은 자동으로 성립한다
-    // (docs/agent-session-list.md §2.1.3이 예고한 해법).
+    // (docs/agent-session-list-layout.md §2.1.3이 예고한 해법).
     //
     // **셀 항을 `@max`로도 섞지 않는 이유**: 한때 `@max(이값, cell + 2*pad)`였는데, 그러면 terminal 폰트가
     // 도크 기하를 정하게 되어(docs/layering-and-portability.md 금지) `font-scale-rects` fixture가 실제로

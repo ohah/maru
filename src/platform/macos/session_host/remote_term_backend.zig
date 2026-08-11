@@ -1573,8 +1573,11 @@ test "C3-3b4 async close parity는 committed cleanup callback 뒤에만 제거�
     try testing.expect(!backend_value.runtimes.contains(42));
 }
 
-test "remote term backend: drives a real host runtime through the TermRuntimeBackend contract" {
+test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (std.c.getenv("MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST")) |raw| {
+        if (std.mem.eql(u8, std.mem.span(raw), "skip-in-aggregate-v1")) return error.SkipZigTest;
+    }
     try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;

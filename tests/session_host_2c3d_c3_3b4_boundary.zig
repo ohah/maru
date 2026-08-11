@@ -44,6 +44,18 @@ test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를
     try std.testing.expectEqual(@as(usize, 2), count(backend, "test \"C3-3b4 async close parity"));
     try std.testing.expectEqual(@as(usize, 2), count(app, "test \"C3-3b4 async close parity"));
     try std.testing.expectEqual(@as(usize, 3), count(runtime, "test \"C3-3b4 proof-loss subprocess"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(backend, "test \"C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다\""),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(backend, "std.c.getenv(\"MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        count(build, "\"MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST\""),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"MARU_C3B4_PROOF_LOSS\""));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "std.c.getenv(\"MARU_C3B4_PROOF_LOSS\")"));
     try std.testing.expectEqual(@as(usize, 2), count(build, "fresh-artifact-v1") + count(runtime, "fresh-artifact-v1"));

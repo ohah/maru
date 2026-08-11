@@ -115,9 +115,12 @@ pub fn pieces(text: []const u8, view_cols: u16, wrap: bool) Pieces {
 /// 각자 세면 번호가 본문과 어긋난다 — 본문을 나눈 쪽이 답을 내고 gutter가 그것을 따른다.
 pub const VisualRow = struct {
     /// 뷰포트 첫 줄로부터 몇 번째 논리 줄인가(0-based).
-    line: u16,
-    /// 그 줄 안에서 몇 번째 조각인가(0-based).
-    piece: u16,
+    ///
+    /// **u16이 아니다.** 호출자가 넘기는 줄 수에 계약상 상한이 없어(뷰포트 컬링은 관례이지 강제가
+    /// 아니다) 좁히면 `@intCast`가 panic한다 — 화면이 안 그려지는 정도가 아니라 앱이 죽는다.
+    line: u32,
+    /// 그 줄 안에서 몇 번째 조각인가(0-based). 조각 수는 화면 행 수를 넘지 않으므로 u32로 충분하다.
+    piece: u32,
 
     /// 이 행에 줄 번호를 그리는가. **랩된 줄의 두 번째 이후에는 비운다**(§4) — 안 그러면 같은
     /// 번호가 연달아 보인다(VSCode 관례).
@@ -126,20 +129,18 @@ pub const VisualRow = struct {
     }
 };
 
-/// 이 줄이 차지하는 시각 행 수. **훑어야 알 수 있다**(모듈 주석의 표 참고).
-pub fn rowsForLine(text: []const u8, view_cols: u16, wrap: bool) usize {
-    var it = pieces(text, view_cols, wrap);
-    var n: usize = 0;
-    while (it.next()) |_| n += 1;
-    return n;
-}
-
 const testing = std.testing;
 
 fn collect(text: []const u8, view_cols: u16, wrap: bool, buf: [][]const u8) [][]const u8 {
     var it = pieces(text, view_cols, wrap);
     var n: usize = 0;
-    while (it.next()) |p| : (n += 1) buf[n] = p.slice(text);
+    while (it.next()) |p| : (n += 1) {
+        // **전진 보장이 깨지면 여기서 죽는다.** 그 방어(`i = @max(start + 1, end)`)를 지우고
+        // 확인해 보니 이터레이터가 무한히 빈 조각을 내고 **테스트가 멈춘다** — hang은 CI에서
+        // 타임아웃으로만 보여 어느 계약이 깨졌는지 알려주지 않는다. 상한을 두어 실패로 만든다.
+        if (n >= buf.len) @panic("조각이 버퍼를 넘었다 — Pieces.next의 전진 보장이 깨졌다");
+        buf[n] = p.slice(text);
+    }
     return buf[0..n];
 }
 
@@ -190,7 +191,6 @@ test "빈 줄도 한 행이다 — caret 자리가 사라지면 안 된다" {
     const got = collect("", 5, true, &buf);
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("", got[0]);
-    try testing.expectEqual(@as(usize, 1), rowsForLine("", 5, true));
 }
 
 test "뷰보다 넓은 글자도 전진한다 — 무한 루프가 아니다" {
@@ -224,7 +224,11 @@ test "조각들이 원본을 빠짐없이 덮는다 — 겹치지도 새지도 �
         for ([_]u16{ 1, 2, 3, 4, 5, 8, 40 }) |cols| {
             var it = pieces(text, cols, true);
             var expect_start: usize = 0;
+            var guard: usize = 0;
             while (it.next()) |p| {
+                // 상한이 없으면 전진 보장이 깨졌을 때 이 루프가 영원히 돈다(위 `collect` 주석 참고).
+                guard += 1;
+                try testing.expect(guard <= text.len + 2);
                 try testing.expectEqual(expect_start, p.start); // 앞 조각 끝에서 이어진다
                 try testing.expect(p.end >= p.start);
                 expect_start = p.end;

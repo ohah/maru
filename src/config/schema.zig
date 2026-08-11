@@ -1374,21 +1374,18 @@ test "parseDocRange: 괄호·백틱·음수·설명 위치 range를 모두 파�
     // range가 없으면 null(bool/enum 등은 애초에 이 가드 대상 아님).
     try std.testing.expect(parseDocRange("| `k` | `true`\\|`false` | `true` | 설명") == null);
 }
-test "editor.wrap이 설정 UI 필드로 노출된다" {
+test "editor.wrap은 아직 설정 UI에 뜨지 않는다 — 값이 렌더에 닿는 경로가 없다" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var list: std.ArrayList(BoolField) = .empty;
     try appendBoolFields(arena, .{}, &list);
 
-    var found = false;
     for (list.items) |f| {
-        if (std.mem.eql(u8, f.key, "editor.wrap")) {
-            found = true;
-            try std.testing.expectEqual(theme.Section.editor, f.section.?);
-            try std.testing.expectEqual(true, f.value); // 기본값
-        }
+        // 편집기가 제품 화면에 배선되기 전이라 토글해도 아무 일이 없다 — 그 상태로 UI에 띄우면
+        // 버그로 보인다(`Meta.hidden`의 용도). **배선할 때 `hidden`을 벗기고 이 테스트를 뒤집는다.**
+        try std.testing.expect(!std.mem.eql(u8, f.key, "editor.wrap"));
     }
-    // 설정 파일을 손으로 고치는 것 말고 **UI에서 끌 수 있어야** 한다는 것이 이 키의 요구였다.
-    try std.testing.expect(found);
+    // 다만 **파싱은 살아 있다** — config 파일로는 지금도 켤 수 있다(loader 테스트가 확인한다).
+    try std.testing.expectEqual(true, (theme.EditorConfig{}).wrap);
 }

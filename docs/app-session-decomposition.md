@@ -673,7 +673,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 | 문서 | 소유하는 축 | 이 문서와의 관계 |
 |---|---|---|
-| [chrome-strategy.md](chrome-strategy.md) · [metal-ui-layout.md](metal-ui-layout.md) §8 ML6 | chrome 컴포넌트의 **형태**(rect 직접 계산 + 짝 `hitTest` → `chrome/ui/` typed tree 이주) | app_session 축소는 그 이주의 **부수효과**다. 무엇을 언제 얼마나 줄일지는 이 문서가 정한다 |
+| [chrome-strategy.md](chrome-strategy.md) · [metal-ui-layout.md](plans/metal-ui-layout.md) §8 ML6 | chrome 컴포넌트의 **형태**(rect 직접 계산 + 짝 `hitTest` → `chrome/ui/` typed tree 이주) | app_session 축소는 그 이주의 **부수효과**다. 무엇을 언제 얼마나 줄일지는 이 문서가 정한다 |
 | [layering-and-portability.md](layering-and-portability.md) §3.3 | L1~L3 **이식** 위상 | L4 내부 분해는 위상 밖이라 이 문서로 위임(원래부터 그렇게 서술) |
 | [app-layer-decomposition.md](app-layer-decomposition.md) | `src/app`(L4 공통 런타임)의 분해 | 대상 파일이 다르다 |
 

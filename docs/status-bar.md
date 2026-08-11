@@ -605,7 +605,7 @@ bottom은 터미널 레이어 맨 처음이라 그 뒤의 모든 것이 위에 �
 
 ### 5.2 사이드바 배경 strip을 상태바 위에서 끊는다 (ABI v167)
 
-strip은 `.m`이 바닥을 직접 정하는 표면이다([metal-ui-layout.md](metal-ui-layout.md) §5의 승인 예외). Zig가 값을 실어 주는 것 말고는 그 바닥을 옮길 방법이 없어 `MetalFrame.status_bar_height_px`를 냈다.
+strip은 `.m`이 바닥을 직접 정하는 표면이다([metal-ui-layout.md](metal-ui-layout-paint.md) §5의 승인 예외). Zig가 값을 실어 주는 것 말고는 그 바닥을 옮길 방법이 없어 `MetalFrame.status_bar_height_px`를 냈다.
 
 **높이의 단일 권위는 `dock_layout`이다** — `chromeGeometrySnapshot`이 `dockGeometry().status_bar.h`를 그대로 싣는다. 따로 계산하면 *작업영역을 깎은 값*과 *strip을 자르는 값*이 갈려 덮이거나 틈이 생긴다. 값이 chrome 기하 **스탬프**를 타므로 셀과 같은 프레임에 고정된다.
 
@@ -613,7 +613,7 @@ strip은 `.m`이 바닥을 직접 정하는 표면이다([metal-ui-layout.md](me
 
 `sidebarBandCell`은 세로 경계를 보지 않는다(폭·칸수만 본다) — 스크롤이 0이어도 맨 아래 카드가 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줘 안 드러났을 뿐이다.
 
-**자를 구간은 Zig가 정한다**(`sidebarScissorPx` → ABI v168 `sidebar_scissor_top/bottom_px`). 게이트("스크롤됐나", "상태바가 있나")와 클램프, 뒤집힌 rect 방지가 전부 그 순수 함수에 있고 `.m`은 받은 구간을 **그대로** 쓴다 — 배치를 아는 곳을 하나로 두는 규율이다([metal-ui-layout.md](metal-ui-layout.md) §5).
+**자를 구간은 Zig가 정한다**(`sidebarScissorPx` → ABI v168 `sidebar_scissor_top/bottom_px`). 게이트("스크롤됐나", "상태바가 있나")와 클램프, 뒤집힌 rect 방지가 전부 그 순수 함수에 있고 `.m`은 받은 구간을 **그대로** 쓴다 — 배치를 아는 곳을 하나로 두는 규율이다([metal-ui-layout.md](metal-ui-layout-paint.md) §5).
 
 자르는 이유가 위아래 서로 다르다: **위**(헤더)는 스크롤된 카드가 헤더 위로 새는 것을 막고 — 스크롤이 0이면 샐 것이 없어 안 자른다 — **아래**(상태바)는 스크롤과 무관하게 자른다. `bottom <= top`이면 아예 안 자른다.
 

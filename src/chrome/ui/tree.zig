@@ -3,7 +3,8 @@
 //! 이 모듈은 TUI cell/ANSI, Metal draw, `ChromeHost` effect dispatch를 읽지 않는다. caller가 준
 //! backing-pixel root size와 bounded frame buffers만 써서 `UiNode`를 flat `UiRectTree`로 만든다.
 //! draw/hit/focus/virtualization은 이 tree를 공유해야 하며, caller는 성공한 tree만 publish한다.
-//! 단일 출처: docs/metal-ui-layout.md §2, §5, §8 ML2a.
+//! 단일 출처: docs/metal-ui-layout.md §2 ML2a(tree 경계), docs/metal-ui-layout-paint.md §5(Metal
+//! paint·입력 정합), docs/plans/metal-ui-layout.md §8(구현 순서).
 
 const std = @import("std");
 const layout = @import("layout.zig");

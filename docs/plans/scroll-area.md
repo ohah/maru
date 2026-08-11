@@ -213,7 +213,7 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
 
   **layer는 3(over)으로 남는다(2026-08-08 실측 정정).** 처음에는 탐색기처럼 공용 lowering이 내는
   layer 2를 그대로 쓰려 했는데, 그러면 막대가 **화면에서 사라진다** — 렌더러가 layer 2 버킷을 맨 처음
-  그리고 그 위에 자기가 소유한 사이드바 배경 strip을 덮기 때문이다(`docs/metal-ui-layout.md` §5의
+  그리고 그 위에 자기가 소유한 사이드바 배경 strip을 덮기 때문이다(`docs/metal-ui-layout-paint.md` §5의
   승인된 예외). 도크·탐색기 스크롤바가 layer 2로 살아남는 것은 그 자리에 strip이 없어서지 layer 2가
   안전해서가 아니다. 그래서 lowering 뒤에 fade alpha와 함께 layer도 되돌린다. gutter는 그래도
   유지한다 — 막대가 카드 텍스트와 겹치지 않는 것은 별개의 이득이다.

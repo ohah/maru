@@ -2134,6 +2134,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3b6 app quit and current plus N-1 shutdown Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3b6_step.dependOn(session_host_2c3d_c3_3b4_step);
+    const session_host_2c3d_c3_3c_step = b.step(
+        "test-session-host-2c3d-c3-3c",
+        "2c3d C3-3c product socket and source-zero Debug and ReleaseFast gates",
+    );
+    session_host_2c3d_c3_3c_step.dependOn(session_host_2c3d_c3_3b6_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2982,6 +2987,46 @@ pub fn build(b: *std.Build) void {
             session_host_2c3d_c3_3b6_step,
             event_c3_3b6_admin_connector_module,
             "C3-3b6 actual socket은 detach host EOF",
+            1,
+        );
+        const event_c3_3c_runtime_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3c_step,
+            event_c3_3c_runtime_module,
+            "C3-3c 열린 peer의",
+            3,
+        );
+        const event_c3_3c_client_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3c_step,
+            event_c3_3c_client_module,
+            "C3-3c ended 빠른 판별은",
+            1,
+        );
+        const event_c3_3c_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3d_c3_3c_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3c_step,
+            event_c3_3c_boundary_module,
+            "C3-3c 제품 socket과 raw Client source-zero 경계는",
             1,
         );
         run_event_c3_3b6_reconnect.dependOn(previous_actual_host_run.?);

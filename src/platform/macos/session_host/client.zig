@@ -1110,6 +1110,20 @@ pub const BufferedEvent = struct {
             accepted,
         );
     }
+
+    /// 알 수 없는 미래 event도 admission에서 봉인된 정상 queue owner다. ended 빠른 판별은
+    /// payload를 다시 읽지 않고 이 메타데이터만 확인해야 후속 settlement가 원래 위반 사유를 소유한다.
+    fn unknownSealMetadataMatches(
+        self: BufferedEvent,
+        canonical_allocator: std.mem.Allocator,
+    ) bool {
+        const seal_value = self.admission_seal orelse return false;
+        return std.meta.eql(seal_value.header, self.header) and
+            std.meta.eql(seal_value.allocator, canonical_allocator) and
+            seal_value.payload_addr == @intFromPtr(self.payload.ptr) and
+            seal_value.payload_len == self.payload.len and
+            std.meta.activeTag(seal_value.admission) == .unknown;
+    }
 };
 
 test "CR3a-2c3d C1 event admission seal closes verdict and allocator provenance" {
@@ -11108,18 +11122,21 @@ pub const Client = struct {
                 frame.header.payload_len != frame.payload.len)
                 return error.InvalidClientState;
 
-            const accepted = switch (frame.preflight orelse
-                return error.InvalidClientState) {
-                .accepted => |value| value,
-                else => return error.InvalidClientState,
+            return switch (frame.preflight orelse return error.InvalidClientState) {
+                .accepted => |accepted| blk: {
+                    if (!frame.acceptedSealMetadataMatches(accepted, event_allocator))
+                        return error.InvalidClientState;
+                    break :blk if (accepted.event == .ended)
+                        .{ .candidate = .{ .event_index = @intCast(index) } }
+                    else
+                        .not_ended;
+                },
+                .unknown => if (frame.unknownSealMetadataMatches(event_allocator))
+                    .not_ended
+                else
+                    error.InvalidClientState,
+                .foreign, .malformed, .resource_exhausted => error.InvalidClientState,
             };
-            if (!frame.acceptedSealMetadataMatches(accepted, event_allocator))
-                return error.InvalidClientState;
-
-            return if (accepted.event == .ended)
-                .{ .candidate = .{ .event_index = @intCast(index) } }
-            else
-                .not_ended;
         }
         return .not_ended;
     }
@@ -17171,6 +17188,34 @@ test "CR3a-2c2b ended peek stops at the first target event" {
         EndedEventPeek.not_ended,
         try client.peekEndedEventForStream(9),
     );
+}
+
+test "C3-3c ended 빠른 판별은 봉인된 unknown event를 보존한다" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    try client.bufferGenerationEventForTest(9, "{\"event\":\"future.event\"}");
+    const items_ptr = client.pending_events.items.ptr;
+    const items_len = client.pending_events.items.len;
+    const items_capacity = client.pending_events.capacity;
+    const byte_count = client.pending_event_bytes;
+
+    try std.testing.expectEqual(
+        EndedEventPeek.not_ended,
+        try client.peekEndedEventForStream(9),
+    );
+    try std.testing.expectEqual(items_ptr, client.pending_events.items.ptr);
+    try std.testing.expectEqual(items_len, client.pending_events.items.len);
+    try std.testing.expectEqual(items_capacity, client.pending_events.capacity);
+    try std.testing.expectEqual(byte_count, client.pending_event_bytes);
+    try std.testing.expect(client.pending_events.items[0].preflight.? == .unknown);
+    try std.testing.expect(client.pending_events.items[0].sealMatches(allocator));
 }
 
 test "CR3a-2c2b ended peek rejects admission identity drift without mutation" {

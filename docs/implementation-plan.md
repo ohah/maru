@@ -944,7 +944,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
 
       **C3-3c product socket/source-zero**는 열린 peer에서
       revoked/unknown/semantic failure roundtrip과 transport 구현·test fixture를 제외한 `src/**/*.zig` 제품 전체 generation raw `Client`
-      event/effect source-zero를 닫는다. RPC/decoder direct-call inventory는 2c3e가 소유한다. immediate EOF·unread RX-first와
+      event/effect source-zero를 닫는다. focused gate는 최적화 모드마다 actual-socket component 3개, 봉인된 unknown의 ended
+      빠른 판별 회귀 1개와 source boundary 1개를 exact-count하며 Pending/EventOwner/correlation/mirror/event queue zero,
+      blocker/pin/quarantine의 event 전 live attachment 기준선 복귀와 payload callback exact 1회를 동일 제품 호출 뒤 검증한다.
+      RPC/decoder direct-call inventory는 2c3e가 소유한다. immediate EOF·unread RX-first와
       decoder cadence/parity는 계속 2c3e 범위다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는

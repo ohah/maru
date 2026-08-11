@@ -6480,6 +6480,130 @@ fn writeAggregateRevokeWire(fd: c.fd_t) !void {
     try socket_server.writeAll(fd, wire);
 }
 
+fn writeC3cEventWire(fd: c.fd_t, payload: []const u8) !void {
+    const wire = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .event, .stream_id = 7 },
+        payload,
+    );
+    defer testing.allocator.free(wire);
+    try socket_server.writeAll(fd, wire);
+}
+
+fn replaceFixtureConnectionWithOpenPeer(
+    runtime: *RemoteRuntime,
+    peer_fd: *c.fd_t,
+) !void {
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    if (runtime.client.fd >= 0) _ = c.close(runtime.client.fd);
+    runtime.client.fd = fds[0];
+    peer_fd.* = fds[1];
+}
+
+fn expectC3cSourceZero(
+    runtime: *RemoteRuntime,
+    source_before: testing_api.AppQuitOwnerSnapshot,
+    callback_before: usize,
+) !void {
+    const source = try testing_api.appQuitOwnerSnapshot(runtime);
+    try testing.expect(source.pending_idle);
+    try testing.expect(source.owner_pristine);
+    try testing.expect(source.correlation_pristine);
+    try testing.expectEqual(@as(u64, 0), source.event_generation_mirror);
+    try testing.expectEqual(source_before.blocker_count, source.blocker_count);
+    try testing.expectEqual(source_before.pin_count, source.pin_count);
+    try testing.expectEqual(source_before.quarantine_occupied, source.quarantine_occupied);
+    try testing.expectEqual(source_before.quarantine_retained_bytes, source.quarantine_retained_bytes);
+    try testing.expectEqual(@as(usize, 0), runtime.client.pending_events.items.len);
+    try testing.expectEqual(
+        callback_before + 1,
+        generation_attachment_mod.testing_api.pendingEventPayloadCallbackCount(),
+    );
+}
+
+test "C3-3c 열린 peer의 revoked event는 settlement source-zero 뒤 observer를 게시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    var peer_fd: c.fd_t = -1;
+    try replaceFixtureConnectionWithOpenPeer(&fixture.runtime, &peer_fd);
+    defer {
+        if (peer_fd >= 0) _ = c.close(peer_fd);
+    }
+    const source_before = try testing_api.appQuitOwnerSnapshot(&fixture.runtime);
+    const callback_before = generation_attachment_mod.testing_api.pendingEventPayloadCallbackCount();
+    try writeC3cEventWire(
+        peer_fd,
+        "{\"event\":\"controller.revoked\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+    );
+    try testing.expect((try fixture.runtime.client.readStreamBatch(7)) == null);
+    const result = try fixture.runtime.drainObservationEvents();
+    try testing.expect(result.metadata and !result.ended);
+    try testing.expectEqual(remote_attachment.Role.observer, fixture.runtime.attachment.statePtr().role);
+    try testing.expectEqual(@as(u64, 4), fixture.runtime.attachment.statePtr().controller_generation);
+    try testing.expect(!fixture.runtime.client.unusable);
+    try expectC3cSourceZero(&fixture.runtime, source_before, callback_before);
+}
+
+test "C3-3c 열린 peer의 unknown event는 source-zero 뒤 connection을 poison한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    var peer_fd: c.fd_t = -1;
+    try replaceFixtureConnectionWithOpenPeer(&fixture.runtime, &peer_fd);
+    defer {
+        if (peer_fd >= 0) _ = c.close(peer_fd);
+    }
+    const source_before = try testing_api.appQuitOwnerSnapshot(&fixture.runtime);
+    const callback_before = generation_attachment_mod.testing_api.pendingEventPayloadCallbackCount();
+    const before_size = fixture.runtime.observation.size;
+    try writeC3cEventWire(peer_fd, "{\"event\":\"future.event\",\"data\":{}}");
+    try testing.expect((try fixture.runtime.client.readStreamBatch(7)) == null);
+    try testing.expect(fixture.runtime.client.firstPoisonReason() == null);
+    try testing.expectError(error.ProtocolError, fixture.runtime.drainObservationEvents());
+    try testing.expect(fixture.runtime.client.unusable);
+    try testing.expectEqual(
+        @import("client_poison.zig").ConnectionReason.peer_contract_violation,
+        fixture.runtime.client.firstPoisonReason().?,
+    );
+    try testing.expectEqual(before_size, fixture.runtime.observation.size);
+    try expectC3cSourceZero(&fixture.runtime, source_before, callback_before);
+}
+
+test "C3-3c 열린 peer의 semantic failure는 source-zero 뒤 prepared 의미를 게시하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    var peer_fd: c.fd_t = -1;
+    try replaceFixtureConnectionWithOpenPeer(&fixture.runtime, &peer_fd);
+    defer {
+        if (peer_fd >= 0) _ = c.close(peer_fd);
+    }
+    fixture.runtime.resize_generation = 10;
+    fixture.runtime.resize_baseline_present = true;
+    fixture.runtime.observation.size = .{ .cols = 90, .rows = 30 };
+    const source_before = try testing_api.appQuitOwnerSnapshot(&fixture.runtime);
+    const callback_before = generation_attachment_mod.testing_api.pendingEventPayloadCallbackCount();
+    try writeC3cEventWire(
+        peer_fd,
+        "{\"event\":\"runtime.resized\",\"data\":{" ++
+            "\"runtime_id\":\"000000000000000000000000000000aa\"," ++
+            "\"cols\":120,\"rows\":40,\"resize_generation\":10,\"reason\":\"controller\"}}",
+    );
+    try testing.expect((try fixture.runtime.client.readStreamBatch(7)) == null);
+    try testing.expectError(error.ProtocolError, fixture.runtime.drainObservationEvents());
+    try testing.expect(fixture.runtime.client.unusable);
+    try testing.expectEqual(@as(u64, 10), fixture.runtime.resize_generation);
+    try testing.expectEqual(terminal.Size{ .cols = 90, .rows = 30 }, fixture.runtime.observation.size);
+    try expectC3cSourceZero(&fixture.runtime, source_before, callback_before);
+}
+
 fn expectActualSocketWireZero(fd: c.fd_t) !void {
     var poll_fd = posix.pollfd{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
     try testing.expectEqual(@as(c_int, 0), c.poll(@ptrCast(&poll_fd), 1, 50));

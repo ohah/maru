@@ -1,4 +1,4 @@
-//! `diff.open`이 웹으로 넘길 **본문 페이로드 정책**(L2 순수, docs/editor-surface.md §6·§10.6).
+//! `diff.open`이 웹으로 넘길 **본문 페이로드 정책**(L2 순수, docs/editor-surface-tooling.md §6, docs/editor-surface.md §10.6).
 //!
 //! 무엇을 실을지가 아니라 **무엇을 싣지 않을지**를 정하는 곳이다. diff 본문은 사용자가 고른 파일 하나지만 그 파일이
 //! 100 MB일 수도, 실행 파일일 수도 있다. 그대로 브리지에 태우면 신뢰 shell이 그만큼을 문자열로 들고 CM6가 그것을

@@ -1,4 +1,4 @@
-//! 도크 소스 컨트롤 뷰의 **행 모델**(L2 순수, docs/editor-surface.md §3.5).
+//! 도크 소스 컨트롤 뷰의 **행 모델**(L2 순수, docs/editor-surface-dock.md §3.5).
 //!
 //! git 출력 세 덩어리(status·staged numstat·worktree numstat)를 받아 화면에 그릴 행 목록을 만든다. 렌더는 이 결과를
 //! 글자로 옮기기만 한다 — 어느 섹션에 무엇이 몇 개 드는지, 증감이 얼마인지를 결정하는 곳은 여기 하나다.
@@ -21,7 +21,7 @@ pub const Section = enum {
     staged,
     unstaged,
     untracked,
-    /// 기본 브랜치와 갈린 뒤 이 브랜치의 **커밋들이** 바꾼 것(docs/editor-surface.md §3.5). 위 셋이 "아직 커밋
+    /// 기본 브랜치와 갈린 뒤 이 브랜치의 **커밋들이** 바꾼 것(docs/editor-surface-dock.md §3.5). 위 셋이 "아직 커밋
     /// 안 한 것"이라면 이 섹션은 "이미 커밋한 것"이라 리뷰 단위가 다르다.
     branch,
     /// **에이전트가 마지막 턴에 바꾼 것**(§6.1). git 기준이 아니라 턴 경계 스냅샷 기준이라 위 넷과 축이 다르다 —

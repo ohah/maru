@@ -1,4 +1,4 @@
-//! 에이전트 **턴 경계 스냅샷** 정책(L2 순수, docs/editor-surface.md §6.1).
+//! 에이전트 **턴 경계 스냅샷** 정책(L2 순수, docs/editor-surface-tooling.md §6.1).
 //!
 //! "에이전트가 방금 바꾼 것"은 git 개념이 아니라 **턴 경계**가 있어야 성립한다. maru는 에이전트를 소유하지 않지만
 //! transcript로 turn 상태(running/idle)를 이미 알므로, **running → idle 전이**를 턴 완료로 보고 그 순간의 작업트리를

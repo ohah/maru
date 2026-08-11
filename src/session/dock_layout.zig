@@ -97,7 +97,7 @@ pub fn modesForKind(kind: dock_panel.EntryKind) []const HeaderModeDescriptor {
     return switch (kind) {
         .markdown => &markdown_header_modes,
         .svg => &header_modes,
-        // diff는 읽기 전용 비교 결과라 mode 선택지가 없다(docs/editor-surface.md §3.5).
+        // diff는 읽기 전용 비교 결과라 mode 선택지가 없다(docs/editor-surface-dock.md §3.5).
         .html, .text, .image, .media, .pdf, .diff => &.{},
     };
 }

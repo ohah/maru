@@ -232,7 +232,7 @@ selection이 배열(§3.2)이므로 복사·붙여넣기가 단순하지 않다.
 
 ### 3.6 외부가 만든 편집 (포맷·code action·자동완성 적용)
 
-포매터·린터·LSP의 **실행·신뢰·config discovery는 [editor-surface.md](editor-surface.md) §8.1이 소유한다**(trusted workspace 게이트, shell 없는 argv 실행, timeout·상한·kill, "결과는 저장이 아니라 현재 revision에 대한 text edits로 반환"). 이 문서는 **그 edits가 문서 모델에 닿는 지점**만 정한다.
+포매터·린터·LSP의 **실행·신뢰·config discovery는 [editor-surface.md](editor-surface-tooling.md) §8.1이 소유한다**(trusted workspace 게이트, shell 없는 argv 실행, timeout·상한·kill, "결과는 저장이 아니라 현재 revision에 대한 text edits로 반환"). 이 문서는 **그 edits가 문서 모델에 닿는 지점**만 정한다.
 
 **적용 대상은 셋이다** — 포매터·린터 결과, code action/rename의 edits, 그리고 **자동완성 적용**. 마지막이 특히 단순 삽입이 아니다: LSP `CompletionItem`은 `textEdit`으로 **이미 타이핑한 접두사를 교체**하고, `additionalTextEdits`로 **다른 줄까지 건드린다**(자동 import 추가가 대표적 — 완성 하나를 고르면 파일 상단에 `import` 줄이 생긴다). 따라서 아래 규칙이 셋 모두에 걸린다.
 

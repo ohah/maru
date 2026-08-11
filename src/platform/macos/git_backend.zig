@@ -5,7 +5,7 @@
 //! frame tick에서 syscall이 도는지 판단하는 규칙이 하나로 유지된다.
 //!
 //! **무엇을 실행할지는 여기서 정하지 않는다.** argv·env는 `session.git_command`가 소유하고(안전 조건이 전부
-//! 거기 있다 — docs/editor-surface.md §6) 이 모듈은 그것을 그대로 spawn한다. 출력 해석도 `session.git_status`가
+//! 거기 있다 — docs/editor-surface-tooling.md §6) 이 모듈은 그것을 그대로 spawn한다. 출력 해석도 `session.git_status`가
 //! 한다. 즉 이 파일의 책임은 **프로세스 수명과 상한**뿐이다.
 
 const std = @import("std");
@@ -89,7 +89,7 @@ pub const Result = struct {
     /// `git diff --numstat` 출력.
     numstat_worktree: []u8 = &.{},
     /// 기본 브랜치와 갈린 지점 이후 이 브랜치가 바꾼 것(`--name-status`/`--numstat`). **없으면 빈 문자열**이고
-    /// 그건 실패가 아니라 "그 섹션이 없는 것"이다(origin/HEAD 없는 저장소 — docs/editor-surface.md §3.5).
+    /// 그건 실패가 아니라 "그 섹션이 없는 것"이다(origin/HEAD 없는 저장소 — docs/editor-surface-dock.md §3.5).
     branch_name_status: []u8 = &.{},
     branch_numstat: []u8 = &.{},
     /// 그 갈린 지점의 커밋 해시. 브랜치 섹션 행의 diff 왼쪽이 이 커밋이다.
@@ -485,7 +485,7 @@ pub const Backend = struct {
     }
 };
 
-/// 비교 기준에 따라 두 쪽을 모은다(docs/editor-surface.md §3.5 표).
+/// 비교 기준에 따라 두 쪽을 모은다(docs/editor-surface-dock.md §3.5 표).
 ///   staged   : `HEAD:<path>` ↔ `:<path>`   (커밋된 것 ↔ 스테이지된 것)
 ///   unstaged : `:<path>`     ↔ 작업트리 파일 (스테이지된 것 ↔ 지금 파일)
 ///   untracked: 없음          ↔ 작업트리 파일 (비교 대상이 없다 — 왼쪽은 빈 문서)
@@ -909,7 +909,7 @@ fn runWithEnv(
     env_ptrs.append(allocator, null) catch return error.GitFailed;
 
     // stdout만 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로 버린다
-    // (docs/editor-surface.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
+    // (docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return error.GitFailed;
     // 동시에 도는 다른 fork(셸 PTY spawn 등)로 write 끝이 새면 EOF가 안 와 read가 영원히 블록한다.

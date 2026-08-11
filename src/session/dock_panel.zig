@@ -40,7 +40,7 @@ pub const EntryKind = enum {
     image,
     media,
     pdf,
-    /// E1: git diff 본문(docs/editor-surface.md §3·§9). 신뢰 shell에 CM6 MergeView를 마운트하지만 파일을 편집하지
+    /// E1: git diff 본문(docs/editor-surface-structure.md §3, docs/plans/editor-surface.md §9). 신뢰 shell에 CM6 MergeView를 마운트하지만 파일을 편집하지
     /// 않는다 — 내용은 `diff.open`이 주고 저장·dirty·epoch 흐름이 없다. **디스크 파일이 아니라 비교 결과**라
     /// entry가 경로와 함께 비교 기준(`DiffBase`)을 들고 다닌다.
     diff,

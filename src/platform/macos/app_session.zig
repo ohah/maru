@@ -3403,7 +3403,7 @@ pub const AppSession = struct {
     file_tree_hovered_row: ?usize = null,
     /// 호버 중인 뷰 스위처 슬롯(§3.5). 렌더가 배경 강조에 쓰고 hoverCursor가 갱신한다 — 트리 행 호버와 같은 규율.
     dock_view_hovered_slot: ?usize = null,
-    /// 소스 컨트롤 뷰의 git 읽기 backend와 마지막 결과(docs/editor-surface.md §3.5). 결과 텍스트는 세션이 소유하고
+    /// 소스 컨트롤 뷰의 git 읽기 backend와 마지막 결과(docs/editor-surface-dock.md §3.5). 결과 텍스트는 세션이 소유하고
     /// 행 모델은 프레임마다 그 위에서 다시 만든다 — 목록이 화면 폭·높이에 따라 잘리므로 미리 굳혀 둘 이유가 없다.
     git_backend: ?git_backend_mod.Backend = null,
     git_result: ?git_backend_mod.Result = null,
@@ -3438,7 +3438,7 @@ pub const AppSession = struct {
     git_watch_request: ?[]u8 = null,
     /// 지금 감시 중인 `.git` 경로. 저장소가 바뀌면 새로 요청한다(같은 경로면 다시 요청하지 않는다).
     git_watch_path: ?[]u8 = null,
-    /// **커널 cwd 폴백 캐시**(OSC 7이 없는 셸·TUI 실행 중 — docs/editor-surface.md §3.5). `proc_pidinfo`는
+    /// **커널 cwd 폴백 캐시**(OSC 7이 없는 셸·TUI 실행 중 — docs/editor-surface-dock.md §3.5). `proc_pidinfo`는
     /// syscall이라 매 프레임 부를 수 없어 저주기로만 갱신하고, 그 사이에는 이 값을 그대로 쓴다. 경로는 길이가
     /// 정해져 있으므로(PATH_MAX) 인라인 배열이다 — 프레임마다 도는 경로에 할당을 두지 않는다.
     proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
@@ -45490,7 +45490,7 @@ test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangl
 }
 
 // SB1: **브랜치를 고르면 우리가 checkout하지 않고 터미널에 명령을 넣는다.** 읽기 전용 계약
-// (docs/editor-surface.md §6)이 write git을 우리 손으로 돌리는 것을 막는다 — 실행 주체가 셸이어야
+// (docs/editor-surface-tooling.md §6)이 write git을 우리 손으로 돌리는 것을 막는다 — 실행 주체가 셸이어야
 // hook·dirty tree·충돌이 평소처럼 사용자에게 보인다. 그래서 "무엇이 PTY로 나갔는가"를 단언한다.
 test "SB1: 브랜치 선택은 git switch를 터미널에 넣기만 한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -50763,7 +50763,7 @@ test "captureWorkspaceTab: diff Term은 index를 차지하지 않는다(복원 f
     try std.testing.expect(wpane.active_term < total);
 }
 
-// [code-review max] 유일성 키는 `(경로, kind, base)`다(docs/editor-surface.md §3.5). 경로만으로 조회하면 소스 컨트롤
+// [code-review max] 유일성 키는 `(경로, kind, base)`다(docs/editor-surface-dock.md §3.5). 경로만으로 조회하면 소스 컨트롤
 // 행 클릭이 이미 열린 markdown Term을 재사용해 **diff가 영영 안 열리고**, 반대로 탐색기에서 그 파일을 열면 diff Term이
 // 활성화된다. 둘 다 사용자가 누른 것과 다른 것을 보여 준다.
 test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에 kind가 든다)" {
@@ -51323,7 +51323,7 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     try session.file_tree.recordOpened(opened, repo);
     git_ops.rememberGitRepo(session, repo);
 
-    // **대상 저장소는 이제 활성 터미널이 정한다**(docs/editor-surface.md §3.5). 이 테스트 프로세스의 터미널은
+    // **대상 저장소는 이제 활성 터미널이 정한다**(docs/editor-surface-dock.md §3.5). 이 테스트 프로세스의 터미널은
     // maru 저장소에 서 있으므로, 그대로 두면 목록이 임시 저장소가 아니라 maru를 읽어 턴 범위가 비어 버린다.
     // 그래서 **diff를 연 상태**를 만든다 — 활성 Term이 파일 Term이 되어 터미널 기준이 사라지고, §3.5의 2순위
     // (직전에 목록을 읽은 저장소)가 대상을 고정한다. 제품에서 목록을 보다 diff를 연 바로 그 상태이고,

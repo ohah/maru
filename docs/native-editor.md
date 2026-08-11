@@ -55,11 +55,11 @@
 
 - **화면 구성은 VSCode 계열 배치를 베이스로 한다**(2026-08-09 사용자 결정). 편집기 본문 주변 요소의 배치와 정보 계층을 그 계열에서 가져온다. **이 문서가 계약을 정의하는 것은 gutter(§2 `gutter.zig`)와 미니맵(§6)뿐**이며, overview 스트립·sticky scroll처럼 같은 계열이 갖는 다른 요소는 §12(이 계약 밖)다 — 베이스로 삼는다는 것이 그 전부를 지금 계약한다는 뜻은 아니다.
 
-  **두 가지를 구분한다.** ⑴ pane 탭바·좌측 사이드바·우측 도크(탐색기·소스 컨트롤)는 **이 결정 이전에** [file-panel.md](file-panel.md) §1과 [editor-surface.md](editor-surface.md) §3.5가 **사용자 제공 목업**을 기준으로 확정한 것이고, 이 문서는 그것을 바꾸지 않는다. ⑵ 이 항목이 새로 정하는 것은 **편집기 본문 안팎의 요소 배치**뿐이다.
+  **두 가지를 구분한다.** ⑴ pane 탭바·좌측 사이드바·우측 도크(탐색기·소스 컨트롤)는 **이 결정 이전에** [file-panel.md](file-panel.md) §1과 [editor-surface.md](editor-surface-dock.md) §3.5가 **사용자 제공 목업**을 기준으로 확정한 것이고, 이 문서는 그것을 바꾸지 않는다. ⑵ 이 항목이 새로 정하는 것은 **편집기 본문 안팎의 요소 배치**뿐이다.
 
-  **레퍼런스 경계는 기존 규율 그대로다** — 두 선행 문서가 정한 "레퍼런스 앱의 코드·DOM은 사용하지 않고 **배치와 정보 계층만** 받아 Maru GPU chrome으로 독립 구현한다"([editor-surface.md](editor-surface.md) §3.5)를 이 문서도 따른다. [project-rules.md](project-rules.md) clean-room 규율상 자료구조 레이아웃·함수 분해·control-flow는 유도 대상이 아니다.
+  **레퍼런스 경계는 기존 규율 그대로다** — 두 선행 문서가 정한 "레퍼런스 앱의 코드·DOM은 사용하지 않고 **배치와 정보 계층만** 받아 Maru GPU chrome으로 독립 구현한다"([editor-surface.md](editor-surface-dock.md) §3.5)를 이 문서도 따른다. [project-rules.md](project-rules.md) clean-room 규율상 자료구조 레이아웃·함수 분해·control-flow는 유도 대상이 아니다.
 
-  **구체 시각 기준은 각 단계 착수 전에 받는다.** [file-panel.md](file-panel.md) §1과 [editor-surface.md](editor-surface.md) §3.5가 **사용자 제공 목업**을 시각 구조 기준으로 삼은 것과 같은 절차다. 이 항목("VSCode 계열")은 방향이지 배치가 아니므로, 그것만으로 구현하면 폭·간격·순서를 임의로 정하게 된다.
+  **구체 시각 기준은 각 단계 착수 전에 받는다.** [file-panel.md](file-panel.md) §1과 [editor-surface.md](editor-surface-dock.md) §3.5가 **사용자 제공 목업**을 시각 구조 기준으로 삼은 것과 같은 절차다. 이 항목("VSCode 계열")은 방향이지 배치가 아니므로, 그것만으로 구현하면 폭·간격·순서를 임의로 정하게 된다.
 
   **단 목업이 유일한 조달 경로는 아니다(2026-08-09 사용자 결정).** VSCode는 오픈 소스이므로 **배치를 소스에서 직접 확인할 수 있고**, 그렇게 얻은 값은 목업보다 정확하다(관찰 추정이 아니라 계산식 자체다). N1 몫인 gutter·상태바 배치는 이 방법으로 확정해 §4.1에 적었다. **목업이 여전히 필요한 것은 소스에 답이 없는 것들**이다 — 우리 고유 요소(저하 상태 표시), Maru 팔레트와의 조화, VSCode에 대응물이 없는 배치.
   - **새로 정할 범위는 좁다** — 색은 이미 확정(`syntax_theme.zig` 파생, §5)이고 떠 있는 UI는 기존 컴포넌트 스타일을 따르므로(§2.0), 목업이 필요한 것은 **편집기 본문과 그 주변**뿐이다.
@@ -100,7 +100,7 @@
   - **보이는 offset에 대해서만 왕복한다**: `o`가 접힘·스크롤로 가려지지 않았을 때 `caretAtPoint(caretRect(o)) == o`. 접힘·랩·가상줄 조합에서 이 조건부 왕복을 고정한다.
   - **접힌 offset은 왕복 대상이 아니다.** `caretRect`가 무엇을 반환하는지(접힘 대표 위치 / 없음)를 먼저 정하고 그 정의를 테스트한다.
   - **역방향은 왕복이 아니다.** `caretAtPoint`는 줄 끝 너머·가상 텍스트 위·여백 좌표에서도 **항상 유효한 offset을 반환**(clamp)하므로, `caretRect(caretAtPoint(p))`가 `p`를 포함한다는 보장이 없다. 이 방향은 "clamp 결과가 그래핌 경계이고 문서 범위 안"이라는 더 약한 불변식으로 검증한다.
-- **레이어 경계는 `check-boundaries`에 규칙을 더해 강제한다.** 현재 그 step은 facade import·chrome text cluster·icon literal 세 가지만 검사하며 **editor 코어 규칙은 아직 없다** — [editor-surface.md](editor-surface.md) §3이 "editor 코어의 platform import 금지를 추가한다"고 **계획**해 둔 상태다. 문서 모델 파일들이 그 규칙에 함께 걸리도록 하되, **규칙을 만드는 것 자체가 이 이관의 작업 항목**이다(새 규칙 *종류*를 발명하는 것이 아니라 기존 boundary 테스트 형식에 항목을 더한다).
+- **레이어 경계는 `check-boundaries`에 규칙을 더해 강제한다.** 현재 그 step은 facade import·chrome text cluster·icon literal 세 가지만 검사하며 **editor 코어 규칙은 아직 없다** — [editor-surface.md](editor-surface-structure.md) §3이 "editor 코어의 platform import 금지를 추가한다"고 **계획**해 둔 상태다. 문서 모델 파일들이 그 규칙에 함께 걸리도록 하되, **규칙을 만드는 것 자체가 이 이관의 작업 항목**이다(새 규칙 *종류*를 발명하는 것이 아니라 기존 boundary 테스트 형식에 항목을 더한다).
 - **IME·firstResponder·실제 GPU 출력은 헤드리스 불가**다. GUI 손 테스트가 유일 안전망이며([web-panel.md](web-panel.md) §11 규율), 무엇을 손으로 확인하는지는 [검증 매트릭스](verification-matrix.md)가 소유한다.
 - **CM6 대비 성능 baseline은 재지 않는다**(2026-08-09 사용자 결정). 이관 전후를 비교하는 계측 하니스를 세우는 것은 이 작업에 비해 과하다고 판단했다. 그 귀결을 회피하지 않고 적는다: **성능 개선을 주장할 수 없다**(§1.0에서 근거 자체를 뺐다). 문서·PR·커밋에 "빨라졌다"·"더 빠르다"를 쓰지 않으며, 쓰려면 그때 측정부터 한다.
   - **그래도 "느려서 못 쓰는 것"은 막는다.** 비교는 안 하지만 절대적 사용 불가는 다른 문제다 — §3.0의 큰 파일 축소와 §3.8의 초장문 줄 축소가 그 장치이고, 이들은 baseline 없이도 동작한다(임계를 넘으면 기능을 줄인다).
@@ -126,7 +126,7 @@
 
 ### 10.1 관측 가능성과 민감정보
 
-[project-rules.md](project-rules.md) §관측 가능성이 *"기능 구현을 시작하기 전에 로그·리플레이·스냅샷·E2E 검증 경로를 먼저 정한다"*고 요구한다. [editor-surface.md](editor-surface.md) §8.3이 editor event schema와 redaction을 이미 소유하므로 **이 문서는 그 스키마를 재정의하지 않고, 네이티브 뷰에서만 생기는 축만 더한다.**
+[project-rules.md](project-rules.md) §관측 가능성이 *"기능 구현을 시작하기 전에 로그·리플레이·스냅샷·E2E 검증 경로를 먼저 정한다"*고 요구한다. [editor-surface.md](editor-surface-tooling.md) §8.3이 editor event schema와 redaction을 이미 소유하므로 **이 문서는 그 스키마를 재정의하지 않고, 네이티브 뷰에서만 생기는 축만 더한다.**
 
 - **문서 내용은 기본 trace에서 제외한다.** editor-surface §8.3의 규율 그대로다 — 편집 중인 소스에는 토큰·비밀이 bare text로 들어갈 수 있고, 그건 자동 guard만으로 충분하다고 보지 않는다.
 - **네이티브 뷰가 새로 만드는 event는 "무엇이 느렸는가"다.** §2.1이 분리한 작업(구문 파싱·랩 재계산·검색)은 **끝난 시각과 대상 크기만** 남기고 내용은 남기지 않는다. 이것이 없으면 §11의 성능 근거를 사후에 확인할 수 없다.
@@ -160,7 +160,7 @@
 - **마크다운 렌더(읽기·리치)의 최종 위상.** 현행 웹 유지. 관련 미결 항목 하나 — `.md`의 **소스 모드**는 등폭이라 이 계약에 들어오는데, 같은 파일에서 `읽기 | 리치 | 소스`를 전환하면 렌더러가 갈린다. 선택지는 셋(소스도 네이티브 / 소스는 CM6 유지 / 마크다운 전체를 함께 결정)이고 아직 정하지 않았다.
   - **이 미결이 §1.1의 "VSCode 무회귀" 기준과 부딪힌다는 점을 명시한다.** "소스는 CM6 유지"를 택하면 사용자는 **파일 종류에 따라 다른 편집기**를 쓰게 된다 — `.py`는 네이티브, `.md` 소스는 CM6이고 그 둘은 키·선택·undo·검색이 미묘하게 다르다. 같은 앱 안에서 편집 경험이 갈리는 것은 그 기준이 막으려던 바로 그 어색함이다. **따라서 이 미결을 오래 두지 않는다** — 결정을 미루는 동안은 두 편집기가 공존하는 과도기이고, 그 상태가 기본값이 되어서는 안 된다.
 - **modal editing**(vim/emacs 키 모델).
-- **편집 상태의 workspace 복원 범위.** 파일 Term의 **경로**가 복원된다는 것은 [file-panel.md](file-panel.md)·[workspace-restore.md](workspace-restore.md)가 이미 정했지만, **커서 위치·스크롤·접힘·undo 스택**을 함께 되살릴지는 그 문서들이 정할 문제이고 이 문서가 앞서 결정하지 않는다. 다만 두 가지는 미리 못박는다 — **undo 스택은 복원 대상이 아니다**(저장되지 않은 편집을 되살리는 것이 되어 dirty 계약과 충돌한다), **diff Term은 애초에 저장되지 않는다**([editor-surface.md](editor-surface.md) §3.5).
+- **편집 상태의 workspace 복원 범위.** 파일 Term의 **경로**가 복원된다는 것은 [file-panel.md](file-panel.md)·[workspace-restore.md](workspace-restore.md)가 이미 정했지만, **커서 위치·스크롤·접힘·undo 스택**을 함께 되살릴지는 그 문서들이 정할 문제이고 이 문서가 앞서 결정하지 않는다. 다만 두 가지는 미리 못박는다 — **undo 스택은 복원 대상이 아니다**(저장되지 않은 편집을 되살리는 것이 되어 dirty 계약과 충돌한다), **diff Term은 애초에 저장되지 않는다**([editor-surface.md](editor-surface-dock.md) §3.5).
 - **편집기 plugin 확장점.** 이 문서는 스팬 provider(§5)·완성 provider(§8.2)를 **내부 인터페이스**로 정의할 뿐, 그것을 plugin에 여는 것은 [plugin boundary](plans/workspace-restore.md) 결정이다. 여는 순간 신뢰 경계가 생기므로([project-rules.md](project-rules.md) "plugin/extension boundary를 앞당기거나 늦추는 경우"는 사용자 논의 대상) 이 문서가 임의로 열지 않는다.
 - **구조 기반 선택 확장** — 구문 트리가 이제 있으므로(§5.3) **기술적 장벽은 없고 소비처만 없다.** 계약 안으로 올릴지는 별도 판단이며, tree-sitter 쿼리 또는 LSP `selectionRange` 어느 쪽으로도 구현 가능하다.
   - **다만 이것만은 `Selection`에 담기지 않는다는 것을 미리 적는다.** 확장(⌃⇧⌘→)한 뒤 **축소**(⌃⇧⌘←)하려면 지나온 범위들을 기억해야 하므로 **커서마다 범위 스택 + 현재 인덱스**가 필요하다(VSCode `SmartSelectController`의 `_state: SelectionRanges[]`). 그리고 **사용자가 커서를 움직이면 그 스택을 버려야 한다** — 안 버리면 무관한 위치에서 옛 이력으로 축소된다(VSCode도 `onDidChangeCursorPosition`으로 폐기한다). 즉 계약 안으로 올릴 때 필요한 것은 selection 구조 변경이 아니라 **별도 상태와 그 무효화 규칙**이며, 그래서 지금 `Selection`에 자리를 비워 두지 않는다.

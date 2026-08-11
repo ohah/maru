@@ -1,4 +1,4 @@
-//! C3-3b3 source boundary: atomic settlement keeps one directed authority graph.
+//! C3-3b3 원자적 정산이 단일 방향 권위 그래프를 유지하는지 검증한다.
 
 const std = @import("std");
 

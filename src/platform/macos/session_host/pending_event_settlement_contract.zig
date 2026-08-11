@@ -1,4 +1,4 @@
-//! Pointer-free authority values shared by the C3-3b3 settlement owners.
+//! C3-3b3 정산 소유자가 공유하는 포인터 없는 권위 값을 정의한다.
 
 const std = @import("std");
 const seal_types = @import("event_cleanup_seal.zig");
@@ -837,7 +837,7 @@ pub fn cleanupCompletionDigest(permit_seal: Digest, plan: CanonicalEffectPlan) D
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update("maru.effect-cleanup-completion.v1\x00");
     hasher.update(&permit_seal);
-    // Fixed lexical role order: close attempt first, allocator cleanup second.
+    // 정리 순서는 fd 닫기 시도 뒤 allocator 정리로 고정한다.
     hasher.update("close\x00");
     hashInt(&hasher, u8, plan.close_attempt_count);
     hashInt(&hasher, i32, plan.fd_before);

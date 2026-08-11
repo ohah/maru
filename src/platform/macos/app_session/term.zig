@@ -347,10 +347,6 @@ pub fn createTerm(
     title: []const u8,
     command: []const u8,
 ) !*Term {
-    const term = try self.allocator.create(Term);
-    errdefer self.allocator.destroy(term);
-    term.* = .{};
-
     const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
     var req = request;
     req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
@@ -483,6 +479,11 @@ pub fn createTerm(
     } else {
         if (be.remove(id) != .removed) @panic("construction rollback lost its terminal runtime");
     };
+    // GUI Term은 backend admission·spawn이 모두 성공한 뒤에만 만든다. remote cap+1이나 host/RPC 실패가
+    // AppSession allocator/layout에 부분 객체를 남기지 않게 하고, 이후 실패는 위 runtime rollback과 함께 회수한다.
+    const term = try self.allocator.create(Term);
+    errdefer self.allocator.destroy(term);
+    term.* = .{};
     term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
     term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
     term.rt.live_initialized = true;

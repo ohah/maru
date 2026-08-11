@@ -140,8 +140,8 @@ test "client barrel exposes only the supported facade" {
     try @import("std").testing.expect(!@hasDecl(@This(), "projectOwnerEventInternal"));
 }
 
-test "session-host test root explicitly initializes process-owned generation state" {
-    if (builtin.os.tag != .macos) return;
+test "session-host 테스트 root는 지원 OS의 process-owned generation state를 먼저 초기화한다" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return;
     try @import("session_host/client_slot.zig").ClientSlot.initializeProcessRuntime();
 }
 // client_deadline(P5c3c-1a)는 nonblocking connect/read/write의 absolute deadline과 syscall

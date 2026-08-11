@@ -244,6 +244,19 @@ const editor_wrap_lines = [_][]const u8{
     "",
     "    return;",
     "}",
+    // **2칸 글자가 행 경계에 정확히 걸치는 줄.** 본문이 52열이므로 51칸을 ASCII로 채우면 다음
+    // 한글이 51~52를 요구하는데 52가 마지막 칸이라 **들어갈 수 없다** — 그 칸을 비우고 넘겨야 한다.
+    //
+    // 이 줄이 없으면 "2칸 글자를 쪼개지 않는다"는 계약에 **가드가 없다.** 자연스러운 한글 문장은
+    // `col`이 짝수로만 늘어 52에서 정확히 떨어지므로, 경계 판정을 `col + w > 폭`에서 `col >= 폭`으로
+    // 바꿔도 그림이 같다(적대적 검증이 실제로 그 상태를 통과시켰다).
+    ("x" ** 51) ++ "가나다",
+    // **랩 + 초장문.** 적대적 검증이 잡은 결함의 회귀 가드다 — 랩은 한 줄에 `남은 행 × 뷰 열수`만큼
+    // 저장소를 쓸 수 있어서, 이 줄이 저장소를 다 삼키면 `expandTabs`가 `OutOfSpace`를 올리고
+    // **캡처가 통째로 안 만들어졌다**(#2086이 고친 결함이 랩에서 되살아났던 것이다).
+    //
+    // **맨 끝에 둔다.** 앞에 두면 화면 대부분을 먹어 위쪽 검증(자·한글)의 골든 rect가 전부 밀린다.
+    long_line,
 };
 
 const editor_width_lines = [_][]const u8{
@@ -308,6 +321,25 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var visual_rows: [row_capacity]editor_view.visual_map.VisualRow = undefined;
     // 랩이 켜지면 논리 줄 하나가 화면 여럿을 덮으므로 **그릴 수 있는 행 수**로 상한을 준다.
     const visual_budget = @min(vp.rows, row_capacity);
+
+    // **gutter 몫을 먼저 떼어 둔다.** 본문이 먼저 도는 순서로 바꾼 대가다 — 랩이 켜지면 긴 줄 하나가
+    // 저장소를 다 써서 뒤에 도는 gutter가 `OutOfSpace`로 죽는다(적대적 검증이 실제로 잡았다).
+    //
+    // **줄 번호가 본문보다 먼저 확보돼야 한다.** 본문이 덜 그려지면 그 줄만 짧게 보이지만, 번호가
+    // 없으면 화면 전체가 어느 위치인지 알 수 없다. 그리고 gutter 소요는 예측 가능하다(행 × 자릿수).
+    //
+    // **이 fixture로는 그 상태가 재현되지 않는다** — 여기 줄들은 대부분 탭이 없어 `expandTabs`가
+    // 원본을 빌려주고(scratch 0), 긴 줄이 맨 끝이라 앞 줄들이 이미 행을 소비해 전개 예산이 작다.
+    // 그래서 이 방어를 지워도 캡처가 나온다. 계약은 `content.zig`의 단위 테스트가 고정한다
+    // ("긴 줄은 본문이 저장소를 끝까지 쓴다").
+    const gutter_reserve = @min(
+        buffers.text_bytes.len / 2,
+        // **실제 자릿수로 잡는다.** `max_digits`(usize 최대 20자리)로 잡으면 실제의 스무 배를
+        // 예약해 본문이 근거 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 다른 쪽의 손실이다.
+        editor_view.gutter.scratchNeeded(visual_budget, vp.first_row + line_count),
+    );
+    const content_scratch = buffers.text_bytes[0 .. buffers.text_bytes.len - gutter_reserve];
+
     const cw = try editor_view.content.build(.{
         .layout = layout,
         .rows = content_rows[0..visible],
@@ -316,7 +348,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
         .font_px = scenario.font_px,
-    }, buffers.ops, buffers.text_bytes, buffers.text_runs, visual_rows[0..visual_budget]);
+    }, buffers.ops, content_scratch, buffers.text_runs, visual_rows[0..visual_budget]);
 
     var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
     const grows = editor_view.gutter.rowsForVisual(

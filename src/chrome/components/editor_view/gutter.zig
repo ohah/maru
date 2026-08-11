@@ -45,7 +45,7 @@ pub const Props = struct {
 pub const line_number_role: tokens.ColorRole = .muted_fg;
 
 /// 줄 번호를 담는 최대 자릿수. `usize`를 십진으로 찍을 때 필요한 상한이며, 이보다 긴 문서는 없다.
-const max_digits = 20;
+pub const max_digits = 20; // 호출자가 gutter 몫을 떼어 둘 때 쓴다(lab.zig 참고)
 
 /// 이 호출이 각 저장소에서 **실제로 쓴 양**. 호출자가 그다음 소비자에게 남은 자리를 넘길 때 쓴다.
 ///
@@ -113,22 +113,25 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
     return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used };
 }
 
-/// 뷰포트에 보이는 논리 줄들을 gutter 행으로 편다. 랩·접힘이 없는 N1 경로다.
+/// 이 행 수·최대 줄 번호로 그릴 때 **필요한 저장소 상한**. 호출자가 gutter 몫을 미리 떼어 둘 때 쓴다.
 ///
-/// 랩이 붙으면 이 함수가 시각 매핑(`visual_map.zig`)의 결과를 받도록 바뀐다 — **그때 호출부만 바뀌고
-/// `build`는 그대로**이므로, `Row`가 optional 번호를 갖는 것이 지금은 쓰이지 않아도 미리 있는 이유다.
-pub fn rowsForRange(first_line: usize, count: u16, out: []Row) []Row {
-    const n = @min(count, out.len);
-    var i: u16 = 0;
-    while (i < n) : (i += 1) {
-        out[i] = .{ .number = first_line + i + 1, .visual_row = i }; // 화면 표시는 1-based
-    }
-    return out[0..n];
+/// **`max_digits`로 잡으면 안 된다.** 그것은 `usize` 최대(20자리)라 실제 줄 번호(한두 자리)의 열 배를
+/// 예약하게 되고, 그만큼 본문이 근거 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 곧 다른 쪽의
+/// 손실이다. 자릿수 계산이 여기 있는 이유는 `build`의 규칙(1-based로 찍는다)과 같은 곳에 두기
+/// 위해서다. 호출자가 세면 그 규칙을 복제하게 된다.
+pub fn scratchNeeded(row_count: usize, max_line_number: usize) usize {
+    var digits: usize = 1;
+    var n = max_line_number;
+    while (n >= 10) : (n /= 10) digits += 1;
+    return row_count * digits;
 }
 
 /// 본문이 정한 시각 배치를 gutter 행으로 옮긴다 — **랩이 켜졌을 때 쓴다.**
 ///
-/// 랩이 켜지면 시각 행과 논리 줄이 1:1이 아니므로 `rowsForRange`처럼 순서대로 셀 수 없다. 어디서
+/// **이것이 gutter 행을 만드는 유일한 경로다.** 랩이 꺼지면 조각이 항상 0이라 논리 줄과 1:1로
+/// 떨어지므로, "줄 번호를 순서대로 센다"는 별도 함수가 필요 없다 — 그런 함수(`rowsForRange`)가
+/// 있었으나 **랩이 켜졌을 때 번호가 본문과 어긋나는 길**이라 지웠다(적대적 검증이 그 상태를 실제로
+/// 잡았다). 어디서
 /// 접혔는지는 본문을 전개해 나눠 본 쪽만 알기 때문에(`content.build` → `visual_map.VisualRow`),
 /// **본문이 답을 내고 gutter가 따른다.** 둘이 각자 세면 번호가 본문과 어긋난다.
 ///
@@ -150,24 +153,6 @@ pub fn rowsForVisual(visual: []const visual_map.VisualRow, first_line: usize, ou
 
 const testing = std.testing;
 
-test "rowsForRange: 0-based 줄을 1-based 표시 번호로 바꾼다" {
-    var buf: [4]Row = undefined;
-    const rows = rowsForRange(0, 3, &buf);
-
-    try testing.expectEqual(@as(usize, 3), rows.len);
-    try testing.expectEqual(@as(usize, 1), rows[0].number.?);
-    try testing.expectEqual(@as(usize, 3), rows[2].number.?);
-    try testing.expectEqual(@as(u16, 0), rows[0].visual_row);
-}
-
-test "rowsForRange: 스크롤된 뷰포트는 첫 줄부터 센다" {
-    var buf: [4]Row = undefined;
-    const rows = rowsForRange(41, 2, &buf);
-
-    try testing.expectEqual(@as(usize, 42), rows[0].number.?);
-    try testing.expectEqual(@as(u16, 0), rows[0].visual_row); // 화면에서는 첫 행이다
-}
-
 fn testProps(layout: geometry.Layout, rows: []const Row) Props {
     return .{
         .layout = layout,
@@ -177,6 +162,27 @@ fn testProps(layout: geometry.Layout, rows: []const Row) Props {
         .font_px = 13,
         .origin_px = .{ .x = 0, .y = 0 },
     };
+}
+
+test "scratchNeeded: 실제 자릿수만큼만 요구한다 — max_digits로 잡으면 20배다" {
+    try testing.expectEqual(@as(usize, 45), scratchNeeded(45, 9)); // 1자리
+    try testing.expectEqual(@as(usize, 90), scratchNeeded(45, 10)); // 2자리 경계
+    try testing.expectEqual(@as(usize, 90), scratchNeeded(45, 99));
+    try testing.expectEqual(@as(usize, 135), scratchNeeded(45, 100));
+    try testing.expectEqual(@as(usize, 0), scratchNeeded(0, 12345));
+
+    // **`build`가 실제로 쓰는 양을 넘지 않는가.** 이 둘이 갈리면 예약이 모자라 gutter가 죽는다.
+    const layout = geometry.compute(80, 100, .{});
+    const rows = [_]Row{
+        .{ .number = 98, .visual_row = 0 },
+        .{ .number = 99, .visual_row = 1 },
+        .{ .number = 100, .visual_row = 2 },
+    };
+    var ops: [8]draw.Op = undefined;
+    var scratch: [64]u8 = undefined;
+    var runs: [8]draw.Run = undefined;
+    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    try testing.expect(w.bytes <= scratchNeeded(rows.len, 100));
 }
 
 test "줄 번호는 우측 정렬된다 — 자릿수가 달라도 본문과의 간격이 같아야 한다" {

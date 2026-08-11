@@ -843,8 +843,11 @@ scale 렌더가 아니다). render scale 1×/2× 비교가 필요한 consumer는
 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)의 scale-normalized rect gate를 쓰거나, 그 PR이
 Chrome Lab 도구 확장을 자기 범위로 선언한다.
 
-`PointerGestureOwner` union이 `none`만 남기 전에는 interaction 이관 전체를 완료로 표시하지 않는다.
-한 consumer가 새 tree를 쓴다는 사실은 그 consumer의 부분 이관 증거일 뿐이다.
+`PointerGestureOwner` union에서 **`address_selection`을 제외한** variant를 전부 소진하기 전에는
+interaction 이관 전체를 완료로 표시하지 않는다. 한 consumer가 새 tree를 쓴다는 사실은 그 consumer의
+부분 이관 증거일 뿐이다. `address_selection`이 예외인 근거와 그 variant의 존속 사유는
+[Chrome 상호작용 컴포넌트 이관 전략](chrome-interaction-migration.md) §2가 단일 출처다 — 여기서
+"`none`만 남는다"로 적으면 도달 불가능한 gate가 된다.
 
 ## 구현 전 TDD 절단 원칙
 

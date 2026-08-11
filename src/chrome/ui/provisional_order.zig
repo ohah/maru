@@ -6,9 +6,19 @@
 //! 이 모듈은 그 preview를 model 밖으로 꺼낸다. 시작 순서를 transaction으로 보관하고, drag 중
 //! 보이는 순서는 여기서 파생한 배열이며, model commit은 up 한 번뿐이다(이관 계약 §4.4).
 //!
-//! **소비자**: terminal tab drag(`app_session.dragTabTo`/`commitTabDragOrder` — `pane.terms`).
-//! 사이드바 워크스페이스 카드(`app_session.moveTab`이 `tabs`·`surface_ptrs`·`active_tab`을 매 move마다
-//! 바꾸는 쪽)는 아직 영구 live reorder이며 CIM5가 이관한다.
+//! **소비자**: terminal tab drag(`app_session.dragTabTo`/`commitTabDragOrder` — `pane.terms`) 하나뿐이다.
+//!
+//! 사이드바 워크스페이스 카드는 이 모듈을 쓰지 **않지만 영구 live reorder도 아니다**. SG8d/SG8e에서 이미
+//! 자체 고스트 프리뷰로 옮겼다 — `sidebar_ops.cardDropPlan`/`groupDragPreviewFrame`이 매 move마다
+//! `tab_ops.simulateDrop`으로 arena에 가상 배치를 만들어 `sidebar_preview_rows`에만 투영하므로 드래그 내내
+//! `self.tabs`는 불변이고, `moveTab`은 up의 `commitSidebarDragPreview`에서 **1회만** 돈다. 즉 §4.3의
+//! "preview는 source layout을 mutation하지 않는다"를 두 소비자가 서로 다른 구현으로 이미 지키고 있다.
+//!
+//! **두 preview는 합치지 않는다.** 이 모듈은 flat `[]u64` 순열이라 "누가 몇 번째냐"만 표현한다. 사이드바는
+//! 그룹 subtree를 블록으로 옮기면서 중첩 depth와 `top_level` 전이를 함께 투영해야 해서
+//! (`VirtualLayout{ order, group_depth, top_level }`) 순열 하나로는 표현되지 않는다. CIM5가 사이드바에서
+//! 옮길 몫은 preview 기계가 아니라 **capture 소유**(`PointerGestureOwner.sidebar_tab`/`sidebar_group` →
+//! `InteractionState`)와 **손수 hit-test**(`components/sidebar.slotAt`/`dragTargetSlot`) 쪽이다.
 //!
 //! **clamp는 주입받는다.** pin 그룹 경계 같은 제약은 domain 상수라 host가 소유한다
 //! (`app_session.clampMoveToGroup`). 그것을 모르면 preview가 commit할 수 없는 자리를 보여주고,

@@ -2719,6 +2719,42 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    | `RemoteRuntime.CloseAuthority` | `open -> routing_tombstoned -> settling -> ready_remove`, disposition `open -> committed` | close disposition, pinned Runtime/host identity, request/attempt generation, shutdown admin outcome | layout membership, event semantic 결과, 파괴 뒤 `removed` 결과 |
    | `RemoteTermBackend.CloseSweep` | `inactive -> active{max_ticket,cursor_after_ticket} -> inactive` | current sweep 방문 경계·순서와 bounded fairness | Runtime 수명, close disposition/effect, event cleanup |
 
+   `CloseRequestKind`는 `close_and_detach|close_without_routing|finish_after_termination`의 closed enum이다.
+   `close_and_detach`는 명시적 tab/window close가 쓰며 routing tombstone과 `terminate_host` disposition을 요구한다.
+   `close_without_routing`은 construction rollback 또는 routing이 아직 게시되지 않은 typed teardown만 쓰며 일반 AppSession close caller는 0이다.
+   `finish_after_termination`은 검증된 종료 관측 뒤에만 쓰고 terminate RPC를 다시 보내지 않는다. 세 kind 모두 같은
+   `CloseProgress`를 반환하지만 precondition과 effect를 서로 대체할 수 없고 kind/disposition 조합은 CloseAuthority seal에 들어간다.
+
+   heap-pin된 `RemoteRuntime.CloseAuthority`의 불변 identity seal tuple은
+   `{self_addr,pid,process_nonce,thread_id,runtime_addr,handle,runtime_generation,host_id,close_request_generation,
+   close_schedule_ticket,request_kind_raw,disposition_raw}`다. 별도 mutable state seal은
+   `{identity_seal,state_generation,lifecycle_raw}`를 봉인하고 lifecycle 전이마다 checked-monotonic `state_generation`을 올린다.
+   lifecycle은 `open -> routing_tombstoned -> settling -> ready_remove`이며 copied/moved/cross-thread/fork/old request와
+   state generation skip/rollback은 mutation 0이다.
+   authority storage는 movable map row가 아니라 heap-pin된 `RemoteRuntime` inline에 둔다.
+
+   `RemoteTermBackend`는 제품에서 AppRuntime이 소유하는 단일 final-address GUI-thread backend다. process-sealed
+   `RemoteBackendSingletonOwner`는 `{pid,process_nonce,backend_addr,owner_generation,lifecycle_raw}`와
+   `pristine -> claimed -> released`를 소유한다. 제품 `initAttachOnlyWithPool|initWithPool`은 같은 private claim helper의 exact 두 caller이고,
+   legacy borrowed-client `init`은 `builtin.is_test` fixture 밖 제품 caller가 0이며 singleton claim을 우회하지 않는다.
+   초기화 실패는 publication 전에 claim을 abort한다. 정상 deinit은 runtime/reservation/pin 0을 확인한 뒤 release하며 같은 process의
+   다음 backend는 새 generation으로 재생성할 수 있다. fork child는 PID/process nonce mismatch를 lock/map 접근 전에 거부하고 상속 claim을
+   release하거나 재사용하지 않는다. current/N-1 host는 이 한 backend map 안에 함께 있고 두 번째 제품 backend construction은
+   mutation 0으로 거부한다. 테스트의 isolated backend는 product singleton과 동시에 live일 수 없다.
+   backend inline `CloseOperationOwner`가 `{backend_addr,pid,process_nonce,thread_id,operation_generation,
+   active,target_handle,target_runtime_generation,target_close_request_generation}`을 소유한다. `CloseOperationPin`은 caller의
+   final-address stack storage에 발급하는 pointer-free sealed tuple
+   `{self_addr,backend_addr,pid,process_nonce,thread_id,operation_generation,handle,runtime_addr,runtime_generation,
+   close_request_generation,close_schedule_ticket,authority_identity_seal,expected_state_generation,expected_lifecycle_raw}`이며
+   `pristine -> active -> consumed|aborted`만 허용한다. pin은 callback 전 불변 identity와 정확한 PRE state generation/lifecycle을
+   snapshot하며 정상 전이 뒤 authority seal 자체를 덮어쓰지 않는다. owner GUI thread에서 callback 0인 한 lexical suffix가 map relookup,
+   receipt 4-tuple과 authority identity/state seal 검증,
+   `CloseOperationOwner inactive -> active`, pin seal publication을 선형화한다. remove/replace는 같은 owner를 반드시 획득하므로
+   active pin 동안 불가능하다. active owner 중 callback 재진입은 target과 무관하게 모든 close/remove/replace/direct teardown이
+   mutation 0의 `event_pending`이고 lock 재획득이나 다른 target 우회는 없다. foreign thread/fork/copy/double consume은 mutation 0이다.
+   callback 반환 뒤 exact pin/owner/identity seal과 `expected PRE -> 허용된 exact POST` state generation/lifecycle만 재검증하고 drift는
+   common fatal-integrity leaf로 닫는다.
+
    `EventCorrelation`은 canonical take publication에서만 발급하는 opaque stale-pair token이다. registry/node/binding/runtime/stream,
    event generation, ordering class, final `EventOwner` address와 ClientSlot-owned `expected_major|metadata_support` snapshot을 묶는다.
    이 capability snapshot은 take transaction의 canonical quarantine mirror에 payload cleanup metadata와 함께 immutable하게 봉인하며,
@@ -2755,13 +2791,51 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    terminal close는 즉시 파괴하는 `void` 계약이 아니다. 공통 `TermRuntimeBackend.VTable`의 기존 메서드 수는 유지하되
    `close_and_detach|close|finish_after_termination`은 `CloseProgress{complete,event_pending}`, `remove`는
-   `RemoveProgress{removed,event_pending,invalid}`를 반환한다. generation handle/surface는 `removed`에서만 무효가 된다. in-process backend는
+   `RemoveProgress{removed,event_pending,invalid}`를 반환한다. `invalid`는 map row와 heap Runtime이 모두 현존하지만
+   request generation/pin/authority가 stale인 mutation-0 reject로만 좁힌다. map absence, runtime generation replacement 또는
+   row/Runtime identity 불일치는 `fatalIntegrity(.close_runtime_absent)`이며 dangling `Term.surface`를 layout에 보존하는 결과로
+   반환하지 않는다. generation handle/surface는 `removed`에서만 무효가 된다. in-process backend는
    기존 동기 close를 수행하고 항상 complete/removed로 수렴한다. generation backend는 pinned `RemoteRuntime.CloseAuthority`를 SSOT로
    사용한다. close request는 AppSession scheduling reservation과 authority publication을 layout 제거 전에 all-or-none으로 끝내며 OOM이면
    UI/routing/backend가 모두 그대로다. layout에서 사라진 Term의 scheduler projection은 authority가 아니다.
+   AppSession-owned `PendingTermClose`는
+   `{self_addr,app_session_addr,app_session_generation,term_addr,surface_id,handle,term_close_generation,
+   request_generation,request_kind_raw,phase_raw}`를
+   final-address seal로 봉인하고 `pristine -> reserved -> backend_pending -> backend_complete -> consumed|aborted`만 허용한다.
+   Tab/Pane pointer는 identity가 아니며 retry마다 `app_session_generation + term_addr + surface_id + handle`이 현재 window/tab/pane graph의
+   exact 한 membership을 가리키는지 다시 검증한다. Term allocator reuse는 checked-monotonic `term_close_generation`이 막는다.
+   close 요청은 stable membership을 최종 재검증한 뒤 topology mutation 전에 이 reservation과 backend authority를 함께 게시한다.
+   `.event_pending`이면 Term은 layout에 남아 마지막 snapshot을 렌더하지만 input/control/paste/rename/notification poll은 mutation 0으로
+   닫히고 같은 close 재요청은 같은 generation의 `.event_pending`이다. maintenance tick만 같은 reservation을 한 번 재시도한다.
+   `.complete` 뒤 remove가 `.removed`를 반환해야 기존 `closeTermAt`의 ordered-remove/index collapse/GUI-owned tail을 실행한다.
+   `.invalid`는 현존 row/Runtime에 대한 stale 요청만 layout과 handle을 보존하는 typed fail-close이며 freed Term pointer를 읽지 않는다.
+   backend absence는 위 fatal-integrity 경계로 분리한다. tab/window cascade는 final-address `PendingTermCloseGraph`가 모든 target의
+   AppSession reservation, backend close-admission subpermit, ticket과 publication destination을 fallible preflight한 뒤,
+   callback/allocation/error/branch 0인 단일 no-fail suffix로 모든 CloseAuthority와 target routing tombstone을 함께 게시한다.
+   publication 이후 실패 가능한 연산은 없다. target `0..N-1` preflight 실패는
+   reservation/backend authority/routing/topology 전부 pristine이고, publication 뒤에도 sibling·active index·surface pointer·rename/paste는
+   보존된다. 따라서 일부 target만 routing을 잃고 나머지 close가 취소되는 rollback 불가능 상태를 만들지 않는다.
+
+   native window close ABI는 별도 진행 enum을 만들지 않고 공통 `CloseProgress` raw를 그대로 전달한다.
+   `windowShouldClose`는 모든 Term의 `PendingTermCloseGraph` preflight/publication을 먼저 호출하고 `event_pending`이면 반드시 `false`,
+   `complete`이면 `true`를 반환한다.
+   기존 실행 중 명령 확인이 필요한 요청은 먼저 확인 modal만 예약하고 close graph는 mutation 0이다. confirm accept 또는 확인이
+   불필요한 요청만 같은 `requestWindowClose` owner에서 graph를 시작한다. b5의 actual ABI 행은 여러 일반 창 중 non-last window를
+   대상으로 하며, 마지막 일반 창의 `NSApp.terminate`와 app-quit detach/admin 정책은 b6가 소유한다.
+   AppSession은 `PendingWindowClose{app_session_generation,graph_generation,lifecycle_raw}`를 보존하고 maintenance tick만 graph를 한 번
+   advance한다. 모든 target이 `complete -> removed`가 된 뒤 `ended_seen`과 one-shot `programmatic_close_ready`를 함께 게시하며 Swift는
+   이를 한 번 drain해 delegate 재진입 없는 `closeWindowOrQuit`을 호출한다. 그 전에는 `windowWillClose`, `AppSession.close/deinit`,
+   direct backend remove/detach가 0회다. `AppSession.deinit`은 이미 승인되어 graph가 removed인 일반 window close만 GUI-owned storage를
+   회수하고, b6-owned app-quit detach allowlist는 별도 기존 경로로 남긴다.
+
    backend-global `max_remote_backend_runtimes = protocol.max_inventory_runtimes`(4,096)는 current/N-1 모든 host의 합계다.
    spawn/attach/restore는 4,097번째 map admission을 allocation·layout/routing/map mutation 전에 typed `ResourceExhausted`로 거부하며 기존
-   Runtime과 요청 전 UI/layout을 그대로 둔다. backend runtime이 하나라도 있으면 매 maintenance tick 모든 map entry를 fixed stack
+   Runtime과 요청 전 UI/layout을 그대로 둔다. 이를 위해 AppSession은 remote Term/layout allocation 전에 backend의 final-address
+   `RuntimeAdmissionReservation{self_addr,backend_addr,pid,process_nonce,thread_id,request_generation,state_raw}`를 획득한다.
+   backend는 committed+reserved 합계를 같은 GUI-thread owner 아래 비교하고 `pristine -> reserved -> consumed|aborted`를 exact once
+   봉인한다. host spawn/attach RPC와 Runtime allocation은 reservation 뒤에만 시작하며 모든 실패는 map/routing/layout publication 전에
+   abort해 capacity를 즉시 재사용한다. 제품 backend singleton 밖의 per-instance `runtimes.count()` 검사는 cap 권위가 아니다.
+   backend runtime이 하나라도 있으면 매 maintenance tick 모든 map entry를 fixed stack
    `[max_remote_backend_runtimes]CloseScanReceipt`에 collect하고 iterator를 닫은 뒤 최대 16개 authority를 진행한다. scratch는
    `@sizeOf(CloseScanReceipt) * max_remote_backend_runtimes <= 256 KiB`를 compile-time assert한다. close admission은 backend의 checked
    monotonic `close_schedule_ticket`을 authority에 exact once 봉인한다. issuer 범위는 `1...maxInt(u64)`이고 0은 발급하지 않는다. backend
@@ -2771,8 +2845,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    새 max/cursor로 시작한다. sweep 중 생긴 더 큰 ticket은 다음 sweep만 참여하므로 static 4,096 owner는 최대 256 tick 안에 모두 한 번
    시도되고 무한 신규 churn도 현재 sweep를 늘리지 않는다. selection 비교는 `visited_count * 16` 이하, heap allocation은 0이다. ticket은
    재시도에도 바뀌지 않는 identity이며 `maxInt(u64)` ticket 선택은 덧셈하지 않고 state를 `inactive`로 바꾼다. empty start도 inactive를
-   유지한다. ticket 발급 exhaustion은
-   publication 전 `fatal_integrity` fail-stop이며 mutation 0이다.
+   유지한다. ticket issuer는 backend inline `{last_issued:u64,terminal:bool}`이며 0은 before-first sentinel이다.
+   `0 -> 1`과 `maxInt(u64)-1 -> maxInt(u64)` 발급은 성공하고, max가 이미 발급된 뒤 다음 요청은
+   authority/map/layout/callback mutation 0에서 `fatalIntegrity(.close_ticket_exhausted)`로만 종료한다. 기존 max ticket owner는
+   계속 scan 가능하다. fatal origin과 exit 86은 fresh subprocess가 검증한다.
    `CloseScanReceipt`는 pointer-free `{handle,runtime_generation,close_request_generation,close_schedule_ticket}`이고, act 직전에 map에서 다시 찾아 네 값과
    final-address CloseAuthority seal을 검증하면서 allocation-free one-shot `CloseOperationPin`을 원자 획득한 뒤에만 Runtime을 역참조한다.
    raw lookup과 pin 획득 사이에는 callback/reentry가 0이다. pin은 authority advance 전체와 callback 동안 Runtime/map row를 non-removable로
@@ -2791,6 +2867,20 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    유효 enum 밖이면 local fatal integrity로 닫는다. AppSession·backend의 일반 close/remove는 이 비동기 계약을 사용한다. source-boundary로
    명시한 direct void deinit/detach 경로만 process teardown 또는 construction rollback 전용이며 제품의 일반 terminal close 우회로로
    호출할 수 없다.
+
+   b5는 product-shaped package-private `RemoteRuntime.advanceClosePinned(pin) CloseProgress`를 미리 소유한다. b5 구현에서는
+   pin과 CloseAuthority를 검증한 뒤 pending lifecycle의 readiness만 한 번 읽고, `idle`은 complete, 나머지 네 상태는
+   event_pending을 반환하며 semantic prepare/settle/commit caller는 exact 0이다. b4는 이 함수 내부의 sole
+   `advancePendingEventForClose` adapter callsite만 exact 1로 활성화해 prepared settlement 또는 committed cleanup을 tick당 한 번
+   전진시킨다. frame pump와 close sweep가 각각 settlement를 호출하지 않으며, sweep는 다음 tick에 같은 stable ticket을 다시 수집해
+   readiness를 재검사한다. invalid raw는 `fatalIntegrity(.invalid_pending_close_lifecycle)`의 단일 noreturn leaf를 쓴다.
+
+   direct void teardown allowlist는 다음으로 닫는다. (1) `RemoteTermBackend.deinit -> destroyRuntimeEntry`의 process/backend teardown,
+   (2) `detachTerm -> destroyRuntimeEntry(.detach)`의 app-quit preserve-host 및 restore rollback이며 b6 전에는 새 app-quit caller를
+   활성화하지 않는다, (3) `attachTermOnHost` 실패의 `detachClientSide`, (4) spawn map-publication 전 실패의
+   `RemoteRuntime.deinit`, (5) RemoteRuntime spawn/attach 내부 construction rollback이다. active CloseOperationPin이 있으면
+   (1)도 제거를 진행하지 않고 `fatalIntegrity(.active_close_operation)`으로 닫는다. 일반 tab/window close, `destroyTerm`, frame pump에서
+   이 allowlist를 직접 호출하는 reference는 0이고 그 밖의 product direct deinit/detach caller도 0이다.
 
    C3-3b5의 첫 RED는 최적화 모드마다 neutral contract 6개, lifecycle readiness 6개, close authority 8개,
    close sweep 8개, remote backend 7개, AppSession parity 4개인 unique component 39개와 boundary 1개를 고정한다.

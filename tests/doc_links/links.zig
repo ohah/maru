@@ -9,10 +9,17 @@ const std = @import("std");
 //      파일은 그대로 있고 절만 다른 파일로 옮겨가므로, A만 보는 검사는 통과하는데 링크는 죽는다.
 //      실측: 계약 문서 분할에서 이 종류로만 8건이 깨졌고 A는 0건이었다.
 //
-// **절 번호 참조(`foo.md §4.2`)는 아직 게이트가 아니다.** 같은 분할에서 그 종류도 12건 깨졌지만,
-// 판정에 오탐이 많아(같은 줄에서 `§` 뒤에 파일명이 오는 표기, 동명 파일 `docs/x.md`↔`docs/plans/x.md`,
-// `**9.5.1 — …**`처럼 헤딩이 아닌 볼드 문단 번호) 좁은 형식을 먼저 정해야 하고, 기존 위반도
-// 30건 넘게 남아 있다. 게이트로 올리는 것은 그 정리와 함께 별도 슬라이스로 한다.
+//   C. `foo.md §4.2`처럼 **절 번호로 가리킨 참조**가 그 문서에 실재하는가. 같은 분할에서 이 종류도
+//      12건 깨졌다 — 절이 다른 파일로 가면 번호만 쓴 참조는 어느 문서를 뜻하는지조차 흐려진다.
+//
+// C의 판정 형식을 좁히는 데 대부분의 노력이 들었다. 처음 넓게 잡았을 때 21건 중 19건이 오탐이었고,
+// 원인은 전부 "절을 다는 형식이 문서마다 다르다"였다. 지금은 셋을 모두 절 정의로 인정하고
+// (`## 3.` 헤딩, `**9.5.1 — …**` 볼드 문단, `7. **(§9.7) …**` 목록 라벨), 참조 쪽은 파일명 **바로 뒤**에
+// 붙은 §만 본다. 사이에 문장이 끼면 "그 문서가 소유하고, 그 안의 §N은…" 같은 진입점 참조라 대상이 다르다.
+//
+// **번호 절 체계가 없는 문서로의 `§N`은 판정하지 않는다.** architecture.md·project-rules.md처럼 제목만
+// 쓰는 문서를 `§211`로 가리키는 곳이 있는데, 실측하면 그건 절이 아니라 **줄 번호를 §로 쓴 표기 오용**이다
+// (`architecture.md §192`가 실제 192행과 일치했다). 이 게이트가 다룰 종류가 아니라 조용히 지나간다.
 
 /// GitHub이 헤딩에서 앵커를 만드는 규칙. 소문자화 → 영숫자·`-`·`_`·공백·문자(한글 등)만 남김 → 공백을 하이픈으로.
 ///
@@ -95,6 +102,33 @@ fn isKnownBroken(from: []const u8, target: []const u8) bool {
     return false;
 }
 
+/// 절 번호 참조 쪽의 같은 목록. 여기도 **비우는 것이 목표다**.
+const known_broken_sections = [_]struct { from: []const u8, doc: []const u8, sec: []const u8, why: []const u8 }{
+    .{
+        .from = "src/session/dock_panel.zig",
+        .doc = "docs/editor-surface.md",
+        .sec = "10.10",
+        // editor-surface.md가 개정되며 §10이 `10.A 결정됨`/`10.B 남음`으로 바뀌어 이 번호가 사라졌다.
+        // 내용("diff 본문의 비교 기준")은 지금 §3.5 섹션 모델과 §6 bounded diff API에 걸쳐 있어 어느
+        // 한 절로 단정할 수 없다. 그 문서를 아는 사람이 대상을 정하면 여기서 지운다.
+        .why = "editor-surface.md 개정으로 사라진 번호 — 대체 절 미정",
+    },
+    .{
+        .from = "tests/macos_editor_smoke.swift",
+        .doc = "docs/editor-surface.md",
+        .sec = "10.6",
+        // 같은 개정으로 사라졌다. 내용은 "큰 응답 파싱 비용의 상한 근거"다.
+        .why = "editor-surface.md 개정으로 사라진 번호 — 대체 절 미정",
+    },
+};
+
+fn isKnownBrokenSection(from: []const u8, doc: []const u8, sec: []const u8) bool {
+    for (known_broken_sections) |k| {
+        if (std.mem.eql(u8, k.from, from) and std.mem.eql(u8, k.doc, doc) and std.mem.eql(u8, k.sec, sec)) return true;
+    }
+    return false;
+}
+
 /// 한 문서가 소유한 앵커 집합.
 fn collectAnchors(arena: std.mem.Allocator, text: []const u8) !std.StringHashMap(void) {
     var set = std.StringHashMap(void).init(arena);
@@ -115,6 +149,140 @@ fn collectAnchors(arena: std.mem.Allocator, text: []const u8) !std.StringHashMap
         try set.put(slug, {});
     }
     return set;
+}
+
+/// 줄이 절을 **정의**하면 그 번호. 문서마다 절을 다는 형식이 셋이라 모두 인정한다 —
+/// 하나라도 빠뜨리면 멀쩡한 참조가 위반으로 잡힌다(실측: 헤딩만 보면 오탐 17건).
+///
+///   `## 3. 문서 모델 계약`            헤딩
+///   `**9.5.1 — 연결 I/O 모델**`        볼드 문단(헤딩을 더 쪼개지 않고 번호만 다는 문서)
+///   `7. **(§9.7) 아이콘은 …**`         번호 목록 안의 절 라벨
+fn sectionDefinedBy(line: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, line, " \t");
+    if (std.mem.startsWith(u8, t, "#")) {
+        var h: usize = 0;
+        while (h < t.len and t[h] == '#') h += 1;
+        if (h < 2 or h > 6 or h >= t.len or t[h] != ' ') return null;
+        return leadingNumber(std.mem.trimStart(u8, t[h..], " "), &.{ '.', ' ' });
+    }
+    if (std.mem.startsWith(u8, t, "**")) {
+        return leadingNumber(t[2..], &.{ ' ', '-', 0xE2 }); // 0xE2 = '—'/'–'의 첫 바이트
+    }
+    // `7. **(§9.7) …`  — 목록 번호를 건너뛰고 괄호 안 절 라벨을 읽는다.
+    const paren = std.mem.indexOf(u8, t, "(§") orelse return null;
+    if (leadingNumber(t, &.{'.'}) == null) return null; // 목록 항목이 아니면 본문 속 참조다
+    if (paren > 8) return null; // 줄 머리 근처의 라벨만
+    return leadingNumber(t[paren + 3 ..], &.{')'}); // "(§" 2바이트 + '§'가 2바이트 더
+}
+
+/// `text` 앞머리의 `1`·`2.3`·`9.5.1` 형태 번호. 뒤에 `stops` 중 하나가 와야 한다.
+fn leadingNumber(text: []const u8, stops: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    var seen_digit = false;
+    while (i < text.len) : (i += 1) {
+        if (std.ascii.isDigit(text[i])) {
+            seen_digit = true;
+            continue;
+        }
+        if (text[i] == '.' and seen_digit and i + 1 < text.len and std.ascii.isDigit(text[i + 1])) continue;
+        break;
+    }
+    if (!seen_digit or i == 0) return null;
+    const num = std.mem.trimEnd(u8, text[0..i], ".");
+    if (num.len == 0) return null;
+    if (i >= text.len) return num; // 줄 끝
+    for (stops) |s| if (text[i] == s) return num;
+    return null;
+}
+
+/// 문서가 소유한 절 번호. `3.2`를 정의하면 부모 `3`도 참조를 받는다.
+fn collectSections(arena: std.mem.Allocator, text: []const u8) !std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(arena);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var in_fence = false;
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if (in_fence) continue;
+        const num = sectionDefinedBy(line) orelse continue;
+        try set.put(try arena.dupe(u8, num), {});
+        var i: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, num, i, '.')) |dot| {
+            try set.put(try arena.dupe(u8, num[0..dot]), {});
+            i = dot + 1;
+        }
+    }
+    return set;
+}
+
+/// 절 번호 참조(`foo.md §4.2`). 파일명 **바로 뒤**에 붙은 것만 본다.
+const SectionRef = struct { path: []const u8, sec: []const u8, line: usize };
+
+/// 파일명과 § 사이에 허용하는 것: 링크 닫기 `)`, 백틱, 공백, 중점(`·`). 그 이상 끼면
+/// "이 문서가 소유하고, 그 안의 §N은…" 같은 **진입점 참조**라 대상이 다르다(실측 오탐의 절반).
+fn sectionRefAt(line: []const u8, md_end: usize) ?[]const u8 {
+    var i = md_end;
+    var gap: usize = 0;
+    while (i < line.len and gap < 4) {
+        const c = line[i];
+        if (c == ')' or c == '`') {
+            i += 1;
+            continue; // 구분자는 간격으로 세지 않는다
+        }
+        if (c == ' ') {
+            i += 1;
+            gap += 1;
+            continue;
+        }
+        if (c == 0xC2 and i + 1 < line.len and line[i + 1] == 0xB7) { // '·'
+            i += 2;
+            gap += 1;
+            continue;
+        }
+        if (c == 0xC2 and i + 1 < line.len and line[i + 1] == 0xA7) { // '§'
+            return leadingNumber(line[i + 2 ..], &.{ ' ', ')', ',', '.', '·', 0xEA, 0xC2, 0xEB, 0xEC, 0xED });
+        }
+        return null;
+    }
+    return null;
+}
+
+fn collectSectionRefs(arena: std.mem.Allocator, text: []const u8) ![]SectionRef {
+    var refs: std.ArrayList(SectionRef) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var line_no: usize = 0;
+    var in_fence = false;
+    while (lines.next()) |line| {
+        line_no += 1;
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if (in_fence) continue;
+        // 절 소유 표와 그 설명문은 `§N 다음에 파일명`이라 짝이 반대다 — 판정 대상이 아니다.
+        if (std.mem.indexOf(u8, line, "절 번호는 파일을 넘어 이어진다") != null) continue;
+        if (std.mem.indexOf(u8, line, "처럼 절 번호로 가리키므로") != null) continue;
+
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, line, i, ".md")) |md| {
+            const end = md + 3;
+            i = end;
+            const sec = sectionRefAt(line, end) orelse continue;
+            // 파일명 앞으로 되짚어 경로를 뽑는다(`[라벨](docs/a.md)` 의 경로 부분, 또는 평문 `docs/a.md`).
+            var s = md;
+            while (s > 0) {
+                const c = line[s - 1];
+                const ok = std.ascii.isAlphanumeric(c) or c == '.' or c == '/' or c == '-' or c == '_';
+                if (!ok) break;
+                s -= 1;
+            }
+            if (s == md) continue;
+            try refs.append(arena, .{ .path = line[s..end], .sec = sec, .line = line_no });
+        }
+    }
+    return refs.items;
 }
 
 /// 마크다운 링크 대상(`](...)`)을 훑는다. 코드블록 안은 건너뛴다.
@@ -237,6 +405,71 @@ test "문서 링크 정합성: 대상 파일과 절 앵커가 실재한다" {
     try std.testing.expectEqual(@as(usize, 0), violations);
 }
 
+/// 절 참조를 쓰는 쪽: 문서뿐 아니라 소스 주석도 `docs/foo.md §4.2`로 계약을 가리킨다.
+fn collectRefSourcePaths(arena: std.mem.Allocator) ![][]const u8 {
+    var paths = try std.ArrayList([]const u8).initCapacity(arena, 64);
+    for (try collectDocPaths(arena)) |p| try paths.append(arena, p);
+    try paths.append(arena, try arena.dupe(u8, "build.zig"));
+
+    for ([_][]const u8{ "src", "tests", "tools" }) |root| {
+        var dir = std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true }) catch continue;
+        defer dir.close(std.testing.io);
+        var walker = try dir.walk(arena);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file) continue;
+            const ok = std.mem.endsWith(u8, entry.path, ".zig") or
+                std.mem.endsWith(u8, entry.path, ".m") or
+                std.mem.endsWith(u8, entry.path, ".swift");
+            if (!ok) continue;
+            try paths.append(arena, try std.fmt.allocPrint(arena, "{s}/{s}", .{ root, entry.path }));
+        }
+    }
+    return paths.items;
+}
+
+test "절 번호 참조: 파일명 뒤의 §N이 그 문서에 실재한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+
+    // 문서별 절 번호 집합. **비어 있으면 그 문서는 번호 절 체계를 안 쓴다** — architecture.md·
+    // project-rules.md처럼 제목만 있는 문서로의 `§N`은 절 참조가 아니라 표기 오용(줄 번호를 §로
+    // 쓴 것이 실제로 있다)이라, 이 게이트가 다룰 종류가 아니므로 판정하지 않는다.
+    var sections = std.StringHashMap(std.StringHashMap(void)).init(arena);
+    for (try collectDocPaths(arena)) |p| {
+        const text = try cwd.readFileAlloc(std.testing.io, p, arena, .limited(8 * 1024 * 1024));
+        try sections.put(p, try collectSections(arena, text));
+    }
+
+    var violations: usize = 0;
+    for (try collectRefSourcePaths(arena)) |from| {
+        const text = cwd.readFileAlloc(std.testing.io, from, arena, .limited(8 * 1024 * 1024)) catch continue;
+        for (try collectSectionRefs(arena, text)) |ref| {
+            // 문서끼리는 상대 경로지만 **소스 주석은 저장소 루트 기준**(`docs/foo.md`)을 쓴다.
+            // 둘 다 시도하고, 실제로 맞은 경로를 이후 판정(등재 조회)에 그대로 쓴다.
+            var doc = try resolveRelative(arena, from, ref.path);
+            var owned = sections.get(doc);
+            if (owned == null) {
+                doc = try std.fmt.allocPrint(arena, "docs/{s}", .{std.fs.path.basename(ref.path)});
+                owned = sections.get(doc);
+            }
+            const secs = owned orelse continue;
+            if (secs.count() == 0) continue; // 번호 절 체계가 없는 문서
+            if (secs.contains(ref.sec)) continue;
+            if (isKnownBrokenSection(from, doc, ref.sec)) continue;
+            std.debug.print(
+                "{s}:{d}: 절이 그 문서에 없다 — {s} §{s}\n",
+                .{ from, ref.line, ref.path, ref.sec },
+            );
+            violations += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
 // 판정 함수 자체의 단위 테스트 — slug 규칙이 조용히 느슨해지면 게이트가 통과만 하는 껍데기가 된다.
 test "slug 규칙: 실제 헤딩으로 경계를 고정" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -280,6 +513,46 @@ test "링크 수집: 코드블록과 외부 URL은 대상이 아니다" {
     try std.testing.expectEqualStrings("a.md", refs[0].path);
     try std.testing.expectEqualStrings("절-하나", refs[0].anchor);
     try std.testing.expectEqualStrings("../c.md", refs[1].path);
+}
+
+test "절 정의 형식: 헤딩·볼드 문단·목록 라벨을 모두 인정한다" {
+    try std.testing.expectEqualStrings("3", sectionDefinedBy("## 3. 문서 모델 계약").?);
+    try std.testing.expectEqualStrings("9.5.1", sectionDefinedBy("**9.5.1 — 연결 I/O 모델**").?);
+    try std.testing.expectEqualStrings("9.7", sectionDefinedBy("7. **(§9.7) 아이콘은 이름이 단일 출처**").?);
+    try std.testing.expectEqualStrings("2.1", sectionDefinedBy("### 2.1 웹 스택").?);
+
+    // 본문 속 참조는 절 **정의**가 아니다. (예시에 실재 문서명을 쓰지 않는다 — 아래 절 참조 게이트가
+    // 이 파일도 훑으므로, 실재 문서를 쓰면 단위 테스트 입력이 진짜 참조로 잡힌다.)
+    try std.testing.expect(sectionDefinedBy("계약은 example-doc.md §7이 소유한다") == null);
+    try std.testing.expect(sectionDefinedBy("# 문서 제목") == null); // h1은 절 번호 체계가 아니다
+    try std.testing.expect(sectionDefinedBy("- 일반 목록 항목") == null);
+
+    // 부모 절 파생: `3.2`를 정의하면 `3`도 참조를 받는다.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var secs = try collectSections(arena_state.allocator(), "### 9.5.1 연결\n## 4. transport\n");
+    try std.testing.expect(secs.contains("9.5.1"));
+    try std.testing.expect(secs.contains("9.5"));
+    try std.testing.expect(secs.contains("9"));
+    try std.testing.expect(secs.contains("4"));
+}
+
+test "절 참조 수집: 파일명 바로 뒤만 보고 진입점 참조는 거른다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const refs = try collectSectionRefs(arena,
+        \\계약은 [문서](docs/a.md) §4.2가 소유한다.
+        \\`docs/b.md` §3 도 같은 형식이다.
+        \\평문 docs/c.md §2.1 도 본다.
+        \\[진입점](docs/d.md)이 단일 출처이며, 그 문서 §7이 적는다.
+        \\> **절 번호는 파일을 넘어 이어진다.** §2 [레이어](docs/e.md) · §3 [모델](docs/f.md)
+    );
+    try std.testing.expectEqual(@as(usize, 3), refs.len);
+    try std.testing.expectEqualStrings("4.2", refs[0].sec);
+    try std.testing.expectEqualStrings("3", refs[1].sec);
+    try std.testing.expectEqualStrings("2.1", refs[2].sec);
 }
 
 test "상대 경로 해석: plans/ 하위에서 ../ 가 docs/ 로 올라간다" {

@@ -927,11 +927,14 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = git_ops.activeTerminalCwd(self, &cwd_buf) orelse return;
     // 방금 커밋된 자동 전환의 재시도 one-shot. 같은 cwd라도 이번 한 번은 통과시켜 새 root 안에서 펼친다.
-    const retry_after_switch = self.file_tree_auto_follow_reveal_pending;
+    //
+    // **전환을 건 그 cwd일 때만 유효하다.** 플래그는 도크가 숨어 있으면 소비되지 않고 남는데(위 게이트가 먼저
+    // 돌아간다), 그 사이 `cd`가 일어나면 **다른 cwd가 이 one-shot을 먹는다**. 그러면 아래에서 전환이 억제된 채
+    // `followed_cwd`만 갱신돼 그 cwd는 영영 따라가지 못한다. 직전 값과 대조해 그 삼킴을 막는다.
+    const same_as_followed = if (self.file_tree_followed_cwd) |prev| std.mem.eql(u8, prev, cwd) else false;
+    const retry_after_switch = self.file_tree_auto_follow_reveal_pending and same_as_followed;
     self.file_tree_auto_follow_reveal_pending = false;
-    if (!retry_after_switch) {
-        if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
-    }
+    if (!retry_after_switch and same_as_followed) return;
     const owned = self.allocator.dupe(u8, cwd) catch return;
     const reveal = self.file_tree.revealDirectory(owned) catch {
         self.allocator.free(owned);
@@ -972,9 +975,10 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
 /// **in-flight면 건너뛴다.** 검증은 비동기라 tick마다 다시 밀어 넣으면 요청이 쌓인다. 호출자가 `followed_cwd`를
 /// 이미 갱신했으므로 같은 cwd로는 다시 오지 않고, 다음 `cd`가 자연히 재시도가 된다.
 fn followRootSwitch(self: *AppSession, cwd: []const u8) bool {
-    if (self.file_tree_root_validation != null) return false;
-    if (self.file_tree_root_picker_inflight != .none) return false; // 사용자가 연 picker를 가로채지 않는다
-    if (self.file_tree_root_pick_pending != .none) return false; // 사용자가 막 요청한 picker보다 뒤다
+    // **사용자 picker와 같은 busy 판정을 쓴다.** 손으로 세 조건만 적었더니 파일 mutation(이름 변경·삭제·
+    // 휴지통 롤백·수동 복구)이 빠져, 그 도중에도 root가 갈릴 수 있었다 — 문서가 "그때는 replace/add/remove
+    // commit을 거부한다"고 정한 바로 그 상황이다(file-explorer.md §2). 판정을 재구현하지 않고 그대로 쓴다.
+    if (fileTreeNamespaceMutationBusy(self)) return false;
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = AppSession.repoRootFor(cwd, &root_buf) orelse cwd;
     self.file_tree_root_picker_inflight = .replace;

@@ -100,22 +100,11 @@ flowchart TD
 
 **왜 묶어서 하나(단위):** `surface` 1개만 단독 이동하면 `split_tree`·`workspace`·`window`이 `src/app`에 남아 `session→app`이 그대로다(절반만 정리). 가치는 중립 모델을 **한꺼번에** 옮겨 의존을 0으로 닫을 때 생긴다 — 그래서 surface 단독 후속은 미뤘고, 이 3차로 묶는다.
 
-**단계(의존 순서, 각 green + 헤드리스 — 계획):**
+**선결 결정([app-layer-decomposition.md](app-layer-decomposition.md) §2, 사용자 합의):** 중립 모델이 빠진 `src/app`(OS-중립 런타임)을 **L4 공통 런타임으로 규정**한다(옵션 A — `src/app` 유지, 개명 0). `platform/macos`·`pty/macos`(OS 종속 어댑터)와 같은 L4지만 §2의 'L4 2단' 명문화로 구분한다. 런타임을 `src/runtime/`로 물리 개명하는 정리(C)는 `runtime/runtime.zig` 이름 중복 + `app` 직관성으로 순이득이 없어 **보류**(app-layer-decomposition.md §2) — `src/app` 유지로 충분하다.
 
-| 단계 | 옮길 것 | 비고 |
-|---|---|---|
-| A1 | `split_tree`·`workspace`·`label`·`artifact_io`(이미 순수, import 0) | 가장 쉬움 — 파일 이동 + barrel/참조 경로만 |
-| A2 | `surface`·`window`·`core_command`(`terminal`만 참조) | `session→terminal`(이미 있음). 런타임 참조처(`live_pty` 등) import 갱신 |
-| A3 | `session→app` 잔여 의존 0 확인 + `check-boundaries`에 `session`의 `app` 금지 추가 | 의존 소거를 가드로 고정 |
+**대가:** `surface` 참조 런타임 10+ 파일의 import 경로가 바뀐다(기계적·저위험, 동작 보존). 본질적 단점은 없다 — L4→L2 참조가 정상이라 위상 손해가 없고, 순수 이동이라 동작 변화도 0이다.
 
-**선결 결정(완료 — [app-layer-decomposition.md](app-layer-decomposition.md) §2, 사용자 합의):** 중립 모델이 빠진 `src/app`(OS-중립 런타임)을 **L4 공통 런타임으로 규정**한다(옵션 A — `src/app` 유지, 개명 0). `platform/macos`·`pty/macos`(OS 종속 어댑터)와 같은 L4지만 §2의 'L4 2단' 명문화로 구분한다. 런타임을 `src/runtime/`로 물리 개명하는 정리(C)는 `runtime/runtime.zig` 이름 중복 + `app` 직관성으로 순이득이 없어 **보류**(app-layer-decomposition.md §2) — `src/app` 유지로 충분하다.
-
-**리스크/한계(정직):**
-- 작업량: `surface` 참조 런타임 10+ 파일 import 경로 변경(기계적·저위험, 동작 보존).
-- 위 선결 설계(런타임 층 정체성)가 미정이면 A1만 해도 어중간 — 그래서 **계획만** 두고 착수는 그 결정 후.
-- 본질적 단점 없음: L4→L2 참조 정상이라 위상 손해 없고, 순수 이동이라 동작 변화 0.
-
-**검증(계획):** 각 단계 `zig build test`·`check-boundaries`(A3에서 `session→app` 금지 추가)·`macos-app-build` + 실기. 이동만이라 기존 테스트가 그대로 그물.
+**가드:** `check-boundaries`가 `session`의 forbidden 목록에 `app`을 넣어 `session→app`을 빌드 시 0으로 강제한다(`tests/boundary/imports.zig`). 이동만이라 기존 테스트가 그대로 그물이다.
 
 ### 3.3 L4 내부 분해 (별개 — 이식 무관)
 

@@ -255,13 +255,13 @@ PausedPaste는 session-host 문서의 1 MiB/item·runtime 1개·app 8 MiB·10분
   활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷과 chrome을 소유한다. Swift는
   `UNUserNotificationCenter` 표시/권한/delegate, 창 활성화(`makeKeyAndOrderFront`/`NSApp.activate`),
   legacy `userInfo` 정수 `wt`/`sid`, 전면 표시 스타일(`willPresent`)만 담당하고 정책은 결정하지 않는다.
-- **P4 host-backed 경로(계획)**: 배포물의 `maru-sessiond`는 별도 unsigned helper가 아니라 **서명된 Maru 실행 파일의
+- **host-backed 경로 — 이 계약 밖**(별도 이니셔티브: [영속 터미널 세션 호스트](persistent-session-host.md)의 P4가 소유하고, 진행은 [검증 매트릭스](verification-matrix.md)가 적는다): 배포물의 `maru-sessiond`는 별도 unsigned helper가 아니라 **서명된 Maru 실행 파일의
   숨김 subcommand**다. 이 process 안의 macOS platform adapter가 host-owned bounded journal을 읽고
   `UNUserNotificationCenter`에 직접 게시한다. 별도 MRSH client/connection이나 GUI `AppSession`을 만들지 않는다.
   stable route는 `userInfo`의 `hid`(32-hex host ID), `rid`(32-hex runtime ID), `eid`(u64 decimal/`NSNumber`)에
   항상 싣고, GUI-live fast hint가 있을 때만 `ae`(app epoch), `wt`, `sid`를 추가한다.
-- **P4 cold route(계획)**: App delegate는 Zig `AppRuntime`/`AppSession`이 아직 없을 수 있는 notification response에서
-  `{hid,rid,eid}`를 앱 전역 pending route로 보관한다. manifest load와 host attach가 준비된 뒤 planned
+- **cold route — 같은 별도 이니셔티브**: App delegate는 Zig `AppRuntime`/`AppSession`이 아직 없을 수 있는 notification response에서
+  `{hid,rid,eid}`를 앱 전역 pending route로 보관한다. manifest load와 host attach가 준비된 뒤
   `activate_runtime_notification` AppRuntime entry point로 정확히 한 번 넘겨 canonical binding 또는
   `Recovered Sessions`를 연다. ABI 번호와 C 서명은 구현 slice N3에서 정하고 Zig/Swift cross-check로 고정한다.
   permission 요청/거부 시 시스템 설정 열기는 계속 GUI 설정 경계가 소유하며, daemon adapter는 현재 권한을 존중하고

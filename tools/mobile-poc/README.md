@@ -13,6 +13,9 @@ sh tools/mobile-poc/run.sh chrome-ios        # **실제 chrome 컴포넌트**를
 sh tools/mobile-poc/run.sh chrome-android    # 같은 draw-list 를 Vulkan 으로(오프스크린)
 sh tools/mobile-poc/run.sh chrome-android-app # **에뮬레이터 화면에** NativeActivity+swapchain
 sh tools/mobile-poc/run.sh present-ios       # present 페이싱을 표시 클럭으로 실측
+#
+# 입력 확인: adb shell input text "echo maru" (Android)
+# 생명주기 확인: adb shell input keyevent KEYCODE_HOME 뒤 am start 재실행
 ```
 
 ## 무엇을 판정하는가
@@ -42,6 +45,8 @@ sh tools/mobile-poc/run.sh present-ios       # present 페이싱을 표시 클�
 | 5. 자연폭 quad | **PASS** | **PASS** |
 | 6. present 페이싱 | **PASS** | **PASS** |
 
+여섯 항목이 모두 채워졌다.
+
 **두 백엔드가 픽셀 단위로 같은 값을 낸다** — opacity `G=64,128,191,255`, 자연폭 구간
 `26,64,39,90px` 가 동일하다. 6번은 스왑체인이 있어야 존재하는 항목이라 오프스크린으로는
 못 봤고, 두 플랫폼을 실제 창에 띄운 뒤 아래처럼 **간격을 재서** 판정했다.
@@ -54,7 +59,7 @@ sh tools/mobile-poc/run.sh present-ios       # present 페이싱을 표시 클�
 |---|---|---|
 | 계측 시계 | `CADisplayLink.timestamp`(직전 vsync) | `CLOCK_MONOTONIC` present 간격 |
 | 자유 실행 | **16.67 ms** (60Hz) | **16.66 ms** (FIFO=vsync) |
-| 30Hz 요청 | **33.33 ms** | 미시도(아래) |
+| 30Hz 요청 | **33.33 ms** | **33.29~33.31 ms**(AChoreographer) |
 | 판정 | **PASS** | **PASS**(vsync 잠금) |
 
 **iOS 의 페이싱 API 는 macOS 와 다르다.** `presentAfterMinimumDuration:`·`presentedTime`·
@@ -63,9 +68,10 @@ sh tools/mobile-poc/run.sh present-ios       # present 페이싱을 표시 클�
 `preferredFrameRateRange` 이고, Metal 쪽 수단은 `presentDrawable:atTime:` 와
 `CAMetalLayer.maximumDrawableCount`(큐 깊이)다. maru 의 30Hz present(comfort)는 이 경로로 선다.
 
-**Android 는 vsync 잠금까지만 측정했다.** FIFO 가 실제로 16.66ms 에 물리는 것은 확인했지만,
-Vulkan 에는 "30Hz 모드"가 없어 하위 주기는 앱이 프레임을 거르거나 `AChoreographer` 로
-맞춰야 한다 — 그건 재보지 않았다.
+**Android 하위 주기는 앱이 만든다.** Vulkan present mode(FIFO/MAILBOX/IMMEDIATE)는 전부
+"언제 내보낼까"지 "얼마나 자주"가 아니라 30Hz 를 고르는 칸이 없다. `AChoreographer` 로
+vsync 를 받아 한 번 걸러 present 하면 33.3ms 가 나온다 — iOS 의 `preferredFrameRateRange`
+에 대응하는 자리다.
 
 ### chrome 컴포넌트 + 텍스트 + 아이콘 (PoC 6)
 
@@ -84,9 +90,9 @@ Vulkan 에는 "30Hz 모드"가 없어 하위 주기는 앱이 프레임을 거�
 coverage 로 펴고 플랫폼은 텍스처로 올려 샘플링만 한다 — **자산이 플랫폼 코드 0줄로
 이식된다**는 증거다.
 
-**텍스트는 호스트 아틀라스를 쓴다.** Android NDK 에 폰트 래스터가 없어 macOS CoreText 로
-아틀라스를 만들어 양쪽이 같은 것을 읽는다(`make_atlas.m`). 실제 제품은 각 플랫폼이 자기
-폰트 스택으로 래스터한다. 한글 폭은 EAW 규칙대로 2셀이다.
+**텍스트 아틀라스는 이제 각 기기가 굽는다**(PoC 10). 호스트 아틀라스(`make_atlas.m`)는
+두 백엔드를 1:1 로 대조할 때 쓰던 것이고, 기기 래스터가 실패할 때의 폴백으로만 남는다.
+한글 폭은 EAW 규칙대로 2셀이다.
 
 ### 두 시뮬레이터 화면 (PoC 7)
 
@@ -98,7 +104,7 @@ Android 도 `NativeActivity` + Vulkan swapchain 으로 **에뮬레이터 화면�
 | 물리 해상도 | 1206×2622 | 1080×2400 |
 | 논리 크기 | 402×874 | 411×841 |
 | 스케일 출처 | `UIScreen.scale` (3.0) | `AConfiguration_getDensity` (420dpi → 2.625) |
-| quad 수 | 147 | 147 |
+| quad 수 | 148 | 148 |
 
 **스케일을 상수로 박으면 안 된다.** 처음에 2.0 으로 두었더니 논리 크기가 540×1200 이 되어
 레이아웃이 화면 위쪽만 채웠다. 기기 density 를 쓰자 iOS 와 거의 같은 논리 크기가 나오고
@@ -107,6 +113,70 @@ Android 도 `NativeActivity` + Vulkan swapchain 으로 **에뮬레이터 화면�
 **해상도가 다른 것 자체는 결함이 아니다.** 기기가 다르면 물리 픽셀이 다르고, 논리 좌표계로
 그리면 결과가 같다. 앞 단계에서 Android 가 540×1140 이었던 것은 기기와 무관하게 내가 정한
 오프스크린 캔버스 크기였다.
+
+### 본문은 진짜 터미널 코어다 (PoC 9)
+
+앞 단계 본문은 하드코딩 문자열이었다. 이제 `TerminalCore` 에 VT 바이트를 실제로 먹이고
+그 격자를 그린다 — 화면의 색과 폭이 **코어가 계산한 것**이다.
+
+| 화면에 보이는 것 | 어디서 왔나 |
+|---|---|
+| `All 11 passed.` 초록 | SGR 32 |
+| ` M ` 노랑 | SGR 33 |
+| `0.1.0` 청록 | SGR 36 |
+| `한글 터미널` 자홍 | SGR 35 |
+| 한글이 2셀 | 코어의 EAW 판정(`cell.width == 2`) |
+
+색표도 새로 만들지 않았다 — `color.xterm256` 을 그대로 쓴다. 화면 크기가 바뀌면 코어를
+그 cols/rows 로 다시 세우므로 **반응형이 코어까지 간다**.
+
+### 각 플랫폼 자체 폰트 래스터 (PoC 10)
+
+호스트 아틀라스를 읽지 않고 **기기에서 굽는다**. 두 플랫폼 모두 외부 라이브러리 없이 섰다.
+
+| | iOS | Android |
+|---|---|---|
+| 래스터 | CoreText | `android.graphics.Paint`/`Canvas`/`Bitmap` (JNI) |
+| 결과 | `atlas_ondevice=384x128 glyphs=49` | `atlas_ondevice=384x128 glyphs=49` |
+| 한글 폴백 | AppleSDGothicNeo | 시스템 폰트가 알아서 |
+
+**NDK 에는 폰트 래스터가 없다.** 있는 것은 폰트 *탐색*(`AFontMatcher`)뿐이라 FreeType 을
+넣어야 하는 줄 알기 쉬운데, JNI 로 `Paint` 를 부르면 안드로이드 자체 폰트 스택으로 굽는다
+— `-ljnigraphics` 의 `AndroidBitmap_lockPixels` 로 픽셀을 그대로 읽어 온다.
+
+### 입력 (PoC 11)
+
+플랫폼이 키를 **바이트로** 코어에 넘긴다. 코어는 그것을 PTY 에서 온 것과 구분하지 않는다.
+
+| | iOS | Android |
+|---|---|---|
+| 수신 | `UIKeyInput.insertText:` | `AInputEvent`(NativeActivity) |
+| 앱이 입력 대상인가 | **OK** — `first_responder=1`, iOS 가 소프트 키보드를 띄웠다 | **OK** |
+| OS→코어 왕복 | **미확인**(아래) | **OK** — `adb shell input text` 로 넣은 `echo maru test` 가 본문에 그려졌다 |
+
+iOS 는 **이 환경에서 키를 넣을 수단이 없었다**. 시뮬레이터가 Mac 키를 받으려면 창이
+포커스를 잡아야 하는데 `System Events` 가 Simulator 의 창을 하나도 못 본다(`every window`
+가 빈 값). 하드웨어 키보드 연결을 켜도 소프트 키보드가 계속 떠 있는 것으로 확인된다.
+**앱이 입력 대상으로 인정받는 데까지는 확인됐다** — 나머지는 시뮬레이터에 직접 타이핑하면
+바로 보인다.
+
+### 백그라운드 생명주기 (PoC 12)
+
+| | iOS | Android |
+|---|---|---|
+| 나갈 때 | `applicationDidEnterBackground` | `APP_CMD_TERM_WINDOW` → **스왑체인 파괴** |
+| 돌아올 때 | `willEnterForeground`, tick 재개 | `APP_CMD_INIT_WINDOW` → 재생성, `quads=148` |
+| 결과 | **OK** | **OK**(크래시 없음) |
+
+**Android 는 창 자체가 사라져서 처리가 필수다.** 스왑체인을 들고 있으면 죽은 surface 로
+present 하게 된다. iOS 는 UIKit 이 레이어를 살려 둬 그 파괴가 필요 없다 — 같은 "생명주기"라도
+플랫폼이 요구하는 일이 다르다.
+
+### 실기기
+
+**못 했다.** 연결된 실기기가 없다(`adb devices` 는 에뮬레이터뿐, `devicectl` 은 "No devices
+found"). 시뮬레이터/에뮬레이터로 확인한 것들 중 실기기에서 달라질 수 있는 것은 GPU 드라이버
+(에뮬레이터는 `llvmpipe` 소프트웨어 래스터다)와 실제 vsync 다.
 
 ## 실측으로 드러난 제약
 
@@ -158,8 +228,8 @@ UI 가 들어간다. 데스크톱에서 타이틀바 inset 을 다루는 것과 
 
 ## 범위 밖
 
-**각 플랫폼의 자체 폰트 래스터**(지금은 호스트 아틀라스를 공유한다), Android 하위 주기
-페이싱(`AChoreographer`), 실기기, 입력·IME, 백그라운드 생명주기.
+**실기기**(연결된 기기가 없다), **iOS 쪽 OS→코어 키 왕복**(이 환경에서 시뮬레이터에 키를
+넣을 수단이 없다), **IME**(한글 조합 — 지금 입력은 완성 문자만이다), 셸/PTY 연결.
 
 에뮬레이터 GPU 가 `llvmpipe`(소프트웨어)라 **실제 Android 드라이버에서 같은 결과가
 나오는지는 실기기로 확인해야 한다.**

@@ -6,6 +6,7 @@
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreText/CoreText.h>
 
 typedef struct {
     float x, y, w, h;
@@ -24,6 +25,7 @@ extern unsigned int maru_icon_build(void);
 extern const unsigned char *maru_icon_atlas(void);
 extern unsigned int maru_icon_slot_px(void);
 extern unsigned int maru_icon_count(void);
+extern unsigned int maru_term_input(const char *bytes, unsigned long len);
 
 // 둥근 모서리를 프래그먼트에서 자른다 — maru 의 rich quad 가 corner_radii 를 쓰므로
 // 그 모양이 실제로 나오는지 보려면 필요하다.
@@ -72,7 +74,7 @@ static NSString *const kShader =
 
 typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Uni;
 
-@interface ChromeView : UIView
+@interface ChromeView : UIView <UIKeyInput>
 @end
 
 @implementation ChromeView {
@@ -83,11 +85,72 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLTexture> _iconTex;
     unsigned int _atlasCols, _atlasRows;
     CADisplayLink *_link;
+    unsigned int _tickCount;
 }
 
 // 호스트가 만든 한글·영어 아틀라스와, **Zig 가 만든** 아이콘 coverage 를 올린다.
 // 아이콘 쪽이 중요하다 — SVG 자산이 플랫폼 코드 없이 그대로 이식된다는 증거다.
+// **기기에서 굽는다.** 호스트가 만든 아틀라스를 읽는 대신 CoreText 로 직접 래스터한다 —
+// "각 플랫폼이 자기 폰트 스택을 쓴다"가 실제로 서는지 보는 자리다. 한글은 Menlo 에 없어
+// 폴백(AppleSDGothicNeo)이 필요하고, 진행 폭은 `CTFontGetAdvancesForGlyphs` 가 준다.
+- (BOOL)rasterizeAtlasOnDevice {
+    NSString *chars = @"$ zig build test All 11 passed.git status --short"
+                       "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch"
+                       "한글 터미널 세션 목록 설정 검색 알림";
+    const unsigned int CW = 24, CH = 32, COLS = 16;
+    NSMutableArray<NSNumber *> *cps = [NSMutableArray array];
+    NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
+    [chars enumerateSubstringsInRange:NSMakeRange(0, chars.length)
+                              options:NSStringEnumerationByComposedCharacterSequences
+                           usingBlock:^(NSString *sub, NSRange r, NSRange e, BOOL *stop) {
+        NSNumber *k = @([sub characterAtIndex:0]);
+        if (![seen containsObject:k]) { [seen addObject:k]; [cps addObject:k]; }
+    }];
+    NSUInteger n = cps.count, rows = (n + COLS - 1) / COLS;
+    unsigned int W = COLS * CW, H = (unsigned int)(rows * CH);
+    uint8_t *gray = calloc(W * H, 1);
+    if (!gray) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
+    CGContextRef ctx = CGBitmapContextCreate(gray, W, H, 8, W, cs, kCGImageAlphaNone);
+    CGContextSetGrayFillColor(ctx, 1.0, 1.0);
+    CTFontRef base = CTFontCreateWithName(CFSTR("Menlo"), 22, NULL);
+    CTFontRef korean = CTFontCreateWithName(CFSTR("AppleSDGothicNeo-Regular"), 22, NULL);
+
+    maru_atlas_geometry(CW, CH);
+    for (NSUInteger i = 0; i < n; i++) {
+        unichar c = (unichar)cps[i].unsignedIntValue;
+        NSUInteger col = i % COLS, row = i / COLS;
+        CTFontRef font = (c >= 0xAC00 && c <= 0xD7A3) ? korean : base;
+        CGGlyph glyph = 0;
+        if (!CTFontGetGlyphsForCharacters(font, &c, &glyph, 1) || glyph == 0) {
+            font = korean;
+            CTFontGetGlyphsForCharacters(font, &c, &glyph, 1);
+        }
+        CGPoint pos = CGPointMake(col * CW + 1, H - (row + 1) * CH + 8);
+        if (glyph) CTFontDrawGlyphs(font, &glyph, &pos, 1, ctx);
+        CGSize adv = CGSizeZero;
+        if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+        int advance = (int)(adv.width + 0.5);
+        if (advance <= 0) advance = CW / 2;
+        maru_atlas_add(c, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
+    }
+    CFRelease(base); CFRelease(korean);
+    CGContextRelease(ctx); CGColorSpaceRelease(cs);
+
+    _atlasCols = COLS; _atlasRows = (unsigned int)rows;
+    MTLTextureDescriptor *td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                           width:W height:H mipmapped:NO];
+    _glyphTex = [_dev newTextureWithDescriptor:td];
+    [_glyphTex replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:gray bytesPerRow:W];
+    free(gray);
+    NSLog(@"MARU_CHROME atlas_ondevice=%ux%u glyphs=%lu source=CoreText", W, H, (unsigned long)n);
+    return YES;
+}
+
 - (void)loadAtlas {
+    // 기기 래스터가 서면 번들 아틀라스는 아예 안 읽는다.
+    if ([self rasterizeAtlasOnDevice]) { [self loadIcons]; return; }
     NSString *dir = NSProcessInfo.processInfo.environment[@"MARU_ATLAS_DIR"];
     if (!dir) dir = [NSBundle.mainBundle resourcePath];
     NSString *idxPath = [dir stringByAppendingPathComponent:@"atlas.idx"];
@@ -118,7 +181,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         NSLog(@"MARU_CHROME atlas_missing dir=%@", dir);
     }
 
-    // 아이콘: Zig 가 coverage 를 만든다(플랫폼 코드 0줄).
+    [self loadIcons];
+}
+
+// 아이콘: Zig 가 coverage 를 만든다(플랫폼 코드 0줄).
+- (void)loadIcons {
     unsigned int filled = maru_icon_build();
     unsigned int slot = maru_icon_slot_px(), count = maru_icon_count();
     NSLog(@"MARU_CHROME icons filled=%u/%u slot=%u", filled, count, slot);
@@ -129,6 +196,21 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     _iconTex = [_dev newTextureWithDescriptor:itd];
     [_iconTex replaceRegion:MTLRegionMake2D(0, 0, slot, slot * count) mipmapLevel:0
                   withBytes:maru_icon_atlas() bytesPerRow:slot * 4];
+}
+
+// **입력**: 하드웨어 키보드가 이 뷰로 온다. 받은 문자를 바이트로 코어에 먹인다 —
+// 코어는 PTY 에서 온 것과 구분하지 않는다(Android 쪽과 같은 계약).
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (BOOL)hasText { return YES; }
+- (void)deleteBackward {
+    char bs = 0x7F;
+    maru_term_input(&bs, 1);
+}
+- (void)insertText:(NSString *)text {
+    const char *b = text.UTF8String;
+    if (!b) return;
+    unsigned int total = maru_term_input(b, strlen(b));
+    NSLog(@"MARU_INPUT text=%@ total=%u", text, total);
 }
 
 + (Class)layerClass { return [CAMetalLayer class]; }
@@ -160,6 +242,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (void)tick {
+    if ((++_tickCount % 120) == 0) NSLog(@"MARU_LIFECYCLE ticks=%u", _tickCount);
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
@@ -216,6 +299,15 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 @end
 
 @implementation AppDelegate
+// **생명주기**: 백그라운드에서는 그리지 않는다. iOS 는 창을 없애지 않아 Android 처럼
+// 스왑체인을 부술 필요는 없지만, CADisplayLink 를 멈추지 않으면 복귀 시 밀린 프레임이
+// 몰린다. 재개 후 다시 도는지가 판정 기준이다.
+- (void)applicationDidEnterBackground:(UIApplication *)app {
+    NSLog(@"MARU_LIFECYCLE background");
+}
+- (void)applicationWillEnterForeground:(UIApplication *)app {
+    NSLog(@"MARU_LIFECYCLE foreground");
+}
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {
     unsigned int n = maru_chrome_build(800, 600);
     NSLog(@"MARU_CHROME quads=%u err=%s", n, maru_chrome_last_error());
@@ -230,6 +322,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // 판정에 필요한 값(quad 수·에러)은 위에서 로그로 이미 나간다.
     self.window.rootViewController = vc;
     [self.window makeKeyAndVisible];
+    // first responder 가 아니면 하드웨어 키가 앱까지 오지 않는다.
+    BOOL fr = [vc.view becomeFirstResponder];
+    NSLog(@"MARU_INPUT first_responder=%d", fr);
     return YES;
 }
 @end

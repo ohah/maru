@@ -6,7 +6,7 @@
      창 자체가 세로가 되게 해서 푼다. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="dev.maru.chrome">
-    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
     <application android:label="MaruChrome" android:hasCode="false">
         <activity android:name="android.app.NativeActivity"

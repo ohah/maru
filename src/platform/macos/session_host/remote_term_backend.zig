@@ -728,6 +728,19 @@ pub const RemoteTermBackend = struct {
             .event_pending;
     }
 
+    /// window graph가 어떤 target도 변경하기 전에 모든 remote runtime의 event readiness를 읽는다.
+    /// 실제 authority/ticket/routing publication은 이 read-only 통과 뒤 AppSession의 commit suffix만 수행한다.
+    pub fn windowCloseReadiness(self: *const RemoteTermBackend, handle: RuntimeHandle) term_backend.CloseProgress {
+        if (self.close_operation_owner.active) return .event_pending;
+        const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
+        const authority = &entry.runtime.close_authority;
+        if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.pristine))
+            return pending_event_owner.closeReadiness(&entry.runtime.pending_event_owner);
+        if (!close_authority.valid(authority) or authority.handle != handle or authority.runtime_generation != entry.runtime_generation)
+            process_seal.fatalIntegrity(.proof_loss);
+        return if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.ready_remove)) .complete else .event_pending;
+    }
+
     /// 원격 Term을 **terminate 없이** 회수한다(§6 app-quit=detach, e3-6). `remove`와 대칭이되 host `runtime.terminate`를 안
     /// 보낸다 — 라우팅 link를 떼고 client-side rr만 free하므로 runtime이 host에 남아 재접속 대상이 된다(연결이 닫히면 host가
     /// controller를 detach로 처리해 유지). 앱 quit 시 host-backed Term에 쓴다(윈도우/탭 명시 close는 `remove`=terminate).
@@ -1108,9 +1121,11 @@ test "C3-3b5 remote backend는 active pin 제거를 보류하고 다음 tick에 
     try testing.expect(try close_authority.publishReadyRemove(&runtime_ptr.close_authority, true));
     try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = runtime_ptr, .host_id = 9, .runtime_generation = 1 });
     backend_value.close_operation_owner.active = true;
+    try testing.expectEqual(term_backend.CloseProgress.event_pending, backend_value.windowCloseReadiness(7));
     try testing.expectEqual(term_backend.RemoveProgress.event_pending, RemoteTermBackend.remove(&backend_value, 7));
     try testing.expect(backend_value.runtimes.contains(7));
     backend_value.close_operation_owner = .{};
+    try testing.expectEqual(term_backend.CloseProgress.complete, backend_value.windowCloseReadiness(7));
     B5TestState.skip_destroy = true;
     defer B5TestState.skip_destroy = false;
     const stats = backend_value.maintenanceCloseTick();

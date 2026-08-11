@@ -10,7 +10,7 @@
 //! encodeKey/encodePaste는 바이트를 **반환**(호출자가 PTY로 씀), reportFocus/reportMouse는 `self.appendResponse`로
 //! 응답 버퍼에 **적재**(app이 매 write 후 PTY로 드레인). 응답 버퍼(`self.response`) primitive는 parser/osc/kitty도
 //! 공유하므로 core 잔류. 베이스: xterm(focus event 1004, mouse 1000/1002/1003/1006/1015/1016/x10)·bracketed
-//! paste(DECSET 2004) — 단일 출처는 각 함수 주석·docs/terminal-core-decomposition.md §9.
+//! paste(DECSET 2004) — 단일 출처는 각 함수 주석·docs/plans/terminal-core-decomposition.md §9.
 
 const std = @import("std");
 const core = @import("core.zig");

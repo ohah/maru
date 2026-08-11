@@ -211,7 +211,7 @@ Maru도 같은 방향을 참고한다.
 
 후속(2단계)은 cursor·grid까지 포함한 완전한 `Screen` 구조체로 흡수하고, 그 자리에 page-aligned storage를 얹는 것이다.
 
-**(실현·정정)** Screen 흡수는 방향 B로, page-aligned storage는 §11의 A1/A2/P4(페이지화 스크롤백 + 가변폭 trailing-trim + mmap backing)로 실현했다 — 수백만 줄 스크롤백 목표를 달성·초과한다. 단 활성 grid까지 한 리스트로 합치는 **통일 PageList(Ghostty식)는 채택하지 않았다**: A2가 스크롤백을 가변폭 packed·불변으로 만들어 메모리를 ~94×↓시켰는데, 활성 grid는 고정 `rows×cols`·제자리 mutate라 그 가변폭 구조와 양립 불가다(트레이드오프 — maru는 메모리를 택함). 따라서 maru의 종착 모델은 **"가변폭 스크롤백 page + 고정폭 활성 grid의 분리"**다. grapheme 저장을 page-local로 귀속하는 회수도 이 통일을 vehicle로 삼았다가 함께 보류됐다(전역 dedup store가 standing 답). 상세·정정 근거는 [terminal-core-decomposition.md §11](terminal-core-decomposition.md)(§11.6 종료·§11.8 §595·§11.10).
+**(실현·정정)** Screen 흡수는 방향 B로, page-aligned storage는 §11의 A1/A2/P4(페이지화 스크롤백 + 가변폭 trailing-trim + mmap backing)로 실현했다 — 수백만 줄 스크롤백 목표를 달성·초과한다. 단 활성 grid까지 한 리스트로 합치는 **통일 PageList(Ghostty식)는 채택하지 않았다**: A2가 스크롤백을 가변폭 packed·불변으로 만들어 메모리를 ~94×↓시켰는데, 활성 grid는 고정 `rows×cols`·제자리 mutate라 그 가변폭 구조와 양립 불가다(트레이드오프 — maru는 메모리를 택함). 따라서 maru의 종착 모델은 **"가변폭 스크롤백 page + 고정폭 활성 grid의 분리"**다. grapheme 저장을 page-local로 귀속하는 회수도 이 통일을 vehicle로 삼았다가 함께 보류됐다(전역 dedup store가 standing 답). 상세·정정 근거는 [page-aligned storage §11](plans/page-aligned-storage.md)(§11.6 종료·§11.8 §595·§11.10).
 
 ## 개발환경
 

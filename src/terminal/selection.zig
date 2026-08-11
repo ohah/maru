@@ -14,7 +14,7 @@
 //!
 //! 베이스: 더블클릭 단어·블록 선택은 iTerm2/Terminal.app 관례, URL 휴리스틱은 Maru 독립 설계(http(s) 스킴 +
 //! 괄호 균형 다듬기), 대소문자 무시 검색은 Unicode simple case folding(width.zig와 같은 정책의 오프셋 블록만).
-//! 단일 출처: docs/terminal-core-decomposition.md §7.
+//! 단일 출처: docs/plans/terminal-core-decomposition.md §7.
 
 const std = @import("std");
 const core = @import("core.zig");

@@ -8,6 +8,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+// Zig 0.16은 Linux `stat` ABI를 공개하지 않는다. Linux는 `statx`로 같은 필드를 얻고 macOS는
+// 기존 libc stat을 사용해 owner 검증의 의미를 한 projection으로 유지한다.
+const StatInfo = struct {
+    dev: posix.dev_t,
+    ino: posix.ino_t,
+    mode: c.mode_t,
+    uid: c.uid_t,
+    size: u64,
+};
 const staged_image = @import("staged_image.zig");
 const host_identity = @import("host_identity.zig");
 const short_endpoint = @import("short_endpoint.zig");
@@ -413,8 +422,8 @@ fn loadExact(
         return error.OpenFailed;
     }
     defer _ = c.close(fd);
-    var stat: posix.Stat = undefined;
-    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
+    var stat: StatInfo = undefined;
+    if (statFd(fd, &stat) != .SUCCESS or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
         (stat.mode & 0o777) != 0o600 or stat.size <= 0 or stat.size > max_manifest_bytes)
         return error.InvalidManifest;
 
@@ -606,8 +615,8 @@ fn fileIdentity(path: [:0]const u8) Error!Published.FileIdentity {
 }
 
 fn fileIdentityFd(fd: c.fd_t) Error!Published.FileIdentity {
-    var stat: posix.Stat = undefined;
-    if (c.fstat(fd, &stat) != 0 or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
+    var stat: StatInfo = undefined;
+    if (statFd(fd, &stat) != .SUCCESS or !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or
         (stat.mode & 0o777) != 0o600)
         return error.InvalidManifest;
     return .{ .dev = stat.dev, .ino = stat.ino };
@@ -686,10 +695,10 @@ fn ensureOwnerDir(path: [:0]const u8) Error!void {
 }
 
 fn validateOwnerDir(path: [:0]const u8) Error!void {
-    var stat: posix.Stat = undefined;
-    const rc = c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW);
-    if (rc != 0) {
-        if (posix.errno(rc) == .NOENT) return error.ManifestNotFound;
+    var stat: StatInfo = undefined;
+    const stat_errno = statAtNoFollow(posix.AT.FDCWD, path, &stat);
+    if (stat_errno != .SUCCESS) {
+        if (stat_errno == .NOENT) return error.ManifestNotFound;
         return error.InvalidDirectory;
     }
     if (!posix.S.ISDIR(stat.mode) or stat.uid != c.getuid() or stat.mode & 0o077 != 0)
@@ -701,6 +710,43 @@ fn openOwnerDir(path: [:0]const u8) Error!c.fd_t {
     const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (fd < 0) return error.InvalidDirectory;
     return fd;
+}
+
+fn statFd(fd: c.fd_t, out: *StatInfo) posix.E {
+    if (builtin.os.tag == .linux) {
+        var stat: std.os.linux.Statx = undefined;
+        const rc = c.statx(fd, "", posix.AT.EMPTY_PATH | posix.AT.SYMLINK_NOFOLLOW, .BASIC_STATS, &stat);
+        const err = posix.errno(rc);
+        if (err != .SUCCESS) return err;
+        out.* = statInfoFromLinux(stat);
+        return .SUCCESS;
+    }
+    var stat: posix.Stat = undefined;
+    const err = posix.errno(c.fstat(fd, &stat));
+    if (err != .SUCCESS) return err;
+    out.* = .{ .dev = stat.dev, .ino = stat.ino, .mode = stat.mode, .uid = stat.uid, .size = @intCast(stat.size) };
+    return .SUCCESS;
+}
+
+fn statAtNoFollow(dir_fd: c.fd_t, path: [:0]const u8, out: *StatInfo) posix.E {
+    if (builtin.os.tag == .linux) {
+        var stat: std.os.linux.Statx = undefined;
+        const rc = c.statx(dir_fd, path.ptr, posix.AT.SYMLINK_NOFOLLOW, .BASIC_STATS, &stat);
+        const err = posix.errno(rc);
+        if (err != .SUCCESS) return err;
+        out.* = statInfoFromLinux(stat);
+        return .SUCCESS;
+    }
+    var stat: posix.Stat = undefined;
+    const err = posix.errno(c.fstatat(dir_fd, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW));
+    if (err != .SUCCESS) return err;
+    out.* = .{ .dev = stat.dev, .ino = stat.ino, .mode = stat.mode, .uid = stat.uid, .size = @intCast(stat.size) };
+    return .SUCCESS;
+}
+
+fn statInfoFromLinux(stat: std.os.linux.Statx) StatInfo {
+    const dev = (@as(u64, stat.dev_major) << 32) | stat.dev_minor;
+    return .{ .dev = @intCast(dev), .ino = @intCast(stat.ino), .mode = @intCast(stat.mode), .uid = stat.uid, .size = stat.size };
 }
 
 fn validateDescriptor(descriptor: Descriptor, session_dir: []const u8) Error!void {

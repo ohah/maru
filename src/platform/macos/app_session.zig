@@ -3472,6 +3472,10 @@ pub const AppSession = struct {
     /// 다음 `provideFileTreeRootPick`가 **자동 따라가기**임을 알리는 one-shot. 그 호출이 소비한다.
     /// 자동 경로는 실패해도 알림을 띄우지 않는다 — 사용자가 시킨 적 없는 동작의 실패를 알릴 이유가 없다.
     file_tree_root_auto_follow: bool = false,
+    /// 자동 root 전환이 **커밋된 직후 한 번** reveal을 다시 시도하게 하는 one-shot. 전환은 비동기라 요청
+    /// 시점엔 새 root가 없어 그때의 reveal이 거절됐다 — 이게 없으면 깊은 하위 디렉터리에서 `cd` 했을 때
+    /// 트리가 저장소 루트에 접힌 채 멈춘다. one-shot이라 심볼릭 링크로 계속 거절돼도 루프가 되지 않는다.
+    file_tree_auto_follow_reveal_pending: bool = false,
     file_tree_root_picker_inflight: FileTreeRootOperation = .none,
     file_tree_root_validation: ?PendingFileTreeRootValidation = null,
     file_tree_root_request_id: u64 = 0,

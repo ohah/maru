@@ -79,6 +79,36 @@ export fn maru_term_input(ptr: [*]const u8, len: usize) u32 {
     return @intCast(input_len);
 }
 
+// ── 포인터 조회 ───────────────────────────────────────────────────────────────
+// 논리 좌표를 본문의 셀 좌표로 바꾼다. **배치를 아는 쪽이 답한다** — 플랫폼은 점만 넘긴다.
+// 본문 rect·셀 크기는 마지막 build 가 정한 값을 그대로 쓴다(별도 상수를 두면 어긋난다).
+var body_rect: struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 } = .{};
+var body_cell_w: i32 = 1;
+var body_line_h: i32 = 1;
+
+/// 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
+export fn maru_hit_cell(x: f32, y: f32) u32 {
+    if (body_rect.w <= 0 or body_rect.h <= 0) return 0xFFFFFFFF;
+    if (x < body_rect.x or y < body_rect.y or
+        x >= body_rect.x + body_rect.w or y >= body_rect.y + body_rect.h) return 0xFFFFFFFF;
+    const col = @divTrunc(@as(i32, @intFromFloat(x - body_rect.x)), @max(1, body_cell_w));
+    const row = @divTrunc(@as(i32, @intFromFloat(y - body_rect.y)), @max(1, body_line_h));
+    return (@as(u32, @intCast(@max(0, col))) << 16) | @as(u32, @intCast(@max(0, row)));
+}
+
+/// 진단: row 행의 첫 non-space 코드포인트(없으면 0). "코어엔 들어왔는데 화면엔 없다"를
+/// 추측으로 가르지 않기 위한 조회다.
+export fn maru_row_first_cp(row: u32) u32 {
+    const core = &(term_core orelse return 0);
+    if (row >= term_rows) return 0;
+    var col: u16 = 0;
+    while (col < term_cols) : (col += 1) {
+        const cell = core.screen.cells[core.index(@intCast(row), col)];
+        if (cell.codepoint != ' ' and cell.codepoint != 0) return cell.codepoint;
+    }
+    return 0;
+}
+
 /// 셀 색을 RGB 로 푼다. indexed 는 maru 자체 팔레트(`color.xterm256`)를 쓴다 —
 /// 모바일용으로 색표를 새로 만들지 않는다.
 fn cellRgb(style: terminal.types.Style, tk: anytype) color.Rgb {
@@ -115,6 +145,11 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         // 재생성이면 그동안 받은 입력도 다시 먹인다 — 화면이 되돌아가지 않는다.
         if (input_len > 0) term_core.?.write(input_buf[0..input_len]) catch {};
     }
+    // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
+    body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };
+    body_cell_w = @max(1, @divTrunc(cw, 2));
+    body_line_h = line_h;
+
     const core = &(term_core orelse return);
 
     var row: u16 = 0;
@@ -199,6 +234,18 @@ export fn maru_atlas_geometry(cell_w: u32, cell_h: u32) void {
 }
 
 export fn maru_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
+    // 등록되면 "없음" 목록에서 뺀다. 안 그러면 아틀라스가 서기 **전에** 한 번 돈 build 가
+    // 남긴 목록 때문에 이미 있는 글자를 슬롯만 축내며 다시 굽는다(실측: grew=15 가 전부
+    // 'z' 같은 ASCII 중복이었다).
+    var i: usize = 0;
+    while (i < miss_n) : (i += 1) {
+        if (miss_cp[i] == cp) {
+            miss_cp[i] = miss_cp[miss_n - 1];
+            miss_n -= 1;
+            break;
+        }
+    }
+    for (0..atlas_n) |j| if (atlas_cp[j] == cp) return; // 이미 있으면 슬롯을 안 쓴다
     if (atlas_n == atlas_cp.len) return;
     atlas_cp[atlas_n] = cp;
     atlas_col[atlas_n] = col;
@@ -207,9 +254,47 @@ export fn maru_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
     atlas_n += 1;
 }
 
+// **아틀라스는 자란다.** 처음 보는 글자는 그릴 글리프가 없어 조용히 안 그려진다 — 고정
+// 집합으로 두면 입력·원격 출력의 새 글자가 전부 사라진다(실측으로 드러났다: 키를 넣었더니
+// 코어엔 들어왔는데 화면이 그대로였다).
+// 여기서는 **놓친 코드포인트를 모아** 플랫폼이 그것만 구워 넣게 한다. 슬롯 추가는
+// 아틀라스 부분 업데이트(여섯 기능 4번)를 그대로 쓴다.
+var miss_cp: [64]u32 = undefined;
+var miss_n: usize = 0;
+
+fn noteMiss(cp: u21) void {
+    for (0..miss_n) |i| if (miss_cp[i] == cp) return;
+    if (miss_n == miss_cp.len) return;
+    miss_cp[miss_n] = cp;
+    miss_n += 1;
+}
+
+/// 플랫폼이 부른다: 아직 아틀라스에 없는 코드포인트 개수.
+export fn maru_missing_count() u32 {
+    return @intCast(miss_n);
+}
+
+/// i번째 놓친 코드포인트. 플랫폼이 이걸 구워 `maru_atlas_add` 로 넣는다.
+export fn maru_missing_cp(i: u32) u32 {
+    if (i >= miss_n) return 0;
+    return miss_cp[i];
+}
+
+/// 다음 빈 슬롯의 (열, 행) — 상위 16비트=열, 하위 16비트=행.
+export fn maru_next_slot(cols: u32) u32 {
+    const idx: u32 = @intCast(atlas_n);
+    return ((idx % cols) << 16) | (idx / cols);
+}
+
+/// 플랫폼이 다 구운 뒤 부른다. 목록을 비워 다음 프레임에 다시 쌓이게 한다.
+export fn maru_missing_clear() void {
+    miss_n = 0;
+}
+
 fn atlasCell(cp: u21) ?struct { col: u32, row: u32, adv: u32 } {
     for (0..atlas_n) |i| if (atlas_cp[i] == cp)
         return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
+    noteMiss(cp);
     return null;
 }
 

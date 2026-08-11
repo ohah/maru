@@ -162,17 +162,17 @@ pub fn Model(comptime Rt: type) type {
             /// 토글 행이 생기므로 그때만 의미가 있다. **영속하지 않는다** — 에이전트 구성은 실행마다 달라져
             /// (어제 2개·오늘 0개) 접힘만 복원하면 빈 토글이나 어긋난 상태가 된다(파생 상태 비영속 규율).
             agents_collapsed: bool = false,
-            /// 중첩 그룹 깊이 레벨(SG5-3 — docs/sidebar-groups.md §9). group_start!=null일 때만 의미: 1=최상위 그룹,
+            /// 중첩 그룹 깊이 레벨(SG5-3 — docs/plans/sidebar-groups.md §9). group_start!=null일 때만 의미: 1=최상위 그룹,
             /// 2=그 안 중첩, … 소속과 마찬가지로 **정규화 depth는 위치에서 파생**(projectRows가 스택으로 재계산·클램프)하고
             /// 이 필드는 "이 마커가 얼마나 깊이 들어가려는가"의 힌트다. 최상위에서 create_group=1, 그룹 안에서=그 카드
             /// depth+1. workspace.v1 영속(group-depth, 기본 1=키 생략). 기본 1(비마커 탭에선 무의미).
             group_depth: u8 = 1,
-            /// 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음/기본 폴백 — docs/sidebar-groups.md §9 SG5-2). group_start!=null일
+            /// 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음/기본 폴백 — docs/plans/sidebar-groups.md §9 SG5-2). group_start!=null일
             /// 때만 의미 — 그룹 시작 마커 **하나에만** 저장하고, 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음,
             /// §2.1 위치 파생과 동형). 헤더 밴드 tint·소속 카드 좌측 accent 막대에 실린다. 개별 카드 background_color와는
             /// 다른 층(그룹 색=헤더+막대, 카드 배경=별도 tint)이라 서로 안 덮는다. workspace.v1 영속(group-color). 기본 0.
             group_color: u32 = 0,
-            /// 그룹-로컬 pin(GL — docs/sidebar-groups.md §13). 이 카드가 **자기 그룹 subtree 안에서** 위로(마커 직후)
+            /// 그룹-로컬 pin(GL — docs/sidebar-groups-pinning.md §13). 이 카드가 **자기 그룹 subtree 안에서** 위로(마커 직후)
             /// 고정됐는가(그룹 안 leaf 멤버 전용). 전역 핀(Tab.pinned = [고정][비고정] 리전, §12)과 **직교하는 별개 축**이다:
             /// pinned=전역 프리픽스, local_pinned=한 그룹 subtree [marker, end) 내부 순서. group_start!=null(마커)·top-level
             /// 카드에선 무의미(마커=그룹 고정 권위·top카드=개별 pin은 Tab.pinned가 든다). **전역 파티션 머신**
@@ -180,7 +180,7 @@ pub fn Model(comptime Rt: type) type {
             /// — 멤버 pinned를 재해석하면 전역 partition이 그룹을 shred(C3)하므로 새 필드로 격리한다(§13). stablePartitionSubtree만
             /// 이 값으로 subtree 내부를 물리 재배열한다. workspace.v1 영속(local-pinned, 기본 false=키 생략). destroyTab 무관(스칼라).
             local_pinned: bool = false,
-            /// §2.1 재설계 서브파티션 마커(docs/sidebar-groups.md §14). 한 핀 리전 **안**에서 이 카드가 **최상위(depth 0)로
+            /// §2.1 재설계 서브파티션 마커(docs/sidebar-groups-top-level.md §14). 한 핀 리전 **안**에서 이 카드가 **최상위(depth 0)로
             /// 복귀**하는 지점 = 앞 그룹 리전을 끝내는 리딩 break 신호(pin 플립과 동형의 두 번째 리셋 신호). 위치 파생 소속을
             /// **override**: 이 카드는 depth 0(top-level)이고 depth 스택을 비우며, 뒤 비마커 카드는 sticky-reset으로 빈 스택을 타
             /// 다음 마커 전까지 자동 top-level이다(§2.1 위치 파생을 서브파티션으로 일반화 — pin ⊃ subregion(top_level) ⊃ group ⊃

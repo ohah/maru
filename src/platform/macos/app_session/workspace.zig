@@ -509,7 +509,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
     // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
     // 앞으로 모은다(고정끼리·비고정끼리 상대 순서 유지). 불변식을 모든 진입 경로(토글·드래그·복원)에서 성립시킨다.
-    // 복원 순서(그룹 고정 C2, docs/sidebar-groups.md §12.5·§12.9 GP2): **(1)탭 설치→(2)normalize→(3)stablePartition**.
+    // 복원 순서(그룹 고정 C2, docs/sidebar-groups-pinning.md §12.5·§12.9 GP2): **(1)탭 설치→(2)normalize→(3)stablePartition**.
     // stablePartition 앞에 normalizePinnedFromGroups를 명시 호출해, 손상/레거시 혼합 파일(멤버 pinned=1·마커=0, 또는 마커
     // pinned=1·멤버=0 desync)을 **마커 기준 canonical**로 흡수한 뒤(멤버 pinned := enclosing 마커 pinned) stablePartition이
     // 고정 그룹을 **통째** 프리픽스로 모은다(정규화 누락 시 마커만 앞으로 가 그룹 shred가 실패 모드). 여긴 드래그 없는

@@ -220,6 +220,18 @@ const cases = [_]Case{
     // 깨졌다: 같은 이모지가 macOS 버전에 따라 다르게 그려져 최대 채널 차이 200이 났다(허용치 2). 그림은
     // Apple Color Emoji가 소유하고 우리가 계약하는 것은 **몇 칸을 차지하는가**뿐이라, 그 답이 드러나는
     // 막대 열만 잠근다. 폭이 한 칸이라도 틀리면 그 줄 막대가 8px 밀려 즉시 걸린다.
+    // §3.8 "초장문 단일 줄" — fixture 마지막 줄이 2340자다. **상한이 없으면 이 캡처가 아예 만들어지지
+    // 않는다**(그 줄 하나가 scratch를 삼켜 `build` 전체가 OutOfSpace로 죽고 스모크가 실패한다) —
+    // `MARU_REQUIRE_GOLDEN=1`이 캡처 부재를 실패로 만들므로 rect와 무관하게 그 회귀는 잡힌다.
+    //
+    // 이 case가 더하는 것은 **상한이 있을 때 어디까지 그리는가**다. 화면 폭에서 정확히 끊기는지,
+    // 그 너머로 새지 않는지를 고정한다.
+    .{
+        .name = "editor-long-line-clipped",
+        .capture = "editor-gutter.ppm",
+        .contract = "2340자 줄이 본문 폭에서 끊기고 그 너머로 새지 않는다(줄 전체를 만들지 않는다)",
+        .rect = .{ .x = 0, .y = 250, .w = 480, .h = 22 },
+    },
     .{
         .name = "editor-wide-glyph-bars",
         .capture = "editor-wide-glyph.ppm",

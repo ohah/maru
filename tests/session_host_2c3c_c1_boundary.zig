@@ -50,7 +50,14 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     const transport_facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
     // 2c3d C3-2 adds the bounded ended-purge facade without widening control.
-    try std.testing.expectEqual(@as(usize, 15), count(transport_facade, "    pub fn "));
+    try std.testing.expectEqual(@as(usize, 28), count(transport_facade, "    pub fn "));
+    inline for (.{
+        "pendingEventReleaseCallbackActive",       "preflightPendingEffect",                 "settlementCorrelationDigest",
+        "preflightPendingEventReleaseUnderEffect", "abortPendingEffectPreAdmissionNoFail",   "commitPendingEffectNoFail",
+        "preparePendingEventReleaseBegunNoFail",   "tombstonePendingEventOwnerNoFail",       "beginPendingEventReleaseResourcesNoFail",
+        "tombstonePendingEventCorrelationNoFail",  "markPendingEventMirrorTombstonedNoFail", "validatePendingEventReleaseFinal",
+        "finishPendingEventReleaseNoFail",
+    }) |name| try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn " ++ name ++ "("));
     try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn sendControl("));
     try std.testing.expectEqual(@as(usize, 1), count(transport_facade, "    pub fn sendControlNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "    pub fn sendControlNonBlocking("));

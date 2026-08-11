@@ -89,9 +89,8 @@ test "C3-3b2b1 trusted preparation seal boundary" {
     try std.testing.expectEqual(@as(usize, 1), countIdentifierOutsideTopLevelTests(runtime, "PreparationEventView"));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "cleanupTranscriptSeal"));
     try std.testing.expectEqual(
-        // b2b3's lifetime owner, preparation substrate, and shared observation-digest leaf
-        // consume the neutral seal types.
-        @as(usize, 5),
+        // b3 settlement contract도 pointer-free receipt digest를 위해 neutral seal type을 소비한다.
+        @as(usize, 6),
         try countProductSources(allocator, "@import(\"event_cleanup_seal.zig\")"),
     );
     try std.testing.expectEqual(
@@ -102,7 +101,8 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         ),
     );
     try std.testing.expectEqual(
-        @as(usize, 6),
+        // C3-3b3 receipt/permit owner 7개가 process domain을 자체 모듈 경계에서 검증한다.
+        @as(usize, 13),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
     inline for (.{
@@ -112,9 +112,11 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         // b2b3 adds the dormant RemoteRuntime orchestration signature.
         .{ "PreparationEventView", 10 },
         // b2b3 persists and revalidates the exact transcript input at the final owner.
-        .{ "cleanupTranscriptSeal", 7 },
+        // C3-3b3 event release completion의 준비와 contextual 재검증이 transcript seal을 각각 한 번 계산한다.
+        .{ "cleanupTranscriptSeal", 9 },
         // b2b3 seals the projected post-publication transfer before its no-fail owner write.
-        .{ "cleanupProgressSeal", 8 },
+        // C3-3b3 event release completion의 준비와 contextual 재검증이 progress seal도 각각 한 번 계산한다.
+        .{ "cleanupProgressSeal", 10 },
     }) |entry| try std.testing.expectEqual(
         @as(usize, entry[1]),
         try countProductIdentifiers(allocator, entry[0]),

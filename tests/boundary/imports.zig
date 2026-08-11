@@ -37,6 +37,8 @@ const ClientReflectionOwnerProof = struct {
     count: usize,
 };
 const client_reflection_owners = [_]ClientReflectionOwnerProof{
+    .{ .path = "src/platform/macos/session_host/pending_event_settlement.zig", .function = "hashPristineRecord", .expression = "@field(T{},field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/pending_event_settlement.zig", .function = "hashSemanticValue", .expression = "@field(value,field.name)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[1])", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[2])", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[3])", .count = 1 },
@@ -1833,6 +1835,49 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationResyncNonBlocking" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callGenerationRpc" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeStreamOperationPermitNoFail" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "settlement_contract" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_proof_loss_marker_fd" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_death_stage_raw" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pendingEventReleaseCallbackActive" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "writeEventReleaseDeathMarker" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PendingEventReleaseCallbackBinding" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "pending_event_release_callback_binding" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EventReleasePostSnapshot" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "pending_event_payload_callback_count" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "anyGenerationEventReleaseCallbackActive" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pendingEventCorrelationDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "reasonProjection" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlementDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "deriveCanonicalEffectPlan" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "setPlanTerminalFd" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "setPlanAllocatorCleanup" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "descriptorMatchesPlan" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "validateCanonicalEffectPrestate" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "validateCanonicalEffectPoststate" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executeCanonicalEffectPlanNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "effectProofLoss" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightPendingEffect" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "operationFromEffectPermit" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortPendingEffectPreAdmissionNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitPendingEffectNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightPendingEventReleaseUnderEffect" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PendingEventReleaseBegunLifecycle" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PendingEventReleaseBegun" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pristinePendingEventReleaseBegunDigest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pendingEventReleaseBegunSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "validPendingEventReleaseBegun" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "advancePendingEventReleaseBegunNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "validatePendingEventReleaseFinal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preparePendingEventReleaseBegunNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markPendingEventOwnerTombstonedNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginPendingEventReleaseResourcesNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markPendingEventCorrelationTombstonedNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markPendingEventMirrorTombstonedNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishPendingEventReleaseNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pinProjectionFromEventReleasePermit" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "hashInt" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registryEventReleaseFromComposite" },
             },
         },
     };
@@ -2309,9 +2354,8 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(source);
-    // The fifth import is `builtin`, shared by destructive B3-3/B3-4 test-only hooks so the
-    // production boundary never needs a second inline import.
-    try std.testing.expectEqual(@as(usize, 5), countOccurrences(source, "@import("));
+    // 기존 다섯 import에 settlement receipt 계약과 process seal leaf만 추가된다.
+    try std.testing.expectEqual(@as(usize, 7), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -2324,6 +2368,14 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(source, "@import(\"rpc_response_authority.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"pending_event_settlement_contract.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"process_seal_service.zig\")"),
     );
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",
@@ -2400,6 +2452,19 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
         "    pub fn fenceRevoke(",
         "    pub fn readInitialSnapshot(",
         "    pub fn poison(",
+        "    pub fn pendingEventReleaseCallbackActive(",
+        "    pub fn preflightPendingEffect(",
+        "    pub fn settlementCorrelationDigest(",
+        "    pub fn preflightPendingEventReleaseUnderEffect(",
+        "    pub fn abortPendingEffectPreAdmissionNoFail(",
+        "    pub fn commitPendingEffectNoFail(",
+        "    pub fn preparePendingEventReleaseBegunNoFail(",
+        "    pub fn tombstonePendingEventOwnerNoFail(",
+        "    pub fn beginPendingEventReleaseResourcesNoFail(",
+        "    pub fn tombstonePendingEventCorrelationNoFail(",
+        "    pub fn markPendingEventMirrorTombstonedNoFail(",
+        "    pub fn validatePendingEventReleaseFinal(",
+        "    pub fn finishPendingEventReleaseNoFail(",
     };
     try std.testing.expectEqual(@as(usize, methods.len), countOccurrences(product_source, "    pub fn "));
     for (methods) |signature|
@@ -2798,10 +2863,13 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
     );
     try std.testing.expectEqual(
-        // Two response strict wrappers, the private B3-0 request transaction fail-stop, the three
-        // reviewed B3-4/5 RPC publication/borrow terminal boundaries, and one correction guard.
-        @as(usize, 7),
+        // 기존 일곱 leaf와 C3-3b3 effect proof-loss leaf만 noreturn 권위를 가진다.
+        @as(usize, 8),
         countOccurrences(slot_product, ") noreturn {"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(slot_product, "fn effectProofLoss() noreturn {"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -4047,6 +4115,14 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             .pump_references = 0,
         },
         .{
+            .name = "consumeCanonicalPinWithReceiptUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
             .name = "commitExternalAdoptionTakeUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/client.zig"},
             .pump_references = 1,
@@ -4257,7 +4333,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     }
     // Allocator restoration is now a checked one-shot token consume, so it intentionally no
     // longer contributes an `*Unchecked` declaration to this global authority inventory.
-    try std.testing.expectEqual(@as(usize, 45), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 46), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -4386,9 +4462,20 @@ test "generation batch Client ownership mutations have one node-bound production
     // allocator scope를 공유하며, 그 밖의 파일에는 raw allocator authority가 없다.
     try std.testing.expectEqual(@as(usize, 5), begin_allocator_references);
     try std.testing.expectEqual(@as(usize, 6), restore_allocator_references);
-    // Confirmed generation poison is the fifth guarded cleanup callback owner.
-    try std.testing.expectEqual(@as(usize, 5), enter_callback_references);
-    try std.testing.expectEqual(@as(usize, 5), leave_callback_references);
+    // C3-3b3 effect settlement가 여섯 번째 guarded cleanup callback owner다.
+    try std.testing.expectEqual(@as(usize, 6), enter_callback_references);
+    try std.testing.expectEqual(@as(usize, 6), leave_callback_references);
+    const slot_source = try readZigFileZ(allocator, "src/platform/macos/session_host/client_slot.zig");
+    defer allocator.free(slot_source);
+    const effect_executor = betweenMarkers(
+        slot_source,
+        "fn executeCanonicalEffectPlanNoFail(",
+        "fn effectProofLoss() noreturn",
+    ) orelse return error.TestUnexpectedResult;
+    const effect_executor_z = try allocator.dupeZ(u8, effect_executor);
+    defer allocator.free(effect_executor_z);
+    try std.testing.expectEqual(@as(usize, 1), countIdentifierOutsideTopLevelTests(effect_executor_z, "enterGenerationAllocatorCallback"));
+    try std.testing.expectEqual(@as(usize, 1), countIdentifierOutsideTopLevelTests(effect_executor_z, "leaveGenerationAllocatorCallbackUnchecked"));
     // 모든 node-local mutation은 callback TLS를 한 공통 guard에서만 읽는다.
     try std.testing.expectEqual(@as(usize, 1), reject_callback_references);
     try std.testing.expectEqual(@as(usize, 1), require_buffered_references);
@@ -6904,14 +6991,39 @@ test "session host has zero raw untyped Client invalidation callsites" {
             const confirmed = betweenMarkers(
                 source,
                 "pub fn poisonGenerationConnection(",
-                "fn mapGenerationRequestClientError(",
+                "fn reasonProjection(",
             ) orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(usize, 3), countFieldAssignments(source, "unusable"));
-            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(source, "first_poison_reason"));
+            try std.testing.expectEqual(@as(usize, 7), countFieldAssignments(source, "unusable"));
+            try std.testing.expectEqual(@as(usize, 3), countFieldAssignments(source, "first_poison_reason"));
             const confirmed_z = try allocator.dupeZ(u8, confirmed);
             defer allocator.free(confirmed_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "unusable"));
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "first_poison_reason"));
+            const effect_executor = betweenMarkers(
+                source,
+                "fn executeCanonicalEffectPlanNoFail(",
+                "fn effectProofLoss() noreturn",
+            ) orelse return error.TestUnexpectedResult;
+            const effect_executor_z = try allocator.dupeZ(u8, effect_executor);
+            defer allocator.free(effect_executor_z);
+            try std.testing.expectEqual(@as(usize, 2), countFieldAssignments(effect_executor_z, "unusable"));
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(effect_executor_z, "first_poison_reason"));
+        } else if (std.mem.eql(u8, entry.path, "generation_attachment.zig")) {
+            const testing_facade = betweenMarkers(
+                source,
+                "pub const testing_api = if (builtin.is_test) struct {",
+                "} else struct {};",
+            ) orelse return error.TestUnexpectedResult;
+            const testing_facade_z = try allocator.dupeZ(u8, testing_facade);
+            defer allocator.free(testing_facade_z);
+            const product_prefix_z = try allocator.dupeZ(
+                u8,
+                source[0 .. @intFromPtr(testing_facade.ptr) - @intFromPtr(source.ptr)],
+            );
+            defer allocator.free(product_prefix_z);
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(testing_facade_z, "unusable"));
+            try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(source, "unusable"));
+            try std.testing.expectEqual(@as(usize, 0), countFieldAssignments(product_prefix_z, "unusable"));
         } else {
             try std.testing.expectEqual(
                 @as(usize, 0),

@@ -5496,10 +5496,10 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
 }
 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
-    try testing.expectEqual(@as(usize, 2512), @sizeOf(pending_event_owner_mod.PendingEventOwner));
+    try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
-        .Debug => 8528,
-        .ReleaseFast => 8464,
+        .Debug => 8736,
+        .ReleaseFast => 8672,
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.mode) {
@@ -5513,7 +5513,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
         @sizeOf(RemoteRuntime) - @sizeOf(pending_event_owner_mod.PendingEventOwner),
     );
     try testing.expectEqual(
-        @as(usize, 10_289_152),
+        @as(usize, 11_141_120),
         @sizeOf(pending_event_owner_mod.PendingEventOwner) * 4096,
     );
     const generation_transport_mod = @import("generation_transport.zig");

@@ -10,10 +10,93 @@ const builtin = @import("builtin");
 const contract = @import("generation_attachment_contract.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
 const rpc_response_authority = @import("rpc_response_authority.zig");
+const settlement = @import("pending_event_settlement_contract.zig");
+const process_seal = @import("process_seal_service.zig");
 
 extern "c" fn alarm(seconds: c_uint) c_uint;
 
 pub const max_entries: usize = 4096;
+
+fn ensureSettlementSealReadyForTest() !process_seal.ReadyIdentity {
+    if (!builtin.is_test) unreachable;
+    return process_seal.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => blk: {
+            const pid = process_seal.currentProcessId();
+            const prepared = try process_seal.prepare(pid, 0x3B33_0001);
+            process_seal.commitReady(prepared);
+            break :blk try process_seal.currentReadyIdentity();
+        },
+        else => err,
+    };
+}
+
+fn fixturePendingRegistryReceipt(
+    ready: process_seal.ReadyIdentity,
+    event: EventGenerationReceipt,
+    pending_owner_addr: u64,
+    pending_owner_incarnation: u64,
+    source_lease_incarnation: u64,
+    attempt: u64,
+) !settlement.PendingRegistryReleaseReceipt {
+    if (!builtin.is_test) unreachable;
+    var event_identity = std.mem.zeroes(@TypeOf((settlement.PendingRegistryReleaseReceipt{}).event_identity));
+    event_identity.registry_incarnation = event.registry_incarnation;
+    event_identity.binding_reservation_id = event.binding_reservation_id;
+    event_identity.event_node_incarnation = event.node_incarnation;
+    event_identity.stream_id = event.stream_id;
+    event_identity.event_generation = event.event_generation;
+    event_identity.event_owner_addr = event.owner_addr;
+    event_identity.pid = ready.pid;
+    event_identity.process_nonce = ready.process_nonce;
+    var receipt: settlement.PendingRegistryReleaseReceipt = .{
+        .event_identity = event_identity,
+        .pending_owner_addr = pending_owner_addr,
+        .pending_owner_incarnation = pending_owner_incarnation,
+        .source_lease_incarnation = source_lease_incarnation,
+        .attempt = attempt,
+        .state_raw = 1,
+    };
+    receipt.release_seal = try process_seal.pendingReleaseSeal(ready.pid, ready.process_nonce, .{
+        .event_identity = receipt.event_identity,
+        .pending_owner_addr = receipt.pending_owner_addr,
+        .pending_owner_incarnation = receipt.pending_owner_incarnation,
+        .source_lease_incarnation = receipt.source_lease_incarnation,
+        .attempt = receipt.attempt,
+        .state_raw = receipt.state_raw,
+        .reserved = receipt.reserved,
+    });
+    return receipt;
+}
+
+fn fixtureRegistrySettlementBinding(
+    ready: process_seal.ReadyIdentity,
+    pending_owner_addr: u64,
+) !settlement.RuntimeSettlementLeaseBinding {
+    if (!builtin.is_test) unreachable;
+    var binding: settlement.RuntimeSettlementLeaseBinding = .{
+        .lease_addr = 0x3B33_1000,
+        .lifetime_owner_addr = 0x3B33_2000,
+        .operation_identity = .{
+            .lifetime_owner_addr = 0x3B33_2000,
+            .runtime_addr = 0x3B33_3000,
+            .pending_owner_addr = pending_owner_addr,
+            .pid = ready.pid,
+            .reserved_pid = 0,
+            .process_nonce = ready.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .owner_incarnation = 3,
+            .operation_incarnation = 5,
+            .operation_kind_raw = 3,
+            .operation_seal = [_]u8{0x31} ** 32,
+        },
+        .ranges_digest = [_]u8{0x32} ** 32,
+        .pristine_digest = [_]u8{0x33} ** 32,
+        .preflight_proof_seal_digest = [_]u8{0x34} ** 32,
+        .lease_seal_digest = [_]u8{0x35} ** 32,
+    };
+    binding.binding_seal = try settlement.sealRuntimeSettlementBinding(binding);
+    return binding;
+}
 
 pub const testing = if (builtin.is_test) struct {
     pub fn rollbackEventPreparationPending(
@@ -59,6 +142,25 @@ pub const EventOrderingClass = enum(u8) {
     none,
     non_revoke_effect,
     controller_revoke,
+};
+
+/// `preparation_pending -> releasing -> idle` 행의 registry-local continuation이다.
+///
+/// payload/allocator/pin/quarantine 권위와 public `EventReleaseCompletion` 목적지는 의도적으로
+/// 포함하지 않는다. `ClientSlot`만 이 projection을 sealed composite
+/// `PreparedEventReleasePermit`에 합치며, 모든 외부 owner가 실제 settle된 뒤 source-zero
+/// completion을 게시한다.
+pub const PreparedRegistryEventRelease = struct {
+    registry_addr: usize = 0,
+    registry_incarnation: u64 = 0,
+    binding_reservation_id: u64 = 0,
+    entry_index: u16 = 0,
+    event_node_incarnation: u64 = 0,
+    stream_id: u64 = 0,
+    event_generation: u64 = 0,
+    event_owner_addr: usize = 0,
+    ordering_class_raw: u8 = 0,
+    expected_blocker_count: usize = 0,
 };
 
 const AdmissionContext = enum(u8) {
@@ -116,6 +218,12 @@ fn eventAuthorityLifecycleRawValid(value: *const EventAuthorityLifecycle) bool {
 fn eventOrderingClassRawValid(value: *const EventOrderingClass) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
     return raw <= @intFromEnum(EventOrderingClass.controller_revoke);
+}
+
+fn rangesOverlap(a_addr: usize, a_len: usize, b_addr: usize, b_len: usize) bool {
+    const a_end = std.math.add(usize, a_addr, a_len) catch return true;
+    const b_end = std.math.add(usize, b_addr, b_len) catch return true;
+    return a_addr < b_end and b_addr < a_end;
 }
 
 /// Binding identity fields known before this registry mints its monotonic reservation ID.
@@ -1383,6 +1491,182 @@ pub const AttachmentCleanupRegistry = struct {
             .completion_addr = completion_addr,
             .registered_operation_id = registered_operation_id,
         };
+    }
+
+    /// immutable preparation에서 나오는 유일한 제품 전이를 준비한다. ordinary live-release
+    /// continuation을 공유하거나 넓히지 않는다.
+    pub fn preflightPreparedEventRelease(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        receipt: EventGenerationReceipt,
+        pending: settlement.PendingRegistryReleaseReceipt,
+        binding: settlement.RuntimeSettlementLeaseBinding,
+        out: *PreparedRegistryEventRelease,
+    ) Error!void {
+        const out_addr = @intFromPtr(out);
+        if (out_addr == 0 or out_addr % @alignOf(PreparedRegistryEventRelease) != 0 or
+            rangesOverlap(out_addr, @sizeOf(PreparedRegistryEventRelease), @intFromPtr(self), @sizeOf(AttachmentCleanupRegistry)) or
+            !std.meta.eql(out.*, PreparedRegistryEventRelease{}))
+            return error.InvalidState;
+        const entry = try self.exactEntry(reservation, identity);
+        const authority = &entry.event_authority;
+        if (!eventReceiptMatches(self, entry, authority, identity, receipt) or
+            authority.lifecycle != .preparation_pending or authority.completion_addr != 0 or
+            authority.registered_operation_id != 0 or authority.ordering_class == .none or
+            self.connection_ordering_blocker_count == 0 or
+            !settlement.validRuntimeSettlementBinding(binding) or
+            !settlement.validPendingRegistryReleaseReceipt(pending) or
+            pending.event_identity.registry_incarnation != receipt.registry_incarnation or
+            pending.event_identity.binding_reservation_id != receipt.binding_reservation_id or
+            pending.event_identity.event_node_incarnation != receipt.node_incarnation or
+            pending.event_identity.stream_id != receipt.stream_id or
+            pending.event_identity.event_generation != receipt.event_generation or
+            pending.event_identity.event_owner_addr != receipt.owner_addr or
+            binding.operation_identity.pending_owner_addr != pending.pending_owner_addr or
+            binding.operation_identity.pid != pending.event_identity.pid or
+            binding.operation_identity.process_nonce != pending.event_identity.process_nonce)
+            return error.InvalidState;
+
+        const ready = process_seal.currentReadyIdentity() catch return error.InvalidState;
+        if (pending.event_identity.pid != ready.pid or
+            pending.event_identity.process_nonce != ready.process_nonce)
+            return error.InvalidState;
+        out.* = .{
+            .registry_addr = @intFromPtr(self),
+            .registry_incarnation = self.incarnation,
+            .binding_reservation_id = identity.binding_reservation_id,
+            .entry_index = reservation.entry_index,
+            .event_node_incarnation = identity.node_incarnation,
+            .stream_id = entry.stream_id,
+            .event_generation = receipt.event_generation,
+            .event_owner_addr = receipt.owner_addr,
+            .ordering_class_raw = @intFromEnum(authority.ordering_class),
+            .expected_blocker_count = self.connection_ordering_blocker_count,
+        };
+    }
+
+    pub fn beginPreparedEventReleaseNoFail(
+        self: *AttachmentCleanupRegistry,
+        permit: PreparedRegistryEventRelease,
+    ) void {
+        if (permit.registry_addr != @intFromPtr(self) or permit.registry_incarnation != self.incarnation or
+            permit.entry_index >= max_entries)
+            process_seal.fatalIntegrity(.proof_loss);
+
+        if (!self.valid()) process_seal.fatalIntegrity(.proof_loss);
+        const entry = &self.entries[permit.entry_index];
+        const authority = &entry.event_authority;
+        if (!entryLifecycleRawValid(&entry.lifecycle) or
+            !controllerAuthorityRawValid(&entry.controller_authority) or
+            !entry.rpc_response_authority.rawLifecycleValid() or
+            !eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            !eventOrderingClassRawValid(&authority.ordering_class))
+            process_seal.fatalIntegrity(.proof_loss);
+        const canonical = currentEntryBinding(entry, self.incarnation) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        if (entry.lifecycle != .bound or
+            entry.reservation_id != permit.binding_reservation_id or
+            entry.stream_id != permit.stream_id or authority.lifecycle != .preparation_pending or
+            canonical.binding_reservation_id != permit.binding_reservation_id or
+            canonical.node_incarnation != permit.event_node_incarnation or
+            authority.active_generation != permit.event_generation or
+            authority.active_owner_addr != permit.event_owner_addr or
+            @intFromEnum(authority.ordering_class) != permit.ordering_class_raw or
+            self.connection_ordering_blocker_count != permit.expected_blocker_count or
+            authority.completion_addr != 0 or authority.registered_operation_id != 0)
+            process_seal.fatalIntegrity(.proof_loss);
+
+        authority.lifecycle = .releasing;
+    }
+
+    /// effect callback 뒤 첫 payload-source 변경 직전에 수행하는 최종 read-only 검사다.
+    /// composite owner가 모든 non-registry 자원을 계속 책임지며, 이 exact lower continuation이
+    /// 여전히 시작 가능한지만 증명한다.
+    pub fn preparedEventReleaseCurrent(
+        self: *AttachmentCleanupRegistry,
+        permit: PreparedRegistryEventRelease,
+    ) bool {
+        if (permit.registry_addr != @intFromPtr(self) or permit.registry_incarnation != self.incarnation or
+            permit.entry_index >= max_entries or !self.valid()) return false;
+        const entry = &self.entries[permit.entry_index];
+        const authority = &entry.event_authority;
+        if (!entryLifecycleRawValid(&entry.lifecycle) or
+            !eventAuthorityLifecycleRawValid(&authority.lifecycle) or
+            !eventOrderingClassRawValid(&authority.ordering_class)) return false;
+        const canonical = currentEntryBinding(entry, self.incarnation) orelse return false;
+        return entry.lifecycle == .bound and
+            entry.reservation_id == permit.binding_reservation_id and
+            entry.stream_id == permit.stream_id and
+            authority.lifecycle == .preparation_pending and
+            canonical.binding_reservation_id == permit.binding_reservation_id and
+            canonical.node_incarnation == permit.event_node_incarnation and
+            authority.active_generation == permit.event_generation and
+            authority.active_owner_addr == permit.event_owner_addr and
+            @intFromEnum(authority.ordering_class) == permit.ordering_class_raw and
+            self.connection_ordering_blocker_count == permit.expected_blocker_count and
+            authority.completion_addr == 0 and authority.registered_operation_id == 0;
+    }
+
+    pub fn finishPreparedEventReleaseNoFail(
+        self: *AttachmentCleanupRegistry,
+        permit: PreparedRegistryEventRelease,
+    ) settlement.EventReleaseLeafReceipt {
+        if (permit.registry_addr != @intFromPtr(self) or permit.registry_incarnation != self.incarnation or
+            permit.entry_index >= max_entries)
+            process_seal.fatalIntegrity(.proof_loss);
+        if (!self.valid()) process_seal.fatalIntegrity(.proof_loss);
+        const entry = &self.entries[permit.entry_index];
+        const authority = &entry.event_authority;
+        if (entry.lifecycle != .bound or authority.lifecycle != .releasing or
+            entry.reservation_id != permit.binding_reservation_id or entry.stream_id != permit.stream_id or
+            authority.active_generation != permit.event_generation or authority.active_owner_addr != permit.event_owner_addr or
+            self.connection_ordering_blocker_count != permit.expected_blocker_count)
+            process_seal.fatalIntegrity(.proof_loss);
+        const blocker_before = self.connection_ordering_blocker_count;
+        self.finishEventOrderingNoFail(authority);
+        authority.active_generation = 0;
+        authority.active_owner_addr = 0;
+        authority.completion_addr = 0;
+        authority.registered_operation_id = 0;
+        authority.quarantine_slot_index = 0;
+        authority.quarantine_reservation_generation = 0;
+        authority.lifecycle = .idle;
+        const ready = process_seal.currentReadyIdentity() catch process_seal.fatalIntegrity(.proof_loss);
+        var receipt: settlement.EventReleaseLeafReceipt = .{
+            .pid = ready.pid,
+            .process_nonce = ready.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .role_raw = @intFromEnum(settlement.EventReleaseLeafRole.registry),
+            .identity_a = permit.registry_incarnation,
+            .identity_b = permit.binding_reservation_id,
+            .identity_c = permit.event_node_incarnation,
+            .identity_d = permit.event_generation,
+            .before_a = blocker_before,
+            .before_b = @intFromEnum(EventAuthorityLifecycle.releasing),
+            .after_a = self.connection_ordering_blocker_count,
+            .after_b = @intFromEnum(EventAuthorityLifecycle.idle),
+        };
+        receipt.seal = settlement.sealEventReleaseLeafReceipt(receipt) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        return receipt;
+    }
+
+    pub fn preparedEventReleaseSettled(
+        self: *AttachmentCleanupRegistry,
+        permit: PreparedRegistryEventRelease,
+    ) bool {
+        if (permit.registry_addr != @intFromPtr(self) or permit.registry_incarnation != self.incarnation or
+            permit.entry_index >= max_entries or !self.valid() or permit.expected_blocker_count == 0)
+            return false;
+        const entry = &self.entries[permit.entry_index];
+        const authority = &entry.event_authority;
+        return entry.lifecycle == .bound and entry.reservation_id == permit.binding_reservation_id and
+            entry.stream_id == permit.stream_id and authority.lifecycle == .idle and
+            authority.active_generation == 0 and authority.active_owner_addr == 0 and
+            authority.completion_addr == 0 and authority.registered_operation_id == 0 and
+            authority.quarantine_slot_index == 0 and authority.quarantine_reservation_generation == 0 and
+            self.connection_ordering_blocker_count == permit.expected_blocker_count - 1;
     }
 
     pub fn finishEventReleaseNoFail(
@@ -3525,6 +3809,163 @@ test "C3-3a1 sibling revoke authorities aggregate independently" {
     try registry.completeActiveDrop(first.reservation, first.identity, 0x3A15);
     try registry.beginBoundDrop(second.reservation, second.identity, 0x3A16);
     try registry.completeActiveDrop(second.reservation, second.identity, 0x3A16);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "C3-3b3 prepared registry release는 target만 settle하고 sibling을 exact 보존한다" {
+    const ready = try ensureSettlementSealReadyForTest();
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D_3B31);
+    const target = try registry.reserve(fixtureSeed(0x3B3100, 0x3B3101));
+    const sibling = try registry.reserve(fixtureSeed(0x3B3110, 0x3B3111));
+    try registry.bindStream(target.reservation, target.identity, 0x3B31);
+    try registry.bindStream(sibling.reservation, sibling.identity, 0x3B32);
+    const target_event = try registry.reserveEventGeneration(target.reservation, target.identity, 0x3B31, 0x3B3120);
+    const sibling_event = try registry.reserveEventGenerationWithOrdering(
+        sibling.reservation,
+        sibling.identity,
+        0x3B32,
+        0x3B3130,
+        .controller_revoke,
+    );
+    registry.commitEventGenerationPublicationNoFail(target.reservation, target.identity, target_event);
+    registry.commitEventGenerationPublicationNoFail(sibling.reservation, sibling.identity, sibling_event);
+    try registry.beginEventPreparationPending(target.reservation, target.identity, target_event);
+    try std.testing.expectEqual(
+        EventReleaseReadiness.busy,
+        try registry.eventReleaseReadiness(target.reservation, target.identity),
+    );
+
+    const sibling_before = (try registry.exactEntry(sibling.reservation, sibling.identity)).*;
+    var permit: PreparedRegistryEventRelease = .{};
+    const pending = try fixturePendingRegistryReceipt(ready, target_event, 0x3B3140, 7, 9, 11);
+    const binding = try fixtureRegistrySettlementBinding(ready, pending.pending_owner_addr);
+    try registry.preflightPreparedEventRelease(
+        target.reservation,
+        target.identity,
+        target_event,
+        pending,
+        binding,
+        &permit,
+    );
+    try std.testing.expectEqual(@intFromPtr(&registry), permit.registry_addr);
+    try std.testing.expectEqual(@as(usize, 2), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(std.meta.eql(sibling_before, (try registry.exactEntry(sibling.reservation, sibling.identity)).*));
+
+    registry.beginPreparedEventReleaseNoFail(permit);
+    _ = registry.finishPreparedEventReleaseNoFail(permit);
+    try std.testing.expectEqual(EventReleaseReadiness.terminal, try registry.eventReleaseReadiness(target.reservation, target.identity));
+    try std.testing.expect(try registry.eventGenerationCurrent(sibling.reservation, sibling.identity, sibling_event));
+    try std.testing.expect(std.meta.eql(sibling_before, (try registry.exactEntry(sibling.reservation, sibling.identity)).*));
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+    try std.testing.expect(try registry.validateConnectionOrderingBlockerCacheForTest());
+
+    try registry.settleEventGenerationForTest(sibling.reservation, sibling.identity, sibling_event);
+    try registry.beginBoundDrop(target.reservation, target.identity, 0x3B31);
+    try registry.completeActiveDrop(target.reservation, target.identity, 0x3B31);
+    try registry.beginBoundDrop(sibling.reservation, sibling.identity, 0x3B32);
+    try registry.completeActiveDrop(sibling.reservation, sibling.identity, 0x3B32);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "C3-3b3 prepared registry release preflight는 receipt drift를 거부한다" {
+    const ready = try ensureSettlementSealReadyForTest();
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D_3B32);
+    const bound = try registry.reserve(fixtureSeed(0x3B3200, 0x3B3201));
+    try registry.bindStream(bound.reservation, bound.identity, 0x3B33);
+    const event = try registry.reserveEventGeneration(bound.reservation, bound.identity, 0x3B33, 0x3B3210);
+    registry.commitEventGenerationPublicationNoFail(bound.reservation, bound.identity, event);
+    try registry.beginEventPreparationPending(bound.reservation, bound.identity, event);
+    const pending = try fixturePendingRegistryReceipt(ready, event, 0x3B3220, 13, 15, 17);
+    const binding = try fixtureRegistrySettlementBinding(ready, pending.pending_owner_addr);
+    var drift = pending;
+    drift.event_identity.stream_id += 1;
+    var permit: PreparedRegistryEventRelease = .{};
+    var lease_drift = binding;
+    lease_drift.ranges_digest[0] ^= 1;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.preflightPreparedEventRelease(
+            bound.reservation,
+            bound.identity,
+            event,
+            pending,
+            lease_drift,
+            &permit,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(permit, PreparedRegistryEventRelease{}));
+    const aliased_permit: *PreparedRegistryEventRelease = @ptrFromInt(@intFromPtr(&registry));
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.preflightPreparedEventRelease(
+            bound.reservation,
+            bound.identity,
+            event,
+            pending,
+            binding,
+            aliased_permit,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(permit, PreparedRegistryEventRelease{}));
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.preflightPreparedEventRelease(
+            bound.reservation,
+            bound.identity,
+            event,
+            drift,
+            binding,
+            &permit,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(permit, PreparedRegistryEventRelease{}));
+    try std.testing.expectEqual(@as(usize, 1), try registry.connectionOrderingBlockerCount());
+
+    try registry.preflightPreparedEventRelease(
+        bound.reservation,
+        bound.identity,
+        event,
+        pending,
+        binding,
+        &permit,
+    );
+    if (builtin.os.tag == .macos) {
+        const proof_loss_child = std.c.fork();
+        try std.testing.expect(proof_loss_child >= 0);
+        if (proof_loss_child == 0) {
+            _ = alarm(5);
+            const raw_lifecycle: *u8 = @ptrCast(&registry.entries[bound.reservation.entry_index].event_authority.lifecycle);
+            raw_lifecycle.* = 0xff;
+            registry.beginPreparedEventReleaseNoFail(permit);
+            std.c._exit(0);
+        }
+        var proof_loss_status: c_int = 0;
+        try std.testing.expectEqual(proof_loss_child, std.c.waitpid(proof_loss_child, &proof_loss_status, 0));
+        const proof_loss_raw: u32 = @bitCast(proof_loss_status);
+        try std.testing.expect(std.c.W.IFEXITED(proof_loss_raw));
+        try std.testing.expectEqual(@as(u8, 86), std.c.W.EXITSTATUS(proof_loss_raw));
+    }
+    registry.beginPreparedEventReleaseNoFail(permit);
+    _ = registry.finishPreparedEventReleaseNoFail(permit);
+    try std.testing.expectEqual(@as(usize, 0), try registry.connectionOrderingBlockerCount());
+    if (builtin.os.tag == .macos) {
+        const child = std.c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            _ = alarm(5);
+            registry.beginPreparedEventReleaseNoFail(permit);
+            std.c._exit(0);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        const raw_status: u32 = @bitCast(status);
+        try std.testing.expect(std.c.W.IFSIGNALED(raw_status) or std.c.W.EXITSTATUS(raw_status) != 0);
+        try std.testing.expect(!(std.c.W.IFSIGNALED(raw_status) and std.c.W.TERMSIG(raw_status) == std.c.SIG.ALRM));
+    }
+    try registry.beginBoundDrop(bound.reservation, bound.identity, 0x3B33);
+    try registry.completeActiveDrop(bound.reservation, bound.identity, 0x3B33);
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
 }
 

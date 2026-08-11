@@ -2500,16 +2500,58 @@ pub fn build(b: *std.Build) void {
             }
         };
         B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 lease owner", 6);
-        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 closed outcome", 6);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 닫힌 결과", 6);
         B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 authority receipt", 6);
-        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 retry callback", 6);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 coordinator", 2);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 재시도 callback", 6);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 payload 보호 범위", 1);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 POST transcript", 1);
+        const event_c3_3b3_attachment_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_attachment.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_attachment_module, "C3-3b3 preparation facade 결과", 1);
+        const event_c3_3b3_client_slot_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b3_step,
+            event_c3_3b3_client_slot_module,
+            "C3-3b3 pending payload callback 중 동일 대상",
+            1,
+        );
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_client_slot_module, "C3-3b3 begun authority는", 1);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_client_slot_module, "C3-3b3 canonical effect plan은", 1);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_client_slot_module, "C3-3b3 canonical effect executor는", 1);
+        B3SettlementTest.add(b, session_host_2c3d_c3_3b3_step, event_c3_3b3_module, "C3-3b3 coordinator는 시작 권위", 1);
 
-        const event_c3_3b3_subprocess_tests = addProjectTest(b, .{
+        const event_c3_3b3_death_child_tests = b.addTest(.{
+            .root_module = event_c3_3b3_module,
+            .filters = &.{"C3-3b3 proof-loss child"},
+            .test_runner = .{
+                .path = b.path("tools/session_host_c3b3_test_runner.zig"),
+                .mode = .simple,
+            },
+        });
+        const event_c3_3b3_subprocess_tests = b.addTest(.{
             .root_module = event_c3_3b3_module,
             .filters = &.{"C3-3b3 subprocess"},
+            .test_runner = .{
+                .path = b.path("tools/session_host_c3b3_test_runner.zig"),
+                .mode = .simple,
+            },
         });
         const run_event_c3_3b3_subprocess_tests = b.addRunArtifact(event_c3_3b3_subprocess_tests);
-        run_event_c3_3b3_subprocess_tests.addArg("--maru-expect-tests=3");
+        run_event_c3_3b3_subprocess_tests.addArtifactArg(event_c3_3b3_death_child_tests);
+        run_event_c3_3b3_subprocess_tests.addArg("--maru-expect-tests=5");
         run_event_c3_3b3_subprocess_tests.setCwd(b.path("."));
         session_host_2c3d_c3_3b3_step.dependOn(&run_event_c3_3b3_subprocess_tests.step);
 

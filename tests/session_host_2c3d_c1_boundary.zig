@@ -19,8 +19,15 @@ test "CR3a-2c3d C1 event facade remains closed and product-unwired" {
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
-    // Earlier contracts remain present after C3-2 adds the bounded ended-purge facade.
-    try std.testing.expectEqual(@as(usize, 15), count(facade, "    pub fn "));
+    // 기존 15개 facade와 C3-3b3의 Attachment-owned settlement 13개만 허용한다.
+    try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
+    inline for (.{
+        "pendingEventReleaseCallbackActive",       "preflightPendingEffect",                 "settlementCorrelationDigest",
+        "preflightPendingEventReleaseUnderEffect", "abortPendingEffectPreAdmissionNoFail",   "commitPendingEffectNoFail",
+        "preparePendingEventReleaseBegunNoFail",   "tombstonePendingEventOwnerNoFail",       "beginPendingEventReleaseResourcesNoFail",
+        "tombstonePendingEventCorrelationNoFail",  "markPendingEventMirrorTombstonedNoFail", "validatePendingEventReleaseFinal",
+        "finishPendingEventReleaseNoFail",
+    }) |name| try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn " ++ name ++ "("));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn takeEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn releaseEvent("));
     try std.testing.expectEqual(@as(usize, 1), count(facade, "    pub fn purgeEndedStream("));

@@ -5,6 +5,8 @@
 //! protocol limits as comptime scalars and remains the sole transaction orchestrator.
 
 const std = @import("std");
+const settlement = @import("pending_event_settlement_contract.zig");
+const process_seal = @import("process_seal_service.zig");
 
 pub fn Registry(
     comptime protocol_max_inventory_runtimes: usize,
@@ -205,14 +207,33 @@ pub fn Registry(
             current_thread_id: u64,
             reservation: Reservation,
             identity: Identity,
-        ) Error!void {
+        ) Error!settlement.EventReleaseLeafReceipt {
             try self.preLockDomain(current_pid, current_thread_id);
             self.lock();
             defer self.mutex.unlock();
             const entry = try self.exactBoundEntry(reservation, identity, .releasing);
+            const retained_before = self.retained_bytes;
+            const occupied_before = self.occupied_slots;
             entry.lifecycle = .released;
             self.releaseAccounting(entry.mirror.payload_len);
             entry.* = .{};
+            const ready = process_seal.currentReadyIdentity() catch return error.ProcessDomainMismatch;
+            var receipt: settlement.EventReleaseLeafReceipt = .{
+                .pid = ready.pid,
+                .process_nonce = ready.process_nonce,
+                .thread_id = current_thread_id,
+                .role_raw = @intFromEnum(settlement.EventReleaseLeafRole.quarantine),
+                .identity_a = reservation.slot_index,
+                .identity_b = reservation.reservation_generation,
+                .identity_c = reservation.node_incarnation,
+                .identity_d = reservation.owner_addr,
+                .before_a = occupied_before,
+                .before_b = retained_before,
+                .after_a = self.occupied_slots,
+                .after_b = self.retained_bytes,
+            };
+            receipt.seal = settlement.sealEventReleaseLeafReceipt(receipt) catch return error.ProcessDomainMismatch;
+            return receipt;
         }
 
         pub fn beginTransfer(
@@ -461,7 +482,7 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
 
     for (reservations, identities) |reservation, identity| {
         _ = try registry.beginRelease(41, 42, reservation, identity);
-        try registry.settleRelease(41, 42, reservation, identity);
+        _ = try registry.settleRelease(41, 42, reservation, identity);
     }
     try std.testing.expectEqual(
         TestRegistry.Snapshot{ .occupied_slots = 0, .transferred_slots = 0, .retained_bytes = 0 },

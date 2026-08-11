@@ -2,7 +2,7 @@
 
 E0.5A~E4 단계와 각 단계의 종료 gate다. 계약은 [에디터 Surface](../editor-surface.md)와 그 절별 소유 문서가 가진다.
 
-> **절 번호는 파일을 넘어 이어진다.** 본문이 `§3.5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1·§2·§4·§5·§10·§11 [editor-surface.md](../editor-surface.md) · §3~§3.4 [권장 구조](../editor-surface-structure.md) · §3.5 [도크 소스 컨트롤 뷰](../editor-surface-dock.md) · §6~§8 [diff·빌드·LSP](../editor-surface-tooling.md) · §9 [단계 계획](../editor-surface.md)
+> **절 번호는 파일을 넘어 이어진다.** 본문이 `§3.5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1·§2·§4·§5·§10·§11 [editor-surface.md](../editor-surface.md) · §3~§3.4 [권장 구조](../editor-surface-structure.md) · §3.5 [도크 소스 컨트롤 뷰](../editor-surface-dock.md) · §6~§8 [diff·빌드·LSP](../editor-surface-tooling.md) · §9 이 문서
 
 ## 9. 단계 계획과 종료 gate
 

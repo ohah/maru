@@ -2,7 +2,7 @@
 
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.
 
-> **절 번호는 파일을 넘어 이어진다.** 본문이 `§2.1.3`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§2·§2.3·§3~§5·§7~§8 [agent-session-list.md](../agent-session-list.md) · §2.1~§2.1.3 [카드 레이아웃](../agent-session-list-layout.md) · §2.2 [선택·확장·geometry](../agent-session-list-interaction.md) · §2.1.4·§6 [구현 계획](../agent-session-list.md)
+> **절 번호는 파일을 넘어 이어진다.** 본문이 `§2.1.3`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§2·§2.3·§3~§5·§7~§8 [agent-session-list.md](../agent-session-list.md) · §2.1~§2.1.3 [카드 레이아웃](../agent-session-list-layout.md) · §2.2 [선택·확장·geometry](../agent-session-list-interaction.md) · §2.1.4·§6 이 문서
 
 #### 2.1.4 B1-button 이관 순서
 

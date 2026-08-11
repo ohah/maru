@@ -2,7 +2,7 @@
 
 SG1~SG8의 단계 분해와 완료 이력이다. 계약은 [사이드바 그룹](../sidebar-groups.md)과 그 절별 소유 문서가 가지고, 이 문서는 그 계약을 어떤 순서로 구현했는지만 소유한다.
 
-> **절 번호는 파일을 넘어 이어진다.** 본문이 `§12.5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§8·§10·§11 [sidebar-groups.md](../sidebar-groups.md) · §9 [단계 분해](../sidebar-groups.md) · §12~§13 [그룹 고정과 로컬 pin](../sidebar-groups-pinning.md) · §14 [top_level 재설계](../sidebar-groups-top-level.md)
+> **절 번호는 파일을 넘어 이어진다.** 본문이 `§12.5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§8·§10·§11 [sidebar-groups.md](../sidebar-groups.md) · §9 이 문서 · §12~§13 [그룹 고정과 로컬 pin](../sidebar-groups-pinning.md) · §14 [top_level 재설계](../sidebar-groups-top-level.md)
 
 > **현황**: **SG1~SG8 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
 > 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +

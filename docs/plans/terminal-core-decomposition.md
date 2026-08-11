@@ -2,7 +2,7 @@
 
 core.zig 분해가 **어떤 순서로 무엇을 옮겼는가**의 기록이다. 왜 그렇게 갈랐는지(분리 메커니즘·책임 분류·검증 프로토콜)는 [TerminalCore 분해 설계](../terminal-core-decomposition.md)가 소유한다.
 
-> **절 번호는 파일을 넘어 이어진다.** 본문이 `§7`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§3·§5 [terminal-core-decomposition.md](../terminal-core-decomposition.md) · §0·§4·§6~§9 [분해 기록](terminal-core-decomposition.md) · §10 [Screen struct fold](screen-struct-fold.md) · §11 [page-aligned storage](page-aligned-storage.md)
+> **절 번호는 파일을 넘어 이어진다.** 본문이 `§7`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§3·§5 [terminal-core-decomposition.md](../terminal-core-decomposition.md) · §0·§4·§6~§9 이 문서 · §10 [Screen struct fold](screen-struct-fold.md) · §11 [page-aligned storage](page-aligned-storage.md)
 
 ## 0. 현재 위치 (무엇이 이미 됐나)
 

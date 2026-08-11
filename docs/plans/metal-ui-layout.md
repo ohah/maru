@@ -2,7 +2,7 @@
 
 ML 슬라이스의 구현 순서와 검증 게이트다. 계약은 [Metal UI 레이아웃](../metal-ui-layout.md)과 그 절별 소유 문서가 가진다.
 
-> **절 번호는 파일을 넘어 이어진다.** 본문이 `§5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§4·§7 [metal-ui-layout.md](../metal-ui-layout.md) · §2의 B1 [rich Button](../metal-ui-layout-button.md) · §5 [Metal paint와 입력 정합](../metal-ui-layout-paint.md) · §6 [Chrome Lab](../metal-ui-layout-lab.md) · §8 [구현·검증 순서](../metal-ui-layout.md)
+> **절 번호는 파일을 넘어 이어진다.** 본문이 `§5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§4·§7 [metal-ui-layout.md](../metal-ui-layout.md) · §2의 B1 [rich Button](../metal-ui-layout-button.md) · §5 [Metal paint와 입력 정합](../metal-ui-layout-paint.md) · §6 [Chrome Lab](../metal-ui-layout-lab.md) · §8 이 문서
 
 ## 8. 구현·검증 순서
 

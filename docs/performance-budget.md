@@ -128,7 +128,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 
 > **상태(2026-07-28)**: FP9 도크 드래그는 [file-panel.md](file-panel.md) §1에서 **폐기**됐다(FP16이 terminal 탭 드래그로 흡수). 그 기계는 이미 제거됐고, 마지막 잔재였던 floating title 빌더(`coretext_frame_builder.buildFloatingTabTitleDrawList`)도 호출자 없이 남아 있다 지웠다. 아래 표는 **FP9 당시 계약의 기록**이며 지금 자동 검증되는 gate가 아니다 — terminal 탭 드래그의 예산은 이 표가 아니라 그 경로의 문서를 따른다.
 
-이 절은 [파일 패널 FP9](file-panel.md#33-파일-탭-드래그도크-내부-분할)의 drag hot path 수치와 실패 조건의 단일 출처다. FP9 구현은 동일 상수와 64-group/256-entry fixture를 소비하는 1,000회 perf artifact로 이 gate를 자동 검증한다.
+이 절은 [파일 패널 FP9](file-panel-dock-ui.md#33-파일-탭-드래그도크-내부-분할)의 drag hot path 수치와 실패 조건의 단일 출처다. FP9 구현은 동일 상수와 64-group/256-entry fixture를 소비하는 1,000회 perf artifact로 이 gate를 자동 검증한다.
 
 | 경로 | hard gate | 실패 조건·구현 제약 |
 | --- | --- | --- |

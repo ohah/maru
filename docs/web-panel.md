@@ -285,7 +285,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 ## 10. 구현 ([control-plane.md] Phase 4~5와 연계)
 
 - **Phase 4(껍데기)**: 컨테이너 contentView + 입력 responder 재편(§4) + 모달 레이어 분리 두 리팩터(§2) + surface 생애주기 ABI(§6) + per-pane rect(§3) + 빈 WKWebView가 본문 rect 추종. 착수 전 M0 ID/scope foundation이 완료됐고 `WindowGraph`/`LiveSurfaceRegistry`가 surface 생애주기 단일 출처인지 확인한다. → [control-plane-implementation.md] §11 Phase 4가 이 규모(특히 모달 분리·입력 재편)를 포함하도록 정합.
-- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane.md] `browser.*`·§8.1 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane.md] Phase 7와 함께 — §11. WebDriver 어댑터는 첫 콘텐츠의 필수 선행이 아니며, 기본 E2E는 `evaluateJavaScript` 하니스로 먼저 닫는다.)
+- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane-security.md] §8.1 `browser.*` 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane-implementation.md] Phase 7와 함께 — §11. WebDriver 어댑터는 첫 콘텐츠의 필수 선행이 아니며, 기본 E2E는 `evaluateJavaScript` 하니스로 먼저 닫는다.)
 
 Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane-implementation.md] §11의 micro-slice를 따른다:
 - 4a: rect/surface lifecycle ABI를 순수 계산 테스트로 먼저 고정한다. **(구현 완료 — `src/session/web_panel_layout.zig`: `contentRect`·`pxTopLeftToPtBottomLeft`·`surfaceDiff`, 헤드리스 TDD·§14.)**

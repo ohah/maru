@@ -187,7 +187,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·
 | `F2` | file tree | 허용된 project row의 inline rename 시작. |
 | `⌘Backspace` | file tree | 허용된 project row를 확인 뒤 macOS 휴지통으로 이동. |
 
-`⌘Backspace`는 tree focus에서만 `delete_file_tree_entry`가 이기며, 그 밖의 terminal focus에서는 기존 빌트인 `Ctrl+U` 바이트를 유지한다. `close_term`은 명시적 사용자 binding 호환을 위해 남지만 기본 `⌘W`는 `close_focused` 하나만 소유한다. `focus_file_tree`는 하위버전 adapter가 아니라 one-way tree 진입용 action으로 남고 FP9부터 기본 chord는 `toggle_file_panel_focus`가 소유한다. **FP16 목표**: 파일이 워크스페이스 Term이 되면 도크에 트리밖에 없어 두 action의 대상이 같아지므로 `focus_file_tree`를 제거하고 `toggle_file_panel_focus` 하나만 남긴다(shim 없이 완전 제거 — [file-panel.md](file-panel.md) §3.4·§8). Esc 복원은 저장된 `{surface_id, generation}`을 재검증하고 stale이면 활성 terminal/browser pane으로 fallback한다. selection과 focus는 transient라 workspace restore 입력이 아니다. focus border의 시각 계약은 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)가 소유한다.
+`⌘Backspace`는 tree focus에서만 `delete_file_tree_entry`가 이기며, 그 밖의 terminal focus에서는 기존 빌트인 `Ctrl+U` 바이트를 유지한다. `close_term`은 명시적 사용자 binding 호환을 위해 남지만 기본 `⌘W`는 `close_focused` 하나만 소유한다. `focus_file_tree`는 하위버전 adapter가 아니라 one-way tree 진입용 action으로 남고 FP9부터 기본 chord는 `toggle_file_panel_focus`가 소유한다. **FP16 목표**: 파일이 워크스페이스 Term이 되면 도크에 트리밖에 없어 두 action의 대상이 같아지므로 `focus_file_tree`를 제거하고 `toggle_file_panel_focus` 하나만 남긴다(shim 없이 완전 제거 — [file-panel-dock-ui.md](file-panel-dock-ui.md) §3.4·[file-panel.md](file-panel.md) §8). Esc 복원은 저장된 `{surface_id, generation}`을 재검증하고 stale이면 활성 terminal/browser pane으로 fallback한다. selection과 focus는 transient라 workspace restore 입력이 아니다. focus border의 시각 계약은 [file-panel-dock-ui.md §3.4](file-panel-dock-ui.md#34-terminal파일-도크-입력-포커스-표시왕복)가 소유한다.
 
 ## 터미널 입력 매크로
 

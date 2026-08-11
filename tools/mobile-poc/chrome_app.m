@@ -26,6 +26,12 @@ extern const unsigned char *maru_icon_atlas(void);
 extern unsigned int maru_icon_slot_px(void);
 extern unsigned int maru_icon_count(void);
 extern unsigned int maru_term_input(const char *bytes, unsigned long len);
+extern unsigned int maru_hit_cell(float x, float y);
+extern unsigned int maru_missing_count(void);
+extern unsigned int maru_row_first_cp(unsigned int row);
+extern unsigned int maru_missing_cp(unsigned int i);
+extern unsigned int maru_next_slot(unsigned int cols);
+extern void maru_missing_clear(void);
 
 // 둥근 모서리를 프래그먼트에서 자른다 — maru 의 rich quad 가 corner_radii 를 쓰므로
 // 그 모양이 실제로 나오는지 보려면 필요하다.
@@ -84,6 +90,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLTexture> _glyphTex;
     id<MTLTexture> _iconTex;
     unsigned int _atlasCols, _atlasRows;
+    CTFontRef _atlasFont;
+    unsigned int _atlasH;
     CADisplayLink *_link;
     unsigned int _tickCount;
 }
@@ -153,10 +161,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (advance <= 0) advance = CW / 2;
         maru_atlas_add(c, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
     }
+    // 온디맨드 성장이 같은 폰트를 계속 쓰므로 여기서 소유권을 넘겨받는다 —
+    // 아래 release 뒤에 retain 하면 해제된 객체를 만진다(그렇게 짰다가 앱이 죽었다).
+    _atlasFont = (CTFontRef)CFRetain(base);
     CFRelease(base); CFRelease(korean);
     CGContextRelease(ctx); CGColorSpaceRelease(cs);
 
-    _atlasCols = COLS; _atlasRows = (unsigned int)rows;
+    _atlasCols = COLS; _atlasRows = (unsigned int)rows; _atlasH = H;
     MTLTextureDescriptor *td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                            width:W height:H mipmapped:NO];
@@ -224,6 +235,20 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 
 // **입력**: 하드웨어 키보드가 이 뷰로 온다. 받은 문자를 바이트로 코어에 먹인다 —
 // 코어는 PTY 에서 온 것과 구분하지 않는다(Android 쪽과 같은 계약).
+// **터치**: 탭한 지점을 셀 좌표로 바꿔 코어에 알린다. 데스크톱의 포인터 조회와 같은 계약이고,
+// 여기서 확인하려는 것은 "터치가 논리 좌표를 거쳐 셀까지 닿는가"다.
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    UITouch *touch = touches.anyObject;
+    CGPoint p = [touch locationInView:self];
+    UIEdgeInsets safe = self.safeAreaInsets;
+    // 플랫폼이 넘긴 것과 같은 논리 좌표계로 되돌린다 — 안 그러면 셀이 어긋난다.
+    float lx = (float)(p.x - safe.left);
+    float ly = (float)(p.y - safe.top);
+    unsigned int cell = maru_hit_cell(lx, ly);
+    NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
+          p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
+}
+
 - (BOOL)canBecomeFirstResponder { return YES; }
 // 소프트 키보드는 이 PoC 에서 화면 절반을 가린다. 빈 `inputView` 를 주면 키보드는 안 뜨고
 // **입력 대상 자격은 그대로** 남는다(하드웨어 키는 계속 `insertText:` 로 온다).
@@ -238,6 +263,50 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     if (!b) return;
     unsigned int total = maru_term_input(b, strlen(b));
     NSLog(@"MARU_INPUT text=%@ total=%u", text, total);
+}
+
+// **아틀라스를 키운다.** Zig 가 모은 미등록 코드포인트를 그 슬롯에만 구워 올린다 —
+// 텍스처 전체를 다시 만들지 않고 `replaceRegion` 으로 그 칸만 바꾼다(여섯 기능 4번과 같은 경로).
+- (void)growAtlas {
+    unsigned int n = maru_missing_count();
+    if (n == 0 || !_atlasFont || !_glyphTex) return;
+    const unsigned int CW = 24, CH = 32;
+    uint8_t *cell = calloc(CW * CH, 1);
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
+    unsigned int added = 0;
+    unsigned int firstMissing = maru_missing_cp(0);
+    for (unsigned int i = 0; i < n; i++) {
+        unsigned int cp = maru_missing_cp(i);
+        if (cp == 0 || cp > 0xFFFF) continue;
+        unsigned int slot = maru_next_slot(_atlasCols);
+        unsigned int col = slot >> 16, row = slot & 0xFFFF;
+        if (row >= _atlasRows) break;  // 아틀라스가 꽉 찼다 — 축출은 이 PoC 범위 밖이다
+        memset(cell, 0, CW * CH);
+        CGContextRef ctx = CGBitmapContextCreate(cell, CW, CH, 8, CW, cs, kCGImageAlphaNone);
+        CGContextSetGrayFillColor(ctx, 1.0, 1.0);
+        unichar c = (unichar)cp;
+        CGGlyph glyph = 0;
+        CTFontGetGlyphsForCharacters(_atlasFont, &c, &glyph, 1);
+        if (glyph) {
+            CGPoint pos = CGPointMake(1, 8);   // 셀 하나짜리 컨텍스트라 원점이 곧 셀 원점이다
+            CTFontDrawGlyphs(_atlasFont, &glyph, &pos, 1, ctx);
+        }
+        CGContextRelease(ctx);
+        CGSize adv = CGSizeZero;
+        if (glyph) CTFontGetAdvancesForGlyphs(_atlasFont, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+        unsigned int advance = (unsigned int)(adv.width + 0.5);
+        if (advance == 0) advance = CW / 2;
+        [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
+                       withBytes:cell bytesPerRow:CW];
+        maru_atlas_add(cp, col, row, advance);
+        added++;
+    }
+    CGColorSpaceRelease(cs);
+    free(cell);
+    maru_missing_clear();
+    if (added) NSLog(@"MARU_ATLAS grew=%u first_missing=U+%04X rows: 6=U+%04X 7=U+%04X 8=U+%04X",
+                     added, firstMissing,
+                     maru_row_first_cp(6), maru_row_first_cp(7), maru_row_first_cp(8));
 }
 
 + (Class)layerClass { return [CAMetalLayer class]; }
@@ -289,6 +358,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CGSize logical = CGSizeMake(self.bounds.size.width - safe.left - safe.right,
                                 self.bounds.size.height - safe.top - safe.bottom);
     unsigned int n = maru_chrome_build((unsigned int)logical.width, (unsigned int)logical.height);
+    // build 가 못 그린 글자를 모아 뒀다 — 그것만 구워 넣고 **다음 프레임에 보이게** 한다.
+    [self growAtlas];
     const CQuad *quads = maru_chrome_quads();
 
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];

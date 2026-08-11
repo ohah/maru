@@ -125,6 +125,7 @@ chrome-ios)
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
         "$POC/chrome_app.m" "$OUT/libchrome.a" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
+        -framework CoreText -framework CoreGraphics \
         -o "$APP/MaruChrome"
     codesign --force --sign - "$APP"
     DEV=$(xcrun simctl list devices available | grep -m1 'iPhone' | sed 's/.*(\([A-F0-9-]*\)).*/\1/')
@@ -194,13 +195,13 @@ chrome-android-app)
     zig build-lib -target aarch64-linux-android -OReleaseFast -static -fPIC \
         -femit-bin="$OUT/libchrome-android.a" \
         --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
-    "$TC/bin/clang" -target aarch64-linux-android28 -fPIC -c "$GLUE/android_native_app_glue.c" \
+    "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -c "$GLUE/android_native_app_glue.c" \
         -o "$OUT/glue.o" -I"$GLUE"
     # `-u ANativeActivity_onCreate` 가 없으면 glue 의 진입점이 --gc-sections 로 잘려
     # 앱이 "네이티브 진입점 없음"으로 죽는다.
-    "$TC/bin/clang" -target aarch64-linux-android28 -fPIC -shared -O2 \
+    "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -shared -O2 \
         "$POC/chrome_android_app.c" "$OUT/glue.o" "$OUT/libchrome-android.a" \
-        -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -lm \
+        -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -ljnigraphics -lm \
         -o "$OUT/libmaruchrome.so"
     for s in chrome.vert chrome.frag; do
         "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"

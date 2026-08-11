@@ -354,8 +354,13 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
                     //
                     // 잘린 조각이 이상해 보이는 것은 맞다. 그래도 **아무것도 안 보이는 것보다 낫다** —
                     // 사용자가 "여기 뭔가 있다"를 안다. 탭을 걸쳐도 잘라 내는 것과 같은 취급이다.
+                    // **여기서는 `col < stop`이 보장되지 않는다.** 루프 머리의 판정은 cluster마다
+                    // 한 번이고, 이 안쪽 cp 루프는 `col += shown.len`으로 열을 계속 밀기 때문이다 —
+                    // 한 cluster에 hazard cp와 정상 cp가 함께 있으면(ZWJ가 앞 글자에 흡수되는 경우)
+                    // 두 번째 cp에서 이미 창을 넘어설 수 있다. **`stop - col`을 그대로 빼면 usize가
+                    // 언더플로해 패닉한다** — 적대적 검증이 `a<ZWJ><ZWJ>b<ZWJ>c`로 재현했다.
+                    if (col >= range.stop()) break;
                     const shown_from = if (col < range.start) @min(shown.len, range.start - col) else 0;
-                    // 루프 머리가 `col >= range.stop()`에서 멈추므로 여기서는 `col < stop`이 보장된다.
                     const shown_to = @min(shown.len, range.stop() - col);
                     if (shown_to > shown_from) {
                         const part = shown[shown_from..shown_to];
@@ -366,6 +371,11 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
                     // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
                     col += shown.len;
                 } else {
+                    // 같은 이유로 오른쪽도 여기서 다시 본다 — 이 분기(한 cluster 안의 정상 cp)에는
+                    // 경계 판정이 아예 없어서, 창을 넘긴 글자가 그대로 나갔다.
+                    const cw = text_layout.clusterCols(std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD, null);
+                    if (col + cw > range.stop()) break;
+
                     // **열 누적은 조건 밖이다.** 밀린 앞부분에서 `col`이 안 늘면 `range.start`에
                     // 영영 닿지 못해 줄 전체가 사라진다.
                     if (col >= range.start) {
@@ -373,8 +383,7 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
                         @memcpy(out[used..][0..cp_len], bytes[cp_i .. cp_i + cp_len]);
                         used += cp_len;
                     }
-                    const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
-                    col += text_layout.clusterCols(cp, null);
+                    col += cw;
                 }
                 cp_i += cp_len;
             }
@@ -548,13 +557,22 @@ test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {
         "👨‍👩‍👧x가나", // ZWJ 가족 — cluster로 세지 않으면 여기서 틀린다
         "\u{1F1F0}\u{1F1F7}가", // 지역표시자 국기
         "e\u{0301}\u{0301}가나", // 결합 문자
+        // **한 cluster 안에 hazard cp와 정상 cp가 함께 있는 경우.** ZWJ가 앞 글자에 흡수되므로
+        // (UAX#29 GB9) cp 루프가 여러 번 돌고, 그 안에서 `col`이 창을 넘어설 수 있다 —
+        // 적대적 검증이 여기서 **정수 언더플로 패닉**을 재현했다(`stop - col`).
+        "a\u{200D}b",
+        "a\u{200D}\u{200D}b\u{200D}c",
+        "가\u{200D}\u{200D}\u{200D}나다",
+        "a\u{0301}\u{200B}b",
+        "\u{200D}" ** 20,
+        "\t가\u{200D}나\t다",
         "",
         "가",
         "\t",
     };
     for (inputs) |line| {
         for (0..25) |start| {
-            for ([_]u16{ 1, 2, 3, 8, 20, 52 }) |count| {
+            for ([_]u16{ 1, 2, 3, 5, 8, 20, 52 }) |count| {
                 const r = expandTabs(line, 4, &out, .{ .start = @intCast(start), .count = count });
                 try testing.expect(testCols(r.text) <= count);
                 try testing.expect(std.unicode.utf8ValidateSlice(r.text));

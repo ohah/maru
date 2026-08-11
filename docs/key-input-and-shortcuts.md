@@ -28,7 +28,7 @@ TerminalInput
 - app shortcut이 아닌 key event만 terminal input encoding을 거쳐 PTY로 간다.
 - `TerminalCore`는 글로벌 핫키 존재를 몰라야 한다.
 
-### 입력 대상 라우팅 통합 (후속 — 계획)
+### 입력 대상 라우팅 통합 — 이 계약 밖(별도 슬라이스)
 
 평문/IME 확정 텍스트·조합(preedit)을 **어느 입력이 받나**는 `AppSession.inputFocus()`(단일 출처 enum: `terminal`·`confirm`·`notice`·`settings`·`rename`·`sidebar_search`·`find`·`palette`·`addr_edit`)가 판정하고, 그 판정을 **exhaustive switch 여러 곳**(`imeSetPreedit`·`imeComposingActive`·`commitComposition`·`overlayCaretRect`·`routeCommittedText`)이 소비한다. 컴파일러가 케이스 누락을 잡아 **안전**하지만, 새 입력 대상 하나를 추가하면 **각 switch에 케이스**를 넣어야 하고(주소창 7e-2 추가 시 실제로 5곳 — 그 중 `routeCommittedText`를 놓쳐 "조합 아닌 평문이 터미널로 새는" IME 버그가 났었다), 같은 디스패치("활성 입력의 메서드 호출")가 여러 곳에 복제되는 냄새가 있다.
 

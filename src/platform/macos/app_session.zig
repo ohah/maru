@@ -31450,7 +31450,7 @@ test "file tree root validation completion projects live dock open close state a
     try std.testing.expect(!saw_closed_safety_root);
 }
 
-test "file tree retained first scan is published but stale namespace row activation is rejected" {
+test "file tree는 retained 첫 scan을 게시하고 stale namespace 행 activation을 거부한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -31489,21 +31489,21 @@ test "file tree retained first scan is published but stale namespace row activat
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
 
-    attempts = 0;
-    while (session.file_tree_backend.resultCountForTest() == 0 and attempts < 2_000) : (attempts += 1) {
-        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
-    try std.testing.expect(session.file_tree_backend.resultCountForTest() > 0);
-    try file_panel_ops.updateFileTree(session);
-
     var row_index: ?usize = null;
-    for (session.file_tree_rows.items, 0..) |row, index| switch (row) {
-        .file => |file| if (std.mem.eql(u8, file.label, "same.md")) {
-            row_index = index;
-        },
-        else => {},
-    };
-    try std.testing.expect(row_index != null); // exact first scan came from the retained old descriptor.
+    attempts = 0;
+    while (row_index == null and attempts < 2_000) : (attempts += 1) {
+        try file_panel_ops.updateFileTree(session);
+        for (session.file_tree_rows.items, 0..) |row, index| switch (row) {
+            .file => |file| if (std.mem.eql(u8, file.label, "same.md")) {
+                row_index = index;
+            },
+            else => {},
+        };
+        if (row_index == null) std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    // 완료 queue의 첫 항목이 validated scan이라는 가정 없이, retained descriptor 결과가 실제 행으로
+    // 게시될 때까지 frame 소비를 진행한다. 느린 CI에서 무관한 초기 scan이 먼저 끝나도 같은 계약이다.
+    try std.testing.expect(row_index != null);
     file_panel_ops.activateFileTreeRow(session, row_index.?);
     try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
     try std.testing.expect(session.peekFileTreeExternalOpen() == null);

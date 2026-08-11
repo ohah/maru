@@ -113,8 +113,27 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     CGContextRef ctx = CGBitmapContextCreate(gray, W, H, 8, W, cs, kCGImageAlphaNone);
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
-    CTFontRef base = CTFontCreateWithName(CFSTR("Menlo"), 22, NULL);
-    CTFontRef korean = CTFontCreateWithName(CFSTR("AppleSDGothicNeo-Regular"), 22, NULL);
+
+    // **번들한 폰트를 쓴다.** maru 는 이미 `assets/fonts/` 에 OFL 폰트를 동봉하고 있고,
+    // 그중 Jetendard 는 영문과 한글을 한 파일에 담는다 — 폴백이 아예 필요 없다.
+    // 시스템 폰트(Menlo·AppleSDGothicNeo)를 쓰면 플랫폼마다 글자 모양이 갈리는데,
+    // 그 차이는 라이선스 때문에 옮길 수도 없는 종류다.
+    CTFontRef base = NULL;
+    NSString *fontPath = [NSBundle.mainBundle pathForResource:@"Jetendard-Regular" ofType:@"ttf"];
+    if (fontPath) {
+        CFArrayRef descs = CTFontManagerCreateFontDescriptorsFromURL(
+            (__bridge CFURLRef)[NSURL fileURLWithPath:fontPath]);
+        if (descs && CFArrayGetCount(descs) > 0) {
+            base = CTFontCreateWithFontDescriptor(
+                (CTFontDescriptorRef)CFArrayGetValueAtIndex(descs, 0), 22, NULL);
+        }
+        if (descs) CFRelease(descs);
+    }
+    if (!base) {  // 번들 폰트가 없으면 예전 경로로 — 조용히 다른 글꼴이 되지 않게 로그를 남긴다
+        NSLog(@"MARU_CHROME bundled_font_missing fallback=Menlo");
+        base = CTFontCreateWithName(CFSTR("Menlo"), 22, NULL);
+    }
+    CTFontRef korean = CFRetain(base);
 
     maru_atlas_geometry(CW, CH);
     for (NSUInteger i = 0; i < n; i++) {
@@ -143,8 +162,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
                                                            width:W height:H mipmapped:NO];
     _glyphTex = [_dev newTextureWithDescriptor:td];
     [_glyphTex replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:gray bytesPerRow:W];
+    // 래스터 결과를 그대로 남긴다 — 두 플랫폼의 픽셀 차이를 재려면 원본이 필요하다.
+    NSString *dump = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]
+                      stringByAppendingPathComponent:@"atlas_ondevice.gray"];
+    [[NSData dataWithBytes:gray length:W * H] writeToFile:dump atomically:YES];
     free(gray);
-    NSLog(@"MARU_CHROME atlas_ondevice=%ux%u glyphs=%lu source=CoreText", W, H, (unsigned long)n);
+    NSLog(@"MARU_CHROME atlas_ondevice=%ux%u glyphs=%lu source=CoreText font=%@",
+          W, H, (unsigned long)n, fontPath ? @"Jetendard" : @"Menlo");
     return YES;
 }
 
@@ -201,6 +225,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // **입력**: 하드웨어 키보드가 이 뷰로 온다. 받은 문자를 바이트로 코어에 먹인다 —
 // 코어는 PTY 에서 온 것과 구분하지 않는다(Android 쪽과 같은 계약).
 - (BOOL)canBecomeFirstResponder { return YES; }
+// 소프트 키보드는 이 PoC 에서 화면 절반을 가린다. 빈 `inputView` 를 주면 키보드는 안 뜨고
+// **입력 대상 자격은 그대로** 남는다(하드웨어 키는 계속 `insertText:` 로 온다).
+- (UIView *)inputView { return [[UIView alloc] initWithFrame:CGRectZero]; }
 - (BOOL)hasText { return YES; }
 - (void)deleteBackward {
     char bs = 0x7F;

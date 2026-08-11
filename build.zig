@@ -705,6 +705,10 @@ pub fn build(b: *std.Build) void {
         macos_app_host_abi_tests.root_module.linkFramework("CoreGraphics", .{});
     }
     const run_macos_app_host_abi_tests = b.addRunArtifact(macos_app_host_abi_tests);
+    run_macos_app_host_abi_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
+        "skip-in-aggregate-v1",
+    );
 
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
@@ -3910,6 +3914,10 @@ pub fn build(b: *std.Build) void {
     }
     run_session_host_tests.setEnvironmentVariable(
         "MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS",
+        "skip-in-aggregate-v1",
+    );
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
         "skip-in-aggregate-v1",
     );
     run_session_host_tests.setEnvironmentVariable(

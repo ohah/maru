@@ -1701,6 +1701,9 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
 
 test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending target까지 routing을 일괄 게시한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (std.c.getenv("MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST")) |raw| {
+        if (std.mem.eql(u8, std.mem.span(raw), "skip-in-aggregate-v1")) return error.SkipZigTest;
+    }
     try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;

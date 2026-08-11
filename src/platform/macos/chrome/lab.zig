@@ -372,7 +372,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     );
     const content_scratch = buffers.text_bytes[0 .. buffers.text_bytes.len - gutter_reserve];
 
-    const cw = try editor_view.content.build(.{
+    const cw = editor_view.content.build(.{
         .layout = layout,
         .rows = content_rows[0..visible],
         .wrap = scenario.id == .editor_wrap,

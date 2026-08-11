@@ -89,7 +89,7 @@ pub fn build(
     text_scratch: []u8,
     runs: []draw.Run,
     visual_out: []visual_map.VisualRow,
-) !Written {
+) Written {
     // **랩이 켜지면 가로 위치는 0이다**(§4). 줄이 폭 안에 들어와 스크롤할 것이 없기 때문이고,
     // 그 방침대로면 범위 clamp가 위치를 0으로 눌러 준다 — **그 clamp가 아직 없으므로 여기서
     // 강제한다.** 안 그러면 "밀린 채 접히는" 상태가 되는데, 그건 계약에 없는 동작이다(실측:
@@ -138,12 +138,19 @@ pub fn build(
             defer visual_row += 1;
             if (text.len == 0) continue;
 
-            if (run_used >= runs.len) return error.OutOfSpace;
+            // **op·run 예산이 다해도 죽지 않는다.** scratch를 절단으로 바꾼 것과 같은 이유이고
+            // (#2086: 화면에 덜 나오는 것 > 편집기가 통째로 안 그려지는 것), **랩이 붙으면서 이
+            // 경로가 실제로 위험해졌다** — 한 줄이 op을 여러 개 쓰므로 긴 줄 하나가 예산을 다 쓸 수
+            // 있다. 그때 에러를 올리면 그 줄만이 아니라 프레임 전체가 사라진다.
+            //
+            // **배치(`visual_out`)는 이미 채웠으므로 gutter가 번호를 그린다** — 본문만 비고 번호는
+            // 나온다. 번호가 없으면 화면 전체가 어느 위치인지 알 수 없다는 것이 같은 PR의 결론이다.
+            if (run_used >= runs.len or op_count >= out.len) continue;
+
             runs[run_used] = .{ .text = text };
             const run_slice = runs[run_used .. run_used + 1];
             run_used += 1;
 
-            if (op_count >= out.len) return error.OutOfSpace;
             out[op_count] = .{
                 .text = .{
                     .origin = .{
@@ -502,6 +509,55 @@ test "expandTabs: 저장소가 모자라면 거기까지만 만들고 truncated�
     try testing.expectEqual(@as(usize, 0), t.text.len);
 }
 
+test "op·run 예산이 모자라도 build는 성공하고 번호 배치는 남긴다" {
+    // **`build`는 이제 실패하지 않는다.** 랩이 붙으면서 한 줄이 op을 여러 개 쓰게 됐고, 그때
+    // 에러를 올리면 긴 줄 하나가 프레임 전체를 지운다(#2086이 scratch에서 고친 것과 같은 결함이
+    // op·run 경로에 남아 있었다).
+    const layout = geometry.compute(40, 3, .{});
+    var scratch: [512]u8 = undefined;
+    var vrows: [16]visual_map.VisualRow = undefined;
+    const rows = [_]Row{ .{ .bytes = "aaa" }, .{ .bytes = "bbb" }, .{ .bytes = "ccc" } };
+
+    for ([_]usize{ 0, 1, 2, 3 }) |cap| {
+        var ops: [4]draw.Op = undefined;
+        var runs: [4]draw.Run = undefined;
+        const w = build(testProps(layout, &rows), ops[0..cap], &scratch, runs[0..cap], &vrows);
+        try testing.expectEqual(@min(cap, rows.len), w.ops);
+        // **배치는 예산과 무관하게 다 채운다** — gutter가 번호를 그려야 화면이 어느 위치인지 안다.
+        try testing.expectEqual(rows.len, w.visual_rows);
+    }
+}
+
+test "랩된 줄에서 op이 다해도 그 줄의 나머지 조각이 배치에서 사라지지 않는다" {
+    // **`continue`와 `break`의 차이가 여기서만 드러난다.** 랩이 꺼지면 줄당 조각이 하나라 둘이
+    // 같은 결과를 내고, 실제로 앞선 테스트가 그 차이를 못 잡았다(반증이 통과했다).
+    //
+    // `break`면 그 줄의 남은 조각이 배치에서 통째로 빠지고 **다음 논리 줄이 그 자리를 차지한다** —
+    // gutter가 따라가는 배치가 어긋나므로 번호가 본문과 갈린다.
+    const layout = geometry.compute(20, 1, .{}); // 본문이 좁아 한 줄이 여러 조각이 된다
+    var scratch: [512]u8 = undefined;
+    var vrows: [16]visual_map.VisualRow = undefined;
+    var ops: [1]draw.Op = undefined; // **op은 하나뿐**
+    var runs: [1]draw.Run = undefined;
+
+    const rows = [_]Row{ .{ .bytes = "0123456789" ** 4 }, .{ .bytes = "second" } };
+    var props = testProps(layout, &rows);
+    props.wrap = true;
+
+    const w = build(props, &ops, &scratch, &runs, &vrows);
+    try testing.expectEqual(@as(usize, 1), w.ops); // 예산만큼만 그렸다
+
+    // 첫 줄이 여러 조각으로 접혔고 **그 조각들이 배치에 그대로 있다**.
+    //
+    // **`vrows[2]`부터 갈린다.** 배치를 예산 확인 **전에** 채우므로 `break`여도 조각 하나는 더
+    // 들어간다 — 처음엔 `vrows[1]`을 보고 반증이 통과했다(검증이 틀린 자리를 봤다).
+    try testing.expect(w.visual_rows >= 4);
+    try testing.expectEqual(@as(u32, 0), vrows[0].line);
+    try testing.expectEqual(@as(u32, 0), vrows[1].line);
+    try testing.expectEqual(@as(u32, 0), vrows[2].line); // `break`면 여기가 줄 1이 된다
+    try testing.expectEqual(@as(u32, 2), vrows[2].piece);
+}
+
 test "저장소가 모자라도 build는 성공하고 나머지 줄을 계속 그린다" {
     // 이것이 #2086의 계약이다 — **화면에 덜 나오는 것**과 **편집기가 통째로 안 그려지는 것** 중
     // 전자를 고른다. 랩이 켜진 상태에서 검증한다(랩이 저장소를 가장 많이 쓴다).
@@ -519,7 +575,7 @@ test "저장소가 모자라도 build는 성공하고 나머지 줄을 계속 �
     var props = testProps(layout, &rows);
     props.wrap = true;
 
-    const w = try build(props, &ops, &tiny, &runs, &vrows);
+    const w = build(props, &ops, &tiny, &runs, &vrows);
     // **죽지 않았다.** 그리고 시각 행을 계속 냈으므로 gutter가 번호를 그릴 수 있다.
     try testing.expect(w.visual_rows > 0);
     try testing.expect(w.bytes <= tiny.len);
@@ -595,12 +651,12 @@ test "랩이 켜지면 가로 위치가 0이어야 한다 — 계약을 코드�
     var wrapped = testProps(layout, &rows);
     wrapped.wrap = true;
     wrapped.first_col = 0; // 랩이면 0만 허용
-    _ = try build(wrapped, &ops, &scratch, &runs, &vrows);
+    _ = build(wrapped, &ops, &scratch, &runs, &vrows);
 
     var scrolled = testProps(layout, &rows);
     scrolled.wrap = false;
     scrolled.first_col = 5; // 랩이 꺼졌으면 밀 수 있다
-    const w = try build(scrolled, &ops, &scratch, &runs, &vrows);
+    const w = build(scrolled, &ops, &scratch, &runs, &vrows);
     try testing.expectEqualStrings("56789", ops[0].text.runs[0].text);
     try testing.expectEqual(@as(usize, 1), w.visual_rows);
 }
@@ -702,7 +758,7 @@ test "긴 줄은 본문이 저장소를 끝까지 쓴다 — 뒤에 그릴 것�
     var props = testProps(layout, &rows);
     props.wrap = true;
 
-    const w = try build(props, &ops, &scratch, &runs, &vrows);
+    const w = build(props, &ops, &scratch, &runs, &vrows);
     // 저장소를 **끝까지** 썼다 — 이 상태로 gutter를 부르면 그릴 자리가 없다.
     try testing.expectEqual(scratch.len, w.bytes);
 }
@@ -715,7 +771,7 @@ test "저장소가 넉넉하면 절단을 보고하지 않는다 — truncated_r
     var scratch: [256]u8 = undefined;
 
     const rows = [_]Row{ .{ .bytes = "\tshort" }, .{ .bytes = "\talso short" } };
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs, &vrows);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &vrows);
     try testing.expectEqual(@as(usize, 0), w.truncated_rows);
 }
 
@@ -737,7 +793,7 @@ test "본문은 gutter 오른쪽에서 시작한다" {
     var ops: [4]draw.Op = undefined;
     var scratch: [128]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(@as(usize, 1), w.ops);
     // gutter 8셀 뒤에서 시작해야 한다(여백 1 + 번호 5 + 접기 1 + 여백 1).
@@ -756,7 +812,7 @@ test "행 간격이 gutter와 같다 — 줄 번호와 본문이 나란히 서�
     var ops: [8]draw.Op = undefined;
     var scratch: [128]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(@as(i32, 0), ops[0].text.origin.y);
     try testing.expectEqual(@as(i32, 16), ops[1].text.origin.y);
@@ -770,7 +826,7 @@ test "본문 폭을 넘는 줄은 max_cols로 잘린다 — 창 밖까지 그리
     var ops: [4]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(layout.content.width, ops[0].text.max_cols);
 }
@@ -786,7 +842,7 @@ test "빈 줄은 op을 만들지 않는다" {
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(@as(usize, 2), w.ops);
     // 세 번째 줄은 시각 행 2를 유지해야 한다 — 빈 줄을 건너뛰었다고 위로 당겨지면 안 된다.
@@ -800,7 +856,7 @@ test "탭이 든 줄은 전개돼 그려진다" {
     var ops: [4]draw.Op = undefined;
     var scratch: [128]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     // 줄 안에 `\n`이 있을 일은 없지만(줄 단위로 들어온다) 탭 전개만 확인한다.
     try testing.expect(std.mem.indexOfScalar(u8, ops[0].text.runs[0].text, '\t') == null);
@@ -813,7 +869,7 @@ test "본문 영역이 없으면 아무것도 그리지 않는다" {
     var ops: [4]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
     try testing.expectEqual(@as(usize, 0), w.ops);
 }
 
@@ -827,7 +883,7 @@ test "각 op이 자기 run을 가리킨다" {
     var ops: [4]draw.Op = undefined;
     var scratch: [128]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqualStrings("first", ops[0].text.runs[0].text);
     try testing.expectEqualStrings("second", ops[1].text.runs[0].text);
@@ -846,7 +902,7 @@ test "탭 없는 줄이 이어져도 저장소를 소비하지 않는다 — 회
     // 12 byte를 요구해 여기서 죽었다.
     var scratch: [4]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(@as(usize, 3), w.ops);
     try testing.expectEqual(@as(usize, 0), w.bytes);
@@ -862,7 +918,7 @@ test "탭 있는 줄과 없는 줄이 섞여도 회계가 맞는다" {
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(@as(usize, 2), w.ops);
     try testing.expectEqual(@as(usize, 5), w.bytes); // 탭 있는 줄만 셌다
@@ -962,7 +1018,7 @@ test "상한이 있으면 작은 scratch로도 긴 줄이 통과한다 — build
     var runs: [4]draw.Run = undefined;
     const layout = geometry.compute(40, 1, .{});
 
-    const w = try build(.{
+    const w = build(.{
         .layout = layout,
         .rows = &rows,
         .cell_w_px = 8,

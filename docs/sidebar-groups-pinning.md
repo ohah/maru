@@ -315,7 +315,7 @@ eject하고, 그러면 뒤이은 `floatLocalPinsAllGroups`가 (더 이상 subtre
 `Row.card`에 렌더 힌트 `local_pinned: bool = false`(chrome/components/sidebar.zig, `pin_derived` 동형) + `appendCardRow`·
 `projectRowsCore` 전달(비마커 그룹 멤버 카드에만 `d > 0 and tab.local_pinned`, 마커 카드·최상위 카드=false — §13.8 leaf 전용).
 그룹째 고정 📌(헤더)와 로컬 pin 📌(멤버 카드)가 **위치로 구별**된다. **공존 시각 모호**(둘 다 단일 글리프 U+1F4CC)는 **수용**
-(별도 글리프 미도입). **GL3에서 배선 완료 ✅**(선두 분기·힌트·헤드리스 GL3(a)·공존 GL3(a2)·스크린샷 `MARU_FORCE_GROUP_LOCALPIN`).
+(별도 글리프 미도입). 구별은 **선두 분기와 힌트**가 하고, 공존은 헤드리스 단언과 제품 스크린샷(`MARU_FORCE_GROUP_LOCALPIN`)으로 고정한다.
 
 ### 13.6.1 마커 자기 카드 렌더 위치 — 로컬 pin **뒤**(그룹 절대 최상단 = 로컬 pin)
 
@@ -346,13 +346,13 @@ preview_rows 공용 order-aware 투영)에서 마커 **자기 카드** row만 �
 - **엣지(수용)**: 비-로컬-pin 멤버를 로컬 pin **프리픽스 안**으로 드롭하면(프리픽스는 §13.5 clamp 대상=로컬 pin 멤버 origin뿐)
   프리뷰가 프리픽스 사이에 잠깐 보였다 commit `floatLocalPins`가 프리픽스 **아래**로 snap-back한다 — 이는 **order 레벨의
   pre-existing snap-back**(마커 카드 재배치와 무관)이라 그대로 수용한다(로컬 pin 프리픽스 = sticky top zone).
-- **배선 완료 ✅**: `projectRowsCore` 버퍼링·재방출 + `flushMarkerCard` + 헤드리스 GL3(a)(순서·힌트)·GL3(d)(순서·hit-test·
-  byte-identical·프리뷰=확정) + 스크린샷 `MARU_FORCE_GROUP_LOCALPIN`(📌가 그룹 절대 최상단, 마커 대표 카드 위).
+- **경로**: `projectRowsCore` 버퍼링·재방출 + `flushMarkerCard`. 순서·힌트·hit-test·byte-identical·프리뷰=확정은
+  헤드리스 단언이, 📌가 그룹 절대 최상단(마커 대표 카드 위)에 오는 것은 스크린샷 `MARU_FORCE_GROUP_LOCALPIN`이 고정한다.
 
 ### 13.7 위생 — 멤버→top-level 전이 시 `local_pinned:=false`(보강4)
 
 멤버가 그룹 밖으로 나가면(ungroup·removeFromGroup·드래그 out) **`local_pinned:=false`** 로 클리어한다 — top-level 카드에선
-로컬 pin이 무의미하므로 고아 stale 📌를 원천 차단한다. **GL3에서 배선 완료 ✅**: 단일 출처 위생 스윕 `clearStaleLocalPins`
+로컬 pin이 무의미하므로 고아 stale 📌를 원천 차단한다. 단일 출처 위생 스윕 `clearStaleLocalPins`
 (그룹 마커·최상위 카드의 `local_pinned` 클리어; 중첩 부모로 **재소속**된 멤버는 여전히 그룹 안 leaf라 유지 — floatLocalPins가 부모
 프리픽스로 재float)를 세 전이 지점(`ungroupTab`·`removeFromGroupForTab`·`commitSidebarDragPreview`)이 각자 float **뒤** 1회 부른다.
 commit 지점의 스윕은 §13.5 확정 clamp가 로컬 pin 멤버의 실제 eject를 막으므로 top-level 전이한 카드의 stale/desync를 지우는

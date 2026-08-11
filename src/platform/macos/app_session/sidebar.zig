@@ -56,7 +56,7 @@ const HeaderPart = AppSession.HeaderPart;
 const SidebarScissor = AppSession.SidebarScissor;
 const SidebarScrollExtent = AppSession.SidebarScrollExtent;
 const SidebarSearchLine = AppSession.SidebarSearchLine;
-const WorkspaceAgent = AppSession.WorkspaceAgent;
+const WorkspaceSession = AppSession.WorkspaceSession;
 const clampMoveToGroup = app_session_mod.clampMoveToGroup;
 const coretext_frame_builder = app_session_mod.coretext_frame_builder;
 const file_panel_ops = @import("file_panel.zig");
@@ -492,9 +492,12 @@ pub fn sidebarSearchActivateFirst(self: *AppSession) void {
 
 /// 에이전트 행이 그리는 줄 수 — 라벨(항상) + 폴더·브랜치(그 Term의 cwd를 알 때, §2.1). 마지막 대화 두 줄은
 /// transcript 보강(4·5단계)이 붙으면 여기서 함께 센다. 카드와 같은 규율로 이 값이 행 높이의 입력이다.
-pub fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceAgent) u8 {
+pub fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceSession) u8 {
     const term = agentTermOf(tab, ag) orelse return 1;
-    var n: u8 = 1; // 라벨(종류 · 상태)은 항상
+    // 라벨 줄은 항상 있다 — 에이전트면 (종류 · 상태), 아니면 Term 라벨(2026-08-11). 아래 세 조건은 종류로
+    // 분기하지 않는다: PTY 없는 Term(브라우저·파일)은 관측이 `.unavailable`이라 폴더·브랜치가 자연히 0줄이고,
+    // 에이전트 아닌 Term은 transcript가 비어 응답 줄도 0이다. 즉 비-에이전트 행은 라벨 1줄로 수렴한다.
+    var n: u8 = 1;
     // **termGitBranch를 먼저** 부른다 — 이 호출이 관측(cwd)을 refresh하므로, sidebarHasCwd를 앞세우면 관측이
     // stale한 rebuild에서 줄 수를 1로 재고 같은 rebuild의 렌더는 2줄을 그려 행 높이와 글자가 어긋난다
     // (code-review max). sidebarCardLines가 쓰는 순서와 같게 맞춘다.
@@ -1504,7 +1507,38 @@ pub fn workspaceStatusLine(self: *AppSession, tab: *Tab) ![]const u8 {
 /// 에이전트 행 **1행 텍스트**(owned) — 종류 이름 + 상태 문구. 카드 상태줄(agentStatusLine)이 상태 마커·문구의
 /// 단일 출처이므로 그대로 쓰고, 앞에 종류 이름을 붙여 "무엇이 어떤 상태인지"를 한 줄로 읽게 한다.
 /// 예: `✓ 대기중` → `Claude Code · ✓ 대기중`. 마지막 프롬프트로 이 자리를 대체하는 것은 transcript 보강(4·5단계)이다.
+/// 세션 목록 행의 **gutter 아이콘** codepoint(0 = 아이콘 없음). 에이전트는 kind 아이콘(✶/◆)을 그대로 쓰고,
+/// 비-에이전트 Term은 종류로 가른다 — 목록이 터미널·브라우저·파일을 함께 담게 되면서(2026-08-11) 아이콘이
+/// 없으면 행이 전부 라벨 한 줄로만 구분돼 종류를 눈으로 못 가른다.
+///
+/// 파일 Term은 **탐색기 트리와 같은 분류기**(`chrome.file_tree_icon.classify`)를 태운다. 같은 파일이 트리와
+/// 사이드바에서 다른 아이콘으로 보이면 같은 것으로 안 읽힌다. 일반 터미널만 0(아이콘 없음)이다 — 등록된
+/// 터미널 아이콘 자산이 없고, 임의 유니코드 글리프는 아이콘 폰트 fit 규약(`icons.hasFit`) 밖이라 크기가 튄다.
+pub fn sessionRowIconCodepoint(term: *Term) u21 {
+    if (term.agent_kind != .none) return agentIconCodepoint(term.agent_kind);
+    if (term.file_entry) |entry| {
+        const kind = chrome.file_tree_icon.classify(.file, std.fs.path.basename(entry.path), false);
+        return chrome.file_tree_icon.codepoint(kind) orelse icons.codepoint(.document);
+    }
+    if (term.kind == .web) return icons.codepoint(.web);
+    return 0;
+}
+
 pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
+    // **비-에이전트 행**(터미널·브라우저·파일, 2026-08-11)은 상태 문구도 프롬프트도 없다 — 아래 경로를 그대로
+    // 태우면 kind_name·status가 모두 빈 문자열이라 라벨 없는 행이 나온다. 탭 바·창 제목과 **같은** `termLabel`
+    // (custom_name > OSC 제목/패널 라벨 > 파일 basename)을 써서 같은 Term이 어디서 보이든 같은 이름으로 읽히게 한다.
+    if (term.agent_kind == .none) {
+        const label = app_session_mod.termLabel(term);
+        // 저장 안 된 편집이 있는 파일 Term은 라벨 앞에 `*`를 붙인다(사용자 요청 2026-08-11). 앞에 두는 이유는
+        // 에이전트 행이 상태 마커를 같은 자리(라벨 선두)에 두기 때문이다 — 한 목록에서 "행 앞이 상태"라는
+        // 읽기 규칙이 하나로 유지된다. 뒤에 붙이면 우측 정렬된 시각과 자리를 다툰다.
+        // NOTE: 파일 패널 **헤더**는 같은 dirty를 `●`(U+25CF)로 그린다(`dock_layout.dirty_col`). 한 상태에 마커가
+        // 둘이라 정합이 필요하면 그쪽과 맞춘다 — 사용자가 `*`를 지정했으므로 여기서는 그대로 둔다.
+        const dirty = if (term.file_entry) |e| e.dirty else false;
+        if (!dirty) return self.allocator.dupe(u8, label);
+        return std.fmt.allocPrint(self.allocator, "* {s}", .{label});
+    }
     const status = try agentStatusLine(self, term);
     defer self.allocator.free(status);
     // 마지막 **사용자 프롬프트**가 있으면 종류 이름·상태 문구 대신 그것을 싣는다(§7). 사용자가 이 행에서 알고
@@ -1635,8 +1669,10 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         for (status_lines.items) |l| self.allocator.free(l);
         status_lines.deinit(self.allocator);
     }
-    var agents: std.ArrayList(u21) = .empty;
+    var agents: std.ArrayList(u21) = .empty; // 왼쪽 독립 gutter(접기 토글 삼각 전용 — 세션 행은 아래 inline)
     defer agents.deinit(self.allocator);
+    var inline_icons: std.ArrayList(u21) = .empty; // 이름줄 선두 아이콘(세션 행의 kind·web·파일 아이콘)
+    defer inline_icons.deinit(self.allocator);
     var pins: std.ArrayList(bool) = .empty;
     defer pins.deinit(self.allocator);
     // 카드당 대표 kind·running을 **한 번만** 스캔해 담는다(표시 슬롯 순서) — 아이콘·상태줄(여기)과 아래 색칠 루프가
@@ -1696,15 +1732,19 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                     break :blk try std.fmt.allocPrint(self.allocator, " \u{00b7} {s}", .{st});
                 } else try self.allocator.dupe(u8, "");
                 defer self.allocator.free(toggle_summary);
+                // 라벨은 **"sessions"**다 — 목록이 에이전트 전수에서 터미널 전수로 넓어졌으므로(2026-08-11)
+                // "agents"는 개수와 실제 행 수가 어긋난다. 종류별로 나눠 적지 않는(예: "2 agents · 1 terminal")
+                // 이유는 라벨 길이가 구성마다 달라져 좁은 사이드바에서 말줄임이 잦아지기 때문이다(사용자 결정).
                 try names.append(self.allocator, try std.fmt.allocPrint(
                     self.allocator,
-                    "{s}{d} agents{s}",
+                    "{s}{d} sessions{s}",
                     .{ indent_buf[0..ind_n], t.count, toggle_summary },
                 ));
                 try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try agents.append(self.allocator, if (t.collapsed) @as(u21, 0x25B6) else @as(u21, 0x25BC));
+                try inline_icons.append(self.allocator, 0); // 토글 삼각은 gutter에 남는다(텍스트 줄이면 1칸이라 안 읽힌다)
                 try pins.append(self.allocator, false);
                 // 접힘 요약의 파형도 **브랜드색**이어야 한다 — 요약은 접었을 때 유일한 상태 단서인데, kind=none·
                 // running=false를 실으면 색칠 루프가 그 자리만 흐린 회색으로 남긴다(code-review max).
@@ -1732,7 +1772,9 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 if (aterm) |t| {
                     const label = try agentRowLabelOwned(self, t);
                     defer self.allocator.free(label);
-                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}  {s}", .{ ind, label }));
+                    // 아이콘 자리는 **빌더가 이름줄만** 밀어 준다(inline_icons) — 옛 gutter처럼 여기서 공백을
+                    // 넣어 밀면 보조줄까지 같이 밀린다. 그래서 라벨은 indent만 붙이고 그대로 넘긴다.
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ind, label }));
                 } else {
                     try names.append(self.allocator, try self.allocator.dupe(u8, ""));
                 }
@@ -1751,8 +1793,15 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                     try agentRowReplyOwned(self, t, ind)
                 else
                     try self.allocator.dupe(u8, ""));
-                // gutter 아이콘: 그 Term의 kind(카드 대표 아이콘이 사라진 자리를 행마다 대신한다).
-                try agents.append(self.allocator, if (aterm) |t| agentIconCodepoint(t.agent_kind) else 0);
+                // 종류 아이콘은 **이름줄 선두**에 인라인으로 둔다 — 옛 왼쪽 gutter는 글리프 하나 때문에 행의
+                // 모든 줄에서 3칸을 뺏고(폭의 7%), 슬롯 세로 중앙에 놓여 줄 수가 다른 행끼리 열도 못 이뤘다
+                // (사용자 피드백). gutter는 접기 토글 삼각만 계속 쓴다.
+                // 아이콘이 없는 일반 터미널 행도 `inline_icon_reserve`로 **자리는 잡아** 라벨 좌단을 맞춘다.
+                try agents.append(self.allocator, 0);
+                try inline_icons.append(self.allocator, if (aterm) |t| blk: {
+                    const cp = sessionRowIconCodepoint(t);
+                    break :blk if (cp == 0) coretext_frame_builder.inline_icon_reserve else cp;
+                } else coretext_frame_builder.inline_icon_reserve);
                 try pins.append(self.allocator, false);
                 try card_kinds.append(self.allocator, if (aterm) |t| t.agent_kind else .none);
                 try card_running.append(self.allocator, if (aterm) |t| (t.agent_state == .running) else false);
@@ -1789,6 +1838,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try agents.append(self.allocator, 0); // 헤더엔 에이전트 아이콘 없음
+                try inline_icons.append(self.allocator, 0);
                 // 그룹 고정 인디케이터(§12.8 GP4): 마커 pinned면 헤더 이름줄 우측 끝에 📌 — "이 그룹 고정됨"을 헤더 하나에
                 // (멤버 카드 📌 노이즈 대신). rename 중엔 억제(편집 폭 보존 — 카드 pin과 같은 규칙). sidebarRowShowsPin이 단일 출처.
                 const header_renaming = gtab != null and self.renamingGroup(gtab.?);
@@ -1825,6 +1875,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // 대표 아이콘 없음: 종류·상태는 **에이전트 목록 행**이 행마다 보여주므로(docs/sidebar-agent-list.md §2)
         // 카드에 대표 하나를 또 그리면 같은 정보가 두 곳에 다른 형태로 나온다. gutter는 목록 행이 쓴다.
         try agents.append(self.allocator, 0);
+        try inline_icons.append(self.allocator, 0); // 카드 이름줄 선두는 동작/활성 마커(·/*) 전용
         // 이름줄 = custom_name(rename) 우선, 없으면 활성 Term 라벨. rename 중이면 편집 텍스트로 대체하고 보조줄은 숨긴다.
         if (renaming) {
             // rename 중엔 마커·핀을 안 붙인다 — 마커 prefix를 붙이면 편집 텍스트가 2칸 밀려 renameCaretRect(이름줄
@@ -1899,7 +1950,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
     // close_row/active_row는 **표시 row 인덱스**(위 padding 루프가 헤더도 slot을 차지하게 해 i==row) — buildSidebarDrawList가
     // 이 i로 슬롯을 인코딩·비교하므로 도메인이 일치한다(SG3c). 헤더 row는 위 루프가 close_row를 안 세워 ✕가 안 붙는다.
-    var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_rows.items, ages.items, null, active_row, active_fg, editing_row);
+    var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, inline_icons.items, pins.items, sidebar_cols, fg, close_rows.items, ages.items, null, active_row, active_fg, editing_row);
     // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
     // codex=OpenAI 청록. 종류를 색으로 구분하고, **관측 상태는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓ 대기중)이 담당한다
     // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.

@@ -246,6 +246,10 @@ pub const inventory = [_]Proof{
     // 그 문서를 가를 때마다 문자열이 바뀐다(file-panel·sidebar-groups·agent-session-list·metal-ui-layout에서
     // 차례로 겪었다 — 여기까지 네 번이고, 문서가 커지는 한 또 온다). 매번 count는 2 그대로인데, `@field` 반사도
     // 선언도 손대지 않고 주석 문자열만 달라지기 때문이다. 개별 이력은 git이 가지므로 사유를 여기 쌓지 않는다.
+    // 사이드바 세션 목록이 에이전트 전수에서 **Term 전수**(터미널·브라우저·파일)로 넓어지고, 종류 아이콘이
+    // 왼쪽 gutter에서 이름줄 인라인으로 옮겨가며 또 바뀐다(docs/sidebar-agent-list.md §1·§2). count는 2 그대로다 —
+    // `WorkspaceAgent` → `WorkspaceSession` 개명, 테스트 둘(신규 1 + 기존 1 보정), `buildSidebarDrawList`에
+    // `inline_icons` 인자가 붙은 호출부 둘뿐이고, 전부 평범한 타입·인자 전달이라 `@field` 반사와 무관하다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "c2deb4f4bc3ef35e1258b4615c357de53de7e65d00f8a1dc82d602a4cd59afdf" },
     // file-panel.md 분할로 주석 여섯 곳의 단일 출처 경로가 바뀌어 움직였다(§2.2·§2.6 → file-panel-kinds.md,
     // §2.3·§2.4 → file-panel-web-stack.md, §2.5 → file-panel-rich-edit.md, §3.4 → file-panel-dock-ui.md).

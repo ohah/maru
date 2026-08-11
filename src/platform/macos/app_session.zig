@@ -7629,9 +7629,10 @@ pub const AppSession = struct {
         agent_ops.appendAgentRows(self, out, tab_index, depth); // 카드 **바로 아래** 그 워크스페이스의 에이전트 목록(§2)
     }
 
-    /// 워크스페이스가 들고 있는 에이전트 Term 하나의 **인덱스 경로**. 포인터가 아니라 인덱스인 이유는 Row와 같다 —
-    /// 사이 tick에 Term이 사라져도 재조회에서 걸러지고 dangling이 없다.
-    pub const WorkspaceAgent = struct { pane: usize, term: usize };
+    /// 워크스페이스가 들고 있는 터미널 Term 하나의 **인덱스 경로**. 포인터가 아니라 인덱스인 이유는 Row와 같다 —
+    /// 사이 tick에 Term이 사라져도 재조회에서 걸러지고 dangling이 없다. 에이전트 여부는 여기 없다(라이브
+    /// 재조회 시점의 `term.agent_kind`가 권위 — 목록 행이 인덱스만 드는 계약과 같은 이유).
+    pub const WorkspaceSession = struct { pane: usize, term: usize };
 
     /// 원본 tab 인덱스 → 표시 슬롯(row 인덱스; 검색 필터 정방향). 필터로 숨겨졌으면 null. 활성 밴드를 표시 슬롯에 그릴 때 쓴다.
     pub fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
@@ -23735,10 +23736,17 @@ test "사이드바 에이전트 목록: 행 클릭이 워크스페이스·Pane·
     sidebar_ops.rebuildSidebar(session) catch {};
 
     // 목록에 그 에이전트 행이 있고, 인덱스 경로가 실제 자리를 가리킨다.
+    // 목록은 이제 터미널 Term도 담으므로(2026-08-11) `.agent` variant만으로는 대상을 못 고른다 — 세 Term이 모두
+    // 행이라 마지막 `.agent` 행은 pane1의 터미널이다. **라이브 `agent_kind`로** 에이전트 행을 집는다(행이 인덱스만
+    // 들고 kind를 캐시하지 않는 계약과 같은 재조회).
     const rows = session.sidebar_rows.items;
     var agent_row: ?usize = null;
-    for (rows, 0..) |r, i| if (r == .agent) {
-        agent_row = i;
+    for (rows, 0..) |r, i| switch (r) {
+        .agent => |row| {
+            const rt = agent_ops.agentTermOf(tab, .{ .pane = row.pane, .term = row.term }) orelse continue;
+            if (rt.agent_kind != .none) agent_row = i;
+        },
+        else => {},
     };
     const ar = agent_row orelse return error.NoAgentRow;
     try std.testing.expectEqual(target_pane, rows[ar].agent.pane);
@@ -23805,6 +23813,59 @@ test "사이드바 에이전트 목록: Term 전수 나열·개수와 무관하�
     sidebar_ops.rebuildSidebar(session) catch {};
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len); // 카드 + 토글
     try std.testing.expect(session.sidebar_rows.items[1] == .agent_toggle);
+}
+
+// 목록이 에이전트 전수에서 **Term 전수**로 넓어진 것을 고정한다(사용자 결정 2026-08-11 —
+// docs/sidebar-agent-list.md §1·§2). 터미널이 목록에 없으면 가려진 탭에서 도는 셸이 화면에 존재하지 않는데,
+// 그것은 "안 보이는 것을 없는 것처럼 만들지 않는다"는 §2 원칙이 에이전트에만 적용되던 빈틈이었다.
+//
+// 함께 증명하는 것: (a) 에이전트를 돌리는 Term이 **에이전트 행 하나로만** 나오고 터미널 행으로 중복되지
+// 않는다(= "터미널이 에이전트 실행 중이면 에이전트만"이 Term 1:1 규율에서 공짜로 나온다), (b) 터미널 1개짜리
+// 워크스페이스는 카드 헤더가 곧 그 Term이라 목록을 내지 않는다.
+test "사이드바 세션 목록: 터미널도 행이 되고, 에이전트 Term은 한 행으로만 나온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+
+    // (0) 터미널 1개 + 에이전트 0 = 목록 없음. 카드 헤더(활성 pane의 활성 Term)가 이미 그 Term의 폴더·브랜치를
+    // 그리므로 행을 더하면 같은 정보가 두 번 나오고 모든 카드가 토글만큼 길어진다.
+    sidebar_ops.rebuildSidebar(session) catch {};
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len);
+
+    // (1) 에이전트 없이 Term만 2개 → 목록이 생긴다. **예전에는 여기서 아무 행도 안 나왔다**(agent_kind == .none
+    // 필터). 토글 개수는 에이전트 수가 아니라 **Term 수**다.
+    try pane_ops.newTermInActivePane(session);
+    sidebar_ops.rebuildSidebar(session) catch {};
+    try std.testing.expectEqual(@as(usize, 4), session.sidebar_rows.items.len); // 카드 + 토글 + 행 2
+    try std.testing.expect(chrome.components.sidebar.onAgentToggle(session.sidebar_rows.items, 1));
+    try std.testing.expectEqual(@as(u16, 2), session.sidebar_rows.items[1].agent_toggle.count);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[2].agent.term);
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items[3].agent.term);
+
+    // (2) 그중 하나를 에이전트로 만든다 → **행 수와 개수는 그대로**다. 같은 Term이 에이전트 행 + 터미널 행으로
+    // 쪼개지지 않는다는 뜻이고, 이것이 "에이전트 실행 중이면 에이전트만 보인다"의 실체다.
+    const t0 = tab.panes.items[0].terms.items[0];
+    t0.agent_kind = .claude;
+    t0.agent_state = .idle;
+    sidebar_ops.rebuildSidebar(session) catch {};
+    try std.testing.expectEqual(@as(usize, 4), session.sidebar_rows.items.len);
+    try std.testing.expectEqual(@as(u16, 2), session.sidebar_rows.items[1].agent_toggle.count);
+
+    // (3) 두 행의 표현이 갈린다 — 에이전트 행은 상태 문구(✓ 대기중)를, 터미널 행은 Term 라벨을 싣고,
+    // gutter 아이콘도 kind 아이콘 vs 없음으로 갈린다.
+    const t1 = tab.panes.items[0].terms.items[1];
+    const agent_label = try sidebar_ops.agentRowLabelOwned(session, t0);
+    defer a.free(agent_label);
+    const term_label = try sidebar_ops.agentRowLabelOwned(session, t1);
+    defer a.free(term_label);
+    try std.testing.expect(std.mem.indexOf(u8, agent_label, "대기중") != null); // 에이전트=상태 문구
+    try std.testing.expect(std.mem.indexOf(u8, term_label, "대기중") == null); // 터미널=상태 문구 없음
+    try std.testing.expectEqual(icons.codepoint(.sparkle), sidebar_ops.sessionRowIconCodepoint(t0));
+    try std.testing.expectEqual(@as(u21, 0), sidebar_ops.sessionRowIconCodepoint(t1)); // 일반 터미널=아이콘 없음
 }
 
 test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {
@@ -28092,13 +28153,13 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
         // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
         //     실패 시 draw_list를 정리하므로 별도 free 안 함).
         {
-            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, &.{}, 1, 0, muted, null);
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, &.{}, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
         }
         // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
         {
-            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, &.{}, 1, 0, muted, null);
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, &.{}, &.{}, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             dl.size.cols = full_cols;
             var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);
@@ -36074,6 +36135,11 @@ test "grip 드래그: 사이드바 빈 영역 드롭 → 새 워크스페이스 
     try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
 
     // 사이드바 빈 영역(카드 한참 아래)으로 drag + up → 새 워크스페이스 분리.
+    // **좌표를 재기 전에 재투영한다.** `mouse()`가 드롭 하이라이트를 세우며 사이드바를 다시 짓기 때문에, stale한
+    // `sidebar_rows`로 잰 "빈 영역"은 갱신된 레이아웃에서는 행 위가 될 수 있다. 실제로 세션 목록이 카드 아래
+    // 행을 갖게 되면서(2026-08-11) 그 어긋남이 드러났다 — 목록 행 위 드롭은 `visibleTab`이 null이라 no-op이고,
+    // 새 워크스페이스가 생기지 않는다. 좌표와 hit-test가 **같은 투영**을 보게 맞춘다.
+    sidebar_ops.rebuildSidebar(session) catch {};
     const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
     const empty_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px + chrome.components.sidebar.contentHeight(session.sidebar_rows.items, sidebar_ops.sidebarMetrics(session)) + 10));
     session.mouse(2, sx, empty_y, 0, 0);

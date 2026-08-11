@@ -44,7 +44,7 @@ const AgentKind = app_session_mod.AgentKind;
 const AgentTally = AppSession.AgentTally;
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
-const WorkspaceAgent = AppSession.WorkspaceAgent;
+const WorkspaceSession = AppSession.WorkspaceSession;
 const agent_session_archive_backend = app_session_mod.agent_session_archive_backend;
 const git_backend_mod = app_session_mod.git_backend_mod;
 const is_macos = app_session_mod.is_macos;
@@ -203,44 +203,59 @@ pub fn focusAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, ter
     self.metal_dirty = true;
 }
 
-/// 카드 아래에 붙는 **에이전트 목록 행**을 방출한다(§1 규칙): 0개면 아무것도, 1개면 행 하나만(토글 없음),
-/// 2개 이상이면 `N agents` 토글 + (펼쳐졌으면) 행들. 접힘은 `tab.agents_collapsed`가 든다(비영속, §4).
+/// 카드 아래에 붙는 **세션 목록 행**(에이전트 + 일반 터미널)을 방출한다: `N sessions` 토글 + (펼쳐졌으면) 행들.
+/// 접힘은 `tab.agents_collapsed`가 든다(비영속, §4).
+///
+/// **목록을 낼지 말지**(사용자 결정 2026-08-11 — docs/sidebar-agent-list.md §1):
+///   - 에이전트가 하나라도 있으면 **Term이 1개여도** 목록을 낸다. 접기는 개수가 아니라 "이 카드를 지금 얼마나
+///     펼쳐 둘 것인가"의 문제라서다(2026-07-26 정정 — 그 결정을 여기서 되돌리지 않는다).
+///   - 에이전트가 0이면 **Term이 2개 이상일 때만** 낸다. 터미널 하나짜리 워크스페이스는 카드 헤더가 이미 그
+///     Term의 폴더·브랜치를 그리므로(sidebarCardTerm = 활성 pane의 활성 Term) 행을 더해도 같은 정보가 두 번
+///     나올 뿐이고, 모든 카드가 토글 때문에 두 줄씩 길어진다.
+///
+/// `Row.agent`/`.agent_toggle` variant 이름은 그대로 둔다 — 이제 터미널 행도 이 variant를 쓰지만, 이름을 바꾸려면
+/// `app_session.zig`의 exhaustive switch 25곳을 함께 고쳐야 해서 동작 변경과 기계적 개명이 한 diff에 섞인다.
+/// 개명은 후속으로 분리한다(docs/sidebar-agent-list.md §2).
 pub fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8) void {
     if (tab_index >= self.tabs.items.len) return;
     const tab = self.tabs.items[tab_index];
-    var agents: std.ArrayList(WorkspaceAgent) = .empty;
-    defer agents.deinit(self.allocator);
-    workspace_ops.collectWorkspaceAgents(tab, &agents, self.allocator);
-    if (agents.items.len == 0) return;
-    // **1개일 때도 토글을 낸다.** 처음엔 "1개면 토글 없이 행 하나"로 뒀지만(토글이 군더더기라고 봤다), 실사용에서
-    // 에이전트 하나짜리 카드도 접을 수 없어 목록이 길어지는 게 불편했다(사용자 요청). 접기는 개수와 무관하게
-    // "이 카드를 지금 얼마나 펼쳐 둘 것인가"의 문제다.
+    var sessions: std.ArrayList(WorkspaceSession) = .empty;
+    defer sessions.deinit(self.allocator);
+    workspace_ops.collectWorkspaceSessions(tab, &sessions, self.allocator);
+    if (sessions.items.len == 0) return;
+    // 에이전트 유무는 **라이브 재조회**로 센다 — WorkspaceSession은 인덱스만 들고 kind를 캐시하지 않는다(§2).
+    var agent_count: usize = 0;
+    for (sessions.items) |s| {
+        const t = agentTermOf(tab, s) orelse continue;
+        if (t.agent_kind != .none) agent_count += 1;
+    }
+    if (agent_count == 0 and sessions.items.len < 2) return; // 터미널 1개뿐 = 카드 헤더가 곧 그 Term(위 주석)
     out.append(self.allocator, .{
         .agent_toggle = .{
             .tab = tab_index,
-            .count = std.math.lossyCast(u16, agents.items.len),
+            .count = std.math.lossyCast(u16, sessions.items.len),
             .collapsed = tab.agents_collapsed,
             .depth = depth,
             .last = tab.agents_collapsed, // 접히면 토글이 이 묶음의 마지막 행이다(아래 여백을 카드와 같게)
         },
     }) catch return;
     if (tab.agents_collapsed) return; // 접혔으면 행은 안 낸다(토글만 남는다)
-    for (agents.items, 0..) |ag, idx| {
+    for (sessions.items, 0..) |s, idx| {
         out.append(self.allocator, .{
             .agent = .{
                 .tab = tab_index,
-                .pane = ag.pane,
-                .term = ag.term,
+                .pane = s.pane,
+                .term = s.term,
                 .depth = depth,
-                .lines = sidebar_ops.sidebarAgentRowLines(self, tab, ag),
-                .last = idx + 1 == agents.items.len, // 마지막 행만 아래 여백을 카드와 같게(밴드 하단)
+                .lines = sidebar_ops.sidebarAgentRowLines(self, tab, s),
+                .last = idx + 1 == sessions.items.len, // 마지막 행만 아래 여백을 카드와 같게(밴드 하단)
             },
         }) catch return;
     }
 }
 
 /// 인덱스 경로 → 라이브 Term(범위 밖이면 null). 목록 행이 포인터 대신 인덱스를 드는 계약의 재조회 지점이다.
-pub fn agentTermOf(tab: *Tab, ag: WorkspaceAgent) ?*Term {
+pub fn agentTermOf(tab: *Tab, ag: WorkspaceSession) ?*Term {
     if (ag.pane >= tab.panes.items.len) return null;
     const pane = tab.panes.items[ag.pane];
     if (ag.term >= pane.terms.items.len) return null;

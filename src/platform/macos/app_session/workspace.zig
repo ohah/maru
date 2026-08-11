@@ -35,7 +35,7 @@ const file_tree = app_session_mod.file_tree;
 const preparePendingPasteTransfer = AppSession.preparePendingPasteTransfer;
 const StructuralCompositionReservation = AppSession.StructuralCompositionReservation;
 const RestoreAccountingSnapshot = AppSession.RestoreAccountingSnapshot;
-const WorkspaceAgent = AppSession.WorkspaceAgent;
+const WorkspaceSession = AppSession.WorkspaceSession;
 const agent_dock = app_session_mod.agent_dock;
 const config_mod = app_session_mod.config_mod;
 const dock_panel = app_session_mod.dock_panel;
@@ -285,12 +285,26 @@ pub fn setWorkspaceRoot(self: *AppSession, text: []const u8) void {
     settings_ops.markConfigKeyDirty(self, "workspace.root");
 }
 
-/// 이 워크스페이스의 **모든 에이전트 Term**을 트리 순서(Pane 순회 → Pane 안 Term 순서)로 모은다.
-/// 상태나 시각으로 재정렬하지 않는다 — 같은 자리의 에이전트가 상태 변화마다 목록에서 튀면 클릭 대상이 흔들린다(§2).
-pub fn collectWorkspaceAgents(tab: *Tab, out: *std.ArrayList(WorkspaceAgent), allocator: std.mem.Allocator) void {
+/// 이 워크스페이스의 **모든 Term**을 트리 순서(Pane 순회 → Pane 안 Term 순서)로 모은다.
+/// 상태나 시각으로 재정렬하지 않는다 — 같은 자리의 세션이 상태 변화마다 목록에서 튀면 클릭 대상이 흔들린다(§2).
+///
+/// **에이전트만이 아니라 터미널도 낸다**(사용자 결정 2026-08-11 — docs/sidebar-agent-list.md §2). 예전엔
+/// `agent_kind == .none`을 걸러 에이전트만 행이 됐고, 그래서 에이전트를 안 돌리는 터미널은 목록에 존재하지
+/// 않았다. "화면에 안 보이는 것을 없는 것처럼 만들지 않는다"는 §2의 원칙은 에이전트만의 것이 아니다 —
+/// 가려진 탭의 터미널도 PTY도 프로세스도 살아 있다.
+///
+/// **한 Term은 한 행이다.** 에이전트를 돌리는 Term은 `agent_kind != .none`이라 에이전트 행으로 그려지고,
+/// 같은 Term이 터미널 행으로 또 나오지 않는다 — "터미널이 에이전트를 실행 중이면 에이전트만 보인다"는
+/// 요구가 별도 중복 제거 없이 이 1:1 규율에서 그대로 나온다.
+///
+/// **kind로도 거르지 않는다**(사용자 결정 2026-08-11). 브라우저 Term과 파일·마크다운 Term도 그 워크스페이스가
+/// 들고 있는 것이고, 가려진 탭에 있으면 터미널과 똑같이 "없는 것처럼" 보인다. 그래서 이 목록의 축은
+/// "무엇이 돌고 있는가"가 아니라 **"이 워크스페이스가 무엇을 들고 있는가"**다. PTY가 없는 Term은 관측이
+/// `availability == .unavailable`이라 폴더·브랜치 줄이 자연히 비어 라벨 한 줄로 줄어든다 — 행 규칙을 분기하지
+/// 않고 같은 경로를 탄다(`refreshTermObservation`도 `kind != .terminal`에서 이미 early-return한다).
+pub fn collectWorkspaceSessions(tab: *Tab, out: *std.ArrayList(WorkspaceSession), allocator: std.mem.Allocator) void {
     for (tab.panes.items, 0..) |pane, pi| {
-        for (pane.terms.items, 0..) |t, ti| {
-            if (t.kind != .terminal or t.agent_kind == .none) continue;
+        for (pane.terms.items, 0..) |_, ti| {
             out.append(allocator, .{ .pane = pi, .term = ti }) catch return; // OOM: 이번 투영만 짧게(다음 rebuild가 복구)
         }
     }

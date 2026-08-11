@@ -1,8 +1,4 @@
-# 빌드 산출물은 안 올린다. PNG(결과 증거)만 커밋한다.
-*.a
-*.ppm
-poc-*
-MaruPoC.app/
-make_atlas
-atlas.gray
-atlas.idx
+# out/ 은 스크린샷(.png)만 커밋한다 — 나머지는 빌드 산출물이라 재생성된다.
+*
+!.gitignore
+!*.png

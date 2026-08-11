@@ -16,13 +16,13 @@ extern "c" fn usleep(usec: c_uint) c_int;
 const pty_write_queue_capacity: usize = 1 << 18; // 256 KiB
 
 /// 위임 명령 큐 상한(대기 명령 수). 명령은 작고 드문 UI 이벤트(IME·스크롤·선택)라 넉넉. 포화 시 메인이
-/// backpressure로 잠깐 대기(손실 금지) — write_queue와 같은 계약(docs/io-render-threading.md §9.2).
+/// backpressure로 잠깐 대기(손실 금지) — write_queue와 같은 계약(docs/plans/io-render-threading.md §9.2).
 const pty_command_queue_capacity: usize = 1024;
 
 // reader의 응답(코어 query reply) outbound 버퍼 상한은 pty_reader.response_buffer_capacity에 있다(write_queue·
-// command_queue와 함께 세 outbound가 모두 bound된다). 그 결정·근거의 단일 출처는 docs/io-render-threading.md §8.8(3)다.
+// command_queue와 함께 세 outbound가 모두 bound된다). 그 결정·근거의 단일 출처는 docs/plans/io-render-threading.md §8.8(3)다.
 
-/// 단일 writer 라우팅(docs/io-render-threading.md §8 P2-3b): 메인 입력을 직접 세션에 쓰지 않고 write 큐에
+/// 단일 writer 라우팅(docs/plans/io-render-threading.md §8 P2-3b): 메인 입력을 직접 세션에 쓰지 않고 write 큐에
 /// enqueue + I/O 스레드 wake. PtyIo.ctx가 이 구조를 가리킨다(LivePtySession이 핀 고정해 주소 안정). resize는
 /// 바이트 스트림이 아니라 ioctl이라 큐를 안 거치고 세션에 바로 전달한다(write(2) 바이트와 독립이라 안전).
 ///
@@ -41,7 +41,7 @@ const WriteQueueIo = struct {
         self.session.signalWrite();
     }
 
-    /// Phase 3 위임(docs/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 명령 큐에 enqueue(복사+포화 시
+    /// Phase 3 위임(docs/plans/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 명령 큐에 enqueue(복사+포화 시
     /// backpressure)하고 reader poll을 wake한다 — write_queue와 같은 self-pipe wake 재사용. reader가 같은 루프에서
     /// pop해 락 아래 적용한다. PtyIo.enqueue_command가 이 함수를 가리킨다(interactive 백엔드만).
     fn enqueueCommand(ctx: *anyopaque, cmd: core_command.CoreCommand) !void {
@@ -157,7 +157,7 @@ pub const LivePtySession = struct {
         var queue_initialized = true;
         errdefer if (queue_initialized) self.queue.deinit();
 
-        // 입력 방향 단일-writer 큐(docs/io-render-threading.md §8 P2-3b): interactive 세션에서 메인 입력이
+        // 입력 방향 단일-writer 큐(docs/plans/io-render-threading.md §8 P2-3b): interactive 세션에서 메인 입력이
         // 이리로 들어오면 reader가 같은 poll 루프에서 drain해 PTY로 write한다(유일한 writer). 사전 할당 없이
         // cap까지 grow하므로 non-interactive 세션에선 사실상 0바이트(idle). 라우팅은 attachSurface가 켠다.
         self.write_queue = try allocator.create(pty_reader.PtyWriteQueue);

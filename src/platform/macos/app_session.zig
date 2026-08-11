@@ -6198,7 +6198,7 @@ pub const AppSession = struct {
                     self.metal_dirty = true; // 선택 하이라이트 재빌드(주소 필드는 chrome 오버레이)
                     return;
                 }
-                // 선택 코어 mutate는 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
+                // 선택 코어 mutate는 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
                 self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .select_all, self.io) catch {};
             },
             // 화면+스크롤백 비우기(⌘K). 코어 mutate(셀·스크롤백)는 락 아래(리더 경합 방지, docs/io-render-threading.md
@@ -8497,7 +8497,7 @@ pub const AppSession = struct {
         // 스킵한다(`activeSurface()`는 non-null assert=unwrapNull 패닉). merge/move → makeKeyAndOrderFront(dst) → 원본 창
         // windowDidResignKey → focus_changed가 비워진 원본 세션을 만지던 크래시 방어(commitComposition와 같은 resign 경로).
         const active = self.app_window.active() orelse return;
-        // Phase 3 위임(docs/io-render-threading.md §9 P3-3): reportFocus는 코어 mutate(+response 생성)라 메인이
+        // Phase 3 위임(docs/plans/io-render-threading.md §9 P3-3): reportFocus는 코어 mutate(+response 생성)라 메인이
         // 직접 안 하고 reader로 위임한다 — reader가 적용 후 pendingResponse를 PTY로 흘린다(non-interactive 폴백은
         // enqueueCoreCommand가 직접 흘림). focus→응답 인과는 그 명령 처리 시 응답 생성으로 보존.
         self.runtime.enqueueCoreCommand(active.id, .{ .report_focus = gained }, self.io) catch {};
@@ -8586,7 +8586,7 @@ pub const AppSession = struct {
             if (last.col == cell.col and last.row == cell.row) return;
         }
         self.last_motion_cell = .{ .col = cell.col, .row = cell.row };
-        // reportMouse(코어 mutate + 응답)는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임 — reader가
+        // reportMouse(코어 mutate + 응답)는 full (a)(docs/plans/io-render-threading.md §9 P3-4)로 reader에 위임 — reader가
         // 적용 후 pendingResponse를 PTY로 흘린다. button 3 = no-button motion(any-event 1003). 적용 시점에 앱이 1003을
         // 꺼도 reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전.
         // command(32)은 마우스 리포트 modifier가 아니라 그룹 드래그 전용이라 마스킹해 뺀다(위 mouse() report 경로와 동형 — motion 비트 32 충돌 회피).
@@ -9558,7 +9558,7 @@ pub const AppSession = struct {
         // 셀렉션은 left 버튼(0)만 시작한다 — tracking 아닌 상태의 right/middle 클릭은 무시(셀렉션·context 메뉴 없음).
         if (button != 0) return;
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-        // 선택 코어 mutate(selectionStart/Extend/Clear/Word/Line)는 full (a)(docs/io-render-threading.md §9 P3-4)로
+        // 선택 코어 mutate(selectionStart/Extend/Clear/Word/Line)는 full (a)(docs/plans/io-render-threading.md §9 P3-4)로
         // reader에 위임한다 — read-modify-decide(kind 3 "이동 없는 클릭=해제")는 `select_extend_or_collapse` 명령으로
         // reader가 락 아래 **원자 실행**(메인이 위임 후 옛 상태를 읽어 오판하던 문제 제거). 메인은 UI 상태
         // (mouse_drag_selecting·drag_autoscroll·last_drag_col)만 만지고 코어는 안 만진다.
@@ -11063,7 +11063,7 @@ pub const AppSession = struct {
             }
             return &.{};
         }
-        // extractSelection은 선택 + 스크롤백을 읽는다 — 락 아래(docs/io-render-threading.md §9.1). full (a)에서 선택이
+        // extractSelection은 선택 + 스크롤백을 읽는다 — 락 아래(docs/plans/io-render-threading.md §9.1). full (a)에서 선택이
         // 이제 reader 스레드가 async로 mutate하므로, 락 없이 읽으면 드래그-선택 직후 Cmd+C가 torn/stale 선택을 본다
         // (렌더 경로는 이미 락 아래 selectionViewportSpan을 읽는다 — copyText만 노출됐던 갭). 추출 바이트는 owned이라 unlock 후 안전.
         const s = term_ops.activeSurface(self);
@@ -11523,7 +11523,7 @@ pub const AppSession = struct {
     /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
     pub fn jumpToPrompt(self: *AppSession, dir: i8) void {
         if (!self.surface_initialized) return;
-        // view_offset mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4) — 위임된 scroll과 같은
+        // view_offset mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4) — 위임된 scroll과 같은
         // 큐를 타 순서 보존(메인 직접 mutate면 reader scroll과 view_offset race). "스크롤됨" 최적화는 reader 렌더 트리거로 대체.
         self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .{ .jump_to_prompt = dir }, self.io) catch {};
         self.metal_dirty = true;
@@ -12841,7 +12841,7 @@ pub const AppSession = struct {
         // ⚠️ 이 전환-리셋은 sync 게이트 baseline이 단일 AppSession 필드 vs per-surface 비교 대상이라는 미스매치를 메운다.
         // per-surface로 옮겨도 배경 reader가 코어를 계속 진행시켜(esu/view_offset) 재활성화 리셋이 여전히 필요하므로 이 블록이
         // 안 사라진다 — 이게 최소 해법이다. blank·이전-탭 잔상을 둘 다 없애려면 per-surface 완성-프레임 스냅샷(큰 변경)이
-        // 필요하고 잔상 체감 시에만 값어치가 있다(대안·근거 분석: docs/io-render-threading.md §11.7).
+        // 필요하고 잔상 체감 시에만 값어치가 있다(대안·근거 분석: docs/io-render-present.md §11.7).
         {
             const active_id = term_ops.activeSurface(self).id;
             if (active_id != self.last_ticked_surface_id) {
@@ -14018,7 +14018,7 @@ pub const AppSession = struct {
             // 활성 grid는 마지막 완성 프레임(self.cells)을 유지하고, 사이드바 셀만 재-shape→place→replaceSidebar로
             // 교체한다. 사이드바 place가 atlas를 grow/repack하면 retained self.cells의 UV가 stale이 되므로, place
             // 전후 atlas.generation 변화를 감지해 변했으면 부분 swap을 버리고 metal_dirty로 다음 tick 전체 재투영을
-            // 예약한다(모든 pane+사이드바를 한 세대로 다시 정규화 — docs/io-render-threading.md §11).
+            // 예약한다(모든 pane+사이드바를 한 세대로 다시 정규화 — docs/io-render-present.md §11).
             if (builtin.os.tag == .macos) {
                 var collected: std.ArrayList(CollectedPane) = .empty;
                 defer {
@@ -29253,7 +29253,7 @@ test "shouldProjectFrame: sync(2026) hold는 라이브 투영만 막고 스크�
     try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0, false, false));
     // ── [B] ESU edge: sync hold 중(sync_active, hold<timeout, 스크롤 없음)이라도 직전 투영 이후 리더가 ESU를
     //    처리했으면(esu_advanced=true) 완성 프레임을 flush한다 — 폴링이 다음 BSU만 관측해 완성 프레임을 놓치던 MISS 수정. ──
-    //    **SSH 트레이드오프(docs/io-render-threading.md §11.6 esu_edge)**: 이 case에서 sync_active=true는 "리더가 이미
+    //    **SSH 트레이드오프(docs/io-render-present.md §11.6 esu_edge)**: 이 case에서 sync_active=true는 "리더가 이미
     //    **다음** 프레임 BSU를 시작"했다는 뜻일 수 있다(연속 조각 프레임). 그러면 flush가 그 진행 중 next 프레임을
     //    half-drawn으로 투영한다 — 로컬은 곧 다음 ESU가 교정하지만 bubbletea diff는 그 셀을 다시 안 보내 영구 stale.
     //    `.sync` 로거의 `active=1 gproj=1`(esu_edge)로 관측되는 maru ssh desync 유력 원인.

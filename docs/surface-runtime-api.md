@@ -77,7 +77,7 @@ pub const PtyIo = struct {
     resize_fn: *const fn (ctx: *anyopaque, size: maru.terminal.Size) anyerror!void,
     // non-blocking 쓰기 변형. null이면 writeInputNonBlocking이 blocking으로 폴백한다(실제 PTY 백엔드만 채운다).
     write_input_nb: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!usize = null,
-    // 메인발 코어 mutate 위임 채널(io-render-threading.md §9 Phase 3). interactive 백엔드(live_pty)만 채운다.
+    // 메인발 코어 mutate 위임 채널(plans/io-render-threading.md §9 Phase 3). interactive 백엔드(live_pty)만 채운다.
     enqueue_command: ?*const fn (ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void = null,
 
     pub fn fromSession(session: *maru.pty.PtySession) PtyIo;
@@ -190,7 +190,7 @@ pub const SurfaceRuntime = struct {
 
 `enqueueCoreCommand`:
 
-- 메인 스레드발 코어 mutate(스크롤 등)를 I/O reader 스레드로 위임한다(코어 변경 단일책임 — [io-render-threading.md §9 Phase 3](io-render-threading.md)). interactive 백엔드면 명령 큐 enqueue + reader wake로 reader가 락 아래 적용하고, reader가 없는 백엔드(controlled smoke·단위 테스트)면 호출 스레드가 코어 락 아래 직접 적용하는 폴백을 탄다.
+- 메인 스레드발 코어 mutate(스크롤 등)를 I/O reader 스레드로 위임한다(코어 변경 단일책임 — [plans/io-render-threading.md §9 Phase 3](plans/io-render-threading.md)). interactive 백엔드면 명령 큐 enqueue + reader wake로 reader가 락 아래 적용하고, reader가 없는 백엔드(controlled smoke·단위 테스트)면 호출 스레드가 코어 락 아래 직접 적용하는 폴백을 탄다.
 - 응답을 만드는 명령이면 폴백 경로에서도 interactive와 같게 응답 바이트를 PTY로 흘린다(락 안 복사, 락 밖 write).
 
 `resize`:

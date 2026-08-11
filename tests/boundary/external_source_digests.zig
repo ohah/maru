@@ -26,7 +26,10 @@ pub const inventory = [_]Proof{
     // 커널 cwd 폴백 seam(`process_cwd`)이 붙어 또 바뀐다(docs/editor-surface-dock.md §3.5 — OSC 7이 없는 셸·TUI에서
     // 활성 터미널의 폴더를 알아내는 경로). count는 3 그대로다 — vtable 항목 하나와 래퍼, fake 구현·계약 테스트를
     // 더했을 뿐이고 `@field` 반사 접근이나 Client 구성·receiver 집합은 건드리지 않는다.
-    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "a874c6e9172164e771aa7a0b61a73e821f7b95750fee789056d21c3548e04ed2" },
+    // io-render-threading.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§9 →
+    // plans/io-render-threading.md). count는 3 그대로다 — 주석 문자열만 달라졌다. 같은 종류가
+    // app_session.zig 항목에도 있다(거기 주석 참조 — 문서가 커지는 한 반복된다).
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "17f2cc3db9bc64e1ea9ab6f5b5462e54e301ec1781d20b428390ea254b7e1be1" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
     // `Backend.deinit`이 in-flight worker를 기다리게 되면서 또 바뀐다(`waitForWorkers`). count는 2 그대로다 —

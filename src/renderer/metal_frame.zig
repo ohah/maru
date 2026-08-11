@@ -1689,7 +1689,7 @@ pub const MetalFrameBuffer = struct {
     /// 투영을 막는 동안에도 에이전트 스피너(사이드바 카드)를 진행시키는 부분 swap이다(전체 `replace`의 사이드바
     /// 부분만 미러링). **전제**: 이 tick에 atlas가 grow/repack되지 **않았어야** 한다 — 그렇지 않으면 retained
     /// `self.cells`의 UV가 stale이 된다. 호출자가 사이드바 place 전후 `atlas.generation` 변화를 감지해 변했으면
-    /// 이 경로를 쓰지 않고 전체 재투영으로 폴백한다(docs/io-render-threading.md §11). 사이드바 raster를 uploads로
+    /// 이 경로를 쓰지 않고 전체 재투영으로 폴백한다(docs/io-render-present.md §11). 사이드바 raster를 uploads로
     /// 실어 새 스피너 글리프가 아직 atlas에 없으면 업로드하고(터미널 글리프는 persistent atlas에 resident라 재업로드
     /// 불필요), generation++로 whole-frame 재draw를 트리거하되 `self.cells`는 byte-identical로 다시 그려져 tearing이 없다.
     pub fn replaceSidebar(

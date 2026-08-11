@@ -747,7 +747,7 @@ pub const PtySession = struct {
         self.signalWake();
     }
 
-    /// 단일 I/O 루프(docs/io-render-threading.md §8 Phase 2)용 I/O 준비 상태. closing이면 waitIo가
+    /// 단일 I/O 루프(docs/plans/io-render-threading.md §8 Phase 2)용 I/O 준비 상태. closing이면 waitIo가
     /// error.SessionClosed. 둘 다 false면 write-pending wake(호출자가 write 큐 확인 후 다음 poll에 POLLOUT 반영).
     pub const IoReady = struct { readable: bool = false, writable: bool = false };
 

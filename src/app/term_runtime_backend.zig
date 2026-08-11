@@ -275,7 +275,7 @@ pub const VTable = struct {
     /// 지금 쓸 수 있는 만큼만 쓰고 쓴 길이를 돌려준다(paste가 UI tick을 동결시키지 않게). 0=다음 tick 재시도.
     write_input_nonblocking: *const fn (ctx: *anyopaque, handle: RuntimeHandle, bytes: []const u8) anyerror!usize,
 
-    /// 메인발 코어 mutate(스크롤/선택/IME 등)를 reader 스레드로 위임한다(docs/io-render-threading.md §9 Phase 3).
+    /// 메인발 코어 mutate(스크롤/선택/IME 등)를 reader 스레드로 위임한다(docs/plans/io-render-threading.md §9 Phase 3).
     enqueue_core_command: *const fn (ctx: *anyopaque, handle: RuntimeHandle, cmd: core_command.CoreCommand, io: std.Io) anyerror!void,
 
     /// grid 크기를 바꾼다 — 코어 resize와 PTY winsize(`TIOCSWINSZ`)를 한 user action으로 함께 적용한다.

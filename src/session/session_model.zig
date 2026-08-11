@@ -94,7 +94,7 @@ pub fn Model(comptime Rt: type) type {
             /// 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 core.windowTitle()을 복사해 채운다. destroyTerm이 해제.
             auto_title: std.ArrayListUnmanaged(u8) = .empty,
             /// syncAutoTitles가 마지막으로 auto_title에 반영한 core.title_generation(P4-1). 코어의 현재 generation과 같으면
-            /// 제목/cwd가 안 바뀐 것이라 lock+복사를 건너뛴다(매 tick 전-Term lock 제거 — docs/io-render-threading.md §12).
+            /// 제목/cwd가 안 바뀐 것이라 lock+복사를 건너뛴다(매 tick 전-Term lock 제거 — docs/plans/io-render-threading.md §12).
             /// 0=아직 미반영(초기 windowTitle이 빈 상태와 일치 — 코어 title/cwd가 세팅돼야 generation이 ≥1로 오른다).
             last_title_gen: u32 = 0,
 

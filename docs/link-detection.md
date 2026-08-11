@@ -79,7 +79,7 @@
   분류(`wordIsUrl`/`urlAnchorAt`/`extractUrlAt`)가 스크롤백을, file_path resolve가 cwd를 읽는데 둘 다 reader
   스레드가 OSC 7·출력으로 mutate하므로(cwd free+realloc, 스크롤백 evict) 락 없이 읽으면 use-after-free·torn
   read가 난다(`focusedTermCwd`·`copyText`가 같은 위험을 락으로 고친 선례). hover는 매 mouse-move라 클릭보다
-  빈번해 노출이 더 크다. 존재검증 `access(F_OK)`는 빠른 syscall이라 락 아래 허용([io-render-threading](io-render-threading.md) §9.1).
+  빈번해 노출이 더 크다. 존재검증 `access(F_OK)`는 빠른 syscall이라 락 아래 허용([io-render-threading](plans/io-render-threading.md) §9.1).
 
 ## hover(밑줄)와 click(열림)의 의도적 불일치
 

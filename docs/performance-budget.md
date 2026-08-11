@@ -97,7 +97,7 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 | `kitty_image_pipeline` | 2,000ms 이하 | 최악 근사(200 placement × 50 image)로 `buildGpuImages`+`planImageUploads` 1,000회 | 이미지가 있는 동안 매 frame 도는 파이프라인 비용의 회귀를 잡는다(측정상 캐시화 불필요 결론의 전제를 지킨다). |
 | `render_build_drawlist` | 2,000ms 이하 | 300×90 full-dirty·전 셀 장식 화면에서 `renderSnapshot`+`buildDrawList` 200회 | 렌더가 core_mutex를 잡은 채 dirty 셀을 복사하는 락-보유 구간의 상한 — 길어지면 I/O 스레드가 대기한다([io-render-threading.md §5](io-render-threading.md)). |
 | `render_build_scrolled` | 2,000ms 이하 | 같은 화면을 과거 스크롤(view_offset>0) 상태로 200회 | 과거를 보는 중 매 frame 도는 viewport 합성+복사(둘 다 락 안)의 정상 상태 비용을 잰다. |
-| `core_command_queue` | 2,000ms 이하 | enqueue→pop→free 라운드트립 100,000회 | 메인발 코어 mutate 위임(`CoreCommandQueue`)의 latency 바닥이 UI 이벤트 빈도에서 무시 가능하게 유지한다([io-render-threading.md §9.7](io-render-threading.md)). |
+| `core_command_queue` | 2,000ms 이하 | enqueue→pop→free 라운드트립 100,000회 | 메인발 코어 mutate 위임(`CoreCommandQueue`)의 latency 바닥이 UI 이벤트 빈도에서 무시 가능하게 유지한다([plans/io-render-threading.md §9.7](plans/io-render-threading.md)). |
 
 이 숫자는 최종 제품 목표가 아니다. 현재 core가 실수로 극단적으로 느려지는 것을 막는 최소 guardrail이다. 각 예산·반복 수의 상세 근거 주석은 `tools/perf/core.zig`를 단일 출처로 둔다.
 

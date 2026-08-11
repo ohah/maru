@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NativeActivity 라 Java/Kotlin 코드가 0줄이다. `hasCode="false"` 가 그 선언이고,
+     `android.app.lib_name` 이 진입점 .so 를 가리킨다. maru 의 "네이티브 최소" 정책과 맞다.
+
+     화면 방향은 portrait 로 고정한다 — 앞 오프스크린 단계에서 가로로 나온 지적을 여기서는
+     창 자체가 세로가 되게 해서 푼다. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="dev.maru.chrome">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
+    <application android:label="MaruChrome" android:hasCode="false">
+        <activity android:name="android.app.NativeActivity"
+                  android:label="MaruChrome"
+                  android:screenOrientation="portrait"
+                  android:configChanges="orientation|keyboardHidden|screenSize"
+                  android:exported="true">
+            <meta-data android:name="android.app.lib_name" android:value="maruchrome" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

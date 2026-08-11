@@ -841,6 +841,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       4. **C3-3b3 atomic settlement:** Attachment가 Runtime semantic type을 import하지 않는
          개념상 `settlePendingEvent(correlation,effect_request)`인 transaction을 구현하며 exact coordinator signature는
          persistent-session-host의 C3-3b3 API 표를 따른다. 모든 authority/callback/allocator preflight 뒤
+         registry ordering row뿐 아니라 source EventOwner payload·allocator provenance·ConnectionLease pin·quarantine
+         continuation까지 ClientSlot 소유 composite prepared event-release permit에 봉인하고, private registry-only
+         subpermit은 전체 completion을 주장하지 않는다. source tombstone/pin·quarantine publication 뒤
+         payload callback exact once와 registry/EventOwner/correlation/mirror source-zero를 완료한다.
          none·poison·revoke clean/cancel/partial→poison·already-terminal cleanup과 exact release를 같은 no-fail suffix로 닫는다.
          sealed PRE state에서 canonical plan을 한 번만 산출하고 POST state는 재분류하지 않으며, optional first-reason presence,
          unusable 전후, target/sibling relation, fd disposition/close-attempt와 ordered allocator cleanup을 evidence에 결속한다.

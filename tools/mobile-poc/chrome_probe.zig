@@ -4,7 +4,12 @@
 //! `tree.build` 로 레이아웃을 돌린 뒤 `paint` 로 ChromeDraw 를 얻는다 — **데스크톱이 쓰는
 //! 바로 그 경로**다. 플랫폼은 나온 op 을 그리기만 한다.
 const std = @import("std");
-const chrome = @import("chrome");
+// **모듈 루트는 `maru.zig` 하나다.** chrome·renderer 를 따로 주면 둘 다 `icons.zig` 를
+// 상대 경로로 끌어와 "file exists in two modules" 로 깨진다(실측). 배럴 하나로 받으면
+// 상대 import 가 전부 같은 모듈 안에서 풀린다.
+const maru = @import("maru");
+const chrome = maru.chrome;
+const icon_glyph = maru.renderer.icon_glyph;
 
 const tree = chrome.ui.tree;
 const layout = chrome.ui.layout;
@@ -24,8 +29,11 @@ pub const CQuad = extern struct {
     b: f32,
     a: f32,
     radius: f32,
-    /// 1이면 텍스트 자리(글리프 아틀라스가 없으므로 플랫폼이 흐린 박스로 표시한다).
-    is_text: u32,
+    /// 0=단색 quad · 1=아틀라스 글리프 · 2=아이콘 coverage
+    kind: u32,
+    /// kind=1 일 때 아틀라스 셀 좌표(열, 행). kind=2 면 아이콘 슬롯 인덱스.
+    cell_x: u32,
+    cell_y: u32,
 };
 
 var quad_buf: [512]CQuad = undefined;
@@ -46,7 +54,7 @@ fn themeColors() tokens.ThemeColors {
     };
 }
 
-fn push(rect: draw.Rect, rgb: anytype, alpha: u8, radius: u16, is_text: bool) void {
+fn push(rect: draw.Rect, rgb: anytype, alpha: u8, radius: u16, kind: u32) void {
     if (quad_count == quad_buf.len) return;
     quad_buf[quad_count] = .{
         .x = @floatFromInt(rect.x),
@@ -58,13 +66,104 @@ fn push(rect: draw.Rect, rgb: anytype, alpha: u8, radius: u16, is_text: bool) vo
         .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
         .a = @as(f32, @floatFromInt(alpha)) / 255.0,
         .radius = @floatFromInt(radius),
-        .is_text = if (is_text) 1 else 0,
+        .kind = kind,
+        .cell_x = 0,
+        .cell_y = 0,
     };
     quad_count += 1;
 }
 
+/// 아틀라스 인덱스(호스트가 만든 atlas.idx)를 코드포인트→셀로 들고 있는다.
+var atlas_cp: [256]u32 = undefined;
+var atlas_col: [256]u32 = undefined;
+var atlas_row: [256]u32 = undefined;
+var atlas_n: usize = 0;
+
+export fn maru_atlas_add(cp: u32, col: u32, row: u32) void {
+    if (atlas_n == atlas_cp.len) return;
+    atlas_cp[atlas_n] = cp;
+    atlas_col[atlas_n] = col;
+    atlas_row[atlas_n] = row;
+    atlas_n += 1;
+}
+
+fn atlasCell(cp: u21) ?struct { col: u32, row: u32 } {
+    for (0..atlas_n) |i| if (atlas_cp[i] == cp) return .{ .col = atlas_col[i], .row = atlas_row[i] };
+    return null;
+}
+
+/// 문자열을 글자 quad 로 분해한다. **폭은 maru 의 EAW 규칙을 따른다** — 한글은 2셀이다.
+fn pushText(text: []const u8, x0: i32, y0: i32, cell_w: i32, cell_h: i32, rgb: anytype) void {
+    var pen = x0;
+    var view = std.unicode.Utf8View.init(text) catch return;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        // 폭은 EAW 규칙을 따른다 — 한글/CJK 는 2셀이다. 실제 이식에서는 `src/width.zig` 를
+        // 그대로 쓴다(여기서는 chrome 이 그 파일을 상대 경로로 이미 들고 있어 모듈 중복이
+        // 나므로 판정만 인라인으로 둔다).
+        const w: u8 = if ((cp >= 0xAC00 and cp <= 0xD7A3) or (cp >= 0x4E00 and cp <= 0x9FFF) or
+            (cp >= 0x3040 and cp <= 0x30FF) or (cp >= 0xFF01 and cp <= 0xFF60)) 2 else 1;
+        if (cp != ' ') {
+            if (atlasCell(cp)) |cell| {
+                if (quad_count < quad_buf.len) {
+                    quad_buf[quad_count] = .{
+                        .x = @floatFromInt(pen),
+                        .y = @floatFromInt(y0),
+                        .w = @floatFromInt(cell_w * @as(i32, @intCast(@max(1, w)))),
+                        .h = @floatFromInt(cell_h),
+                        .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+                        .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+                        .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+                        .a = 1.0,
+                        .radius = 0,
+                        .kind = 1,
+                        .cell_x = cell.col,
+                        .cell_y = cell.row,
+                    };
+                    quad_count += 1;
+                }
+            }
+        }
+        pen += cell_w * @as(i32, @intCast(@max(1, w)));
+    }
+}
+
+/// 등록된 SVG 아이콘의 coverage 를 Zig 에서 만든다 — 두 플랫폼이 같은 코드를 쓴다.
+const icon_slot_px = 32;
+const icon_slots = 6;
+/// **RGBA8** 이어야 한다 — `glyph_pixels.slotFits` 가 `bytes_per_row >= width*4` 를 요구한다
+/// (단일 채널을 주면 조용히 0을 돌려준다. 실측: filled=0/6 으로 헤맸다). 셰이더는 alpha 를
+/// coverage 로 읽는다.
+var icon_pixels: [icon_slots * icon_slot_px * icon_slot_px * 4]u8 = undefined;
+
+export fn maru_icon_atlas() [*]const u8 {
+    return &icon_pixels;
+}
+export fn maru_icon_slot_px() u32 {
+    return icon_slot_px;
+}
+export fn maru_icon_count() u32 {
+    return icon_slots;
+}
+
+/// 아이콘 coverage 를 채우고, 실제로 잉크가 있는 슬롯 수를 돌려준다(0이면 자산 이식 실패).
+export fn maru_icon_build() u32 {
+    @memset(&icon_pixels, 0);
+    const cps = [icon_slots]u32{ 0xF0001, 0xF0002, 0xF0003, 0xF0004, 0xF0005, 0xF0006 };
+    var filled: u32 = 0;
+    for (cps, 0..) |cp, i| {
+        const stride = icon_slot_px * 4;
+        const base = i * icon_slot_px * stride;
+        const slot = icon_pixels[base .. base + icon_slot_px * stride];
+        const n = icon_glyph.fillCoverage(cp, icon_slot_px, icon_slot_px, stride, slot) orelse continue;
+        if (n > 0) filled += 1;
+    }
+    return filled;
+}
+
 /// 터미널 창 chrome 을 실제 컴포넌트로 조립한다 — 탭 바, 사이드바 카드 목록, 본문, 상태바.
 fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
+    const height_f: f32 = @floatFromInt(height);
     var entries: [256]tree.RectEntry = undefined;
     var items: [256]layout.Item = undefined;
     var flex_scratch: [256]layout.FlexScratch = undefined;
@@ -119,18 +218,18 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // ── 본문: 터미널 영역(카드 하나) + 그 안의 텍스트 줄들
     const output = [_][]const u8{
         "$ zig build test",
-        "  All 11 tests passed.",
+        "  All 11 passed.",
         "$ git status --short",
         "  M src/chrome/ui/tree.zig",
-        "  M docs/metal-ui-layout.md",
-        "$ maru --version",
-        "  maru 0.1.0 (arm64-ios)",
+        "  한글 터미널 세션",
+        "$ maru 0.1.0 (arm64)",
+        "  목록 설정 검색 알림",
     };
     var lines: [7]tree.UiNode = undefined;
     for (&lines, 0..) |*l, i| {
         l.* = tree.text(.{
             .id = @intCast(310 + i),
-            .style = .{ .width = .{ .px = @floatFromInt(output[i].len * 8) },
+            .style = .{ .width = .{ .px = @floatFromInt(output[i].len * 7) },
                         .height = .{ .px = 15.0 }, .margin = .{ .bottom = 7.0 } },
             .value = output[i],
             .tone = if (output[i][0] == '$') .accent else .primary,
@@ -169,32 +268,30 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     const cd = try paint_mod.paint(built, .{}, tk, .sidebar, .{ .ops = &ops });
 
     // 배경 먼저
-    push(.{ .x = 0, .y = 0, .w = width, .h = height }, tk.get(.surface_bg), 0xFF, 0, false);
+    push(.{ .x = 0, .y = 0, .w = width, .h = height }, tk.get(.surface_bg), 0xFF, 0, 0);
     for (cd.ops) |op| switch (op) {
-        .quad => |q| push(q.rect, tk.get(q.fill_role), q.alpha, q.corner_radii[0], false),
-        .fill => |f| push(f.rect, tk.get(f.role), f.alpha, 0, false),
-        .border => |b| push(b.rect, tk.get(b.role), 0x60, 0, false),
+        .quad => |q| push(q.rect, tk.get(q.fill_role), q.alpha, q.corner_radii[0], 0),
+        .fill => |f| push(f.rect, tk.get(f.role), f.alpha, 0, 0),
+        .border => |b| push(b.rect, tk.get(b.role), 0x60, 0, 0),
         .rule => |r| push(.{ .x = r.from.x, .y = r.from.y,
                              .w = @intCast(@max(1, r.to.x - r.from.x)),
-                             .h = @intCast(@max(1, r.to.y - r.from.y)) }, tk.get(r.role), 0xFF, 0, false),
+                             .h = @intCast(@max(1, r.to.y - r.from.y)) }, tk.get(r.role), 0xFF, 0, 0),
         // 글리프 아틀라스가 없으므로 텍스트는 **글자 수에 비례한 박스**로 자리만 표시한다.
         // 실제 이식에서는 CoreText/FreeType 로 래스터한 아틀라스를 샘플링한다.
         .text => |tx| {
             var chars: u32 = 0;
             for (tx.runs) |run| chars += @intCast(run.text.len);
             push(.{ .x = tx.origin.x, .y = tx.origin.y, .w = chars * 7 + 2, .h = 13 },
-                 tk.get(tx.role), 0xC0, 2, true);
+                 tk.get(tx.role), 0xC0, 2, 0);
         },
         else => {},
     };
 
     // `ui.paint` 는 텍스트 op 을 내지 않는다(resolveText 결과를 버린다 — 실측). 텍스트 렌더는
-    // typography/lowering 이 따로 맡는 구조라, 레이아웃이 잡은 자리를 트리에서 직접 읽어
-    // **글자 수에 비례한 박스**로 표시한다. 실제 이식에서는 이 자리에 글리프 아틀라스를 샘플링한다.
+    // typography/lowering 이 따로 맡는 구조라, 레이아웃이 잡은 자리에 **실제 글자**를 그린다.
     for (built.entries) |entry| {
         if (entry.kind != .text) continue;
-        const r = entry.rect;
-        if (r.width < 1 or r.height < 1) continue;
+        const label = labelFor(entry.id) orelse continue;
         const tone_role: tokens.ColorRole = switch (entry.visual) {
             .text => |tv| switch (tv.tone) {
                 .accent => .accent_bar,
@@ -203,13 +300,54 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             },
             else => .surface_fg,
         };
-        push(.{
-            .x = @intFromFloat(r.x),
-            .y = @intFromFloat(r.y),
-            .w = @intFromFloat(@max(2, r.width)),
-            .h = @intFromFloat(@max(2, r.height)),
-        }, tk.get(tone_role), 0xD0, 2, true);
+        pushText(label, @intFromFloat(entry.rect.x), @intFromFloat(entry.rect.y), 8, 15, tk.get(tone_role));
     }
+
+    // **SVG 아이콘**: maru 의 등록 아이콘을 그대로 얹는다. coverage 는 Zig 가 만들고
+    // (renderer/icon_glyph) 플랫폼은 텍스처로 올려 샘플링만 한다 — 자산이 이식된다는 증거다.
+    const icon_y: i32 = @intFromFloat(@max(0, height_f - 22));
+    for (0..6) |i| {
+        if (quad_count == quad_buf.len) break;
+        const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);
+        quad_buf[quad_count] = .{
+            .x = @floatFromInt(@as(i32, @intCast(260 + i * 26))),
+            .y = @floatFromInt(icon_y),
+            .w = 18,
+            .h = 18,
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1.0,
+            .radius = 0,
+            .kind = 2,
+            .cell_x = 0,
+            .cell_y = @intCast(i),
+        };
+        quad_count += 1;
+    }
+}
+
+/// UiId → 문자열. `RectEntry` 는 문자열을 들고 있지 않으므로(레이아웃만 담는다) 조립할 때
+/// 쓴 값을 여기서 되찾는다.
+fn labelFor(id: u64) ?[]const u8 {
+    return switch (id) {
+        111 => "zsh",
+        112 => "vim",
+        113 => "logs",
+        230 => "maru",
+        231 => "web",
+        232 => "docs",
+        233 => "infra",
+        234 => "scratch",
+        310 => "$ zig build test",
+        311 => "  All 11 passed.",
+        312 => "$ git status --short",
+        313 => "  M src/chrome/ui/tree.zig",
+        314 => "  한글 터미널 세션",
+        315 => "$ maru 0.1.0 (arm64)",
+        316 => "  목록 설정 검색 알림",
+        else => null,
+    };
 }
 
 /// 플랫폼이 부른다: UI 를 조립하고 quad 개수를 돌려준다.

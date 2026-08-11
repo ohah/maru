@@ -3,3 +3,6 @@
 *.ppm
 poc-*
 MaruPoC.app/
+make_atlas
+atlas.gray
+atlas.idx

@@ -4,10 +4,12 @@
 layout(push_constant) uniform Push {
     vec4 rect_px;   // x0,y0,x1,y1
     vec4 color;
-    vec4 misc;      // radius, viewport.x, viewport.y, is_text
+    vec4 misc;      // radius, viewport.x, viewport.y, kind
+    vec4 cell;      // col, row, atlas_cols, atlas_rows
 } pc;
 layout(location = 0) out vec2 vLocal;
 layout(location = 1) out vec2 vHalf;
+layout(location = 2) out vec2 vUV;
 void main() {
     vec2 p0 = pc.rect_px.xy;
     vec2 p1 = pc.rect_px.zw;
@@ -20,4 +22,6 @@ void main() {
     vec2 half_size = (p1 - p0) * 0.5;
     vHalf = half_size;
     vLocal = px - (p0 + half_size);
+    vec2 t[4] = vec2[4](vec2(0,1), vec2(1,1), vec2(0,0), vec2(1,0));
+    vUV = (pc.cell.xy + t[gl_VertexIndex]) / pc.cell.zw;
 }

@@ -11,7 +11,7 @@
 
 활성 터미널의 작업 디렉터리가 바뀌면 탐색기가 **그 자리를 펼쳐 보여준다**(reveal). 사용자 요청은 "탐색기가 활성 터미널 베이스 경로를 따라가면 좋겠다"였고, 구현 모델은 **root 교체가 아니라 reveal**이다.
 
-**cwd를 어디서 얻는가는 이 문서가 소유하지 않는다.** 해석 지점은 소스 컨트롤 뷰와 공유하며(`git_ops.activeTerminalCwd`), 규칙은 [editor-surface-dock.md §3.5](editor-surface.md)의 "대상 저장소를 정하는 규칙"이 단일 출처다. 요약하면 **OSC 7 → 커널 조회** 2단이다. 2026-08-10 전까지 이 기능은 OSC 7 단독이었고, 그래서 셸 통합이 없는 셸(bash/fish)이나 화면을 리셋하는 전체화면 TUI(claude·codex)가 떠 있는 터미널에서는 **reveal이 조용히 동작하지 않았다**. 커널 폴백이 그 빈칸을 메운다. 두 뷰가 같은 지점을 쓰는 이유는 단순하다 — 탐색기가 펼친 폴더와 목록이 보는 저장소가 달라지면 안 된다.
+**cwd를 어디서 얻는가는 이 문서가 소유하지 않는다.** 해석 지점은 소스 컨트롤 뷰와 공유하며(`git_ops.activeTerminalCwd`), 규칙은 [editor-surface-dock.md §3.5](editor-surface-dock.md)의 "대상 저장소를 정하는 규칙"이 단일 출처다. 요약하면 **OSC 7 → 커널 조회** 2단이다. 2026-08-10 전까지 이 기능은 OSC 7 단독이었고, 그래서 셸 통합이 없는 셸(bash/fish)이나 화면을 리셋하는 전체화면 TUI(claude·codex)가 떠 있는 터미널에서는 **reveal이 조용히 동작하지 않았다**. 커널 폴백이 그 빈칸을 메운다. 두 뷰가 같은 지점을 쓰는 이유는 단순하다 — 탐색기가 펼친 폴더와 목록이 보는 저장소가 달라지면 안 된다.
 
 **왜 root를 갈지 않는가.** `replaceExplicitRoots`는 주석 그대로 *"기존 expanded snapshot은 root 변경의 correctness 권위가 아니므로 버리고 새 lazy scan을 예약한다"* — 즉 root 교체는 **접힘·펼침 상태를 통째로 버리고** `root_generation`을 올리며 watcher를 재등록한다. cwd는 `cd` 한 번에 바뀌는 값이라, 그걸 root에 묶으면:
 
@@ -198,7 +198,7 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   아이콘 세 개가 뷰를 바꿀 때마다 오르내리고**(실측 53px ↔ 80px, 사용자 보고) 터미널 폰트가 도크 기하를 정하게 된다. 지금은
   방향이 반대다 — 도크가 터미널 식을 물려받는 게 아니라, 터미널 탭 바가 도크가 쓰던 40pt 하한을 **함께 본다**. 그래서 뷰
   전환은 여전히 아이콘 위치를 움직이지 않고, 폰트를 키우면 두 바가 함께 커진다
-  ([agent-session-list.md](agent-session-list-layout.md) §2.1.3이 예고한 "두 chrome이 공유하는 logical token" 해법이다).
+  ([agent-session-list-layout.md](agent-session-list-layout.md) §2.1.3이 예고한 "두 chrome이 공유하는 logical token" 해법이다).
   바 높이를 넣으면 본문이 사라질 만큼 도크가 낮으면 바를 접는다 — 스위처가 콘텐츠를 굶기지 않는다.
 
   **시작선도 같은 이유로 하나다.** 도크는 터미널과 **같은 상단 띠**(`titlebar_strip_px`)에서 시작한다. 예전에는 도크만
@@ -232,7 +232,7 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 | 뷰 | 아이콘 | 내용 | 계약 소유 |
 |---|---|---|---|
 | 탐색기 | 폴더 | 파일 트리(§4) | 이 문서 |
-| 소스 컨트롤 | git | 변경 목록·스테이징 | [editor-surface.md](editor-surface-dock.md) §3.5 |
+| 소스 컨트롤 | git | 변경 목록·스테이징 | [editor-surface-dock.md](editor-surface-dock.md) §3.5 |
 | AI 세션 | 코드 | 창의 **모든 탭**을 가로지르는 에이전트 세션 목록 | 아래 |
 
 **AI 세션 뷰.** 행 문자열은 사이드바 에이전트 행과 **같은 출처**(마지막 사용자 프롬프트 우선 + 상태 마커)를 쓴다 — 같은 것을
@@ -242,7 +242,7 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 
 ## 4. 트리 계약
 
-- **배치**: 트리가 **도크의 현재 뷰 영역 전체**다 — `Geometry.tree = dock - view_bar`(§3.5)이고 `editor`/`tab_bar`/`header`/`content`/`tree_divider` rect와 그 hit-test·드래그(`treeDividerHitRect`·`treeSizePtForPointer`·`dock_tree_divider` 제스처)는 삭제됐다. 도크 폭이 곧 트리 폭이라 폭 조절은 outer divider 하나뿐이다(`dock.tree_size`와 `dock-tree-size` 키는 B-4에서 제거했다 — 도크 폭이 곧 트리 폭이라 잴 것이 없다). 부작용: **트리 좌측 가장자리가 outer divider의 grab band와 겹친다**(옛 배치에선 트리가 우측이라 안 겹쳤다). 그래서 `min_editor_cols`(28셀)·`min_tree_cols`(12셀)·`default_tree_cols`(18셀) 상수와 editor↔tree divider도 함께 사라졌다(B-4에서 삭제). 남은 폭 하한은 pt 기준 `min_right_pt`를 계속 강제한다(`@max(requested_px, @min(min_dock, max_dock))`). 옛 420pt 기본·240pt 하한은 **editor + tree를 함께 담던 시절의 값**이라 트리 전용에는 과했다(화면 절반 가까이 차지 — 사용자 확인 2026-07-28). 자동 도크(`dock.size == 0`)의 탐색기·소스 컨트롤은 좌측 사이드바와 같은 성격의 목록 열이므로 **기본 180pt·하한 120pt**(`theme.SidebarConfig.width_pt`의 기본·범위와 같은 값. 레이어가 달라 상수는 공유하지 않고 값만 맞춘다)을 쓴다. `agent_sessions`만 같은 자동 sentinel에서 480pt를 쓰는 consumer-specific 예외이며, 수동으로 저장한 0 이외 폭은 어느 뷰도 바꾸지 않는다([agent-session-list.md](agent-session-list-layout.md) §2.1). bottom은 가로 띠라 성격이 달라(폭이 아니라 높이) 300/160pt를 유지한다. 폭 조절은 이제 **terminal↔dock outer divider 하나**가 담당하며, 그 divider가 곧 트리 폭이다(현행 `dock-size`가 그 값이다 — `dock-tree-size`는 **키 자체가 제거**돼 더는 쓰지도 읽지도 않고, 옛 파일의 그 키는 unknown field 관용으로 조용히 무시된다). 확장 grab band·live reframe·mouse-down offset 보존 계약은 outer divider에 그대로 남는다. **트리 자체는 WKWebView가 아니라 GPU 셀 chrome이므로 도크에 web surface가 하나도 없고**, 그 결과 §4의 도크-aware 예외 둘이 제거된다.
+- **배치**: 트리가 **도크의 현재 뷰 영역 전체**다 — `Geometry.tree = dock - view_bar`(§3.5)이고 `editor`/`tab_bar`/`header`/`content`/`tree_divider` rect와 그 hit-test·드래그(`treeDividerHitRect`·`treeSizePtForPointer`·`dock_tree_divider` 제스처)는 삭제됐다. 도크 폭이 곧 트리 폭이라 폭 조절은 outer divider 하나뿐이다(`dock.tree_size`와 `dock-tree-size` 키는 B-4에서 제거했다 — 도크 폭이 곧 트리 폭이라 잴 것이 없다). 부작용: **트리 좌측 가장자리가 outer divider의 grab band와 겹친다**(옛 배치에선 트리가 우측이라 안 겹쳤다). 그래서 `min_editor_cols`(28셀)·`min_tree_cols`(12셀)·`default_tree_cols`(18셀) 상수와 editor↔tree divider도 함께 사라졌다(B-4에서 삭제). 남은 폭 하한은 pt 기준 `min_right_pt`를 계속 강제한다(`@max(requested_px, @min(min_dock, max_dock))`). 옛 420pt 기본·240pt 하한은 **editor + tree를 함께 담던 시절의 값**이라 트리 전용에는 과했다(화면 절반 가까이 차지 — 사용자 확인 2026-07-28). 자동 도크(`dock.size == 0`)의 탐색기·소스 컨트롤은 좌측 사이드바와 같은 성격의 목록 열이므로 **기본 180pt·하한 120pt**(`theme.SidebarConfig.width_pt`의 기본·범위와 같은 값. 레이어가 달라 상수는 공유하지 않고 값만 맞춘다)을 쓴다. `agent_sessions`만 같은 자동 sentinel에서 480pt를 쓰는 consumer-specific 예외이며, 수동으로 저장한 0 이외 폭은 어느 뷰도 바꾸지 않는다([agent-session-list-layout.md](agent-session-list-layout.md) §2.1). bottom은 가로 띠라 성격이 달라(폭이 아니라 높이) 300/160pt를 유지한다. 폭 조절은 이제 **terminal↔dock outer divider 하나**가 담당하며, 그 divider가 곧 트리 폭이다(현행 `dock-size`가 그 값이다 — `dock-tree-size`는 **키 자체가 제거**돼 더는 쓰지도 읽지도 않고, 옛 파일의 그 키는 unknown field 관용으로 조용히 무시된다). 확장 grab band·live reframe·mouse-down offset 보존 계약은 outer divider에 그대로 남는다. **트리 자체는 WKWebView가 아니라 GPU 셀 chrome이므로 도크에 web surface가 하나도 없고**, 그 결과 §4의 도크-aware 예외 둘이 제거된다.
 - **루트**: inferred mode에서는 열린 파일이 git repo 안이면 repo 루트, 밖이면 부모 폴더를 합류시킨다. explicit mode에서는 open/add/remove 명령만 표시 root를 바꾼다. 서로 겹치지 않는 루트는 멀티루트 섹션으로 두고, parent/child로 겹치면 가장 바깥 ancestor 하나로 정규화한다. root가 없으면 cwd를 암묵 추가하지 않고 빈 안내를 표시한다.
 - **내용**: 폴더 접기(lazy 열거), 파일 클릭=열기(§6), 열린 파일 하이라이트 + dirty 점, **최근 파일 접이식 섹션**(파일 열람 히스토리 흡수처).
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.

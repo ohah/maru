@@ -344,14 +344,24 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
                     const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
                     var mark: [hazard.max_display_len]u8 = undefined;
                     const shown = hazard.displayText(cp, &mark);
-                    // 오른쪽 경계에 걸치면 **통째로 뺀다.** 표기는 ASCII라 자를 수는 있지만 `<U+202`처럼
-                    // 잘린 조각이 남으면 그게 무엇인지 알 수 없어 더 혼란스럽다.
-                    if (col + shown.len > range.stop()) break;
-                    // 가로로 밀린 앞부분은 **열만 세고 만들지 않는다**(아래 일반 cluster와 같은 규칙).
-                    if (col >= range.start) {
-                        if (used + shown.len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
-                        @memcpy(out[used..][0..shown.len], shown);
-                        used += shown.len;
+
+                    // **표기는 경계에서 잘라서라도 그린다 — 2칸 글자와 다르다.**
+                    //
+                    // 2칸 글자를 통째로 빼는 것은 반쪽이 깨진 글자이기 때문인데, 표기는 ASCII
+                    // 문자열이라 부분도 읽힌다(`<U+20`). 그리고 **빼면 §3.8이 깨진다** — 위험 문자가
+                    // 화면에서 사라지고 앞뒤가 붙어, 그 절이 막으려던 Trojan Source가 그대로 통과한다.
+                    // 실측으로 확인했다: `ab<U+202E>cd`를 5열 창에 넣었더니 **`abcd`**가 나왔다.
+                    //
+                    // 잘린 조각이 이상해 보이는 것은 맞다. 그래도 **아무것도 안 보이는 것보다 낫다** —
+                    // 사용자가 "여기 뭔가 있다"를 안다. 탭을 걸쳐도 잘라 내는 것과 같은 취급이다.
+                    const shown_from = if (col < range.start) @min(shown.len, range.start - col) else 0;
+                    // 루프 머리가 `col >= range.stop()`에서 멈추므로 여기서는 `col < stop`이 보장된다.
+                    const shown_to = @min(shown.len, range.stop() - col);
+                    if (shown_to > shown_from) {
+                        const part = shown[shown_from..shown_to];
+                        if (used + part.len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
+                        @memcpy(out[used..][0..part.len], part);
+                        used += part.len;
                     }
                     // 표기가 차지하는 칸은 그 글자 수다 — 원래 codepoint의 폭(0일 수도 있다)이 아니다.
                     col += shown.len;
@@ -613,15 +623,30 @@ test "가로 스크롤: 탭스톱은 줄 처음부터 센다 — 밀린 위치�
     try testing.expectEqualStrings("b  c", expandTabs("ab\tc", 4, &out, .{ .start = 1, .count = 10 }).text);
 }
 
-test "가로 스크롤: 위험 문자 표기도 밀린다 — 앞은 열만 센다 (§3.8)" {
+test "가로 스크롤: 위험 문자 표기가 경계에서 잘려도 사라지지는 않는다 (§3.8)" {
     var out: [64]u8 = undefined;
-    const line = "ab\u{202E}cd"; // BiDi 제어 문자가 `<U+202E>` 표기로 나온다
-    const full = expandTabs(line, 4, &out, .{ .count = 40 }).text;
-    try testing.expect(std.mem.indexOf(u8, full, "<U+202E>") != null);
-    // 표기는 8칸이다. 그 앞 2칸(ab)을 밀면 표기부터 나온다.
-    var out2: [64]u8 = undefined;
-    const shifted = expandTabs(line, 4, &out2, .{ .start = 2, .count = 40 }).text;
-    try testing.expectEqualStrings("<U+202E>cd", shifted);
+    const line = "ab\u{202E}cd"; // a(0) b(1) <U+202E>(2~9) c(10) d(11)
+    try testingEqual("ab<U+202E>cd", expandTabs(line, 4, &out, .{ .count = 40 }).text);
+    try testingEqual("<U+202E>cd", expandTabs(line, 4, &out, .{ .start = 2, .count = 40 }).text);
+
+    // **표기는 2칸 글자와 달리 잘라서 그린다.** 통째로 빼면 위험 문자가 화면에서 사라지고 앞뒤가
+    // 붙어(`abcd`) §3.8이 막으려던 Trojan Source가 그대로 통과한다 — 실제로 그 상태였다.
+    try testingEqual("ab<U+", expandTabs(line, 4, &out, .{ .count = 5 }).text);
+    try testingEqual("ab<U+202E", expandTabs(line, 4, &out, .{ .count = 9 }).text);
+    try testingEqual("U+202E>cd", expandTabs(line, 4, &out, .{ .start = 3, .count = 40 }).text);
+    try testingEqual(">cd", expandTabs(line, 4, &out, .{ .start = 9, .count = 40 }).text);
+
+    // **어느 창에서도 `abcd`가 되지 않는다** — 그것이 이 규칙이 지키는 것이다.
+    for (0..14) |start| {
+        for (1..14) |count| {
+            const r = expandTabs(line, 4, &out, .{ .start = @intCast(start), .count = @intCast(count) });
+            try testing.expect(!std.mem.eql(u8, r.text, "abcd"));
+        }
+    }
+}
+
+fn testingEqual(want: []const u8, got: []const u8) !void {
+    return testing.expectEqualStrings(want, got);
 }
 
 test "가로 스크롤: 밀린 줄도 UTF-8이 온전하다" {

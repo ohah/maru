@@ -2531,6 +2531,16 @@ pub const testing_api = if (builtin.is_test) struct {
         runtime_lifetime_owner_mod.testing.armSettlementContention(count);
     }
 
+    /// 실제 Runtime의 generation stream에 event를 넣어 close pump가 소비할 prepared owner를 만든다.
+    pub fn preparePendingEventForClose(runtime: *RemoteRuntime, payload: []const u8) !void {
+        try runtime.client.bufferGenerationEventForTest(runtime.attachment.streamId(), payload);
+        switch (try runtime.attachment.generation.takeEvent()) {
+            .taken => {},
+            else => return error.TestUnexpectedResult,
+        }
+        _ = try runtime.classifyAndPrepareEvent();
+    }
+
     pub fn armSemanticProofLoss(stage_raw: u8) void {
         const stage = std.enums.fromInt(B4SemanticProofLossStage, stage_raw) orelse
             @panic("알 수 없는 b4 semantic proof-loss stage");

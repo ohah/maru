@@ -1078,7 +1078,7 @@ test "host manifest initial publish is exclusive and old owner cleanup cannot un
 
 test "host manifest transaction rolls back precommit failure and poisons indeterminate rollback" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/private/tmp/maru-host-manifest-txn-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-host-manifest-txn-{d}", .{c.getpid()}) catch
         return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);

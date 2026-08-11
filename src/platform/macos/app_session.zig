@@ -7363,7 +7363,7 @@ pub const AppSession = struct {
         const n = order.len;
         if (n == 0) return .{ .lo = 0, .hi = 0 };
 
-        // 중첩(SG5-3)은 위치 파생을 **다단계**로 일반화한다(docs/sidebar-groups.md §2.1·§9). subtree 경계·member_count·
+        // 중첩(SG5-3)은 위치 파생을 **다단계**로 일반화한다(docs/sidebar-groups.md §2.1, docs/plans/sidebar-groups.md §9). subtree 경계·member_count·
         // 검색 헤더 가시성이 앞을 내다봐야(lookahead) 하므로 한 번 계산해 둔다: depth[i]=정규화 eff_depth(마커=자기
         // 깊이, 카드=소속 그룹 깊이, 0=최상위), matches[i]=검색 매치(비검색이면 전부 true). OOM(극단)이면 그룹 무시 flat.
         const depth = self.allocator.alloc(u8, n) catch {

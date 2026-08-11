@@ -120,6 +120,14 @@ const known_broken_sections = [_]struct { from: []const u8, doc: []const u8, sec
         // 같은 개정으로 사라졌다. 내용은 "큰 응답 파싱 비용의 상한 근거"다.
         .why = "editor-surface.md 개정으로 사라진 번호 — 대체 절 미정",
     },
+    .{
+        .from = "src/session/diff_payload.zig",
+        .doc = "docs/editor-surface.md",
+        .sec = "10.6",
+        // 위와 같은 번호를 가리킨다(`§6·§10.6` 연쇄의 뒤쪽). 연속 절 참조까지 검사하게 되며 드러났다.
+        // 그 문서의 §10이 10.A/10.B로 개정되며 사라진 번호라 대체 절을 단정할 수 없다.
+        .why = "editor-surface.md 개정으로 사라진 번호 — 대체 절 미정",
+    },
 };
 
 fn isKnownBrokenSection(from: []const u8, doc: []const u8, sec: []const u8) bool {

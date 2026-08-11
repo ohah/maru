@@ -709,6 +709,10 @@ pub fn build(b: *std.Build) void {
         "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
         "skip-in-aggregate-v1",
     );
+    run_macos_app_host_abi_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST",
+        "skip-in-aggregate-v1",
+    );
 
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
@@ -2744,6 +2748,15 @@ pub fn build(b: *std.Build) void {
             "C3-3b4 pump round-robin",
             8,
         );
+        // 실제 daemon을 fork하는 process-global fixture는 거대 aggregate와 process seal을
+        // 공유하지 않고 전용 artifact에서 정확히 한 번 실행한다.
+        B3SettlementTest.add(
+            b,
+            session_host_2c3d_c3_3b4_step,
+            event_c3_3b4_backend_module,
+            "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다",
+            1,
+        );
         const event_c3_3b4_contract_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/remote_event_pump_contract.zig"),
             .target = target,
@@ -3918,6 +3931,10 @@ pub fn build(b: *std.Build) void {
     );
     run_session_host_tests.setEnvironmentVariable(
         "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST",
+        "skip-in-aggregate-v1",
+    );
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST",
         "skip-in-aggregate-v1",
     );
     run_session_host_tests.setEnvironmentVariable(

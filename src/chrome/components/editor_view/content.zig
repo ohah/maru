@@ -90,6 +90,12 @@ pub fn build(
     runs: []draw.Run,
     visual_out: []visual_map.VisualRow,
 ) !Written {
+    // **랩이 켜지면 가로 위치는 0이다**(§4). 줄이 폭 안에 들어와 스크롤할 것이 없기 때문이고,
+    // 그 방침대로면 범위 clamp가 위치를 0으로 눌러 준다 — **그 clamp가 아직 없으므로 여기서
+    // 강제한다.** 안 그러면 "밀린 채 접히는" 상태가 되는데, 그건 계약에 없는 동작이다(실측:
+    // 첫 조각만 밀리고 나머지가 그 뒤에서 이어진다).
+    std.debug.assert(!props.wrap or props.first_col == 0);
+
     if (props.layout.content.isEmpty()) return .{ .ops = 0, .bytes = 0, .runs = 0 };
 
     var op_count: usize = 0;
@@ -184,6 +190,15 @@ pub fn build(
 /// 빌려주기 때문이다 — 그 경우 `text.len > 0`이지만 `scratch_used == 0`이라, 호출자가 길이로
 /// 저장소 소비를 추정하면 틀린다.
 /// `limit`을 넘지 않는 가장 가까운 UTF-8 경계. 중간에서 자르면 깨진 글자가 그려진다.
+/// 전부 ASCII인가. **원본을 빌려주는 길의 전제**다 — 그래야 `1byte = 1열`이라 열 상한을 byte로
+/// 정확히 지킬 수 있다(위 `expandTabs` 주석 ⑶).
+fn isAsciiOnly(bytes: []const u8) bool {
+    for (bytes) |b| {
+        if (b >= 0x80) return false;
+    }
+    return true;
+}
+
 fn utf8BoundaryAtMost(bytes: []const u8, limit: usize) usize {
     if (limit >= bytes.len) return bytes.len;
     var i = limit;
@@ -231,13 +246,32 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
     // 정확히 환산하려면 결국 훑어야 하므로, UTF-8 최대 4byte를 열마다 가정해 넉넉히 잡는다.
     // 결합 문자를 수백 개 붙인 적대적 입력에서는 이 범위가 `max_cols` 열을 못 채워 오른쪽이 빌 수
     // 있는데, 그것은 §3.8이 "초장문·극단 입력에서 기능을 줄인다"고 허용한 범위다.
+    // **`start`가 크면 그만큼 훑는다 — 비용이 화면 폭에만 비례하지 않는다.** 실측(60001byte 한 줄,
+    // 화면 52열): start 0 → 216byte, 1000 → 4216, 10000 → 40216. 화면에 나오는 것은 늘 52열인데
+    // 앞을 세느라 그만큼을 지나간다.
+    //
+    // **가로 스크롤 입력이 붙으면 이것이 실제 비용이 된다**(끝까지 민 상태에서 매 프레임, 줄마다).
+    // 고치려면 열→byte 인덱스를 줄마다 캐시해야 하는데, 그 캐시는 §2 표의 폭 합 캐시와 같은 자리에
+    // 있어야 하므로 그 슬라이스로 미룬다. 지금은 `first_col`이 호출자가 주는 고정값이라 드러나지 않는다.
     const scan_limit = utf8BoundaryAtMost(bytes, range.stop() * 4 + 8);
     const head = bytes[0..scan_limit];
-    // **원본을 빌려주는 길은 `start == 0`일 때만이다.** 가로로 밀린 상태에서는 앞을 잘라내야 하는데,
-    // 열↔byte 환산이 문자마다 달라(한글 1.5, 이모지 2) byte로 자르면 어긋난다. 밀렸으면 훑는다 —
-    // 비용은 여전히 **화면 폭에 비례**한다(`scan_limit`이 `start + count`로 묶여 있다).
-    if (range.start == 0 and std.mem.indexOfScalar(u8, head, '\t') == null and !hazard.containsAny(head)) {
-        return .{ .text = head, .scratch_used = 0 };
+    // **원본을 빌려주는 길에는 조건이 셋이다.**
+    //
+    // ⑴ `start == 0` — 가로로 밀린 상태에서는 앞을 잘라내야 하는데, 열↔byte 환산이 문자마다 달라
+    //    (한글 1.5, 이모지 2) byte로 자르면 어긋난다.
+    // ⑵ 탭·위험 문자가 없다 — 둘 다 원본과 다른 글자를 만들어야 한다.
+    // ⑶ **ASCII만 있다** — 그래야 `1byte = 1열`이라 열 상한을 byte로 정확히 지킬 수 있다.
+    //
+    // ⑶이 없으면 **2칸 글자가 오른쪽 경계에 걸칠 때 통째로 넘어가고 렌더러가 반쪽을 그린다**
+    // (실측: 마지막 셀에 한글 왼쪽 절반이 남았다). 상한을 루프에만 두고 이 길에는 두지 않았던 것이
+    // 원인이며, 랩이 켜졌을 때는 `visual_map`이 뒤에서 다시 잘라 가려져 있었다.
+    if (range.start == 0 and
+        std.mem.indexOfScalar(u8, head, '\t') == null and
+        !hazard.containsAny(head) and
+        isAsciiOnly(head))
+    {
+        // ASCII는 1byte가 1열이므로 열 상한을 그대로 byte로 쓴다.
+        return .{ .text = head[0..@min(head.len, @as(usize, range.count))], .scratch_used = 0 };
     }
 
     const stop_width = if (tab_width == 0) 1 else tab_width;
@@ -263,7 +297,9 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
             // **가로로 밀린 만큼은 만들지 않는다.** 탭은 공백이라 걸쳐도 잘라 낼 수 있다 —
             // 아래 일반 cluster와 다른 점이고, 그래서 왼쪽 경계에 탭이 걸리면 빈칸이 생기지 않는다.
             const from = @max(col, @as(usize, range.start));
-            const pad = if (stop > from) stop - from else 0;
+            // 오른쪽도 같은 이유로 잘라 낸다 — 탭은 공백이라 걸쳐도 나눌 수 있다.
+            const to = @min(stop, range.stop());
+            const pad = if (to > from) to - from else 0;
             if (used + pad > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
             @memset(out[used..][0..pad], ' ');
             used += pad;
@@ -308,6 +344,9 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
                     const cp = std.unicode.utf8Decode(bytes[cp_i .. cp_i + cp_len]) catch 0xFFFD;
                     var mark: [hazard.max_display_len]u8 = undefined;
                     const shown = hazard.displayText(cp, &mark);
+                    // 오른쪽 경계에 걸치면 **통째로 뺀다.** 표기는 ASCII라 자를 수는 있지만 `<U+202`처럼
+                    // 잘린 조각이 남으면 그게 무엇인지 알 수 없어 더 혼란스럽다.
+                    if (col + shown.len > range.stop()) break;
                     // 가로로 밀린 앞부분은 **열만 세고 만들지 않는다**(아래 일반 cluster와 같은 규칙).
                     if (col >= range.start) {
                         if (used + shown.len > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
@@ -337,8 +376,14 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
         // 컬러 글리프가 절반 크기로 그려진다. 터미널의 `width.cellWidth`와 갈리는 지점이다.
         const w = display_width.clusterCols(bytes, i, end);
 
-        // **가로로 밀린 앞부분은 열만 세고 만들지 않는다.** 경계에 2칸 글자가 걸치면 **통째로 뺀다**
-        // (왼쪽에 한 칸이 빈다) — 셀 격자라 반쪽을 그릴 수 없고, 랩의 오른쪽 경계와 같은 규칙이다.
+        // **오른쪽 경계에 걸쳐도 통째로 뺀다.** 위 `col >= range.stop()`은 cluster의 **시작** 열만
+        // 보므로 걸친 글자가 통째로 들어가고, 자르는 것은 렌더러의 픽셀 예산이다 — 그러면 **반쪽이
+        // 그려진다**(실측: 마지막 셀에 한글 왼쪽 절반이 남았다). 랩이 켜졌을 때는 `visual_map`이
+        // 같은 판정으로 막는데, 꺼지면 아무도 막지 않아 비대칭이었다.
+        if (col + w > range.stop()) break;
+
+        // **가로로 밀린 앞부분은 열만 세고 만들지 않는다.** 왼쪽 경계에 2칸 글자가 걸치면 마찬가지로
+        // **통째로 뺀다**(왼쪽에 한 칸이 빈다) — 셀 격자라 반쪽을 그릴 수 없다.
         if (col >= range.start) {
             if (used + n > out.len) return .{ .text = out[0..used], .scratch_used = used, .truncated = true };
             @memcpy(out[used..][0..n], bytes[i..][0..n]);
@@ -462,6 +507,74 @@ test "저장소가 모자라도 build는 성공하고 나머지 줄을 계속 �
     // **조용하지 않다.** 절단은 실패가 아니지만 화면에서는 그냥 짧은 줄로 보이므로, 호출자가
     // 알 수 있어야 한다(§3.0 "왜 줄었는지 알린다").
     try testing.expect(w.truncated_rows > 0);
+}
+
+/// 전개 결과의 표시 폭. **cluster 단위로 센다** — codepoint로 세면 ZWJ 가족이 8칸으로 잡혀
+/// 거짓 양성이 난다(적대적 검증 중 실제로 그 함정에 빠졌다).
+fn testCols(t: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < t.len) {
+        const base = text_layout.decodeCodepoint(t, i);
+        const end = @min(text_layout.clusterEndAfter(t, i, base.advance), t.len);
+        const step = @max(1, end - i);
+        n += display_width.clusterCols(t, i, i + step);
+        i += step;
+    }
+    return n;
+}
+
+test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {
+    // 왼쪽·오른쪽 경계를 **동시에** 지키는지 본다. 한쪽만 고치면 반대쪽에서 2칸 글자가 걸쳐
+    // 렌더러가 반쪽을 그린다(실측으로 잡은 결함이다).
+    var out: [512]u8 = undefined;
+    const inputs = [_][]const u8{
+        "0123456789" ** 8,
+        "가나다라마바사아자차" ** 4,
+        "a가b나c다" ** 8,
+        "\t\t가나다라마",
+        "ab\u{202E}cd가나다", // §3.8 표기(8칸)가 경계에 걸리는 경우
+        "\ta\tb\t가\t나",
+        "👨‍👩‍👧x가나", // ZWJ 가족 — cluster로 세지 않으면 여기서 틀린다
+        "\u{1F1F0}\u{1F1F7}가", // 지역표시자 국기
+        "e\u{0301}\u{0301}가나", // 결합 문자
+        "",
+        "가",
+        "\t",
+    };
+    for (inputs) |line| {
+        for (0..25) |start| {
+            for ([_]u16{ 1, 2, 3, 8, 20, 52 }) |count| {
+                const r = expandTabs(line, 4, &out, .{ .start = @intCast(start), .count = count });
+                try testing.expect(testCols(r.text) <= count);
+                try testing.expect(std.unicode.utf8ValidateSlice(r.text));
+            }
+        }
+    }
+}
+
+test "랩이 켜지면 가로 위치가 0이어야 한다 — 계약을 코드가 강제한다" {
+    // §4는 랩이면 범위 clamp가 위치를 0으로 누른다고 정했는데 **그 clamp가 아직 없다.** 그래서
+    // `build`가 assert로 막는다 — 없으면 "밀린 채 접히는" 정의되지 않은 상태가 만들어진다.
+    // (Zig의 assert는 Debug/ReleaseSafe에서만 도므로 여기서는 **허용되는 조합만** 확인한다.)
+    const layout = geometry.compute(40, 1, .{});
+    var ops: [8]draw.Op = undefined;
+    var runs: [8]draw.Run = undefined;
+    var vrows: [4]visual_map.VisualRow = undefined;
+    var scratch: [128]u8 = undefined;
+    const rows = [_]Row{.{ .bytes = "0123456789" }};
+
+    var wrapped = testProps(layout, &rows);
+    wrapped.wrap = true;
+    wrapped.first_col = 0; // 랩이면 0만 허용
+    _ = try build(wrapped, &ops, &scratch, &runs, &vrows);
+
+    var scrolled = testProps(layout, &rows);
+    scrolled.wrap = false;
+    scrolled.first_col = 5; // 랩이 꺼졌으면 밀 수 있다
+    const w = try build(scrolled, &ops, &scratch, &runs, &vrows);
+    try testing.expectEqualStrings("56789", ops[0].text.runs[0].text);
+    try testing.expectEqual(@as(usize, 1), w.visual_rows);
 }
 
 test "가로 스크롤: 시작 열 앞은 만들지 않는다" {

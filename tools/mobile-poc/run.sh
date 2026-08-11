@@ -6,6 +6,8 @@
 #   sh tools/mobile-poc/run.sh android   에뮬레이터 실행 + Vulkan 오프스크린 → PNG
 #   sh tools/mobile-poc/run.sh features-ios      Metal 로 여섯 기능 판정
 #   sh tools/mobile-poc/run.sh features-android  Vulkan 으로 같은 여섯 기능 판정
+#   sh tools/mobile-poc/run.sh chrome-ios       실제 chrome 컴포넌트를 시뮬레이터에
+#   sh tools/mobile-poc/run.sh chrome-android   같은 draw-list 를 Vulkan 으로
 #
 # **판정 기준**: 화면이 뜨는 것으로는 부족하다. 픽셀을 읽거나 디바이스 수를 세어
 # "실제로 그려졌다"를 확인한다.
@@ -99,8 +101,48 @@ features-android)
     $ADB shell chmod 755 /data/local/tmp/features-vk
     $ADB shell /data/local/tmp/features-vk
     ;;
+chrome-ios)
+    zig build-lib -target aarch64-ios-simulator -OReleaseFast -static \
+        -femit-bin="$OUT/libchrome.a" \
+        --dep chrome -Mroot="$POC/chrome_probe.zig" -Mchrome="$ROOT/src/chrome.zig"
+    APP="$OUT/MaruChrome.app"
+    rm -rf "$APP" && mkdir -p "$APP"
+    sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$POC/Info.plist.in" > "$APP/Info.plist"
+    xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
+        "$POC/chrome_app.m" "$OUT/libchrome.a" \
+        -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
+        -o "$APP/MaruChrome"
+    codesign --force --sign - "$APP"
+    DEV=$(xcrun simctl list devices available | grep -m1 'iPhone' | sed 's/.*(\([A-F0-9-]*\)).*/\1/')
+    xcrun simctl boot "$DEV" 2>/dev/null || true
+    xcrun simctl install "$DEV" "$APP"
+    xcrun simctl launch "$DEV" dev.maru.chrome
+    sleep 4
+    xcrun simctl io "$DEV" screenshot "$OUT/maru-chrome-ios.png"
+    echo "스크린샷: $OUT/maru-chrome-ios.png"
+    ;;
+chrome-android)
+    NDK=${ANDROID_NDK:-$HOME/Library/Android/sdk/ndk/27.1.12297006}
+    ADB=${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}
+    TC="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+    GLSLC="$NDK/shader-tools/darwin-x86_64/glslc"
+    zig build-lib -target aarch64-linux-android -OReleaseFast -static -fPIC \
+        -femit-bin="$OUT/libchrome-android.a" \
+        --dep chrome -Mroot="$POC/chrome_probe.zig" -Mchrome="$ROOT/src/chrome.zig"
+    for s in chrome.vert chrome.frag; do
+        "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
+        $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+    done
+    "$TC/aarch64-linux-android30-clang" "$POC/chrome_vk.c" "$OUT/libchrome-android.a" \
+        -lvulkan -o "$OUT/chrome-vk"
+    $ADB push "$OUT/chrome-vk" /data/local/tmp/chrome-vk >/dev/null
+    $ADB shell chmod 755 /data/local/tmp/chrome-vk
+    $ADB shell /data/local/tmp/chrome-vk
+    $ADB pull /data/local/tmp/maru-chrome-android.ppm "$OUT/maru-chrome-android.ppm" >/dev/null 2>&1 \
+        && python3 "$POC/ppm2png.py" "$OUT/maru-chrome-android.ppm" "$OUT/maru-chrome-android.png"
+    ;;
 *)
-    echo "usage: $0 [ios|ios-app|android|features-ios|features-android]" >&2
+    echo "usage: $0 [ios|ios-app|android|features-ios|features-android|chrome-ios|chrome-android]" >&2
     exit 2
     ;;
 esac

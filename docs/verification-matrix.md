@@ -633,7 +633,7 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   final address에서만 abort/consume 가능한지 검증한다.
   preliminary precheck 뒤 경쟁 prepare/settlement exact finish와 same-address next-attempt race는 lease 아래 final preflight에서
   typed reject하고 process 생존·domain mutation 0·operation incarnation burn만 검증한다. RED inventory는 최적화 모드당
-  unique component 34개와 product-prepared coordinator fresh replay 1회,
+  unique component 36개와 product-prepared coordinator fresh replay 1회,
   fresh subprocess 5개(pre-admission fork, post-admission proof loss, post-callback proof loss,
   Client POST callback drift, watchdog), boundary 1개다. watchdog은 marker 전 무응답, prefix 뒤 열린 pipe,
   EOF 뒤 child 생존, 정확히 16-byte를 쓴 뒤 정상 EOF와 exit 73, cap 뒤 trailing marker, signal 종료를 typed

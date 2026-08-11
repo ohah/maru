@@ -23118,11 +23118,27 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
 
     var restored: Client = blk: {
         var attempts: usize = 0;
-        while (attempts < 250) : (attempts += 1) {
+        // exec 뒤 동일 PID host가 다시 listen할 때까지 병렬 전체 게이트의 부하를 포함해 최대 15초 관측한다.
+        while (attempts < 750) : (attempts += 1) {
             if (Client.connect(allocator, socket_path, .gui)) |connected|
                 break :blk connected
             else |_|
                 _ = usleepMs(20);
+        }
+        const child_alive = c.kill(child, @enumFromInt(0)) == 0;
+        const socket_alive = c.access(socket_path.ptr, c.F_OK) == 0;
+        if (host_manifest_mod.load(allocator, dir_path, host_id)) |loaded_manifest| {
+            var manifest = loaded_manifest;
+            defer manifest.deinit();
+            std.debug.print(
+                "업그레이드 재연결 실패: child_alive={} socket_alive={} lifecycle={s} epoch={}\n",
+                .{ child_alive, socket_alive, @tagName(manifest.lifecycle), manifest.upgrade_epoch },
+            );
+        } else |err| {
+            std.debug.print(
+                "업그레이드 재연결 실패: child_alive={} socket_alive={} manifest={s}\n",
+                .{ child_alive, socket_alive, @errorName(err) },
+            );
         }
         return error.TestUnexpectedResult;
     };

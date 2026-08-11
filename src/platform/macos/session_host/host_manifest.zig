@@ -149,6 +149,33 @@ pub const Published = struct {
             return err;
         };
     }
+
+    /// tmp cleaner 방지용 시각 갱신도 pathname owner 전환이다. 현재 exact identity를 먼저 확인하고,
+    /// 같은 inode의 새 ctime만 다시 채택해 외부 replacement를 정상 owner로 승격하지 않는다.
+    pub fn touchExact(self: *Published) Error!void {
+        if (self.poisoned) return error.AuthorityPoisoned;
+        const fd = c.open(
+            self.manifest_path.ptr,
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+            @as(c.mode_t, 0),
+        );
+        if (fd < 0) return error.InvalidManifest;
+        defer _ = c.close(fd);
+        const before = try fileIdentityFd(fd);
+        if (!sameIdentity(before, self.identity)) return error.InvalidManifest;
+        if (c.futimens(fd, null) != 0)
+            return error.InvalidManifest;
+        const after = try fileIdentityFd(fd);
+        const path_after = fileIdentity(self.manifest_path) catch {
+            self.poisoned = true;
+            return error.AuthorityPoisoned;
+        };
+        if (!sameInode(after, before) or !sameIdentity(path_after, after)) {
+            self.poisoned = true;
+            return error.AuthorityPoisoned;
+        }
+        self.identity = path_after;
+    }
 };
 
 const LoadedExact = struct {
@@ -952,6 +979,8 @@ test "host manifest publish-load is atomic owner-only and exact-host keyed" {
     try std.testing.expectEqualStrings(endpoint, loaded.endpoint);
     try std.testing.expectError(error.ManifestNotFound, load(std.testing.allocator, dir, 0xDEAD));
 
+    // 제품의 주기적 보존 touch가 exact owner ctime을 갱신한 뒤에도 같은 권위가 다음 generation을 게시한다.
+    try published.touchExact();
     exact.upgrade_epoch = 2;
     exact.lifecycle = .restoring;
     try published.republish(exact);

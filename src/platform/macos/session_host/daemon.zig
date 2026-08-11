@@ -191,14 +191,23 @@ fn awakeMs(io: std.Io) u64 {
 /// **best-effort다.** 실패해도 host는 계속 돈다 — 갱신하지 못하면 최악의 경우 3일 뒤 endpoint를 잃지만, 그
 /// 때문에 지금 살아 있는 세션을 끊는 것이 더 나쁘다. 디렉터리까지 찍는 이유는 정리 규칙이 빈 디렉터리도
 /// (`-empty -mtime +3`) 대상으로 삼기 때문이다.
-fn touchRuntimeArtifacts(dir_path: [:0]const u8, socket_path: [:0]const u8, host_id: u128) void {
+fn touchRuntimeArtifacts(
+    dir_path: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+    published_manifest: ?*host_manifest.Published,
+) void {
     // null times = 현재 시각으로 설정(POSIX). AT_SYMLINK_NOFOLLOW를 주지 않아 경로를 그대로 따른다.
     _ = c.utimensat(c.AT.FDCWD, socket_path.ptr, null, 0);
     _ = c.utimensat(c.AT.FDCWD, dir_path.ptr, null, 0);
-    var manifest_buf: [512]u8 = undefined;
-    if (host_manifest.manifestPathIn(&manifest_buf, dir_path, host_id)) |path| {
-        _ = c.utimensat(c.AT.FDCWD, path.ptr, null, 0);
-    } else |_| {}
+    if (published_manifest) |published| {
+        _ = published.touchExact() catch {};
+    } else {
+        var manifest_buf: [512]u8 = undefined;
+        if (host_manifest.manifestPathIn(&manifest_buf, dir_path, host_id)) |path| {
+            _ = c.utimensat(c.AT.FDCWD, path.ptr, null, 0);
+        } else |_| {}
+    }
     // 소켓과 manifest의 부모(`/tmp/maru-<uid>`, `.../sh`)도 함께 찍는다. 자식이 남아 있으면 `-empty` 조건에
     // 걸리지 않지만, 자식이 먼저 지워진 뒤 빈 디렉터리로 남는 창을 없앤다.
     var root_buf: [64]u8 = undefined;
@@ -247,7 +256,7 @@ test "tmp 정리 회피: touch가 실제로 파일 시각을 되돌린다" {
 
     const cwd = std.Io.Dir.cwd();
     const before = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
-    touchRuntimeArtifacts(dir, fake_socket, 0xabcd);
+    touchRuntimeArtifacts(dir, fake_socket, 0xabcd, null);
     const after = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
 
     // 갱신되지 않으면 3일 조건을 못 깨고, host는 살아 있는데도 endpoint를 잃는다.
@@ -506,7 +515,12 @@ fn runSessionHostImpl(
         // host가 자기 endpoint를 잃고, 프로세스는 살아 있는데 아무도 찾지 못하는 상태가 된다.
         const now_ms = awakeMs(io);
         if (shouldTouchRuntimeArtifacts(now_ms, last_touch_ms)) {
-            touchRuntimeArtifacts(dir_path, socket_path, host_id);
+            touchRuntimeArtifacts(
+                dir_path,
+                socket_path,
+                host_id,
+                if (published_manifest) |*published| published else null,
+            );
             last_touch_ms = now_ms;
         }
         if (registry.count() != 0) served_any_runtime = true;

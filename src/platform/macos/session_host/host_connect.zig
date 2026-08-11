@@ -1627,7 +1627,8 @@ test "host_connect: launches the product maru session host and completes host.in
     // 확인한다. 테스트가 직접 지우면 제품의 누적 회귀를 숨기므로 부재만 관찰한다.
     var stopped = false;
     var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
+    // 병렬 전체 게이트에서도 제품 종료 순서는 바꾸지 않고, filesystem 회수 완료를 최대 15초 관측한다.
+    while (attempts < 750) : (attempts += 1) {
         if (c.access(@ptrCast(&launched_socket_buf), 0) != 0 and
             c.access(manifest_path.ptr, 0) != 0 and
             c.access(owner_path.ptr, 0) != 0 and

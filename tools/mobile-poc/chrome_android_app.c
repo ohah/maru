@@ -43,6 +43,7 @@ extern const unsigned char *maru_icon_atlas(void);
 extern unsigned int maru_icon_slot_px(void);
 extern unsigned int maru_icon_count(void);
 extern unsigned int maru_term_input(const char *bytes, size_t len);
+extern unsigned int maru_hit_cell(float x, float y);
 
 typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Push;
 
@@ -673,6 +674,20 @@ static char keycodeToAscii(int32_t kc, int32_t meta) {
 
 static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
     (void)app;
+    // **터치**: 누른 지점을 셀 좌표로 바꿔 조회한다. iOS `touchesBegan:` 과 같은 자리이고,
+    // 좌표계 환산도 같다 — 물리 px 를 density 로 나누고 상태바 inset 을 뺀 **논리 좌표**로
+    // 되돌려야 셀이 안 어긋난다(그 값은 렌더가 쓴 것과 같은 변수에서 나온다).
+    if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_MOTION) {
+        int32_t action = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK;
+        if (action != AMOTION_EVENT_ACTION_DOWN) return 0;
+        float px = AMotionEvent_getX(ev, 0), py = AMotionEvent_getY(ev, 0);
+        float lx = px / g.scale;
+        float ly = (py - (float)g.inset_top) / g.scale;
+        unsigned int cell = maru_hit_cell(lx, ly);
+        LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
+             px, py, lx, ly, cell >> 16, cell & 0xFFFF);
+        return 1;
+    }
     if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_KEY) return 0;
     if (AKeyEvent_getAction(ev) != AKEY_EVENT_ACTION_DOWN) return 0;
     char c = keycodeToAscii(AKeyEvent_getKeyCode(ev), AKeyEvent_getMetaState(ev));

@@ -918,6 +918,9 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
         self.allocator.free(owned);
         return; // OOM이면 이전 CWD를 보존해 다음 tick에 재시도한다.
     };
+    // **root 밖이면 root를 갈아끼운다**(2026-08-11 사용자 결정 — file-explorer.md §1). 이전에는 여기서 아무것도
+    // 하지 않았는데, 소스 컨트롤 뷰가 어느 저장소로든 따라가게 되면서 두 뷰가 서로 다른 곳을 가리키게 됐다.
+    if (reveal == .rejected) followRootSwitch(self, cwd);
     if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
     self.file_tree_followed_cwd = owned;
     // root 밖이면 Tree의 이전 file-open reveal intent는 그대로 두되, 그것을 새 CWD의 scroll 대상으로
@@ -929,6 +932,28 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
             self.file_tree_follow_scroll_pending = true;
         },
     }
+}
+
+/// 활성 터미널이 **root 밖으로** 나갔을 때 탐색기 root를 그쪽으로 갈아끼운다(file-explorer.md §1).
+///
+/// **무엇을 root로 세우나**: cwd가 아니라 **그 cwd를 품은 저장소 루트**다. 소스 컨트롤 뷰가 고르는 것과 같은
+/// 값이어야 두 뷰가 같은 것을 본다(그게 이 변경의 목적이다). `~/work/repo/src/deep`에서 `deep`을 root로 세우면
+/// 형제 디렉터리가 안 보여 쓸모도 없다. 저장소가 아니면 cwd 폴더 자체를 쓴다.
+///
+/// **제품 picker와 같은 경로로 보낸다**(`provideFileTreeRootPick` + `.replace`). 여기서 `replaceExplicitRoots`를
+/// 직접 부르면 realpath·identity pinning·watcher union 재구성·영속이 전부 빠진 반쪽 전환이 된다 — 그 배관은
+/// 이미 root 검증 파이프라인이 갖고 있다.
+///
+/// **in-flight면 건너뛴다.** 검증은 비동기라 tick마다 다시 밀어 넣으면 요청이 쌓인다. 호출자가 `followed_cwd`를
+/// 이미 갱신했으므로 같은 cwd로는 다시 오지 않고, 다음 `cd`가 자연히 재시도가 된다.
+fn followRootSwitch(self: *AppSession, cwd: []const u8) void {
+    if (self.file_tree_root_validation != null) return;
+    if (self.file_tree_root_picker_inflight != .none) return; // 사용자가 연 picker를 가로채지 않는다
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = AppSession.repoRootFor(cwd, &root_buf) orelse cwd;
+    self.file_tree_root_picker_inflight = .replace;
+    self.file_tree_root_auto_follow = true;
+    provideFileTreeRootPick(self, target);
 }
 
 /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·
@@ -1736,6 +1761,9 @@ pub fn activateFilePanelDockControl(self: *AppSession) void {
 
 pub fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome, message: ?[]const u8) void {
     self.file_tree_root_outcome = outcome;
+    // **자동 따라가기의 실패는 조용하다.** 사용자가 시킨 적 없는 동작인데 "선택한 폴더를 열 수 없습니다"가 뜨면
+    // 무엇을 잘못했는지 알 수 없는 알림이 된다. outcome은 남기므로 진단·테스트는 그대로 볼 수 있다.
+    if (self.file_tree_root_auto_follow) return;
     if (message) |text| self.showNotice(text);
 }
 
@@ -3546,6 +3574,12 @@ pub fn toggleFilePanelFocus(self: *AppSession) void {
 }
 
 pub fn requestFileTreeRootPick(self: *AppSession, operation: FileTreeRootOperation) void {
+    // **사용자가 자동 따라가기보다 먼저다.** `cd` 직후 자동 전환이 검증 슬롯을 잡고 있는 동안 폴더 열기를
+    // busy로 거절하면, 사용자는 자기가 누른 메뉴가 왜 안 먹는지 알 수 없다. 자동 검증뿐이면 그것을 버리고
+    // 자리를 내준다 — 뒤늦게 도착한 그 결과는 `request_id` 대조에서 이미 걸러진다(완료 처리 참고).
+    if (self.file_tree_root_validation) |pending| if (pending.auto) {
+        self.file_tree_root_validation = null;
+    };
     if (operation == .none or fileTreeNamespaceMutationBusy(self)) {
         reportFileTreeRootOutcome(self, .busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
         return;
@@ -3746,6 +3780,9 @@ pub const FileTreeDockRemovalStats = struct {
 pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
     const operation = self.file_tree_root_picker_inflight;
     self.file_tree_root_picker_inflight = .none;
+    // one-shot 소비: 아래 모든 이탈 경로에서 꺼진 채로 끝나야 다음 사용자 조작이 조용해지지 않는다.
+    const auto = self.file_tree_root_auto_follow;
+    defer self.file_tree_root_auto_follow = false;
     if (operation == .none or path.len == 0) {
         reportFileTreeRootOutcome(self, .picker_canceled, null);
         return;
@@ -3767,6 +3804,7 @@ pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
         .request_id = self.file_tree_root_request_id,
         .expected_root_generation = self.file_tree.rootGeneration(),
         .operation = operation,
+        .auto = auto,
     };
     if (!self.file_tree_backend.submitRootValidation(
         owned,

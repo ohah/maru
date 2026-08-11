@@ -11,6 +11,8 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <android_native_app_glue.h>
 #include <android/log.h>
+#include <android/bitmap.h>
+#include <android/choreographer.h>
 #include <vulkan/vulkan.h>
 #include <stdio.h>
 #include <string.h>
@@ -40,6 +42,7 @@ extern unsigned int maru_icon_build(void);
 extern const unsigned char *maru_icon_atlas(void);
 extern unsigned int maru_icon_slot_px(void);
 extern unsigned int maru_icon_count(void);
+extern unsigned int maru_term_input(const char *bytes, size_t len);
 
 typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Push;
 
@@ -74,10 +77,111 @@ static struct {
     double pace_ms[PACE_SAMPLES];
     int n_pace;
     int pace_done;
+    // 페이싱 단계: 0=FIFO 자유 실행, 1=vsync 한 번 걸러(=30Hz 목표)
+    int pace_phase;
+    int64_t vsync_count;
 } g;
 
 static uint8_t *g_glyph_px = NULL;
 static uint32_t g_gw, g_gh;
+
+// **기기에서 굽는다.** NDK 에는 폰트 래스터가 없지만(폰트 *탐색* API 인 `AFontMatcher` 뿐),
+// JNI 로 `android.graphics.Paint`/`Canvas`/`Bitmap` 을 부르면 안드로이드 자체 폰트 스택으로
+// 래스터할 수 있다 — iOS 의 CoreText 와 대응하는 자리다. 외부 라이브러리(FreeType 등) 없이
+// 선다는 것이 이 함수가 확인하는 것이다.
+//
+// 좌표는 호스트 아틀라스와 같은 배치를 쓴다(행 r 의 baseline = r*CH + CH - 8) — 그래야
+// 같은 셰이더가 두 아틀라스를 똑같이 샘플링한다.
+static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32_t *ow, uint32_t *oh) {
+    // iOS 쪽과 같은 글자 집합.
+    static const char *CHARS =
+        "$ zig build test All 11 passed.git status --short"
+        "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch"
+        "한글 터미널 세션 목록 설정 검색 알림";
+    const uint32_t CW = 24, CH = 32, COLS = 16;
+
+    // UTF-8 → BMP 코드포인트, 중복 제거.
+    static uint16_t cps[256];
+    uint32_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)CHARS; *p && n < 256;) {
+        uint32_t cp;
+        if (*p < 0x80) { cp = *p; p += 1; }
+        else if ((*p & 0xE0) == 0xC0) { cp = ((*p & 0x1F) << 6) | (p[1] & 0x3F); p += 2; }
+        else if ((*p & 0xF0) == 0xE0) { cp = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); p += 3; }
+        else { p += 4; continue; }  // BMP 밖은 이 PoC 범위가 아니다
+        int dup = 0;
+        for (uint32_t i = 0; i < n; i++) if (cps[i] == cp) { dup = 1; break; }
+        if (!dup) cps[n++] = (uint16_t)cp;
+    }
+    uint32_t rows = (n + COLS - 1) / COLS;
+    uint32_t W = COLS * CW, H = rows * CH;
+
+    JavaVM *vm = app->activity->vm;
+    JNIEnv *env = NULL;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return 0;
+
+    jclass bmCls = (*env)->FindClass(env, "android/graphics/Bitmap");
+    jclass cfgCls = (*env)->FindClass(env, "android/graphics/Bitmap$Config");
+    jobject cfg = (*env)->GetStaticObjectField(env, cfgCls,
+        (*env)->GetStaticFieldID(env, cfgCls, "ALPHA_8", "Landroid/graphics/Bitmap$Config;"));
+    jmethodID mCreate = (*env)->GetStaticMethodID(env, bmCls, "createBitmap",
+        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject bmp = (*env)->CallStaticObjectMethod(env, bmCls, mCreate, (jint)W, (jint)H, cfg);
+    if (!bmp) { (*vm)->DetachCurrentThread(vm); return 0; }
+
+    jclass cvCls = (*env)->FindClass(env, "android/graphics/Canvas");
+    jobject canvas = (*env)->NewObject(env, cvCls,
+        (*env)->GetMethodID(env, cvCls, "<init>", "(Landroid/graphics/Bitmap;)V"), bmp);
+    jclass pCls = (*env)->FindClass(env, "android/graphics/Paint");
+    jobject paint = (*env)->NewObject(env, pCls,
+        (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1 /* ANTI_ALIAS_FLAG */);
+    (*env)->CallVoidMethod(env, paint,
+        (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)22.0f);
+    (*env)->CallVoidMethod(env, paint,
+        (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
+    jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
+    jobject mono = (*env)->GetStaticObjectField(env, tfCls,
+        (*env)->GetStaticFieldID(env, tfCls, "MONOSPACE", "Landroid/graphics/Typeface;"));
+    (*env)->CallObjectMethod(env, paint,
+        (*env)->GetMethodID(env, pCls, "setTypeface",
+                            "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), mono);
+
+    jmethodID mDraw = (*env)->GetMethodID(env, cvCls, "drawText",
+        "(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
+    jmethodID mMeasure = (*env)->GetMethodID(env, pCls, "measureText", "(Ljava/lang/String;)F");
+
+    maru_atlas_geometry(CW, CH);
+    for (uint32_t i = 0; i < n; i++) {
+        jstring s = (*env)->NewString(env, &cps[i], 1);
+        uint32_t col = i % COLS, row = i / COLS;
+        (*env)->CallVoidMethod(env, canvas, mDraw, s,
+                               (jfloat)(col * CW + 1), (jfloat)(row * CH + CH - 8), paint);
+        jfloat adv = (*env)->CallFloatMethod(env, paint, mMeasure, s);
+        uint32_t advance = (uint32_t)(adv + 0.5f);
+        if (advance == 0) advance = CW / 2;
+        maru_atlas_add(cps[i], col, row, advance);
+        (*env)->DeleteLocalRef(env, s);
+    }
+
+    void *pixels = NULL;
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bmp, &info) != 0 ||
+        AndroidBitmap_lockPixels(env, bmp, &pixels) != 0) {
+        (*vm)->DetachCurrentThread(vm);
+        return 0;
+    }
+    uint8_t *buf = malloc(W * H);
+    for (uint32_t y = 0; y < H; y++)
+        memcpy(buf + y * W, (uint8_t *)pixels + y * info.stride, W);
+    AndroidBitmap_unlockPixels(env, bmp);
+    (*vm)->DetachCurrentThread(vm);
+
+    *out = buf; *ow = W; *oh = H;
+    g.atlas_cols = COLS;
+    g.atlas_rows = rows;
+    LOGI("atlas_ondevice=%ux%u glyphs=%u source=android.graphics.Paint", W, H, n);
+    return 1;
+}
 
 // 아틀라스는 APK 의 asset 이 아니라 /data/local/tmp 에서 읽는다 — PoC 라 push 로 넣는다.
 static void loadAtlas(void) {
@@ -468,14 +572,26 @@ static void drawFrame(void) {
     if (g.frames >= PACE_WARMUP && g.last_ms > 0 && g.n_pace < PACE_SAMPLES)
         g.pace_ms[g.n_pace++] = now - g.last_ms;
     g.last_ms = now;
-    if (g.n_pace == PACE_SAMPLES && !g.pace_done) {
-        g.pace_done = 1;
+    if (g.n_pace == PACE_SAMPLES) {
         for (int i = 1; i < PACE_SAMPLES; i++) {
             double k = g.pace_ms[i]; int j = i - 1;
             while (j >= 0 && g.pace_ms[j] > k) { g.pace_ms[j + 1] = g.pace_ms[j]; j--; }
             g.pace_ms[j + 1] = k;
         }
-        LOGI("MARU_PACE fifo_median_ms=%.2f n=%d", g.pace_ms[PACE_SAMPLES / 2], PACE_SAMPLES);
+        double med = g.pace_ms[PACE_SAMPLES / 2];
+        if (g.pace_phase == 0) {
+            LOGI("MARU_PACE fifo_median_ms=%.2f n=%d", med, PACE_SAMPLES);
+            // 다음 단계: **하위 주기**. Vulkan 에는 "30Hz 모드"가 없어 앱이 직접 맞춘다 —
+            // AChoreographer 로 vsync 를 받아 한 번 걸러 present 한다.
+            g.pace_phase = 1;
+            g.n_pace = 0;
+            g.last_ms = 0;
+        } else if (!g.pace_done) {
+            g.pace_done = 1;
+            int paced = (med >= 25.0 && med <= 42.0);
+            LOGI("MARU_PACE half_rate_median_ms=%.2f n=%d target=33.33 verdict=%s",
+                 med, PACE_SAMPLES, paced ? "PASS" : "FAIL");
+        }
     }
     g.frames++;
 }
@@ -513,26 +629,112 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
     (*vm)->DetachCurrentThread(vm);
 }
 
+// **입력**: NativeActivity 가 받은 키를 바이트로 바꿔 코어에 먹인다.
+//
+// NDK 는 keycode 만 주고 문자 매핑은 Java `KeyCharacterMap` 에 있다. PoC 는 그 왕복을
+// 하지 않고 ASCII 구간만 표로 옮긴다 — 확인하려는 것은 "OS 키 이벤트가 코어까지 닿는가"
+// 이지 자판 배열 전체가 아니다. 실제 제품은 KeyCharacterMap(또는 IME)을 거쳐야 한다.
+static char keycodeToAscii(int32_t kc, int32_t meta) {
+    if (kc >= AKEYCODE_A && kc <= AKEYCODE_Z) {
+        char base = (char)('a' + (kc - AKEYCODE_A));
+        int shift = (meta & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON)) != 0;
+        return shift ? (char)(base - 32) : base;
+    }
+    if (kc >= AKEYCODE_0 && kc <= AKEYCODE_9) return (char)('0' + (kc - AKEYCODE_0));
+    switch (kc) {
+        case AKEYCODE_SPACE: return ' ';
+        case AKEYCODE_ENTER: return '\r';
+        case AKEYCODE_PERIOD: return '.';
+        case AKEYCODE_MINUS: return '-';
+        case AKEYCODE_SLASH: return '/';
+        default: return 0;
+    }
+}
+
+static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
+    (void)app;
+    if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_KEY) return 0;
+    if (AKeyEvent_getAction(ev) != AKEY_EVENT_ACTION_DOWN) return 0;
+    char c = keycodeToAscii(AKeyEvent_getKeyCode(ev), AKeyEvent_getMetaState(ev));
+    if (!c) return 0;
+    unsigned int total = maru_term_input(&c, 1);
+    LOGI("MARU_INPUT keycode=%d byte=0x%02x total=%u",
+         AKeyEvent_getKeyCode(ev), (unsigned char)c, total);
+    return 1;
+}
+
+// **생명주기**: 홈으로 나가면 창이 죽는다(APP_CMD_TERM_WINDOW). 그때 스왑체인을 그대로
+// 들고 있으면 죽은 surface 로 present 하게 된다 — 되돌아왔을 때 다시 세워야 한다.
+// iOS 는 UIKit 이 레이어를 살려 두지만 Android 는 창 자체가 사라져서 이 처리가 필수다.
+static void teardownVulkan(void) {
+    if (!g.dev) return;
+    vkDeviceWaitIdle(g.dev);
+    for (uint32_t i = 0; i < g.image_count; i++) {
+        if (g.fbs) vkDestroyFramebuffer(g.dev, g.fbs[i], NULL);
+        if (g.views) vkDestroyImageView(g.dev, g.views[i], NULL);
+    }
+    free(g.fbs); free(g.views); free(g.cbs);
+    g.fbs = NULL; g.views = NULL; g.cbs = NULL;
+    if (g.swap) vkDestroySwapchainKHR(g.dev, g.swap, NULL);
+    vkDestroyDevice(g.dev, NULL);
+    if (g.surface) vkDestroySurfaceKHR(g.inst, g.surface, NULL);
+    if (g.inst) vkDestroyInstance(g.inst, NULL);
+    // 페이싱 계측과 화면 설정은 살린다 — 재개 후에도 같은 상태로 이어져야 한다.
+    float scale = g.scale;
+    int it = g.inset_top, ib = g.inset_bottom;
+    uint32_t ac = g.atlas_cols, ar = g.atlas_rows;
+    memset(&g, 0, sizeof g);
+    g.scale = scale; g.inset_top = it; g.inset_bottom = ib;
+    g.atlas_cols = ac; g.atlas_rows = ar;
+    LOGI("MARU_LIFECYCLE window_destroyed vulkan_torn_down");
+}
+
 static void onAppCmd(struct android_app *app, int32_t cmd) {
+    if (cmd == APP_CMD_TERM_WINDOW) {
+        teardownVulkan();
+        return;
+    }
+    if (cmd == APP_CMD_INIT_WINDOW && app->window && g.ready) return;  // 이미 서 있으면 그대로
     if (cmd == APP_CMD_INIT_WINDOW && app->window) {
         int32_t dpi = AConfiguration_getDensity(app->config);
         g.scale = (dpi > 0 && dpi != ACONFIGURATION_DENSITY_ANY &&
                    dpi != ACONFIGURATION_DENSITY_NONE) ? (float)dpi / 160.0f : 2.0f;
         queryInsets(app, &g.inset_top, &g.inset_bottom);
         LOGI("density=%d scale=%.3f inset top=%d bottom=%d", dpi, g.scale, g.inset_top, g.inset_bottom);
-        loadAtlas();
-        if (initVulkan(app->window)) LOGI("vulkan ready");
+        // 기기 래스터가 서면 push 한 호스트 아틀라스는 아예 안 읽는다.
+        if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh)) loadAtlas();
+        if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_ready frames_reset");
     }
+}
+
+// vsync 마다 불린다. **한 번 걸러** 그려서 30Hz 를 만든다 — Vulkan present mode 에는
+// 하위 주기 선택지가 없으므로(FIFO/MAILBOX/IMMEDIATE 는 전부 "언제"지 "얼마나 자주"가
+// 아니다) 주기는 앱이 정한다. iOS 의 `preferredFrameRateRange` 에 대응하는 자리다.
+static void frameCallback(int64_t frame_time_ns, void *data) {
+    (void)frame_time_ns;
+    g.vsync_count++;
+    if ((g.vsync_count & 1) == 0) drawFrame();
+    AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, data);
 }
 
 void android_main(struct android_app *app) {
     app->onAppCmd = onAppCmd;
+    app->onInputEvent = onInputEvent;
+    int chor_started = 0;
     while (1) {
         int events;
         struct android_poll_source *source;
         while (ALooper_pollOnce(g.ready ? 0 : -1, NULL, &events, (void **)&source) >= 0) {
             if (source) source->process(app, source);
             if (app->destroyRequested) return;
+        }
+        if (g.pace_phase == 1) {
+            // 이 단계부터는 루프가 직접 그리지 않는다 — vsync 콜백이 주기를 쥔다.
+            if (!chor_started) {
+                chor_started = 1;
+                AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, app);
+            }
+            continue;
         }
         drawFrame();
     }

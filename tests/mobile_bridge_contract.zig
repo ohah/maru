@@ -119,6 +119,21 @@ test "굵기가 다르면 다른 슬롯을 쓴다" {
     try std.testing.expectEqual(after, bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols()));
 }
 
+// 박스·블록·브라유는 **폰트가 아니라 절차 합성**으로 그린다(renderer 계약). 폰트로 구우면
+// 셀에 안 맞아 끊기고 이음매가 보인다 — 화면으로 확인한 상태다.
+//
+// **coverage 계약이 RGBA 다**(`bytes_per_row >= w*4`, 커버리지는 alpha 채널). 단일 채널 버퍼를
+// 그대로 넘기면 조용히 null 이라, 아이콘에서 한 번 겪은 그 함정에 여기서 또 걸렸다.
+test "합성 대상은 잉크를 내고 보통 글자는 0" {
+    var cell: [24 * 32]u8 = undefined;
+    // 박스 가로·모서리·블록·브라유
+    for ([_]u32{ 0x2500, 0x250C, 0x2588, 0x28FF }) |cp| {
+        try std.testing.expect(bridge.maru_mobile_synthesize(cp, &cell, 24) > 0);
+    }
+    // 보통 글자는 합성 대상이 아니다 — 플랫폼이 폰트로 굽는다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_synthesize('W', &cell, 24));
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

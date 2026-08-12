@@ -592,6 +592,42 @@ pub export fn maru_mobile_next_slot(cols: u32) u32 {
     return ((idx % cols) << 16) | (idx / cols);
 }
 
+/// 합성 글리프를 슬롯에 채운다. 플랫폼은 **폰트 경로보다 먼저** 이걸 부른다 —
+/// `renderer.synthesizeGlyph` 의 계약이 그렇다("rasterizer 는 폰트 경로 전에 한 번 호출한다").
+/// 반환값은 잉크 픽셀 수이고, **0 이면 합성 대상이 아니라서** 플랫폼이 폰트로 굽는다.
+///
+/// 박스 드로잉(U+2500~257F)·블록(U+2580~259F)·브라유(U+2800~28FF)·파워라인·legacy mosaic 은
+/// 폰트 글리프로 그리면 셀에 안 맞아 **끊기고 이음매가 보인다**(그 상태를 화면으로 확인했다).
+/// 합성은 셀을 가장자리까지 채워 이어진다.
+///
+/// **슬롯의 왼쪽 절반에 채운다.** 합성 대상은 전부 단폭이고, 그리는 쪽도 단폭 글자는 슬롯
+/// 절반만 샘플링한다(§4 글리프 기하). 슬롯 전체에 채우면 두 배로 넓게 나온다.
+/// 합성 결과를 받는 RGBA 스크래치. **coverage 계약이 RGBA 다** — `glyph_pixels.slotFits` 가
+/// `bytes_per_row >= w*4` 를 요구하고 커버리지는 **alpha 채널**로 온다. 단일 채널 버퍼를
+/// 그대로 주면 조용히 null 이다. 아이콘에서 `filled=0/6` 으로 한 번 헤맨 그 함정이고, 여기서
+/// 또 걸렸다(`isSynthesizedCodepoint` 는 true 인데 잉크가 0 이었다).
+var synth_rgba: [24 * 32 * 4]u8 = undefined;
+
+pub export fn maru_mobile_synthesize(cp: u32, out: [*]u8, stride: u32) u32 {
+    const w = atlas_cell_w / 2;
+    const h = atlas_cell_h;
+    const rgba_stride = w * 4;
+    if (@as(usize, rgba_stride) * h > synth_rgba.len) {
+        setLastError("synth_slot_too_small");
+        return 0;
+    }
+    const buf = synth_rgba[0 .. @as(usize, rgba_stride) * h];
+    @memset(buf, 0);
+    const n = maru.renderer.synthesizeGlyph(cp, w, h, rgba_stride, buf) orelse return 0;
+
+    // 아틀라스 텍스처는 단일 채널(coverage)이라 alpha 만 옮긴다.
+    @memset(out[0 .. stride * h], 0);
+    for (0..h) |y| {
+        for (0..w) |x| out[y * stride + x] = buf[y * rgba_stride + x * 4 + 3];
+    }
+    return n;
+}
+
 /// 플랫폼이 다 구운 뒤 부른다. 목록을 비워 다음 프레임에 다시 쌓이게 한다.
 pub export fn maru_mobile_missing_clear() void {
     miss_n = 0;

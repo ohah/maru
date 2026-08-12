@@ -1949,10 +1949,25 @@ pub fn build(b: *std.Build) void {
     const run_icon_literal_boundary_tests = b.addRunArtifact(icon_literal_boundary_tests);
     run_icon_literal_boundary_tests.setCwd(b.path("."));
 
+    // cwd 축 규율 — "이 터미널이 서 있는 폴더"를 푸는 지점이 하나여야 한다(docs/editor-surface-dock.md §3.5).
+    // 그 규칙이 주석에만 있던 동안 소비자 여섯이 관측(`observation.cwd`)을 직독해 갈렸고, 셸 통합이 없는 셸과
+    // 재개 Term에서 사이드바·상태바·검색·도크 범위 칩·대화 매핑이 한꺼번에 죽었다. 같은 결의 소스 스캔으로
+    // 정당한 직독의 **개수를 고정**한다(0건 규칙은 세울 수 없다 — Q1 직독이 실재한다).
+    const cwd_axis_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/cwd_axis.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_cwd_axis_boundary_tests = b.addRunArtifact(cwd_axis_boundary_tests);
+    run_cwd_axis_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
+    boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

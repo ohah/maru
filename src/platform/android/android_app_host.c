@@ -11,6 +11,7 @@
 #include <android/log.h>
 #include <android/bitmap.h>
 #include <android/asset_manager.h>
+#include <sys/system_properties.h>
 #include <jni.h>
 #include <android/choreographer.h>
 #include <vulkan/vulkan.h>
@@ -194,12 +195,18 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
     (*vm)->DetachCurrentThread(vm);
 
     // 래스터 결과를 그대로 남긴다 — 두 플랫폼의 픽셀 차이를 재려면 원본이 필요하다.
-    // 앱은 /data/local/tmp 에 못 쓴다(샌드박스) — 자기 내부 경로에 남기고 run-as 로 꺼낸다.
-    char dump_path[512];
-    snprintf(dump_path, sizeof dump_path, "%s/atlas_ondevice.gray",
-             app->activity->internalDataPath ? app->activity->internalDataPath : "/data/local/tmp");
-    FILE *df = fopen(dump_path, "wb");
-    if (df) { fwrite(buf, 1, W * H, df); fclose(df); LOGI("atlas_dump=%s", dump_path); }
+    // 래스터 결과를 남긴다 — 하네스(`atlas_diff.py`)가 `run-as` 로 꺼내 픽셀을 대조한다.
+    // 앱은 /data/local/tmp 에 못 쓴다(샌드박스)라 자기 내부 경로에 둔다.
+    // **요청할 때만 쓴다**(`setprop debug.maru.atlas_dump 1` — 셸은 `debug.*` 만 설정할 수 있다) — 제품이 매 실행마다 384KB 를 남길
+    // 이유가 없다.
+    char want[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.maru.atlas_dump", want) > 0 && want[0] == '1') {
+        char dump_path[512];
+        snprintf(dump_path, sizeof dump_path, "%s/atlas_ondevice.gray",
+                 app->activity->internalDataPath ? app->activity->internalDataPath : "/data/local/tmp");
+        FILE *df = fopen(dump_path, "wb");
+        if (df) { fwrite(buf, 1, W * H, df); fclose(df); LOGI("atlas_dump=%s", dump_path); }
+    }
 
     *out = buf; *ow = W; *oh = H;
     g.atlas_cols = COLS;

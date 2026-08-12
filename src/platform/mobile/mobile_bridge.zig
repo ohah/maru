@@ -115,16 +115,24 @@ pub export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
     preedit_len = n;
 }
 
-/// 코어가 만든 **답**(DA·DSR·커서 위치…)을 치운다. 데스크톱은 이걸 PTY 로 흘리고 비운다
-/// (`app/runtime.zig`·`app/pty_reader.zig`). 모바일에는 아직 흘려보낼 곳이 없다 — 원격
-/// 세션(M3)이 그 자리다. 그때까지는 **버리되 조용히 버리지 않는다**(§5).
+/// 코어가 만들었지만 **모바일에 아직 가져갈 사람이 없는 것**들을 치운다. 데스크톱은 매
+/// 프레임 이걸 한다 — 답은 PTY 로 흘리고(`app/runtime.zig`·`app/pty_reader.zig`), 셸
+/// 이벤트는 소비한 뒤 비운다(`clearShellEvents`).
 ///
-/// 안 치우면 쌓이기만 한다: 질의 3000번에 15005바이트(실측). 오늘도 ESC 를 눌러 `[c` 를
-/// 치면 닿는 경로이고, 원격 세션이 붙으면 셸이 알아서 질의한다.
-fn drainResponse(core: *terminal.core.TerminalCore) void {
-    if (core.pendingResponse().len == 0) return;
-    setLastError("response_dropped");
-    core.clearResponse();
+/// 안 치우면 이렇게 된다(둘 다 실측):
+///   * **답**(DA·DSR·커서 위치)은 쌓이기만 한다 — 질의 3000번에 15005바이트.
+///   * **셸 이벤트**(OSC 133)는 상한 4096 에 닿고 그 뒤로 전부 드롭되며 overflow 가 영원히
+///     선다 — 프롬프트 사이클 2000회면 닿는다. 코어 주석이 "프레임마다 drain 되면 닿을 일이
+///     없다" 고 전제하는 바로 그 자리다.
+///
+/// 답을 버리는 것은 **의미의 손실**이라 신호를 남기고(§5), 셸 이벤트는 관측용이라 조용히
+/// 비운다. 소비자가 생기면(에이전트 상태·프롬프트 표시) 비우기 **전에** 읽으면 된다.
+fn drainUnconsumed(core: *terminal.core.TerminalCore) void {
+    if (core.pendingResponse().len > 0) {
+        setLastError("response_dropped");
+        core.clearResponse();
+    }
+    if (core.shellEvents().len > 0) core.clearShellEvents();
 }
 
 pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
@@ -142,7 +150,7 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
         return @intCast(delivered_len);
     };
     delivered_len += len;
-    drainResponse(core);
+    drainUnconsumed(core);
     return @intCast(delivered_len);
 }
 
@@ -211,7 +219,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         term_cols = cols;
         term_rows = rows;
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
-        drainResponse(&term_core.?);
+        drainUnconsumed(&term_core.?);
     }
     const core = &(term_core orelse return);
     // **격자를 도는 기준은 코어가 실제로 들고 있는 크기다.** 우리가 요청한 크기를 쓰면

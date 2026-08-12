@@ -230,6 +230,8 @@ selection이 배열(§3.2)이므로 복사·붙여넣기가 단순하지 않다.
 - **BOM이 있으면 보존한다.** 내용의 일부가 아니라 파일 속성으로 다루며, 문서 offset 0은 BOM 뒤다.
 - **쓸 수 없는 파일은 읽기 전용으로 연다.** 권한이 없거나 잠긴 파일을 못 열게 하지 않는다 — 보는 것은 되어야 한다. 대신 **편집을 시도하기 전에** 그 상태를 알리고 편집 연산을 막는다. 저장 시점에 처음 실패하면 사용자는 그때까지의 편집을 잃는다. 판정 시점의 권한이 저장 시점까지 유지된다는 보장은 없으므로, 저장 실패는 [editor-surface.md](editor-surface.md)의 저장 계약이 그대로 처리한다(버퍼와 dirty를 유지).
 
+**위 규칙 중 셋은 "문자가 안 보이는 것"이 정답이라 문자열 비교로 판정되지 않는다** — BOM을 뗐는지, CRLF의 `\r`을 뺐는지, 탭이 전개됐는지. 어느 것이든 실패하면 화면에 유령 글자가 서거나 열이 어긋나는데, 단위 테스트의 `expectEqualStrings`는 "제대로 뗐다"와 "줄을 통째로 못 읽었다"를 구별하지 못한다. 그래서 Chrome Lab의 `editor-real-file` 시나리오가 **파일을 실제로 써서 `openPath`로 읽고 그 줄들을 그린다**(골든 `editor-real-file-from-disk`). 줄 번호가 붙은 캡처는 그 둘을 가른다. Lab 자체는 effect-free 계약이라 파일을 읽지 않으며, 읽기는 호출자가 하고 Lab은 줄만 받는다(`lab.Scenario.lines`).
+
 ### 3.6 외부가 만든 편집 (포맷·code action·자동완성 적용)
 
 포매터·린터·LSP의 **실행·신뢰·config discovery는 [editor-surface-tooling.md](editor-surface-tooling.md) §8.1이 소유한다**(trusted workspace 게이트, shell 없는 argv 실행, timeout·상한·kill, "결과는 저장이 아니라 현재 revision에 대한 text edits로 반환"). 이 문서는 **그 edits가 문서 모델에 닿는 지점**만 정한다.

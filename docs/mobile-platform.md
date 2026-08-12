@@ -18,7 +18,8 @@
   싣는 일이 통째로 사라진다.
 
   **그래서 모바일 앱은 PC 세션의 원격 뷰어다.** [컨트롤 플레인](control-plane.md)이 선택이
-  아니라 전제이고, 앱에는 `pty` 가 링크되지 않는다.
+  아니라 전제다. 실측: 모바일 정적 라이브러리에 maru 의 `pty` 심볼이 **0개**다(libc 의
+  `_execve` 참조는 std 경로에서 오는 것이고 우리 셸 경로가 아니다).
 
   **이 결정이 컨트롤 플레인의 현재 계약과 충돌한다.** 지금 계약은 "wire 는 TCP/HTTP 를
   바인드하지 않는다" 이고 보안이 "같은 uid 안의 신뢰 차등" 이다 — peer-cred 는 기계를
@@ -57,16 +58,17 @@ src/platform/
     mobile_host_abi.h      플랫폼↔코어 C ABI(quad·입력·조회)
     mobile_bridge.zig      chrome→quad 투영, 아틀라스 등록부, 입력·hit-test
   ios/
-    ios_app_host.m         UIKit host: 창·생명주기·터치·키보드
-    ios_metal_renderer.m   Metal 백엔드(배칭)
-    ios_text.m             CoreText 래스터 + 아틀라스 성장
+    ios_app_host.m         UIKit host + Metal 백엔드 + CoreText 래스터
   android/
-    android_app_host.c     NativeActivity host: 창·생명주기·터치
-    MaruActivity.java      IME shim: 조합 중/확정 문자열을 JNI 로 넘긴다(~120줄)
-    android_vulkan_renderer.c  Vulkan 백엔드(배칭)
-    android_text.c         JNI Paint 래스터 + 아틀라스 성장
+    android_app_host.c     NativeActivity host + Vulkan 백엔드 + JNI Paint 래스터
+    MaruActivity.java      IME shim: 조합 중/확정 문자열을 JNI 로 넘긴다
     AndroidManifest.xml
+    shaders/               SPIR-V 소스(chrome.vert·chrome.frag)
 ```
+
+**host 파일 하나가 창·GPU·폰트를 다 갖는다.** 지금 규모(iOS 430줄·Android 977줄)에서는
+나누는 것이 이득이 아니다 — 셋이 같은 상태(스왑체인·아틀라스·스케일)를 공유해서, 가르면 그 상태를
+넘기는 배관이 코드보다 커진다. 커지면 그때 가른다.
 
 **`platform/mobile` 에는 OS 호출이 없다.** 있으면 `ios/`·`android/` 로 내려야 한다. 이
 규칙이 "공통분모" 를 관찰 가능하게 만든다 — 지키는지 여부를 파일 내용으로 판정할 수 있다.
@@ -83,7 +85,8 @@ src/platform/
 |---|---|---|
 | 플랫폼 → 코어 | 논리 크기(safe area 뺀 값) | `maru_mobile_build(w, h)` |
 | 코어 → 플랫폼 | quad 목록(rect·색·radius·kind·아틀라스 셀) | `maru_mobile_quads()` |
-| 플랫폼 → 코어 | 키 입력 바이트 | `maru_mobile_input(bytes, len)` |
+| 플랫폼 → 코어 | 확정된 키 입력 바이트 | `maru_mobile_input(bytes, len)` |
+| 플랫폼 → 코어 | 조합 중 문자열(IME preedit) | `maru_mobile_set_preedit(bytes, len)` |
 | 플랫폼 → 코어 | 터치 지점(논리 px) | `maru_mobile_hit_cell(x, y)` |
 | 코어 → 플랫폼 | 아직 아틀라스에 없는 코드포인트 | `maru_mobile_missing_*` |
 
@@ -123,5 +126,7 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 - **아틀라스 축출** 정책.
 - **스크롤·선택·복사**와 터미널용 **보조 키바**(모바일 키보드에 `Esc`·`Ctrl`·화살표가 없다).
 - **회전·태블릿** 레이아웃.
-- **IME preedit**(조합 중 표시) — `GameTextInput`·`UITextInput` 의 marked text 를 어느 층이
-  소유할지는 [키 입력과 단축키](key-input-and-shortcuts.md)의 IME 계약에 맞춰 정한다.
+- **iOS IME preedit.** Android 는 정했다(§1 — shim 이 `setComposingText` 를 넘기고 코어가
+  커서 자리에 흐리게 그린다). iOS 는 `UITextInput` 의 marked text 를 같은 자리에 태우면
+  되지만 아직 안 했다.
+- **원격 전송·인증**(§1 의 충돌). 이것이 정해지기 전에는 모바일이 세션에 붙지 못한다.

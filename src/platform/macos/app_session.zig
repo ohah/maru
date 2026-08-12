@@ -31897,6 +31897,17 @@ test "file tree는 retained 첫 scan을 게시하고 stale namespace 행 activat
     try tmp.dir.rename("selected", tmp.dir, "moved", session.io);
     try tmp.dir.createDir(session.io, "selected", .default_dir);
     try tmp.dir.writeFile(session.io, .{ .sub_path = "selected/same.md", .data = "# replacement" });
+    // **탐색기의 "활성 터미널 따라가기"를 이 구간에서 끈다.** root pick commit이 도크를 펴고
+    // (`file_panel.zig`의 committed 갈래가 `dock.presented = true`), **같은 `updateFileTree` 호출** 꼬리에서
+    // `followActiveTerminalCwd`가 돈다. 터미널 cwd는 이 임시 root **밖**(테스트 프로세스의 저장소)이라
+    // `followRootSwitch`가 root를 갈아끼우고, 그러면 `same.md`가 영영 안 나와 폴링이 소진된다. 그건 제품이
+    // 맞게 동작한 것이지(docs/file-explorer.md §1) 이 테스트의 주제가 아니다.
+    //
+    // **`dock.collapsed`로는 못 막는다** — 그 commit 갈래가 `collapsed = false`를 함께 쓰므로 미리 세워도
+    // 지워지고, commit 뒤에 세우면 이미 같은 호출에서 전환이 끝난 뒤다(첫 시도가 정확히 이래서 CI에서
+    // 계속 실패했다). `chrome_minimal`은 그 갈래가 건드리지 않으면서 `dockVisible`을 끄므로 commit을
+    // 가로질러 살아남는다. `updateFileTree`는 이 플래그를 보지 않아 결과 소비·행 빌드·감시는 그대로 돈다.
+    session.chrome_minimal = true;
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, file_panel_ops.fileTreeRootOutcome(session));
 
@@ -31911,6 +31922,17 @@ test "file tree는 retained 첫 scan을 게시하고 stale namespace 행 activat
             else => {},
         };
         if (row_index == null) std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    // **억제가 실제로 걸렸는지 확인한다.** 이게 없으면 "레이스가 이번엔 안 터졌다"와 "전환이 불가능하다"를
+    // 구별할 수 없다 — 첫 시도(`dock.collapsed`)가 로컬 5회 통과로 고쳐진 줄 알았다가 CI에서 다시 실패한
+    // 이유가 정확히 그것이다. root가 바뀌면 아래 `row_index`가 null인 채로 폴링만 소진돼 **원인이 안 보이는**
+    // 실패가 되므로, 원인을 직접 말하는 단언을 먼저 둔다.
+    {
+        var still_selected = false;
+        for (session.file_tree.roots.items) |root| {
+            if (std.mem.eql(u8, root.path, selected)) still_selected = true;
+        }
+        try std.testing.expect(still_selected);
     }
     // 완료 queue의 첫 항목이 validated scan이라는 가정 없이, retained descriptor 결과가 실제 행으로
     // 게시될 때까지 frame 소비를 진행한다. 느린 CI에서 무관한 초기 scan이 먼저 끝나도 같은 계약이다.

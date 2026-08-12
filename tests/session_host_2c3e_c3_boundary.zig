@@ -14,7 +14,8 @@ test "2c3e C3 경계는 RX-first와 decoder cadence의 유일한 제품 owner를
     defer allocator.free(transport);
 
     try std.testing.expectEqual(@as(usize, 12), count(runtime, "test \"2c3e C3 socket cadence는"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "try self.client.ingestReadableOutOfBandEvidence();"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".legacy => |client| try client.ingestReadableOutOfBandEvidence(),"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".generation => |adapter| try adapter.ingestRuntimeReadableEvidence(),"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn ingestReadableOutOfBandEvidence("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "RuntimeAttachment.preDecodeBufferedEvents(&self.attachment)"));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "executePreparedRequestWithDecoderOwned("));

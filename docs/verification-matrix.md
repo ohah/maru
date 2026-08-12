@@ -1197,6 +1197,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   2c3d one-shot event와 repo-wide event/effect source-zero, 2c3e RPC/decoder direct-call source-zero+immediate EOF/unread RX-first
   socket parity로 나누며 모두 green 전 2c3 완료를 주장하지 않는다. 중간
   gate는 자기 raw allowlist만 줄이며 2c4 전에는 `RemoteRuntime.client` 0이나 2c 전체 완료를 주장하지 않는다.
+  2c4 focused gate는 Debug·ReleaseFast에서 `RuntimeConnection` exact two-arm schema, 네 public constructor의 arm 선택,
+  공통 private constructor/teardown의 단일 connection 인자, semantic facade 15개 이름·signature, generation raw Client source-zero,
+  legacy raw call reviewed allowlist와 기존 attach/input/control/RPC/event/purge/poison/teardown parity를 검증한다. boundary 1개는
+  제거 대상 여섯 항목과 nullable-adapter mode switch 0, reconnect/current publish 0을 exact-count한다.
   2c3a는 generation 제품 input/revoke/output-progress의 direct Client 호출을 0으로 만들고 legacy baseline은 유지한다.
   exact public signature와 closed error/outcome은 persistent-session-host SSOT를 따르며, accepted byte ownership, 0-byte
   backpressure, revoke-before-input, zero/partial pending frame, controller/observer, copied/moved/fork/foreign-thread,

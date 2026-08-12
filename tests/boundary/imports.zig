@@ -2581,12 +2581,12 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         return error.TestUnexpectedResult;
     const runtime_product = runtime_source[0..runtime_first_test];
     const raw_baseline = [_]struct { name: []const u8, count: usize }{
-        .{ .name = "wire_major", .count = 2 },
-        .{ .name = "screen_codec_version", .count = 2 },
-        .{ .name = "metadata_support", .count = 4 },
-        .{ .name = "peer_attach_generation", .count = 1 },
+        .{ .name = "wire_major", .count = 5 },
+        .{ .name = "screen_codec_version", .count = 4 },
+        .{ .name = "metadata_support", .count = 6 },
+        .{ .name = "peer_attach_generation", .count = 3 },
         .{ .name = "screen_viewport_scrolled_v1", .count = 1 },
-        .{ .name = "async_scroll_to_bottom_v1", .count = 1 },
+        .{ .name = "async_scroll_to_bottom_v1", .count = 2 },
         .{ .name = "notification_stream_auth_v1", .count = 1 },
         .{ .name = "runtime_clipboard_v1", .count = 1 },
         .{ .name = "runtime_core_command_v1", .count = 5 },
@@ -2597,15 +2597,15 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         try std.testing.expectEqual(entry.count, countOccurrences(runtime_product, entry.name));
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(runtime_product, ".expected_major = self.client.wire_major"),
+        countOccurrences(runtime_product, ".expected_major = self.connectionCapabilities().wire_major"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(runtime_product, "self.client.compatibility_profile"),
+        countOccurrences(runtime_product, "client.compatibility_profile"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(runtime_product, "compatibility_profile.attach_schema"),
+        countOccurrences(runtime_product, "profile.attach_schema"),
     );
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(runtime_product, ".capabilities()"));
 }
@@ -7204,7 +7204,7 @@ test "CR3a-2b2 generation GUI batch path is node-bound while legacy fallback sta
     // transport를 인자로 받거나 fallback으로 되찾을 수 없다.
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(runtime, "attachmentTransport(self.client)"),
+        countOccurrences(runtime, "attachmentTransport(self.legacyConnection())"),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -7239,8 +7239,8 @@ test "CR3a-2b2 generation GUI batch path is node-bound while legacy fallback sta
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot, ".readGenerationBatch("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot, ".dropBufferedStream("));
     // Initial snapshot과 ended-event queue 정리는 2c의 명시적 raw Client allowlist다.
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.readSnapshot("));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.dropBufferedStream("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.legacyConnection().readSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.legacyConnection().dropBufferedStream("));
 }
 
 test "CR3a-2c1 initial snapshot ownership stays final-address and generation-bound" {
@@ -7274,7 +7274,7 @@ test "CR3a-2c1 initial snapshot ownership stays final-address and generation-bou
 
     // Generation initial snapshot은 raw Client 호출이나 bare slice 반환이 아니라 exact
     // final-address owner를 통해서만 제품 attach stack에 도달한다.
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.readSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.legacyConnection().readSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, "pub fn readInitialSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, ".readInitialSnapshotGuarded("));
     try std.testing.expectEqual(
@@ -7504,14 +7504,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         @as(usize, 1),
         countOccurrences(backend, "try rr.attachExistingWithAdapter("),
     );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(runtime, "    client: *client_mod.Client, // borrowed"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        countOccurrences(runtime, "        self.client = client;"),
-    );
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(runtime, "connection: RuntimeConnection,"));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(runtime, "        self.connection = connection;"));
     // CR3a-2c3a moves generation input/revoke/output-progress behind RuntimeAttachment's closed
     // switch. The one raw call per primitive is the explicit legacy arm; product methods must not
     // regain a direct self.client call while RemoteRuntime.client still exists for 2c4.
@@ -7549,11 +7543,11 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(runtime, ".legacy => client.pumpPendingOutput(),"),
+        countOccurrences(runtime, ".legacy => (client orelse return error.ProtocolError).pumpPendingOutput(),"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(runtime, "client.fenceRevokedStream(value.streamId())"),
+        countOccurrences(runtime, "(client orelse return error.ProtocolError).fenceRevokedStream(value.streamId())"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),

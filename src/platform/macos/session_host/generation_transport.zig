@@ -1029,6 +1029,7 @@ fn mapGenerationExecuteToLegacyError(err: client_slot_mod.GenerationExecuteError
         error.InvalidReceipt => error.InvalidReceipt,
         error.IdentityExhausted => error.IdentityExhausted,
         error.ResourceExhausted => error.OutOfMemory,
+        error.WriteFailed => error.WriteFailed,
         error.InvalidResponseDestination => error.InvalidResponseDestination,
         else => |client_err| client_err,
     };

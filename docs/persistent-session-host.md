@@ -908,6 +908,31 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    legacy로 fallback하지 않는다. 2c3은 generation arm의 direct `logicalClient()`/`Client` method callsite 0을,
    2c4는 `RemoteRuntime.client` 필드 자체 제거와 `RuntimeConnection.legacy|generation` 타입 격리를 소유한다.
 
+   **CR3a-2c4의 단일 mode SSOT**는 `RemoteRuntime.connection: RuntimeConnection` 하나다. exact storage schema는
+   `union(enum) { legacy: *Client, generation: *HostAdapter }`이며 `RemoteRuntime`에는 `client`, `generation_adapter`, mode bool/tag,
+   raw client mirror 또는 adapter mirror를 병렬로 두지 않는다. `spawn(*Client)`·`attachExisting(*Client)`는 오직 `.legacy`를,
+   `spawnWithAdapter(*HostAdapter)`·`attachExistingWithAdapter(*HostAdapter)`는 오직 `.generation`을 조립한다. 공통 private 생성자는
+   `client`와 nullable adapter 두 인자를 함께 받지 않고 `RuntimeConnection` 하나만 받는다. generation arm이 실패해도 `.legacy`로
+   바꾸거나 `HostAdapter.logicalClient()`를 호출하지 않는다.
+
+   mode별 transport surface의 exact 15개 의미 메서드는
+   `capabilities|prepareRequest|executePreparedRequest|abortPreparedRequest|sendInput|sendInputNonBlocking|sendControl|
+   sendControlNonBlocking|pumpPendingOutput|takeEvent|releaseEvent|fenceRevoke|readInitialSnapshot|purgeEndedStream|poison`이다.
+   generation arm은 이 15개를 `GenerationAttachment`/`GenerationTransport`의 typed facade로만 실행하고, 인자·반환형은 2c3의
+   기존 public 계약과 동일하다. legacy arm은 기존 raw `Client` 호출을 이 arm의 bounded switch branch 안에서만 유지한다.
+   settlement용 13개 internal orchestration 메서드는 이 15개에 포함하지 않으며 `RemoteRuntime`이 임의 raw Client authority를
+   얻는 우회로가 아니다. boundary는 15개 이름과 signature를 각각 exact 1, 추가 semantic method 0으로 고정한다.
+
+   제거 목록은 `RemoteRuntime.client`, `RemoteRuntime.generation_adapter`, `spawnWithOwner(client,generation_adapter,...)`,
+   `attachExistingWithOwner(client,generation_adapter,...)`, `initializePendingEventOwner(generation_adapter)`,
+   `RuntimeAttachment.deinitWithAdapter(..., ?*HostAdapter)`와 제품 코드의 nullable-adapter mode switch다. 대체 API는 각각
+   `connection`, `spawnWithConnection(connection,...)`, `attachExistingWithConnection(connection,...)`,
+   `initializePendingEventOwner()`, `RuntimeAttachment.deinitWithConnection(connection)` 하나뿐이다. test fixture도 두 필드를 따로
+   대입하지 않고 union을 조립한다. source oracle은 `RemoteRuntime` 제품 영역의 `.client`/`.generation_adapter` 필드 선언·접근 0,
+   generation branch의 `logicalClient()`·`*Client`·raw `Client` method call 0, legacy branch의 reviewed raw call allowlist와
+   기존 external movable graph 변화 0을 함께 검증한다. Debug·ReleaseFast 제품 parity는 legacy/generation attach, initial snapshot,
+   input/control/RPC/event/purge/poison/teardown의 기존 관측값과 reconnect/current publish 0을 유지한다.
+
    2c3a의 exact signature는 `sendInput(bytes: []const u8) -> InputError!void`,
    `sendInputNonBlocking(bytes: []const u8) -> InputError!usize`,
    `pumpPendingOutput() -> InputError!bool`, `fenceRevoke() -> InputError!RevokeFence`다.

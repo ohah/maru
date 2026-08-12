@@ -122,11 +122,12 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     try std.testing.expectEqual(@as(usize, 1), count(blocking_generation_arm, ".sendControl("));
     try std.testing.expectEqual(@as(usize, 0), count(blocking_generation_arm, "self.client.send"));
     try std.testing.expectEqual(@as(usize, 0), count(blocking_generation_arm, "encodeParams"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottomNonBlocking("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommandNonBlocking("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottom("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommand("));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "client.sendResyncNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.legacyConnection().sendScrollToBottomNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.legacyConnection().sendCoreCommandNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.legacyConnection().sendScrollToBottom("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.legacyConnection().sendCoreCommand("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "value.sendResyncNonBlocking("));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.attachment.sendResyncNonBlocking(self.legacyConnectionOrNull())"));
     const response_core = between(
         runtime,
         "    pub fn sendCoreCommandBlocking(",

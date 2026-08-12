@@ -113,7 +113,8 @@ export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     // 누적 512바이트를 넘긴 순간부터 모든 키·IME 확정·백스페이스가 조용히 사라졌다
     // (실측: `total=512` 에서 멈춤). replay 는 화면 크기가 바뀌어 코어를 다시 세울 때
     // 쓰는 편의일 뿐이고, 그 편의가 입력 자체를 막아서는 안 된다.
-    if (term_core) |*c| c.write(ptr[0..len]) catch {};
+    // 실패를 삼키지 않는다 — 키가 사라지는데 신호가 없던 것이 이번 최상위 결함이었다.
+    if (term_core) |*c| c.write(ptr[0..len]) catch setLastError("core_write_input");
     delivered_len += len;
 
     const n = @min(len, input_buf.len - input_len);
@@ -178,10 +179,11 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         };
         term_cols = cols;
         term_rows = rows;
-        term_core.?.write(term_feed) catch {};
+        term_core.?.write(term_feed) catch setLastError("core_write_feed");
         // 재생성이면 그동안 받은 입력도 다시 먹인다 — 화면이 되돌아가지 않는다.
         // 기록이 잘렸으면 replay 하지 않는다(위 주석).
-        if (input_len > 0 and !input_truncated) term_core.?.write(input_buf[0..input_len]) catch {};
+        if (input_len > 0 and !input_truncated)
+            term_core.?.write(input_buf[0..input_len]) catch setLastError("core_write_replay");
     }
     // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };

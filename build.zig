@@ -1746,6 +1746,11 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "mobile_bridge", .module = mobile_bridge_mod }},
         }),
     });
+    // 키 id 표는 헤더가 단일 출처다. 한쪽만 고치면 host 가 모르는 id 를 보내고 키가 조용히
+    // 사라지므로, 테스트가 **헤더를 그대로 읽어** 브리지 매핑과 대조한다.
+    mobile_bridge_tests.root_module.addAnonymousImport("mobile_host_abi_for_test", .{
+        .root_source_file = b.path("src/platform/mobile/mobile_host_abi.h"),
+    });
     const run_mobile_bridge_tests = b.addRunArtifact(mobile_bridge_tests);
     test_step.dependOn(&run_mobile_bridge_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의

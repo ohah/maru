@@ -134,6 +134,56 @@ test "합성 대상은 잉크를 내고 보통 글자는 0" {
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_synthesize('W', &cell, 24));
 }
 
+// 키는 **코어의 인코더**를 타야 한다. host 가 바이트를 손으로 적으면 DECCKM·수정자·kitty
+// 프로토콜이 전부 빠진다. 화살표가 실제로 `CSI A` 로 나가는지로 확인한다.
+test "화살표는 코어가 인코딩한다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+    const before = bridge.maru_mobile_input("", 0);
+    const after = bridge.maru_mobile_key(5, 0, 0); // MARU_KEY_UP
+    try std.testing.expectEqual(before + 3, after); // ESC [ A = 3바이트
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    // Ctrl+C 는 한 바이트(0x03) — 손으로 적던 표에는 아예 없던 경로다.
+    const ctrl_c = bridge.maru_mobile_key(0, 'c', 2); // MARU_MOD_CTRL
+    try std.testing.expectEqual(after + 1, ctrl_c);
+}
+
+// 헤더가 숫자 표의 단일 출처다. **한쪽만 고치면 host 가 모르는 id 를 보내고 키가 사라진다** —
+// 헤더를 읽어 브리지 매핑이 그 전부를 아는지 검사한다.
+test "헤더의 키 id 를 브리지가 전부 안다" {
+    const src = @embedFile("mobile_host_abi_for_test");
+    _ = bridge.maru_mobile_build(402, 874);
+    var checked: u32 = 0;
+    var it = std.mem.tokenizeScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const marker = "#define MARU_KEY_";
+        if (!std.mem.startsWith(u8, line, marker)) continue;
+        if (std.mem.indexOf(u8, line, "MARU_KEY_F(") != null) continue; // 매크로 함수는 아래서 따로
+        var parts = std.mem.tokenizeAny(u8, line[marker.len..], " \t");
+        _ = parts.next() orelse continue; // 이름
+        const num = parts.next() orelse continue;
+        const id = std.fmt.parseInt(u32, num, 10) catch continue;
+        bridge.maru_mobile_clear_error();
+        _ = bridge.maru_mobile_key(id, 'a', 0);
+        try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 15); // CHAR + 특수키 14개
+    // F1~F12 도 전부
+    var n: u32 = 1;
+    while (n <= 12) : (n += 1) {
+        bridge.maru_mobile_clear_error();
+        _ = bridge.maru_mobile_key(99 + n, 0, 0);
+        try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    }
+    // 표에 없는 id 는 **조용히 흘리지 않는다**
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_key(9999, 0, 0);
+    try std.testing.expectEqualStrings("key_unknown_id", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

@@ -49,8 +49,12 @@ const unsigned char *maru_mobile_icon_atlas(void);
 unsigned int maru_mobile_icon_slot_px(void);
 unsigned int maru_mobile_icon_count(void);
 
-/// 키 입력. 코어는 이 바이트를 PTY 에서 온 것과 구분하지 않는다.
+/// 키 입력(확정된 문자). 코어는 이 바이트를 PTY 에서 온 것과 구분하지 않는다.
 unsigned int maru_mobile_input(const char *bytes, unsigned long len);
+
+/// 조합 중 문자열(IME preedit). **코어에 넣지 않는다** — 확정 전에 PTY 로 흘리면 셸이
+/// 자모를 명령어 일부로 받는다. 화면 커서 자리에 흐리게 그릴 겉치레다.
+void maru_mobile_set_preedit(const char *bytes, unsigned long len);
 
 /// 터치 지점(논리 px) → 셀. 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
 unsigned int maru_mobile_hit_cell(float x, float y);

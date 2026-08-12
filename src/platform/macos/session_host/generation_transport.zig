@@ -851,6 +851,8 @@ pub fn executePreparedRequestWithDecoderOwned(
     receipt: contract.PreparedCallReceipt,
     context: *anyopaque,
     decoder: contract.RpcDecoder,
+    pre_decode_owner: *anyopaque,
+    pre_decode: contract.RpcPreDecode,
 ) Error!contract.RpcDecodeDisposition {
     if (!transport.requestIdentityValid() or attachment_owner_addr == 0 or
         transport.owner_addr != attachment_owner_addr)
@@ -860,7 +862,13 @@ pub fn executePreparedRequestWithDecoderOwned(
         .bound_stream_id = transport.bound_stream_id,
         .context = context,
         .decoder = decoder,
+        .pre_decode_context = pre_decode_owner,
+        .pre_decode = pre_decode,
     }) catch |err| return mapGenerationExecuteToLegacyError(err);
+}
+
+fn acceptBufferedPreDecode(_: *anyopaque) contract.RpcPreDecodeDisposition {
+    return .proceed;
 }
 
 /// Package-level attachment seam. It publishes the mirror only from the canonical registry
@@ -965,7 +973,7 @@ fn mapPrepareError(err: client_slot_mod.GenerationRequestError) PrepareError {
     return switch (err) {
         error.Busy => error.Busy,
         error.InvalidOwner => error.InvalidOwner,
-        error.Unauthorized => error.Unauthorized,
+        error.Unauthorized => error.ProtocolError,
         error.IdentityExhausted => error.IdentityExhausted,
         error.ResourceExhausted => error.ResourceExhausted,
         error.ConnectionClosed => error.ConnectionClosed,
@@ -1004,7 +1012,7 @@ fn mapGenerationRequestToLegacyError(err: client_slot_mod.GenerationRequestError
     return switch (err) {
         error.Busy => error.AdminBusy,
         error.InvalidOwner => error.MovedOrCopied,
-        error.Unauthorized => error.ProtocolError,
+        error.Unauthorized => error.Unauthorized,
         error.InvalidReceipt => error.InvalidReceipt,
         error.IdentityExhausted => error.IdentityExhausted,
         error.ResourceExhausted => error.OutOfMemory,
@@ -1017,7 +1025,7 @@ fn mapGenerationExecuteToLegacyError(err: client_slot_mod.GenerationExecuteError
     return switch (err) {
         error.Busy => error.AdminBusy,
         error.InvalidOwner => error.MovedOrCopied,
-        error.Unauthorized => error.ProtocolError,
+        error.Unauthorized => error.Unauthorized,
         error.InvalidReceipt => error.InvalidReceipt,
         error.IdentityExhausted => error.IdentityExhausted,
         error.ResourceExhausted => error.OutOfMemory,
@@ -1798,6 +1806,8 @@ fn runScopedDecoderSocket(case: ScopedDecoderSocketCase) !void {
         receipt,
         &decoder,
         Decoder.decode,
+        &decoder,
+        acceptBufferedPreDecode,
     );
     peer.join();
     try std.testing.expect(peer_complete);

@@ -261,6 +261,14 @@ const RuntimeAttachment = union(enum) {
             .legacy => blk: {
                 const response = try client.call(legacy_method, legacy_params_json);
                 defer client.allocator.free(response);
+                switch (preDecodeBufferedEvents(self)) {
+                    .proceed => {},
+                    .stale => return error.Unauthorized,
+                    .busy => return error.AdminBusy,
+                    .out_of_memory => return error.OutOfMemory,
+                    .protocol_failure => return error.ProtocolError,
+                    .connection_closed => return error.ConnectionClosed,
+                }
                 const disposition = decoder(context, tag, response);
                 if (disposition == .protocol_failure)
                     client.poison(.peer_contract_violation);
@@ -271,8 +279,33 @@ const RuntimeAttachment = union(enum) {
                 request,
                 context,
                 decoder,
-            ) catch |err| return mapGenerationDecodedError(err),
+                self,
+                preDecodeBufferedEvents,
+            ) catch |err| {
+                if (self.statePtr().role == .observer) return error.Unauthorized;
+                return mapGenerationDecodedError(err);
+            },
         };
+    }
+
+    fn preDecodeBufferedEvents(context: *anyopaque) generation_contract.RpcPreDecodeDisposition {
+        const self: *RuntimeAttachment = @ptrCast(@alignCast(context));
+        const runtime: *RemoteRuntime = @fieldParentPtr("attachment", self);
+        const before_role = runtime.attachment.statePtr().role;
+        const before_generation = runtime.attachment.statePtr().controller_generation;
+        const drained = runtime.drainObservationEvents() catch |err| return switch (err) {
+            error.AdminBusy => .busy,
+            error.OutOfMemory => .out_of_memory,
+            error.ConnectionClosed => .connection_closed,
+            else => .protocol_failure,
+        };
+        if (drained.ended) return .connection_closed;
+        const after = runtime.attachment.statePtr();
+        return if (before_role == .controller and
+            (after.role != .controller or after.controller_generation != before_generation))
+            .stale
+        else
+            .proceed;
     }
 
     fn hasBufferedControllerRevoke(
@@ -6519,6 +6552,155 @@ test "2c3e C2 제품 RPC family는 terminate를 typed request로 실행한다" {
 
 test "2c3e C2 제품 RPC family는 detach를 typed request로 실행한다" {
     try runC2TypedFamilySocket(.detach);
+}
+
+const C3CadenceAttachmentMode = enum { legacy, generation };
+
+fn runC3ResponsePredecessor(
+    mode: C3CadenceAttachmentMode,
+    predecessor: framing.Frame,
+    expect_stale: bool,
+    expect_snapshot: bool,
+) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    const Peer = struct {
+        fn run(fd: c.fd_t, first: framing.Frame) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            const first_wire = framing.encodeFrame(
+                std.heap.page_allocator,
+                first.header,
+                first.payload,
+            ) catch return;
+            defer std.heap.page_allocator.free(first_wire);
+            socket_server.writeAll(fd, first_wire) catch return;
+            const response_wire = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = request.header.request_id },
+                "{\"result\":{\"metadata_revision\":4,\"metadata\":{\"cwd\":\"/rpc\",\"window_title\":\"rpc\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":4,\"title_generation\":4,\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null,\"processes\":[]}}}",
+            ) catch return;
+            defer std.heap.page_allocator.free(response_wire);
+            socket_server.writeAll(fd, response_wire) catch return;
+        }
+    };
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], predecessor });
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3E_C300 + @as(u128, @intFromEnum(mode)),
+        .parser = framing.FrameParser.init(testing.allocator),
+        .metadata_support = .supported,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var runtime: RemoteRuntime = undefined;
+    runtime.client = &client;
+    runtime.generation_adapter = null;
+    runtime.allocator = testing.allocator;
+    runtime.io = testing.io;
+    runtime.attachment = .init(testing.allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 3,
+    });
+    if (mode == .generation) {
+        try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+        try host_adapter_mod.HostAdapter.initInPlace(&adapter, testing.allocator, &client);
+        runtime.client = adapter.logicalClient();
+        runtime.generation_adapter = &adapter;
+        runtime.attachment.deinit();
+        runtime.attachment = .{ .generation = .{} };
+        try generation_attachment_mod.testing_api.initAttached(
+            &runtime.attachment.generation,
+            &adapter,
+            testing.allocator,
+            0xaa,
+            7,
+        );
+        runtime.attachment.statePtr().role = .controller;
+        runtime.attachment.statePtr().controller_generation = 3;
+    }
+    runtime.pending_event_owner = .{};
+    runtime.runtime_lifetime = .{};
+    try runtime.initializePendingEventOwner(runtime.generation_adapter);
+    runtime.observation = .{};
+    runtime.direct_input = .empty;
+    runtime.direct_input_offset = 0;
+    runtime.pending_controls = .empty;
+    runtime.blocking_flush_active = false;
+    runtime.event_generation_tracking = .tracked;
+    defer {
+        peer.join();
+        runtime.observation.deinit(testing.allocator);
+        runtime.direct_input.deinit(testing.allocator);
+        runtime.pending_controls.deinit(testing.allocator);
+        runtime.attachment.deinitWithAdapter(runtime.generation_adapter);
+        if (runtime.generation_adapter) |_| adapter.deinit() else client.deinit();
+    }
+    const outcome = runtime.refreshObservation();
+    if (expect_stale) {
+        try testing.expectError(error.Unauthorized, outcome);
+        try testing.expectEqual(remote_attachment.Role.observer, runtime.attachment.statePtr().role);
+        try testing.expectEqual(@as(u64, 0), runtime.observation.revision);
+    } else {
+        try outcome;
+        try testing.expectEqual(@as(u64, 4), runtime.observation.revision);
+        if (expect_snapshot) {
+            try testing.expectEqual(@as(usize, 1), runtime.client.pending_stream.items.len);
+            try testing.expectEqualStrings(
+                predecessor.payload,
+                runtime.client.pending_stream.items[0].payload,
+            );
+        }
+    }
+}
+
+test "2c3e C3 socket cadence는 response 전 revoke를 먼저 settle하고 stale RPC를 게시하지 않는다" {
+    const payload = "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}";
+    inline for (.{ C3CadenceAttachmentMode.legacy, .generation }) |mode| try runC3ResponsePredecessor(
+        mode,
+        .{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = @constCast(payload) },
+        true,
+        false,
+    );
+}
+
+test "2c3e C3 socket cadence는 response 전 metadata event를 먼저 settle한 뒤 decoder를 한 번 호출한다" {
+    const payload = "{\"event\":\"runtime.metadata\",\"metadata_revision\":3,\"metadata\":{\"cwd\":\"/event\",\"window_title\":\"event\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":3,\"title_generation\":3,\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null,\"processes\":[]}}";
+    inline for (.{ C3CadenceAttachmentMode.legacy, .generation }) |mode| try runC3ResponsePredecessor(
+        mode,
+        .{ .header = .{ .kind = .event, .stream_id = 7 }, .payload = @constCast(payload) },
+        false,
+        false,
+    );
+}
+
+test "2c3e C3 socket cadence는 response 전 snapshot을 먼저 보존한 뒤 decoder를 한 번 호출한다" {
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(testing.allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        testing.allocator,
+        .{ .kind = .screen_meta, .generation = 9 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer testing.allocator.free(meta);
+    try screen_stream.appendRecord(&records, testing.allocator, meta);
+    inline for (.{ C3CadenceAttachmentMode.legacy, .generation }) |mode| try runC3ResponsePredecessor(
+        mode,
+        .{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = 7,
+                .flags = protocol.Flags.end_stream,
+            },
+            .payload = records.items,
+        },
+        false,
+        true,
+    );
 }
 
 const PreparationDtoDriftAllocator = struct {

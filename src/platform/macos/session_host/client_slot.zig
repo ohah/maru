@@ -1808,6 +1808,8 @@ pub const GenerationRpcDecodedExecute = struct {
     bound_stream_id: u64,
     context: *anyopaque,
     decoder: contract.RpcDecoder,
+    pre_decode_context: *anyopaque,
+    pre_decode: contract.RpcPreDecode,
 };
 
 pub const GenerationExecuteError = GenerationRequestError ||
@@ -5799,6 +5801,34 @@ pub fn executeGenerationRpcDecoded(
         @panic("RPC decoder bridge lost its canonical response address after publication");
     const response: *RpcExecutedResponse = @ptrFromInt(response_addr);
     if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.response_published);
+    switch (execution.pre_decode(execution.pre_decode_context)) {
+        .proceed => {},
+        .busy => return error.Busy,
+        .out_of_memory => return error.OutOfMemory,
+        .protocol_failure => return error.ProtocolError,
+        .connection_closed => return error.ConnectionClosed,
+        .stale => {
+        const stale_admission = beginGenerationRequestOwner(execution.request, false) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        defer endRegisteredNodeOperation(stale_admission.operation);
+        var stale_borrow: rpc_executed_response.RpcResponseBorrow = .{};
+        beginRpcResponseBorrowUnderOwner(
+            execution.request,
+            response,
+            &stale_borrow,
+            &stale_admission,
+        ) catch process_seal_service.fatalIntegrity(.proof_loss);
+        finishRpcResponseOwnedUnderOwner(
+            execution.request,
+            response,
+            &stale_borrow,
+            .reusable,
+            &stale_admission,
+        ) catch process_seal_service.fatalIntegrity(.proof_loss);
+        if (!response.pristineExact()) process_seal_service.fatalIntegrity(.proof_loss);
+        return error.Unauthorized;
+        },
+    }
     const admission = beginGenerationRequestOwner(execution.request, false) catch
         process_seal_service.fatalIntegrity(.proof_loss);
     defer endRegisteredNodeOperation(admission.operation);

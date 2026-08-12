@@ -11,8 +11,13 @@
   - 글리프가 통째로 밀렸는지 보려면 셀별 무게중심 차이를 본다 — 그건 폰트가 다를 때 생기고,
     같은 폰트라면 0 에 가까워야 한다.
 
+대조 그림도 함께 낸다(`out/atlas-diff.png`) — README 가 보여주는 그림을 **커밋된
+스크립트로 다시 만들 수 있어야** 한다.
+
 사용: python3 tools/mobile-poc/atlas_diff.py out/atlas-ios.gray out/atlas-android.gray 384 128 24 32
 """
+import pathlib
+import subprocess
 import sys
 
 
@@ -90,7 +95,41 @@ def main() -> int:
                 worst = (d, c, r)
     print(f"무게중심 0.5px 초과로 밀린 셀  {shifted}/{cols * rows}")
     print(f"최대 밀림  {worst[0]:.2f}px (셀 {worst[1]},{worst[2]})")
+
+    write_diff_png(a, b, W, H, pathlib.Path(a_path).parent / "atlas-diff.png")
     return 0
+
+
+def write_diff_png(a: bytes, b: bytes, W: int, H: int, out: pathlib.Path) -> None:
+    """위=A(초록) · 가운데=B(자홍) · 아래=차이(3배 증폭).
+
+    차이를 증폭하는 이유는 **안 증폭하면 안 보이기 때문**이다 — 그게 결론이기도 하다.
+    """
+    scale, gap = 2, 8
+    ow, oh = W * scale, (H * 3 + gap * 2) * scale
+    px = bytearray(ow * oh * 3)
+
+    def put(x: int, y: int, r: int, g: int, bl: int) -> None:
+        for dy in range(scale):
+            row = (y * scale + dy) * ow
+            for dx in range(scale):
+                o = (row + x * scale + dx) * 3
+                px[o], px[o + 1], px[o + 2] = r, g, bl
+
+    for y in range(H):
+        for x in range(W):
+            av, bv = a[y * W + x], b[y * W + x]
+            put(x, y, av // 3, av, av // 3)
+            put(x, y + H + gap, bv, bv // 3, bv)
+            d = min(255, abs(av - bv) * 3)
+            put(x, y + (H + gap) * 2, d, d, d)
+
+    ppm = out.with_suffix(".ppm")
+    ppm.write_bytes(b"P6\n%d %d\n255\n" % (ow, oh) + bytes(px))
+    here = pathlib.Path(__file__).parent
+    subprocess.run(["python3", str(here / "ppm2png.py"), str(ppm), str(out)], check=True)
+    ppm.unlink()
+    print(f"대조 그림  {out}")
 
 
 if __name__ == "__main__":

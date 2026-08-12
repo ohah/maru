@@ -88,7 +88,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 폴백(AppleSDGothicNeo)이 필요하고, 진행 폭은 `CTFontGetAdvancesForGlyphs` 가 준다.
 - (BOOL)rasterizeAtlasOnDevice {
     NSString *chars = @MARU_ATLAS_PREBAKE;   // 집합은 공용 헤더가 소유한다
-    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = MARU_ATLAS_COLS;
+    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = maru_mobile_atlas_cols();
     NSMutableArray<NSNumber *> *cps = [NSMutableArray array];
     NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
     [chars enumerateSubstringsInRange:NSMakeRange(0, chars.length)
@@ -100,7 +100,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSUInteger n = cps.count;
     // 미리 굽는 글자 수가 아니라 **고정 행 수**로 잡는다 — 남는 슬롯이 온디맨드
     // 성장의 상한이 되기 때문이다.
-    unsigned int W = COLS * CW, H = MARU_ATLAS_ROWS * CH;
+    unsigned int W = COLS * CW, H = maru_mobile_atlas_rows() * CH;
     uint8_t *gray = calloc(W * H, 1);
     if (!gray) return NO;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
@@ -152,7 +152,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CFRelease(base); CFRelease(korean);
     CGContextRelease(ctx); CGColorSpaceRelease(cs);
 
-    _atlasCols = COLS; _atlasRows = MARU_ATLAS_ROWS; _atlasH = H;
+    _atlasCols = COLS; _atlasRows = maru_mobile_atlas_rows(); _atlasH = H;
     MTLTextureDescriptor *td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                            width:W height:H mipmapped:NO];
@@ -239,8 +239,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
+        // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
+        // 다시 굽고** 있었다 — 화면에는 안 나오면서 CPU·GPU 만 먹는다.
+        if (slot == 0xFFFFFFFF) break;  // 축출 정책은 아직 없다(계약 §4)
         unsigned int col = slot >> 16, row = slot & 0xFFFF;
-        if (row >= _atlasRows) break;  // 아틀라스가 꽉 찼다 — 축출 정책은 아직 없다(계약 §4)
         memset(cell, 0, CW * CH);
         CGContextRef ctx = CGBitmapContextCreate(cell, CW, CH, 8, CW, cs, kCGImageAlphaNone);
         CGContextSetGrayFillColor(ctx, 1.0, 1.0);

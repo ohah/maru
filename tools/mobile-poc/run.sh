@@ -121,15 +121,17 @@ chrome-android-app)
         "$ANDROID/android_app_host.c" "$OUT/glue.o" "$LIB_OUT/libmaru-mobile-android.a" \
         -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -ljnigraphics -lm \
         -o "$OUT/libmaruchrome.so"
+    # 셰이더·폰트는 **APK asset** 으로 들어간다 — /data/local/tmp 는 개발 스크립트 자리라
+    # push 를 안 한 기기에서는 앱이 검은 화면이 된다.
+    rm -rf "$OUT/assets" && mkdir -p "$OUT/assets"
     for s in chrome.vert chrome.frag; do
-        "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
-        $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+        "$GLSLC" -o "$OUT/assets/$s.spv" "$ANDROID/shaders/$s"
     done
-    # iOS 번들과 **같은 폰트 파일**을 올린다 — 그래야 래스터 차이만 남는다.
-    $ADB push "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" /data/local/tmp/ >/dev/null
+    cp "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" "$OUT/assets/"
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
-        --manifest "$ANDROID/AndroidManifest.xml" -o "$OUT/base.apk" --auto-add-overlay
+        --manifest "$ANDROID/AndroidManifest.xml" -A "$OUT/assets" \
+        -o "$OUT/base.apk" --auto-add-overlay
     # IME shim 하나만 컴파일한다. `android.*` 만 써서 AndroidX 도 kotlin-stdlib 도 없다 —
     # 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(docs/mobile-platform.md §1).
     mkdir -p "$OUT/java"

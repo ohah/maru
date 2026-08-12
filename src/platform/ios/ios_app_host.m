@@ -87,9 +87,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // "각 플랫폼이 자기 폰트 스택을 쓴다"가 실제로 서는지 보는 자리다. 한글은 Menlo 에 없어
 // 폴백(AppleSDGothicNeo)이 필요하고, 진행 폭은 `CTFontGetAdvancesForGlyphs` 가 준다.
 - (BOOL)rasterizeAtlasOnDevice {
-    NSString *chars = @"$ zig build test All 11 passed.git status --short"
-                       "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch"
-                       "한글 터미널 세션 목록 설정 검색 알림";
+    NSString *chars = @MARU_ATLAS_PREBAKE;   // 집합은 공용 헤더가 소유한다
     const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = MARU_ATLAS_COLS;
     NSMutableArray<NSNumber *> *cps = [NSMutableArray array];
     NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
@@ -99,8 +97,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         NSNumber *k = @([sub characterAtIndex:0]);
         if (![seen containsObject:k]) { [seen addObject:k]; [cps addObject:k]; }
     }];
-    NSUInteger n = cps.count, rows = (n + COLS - 1) / COLS;
-    unsigned int W = COLS * CW, H = (unsigned int)(rows * CH);
+    NSUInteger n = cps.count;
+    // 미리 굽는 글자 수가 아니라 **고정 행 수**로 잡는다 — 남는 슬롯이 온디맨드
+    // 성장의 상한이 되기 때문이다.
+    unsigned int W = COLS * CW, H = MARU_ATLAS_ROWS * CH;
     uint8_t *gray = calloc(W * H, 1);
     if (!gray) return NO;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
@@ -152,7 +152,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CFRelease(base); CFRelease(korean);
     CGContextRelease(ctx); CGColorSpaceRelease(cs);
 
-    _atlasCols = COLS; _atlasRows = (unsigned int)rows; _atlasH = H;
+    _atlasCols = COLS; _atlasRows = MARU_ATLAS_ROWS; _atlasH = H;
     MTLTextureDescriptor *td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
                                                            width:W height:H mipmapped:NO];
@@ -227,12 +227,17 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (void)growAtlas {
     unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !_atlasFont || !_glyphTex) return;
+    // **먼저 복사한다.** `maru_mobile_atlas_add` 가 미스 목록에서 그 항목을 지우면서 마지막
+    // 항목을 그 자리로 당겨 오므로, 인덱스를 앞으로만 진행하면 절반을 건너뛴다(실측).
+    if (n > 64) n = 64;
+    unsigned int want[64];
+    for (unsigned int i = 0; i < n; i++) want[i] = maru_mobile_missing_cp(i);
     const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
     for (unsigned int i = 0; i < n; i++) {
-        unsigned int cp = maru_mobile_missing_cp(i);
+        unsigned int cp = want[i];
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
         unsigned int col = slot >> 16, row = slot & 0xFFFF;

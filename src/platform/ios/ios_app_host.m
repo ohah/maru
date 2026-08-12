@@ -207,9 +207,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (BOOL)canBecomeFirstResponder { return YES; }
-// 소프트 키보드는 화면 절반을 가린다. 빈 `inputView` 를 주면 키보드는 안 뜨고
-// **입력 대상 자격은 그대로** 남는다(하드웨어 키는 계속 `insertText:` 로 온다).
-- (UIView *)inputView { return [[UIView alloc] initWithFrame:CGRectZero]; }
+// **소프트 키보드를 막지 않는다.** 한때 빈 `inputView` 를 돌려줘 키보드를 감췄는데,
+// 그러면 하드웨어 키보드가 없는 사용자는 **아무것도 입력할 수 없다** — 스크린샷을 깨끗하게
+// 하려다 넣은 것이라 제품에는 틀린 동작이었다. Android 도 켜지면 키보드를 올린다.
 - (BOOL)hasText { return YES; }
 - (void)deleteBackward {
     char bs = 0x7F;

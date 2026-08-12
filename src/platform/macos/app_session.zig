@@ -1,5 +1,7 @@
 const std = @import("std");
 const debug_fixtures = @import("app_session/debug_fixtures.zig");
+/// N1: 네이티브 편집기의 platform 쪽(파일 읽기·권한). L2는 OS를 모르므로 여기서 읽어 넘긴다.
+const editor_ops = @import("app_session/editor.zig");
 const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
 const agent_ops = @import("app_session/agent.zig");
@@ -2392,6 +2394,7 @@ pub const AppSession = struct {
 
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
     pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
+        debug_fixtures.maybeDebugOpenNativeEditor(self);
         return debug_fixtures.maybeDebugOpenFilePanel(self);
     }
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
@@ -3608,6 +3611,8 @@ pub const AppSession = struct {
     /// 같은 host를 가리키므로 슬롯 하나로 충분하다).
     restore_gone_host_id: u128 = 0,
     debug_file_panel_opened: bool = false,
+    /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).
+    debug_native_editor_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
     // 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(cur)을 만들고 이 prev와 4a surfaceDiff한 뒤 cur로 전진시킨다
     // (Swift가 batch를 적용했다는 전제). 비어 있으면 직전 tick에 web Term이 없었음.

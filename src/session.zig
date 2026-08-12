@@ -93,6 +93,8 @@ pub const editor = struct {
     pub const line_index = @import("session/editor/line_index.zig");
     pub const selection = @import("session/editor/selection.zig");
     pub const document = @import("session/editor/document.zig");
+    /// 읽어 온 bytes를 문서 + 논리행 인덱스로 묶는다 — 뷰가 필요로 하는 것을 한 번에 준다.
+    pub const open = @import("session/editor/open.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

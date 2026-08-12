@@ -11,6 +11,7 @@
 //! 첫 프레임에 플래그 검사 몇 번으로 끝난다.
 
 const std = @import("std");
+const editor_ops = @import("editor.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 
@@ -660,6 +661,52 @@ pub fn reapplyForcedAgentStates(self: *AppSession) void {
     // 사용자 클릭과 **같은 경로**(rebuildSidebar)를 태워 rows를 현실과 맞춘다(메모리·docs의 self-verify 게이트 규율).
     // env 미설정이면 위에서 이미 반환했으므로 제품 실행에는 영향이 없다.
     if (n > 0) sidebar_ops.rebuildSidebar(self) catch {};
+}
+
+/// `MARU_NATIVE_EDITOR=<path>` — 네이티브 편집기로 파일을 **열어 보고 그 결과를 알린다**(N1).
+///
+/// **아직 화면에 그리지 않는다.** 문서 쪽 절반(파일 읽기·인코딩·줄바꿈·논리행)이 실제 파일에서
+/// 서는지 먼저 확인하는 훅이고, 그리는 절반은 chrome 텍스트 배선이 붙는 슬라이스에서 잇는다.
+/// 그때 이 훅은 "열어서 그린다"로 바뀐다.
+pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
+    // **`dock_initialized`를 본다 — 바로 아래 파일 패널 훅과 같은 조건이다.** 처음에는
+    // `surface_initialized`를 봤는데 그것은 `finishInitialSurface`가 **첫 live tab이 준비된 뒤**에
+    // 켜므로(PTY 셸이 뜬 다음), 셸 시작이 늦은 환경에서는 훅이 매 프레임 그냥 반환한다. 같은
+    // 함수에서 불리는 두 훅이 다른 시점을 기다릴 이유가 없고, 파일 패널 쪽 조건은 여러 보이는
+    // 스모크가 실제로 캡처를 뽑아 동작이 증명돼 있다.
+    //
+    // **그래도 notice가 화면에 뜨는 것은 터미널 서피스가 있을 때뿐이다.** 모달은 `workspaceRect`
+    // 위에 올라가는데(`modal_box.layout`), 서피스가 없으면 그 사각형이 0×0이라 layout이 null을 주고
+    // op이 하나도 안 나온다. 이 훅은 "읽었다"를 알리는 쪽이므로 그 조건까지 기다리지 않는다 —
+    // 서피스가 생기고 다음 redraw가 오면 열려 있던 notice가 그대로 그려진다.
+    if (self.debug_native_editor_opened or !self.dock_initialized) return;
+    const raw = std.c.getenv("MARU_NATIVE_EDITOR") orelse return;
+    self.debug_native_editor_opened = true;
+
+    const path = std.mem.span(raw);
+    if (path.len == 0) return;
+
+    var opened = editor_ops.openPath(self.io, self.allocator, path) catch |e| {
+        // **왜 못 열었는지 구분해서 알린다.** §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고
+        // 정했으므로, 나머지 이유가 같은 메시지로 뭉개지면 그 계약을 확인할 수 없다.
+        self.showNotice(switch (e) {
+            error.NotUtf8 => "네이티브 편집기: UTF-8이 아니라 열지 않았습니다.",
+            error.TooLarge => "네이티브 편집기: 파일이 읽기 상한을 넘었습니다.",
+            error.Unreadable => "네이티브 편집기: 파일을 읽지 못했습니다.",
+            error.OutOfMemory => "네이티브 편집기: 메모리가 모자랍니다.",
+        });
+        return;
+    };
+    defer opened.deinit(self.allocator);
+
+    var buf: [160]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "네이티브 편집기: {d}줄 · {s} · {s}{s}", .{
+        opened.file.lineCount(),
+        @tagName(opened.file.doc.format.dominant_ending),
+        if (opened.file.doc.read_only) "읽기 전용" else "쓰기 가능",
+        if (opened.file.doc.format.has_bom) " · BOM" else "",
+    }) catch return;
+    self.showNotice(msg);
 }
 
 pub fn maybeDebugOpenFilePanel(self: *AppSession) void {

@@ -116,6 +116,13 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
      실측과 다르다. 이 갈래는 실제로 RIS를 보내는 프로그램에만 해당한다.
 
    커널을 물어보면 셸 종류·화면 리셋·셸 기동 형태와 무관하게 답이 나온다.
+
+   **이 2단 규칙은 게이트가 강제한다**(`tests/boundary/cwd_axis.zig`, `check-boundaries`). 규칙이 주석에만
+   있던 2026-08-10~08-12 사이에 소비자 **여섯**이 관측(`observation.cwd`)을 직독해 축이 갈렸고, 셸 통합이
+   없는 셸과 재개 Term에서 사이드바·상태바·검색·아카이브 범위 칩·대화 매핑이 한꺼번에 죽었다. 게이트는
+   정당한 직독의 **개수를 파일별로 고정**한다 — "0건"은 세울 수 없는 규칙이다(Q1 직독이 실재한다). 새
+   소비자는 `git_ops.termCwd`(저장소 판정) 또는 `git_ops.termCwdForDisplay`(표시)를 쓰고, 직독이 맞다면
+   그 재고에 **이유와 함께** 올려야 한다.
    - 베이스: 공개 libproc API이고 iTerm2·Ghostty가 같은 목적으로 쓰는 사실상 표준 경로다(clean-room — 공개 API
      호출만 하고 레퍼런스 코드 표현은 옮기지 않는다, [project-rules.md](project-rules.md)).
    - **누구의 cwd를 묻는가**: foreground process group의 **leader가 아닌 구성원 → leader → 세션의 child** 순이다.

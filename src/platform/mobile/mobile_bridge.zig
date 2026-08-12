@@ -57,8 +57,14 @@ var quad_count: usize = 0;
 const terminal = maru.terminal;
 const color = maru.color;
 
-var term_buf: [512 * 1024]u8 = undefined;
-var term_fba = std.heap.FixedBufferAllocator.init(&term_buf);
+// **고정 버퍼로는 resize 를 못 버틴다.** `FixedBufferAllocator` 는 마지막 할당 말고는
+// free 가 no-op 이라, 격자가 바뀔 때마다 옛 격자를 영영 못 돌려받는다 — 512KB 로 **resize
+// 7번**이면 OutOfMemory 였다(헤드리스 실측). 키보드를 서너 번 올렸다 내리면 닿는 수다.
+//
+// `page_allocator` 를 쓴다: 전역 싱글턴이 없고(우리는 남의 앱 프로세스 안에 들어가는
+// 라이브러리다) free 가 실제로 메모리를 돌려준다. 페이지 단위 반올림 손실은 코어 할당이
+// 몇 개뿐이라 작다 — 원격 세션(M3)이 붙어 처리량이 생기면 그때 재보고 정한다.
+const term_allocator = std.heap.page_allocator;
 var term_core: ?terminal.core.TerminalCore = null;
 var term_cols: u16 = 0;
 var term_rows: u16 = 0;
@@ -87,7 +93,7 @@ var delivered_len: usize = 0;
 var preedit_buf: [128]u8 = undefined;
 var preedit_len: usize = 0;
 
-export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
+pub export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
     // **UTF-8 경계에서 자른다.** 바이트 수로만 자르면 조합 중 한글이 반토막 나고, 그리는
     // 쪽의 `Utf8View.init` 이 실패해 **조합 문자열 전체가 사라진다** — 화면이 멈춘 것처럼 보인다.
     var n = @min(len, preedit_buf.len);
@@ -101,7 +107,7 @@ export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
     preedit_len = n;
 }
 
-export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
+pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
     // 실패를 삼키지 않는다 — 키가 사라지는데 신호가 없던 것이 이번 최상위 결함이었다.
     if (term_core) |*c| c.write(ptr[0..len]) catch setLastError("core_write_input");
@@ -115,15 +121,20 @@ export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
 var body_rect: struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 } = .{};
 var body_cell_w: i32 = 1;
 var body_line_h: i32 = 1;
+/// 본문 사각형 안에 **실제로 있는** 격자 크기. 사각형은 격자보다 클 수 있다(나머지 여백,
+/// cols/rows 상한). 그 여백을 셀로 답하면 없는 셀을 가리키게 된다.
+var body_cols: u16 = 0;
+var body_rows: u16 = 0;
 
-/// 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
-export fn maru_mobile_hit_cell(x: f32, y: f32) u32 {
+/// 상위 16비트=열, 하위 16비트=행. 본문 밖이거나 **격자 밖이면** 0xFFFFFFFF.
+pub export fn maru_mobile_hit_cell(x: f32, y: f32) u32 {
     if (body_rect.w <= 0 or body_rect.h <= 0) return 0xFFFFFFFF;
     if (x < body_rect.x or y < body_rect.y or
         x >= body_rect.x + body_rect.w or y >= body_rect.y + body_rect.h) return 0xFFFFFFFF;
     const col = @divTrunc(@as(i32, @intFromFloat(x - body_rect.x)), @max(1, body_cell_w));
     const row = @divTrunc(@as(i32, @intFromFloat(y - body_rect.y)), @max(1, body_line_h));
-    return (@as(u32, @intCast(@max(0, col))) << 16) | @as(u32, @intCast(@max(0, row)));
+    if (col < 0 or row < 0 or col >= body_cols or row >= body_rows) return 0xFFFFFFFF;
+    return (@as(u32, @intCast(col)) << 16) | @as(u32, @intCast(row));
 }
 
 /// 셀 색을 RGB 로 푼다. indexed 는 maru 자체 팔레트(`color.xterm256`)를 쓴다 —
@@ -151,14 +162,17 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 상태가 통째로 날아간다 — 키보드를 올렸다 내리기만 해도 그렇게 된다(창이 리사이즈된다).
     // 지금은 고정 대본을 먹이고 있어 눈에 안 띄지만, 원격 세션이 붙으면 곧바로 드러난다.
     if (term_core != null and (term_cols != cols or term_rows != rows)) {
-        term_core.?.resize(cols, rows) catch setLastError("core_resize");
-        term_cols = cols;
-        term_rows = rows;
+        // **실패했으면 기록도 안 바꾼다.** 예전에는 catch 로 오류만 적고 term_cols/rows 를
+        // 새 값으로 덮어, 코어는 옛 크기인데 아래 격자 순회는 새 크기로 돌았다 — 없는 셀을
+        // 읽는다(ReleaseSafe 범위 검사에 걸려 앱이 죽는다).
+        if (term_core.?.resize(cols, rows)) {
+            term_cols = cols;
+            term_rows = rows;
+        } else |_| setLastError("core_resize");
     }
     if (term_core == null) {
-        term_core = terminal.core.TerminalCore.init(term_fba.allocator(), .{ .cols = cols, .rows = rows }) catch {
-            // 조용히 비우면 본문만 사라진 채 아무 신호가 없다. 지금은 고정 버퍼라
-            // 큰 격자(태블릿 등)에서 모자랄 수 있다.
+        term_core = terminal.core.TerminalCore.init(term_allocator, .{ .cols = cols, .rows = rows }) catch {
+            // 조용히 비우면 본문만 사라진 채 아무 신호가 없다.
             setLastError("terminal_core_init");
             term_core = null;
             return;
@@ -167,12 +181,18 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         term_rows = rows;
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
     }
+    const core = &(term_core orelse return);
+    // **격자를 도는 기준은 코어가 실제로 들고 있는 크기다.** 우리가 요청한 크기를 쓰면
+    // resize 가 실패했을 때 없는 셀을 읽는다. 요청값과 갈릴 수 있는 자리를 아예 없앤다.
+    const grid_cols = core.size.cols;
+    const grid_rows = core.size.rows;
+
     // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };
     body_cell_w = @max(1, @divTrunc(cw, 2));
     body_line_h = line_h;
-
-    const core = &(term_core orelse return);
+    body_cols = grid_cols;
+    body_rows = grid_rows;
 
     // 조합 중 문자열을 커서 자리에 **흐리게** 얹는다. 셀 격자 뒤라 그 위에 그려진다.
     if (preedit_len > 0) {
@@ -184,9 +204,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     }
 
     var row: u16 = 0;
-    while (row < rows) : (row += 1) {
+    while (row < grid_rows) : (row += 1) {
         var col: u16 = 0;
-        while (col < cols) : (col += 1) {
+        while (col < grid_cols) : (col += 1) {
             const cell = core.screen.cells[core.index(row, col)];
             if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
             if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
@@ -270,11 +290,11 @@ const atlas_cols_n: u32 = 16;
 const atlas_rows_n: u32 = 32;
 const atlas_cap: usize = atlas_cols_n * atlas_rows_n;
 
-export fn maru_mobile_atlas_cols() u32 {
+pub export fn maru_mobile_atlas_cols() u32 {
     return atlas_cols_n;
 }
 
-export fn maru_mobile_atlas_rows() u32 {
+pub export fn maru_mobile_atlas_rows() u32 {
     return atlas_rows_n;
 }
 
@@ -287,12 +307,12 @@ var atlas_n: usize = 0;
 var atlas_cell_w: u32 = 24;
 var atlas_cell_h: u32 = 32;
 
-export fn maru_mobile_atlas_geometry(cell_w: u32, cell_h: u32) void {
+pub export fn maru_mobile_atlas_geometry(cell_w: u32, cell_h: u32) void {
     atlas_cell_w = cell_w;
     atlas_cell_h = cell_h;
 }
 
-export fn maru_mobile_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
+pub export fn maru_mobile_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
     // 등록되면 "없음" 목록에서 뺀다. 안 그러면 아틀라스가 서기 **전에** 한 번 돈 build 가
     // 남긴 목록 때문에 이미 있는 글자를 슬롯만 축내며 다시 굽는다(실측: grew=15 가 전부
     // 'z' 같은 ASCII 중복이었다).
@@ -329,12 +349,12 @@ fn noteMiss(cp: u21) void {
 }
 
 /// 플랫폼이 부른다: 아직 아틀라스에 없는 코드포인트 개수.
-export fn maru_mobile_missing_count() u32 {
+pub export fn maru_mobile_missing_count() u32 {
     return @intCast(miss_n);
 }
 
 /// i번째 놓친 코드포인트. 플랫폼이 이걸 구워 `maru_atlas_add` 로 넣는다.
-export fn maru_mobile_missing_cp(i: u32) u32 {
+pub export fn maru_mobile_missing_cp(i: u32) u32 {
     if (i >= miss_n) return 0;
     return miss_cp[i];
 }
@@ -342,14 +362,14 @@ export fn maru_mobile_missing_cp(i: u32) u32 {
 /// 다음 빈 슬롯의 (열, 행) — 상위 16비트=열, 하위 16비트=행.
 /// 다음 빈 슬롯. **꽉 차면 0xFFFFFFFF 를 돌려준다** — 예전에는 같은 자리를 계속 돌려줘,
 /// 등록되지 못한 글자가 매 프레임 다시 구워지며 CPU·GPU 만 먹었다.
-export fn maru_mobile_next_slot(cols: u32) u32 {
+pub export fn maru_mobile_next_slot(cols: u32) u32 {
     if (atlas_n >= atlas_cap) return 0xFFFFFFFF;
     const idx: u32 = @intCast(atlas_n);
     return ((idx % cols) << 16) | (idx / cols);
 }
 
 /// 플랫폼이 다 구운 뒤 부른다. 목록을 비워 다음 프레임에 다시 쌓이게 한다.
-export fn maru_mobile_missing_clear() void {
+pub export fn maru_mobile_missing_clear() void {
     miss_n = 0;
 }
 
@@ -408,18 +428,18 @@ const icon_slots = 6;
 /// coverage 로 읽는다.
 var icon_pixels: [icon_slots * icon_slot_px * icon_slot_px * 4]u8 = undefined;
 
-export fn maru_mobile_icon_atlas() [*]const u8 {
+pub export fn maru_mobile_icon_atlas() [*]const u8 {
     return &icon_pixels;
 }
-export fn maru_mobile_icon_slot_px() u32 {
+pub export fn maru_mobile_icon_slot_px() u32 {
     return icon_slot_px;
 }
-export fn maru_mobile_icon_count() u32 {
+pub export fn maru_mobile_icon_count() u32 {
     return icon_slots;
 }
 
 /// 아이콘 coverage 를 채우고, 실제로 잉크가 있는 슬롯 수를 돌려준다(0이면 자산 이식 실패).
-export fn maru_mobile_icon_build() u32 {
+pub export fn maru_mobile_icon_build() u32 {
     @memset(&icon_pixels, 0);
     const cps = [icon_slots]u32{ 0xF0001, 0xF0002, 0xF0003, 0xF0004, 0xF0005, 0xF0006 };
     var filled: u32 = 0;
@@ -595,9 +615,12 @@ fn setLastError(name: []const u8) void {
     @memcpy(last_error[0..n], name[0..n]);
 }
 
-export fn maru_mobile_build(width: u32, height: u32) u32 {
+pub export fn maru_mobile_build(width: u32, height: u32) u32 {
     quad_count = 0;
-    @memset(&last_error, 0);
+    // **여기서 비우지 않는다.** 프레임 시작마다 비우면 프레임 **사이**에 난 실패
+    // (`maru_mobile_input` 의 core write)가 아무도 읽기 전에 지워진다 — 키가 조용히
+    // 사라지던 것이 이번 리뷰 최상위 결함이었는데, 그 신호가 딱 그 경로에서만 안 남았다.
+    // 비우는 것은 **읽은 쪽**이 한다(`maru_mobile_clear_error`).
     const tk = tokens.Tokens.rich(themeColors());
     buildUi(width, height, &tk) catch |err| {
         setLastError(@errorName(err));
@@ -606,10 +629,16 @@ export fn maru_mobile_build(width: u32, height: u32) u32 {
     return @intCast(quad_count);
 }
 
-export fn maru_mobile_last_error() [*:0]const u8 {
+pub export fn maru_mobile_last_error() [*:0]const u8 {
     return @ptrCast(&last_error);
 }
 
-export fn maru_mobile_quads() [*]const MaruQuad {
+/// 플랫폼이 읽고 나서 부른다. 비우는 자리를 읽는 쪽에 두어야 **프레임 사이에 난 실패**도
+/// 반드시 한 번은 눈에 띈다. 같은 오류가 계속 나면 호스트의 "바뀔 때만 로그"가 걸러 준다.
+pub export fn maru_mobile_clear_error() void {
+    @memset(&last_error, 0);
+}
+
+pub export fn maru_mobile_quads() [*]const MaruQuad {
     return &quad_buf;
 }

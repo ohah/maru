@@ -1707,6 +1707,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_chrome_ui_tests = b.addRunArtifact(chrome_ui_tests);
     test_step.dependOn(&run_chrome_ui_tests.step);
+    // 모바일 브리지는 OS 를 안 부르는 순수 Zig 라(docs/mobile-platform.md §3) 시뮬레이터 없이
+    // 호스트에서 돈다. 여기 있는 계약은 전부 기기에서 앱을 죽이거나 화면을 지웠던 결함의
+    // 재발 방지다 — 잡는 데 오래 걸린 것들이라 값이 싼 자리로 내려 둔다.
+    const mobile_bridge_mod = b.addModule("mobile_bridge", .{
+        .root_source_file = b.path("src/platform/mobile/mobile_bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const mobile_bridge_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/mobile_bridge_contract.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "mobile_bridge", .module = mobile_bridge_mod }},
+        }),
+    });
+    const run_mobile_bridge_tests = b.addRunArtifact(mobile_bridge_tests);
+    test_step.dependOn(&run_mobile_bridge_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
     // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
     // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.

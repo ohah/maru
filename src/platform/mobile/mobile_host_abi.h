@@ -17,11 +17,11 @@ extern "C" {
 /// 굽는 쪽과 좌표를 계산하는 쪽이 어긋난다. 네 곳에 흩어져 있던 것을 여기로 모았다.
 #define MARU_ATLAS_CELL_W 24
 #define MARU_ATLAS_CELL_H 32
-#define MARU_ATLAS_COLS   16
-/// 아틀라스 전체 행 수. **미리 굽는 글자 수로 정하면 안 된다** — 온디맨드 성장이 남는
-/// 슬롯만큼만 되고, 한글은 수천 자라 금세 막힌다(실측: 여유 15칸에서 멈춤).
-/// 32행 = 512슬롯 = 384x1024 R8 텍스처(384KB). 축출 정책이 생기기 전까지의 상한이다.
-#define MARU_ATLAS_ROWS   32
+/// 아틀라스 격자 크기는 **Zig 가 소유한다**(`maru_mobile_atlas_cols/rows`). 매크로로 두면
+/// 등록부보다 큰 슬롯을 약속하게 되고, 남는 슬롯은 등록이 안 된 채 매 프레임 다시 구워진다.
+/// 셀 크기만 매크로로 남긴다 — 스택 배열 크기에 쓰이기 때문이다.
+unsigned int maru_mobile_atlas_cols(void);
+unsigned int maru_mobile_atlas_rows(void);
 
 /// 앱이 뜨자마자 보일 글자만 미리 굽는다(나머지는 온디맨드 성장이 맡는다). **두 플랫폼이
 /// 같은 집합을 써야** 픽셀 대조가 의미를 갖는다 — 예전에는 두 host 에 같은 문자열이

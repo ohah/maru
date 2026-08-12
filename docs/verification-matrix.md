@@ -729,6 +729,14 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   queued input flush 선행, attachment-owned prepare/execute/abort와 C1 bridge 제품 caller exact 1을 고정한다.
   C3의 immediate EOF·unread revoke/event 우선 및 legacy/generation cadence parity가 green이 되기 전에는
   2c3e 또는 2c3 완료로 표시하지 않는다.
+- **2c3e C3 RED 인벤토리:** `test-session-host-2c3e-c3`은 C2 gate를 상속하고 Debug·ReleaseFast 각각
+  legacy/generation을 같은 actual-socket oracle로 비교하는 cadence 12개를 실행한다. EOF는 완성 response 뒤 EOF,
+  partial header 뒤 EOF, partial payload 뒤 EOF 세 행이다. response 전 RX는 revoke, metadata event, snapshot 세 행이고,
+  response 뒤 RX도 같은 세 종류를 독립 실행한다. 나머지는 malformed frame, unknown kind 또는 wrong correlation,
+  unread revoke와 queued TX의 RX-first다. 완성 response는 decoder exact 1과 다음 turn terminal을, 불완전 response와
+  malformed/correlation failure는 decoder 0·response owner source-zero·connection terminal을 요구한다. revoke는 stale
+  RPC publication을 막고, benign event/snapshot은 wire order와 exact-once 후속 소비를 보존한다. 첫 RED는 12행 전부
+  `C3CadenceNotImplemented`이며 제품 구현·boundary가 green이 되기 전에는 2c3e 또는 2c3 완료로 표시하지 않는다.
 
 ### 파일 탐색기 후속 두 PR gate (PR 1·PR 2 구현 완료)
 

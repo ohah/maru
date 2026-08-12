@@ -783,14 +783,17 @@ pub fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
     const content = dock_ops.dockGeometry(self).tree_content;
     if (content.w == 0 or content.h == 0) return 0;
 
-    const sizes = chrome.components.session_dock.build.bufferSizes(&.{});
-    var nodes: [16]chrome.ui.tree.UiNode = undefined;
-    var entries: [16]chrome.ui.tree.RectEntry = undefined;
-    var layout_items: [16]chrome.ui.layout.Item = undefined;
-    var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
-    var child_rects: [16]chrome.ui.layout.UiRect = undefined;
-    var actions: [16]chrome.components.session_dock.ids.Entry = undefined;
-    if (sizes.entries > entries.len or sizes.actions > actions.len) return 0;
+    // 버퍼 크기는 **계약에서 파생한다**. 예전에는 고정 `[16]`이었고, 넘치면 조용히 `return 0`이었다 —
+    // 그런데 이 함수의 0은 "스크롤 뷰포트 높이 0"이라 가상화가 통째로 죽는다는 뜻이고, 컴파일도 테스트도
+    // 그것을 잡지 못한다. 도크에 노드를 하나 더하는 것만으로 스크롤이 조용히 멈추는 함정이라, 상한을
+    // `bufferSizes`에서 comptime으로 받아 영원히 맞게 둔다(정렬 토글이 이미 그 여유를 한 칸 먹었다).
+    const sizes = comptime chrome.components.session_dock.build.bufferSizes(&.{});
+    var nodes: [sizes.nodes]chrome.ui.tree.UiNode = undefined;
+    var entries: [sizes.entries]chrome.ui.tree.RectEntry = undefined;
+    var layout_items: [sizes.layout_items]chrome.ui.layout.Item = undefined;
+    var flex_scratch: [sizes.flex_scratch]chrome.ui.layout.FlexScratch = undefined;
+    var child_rects: [sizes.child_rects]chrome.ui.layout.UiRect = undefined;
+    var actions: [sizes.actions]chrome.components.session_dock.ids.Entry = undefined;
 
     const frame = chrome.components.session_dock.build.build(
         agentSessionDockProps(self, content, .{
@@ -802,12 +805,12 @@ pub fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
             .end_exclusive = 0,
         }, &.{}),
         .{
-            .nodes = nodes[0..sizes.nodes],
-            .entries = entries[0..sizes.entries],
-            .layout_items = layout_items[0..sizes.layout_items],
-            .flex_scratch = flex_scratch[0..sizes.flex_scratch],
-            .child_rects = child_rects[0..sizes.child_rects],
-            .actions = actions[0..sizes.actions],
+            .nodes = &nodes,
+            .entries = &entries,
+            .layout_items = &layout_items,
+            .flex_scratch = &flex_scratch,
+            .child_rects = &child_rects,
+            .actions = &actions,
         },
     ) catch return 0;
     const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse return 0;

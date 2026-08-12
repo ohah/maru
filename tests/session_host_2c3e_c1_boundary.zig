@@ -2,7 +2,7 @@ const std = @import("std");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "2c3e C1 경계는 decoder borrow를 scoped owner와 제품 caller 0으로 제한한다" {
+test "2c3e C1 경계는 decoder borrow를 scoped owner와 C2 제품 caller 하나로 제한한다" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
@@ -39,7 +39,7 @@ test "2c3e C1 경계는 decoder borrow를 scoped owner와 제품 caller 0으로 
         }
     }
     try std.testing.expectEqual(@as(usize, 2), decoder_facade_declarations);
-    try std.testing.expectEqual(@as(usize, 0), decoder_product_calls);
+    try std.testing.expectEqual(@as(usize, 1), decoder_product_calls);
     try std.testing.expectEqual(@as(usize, 1), client_decoder_declarations);
     try std.testing.expectEqual(@as(usize, 1), client_decoder_calls);
 

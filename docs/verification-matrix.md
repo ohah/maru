@@ -721,6 +721,14 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   common proof-loss로 닫는다. boundary는 decoder callback 밖 raw slice·RPC owner/receipt escape 0, C1 bridge product
   caller 0과 raw wrapper baseline을 고정한다. C2의 exact 12 bound family 제품 전환과 C3의 immediate EOF·unread
   RX-first actual socket parity가 모두 green이 되기 전에는 2c3e 또는 2c3 완료로 표시하지 않는다.
+- **2c3e C2 구현 인벤토리:** `test-session-host-2c3e-c2`는 C1 gate를 상속하고 Debug·ReleaseFast 각각
+  실제 제품 RPC family 12개와 source boundary 1개를 실행한다. 열두 행은 `RemoteRuntime`의 resize, observation,
+  selected text, link at, clipboard write, find, select op, core command, mouse report, notification, terminate,
+  detach 공개 제품 흐름이 실제 socket 응답을 typed `RuntimeRequest`와 scoped decoder로 소비하는지 검증한다.
+  boundary는 각 family constructor와 decoder 호출 exact 1, generation arm의 raw `callOrdered`·`Client.call` 0,
+  queued input flush 선행, attachment-owned prepare/execute/abort와 C1 bridge 제품 caller exact 1을 고정한다.
+  C3의 immediate EOF·unread revoke/event 우선 및 legacy/generation cadence parity가 green이 되기 전에는
+  2c3e 또는 2c3 완료로 표시하지 않는다.
 
 ### 파일 탐색기 후속 두 PR gate (PR 1·PR 2 구현 완료)
 

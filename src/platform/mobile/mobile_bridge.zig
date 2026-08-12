@@ -12,6 +12,13 @@ const std = @import("std");
 // 상대 경로로 끌어와 "file exists in two modules" 로 깨진다(실측). 배럴 하나로 받으면
 // 상대 import 가 전부 같은 모듈 안에서 풀린다.
 const maru = @import("maru");
+
+/// **iOS 에서 ReleaseSafe 를 쓰려면 이게 필요하다.** 기본 panic 핸들러는 스택 트레이스를
+/// 찍으려고 `_dyld_get_image_header_containing_address` 를 부르는데 그 심볼이 시뮬레이터
+/// SDK 에 없어 링크가 깨진다(실측). `simple_panic` 은 메시지만 내고 그 경로를 안 들여온다
+/// — **안전 검사(overflow·bounds)는 그대로 산다**.
+pub const panic = std.debug.simple_panic;
+
 const chrome = maru.chrome;
 const icon_glyph = maru.renderer.icon_glyph;
 

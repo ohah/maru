@@ -146,6 +146,10 @@ void maru_mobile_report_focus(int focused);
 /// 자모를 명령어 일부로 받는다. 화면 커서 자리에 흐리게 그릴 겉치레다.
 void maru_mobile_set_preedit(const char *bytes, unsigned long len);
 
+/// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
+/// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).
+unsigned long long maru_mobile_caret_rect(void);
+
 /// 터치 지점(논리 px) → 셀. 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
 unsigned int maru_mobile_hit_cell(float x, float y);
 

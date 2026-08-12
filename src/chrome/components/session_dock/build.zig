@@ -1084,11 +1084,11 @@ test "SessionDock 좁은 도크는 정렬 토글을 발행하지 않는다" {
     try std.testing.expect(wide.tree.find(NodeIds.sort_toggle) != null);
 
     // 경계 바로 위/아래. header 폭은 viewport에서 root `padding.left`와 header `margin.right`를 둘 다
-    // 뺀 값이라(각 20pt) viewport 260이 딱 경계다. 하나만 빼는 회귀가 나면 259에서도 발행돼 여기서
-    // 걸린다.
+    // 뺀 값이라(각 20pt) viewport 320이 딱 경계다(utility 224 + content inset 8 + 제목 최소 48 + 40).
+    // 하나만 빼는 회귀가 나면 319에서도 발행돼 여기서 걸린다.
     var edge_in_storage = Built{};
     const edge_in = try edge_in_storage.run(.{
-        .viewport_px = .{ .width = 260, .height = 480 },
+        .viewport_px = .{ .width = 320, .height = 480 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 5,
@@ -1099,7 +1099,7 @@ test "SessionDock 좁은 도크는 정렬 토글을 발행하지 않는다" {
 
     var edge_out_storage = Built{};
     const edge_out = try edge_out_storage.run(.{
-        .viewport_px = .{ .width = 259, .height = 480 },
+        .viewport_px = .{ .width = 319, .height = 480 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 5,

@@ -87,11 +87,11 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
 
     // 정렬 토글. published 자식 rect 안에 label을 중앙 정렬해 그린다 — 방향이 바뀌어도 slot 폭이
     // 고정이라 옆의 `로컬`과 refresh가 움직이지 않는다.
-    if (sort_rect) |rect| try writer.text(rect, 0, props.sort_order.label(), .surface_fg, .control, 1, false, true);
+    if (sort_rect) |rect| try writer.centeredLabel(rect, props.sort_order.label());
 
-    try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, .control, 1, false, true);
-    try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, .control, 1, false, true);
-    try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg, .control, 1, false, true);
+    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, "작업공간");
+    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, "프로젝트");
+    try writer.centeredLabel(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, "전체");
     const search = find(frame.tree, build.NodeIds.search) orelse return error.MissingRect;
     try writer.searchField(search);
 
@@ -217,6 +217,51 @@ const Writer = struct {
         const y = rect.rect.y + (rect.rect.height - stack_h) / 2;
         try self.emit(x, y, heading, max_cols, .head, .surface_fg, .dock_heading, false, true);
         try self.emit(x, y + heading_h, supporting, max_cols, .head, .muted_fg, .supporting, false, false);
+    }
+
+    /// scope 세그먼트와 정렬 토글의 label. 자기 slot 안에서 **measured로** 가로·세로 중앙에 놓는다.
+    ///
+    /// 예전 cell 경로(`textInsetStyled`)는 두 가지를 함께 틀렸다. 첫째, x가 `rect.x + cell_width`라 label이
+    /// slot 왼쪽에 붙어 세그먼트가 실제보다 넓고 성글게 보였다. 둘째, 폭 예산을 `floor(available/cell_width)`
+    /// cols로 양자화해 slot에 들어갈 글자까지 미리 잘랐다 — `오래된순`이 잘려 보인 사용자 보고가 그것이다.
+    /// `center_in_rect`는 worker의 실제 advance로 중앙을 잡으므로 face가 바뀌어도 같은 자리에 앉는다.
+    ///
+    /// **전경은 quad를 칠한 그 함수에서 받는다**(`Writer.state` 주석의 규율). 예전에는 `.surface_fg`를
+    /// 박아 두었는데, 도크는 워크스페이스/프로젝트 root가 없으면 그 scope를 실제로 비활성으로 발행한다
+    /// (`agent_dock.zig`). 그때 `resolveCard`는 배경·전경을 disabled로 낮추지만 label만 밝게 남아, 누를 수
+    /// 있어 보이는데 안 눌리는 세그먼트가 됐다. hover/press/selected도 같은 이유로 어긋난다.
+    fn centeredLabel(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
+        const cw = self.props.cell_width_px;
+        if (cw == 0) return;
+        const line_h = typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli));
+        if (rect.rect.height < @as(f32, @floatFromInt(line_h)) or rect.rect.width <= 0) return;
+        const content = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x)),
+            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(line_h))) / 2)),
+            .w = @intFromFloat(@floor(rect.rect.width)),
+            .h = line_h,
+        };
+        if (content.w == 0) return;
+        // 폭 예산의 단일 출처는 아래 `max_width_px`(정확한 slot 폭)다. lowering이 `max_width_px orelse
+        // max_cols * cell_width`로 예산을 풀기 때문에(chrome_draw_lowering.zig `textWidthBudget`), 이 값을
+        // 실은 순간 measured 경로는 cols를 아예 보지 않는다 — 예전 경로가 `max_width_px`를 안 실어 예산이
+        // cell 배수로 깎였고, 그것이 `오래된순` 잘림의 실제 원인이었다.
+        //
+        // 따라서 cols는 **legacy cell 백엔드(Lab·폴백) 전용 상한**으로만 남고, 여기서는 보수적인 `floor`가
+        // 맞다. `ceil`은 그 경로에서 라벨이 slot을 최대 1 cell 넘겨 이웃 세그먼트를 침범시킨다. slot이 한
+        // 셀보다 좁으면 최소 1 cell은 준다 — 그 경우에도 measured 경로는 자기 예산으로 정확히 그린다.
+        const cols: u16 = @intFromFloat(@min(
+            @max(@floor(@as(f32, @floatFromInt(content.w)) / @as(f32, @floatFromInt(cw))), 1),
+            @as(f32, @floatFromInt(std.math.maxInt(u16))),
+        ));
+        const foreground: tokens.ColorRole = switch (rect.visual) {
+            .card => |visual| paint_style.resolveCard(rect.id, visual, rect.action, self.state, self.tokens_ref).foreground,
+            .button => |visual| paint_style.resolveButton(rect.id, visual, rect.action, self.state, self.tokens_ref).foreground,
+            // scope는 Card, 정렬 토글은 Button이다. 그 밖의 visual로 이 함수가 불린다면 published tree가
+            // 예상과 다르다는 뜻이므로, 최소한 읽히는 색으로 그리고 넘어간다.
+            else => .surface_fg,
+        };
+        try self.emitPlaced(@floatFromInt(content.x), @floatFromInt(content.y), source, cols, .head, foreground, .control, false, false, content.w, .{ .center_in_rect = content });
     }
 
     fn textStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool, bold: bool) ViewError!void {
@@ -872,6 +917,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var workspace_origin_y: ?i32 = null;
     var project_origin_y: ?i32 = null;
     var all_origin_y: ?i32 = null;
+    var workspace_placement: ?draw.TextPlacement = null;
     var saw_search_icon = false;
     var saw_group_chevron = false;
     var saw_group_label = false;
@@ -927,7 +973,10 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                     host_label_max_cols = text.max_cols;
                     host_label_placement = text.placement;
                 }
-                if (std.mem.eql(u8, run.text, "작업공간")) workspace_origin_y = text.origin.y;
+                if (std.mem.eql(u8, run.text, "작업공간")) {
+                    workspace_origin_y = text.origin.y;
+                    workspace_placement = text.placement;
+                }
                 if (std.mem.eql(u8, run.text, "프로젝트")) project_origin_y = text.origin.y;
                 if (std.mem.eql(u8, run.text, "전체")) all_origin_y = text.origin.y;
                 if (std.mem.eql(u8, run.text, "workspace")) {
@@ -988,6 +1037,18 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         const expected_line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(props.scale_milli)));
         const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - expected_line_h) / 2));
         try std.testing.expectEqual(expected_y, origin orelse return error.TestUnexpectedResult);
+    }
+    // 세그먼트 label은 slot **가로 중앙**이기도 하다. cell 경로는 `rect.x + cell_width`로 왼쪽에 붙였고,
+    // 그래서 세그먼트가 실제보다 넓고 성글게 보였다(사용자 보고). 중앙은 worker의 measured advance가 정하므로
+    // 여기서는 slot 전체가 그 계산의 입력으로 실렸는지를 고정한다.
+    switch (workspace_placement orelse return error.TestUnexpectedResult) {
+        .center_in_rect => |content| {
+            const scope = find(frame.tree, build.NodeIds.scope_workspace) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(scope.rect.x))), content.x);
+            try std.testing.expectEqual(@as(u32, @intFromFloat(@floor(scope.rect.width))), content.w);
+            try std.testing.expectEqual(typography.lineHeightPx(.control, effectiveScale(props.scale_milli)), content.h);
+        },
+        else => return error.TestUnexpectedResult,
     }
     const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
     switch (refresh_placement orelse return error.TestUnexpectedResult) {
@@ -1820,4 +1881,310 @@ test "SessionDock scroll-area decoration quads inherit the container clip" {
     };
     // 전제가 살아 있는지 확인한다 — skeleton이 하나도 안 나왔다면 위 단언이 공허하다.
     try std.testing.expect(skeletons >= 3);
+}
+
+// 사용자 보고 회귀(2026-08-11): 펼친 카드를 스크롤로 목록 위까지 올리면 그 카드 배경이 고정 header/scope
+// **위에** 통째로 그려졌다. clip은 정확히 실려 있었지만 그 값이 면적 0이었고, backend quad 규약은 폭 0을
+// "클립 없음"으로 읽는다(maru_metal_shader.h) — "한 픽셀도 안 보인다"가 "전부 보인다"로 뒤집힌 것이다.
+//
+// **단위 테스트만으로는 이 결함을 못 잡는다**: 면적 0 clip은 tree 계약상 정상 값이고(교차가 빈 것),
+// `ui.paint`의 clip 전달도 정상이었다. 뒤집힘은 그 값이 backend 규약을 만나는 자리에서만 생긴다. 그래서
+// 여기서는 **컴포넌트가 내보내는 op 자체**를 본다: 면적 0 clip을 든 quad가 하나라도 남아 있으면 그것이
+// 화면에서 클립 없는 quad가 된다.
+test "SessionDock never emits a quad whose clip has collapsed to zero area" {
+    const metrics = types.DockMetrics.resolve(1000);
+    const turns = [_]types.Turn{.{ .role = .assistant, .text = "펼친 카드의 본문" }};
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 11,
+        .displayed_count = 2,
+        .expanded_identity = 1,
+        // 펼친 카드(header + detail + actions)를 **통째로** 스크롤 영역 위로 밀어낸다. 사용자가 겪은
+        // 상태 그대로다 — 카드는 아직 가상화 창 안이지만 화면에는 한 픽셀도 남지 않는다.
+        .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.card_h + metrics.expanded_detail_h + metrics.expanded_actions_h + 40)),
+        .items = &.{
+            .{ .card = .{
+                .identity = 1,
+                .provider = .claude,
+                .title = "밀려 올라간 펼친 카드",
+                .summary = "요약",
+                .metadata = "메타",
+                .expanded = .{ .state = .ready, .turns = &turns, .resume_enabled = true, .reveal_enabled = true },
+            } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "다음 카드", .summary = "요약", .metadata = "메타" } },
+        },
+    };
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [64]draw.Op = undefined;
+    var runs: [48]draw.Run = undefined;
+    var text_bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+    // 이 시나리오가 실제로 면적 0 clip을 만드는지 먼저 확인한다. 안 만든다면 아래 단언은 아무것도
+    // 증명하지 못하고 조용히 통과한다(회귀를 못 잡는 테스트가 되는 흔한 실패 방식).
+    const collapsed_entry = frame.tree.entries[frame.tree.find(build.NodeIds.cardHeader(0)).?];
+    const collapsed_clip = collapsed_entry.effective_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expect(collapsed_clip.width <= 0 or collapsed_clip.height <= 0);
+
+    // 그런 entry의 quad는 한 개도 나가면 안 된다. 나가면 화면에서 클립 없는 quad가 된다.
+    const content = frame.tree.entries[frame.tree.find(build.NodeIds.content).?];
+    const content_top: i32 = @intFromFloat(@floor(content.rect.y));
+    for (out.ops) |op| switch (op) {
+        .quad => |quad| {
+            if (quad.clip) |clip| {
+                try std.testing.expect(clip.w > 0);
+                try std.testing.expect(clip.h > 0);
+            } else {
+                // clip 없는 quad는 "안 자른다"는 뜻이므로 고정 chrome만 낼 수 있다. 목록 quad가 여기
+                // 섞이면 그것이 정확히 헤더 위로 새는 경로다.
+                try std.testing.expect(quad.rect.y >= 0);
+                try std.testing.expect(quad.rect.y < content_top + @as(i32, @intFromFloat(@floor(content.rect.height))));
+            }
+        },
+        else => {},
+    };
+}
+
+// 사용자 보고 회귀(2026-08-11): 정렬 토글의 `오래된순`이 slot 안에 들어가는데도 `…`로 잘렸다.
+//
+// 원인은 slot 폭이 아니라 **폭 예산이 실리는 방식**이었다. lowering은 예산을 `max_width_px orelse
+// max_cols * cell_width`로 푸는데(chrome_draw_lowering.zig `textWidthBudget`), 예전 cell 경로는
+// `max_width_px`를 안 실어서 예산이 `floor(available/cell_width)` cell 배수로 깎였다. 그래서 slot에
+// 실제로 들어가는 글자까지 worker가 보기 전에 사라졌다.
+//
+// slot 폭을 키우는 것만으로는 이 결함이 안 고쳐진다(양자화는 그대로다). 그래서 여기서 고정하는 것은
+// 폭이 아니라 **계약**이다: 세그먼트·토글 label은 자기 slot 폭을 `max_width_px`로 그대로 싣는다.
+test "SessionDock segment and sort labels carry the exact slot width as their measured budget" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 12,
+        .displayed_count = 1,
+        .sort_order = .oldest_first,
+        .items = &.{
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = "메타" } },
+        },
+    };
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [48]draw.Op = undefined;
+    var runs: [32]draw.Run = undefined;
+    var text_bytes: [1024]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+    const cases = [_]struct { label: []const u8, id: u64 }{
+        .{ .label = "작업공간", .id = build.NodeIds.scope_workspace },
+        .{ .label = "프로젝트", .id = build.NodeIds.scope_project },
+        .{ .label = "전체", .id = build.NodeIds.scope_all },
+        .{ .label = "오래된순", .id = build.NodeIds.sort_toggle },
+    };
+    for (cases) |case| {
+        const slot = find(frame.tree, case.id) orelse return error.TestUnexpectedResult;
+        const slot_w: u32 = @intFromFloat(@floor(slot.rect.width));
+        var seen = false;
+        for (out.ops) |op| switch (op) {
+            .text => |text| for (text.runs) |run| {
+                if (!std.mem.eql(u8, run.text, case.label)) continue;
+                seen = true;
+                // 예산은 slot 폭 **그대로**다. cell 배수로 깎이면 여기서 걸린다.
+                try std.testing.expectEqual(@as(?u32, slot_w), text.max_width_px);
+                // 중앙 정렬의 입력도 같은 slot이어야 한다 — 둘이 갈리면 라벨이 예산과 다른 곳에 앉는다.
+                switch (text.placement) {
+                    .center_in_rect => |rect| try std.testing.expectEqual(slot_w, rect.w),
+                    else => return error.TestUnexpectedResult,
+                }
+                // cell 백엔드용 상한은 보수적이어야 한다: slot을 넘기면 이웃 세그먼트를 침범한다.
+                try std.testing.expect(@as(u32, text.max_cols) * props.cell_width_px <= @max(slot_w, props.cell_width_px));
+            },
+            else => {},
+        };
+        try std.testing.expect(seen);
+    }
+}
+
+// 적대적 검증에서 찾은 결함(2026-08-12): 도크는 워크스페이스/프로젝트 root가 없으면 그 scope를 실제로
+// **비활성으로 발행한다**(`agent_dock.zig`의 `workspace_scope_enabled`/`project_scope_enabled`). 그때
+// `resolveCard`는 배경과 전경을 함께 disabled로 낮추는데 label 색만 `.surface_fg`로 박혀 있어, 배경만
+// 흐려지고 글자는 활성과 똑같이 밝은 세그먼트가 됐다 — 누를 수 있어 보이는데 안 눌린다.
+//
+// `Writer`는 이 규율을 이미 문서화해 두었다("label 전경은 quad와 **같은 함수**에서 나와야 한다"). 지금까지
+// `action()`만 그것을 지켰다. 여기서 세그먼트·토글에도 같은 계약을 고정한다.
+test "SessionDock segment labels take their foreground from the same resolver as their quad" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 13,
+        .displayed_count = 1,
+        // 실제 도크가 내는 상태: 워크스페이스 root가 없어 그 scope만 비활성이다.
+        .workspace_scope_enabled = false,
+        .project_scope_enabled = true,
+        .scope = .all,
+        .items = &.{
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = "메타" } },
+        },
+    };
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [48]draw.Op = undefined;
+    var runs: [32]draw.Run = undefined;
+    var text_bytes: [1024]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+    var disabled_role: ?tokens.ColorRole = null;
+    var enabled_role: ?tokens.ColorRole = null;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, "작업공간")) disabled_role = text.role;
+            if (std.mem.eql(u8, run.text, "프로젝트")) enabled_role = text.role;
+        },
+        else => {},
+    };
+
+    // 전경의 단일 출처는 quad를 칠한 resolver다. 컴포넌트가 색을 따로 고르면 여기서 갈린다.
+    const scope = find(frame.tree, build.NodeIds.scope_workspace) orelse return error.TestUnexpectedResult;
+    const expected = paint_style.resolveCard(scope.id, scope.visual.card, scope.action, .{}, &tk).foreground;
+    try std.testing.expectEqual(@as(?tokens.ColorRole, expected), disabled_role);
+    // 그리고 그 값은 활성 세그먼트와 **달라야** 한다 — 같으면 비활성이 눈에 구분되지 않는다.
+    try std.testing.expect(disabled_role != enabled_role);
+}
+
+// 적대적 검증에서 찾은 결함(2026-08-12): `build`의 의도는 주석에 적혀 있다 — "utility control이 제목을
+// 통째로 밀어내는 폭이 실제로 존재한다. 그 구간에서는 토글보다 무엇을 보고 있는지가 먼저다."
+//
+// 그런데 판정이 utility 폭만 봐서 **제목 폭 0을 허용**했다. 그러면 `headerStack`의 `available_px <= 0`
+// (또는 `max_cols == 0`)에 걸려 제목도 개수도 안 그려진다 — 토글은 떠 있는데 무엇을 보고 있는지가
+// 사라지는, 정확히 그 주석이 막으려던 상태다. 경계값 단언은 "왜 그 값인가"를 말해 주지 않으므로
+// 계약 자체를 여기서 고정한다: **토글이 발행된 모든 폭에서 제목 run이 존재한다.**
+test "SessionDock never publishes the sort toggle at a width that erases the header title" {
+    const heading = "Agent 세션 기록";
+    var width: u32 = 120; // dock_layout.zig의 최소 도크 폭
+    while (width <= 480) : (width += 1) {
+        const props = types.Props{
+            .viewport_px = .{ .width = @floatFromInt(width), .height = 480 },
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .snapshot_generation = 14,
+            .displayed_count = 3,
+            .items = &.{
+                .{ .card = .{ .identity = 1, .provider = .claude, .title = "제목", .summary = "요약", .metadata = "메타" } },
+            },
+        };
+        var nodes: [32]tree.UiNode = undefined;
+        var entries: [32]tree.RectEntry = undefined;
+        var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+        var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+        var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+        var actions: [32]@import("ids.zig").Entry = undefined;
+        const frame = build.build(props, .{
+            .nodes = &nodes,
+            .entries = &entries,
+            .layout_items = &layout_items,
+            .flex_scratch = &flex_scratch,
+            .child_rects = &child_rects,
+            .actions = &actions,
+        }) catch continue; // 이 폭에서 tree가 안 서면 토글도 없다 — 판정할 것이 없다.
+        if (frame.tree.find(build.NodeIds.sort_toggle) == null) continue;
+
+        const tk = tokens.Tokens.rich(.{
+            .foreground = .{ .r = 240, .g = 240, .b = 240 },
+            .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+            .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+            .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+            .search_match = .{ .r = 1, .g = 2, .b = 3 },
+            .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+            .selection = .{ .r = 7, .g = 8, .b = 9 },
+            .cursor = .{ .r = 10, .g = 11, .b = 12 },
+            .accent = .{ .r = 13, .g = 14, .b = 15 },
+        });
+        var ops: [48]draw.Op = undefined;
+        var runs: [32]draw.Run = undefined;
+        var text_bytes: [1024]u8 = undefined;
+        const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+        var saw_title = false;
+        for (out.ops) |op| switch (op) {
+            .text => |text| for (text.runs) |run| {
+                if (std.mem.eql(u8, run.text, heading)) saw_title = true;
+            },
+            else => {},
+        };
+        if (!saw_title) {
+            std.debug.print("토글은 발행됐는데 제목이 사라진 도크 폭: {d}pt\n", .{width});
+            return error.TestUnexpectedResult;
+        }
+    }
 }

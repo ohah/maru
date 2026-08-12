@@ -12,6 +12,13 @@
 extern "C" {
 #endif
 
+/// 글리프 아틀라스의 셀 기하. **두 플랫폼이 같은 값을 써야 한다** — 다르면 같은 폰트를
+/// 써도 대조가 조용히 무의미해지고(픽셀 비교가 서로 다른 격자를 보게 된다), 아틀라스를
+/// 굽는 쪽과 좌표를 계산하는 쪽이 어긋난다. 네 곳에 흩어져 있던 것을 여기로 모았다.
+#define MARU_ATLAS_CELL_W 24
+#define MARU_ATLAS_CELL_H 32
+#define MARU_ATLAS_COLS   16
+
 /// 그릴 것 하나. ChromeDraw 의 op 은 union 이라 C 에서 다루기 번거로워 rect+색+radius 로
 /// 낮춰 넘긴다. **`float4` 배수로 맞춘다** — Metal 셰이더 구조체가 `float2` 에 8바이트
 /// 정렬을 요구해 필드가 밀리고 NDC 가 깨진 적이 있다(실측).

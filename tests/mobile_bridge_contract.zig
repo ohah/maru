@@ -75,7 +75,7 @@ test "코어가 만든 답을 치우고 그 사실을 알린다" {
 test "화면을 꽉 채워도 quad 가 안 잘린다" {
     // 헤드리스에는 굽는 host 가 없다 — 등록부만 채워 "그릴 글리프가 있는" 상태로 만든다.
     var cp: u32 = 32;
-    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 11);
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
 
     const sizes = [_][2]u32{ .{ 402, 874 }, .{ 874, 402 }, .{ 1024, 1366 }, .{ 1366, 1024 } };
     for (sizes) |s| {
@@ -94,6 +94,26 @@ test "화면을 꽉 채워도 quad 가 안 잘린다" {
     }
 }
 
+// 굵은 글자는 **다른 글리프**라 슬롯도 달라야 한다. 등록부 키가 코드포인트뿐이면 굵은 판이
+// 보통 판 자리를 덮어써서, 한 줄이 굵어지면 그 글자가 화면 전체에서 굵어진다.
+test "굵기가 다르면 다른 슬롯을 쓴다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    const before = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
+    bridge.maru_mobile_atlas_add(0x2600, 0, 1, 1, 11); // 보통
+    const mid = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
+    try std.testing.expect(mid != before); // 슬롯 하나를 썼다
+
+    bridge.maru_mobile_atlas_add(0x2600, bridge.style_bold, 2, 2, 11); // 같은 글자의 굵은 판
+    const after = bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols());
+    try std.testing.expect(after != mid); // **또 하나를 썼다** — 덮어쓰지 않았다
+
+    // 같은 (글자, 스타일) 을 또 넣으면 슬롯을 더 쓰지 않는다.
+    bridge.maru_mobile_atlas_add(0x2600, bridge.style_bold, 3, 3, 11);
+    try std.testing.expectEqual(after, bridge.maru_mobile_next_slot(bridge.maru_mobile_atlas_cols()));
+}
+
+// **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
+// 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이
 // 안 된 채 매 프레임 다시 구워진다 — 그래서 슬롯을 다 쓰면 `next_slot` 이 "없음" 을 답해야 한다.
 test "슬롯이 다 차면 없음을 답한다" {
@@ -103,7 +123,7 @@ test "슬롯이 다 차면 없음을 답한다" {
     const cp: u32 = 0x4000; // 대본에 없는 코드포인트로 등록부만 채운다
     var n: u32 = 0;
     while (n < cols * rows) : (n += 1) {
-        bridge.maru_mobile_atlas_add(cp + n, 0, 0, 1);
+        bridge.maru_mobile_atlas_add(cp + n, 0, 0, 0, 1);
     }
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(cols));
 }

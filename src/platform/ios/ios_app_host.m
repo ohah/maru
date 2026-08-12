@@ -81,6 +81,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     int _paceN;
     BOOL _paceDone;
     CTFontRef _atlasFont;
+    /// 스타일 비트(0~3)로 바로 찾는다 — SGR 1/3 은 **다른 글리프**라 폰트 파일이 따로 있어야 한다.
+    CTFontRef _atlasFaces[4];
     unsigned int _atlasH;
     CADisplayLink *_link;
 }
@@ -148,11 +150,29 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
         int advance = (int)(adv.width + 0.5);
         if (advance <= 0) advance = CW / 2;
-        maru_mobile_atlas_add(c, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
+        maru_mobile_atlas_add(c, 0, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
     }
     // 온디맨드 성장이 같은 폰트를 계속 쓰므로 여기서 소유권을 넘겨받는다 —
     // 아래 release 뒤에 retain 하면 해제된 객체를 만진다(그렇게 짰다가 앱이 죽었다).
     _atlasFont = (CTFontRef)CFRetain(base);
+    // **굵게·기울임 판도 연다.** 가짜 굵게(획을 덧그리기)는 advance 가 달라져 자간이 어긋난다 —
+    // Jetendard 는 네 판을 다 동봉하므로 파일로 고른다. 없으면 보통 판으로 되돌린다.
+    static NSString *const kFace[4] = {@"Jetendard-Regular", @"Jetendard-Bold",
+                                       @"Jetendard-Italic", @"Jetendard-BoldItalic"};
+    for (int s = 0; s < 4; s++) {
+        CTFontRef f = NULL;
+        NSString *path = [NSBundle.mainBundle pathForResource:kFace[s] ofType:@"ttf"];
+        if (path) {
+            CFArrayRef ds = CTFontManagerCreateFontDescriptorsFromURL(
+                (__bridge CFURLRef)[NSURL fileURLWithPath:path]);
+            if (ds && CFArrayGetCount(ds) > 0)
+                f = CTFontCreateWithFontDescriptor(
+                    (CTFontDescriptorRef)CFArrayGetValueAtIndex(ds, 0), MARU_ATLAS_TEXT_PX, NULL);
+            if (ds) CFRelease(ds);
+        }
+        if (!f) { NSLog(@"MARU_CHROME bundled_font_missing style=%d", s); f = (CTFontRef)CFRetain(base); }
+        _atlasFaces[s] = f;
+    }
     CFRelease(base); CFRelease(korean);
     CGContextRelease(ctx); CGColorSpaceRelease(cs);
 
@@ -244,7 +264,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     unsigned int added = 0;
     for (int i = (int)n - 1; i >= 0; i--) {
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
+        unsigned int style = maru_mobile_missing_style((unsigned int)i);
         if (cp == 0 || cp > 0xFFFF) continue;
+        CTFontRef face = _atlasFaces[style & 3] ?: _atlasFont;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
         // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
         // 다시 굽고** 있었다 — 화면에는 안 나오면서 CPU·GPU 만 먹는다.
@@ -255,19 +277,19 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         CGContextSetGrayFillColor(ctx, 1.0, 1.0);
         unichar c = (unichar)cp;
         CGGlyph glyph = 0;
-        CTFontGetGlyphsForCharacters(_atlasFont, &c, &glyph, 1);
+        CTFontGetGlyphsForCharacters(face, &c, &glyph, 1);
         if (glyph) {
             CGPoint pos = CGPointMake(1, 8);   // 셀 하나짜리 컨텍스트라 원점이 곧 셀 원점이다
-            CTFontDrawGlyphs(_atlasFont, &glyph, &pos, 1, ctx);
+            CTFontDrawGlyphs(face, &glyph, &pos, 1, ctx);
         }
         CGContextRelease(ctx);
         CGSize adv = CGSizeZero;
-        if (glyph) CTFontGetAdvancesForGlyphs(_atlasFont, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+        if (glyph) CTFontGetAdvancesForGlyphs(face, kCTFontOrientationHorizontal, &glyph, &adv, 1);
         unsigned int advance = (unsigned int)(adv.width + 0.5);
         if (advance == 0) advance = CW / 2;
         [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
                        withBytes:cell bytesPerRow:CW];
-        maru_mobile_atlas_add(cp, col, row, advance);
+        maru_mobile_atlas_add(cp, style, col, row, advance);
         added++;
     }
     CGColorSpaceRelease(cs);
@@ -385,10 +407,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // **draw call 한 번.** `setVertexBytes:` 는 4KB 한계라 148 quad(9.5KB)도 못 싣는다 —
     // 버퍼를 잡고 채운 뒤 인스턴스로 그린다(Vulkan storage buffer 와 같은 모양).
     // 프래그먼트는 이미 varying 으로 받으므로 `setFragmentBytes:` 는 필요 없다.
-    // **크기는 코어가 답한다.** 필요할 때마다 늘리면 두 플랫폼의 상한이 서로 다르고(Android
-    // 는 4096 에서 조용히 잘랐다), 큰 화면에서 첫 프레임에 한 번 재할당이 튄다.
-    if (_quadCap == 0) {
-        _quadCap = maru_mobile_max_quads();
+    // **크기는 코어가 답한다.** host 마다 상한을 적어 두면 어긋난다(Android 는 4096 에서
+    // 조용히 잘랐다). 코어 버퍼는 격자가 커질 때만 자라므로 여기 재할당도 그때뿐이다.
+    NSUInteger want = maru_mobile_max_quads();
+    if (_quadCap < want) {
+        _quadCap = want;
         _quadBuf = [_dev newBufferWithLength:_quadCap * sizeof(Uni)
                                      options:MTLResourceStorageModeShared];
     }

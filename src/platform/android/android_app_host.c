@@ -198,29 +198,6 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
     return 1;
 }
 
-// 아틀라스는 APK 의 asset 이 아니라 /data/local/tmp 에서 읽는다 — PoC 라 push 로 넣는다.
-static void loadAtlas(void) {
-    FILE *f = fopen("/data/local/tmp/atlas.idx", "r");
-    if (!f) { LOGI("atlas_missing"); return; }
-    uint32_t cw, ch, n;
-    if (fscanf(f, "%u %u %u %u %u", &g_gw, &g_gh, &cw, &ch, &n) != 5) { fclose(f); return; }
-    g.atlas_cols = g_gw / cw;
-    g.atlas_rows = g_gh / ch;
-    maru_mobile_atlas_geometry(cw, ch);
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t cp, col, row, adv;
-        if (fscanf(f, "%u %u %u %u", &cp, &col, &row, &adv) != 4) break;
-        maru_mobile_atlas_add(cp, col, row, adv);
-    }
-    fclose(f);
-    FILE *gf = fopen("/data/local/tmp/atlas.gray", "rb");
-    if (!gf) return;
-    g_glyph_px = malloc(g_gw * g_gh);
-    if (fread(g_glyph_px, 1, g_gw * g_gh, gf) != (size_t)(g_gw * g_gh)) { free(g_glyph_px); g_glyph_px = NULL; }
-    fclose(gf);
-    LOGI("atlas %ux%u cols=%u rows=%u", g_gw, g_gh, g.atlas_cols, g.atlas_rows);
-}
-
 static VkShaderModule loadSpv(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { LOGI("spv_missing=%s", path); return VK_NULL_HANDLE; }
@@ -935,8 +912,10 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
                    dpi != ACONFIGURATION_DENSITY_NONE) ? (float)dpi / 160.0f : 2.0f;
         queryInsets(app, &g.inset_top, &g.inset_bottom);
         LOGI("density=%d scale=%.3f inset top=%d bottom=%d", dpi, g.scale, g.inset_top, g.inset_bottom);
-        // 기기 래스터가 서면 push 한 호스트 아틀라스는 아예 안 읽는다.
-        if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh)) loadAtlas();
+        // 기기에서 굽는다. 실패하면 글리프 없이 뜨는 편이 낫다 — 예전 폴백은 개발
+        // 스크립트가 push 한 파일에 기대는 것이라 실제 앱에는 그 파일이 없었다.
+        if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh))
+            LOGI("atlas_raster_failed");
         if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_ready frames_reset");
         showKeyboard(app);
     }

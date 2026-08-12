@@ -169,38 +169,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (void)loadAtlas {
-    // 기기 래스터가 서면 번들 아틀라스는 아예 안 읽는다.
-    if ([self rasterizeAtlasOnDevice]) { [self loadIcons]; return; }
-    NSString *dir = NSProcessInfo.processInfo.environment[@"MARU_ATLAS_DIR"];
-    if (!dir) dir = [NSBundle.mainBundle resourcePath];
-    NSString *idxPath = [dir stringByAppendingPathComponent:@"atlas.idx"];
-    NSString *idx = [NSString stringWithContentsOfFile:idxPath encoding:NSUTF8StringEncoding error:nil];
-    if (idx) {
-        NSArray<NSString *> *lines = [idx componentsSeparatedByString:@"\n"];
-        NSArray<NSString *> *head = [lines[0] componentsSeparatedByString:@" "];
-        unsigned int W = head[0].intValue, H = head[1].intValue;
-        unsigned int cw = head[2].intValue, ch = head[3].intValue;
-        _atlasCols = W / cw; _atlasRows = H / ch;
-        maru_mobile_atlas_geometry(cw, ch);
-        NSData *gray = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"atlas.gray"]];
-        if (gray.length >= W * H) {
-            MTLTextureDescriptor *td =
-                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                                   width:W height:H mipmapped:NO];
-            _glyphTex = [_dev newTextureWithDescriptor:td];
-            [_glyphTex replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0
-                           withBytes:gray.bytes bytesPerRow:W];
-            for (NSUInteger i = 1; i < lines.count; i++) {
-                NSArray<NSString *> *f = [lines[i] componentsSeparatedByString:@" "];
-                if (f.count < 4) continue;
-                maru_mobile_atlas_add(f[0].intValue, f[1].intValue, f[2].intValue, f[3].intValue);
-            }
-        }
-        NSLog(@"MARU_CHROME atlas=%ux%u cols=%u rows=%u", W, H, _atlasCols, _atlasRows);
-    } else {
-        NSLog(@"MARU_CHROME atlas_missing dir=%@", dir);
-    }
-
+    // 기기에서 굽는다. 실패하면 글리프 없이 뜨는 편이 낫다 — 예전에 두던 "호스트가 만든
+    // 아틀라스를 읽는" 폴백은 개발 스크립트가 넣어 준 파일에 기대는 것이라 **실제 앱에는
+    // 그 파일이 없다**. 제품 폴백이 아니라 PoC 잔재였다.
+    if (![self rasterizeAtlasOnDevice]) NSLog(@"MARU_CHROME atlas_raster_failed");
     [self loadIcons];
 }
 
@@ -259,7 +231,6 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
-    unsigned int firstMissing = maru_mobile_missing_cp(0);
     for (unsigned int i = 0; i < n; i++) {
         unsigned int cp = maru_mobile_missing_cp(i);
         if (cp == 0 || cp > 0xFFFF) continue;
@@ -289,9 +260,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CGColorSpaceRelease(cs);
     free(cell);
     maru_mobile_missing_clear();
-    if (added) NSLog(@"MARU_ATLAS grew=%u first_missing=U+%04X rows: 6=U+%04X 7=U+%04X 8=U+%04X",
-                     added, firstMissing,
-                     maru_mobile_row_first_cp(6), maru_mobile_row_first_cp(7), maru_mobile_row_first_cp(8));
+    if (added) NSLog(@"MARU_ATLAS grew=%u", added);
 }
 
 + (Class)layerClass { return [CAMetalLayer class]; }

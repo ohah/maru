@@ -861,6 +861,8 @@ pub fn executeRequestWithDecoderOwned(
     request: contract.RuntimeRequest,
     context: *anyopaque,
     decoder: contract.RpcDecoder,
+    pre_decode_context: *anyopaque,
+    pre_decode: contract.RpcPreDecode,
 ) generation_transport_mod.Error!contract.RpcDecodeDisposition {
     if (!attachment.valid() or attachment.lifecycle != .attached)
         return error.InvalidTransport;
@@ -878,6 +880,8 @@ pub fn executeRequestWithDecoderOwned(
         receipt,
         context,
         decoder,
+        pre_decode_context,
+        pre_decode,
     ) catch |err| {
         attachment.transport.abortPreparedRequest(receipt) catch {};
         return err;

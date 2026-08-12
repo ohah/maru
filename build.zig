@@ -3103,6 +3103,13 @@ pub fn build(b: *std.Build) void {
             "2c3e C2 제품 RPC family는",
             12,
         );
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c3_step,
+            event_2c3e_c2_runtime_module,
+            "2c3e C3 socket cadence는",
+            3,
+        );
         const event_2c3e_c2_boundary_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_2c3e_c2_boundary.zig"),
             .target = target,
@@ -3124,8 +3131,8 @@ pub fn build(b: *std.Build) void {
             b,
             session_host_2c3e_c3_step,
             event_2c3e_c3_red_module,
-            "2c3e C3 socket cadence는",
-            12,
+            "2c3e C3 미구현 socket cadence는",
+            9,
         );
         const event_c3_3c_boundary_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_2c3d_c3_3c_boundary.zig"),

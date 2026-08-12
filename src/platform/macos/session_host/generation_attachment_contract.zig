@@ -473,6 +473,19 @@ pub const RpcDecoder = *const fn (
     bytes: []const u8,
 ) RpcDecodeDisposition;
 
+/// decoder 직전에는 RemoteRuntime만 이미 버퍼된 의미 event를 처리할 수 있다. false는
+/// response가 도착했어도 request 권위가 먼저 폐기됐다는 뜻이며 bytes를 callback에 빌리지 않는다.
+pub const RpcPreDecodeDisposition = enum(u8) {
+    proceed,
+    stale,
+    busy,
+    out_of_memory,
+    protocol_failure,
+    connection_closed,
+};
+
+pub const RpcPreDecode = *const fn (context: *anyopaque) RpcPreDecodeDisposition;
+
 fn typeContainsPointer(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer, .optional => |info| if (@typeInfo(T) == .optional)

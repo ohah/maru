@@ -9929,8 +9929,28 @@ pub const Client = struct {
                 return error.AdminBusy;
             defer if (manual_allocator_guard)
                 self.leaveGenerationAllocatorCallbackUnchecked();
-            discardFramePayloadObservation(payload_observer, frame);
-            self.bufferEventWithAllocator(frame, allocator) catch |err| {
+            var canonical_frame = frame;
+            const event_allocator = self.canonicalEventAllocator() catch {
+                discardFramePayloadObservation(payload_observer, frame);
+                frame.deinit(allocator);
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            };
+            if (!allocatorEql(allocator, event_allocator)) {
+                const payload = event_allocator.dupe(u8, frame.payload) catch {
+                    discardFramePayloadObservation(payload_observer, frame);
+                    frame.deinit(allocator);
+                    self.poisonMutationIo(.local_resource_exhausted, execution_lease_held);
+                    return error.OutOfMemory;
+                };
+                discardFramePayloadObservation(payload_observer, frame);
+                frame.deinit(allocator);
+                canonical_frame.payload = payload;
+                canonical_frame.payload_observation_generation = 0;
+            } else {
+                discardFramePayloadObservation(payload_observer, frame);
+            }
+            self.bufferEventWithAllocator(canonical_frame, event_allocator) catch |err| {
                 if (execution_lease_held and self.first_poison_reason == null)
                     self.poisonMutationIo(switch (err) {
                         error.OutOfMemory => .local_resource_exhausted,

@@ -3121,6 +3121,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact once 소비한다. 첫 RED에서는 12행이 모두 `C3CadenceNotImplemented`이고, 각 행을 실제 socket 제품 호출로
    교체하기 전에는 cadence parity를 구현했다고 주장하지 않는다.
 
+   현재 response 전 revoke·metadata event·snapshot 세 행은 actual socket의 legacy/generation 공통 fixture로
+   구현됐다. Client는 request execution allocator에서 읽은 event payload를 canonical event allocator로 옮긴
+   뒤에만 queue에 게시하고, RemoteRuntime pre-decode owner가 버퍼된 의미 event를 먼저 settlement한다. revoke가
+   controller generation을 바꾸면 response는 source-zero로 회수하고 decoder에는 빌리지 않는다. 나머지 아홉
+   행은 계속 명시적 RED다.
+
    C3-3b TDD gate는 최소 다음을 Debug·ReleaseFast와 actual socket/product path에서 고정한다.
 
    - 모든 event kind의 prepare/settlement Busy·mismatch에서 live semantic state mutation 0, retry exact once

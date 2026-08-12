@@ -737,6 +737,8 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   malformed/correlation failure는 decoder 0·response owner source-zero·connection terminal을 요구한다. revoke는 stale
   RPC publication을 막고, benign event/snapshot은 wire order와 exact-once 후속 소비를 보존한다. 첫 RED는 12행 전부
   `C3CadenceNotImplemented`이며 제품 구현·boundary가 green이 되기 전에는 2c3e 또는 2c3 완료로 표시하지 않는다.
+  현재 response 전 revoke·metadata event·snapshot 3행은 실제 socket의 legacy/generation 공통 oracle로
+  green이며, 나머지 9행은 명시적 RED를 유지한다.
 
 ### 파일 탐색기 후속 두 PR gate (PR 1·PR 2 구현 완료)
 

@@ -67,8 +67,26 @@ test "CR3a-2c3b internal rpc substrate keeps the strict path private" {
         count(slot_product, "pub fn armRpcSubstrateFailStopForTest("),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         count(transport, "client_slot_mod.armRpcSubstrateFailStopForTest("),
+    );
+    const c1_proof_loss = between(
+        transport,
+        "fn runScopedDecoderProofLoss(",
+        "test \"2c3e C1 proof-loss subprocess는",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(c1_proof_loss, "client_slot_mod.armRpcSubstrateFailStopForTest("),
+    );
+    const b3_proof_loss = between(
+        transport,
+        "test \"CR3a-2c3b internal rpc substrate local invariant fail-stop is authenticated\"",
+        "test \"CR3a-2c3b reusable response correction forbids work after rearm before operation release\"",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(b3_proof_loss, "client_slot_mod.armRpcSubstrateFailStopForTest("),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -96,7 +114,7 @@ test "CR3a-2c3b internal rpc substrate keeps the strict path private" {
     const strict_entry = between(
         slot_product,
         "pub fn executeGenerationRpcSubstrate(",
-        "fn canonicalRpcResponseAddress(",
+        "/// C1 decoder bridge는",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(strict_entry, "executePreparedRpcPrivate("));
     try std.testing.expectEqual(@as(usize, 1), count(strict_entry, ".{ .canonical = {} }"));

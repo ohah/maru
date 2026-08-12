@@ -949,6 +949,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       blocker/pin/quarantine의 event 전 live attachment 기준선 복귀와 payload callback exact 1회를 동일 제품 호출 뒤 검증한다.
       RPC/decoder direct-call inventory는 2c3e가 소유한다. immediate EOF·unread RX-first와
       decoder cadence/parity는 계속 2c3e 범위다.
+      **2c3e는 C1 scoped decoder bridge, C2 bound RPC family 전환, C3 actual-socket EOF/RX-first parity 순서로
+      병합한다.** C1은 typed `RuntimeRequest` execute 뒤 transport-owned inline response를 final-address borrow로
+      잠시 빌리고 `RpcDecodeDisposition.reusable|protocol_failure`만 돌려받는다. raw bytes·owner·receipt는 callback
+      밖으로 반환하지 않으며 accepted callback 뒤 exact free와 reusable rearm 또는 protocol terminal을 완료한다.
+      C2는 attach를 제외한 exact 12 family를 이 bridge로 옮기고 `RemoteRuntime`을 decoder/ordered-input SSOT로
+      유지한다. C3는 immediate EOF, unread revoke/event 우선, response 뒤 event와 malformed/unknown cadence를 실제
+      socket의 legacy/generation 공통 oracle로 닫는다. 세부 API·count·proof-loss와 source boundary는
+      persistent-session-host의 2c3e 계약을 단일 출처로 따른다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

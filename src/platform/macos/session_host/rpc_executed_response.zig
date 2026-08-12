@@ -7,6 +7,43 @@
 const std = @import("std");
 const contract = @import("generation_attachment_contract.zig");
 const owner_seal = @import("external_owner_seal.zig");
+const builtin = @import("builtin");
+const c = std.c;
+
+const DecoderProofLossHook = struct {
+    const record_size: usize = 11;
+
+    armed: bool = false,
+    nonce: u64 = 0,
+    stage_fd: c.fd_t = -1,
+
+    fn writeStage(self: *const @This(), stage: u8) void {
+        if (!self.armed) return;
+        var bytes: [record_size]u8 = undefined;
+        bytes[0] = 1;
+        bytes[1] = 6;
+        std.mem.writeInt(u64, bytes[2..10], self.nonce, .little);
+        bytes[10] = stage;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const written = c.write(self.stage_fd, bytes[offset..].ptr, bytes.len - offset);
+            if (written < 0 and std.posix.errno(written) == .INTR) continue;
+            if (written <= 0) @panic("decoder proof-loss marker write failed");
+            offset += @intCast(written);
+        }
+    }
+};
+
+threadlocal var decoder_proof_loss_hook: if (builtin.is_test) DecoderProofLossHook else void =
+    if (builtin.is_test) .{} else {};
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn armBorrowSealDriftAfterCallback(nonce: u64, stage_fd: c.fd_t) void {
+        if (decoder_proof_loss_hook.armed or nonce == 0 or stage_fd < 3)
+            @panic("invalid decoder proof-loss hook authority");
+        decoder_proof_loss_hook = .{ .armed = true, .nonce = nonce, .stage_fd = stage_fd };
+    }
+} else struct {};
 
 pub const max_owned_response_bytes: usize = 256 * 1024;
 
@@ -271,6 +308,14 @@ pub const RpcExecutedResponse = struct {
             @panic("RPC response reusable rearm permit mismatch");
         permit.consumed_raw = 1;
         self.* = .{};
+    }
+
+    pub fn reusableRearmReady(
+        self: *const RpcExecutedResponse,
+        txn: *const RpcResponseFinishTxn,
+        permit: *const PreparedReusableRearmPermit,
+    ) bool {
+        return permit.exactFor(self, txn);
     }
 
     /// Closes a live owner without dereferencing or freeing its payload when lexical alias
@@ -592,6 +637,33 @@ fn finishStageRawValid(value: *const FinishStage) bool {
     return @as(*const u8, @ptrCast(value)).* <= @intFromEnum(FinishStage.consumed);
 }
 
+/// 응답 payload는 이 호출 동안에만 빌려 준다. callback 복귀 뒤 owner와 borrow를 다시
+/// 검증하므로 decoder가 source authority를 건드리면 cleanup을 추측하지 않고 상위 proof-loss로 닫힌다.
+pub fn decodeBorrowedRpcResponse(
+    response: *const RpcExecutedResponse,
+    borrow: *const RpcResponseBorrow,
+    context: *anyopaque,
+    callback: contract.RpcDecoder,
+) RpcExecutedResponse.Error!contract.RpcDecodeDisposition {
+    if (!response.liveExact(response.identity) or !borrow.exactFor(response, response.identity))
+        return error.InvalidReceipt;
+    const disposition = callback(
+        context,
+        response.identity.tag,
+        payloadSlice(response.payload_addr, response.payload_len).?,
+    );
+    if (builtin.is_test and decoder_proof_loss_hook.armed) {
+        decoder_proof_loss_hook.writeStage(12);
+        @constCast(borrow).seal[0] ^= 1;
+        decoder_proof_loss_hook.writeStage(11);
+        decoder_proof_loss_hook.armed = false;
+    }
+    if (!response.liveExact(response.identity) or !borrow.exactFor(response, response.identity))
+        return error.InvalidReceipt;
+    if (!contract.rpcDecodeDispositionRawValid(&disposition)) return error.InvalidReceipt;
+    return disposition;
+}
+
 pub fn withBorrowedRpcResponseBytesForTest(
     response: *const RpcExecutedResponse,
     borrow: *const RpcResponseBorrow,
@@ -599,11 +671,18 @@ pub fn withBorrowedRpcResponseBytesForTest(
     callback: *const fn (*anyopaque, []const u8) void,
 ) RpcExecutedResponse.Error!void {
     if (!@import("builtin").is_test) @compileError("test-only RPC response byte bridge");
-    if (!response.liveExact(response.identity) or !borrow.exactFor(response, response.identity))
-        return error.InvalidReceipt;
-    callback(context, payloadSlice(response.payload_addr, response.payload_len).?);
-    if (!response.liveExact(response.identity) or !borrow.exactFor(response, response.identity))
-        return error.InvalidReceipt;
+    const Adapter = struct {
+        callback: *const fn (*anyopaque, []const u8) void,
+        context: *anyopaque,
+
+        fn invoke(raw: *anyopaque, _: contract.RuntimeRequestTag, bytes: []const u8) contract.RpcDecodeDisposition {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.callback(self.context, bytes);
+            return .reusable;
+        }
+    };
+    var adapter = Adapter{ .callback = callback, .context = context };
+    _ = try decodeBorrowedRpcResponse(response, borrow, &adapter, Adapter.invoke);
 }
 
 fn responseSeal(response: *const RpcExecutedResponse) owner_seal.Digest {
@@ -801,6 +880,209 @@ const ByteProbe = struct {
         self.called = std.mem.eql(u8, self.expected, bytes);
     }
 };
+
+const DecodeProbe = struct {
+    expected: []const u8,
+    expected_tag: contract.RuntimeRequestTag,
+    disposition: contract.RpcDecodeDisposition,
+    calls: usize = 0,
+
+    fn inspect(
+        context: *anyopaque,
+        tag: contract.RuntimeRequestTag,
+        bytes: []const u8,
+    ) contract.RpcDecodeDisposition {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (tag == self.expected_tag and std.mem.eql(u8, self.expected, bytes)) self.calls += 1;
+        return self.disposition;
+    }
+};
+
+fn fixtureLiveBorrow(
+    response: *RpcExecutedResponse,
+    borrow: *RpcResponseBorrow,
+    payload: []u8,
+) !void {
+    const identity = fixtureIdentity(@intFromPtr(response), 53);
+    try RpcExecutedResponse.initLiveInPlace(
+        response,
+        identity,
+        std.testing.allocator,
+        payload,
+        fixtureProvenance(),
+    );
+    var permit: PreparedBorrowInit = .{};
+    try response.prepareBorrowInit(identity, borrow, &permit);
+    response.commitBorrowReceiptNoFail(identity, borrow, &permit);
+}
+
+test "2c3e C1 scoped owner는 accepted bytes를 decoder에 exact 한 번 빌려 준다" {
+    const payload = try std.testing.allocator.dupe(u8, "{\"result\":{}}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    var probe = DecodeProbe{
+        .expected = payload,
+        .expected_tag = .observation,
+        .disposition = .reusable,
+    };
+    try std.testing.expectEqual(
+        contract.RpcDecodeDisposition.reusable,
+        try decodeBorrowedRpcResponse(&response, &borrow, &probe, DecodeProbe.inspect),
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "2c3e C1 scoped owner는 protocol failure disposition을 그대로 보존한다" {
+    const payload = try std.testing.allocator.dupe(u8, "malformed");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    var probe = DecodeProbe{
+        .expected = payload,
+        .expected_tag = .observation,
+        .disposition = .protocol_failure,
+    };
+    try std.testing.expectEqual(
+        contract.RpcDecodeDisposition.protocol_failure,
+        try decodeBorrowedRpcResponse(&response, &borrow, &probe, DecodeProbe.inspect),
+    );
+}
+
+test "2c3e C1 scoped owner는 copied borrow를 callback 전에 거부한다" {
+    const payload = try std.testing.allocator.dupe(u8, "{}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    var copied = borrow;
+    var probe = DecodeProbe{
+        .expected = payload,
+        .expected_tag = .observation,
+        .disposition = .reusable,
+    };
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        decodeBorrowedRpcResponse(&response, &copied, &probe, DecodeProbe.inspect),
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "2c3e C1 scoped owner는 callback의 response seal drift를 복귀 직후 거부한다" {
+    const payload = try std.testing.allocator.dupe(u8, "{}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    const Drift = struct {
+        response: *RpcExecutedResponse,
+
+        fn inspect(
+            context: *anyopaque,
+            _: contract.RuntimeRequestTag,
+            _: []const u8,
+        ) contract.RpcDecodeDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.response.seal[0] ^= 1;
+            return .reusable;
+        }
+    };
+    var drift = Drift{ .response = &response };
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        decodeBorrowedRpcResponse(&response, &borrow, &drift, Drift.inspect),
+    );
+}
+
+test "2c3e C1 scoped owner는 callback의 borrow seal drift를 복귀 직후 거부한다" {
+    const payload = try std.testing.allocator.dupe(u8, "{}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    const Drift = struct {
+        borrow: *RpcResponseBorrow,
+
+        fn inspect(
+            context: *anyopaque,
+            _: contract.RuntimeRequestTag,
+            _: []const u8,
+        ) contract.RpcDecodeDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.borrow.seal[0] ^= 1;
+            return .reusable;
+        }
+    };
+    var drift = Drift{ .borrow = &borrow };
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        decodeBorrowedRpcResponse(&response, &borrow, &drift, Drift.inspect),
+    );
+}
+
+test "2c3e C1 scoped owner는 callback의 payload byte drift를 복귀 직후 거부한다" {
+    const payload = try std.testing.allocator.dupe(u8, "{}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    const Drift = struct {
+        payload: []u8,
+
+        fn inspect(
+            context: *anyopaque,
+            _: contract.RuntimeRequestTag,
+            _: []const u8,
+        ) contract.RpcDecodeDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.payload[0] ^= 1;
+            return .reusable;
+        }
+    };
+    var drift = Drift{ .payload = payload };
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        decodeBorrowedRpcResponse(&response, &borrow, &drift, Drift.inspect),
+    );
+}
+
+test "2c3e C1 scoped owner는 copied response address를 callback 전에 거부한다" {
+    const payload = try std.testing.allocator.dupe(u8, "{}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    var copied_response = response;
+    var probe = DecodeProbe{
+        .expected = payload,
+        .expected_tag = .observation,
+        .disposition = .reusable,
+    };
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        decodeBorrowedRpcResponse(&copied_response, &borrow, &probe, DecodeProbe.inspect),
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "2c3e C1 scoped owner는 callback 뒤 cleanup 전까지 같은 live source를 보존한다" {
+    const payload = try std.testing.allocator.dupe(u8, "{}");
+    defer std.testing.allocator.free(payload);
+    var response: RpcExecutedResponse = .{};
+    var borrow: RpcResponseBorrow = .{};
+    try fixtureLiveBorrow(&response, &borrow, payload);
+    const identity = response.identity;
+    var probe = DecodeProbe{
+        .expected = payload,
+        .expected_tag = .observation,
+        .disposition = .reusable,
+    };
+    _ = try decodeBorrowedRpcResponse(&response, &borrow, &probe, DecodeProbe.inspect);
+    try std.testing.expect(response.liveScalarIdentityExact(identity));
+    try std.testing.expect(borrow.exactFor(&response, identity));
+}
 
 fn beginBorrowForTest(
     response: *const RpcExecutedResponse,

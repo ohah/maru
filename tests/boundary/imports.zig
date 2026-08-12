@@ -1897,6 +1897,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pinProjectionFromEventReleasePermit" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "hashInt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registryEventReleaseFromComposite" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "rpc_decoder_callback_active" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRpcDecodedExecute" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRpcDecoded" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRpcResponseBorrowUnderOwner" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishRpcResponseOwnedUnderOwner" },
             },
         },
     };
@@ -2360,10 +2365,18 @@ test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
         "@import(\"host_adapter.zig\")",
         "@import(\"remote_runtime.zig\")",
         "@import(\"remote_attachment.zig\")",
-        "*anyopaque",
     };
     for (forbidden) |needle|
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "*anyopaque"));
+    const decoder_start = std.mem.indexOf(u8, source, "pub const RpcDecoder =") orelse
+        return error.TestUnexpectedResult;
+    const decoder_end = std.mem.indexOfPos(u8, source, decoder_start, "fn typeContainsPointer") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source[decoder_start..decoder_end], "*anyopaque"),
+    );
 }
 
 test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
@@ -2488,13 +2501,14 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
     try std.testing.expectEqual(@as(usize, methods.len), countOccurrences(product_source, "    pub fn "));
     for (methods) |signature|
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(product_source, signature));
-    try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "*anyopaque"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(product_source, "*anyopaque"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "pub fn call("));
     const facade_start = std.mem.indexOf(u8, product_source, "pub const GenerationTransport = struct") orelse
         return error.TestUnexpectedResult;
     const facade_end = std.mem.indexOfPos(u8, product_source, facade_start, "pub fn sendResyncNonBlockingOwned(") orelse
         return error.TestUnexpectedResult;
     const facade_source = product_source[facade_start..facade_end];
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(facade_source, "*anyopaque"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(facade_source, "method: []const u8"));
     const direct_prepared_client_apis = [_][]const u8{
         ".prepareBlockingRpcStorage(",
@@ -3122,7 +3136,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 13),
+        @as(usize, 14),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -7398,7 +7412,7 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         );
         try std.testing.expectEqual(
             // b2b3's canonical real-take harness owns one additional test-only terminalization.
-            @as(usize, if (is_generation_transport) 5 else if (is_generation_attachment) 1 else 0),
+            @as(usize, if (is_generation_transport) 6 else if (is_generation_attachment) 1 else 0),
             countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
         );
         if (is_generation_transport) {
@@ -7414,16 +7428,15 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             transport_count: usize,
             attachment_count: usize = 1,
         }{
-            // The correction, B3-6, and b2b3 real-take fixtures are top-level test helpers and own
-            // three lexical calls; there is still one product-facade callsite.
-            .{ .name = "bindCommittedStreamOwned", .transport_count = 4 },
+            // 기존 fixture 네 곳과 C1 actual-socket fixture 한 곳만 attachment 결속을 연다.
+            .{ .name = "bindCommittedStreamOwned", .transport_count = 5 },
             // 기존 fallible revoke와 b4의 이미 확정된 effect suffix가 같은 권위를 한 번씩 연다.
             .{ .name = "beginControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
-            // Shell and attached teardown each own one terminalization fence.
-            .{ .name = "preflightTerminalizeOwned", .transport_count = 2, .attachment_count = 2 },
+            // 기존 두 경로와 C1 decoder callback의 mutation-0 teardown probe만 preflight한다.
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 2 },
         };
         for (owned_helpers) |helper| {
             const expected: usize = if (is_generation_transport)

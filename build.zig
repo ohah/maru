@@ -109,6 +109,75 @@ pub fn build(b: *std.Build) void {
     demo_cmd.addArg("demo");
     demo_step.dependOn(&demo_cmd.step);
 
+    // ── 모바일 어댑터 정적 라이브러리 ────────────────────────────────────────────
+    // **Zig 는 `.a` 까지만 만든다.** iOS 용 `libSystem` 을 Zig 가 링크하지 못해(실측)
+    // 링크는 플랫폼 툴체인(clang/NDK)이 맡는다 — 실제 앱에서도 이 구조가 된다.
+    // 기기 조작(설치·실행·캡쳐)은 `tools/mobile-poc/run.sh` 가, 빌드는 여기가 소유한다.
+    //
+    // **Debug 는 iOS 에서 링크가 깨진다.** std 의 스택 트레이스 경로가 시뮬레이터 SDK 에 없는
+    // `_dyld_get_image_header_containing_address` 를 참조한다. `mobile_bridge.zig` 의
+    // `simple_panic` 이 ReleaseSafe/ReleaseFast 에서 그 경로를 걷어내므로 `-Doptimize` 로
+    // 그중 하나를 준다(안전 검사는 ReleaseSafe 에서 그대로 산다).
+    //
+    // CI 에는 붙이지 않는다(사용자 결정) — Xcode·NDK·에뮬레이터가 필요해 러너 비용이 크고
+    // 지금 막아야 할 회귀가 없다(docs/plans/mobile-platform.md).
+    {
+        const mobile_libs_step = b.step("mobile-libs", "Build the mobile adapter static libraries (iOS/Android)");
+        const MobileTarget = struct {
+            step_name: []const u8,
+            lib_name: []const u8,
+            query: std.Target.Query,
+            /// Android 는 PIE 가 필수라 정적 라이브러리도 위치 독립이어야 한다(실측).
+            pic: bool,
+        };
+        const mobile_targets = [_]MobileTarget{
+            .{
+                .step_name = "mobile-lib-ios-sim",
+                .lib_name = "maru-mobile-ios-sim",
+                .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .simulator },
+                .pic = false,
+            },
+            .{
+                .step_name = "mobile-lib-ios",
+                .lib_name = "maru-mobile-ios",
+                .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .none },
+                .pic = false,
+            },
+            .{
+                .step_name = "mobile-lib-android",
+                .lib_name = "maru-mobile-android",
+                .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .android },
+                .pic = true,
+            },
+        };
+        for (mobile_targets) |mt| {
+            const mobile_target = b.resolveTargetQuery(mt.query);
+            // 모듈 루트는 `maru.zig` 하나여야 한다 — chrome·renderer 를 따로 주면 둘 다
+            // `icons.zig` 를 상대 경로로 끌어와 "file exists in two modules" 로 깨진다(실측).
+            const mobile_maru_mod = b.createModule(.{
+                .root_source_file = b.path("src/maru.zig"),
+                .target = mobile_target,
+                .optimize = optimize,
+                .pic = if (mt.pic) true else null,
+            });
+            const lib = b.addLibrary(.{
+                .name = mt.lib_name,
+                .linkage = .static,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/mobile/mobile_bridge.zig"),
+                    .target = mobile_target,
+                    .optimize = optimize,
+                    .pic = if (mt.pic) true else null,
+                    .imports = &.{.{ .name = "maru", .module = mobile_maru_mod }},
+                }),
+            });
+            const install = b.addInstallArtifact(lib, .{});
+            const step = b.step(mt.step_name, b.fmt("Build {s}", .{mt.lib_name}));
+            step.dependOn(&install.step);
+            mobile_libs_step.dependOn(&install.step);
+        }
+    }
+
     const app_smoke_step = b.step("app-smoke", "Run the app host frame smoke");
     const app_smoke_cmd = b.addRunArtifact(exe);
     app_smoke_cmd.step.dependOn(b.getInstallStep());

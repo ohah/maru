@@ -262,6 +262,25 @@ test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
 
+// 커서 **가시성 규칙은 코어의 합성과 같아야 한다**. `screen.cursor.visible` 은 코어가 "내부
+// 불변" 이라고 적어 둔 값(늘 참)이고, 실제 판단은 DECTCEM **그리고** 스크롤백을 보고 있지
+// 않을 것이다 — 내부 필드만 보면 스크롤백을 볼 때도 커서를 그린다.
+test "스크롤백을 보는 동안에는 커서를 안 그린다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874);
+    // 스크롤백을 만든다(화면보다 많이 찍는다)
+    var i: u32 = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    const at_bottom = bridge.maru_mobile_build(402, 874);
+
+    _ = bridge.maru_mobile_input("\x1b[?25l", 6); // 커서를 끈 상태와 비교해 quad 한 개 차이를 본다
+    const hidden = bridge.maru_mobile_build(402, 874);
+    try std.testing.expectEqual(hidden + 1, at_bottom);
+    _ = bridge.maru_mobile_input("\x1b[?25h", 6);
+    bridge.maru_mobile_clear_error();
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

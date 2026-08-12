@@ -187,11 +187,23 @@ pub const DockMetrics = struct {
     /// 정렬 토글의 고정 slot 폭. 가장 긴 label(`오래된순`, 한글 4자)과 좌우 여백이 들어가는 값으로
     /// 고정한다 — label 길이에 따라 slot이 늘었다 줄면 그 옆의 `로컬`과 refresh가 방향을 바꿀 때마다
     /// 움직인다.
+    ///
+    /// 이 slot의 label은 cell 격자가 아니라 measured `center_in_rect`로 놓는다. cols 양자화 경로는 폭
+    /// 예산을 `floor(available/cell_width)`로 깎아, slot에 실제로 들어가는 글자까지 미리 잘라 버렸다.
     header_sort_extent: u32,
     /// 정렬 토글의 line box 높이. control role 한 줄이며, 이 값이 있어야 header가 토글을 세로 중앙에
     /// 놓는다.
     header_sort_line_h: u32,
     header_trailing_inset: u32,
+    /// 정렬 토글을 발행하려면 제목에 **최소한 이만큼**은 남아야 한다.
+    ///
+    /// `headerFitsSortToggle`의 의도는 "utility가 제목을 통째로 밀어내는 구간에서는 토글을 뺀다"인데,
+    /// 판정이 utility 폭만 봤을 때는 제목 폭 0을 허용했다. 그러면 `view.headerStack`의 `available_px <= 0`
+    /// (또는 `max_cols == 0`)에 걸려 **토글은 있는데 제목도 개수도 없는 헤더**가 나온다 — 무엇을 보고
+    /// 있는지가 사라지는 것이 바로 그 주석이 막으려던 상태다.
+    ///
+    /// 값은 logical pt다. terminal cell 폭으로 정의하면 폰트를 바꿀 때마다 토글이 나타났다 사라진다.
+    header_title_min_w: u32,
     group_disclosure_inset_x: u32,
     group_disclosure_extent: u32,
     group_disclosure_label_gap: u32,
@@ -244,7 +256,16 @@ pub const DockMetrics = struct {
         return .{
             // Heading + supporting + 4pt stack gap + 12pt vertical inset on each side.
             .header_h = geometryPx(@max(spacing.pointsPx(76, scale), saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.dock_heading, scale), typography.lineHeightPx(.supporting, scale)), spacing.px(.xxs, scale)), saturatedMul(spacing.px(.sm, scale), 2)))),
-            .scope_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
+            // scope는 **필터 세그먼트**이지 action button이 아니다. 48pt action 하한을 같이 쓰면 검색 필드와
+            // 같은 덩치가 되어 도크 상단이 컨트롤 두 줄로 꽉 찬다(사용자 보고 2026-08-11: "작업공간·프로젝트·
+            // 전체가 너무 크다", 36pt로 낮춘 뒤에도 "좀 더 작게"). control 한 줄 + xxs 여백을 자기 하한으로
+            // 두어 검색 필드(48pt)의 절반 남짓한 얇은 필터 줄로 읽히게 한다.
+            //
+            // 30pt는 pointer target 최소치(그룹 행 48pt)보다 **낮고 그것이 의도다**: 세그먼트는 가로로 도크
+            // 1/3폭(자동 폭 640pt에서 약 200pt)을 차지하므로 타깃 면적 자체는 그 행보다 훨씬 넓다. 한때
+            // 26pt까지 내렸다가 되돌린 값이다(사용자 2026-08-12: "너무 줄였다") — 바닥은 line box 17pt이지만
+            // 실제로 얇아 보이는 한계가 그보다 높다.
+            .scope_h = geometryPx(@max(spacing.pointsPx(30, scale), saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.xxs, scale), 2)))),
             .search_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
             .group_h = geometryPx(@max(spacing.pointsPx(48, scale), saturatedAdd(typography.lineHeightPx(.group_heading, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
             // 하한은 "role line box 합이 지나치게 작아졌을 때의 바닥"이지 목표 높이가 아니다. typography를
@@ -269,9 +290,15 @@ pub const DockMetrics = struct {
             // optical breathing room on every side.  The 20pt trailing inset matches the
             // shared dock content edge, so neither the SVG nor the spinner reads as clipped.
             .header_refresh_extent = geometryPx(spacing.pointsPx(24, scale)),
-            .header_sort_extent = geometryPx(spacing.pointsPx(72, scale)),
+            // 가장 긴 label `오래된순`(한글 4자)이 좌우 여백과 함께 들어가야 한다. 72pt였을 때는 도크 텍스트가
+            // 사용자 monospace face라(폰트 전략) 한글 4자가 slot을 넘겨 `…`로 잘렸다(사용자 보고). control
+            // 13pt 기준 한글 4자는 약 62pt이므로 좌우 여백을 포함해 84pt로 둔다.
+            .header_sort_extent = geometryPx(spacing.pointsPx(84, scale)),
             .header_sort_line_h = geometryPx(typography.lineHeightPx(.control, scale)),
             .header_trailing_inset = geometryPx(spacing.px(.lg, scale)),
+            // 48pt면 dock_heading으로 한글 세 자 남짓이다. 제목이 `…` 하나로 줄어드는 것까지는 허용하되,
+            // 아예 사라지는 구간은 만들지 않는다.
+            .header_title_min_w = geometryPx(spacing.pointsPx(48, scale)),
             // The root already contributes the dock's 20pt content inset. The disclosure gets
             // only its local 8pt slot, preventing the chevron from inheriting a second 20pt.
             .group_disclosure_inset_x = geometryPx(spacing.px(.xs, scale)),
@@ -302,7 +329,7 @@ pub const DockMetrics = struct {
     /// 제목을 통째로 밀어내는 폭이 실제로 존재한다. 그 구간에서는 토글보다 "무엇을 보고 있는지"가
     /// 먼저다 — 토글을 빼고 제목에 자리를 준다.
     pub fn headerFitsSortToggle(self: DockMetrics, header_width_px: u32) bool {
-        return header_width_px >= saturatedAdd(self.headerUtilityWidth(true), self.header_content_inset_x);
+        return header_width_px >= saturatedAdd(saturatedAdd(self.headerUtilityWidth(true), self.header_content_inset_x), self.header_title_min_w);
     }
 
     pub fn headerUtilityWidth(self: DockMetrics, include_sort: bool) u32 {
@@ -365,7 +392,11 @@ fn saturatedMul(a: u32, b: u32) u32 {
 test "DockMetrics fixes all Session Dock geometry independently of terminal cells" {
     const m = DockMetrics.resolve(1000);
     try std.testing.expectEqual(@as(u32, 76), m.header_h);
-    try std.testing.expectEqual(@as(u32, 48), m.scope_h);
+    // scope는 action button 하한(48pt)이 아니라 자기 하한 30pt를 쓴다 — 검색 필드보다 확실히 낮은 얇은 필터 줄.
+    try std.testing.expectEqual(@as(u32, 30), m.scope_h);
+    try std.testing.expect(m.scope_h < m.search_h);
+    // 하한이 계산값(line box + 여백)을 이겨야 위아래 여백이 남는다. 뒤집히면 글자가 상자에 꽉 찬다.
+    try std.testing.expect(m.scope_h > typography.lineHeightPx(.control, 1000));
     try std.testing.expectEqual(@as(u32, 48), m.search_h);
     try std.testing.expectEqual(@as(u32, 48), m.group_h);
     // 카드 높이는 이제 하한이 아니라 role line box 합이 정한다(96pt 하한 < 98px 계산값). 그래서 이 값은
@@ -383,19 +414,37 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 8), m.header_host_icon_gap);
     try std.testing.expectEqual(@as(u32, 12), m.header_utility_gap);
     try std.testing.expectEqual(@as(u32, 24), m.header_refresh_extent);
-    try std.testing.expectEqual(@as(u32, 72), m.header_sort_extent);
+    try std.testing.expectEqual(@as(u32, 84), m.header_sort_extent);
     try std.testing.expectEqual(@as(u32, 20), m.header_trailing_inset);
+    try std.testing.expectEqual(@as(u32, 48), m.header_title_min_w);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_inset_x);
     try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
-    // host label 72 + gap 12 + 정렬 토글 72 + gap 12 + refresh 24 + trailing inset 20.
-    try std.testing.expectEqual(@as(u32, 212), m.headerUtilityWidth(true));
+    // host label 72 + gap 12 + 정렬 토글 84 + gap 12 + refresh 24 + trailing inset 20.
+    try std.testing.expectEqual(@as(u32, 224), m.headerUtilityWidth(true));
     // 좁은 도크에서 토글을 빼면 예전 폭으로 돌아간다.
     try std.testing.expectEqual(@as(u32, 128), m.headerUtilityWidth(false));
-    try std.testing.expect(m.headerFitsSortToggle(240));
+    // utility 224 + content inset 8 + 제목 최소 48 = 280이 경계다. 제목이 0폭으로 짜부라지는 구간에서는
+    // 토글을 내지 않는다 — 그 구간이 바로 "토글은 있는데 제목이 없는 헤더"였다.
+    try std.testing.expect(m.headerFitsSortToggle(280));
+    try std.testing.expect(!m.headerFitsSortToggle(279));
     try std.testing.expect(!m.headerFitsSortToggle(160));
     try std.testing.expect(m.card_metadata_y < m.card_h);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
+}
+
+test "scope segment keeps room for its label across the whole bounded dock zoom range" {
+    // scope를 26pt까지 낮춘 뒤 남은 위험은 하나다: 어떤 scale에서 control line box가 상자를 이기면
+    // `view.centeredLabel`이 통째로 return해 **라벨이 사라진다**. 도크 UI zoom은 750~1500 milli로
+    // clamp되고(agent_dock.zig `session_dock_ui_zoom_*`) 거기에 Retina 2x가 곱해지므로 3000까지 본다.
+    for ([_]u32{ 750, 1000, 1250, 1500, 2000, 2500, 3000 }) |milli| {
+        const m = DockMetrics.resolve(milli);
+        try std.testing.expect(m.scope_h > typography.lineHeightPx(.control, milli));
+        // 검색 필드보다 낮다는 위계도 scale에 무관해야 한다 — 한쪽만 하한에 걸리면 뒤집힌다.
+        try std.testing.expect(m.scope_h < m.search_h);
+        // 정렬 토글 slot도 같은 이유로 자기 line box보다 넓어야 한다.
+        try std.testing.expect(m.header_sort_extent > m.header_sort_line_h);
+    }
 }
 
 test "DockMetrics scales with one resolved Dock scale" {

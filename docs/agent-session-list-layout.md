@@ -78,6 +78,29 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   같은 radius 계열의 별도 filled field이며 16pt content inset, 18pt registered SVG, 8pt gap 뒤에
   measured placeholder/query/preedit/caret을 둔다. icon·텍스트는 terminal cell baseline을 공유하지 않고
   각각의 logical rect 중앙에 lower한다.
+- **scope는 action button이 아니라 필터 세그먼트다.** 높이 하한은 48pt action 최소치가 아니라 30pt이며,
+  그래서 검색 필드(48pt)보다 확실히 낮은 얇은 필터 줄로 읽힌다. 48pt를 같이 쓰면 도크 상단이 같은 덩치의
+  컨트롤 두 줄로 꽉 찬다(사용자 보고 2026-08-11). pointer target 최소치(그룹 행 48pt)보다 낮은 것은
+  의도다 — 세그먼트는 가로로 도크 1/3폭(자동 폭 640pt에서 약 200pt)을 차지해 타깃 **면적**은 그 행보다
+  넓다. 한때 26pt까지 내렸다가 되돌린 값이다(사용자 2026-08-12: "너무 줄였다") — 계산상 바닥은 control
+  line box 17pt이지만, 실제로 얇아 보이는 한계는 그보다 높다.
+- **세그먼트 label과 정렬 토글 label은 measured `center_in_rect`로 자기 slot 중앙에 놓고, 폭 예산으로는
+  slot 폭을 `max_width_px`에 그대로 싣는다.** lowering은 예산을 `max_width_px orelse max_cols *
+  cell_width`로 푼다(`chrome_draw_lowering.zig`의 `textWidthBudget`). 예전 cell 격자 경로
+  (`textInsetStyled`)는 `max_width_px`를 안 실어서 예산이 `floor(available/cell_width)` cell 배수로
+  깎였고, 그래서 slot에 실제로 들어가는 글자까지 worker가 보기 전에 잘렸다 — `오래된순`이 잘려 보인
+  사용자 보고가 그것이다. 같은 경로가 x도 `rect.x + cell_width`로 잡아 label을 slot 왼쪽에 붙였다.
+
+  **정렬 토글을 발행할 폭인지는 utility 폭만으로 정하지 않는다.** 판정에는 제목 최소 폭(48pt,
+  `header_title_min_w`)이 함께 들어간다. utility 폭만 보면 제목 폭 0을 허용하게 되고, 그러면
+  `view.headerStack`의 `available_px <= 0`에 걸려 **토글은 떠 있는데 제목도 개수도 없는 헤더**가 나온다 —
+  "그 구간에서는 토글보다 무엇을 보고 있는지가 먼저다"라는 원래 의도가 정확히 뒤집힌 상태다.
+
+  **slot 폭을 키우는 것은 잘림 결함의 해법이 아니다**(양자화는 그대로다). 단일 출처는 `max_width_px`이고,
+  `max_cols`는 legacy cell 백엔드(Lab·폴백) 전용 상한으로만 남으므로 **보수적인 `floor`**여야 한다 —
+  `ceil`이면 그 경로에서 라벨이 slot을 최대 1 cell 넘겨 이웃 세그먼트를 침범한다. 정렬 slot 84pt는
+  그와 별개로 한글 4자에 좌우 여백을 주기 위한 값이다(72pt는 도크 텍스트가 사용자 monospace face일 때
+  빠듯했다).
 - group은 위아래 rule과 20pt disclosure slot·8pt label gap·workspace name·count pill을 갖는 독립
   header다. count pill의 치수·자리(최소 폭 44pt, 최대 높이 32pt, 반지름 = 높이/2, 행 세로 중앙,
   라벨 상자 중앙, 안 들어가면 안 그림)는 `chrome/ui/badge.zig`가 소유한다 — 컴포넌트 view가 그

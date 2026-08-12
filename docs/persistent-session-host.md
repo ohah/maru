@@ -933,6 +933,44 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    stale/cross-node handoff 거부, 실제 attachment→node typed teardown final-zero를 독립 증명한다. 테스트명과 새 설명 주석은
    한국어로 쓰고 타입·API 식별자는 코드 계약 이름을 유지한다.
 
+   2d3은 typed terminal drain의 callback 경계를 다음 계약으로 닫는다. `ClientSlot`은 row 하나를 free하기 전에 caller
+   final-address `TerminalDrainContinuation`을 준비한다. immutable identity는
+   `{self_addr,pid,process_nonce,thread_id,node_addr,node_incarnation,registry_incarnation,handoff_identity_seal,
+   handoff_state_seal,handoff_state_generation,row_slot,row_kind_raw,row_generation,accounting_client_addr,
+   accounting_transfer_id,accounting_byte_count,payload_addr,payload_len,allocator_ptr,allocator_vtable,callback_ordinal}`을
+   process seal로 결속한다. mutable lifecycle은 `pristine|prepared|callback_active|callback_returned|consumed`이며 각 전이는
+   별도 state seal과 exact generation을 가진다. copied/moved/cross-node/cross-row continuation과 unknown raw lifecycle은 첫
+   payload dereference 전에 거부한다. callback-visible registry row나 public descriptor를 callback 뒤 다시 읽어 authority를
+   복원하지 않는다.
+
+   preflight는 전체 handoff와 모든 row/accounting을 먼저 검증한 뒤 각 surviving row의 callback-local descriptor와
+   `TerminalDrainContinuation`을 fixed scratch에 준비한다. 이 단계는 allocation/callback/free/accounting/row mutation 0이다.
+   no-fail suffix는 continuation을 `prepared -> callback_active`로 게시하고 thread-local callback binding
+   `{continuation_addr,continuation_seal,node_addr,row_slot,callback_ordinal}`을 exact pristine 상태에서 설정한 뒤 allocator free를
+   정확히 한 번 호출한다. callback 복귀 직후 binding과 continuation을 `callback_active` preimage로 검증하고 binding을 지운 뒤
+   `callback_returned` receipt를 봉인한다. 그 다음에만 미리 준비한 accounting consume permit과 registry row continuation을
+   소비한다. quarantine row는 allocator callback을 전혀 실행하지 않고 같은 row/accounting consume suffix만 사용한다.
+
+   allocator callback 중 같은 attachment release/deinit, 같은 node의 sibling release/deinit, `ClientSlot.tryDeinit`, 새 batch
+   read/drop/permit prepare는 모두 typed `Busy|terminal_handoff`로 닫히며 callback/free/accounting/row/wire/poison mutation 0이다.
+   callback binding은 일반 generation release binding과 타입·주소를 공유하지 않는다. 다른 독립 Client node의 read-only
+   operation은 정상 동작할 수 있지만 이 continuation이나 registry를 관측하지 않는다. callback은 target descriptor bytes를
+   합법적으로 바꿀 수 있으므로 free 이후 payload나 allocator bytes는 다시 읽지 않는다.
+
+   proof-loss는 공통 `process_seal_service.fatalIntegrity(.proof_loss)` leaf로만 수렴한다. callback 전 handoff/row/accounting/
+   continuation drift는 payload free 0, callback marker 0, row/accounting/completion publication 0 뒤 exit 86이다. callback 뒤
+   continuation/TLS/accounting/registry proof drift는 exact payload free 1과 callback return marker 뒤 exit 86이며 accounting consume,
+   row clear, handoff `consumed`, Client/node destroy와 두 번째 free는 모두 0이다. test harness가 직접 exit 86을 만들지 않으며,
+   marker는 제품 checkpoint owner가 allocation·formatting·mutex 없이 fixed 1-byte record로 쓴다. fresh-exec child는 실제
+   `GenerationAttachment` terminal handoff fixture를 만들고 exact transcript/EOF/exit status를 검증한다.
+
+   2d3 focused gate는 2d2를 상속하고 Debug·ReleaseFast 각각 unique component 12개, subprocess 3개, boundary 1개를 실행한다.
+   component 분해는 continuation schema/seal/lifecycle 3개, callback reentry 3개, preflight mutation-0와 exact-once suffix 3개,
+   quarantine never-free 2개, 제품 attachment final-zero 1개다. subprocess는 pre-callback proof loss, post-callback proof loss,
+   callback reentry transcript를 각각 독립 실행한다. boundary는 callback binding 타입 분리, common fatal leaf sole origin,
+   test-only marker/injection production caller 0, public registry bulk commit 0, continuation/receipt pointer-free와 정확한 제품 caller
+   하나를 고정한다.
+
    terminal handoff는 payload token과 남은 sibling batch/drop token 전부를 allocation/callback 0의 한 node-owned teardown
    receipt로 결속하고 attachment token들을 tombstone한 뒤 lease pin을 해제한다. 첫 `indeterminate_or_partial` 또는 두 번째
    `retryable_preserved` 뒤에는 개별 cleanup을 계속하지 않는다. `ClientSlot.tryDeinit`은 attachment pin/active permit이 0이고

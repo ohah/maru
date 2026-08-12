@@ -862,7 +862,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
       exact token count와 ordered token digest, surviving-descriptor authority 여부를 process seal로 봉인한다. publication suffix는
       attachment token tombstone→lease pin release→connection poison 순이며 부분 publication은 없다. `ClientSlot.tryDeinit`은
       `cleaned|busy|terminal_handoff|corrupt`를 반환하고 terminal handoff에서는 exact descriptor만 drain한 뒤 accounting을
-      consume하며 불명확 descriptor는 `terminal_quarantined_no_free`로 남긴 다음 Client와 node를 마지막에 회수한다.
+      consume하며 불명확 descriptor는 payload free authority 없이 `terminal_quarantined_no_free`로 봉인한 다음 accounting과
+      registry row를 정리하고 Client와 node를 마지막에 회수한다.
    3. **2d3 — callback·proof-loss·quarantine 제품 경계.** allocator callback 중 같은 attachment release/deinit, sibling
       release, slot deinit은 모두 typed Busy이고 새 permit/free/wire mutation 0이다. callback 전 permit/registry/descriptor drift는
       free 0 fail-stop, callback 뒤 receipt/accounting drift는 free 1 뒤 completion publication 0 fail-stop이다. surviving descriptor
@@ -877,6 +878,60 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    GenerationAttachment actual retry/teardown 1개다. recoverable 주입은 exact registry 주소와 token에 결속된 test-only one-shot이며
    다른 registry나 sibling token이 대신 소비할 수 없다. production callback은 같은 permit decision 결과를 그대로 전달하고,
    `indeterminate_or_partial`의 실제 공급과 terminal handoff는 2d2가 소유한다.
+
+   2d2의 aggregate authority는 node의 final-address `GenerationBatchRegistry` 안에 둔 단일
+   `TerminalCleanupHandoff` slot이다. movable `RemoteAttachment`나 `AttachmentTransport` callback context에 receipt 원문을
+   저장하지 않는다. receipt의 immutable schema는
+   `{self_addr,pid,process_nonce,thread_id,node_addr,node_incarnation,registry_incarnation,connection_generation,stream_id,
+   token_count,ordered_token_digest,surviving_descriptor_count,quarantined_descriptor_count,accounting_count,
+   accounting_bytes,request_generation}`이고, mutable lifecycle은 `pristine|prepared|published|draining|consumed|terminal`이다.
+   immutable identity seal과 mutable state seal을 분리해 정상 lifecycle 전이가 callback 전 identity 증거를 지우지 않는다.
+   `token_count`는 `failed_release` 0/1개 뒤 아직 소비하지 않은 `pending_batches[pending_batch_head..]`의 generation token만
+   순서대로 더한 값이고, external `untracked|charged` lease가 하나라도 섞이면 mutation 0 `corrupt`다. ordered digest는 token의
+   `{registry_incarnation,entry_slot,entry_generation,stream_id}` canonical bytes와 ordinal을 결속하며 XOR/정렬 digest를 쓰지 않는다.
+
+   `GenerationAttachment.tryDeinit`은 terminal 결과를 본 뒤 다음 두 단계만 호출한다. 먼저
+   `GenerationBatchAdapter.preflightTerminalCleanup(lease_view,out)`이 기존 attachment storage를 read-only로 순회하고 exact
+   registry row·accounting·connection lease projection을 검증해 caller final-address `PreparedTerminalCleanup`을 만든다. 이
+   단계는 allocation/callback/row/attachment/pin/poison mutation 0이다. 그 다음
+   `GenerationBatchAdapter.commitTerminalCleanupNoFail(prepared,lease_view)`은 같은 ordered lease view를 재검증한 뒤 registry의
+   `beginTerminalCleanupPublicationNoFail`과 `publishTerminalTokenNoFail`만 사용해 fixed slot을
+   `prepared -> published`로 먼저 게시하고, attachment의 `failed_release`와 generation suffix를 tombstone하고, connection lease
+   pin을 release한 뒤 `.attachment_cleanup_failed` poison을 마지막에 게시한다. commit suffix에는 allocation/callback/fallible
+   call이 없고, 어느 store 뒤에도 typed return이나 rollback이 없다. attachment storage가 4,096개여도 새 token 배열을 만들지
+   않고 동일 ordered view를 두 번 순회한다. exact token set의 registry row 전량이 prepared되기 전에는 첫 row도 terminal로
+   바꾸지 않으며, preflight fail-index 0..N-1은 전체 source와 destination을 pristine으로 보존한다.
+
+   registry row의 terminal projection은 `terminal_surviving_descriptor|terminal_quarantined_no_free` 두 값뿐이다.
+   `retryable_preserved` row는 descriptor/allocator/accounting authority가 모두 exact이므로 surviving으로만 전이한다.
+   `indeterminate_or_partial` 주입은 mutation 지점에서 descriptor authority 보존 여부를 함께 닫힌 결과로 발행하며, authority가
+   exact이면 surviving, 아니면 allocator pointer와 payload slice를 다시 읽지 않는 quarantine으로 전이한다. quarantine은
+   `{entry identity,accounting receipt,byte_count}`만 유지하고 free authority를 보유하지 않는다. 두 결과 모두 attachment token은
+   publication suffix에서 tombstone되어 개별 release가 다시 호출되지 않는다.
+
+   게시된 handoff는 typed teardown이 모든 row/accounting을 읽기 전용 검증한 뒤 `published -> draining`으로 state seal을
+   갱신하고, row/accounting source-zero 뒤 `draining -> consumed`, registry가 node와 함께 닫힐 때 `consumed -> terminal`로
+   진행한다. 각 전이는 동일 immutable identity seal과 증가하는 state generation을 결속한다. 첫
+   `indeterminate_or_partial`은 attachment-local 닫힌 상태로 보존하므로 deinit이 해당 lease callback을 다시 호출하지 않는다.
+   registry에는 이 봉인된 streaming publication 외의 public bulk commit 경로를 두지 않는다.
+
+   `ClientSlot.tryDeinitWithTerminalCleanup(handoff)`의 닫힌 결과는
+   `cleaned|busy|terminal_handoff|corrupt`다. handoff가 live이면 기존 `tryDeinit`은 `terminal_handoff`만 반환하고 node를 직접
+   파괴하지 않는다. typed teardown은 registered exclusive operation 아래에서 handoff identity/state와 모든 terminal row를 먼저
+   검증한다. surviving row는 descriptor를 callback-local owner로 옮겨 allocator free exact once 뒤 accounting을 consume하고,
+   quarantined row는 payload free 0으로 accounting을 consume하고 payload authority를 의도적으로 폐기한 뒤 registry row를
+   source-zero로 만든다. 모든 row가 source-zero가 된 뒤 registry
+   handoff를 consumed로 게시하고 `Client.deinit -> registry deinit -> node destroy` 순서를 지킨다. busy/corrupt preflight는
+   callback/free/accounting/node mutation 0이며, copied/moved/stale/cross-node receipt는 current node를 역참조하기 전에 거부한다.
+
+   2d2 focused gate는 2d1을 상속하고 Debug·ReleaseFast 각각 unique component 14개와 boundary 1개를 실행한다. exact 소유
+   분해는 neutral handoff schema/seal 3개, registry aggregate preflight/publication 4개, RemoteAttachment aggregate trigger/source
+   tombstone 3개, ClientSlot typed teardown 3개, GenerationAttachment 실제 제품 terminal handoff/deinit 1개다. 14개는 각각
+   pointer-free exact schema와 copy/move 거부, ordered digest splice 거부, 0/1/4,096 token preflight, fail-index mutation 0,
+   second-retryable aggregate trigger, first-indeterminate surviving/quarantine 분기, external lease 혼합 거부, source tombstone·pin
+   release·poison 순서, ordinary `tryDeinit`의 terminal_handoff 반환, surviving exact-free/accounting consume, quarantine never-free,
+   stale/cross-node handoff 거부, 실제 attachment→node typed teardown final-zero를 독립 증명한다. 테스트명과 새 설명 주석은
+   한국어로 쓰고 타입·API 식별자는 코드 계약 이름을 유지한다.
 
    terminal handoff는 payload token과 남은 sibling batch/drop token 전부를 allocation/callback 0의 한 node-owned teardown
    receipt로 결속하고 attachment token들을 tombstone한 뒤 lease pin을 해제한다. 첫 `indeterminate_or_partial` 또는 두 번째

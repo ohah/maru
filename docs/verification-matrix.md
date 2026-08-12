@@ -1523,7 +1523,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   **2b1(node batch registry와 Client transferred accounting, 구현) → 2b2(GUI node-bound adapter와 제품 pump/release/canonical drop 무회귀, 구현)**로
   나누며, 2b1만 green이어도 GUI raw context가 남아 있으므로 2b 전체를 구현으로 표시하지 않는다. 2c는 남은 exact primitive facade와
   `RemoteRuntime.client`를 포함한 raw escape zero,
-  2d는 2d1 actual generation release 결과와 최초 retry 보존(구현 완료), 2d2 aggregate terminal handoff와 typed node teardown,
+  2d는 2d1 actual generation release 결과와 최초 retry 보존(구현 완료), 2d2 aggregate terminal handoff와 typed node
+  teardown(구현 완료),
   2d3 permit/reentry/quarantine/proof-loss 제품 경계 순으로 닫는다. 2d1~3 전체가 green이기 전에는 2d 완료가 아니다. 2e는 actual socket
   attach/pump/deinit/uncertain/malformed/snapshot-failure/failed-release fixture와 전체 source
   boundary를 각각 증명한다. 각 gate는 production-type unit과 boundary를 재실행하며 전체가 green이기 전 CR3a-2 완료를 주장하지
@@ -1532,6 +1533,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   GenerationAttachment actual retry/teardown 1개인 unique component exact 8개와 boundary 1개를 실행한다. retryable은 exact
   registry/token test owner seam이 permit decision에서만 발행하고 제품 경로는 그 결과를 그대로 전달한다. retryable 전후 payload,
   token, accounting과 Client sibling queue는 보존되고 teardown의 새 permit 성공 뒤 target free와 accounting consume은 exact 한 번이다.
+  2d2 focused gate는 2d1을 상속하고 Debug·ReleaseFast 각각 neutral handoff 3개, registry aggregate 4개,
+  RemoteAttachment trigger/tombstone 3개, ClientSlot typed teardown 3개, GenerationAttachment actual terminal handoff 1개인
+  unique component exact 14개와 boundary 1개를 실행한다. ordered lease view의 0/1/4,096행과 preflight fail-index는 allocation과
+  source mutation 0을, second retryable/first indeterminate는 하나의 node-final receipt publication을, surviving descriptor는
+  free/accounting exact once를, authority가 불명확한 descriptor는 never-free quarantine을 증명한다. external lease 혼합,
+  copied/stale/cross-node receipt와 partial source tombstone은 모두 제품 callback/free/node mutation 전에 거부한다.
+  public bulk registry commit은 0개이며, node-final streaming publication 뒤 state seal이
+  `published→draining→consumed→terminal`로 진행한다. 첫 indeterminate는 deinit에서 release callback을 재호출하지 않는다.
   2b1의 현재 자동 증거는 node-local 4,096-entry registry와 독립 exact accounting ledger, 18 MiB pending+transferred 합산,
   pointer-free token의 registry incarnation·entry generation·stream 결속, buffered/direct-parser all-or-none transfer,
   0/1/4,096/4,097 및 exact cap/cap+1, allocator fail-index·drift·partial rollback, sibling/source/canonical owner alias,

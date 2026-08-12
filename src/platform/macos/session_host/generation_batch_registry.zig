@@ -6,6 +6,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const process_identity = @import("process_identity.zig");
+const process_seal_service = @import("process_seal_service.zig");
+const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 
 pub const max_entries: usize = 4096;
 
@@ -17,6 +19,15 @@ pub const Token = struct {
 };
 
 pub const Reservation = Token;
+
+fn tokenFromProjection(projection: terminal_contract.TokenProjection) Token {
+    return .{
+        .registry_incarnation = projection.registry_incarnation,
+        .entry_slot = projection.entry_slot,
+        .entry_generation = projection.entry_generation,
+        .stream_id = projection.stream_id,
+    };
+}
 
 pub const AccountingReceipt = struct {
     client_addr: usize,
@@ -31,6 +42,53 @@ pub const GenerationReleaseResult = enum(u8) {
 };
 
 const PreparedReleaseLifecycle = enum(u8) { pristine, prepared, consumed, aborted };
+
+const TerminalCleanupLifecycle = terminal_contract.Lifecycle;
+
+/// Node owner가 process seal을 붙이기 전 registry row 집합을 최종 주소에 고정한다.
+/// token 원문은 attachment ordered view에 남고 이 값에는 canonical digest와 집계만 남는다.
+pub const TerminalCleanupHandoff = struct {
+    self_addr: usize = 0,
+    token_count: u32 = 0,
+    ordered_token_digest: terminal_contract.Digest = [_]u8{0} ** 32,
+    surviving_descriptor_count: u32 = 0,
+    quarantined_descriptor_count: u32 = 0,
+    accounting_count: u32 = 0,
+    accounting_bytes: u64 = 0,
+    request_generation: u64 = 0,
+    identity: terminal_contract.Identity = std.mem.zeroes(terminal_contract.Identity),
+    state: terminal_contract.State = std.mem.zeroes(terminal_contract.State),
+    lifecycle: TerminalCleanupLifecycle = .pristine,
+
+    pub fn pristine(self: *const TerminalCleanupHandoff) bool {
+        return self.self_addr == 0 and self.token_count == 0 and self.request_generation == 0 and
+            self.lifecycle == .pristine and
+            std.mem.eql(u8, &self.ordered_token_digest, &([_]u8{0} ** 32));
+    }
+};
+
+pub const TerminalTokenSummary = struct {
+    projection: terminal_contract.TokenProjection,
+    kind: terminal_contract.TerminalRowKind,
+    accounting_bytes: u64,
+};
+
+pub const TerminalPublicationOwner = struct {
+    pid: u32,
+    process_nonce: u64,
+    thread_id: u64,
+    node_addr: u64,
+    node_incarnation: u64,
+    connection_generation: u64,
+    stream_id: u64,
+};
+
+pub const TerminalDrainDescriptor = struct {
+    kind: terminal_contract.TerminalRowKind,
+    bytes: []u8,
+    allocator: ?std.mem.Allocator,
+    accounting: AccountingReceipt,
+};
 
 /// 실제 registry row를 움직이기 전에 token과 accounting을 final-address scratch에 고정한다.
 /// retryable 결과는 이 permit을 abort해 live row를 그대로 보존한 경우에만 발행할 수 있다.
@@ -50,6 +108,8 @@ pub const PreparedRelease = struct {
 const TestingRetryableRelease = struct {
     registry_addr: usize = 0,
     token: Token = std.mem.zeroes(Token),
+    result: GenerationReleaseResult = .completed,
+    terminal_kind: terminal_contract.TerminalRowKind = .surviving_descriptor,
 };
 threadlocal var testing_retryable_release: TestingRetryableRelease = .{};
 
@@ -60,6 +120,22 @@ pub const testing = if (builtin.is_test) struct {
         testing_retryable_release = .{
             .registry_addr = @intFromPtr(registry),
             .token = token,
+            .result = .retryable_preserved,
+        };
+    }
+
+    pub fn armNextIndeterminate(
+        registry: *Registry,
+        token: Token,
+        terminal_kind: terminal_contract.TerminalRowKind,
+    ) void {
+        if (testing_retryable_release.registry_addr != 0)
+            @panic("generation release test verdict is not pristine");
+        testing_retryable_release = .{
+            .registry_addr = @intFromPtr(registry),
+            .token = token,
+            .result = .indeterminate_or_partial,
+            .terminal_kind = terminal_kind,
         };
     }
 } else struct {};
@@ -445,6 +521,16 @@ pub const AccountingLedger = struct {
         return error.InvalidDescriptor;
     }
 
+    pub fn canConsume(self: *const AccountingLedger, receipt: AccountingReceipt) bool {
+        if (!self.matchesClient(receipt.client_addr) or receipt.transfer_id == 0 or
+            receipt.byte_count == 0) return false;
+        for (self.entries) |entry| {
+            if (entry.transfer_id != receipt.transfer_id) continue;
+            return entry.lifecycle == .live and entry.byte_count == receipt.byte_count;
+        }
+        return false;
+    }
+
     /// `prepareConsume`가 exact live entry를 releasing으로 봉인한 뒤의 무검증 suffix다.
     pub fn consumeUnchecked(
         self: *AccountingLedger,
@@ -590,7 +676,15 @@ test "CR3a-2c3d C1 fork child rejects inherited allocator authority before mutex
 }
 
 const RegistryLifecycle = enum(u8) { pristine, live, dead };
-const EntryLifecycle = enum(u8) { empty, reserved, ingress, live, releasing };
+const EntryLifecycle = enum(u8) {
+    empty,
+    reserved,
+    ingress,
+    live,
+    releasing,
+    terminal_surviving_descriptor,
+    terminal_quarantined_no_free,
+};
 
 const Entry = struct {
     lifecycle: EntryLifecycle = .empty,
@@ -601,6 +695,7 @@ const Entry = struct {
     allocator: ?std.mem.Allocator = null,
     accounting: AccountingReceipt = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 },
     cleanup_addr: usize = 0,
+    terminal_hint_raw: u8 = 0,
 
     fn clear(self: *Entry) void {
         self.* = .{};
@@ -622,6 +717,9 @@ pub const Registry = struct {
     last_generation: u64 = 0,
     live_count: usize = 0,
     lifecycle: RegistryLifecycle = .pristine,
+    terminal_handoff_active: bool = false,
+    terminal_request_generation: u64 = 0,
+    terminal_handoff: TerminalCleanupHandoff = .{},
     entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
 
     pub fn initInPlace(out: *Registry, incarnation: u64) Error!void {
@@ -807,10 +905,365 @@ pub const Registry = struct {
         if (testing_retryable_release.registry_addr == @intFromPtr(self) and
             std.meta.eql(testing_retryable_release.token, prepared.token))
         {
+            const result = testing_retryable_release.result;
+            if (result == .indeterminate_or_partial) {
+                const entry = self.exactEntry(prepared.token) catch unreachable;
+                entry.terminal_hint_raw = switch (testing_retryable_release.terminal_kind) {
+                    .surviving_descriptor => 1,
+                    .quarantined_no_free => 2,
+                };
+            }
             testing_retryable_release = .{};
-            return .retryable_preserved;
+            return result;
         }
         return .completed;
+    }
+
+    /// 모든 token과 row를 읽기 전용으로 검증한 뒤 aggregate destination만 준비한다.
+    pub fn preflightTerminalCleanup(
+        self: *Registry,
+        tokens: []const terminal_contract.TokenProjection,
+        kinds: []const terminal_contract.TerminalRowKind,
+        out: *TerminalCleanupHandoff,
+    ) Error!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (self.terminal_handoff_active or !out.pristine() or tokens.len == 0 or
+            tokens.len != kinds.len or tokens.len > max_entries or
+            self.terminal_request_generation == std.math.maxInt(u64))
+            return error.InvalidState;
+        var surviving: u32 = 0;
+        var quarantined: u32 = 0;
+        var accounting_bytes: u64 = 0;
+        for (tokens, kinds) |projection, kind| {
+            const token = tokenFromProjection(projection);
+            const entry = try self.exactEntry(token);
+            if (entry.lifecycle != .live or entry.bytes.len == 0 or
+                entry.accounting.byte_count != entry.bytes.len or entry.accounting.client_addr == 0 or
+                entry.accounting.transfer_id != entry.generation or entry.cleanup_addr != 0)
+                return error.InvalidDescriptor;
+            switch (kind) {
+                .surviving_descriptor => {
+                    if (entry.allocator == null) return error.InvalidDescriptor;
+                    surviving += 1;
+                },
+                .quarantined_no_free => quarantined += 1,
+            }
+            accounting_bytes = std.math.add(u64, accounting_bytes, @intCast(entry.accounting.byte_count)) catch
+                return error.InvalidDescriptor;
+        }
+        const request_generation = self.terminal_request_generation + 1;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .token_count = @intCast(tokens.len),
+            .ordered_token_digest = terminal_contract.orderedTokenDigest(tokens),
+            .surviving_descriptor_count = surviving,
+            .quarantined_descriptor_count = quarantined,
+            .accounting_count = @intCast(tokens.len),
+            .accounting_bytes = accounting_bytes,
+            .request_generation = request_generation,
+            .lifecycle = .prepared,
+        };
+    }
+
+    pub fn preflightTerminalToken(
+        self: *Registry,
+        token: Token,
+        kind: terminal_contract.TerminalRowKind,
+    ) Error!TerminalTokenSummary {
+        const entry = try self.exactEntry(token);
+        if (entry.lifecycle != .live or entry.bytes.len == 0 or
+            entry.accounting.byte_count != entry.bytes.len or entry.accounting.client_addr == 0 or
+            entry.accounting.transfer_id != entry.generation or entry.cleanup_addr != 0)
+            return error.InvalidDescriptor;
+        const expected_kind: terminal_contract.TerminalRowKind = switch (entry.terminal_hint_raw) {
+            0, 1 => .surviving_descriptor,
+            2 => .quarantined_no_free,
+            else => return error.InvalidDescriptor,
+        };
+        if (kind != expected_kind) return error.InvalidDescriptor;
+        if (kind == .surviving_descriptor and entry.allocator == null)
+            return error.InvalidDescriptor;
+        return .{
+            .projection = terminalProjection(token),
+            .kind = kind,
+            .accounting_bytes = @intCast(entry.accounting.byte_count),
+        };
+    }
+
+    pub fn terminalTokenKind(
+        self: *Registry,
+        token: Token,
+    ) Error!terminal_contract.TerminalRowKind {
+        const entry = try self.exactEntry(token);
+        return switch (entry.terminal_hint_raw) {
+            0, 1 => .surviving_descriptor,
+            2 => .quarantined_no_free,
+            else => error.InvalidDescriptor,
+        };
+    }
+
+    pub fn prepareTerminalCleanupSummary(
+        self: *Registry,
+        token_count: u32,
+        digest: terminal_contract.Digest,
+        surviving: u32,
+        quarantined: u32,
+        accounting_bytes: u64,
+        out: *TerminalCleanupHandoff,
+    ) Error!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (self.terminal_handoff_active or !out.pristine() or token_count == 0 or
+            token_count > max_entries or surviving + quarantined != token_count or
+            self.terminal_request_generation == std.math.maxInt(u64))
+            return error.InvalidState;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .token_count = token_count,
+            .ordered_token_digest = digest,
+            .surviving_descriptor_count = surviving,
+            .quarantined_descriptor_count = quarantined,
+            .accounting_count = token_count,
+            .accounting_bytes = accounting_bytes,
+            .request_generation = self.terminal_request_generation + 1,
+            .lifecycle = .prepared,
+        };
+    }
+
+    pub fn beginTerminalCleanupPublicationNoFail(
+        self: *Registry,
+        prepared: *TerminalCleanupHandoff,
+        owner: TerminalPublicationOwner,
+    ) void {
+        if (!self.valid() or self.terminal_handoff_active or
+            prepared.self_addr != @intFromPtr(prepared) or prepared.lifecycle != .prepared or
+            prepared.request_generation != self.terminal_request_generation + 1)
+            @panic("generation terminal cleanup publication drifted");
+        self.terminal_handoff_active = true;
+        self.terminal_request_generation = prepared.request_generation;
+        self.terminal_handoff = prepared.*;
+        self.terminal_handoff.self_addr = @intFromPtr(&self.terminal_handoff);
+        const ready = process_seal_service.currentReadyIdentity() catch
+            @panic("terminal cleanup process seal is not ready");
+        if (owner.pid != ready.pid or owner.process_nonce != ready.process_nonce or
+            owner.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+            owner.node_addr == 0 or owner.node_incarnation != self.incarnation or
+            owner.connection_generation == 0 or owner.stream_id == 0)
+            @panic("terminal cleanup publication owner drifted");
+        self.terminal_handoff.identity = .{
+            .self_addr = @intFromPtr(&self.terminal_handoff),
+            .pid = ready.pid,
+            .process_nonce = ready.process_nonce,
+            .thread_id = owner.thread_id,
+            .node_addr = owner.node_addr,
+            .node_incarnation = owner.node_incarnation,
+            .registry_incarnation = self.incarnation,
+            .connection_generation = owner.connection_generation,
+            .stream_id = owner.stream_id,
+            .token_count = prepared.token_count,
+            .ordered_token_digest = prepared.ordered_token_digest,
+            .surviving_descriptor_count = prepared.surviving_descriptor_count,
+            .quarantined_descriptor_count = prepared.quarantined_descriptor_count,
+            .accounting_count = prepared.accounting_count,
+            .accounting_bytes = prepared.accounting_bytes,
+            .request_generation = prepared.request_generation,
+        };
+        const identity_seal = process_seal_service.terminalCleanupIdentitySeal(ready.pid, ready.process_nonce, .{
+            .self_addr = self.terminal_handoff.identity.self_addr,
+            .thread_id = self.terminal_handoff.identity.thread_id,
+            .node_addr = self.terminal_handoff.identity.node_addr,
+            .node_incarnation = self.terminal_handoff.identity.node_incarnation,
+            .registry_incarnation = self.terminal_handoff.identity.registry_incarnation,
+            .connection_generation = self.terminal_handoff.identity.connection_generation,
+            .stream_id = self.terminal_handoff.identity.stream_id,
+            .token_count = self.terminal_handoff.identity.token_count,
+            .ordered_token_digest = self.terminal_handoff.identity.ordered_token_digest,
+            .surviving_descriptor_count = self.terminal_handoff.identity.surviving_descriptor_count,
+            .quarantined_descriptor_count = self.terminal_handoff.identity.quarantined_descriptor_count,
+            .accounting_count = self.terminal_handoff.identity.accounting_count,
+            .accounting_bytes = self.terminal_handoff.identity.accounting_bytes,
+            .request_generation = self.terminal_handoff.identity.request_generation,
+        }) catch @panic("terminal cleanup identity seal failed");
+        self.terminal_handoff.state = .{
+            .identity_seal = identity_seal,
+            .lifecycle_raw = @intFromEnum(terminal_contract.Lifecycle.published),
+            .state_generation = 1,
+            .state_seal = [_]u8{0} ** 32,
+        };
+        self.terminal_handoff.state.state_seal = process_seal_service.terminalCleanupStateSeal(
+            ready.pid,
+            ready.process_nonce,
+            .{
+                .self_addr = self.terminal_handoff.identity.self_addr,
+                .lifecycle_raw = self.terminal_handoff.state.lifecycle_raw,
+                .state_generation = self.terminal_handoff.state.state_generation,
+                .identity_seal = identity_seal,
+            },
+        ) catch @panic("terminal cleanup state seal failed");
+        self.terminal_handoff.lifecycle = .published;
+        prepared.lifecycle = .consumed;
+    }
+
+    pub fn publishTerminalTokenNoFail(
+        self: *Registry,
+        token: Token,
+        kind: terminal_contract.TerminalRowKind,
+    ) void {
+        if (!self.terminal_handoff_active) @panic("generation terminal token without handoff");
+        const entry = self.exactEntry(token) catch @panic("generation terminal token drifted");
+        if (entry.lifecycle != .live) @panic("generation terminal token lifecycle drifted");
+        entry.lifecycle = switch (kind) {
+            .surviving_descriptor => .terminal_surviving_descriptor,
+            .quarantined_no_free => .terminal_quarantined_no_free,
+        };
+        if (kind == .quarantined_no_free) {
+            entry.bytes = &.{};
+            entry.allocator = null;
+        }
+    }
+
+    pub fn terminalHandoffPublished(self: *const Registry) bool {
+        return self.terminalHandoffCurrent(.published, 1, true);
+    }
+
+    fn terminalHandoffCurrent(
+        self: *const Registry,
+        expected_lifecycle: terminal_contract.Lifecycle,
+        expected_generation: u64,
+        expected_active: bool,
+    ) bool {
+        if (!(self.valid() and self.terminal_handoff_active == expected_active and
+            self.terminal_handoff.self_addr == @intFromPtr(&self.terminal_handoff) and
+            self.terminal_handoff.lifecycle == expected_lifecycle and
+            self.terminal_handoff.identity.self_addr == @intFromPtr(&self.terminal_handoff) and
+            self.terminal_handoff.identity.pid == process_identity.currentProcessId() and
+            self.terminal_handoff.identity.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and
+            self.terminal_handoff.state.lifecycle_raw == @intFromEnum(expected_lifecycle) and
+            self.terminal_handoff.state.state_generation == expected_generation and
+            self.terminal_handoff.token_count == self.terminal_handoff.identity.token_count and
+            self.terminal_handoff.surviving_descriptor_count == self.terminal_handoff.identity.surviving_descriptor_count and
+            self.terminal_handoff.quarantined_descriptor_count == self.terminal_handoff.identity.quarantined_descriptor_count and
+            self.terminal_handoff.accounting_count == self.terminal_handoff.identity.accounting_count and
+            self.terminal_handoff.accounting_bytes == self.terminal_handoff.identity.accounting_bytes and
+            self.terminal_handoff.request_generation == self.terminal_handoff.identity.request_generation and
+            std.mem.eql(u8, &self.terminal_handoff.ordered_token_digest, &self.terminal_handoff.identity.ordered_token_digest))) return false;
+        const expected_identity = process_seal_service.terminalCleanupIdentitySeal(
+            self.terminal_handoff.identity.pid,
+            self.terminal_handoff.identity.process_nonce,
+            .{
+                .self_addr = self.terminal_handoff.identity.self_addr,
+                .thread_id = self.terminal_handoff.identity.thread_id,
+                .node_addr = self.terminal_handoff.identity.node_addr,
+                .node_incarnation = self.terminal_handoff.identity.node_incarnation,
+                .registry_incarnation = self.terminal_handoff.identity.registry_incarnation,
+                .connection_generation = self.terminal_handoff.identity.connection_generation,
+                .stream_id = self.terminal_handoff.identity.stream_id,
+                .token_count = self.terminal_handoff.identity.token_count,
+                .ordered_token_digest = self.terminal_handoff.identity.ordered_token_digest,
+                .surviving_descriptor_count = self.terminal_handoff.identity.surviving_descriptor_count,
+                .quarantined_descriptor_count = self.terminal_handoff.identity.quarantined_descriptor_count,
+                .accounting_count = self.terminal_handoff.identity.accounting_count,
+                .accounting_bytes = self.terminal_handoff.identity.accounting_bytes,
+                .request_generation = self.terminal_handoff.identity.request_generation,
+            },
+        ) catch return false;
+        if (!std.crypto.timing_safe.eql(
+            terminal_contract.Digest,
+            expected_identity,
+            self.terminal_handoff.state.identity_seal,
+        )) return false;
+        const expected_state = process_seal_service.terminalCleanupStateSeal(
+            self.terminal_handoff.identity.pid,
+            self.terminal_handoff.identity.process_nonce,
+            .{
+                .self_addr = self.terminal_handoff.identity.self_addr,
+                .lifecycle_raw = self.terminal_handoff.state.lifecycle_raw,
+                .state_generation = self.terminal_handoff.state.state_generation,
+                .identity_seal = self.terminal_handoff.state.identity_seal,
+            },
+        ) catch return false;
+        return std.crypto.timing_safe.eql(
+            terminal_contract.Digest,
+            expected_state,
+            self.terminal_handoff.state.state_seal,
+        );
+    }
+
+    fn advanceTerminalHandoffNoFail(
+        self: *Registry,
+        expected: terminal_contract.Lifecycle,
+        next: terminal_contract.Lifecycle,
+        expected_active: bool,
+        next_active: bool,
+    ) void {
+        const generation = self.terminal_handoff.state.state_generation;
+        if (!self.terminalHandoffCurrent(expected, generation, expected_active) or
+            generation == std.math.maxInt(u64))
+            @panic("terminal cleanup state proof was lost");
+        self.terminal_handoff.lifecycle = next;
+        self.terminal_handoff.state.lifecycle_raw = @intFromEnum(next);
+        self.terminal_handoff.state.state_generation = generation + 1;
+        self.terminal_handoff.state.state_seal = process_seal_service.terminalCleanupStateSeal(
+            self.terminal_handoff.identity.pid,
+            self.terminal_handoff.identity.process_nonce,
+            .{
+                .self_addr = self.terminal_handoff.identity.self_addr,
+                .lifecycle_raw = self.terminal_handoff.state.lifecycle_raw,
+                .state_generation = self.terminal_handoff.state.state_generation,
+                .identity_seal = self.terminal_handoff.state.identity_seal,
+            },
+        ) catch @panic("terminal cleanup state seal failed");
+        self.terminal_handoff_active = next_active;
+    }
+
+    pub fn beginTerminalDrainNoFail(self: *Registry) void {
+        self.advanceTerminalHandoffNoFail(.published, .draining, true, true);
+    }
+
+    /// Typed teardown이 callback 전에 모든 row와 accounting을 검증할 수 있도록 descriptor를
+    /// 값으로 투영한다. 이 호출은 row를 움직이거나 allocator를 실행하지 않는다.
+    pub fn terminalDrainDescriptor(
+        self: *Registry,
+        slot: usize,
+    ) Error!?TerminalDrainDescriptor {
+        const readable = self.terminalHandoffCurrent(.published, 1, true) or
+            self.terminalHandoffCurrent(.draining, 2, true);
+        if (!readable or slot >= max_entries) return error.InvalidState;
+        const entry = &self.entries[slot];
+        return switch (entry.lifecycle) {
+            .empty => null,
+            .terminal_surviving_descriptor => .{
+                .kind = .surviving_descriptor,
+                .bytes = entry.bytes,
+                .allocator = entry.allocator orelse return error.InvalidDescriptor,
+                .accounting = entry.accounting,
+            },
+            .terminal_quarantined_no_free => .{
+                .kind = .quarantined_no_free,
+                .bytes = &.{},
+                .allocator = null,
+                .accounting = entry.accounting,
+            },
+            else => return error.InvalidState,
+        };
+    }
+
+    pub fn consumeTerminalDrainNoFail(self: *Registry, slot: usize) void {
+        if (!self.terminal_handoff_active or slot >= max_entries)
+            @panic("terminal drain row proof was lost");
+        const entry = &self.entries[slot];
+        if (entry.lifecycle != .terminal_surviving_descriptor and
+            entry.lifecycle != .terminal_quarantined_no_free)
+            @panic("terminal drain row lifecycle drifted");
+        entry.clear();
+        self.live_count -= 1;
+    }
+
+    pub fn finishTerminalCleanupNoFail(self: *Registry) void {
+        if (!self.terminalHandoffCurrent(.draining, 2, true) or self.live_count != 0)
+            @panic("terminal cleanup completion drifted");
+        for (self.entries) |entry| if (entry.lifecycle != .empty)
+            @panic("terminal cleanup left a live row");
+        self.advanceTerminalHandoffNoFail(.draining, .consumed, true, false);
     }
 
     pub fn abortPreparedReleaseUnchecked(self: *Registry, prepared: *PreparedRelease) void {
@@ -848,6 +1301,36 @@ pub const Registry = struct {
             entry.accounting.client_addr == prepared.accounting.client_addr and
             entry.accounting.transfer_id == prepared.accounting.transfer_id and
             entry.accounting.byte_count == prepared.accounting.byte_count;
+    }
+
+    fn terminalCleanupCurrent(
+        self: *Registry,
+        prepared: *const TerminalCleanupHandoff,
+        tokens: []const terminal_contract.TokenProjection,
+        kinds: []const terminal_contract.TerminalRowKind,
+    ) bool {
+        if (!self.valid() or self.terminal_handoff_active or
+            prepared.self_addr != @intFromPtr(prepared) or prepared.lifecycle != .prepared or
+            tokens.len != prepared.token_count or tokens.len != kinds.len or
+            prepared.request_generation != self.terminal_request_generation + 1 or
+            !std.mem.eql(u8, &prepared.ordered_token_digest, &terminal_contract.orderedTokenDigest(tokens)))
+            return false;
+        var surviving: u32 = 0;
+        var quarantined: u32 = 0;
+        var accounting_bytes: u64 = 0;
+        for (tokens, kinds) |projection, kind| {
+            const entry = self.exactEntry(tokenFromProjection(projection)) catch return false;
+            if (entry.lifecycle != .live or entry.bytes.len == 0 or entry.accounting.byte_count != entry.bytes.len)
+                return false;
+            switch (kind) {
+                .surviving_descriptor => surviving += 1,
+                .quarantined_no_free => quarantined += 1,
+            }
+            accounting_bytes = std.math.add(u64, accounting_bytes, @intCast(entry.accounting.byte_count)) catch return false;
+        }
+        return surviving == prepared.surviving_descriptor_count and
+            quarantined == prepared.quarantined_descriptor_count and
+            prepared.accounting_count == tokens.len and accounting_bytes == prepared.accounting_bytes;
     }
 
     pub fn beginReleaseUnchecked(self: *Registry, token: Token, out: *OwnedBatch) void {
@@ -895,12 +1378,18 @@ pub const Registry = struct {
         if (!self.valid()) return .corrupt;
         if (self.live_count != 0) return .busy;
         for (self.entries) |entry| if (entry.lifecycle != .empty) return .corrupt;
+        if (self.terminal_handoff.lifecycle == .consumed and
+            !self.terminalHandoffCurrent(.consumed, 3, false)) return .corrupt;
         return .cleaned;
     }
 
     pub fn tryDeinit(self: *Registry) DeinitOutcome {
         const outcome = self.preflightDeinit();
-        if (outcome == .cleaned) self.lifecycle = .dead;
+        if (outcome == .cleaned) {
+            if (self.terminal_handoff.lifecycle == .consumed)
+                self.advanceTerminalHandoffNoFail(.consumed, .terminal, false, false);
+            self.lifecycle = .dead;
+        }
         return outcome;
     }
 };
@@ -1208,6 +1697,138 @@ test "CR3a-2d1 registry prepared release는 final address 복사와 stale token�
     cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
     cleanup.completeCleanupUnchecked();
     registry.finishReleaseUnchecked(token, &cleanup);
+}
+
+test "CR3a-2d2 registry aggregate는 0과 1과 4096 token을 mutation 없이 preflight한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(91);
+    var handoff: TerminalCleanupHandoff = .{};
+    try std.testing.expectError(error.InvalidState, registry.preflightTerminalCleanup(&.{}, &.{}, &handoff));
+
+    const token = try terminalFixtureToken(&registry, allocator, 7, "one");
+    const projection = terminalProjection(token);
+    const kind = terminal_contract.TerminalRowKind.surviving_descriptor;
+    try registry.preflightTerminalCleanup(&.{projection}, &.{kind}, &handoff);
+    try std.testing.expectEqual(@as(u32, 1), handoff.token_count);
+    try std.testing.expectEqual(@as(usize, 1), registry.live_count);
+
+    var cleanup: OwnedBatch = .{};
+    registry.beginReleaseUnchecked(token, &cleanup);
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    cleanup.completeCleanupUnchecked();
+    registry.finishReleaseUnchecked(token, &cleanup);
+
+    var cap_registry: Registry = .{};
+    try cap_registry.initInPlace(95);
+    var tokens: [max_entries]Token = undefined;
+    var projections: [max_entries]terminal_contract.TokenProjection = undefined;
+    var kinds: [max_entries]terminal_contract.TerminalRowKind = undefined;
+    for (0..max_entries) |index| {
+        tokens[index] = try terminalFixtureToken(&cap_registry, allocator, 9, "x");
+        projections[index] = terminalProjection(tokens[index]);
+        kinds[index] = .surviving_descriptor;
+    }
+    var cap_handoff: TerminalCleanupHandoff = .{};
+    try cap_registry.preflightTerminalCleanup(&projections, &kinds, &cap_handoff);
+    try std.testing.expectEqual(@as(u32, max_entries), cap_handoff.token_count);
+    try std.testing.expectEqual(@as(u64, max_entries), cap_handoff.accounting_bytes);
+    try std.testing.expectEqual(max_entries, cap_registry.live_count);
+    for (tokens) |cap_token| try terminalFixtureRelease(&cap_registry, cap_token);
+    try std.testing.expectEqual(@as(usize, 0), cap_registry.live_count);
+}
+
+test "CR3a-2d2 registry aggregate preflight 실패는 모든 row와 destination을 보존한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(92);
+    const first = try terminalFixtureToken(&registry, allocator, 7, "first");
+    const second = try terminalFixtureToken(&registry, std.heap.page_allocator, 7, "second");
+    var invalid = terminalProjection(second);
+    invalid.entry_generation += 1;
+    var handoff: TerminalCleanupHandoff = .{};
+    try std.testing.expectError(error.InvalidReservation, registry.preflightTerminalCleanup(
+        &.{ terminalProjection(first), invalid },
+        &.{ .surviving_descriptor, .surviving_descriptor },
+        &handoff,
+    ));
+    try std.testing.expect(handoff.pristine());
+    try std.testing.expectEqual(@as(usize, 2), registry.live_count);
+    try std.testing.expectEqualStrings("first", (try registry.borrow(first)).bytes);
+    try std.testing.expectEqualStrings("second", (try registry.borrow(second)).bytes);
+    try terminalFixtureRelease(&registry, first);
+    try terminalFixtureRelease(&registry, second);
+}
+
+test "CR3a-2d2 registry aggregate prepared view는 ordered digest와 row kind를 exact 고정한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(93);
+    const first = try terminalFixtureToken(&registry, allocator, 7, "first");
+    const second = try terminalFixtureToken(&registry, std.heap.page_allocator, 7, "second");
+    const projections = [_]terminal_contract.TokenProjection{ terminalProjection(first), terminalProjection(second) };
+    const kinds = [_]terminal_contract.TerminalRowKind{ .surviving_descriptor, .quarantined_no_free };
+    var handoff: TerminalCleanupHandoff = .{};
+    try registry.preflightTerminalCleanup(&projections, &kinds, &handoff);
+    try std.testing.expect(registry.terminalCleanupCurrent(&handoff, &projections, &kinds));
+    try std.testing.expectEqual(@as(u32, 1), handoff.surviving_descriptor_count);
+    try std.testing.expectEqual(@as(u32, 1), handoff.quarantined_descriptor_count);
+    try terminalFixtureRelease(&registry, first);
+    try terminalFixtureRelease(&registry, second);
+}
+
+test "CR3a-2d2 registry aggregate는 copied handoff와 reordered view를 거부한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(94);
+    const first = try terminalFixtureToken(&registry, allocator, 7, "first");
+    const second = try terminalFixtureToken(&registry, allocator, 7, "second");
+    const projections = [_]terminal_contract.TokenProjection{ terminalProjection(first), terminalProjection(second) };
+    const reversed = [_]terminal_contract.TokenProjection{ terminalProjection(second), terminalProjection(first) };
+    const kinds = [_]terminal_contract.TerminalRowKind{ .surviving_descriptor, .surviving_descriptor };
+    var handoff: TerminalCleanupHandoff = .{};
+    try registry.preflightTerminalCleanup(&projections, &kinds, &handoff);
+    var copied = handoff;
+    try std.testing.expect(!registry.terminalCleanupCurrent(&copied, &projections, &kinds));
+    try std.testing.expect(!registry.terminalCleanupCurrent(&handoff, &reversed, &kinds));
+    try terminalFixtureRelease(&registry, first);
+    try terminalFixtureRelease(&registry, second);
+}
+
+fn terminalProjection(token: Token) terminal_contract.TokenProjection {
+    return .{
+        .registry_incarnation = token.registry_incarnation,
+        .entry_slot = token.entry_slot,
+        .entry_generation = token.entry_generation,
+        .stream_id = token.stream_id,
+    };
+}
+
+fn terminalFixtureToken(registry: *Registry, allocator: std.mem.Allocator, stream_id: u64, bytes: []const u8) !Token {
+    const reservation = try registry.reserve(stream_id);
+    try registry.prepareIngress(reservation);
+    const owned_bytes = try allocator.dupe(u8, bytes);
+    var owned: OwnedBatch = .{};
+    try OwnedBatch.initInPlace(&owned, false, stream_id, owned_bytes, allocator, .{
+        .client_addr = 1,
+        .transfer_id = reservation.entry_generation,
+        .byte_count = owned_bytes.len,
+    });
+    return registry.commit(reservation, &owned);
+}
+
+fn terminalFixtureRelease(registry: *Registry, token: Token) !void {
+    var cleanup: OwnedBatch = .{};
+    try registry.beginRelease(token, &cleanup);
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    try cleanup.completeCleanup();
+    try registry.finishRelease(token, &cleanup);
 }
 
 comptime {

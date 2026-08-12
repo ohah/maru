@@ -8,6 +8,7 @@ const client_mod = @import("client.zig");
 const client_poison = @import("client_poison.zig");
 const client_slot_mod = @import("client_slot.zig");
 const generation_batch_registry = @import("generation_batch_registry.zig");
+const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_attachment = @import("remote_attachment.zig");
 
 const Lifecycle = enum(u8) { pristine, prepared, live, draining, terminal };
@@ -89,6 +90,102 @@ pub const GenerationBatchAdapter = struct {
         if (self.borrowSlot(.draining) == null)
             @panic("invalid generation batch adapter drain completion");
         self.terminalizeUnchecked();
+    }
+
+    /// 이동 가능한 payload의 ordered view를 pointer-free scratch로 바꾼 뒤 canonical registry가
+    /// 모든 row를 다시 검증하게 한다. 실패 전에는 adapter와 attachment source를 바꾸지 않는다.
+    pub fn preflightTerminalCleanup(
+        self: *GenerationBatchAdapter,
+        view: remote_attachment.TerminalCleanupView,
+        out: *generation_batch_registry.TerminalCleanupHandoff,
+    ) Error!void {
+        const slot = self.borrowSlot(.draining) orelse return error.MovedOrCopied;
+        if (view.token_count == 0 or view.token_count > generation_batch_registry.max_entries)
+            return error.InvalidState;
+        var ordered = terminal_contract.OrderedTokenHasher.init(view.token_count);
+        var surviving: u32 = 0;
+        var quarantined: u32 = 0;
+        var accounting_bytes: u64 = 0;
+        var index: u32 = 0;
+        if (view.failed) |lease| {
+            const token = switch (lease) {
+                .generation => |token| token,
+                .untracked, .charged => return error.InvalidState,
+            };
+            const summary = slot.preflightTerminalAttachmentBatch(token) catch return error.InvalidState;
+            ordered.add(summary.projection) catch return error.InvalidState;
+            switch (summary.kind) {
+                .surviving_descriptor => surviving += 1,
+                .quarantined_no_free => quarantined += 1,
+            }
+            accounting_bytes = std.math.add(u64, accounting_bytes, summary.accounting_bytes) catch
+                return error.InvalidState;
+            index += 1;
+        }
+        for (view.pending) |lease| {
+            const token = switch (lease) {
+                .generation => |token| token,
+                .untracked, .charged => return error.InvalidState,
+            };
+            const summary = slot.preflightTerminalAttachmentBatch(token) catch return error.InvalidState;
+            ordered.add(summary.projection) catch return error.InvalidState;
+            switch (summary.kind) {
+                .surviving_descriptor => surviving += 1,
+                .quarantined_no_free => quarantined += 1,
+            }
+            accounting_bytes = std.math.add(u64, accounting_bytes, summary.accounting_bytes) catch
+                return error.InvalidState;
+            index += 1;
+        }
+        if (index != view.token_count) return error.InvalidState;
+        const digest = ordered.finish(view.token_count) catch return error.InvalidState;
+        slot.prepareTerminalCleanupSummary(
+            view.token_count,
+            digest,
+            surviving,
+            quarantined,
+            accounting_bytes,
+            out,
+        ) catch return error.InvalidState;
+    }
+
+    pub fn commitTerminalCleanupNoFail(
+        self: *GenerationBatchAdapter,
+        view: remote_attachment.TerminalCleanupView,
+        prepared: *generation_batch_registry.TerminalCleanupHandoff,
+    ) void {
+        const slot = self.borrowSlot(.draining) orelse
+            @panic("terminal cleanup adapter proof was lost");
+        slot.beginTerminalCleanupPublicationNoFail(prepared, self.stream_id);
+        var index: u32 = 0;
+        if (view.failed) |lease| {
+            const token = switch (lease) {
+                .generation => |token| token,
+                .untracked, .charged => @panic("external lease entered generation terminal cleanup"),
+            };
+            const kind = slot.terminalAttachmentBatchKind(token) catch
+                @panic("terminal cleanup row kind drifted");
+            slot.publishTerminalAttachmentBatchNoFail(token, kind);
+            index += 1;
+        }
+        for (view.pending) |lease| {
+            const token = switch (lease) {
+                .generation => |token| token,
+                .untracked, .charged => @panic("external lease entered generation terminal cleanup"),
+            };
+            const kind = slot.terminalAttachmentBatchKind(token) catch
+                @panic("terminal cleanup row kind drifted");
+            slot.publishTerminalAttachmentBatchNoFail(token, kind);
+            index += 1;
+        }
+        if (index != view.token_count) @panic("terminal cleanup ordered view drifted");
+    }
+
+    pub fn poisonTerminalCleanupNoFail(self: *GenerationBatchAdapter) void {
+        const slot = self.borrowSlot(.draining) orelse
+            @panic("terminal cleanup poison lost its canonical adapter");
+        slot.poisonAttachmentConnection(.attachment_cleanup_failed) catch
+            @panic("terminal cleanup poison lost its ClientSlot");
     }
 
     pub fn interface(self: *GenerationBatchAdapter) remote_attachment.AttachmentTransport {

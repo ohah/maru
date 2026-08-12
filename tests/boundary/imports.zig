@@ -1907,6 +1907,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRpcDecoded" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRpcResponseBorrowUnderOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishRpcResponseOwnedUnderOwner" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalAttachmentBatchKind" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightTerminalAttachmentBatch" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareTerminalCleanupSummary" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginTerminalCleanupPublicationNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publishTerminalAttachmentBatchNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryDeinitWithTerminalCleanup" },
             },
         },
     };
@@ -2075,16 +2081,19 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // 일반 teardown과 2d2 terminal aggregate teardown이 같은 배타적 fence를 연다.
+        @as(usize, 3),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredExclusiveTeardown"),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // 일반 teardown 한 경로와 2d2 terminal aggregate teardown의 실패·성공 해제가
+        // 모두 같은 exclusive fence 해제 함수로 수렴한다.
+        @as(usize, 4),
         countIdentifierOutsideTopLevelTests(client_slot, "abortRegisteredExclusiveTeardown"),
     );
     try std.testing.expectEqual(
-        // The second source-visible reference is the builtin.is_test activation-contention
-        // probe; it must observe AdminBusy and never acquires teardown authority.
+        // 두 번째 참조는 builtin.is_test 활성화 경합 probe다. 이 경로는 AdminBusy만
+        // 관측하며 teardown 권위를 획득하지 않는다.
         @as(usize, 2),
         countIdentifierOutsideTopLevelTests(client_slot, "tryAcquireClientSlotTeardownExclusive"),
     );
@@ -2126,13 +2135,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         client_slot,
         client_teardown_commit_marker,
     ) orelse return error.TestUnexpectedResult;
-    const slot_deinit_end = std.mem.indexOfPos(
+    const ordinary_slot_deinit_end = std.mem.indexOfPos(
         u8,
         client_slot,
         client_teardown_commit,
-        "    pub fn deinit(self: *ClientSlot) void",
+        "    pub fn tryDeinitWithTerminalCleanup(self: *ClientSlot) DeinitOutcome",
     ) orelse return error.TestUnexpectedResult;
-    const post_client_teardown = client_slot[client_teardown_commit + client_teardown_commit_marker.len .. slot_deinit_end];
+    const post_client_teardown = client_slot[client_teardown_commit + client_teardown_commit_marker.len .. ordinary_slot_deinit_end];
     try std.testing.expect(!std.mem.containsAtLeast(u8, post_client_teardown, 1, "return .busy"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, post_client_teardown, 1, "return .corrupt"));
     const client_fence_first = [_]struct { name: []const u8, markers: []const []const u8 }{
@@ -4530,7 +4539,8 @@ test "generation batch Client ownership mutations have one node-bound production
         require_buffered_references += require_buffered_count;
     }
     try std.testing.expectEqual(@as(usize, 1), read_references);
-    try std.testing.expectEqual(@as(usize, 1), prepare_references);
+    // 일반 release와 2d2 terminal aggregate drain이 같은 canonical accounting permit을 쓴다.
+    try std.testing.expectEqual(@as(usize, 2), prepare_references);
     try std.testing.expectEqual(@as(usize, 1), bind_references);
     // Batch, one-shot initial snapshot, RPC prepare/execute/publication은 purpose-tagged node-local
     // allocator scope를 공유하며, 그 밖의 파일에는 raw allocator authority가 없다.
@@ -7444,7 +7454,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
                 countIdentifierOutsideTopLevelTests(source, "slot.current"),
             );
         try std.testing.expectEqual(
-            @as(usize, if (is_remote_attachment or is_generation_attachment) 1 else 0),
+            // GenerationAttachment는 일반 payload teardown과 terminal handoff 뒤 source-zero를 각각 확인한다.
+            @as(usize, if (is_remote_attachment) 1 else if (is_generation_attachment) 2 else 0),
             countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
         );
         try std.testing.expectEqual(

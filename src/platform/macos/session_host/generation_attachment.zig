@@ -14,6 +14,7 @@ const executed_response_mod = @import("executed_response.zig");
 const generation_transport_mod = @import("generation_transport.zig");
 const generation_event = @import("generation_event_contract.zig");
 const generation_batch_adapter_mod = @import("generation_batch_adapter.zig");
+const generation_batch_registry = @import("generation_batch_registry.zig");
 const framing = @import("framing.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
@@ -75,6 +76,7 @@ fn testAllocationProvenance(generation: u64) executed_response_mod.AllocationPro
 
 pub const DeinitOutcome = enum {
     cleaned,
+    terminal_handoff,
     already_terminal,
     busy,
     corrupt,
@@ -582,7 +584,30 @@ pub const GenerationAttachment = struct {
                 // batch adapter의 release-only draining 권위는 유지한다.
                 self.batch_adapter.commitDraining();
                 self.terminalizeTransport();
-                payload.deinitPayloadOnly();
+                switch (payload.deinitPayloadOnly()) {
+                    .cleaned => {},
+                    .terminal_handoff => {
+                        const view = payload.terminalCleanupView() catch return .corrupt;
+                        var handoff: generation_batch_registry.TerminalCleanupHandoff = .{};
+                        self.batch_adapter.preflightTerminalCleanup(view, &handoff) catch
+                            return .corrupt;
+                        self.batch_adapter.commitTerminalCleanupNoFail(view, &handoff);
+                        payload.consumeTerminalCleanupSourcesNoFail(view.token_count);
+                        if (payload.deinitPayloadOnly() != .cleaned)
+                            @panic("published terminal cleanup source was not tombstoned");
+                        self.payload = null;
+                        adapter.finishActiveAttachmentDrop(
+                            &self.binding,
+                            self.reservation.?,
+                            &self.lease,
+                        );
+                        self.batch_adapter.poisonTerminalCleanupNoFail();
+                        self.batch_adapter.finishDraining();
+                        self.lifecycle = .terminal;
+                        return .terminal_handoff;
+                    },
+                    .corrupt => return .corrupt,
+                }
                 self.batch_adapter.finishDraining();
                 self.payload = null;
                 adapter.finishActiveAttachmentDrop(
@@ -599,7 +624,7 @@ pub const GenerationAttachment = struct {
 
     pub fn deinit(self: *GenerationAttachment, adapter: *host_adapter_mod.HostAdapter) void {
         const outcome = self.tryDeinit(adapter);
-        if (outcome != .cleaned)
+        if (outcome != .cleaned and outcome != .terminal_handoff)
             @panic("generation attachment teardown invariant violated");
     }
 
@@ -2256,6 +2281,83 @@ test "CR3a-2d1 generation attachment는 첫 retryable token을 teardown fresh pe
     try std.testing.expectEqual(@as(usize, 1), release_probe.target_free_count);
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.accounting_ledger.item_count);
+}
+
+test "CR3a-2d2 GenerationAttachment는 두 번째 retryable을 node terminal handoff로 이전한다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var release_probe = AttachmentEventNoFreeAllocator{ .parent = allocator };
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2D31,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    const receipt = try attachment.prepareControllerAttach(&adapter, 0x2D32);
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedFromPromotedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x2D33,
+        accepted,
+        response_bytes,
+        testAllocationProvenance(0x2D33),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x2D32,
+        .stream_id = 0x2D34,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+
+    const bytes = try release_probe.allocator().dupe(u8, "terminal-generation-batch");
+    release_probe.target_addr = @intFromPtr(bytes.ptr);
+    release_probe.target_len = bytes.len;
+    const logical_client = adapter.logicalClient();
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 0x2D34,
+        .bytes = bytes,
+        .allocator = release_probe.allocator(),
+    });
+    logical_client.pending_batch_bytes = bytes.len;
+    const pending_lease = (try attachment.batch_adapter.interface().read_batch(
+        &attachment.batch_adapter,
+        0x2D34,
+    )) orelse return error.TestUnexpectedResult;
+    const pending_token = switch (pending_lease) {
+        .generation => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    try attachment.payload.?.pending_batches.append(allocator, pending_lease);
+    generation_batch_registry.testing.armNextRetryable(
+        &adapter.slot.current.batch_registry,
+        pending_token,
+    );
+    try std.testing.expectError(error.LedgerInvariant, attachment.pumpScreen(std.testing.io));
+    try std.testing.expect(attachment.payload.?.failed_release != null);
+    generation_batch_registry.testing.armNextRetryable(
+        &adapter.slot.current.batch_registry,
+        pending_token,
+    );
+    release_probe.armed = true;
+    try std.testing.expectEqual(DeinitOutcome.terminal_handoff, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), release_probe.target_free_count);
+    try std.testing.expectEqual(client_slot_mod.DeinitOutcome.terminal_handoff, adapter.slot.tryDeinit());
+    adapter.deinit();
+    release_probe.armed = false;
+    try std.testing.expectEqual(@as(usize, 1), release_probe.target_free_count);
 }
 
 test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {

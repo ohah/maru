@@ -116,14 +116,17 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         ),
     );
     try std.testing.expectEqual(
-        // C3-3b3 receipt/permit, b5 close owner와 b6 shutdown attempt/backend/connector가 process domain을 자체 경계에서 검증한다.
-        @as(usize, 19),
+        // C3-3b3 receipt/permit, b5 close owner, b6 shutdown owner와 2d2 terminal handoff registry가 process domain을 검증한다.
+        @as(usize, 20),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
     try std.testing.expectEqual(@as(usize, 1), count(
         remote_backend,
         "@import(\"process_seal_service.zig\")",
     ));
+    const batch_registry = try readSource(allocator, "src/platform/macos/session_host/generation_batch_registry.zig");
+    defer allocator.free(batch_registry);
+    try std.testing.expectEqual(@as(usize, 1), count(batch_registry, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(
         shutdown_attempt,
         "@import(\"process_seal_service.zig\")",

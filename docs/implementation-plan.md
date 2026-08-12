@@ -971,10 +971,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       legacy reviewed allowlist, generation raw Client source-zero는 persistent-session-host의 exact 목록을 그대로 사용한다.
    각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4
    전에는 2c 전체 완료를 주장하지 않는다. **CR3a-2d는 2d1→2d2→2d3의 세 세로 gate로 닫는다.**
-   2d1은 구현 완료했다. 실제 generation batch release가 `completed|retryable_preserved|indeterminate_or_partial`을 반환하는
-   owner-owned 결과와 최초 retryable 한 건의 attachment 보존·deinit 재시도를 배선했다. 2d2는 두 번째 retryable 또는
+   2d1과 2d2는 구현 완료했다. 2d1은 실제 generation batch release가
+   `completed|retryable_preserved|indeterminate_or_partial`을 반환하는 owner-owned 결과와 최초 retryable 한 건의 attachment
+   보존·deinit 재시도를 배선했다. 2d2는 두 번째 retryable 또는
    indeterminate에서 남은 batch/drop owner 전부를 node-owned terminal handoff receipt 하나로 이전하고
-   `ClientSlot.tryDeinit`의 drain/quarantine→Client→node 순서를 닫는다. 2d3은 allocator callback reentry,
+   `ClientSlot.tryDeinit`의 drain/quarantine→Client→node 순서를 닫는다. handoff state seal은
+   `published→draining→consumed→terminal`을 exact generation으로 결속하고 첫 indeterminate lease는 재호출하지 않는다.
+   node-final receipt와 attachment ordered lease view의
+   allocation-free 2-pass preflight/commit, surviving exact-free와 no-free quarantine을 unique component 14개와 boundary 1개로
+   검증한다. 2d3은 allocator callback reentry,
    permit/receipt proof loss, exact surviving descriptor drain과 no-free quarantine의 제품 subprocess/source boundary를 닫는다.
    각 gate의 exact API·RED 인벤토리는 persistent-session-host의 CR3a-2d 절을 단일 출처로 삼으며, 2d1~3 전체가 green이기
    전에는 2d 완료를 주장하지 않는다. CR3a-2e는 actual socket

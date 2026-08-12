@@ -9,6 +9,7 @@ const client_poison = @import("client_poison.zig");
 const external_recovery_types = @import("external_recovery_types.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const generation_batch_registry = @import("generation_batch_registry.zig");
+const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 
@@ -94,6 +95,40 @@ pub const PumpScreenResult = enum {
     terminal,
 };
 
+pub const TerminalCleanupView = struct {
+    failed: ?AttachmentBatchLease,
+    pending: []const AttachmentBatchLease,
+    token_count: u32,
+};
+
+pub const TerminalCleanupViewError = error{InvalidTerminalCleanup};
+
+const ReleaseDisposition = enum { completed, retained_retry, terminal_handoff, corrupt };
+
+const FailedReleaseState = enum(u8) {
+    none,
+    retryable,
+    indeterminate,
+};
+
+pub const PayloadDeinitOutcome = enum { cleaned, terminal_handoff, corrupt };
+
+fn terminalTestTransport() AttachmentTransport {
+    const Fixture = struct {
+        fn read(_: *anyopaque, _: u64) client_mod.ClientError!?AttachmentBatchLease {
+            return null;
+        }
+        fn drop(_: *anyopaque, _: u64) void {}
+        fn failClosed(_: *anyopaque, _: client_poison.ConnectionReason) void {}
+    };
+    return .{
+        .context = @ptrFromInt(@alignOf(usize)),
+        .read_batch = Fixture.read,
+        .drop_stream = Fixture.drop,
+        .fail_closed = Fixture.failClosed,
+    };
+}
+
 pub const AttachmentTransport = struct {
     context: *anyopaque,
     read_batch: *const fn (
@@ -138,6 +173,7 @@ pub const State = struct {
     runtime_id: u128,
     stream_id: u64,
     role: Role,
+    failed_release_state: FailedReleaseState = .none,
     controller_generation: u64,
 };
 
@@ -176,28 +212,71 @@ pub const RemoteAttachment = struct {
     }
 
     pub fn deinit(self: *RemoteAttachment) void {
-        self.deinitWithDropPolicy(true);
+        if (self.deinitWithDropPolicy(true) != .cleaned)
+            @panic("remote attachment teardown requires a terminal cleanup owner");
     }
 
     /// GUI generation-bound owner settles the canonical node-local stream drop itself, but still
     /// needs this payload to release pending batch leases and screen storage. External movable
     /// attachments keep using `deinit`, which retains the legacy transport-owned drop.
-    pub fn deinitPayloadOnly(self: *RemoteAttachment) void {
-        self.deinitWithDropPolicy(false);
+    pub fn deinitPayloadOnly(self: *RemoteAttachment) PayloadDeinitOutcome {
+        return self.deinitWithDropPolicy(false);
     }
 
-    fn deinitWithDropPolicy(self: *RemoteAttachment, drop_stream: bool) void {
+    fn deinitWithDropPolicy(self: *RemoteAttachment, drop_stream: bool) PayloadDeinitOutcome {
         if (self.transport) |transport| {
             if (self.failed_release) |lease| {
+                const generation_owned = switch (lease) {
+                    .generation => true,
+                    .untracked, .charged => false,
+                };
+                if (generation_owned and self.state.failed_release_state == .indeterminate)
+                    return .terminal_handoff;
+                if (generation_owned and self.state.failed_release_state != .retryable)
+                    return .corrupt;
                 switch (lease.release(transport)) {
-                    .completed => {},
-                    .retryable_preserved, .indeterminate_or_partial, .invariant_failure => transport.fail_closed(transport.context, .attachment_cleanup_failed),
+                    .completed => {
+                        self.failed_release = null;
+                        self.state.failed_release_state = .none;
+                    },
+                    .retryable_preserved, .indeterminate_or_partial => {
+                        if (generation_owned) {
+                            self.state.failed_release_state = .indeterminate;
+                            return .terminal_handoff;
+                        }
+                        transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                        self.failed_release = null;
+                        self.state.failed_release_state = .none;
+                    },
+                    .invariant_failure => {
+                        if (generation_owned) return .corrupt;
+                        transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                        self.failed_release = null;
+                        self.state.failed_release_state = .none;
+                    },
                 }
             }
-            for (self.pending_batches.items[self.pending_batch_head..]) |lease| {
-                switch (lease.release(transport)) {
-                    .completed => {},
-                    .retryable_preserved, .indeterminate_or_partial, .invariant_failure => transport.fail_closed(transport.context, .attachment_cleanup_failed),
+            while (self.pending_batch_head < self.pending_batches.items.len) {
+                const lease = self.pending_batches.items[self.pending_batch_head];
+                const release_result = lease.release(transport);
+                switch (release_result) {
+                    .completed => self.pending_batch_head += 1,
+                    .retryable_preserved, .indeterminate_or_partial => {
+                        self.failed_release = lease;
+                        self.state.failed_release_state = if (release_result == .retryable_preserved)
+                            .retryable
+                        else
+                            .indeterminate;
+                        self.pending_batch_head += 1;
+                        return .terminal_handoff;
+                    },
+                    .invariant_failure => switch (lease) {
+                        .generation => return .corrupt,
+                        .untracked, .charged => {
+                            transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                            self.pending_batch_head += 1;
+                        },
+                    },
                 }
             }
             if (drop_stream) transport.drop_stream(transport.context, self.state.stream_id);
@@ -216,6 +295,48 @@ pub const RemoteAttachment = struct {
         self.pending_batches.deinit(self.allocator);
         if (self.screen) |*screen| screen.deinit();
         self.* = undefined;
+        return .cleaned;
+    }
+
+    /// 실패한 lease와 아직 시도하지 않은 suffix만 내보내야 같은 token을 두 번 봉인하지 않는다.
+    /// 이 view는 소유권을 빌려줄 뿐이며 terminal handoff가 게시되기 전에는 source를 지우지 않는다.
+    pub fn terminalCleanupView(self: *const RemoteAttachment) TerminalCleanupViewError!TerminalCleanupView {
+        if (self.transport == null or self.failed_release == null)
+            return error.InvalidTerminalCleanup;
+        const pending = self.pending_batches.items[self.pending_batch_head..];
+        var count: usize = pending.len;
+        if (self.failed_release != null) count = std.math.add(usize, count, 1) catch
+            return error.InvalidTerminalCleanup;
+        if (count == 0 or count > std.math.maxInt(u32)) return error.InvalidTerminalCleanup;
+        if (self.failed_release) |lease| switch (lease) {
+            .generation => {},
+            .untracked, .charged => return error.InvalidTerminalCleanup,
+        };
+        for (pending) |lease| switch (lease) {
+            .generation => {},
+            .untracked, .charged => return error.InvalidTerminalCleanup,
+        };
+        return .{
+            .failed = self.failed_release,
+            .pending = pending,
+            .token_count = @intCast(count),
+        };
+    }
+
+    /// Node-final handoff가 게시된 뒤에만 이동 가능한 attachment의 복제 source를 지운다.
+    /// 배열 저장소는 payload 최종 정리가 회수하므로 여기서는 token 가시성만 원자적으로 닫는다.
+    pub fn consumeTerminalCleanupSourcesNoFail(
+        self: *RemoteAttachment,
+        expected_token_count: u32,
+    ) void {
+        const view = self.terminalCleanupView() catch
+            @panic("terminal cleanup source proof was lost");
+        if (view.token_count != expected_token_count)
+            @panic("terminal cleanup source count drifted");
+        self.failed_release = null;
+        self.state.failed_release_state = .none;
+        self.pending_batch_head = self.pending_batches.items.len;
+        self.compactConsumedBatches();
     }
 
     /// Pull one stream-local batch from the borrowed connection into attachment-owned storage,
@@ -236,9 +357,9 @@ pub const RemoteAttachment = struct {
             self.pending_batches.append(self.allocator, lease) catch {
                 transport.fail_closed(transport.context, .local_resource_exhausted);
                 const released = self.releaseOrRetain(lease, transport);
-                if (!released)
+                if (released != .completed)
                     transport.fail_closed(transport.context, .attachment_cleanup_failed);
-                if (!released) return error.LedgerInvariant;
+                if (released != .completed) return error.LedgerInvariant;
                 return error.OutOfMemory;
             };
         }
@@ -247,7 +368,7 @@ pub const RemoteAttachment = struct {
         self.pending_batch_head += 1;
         const batch = lease.borrow(transport) catch {
             transport.fail_closed(transport.context, .local_invariant_violation);
-            if (!self.releaseOrRetain(lease, transport))
+            if (self.releaseOrRetain(lease, transport) != .completed)
                 transport.fail_closed(transport.context, .attachment_cleanup_failed);
             self.compactConsumedBatches();
             return error.LedgerInvariant;
@@ -259,9 +380,9 @@ pub const RemoteAttachment = struct {
             transport.fail_closed(transport.context, .local_invariant_violation);
             const released = self.releaseOrRetain(lease, transport);
             self.compactConsumedBatches();
-            if (!released)
+            if (released != .completed)
                 transport.fail_closed(transport.context, .attachment_cleanup_failed);
-            if (!released) return error.LedgerInvariant;
+            if (released != .completed) return error.LedgerInvariant;
             return error.LedgerInvariant;
         }
         const batch_authority = if (transport.preflight_batch_authority) |preflight|
@@ -284,18 +405,18 @@ pub const RemoteAttachment = struct {
             transport.fail_closed(transport.context, .local_invariant_violation);
             const released = self.releaseOrRetain(lease, transport);
             self.compactConsumedBatches();
-            if (!released)
+            if (released != .completed)
                 transport.fail_closed(transport.context, .attachment_cleanup_failed);
-            if (!released) return error.LedgerInvariant;
+            if (released != .completed) return error.LedgerInvariant;
             return .terminal;
         }
         const screen = &(self.screen orelse {
             transport.fail_closed(transport.context, .local_invariant_violation);
             const released = self.releaseOrRetain(lease, transport);
             self.compactConsumedBatches();
-            if (!released)
+            if (released != .completed)
                 transport.fail_closed(transport.context, .attachment_cleanup_failed);
-            if (!released) return error.LedgerInvariant;
+            if (released != .completed) return error.LedgerInvariant;
             return error.ProtocolError;
         });
         if (batch_authority == .recovery_exact) {
@@ -313,9 +434,9 @@ pub const RemoteAttachment = struct {
                     .peer_contract_violation);
                 const released = self.releaseOrRetain(lease, transport);
                 self.compactConsumedBatches();
-                if (!released)
+                if (released != .completed)
                     transport.fail_closed(transport.context, .attachment_cleanup_failed);
-                if (!released) return error.LedgerInvariant;
+                if (released != .completed) return error.LedgerInvariant;
                 return err;
             };
             var prepared_screen_live = true;
@@ -327,12 +448,12 @@ pub const RemoteAttachment = struct {
                     .frame_malformed);
                 const released = self.releaseOrRetain(lease, transport);
                 self.compactConsumedBatches();
-                if (!released)
+                if (released != .completed)
                     transport.fail_closed(transport.context, .attachment_cleanup_failed);
-                if (!released) return error.LedgerInvariant;
+                if (released != .completed) return error.LedgerInvariant;
                 return err;
             };
-            if (!self.releaseOrRetain(lease, transport)) {
+            if (self.releaseOrRetain(lease, transport) != .completed) {
                 self.compactConsumedBatches();
                 transport.fail_closed(transport.context, .attachment_cleanup_failed);
                 return error.LedgerInvariant;
@@ -366,9 +487,9 @@ pub const RemoteAttachment = struct {
                     .frame_malformed);
                 const released = self.releaseOrRetain(lease, transport);
                 self.compactConsumedBatches();
-                if (!released)
+                if (released != .completed)
                     transport.fail_closed(transport.context, .attachment_cleanup_failed);
-                if (!released) return error.LedgerInvariant;
+                if (released != .completed) return error.LedgerInvariant;
                 return err;
             };
         } else {
@@ -379,13 +500,13 @@ pub const RemoteAttachment = struct {
                     .frame_malformed);
                 const released = self.releaseOrRetain(lease, transport);
                 self.compactConsumedBatches();
-                if (!released)
+                if (released != .completed)
                     transport.fail_closed(transport.context, .attachment_cleanup_failed);
-                if (!released) return error.LedgerInvariant;
+                if (released != .completed) return error.LedgerInvariant;
                 return err;
             };
         }
-        if (!self.releaseOrRetain(lease, transport)) {
+        if (self.releaseOrRetain(lease, transport) != .completed) {
             self.compactConsumedBatches();
             transport.fail_closed(transport.context, .attachment_cleanup_failed);
             return error.LedgerInvariant;
@@ -401,14 +522,24 @@ pub const RemoteAttachment = struct {
         self: *RemoteAttachment,
         lease: AttachmentBatchLease,
         transport: AttachmentTransport,
-    ) bool {
+    ) ReleaseDisposition {
         return switch (lease.release(transport)) {
-            .completed => true,
+            .completed => .completed,
             .retryable_preserved => blk: {
-                if (self.failed_release == null) self.failed_release = lease;
-                break :blk false;
+                if (self.failed_release == null) {
+                    self.failed_release = lease;
+                    self.state.failed_release_state = .retryable;
+                }
+                break :blk .retained_retry;
             },
-            .indeterminate_or_partial, .invariant_failure => false,
+            .indeterminate_or_partial => blk: {
+                if (self.failed_release == null) {
+                    self.failed_release = lease;
+                    self.state.failed_release_state = .indeterminate;
+                }
+                break :blk .terminal_handoff;
+            },
+            .invariant_failure => .corrupt,
         };
     }
 
@@ -1119,7 +1250,7 @@ test "CR3a-2a GUI payload-only teardown leaves stream drop to generation owner" 
         .controller_generation = 1,
     });
     try attachment.bindTransport(transport.interface());
-    attachment.deinitPayloadOnly();
+    try std.testing.expectEqual(PayloadDeinitOutcome.cleaned, attachment.deinitPayloadOnly());
     try std.testing.expectEqual(@as(usize, 0), transport.drop_calls);
 
     var external = RemoteAttachment.init(std.testing.allocator, .{
@@ -1678,6 +1809,79 @@ test "remote attachment stale mark terminalizes without retaining released token
     try std.testing.expectEqual(@as(?AttachmentBatchLease, null), attachment.failed_release);
     attachment.deinit();
     try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+}
+
+test "CR3a-2d2 RemoteAttachment terminal view는 failed 뒤 pending suffix 순서를 보존한다" {
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    attachment.transport = terminalTestTransport();
+    attachment.failed_release = .{ .generation = .{
+        .registry_incarnation = 11,
+        .entry_slot = 1,
+        .entry_generation = 21,
+        .stream_id = 7,
+    } };
+    try attachment.pending_batches.append(std.testing.allocator, .{ .generation = .{
+        .registry_incarnation = 11,
+        .entry_slot = 2,
+        .entry_generation = 22,
+        .stream_id = 7,
+    } });
+    try attachment.pending_batches.append(std.testing.allocator, .{ .generation = .{
+        .registry_incarnation = 11,
+        .entry_slot = 3,
+        .entry_generation = 23,
+        .stream_id = 7,
+    } });
+    attachment.pending_batch_head = 1;
+
+    const view = try attachment.terminalCleanupView();
+    try std.testing.expectEqual(@as(u32, 2), view.token_count);
+    try std.testing.expectEqual(@as(u16, 1), view.failed.?.generation.entry_slot);
+    try std.testing.expectEqual(@as(usize, 1), view.pending.len);
+    try std.testing.expectEqual(@as(u16, 3), view.pending[0].generation.entry_slot);
+    attachment.consumeTerminalCleanupSourcesNoFail(2);
+    attachment.pending_batches.deinit(std.testing.allocator);
+}
+
+test "CR3a-2d2 RemoteAttachment terminal view는 external lease 혼입을 mutation 없이 거부한다" {
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    defer attachment.pending_batches.deinit(std.testing.allocator);
+    attachment.transport = terminalTestTransport();
+    attachment.failed_release = .{ .charged = .{ .slot = 1, .generation = 9 } };
+    const before = attachment.failed_release;
+    try std.testing.expectError(error.InvalidTerminalCleanup, attachment.terminalCleanupView());
+    try std.testing.expectEqualDeep(before, attachment.failed_release);
+}
+
+test "CR3a-2d2 RemoteAttachment terminal source는 handoff 뒤 exact once tombstone된다" {
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    attachment.transport = terminalTestTransport();
+    attachment.failed_release = .{ .generation = .{
+        .registry_incarnation = 11,
+        .entry_slot = 1,
+        .entry_generation = 21,
+        .stream_id = 7,
+    } };
+    attachment.consumeTerminalCleanupSourcesNoFail(1);
+    try std.testing.expectEqual(@as(?AttachmentBatchLease, null), attachment.failed_release);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+    try std.testing.expectError(error.InvalidTerminalCleanup, attachment.terminalCleanupView());
+    attachment.pending_batches.deinit(std.testing.allocator);
 }
 
 test "remote attachment rejects wrong recovery stream before screen apply or mark" {

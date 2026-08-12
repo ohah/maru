@@ -959,7 +959,7 @@ interaction 이관 전체를 완료로 표시하지 않는다. 한 consumer가 �
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a·CR3a-1·2a·2b1·2b2·2c1 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a·CR3a·CR3b R1 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
@@ -971,8 +971,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   포함하며 clean EOF·read timeout/failure·framing truncation/malformed·write progress ambiguity/known partial·attachment
   cleanup의 타입을 테스트한다. `zig build test-session-host`와 `mise run check-boundaries`가 증거다. incident
   artifact/reconnect 동작은 주장하지 않는다.
-- CR0b: child-event incident correlation, redaction, 32 KiB ring handoff→reconnect와 bounded disk writer ordering, blocked/late
-  writer, ring full aggregation과 Debug fail-stop.
+- CR0b: pointer-free exact-208 DTO와 256-byte envelope, closed `SourceSite`, process/fork/sequence authority, first-reason과 incident의
+  단일 publication suffix, 120 incident+8 aggregate exact-32 KiB ring, child-event correlation, redaction, ring handoff→reconnect와
+  bounded disk writer ordering, blocked/late writer, ring full/other-bucket saturation과 Debug fail-stop.
+  첫 RED gate `zig build test-session-host-cr0b`는 CR3b R1을 상속하고 실제 fork-before-lock 거부와 동시 sequence 유일성을 포함한
+  중립 schema/codec/ring/service component 20개와 boundary 1개를 Debug·ReleaseFast에서
+  exact-count한다. process bootstrap/writer/Client publication은 후속 CR0b gate가 닫기 전 구현 완료로 세지 않는다.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
@@ -988,8 +992,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2·2c2b3a·2c2b3b-F·2c2b3b-S·2c2b3b-O 구현**,
-  2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+- CR3a-2(구현 완료; 아래는 단계별 검증 이력): 2c2a는 snapshot 전용 permit을 kind-tagged common
   `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
   reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. 2c2b1은 대상 stream의 첫 event에 대한 무할당·무변경
   ended hot peek와 비권위적 index hint까지만 구현한다. 2c2b2는 exact binding과 common permit 아래 fixed inline scratch로 전체 Client
@@ -1587,6 +1590,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   callback reentry를 Debug·ReleaseFast에서 실행하고, raw `HostAdapter.logicalClient()` 제품 caller와 reconnect publish/current flip/
   retired node/destroy/generation increment는 0으로 고정한다. focused gate는 각 최적화 모드에서 ClientSlot component 6개,
   HostAdapter 제품 facade 1개, source boundary 1개를 exact-count한다.
+  R1은 current pointer·runtime/screen target·connection generation을 바꾸지 않는 inactive 기반이라 CR2보다 먼저 허용된다.
+  R2 admission은 CR0b·CR1·CR2a~e의 focused gate가 모두 green이고 CR2의 production `RemoteGeneration`, stable proxy,
+  preallocated `UnavailableCore`, `PreparedReconnect`가 존재해야 한다. R2가 이 네 기반을 대신 구현하는 것은 선행 gate 우회다.
+  CR3c는 R2/R3의 결과를 이미 존재하는 `RemoteGeneration` slot에 연결하며 stable shell 최초 도입을 소유하지 않는다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는
   suffix로 결속해 `live`가 된다. Debug·ReleaseFast `test-session-host-2e`는 준비 계약 4개, actual socket parity 6개, rollback 4개,

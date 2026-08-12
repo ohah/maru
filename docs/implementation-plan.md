@@ -69,7 +69,7 @@ macOS 로컬 shell 1개 surface
 - **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR3a-1·2a·2b1·2b2·2c1 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR3a·CR3b R1 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -85,7 +85,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    model-only이며 production semantic decode/dispatch 연결과 scope 축소는 CR1 범위다. reconnect와 artifact writer는 CR0b
    이후 범위다.
 2. **CR0b — poison observability:** CR0a DTO만 소비하는 immutable `ConnectionIncident`, 최초 원인 보존, redaction/rate-limit,
-   32 KiB emergency ring handoff→bounded disk writer 순서, Debug fail-stop과 Release artifact-before-recovery gate를 구현한다.
+   exact 208-byte DTO와 256-byte envelope, 120 incident+8 aggregate의 32 KiB emergency ring, first-reason과 incident의 단일
+   publication suffix, process/fork/sequence authority, ring handoff→bounded disk writer 순서, Debug fail-stop과 Release
+   artifact-before-recovery gate를 구현한다. exact schema와 lifecycle은 trace-replay의 CR0b 절을 단일 출처로 삼는다.
 3. **CR1 — poison 범위 축소와 scheduler:** semantic stream 오류가 shared connection을 불필요하게 poison하지 않도록 callsite를
    정리하고 partial read/write, sibling stream, artifact 실패를 결정적으로 교차하는 scheduler fixture를 만든다.
 4. **CR2 — stable shell 기반:** CR2a는 field inventory를 고정하고 `RemoteGeneration`만 추출한다. CR2b는 기존 Surface API를
@@ -95,7 +97,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.
-5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫는다. **CR3a-1(완료)**은 현
+5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫았고 CR3b R1까지 완료했다. **CR3a-1(완료)**은 현
    Client/external-pump/final-address cleanup ownership inventory를 먼저 고정하고 cleanup lease의 제품 callback이 0인
    transport-neutral `ConnectionLease`와 generation 1 전용 `HostAdapter.ClientSlot` skeleton을 넣는다. `HostAdapter`는
    `initInPlace(out,node_allocator,source)`로만 생성하고 inline slot이 세대별 heap-pinned `ClientNode`를 단독 소유한다.
@@ -996,11 +998,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `withCurrent` stack borrow, admission close,
    `Client.canRetire()`와 tick-end deferred retirement(동시 retired Client hard cap 2)를 닫는다. CR3c에서 `RemoteGeneration`을
    실제 slot에 연결한다.
-   CR3b R1은 먼저 generation 1 current를 바꾸지 않은 채 final-address `PreparedAdmissionClose`로 신규 Client admission을
+   CR3b R1은 generation 1 current를 바꾸거나 runtime/screen을 publish하지 않는 독립 inactive 기반이므로 CR2보다 먼저
+   완료했다. final-address `PreparedAdmissionClose`로 신규 Client admission을
    store-only close/cancel하고, raw `logicalClient()`를 반환하지 않는 closed-operation `withCurrent` stack borrow로 제품 호출을
    전환한다. 독립 allocator-owned RPC response만 각 facade의 기존 소유 계약으로 반환할 수 있다. R1의 reconnect/current publish·
-   retired node·Client destroy·generation increment 제품 caller는 0이다. R2가
-   detach+placeholder와 generation publish를, R3가 final seal/canRetire/tick-end destroy를 이어서 소유한다.
+   retired node·Client destroy·generation increment 제품 caller는 0이다. R2는 CR0b·CR1·CR2a~e가 모두 green이고
+   stable shell의 `RemoteGeneration`·proxy·preallocated `UnavailableCore`·`PreparedReconnect`가 실제 제품 타입으로 존재한
+   뒤에만 시작한다. R2가 그 기반을 새로 만들거나 우회하지 않고 detach+placeholder와 Client generation publish를,
+   R3가 final seal/canRetire/tick-end destroy를 이어서 소유한다. CR3c는 R2/R3 결과를 CR2의 실제 `RemoteGeneration` slot에
+   연결하며 stable shell 자체를 처음 도입하는 단계가 아니다.
 6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
    status/takeover와 lost-reply fail-stop 정책을 실제 socket fixture로 연결한다. observer conflict를 자동 takeover하지 않는다.
 7. **CR5 — 멀티윈도우·다중 runtime:** app-global `SessionHostCoordinator`의 host job, runtime별 authority ledger,
@@ -1012,8 +1018,9 @@ CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단�
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라
 실제 production type을 import한 테스트가 필요하다. 최초 구현 순서는 CR0a → CR3a-1 inactive skeleton → CR3a-2
-generation 1 compatibility wiring → CR2a → inactive CR2b이며 이
-비제품 구조 slice가 green이기 전 CR4 socket reconnect를 시작하지 않는다.
+generation 1 compatibility wiring → CR3b R1 inactive admission close → CR0b → CR1 → CR2a → CR2b → CR2c → CR2d → CR2e →
+CR3b R2 → CR3b R3 → CR3c다. R1만 current pointer·runtime/screen publication·generation 증가가 모두 0인 독립 기반이라
+CR2보다 먼저 허용된다. 이 비제품 구조 slice가 green이기 전 CR4 socket reconnect를 시작하지 않는다.
 
 실행 중 connection invalidation이 현재 session-host 제품 사용과 검증을 막으므로 CR은 나머지 제품 polish보다 먼저 닫는
 blocking track이다.

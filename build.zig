@@ -2203,6 +2203,38 @@ pub fn build(b: *std.Build) void {
         "CR3b R1 current borrow and admission close Debug and ReleaseFast gates",
     );
     session_host_cr3b_r1_step.dependOn(session_host_2e_step);
+    const session_host_cr0b_step = b.step(
+        "test-session-host-cr0b",
+        "CR0b connection incident neutral contract Debug and ReleaseFast gates",
+    );
+    session_host_cr0b_step.dependOn(session_host_cr3b_r1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr0b_optimize| {
+        const cr0b_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/observability/connection_incident.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b"},
+        });
+        const run_cr0b_contract_tests = b.addRunArtifact(cr0b_contract_tests);
+        run_cr0b_contract_tests.addArg("--maru-expect-tests=20");
+        run_cr0b_contract_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_contract_tests.step);
+        const cr0b_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr0b_boundary.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b 경계는"},
+        });
+        const run_cr0b_boundary_tests = b.addRunArtifact(cr0b_boundary_tests);
+        run_cr0b_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_boundary_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_boundary_tests.step);
+        boundary_step.dependOn(&run_cr0b_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

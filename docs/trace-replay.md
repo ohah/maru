@@ -163,6 +163,126 @@ bounded 숫자/enum만 채우고, 구조화 로그·테스트 artifact·future i
 immutable이고 반복 횟수와 first/last timestamp만 별도 bounded `IncidentAggregate`가 갱신한다. raw terminal input/output,
 paste, clipboard, cwd, command, SSH 주소와 임의 오류 문자열은 DTO에 들어가지 않는다.
 
+### CR0b exact schema와 publication owner
+
+`ConnectionIncident`는 Zig struct padding을 wire나 seal에 쓰지 않는 pointer-free scalar DTO다. canonical encoding version은 1이고
+모든 정수는 little-endian이다. enum은 아래 닫힌 raw 값만 허용하며 reserved/tail bytes는 0이어야 한다.
+
+| field | type | 계약 |
+| --- | --- | --- |
+| `version` | `u16` | exact 1 |
+| `record_kind` | `u8` | `incident=1`; aggregate record에는 쓰지 않음 |
+| `flags` | `u8` | bit0 expected, bit1 transport_usable, bit2 host_identity_present, 나머지 0 |
+| `incident_id` | `{app_instance_nonce:u128,sequence:u64}` | 둘 다 nonzero, sequence checked-monotonic |
+| `timestamp_ns` | `i128` | continuous monotonic clock의 nonnegative 값 |
+| `host_id` | `u128` | identity-present면 nonzero, 아니면 0 |
+| `host_adapter_generation` | `u64` | identity-present면 `HostPool.adapterGeneration(host_id)`의 nonzero 값, 아니면 0 |
+| `connection_generation` | `u64` | identity-present면 nonzero, 아니면 0 |
+| `wire_major` | `u16` | identity-present면 handshake가 확정한 nonzero major, 아니면 0 |
+| `reason_raw` | `u8` | `client_poison.ConnectionReason` exact raw |
+| `scope_raw` | `u8` | `client_poison.Scope` exact raw; CR0b incident는 connection만 허용 |
+| `disposition_raw` | `u8` | `client_poison.Disposition` exact raw |
+| `source_site_raw` | `u8` | 아래 `SourceSite` exact raw |
+| `host_class_raw` | `u8` | `current=1,previous=2,external=3` |
+| `parser_phase_raw` | `u8` | `idle=1,header=2,payload=3,terminal=4` |
+| `outbound_phase_raw` | `u8` | `idle=1,queued=2,partial=3,terminal=4` |
+| `reserved0` | `u8` | 0 |
+| `last_success_request_id` | `u64` | 없으면 0 |
+| `pending_request_count` | `u32` | bounded canonical count |
+| `pending_stream_count` | `u32` | bounded canonical count |
+| `pending_event_count` | `u32` | bounded canonical count |
+| `queue_item_count` | `u32` | 위 queue 외 connection-owned item 합계 |
+| `queue_bytes` | `u64` | checked resident byte 합계 |
+| `outbound_offset` | `u64` | idle이면 0, 그 외 `<= outbound_length` |
+| `outbound_length` | `u64` | idle이면 0 |
+| `controller_generation` | `u64` | 관측되지 않았으면 0 |
+| `upgrade_epoch` | `u64` | 관측되지 않았으면 0 |
+| `occurrence_count` | `u64` | 최초 incident는 exact 1 |
+| `first_timestamp_ns` | `i128` | 최초에는 `timestamp_ns`와 exact 동일 |
+| `last_timestamp_ns` | `i128` | 최초에는 `timestamp_ns`와 exact 동일 |
+| `reserved_tail` | `[18]u8` | 전부 0; 위 필드의 canonical encoding 합계는 exact 208 bytes |
+
+`SourceSite`는 제품 poison owner family를 닫힌 값으로만 표현한다:
+`client_read=1,client_write=2,client_response=3,client_event=4,client_queue=5,client_cleanup=6,
+client_slot_operation=7,generation_transport=8,generation_attachment=9,remote_runtime_decode=10,
+remote_runtime_pump=11,remote_backend=12,external_attach=13,external_pump=14,app_quit=15,integrity=16`.
+새 poison 제품 caller는 이 enum과 source-boundary inventory를 함께 갱신하지 않으면 빌드되지 않는다. 파일/함수명 문자열이나 line
+number는 artifact authority가 아니다.
+
+process-global final-address `ConnectionIncidentService`가 `{self_addr,pid,process_nonce,app_instance_nonce,
+last_issued_sequence,ring,pending_slots,writer_lifecycle,lifecycle}`를 소유한다. `app_instance_nonce`는 process seal nonce와 별도로 OS entropy에서 한 번
+발급하며 0을 거부한다. service는 process runtime bootstrap에서 ring과 함께 준비된 뒤 ready로 게시된다. fork child, copied/moved
+service, PID/process nonce 불일치, `last_issued_sequence == maxInt(u64)`에서의 다음 발급은 Client/ring/reconnect mutation 0 뒤
+`fatalIntegrity(.incident_authority)`로 닫는다. 초기값 0에서 첫 발급은 1이고 max sequence로 발급한 incident 자체는 유효하다.
+
+CR0b가 artifact를 의무화하는 범위는 hello를 마치고 session-host의 `HostAdapter` 또는 app-global remote backend에 등록된
+**managed Client**다. connect/hello 실패처럼 등록 전 Client가 없는 경로는 기존 typed error이며 reconnect admission 대상도 아니다.
+등록 owner는 Client를 외부에 publish하기 전에 final-address Client 안에 pointer-free
+`IncidentBinding {host_id,host_adapter_generation,connection_generation,wire_major,host_class_raw}`와 binding seal을 exact once
+게시한다. `HostPool` 등록은 map capacity와 다음 adapter generation을 mutation 없이 준비하는 `PreparedIncidentBinding`을 먼저 만들고,
+최종 Client 주소의 pristine binding을 봉인한 뒤 allocation/callback 없는 suffix에서 map row를 publish한다. 준비 실패는
+Client/binding/map mutation 0이고, binding 게시 뒤 map publication proof loss는 rollback이나 unbound fallback 없이 fail-stop한다.
+Client를 값으로 move한 뒤 binding을 복사하거나 pool publication 뒤 binding을 늦게 채우는 경로는 금지한다. standalone fixture나 등록 전
+Client는 identity-absent binding만 가질 수 있고 artifact-required reconnect 경로에 들어갈 수 없다.
+poison caller는 `SourceSite`와 parser/outbound/count projection을 담은 pointer-free `IncidentInput`을 만든 뒤 canonical poison suffix에
+전달한다. 기존 reason-only poison wrapper는 identity-absent·reconnect-ineligible 경로에만 남기고, managed Client 제품 caller는
+source-boundary가 reason-only wrapper를 호출하지 못하게 한다.
+
+최초 incident 선형화는 `Client`의 canonical first-reason publication과 분리하지 않는다. public poison, registered-operation
+deferred poison, allocator-callback deferred poison은 모두 같은 private suffix에서 ring evidence와
+`Client.first_incident_id`를 먼저 게시하고, 마지막 store로 `first_poison_reason:null -> reason`을 게시한다. raw 두 저장소를
+lock-free로 함께 읽는 API는 두지 않는다. reconnect scheduler와 inspector는 Client operation fence와 service mutex를 순서대로 잡는
+contextual snapshot만 소비하며, crash가 마지막 store 전에 발생해도 orphan ring evidence는 허용하지만 reason만 있고 evidence가 없는
+상태는 허용하지 않는다. suffix 진입 전에
+`IncidentInput`과 binding을 모두 검증하며 실패는 Client/ring/reconnect mutation 0이다. suffix는 allocation/callback/syscall 0인
+no-fail 구간이고, publication 중 proof loss는 재시도나 reason-only fallback 없이 `fatalIntegrity(.incident_authority)`로 닫는다.
+이미 first reason이 있으면 새 incident ID를 만들지 않고 `first_incident_id`와 같은 fingerprint aggregate occurrence만
+saturating 증가한다. service는 제출 뒤 Client/queue/parser pointer를 역참조하지 않고, caller는 raw payload가 아니라 위 scalar
+projection을 operation/fence 아래에서 먼저 완성한다. ring publication과 first reason이 함께 보이는 마지막 store가 reconnect
+scheduler admission보다 앞선 선형화점이다.
+
+repeat publication은 raw incident ID만 받지 않는다. 최초 suffix가 Client final address, `first_incident_id`, fingerprint,
+binding seal을 결속한 process-sealed `IncidentRepeatKey`를 Client inline storage에 게시하고, 같은 operation owner가 이 key와 현재
+projection을 함께 제출할 때만 aggregate를 갱신한다. 상세 record가 120개 cap 뒤 drop됐더라도 key가 fingerprint authority다.
+CR0b 중립 leaf의 unsealed repeat helper는 test-private이며 product caller는 0이다.
+
+emergency ring은 exact 32 KiB이며 `IncidentRecord[120] + AggregateRecord[8]`로 구성된다. 두 record의 canonical storage envelope는
+각각 exact 256 bytes이고 header `{version:u16,kind:u8,committed:u8,payload_len:u16,reserved:u16,generation:u64}` 16 bytes,
+payload exact 208 bytes, BLAKE3 digest 32 bytes로 고정한다. incident payload는 위 208-byte DTO 자체다.
+aggregate payload도 exact 208 bytes이며
+`{version:u16=1,kind:u8=2,flags:u8(bit0 other, bit1 detail_dropped),reason_raw:u8,scope_raw:u8,
+source_site_raw:u8,host_class_raw:u8,count:u64,detail_dropped_count:u64,first_timestamp_ns:i128,
+last_timestamp_ns:i128,reserved:[152]u8=0}` 순서로 encode한다. producer는 process-global mutex 아래 pristine incident slot의
+가장 낮은 index에 최초 120개 Client incident를 immutable publish하고, 모든 최초/repeat publication에서 fingerprint aggregate도
+갱신한다. 상세 slot이 찬 뒤의 새 최초 incident는 새 nonzero ID를 Client에 남기되 상세 DTO 대신 해당 aggregate의
+`detail_dropped_count`를 증가시킨다. 따라서 `first_incident_id`는 correlation identity이지 반드시 ring-resident 상세 slot을
+뜻하지 않으며, contextual snapshot이 `detail_present`를 함께 반환한다. 이 bounded degradation도 artifact-before-recovery evidence다.
+named aggregate fingerprint가 없으면 slot 0..6의 pristine 최저 index를 쓴다. aggregate slot 7은 처음부터 고정 `other`라 named
+slot 일곱 개가 찬 뒤의 미등록 fingerprint만 saturating 합산한다. 기존 incident record와 named aggregate bucket을
+evict·전환·재배치하지 않는다.
+incident record generation은 `slot_index+1`로 불변이다. aggregate generation은 갱신마다 checked 증가하며 max 다음 갱신은
+ring/Client/reconnect mutation 0 뒤 fail-stop한다. 한 poison이 incident와 aggregate를 함께 갱신할 때는 pristine 상세 slot,
+aggregate slot/generation, sequence, Client destination을 전부 preflight한 뒤에만 mutation을 시작한다. producer는 mutex 아래
+`committed=0`을 먼저 게시하고 payload+digest+generation을
+쓴 뒤 마지막 store로 `committed=1`을 게시한다. writer도 같은 mutex 아래 committed record 전체를 value-copy하므로 갱신 중 payload를
+볼 수 없다. producer 경로에는 allocation, callback, filesystem syscall이 없다.
+
+service는 exact 한 개 writer thread와 128-bit `pending_slots` bitmap, wake primitive를 bootstrap 때 함께 준비한다. producer는 record의
+마지막 store 뒤 해당 slot bit를 idempotent set하고 non-allocating wake만 수행한다. queue node나 receipt를 동적으로 만들지 않으며 같은
+aggregate의 여러 갱신은 한 bit로 coalesce된다. writer는 mutex 아래
+`{pid,process_nonce,slot_index,record_generation,digest}` receipt와 exact record를 value-copy하고 bit를 clear한 뒤
+lock을 놓고 disk I/O를 수행한다. completion 때 record generation이 복사본보다 새로우면 bit를 다시 set하고, 같으면 disk 상태만
+게시한다. reconnect/quit은 writer를 기다리지 않는다. late completion은 ring storage를 free하거나 incident/aggregate를 변경하지
+않는다. writer는 별도 작업 ID를 발급하지 않고 record generation만 stale completion 판정에 사용한다. process teardown은 writer를
+bounded deadline까지 join한 뒤 미완료 작업을 ring-only로 남기며 ring backing을 writer보다
+먼저 파괴하지 않는다. producer lock→writer lock 외의 역방향 lock 획득은 0이고 writer는 Client/HostAdapter를 호출하지 않는다.
+
+timestamp와 `IncidentInput`은 service mutex 진입 전에 operation owner가 process-monotonic clock에서 만들며 clock failure나 음수 값은
+mutation 0 typed reject다. aggregate의 first/last는 각각 `min`/`max`로 갱신해 caller 간 관측 순서가 바뀌어도 역전되지 않는다.
+Debug/test의 unexpected poison은 ring evidence와 first reason의 마지막 store가 끝난 직후 common
+`fatalIntegrity(.unexpected_connection_poison)` leaf로만 종료한다. expected poison과 Release 제품은 같은 publication 뒤 scheduler로
+진행하며 artifact writer 성공을 기다리지 않는다.
+
 Release는 preallocated 32 KiB ring handoff를 reconnect scheduling보다 먼저 끝낸다. disk writer는 별도 bounded owner이며
 filesystem syscall 정지를 reconnect/main/quit 경로가 기다리지 않는다. `${XDG_CACHE_HOME:-$HOME/.cache}/maru/incidents`
 디렉터리는 `0700`,

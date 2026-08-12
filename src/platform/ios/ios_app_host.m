@@ -273,6 +273,15 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (slot == 0xFFFFFFFF) break;  // 축출 정책은 아직 없다(계약 §4)
         unsigned int col = slot >> 16, row = slot & 0xFFFF;
         memset(cell, 0, CW * CH);
+        // **합성이 먼저다**(renderer 계약). 박스·블록·브라유는 폰트로 구우면 셀에 안 맞아
+        // 끊긴다 — 합성은 셀을 가장자리까지 채운다. 0 이면 합성 대상이 아니라 폰트로 간다.
+        if (maru_mobile_synthesize(cp, cell, CW) != 0) {
+            [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
+                           withBytes:cell bytesPerRow:CW];
+            maru_mobile_atlas_add(cp, style, col, row, CW / 2);
+            added++;
+            continue;
+        }
         CGContextRef ctx = CGBitmapContextCreate(cell, CW, CH, 8, CW, cs, kCGImageAlphaNone);
         CGContextSetGrayFillColor(ctx, 1.0, 1.0);
         unichar c = (unichar)cp;

@@ -182,7 +182,9 @@ Android 도 `NativeActivity` + Vulkan swapchain 으로 **에뮬레이터 화면�
 **폰트는 시스템 것이 아니라 동봉한 것을 쓴다.** maru 는 이미 `assets/fonts/` 에 OFL 폰트를
 싣고 있고 그중 **Jetendard** 는 영문과 한글을 한 파일에 담아 폴백이 필요 없다. 시스템 폰트
 (Menlo·AppleSDGothicNeo)를 쓰면 플랫폼마다 글자가 갈리는 데다, 그 폰트들은 라이선스 때문에
-옮길 수도 없다. iOS 는 번들 리소스, Android 는 `/data/local/tmp` 의 **같은 파일**을 읽는다.
+옮길 수도 없다. iOS 는 앱 번들, Android 는 **APK asset** 의 같은 파일을 읽는다 — 예전에는 Android 가
+`/data/local/tmp` 를 봤는데, 그건 이 스크립트가 넣어 주는 자리라 스크립트를 안 돌린
+기기에서는 폰트가 시스템 글꼴로 떨어지고 셰이더는 아예 없어 검은 화면이었다.
 
 ### 같은 폰트일 때 남는 픽셀 차이 (PoC 13)
 

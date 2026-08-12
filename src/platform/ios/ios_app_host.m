@@ -158,10 +158,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
                                                            width:W height:H mipmapped:NO];
     _glyphTex = [_dev newTextureWithDescriptor:td];
     [_glyphTex replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:gray bytesPerRow:W];
-    // 래스터 결과를 그대로 남긴다 — 두 플랫폼의 픽셀 차이를 재려면 원본이 필요하다.
-    NSString *dump = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]
-                      stringByAppendingPathComponent:@"atlas_ondevice.gray"];
-    [[NSData dataWithBytes:gray length:W * H] writeToFile:dump atomically:YES];
+    // 래스터 결과를 남긴다 — 두 플랫폼의 픽셀 차이를 재는 하네스(`atlas_diff.py`)가 읽는다.
+    // **요청할 때만 쓴다.** 제품이 매 실행마다 384KB 를 남길 이유가 없다.
+    if (NSProcessInfo.processInfo.environment[@"MARU_ATLAS_DUMP"]) {
+        NSString *dump = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]
+                          stringByAppendingPathComponent:@"atlas_ondevice.gray"];
+        [[NSData dataWithBytes:gray length:W * H] writeToFile:dump atomically:YES];
+    }
     free(gray);
     NSLog(@"MARU_CHROME atlas_ondevice=%ux%u glyphs=%lu source=CoreText font=%@",
           W, H, (unsigned long)n, fontPath ? @"Jetendard" : @"Menlo");

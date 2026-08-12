@@ -85,6 +85,14 @@ pub const ScenarioId = enum {
     /// 올라와, 사용자에게는 리사이즈 한 번에 화면이 문서의 다른 곳으로 튄 것처럼 보인다. 코드
     /// 리뷰가 지적한 자리이고, 화면에 보이는 결함이므로 캡처로 고정한다.
     editor_wrap_stale_scroll,
+    /// N1 §3.5 — **디스크에서 읽은 파일이 화면에 뜬다.** 앞의 편집기 시나리오들은 전부 소스에 박은
+    /// 배열을 그리므로, `openPath`가 실제로 무엇을 돌려주는지는 증명하지 않는다. 여기서는 호출자가
+    /// 파일을 써서 `openPath`로 읽고 그 줄들을 그대로 넘긴다(`Scenario.lines`).
+    ///
+    /// **캡처로만 보이는 것들**이 있다: CRLF의 `\r`이 화면에 안 남는지(§3.5 — `lineText`가 줄바꿈을
+    /// 뺀다), BOM이 첫 줄 앞에 유령 글자로 서지 않는지, 탭이 전개되어 열이 맞는지. 셋 다 문자가
+    /// **안 보이는 것**이 정답이라, 단위 테스트의 문자열 비교로는 "안 그려졌다"와 구별되지 않는다.
+    editor_real_file,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -108,6 +116,13 @@ pub const Scenario = struct {
     /// (`chrome_lab_smoke.fontPxFor`). 그 근사가 픽스처 쪽에 있는 것이 요점이다 — 백엔드는
     /// 폰트 크기를 그대로 받고 역산을 모른다.
     font_px: u16 = 13,
+    /// 그릴 줄들. **`null`이면 시나리오가 자기 픽스처를 고른다** — 기존 시나리오는 전부 그쪽이라
+    /// 캡처가 바이트 그대로다.
+    ///
+    /// `editor_real_file`만 이것을 채운다. Lab은 "deterministic, effect-free"가 계약이라 여기서
+    /// 파일을 읽을 수 없고(읽으면 캡처가 디스크 상태에 딸린다), 그래서 **읽기는 호출자 몫**이다 —
+    /// 호출자가 `openPath`로 연 줄들을 넘기면 Lab은 받은 것을 그리기만 한다.
+    lines: ?[]const []const u8 = null,
 };
 
 pub const Result = struct {
@@ -153,7 +168,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -344,7 +359,9 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 요구한 gutter(12px)보다 넓은 자투리가 생긴다 — 그것을 gutter에 포함하지 않으면 막대가 화면
     // 오른쪽 끝에서 어중간하게 떠 있다(실측 6px). 남은 폭을 그대로 주면 막대가 그 안에 가운데로 선다.
     const scrollbar_gutter_px: u32 = viewport_w -| (@as(u32, total_cols) * cell_w_px);
-    const lines: []const []const u8 = switch (scenario.id) {
+    // **호출자가 준 줄이 있으면 그것을 그린다**(`editor_real_file`) — 디스크에서 읽어 온 것이라
+    // Lab이 픽스처로 흉내낼 수 없다.
+    const lines: []const []const u8 = scenario.lines orelse switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
         .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => &editor_wrap_lines,
@@ -629,7 +646,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_real_file => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

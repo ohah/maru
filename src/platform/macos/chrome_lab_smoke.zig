@@ -14,6 +14,7 @@ const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 const metal_smoke = @import("metal_smoke.zig");
+const editor_ops = @import("app_session/editor.zig");
 
 const chrome = maru.chrome;
 const artifact_io = maru.app.artifact_io;
@@ -57,6 +58,7 @@ fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
         .editor_hscroll,
         .editor_wrap_scrolled,
         .editor_wrap_stale_scroll,
+        .editor_real_file,
         => .{ .family = variant.family(), .fallback = (maru.config.theme.FontConfig{}).fallback },
         else => .{},
     };
@@ -128,6 +130,29 @@ const PpmProbe = struct {
 /// The Lab has one short, reviewable font specimen in addition to product-state fixtures. These
 /// counts come from CoreText's actual shaped runs, not from a source-string coverage guess, so a
 /// reviewer can tell whether a Korean sample used the registered face or a fallback face.
+/// `editor_real_file`이 디스크에 쓰고 다시 `openPath`로 읽는 내용.
+///
+/// **셋을 한 화면에 모았다.** ⑴ 맨 앞 BOM — 첫 줄 앞에 유령 글자로 서면 안 된다(`document.open`이
+/// 떼고 인덱스도 그 기준이다). ⑵ CRLF와 LF가 섞였다 — `\r`이 화면에 남으면 §3.8의 가시화가 그것을
+/// `<U+000D>`로 그려 줄 끝이 어지러워진다. ⑶ 탭으로 들여쓴 줄 — 전개되어 열이 맞아야 한다.
+///
+/// 셋 다 **문자가 안 보이는 것이 정답**이라, 문자열 비교로는 "제대로 뗐다"와 "줄을 통째로 못 읽었다"가
+/// 구별되지 않는다. 줄 번호가 붙은 캡처는 그 둘을 가른다.
+///
+/// **주석 줄의 `//`가 지금 한 칸으로 합쳐져 나온다.** 폰트 리가처가 두 글자를 한 글리프로 만들어
+/// 셀 하나가 비는 것이고, `/ /`처럼 공백을 끼우면 둘 다 제대로 선다(그 대조를 캡처로 확인했다).
+/// 모노스페이스 격자를 쓰는 편집기에서 어긋나는 동작이지만 **이 슬라이스가 만든 것이 아니라
+/// 렌더 경로의 성질**이라 여기서 고치지 않는다 — 골든이 현재 상태를 잡아 두므로, 리가처를 끄면
+/// 이 캡처가 바뀌며 그 사실이 드러난다.
+const real_file_fixture =
+    "\xEF\xBB\xBFconst std = @import(\"std\");\r\n" ++
+    "\r\n" ++
+    "// 한글 주석 — 2칸 글자도 열을 맞춘다\r\n" ++
+    "pub fn main() void {\n" ++
+    "\tconst greeting = \"안녕하세요\";\n" ++
+    "\tstd.debug.print(\"{s}\\n\", .{greeting});\n" ++
+    "}\n";
+
 const FontUsage = struct {
     primary_glyphs: usize,
     fallback_glyphs: usize,
@@ -191,6 +216,25 @@ pub fn main(init: std.process.Init) !void {
         break :blk 0xFF00_0000 | (lift(base.r) << 16) | (lift(base.g) << 8) | lift(base.b);
     } else 0;
 
+    // **`editor_real_file`만 디스크를 탄다.** Lab은 effect-free 계약이라 파일을 못 읽으므로
+    // (`lab.Scenario.lines` 주석), 여기서 읽어 줄들을 넘긴다. 픽스처를 **직접 쓰고 읽는** 이유는
+    // 캡처가 결정적이어야 하기 때문이다 — 레포의 임의 파일을 가리키면 그 파일이 바뀔 때 골든이 깨진다.
+    var real_file_opened: ?editor_ops.Opened = null;
+    defer if (real_file_opened) |*o| o.deinit(allocator);
+    var real_file_lines: ?[][]const u8 = null;
+    defer if (real_file_lines) |l| allocator.free(l);
+    if (scenario_id == .editor_real_file) {
+        const src_path = try std.fmt.allocPrint(allocator, "{s}/editor-real-file.src", .{artifact_dir});
+        defer allocator.free(src_path);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = real_file_fixture });
+        real_file_opened = try editor_ops.openPath(io, allocator, src_path);
+        const opened = &real_file_opened.?;
+        const n = opened.file.lineCount();
+        const rows = try allocator.alloc([]const u8, n);
+        for (0..n) |i| rows[i] = opened.file.lineText(i).?;
+        real_file_lines = rows;
+    }
+
     const frame = try lab.buildFrame(.{
         .id = scenario_id,
         .viewport_px = viewport,
@@ -198,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
         .cell_w_px = @intCast(cellSizeFor(scenario_id).w),
         .cell_h_px = @intCast(cellSizeFor(scenario_id).h),
         .font_px = fontPxFor(scenario_id),
+        .lines = real_file_lines,
     }, &tokens, .{
         .entries = &entries,
         .items = &items,
@@ -544,6 +589,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-hscroll")) return .editor_hscroll;
     if (std.mem.eql(u8, raw, "editor-wrap-scrolled")) return .editor_wrap_scrolled;
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
+    if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
     return null;
 }
 
@@ -573,6 +619,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_hscroll => "editor-hscroll",
         .editor_wrap_scrolled => "editor-wrap-scrolled",
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
+        .editor_real_file => "editor-real-file",
     };
 }
 

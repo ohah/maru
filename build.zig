@@ -2149,6 +2149,11 @@ pub fn build(b: *std.Build) void {
         "2c3e C2 bound RPC family Debug and ReleaseFast gates",
     );
     session_host_2c3e_c2_step.dependOn(session_host_2c3e_c1_step);
+    const session_host_2c3e_c3_step = b.step(
+        "test-session-host-2c3e-c3",
+        "2c3e C3 socket cadence parity Debug and ReleaseFast gates",
+    );
+    session_host_2c3e_c3_step.dependOn(session_host_2c3e_c2_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3109,6 +3114,18 @@ pub fn build(b: *std.Build) void {
             event_2c3e_c2_boundary_module,
             "2c3e C2 경계는",
             1,
+        );
+        const event_2c3e_c3_red_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3e_c3_red.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c3_step,
+            event_2c3e_c3_red_module,
+            "2c3e C3 socket cadence는",
+            12,
         );
         const event_c3_3c_boundary_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_2c3d_c3_3c_boundary.zig"),

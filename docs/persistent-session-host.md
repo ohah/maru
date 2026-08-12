@@ -3111,6 +3111,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    제품 호출 0과 C1 bridge의 `RemoteRuntime` exact caller inventory를 고정한다. C1~C3가 모두 green일 때만 2c3e와
    2c3 전체를 구현 완료로 표시한다.
 
+   C3 focused gate의 첫 RED는 최적화 모드마다 legacy/generation을 같은 제품 oracle에서 비교하는 cadence 12개다.
+   완성 response 직후 EOF, partial header 뒤 EOF, partial payload 뒤 EOF를 각각 분리한다. response보다 먼저 온
+   revoke·metadata event·snapshot과 response 뒤 같은 세 종류도 각각 독립 행이다. malformed frame, unknown kind 또는
+   wrong correlation, unread revoke와 queued TX의 RX-first가 나머지 세 행이다. 완성 response는 decoder exact 1회와
+   response source-zero 뒤 다음 turn terminal을 요구한다. partial/malformed/correlation failure는 decoder 0과 response
+   source-zero 뒤 terminal이다. response 전 revoke는 stale RPC 의미 publication 0, benign event/snapshot은 선행
+   settlement 또는 보존 뒤 decoder exact 1회다. response 뒤 frame은 decoder 복귀 뒤 다음 turn에 wire order 그대로
+   exact once 소비한다. 첫 RED에서는 12행이 모두 `C3CadenceNotImplemented`이고, 각 행을 실제 socket 제품 호출로
+   교체하기 전에는 cadence parity를 구현했다고 주장하지 않는다.
+
    C3-3b TDD gate는 최소 다음을 Debug·ReleaseFast와 actual socket/product path에서 고정한다.
 
    - 모든 event kind의 prepare/settlement Busy·mismatch에서 live semantic state mutation 0, retry exact once

@@ -293,6 +293,14 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     _queue = [_dev newCommandQueue];
     [self loadAtlas];
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
+    // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
+    // 사용자에게 보인다. Android 도 같은 값이고, 데스크톱 maru 의 present 정책과 같다.
+    // 실측으로 이 경로가 33.33ms 를 낸다는 것을 확인했다(`present-ios`).
+    if (@available(iOS 15.0, *)) {
+        _link.preferredFrameRateRange = CAFrameRateRangeMake(30, 30, 30);
+    } else {
+        _link.preferredFramesPerSecond = 30;
+    }
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
     return self;
 }

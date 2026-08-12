@@ -1116,6 +1116,11 @@ pub fn logScreenIfDebug(self: *AppSession) void {
 /// 프레임마다 셸 의미 이벤트(OSC 133/7)를 소비한다 — MARU_DEBUG면 명령 경계를 구조화 한 줄씩
 /// 찍고, 항상 비워 core의 이벤트 버퍼를 bounded하게 유지한다(누구도 drain 안 하면 cap에서 드롭).
 /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
+///
+/// **이 스트림을 제품 신호로 쓰지 마라.** 비우는 대상이 **활성 Term 하나**고(원격은 통째로 skip) 매 프레임
+/// 비우므로, 비활성 Term의 이벤트는 아무도 못 보고 활성 Term의 이벤트도 다른 소비자가 보기 전에 사라진다.
+/// `.cwd_changed`를 "OSC 7이 방금 왔다"는 신호로 쓰려다 여기서 걸렸다(docs/editor-surface-dock.md §3.5의
+/// 낡은 OSC 7 항목). 필요하면 이 자리에서 함께 drain하도록 소비자를 여기에 붙여라.
 pub fn drainShellEventsForFrame(self: *AppSession) void {
     if (!self.surface_initialized) return;
     if (!activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip

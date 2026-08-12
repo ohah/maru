@@ -125,8 +125,11 @@ fn collectProcessTree(pid: std.c.pid_t, out: []types.ProcessResourceSample, n: *
 }
 extern "c" fn getpgid(pid: c_int) c_int;
 // proc_pidinfo + PROC_PIDVNODEPATHINFO: pid 하나의 **현재 작업 디렉터리**를 커널에서 직접 읽는다. 공개 libproc
-// API(<libproc.h>)이고 iTerm2·Ghostty가 같은 목적(OSC 7이 없는 셸의 cwd 추정)으로 쓰는 사실상 표준 경로다
-// (clean-room: 공개 API 호출만 하고 레퍼런스 코드 표현은 옮기지 않는다 — docs/project-rules.md).
+// API(<libproc.h>)다(clean-room: 공개 API 호출만 하고 레퍼런스 코드 표현은 옮기지 않는다 — docs/project-rules.md).
+//
+// 예전 주석은 "iTerm2·Ghostty가 같은 목적으로 쓰는 사실상 표준 경로"라고 적었는데 **틀렸다** — 레퍼런스 소스로
+// 확인하니 Ghostty는 커널을 전혀 묻지 않고 OSC 7만 쓴다(2026-08-13 확인). iTerm2는 확인하지 못했다. 근거는
+// 레퍼런스가 아니라 아래 "왜 필요한가"의 실측 세 갈래다. 자세한 내용은 docs/editor-surface-dock.md §3.5.
 //
 // **왜 필요한가**: `TerminalCore.currentCwd()`는 OSC 7 전용이고 그 보고자는 maru의 zsh precmd 훅뿐이다. 그래서
 // ⑴ bash/fish는 cwd가 처음부터 없고, ⑵ claude·codex 같은 전체화면 TUI가 시작하며 RIS(ESC c)를 보내면

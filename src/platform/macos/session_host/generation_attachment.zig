@@ -2283,7 +2283,7 @@ test "CR3a-2d1 generation attachment는 첫 retryable token을 teardown fresh pe
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.accounting_ledger.item_count);
 }
 
-test "CR3a-2d2 GenerationAttachment는 두 번째 retryable을 node terminal handoff로 이전한다" {
+test "CR3a-2d2 GenerationAttachment는 두 번째 retryable을 node terminal handoff로 이전하고 CR3a-2d3 component 실제 attachment terminal drain은 source와 node를 final-zero로 만든다" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var release_probe = AttachmentEventNoFreeAllocator{ .parent = allocator };
@@ -2353,9 +2353,12 @@ test "CR3a-2d2 GenerationAttachment는 두 번째 retryable을 node terminal han
     );
     release_probe.armed = true;
     try std.testing.expectEqual(DeinitOutcome.terminal_handoff, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(Lifecycle.terminal, attachment.lifecycle);
+    try std.testing.expect(attachment.payload == null);
     try std.testing.expectEqual(@as(usize, 0), release_probe.target_free_count);
     try std.testing.expectEqual(client_slot_mod.DeinitOutcome.terminal_handoff, adapter.slot.tryDeinit());
     adapter.deinit();
+    try std.testing.expectEqual(client_slot_mod.Lifecycle.dead, adapter.slot.lifecycle);
     release_probe.armed = false;
     try std.testing.expectEqual(@as(usize, 1), release_probe.target_free_count);
 }

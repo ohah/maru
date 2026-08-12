@@ -3343,13 +3343,42 @@ pub fn build(b: *std.Build) void {
         boundary_step.dependOn(&run_event_2d2_boundary_tests.step);
 
         B3SettlementTest.add(b, session_host_2d3_step, event_2d2_contract_module, "CR3a-2d3 terminal drain", 3);
-        const event_2d3_red_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2d3_red.zig"),
-            .target = target,
-            .optimize = b3_optimize,
-        });
-        B3SettlementTest.add(b, session_host_2d3_step, event_2d3_red_module, "CR3a-2d3 component", 9);
-        B3SettlementTest.add(b, session_host_2d3_step, event_2d3_red_module, "CR3a-2d3 subprocess", 3);
+        B3SettlementTest.add(b, session_host_2d3_step, event_c3_3b3_client_slot_module, "CR3a-2d3 component", 8);
+        B3SettlementTest.add(
+            b,
+            session_host_2d3_step,
+            event_2d1_attachment_module,
+            "CR3a-2d3 component 실제 attachment terminal drain은",
+            1,
+        );
+        const proof_pairs = [_]struct { child: []const u8, parent: []const u8 }{
+            .{ .child = "CR3a-2d3 pre-callback child", .parent = "CR3a-2d3 subprocess는 callback 전" },
+            .{ .child = "CR3a-2d3 post-callback child", .parent = "CR3a-2d3 subprocess는 callback 뒤" },
+            .{ .child = "CR3a-2d3 callback-reentry child", .parent = "CR3a-2d3 subprocess는 callback reentry" },
+        };
+        for (proof_pairs) |pair| {
+            const child = b.addTest(.{
+                .root_module = event_c3_3b3_client_slot_module,
+                .filters = &.{pair.child},
+                .test_runner = .{
+                    .path = b.path("tools/session_host_2d3_test_runner.zig"),
+                    .mode = .simple,
+                },
+            });
+            const parent = b.addTest(.{
+                .root_module = event_c3_3b3_client_slot_module,
+                .filters = &.{pair.parent},
+                .test_runner = .{
+                    .path = b.path("tools/session_host_2d3_test_runner.zig"),
+                    .mode = .simple,
+                },
+            });
+            const run_parent = b.addRunArtifact(parent);
+            run_parent.addArtifactArg(child);
+            run_parent.addArg("--maru-expect-tests=1");
+            run_parent.setCwd(b.path("."));
+            session_host_2d3_step.dependOn(&run_parent.step);
+        }
         const event_2d3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_2d3_boundary.zig"),

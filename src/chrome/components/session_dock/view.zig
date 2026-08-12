@@ -2131,7 +2131,13 @@ test "SessionDock segment labels take their foreground from the same resolver as
 // 계약 자체를 여기서 고정한다: **토글이 발행된 모든 폭에서 제목 run이 존재한다.**
 test "SessionDock never publishes the sort toggle at a width that erases the header title" {
     const heading = "Agent 세션 기록";
-    var width: u32 = 120; // dock_layout.zig의 최소 도크 폭
+    // 이 루프가 **경계를 실제로 가로지르는지** 세어 둔다. 토글이 한 번도 발행되지 않는 구간만 훑으면
+    // 아래 단언이 한 번도 실행되지 않은 채 통과한다 — 회귀를 못 잡는 테스트가 되는 흔한 방식이고,
+    // utility 폭이 커져 경계가 480pt 위로 올라가면 **조용히** 그렇게 된다.
+    var published: u32 = 0;
+    var withheld: u32 = 0;
+    const heading_check_start = 120; // dock_layout.zig의 최소 도크 폭
+    var width: u32 = heading_check_start;
     while (width <= 480) : (width += 1) {
         const props = types.Props{
             .viewport_px = .{ .width = @floatFromInt(width), .height = 480 },
@@ -2157,7 +2163,11 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
             .child_rects = &child_rects,
             .actions = &actions,
         }) catch continue; // 이 폭에서 tree가 안 서면 토글도 없다 — 판정할 것이 없다.
-        if (frame.tree.find(build.NodeIds.sort_toggle) == null) continue;
+        if (frame.tree.find(build.NodeIds.sort_toggle) == null) {
+            withheld += 1;
+            continue;
+        }
+        published += 1;
 
         const tk = tokens.Tokens.rich(.{
             .foreground = .{ .r = 240, .g = 240, .b = 240 },
@@ -2187,4 +2197,7 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
             return error.TestUnexpectedResult;
         }
     }
+    // 위 단언이 실제로 실행됐는가. 둘 다 0이 아니어야 이 루프가 경계를 가로지른 것이다.
+    try std.testing.expect(published > 0);
+    try std.testing.expect(withheld > 0);
 }

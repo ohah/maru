@@ -187,7 +187,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         jfloat adv = (*env)->CallFloatMethod(env, paint, mMeasure, s);
         uint32_t advance = (uint32_t)(adv + 0.5f);
         if (advance == 0) advance = CW / 2;
-        maru_mobile_atlas_add(cps[i], col, row, advance);
+        maru_mobile_atlas_add(cps[i], 0, col, row, advance);
         (*env)->DeleteLocalRef(env, s);
     }
 
@@ -664,11 +664,17 @@ static void drawFrame(void) {
     // 80x40 터미널이 3200 call 이 되고, 모바일 타일 기반 GPU 는 거기에 특히 민감하다.
     // 버퍼를 `maru_mobile_max_quads()` 만큼 잡았으므로 잘릴 일이 없다 — 잘린다면 그건
     // 계약이 깨진 것이라 조용히 넘기지 않고 남긴다.
+    // **버퍼가 자랐으면 다음 프레임에 맞춘다.** 코어의 quad 버퍼는 격자가 커질 때만 자라고
+    // (셀 속성이 붙어 한 칸이 최대 6 quad 를 낸다) 그 순간 우리 GPU 버퍼는 아직 작다.
+    //
+    // **여기서 return 하면 안 된다** — 이미 스왑체인 이미지를 acquire 했고 세마포어가 뜬
+    // 상태라, 제출 없이 빠져나가면 다음 acquire 가 같은 세마포어를 다시 기다린다. 그래서
+    // 이 한 프레임만 잘라 그리고 자원을 다시 세운다(다음 프레임부터 온전하다).
     unsigned int drawn = n;
     if (drawn > g.quad_cap) {
         drawn = g.quad_cap;
-        static int logged_drift;  // 매 프레임 도배하지 않는다 — 한 번이면 안다
-        if (!logged_drift) { logged_drift = 1; LOGI("MARU_CHROME error=quad_cap_drift n=%u cap=%u", n, g.quad_cap); }
+        LOGI("MARU_LIFECYCLE quad_cap_grew n=%u cap=%u", n, g.quad_cap);
+        g.needs_recreate = 1;
     }
     Push *dst = (Push *)g.quad_map;
     for (unsigned int i = 0; i < drawn; i++) {
@@ -903,9 +909,20 @@ static void teardownVulkan(void) {
 typedef struct {
     JNIEnv *env;
     jobject bmp, canvas, paint;
-    jmethodID draw, measure;
+    /// 스타일 비트(0=보통·1=굵게·2=기울임·3=굵은기울임)로 바로 찾는다 — SGR 1/3 은 **다른
+    /// 글리프**라 폰트 파일이 따로 있어야 한다(가짜 굵게는 자간이 어긋난다).
+    jobject faces[4];
+    jmethodID draw, measure, set_typeface;
     int ok;
 } GlyphBaker;
+
+/// asset 에서 폰트 하나를 읽는다. 없으면 NULL — 부르는 쪽이 보통 판으로 되돌린다.
+static jobject loadFace(JNIEnv *env, jclass tfCls, jmethodID mFromAsset, jobject assets, const char *name) {
+    jobject f = (*env)->CallStaticObjectMethod(env, tfCls, mFromAsset, assets,
+                                               (*env)->NewStringUTF(env, name));
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    return f;
+}
 
 static int bakerOpen(struct android_app *app, GlyphBaker *b, uint32_t CW, uint32_t CH) {
     memset(b, 0, sizeof *b);
@@ -933,20 +950,25 @@ static int bakerOpen(struct android_app *app, GlyphBaker *b, uint32_t CW, uint32
         (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
 
     // asset 에서 읽는다 — `/data/local/tmp` 는 개발 스크립트 자리라 실제 앱에는 없다.
+    // **네 가지를 다 연다**(보통·굵게·기울임·굵은기울임). 배열 인덱스가 곧 스타일 비트다.
     jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
     jclass actCls = (*env)->GetObjectClass(env, app->activity->clazz);
     jobject assets = (*env)->CallObjectMethod(env, app->activity->clazz,
         (*env)->GetMethodID(env, actCls, "getAssets", "()Landroid/content/res/AssetManager;"));
-    jobject face = (*env)->CallStaticObjectMethod(env, tfCls,
-        (*env)->GetStaticMethodID(env, tfCls, "createFromAsset",
-            "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/graphics/Typeface;"),
-        assets, (*env)->NewStringUTF(env, "Jetendard-Regular.ttf"));
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
-    if (face) (*env)->CallObjectMethod(env, b->paint,
-        (*env)->GetMethodID(env, pCls, "setTypeface",
-            "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), face);
-    else LOGI("bundled_font_missing fallback=default");
+    jmethodID mFromAsset = (*env)->GetStaticMethodID(env, tfCls, "createFromAsset",
+        "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/graphics/Typeface;");
+    static const char *kFace[4] = {
+        "Jetendard-Regular.ttf", "Jetendard-Bold.ttf",
+        "Jetendard-Italic.ttf", "Jetendard-BoldItalic.ttf",
+    };
+    for (int s = 0; s < 4; s++) {
+        b->faces[s] = loadFace(env, tfCls, mFromAsset, assets, kFace[s]);
+        // 그 판이 없으면 보통 판으로 되돌린다 — 조용히 시스템 글꼴이 되지 않게.
+        if (!b->faces[s]) { LOGI("bundled_font_missing style=%d", s); b->faces[s] = b->faces[0]; }
+    }
 
+    b->set_typeface = (*env)->GetMethodID(env, pCls, "setTypeface",
+        "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;");
     b->draw = (*env)->GetMethodID(env, cvCls, "drawText",
         "(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
     b->measure = (*env)->GetMethodID(env, pCls, "measureText", "(Ljava/lang/String;)F");
@@ -963,10 +985,12 @@ static void bakerClose(struct android_app *app, GlyphBaker *b) {
 
 /// 한 글자를 셀 크기 버퍼에 굽는다. 아틀라스를 처음 만들 때와 **같은 폰트·같은 배치**를
 /// 써야 새로 넣은 글리프가 기존 것과 어긋나지 않는다(baseline = CH-8).
-static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint8_t *out,
+static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint32_t style, uint8_t *out,
                      uint32_t CW, uint32_t CH, uint32_t *advance) {
     if (!b->ok) return 0;
     JNIEnv *env = b->env;
+    // 스타일에 맞는 폰트로 갈아 끼운다. advance 도 이 폰트에서 나와야 자간이 안 어긋난다.
+    (*env)->CallObjectMethod(env, b->paint, b->set_typeface, b->faces[style & 3]);
     // **셀을 비우고 그린다.** `Canvas.drawColor(0)` 은 SRC_OVER 라 투명색을 덮어도 아무것도
     // 안 지운다 — 그렇게 짰다가 앞 글자 잉크가 남아 글자가 겹쳐 나왔다(화면으로 잡았다).
     // `Bitmap.eraseColor` 가 실제로 지우는 쪽이다.
@@ -1011,6 +1035,7 @@ static void growAtlas(struct android_app *app) {
     if (!bakerOpen(app, &baker, CW, CH)) { maru_mobile_missing_clear(); return; }
     for (int i = (int)n - 1; i >= 0; i--) {
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
+        unsigned int style = maru_mobile_missing_style((unsigned int)i);
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
         // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
@@ -1019,7 +1044,7 @@ static void growAtlas(struct android_app *app) {
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
         memset(cell, 0, sizeof cell);
         uint32_t advance = CW / 2;
-        if (!bakeGlyph(&baker, cp, cell, CW, CH, &advance)) continue;
+        if (!bakeGlyph(&baker, cp, style, cell, CW, CH, &advance)) continue;
 
         // staging 버퍼 → 이미지의 그 사각형만 복사.
         VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -1088,7 +1113,7 @@ static void growAtlas(struct android_app *app) {
             for (uint32_t y = 0; y < CH; y++)
                 memcpy(g_glyph_px + (row * CH + y) * g_gw + col * CW, cell + y * CW, CW);
         }
-        maru_mobile_atlas_add(cp, col, row, advance);
+        maru_mobile_atlas_add(cp, style, col, row, advance);
         added++;
     }
     bakerClose(app, &baker);

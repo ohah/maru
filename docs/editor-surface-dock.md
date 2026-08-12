@@ -117,6 +117,44 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
 
    커널을 물어보면 셸 종류·화면 리셋·셸 기동 형태와 무관하게 답이 나온다.
 
+   **알려진 결함: 낡은 OSC 7이 정확한 커널 값을 이긴다(미해결).** 1단이 값을 내면 2단을 보지 않는데, OSC 7은
+   **프롬프트를 그릴 때만** 갱신되고 한 번 받으면 덮어쓸 때까지 남는다(지우는 유일한 경로는 RIS이고 그걸
+   보내는 프로그램은 거의 없다). 그래서 셸이 보고 없이 움직이면 낡은 값이 계속 이긴다. 2026-08-13 제품에서
+   재현했다 — 셸이 `maru3`를 OSC 7으로 보고한 뒤 `/`로 이동하면:
+
+   | 무엇 | 값 |
+   |---|---|
+   | 셸의 실제 위치 (`pwd`) | `/` |
+   | 커널이 보는 위치 (`lsof -d cwd`) | `/` |
+   | maru가 답하는 값 | `/Users/…/maru3` |
+
+   **`git=`까지 오염된다** — `/`는 저장소가 아닌데 `maru3`의 브랜치가 붙는다. 즉 폴더줄뿐 아니라 소스 컨트롤
+   판정이 함께 틀린다. 재현은 `SHELL`을 OSC 7을 한 번 보낸 뒤 `cd` 하는 스크립트로 두고 앱을 띄운 다음,
+   그 안에서 `maru sessions list`를 돌리면 된다(제어 평면은 maru 터미널 안에서만 자기 surface를 본다).
+
+   **왜 아직 안 고쳤나.** 설계를 세 번 시도해 세 번 다 적대적 검증에서 뒤집혔다. 남은 제약을 적어 둔다 —
+   다음 사람이 같은 벽을 다시 만나지 않도록.
+
+   - **"커널을 항상 우선"은 답이 아니다.** 두 출처는 다른 질문에 답한다 — OSC 7은 *셸이* 선 곳, 커널은 *지금
+     돌고 있는 프로세스가* 선 곳이다. 폴더줄이 원하는 건 전자다(다음 명령이 실행될 곳). 커널을 항상 쓰면
+     `sh -c 'cd /tmp; …'` 같은 명령이 도는 동안 폴더줄과 저장소가 그리로 튄다.
+   - **읽을 때마다 고르면 깜빡인다.** "포그라운드가 셸이면 커널" 같은 규칙은 프롬프트에 앉아 있을 때와 명령이
+     도는 동안 답이 갈려, 사이드바가 두 값을 오간다. 지금은 일관되게 틀리기라도 하는데 그 일관성마저 깨진다.
+     맞는 모양은 우선순위 전환이 아니라 **정정 이벤트**다 — 다른 셸이 앞에 있는 것을 관측한 순간 그 값을
+     기록하고, 보고자가 돌아올 때까지 세운다.
+   - **"새 OSC 7이 왔다"를 알 신호가 없다.** `bumpTitleGeneration`은 경로가 **바뀔 때만** 오르고,
+     `observation.revision`은 아무 출력에나 오른다. 셸 이벤트(`recordShellEvent(.cwd_changed)`)는 매 보고마다
+     기록되지만 `drainShellEventsForFrame`이 **활성 Term 하나만** 매 프레임 비우므로 제품 신호로 못 쓴다.
+     해제 조건을 만들려면 이 신호부터 만들거나, 신호 없이 되는 조건(예: 포그라운드가 세션 루트 그룹으로 복귀)을
+     써야 한다.
+   - **관측 창을 놓치면 아무 일도 안 일어난다.** 포그라운드 이름은 500 ms 주기라, 셸이 프롬프트에 앉은 순간을
+     한 번도 샘플하지 못하는 형태(`sh -c "cd /; 긴명령"`)는 어떤 사건 기반 규칙으로도 안 잡힌다. 대화형
+     사용에서도 진입 후 최대 0.5초는 옛 값이 보인다.
+   - **판정은 `pty/macos.zig` 안이어야 한다.** 필요한 재료(`child_pid`, 포그라운드 그룹)가 거기 있고,
+     `app_session`이 pid·libproc을 만지지 않는 것이 규약이다(`term_runtime_backend.zig`의 seam 주석). 관측
+     구조체에 필드를 더하는 것 자체는 wire 파손이 아니다 — `bell_count`·`mouse_tracking_mode`처럼 "구 host면
+     기본값 = 기존 동작"이라는 호환 패턴이 이미 있다. 비용은 `C3-3b2b0` exact-capacity 게이트 갱신이다.
+
    **닿지 않는 곳이 하나 있다.** 영속 세션 호스트(`session.keep-alive-after-quit`, 실험적 opt-in·기본 `false`)로
    연 Term은 PTY와 그 자식이 `maru-sessiond` 프로세스에 살아서 GUI 프로세스의 `proc_pidinfo`가 닿지 않는다
    (pid 네임스페이스 문제가 아니라 소유 프로세스가 다른 문제다 — `session_host/remote_term_backend.zig`의
@@ -132,8 +170,24 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
    더하면 총합이 보존돼 통과했다(실제로 뚫렸다). 새
    소비자는 `git_ops.termCwd`(저장소 판정) 또는 `git_ops.termCwdForDisplay`(표시)를 쓰고, 직독이 맞다면
    그 재고에 **이유와 함께** 올려야 한다.
-   - 베이스: 공개 libproc API이고 iTerm2·Ghostty가 같은 목적으로 쓰는 사실상 표준 경로다(clean-room — 공개 API
-     호출만 하고 레퍼런스 코드 표현은 옮기지 않는다, [project-rules.md](project-rules.md)).
+   - 베이스: 공개 libproc API다(clean-room — 공개 API 호출만 하고 레퍼런스 코드 표현은 옮기지 않는다,
+     [project-rules.md](project-rules.md)).
+
+     **레퍼런스가 우리와 같지 않다 — 예전 문장은 틀렸다.** 여기엔 "iTerm2·Ghostty가 같은 목적으로 쓰는 사실상
+     표준 경로"라고 적혀 있었는데, 레퍼런스 소스로 확인하니 **Ghostty는 커널을 전혀 묻지 않는다**
+     (`references/ghostty` @ `b2fa2931b`, 2026-08-13 확인). 제품 코드에서 pwd를 세우는 곳은 OSC 7 핸들러
+     (`stream_terminal.zig`)와 스냅샷 복원(`snapshot/terminal.zig`) 둘뿐이고, `libproc`·`proc_pidinfo`·`lsof`·
+     `KERN_PROC`은 트리 전체에 없다. iTerm2는 레퍼런스에 없어 **확인하지 못했다** — 확인 전까지 근거로 쓰지 말 것.
+
+     대신 Ghostty는 **모른다고 말할 수 있게** 한다: 빈 OSC 7(`OSC 7 ;`)을 pwd 리셋으로 받아, macOS proxy icon을
+     낡은 값으로 그리는 대신 **숨긴다**(`stream_handler.zig` `reportPwd`). 터미널이 추측하지 않는 설계다.
+
+     같은 계열 중 커널을 함께 쓰는 곳은 있다 — Orca(`references/orca` @ `e4c278eb`)는 `resolve-split-cwd.ts`에서
+     **확인된 OSC 7 → 커널(`/proc` 또는 `lsof`) → 확인 안 된(재생된) OSC 7 → worktree 루트** 4단으로 내려간다.
+     동기도 같다("shells that never emit OSC 7 — **agent TUIs**, minimal sh"). 다만 그건 "새 split을 어디서
+     시작할까"라 **반드시 답이 있어야 하는** 질문이고, 우리 폴더줄은 "모른다"가 유효한 답인 질문이라 그대로
+     베끼면 안 된다. 비용도 다르다 — Orca는 macOS에서 `lsof` 서브프로세스(100~500 ms)라 split 순간에만 묻고,
+     우리 `proc_pidinfo`는 0.78 µs라 상시 축에 넣을 수 있다.
    - **누구의 cwd를 묻는가**: foreground process group의 **leader가 아닌 구성원 → leader → 세션의 child** 순이다.
      `PGID를 그대로 PID로 쓰면 안 된다` — 제품 spawn은 `/usr/bin/login`이 wrapper로 남고 실제 셸이 같은 그룹의
      child로 돌아서, leader만 조회하면 **wrapper의 cwd(홈 등)** 를 읽고 저장소가 통째로 틀린다(적대적 검증에서

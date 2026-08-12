@@ -7258,48 +7258,6 @@ test "2c3e C3 socket cadence는 unread revoke를 queued TX보다 먼저 처리�
     inline for (.{ C3CadenceAttachmentMode.legacy, .generation }) |mode| try runC3UnreadRevokeBeforeTx(mode);
 }
 
-const PreparationDtoDriftAllocator = struct {
-    parent: std.mem.Allocator,
-    first_allocation: ?[]u8 = null,
-    allocation_count: usize = 0,
-
-    fn allocator(self: *@This()) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{
-            .alloc = alloc,
-            .resize = resize,
-            .remap = remap,
-            .free = free,
-        } };
-    }
-
-    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        self.allocation_count += 1;
-        // The first b2b3 metadata allocation is the filled DTO. Mutate it from the next
-        // allocator callback to prove that the frame authenticates content, not just its slice.
-        if (self.allocation_count == 2) {
-            const dto = self.first_allocation orelse return null;
-            dto[0] ^= 1;
-        }
-        const candidate = self.parent.rawAlloc(len, alignment, ra) orelse return null;
-        if (self.allocation_count == 1) self.first_allocation = candidate[0..len];
-        return candidate;
-    }
-
-    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
-        return false;
-    }
-
-    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
-        return null;
-    }
-
-    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        self.parent.rawFree(memory, alignment, ra);
-    }
-};
-
 fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
     const generation_transport_mod = @import("generation_transport.zig");
     const Probe = struct {
@@ -7310,9 +7268,8 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
             view: anytype,
             correlation: anytype,
         ) !void {
-            var hostile = PreparationDtoDriftAllocator{ .parent = testing.allocator };
             var runtime: RemoteRuntime = undefined;
-            runtime.allocator = hostile.allocator();
+            runtime.allocator = testing.allocator;
             runtime.direct_input = .empty;
             runtime.direct_input_offset = 0;
             runtime.pending_controls = .empty;
@@ -7323,6 +7280,7 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
             runtime.pending_event_owner = .{};
             runtime.runtime_lifetime = .{};
             try runtime.initializePendingEventOwner();
+            pending_event_preparation_mod.testing.armObservationContentDriftOnDtoFree();
             try runtime.classifyAndPrepareEventFromSourceForTest(source_owner, view, correlation);
             return error.TestUnexpectedResult;
         }

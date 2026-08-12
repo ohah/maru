@@ -47,6 +47,9 @@ typedef struct {
 /// 논리 크기를 주고 그릴 quad 개수를 받는다. 목록은 `maru_mobile_quads()`.
 unsigned int maru_mobile_build(unsigned int width, unsigned int height);
 const MaruQuad *maru_mobile_quads(void);
+/// build 가 낼 수 있는 **최대** quad 수. GPU 버퍼를 이만큼 잡으면 잘릴 일이 없다. 상한을
+/// host 마다 손으로 적으면 어긋난다 — iOS 는 늘리고 Android 는 4096 에서 조용히 자르고 있었다.
+unsigned int maru_mobile_max_quads(void);
 /// 0 quad 가 나왔을 때 **무엇이 실패했는지** 플랫폼이 볼 수 있어야 한다.
 ///
 /// **읽은 쪽이 비운다.** build 가 프레임마다 비우면 프레임 *사이*에 난 실패(입력의 core

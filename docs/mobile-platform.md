@@ -90,6 +90,10 @@ src/platform/
 | 플랫폼 → 코어 | 터치 지점(논리 px) | `maru_mobile_hit_cell(x, y)` |
 | 코어 → 플랫폼 | 아직 아틀라스에 없는 코드포인트 | `maru_mobile_missing_*` |
 
+**폴백 아틀라스는 없다.** 기기 래스터가 실패하면 글리프 없이 뜬다 — 예전에 두던 "호스트가
+만든 아틀라스를 읽는" 경로는 개발 스크립트가 넣어 준 파일에 기대는 것이라 **실제 앱에는 그
+파일이 없었다**. 제품 폴백이 아니라 PoC 잔재였다.
+
 **논리 좌표계로 되돌리는 자리는 플랫폼이 갖는다.** iOS 는 `UIScreen.scale` + `safeAreaInsets`,
 Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으로 확인했다 — 같은
 논리 좌표를 주면 두 플랫폼이 같은 셀을 답한다(물리 좌표는 200,300 과 525,753 으로 다르다).

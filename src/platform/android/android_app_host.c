@@ -844,10 +844,15 @@ static int rasterizeOneGlyph(struct android_app *app, uint32_t cp, uint8_t *out,
         (*env)->CallVoidMethod(env, paint,
             (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
         jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
+        // **asset 에서 읽는다.** 초기 아틀라스만 고치고 이 성장 경로를 놓쳤었다 — 그러면
+        // push 안 한 기기에서 처음 굽는 글자만 시스템 글꼴이 되어 **글꼴이 섞인다**.
+        jclass actCls2 = (*env)->GetObjectClass(env, app->activity->clazz);
+        jobject assets = (*env)->CallObjectMethod(env, app->activity->clazz,
+            (*env)->GetMethodID(env, actCls2, "getAssets", "()Landroid/content/res/AssetManager;"));
         jobject face = (*env)->CallStaticObjectMethod(env, tfCls,
-            (*env)->GetStaticMethodID(env, tfCls, "createFromFile",
-                "(Ljava/lang/String;)Landroid/graphics/Typeface;"),
-            (*env)->NewStringUTF(env, "/data/local/tmp/Jetendard-Regular.ttf"));
+            (*env)->GetStaticMethodID(env, tfCls, "createFromAsset",
+                "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/graphics/Typeface;"),
+            assets, (*env)->NewStringUTF(env, "Jetendard-Regular.ttf"));
         if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
         if (face) (*env)->CallObjectMethod(env, paint,
             (*env)->GetMethodID(env, pCls, "setTypeface",

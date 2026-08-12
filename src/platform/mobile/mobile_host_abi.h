@@ -62,13 +62,22 @@ const char *maru_mobile_last_error(void);
 void maru_mobile_clear_error(void);
 
 /// 아틀라스 등록부. 플랫폼이 글리프를 굽고 그 자리를 알려 준다.
+///
+/// `style` 은 굵게(1)·기울임(2) 비트다 — **Android `Typeface` 상수와 같은 값**이라 그쪽은
+/// 그대로 넘기고, iOS 는 이 비트로 번들 폰트 파일을 고른다. 같은 글자라도 굵은 판은 **다른
+/// 글리프**라 슬롯이 따로 있어야 한다(등록부 키가 코드포인트+스타일인 이유).
+#define MARU_STYLE_BOLD 1
+#define MARU_STYLE_ITALIC 2
 void maru_mobile_atlas_geometry(unsigned int cell_w, unsigned int cell_h);
-void maru_mobile_atlas_add(unsigned int cp, unsigned int col, unsigned int row, unsigned int advance);
+void maru_mobile_atlas_add(unsigned int cp, unsigned int style,
+                           unsigned int col, unsigned int row, unsigned int advance);
 
 /// 아직 아틀라스에 없어 못 그린 코드포인트들. 플랫폼이 그것만 구워 넣는다.
 /// 고정 집합으로 두면 처음 보는 글자가 **조용히** 안 그려진다(실측으로 드러났다).
 unsigned int maru_mobile_missing_count(void);
 unsigned int maru_mobile_missing_cp(unsigned int i);
+/// i번째 놓친 것의 스타일 비트. 코드포인트와 **함께** 읽어야 어느 폰트로 구울지 안다.
+unsigned int maru_mobile_missing_style(unsigned int i);
 /// 다음 빈 슬롯 — 상위 16비트=열, 하위 16비트=행.
 unsigned int maru_mobile_next_slot(unsigned int cols);
 void maru_mobile_missing_clear(void);

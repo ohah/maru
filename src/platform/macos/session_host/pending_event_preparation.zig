@@ -5,6 +5,7 @@
 //! reverse cleanup needed before a later adapter may publish into PendingEventOwner.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const cleanup = @import("event_cleanup_seal.zig");
 const event_preparation = @import("runtime_event_preparation.zig");
@@ -1924,6 +1925,16 @@ test "C3-3b2b3 hostile runtime admission table executes all 23 owner decisions" 
 const CallbackMutation = enum(u8) { owner, operation, source, progress, snapshot, allocator };
 var callback_mutation: CallbackMutation = .owner;
 var mutate_observation_content_on_dto_free = false;
+
+pub const testing = if (builtin.is_test) struct {
+    /// 외부 allocator 호출 순서에 기대지 않고 preparation이 봉인한 DTO role의 실제 free
+    /// callback에서 semantic backing을 한 번만 변조한다.
+    pub fn armObservationContentDriftOnDtoFree() void {
+        if (mutate_observation_content_on_dto_free)
+            @panic("DTO free proof-loss hook이 이미 활성 상태다");
+        mutate_observation_content_on_dto_free = true;
+    }
+} else struct {};
 
 fn mutatePreparationDuringCallback(context: *PreparationAllocatorContext) void {
     const frame = allocatorFrame(context);

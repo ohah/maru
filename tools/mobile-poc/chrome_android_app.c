@@ -44,6 +44,10 @@ extern unsigned int maru_icon_slot_px(void);
 extern unsigned int maru_icon_count(void);
 extern unsigned int maru_term_input(const char *bytes, size_t len);
 extern unsigned int maru_hit_cell(float x, float y);
+extern unsigned int maru_missing_count(void);
+extern unsigned int maru_missing_cp(unsigned int i);
+extern unsigned int maru_next_slot(unsigned int cols);
+extern void maru_missing_clear(void);
 
 typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Push;
 
@@ -68,6 +72,8 @@ static struct {
     VkSemaphore acquire_sem, submit_sem;
     VkFence fence;
     VkImageView glyph_view, icon_view;
+    VkImage glyph_image;   // 온디맨드 성장은 view 가 아니라 image 에 복사한다
+    uint32_t glyph_w, glyph_h;
     VkDescriptorSet dset;
     uint32_t atlas_cols, atlas_rows;
     float scale;
@@ -83,6 +89,9 @@ static struct {
     int64_t vsync_count;
 } g;
 
+// drawFrame 은 app 을 안 받는다 — 온디맨드 래스터가 JNI 를 쓰려면 필요해서 들고 있는다.
+static struct android_app *g_app = NULL;
+static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 static uint32_t g_gw, g_gh;
 
@@ -243,7 +252,7 @@ static VkShaderModule loadSpv(const char *path) {
 }
 
 static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t bpp,
-                         VkFormat fmt, VkImageView *outView) {
+                         VkFormat fmt, VkImageView *outView, VkImage *outImage) {
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
                             .format = fmt, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -318,6 +327,7 @@ static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t
     VkImageViewCreateInfo ivci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
                                   .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    if (outImage) *outImage = img;
     return vkCreateImageView(g.dev, &ivci, NULL, outView) == VK_SUCCESS;
 }
 
@@ -432,10 +442,13 @@ static int initVulkan(ANativeWindow *win) {
     vkAllocateCommandBuffers(g.dev, &cbai, g.cbs);
 
     // 텍스처: 글리프(호스트 아틀라스) + 아이콘(Zig 가 만든 coverage)
-    if (g_glyph_px) uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &g.glyph_view);
+    if (g_glyph_px) {
+        uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &g.glyph_view, &g.glyph_image);
+        g.glyph_w = g_gw; g.glyph_h = g_gh;
+    }
     uint32_t filled = maru_icon_build();
     uint32_t slot = maru_icon_slot_px(), cnt = maru_icon_count();
-    uploadTexture(maru_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM, &g.icon_view);
+    uploadTexture(maru_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM, &g.icon_view, NULL);
     LOGI("icons filled=%u/%u", filled, cnt);
 
     VkSamplerCreateInfo sampci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -536,6 +549,8 @@ static void drawFrame(void) {
     unsigned int lw = (unsigned int)(g.extent.width / scale);
     unsigned int lh = (unsigned int)((g.extent.height - g.inset_top - g.inset_bottom) / scale);
     unsigned int n = maru_chrome_build(lw, lh);
+    // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
+    if (g_app) growAtlas(g_app);
     const CQuad *quads = maru_chrome_quads();
     if (g.frames == 0) LOGI("quads=%u err=%s logical=%ux%u", n, maru_chrome_last_error(), lw, lh);
 
@@ -724,6 +739,151 @@ static void teardownVulkan(void) {
     LOGI("MARU_LIFECYCLE window_destroyed vulkan_torn_down");
 }
 
+// 한 글자를 셀 크기 버퍼에 굽는다. 아틀라스를 처음 만들 때와 **같은 폰트·같은 배치**를
+// 써야 새로 넣은 글리프가 기존 것과 어긋나지 않는다(baseline = CH-8).
+static int rasterizeOneGlyph(struct android_app *app, uint32_t cp, uint8_t *out,
+                             uint32_t CW, uint32_t CH, uint32_t *advance) {
+    JavaVM *vm = app->activity->vm;
+    JNIEnv *env = NULL;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return 0;
+    int ok = 0;
+    jclass bmCls = (*env)->FindClass(env, "android/graphics/Bitmap");
+    jclass cfgCls = (*env)->FindClass(env, "android/graphics/Bitmap$Config");
+    jobject cfg = (*env)->GetStaticObjectField(env, cfgCls,
+        (*env)->GetStaticFieldID(env, cfgCls, "ALPHA_8", "Landroid/graphics/Bitmap$Config;"));
+    jobject bmp = (*env)->CallStaticObjectMethod(env, bmCls,
+        (*env)->GetStaticMethodID(env, bmCls, "createBitmap",
+            "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;"),
+        (jint)CW, (jint)CH, cfg);
+    if (bmp) {
+        jclass cvCls = (*env)->FindClass(env, "android/graphics/Canvas");
+        jobject canvas = (*env)->NewObject(env, cvCls,
+            (*env)->GetMethodID(env, cvCls, "<init>", "(Landroid/graphics/Bitmap;)V"), bmp);
+        jclass pCls = (*env)->FindClass(env, "android/graphics/Paint");
+        jobject paint = (*env)->NewObject(env, pCls,
+            (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1);
+        (*env)->CallVoidMethod(env, paint,
+            (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)22.0f);
+        (*env)->CallVoidMethod(env, paint,
+            (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
+        jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
+        jobject face = (*env)->CallStaticObjectMethod(env, tfCls,
+            (*env)->GetStaticMethodID(env, tfCls, "createFromFile",
+                "(Ljava/lang/String;)Landroid/graphics/Typeface;"),
+            (*env)->NewStringUTF(env, "/data/local/tmp/Jetendard-Regular.ttf"));
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
+        if (face) (*env)->CallObjectMethod(env, paint,
+            (*env)->GetMethodID(env, pCls, "setTypeface",
+                "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), face);
+        jchar unit = (jchar)cp;
+        jstring s = (*env)->NewString(env, &unit, 1);
+        (*env)->CallVoidMethod(env, canvas,
+            (*env)->GetMethodID(env, cvCls, "drawText", "(Ljava/lang/String;FFLandroid/graphics/Paint;)V"),
+            s, (jfloat)1.0f, (jfloat)(CH - 8), paint);
+        jfloat adv = (*env)->CallFloatMethod(env, paint,
+            (*env)->GetMethodID(env, pCls, "measureText", "(Ljava/lang/String;)F"), s);
+        *advance = (uint32_t)(adv + 0.5f);
+        if (*advance == 0) *advance = CW / 2;
+        void *pixels = NULL;
+        AndroidBitmapInfo info;
+        if (AndroidBitmap_getInfo(env, bmp, &info) == 0 &&
+            AndroidBitmap_lockPixels(env, bmp, &pixels) == 0) {
+            for (uint32_t y = 0; y < CH; y++)
+                memcpy(out + y * CW, (uint8_t *)pixels + y * info.stride, CW);
+            AndroidBitmap_unlockPixels(env, bmp);
+            ok = 1;
+        }
+        (*env)->DeleteLocalRef(env, s);
+    }
+    (*vm)->DetachCurrentThread(vm);
+    return ok;
+}
+
+// **아틀라스를 키운다.** 텍스처를 다시 만들지 않고 그 셀 자리에만 복사한다 —
+// 아틀라스 부분 업데이트(여섯 기능 4번)를 그대로 쓴다. iOS `replaceRegion:` 과 같은 자리다.
+static void growAtlas(struct android_app *app) {
+    unsigned int n = maru_missing_count();
+    if (n == 0 || !g.glyph_image || !g.dev) return;
+    const uint32_t CW = 24, CH = 32;
+    uint8_t cell[24 * 32];
+    unsigned int added = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        unsigned int cp = maru_missing_cp(i);
+        if (cp == 0 || cp > 0xFFFF) continue;
+        unsigned int slot = maru_next_slot(g.atlas_cols);
+        uint32_t col = slot >> 16, row = slot & 0xFFFF;
+        if (row >= g.atlas_rows) break;  // 꽉 찼다 — 축출은 이 PoC 범위 밖이다
+        memset(cell, 0, sizeof cell);
+        uint32_t advance = CW / 2;
+        if (!rasterizeOneGlyph(app, cp, cell, CW, CH, &advance)) continue;
+
+        // staging 버퍼 → 이미지의 그 사각형만 복사.
+        VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                  .size = sizeof cell, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+        VkBuffer stage;
+        if (vkCreateBuffer(g.dev, &bci, NULL, &stage) != VK_SUCCESS) continue;
+        VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.dev, stage, &mr);
+        VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(g.pd, &mp);
+        uint32_t mt = UINT32_MAX;
+        for (uint32_t k = 0; k < mp.memoryTypeCount; k++) {
+            int want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            if ((mr.memoryTypeBits & (1u << k)) && (mp.memoryTypes[k].propertyFlags & want) == want) { mt = k; break; }
+        }
+        VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                    .allocationSize = mr.size, .memoryTypeIndex = mt};
+        VkDeviceMemory mem;
+        if (vkAllocateMemory(g.dev, &mai, NULL, &mem) != VK_SUCCESS) { vkDestroyBuffer(g.dev, stage, NULL); continue; }
+        vkBindBufferMemory(g.dev, stage, mem, 0);
+        void *map = NULL;
+        vkMapMemory(g.dev, mem, 0, VK_WHOLE_SIZE, 0, &map);
+        memcpy(map, cell, sizeof cell);
+        vkUnmapMemory(g.dev, mem);
+
+        VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                            .commandPool = g.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                            .commandBufferCount = 1};
+        VkCommandBuffer cb;
+        vkAllocateCommandBuffers(g.dev, &cbai, &cb);
+        VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+        vkBeginCommandBuffer(cb, &bi);
+        // 이미 셰이더가 읽는 레이아웃이라 transfer 로 내렸다가 되돌린다.
+        VkImageMemoryBarrier tb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                   .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .image = g.glyph_image,
+                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                   .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                                   .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, NULL, 0, NULL, 1, &tb);
+        VkBufferImageCopy region = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                    .imageOffset = {(int32_t)(col * CW), (int32_t)(row * CH), 0},
+                                    .imageExtent = {CW, CH, 1}};
+        vkCmdCopyBufferToImage(cb, stage, g.glyph_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        tb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        tb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        tb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        tb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, NULL, 0, NULL, 1, &tb);
+        vkEndCommandBuffer(cb);
+        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+        vkQueueSubmit(g.queue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(g.queue);
+        vkFreeCommandBuffers(g.dev, g.pool, 1, &cb);
+        vkDestroyBuffer(g.dev, stage, NULL);
+        vkFreeMemory(g.dev, mem, NULL);
+
+        maru_atlas_add(cp, col, row, advance);
+        added++;
+    }
+    maru_missing_clear();
+    if (added) LOGI("MARU_ATLAS grew=%u", added);
+}
+
 static void onAppCmd(struct android_app *app, int32_t cmd) {
     if (cmd == APP_CMD_TERM_WINDOW) {
         teardownVulkan();
@@ -753,6 +913,7 @@ static void frameCallback(int64_t frame_time_ns, void *data) {
 }
 
 void android_main(struct android_app *app) {
+    g_app = app;
     app->onAppCmd = onAppCmd;
     app->onInputEvent = onInputEvent;
     int chor_started = 0;

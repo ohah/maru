@@ -374,6 +374,11 @@ pub fn appendBackgroundQuads(
 ) void {
     for (draws) |draws_for_layer| for (draws_for_layer.ops) |op| switch (op) {
         .quad => |quad| {
+            // 면적 0 clip은 "한 픽셀도 안 보인다"는 뜻인데, shader 규약은 `clip.z == 0`을 **"클립 없음"**으로
+            // 읽는다(maru_metal_shader.h). 그대로 내리면 정반대로 자르지 않은 quad가 되므로 여기서 버린다.
+            // 상류 `ui.paint`도 같은 판정을 하지만, component가 직접 낸 장식 quad는 그 경로를 지나지 않는다 —
+            // 규약을 아는 유일한 자리인 이 lowerer가 마지막 관문이다.
+            if (quad.clip) |clip| if (clip.w == 0 or clip.h == 0) continue;
             // `ChromeDraw.Quad.alpha` is semantic paint data, not a Lab-only decoration.
             // Preserve it in the renderer's ARGB colors so loading skeletons and later hover
             // transitions keep the same token-relative contrast on the actual Metal host.
@@ -815,4 +820,26 @@ test "appendBackgroundQuads puts every quad on the caller's layer" {
         try std.testing.expectEqual(b.h, o.h);
         try std.testing.expectEqual(b.fill_color0, o.fill_color0);
     }
+}
+
+test "appendBackgroundQuads drops an empty clip instead of inverting it into no clip" {
+    // 회귀(사용자 보고): 스크롤로 뷰포트를 완전히 벗어난 카드 배경이 고정 header/scope 위에 그려졌다.
+    // shader 규약은 `clip.z == 0`을 **클립 없음**으로 읽으므로(maru_metal_shader.h), 면적 0 clip을 그대로
+    // 내리면 "아무것도 안 보인다"가 "전부 보인다"로 뒤집힌다.
+    const Rgb = maru.color.Rgb;
+    const tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 0, .y = -400, .w = 10, .h = 4 }, .fill_role = .surface_bg, .clip = .{ .x = 0, .y = 0, .w = 10, .h = 0 } } },
+        .{ .quad = .{ .rect = .{ .x = 0, .y = -400, .w = 10, .h = 4 }, .fill_role = .surface_bg, .clip = .{ .x = 0, .y = 0, .w = 0, .h = 4 } } },
+        // clip이 아예 없는 quad는 "안 자른다"는 뜻이므로 그대로 남는다 — 고정 chrome이 이 경우다.
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg } },
+        // 면적이 남아 있는 clip도 물론 남는다.
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg, .clip = .{ .x = 0, .y = 0, .w = 10, .h = 2 } } },
+    };
+
+    var quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    defer quads.deinit(std.testing.allocator);
+    appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 0, 0, &quads, 2);
+    try std.testing.expectEqual(@as(usize, 2), quads.items.len);
+    for (quads.items) |q| try std.testing.expectEqual(@as(f32, 0), q.y);
 }

@@ -55,6 +55,7 @@ pub fn paint(
             .none => if (entry.kind != .container and entry.kind != .scroll_area) return error.InvalidSnapshot,
             .card => |visual| {
                 if (entry.kind != .card) return error.InvalidSnapshot;
+                if (fullyClipped(entry)) continue;
                 const rect = try snapRect(entry.rect);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
@@ -72,6 +73,7 @@ pub fn paint(
             },
             .button => |visual| {
                 if (entry.kind != .button) return error.InvalidSnapshot;
+                if (fullyClipped(entry)) continue;
                 const rect = try snapRect(entry.rect);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
@@ -94,6 +96,18 @@ pub fn paint(
         }
     }
     return .{ .layer = layer, .ops = buffers.ops[0..count] };
+}
+
+/// 이 entry가 자기 clip에 **통째로** 잘렸는가. `layout.intersectRect`는 교차가 비면 면적 0 rect를 주고
+/// (`layout.zig`), 그것은 "한 픽셀도 보이지 않는다"는 뜻이다. 그런데 backend의 quad clip 규약은 폭 0을
+/// **"클립 없음"**으로 읽으므로(`maru_metal_shader.h`의 `clip.z == 0`), 그대로 내보내면 정반대로 자르지
+/// 않은 원본 rect가 통째로 그려진다 — 스크롤로 뷰포트를 완전히 벗어난 카드 배경이 고정 chrome 위에
+/// 떠 있던 사용자 보고가 이것이다. 안 보이는 quad는 여기서 없앤다.
+///
+/// NaN clip도 여기서 걸러진다(비교가 전부 false라 `!(> 0)`이 참). 그리는 쪽에 넘겨 봐야 좌표가 없다.
+fn fullyClipped(entry: ui_tree.RectEntry) bool {
+    const clip = entry.effective_clip orelse return false;
+    return !(clip.width > 0 and clip.height > 0);
 }
 
 /// published clip을 semantic quad에 **그대로** 싣는다. 여기서 rect를 미리 자르지 않는 것이 핵심이다 —
@@ -333,6 +347,48 @@ test "paint carries the completed tree clip on the quad instead of cutting its r
     const clip = out.ops[0].quad.clip orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(i32, 0), clip.y);
     try std.testing.expectEqual(@as(u32, 12), clip.h);
+}
+
+test "paint drops a fully clipped quad instead of publishing an empty clip" {
+    // 회귀(사용자 보고): 펼친 카드를 스크롤로 목록 위까지 올리면 그 카드 배경이 고정 header/scope 위에
+    // 통째로 그려졌다. `layout.intersectRect`가 빈 교차를 면적 0 rect로 접고, backend는 폭 0 clip을
+    // "클립 없음"으로 읽기 때문이다(maru_metal_shader.h). 안 보이는 quad는 아예 내지 않는다.
+    const tk = testTokens();
+    const entries = [_]ui_tree.RectEntry{
+        .{
+            .id = 1,
+            .parent_index = null,
+            .kind = .card,
+            .rect = .{ .x = 0, .y = -200, .width = 20, .height = 20 },
+            // 뷰포트 위로 완전히 벗어난 자식의 교차: 원점은 컨테이너 경계 안이고 면적만 0이다.
+            .effective_clip = .{ .x = 0, .y = 0, .width = 20, .height = 0 },
+            .action = .{ .id = 1 },
+            .visual = .{ .card = .{ .variant = .surface, .paint = .{} } },
+        },
+        .{
+            .id = 2,
+            .parent_index = null,
+            .kind = .button,
+            .rect = .{ .x = 0, .y = -200, .width = 20, .height = 20 },
+            .effective_clip = .{ .x = 0, .y = 0, .width = 0, .height = 20 },
+            .action = .{ .id = 2 },
+            .visual = .{ .button = .{ .variant = .primary, .paint = .{} } },
+        },
+        // 같은 프레임의 보이는 형제는 그대로 남는다 — "전부 지운다"가 아니라 "안 보이는 것만"이다.
+        .{
+            .id = 3,
+            .parent_index = null,
+            .kind = .card,
+            .rect = .{ .x = 0, .y = 0, .width = 20, .height = 20 },
+            .effective_clip = .{ .x = 0, .y = 0, .width = 20, .height = 20 },
+            .action = .{ .id = 3 },
+            .visual = .{ .card = .{ .variant = .surface, .paint = .{} } },
+        },
+    };
+    var ops: [3]draw.Op = undefined;
+    const out = try paint(.{ .entries = &entries }, .{}, &tk, .sidebar, .{ .ops = &ops });
+    try std.testing.expectEqual(@as(usize, 1), out.ops.len);
+    try std.testing.expectEqual(@as(i32, 0), out.ops[0].quad.rect.y);
 }
 
 test "paint fails closed for bad snapshots and fixed-capacity overflow" {

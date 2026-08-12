@@ -539,7 +539,11 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     //
     // 커서가 없으면 화살표·선택이 **눈으로 검증되지 않는다**(로그가 유일한 판정자가 된다).
     // 그래서 이 자리가 이후 슬라이스 전부의 선행 조건이다.
-    if (core.cursor_visible and core.screen.cursor.visible) {
+    // **가시성 규칙은 코어의 합성과 같아야 한다.** `screen.cursor.visible` 은 코어가 "내부
+    // 불변" 이라고 적어 둔 값이라 늘 참이고, 실제 판단은 snapshot 이 합성한다 —
+    // DECTCEM(`cursor_visible`) **그리고** 스크롤백을 보고 있지 않을 것(`view_offset == 0`).
+    // 내부 필드만 보면 스크롤백을 볼 때도 커서를 그린다(스크롤이 붙는 M4b 에서 드러날 자리).
+    if (core.cursor_visible and core.viewOffset() == 0) {
         const cur = core.screen.cursor;
         if (cur.col < grid_cols and cur.row < grid_rows) {
             const cx = ox + @as(i32, cur.col) * cell_w;
@@ -547,13 +551,18 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             const cy = oy + @as(i32, cur.row) * line_h;
             const rgb = tk.get(.cursor);
             const shape = core.cursor_shape;
+            // **2셀 글자 위에서는 두 칸을 덮는다.** 한 칸만 덮으면 한글 절반에만 걸려
+            // "커서가 글자 가운데 있는" 모양이 된다(글자 폭은 코어가 정한 값을 쓴다).
+            // continuation 칸(width 0)에 놓이면 한 칸이다 — 코어가 거기 커서를 두지 않는다.
+            const cur_cell = core.screen.cells[core.index(cur.row, cur.col)];
+            const cur_w = if (cur_cell.width == 2) cell_w * 2 else cell_w;
             // 블록은 칸을 채우고, 밑줄은 아래 굵은 선, 막대는 왼쪽 세로선이다.
             const r: draw.Rect = switch (shape) {
-                .block => .{ .x = cx, .y = cy, .w = @intCast(cell_w), .h = @intCast(line_h) },
+                .block => .{ .x = cx, .y = cy, .w = @intCast(cur_w), .h = @intCast(line_h) },
                 .underline => .{
                     .x = cx,
                     .y = cy + line_h - 2 * rule,
-                    .w = @intCast(cell_w),
+                    .w = @intCast(cur_w),
                     .h = @intCast(2 * rule),
                 },
                 .bar => .{ .x = cx, .y = cy, .w = @intCast(2 * rule), .h = @intCast(line_h) },

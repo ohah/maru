@@ -15,9 +15,24 @@
   전용**이고, 로컬 PTY 는 Android 에만 존재한다. 이것이 모바일 지원의 성격을 정한다 —
   iOS 앱은 PC 의 원격 뷰어이고 [컨트롤 플레인](control-plane.md)이 선택이 아니라 전제다.
   ([베이스](#5-베이스): 출시된 iOS 터미널이 전부 SSH/Mosh 클라이언트인 것이 같은 결론이다.)
-- **Android host 는 `GameActivity` 다.** `NativeActivity` 는 소프트 키보드가 ASCII 물리 키
-  이벤트를 줄 때만 입력이 되고 **IME 를 못 받는다** — 한글 조합이 필수인 터미널에서는 쓸 수
-  없다. `GameActivity` 의 `GameTextInput` 이 그 자리를 채운다.
+- **Android IME 는 자체 Java shim 이 받는다**(`NativeActivity` 유지). `NativeActivity` 만으로는
+  소프트 키보드가 ASCII 물리 키 이벤트를 줄 때만 입력이 되고 **IME 를 못 받는다** — 한글
+  조합이 필수인 터미널에서는 쓸 수 없다. 구글의 `GameActivity`/`GameTextInput` 이 그 자리를
+  채우지만 **`AppCompatActivity` 를 상속해 AndroidX 의존 트리와 Gradle 을 끌고 온다**(실측:
+  1.2.2~4.4.2 전 버전). 그래서 `InputConnection` 을 직접 받는 ~120줄 Java 로 간다.
+
+  **한글 조합 알고리즘은 우리 것이 아니다.** IME 가 계산해 문자열로 주고, shim 은
+  `setComposingText`(조합 중)·`commitText`(확정)를 JNI 로 넘기기만 한다. 같은 조건의
+  터미널(Termux)이 `GameActivity` 없이 이 방식으로 선다.
+
+  **판단 근거는 유지보수다.** 모바일은 CI 에 안 붙으므로(§6) Gradle·AGP·JDK 삼각 버전은
+  **정기적으로 돌지 않으면 조용히 썩는다**. `javac` + `android.jar` + `d8` 은 의존이 없고
+  안드로이드 SDK 의 하위 호환이 강하다. Gradle 은 Play 배포·App Bundle 처럼 실제로 필요해질
+  때 도입한다 — 지금 넣으면 쓰지 않으면서 썩는다.
+
+  **Kotlin 은 쓰지 않는다.** 구조가 같고(같은 콜백 두 개), 대가로 `kotlin-stdlib` 가 APK 에
+  들어가며 `companion object` 의 JNI 심볼이 `@JvmStatic` 없이는 런타임에 죽는다. 이 120줄에는
+  Kotlin 의 이점이 나올 자리가 없다.
 - **draw-list 는 배칭해 그린다.** quad 하나당 draw call 하나는 모바일 타일 기반 GPU 에서
   특히 비싸다. 데스크톱이 이미 vertex buffer 로 배칭하므로(`maru_metal_renderer.m`) 같은
   모양을 쓴다 — 새 경로를 만들지 않는다.
@@ -37,7 +52,8 @@ src/platform/
     ios_metal_renderer.m   Metal 백엔드(배칭)
     ios_text.m             CoreText 래스터 + 아틀라스 성장
   android/
-    android_app_host.c     GameActivity host: 창·생명주기·입력·IME
+    android_app_host.c     NativeActivity host: 창·생명주기·터치
+    MaruActivity.java      IME shim: 조합 중/확정 문자열을 JNI 로 넘긴다(~120줄)
     android_vulkan_renderer.c  Vulkan 백엔드(배칭)
     android_text.c         JNI Paint 래스터 + 아틀라스 성장
     AndroidManifest.xml

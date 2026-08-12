@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- NativeActivity 라 Java/Kotlin 코드가 0줄이다. `hasCode="false"` 가 그 선언이고,
-     `android.app.lib_name` 이 진입점 .so 를 가리킨다. maru 의 "네이티브 최소" 정책과 맞다.
+<!-- host 는 `NativeActivity` 를 상속한 `MaruActivity` 다. 상속하는 이유는 **IME 하나**다 —
+     소프트 키보드가 만든 한글을 `InputConnection` 으로 받으려면 Java 쪽 진입점이 필요하다.
+     구글의 `GameActivity` 는 `AppCompatActivity` 를 상속해 AndroidX·Gradle 을 끌고 와서
+     쓰지 않는다(docs/mobile-platform.md §1). `android.*` 만 쓰므로 의존은 여전히 0 이다.
 
      화면 방향은 portrait 로 고정한다 — 앞 오프스크린 단계에서 가로로 나온 지적을 여기서는
      창 자체가 세로가 되게 해서 푼다. -->
@@ -9,11 +11,12 @@
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
     <!-- debuggable 은 PoC 전용이다 — run-as 로 앱 내부의 래스터 결과를 꺼내 대조한다. -->
-    <application android:label="MaruChrome" android:hasCode="false" android:debuggable="true">
-        <activity android:name="android.app.NativeActivity"
+    <application android:label="MaruChrome" android:debuggable="true">
+        <activity android:name="dev.maru.MaruActivity"
                   android:label="MaruChrome"
                   android:screenOrientation="portrait"
                   android:configChanges="orientation|keyboardHidden|screenSize"
+                  android:windowSoftInputMode="adjustResize"
                   android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="maruchrome" />
             <intent-filter>

@@ -80,7 +80,20 @@ const term_feed =
 var input_buf: [512]u8 = undefined;
 var input_len: usize = 0;
 
+// **조합 중 문자열은 코어에 안 넣는다.** 확정 전에 PTY 로 흘리면 셸이 `ㅎ` 같은 자모를
+// 명령어 일부로 받는다. 화면에만 흐리게 그릴 겉치레라 별도 상태로 둔다 — 데스크톱 maru 의
+// IME 계약(삽입형 + dim 고스트)과 같은 모양이다.
+var preedit_buf: [128]u8 = undefined;
+var preedit_len: usize = 0;
+
+export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
+    const n = @min(len, preedit_buf.len);
+    @memcpy(preedit_buf[0..n], ptr[0..n]);
+    preedit_len = n;
+}
+
 export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
+    preedit_len = 0; // 확정됐으니 겉치레를 지운다
     const n = @min(len, input_buf.len - input_len);
     if (n == 0) return @intCast(input_len);
     @memcpy(input_buf[input_len..][0..n], ptr[0..n]);
@@ -162,6 +175,15 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     body_line_h = line_h;
 
     const core = &(term_core orelse return);
+
+    // 조합 중 문자열을 커서 자리에 **흐리게** 얹는다. 셀 격자 뒤라 그 위에 그려진다.
+    if (preedit_len > 0) {
+        const cur = core.screen.cursor;
+        const px = @as(i32, @intFromFloat(rect.x)) + @as(i32, cur.col) * @divTrunc(cw, 2);
+        const py = @as(i32, @intFromFloat(rect.y)) + @as(i32, cur.row) * line_h;
+        const dim = tk.get(.muted_fg);
+        pushText(preedit_buf[0..preedit_len], px, py, font_px, dim);
+    }
 
     var row: u16 = 0;
     while (row < rows) : (row += 1) {

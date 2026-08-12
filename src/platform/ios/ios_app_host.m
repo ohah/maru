@@ -418,13 +418,19 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     Uni *dst = (Uni *)_quadBuf.contents;
     for (unsigned int i = 0; i < n; i++) {
         const MaruQuad *q = &quads[i];
-        float cols = (q->kind == 2) ? 1.0f : (float)_atlasCols;
+        // kind=3 은 슬롯의 **왼쪽 절반**이다 — 슬롯 하나가 양폭 상자라 단폭 글자는 절반만 쓴다.
+        // 셰이더는 `(cell.xy + t)/cell.zw` 뿐이라, 열과 나누는 수를 함께 2배로 주면 그대로
+        // 왼쪽 절반이 나온다. 셰이더에는 kind=1 로 넘긴다.
+        int half = (q->kind == 3);
+        float cols = (q->kind == 2) ? 1.0f : (float)_atlasCols * (half ? 2.0f : 1.0f);
         float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)_atlasRows;
+        float cx = (float)q->cell_x * (half ? 2.0f : 1.0f);
+        float kind = half ? 1.0f : (float)q->kind;
         Uni u = {{q->x + (float)safe.left, q->y + (float)safe.top,
                   q->x + q->w + (float)safe.left, q->y + q->h + (float)safe.top},
                  {q->r, q->g, q->b, q->a},
-                 {q->radius, (float)self.bounds.size.width, (float)self.bounds.size.height, (float)q->kind},
-                 {(float)q->cell_x, (float)q->cell_y, cols, rows}};
+                 {q->radius, (float)self.bounds.size.width, (float)self.bounds.size.height, kind},
+                 {cx, (float)q->cell_y, cols, rows}};
         dst[i] = u;
     }
     if (n > 0) {

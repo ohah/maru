@@ -339,8 +339,11 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .inset_x_px = 4,
         .min_thumb_px = 24,
     };
-    const scrollbar_gutter_px: u32 = scrollbar_metrics.gutterPx();
-    const total_cols: u16 = @intCast((viewport_w -| scrollbar_gutter_px) / cell_w_px);
+    const total_cols: u16 = @intCast((viewport_w -| scrollbar_metrics.gutterPx()) / cell_w_px);
+    // **남은 공간 전부가 스크롤바 gutter다.** `total_cols`가 버림이라 본문이 셀 경계에서 끝나고,
+    // 요구한 gutter(12px)보다 넓은 자투리가 생긴다 — 그것을 gutter에 포함하지 않으면 막대가 화면
+    // 오른쪽 끝에서 어중간하게 떠 있다(실측 6px). 남은 폭을 그대로 주면 막대가 그 안에 가운데로 선다.
+    const scrollbar_gutter_px: u32 = viewport_w -| (@as(u32, total_cols) * cell_w_px);
     const lines: []const []const u8 = switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,

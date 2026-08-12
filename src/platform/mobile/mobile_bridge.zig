@@ -115,11 +115,34 @@ pub export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
     preedit_len = n;
 }
 
+/// 코어가 만든 **답**(DA·DSR·커서 위치…)을 치운다. 데스크톱은 이걸 PTY 로 흘리고 비운다
+/// (`app/runtime.zig`·`app/pty_reader.zig`). 모바일에는 아직 흘려보낼 곳이 없다 — 원격
+/// 세션(M3)이 그 자리다. 그때까지는 **버리되 조용히 버리지 않는다**(§5).
+///
+/// 안 치우면 쌓이기만 한다: 질의 3000번에 15005바이트(실측). 오늘도 ESC 를 눌러 `[c` 를
+/// 치면 닿는 경로이고, 원격 세션이 붙으면 셸이 알아서 질의한다.
+fn drainResponse(core: *terminal.core.TerminalCore) void {
+    if (core.pendingResponse().len == 0) return;
+    setLastError("response_dropped");
+    core.clearResponse();
+}
+
 pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
-    // 실패를 삼키지 않는다 — 키가 사라지는데 신호가 없던 것이 이번 최상위 결함이었다.
-    if (term_core) |*c| c.write(ptr[0..len]) catch setLastError("core_write_input");
+    // **닿은 것만 센다.** 반환값이 "코어에 전달한 누적 바이트" 라고 헤더에 적어 놓고,
+    // 코어가 없거나 write 가 실패해도 그냥 더하고 있었다 — 그 값으로 입력이 죽은 것을
+    // 판정하라고 해 놓고 값이 거짓말을 했다.
+    const core = &(term_core orelse {
+        setLastError("input_before_core");
+        return @intCast(delivered_len);
+    });
+    // 실패를 삼키지 않는다 — 키가 사라지는데 신호가 없던 것이 리뷰 최상위 결함이었다.
+    core.write(ptr[0..len]) catch {
+        setLastError("core_write_input");
+        return @intCast(delivered_len);
+    };
     delivered_len += len;
+    drainResponse(core);
     return @intCast(delivered_len);
 }
 
@@ -188,6 +211,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         term_cols = cols;
         term_rows = rows;
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
+        drainResponse(&term_core.?);
     }
     const core = &(term_core orelse return);
     // **격자를 도는 기준은 코어가 실제로 들고 있는 크기다.** 우리가 요청한 크기를 쓰면
@@ -201,15 +225,6 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     body_line_h = line_h;
     body_cols = grid_cols;
     body_rows = grid_rows;
-
-    // 조합 중 문자열을 커서 자리에 **흐리게** 얹는다. 셀 격자 뒤라 그 위에 그려진다.
-    if (preedit_len > 0) {
-        const cur = core.screen.cursor;
-        const px = @as(i32, @intFromFloat(rect.x)) + @as(i32, cur.col) * @divTrunc(cw, 2);
-        const py = @as(i32, @intFromFloat(rect.y)) + @as(i32, cur.row) * line_h;
-        const dim = tk.get(.muted_fg);
-        pushText(preedit_buf[0..preedit_len], px, py, font_px, dim);
-    }
 
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {
@@ -243,6 +258,17 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             };
             quad_count += 1;
         }
+    }
+
+    // 조합 중 문자열을 커서 자리에 **흐리게** 얹는다. **격자를 다 그린 뒤**라야 그 위에
+    // 올라간다 — 앞에 두면 커서 자리에 글자가 있을 때 그 글자가 조합을 덮는다(주석은 "위에
+    // 그려진다" 라고 적혀 있었는데 순서는 반대였다).
+    if (preedit_len > 0) {
+        const cur = core.screen.cursor;
+        const px = @as(i32, @intFromFloat(rect.x)) + @as(i32, cur.col) * @divTrunc(cw, 2);
+        const py = @as(i32, @intFromFloat(rect.y)) + @as(i32, cur.row) * line_h;
+        const dim = tk.get(.muted_fg);
+        pushText(preedit_buf[0..preedit_len], px, py, font_px, dim);
     }
 }
 

@@ -6,6 +6,20 @@
 const std = @import("std");
 const bridge = @import("mobile_bridge");
 
+// 아래 순서에 의존한다: 이 테스트는 build 가 한 번도 안 돈 상태를 봐야 해 **맨 앞**이다.
+// 반환값은 **코어에 전달한** 누적 바이트다(헤더가 그 값으로 입력이 죽었는지 판정하라고
+// 적어 뒀다). 코어가 아직 없을 때도 그냥 더하고 있어서, 값이 "닿았다" 고 거짓말했다.
+test "코어가 없을 때는 세지 않고 알린다" {
+    const before = bridge.maru_mobile_input("abc", 3); // 아직 build 전 — 코어가 없다
+    try std.testing.expectEqual(@as(u32, 0), before);
+    try std.testing.expectEqualStrings("input_before_core", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+
+    _ = bridge.maru_mobile_build(402, 874);
+    const after = bridge.maru_mobile_input("abc", 3);
+    try std.testing.expectEqual(@as(u32, 3), after);
+}
+
 // 옛 코드는 코어를 512KB `FixedBufferAllocator` 위에 세웠다. FBA 는 마지막 할당 말고는
 // free 가 no-op 이라 격자가 바뀔 때마다 옛 격자를 못 돌려받았고, **resize 7번**이면
 // OutOfMemory 였다. 모바일에서 키보드를 올렸다 내리면 창이 리사이즈되므로 서너 번이면 닿는다.
@@ -38,6 +52,17 @@ test "본문 밖과 격자 밖은 둘 다 없음으로 답한다" {
     _ = bridge.maru_mobile_build(420, 900);
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_hit_cell(-10, -10));
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_hit_cell(100000, 100000));
+}
+
+// 코어는 질의에 **답을 만든다**(DA·DSR…). 데스크톱은 그 답을 PTY 로 흘리고 비우는데,
+// 모바일은 흘려보낼 곳이 아직 없다 — 안 치우면 쌓이기만 한다(질의 3000번에 15005바이트).
+// 버리는 것은 좋지만 **조용히** 버리면 안 된다.
+test "코어가 만든 답을 치우고 그 사실을 알린다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+    _ = bridge.maru_mobile_input("\x1b[c", 3); // DA1 — 장치 속성 질의
+    try std.testing.expectEqualStrings("response_dropped", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
 }
 
 // quad 버퍼를 2048 로 박아 뒀을 때 **태블릿 크기에서 격자만으로 넘쳤다**(폰 세로도 1828 로

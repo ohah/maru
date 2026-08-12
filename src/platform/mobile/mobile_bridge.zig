@@ -120,19 +120,6 @@ export fn maru_mobile_hit_cell(x: f32, y: f32) u32 {
     return (@as(u32, @intCast(@max(0, col))) << 16) | @as(u32, @intCast(@max(0, row)));
 }
 
-/// 진단: row 행의 첫 non-space 코드포인트(없으면 0). "코어엔 들어왔는데 화면엔 없다"를
-/// 추측으로 가르지 않기 위한 조회다.
-export fn maru_mobile_row_first_cp(row: u32) u32 {
-    const core = &(term_core orelse return 0);
-    if (row >= term_rows) return 0;
-    var col: u16 = 0;
-    while (col < term_cols) : (col += 1) {
-        const cell = core.screen.cells[core.index(@intCast(row), col)];
-        if (cell.codepoint != ' ' and cell.codepoint != 0) return cell.codepoint;
-    }
-    return 0;
-}
-
 /// 셀 색을 RGB 로 푼다. indexed 는 maru 자체 팔레트(`color.xterm256`)를 쓴다 —
 /// 모바일용으로 색표를 새로 만들지 않는다.
 fn cellRgb(style: terminal.types.Style, tk: anytype) color.Rgb {

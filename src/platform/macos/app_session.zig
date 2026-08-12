@@ -46241,13 +46241,30 @@ test "SB1: 항목이 없는 상태바 구간은 텍스트 커서를 주지 않�
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
-    // 바 한가운데 — 좌측 항목(브랜치·경로)도 우측 항목도 없는 구간이다.
     const h = session.statusBarHeightPx();
-    const cx: f64 = @floatFromInt(session.backing_width_px / 2);
     const cy: f64 = @floatFromInt(session.backing_height_px - h / 2);
-    try std.testing.expect(session.statusBarItemAt(cx, cy) == null); // 항목 없음을 먼저 확인
 
-    const cursor = session.hoverCursor(cx, cy, 0);
+    // **빈 x를 가정하지 않고 찾는다.** 예전에는 "바 한가운데는 비어 있다"고 가정했는데, 그 가정은 스모크
+    // 세션이 cwd를 몰라 좌측 항목(브랜치·경로)이 **아예 안 만들어지던** 시절의 우연에 기대고 있었다. 커널 cwd
+    // 폴백이 들어오며 그 세션에도 두 항목이 생기고, 그것이 x축으로 어디까지 뻗는지는 저장소 경로 길이와
+    // 브랜치 이름에 달렸다 — 이 테스트가 볼 값이 아니다.
+    //
+    // 게다가 그 가정은 **부하에 따라 결과가 갈렸다**: 전체 스위트를 병렬로 돌리면 자식이 아직 foreground
+    // process group을 못 잡아 커널 조회가 실패해 항목이 없고(통과), 이 바이너리만 단독으로 돌리면 답이 나와
+    // 항목이 생겨 실패했다. 실측으로 단독 3/3 실패·전체 실행 통과였다. 이 테스트가 보려는 것은 "빈 구간에서
+    // 텍스트 커서가 안 나온다"이지 "항목이 있느냐"가 아니므로, 항목 유무와 무관하게 성립하도록 고친다.
+    const empty_x: f64 = blk: {
+        const step: u32 = @max(session.cell_width_px, 1);
+        var x: u32 = 0;
+        while (x < session.backing_width_px) : (x += step) {
+            const fx: f64 = @floatFromInt(x);
+            if (session.statusBarItemAt(fx, cy) == null) break :blk fx;
+        }
+        // 바가 항목으로 완전히 덮이면 이 테스트가 볼 것이 없다 — 조용히 통과시키지 않고 실패로 말한다.
+        return error.StatusBarHasNoEmptyRegion;
+    };
+
+    const cursor = session.hoverCursor(empty_x, cy, 0);
     try std.testing.expect(cursor != .text);
 }
 

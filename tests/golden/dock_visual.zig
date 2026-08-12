@@ -281,6 +281,18 @@ const cases = [_]Case{
     // **자 줄(y<16)은 일부러 뺐다.** `0123456789`가 10주기라 20열을 밀어도 그림이 같아서, 그 줄을
     // 넣으면 스크롤이 통째로 죽어도 통과하는 rect가 된다. 대신 `fn wrap(...)`·주석 줄들이 앞을
     // 잘라낸 채 시작하는 것을 본다.
+    // §4 — **세로 스크롤이 시각 행 단위다.** 화면이 랩된 줄의 *중간 행*(`row.`)에서 시작하고,
+    // **그 행에는 줄 번호가 없다** — 이어지는 조각이기 때문이다.
+    //
+    // 논리 줄 단위 뷰포트로는 이 그림을 만들 수 없다: 줄 머리에서만 멈출 수 있어 랩된 줄 하나가
+    // 화면보다 길면 그 아래를 볼 방법이 없다. `visual_map.RowIndex`가 시각 행을 논리 줄+조각으로
+    // 풀고 `content.first_piece`가 그 조각부터 그린다.
+    .{
+        .name = "editor-wrap-scrolled-mid-line",
+        .capture = "editor-wrap-scrolled.ppm",
+        .contract = "랩된 줄의 중간 행부터 화면이 시작하고 그 행에는 번호가 없다",
+        .rect = .{ .x = 0, .y = 0, .w = 480, .h = 36 },
+    },
     .{
         .name = "editor-hscroll-body",
         .capture = "editor-hscroll.ppm",

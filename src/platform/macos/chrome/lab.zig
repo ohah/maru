@@ -72,6 +72,12 @@ pub const ScenarioId = enum {
     /// **gutter가 함께 밀리지 않는지**가 이 시나리오의 핵심이다 — 줄 번호와 diff 색 띠는 늘 보여야
     /// 하는데(§7), 본문과 같은 오프셋을 먹이면 화면 밖으로 나간다.
     editor_hscroll,
+    /// N1 §4 — **랩된 줄의 중간 행부터 시작하는 화면.** 세로 스크롤이 논리 줄 단위이면 만들 수 없는
+    /// 상태다: 랩된 줄 하나가 화면보다 길면 그 줄 머리에서만 멈출 수 있어 **아래를 볼 방법이 없다.**
+    ///
+    /// `visual_map.RowIndex`가 시각 행을 논리 줄+조각으로 풀고, `content.first_piece`가 그 조각부터
+    /// 그린다. 첫 행에 **줄 번호가 없는 것**이 그 증거다 — 이어지는 조각이기 때문이다.
+    editor_wrap_scrolled,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -140,7 +146,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -316,7 +322,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const lines: []const []const u8 = switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
-        .editor_wrap, .editor_hscroll => &editor_wrap_lines,
+        .editor_wrap, .editor_hscroll, .editor_wrap_scrolled => &editor_wrap_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -344,10 +350,33 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // **본문을 먼저 그린다.** 랩이 켜지면 어느 논리 줄이 몇 행으로 접히는지는 전개해서 나눠 본
     // 쪽만 알기 때문에(§4 세로 축), 본문이 시각 배치를 정하고 gutter가 그것을 따른다. 둘이 각자
     // 세면 랩된 줄에서 번호가 본문과 어긋난다.
+    // **세로 스크롤이 시각 행 단위인 시나리오**는 여기서 갈린다. 랩된 줄 하나가 화면보다 길면
+    // 논리 줄 단위로는 그 줄 머리에서만 멈출 수 있어 **아래를 볼 방법이 없다** — `RowIndex`가
+    // 시각 행을 논리 줄+조각으로 풀고, 그 조각부터 그린다.
+    const wrap_on = scenario.id == .editor_wrap or scenario.id == .editor_wrap_scrolled;
+    var first_line: usize = vp.first_row;
+    var first_piece: u32 = 0;
+    if (scenario.id == .editor_wrap_scrolled) {
+        var counts: [row_capacity]u32 = undefined;
+        var index_scratch: [4096]u8 = undefined;
+        const counted = @min(line_count, row_capacity);
+        for (lines[0..counted], 0..) |line, i| {
+            counts[i] = editor_view.content.rowCount(line, 4, layout.content.width, true, &index_scratch);
+        }
+        var starts: [row_capacity + 1]u32 = undefined;
+        const index = editor_view.visual_map.buildIndex(counts[0..counted], &starts);
+        // **시각 행 6부터.** 그 자리가 첫 fixture 줄(자, 세 조각)의 한가운데라, 첫 화면 행에
+        // 번호가 없는 것이 곧 "논리 줄 단위로는 못 만드는 상태"의 증거다.
+        if (index.resolve(6)) |pos| {
+            first_line = pos.line;
+            first_piece = pos.piece;
+        }
+    }
+
     var content_rows: [row_capacity]editor_view.content.Row = undefined;
     var n: u16 = 0;
-    while (n < visible) : (n += 1) {
-        content_rows[n] = .{ .bytes = lines[vp.first_row + n] };
+    while (n < visible and first_line + n < line_count) : (n += 1) {
+        content_rows[n] = .{ .bytes = lines[first_line + n] };
     }
 
     var visual_rows: [row_capacity]editor_view.visual_map.VisualRow = undefined;
@@ -368,15 +397,16 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         buffers.text_bytes.len / 2,
         // **실제 자릿수로 잡는다.** `max_digits`(usize 최대 20자리)로 잡으면 실제의 스무 배를
         // 예약해 본문이 근거 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 다른 쪽의 손실이다.
-        editor_view.gutter.scratchNeeded(visual_budget, vp.first_row + line_count),
+        editor_view.gutter.scratchNeeded(visual_budget, first_line + line_count),
     );
     const content_scratch = buffers.text_bytes[0 .. buffers.text_bytes.len - gutter_reserve];
 
     const cw = editor_view.content.build(.{
         .layout = layout,
-        .rows = content_rows[0..visible],
-        .wrap = scenario.id == .editor_wrap,
+        .rows = content_rows[0..n],
+        .wrap = wrap_on,
         .first_col = vp.first_col,
+        .first_piece = first_piece,
 
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
@@ -387,7 +417,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
     const grows = editor_view.gutter.rowsForVisual(
         visual_rows[0..cw.visual_rows],
-        vp.first_row,
+        first_line,
         &gutter_rows,
     );
     const gw = try editor_view.gutter.build(.{
@@ -502,7 +532,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

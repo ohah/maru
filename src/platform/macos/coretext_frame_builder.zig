@@ -263,6 +263,16 @@ pub const icon_slot_reserve: u21 = ' ';
 /// 아이콘이 이 열에 오고 이름 본문은 여기서 `icon_cols`만큼 더 간다. 보조줄은 호출자가 같은 자리에 맞춘다.
 pub const session_row_indent_cols: u16 = 1;
 
+/// gutter 아이콘이 있는 행의 **텍스트 시작 열**(아이콘 2칸 + 간격 1칸). 빌더가 이름줄을 이만큼 밀어 아이콘과
+/// 겹치지 않게 한다.
+///
+/// **pub인 이유**: 이름줄 안의 열 좌표를 만드는 쪽이 이 폭을 알아야 한다. 사이드바 running 배지가 그렇다 —
+/// 조립이 기록한 색 구간(`BadgeSpan`)과 색칠 루프가 보는 `c.col`이 같은 좌표계여야 하는데, 배지가 사는
+/// `sessions` 토글 행은 삼각(▼)을 gutter에 실어 텍스트가 이만큼 밀린다. 그 폭을 여기서 파생하지 않고 3을
+/// 따로 적으면 두 값이 조용히 어긋나 **색만 밀리는** 결함이 된다(실제로 그렇게 어긋났다 — 두 종류가 동시에
+/// 도는 화면에서만 드러났다).
+pub const sidebar_row_icon_cols: u16 = 3;
+
 /// 카드 보조줄(branch/folder)에 maru가 의도적으로 박은 아이콘을 **렌더 폭 2칸**으로 치는 규칙 —
 /// `text_layout`(L3)이 renderer를 import할 수 없어(경계 가드) predicate로 주입한다. advance(cellWidth)는 1이지만
 /// 1칸(~8px)에 다운스케일하면 octocat·폴더 실루엣이 뭉개져 안 보였다(사용자 피드백) — 에이전트 gutter 아이콘
@@ -488,7 +498,7 @@ pub fn buildSidebarDrawList(
     errdefer pool.deinit(allocator);
 
     const style: terminal.Style = .{ .foreground = fg };
-    const icon_cols: u16 = 3; // 아이콘 자리(아이콘 2칸 + 간격 1칸) — gutter와 이름줄 인라인이 같은 폭을 쓴다
+    const icon_cols: u16 = sidebar_row_icon_cols;
     var max_row: u16 = 0;
     for (names, 0..) |name, i| {
         if (i > @as(usize, std.math.maxInt(u16)) / sidebar_line_base) break; // slot*32+…가 u16 한도 안에 들게

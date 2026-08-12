@@ -1546,8 +1546,11 @@ pub const BadgeSpan = struct {
 /// **본문만 만들고 앞뒤는 호출자가 붙인다.** 이 배지는 `sessions` 토글 행의 라벨·요약과 한 줄을 나눠 쓰므로
 /// (`▸ 1  ▁▅▇▃ 2 · 진행중`), 들여쓰기를 함수가 소유하면 앞에 붙는 개수 라벨만큼 span이 어긋난다. 그래서 시작 열을
 /// **인자로 받는다** — 호출자가 이미 만든 prefix의 표시 폭을 그대로 넘기면 색이 밀리지 않는다.
-pub fn runningBadgeText(self: *AppSession, tab: *Tab, start_col: u16, spans: *std.ArrayList(BadgeSpan), slot: usize) ![]const u8 {
-    const counts = tab_ops.tabRunningCountsByKind(tab);
+///
+/// 집계도 **인자로 받는다**(tab이 아니라 `RunningCounts`). 호출자는 배지 앞 간격을 붙일지 정하려고 같은 집계를
+/// 이미 봐야 하는데, 함수가 tab에서 다시 세면 «running > 0» 조건이 두 곳에 따로 적힌다 — 한쪽만 바뀌면
+/// "간격은 있는데 배지가 없는" 줄이 나온다. 한 번 센 값을 나눠 쓰면 그 어긋남이 구조적으로 불가능하다.
+pub fn runningBadgeText(self: *AppSession, counts: tab_ops.RunningCounts, start_col: u16, spans: *std.ArrayList(BadgeSpan), slot: usize) ![]const u8 {
     if (counts.total() == 0) return self.allocator.dupe(u8, ""); // running 0 — 배지 없음(호출자가 prefix만 쓴다)
     const bars = try spinnerBarsUtf8(self, self.allocator);
     defer self.allocator.free(bars);
@@ -1836,26 +1839,39 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 // 유일한 자리이기 때문이다 — 접었을 때만 보이면 «안 보이는 것을 없는 것처럼 만들지 않는다»가 펼침에서
                 // 뒤집힌다. 반면 뒤따르는 대표 상태 요약(`· 진행중`)은 **접혔을 때만**이다(위 toggle_summary): 펼치면
                 // 각 행이 자기 상태를 보여줘 잉여이고, 배지와 달리 목록이 답할 수 있는 질문이다.
-                const badge_tab: ?*Tab = if (t.tab < self.tabs.items.len) self.tabs.items[t.tab] else null;
-                // 배지가 없으면 개수 뒤 간격도 없앤다 — 안 그러면 running 0인 행만 꼬리 공백이 남아 상태 문구가 밀린다.
-                const badge_gap: []const u8 = if (badge_tab) |bt|
-                    (if (tab_ops.tabRunningCountsByKind(bt).total() > 0) "  " else "")
+                // 집계는 **한 번만** 센다 — 아래 간격과 배지 본문이 같은 «running > 0»을 보므로, 두 번 세면 그
+                // 조건이 두 곳에 따로 적혀 어긋날 수 있다(간격만 남은 줄).
+                const badge_counts: tab_ops.RunningCounts = if (t.tab < self.tabs.items.len)
+                    tab_ops.tabRunningCountsByKind(self.tabs.items[t.tab])
                 else
-                    "";
+                    .{};
+                // 배지가 없으면 개수 뒤 간격도 없앤다 — 안 그러면 running 0인 행만 꼬리 공백이 남아 상태 문구가 밀린다.
+                const badge_gap: []const u8 = if (badge_counts.total() > 0) "  " else "";
                 const badge_prefix = try std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{ indent_buf[0..ind_n], t.count, badge_gap });
                 defer self.allocator.free(badge_prefix);
-                // 시작 열은 prefix의 **표시 폭**이다. prefix는 공백과 숫자(ASCII 1칸)뿐이라 byte 길이와 칸 수가 같다 —
-                // 여기에 다국어 문자가 섞이면 이 등식이 깨지므로 라벨을 숫자로 유지하는 것이 span 정합의 전제다.
-                const badge = if (badge_tab) |bt|
-                    try runningBadgeText(self, bt, @intCast(badge_prefix.len), &badge_spans, row_i)
-                else
-                    try self.allocator.dupe(u8, "");
+                // 시작 열 = **gutter 아이콘 폭 + prefix 표시 폭**이다.
+                //
+                // 이 행은 삼각(▼/▶)을 gutter에 실으므로 빌더가 이름줄 텍스트를 `sidebar_row_icon_cols`만큼 민다
+                // (`buildSidebarDrawList`의 `text_col`). 그 폭을 빼먹으면 색 구간만 왼쪽으로 밀려 **파형 대신 라벨이
+                // 브랜드색을 받는다**. 카드 배지 시절엔 이 문제가 없었다 — 배지가 gutter 없는 보조줄(status)에 있었다.
+                // 한 종류만 도는 화면에서는 밀려난 칸이 스피너 경로에서 **대표 kind의 같은 색**을 받아 증상이 가려지고,
+                // claude·codex가 함께 도는 화면에서만 색이 갈려 드러난다(적대적 검증 2회차에서 이렇게 잡혔다).
+                //
+                // prefix는 공백과 숫자(ASCII 1칸)뿐이라 byte 길이와 칸 수가 같다 — 다국어 문자가 섞이면 이 등식이
+                // 깨지므로 라벨을 숫자로 유지하는 것이 span 정합의 전제다.
+                const badge_start_col: u16 = coretext_frame_builder.sidebar_row_icon_cols + @as(u16, @intCast(badge_prefix.len));
+                const badge = try runningBadgeText(self, badge_counts, badge_start_col, &badge_spans, row_i);
                 defer self.allocator.free(badge);
-                try names.append(self.allocator, try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}{s}{s}",
-                    .{ badge_prefix, badge, toggle_summary },
-                ));
+                // 조립한 이름줄은 **중간 변수로 받아** append 실패 시 직접 해제한다. `append(alloc, try allocPrint(…))`로
+                // 바로 넘기면 문자열은 만들어졌는데 append가 OOM으로 실패했을 때 아무도 그것을 소유하지 않아 샌다
+                // (이 코드베이스가 에이전트 행 라벨에서 이미 한 번 겪은 실패다). `errdefer`가 아니라 `catch`인 이유는,
+                // append가 **성공한 뒤** 아래 다른 append가 실패하면 errdefer가 이미 names 소유가 된 것을 또 해제해
+                // 이중 해제가 되기 때문이다.
+                const toggle_name = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ badge_prefix, badge, toggle_summary });
+                names.append(self.allocator, toggle_name) catch |e| {
+                    self.allocator.free(toggle_name);
+                    return e;
+                };
                 try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
@@ -2109,9 +2125,26 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // (`badge_spans`)을 스피너 판정보다 앞에서 본다. 개수 숫자도 같은 구간에 들어 파형과 같은 색을 받는다
         // (한 배지 = 한 색). 구간에 걸리지 않은 셀은 그대로 아래 경로로 흘러 요약 파형이 대표색을 유지한다.
         //
-        // row 종류(`.agent_toggle`)로 좁히는 것이 오염 방지다 — slot만 맞추면 다른 행의 같은 열 글자가 배지색을 받는다.
+        // **줄까지 좁힌다.** `span.slot`은 *행*을 고를 뿐이고 한 행은 여러 *줄*을 가질 수 있어서, slot만 보면 같은 행의
+        // 다른 줄에서 같은 열에 온 글자가 배지색을 받는다(카드 배지 시절 `line_index + 1 == line_count`로 좁히던
+        // 규율 — 옮기면서 빠졌다). 배지는 토글 행의 **이름줄**에만 있으므로 `line_index == 0`이 그 자리다. 지금은
+        // 토글이 보조줄을 비워 1줄이라 증상이 없지만, 줄이 하나 붙는 순간 조용히 오염된다.
+        //
+        // row 종류(`.agent_toggle`) 게이트는 **중복 방어**로 남긴다 — `span.slot`이 이미 행을 좁히므로 없어도
+        // 오염되지 않지만, 배지가 토글 행 전용이라는 계약을 색칠 쪽에도 적어 두면 나중에 span 출처가 늘어날 때
+        // 이 루프가 먼저 걸린다.
+        // **글리프까지 본다.** 구간은 열 범위일 뿐이라, 그 자리에 배지가 아닌 글자가 오면 그것도 색을 받는다. 배지
+        // 구간에 정당하게 올 수 있는 것은 **파형**과 **개수 숫자**뿐이므로 스피너 경로와 같은 규율을 여기에도 둔다
+        // (옮겨 오면서 이쪽만 빠져 있었다).
+        //
+        // 정직하게 적어 둔다: 이 게이트가 막는 상황을 **실제로 재현하지는 못했다**. 좁은 사이드바의 말줄임
+        // `…`(U+2026)을 노렸지만, 배지가 줄 앞부분이라 `…`은 구간 뒤에 오거나 그 폭에서는 아예 나오지 않았다
+        // (적대적 검증 12회차 — 폭 90·72·56 실측). 그럼에도 남기는 이유는 비용이 0이고, "색은 자기 글리프에만"이
+        // 이 루프가 아이콘·스피너에 이미 적용하는 규율이기 때문이다. 재현하지 못한 것을 테스트로 굳히지는 않았다.
+        const badge_glyph = isAgentSpinnerCp(c.codepoint) or (c.codepoint >= '0' and c.codepoint <= '9');
         var badge_painted = false;
-        if (slot < rrows.len and rrows[slot] == .agent_toggle) {
+        const badge_line_index = (c.row % coretext_frame_builder.sidebar_line_base) % 4;
+        if (badge_glyph and badge_line_index == 0 and slot < rrows.len and rrows[slot] == .agent_toggle) {
             for (badge_spans.items) |span| {
                 if (span.slot != slot or c.col < span.start_col or c.col >= span.end_col) continue;
                 if (agentBrandColor(span.kind)) |badge_brand| {

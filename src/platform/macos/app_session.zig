@@ -24203,7 +24203,7 @@ test "사이드바 running 배지: 종류별 running 개수를 세고, 개수 1�
     {
         var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
         defer spans.deinit(a);
-        const line = try sidebar_ops.runningBadgeText(session, tab, 0, &spans, 0);
+        const line = try sidebar_ops.runningBadgeText(session, tab_ops.tabRunningCountsByKind(tab), 0, &spans, 0);
         defer a.free(line);
         // claude 2 + codex 1 → 파형+공백+2, 두 칸, 파형(개수 1은 숫자 생략).
         try std.testing.expect(std.mem.indexOf(u8, line, " 2") != null); // 숫자가 파형에 붙지 않는다
@@ -24235,7 +24235,7 @@ test "사이드바 running 배지: 종류별 running 개수를 세고, 개수 1�
     {
         var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
         defer spans.deinit(a);
-        const line = try sidebar_ops.runningBadgeText(session, tab, 7, &spans, 3);
+        const line = try sidebar_ops.runningBadgeText(session, tab_ops.tabRunningCountsByKind(tab), 7, &spans, 3);
         defer a.free(line);
         try std.testing.expectEqual(@as(usize, 1), spans.items.len);
         try std.testing.expectEqual(@as(u16, 7), spans.items[0].start_col); // prefix 폭만큼 밀려 시작한다
@@ -24247,7 +24247,7 @@ test "사이드바 running 배지: 종류별 running 개수를 세고, 개수 1�
     {
         var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
         defer spans.deinit(a);
-        const line = try sidebar_ops.runningBadgeText(session, tab, 4, &spans, 0);
+        const line = try sidebar_ops.runningBadgeText(session, tab_ops.tabRunningCountsByKind(tab), 4, &spans, 0);
         defer a.free(line);
         try std.testing.expectEqual(@as(usize, 0), line.len);
         try std.testing.expectEqual(@as(usize, 0), spans.items.len);
@@ -24315,12 +24315,19 @@ test "사이드바 토글 행: running 배지가 붙어도 그려진다(목록 �
 
     try pane_ops.newTermInActivePane(session); // Term 2개 → 목록이 생긴다
     const tab = session.tabs.items[0];
-    // **둘 다 running**이어야 재현된다. 하나만 running이면 배지가 `▁▅▇▃`로 끝나고(개수 1은 숫자 생략) 제품에서도
-    // 정상이었다 — 개수 2가 되어 숫자가 붙는 순간 목록이 사라졌으므로, 재현 조건은 "배지에 숫자가 붙는 상태"다.
-    for (tab.panes.items[0].terms.items) |t| {
-        t.agent_kind = .claude;
-        t.agent_state = .running;
-    }
+    // **종류를 섞어 둘 다 running**으로 만든다. 한 종류만이면 배지 파형이 span 경로로 칠해지든 스피너 경로
+    // (대표 kind)로 칠해지든 **같은 색**이라, 구간이 통째로 밀려도 결과가 같아 아래 색 판정이 무력해진다
+    // (mutation으로 확인: 시작 열을 +1 해도 claude 단일 케이스는 통과한다). 두 종류가 함께 도는 화면에서만
+    // "어느 칸이 어느 종류인가"가 색으로 갈리고, 그때 비로소 span이 제 일을 한다.
+    const terms = tab.panes.items[0].terms.items;
+    terms[0].agent_kind = .claude;
+    terms[0].agent_state = .running;
+    terms[1].agent_kind = .codex;
+    terms[1].agent_state = .running;
+    // 파형은 **애니메이션**이라 프레임마다 바 높이가 다르고, 높이 0인 바는 `isAgentSpinnerCp` 게이트를 통과하지
+    // 못한다. 프레임을 고정하지 않으면 색칠된 칸 수가 실행마다 달라져 이 테스트가 비결정적이 된다(실제로 같은
+    // 코드에서 `found 2`·`found 1`이 번갈아 나왔다). 기대값도 상수로 박지 않고 **이 프레임에서 파생**한다.
+    session.agent_spin_frame = 0;
     sidebar_ops.rebuildSidebar(session) catch {};
     try std.testing.expect(chrome.components.sidebar.onAgentToggle(session.sidebar_rows.items, 1));
 
@@ -24340,6 +24347,180 @@ test "사이드바 토글 행: running 배지가 붙어도 그려진다(목록 �
     for (dl.cells) |c| {
         try std.testing.expect(c.col < dl.size.cols);
     }
+
+    // **두 종류 배지가 각자 브랜드색으로 칠해졌는가** — span 정합의 end-to-end 판정이다.
+    //
+    // 조립(`runningBadgeText`)이 기록한 열 구간과 색칠 루프가 보는 `c.col`은 서로 다른 코드가 계산한다. 개수 라벨
+    // 폭을 한 칸이라도 잘못 넘기면 구간이 밀려, 밀려난 칸이 span 대신 **스피너 경로(대표 kind 색)** 로 떨어진다 —
+    // 대표는 하나뿐이므로 두 색의 칸 수가 곧바로 어긋난다. 좌표를 직접 비교하지 않고 결과 색을 세는 이유는 그것이
+    // 사용자가 실제로 보는 것이기 때문이고, 종류를 섞어야만 이 판정이 힘을 갖는다(위 주석).
+    const claude_brand = agent_ops.agentBrandColor(.claude).?;
+    const codex_brand = agent_ops.agentBrandColor(.codex).?;
+    var claude_painted: usize = 0;
+    var codex_painted: usize = 0;
+    for (dl.cells) |c| {
+        if (c.row / coretext_frame_builder.sidebar_line_base != 1) continue;
+        if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
+        switch (c.style.foreground) {
+            .rgb => |rgb| {
+                if (std.meta.eql(rgb, claude_brand)) claude_painted += 1;
+                if (std.meta.eql(rgb, codex_brand)) codex_painted += 1;
+            },
+            else => {},
+        }
+    }
+    // 기대값은 **고정한 프레임에서 파생**한다 — 그 프레임에 높이 0인 바가 있으면 게이트를 통과하는 칸이 그만큼
+    // 적다. 상수 `spinner_bar_count`로 박으면 파형 테이블이 바뀔 때 이 테스트가 애먼 곳에서 깨진다.
+    var expected_bars: usize = 0;
+    for (0..sidebar_ops.spinner_bar_count) |bar| {
+        if (sidebar_ops.isAgentSpinnerCp(sidebar_ops.spinnerBarCp(0, bar))) expected_bars += 1;
+    }
+    try std.testing.expect(expected_bars > 0); // 파형이 한 칸도 안 보이는 프레임을 골랐다면 판정이 무의미하다
+    // 종류마다 자기 칸 수만큼. 구간이 밀리면 밀려난 칸이 대표 kind 색으로 떨어져 한쪽이 모자라고 다른 쪽이 넘친다.
+    try std.testing.expectEqual(expected_bars, claude_painted);
+    try std.testing.expectEqual(expected_bars, codex_painted);
+
+    // **접으면 같은 줄에 요약 파형이 하나 더 붙는다** — 배지(종류별 색)와 요약(대표 kind 색)이 한 줄에 공존하는
+    // 유일한 상태이고, 색칠 루프가 구간을 스피너 판정보다 먼저 보는 이유 그 자체다. 배지가 접힘에서도 남아야
+    // 한다는 계약(«접힘과 무관하게 항상»)도 여기서 함께 지켜진다.
+    tab.agents_collapsed = true;
+    sidebar_ops.rebuildSidebar(session) catch {};
+    var dl2 = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl2.deinit(a);
+
+    var claude2: usize = 0;
+    var codex2: usize = 0;
+    for (dl2.cells) |c| {
+        if (c.row / coretext_frame_builder.sidebar_line_base != 1) continue;
+        if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
+        switch (c.style.foreground) {
+            .rgb => |rgb| {
+                if (std.meta.eql(rgb, claude_brand)) claude2 += 1;
+                if (std.meta.eql(rgb, codex_brand)) codex2 += 1;
+            },
+            else => {},
+        }
+    }
+    // 판정은 **배지에만** 건다: 종류마다 자기 칸이 그대로 남아야 한다(«접힘과 무관하게 항상»). 접힘 요약이 이 줄에
+    // 파형을 하나 더 얹을 수도 있으므로 등호가 아니라 하한으로 본다 — 요약은 이 변경이 건드리지 않은 기존 경로이고
+    // (대표 규칙이 어느 종류로 갈지 정한다), 그 동작에 이 테스트를 묶으면 애먼 곳에서 깨진다.
+    // 배지가 접힘에서 사라지거나 구간이 밀리면 한쪽이 하한 아래로 떨어져 걸린다.
+    try std.testing.expect(claude2 >= expected_bars);
+    try std.testing.expect(codex2 >= expected_bars);
+
+    // **한 종류만 도는 경우**(여기선 codex)도 시작 자리가 같아야 한다. 조립은 종류 사이 간격을 `first` 분기로
+    // 넣는데, 그 분기가 첫 배지에도 간격을 붙이면 배지 전체가 오른쪽으로 밀리고 색만 어긋난다 — claude·codex가
+    // 함께 도는 위 화면에서는 **두 번째** 배지만 틀어져 가려지기 쉬운 실패다. 종류 순서상 뒤에 오는 codex를
+    // 단독으로 세우는 것이 이 분기를 가장 세게 친다(첫 항목이 건너뛰어진 뒤 first가 유지되는지).
+    tab.agents_collapsed = false;
+    terms[0].agent_kind = .codex;
+    sidebar_ops.rebuildSidebar(session) catch {};
+    var dl3 = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl3.deinit(a);
+
+    var codex_only: usize = 0;
+    var claude_leak: usize = 0;
+    for (dl3.cells) |c| {
+        if (c.row / coretext_frame_builder.sidebar_line_base != 1) continue;
+        if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
+        switch (c.style.foreground) {
+            .rgb => |rgb| {
+                if (std.meta.eql(rgb, codex_brand)) codex_only += 1;
+                if (std.meta.eql(rgb, claude_brand)) claude_leak += 1;
+            },
+            else => {},
+        }
+    }
+    // 배지는 하나(codex 2개 → 파형 + 숫자). 밀리면 파형 일부가 구간 밖으로 나가 칸 수가 줄고, claude가 하나도
+    // 안 도는데 코랄이 보이면 구간이 남의 종류를 칠한 것이다.
+    try std.testing.expectEqual(expected_bars, codex_only);
+    try std.testing.expectEqual(@as(usize, 0), claude_leak);
+}
+
+// [적대적 검증 7회차] `badge_spans`는 **모든 토글 행의 구간을 한 배열**에 담고 `span.slot`으로만 갈린다. 워크스페이스가
+// 여럿이면 그 매칭이 유일한 방어선인데, 지금까지의 테스트는 카드가 하나뿐이라 slot이 언제나 1이어서 이 방어가 한 번도
+// 시험되지 않았다(slot을 무시해도 통과한다).
+//
+// 두 워크스페이스에 **서로 다른 종류**를 두면 교차가 색으로 드러난다: claude만 도는 카드의 토글 행에 청록이 한 칸이라도
+// 보이면 옆 워크스페이스의 구간이 남의 행을 칠한 것이다. 각 카드의 대표 kind가 자기 종류라서 스피너 경로로 칠해져도
+// 자기 색이 나오므로, 이 판정은 **오염만** 정확히 겨냥한다.
+test "사이드바 배지: 워크스페이스가 여럿이어도 구간이 남의 행을 칠하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    session.agent_spin_frame = 0;
+
+    // 워크스페이스 A: claude 2개
+    try pane_ops.newTermInActivePane(session);
+    for (session.tabs.items[0].panes.items[0].terms.items) |t| {
+        t.agent_kind = .claude;
+        t.agent_state = .running;
+    }
+    // 워크스페이스 B: codex 2개
+    _ = try tab_ops.newTab(session);
+    try pane_ops.newTermInActivePane(session);
+    const tab_b = session.tabs.items[1];
+    for (tab_b.panes.items[0].terms.items) |t| {
+        t.agent_kind = .codex;
+        t.agent_state = .running;
+    }
+    sidebar_ops.rebuildSidebar(session) catch {};
+
+    // 토글 행 slot을 **찾아서** 쓴다 — 행 구성(카드 줄 수·목록 길이)에 인덱스를 하드코딩하면 이 테스트가 엉뚱한
+    // 이유로 깨진다.
+    var toggle_a: ?usize = null;
+    var toggle_b: ?usize = null;
+    for (session.sidebar_rows.items, 0..) |row, i| switch (row) {
+        .agent_toggle => |t| {
+            if (t.tab == 0) toggle_a = i else if (t.tab == 1) toggle_b = i;
+        },
+        else => {},
+    };
+    try std.testing.expect(toggle_a != null and toggle_b != null);
+
+    var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl.deinit(a);
+
+    const claude_brand = agent_ops.agentBrandColor(.claude).?;
+    const codex_brand = agent_ops.agentBrandColor(.codex).?;
+    var a_claude: usize = 0;
+    var a_codex: usize = 0;
+    var b_codex: usize = 0;
+    var b_claude: usize = 0;
+    for (dl.cells) |c| {
+        if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
+        const slot = c.row / coretext_frame_builder.sidebar_line_base;
+        const rgb = switch (c.style.foreground) {
+            .rgb => |v| v,
+            else => continue,
+        };
+        if (slot == toggle_a.?) {
+            if (std.meta.eql(rgb, claude_brand)) a_claude += 1;
+            if (std.meta.eql(rgb, codex_brand)) a_codex += 1;
+        } else if (slot == toggle_b.?) {
+            if (std.meta.eql(rgb, codex_brand)) b_codex += 1;
+            if (std.meta.eql(rgb, claude_brand)) b_claude += 1;
+        }
+    }
+    var expected_bars: usize = 0;
+    for (0..sidebar_ops.spinner_bar_count) |bar| {
+        if (sidebar_ops.isAgentSpinnerCp(sidebar_ops.spinnerBarCp(0, bar))) expected_bars += 1;
+    }
+    try std.testing.expectEqual(expected_bars, a_claude);
+    try std.testing.expectEqual(expected_bars, b_codex);
+    try std.testing.expectEqual(@as(usize, 0), a_codex); // 옆 워크스페이스(codex) 구간이 새어 들어왔다
+    try std.testing.expectEqual(@as(usize, 0), b_claude);
+
+    // [적대적 검증 12회차] 사이드바를 좁혀 이름줄이 잘릴 때 말줄임 `…`이 배지 구간에 들어가 브랜드색을 받는지
+    // 노렸다. **재현하지 못했다** — 폭 90에서는 `…`이 배지 구간 뒤(줄 끝)에 오고, 72에서는 토글 행에 `…` 자체가
+    // 나오지 않으며, 56은 사이드바가 성립하지 않는다(`NoSidebar`). 배지가 줄 앞부분이라 구간과 겹치는 창이 아주
+    // 좁은 것으로 보인다.
+    //
+    // 색칠 쪽 codepoint 게이트(`badge_glyph`)는 **그래도 남긴다**: 스피너 경로가 이미 같은 규율을 갖고 있어
+    // 일관되고 비용이 없다. 다만 그 게이트를 잠그는 판정은 여기 두지 않는다 — 재현하지 못한 것을 테스트로 굳히면
+    // 무엇을 지키는지 모르는 채 나중에 애먼 이유로 깨진다.
 }
 
 test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {

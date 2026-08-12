@@ -136,6 +136,12 @@ pub const GenerationAttachment = struct {
             reservation,
         );
         errdefer self.terminalizeTransport();
+        try adapter.reserveGenerationBatchAdapter(
+            &self.batch_adapter,
+            @intFromPtr(self),
+            @sizeOf(GenerationAttachment),
+        );
+        errdefer self.batch_adapter.abortPrepared();
         try generation_transport_mod.reserveEventOwnerInPlace(
             &self.transport,
             &self.event_owner,
@@ -160,6 +166,7 @@ pub const GenerationAttachment = struct {
             return error.InvalidState;
         self.binding.beginExecute(receipt) catch |err| {
             self.transport.abortPreparedRequest(receipt) catch {};
+            self.batch_adapter.abortPrepared();
             self.terminalizeTransport();
             try adapter.abortAttachmentBinding(&self.binding, self.reservation.?);
             self.lifecycle = .terminal;
@@ -171,6 +178,7 @@ pub const GenerationAttachment = struct {
             &self.response,
         ) catch |err| {
             self.transport.abortPreparedRequest(receipt) catch {};
+            self.batch_adapter.abortPrepared();
             self.terminalizeTransport();
             try adapter.abortExecutedAttachmentBinding(
                 &self.binding,
@@ -193,6 +201,7 @@ pub const GenerationAttachment = struct {
             .uncertain_or_connection_failure => |executed| {
                 if (self.finishResponse(adapter) != .cleaned)
                     @panic("uncertain response settlement failed");
+                self.batch_adapter.abortPrepared();
                 self.terminalizeTransport();
                 adapter.abortExecutedAttachmentBinding(
                     &self.binding,
@@ -204,6 +213,7 @@ pub const GenerationAttachment = struct {
             .typed_reject => |correlated| {
                 if (self.finishResponse(adapter) != .cleaned)
                     @panic("typed reject response settlement failed");
+                self.batch_adapter.abortPrepared();
                 self.terminalizeTransport();
                 adapter.abortExecutedAttachmentBinding(
                     &self.binding,
@@ -244,6 +254,7 @@ pub const GenerationAttachment = struct {
         executed: contract.ExecutedCallReceipt,
     ) anyerror!void {
         if (!self.valid() or self.lifecycle != .executing) return error.InvalidState;
+        self.batch_adapter.abortPrepared();
         self.terminalizeTransport();
         try adapter.abortExecutedAttachmentBinding(
             &self.binding,
@@ -262,13 +273,7 @@ pub const GenerationAttachment = struct {
     ) anyerror!void {
         if (!self.valid() or self.lifecycle != .executing or self.payload != null)
             return error.InvalidState;
-        try adapter.mintGenerationBatchAdapter(
-            &self.batch_adapter,
-            @intFromPtr(self),
-            @sizeOf(GenerationAttachment),
-            state.stream_id,
-        );
-        errdefer self.batch_adapter.abortPrepared();
+        try self.batch_adapter.preflightPreparedStream(state.stream_id);
         try adapter.commitAttachmentBinding(
             &self.binding,
             self.reservation.?,
@@ -276,6 +281,7 @@ pub const GenerationAttachment = struct {
             state.stream_id,
             &self.lease,
         );
+        self.batch_adapter.bindPreparedStreamNoFail(state.stream_id);
         generation_transport_mod.bindCommittedStreamOwned(
             &self.transport,
             @intFromPtr(self),
@@ -1146,6 +1152,7 @@ pub const testing_api = if (builtin.is_test) struct {
             switch (attachment.lifecycle) {
                 .binding_prepared => {
                     attachment.transport.abortPreparedRequest(receipt) catch {};
+                    attachment.batch_adapter.abortPrepared();
                     attachment.terminalizeTransport();
                     adapter.abortAttachmentBinding(
                         &attachment.binding,
@@ -1156,6 +1163,7 @@ pub const testing_api = if (builtin.is_test) struct {
                 .executing => {
                     _ = attachment.finishResponse(adapter);
                     attachment.transport.abortPreparedRequest(receipt) catch {};
+                    attachment.batch_adapter.abortPrepared();
                     attachment.terminalizeTransport();
                     adapter.abortExecutedAttachmentBinding(
                         &attachment.binding,
@@ -1392,7 +1400,7 @@ test "CR3a-2c3d C3-1 release callback preserves mirror and teardown stays busy" 
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
 
-test "CR3a-2c3d C3-1 event reserve failure rolls construction back to terminal" {
+test "CR3a-2c3d C3-1 event 예약 실패와 모든 준비 할당 실패는 terminal로 원복한다" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -1413,6 +1421,8 @@ test "CR3a-2c3d C3-1 event reserve failure rolls construction back to terminal" 
     );
     try std.testing.expectEqual(Lifecycle.terminal, attachment.lifecycle);
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), attachment.batch_adapter.slot_addr);
     try std.testing.expectError(
         error.InvalidOwner,
         attachment.transport.prepareRequest(contract.RuntimeRequest.detach()),
@@ -1427,9 +1437,66 @@ test "CR3a-2c3d C3-1 event reserve failure rolls construction back to terminal" 
     );
     try std.testing.expectEqual(Lifecycle.terminal, request_exhausted.lifecycle);
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), request_exhausted.batch_adapter.slot_addr);
     try std.testing.expectError(
         error.InvalidOwner,
         request_exhausted.transport.prepareRequest(contract.RuntimeRequest.detach()),
+    );
+
+    const AllocationFailure = struct {
+        fn run(failing_allocator: std.mem.Allocator) !void {
+            var source: @import("client.zig").Client = .{
+                .allocator = failing_allocator,
+                .fd = -1,
+                .host_id = 0x2C3D74,
+                .parser = framing.FrameParser.init(failing_allocator),
+            };
+            var host: host_adapter_mod.HostAdapter = undefined;
+            try host_adapter_mod.HostAdapter.initInPlace(
+                &host,
+                std.testing.allocator,
+                &source,
+            );
+            defer host.deinit();
+
+            var candidate: GenerationAttachment = .{};
+            try GenerationAttachment.initInPlace(&candidate, &host);
+            const prepared = candidate.prepareControllerAttach(&host, 0x2C3D75) catch |err| {
+                if (err != error.OutOfMemory and err != error.ResourceExhausted) return err;
+                try std.testing.expectEqual(Lifecycle.terminal, candidate.lifecycle);
+                try std.testing.expectEqual(
+                    @as(usize, 0),
+                    host.slot.current.pin_owner.cleanup_pin_count,
+                );
+                try std.testing.expectEqual(
+                    @as(usize, 0),
+                    try host.slot.current.cleanup_registry.count(),
+                );
+                try std.testing.expectEqual(@as(usize, 0), candidate.batch_adapter.slot_addr);
+                return error.OutOfMemory;
+            };
+            const result = try candidate.executePreparedAttach(&host, prepared);
+            switch (result) {
+                .uncertain_or_connection_failure => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(Lifecycle.terminal, candidate.lifecycle);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                host.slot.current.pin_owner.cleanup_pin_count,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                try host.slot.current.cleanup_registry.count(),
+            );
+            try std.testing.expectEqual(@as(usize, 0), candidate.batch_adapter.slot_addr);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        AllocationFailure.run,
+        .{},
     );
 }
 
@@ -1885,7 +1952,7 @@ const AttachmentReentrantFreeAllocator = struct {
     }
 };
 
-test "CR3a-2c3b registry-cleared uncertain response rejects finish and attachment retry" {
+test "CR3a-2e 원복은 응답 불확정 뒤 row와 pin과 batch를 terminal로 정리한다" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -1908,6 +1975,9 @@ test "CR3a-2c3b registry-cleared uncertain response rejects finish and attachmen
         .uncertain_or_connection_failure => {},
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), attachment.batch_adapter.slot_addr);
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
 }
@@ -2524,7 +2594,7 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
 }
 
-test "CR3a-2c3b registry-cleared typed reject rejects finish and attachment retry" {
+test "CR3a-2e 원복은 typed reject 뒤 row와 pin과 batch를 terminal로 정리한다" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -2556,6 +2626,30 @@ test "CR3a-2c3b registry-cleared typed reject rejects finish and attachment retr
     attachment.settleExecutedOutcome(&adapter, result);
     try std.testing.expectEqual(Lifecycle.terminal, attachment.lifecycle);
     try std.testing.expectEqual(contract.BindingLifecycle.terminal, attachment.binding.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), attachment.batch_adapter.slot_addr);
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
+}
+
+test "CR3a-2e 원복은 committed snapshot 실패를 같은 stream cleanup으로 수렴시킨다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2E40,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try testing_api.initAttached(&attachment, &adapter, allocator, 0x2E41, 0x2E42);
+    try attachment.poisonInitialSnapshotApply(false);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), attachment.batch_adapter.slot_addr);
 }

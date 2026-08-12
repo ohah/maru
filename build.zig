@@ -2193,6 +2193,11 @@ pub fn build(b: *std.Build) void {
         "2d3 terminal drain callback and proof-loss Debug and ReleaseFast gates",
     );
     session_host_2d3_step.dependOn(session_host_2d2_step);
+    const session_host_2e_step = b.step(
+        "test-session-host-2e",
+        "CR3a-2e actual attach parity Debug and ReleaseFast gates",
+    );
+    session_host_2e_step.dependOn(session_host_2d3_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3411,6 +3416,40 @@ pub fn build(b: *std.Build) void {
         run_event_2d3_boundary_tests.setCwd(b.path("."));
         session_host_2d3_step.dependOn(&run_event_2d3_boundary_tests.step);
         boundary_step.dependOn(&run_event_2d3_boundary_tests.step);
+
+        const event_2e_batch_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_batch_adapter.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_batch_module, "CR3a-2e batch adapter는", 4);
+        const event_2e_runtime_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_runtime_module, "CR3a-2e actual socket", 4);
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_runtime_module, "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach", 1);
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_runtime_module, "CR3a-2c1 malformed generation snapshot", 1);
+        const event_2e_attachment_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_attachment.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_attachment_module, "CR3a-2e 원복은", 3);
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_attachment_module, "CR3a-2c3d C3-1 event 예약 실패", 1);
+        const event_2e_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2e_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(b, session_host_2e_step, event_2e_boundary_module, "CR3a-2e 경계는", 1);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

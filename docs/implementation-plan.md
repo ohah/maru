@@ -984,10 +984,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    boundary를 닫는다. 2d3은 unique component 12개, stage별 전용 fresh-exec subprocess 3개, boundary 1개를
    Debug·ReleaseFast로 검증한다.
    각 gate의 exact API·RED 인벤토리는 persistent-session-host의 CR3a-2d 절을 단일 출처로 삼는다. 2d focused gate와 전체 검증이
-   green이므로 2d는 완료됐고, CR3a-2e는 actual socket parity와 production boundary를 닫는다. HostAdapter는 RPC 전에 neutral
-   binding의 node pin과 빈 cleanup entry를 예약하고 attach
-   성공 뒤 stream ID를 무할당으로 결속하므로 post-attach lease mint 실패
-   rollback을 만들지 않는다. external-pump의 `ExternalInboxLedger`와 movable attachment graph는 흡수·공유하지 않는다. 이때
+   green이므로 2d는 완료됐다. CR3a-2e도 actual socket parity와 production boundary를 닫았다. HostAdapter는 RPC 전에 neutral
+   binding의 node pin·빈 cleanup entry·final-address batch adapter를 하나의 준비 suffix로 예약한다. batch adapter는 이때
+   `stream_id=0`인 `reserved` 상태이고, accepted attach 응답 뒤에는 allocation 없이 exact stream ID를 결속해 `live`로 게시한다.
+   따라서 post-attach lease/batch mint 실패 rollback을 만들지 않는다. external-pump의 `ExternalInboxLedger`와 movable attachment
+   graph는 흡수·공유하지 않는다. focused gate `test-session-host-2e`는 Debug·ReleaseFast마다 준비 계약 4개, actual socket attach
+   parity 6개, rollback 4개인 unique component 14개와 boundary 1개를 exact-count하며 현재 Debug·ReleaseFast에서 green이다. 이때
    reconnect, current 교체, retired node 생성은 여전히 0이고 cleanup은 typed result만 반환하며 incident/artifact mutation은
    CR0b까지 0이다.
    CR3b는 pool membership과 독립된 connection generation의 checked-monotonic 전이·publish·overflow, main-thread

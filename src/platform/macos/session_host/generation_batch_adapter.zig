@@ -37,9 +37,22 @@ pub const GenerationBatchAdapter = struct {
         owner_size: usize,
         stream_id: u64,
     ) Error!void {
+        if (stream_id == 0) return error.InvalidAdapter;
+        try initReservedInPlace(out, slot, owner_addr, owner_size);
+        try out.bindPreparedStream(stream_id);
+    }
+
+    /// attach RPC 전에 final-address storage와 ClientSlot identity를 먼저 고정한다. stream은 peer 응답에서만
+    /// 알 수 있으므로 이 단계에서는 0으로 남기며, wire 이후 새 권위를 할당하지 않게 하는 것이 목적이다.
+    pub fn initReservedInPlace(
+        out: *GenerationBatchAdapter,
+        slot: *client_slot_mod.ClientSlot,
+        owner_addr: usize,
+        owner_size: usize,
+    ) Error!void {
         if (out.self_addr != 0 or out.lifecycle != .pristine)
             return error.DestinationOccupied;
-        if (owner_addr == 0 or owner_size == 0 or stream_id == 0)
+        if (owner_addr == 0 or owner_size == 0)
             return error.InvalidAdapter;
         const owner_end = std.math.add(usize, owner_addr, owner_size) catch
             return error.InvalidAdapter;
@@ -56,15 +69,34 @@ pub const GenerationBatchAdapter = struct {
             .owner_size = owner_size,
             .slot_addr = @intFromPtr(slot),
             .identity = identity,
-            .stream_id = stream_id,
+            .stream_id = 0,
             .owner_thread_id = std.Thread.getCurrentId(),
             .lifecycle = .prepared,
         };
     }
 
+    /// accepted attach가 준 exact stream을 prepared storage에 한 번만 결속한다. allocation과 callback은 없다.
+    pub fn bindPreparedStream(self: *GenerationBatchAdapter, stream_id: u64) Error!void {
+        try self.preflightPreparedStream(stream_id);
+        self.bindPreparedStreamNoFail(stream_id);
+    }
+
+    /// accepted stream publication 전에 final-address reserved owner를 read-only로 검증한다.
+    pub fn preflightPreparedStream(self: *GenerationBatchAdapter, stream_id: u64) Error!void {
+        if (self.borrowSlot(.prepared) == null or self.stream_id != 0 or stream_id == 0)
+            return error.InvalidState;
+    }
+
+    /// binding row와 lease commit이 성공한 뒤 실행하는 store-only suffix다.
+    pub fn bindPreparedStreamNoFail(self: *GenerationBatchAdapter, stream_id: u64) void {
+        if (self.borrowSlot(.prepared) == null or self.stream_id != 0 or stream_id == 0)
+            @panic("prepared generation batch stream changed after preflight");
+        self.stream_id = stream_id;
+    }
+
     /// Attachment binding commit 뒤 호출되는 무실패 publication suffix다.
     pub fn activateCommitted(self: *GenerationBatchAdapter) Error!void {
-        if (self.borrowSlot(.prepared) == null)
+        if (self.borrowSlot(.prepared) == null or self.stream_id == 0)
             return error.MovedOrCopied;
         self.lifecycle = .live;
     }
@@ -204,7 +236,8 @@ pub const GenerationBatchAdapter = struct {
     fn borrowSlot(self: *GenerationBatchAdapter, expected: Lifecycle) ?*client_slot_mod.ClientSlot {
         if (self.self_addr != @intFromPtr(self) or self.lifecycle != expected or
             self.owner_addr == 0 or self.owner_size == 0 or self.slot_addr == 0 or
-            self.stream_id == 0 or self.owner_thread_id != std.Thread.getCurrentId())
+            (expected != .prepared and self.stream_id == 0) or
+            self.owner_thread_id != std.Thread.getCurrentId())
             return null;
         const owner_end = std.math.add(usize, self.owner_addr, self.owner_size) catch return null;
         const self_end = std.math.add(usize, @intFromPtr(self), @sizeOf(GenerationBatchAdapter)) catch
@@ -357,4 +390,98 @@ test "CR3a-2b2 batch adapter rejects copy foreign slot and wrong thread before m
     try owner.adapter.preflightDraining();
     owner.adapter.commitDraining();
     owner.adapter.finishDraining();
+}
+
+test "CR3a-2e batch adapter는 stream 없이 final-address reserved 상태를 준비한다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const Owner = struct { adapter: GenerationBatchAdapter = .{} };
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2E01,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2E01);
+    defer slot.deinit();
+    var owner: Owner = .{};
+    try GenerationBatchAdapter.initReservedInPlace(
+        &owner.adapter,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+    );
+    try std.testing.expectEqual(@as(u64, 0), owner.adapter.stream_id);
+    try std.testing.expectError(error.MovedOrCopied, owner.adapter.preflightDraining());
+    owner.adapter.abortPrepared();
+}
+
+test "CR3a-2e batch adapter는 accepted stream을 한 번만 결속한다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const Owner = struct { adapter: GenerationBatchAdapter = .{} };
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2E02,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2E02);
+    defer slot.deinit();
+    var owner: Owner = .{};
+    try GenerationBatchAdapter.initReservedInPlace(
+        &owner.adapter,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+    );
+    try owner.adapter.bindPreparedStream(17);
+    try std.testing.expectError(error.InvalidState, owner.adapter.bindPreparedStream(18));
+    try owner.adapter.activateCommitted();
+    try owner.adapter.preflightDraining();
+    owner.adapter.commitDraining();
+    owner.adapter.finishDraining();
+}
+
+test "CR3a-2e batch adapter는 zero stream 결속을 mutation 없이 거부한다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const Owner = struct { adapter: GenerationBatchAdapter = .{} };
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2E03,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2E03);
+    defer slot.deinit();
+    var owner: Owner = .{};
+    try GenerationBatchAdapter.initReservedInPlace(&owner.adapter, &slot, @intFromPtr(&owner), @sizeOf(Owner));
+    try std.testing.expectError(error.InvalidState, owner.adapter.bindPreparedStream(0));
+    try std.testing.expectEqual(@as(u64, 0), owner.adapter.stream_id);
+    owner.adapter.abortPrepared();
+}
+
+test "CR3a-2e batch adapter는 copied reserved owner와 abort replay를 거부한다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const Owner = struct { adapter: GenerationBatchAdapter = .{} };
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2E04,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2E04);
+    defer slot.deinit();
+    var owner: Owner = .{};
+    try GenerationBatchAdapter.initReservedInPlace(&owner.adapter, &slot, @intFromPtr(&owner), @sizeOf(Owner));
+    var copied = owner.adapter;
+    try std.testing.expectError(error.InvalidState, copied.bindPreparedStream(9));
+    owner.adapter.abortPrepared();
+    try std.testing.expectError(error.InvalidState, owner.adapter.bindPreparedStream(9));
 }

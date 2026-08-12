@@ -1582,6 +1582,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - CR3b: pool-membership과 독립된 connection generation 전이·publish·overflow, stale callback/동시 attempt,
   R1 admission close/cancel → R2 store-only detach+placeholder publish+callback cleanup → R3 final seal/canRetire/tick-end destroy의
   three-phase retirement, retired Client cap 2. CR3c: 실제 RemoteGeneration slot integration.
+- CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
+  준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는
+  suffix로 결속해 `live`가 된다. Debug·ReleaseFast `test-session-host-2e`는 준비 계약 4개, actual socket parity 6개, rollback 4개,
+  boundary 1개를 실행한다. actual socket 행은 성공, typed reject, response 전 EOF, accepted 뒤 snapshot EOF, malformed accepted,
+  initial snapshot apply 실패를 다루며 wire 전에 모든 준비가 끝났는지와 성공 뒤 cleanup row/pin/batch identity가 같은 stream에
+  결속되는지를 증명한다. rollback 행은 준비 fail-index, typed reject, uncertain response, accepted 뒤 snapshot 실패가 pin/row/batch를
+  exact zero 또는 단일 committed cleanup으로 수렴시키는지 검증한다. `ExternalInboxLedger` import/caller, reconnect/current 교체,
+  retired node publication, incident/artifact mutation은 0이다.
 - CR4: 실제 socket poison→observer attach→takeover→input/resize. takeover reply-loss는 local authority 미발행,
   candidate close 완료를 가정하지 않고 direct-controller grant만 기다리며 observer conflict는 자동 탈취하지 않는다.
 - CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,

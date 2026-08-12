@@ -874,6 +874,25 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    generation release 결과 shape 3개, 제품 completed 1개, 최초 retryable mutation-0 1개, deinit fresh-permit retry 성공 1개,
    retry 중 read/sibling 차단 1개, stale/wrong-stream strict failure 1개와 boundary 1개인 최적화 모드당 unique component 8개다.
    테스트명과 새 설명 주석은 한국어로 쓰고, 결과 enum·API 식별자는 코드 계약 이름을 유지한다.
+
+   **CR3a-2e actual attach parity:** generation attach는 peer가 accepted response를 보낸 뒤 새로운 cleanup 권위를 mint하지 않는다.
+   `GenerationAttachment.prepareControllerAttach`의 fallible prefix가 binding/lease와 함께 final-address batch adapter를
+   `reserved(stream_id=0)`로 준비한다. 이 시점에는 cleanup registry row와 connection pin이 이미 예약돼 있지만 wire write, callback,
+   payload allocation은 0이다. prepared request를 실행해 accepted response를 얻은 뒤 `commitAccepted`는 decoded nonzero stream ID가
+   correlated response와 binding identity에 일치하는지 검증하고, cleanup row bind→lease init→batch stream bind→transport stream bind를
+   callback/allocation 없는 suffix로 게시한다. 어느 store 뒤에도 typed return이나 rollback이 없으며 batch adapter의 새 storage를
+   만들지 않는다. typed reject와 response 전 EOF는 prepared batch를 terminal로 만들고 row/pin을 원복한다. accepted 뒤 snapshot EOF,
+   malformed accepted, initial snapshot apply 실패는 이미 committed된 동일 stream의 canonical drop만 사용하며 별도 lease/batch mint나
+   host runtime terminate 추측을 만들지 않는다.
+
+   focused gate `test-session-host-2e`는 Debug·ReleaseFast마다 준비 계약 4개, actual socket parity 6개, rollback 4개인 unique component
+   14개와 boundary 1개를 exact-count한다. 준비 계약은 reserved batch의 final address/copy 거부, stream 0 전용 준비, exact nonzero
+   stream one-shot bind, abort/replay mutation 0을 각각 증명한다. actual socket은 정상 attach, typed reject, response 전 EOF, accepted 뒤
+   snapshot EOF, malformed accepted, initial snapshot apply 실패를 제품 `RemoteRuntime.attachAndAssemble`로 실행한다. rollback은 준비
+   fail-index 전수, typed reject, uncertain response, committed snapshot failure의 cleanup row/pin/batch/source-zero를 독립 검증한다.
+   boundary는 batch prepare가 wire write보다 앞선 sole product caller인지, commit 뒤 batch mint/allocator call이 0인지,
+   `ExternalInboxLedger` import/caller와 reconnect/current/retired publication이 0인지 고정한다. AppKit은 완료 조건이 아니며 이 gate가
+   green이 되기 전 CR3a 전체 완료나 CR3b admission을 주장하지 않는다.
    구현 gate의 exact 소유 분해는 registry result/permit 4개, ClientSlot completed/retryable/strict-token 3개,
    GenerationAttachment actual retry/teardown 1개다. recoverable 주입은 exact registry 주소와 token에 결속된 test-only one-shot이며
    다른 registry나 sibling token이 대신 소비할 수 없다. production callback은 같은 permit decision 결과를 그대로 전달하고,

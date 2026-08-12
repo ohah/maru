@@ -124,6 +124,20 @@ src/platform/
 Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으로 확인했다 — 같은
 논리 좌표를 주면 두 플랫폼이 같은 셀을 답한다(물리 좌표는 200,300 과 525,753 으로 다르다).
 
+## 3.2 프레임 주기
+
+**30Hz(comfort)로 그린다 — 처음부터.** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은
+배터리·발열이 **사용자에게 보인다**. 데스크톱 maru 의 present 정책과 같은 값이다.
+
+| | 어떻게 |
+|---|---|
+| iOS | `CADisplayLink.preferredFrameRateRange = 30` |
+| Android | `AChoreographer` vsync 를 받아 **한 번 걸러** present(Vulkan 에는 하위 주기 모드가 없다) |
+
+**계측은 동작을 바꾸지 않는다.** 예전에는 60Hz 로 시작해 80프레임쯤 뒤 계측이 끝나면 30Hz 로
+넘어갔다 — 측정의 부산물이 제품 동작이었고, iOS 엔 그 전환이 없어 두 플랫폼이 달랐다. 지금은
+둘 다 처음부터 30Hz 이고 `MARU_PACE` 는 도는 주기를 재서 한 번 기록만 한다.
+
 ## 4. 폰트
 
 **동봉 폰트를 쓴다.** `assets/fonts/Jetendard`(OFL)는 영문과 한글을 한 파일에 담아 폴백이

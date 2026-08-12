@@ -106,6 +106,42 @@ unsigned int maru_mobile_icon_count(void);
 /// 멈춘 채 모든 키가 사라지고 있었다). 이 값이 안 늘면 입력이 안 닿은 것이다.
 unsigned int maru_mobile_input(const char *bytes, unsigned long len);
 
+/// 키 입력(**인코딩 전**). 문자·특수키·수정자를 그대로 넘기면 코어의 `encodeKey` 가
+/// 터미널 바이트로 만든다 — DECCKM(커서키 모드)·수정자·kitty 프로토콜·application keypad 가
+/// 전부 거기 있다. 손으로 `\r`·`0x7F` 를 적어 넣으면 그 전부가 빠진다.
+///
+/// **이 숫자가 단일 출처다.** 브리지의 매핑과 함께 바꾼다 — 계약 테스트가 헤더를 읽어
+/// 미러를 검사하므로, 한쪽만 고치면 테스트가 잡는다.
+#define MARU_KEY_CHAR      0   /* codepoint 인자를 쓴다 */
+#define MARU_KEY_ENTER     1
+#define MARU_KEY_ESCAPE    2
+#define MARU_KEY_TAB       3
+#define MARU_KEY_BACKSPACE 4
+#define MARU_KEY_UP        5
+#define MARU_KEY_DOWN      6
+#define MARU_KEY_LEFT      7
+#define MARU_KEY_RIGHT     8
+#define MARU_KEY_HOME      9
+#define MARU_KEY_END       10
+#define MARU_KEY_INSERT    11
+#define MARU_KEY_DELETE    12
+#define MARU_KEY_PAGE_UP   13
+#define MARU_KEY_PAGE_DOWN 14
+/// F1~F12 는 100+n-1 (F1=100 … F12=111).
+#define MARU_KEY_F(n)      (99 + (n))
+
+#define MARU_MOD_SHIFT 1
+#define MARU_MOD_CTRL  2
+#define MARU_MOD_ALT   4
+#define MARU_MOD_CMD   8
+
+/// 반환값은 `maru_mobile_input` 과 같은 **코어에 전달한 누적 바이트**다.
+unsigned int maru_mobile_key(unsigned int key_id, unsigned int codepoint, unsigned int mods);
+
+/// 포커스 변화를 코어에 알린다(DEC 1004). 켜져 있으면 `CSI I`/`CSI O` 가 흐른다 — vim 의
+/// FocusGained/Lost 가 그걸 본다. 모바일은 배경↔복귀가 데스크톱보다 훨씬 잦다.
+void maru_mobile_report_focus(int focused);
+
 /// 조합 중 문자열(IME preedit). **코어에 넣지 않는다** — 확정 전에 PTY 로 흘리면 셸이
 /// 자모를 명령어 일부로 받는다. 화면 커서 자리에 흐리게 그릴 겉치레다.
 void maru_mobile_set_preedit(const char *bytes, unsigned long len);

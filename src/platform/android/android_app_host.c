@@ -19,6 +19,16 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <pthread.h>
+
+// **입력과 렌더가 다른 스레드다.** IME 는 Java UI 스레드에서 `InputConnection` 으로 오고
+// (실측 tid 14832), 그리는 쪽은 NativeActivity 가 만든 스레드다(tid 14850). 브리지의
+// `TerminalCore`·preedit·오류 문자열을 그 둘이 동기화 없이 만지고 있었다.
+//
+// **자물쇠는 여기가 갖는다.** 브리지는 OS 를 모르는 자리이고(docs/mobile-platform.md §3),
+// 스레드가 둘이라는 사실은 이 플랫폼의 것이다. iOS 는 UIKit 이 둘 다 main 에서 부르므로
+// 이 문제가 없다 — 대칭이 아니라 사정이 다른 것이고, 그 차이를 여기 적어 둔다.
+static pthread_mutex_t g_bridge_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #define PACE_WARMUP 20
 #define PACE_SAMPLES 60
@@ -252,15 +262,24 @@ static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t
             (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt = i; break; }
     VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                                 .allocationSize = mr.size, .memoryTypeIndex = mt};
+    // 실패해도 **device 의 자식을 남기지 않는다.** 남기면 나중에 device 를 파괴할 때
+    // 드라이버가 죽는다(아래 staging 주석의 실측과 같은 종류).
     VkDeviceMemory mem;
-    if (vkAllocateMemory(g.dev, &mai, NULL, &mem) != VK_SUCCESS) return 0;
+    if (vkAllocateMemory(g.dev, &mai, NULL, &mem) != VK_SUCCESS) {
+        vkDestroyImage(g.dev, img, NULL);
+        return 0;
+    }
     vkBindImageMemory(g.dev, img, mem, 0);
 
     VkDeviceSize bytes = (VkDeviceSize)w * h * bpp;
     VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
                               .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
     VkBuffer stage;
-    if (vkCreateBuffer(g.dev, &bci, NULL, &stage) != VK_SUCCESS) return 0;
+    if (vkCreateBuffer(g.dev, &bci, NULL, &stage) != VK_SUCCESS) {
+        vkDestroyImage(g.dev, img, NULL);
+        vkFreeMemory(g.dev, mem, NULL);
+        return 0;
+    }
     VkMemoryRequirements bmr; vkGetBufferMemoryRequirements(g.dev, stage, &bmr);
     uint32_t bmt = UINT32_MAX;
     for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
@@ -270,7 +289,12 @@ static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t
     VkMemoryAllocateInfo bmai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                                  .allocationSize = bmr.size, .memoryTypeIndex = bmt};
     VkDeviceMemory bmem;
-    if (vkAllocateMemory(g.dev, &bmai, NULL, &bmem) != VK_SUCCESS) return 0;
+    if (vkAllocateMemory(g.dev, &bmai, NULL, &bmem) != VK_SUCCESS) {
+        vkDestroyBuffer(g.dev, stage, NULL);
+        vkDestroyImage(g.dev, img, NULL);
+        vkFreeMemory(g.dev, mem, NULL);
+        return 0;
+    }
     vkBindBufferMemory(g.dev, stage, bmem, 0);
     void *map = NULL;
     vkMapMemory(g.dev, bmem, 0, VK_WHOLE_SIZE, 0, &map);
@@ -307,6 +331,14 @@ static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
     vkQueueSubmit(g.queue, 1, &si, VK_NULL_HANDLE);
     vkQueueWaitIdle(g.queue);
+
+    // **staging 을 여기서 지운다.** 안 지우면 device 의 자식으로 남고, 창이 바뀔 때
+    // `teardownVulkan` 이 자식이 살아 있는 device 를 파괴한다 — 정의되지 않은 동작이다.
+    // 실측: 창 크기를 아홉 번 바꿨더니 `vkDestroyDevice` 안에서 SIGSEGV 로 앱이 죽었다
+    // (툼스톤 #01 `on_vkDestroyDevice_pre`, 드라이버의 device-memory 등록부).
+    vkFreeCommandBuffers(g.dev, g.pool, 1, &cb);
+    vkDestroyBuffer(g.dev, stage, NULL);
+    vkFreeMemory(g.dev, bmem, NULL);
 
     VkImageViewCreateInfo ivci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
                                   .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
@@ -581,6 +613,9 @@ static void drawFrame(void) {
     // 상태바·제스처바를 뺀 영역만 준다 — iOS 의 safeAreaInsets 와 같은 자리다.
     unsigned int lw = (unsigned int)(g.extent.width / scale);
     unsigned int lh = (unsigned int)((g.extent.height - g.inset_top - g.inset_bottom) / scale);
+    // **브리지를 만지는 동안 입력 스레드를 막는다.** IME 가 `maru_mobile_input` 으로
+    // 코어에 쓰는 것과 여기서 격자를 읽는 것이 겹치면 셀을 반쯤 쓴 상태로 읽는다.
+    pthread_mutex_lock(&g_bridge_lock);
     unsigned int n = maru_mobile_build(lw, lh);
     // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
     if (g_app) growAtlas(g_app);
@@ -591,9 +626,12 @@ static void drawFrame(void) {
     {
         static char last_err[64];
         const char *err = maru_mobile_last_error();
-        if (err[0] && strcmp(err, last_err) != 0) {
-            snprintf(last_err, sizeof last_err, "%s", err);
-            LOGI("MARU_CHROME error=%s", err);
+        if (err[0]) {
+            if (strcmp(err, last_err) != 0) {
+                snprintf(last_err, sizeof last_err, "%s", err);
+                LOGI("MARU_CHROME error=%s", err);
+            }
+            maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
         }
     }
 
@@ -628,6 +666,8 @@ static void drawFrame(void) {
                   {(float)q->cell_x, (float)q->cell_y, cols, rows}};
         dst[i] = p;
     }
+    // quad 를 GPU 버퍼로 다 옮겼다 — 여기서부터는 브리지를 안 읽는다.
+    pthread_mutex_unlock(&g_bridge_lock);
     vkCmdDraw(cb, 4, drawn, 0, 0);
     if (g.frames == 0) LOGI("MARU_DRAW calls=1 instances=%u", drawn);
     vkCmdEndRenderPass(cb);
@@ -722,7 +762,10 @@ Java_dev_maru_MaruActivity_nativeComposing(JNIEnv *env, jclass cls, jstring text
     (void)cls;
     const char *s = text ? (*env)->GetStringUTFChars(env, text, NULL) : NULL;
     unsigned int n = s ? (unsigned int)strlen(s) : 0;
+    // **UI 스레드다.** 렌더 스레드가 브리지를 읽는 동안 끼어들면 안 된다(파일 위 주석).
+    pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_set_preedit(s ? s : "", n);
+    pthread_mutex_unlock(&g_bridge_lock);
     if (s) (*env)->ReleaseStringUTFChars(env, text, s);
 }
 
@@ -732,7 +775,9 @@ Java_dev_maru_MaruActivity_nativeCommit(JNIEnv *env, jclass cls, jstring text) {
     if (!text) return;
     const char *s = (*env)->GetStringUTFChars(env, text, NULL);
     if (s) {
+        pthread_mutex_lock(&g_bridge_lock);
         unsigned int total = maru_mobile_input(s, strlen(s));
+        pthread_mutex_unlock(&g_bridge_lock);
         LOGI("MARU_INPUT commit=\"%s\" total=%u", s, total);
         (*env)->ReleaseStringUTFChars(env, text, s);
     }
@@ -750,7 +795,9 @@ Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code) {
         case AKEYCODE_ESCAPE: c = 0x1B; break;
         default: return;
     }
+    pthread_mutex_lock(&g_bridge_lock);
     maru_mobile_input(&c, 1);
+    pthread_mutex_unlock(&g_bridge_lock);
 }
 
 // 창이 서면 키보드를 올린다 — 터미널은 켜지면 바로 입력을 받는다.

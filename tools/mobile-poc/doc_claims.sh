@@ -34,6 +34,12 @@ ck "선언 집합 해시" "$h" "$z"
 echo "문서에 낡을 값이 없는가"
 ck "매트릭스에 테스트 개수 하드코딩" 0 "$(grep -c 'mobile_bridge_contract.zig`([0-9]*개)' docs/verification-matrix.md)"
 
+echo "§3.1 IME 가 입력을 고쳐 쓰지 못한다"
+# 선언이 **없으면** OS 기본값(글 쓰기용)이 붙는다 — 없는 것을 세야 하므로 grep 하나로는 못
+# 잡는다. iOS 는 여섯 traits 를 다 끄고, Android 는 제안을 끈다.
+ck "iOS traits 여섯 개" 6 "$(grep -cE 'UITextAutocapitalizationTypeNone|UITextAutocorrectionTypeNo|UITextSpellCheckingTypeNo|UITextSmartQuotesTypeNo|UITextSmartDashesTypeNo|UITextSmartInsertDeleteTypeNo' $I)"
+ck "Android NO_SUGGESTIONS" 1 "$(grep -c 'TYPE_TEXT_FLAG_NO_SUGGESTIONS' src/platform/android/MaruActivity.java)"
+
 echo "문서가 자기 자신과 모순되지 않는가"
 # 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
 # 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이

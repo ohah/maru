@@ -93,6 +93,12 @@ src/platform/
 | 플랫폼 → 코어 | 조합 중 문자열(IME preedit) | `maru_mobile_set_preedit(bytes, len)` |
 | 플랫폼 → 코어 | 본문 셀 조회(논리 px) | `maru_mobile_hit_cell(x, y)` |
 | 코어 → 플랫폼 | 아직 아틀라스에 없는 코드포인트 | `maru_mobile_missing_*` |
+| 코어 → 플랫폼 | 마지막 실패 이름(읽은 쪽이 비운다) | `maru_mobile_last_error` / `_clear_error` |
+
+**브리지는 스레드를 모른다.** 자물쇠는 스레드가 둘인 플랫폼이 갖는다. Android 는 IME 가
+Java UI 스레드에서 오고 그리는 쪽은 NativeActivity 스레드라(실측 tid 14832 vs 14850) host 가
+`pthread_mutex` 로 브리지 호출을 직렬화한다. iOS 는 UIKit 이 둘 다 main 에서 부르므로 없다 —
+대칭이 깨진 게 아니라 사정이 다른 것이고, 그 차이는 각 host 파일 머리에 적는다.
 
 ### 3.1 포인터는 누가 해석하는가
 
@@ -191,6 +197,25 @@ surface 로 present 하게 된다. iOS 는 그 파괴가 필요 없고, **대신
 이 원칙이 없을 때 실제로 생긴 일: 입력이 512바이트에서 죽었는데 **로그가 같은 수를 계속
 찍어** 죽은 줄 몰랐다. 그래서 `maru_mobile_input` 의 반환값도 내부 기록 길이가 아니라
 **코어에 전달한 누적 바이트**다 — 안 늘면 안 닿은 것이다.
+
+**오류는 읽은 쪽이 비운다.** build 가 프레임 시작마다 비우면 프레임 *사이*에 난 실패
+(입력의 core write)가 아무도 읽기 전에 지워진다 — 이 원칙을 만든 바로 그 경로에서만 신호가
+안 남는 셈이었다. host 는 매 프레임 읽고, 값이 있으면 로그하고 `maru_mobile_clear_error` 한다.
+
+**고정 버퍼 위에 코어를 세우지 않는다.** `FixedBufferAllocator` 는 마지막 할당 말고는 free 가
+no-op 이라 격자가 바뀔 때마다 옛 격자를 못 돌려받는다 — 512KB 로 **resize 7번**이면
+OutOfMemory 였다(헤드리스 실측). 모바일은 **키보드를 올렸다 내리기만 해도** 리사이즈다.
+
+**resize 가 실패하면 기록도 안 바꾼다.** 실패한 채 크기 기록만 새 값으로 덮으면 코어는 옛
+크기인데 순회는 새 크기로 돌아 없는 셀을 읽는다. 순회 기준을 **코어가 들고 있는 크기**로
+두어 갈릴 자리 자체를 없앤다.
+
+**GPU 자원은 device 보다 오래 살면 안 된다.** 업로드용 staging 버퍼를 안 지운 채
+`vkDestroyDevice` 를 불렀더니 창 크기를 아홉 번 바꾸는 것만으로 드라이버 안에서 SIGSEGV 가
+났다(툼스톤 `on_vkDestroyDevice_pre`). 실패 경로에서도 자식을 남기지 않는다.
+
+이 계약들은 `tests/mobile_bridge_contract.zig` 가 지킨다 — 브리지가 OS 를 안 부르므로
+시뮬레이터 없이 `zig build test` 에서 돈다.
 
 **문자열은 UTF-8 경계에서 자른다.** 조합 중 문자열을 바이트 수로만 자르면 한글이 반토막
 나고, 그리는 쪽이 그 문자열을 통째로 버려 **조합이 화면에서 사라진다**(멈춘 것처럼 보인다).

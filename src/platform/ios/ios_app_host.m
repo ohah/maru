@@ -362,9 +362,12 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // **오류는 바뀔 때 알린다.** 시작 때 한 번만 읽으면 그 뒤에 생긴 실패(quad 넘침·코어
     // write·아틀라스 만원)는 기록만 되고 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
     const char *err = maru_mobile_last_error();
-    if (err[0] && strcmp(err, _lastErr) != 0) {
-        strncpy(_lastErr, err, sizeof _lastErr - 1);
-        NSLog(@"MARU_CHROME error=%s", err);
+    if (err[0]) {
+        if (strcmp(err, _lastErr) != 0) {
+            strncpy(_lastErr, err, sizeof _lastErr - 1);
+            NSLog(@"MARU_CHROME error=%s", err);
+        }
+        maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
     }
     // build 가 못 그린 글자를 모아 뒀다 — 그것만 구워 넣고 **다음 프레임에 보이게** 한다.
     [self growAtlas];

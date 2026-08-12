@@ -284,8 +284,15 @@ quad 구조체를 넓히면 `float4` 배수가 깨진다(그 정렬을 어겼다
 
 ### IME — 두 플랫폼이 조합을 다르게 준다 (실측)
 
-**Android 는 조합을 조합으로 준다.** `InputConnection.setComposingText` 가 확정 전 문자열을
-따로 주므로, 화면에만 흐리게 그리고 코어는 확정된 것만 받는다. 계약대로다.
+**Android 는 조합을 조합으로 줄 것이다 — 아직 확인은 못 했다.**
+`InputConnection.setComposingText` 가 확정 전 문자열을 따로 주는 자리이고 우리는 그것을 받아
+화면에만 흐리게 그린다. 다만 **왕복은 이 환경에서 검증할 수 없다**: 에뮬레이터의 Gboard 는
+활성 입력 방식이 영어 변형뿐이고(Play 스토어 없는 이미지라 한국어 언어팩을 받을 경로가 없다),
+영어 Gboard 는 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 때문에 조합 없이 바로 확정한다.
+
+그래서 우리가 소유한 절반만 테스트로 고정했다(`tests/mobile_bridge_contract.zig` — 받으면
+그리고·확정되면 지우고·코어를 안 더럽히고·UTF-8 경계에서 자른다). **IME 가 실제로 조합을
+보내는지는 실기기에서만 확인된다.**
 
 **iOS 한글은 marked text 를 쓰지 않는다.** `UITextInput` 을 구현하고 UIKit 이 그것을 쓰는
 것까지 확인했는데도(`MARU_IME protocol=UITextInput`), 한글은 `setMarkedText` 대신

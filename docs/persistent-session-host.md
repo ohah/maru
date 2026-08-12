@@ -628,6 +628,11 @@ conflict는 같은 incident의 child event이며 최초 `poison_reason`을 덮�
   cache 경로, mode, quota와 aggregate fingerprint의 단일 출처는 [Trace와 Replay](trace-replay.md#connectionincident-진단-artifact)다.
   구조화 로그와 future inspector는 같은 `ConnectionIncident` DTO를 소비한다.
 
+CR0b의 exact scalar schema, `SourceSite`, 256-byte record envelope, 120 incident+8 aggregate의 32 KiB ring 산술,
+first-reason과 incident의 단일 publication suffix, process/fork/sequence/writer lifecycle은
+[Trace와 Replay](trace-replay.md#cr0b-exact-schema와-publication-owner)를 단일 출처로 따른다. 이 계약이 구현되기 전에는
+artifact-before-recovery나 CR0b 완료를 주장하지 않는다.
+
 #### 소유 구조: stable shell + generation bundle
 
 raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소 안정성과 prepared publish를 결합한다.
@@ -5022,6 +5027,12 @@ wrong-thread/fork, request-generation replay와 callback reentry를 Debug·Relea
 `HostAdapter.logicalClient()` 제품 호출을 0으로 만들고 test-only raw observer만 conditional facade에 남기며, reconnect publish,
 current pointer flip, retired node, Client destroy와 connection generation increment가 모두 0임을 고정한다.
 focused gate는 각 최적화 모드에서 ClientSlot component 6개, HostAdapter 제품 facade 1개, source boundary 1개를 exact-count한다.
+
+R1은 current pointer, runtime/screen target, connection generation을 바꾸지 않는 독립 inactive 기반이라 stable shell보다 먼저
+존재할 수 있다. 반대로 R2는 CR0b·CR1·CR2a~e가 모두 완료되어 `RemoteGeneration`, stable `ScreenSource` proxy,
+preallocated `UnavailableCore`, `PreparedReconnect`가 실제 제품 타입으로 준비된 뒤에만 admission한다. R2가 이 기반을
+`ClientSlot` 안에 임시로 복제하거나 stable shell 없이 attachment를 직접 파괴하는 경로는 허용하지 않는다. CR3c는 R2/R3의
+Client 세대 결과를 이미 존재하는 `RemoteGeneration` slot에 연결한다.
 
 #### CR3a ownership target inventory
 

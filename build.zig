@@ -2539,9 +2539,28 @@ pub fn build(b: *std.Build) void {
         B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_preparation_module, "C3-3b2b3 callback subprocess", 1);
         B2b3Test.add(b, session_host_2c3d_c3_3b2b3_step, event_c3_3b2b3_adapter_module, "C3-3b2b3 integration adapter", 2);
 
-        // The aggregate artifact has inherited process-keyed seal state by the time it reaches
-        // this test. Run the destructive DTO callback probe in a fresh exact-filter artifact so
-        // its child inherits pristine state; the aggregate copy still executes every non-fork row.
+        // DTO callback proof-loss는 process seal을 초기화하기 전의 별도 artifact 자체가 종료해야 한다.
+        // 이미 초기화된 test process에서 fork하면 inherited authority 거부가 목표 callback보다 먼저 닫힌다.
+        const event_c3_3b2b3_dto_drift_child = b.addTest(.{
+            .root_module = event_c3_3b2b3_adapter_module,
+            .filters = &.{"C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다"},
+            .test_runner = .{
+                .path = b.path("tools/simple_test_runner.zig"),
+                .mode = .simple,
+            },
+        });
+        const run_event_c3_3b2b3_dto_drift_child =
+            b.addRunArtifact(event_c3_3b2b3_dto_drift_child);
+        run_event_c3_3b2b3_dto_drift_child.expectExitCode(86);
+        run_event_c3_3b2b3_dto_drift_child.setCwd(b.path("."));
+        session_host_2c3d_c3_3b2b3_step.dependOn(
+            &run_event_c3_3b2b3_dto_drift_child.step,
+        );
+        run_session_host_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
+        run_core_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
+        run_exe_tests.step.dependOn(&run_event_c3_3b2b3_dto_drift_child.step);
+
+        // 나머지 allocation/ownership 행은 정상 종료하는 exact-one artifact에서도 반복한다.
         const event_c3_3b2b3_dto_drift_tests = addProjectTest(b, .{
             .root_module = event_c3_3b2b3_adapter_module,
             .filters = &.{"C3-3b2b3 integration adapter prepares a canonical real-take event"},

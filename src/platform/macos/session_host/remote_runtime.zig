@@ -7290,6 +7290,16 @@ fn runPreparationDtoDriftChild(metadata: []const u8) noreturn {
     std.c._exit(124);
 }
 
+test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" {
+    // 이 행은 build가 별도로 만든 exact-one death artifact에서만 실행한다.
+    // aggregate root에서는 정상 테스트 뒤의 process seal을 물려받으므로 목표 callback을 증명하지 못한다.
+    if (builtin.test_functions.len != 1) return;
+    const metadata =
+        \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/next/repo","window_title":"next work","ssh_remote_dest":"next-host","semantic_state":2,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":false,"observer_generation":10,"title_generation":5,"cols":132,"rows":43,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"codex"}]}}
+    ;
+    runPreparationDtoDriftChild(metadata);
+}
+
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.mode) {
@@ -7460,22 +7470,6 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     const metadata =
         \\{"event":"runtime.metadata","metadata_revision":3,"metadata":{"cwd":"/next/repo","window_title":"next work","ssh_remote_dest":"next-host","semantic_state":2,"alt_active":true,"app_cursor_keys":true,"alternate_scroll":false,"observer_generation":10,"title_generation":5,"cols":132,"rows":43,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"codex"}]}}
     ;
-    // The aggregate test process has already initialized process-bound seals. A fork from there
-    // must reject inherited authority, so only the build-owned exact-one artifact runs this probe.
-    // Its runner also checks `--maru-expect-tests=1`; the aggregate copy still executes every
-    // allocation and ownership row below without relying on mutable process environment markers.
-    if ((builtin.os.tag == .macos or builtin.os.tag == .linux) and
-        builtin.test_functions.len == 1)
-    {
-        const child = std.c.fork();
-        if (child < 0) return error.TestUnexpectedResult;
-        if (child == 0) runPreparationDtoDriftChild(metadata);
-        var status: c_int = 0;
-        try testing.expectEqual(child, std.c.waitpid(child, &status, 0));
-        const unsigned: u32 = @bitCast(status);
-        try testing.expect(std.c.W.IFEXITED(unsigned));
-        try testing.expectEqual(@as(u8, 86), @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned))));
-    }
     // dto backing plus cwd, window title, SSH destination, and process array are the five actual
     // nonzero allocations for this canonical metadata event. Ordinals 0..4 publish OOM; ordinal 5
     // is the first-success sentinel and proves that the schedule has no undocumented sixth callback.

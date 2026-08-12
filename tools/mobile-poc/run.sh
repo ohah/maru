@@ -26,13 +26,6 @@ mkdir -p "$OUT"
 # 호스트에서 한글·영어 글리프 아틀라스를 만든다. Android NDK 에는 폰트 래스터가 없고,
 # 두 플랫폼이 **같은 아틀라스**를 쓰면 렌더 결과를 1:1 로 비교할 수 있다. 실제 제품에서는
 # 각 플랫폼이 자기 폰트 스택으로 래스터한다(iOS CoreText, Android FreeType/HarfBuzz).
-ATLAS_CHARS='$ zig build test All 11 passed.git status --shortM src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch한글 터미널 세션 목록 설정 검색 알림'
-make_atlas() {
-    [ -f "$OUT/atlas.idx" ] && return 0
-    clang -fobjc-arc "$POC/make_atlas.m" -framework Foundation -framework CoreText \
-        -framework CoreGraphics -o "$OUT/make_atlas"
-    "$OUT/make_atlas" "$OUT" "$ATLAS_CHARS"
-}
 
 # 코어 라이브러리는 build.zig 가 만든다. 여기서는 산출물 경로만 안다.
 LIB_OUT="$ROOT/zig-out/lib"
@@ -67,12 +60,10 @@ features-android)
     $ADB shell /data/local/tmp/features-vk
     ;;
 chrome-ios)
-    make_atlas
     mobile_lib mobile-lib-ios-sim
     APP="$OUT/MaruChrome.app"
     rm -rf "$APP" && mkdir -p "$APP"
     sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$POC/Info.plist.in" > "$APP/Info.plist"
-    cp "$OUT/atlas.gray" "$OUT/atlas.idx" "$APP/"
     # 동봉 폰트를 앱 번들에 넣는다 — 시스템 폰트를 쓰면 플랫폼마다 글자가 갈린다.
     cp "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" "$APP/"
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
@@ -121,7 +112,6 @@ chrome-android-app)
     # apksigner·keytool 은 JVM 이 필요하다. 별도 JDK 없이 Android Studio 번들 JBR 을 쓴다.
     JBR="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
     [ -d "$JBR" ] && { JAVA_HOME="$JBR"; export JAVA_HOME; PATH="$JBR/bin:$PATH"; export PATH; }
-    make_atlas
     mobile_lib mobile-lib-android
     "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -c "$GLUE/android_native_app_glue.c" \
         -o "$OUT/glue.o" -I"$GLUE"
@@ -135,8 +125,6 @@ chrome-android-app)
         "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
         $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
-    $ADB push "$OUT/atlas.gray" /data/local/tmp/atlas.gray >/dev/null
-    $ADB push "$OUT/atlas.idx" /data/local/tmp/atlas.idx >/dev/null
     # iOS 번들과 **같은 폰트 파일**을 올린다 — 그래야 래스터 차이만 남는다.
     $ADB push "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" /data/local/tmp/ >/dev/null
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.

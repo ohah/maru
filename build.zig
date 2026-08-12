@@ -2158,6 +2158,11 @@ pub fn build(b: *std.Build) void {
         "2c3e C3 socket cadence parity Debug and ReleaseFast gates",
     );
     session_host_2c3e_c3_step.dependOn(session_host_2c3e_c2_step);
+    const session_host_2c4_step = b.step(
+        "test-session-host-2c4",
+        "2c4 RuntimeConnection mode SSOT Debug and ReleaseFast gates",
+    );
+    session_host_2c4_step.dependOn(session_host_2c3e_c3_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3136,6 +3141,38 @@ pub fn build(b: *std.Build) void {
             session_host_2c3e_c3_step,
             event_2c3e_c3_boundary_module,
             "2c3e C3 경계는",
+            1,
+        );
+        const event_2c4_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c4_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c4_step,
+            event_2c4_boundary_module,
+            "2c4 경계는",
+            1,
+        );
+        const event_2c4_runtime_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c4_step,
+            event_2c4_runtime_module,
+            "2c4 RuntimeConnection은",
+            1,
+        );
+        B3SettlementTest.add(
+            b,
+            session_host_2c4_step,
+            event_2c4_runtime_module,
+            "2c4 generation arm은",
             1,
         );
         const event_c3_3c_boundary_module = b.createModule(.{

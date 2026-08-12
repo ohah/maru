@@ -1099,8 +1099,8 @@ pub const RemoteTermBackend = struct {
         client.poison(.local_invariant_violation);
 
         var rr: RemoteRuntime = undefined;
+        remote_runtime.testing_api.initializeLegacyConnection(&rr, &client);
         try remote_runtime.testing_api.initializePendingOwners(&rr);
-        rr.client = &client;
         rr.allocator = allocator;
         rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
         rr.direct_input = .empty;
@@ -1139,9 +1139,8 @@ pub const RemoteTermBackend = struct {
         client.pending_event_bytes = ended.payload.len;
 
         var rr: RemoteRuntime = undefined;
+        remote_runtime.testing_api.initializeLegacyConnection(&rr, &client);
         try remote_runtime.testing_api.initializePendingOwners(&rr);
-        rr.client = &client;
-        rr.generation_adapter = null;
         rr.allocator = allocator;
         rr.io = std.testing.io;
         rr.runtime_id_hex = "00000000000000000000000000000001".*;
@@ -1430,7 +1429,10 @@ pub const RemoteTermBackend = struct {
 
         // Runtime owner와 attachment graph를 map membership이 살아 있는 동안 먼저 닫는다. 이 호출 뒤에는 callback과
         // fallible 작업이 없으며, exact row를 제거한 다음 allocation과 host lease만 마지막으로 회수한다.
-        const generation_adapter = entry.runtime.generation_adapter;
+        const generation_adapter = if (builtin.is_test)
+            remote_runtime.testing_api.generationAdapter(entry.runtime)
+        else
+            null;
         self.surface_runtime.detachSurface(handle);
         entry.runtime.detachClientSide();
         if (builtin.is_test) {
@@ -2050,7 +2052,8 @@ test "C3-3b4 async close parity는 committed cleanup callback 뒤에만 제거�
     probe.target_len = fixture.runtime.observation.cwd.items.len;
     probe.armed = true;
 
-    try testing.expectEqual(term_backend.CloseProgress.complete, backend_value.backend().finishAfterTermination(42));
+    const finish = backend_value.backend().finishAfterTermination(42);
+    try testing.expectEqual(term_backend.CloseProgress.complete, finish);
     try testing.expectEqual(@as(usize, 1), probe.callback_count);
     try testing.expect(probe.saw_committed_cleanup);
     try testing.expectEqual(term_backend.RemoveProgress.event_pending, probe.reentrant_remove.?);

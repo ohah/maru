@@ -308,6 +308,15 @@ pub const GenerationAttachment = struct {
             .peer_contract_violation);
     }
 
+    pub fn poison(
+        self: *GenerationAttachment,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) generation_transport_mod.Error!void {
+        if (!self.valid() or (self.lifecycle != .executing and self.lifecycle != .attached))
+            return error.MovedOrCopied;
+        return self.transport.poison(reason);
+    }
+
     pub fn sendControlNonBlocking(
         self: *GenerationAttachment,
         control: contract.RuntimeControl,

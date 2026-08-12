@@ -81,7 +81,7 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 0), count(prepared_settlement, "PreparationEventView"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pending_event_owner: pending_event_owner_mod.PendingEventOwner"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner"));
-    try std.testing.expectEqual(@as(usize, 2), countProductCalls(runtime, "try self.initializePendingEventOwner(generation_adapter);"));
+    try std.testing.expectEqual(@as(usize, 2), countProductCalls(runtime, "try self.initializePendingEventOwner();"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn preparationEventViewOwned("));
     try std.testing.expectEqual(@as(usize, 0), countProductCalls(runtime, "preparationEventViewOwned("));
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn prepareTakenEvent("));

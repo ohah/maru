@@ -965,7 +965,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 제거할 legacy 인자·shim·split helper의 exact 목록은
-   persistent-session-host의 CR3a-2c4 계약과 boundary oracle을 단일 출처로 따른다.
+      persistent-session-host의 CR3a-2c4 계약과 boundary oracle을 단일 출처로 따른다.
+      2c4는 `RemoteRuntime.connection: RuntimeConnection`의 `legacy(*Client)|generation(*HostAdapter)`만 mode SSOT로 남기고
+      병렬 `client`/nullable adapter 필드와 두-owner private 생성자·teardown shim을 제거한다. exact semantic facade 15개와
+      legacy reviewed allowlist, generation raw Client source-zero는 persistent-session-host의 exact 목록을 그대로 사용한다.
    각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4
    전에는 2c 전체 완료를 주장하지 않는다. CR3a-2d는
    실제 owner의 typed failure/reentry/aggregate handoff를 닫고, CR3a-2e는 actual socket

@@ -126,6 +126,33 @@ pub const HostAdapter = struct {
         return self.slot.logicalClientConst().wire_major;
     }
 
+    /// runtime attach decode도 generation transport와 같은 pointer-free capability projection을 사용한다.
+    pub fn generationCapabilities(self: *const HostAdapter) generation_contract.GenerationCapabilities {
+        const client = self.slot.logicalClientConst();
+        const profile = client.compatibility_profile orelse
+            @panic("generation adapter lost its compatibility profile");
+        return .{
+            .wire_major = client.wire_major,
+            .screen_codec_version = client.screen_codec_version,
+            .attach_schema = switch (profile.attach_schema) {
+                .frozen_controller_only => .frozen_controller_only,
+                .granted_roles => .granted_roles,
+            },
+            .metadata_support = switch (client.metadata_support) {
+                .unsupported => .unsupported,
+                .supported => .supported,
+            },
+            .peer_attach_generation = client.attachment_capabilities.peer_attach_generation,
+            .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
+            .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
+            .notification_stream_auth = client.notification_stream_auth_v1,
+            .runtime_clipboard = client.runtime_clipboard_v1,
+            .runtime_core_command = client.runtime_core_command_v1,
+            .runtime_link_at = client.runtime_link_at_v1,
+            .runtime_selected_text = client.runtime_selected_text_v1,
+        };
+    }
+
     pub fn supportsRuntimeInventory(self: *const HostAdapter) bool {
         return self.slot.logicalClientConst().runtime_inventory_v1;
     }
@@ -133,6 +160,16 @@ pub const HostAdapter = struct {
     /// host.info/runtime.list/host.upgrade.*처럼 screen codec과 독립된 control RPC.
     pub fn call(self: *HostAdapter, method: []const u8, params_json: ?[]const u8) client_mod.ClientError![]u8 {
         return self.slot.logicalClient().call(method, params_json);
+    }
+
+    /// generation runtime 생성은 고정된 wire method만 노출해 호출자가 raw Client를 빌리지 않게 한다.
+    pub fn spawnRuntime(self: *HostAdapter, params_json: []const u8) client_mod.ClientError![]u8 {
+        return self.slot.logicalClient().call("runtime.spawn_full", params_json);
+    }
+
+    /// generation RPC가 새 request를 쓰기 전에 현재 readable RX를 canonical queue로 옮긴다.
+    pub fn ingestRuntimeReadableEvidence(self: *HostAdapter) client_mod.ClientError!void {
+        return self.slot.logicalClient().ingestReadableOutOfBandEvidence();
     }
 
     /// Client 내부의 selected wire major와 bounded screen reader가 current logical DTO로 normalize한다.

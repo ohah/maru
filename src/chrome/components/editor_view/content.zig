@@ -230,8 +230,10 @@ pub fn build(
 /// 마지막 하나까지 맞추려면 전개 로직을 통째로 복제해야 한다. 그래서 복제를 버리고 **전개 결과를
 /// 그대로 나눈다** — 규칙이 한 곳에만 있으므로 갈릴 수 없다.
 ///
-/// `scratch`는 한 줄분이면 되고 줄마다 재사용한다. 모자라면 `expandTabs`가 절단하므로 행 수가
-/// 실제보다 적어지는데, 그것은 §3.8이 "초장문에서 기능을 줄인다"고 허용한 범위다.
+/// `scratch`는 한 줄분이면 되고 줄마다 재사용한다. 모자라면 `expandTabs`가 절단해 행 수가 실제보다
+/// 적어지는데, **그 사실을 `RowCount.truncated`로 함께 돌려준다** — §3.8이 "초장문에서 기능을
+/// 줄인다"고 허용한 범위이지만 **조용해서는 안 되기 때문이다**(그 값이 스크롤바 길이가 되므로,
+/// 알리지 않으면 문서가 일찍 끝난 것처럼 보인다).
 pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) RowCount {
     if (!wrap or view_cols == 0) return .{ .rows = 1 };
     const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u32) });

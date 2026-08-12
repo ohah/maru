@@ -35,7 +35,7 @@
   `setComposingText`(조합 중)·`commitText`(확정)를 JNI 로 넘기기만 한다. 같은 조건의
   터미널(Termux)이 `GameActivity` 없이 이 방식으로 선다.
 
-  **판단 근거는 유지보수다.** 모바일은 CI 에 안 붙으므로(§6) Gradle·AGP·JDK 삼각 버전은
+  **판단 근거는 유지보수다.** 모바일은 CI 에 안 붙으므로([계획](plans/mobile-platform.md)) Gradle·AGP·JDK 삼각 버전은
   **정기적으로 돌지 않으면 조용히 썩는다**. `javac` + `android.jar` + `d8` 은 의존이 없고
   안드로이드 SDK 의 하위 호환이 강하다. Gradle 은 Play 배포·App Bundle 처럼 실제로 필요해질
   때 도입한다 — 지금 넣으면 쓰지 않으면서 썩는다.

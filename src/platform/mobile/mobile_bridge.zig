@@ -358,8 +358,10 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const rule: i32 = @max(1, @divTrunc(line_h, 16));
     const y_over = 0; // 윗줄: 칸 위
     const y_strike = @divTrunc(line_h, 2); // 취소선: 칸 한가운데
-    const y_under = line_h - 2 * rule; // 밑줄: 칸 아래(디센더 밑)
-    const y_under2 = line_h - 4 * rule; // 이중밑줄의 둘째 줄
+    // 밑줄은 **베이스라인 바로 아래**다. 칸 맨 아래에 두면 글자에서 3.7 논리 px 떨어져
+    // 떠 보인다(픽셀 실측). 굽는 baseline 이 칸의 3/4 께라 그 조금 아래가 관례에 맞는다.
+    const y_under = line_h - 4 * rule;
+    const y_under2 = line_h - 2 * rule; // 이중밑줄의 **둘째** 줄은 그 아래
 
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {

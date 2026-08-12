@@ -48,7 +48,11 @@ typedef struct {
 unsigned int maru_mobile_build(unsigned int width, unsigned int height);
 const MaruQuad *maru_mobile_quads(void);
 /// 0 quad 가 나왔을 때 **무엇이 실패했는지** 플랫폼이 볼 수 있어야 한다.
+///
+/// **읽은 쪽이 비운다.** build 가 프레임마다 비우면 프레임 *사이*에 난 실패(입력의 core
+/// write)가 아무도 읽기 전에 지워진다. 호스트는 매 프레임 읽고, 값이 있으면 비운다.
 const char *maru_mobile_last_error(void);
+void maru_mobile_clear_error(void);
 
 /// 아틀라스 등록부. 플랫폼이 글리프를 굽고 그 자리를 알려 준다.
 void maru_mobile_atlas_geometry(unsigned int cell_w, unsigned int cell_h);

@@ -209,6 +209,15 @@ IME 경로가 서 있다는 뜻이다(다만 preedit/marked text 는 다루지 �
 없어 조용히 안 그려진 것이다. 이제 Zig 가 못 찾은 코드포인트를 모으고 플랫폼이 그 슬롯만
 구워 올린다(아틀라스 부분 업데이트 = 여섯 기능 4번을 그대로 쓴다).
 
+| | iOS | Android |
+|---|---|---|
+| 한 글자 굽기 | CoreText | JNI `Paint`(같은 baseline·같은 폰트) |
+| 그 자리만 올리기 | `replaceRegion:` | `vkCmdCopyBufferToImage` + `imageOffset` |
+| 확인 | `idb ui text "maru"` → 8행에 그려짐 | `adb shell input text "PQXY zw"` → 8행에 그려짐 |
+
+Vulkan 쪽은 이미 셰이더가 읽는 레이아웃이라 `SHADER_READ_ONLY → TRANSFER_DST → SHADER_READ_ONLY`
+로 내렸다 되돌린다. 텍스처를 다시 만들지 않는다.
+
 만들면서 실측으로 드러난 것: **아틀라스가 서기 전에 build 가 한 번 돈다.** 그때 모든 글자가
 "없음"으로 기록돼, 나중에 이미 있는 'z' 같은 ASCII 를 슬롯만 축내며 다시 굽고 있었다
 (`grew=15 first_missing=U+007A`). `maru_atlas_add` 가 등록 시 목록에서 빼도록 고쳤다.
@@ -285,7 +294,7 @@ UI 가 들어간다. 데스크톱에서 타이틀바 inset 을 다루는 것과 
 숫자가 의미 없다), **셸/PTY 연결**(iOS 는 샌드박스가 프로세스 생성을 막아 원격 세션만
 가능하다 — 구조를 가르는 질문이라 별도 판단이 필요하다), **IME preedit**(조합 중 표시),
 스크롤·선택·복사, 보조 키바, 회전·태블릿, 성능 예산, 아틀라스 축출(지금은 꽉 차면 멈춘다),
-Android 아틀라스 성장(지금은 iOS 만), build.zig·CI 통합.
+build.zig·CI 통합.
 
 에뮬레이터 GPU 가 `llvmpipe`(소프트웨어)라 **실제 Android 드라이버에서 같은 결과가
 나오는지는 실기기로 확인해야 한다.**

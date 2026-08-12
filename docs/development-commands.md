@@ -134,6 +134,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 영속 세션 호스트 2c3e C3 socket cadence gate: `zig build test-session-host-2c3e-c3`. C2 gate를 상속하고 Debug·ReleaseFast마다 legacy/generation 공통 actual-socket cadence 12개와 source boundary 1개를 exact-count한다. immediate EOF와 완성 response+EOF, partial header/payload+EOF, response 전후 revoke/metadata/snapshot, malformed/unknown-correlation, unread revoke와 queued TX의 RX-first가 모두 제품 fixture로 green이며 boundary가 RX→settlement→TX와 decoder owner를 고정한다.
 - 영속 세션 호스트 2c4 RuntimeConnection gate: `zig build test-session-host-2c4`. 2c3e C3를 상속하고 Debug·ReleaseFast에서 two-arm mode SSOT와 legacy/generation 제품 parity component, semantic facade exact 15 및 source boundary 1개를 검증한다. `RemoteRuntime.client`/nullable adapter 병렬 필드와 generation raw Client fallback은 0이어야 한다.
 - 영속 세션 호스트 2d1 generation release gate: `zig build test-session-host-2d1`. 2c4를 상속하고 Debug·ReleaseFast에서 registry 결과·permit 4개, ClientSlot completed/retryable/strict-token 3개, 실제 GenerationAttachment retry→teardown 1개와 boundary 1개를 검증한다. unique component는 최적화 모드당 exact 8개이며 첫 retryable 동안 target free와 신규 sibling read/release는 0, teardown fresh permit 뒤 target free는 exact 1이어야 한다.
+- 영속 세션 호스트 2d2 terminal handoff gate: `zig build test-session-host-2d2`. 2d1을 상속하고 Debug·ReleaseFast에서 neutral handoff 3개, registry aggregate 4개, RemoteAttachment trigger/tombstone 3개, ClientSlot typed teardown 3개, 실제 GenerationAttachment terminal handoff 1개와 boundary 1개를 검증한다. unique component는 최적화 모드당 exact 14개다.
 
 ## 완료 전 확인
 

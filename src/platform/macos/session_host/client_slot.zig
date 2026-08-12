@@ -1377,6 +1377,7 @@ pub const InitError = error{
 pub const DeinitOutcome = enum {
     cleaned,
     busy,
+    terminal_handoff,
     corrupt,
     already_dead,
 };
@@ -11108,6 +11109,70 @@ pub const ClientSlot = struct {
         return .completed;
     }
 
+    pub fn terminalAttachmentBatchKind(
+        self: *ClientSlot,
+        token: batch_registry_mod.Token,
+    ) batch_registry_mod.Error!@import("terminal_cleanup_handoff_contract.zig").TerminalRowKind {
+        if (!self.valid()) return error.MovedOrCopied;
+        return self.current.batch_registry.terminalTokenKind(token);
+    }
+
+    pub fn preflightTerminalAttachmentBatch(
+        self: *ClientSlot,
+        token: batch_registry_mod.Token,
+    ) batch_registry_mod.Error!batch_registry_mod.TerminalTokenSummary {
+        if (!self.valid()) return error.MovedOrCopied;
+        const kind = try self.current.batch_registry.terminalTokenKind(token);
+        return self.current.batch_registry.preflightTerminalToken(token, kind);
+    }
+
+    pub fn prepareTerminalCleanupSummary(
+        self: *ClientSlot,
+        token_count: u32,
+        digest: @import("terminal_cleanup_handoff_contract.zig").Digest,
+        surviving: u32,
+        quarantined: u32,
+        accounting_bytes: u64,
+        out: *batch_registry_mod.TerminalCleanupHandoff,
+    ) batch_registry_mod.Error!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        return self.current.batch_registry.prepareTerminalCleanupSummary(
+            token_count,
+            digest,
+            surviving,
+            quarantined,
+            accounting_bytes,
+            out,
+        );
+    }
+
+    pub fn beginTerminalCleanupPublicationNoFail(
+        self: *ClientSlot,
+        prepared: *batch_registry_mod.TerminalCleanupHandoff,
+        stream_id: u64,
+    ) void {
+        if (!self.valid() or stream_id == 0)
+            @panic("terminal cleanup ClientSlot proof was lost");
+        self.current.batch_registry.beginTerminalCleanupPublicationNoFail(prepared, .{
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .thread_id = @intCast(std.Thread.getCurrentId()),
+            .node_addr = @intFromPtr(self.current),
+            .node_incarnation = self.current.incarnation.tagged,
+            .connection_generation = self.incarnation.tagged,
+            .stream_id = stream_id,
+        });
+    }
+
+    pub fn publishTerminalAttachmentBatchNoFail(
+        self: *ClientSlot,
+        token: batch_registry_mod.Token,
+        kind: @import("terminal_cleanup_handoff_contract.zig").TerminalRowKind,
+    ) void {
+        if (!self.valid()) @panic("terminal cleanup ClientSlot proof was lost");
+        self.current.batch_registry.publishTerminalTokenNoFail(token, kind);
+    }
+
     pub fn tryDeinit(self: *ClientSlot) DeinitOutcome {
         if (self.lifecycle == .dead) return .already_dead;
         if (self.lifecycle == .deinit_reserved) return .busy;
@@ -11130,6 +11195,7 @@ pub const ClientSlot = struct {
         if (batch_release_callback_active) return .busy;
         if (self.generationAllocatorCallbackActive()) return .busy;
         if (node.active_operation_generation != 0) return .busy;
+        if (node.batch_registry.terminalHandoffPublished()) return .terminal_handoff;
         if (!node.rpc_free_evidence.emptyExact()) return .busy;
         if (node.pin_owner.cleanup_pin_count != 0 or
             node.pin_owner.active_cleanup != 0)
@@ -11167,6 +11233,61 @@ pub const ClientSlot = struct {
         self.node_allocator.destroy(node);
         self.lifecycle = .dead;
         return .cleaned;
+    }
+
+    /// 게시된 terminal handoff만 배타적 teardown fence 아래에서 drain한다. 모든 row와
+    /// accounting receipt를 먼저 검증하므로 첫 allocator callback 뒤에는 실패 가능한 분기가 없다.
+    pub fn tryDeinitWithTerminalCleanup(self: *ClientSlot) DeinitOutcome {
+        if (self.lifecycle == .dead) return .already_dead;
+        if (self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation)) return .corrupt;
+        const reserved = self.beginRegisteredExclusiveTeardown() catch |err| return switch (err) {
+            error.AdminBusy => .busy,
+            error.MovedOrCopied => .corrupt,
+        };
+        var reserved_live = true;
+        defer if (reserved_live) self.abortRegisteredExclusiveTeardown(reserved);
+        const node = reserved.node;
+        if (!self.valid() or reserved.node != self.current) return .corrupt;
+        if (!node.batch_registry.terminalHandoffPublished()) return .corrupt;
+        if (batch_release_callback_active or self.generationAllocatorCallbackActive()) return .busy;
+        if (node.active_operation_generation != 0 or node.pin_owner.cleanup_pin_count != 0 or
+            node.pin_owner.active_cleanup != 0 or !node.rpc_free_evidence.emptyExact()) return .busy;
+
+        var row_count: u32 = 0;
+        var accounting_bytes: u64 = 0;
+        for (0..batch_registry_mod.max_entries) |slot| {
+            const descriptor = node.batch_registry.terminalDrainDescriptor(slot) catch return .corrupt;
+            if (descriptor) |item| {
+                if (!node.accounting_ledger.canConsume(item.accounting)) return .corrupt;
+                row_count += 1;
+                accounting_bytes = std.math.add(u64, accounting_bytes, @intCast(item.accounting.byte_count)) catch
+                    return .corrupt;
+            }
+        }
+        const handoff = &node.batch_registry.terminal_handoff;
+        if (row_count != handoff.token_count or row_count != handoff.accounting_count or
+            accounting_bytes != handoff.accounting_bytes) return .corrupt;
+
+        node.batch_registry.beginTerminalDrainNoFail();
+        for (0..batch_registry_mod.max_entries) |slot| {
+            const descriptor = node.batch_registry.terminalDrainDescriptor(slot) catch unreachable;
+            if (descriptor) |item| {
+                const accounting = node.client.prepareGenerationAccountingConsume(item.accounting) catch
+                    @panic("terminal accounting preflight drifted");
+                if (item.kind == .surviving_descriptor) {
+                    batch_release_callback_active = true;
+                    item.allocator.?.free(item.bytes);
+                    batch_release_callback_active = false;
+                }
+                node.client.consumeGenerationAccountingUnchecked(accounting);
+                node.batch_registry.consumeTerminalDrainNoFail(slot);
+            }
+        }
+        node.batch_registry.finishTerminalCleanupNoFail();
+        reserved_live = false;
+        self.abortRegisteredExclusiveTeardown(reserved);
+        return self.tryDeinit();
     }
 
     pub fn deinit(self: *ClientSlot) void {
@@ -11350,6 +11471,132 @@ test "CR3a-2d1 ClientSlot completed release는 payload와 accounting을 exact �
     try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
     try std.testing.expectEqual(@as(usize, 0), slot.current.accounting_ledger.item_count);
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2d2 ClientSlot ordinary teardown은 published handoff를 보존한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xD201);
+    const bytes = try allocator.dupe(u8, "terminal-batch");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD201);
+    const token = switch (try slot.readAttachmentBatch(7)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const kind: @import("terminal_cleanup_handoff_contract.zig").TerminalRowKind = .surviving_descriptor;
+    const summary = try slot.current.batch_registry.preflightTerminalToken(token, kind);
+    var ordered = @import("terminal_cleanup_handoff_contract.zig").OrderedTokenHasher.init(1);
+    try ordered.add(summary.projection);
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(
+        1,
+        try ordered.finish(1),
+        1,
+        0,
+        summary.accounting_bytes,
+        &handoff,
+    );
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, 7);
+    slot.current.batch_registry.publishTerminalTokenNoFail(token, kind);
+    const canonical_state_seal = slot.current.batch_registry.terminal_handoff.state.state_seal;
+    slot.current.batch_registry.terminal_handoff.state.state_seal[0] ^= 1;
+    try std.testing.expectEqual(DeinitOutcome.corrupt, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    slot.current.batch_registry.terminal_handoff.state.state_seal = canonical_state_seal;
+    try std.testing.expectEqual(DeinitOutcome.terminal_handoff, slot.tryDeinit());
+    try std.testing.expect(slot.valid());
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+}
+
+test "CR3a-2d2 ClientSlot typed teardown은 surviving payload와 accounting을 exact 한 번 정리한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xD202);
+    const bytes = try allocator.dupe(u8, "surviving");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 9,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD202);
+    const token = switch (try slot.readAttachmentBatch(9)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const summary = try slot.current.batch_registry.preflightTerminalToken(token, .surviving_descriptor);
+    var ordered = @import("terminal_cleanup_handoff_contract.zig").OrderedTokenHasher.init(1);
+    try ordered.add(summary.projection);
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(
+        1,
+        try ordered.finish(1),
+        1,
+        0,
+        summary.accounting_bytes,
+        &handoff,
+    );
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, 9);
+    slot.current.batch_registry.publishTerminalTokenNoFail(token, .surviving_descriptor);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(DeinitOutcome.already_dead, slot.tryDeinit());
+}
+
+test "CR3a-2d2 ClientSlot typed teardown은 quarantine payload를 free하지 않고 accounting만 회수한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xD203);
+    const bytes = try std.heap.page_allocator.dupe(u8, "quarantined");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 11,
+        .bytes = bytes,
+        .allocator = std.heap.page_allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD203);
+    const token = switch (try slot.readAttachmentBatch(11)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    batch_registry_mod.testing.armNextIndeterminate(
+        &slot.current.batch_registry,
+        token,
+        .quarantined_no_free,
+    );
+    try std.testing.expectEqual(
+        batch_registry_mod.GenerationReleaseResult.indeterminate_or_partial,
+        try slot.releaseAttachmentBatchResult(token),
+    );
+    const summary = try slot.current.batch_registry.preflightTerminalToken(token, .quarantined_no_free);
+    var ordered = @import("terminal_cleanup_handoff_contract.zig").OrderedTokenHasher.init(1);
+    try ordered.add(summary.projection);
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(
+        1,
+        try ordered.finish(1),
+        0,
+        1,
+        summary.accounting_bytes,
+        &handoff,
+    );
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, 11);
+    slot.current.batch_registry.publishTerminalTokenNoFail(token, .quarantined_no_free);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqualStrings("quarantined", bytes);
+    std.heap.page_allocator.free(bytes);
 }
 
 test "CR3a-2d1 ClientSlot 첫 retryable은 payload token accounting을 그대로 보존한다" {

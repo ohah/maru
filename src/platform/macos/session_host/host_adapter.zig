@@ -113,7 +113,13 @@ pub const HostAdapter = struct {
     }
 
     pub fn deinit(self: *HostAdapter) void {
-        self.slot.deinit();
+        const outcome = self.slot.tryDeinit();
+        const final_outcome = if (outcome == .terminal_handoff)
+            self.slot.tryDeinitWithTerminalCleanup()
+        else
+            outcome;
+        if (final_outcome != .cleaned)
+            @panic("session-host HostAdapter teardown invariant violated");
         self.shutdown_manifest = .{};
         self.kind = undefined;
     }

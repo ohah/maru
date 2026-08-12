@@ -11,6 +11,30 @@ const decision_seal = @import("runtime_prepared_decision_seal.zig");
 pub const CleanupSeal = [32]u8;
 pub const Digest = [32]u8;
 
+pub const TerminalCleanupIdentitySealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    node_addr: u64,
+    node_incarnation: u64,
+    registry_incarnation: u64,
+    connection_generation: u64,
+    stream_id: u64,
+    token_count: u32,
+    ordered_token_digest: Digest,
+    surviving_descriptor_count: u32,
+    quarantined_descriptor_count: u32,
+    accounting_count: u32,
+    accounting_bytes: u64,
+    request_generation: u64,
+};
+
+pub const TerminalCleanupStateSealInput = struct {
+    self_addr: u64,
+    lifecycle_raw: u8,
+    state_generation: u64,
+    identity_seal: CleanupSeal,
+};
+
 pub const CloseAuthorityIdentitySealInput = struct {
     self_addr: u64,
     thread_id: u64,

@@ -20,7 +20,10 @@ static NSString *const kShader =
      "struct VOut { float4 pos [[position]]; float2 local; float2 half_size; float radius; float4 color; float2 uv; float kind; };\n"
      "struct Uni { float4 rect_px; float4 color; float4 misc; float4 cell; };\n"
      "// misc = (radius, vp.x, vp.y, kind) · cell = (col, row, atlas_cols, atlas_rows)\n"
-     "vertex VOut v_main(uint vid [[vertex_id]], constant Uni &u [[buffer(0)]]) {\n"
+     "// quad 마다 draw call 을 내지 않는다 — 목록을 통째로 올리고 instance_id 로 고른다.\n"
+     "vertex VOut v_main(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
+     "                   constant Uni *quads [[buffer(0)]]) {\n"
+     "  constant Uni &u = quads[iid];\n"
      "  float2 p0 = float2(u.rect_px.x, u.rect_px.y);\n"
      "  float2 p1 = float2(u.rect_px.z, u.rect_px.w);\n"
      "  float2 corners[4] = { float2(p0.x,p1.y), float2(p1.x,p1.y), float2(p0.x,p0.y), float2(p1.x,p0.y) };\n"
@@ -69,6 +72,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLTexture> _glyphTex;
     id<MTLTexture> _iconTex;
     unsigned int _atlasCols, _atlasRows;
+    id<MTLBuffer> _quadBuf;   // draw-list 를 통째로 올리는 자리
+    NSUInteger _quadCap;
+    BOOL _loggedDraw;
     CTFontRef _atlasFont;
     unsigned int _atlasH;
     CADisplayLink *_link;
@@ -350,6 +356,15 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLCommandBuffer> cb = [_queue commandBuffer];
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
     [e setRenderPipelineState:_pipe];
+    // **draw call 한 번.** `setVertexBytes:` 는 4KB 한계라 148 quad(9.5KB)도 못 싣는다 —
+    // 버퍼를 잡고 채운 뒤 인스턴스로 그린다(Vulkan storage buffer 와 같은 모양).
+    // 프래그먼트는 이미 varying 으로 받으므로 `setFragmentBytes:` 는 필요 없다.
+    if (_quadCap < n) {
+        _quadCap = n < 1024 ? 1024 : n * 2;
+        _quadBuf = [_dev newBufferWithLength:_quadCap * sizeof(Uni)
+                                     options:MTLResourceStorageModeShared];
+    }
+    Uni *dst = (Uni *)_quadBuf.contents;
     for (unsigned int i = 0; i < n; i++) {
         const MaruQuad *q = &quads[i];
         float cols = (q->kind == 2) ? 1.0f : (float)_atlasCols;
@@ -359,11 +374,15 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
                  {q->r, q->g, q->b, q->a},
                  {q->radius, (float)self.bounds.size.width, (float)self.bounds.size.height, (float)q->kind},
                  {(float)q->cell_x, (float)q->cell_y, cols, rows}};
-        [e setVertexBytes:&u length:sizeof(u) atIndex:0];
-        [e setFragmentBytes:&u length:sizeof(u) atIndex:0];
+        dst[i] = u;
+    }
+    if (n > 0) {
+        [e setVertexBuffer:_quadBuf offset:0 atIndex:0];
         if (_glyphTex) [e setFragmentTexture:_glyphTex atIndex:0];
         if (_iconTex) [e setFragmentTexture:_iconTex atIndex:1];
-        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4
+                instanceCount:n];
+        if (!_loggedDraw) { _loggedDraw = YES; NSLog(@"MARU_DRAW calls=1 instances=%u", n); }
     }
     [e endEncoding];
     [cb presentDrawable:d];

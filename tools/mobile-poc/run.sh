@@ -14,6 +14,11 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 POC="$ROOT/tools/mobile-poc"
+# 제품 코드는 `src/platform/` 이 소유한다. 이 스크립트는 그것을 빌드·실행·계측하는
+# 하네스일 뿐이고, 앱 소스를 따로 갖지 않는다(양쪽에 두면 하나가 조용히 낡는다).
+IOS="$ROOT/src/platform/ios"
+ANDROID="$ROOT/src/platform/android"
+MOBILE="$ROOT/src/platform/mobile"
 OUT="$POC/out"
 mkdir -p "$OUT"
 
@@ -104,8 +109,8 @@ features-android)
     TC="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
     GLSLC="$NDK/shader-tools/darwin-x86_64/glslc"
     for s in quad.vert solid.frag tex.frag; do
-        "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
-        $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+        "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
+        $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
     "$TC/aarch64-linux-android30-clang" "$POC/features_vk.c" -lvulkan -o "$OUT/features-vk"
     $ADB push "$OUT/features-vk" /data/local/tmp/features-vk >/dev/null
@@ -117,7 +122,7 @@ chrome-ios)
     # 모듈 루트는 maru.zig 하나다 — chrome·renderer 를 따로 주면 icons.zig 가 두 모듈에 걸린다.
     zig build-lib -target aarch64-ios-simulator -OReleaseFast -static \
         -femit-bin="$OUT/libchrome.a" \
-        --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
+        --dep maru -Mroot="$MOBILE/mobile_bridge.zig" -Mmaru="$ROOT/src/maru.zig"
     APP="$OUT/MaruChrome.app"
     rm -rf "$APP" && mkdir -p "$APP"
     sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$POC/Info.plist.in" > "$APP/Info.plist"
@@ -125,7 +130,7 @@ chrome-ios)
     # 동봉 폰트를 앱 번들에 넣는다 — 시스템 폰트를 쓰면 플랫폼마다 글자가 갈린다.
     cp "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" "$APP/"
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
-        "$POC/chrome_app.m" "$OUT/libchrome.a" \
+        "$IOS/ios_app_host.m" "$OUT/libchrome.a" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
         -framework CoreText -framework CoreGraphics \
         -o "$APP/MaruChrome"
@@ -146,10 +151,10 @@ chrome-android)
     make_atlas
     zig build-lib -target aarch64-linux-android -OReleaseFast -static -fPIC \
         -femit-bin="$OUT/libchrome-android.a" \
-        --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
+        --dep maru -Mroot="$MOBILE/mobile_bridge.zig" -Mmaru="$ROOT/src/maru.zig"
     for s in chrome.vert chrome.frag; do
-        "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
-        $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+        "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
+        $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
     $ADB push "$OUT/atlas.gray" /data/local/tmp/atlas.gray >/dev/null
     $ADB push "$OUT/atlas.idx" /data/local/tmp/atlas.idx >/dev/null
@@ -196,18 +201,18 @@ chrome-android-app)
     make_atlas
     zig build-lib -target aarch64-linux-android -OReleaseFast -static -fPIC \
         -femit-bin="$OUT/libchrome-android.a" \
-        --dep maru -Mroot="$POC/chrome_probe.zig" -Mmaru="$ROOT/src/maru.zig"
+        --dep maru -Mroot="$MOBILE/mobile_bridge.zig" -Mmaru="$ROOT/src/maru.zig"
     "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -c "$GLUE/android_native_app_glue.c" \
         -o "$OUT/glue.o" -I"$GLUE"
     # `-u ANativeActivity_onCreate` 가 없으면 glue 의 진입점이 --gc-sections 로 잘려
     # 앱이 "네이티브 진입점 없음"으로 죽는다.
     "$TC/bin/clang" -target aarch64-linux-android29 -fPIC -shared -O2 \
-        "$POC/chrome_android_app.c" "$OUT/glue.o" "$OUT/libchrome-android.a" \
+        "$ANDROID/android_app_host.c" "$OUT/glue.o" "$OUT/libchrome-android.a" \
         -I"$GLUE" -u ANativeActivity_onCreate -lvulkan -llog -landroid -ljnigraphics -lm \
         -o "$OUT/libmaruchrome.so"
     for s in chrome.vert chrome.frag; do
-        "$GLSLC" -o "$POC/shaders/$s.spv" "$POC/shaders/$s"
-        $ADB push "$POC/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
+        "$GLSLC" -o "$ANDROID/shaders/$s.spv" "$ANDROID/shaders/$s"
+        $ADB push "$ANDROID/shaders/$s.spv" "/data/local/tmp/$s.spv" >/dev/null
     done
     $ADB push "$OUT/atlas.gray" /data/local/tmp/atlas.gray >/dev/null
     $ADB push "$OUT/atlas.idx" /data/local/tmp/atlas.idx >/dev/null
@@ -215,7 +220,7 @@ chrome-android-app)
     $ADB push "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" /data/local/tmp/ >/dev/null
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
-        --manifest "$POC/AndroidManifest.xml" -o "$OUT/base.apk" --auto-add-overlay
+        --manifest "$ANDROID/AndroidManifest.xml" -o "$OUT/base.apk" --auto-add-overlay
     python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.close()' \
         "$OUT/base.apk" "$OUT/libmaruchrome.so"
     [ -f "$OUT/debug.keystore" ] || keytool -genkeypair -keystore "$OUT/debug.keystore" \

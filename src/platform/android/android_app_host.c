@@ -498,7 +498,9 @@ static int initVulkan(ANativeWindow *win) {
         {samp, g.glyph_view ? g.glyph_view : g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {samp, g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
     // draw-list 버퍼: 프레임마다 새로 만들지 않고 한 번 잡아 persistent map 한다.
-    g.quad_cap = 4096;
+    // **크기는 코어가 답한다.** 4096 을 손으로 적어 뒀을 때는 그보다 많이 오면 `drawn` 이
+    // 조용히 잘라 화면 아래가 사라졌다 — 게다가 iOS 는 늘리고 있어 둘이 달랐다.
+    g.quad_cap = maru_mobile_max_quads();
     VkBufferCreateInfo qbci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                .size = (VkDeviceSize)g.quad_cap * sizeof(Push),
                                .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
@@ -613,13 +615,15 @@ static void drawFrame(void) {
     // 상태바·제스처바를 뺀 영역만 준다 — iOS 의 safeAreaInsets 와 같은 자리다.
     unsigned int lw = (unsigned int)(g.extent.width / scale);
     unsigned int lh = (unsigned int)((g.extent.height - g.inset_top - g.inset_bottom) / scale);
-    // **브리지를 만지는 동안 입력 스레드를 막는다.** IME 가 `maru_mobile_input` 으로
-    // 코어에 쓰는 것과 여기서 격자를 읽는 것이 겹치면 셀을 반쯤 쓴 상태로 읽는다.
+    // **입력 스레드와 겹치는 구간만 막는다.** IME 가 `maru_mobile_input` 으로 코어에 쓰는
+    // 것과 여기서 격자를 읽는 것이 겹치면 셀을 반쯤 쓴 상태로 읽는다. 오류 문자열도 두
+    // 스레드가 만지므로 같이 넣는다.
+    //
+    // **아틀라스 성장은 밖에 둔다.** 굽기는 글자마다 `vkQueueWaitIdle` 로 GPU 를 기다리는데,
+    // 그 동안 자물쇠를 쥐고 있으면 **타이핑이 GPU 를 기다리게 된다**. 성장이 만지는 등록부·
+    // 미스 목록은 입력 스레드가 안 건드리므로 밖에 둬도 된다.
     pthread_mutex_lock(&g_bridge_lock);
     unsigned int n = maru_mobile_build(lw, lh);
-    // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
-    if (g_app) growAtlas(g_app);
-    const MaruQuad *quads = maru_mobile_quads();
     if (g.frames == 0) LOGI("quads=%u err=%s logical=%ux%u", n, maru_mobile_last_error(), lw, lh);
     // **오류는 바뀔 때 알린다.** frames==0 에서만 읽으면 그 뒤에 생긴 실패는 기록만 되고
     // 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
@@ -634,6 +638,11 @@ static void drawFrame(void) {
             maru_mobile_clear_error();  // 읽은 쪽이 비운다 — 다음 실패가 가려지지 않게
         }
     }
+    pthread_mutex_unlock(&g_bridge_lock);
+
+    // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
+    if (g_app) growAtlas(g_app);
+    const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
     vkResetCommandBuffer(cb, 0);
@@ -653,7 +662,10 @@ static void drawFrame(void) {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 1, &g.dset, 0, NULL);
     // **draw call 한 번.** 목록을 버퍼에 채우고 인스턴스로 그린다 — quad 마다 부르면
     // 80x40 터미널이 3200 call 이 되고, 모바일 타일 기반 GPU 는 거기에 특히 민감하다.
-    unsigned int drawn = n < g.quad_cap ? n : g.quad_cap;
+    // 버퍼를 `maru_mobile_max_quads()` 만큼 잡았으므로 잘릴 일이 없다 — 잘린다면 그건
+    // 계약이 깨진 것이라 조용히 넘기지 않고 남긴다.
+    unsigned int drawn = n;
+    if (drawn > g.quad_cap) { drawn = g.quad_cap; LOGI("MARU_CHROME error=quad_cap_drift n=%u cap=%u", n, g.quad_cap); }
     Push *dst = (Push *)g.quad_map;
     for (unsigned int i = 0; i < drawn; i++) {
         const MaruQuad *q = &quads[i];
@@ -666,8 +678,6 @@ static void drawFrame(void) {
                   {(float)q->cell_x, (float)q->cell_y, cols, rows}};
         dst[i] = p;
     }
-    // quad 를 GPU 버퍼로 다 옮겼다 — 여기서부터는 브리지를 안 읽는다.
-    pthread_mutex_unlock(&g_bridge_lock);
     vkCmdDraw(cb, 4, drawn, 0, 0);
     if (g.frames == 0) LOGI("MARU_DRAW calls=1 instances=%u", drawn);
     vkCmdEndRenderPass(cb);

@@ -423,6 +423,20 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         }
     }
 
+    // **배경이 맨 먼저다**(§4.1b, painter) — 나중에 오면 글자를 덮는다.
+    //
+    // **이 픽스처에서는 경계가 눈에 보이지 않는다.** Lab 토큰의 `surface_bg`가 오프스크린 렌더의
+    // clear color와 우연히 같은 값(20,20,20)이라 뷰 안팎이 같은 색으로 나온다. 제품에서는 pane이
+    // 자기 배경을 그리므로 두 색이 갈리고, 그때 이 사각이 편집기 경계가 된다.
+    //
+    // **스크롤 시나리오에서 화면 아래가 비는 이유**도 여기 적어 둔다: `vp.rows`를 6으로 좁혀 놓았고
+    // (아래 주석 참고) 화면은 45행분이라, 편집기는 위 6행만 그리고 스크롤바도 그 안에 선다. 캡처만
+    // 보면 "꽉 안 찼는데 스크롤바가 있다"로 읽히는데, 좁힌 뷰포트 안에서는 정확한 동작이다.
+    const view_h_px: u32 = @as(u32, @min(vp.rows, row_capacity)) * cell_h_px;
+    const bgw = editor_view.surface.build(.{
+        .rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px },
+    }, buffers.ops);
+
     var content_rows: [row_capacity]editor_view.content.Row = undefined;
     var n: u16 = 0;
     while (n < visible and first_line + n < line_count) : (n += 1) {
@@ -465,7 +479,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
         .font_px = scenario.font_px,
-    }, buffers.ops, content_scratch, buffers.text_runs, visual_rows[0..visual_budget]);
+    }, buffers.ops[bgw.ops..], content_scratch, buffers.text_runs, visual_rows[0..visual_budget]);
 
     var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
     const grows = editor_view.gutter.rowsForVisual(
@@ -480,7 +494,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_h_px = cell_h_px,
         .origin_px = .{ .x = 0, .y = 0 },
         .font_px = scenario.font_px,
-    }, buffers.ops[cw.ops..], buffers.text_bytes[cw.bytes..], buffers.text_runs[cw.runs..]);
+    }, buffers.ops[bgw.ops + cw.ops ..], buffers.text_bytes[cw.bytes..], buffers.text_runs[cw.runs..]);
 
     // **문서 전체의 시각 행 수**가 있어야 막대 길이가 나온다(§4.1a) — 논리 줄로 세면 랩된 문서에서
     // 실제보다 길어 보인다. 화면에 그린 행이 아니라 **문서 전체**를 세는 것이 요점이다.
@@ -507,12 +521,12 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .first_visual_row = @intCast(@min(first_line, std.math.maxInt(u32))),
         .cell_h_px = cell_h_px,
         .metrics = scrollbar_metrics,
-    }, buffers.ops[cw.ops + gw.ops ..]);
+    }, buffers.ops[bgw.ops + cw.ops + gw.ops ..]);
 
     return .{
         // 아직 hit-test 대상이 없다(줄 번호 클릭은 N2의 줄 선택, 본문 클릭은 캐럿 배치다). 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
-        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. gw.ops + cw.ops + sw.ops] },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. bgw.ops + gw.ops + cw.ops + sw.ops] },
     };
 }
 

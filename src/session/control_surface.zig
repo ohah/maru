@@ -88,12 +88,27 @@ pub const AgentInfo = struct {
     state: AgentState,
 };
 
-/// terminal surface 전용 메타(§3). collector가 app_session Model 트리 + core.currentCwd + termGitBranch +
+/// terminal surface 전용 메타(§3). collector가 app_session Model 트리 + termCwdForDisplay + termGitBranch +
 /// agent observer의 터미널 관측 결과에서 채운다(수집 로직은 L4, 여긴 스키마만).
 pub const TerminalMeta = struct {
-    /// OSC 7 작업 디렉터리. 없으면 wire에서 생략.
+    /// **이 터미널이 서 있는 작업 디렉터리** — GUI의 사이드바·소스 컨트롤·파일 탐색기·상태바 폴더줄과
+    /// **같은 값**이다. 규칙의 단일 출처는 docs/editor-surface-dock.md §3.5(OSC 7 → 커널 조회 2단)다.
+    ///
+    /// 예전에는 OSC 7만 봤다. 그래서 셸 통합이 없는 셸(bash/fish)이나 프롬프트를 한 번도 그리지 않는
+    /// 재개 Term에서는 **화면에 폴더가 보이는데 이 필드만 비는** 상태가 상시였고, 반대로 maru ssh 세션에서
+    /// 원격 셸이 OSC 7을 안 보내면 ssh 이전의 **낡은 로컬 경로**가 원격 세션의 cwd인 양 실렸다.
+    ///
+    /// 원격은 `cwd_host` authority로 가른다 — 원격 authority가 보고한 경로는 그대로 싣고(host 접두는
+    /// 붙이지 않는다. 이 구조체에 host 필드가 없고 접두는 GUI 표기 규약이다), 커널 조회로 대체하지
+    /// 않는다(커널은 로컬 ssh 클라이언트의 cwd를 답한다).
+    ///
+    /// **여전히 없을 수 있다.** 영속 세션 호스트로 연 Term은 PTY가 데몬 프로세스 소유라 커널 조회가 닿지
+    /// 않아 OSC 7이 유일한 출처다(editor-surface-dock.md §3.5). 클라이언트는 이 필드의 존재를 가정하면
+    /// 안 된다 — 그때는 GUI 폴더줄도 함께 비므로 wire만 모르는 상태는 아니다. 값이 없으면 생략.
     cwd: ?[]const u8 = null,
-    /// git 브랜치. 없으면 생략.
+    /// git 브랜치. 위 `cwd`(표시용)가 아니라 **저장소 판정용 축**(`termGitBranch` → 원격·ssh면 null)에서
+    /// 파생한다. 원격 세션에 브랜치가 없는 것은 예나 지금이나 같다 — 로컬 `.git`을 원격 경로로 읽지 않도록
+    /// 파생 함수가 이미 끊는다(ssh-integration.md §9.4). 없으면 생략.
     git_branch: ?[]const u8 = null,
     /// 포그라운드 에이전트(있을 때만). null이면 wire에서 생략.
     agent: ?AgentInfo = null,

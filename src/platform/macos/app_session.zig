@@ -11456,19 +11456,54 @@ pub const AppSession = struct {
                     }
                     term_ops.refreshTermObservation(self, term, false, true);
                     // runtime observation은 in-process core/host event 어느 쪽이든 caller-owned cache다. unavailable은
-                    // cwd 없음/idle로 위장하지 않고 null/unknown으로 보낸다.
+                    // 낡은 사본을 현재값인 척 싣지 않고 null/unknown으로 보낸다.
                     const observation_available = term.rt.observation.availability != .unavailable;
                     const sem = if (observation_available) term.rt.observation.semantic_state else terminal.SemanticPrompt.unknown;
                     const alt = if (observation_available) term.rt.observation.alt_active else false;
-                    const cwd_live = if (observation_available) term.rt.observation.cwd.items else "";
-                    const cwd_copy: ?[]const u8 = if (cwd_live.len == 0) null else try arena.dupe(u8, cwd_live);
 
-                    // ── 나머지(§5 락 밖): at_prompt 매핑·agent·git .git/HEAD fs 읽기·title·DTO 조립 ──
+                    // ── 나머지: cwd 축·at_prompt 매핑·agent·git .git/HEAD fs 읽기·title·DTO 조립 ──
+                    // **cwd는 축 함수 하나로 푼다.** 여기서 `observation.cwd`를 직접 읽으면 "이 터미널이 서 있는
+                    // 폴더"라는 같은 질문을 GUI와 다른 능력으로 답하게 된다(docs/editor-surface-dock.md §3.5가
+                    // 단일 출처). 그 어긋남이 실제로 두 갈래로 났다:
+                    //
+                    //  · **OSC 7이 없는 경우** — 셸 통합 없는 bash/fish, 그리고 프롬프트를 한 번도 그리지 않는
+                    //    재개 Term(`zsh -l -i -c "exec <provider> --resume"`). 화면에는 폴더가 보이는데
+                    //    `maru sessions list`만 `cwd`를 생략했다. 축은 커널 조회로 답한다.
+                    //  · **maru ssh 세션** — OSC 5379로 목적지가 잡혔는데 원격 셸이 OSC 7을 안 보내면 관측에는
+                    //    **ssh 이전의 로컬 경로**가 남아 있다. GUI는 그걸 감추는데(축이 null) collector만 그
+                    //    로컬 경로를 원격 세션의 cwd인 양 실었다.
+                    //
+                    // `termCwd`가 아니라 `termCwdForDisplay`인 이유: 원격 cwd(authority가 원격인 관측값)를
+                    // 그대로 싣는 기존 wire 동작을 유지해야 한다. `termCwd`는 저장소 판정용이라 원격에서 null을
+                    // 낸다. host 접두는 붙이지 않는다 — `TerminalMeta`에 host 필드가 없고, 접두는 GUI 폴더줄의
+                    // 표기 규약(docs/ssh-integration.md §9.3)이지 wire 값이 아니다.
+                    //
+                    // 여기가 §5의 "fs·직렬화는 락 밖"에 해당한다. 이 함수에서 core_mutex를 잡는 것은
+                    // `readObservation`뿐이고 그건 값을 복사해 **반환한 뒤**이므로, 이 지점에서는 락을 쥐고 있지
+                    // 않다. 축이 도는 syscall(`proc_pidinfo`)은 `.git/HEAD` 읽기와 같은 계열이라 이쪽에 속한다.
+                    // (축 안의 `refreshTermObservation`은 force=false라 위 강제 갱신이 성공했으면 곧장 반환한다.
+                    // 실패해 `stale`로 떨어졌을 때만 한 번 더 읽고, 그것도 잡았다 놓는 것이라 §8.8 lock-order와
+                    // 무관하다 — 이 함수는 락을 쥔 채 marshal 큐를 건드리지 않는다.)
+                    //
+                    // `sem`/`alt`처럼 `observation_available`로 가르지 않는다. 그 둘은 코어 상태의 *사본*이라
+                    // unavailable이면 낡은 값이지만, 커널 조회는 사본이 아니라 지금 재는 측정값이다. 축도 같은
+                    // 판단을 하므로(관측이 unavailable이면 커널로 내려간다) 여기서 따로 가르면 다시 갈린다.
+                    var cwd_axis_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const cwd_copy: ?[]const u8 = if (git_ops.termCwdForDisplay(self, term, &cwd_axis_buf)) |c|
+                        try arena.dupe(u8, c)
+                    else
+                        null;
                     const at_prompt = atPromptWire(sem, alt); // 3상(§3, unknown 보존)
                     const agent = agentInfoWire(term.agent_kind, term.agent_state); // 내부→wire, none=null
-                    // git branch: 락 아래 복사한 cwd로 계산(fs 읽기를 core_mutex 아래로 넣지 않음). termGitBranch 캐시
-                    // 재사용. 반환은 term 소유 캐시(다음 cwd 변경까지) → snapshot 수명 위해 arena로 복사.
-                    const branch_live: ?[]const u8 = if (cwd_copy) |cw| git_ops.termGitBranchForCwd(self, term, cw) else null;
+                    // git branch: **`cwd_copy`를 넣지 않는다.** 그건 표시용이라 원격 경로를 담을 수 있는데,
+                    // 저장소 파생에 표시용 경로를 넣는 것 자체가 뒤집힌 방향이다. `termGitBranch`는 저장소 판정용
+                    // 축(`termCwd`, 원격·ssh면 null)을 거치므로 GUI 브랜치줄과 정의상 같은 답을 낸다.
+                    //
+                    // **결과는 지금도 같다** — `termGitBranchForCwd`가 파일을 열기 전에 `termCwdIsRemote`로 한 번
+                    // 더 끊기 때문이다(git.zig, ssh-integration.md §9.4). 즉 이 줄은 결함 수정이 아니라 방향 정리다:
+                    // 안쪽 가드에 기대는 대신 애초에 표시용 값이 이 경로에 들어오지 못하게 한다.
+                    // 반환은 term 소유 캐시(다음 cwd 변경까지) → snapshot 수명 위해 arena로 복사.
+                    const branch_live: ?[]const u8 = git_ops.termGitBranch(self, term);
                     const branch_copy: ?[]const u8 = if (branch_live) |b| try arena.dupe(u8, b) else null;
                     // title: main-thread 소유(custom_name·auto_title 캐시·정적 title, reader 미접근 — termLabel doc). arena 복사.
                     const title_copy = try arena.dupe(u8, termLabel(term));
@@ -39257,8 +39292,18 @@ test "collector: 단일 term 세션 — 좌표·id·focused·membership·termina
     defer allocator.destroy(session);
     defer session.deinit();
 
-    pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .input; // 프롬프트 idle → at_prompt=true
+    const term = pane_ops.activePane(session).activeTerm();
+    term.surface.core.semantic_state = .input; // 프롬프트 idle → at_prompt=true
     const active_id = term_ops.activeSurface(session).id;
+
+    // **커널 조회 결과를 심는다.** 스모크 세션은 OSC 7을 안 보내므로 축은 2단째(커널)로 내려간다. 실제
+    // 커널 값은 테스트 프로세스의 cwd라 환경마다 달라 값 비교를 못 하므로, 폴 주기 안에 있는 것처럼
+    // `proc_cwd_polled_ns`를 지금으로 맞춰 다시 묻지 않게 하고 고정 표본을 넣는다.
+    const seeded_cwd = "/private/var/empty/maru-collector-fixture";
+    term.rt.proc_cwd_polled_ns = std.Io.Clock.awake.now(session.io).nanoseconds;
+    @memcpy(term.rt.proc_cwd_buf[0..seeded_cwd.len], seeded_cwd);
+    term.rt.proc_cwd_len = seeded_cwd.len;
+    try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len); // 전제: OSC 7 없음
 
     const c = try session.collectSession(allocator, 42, .normal);
     defer c.deinit();
@@ -39273,16 +39318,91 @@ test "collector: 단일 term 세션 — 좌표·id·focused·membership·termina
     try std.testing.expectEqual(@as(u32, 0), dto.pane);
     try std.testing.expect(dto.focused); // key 창(window_focused 기본 true)의 활성 surface
     try std.testing.expectEqual(control_surface.AtPrompt.at_prompt, dto.detail.terminal.at_prompt);
-    // controlled_smoke는 OSC 7·에이전트 없음 → cwd/git_branch/agent 전부 생략(null).
-    try std.testing.expect(dto.detail.terminal.cwd == null);
+    try std.testing.expect(dto.detail.terminal.agent == null); // controlled_smoke는 에이전트 없음
+
+    // **cwd는 GUI와 같은 답이어야 한다.** OSC 7이 없어도 축이 커널 조회로 답한다
+    // (docs/editor-surface-dock.md §3.5의 2단 규칙 — 사이드바·소스 컨트롤·탐색기·상태바와 같은 지점).
+    // 예전에는 collector만 관측을 직독해 이 필드가 **항상** null이었고, 그래서 화면에는 폴더가 보이는데
+    // `maru sessions list`는 생략하는 상태가 셸 통합 없는 셸·재개 Term에서 상시였다.
+    try std.testing.expectEqualStrings(seeded_cwd, dto.detail.terminal.cwd orelse return error.CollectorCwdMissing);
+    // 브랜치는 그 cwd에서 파생된다 — 심은 경로는 어떤 조상에도 `.git`이 없으므로 없는 것이 맞다.
     try std.testing.expect(dto.detail.terminal.git_branch == null);
-    try std.testing.expect(dto.detail.terminal.agent == null);
 
     try std.testing.expectEqual(@as(usize, 1), c.snapshot.windows.len);
     const w = c.snapshot.windows[0];
     try std.testing.expectEqual(@as(u64, 42), w.window_id);
     try std.testing.expectEqual(maru.session.WindowKind.normal, w.window_kind);
     try std.testing.expectEqualSlices(u64, &.{active_id}, w.surface_ids);
+}
+
+// 원격 두 형태에서 wire `cwd`/`git_branch` — GUI 폴더줄·브랜치줄과 같은 답이어야 한다.
+//
+// 두 경우를 가르는 것이 OSC 7 authority(`cwd_host`, §9.2)다. 원격 authority가 보고한 경로는 곧 "이 터미널이
+// 서 있는 곳"이므로 그대로 싣는다. 반면 maru ssh 세션(OSC 5379 `ssh;<dest>`)인데 원격 셸이 OSC 7을 안
+// 보내면 관측에 남은 것은 **ssh 이전의 로컬 경로**다. 그 낡은 값을 원격 세션의 cwd인 양 실으면 안 된다.
+//
+// 브랜치는 두 경우 다 없다. 원격 경로로 로컬 `.git`을 읽으면 같은 프로젝트를 양쪽에 둔 흔한 배치에서
+// 원격 세션에 로컬 브랜치가 붙는다.
+test "collector: 원격 cwd는 그대로 싣고 maru ssh 세션은 낡은 로컬 경로를 싣지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    {
+        // 원격이 보고한 경로와 **같은 경로가 로컬에도 저장소로 존재**하는 배치를 만든다. 이게 브랜치 누출의
+        // 실제 조건이다 — 같은 프로젝트를 로컬과 원격에 두면 흔히 경로까지 같다.
+        // `std.testing.tmpDir`는 0.16에서 realpath를 안 주므로 경로를 직접 만든다(git_backend.zig와 같은 관용구).
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+        const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const repo = try std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-collector-remote-repo", .{cwd});
+        const io = std.testing.io;
+        const here = std.Io.Dir.cwd();
+        here.deleteTree(io, ".zig-cache/tmp-collector-remote-repo") catch {};
+        defer here.deleteTree(io, ".zig-cache/tmp-collector-remote-repo") catch {};
+        try here.createDirPath(io, ".zig-cache/tmp-collector-remote-repo/.git");
+        try here.writeFile(io, .{
+            .sub_path = ".zig-cache/tmp-collector-remote-repo/.git/HEAD",
+            .data = "ref: refs/heads/local-branch-must-not-leak\n",
+        });
+
+        const session = try initSmokeSessionSized(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const term = pane_ops.activePane(session).activeTerm();
+        var osc7_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+        try term.surface.core.write(try std.fmt.bufPrint(&osc7_buf, "\x1b]7;file://build-box.example.com{s}\x07", .{repo}));
+
+        const c = try session.collectSession(allocator, 42, .normal);
+        defer c.deinit();
+        const t = c.snapshot.surfaces[0].detail.terminal;
+        // host 접두는 붙이지 않는다 — `TerminalMeta`에 host 필드가 없고 접두는 GUI 폴더줄의 표기 규약이다.
+        try std.testing.expectEqualStrings(repo, t.cwd orelse return error.RemoteCwdMissing);
+        // **원격 경로로 로컬 `.git`을 읽지 않는다.** 읽었다면 여기서 `local-branch-must-not-leak`이 나온다.
+        // 이 단언은 회귀 포획이 아니라 **계약 고정**이다 — 지금은 두 겹이 막고 있어(collector가 저장소 판정용
+        // 축을 쓰고, 파생 함수도 원격을 한 번 더 끊는다) 어느 한 겹을 빼도 통과한다. 픽스처를 실제 저장소로
+        // 만든 이유는 두 겹이 **동시에** 사라지면 그때는 잡히게 하려는 것이다.
+        try std.testing.expect(t.git_branch == null);
+    }
+
+    {
+        const session = try initSmokeSessionSized(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const term = pane_ops.activePane(session).activeTerm();
+        // ssh 이전 로컬 셸이 보고한 cwd(authority 비어 있음 = 로컬) + maru ssh 목적지.
+        try term.surface.core.write("\x1b]7;file:///Users/me/local-before-ssh\x07");
+        try term.surface.core.write("\x1b]5379;ssh;build-box.example.com:22\x07");
+        // 커널이 대신 답하는 것과 구별한다 — 폴 주기 안으로 맞춰 두고 빈 값을 심는다.
+        term.rt.proc_cwd_polled_ns = std.Io.Clock.awake.now(session.io).nanoseconds;
+        term.rt.proc_cwd_len = 0;
+
+        const c = try session.collectSession(allocator, 42, .normal);
+        defer c.deinit();
+        const t = c.snapshot.surfaces[0].detail.terminal;
+        try std.testing.expect(t.cwd == null);
+        try std.testing.expect(t.git_branch == null);
+    }
 }
 
 // ── 4) 다중 term(한 pane 가로 탭): 같은 좌표·구별 id, focused는 활성 term만 ──

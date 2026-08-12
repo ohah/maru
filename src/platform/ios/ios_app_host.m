@@ -75,6 +75,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLBuffer> _quadBuf;   // draw-list 를 통째로 올리는 자리
     NSUInteger _quadCap;
     BOOL _loggedDraw;
+    char _lastErr[64];
     CTFontRef _atlasFont;
     unsigned int _atlasH;
     CADisplayLink *_link;
@@ -330,6 +331,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CGSize logical = CGSizeMake(self.bounds.size.width - safe.left - safe.right,
                                 self.bounds.size.height - safe.top - safe.bottom);
     unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height);
+    // **오류는 바뀔 때 알린다.** 시작 때 한 번만 읽으면 그 뒤에 생긴 실패(quad 넘침·코어
+    // write·아틀라스 만원)는 기록만 되고 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
+    const char *err = maru_mobile_last_error();
+    if (err[0] && strcmp(err, _lastErr) != 0) {
+        strncpy(_lastErr, err, sizeof _lastErr - 1);
+        NSLog(@"MARU_CHROME error=%s", err);
+    }
     // build 가 못 그린 글자를 모아 뒀다 — 그것만 구워 넣고 **다음 프레임에 보이게** 한다.
     [self growAtlas];
     const MaruQuad *quads = maru_mobile_quads();
@@ -397,12 +405,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSLog(@"MARU_LIFECYCLE foreground");
 }
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {
-    unsigned int n = maru_mobile_build(800, 600);
-    NSLog(@"MARU_CHROME quads=%u err=%s", n, maru_mobile_last_error());
-    const MaruQuad *qd = maru_mobile_quads();
-    for (unsigned int i = 0; i < (n < 6 ? n : 6); i++)
-        NSLog(@"MARU_CHROME q%u rect=(%.0f,%.0f %.0fx%.0f) rgba=(%.2f,%.2f,%.2f,%.2f) rad=%.0f",
-              i, qd[i].x, qd[i].y, qd[i].w, qd[i].h, qd[i].r, qd[i].g, qd[i].b, qd[i].a, qd[i].radius);
+    // 시작 때 가짜 크기로 한 번 빌드해 로그를 찍던 것을 지웠다 — 실제 뷰가 서기 전이라
+    // 그 결과는 아무도 안 쓰고, 아틀라스가 서기 전에 miss 목록만 채웠다.
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIViewController *vc = [UIViewController new];
     vc.view = [[ChromeView alloc] initWithFrame:UIScreen.mainScreen.bounds];

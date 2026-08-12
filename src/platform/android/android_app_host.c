@@ -579,6 +579,16 @@ static void drawFrame(void) {
     if (g_app) growAtlas(g_app);
     const MaruQuad *quads = maru_mobile_quads();
     if (g.frames == 0) LOGI("quads=%u err=%s logical=%ux%u", n, maru_mobile_last_error(), lw, lh);
+    // **오류는 바뀔 때 알린다.** frames==0 에서만 읽으면 그 뒤에 생긴 실패는 기록만 되고
+    // 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
+    {
+        static char last_err[64];
+        const char *err = maru_mobile_last_error();
+        if (err[0] && strcmp(err, last_err) != 0) {
+            snprintf(last_err, sizeof last_err, "%s", err);
+            LOGI("MARU_CHROME error=%s", err);
+        }
+    }
 
     VkCommandBuffer cb = g.cbs[idx];
     vkResetCommandBuffer(cb, 0);

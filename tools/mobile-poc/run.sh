@@ -86,27 +86,17 @@ ime-ios)
 cursor-android)
     # **커서 세 모양을 글자 위에서** 찍는다. 빈 칸 위에서는 셋 다 잘 보이지만, 블록이 글자를
     # 가리는지는 **글자 위**에 놓아야 알고, 두 칸을 덮는지는 **한글(2셀) 위**에 놓아야 안다.
-    #
-    # DECSCUSR·CUP 는 이스케이프라 `input text` 로 못 친다 — 대본 끝에 붙여 빌드했다 뺀다.
-    # 제품 대본은 안 건드린다(trap 으로 중간에 죽어도 되돌린다).
+    # 대본을 잠시 고쳐 빌드하고 원복한다(중간에 죽어도 trap 이 되돌린다).
     ADB=${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}
     BR="$ROOT/src/platform/mobile/mobile_bridge.zig"
     BAK="$OUT/bridge.bak"
     mkdir -p "$OUT"
     cp "$BR" "$BAK"
     trap 'cp "$BAK" "$BR"' EXIT INT TERM
+    # 이름 · DECSCUSR · 커서 자리(행;열). 1;4 = `$ zig build test` 의 `i`, 6;1 = `한`.
     for pair in "block 2 1;4" "underline 4 1;4" "bar 6 1;4" "wide 2 6;1"; do
         set -- $pair
-        python3 - "$2" "$3" "$BR" <<'PYEOF'
-import sys
-from pathlib import Path
-p = Path(sys.argv[3])
-t = p.read_text(encoding="utf-8")
-old = '"\x1b[53move\x1b[0m \x1b[4;58;5;196mucol\x1b[0m \x1b[8mhid\x1b[0m|\r\n";'
-new = old[:-1] + ' ++\n    "\x1b[' + sys.argv[1] + ' q\x1b[' + sys.argv[2] + 'H";'
-assert old in t, "대본 앵커를 못 찾음 — 대본이 바뀌었으면 여기도 고친다"
-p.write_text(t.replace(old, new), encoding="utf-8")
-PYEOF
+        python3 "$POC/cursor_probe.py" set "$BR" "$2" "$3" || exit 1
         sh "$0" chrome-android-app >/dev/null 2>&1
         sleep 3
         "$ADB" exec-out screencap -p > "$OUT/cursor-$1.png"

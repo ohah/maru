@@ -158,7 +158,10 @@ event 4 output surface=1 bytes="..."
 실행 중 session-host transport reconnect의 진단 단일 출처는 trace event가 아니라 중립 leaf
 `src/observability/connection_incident.zig`의 versioned `ConnectionIncident` DTO다. `incident_id`는
 `{app_instance_nonce: u128, sequence: nonzero checked-monotonic u64}`이며 zero/wrap은 새 incident/reconnect를 fail-close한다.
-filename은 두 값을 고정 길이 lowercase hex로만 인코딩한다. session client는 typed poison tuple과
+detail filename은 `i-<app_instance_nonce 32hex>-<sequence 16hex>.incident`, aggregate filename은
+`a-<app_instance_nonce 32hex>-<record_generation 16hex>-<digest 64hex>.incident`다. aggregate slot은 봉투에 canonical
+encoding되지 않으므로 파일 이름 권위로 복제하지 않고, 실제 봉투 generation과 digest를 결속한다. 모든 hex는 고정 길이
+lowercase이고 다른 문자·축약·대문자를 허용하지 않는다. session client는 typed poison tuple과
 bounded 숫자/enum만 채우고, 구조화 로그·테스트 artifact·future inspector가 같은 DTO를 직렬화한다. 최초 incident는
 immutable이고 반복 횟수와 first/last timestamp만 별도 bounded `IncidentAggregate`가 갱신한다. raw terminal input/output,
 paste, clipboard, cwd, command, SSH 주소와 임의 오류 문자열은 DTO에 들어가지 않는다.
@@ -288,7 +291,13 @@ filesystem syscall 정지를 reconnect/main/quit 경로가 기다리지 않는�
 디렉터리는 `0700`,
 새 파일은 `0600` regular file로
 exclusive create하고 symlink를 따르지 않으며 현재 uid 소유를 확인한다. 파일당·총량·보존 기간은 각각 64 KiB, 1 MiB,
-7일이고 최대 128개에서 oldest-first로 지운다. disk가 실패하면 process 시작 때 할당한 32 KiB fixed-record emergency ring에
+7일이고 최대 128개에서 oldest-first로 지운다. 현재 version 1은 파일마다 exact 256-byte envelope 하나만 쓰지만 64 KiB는
+향후 compatible tail을 포함한 hard cap이며 1 MiB는 파일 수와 독립적으로 유지하는 방어 한도다. 동일 filename의 existing regular
+file은 current uid·0600·exact 256-byte content가 handoff와 byte-equal할 때만 idempotent success이고, symlink/non-regular/wrong-owner/
+wrong-mode/content drift는 덮어쓰거나 unlink하지 않고 실패한다. eviction 순서는 현재 app nonce와 strict filename의
+detail sequence 또는 aggregate generation/digest, 첫 256-byte envelope header와 BLAKE3 digest까지 일치한 regular file만 대상으로 삼고
+`(mtime_ns, filename bytes)` 오름차순이며 7일 초과를 먼저, 그 다음 128개와 1 MiB를 만족할 때까지 지운다. scan 중 검증되지 않은
+entry와 이 version의 strict filename을 벗어난 entry는 용량 계산·삭제 대상에서 제외한다. disk가 실패하면 process 시작 때 할당한 32 KiB fixed-record emergency ring에
 writer는 이미 handoff된 ring record를 disk로 persist하며 실패하면 같은 record를 ring-resident로 유지한다. 재삽입이나
 aggregate count 증가는 0이다. disk에 저장된 record는 ring eviction 대상이 아니다. ring은 first-N distinct immutable
 slot과 fixed overflow bucket을 분리하고 `{reason,scope,source_site,host_class}` bounded enum fingerprint의 count/first/last만
@@ -296,8 +305,11 @@ saturating aggregate한다. incident ID와 raw host ID는 aggregate key가 아�
 unexpected poison은 같은 기록 뒤 fail-stop한다. 이 artifact는 화면 replay 입력이 아니므로 `maru.trace.v1`에 억지로 섞지 않는다.
 
 writer가 소비하는 중립 handoff는 pointer-free `IncidentWriterHandoff` 하나뿐이다. 이 값은 exact 256-byte envelope와
-`{pid,process_nonce,service_addr,slot_index,record_generation,digest}` receipt를 함께 보존한다. `takePendingForWriter`는
+`{pid,process_nonce,service_addr,app_instance_nonce,slot_index,record_generation,incident_sequence,digest,receipt_digest}` receipt를 함께 보존한다.
+detail slot만 `incident_sequence`가 nonzero이고 aggregate slot은 0이다. `takePendingForWriter`는
 service 권위를 mutex 전·후에 검증하고 가장 낮은 pending bit의 committed envelope를 value-copy한 뒤 그 bit만 clear한다.
+`receipt_digest`는 receipt의 앞선 모든 필드를 canonical little-endian 값으로 결속해 파일 I/O 경계에서 slot을 포함한 복사 drift를
+서비스 mutex 없이 거부한다. 이는 같은 프로세스의 악의적 코드를 막는 비밀 seal이 아니라 값 인계의 구조적 결속이다.
 pristine output, pending 0, invalid/corrupt envelope는 mutation 0 typed 결과다. `completeWriterHandoff`는 receipt와 현재 slot의
 generation/digest를 다시 대조한다. 현재 generation이 더 크면 disk 결과를 해당 새 record의 결과로 오인하지 않고 pending bit를
 다시 set한다. exact generation이면 `persisted|failed` bounded disk 상태와 완료 generation만 게시하며 ring envelope와 aggregate

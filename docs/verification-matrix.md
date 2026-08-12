@@ -977,7 +977,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   첫 RED gate `zig build test-session-host-cr0b`는 CR3b R1을 상속하고 실제 fork-before-lock 거부와 동시 sequence 유일성을 포함한
   중립 schema/codec/ring/service component 20개와 boundary 1개를 Debug·ReleaseFast에서 exact-count한다. 두 번째 중립 gate는
   pointer-free writer handoff, lowest-bit value-copy, stale aggregate generation requeue, exact completion/replay·foreign authority
-  거부를 component 11개와 boundary 1개로 고정한다. process bootstrap/writer thread/secure filesystem/Client publication은 후속
+  거부를 component 11개로 고정한다. 세 번째 storage gate는 strict detail/aggregate filename, final-address 0700 directory FD,
+  0600 no-follow exclusive create, exact-content idempotence/collision 보존과 1 MiB oldest-first prune를 component 6개로 고정한다.
+  세 component군과 boundary 1개를 Debug·ReleaseFast에서 실행한다. process bootstrap/writer thread/Client publication은 후속
   CR0b gate가 닫기 전 구현 완료로 세지 않는다.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,

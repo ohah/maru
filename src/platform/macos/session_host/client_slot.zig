@@ -12315,9 +12315,7 @@ fn runTerminalDrainProofChild(stage: TerminalDrainProofStage, expected: []const 
 }
 
 fn dispatchTerminalDrainProofChild(stage: TerminalDrainProofStage) !void {
-    var stat: std.posix.Stat = undefined;
-    if (std.c.fstat(terminal_drain_marker_fd, &stat) != 0 or !std.posix.S.ISFIFO(stat.mode))
-        return;
+    if (!terminalDrainMarkerIsFifo(terminal_drain_marker_fd)) return;
     testing.armTerminalDrainProofLoss(terminal_drain_marker_fd, @intFromEnum(stage), 1);
     writeEventReleaseDeathMarker(0x41);
     try ClientSlot.initializeProcessRuntime();
@@ -12365,6 +12363,21 @@ fn dispatchTerminalDrainProofChild(stage: TerminalDrainProofStage) !void {
     if (stage != .callback_reentry or outcome != .cleaned or probe.callback_count != 1)
         std.process.exit(121);
     std.process.exit(73);
+}
+
+// macOS 제품 경로는 libc fstat을 쓰지만 Linux CI의 Zig 0.16은 같은 선언을 void로 노출한다.
+// 테스트 채널의 FIFO 성질은 statx로 동일하게 확인해 타깃별 ABI 차이가 증거를 약화하지 않게 한다.
+fn terminalDrainMarkerIsFifo(fd: std.c.fd_t) bool {
+    if (fd < 0) return false;
+    if (comptime builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var statx = std.mem.zeroes(linux.Statx);
+        return linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX.BASIC_STATS, &statx)) == .SUCCESS and
+            statx.mask.TYPE and linux.S.ISFIFO(statx.mode);
+    }
+
+    var stat: std.c.Stat = undefined;
+    return std.c.fstat(fd, &stat) == 0 and std.posix.S.ISFIFO(stat.mode);
 }
 
 test "CR3a-2d3 pre-callback child는 선택된 stage를 dispatch한다" {

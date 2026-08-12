@@ -345,7 +345,10 @@ cap과 cap+1, `count × element_size` overflow, section 합계 overflow, allocat
 - `host_id`, runtime IDs, registry size/resize generation, runtime별 canonical grid size.
 - `TerminalCore`의 화면·스크롤백·parser/UTF-8/CSI/OSC/DCS/APC 중간 상태와 모든 logical mode.
 - link/grapheme/kitty image storage와 cell이 참조하는 stable ID 관계.
-- cwd/title/SSH destination/semantic state와 generation counter.
+- cwd/title/SSH destination/semantic state와 generation counter. 여기서 cwd는 **셸이 OSC 7으로 보고한 값**뿐이다 —
+  커널 조회(`proc_pidinfo`) 단계는 host-backed runtime에 없어서, 셸 통합이 없는 셸과 재개 Term은 host-backed일 때
+  cwd가 비어 있다. 메우려면 관측 payload에 host가 측정한 cwd를 더해야 하고 그건 이 문서의 wire 호환 규약을
+  건드린다(배경: [persistent-session-host.md](persistent-session-host.md) 머리말, 규칙: [editor-surface-dock.md](editor-surface-dock.md) §3.5).
 - pending clipboard/notification/bell/agent observation처럼 중복 또는 손실이 사용자에게 보이는 상태.
 - PTY child pid, process group 확인값, size, master-fd slot. `exited/closing/reaping`은 serializable logical state가
   아니라 모두 false여야 하는 eligibility/lifecycle guard다.

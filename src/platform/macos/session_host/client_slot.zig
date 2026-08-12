@@ -11070,16 +11070,30 @@ pub const ClientSlot = struct {
         self: *ClientSlot,
         token: batch_registry_mod.Token,
     ) BatchError!void {
+        const result = try self.releaseAttachmentBatchResult(token);
+        if (result != .completed) return error.AdminBusy;
+    }
+
+    pub fn releaseAttachmentBatchResult(
+        self: *ClientSlot,
+        token: batch_registry_mod.Token,
+    ) BatchError!batch_registry_mod.GenerationReleaseResult {
         const operation = try self.beginRegisteredClientOperation();
         defer self.endRegisteredClientOperation(operation);
         if (!self.valid()) return error.MovedOrCopied;
         if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (batch_release_callback_active) return error.AdminBusy;
         if (self.generationAllocatorCallbackActive()) return error.AdminBusy;
+        var prepared: batch_registry_mod.PreparedRelease = .{};
+        try self.current.batch_registry.prepareRelease(token, &prepared);
+        const decision = self.current.batch_registry.releaseDecision(&prepared);
+        if (decision != .completed) {
+            self.current.batch_registry.abortPreparedReleaseUnchecked(&prepared);
+            return decision;
+        }
         var cleanup: batch_registry_mod.OwnedBatch = .{};
-        const receipt = try self.current.batch_registry.preflightRelease(token, &cleanup);
-        const accounting = try self.current.client.prepareGenerationAccountingConsume(receipt);
-        self.current.batch_registry.beginReleaseUnchecked(token, &cleanup);
+        const accounting = try self.current.client.prepareGenerationAccountingConsume(prepared.accounting);
+        self.current.batch_registry.beginPreparedReleaseUnchecked(&prepared, &cleanup);
         {
             batch_release_callback_active = true;
             defer batch_release_callback_active = false;
@@ -11090,7 +11104,8 @@ pub const ClientSlot = struct {
         cleanup.allocator = null;
         cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
         cleanup.completeCleanupUnchecked();
-        self.current.batch_registry.finishReleaseUnchecked(token, &cleanup);
+        self.current.batch_registry.finishPreparedReleaseUnchecked(&prepared, &cleanup);
+        return .completed;
     }
 
     pub fn tryDeinit(self: *ClientSlot) DeinitOutcome {
@@ -11307,6 +11322,107 @@ test "CR3a-2b1 ClientSlot은 buffered batch owner와 accounting을 exact release
     try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
     try std.testing.expectError(error.InvalidReservation, slot.borrowAttachmentBatch(token));
     try std.testing.expectError(error.InvalidReservation, slot.releaseAttachmentBatch(token));
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2d1 ClientSlot completed release는 payload와 accounting을 exact 한 번 정리한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2D11);
+    const bytes = try allocator.dupe(u8, "completed-release");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 31,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2D11);
+    const token = switch (try slot.readAttachmentBatch(31)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        batch_registry_mod.GenerationReleaseResult.completed,
+        try slot.releaseAttachmentBatchResult(token),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2d1 ClientSlot 첫 retryable은 payload token accounting을 그대로 보존한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2D12);
+    const bytes = try allocator.dupe(u8, "retryable-release");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 32,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2D12);
+    const token = switch (try slot.readAttachmentBatch(32)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    const before = try slot.borrowAttachmentBatch(token);
+    batch_registry_mod.testing.armNextRetryable(&slot.current.batch_registry, token);
+    try std.testing.expectEqual(
+        batch_registry_mod.GenerationReleaseResult.retryable_preserved,
+        try slot.releaseAttachmentBatchResult(token),
+    );
+    const after = try slot.borrowAttachmentBatch(token);
+    try std.testing.expectEqual(before.is_snapshot, after.is_snapshot);
+    try std.testing.expectEqual(before.stream_id, after.stream_id);
+    try std.testing.expectEqualStrings(before.bytes, after.bytes);
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(bytes.len, slot.current.accounting_ledger.byte_count);
+    try std.testing.expectEqual(
+        batch_registry_mod.GenerationReleaseResult.completed,
+        try slot.releaseAttachmentBatchResult(token),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2d1 ClientSlot stale token과 wrong stream은 recoverable 결과로 바뀌지 않는다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2D13);
+    const bytes = try allocator.dupe(u8, "strict-release");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 33,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2D13);
+    const token = switch (try slot.readAttachmentBatch(33)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    var wrong_stream = token;
+    wrong_stream.stream_id = 34;
+    try std.testing.expectError(
+        error.InvalidReservation,
+        slot.releaseAttachmentBatchResult(wrong_stream),
+    );
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(
+        batch_registry_mod.GenerationReleaseResult.completed,
+        try slot.releaseAttachmentBatchResult(token),
+    );
+    try std.testing.expectError(
+        error.InvalidReservation,
+        slot.releaseAttachmentBatchResult(token),
+    );
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
 }
 

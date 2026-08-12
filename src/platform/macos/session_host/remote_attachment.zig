@@ -46,31 +46,35 @@ pub const AttachmentBatchLease = union(enum) {
     fn release(
         self: AttachmentBatchLease,
         transport: AttachmentTransport,
-    ) enum { ok, invariant_failure } {
+    ) enum { completed, retryable_preserved, indeterminate_or_partial, invariant_failure } {
         switch (self) {
             .untracked => |batch| {
                 batch.deinit();
-                return .ok;
+                return .completed;
             },
             .charged => |token| {
                 const release_charged = transport.release_charged orelse
                     return .invariant_failure;
                 release_charged(transport.context, token) catch
-                    return .invariant_failure;
-                return .ok;
+                    return .retryable_preserved;
+                return .completed;
             },
             .generation => |token| {
                 const release_generation = transport.release_generation orelse
                     return .invariant_failure;
-                release_generation(transport.context, token) catch
-                    return .invariant_failure;
-                return .ok;
+                return switch (release_generation(transport.context, token) catch
+                    return .invariant_failure) {
+                    .completed => .completed,
+                    .retryable_preserved => .retryable_preserved,
+                    .indeterminate_or_partial => .indeterminate_or_partial,
+                };
             },
         }
     }
 };
 
 pub const LeaseError = error{LedgerInvariant};
+pub const GenerationReleaseResult = generation_batch_registry.GenerationReleaseResult;
 
 /// Attachment consumer가 공유하는 transport-neutral batch view. External ledger의 저장
 /// provenance는 transport 내부에 남기고 consumer에는 recovery key만 투영한다.
@@ -111,7 +115,7 @@ pub const AttachmentTransport = struct {
     release_generation: ?*const fn (
         context: *anyopaque,
         token: generation_batch_registry.Token,
-    ) LeaseError!void = null,
+    ) LeaseError!GenerationReleaseResult = null,
     preflight_batch_authority: ?*const fn (
         context: *anyopaque,
         stream_id: u64,
@@ -185,13 +189,15 @@ pub const RemoteAttachment = struct {
     fn deinitWithDropPolicy(self: *RemoteAttachment, drop_stream: bool) void {
         if (self.transport) |transport| {
             if (self.failed_release) |lease| {
-                if (lease.release(transport) == .invariant_failure) {
-                    transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                switch (lease.release(transport)) {
+                    .completed => {},
+                    .retryable_preserved, .indeterminate_or_partial, .invariant_failure => transport.fail_closed(transport.context, .attachment_cleanup_failed),
                 }
             }
             for (self.pending_batches.items[self.pending_batch_head..]) |lease| {
-                if (lease.release(transport) == .invariant_failure) {
-                    transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                switch (lease.release(transport)) {
+                    .completed => {},
+                    .retryable_preserved, .indeterminate_or_partial, .invariant_failure => transport.fail_closed(transport.context, .attachment_cleanup_failed),
                 }
             }
             if (drop_stream) transport.drop_stream(transport.context, self.state.stream_id);
@@ -396,9 +402,14 @@ pub const RemoteAttachment = struct {
         lease: AttachmentBatchLease,
         transport: AttachmentTransport,
     ) bool {
-        if (lease.release(transport) == .ok) return true;
-        if (self.failed_release == null) self.failed_release = lease;
-        return false;
+        return switch (lease.release(transport)) {
+            .completed => true,
+            .retryable_preserved => blk: {
+                if (self.failed_release == null) self.failed_release = lease;
+                break :blk false;
+            },
+            .indeterminate_or_partial, .invariant_failure => false,
+        };
     }
 
     /// Preserve FIFO without `orderedRemove(0)`'s quadratic drain. Consumed prefix copies carry no

@@ -176,13 +176,13 @@ pub const GenerationBatchAdapter = struct {
     fn releaseGeneration(
         context: *anyopaque,
         token: generation_batch_registry.Token,
-    ) remote_attachment.LeaseError!void {
+    ) remote_attachment.LeaseError!remote_attachment.GenerationReleaseResult {
         const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
         const slot = self.borrowLiveOrDraining() orelse
             @panic("generation batch release lost its canonical adapter");
         if (token.stream_id != self.stream_id)
             @panic("generation batch release crossed attachment streams");
-        slot.releaseAttachmentBatch(token) catch
+        return slot.releaseAttachmentBatchResult(token) catch
             @panic("generation batch strict release failed");
     }
 

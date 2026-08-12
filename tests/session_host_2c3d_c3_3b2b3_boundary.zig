@@ -105,7 +105,7 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(build, "test-session-host-2c3d-c3-3b2b3"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-2c3d-c3-3b2b\""));
     const gate_start = std.mem.indexOf(u8, build, "const event_c3_3b2b3_control_types_module") orelse return error.MissingGateStart;
-    const gate_end = std.mem.indexOfPos(u8, build, gate_start, "const control_c1_runtime_tests") orelse return error.MissingGateEnd;
+    const gate_end = std.mem.indexOfPos(u8, build, gate_start, "const event_2d1_registry_module") orelse return error.MissingGateEnd;
     const gate = build[gate_start..gate_end];
     try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests={d}"));
     // 상속 gate에는 b3의 pointer-free facade와 ClientSlot focused 4개가 추가된다.

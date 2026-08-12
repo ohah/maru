@@ -2163,6 +2163,11 @@ pub fn build(b: *std.Build) void {
         "2c4 RuntimeConnection mode SSOT Debug and ReleaseFast gates",
     );
     session_host_2c4_step.dependOn(session_host_2c3e_c3_step);
+    const session_host_2d1_step = b.step(
+        "test-session-host-2d1",
+        "2d1 generation release result and first retry preservation Debug and ReleaseFast gates",
+    );
+    session_host_2d1_step.dependOn(session_host_2c4_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3233,6 +3238,36 @@ pub fn build(b: *std.Build) void {
             "C3-3b6 shutdown boundary는",
             1,
         );
+        const event_2d1_registry_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_batch_registry.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+        });
+        B3SettlementTest.add(b, session_host_2d1_step, event_2d1_registry_module, "CR3a-2d1 registry", 4);
+        B3SettlementTest.add(b, session_host_2d1_step, event_c3_3b3_client_slot_module, "CR3a-2d1 ClientSlot", 3);
+        const event_2d1_attachment_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_attachment.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_2d1_step, event_2d1_attachment_module, "CR3a-2d1 generation attachment", 1);
+        const event_2d1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2d1_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2d1 경계"},
+        });
+        const run_event_2d1_boundary_tests = b.addRunArtifact(event_2d1_boundary_tests);
+        run_event_2d1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_2d1_boundary_tests.setCwd(b.path("."));
+        session_host_2d1_step.dependOn(&run_event_2d1_boundary_tests.step);
+        boundary_step.dependOn(&run_event_2d1_boundary_tests.step);
+
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

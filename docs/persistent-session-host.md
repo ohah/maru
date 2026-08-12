@@ -844,6 +844,40 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `retryable_preserved|indeterminate_or_partial`, recoverable failed-release retry, terminal quarantine와 aggregate handoff의 실제 제품
    배선은 2d가 소유한다.
 
+   **CR3a-2d 실행 gate:** 2d는 아래 세 gate를 순서대로 병합한다. 앞 gate가 만든 제품 타입과 결과를 다음 gate가 그대로
+   소비하며, 테스트 전용 병렬 ledger나 `RemoteAttachment` 내부 결과 추측 분기를 만들지 않는다.
+
+   1. **2d1 — 실제 결과와 최초 retry 보존.** `AttachmentTransport.release_generation`은 error를 뭉개는 `void` callback이
+      아니라 닫힌 `GenerationReleaseResult { completed, retryable_preserved, indeterminate_or_partial }`을 반환한다.
+      이 결과는 `GenerationBatchAdapter -> ClientSlot -> GenerationBatchRegistry`의 실제 예약/permit callback에서만 발행한다.
+      `RemoteAttachment.releaseOrRetain`은 generation arm의 최초 `retryable_preserved`만 `failed_release` 한 칸에 보존하고,
+      그 뒤 batch를 읽거나 sibling lease를 release하지 않는다. `deinitPayloadOnly`는 같은 token으로 fresh permit을 정확히 한 번
+      준비해 재시도한다. 두 번째 `completed`만 정상 cleanup으로 끝나며 external `untracked|charged` 결과와 owner 의미는
+      바뀌지 않는다. Debug·ReleaseFast의 제품 fixture는 정상 completed, 최초 retryable의 payload/token/accounting/pin mutation 0,
+      retry 뒤 completed exact-free 1, retry 동안 read/sibling-release 0, copied/stale token과 wrong stream이 recoverable 결과로
+      둔갑하지 않고 기존 strict fail-stop으로 수렴함을 각각 독립 검증한다.
+   2. **2d2 — aggregate terminal handoff와 typed teardown.** 두 번째 `retryable_preserved` 또는 첫
+      `indeterminate_or_partial`은 attachment의 `failed_release`와 아직 소비하지 않은 generation batch/drop token 전부를
+      allocation/callback 0의 `TerminalCleanupHandoff` 하나로 옮긴다. receipt는 final-address node, connection/stream generation,
+      exact token count와 ordered token digest, surviving-descriptor authority 여부를 process seal로 봉인한다. publication suffix는
+      attachment token tombstone→lease pin release→connection poison 순이며 부분 publication은 없다. `ClientSlot.tryDeinit`은
+      `cleaned|busy|terminal_handoff|corrupt`를 반환하고 terminal handoff에서는 exact descriptor만 drain한 뒤 accounting을
+      consume하며 불명확 descriptor는 `terminal_quarantined_no_free`로 남긴 다음 Client와 node를 마지막에 회수한다.
+   3. **2d3 — callback·proof-loss·quarantine 제품 경계.** allocator callback 중 같은 attachment release/deinit, sibling
+      release, slot deinit은 모두 typed Busy이고 새 permit/free/wire mutation 0이다. callback 전 permit/registry/descriptor drift는
+      free 0 fail-stop, callback 뒤 receipt/accounting drift는 free 1 뒤 completion publication 0 fail-stop이다. surviving descriptor
+      drain과 no-free quarantine은 각각 exact once/never-free를 subprocess marker로 증명하고, terminal receipt가 node 밖으로
+      escape하거나 external movable ledger와 splice되지 않음을 source boundary로 고정한다.
+
+   2d focused build는 각 gate가 선행 gate를 상속하고 Debug·ReleaseFast를 모두 실행한다. 2d1의 첫 RED 인벤토리는
+   generation release 결과 shape 3개, 제품 completed 1개, 최초 retryable mutation-0 1개, deinit fresh-permit retry 성공 1개,
+   retry 중 read/sibling 차단 1개, stale/wrong-stream strict failure 1개와 boundary 1개인 최적화 모드당 unique component 8개다.
+   테스트명과 새 설명 주석은 한국어로 쓰고, 결과 enum·API 식별자는 코드 계약 이름을 유지한다.
+   구현 gate의 exact 소유 분해는 registry result/permit 4개, ClientSlot completed/retryable/strict-token 3개,
+   GenerationAttachment actual retry/teardown 1개다. recoverable 주입은 exact registry 주소와 token에 결속된 test-only one-shot이며
+   다른 registry나 sibling token이 대신 소비할 수 없다. production callback은 같은 permit decision 결과를 그대로 전달하고,
+   `indeterminate_or_partial`의 실제 공급과 terminal handoff는 2d2가 소유한다.
+
    terminal handoff는 payload token과 남은 sibling batch/drop token 전부를 allocation/callback 0의 한 node-owned teardown
    receipt로 결속하고 attachment token들을 tombstone한 뒤 lease pin을 해제한다. 첫 `indeterminate_or_partial` 또는 두 번째
    `retryable_preserved` 뒤에는 개별 cleanup을 계속하지 않는다. `ClientSlot.tryDeinit`은 attachment pin/active permit이 0이고

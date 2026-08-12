@@ -1049,7 +1049,11 @@ static void growAtlas(struct android_app *app) {
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
         memset(cell, 0, sizeof cell);
         uint32_t advance = CW / 2;
-        if (!bakeGlyph(&baker, cp, style, cell, CW, CH, &advance)) continue;
+        // **합성이 먼저다**(renderer 계약). 박스·블록·브라유는 폰트로 구우면 셀에 안 맞아
+        // 끊긴다 — 합성은 셀을 가장자리까지 채운다. 0 이면 합성 대상이 아니라 폰트로 간다.
+        if (maru_mobile_synthesize(cp, cell, CW) == 0) {
+            if (!bakeGlyph(&baker, cp, style, cell, CW, CH, &advance)) continue;
+        }
 
         // staging 버퍼 → 이미지의 그 사각형만 복사.
         VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,

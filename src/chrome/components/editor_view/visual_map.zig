@@ -191,7 +191,11 @@ pub fn buildIndex(row_counts: []const u32, out: []u32) RowIndex {
     var acc: u32 = 0;
     for (row_counts, 0..) |n, i| {
         out[i] = acc;
-        acc += n;
+        // **포화 덧셈이다.** 총 시각 행이 u32를 넘으면(100만 줄 × 4300행 수준) 그냥 더하면
+        // 정수 오버플로로 **앱이 죽는다** — 적대적 검증이 재현했다. 그 규모에서는 §3.0의 축소가
+        // 이미 개입할 상태이므로, 죽는 대신 상한에서 멈춘다: 문서 끝쪽이 스크롤로 닿지 않게 되지만
+        // 그것은 §3.8이 "극단 입력에서 기능을 줄인다"고 허용한 범위다.
+        acc +|= n;
     }
     out[row_counts.len] = acc;
     return .{ .starts = out[0 .. row_counts.len + 1] };
@@ -282,6 +286,37 @@ test "RowIndex: 모든 행이 정확히 한 번씩 매핑된다 — 이진 탐�
             }
         }
         try testing.expectEqual(@as(u32, @intCast(n - 1)), seen_line); // 마지막 줄까지 닿았다
+    }
+}
+
+test "RowIndex: 총 행 수가 u32를 넘어도 죽지 않는다" {
+    // 그냥 더하면 정수 오버플로로 **앱이 죽는다**(적대적 검증이 재현했다). 그 규모에서는 §3.0의
+    // 축소가 이미 개입할 상태이므로 상한에서 멈추는 쪽을 고른다.
+    var counts: [1000]u32 = undefined;
+    for (&counts) |*v| v.* = 5_000_000; // 합 50억 > u32max(약 42억)
+    var buf: [1001]u32 = undefined;
+    const idx = buildIndex(&counts, &buf);
+
+    try testing.expectEqual(@as(u32, std.math.maxInt(u32)), idx.totalRows());
+    // 포화 뒤에도 `resolve`가 범위를 벗어나지 않는다.
+    try testing.expect(idx.resolve(0) != null);
+    try testing.expect(idx.resolve(std.math.maxInt(u32) - 1) != null);
+    try testing.expect(idx.resolve(std.math.maxInt(u32)) == null);
+}
+
+test "RowIndex: 0행짜리 줄은 건너뛴다 — 그 줄을 가리키지 않는다" {
+    // `content.rowCount`는 최소 1을 내므로 실제로는 생기지 않지만, 인덱스가 그 입력에서 어떻게
+    // 행동하는지는 정해져 있어야 한다(같은 시작 행이 연속으로 놓인다).
+    const counts = [_]u32{ 1, 0, 2, 0, 0, 1 };
+    var buf: [8]u32 = undefined;
+    const idx = buildIndex(&counts, &buf);
+
+    try testing.expectEqual(@as(u32, 4), idx.totalRows());
+    for (0..idx.totalRows()) |row| {
+        const p = idx.resolve(@intCast(row)).?;
+        const have = idx.rowsOf(p.line).?;
+        try testing.expect(have > 0); // 0행 줄을 가리키지 않는다
+        try testing.expect(p.piece < have);
     }
 }
 

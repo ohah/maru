@@ -19,7 +19,7 @@ PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실
 | M1 | **draw-list 배칭** — quad 당 draw call 을 인스턴스 드로우 한 번으로 | 완료 |
 | M1.5 | **`build.zig` 타깃** — 제품 빌드를 셸 스크립트에서 회수한다 | 완료 |
 | M2 | **Android IME** — 자체 Java shim 이 `InputConnection` 을 받는다 | 완료(일부 미검증) |
-| M2b | **iOS IME preedit** — `UITextInput` marked text 를 같은 자리에 태운다 | 미착수 |
+| M2b | **iOS IME** — `UITextInput` 완료. 한글은 marked text 를 안 쓰므로 **고쳐 쓰기 버퍼**가 남았다(계약 §IME) | 진행 중 |
 | M3a | **컨트롤 플레인 원격 축** — 전송·인증·암호화 계약(doc-first) | 미착수 |
 | M3b | 모바일 클라이언트 부착 | 미착수 |
 | M3c | **연결 수명** — 재접속·네트워크 전환·백그라운드 소켓·자격증명 저장·프로토콜 버전 | 미착수 |

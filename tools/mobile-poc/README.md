@@ -1,22 +1,27 @@
-# 모바일 이식 PoC
+# 모바일 기기 하네스 · 측정 기록
 
-**"Zig 코어 + chrome 컴포넌트 + 네이티브 GPU"가 iOS/Android 에서 성립하는가**를 실측한다.
-설계 논의가 추정 위에서 돌지 않게 하려는 것이고, 제품 코드가 아니다.
+**제품 코드는 `src/platform/{mobile,ios,android}` 가 소유하고, 빌드는 `build.zig` 가 한다.**
+이 폴더는 그것을 기기에 올려 실행·캡쳐·계측하는 하네스이고, 앱 소스를 갖지 않는다 — 양쪽에
+두면 하나가 조용히 낡는다. 계약은 [모바일 플랫폼](../../docs/mobile-platform.md)이 소유한다.
+
+아래는 이 구조가 성립하는지 PoC 로 실측한 기록이다. **설계 논의가 추정 위에서 돌지 않게**
+하려던 것이고, 여기 적힌 숫자가 계약의 근거다.
 
 ```sh
-sh tools/mobile-poc/run.sh ios               # 오프스크린 Metal → PNG + 픽셀 판정
-sh tools/mobile-poc/run.sh ios-app           # 시뮬레이터 설치·실행 + 스크린샷
-sh tools/mobile-poc/run.sh android           # 에뮬레이터 실행 + Vulkan 오프스크린 → PNG
-sh tools/mobile-poc/run.sh features-ios      # Metal 로 여섯 기능 판정
-sh tools/mobile-poc/run.sh features-android  # Vulkan 으로 같은 여섯 기능 판정
-sh tools/mobile-poc/run.sh chrome-ios        # **실제 chrome 컴포넌트**를 시뮬레이터에
-sh tools/mobile-poc/run.sh chrome-android    # 같은 draw-list 를 Vulkan 으로(오프스크린)
-sh tools/mobile-poc/run.sh chrome-android-app # **에뮬레이터 화면에** NativeActivity+swapchain
-sh tools/mobile-poc/run.sh present-ios       # present 페이싱을 표시 클럭으로 실측
+sh tools/mobile-poc/run.sh chrome-ios          # 시뮬레이터에 설치·실행 + 스크린샷
+sh tools/mobile-poc/run.sh chrome-android-app  # 에뮬레이터에 설치·실행 + 스크린샷
+sh tools/mobile-poc/run.sh present-ios         # present 페이싱을 표시 클럭으로 실측
+sh tools/mobile-poc/run.sh features-ios        # Metal 로 여섯 기능 판정
+sh tools/mobile-poc/run.sh features-android    # Vulkan 으로 같은 여섯 기능 판정
 #
-# 입력 확인: adb shell input text "echo maru" (Android)
-# 생명주기 확인: adb shell input keyevent KEYCODE_HOME 뒤 am start 재실행
+# 입력: adb shell input tap <키 좌표>  — `input text` 는 IME 를 우회하므로 이 검증에 못 쓴다
+# 터치: adb shell input tap 525 753 · idb ui tap 200 300
+# 생명주기: adb shell input keyevent KEYCODE_HOME 뒤 am start 재실행
 ```
+
+**초기 단계 하네스(`ios`·`ios-app`·`android`·`chrome-android`)는 지웠다.** 위 두 모드가 그
+일을 포함하고, 남겨 두면 어느 쪽이 진짜인지 흐려진다. 측정 **결과**(아래 표·스크린샷)는
+전부 남는다. 여섯 기능 판정기는 다른 모드가 대체하지 않아 남겼다.
 
 ## 무엇을 판정하는가
 

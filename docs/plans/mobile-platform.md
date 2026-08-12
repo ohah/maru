@@ -18,7 +18,7 @@ PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실
 | M0 | 계약 문서 + 폴더 구조. PoC 코드를 `src/platform/{mobile,ios,android}` 로 옮긴다 | 완료 |
 | M1 | **draw-list 배칭** — quad 당 draw call 을 인스턴스 드로우 한 번으로 | 완료 |
 | M1.5 | **`build.zig` 타깃** — 제품 빌드를 셸 스크립트에서 회수한다 | 완료 |
-| M2 | **Android `GameActivity` 이관** — `GameTextInput` 으로 IME 를 받는다 | 미착수 |
+| M2 | **Android IME** — 자체 Java shim 이 `InputConnection` 을 받는다 | 완료(일부 미검증) |
 | M3 | 원격 세션 연결 — `session_host` 클라이언트를 모바일에 붙인다 | 미착수 |
 | M4 | 스크롤·선택·복사 + 보조 키바 | 미착수 |
 | M5 | 회전·태블릿 레이아웃 | 미착수 |
@@ -68,10 +68,41 @@ zig build mobile-lib-ios-sim | mobile-lib-ios | mobile-lib-android
 측정 **결과**(표·스크린샷)는 전부 남는다. 여섯 기능 판정기(`features-*`)는 다른 모드가
 대체하지 않는 별도 측정이라 남긴다.
 
-## M2 — GameActivity
+## M2 — Android IME (자체 Java shim)
 
-`androidx.games:games-activity` 의 prefab C 소스와 `classes.jar` 를 쓴다. Java 코드가 생기므로
-`hasCode="false"` 를 버리고 `d8` 로 dex 를 만든다.
+**`GameActivity` 를 시도했다가 되돌렸다.** 코드 이관과 빌드까지 통과했지만 실행에서
+`ClassNotFoundException: androidx.appcompat.app.AppCompatActivity` 로 죽었다 — `GameActivity`
+가 전 버전에서 `AppCompatActivity` 를 상속해 AndroidX 20여 개와 리소스 컴파일이 필요하고,
+그건 Gradle 없이 손으로 조립할 수 없다. 계획할 때 못 본 비용이라 결정을 다시 했다
+(근거는 [계약 §1](../mobile-platform.md#1-확정-결정)).
 
-판정: `adb shell input text` 로 넣은 한글이 **조합된 채로** 앱에 도달한다(`GameTextInput` 의
-`stateChanged` 콜백). `NativeActivity` 의 keycode 표를 지운다.
+`NativeActivity` 를 유지하고 IME 만 자체 shim 으로 받는다.
+
+```text
+MaruActivity(NativeActivity)   투명 입력 View 를 얹고 소프트 키보드를 띄운다
+  └ MaruInputView              onCheckIsTextEditor()=true → IME 가 입력 대상으로 인정
+      └ MaruInputConn          setComposingText/commitText 를 JNI 로 넘긴다
+```
+
+### 검증된 것과 안 된 것
+
+| | 상태 |
+|---|---|
+| shim 이 입력 대상으로 인정됨 | **OK** — 소프트 키보드가 뜬다 |
+| `commitText` → 코어 | **OK** — 키를 눌러 `commit="a"` 도달 |
+| preedit 렌더(커서 자리에 흐리게) | **OK** — 주입해서 확인 |
+| IME 조합 → preedit 왕복 | **미검증**(아래) |
+
+**조합을 실제로 흘려 보지 못했다.** 이 에뮬레이터에는 Gboard(LatinIME)뿐이고 한글 IME 가
+없다. 영어 Gboard 는 이 입력 타입에서 `setComposingText` 없이 바로 `commitText` 를 부른다.
+그래서 "IME 가 만든 조합 문자열이 preedit 으로 그려진다" 는 왕복은 **한글 키보드가 있는
+기기에서 손으로 확인해야 한다**.
+
+실측으로 잡은 것들:
+
+  - `adb shell input text` 는 **IME 를 우회**한다(키 이벤트 주입). IME 경로 검증에 못 쓴다.
+  - `BaseInputConnection(view, false)` 면 IME 가 "편집기가 아니다" 로 보고 조합 없이 바로
+    확정한다 — `true` 여야 한다.
+  - `NativeActivity` 는 `android.app.lib_name` 의 .so 를 **클래스로더 밖에서 dlopen** 한다.
+    Java 쪽 `System.loadLibrary` 를 한 번 더 해야 JNI 이름 해석이 된다.
+  - `d8` 8.2.2 가 **익명 내부 클래스에서 내부 오류로 죽는다**. 이름 있는 중첩 클래스만 쓴다.

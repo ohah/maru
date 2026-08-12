@@ -296,7 +296,12 @@ pub const inventory = [_]Proof{
     // 줄 수도 보게 됐다(제품 스크린샷에서 폴더줄이 다음 행 라벨을 덮는 것을 확인 — cwd가 투영 뒤에 도착하는
     // 경로가 커널 폴백으로 흔해졌다). count는 2 그대로다 — 더한 것은 테스트와 판정 한 갈래뿐이고 `@field`
     // 반사 접근이나 Client 구성·receiver 집합은 건드리지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "fab8c17b39b6f690e1a75de73a7c286c88d8ce1eede7c21c2e5826c1067a27ad" },
+    // 제어 평면 collector(`collectSessionInto`)가 같은 2단 규칙으로 넘어오며 또 바뀐다 — `TerminalMeta.cwd`를
+    // 관측 직독이 아니라 `git_ops.termCwdForDisplay`로, `git_branch`를 `cwd` 파생이 아니라 `git_ops.termGitBranch`로
+    // 채운다. 그전까지 GUI와 wire가 두 방향으로 갈렸다(OSC 7 없는 Term은 wire만 `cwd` 생략, ssh Term은 wire만
+    // 낡은 로컬 경로 노출). count는 2 그대로다 — 바뀐 것은 두 값의 출처뿐이고 `@field` 반사 접근이나
+    // Client 구성·receiver 집합은 건드리지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "b8556b05992d2846b067ad5585598bad04dde9557663422792ea80de3f9d1197" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

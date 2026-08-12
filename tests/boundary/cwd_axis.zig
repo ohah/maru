@@ -57,15 +57,17 @@ const Entry = struct {
 const inventory = [_]Entry{
     .{
         .path = "src/platform/macos/app_session.zig",
-        .fns = &.{ "termCwdIsRemote", "respawnEndedPlaceholder", "writeEndedPlaceholderGuidance", "currentCwd", "collectSessionInto" },
+        .fns = &.{ "termCwdIsRemote", "respawnEndedPlaceholder", "writeEndedPlaceholderGuidance", "currentCwd" },
         .aliases = 2,
         .why =
-        \\Q1(셸이 보고한 값 그 자체가 답) + 이관 예정 하나가 섞여 있다.
+        \\전부 Q1이다 — 셸이 보고한 값 **그 자체**가 답이라 커널 값으로 대체할 수 없다.
         \\  - termCwdIsRemote: OSC 7 authority(host) 판정 그 자체 — 커널 값엔 host가 없다
         \\  - 묘비(ended placeholder) 복원 spawn cwd: "마지막으로 셸이 보고한 값"으로 되살린다
         \\  - 묘비 안내 텍스트: 같은 이유. 프로세스는 이미 죽어 커널에 물을 대상이 없다
         \\  - currentCwd: 제품 소비자가 0인 ABI(그 주석 참조). 소비자가 생기면 축부터 정해야 한다
-        \\  - collectSessionInto(제어 평면 TerminalMeta.cwd): **이관 예정**. wire 계약 변경이라 단독 PR로 뺐다
+        \\
+        \\`collectSessionInto`(제어 평면 `TerminalMeta.cwd`)는 여기 **있었다가 빠졌다** — 축(`termCwdForDisplay`)
+        \\으로 이관했다. 다시 들어오려 하면 그건 wire가 GUI와 갈라지는 것이므로 이유부터 적어야 한다.
         \\
         \\`sidebarCwdPath`의 원격 분기는 여기 없다 — 그건 `cwd_host`를 읽지 `cwd`를 읽지 않는다.
         \\(첫 재고에 그것을 6번째로 잘못 적었고, 이 게이트가 스스로 그 오류를 잡았다.)

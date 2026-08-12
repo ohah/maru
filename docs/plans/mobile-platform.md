@@ -19,13 +19,19 @@ PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실
 | M1 | **draw-list 배칭** — quad 당 draw call 을 인스턴스 드로우 한 번으로 | 완료 |
 | M1.5 | **`build.zig` 타깃** — 제품 빌드를 셸 스크립트에서 회수한다 | 완료 |
 | M2 | **Android IME** — 자체 Java shim 이 `InputConnection` 을 받는다 | 완료(일부 미검증) |
+| M2b | **iOS IME preedit** — `UITextInput` marked text 를 같은 자리에 태운다 | 미착수 |
 | M3a | **컨트롤 플레인 원격 축** — 전송·인증·암호화 계약(doc-first) | 미착수 |
 | M3b | 모바일 클라이언트 부착 | 미착수 |
+| M3c | **연결 수명** — 재접속·네트워크 전환·백그라운드 소켓·자격증명 저장·프로토콜 버전 | 미착수 |
 | M4 | 스크롤·선택·복사 + 보조 키바 | 미착수 |
-| M5 | 회전·태블릿 레이아웃 | 미착수 |
+| M5 | 회전·태블릿 레이아웃 + **멀티윈도우/분할 화면** | 미착수 |
 | M6 | 실기기 성능 예산 + 아틀라스 축출 | 미착수 |
 | ~~M7~~ | ~~CI 통합~~ — **안 한다**(아래) | 취소 |
 | M8 | `features-ios` 를 앱으로 — `simctl spawn` 에서 멈춘다 | 미착수 |
+| M9 | **접근성 어댑터** — 이미 있는 계약을 모바일이 안 따른다 | 미착수 |
+| M10 | **config 경로** — 모바일이 설정을 어디서 받는가 | 미착수 |
+| M11 | **스토어 배포** — 서명·아이콘·privacy manifest·`debuggable` 해제 | 미착수 |
+| M12 | 세션 목록·전환 UI — 지금 탭/사이드바는 그림만이고 눌러도 안 바뀐다 | 미착수 |
 
 **실기기가 있어야만 되는 것**은 [검증 매트릭스](../verification-matrix.md)의 "아직 완전 자동
 검증이 아닌 영역" 이 소유한다 — 이 표는 **무엇을 언제 하는가**이고, 그쪽은 **무엇으로
@@ -181,3 +187,61 @@ MaruActivity(NativeActivity)   투명 입력 View 를 얹고 소프트 키보드
 | 왕복 뒤 렌더 재개 | `quads=148` 재출력 |
 | 아틀라스 성장 반복 | 배치마다 2~7자, 멈추지 않음 |
 | 512바이트 넘는 입력 | `total=1995` 까지 전달 |
+
+## 기획 공백 (M9~M12, M2b, M3c)
+
+PoC 는 "되는가" 에 답했고 지금 계획은 **PoC 가 드러낸 것**만 담고 있었다. 제품이 되려면
+필요한데 아직 아무 데도 없던 것들을 넣는다. **둘은 새 결정이 아니라 이행 누락이다** —
+데스크톱이 이미 계약으로 정해 둔 것을 모바일이 안 따른다.
+
+### M9 접근성 (이행 누락)
+
+[chrome 상호작용 이관](../chrome-interaction-migration.md)이 정한 계약: interactive node 가
+**semantic descriptor** 를 내고 플랫폼 어댑터가 그것을 네이티브 접근성 요소로 투영한다.
+**모바일은 그 어댑터가 없다** — GPU 로 그린 quad 뿐이라 VoiceOver·TalkBack 에게는 빈 화면이다.
+
+GPU 로 UI 를 그리는 선택의 대가라 나중에 붙이기 비싸다. 지금 계약이 이미 있으므로 iOS 는
+`UIAccessibilityElement`, Android 는 `AccessibilityNodeInfo` 로 같은 descriptor 를 투영하면 된다.
+
+### M10 config 경로 (이행 누락)
+
+[설정](../configuration.md)이 config 계약의 단일 출처인데 **모바일은 config 를 아예 안 읽는다**
+(`mobile_bridge.zig` 의 `themeColors()` 가 값을 고정한다). 폰트 크기 하나 못 바꾸는 상태다.
+
+**모바일에서 설정이 어디서 오는지가 정해지지 않았다.** 원격 host 의 config 를 따라가는가,
+기기에 따로 두는가, 둘을 합치는가 — 원격 전용(§1)이라는 결정과 얽혀 있어 M3 와 함께 봐야 한다.
+
+### M11 스토어 배포
+
+[배포](../distribution.md)는 macOS 채널·서명·공증·업데이트를 소유하지만 **모바일 스토어는
+다루지 않는다**. 지금 상태로는 배포가 불가능하다.
+
+  - `AndroidManifest.xml` 에 `android:debuggable="true"` 가 남아 있다(개발용 — `run-as` 로
+    래스터 결과를 꺼내려고 넣었다). **배포 빌드에서는 반드시 빼야 한다.**
+  - 앱 아이콘·런치 스크린이 없다.
+  - iOS 는 privacy manifest(`PrivacyInfo.xcprivacy`)와 프로비저닝이 필요하다.
+  - Play 는 targetSdk 하한과 App Bundle 을 요구한다 — Gradle 을 안 쓰기로 한 결정([계약 §1])과
+    다시 만나는 지점이라, 그때 Gradle 도입을 재검토한다.
+
+### M12 세션 목록·전환 UI
+
+지금 탭 바·사이드바는 **그림만이다**. 터치가 셀 좌표까지 오지만(계약 §3) 그걸 받아 탭을
+바꾸는 코드가 없다. 원격 세션이 붙으면(M3) 곧바로 필요해진다.
+
+### M2b iOS IME preedit
+
+Android 는 정했고 iOS 는 안 했다(계약 §7). `UITextInput` 의 marked text 를
+`maru_mobile_set_preedit` 에 태우면 되는 자리다.
+
+### M3c 연결 수명
+
+M3 는 "무엇을 타고 가는가" 만 다뤘다. 모바일은 그 뒤가 더 어렵다.
+
+  - **네트워크가 끊긴다** — 셀룰러↔Wi-Fi 전환, 지하철, 화면 잠금. 재접속·backoff·중복 세션
+    방지가 필요하다. Mosh 가 존재하는 이유가 이것이다.
+  - **백그라운드에서 소켓이 죽는다**(iOS 는 특히). 세션을 서버가 붙들고 있다가 다시 붙는
+    모델인지, 클라가 상태를 들고 있는지 정해야 한다 — [영속 세션 호스트](../persistent-session-host.md)와
+    같은 문제를 다른 조건에서 푸는 셈이다.
+  - **자격증명을 어디에 두는가** — iOS Keychain / Android Keystore. 지금 계획에 없다.
+  - **프로토콜 버전** — 모바일 앱과 데스크톱 host 의 버전이 갈린다(스토어 심사·사용자 업데이트
+    지연). 호환 규칙이 필요하다.

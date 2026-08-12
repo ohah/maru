@@ -145,7 +145,19 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 `GameActivity` 권장과 `NativeActivity` 의 텍스트 입력 한계는 Android 공식 문서가 소유한다.
 모바일 GPU 가 draw call 오버헤드에 민감하다는 것은 Vulkan 공식 모바일 가이드가 소유한다.
 
-## 7. 아직 정하지 않은 것
+## 7. 아직 안 따르고 있는 기존 계약
+
+**새로 정할 것이 아니라 이행이 빠진 것들**이다. 데스크톱이 이미 계약으로 정해 뒀다.
+
+| 계약 | 모바일 상태 |
+|---|---|
+| [chrome 상호작용 이관](chrome-interaction-migration.md) — interactive node 가 semantic descriptor 를 내고 플랫폼이 네이티브 접근성 요소로 투영한다 | **어댑터 없음.** GPU quad 뿐이라 VoiceOver·TalkBack 에게는 빈 화면이다 |
+| [설정](configuration.md) — config 스키마·resolve 계약 | **config 를 안 읽는다.** `themeColors()` 가 값을 고정한다 — 폰트 크기 하나 못 바꾼다 |
+| [배포](distribution.md) — 채널·서명·업데이트 | **모바일 스토어를 안 다룬다.** `AndroidManifest.xml` 의 `android:debuggable="true"` 는 개발용이라 배포 전에 반드시 뺀다 |
+
+계획은 [M9~M11](plans/mobile-platform.md)이 소유한다.
+
+## 8. 아직 정하지 않은 것
 
 - **성능 예산.** 실기기가 있어야 잰다. 에뮬레이터 GPU 는 `llvmpipe` 소프트웨어 래스터라
   숫자가 의미 없다.

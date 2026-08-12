@@ -20,6 +20,13 @@ test "코어가 없을 때는 세지 않고 알린다" {
     try std.testing.expectEqual(@as(u32, 3), after);
 }
 
+// **build 보다 먼저 물어도 0 이 아니어야 한다.** Android 는 창이 서는 순간 이 값으로 GPU
+// 버퍼를 한 번 잡는데, 그게 첫 build 보다 앞이다. 0 을 돌려줬더니 크기 0 짜리 VkBuffer 를
+// 만들었고 드라이버가 단언에 걸려 **에뮬레이터를 통째로 abort** 시켰다(실측).
+test "용량은 build 전에 물어도 0 이 아니다" {
+    try std.testing.expect(bridge.maru_mobile_max_quads() > 0);
+}
+
 // 옛 코드는 코어를 512KB `FixedBufferAllocator` 위에 세웠다. FBA 는 마지막 할당 말고는
 // free 가 no-op 이라 격자가 바뀔 때마다 옛 격자를 못 돌려받았고, **resize 7번**이면
 // OutOfMemory 였다. 모바일에서 키보드를 올렸다 내리면 창이 리사이즈되므로 서너 번이면 닿는다.

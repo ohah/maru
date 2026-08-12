@@ -21,6 +21,53 @@ pub const TerminalRowKind = enum(u8) {
     quarantined_no_free,
 };
 
+pub const TerminalDrainLifecycle = enum(u8) {
+    pristine,
+    prepared,
+    callback_active,
+    callback_returned,
+    consumed,
+};
+
+pub const TerminalDrainIdentity = struct {
+    self_addr: u64,
+    pid: u32,
+    process_nonce: u64,
+    thread_id: u64,
+    node_addr: u64,
+    node_incarnation: u64,
+    registry_incarnation: u64,
+    handoff_identity_seal: Digest,
+    handoff_state_seal: Digest,
+    handoff_state_generation: u64,
+    row_slot: u16,
+    row_kind_raw: u8,
+    row_generation: u64,
+    accounting_client_addr: u64,
+    accounting_transfer_id: u64,
+    accounting_byte_count: u64,
+    payload_addr: u64,
+    payload_len: u64,
+    allocator_ptr: u64,
+    allocator_vtable: u64,
+    callback_ordinal: u32,
+};
+
+pub const TerminalDrainState = struct {
+    identity_seal: Digest,
+    lifecycle_raw: u8,
+    state_generation: u64,
+    state_seal: Digest,
+};
+
+pub const TerminalDrainCallbackBinding = struct {
+    continuation_addr: u64,
+    continuation_seal: Digest,
+    node_addr: u64,
+    row_slot: u16,
+    callback_ordinal: u32,
+};
+
 pub const TokenProjection = struct {
     registry_incarnation: u64,
     entry_slot: u16,
@@ -155,4 +202,50 @@ test "CR3a-2d2 terminal handoff ordered token digest는 순서와 ordinal splice
     try std.testing.expect(!std.mem.eql(u8, &orderedTokenDigest(&ordered), &orderedTokenDigest(&reversed)));
     const duplicated = [_]TokenProjection{ first, first };
     try std.testing.expect(!std.mem.eql(u8, &orderedTokenDigest(&ordered), &orderedTokenDigest(&duplicated)));
+}
+
+test "CR3a-2d3 terminal drain continuation schema는 재귀적으로 pointer-free다" {
+    try std.testing.expect(!containsPointer(TerminalDrainIdentity));
+    try std.testing.expect(!containsPointer(TerminalDrainState));
+    try std.testing.expect(!containsPointer(TerminalDrainCallbackBinding));
+}
+
+test "CR3a-2d3 terminal drain continuation은 final address와 row accounting identity를 보존한다" {
+    const identity = TerminalDrainIdentity{
+        .self_addr = 3,
+        .pid = 5,
+        .process_nonce = 7,
+        .thread_id = 11,
+        .node_addr = 13,
+        .node_incarnation = 17,
+        .registry_incarnation = 19,
+        .handoff_identity_seal = [_]u8{23} ** 32,
+        .handoff_state_seal = [_]u8{29} ** 32,
+        .handoff_state_generation = 31,
+        .row_slot = 37,
+        .row_kind_raw = @intFromEnum(TerminalRowKind.surviving_descriptor),
+        .row_generation = 41,
+        .accounting_client_addr = 43,
+        .accounting_transfer_id = 47,
+        .accounting_byte_count = 53,
+        .payload_addr = 59,
+        .payload_len = 61,
+        .allocator_ptr = 67,
+        .allocator_vtable = 71,
+        .callback_ordinal = 73,
+    };
+    try std.testing.expectEqual(@as(u64, 3), identity.self_addr);
+    try std.testing.expectEqual(@as(u16, 37), identity.row_slot);
+    try std.testing.expectEqual(@as(u64, 47), identity.accounting_transfer_id);
+    try std.testing.expectEqual(@as(u32, 73), identity.callback_ordinal);
+}
+
+test "CR3a-2d3 terminal drain lifecycle은 callback 복귀와 consume 순서를 닫는다" {
+    const values = std.enums.values(TerminalDrainLifecycle);
+    try std.testing.expectEqual(@as(usize, 5), values.len);
+    try std.testing.expectEqual(TerminalDrainLifecycle.pristine, values[0]);
+    try std.testing.expectEqual(TerminalDrainLifecycle.prepared, values[1]);
+    try std.testing.expectEqual(TerminalDrainLifecycle.callback_active, values[2]);
+    try std.testing.expectEqual(TerminalDrainLifecycle.callback_returned, values[3]);
+    try std.testing.expectEqual(TerminalDrainLifecycle.consumed, values[4]);
 }

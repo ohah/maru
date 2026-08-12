@@ -1541,6 +1541,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   copied/stale/cross-node receipt와 partial source tombstone은 모두 제품 callback/free/node mutation 전에 거부한다.
   public bulk registry commit은 0개이며, node-final streaming publication 뒤 state seal이
   `published→draining→consumed→terminal`로 진행한다. 첫 indeterminate는 deinit에서 release callback을 재호출하지 않는다.
+  2d3은 구현 전이다. 첫 RED gate는 Debug·ReleaseFast 각각 final-address continuation 3개, callback reentry 3개,
+  preflight/exact-once suffix 3개, quarantine 2개, 실제 attachment final-zero 1개인 unique component 12개와 fresh-exec
+  subprocess 3개, boundary 1개를 요구한다. pre-callback drift는 free 0, post-callback drift는 free exact 1 뒤 공통
+  `fatalIntegrity(.proof_loss)` exit 86이며 두 경우 모두 accounting/row/handoff completion/node destroy 0을 증명한다.
   2b1의 현재 자동 증거는 node-local 4,096-entry registry와 독립 exact accounting ledger, 18 MiB pending+transferred 합산,
   pointer-free token의 registry incarnation·entry generation·stream 결속, buffered/direct-parser all-or-none transfer,
   0/1/4,096/4,097 및 exact cap/cap+1, allocator fail-index·drift·partial rollback, sibling/source/canonical owner alias,

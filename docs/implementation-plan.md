@@ -979,8 +979,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `published→draining→consumed→terminal`을 exact generation으로 결속하고 첫 indeterminate lease는 재호출하지 않는다.
    node-final receipt와 attachment ordered lease view의
    allocation-free 2-pass preflight/commit, surviving exact-free와 no-free quarantine을 unique component 14개와 boundary 1개로
-   검증한다. 2d3은 allocator callback reentry,
-   permit/receipt proof loss, exact surviving descriptor drain과 no-free quarantine의 제품 subprocess/source boundary를 닫는다.
+   검증한다. 2d3은 final-address `TerminalDrainContinuation`, typed callback binding과 callback-returned receipt를 추가해 allocator
+   callback reentry, permit/receipt proof loss, exact surviving descriptor drain과 no-free quarantine의 제품 subprocess/source
+   boundary를 닫는다. 2d3의 RED는 unique component 12개, fresh-exec subprocess 3개, boundary 1개로 시작한다.
    각 gate의 exact API·RED 인벤토리는 persistent-session-host의 CR3a-2d 절을 단일 출처로 삼으며, 2d1~3 전체가 green이기
    전에는 2d 완료를 주장하지 않는다. CR3a-2e는 actual socket
    parity와 production boundary를 닫는다. HostAdapter는 RPC 전에 neutral binding의 node pin과 빈 cleanup entry를 예약하고 attach

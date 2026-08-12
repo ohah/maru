@@ -2188,6 +2188,11 @@ pub fn build(b: *std.Build) void {
         "2d2 aggregate terminal handoff and typed node teardown Debug and ReleaseFast gates",
     );
     session_host_2d2_step.dependOn(session_host_2d1_step);
+    const session_host_2d3_step = b.step(
+        "test-session-host-2d3",
+        "2d3 terminal drain callback and proof-loss Debug and ReleaseFast gates",
+    );
+    session_host_2d3_step.dependOn(session_host_2d2_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3336,6 +3341,28 @@ pub fn build(b: *std.Build) void {
         run_event_2d2_boundary_tests.setCwd(b.path("."));
         session_host_2d2_step.dependOn(&run_event_2d2_boundary_tests.step);
         boundary_step.dependOn(&run_event_2d2_boundary_tests.step);
+
+        B3SettlementTest.add(b, session_host_2d3_step, event_2d2_contract_module, "CR3a-2d3 terminal drain", 3);
+        const event_2d3_red_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2d3_red.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(b, session_host_2d3_step, event_2d3_red_module, "CR3a-2d3 component", 9);
+        B3SettlementTest.add(b, session_host_2d3_step, event_2d3_red_module, "CR3a-2d3 subprocess", 3);
+        const event_2d3_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2d3_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2d3 경계"},
+        });
+        const run_event_2d3_boundary_tests = b.addRunArtifact(event_2d3_boundary_tests);
+        run_event_2d3_boundary_tests.addArg("--maru-expect-tests=1");
+        run_event_2d3_boundary_tests.setCwd(b.path("."));
+        session_host_2d3_step.dependOn(&run_event_2d3_boundary_tests.step);
+        boundary_step.dependOn(&run_event_2d3_boundary_tests.step);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

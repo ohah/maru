@@ -75,8 +75,6 @@ static struct {
     double pace_ms[PACE_SAMPLES];
     int n_pace;
     int pace_done;
-    // 페이싱 단계: 0=FIFO 자유 실행, 1=vsync 한 번 걸러(=30Hz 목표)
-    int pace_phase;
     int64_t vsync_count;
 } g;
 
@@ -84,6 +82,7 @@ static struct {
 static struct android_app *g_app = NULL;
 static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선언이 필요하다
 static void recreateVulkan(struct android_app *app);
+static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
 static uint32_t g_gw, g_gh;
 
@@ -643,18 +642,13 @@ static void drawFrame(void) {
             while (j >= 0 && g.pace_ms[j] > k) { g.pace_ms[j + 1] = g.pace_ms[j]; j--; }
             g.pace_ms[j + 1] = k;
         }
-        double med = g.pace_ms[PACE_SAMPLES / 2];
-        if (g.pace_phase == 0) {
-            LOGI("MARU_PACE fifo_median_ms=%.2f n=%d", med, PACE_SAMPLES);
-            // 다음 단계: **하위 주기**. Vulkan 에는 "30Hz 모드"가 없어 앱이 직접 맞춘다 —
-            // AChoreographer 로 vsync 를 받아 한 번 걸러 present 한다.
-            g.pace_phase = 1;
-            g.n_pace = 0;
-            g.last_ms = 0;
-        } else if (!g.pace_done) {
+        if (!g.pace_done) {
             g.pace_done = 1;
+            // **계측은 동작을 바꾸지 않는다.** 예전에는 여기서 앱을 30Hz 로 전환해, 측정의
+            // 부산물이 제품 동작이 됐다(그리고 iOS 엔 그 전환이 없어 두 플랫폼이 달랐다).
+            double med = g.pace_ms[PACE_SAMPLES / 2];
             int paced = (med >= 25.0 && med <= 42.0);
-            LOGI("MARU_PACE half_rate_median_ms=%.2f n=%d target=33.33 verdict=%s",
+            LOGI("MARU_PACE median_ms=%.2f n=%d target=33.33 verdict=%s",
                  med, PACE_SAMPLES, paced ? "PASS" : "FAIL");
         }
     }
@@ -996,6 +990,13 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh))
             LOGI("atlas_raster_failed");
         if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_ready frames_reset");
+        // **처음부터 vsync 콜백이 주기를 쥔다**(30Hz). 여기서 등록하는 이유는
+        // 메인 루프가 `pollOnce(-1)` 로 막혀 있어 거기서는 등록에 도달할 수
+        // 없기 때문이다(그렇게 짰다가 아무것도 안 그려졌다).
+        if (!g.chor_started) {
+            g.chor_started = 1;
+            AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, app);
+        }
         showKeyboard(app);
     }
 }
@@ -1006,6 +1007,8 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
 static void frameCallback(int64_t frame_time_ns, void *data) {
     (void)frame_time_ns;
     g.vsync_count++;
+    // **30Hz(comfort).** 터미널은 매 vsync 마다 새로 그릴 것이 없고, 모바일은 배터리·발열이
+    // 사용자에게 보인다. 데스크톱 maru 의 present 정책과 같은 값이다.
     if ((g.vsync_count & 1) == 0) drawFrame();
     // **여기서도 재생성을 봐야 한다.** 이 단계에서는 메인 루프가 pollOnce(-1) 로 막혀 있어
     // 리사이즈 신호를 받아 줄 사람이 없다 — 그러면 화면이 그대로 언다.
@@ -1031,25 +1034,12 @@ void android_main(struct android_app *app) {
     while (1) {
         int events;
         struct android_poll_source *source;
-        // phase 1 은 choreographer 가 그리므로 여기서 **막아야 한다** — 0 을 주면 아무것도
-        // 안 막아 CPU 한 코어를 계속 문다(폰이 뜨겁고 배터리가 준다).
-        //
-        // **조건은 루프 안에서 매번 본다.** 밖에서 한 번 계산하면 INIT_WINDOW 를 처리해
-        // `g.ready` 가 1 이 된 뒤에도 낡은 -1 로 다시 막혀 영영 안 그린다(그렇게 짰다가 잡았다).
-        while (ALooper_pollOnce((g.ready && g.pace_phase == 0) ? 0 : -1,
-                                NULL, &events, (void **)&source) >= 0) {
+        // 그리는 것은 choreographer 가 한다 — 여기서는 **막고** 이벤트만 기다린다.
+        // 0 을 주면 아무것도 안 막아 CPU 한 코어를 계속 문다(폰이 뜨겁고 배터리가 준다).
+        while (ALooper_pollOnce(-1, NULL, &events, (void **)&source) >= 0) {
             if (source) source->process(app, source);
             if (app->destroyRequested) return;
         }
-        if (g.needs_recreate) { g.needs_recreate = 0; recreateVulkan(app); continue; }
-        if (g.pace_phase == 1) {
-            // 이 단계부터는 루프가 직접 그리지 않는다 — vsync 콜백이 주기를 쥔다.
-            if (!g.chor_started) {
-                g.chor_started = 1;
-                AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, app);
-            }
-            continue;
-        }
-        drawFrame();
+        if (g.needs_recreate) { g.needs_recreate = 0; recreateVulkan(app); }
     }
 }

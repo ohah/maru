@@ -2144,6 +2144,11 @@ pub fn build(b: *std.Build) void {
         "2c3e C1 scoped decoder bridge Debug and ReleaseFast gates",
     );
     session_host_2c3e_c1_step.dependOn(session_host_2c3d_c3_3c_step);
+    const session_host_2c3e_c2_step = b.step(
+        "test-session-host-2c3e-c2",
+        "2c3e C2 bound RPC family Debug and ReleaseFast gates",
+    );
+    session_host_2c3e_c2_step.dependOn(session_host_2c3e_c1_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3079,6 +3084,32 @@ pub fn build(b: *std.Build) void {
             "2c3e C1 경계는",
             1,
         );
+        const event_2c3e_c2_runtime_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c2_step,
+            event_2c3e_c2_runtime_module,
+            "2c3e C2 제품 RPC family는",
+            12,
+        );
+        const event_2c3e_c2_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3e_c2_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c2_step,
+            event_2c3e_c2_boundary_module,
+            "2c3e C2 경계는",
+            1,
+        );
         const event_c3_3c_boundary_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_2c3d_c3_3c_boundary.zig"),
             .target = target,
@@ -3167,6 +3198,22 @@ pub fn build(b: *std.Build) void {
         run_control_c1_boundary_tests.setCwd(b.path("."));
         session_host_2c3c_c1_step.dependOn(&run_control_c1_boundary_tests.step);
         boundary_step.dependOn(&run_control_c1_boundary_tests.step);
+
+        // 새 decoder 경계도 전체 boundary 명령에서 빠지지 않게 각 최적화 모드로 다시 실행한다.
+        const run_event_2c3e_c1_boundary = b.addRunArtifact(addProjectTest(b, .{
+            .root_module = event_2c3e_c1_boundary_module,
+            .filters = &.{"2c3e C1 경계는"},
+        }));
+        run_event_2c3e_c1_boundary.addArg("--maru-expect-tests=1");
+        run_event_2c3e_c1_boundary.setCwd(b.path("."));
+        boundary_step.dependOn(&run_event_2c3e_c1_boundary.step);
+        const run_event_2c3e_c2_boundary = b.addRunArtifact(addProjectTest(b, .{
+            .root_module = event_2c3e_c2_boundary_module,
+            .filters = &.{"2c3e C2 경계는"},
+        }));
+        run_event_2c3e_c2_boundary.addArg("--maru-expect-tests=1");
+        run_event_2c3e_c2_boundary.setCwd(b.path("."));
+        boundary_step.dependOn(&run_event_2c3e_c2_boundary.step);
 
         const event_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

@@ -243,6 +243,38 @@ const RuntimeAttachment = union(enum) {
         };
     }
 
+    fn callDecoded(
+        self: *RuntimeAttachment,
+        client: *client_mod.Client,
+        request: generation_contract.RuntimeRequest,
+        legacy_method: []const u8,
+        legacy_params_json: ?[]const u8,
+        context: *anyopaque,
+        decoder: generation_contract.RpcDecoder,
+    ) client_mod.ClientError!generation_contract.RpcDecodeDisposition {
+        if (!generation_contract.runtimeRequestTagRawValid(@ptrCast(&request.tag)))
+            return error.ProtocolError;
+        const tag: generation_contract.RuntimeRequestTag = @enumFromInt(request.tag);
+        if (!std.mem.eql(u8, generation_contract.requestMethod(tag), legacy_method))
+            return error.ProtocolError;
+        return switch (self.*) {
+            .legacy => blk: {
+                const response = try client.call(legacy_method, legacy_params_json);
+                defer client.allocator.free(response);
+                const disposition = decoder(context, tag, response);
+                if (disposition == .protocol_failure)
+                    client.poison(.peer_contract_violation);
+                break :blk disposition;
+            },
+            .generation => |*value| generation_attachment_mod.executeRequestWithDecoderOwned(
+                value,
+                request,
+                context,
+                decoder,
+            ) catch |err| return mapGenerationDecodedError(err),
+        };
+    }
+
     fn hasBufferedControllerRevoke(
         self: *const RuntimeAttachment,
         client: *const client_mod.Client,
@@ -271,6 +303,24 @@ fn mapGenerationInputError(err: @import("generation_transport.zig").InputError) 
         error.Unauthorized => error.Unauthorized,
         error.ResourceExhausted => error.OutOfMemory,
         error.ConnectionClosed => error.ConnectionClosed,
+    };
+}
+
+fn mapGenerationDecodedError(err: @import("generation_transport.zig").Error) client_mod.ClientError {
+    return switch (err) {
+        error.AdminBusy => error.AdminBusy,
+        error.OutOfMemory => error.OutOfMemory,
+        error.ConnectionClosed => error.ConnectionClosed,
+        error.ProtocolError,
+        error.InvalidPreparedRpc,
+        error.MovedOrCopied,
+        error.DestinationOccupied,
+        error.IdentityExhausted,
+        error.InvalidTransport,
+        error.InvalidReceipt,
+        error.InvalidResponseDestination,
+        => error.ProtocolError,
+        else => |client_error| client_error,
     };
 }
 
@@ -1242,6 +1292,82 @@ pub const RemoteRuntime = struct {
         return self.attachment.callOrdered(self.client, method, params_json);
     }
 
+    const BoundRpcDecodeApply = *const fn (
+        runtime: *RemoteRuntime,
+        output: *anyopaque,
+        bytes: []const u8,
+    ) client_mod.ClientError!void;
+
+    const BoundRpcDecodeContext = struct {
+        runtime: *RemoteRuntime,
+        expected_tag: generation_contract.RuntimeRequestTag,
+        output: *anyopaque,
+        apply: BoundRpcDecodeApply,
+        decode_error: ?client_mod.ClientError = null,
+    };
+
+    fn decodeBoundRpcCallback(
+        raw_context: *anyopaque,
+        tag: generation_contract.RuntimeRequestTag,
+        bytes: []const u8,
+    ) generation_contract.RpcDecodeDisposition {
+        const context: *BoundRpcDecodeContext = @ptrCast(@alignCast(raw_context));
+        if (tag != context.expected_tag) {
+            context.decode_error = error.ProtocolError;
+            return .protocol_failure;
+        }
+        context.apply(context.runtime, context.output, bytes) catch |err| {
+            context.decode_error = err;
+            return if (err == error.ProtocolError) .protocol_failure else .reusable;
+        };
+        return .reusable;
+    }
+
+    fn callDecoded(
+        self: *RemoteRuntime,
+        request: generation_contract.RuntimeRequest,
+        legacy_method: []const u8,
+        legacy_params_json: ?[]const u8,
+        output: *anyopaque,
+        apply: BoundRpcDecodeApply,
+    ) client_mod.ClientError!void {
+        try self.flushQueuedInputBlocking();
+        return self.callDecodedAfterFlush(
+            request,
+            legacy_method,
+            legacy_params_json,
+            output,
+            apply,
+        );
+    }
+
+    fn callDecodedAfterFlush(
+        self: *RemoteRuntime,
+        request: generation_contract.RuntimeRequest,
+        legacy_method: []const u8,
+        legacy_params_json: ?[]const u8,
+        output: *anyopaque,
+        apply: BoundRpcDecodeApply,
+    ) client_mod.ClientError!void {
+        const tag: generation_contract.RuntimeRequestTag = @enumFromInt(request.tag);
+        var context: BoundRpcDecodeContext = .{
+            .runtime = self,
+            .expected_tag = tag,
+            .output = output,
+            .apply = apply,
+        };
+        const disposition = try self.attachment.callDecoded(
+            self.client,
+            request,
+            legacy_method,
+            legacy_params_json,
+            &context,
+            decodeBoundRpcCallback,
+        );
+        if (context.decode_error) |err| return err;
+        if (disposition != .reusable) return error.ProtocolError;
+    }
+
     fn discardQueuedMutations(self: *RemoteRuntime) void {
         self.direct_input.clearRetainingCapacity();
         self.direct_input_offset = 0;
@@ -1297,21 +1423,64 @@ pub const RemoteRuntime = struct {
             error.InvalidRequest => error.ResizeRejected,
             error.BufferTooSmall => error.OutOfMemory,
         };
-        const resp = try self.callOrdered(encoded.method, encoded.params);
-        defer self.allocator.free(resp);
-        const reply = decodeResizeReply(self.allocator, resp, self.resize_seq) catch |err| {
-            if (err == error.ProtocolError) self.client.poison(.peer_contract_violation);
-            return err;
+        var context: ResizeDecodeContext = .{
+            .runtime = self,
+            .client_sequence = self.resize_seq,
+        };
+        try self.flushQueuedInputBlocking();
+        const disposition = self.attachment.callDecoded(
+            self.client,
+            generation_contract.RuntimeRequest.resize(.{
+                .cols = cols,
+                .rows = rows,
+                .client_sequence = self.resize_seq,
+            }),
+            encoded.method,
+            encoded.params,
+            &context,
+            decodeResizeCallback,
+        ) catch |err| return err;
+        if (context.decode_error) |err| return err;
+        if (disposition != .reusable) return error.ProtocolError;
+    }
+
+    const ResizeDecodeContext = struct {
+        runtime: *RemoteRuntime,
+        client_sequence: u64,
+        decode_error: ?ResizeError = null,
+    };
+
+    fn decodeResizeCallback(
+        raw_context: *anyopaque,
+        tag: generation_contract.RuntimeRequestTag,
+        bytes: []const u8,
+    ) generation_contract.RpcDecodeDisposition {
+        const context: *ResizeDecodeContext = @ptrCast(@alignCast(raw_context));
+        if (tag != .resize) {
+            context.decode_error = error.ProtocolError;
+            return .protocol_failure;
+        }
+        const reply = decodeResizeReply(
+            context.runtime.allocator,
+            bytes,
+            context.client_sequence,
+        ) catch |err| {
+            context.decode_error = err;
+            return if (err == error.ProtocolError) .protocol_failure else .reusable;
         };
         switch (reply) {
             .stale => {},
             .applied => |applied| {
-                _ = try self.applyResizeFullState(
+                _ = context.runtime.applyResizeFullState(
                     .{ .cols = applied.cols, .rows = applied.rows },
                     applied.resize_generation,
-                );
+                ) catch |err| {
+                    context.decode_error = err;
+                    return if (err == error.ProtocolError) .protocol_failure else .reusable;
+                };
             },
         }
+        return .reusable;
     }
 
     /// 내 stream(§멀티 runtime demux)의 다음 화면 배치 하나를 소비해 원격 화면에 반영한다(§9/§10). **논블로킹** — 내 배치가
@@ -1818,9 +1987,18 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
-        const before = self.observation.revision;
-        const resp = try self.callOrdered("runtime.observation", params);
-        defer self.allocator.free(resp);
+        var before = self.observation.revision;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.observation(),
+            "runtime.observation",
+            params,
+            &before,
+            applyObservationResponse,
+        );
+    }
+
+    fn applyObservationResponse(self: *RemoteRuntime, raw_before: *anyopaque, resp: []const u8) client_mod.ClientError!void {
+        const before: *const u64 = @ptrCast(@alignCast(raw_before));
         var seed = runtime_metadata_wire.decodeObservationEnvelope(
             self.allocator,
             resp,
@@ -1840,7 +2018,7 @@ pub const RemoteRuntime = struct {
             },
         };
         const revision = dto.revision;
-        if (revision < before) {
+        if (revision < before.*) {
             self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
@@ -1848,7 +2026,7 @@ pub const RemoteRuntime = struct {
             self.client.poison(.peer_contract_violation);
             return err;
         };
-        if (revision > before and !changed) {
+        if (revision > before.* and !changed) {
             self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
@@ -1867,9 +2045,26 @@ pub const RemoteRuntime = struct {
         if (!self.client.runtime_selected_text_v1) return self.selectedTextFromProjection(span);
         var buf: [160]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.selected_text", params);
-        defer self.allocator.free(resp);
-        return self.decodeSelectedTextResponse(resp);
+        var output: ?[]u8 = null;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.selectedText(.{
+                .start_row = span.start.row,
+                .start_col = span.start.col,
+                .end_row = span.end.row,
+                .end_col = span.end.col,
+                .block = span.block,
+            }),
+            "runtime.selected_text",
+            params,
+            &output,
+            applySelectedTextResponse,
+        );
+        return output;
+    }
+
+    fn applySelectedTextResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *?[]u8 = @ptrCast(@alignCast(raw_output));
+        output.* = try runtime.decodeSelectedTextResponse(bytes);
     }
 
     fn decodeSelectedTextResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?[]u8 {
@@ -1913,9 +2108,20 @@ pub const RemoteRuntime = struct {
         if (!self.client.runtime_link_at_v1) return null;
         var buf: [160]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.attachment.streamId(), row, col, scopes }) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.link_at", params);
-        defer self.allocator.free(resp);
-        return self.decodeLinkAtResponse(resp);
+        var output: ?RemoteLink = null;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.linkAt(.{ .row = row, .col = col, .scopes = scopes }),
+            "runtime.link_at",
+            params,
+            &output,
+            applyLinkAtResponse,
+        );
+        return output;
+    }
+
+    fn applyLinkAtResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *?RemoteLink = @ptrCast(@alignCast(raw_output));
+        output.* = try runtime.decodeLinkAtResponse(bytes);
     }
 
     /// `runtime.link_at` success는 링크가 있으면 `{"text":"...","kind":N}`, 없으면 `{"text":""}`다.
@@ -1988,9 +2194,20 @@ pub const RemoteRuntime = struct {
         if (!self.client.runtime_clipboard_v1) return null;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.clipboard_write", params);
-        defer self.allocator.free(resp);
-        return self.decodeClipboardWriteResponse(resp);
+        var output: ?ClipboardWrite = null;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.clipboardWrite(),
+            "runtime.clipboard_write",
+            params,
+            &output,
+            applyClipboardWriteResponse,
+        );
+        return output;
+    }
+
+    fn applyClipboardWriteResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *?ClipboardWrite = @ptrCast(@alignCast(raw_output));
+        output.* = try runtime.decodeClipboardWriteResponse(bytes);
     }
 
     fn decodeClipboardWriteResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?ClipboardWrite {
@@ -2050,6 +2267,11 @@ pub const RemoteRuntime = struct {
     /// 유일한 신호라 별도 capability 비트를 두지 않는다(find 응답은 count/cur도 같은 관대한 파싱 규율이다).
     pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan, voff: ?u64 };
 
+    const FindDecodeOutput = struct {
+        spans: *std.ArrayList(terminal.SelectionSpan),
+        result: FindResult = .{ .count = 0, .cur = null, .voff = null },
+    };
+
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         try self.admitRuntimeOperation();
         if (scroll and !self.mutationAllowed()) return error.Unauthorized;
@@ -2063,12 +2285,28 @@ pub const RemoteRuntime = struct {
         }
         var buf: [640]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{}}}", .{ self.attachment.streamId(), hexbuf[0 .. qn * 2], cur_index, scroll }) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.find", params);
-        defer self.allocator.free(resp);
-        const count = client_mod.extractU64Field(resp, "\"count\":") orelse 0;
-        const cur = parseFirstSpan(resp, "\"cur\":[");
-        parseSpansInto(resp, out_spans, self.allocator);
-        return .{ .count = @intCast(count), .cur = cur, .voff = client_mod.extractU64Field(resp, "\"voff\":") };
+        const request = generation_contract.FindRequest.init(query[0..qn], cur_index, scroll) orelse
+            return error.ProtocolError;
+        var output: FindDecodeOutput = .{ .spans = out_spans };
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.find(request),
+            "runtime.find",
+            params,
+            &output,
+            applyFindResponse,
+        );
+        return output.result;
+    }
+
+    fn applyFindResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *FindDecodeOutput = @ptrCast(@alignCast(raw_output));
+        const count = client_mod.extractU64Field(bytes, "\"count\":") orelse 0;
+        output.result = .{
+            .count = @intCast(count),
+            .cur = parseFirstSpan(bytes, "\"cur\":["),
+            .voff = client_mod.extractU64Field(bytes, "\"voff\":"),
+        };
+        parseSpansInto(bytes, output.spans, runtime.allocator);
     }
 
     /// 단어/줄 선택(§6b-2): host가 콘텐츠를 아는 자기 core로 경계를 계산하게 하고(`selectWordAt`/`selectLineAt`) 결과 뷰포트
@@ -2079,15 +2317,35 @@ pub const RemoteRuntime = struct {
         if (!self.mutationAllowed()) return error.Unauthorized;
         var buf: [96]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.attachment.streamId(), op, row, col }) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.select_op", params);
-        defer self.allocator.free(resp);
-        if (std.mem.indexOf(u8, resp, "\"sel\":true") == null) return null; // 빈 선택(공백 셀 등).
-        const sr = client_mod.extractU64Field(resp, "\"sr\":") orelse return null;
-        const sc = client_mod.extractU64Field(resp, "\"sc\":") orelse return null;
-        const er = client_mod.extractU64Field(resp, "\"er\":") orelse return null;
-        const ec = client_mod.extractU64Field(resp, "\"ec\":") orelse return null;
-        const block = std.mem.indexOf(u8, resp, "\"block\":true") != null;
-        return .{ .start = .{ .row = @intCast(sr), .col = @intCast(sc) }, .end = .{ .row = @intCast(er), .col = @intCast(ec) }, .block = block };
+        const kind: generation_contract.SelectKind = if (std.mem.eql(u8, op, "word"))
+            .word
+        else if (std.mem.eql(u8, op, "line"))
+            .line
+        else
+            return error.ProtocolError;
+        var output: ?terminal.SelectionSpan = null;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.selectOp(.{ .kind = kind, .row = row, .col = col }),
+            "runtime.select_op",
+            params,
+            &output,
+            applySelectResponse,
+        );
+        return output;
+    }
+
+    fn applySelectResponse(_: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *?terminal.SelectionSpan = @ptrCast(@alignCast(raw_output));
+        if (std.mem.indexOf(u8, bytes, "\"sel\":true") == null) return;
+        const sr = client_mod.extractU64Field(bytes, "\"sr\":") orelse return;
+        const sc = client_mod.extractU64Field(bytes, "\"sc\":") orelse return;
+        const er = client_mod.extractU64Field(bytes, "\"er\":") orelse return;
+        const ec = client_mod.extractU64Field(bytes, "\"ec\":") orelse return;
+        output.* = .{
+            .start = .{ .row = @intCast(sr), .col = @intCast(sc) },
+            .end = .{ .row = @intCast(er), .col = @intCast(ec) },
+            .block = std.mem.indexOf(u8, bytes, "\"block\":true") != null,
+        };
     }
 
     /// host-authoritative core command를 strict bounded codec으로 보낸다. 구 host는 scroll 4종만 이해하므로 capability가
@@ -2098,8 +2356,14 @@ pub const RemoteRuntime = struct {
         if (!shouldSendCoreCommand(self.client.runtime_core_command_v1, command)) return;
         const params = core_command_wire.encodeParams(self.allocator, self.attachment.streamId(), command) catch return error.OutOfMemory;
         defer self.allocator.free(params);
-        const resp = try self.callOrdered("runtime.core_command", params);
-        self.allocator.free(resp);
+        var output: u8 = 0;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.coreCommand(runtime_pending_control.projectCoreCommand(command)),
+            "runtime.core_command",
+            params,
+            &output,
+            applyDiscardedResponse,
+        );
     }
 
     /// host-backed 마우스 리포트(§ 입력 패리티): 마우스 이벤트를 host로 보내 host core가 자기 mouse_tracking/format으로
@@ -2113,8 +2377,23 @@ pub const RemoteRuntime = struct {
             "{{\"stream_id\":{d},\"button\":{d},\"col\":{d},\"row\":{d},\"x_px\":{d},\"y_px\":{d},\"pressed\":{},\"motion\":{},\"mods\":{d}}}",
             .{ self.attachment.streamId(), m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods },
         ) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.report_mouse", params);
-        self.allocator.free(resp);
+        var output: u8 = 0;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.reportMouse(.{
+                .button = m.button,
+                .col = m.col,
+                .row = m.row,
+                .x_px = m.x_px,
+                .y_px = m.y_px,
+                .pressed = m.pressed,
+                .motion = m.motion,
+                .mods = m.mods,
+            }),
+            "runtime.report_mouse",
+            params,
+            &output,
+            applyDiscardedResponse,
+        );
     }
 
     /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
@@ -2130,10 +2409,23 @@ pub const RemoteRuntime = struct {
             &buf,
             self.attachment.streamId(),
         ) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.notification", params);
-        defer self.allocator.free(resp);
-        return self.decodeNotificationResponse(resp);
+        var output: ?Notification = null;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.notification(),
+            "runtime.notification",
+            params,
+            &output,
+            applyNotificationResponse,
+        );
+        return output;
     }
+
+    fn applyNotificationResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *?Notification = @ptrCast(@alignCast(raw_output));
+        output.* = try runtime.decodeNotificationResponse(bytes);
+    }
+
+    fn applyDiscardedResponse(_: *RemoteRuntime, _: *anyopaque, _: []const u8) client_mod.ClientError!void {}
 
     fn notificationParams(
         buf: []u8,
@@ -2446,13 +2738,19 @@ pub const RemoteRuntime = struct {
                 return;
             }
         };
-        const resp = self.client.call("runtime.terminate", params) catch |err| {
+        var output: u8 = 0;
+        self.callDecodedAfterFlush(
+            generation_contract.RuntimeRequest.terminate(),
+            "runtime.terminate",
+            params,
+            &output,
+            applyDiscardedResponse,
+        ) catch |err| {
             // cleanup request를 만들거나 응답을 추적할 메모리조차 없으면 shared connection을 닫아 host EOF 경로가
             // 모든 attachment/controller lease를 회수하게 한다.
             if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
             return;
         };
-        self.allocator.free(resp);
     }
 
     /// detach가 끝내 실패하면 host에 controller lease가 남는다. 그 결과는 조용하지 않다 — 다음 attach가
@@ -2478,7 +2776,14 @@ pub const RemoteRuntime = struct {
             logDetachIncomplete("flush", err);
             return;
         };
-        const resp = self.client.call("runtime.detach", params) catch |err| {
+        var output: u8 = 0;
+        self.callDecodedAfterFlush(
+            generation_contract.RuntimeRequest.detach(),
+            "runtime.detach",
+            params,
+            &output,
+            applyDiscardedResponse,
+        ) catch |err| {
             if (err == error.OutOfMemory) {
                 self.client.poison(.local_resource_exhausted);
             } else if (err == error.AdminBusy) {
@@ -2489,7 +2794,6 @@ pub const RemoteRuntime = struct {
             logDetachIncomplete("detach", err);
             return;
         };
-        self.allocator.free(resp);
     }
 
     fn failCloseTeardownFlush(self: *RemoteRuntime, err: client_mod.ClientError) void {
@@ -6075,6 +6379,146 @@ fn deinitGenerationAttachmentFixture(
         generation_attachment_mod.DeinitOutcome.cleaned,
         attachment.tryDeinit(adapter),
     ) catch @panic("generation attachment fixture cleanup failed");
+}
+
+fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    const Peer = struct {
+        fn run(fd: c.fd_t, expected_method: []const u8, response_payload: []const u8) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            if (std.mem.indexOf(u8, request.payload, expected_method) == null) return;
+            const response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = request.header.request_id },
+                response_payload,
+            ) catch return;
+            defer std.heap.page_allocator.free(response);
+            socket_server.writeAll(fd, response) catch return;
+        }
+    };
+    const response_payload: []const u8 = switch (tag) {
+        .resize => "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":1,\"changed\":true}}",
+        .observation => "{\"result\":{\"metadata_revision\":1,\"metadata\":{\"cwd\":\"/tmp\",\"window_title\":\"c2\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null,\"processes\":[]}}}",
+        .selected_text => "{\"text\":\"x\"}",
+        .link_at => "{\"text\":\"\"}",
+        .clipboard_write => "{\"b64\":\"\",\"too_large\":0}",
+        .find => "{\"count\":0,\"spans\":[]}",
+        .select_op => "{\"sel\":false}",
+        .notification => "{\"title\":\"\",\"body\":\"\"}",
+        .core_command, .report_mouse, .terminate, .detach => "{}",
+        .spawn_full, .attach_controller => unreachable,
+    };
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{
+        fds[1],
+        generation_contract.requestMethod(tag),
+        response_payload,
+    });
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3E_C200 + @as(u128, @intFromEnum(tag)),
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
+    defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+    runtime.resize_seq = 0;
+    runtime.pump_ended = false;
+    runtime.client.runtime_selected_text_v1 = true;
+    runtime.client.runtime_link_at_v1 = true;
+    runtime.client.runtime_clipboard_v1 = true;
+    runtime.client.runtime_core_command_v1 = true;
+    runtime.client.notification_stream_auth_v1 = true;
+    switch (tag) {
+        .resize => try runtime.resize(80, 24),
+        .observation => try runtime.refreshObservation(),
+        .selected_text => if (try runtime.selectedText(.{
+            .start = .{ .row = 0, .col = 0 },
+            .end = .{ .row = 0, .col = 1 },
+            .block = false,
+        })) |text| runtime.allocator.free(text),
+        .link_at => if (try runtime.linkAt(0, 0, 1)) |link| runtime.allocator.free(link.text),
+        .clipboard_write => if (try runtime.clipboardWrite()) |value| if (value.text) |text| runtime.allocator.free(text),
+        .find => {
+            var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
+            defer spans.deinit(runtime.allocator);
+            _ = try runtime.find("x", 0, false, &spans);
+        },
+        .select_op => _ = try runtime.selectContentAware("word", 0, 0),
+        .core_command => try runtime.sendCoreCommandBlocking(.scroll_to_bottom),
+        .report_mouse => try runtime.sendMouseReport(.{
+            .button = 0,
+            .col = 0,
+            .row = 0,
+            .x_px = 0,
+            .y_px = 0,
+            .pressed = true,
+            .motion = false,
+            .mods = 0,
+        }),
+        .notification => if (try runtime.takeNotification()) |value| value.deinit(runtime.allocator),
+        .terminate => runtime.terminate(),
+        .detach => {
+            runtime.admitDestructiveRuntimeOperation();
+            runtime.detachBestEffort();
+        },
+        .spawn_full, .attach_controller => unreachable,
+    }
+    peer.join();
+    try testing.expect(!adapter.logicalClient().unusable);
+}
+
+test "2c3e C2 제품 RPC family는 resize를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.resize);
+}
+
+test "2c3e C2 제품 RPC family는 observation을 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.observation);
+}
+
+test "2c3e C2 제품 RPC family는 selected text를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.selected_text);
+}
+
+test "2c3e C2 제품 RPC family는 link at을 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.link_at);
+}
+
+test "2c3e C2 제품 RPC family는 clipboard write를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.clipboard_write);
+}
+
+test "2c3e C2 제품 RPC family는 find를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.find);
+}
+
+test "2c3e C2 제품 RPC family는 select op를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.select_op);
+}
+
+test "2c3e C2 제품 RPC family는 core command를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.core_command);
+}
+
+test "2c3e C2 제품 RPC family는 report mouse를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.report_mouse);
+}
+
+test "2c3e C2 제품 RPC family는 notification을 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.notification);
+}
+
+test "2c3e C2 제품 RPC family는 terminate를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.terminate);
+}
+
+test "2c3e C2 제품 RPC family는 detach를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.detach);
 }
 
 const PreparationDtoDriftAllocator = struct {

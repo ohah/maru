@@ -132,8 +132,10 @@ test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
         "    pub fn sendCoreCommandBlocking(",
         "    pub fn sendMouseReport(",
     ) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), count(response_core, "self.callOrdered(\"runtime.core_command\""));
+    try std.testing.expectEqual(@as(usize, 0), count(response_core, "self.callOrdered(\"runtime.core_command\""));
     try std.testing.expectEqual(@as(usize, 1), count(response_core, "core_command_wire.encodeParams("));
+    try std.testing.expectEqual(@as(usize, 1), count(response_core, "RuntimeRequest.coreCommand("));
+    try std.testing.expectEqual(@as(usize, 1), count(response_core, "self.callDecoded("));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -3070,8 +3070,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    RpcError!RpcDecodeDisposition`이고 decoder는
    `fn (*anyopaque, RuntimeRequestTag, []const u8) RpcDecodeDisposition`이다. `RpcDecodeDisposition`은
    `reusable|protocol_failure` 두 값뿐이며 pointer, allocator, response owner, borrow/finish receipt를 포함하지 않는다.
-   callback의 byte slice는 호출 중에만 유효하고 저장·반환할 수 없다. C1 제품 caller는 0이며 C2의
-   `RemoteRuntime` adapter만 exact caller가 된다.
+   callback의 byte slice는 호출 중에만 유효하고 저장·반환할 수 없다. C1 단독 gate에서는 제품 caller가 0이고,
+   C2가 연결된 현재 source inventory에서는 attachment-owned `executeRequestWithDecoderOwned` 하나만 exact caller다.
 
    C1의 canonical 순서는 queued mutation과 무관한 이미 prepared request에 대해 execute → accepted response owner
    publication → final-address borrow receipt publication → decoder callback exact 1회 → callback 복귀 뒤 response와
@@ -3094,13 +3094,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    response slice 반환 0, decoder bridge의 C1 제품 caller 0, old raw `callOwned|callGenerationRpc` 제품 caller baseline,
    allocator·Client·RPC owner type escape 0을 고정한다.
 
-   C2는 `RemoteRuntime`의 attach를 제외한 bound request family를 typed `RuntimeRequest`와 C1 decoder callback으로
-   전환한다. decoder와 ordered input 정책은 계속 `RemoteRuntime` 하나만 소유하고 transport/ClientSlot은 JSON schema를
+   C2에서 `RemoteRuntime`의 attach를 제외한 bound request family는 typed `RuntimeRequest`와 C1 decoder callback을
+   사용한다. decoder와 ordered input 정책은 계속 `RemoteRuntime` 하나만 소유하고 transport/ClientSlot은 JSON schema를
    해석하지 않는다. family는 resize, observation, selected_text, link_at, clipboard_write, find, select_op,
    core_command, report_mouse, notification, terminate, detach의 exact 12개다. attach는 기존 one-shot
    `ExecutedResponse` owner를 유지하고 C2 count에 섞지 않는다. 각 family는 legacy와 generation의 typed 결과,
    poison reason, retained input/control ordering, payload free count가 같아야 하며 generation arm의 raw method/encoded
-   JSON/`callOrdered` 직접 호출은 0이 된다. C2가 green이 되기 전에는 raw compatibility wrapper를 제거하지 않는다.
+   JSON/`callOrdered` 직접 호출은 0이다. focused gate는 Debug·ReleaseFast마다 실제 제품 family 12개와 boundary 1개를
+   exact-count한다. raw compatibility wrapper는 C3 cadence parity가 끝날 때까지 resync baseline을 위해 남긴다.
 
    C3는 actual socket에서 immediate EOF, unread response 앞의 revoke/event, response 뒤 queued event, malformed/unknown
    frame cadence를 legacy와 generation으로 같은 fixture에 실행한다. RX arbitration은 unread event/revoke를 먼저

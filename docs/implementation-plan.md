@@ -953,8 +953,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       병합한다.** C1은 typed `RuntimeRequest` execute 뒤 transport-owned inline response를 final-address borrow로
       잠시 빌리고 `RpcDecodeDisposition.reusable|protocol_failure`만 돌려받는다. raw bytes·owner·receipt는 callback
       밖으로 반환하지 않으며 accepted callback 뒤 exact free와 reusable rearm 또는 protocol terminal을 완료한다.
-      C2는 attach를 제외한 exact 12 family를 이 bridge로 옮기고 `RemoteRuntime`을 decoder/ordered-input SSOT로
-      유지한다. C3는 immediate EOF, unread revoke/event 우선, response 뒤 event와 malformed/unknown cadence를 실제
+      C2는 attach를 제외한 exact 12 family를 이 bridge로 옮겼고 `RemoteRuntime`을 decoder/ordered-input SSOT로
+      유지한다. Debug·ReleaseFast에서 실제 제품 family 12개와 source boundary 1개가 이를 고정한다. C3는 immediate EOF,
+      unread revoke/event 우선, response 뒤 event와 malformed/unknown cadence를 실제
       socket의 legacy/generation 공통 oracle로 닫는다. 세부 API·count·proof-loss와 source boundary는
       persistent-session-host의 2c3e 계약을 단일 출처로 따른다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는

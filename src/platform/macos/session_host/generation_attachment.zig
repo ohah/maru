@@ -854,6 +854,36 @@ pub const GenerationAttachment = struct {
     }
 };
 
+/// C2 제품 경로는 attachment가 request 준비와 decoder 실행을 한 owner stack에서 끝내게 한다.
+/// 준비 뒤 실패한 request만 여기서 회수하며, accepted callback 뒤 proof-loss는 복구를 추측하지 않는다.
+pub fn executeRequestWithDecoderOwned(
+    attachment: *GenerationAttachment,
+    request: contract.RuntimeRequest,
+    context: *anyopaque,
+    decoder: contract.RpcDecoder,
+) generation_transport_mod.Error!contract.RpcDecodeDisposition {
+    if (!attachment.valid() or attachment.lifecycle != .attached)
+        return error.InvalidTransport;
+    const receipt = attachment.transport.prepareRequest(request) catch |err| return switch (err) {
+        error.Busy => error.AdminBusy,
+        error.InvalidOwner => error.MovedOrCopied,
+        error.Unauthorized, error.ProtocolError => error.InvalidReceipt,
+        error.ResourceExhausted => error.OutOfMemory,
+        error.IdentityExhausted => error.IdentityExhausted,
+        error.ConnectionClosed => error.ConnectionClosed,
+    };
+    return generation_transport_mod.executePreparedRequestWithDecoderOwned(
+        &attachment.transport,
+        @intFromPtr(attachment),
+        receipt,
+        context,
+        decoder,
+    ) catch |err| {
+        attachment.transport.abortPreparedRequest(receipt) catch {};
+        return err;
+    };
+}
+
 fn rawLifecycleValid(value: *const Lifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
     return raw <= @intFromEnum(Lifecycle.terminal);

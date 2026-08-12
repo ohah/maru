@@ -708,7 +708,16 @@ pub export fn maru_mobile_icon_count() u32 {
 /// 아이콘 coverage 를 채우고, 실제로 잉크가 있는 슬롯 수를 돌려준다(0이면 자산 이식 실패).
 pub export fn maru_mobile_icon_build() u32 {
     @memset(&icon_pixels, 0);
-    const cps = [icon_slots]u32{ 0xF0001, 0xF0002, 0xF0003, 0xF0004, 0xF0005, 0xF0006 };
+    // **이름으로 부른다.** PUA codepoint 리터럴은 경계 테스트가 막는다
+    // (docs/chrome-strategy.md §9.7) — 자산이 옮겨 가면 리터럴만 조용히 어긋난다.
+    const cps = [icon_slots]u32{
+        maru.icons.codepoint(.git_branch),
+        maru.icons.codepoint(.gear),
+        maru.icons.codepoint(.plus),
+        maru.icons.codepoint(.search),
+        maru.icons.codepoint(.bell),
+        maru.icons.codepoint(.sidebar_collapse),
+    };
     var filled: u32 = 0;
     for (cps, 0..) |cp, i| {
         const stride = icon_slot_px * 4;

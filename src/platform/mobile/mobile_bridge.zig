@@ -196,11 +196,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
             if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
             const glyph = atlasCell(cell.codepoint) orelse continue;
-            if (quad_count == quad_buf.len) {
-                // 조용히 자르면 남은 행과 아이콘 줄이 통째로 사라진 채 화면만 이상해진다.
-                setLastError("quad_buffer_full");
-                return;
-            }
+            if (!reserveQuad()) return;
             const rgb = cellRgb(cell.style, tk);
             // 진행 폭은 코어가 정한 셀 폭을 따른다 — 한글이 2셀이라는 판정이 코어 것이다.
             const x = @as(i32, @intFromFloat(rect.x)) + @as(i32, col) * @divTrunc(cw, 2);
@@ -243,8 +239,18 @@ fn themeColors() tokens.ThemeColors {
     };
 }
 
+/// quad 자리를 하나 잡는다. **넘치면 알린다** — 조용히 자르면 화면 일부가 사라진 채
+/// 아무 신호도 없다(본문만 알리고 chrome·아이콘은 조용하던 것을 한곳으로 모았다).
+fn reserveQuad() bool {
+    if (quad_count == quad_buf.len) {
+        setLastError("quad_buffer_full");
+        return false;
+    }
+    return true;
+}
+
 fn push(rect: draw.Rect, rgb: anytype, alpha: u8, radius: u16, kind: u32) void {
-    if (quad_count == quad_buf.len) return;
+    if (!reserveQuad()) return;
     quad_buf[quad_count] = .{
         .x = @floatFromInt(rect.x),
         .y = @floatFromInt(rect.y),
@@ -376,7 +382,7 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
             @divTrunc(draw_w, 2);
         if (cp != ' ') {
             if (cell) |c| {
-                if (quad_count < quad_buf.len) {
+                if (reserveQuad()) {
                     quad_buf[quad_count] = .{
                         .x = @floatFromInt(pen),
                         .y = @floatFromInt(y0),
@@ -544,7 +550,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     const icon_step: i32 = 26;
     const icon_x0: i32 = @as(i32, @intCast(width)) - icon_step * 6 - 12;
     for (0..6) |i| {
-        if (quad_count == quad_buf.len) break;
+        if (!reserveQuad()) break;
         const rgb = tk.get(if (i == 0) .accent_bar else .surface_fg);
         quad_buf[quad_count] = .{
             .x = @floatFromInt(icon_x0 + icon_step * @as(i32, @intCast(i))),

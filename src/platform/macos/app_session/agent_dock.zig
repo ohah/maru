@@ -37,6 +37,7 @@ const agent_ops = @import("agent.zig");
 const tab_ops = @import("tab.zig");
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
+const git_ops = @import("git.zig"); // 범위 칩의 cwd 해석을 소스 컨트롤·탐색기·사이드바와 공유한다
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const dock_view_bar = app_session_mod.dock_view_bar;
 const smokeProbeVisibleRect = AppSession.smokeProbeVisibleRect;
@@ -414,9 +415,32 @@ pub fn invalidateAgentSessionArchiveScopeRequest(self: *AppSession) void {
     if (self.agent_session_archive_scope_request_id == 0) self.agent_session_archive_scope_request_id = 1;
 }
 
-/// Capture only the current in-memory observation on the main actor.  The
-/// backend owns canonicalization and the `.git` ancestor walk, so neither
-/// scope selection nor a later key/frame path can block on filesystem I/O.
+/// cwd 해석은 **소스 컨트롤 뷰·파일 탐색기·사이드바와 같은 지점**(`git_ops.termCwd`)을 쓴다 — 규칙은
+/// docs/editor-surface-dock.md §3.5가 단일 출처이고 요약하면 OSC 7 → 커널 조회 2단이다. 여기만 관측을
+/// 직독하던 동안에는, 셸이 OSC 7을 안 보내는 Term에서 `현재 작업공간`·`현재 프로젝트` 칩이 **비활성으로
+/// 죽었다**. 셸 통합이 없는 bash/fish는 상시, 그리고 이 도크에서 `이어하기`로 연 Term은 그 수명 내내
+/// 그렇다 — 방금 이어한 세션의 프로젝트로 목록을 좁히려는 바로 그 순간 칩이 꺼지는 것이 옛 동작이었다.
+///
+/// **`.git` ancestor walk는 여전히 backend가 소유한다.** 이 자리는 canonicalization도 walk도 하지 않는다.
+/// 원래 주석이 "in-memory observation만"이라고 못 박은 것은 그 walk를 main actor에서 막으려는 것이었는데,
+/// 커널 cwd 조회는 그 부류가 아니다.
+///
+/// **이 함수는 프레임 경로가 아니다.** tick의 `refreshAgentSessionArchiveProjectScopeForFocus`는 활성
+/// surface id가 바뀔 때만 여기까지 오고(그 전은 전부 필드 읽기), 나머지 호출자는 도크 진입과 칩 클릭이다.
+/// 즉 도는 빈도가 focus 이동·view 전환 수준이며, 그마저도 실측 **약 9 µs**다(2026-08-12, 프로세스 848개인
+/// 머신: `proc_listpgrppids` 8.65 µs + `proc_pidinfo` 0.78 µs). 비교 대상인 `.git` walk는 경로 구성요소마다
+/// `access(2)`를 쓰는 자릿수가 다른 비용이다. 게다가 GUI tick이 같은 Term의 Term별 0.5초 캐시
+/// (`term.rt.proc_cwd_*`)를 이미 데워 두므로 대개 syscall이 0이다 — 이 함수는 그 캐시를 공유한다.
+///
+/// (비용의 92%인 `proc_listpgrppids`는 **전체 프로세스 테이블 스캔**이다 — 없는 pgid도 8.65 µs로
+/// `proc_listpids(ALL_PIDS)`와 같아 그룹 크기가 아니라 시스템 프로세스 수에 비례한다. 캐시가 막는 것이
+/// 정확히 그 스캔이다.)
+///
+/// **원격 Term은 이제 여기서 끊긴다.** `termCwd`가 원격에 null을 내기 때문인데, 이것은 부수 효과가 아니라
+/// 고쳐야 할 것이었다: 옛 경로는 원격 cwd를 그대로 backend에 넘겼고, `canonicalDirectory`는 그 경로를
+/// **로컬 파일시스템에 대고** `realPath`+`openDir` 한다. 로컬에 같은 경로가 우연히 있으면 그 **로컬**
+/// 디렉터리가 워크스페이스 루트로 서서, 원격 세션인데 로컬 아카이브를 "이 작업공간 것"으로 거른다
+/// (docs/ssh-integration.md §9.4가 링크 감지에서 막은 것과 같은 함정).
 pub fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?AgentSessionArchiveScope) void {
     if (requested) |scope| switch (scope) {
         .workspace => self.agent_session_archive_workspace_scope_requested = true,
@@ -424,8 +448,8 @@ pub fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?Agent
         .all => unreachable,
     };
     const term = tab_ops.activeTab(self).activeTerm();
-    term_ops.refreshTermObservation(self, term, false, false);
-    const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse "";
     if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) {
         const had_observed_cwd = self.agent_session_archive_scope_observed_cwd != null;
         clearAgentSessionArchiveScopeObservedCwd(self);

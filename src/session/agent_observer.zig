@@ -99,6 +99,20 @@ const CodepointRange = struct { lo: u21, hi: u21 };
 /// 개별 프레임을 열거하지 않고 블록 범위로 판정해 프레임 변경에 견디게 한다.
 const braille_block = CodepointRange{ .lo = 0x2800, .hi = 0x28FF };
 
+/// 반원 스피너 블록(◐◓◑◒ = U+25D0~U+25D3). **claude 2.1.228 실측**: running OSC 타이틀 선두가 `◐`(U+25D0)·
+/// `◑`(U+25D1)를 교대로 쓴다(0.35초 간격 14회 표본에서 두 프레임만 관측 — `maru sessions list`로 실행 중 세션의
+/// 타이틀을 직접 읽었다). 위 브라유 범위와 **교집합이 0**이라, braille만 보던 `working_title`이 통째로 불발하고
+/// composer의 `❯`가 `live_prompt`(idle)로 이겨 **작업 중 세션이 "대기중"으로 표시됐다**(사용자 보고 2026-08-12).
+///
+/// **브라유를 지우지 않고 둘 다 인정한다**(사용자 결정): 어느 버전에서 계열이 바뀌었는지 특정하지 못했고
+/// (2.1.226·227·228 바이너리 모두 두 문자를 평문으로 품고 있어 평문 검색으로는 가려지지 않는다), 구버전으로
+/// 롤백하거나 다른 provider가 브라유를 쓰는 경우 그쪽이 다시 깨진다. 관측된 두 계열을 함께 두는 것이
+/// "프레임 변경에 견딘다"는 위 규율의 연장이다. 관측되지 않은 계열은 넣지 않는다.
+///
+/// codex는 **건드리지 않았다** — 같은 취약성이 있지만 codex 타이틀은 이 보고 시점에도 정상 판정됐고(사용자 확인),
+/// 실측 없이 범위를 넓히면 근거 없는 데이터가 된다(docs/agent-session.md «실측 신호 기록»).
+const half_circle_block = CodepointRange{ .lo = 0x25D0, .hi = 0x25D3 };
+
 const claude_rules = [_]Rule{
     // `any`의 선택지는 **선택지 줄의 실측 모양**(`❯ 1. Yes…`)을 쓴다. 맨 단어 `yes`는 화면 어디에나 있어서, 위쪽 산문의
     // `Do you want to proceed?`와 아래 composer에 사용자가 친 `yes …`가 조합돼 거짓 blocked를 만들었다(코드 리뷰에서
@@ -138,7 +152,7 @@ const claude_rules = [_]Rule{
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     // 작업 중에도 composer가 열려 있어 live_prompt와 동시에 매치되므로 idle보다 우선한다(실측).
-    .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
+    .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{ braille_block, half_circle_block }, .visible_running = true },
     // 실행 footer도 상시 chrome이라 거리 게이트를 걸지 않는다. 사용자 statusLine이 여러 줄이거나 입력이 여러 행이면
     // footer가 스스로 위로 밀려 근거가 사라지고, 그 화면에는 idle 근거도 없어 판정이 폴백으로 떨어진다(실측).
     //
@@ -783,6 +797,25 @@ test "claude manifest prioritizes a visible blocker over working text" {
 test "claude prompt and OSC progress report visible idle" {
     try std.testing.expectEqual(State.idle, detect(.claude, .{ .screen = "────────────────\n❯ " }).state);
     try std.testing.expectEqual(State.idle, detect(.claude, .{ .osc_progress = "4;0" }).state);
+}
+
+// [사용자 보고 2026-08-12] "클로드 동작 표시(파형)가 사라졌다 — 알림은 정상". 원인은 claude가 running OSC 타이틀의
+// 스피너 계열을 **브라유에서 반원으로** 바꾼 것이다(2.1.228 실측 `◐`·`◑`). `working_title`이 브라유만 보고 있어
+// running 근거가 통째로 사라지고, composer의 `❯`가 `live_prompt`(idle)로 이겨 **작업 중 세션이 "대기중"**이 됐다.
+// 파형 문자열은 `.running`에서만 생성되므로 글리프 자체가 안 그려졌다(색 문제가 아니었다).
+//
+// 이 판정자는 **두 계열을 함께** 고정한다 — 한쪽만 두면 같은 사고가 반대 방향으로 재발한다(구버전 롤백·다른 provider).
+// composer가 열린 화면을 함께 주는 것이 요점이다: 그 조합이 실제 화면이고, running 근거가 없으면 idle이 이긴다.
+test "claude running title accepts both braille and half-circle spinner families (2.1.218 · 2.1.228 실측)" {
+    const composer_open = "────────────────\n❯ ";
+    // 2.1.228 실측 프레임 — 이것이 idle로 판정되던 회귀.
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "◐ 탐색기 에러 모달 텍스트 확인", .screen = composer_open }).state);
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "◑ 무언가 하는 중", .screen = composer_open }).state);
+    // 2.1.218 실측 프레임 — 넓히면서 잃지 않았음을 함께 고정한다.
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "\u{2810} 무언가 하는 중", .screen = composer_open }).state);
+    try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_title = "\u{2802} 무언가 하는 중", .screen = composer_open }).state);
+    // idle 마커(`✳`)는 그대로 idle이어야 한다 — 넓힌 범위가 idle 타이틀을 삼키면 "항상 running"이 된다.
+    try std.testing.expectEqual(State.idle, detect(.claude, .{ .osc_title = "\u{2733} 대기 중 요약", .screen = composer_open }).state);
 }
 
 test "codex working title and action-required title are distinct" {

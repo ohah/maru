@@ -490,7 +490,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         first_line,
         &gutter_rows,
     );
-    const gw = try editor_view.gutter.build(.{
+    const gw = editor_view.gutter.build(.{
         .layout = layout,
         .rows = grows,
         .cell_w_px = cell_w_px,

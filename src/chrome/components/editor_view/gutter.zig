@@ -55,28 +55,47 @@ pub const Written = struct {
     ops: usize,
     bytes: usize,
     runs: usize,
+    /// 저장소가 모자라 **번호를 못 그린 줄 수**. 절단은 실패가 아니지만 조용해서도 안 된다 —
+    /// 번호가 빈 줄은 화면에서 "랩으로 이어진 행"과 구분되지 않기 때문이다(§4).
+    dropped_rows: usize = 0,
 };
 
 /// gutter draw op을 `out`에 채우고 각 저장소에서 쓴 양을 돌려준다.
 ///
-/// **할당하지 않는다.** 호출자가 준 저장소만 쓰며, 모자라면 `error.OutOfSpace`로 **fail-close**한다 —
-/// 조용히 잘라 내면 아래쪽 줄 번호가 사라진 채 캡처가 통과한다.
+/// **할당하지 않는다.** 호출자가 준 저장소만 쓰며, **모자라면 거기까지만 그린다.**
+///
+/// 초판은 `error.OutOfSpace`로 fail-close했다 — "조용히 잘라 내면 아래쪽 줄 번호가 사라진 채
+/// 캡처가 통과한다"는 이유였다. 그런데 호출자가 이 에러를 프레임 전체의 실패로 다루므로 **번호 몇
+/// 개가 아니라 편집기가 통째로 사라진다**(#2086이 `content`에서 고친 것과 같은 결함). 본문이
+/// 먼저 그려지는 순서(§4 — 배치를 본문이 정한다)에서는 본문이 op을 다 쓰면 여기에 0이 남을 수
+/// 있어, 적대적 검증이 실제로 그 상태를 재현했다.
+///
+/// 조용해지지 않도록 `Written.dropped_rows`로 **몇 줄을 못 그렸는지 알린다.**
 ///
 /// 줄 번호는 **우측 정렬**이다(Monaco와 같다). 자릿수가 다른 줄이 좌측 정렬되면 본문과의 간격이
 /// 줄마다 달라져 읽기 흐름이 끊긴다.
-pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run) !Written {
+pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run) Written {
     if (props.layout.line_numbers.isEmpty()) return .{ .ops = 0, .bytes = 0, .runs = 0 };
 
     var op_count: usize = 0;
     var scratch_used: usize = 0;
     var run_used: usize = 0;
 
+    var dropped: usize = 0;
     for (props.rows) |row| {
         const number = row.number orelse continue; // 랩 이어짐 행은 번호가 없다
 
-        if (scratch_used + max_digits > text_scratch.len) return error.OutOfSpace;
-        const text = std.fmt.bufPrint(text_scratch[scratch_used..], "{d}", .{number}) catch
-            return error.OutOfSpace;
+        if (scratch_used + max_digits > text_scratch.len or
+            run_used >= runs.len or
+            op_count >= out.len)
+        {
+            dropped += 1;
+            continue;
+        }
+        const text = std.fmt.bufPrint(text_scratch[scratch_used..], "{d}", .{number}) catch {
+            dropped += 1;
+            continue;
+        };
         scratch_used += text.len;
 
         // 우측 정렬: 영역 오른쪽 끝에서 글자 수만큼 왼쪽으로 민다.
@@ -89,12 +108,10 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 
         // 문자열 하나로 낸다. 백엔드가 `cell_w_px`를 보고 **글자마다 셀 인덱스를 세어** 놓으므로
         // (`platform/macos/chrome/system_text.zig`) 자리마다 op을 쪼갤 필요가 없다.
-        if (run_used >= runs.len) return error.OutOfSpace;
         runs[run_used] = .{ .text = text };
         const run_slice = runs[run_used .. run_used + 1];
         run_used += 1;
 
-        if (op_count >= out.len) return error.OutOfSpace;
         out[op_count] = .{ .text = .{
             .origin = .{
                 .x = props.origin_px.x + @as(i32, col) * @as(i32, props.cell_w_px),
@@ -110,7 +127,7 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
         op_count += 1;
     }
 
-    return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used };
+    return .{ .ops = op_count, .bytes = scratch_used, .runs = run_used, .dropped_rows = dropped };
 }
 
 /// 이 행 수·최대 줄 번호로 그릴 때 **필요한 저장소 상한**. 호출자가 gutter 몫을 미리 떼어 둘 때 쓴다.
@@ -208,7 +225,7 @@ test "scratchNeeded: 실제 자릿수만큼만 요구한다 — max_digits로 �
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
     try testing.expect(w.bytes <= scratchNeeded(rows.len, 100));
 }
 
@@ -222,7 +239,7 @@ test "줄 번호는 우측 정렬된다 — 자릿수가 달라도 본문과의 
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
 
     try testing.expectEqual(@as(usize, 2), w.ops);
 
@@ -244,7 +261,7 @@ test "행 간격은 셀 높이를 따른다 — 본문 줄과 1:1로 정렬돼�
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs);
 
     try testing.expectEqual(@as(i32, 0), ops[0].text.origin.y);
     try testing.expectEqual(@as(i32, 16), ops[1].text.origin.y);
@@ -260,7 +277,7 @@ test "뷰 원점이 옮겨지면 gutter 전체가 함께 옮겨진다" {
     var runs: [4]draw.Run = undefined;
     var props = testProps(layout, &rows);
     props.origin_px = .{ .x = 100, .y = 50 };
-    _ = try build(props, &ops, &scratch, &runs);
+    _ = build(props, &ops, &scratch, &runs);
 
     try testing.expectEqual(@as(i32, 100 + 5 * 8), ops[0].text.origin.x);
     try testing.expectEqual(@as(i32, 50), ops[0].text.origin.y);
@@ -277,7 +294,7 @@ test "랩으로 이어진 행은 번호를 그리지 않는다 — 자리만 차
     var ops: [8]draw.Op = undefined;
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
 
     // 행은 셋인데 op은 둘이다.
     try testing.expectEqual(@as(usize, 2), w.ops);
@@ -296,12 +313,12 @@ test "줄 번호를 끄면 아무것도 그리지 않는다" {
     var ops: [4]draw.Op = undefined;
     var scratch: [32]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    const w = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
     try testing.expectEqual(@as(usize, 0), w.ops);
     try testing.expectEqual(@as(usize, 0), w.bytes);
 }
 
-test "저장소가 모자라면 조용히 자르지 않고 실패한다" {
+test "저장소가 모자라면 거기까지만 그리고 못 그린 줄 수를 알린다" {
     const layout = geometry.compute(80, 10, .{});
     const rows = [_]Row{
         .{ .number = 1, .visual_row = 0 },
@@ -312,7 +329,38 @@ test "저장소가 모자라면 조용히 자르지 않고 실패한다" {
     var scratch: [64]u8 = undefined;
     var runs: [8]draw.Run = undefined;
 
-    try testing.expectError(error.OutOfSpace, build(testProps(layout, &rows), &ops, &scratch, &runs));
+    // **실패하지 않는다.** 초판은 `error.OutOfSpace`를 올렸는데, 호출자가 그것을 프레임 전체의
+    // 실패로 다루므로 **번호 몇 개가 아니라 편집기가 통째로 사라졌다**(#2086이 `content`에서 고친
+    // 것과 같은 결함). 본문이 먼저 그려지는 순서에서는 본문이 op을 다 쓰면 여기에 0이 남을 수 있어
+    // 실제로 일어난다 — 적대적 검증이 재현했다.
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
+    try testing.expectEqual(@as(usize, 1), w.ops); // 담을 수 있는 만큼은 그렸다
+    try testing.expectEqual(@as(usize, 1), w.dropped_rows); // 그리고 못 그린 줄을 알린다
+}
+
+test "op·run·문자 저장소 어느 쪽이 모자라도 죽지 않는다" {
+    const layout = geometry.compute(80, 10, .{});
+    const rows = [_]Row{
+        .{ .number = 1, .visual_row = 0 },
+        .{ .number = 2, .visual_row = 1 },
+        .{ .number = 3, .visual_row = 2 },
+    };
+    for ([_]usize{ 0, 1, 2, 3 }) |cap| {
+        var ops: [4]draw.Op = undefined;
+        var runs: [4]draw.Run = undefined;
+        var scratch: [64]u8 = undefined;
+        const w = build(testProps(layout, &rows), ops[0..cap], &scratch, runs[0..cap]);
+        try testing.expectEqual(@min(cap, rows.len), w.ops);
+        try testing.expectEqual(rows.len - @min(cap, rows.len), w.dropped_rows);
+    }
+    // 문자 저장소만 모자란 경우도 같다.
+    for ([_]usize{ 0, 1, 5 }) |sc| {
+        var ops: [8]draw.Op = undefined;
+        var runs: [8]draw.Run = undefined;
+        var scratch: [64]u8 = undefined;
+        const w = build(testProps(layout, &rows), &ops, scratch[0..sc], &runs);
+        try testing.expect(w.dropped_rows > 0);
+    }
 }
 
 test "자릿수가 영역보다 길면 잘라 내지 않고 왼쪽 끝에 맞춘다" {
@@ -324,7 +372,7 @@ test "자릿수가 영역보다 길면 잘라 내지 않고 왼쪽 끝에 맞춘
     var ops: [4]draw.Op = undefined;
     var scratch: [32]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs);
 
     // 여백 1셀 뒤가 번호 영역의 시작이다. 음수로 가서 gutter 밖에 찍히는 것만 막는다.
     try testing.expectEqual(@as(i32, 1 * 8), ops[0].text.origin.x);
@@ -340,7 +388,7 @@ test "각 op이 자기 run을 가리킨다 — 공유 버퍼를 덮어쓰지 않
     var ops: [4]draw.Op = undefined;
     var scratch: [32]u8 = undefined;
     var runs: [4]draw.Run = undefined;
-    _ = try build(testProps(layout, &rows), &ops, &scratch, &runs);
+    _ = build(testProps(layout, &rows), &ops, &scratch, &runs);
 
     // 두 op이 같은 run을 가리키면 마지막 글자가 둘 다에 나온다.
     try testing.expectEqualStrings("7", ops[0].text.runs[0].text);

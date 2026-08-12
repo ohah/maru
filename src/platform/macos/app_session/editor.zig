@@ -32,7 +32,9 @@ pub const OpenFileError = error{
 };
 
 pub const Opened = struct {
-    /// 읽은 원본 bytes. **문서가 이것을 빌려 쓰므로** 문서보다 오래 살아야 한다.
+    /// 할당한 버퍼 **전체**. 문서는 그 앞부분(실제로 읽은 만큼)을 빌려 쓰므로 문서보다 오래 살아야
+    /// 한다. 파일이 `stat`과 read 사이에 줄어들면 뒤에 안 쓰는 꼬리가 남는데, `free`가 원래 크기를
+    /// 요구하므로 잘라 들 수 없다 — **파일 내용으로 쓰지 말 것**(문서를 통해 읽어야 한다).
     bytes: []u8,
     file: editor.open.OpenFile,
 
@@ -56,6 +58,13 @@ pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Open
     // 문서로 해석한다 — 새 파일을 만들자마자 여는 흐름이 그렇게 생긴다.
     const buf = allocator.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
     errdefer allocator.free(buf);
+    // **짧게 읽히면 그만큼만 문서가 된다.** `readPositionalAll`은 EOF에서 조용히 멈추므로(`amt == 0`
+    // 이면 break) 파일이 `stat`과 여기 사이에 줄어들면 `n < size`가 되고, 우리는 그 시점의 실제
+    // 내용을 여는 셈이라 화면은 거짓을 보이지 않는다.
+    //
+    // **저장이 붙으면 달라진다(N2).** 잘린 버퍼를 원문으로 알고 되쓰면 파일이 그만큼 잘린다 —
+    // 그때는 `n != size`를 에러로 올리거나 다시 읽어야 한다. 읽기 전용인 지금은 그 판정을 만들지
+    // 않는다(없는 계약을 여기서 지어내지 않는다).
     const n = file.readPositionalAll(io, buf, 0) catch return error.Unreadable;
 
     const opened = editor.open.open(allocator, buf[0..n], !isWritable(path)) catch |e| switch (e) {
@@ -112,6 +121,69 @@ test "없는 경로는 Unreadable — 읽기 전용과 구분된다" {
         error.Unreadable,
         openPath(std.testing.io, testing.allocator, "/nonexistent/maru-editor-test"),
     );
+}
+
+test "디렉터리를 가리켜도 죽지 않고 Unreadable이다" {
+    // 파일 패널이 폴더 행을 잘못 넘기는 경로가 실재한다. `openFile`이 디렉터리에 성공하는 플랫폼이
+    // 있으므로(그러면 read가 EISDIR로 실패한다) 어느 단계에서 걸리든 **같은 에러 하나로** 나와야 한다.
+    const io = std.testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub");
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(testing.allocator, &.{ root, "sub" });
+    defer testing.allocator.free(path);
+
+    try testing.expectError(error.Unreadable, openPath(io, testing.allocator, path));
+}
+
+test "쓸 수 없는 파일도 열리고 읽기 전용으로 표시된다" {
+    // §3.5: "쓸 수 없는 파일은 읽기 전용으로 연다 — 보는 것은 되어야 한다." **두 가지를 함께 본다**:
+    // ⑴ 열리는가(권한이 여는 것을 막지 않는다) ⑵ 그 사실이 문서에 실리는가. `isWritable`이 늘
+    // true를 줘도 ⑴은 통과하므로, ⑵이 없으면 읽기 전용 표시가 통째로 사라져도 아무도 모른다.
+    const io = std.testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "ro.txt", .data = "locked\n" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(testing.allocator, &.{ root, "ro.txt" });
+    defer testing.allocator.free(path);
+
+    const pathz = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(pathz);
+    if (std.c.chmod(pathz.ptr, 0o444) != 0) return error.SkipZigTest;
+    // **root는 W_OK를 통과한다.** 그 환경에서는 이 테스트가 증명할 것이 없으므로 비켜난다.
+    //
+    // **판정을 `isWritable`로 하지 않는다.** 그러면 검사 대상 함수가 자기 검사 여부를 정하게 되어,
+    // 그 함수가 늘 `true`를 돌려주도록 망가진 순간 테스트가 실패 대신 skip이 된다 — 적대적 검증에서
+    // 실제로 그 뮤턴트가 초록으로 빠져나갔다. 환경만 보는 축(euid)으로 가른다.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var opened = try openPath(io, testing.allocator, path);
+    defer opened.deinit(testing.allocator);
+    try testing.expect(opened.file.doc.read_only); // ⑵ 표시된다
+    try testing.expectEqualStrings("locked", opened.file.lineText(0).?); // ⑴ 그래도 열린다
+}
+
+test "쓸 수 있는 파일은 읽기 전용이 아니다 — 대조군" {
+    // 위 테스트만 있으면 `read_only`를 **항상 true로** 두어도 통과한다.
+    const io = std.testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "rw.txt", .data = "open\n" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(testing.allocator, &.{ root, "rw.txt" });
+    defer testing.allocator.free(path);
+
+    var opened = try openPath(io, testing.allocator, path);
+    defer opened.deinit(testing.allocator);
+    try testing.expect(!opened.file.doc.read_only);
 }
 
 test "여러 줄 파일의 줄 내용이 줄바꿈 없이 나온다" {

@@ -42,7 +42,12 @@ typedef struct {
     float x, y, w, h;
     float r, g, b, a;
     float radius;
-    /// 0=단색 quad · 1=아틀라스 글리프 · 2=아이콘 coverage
+    /// 0=단색 quad · 1=아틀라스 글리프(슬롯 전체) · 2=아이콘 coverage
+    /// · 3=아틀라스 글리프의 **왼쪽 절반**
+    ///
+    /// 슬롯 하나는 **양폭(한글) 상자**라, 단폭 글자는 그 왼쪽 절반만 쓴다. 셰이더는 안 고친다 —
+    /// `uv = (cell.xy + t) / cell.zw` 이므로 host 가 **열과 나누는 수를 함께 2배** 로 주면
+    /// 그대로 왼쪽 절반이 나온다(`2*col / 2*cols`). 셰이더에는 kind=1 로 넘긴다.
     unsigned int kind;
     /// kind=1 이면 아틀라스 셀(열, 행). kind=2 면 아이콘 슬롯 인덱스.
     unsigned int cell_x, cell_y;

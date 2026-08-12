@@ -123,6 +123,27 @@ pub const PublishResult = struct {
 
 pub const ServiceError = PublishError || error{InvalidAuthority};
 
+pub const IncidentDiskStatus = enum(u8) { pristine = 0, persisted = 1, failed = 2 };
+
+/// writer가 service mutex를 놓은 뒤에도 어느 record를 복사했는지 증명한다.
+/// 별도 작업 ID를 만들지 않아 aggregate generation이 stale completion 판정의 단일 권위로 남는다.
+pub const IncidentWriterReceipt = struct {
+    pid: u64 = 0,
+    process_nonce: u64 = 0,
+    service_addr: usize = 0,
+    slot_index: u8 = 0,
+    record_generation: u64 = 0,
+    digest: [32]u8 = [_]u8{0} ** 32,
+};
+
+pub const IncidentWriterHandoff = struct {
+    receipt: IncidentWriterReceipt = .{},
+    record: [envelope_size]u8 = [_]u8{0} ** envelope_size,
+};
+
+pub const WriterTakeResult = enum(u8) { taken = 1, inactive = 2 };
+pub const WriterCompletion = enum(u8) { persisted = 1, failed = 2 };
+
 pub const ConnectionIncidentService = struct {
     mutex: std.atomic.Mutex = .unlocked,
     self_addr: usize = 0,
@@ -131,6 +152,13 @@ pub const ConnectionIncidentService = struct {
     app_instance_nonce: u128 = 0,
     last_issued_sequence: u64 = 0,
     pending_slots: u128 = 0,
+    writer_inflight_slots: u128 = 0,
+    writer_inflight_generations: [incident_slot_count + aggregate_slot_count]u64 =
+        [_]u64{0} ** (incident_slot_count + aggregate_slot_count),
+    disk_generations: [incident_slot_count + aggregate_slot_count]u64 =
+        [_]u64{0} ** (incident_slot_count + aggregate_slot_count),
+    disk_status: [incident_slot_count + aggregate_slot_count]IncidentDiskStatus =
+        [_]IncidentDiskStatus{.pristine} ** (incident_slot_count + aggregate_slot_count),
     lifecycle_raw: u8 = 0,
     ring: EmergencyRing = .{},
 
@@ -188,11 +216,100 @@ pub const ConnectionIncidentService = struct {
         return result;
     }
 
+    pub fn takePendingForWriter(
+        self: *ConnectionIncidentService,
+        current_pid: u64,
+        current_process_nonce: u64,
+        out: *IncidentWriterHandoff,
+    ) ServiceError!WriterTakeResult {
+        if (!self.validAuthority(current_pid, current_process_nonce) or
+            rangesOverlap(@intFromPtr(self), @sizeOf(ConnectionIncidentService), @intFromPtr(out), @sizeOf(IncidentWriterHandoff)) or
+            !pristineWriterHandoff(out))
+            return error.InvalidAuthority;
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        if (!self.validAuthority(current_pid, current_process_nonce)) return error.InvalidAuthority;
+        const available = self.pending_slots & ~self.writer_inflight_slots;
+        if (available == 0) return .inactive;
+        const slot: u8 = @intCast(@ctz(available));
+        const bit = @as(u128, 1) << @intCast(slot);
+        const record = self.ring.records[slot];
+        if (!validEnvelope(&record) or (self.writer_inflight_slots & bit) != 0) return error.InvalidAuthority;
+        const generation = std.mem.readInt(u64, record[8..16], .little);
+        out.* = .{
+            .receipt = .{
+                .pid = self.pid,
+                .process_nonce = self.process_nonce,
+                .service_addr = self.self_addr,
+                .slot_index = slot,
+                .record_generation = generation,
+                .digest = record[224..256].*,
+            },
+            .record = record,
+        };
+        self.pending_slots &= ~bit;
+        self.writer_inflight_slots |= bit;
+        self.writer_inflight_generations[slot] = generation;
+        return .taken;
+    }
+
+    pub fn completeWriterHandoff(
+        self: *ConnectionIncidentService,
+        current_pid: u64,
+        current_process_nonce: u64,
+        handoff: IncidentWriterHandoff,
+        completion: WriterCompletion,
+    ) ServiceError!void {
+        if (!self.validAuthority(current_pid, current_process_nonce) or
+            handoff.receipt.pid != current_pid or handoff.receipt.process_nonce != current_process_nonce or
+            handoff.receipt.service_addr != @intFromPtr(self) or handoff.receipt.slot_index >= self.ring.records.len or
+            !validEnvelope(&handoff.record) or
+            std.mem.readInt(u64, handoff.record[8..16], .little) != handoff.receipt.record_generation or
+            !std.mem.eql(u8, handoff.record[224..256], &handoff.receipt.digest)) return error.InvalidAuthority;
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        if (!self.validAuthority(current_pid, current_process_nonce)) return error.InvalidAuthority;
+        const slot = handoff.receipt.slot_index;
+        const bit = @as(u128, 1) << @intCast(slot);
+        if ((self.writer_inflight_slots & bit) == 0 or
+            self.writer_inflight_generations[slot] != handoff.receipt.record_generation) return error.InvalidAuthority;
+        const current = &self.ring.records[slot];
+        if (!validEnvelope(current)) return error.InvalidAuthority;
+        const current_generation = std.mem.readInt(u64, current[8..16], .little);
+        if (current_generation < handoff.receipt.record_generation) return error.InvalidAuthority;
+        if (current_generation > handoff.receipt.record_generation) {
+            self.writer_inflight_slots &= ~bit;
+            self.writer_inflight_generations[slot] = 0;
+            self.pending_slots |= bit;
+            return;
+        }
+        if (!std.mem.eql(u8, current[224..256], &handoff.receipt.digest)) return error.InvalidAuthority;
+        self.disk_generations[slot] = current_generation;
+        self.disk_status[slot] = switch (completion) {
+            .persisted => .persisted,
+            .failed => .failed,
+        };
+        self.writer_inflight_slots &= ~bit;
+        self.writer_inflight_generations[slot] = 0;
+    }
+
     fn validAuthority(self: *const ConnectionIncidentService, current_pid: u64, current_process_nonce: u64) bool {
         return self.lifecycle_raw == 1 and self.self_addr == @intFromPtr(self) and self.pid == current_pid and
             self.process_nonce == current_process_nonce and self.app_instance_nonce != 0;
     }
 };
+
+fn pristineWriterHandoff(value: *const IncidentWriterHandoff) bool {
+    return value.receipt.pid == 0 and value.receipt.process_nonce == 0 and value.receipt.service_addr == 0 and
+        value.receipt.slot_index == 0 and value.receipt.record_generation == 0 and
+        allZero(&value.receipt.digest) and allZero(&value.record);
+}
+
+fn rangesOverlap(a_addr: usize, a_len: usize, b_addr: usize, b_len: usize) bool {
+    const a_end = std.math.add(usize, a_addr, a_len) catch return true;
+    const b_end = std.math.add(usize, b_addr, b_len) catch return true;
+    return a_addr < b_end and b_addr < a_end;
+}
 
 const Envelope = [envelope_size]u8;
 
@@ -536,7 +653,7 @@ fn unpublishedFixture() ConnectionIncident {
     return value;
 }
 
-test "CR0b incident payload는 canonical encoding 208바이트다" {
+test "CR0b core incident payload는 canonical encoding 208바이트다" {
     const original = fixture();
     const encoded = try encodeIncident(original);
     try std.testing.expectEqual(payload_size, encoded.len);
@@ -664,19 +781,19 @@ test "CR0b incident payload는 canonical encoding 208바이트다" {
     }
 }
 
-test "CR0b ring 산술은 256바이트 record 128개로 정확히 32 KiB다" {
+test "CR0b core ring 산술은 256바이트 record 128개로 정확히 32 KiB다" {
     try std.testing.expectEqual(@as(usize, 128), incident_slot_count + aggregate_slot_count);
     try std.testing.expectEqual(ring_size, envelope_size * (incident_slot_count + aggregate_slot_count));
     try std.testing.expectEqual(envelope_size, 16 + payload_size + 32);
 }
 
-test "CR0b SourceSite는 1부터 16까지 빈 raw 값 없이 닫혀 있다" {
+test "CR0b core SourceSite는 1부터 16까지 빈 raw 값 없이 닫혀 있다" {
     const tags = std.meta.tags(SourceSite);
     try std.testing.expectEqual(@as(usize, 16), tags.len);
     inline for (tags, 1..) |tag, raw| try std.testing.expectEqual(raw, @intFromEnum(tag));
 }
 
-test "CR0b incident는 불완전한 host identity를 거부한다" {
+test "CR0b core incident는 불완전한 host identity를 거부한다" {
     var value = fixture();
     value.connection_generation = 0;
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
@@ -687,7 +804,7 @@ test "CR0b incident는 불완전한 host identity를 거부한다" {
     try validateIncident(value);
 }
 
-test "CR0b incident는 outbound phase와 descriptor를 함께 검증한다" {
+test "CR0b core incident는 outbound phase와 descriptor를 함께 검증한다" {
     var value = fixture();
     value.outbound_length = 4;
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
@@ -696,7 +813,7 @@ test "CR0b incident는 outbound phase와 descriptor를 함께 검증한다" {
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
 }
 
-test "CR0b incident는 CR0a reason decision 조합만 허용한다" {
+test "CR0b core incident는 CR0a reason decision 조합만 허용한다" {
     var value = fixture();
     value.flags &= ~@as(u8, 1);
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
@@ -711,7 +828,7 @@ test "CR0b incident는 CR0a reason decision 조합만 허용한다" {
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
 }
 
-test "CR0b aggregate canonical schema도 payload 208바이트를 정확히 채운다" {
+test "CR0b core aggregate canonical schema도 payload 208바이트를 정확히 채운다" {
     const encoded = try encodeAggregate(.{
         .flags = 0,
         .reason_raw = @intFromEnum(ConnectionReason.connection_eof),
@@ -726,7 +843,7 @@ test "CR0b aggregate canonical schema도 payload 208바이트를 정확히 채�
     try std.testing.expectEqual(payload_size, encoded.len);
 }
 
-test "CR0b ring은 최초 incident와 aggregate를 같은 publication에서 기록한다" {
+test "CR0b core ring은 최초 incident와 aggregate를 같은 publication에서 기록한다" {
     var ring: EmergencyRing = .{};
     const published = try ring.publish(fixture());
     try std.testing.expect(published.detail_present);
@@ -736,7 +853,7 @@ test "CR0b ring은 최초 incident와 aggregate를 같은 publication에서 기�
     try std.testing.expect(ring.record(incident_slot_count) != null);
 }
 
-test "CR0b ring은 상세 120개 뒤에도 aggregate detail dropped 증거를 남긴다" {
+test "CR0b core ring은 상세 120개 뒤에도 aggregate detail dropped 증거를 남긴다" {
     var ring: EmergencyRing = .{};
     var value = fixture();
     for (0..incident_slot_count + 1) |index| {
@@ -753,7 +870,7 @@ test "CR0b ring은 상세 120개 뒤에도 aggregate detail dropped 증거를 �
     try std.testing.expectEqual(@as(u8, 2), aggregate.flags & 2);
 }
 
-test "CR0b ring은 named aggregate 일곱 개 뒤 고정 other만 갱신한다" {
+test "CR0b core ring은 named aggregate 일곱 개 뒤 고정 other만 갱신한다" {
     var ring: EmergencyRing = .{};
     var value = fixture();
     for (0..9) |index| {
@@ -770,7 +887,7 @@ test "CR0b ring은 named aggregate 일곱 개 뒤 고정 other만 갱신한다" 
     try std.testing.expectEqual(@as(u64, 2), other.count);
 }
 
-test "CR0b envelope는 committed와 header와 digest drift를 모두 거부한다" {
+test "CR0b core envelope는 committed와 header와 digest drift를 모두 거부한다" {
     var ring: EmergencyRing = .{};
     _ = try ring.publish(fixture());
     try std.testing.expect(ring.record(0) != null);
@@ -782,7 +899,7 @@ test "CR0b envelope는 committed와 header와 digest drift를 모두 거부한�
     }
 }
 
-test "CR0b aggregate generation exhaustion은 ring을 변경하지 않는다" {
+test "CR0b core aggregate generation exhaustion은 ring을 변경하지 않는다" {
     var ring: EmergencyRing = .{};
     _ = try ring.publish(fixture());
     ring.aggregate_generations[0] = std.math.maxInt(u64);
@@ -791,7 +908,7 @@ test "CR0b aggregate generation exhaustion은 ring을 변경하지 않는다" {
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&ring));
 }
 
-test "CR0b service는 app nonce와 checked sequence를 incident에 exact once 발급한다" {
+test "CR0b core service는 app nonce와 checked sequence를 incident에 exact once 발급한다" {
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     const first = try service.publish(7, 9, unpublishedFixture());
@@ -801,7 +918,7 @@ test "CR0b service는 app nonce와 checked sequence를 incident에 exact once �
     try std.testing.expectEqual(@as(u128, 0b11) | (@as(u128, 1) << incident_slot_count), service.pending_slots);
 }
 
-test "CR0b service는 copied address와 PID domain mismatch를 ring mutation 전에 거부한다" {
+test "CR0b core service는 copied address와 PID domain mismatch를 ring mutation 전에 거부한다" {
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     var copied = service;
@@ -813,7 +930,7 @@ test "CR0b service는 copied address와 PID domain mismatch를 ring mutation 전
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&service));
 }
 
-test "CR0b service는 fork child를 상속 mutex 접근 전에 거부한다" {
+test "CR0b core service는 fork child를 상속 mutex 접근 전에 거부한다" {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
     var service: ConnectionIncidentService = .{};
     const parent_pid: u64 = @intCast(std.c.getpid());
@@ -842,7 +959,7 @@ test "CR0b service는 fork child를 상속 mutex 접근 전에 거부한다" {
     try std.testing.expectEqual(@as(u128, 0), service.pending_slots);
 }
 
-test "CR0b service는 동시 최초 publication에 중복 없는 sequence를 발급한다" {
+test "CR0b core service는 동시 최초 publication에 중복 없는 sequence를 발급한다" {
     const thread_count = 8;
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
@@ -872,7 +989,7 @@ test "CR0b service는 동시 최초 publication에 중복 없는 sequence를 발
     try std.testing.expectEqual(@as(u64, thread_count), service.last_issued_sequence);
 }
 
-test "CR0b service sequence exhaustion은 마지막 발급 뒤 mutation 없이 닫힌다" {
+test "CR0b core service sequence exhaustion은 마지막 발급 뒤 mutation 없이 닫힌다" {
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     service.last_issued_sequence = std.math.maxInt(u64);
@@ -881,7 +998,7 @@ test "CR0b service sequence exhaustion은 마지막 발급 뒤 mutation 없이 �
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&service));
 }
 
-test "CR0b repeat는 incident sequence와 detail slot을 소비하지 않고 aggregate만 갱신한다" {
+test "CR0b core repeat는 incident sequence와 detail slot을 소비하지 않고 aggregate만 갱신한다" {
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     const first = try service.publish(7, 9, unpublishedFixture());
@@ -900,7 +1017,7 @@ test "CR0b repeat는 incident sequence와 detail slot을 소비하지 않고 agg
     try std.testing.expectEqual(@as(i128, 12), aggregate.last_timestamp_ns);
 }
 
-test "CR0b repeat는 foreign incident ID를 aggregate mutation 전에 거부한다" {
+test "CR0b core repeat는 foreign incident ID를 aggregate mutation 전에 거부한다" {
     var service: ConnectionIncidentService = .{};
     try ConnectionIncidentService.initInPlace(&service, 7, 9, 11);
     _ = try service.publish(7, 9, unpublishedFixture());
@@ -911,11 +1028,147 @@ test "CR0b repeat는 foreign incident ID를 aggregate mutation 전에 거부한�
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&service));
 }
 
-test "CR0b ring은 기존 aggregate digest 손상을 새 fingerprint로 우회하지 않는다" {
+test "CR0b core ring은 기존 aggregate digest 손상을 새 fingerprint로 우회하지 않는다" {
     var ring: EmergencyRing = .{};
     _ = try ring.publish(fixture());
     ring.records[incident_slot_count][224] ^= 1;
     const before = ring;
     try std.testing.expectError(error.InvalidIncident, ring.publish(fixture()));
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&ring));
+}
+
+test "CR0b writer handoff는 재귀 pointer-free 값만 전달한다" {
+    try std.testing.expect(!containsPointer(IncidentWriterReceipt));
+    try std.testing.expect(!containsPointer(IncidentWriterHandoff));
+    try std.testing.expectEqual(@as(usize, envelope_size), @sizeOf(@FieldType(IncidentWriterHandoff, "record")));
+}
+
+test "CR0b writer는 가장 낮은 pending record를 값으로 가져간다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    _ = try service.publish(7, 9, unpublishedFixture());
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    try std.testing.expectEqual(WriterTakeResult.taken, try service.takePendingForWriter(7, 9, &handoff));
+    try std.testing.expectEqual(@as(u8, 0), handoff.receipt.slot_index);
+    try std.testing.expect((service.pending_slots & 1) == 0);
+    try std.testing.expect((service.writer_inflight_slots & 1) != 0);
+    try std.testing.expect(validEnvelope(&handoff.record));
+}
+
+test "CR0b writer는 pending이 없으면 output을 바꾸지 않는다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    const before = handoff;
+    try std.testing.expectEqual(WriterTakeResult.inactive, try service.takePendingForWriter(7, 9, &handoff));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&handoff));
+}
+
+test "CR0b writer는 inflight aggregate를 건너뛰고 다음 pending을 가져간다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    const published = try service.publish(7, 9, unpublishedFixture());
+    var first: IncidentWriterHandoff = .{};
+    _ = try service.takePendingForWriter(7, 9, &first);
+    const aggregate_slot: u8 = @intCast(incident_slot_count + published.aggregate_slot);
+    service.pending_slots |= (@as(u128, 1) << @intCast(first.receipt.slot_index)) |
+        (@as(u128, 1) << @intCast(aggregate_slot));
+    var second: IncidentWriterHandoff = .{};
+    try std.testing.expectEqual(WriterTakeResult.taken, try service.takePendingForWriter(7, 9, &second));
+    try std.testing.expectEqual(aggregate_slot, second.receipt.slot_index);
+    try std.testing.expect((service.pending_slots & (@as(u128, 1) << @intCast(first.receipt.slot_index))) != 0);
+}
+
+test "CR0b writer는 service와 겹친 output을 source mutation 전에 거부한다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    _ = try service.publish(7, 9, unpublishedFixture());
+    const before = service;
+    const alias: *IncidentWriterHandoff = @ptrCast(@alignCast(&service.ring.records[0]));
+    try std.testing.expectError(error.InvalidAuthority, service.takePendingForWriter(7, 9, alias));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&service));
+}
+
+test "CR0b writer 완료는 exact record의 disk 상태만 게시한다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    _ = try service.publish(7, 9, unpublishedFixture());
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    _ = try service.takePendingForWriter(7, 9, &handoff);
+    const ring_before = service.ring;
+    try service.completeWriterHandoff(7, 9, handoff, .persisted);
+    try std.testing.expectEqual(IncidentDiskStatus.persisted, service.disk_status[0]);
+    try std.testing.expectEqual(handoff.receipt.record_generation, service.disk_generations[0]);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&ring_before), std.mem.asBytes(&service.ring));
+}
+
+test "CR0b writer 실패도 ring record를 보존한다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    _ = try service.publish(7, 9, unpublishedFixture());
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    _ = try service.takePendingForWriter(7, 9, &handoff);
+    const record_before = service.ring.records[0];
+    try service.completeWriterHandoff(7, 9, handoff, .failed);
+    try std.testing.expectEqual(IncidentDiskStatus.failed, service.disk_status[0]);
+    try std.testing.expectEqualSlices(u8, &record_before, &service.ring.records[0]);
+}
+
+test "CR0b writer는 stale aggregate 완료 뒤 최신 generation을 다시 pending으로 둔다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    const first = try service.publish(7, 9, unpublishedFixture());
+    service.pending_slots = @as(u128, 1) << @intCast(incident_slot_count + first.aggregate_slot);
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    _ = try service.takePendingForWriter(7, 9, &handoff);
+    var repeat = fixture();
+    repeat.incident_id = .{ .app_instance_nonce = 11, .sequence = 1 };
+    _ = try service.recordRepeatForTest(7, 9, repeat);
+    try service.completeWriterHandoff(7, 9, handoff, .persisted);
+    const bit = @as(u128, 1) << @intCast(handoff.receipt.slot_index);
+    try std.testing.expect((service.pending_slots & bit) != 0);
+    try std.testing.expectEqual(IncidentDiskStatus.pristine, service.disk_status[handoff.receipt.slot_index]);
+}
+
+test "CR0b writer는 copied foreign receipt 완료를 mutation 없이 거부한다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    _ = try service.publish(7, 9, unpublishedFixture());
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    _ = try service.takePendingForWriter(7, 9, &handoff);
+    handoff.receipt.process_nonce += 1;
+    const pending_before = service.pending_slots;
+    const inflight_before = service.writer_inflight_slots;
+    try std.testing.expectError(error.InvalidAuthority, service.completeWriterHandoff(7, 9, handoff, .persisted));
+    try std.testing.expectEqual(pending_before, service.pending_slots);
+    try std.testing.expectEqual(inflight_before, service.writer_inflight_slots);
+}
+
+test "CR0b writer completion은 같은 receipt replay를 거부한다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    _ = try service.publish(7, 9, unpublishedFixture());
+    var handoff: IncidentWriterHandoff = std.mem.zeroes(IncidentWriterHandoff);
+    _ = try service.takePendingForWriter(7, 9, &handoff);
+    try service.completeWriterHandoff(7, 9, handoff, .persisted);
+    try std.testing.expectError(error.InvalidAuthority, service.completeWriterHandoff(7, 9, handoff, .persisted));
+}
+
+test "CR0b writer는 stale receipt replay가 최신 inflight를 소비하지 못하게 한다" {
+    var service: ConnectionIncidentService = .{};
+    try service.initInPlace(7, 9, 11);
+    const first = try service.publish(7, 9, unpublishedFixture());
+    service.pending_slots = @as(u128, 1) << @intCast(incident_slot_count + first.aggregate_slot);
+    var stale: IncidentWriterHandoff = .{};
+    _ = try service.takePendingForWriter(7, 9, &stale);
+    var repeat = fixture();
+    repeat.incident_id = .{ .app_instance_nonce = 11, .sequence = 1 };
+    _ = try service.recordRepeatForTest(7, 9, repeat);
+    try service.completeWriterHandoff(7, 9, stale, .persisted);
+    var current: IncidentWriterHandoff = .{};
+    _ = try service.takePendingForWriter(7, 9, &current);
+    const inflight_before = service.writer_inflight_slots;
+    try std.testing.expectError(error.InvalidAuthority, service.completeWriterHandoff(7, 9, stale, .persisted));
+    try std.testing.expectEqual(inflight_before, service.writer_inflight_slots);
+    try std.testing.expectEqual(current.receipt.record_generation, service.writer_inflight_generations[current.receipt.slot_index]);
 }

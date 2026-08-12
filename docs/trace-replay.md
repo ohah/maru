@@ -295,6 +295,16 @@ slot과 fixed overflow bucket을 분리하고 `{reason,scope,source_site,host_cl
 saturating aggregate한다. incident ID와 raw host ID는 aggregate key가 아니다. Debug/test의
 unexpected poison은 같은 기록 뒤 fail-stop한다. 이 artifact는 화면 replay 입력이 아니므로 `maru.trace.v1`에 억지로 섞지 않는다.
 
+writer가 소비하는 중립 handoff는 pointer-free `IncidentWriterHandoff` 하나뿐이다. 이 값은 exact 256-byte envelope와
+`{pid,process_nonce,service_addr,slot_index,record_generation,digest}` receipt를 함께 보존한다. `takePendingForWriter`는
+service 권위를 mutex 전·후에 검증하고 가장 낮은 pending bit의 committed envelope를 value-copy한 뒤 그 bit만 clear한다.
+pristine output, pending 0, invalid/corrupt envelope는 mutation 0 typed 결과다. `completeWriterHandoff`는 receipt와 현재 slot의
+generation/digest를 다시 대조한다. 현재 generation이 더 크면 disk 결과를 해당 새 record의 결과로 오인하지 않고 pending bit를
+다시 set한다. exact generation이면 `persisted|failed` bounded disk 상태와 완료 generation만 게시하며 ring envelope와 aggregate
+count는 바꾸지 않는다. copied service, foreign PID/process nonce, receipt slot·generation·digest drift, replay completion은
+mutation 0이다. 별도 job ID, heap node, Client/HostAdapter callback은 없다. 실제 writer thread와 secure filesystem adapter는 이
+두 API의 sole product caller이며, bootstrap gate 전까지 product caller는 0으로 유지한다.
+
 경로·권한·cap·eviction·disk/ring 실패는 deterministic fake storage로 검증하고, artifact 본문에는 프로젝트 redaction 규칙을
 통과한 fixed schema 외 필드가 생기지 않도록 golden schema test를 둔다. fake storage는 ordering/failure injection만
 증명한다. 실제 macOS tempdir integration은 component별 no-follow/current-UID/directory 검증, `openat`-relative exclusive

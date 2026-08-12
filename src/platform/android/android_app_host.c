@@ -1,13 +1,9 @@
-// PoC 7(Android): **에뮬레이터 화면에** maru chrome 을 그린다.
+// Android host (L4). NativeActivity 창·생명주기·터치 + Vulkan 백엔드 + JNI Paint 래스터.
 //
-// 앞 단계는 오프스크린 텍스처를 PPM 으로 뽑았다. 여기서는 `NativeActivity` + Vulkan
-// swapchain 으로 진짜 창에 그린다 — iOS 시뮬레이터와 같은 조건이 되고, 남아 있던
-// **present 페이싱**(스왑체인)도 이 경로에서 함께 확인된다.
-//
-// Java 코드는 0줄이다. NativeActivity 를 쓰면 매니페스트 선언만으로 네이티브 진입점이
-// 잡히고, maru 의 "네이티브 최소" 정책과도 맞는다.
-// `VK_USE_PLATFORM_ANDROID_KHR` 이 있어야 `vkCreateAndroidSurfaceKHR` 이 헤더에 노출된다 —
-// 없으면 surface 생성 함수가 통째로 안 보인다.
+// **플랫폼은 배치를 모른다** — Zig 가 낸 quad 를 그리기만 한다(L3 chrome 이 배치,
+// L4 platform 이 그리기). IME 만 Java shim(`MaruActivity.java`)이 받는다: NDK 에는
+// `InputConnection` 에 해당하는 것이 없어 한글 조합을 받을 수 없다.
+// 계약은 docs/mobile-platform.md 가 단일 출처다.
 // 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
 #include "../mobile/mobile_host_abi.h"
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -103,7 +99,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         if (*p < 0x80) { cp = *p; p += 1; }
         else if ((*p & 0xE0) == 0xC0) { cp = ((*p & 0x1F) << 6) | (p[1] & 0x3F); p += 2; }
         else if ((*p & 0xF0) == 0xE0) { cp = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); p += 3; }
-        else { p += 4; continue; }  // BMP 밖은 이 PoC 범위가 아니다
+        else { p += 4; continue; }  // BMP 밖은 아직 안 다룬다
         int dup = 0;
         for (uint32_t i = 0; i < n; i++) if (cps[i] == cp) { dup = 1; break; }
         if (!dup) cps[n++] = (uint16_t)cp;
@@ -828,7 +824,7 @@ static void growAtlas(struct android_app *app) {
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
-        if (row >= g.atlas_rows) break;  // 꽉 찼다 — 축출은 이 PoC 범위 밖이다
+        if (row >= g.atlas_rows) break;  // 꽉 찼다 — 축출 정책은 아직 없다(계약 §4)
         memset(cell, 0, sizeof cell);
         uint32_t advance = CW / 2;
         if (!rasterizeOneGlyph(app, cp, cell, CW, CH, &advance)) continue;

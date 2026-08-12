@@ -248,6 +248,14 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
   - **셸 종류로 분기하지 않는다.** 분기해 직접 exec으로 폴백해 봐야 그건 이 계약이 고치는 바로 그
     실패(GUI 실행에서 PATH를 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만 는다. 셸이
     이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 뜨므로 실패가 조용하지 않다.
+  - ZDOTDIR은 새 탭과 **같은 지점**(`shellIntegrationZdotdir`)에서 얻는다. 그 함수는 캐시의 `.zshenv`가
+    사라졌으면 다시 써 주는 자가 복구를 한다 — 보관 필드를 직접 읽으면 캐시가 비워진 뒤 재개 탭만 셸
+    통합이 통째로 빠진다.
+  - **이 형태의 Term은 OSC 7을 한 번도 보내지 않는다.** `-c`는 프롬프트를 그리지 않으므로 통합의
+    `_maru_osc7` precmd 훅이 돌지 않는다(`.zshrc`는 source되고 훅 등록도 되지만 precmd는 안 돈다 — 실측
+    2026-08-12). 그래서 이 Term의 폴더·브랜치·저장소는 전부 **커널 cwd 폴백**에 의존한다
+    ([editor-surface-dock.md §3.5](editor-surface-dock.md)). 사이드바가 그 폴백 밖에 있던 2026-08-12 전까지
+    재개 탭에서만 카드·행의 폴더줄과 브랜치줄이 사라졌다.
   - 명령 문자열에 들어가는 각 인자는 예외 없이 single-quote escape한다. **cwd는 명령 문자열에 넣지
     않고 spawn request의 작업 디렉터리로만 전달한다.** parse한 prompt는 실행 인자로 절대 넣지 않는다.
   - session id/provider는 UI text나 log에서 명령으로 재해석되지 않는다.

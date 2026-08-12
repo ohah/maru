@@ -321,7 +321,19 @@ const proc_cwd_poll_interval_ns: i128 = 500 * std.time.ns_per_ms;
 /// 커널이 답하는 다른 폴더가 대신 쓰인다. 관례로 두지 않고 타입으로 못 박는다 — 호출부는 이미 이 크기를 넘긴다.
 pub fn activeTerminalCwd(self: *AppSession, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     if (self.tabs.items.len == 0) return null;
-    const term = pane_ops.activePane(self).activeTerm();
+    return termCwd(self, pane_ops.activePane(self).activeTerm(), buf);
+}
+
+/// 위 규칙을 **임의의 Term**에 적용한 것. `activeTerminalCwd`는 이제 "활성 Term을 골라 이걸 부른다"일 뿐이라
+/// 두 함수의 판정은 정의상 같다.
+///
+/// **왜 Term 단위가 필요한가**: 사이드바는 활성 Term 하나가 아니라 **모든 탭의 모든 Term**에 대해 폴더·브랜치
+/// 줄을 그린다(docs/sidebar-agent-list.md §2.1). 예전에는 사이드바만 이 2단 규칙 밖에 있어 관측(OSC 7)만 봤고,
+/// 그래서 OSC 7이 없는 Term — 셸 통합이 없는 bash/fish, 그리고 `zsh -l -i -c "exec <provider> --resume"`로
+/// 띄워 프롬프트를 한 번도 그리지 않는 **재개 Term** — 에서는 소스 컨트롤 뷰가 저장소를 멀쩡히 찾는 동안
+/// 사이드바만 "cwd 없음"으로 폴더줄·브랜치줄을 통째로 지웠다. 축이 하나여야 두 뷰가 같은 곳을 본다
+/// (`followActiveTerminalRepo`·`followActiveTerminalCwd`가 같은 이유로 이미 이 함수를 공유한다).
+pub fn termCwd(self: *AppSession, term: *Term, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     if (term.kind != .terminal) return null;
     term_ops.refreshTermObservation(self, term, false, false);
     // OSC 7 authority가 로컬이 아니다 → 보고된 경로는 원격 것이다.
@@ -341,23 +353,45 @@ pub fn activeTerminalCwd(self: *AppSession, buf: *[std.fs.max_path_bytes]u8) ?[]
 }
 
 /// 커널 cwd 폴백 + 저주기 캐시. 매 프레임 `proc_pidinfo`를 부르면 OSC 7이 없는 셸에서 프레임마다 syscall이 된다.
-/// **Term이 바뀌면 주기를 기다리지 않고 즉시 다시 묻는다** — 탭을 옮겼는데 이전 터미널의 폴더가 최대 0.5초
-/// 남아 있으면 그 사이 목록이 남의 저장소를 보여 준다.
+///
+/// **캐시는 Term별이다**(`term.rt.proc_cwd_*`). 예전에는 AppSession에 한 칸뿐이었고 "그 칸이 어느 Term 것인가"를
+/// 들고 있다가 다르면 주기를 무시하고 다시 물었다 — 활성 Term 하나만 물어보던 시절의 보정이다. 사이드바가 같은
+/// 규칙을 쓰면서 rebuild가 모든 Term을 훑게 되자 그 한 칸은 Term들이 서로 밀어내는 자리가 됐다(캐시가 무의미해지고
+/// rebuild마다 Term 수만큼 syscall). Term별로 두면 그 보정 자체가 필요 없다 — 각 Term이 자기 시각으로 자기 답을 한다.
 fn procCwdCached(self: *AppSession, term: *Term, buf: []u8) ?[]const u8 {
-    const id = term.surface.id;
-    const stale_surface = self.proc_cwd_surface_id != id;
     const now = std.Io.Clock.awake.now(self.io).nanoseconds;
-    if (stale_surface or now - self.proc_cwd_polled_ns >= proc_cwd_poll_interval_ns) {
-        self.proc_cwd_polled_ns = now;
-        self.proc_cwd_surface_id = id;
-        self.proc_cwd_len = 0;
-        if (self.backendFor(term).processCwd(term.rt.handle, &self.proc_cwd_buf)) |cwd| {
-            self.proc_cwd_len = cwd.len;
+    if (now - term.rt.proc_cwd_polled_ns >= proc_cwd_poll_interval_ns) {
+        term.rt.proc_cwd_polled_ns = now;
+        term.rt.proc_cwd_len = 0;
+        if (self.backendFor(term).processCwd(term.rt.handle, &term.rt.proc_cwd_buf)) |cwd| {
+            term.rt.proc_cwd_len = cwd.len;
         }
     }
-    if (self.proc_cwd_len == 0 or self.proc_cwd_len > buf.len) return null;
-    @memcpy(buf[0..self.proc_cwd_len], self.proc_cwd_buf[0..self.proc_cwd_len]);
-    return buf[0..self.proc_cwd_len];
+    const len = term.rt.proc_cwd_len;
+    if (len == 0 or len > buf.len) return null;
+    @memcpy(buf[0..len], term.rt.proc_cwd_buf[0..len]);
+    return buf[0..len];
+}
+
+/// 사이드바 카드·에이전트 행·상태바의 **경로줄이 표시할 cwd**. `termCwd`와 같은 2단 규칙에 **원격 표시**만
+/// 더한 것이다.
+///
+/// 원격을 따로 가르는 이유: `termCwd`는 원격에서 null을 낸다(커널 조회가 로컬 ssh 클라이언트의 cwd를 답해
+/// 남의 저장소를 원격인 척 보여 주기 때문 — 그 판단은 저장소 선택에 맞다). 그런데 **표시**는 다른 문제다.
+/// 원격 세션에서 이 줄은 "지금 어느 호스트의 어디에 있나"를 알려 주는 유일한 자리이므로, 관측이 준 경로를
+/// 그대로 쓰고 호출자가 host 접두를 붙인다(docs/ssh-integration.md §9.3). 그 경로로 로컬 `.git`을 읽지는
+/// 않는다 — 브랜치 파생은 계속 `termCwd`(원격이면 null)를 거친다.
+pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    if (term.kind != .terminal) return null;
+    term_ops.refreshTermObservation(self, term, false, false);
+    if (app_session_mod.termCwdIsRemote(term)) {
+        if (term.rt.observation.availability == .unavailable) return null;
+        const cwd = term.rt.observation.cwd.items;
+        if (cwd.len == 0 or cwd.len > buf.len) return null;
+        @memcpy(buf[0..cwd.len], cwd);
+        return buf[0..cwd.len];
+    }
+    return termCwd(self, term, buf);
 }
 
 /// 목록이 대상으로 삼을 **저장소 루트**. 우선순위가 곧 제품 동작이라 순서를 지킨다
@@ -600,8 +634,11 @@ pub fn diffTermFor(self: *AppSession, abs_path: []const u8, base: dock_panel.Dif
 /// (사이드바는 매 프레임 빌드되므로 fs 읽기를 cwd 변경으로 게이트). 없으면 null. 반환은 term 소유(다음 cwd 변경/
 /// teardown까지 유효). 파생값이라 영속 안 함 — restore가 cwd에서 재도출.
 pub fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
-    term_ops.refreshTermObservation(self, term, false, false);
-    const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+    // 관측만 보던 자리다. 이제 소스 컨트롤·탐색기와 **같은 2단 규칙**을 쓴다 — 그래야 같은 화면에서 목록은
+    // 저장소를 찾았는데 사이드바 카드만 브랜치를 못 찾는 일이 없다. `termCwd`가 관측 refresh와 원격 가드를
+    // 모두 맡으므로 여기서 다시 하지 않는다.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = termCwd(self, term, &buf) orelse "";
     return termGitBranchForCwd(self, term, cwd);
 }
 

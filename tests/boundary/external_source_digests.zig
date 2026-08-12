@@ -285,6 +285,11 @@ pub const inventory = [_]Proof{
     // count는 2 그대로다 — 더한 것은 `fileTreeChanged`의 `.git` 분기 호출 한 줄, `MARU_FORCE_SCM` self-verify
     // 게이트(`getenv` + `openDockTo`), 그리고 테스트 셋이다. 전부 평범한 호출·값 전달이라 `@field` 반사 접근이나
     // Client 구성·receiver 집합과는 무관하다.
+    // 커널 cwd 폴백 캐시가 AppSession 단일 슬롯에서 **Term별**(`TermRuntime.proc_cwd_*`)로 옮겨 가고,
+    // `sidebarCwdPath`가 관측 직독 대신 `git_ops.termCwdForDisplay`를 쓰게 되며 바뀐다(docs/editor-surface-dock.md
+    // §3.5의 2단 규칙을 사이드바까지 확장 — 그전까지 OSC 7이 없는 Term에서 소스 컨트롤은 저장소를 찾는데
+    // 사이드바만 폴더·브랜치줄을 지웠다). count는 2 그대로다 — 옮긴 것은 값 필드 셋과 그 읽기뿐이고,
+    // `@field` 반사 접근이나 Client 구성·receiver 집합은 건드리지 않는다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "463a1178d7f2cd6c7311d566ffe34f5b5b2b0d52bbc31cac150a3dfa8dd00a58" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).

@@ -82,7 +82,12 @@ pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_sessi
     const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
     var cfg = self.new_tab_config;
     cfg.size = size;
-    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+    // ZDOTDIR은 **새 탭과 같은 지점**(`shellIntegrationZdotdir`)에서 얻는다. 예전에는 여기만 보관 필드
+    // (`new_tab_zdotdir`)를 직접 읽었는데, 그 함수는 캐시의 `.zshenv`가 사라졌으면 다시 써 주는 자가 복구를
+    // 한다(앱 시작 때 한 번만 도는 `setupZsh`의 산출물이라 캐시 정리에 그대로 노출된다). 직접 읽으면 캐시가
+    // 비워진 뒤 **재개 탭만** 셸 통합이 통째로 빠져, provider를 끝내고 프롬프트로 돌아와도 그 탭은 OSC 7·
+    // OSC 133을 영영 보내지 않는다.
+    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     const provider_command: []const u8 = record.parsed.provider.label();
     const args = switch (record.parsed.provider) {
         .claude => [_][]const u8{ "claude", "--resume", record.parsed.session_id },

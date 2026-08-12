@@ -348,8 +348,15 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const ox = @as(i32, @intFromFloat(rect.x));
     const oy = @as(i32, @intFromFloat(rect.y));
     const cell_w = @max(1, @divTrunc(cw, 2));
-    // 장식선 두께. 칸 높이에 비례시켜 두면 줄 높이가 바뀌어도 같은 비율로 따라간다.
-    const rule: i32 = @max(1, @divTrunc(line_h, 16));
+    // 장식선 두께·자리. **글자 상자 기준이다** — 칸 높이로 잡았더니 밑줄이 글자에서 5 논리 px
+    // 떨어져 줄 사이 빈 공간에 떴다(실측: 글자 아래끝 860 · 밑줄 873, 기기 px). 칸(22)이
+    // 글자 상자(15)보다 높은 탓인데, 그 불일치를 없애는 것이 M4a3 이고 그때까지는 눈에 보이는
+    // 쪽(글자)에 맞춘다.
+    const rule: i32 = @max(1, @divTrunc(font_px, 12));
+    const y_over = 0;                       // 윗줄: 글자 상자 위
+    const y_strike = @divTrunc(font_px, 2); // 취소선: 글자 한가운데
+    const y_under = font_px;                // 밑줄: 글자 상자 바로 아래
+    const y_under2 = font_px + 2 * rule;    // 이중밑줄의 둘째 줄
 
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {
@@ -366,16 +373,16 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         while (col < grid_cols) : (col += 1) {
             const p = paintCell(core.screen.cells[core.index(row, col)].style, tk);
             bg_run.note(col, p.bg, ox, y0, cell_w, line_h);
-            under_run.note(col, if (p.underline) p.line else null, ox, y0 + line_h - 2 * rule, cell_w, rule);
-            under2_run.note(col, if (p.underline_double) p.line else null, ox, y0 + line_h - 4 * rule, cell_w, rule);
-            strike_run.note(col, if (p.strikethrough) p.line else null, ox, y0 + @divTrunc(line_h, 2), cell_w, rule);
-            over_run.note(col, if (p.overline) p.line else null, ox, y0, cell_w, rule);
+            under_run.note(col, if (p.underline) p.line else null, ox, y0 + y_under, cell_w, rule);
+            under2_run.note(col, if (p.underline_double) p.line else null, ox, y0 + y_under2, cell_w, rule);
+            strike_run.note(col, if (p.strikethrough) p.line else null, ox, y0 + y_strike, cell_w, rule);
+            over_run.note(col, if (p.overline) p.line else null, ox, y0 + y_over, cell_w, rule);
         }
         bg_run.flush(grid_cols, ox, y0, cell_w, line_h);
-        under_run.flush(grid_cols, ox, y0 + line_h - 2 * rule, cell_w, rule);
-        under2_run.flush(grid_cols, ox, y0 + line_h - 4 * rule, cell_w, rule);
-        strike_run.flush(grid_cols, ox, y0 + @divTrunc(line_h, 2), cell_w, rule);
-        over_run.flush(grid_cols, ox, y0, cell_w, rule);
+        under_run.flush(grid_cols, ox, y0 + y_under, cell_w, rule);
+        under2_run.flush(grid_cols, ox, y0 + y_under2, cell_w, rule);
+        strike_run.flush(grid_cols, ox, y0 + y_strike, cell_w, rule);
+        over_run.flush(grid_cols, ox, y0 + y_over, cell_w, rule);
 
         // ── 2) 글자
         col = 0;

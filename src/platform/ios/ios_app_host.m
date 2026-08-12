@@ -62,7 +62,30 @@ static NSString *const kShader =
 
 typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Uni;
 
-@interface ChromeView : UIView <UIKeyInput>
+/// `UITextInput` 은 문서 안의 **위치**와 **범위**를 타입으로 요구한다. 우리 문서는 조합 중
+/// 문자열 하나뿐이라 위치는 그냥 정수 오프셋이다.
+@interface MaruPos : UITextPosition
+@property (nonatomic) NSUInteger off;
++ (instancetype)at:(NSUInteger)o;
+@end
+@implementation MaruPos
++ (instancetype)at:(NSUInteger)o { MaruPos *p = [MaruPos new]; p.off = o; return p; }
+@end
+
+@interface MaruRange : UITextRange
+@property (nonatomic) NSUInteger from, to;
++ (instancetype)from:(NSUInteger)f to:(NSUInteger)t;
+@end
+@implementation MaruRange
++ (instancetype)from:(NSUInteger)f to:(NSUInteger)t {
+    MaruRange *r = [MaruRange new]; r.from = MIN(f, t); r.to = MAX(f, t); return r;
+}
+- (UITextPosition *)start { return [MaruPos at:self.from]; }
+- (UITextPosition *)end { return [MaruPos at:self.to]; }
+- (BOOL)isEmpty { return self.from == self.to; }
+@end
+
+@interface ChromeView : UIView <UITextInput>
 @end
 
 @implementation ChromeView {
@@ -85,6 +108,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CTFontRef _atlasFaces[4];
     unsigned int _atlasH;
     CADisplayLink *_link;
+    /// **조합 중 문자열만 담는 1줄짜리 가짜 문서.** 확정 전에는 여기 있고 코어엔 안 간다 —
+    /// 그게 IME 계약이다(자모가 셸로 새면 명령어 일부가 된다).
+    NSMutableString *_composing;
+    id<UITextInputDelegate> _inputDelegate;
+    UITextInputStringTokenizer *_tokenizer;
 }
 
 // 호스트가 만든 한글·영어 아틀라스와, **Zig 가 만든** 아이콘 coverage 를 올린다.
@@ -238,11 +266,160 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 그러면 하드웨어 키보드가 없는 사용자는 **아무것도 입력할 수 없다** — 스크린샷을 깨끗하게
 // 하려다 넣은 것이라 제품에는 틀린 동작이었다. Android 도 켜지면 키보드를 올린다.
 - (BOOL)hasText { return YES; }
+
+// ── UITextInput: 조합 중 문자열만 담는 1줄짜리 문서 ────────────────────────────
+// 터미널에는 편집할 문서가 없다. 그런데 `UITextInput` 은 문서를 요구하고, 그 대가로
+// **marked text**(조합 중 상태)를 준다 — 그게 있어야 확정 전 자모를 코어에 안 넣을 수 있다.
+// 그래서 조합 중 문자열만 담는 가짜 문서를 두고, 확정될 때만 코어로 보낸다.
+
+- (NSMutableString *)doc {
+    if (!_composing) _composing = [NSMutableString string];
+    return _composing;
+}
+
+/// 조합을 코어에 **확정**해 보낸다. 겉치레는 지운다.
+- (void)commitComposing {
+    if (self.doc.length == 0) return;
+    const char *b = self.doc.UTF8String;
+    if (b) maru_mobile_input(b, strlen(b));
+    [self.doc setString:@""];
+    maru_mobile_set_preedit("", 0);
+}
+
+- (void)setMarkedText:(NSString *)markedText selectedRange:(NSRange)selectedRange {
+    [self.doc setString:markedText ?: @""];
+    // **코어에 넣지 않는다.** 화면에만 흐리게 그릴 겉치레라 별도 경로로 보낸다.
+    const char *b = self.doc.UTF8String;
+    maru_mobile_set_preedit(b ?: "", b ? strlen(b) : 0);
+    NSLog(@"MARU_IME marked=%@", self.doc);
+}
+
+- (void)unmarkText {
+    // 조합이 확정됐다 — 이제 코어로 보낸다.
+    if (self.doc.length) NSLog(@"MARU_IME commit=%@", self.doc);
+    [self commitComposing];
+}
+
+- (UITextRange *)markedTextRange {
+    return self.doc.length ? [MaruRange from:0 to:self.doc.length] : nil;
+}
+- (NSDictionary *)markedTextStyle { return nil; }
+- (void)setMarkedTextStyle:(NSDictionary *)s { (void)s; }
+
+- (void)insertText:(NSString *)text {
+    // 조합이 있던 자리면 그것을 대체하는 확정이다.
+    [self.doc setString:@""];
+    maru_mobile_set_preedit("", 0);
+    const char *b = text.UTF8String;
+    if (!b) return;
+    NSLog(@"MARU_INPUT text=%@ total=%u", text, maru_mobile_input(b, strlen(b)));
+}
+
 - (void)deleteBackward {
-    // **바이트를 손으로 적지 않는다.** backspace 도 코어가 인코딩한다 — 모드에 따라 0x7F 와
-    // 0x08 이 갈리고, 수정자가 붙으면 또 달라진다.
+    if (self.doc.length) {  // 조합 중이면 조합에서 지운다 — 코어는 안 건드린다
+        [self.doc deleteCharactersInRange:NSMakeRange(self.doc.length - 1, 1)];
+        const char *b = self.doc.UTF8String;
+        maru_mobile_set_preedit(b ?: "", b ? strlen(b) : 0);
+        return;
+    }
+    // **바이트를 손으로 적지 않는다.** 모드에 따라 0x7F 와 0x08 이 갈린다.
     maru_mobile_key(MARU_KEY_BACKSPACE, 0, 0);
 }
+
+// ── 문서 조회/편집 ──────────────────────────────────────────────────────────
+- (NSString *)textInRange:(UITextRange *)range {
+    MaruRange *r = (MaruRange *)range;
+    if (r.to > self.doc.length) return @"";
+    return [self.doc substringWithRange:NSMakeRange(r.from, r.to - r.from)];
+}
+- (void)replaceRange:(UITextRange *)range withText:(NSString *)text {
+    (void)range;
+    [self insertText:text];
+}
+- (UITextRange *)selectedTextRange { return [MaruRange from:self.doc.length to:self.doc.length]; }
+- (void)setSelectedTextRange:(UITextRange *)r { (void)r; }
+- (UITextPosition *)beginningOfDocument {
+    // UIKit 이 `UITextInput` 세션을 열면 여기부터 부른다 — 한 번만 남겨 "프로토콜이 실제로
+    // 쓰이는지" 를 판정한다(선언만 하고 안 쓰이는 경우와 가른다).
+    static BOOL logged;
+    if (!logged) { logged = YES; NSLog(@"MARU_IME protocol=UITextInput"); }
+    return [MaruPos at:0];
+}
+- (UITextPosition *)endOfDocument { return [MaruPos at:self.doc.length]; }
+
+// ── 위치 계산 ───────────────────────────────────────────────────────────────
+- (UITextRange *)textRangeFromPosition:(UITextPosition *)f toPosition:(UITextPosition *)t {
+    return [MaruRange from:((MaruPos *)f).off to:((MaruPos *)t).off];
+}
+- (UITextPosition *)positionFromPosition:(UITextPosition *)p offset:(NSInteger)o {
+    NSInteger n = (NSInteger)((MaruPos *)p).off + o;
+    if (n < 0 || n > (NSInteger)self.doc.length) return nil;
+    return [MaruPos at:(NSUInteger)n];
+}
+- (UITextPosition *)positionFromPosition:(UITextPosition *)p
+                             inDirection:(UITextLayoutDirection)d offset:(NSInteger)o {
+    NSInteger sign = (d == UITextLayoutDirectionLeft || d == UITextLayoutDirectionUp) ? -1 : 1;
+    return [self positionFromPosition:p offset:sign * o];
+}
+- (NSComparisonResult)comparePosition:(UITextPosition *)a toPosition:(UITextPosition *)b {
+    NSUInteger x = ((MaruPos *)a).off, y = ((MaruPos *)b).off;
+    return x < y ? NSOrderedAscending : (x > y ? NSOrderedDescending : NSOrderedSame);
+}
+- (NSInteger)offsetFromPosition:(UITextPosition *)a toPosition:(UITextPosition *)b {
+    return (NSInteger)((MaruPos *)b).off - (NSInteger)((MaruPos *)a).off;
+}
+- (UITextPosition *)positionWithinRange:(UITextRange *)r
+                    farthestInDirection:(UITextLayoutDirection)d {
+    MaruRange *m = (MaruRange *)r;
+    return [MaruPos at:(d == UITextLayoutDirectionLeft || d == UITextLayoutDirectionUp) ? m.from : m.to];
+}
+- (UITextRange *)characterRangeByExtendingPosition:(UITextPosition *)p
+                                       inDirection:(UITextLayoutDirection)d {
+    NSUInteger o = ((MaruPos *)p).off;
+    if (d == UITextLayoutDirectionLeft || d == UITextLayoutDirectionUp)
+        return [MaruRange from:0 to:o];
+    return [MaruRange from:o to:self.doc.length];
+}
+- (UITextWritingDirection)baseWritingDirectionForPosition:(UITextPosition *)p
+                                              inDirection:(UITextStorageDirection)d {
+    (void)p; (void)d;
+    return UITextWritingDirectionLeftToRight;
+}
+- (void)setBaseWritingDirection:(UITextWritingDirection)w forRange:(UITextRange *)r {
+    (void)w; (void)r;
+}
+
+// ── 기하: **IME 후보창이 이 값을 보고 따라온다** ────────────────────────────
+// 커서 자리는 배치를 아는 쪽(코어)이 답한다 — 여기서 셀 크기를 다시 계산하면 어긋난다.
+- (CGRect)caretRectForPosition:(UITextPosition *)p {
+    (void)p;
+    unsigned long long r = maru_mobile_caret_rect();
+    if (r == 0) return CGRectZero;
+    UIEdgeInsets safe = self.safeAreaInsets;
+    CGFloat x = (CGFloat)((r >> 48) & 0xFFFF) + safe.left;
+    CGFloat y = (CGFloat)((r >> 32) & 0xFFFF) + safe.top;
+    return CGRectMake(x, y, (CGFloat)((r >> 16) & 0xFFFF), (CGFloat)(r & 0xFFFF));
+}
+- (CGRect)firstRectForRange:(UITextRange *)range {
+    (void)range;
+    return [self caretRectForPosition:nil];
+}
+- (NSArray<UITextSelectionRect *> *)selectionRectsForRange:(UITextRange *)range {
+    (void)range;
+    return @[];
+}
+- (UITextPosition *)closestPositionToPoint:(CGPoint)pt { (void)pt; return [self endOfDocument]; }
+- (UITextPosition *)closestPositionToPoint:(CGPoint)pt withinRange:(UITextRange *)r {
+    (void)pt; return ((MaruRange *)r).end;
+}
+- (UITextRange *)characterRangeAtPoint:(CGPoint)pt { (void)pt; return nil; }
+
+- (id<UITextInputTokenizer>)tokenizer {
+    if (!_tokenizer) _tokenizer = [[UITextInputStringTokenizer alloc] initWithTextInput:self];
+    return _tokenizer;
+}
+- (id<UITextInputDelegate>)inputDelegate { return _inputDelegate; }
+- (void)setInputDelegate:(id<UITextInputDelegate>)d { _inputDelegate = d; }
 
 /// 수정자·특수키는 `UIKeyInput` 이 안 준다 — `pressesBegan` 이 `UIKey` 로 준다(iOS 13.4+).
 /// 화살표·Home/End·F1~F12·Ctrl 조합이 전부 이 경로다. 문자는 `insertText` 가 계속 맡는다.
@@ -299,13 +476,6 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     }
     if (!handled) [super pressesBegan:presses withEvent:event];
 }
-- (void)insertText:(NSString *)text {
-    const char *b = text.UTF8String;
-    if (!b) return;
-    unsigned int total = maru_mobile_input(b, strlen(b));
-    NSLog(@"MARU_INPUT text=%@ total=%u", text, total);
-}
-
 // **아틀라스를 키운다.** Zig 가 모은 미등록 코드포인트를 그 슬롯에만 구워 올린다 —
 // 텍스처 전체를 다시 만들지 않고 `replaceRegion` 으로 그 칸만 바꾼다(여섯 기능 4번과 같은 경로).
 - (void)growAtlas {

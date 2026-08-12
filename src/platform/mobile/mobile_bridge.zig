@@ -286,6 +286,23 @@ pub export fn maru_mobile_hit_cell(x: f32, y: f32) u32 {
     return (@as(u32, @intCast(col)) << 16) | @as(u32, @intCast(row));
 }
 
+/// 커서(캐럿)가 있는 자리를 논리 px 로 답한다. **IME 후보창이 이걸 보고 따라온다** —
+/// 조합 중 후보 목록이 엉뚱한 자리에 뜨면 글자를 가린다.
+///
+/// 배치를 아는 쪽이 답한다(§3) — 플랫폼이 셀 크기·본문 위치를 다시 계산하면 어긋난다.
+/// 반환값은 x·y·w·h 를 각각 16비트로 담는다(전부 논리 px, 화면 밖이면 0).
+pub export fn maru_mobile_caret_rect() u64 {
+    const core = &(term_core orelse return 0);
+    const cur = core.screen.cursor;
+    if (body_cols == 0 or body_rows == 0) return 0;
+    const x = body_rect.x + @as(f32, @floatFromInt(@as(i32, cur.col) * body_cell_w));
+    const y = body_rect.y + @as(f32, @floatFromInt(@as(i32, cur.row) * body_line_h));
+    return (@as(u64, @intFromFloat(@max(0, x))) << 48) |
+        (@as(u64, @intFromFloat(@max(0, y))) << 32) |
+        (@as(u64, @intCast(body_cell_w)) << 16) |
+        @as(u64, @intCast(body_line_h));
+}
+
 /// 셀 색을 RGB 로 푼다. indexed 는 maru 자체 팔레트(`color.xterm256`)를 쓴다 —
 /// 모바일용으로 색표를 새로 만들지 않는다.
 fn resolveColor(c: terminal.types.Color, fallback: color.Rgb) color.Rgb {

@@ -16,13 +16,15 @@ PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실
 | 슬라이스 | 내용 | 상태 |
 |---|---|---|
 | M0 | 계약 문서 + 폴더 구조. PoC 코드를 `src/platform/{mobile,ios,android}` 로 옮긴다 | 완료 |
-| M1 | **draw-list 배칭** — quad 당 draw call 을 vertex buffer 한 번으로 | 미착수 |
+| M1 | **draw-list 배칭** — quad 당 draw call 을 인스턴스 드로우 한 번으로 | 완료 |
+| M1.5 | **`build.zig` 타깃** — 제품 빌드를 셸 스크립트에서 회수한다 | 진행 중 |
 | M2 | **Android `GameActivity` 이관** — `GameTextInput` 으로 IME 를 받는다 | 미착수 |
 | M3 | 원격 세션 연결 — `session_host` 클라이언트를 모바일에 붙인다 | 미착수 |
 | M4 | 스크롤·선택·복사 + 보조 키바 | 미착수 |
 | M5 | 회전·태블릿 레이아웃 | 미착수 |
 | M6 | 실기기 성능 예산 + 아틀라스 축출 | 미착수 |
-| M7 | `build.zig` 타깃 + CI | 미착수 |
+| M7 | CI 통합 | 미착수 |
+
 
 ## M0 — 폴더 구조
 
@@ -37,6 +39,17 @@ PoC 는 `tools/mobile-poc/` 에 앱 전체를 담고 있었다. 제품 코드는
 읽는다(Metal `[[instance_id]]`, Vulkan `gl_InstanceIndex`).
 
 판정: 프레임당 draw call 수를 로그로 낸다. 148 quad 에서 **1** 이어야 한다.
+실측: 두 플랫폼 모두 `MARU_DRAW calls=1 instances=148`, 화면은 이전과 동일.
+
+Metal 은 `setVertexBytes:` 가 4KB 한계라 148 quad(9.5KB)도 못 실어 `MTLBuffer` 가 필요했다.
+Vulkan 은 push constant 를 통째로 버리고 storage buffer + `gl_InstanceIndex` 로 갔다 —
+quad 마다 다른 값을 한 번의 draw call 에 실을 수 없기 때문이다. 그 결과 **프래그먼트가
+push constant 를 못 읽게 되어** 색·radius·kind 를 varying 으로 넘긴다.
+
+## M1.5 — build.zig
+
+제품 코드를 셸 스크립트가 빌드하는 것은 정식 도입이 아니다. `build.zig` 가 모바일 타깃을
+소유하고, `tools/mobile-poc/run.sh` 는 **기기 조작**(설치·실행·캡쳐·계측)만 남긴다.
 
 ## M2 — GameActivity
 

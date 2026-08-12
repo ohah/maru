@@ -783,7 +783,7 @@ fn runActualPreparedSettlement(options: ActualSettlementOptions) !void {
         "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000c33b3e02\",\"stream_id\":3275439619,\"controller_generation\":4,\"reason\":\"takeover\"}}"
     else
         "{\"event\":\"runtime.invalidated\"}";
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0xC33B3E03,
         event_wire,
     );
@@ -851,7 +851,7 @@ fn runActualPreparedSettlement(options: ActualSettlementOptions) !void {
             0xC33B3E12,
             0xC33B3E13,
         );
-        try adapter.logicalClient().bufferGenerationEventForTest(
+        try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
             0xC33B3E13,
             "{\"event\":\"runtime.invalidated\"}",
         );

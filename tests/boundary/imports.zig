@@ -1936,6 +1936,25 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginTerminalCleanupPublicationNoFail" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "publishTerminalAttachmentBatchNoFail" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryDeinitWithTerminalCleanup" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "AdmissionLifecycle" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedAdmissionClose" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "cr3bR1Client" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "admissionLifecycleRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedAdmissionCloseLifecycleRawValid" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "CurrentBorrowError" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "AdmissionCloseError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "admissionCloseSeal" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "admissionClosePermitValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "withCurrent" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectionGeneration" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "mapCurrentBorrowError" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callCurrent" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "ingestCurrentReadableEvidence" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "currentCanTerminalizeNoDestroy" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizeCurrentNoDestroy" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareAdmissionClose" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitAdmissionClose" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "cancelAdmissionClose" },
             },
         },
     };
@@ -2096,11 +2115,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 5),
+        // R1 stack borrow와 admission prepare·commit도 같은 registered operation으로 current node를 고정한다.
+        @as(usize, 9),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 9),
+        @as(usize, 13),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
@@ -7559,8 +7579,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         @as(usize, 4),
         countOccurrences(app, "RemoteSessionAdapter.initInPlace("),
     );
+    // R1은 pooled adapter의 raw Client escape 두 곳을 closed HostAdapter operation으로 치환한다.
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 0),
         countIdentifierOutsideTopLevelTests(backend, "logicalClient"),
     );
     try std.testing.expectEqual(

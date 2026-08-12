@@ -2198,6 +2198,11 @@ pub fn build(b: *std.Build) void {
         "CR3a-2e actual attach parity Debug and ReleaseFast gates",
     );
     session_host_2e_step.dependOn(session_host_2d3_step);
+    const session_host_cr3b_r1_step = b.step(
+        "test-session-host-cr3b-r1",
+        "CR3b R1 current borrow and admission close Debug and ReleaseFast gates",
+    );
+    session_host_cr3b_r1_step.dependOn(session_host_2e_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3450,6 +3455,30 @@ pub fn build(b: *std.Build) void {
             .optimize = b3_optimize,
         });
         B3SettlementTest.add(b, session_host_2e_step, event_2e_boundary_module, "CR3a-2e 경계는", 1);
+
+        const cr3b_r1_client_slot_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_cr3b_r1_step, cr3b_r1_client_slot_module, "CR3b R1", 6);
+        const cr3b_r1_host_adapter_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/host_adapter.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(b, session_host_cr3b_r1_step, cr3b_r1_host_adapter_module, "CR3b R1 HostAdapter", 1);
+        const cr3b_r1_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr3b_r1_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(b, session_host_cr3b_r1_step, cr3b_r1_boundary_module, "CR3b R1 경계는", 1);
+        B3SettlementTest.add(b, boundary_step, cr3b_r1_boundary_module, "CR3b R1 경계는", 1);
 
         const control_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

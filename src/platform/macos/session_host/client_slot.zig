@@ -795,7 +795,49 @@ pub const ClientNode = struct {
     active_operation_transport_incarnation: u64,
     active_operation_binding: contract.BindingIdentity,
     rpc_free_evidence: RpcFreeEvidenceRecord = .{},
+    connection_generation: u64,
+    admission_lifecycle: AdmissionLifecycle,
+    stack_borrows: u32,
+    next_admission_close_request_generation: u64,
 };
+
+pub const AdmissionLifecycle = enum(u8) { open, closed };
+
+pub const PreparedAdmissionClose = struct {
+    pub const Lifecycle = enum(u8) { pristine, prepared, committed, cancelled, consumed };
+
+    self_addr: usize = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread_incarnation: u64 = 0,
+    slot_addr: usize = 0,
+    slot_incarnation: u64 = 0,
+    current_node_addr: usize = 0,
+    current_node_incarnation: u64 = 0,
+    expected_connection_generation: u64 = 0,
+    request_generation: u64 = 0,
+    lifecycle: PreparedAdmissionClose.Lifecycle = .pristine,
+    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+};
+
+fn admissionLifecycleRawValid(value: *const AdmissionLifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(AdmissionLifecycle.open), @intFromEnum(AdmissionLifecycle.closed) => true,
+        else => false,
+    };
+}
+
+fn preparedAdmissionCloseLifecycleRawValid(value: *const PreparedAdmissionClose.Lifecycle) bool {
+    return switch (@as(*const u8, @ptrCast(value)).*) {
+        @intFromEnum(PreparedAdmissionClose.Lifecycle.pristine),
+        @intFromEnum(PreparedAdmissionClose.Lifecycle.prepared),
+        @intFromEnum(PreparedAdmissionClose.Lifecycle.committed),
+        @intFromEnum(PreparedAdmissionClose.Lifecycle.cancelled),
+        @intFromEnum(PreparedAdmissionClose.Lifecycle.consumed),
+        => true,
+        else => false,
+    };
+}
 
 fn rpcFreeEvidenceFixture(seed: u64) owner_seal.Digest {
     var writer = owner_seal.Writer.init("maru.rpc-free-evidence.fixture.v1");
@@ -810,6 +852,191 @@ test "B3-4/5 RPC free evidence commits and retires one exact epoch" {
     try std.testing.expect(record.exact(.free_call_committed, 7, digest));
     try std.testing.expect(record.retireFreeCall(7, digest));
     try std.testing.expect(record.emptyExact());
+}
+
+fn cr3bR1Client(host_id: u128) client_mod.Client {
+    return .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = host_id,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+}
+
+test "CR3b R1 current borrow는 generation을 확인하고 stack 밖 raw Client를 남기지 않는다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B101);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer if (slot.lifecycle == .live) {
+        const outcome = slot.tryDeinit();
+        if (outcome != .cleaned) @panic("CR3b R1 fixture teardown failed");
+    };
+
+    const ReadHost = struct {
+        fn run(_: void, client: *client_mod.Client) u128 {
+            return client.host_id;
+        }
+    };
+    try std.testing.expectEqual(
+        @as(u128, 0xC3B101),
+        try slot.withCurrent(1, {}, ReadHost.run),
+    );
+    try std.testing.expectEqual(@as(u32, 0), slot.current.stack_borrows);
+    try std.testing.expectError(error.GenerationMismatch, slot.withCurrent(2, {}, ReadHost.run));
+    try std.testing.expectEqual(@as(u32, 0), slot.current.stack_borrows);
+}
+
+test "CR3b R1 admission close는 active borrow를 거부하고 cancel 뒤 같은 generation을 다시 연다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B102);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer if (slot.lifecycle == .live) {
+        const outcome = slot.tryDeinit();
+        if (outcome != .cleaned) @panic("CR3b R1 fixture teardown failed");
+    };
+
+    const Reentry = struct {
+        fn run(target: *ClientSlot, _: *client_mod.Client) bool {
+            var permit: PreparedAdmissionClose = .{};
+            target.prepareAdmissionClose(1, &permit) catch |err| return err == error.Busy;
+            return false;
+        }
+    };
+    try std.testing.expect(try slot.withCurrent(1, &slot, Reentry.run));
+
+    var permit: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &permit);
+    try slot.commitAdmissionClose(&permit);
+    const ReadHost = struct {
+        fn run(_: void, client: *client_mod.Client) u128 {
+            return client.host_id;
+        }
+    };
+    try std.testing.expectError(error.Closed, slot.withCurrent(1, {}, ReadHost.run));
+    try slot.cancelAdmissionClose(&permit);
+    try std.testing.expectEqual(
+        @as(u128, 0xC3B102),
+        try slot.withCurrent(1, {}, ReadHost.run),
+    );
+    try std.testing.expectEqual(PreparedAdmissionClose.Lifecycle.consumed, permit.lifecycle);
+}
+
+test "CR3b R1 admission close permit은 copied address와 replay를 거부한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B103);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer if (slot.lifecycle == .live) {
+        const outcome = slot.tryDeinit();
+        if (outcome != .cleaned) @panic("CR3b R1 fixture teardown failed");
+    };
+
+    const slot_alias: *PreparedAdmissionClose = @ptrCast(&slot);
+    try std.testing.expectError(error.InvalidOwner, slot.prepareAdmissionClose(1, slot_alias));
+    const node_alias: *PreparedAdmissionClose = @ptrCast(slot.current);
+    try std.testing.expectError(error.InvalidOwner, slot.prepareAdmissionClose(1, node_alias));
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+    try std.testing.expectEqual(@as(u64, 1), slot.current.next_admission_close_request_generation);
+
+    var permit: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &permit);
+    var copied = permit;
+    try std.testing.expectError(error.InvalidOwner, slot.commitAdmissionClose(&copied));
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+    try slot.commitAdmissionClose(&permit);
+    try std.testing.expectError(error.InvalidOwner, slot.commitAdmissionClose(&permit));
+    try slot.cancelAdmissionClose(&permit);
+    try std.testing.expectError(error.InvalidOwner, slot.cancelAdmissionClose(&permit));
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+}
+
+test "CR3b R1 admission close는 wrong thread와 fork의 inherited 권위를 변경 없이 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B104);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer if (slot.lifecycle == .live) {
+        const outcome = slot.tryDeinit();
+        if (outcome != .cleaned) @panic("CR3b R1 fixture teardown failed");
+    };
+
+    var wrong_thread_rejected: std.atomic.Value(bool) = .init(false);
+    const WrongThread = struct {
+        fn run(target: *ClientSlot, rejected: *std.atomic.Value(bool)) void {
+            var permit: PreparedAdmissionClose = .{};
+            target.prepareAdmissionClose(1, &permit) catch |err| {
+                if (err == error.InvalidOwner and std.meta.eql(permit, PreparedAdmissionClose{}))
+                    rejected.store(true, .release);
+            };
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, WrongThread.run, .{ &slot, &wrong_thread_rejected });
+    thread.join();
+    try std.testing.expect(wrong_thread_rejected.load(.acquire));
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+
+    const child = c.fork();
+    try std.testing.expect(child >= 0);
+    if (child == 0) {
+        var permit: PreparedAdmissionClose = .{};
+        const rejected = if (slot.prepareAdmissionClose(1, &permit)) |_| false else |err| err == error.InvalidOwner;
+        const unchanged = std.meta.eql(permit, PreparedAdmissionClose{}) and
+            slot.current.admission_lifecycle == .open and slot.current.stack_borrows == 0 and
+            slot.current.next_admission_close_request_generation == 1;
+        c._exit(if (rejected and unchanged) 0 else 1);
+    }
+    var status: c_int = 0;
+    try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+    try std.testing.expectEqual(@as(c_int, 0), status);
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+    try std.testing.expectEqual(@as(u64, 1), slot.current.next_admission_close_request_generation);
+}
+
+test "CR3b R1 admission close request exhaustion은 permit과 Client를 변경하지 않는다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B105);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer if (slot.lifecycle == .live) {
+        const outcome = slot.tryDeinit();
+        if (outcome != .cleaned) @panic("CR3b R1 fixture teardown failed");
+    };
+
+    slot.current.next_admission_close_request_generation = std.math.maxInt(u64);
+    var permit: PreparedAdmissionClose = .{};
+    try std.testing.expectError(error.RequestExhausted, slot.prepareAdmissionClose(1, &permit));
+    try std.testing.expect(std.meta.eql(permit, PreparedAdmissionClose{}));
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
+    try std.testing.expectEqual(@as(u32, 0), slot.current.stack_borrows);
+    try std.testing.expectEqual(std.math.maxInt(u64), slot.current.next_admission_close_request_generation);
+}
+
+test "CR3b R1 admission close는 invalid raw lifecycle을 Client 접근 전에 거부한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = cr3bR1Client(0xC3B107);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer {
+        slot.current.admission_lifecycle = .open;
+        if (slot.lifecycle == .live) {
+            const outcome = slot.tryDeinit();
+            if (outcome != .cleaned) @panic("CR3b R1 fixture teardown failed");
+        }
+    }
+
+    @as(*u8, @ptrCast(&slot.current.admission_lifecycle)).* = 0xff;
+    var permit: PreparedAdmissionClose = .{};
+    try std.testing.expectError(error.InvalidOwner, slot.prepareAdmissionClose(1, &permit));
+    try std.testing.expect(std.meta.eql(permit, PreparedAdmissionClose{}));
+
+    slot.current.admission_lifecycle = .open;
+    try slot.prepareAdmissionClose(1, &permit);
+    @as(*u8, @ptrCast(&permit.lifecycle)).* = 0xff;
+    try std.testing.expectError(error.InvalidOwner, slot.commitAdmissionClose(&permit));
+    try std.testing.expectEqual(AdmissionLifecycle.open, slot.current.admission_lifecycle);
 }
 
 test "B3-4/5 RPC free evidence retire permit consumes exact committed record" {
@@ -10041,6 +10268,10 @@ pub const ClientSlot = struct {
         node.active_operation_transport_incarnation = 0;
         node.active_operation_binding = undefined;
         node.rpc_free_evidence = .{};
+        node.connection_generation = 1;
+        node.admission_lifecycle = .open;
+        node.stack_borrows = 0;
+        node.next_admission_close_request_generation = 1;
         node.guarded_allocator = .{
             .parent = source.allocator,
             .node_start = node_start,
@@ -10194,6 +10425,8 @@ pub const ClientSlot = struct {
         _ = self.current.cleanup_registry.count() catch return false;
         _ = self.current.batch_registry.count() catch return false;
         return self.current.incarnation.kind() == .node and
+            self.current.connection_generation != 0 and
+            self.current.next_admission_close_request_generation != 0 and
             self.current.pin_owner.self_addr == @intFromPtr(&self.current.pin_owner) and
             self.current.pin_owner.slot_addr == @intFromPtr(self) and
             self.current.pin_owner.node_addr == @intFromPtr(self.current) and
@@ -10431,6 +10664,228 @@ pub const ClientSlot = struct {
     pub fn logicalClient(self: *ClientSlot) *client_mod.Client {
         if (!self.valid()) @panic("invalid session-host ClientSlot");
         return &self.current.client;
+    }
+
+    pub const CurrentBorrowError = error{ InvalidOwner, GenerationMismatch, Closed, Busy, CounterExhausted };
+    pub const AdmissionCloseError = error{ InvalidOwner, Busy, GenerationMismatch, RequestExhausted };
+
+    fn admissionCloseSeal(self: *const ClientSlot, permit: *const PreparedAdmissionClose) process_seal_service.CleanupSeal {
+        return process_seal_service.preparedAdmissionCloseSeal(self.pid, self.process_nonce, .{
+            .self_addr = @intCast(permit.self_addr),
+            .thread_id = permit.owner_thread_incarnation,
+            .slot_addr = @intCast(permit.slot_addr),
+            .slot_incarnation = permit.slot_incarnation,
+            .node_addr = @intCast(permit.current_node_addr),
+            .node_incarnation = permit.current_node_incarnation,
+            .connection_generation = permit.expected_connection_generation,
+            .request_generation = permit.request_generation,
+            .lifecycle_raw = @intFromEnum(permit.lifecycle),
+        }) catch @panic("CR3b R1 admission close seal service unavailable");
+    }
+
+    fn admissionClosePermitValid(
+        self: *const ClientSlot,
+        permit: *const PreparedAdmissionClose,
+        lifecycle: PreparedAdmissionClose.Lifecycle,
+    ) bool {
+        if (!preparedAdmissionCloseLifecycleRawValid(&permit.lifecycle) or
+            !self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            !admissionLifecycleRawValid(&self.current.admission_lifecycle) or
+            permit.self_addr != @intFromPtr(permit) or permit.pid != self.pid or
+            permit.process_nonce != self.process_nonce or
+            permit.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            permit.slot_addr != @intFromPtr(self) or permit.slot_incarnation != self.incarnation.tagged or
+            permit.current_node_addr != @intFromPtr(self.current) or
+            permit.current_node_incarnation != self.current.incarnation.tagged or
+            permit.expected_connection_generation != self.current.connection_generation or
+            permit.request_generation == 0 or permit.lifecycle != lifecycle)
+            return false;
+        const expected = self.admissionCloseSeal(permit);
+        return std.mem.eql(u8, &expected, &permit.seal);
+    }
+
+    /// 현재 Client 주소는 이 함수의 stack frame 밖으로 반환하지 않는다. 제품 facade는 닫힌 operation만 callback으로 전달한다.
+    fn withCurrent(
+        self: *ClientSlot,
+        expected_generation: u64,
+        context: anytype,
+        comptime callback: anytype,
+    ) CurrentBorrowError!@typeInfo(@TypeOf(callback)).@"fn".return_type.? {
+        if (!self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (operation.node != self.current) return error.InvalidOwner;
+        if (expected_generation == 0 or expected_generation != operation.node.connection_generation)
+            return error.GenerationMismatch;
+        if (!admissionLifecycleRawValid(&operation.node.admission_lifecycle)) return error.InvalidOwner;
+        if (operation.node.admission_lifecycle != .open) return error.Closed;
+        if (operation.node.stack_borrows == std.math.maxInt(u32)) return error.CounterExhausted;
+        operation.node.stack_borrows += 1;
+        defer operation.node.stack_borrows -= 1;
+        return callback(context, &operation.node.client);
+    }
+
+    pub fn connectionGeneration(self: *const ClientSlot) u64 {
+        if (!self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation))
+            @panic("invalid session-host ClientSlot generation access");
+        return self.current.connection_generation;
+    }
+
+    fn mapCurrentBorrowError(err: CurrentBorrowError) client_mod.ClientError {
+        return switch (err) {
+            error.Closed, error.Busy => error.AdminBusy,
+            error.InvalidOwner, error.GenerationMismatch, error.CounterExhausted => process_seal_service.fatalIntegrity(.proof_loss),
+        };
+    }
+
+    pub fn callCurrent(
+        self: *ClientSlot,
+        expected_generation: u64,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) client_mod.ClientError![]u8 {
+        const Context = struct { method: []const u8, params_json: ?[]const u8 };
+        const Operation = struct {
+            fn run(context: Context, client: *client_mod.Client) client_mod.ClientError![]u8 {
+                return client.call(context.method, context.params_json);
+            }
+        };
+        return self.withCurrent(
+            expected_generation,
+            Context{ .method = method, .params_json = params_json },
+            Operation.run,
+        ) catch |err| return mapCurrentBorrowError(err);
+    }
+
+    pub fn ingestCurrentReadableEvidence(
+        self: *ClientSlot,
+        expected_generation: u64,
+    ) client_mod.ClientError!void {
+        const Operation = struct {
+            fn run(_: void, client: *client_mod.Client) client_mod.ClientError!void {
+                return client.ingestReadableOutOfBandEvidence();
+            }
+        };
+        return self.withCurrent(expected_generation, {}, Operation.run) catch |err|
+            return mapCurrentBorrowError(err);
+    }
+
+    pub fn currentCanTerminalizeNoDestroy(self: *ClientSlot, expected_generation: u64) bool {
+        const Operation = struct {
+            fn run(_: void, client: *client_mod.Client) bool {
+                return client.canTerminalizeSharedConnectionNoDestroy();
+            }
+        };
+        return self.withCurrent(expected_generation, {}, Operation.run) catch |err| switch (err) {
+            error.Closed, error.Busy => false,
+            error.InvalidOwner, error.GenerationMismatch, error.CounterExhausted => process_seal_service.fatalIntegrity(.proof_loss),
+        };
+    }
+
+    pub fn terminalizeCurrentNoDestroy(self: *ClientSlot, expected_generation: u64) bool {
+        const Operation = struct {
+            fn run(_: void, client: *client_mod.Client) bool {
+                return client.terminalizeSharedConnectionNoDestroy();
+            }
+        };
+        return self.withCurrent(expected_generation, {}, Operation.run) catch |err| switch (err) {
+            error.Closed, error.Busy => false,
+            error.InvalidOwner, error.GenerationMismatch, error.CounterExhausted => process_seal_service.fatalIntegrity(.proof_loss),
+        };
+    }
+
+    pub fn prepareAdmissionClose(
+        self: *ClientSlot,
+        expected_generation: u64,
+        out: *PreparedAdmissionClose,
+    ) AdmissionCloseError!void {
+        if (!self.valid() or !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            rangesOverlapTyped(out, self) or rangesOverlapTyped(out, self.current) or
+            !std.meta.eql(out.*, PreparedAdmissionClose{}))
+            return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (operation.node != self.current) return error.InvalidOwner;
+        if (expected_generation == 0 or expected_generation != operation.node.connection_generation)
+            return error.GenerationMismatch;
+        if (!admissionLifecycleRawValid(&operation.node.admission_lifecycle)) return error.InvalidOwner;
+        if (operation.node.admission_lifecycle != .open or operation.node.stack_borrows != 0 or
+            operation.node.active_operation_generation != 0 or operation.node.pin_owner.active_cleanup != 0)
+            return error.Busy;
+        const request_generation = operation.node.next_admission_close_request_generation;
+        if (request_generation == 0 or request_generation == std.math.maxInt(u64))
+            return error.RequestExhausted;
+        operation.node.next_admission_close_request_generation = request_generation + 1;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+            .slot_addr = @intFromPtr(self),
+            .slot_incarnation = self.incarnation.tagged,
+            .current_node_addr = @intFromPtr(operation.node),
+            .current_node_incarnation = operation.node.incarnation.tagged,
+            .expected_connection_generation = expected_generation,
+            .request_generation = request_generation,
+            .lifecycle = .prepared,
+        };
+        out.seal = self.admissionCloseSeal(out);
+    }
+
+    pub fn commitAdmissionClose(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+    ) AdmissionCloseError!void {
+        if (!self.admissionClosePermitValid(permit, .prepared)) return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .prepared) or operation.node != self.current)
+            return error.InvalidOwner;
+        if (operation.node.stack_borrows != 0 or
+            operation.node.admission_lifecycle != .open or operation.node.active_operation_generation != 0 or
+            operation.node.pin_owner.active_cleanup != 0)
+            return error.Busy;
+        operation.node.admission_lifecycle = .closed;
+        permit.lifecycle = .committed;
+        permit.seal = self.admissionCloseSeal(permit);
+    }
+
+    pub fn cancelAdmissionClose(
+        self: *ClientSlot,
+        permit: *PreparedAdmissionClose,
+    ) AdmissionCloseError!void {
+        if (self.admissionClosePermitValid(permit, .prepared)) {
+            permit.lifecycle = .consumed;
+            permit.seal = self.admissionCloseSeal(permit);
+            return;
+        }
+        if (!self.admissionClosePermitValid(permit, .committed)) return error.InvalidOwner;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.MovedOrCopied => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+        };
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.admissionClosePermitValid(permit, .committed) or operation.node != self.current)
+            return error.InvalidOwner;
+        if (!admissionLifecycleRawValid(&operation.node.admission_lifecycle)) return error.InvalidOwner;
+        if (operation.node.admission_lifecycle != .closed or operation.node.stack_borrows != 0 or
+            operation.node.active_operation_generation != 0 or operation.node.pin_owner.active_cleanup != 0)
+            return error.Busy;
+        operation.node.admission_lifecycle = .open;
+        permit.lifecycle = .cancelled;
+        permit.seal = self.admissionCloseSeal(permit);
+        permit.lifecycle = .consumed;
+        permit.seal = self.admissionCloseSeal(permit);
     }
 
     pub fn logicalClientConst(self: *const ClientSlot) *const client_mod.Client {

@@ -203,7 +203,8 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     }
 }
 
-/// 데스크톱 기본 테마에 가까운 값. 실제 제품은 config 에서 오지만 PoC 는 고정한다.
+/// 데스크톱 기본 테마에 가까운 값. **아직 config 를 안 읽는다** — 모바일이 config 를
+/// 어디서 받을지가 원격 연결(M3)과 함께 정해진다.
 fn themeColors() tokens.ThemeColors {
     return .{
         .foreground = .{ .r = 0xE6, .g = 0xE6, .b = 0xEA },

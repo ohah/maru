@@ -142,8 +142,14 @@ chrome-android-app)
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
         --manifest "$ANDROID/AndroidManifest.xml" -o "$OUT/base.apk" --auto-add-overlay
-    python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.close()' \
-        "$OUT/base.apk" "$OUT/libmaruchrome.so"
+    # IME shim 하나만 컴파일한다. `android.*` 만 써서 AndroidX 도 kotlin-stdlib 도 없다 —
+    # 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(docs/mobile-platform.md §1).
+    mkdir -p "$OUT/java"
+    javac -source 8 -target 8 -nowarn -bootclasspath "$SDK/platforms/android-35/android.jar" \
+        -d "$OUT/java" "$ANDROID/MaruActivity.java"
+    "$BT/d8" --min-api 29 --output "$OUT" $(find "$OUT/java" -name '*.class')
+    python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1],"a",zipfile.ZIP_DEFLATED);z.write(sys.argv[2],"lib/arm64-v8a/libmaruchrome.so");z.write(sys.argv[3],"classes.dex");z.close()' \
+        "$OUT/base.apk" "$OUT/libmaruchrome.so" "$OUT/classes.dex"
     [ -f "$OUT/debug.keystore" ] || keytool -genkeypair -keystore "$OUT/debug.keystore" \
         -alias a -storepass android -keypass android -keyalg RSA -validity 3650 -dname CN=maru
     "$BT/zipalign" -f 4 "$OUT/base.apk" "$OUT/maru-chrome.apk"
@@ -151,7 +157,7 @@ chrome-android-app)
         --key-pass pass:android "$OUT/maru-chrome.apk"
     $ADB install -r "$OUT/maru-chrome.apk"
     $ADB logcat -c
-    $ADB shell am start -n dev.maru.chrome/android.app.NativeActivity >/dev/null
+    $ADB shell am start -n dev.maru.chrome/dev.maru.MaruActivity >/dev/null
     sleep 5
     $ADB exec-out screencap -p > "$OUT/maru-chrome-android-app.png"
     $ADB logcat -d -s MaruChrome | tail -6

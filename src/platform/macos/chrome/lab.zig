@@ -443,110 +443,55 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         }
     }
 
-    // **배경이 맨 먼저다**(§4.1b, painter) — 나중에 오면 글자를 덮는다.
+    // **조립은 `editor_view.frame`이 한다.** 순서(배경 → 본문 → gutter → 스크롤바)와 저장소 분배가
+    // 계약이라 Lab이 자기 판으로 짜면 제품과 갈리고, 그러면 이 캡처가 제품을 예고하지 못한다.
     //
-    // **이 픽스처에서는 경계가 눈에 보이지 않는다.** Lab 토큰의 `surface_bg`가 오프스크린 렌더의
+    // **이 픽스처에서는 뷰 경계가 눈에 보이지 않는다.** Lab 토큰의 `surface_bg`가 오프스크린 렌더의
     // clear color와 우연히 같은 값(20,20,20)이라 뷰 안팎이 같은 색으로 나온다. 제품에서는 pane이
-    // 자기 배경을 그리므로 두 색이 갈리고, 그때 이 사각이 편집기 경계가 된다.
+    // 자기 배경을 그리므로 두 색이 갈리고, 그때 그 사각이 편집기 경계가 된다.
     //
     // **스크롤 시나리오에서 화면 아래가 비는 이유**도 여기 적어 둔다: `vp.rows`를 6으로 좁혀 놓았고
-    // (아래 주석 참고) 화면은 45행분이라, 편집기는 위 6행만 그리고 스크롤바도 그 안에 선다. 캡처만
-    // 보면 "꽉 안 찼는데 스크롤바가 있다"로 읽히는데, 좁힌 뷰포트 안에서는 정확한 동작이다.
+    // 화면은 45행분이라, 편집기는 위 6행만 그리고 스크롤바도 그 안에 선다. 캡처만 보면 "꽉 안 찼는데
+    // 스크롤바가 있다"로 읽히는데, 좁힌 뷰포트 안에서는 정확한 동작이다.
     const view_h_px: u32 = @as(u32, @min(vp.rows, row_capacity)) * cell_h_px;
-    const bgw = editor_view.surface.build(.{
-        .rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px },
-    }, buffers.ops);
 
     var content_rows: [row_capacity]editor_view.content.Row = undefined;
-    var n: u16 = 0;
-    while (n < visible and first_line + n < line_count) : (n += 1) {
-        content_rows[n] = .{ .bytes = lines[first_line + n] };
-    }
-
     var visual_rows: [row_capacity]editor_view.visual_map.VisualRow = undefined;
-    // 랩이 켜지면 논리 줄 하나가 화면 여럿을 덮으므로 **그릴 수 있는 행 수**로 상한을 준다.
-    const visual_budget = @min(vp.rows, row_capacity);
-
-    // **gutter 몫을 먼저 떼어 둔다.** 본문이 먼저 도는 순서로 바꾼 대가다 — 랩이 켜지면 긴 줄 하나가
-    // 저장소를 다 써서 뒤에 도는 gutter가 `OutOfSpace`로 죽는다(적대적 검증이 실제로 잡았다).
-    //
-    // **줄 번호가 본문보다 먼저 확보돼야 한다.** 본문이 덜 그려지면 그 줄만 짧게 보이지만, 번호가
-    // 없으면 화면 전체가 어느 위치인지 알 수 없다. 그리고 gutter 소요는 예측 가능하다(행 × 자릿수).
-    //
-    // **이 fixture로는 그 상태가 재현되지 않는다** — 여기 줄들은 대부분 탭이 없어 `expandTabs`가
-    // 원본을 빌려주고(scratch 0), 긴 줄이 맨 끝이라 앞 줄들이 이미 행을 소비해 전개 예산이 작다.
-    // 그래서 이 방어를 지워도 캡처가 나온다. 계약은 `content.zig`의 단위 테스트가 고정한다
-    // ("긴 줄은 본문이 저장소를 끝까지 쓴다").
-    const gutter_reserve = @min(
-        buffers.text_bytes.len / 2,
-        // **실제 자릿수로 잡는다.** `max_digits`(usize 최대 20자리)로 잡으면 실제의 스무 배를
-        // 예약해 본문이 근거 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 다른 쪽의 손실이다.
-        // **`line_count`는 이미 문서 전체 줄 수다.** 여기에 스크롤 오프셋을 더하면 gutter가
-        // 그릴 수 있는 어떤 번호보다 큰 값이 되어 자릿수가 하나 늘고, 그만큼 본문 저장소가
-        // 근거 없이 줄어든다(바로 위 주석이 경고하는 그 실패다 — 코드 리뷰가 잡았다).
-        editor_view.gutter.scratchNeeded(visual_budget, line_count),
-    );
-    const content_scratch = buffers.text_bytes[0 .. buffers.text_bytes.len - gutter_reserve];
-
-    const cw = editor_view.content.build(.{
-        .layout = layout,
-        .rows = content_rows[0..n],
-        .wrap = wrap_on,
-        .first_col = vp.first_col,
-        .first_piece = first_piece,
-
-        .cell_w_px = cell_w_px,
-        .cell_h_px = cell_h_px,
-        .origin_px = .{ .x = 0, .y = 0 },
-        .font_px = scenario.font_px,
-    }, buffers.ops[bgw.ops..], content_scratch, buffers.text_runs, visual_rows[0..visual_budget]);
-
     var gutter_rows: [row_capacity]editor_view.gutter.Row = undefined;
-    const grows = editor_view.gutter.rowsForVisual(
-        visual_rows[0..cw.visual_rows],
-        first_line,
-        &gutter_rows,
-    );
-    const gw = editor_view.gutter.build(.{
-        .layout = layout,
-        .rows = grows,
+    var row_counts: [row_capacity]u32 = undefined;
+    var count_scratch: [4096]u8 = undefined;
+
+    const fw = editor_view.frame.build(.{
+        .lines = lines,
+        .first_line = first_line,
+        .first_piece = first_piece,
+        .first_col = vp.first_col,
+        .total_lines = line_count,
+        .visible_rows = @min(vp.rows, row_capacity),
+        .wrap = wrap_on,
+
+        .rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = view_h_px },
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
-        .origin_px = .{ .x = 0, .y = 0 },
         .font_px = scenario.font_px,
-    }, buffers.ops[bgw.ops + cw.ops ..], buffers.text_bytes[cw.bytes..], buffers.text_runs[cw.runs..]);
-
-    // **문서 전체의 시각 행 수**가 있어야 막대 길이가 나온다(§4.1a) — 논리 줄로 세면 랩된 문서에서
-    // 실제보다 길어 보인다. 화면에 그린 행이 아니라 **문서 전체**를 세는 것이 요점이다.
-    var sb_counts: [row_capacity]u32 = undefined;
-    var sb_scratch: [4096]u8 = undefined;
-    const sb_counted = @min(line_count, row_capacity);
-    for (lines[0..sb_counted], 0..) |line, i| {
-        sb_counts[i] = editor_view.content.rowCount(line, 4, layout.content.width, wrap_on, &sb_scratch).rows;
-    }
-    var sb_total: u32 = 0;
-    for (sb_counts[0..sb_counted]) |rows| sb_total +|= rows;
-
-    const sw = editor_view.scrollbar.build(.{
-        .content = .{
-            .x = 0,
-            .y = 0,
-            .w = @floatFromInt(total_cols * cell_w_px),
-            // **실제로 보이는 높이**여야 한다. 창 전체 높이를 주면 문서가 늘 다 들어간다고 판정돼
-            // 막대가 안 그려진다(스크롤 시나리오는 화면을 일부러 좁힌다).
-            .h = @floatFromInt(@as(u32, visual_budget) * cell_h_px),
-            .gutter_w = @floatFromInt(scrollbar_gutter_px),
-        },
-        .total_visual_rows = sb_total,
-        .first_visual_row = @intCast(@min(first_line, std.math.maxInt(u32))),
-        .cell_h_px = cell_h_px,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = scrollbar_gutter_px,
         .metrics = scrollbar_metrics,
-    }, buffers.ops[bgw.ops + cw.ops + gw.ops ..]);
+    }, .{
+        .ops = buffers.ops,
+        .text_bytes = buffers.text_bytes,
+        .runs = buffers.text_runs,
+        .content_rows = content_rows[0..@min(visible, row_capacity)],
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &row_counts,
+        .count_scratch = &count_scratch,
+    });
 
     return .{
         // 아직 hit-test 대상이 없다(줄 번호 클릭은 N2의 줄 선택, 본문 클릭은 캐럿 배치다). 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
-        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. bgw.ops + gw.ops + cw.ops + sw.ops] },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..fw.ops] },
     };
 }
 

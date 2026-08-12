@@ -120,8 +120,16 @@ pub fn build(
         // 비례**하지 줄 길이에 비례하지 않는다 — 이 상한이 없으면 minified JS 한 줄이 scratch를
         // 삼켜 `build` 전체가 죽는다.
         const rows_left: usize = visual_out.len - visual_row;
-        const budget_cols: usize = if (props.wrap) rows_left * @as(usize, view_cols) else view_cols;
-        const expand_cols: u16 = @intCast(@min(budget_cols, std.math.maxInt(u16)));
+        // **건너뛸 조각도 전개해야 한다.** `first_piece`가 가리키는 조각은 화면에 없지만 그 앞
+        // 글자를 지나야 거기에 닿는다 — 예산에서 빼면 화면 아래쪽이 조용히 빈다(코드 리뷰가
+        // 실측으로 잡았다: 5조각 줄에 `first_piece=2`, 3행 뷰포트에서 조각 3·4가 사라지고 다음
+        // 논리 줄이 올라왔다).
+        const skip_hint: usize = if (line_idx == 0) props.first_piece else 0;
+        const budget_cols: usize = if (props.wrap)
+            (skip_hint + rows_left) * @as(usize, view_cols)
+        else
+            view_cols;
+        const expand_cols: u32 = @intCast(@min(budget_cols, std.math.maxInt(u32)));
 
         // **전개는 실패하지 않는다.** 저장소가 모자라면 거기까지만 만들고 `truncated`로 알린다 —
         // 긴 줄 하나가 프레임 전체를 지우던 결함(#2086)이 랩에서 되살아나지 않게 하는 자리다.
@@ -132,12 +140,28 @@ pub fn build(
         scratch_used += r.scratch_used;
         if (r.truncated) truncated_rows += 1;
 
+        // **`first_piece`가 실제 조각 수를 넘으면 무시한다.** 그대로 두면 **첫 논리 줄이 통째로
+        // 사라지고 다음 줄이 그 자리에 올라온다** — 리사이즈 한 번에 화면이 문서의 다른 곳으로
+        // 튀는 셈이다. 줄을 지우느니 처음부터 보여준다.
+        //
+        // **assert로 막지 않는다.** 처음엔 `assert(first_piece < have)`를 넣었는데, 그것이 아래
+        // fallback에 닿기 전에 앱을 죽였다(적대적 검증이 재현했다). 넘는 값은 **일어날 수 있는
+        // 상태**다 — `RowIndex` 주석 자체가 "무효화를 호출자가 판단한다"고 적었고, 뷰 폭·탭 폭·랩
+        // 토글이 바뀌면 살아남은 스크롤 위치가 곧 그 값이 된다. assert는 "절대 일어나면 안 되는
+        // 것"에 쓰는 도구이지, 복구 가능한 낡은 입력에 쓰는 것이 아니다.
+        const skip: u32 = if (line_idx == 0 and props.first_piece != 0) blk: {
+            var probe = visual_map.pieces(expanded, view_cols, props.wrap);
+            var have: u32 = 0;
+            while (probe.next()) |_| have += 1;
+            break :blk if (props.first_piece >= have) 0 else props.first_piece;
+        } else 0;
+
         var it = visual_map.pieces(expanded, view_cols, props.wrap);
         var piece_idx: u32 = 0;
         while (it.next()) |piece| : (piece_idx += 1) {
             // **첫 줄의 앞 조각들은 화면 위로 지나간 부분이다.** 행을 세지도 배치를 채우지도
             // 않는다 — 그 조각들은 화면에 없다.
-            if (line_idx == 0 and piece_idx < props.first_piece) continue;
+            if (piece_idx < skip) continue;
             if (visual_row >= visual_out.len) break;
 
             // **빈 조각도 시각 행을 차지한다.** 그릴 글자가 없어도 그 행은 화면에서 한 줄이고 gutter가
@@ -208,14 +232,22 @@ pub fn build(
 ///
 /// `scratch`는 한 줄분이면 되고 줄마다 재사용한다. 모자라면 `expandTabs`가 절단하므로 행 수가
 /// 실제보다 적어지는데, 그것은 §3.8이 "초장문에서 기능을 줄인다"고 허용한 범위다.
-pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) u32 {
-    if (!wrap or view_cols == 0) return 1;
-    const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u16) });
+pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) RowCount {
+    if (!wrap or view_cols == 0) return .{ .rows = 1 };
+    const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
     var it = visual_map.pieces(r.text, view_cols, wrap);
     var n: u32 = 0;
     while (it.next()) |_| n += 1;
-    return n;
+    return .{ .rows = n, .truncated = r.truncated };
 }
+
+/// `rowCount`의 결과. **절단 여부를 함께 돌려준다** — 이 모듈의 다른 곳과 같은 규율이다
+/// (`Written.truncated_rows` 주석의 §3.0 인용 참고). 절단되면 행 수가 실제보다 적고, 그대로
+/// 스크롤바 길이가 되면 **문서가 일찍 끝난 것처럼 보이는데** 왜인지 알려주는 신호가 없다.
+pub const RowCount = struct {
+    rows: u32,
+    truncated: bool = false,
+};
 
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
 ///
@@ -271,7 +303,11 @@ pub const ColRange = struct {
     /// 이 열 앞은 만들지 않는다.
     start: u16 = 0,
     /// 이 열수만큼 만든다.
-    count: u16,
+    ///
+    /// **u32다.** 화면 폭은 u16이면 충분하지만 `rowCount`가 **줄 전체**를 요구하고, u16이면
+    /// 65535열에서 잘려 긴 줄의 행 수가 조용히 상한에 걸린다(1 MiB scratch를 줘도 200KB 줄을
+    /// 5462행으로 셌다 — 실제는 16667행. 코드 리뷰가 잡았다).
+    count: u32,
 
     fn stop(self: ColRange) usize {
         return @as(usize, self.start) + @as(usize, self.count);
@@ -663,16 +699,37 @@ test "rowCount는 실제로 그리는 조각 수와 언제나 같다" {
         "\t가",
         "가가\t가",
     };
+    var ops: [256]draw.Op = undefined;
+    var runs: [256]draw.Run = undefined;
+    var vrows: [256]visual_map.VisualRow = undefined;
+
     for (lines) |line| {
         for ([_]u16{ 1, 2, 3, 5, 8, 13, 20, 52, 80 }) |cols| {
             for ([_]u16{ 0, 1, 2, 4, 8 }) |tab| {
-                // 실제로 그리는 경로: 전개한 뒤 조각을 센다.
-                const r = expandTabs(line, tab, &out, .{ .count = 4000 });
-                var it = visual_map.pieces(r.text, cols, true);
-                var want: u32 = 0;
-                while (it.next()) |_| want += 1;
+                // **실제로 그리는 경로는 `build`다.** 초판은 여기서 `expandTabs` → `pieces`를 직접
+                // 불렀는데, 그것은 `rowCount`의 본문을 그대로 옮겨 적은 것이라 **항상 통과했다** —
+                // 코드 리뷰가 그것을 잡았고, 그래서 `first_piece`가 전개 예산을 갉아먹어 화면
+                // 아래가 비는 결함이 이 테스트를 그냥 지나갔다.
+                // gutter 없이 본문만 `cols`칸 — `geometry.compute`는 줄 수에서 gutter 폭을
+                // 파생하므로 원하는 본문 폭을 정확히 만들 수 없다.
+                const layout = geometry.Layout{
+                    .leading_margin = .{ .start = 0, .width = 0 },
+                    .line_numbers = .{ .start = 0, .width = 0 },
+                    .folding = .{ .start = 0, .width = 0 },
+                    .content_gap = .{ .start = 0, .width = 0 },
+                    .content = .{ .start = 0, .width = cols },
+                };
+                var props = testProps(layout, &.{.{ .bytes = line }});
+                props.wrap = true;
+                props.tab_width = tab;
+                const w = build(props, &ops, &out, &runs, &vrows);
 
-                try testing.expectEqual(want, rowCount(line, tab, cols, true, &scratch));
+                const rc = rowCount(line, tab, cols, true, &scratch);
+                // 저장소가 모자라 어느 쪽이든 절단됐으면 비교 대상이 아니다 — 그건 §3.8 축소이고
+                // 아래 별도 테스트가 본다.
+                if (w.truncated_rows == 0 and !rc.truncated) {
+                    try testing.expectEqual(w.visual_rows, rc.rows);
+                }
             }
         }
     }
@@ -708,6 +765,83 @@ test "first_piece: 랩된 줄의 중간 행부터 화면이 시작한다" {
     try testing.expectEqual(@as(i32, 0), ops[0].text.origin.y);
 }
 
+test "first_piece가 있어도 화면 아래까지 채운다 — 전개 예산이 건너뛴 조각을 포함한다" {
+    // **코드 리뷰가 실측한 재현을 그대로 옮겼다.** 전개 예산을 `rows_left`만으로 잡으면 건너뛴
+    // 조각이 그 예산을 먹어, 뷰포트 아래쪽이 조용히 비고 **다음 논리 줄이 그 자리로 올라온다.**
+    //
+    // 앞선 `first_piece` 테스트들은 뷰포트가 넉넉해 예산이 남았기 때문에 이것을 못 잡았다 —
+    // **뷰포트가 작을 때만 드러난다.**
+    const layout = geometry.Layout{
+        .leading_margin = .{ .start = 0, .width = 0 },
+        .line_numbers = .{ .start = 0, .width = 0 },
+        .folding = .{ .start = 0, .width = 0 },
+        .content_gap = .{ .start = 0, .width = 0 },
+        .content = .{ .start = 0, .width = 12 },
+    };
+    var ops: [16]draw.Op = undefined;
+    var runs: [16]draw.Run = undefined;
+    var vrows: [3]visual_map.VisualRow = undefined; // **3행짜리 뷰포트**
+    var scratch: [1024]u8 = undefined;
+
+    // 60칸 → 12열에서 5조각.
+    const rows = [_]Row{ .{ .bytes = "0123456789" ** 6 }, .{ .bytes = "next" } };
+    var props = testProps(layout, &rows);
+    props.wrap = true;
+    props.first_piece = 2;
+
+    const w = build(props, &ops, &scratch, &runs, &vrows);
+
+    // 화면 세 행이 **전부 첫 줄의 조각 2·3·4**여야 한다.
+    try testing.expectEqual(@as(usize, 3), w.visual_rows);
+    for (0..3) |i| {
+        try testing.expectEqual(@as(u32, 0), vrows[i].line);
+        try testing.expectEqual(@as(u32, @intCast(i + 2)), vrows[i].piece);
+    }
+    // 다음 논리 줄이 올라오지 않았다.
+    try testing.expectEqual(@as(usize, 3), w.ops);
+}
+
+test "first_piece가 범위를 넘으면 줄을 지우지 않고 처음부터 보여준다" {
+    // 스크롤 위치가 뷰 폭·탭 폭·랩 토글 변경 뒤에도 살아남으면 이 상태가 된다. 그대로 두면
+    // **첫 논리 줄이 통째로 사라지고 다음 줄이 그 자리로 올라온다** — 리사이즈 한 번에 화면이
+    // 문서의 다른 곳으로 튄다(코드 리뷰가 지적했다).
+    //
+    // **범위를 넘는 값을 실제로 넣어 본다.** 초판은 여기에 assert를 두었다가 그것이 fallback에
+    // 닿기 전에 앱을 죽였다 — 넘는 값은 복구 가능한 낡은 입력이지 프로그래밍 오류가 아니다.
+    const layout = geometry.Layout{
+        .leading_margin = .{ .start = 0, .width = 0 },
+        .line_numbers = .{ .start = 0, .width = 0 },
+        .folding = .{ .start = 0, .width = 0 },
+        .content_gap = .{ .start = 0, .width = 0 },
+        .content = .{ .start = 0, .width = 12 },
+    };
+    var ops: [16]draw.Op = undefined;
+    var runs: [16]draw.Run = undefined;
+    var vrows: [8]visual_map.VisualRow = undefined;
+    var scratch: [512]u8 = undefined;
+
+    // 24칸 → 12열에서 2조각. 마지막 유효 조각(1)까지는 정상 동작해야 한다.
+    const rows = [_]Row{ .{ .bytes = "0123456789" ** 2 ++ "abcd" }, .{ .bytes = "next" } };
+    var props = testProps(layout, &rows);
+    props.wrap = true;
+    props.first_piece = 1;
+
+    const w = build(props, &ops, &scratch, &runs, &vrows);
+    try testing.expectEqual(@as(u32, 0), vrows[0].line);
+    try testing.expectEqual(@as(u32, 1), vrows[0].piece);
+    try testing.expect(w.visual_rows >= 2);
+    try testing.expectEqual(@as(u32, 1), vrows[1].line);
+
+    // **조각 수(2)를 넘는 값들.** 죽지 않고, 첫 줄이 조각 0부터 온전히 나와야 한다.
+    for ([_]u32{ 2, 3, 100, 10_000, std.math.maxInt(u32) }) |over| {
+        props.first_piece = over;
+        const r = build(props, &ops, &scratch, &runs, &vrows);
+        try testing.expect(r.visual_rows >= 2);
+        try testing.expectEqual(@as(u32, 0), vrows[0].line);
+        try testing.expectEqual(@as(u32, 0), vrows[0].piece); // 처음부터 보여준다
+    }
+}
+
 test "first_piece는 첫 줄에만 적용된다 — 뒤따르는 줄이 잘리면 안 된다" {
     const layout = geometry.compute(20, 2, .{});
     var ops: [16]draw.Op = undefined;
@@ -730,12 +864,37 @@ test "first_piece는 첫 줄에만 적용된다 — 뒤따르는 줄이 잘리�
     try testing.expect(saw_line1_piece0);
 }
 
+test "rowCount: 65535열을 넘는 줄도 끝까지 센다 — u16 상한에 걸리지 않는다" {
+    // 초판은 열 예산을 `ColRange.count`(u16)로 넘겨 **scratch와 무관하게** 65535열에서 잘렸다.
+    // 코드 리뷰 실측: 200KB 줄·12열·1MiB scratch에서 5462행(실제 16667행). 이 PR이 고치려던
+    // "긴 줄 아래를 볼 방법이 없다"가 그대로 되살아나는 자리다.
+    const line = "0123456789" ** 8000; // 80,000칸
+    var scratch: [131072]u8 = undefined;
+    const r = rowCount(line, 4, 12, true, &scratch);
+    try testing.expect(!r.truncated);
+    try testing.expectEqual(@as(u32, 80000 / 12 + 1), r.rows); // 6667행 — u16 상한(5462)이 아니다
+}
+
+test "rowCount: 저장소가 모자라면 절단을 보고한다 — 조용히 짧아지지 않는다" {
+    // 절단 자체는 §3.8이 허용하지만 **조용해서는 안 된다**(`Written.truncated_rows`와 같은 규율).
+    // 이 값이 없으면 스크롤바가 문서보다 짧게 그려지는데 왜인지 알 길이 없다.
+    const line = "\t" ++ ("0123456789" ** 200);
+    var tiny: [64]u8 = undefined;
+    const r = rowCount(line, 4, 12, true, &tiny);
+    try testing.expect(r.truncated);
+
+    var big: [8192]u8 = undefined;
+    const full = rowCount(line, 4, 12, true, &big);
+    try testing.expect(!full.truncated);
+    try testing.expect(full.rows > r.rows); // 절단된 쪽이 실제로 짧다
+}
+
 test "rowCount: 랩이 꺼지면 언제나 한 행이다" {
     var scratch: [64]u8 = undefined;
-    try testing.expectEqual(@as(u32, 1), rowCount("0123456789" ** 10, 4, 20, false, &scratch));
-    try testing.expectEqual(@as(u32, 1), rowCount("", 4, 20, false, &scratch));
+    try testing.expectEqual(@as(u32, 1), rowCount("0123456789" ** 10, 4, 20, false, &scratch).rows);
+    try testing.expectEqual(@as(u32, 1), rowCount("", 4, 20, false, &scratch).rows);
     // 뷰 폭이 0이면 접을 수 없다 — 0으로 나누거나 무한히 도는 대신 한 행으로 둔다.
-    try testing.expectEqual(@as(u32, 1), rowCount("긴 줄", 4, 0, true, &scratch));
+    try testing.expectEqual(@as(u32, 1), rowCount("긴 줄", 4, 0, true, &scratch).rows);
 }
 
 test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {

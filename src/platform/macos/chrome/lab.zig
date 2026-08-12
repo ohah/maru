@@ -335,6 +335,10 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         // **20열 밀어 둔다.** 0이면 안 민 것과 그림이 같아 시나리오가 아무것도 증명하지 못하고,
         // 너무 크면 fixture의 짧은 줄들이 전부 비어 gutter만 남는다.
         .editor_hscroll => .{ .first_row = 0, .first_col = 20, .rows = @intCast(viewport_h / cell_h_px) },
+        // **화면을 6행으로 좁힌다.** 전체 높이면 전개 예산이 늘 넉넉해서, `first_piece`가 예산을
+        // 갉아먹어 **화면 아래가 비는** 결함(코드 리뷰 #1)이 캡처에 나타나지 않는다 — 실제로 그
+        // 상태로 골든이 전부 통과했다. 좁은 화면은 분할 pane에서 늘 일어나는 상태이기도 하다.
+        .editor_wrap_scrolled => .{ .first_row = 0, .rows = 6 },
         else => .{ .first_row = 0, .rows = @intCast(viewport_h / cell_h_px) },
     };
 
@@ -358,16 +362,32 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var first_piece: u32 = 0;
     if (scenario.id == .editor_wrap_scrolled) {
         var counts: [row_capacity]u32 = undefined;
+        // **인덱스와 렌더러가 서로 다른 저장소 한도를 본다** — 인덱스는 줄마다 재사용하는 이
+        // 버퍼를, 렌더러는 모든 줄이 나눠 쓰는 `text_bytes`(2048)를 쓴다. 그래서 렌더러가 절단한
+        // 줄을 인덱스는 온전히 세고, `totalRows`가 화면이 실제로 닿을 수 있는 것보다 커질 수 있다
+        // (코드 리뷰가 지적했다).
+        //
+        // **Lab의 한계다.** 제품에서는 문서 전체를 인덱싱하고 렌더는 화면 몫만 그리므로 두 저장소가
+        // 애초에 다른 것이 정상이며, 어긋남은 `rowCount`가 `truncated`를 돌려주는 것으로 드러난다.
+        // 여기서 맞추려면 Lab이 렌더 저장소를 미리 나눠야 하는데, 그러면 픽스처가 제품에 없는
+        // 제약을 흉내내게 된다.
         var index_scratch: [4096]u8 = undefined;
         const counted = @min(line_count, row_capacity);
         for (lines[0..counted], 0..) |line, i| {
-            counts[i] = editor_view.content.rowCount(line, 4, layout.content.width, true, &index_scratch);
+            counts[i] = editor_view.content.rowCount(line, 4, layout.content.width, true, &index_scratch).rows;
         }
         var starts: [row_capacity + 1]u32 = undefined;
         const index = editor_view.visual_map.buildIndex(counts[0..counted], &starts);
-        // **시각 행 6부터.** 그 자리가 첫 fixture 줄(자, 세 조각)의 한가운데라, 첫 화면 행에
-        // 번호가 없는 것이 곧 "논리 줄 단위로는 못 만드는 상태"의 증거다.
-        if (index.resolve(6)) |pos| {
+        // **초장문 줄(`long_line`, fixture 마지막)의 10번째 조각부터.** 자리를 손으로 박지 않고
+        // 인덱스에서 유도하므로, 앞 줄이 바뀌어도 가리키는 곳이 흔들리지 않는다.
+        //
+        // **왜 하필 긴 줄 안쪽인가**: 짧은 줄이면 전개 예산이 늘 넉넉해서 `first_piece`가 예산을
+        // 갉아먹는 결함(코드 리뷰 #1)이 **캡처에 나타나지 않는다** — 실제로 그 결함이 살아 있는
+        // 상태로 골든이 전부 통과했다. 조각 10은 열 500 언저리라, 건너뛸 몫을 예산에 더하지
+        // 않으면 전개가 거기까지 닿지 못하고 화면이 통째로 달라진다.
+        const long_line_index = editor_wrap_lines.len - 1;
+        const target: u32 = if (index.firstRowOf(long_line_index)) |start| start + 10 else 6;
+        if (index.resolve(target)) |pos| {
             first_line = pos.line;
             first_piece = pos.piece;
         }
@@ -397,7 +417,10 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         buffers.text_bytes.len / 2,
         // **실제 자릿수로 잡는다.** `max_digits`(usize 최대 20자리)로 잡으면 실제의 스무 배를
         // 예약해 본문이 근거 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 다른 쪽의 손실이다.
-        editor_view.gutter.scratchNeeded(visual_budget, first_line + line_count),
+        // **`line_count`는 이미 문서 전체 줄 수다.** 여기에 스크롤 오프셋을 더하면 gutter가
+        // 그릴 수 있는 어떤 번호보다 큰 값이 되어 자릿수가 하나 늘고, 그만큼 본문 저장소가
+        // 근거 없이 줄어든다(바로 위 주석이 경고하는 그 실패다 — 코드 리뷰가 잡았다).
+        editor_view.gutter.scratchNeeded(visual_budget, line_count),
     );
     const content_scratch = buffers.text_bytes[0 .. buffers.text_bytes.len - gutter_reserve];
 

@@ -157,14 +157,16 @@ pub const RowIndex = struct {
     /// **이진 탐색이다.** 선형으로 훑으면 스크롤할 때마다 문서 길이에 비례하는 비용이 든다.
     pub fn resolve(self: RowIndex, visual_row: u32) ?VisualRow {
         if (visual_row >= self.totalRows()) return null;
-        // starts[lo] <= visual_row < starts[lo+1]인 lo를 찾는다.
-        var lo: usize = 0;
-        var hi: usize = self.lineCount();
-        while (hi - lo > 1) {
-            const mid = lo + (hi - lo) / 2;
-            if (self.starts[mid] <= visual_row) lo = mid else hi = mid;
-        }
-        return .{ .line = @intCast(lo), .piece = visual_row - self.starts[lo] };
+        // `starts[line] <= visual_row < starts[line+1]`인 줄을 찾는다. 손으로 쓴 이진 탐색은
+        // 경계 조건(`<` vs `<=`, 종료 조건)이 틀리기 쉬운 자리라 표준 함수를 쓴다 — 실제로
+        // 적대적 검증에서 `<=`를 `<`로 바꾸는 반증이 테스트 셋을 깨뜨렸다.
+        const upper = std.sort.upperBound(u32, self.starts, visual_row, order);
+        const line = upper - 1; // 위 범위 검사 덕에 upper >= 1이다
+        return .{ .line = @intCast(line), .piece = visual_row - self.starts[line] };
+    }
+
+    fn order(target: u32, item: u32) std.math.Order {
+        return std.math.order(target, item);
     }
 
     /// 논리 줄의 **첫** 시각 행. 줄 단위로 이동할 때 쓴다(§5.2 "위치로 이동").

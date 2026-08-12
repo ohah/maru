@@ -59,10 +59,6 @@ void maru_mobile_set_preedit(const char *bytes, unsigned long len);
 /// 터치 지점(논리 px) → 셀. 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
 unsigned int maru_mobile_hit_cell(float x, float y);
 
-/// 진단: row 행의 첫 non-space 코드포인트(없으면 0). "코어엔 있는데 화면엔 없다" 를
-/// 추측으로 가르지 않기 위한 조회다.
-unsigned int maru_mobile_row_first_cp(unsigned int row);
-
 #ifdef __cplusplus
 }
 #endif

@@ -718,6 +718,10 @@ pub fn build(b: *std.Build) void {
         "MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST",
         "skip-in-aggregate-v1",
     );
+    run_macos_app_host_abi_tests.setEnvironmentVariable(
+        "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
+        "skip-in-aggregate-v1",
+    );
 
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
@@ -3108,7 +3112,7 @@ pub fn build(b: *std.Build) void {
             session_host_2c3e_c3_step,
             event_2c3e_c2_runtime_module,
             "2c3e C3 socket cadence는",
-            3,
+            12,
         );
         const event_2c3e_c2_boundary_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_2c3e_c2_boundary.zig"),
@@ -3122,17 +3126,17 @@ pub fn build(b: *std.Build) void {
             "2c3e C2 경계는",
             1,
         );
-        const event_2c3e_c3_red_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3e_c3_red.zig"),
+        const event_2c3e_c3_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3e_c3_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });
         B3SettlementTest.add(
             b,
             session_host_2c3e_c3_step,
-            event_2c3e_c3_red_module,
-            "2c3e C3 미구현 socket cadence는",
-            9,
+            event_2c3e_c3_boundary_module,
+            "2c3e C3 경계는",
+            1,
         );
         const event_c3_3c_boundary_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_2c3d_c3_3c_boundary.zig"),
@@ -3238,6 +3242,13 @@ pub fn build(b: *std.Build) void {
         run_event_2c3e_c2_boundary.addArg("--maru-expect-tests=1");
         run_event_2c3e_c2_boundary.setCwd(b.path("."));
         boundary_step.dependOn(&run_event_2c3e_c2_boundary.step);
+        const run_event_2c3e_c3_boundary = b.addRunArtifact(addProjectTest(b, .{
+            .root_module = event_2c3e_c3_boundary_module,
+            .filters = &.{"2c3e C3 경계는"},
+        }));
+        run_event_2c3e_c3_boundary.addArg("--maru-expect-tests=1");
+        run_event_2c3e_c3_boundary.setCwd(b.path("."));
+        boundary_step.dependOn(&run_event_2c3e_c3_boundary.step);
 
         const event_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -4356,6 +4367,10 @@ pub fn build(b: *std.Build) void {
     );
     run_session_host_tests.setEnvironmentVariable(
         "MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC",
+        "skip-in-aggregate-v1",
+    );
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
         "skip-in-aggregate-v1",
     );
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만

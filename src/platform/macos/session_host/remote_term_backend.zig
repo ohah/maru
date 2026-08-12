@@ -2175,6 +2175,14 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
     try surface_runtime.resize(1, .{ .cols = 80, .rows = 24 }, io);
 
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(1));
+    var saw_close_ended = false;
+    attempts = 0;
+    while (attempts < 100 and !saw_close_ended) : (attempts += 1) {
+        const summary = try frame_pump.drainAvailable();
+        saw_close_ended = summary.ended != null;
+        if (!saw_close_ended) _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_close_ended);
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(1)); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
     try testing.expectEqual(@as(usize, 0), be_impl.runtimes.count());
     try testing.expect(try pool.remove(host_id));
@@ -2312,6 +2320,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     _ = try be_impl.attachTermOnHost(host_a, 33, runtime_a_id, size);
     try testing.expect(be_impl.runtimes.get(33).?.runtime.usesGenerationAttachment());
     _ = try be.attach(33, true);
+    var pump_a = try be.pump(33);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
     try surface_runtime.writeInput(22, .{ .bytes = "after\n" });
@@ -2359,16 +2368,24 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try testing.expectEqual(@as(u8, 2), reservation.state_raw);
     try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.routing_tombstoned)), be_impl.runtimes.get(33).?.runtime.close_authority.lifecycle_raw);
     try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.routing_tombstoned)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
-    remote_runtime.testing_api.armSettlementContention(1);
     try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(33));
-    try testing.expectEqual(term_backend.CloseProgress.event_pending, be.closeAndDetach(22));
-    try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.settling)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
+    // C3 RX-first는 terminate response를 decoder에 넘기기 전에 준비된 target event를 정산한다.
+    // persistent Busy의 다음-tick 계약은 별도 async close parity 테스트가 맡는다.
+    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));
+    try testing.expectEqual(@as(u8, @intFromEnum(close_authority.Lifecycle.ready_remove)), be_impl.runtimes.get(22).?.runtime.close_authority.lifecycle_raw);
     try testing.expectEqual(
-        @intFromEnum(pending_event_owner.PendingLifecycle.prepared),
+        @intFromEnum(pending_event_owner.PendingLifecycle.idle),
         be_impl.runtimes.get(22).?.runtime.pending_event_owner.lifecycle_raw,
     );
-    // 실제 frame은 close 재시도 전에 semantic pump를 돌린다. terminate가 만든 runtime.ended까지
-    // 관측해야 느린 runner에서도 queued event를 남긴 채 Runtime을 제거하지 않는다.
+    // 실제 frame은 remove 전에 두 host가 만든 runtime.ended를 모두 관측해야 한다.
+    var saw_close_ended_a = false;
+    attempts = 0;
+    while (attempts < 100 and !saw_close_ended_a) : (attempts += 1) {
+        const summary = try pump_a.drainAvailable();
+        saw_close_ended_a = summary.ended != null;
+        if (!saw_close_ended_a) _ = usleep(20 * 1000);
+    }
+    try testing.expect(saw_close_ended_a);
     var saw_close_ended = false;
     attempts = 0;
     while (attempts < 100 and !saw_close_ended) : (attempts += 1) {
@@ -2383,7 +2400,6 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     );
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(33));
     try testing.expect(try pool.remove(host_a));
-    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(22));
     try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(22));
     try testing.expect(try pool.remove(host_b));
 }

@@ -5808,25 +5808,25 @@ pub fn executeGenerationRpcDecoded(
         .protocol_failure => return error.ProtocolError,
         .connection_closed => return error.ConnectionClosed,
         .stale => {
-        const stale_admission = beginGenerationRequestOwner(execution.request, false) catch
-            process_seal_service.fatalIntegrity(.proof_loss);
-        defer endRegisteredNodeOperation(stale_admission.operation);
-        var stale_borrow: rpc_executed_response.RpcResponseBorrow = .{};
-        beginRpcResponseBorrowUnderOwner(
-            execution.request,
-            response,
-            &stale_borrow,
-            &stale_admission,
-        ) catch process_seal_service.fatalIntegrity(.proof_loss);
-        finishRpcResponseOwnedUnderOwner(
-            execution.request,
-            response,
-            &stale_borrow,
-            .reusable,
-            &stale_admission,
-        ) catch process_seal_service.fatalIntegrity(.proof_loss);
-        if (!response.pristineExact()) process_seal_service.fatalIntegrity(.proof_loss);
-        return error.Unauthorized;
+            const stale_admission = beginGenerationRequestOwner(execution.request, false) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            defer endRegisteredNodeOperation(stale_admission.operation);
+            var stale_borrow: rpc_executed_response.RpcResponseBorrow = .{};
+            beginRpcResponseBorrowUnderOwner(
+                execution.request,
+                response,
+                &stale_borrow,
+                &stale_admission,
+            ) catch process_seal_service.fatalIntegrity(.proof_loss);
+            finishRpcResponseOwnedUnderOwner(
+                execution.request,
+                response,
+                &stale_borrow,
+                .reusable,
+                &stale_admission,
+            ) catch process_seal_service.fatalIntegrity(.proof_loss);
+            if (!response.pristineExact()) process_seal_service.fatalIntegrity(.proof_loss);
+            return error.Unauthorized;
         },
     }
     const admission = beginGenerationRequestOwner(execution.request, false) catch

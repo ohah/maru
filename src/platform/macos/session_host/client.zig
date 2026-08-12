@@ -9990,6 +9990,47 @@ pub const Client = struct {
         }
     }
 
+    /// 새 request byte보다 먼저 현재 readable RX를 canonical out-of-band owner로 옮긴다.
+    /// 의미 처리는 caller가 소유하며, 이 단계에서 response/control을 만나면 상관관계 없는 wire로 닫는다.
+    pub fn ingestReadableOutOfBandEvidence(self: *Client) ClientError!void {
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
+        while (true) {
+            const frame = if (self.parser.next() catch |err| {
+                self.poison(if (err == error.OutOfMemory) .local_resource_exhausted else .frame_malformed);
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProtocolError,
+                };
+            }) |owned|
+                try self.requireWireMajor(owned)
+            else {
+                if (!pollReadableOrTerminal(self.fd)) return;
+                var buf: [4096]u8 = undefined;
+                const count = c.read(self.fd, &buf, buf.len);
+                if (count < 0) {
+                    if (posix.errno(count) == .INTR) continue;
+                    if (posix.errno(count) == .AGAIN or posix.errno(count) == .TIMEDOUT) return;
+                    self.poison(.transport_read_failure);
+                    return error.ConnectionClosed;
+                }
+                if (count == 0) {
+                    self.poison(if (self.parser.bufferedBytes() == 0) .connection_eof else .frame_malformed);
+                    return if (self.parser.bufferedBytes() == 0) error.ConnectionClosed else error.ProtocolError;
+                }
+                self.parser.push(buf[0..@intCast(count)]) catch {
+                    self.poison(.local_resource_exhausted);
+                    return error.OutOfMemory;
+                };
+                continue;
+            };
+            if (try self.bufferOutOfBandFrame(frame, null, null, false)) continue;
+            frame.deinit(self.allocator);
+            self.poison(.peer_contract_violation);
+            return error.ProtocolError;
+        }
+    }
+
     /// ID-only inventory를 한 authority generation 아래 끝까지 모은다. 중간 page가 stale/error면 이미 모은 prefix를
     /// 절대 반환하지 않고 typed unavailable로 강등한다. Recovery projection의 malformed response는 canonical exact
     /// manifest attach가 같은 adapter에서 계속 가능하도록 connection 전체를 poison하지 않는다.
@@ -19039,6 +19080,15 @@ fn pollReadable(fd: c.fd_t) bool {
     const rc = c.poll(&fds, 1, 0);
     if (rc <= 0) return false; // EINTR/timeout/오류 → 없음으로 취급(다음 tick에 재확인).
     return fds[0].revents & c.POLL.IN != 0;
+}
+
+fn pollReadableOrTerminal(fd: c.fd_t) bool {
+    var fds = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.IN, .revents = 0 }};
+    const rc = c.poll(&fds, 1, 0);
+    if (rc <= 0) return false;
+    // peer 종료도 새 TX보다 먼저 소비해야 한다. macOS는 unread byte 없이 닫힌 socket을
+    // POLLHUP만으로 보고할 수 있으므로 실제 read(0)가 terminal owner를 게시하게 한다.
+    return fds[0].revents & (c.POLL.IN | c.POLL.HUP | c.POLL.ERR) != 0;
 }
 
 /// recv timeout(ms)을 건다 — host가 연결만 받고 응답하지 않을 때 `readFrame`이 영원히 막히지 않게 한다(control_socket 관용구).

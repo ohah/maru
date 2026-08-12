@@ -46232,13 +46232,45 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
 
     // 넓은 창: 예산이 넉넉해 온전히 뜬다.
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try std.testing.expect(try statusBarHasText(allocator, session, "512"));
+    {
+        var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+        defer {
+            for (collected.items) |*c| c.deinit(allocator);
+            collected.deinit(allocator);
+        }
+        const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+        session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+        var resource_published = false;
+        for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
+            if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.resource)) {
+                resource_published = true;
+                break;
+            }
+        }
+        try std.testing.expect(resource_published);
+    }
 
     // 좁은 창: 예산(바 폭/3)이 16칸에 못 미쳐 말줄임될 상황 — 숫자가 보이면 안 된다.
     _ = try session.resize(260, 600, session.scale_milli);
     const bar_cols = session.backing_width_px / session.cell_width_px;
     try std.testing.expect(bar_cols / 3 < ru.text_cols); // 전제: 예산이 실제로 모자란다
-    try std.testing.expect(!(try statusBarHasText(allocator, session, "512")));
+    {
+        var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+        defer {
+            for (collected.items) |*c| c.deinit(allocator);
+            collected.deinit(allocator);
+        }
+        const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+        session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+        var resource_published = false;
+        for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
+            if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.resource)) {
+                resource_published = true;
+                break;
+            }
+        }
+        try std.testing.expect(!resource_published);
+    }
 }
 
 // SB-R: **상태바가 안 보이면 재지 않는다.** 안 보이는 UI에 syscall을 쓰지 않는다 —

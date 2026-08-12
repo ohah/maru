@@ -533,6 +533,37 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         }
     }
 
+    // ── 커서 ──────────────────────────────────────────────────────────────────
+    // **모양도 표시 여부도 코어가 정한다.** DECTCEM(`CSI ?25 l`)으로 TUI 가 커서를 숨기고,
+    // DECSCUSR 로 모양을 바꾼다 — 그 판단을 플랫폼이 다시 하면 어긋난다.
+    //
+    // 커서가 없으면 화살표·선택이 **눈으로 검증되지 않는다**(로그가 유일한 판정자가 된다).
+    // 그래서 이 자리가 이후 슬라이스 전부의 선행 조건이다.
+    if (core.cursor_visible and core.screen.cursor.visible) {
+        const cur = core.screen.cursor;
+        if (cur.col < grid_cols and cur.row < grid_rows) {
+            const cx = ox + @as(i32, cur.col) * cell_w;
+            // 격자와 **같은 식**으로 y 를 낸다 — 따로 계산하면 한 줄씩 어긋난다.
+            const cy = oy + @as(i32, cur.row) * line_h;
+            const rgb = tk.get(.cursor);
+            const shape = core.cursor_shape;
+            // 블록은 칸을 채우고, 밑줄은 아래 굵은 선, 막대는 왼쪽 세로선이다.
+            const r: draw.Rect = switch (shape) {
+                .block => .{ .x = cx, .y = cy, .w = @intCast(cell_w), .h = @intCast(line_h) },
+                .underline => .{
+                    .x = cx,
+                    .y = cy + line_h - 2 * rule,
+                    .w = @intCast(cell_w),
+                    .h = @intCast(2 * rule),
+                },
+                .bar => .{ .x = cx, .y = cy, .w = @intCast(2 * rule), .h = @intCast(line_h) },
+            };
+            // **글자 위에 얹되 가리지 않는다.** 블록을 불투명하게 칠하면 그 칸 글자가 사라진다 —
+            // 반전은 셀 속성(reverse)이 하는 일이고, 여기서는 반투명으로 겹친다.
+            push(r, rgb, if (shape == .block) 0x80 else 0xFF, 0, 0);
+        }
+    }
+
     // 조합 중 문자열을 커서 자리에 **흐리게** 얹는다. **격자를 다 그린 뒤**라야 그 위에
     // 올라간다 — 앞에 두면 커서 자리에 글자가 있을 때 그 글자가 조합을 덮는다(주석은 "위에
     // 그려진다" 라고 적혀 있었는데 순서는 반대였다).

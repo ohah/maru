@@ -4984,6 +4984,45 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    가능한 owned lease만 계수한다. 한 slot의 동시 retired Client hard cap은 2이며 초과가 예상되면 새 reconnect를 시작하지
    않고 backoff한다. 향후 실제 multi-thread Client reader가 생길 때 generation lease를 확장한다.
 
+#### CR3b R1 — current admission close와 stack borrow
+
+R1은 reconnect publish나 retired node를 만들지 않고, 현재 connection 하나의 신규 Client 호출 admission만 닫고 취소할 수
+있는 제품 권위를 먼저 연다. owner는 main-thread confined `ClientSlot`이며 pool membership generation과 무관한 nonzero
+`connection_generation`을 소유한다. 초기 current는 generation 1이고 R1에서는 값을 증가시키지 않는다. 증가·current 교체와
+overflow는 R2의 publish suffix가 소유한다.
+
+`ClientSlot.withCurrent(expected_generation, context, callback)`은 raw `*Client`를 저장하거나 반환하지 않는 유일한 current
+borrow다. callback은 같은 stack frame 안에서만 `*Client`를 받으며 module-private closed operation adapter만 caller가 될 수
+있다. callback 결과는 `Client` 주소나 parser/queue/frame 내부 backing view를 포함할 수 없다. 기존 RPC의 독립 allocator-owned
+response `[]u8`처럼 callback이 소유권을 새로 넘기는 closed 결과는 허용하고 각 public facade가 그 소유·해제 계약을 고정한다.
+따라서 generic `withCurrent` 자체를 외부 public callback trampoline으로 열지 않는다. 진입은 final-address slot,
+PID/process nonce, main-thread owner, lifecycle live, admission open, exact current generation을 먼저 검증하고 `stack_borrows`를
+checked increment한 뒤 callback을 호출한다. callback 반환 뒤에는 Client bytes를 다시 읽지 않고 borrow counter만 exact once
+감소한다. callback 중 같은 slot의 close 요청은 mutation 0의 `busy`, 다른 slot의 borrow는 허용한다. callback panic/noreturn은
+복구 가능한 결과를 합성하지 않는 process fail-stop 범위다.
+
+R1 close 권위는 caller-provided final-address `PreparedAdmissionClose` 하나다. pointer-free schema는
+`{self_addr,pid,process_nonce,owner_thread_incarnation,slot_addr,slot_incarnation,current_node_addr,
+current_node_incarnation,expected_connection_generation,request_generation,lifecycle_raw,seal}`이고 lifecycle은
+`pristine|prepared|committed|cancelled|consumed`의 닫힌 enum이다. `prepareAdmissionClose`는 allocation/callback/Client mutation 0으로
+현재 identity와 admission-open을 봉인한다. copied/moved/wrong PID·thread, generation/request replay, non-pristine destination은
+typed `invalid_owner`; active stack borrow·Client operation·attachment preparation/cleanup은 typed `busy`다.
+
+`commitAdmissionClose`는 같은 main-thread owner turn에서 permit과 current identity를 재검증한 뒤 admission을
+`open -> closed`로 store-only 게시하고 permit을 `committed`로 만든다. 이 선형화점 뒤 `withCurrent`와 신규 RPC/input/attach
+admission은 exact generation이라도 mutation 0의 `closed`를 반환한다. 기존 attachment cleanup과 R1 permit cancel은 허용한다.
+`cancelAdmissionClose`는 exact committed permit/current identity와 R2 publication 0을 검증한 뒤
+`closed -> open`, permit `committed -> cancelled -> consumed`을 callback/allocation 없이 exact once 수행한다. prepared 상태의
+abort도 permit만 consumed로 만들며 admission은 open 그대로다. stale/copy/replay나 close 뒤 canonical identity drift는 임의로
+다시 열지 않고 typed reject 또는 no-fail suffix의 integrity fail-stop으로 닫는다.
+
+R1 제품 caller는 reconnect coordinator가 아직 없으므로 0이다. focused gate만 실제 `HostAdapter`/`ClientSlot` production type으로
+open borrow, generation mismatch, active-borrow Busy, commit 뒤 admission closed, cancel 뒤 동일 generation 재개, copied permit,
+wrong-thread/fork, request-generation replay와 callback reentry를 Debug·ReleaseFast에서 검증한다. boundary는
+`HostAdapter.logicalClient()` 제품 호출을 0으로 만들고 test-only raw observer만 conditional facade에 남기며, reconnect publish,
+current pointer flip, retired node, Client destroy와 connection generation increment가 모두 0임을 고정한다.
+focused gate는 각 최적화 모드에서 ClientSlot component 6개, HostAdapter 제품 facade 1개, source boundary 1개를 exact-count한다.
+
 #### CR3a ownership target inventory
 
 CR3a-1의 compile-time/source boundary는 다음 행을 전부 분류하고 새 raw owner·escape가 추가되면 실패한다.

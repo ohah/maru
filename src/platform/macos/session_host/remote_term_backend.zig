@@ -889,7 +889,7 @@ pub const RemoteTermBackend = struct {
             retained = true;
             if (adapter.hostId() != host_id) return error.HostIdentityMismatch;
             selected_adapter = adapter;
-            break :blk adapter.logicalClient();
+            break :blk null;
         } else if ((self.client orelse return error.HostNotFound).host_id == host_id)
             self.client.?
         else
@@ -899,7 +899,7 @@ pub const RemoteTermBackend = struct {
         if (selected_adapter) |adapter|
             try rr.attachExistingWithAdapter(adapter, self.allocator, self.io, handle, runtime_id_hex, size)
         else
-            try rr.attachExisting(selected_client, self.allocator, self.io, handle, runtime_id_hex, size);
+            try rr.attachExisting(selected_client.?, self.allocator, self.io, handle, runtime_id_hex, size);
         // 재접속은 **기존** host runtime이라 이후 단계(map put)가 실패해도 terminate 금지(§7 attach는 terminate 안 함) —
         // client-side(surface/screen)만 회수한다. spawn 경로는 방금 우리가 띄운 runtime이라 deinit(terminate)이 맞지만
         // attach는 남의 runtime이므로 detachClientSide로 되돌려야 재접속 실패가 세션을 죽이지 않는다.
@@ -987,7 +987,7 @@ pub const RemoteTermBackend = struct {
             retained = true;
             if (adapter.hostId() != selected_host_id) return error.HostIdentityMismatch;
             selected_adapter = adapter;
-            break :blk adapter.logicalClient();
+            break :blk null;
         } else blk: {
             const client = self.client orelse return error.HostNotFound;
             selected_host_id = client.host_id;
@@ -999,7 +999,7 @@ pub const RemoteTermBackend = struct {
         if (selected_adapter) |adapter|
             try rr.spawnWithAdapter(adapter, self.allocator, self.io, params.handle, request, params.size, params.initial_config)
         else
-            try rr.spawnWithConfig(selected_client, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
+            try rr.spawnWithConfig(selected_client.?, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
         try self.runtimes.put(self.allocator, params.handle, .{
             .runtime = rr,

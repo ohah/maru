@@ -1018,7 +1018,7 @@ pub const testing_api = if (builtin.is_test) struct {
     }
 
     pub fn seedFirstReason(adapter: *host_adapter_mod.HostAdapter, raw: u8) !void {
-        const client = adapter.logicalClient();
+        const client = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
         const Reason = @typeInfo(@TypeOf(client.first_poison_reason)).optional.child;
         client.first_poison_reason = std.enums.fromInt(Reason, raw) orelse return error.InvalidOwner;
     }
@@ -1029,7 +1029,7 @@ pub const testing_api = if (builtin.is_test) struct {
         offset: usize,
         stream_id: u64,
     ) !void {
-        const client = adapter.logicalClient();
+        const client = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
         if (offset >= bytes.len or client.pending_outbound != null) return error.InvalidOwner;
         client.pending_outbound = .{
             .frame = try client.allocator.dupe(u8, bytes),
@@ -1039,7 +1039,7 @@ pub const testing_api = if (builtin.is_test) struct {
     }
 
     pub fn effectStateSnapshot(adapter: *host_adapter_mod.HostAdapter) EffectStateSnapshot {
-        const client = adapter.logicalClient();
+        const client = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
         var result: EffectStateSnapshot = .{
             .first_reason_present = client.first_poison_reason != null,
             .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@intFromEnum(reason)) else 0,
@@ -1236,7 +1236,7 @@ test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" 
     var attachment: GenerationAttachment = .{};
     try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D32, 0x2C3D34);
 
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D34,
         "{\"event\":\"future.event\"}",
     );
@@ -1267,7 +1267,7 @@ test "CR3a-2c3d C3-1 mirror drift and copied attachment cannot settle canonical 
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
     try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D42, 0x2C3D43);
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D43,
         "{\"event\":\"future.event\"}",
     );
@@ -1378,7 +1378,7 @@ test "CR3a-2c3d C3-1 release callback preserves mirror and teardown stays busy" 
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
     try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D62, 0x2C3D63);
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D63,
         "{\"event\":\"future.event\"}",
     );
@@ -1430,7 +1430,7 @@ test "CR3a-2c3d C3-1 event 예약 실패와 모든 준비 할당 실패는 termi
 
     var request_exhausted: GenerationAttachment = .{};
     try GenerationAttachment.initInPlace(&request_exhausted, &adapter);
-    adapter.logicalClient().next_request_id = std.math.maxInt(u64);
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).next_request_id = std.math.maxInt(u64);
     try std.testing.expectError(
         error.ProtocolError,
         request_exhausted.prepareControllerAttach(&adapter, 0x2C3D73),
@@ -1517,7 +1517,7 @@ test "CR3a-2c3d C3-1 same-address stale owner hands current event off without fr
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
     try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3D82, 0x2C3D83);
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D83,
         "{\"event\":\"future.event.one\"}",
     );
@@ -1528,7 +1528,7 @@ test "CR3a-2c3d C3-1 same-address stale owner hands current event off without fr
     const stale_owner = attachment.event_owner;
     const stale_generation = attachment.event_generation_mirror;
     try attachment.releaseEvent();
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D83,
         "{\"event\":\"future.event.two\"}",
     );
@@ -1572,7 +1572,7 @@ test "CR3a-2c3d C3-1 mirror drift and permit exhaustion converge through canonic
     // A zeroed non-authoritative mirror must not prevent the canonical C2 owner from releasing.
     var zero_drift: GenerationAttachment = .{};
     try testing_api.initAttached(&zero_drift, &adapter, allocator, 0x2C3D92, 0x2C3D93);
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D93,
         "{\"event\":\"future.event.zero-drift\"}",
     );
@@ -1591,7 +1591,7 @@ test "CR3a-2c3d C3-1 mirror drift and permit exhaustion converge through canonic
     // no-free transfer under the registered-node operation and leave teardown convergent.
     var exhausted: GenerationAttachment = .{};
     try testing_api.initAttached(&exhausted, &adapter, allocator, 0x2C3D94, 0x2C3D95);
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3D95,
         "{\"event\":\"future.event.exhausted\"}",
     );
@@ -1635,7 +1635,7 @@ test "CR3a-2c3d C3-2 ended event purges before ordinary event ownership" {
     defer adapter.deinit();
     var attachment: GenerationAttachment = .{};
     try testing_api.initAttached(&attachment, &adapter, allocator, 0x2C3DA2, 0x2C3DA3);
-    try adapter.logicalClient().bufferGenerationEventForTest(
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(
         0x2C3DA3,
         "{\"event\":\"runtime.ended\"}",
     );
@@ -1687,7 +1687,7 @@ test "CR3a-2c3d C3-2 empty target is a mutation-free not-ended result" {
         generation_transport_mod.PurgeEndedOutcome.not_ended,
         try attachment.purgeEndedStream(),
     );
-    try std.testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_events.items.len);
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
 
@@ -1699,7 +1699,7 @@ test "CR3a-2c3d C3-2 ordinary owner blocks purge until exact release" {
     const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DC1, 0x2C3DC2, 0x2C3DC3);
     defer _ = std.c.close(peer);
     defer adapter.deinit();
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DC3, "{\"event\":\"future.event\"}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3DC3, "{\"event\":\"future.event\"}");
     try std.testing.expectEqual(generation_transport_mod.EventTakeOutcome.taken, try attachment.takeEvent());
     try std.testing.expectError(error.Busy, attachment.purgeEndedStream());
     try attachment.releaseEvent();
@@ -1719,15 +1719,15 @@ test "CR3a-2c3d C3-2 sibling ended cannot purge the bound stream" {
     const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DD1, 0x2C3DD2, 0x2C3DD3);
     defer _ = std.c.close(peer);
     defer adapter.deinit();
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DD4, "{\"event\":\"runtime.ended\"}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3DD4, "{\"event\":\"runtime.ended\"}");
     try std.testing.expectEqual(
         generation_transport_mod.PurgeEndedOutcome.not_ended,
         try attachment.purgeEndedStream(),
     );
-    const sibling = (try adapter.logicalClient().takeEventForStream(0x2C3DD4)).?;
+    const sibling = (try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).takeEventForStream(0x2C3DD4)).?;
     try std.testing.expectEqualStrings("{\"event\":\"runtime.ended\"}", sibling.payload);
-    adapter.logicalClient().releaseEvent(sibling);
-    try std.testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_events.items.len);
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).releaseEvent(sibling);
+    try std.testing.expectEqual(@as(usize, 0), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_events.items.len);
     _ = allocator;
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
@@ -1742,16 +1742,16 @@ test "CR3a-2c3d C3-2 target purge preserves sibling byte order" {
     defer adapter.deinit();
     const sibling_one = "{\"event\":\"runtime.ended\"}";
     const sibling_two = "{\"event\":\"runtime.resized\",\"data\":{\"runtime_id\":\"000000000000000000000000000000bb\",\"cols\":140,\"rows\":50,\"resize_generation\":10,\"reason\":\"controller\"}}";
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DE4, sibling_one);
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DE3, "{\"event\":\"runtime.ended\"}");
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DE4, sibling_two);
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3DE4, sibling_one);
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3DE3, "{\"event\":\"runtime.ended\"}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3DE4, sibling_two);
     try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
-    const first = (try adapter.logicalClient().takeEventForStream(0x2C3DE4)).?;
+    const first = (try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).takeEventForStream(0x2C3DE4)).?;
     try std.testing.expectEqualStrings(sibling_one, first.payload);
-    adapter.logicalClient().releaseEvent(first);
-    const second = (try adapter.logicalClient().takeEventForStream(0x2C3DE4)).?;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).releaseEvent(first);
+    const second = (try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).takeEventForStream(0x2C3DE4)).?;
     try std.testing.expectEqualStrings(sibling_two, second.payload);
-    adapter.logicalClient().releaseEvent(second);
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).releaseEvent(second);
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
 
@@ -1763,10 +1763,10 @@ test "CR3a-2c3d C3-2 copied attachment cannot purge canonical queue" {
     const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3DF1, 0x2C3DF2, 0x2C3DF3);
     defer _ = std.c.close(peer);
     defer adapter.deinit();
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3DF3, "{\"event\":\"runtime.ended\"}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3DF3, "{\"event\":\"runtime.ended\"}");
     var copied = attachment;
     try std.testing.expectError(error.InvalidOwner, copied.purgeEndedStream());
-    try std.testing.expectEqual(@as(usize, 1), adapter.logicalClient().pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 1), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_events.items.len);
     try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
@@ -1779,7 +1779,7 @@ test "CR3a-2c3d C3-2 foreign thread purge is rejected before mutation" {
     const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3E01, 0x2C3E02, 0x2C3E03);
     defer _ = std.c.close(peer);
     defer adapter.deinit();
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3E03, "{\"event\":\"runtime.ended\"}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3E03, "{\"event\":\"runtime.ended\"}");
     const Probe = struct {
         attachment: *GenerationAttachment,
         rejected: std.atomic.Value(bool) = .init(false),
@@ -1794,7 +1794,7 @@ test "CR3a-2c3d C3-2 foreign thread purge is rejected before mutation" {
     const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
     thread.join();
     try std.testing.expect(probe.rejected.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), adapter.logicalClient().pending_events.items.len);
+    try std.testing.expectEqual(@as(usize, 1), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_events.items.len);
     try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
@@ -1807,7 +1807,7 @@ test "CR3a-2c3d C3-2 repeated purge is one-shot then not-ended" {
     const peer = try initPurgeTest(&client, &adapter, &attachment, 0x2C3E11, 0x2C3E12, 0x2C3E13);
     defer _ = std.c.close(peer);
     defer adapter.deinit();
-    try adapter.logicalClient().bufferGenerationEventForTest(0x2C3E13, "{\"event\":\"runtime.ended\"}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(0x2C3E13, "{\"event\":\"runtime.ended\"}");
     try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.purged, try attachment.purgeEndedStream());
     try std.testing.expectEqual(generation_transport_mod.PurgeEndedOutcome.not_ended, try attachment.purgeEndedStream());
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
@@ -2164,7 +2164,7 @@ test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct 
 
     const first_batch_bytes = try allocator.dupe(u8, snapshot.items);
     const second_batch_bytes = try allocator.dupe(u8, snapshot.items);
-    const logical_client = adapter.logicalClient();
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
     try logical_client.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2B5,
@@ -2304,7 +2304,7 @@ test "CR3a-2d1 generation attachment는 첫 retryable token을 teardown fresh pe
     const bytes = try release_probe.allocator().dupe(u8, snapshot.items);
     release_probe.target_addr = @intFromPtr(bytes.ptr);
     release_probe.target_len = bytes.len;
-    const logical_client = adapter.logicalClient();
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
     try logical_client.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2D24,
@@ -2394,7 +2394,7 @@ test "CR3a-2d2 GenerationAttachment는 두 번째 retryable을 node terminal han
     const bytes = try release_probe.allocator().dupe(u8, "terminal-generation-batch");
     release_probe.target_addr = @intFromPtr(bytes.ptr);
     release_probe.target_len = bytes.len;
-    const logical_client = adapter.logicalClient();
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
     try logical_client.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 0x2D34,
@@ -2476,7 +2476,7 @@ test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
     try attachment.initScreen(screen_stream.codec_version);
 
     const malformed_bytes = try allocator.dupe(u8, "malformed-screen-record");
-    const logical_client = adapter.logicalClient();
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
     try logical_client.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2D5,
@@ -2575,7 +2575,7 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     // 다음 batch는 payload queue가 이미 소유한 상태에서 teardown해 release-only draining과
     // canonical drop의 exact 순서를 고정한다.
     const pending_bytes = try allocator.dupe(u8, "pending-generation-batch");
-    const logical_client = adapter.logicalClient();
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
     try logical_client.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 0x2C4,

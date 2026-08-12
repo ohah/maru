@@ -108,6 +108,18 @@ pub const RuntimeAdmissionSealInput = struct {
     state_raw: u8,
 };
 
+pub const PreparedAdmissionCloseSealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    slot_addr: u64,
+    slot_incarnation: u64,
+    node_addr: u64,
+    node_incarnation: u64,
+    connection_generation: u64,
+    request_generation: u64,
+    lifecycle_raw: u8,
+};
+
 pub const WindowCloseTicketReservationSealInput = struct {
     self_addr: u64,
     backend_addr: u64,

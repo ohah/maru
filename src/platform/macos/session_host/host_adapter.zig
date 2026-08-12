@@ -53,8 +53,44 @@ pub const HostAdapter = struct {
 
     pub const InitError = client_slot_mod.InitError || error{UnsupportedProtocol};
 
+    pub const testing = if (@import("builtin").is_test) struct {
+        /// 제품 facade가 닫힌 operation으로 전환된 뒤에도 기존 failure fixture가 Client 상태를 주입할 때만 쓴다.
+        pub fn rawClient(adapter: *HostAdapter) *client_mod.Client {
+            return adapter.slot.logicalClient();
+        }
+    } else struct {};
+
     pub fn initializeProcessRuntime() client_slot_mod.ClientSlot.ProcessRuntimeInitError!void {
         try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    }
+
+    pub fn connectionGeneration(self: *const HostAdapter) u64 {
+        return self.slot.connectionGeneration();
+    }
+
+    /// reconnect 준비는 Client를 꺼내지 않고 exact current generation의 신규 admission만 봉인한다.
+    pub fn prepareAdmissionClose(
+        self: *HostAdapter,
+        expected_generation: u64,
+        out: *client_slot_mod.PreparedAdmissionClose,
+    ) client_slot_mod.ClientSlot.AdmissionCloseError!void {
+        return self.slot.prepareAdmissionClose(expected_generation, out);
+    }
+
+    /// 준비된 권위만 신규 호출을 닫을 수 있으며 current pointer와 Client bytes는 이 단계에서 바꾸지 않는다.
+    pub fn commitAdmissionClose(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+    ) client_slot_mod.ClientSlot.AdmissionCloseError!void {
+        return self.slot.commitAdmissionClose(permit);
+    }
+
+    /// R2 publication 전 실패만 같은 generation을 다시 열며 permit replay는 허용하지 않는다.
+    pub fn cancelAdmissionClose(
+        self: *HostAdapter,
+        permit: *client_slot_mod.PreparedAdmissionClose,
+    ) client_slot_mod.ClientSlot.AdmissionCloseError!void {
+        return self.slot.cancelAdmissionClose(permit);
     }
 
     pub fn initInPlace(
@@ -165,30 +201,25 @@ pub const HostAdapter = struct {
 
     /// host.info/runtime.list/host.upgrade.*처럼 screen codec과 독립된 control RPC.
     pub fn call(self: *HostAdapter, method: []const u8, params_json: ?[]const u8) client_mod.ClientError![]u8 {
-        return self.slot.logicalClient().call(method, params_json);
+        return self.slot.callCurrent(self.slot.connectionGeneration(), method, params_json);
     }
 
     /// generation runtime 생성은 고정된 wire method만 노출해 호출자가 raw Client를 빌리지 않게 한다.
     pub fn spawnRuntime(self: *HostAdapter, params_json: []const u8) client_mod.ClientError![]u8 {
-        return self.slot.logicalClient().call("runtime.spawn_full", params_json);
+        return self.slot.callCurrent(self.slot.connectionGeneration(), "runtime.spawn_full", params_json);
     }
 
     /// generation RPC가 새 request를 쓰기 전에 현재 readable RX를 canonical queue로 옮긴다.
     pub fn ingestRuntimeReadableEvidence(self: *HostAdapter) client_mod.ClientError!void {
-        return self.slot.logicalClient().ingestReadableOutOfBandEvidence();
-    }
-
-    /// Client 내부의 selected wire major와 bounded screen reader가 current logical DTO로 normalize한다.
-    pub fn logicalClient(self: *HostAdapter) *client_mod.Client {
-        return self.slot.logicalClient();
+        return self.slot.ingestCurrentReadableEvidence(self.slot.connectionGeneration());
     }
 
     pub fn canTerminalizeSharedConnectionNoDestroy(self: *HostAdapter) bool {
-        return self.logicalClient().canTerminalizeSharedConnectionNoDestroy();
+        return self.slot.currentCanTerminalizeNoDestroy(self.slot.connectionGeneration());
     }
 
     pub fn terminalizeSharedConnectionNoDestroy(self: *HostAdapter) bool {
-        return self.logicalClient().terminalizeSharedConnectionNoDestroy();
+        return self.slot.terminalizeCurrentNoDestroy(self.slot.connectionGeneration());
     }
 
     pub fn mintGenerationTransport(
@@ -332,7 +363,7 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
     defer current.deinit();
     try std.testing.expectEqual(Kind.current, current.kind);
     try std.testing.expectEqual(@as(u128, 0xAA), current.hostId());
-    try std.testing.expect(current.logicalClient() == current.slot.logicalClientConst());
+    try std.testing.expect(HostAdapter.testing.rawClient(&current) == current.slot.logicalClientConst());
 
     var previous_client: client_mod.Client = .{
         .allocator = allocator,
@@ -350,7 +381,7 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
     defer previous.deinit();
     try std.testing.expectEqual(Kind.previous, previous.kind);
     try std.testing.expectEqual(protocol.version_major - 1, previous.wireMajor());
-    try std.testing.expect(previous.logicalClient() == previous.slot.logicalClientConst());
+    try std.testing.expect(HostAdapter.testing.rawClient(&previous) == previous.slot.logicalClientConst());
 }
 
 test "host adapter validation failure preserves Client ownership and destination publication" {
@@ -422,7 +453,7 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
                 .wire_major => _ = local.wireMajor(),
                 .inventory => _ = local.supportsRuntimeInventory(),
                 .shutdown_manifest => _ = local.shutdownManifest(),
-                .logical_client => _ = local.logicalClient(),
+                .logical_client => _ = HostAdapter.testing.rawClient(&local),
                 .call => _ = local.call("host.info", null) catch {},
                 .deinit => local.deinit(),
             }
@@ -434,6 +465,29 @@ test "all copied host adapter public entrypoints fail-stop before freed-node acc
         // SIGABRT (6); pinning that signal distinguishes the intended fail-stop from a UAF SIGSEGV.
         try std.testing.expectEqual(@as(c_int, 6), status & 0x7f);
     }
+}
+
+test "CR3b R1 HostAdapter admission close는 호출을 막고 cancel 뒤 같은 generation을 다시 연다" {
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B106,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: HostAdapter = undefined;
+    try HostAdapter.initInPlace(&adapter, allocator, &source);
+    defer adapter.deinit();
+
+    const generation = adapter.connectionGeneration();
+    var permit: client_slot_mod.PreparedAdmissionClose = .{};
+    try adapter.prepareAdmissionClose(generation, &permit);
+    try adapter.commitAdmissionClose(&permit);
+    try std.testing.expectError(error.AdminBusy, adapter.call("host.info", null));
+    try adapter.cancelAdmissionClose(&permit);
+    // fd=-1 fixture가 wire 진입까지 갔다는 WriteFailed가 admission 재개 증거다.
+    try std.testing.expectError(error.WriteFailed, adapter.call("host.info", null));
 }
 
 test "C3-3b6 HostAdapter는 종료 manifest를 고정 길이 값으로 복사해 원본 수명과 분리한다" {

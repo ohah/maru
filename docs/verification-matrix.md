@@ -1582,6 +1582,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - CR3b: pool-membership과 독립된 connection generation 전이·publish·overflow, stale callback/동시 attempt,
   R1 admission close/cancel → R2 store-only detach+placeholder publish+callback cleanup → R3 final seal/canRetire/tick-end destroy의
   three-phase retirement, retired Client cap 2. CR3c: 실제 RemoteGeneration slot integration.
+  R1은 production `ClientSlot`의 generation 1을 대상으로 closed-operation `withCurrent` stack borrow와 final-address
+  `PreparedAdmissionClose`를 검증한다. open/mismatch/active borrow/commit 후 closed/cancel 후 reopen, copy·wrong-thread·fork·request replay와
+  callback reentry를 Debug·ReleaseFast에서 실행하고, raw `HostAdapter.logicalClient()` 제품 caller와 reconnect publish/current flip/
+  retired node/destroy/generation increment는 0으로 고정한다. focused gate는 각 최적화 모드에서 ClientSlot component 6개,
+  HostAdapter 제품 facade 1개, source boundary 1개를 exact-count한다.
 - CR3a-2e(구현 완료): generation attach는 wire write 전에 final-address binding, cleanup row, connection pin, batch adapter를 전부
   준비한다. batch adapter는 `reserved(stream_id=0)`에서 시작하고 accepted response의 exact nonzero stream만 callback/allocation 없는
   suffix로 결속해 `live`가 된다. Debug·ReleaseFast `test-session-host-2e`는 준비 계약 4개, actual socket parity 6개, rollback 4개,

@@ -531,7 +531,7 @@ pub const RemoteRuntime = struct {
         if (!builtin.is_test) unreachable;
         return switch (self.connection) {
             .legacy => |client| client,
-            .generation => |adapter| adapter.logicalClient(),
+            .generation => |adapter| host_adapter_mod.HostAdapter.testing.rawClient(adapter),
         };
     }
 
@@ -3062,7 +3062,7 @@ pub const testing_api = if (builtin.is_test) struct {
     /// 실제 Runtime의 generation stream에 event를 넣어 close pump가 소비할 prepared owner를 만든다.
     pub fn preparePendingEventForClose(runtime: *RemoteRuntime, payload: []const u8) !void {
         const adapter = runtime.generationConnection() orelse return error.InvalidOwner;
-        try adapter.logicalClient().bufferGenerationEventForTest(runtime.attachment.streamId(), payload);
+        try host_adapter_mod.HostAdapter.testing.rawClient(adapter).bufferGenerationEventForTest(runtime.attachment.streamId(), payload);
         switch (try runtime.attachment.generation.takeEvent()) {
             .taken => {},
             else => return error.TestUnexpectedResult,
@@ -4057,7 +4057,7 @@ test "CR3a-2e actual socket malformed accepted는 cache를 보존하고 준비 �
     );
     peer.join();
     try std.testing.expect(eof_seen);
-    try std.testing.expect(adapter.logicalClient().unusable);
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
     try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
     try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
     try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
@@ -4601,19 +4601,19 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
         }
     }
     try rr.queueCoreCommand(.{ .report_focus = true });
-    adapter.logicalClient().runtime_core_command_v1 = false;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).runtime_core_command_v1 = false;
     try rr.queueCoreCommand(.{ .scroll = 1 });
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
-    adapter.logicalClient().runtime_core_command_v1 = true;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).runtime_core_command_v1 = true;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    const saved_client_allocator = adapter.logicalClient().allocator;
-    adapter.logicalClient().allocator = failing.allocator();
+    const saved_client_allocator = host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator = failing.allocator();
     const oom_result = rr.queueCoreCommand(.{ .jump_to_prompt = 1 });
-    adapter.logicalClient().allocator = saved_client_allocator;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator = saved_client_allocator;
     try oom_result;
     try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
-    try std.testing.expect(adapter.logicalClient().pending_outbound == null);
-    try std.testing.expect(!adapter.logicalClient().unusable);
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
+    try std.testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
     while (!(try rr.pumpQueuedInput())) {}
     try rr.direct_input.appendSlice(allocator, "CD");
     try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
@@ -4628,10 +4628,10 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
         .parent = allocator,
         .runtime = &rr,
     };
-    const blocking_reentry_saved_allocator = adapter.logicalClient().allocator;
-    adapter.logicalClient().allocator = blocking_reentry.allocator();
+    const blocking_reentry_saved_allocator = host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator = blocking_reentry.allocator();
     const blocking_reentry_result = rr.flushQueuedInputBlocking();
-    adapter.logicalClient().allocator = blocking_reentry_saved_allocator;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator = blocking_reentry_saved_allocator;
     try blocking_reentry_result;
     try std.testing.expect(blocking_reentry.fired);
     try std.testing.expect(blocking_reentry.observed_admin_busy);
@@ -4639,17 +4639,17 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     try std.testing.expect(blocking_reentry.observed_pump_error == null);
     try std.testing.expectEqual(@as(usize, 1), blocking_reentry.observed_queue_len);
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
-    adapter.logicalClient().async_scroll_to_bottom_v1 = false;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).async_scroll_to_bottom_v1 = false;
     try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(0).?);
     try rr.flushQueuedInputBlocking();
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
     blocking_unsupported_ready.store(1, .release);
     try waitRemoteTestFlag(&blocking_unsupported_checked);
-    adapter.logicalClient().async_scroll_to_bottom_v1 = true;
-    blocking_filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).async_scroll_to_bottom_v1 = true;
+    blocking_filler_len = try fillRemoteTestSendBuffer(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd);
     try std.testing.expectEqual(
         @as(usize, 1),
-        try adapter.logicalClient().sendInputNonBlocking(7, "E"),
+        try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).sendInputNonBlocking(7, "E"),
     );
     try rr.direct_input.appendSlice(allocator, "F");
     try rr.pending_controls.append(allocator, runtime_pending_control.RawQueuedRuntimeControl.coreCommand(
@@ -4657,21 +4657,21 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
         .{ .jump_to_prompt = -1 },
     ).?);
     var blocking_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    const blocking_saved_allocator = adapter.logicalClient().allocator;
-    adapter.logicalClient().allocator = blocking_failing.allocator();
+    const blocking_saved_allocator = host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator = blocking_failing.allocator();
     blocking_oom_ready.store(1, .release);
     const blocking_oom_result = rr.flushQueuedInputBlocking();
-    adapter.logicalClient().allocator = blocking_saved_allocator;
+    host_adapter_mod.HostAdapter.testing.rawClient(&adapter).allocator = blocking_saved_allocator;
     try std.testing.expectError(error.OutOfMemory, blocking_oom_result);
     try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
     try std.testing.expectEqualStrings("F", rr.direct_input.items[rr.direct_input_offset..]);
-    try std.testing.expect(adapter.logicalClient().pending_outbound == null);
-    try std.testing.expect(!adapter.logicalClient().unusable);
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
+    try std.testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
     try rr.flushQueuedInputBlocking();
     try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
     try std.testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
     try waitRemoteTestFlag(&blocking_oom_retry_checked);
-    retry_filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+    retry_filler_len = try fillRemoteTestSendBuffer(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd);
     try std.testing.expectEqual(@as(usize, 1), try rr.sendInputNonBlocking("A"));
     try rr.queueCoreCommand(.{ .report_focus = false });
     try rr.requestScrollToBottom();
@@ -4681,22 +4681,22 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     // queue 길이는 1 또는 2지만, 아래 peer oracle이 wire 순서를 끝까지 검증한다.
     try std.testing.expect(rr.pending_controls.items.len >= 1);
     try std.testing.expect(rr.pending_controls.items.len <= 2);
-    try std.testing.expect(adapter.logicalClient().pending_outbound != null);
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound != null);
     release_filler.store(1, .release);
     try waitRemoteTestFlag(&filler_drained);
-    const pending = &adapter.logicalClient().pending_outbound.?;
+    const pending = &host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?;
     if (pending.offset == 0) {
         const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
             60 * std.time.ns_per_s;
         while (true) {
-            const written = c.send(adapter.logicalClient().fd, pending.frame.ptr, 1, 0);
+            const written = c.send(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd, pending.frame.ptr, 1, 0);
             if (written == 1) break;
             if (written < 0 and posix.errno(written) == .INTR) continue;
             if (written < 0 and posix.errno(written) == .AGAIN) {
                 if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline)
                     return error.RemoteTestDeadlineExceeded;
                 var poll_fd = posix.pollfd{
-                    .fd = adapter.logicalClient().fd,
+                    .fd = host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd,
                     .events = c.POLL.OUT,
                     .revents = 0,
                 };
@@ -4711,8 +4711,8 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
         pending.offset = 1;
     }
     try std.testing.expect(pending.offset > 0 and pending.offset < pending.frame.len);
-    while (!(try rr.attachment.pumpPendingOutput(adapter.logicalClient()))) {}
-    try std.testing.expect(adapter.logicalClient().pending_outbound == null);
+    while (!(try rr.attachment.pumpPendingOutput(host_adapter_mod.HostAdapter.testing.rawClient(&adapter)))) {}
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
     while (!(try rr.pumpQueuedInput())) {}
     peer.join();
     peer_joined = true;
@@ -4731,10 +4731,10 @@ test "CR3a-2c1 CR3a-2c3c C2 CR3a-2c3c C3 generation attach admits nonblocking an
     ).?);
     try std.testing.expectError(error.ConnectionClosed, rr.flushQueuedInputBlocking());
     try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
-    try std.testing.expect(adapter.logicalClient().unusable);
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
     try std.testing.expectEqual(
         @import("client_poison.zig").ConnectionReason.outbound_write_ambiguous,
-        adapter.logicalClient().firstPoisonReason().?,
+        host_adapter_mod.HostAdapter.testing.rawClient(&adapter).firstPoisonReason().?,
     );
     try std.testing.expectError(error.ConnectionClosed, rr.flushQueuedInputBlocking());
     try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
@@ -5605,10 +5605,10 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
         rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 }),
     );
     peer.join();
-    try std.testing.expect(adapter.logicalClient().unusable);
+    try std.testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
     try std.testing.expectEqual(
         client_poison.ConnectionReason.peer_contract_violation,
-        adapter.logicalClient().firstPoisonReason().?,
+        host_adapter_mod.HostAdapter.testing.rawClient(&adapter).firstPoisonReason().?,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -6772,7 +6772,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
         .spawn_full, .attach_controller => unreachable,
     }
     peer.join();
-    try testing.expect(!adapter.logicalClient().unusable);
+    try testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
 }
 
 test "2c3e C2 제품 RPC family는 resize를 typed request로 실행한다" {
@@ -7660,13 +7660,13 @@ test "C3-3a3 product remote runtime aggregate rejects central RPC and retains qu
     var runtime: RemoteRuntime = undefined;
     try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
     defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
-    try adapter.logicalClient().bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
     try takeAggregateRevokeForFixture(&runtime);
     try runtime.direct_input.appendSlice(testing.allocator, "retained");
     try testing.expect(!(try runtime.pumpQueuedInput()));
     try testing.expectEqualStrings("retained", runtime.direct_input.items);
     try testing.expectError(error.AdminBusy, runtime.callOrdered("runtime.snapshot", "{}"));
-    try testing.expect(adapter.logicalClient().pending_outbound == null);
+    try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
     try runtime.attachment.generation.releaseEvent();
 }
 
@@ -7681,7 +7681,7 @@ test "C3-3a3 product remote runtime observer remains a local no-op while aggrega
     var runtime: RemoteRuntime = undefined;
     try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
     defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
-    try adapter.logicalClient().bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
+    try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).bufferGenerationEventForTest(7, "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}");
     try takeAggregateRevokeForFixture(&runtime);
     try testing.expectEqual(@as(usize, 1), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     try runtime.direct_input.appendSlice(testing.allocator, "observer-retained");
@@ -7689,7 +7689,7 @@ test "C3-3a3 product remote runtime observer remains a local no-op while aggrega
     try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
     try runtime.resize(80, 24);
     try testing.expectEqualStrings("observer-retained", runtime.direct_input.items);
-    try testing.expect(adapter.logicalClient().pending_outbound == null);
+    try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
     try runtime.attachment.generation.releaseEvent();
     try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     try testing.expectEqualStrings("observer-retained", runtime.direct_input.items);
@@ -7847,18 +7847,18 @@ test "C3-3a3 actual socket target offset zero is cancelled and aggregate settles
     var runtime: RemoteRuntime = undefined;
     try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
     defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
-    const filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+    const filler_len = try fillRemoteTestSendBuffer(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd);
     try testing.expectEqual(
         @as(usize, "target-owned-frame".len),
         try runtime.attachment.generation.sendInputNonBlocking("target-owned-frame"),
     );
-    try testing.expectEqual(@as(u64, 7), adapter.logicalClient().pending_outbound.?.stream_id);
-    try testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_outbound.?.offset);
+    try testing.expectEqual(@as(u64, 7), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.stream_id);
+    try testing.expectEqual(@as(usize, 0), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.offset);
     try writeAggregateRevokeWire(fds[1]);
-    try testing.expect((try adapter.logicalClient().readStreamBatch(7)) == null);
+    try testing.expect((try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).readStreamBatch(7)) == null);
     const drained = try runtime.drainObservationEvents();
     try testing.expect(drained.metadata);
-    try testing.expect(adapter.logicalClient().pending_outbound == null);
+    try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
     try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     const filler = try testing.allocator.alloc(u8, filler_len);
     defer testing.allocator.free(filler);
@@ -7882,24 +7882,24 @@ test "C3-3a3 actual socket partial target fails closed and sibling owner resumes
         var runtime: RemoteRuntime = undefined;
         try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
         defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
-        const filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+        const filler_len = try fillRemoteTestSendBuffer(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd);
         const payload = try testing.allocator.alloc(u8, 64 * 1024);
         defer testing.allocator.free(payload);
         @memset(payload, 'p');
         try testing.expectEqual(payload.len, try runtime.attachment.generation.sendInputNonBlocking(payload));
-        try testing.expectEqual(@as(usize, 0), adapter.logicalClient().pending_outbound.?.offset);
+        try testing.expectEqual(@as(usize, 0), host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.offset);
         var filler_prefix: [4096]u8 = undefined;
         try readRemoteTestExact(fds[1], &filler_prefix);
         try testing.expect(filler_len >= filler_prefix.len);
         _ = try runtime.attachment.generation.pumpPendingOutput();
-        try testing.expect(adapter.logicalClient().pending_outbound.?.offset > 0);
-        try testing.expect(adapter.logicalClient().pending_outbound.?.offset <
-            adapter.logicalClient().pending_outbound.?.frame.len);
+        try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.offset > 0);
+        try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.offset <
+            host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.frame.len);
         try writeAggregateRevokeWire(fds[1]);
-        try testing.expect((try adapter.logicalClient().readStreamBatch(7)) == null);
+        try testing.expect((try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).readStreamBatch(7)) == null);
         try testing.expectError(error.ConnectionClosed, runtime.drainObservationEvents());
-        try testing.expect(adapter.logicalClient().unusable);
-        try testing.expect(adapter.logicalClient().pending_outbound == null);
+        try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
+        try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
         try testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.connectionOrderingBlockerCount());
     }
     {
@@ -7925,16 +7925,16 @@ test "C3-3a3 actual socket partial target fails closed and sibling owner resumes
             8,
         );
         defer deinitGenerationAttachmentFixture(&sibling, &adapter);
-        const filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+        const filler_len = try fillRemoteTestSendBuffer(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).fd);
         try testing.expectEqual(
             @as(usize, "sibling-owned-frame".len),
             try sibling.sendInputNonBlocking("sibling-owned-frame"),
         );
-        const sibling_addr = @intFromPtr(adapter.logicalClient().pending_outbound.?.frame.ptr);
+        const sibling_addr = @intFromPtr(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?.frame.ptr);
         try writeAggregateRevokeWire(fds[1]);
-        try testing.expect((try adapter.logicalClient().readStreamBatch(7)) == null);
+        try testing.expect((try host_adapter_mod.HostAdapter.testing.rawClient(&adapter).readStreamBatch(7)) == null);
         _ = try runtime.drainObservationEvents();
-        const preserved = adapter.logicalClient().pending_outbound.?;
+        const preserved = host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound.?;
         try testing.expectEqual(@as(u64, 8), preserved.stream_id);
         try testing.expectEqual(@as(usize, 0), preserved.offset);
         try testing.expectEqual(sibling_addr, @intFromPtr(preserved.frame.ptr));
@@ -7943,7 +7943,7 @@ test "C3-3a3 actual socket partial target fails closed and sibling owner resumes
         defer testing.allocator.free(filler);
         try readRemoteTestExact(fds[1], filler);
         try testing.expect(try runtime.attachment.generation.pumpPendingOutput());
-        try testing.expect(adapter.logicalClient().pending_outbound == null);
+        try testing.expect(host_adapter_mod.HostAdapter.testing.rawClient(&adapter).pending_outbound == null);
         const frame = try framing.encodeFrame(testing.allocator, .{
             .kind = .input_bytes,
             .stream_id = 8,

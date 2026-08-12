@@ -996,6 +996,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `withCurrent` stack borrow, admission close,
    `Client.canRetire()`와 tick-end deferred retirement(동시 retired Client hard cap 2)를 닫는다. CR3c에서 `RemoteGeneration`을
    실제 slot에 연결한다.
+   CR3b R1은 먼저 generation 1 current를 바꾸지 않은 채 final-address `PreparedAdmissionClose`로 신규 Client admission을
+   store-only close/cancel하고, raw `logicalClient()`를 반환하지 않는 closed-operation `withCurrent` stack borrow로 제품 호출을
+   전환한다. 독립 allocator-owned RPC response만 각 facade의 기존 소유 계약으로 반환할 수 있다. R1의 reconnect/current publish·
+   retired node·Client destroy·generation increment 제품 caller는 0이다. R2가
+   detach+placeholder와 generation publish를, R3가 final seal/canRetire/tick-end destroy를 이어서 소유한다.
 6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
    status/takeover와 lost-reply fail-stop 정책을 실제 socket fixture로 연결한다. observer conflict를 자동 takeover하지 않는다.
 7. **CR5 — 멀티윈도우·다중 runtime:** app-global `SessionHostCoordinator`의 host job, runtime별 authority ledger,

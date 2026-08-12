@@ -30,6 +30,27 @@ sh tools/mobile-poc/run.sh features-ios        # 같은 판정 (지금 멈춘다
 일을 포함하고, 남겨 두면 어느 쪽이 진짜인지 흐려진다. 측정 **결과**(아래 표·스크린샷)는
 전부 남는다. 여섯 기능 판정기는 다른 모드가 대체하지 않아 남겼다.
 
+## 남아 있는 그림
+
+측정 결과는 숫자와 그림 둘 다다. **저장소만 보고도 각 그림이 무엇의 증거인지 알 수 있어야**
+하므로 여기에 적는다.
+
+| 파일 | 무엇의 증거 | 다시 만들 수 있나 |
+|---|---|---|
+| `out/maru-chrome-ios.png` | iOS 시뮬레이터의 현재 화면 | `chrome-ios` |
+| `out/maru-chrome-android-app.png` | Android 에뮬레이터의 현재 화면 | `chrome-android-app` |
+| `out/atlas-diff.png` | 같은 폰트로 구운 두 아틀라스의 픽셀 차이 | `atlas_diff.py` |
+| `out/maru-input-ios.png` | iOS 입력이 코어까지 닿아 그려짐 | `idb ui text` 뒤 캡쳐 |
+| `out/maru-input-android.png` | Android 입력이 코어까지 닿아 그려짐 | `adb shell input tap` 뒤 캡쳐 |
+| `out/maru-lifecycle-android.png` | 홈↔복귀 뒤 렌더 재개 | `input keyevent KEYCODE_HOME` 뒤 재실행 |
+| `out/maru-ios-poc.png` | 1단계 — Metal 오프스크린 격자 | **아니오**(하네스 제거) |
+| `out/maru-android-poc.png` | 1단계 — Vulkan 오프스크린 격자 | **아니오** |
+| `out/maru-ios-app.png` | 2단계 — 시뮬레이터 앱에서 커서 깜빡임 | **아니오** |
+| `out/maru-chrome-android.png` | 3단계 — chrome 을 Vulkan 오프스크린으로 | **아니오** |
+
+아래 넷은 대체된 초기 단계의 결과다. 그 단계를 지운 뒤로 **다시 만들 수 없지만**, 당시
+판정의 근거라서 남긴다.
+
 ## 무엇을 판정하는가
 
 **화면이 뜨는 것으로는 부족하다.** 픽셀을 읽어 "실제로 그려졌다"를 확인한다 — 새

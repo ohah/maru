@@ -3062,6 +3062,54 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact 1회, `bufferGenerationEventForTest`가 0이어야 한다. RPC/decoder direct-call inventory, immediate EOF와 unread
    RX-first, decoder cadence/parity는 2c3e가 소유하므로 이 경계를 넓혀 대신 완료 처리하지 않는다.
 
+   **2c3e는 scoped decoder bridge(C1) → 제품 RPC family 전환(C2) → socket cadence parity(C3)의 세 merge
+   gate로 닫는다.** C1은 이미 구현된 typed `RuntimeRequest`와 transport-owned inline RPC response owner 사이의
+   마지막 lexical borrow만 연다. 공개·package facade의 exact 호출 형태는
+   기존 `GenerationTransport` facade method 수를 늘리지 않는 owner-bound module seam
+   `executePreparedRequestWithDecoderOwned(transport, attachment_owner_addr, receipt, context, decoder)
+   RpcError!RpcDecodeDisposition`이고 decoder는
+   `fn (*anyopaque, RuntimeRequestTag, []const u8) RpcDecodeDisposition`이다. `RpcDecodeDisposition`은
+   `reusable|protocol_failure` 두 값뿐이며 pointer, allocator, response owner, borrow/finish receipt를 포함하지 않는다.
+   callback의 byte slice는 호출 중에만 유효하고 저장·반환할 수 없다. C1 제품 caller는 0이며 C2의
+   `RemoteRuntime` adapter만 exact caller가 된다.
+
+   C1의 canonical 순서는 queued mutation과 무관한 이미 prepared request에 대해 execute → accepted response owner
+   publication → final-address borrow receipt publication → decoder callback exact 1회 → callback 복귀 뒤 response와
+   borrow exact 재검증 → disposition별 finish/free → reusable inline slot pristine rearm 또는 protocol-failure terminal
+   publication이다. typed reject·uncertain·pre-wire failure에서는 decoder callback 0이다. accepted callback 뒤에는 payload
+   free가 exact 1회이고 raw response owner·borrow·finish authority가 전부 source-zero여야 한다. decoder가
+   `protocol_failure`를 반환하면 response bytes를 먼저 exact free한 뒤 Client connection을
+   `peer_contract_violation`으로 한 번만 terminalize한다. callback 중 same/cross-family request, input/control/event,
+   teardown은 borrow부터 finish/rearm까지 유지되는 registered operation pin과 같은 thread의 scoped decoder latch에서
+   mutation 0 `Busy`다. callback이 response/borrow/permit/allocator
+   provenance를 바꾸면 retry·두 번째 free 없이 common `fatalIntegrity(.proof_loss)`로 끝난다.
+
+   C1 focused gate `test-session-host-2c3e-c1`은 Debug·ReleaseFast 각각 neutral contract 4개, scoped owner 8개,
+   actual-socket replay 3개, fresh proof-loss subprocess 3개, boundary 1개를 exact-count한다. neutral 범주는 closed
+   disposition, callback signature, pointer-free result, 기존 VTable/transport ABI 비확장을 고정한다. owner 범주는
+   accepted reusable/protocol failure, typed reject/uncertain callback 0, callback reentry Busy, copied/moved
+   response·borrow authority와 response alias, source-zero/rearm exact once를 독립 검증한다. socket replay는 정상 JSON, malformed JSON,
+   response 직후 EOF를 실제 wire에서 실행한다. subprocess는 callback 전 response seal, callback 뒤 borrow seal,
+   free 뒤 rearm permit drift를 서로 다른 marker transcript로 common proof-loss leaf에 결속한다. boundary는 raw
+   response slice 반환 0, decoder bridge의 C1 제품 caller 0, old raw `callOwned|callGenerationRpc` 제품 caller baseline,
+   allocator·Client·RPC owner type escape 0을 고정한다.
+
+   C2는 `RemoteRuntime`의 attach를 제외한 bound request family를 typed `RuntimeRequest`와 C1 decoder callback으로
+   전환한다. decoder와 ordered input 정책은 계속 `RemoteRuntime` 하나만 소유하고 transport/ClientSlot은 JSON schema를
+   해석하지 않는다. family는 resize, observation, selected_text, link_at, clipboard_write, find, select_op,
+   core_command, report_mouse, notification, terminate, detach의 exact 12개다. attach는 기존 one-shot
+   `ExecutedResponse` owner를 유지하고 C2 count에 섞지 않는다. 각 family는 legacy와 generation의 typed 결과,
+   poison reason, retained input/control ordering, payload free count가 같아야 하며 generation arm의 raw method/encoded
+   JSON/`callOrdered` 직접 호출은 0이 된다. C2가 green이 되기 전에는 raw compatibility wrapper를 제거하지 않는다.
+
+   C3는 actual socket에서 immediate EOF, unread response 앞의 revoke/event, response 뒤 queued event, malformed/unknown
+   frame cadence를 legacy와 generation으로 같은 fixture에 실행한다. RX arbitration은 unread event/revoke를 먼저
+   settlement하고 그 뒤 correlated response decoder를 exact once 호출한다. EOF는 parser에 완전한 response가 있으면
+   그 response를 먼저 commit하고 다음 turn에 terminalize하며, incomplete response면 decoder 0·source-zero 뒤
+   connection terminal이다. C3 boundary가 generation arm의 direct `logicalClient()`/raw `Client` RPC·decoder method
+   제품 호출 0과 C1 bridge의 `RemoteRuntime` exact caller inventory를 고정한다. C1~C3가 모두 green일 때만 2c3e와
+   2c3 전체를 구현 완료로 표시한다.
+
    C3-3b TDD gate는 최소 다음을 Debug·ReleaseFast와 actual socket/product path에서 고정한다.
 
    - 모든 event kind의 prepare/settlement Busy·mismatch에서 live semantic state mutation 0, retry exact once

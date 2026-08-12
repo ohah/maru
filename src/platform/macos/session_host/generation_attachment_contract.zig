@@ -456,6 +456,69 @@ pub fn runtimeRequestTagRawValid(value: *const RuntimeRequestTag) bool {
     return raw <= @intFromEnum(RuntimeRequestTag.detach);
 }
 
+/// Decoder는 응답 bytes를 빌린 호출 안에서 이 두 종료 의미 중 하나만 선택한다. bytes나
+/// response owner를 결과에 담지 않으므로 callback이 끝난 뒤 cleanup 권위가 caller로 새지 않는다.
+pub const RpcDecodeDisposition = enum(u8) {
+    reusable,
+    protocol_failure,
+};
+
+pub fn rpcDecodeDispositionRawValid(value: *const RpcDecodeDisposition) bool {
+    return @as(*const u8, @ptrCast(value)).* <= @intFromEnum(RpcDecodeDisposition.protocol_failure);
+}
+
+pub const RpcDecoder = *const fn (
+    context: *anyopaque,
+    tag: RuntimeRequestTag,
+    bytes: []const u8,
+) RpcDecodeDisposition;
+
+fn typeContainsPointer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer, .optional => |info| if (@typeInfo(T) == .optional)
+            typeContainsPointer(info.child)
+        else
+            true,
+        .array => |info| typeContainsPointer(info.child),
+        .error_union => |info| typeContainsPointer(info.payload),
+        .@"struct" => |info| blk: {
+            for (info.fields) |field| if (typeContainsPointer(field.type)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            for (info.fields) |field| if (typeContainsPointer(field.type)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+test "2c3e C1 중립 계약은 decoder disposition 두 값만 허용한다" {
+    var raw: u16 = 0;
+    while (raw <= 255) : (raw += 1) {
+        var storage: u8 = @intCast(raw);
+        const value: *const RpcDecodeDisposition = @ptrCast(&storage);
+        try std.testing.expectEqual(raw <= 1, rpcDecodeDispositionRawValid(value));
+    }
+}
+
+test "2c3e C1 중립 계약은 decoder callback signature를 고정한다" {
+    try std.testing.expect(RpcDecoder == *const fn (
+        *anyopaque,
+        RuntimeRequestTag,
+        []const u8,
+    ) RpcDecodeDisposition);
+}
+
+test "2c3e C1 중립 계약의 decoder 결과에는 pointer authority가 없다" {
+    try std.testing.expect(!typeContainsPointer(RpcDecodeDisposition));
+}
+
+test "2c3e C1 중립 계약은 reusable과 protocol failure를 서로 다른 raw 값으로 보존한다" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(RpcDecodeDisposition.reusable));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(RpcDecodeDisposition.protocol_failure));
+}
+
 pub const RequestFamily = enum(u8) {
     connection_only_denied,
     attach_only,

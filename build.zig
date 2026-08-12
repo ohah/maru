@@ -2139,6 +2139,11 @@ pub fn build(b: *std.Build) void {
         "2c3d C3-3c product socket and source-zero Debug and ReleaseFast gates",
     );
     session_host_2c3d_c3_3c_step.dependOn(session_host_2c3d_c3_3b6_step);
+    const session_host_2c3e_c1_step = b.step(
+        "test-session-host-2c3e-c1",
+        "2c3e C1 scoped decoder bridge Debug and ReleaseFast gates",
+    );
+    session_host_2c3e_c1_step.dependOn(session_host_2c3d_c3_3c_step);
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -3015,6 +3020,63 @@ pub fn build(b: *std.Build) void {
             session_host_2c3d_c3_3c_step,
             event_c3_3c_client_module,
             "C3-3c ended 빠른 판별은",
+            1,
+        );
+        const event_2c3e_c1_contract_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_attachment_contract.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c1_step,
+            event_2c3e_c1_contract_module,
+            "2c3e C1 중립 계약",
+            4,
+        );
+        const event_2c3e_c1_response_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/rpc_executed_response.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c1_step,
+            event_2c3e_c1_response_module,
+            "2c3e C1 scoped owner는",
+            8,
+        );
+        const event_2c3e_c1_transport_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_transport.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c1_step,
+            event_2c3e_c1_transport_module,
+            "2c3e C1 actual socket은",
+            3,
+        );
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c1_step,
+            event_2c3e_c1_transport_module,
+            "2c3e C1 proof-loss subprocess는",
+            3,
+        );
+        const event_2c3e_c1_boundary_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_2c3e_c1_boundary.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        B3SettlementTest.add(
+            b,
+            session_host_2c3e_c1_step,
+            event_2c3e_c1_boundary_module,
+            "2c3e C1 경계는",
             1,
         );
         const event_c3_3c_boundary_module = b.createModule(.{

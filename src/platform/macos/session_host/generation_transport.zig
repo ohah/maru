@@ -843,6 +843,26 @@ pub fn callOwned(
     return client_slot_mod.callGenerationRpc(transport.ownerQuery(), method, params_json);
 }
 
+/// C1은 decoder에게 payload를 소유시키지 않는다. callback이 끝나기 전에 ClientSlot이
+/// response owner를 다시 검증하고 free/rearm 또는 protocol terminal을 완결한다.
+pub fn executePreparedRequestWithDecoderOwned(
+    transport: *GenerationTransport,
+    attachment_owner_addr: usize,
+    receipt: contract.PreparedCallReceipt,
+    context: *anyopaque,
+    decoder: contract.RpcDecoder,
+) Error!contract.RpcDecodeDisposition {
+    if (!transport.requestIdentityValid() or attachment_owner_addr == 0 or
+        transport.owner_addr != attachment_owner_addr)
+        return error.MovedOrCopied;
+    return client_slot_mod.executeGenerationRpcDecoded(.{
+        .request = transport.requestOperation(receipt),
+        .bound_stream_id = transport.bound_stream_id,
+        .context = context,
+        .decoder = decoder,
+    }) catch |err| return mapGenerationExecuteToLegacyError(err);
+}
+
 /// Package-level attachment seam. It publishes the mirror only from the canonical registry
 /// publication returned by the same take transaction; EventOwner bytes are not re-read.
 pub fn takeEventProjected(
@@ -1365,9 +1385,10 @@ pub fn preflightTerminalizeOwned(
     if (!rawLifecycleValid(&transport.lifecycle) or
         transport.self_addr != @intFromPtr(transport) or transport.lifecycle != .live or
         transport.owner_addr == 0 or transport.owner_addr != owner_addr or transport.owner_seal_addr == 0 or
-        !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage) or
-        !transport.rpc_response.pristineExact())
+        !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage))
         return .invalid;
+    if (transport.rpc_response.liveScalarIdentityExact(transport.rpc_response.identity)) return .busy;
+    if (!(transport.rpc_response.pristineExact() or transport.rpc_response.terminalExact())) return .invalid;
     if (!transport.snapshot_authority.canTerminalize(transport.transport_incarnation))
         return .busy;
     client_slot_mod.preflightGenerationTransportTerminalize(transport.ownerQuery()) catch |err|
@@ -1614,6 +1635,325 @@ fn runReusableResponseCorrection(cycles: usize, hostile_alias_case: ?u8) !void {
     try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
     try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
     slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
+}
+
+const ScopedDecoderSocketCase = enum {
+    reusable,
+    protocol_failure,
+    response_then_eof,
+};
+
+fn runScopedDecoderSocket(case: ScopedDecoderSocketCase) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3E_C101,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3E_C101);
+    defer slot.deinit();
+
+    const Lease = @typeInfo(
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+    ).pointer.child;
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: Lease = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &owner.binding,
+        &owner.lease,
+        @intFromPtr(&owner.transport),
+    );
+    const attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0x2C3E_C102,
+        .request_id = 0x2C3E_C103,
+        .request_digest = 0x2C3E_C104,
+    }).?;
+    try owner.binding.pairRequest(attach_receipt);
+    try owner.binding.beginExecute(attach_receipt);
+    try slot.commitAttachmentBinding(
+        &owner.binding,
+        reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(attach_receipt).?,
+            attach_receipt.request_id,
+        ).?,
+        91,
+        &owner.lease,
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    try bindCommittedStreamOwned(&owner.transport, @intFromPtr(&owner), 91);
+
+    const expected_payload = switch (case) {
+        .reusable, .response_then_eof => "{\"result\":true}",
+        .protocol_failure => "{malformed",
+    };
+    const Peer = struct {
+        fn readExact(fd: c.fd_t, bytes: []u8) bool {
+            var offset: usize = 0;
+            while (offset < bytes.len) {
+                const read_count = c.read(fd, bytes.ptr + offset, bytes.len - offset);
+                if (read_count < 0 and posix.errno(read_count) == .INTR) continue;
+                if (read_count <= 0) return false;
+                offset += @intCast(read_count);
+            }
+            return true;
+        }
+
+        fn run(fd: c.fd_t, payload: []const u8, complete: *bool) void {
+            defer _ = c.close(fd);
+            var raw_header: [protocol.header_size]u8 = undefined;
+            if (!readExact(fd, &raw_header)) return;
+            const header = protocol.Header.decode(&raw_header) catch return;
+            if (header.kind != .request or header.request_id == 0 or
+                header.payload_len > protocol.max_control_json) return;
+            const request_payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+            defer std.heap.page_allocator.free(request_payload);
+            if (!readExact(fd, request_payload)) return;
+            const response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = header.request_id },
+                payload,
+            ) catch return;
+            defer std.heap.page_allocator.free(response);
+            socket_server.writeAll(fd, response) catch return;
+            complete.* = true;
+        }
+    };
+    var peer_complete = false;
+    const peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], expected_payload, &peer_complete });
+
+    const Decoder = struct {
+        expected: []const u8,
+        disposition: contract.RpcDecodeDisposition,
+        transport: *GenerationTransport,
+        owner_addr: usize,
+        probe_reentry: bool,
+        invocation_count: usize = 0,
+        tag_exact: bool = false,
+        payload_exact: bool = false,
+        reentry_busy: bool = false,
+        cross_family_busy: bool = false,
+        input_busy: bool = false,
+        teardown_busy: bool = false,
+        latch_active: bool = false,
+
+        fn decode(
+            raw: *anyopaque,
+            tag: contract.RuntimeRequestTag,
+            payload: []const u8,
+        ) contract.RpcDecodeDisposition {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.invocation_count += 1;
+            self.tag_exact = tag == .observation;
+            self.payload_exact = std.mem.eql(u8, self.expected, payload);
+            self.latch_active = client_slot_mod.testing.rpcDecoderCallbackActive();
+            if (self.probe_reentry) {
+                _ = self.transport.prepareRequest(contract.RuntimeRequest.observation()) catch |err| {
+                    self.reentry_busy = err == error.Busy;
+                };
+                _ = self.transport.prepareRequest(contract.RuntimeRequest.clipboardWrite()) catch |err| {
+                    self.cross_family_busy = err == error.Busy;
+                };
+                _ = self.transport.sendInput("decoder-reentry") catch |err| {
+                    self.input_busy = err == error.Busy;
+                };
+                self.teardown_busy = preflightTerminalizeOwned(
+                    self.transport,
+                    self.owner_addr,
+                ) == .busy;
+            }
+            return self.disposition;
+        }
+    };
+    var decoder = Decoder{
+        .expected = expected_payload,
+        .disposition = if (case == .protocol_failure) .protocol_failure else .reusable,
+        .transport = &owner.transport,
+        .owner_addr = @intFromPtr(&owner),
+        .probe_reentry = case == .reusable,
+    };
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.observation());
+    const disposition = try executePreparedRequestWithDecoderOwned(
+        &owner.transport,
+        @intFromPtr(&owner),
+        receipt,
+        &decoder,
+        Decoder.decode,
+    );
+    peer.join();
+    try std.testing.expect(peer_complete);
+    try std.testing.expectEqual(@as(usize, 1), decoder.invocation_count);
+    try std.testing.expect(decoder.tag_exact);
+    try std.testing.expect(decoder.payload_exact);
+    try std.testing.expectEqual(decoder.disposition, disposition);
+    try std.testing.expect(decoder.latch_active);
+    if (case == .reusable) {
+        try std.testing.expect(decoder.reentry_busy);
+        try std.testing.expect(decoder.cross_family_busy);
+        try std.testing.expect(decoder.input_busy);
+        try std.testing.expect(decoder.teardown_busy);
+    }
+
+    if (case == .protocol_failure) {
+        try std.testing.expect(slot.logicalClient().unusable);
+        try std.testing.expectEqual(
+            client_poison.ConnectionReason.peer_contract_violation,
+            slot.logicalClient().first_poison_reason.?,
+        );
+        try owner.transport.poison(.peer_contract_violation);
+    } else {
+        try std.testing.expect(owner.transport.rpc_response.pristineExact());
+        try std.testing.expect(!slot.logicalClient().unusable);
+        try std.testing.expect(slot.logicalClient().first_poison_reason == null);
+    }
+
+    try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner));
+    slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
+}
+
+test "2c3e C1 actual socket은 정상 응답을 decoder에 exact once 빌리고 reusable로 재무장한다" {
+    try runScopedDecoderSocket(.reusable);
+}
+
+test "2c3e C1 actual socket은 malformed 응답을 exact once 빌리고 protocol failure로 닫는다" {
+    try runScopedDecoderSocket(.protocol_failure);
+}
+
+test "2c3e C1 actual socket은 응답 직후 EOF에서도 accepted 응답을 먼저 재무장한다" {
+    try runScopedDecoderSocket(.response_then_eof);
+}
+
+fn runScopedDecoderProofLoss(case_id: u8) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const child_case_ptr = c.getenv("MARU_2C3E_C1_PROOF_CASE");
+    if (child_case_ptr) |raw_case| {
+        const selected = std.fmt.parseInt(u8, std.mem.span(raw_case), 10) catch
+            return error.TestUnexpectedResult;
+        if (selected != case_id) return;
+        const stage_fd = std.fmt.parseInt(
+            c.fd_t,
+            std.mem.span(c.getenv("MARU_2C3E_C1_PROOF_FD") orelse
+                return error.TestUnexpectedResult),
+            10,
+        ) catch return error.TestUnexpectedResult;
+        const nonce = std.fmt.parseInt(
+            u64,
+            std.mem.span(c.getenv("MARU_2C3E_C1_PROOF_NONCE") orelse
+                return error.TestUnexpectedResult),
+            10,
+        ) catch return error.TestUnexpectedResult;
+        client_slot_mod.armRpcSubstrateFailStopForTest(case_id, nonce, stage_fd);
+        try runScopedDecoderSocket(.reusable);
+        @panic("decoder proof-loss fixture returned");
+    }
+
+    var stage_pipe: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stage_pipe));
+    const executable = try std.process.executablePathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(executable);
+    const nonce: u64 = 0x2C3E_C100_0000_0000 | @as(u64, case_id);
+    const child = c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) {
+        _ = c.close(stage_pipe[0]);
+        var case_buffer: [64]u8 = undefined;
+        const case_env = std.fmt.bufPrintZ(
+            &case_buffer,
+            "MARU_2C3E_C1_PROOF_CASE={d}",
+            .{case_id},
+        ) catch c._exit(126);
+        var fd_buffer: [64]u8 = undefined;
+        const fd_env = std.fmt.bufPrintZ(
+            &fd_buffer,
+            "MARU_2C3E_C1_PROOF_FD={d}",
+            .{stage_pipe[1]},
+        ) catch c._exit(126);
+        var nonce_buffer: [96]u8 = undefined;
+        const nonce_env = std.fmt.bufPrintZ(
+            &nonce_buffer,
+            "MARU_2C3E_C1_PROOF_NONCE={d}",
+            .{nonce},
+        ) catch c._exit(126);
+        const argv = [_:null]?[*:0]const u8{executable.ptr};
+        const env = [_:null]?[*:0]const u8{ case_env.ptr, fd_env.ptr, nonce_env.ptr };
+        _ = alarm(5);
+        _ = c.execve(executable.ptr, &argv, &env);
+        c._exit(127);
+    }
+    _ = c.close(stage_pipe[1]);
+    var transcript: [11 * 16]u8 = undefined;
+    var transcript_len: usize = 0;
+    while (transcript_len < transcript.len) {
+        const read_count = c.read(
+            stage_pipe[0],
+            transcript[transcript_len..].ptr,
+            transcript.len - transcript_len,
+        );
+        if (read_count > 0) {
+            transcript_len += @intCast(read_count);
+            continue;
+        }
+        if (read_count < 0 and posix.errno(read_count) == .INTR) continue;
+        if (read_count == 0) break;
+        return error.TestUnexpectedResult;
+    }
+    _ = c.close(stage_pipe[0]);
+    var status: c_int = 0;
+    while (true) {
+        const waited = c.waitpid(child, &status, 0);
+        if (waited == child) break;
+        if (waited < 0 and posix.errno(waited) == .INTR) continue;
+        return error.TestUnexpectedResult;
+    }
+    const wait_status: u32 = @bitCast(status);
+    try std.testing.expect(c.W.IFEXITED(wait_status));
+    try std.testing.expectEqual(@as(u8, 86), c.W.EXITSTATUS(wait_status));
+    const expected: []const u8 = switch (case_id) {
+        5 => &.{ 1, 2, 3, 4, 11 },
+        6 => &.{ 1, 2, 3, 4, 12, 11 },
+        4 => &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(expected.len * 11, transcript_len);
+    for (expected, 0..) |stage, index| {
+        const record = transcript[index * 11 ..][0..11];
+        try std.testing.expectEqual(@as(u8, 1), record[0]);
+        try std.testing.expectEqual(case_id, record[1]);
+        try std.testing.expectEqual(nonce, std.mem.readInt(u64, record[2..10], .little));
+        try std.testing.expectEqual(stage, record[10]);
+    }
+}
+
+test "2c3e C1 proof-loss subprocess는 callback 전 response seal drift를 fail-stop한다" {
+    try runScopedDecoderProofLoss(5);
+}
+
+test "2c3e C1 proof-loss subprocess는 callback 뒤 borrow seal drift를 fail-stop한다" {
+    try runScopedDecoderProofLoss(6);
+}
+
+test "2c3e C1 proof-loss subprocess는 free 뒤 rearm permit drift를 fail-stop한다" {
+    try runScopedDecoderProofLoss(4);
 }
 
 test "CR3a-2c3b reusable response correction uses transport inline slot twice" {

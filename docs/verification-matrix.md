@@ -713,6 +713,14 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
   repo-wide raw event/effect source boundary 1개를 실행하고 C3-3b6 gate를 상속한다. 제품 행은 wire ingress 뒤
   Pending/EventOwner/correlation/mirror/event queue source-zero, blocker/pin/quarantine의 event 전 live attachment 기준선 복귀,
   payload callback exact 1회를 검증한다. RPC/decoder direct-call과 immediate EOF·unread RX-first는 2c3e가 소유한다.
+- **2c3e C1 RED 인벤토리:** `test-session-host-2c3e-c1`은 Debug·ReleaseFast 각각 neutral contract 4개,
+  scoped owner 8개, actual-socket replay 3개, fresh proof-loss subprocess 3개, boundary 1개를 실행한다. accepted
+  response만 decoder callback exact 1회에 들어가고 reusable은 inline slot pristine rearm, protocol failure는 payload
+  free 뒤 peer-contract terminal이 된다. typed reject·uncertain은 callback 0이며 callback reentry는 모든 generation
+  mutation family에서 Busy다. copied/moved/alias와 callback 전후 seal/provenance drift는 mutation 0 또는 admission 뒤
+  common proof-loss로 닫는다. boundary는 decoder callback 밖 raw slice·RPC owner/receipt escape 0, C1 bridge product
+  caller 0과 raw wrapper baseline을 고정한다. C2의 exact 12 bound family 제품 전환과 C3의 immediate EOF·unread
+  RX-first actual socket parity가 모두 green이 되기 전에는 2c3e 또는 2c3 완료로 표시하지 않는다.
 
 ### 파일 탐색기 후속 두 PR gate (PR 1·PR 2 구현 완료)
 

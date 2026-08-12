@@ -114,6 +114,8 @@ const RpcSubstrateFailStopTestHook = struct {
         allocator_transcript_drift = 2,
         authority_permit_drift = 3,
         rearm_permit_drift = 4,
+        decoder_response_seal_drift = 5,
+        decoder_borrow_seal_drift = 6,
     };
     const Stage = enum(u8) {
         armed = 1,
@@ -127,6 +129,7 @@ const RpcSubstrateFailStopTestHook = struct {
         evidence_retired = 9,
         rearm_precondition = 10,
         drift_injected = 11,
+        decoder_callback_returned = 12,
     };
     const record_size: usize = 11;
 
@@ -165,6 +168,7 @@ const RpcSubstrateFailStopTestHook = struct {
 
 threadlocal var rpc_substrate_fail_stop_test_hook: if (builtin.is_test) RpcSubstrateFailStopTestHook else void =
     if (builtin.is_test) .{} else {};
+threadlocal var rpc_decoder_callback_active = false;
 
 const PreparationProjectionTestHook = struct {
     context: ?*anyopaque = null,
@@ -176,6 +180,10 @@ threadlocal var preparation_projection_test_hook: if (builtin.is_test) Preparati
     if (builtin.is_test) .{} else {};
 
 pub const testing = if (builtin.is_test) struct {
+    pub fn rpcDecoderCallbackActive() bool {
+        return rpc_decoder_callback_active;
+    }
+
     pub const AttachmentLease = lease_mod.ConnectionLease;
     pub const EventReleaseSourceSnapshot = struct {
         pin_count: usize,
@@ -1795,6 +1803,13 @@ pub const GenerationRpcSubstrateExecute = struct {
     bound_stream_id: u64,
 };
 
+pub const GenerationRpcDecodedExecute = struct {
+    request: GenerationRequestAbort,
+    bound_stream_id: u64,
+    context: *anyopaque,
+    decoder: contract.RpcDecoder,
+};
+
 pub const GenerationExecuteError = GenerationRequestError ||
     client_mod.PreparedBlockingRpcError || error{InvalidResponseDestination};
 
@@ -2470,7 +2485,8 @@ fn beginEventTakeActivationTransaction(
         return error.InvalidOwner;
     if (!finalAdmissionDestinationValid(&out.admission, operation.*, protected_ranges))
         return error.InvalidOwner;
-    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
+    if (client_mod.generationAllocatorCallbackActive() or rpc_decoder_callback_active or
+        batch_release_callback_active or
         anyGenerationEventReleaseCallbackActive())
         return error.Busy;
     mintRegisteredOperationExecutionReceipt(
@@ -2768,7 +2784,8 @@ fn beginGenerationRequestOwner(
     request: anytype,
     comptime allow_active_cleanup: bool,
 ) GenerationRequestError!GenerationRequestOwner {
-    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active or
+    if (client_mod.generationAllocatorCallbackActive() or rpc_decoder_callback_active or
+        batch_release_callback_active or
         anyGenerationEventReleaseCallbackActive())
         return error.Busy;
     if (request.slot_addr == 0 or request.slot_incarnation == 0 or
@@ -5751,6 +5768,80 @@ pub fn executeGenerationRpcSubstrate(execution: GenerationRpcSubstrateExecute) G
     if (!response.pristineExact()) @panic("RPC substrate reusable slot did not rearm");
 }
 
+/// C1 decoder bridge는 canonical inline response를 callback 동안만 빌리고 같은 stack에서
+/// source-zero까지 끝낸다. decoder가 authority를 바꾸면 recoverable 오류로 되돌리지 않는다.
+pub fn executeGenerationRpcDecoded(
+    execution: GenerationRpcDecodedExecute,
+) GenerationExecuteError!contract.RpcDecodeDisposition {
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.activate();
+    executePreparedRpcPrivate(
+        execution.request,
+        execution.bound_stream_id,
+        .{ .canonical = {} },
+        .correlated_response,
+        .none,
+    ) catch |err| {
+        return switch (err) {
+            error.CapacityExhausted,
+            error.InvalidIdentity,
+            error.InvalidReservation,
+            error.InvalidState,
+            error.InvalidStream,
+            error.InvalidCanonical,
+            error.InjectedFailure,
+            error.InvalidDescriptor,
+            error.ObservationBusy,
+            => @panic("RPC decoder bridge returned an internal-only execution error"),
+            else => @errorCast(err),
+        };
+    };
+    const response_addr = canonicalRpcResponseAddress(execution.request) catch
+        @panic("RPC decoder bridge lost its canonical response address after publication");
+    const response: *RpcExecutedResponse = @ptrFromInt(response_addr);
+    if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.response_published);
+    const admission = beginGenerationRequestOwner(execution.request, false) catch
+        process_seal_service.fatalIntegrity(.proof_loss);
+    defer endRegisteredNodeOperation(admission.operation);
+    var borrow: rpc_executed_response.RpcResponseBorrow = .{};
+    beginRpcResponseBorrowUnderOwner(execution.request, response, &borrow, &admission) catch
+        process_seal_service.fatalIntegrity(.proof_loss);
+    if (builtin.is_test) {
+        rpc_substrate_fail_stop_test_hook.writeStage(.response_borrowed);
+        if (rpc_substrate_fail_stop_test_hook.activeCase(.decoder_response_seal_drift)) {
+            response.seal[0] ^= 1;
+            rpc_substrate_fail_stop_test_hook.writeStage(.drift_injected);
+        } else if (rpc_substrate_fail_stop_test_hook.activeCase(.decoder_borrow_seal_drift)) {
+            rpc_executed_response.testing.armBorrowSealDriftAfterCallback(
+                rpc_substrate_fail_stop_test_hook.nonce,
+                rpc_substrate_fail_stop_test_hook.stage_fd,
+            );
+        }
+    }
+    if (rpc_decoder_callback_active) process_seal_service.fatalIntegrity(.proof_loss);
+    rpc_decoder_callback_active = true;
+    const decode_result = rpc_executed_response.decodeBorrowedRpcResponse(
+        response,
+        &borrow,
+        execution.context,
+        execution.decoder,
+    );
+    rpc_decoder_callback_active = false;
+    const disposition = decode_result catch process_seal_service.fatalIntegrity(.proof_loss);
+    finishRpcResponseOwnedUnderOwner(
+        execution.request,
+        response,
+        &borrow,
+        switch (disposition) {
+            .reusable => .reusable,
+            .protocol_failure => .protocol_failure,
+        },
+        &admission,
+    ) catch process_seal_service.fatalIntegrity(.proof_loss);
+    if (disposition == .reusable and !response.pristineExact())
+        process_seal_service.fatalIntegrity(.proof_loss);
+    return disposition;
+}
+
 /// Arms one destructive, process-local B3-6 fixture. The hook is deliberately scalar-only and
 /// one-shot: the external test owns the pipe capability and the canonical product stack consumes
 /// the case. Case ids are 1=response seal, 2=allocator transcript, 3=authority permit, 4=rearm
@@ -5950,6 +6041,15 @@ fn beginRpcResponseBorrow(
 ) !void {
     const admission = try beginGenerationRequestOwner(request, false);
     defer endRegisteredNodeOperation(admission.operation);
+    return beginRpcResponseBorrowUnderOwner(request, response, out, &admission);
+}
+
+fn beginRpcResponseBorrowUnderOwner(
+    request: GenerationRequestAbort,
+    response: *RpcExecutedResponse,
+    out: *rpc_executed_response.RpcResponseBorrow,
+    admission: *const GenerationRequestOwner,
+) !void {
     const node = admission.operation.node;
     const identity = response.identity;
     const canonical = rpcAuthorityCanonical(identity);
@@ -5991,6 +6091,16 @@ fn finishRpcResponseOwned(
 ) !void {
     const admission = try beginGenerationRequestOwner(request, false);
     defer endRegisteredNodeOperation(admission.operation);
+    return finishRpcResponseOwnedUnderOwner(request, response, borrow, disposition, &admission);
+}
+
+fn finishRpcResponseOwnedUnderOwner(
+    request: GenerationRequestAbort,
+    response: *RpcExecutedResponse,
+    borrow: *rpc_executed_response.RpcResponseBorrow,
+    disposition: RpcResponseDisposition,
+    admission: *const GenerationRequestOwner,
+) !void {
     const node = admission.operation.node;
     const identity = response.identity;
     const canonical = rpcAuthorityCanonical(identity);
@@ -6162,6 +6272,8 @@ fn finishRpcResponseOwned(
                 rpc_substrate_fail_stop_test_hook.writeStage(.drift_injected);
             }
         }
+        if (!response.reusableRearmReady(&finish, permits.rearm))
+            process_seal_service.fatalIntegrity(.proof_loss);
         response.commitReusableRearmNoFail(&finish, permits.rearm);
     }
 }

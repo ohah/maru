@@ -29,8 +29,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
 
     const facade = between(transport, "pub const GenerationTransport = struct", "fn mapPrepareError(") orelse
         return error.TestExpectedEqual;
-    // C3-3b3 product settlement 5개와 test-only facade 16개를 반영한 net +13 source inventory다.
-    // C3-3b3 settlement이 추가한 product owner API 13개를 별도 테스트 facade와 섞지 않고 고정한다.
+    // 2c3e C1 decoder bridge는 owner-bound module seam으로 두어 기존 facade 28개를 늘리지 않는다.
     try std.testing.expectEqual(@as(usize, 28), count(facade, "    pub fn "));
 
     // Revoke ordering extends the existing event authority. It must not grow a parallel

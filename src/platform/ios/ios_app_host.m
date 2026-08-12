@@ -90,7 +90,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSString *chars = @"$ zig build test All 11 passed.git status --short"
                        "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch"
                        "한글 터미널 세션 목록 설정 검색 알림";
-    const unsigned int CW = 24, CH = 32, COLS = 16;
+    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = MARU_ATLAS_COLS;
     NSMutableArray<NSNumber *> *cps = [NSMutableArray array];
     NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
     [chars enumerateSubstringsInRange:NSMakeRange(0, chars.length)
@@ -227,7 +227,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (void)growAtlas {
     unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !_atlasFont || !_glyphTex) return;
-    const unsigned int CW = 24, CH = 32;
+    const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;

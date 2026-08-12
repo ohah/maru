@@ -93,7 +93,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         "$ zig build test All 11 passed.git status --short"
         "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch"
         "한글 터미널 세션 목록 설정 검색 알림";
-    const uint32_t CW = 24, CH = 32, COLS = 16;
+    const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = MARU_ATLAS_COLS;
 
     // UTF-8 → BMP 코드포인트, 중복 제거.
     static uint16_t cps[256];
@@ -820,8 +820,8 @@ static int rasterizeOneGlyph(struct android_app *app, uint32_t cp, uint8_t *out,
 static void growAtlas(struct android_app *app) {
     unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !g.glyph_image || !g.dev) return;
-    const uint32_t CW = 24, CH = 32;
-    uint8_t cell[24 * 32];
+    const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
+    uint8_t cell[MARU_ATLAS_CELL_W * MARU_ATLAS_CELL_H];
     unsigned int added = 0;
     for (unsigned int i = 0; i < n; i++) {
         unsigned int cp = maru_mobile_missing_cp(i);

@@ -217,6 +217,21 @@ pub const HostAdapter = struct {
         );
     }
 
+    /// attach wire 전에 batch storage를 final-address로 예약한다. stream 결속은 accepted response 뒤 별도 suffix가 한다.
+    pub fn reserveGenerationBatchAdapter(
+        self: *HostAdapter,
+        out: *generation_batch_adapter.GenerationBatchAdapter,
+        owner_addr: usize,
+        owner_size: usize,
+    ) generation_batch_adapter.Error!void {
+        return generation_batch_adapter.GenerationBatchAdapter.initReservedInPlace(
+            out,
+            &self.slot,
+            owner_addr,
+            owner_size,
+        );
+    }
+
     pub fn responseOwnerSeal(
         self: *HostAdapter,
         reservation: client_slot_mod.AttachmentBindingReservation,

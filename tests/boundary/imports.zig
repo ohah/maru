@@ -7278,11 +7278,15 @@ test "CR3a-2b2 generation GUI batch path is node-bound while legacy fallback sta
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(attachment, ".mintGenerationBatchAdapter("),
+        countOccurrences(attachment, ".reserveGenerationBatchAdapter("),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOccurrences(host_adapter, "GenerationBatchAdapter.initPreparedInPlace("),
+        countOccurrences(host_adapter, "GenerationBatchAdapter.initReservedInPlace("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(attachment, ".mintGenerationBatchAdapter("),
     );
     try std.testing.expectEqual(
         @as(usize, 1),

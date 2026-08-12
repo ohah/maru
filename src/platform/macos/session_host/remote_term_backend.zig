@@ -2207,6 +2207,20 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;
+    // 이 행은 daemon 두 개를 띄우므로 다른 actual-host artifact와 동시에 실행하지 않는다. lock은
+    // 부모 fixture만 소유해야 fail-stop한 부모가 남긴 daemon child가 다음 실행을 영구 차단하지 않는다.
+    const fixture_lock_path = "/tmp/maru-session-host-actual-fixture.lock";
+    const fixture_lock_fd = c.open(
+        fixture_lock_path,
+        .{ .ACCMODE = .RDWR, .CREAT = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fixture_lock_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(fixture_lock_fd);
+    if (c.flock(fixture_lock_fd, posix.LOCK.EX) != 0) return error.TestUnexpectedResult;
+    // Debug·ReleaseFast actual-host artifact가 병렬 실행될 때 daemon 두 개의 첫 frame이 2초를 넘길 수 있다.
+    // 제품 deadline을 바꾸지 않고 이 외부 프로세스 fixture의 관측 상한만 6초로 둔다.
+    const frame_attempt_limit = 300;
 
     var dir_a_buf: [256]u8 = undefined;
     const dir_a = std.fmt.bufPrintZ(&dir_a_buf, "/tmp/maru-sh-pool-a-{d}", .{c.getpid()}) catch return error.SkipZigTest;
@@ -2220,6 +2234,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     const child_a = c.fork();
     if (child_a < 0) return error.SkipZigTest;
     if (child_a == 0) {
+        _ = c.close(fixture_lock_fd);
         _ = c.setsid();
         daemon.runSessionHost(std.heap.page_allocator, io, dir_a, socket_a) catch {};
         c._exit(0);
@@ -2232,6 +2247,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
         return error.SkipZigTest;
     }
     if (child_b == 0) {
+        _ = c.close(fixture_lock_fd);
         _ = c.setsid();
         daemon.runSessionHost(std.heap.page_allocator, io, dir_b, socket_b) catch {};
         c._exit(0);
@@ -2304,7 +2320,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try surface_runtime.writeInput(22, .{ .bytes = "before\n" });
     var saw_before = false;
     var attempts: usize = 0;
-    while (attempts < 100 and !saw_before) : (attempts += 1) {
+    while (attempts < frame_attempt_limit and !saw_before) : (attempts += 1) {
         _ = try pump_b.drainAvailable();
         surface_b.lockCore(io);
         const cells = surface_b.renderSnapshot().cells;
@@ -2329,7 +2345,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try surface_runtime.writeInput(22, .{ .bytes = "after\n" });
     var saw_after = false;
     attempts = 0;
-    while (attempts < 100 and !saw_after) : (attempts += 1) {
+    while (attempts < frame_attempt_limit and !saw_after) : (attempts += 1) {
         _ = try pump_b.drainAvailable();
         surface_b.lockCore(io);
         const cells = surface_b.renderSnapshot().cells;
@@ -2383,7 +2399,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     // 실제 frame은 remove 전에 두 host가 만든 runtime.ended를 모두 관측해야 한다.
     var saw_close_ended_a = false;
     attempts = 0;
-    while (attempts < 100 and !saw_close_ended_a) : (attempts += 1) {
+    while (attempts < frame_attempt_limit and !saw_close_ended_a) : (attempts += 1) {
         const summary = try pump_a.drainAvailable();
         saw_close_ended_a = summary.ended != null;
         if (!saw_close_ended_a) _ = usleep(20 * 1000);
@@ -2391,7 +2407,7 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     try testing.expect(saw_close_ended_a);
     var saw_close_ended = false;
     attempts = 0;
-    while (attempts < 100 and !saw_close_ended) : (attempts += 1) {
+    while (attempts < frame_attempt_limit and !saw_close_ended) : (attempts += 1) {
         const summary = try pump_b.drainAvailable();
         saw_close_ended = summary.ended != null;
         if (!saw_close_ended) _ = usleep(20 * 1000);

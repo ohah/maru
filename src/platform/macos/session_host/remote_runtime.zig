@@ -3873,7 +3873,92 @@ test "remote runtime: GUI metadata ingress drops malformed and fail-closes resou
     try expectGuiMetadataProjectionFailurePreservesCache(valid, .unsupported, .fail_closed);
 }
 
-test "remote runtime: actual GUI attach resource failure closes and preserves existing cache" {
+const Attach2eFailureCase = enum { typed_reject, response_eof };
+
+fn run2eAttachFailureSocket(selected: Attach2eFailureCase) !void {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const Peer = struct {
+        fn run(fd: c.fd_t, mode: Attach2eFailureCase) void {
+            defer _ = c.close(fd);
+            const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
+            defer std.heap.page_allocator.free(request.payload);
+            if (request.header.kind != .request or
+                std.mem.indexOf(u8, request.payload, "\"method\":\"runtime.attach\"") == null)
+                return;
+            if (mode == .response_eof) return;
+            const response = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{ .kind = .response, .request_id = request.header.request_id },
+                "{\"error\":\"runtime_not_found\"}",
+            ) catch return;
+            defer std.heap.page_allocator.free(response);
+            socket_server.writeAll(fd, response) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], selected });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.connection = .{ .generation = &adapter };
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner();
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.resize_seq = 0;
+    rr.resize_generation = 0;
+    rr.resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
+    rr.observation = .{};
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    defer rr.observation.deinit(allocator);
+
+    const result = rr.attachAndAssemble(1, .{ .cols = 80, .rows = 24 });
+    switch (selected) {
+        .typed_reject => try std.testing.expectError(error.RuntimeNotFound, result),
+        .response_eof => try std.testing.expectError(error.AttachFailed, result),
+    }
+    peer.join();
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), rr.attachment.generation.batch_adapter.slot_addr);
+}
+
+test "CR3a-2e actual socket typed reject는 준비한 row와 pin과 batch를 exact 원복한다" {
+    try run2eAttachFailureSocket(.typed_reject);
+}
+
+test "CR3a-2e actual socket response 전 EOF는 준비한 row와 pin과 batch를 exact 원복한다" {
+    try run2eAttachFailureSocket(.response_eof);
+}
+
+test "CR3a-2e actual socket malformed accepted는 cache를 보존하고 준비 권위를 정리한다" {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -3977,9 +4062,12 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
     try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
     try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
     try std.testing.expectEqualStrings("safe-host", rr.observation.ssh_remote_dest.items);
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.cleanup_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), rr.attachment.generation.batch_adapter.slot_addr);
 }
 
-test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot EOF follows" {
+test "CR3a-2e actual socket accepted 뒤 snapshot EOF는 committed stream 권위를 exact 정리한다" {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -4058,6 +4146,7 @@ test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot
         try adapter.slot.current.cleanup_registry.count(),
     );
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), rr.attachment.generation.batch_adapter.slot_addr);
 }
 
 const SnapshotFreeReentryProbe = struct {
@@ -5526,6 +5615,7 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
         try adapter.slot.current.cleanup_registry.count(),
     );
     try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+    try std.testing.expectEqual(@as(usize, 0), rr.attachment.generation.batch_adapter.slot_addr);
 }
 
 test "remote runtime: actual GUI metadata event is atomic across every projection allocation failure" {

@@ -149,6 +149,28 @@ test "화살표는 코어가 인코딩한다" {
     try std.testing.expectEqual(after + 1, ctrl_c);
 }
 
+// **개행은 문자가 아니라 Enter 키다.** IME 는 소프트 Return 을 `"\n"` 으로 커밋하는데 그대로
+// 쓰면 LF 가 나가고, 하드웨어 Return 은 키 경로로 CR 이 나간다 — 같은 Enter 가 입력 수단에
+// 따라 다른 바이트가 되면 안 된다.
+test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+    const base = bridge.maru_mobile_input("", 0);
+    const hard = bridge.maru_mobile_key(1, 0, 0); // MARU_KEY_ENTER
+    const hard_len = hard - base;
+    const soft = bridge.maru_mobile_input("\n", 1);
+    try std.testing.expectEqual(hard_len, soft - hard);
+
+    // CRLF 는 Enter **한 번**이다(두 번이면 빈 줄이 생긴다).
+    const crlf = bridge.maru_mobile_input("\r\n", 2);
+    try std.testing.expectEqual(hard_len, crlf - soft);
+
+    // 글자와 개행이 섞여도 글자는 글자대로 간다.
+    const mixed = bridge.maru_mobile_input("ab\ncd", 5);
+    try std.testing.expectEqual(4 + hard_len, mixed - crlf);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
 // 헤더가 숫자 표의 단일 출처다. **한쪽만 고치면 host 가 모르는 id 를 보내고 키가 사라진다** —
 // 헤더를 읽어 브리지 매핑이 그 전부를 아는지 검사한다.
 test "헤더의 키 id 를 브리지가 전부 안다" {

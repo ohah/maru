@@ -271,7 +271,9 @@ jobs:
     # (실측: 잡 8개 합계 24분 46초 중 이 잡 하나가 8분 14초).
     # ⚠️ 이 잡은 branch protection의 **필수 체크**였다 — PR에서 안 돌게 하려면 그 목록에서도 빼야 한다
     # (필수인데 실행되지 않으면 PR이 영영 pending으로 막힌다). 이 PR과 함께 설정을 바꾼다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    # 이 job 은 main push 에서만 돈다 — 거기서는 `github.event.pull_request` 가 항상 null 이라
+    # draft 가드를 달아도 늘 참이다. 없는 게이팅을 있는 것처럼 보이게 하므로 달지 않는다.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:

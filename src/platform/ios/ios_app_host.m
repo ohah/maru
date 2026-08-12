@@ -573,7 +573,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
     pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     _pipe = [_dev newRenderPipelineStateWithDescriptor:pd error:&err];
-    if (!_pipe) NSLog(@"MARU_CHROME pipeline_fail=%@", err);
+    // **실패했으면 렌더 루프를 걸지 않는다.** 위 셰이더 실패는 `return` 하는데 여기만 로그를
+    // 남기고 계속 갔다 — 그러면 tick 이 nil 파이프라인을 `setRenderPipelineState:` 에 넘긴다.
+    // Android 는 `g.ready` 를 안 세워 draw 가 통째로 no-op 이 된다. 같은 모양으로 맞춘다:
+    // 검은 화면 + 로그 한 줄이지, 죽는 것이 아니다.
+    if (!_pipe) { NSLog(@"MARU_CHROME pipeline_fail=%@", err); return self; }
     _queue = [_dev newCommandQueue];
     [self loadAtlas];
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];

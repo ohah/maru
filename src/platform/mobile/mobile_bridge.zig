@@ -263,10 +263,24 @@ fn push(rect: draw.Rect, rgb: anytype, alpha: u8, radius: u16, kind: u32) void {
 }
 
 /// 아틀라스 인덱스(호스트가 만든 atlas.idx)를 코드포인트→셀로 들고 있는다.
-var atlas_cp: [256]u32 = undefined;
-var atlas_col: [256]u32 = undefined;
-var atlas_row: [256]u32 = undefined;
-var atlas_adv: [256]u32 = undefined;
+/// 아틀라스 격자. **여기가 용량의 단일 출처다** — 헤더 매크로로 두면 등록부보다 큰 슬롯을
+/// 약속하게 되고, 남는 슬롯은 등록이 안 된 채 매 프레임 다시 구워진다(실측 위험).
+const atlas_cols_n: u32 = 16;
+const atlas_rows_n: u32 = 32;
+const atlas_cap: usize = atlas_cols_n * atlas_rows_n;
+
+export fn maru_mobile_atlas_cols() u32 {
+    return atlas_cols_n;
+}
+
+export fn maru_mobile_atlas_rows() u32 {
+    return atlas_rows_n;
+}
+
+var atlas_cp: [atlas_cap]u32 = undefined;
+var atlas_col: [atlas_cap]u32 = undefined;
+var atlas_row: [atlas_cap]u32 = undefined;
+var atlas_adv: [atlas_cap]u32 = undefined;
 var atlas_n: usize = 0;
 /// 아틀라스 셀 크기(px). 종횡비를 지켜 그려야 글자가 안 늘어난다.
 var atlas_cell_w: u32 = 24;
@@ -325,7 +339,10 @@ export fn maru_mobile_missing_cp(i: u32) u32 {
 }
 
 /// 다음 빈 슬롯의 (열, 행) — 상위 16비트=열, 하위 16비트=행.
+/// 다음 빈 슬롯. **꽉 차면 0xFFFFFFFF 를 돌려준다** — 예전에는 같은 자리를 계속 돌려줘,
+/// 등록되지 못한 글자가 매 프레임 다시 구워지며 CPU·GPU 만 먹었다.
 export fn maru_mobile_next_slot(cols: u32) u32 {
+    if (atlas_n >= atlas_cap) return 0xFFFFFFFF;
     const idx: u32 = @intCast(atlas_n);
     return ((idx % cols) << 16) | (idx / cols);
 }

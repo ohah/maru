@@ -96,7 +96,7 @@ static uint32_t g_gw, g_gh;
 // 같은 셰이더가 두 아틀라스를 똑같이 샘플링한다.
 static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32_t *ow, uint32_t *oh) {
     static const char *CHARS = MARU_ATLAS_PREBAKE;   // 집합은 공용 헤더가 소유한다
-    const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = MARU_ATLAS_COLS;
+    const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = maru_mobile_atlas_cols();
 
     // UTF-8 → BMP 코드포인트, 중복 제거.
     static uint16_t cps[256];
@@ -113,7 +113,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
     }
     // 미리 굽는 글자 수가 아니라 **고정 행 수**로 잡는다 — 남는 슬롯이 온디맨드
     // 성장의 상한이 되기 때문이다.
-    uint32_t W = COLS * CW, H = MARU_ATLAS_ROWS * CH;
+    uint32_t W = COLS * CW, H = maru_mobile_atlas_rows() * CH;
 
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
@@ -201,7 +201,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
 
     *out = buf; *ow = W; *oh = H;
     g.atlas_cols = COLS;
-    g.atlas_rows = MARU_ATLAS_ROWS;
+    g.atlas_rows = maru_mobile_atlas_rows();
     LOGI("atlas_ondevice=%ux%u glyphs=%u source=android.graphics.Paint", W, H, n);
     return 1;
 }
@@ -892,8 +892,10 @@ static void growAtlas(struct android_app *app) {
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
+        // 등록부가 꽉 차면 sentinel 이 온다. 옛 코드는 같은 자리를 계속 받아 **매 프레임
+        // 다시 굽고** 있었다 — 화면에는 안 나오면서 CPU·GPU 만 먹는다.
+        if (slot == 0xFFFFFFFF) break;  // 축출 정책은 아직 없다(계약 §4)
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
-        if (row >= g.atlas_rows) break;  // 꽉 찼다 — 축출 정책은 아직 없다(계약 §4)
         memset(cell, 0, sizeof cell);
         uint32_t advance = CW / 2;
         if (!rasterizeOneGlyph(app, cp, cell, CW, CH, &advance)) continue;

@@ -280,7 +280,12 @@ pub const inventory = [_]Proof{
     // b4는 frame 시작의 backend pump와 실제 async close parity 테스트만 더하며 기존 반사 owner 둘은 유지한다.
     // C3-3b6 app-quit 제품 순서와 실제 socket fixture가 추가됐지만 기존 반사 두 곳의 소유 범위는 그대로다.
     // 마지막 target 승인 frame을 즉시 반환해 terminal Runtime의 같은-frame 재접근을 막는 순서까지 digest에 포함한다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "4ed9d4e51384b1688866ae3492e8fbe0dd8d02bfad3d5aa268aac590800a378c" },
+    // 소스 컨트롤 저장소 판정이 3-상태(`RepoTarget`)로 갈리고, 브랜치 표시가 `.git` 변경 이벤트로 갱신되도록
+    // 바뀌며 또 움직인다(docs/editor-surface-dock.md §3.5 "판정은 3-상태다" · docs/status-bar.md 브랜치 항목).
+    // count는 2 그대로다 — 더한 것은 `fileTreeChanged`의 `.git` 분기 호출 한 줄, `MARU_FORCE_SCM` self-verify
+    // 게이트(`getenv` + `openDockTo`), 그리고 테스트 셋이다. 전부 평범한 호출·값 전달이라 `@field` 반사 접근이나
+    // Client 구성·receiver 집합과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "463a1178d7f2cd6c7311d566ffe34f5b5b2b0d52bbc31cac150a3dfa8dd00a58" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

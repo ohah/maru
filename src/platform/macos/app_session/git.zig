@@ -605,6 +605,38 @@ pub fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
     return termGitBranchForCwd(self, term, cwd);
 }
 
+/// 브랜치 캐시의 **백스톱** 주기. 이 값이 갱신의 1차 수단이 아니다 — `.git` 변경 이벤트가 1차이고
+/// (`invalidateTermGitBranches`), 이 주기는 **그 이벤트가 닿지 않는 저장소**를 위한 마지막 그물이다: 터미널만
+/// 그 폴더에 있고 탐색기 root도 SCM 뷰도 아닌 저장소는 감시 대상이 아니라 이벤트가 오지 않는다.
+///
+/// 그래서 `proc_cwd_poll_interval_ns`(0.5초)보다 훨씬 길게 잡는다. 사이드바는 매 프레임, **term마다** 이 경로를
+/// 부르므로 짧은 주기는 tick 귀속 blocking FS(walk-up `access` + `.git/HEAD` open/read/alloc)를 term 수만큼
+/// 만든다 — `docs/performance-budget.md`가 FS를 tick 귀속 0으로 지향하는 것과 반대 방향이다.
+pub const git_branch_backstop_interval_ns: i128 = 5 * std.time.ns_per_s;
+
+/// `.git` 이벤트가 앞당기는 재계산의 **하한**. 이벤트 하나하나를 즉시 재계산으로 바꾸면 rebase·대량 checkout이
+/// `.git`을 수백 번 건드리는 동안 프레임마다 term 수만큼 fs를 읽는다(폴링보다 나빠진다). `refreshGitStatus`가
+/// in-flight 가드로 이벤트 몰림을 흡수하는 것과 같은 규율이다.
+pub const git_branch_event_floor_ns: i128 = 200 * std.time.ns_per_ms;
+
+/// `.git`이 바뀌었다 — 모든 term의 브랜치 캐시 만료를 **앞당긴다**(갱신의 1차 경로).
+///
+/// `git checkout`은 cwd를 바꾸지 않으므로 OSC 7으로는 감지되지 않고, 브랜치가 든 `.git/HEAD`만 바뀐다. 그 변경은
+/// 이미 `fileTreeChanged`로 들어와 SCM 목록을 다시 읽게 하고 있었다 — 같은 신호를 브랜치 표시에도 연결해 두
+/// 표시가 **같은 이벤트로** 움직이게 한다(그러지 않으면 목록은 갱신됐는데 상태바만 옛 브랜치가 남는다).
+///
+/// 값을 0으로 밀지 않는 이유는 `git_branch_event_floor_ns` 주석에 있다.
+pub fn invalidateTermGitBranches(self: *AppSession) void {
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+    const target = now - git_branch_backstop_interval_ns + git_branch_event_floor_ns;
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        // **앞당기기만 한다.** 이미 더 이른 만료(오래 안 읽은 term·아직 안 읽은 0)를 이 값으로 덮으면 이벤트가
+        // 오히려 갱신을 **늦춘다** — 무효화가 지연 장치가 되는 역전이다.
+        if (term.git_branch_polled_ns > target) term.git_branch_polled_ns = target;
+    };
+    self.metal_dirty = true; // 다음 프레임에 다시 그려야 새 브랜치가 보인다
+}
+
 /// 이미 확보한 runtime observation `cwd`로 git 브랜치 캐시를 계산한다. blocking .git/HEAD 읽기와 runtime 관측을
 /// 분리하며, sidebar와 control-plane이 이 단일 파생 경로를 공유한다. 캐시 키·재계산 로직은 단일 출처(재구현 금지).
 pub fn termGitBranchForCwd(self: *AppSession, term: *Term, cwd: []const u8) ?[]const u8 {
@@ -612,10 +644,20 @@ pub fn termGitBranchForCwd(self: *AppSession, term: *Term, cwd: []const u8) ?[]c
     // 원격 cwd에는 로컬 `.git`이 없다. 읽어 봐야 항상 실패인데다, 같은 경로가 로컬에도 우연히 있으면 **엉뚱한
     // repo의 브랜치**를 원격 세션 카드에 붙인다. 그래서 파일을 열기 전에 끊는다(ssh-integration.md §9.4).
     if (app_session_mod.termCwdIsRemote(term)) return null;
+    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
     if (term.git_branch_cwd) |c| {
-        if (std.mem.eql(u8, c, cwd)) return term.git_branch; // 캐시 적중(cwd 불변)
+        // 캐시 적중은 **cwd가 같고 백스톱 주기 안일 때만**이다. cwd만 키로 쓰면 같은 폴더에서 일어난 변화가
+        // 영영 반영되지 않는다 — `git checkout`으로 브랜치를 바꿔도, `git init`으로 저장소를 만들어도, 저장소를
+        // 지워도 cwd는 그대로다(마지막 경우가 실제로 드러났다: 도크는 "git 저장소가 아닙니다"인데 상태바는 옛
+        // 브랜치를 계속 표시).
+        //
+        // **갱신의 1차 경로는 이 주기가 아니라 `.git` 변경 이벤트**(`invalidateTermGitBranches`)다. 사이드바는
+        // 매 프레임, term마다 이 함수를 부르므로 주기를 짧게 잡으면 그 자체가 tick 귀속 blocking FS가 된다.
+        if (std.mem.eql(u8, c, cwd) and now - term.git_branch_polled_ns < git_branch_backstop_interval_ns)
+            return term.git_branch;
     }
-    // cwd 변경 → 재계산(옛 캐시 해제 후 갱신).
+    term.git_branch_polled_ns = now;
+    // cwd 변경 또는 백스톱 만료 → 재계산(옛 캐시 해제 후 갱신).
     if (term.git_branch) |b| self.allocator.free(b);
     if (term.git_branch_cwd) |c| self.allocator.free(c);
     term.git_branch = readGitBranch(self.io, self.allocator, cwd);

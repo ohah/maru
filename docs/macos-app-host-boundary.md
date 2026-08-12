@@ -33,6 +33,34 @@
 > terminal runtime detach로 바뀔 수 있지만, Term/Workspace의 명시 close는 계속 terminate다. 그 전까지 이 절의
 > 현재 종료 확인·dirty file 보호·teardown 계약이 제품 동작의 단일 기준이다.
 
+**종료 중 창 숨김과 단계 계측**: `applicationWillTerminate`의 정리(mermaid 회수 → 컨트롤 서버 정지 → workspace 저장
+→ session/PTY teardown)는 전부 **메인 스레드에서 동기로** 돈다. 그동안 이벤트 루프가 멈추므로 창이 떠 있는 채면 그
+멈춤이 사용자에게 모래시계(응답 없음)로 보인다. 그래서 정리보다 **먼저** 모든 일반 창과 quick을 `orderOut`으로 화면에서
+내린다(iTerm2·Terminal.app과 같은 순서). `orderOut`은 창을 화면에서 뺄 뿐 객체를 해제하지 않으므로 뒤따르는
+teardown·요약이 읽는 window 참조는 그대로 살아 있고, `applicationShouldTerminateAfterLastWindowClosed`는 false라 숨김이
+종료를 재유발하지도 않는다. **전체화면(native `.fullScreen`) 창은 예외로 숨기지 않는다** — 전체화면 창을 `orderOut`하면
+macOS가 그 space를 없애며 이전 space로 전환하는데, 종료 직전에 그 애니메이션이 끼어들면 체감이 오히려 나빠지고,
+전체화면은 뒤에 드러날 다른 창도 없어 숨겨서 얻을 것이 없다(workspace 저장이 전체화면 frame을 건너뛰는 것과 같은 결).
+
+숨김에는 딸린 계약이 하나 더 있다. `orderOut`은 `isKeyWindow`를 false로 만들고, workspace의 `active-window` 마커(M3e —
+다음 실행이 그 창을 다시 focus)는 그 값으로 정해진다. 그래서 창을 내리기 **직전**의 key 창을 붙잡아 두고 저장이 그것을
+우선 본다. 판정 규칙과 이유는 `TerminationWindowPolicy`(`src/platform/macos/TerminationWindowPolicy.swift`)가 소유하고
+`tests/macos_termination_window_policy.swift`가 고정한다 — 이 규칙이 없으면 종료할 때마다 활성 창 정보가 사라져 복원이
+항상 첫 창을 고른다. 이 변경은 **체감**만 없애고 실제 정리 시간은 그대로이므로, 각 단계 경과를 `TerminationTiming`
+(`src/platform/macos/TerminationTiming.swift`)에 기록해 종료 요약에 `quit_hide_windows_ms`·`quit_mermaid_ms`·
+`quit_control_stop_ms`·`quit_save_workspace_ms`·`quit_teardown_ms`·`quit_total_ms`로 남긴다. 실행되지 않은 단계도 0으로
+실려 요약 필드 집합은 실행 경로와 무관하게 같은 모양이다. total은 요약을 쓰는 시점에 확정하므로 단계 합과의 차이가
+단계로 나누지 않은 잔여 시간을 뜻한다.
+
+요약이 나가는 자리도 이 계측의 일부다. 아티팩트 경로(`zig-out/maru-macos-app/app.summary.txt`)는 저장소 상대 경로라
+개발/CI(저장소 cwd)에서만 쓸 수 있고, `.app`을 Finder/Dock으로 실행하면 cwd가 `/`여서 쓰기가 실패하는 데다 stdout/stderr도
+보이지 않아 요약이 통째로 사라진다. 정작 종료 지연이 문제되는 것은 그 실사용 경로이므로, 쓰기가 실패하면
+`~/Library/Logs/maru/app.summary.txt`로 폴백한다. 기존 경로가 성공하는 개발/CI에서는 이 분기를 타지 않아 아티팩트 계약은
+그대로다.
+
+**검증**: 시간 측정 자체는 실제 종료에서만 재현되므로 host 배선은 수동 E2E이고, 필드 이름·순서·0.1ms 반올림 같은 표현
+규칙은 `tests/macos_termination_timing.swift`가 결정론적으로 고정한다.
+
 - **베이스/결정(사실상 표준)**: iTerm2·Terminal.app·Ghostty는 닫으려는 surface/창에 **셸이 아닌 실행 중 프로세스**가 있으면 닫기 확인 시트/다이얼로그를 띄운다. maru도 같은 관례를 택한다 — 단, 다이얼로그는 네이티브 NSAlert가 아니라 **maru 자체 오버레이**(`chrome/components/confirm.zig`)로 통일해 모든 닫기 경로에서 같은 룩/키(Enter·Y=닫기, Esc·N=취소)를 쓴다.
 - **트리거 판정("무엇이 실행 중인가")**: 코어의 `TerminalCore.cursorIsAtPrompt()`(OS-중립)로 판정한다 — **셸 통합(OSC 133 semantic prompt)** 상태와 **alt 화면** 여부만 본다. alt 화면(vim·claude 등 풀스크린 TUI)이면 프롬프트 아님(=실행 중), 아니면 `semantic_state`로: `prompt`(A~B)·`input`(B~C)=프롬프트, `command`(C~D)·`unknown`=프롬프트 아님. 닫기 확인은 `!cursorIsAtPrompt()`를 "실행 중 명령 있음"으로 쓴다(`termHasRunningJob`; 단 `process_state==exited`·attach 전이면 명령 없음으로 단락). `ProcessState`는 "셸 살아있음"만 알고 "명령 실행 중"은 모른다.
   - **레퍼런스 간 선택(베이스/결정)**: 세 레퍼런스는 판정 **메커니즘**이 다르다 — iTerm2·Terminal.app은 포그라운드 프로세스 **이름을 안전 목록과 대조**하고, Ghostty는 **셸 통합**(`Terminal.cursorIsAtPrompt`)을 쓴다. maru는 **Ghostty 모델**을 택했다. 근거 둘:

@@ -3712,6 +3712,27 @@ final class QuickTerminalPanel: NSPanel {
 
 private func selfTestRelease<T: AnyObject>(_ value: inout T?) { value = nil }
 
+/// `.app`으로 실행돼 저장소 상대 경로(`zig-out/...`)에 쓸 수 없을 때 종료 요약이 대신 남는 자리.
+/// macOS 관례대로 `~/Library/Logs` 아래에 두어 Console.app이나 Finder로 바로 열 수 있게 한다.
+private func maruFallbackSummaryFileURL() -> URL? {
+    guard let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else {
+        return nil
+    }
+    return logs.appendingPathComponent("Logs/maru/app.summary.txt")
+}
+
+/// `body`가 실제로 걸린 시간을 ns로 돌려준다. 종료 경로 계측 전용의 얇은 래퍼로, 각 단계마다 시작/끝 시각을
+/// 손으로 적는 대신 측정 대상을 블록으로 묶어 "무엇을 쟀는지"가 코드에서 바로 보이게 한다. 모노토닉 시계라
+/// (`uptimeNanoseconds`) 시스템 시간 변경에 흔들리지 않는다.
+private func measureElapsedNs(_ body: () -> Void) -> UInt64 {
+    let start = DispatchTime.now().uptimeNanoseconds
+    body()
+    let end = DispatchTime.now().uptimeNanoseconds
+    // 모노토닉 시계라 end < start는 나오지 않아야 하지만, 그 가정이 깨지면 뺄셈이 wrap해 UInt64 최대치에 가까운
+    // 값이 되고 요약에 `18446744073.7ms` 같은 헛수가 실린다. 진단용 숫자가 헛것을 말하느니 0이 낫다.
+    return end >= start ? end - start : 0
+}
+
 private func maruWorkspaceFileURL() -> URL? {
     guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
         return nil
@@ -3917,6 +3938,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
     private var smokeMode = false
+    /// 종료 경로 단계별 비용. 종료는 메인 스레드를 동기로 붙잡으므로 어느 단계가 그 시간을 쓰는지 남겨야
+    /// 추측 없이 고칠 수 있다. 값은 종료 요약의 `quit_*` 필드로 나간다(docs/macos-app-host-boundary.md).
+    private var terminationTiming = TerminationTiming()
+    /// `applicationWillTerminate` 진입 시각. 요약을 쓰는 시점에 total을 계산해, 단계로 나누지 않은 잔여
+    /// 시간까지 total과 단계 합의 차이로 드러나게 한다.
+    private var terminationStartNs: UInt64 = 0
+    /// 종료 중 창을 숨기기 **전**의 key 창. `orderOut`은 창을 화면에서 내리면서 `isKeyWindow`를 false로 만드는데,
+    /// workspace의 `active-window` 마커(M3e — 다음 실행이 그 창을 다시 focus)는 그 값으로 정해진다. 미리 붙잡아
+    /// 두지 않으면 종료할 때마다 활성 창 정보가 사라져 복원이 항상 첫 창을 고른다.
+    private weak var terminationKeyWindow: NSWindow?
     /// AS4-c uses its own explicit env gate so the ordinary PTY/file-panel smoke never gains
     /// fixture worker controls or synthetic archive input.
     private var agentSessionArchiveSmokeDriver: AgentSessionArchiveSmokeDriver?
@@ -4364,33 +4395,57 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
+        terminationStartNs = DispatchTime.now().uptimeNanoseconds
         tickTimer?.invalidate()
         tickTimer = nil
         smokeTimer?.invalidate()
         smokeTimer = nil
-        cancelAllMermaidReplies(error: "application terminating")
-        mermaidRenderCoordinator.shutdown()
-        // physical control/I/O executor가 완전히 quiesce된 뒤 Zig app-global queue/latch/lease를
-        // 최종 종료한다. 이 순서만 leased request frame의 pointer 수명을 안전하게 끝낸다.
-        maru_macos_mermaid_shutdown()
+        // 아래 정리는 전부 메인 스레드에서 동기로 돌아 그동안 이벤트 루프가 멈춘다. 창이 그대로 떠 있으면 그 멈춤이
+        // 사용자에게 모래시계(응답 없음)로 보이므로, **정리 전에** 창을 화면에서 내려 종료가 즉시 끝난 것처럼 보이게
+        // 한다(iTerm2·Terminal.app도 같은 순서). `orderOut`은 창을 화면에서 뺄 뿐 객체를 해제하지 않으므로 뒤따르는
+        // teardown·요약이 읽는 window 참조는 그대로 살아 있다. 실제 정리 비용은 아래 quit_* 계측이 남긴다.
+        terminationTiming.record(.hideWindows, elapsedNs: measureElapsedNs {
+            // 숨기면 `isKeyWindow`가 false가 되므로, workspace의 active-window 마커가 읽을 key 창을 **먼저** 붙잡는다.
+            terminationKeyWindow = windows.first(where: { $0.window?.isKeyWindow == true })?.window
+            // 전체화면(native `.fullScreen`) 창은 **숨기지 않는다**. 전체화면 창을 orderOut하면 macOS가 그 space를
+            // 없애며 이전 space로 전환하는데, 종료 직전에 그 전환 애니메이션이 끼어들면 체감이 오히려 나빠진다
+            // (숨김의 목적은 체감 개선이지 새 애니메이션 추가가 아니다). 전체화면은 그 창이 화면을 다 덮고 있어
+            // 뒤에 드러날 다른 창도 없으므로 숨겨서 얻는 것도 없다. workspace 저장이 전체화면 frame을 건너뛰는
+            // 것과 같은 이유의 예외다.
+            for surface in windows where surface.window?.styleMask.contains(.fullScreen) == false {
+                surface.window?.orderOut(nil)
+            }
+            if quick?.window?.styleMask.contains(.fullScreen) == false { quick?.window?.orderOut(nil) }
+        })
+        terminationTiming.record(.mermaid, elapsedNs: measureElapsedNs {
+            cancelAllMermaidReplies(error: "application terminating")
+            mermaidRenderCoordinator.shutdown()
+            // physical control/I/O executor가 완전히 quiesce된 뒤 Zig app-global queue/latch/lease를
+            // 최종 종료한다. 이 순서만 leased request frame의 pointer 수명을 안전하게 끝낸다.
+            maru_macos_mermaid_shutdown()
+        })
         // 컨트롤 플레인 서버를 세션 teardown '전에' 멈춘다 — accept 스레드를 join하고 대기 중 요청을 cancel해, 이후
         // shutdownAppSession이 세션을 해제할 때 accept 스레드가 (marshal 큐 밖에서) 세션을 만지지 않게 한다. tick은
         // 이미 멈춰(위) 더 이상 drain되지 않는다. idempotent(미시작이면 무동작).
-        if controlServerStarted {
-            maru_macos_control_server_stop()
-            BrowserResultTransferRegistry.shared.releaseAll() // ABI stop callback 실패까지 포함한 마지막 Data 소유권 backstop.
-            controlServerStarted = false
-        }
+        terminationTiming.record(.controlServer, elapsedNs: measureElapsedNs {
+            if controlServerStarted {
+                maru_macos_control_server_stop()
+                BrowserResultTransferRegistry.shared.releaseAll() // ABI stop callback 실패까지 포함한 마지막 Data 소유권 backstop.
+                controlServerStarted = false
+            }
+        })
         // workspace를 '정상 종료'에 저장한다 — applicationWillTerminate는 크래시에선 안 불리므로(자동 충족),
         // 마지막 정상 세션만 디스크에 남는다(다음 실행이 그걸 복원, R4). shutdown '전에'(세션이 아직 살아 있을 때).
-        saveWorkspace()
+        terminationTiming.record(.saveWorkspace, elapsedNs: measureElapsedNs { saveWorkspace() })
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
         // shutdownAppSession의 close()가 summary에 담는다.
         // 종료 요약 기준 surface(메인=첫 창)를 shutdown '전에' 잡는다 — shutdownAppSession이 컬렉션을 비우므로
         // 그 뒤엔 primary(=windows.first)가 nil이 된다. surface 객체는 캡처로 살아 있어 close가 채운 요약을 읽는다.
         let mainSurface = windows.first
-        shutdownAppSession(preserveWebPanelsFor: mainSurface)
+        terminationTiming.record(.teardown, elapsedNs: measureElapsedNs {
+            shutdownAppSession(preserveWebPanelsFor: mainSurface)
+        })
         if let mainSurface {
             // quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게 메인 창을 명시 대상으로.
             withSurface(mainSurface) {
@@ -9843,13 +9898,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
         var blocks = ""
         var blockCount: Int64 = 0
-        for surface in windows {
+        // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
+        // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
+        // 종료 경로는 정리 전에 창을 숨겨(체감 지연 제거) 이 시점 `isKeyWindow`가 이미 전부 false이므로, 숨기기
+        // 직전에 붙잡아 둔 창을 우선 본다(판정 규칙과 그 이유는 `TerminationWindowPolicy`).
+        let capturedKeyIndex = terminationKeyWindow.flatMap { captured in
+            windows.firstIndex(where: { $0.window === captured })
+        }
+        let currentKeyIndex = windows.firstIndex(where: { $0.window?.isKeyWindow == true })
+        for (windowIndex, surface) in windows.enumerated() {
             // workspace.v1은 모든 normal Window가 한 atomic snapshot이다. 한 창이라도 캡처할 수 없으면 성공한 창만으로
             // 기존 완전본을 덮어쓰지 않는다(다음 실행에서 실패 창이 영구 삭제되는 partial checkpoint 방지).
             guard let session = surface.appSession else { return }
-            // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
-            // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
-            let isActive: UInt32 = (surface.window?.isKeyWindow == true) ? 1 : 0
+            let isActive: UInt32 = TerminationWindowPolicy.isActive(
+                index: windowIndex,
+                capturedKeyIndex: capturedKeyIndex,
+                currentKeyIndex: currentKeyIndex
+            ) ? 1 : 0
             // M3f: 창 frame(전역 스크린 좌표, bottom-left 원점)을 저장해 재시작 시 위치·크기·모니터를 복원한다. 절대
             // frame이라 어느 모니터인지 자동 인코딩된다(display ID 불필요). 점 단위 정수로 반올림(픽셀 아님 — backing
             // scale 무관). 창이 없으면 hasFrame=0(win-* 생략 → cascade).
@@ -9926,6 +9991,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func writeSummary(visibleUI: Bool, abiReady: Bool, smokeDurationMs: UInt32?) {
+        // 요약을 쓰는 이 시점이 종료 경로의 사실상 마지막이라, 여기서 total을 확정하면 단계로 나누지 않은
+        // 잔여 시간까지 total에 들어온다. 종료가 아닌 경로로 불리면(start==0) total은 0으로 남는다.
+        if terminationStartNs != 0 {
+            // 단계 측정(`measureElapsedNs`)과 같은 규칙으로 음의 경과를 0으로 접는다 — 한쪽만 wrap을 허용하면
+            // total만 헛수가 되어 단계 합과의 차이를 잔여 시간으로 읽을 수 없다.
+            let now = DispatchTime.now().uptimeNanoseconds
+            terminationTiming.recordTotal(elapsedNs: now >= terminationStartNs ? now - terminationStartNs : 0)
+        }
         let smokeMode = smokeDurationMs != nil
         let duration = smokeDurationMs ?? 0
         let terminalSurface = latestFrameSummary.terminal_surface != 0
@@ -10022,6 +10095,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         mermaid_stale_results=\(mermaidRenderCoordinator.staleResultCount)
         mermaid_accepted_results=\(mermaidSnapshot.accepted_results)
         mermaid_deadline_expirations=\(mermaidSnapshot.deadline_expirations)
+        \(terminationTiming.summaryBlock())
 
         """
 
@@ -10292,6 +10366,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             print(summary, terminator: "")
             print("artifacts written to \(artifactDirectory)/")
         } catch {
+            // `artifactDirectory`는 상대 경로라 개발/CI(저장소 cwd)에서만 쓸 수 있다. `.app`을 Finder/Dock으로
+            // 실행하면 cwd가 "/"여서 쓰기가 실패하고, stdout/stderr도 보이지 않아 종료 요약이 통째로 사라진다.
+            // 그 경로에서도 quit_* 계측을 되짚을 수 있어야 하므로 사용자 홈 아래로 폴백한다. 기존 경로가 성공하는
+            // 개발/CI에서는 이 분기를 타지 않으므로 아티팩트 계약은 그대로다.
+            if let fallback = maruFallbackSummaryFileURL(),
+               (try? FileManager.default.createDirectory(
+                   at: fallback.deletingLastPathComponent(),
+                   withIntermediateDirectories: true
+               )) != nil,
+               (try? summary.write(to: fallback, atomically: true, encoding: .utf8)) != nil {
+                // 저장소 밖 cwd에서 터미널로 직접 실행한 경우처럼 stdout은 살아 있을 수 있다. 성공 경로와 똑같이
+                // 요약을 찍어야 파일을 찾아가지 않고도 바로 읽는다(파일 기록과 화면 출력은 서로 대체재가 아니다).
+                print(summary, terminator: "")
+                print("artifacts written to \(fallback.path)")
+                return
+            }
             exitCode = 1
             fputs("failed to write \(summaryPath): \(error)\n", stderr)
         }

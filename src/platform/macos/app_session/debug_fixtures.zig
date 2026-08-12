@@ -636,10 +636,10 @@ pub fn reapplyForcedAgentStates(self: *AppSession) void {
 
     var n: usize = 0;
     var stamp: u64 = 0;
-    for (self.tabs.items) |tab| {
+    outer: for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (n >= want_n) return;
+                if (n >= want_n) break :outer;
                 term.agent_state = want;
                 term.agent_kind = .claude;
                 // 활동 시각은 **앞 Term이 가장 최근**이 되게 심는다 — 그래야 두 정렬이 화면에서 갈린다.
@@ -651,6 +651,15 @@ pub fn reapplyForcedAgentStates(self: *AppSession) void {
             }
         }
     }
+    // **사이드바를 다시 투영한다.** `sidebar_rows`는 이벤트(Term 열기/닫기·접기·드래그)에서만 재빌드되고 tick에는
+    // 돌지 않는다 — 그 설계 자체는 옳다(매 프레임 재투영은 낭비고, running 상태는 draw list가 라이브로 재조회한다).
+    // 문제는 이 하니스가 **제품 이벤트를 거치지 않고** 상태를 심는다는 점이다: `MARU_FORCE_SPLIT`이 만든 pane과
+    // 여기서 세운 agent_kind가 rows에는 없어, 목록 유무를 정하는 `appendAgentRows`가 "세션 1개·에이전트 0"인
+    // 첫 투영 그대로 굳는다. 실제로 캡처에서 세션 목록이 통째로 안 나왔고, 그것을 코드 회귀로 오해하기 쉬웠다.
+    //
+    // 사용자 클릭과 **같은 경로**(rebuildSidebar)를 태워 rows를 현실과 맞춘다(메모리·docs의 self-verify 게이트 규율).
+    // env 미설정이면 위에서 이미 반환했으므로 제품 실행에는 영향이 없다.
+    if (n > 0) sidebar_ops.rebuildSidebar(self) catch {};
 }
 
 pub fn maybeDebugOpenFilePanel(self: *AppSession) void {

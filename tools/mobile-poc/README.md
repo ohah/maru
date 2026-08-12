@@ -93,6 +93,11 @@ sh tools/mobile-poc/run.sh features-ios        # 같은 판정 (지금 멈춘다
 | 계측 시계 | `CADisplayLink.timestamp`(직전 vsync) | `CLOCK_MONOTONIC` present 간격 |
 | 자유 실행 | **16.67 ms** (60Hz) | **16.66 ms** (FIFO=vsync) |
 | 30Hz 요청 | **33.33 ms** | **33.29~33.31 ms**(AChoreographer) |
+
+**이 표는 "할 수 있는가" 의 기록이다.** 제품은 그 뒤 **처음부터 30Hz** 로 간다
+([계약 §3.2](../../docs/mobile-platform.md)) — 한때 60Hz 로 시작해 계측이 끝나면 30Hz 로
+넘어갔는데, 측정의 부산물이 제품 동작이 되어 있었다. 지금 제품 host 의 `MARU_PACE median_ms`
+는 도는 주기를 재서 한 번 기록만 하고 동작을 바꾸지 않는다.
 | 판정 | **PASS** | **PASS**(vsync 잠금) |
 
 **iOS 의 페이싱 API 는 macOS 와 다르다.** `presentAfterMinimumDuration:`·`presentedTime`·

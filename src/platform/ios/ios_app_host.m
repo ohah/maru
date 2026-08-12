@@ -78,7 +78,6 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     CTFontRef _atlasFont;
     unsigned int _atlasH;
     CADisplayLink *_link;
-    unsigned int _tickCount;
 }
 
 // 호스트가 만든 한글·영어 아틀라스와, **Zig 가 만든** 아이콘 coverage 를 올린다.
@@ -269,6 +268,12 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     if (added) NSLog(@"MARU_ATLAS grew=%u", added);
 }
 
+/// 배경/복귀에서 렌더를 멈추고 잇는다. `CADisplayLink.paused` 는 콜백만 멈출 뿐 링크를
+/// 버리지 않으므로 복귀가 싸다.
+- (void)setRenderingPaused:(BOOL)paused {
+    _link.paused = paused;
+}
+
 + (Class)layerClass { return [CAMetalLayer class]; }
 
 - (instancetype)initWithFrame:(CGRect)f {
@@ -306,7 +311,6 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (void)tick {
-    if ((++_tickCount % 120) == 0) NSLog(@"MARU_LIFECYCLE ticks=%u", _tickCount);
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
@@ -382,9 +386,14 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 스왑체인을 부술 필요는 없지만, CADisplayLink 를 멈추지 않으면 복귀 시 밀린 프레임이
 // 몰린다. 재개 후 다시 도는지가 판정 기준이다.
 - (void)applicationDidEnterBackground:(UIApplication *)app {
+    // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
+    // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는
+    // 창이 죽을 때 Vulkan 을 부수는데 iOS 만 아무것도 안 하고 있었다.
+    [(ChromeView *)self.window.rootViewController.view setRenderingPaused:YES];
     NSLog(@"MARU_LIFECYCLE background");
 }
 - (void)applicationWillEnterForeground:(UIApplication *)app {
+    [(ChromeView *)self.window.rootViewController.view setRenderingPaused:NO];
     NSLog(@"MARU_LIFECYCLE foreground");
 }
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {

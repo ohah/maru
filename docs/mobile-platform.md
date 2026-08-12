@@ -138,6 +138,24 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 넘어갔다 — 측정의 부산물이 제품 동작이었고, iOS 엔 그 전환이 없어 두 플랫폼이 달랐다. 지금은
 둘 다 처음부터 30Hz 이고 `MARU_PACE` 는 도는 주기를 재서 한 번 기록만 한다.
 
+## 3.3 배경으로 나갈 때
+
+**두 플랫폼이 하는 일이 다르다 — OS 가 요구하는 것이 다르기 때문이다.**
+
+| | 나갈 때 | 돌아올 때 |
+|---|---|---|
+| iOS | `CADisplayLink` 를 **멈춘다**(`paused`). 배경에서 GPU 작업을 계속하면 앱이 종료될 수 있다 | 다시 돌린다. 레이어·텍스처는 UIKit 이 살려 둔다 |
+| Android | 창 자체가 사라진다(`APP_CMD_TERM_WINDOW`) → **Vulkan 을 통째로 부순다** | `APP_CMD_INIT_WINDOW` 에서 다시 세운다 |
+
+Android 가 더 무거운 이유는 창이 진짜로 없어지기 때문이다 — 스왑체인을 들고 있으면 죽은
+surface 로 present 하게 된다. iOS 는 그 파괴가 필요 없고, **대신 그리기를 멈추지 않으면
+안 된다**(한동안 iOS 만 아무것도 안 하고 있었다).
+
+**재개해도 살아야 하는 것은 `g` 밖에 둔다**(Android). teardown 이 상태를 memset 하므로 안에
+두면 재개할 때마다 초기화된다 — vsync 체인 소유 플래그가 그래서 왕복마다 체인을 쌓았다
+(실측: 3회 왕복에 33.4ms → 16.7ms). 반대로 **새 네이티브 스레드는 체인이 없으므로**
+`android_main` 시작 때 그 플래그를 0 으로 되돌린다.
+
 ## 4. 폰트
 
 **동봉 폰트를 쓴다.** `assets/fonts/Jetendard`(OFL)는 영문과 한글을 한 파일에 담아 폴백이

@@ -12847,7 +12847,7 @@ pub const AppSession = struct {
         self.runFramePreHousekeeping();
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
-        sidebar_ops.reprojectSidebarIfCardLinesStale(self); // 관측·활성 Term 변화로 카드 줄 수가 바뀌었으면 재투영(아래 주석)
+        sidebar_ops.reprojectSidebarIfRowLinesStale(self); // 관측·cwd·활성 Term 변화로 행 줄 수가 바뀌었으면 재투영(아래 주석)
         if (ft_on) ft_titles = std.Io.Clock.awake.now(self.io).nanoseconds; // titles(syncAutoTitles=전체 코어 lock) 끝
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
@@ -23874,6 +23874,87 @@ test "OSC 7이 비어도 사이드바는 소스 컨트롤과 같은 답을 낸�
     // 결과: 카드가 이름+브랜치+폴더 3줄, 에이전트 행도 라벨+폴더+브랜치 3줄이다(기본 토글 both-on 기준).
     try std.testing.expectEqual(@as(u8, 3), sidebar_ops.sidebarCardLines(session, tab));
     try std.testing.expectEqual(@as(u8, 3), sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }));
+}
+
+// 사이드바 **검색**도 같은 축을 쓴다. `tabMatchesSearch`는 이름·브랜치·폴더 셋으로 카드를 거르는데, 폴더만
+// 관측(OSC 7)을 직독하면 사이드바가 커널 폴백으로 폴더줄을 **그리고 있는** 카드인데 그 폴더 이름으로는 검색이
+// 안 되는 반쪽 필터가 된다(브랜치로는 된다 — 그쪽은 `termGitBranch`라 축을 탄다). 적대적 검증에서 실제로 만들
+// 뻔한 회귀라 여기서 잠근다.
+test "사이드바 검색: 폴더도 브랜치와 같은 축으로 매칭한다(OSC 7이 없어도)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const term = tab.panes.items[0].terms.items[0];
+    try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len); // 전제: OSC 7 미수신
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.termCwd(session, term, &buf) orelse return error.SkipZigTest;
+    const leaf = std.fs.path.basename(cwd);
+    try std.testing.expect(leaf.len > 0);
+    // 이름줄에 우연히 폴더명이 들어 있으면 이 테스트가 **폴더 축을 검증하지 못한다**(이름 매칭으로 통과한다).
+    // 그때는 통과시키지 않고 판정 불가로 물러난다.
+    if (std.ascii.indexOfIgnoreCase(workspaceLabel(tab), leaf) != null) return error.SkipZigTest;
+
+    try std.testing.expect(tab_ops.tabMatchesSearch(session, tab, leaf));
+    // 브랜치도 같은 cwd에서 파생되므로 함께 매칭된다(저장소 밖이면 판정할 것이 없다).
+    if (git_ops.termGitBranch(session, term)) |branch| {
+        try std.testing.expect(tab_ops.tabMatchesSearch(session, tab, branch));
+    }
+    // 위 단언이 "무엇을 넣어도 true"라서 통과한 것이 아님을 보인다 — 이게 없으면 필터가 통째로 고장 나도
+    // 이 테스트는 계속 초록이다.
+    try std.testing.expect(!tab_ops.tabMatchesSearch(session, tab, "zzz-no-such-token-zzz"));
+}
+
+// **에이전트 행의 줄 수도 투영 뒤에 바뀐다.** 제품 스크린샷에서 실제로 발견했다(bash 셸 = OSC 7 없음):
+// 폴더줄이 **다음 행의 라벨 위에 겹쳐** 그려졌다. 원인은 재투영 가드가 카드 행만 보고 에이전트 행은
+// `else => {}`로 건너뛴 것이다 — 예전에는 보조줄이 OSC 7에만 달려 있었고 그 값이 대개 첫 투영 전에 도착해
+// 어긋남이 드물었지만, cwd가 커널 폴백까지 가면서 값이 투영 **뒤에** 오는 것이 흔해졌다(커널 조회는 자식이
+// foreground process group을 잡은 뒤에야 답한다).
+//
+// 여기서는 그 상태를 손으로 만든다: 줄 수를 굳힌 뒤 cwd가 도착하는 순서를 재현하고, 가드가 그것을 낡음으로
+// 보는지 확인한다.
+test "사이드바 재투영: cwd가 투영 뒤에 와도 에이전트 행 줄 수가 따라온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const tab = session.tabs.items[0];
+    const term = tab.panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    term.agent_state = .idle;
+    sidebar_ops.rebuildSidebar(session) catch {};
+
+    // 투영된 에이전트 행을 찾아, 그 행이 든 줄 수가 지금 계산과 같은지부터 확인한다(전제).
+    const projected: u8 = blk: {
+        for (session.sidebar_rows.items) |row| switch (row) {
+            .agent => |g| break :blk g.lines,
+            else => {},
+        };
+        return error.SkipZigTest; // 이 세션 형태에 에이전트 행이 없으면 판정할 것이 없다
+    };
+    try std.testing.expectEqual(sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }), projected);
+
+    // 이제 cwd가 **투영 뒤에** 바뀐 상태를 만든다. `/tmp`는 저장소가 아니라 브랜치줄이 사라져 줄 수가 줄고,
+    // 관측은 커널 폴백보다 우선이므로 이 심기가 실제로 이긴다.
+    term.rt.observation.cwd.clearRetainingCapacity();
+    try term.rt.observation.cwd.appendSlice(a, "/tmp");
+    term.rt.observation.availability = .current;
+    const now_lines = sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 });
+    if (now_lines == projected) return error.SkipZigTest; // 원래 같은 줄 수면 이 테스트가 볼 것이 없다
+
+    // 가드가 그 차이를 보고 다시 투영해야 한다. 안 하면 행 높이(1)와 렌더(2)가 갈려 폴더줄이 아래 행을 덮는다.
+    sidebar_ops.reprojectSidebarIfRowLinesStale(session);
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .agent => |g| try std.testing.expectEqual(now_lines, g.lines),
+        else => {},
+    };
 }
 
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {

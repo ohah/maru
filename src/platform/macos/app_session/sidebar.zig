@@ -597,7 +597,7 @@ pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
     return .{ .x = caret_x, .y = rect.y, .w = @max(self.cell_width_px, 1), .h = rect.h };
 }
 
-/// 카드 줄 수가 투영 당시와 달라졌으면 사이드바를 다시 투영한다.
+/// 행(카드·에이전트) 줄 수가 투영 당시와 달라졌으면 사이드바를 다시 투영한다.
 ///
 /// **왜 필요한가**: 카드 줄 수는 활성 Term의 관측(cwd·git 브랜치)에서 파생되는데, 그 값은 투영 **뒤에** 바뀔 수
 /// 있다. 두 경로가 실측으로 확인됐다(사용자 제보):
@@ -607,15 +607,19 @@ pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
 /// 2. **Term 전환**(터미널 ↔ web 패널) — web Term은 cwd·브랜치가 없어 카드가 1줄, 터미널은 3줄이다. 같은 Pane
 ///    안에서 탭을 옮기면 카드 줄 수가 3↔1로 바뀐다.
 ///
-/// 둘 다 결과가 같다: 밴드·hit-test가 쓰는 행 높이와 실제로 그려지는 글자가 어긋나, 활성 밴드가 이름줄이 아니라
-/// 브랜치 줄에 걸린다. 에이전트 행에서 같은 클래스를 고쳤지만(응답 도착 시 재투영) 카드는 파생 경로가 달라
-/// 여기서 막는다.
+/// 3. **cwd가 커널 폴백으로 늦게 온다** — 커널 조회는 자식이 foreground process group을 잡은 뒤에야 답하므로
+///    첫 투영 때는 비고 다음 폴링에서 채워진다. 이건 **에이전트 행**에서 특히 잘 보인다(폴더줄이 다음 행의
+///    라벨 위에 겹친다 — 제품 스크린샷으로 확인). 셸 통합이 없는 셸과 재개 Term이 상시 이 상태다.
+///
+/// 셋 다 결과가 같다: 밴드·hit-test가 쓰는 행 높이와 실제로 그려지는 글자가 어긋나, 활성 밴드가 이름줄이 아니라
+/// 브랜치 줄에 걸리거나 보조줄이 아래 행을 침범한다. 에이전트 행은 응답 도착 경로만 재투영을 걸고 있어 cwd
+/// 경로가 비어 있었다 — 그래서 여기서 **두 종류를 함께** 본다.
 ///
 /// **고정 높이(min-height)로 덮지 않는 이유**: 그러면 1줄 카드도 3줄 자리를 차지해 목록이 그만큼 길어지고,
 /// "카드 높이는 내용에 따라 다르다"는 이 기능의 전제(docs/sidebar-agent-list.md §3)와 정면으로 충돌한다.
 /// 어긋남의 원인은 높이가 변하는 것이 아니라 **변한 뒤 다시 투영하지 않는 것**이다.
 ///
-/// `sidebarCardLines`가 줄 수의 단일 출처이므로 그 값과 박힌 값을 그대로 대조한다. 값이 실제로 달라졌을 때만
+/// `sidebarCardLines`·`sidebarAgentRowLines`가 각 행 줄 수의 단일 출처이므로 그 값과 박힌 값을 그대로 대조한다. 값이 실제로 달라졌을 때만
 /// 재투영한다.
 ///
 /// **비용**: 이 비교는 카드마다 `termGitBranch`와 `sidebarHasCwd`를 부르고 둘 다 `termCwd`를 거친다. OSC 7을
@@ -623,13 +627,25 @@ pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
 /// 그것도 **Term별 0.5초 캐시**(`term.rt.proc_cwd_*`)를 지난다. 즉 최악이 Term당 초당 2회이며, 그 캐시가
 /// AppSession 단일 슬롯이 아니라 Term별인 이유가 정확히 여기다 — 한 칸이면 이 루프가 카드마다 서로를 밀어내
 /// 매 tick 전수 syscall이 된다. `.git/HEAD` 읽기는 그 위에서 cwd가 바뀔 때만 도는 별도 캐시다.
-pub fn reprojectSidebarIfCardLinesStale(self: *AppSession) void {
+pub fn reprojectSidebarIfRowLinesStale(self: *AppSession) void {
     if (self.sidebar_collapsed or self.chrome_minimal) return; // 그릴 자리가 없으면 볼 이유도 없다
     var stale = false;
     for (self.sidebar_rows.items) |row| switch (row) {
         .card => |c| {
             if (c.tab >= self.tabs.items.len) continue;
             if (sidebarCardLines(self, self.tabs.items[c.tab]) != c.lines) {
+                stale = true;
+                break;
+            }
+        },
+        // **에이전트 행도 같은 이유로 낡는다.** 예전에는 카드만 봤는데, 그때는 이 행의 보조줄(폴더·브랜치)이
+        // OSC 7에만 달려 있었고 그 값은 대개 첫 투영 **전에** 도착해 어긋남이 드물었다. cwd가 커널 폴백까지
+        // 가면서 값이 투영 **뒤에** 오는 경우가 흔해졌다 — 커널 조회는 자식이 foreground process group을 잡은
+        // 뒤에야 답하므로 첫 투영 때는 비고 다음 폴링에서 채워진다. 그러면 행 높이는 1줄인데 렌더는 2줄을
+        // 그려 **폴더줄이 다음 행의 라벨 위에 겹친다**(제품 스크린샷으로 실제 확인).
+        .agent => |g| {
+            if (g.tab >= self.tabs.items.len) continue;
+            if (sidebarAgentRowLines(self, self.tabs.items[g.tab], .{ .pane = g.pane, .term = g.term }) != g.lines) {
                 stale = true;
                 break;
             }

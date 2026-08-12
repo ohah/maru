@@ -299,11 +299,16 @@ const Run = struct {
 
 /// 본문 사각형을 터미널 격자로 채운다.
 fn pushTerminal(rect: anytype, tk: anytype) void {
+    // **글자 상자가 곧 칸이다**(계약 §4 — 글리프 기하). 아틀라스 슬롯 하나는 **양폭 상자**라
+    // 단폭 글자는 왼쪽 절반만 쓴다. 줄 높이를 정하면 배율이 나오고, 칸 너비는 슬롯 절반이다.
+    // 예전에는 상자(11x15)와 칸(5x22)이 달라서, 셀을 가장자리까지 채우는 합성 글리프가
+    // 원리상 붙을 수 없었다.
+    const line_h: i32 = 22;
+    const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
+    const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
+    // chrome 라벨은 아직 예전 크기를 쓴다(본문 격자와 별개 — `pushText`).
     const font_px: i32 = 15;
-    const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
-    const cw: i32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale);
-    const line_h: i32 = font_px + 7;
-    const cols_f = @divTrunc(@as(i32, @intFromFloat(rect.width)), @max(1, @divTrunc(cw, 2)));
+    const cols_f = @divTrunc(@as(i32, @intFromFloat(rect.width)), cell_w);
     const rows_f = @divTrunc(@as(i32, @intFromFloat(rect.height)), line_h);
     const cols: u16 = @intCast(@max(8, @min(max_cols, cols_f)));
     const rows: u16 = @intCast(@max(2, @min(max_rows, rows_f)));
@@ -340,23 +345,21 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
 
     // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };
-    body_cell_w = @max(1, @divTrunc(cw, 2));
+    body_cell_w = cell_w;
     body_line_h = line_h;
     body_cols = grid_cols;
     body_rows = grid_rows;
 
     const ox = @as(i32, @intFromFloat(rect.x));
     const oy = @as(i32, @intFromFloat(rect.y));
-    const cell_w = @max(1, @divTrunc(cw, 2));
-    // 장식선 두께·자리. **글자 상자 기준이다** — 칸 높이로 잡았더니 밑줄이 글자에서 5 논리 px
-    // 떨어져 줄 사이 빈 공간에 떴다(실측: 글자 아래끝 860 · 밑줄 873, 기기 px). 칸(22)이
-    // 글자 상자(15)보다 높은 탓인데, 그 불일치를 없애는 것이 M4a3 이고 그때까지는 눈에 보이는
-    // 쪽(글자)에 맞춘다.
-    const rule: i32 = @max(1, @divTrunc(font_px, 12));
-    const y_over = 0; // 윗줄: 글자 상자 위
-    const y_strike = @divTrunc(font_px, 2); // 취소선: 글자 한가운데
-    const y_under = font_px; // 밑줄: 글자 상자 바로 아래
-    const y_under2 = font_px + 2 * rule; // 이중밑줄의 둘째 줄
+    // 장식선 두께·자리. **칸 기준이다** — M4a3 에서 글자 상자를 칸과 같게 만들었으므로 둘이
+    // 같은 말이 됐다. 그 전에는 칸(22)이 글자 상자(15)보다 높아 칸 기준으로 잡으면 밑줄이
+    // 글자에서 5 논리 px 떨어져 줄 사이에 떴고(픽셀 실측), 그때는 글자 쪽에 맞춰 두었다.
+    const rule: i32 = @max(1, @divTrunc(line_h, 16));
+    const y_over = 0; // 윗줄: 칸 위
+    const y_strike = @divTrunc(line_h, 2); // 취소선: 칸 한가운데
+    const y_under = line_h - 2 * rule; // 밑줄: 칸 아래(디센더 밑)
+    const y_under2 = line_h - 4 * rule; // 이중밑줄의 둘째 줄
 
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {
@@ -395,20 +398,20 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             const rgb = paintCell(cell.style, tk).fg;
             // 진행 폭은 코어가 정한 셀 폭을 따른다 — 한글이 2셀이라는 판정이 코어 것이다.
             const x = ox + @as(i32, col) * cell_w;
+            // **양폭 글자는 슬롯 전체, 단폭은 왼쪽 절반.** 슬롯 하나가 양폭 상자라서다.
+            // 그래야 글자 상자가 칸과 정확히 겹치고, 합성 글리프가 이음매 없이 붙는다.
+            const wide = cell.width == 2;
             quad_buf[quad_count] = .{
                 .x = @floatFromInt(x),
                 .y = @floatFromInt(y0),
-                // **셀 종횡비를 지킨다.** 셰이더가 아틀라스 셀 *전체* 를 quad 에 매핑하므로
-                // 폭을 줄이면 글자가 가로로 눌린다. 단폭·양폭 모두 같은 셀 하나를 그리고,
-                // 다른 것은 **다음 칸까지의 거리**(위 x 계산)뿐이다.
-                .w = @floatFromInt(cw),
-                .h = @floatFromInt(font_px),
+                .w = @floatFromInt(if (wide) cell_w * 2 else cell_w),
+                .h = @floatFromInt(line_h),
                 .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
                 .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
                 .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
                 .a = 1.0,
                 .radius = 0,
-                .kind = 1,
+                .kind = if (wide) 1 else 3, // 3 = 슬롯의 왼쪽 절반
                 .cell_x = glyph.col,
                 .cell_y = glyph.row,
             };
@@ -421,7 +424,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 그려진다" 라고 적혀 있었는데 순서는 반대였다).
     if (preedit_len > 0) {
         const cur = core.screen.cursor;
-        const px = @as(i32, @intFromFloat(rect.x)) + @as(i32, cur.col) * @divTrunc(cw, 2);
+        const px = @as(i32, @intFromFloat(rect.x)) + @as(i32, cur.col) * cell_w;
         const py = @as(i32, @intFromFloat(rect.y)) + @as(i32, cur.row) * line_h;
         const dim = tk.get(.muted_fg);
         pushText(preedit_buf[0..preedit_len], px, py, font_px, dim);

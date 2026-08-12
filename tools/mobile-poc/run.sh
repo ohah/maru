@@ -48,6 +48,22 @@ ime-ios)
     # `MARU_INPUT` 이 조합 단계마다 나오면 계약 위반이다(예전 `UIKeyInput` 이 그랬다).
     DEV=$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -1)
     [ -n "$DEV" ] || { echo "부팅된 시뮬레이터가 없다 — 먼저 chrome-ios 를 돌려라"; exit 1; }
+
+    # **하드웨어 키보드가 붙어 있으면 iOS 가 소프트 키보드를 숨긴다.** 앱이 강제할 공개 API 는
+    # 없다(실기기에는 하드웨어 키보드가 없어 늘 뜬다). 시뮬레이터 설정을 끄고 다시 띄운다 —
+    # 이 단계를 사람 손에 맡기면 "왜 로그가 안 나오지" 로 한 시간을 쓴다(실제로 그랬다).
+    if [ "$(defaults read com.apple.iphonesimulator ConnectHardwareKeyboard 2>/dev/null)" != "0" ]; then
+        echo "하드웨어 키보드를 끄고 시뮬레이터를 다시 띄운다"
+        defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false
+        osascript -e 'tell application "Simulator" to quit' 2>/dev/null || true
+        sleep 4
+        open -a Simulator
+        # 부팅과 앱 재설치를 기다린다
+        until xcrun simctl list devices booted | grep -q "$DEV"; do sleep 2; done
+        sleep 8
+        "$0" chrome-ios >/dev/null 2>&1
+        sleep 3
+    fi
     # **소프트 키보드를 두드린다.** `idb ui text` 는 하드웨어 키보드 경로라 IME 를 안 거친다 —
     # 조합 대신 "지웠다 다시 쓰기" 로 와서 우리 계약을 검증하지 못한다(바이트 델타가 3,4,4…로
     # backspace 가 섞여 나온다). 화면 키를 눌러야 진짜 IME 가 `setMarkedText` 를 보낸다.

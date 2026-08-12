@@ -58,9 +58,7 @@ static struct {
     uint32_t glyph_w, glyph_h;
     // 창이 리사이즈되면 스왑체인을 다시 만들어야 한다. 안 그러면 화면이 영구히 언다.
     int needs_recreate;
-    // 루프 지역 변수로 두면 teardown 이 g 를 지워도 남아, 재개 후 루프와 choreographer 가
-    // 둘 다 그린다.
-    int chor_started;
+
     VkDescriptorSet dset;
     VkBuffer quad_buf;        // draw-list 를 통째로 올리는 자리
     VkDeviceMemory quad_mem;
@@ -79,6 +77,11 @@ static struct {
 } g;
 
 // drawFrame 은 app 을 안 받는다 — 온디맨드 래스터가 JNI 를 쓰려면 필요해서 들고 있는다.
+// **`g` 밖에 둔다.** teardown 이 `g` 를 memset 하므로 안에 두면 재개할 때마다 새 체인을
+// 걸고, 이미 떠 있던 체인은 스스로 다시 등록하며 살아남는다 — 왕복할수록 체인이 늘어
+// **프레임 주기가 배로 빨라진다**(실측: 3회 왕복에 33.4ms → 16.7ms).
+// 체인은 앱 수명 동안 하나면 된다. 창이 없을 때는 drawFrame 이 알아서 쉰다.
+static int g_chor_started = 0;
 static struct android_app *g_app = NULL;
 static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선언이 필요하다
 static void recreateVulkan(struct android_app *app);
@@ -993,8 +996,8 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         // **처음부터 vsync 콜백이 주기를 쥔다**(30Hz). 여기서 등록하는 이유는
         // 메인 루프가 `pollOnce(-1)` 로 막혀 있어 거기서는 등록에 도달할 수
         // 없기 때문이다(그렇게 짰다가 아무것도 안 그려졌다).
-        if (!g.chor_started) {
-            g.chor_started = 1;
+        if (!g_chor_started) {
+            g_chor_started = 1;
             AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, app);
         }
         showKeyboard(app);

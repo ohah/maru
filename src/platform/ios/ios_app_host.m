@@ -239,8 +239,65 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 하려다 넣은 것이라 제품에는 틀린 동작이었다. Android 도 켜지면 키보드를 올린다.
 - (BOOL)hasText { return YES; }
 - (void)deleteBackward {
-    char bs = 0x7F;
-    maru_mobile_input(&bs, 1);
+    // **바이트를 손으로 적지 않는다.** backspace 도 코어가 인코딩한다 — 모드에 따라 0x7F 와
+    // 0x08 이 갈리고, 수정자가 붙으면 또 달라진다.
+    maru_mobile_key(MARU_KEY_BACKSPACE, 0, 0);
+}
+
+/// 수정자·특수키는 `UIKeyInput` 이 안 준다 — `pressesBegan` 이 `UIKey` 로 준다(iOS 13.4+).
+/// 화살표·Home/End·F1~F12·Ctrl 조합이 전부 이 경로다. 문자는 `insertText` 가 계속 맡는다.
+- (unsigned int)modsFrom:(UIKeyModifierFlags)f {
+    unsigned int m = 0;
+    if (f & UIKeyModifierShift) m |= MARU_MOD_SHIFT;
+    if (f & UIKeyModifierControl) m |= MARU_MOD_CTRL;
+    if (f & UIKeyModifierAlternate) m |= MARU_MOD_ALT;
+    if (f & UIKeyModifierCommand) m |= MARU_MOD_CMD;
+    return m;
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    BOOL handled = NO;
+    for (UIPress *press in presses) {
+        UIKey *k = press.key;
+        if (!k) continue;
+        unsigned int mods = [self modsFrom:k.modifierFlags];
+        unsigned int id = 0;
+        switch (k.keyCode) {
+            case UIKeyboardHIDUsageKeyboardUpArrow:    id = MARU_KEY_UP; break;
+            case UIKeyboardHIDUsageKeyboardDownArrow:  id = MARU_KEY_DOWN; break;
+            case UIKeyboardHIDUsageKeyboardLeftArrow:  id = MARU_KEY_LEFT; break;
+            case UIKeyboardHIDUsageKeyboardRightArrow: id = MARU_KEY_RIGHT; break;
+            case UIKeyboardHIDUsageKeyboardHome:       id = MARU_KEY_HOME; break;
+            case UIKeyboardHIDUsageKeyboardEnd:        id = MARU_KEY_END; break;
+            case UIKeyboardHIDUsageKeyboardInsert:     id = MARU_KEY_INSERT; break;
+            case UIKeyboardHIDUsageKeyboardDeleteForward: id = MARU_KEY_DELETE; break;
+            case UIKeyboardHIDUsageKeyboardPageUp:     id = MARU_KEY_PAGE_UP; break;
+            case UIKeyboardHIDUsageKeyboardPageDown:   id = MARU_KEY_PAGE_DOWN; break;
+            case UIKeyboardHIDUsageKeyboardEscape:     id = MARU_KEY_ESCAPE; break;
+            case UIKeyboardHIDUsageKeyboardTab:        id = MARU_KEY_TAB; break;
+            case UIKeyboardHIDUsageKeyboardReturnOrEnter: id = MARU_KEY_ENTER; break;
+            case UIKeyboardHIDUsageKeyboardDeleteOrBackspace: id = MARU_KEY_BACKSPACE; break;
+            default:
+                if (k.keyCode >= UIKeyboardHIDUsageKeyboardF1 &&
+                    k.keyCode <= UIKeyboardHIDUsageKeyboardF12) {
+                    id = MARU_KEY_F(k.keyCode - UIKeyboardHIDUsageKeyboardF1 + 1);
+                } else if (mods & (MARU_MOD_CTRL | MARU_MOD_ALT | MARU_MOD_CMD)) {
+                    // 수정자가 붙은 문자는 `insertText` 로 안 온다 — 여기서 코어에 태운다.
+                    NSString *s = k.charactersIgnoringModifiers;
+                    if (s.length == 0) continue;
+                    NSLog(@"MARU_INPUT key=char mods=%u total=%u", mods,
+                          maru_mobile_key(MARU_KEY_CHAR, [s characterAtIndex:0], mods));
+                    handled = YES;
+                    continue;
+                } else {
+                    continue;  // 평범한 문자는 insertText 가 맡는다
+                }
+        }
+        // Android 의 `MARU_INPUT` 과 같은 판정자다 — 누적 전달 바이트가 늘면 코어에 닿은 것이다.
+        NSLog(@"MARU_INPUT key=%u mods=%u total=%u", id, mods, maru_mobile_key(id, 0, mods));
+        handled = YES;
+    }
+    if (!handled) [super pressesBegan:presses withEvent:event];
 }
 - (void)insertText:(NSString *)text {
     const char *b = text.UTF8String;

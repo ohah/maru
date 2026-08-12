@@ -24031,6 +24031,66 @@ test "사이드바 재투영: 비활성 Term의 cwd가 투영 뒤에 와도 그 
     };
 }
 
+// transcript 매핑도 **같은 축**을 쓰고, provider별로 필요한 것만 요구해야 한다. 예전 `pollAgentTranscript`는
+// 관측(OSC 7)을 직독한 뒤 `if (cwd.len == 0) return;`로 **둘 다** 막았다. 그래서 두 가지가 함께 깨졌다.
+//
+//   1. Claude — cwd가 정말 필요한데(`~/.claude/projects/<슬러그>/`) OSC 7이 없는 Term에서 못 풀어 대화가 빈다.
+//   2. codex — `refreshCodexTranscript`가 `_ = cwd`로 무시하는데도 그 게이트에 함께 걸렸다. **필요하지도
+//      않은 값 때문에** 대화를 못 읽은 것이다.
+//
+// 여기서는 2를 잠근다: 신원만 세우고 cwd는 비워 둔 codex Term이 `.codex/sessions`의 rollout을 실제로 읽어
+// 마지막 대화를 채우는지 본다. 1은 축 자체(`termCwd`)를 다른 테스트가 덮는다.
+test "에이전트 대화: codex는 cwd를 몰라도 신원만으로 rollout을 읽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    // 격리 HOME에 codex rollout 하나를 심는다 — 실제 파일 규칙(`rollout-<ts>-<thread_id>.jsonl`)을 따른다.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = home_buf[0..try tmp.dir.realPath(session.io, &home_buf)];
+    // 실제 배치를 따른다: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`.
+    // `findCodexByThreadId`가 그 날짜 계층을 훑으므로 평평하게 두면 찾지 못한다(첫 시도가 그래서 실패했다).
+    for ([_][]const u8{ ".codex", ".codex/sessions", ".codex/sessions/2026", ".codex/sessions/2026/08", ".codex/sessions/2026/08/12" }) |dir|
+        try tmp.dir.createDir(session.io, dir, .default_dir);
+    const thread_id = "t-cwdless-1";
+    var name_buf: [160]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, ".codex/sessions/2026/08/12/rollout-2026-08-12T00-00-00-{s}.jsonl", .{thread_id});
+    try tmp.dir.writeFile(session.io, .{
+        .sub_path = name,
+        .data =
+        \\{"type":"session_meta","payload":{"id":"t-cwdless-1","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"cwd 없이도 읽히나"}}
+        \\{"type":"event_msg","payload":{"type":"agent_message","message":"읽힌다"}}
+        \\
+        ,
+    });
+
+    var home_z: [std.fs.max_path_bytes:0]u8 = undefined;
+    @memcpy(home_z[0..home.len], home);
+    home_z[home.len] = 0;
+    const prev_home = std.c.getenv("HOME");
+    _ = setenv("HOME", home_z[0..home.len :0].ptr, 1);
+    defer if (prev_home) |ph| {
+        _ = setenv("HOME", ph, 1);
+    };
+
+    const term = session.tabs.items[0].panes.items[0].terms.items[0];
+    term.agent_kind = .codex;
+    term.agent_state = .idle;
+    term.agent_transcript.setIdentity(thread_id);
+    // **전제: cwd를 모른다.** 관측은 비어 있고, 커널 폴백이 답하더라도 codex 경로는 그 값을 쓰지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len);
+
+    agent_ops.pollAgentTranscript(session, term, true);
+
+    // 예전에는 cwd 게이트에 걸려 여기가 빈 채로 남았다.
+    try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.reply(), "읽힌다") != null);
+}
+
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;

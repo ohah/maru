@@ -414,13 +414,26 @@ pub fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void
     // asked to return to.  Transcript path lookup below does require CWD, so keep that
     // optional enrichment separate from identity observation.
     refreshAgentSessionIdentity(self, term);
-    const cwd = term.rt.observation.cwd.items;
-    if (cwd.len == 0) return;
+    // **cwd는 Claude 경로에만 필요하다.** 그 경로는 `~/.claude/projects/<cwd 슬러그>/`를 찾느라 cwd를 쓰지만
+    // (`claudeDirName`), codex는 신원이 곧 파일명이라 `refreshCodexTranscript`가 `_ = cwd`로 무시한다.
+    // 그런데 예전에는 여기서 **둘 다** 막았다 — cwd를 모르면 codex도 대화를 못 읽었다. 그 provider에게는
+    // 필요하지도 않은 값 때문에. 아래처럼 provider별로 가른다.
+    //
+    // 그리고 그 cwd 자체도 **축**을 쓴다(`git_ops.termCwd` — OSC 7 → 커널 조회 2단, 단일 출처는
+    // docs/editor-surface-dock.md §3.5). 관측만 보던 동안에는 셸 통합이 없는 셸과 재개 Term에서 Claude
+    // 대화가 통째로 비어, 사이드바 에이전트 행이 마지막 프롬프트·응답 없이 종류 이름만 보였다.
+    //
+    // **수명**: `refreshClaudeTranscript`는 이 슬라이스를 슬러그 계산에만 쓰고 밖으로 내보내지 않으므로
+    // 스택 버퍼로 충분하다. 이 함수는 Term당 `transcript_poll_interval_ms`(1초)로 throttle되어 있어
+    // 커널 조회가 여기서 늘리는 비용은 무시할 수준이다.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse "";
     const had_reply = cache.owned.reply().len > 0;
     // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
     // 재투영은 여기 공통으로 남는다.
     const changed = switch (term.agent_kind) {
-        .claude => refreshClaudeTranscript(self, term, cwd),
+        // cwd를 못 풀면 슬러그를 만들 수 없어 이 갈래만 건너뛴다(추측으로 다른 디렉터리를 열지 않는다).
+        .claude => cwd.len > 0 and refreshClaudeTranscript(self, term, cwd),
         .codex => refreshCodexTranscript(self, term, cwd),
         .none => false,
     };

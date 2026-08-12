@@ -158,8 +158,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     if (term_core == null or term_cols != cols or term_rows != rows) {
         if (term_core) |*c| c.deinit();
         term_fba.reset();
-        term_core = terminal.core.TerminalCore.init(term_fba.allocator(),
-                                                    .{ .cols = cols, .rows = rows }) catch {
+        term_core = terminal.core.TerminalCore.init(term_fba.allocator(), .{ .cols = cols, .rows = rows }) catch {
             term_core = null;
             return;
         };
@@ -228,7 +227,7 @@ fn themeColors() tokens.ThemeColors {
         .search_match_current = .{ .r = 0x8A, .g = 0x7A, .b = 0x20 },
         .selection = .{ .r = 0x30, .g = 0x40, .b = 0x60 },
         .cursor = .{ .r = 0xE6, .g = 0xE6, .b = 0xEA },
-        .accent = .{ .r = 0xDD, .g = 0xA1, .b = 0x5E },   // maru 앰버
+        .accent = .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }, // maru 앰버
     };
 }
 
@@ -422,19 +421,11 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .{tree.text(.{ .id = 113, .style = tab_label_style, .value = "logs", .tone = .muted })},
     };
     const tabs = [_]tree.UiNode{
-        tree.card(.{ .id = 101, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 },
-                                            .margin = .{ .right = 6.0 } },
-                     .variant = .selected }, &tab_kids[0]),
-        tree.card(.{ .id = 102, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 },
-                                            .margin = .{ .right = 6.0 } },
-                     .variant = .surface }, &tab_kids[1]),
-        tree.card(.{ .id = 103, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 } },
-                     .variant = .surface }, &tab_kids[2]),
+        tree.card(.{ .id = 101, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 }, .margin = .{ .right = 6.0 } }, .variant = .selected }, &tab_kids[0]),
+        tree.card(.{ .id = 102, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 }, .margin = .{ .right = 6.0 } }, .variant = .surface }, &tab_kids[1]),
+        tree.card(.{ .id = 103, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 34.0 } }, .variant = .surface }, &tab_kids[2]),
     };
-    const tab_bar = tree.container(.{ .id = 100, .direction = .row,
-                                      .style = .{ .height = .{ .px = 46.0 },
-                                                  .padding = .{ .left = 12.0, .right = 12.0, .top = 6.0, .bottom = 6.0 } } },
-                                   &tabs);
+    const tab_bar = tree.container(.{ .id = 100, .direction = .row, .style = .{ .height = .{ .px = 46.0 }, .padding = .{ .left = 12.0, .right = 12.0, .top = 6.0, .bottom = 6.0 } } }, &tabs);
 
     // ── 사이드바: 워크스페이스 카드 다섯 개(세로)
     const names = [_][]const u8{ "maru", "web", "docs", "infra", "scratch" };
@@ -449,37 +440,23 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         })};
         c.* = tree.card(.{
             .id = @intCast(210 + i),
-            .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = 52.0 },
-                        .margin = .{ .bottom = 8.0 } },
+            .style = .{ .width = .{ .percent = 1.0 }, .height = .{ .px = 52.0 }, .margin = .{ .bottom = 8.0 } },
             .variant = if (i == 1) .selected else .surface,
         }, &side_kids[i]);
     }
-    const sidebar = tree.container(.{ .id = 200, .direction = .column,
-                                      .style = .{ .width = .{ .percent = 0.34 },
-                                                  .padding = .{ .left = 10.0, .right = 10.0, .top = 10.0, .bottom = 10.0 } } },
-                                   &side_children);
+    const sidebar = tree.container(.{ .id = 200, .direction = .column, .style = .{ .width = .{ .percent = 0.34 }, .padding = .{ .left = 10.0, .right = 10.0, .top = 10.0, .bottom = 10.0 } } }, &side_children);
 
     // ── 본문: **진짜 터미널 화면**이다. 자식 없이 자리만 잡고, 그 사각형을
     // `TerminalCore` 의 셀 격자로 채운다(아래 `pushTerminal`). 앞 단계의 하드코딩
     // 문자열과 달리 VT 파서를 실제로 태우므로 SGR 색·한글 2셀 폭이 코어에서 나온다.
-    const body = tree.container(.{ .id = 300, .direction = .column,
-                                   .style = .{ .flex = .{ .grow = 1 },
-                                               .padding = .{ .left = 16.0, .right = 16.0, .top = 14.0, .bottom = 14.0 } } },
-                                &.{});
+    const body = tree.container(.{ .id = 300, .direction = .column, .style = .{ .flex = .{ .grow = 1 }, .padding = .{ .left = 16.0, .right = 16.0, .top = 14.0, .bottom = 14.0 } } }, &.{});
 
-    const middle = tree.container(.{ .id = 20, .direction = .row, .style = .{ .flex = .{ .grow = 1 } } },
-                                  &.{ sidebar, body });
+    const middle = tree.container(.{ .id = 20, .direction = .row, .style = .{ .flex = .{ .grow = 1 } } }, &.{ sidebar, body });
 
     // ── 상태바
-    const status = tree.container(.{ .id = 400, .direction = .row,
-                                     .style = .{ .height = .{ .px = 26.0 },
-                                                 .padding = .{ .left = 12.0, .right = 12.0, .top = 5.0, .bottom = 5.0 } } },
-                                  &.{
-        tree.card(.{ .id = 401, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 16.0 },
-                                            .margin = .{ .right = 10.0 } },
-                     .variant = .raised }, &.{}),
-        tree.card(.{ .id = 402, .style = .{ .flex = .{ .grow = 1.4 }, .height = .{ .px = 16.0 } },
-                     .variant = .raised }, &.{}),
+    const status = tree.container(.{ .id = 400, .direction = .row, .style = .{ .height = .{ .px = 26.0 }, .padding = .{ .left = 12.0, .right = 12.0, .top = 5.0, .bottom = 5.0 } } }, &.{
+        tree.card(.{ .id = 401, .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 16.0 }, .margin = .{ .right = 10.0 } }, .variant = .raised }, &.{}),
+        tree.card(.{ .id = 402, .style = .{ .flex = .{ .grow = 1.4 }, .height = .{ .px = 16.0 } }, .variant = .raised }, &.{}),
     });
 
     const root = tree.container(.{ .id = 1, .direction = .column }, &.{ tab_bar, middle, status });
@@ -500,17 +477,12 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         .quad => |q| push(q.rect, tk.get(q.fill_role), q.alpha, q.corner_radii[0], 0),
         .fill => |f| push(f.rect, tk.get(f.role), f.alpha, 0, 0),
         .border => |b| push(b.rect, tk.get(b.role), 0x60, 0, 0),
-        .rule => |r| push(.{ .x = r.from.x, .y = r.from.y,
-                             .w = @intCast(@max(1, r.to.x - r.from.x)),
-                             .h = @intCast(@max(1, r.to.y - r.from.y)) }, tk.get(r.role), 0xFF, 0, 0),
-        // 글리프 아틀라스가 없으므로 텍스트는 **글자 수에 비례한 박스**로 자리만 표시한다.
-        // 실제 이식에서는 CoreText/FreeType 로 래스터한 아틀라스를 샘플링한다.
-        .text => |tx| {
-            var chars: u32 = 0;
-            for (tx.runs) |run| chars += @intCast(run.text.len);
-            push(.{ .x = tx.origin.x, .y = tx.origin.y, .w = chars * 7 + 2, .h = 13 },
-                 tk.get(tx.role), 0xC0, 2, 0);
-        },
+        .rule => |r| push(.{ .x = r.from.x, .y = r.from.y, .w = @intCast(@max(1, r.to.x - r.from.x)), .h = @intCast(@max(1, r.to.y - r.from.y)) }, tk.get(r.role), 0xFF, 0, 0),
+        // **텍스트는 여기서 그리지 않는다.** `ui.paint` 는 `resolveText` 결과를 버려서
+        // 이 분기가 실제로는 안 온다(`_ = paint_style.resolveText(visual)`). 글자는 아래
+        // 레이아웃 entry 를 훑어 아틀라스로 그린다 — 혹시 이 op 이 오더라도 여기서 또
+        // 그리면 같은 자리에 두 번 그려진다.
+        .text => {},
         else => {},
     };
 

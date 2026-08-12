@@ -55,6 +55,10 @@ static struct {
     VkImage glyph_image;   // 온디맨드 성장은 view 가 아니라 image 에 복사한다
     uint32_t glyph_w, glyph_h;
     VkDescriptorSet dset;
+    VkBuffer quad_buf;        // draw-list 를 통째로 올리는 자리
+    VkDeviceMemory quad_mem;
+    void *quad_map;           // persistent map — 프레임마다 memcpy 만 한다
+    unsigned int quad_cap;
     uint32_t atlas_cols, atlas_rows;
     float scale;
     int inset_top, inset_bottom;
@@ -434,17 +438,21 @@ static int initVulkan(ANativeWindow *win) {
     VkSamplerCreateInfo sampci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                                   .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
     VkSampler samp; vkCreateSampler(g.dev, &sampci, NULL, &samp);
-    VkDescriptorSetLayoutBinding binds[2] = {
+    VkDescriptorSetLayoutBinding binds[3] = {
         {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT}};
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
+        // binding 2 = draw-list. vertex 가 gl_InstanceIndex 로 읽는다.
+        {.binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT}};
     VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                             .bindingCount = 2, .pBindings = binds};
+                                             .bindingCount = 3, .pBindings = binds};
     VkDescriptorSetLayout dsl; vkCreateDescriptorSetLayout(g.dev, &dslci, NULL, &dsl);
-    VkDescriptorPoolSize dps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+    VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+                                   {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
     VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                                       .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps};
+                                       .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = dps};
     VkDescriptorPool dpool; vkCreateDescriptorPool(g.dev, &dpci, NULL, &dpool);
     VkDescriptorSetAllocateInfo dsai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                         .descriptorPool = dpool, .descriptorSetCount = 1, .pSetLayouts = &dsl};
@@ -452,17 +460,38 @@ static int initVulkan(ANativeWindow *win) {
     VkDescriptorImageInfo dii[2] = {
         {samp, g.glyph_view ? g.glyph_view : g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {samp, g.icon_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    VkWriteDescriptorSet wds[2] = {
+    // draw-list 버퍼: 프레임마다 새로 만들지 않고 한 번 잡아 persistent map 한다.
+    g.quad_cap = 4096;
+    VkBufferCreateInfo qbci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                               .size = (VkDeviceSize)g.quad_cap * sizeof(Push),
+                               .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    vkCreateBuffer(g.dev, &qbci, NULL, &g.quad_buf);
+    VkMemoryRequirements qmr; vkGetBufferMemoryRequirements(g.dev, g.quad_buf, &qmr);
+    VkPhysicalDeviceMemoryProperties qmp; vkGetPhysicalDeviceMemoryProperties(g.pd, &qmp);
+    uint32_t qmt = UINT32_MAX;
+    for (uint32_t i = 0; i < qmp.memoryTypeCount; i++) {
+        int want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if ((qmr.memoryTypeBits & (1u << i)) && (qmp.memoryTypes[i].propertyFlags & want) == want) { qmt = i; break; }
+    }
+    VkMemoryAllocateInfo qmai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                 .allocationSize = qmr.size, .memoryTypeIndex = qmt};
+    vkAllocateMemory(g.dev, &qmai, NULL, &g.quad_mem);
+    vkBindBufferMemory(g.dev, g.quad_buf, g.quad_mem, 0);
+    vkMapMemory(g.dev, g.quad_mem, 0, VK_WHOLE_SIZE, 0, &g.quad_map);
+    VkDescriptorBufferInfo qdbi = {.buffer = g.quad_buf, .offset = 0, .range = VK_WHOLE_SIZE};
+
+    VkWriteDescriptorSet wds[3] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 0,
          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[0]},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 1,
-         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1]}};
-    vkUpdateDescriptorSets(g.dev, 2, wds, 0, NULL);
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii[1]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.dset, .dstBinding = 2,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &qdbi}};
+    vkUpdateDescriptorSets(g.dev, 3, wds, 0, NULL);
 
-    VkPushConstantRange pcr = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push)};
+    // push constant 는 없앴다 — quad 마다 다른 값을 한 번의 draw call 에 실을 수 없다.
     VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                       .setLayoutCount = 1, .pSetLayouts = &dsl,
-                                       .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
+                                       .setLayoutCount = 1, .pSetLayouts = &dsl};
     vkCreatePipelineLayout(g.dev, &plci, NULL, &g.layout);
 
     VkShaderModule vs = loadSpv("/data/local/tmp/chrome.vert.spv");
@@ -550,7 +579,11 @@ static void drawFrame(void) {
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 1, &g.dset, 0, NULL);
-    for (unsigned int i = 0; i < n; i++) {
+    // **draw call 한 번.** 목록을 버퍼에 채우고 인스턴스로 그린다 — quad 마다 부르면
+    // 80x40 터미널이 3200 call 이 되고, 모바일 타일 기반 GPU 는 거기에 특히 민감하다.
+    unsigned int drawn = n < g.quad_cap ? n : g.quad_cap;
+    Push *dst = (Push *)g.quad_map;
+    for (unsigned int i = 0; i < drawn; i++) {
         const MaruQuad *q = &quads[i];
         float cols = (q->kind == 2) ? 1.0f : (float)g.atlas_cols;
         float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)g.atlas_rows;
@@ -559,10 +592,10 @@ static void drawFrame(void) {
                   {q->r, q->g, q->b, q->a},
                   {q->radius * scale, (float)g.extent.width, (float)g.extent.height, (float)q->kind},
                   {(float)q->cell_x, (float)q->cell_y, cols, rows}};
-        vkCmdPushConstants(cb, g.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof p, &p);
-        vkCmdDraw(cb, 4, 1, 0, 0);
+        dst[i] = p;
     }
+    vkCmdDraw(cb, 4, drawn, 0, 0);
+    if (g.frames == 0) LOGI("MARU_DRAW calls=1 instances=%u", drawn);
     vkCmdEndRenderPass(cb);
     vkEndCommandBuffer(cb);
 

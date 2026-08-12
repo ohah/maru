@@ -173,6 +173,73 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     return @intCast(delivered_len);
 }
 
+/// 키를 **코어의 인코더에 태운다**. 예전에는 host 가 `\r`·`0x7F` 를 손으로 적어 넣었는데,
+/// 그러면 DECCKM(커서키 모드)·수정자(Ctrl·Alt)·kitty 프로토콜·application keypad 가 전부
+/// 빠진다 — 그 지식은 전부 `core.encodeKey` 안에 있다.
+///
+/// 숫자 표의 단일 출처는 `mobile_host_abi.h` 다. 여기 매핑과 함께 바꾼다 —
+/// 계약 테스트가 헤더를 읽어 미러를 검사한다.
+fn keyFromId(key_id: u32, codepoint: u32) ?terminal.input.Key {
+    return switch (key_id) {
+        0 => terminal.input.charKeyFromCodepoint(codepoint) catch null,
+        1 => .enter,
+        2 => .escape,
+        3 => .tab,
+        4 => .backspace,
+        5 => .arrow_up,
+        6 => .arrow_down,
+        7 => .arrow_left,
+        8 => .arrow_right,
+        9 => .home,
+        10 => .end,
+        11 => .insert,
+        12 => .delete,
+        13 => .page_up,
+        14 => .page_down,
+        100...111 => .{ .function = @intCast(key_id - 99) },
+        else => null,
+    };
+}
+
+pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
+    preedit_len = 0; // 확정됐으니 겉치레를 지운다
+    const core = &(term_core orelse {
+        setLastError("input_before_core");
+        return @intCast(delivered_len);
+    });
+    const key = keyFromId(key_id, codepoint) orelse {
+        // 모르는 id 를 조용히 흘리면 그 키가 사라진 채 아무 신호가 없다(§5).
+        setLastError("key_unknown_id");
+        return @intCast(delivered_len);
+    };
+    const ev: terminal.input.KeyEvent = .{ .key = key, .modifiers = .{
+        .shift = mods & 1 != 0,
+        .control = mods & 2 != 0,
+        .option = mods & 4 != 0,
+        .command = mods & 8 != 0,
+    } };
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const bytes = core.encodeKey(ev, &buf) catch {
+        setLastError("key_encode");
+        return @intCast(delivered_len);
+    };
+    core.write(bytes) catch {
+        setLastError("core_write_input");
+        return @intCast(delivered_len);
+    };
+    delivered_len += bytes.len;
+    drainUnconsumed(core);
+    return @intCast(delivered_len);
+}
+
+/// 포커스 변화를 코어에 알린다(DEC 1004). 켜져 있으면 `CSI I`/`CSI O` 가 흐르고 vim 의
+/// FocusGained/Lost 가 그걸 본다 — 모바일은 배경↔복귀가 데스크톱보다 훨씬 잦다.
+pub export fn maru_mobile_report_focus(focused: c_int) void {
+    const core = &(term_core orelse return);
+    core.reportFocus(focused != 0);
+    drainUnconsumed(core);
+}
+
 // ── 포인터 조회 ───────────────────────────────────────────────────────────────
 // 논리 좌표를 본문의 셀 좌표로 바꾼다. **배치를 아는 쪽이 답한다** — 플랫폼은 점만 넘긴다.
 // 본문 rect·셀 크기는 마지막 build 가 정한 값을 그대로 쓴다(별도 상수를 두면 어긋난다).

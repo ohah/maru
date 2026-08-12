@@ -447,6 +447,44 @@ pub fn tabHasRunningAgent(tab: *Tab) bool {
     return false;
 }
 
+/// 이 탭에서 **종류별로 몇 개가 running인가**. 카드 배지(`▁▅▇▃N`)의 단일 출처다.
+///
+/// `tabHasRunningAgent`(bool)나 `tabAgentRepresentative`(대표 하나)로는 이 질문에 답할 수 없다 — 배지는 "무엇이
+/// 대표인가"가 아니라 "지금 몇 개가 돌고 있는가"를 말하고, claude·codex가 함께 도는 워크스페이스에서는 **둘을
+/// 따로** 세야 한다(사용자 결정 2026-08-12: 종류는 색으로 구분하고 개수는 숫자로 붙인다).
+/// 목록이 접혀 있어도 카드에 이 집계가 남으므로 "안 보이는 것을 없는 것처럼 만들지 않는다"가 유지된다.
+pub fn tabRunningCountsByKind(tab: *Tab) RunningCounts {
+    var counts: RunningCounts = .{};
+    for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.agent_state != .running) continue;
+        switch (term.agent_kind) {
+            .claude => counts.claude +|= 1,
+            .codex => counts.codex +|= 1,
+            .none => {}, // 에이전트가 아닌 Term은 running 상태를 갖지 않는다(관측이 kind로 게이트된다)
+        }
+    };
+    return counts;
+}
+
+/// 종류별 running 개수. 배지는 **0인 종류를 그리지 않는다** — 없는 것을 `0`으로 보여 주면 "무엇이 도는가"를
+/// 읽는 데 방해가 된다.
+pub const RunningCounts = struct {
+    claude: u16 = 0,
+    codex: u16 = 0,
+
+    pub fn total(self: RunningCounts) u16 {
+        return self.claude +| self.codex;
+    }
+
+    /// running인 종류 수(0·1·2). 1이면 배지 하나라 색만으로 종류가 읽히고, 2면 두 배지를 나란히 둔다.
+    pub fn kindCount(self: RunningCounts) u8 {
+        var n: u8 = 0;
+        if (self.claude > 0) n += 1;
+        if (self.codex > 0) n += 1;
+        return n;
+    }
+};
+
 /// 워크스페이스 대표 상태. 사용자 조치가 필요한 blocked를 running보다 먼저, 그 뒤 idle/unknown 순으로 고른다.
 /// 같은 우선순위면 활성 Term을 유지해 카드 라벨과 종류가 불필요하게 흔들리지 않는다.
 pub fn tabAgentRepresentative(tab: *Tab) ?AgentRepresentative {

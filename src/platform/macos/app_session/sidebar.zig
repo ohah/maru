@@ -1522,6 +1522,63 @@ pub fn runningStatusLine(self: *AppSession) ![]const u8 {
     return std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
 }
 
+/// 카드 배지 줄의 **색 구간** — 어느 열 범위가 어느 종류인지. 색칠 루프가 셀만 보고는 알 수 없기 때문에 있다:
+/// 두 종류의 배지는 **같은 블록 문자**를 쓰고 종류를 색으로만 가르므로(사용자 결정), 문자로는 구분이 안 된다.
+/// 조립 루프가 문자열을 만들면서 같은 좌표계로 기록하고 색칠 루프가 그대로 읽는다 — 두 곳이 폭 계산을
+/// 각자 하면 색이 한 칸씩 밀린다.
+pub const BadgeSpan = struct {
+    slot: usize,
+    start_col: u16, // 포함
+    end_col: u16, // 제외
+    kind: AgentKind,
+};
+
+/// 카드 배지 줄 문자열(owned) + 색 구간. running이 없으면 빈 문자열이고 구간도 비어 있다(그 줄은 생략된다).
+///
+/// 형태는 종류마다 `▁▅▇▃`(현재 프레임) + 공백 + 개수다. **개수가 1이면 숫자를 붙이지 않는다** — "하나 돌고 있다"는
+/// 파형만으로 이미 말하고, `1`은 잡음이다. 종류가 둘이면 공백 하나로 나란히 둔다(`▁▅▇▃2 ▁▅▇▃`).
+/// 종류 아이콘을 붙이지 않는 이유: 색이 그 일을 한다(사용자 결정 2026-08-12).
+pub fn runningBadgeLine(self: *AppSession, tab: *Tab, indent: []const u8, spans: *std.ArrayList(BadgeSpan), slot: usize) ![]const u8 {
+    const counts = tab_ops.tabRunningCountsByKind(tab);
+    if (counts.total() == 0) return self.allocator.dupe(u8, ""); // 빈 줄은 반드시 ""(공백만 있으면 없던 줄이 렌더된다)
+    const bars = try spinnerBarsUtf8(self, self.allocator);
+    defer self.allocator.free(bars);
+    // 폭은 **표시 칸**으로 센다. 블록 문자는 1칸이라 bar 개수와 같고, indent는 공백이라 그대로 칸이다.
+    var col: u16 = @intCast(indent.len);
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(self.allocator);
+    try text.appendSlice(self.allocator, indent);
+    const order = [_]struct { kind: AgentKind, count: u16 }{
+        .{ .kind = .claude, .count = counts.claude },
+        .{ .kind = .codex, .count = counts.codex },
+    };
+    var first = true;
+    for (order) |entry| {
+        if (entry.count == 0) continue;
+        if (!first) {
+            // 종류 사이는 **두 칸**이다. 파형과 개수 사이가 한 칸이므로(아래), 종류 간격도 한 칸이면 어디까지가
+            // 한 배지인지 흐려진다 — 색이 다르더라도 폭이 같으면 눈이 그룹을 못 가른다.
+            try text.appendSlice(self.allocator, "  ");
+            col += 2;
+        }
+        first = false;
+        const start = col;
+        try text.appendSlice(self.allocator, bars);
+        col += @intCast(spinner_bar_count);
+        if (entry.count > 1) {
+            // 파형과 개수 사이 한 칸 — 붙여 쓰면 숫자가 마지막 바에 달라붙어 읽기 어렵다(사용자 피드백 2026-08-12).
+            try text.append(self.allocator, ' ');
+            col += 1;
+            var num_buf: [8]u8 = undefined;
+            const num = std.fmt.bufPrint(&num_buf, "{d}", .{entry.count}) catch "";
+            try text.appendSlice(self.allocator, num);
+            col += @intCast(num.len);
+        }
+        try spans.append(self.allocator, .{ .slot = slot, .start_col = start, .end_col = col, .kind = entry.kind });
+    }
+    return text.toOwnedSlice(self.allocator);
+}
+
 /// 사이드바 상태줄은 워크스페이스 대표 상태(blocked > running > idle > unknown)를 표시한다.
 pub fn workspaceStatusLine(self: *AppSession, tab: *Tab) ![]const u8 {
     const representative = tab_ops.tabAgentRepresentative(tab) orelse return self.allocator.dupe(u8, "");
@@ -1708,6 +1765,10 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     defer card_kinds.deinit(self.allocator);
     var card_running: std.ArrayList(bool) = .empty;
     defer card_running.deinit(self.allocator);
+    // 배지 줄의 색 구간(슬롯·열 범위·종류). 같은 블록 문자를 색으로만 가르므로 색칠 루프가 셀만 보고는 종류를
+    // 알 수 없다 — 문자열을 만든 쪽이 좌표를 함께 기록해 넘긴다(`BadgeSpan` 주석).
+    var badge_spans: std.ArrayList(BadgeSpan) = .empty;
+    defer badge_spans.deinit(self.allocator);
     // 인덱스 도메인 통일(SG3c): 아래 카드-정보 배열(names/card_kinds…)은 **표시 row 인덱스**로 색인된다 —
     // group_header row도 padding 엔트리(삼각+이름 name, 빈 보조줄·아이콘 0·핀 false)를 하나 append해 배열 인덱스
     // i == 표시 row 인덱스가 되게 한다. buildSidebarDrawList도 이 i로 슬롯을 인코딩(sidebarGlyphRow)하고, active/close를
@@ -1922,7 +1983,9 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
             // **상태줄은 rename 중에도 표시** — 편집하는 워크스페이스가 running이면 파형 스피너를 보여준다(사용자 요청:
             // "리네임하면 애니메이션이 안 보인다"). 캐럿은 이름줄에만 있어 간섭 없고, "편집 이름 + 상태줄" 레이아웃은
             // non-git 에이전트 워크스페이스(브랜치/경로 없이 상태줄만)와 동형이라 안전하다. 브랜치/경로는 편집 집중 위해 계속 숨김.
-            try status_lines.append(self.allocator, try workspaceStatusLine(self, tab));
+            // rename 중에도 배지를 유지한다 — "리네임하면 애니메이션이 안 보인다"는 기존 사용자 요구를 그대로
+            // 지킨다. indent는 붙이지 않는다(편집 중 보조줄을 숨기므로 이 줄이 카드의 두 번째 줄이 된다).
+            try status_lines.append(self.allocator, try runningBadgeLine(self, tab, "", &badge_spans, status_lines.items.len));
             try pins.append(self.allocator, false);
             // ✕도 편집 중엔 숨긴다(핀과 같은 이유 — 편집 폭 확보). **append 자체를 빼면 안 된다**: close_rows는
             // row별 병렬 배열이라 한 칸이 비면 이후 모든 행의 ✕가 한 줄씩 밀리고 마지막 행은 "안 보이는데
@@ -1970,12 +2033,14 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 defer self.allocator.free(fl);
                 break :blk try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ indent, fl });
             } else try self.allocator.dupe(u8, ""));
-            // 상태줄은 **탭 단위** — running이면(어느 pane/Term이든) 파형 스피너, 아니면 활성 Term 상태(위에서 계산한 running 재사용).
-            // **빈 상태줄(에이전트 아님)엔 indent를 붙이지 않는다** — 안 그러면 공백-only 줄이 돼 buildSidebarDrawList가
-            // 빈 줄로 생략하지 못하고 **없던 4번째 줄이 렌더**된다(사용자 제보 버그). 빈 줄은 반드시 ""로 유지.
-            // 상태줄 없음: 대표 하나로 압축하던 자리를 **에이전트 목록**이 대체한다(§2 "기존 대표 표시는 제거").
-            // 대표를 고르는 규칙(blocked > running > idle)도 목록 앞에서는 의미가 없다.
-            try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+            // 상태줄 = **running 집계 배지**(`▁▅▇▃N`, 종류마다 하나 — 색으로 구분). running이 없으면 ""이고 그 줄은
+            // 생략된다. **빈 줄에 indent를 붙이면 안 된다** — 공백-only 줄은 buildSidebarDrawList가 빈 줄로 생략하지
+            // 못해 **없던 4번째 줄이 렌더**된다(사용자 제보 버그). `runningBadgeLine`이 그 규율을 지킨다.
+            //
+            // 대표 상태(blocked > running > idle)를 압축해 보여주던 옛 상태줄과는 **다른 정보**다. 그때 제거한 이유는
+            // "같은 정보가 두 곳에 다른 형태로 나온다"였는데(§2), 집계는 대표 선택이 아니라 목록이 답하지 못하는
+            // 질문에 답한다 — 목록이 **접혀 있어도** 무엇이 몇 개 도는지 보여야 한다(사용자 결정 2026-08-12).
+            try status_lines.append(self.allocator, try runningBadgeLine(self, tab, indent, &badge_spans, status_lines.items.len));
         }
     }
 
@@ -2009,7 +2074,25 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // 위치가 바뀌어도 따라오고, 이름·경로 줄의 우연한 블록 문자가 오염되는 것도 막는다.
         const on_agent_row = slot < rrows.len and (rrows[slot] == .agent or rrows[slot] == .agent_toggle);
         const is_spinner = on_agent_row and isAgentSpinnerCp(c.codepoint);
-        if (!is_icon and !is_spinner) continue;
+        // **카드 배지 줄**은 위 두 경로와 다르게 색을 고른다. 배지는 종류마다 같은 블록 문자를 쓰고 **색으로만**
+        // 구분하므로(사용자 결정), codepoint로는 claude/codex를 가릴 수 없다 — 문자열을 만든 쪽이 기록한 열 구간
+        // (`badge_spans`)을 그대로 읽는다. 개수 숫자도 같은 구간에 들어 파형과 같은 색을 받는다(한 배지 = 한 색).
+        if (!is_icon and !is_spinner) {
+            // **배지 줄로 좁힌다.** slot만 맞추면 같은 카드의 이름·브랜치·경로 줄에서 같은 열에 온 글자가 배지색으로
+            // 칠해진다(색칠 루프가 지켜 온 오염 방지 규율). 배지는 카드의 **마지막 줄**이므로 row 인코딩을 풀어
+            // `line_index + 1 == line_count`로 판정한다 — 줄 수가 카드마다 달라도(브랜치·경로 유무) 따라온다.
+            const base = coretext_frame_builder.sidebar_line_base;
+            const line_count = (c.row % base) / 4;
+            const line_index = (c.row % base) % 4;
+            if (line_count == 0 or line_index + 1 != line_count) continue;
+            for (badge_spans.items) |span| {
+                if (span.slot != slot or c.col < span.start_col or c.col >= span.end_col) continue;
+                const badge_brand = agentBrandColor(span.kind) orelse break;
+                c.style.foreground = .{ .rgb = badge_brand };
+                break;
+            }
+            continue;
+        }
         // 스피너 색칠은 **어느 Term이든 running일 때만** — idle/blocked/unknown 상태 문구에 블록 글자가 우연히 있어도
         // 브랜드색으로 오염되지 않게 한다(넓힌 블록 게이트 부작용 차단, code-review high). 아이콘은 상태 무관 솔리드.
         if (is_spinner and !card_running.items[slot]) continue;

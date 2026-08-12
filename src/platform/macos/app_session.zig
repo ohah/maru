@@ -24149,6 +24149,92 @@ test "사이드바 에이전트 목록: Term 전수 나열·개수와 무관하�
 // 함께 증명하는 것: (a) 에이전트를 돌리는 Term이 **에이전트 행 하나로만** 나오고 터미널 행으로 중복되지
 // 않는다(= "터미널이 에이전트 실행 중이면 에이전트만"이 Term 1:1 규율에서 공짜로 나온다), (b) 터미널 1개짜리
 // 워크스페이스는 카드 헤더가 곧 그 Term이라 목록을 내지 않는다.
+// [사용자 결정 2026-08-12] 카드에 **running 집계 배지**를 되살린다. 목록으로 옮겼던 파형은 목록을 **접으면**
+// 어디에도 남지 않아, 같은 커밋이 내세운 "안 보이는 것을 없는 것처럼 만들지 않는다"가 접힘에서 뒤집혔다.
+// 배지는 대표 하나를 고르는 옛 상태줄과 다른 정보다 — "무엇이 몇 개 도는가"를 종류별로 센다. 종류 아이콘은
+// 붙이지 않고 **색으로** 가른다(사용자 결정). 개수 1은 숫자를 생략한다(파형이 이미 "하나"를 말한다).
+test "사이드바 카드 배지: 종류별 running 개수를 세고, 개수 1은 숫자를 생략한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const tab = session.tabs.items[0];
+
+    // running이 없으면 집계도 0 — 배지 줄은 ""이라 카드에서 생략된다(공백만 있으면 없던 줄이 렌더된다).
+    {
+        const counts = tab_ops.tabRunningCountsByKind(tab);
+        try std.testing.expectEqual(@as(u16, 0), counts.total());
+        try std.testing.expectEqual(@as(u8, 0), counts.kindCount());
+    }
+
+    const first = pane_ops.activePane(session).activeTerm();
+    first.agent_kind = .claude;
+    first.agent_state = .running;
+    {
+        const counts = tab_ops.tabRunningCountsByKind(tab);
+        try std.testing.expectEqual(@as(u16, 1), counts.claude);
+        try std.testing.expectEqual(@as(u8, 1), counts.kindCount());
+    }
+
+    // 같은 종류가 하나 더 running이면 개수가 오른다 — 대표 하나로 압축하던 옛 상태줄이 답하지 못한 질문이다.
+    try pane_ops.newTermInActivePane(session);
+    const second = tab.panes.items[0].terms.items[1];
+    second.agent_kind = .claude;
+    second.agent_state = .running;
+    // 다른 종류도 함께 돌면 **따로** 센다(색으로 구분되는 두 배지가 된다).
+    try pane_ops.newTermInActivePane(session);
+    const third = tab.panes.items[0].terms.items[2];
+    third.agent_kind = .codex;
+    third.agent_state = .running;
+    {
+        const counts = tab_ops.tabRunningCountsByKind(tab);
+        try std.testing.expectEqual(@as(u16, 2), counts.claude);
+        try std.testing.expectEqual(@as(u16, 1), counts.codex);
+        try std.testing.expectEqual(@as(u8, 2), counts.kindCount());
+        try std.testing.expectEqual(@as(u16, 3), counts.total());
+    }
+
+    // **문자열 형태와 색 구간**을 함께 고정한다. 공백 규칙(파형·개수 사이 한 칸, 종류 사이 두 칸)은 사용자
+    // 피드백으로 정해진 것이라 회귀하기 쉽고, 색 구간은 조립과 색칠이 **같은 좌표계**를 봐야 한 칸도 안 밀린다.
+    {
+        var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
+        defer spans.deinit(a);
+        const line = try sidebar_ops.runningBadgeLine(session, tab, "", &spans, 0);
+        defer a.free(line);
+        // claude 2 + codex 1 → 파형+공백+2, 두 칸, 파형(개수 1은 숫자 생략).
+        try std.testing.expect(std.mem.indexOf(u8, line, " 2") != null); // 숫자가 파형에 붙지 않는다
+        try std.testing.expect(std.mem.indexOf(u8, line, "  ") != null); // 종류 사이는 두 칸
+        try std.testing.expect(!std.mem.endsWith(u8, line, "1")); // 개수 1은 숫자를 붙이지 않는다
+        // 구간은 종류마다 하나이고, 서로 겹치지 않으며, claude가 먼저다(색이 뒤바뀌면 종류가 뒤바뀐다).
+        try std.testing.expectEqual(@as(usize, 2), spans.items.len);
+        try std.testing.expectEqual(AgentKind.claude, spans.items[0].kind);
+        try std.testing.expectEqual(AgentKind.codex, spans.items[1].kind);
+        try std.testing.expect(spans.items[0].end_col <= spans.items[1].start_col);
+        try std.testing.expect(spans.items[0].start_col < spans.items[0].end_col);
+    }
+
+    // idle은 세지 않는다 — 배지는 "돌고 있는 것"만 말한다(알림이 오는 것과 무관하게 판정이 근거다).
+    second.agent_state = .idle;
+    third.agent_state = .idle;
+    {
+        const counts = tab_ops.tabRunningCountsByKind(tab);
+        try std.testing.expectEqual(@as(u16, 1), counts.claude);
+        try std.testing.expectEqual(@as(u16, 0), counts.codex);
+    }
+
+    // running이 0이면 **빈 문자열**이어야 한다 — 공백만 있으면 카드에 없던 줄이 렌더된다(옛 사용자 제보 버그).
+    first.agent_state = .idle;
+    {
+        var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
+        defer spans.deinit(a);
+        const line = try sidebar_ops.runningBadgeLine(session, tab, "  ", &spans, 0);
+        defer a.free(line);
+        try std.testing.expectEqual(@as(usize, 0), line.len);
+        try std.testing.expectEqual(@as(usize, 0), spans.items.len);
+    }
+}
+
 test "사이드바 세션 목록: 터미널도 행이 되고, 에이전트 Term은 한 행으로만 나온다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;

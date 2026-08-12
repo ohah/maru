@@ -40,6 +40,31 @@ test "본문 밖과 격자 밖은 둘 다 없음으로 답한다" {
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_hit_cell(100000, 100000));
 }
 
+// quad 버퍼를 2048 로 박아 뒀을 때 **태블릿 크기에서 격자만으로 넘쳤다**(폰 세로도 1828 로
+// 아슬아슬했다). 지금은 버퍼 크기를 격자 상한에서 계산하므로 어느 크기든 안 넘쳐야 한다.
+// 이 테스트는 아래 "슬롯이 다 차면" 보다 **앞**에 있어야 한다 — 그쪽이 등록부를 채운다.
+test "화면을 꽉 채워도 quad 가 안 잘린다" {
+    // 헤드리스에는 굽는 host 가 없다 — 등록부만 채워 "그릴 글리프가 있는" 상태로 만든다.
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 11);
+
+    const sizes = [_][2]u32{ .{ 402, 874 }, .{ 874, 402 }, .{ 1024, 1366 }, .{ 1366, 1024 } };
+    for (sizes) |s| {
+        _ = bridge.maru_mobile_build(s[0], s[1]); // 코어를 그 크기로 세운다
+        var line: [256]u8 = undefined;
+        @memset(&line, 'W');
+        line[254] = '\r';
+        line[255] = '\n';
+        var i: u32 = 0;
+        while (i < 80) : (i += 1) _ = bridge.maru_mobile_input(&line, line.len);
+
+        const n = bridge.maru_mobile_build(s[0], s[1]);
+        try std.testing.expect(n > 0);
+        try std.testing.expect(n <= bridge.maru_mobile_max_quads());
+        try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    }
+}
+
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이
 // 안 된 채 매 프레임 다시 구워진다 — 그래서 슬롯을 다 쓰면 `next_slot` 이 "없음" 을 답해야 한다.
 test "슬롯이 다 차면 없음을 답한다" {

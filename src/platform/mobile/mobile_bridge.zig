@@ -47,7 +47,15 @@ pub const MaruQuad = extern struct {
     cell_y: u32,
 };
 
-var quad_buf: [2048]MaruQuad = undefined;
+/// 격자 상한. 본문 cols/rows 를 여기로 자르고, quad 버퍼도 **여기서 계산한다** — 둘을 따로
+/// 두면 조용히 어긋난다(2048 로 박아 뒀을 때 태블릿 크기에서 격자만으로 넘쳤다. 폰 세로도
+/// 1828/2048 로 아슬아슬했다 — 헤드리스 실측).
+const max_cols: u16 = 200;
+const max_rows: u16 = 60;
+/// 본문 밖에서 나오는 quad: 배경 1 + chrome op(`ops` 배열 상한 512) + 라벨 글자 + 아이콘 6.
+/// 본문이 압도적이라 여유는 넉넉히 잡아 둔다.
+const chrome_quad_slack = 768;
+var quad_buf: [@as(usize, max_cols) * max_rows + chrome_quad_slack]MaruQuad = undefined;
 var quad_count: usize = 0;
 
 // ── 본문용 터미널 코어 ────────────────────────────────────────────────────────
@@ -155,8 +163,8 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const line_h: i32 = font_px + 7;
     const cols_f = @divTrunc(@as(i32, @intFromFloat(rect.width)), @max(1, @divTrunc(cw, 2)));
     const rows_f = @divTrunc(@as(i32, @intFromFloat(rect.height)), line_h);
-    const cols: u16 = @intCast(@max(8, @min(200, cols_f)));
-    const rows: u16 = @intCast(@max(2, @min(60, rows_f)));
+    const cols: u16 = @intCast(@max(8, @min(max_cols, cols_f)));
+    const rows: u16 = @intCast(@max(2, @min(max_rows, rows_f)));
 
     // **크기가 바뀌면 코어를 다시 세우지 않고 `resize` 한다.** 새로 만들면 스크롤백과 화면
     // 상태가 통째로 날아간다 — 키보드를 올렸다 내리기만 해도 그렇게 된다(창이 리사이즈된다).
@@ -641,4 +649,11 @@ pub export fn maru_mobile_clear_error() void {
 
 pub export fn maru_mobile_quads() [*]const MaruQuad {
     return &quad_buf;
+}
+
+/// build 가 낼 수 있는 **최대** quad 수. 플랫폼이 GPU 버퍼를 이만큼 잡으면 잘릴 일이 없다.
+/// 상한을 host 마다 손으로 적어 두면 어긋난다 — 실제로 iOS 는 늘리고 Android 는 4096 에서
+/// **조용히 자르고** 있었다. 아는 쪽이 답한다.
+pub export fn maru_mobile_max_quads() u32 {
+    return @intCast(quad_buf.len);
 }

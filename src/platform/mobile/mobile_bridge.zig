@@ -1,8 +1,12 @@
-//! PoC 6: **maru 의 실제 chrome 컴포넌트**로 UI 를 조립해 모바일 GPU 로 그린다.
+//! L4 모바일 어댑터의 **코어 쪽 절반**. iOS·Android host 가 공유한다.
 //!
-//! 앞 단계들은 색 격자를 손으로 그렸다. 여기서는 `chrome.ui.tree` 로 UiNode 를 조립하고
-//! `tree.build` 로 레이아웃을 돌린 뒤 `paint` 로 ChromeDraw 를 얻는다 — **데스크톱이 쓰는
-//! 바로 그 경로**다. 플랫폼은 나온 op 을 그리기만 한다.
+//! 플랫폼은 배치를 모른다 — 쓸 수 있는 크기를 논리 px 로 받고 quad 목록을 돌려준다.
+//! 셀 판정(`maru_mobile_hit_cell`)도 여기가 한다. C 쪽 계약은 `mobile_host_abi.h` 가
+//! 단일 출처이고, 이 파일의 export 와 **필드 순서·타입을 함께** 바꿔야 한다(한쪽만
+//! 고치면 링크는 되고 동작만 어긋난다).
+//!
+//! **OS 호출이 없다.** 있으면 `platform/ios`·`platform/android` 로 내려야 한다 — 그
+//! 규칙이 "공통분모" 를 파일 내용으로 판정 가능하게 만든다(docs/mobile-platform.md §2).
 const std = @import("std");
 // **모듈 루트는 `maru.zig` 하나다.** chrome·renderer 를 따로 주면 둘 다 `icons.zig` 를
 // 상대 경로로 끌어와 "file exists in two modules" 로 깨진다(실측). 배럴 하나로 받으면
@@ -19,7 +23,7 @@ const tokens = chrome.tokens;
 
 /// 플랫폼이 그릴 수 있는 최소 형태로 평탄화한 quad. ChromeDraw 의 op 은 union 이라
 /// C 에서 다루기 번거로우니, 여기서 rect + 색 + radius 로 낮춰 넘긴다.
-pub const CQuad = extern struct {
+pub const MaruQuad = extern struct {
     x: f32,
     y: f32,
     w: f32,
@@ -36,7 +40,7 @@ pub const CQuad = extern struct {
     cell_y: u32,
 };
 
-var quad_buf: [2048]CQuad = undefined;
+var quad_buf: [2048]MaruQuad = undefined;
 var quad_count: usize = 0;
 
 // ── 본문용 터미널 코어 ────────────────────────────────────────────────────────
@@ -69,7 +73,7 @@ const term_feed =
 var input_buf: [512]u8 = undefined;
 var input_len: usize = 0;
 
-export fn maru_term_input(ptr: [*]const u8, len: usize) u32 {
+export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     const n = @min(len, input_buf.len - input_len);
     if (n == 0) return @intCast(input_len);
     @memcpy(input_buf[input_len..][0..n], ptr[0..n]);
@@ -87,7 +91,7 @@ var body_cell_w: i32 = 1;
 var body_line_h: i32 = 1;
 
 /// 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
-export fn maru_hit_cell(x: f32, y: f32) u32 {
+export fn maru_mobile_hit_cell(x: f32, y: f32) u32 {
     if (body_rect.w <= 0 or body_rect.h <= 0) return 0xFFFFFFFF;
     if (x < body_rect.x or y < body_rect.y or
         x >= body_rect.x + body_rect.w or y >= body_rect.y + body_rect.h) return 0xFFFFFFFF;
@@ -98,7 +102,7 @@ export fn maru_hit_cell(x: f32, y: f32) u32 {
 
 /// 진단: row 행의 첫 non-space 코드포인트(없으면 0). "코어엔 들어왔는데 화면엔 없다"를
 /// 추측으로 가르지 않기 위한 조회다.
-export fn maru_row_first_cp(row: u32) u32 {
+export fn maru_mobile_row_first_cp(row: u32) u32 {
     const core = &(term_core orelse return 0);
     if (row >= term_rows) return 0;
     var col: u16 = 0;
@@ -228,12 +232,12 @@ var atlas_n: usize = 0;
 var atlas_cell_w: u32 = 24;
 var atlas_cell_h: u32 = 32;
 
-export fn maru_atlas_geometry(cell_w: u32, cell_h: u32) void {
+export fn maru_mobile_atlas_geometry(cell_w: u32, cell_h: u32) void {
     atlas_cell_w = cell_w;
     atlas_cell_h = cell_h;
 }
 
-export fn maru_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
+export fn maru_mobile_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
     // 등록되면 "없음" 목록에서 뺀다. 안 그러면 아틀라스가 서기 **전에** 한 번 돈 build 가
     // 남긴 목록 때문에 이미 있는 글자를 슬롯만 축내며 다시 굽는다(실측: grew=15 가 전부
     // 'z' 같은 ASCII 중복이었다).
@@ -270,24 +274,24 @@ fn noteMiss(cp: u21) void {
 }
 
 /// 플랫폼이 부른다: 아직 아틀라스에 없는 코드포인트 개수.
-export fn maru_missing_count() u32 {
+export fn maru_mobile_missing_count() u32 {
     return @intCast(miss_n);
 }
 
 /// i번째 놓친 코드포인트. 플랫폼이 이걸 구워 `maru_atlas_add` 로 넣는다.
-export fn maru_missing_cp(i: u32) u32 {
+export fn maru_mobile_missing_cp(i: u32) u32 {
     if (i >= miss_n) return 0;
     return miss_cp[i];
 }
 
 /// 다음 빈 슬롯의 (열, 행) — 상위 16비트=열, 하위 16비트=행.
-export fn maru_next_slot(cols: u32) u32 {
+export fn maru_mobile_next_slot(cols: u32) u32 {
     const idx: u32 = @intCast(atlas_n);
     return ((idx % cols) << 16) | (idx / cols);
 }
 
 /// 플랫폼이 다 구운 뒤 부른다. 목록을 비워 다음 프레임에 다시 쌓이게 한다.
-export fn maru_missing_clear() void {
+export fn maru_mobile_missing_clear() void {
     miss_n = 0;
 }
 
@@ -346,18 +350,18 @@ const icon_slots = 6;
 /// coverage 로 읽는다.
 var icon_pixels: [icon_slots * icon_slot_px * icon_slot_px * 4]u8 = undefined;
 
-export fn maru_icon_atlas() [*]const u8 {
+export fn maru_mobile_icon_atlas() [*]const u8 {
     return &icon_pixels;
 }
-export fn maru_icon_slot_px() u32 {
+export fn maru_mobile_icon_slot_px() u32 {
     return icon_slot_px;
 }
-export fn maru_icon_count() u32 {
+export fn maru_mobile_icon_count() u32 {
     return icon_slots;
 }
 
 /// 아이콘 coverage 를 채우고, 실제로 잉크가 있는 슬롯 수를 돌려준다(0이면 자산 이식 실패).
-export fn maru_icon_build() u32 {
+export fn maru_mobile_icon_build() u32 {
     @memset(&icon_pixels, 0);
     const cps = [icon_slots]u32{ 0xF0001, 0xF0002, 0xF0003, 0xF0004, 0xF0005, 0xF0006 };
     var filled: u32 = 0;
@@ -552,7 +556,7 @@ fn labelFor(id: u64) ?[]const u8 {
 /// catch 로 삼키면 화면이 비어 있는 이유를 알 수 없다(실측: 처음에 그렇게 짰다가 헤맸다).
 var last_error: [64]u8 = [_]u8{0} ** 64;
 
-export fn maru_chrome_build(width: u32, height: u32) u32 {
+export fn maru_mobile_build(width: u32, height: u32) u32 {
     quad_count = 0;
     @memset(&last_error, 0);
     const tk = tokens.Tokens.rich(themeColors());
@@ -565,10 +569,10 @@ export fn maru_chrome_build(width: u32, height: u32) u32 {
     return @intCast(quad_count);
 }
 
-export fn maru_chrome_last_error() [*:0]const u8 {
+export fn maru_mobile_last_error() [*:0]const u8 {
     return @ptrCast(&last_error);
 }
 
-export fn maru_chrome_quads() [*]const CQuad {
+export fn maru_mobile_quads() [*]const MaruQuad {
     return &quad_buf;
 }

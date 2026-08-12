@@ -3,35 +3,14 @@
 // 앞 단계는 색 격자를 손으로 그렸다. 여기서는 Zig 쪽 `chrome.ui.tree` 로 UI 를 조립하고
 // `paint` 가 뱉은 op 을 받아 그대로 그린다 — 플랫폼은 배치를 **모른다**. 그게 maru 의
 // 레이어 계약(L3 chrome 이 배치, L4 platform 이 그리기)이고, 이 PoC 가 확인하려는 것이다.
+// 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
+#include "../mobile/mobile_host_abi.h"
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <CoreText/CoreText.h>
 
-typedef struct {
-    float x, y, w, h;
-    float r, g, b, a;
-    float radius;
-    unsigned int kind;      // 0=단색 1=아틀라스 글리프 2=아이콘
-    unsigned int cell_x, cell_y;
-} CQuad;
 
-extern unsigned int maru_chrome_build(unsigned int width, unsigned int height);
-extern const CQuad *maru_chrome_quads(void);
-extern const char *maru_chrome_last_error(void);
-extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row, unsigned int advance);
-extern void maru_atlas_geometry(unsigned int cell_w, unsigned int cell_h);
-extern unsigned int maru_icon_build(void);
-extern const unsigned char *maru_icon_atlas(void);
-extern unsigned int maru_icon_slot_px(void);
-extern unsigned int maru_icon_count(void);
-extern unsigned int maru_term_input(const char *bytes, unsigned long len);
-extern unsigned int maru_hit_cell(float x, float y);
-extern unsigned int maru_missing_count(void);
-extern unsigned int maru_row_first_cp(unsigned int row);
-extern unsigned int maru_missing_cp(unsigned int i);
-extern unsigned int maru_next_slot(unsigned int cols);
-extern void maru_missing_clear(void);
 
 // 둥근 모서리를 프래그먼트에서 자른다 — maru 의 rich quad 가 corner_radii 를 쓰므로
 // 그 모양이 실제로 나오는지 보려면 필요하다.
@@ -143,7 +122,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     }
     CTFontRef korean = CFRetain(base);
 
-    maru_atlas_geometry(CW, CH);
+    maru_mobile_atlas_geometry(CW, CH);
     for (NSUInteger i = 0; i < n; i++) {
         unichar c = (unichar)cps[i].unsignedIntValue;
         NSUInteger col = i % COLS, row = i / COLS;
@@ -159,7 +138,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (glyph) CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
         int advance = (int)(adv.width + 0.5);
         if (advance <= 0) advance = CW / 2;
-        maru_atlas_add(c, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
+        maru_mobile_atlas_add(c, (unsigned int)col, (unsigned int)row, (unsigned int)advance);
     }
     // 온디맨드 성장이 같은 폰트를 계속 쓰므로 여기서 소유권을 넘겨받는다 —
     // 아래 release 뒤에 retain 하면 해제된 객체를 만진다(그렇게 짰다가 앱이 죽었다).
@@ -196,7 +175,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         unsigned int W = head[0].intValue, H = head[1].intValue;
         unsigned int cw = head[2].intValue, ch = head[3].intValue;
         _atlasCols = W / cw; _atlasRows = H / ch;
-        maru_atlas_geometry(cw, ch);
+        maru_mobile_atlas_geometry(cw, ch);
         NSData *gray = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"atlas.gray"]];
         if (gray.length >= W * H) {
             MTLTextureDescriptor *td =
@@ -208,7 +187,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
             for (NSUInteger i = 1; i < lines.count; i++) {
                 NSArray<NSString *> *f = [lines[i] componentsSeparatedByString:@" "];
                 if (f.count < 4) continue;
-                maru_atlas_add(f[0].intValue, f[1].intValue, f[2].intValue, f[3].intValue);
+                maru_mobile_atlas_add(f[0].intValue, f[1].intValue, f[2].intValue, f[3].intValue);
             }
         }
         NSLog(@"MARU_CHROME atlas=%ux%u cols=%u rows=%u", W, H, _atlasCols, _atlasRows);
@@ -221,8 +200,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 
 // 아이콘: Zig 가 coverage 를 만든다(플랫폼 코드 0줄).
 - (void)loadIcons {
-    unsigned int filled = maru_icon_build();
-    unsigned int slot = maru_icon_slot_px(), count = maru_icon_count();
+    unsigned int filled = maru_mobile_icon_build();
+    unsigned int slot = maru_mobile_icon_slot_px(), count = maru_mobile_icon_count();
     NSLog(@"MARU_CHROME icons filled=%u/%u slot=%u", filled, count, slot);
     // coverage 는 RGBA8 로 오고 alpha 채널이 값이다(glyph_pixels 계약).
     MTLTextureDescriptor *itd =
@@ -230,7 +209,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
                                                            width:slot height:slot * count mipmapped:NO];
     _iconTex = [_dev newTextureWithDescriptor:itd];
     [_iconTex replaceRegion:MTLRegionMake2D(0, 0, slot, slot * count) mipmapLevel:0
-                  withBytes:maru_icon_atlas() bytesPerRow:slot * 4];
+                  withBytes:maru_mobile_icon_atlas() bytesPerRow:slot * 4];
 }
 
 // **입력**: 하드웨어 키보드가 이 뷰로 온다. 받은 문자를 바이트로 코어에 먹인다 —
@@ -244,7 +223,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // 플랫폼이 넘긴 것과 같은 논리 좌표계로 되돌린다 — 안 그러면 셀이 어긋난다.
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
-    unsigned int cell = maru_hit_cell(lx, ly);
+    unsigned int cell = maru_mobile_hit_cell(lx, ly);
     NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
           p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
 }
@@ -256,29 +235,29 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (BOOL)hasText { return YES; }
 - (void)deleteBackward {
     char bs = 0x7F;
-    maru_term_input(&bs, 1);
+    maru_mobile_input(&bs, 1);
 }
 - (void)insertText:(NSString *)text {
     const char *b = text.UTF8String;
     if (!b) return;
-    unsigned int total = maru_term_input(b, strlen(b));
+    unsigned int total = maru_mobile_input(b, strlen(b));
     NSLog(@"MARU_INPUT text=%@ total=%u", text, total);
 }
 
 // **아틀라스를 키운다.** Zig 가 모은 미등록 코드포인트를 그 슬롯에만 구워 올린다 —
 // 텍스처 전체를 다시 만들지 않고 `replaceRegion` 으로 그 칸만 바꾼다(여섯 기능 4번과 같은 경로).
 - (void)growAtlas {
-    unsigned int n = maru_missing_count();
+    unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !_atlasFont || !_glyphTex) return;
     const unsigned int CW = 24, CH = 32;
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
-    unsigned int firstMissing = maru_missing_cp(0);
+    unsigned int firstMissing = maru_mobile_missing_cp(0);
     for (unsigned int i = 0; i < n; i++) {
-        unsigned int cp = maru_missing_cp(i);
+        unsigned int cp = maru_mobile_missing_cp(i);
         if (cp == 0 || cp > 0xFFFF) continue;
-        unsigned int slot = maru_next_slot(_atlasCols);
+        unsigned int slot = maru_mobile_next_slot(_atlasCols);
         unsigned int col = slot >> 16, row = slot & 0xFFFF;
         if (row >= _atlasRows) break;  // 아틀라스가 꽉 찼다 — 축출은 이 PoC 범위 밖이다
         memset(cell, 0, CW * CH);
@@ -298,15 +277,15 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (advance == 0) advance = CW / 2;
         [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
                        withBytes:cell bytesPerRow:CW];
-        maru_atlas_add(cp, col, row, advance);
+        maru_mobile_atlas_add(cp, col, row, advance);
         added++;
     }
     CGColorSpaceRelease(cs);
     free(cell);
-    maru_missing_clear();
+    maru_mobile_missing_clear();
     if (added) NSLog(@"MARU_ATLAS grew=%u first_missing=U+%04X rows: 6=U+%04X 7=U+%04X 8=U+%04X",
                      added, firstMissing,
-                     maru_row_first_cp(6), maru_row_first_cp(7), maru_row_first_cp(8));
+                     maru_mobile_row_first_cp(6), maru_mobile_row_first_cp(7), maru_mobile_row_first_cp(8));
 }
 
 + (Class)layerClass { return [CAMetalLayer class]; }
@@ -357,10 +336,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UIEdgeInsets safe = self.safeAreaInsets;
     CGSize logical = CGSizeMake(self.bounds.size.width - safe.left - safe.right,
                                 self.bounds.size.height - safe.top - safe.bottom);
-    unsigned int n = maru_chrome_build((unsigned int)logical.width, (unsigned int)logical.height);
+    unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height);
     // build 가 못 그린 글자를 모아 뒀다 — 그것만 구워 넣고 **다음 프레임에 보이게** 한다.
     [self growAtlas];
-    const CQuad *quads = maru_chrome_quads();
+    const MaruQuad *quads = maru_mobile_quads();
 
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = d.texture;
@@ -372,9 +351,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
     [e setRenderPipelineState:_pipe];
     for (unsigned int i = 0; i < n; i++) {
-        const CQuad *q = &quads[i];
+        const MaruQuad *q = &quads[i];
         float cols = (q->kind == 2) ? 1.0f : (float)_atlasCols;
-        float rows = (q->kind == 2) ? (float)maru_icon_count() : (float)_atlasRows;
+        float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)_atlasRows;
         Uni u = {{q->x + (float)safe.left, q->y + (float)safe.top,
                   q->x + q->w + (float)safe.left, q->y + q->h + (float)safe.top},
                  {q->r, q->g, q->b, q->a},
@@ -407,9 +386,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSLog(@"MARU_LIFECYCLE foreground");
 }
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {
-    unsigned int n = maru_chrome_build(800, 600);
-    NSLog(@"MARU_CHROME quads=%u err=%s", n, maru_chrome_last_error());
-    const CQuad *qd = maru_chrome_quads();
+    unsigned int n = maru_mobile_build(800, 600);
+    NSLog(@"MARU_CHROME quads=%u err=%s", n, maru_mobile_last_error());
+    const MaruQuad *qd = maru_mobile_quads();
     for (unsigned int i = 0; i < (n < 6 ? n : 6); i++)
         NSLog(@"MARU_CHROME q%u rect=(%.0f,%.0f %.0fx%.0f) rgba=(%.2f,%.2f,%.2f,%.2f) rad=%.0f",
               i, qd[i].x, qd[i].y, qd[i].w, qd[i].h, qd[i].r, qd[i].g, qd[i].b, qd[i].a, qd[i].radius);

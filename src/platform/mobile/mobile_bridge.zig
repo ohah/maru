@@ -163,12 +163,30 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
         setLastError("input_before_core");
         return @intCast(delivered_len);
     });
-    // 실패를 삼키지 않는다 — 키가 사라지는데 신호가 없던 것이 리뷰 최상위 결함이었다.
-    core.write(ptr[0..len]) catch {
-        setLastError("core_write_input");
-        return @intCast(delivered_len);
-    };
-    delivered_len += len;
+    // **개행은 문자가 아니라 Enter 키다.** IME 는 소프트 Return 을 `"\n"` 으로 커밋하는데,
+    // 그대로 쓰면 LF 가 나간다 — 터미널은 CR 이고, 그 판단은 `encodeKey` 것이다. 하드웨어
+    // Return 은 이미 키 경로로 CR 이 나가므로, 안 가르면 **같은 Enter 가 입력 수단에 따라
+    // 다른 바이트**가 된다.
+    var rest = ptr[0..len];
+    while (std.mem.indexOfAny(u8, rest, "\r\n")) |i| {
+        if (i > 0) core.write(rest[0..i]) catch {
+            setLastError("core_write_input");
+            return @intCast(delivered_len);
+        };
+        delivered_len += i;
+        // CRLF 는 Enter 한 번이다.
+        var skip: usize = 1;
+        if (rest[i] == '\r' and i + 1 < rest.len and rest[i + 1] == '\n') skip = 2;
+        writeKey(core, .enter, .{});
+        rest = rest[i + skip ..];
+    }
+    if (rest.len > 0) {
+        core.write(rest) catch {
+            setLastError("core_write_input");
+            return @intCast(delivered_len);
+        };
+        delivered_len += rest.len;
+    }
     drainUnconsumed(core);
     return @intCast(delivered_len);
 }
@@ -201,6 +219,21 @@ fn keyFromId(key_id: u32, codepoint: u32) ?terminal.input.Key {
     };
 }
 
+/// 키 하나를 인코딩해 코어에 쓴다. **키 경로와 개행 경로가 같은 자리를 쓴다** — 안 그러면
+/// 같은 Enter 가 입력 수단에 따라 다른 바이트가 된다.
+fn writeKey(core: *terminal.core.TerminalCore, key: terminal.input.Key, mods: terminal.input.ModifierSet) void {
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const bytes = core.encodeKey(.{ .key = key, .modifiers = mods }, &buf) catch {
+        setLastError("key_encode");
+        return;
+    };
+    core.write(bytes) catch {
+        setLastError("core_write_input");
+        return;
+    };
+    delivered_len += bytes.len;
+}
+
 pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
     const core = &(term_core orelse {
@@ -218,16 +251,7 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
         .option = mods & 4 != 0,
         .command = mods & 8 != 0,
     } };
-    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-    const bytes = core.encodeKey(ev, &buf) catch {
-        setLastError("key_encode");
-        return @intCast(delivered_len);
-    };
-    core.write(bytes) catch {
-        setLastError("core_write_input");
-        return @intCast(delivered_len);
-    };
-    delivered_len += bytes.len;
+    writeKey(core, ev.key, ev.modifiers);
     drainUnconsumed(core);
     return @intCast(delivered_len);
 }

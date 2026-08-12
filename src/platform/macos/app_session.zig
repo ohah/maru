@@ -11364,7 +11364,16 @@ pub const AppSession = struct {
     }
 
     /// backend runtime observation으로 동기화한 현재 cwd(OSC 7, percent-decode된 경로). 한 번도 못 받았으면 빈
-    /// 슬라이스. 반환은 Term의 owned observation cache 소유로 다음 동기화/destroy까지 유효하다. Swift가 창 제목에 쓴다.
+    /// 슬라이스. 반환은 Term의 owned observation cache 소유로 다음 동기화/destroy까지 유효하다.
+    ///
+    /// **"Swift가 창 제목에 쓴다"는 옛 설명이었다.** 창 제목은 `windowTitle()`이 `observation.window_title`
+    /// (OSC 0/2)에서 만들고 cwd를 쓰지 않는다. 이 함수를 노출하는 `maru_macos_app_session_cwd` ABI는 헤더에
+    /// 선언만 있고 Swift 호출자가 없다(2026-08-12 확인) — 즉 현재 **제품 소비자가 0**이다. 제거할지 유지할지는
+    /// 별도 판단이고, 그때까지 이 주석이 낡은 채로 다음 사람을 잘못 이끌지 않게 사실만 적어 둔다.
+    ///
+    /// **소비자가 생기면 축부터 정해야 한다.** 이 함수는 관측만 보므로 OSC 7이 없는 Term(셸 통합 없는 셸,
+    /// 재개 Term)에서 빈 값이다. "이 터미널이 서 있는 폴더"가 필요하면 `git_ops.termCwd`(OSC 7 → 커널 2단,
+    /// docs/editor-surface-dock.md §3.5)를 써야 한다.
     pub fn currentCwd(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
         const term = pane_ops.activePane(self).activeTerm();
@@ -23967,7 +23976,7 @@ test "사이드바 검색: 폴더도 브랜치와 같은 축으로 매칭한다(
 //
 // 여기서는 그 상태를 손으로 만든다: 줄 수를 굳힌 뒤 cwd가 도착하는 순서를 재현하고, 가드가 그것을 낡음으로
 // 보는지 확인한다.
-test "사이드바 재투영: cwd가 투영 뒤에 와도 에이전트 행 줄 수가 따라온다" {
+test "사이드바 재투영: 비활성 Term의 cwd가 투영 뒤에 와도 그 행 줄 수가 따라온다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const session = try initSmokeSessionSized(a);
@@ -23975,34 +23984,49 @@ test "사이드바 재투영: cwd가 투영 뒤에 와도 에이전트 행 줄 �
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
 
+    // **비활성 Term이어야 한다.** 활성 Term은 카드(`sidebarCardTerm`)도 함께 쓰므로 그 cwd를 바꾸면 카드 줄
+    // 수도 같이 바뀌고, 가드의 `.card` 갈래가 낡음을 감지해 rebuild한다 — 그러면 `.agent` 갈래를 통째로 빼도
+    // 에이전트 행이 덤으로 재투영돼 **테스트가 헛돈다**(실측: 갈래를 제거해도 통과했다). 카드는 그대로인데
+    // 에이전트 행만 바뀌는 상황을 만들어야 이 가드를 실제로 잠근다.
+    try pane_ops.newTermInActivePane(session); // 새 Term이 활성이 되고, 0번이 비활성으로 남는다
     const tab = session.tabs.items[0];
-    const term = tab.panes.items[0].terms.items[0];
-    term.agent_kind = .claude;
-    term.agent_state = .idle;
+    const pane = tab.panes.items[0];
+    if (pane.terms.items.len < 2) return error.SkipZigTest;
+    const inactive_index: usize = if (pane.active_term == 0) 1 else 0;
+    const inactive = pane.terms.items[inactive_index];
+    for (pane.terms.items) |t| {
+        t.agent_kind = .claude;
+        t.agent_state = .idle;
+    }
     sidebar_ops.rebuildSidebar(session) catch {};
 
-    // 투영된 에이전트 행을 찾아, 그 행이 든 줄 수가 지금 계산과 같은지부터 확인한다(전제).
+    const card_lines_before = sidebar_ops.sidebarCardLines(session, tab);
     const projected: u8 = blk: {
         for (session.sidebar_rows.items) |row| switch (row) {
-            .agent => |g| break :blk g.lines,
+            .agent => |g| if (g.term == inactive_index) break :blk g.lines,
             else => {},
         };
-        return error.SkipZigTest; // 이 세션 형태에 에이전트 행이 없으면 판정할 것이 없다
+        return error.SkipZigTest; // 그 행이 투영되지 않았으면 판정할 것이 없다
     };
-    try std.testing.expectEqual(sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }), projected);
+    const ag: AppSession.WorkspaceSession = .{ .pane = 0, .term = inactive_index };
+    try std.testing.expectEqual(sidebar_ops.sidebarAgentRowLines(session, tab, ag), projected);
 
-    // 이제 cwd가 **투영 뒤에** 바뀐 상태를 만든다. `/tmp`는 저장소가 아니라 브랜치줄이 사라져 줄 수가 줄고,
+    // 비활성 Term의 cwd만 투영 **뒤에** 바꾼다. `/tmp`는 저장소가 아니라 브랜치줄이 사라져 줄 수가 줄고,
     // 관측은 커널 폴백보다 우선이므로 이 심기가 실제로 이긴다.
-    term.rt.observation.cwd.clearRetainingCapacity();
-    try term.rt.observation.cwd.appendSlice(a, "/tmp");
-    term.rt.observation.availability = .current;
-    const now_lines = sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 });
-    if (now_lines == projected) return error.SkipZigTest; // 원래 같은 줄 수면 이 테스트가 볼 것이 없다
+    inactive.rt.observation.cwd.clearRetainingCapacity();
+    try inactive.rt.observation.cwd.appendSlice(a, "/tmp");
+    inactive.rt.observation.availability = .current;
+    const now_lines = sidebar_ops.sidebarAgentRowLines(session, tab, ag);
+    if (now_lines == projected) return error.SkipZigTest; // 원래 같은 줄 수면 볼 것이 없다
 
-    // 가드가 그 차이를 보고 다시 투영해야 한다. 안 하면 행 높이(1)와 렌더(2)가 갈려 폴더줄이 아래 행을 덮는다.
+    // **카드는 안 바뀌었다**는 것이 이 테스트의 전제다. 바뀌었다면 `.card` 갈래가 대신 일해 버려 이 단언이
+    // `.agent` 갈래를 검증하지 못한다.
+    try std.testing.expectEqual(card_lines_before, sidebar_ops.sidebarCardLines(session, tab));
+
+    // 가드가 그 차이를 보고 다시 투영해야 한다. 안 하면 행 높이와 렌더가 갈려 보조줄이 아래 행을 덮는다.
     sidebar_ops.reprojectSidebarIfRowLinesStale(session);
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent => |g| try std.testing.expectEqual(now_lines, g.lines),
+        .agent => |g| if (g.term == inactive_index) try std.testing.expectEqual(now_lines, g.lines),
         else => {},
     };
 }

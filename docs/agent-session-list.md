@@ -275,7 +275,7 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
 
 | 회차 | 점검한 빈칸 | 결정 |
 | --- | --- | --- |
-| M1 | workspace/project의 의미 | active workspace의 active local Term canonical CWD와 그 git root로 각각 고정; 없으면 비활성화 (§2) |
+| M1 | workspace/project의 의미 | active workspace의 active local Term canonical CWD와 그 git root로 각각 고정; 없으면 비활성화 (§2). 그 CWD는 소스 컨트롤·탐색기·사이드바와 **같은 지점**(`git_ops.termCwd` — OSC 7 → 커널 조회 2단, [editor-surface-dock.md §3.5](editor-surface-dock.md))에서 온다. 2026-08-12 전에는 이 자리만 관측을 직독해, OSC 7이 없는 Term(셸 통합 없는 셸·재개 Term)에서 두 칩이 **눌리지 않았다** — `enabled`는 paint가 아니라 hit-test만 바꾸므로 겉모습에 단서가 없었다 |
 | M2 | 정확하지 않은 count/검색 | partial 상태·`≥n` 표기와 snapshot-only search를 명시 (§2, §4) |
 | M3 | resume cwd·실행 경계 | 삭제 cwd fallback, shell 미사용, 명시 ▶/resume 버튼의 즉시 새 탭 실행을 명시 (§2, §5) |
 | M4 | 중복·변경·손상 log | provider/id+file identity, conflict discard, line-level corruption 정책을 명시 (§3, §4) |

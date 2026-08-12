@@ -1187,7 +1187,10 @@ pub fn tabMatchesSearch(self: *AppSession, tab: *Tab, query: []const u8) bool {
     const term = tab.activePane().activeTerm();
     const name = workspaceLabel(tab);
     const branch = git_ops.termGitBranch(self, term) orelse "";
-    const folder = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+    // 폴더도 **브랜치와 같은 축**으로 푼다. 관측(OSC 7)만 직접 읽으면, 사이드바가 커널 폴백으로 폴더줄을
+    // 실제로 그리고 있는 Term인데도 그 폴더 이름으로는 검색이 안 되는 반쪽 필터가 된다(브랜치로는 된다).
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const folder = git_ops.termCwdForDisplay(self, term, &cwd_buf) orelse "";
     return std.ascii.indexOfIgnoreCase(name, query) != null or
         std.ascii.indexOfIgnoreCase(branch, query) != null or
         std.ascii.indexOfIgnoreCase(folder, query) != null;

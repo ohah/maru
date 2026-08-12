@@ -1057,8 +1057,12 @@ pub fn linkScopesForTerm(self: *const AppSession, term: *const Term) terminal.Li
     return scopes;
 }
 
-pub fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
-    const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+pub fn sidebarCwdPath(self: *AppSession, term: *Term) ![]const u8 {
+    // cwd 해석은 **소스 컨트롤 뷰·파일 탐색기와 같은 지점**을 쓴다(docs/editor-surface-dock.md §3.5의 2단 규칙).
+    // 예전에는 여기만 관측(OSC 7)을 직접 읽어, OSC 7이 없는 Term에서 같은 화면의 두 뷰가 서로 다른 답을 냈다.
+    const allocator = self.allocator;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.termCwdForDisplay(self, term, &cwd_buf) orelse return allocator.dupe(u8, "");
     if (cwd.len == 0) return allocator.dupe(u8, "");
     // 원격 cwd는 `<host>:<path>`로 그리고 `~` 축약을 **하지 않는다**. 축약하면 원격 $HOME을 로컬 것으로 계산해
     // 남의 홈을 자기 홈처럼 보여 주고(로컬 $HOME과 우연히 겹치면 조용히 틀린다), host가 없으면 사용자가 그 경로를
@@ -1475,6 +1479,22 @@ const TermRuntime = struct {
     /// capture가 반복 relaunch에도 같은 handle을 기록한다.
     ended_runtime_host_id: []const u8 = "",
     ended_runtime_id: []const u8 = "",
+    /// **커널 cwd 폴백 캐시(Term별)** — OSC 7이 빈 Term의 cwd를 `proc_pidinfo`로 물어본 결과
+    /// (docs/editor-surface-dock.md §3.5). `proc_pidinfo`는 syscall이라 매 프레임 부를 수 없어 저주기로만
+    /// 갱신하고 그 사이에는 이 값을 그대로 쓴다. 경로 길이는 `PATH_MAX`로 정해져 있으므로 인라인 배열이다 —
+    /// 프레임마다 도는 경로에 할당을 두지 않는다.
+    ///
+    /// **AppSession 단일 슬롯이 아니라 Term별인 이유**: 예전에는 활성 Term 하나만 물어봤으므로 한 칸이면
+    /// 됐다. 사이드바가 같은 2단 규칙을 쓰게 되면서 rebuild가 **모든 탭의 모든 Term**을 훑는데, 한 칸이면
+    /// Term들이 서로를 계속 밀어내 캐시가 무의미해지고 rebuild마다 Term 수만큼 syscall이 된다. Term별로
+    /// 두면 "활성 Term이 바뀌면 주기를 기다리지 않고 다시 묻는다"는 옛 보정도 필요 없어진다 — 각 Term이
+    /// 자기 시각을 들고 자기 답을 하기 때문이다.
+    proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
+    /// 캐시에 든 경로 길이(0 = 커널도 모른다/아직 안 물었다).
+    proc_cwd_len: usize = 0,
+    /// 마지막으로 커널에 물어본 시각(awake clock ns). **tick 카운터가 아니라 시각인 이유**는 git.zig의
+    /// `proc_cwd_poll_interval_ns` 주석에 있다 — 한 프레임에 여러 번 불리는 경로라 카운터로는 주기가 안 지켜진다.
+    proc_cwd_polled_ns: i128 = 0,
 };
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
@@ -3462,18 +3482,6 @@ pub const AppSession = struct {
     git_watch_request: ?[]u8 = null,
     /// 지금 감시 중인 `.git` 경로. 저장소가 바뀌면 새로 요청한다(같은 경로면 다시 요청하지 않는다).
     git_watch_path: ?[]u8 = null,
-    /// **커널 cwd 폴백 캐시**(OSC 7이 없는 셸·TUI 실행 중 — docs/editor-surface-dock.md §3.5). `proc_pidinfo`는
-    /// syscall이라 매 프레임 부를 수 없어 저주기로만 갱신하고, 그 사이에는 이 값을 그대로 쓴다. 경로는 길이가
-    /// 정해져 있으므로(PATH_MAX) 인라인 배열이다 — 프레임마다 도는 경로에 할당을 두지 않는다.
-    proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
-    /// 캐시에 든 경로 길이(0 = 커널도 모른다/아직 안 물었다).
-    proc_cwd_len: usize = 0,
-    /// 그 캐시가 **어느 Term의 값인가.** 활성 Term이 바뀌면 주기를 기다리지 않고 즉시 다시 묻는다 —
-    /// 안 그러면 탭을 옮긴 직후 최대 한 주기 동안 이전 터미널의 폴더로 남의 저장소를 보여 준다.
-    proc_cwd_surface_id: u64 = 0,
-    /// 마지막으로 커널에 물어본 시각(awake clock ns). **tick 카운터가 아니라 시각인 이유**는 git.zig의
-    /// `proc_cwd_poll_interval_ns` 주석에 있다 — 한 프레임에 여러 번 불리는 경로라 카운터로는 주기가 안 지켜진다.
-    proc_cwd_polled_ns: i128 = 0,
     /// **저장소 루트 walk-up 캐시**(git.zig `repoRootForCached`). `repoRootFor`는 경로 구성요소마다 `access(2)`를
     /// 쓰는데 그 walk가 매 프레임 돌면 blocking syscall이 초당 수천 번이 된다. 키는 cwd 문자열이고, 결과 root는
     /// 항상 그 접두라 **길이만** 들고 있는다(별도 버퍼가 필요 없다). 0 = 저장소 아님.
@@ -15023,7 +15031,7 @@ pub const AppSession = struct {
         // ② 작업 경로 — **repo 밖에서도 그린다**. 사이드바 카드는 "repo 안일 때만 폴더줄"이지만(카드는 repo
         // 맥락을 보여주는 자리다), 상태바는 "지금 어디에 있나"가 목적이라 repo 밖 cwd가 오히려 유용하다.
         // 경로 파생은 `sidebarCwdPath`(HOME 경계를 정확히 지켜 `~`로 줄인다)를 재사용한다 — 다시 구현하지 않는다.
-        if (sidebarCwdPath(self.allocator, term)) |path| {
+        if (sidebarCwdPath(self, term)) |path| {
             defer self.allocator.free(path);
             if (path.len > 0 and n < max_status_bar_left_items) {
                 if (self.buildStatusBarItem(icons.codepoint(.folder), path, bar_cols, fg, icon_fg, .path)) |dl| {
@@ -23779,10 +23787,13 @@ test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 �
     }
 }
 
-// 세션 행의 **폴더·브랜치 줄**이 관측 cwd에서 실제로 나오는지 고정한다. 목록을 Term 전수로 넓히면서
-// (2026-08-11) "행에 폴더·브랜치가 안 보인다"는 제보를 받았고, 그것이 코드 회귀인지 관측이 비어서인지
-// 가르는 축이 없었다. 이 테스트가 그 축이다 — cwd가 있으면 줄이 붙는다는 것을 코드 수준에서 못박아,
-// 실제 앱에서 안 보이면 원인이 **관측(OSC 7)** 쪽임을 역으로 확정할 수 있다.
+// 세션 행의 **폴더·브랜치 줄**이 cwd에서 실제로 나오는지, 그리고 **관측(OSC 7)이 커널 폴백보다 우선**인지
+// 고정한다. 목록을 Term 전수로 넓히면서(2026-08-11) "행에 폴더·브랜치가 안 보인다"는 제보를 받았고, 그것이
+// 코드 회귀인지 cwd를 몰라서인지 가르는 축이 없었다. 이 테스트가 그 축이다.
+//
+// 관측이 비어도 줄이 붙는다는 것(커널 폴백)은 바로 아래 회귀 테스트가 소유한다. 여기서 잠그는 것은
+// **우선순위**다 — 관측이 값을 주면 커널에 묻지 않고 그 값을 쓴다. 순서가 뒤집히면 셸이 방금 보고한 cwd를
+// 최대 한 폴링 주기 동안 무시하게 된다.
 test "사이드바 세션 행: 관측 cwd가 있으면 폴더·브랜치 줄이 붙는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -23795,8 +23806,9 @@ test "사이드바 세션 행: 관측 cwd가 있으면 폴더·브랜치 줄이 
     term.agent_kind = .claude;
     term.agent_state = .idle;
 
-    // 관측이 비어 있으면(기본) 라벨 한 줄뿐이다 — 실제 앱에서 보이던 그 모습.
-    try std.testing.expectEqual(@as(u8, 1), sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }));
+    // 관측이 비어도 라벨 한 줄로 줄지 않는다 — 커널 폴백이 답하므로 최소한 폴더 줄이 붙는다.
+    // (테스트 프로세스의 cwd가 저장소 안이면 브랜치 줄까지 3줄이라 여기서는 하한만 잠근다.)
+    try std.testing.expect(sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }) >= 2);
 
     // cwd를 심는다. 스모크 세션은 `live_initialized=false`라 refreshTermObservation이 early-return하므로
     // 이 값이 덮이지 않는다. git repo가 **아닌** 경로를 쓰는 이유는 결정성 때문이다 — 테스트가 어디서
@@ -23804,13 +23816,64 @@ test "사이드바 세션 행: 관측 cwd가 있으면 폴더·브랜치 줄이 
     try term.rt.observation.cwd.appendSlice(a, "/tmp");
     term.rt.observation.availability = .current;
 
-    // 폴더 줄이 하나 는다(라벨 1 + 폴더 1 = 2). 이 줄이 안 붙으면 행 높이가 1이라 폴더가 그려져도
-    // 다음 행에 먹힌다 — 제보된 "폴더가 안 보인다"의 코드 쪽 원인은 여기뿐이다.
+    // **관측이 커널보다 우선이다.** 심은 값이 `/tmp`(저장소 아님)라 브랜치 줄이 사라져 정확히 2줄이 된다 —
+    // 폴백이 우선이었다면 테스트 프로세스의 저장소 cwd가 이겨 3줄이 나온다. 즉 이 등식이 순서를 잠근다.
     try std.testing.expectEqual(@as(u8, 2), sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }));
     const folder = try sidebar_ops.agentRowFolderOwned(session, term, "");
     defer a.free(folder);
     try std.testing.expect(folder.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, folder, "tmp") != null);
+}
+
+// **회귀 잠금**: "활성 터미널이 서 있는 폴더"를 푸는 지점은 하나여야 한다. 예전에는 둘이었고 한쪽만 커널
+// 폴백을 갖고 있었다 — `git_ops.activeTerminalCwd`(소스 컨트롤·파일 탐색기)는 OSC 7이 비면 `proc_pidinfo`로
+// 내려가는데(docs/editor-surface-dock.md §3.5), 사이드바의 `sidebarHasCwd`·`termGitBranch`는 관측만 봤다.
+//
+// 그 비대칭이 언제 보이는가가 핵심이었다. 재개(에이전트 세션 기록 → 이어하기)는 셸을
+// `zsh -l -i -c "exec claude --resume <id>"`로 띄우는데(agent.zig의 `resumeAgentSessionInNewTerm`),
+// `-c`는 프롬프트를 한 번도 그리지 않아 `_maru_osc7` precmd 훅이 돌지 않는다(실측: `.zshrc`는 source되고
+// 훅 등록도 되지만 precmd는 안 돈다) — 그 Term은 평생 OSC 7을 한 번도 못 받는다. 프롬프트를 거쳐 provider를
+// 띄운 보통 탭은 이미 한 번 보고했으므로 값이 남아 있다. 그래서 증상이 **재개에서만** 보였다.
+// (claude·codex가 RIS로 그 값을 지운다는 옛 설명은 실측과 다르다 — 2026-08-12 pty 캡처에서 두 provider 모두
+// RIS를 보내지 않는다. 지우는 쪽이 아니라 **애초에 안 받는 쪽**이 원인이다.)
+//
+// 스모크 세션은 `live_initialized=false`라 관측이 빈 채로 남아 "OSC 7 미수신" 상태를 그대로 재현한다.
+test "OSC 7이 비어도 사이드바는 소스 컨트롤과 같은 답을 낸다(폴더·브랜치줄이 살아 있다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const term = tab.panes.items[0].terms.items[0];
+    term.agent_kind = .claude; // 재개된 provider Term을 흉내낸다
+    term.agent_state = .idle;
+
+    // 전제: OSC 7 미수신.
+    try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len);
+
+    // 축 1 — 소스 컨트롤·파일 탐색기: 커널 폴백이 답한다(저장소 밖에서 돌면 판정 불가라 skip).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = git_ops.activeTerminalCwd(session, &buf) orelse return error.SkipZigTest;
+    const fallback_branch = git_ops.readGitBranch(session.io, a, cwd) orelse return error.SkipZigTest;
+    defer a.free(fallback_branch);
+
+    // 축 2 — 사이드바: **같은 Term, 같은 순간**에 같은 답을 내야 한다. 예전에는 여기서 전부 "모른다"였다.
+    try std.testing.expect(sidebar_ops.sidebarHasCwd(session, term));
+    try std.testing.expect(sidebar_ops.sidebarFolderLineShown(session, term));
+    const branch = git_ops.termGitBranch(session, term) orelse return error.SidebarBranchMissing;
+    try std.testing.expectEqualStrings(fallback_branch, branch);
+
+    // 경로줄도 같은 폴더를 가리킨다 — 판정(`sidebarHasCwd`)과 표시(`sidebarCwdPath`)가 갈리면 줄 수와
+    // 글자가 어긋나 "보이는 곳과 눌리는 곳이 다른" 회귀가 난다.
+    const path = try sidebarCwdPath(session, term);
+    defer a.free(path);
+    try std.testing.expect(std.mem.endsWith(u8, path, std.fs.path.basename(cwd)));
+
+    // 결과: 카드가 이름+브랜치+폴더 3줄, 에이전트 행도 라벨+폴더+브랜치 3줄이다(기본 토글 both-on 기준).
+    try std.testing.expectEqual(@as(u8, 3), sidebar_ops.sidebarCardLines(session, tab));
+    try std.testing.expectEqual(@as(u8, 3), sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 }));
 }
 
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
@@ -29506,18 +29569,30 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     const term = tab.activeTerm();
     const ch: u32 = session.cell_height_px;
     const header: u32 = session.sidebar_header_height_px;
-    // 카드 높이가 **줄 수 기반**이 되면서 블록중앙 오프셋은 항상 카드 상하 여백(card_pad_v)이다
-    // (카드 높이 = 줄 블록 + 2×여백이므로 (카드-블록)/2 = 여백). 즉 이름줄은 줄 수와 무관하게 카드 상단
-    // 같은 자리에 온다 — 옛 고정 슬롯에서 줄이 늘 때마다 이름줄이 위로 올라가던 것과 달라진 점이다.
-    const pad_v: u32 = sidebar_ops.sidebarMetrics(session).card_pad_v + sidebar_ops.sidebarMetrics(session).content_pad_v; // 카드 여백 + 목록 위 여백
     try std.testing.expect(header > 0); // 헤더(검색바·아이콘)가 있다는 전제 — caret y가 그만큼 내려가야 렌더러와 정합
 
-    // 1) non-agent 워크스페이스(scroll 0): 카드 1줄(이름만) → caret = header + 슬롯 세로 중앙(1줄 블록).
+    // **기대값을 렌더러와 같은 식으로 만든다.** rename 중에는 보조줄(브랜치·경로)이 숨으므로 **그리는 줄 수**가
+    // 투영된 카드 줄 수보다 적을 수 있고, 그때 블록중앙 오프셋은 카드 여백과 같지 않다. 옛 기대식
+    // (`card_pad_v + content_pad_v`)은 둘이 우연히 같던 스모크 세션(관측 cwd가 비어 카드가 1줄)에서만 맞았다 —
+    // 커널 cwd 폴백이 들어오며 그 카드가 3줄이 되자 어긋났고, 어긋난 쪽은 **기대식**이다(렌더는 아래와 같은
+    // `fillSidebarGlyphPyTop` 계산을 쓴다). 실제 사용자 카드는 예전부터 3줄이었으므로 제품 동작은 안 바뀐다.
+    const expectedCaretY = struct {
+        fn f(s: *AppSession, drawn_lines: u32, cell_h: u32) i64 {
+            const m = sidebar_ops.sidebarMetrics(s);
+            const rows = sidebar_ops.sidebarRenderRows(s);
+            const top = chrome.components.sidebar.rowTop(rows, 0, s.sidebar_header_height_px, m, s.sidebar_scroll_offset_px);
+            const row_h = chrome.components.sidebar.rowHeight(rows[0], m);
+            const off: i64 = @intCast((row_h -| sidebar_ops.sidebarBlockHeight(drawn_lines, cell_h)) / 2);
+            return @max(top + off, @as(i64, s.sidebar_header_height_px));
+        }
+    }.f;
+
+    // 1) non-agent 워크스페이스(scroll 0): rename 중 그리는 줄은 이름줄 하나뿐이다.
     term.agent_kind = .none;
     sidebar_ops.rebuildSidebar(session) catch {}; // Row.lines(줄 수)는 투영 때 굳는다 — 상태를 바꿨으면 다시 투영해야 정합
     settings_ops.startRename(session, .{ .workspace = tab });
     const cr1 = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + pad_v)), cr1.y);
+    try std.testing.expectEqual(@as(i32, @intCast(expectedCaretY(session, 1, ch))), cr1.y);
     settings_ops.closeRename(session);
 
     // 2) 에이전트가 있으면 **rename 중에도 상태줄이 그려지므로**(편집 화면에서 파형을 보여달라는 사용자 요청)
@@ -29535,15 +29610,17 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     settings_ops.closeRename(session);
     try std.testing.expect(cr2.y < cr1.y); // 상태줄이 붙으면 이름줄(=caret)이 위로 올라간다
 
-    // 3) scroll offset 반영: 콘텐츠가 offset만큼 위로 밀리면 caret도 따라 올라간다(slotTop이 scroll을 뺌). idx 0,
-    // 작은 offset(블록중앙 (slot_h−ch)/2 보다 작아 헤더 clamp 전)이라 caret = header + block_off − offset.
+    // 3) scroll offset 반영: 콘텐츠가 offset만큼 위로 밀리면 caret도 따라 올라간다(slotTop이 scroll을 뺌).
+    // 작은 offset(블록중앙보다 작아 헤더 clamp 전)이라 caret이 정확히 그만큼 올라가야 한다.
     term.agent_kind = .none;
     sidebar_ops.rebuildSidebar(session) catch {};
-    const offset: u32 = @min(ch / 2, pad_v); // pad_v 이하라 헤더 clamp(@max header)에 안 걸린다
+    const before_scroll = expectedCaretY(session, 1, ch);
+    const offset: u32 = @min(ch / 2, sidebar_ops.sidebarMetrics(session).card_pad_v); // 헤더 clamp(@max header)에 안 걸리게
     session.sidebar_scroll_offset_px = offset;
     settings_ops.startRename(session, .{ .workspace = tab });
     const cr3 = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + pad_v - offset)), cr3.y);
+    try std.testing.expectEqual(@as(i32, @intCast(expectedCaretY(session, 1, ch))), cr3.y);
+    try std.testing.expectEqual(@as(i64, before_scroll - @as(i64, offset)), @as(i64, cr3.y)); // 스크롤한 만큼 정확히 올라간다
     settings_ops.closeRename(session);
     session.sidebar_scroll_offset_px = 0; // 복원
 }
@@ -35151,7 +35228,7 @@ test "sidebarCwdPath/sidebarFolderLineShown: 원격 cwd는 host를 붙이고 rep
     try term_ops.activeSurface(session).core.write("\x1b]7;file://build-box/home/me/svc\x07");
     term_ops.refreshTermObservation(session, term, false, false);
     try std.testing.expect(termCwdIsRemote(term));
-    const remote_path = try sidebarCwdPath(allocator, term);
+    const remote_path = try sidebarCwdPath(session, term);
     defer allocator.free(remote_path);
     try std.testing.expectEqualStrings("build-box:/home/me/svc", remote_path);
     // repo 밖(원격 경로엔 로컬 .git이 없다)인데도 폴더줄을 그린다 — 예전 규칙이 지우던 바로 그 줄이다.
@@ -35163,7 +35240,7 @@ test "sidebarCwdPath/sidebarFolderLineShown: 원격 cwd는 host를 붙이고 rep
     try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp/local-proj\x07");
     term_ops.refreshTermObservation(session, term, false, false);
     try std.testing.expect(!termCwdIsRemote(term));
-    const local_path = try sidebarCwdPath(allocator, term);
+    const local_path = try sidebarCwdPath(session, term);
     defer allocator.free(local_path);
     try std.testing.expectEqualStrings("/tmp/local-proj", local_path);
 }

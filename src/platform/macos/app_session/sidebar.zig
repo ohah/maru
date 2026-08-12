@@ -500,9 +500,10 @@ pub fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceSession) 
     var n: u8 = 1;
     // **termGitBranch를 먼저** 부른다 — 이 호출이 관측(cwd)을 refresh하므로, sidebarHasCwd를 앞세우면 관측이
     // stale한 rebuild에서 줄 수를 1로 재고 같은 rebuild의 렌더는 2줄을 그려 행 높이와 글자가 어긋난다
-    // (code-review max). sidebarCardLines가 쓰는 순서와 같게 맞춘다.
+    // (code-review max). sidebarCardLines가 쓰는 순서와 같게 맞춘다. (둘 다 같은 해석 지점을 거치게 된
+    // 지금은 순서가 무해하지만, 규율은 그대로 둔다 — 한쪽만 바뀌어도 어긋나지 않게.)
     const has_branch = git_ops.termGitBranch(self, term) != null;
-    if (sidebarHasCwd(term)) {
+    if (sidebarHasCwd(self, term)) {
         n += 1; // 폴더 줄
         if (has_branch) n += 1; // 브랜치 줄(repo 안일 때만 — 카드 보조줄과 같은 규칙)
     }
@@ -525,8 +526,12 @@ pub fn sidebarCardTerm(tab: *Tab) ?*Term {
 
 /// 이 Term이 **경로줄에 쓸 cwd**를 갖고 있는가 — `sidebarCwdPath`가 ""를 내는 조건의 할당 없는 판정판이다
 /// (줄 수 계산은 매 rebuild마다 도므로 문자열을 만들지 않는다). 두 곳이 어긋나면 줄 수와 렌더가 갈린다.
-pub fn sidebarHasCwd(term: *Term) bool {
-    return term.rt.observation.availability != .unavailable and term.rt.observation.cwd.items.len > 0;
+pub fn sidebarHasCwd(self: *AppSession, term: *Term) bool {
+    // 관측만 보던 자리다. 이제 소스 컨트롤·탐색기와 **같은 2단 규칙**(OSC 7 → 커널 조회)을 쓴다 — 판정과
+    // 표시가 어긋나지 않게 `sidebarCwdPath`와 정확히 같은 해석 지점을 부른다. 여전히 **할당은 없다**
+    // (스택 버퍼 + Term별 저주기 캐시라 OSC 7이 있는 Term은 syscall도 0이다).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    return git_ops.termCwdForDisplay(self, term, &buf) != null;
 }
 
 /// 카드가 **폴더줄을 그리는가** — 줄 수 계산(`sidebarCardLines`)과 조립부(`buildSidebarTitleFrame`)가 공유하는
@@ -539,7 +544,7 @@ pub fn sidebarHasCwd(term: *Term) bool {
 /// 그린다(docs/ssh-integration.md §9.3). 로컬 동작은 예전 그대로다.
 pub fn sidebarFolderLineShown(self: *AppSession, term: *Term) bool {
     if (!self.loaded_config.config.sidebar.show_folder) return false;
-    if (!sidebarHasCwd(term)) return false;
+    if (!sidebarHasCwd(self, term)) return false;
     if (app_session_mod.termCwdIsRemote(term)) return true;
     return git_ops.termGitBranch(self, term) != null;
 }
@@ -556,7 +561,7 @@ pub fn sidebarCardLines(self: *AppSession, tab: *Tab) u8 {
     // 각 토글(show-branch·show-folder)이 독립적으로 줄을 켠다.
     if (git_ops.termGitBranch(self, term) != null) {
         if (self.loaded_config.config.sidebar.show_branch) n += 1;
-        if (self.loaded_config.config.sidebar.show_folder and sidebarHasCwd(term)) n += 1;
+        if (self.loaded_config.config.sidebar.show_folder and sidebarHasCwd(self, term)) n += 1;
     } else if (sidebarFolderLineShown(self, term)) n += 1;
     // 에이전트 상태줄은 카드에서 빠졌다(목록 행이 대체) — 줄 수도 그만큼 줄어 카드가 짧아진다.
     return n;
@@ -611,7 +616,13 @@ pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
 /// 어긋남의 원인은 높이가 변하는 것이 아니라 **변한 뒤 다시 투영하지 않는 것**이다.
 ///
 /// `sidebarCardLines`가 줄 수의 단일 출처이므로 그 값과 박힌 값을 그대로 대조한다. 값이 실제로 달라졌을 때만
-/// 재투영하며, `termGitBranch`는 cwd가 바뀔 때만 재계산하므로 대부분의 tick에서 이 비교는 필드 읽기 몇 번이다.
+/// 재투영한다.
+///
+/// **비용**: 이 비교는 카드마다 `termGitBranch`와 `sidebarHasCwd`를 부르고 둘 다 `termCwd`를 거친다. OSC 7을
+/// 받는 Term은 그 자리에서 관측 값을 돌려주므로 syscall이 0이고, 안 받는 Term만 `proc_pidinfo`로 내려가는데
+/// 그것도 **Term별 0.5초 캐시**(`term.rt.proc_cwd_*`)를 지난다. 즉 최악이 Term당 초당 2회이며, 그 캐시가
+/// AppSession 단일 슬롯이 아니라 Term별인 이유가 정확히 여기다 — 한 칸이면 이 루프가 카드마다 서로를 밀어내
+/// 매 tick 전수 syscall이 된다. `.git/HEAD` 읽기는 그 위에서 cwd가 바뀔 때만 도는 별도 캐시다.
 pub fn reprojectSidebarIfCardLinesStale(self: *AppSession) void {
     if (self.sidebar_collapsed or self.chrome_minimal) return; // 그릴 자리가 없으면 볼 이유도 없다
     var stale = false;
@@ -1604,7 +1615,7 @@ pub fn agentRowReplyOwned(self: *AppSession, term: *Term, indent: []const u8) ![
 /// 에이전트 행 **폴더 줄**(owned) — 그 Term이 도는 디렉터리(§2.1). 카드 헤더가 활성 Term 기준이라 다른 Pane에서
 /// 도는 에이전트의 자리는 여기서만 드러난다. 폭이 좁으므로 경로 전체가 아니라 **마지막 세그먼트**만 쓴다.
 pub fn agentRowFolderOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
-    const path = try sidebarCwdPath(self.allocator, term);
+    const path = try sidebarCwdPath(self, term);
     defer self.allocator.free(path);
     if (path.len == 0) return self.allocator.dupe(u8, "");
     const leaf = std.fs.path.basename(path);
@@ -1938,7 +1949,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
             // 각 보조줄은 **비어있지 않을 때만** indent를 붙인다(빈 줄은 그대로 "" — 카드 줄 수 계산 정합).
             try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}" ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
             try path_lines.append(self.allocator, if (sidebarFolderLineShown(self, term)) blk: {
-                const fl = try sidebarFolderLine(self.allocator, term);
+                const fl = try sidebarFolderLine(self, term);
                 if (indent.len == 0 or fl.len == 0) break :blk fl; // depth 0 or 빈 줄 — 그대로(빈 줄에 공백 붙이면 4번째 줄이 생긴다)
                 defer self.allocator.free(fl);
                 break :blk try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ indent, fl });
@@ -2348,8 +2359,9 @@ pub const sidebar_scroll_ids = struct {
 
 /// 카드 폴더줄(owned) = 폴더 아이콘(0xF000A) prefix + 순수 cwd(sidebarCwdPath). 브랜치줄 octocat(0xF0009)과 같은
 /// "아이콘 + 공백 + 텍스트" 조립 패턴 — 표현(아이콘)은 카드 조립부에, 경로 파생은 sidebarCwdPath에 둔다. cwd 비면 "".
-pub fn sidebarFolderLine(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
-    const path = try sidebarCwdPath(allocator, term);
+pub fn sidebarFolderLine(self: *AppSession, term: *Term) ![]const u8 {
+    const allocator = self.allocator;
+    const path = try sidebarCwdPath(self, term);
     defer allocator.free(path);
     if (path.len == 0) return allocator.dupe(u8, "");
     return std.fmt.allocPrint(allocator, icons.utf8(.folder) ++ " {s}", .{path});

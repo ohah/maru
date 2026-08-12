@@ -106,9 +106,16 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
 
 1. **OSC 7**(셸이 프롬프트마다 보고). 가장 싸다 — syscall이 없다.
 2. **커널 조회**(`proc_pidinfo(PROC_PIDVNODEPATHINFO)`). OSC 7이 **빈 경우가 드물지
-   않아서** 필요하다: maru의 셸 통합은 zsh 전용이라 bash/fish는 아예 안 보내고, claude·codex 같은 전체화면 TUI가
-   시작하며 RIS(`ESC c`)를 보내면 `TerminalCore.fullReset`이 보고된 cwd를 지워 **그 프로그램이 떠 있는 내내** 비어
-   있다. 커널을 물어보면 셸 종류·화면 리셋과 무관하게 답이 나온다.
+   않아서** 필요하다. 실측된 경우가 셋이다(2026-08-12).
+   - maru의 셸 통합은 **zsh 전용**이라 bash/fish는 아예 안 보낸다.
+   - **재개 Term은 평생 한 번도 안 보낸다.** 에이전트 세션 기록의 이어하기는 셸을
+     `zsh -l -i -c "exec <provider> --resume <id>"`로 띄우는데, `-c`는 프롬프트를 한 번도 그리지 않아
+     `_maru_osc7` precmd 훅이 돌지 않는다(`.zshrc`는 source되고 훅 등록도 되지만 precmd는 안 돈다).
+   - `TerminalCore.fullReset`이 RIS(`ESC c`)에 보고된 cwd를 지운다. **다만 claude·codex는 RIS를 보내지 않는다** —
+     pty 캡처상 둘 다 alt screen(`CSI ?1049h`)+`ED 2`로 화면만 지운다. 예전 판에 그 둘을 이 항목의 예로 든 것은
+     실측과 다르다. 이 갈래는 실제로 RIS를 보내는 프로그램에만 해당한다.
+
+   커널을 물어보면 셸 종류·화면 리셋·셸 기동 형태와 무관하게 답이 나온다.
    - 베이스: 공개 libproc API이고 iTerm2·Ghostty가 같은 목적으로 쓰는 사실상 표준 경로다(clean-room — 공개 API
      호출만 하고 레퍼런스 코드 표현은 옮기지 않는다, [project-rules.md](project-rules.md)).
    - **누구의 cwd를 묻는가**: foreground process group의 **leader가 아닌 구성원 → leader → 세션의 child** 순이다.

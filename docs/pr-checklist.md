@@ -45,7 +45,8 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `notifications` | 데스크톱 알림·알림 패널·벨 | `notification` `bell` |
 | `config` | config 스키마·로더·resolve 계약 | `config` |
 | `observability` | snapshot·trace·replay·진단 계측 | `observability` `diag` |
-| `platform` | macOS 어댑터·ABI·앱 호스트 | `platform` `macos` `app-host` |
+| `platform` | **macOS** 어댑터·ABI·앱 호스트 | `platform` `macos` `app-host` |
+| `mobile` | **iOS·Android** 어댑터 — 모바일 host·Vulkan 백엔드·모바일 IME·기기 하네스. macOS 와 층은 같지만(L4) 타깃이 달라 영역을 가른다 | `mobile` `ios` `android` |
 | `app-runtime` | 앱 런타임·surface 라우팅·세션 조정 | `app` `session` `runtime` |
 
 **성격(kind)**

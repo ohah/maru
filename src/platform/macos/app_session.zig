@@ -672,6 +672,56 @@ test "archive scope refresh detects same-pane cwd changes but ignores repeated o
     try std.testing.expect(agent_dock.agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/b"));
 }
 
+// 범위 칩(`현재 작업공간`·`현재 프로젝트`)의 cwd도 **소스 컨트롤·탐색기·사이드바와 같은 축**을 써야 한다.
+// 예전에는 이 자리만 관측(OSC 7)을 직독해, 셸이 OSC 7을 안 보내는 Term에서 두 칩이 죽었다 — 셸 통합이 없는
+// bash/fish는 상시, 이 도크에서 `이어하기`로 연 Term은 수명 내내 그랬다.
+//
+// **증상이 눈에 안 보인다는 점이 중요하다.** `scopeNode`는 `enabled`를 paint가 아니라 `action`에만 싣고
+// (`build.zig`), hit-test는 `if (!action.enabled) return false`로 그냥 무시한다(`interaction.zig`). 즉 칩은
+// 평소와 똑같이 보이는데 **눌러도 아무 일이 없다.** 그래서 published props의 `workspace_scope_enabled`까지
+// 끝까지 확인한다 — 중간 상태(cwd를 안다)만 보면 "보이는데 안 눌리는" 그 상태를 놓친다.
+test "아카이브 범위 칩: OSC 7이 없어도 커널 폴백으로 눌리는 칩이 된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len); // 전제: OSC 7 미수신
+
+    // 축이 답을 주는 환경인지 먼저 확인한다(권한 없음·죽은 pid면 판정할 것이 없다).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const axis_cwd = git_ops.termCwd(session, term, &buf) orelse return error.SkipZigTest;
+
+    agent_dock.requestAgentSessionArchiveScopeRoots(session, null);
+
+    // 관측된 cwd가 축과 **같은 값**으로 선다. 예전에는 여기가 null이라 아래 루트들이 비워졌다.
+    const observed = session.agent_session_archive_scope_observed_cwd orelse return error.ScopeCwdMissing;
+    try std.testing.expectEqualStrings(axis_cwd, observed);
+    try std.testing.expect(session.agent_session_archive_project_scope_loading); // job이 나갔다
+
+    // backend가 canonicalize를 끝낼 때까지 결과만 소비한다(이 루프에 filesystem I/O는 없다).
+    var attempts: usize = 0;
+    while (session.agent_session_archive_workspace_root == null and attempts < 2_000) : (attempts += 1) {
+        agent_dock.updateAgentSessionArchiveProjectScope(session);
+        if (session.agent_session_archive_workspace_root == null)
+            std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.agent_session_archive_workspace_root != null);
+
+    // **렌더러가 실제로 읽는 값까지 본다.** 위 필드는 내부 상태이고, 칩이 눌리는지를 정하는 것은 published
+    // props의 `workspace_scope_enabled`다(`agentSessionDockProps`가 그 필드에서 파생한다). 둘 사이에 게이트가
+    // 하나라도 끼면 "루트는 섰는데 칩은 여전히 죽어 있는" 상태가 되므로 끝까지 확인한다.
+    const props = agent_dock.agentSessionDockProps(
+        session,
+        .{ .x = 0, .y = 0, .w = 400, .h = 600 },
+        .{ .content_height_px = 0, .max_offset_px = 0, .offset_y_px = 0, .first_index = 0, .first_origin_y_px = 0, .end_exclusive = 0 },
+        &.{},
+    );
+    try std.testing.expect(props.workspace_scope_enabled);
+}
+
 test "archive relative age uses the worker mtime without filesystem access" {
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("방금", agent_dock.formatAgentSessionArchiveRelativeAge(100, 200, &buf));

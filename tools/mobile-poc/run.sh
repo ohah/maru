@@ -65,7 +65,10 @@ chrome-ios)
     rm -rf "$APP" && mkdir -p "$APP"
     sed 's/@@NAME@@/MaruChrome/; s/dev.maru.poc/dev.maru.chrome/' "$POC/Info.plist.in" > "$APP/Info.plist"
     # 동봉 폰트를 앱 번들에 넣는다 — 시스템 폰트를 쓰면 플랫폼마다 글자가 갈린다.
-    cp "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" "$APP/"
+    # 굵게·기울임은 **다른 글리프**라 폰트 파일도 따로 필요하다(SGR 1/3).
+    for f in Regular Bold Italic BoldItalic; do
+        cp "$ROOT/assets/fonts/Jetendard/Jetendard-$f.ttf" "$APP/"
+    done
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
         "$IOS/ios_app_host.m" "$LIB_OUT/libmaru-mobile-ios-sim.a" \
         -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
@@ -130,7 +133,9 @@ chrome-android-app)
     for s in chrome.vert chrome.frag; do
         "$GLSLC" -o "$OUT/assets/$s.spv" "$ANDROID/shaders/$s"
     done
-    cp "$ROOT/assets/fonts/Jetendard/Jetendard-Regular.ttf" "$OUT/assets/"
+    for f in Regular Bold Italic BoldItalic; do
+        cp "$ROOT/assets/fonts/Jetendard/Jetendard-$f.ttf" "$OUT/assets/"
+    done
     # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
         --manifest "$ANDROID/AndroidManifest.xml" -A "$OUT/assets" \

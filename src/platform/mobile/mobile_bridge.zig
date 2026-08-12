@@ -53,9 +53,17 @@ pub const MaruQuad = extern struct {
 const max_cols: u16 = 200;
 const max_rows: u16 = 60;
 /// 본문 밖에서 나오는 quad: 배경 1 + chrome op(`ops` 배열 상한 512) + 라벨 글자 + 아이콘 6.
-/// 본문이 압도적이라 여유는 넉넉히 잡아 둔다.
 const chrome_quad_slack = 768;
-var quad_buf: [@as(usize, max_cols) * max_rows + chrome_quad_slack]MaruQuad = undefined;
+
+/// **정적으로 최악을 잡지 않는다.** 셀 속성이 붙으면서 한 칸이 낼 수 있는 quad 가 늘었다 —
+/// 배경 1 + 밑줄 1 + 이중밑줄 1 + 취소선 1 + 윗줄 1 + 글자 1 = 6. 최대 격자(200x60)에 그대로
+/// 곱하면 72768 개(3.5MB)를 **쓰지도 않을 최악을 위해 늘 이고 가게** 된다(폰의 실제 최악은
+/// 3577 개였다 — 실측).
+///
+/// 그래서 **필요할 때 배로 늘린다.** 늘어나는 시점은 격자가 커질 때뿐이고, 그건 리사이즈라
+/// 어차피 플랫폼이 GPU 자원을 다시 세우는 순간이다. 플랫폼은 `maru_mobile_max_quads()` 로
+/// 현재 용량을 물어보고 자기 버퍼를 맞춘다.
+var quad_buf: []MaruQuad = &.{};
 var quad_count: usize = 0;
 
 // ── 본문용 터미널 코어 ────────────────────────────────────────────────────────
@@ -91,8 +99,8 @@ const term_feed =
     // (renderer.synthesizeGlyph) 화면에 이게 제대로 나오는지가 곧 합성 경로가 서 있는지다.
     "┌──┬──┐ █▄▀░ ⠿⠇\r\n" ++
     "│ab│cd│\r\n" ++
-    // SGR 한 줄. 코어는 이 속성들을 전부 파싱해 셀에 담는데 **모바일 렌더는 전경색만
-    // 읽는다** — 배경·reverse·밑줄·굵기가 화면에서 사라지는지 여기서 드러난다.
+    // SGR 한 줄. 코어가 셀에 담는 속성이 화면까지 오는지 보는 자리다 — 배경(44)·반전(7)·
+    // 밑줄(4)·굵게(1). 예전에는 전경색만 읽어서 넷 다 평범한 글자로 나왔다.
     "\x1b[44m bg \x1b[0m\x1b[7m rev \x1b[0m\x1b[4m under \x1b[0m\x1b[1m bold \x1b[0m\r\n";
 
 // ── 입력 ─────────────────────────────────────────────────────────────────────
@@ -185,13 +193,105 @@ pub export fn maru_mobile_hit_cell(x: f32, y: f32) u32 {
 
 /// 셀 색을 RGB 로 푼다. indexed 는 maru 자체 팔레트(`color.xterm256`)를 쓴다 —
 /// 모바일용으로 색표를 새로 만들지 않는다.
-fn cellRgb(style: terminal.types.Style, tk: anytype) color.Rgb {
-    return switch (style.foreground) {
-        .default => tk.get(.surface_fg),
+fn resolveColor(c: terminal.types.Color, fallback: color.Rgb) color.Rgb {
+    return switch (c) {
+        .default => fallback,
         .indexed => |i| color.xterm256(i),
-        .rgb => |c| c,
+        .rgb => |v| v,
     };
 }
+
+/// 셀 하나가 실제로 낼 색과 장식. **코어가 셀에 담은 속성을 여기서 푼다** — 예전에는
+/// `foreground` 하나만 읽어서 배경색·reverse·밑줄·dim 이 전부 화면에서 사라졌다.
+const CellPaint = struct {
+    fg: color.Rgb,
+    /// null = 표면 배경 그대로(quad 를 안 낸다). 값이 있으면 칸을 그 색으로 칠한다.
+    bg: ?color.Rgb,
+    line: color.Rgb,
+    underline: bool,
+    underline_double: bool,
+    strikethrough: bool,
+    overline: bool,
+};
+
+/// SGR 속성을 색으로 푼다. 규칙은 데스크톱과 같은 것을 쓴다:
+///   * reverse(7) — 전경/배경을 맞바꾼다. **default 는 테마 값으로 풀고 나서** 바꾼다,
+///     안 그러면 "기본색끼리 맞바꿈" 이 아무 일도 안 하게 된다.
+///   * dim(2) — 전경을 배경 쪽으로 절반 보간한다(maru 전경엔 alpha 가 없어 RGB 보간으로 낸다).
+///   * conceal(8) — 전경을 그 칸의 배경색으로 만든다(비밀번호 프롬프트).
+///   * underline_color(58) — default 면 전경색을 쓴다.
+/// blink(5)는 아직 정적이다(코어도 "렌더는 정적" 이라고 적어 둔 자리다).
+fn paintCell(style: terminal.types.Style, tk: anytype) CellPaint {
+    const surface_fg = tk.get(.surface_fg);
+    const surface_bg = tk.get(.surface_bg);
+
+    var fg = resolveColor(style.foreground, surface_fg);
+    // 배경이 default 면 "칠하지 않는다" 는 뜻이라 null 로 둔다 — 표면 배경 위에 그대로 얹는다.
+    var bg: ?color.Rgb = switch (style.background) {
+        .default => null,
+        else => resolveColor(style.background, surface_bg),
+    };
+
+    if (style.reverse) {
+        const b = bg orelse surface_bg;
+        bg = fg;
+        fg = b;
+    }
+    const bg_for_blend = bg orelse surface_bg;
+    if (style.dim) fg = .{
+        .r = @intCast((@as(u16, fg.r) + bg_for_blend.r) / 2),
+        .g = @intCast((@as(u16, fg.g) + bg_for_blend.g) / 2),
+        .b = @intCast((@as(u16, fg.b) + bg_for_blend.b) / 2),
+    };
+    if (style.conceal) fg = bg_for_blend;
+
+    return .{
+        .fg = fg,
+        .bg = bg,
+        .line = resolveColor(style.underline_color, fg),
+        .underline = style.underline,
+        .underline_double = style.underline_double,
+        .strikethrough = style.strikethrough,
+        .overline = style.overline,
+    };
+}
+
+fn sameRgb(a: color.Rgb, b: color.Rgb) bool {
+    return a.r == b.r and a.g == b.g and a.b == b.b;
+}
+
+/// 같은 색이 이어지는 칸을 **하나의 quad 로 묶는다**. 칸마다 내면 80x24 만 해도 배경에서만
+/// 1920 개가 나오고, 그것이 곧 quad 예산이다.
+const Run = struct {
+    active: bool = false,
+    start: u16 = 0,
+    rgb: color.Rgb = .{ .r = 0, .g = 0, .b = 0 },
+
+    fn flush(self: *Run, end_col: u16, x0: i32, y: i32, cell_w: i32, h: i32) void {
+        if (!self.active) return;
+        const x = x0 + @as(i32, self.start) * cell_w;
+        const w = @as(i32, end_col - self.start) * cell_w;
+        if (w > 0 and h > 0) push(.{
+            .x = x,
+            .y = y,
+            .w = @intCast(w),
+            .h = @intCast(h),
+        }, self.rgb, 0xFF, 0, 0);
+        self.active = false;
+    }
+
+    fn note(self: *Run, col: u16, rgb: ?color.Rgb, x0: i32, y: i32, cell_w: i32, h: i32) void {
+        const want = rgb orelse {
+            self.flush(col, x0, y, cell_w, h);
+            return;
+        };
+        if (self.active and sameRgb(self.rgb, want)) return;
+        self.flush(col, x0, y, cell_w, h);
+        self.active = true;
+        self.start = col;
+        self.rgb = want;
+    }
+};
 
 /// 본문 사각형을 터미널 격자로 채운다.
 fn pushTerminal(rect: anytype, tk: anytype) void {
@@ -241,25 +341,55 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     body_cols = grid_cols;
     body_rows = grid_rows;
 
+    const ox = @as(i32, @intFromFloat(rect.x));
+    const oy = @as(i32, @intFromFloat(rect.y));
+    const cell_w = @max(1, @divTrunc(cw, 2));
+    // 장식선 두께. 칸 높이에 비례시켜 두면 줄 높이가 바뀌어도 같은 비율로 따라간다.
+    const rule: i32 = @max(1, @divTrunc(line_h, 16));
+
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {
+        const y0 = oy + @as(i32, row) * line_h;
+
+        // ── 1) 배경과 장식선을 먼저. **글자보다 앞에 쌓아야** 글자가 그 위에 온다.
+        // 칸마다 quad 를 내지 않고 같은 색이 이어지는 구간을 묶는다(Run).
+        var bg_run: Run = .{};
+        var under_run: Run = .{};
+        var under2_run: Run = .{};
+        var strike_run: Run = .{};
+        var over_run: Run = .{};
         var col: u16 = 0;
+        while (col < grid_cols) : (col += 1) {
+            const p = paintCell(core.screen.cells[core.index(row, col)].style, tk);
+            bg_run.note(col, p.bg, ox, y0, cell_w, line_h);
+            under_run.note(col, if (p.underline) p.line else null, ox, y0 + line_h - 2 * rule, cell_w, rule);
+            under2_run.note(col, if (p.underline_double) p.line else null, ox, y0 + line_h - 4 * rule, cell_w, rule);
+            strike_run.note(col, if (p.strikethrough) p.line else null, ox, y0 + @divTrunc(line_h, 2), cell_w, rule);
+            over_run.note(col, if (p.overline) p.line else null, ox, y0, cell_w, rule);
+        }
+        bg_run.flush(grid_cols, ox, y0, cell_w, line_h);
+        under_run.flush(grid_cols, ox, y0 + line_h - 2 * rule, cell_w, rule);
+        under2_run.flush(grid_cols, ox, y0 + line_h - 4 * rule, cell_w, rule);
+        strike_run.flush(grid_cols, ox, y0 + @divTrunc(line_h, 2), cell_w, rule);
+        over_run.flush(grid_cols, ox, y0, cell_w, rule);
+
+        // ── 2) 글자
+        col = 0;
         while (col < grid_cols) : (col += 1) {
             const cell = core.screen.cells[core.index(row, col)];
             if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
             if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
-            const glyph = atlasCell(cell.codepoint) orelse continue;
+            const glyph = atlasCell(cell.codepoint, styleBits(cell.style)) orelse continue;
             if (!reserveQuad()) return;
-            const rgb = cellRgb(cell.style, tk);
+            const rgb = paintCell(cell.style, tk).fg;
             // 진행 폭은 코어가 정한 셀 폭을 따른다 — 한글이 2셀이라는 판정이 코어 것이다.
-            const x = @as(i32, @intFromFloat(rect.x)) + @as(i32, col) * @divTrunc(cw, 2);
-            const y = @as(i32, @intFromFloat(rect.y)) + @as(i32, row) * line_h;
+            const x = ox + @as(i32, col) * cell_w;
             quad_buf[quad_count] = .{
                 .x = @floatFromInt(x),
-                .y = @floatFromInt(y),
+                .y = @floatFromInt(y0),
                 // **셀 종횡비를 지킨다.** 셰이더가 아틀라스 셀 *전체* 를 quad 에 매핑하므로
                 // 폭을 줄이면 글자가 가로로 눌린다. 단폭·양폭 모두 같은 셀 하나를 그리고,
-                // 다른 것은 **다음 칸까지의 거리**(아래 x 계산)뿐이다.
+                // 다른 것은 **다음 칸까지의 거리**(위 x 계산)뿐이다.
                 .w = @floatFromInt(cw),
                 .h = @floatFromInt(font_px),
                 .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
@@ -306,10 +436,15 @@ fn themeColors() tokens.ThemeColors {
 /// quad 자리를 하나 잡는다. **넘치면 알린다** — 조용히 자르면 화면 일부가 사라진 채
 /// 아무 신호도 없다(본문만 알리고 chrome·아이콘은 조용하던 것을 한곳으로 모았다).
 fn reserveQuad() bool {
-    if (quad_count == quad_buf.len) {
-        setLastError("quad_buffer_full");
+    if (quad_count < quad_buf.len) return true;
+    const next = if (quad_buf.len == 0) chrome_quad_slack * 2 else quad_buf.len * 2;
+    const grown = term_allocator.alloc(MaruQuad, next) catch {
+        setLastError("quad_alloc");
         return false;
-    }
+    };
+    @memcpy(grown[0..quad_count], quad_buf[0..quad_count]);
+    if (quad_buf.len > 0) term_allocator.free(quad_buf);
+    quad_buf = grown;
     return true;
 }
 
@@ -361,21 +496,33 @@ pub export fn maru_mobile_atlas_geometry(cell_w: u32, cell_h: u32) void {
     atlas_cell_h = cell_h;
 }
 
-pub export fn maru_mobile_atlas_add(cp: u32, col: u32, row: u32, advance: u32) void {
+/// 굵게(1)·기울임(2) 비트. **Android `Typeface` 상수와 같은 값**이라 host 가 그대로 넘긴다
+/// (0=NORMAL·1=BOLD·2=ITALIC·3=BOLD_ITALIC). iOS 는 이 비트로 번들 폰트 파일을 고른다.
+pub const style_bold: u32 = 1;
+pub const style_italic: u32 = 2;
+
+/// 등록부 키. 코드포인트는 21비트라 위쪽이 비어 있어 스타일을 같이 싣는다 — 같은 글자의
+/// 굵은 판과 보통 판은 **다른 글리프**라 슬롯도 달라야 한다.
+fn atlasKey(cp: u32, style: u32) u32 {
+    return (cp & 0xFFFFFF) | (style << 24);
+}
+
+pub export fn maru_mobile_atlas_add(cp: u32, style: u32, col: u32, row: u32, advance: u32) void {
+    const key = atlasKey(cp, style);
     // 등록되면 "없음" 목록에서 뺀다. 안 그러면 아틀라스가 서기 **전에** 한 번 돈 build 가
     // 남긴 목록 때문에 이미 있는 글자를 슬롯만 축내며 다시 굽는다(실측: grew=15 가 전부
     // 'z' 같은 ASCII 중복이었다).
     var i: usize = 0;
     while (i < miss_n) : (i += 1) {
-        if (miss_cp[i] == cp) {
+        if (miss_cp[i] == key) {
             miss_cp[i] = miss_cp[miss_n - 1];
             miss_n -= 1;
             break;
         }
     }
-    for (0..atlas_n) |j| if (atlas_cp[j] == cp) return; // 이미 있으면 슬롯을 안 쓴다
+    for (0..atlas_n) |j| if (atlas_cp[j] == key) return; // 이미 있으면 슬롯을 안 쓴다
     if (atlas_n == atlas_cp.len) return;
-    atlas_cp[atlas_n] = cp;
+    atlas_cp[atlas_n] = key;
     atlas_col[atlas_n] = col;
     atlas_row[atlas_n] = row;
     atlas_adv[atlas_n] = advance;
@@ -390,10 +537,11 @@ pub export fn maru_mobile_atlas_add(cp: u32, col: u32, row: u32, advance: u32) v
 var miss_cp: [64]u32 = undefined;
 var miss_n: usize = 0;
 
-fn noteMiss(cp: u21) void {
-    for (0..miss_n) |i| if (miss_cp[i] == cp) return;
+/// 못 그린 것은 **(코드포인트, 스타일) 짝**으로 모은다 — 같은 글자라도 굵은 판은 따로 구워야 한다.
+fn noteMiss(key: u32) void {
+    for (0..miss_n) |i| if (miss_cp[i] == key) return;
     if (miss_n == miss_cp.len) return;
-    miss_cp[miss_n] = cp;
+    miss_cp[miss_n] = key;
     miss_n += 1;
 }
 
@@ -402,10 +550,17 @@ pub export fn maru_mobile_missing_count() u32 {
     return @intCast(miss_n);
 }
 
-/// i번째 놓친 코드포인트. 플랫폼이 이걸 구워 `maru_atlas_add` 로 넣는다.
+/// i번째 놓친 코드포인트. 플랫폼이 이걸 구워 `maru_mobile_atlas_add` 로 넣는다.
 pub export fn maru_mobile_missing_cp(i: u32) u32 {
     if (i >= miss_n) return 0;
-    return miss_cp[i];
+    return miss_cp[i] & 0xFFFFFF;
+}
+
+/// i번째 놓친 것의 **스타일**(1=굵게·2=기울임, Android `Typeface` 상수와 같은 값).
+/// 코드포인트와 함께 읽어야 host 가 어느 폰트로 구울지 안다.
+pub export fn maru_mobile_missing_style(i: u32) u32 {
+    if (i >= miss_n) return 0;
+    return miss_cp[i] >> 24;
 }
 
 /// 다음 빈 슬롯의 (열, 행) — 상위 16비트=열, 하위 16비트=행.
@@ -422,11 +577,18 @@ pub export fn maru_mobile_missing_clear() void {
     miss_n = 0;
 }
 
-fn atlasCell(cp: u21) ?struct { col: u32, row: u32, adv: u32 } {
-    for (0..atlas_n) |i| if (atlas_cp[i] == cp)
+fn atlasCell(cp: u21, style: u32) ?struct { col: u32, row: u32, adv: u32 } {
+    const key = atlasKey(cp, style);
+    for (0..atlas_n) |i| if (atlas_cp[i] == key)
         return .{ .col = atlas_col[i], .row = atlas_row[i], .adv = atlas_adv[i] };
-    noteMiss(cp);
+    noteMiss(key);
     return null;
+}
+
+/// 셀의 SGR 굵기·기울임을 아틀라스 스타일 비트로. **여기가 단일 출처다** — 글자를 그리는
+/// 자리와 굽는 자리가 같은 값을 봐야 굵은 글자가 보통 슬롯을 덮어쓰지 않는다.
+fn styleBits(s: terminal.types.Style) u32 {
+    return (if (s.bold) style_bold else 0) | (if (s.italic) style_italic else 0);
 }
 
 /// 문자열을 글자 quad 로 분해한다. **폭은 maru 의 EAW 규칙을 따른다** — 한글은 2셀이다.
@@ -438,7 +600,7 @@ fn pushText(text: []const u8, x0: i32, y0: i32, font_px: i32, rgb: anytype) void
     var view = std.unicode.Utf8View.init(text) catch return;
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
-        const cell = atlasCell(cp);
+        const cell = atlasCell(cp, 0);
         // 진행 폭은 **폰트 advance** 다. 셀 폭을 쓰면 자간이 벌어진다(실측).
         const adv_px: i32 = if (cell) |c|
             @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale)
@@ -688,13 +850,16 @@ pub export fn maru_mobile_clear_error() void {
     @memset(&last_error, 0);
 }
 
+/// **매 프레임 다시 물어야 한다.** 버퍼가 자라면 주소가 바뀐다(격자가 커질 때만 자란다).
 pub export fn maru_mobile_quads() [*]const MaruQuad {
-    return &quad_buf;
+    return quad_buf.ptr;
 }
 
-/// build 가 낼 수 있는 **최대** quad 수. 플랫폼이 GPU 버퍼를 이만큼 잡으면 잘릴 일이 없다.
-/// 상한을 host 마다 손으로 적어 두면 어긋난다 — 실제로 iOS 는 늘리고 Android 는 4096 에서
-/// **조용히 자르고** 있었다. 아는 쪽이 답한다.
+/// 지금 용량. 플랫폼이 GPU 버퍼를 이만큼 잡으면 잘릴 일이 없다. 상한을 host 마다 손으로 적어
+/// 두면 어긋난다 — 실제로 iOS 는 늘리고 Android 는 4096 에서 **조용히 자르고** 있었다.
+///
+/// build **뒤에** 읽는다. 그 프레임에 늘어났다면 플랫폼 버퍼가 아직 작으므로, 플랫폼은 자기
+/// 버퍼를 키우고(iOS) 또는 자원을 다시 세우고(Android) 그 프레임은 건너뛴다.
 pub export fn maru_mobile_max_quads() u32 {
     return @intCast(quad_buf.len);
 }

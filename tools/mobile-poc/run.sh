@@ -98,7 +98,17 @@ cursor-android)
         set -- $pair
         python3 "$POC/cursor_probe.py" set "$BR" "$2" "$3" || exit 1
         sh "$0" chrome-android-app >/dev/null 2>&1
-        sleep 3
+        # **앱이 화면에 떠 있을 때만 찍는다.** adb 가 성공해도 앱이 아직 안 떴거나 죽었으면
+        # 홈 화면을 `cursor-block.png` 라는 이름으로 남기고 "확인했다" 가 된다 — 이 하네스가
+        # 맨 위에 스스로 적어 둔 판정 기준("화면이 뜨는 것으로는 부족하다")이 걸리는 자리다.
+        # 고정 sleep 대신 포커스를 기다리면 늦게 뜨는 경우도 같이 덮는다.
+        n=0
+        while ! "$ADB" shell dumpsys window 2>/dev/null | grep -q "mCurrentFocus.*dev.maru.chrome"; do
+            n=$((n + 1))
+            [ "$n" -gt 15 ] && { echo "앱이 화면에 없다 — 캡쳐를 믿을 수 없다" >&2; exit 1; }
+            sleep 1
+        done
+        sleep 2  # 첫 프레임이 아니라 대본이 다 그려진 뒤를 찍는다
         "$ADB" exec-out screencap -p > "$OUT/cursor-$1.png"
         cp "$BAK" "$BR"
         echo "  cursor-$1.png"

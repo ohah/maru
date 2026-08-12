@@ -353,10 +353,10 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 글자 상자(15)보다 높은 탓인데, 그 불일치를 없애는 것이 M4a3 이고 그때까지는 눈에 보이는
     // 쪽(글자)에 맞춘다.
     const rule: i32 = @max(1, @divTrunc(font_px, 12));
-    const y_over = 0;                       // 윗줄: 글자 상자 위
+    const y_over = 0; // 윗줄: 글자 상자 위
     const y_strike = @divTrunc(font_px, 2); // 취소선: 글자 한가운데
-    const y_under = font_px;                // 밑줄: 글자 상자 바로 아래
-    const y_under2 = font_px + 2 * rule;    // 이중밑줄의 둘째 줄
+    const y_under = font_px; // 밑줄: 글자 상자 바로 아래
+    const y_under2 = font_px + 2 * rule; // 이중밑줄의 둘째 줄
 
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {

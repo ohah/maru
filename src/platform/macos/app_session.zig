@@ -12679,6 +12679,13 @@ pub const AppSession = struct {
                 break;
             }
         }
+        // MARU_FORCE_SCM=1 — 도크를 소스 컨트롤 뷰로 열어 둔 것처럼 만들어 헤드리스로 찍는다. 뷰 전환의 유일한
+        // 진입점이 스위처 아이콘 **클릭**이라 스크린샷 하니스로는 도달할 수 없다(입력 자동화는 겹친 남의 창을
+        // 누를 위험이 있어 검증 수단으로 쓰지 않는다). 상태를 심지 않고 사용자 클릭과 **같은 경로**
+        // (`openDockTo`)를 태우므로, 저장소 판정·목록 읽기·안내 문구는 전부 제품 tick이 그대로 정한다.
+        if (std.c.getenv("MARU_FORCE_SCM") != null and self.dock.view != .source_control) {
+            dock_ops.openDockTo(self, .source_control);
+        }
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
@@ -51572,6 +51579,141 @@ test "소스 컨트롤: 활성 터미널이 다른 저장소로 옮겨 가면 �
     git_ops.followActiveTerminalRepo(session);
     try std.testing.expect(session.git_result != null);
     try std.testing.expect(session.peekFileTreeWatchRoot() == null);
+}
+
+// [사용자 보고 2026-08-12] "원격 ssh나 깃 연결 안 된 터미널이 활성될 때 이전 깃 이력이 나온다".
+//
+// 둘은 원인이 다르고, 하나만 결함이다. **원격은 §3.5가 규정한 동작이다** — OSC 7·커널 조회가 둘 다 원격 경로를
+// 로컬에 대고 해석하게 만들어 1순위를 비우므로, 2순위(직전에 읽은 저장소)가 대상을 잡는다. 반면 **저장소 아닌
+// 로컬 폴더**는 같은 문서가 "터미널이 답했으면 결론은 저장소 없음"이라고 못 박은 쪽인데도 옛 목록이 남았다:
+// `gitRepoRoot`가 "모른다"(파일 Term·원격)와 "없다"(비저장소)를 같은 `null`로 뭉개서 호출자가 구별할 수 없었고,
+// `followActiveTerminalRepo`는 안전한 쪽(직전 판단 유지)으로만 읽을 수밖에 없었다. 3-상태 `gitRepoTarget`이 그
+// 구별을 만든다 — 이 테스트가 **두 방향을 같은 자리에서** 고정해, 무효화를 넓혀 원격까지 지우는 회귀도 막는다.
+test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버리고, 원격에서는 직전 판단을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    // 실제 git을 띄우지 않는다(검증 대상은 "무효화 판정"이지 목록 내용이 아니다 — 위 테스트와 같은 규율).
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = git_ops.gitRepoRoot(session, &buf) orelse return error.SkipZigTest; // 저장소 밖에서 돌면 건너뛴다
+    git_ops.rememberGitRepo(session, repo);
+
+    // ⑴ **저장소 아닌 폴더로 옮긴다.** 관측 캐시를 손으로 쓰지 않고 실제 OSC 7으로 몬다(직접 필드를 쓰면 다음
+    // `refreshTermObservation`이 코어에서 다시 읽어 덮을 수 있어, 통과해도 이유를 믿을 수 없다).
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]7;file:///tmp\x07");
+    // walk-up이 상위에서 `.git`을 만나면(예: `/`가 저장소인 특이 머신) 이 단언은 의미를 잃는다 — 건너뛴다.
+    var probe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (git_ops.gitRepoRoot(session, &probe_buf) != null) return error.SkipZigTest;
+    // **타는 분기를 못 박는다.** `.unknown`(OSC 7이 안 먹어 아무도 답을 못 한 상태)이어도 위 skip 조건은 똑같이
+    // 통과하는데, 그때 아래 단언들은 전혀 다른 경로를 검증하게 된다 — ⑵에서 실제로 그 착오가 있었다.
+    // 이 단언이 `null`의 정체를 "저장소 없음 확정"으로 고정하고, 그 값이 곧 뷰가 "git 저장소가 아닙니다"를
+    // 고르는 조건이다(`git_missing`이 아니고 `gitRepoRoot == null`).
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.none,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &probe_buf)),
+    );
+
+    session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    session.git_failed = true;
+    session.scm_selected_row = 3;
+    git_ops.followActiveTerminalRepo(session);
+
+    // 옛 저장소의 목록·실패·선택이 전부 사라져야 뷰가 "git 저장소가 아닙니다" 안내를 낸다(그 안내는
+    // `git_result == null`일 때만 그려지므로, 목록을 안 버리면 안내가 나올 자리 자체가 없다).
+    try std.testing.expect(session.git_result == null);
+    try std.testing.expect(!session.git_failed);
+    try std.testing.expect(session.scm_selected_row == null);
+    try std.testing.expect(session.git_inflight == 0);
+
+    // **두 번째 호출은 아무것도 하지 않는다.** 매 tick 도는 경로라 무효화가 반복되면 프레임마다 렌더를 깨운다.
+    session.metal_dirty = false;
+    git_ops.followActiveTerminalRepo(session);
+    try std.testing.expect(!session.metal_dirty);
+
+    // ⑵ **원격은 지우지 않는다.** maru ssh 진입 통지로 1순위를 비우면 2순위가 직전 저장소를 답하므로 목록이
+    // 그대로 남는 것이 §3.5의 규정이다 — 여기서 지우면 SSH 터미널로 옮길 때마다 목록이 깜빡인다.
+    // **이 단계가 타는 분기는 `.repo`(2순위)다**, `.unknown`이 아니다 — 적대적 검증에서 `.unknown`을 무효화로
+    // 바꿔도 이 단언이 통과해 그 사실이 드러났다. 그래서 ⑶이 그 분기를 따로 고정한다.
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    git_ops.followActiveTerminalRepo(session);
+    try std.testing.expect(session.git_result != null);
+
+    // ⑶ **`.unknown`(아무도 답을 못 줌)도 유지다.** 2순위마저 해석에 실패하는 상태를 만든다 — 목록을 읽은
+    // 저장소가 그 사이 사라진 경우다. 여기서 지우면 "모르면 직전 판단을 유지한다"(§3.5 ⑶)가 깨져, 저장소를
+    // 잠시 못 읽는 순간마다 목록이 사라진다.
+    git_ops.rememberGitRepo(session, "/maru-nonexistent-scm-probe");
+    // 전제를 **단언으로** 고정한다 — 하네스가 탐색기 root를 갖게 되면 3순위가 답해 `.repo`로 빠지고, 이 단계는
+    // 조용히 다른 분기를 검증하게 된다(⑵에서 실제로 그런 착오가 있었다).
+    try std.testing.expect(session.file_tree.rootCount() == 0);
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.unknown,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
+    );
+    git_ops.followActiveTerminalRepo(session);
+    try std.testing.expect(session.git_result != null);
+}
+
+// **무효화의 대칭**: 저장소 아닌 폴더에서 돌아왔을 때 목록이 되살아나는가. `.none` 정리는 새 읽기를 걸지 않고
+// (읽을 저장소가 없다) `git_inflight`를 0으로 놓기만 하므로, 같은 저장소로 복귀하면 `followActiveTerminalRepo`의
+// "바뀔 때만"이 no-op이 되어 **복구가 전적으로 tick의 "결과가 없으면 한 번 건다"에 달려 있다**. 그 가드 조건이
+// 바뀌면(플래그 추가 등) 목록이 영영 빈 채로 남는데 무효화 테스트는 그대로 통과한다 — 그 공백을 여기서 막는다.
+test "소스 컨트롤: 저장소 아닌 폴더에서 돌아오면 같은 저장소를 다시 읽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true; // 워커를 띄우지 않는다(검증 대상은 "읽기를 걸었나")
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = git_ops.gitRepoRoot(session, &buf) orelse return error.SkipZigTest;
+    var repo_copy: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(repo_copy[0..repo.len], repo);
+    const home_repo = repo_copy[0..repo.len];
+    // git이 없는 머신에서는 `submitGitRead`가 미설치로 표시하고 seq를 올리지 않는다 — 그 경우 이 판정은 성립하지 않는다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (git_backend_mod.locate(&exe_buf) == null) return error.SkipZigTest;
+    git_ops.rememberGitRepo(session, home_repo);
+
+    // 저장소 아닌 폴더로 나간다(위 테스트가 고정한 경로).
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]7;file:///tmp\x07");
+    var probe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (git_ops.gitRepoRoot(session, &probe_buf) != null) return error.SkipZigTest; // `/` 가 저장소인 머신
+    session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    git_ops.followActiveTerminalRepo(session);
+    try std.testing.expect(session.git_result == null); // 여기까지는 위 테스트와 같다
+
+    // **돌아온다.** `git_repo`가 그대로여서 `followActiveTerminalRepo`는 no-op이고, 읽기를 다시 거는 것은 tick이다.
+    var back_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const osc = try std.fmt.bufPrint(&back_buf, "\x1b]7;file://{s}\x07", .{home_repo});
+    try term.surface.core.write(osc);
+    const seq_before = session.git_request_seq;
+    git_ops.drainGitStatus(session);
+    // seq가 올랐다 = `submitGitRead`가 그 저장소로 읽기를 걸었다(백엔드가 닫혀 있어 in-flight까지는 가지 않는다).
+    try std.testing.expect(session.git_request_seq > seq_before);
+    try std.testing.expectEqualStrings(home_repo, session.git_repo.?);
 }
 
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". **좌표 클릭부터** 그대로 태워 재현한다 — 세션 API를 직접

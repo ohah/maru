@@ -666,7 +666,13 @@ MARU_SCREENSHOT_DELAY_MS=1500 MARU_SCREENSHOT=<path> ./zig-out/Maru.app/Contents
 ```
 MARU_FORCE_NOTIFICATIONS=<n>   # 안 읽은 알림 n개
 MARU_FORCE_AGENT=1             # 활성 Term을 running으로
+MARU_FORCE_SCM=1               # 우측 도크를 소스 컨트롤 뷰로 열어 둔 것처럼(뷰 전환의 유일한 진입점이 스위처 아이콘 클릭이라 캡처로 도달할 수 없다)
 ```
+
+> `MARU_FORCE_SCM`은 상태를 심지 않고 사용자 클릭과 **같은 경로**(`openDockTo`)를 태운다 — 저장소 판정·목록 읽기·
+> 안내 문구는 전부 제품 tick이 정한다. 이 게이트로 "저장소 cwd에서 목록이 보인다"와 "저장소 아닌 cwd에서
+> `git 저장소가 아닙니다`가 뜬다"를 각각 찍어 대조했고, 실행 중 `.git`을 지워 **무효화 전이**까지 확인했다
+> ([editor-surface-dock.md §3.5](editor-surface-dock.md)의 3-상태 판정).
 
 > 픽셀 검증 주의: **"배경색이 아닌 픽셀"을 글자로 세면 안 된다.** 바 자신의 안티앨리어싱 가장자리가 섞인다(바 배경과 1단위 차이로 나타난다). 잉크는 밝기로 갈라야 한다. 이 오인 때문에 있지도 않은 "폭 초과" 결함을 한 번 보고했다.
 

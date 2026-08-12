@@ -236,6 +236,32 @@ test "헤더의 키 id 를 브리지가 전부 안다" {
     bridge.maru_mobile_clear_error();
 }
 
+// 커서는 **모양도 표시 여부도 코어가 정한다**(DECSCUSR·DECTCEM). 데스크톱과 같은 세 모양을
+// 다 그리는지, 그리고 TUI 가 숨기면(`CSI ?25 l`) 실제로 사라지는지 본다.
+test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+
+    // DECTCEM 으로 숨긴 상태를 기준선으로 잡는다 — 커서 quad 가 빠진 수다.
+    _ = bridge.maru_mobile_input("\x1b[?25l", 6);
+    const hidden = bridge.maru_mobile_build(402, 874);
+
+    // 세 모양 모두 quad 를 하나 더 낸다(모양은 rect 로 갈리고 개수는 같다).
+    const shapes = [_][]const u8{ "\x1b[2 q", "\x1b[4 q", "\x1b[6 q" }; // block · underline · bar
+    for (shapes) |seq| {
+        _ = bridge.maru_mobile_input("\x1b[?25h", 6); // 다시 보이게
+        _ = bridge.maru_mobile_input(seq.ptr, seq.len);
+        const shown = bridge.maru_mobile_build(402, 874);
+        try std.testing.expectEqual(hidden + 1, shown);
+        _ = bridge.maru_mobile_input("\x1b[?25l", 6);
+        try std.testing.expectEqual(hidden, bridge.maru_mobile_build(402, 874));
+    }
+    _ = bridge.maru_mobile_input("\x1b[?25h", 6);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

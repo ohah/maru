@@ -1766,6 +1766,11 @@ pub fn build(b: *std.Build) void {
     });
     const run_mobile_bridge_tests = b.addRunArtifact(mobile_bridge_tests);
     test_step.dependOn(&run_mobile_bridge_tests.step);
+    // 이 스위트만 따로 돌릴 수단이 필요하다. 전체 `test` 는 session host 테스트가 유닉스 소켓
+    // 경로 상한에 걸려(`SocketPathTooLong`) **경로가 긴 워크트리에서는 원리상 통과할 수 없고**,
+    // 모바일은 CI 가 없어 로컬 실행이 유일한 판정자다.
+    const test_mobile_step = b.step("test-mobile", "Run the mobile bridge contract tests");
+    test_mobile_step.dependOn(&run_mobile_bridge_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
     // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
     // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.

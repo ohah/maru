@@ -1,0 +1,151 @@
+// Android IME shim. **이 파일이 저장소의 유일한 Java 다.**
+//
+// `NativeActivity` 만으로는 소프트 키보드가 ASCII 물리 키 이벤트를 줄 때만 입력이 되고
+// IME 를 못 받는다 — 한글 조합이 필수인 터미널에서는 쓸 수 없다. 구글의 `GameActivity`
+// 가 그 자리를 채우지만 `AppCompatActivity` 를 상속해 AndroidX 의존 트리와 Gradle 을
+// 끌고 온다(실측). 그래서 `InputConnection` 만 직접 받는다(docs/mobile-platform.md §1).
+//
+// **한글 조합 알고리즘은 여기 없다.** IME 가 `ㅎ`→`하`→`한` 을 계산해 완성된 문자열로
+// 주고, 이 파일은 그것을 JNI 로 넘기기만 한다.
+//
+// `android.*` 만 쓴다 — AndroidX 도 kotlin-stdlib 도 안 들어간다. 그래서 빌드가
+// `javac` + `d8` 로 끝난다.
+package dev.maru;
+
+import android.content.Context;
+import android.os.Bundle;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
+
+public class MaruActivity extends android.app.NativeActivity {
+
+    // **JVM 에게도 라이브러리를 알려야 한다.** `NativeActivity` 는 `android.app.lib_name` 을
+    // 보고 직접 `dlopen` 하지만 그건 클래스로더 밖이라, JNI 이름 해석이 안 돼
+    // `UnsatisfiedLinkError` 로 죽는다(실측). 같은 .so 를 여기서 한 번 더 연다 —
+    // dlopen 은 refcount 라 두 번 열려도 인스턴스는 하나다.
+    static {
+        System.loadLibrary("maruchrome");
+    }
+
+    /// 조합 중 문자열. **셸로 보내지 않는다** — 화면에만 흐리게 그린다. 확정되기 전에
+    /// PTY 로 흘리면 셸이 `ㅎ` 같은 자모를 명령어 일부로 받아버린다.
+    private static native void nativeComposing(String text);
+
+    /// 확정 문자열. 이때만 코어(→PTY)로 간다.
+    private static native void nativeCommit(String text);
+
+    /// IME 가 문자로 주지 않는 키(백스페이스 등). 코어가 바이트로 받는다.
+    private static native void nativeKey(int keyCode);
+
+    /// IME 가 입력 대상으로 인정할 View. `NativeActivity` 의 SurfaceView 는 텍스트 편집기가
+    /// 아니라서 키보드가 이 View 를 봐야 한다. 그리지 않으므로 화면에는 영향이 없다.
+    private static final class InputView extends View {
+        InputView(Context ctx) {
+            super(ctx);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+        }
+
+        @Override
+        public boolean onCheckIsTextEditor() {
+            return true;   // 이 한 줄이 없으면 IME 가 이 View 를 무시한다
+        }
+
+        @Override
+        public InputConnection onCreateInputConnection(EditorInfo out) {
+            // 터미널이라 자동완성·자동대문자를 끈다. 그것들이 켜져 있으면 IME 가
+            // 앞 문맥을 조회해 멋대로 고쳐 넣는다.
+            out.inputType = EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            out.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                    | EditorInfo.IME_FLAG_NO_FULLSCREEN
+                    | EditorInfo.IME_ACTION_NONE;
+            return new TerminalInputConnection(this);
+        }
+    }
+
+    /// IME 가 부르는 콜백을 코어로 넘긴다.
+    ///
+    /// **`fullEditor=true` 여야 조합이 온다.** false 로 두면 IME 가 "편집기가 아니다" 로 보고
+    /// `setComposingText` 없이 바로 `commitText` 를 부른다(실측). 그러면 한글이 조립되는
+    /// 과정이 화면에 안 나온다. true 면 프레임워크가 Editable 버퍼를 두지만 우리는 콜백만
+    /// 가로채 쓰므로 그 버퍼는 안 읽는다.
+    private static final class TerminalInputConnection extends BaseInputConnection {
+        TerminalInputConnection(View target) {
+            super(target, true);
+        }
+
+        @Override
+        public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            nativeComposing(text == null ? "" : text.toString());
+            return true;
+        }
+
+        @Override
+        public boolean finishComposingText() {
+            nativeComposing("");   // 조합이 끝났다 — 겉치레를 지운다
+            return true;
+        }
+
+        @Override
+        public boolean commitText(CharSequence text, int newCursorPosition) {
+            nativeComposing("");
+            nativeCommit(text == null ? "" : text.toString());
+            return true;
+        }
+
+        @Override
+        public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            // 조합이 없는 상태의 백스페이스가 이리로 온다. 터미널은 화면 버퍼를 편집하지
+            // 않으므로 삭제를 흉내 내지 않고 **키 자체를 코어로** 넘긴다.
+            for (int i = 0; i < beforeLength; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL);
+            return true;
+        }
+
+        @Override
+        public boolean sendKeyEvent(android.view.KeyEvent event) {
+            if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) nativeKey(event.getKeyCode());
+            return true;
+        }
+    }
+
+    private InputView input;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        input = new InputView(this);
+        // NativeActivity 가 만든 content view 위에 얹는다. 0x0 이면 포커스를 못 받는 기기가
+        // 있어 전체 크기로 두고, 그리지 않아 화면에는 안 보인다.
+        addContentView(input, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        input.requestFocus();
+    }
+
+    /// **익명 클래스를 안 쓴다.** `d8` 8.2.2 가 익명 내부 클래스(`MaruActivity$1`)에서
+    /// 내부 오류로 죽는다(실측). 이름 있는 중첩 클래스는 정상이라 그것만 쓴다.
+    private static final class ShowKeyboard implements Runnable {
+        private final MaruActivity activity;
+
+        ShowKeyboard(MaruActivity a) {
+            this.activity = a;
+        }
+
+        @Override
+        public void run() {
+            activity.input.requestFocus();
+            InputMethodManager imm = (InputMethodManager)
+                    activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(activity.input, InputMethodManager.SHOW_IMPLICIT);
+        }
+    }
+
+    /// 네이티브에서 부른다 — 터미널은 켜지면 바로 입력을 받는다.
+    @SuppressWarnings("unused")
+    public void showKeyboard() {
+        runOnUiThread(new ShowKeyboard(this));
+    }
+}

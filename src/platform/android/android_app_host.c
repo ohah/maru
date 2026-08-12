@@ -14,6 +14,7 @@
 #include <android_native_app_glue.h>
 #include <android/log.h>
 #include <android/bitmap.h>
+#include <jni.h>
 #include <android/choreographer.h>
 #include <vulkan/vulkan.h>
 #include <stdio.h>
@@ -678,26 +679,57 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
     (*vm)->DetachCurrentThread(vm);
 }
 
-// **입력**: NativeActivity 가 받은 키를 바이트로 바꿔 코어에 먹인다.
+// **입력**: 문자는 IME 가 만든다. `MaruActivity.java` 가 `InputConnection` 으로 받아
+// 여기로 넘긴다 — keycode→ASCII 표를 손으로 짜면 한글을 못 만든다(그게 shim 을 둔 이유다).
 //
-// NDK 는 keycode 만 주고 문자 매핑은 Java `KeyCharacterMap` 에 있다. PoC 는 그 왕복을
-// 하지 않고 ASCII 구간만 표로 옮긴다 — 확인하려는 것은 "OS 키 이벤트가 코어까지 닿는가"
-// 이지 자판 배열 전체가 아니다. 실제 제품은 KeyCharacterMap(또는 IME)을 거쳐야 한다.
-static char keycodeToAscii(int32_t kc, int32_t meta) {
-    if (kc >= AKEYCODE_A && kc <= AKEYCODE_Z) {
-        char base = (char)('a' + (kc - AKEYCODE_A));
-        int shift = (meta & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON)) != 0;
-        return shift ? (char)(base - 32) : base;
+// 조합 중 문자열은 **셸로 보내지 않는다**. 화면에만 흐리게 그릴 겉치레라서, 코어의 입력
+// 경로가 아니라 별도 상태로 둔다(docs/mobile-platform.md §1).
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeComposing(JNIEnv *env, jclass cls, jstring text) {
+    (void)cls;
+    const char *s = text ? (*env)->GetStringUTFChars(env, text, NULL) : NULL;
+    unsigned int n = s ? (unsigned int)strlen(s) : 0;
+    maru_mobile_set_preedit(s ? s : "", n);
+    if (s) (*env)->ReleaseStringUTFChars(env, text, s);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeCommit(JNIEnv *env, jclass cls, jstring text) {
+    (void)cls;
+    if (!text) return;
+    const char *s = (*env)->GetStringUTFChars(env, text, NULL);
+    if (s) {
+        unsigned int total = maru_mobile_input(s, strlen(s));
+        LOGI("MARU_INPUT commit=\"%s\" total=%u", s, total);
+        (*env)->ReleaseStringUTFChars(env, text, s);
     }
-    if (kc >= AKEYCODE_0 && kc <= AKEYCODE_9) return (char)('0' + (kc - AKEYCODE_0));
-    switch (kc) {
-        case AKEYCODE_SPACE: return ' ';
-        case AKEYCODE_ENTER: return '\r';
-        case AKEYCODE_PERIOD: return '.';
-        case AKEYCODE_MINUS: return '-';
-        case AKEYCODE_SLASH: return '/';
-        default: return 0;
+}
+
+// IME 가 문자로 주지 않는 키만 여기로 온다(백스페이스·엔터 등).
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code) {
+    (void)env; (void)cls;
+    char c = 0;
+    switch (key_code) {
+        case AKEYCODE_ENTER: c = '\r'; break;
+        case AKEYCODE_DEL:   c = 0x7F; break;
+        case AKEYCODE_TAB:   c = '\t'; break;
+        case AKEYCODE_ESCAPE: c = 0x1B; break;
+        default: return;
     }
+    maru_mobile_input(&c, 1);
+}
+
+// 창이 서면 키보드를 올린다 — 터미널은 켜지면 바로 입력을 받는다.
+static void showKeyboard(struct android_app *app) {
+    JavaVM *vm = app->activity->vm;
+    JNIEnv *env = NULL;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jclass cls = (*env)->GetObjectClass(env, app->activity->clazz);
+    jmethodID m = (*env)->GetMethodID(env, cls, "showKeyboard", "()V");
+    if (m) (*env)->CallVoidMethod(env, app->activity->clazz, m);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*vm)->DetachCurrentThread(vm);
 }
 
 static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
@@ -716,14 +748,8 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
              px, py, lx, ly, cell >> 16, cell & 0xFFFF);
         return 1;
     }
-    if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_KEY) return 0;
-    if (AKeyEvent_getAction(ev) != AKEY_EVENT_ACTION_DOWN) return 0;
-    char c = keycodeToAscii(AKeyEvent_getKeyCode(ev), AKeyEvent_getMetaState(ev));
-    if (!c) return 0;
-    unsigned int total = maru_mobile_input(&c, 1);
-    LOGI("MARU_INPUT keycode=%d byte=0x%02x total=%u",
-         AKeyEvent_getKeyCode(ev), (unsigned char)c, total);
-    return 1;
+    // 키는 여기서 안 본다 — 소프트 키보드 문자는 `MaruActivity` 의 InputConnection 이 준다.
+    return 0;
 }
 
 // **생명주기**: 홈으로 나가면 창이 죽는다(APP_CMD_TERM_WINDOW). 그때 스왑체인을 그대로
@@ -912,6 +938,7 @@ static void onAppCmd(struct android_app *app, int32_t cmd) {
         // 기기 래스터가 서면 push 한 호스트 아틀라스는 아예 안 읽는다.
         if (!g_glyph_px && !rasterizeAtlasOnDevice(app, &g_glyph_px, &g_gw, &g_gh)) loadAtlas();
         if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_ready frames_reset");
+        showKeyboard(app);
     }
 }
 

@@ -77,11 +77,6 @@ const term_feed =
 // ── 입력 ─────────────────────────────────────────────────────────────────────
 // 플랫폼이 키를 받아 **바이트로** 넘긴다. 코어는 그것을 PTY 에서 온 것과 구분하지 않는다 —
 // 그게 터미널의 계약이고, 모바일에서도 같은 계약이 서는지 보는 자리다.
-var input_buf: [512]u8 = undefined;
-var input_len: usize = 0;
-/// 기록이 잘렸다 — 코어를 다시 세울 때 replay 하지 않는다(잘린 replay 는 escape sequence 를
-/// 반토막 내 화면을 더 망친다).
-var input_truncated: bool = false;
 /// **코어에 실제로 전달한** 누적 바이트. 반환값이 기록 길이였을 때는 버퍼가 찬 뒤에도
 /// 같은 수가 계속 나와서, 입력이 죽은 것을 로그로 알아챌 수 없었다.
 var delivered_len: usize = 0;
@@ -108,23 +103,9 @@ export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
 
 export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
-
-    // **코어에 먹이는 것이 먼저다.** 예전에는 replay 버퍼가 꽉 차면 여기서 반환해,
-    // 누적 512바이트를 넘긴 순간부터 모든 키·IME 확정·백스페이스가 조용히 사라졌다
-    // (실측: `total=512` 에서 멈춤). replay 는 화면 크기가 바뀌어 코어를 다시 세울 때
-    // 쓰는 편의일 뿐이고, 그 편의가 입력 자체를 막아서는 안 된다.
     // 실패를 삼키지 않는다 — 키가 사라지는데 신호가 없던 것이 이번 최상위 결함이었다.
     if (term_core) |*c| c.write(ptr[0..len]) catch setLastError("core_write_input");
     delivered_len += len;
-
-    const n = @min(len, input_buf.len - input_len);
-    if (n < len) {
-        // 버퍼가 모자라면 **기록만** 포기한다. 코어를 다시 세울 때 앞부분만 replay 하면
-        // escape sequence 가 잘려 화면이 더 이상해지므로, 아예 replay 를 끈다.
-        input_truncated = true;
-    }
-    @memcpy(input_buf[input_len..][0..n], ptr[0..n]);
-    input_len += n;
     return @intCast(delivered_len);
 }
 
@@ -166,10 +147,15 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const cols: u16 = @intCast(@max(8, @min(200, cols_f)));
     const rows: u16 = @intCast(@max(2, @min(60, rows_f)));
 
-    // 화면 크기가 바뀌면 코어도 그 크기로 다시 세운다 — 반응형이 코어까지 간다.
-    if (term_core == null or term_cols != cols or term_rows != rows) {
-        if (term_core) |*c| c.deinit();
-        term_fba.reset();
+    // **크기가 바뀌면 코어를 다시 세우지 않고 `resize` 한다.** 새로 만들면 스크롤백과 화면
+    // 상태가 통째로 날아간다 — 키보드를 올렸다 내리기만 해도 그렇게 된다(창이 리사이즈된다).
+    // 지금은 고정 대본을 먹이고 있어 눈에 안 띄지만, 원격 세션이 붙으면 곧바로 드러난다.
+    if (term_core != null and (term_cols != cols or term_rows != rows)) {
+        term_core.?.resize(cols, rows) catch setLastError("core_resize");
+        term_cols = cols;
+        term_rows = rows;
+    }
+    if (term_core == null) {
         term_core = terminal.core.TerminalCore.init(term_fba.allocator(), .{ .cols = cols, .rows = rows }) catch {
             // 조용히 비우면 본문만 사라진 채 아무 신호가 없다. 지금은 고정 버퍼라
             // 큰 격자(태블릿 등)에서 모자랄 수 있다.
@@ -180,10 +166,6 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         term_cols = cols;
         term_rows = rows;
         term_core.?.write(term_feed) catch setLastError("core_write_feed");
-        // 재생성이면 그동안 받은 입력도 다시 먹인다 — 화면이 되돌아가지 않는다.
-        // 기록이 잘렸으면 replay 하지 않는다(위 주석).
-        if (input_len > 0 and !input_truncated)
-            term_core.?.write(input_buf[0..input_len]) catch setLastError("core_write_replay");
     }
     // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };

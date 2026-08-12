@@ -836,66 +836,101 @@ static void teardownVulkan(void) {
 
 // 한 글자를 셀 크기 버퍼에 굽는다. 아틀라스를 처음 만들 때와 **같은 폰트·같은 배치**를
 // 써야 새로 넣은 글리프가 기존 것과 어긋나지 않는다(baseline = CH-8).
-static int rasterizeOneGlyph(struct android_app *app, uint32_t cp, uint8_t *out,
-                             uint32_t CW, uint32_t CH, uint32_t *advance) {
+/// 한 배치 동안 재사용하는 래스터 도구. **글자마다 만들면 비싸다** — 특히
+/// `Typeface.createFromAsset` 은 폰트 파일을 여는 일이라 한글을 타이핑하는 내내 그 비용을
+/// 치르게 된다. 한 번 붙이고 한 벌 만들어 `drawText` 만 반복한다.
+typedef struct {
+    JNIEnv *env;
+    jobject bmp, canvas, paint;
+    jmethodID draw, measure;
+    int ok;
+} GlyphBaker;
+
+static int bakerOpen(struct android_app *app, GlyphBaker *b, uint32_t CW, uint32_t CH) {
+    memset(b, 0, sizeof *b);
     JavaVM *vm = app->activity->vm;
-    JNIEnv *env = NULL;
-    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return 0;
-    int ok = 0;
+    if ((*vm)->AttachCurrentThread(vm, &b->env, NULL) != 0) return 0;
+    JNIEnv *env = b->env;
     jclass bmCls = (*env)->FindClass(env, "android/graphics/Bitmap");
     jclass cfgCls = (*env)->FindClass(env, "android/graphics/Bitmap$Config");
     jobject cfg = (*env)->GetStaticObjectField(env, cfgCls,
         (*env)->GetStaticFieldID(env, cfgCls, "ALPHA_8", "Landroid/graphics/Bitmap$Config;"));
-    jobject bmp = (*env)->CallStaticObjectMethod(env, bmCls,
+    b->bmp = (*env)->CallStaticObjectMethod(env, bmCls,
         (*env)->GetStaticMethodID(env, bmCls, "createBitmap",
             "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;"),
         (jint)CW, (jint)CH, cfg);
-    if (bmp) {
-        jclass cvCls = (*env)->FindClass(env, "android/graphics/Canvas");
-        jobject canvas = (*env)->NewObject(env, cvCls,
-            (*env)->GetMethodID(env, cvCls, "<init>", "(Landroid/graphics/Bitmap;)V"), bmp);
-        jclass pCls = (*env)->FindClass(env, "android/graphics/Paint");
-        jobject paint = (*env)->NewObject(env, pCls,
-            (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1);
-        (*env)->CallVoidMethod(env, paint,
-            (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)22.0f);
-        (*env)->CallVoidMethod(env, paint,
-            (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
-        jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
-        // **asset 에서 읽는다.** 초기 아틀라스만 고치고 이 성장 경로를 놓쳤었다 — 그러면
-        // push 안 한 기기에서 처음 굽는 글자만 시스템 글꼴이 되어 **글꼴이 섞인다**.
-        jclass actCls2 = (*env)->GetObjectClass(env, app->activity->clazz);
-        jobject assets = (*env)->CallObjectMethod(env, app->activity->clazz,
-            (*env)->GetMethodID(env, actCls2, "getAssets", "()Landroid/content/res/AssetManager;"));
-        jobject face = (*env)->CallStaticObjectMethod(env, tfCls,
-            (*env)->GetStaticMethodID(env, tfCls, "createFromAsset",
-                "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/graphics/Typeface;"),
-            assets, (*env)->NewStringUTF(env, "Jetendard-Regular.ttf"));
-        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
-        if (face) (*env)->CallObjectMethod(env, paint,
-            (*env)->GetMethodID(env, pCls, "setTypeface",
-                "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), face);
-        jchar unit = (jchar)cp;
-        jstring s = (*env)->NewString(env, &unit, 1);
-        (*env)->CallVoidMethod(env, canvas,
-            (*env)->GetMethodID(env, cvCls, "drawText", "(Ljava/lang/String;FFLandroid/graphics/Paint;)V"),
-            s, (jfloat)1.0f, (jfloat)(CH - 8), paint);
-        jfloat adv = (*env)->CallFloatMethod(env, paint,
-            (*env)->GetMethodID(env, pCls, "measureText", "(Ljava/lang/String;)F"), s);
-        *advance = (uint32_t)(adv + 0.5f);
-        if (*advance == 0) *advance = CW / 2;
-        void *pixels = NULL;
-        AndroidBitmapInfo info;
-        if (AndroidBitmap_getInfo(env, bmp, &info) == 0 &&
-            AndroidBitmap_lockPixels(env, bmp, &pixels) == 0) {
-            for (uint32_t y = 0; y < CH; y++)
-                memcpy(out + y * CW, (uint8_t *)pixels + y * info.stride, CW);
-            AndroidBitmap_unlockPixels(env, bmp);
-            ok = 1;
-        }
-        (*env)->DeleteLocalRef(env, s);
-    }
+    if (!b->bmp) return 0;
+    jclass cvCls = (*env)->FindClass(env, "android/graphics/Canvas");
+    b->canvas = (*env)->NewObject(env, cvCls,
+        (*env)->GetMethodID(env, cvCls, "<init>", "(Landroid/graphics/Bitmap;)V"), b->bmp);
+    jclass pCls = (*env)->FindClass(env, "android/graphics/Paint");
+    b->paint = (*env)->NewObject(env, pCls,
+        (*env)->GetMethodID(env, pCls, "<init>", "(I)V"), (jint)1);
+    (*env)->CallVoidMethod(env, b->paint,
+        (*env)->GetMethodID(env, pCls, "setTextSize", "(F)V"), (jfloat)22.0f);
+    (*env)->CallVoidMethod(env, b->paint,
+        (*env)->GetMethodID(env, pCls, "setColor", "(I)V"), (jint)0xFFFFFFFF);
+
+    // asset 에서 읽는다 — `/data/local/tmp` 는 개발 스크립트 자리라 실제 앱에는 없다.
+    jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
+    jclass actCls = (*env)->GetObjectClass(env, app->activity->clazz);
+    jobject assets = (*env)->CallObjectMethod(env, app->activity->clazz,
+        (*env)->GetMethodID(env, actCls, "getAssets", "()Landroid/content/res/AssetManager;"));
+    jobject face = (*env)->CallStaticObjectMethod(env, tfCls,
+        (*env)->GetStaticMethodID(env, tfCls, "createFromAsset",
+            "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/graphics/Typeface;"),
+        assets, (*env)->NewStringUTF(env, "Jetendard-Regular.ttf"));
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
+    if (face) (*env)->CallObjectMethod(env, b->paint,
+        (*env)->GetMethodID(env, pCls, "setTypeface",
+            "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;"), face);
+    else LOGI("bundled_font_missing fallback=default");
+
+    b->draw = (*env)->GetMethodID(env, cvCls, "drawText",
+        "(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
+    b->measure = (*env)->GetMethodID(env, pCls, "measureText", "(Ljava/lang/String;)F");
+    b->ok = 1;
+    return 1;
+}
+
+static void bakerClose(struct android_app *app, GlyphBaker *b) {
+    if (!b->env) return;
+    JavaVM *vm = app->activity->vm;
     (*vm)->DetachCurrentThread(vm);
+    b->env = NULL;
+}
+
+/// 한 글자를 셀 크기 버퍼에 굽는다. 아틀라스를 처음 만들 때와 **같은 폰트·같은 배치**를
+/// 써야 새로 넣은 글리프가 기존 것과 어긋나지 않는다(baseline = CH-8).
+static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint8_t *out,
+                     uint32_t CW, uint32_t CH, uint32_t *advance) {
+    if (!b->ok) return 0;
+    JNIEnv *env = b->env;
+    // **셀을 비우고 그린다.** `Canvas.drawColor(0)` 은 SRC_OVER 라 투명색을 덮어도 아무것도
+    // 안 지운다 — 그렇게 짰다가 앞 글자 잉크가 남아 글자가 겹쳐 나왔다(화면으로 잡았다).
+    // `Bitmap.eraseColor` 가 실제로 지우는 쪽이다.
+    jclass bmCls2 = (*env)->GetObjectClass(env, b->bmp);
+    (*env)->CallVoidMethod(env, b->bmp,
+        (*env)->GetMethodID(env, bmCls2, "eraseColor", "(I)V"), (jint)0);
+
+    jchar unit = (jchar)cp;
+    jstring s = (*env)->NewString(env, &unit, 1);
+    (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
+    jfloat adv = (*env)->CallFloatMethod(env, b->paint, b->measure, s);
+    *advance = (uint32_t)(adv + 0.5f);
+    if (*advance == 0) *advance = CW / 2;
+
+    void *pixels = NULL;
+    AndroidBitmapInfo info;
+    int ok = 0;
+    if (AndroidBitmap_getInfo(env, b->bmp, &info) == 0 &&
+        AndroidBitmap_lockPixels(env, b->bmp, &pixels) == 0) {
+        for (uint32_t y = 0; y < CH; y++)
+            memcpy(out + y * CW, (uint8_t *)pixels + y * info.stride, CW);
+        AndroidBitmap_unlockPixels(env, b->bmp);
+        ok = 1;
+    }
+    (*env)->DeleteLocalRef(env, s);
     return ok;
 }
 
@@ -911,6 +946,8 @@ static void growAtlas(struct android_app *app) {
     const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
     uint8_t cell[MARU_ATLAS_CELL_W * MARU_ATLAS_CELL_H];
     unsigned int added = 0;
+    GlyphBaker baker;
+    if (!bakerOpen(app, &baker, CW, CH)) { maru_mobile_missing_clear(); return; }
     for (int i = (int)n - 1; i >= 0; i--) {
         unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
         if (cp == 0 || cp > 0xFFFF) continue;
@@ -921,7 +958,7 @@ static void growAtlas(struct android_app *app) {
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
         memset(cell, 0, sizeof cell);
         uint32_t advance = CW / 2;
-        if (!rasterizeOneGlyph(app, cp, cell, CW, CH, &advance)) continue;
+        if (!bakeGlyph(&baker, cp, cell, CW, CH, &advance)) continue;
 
         // staging 버퍼 → 이미지의 그 사각형만 복사.
         VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -993,6 +1030,7 @@ static void growAtlas(struct android_app *app) {
         maru_mobile_atlas_add(cp, col, row, advance);
         added++;
     }
+    bakerClose(app, &baker);
     maru_mobile_missing_clear();
     if (added) LOGI("MARU_ATLAS grew=%u", added);
 }

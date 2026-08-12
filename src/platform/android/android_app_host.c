@@ -810,18 +810,41 @@ Java_dev_maru_MaruActivity_nativeCommit(JNIEnv *env, jclass cls, jstring text) {
 
 // IME 가 문자로 주지 않는 키만 여기로 온다(백스페이스·엔터 등).
 JNIEXPORT void JNICALL
-Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code) {
+Java_dev_maru_MaruActivity_nativeKey(JNIEnv *env, jclass cls, jint key_code, jint meta) {
     (void)env; (void)cls;
-    char c = 0;
+    // **바이트를 손으로 적지 않는다.** 키를 그대로 넘기면 코어의 `encodeKey` 가 DECCKM(커서키
+    // 모드)·수정자·kitty 프로토콜을 반영해 만든다 — 예전에는 여기서 `\r`·`0x7F` 를 적어 넣어
+    // 화살표도 Ctrl 조합도 아예 없었다.
+    unsigned int id;
     switch (key_code) {
-        case AKEYCODE_ENTER: c = '\r'; break;
-        case AKEYCODE_DEL:   c = 0x7F; break;
-        case AKEYCODE_TAB:   c = '\t'; break;
-        case AKEYCODE_ESCAPE: c = 0x1B; break;
-        default: return;
+        case AKEYCODE_ENTER:        id = MARU_KEY_ENTER; break;
+        case AKEYCODE_DEL:          id = MARU_KEY_BACKSPACE; break;
+        case AKEYCODE_FORWARD_DEL:  id = MARU_KEY_DELETE; break;
+        case AKEYCODE_TAB:          id = MARU_KEY_TAB; break;
+        case AKEYCODE_ESCAPE:       id = MARU_KEY_ESCAPE; break;
+        case AKEYCODE_DPAD_UP:      id = MARU_KEY_UP; break;
+        case AKEYCODE_DPAD_DOWN:    id = MARU_KEY_DOWN; break;
+        case AKEYCODE_DPAD_LEFT:    id = MARU_KEY_LEFT; break;
+        case AKEYCODE_DPAD_RIGHT:   id = MARU_KEY_RIGHT; break;
+        case AKEYCODE_MOVE_HOME:    id = MARU_KEY_HOME; break;
+        case AKEYCODE_MOVE_END:     id = MARU_KEY_END; break;
+        case AKEYCODE_INSERT:       id = MARU_KEY_INSERT; break;
+        case AKEYCODE_PAGE_UP:      id = MARU_KEY_PAGE_UP; break;
+        case AKEYCODE_PAGE_DOWN:    id = MARU_KEY_PAGE_DOWN; break;
+        default:
+            if (key_code >= AKEYCODE_F1 && key_code <= AKEYCODE_F12)
+                id = MARU_KEY_F(key_code - AKEYCODE_F1 + 1);
+            else return;
     }
+    // Android meta 비트 → 우리 표. Meta(⌘) 는 안드로이드에서 META_META_ON 이다.
+    unsigned int mods = 0;
+    if (meta & AMETA_SHIFT_ON) mods |= MARU_MOD_SHIFT;
+    if (meta & AMETA_CTRL_ON)  mods |= MARU_MOD_CTRL;
+    if (meta & AMETA_ALT_ON)   mods |= MARU_MOD_ALT;
+    if (meta & AMETA_META_ON)  mods |= MARU_MOD_CMD;
+
     pthread_mutex_lock(&g_bridge_lock);
-    maru_mobile_input(&c, 1);
+    maru_mobile_key(id, 0, mods);
     pthread_mutex_unlock(&g_bridge_lock);
 }
 

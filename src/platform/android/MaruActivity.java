@@ -39,7 +39,8 @@ public class MaruActivity extends android.app.NativeActivity {
     private static native void nativeCommit(String text);
 
     /// IME 가 문자로 주지 않는 키(백스페이스 등). 코어가 바이트로 받는다.
-    private static native void nativeKey(int keyCode);
+    /** 키를 **인코딩 전** 상태로 넘긴다 — 바이트는 코어의 encodeKey 가 만든다(수정자 포함). */
+    private static native void nativeKey(int keyCode, int metaState);
 
     /// IME 가 입력 대상으로 인정할 View. `NativeActivity` 의 SurfaceView 는 텍스트 편집기가
     /// 아니라서 키보드가 이 View 를 봐야 한다. 그리지 않으므로 화면에는 영향이 없다.
@@ -101,13 +102,14 @@ public class MaruActivity extends android.app.NativeActivity {
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
             // 조합이 없는 상태의 백스페이스가 이리로 온다. 터미널은 화면 버퍼를 편집하지
             // 않으므로 삭제를 흉내 내지 않고 **키 자체를 코어로** 넘긴다.
-            for (int i = 0; i < beforeLength; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL);
+            for (int i = 0; i < beforeLength; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL, 0);
             return true;
         }
 
         @Override
         public boolean sendKeyEvent(android.view.KeyEvent event) {
-            if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) nativeKey(event.getKeyCode());
+            if (event.getAction() == android.view.KeyEvent.ACTION_DOWN)
+                nativeKey(event.getKeyCode(), event.getMetaState());
             return true;
         }
     }

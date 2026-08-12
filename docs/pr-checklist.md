@@ -40,14 +40,28 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `control-plane` | CLI·IPC·`browser.*` 제어·capability | `control` `cli` |
 | `session-host` | 영속 host·runtime 이관·host 업그레이드 | `session-host` |
 | `workspace` | workspace 저장/복원·창 이동성 | `workspace` `window` `mobility` |
-| `input` | 키 입력·IME·키바인딩·마우스 라우팅·링크 | `input` `ime` `keybind` `link` |
+| `input` | 키 입력·IME·키바인딩·마우스 라우팅·**터치**·링크 | `input` `ime` `keybind` `touch` `link` |
 | `agent` | 에이전트 관측·상태줄·사이드바 에이전트 목록 | `agent` |
 | `notifications` | 데스크톱 알림·알림 패널·벨 | `notification` `bell` |
 | `config` | config 스키마·로더·resolve 계약 | `config` |
 | `observability` | snapshot·trace·replay·진단 계측 | `observability` `diag` |
 | `platform` | **macOS** 어댑터·ABI·앱 호스트 | `platform` `macos` `app-host` |
-| `mobile` | **iOS·Android** 어댑터 — 모바일 host·Vulkan 백엔드·모바일 IME·기기 하네스. macOS 와 층은 같지만(L4) 타깃이 달라 영역을 가른다 | `mobile` `ios` `android` |
+| `mobile` | **iOS·Android 공통** — `platform/mobile`(C ABI·Zig 브리지)·모바일 타깃 빌드·계약·기기 하네스. macOS 와 층은 같지만(L4) 타깃이 달라 `platform` 과 가른다 | `mobile` |
+| `ios` | iOS 전용 — UIKit host·Metal 백엔드·CoreText 래스터. **`mobile`과 함께 단다**(공통분모가 같이 움직이는지 보이게) | `ios` |
+| `android` | Android 전용 — NativeActivity host·Vulkan 백엔드·JNI 래스터·IME shim. **`mobile`과 함께 단다** | `android` |
 | `app-runtime` | 앱 런타임·surface 라우팅·세션 조정 | `app` `session` `runtime` |
+
+**모바일 전용 기능에 새 라벨을 만들지 않는다.** 터치·IME·폰트 래스터·아틀라스 성장·드로우
+배칭은 전부 이미 있는 **기능 축**(`input`·`font`·`renderer`)이고, 모바일은 그 기능의 **다른
+타깃 구현**이다. 새 라벨을 파면 같은 기능의 회귀가 두 이름으로 갈려 검색이 깨진다. 대신
+**타깃 라벨과 기능 라벨을 함께** 단다.
+
+| 모바일에서 한 일 | 라벨 |
+|---|---|
+| IME shim·터치→셀 | `mobile` `android` `input` |
+| 기기 폰트 래스터·아틀라스 성장 | `mobile` `ios` `android` `font` |
+| 드로우 배칭·present 페이싱 | `mobile` `ios` `android` `renderer` |
+| 원격 세션 연결(M3) | `mobile` `control-plane` (전송에 따라 `ssh`) |
 
 **성격(kind)**
 

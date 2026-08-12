@@ -38,6 +38,35 @@ mobile_lib() {
 }
 
 case "${1:-ios}" in
+ime-ios)
+    # **한글 조합을 재현한다.** 시뮬레이터 키보드가 한글일 때 두벌식 `gksrmf` = "한글" 이다.
+    # 계약(§IME)은 확정 전 자모를 코어에 넣지 말라고 한다 — `UITextInput` 의 marked text 가
+    # 그 자리다. 로그가 판정자다:
+    #   MARU_IME marked=…   조합 중(코어에 안 감)
+    #   MARU_IME commit=…   확정(코어로 감)
+    #   MARU_INPUT text=…   코어에 들어간 것
+    # `MARU_INPUT` 이 조합 단계마다 나오면 계약 위반이다(예전 `UIKeyInput` 이 그랬다).
+    DEV=$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -1)
+    [ -n "$DEV" ] || { echo "부팅된 시뮬레이터가 없다 — 먼저 chrome-ios 를 돌려라"; exit 1; }
+    # **소프트 키보드를 두드린다.** `idb ui text` 는 하드웨어 키보드 경로라 IME 를 안 거친다 —
+    # 조합 대신 "지웠다 다시 쓰기" 로 와서 우리 계약을 검증하지 못한다(바이트 델타가 3,4,4…로
+    # backspace 가 섞여 나온다). 화면 키를 눌러야 진짜 IME 가 `setMarkedText` 를 보낸다.
+    #
+    # 좌표는 접근성에서 뽑았다(`idb ui describe-all` 의 AXLabel). 두벌식 ㅎ+ㅏ+ㄴ = "한".
+    # 하드웨어 키보드가 붙어 있으면 소프트 키보드가 안 뜬다:
+    #   defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false
+    for xy in "202 671" "320 671" "83 671"; do
+        idb ui tap $xy --udid "$DEV" >/dev/null 2>&1
+        sleep 1
+    done
+    sleep 2
+    echo "--- IME 로그 ---"
+    xcrun simctl spawn booted log show --last 30s --predicate 'process == "MaruChrome"' 2>/dev/null \
+        | grep -E "MARU_IME|MARU_INPUT text=" | tail -12
+    xcrun simctl io "$DEV" screenshot --type png "$OUT/ime-ios.png" >/dev/null 2>&1
+    echo "스크린샷: $OUT/ime-ios.png"
+    ;;
+
 features-ios)
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \
         "$POC/features_ios.m" -framework Foundation -framework Metal -o "$OUT/features-ios"

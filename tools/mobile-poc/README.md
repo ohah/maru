@@ -14,6 +14,10 @@ sh tools/mobile-poc/run.sh present-ios         # present 페이싱을 표시 클
 sh tools/mobile-poc/run.sh features-android    # Vulkan 으로 여섯 기능 판정
 sh tools/mobile-poc/run.sh features-ios        # 같은 판정 (지금 멈춘다 — 아래)
 #
+# 아틀라스 덤프(픽셀 대조용) — **요청할 때만** 쓴다. 제품이 매 실행 384KB 를 남길 이유가 없다.
+#   Android: adb shell setprop debug.maru.atlas_dump 1  뒤 앱 재실행 → adb exec-out run-as … cat
+#   iOS:     simctl launch 에 MARU_ATLAS_DUMP=1 환경변수
+#
 # 입력: adb shell input tap <키 좌표>  — `input text` 는 IME 를 우회하므로 이 검증에 못 쓴다
 # 터치: adb shell input tap 525 753 · idb ui tap 200 300
 # 생명주기: adb shell input keyevent KEYCODE_HOME 뒤 am start 재실행
@@ -39,7 +43,7 @@ sh tools/mobile-poc/run.sh features-ios        # 같은 판정 (지금 멈춘다
 |---|---|---|
 | `out/maru-chrome-ios.png` | iOS 시뮬레이터의 현재 화면 | `chrome-ios` |
 | `out/maru-chrome-android-app.png` | Android 에뮬레이터의 현재 화면 | `chrome-android-app` |
-| `out/atlas-diff.png` | 같은 폰트로 구운 두 아틀라스의 픽셀 차이 | `atlas_diff.py` |
+| `out/atlas-diff.png` | 같은 폰트로 구운 두 아틀라스의 픽셀 차이 | `atlas_diff.py`(아래 덤프 필요) |
 | `out/maru-input-ios.png` | iOS 입력이 코어까지 닿아 그려짐 | `idb ui text` 뒤 캡쳐 |
 | `out/maru-input-android.png` | Android 입력이 코어까지 닿아 그려짐 | `adb shell input tap` 뒤 캡쳐 |
 | `out/maru-lifecycle-android.png` | 홈↔복귀 뒤 렌더 재개 | `input keyevent KEYCODE_HOME` 뒤 재실행 |

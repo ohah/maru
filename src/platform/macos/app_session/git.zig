@@ -124,14 +124,42 @@ pub fn isGitInternalPath(path: []const u8) bool {
 /// 같은 저장소를 본다: ⑴ 뷰가 보일 때만 ⑵ 활성 pane·활성 Term만 ⑶ **모르면 직전 값 유지** ⑷ 바뀔 때만.
 ///
 /// ⑶이 특히 중요하다: diff를 열면 활성 Term이 웹 Term이 되어 cwd가 없어지는데, 그걸 "저장소 없음"으로 읽으면
-/// 목록이 사라지거나 탐색기 root로 튄다. `gitRepoRoot`가 그 경우 직전 저장소를 유지하므로 여기서도 no-op이 된다.
+/// 목록이 사라지거나 탐색기 root로 튄다. `gitRepoTarget`이 그 경우 `.unknown`(또는 2순위)을 주므로 no-op이 된다.
+///
+/// **⑶의 "모르면"은 "저장소가 아니면"과 다르다.** 터미널이 저장소 아닌 폴더에 서 있다고 답한 것은 확정된 사실
+/// (`.none`)이고, 그때는 유지가 아니라 **버리는** 것이 §3.5의 규정이다 — 유지하면 탐색기는 새 폴더를, 목록은 옛
+/// 저장소를 보여 준다. 둘을 같은 null로 받던 동안 이 함수는 구별할 수 없어 둘 다 유지했다(사용자 보고 2026-08-12).
 pub fn followActiveTerminalRepo(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = gitRepoRoot(self, &repo_buf) orelse return; // 모르면 직전 판단을 유지한다
+    const repo = switch (gitRepoTarget(self, &repo_buf)) {
+        .repo => |found| found,
+        .unknown => return, // 모르면 직전 판단을 유지한다(파일 Term·원격 세션)
+        .none => {
+            // 터미널이 저장소 아닌 폴더에 서 있다 — 결론은 "저장소 없음"이므로 옛 목록을 버려 뷰가 그 안내를
+            // 내게 한다(안내는 `git_result == null`일 때만 그려진다). **읽기를 새로 걸지는 않는다** — 읽을
+            // 저장소가 없다.
+            //
+            // "지금 보는 저장소"(`git_repo`)는 놓지 않는다. 그 값은 열려 있는 diff(`openDiffForScmRow`)와 턴
+            // 스냅샷(`captureTurnSnapshot`)이 대상으로 쓰는 것이고, 여기서 지워야 하는 것은 화면의 목록이다.
+            // 1순위가 답을 준 동안에는 2순위가 조회되지 않으므로 남겨 둬도 목록 판정에는 영향이 없다.
+            if (scmResultCleared(self)) return; // **멱등**: 매 tick 도는 경로라 반복 무효화는 렌더를 계속 깨운다
+            clearScmResult(self);
+            return;
+        },
+    };
     if (self.git_repo) |current| if (std.mem.eql(u8, current, repo)) return; // 바뀔 때만
 
     // 저장소가 갈렸다. 옛 결과를 그대로 두면 새 저장소의 목록이 도착할 때까지 **남의 저장소 상태**가 화면에 남는다.
+    clearScmResult(self);
+    // 이미 해석한 저장소를 그대로 넘긴다 — `refreshGitStatus`를 부르면 같은 walk-up을 한 번 더 한다.
+    // 기억·감시 이동도 저쪽이 (실행 파일 탐색보다 먼저) 하므로 여기서 중복하지 않는다.
+    submitGitRead(self, repo);
+}
+
+/// 화면에 남은 목록·실패·선택·in-flight를 버린다. **저장소가 갈릴 때와 "저장소 없음"으로 판정될 때가 같은 정리를
+/// 요구**하므로 한 자리에 둔다 — 복붙해 두면 한쪽만 고쳐져 다른 쪽에 남의 저장소 상태가 남는다.
+fn clearScmResult(self: *AppSession) void {
     if (self.git_result) |*result| result.deinit(git_backend_mod.worker_allocator);
     self.git_result = null;
     self.git_failed = false; // 옛 저장소의 실패를 새 저장소에 물려주지 않는다
@@ -143,9 +171,12 @@ pub fn followActiveTerminalRepo(self: *AppSession) void {
     // 규칙이 그대로 그 응답을 걸러낸다.
     self.git_inflight = 0;
     self.metal_dirty = true;
-    // 이미 해석한 저장소를 그대로 넘긴다 — `refreshGitStatus`를 부르면 같은 walk-up을 한 번 더 한다.
-    // 기억·감시 이동도 저쪽이 (실행 파일 탐색보다 먼저) 하므로 여기서 중복하지 않는다.
-    submitGitRead(self, repo);
+}
+
+/// 이미 비어 있나. `.none`이 매 tick 반복되므로 무효화가 한 번만 돌게 하는 가드다 — 없으면 `metal_dirty`가
+/// 프레임마다 서서, 저장소 아닌 폴더에 서 있는 동안 렌더가 계속 깨어난다.
+fn scmResultCleared(self: *const AppSession) bool {
+    return self.git_result == null and self.git_inflight == 0 and !self.git_failed and self.scm_selected_row == null;
 }
 
 /// 완료된 git 결과를 받아 세션에 싣는다(큐에서 꺼내기만 — 결과 처리 자체엔 I/O가 없다).
@@ -339,26 +370,51 @@ fn procCwdCached(self: *AppSession, term: *Term, buf: []u8) ?[]const u8 {
 /// 3. **파일 탐색기 root.** 터미널이 아직 아무것도 보고하지 않은 첫 진입(창을 열자마자 도크를 편 경우)의 바닥값.
 ///
 /// 셋 다 실패하면 null이고 뷰는 빈 안내를 낸다.
+///
+/// **"없다"와 "모른다"를 구별해야 하는 호출자는 `gitRepoTarget`을 쓴다.** 이 함수는 둘을 같은 null로 뭉갠다.
 pub fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
+    return switch (gitRepoTarget(self, buf)) {
+        .repo => |found| found,
+        .none, .unknown => null,
+    };
+}
+
+/// 위 판정의 **3-상태 결과**(docs/editor-surface-dock.md §3.5 "판정은 3-상태다").
+///
+/// `?[]const u8` 하나로는 표현할 수 없는 구별이 있다 — 두 결론이 호출자에게 **반대되는** 행동을 요구하기 때문이다:
+/// `.none`은 화면에 남은 목록을 **버려야** 하고, `.unknown`은 직전 판단을 **유지해야** 한다. 같은 null로 돌려주던
+/// 동안 호출자는 구별할 수 없어 안전한 쪽(유지)으로만 읽었고, 그래서 저장소 아닌 폴더로 `cd` 하면 옛 목록이 그대로
+/// 남았다(사용자 보고 2026-08-12 — 아래 `gitRepoTarget`의 1순위 주석이 금지한 상태가 호출자 쪽에서 재현된 것이다).
+pub const RepoTarget = union(enum) {
+    /// 대상 저장소가 확정됐다. slice는 호출자가 넘긴 `buf` 안을 가리킨다.
+    repo: []const u8,
+    /// **터미널이 답했고 그 폴더는 저장소가 아니다.** 확정된 "저장소 없음"이라 2·3순위로 내려가지 않는다.
+    none,
+    /// **아무도 답을 못 줬다**(파일 Term·원격 세션이고 2·3순위도 비었다). 모르는 것이므로 직전 판단을 유지한다.
+    unknown,
+};
+
+pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (activeTerminalCwd(self, &cwd_buf)) |cwd| {
         // **터미널이 답했으면 그 답으로 끝난다.** 그 폴더가 저장소가 아니면 결론은 "저장소 없음"이지
         // "아래 순위로 내려간다"가 아니다 — 내려가면 저장소 아닌 곳으로 `cd` 했을 때 옛 저장소에 영영
         // 고정돼(2·3순위가 계속 답을 준다) 탐색기는 새 폴더를, 목록은 옛 저장소를 가리키게 된다.
         // 아래 두 순위는 **터미널이 답을 못 준 경우**(파일 Term·원격 세션)의 것이다.
-        return repoRootForCached(self, cwd, buf);
+        if (repoRootForCached(self, cwd, buf)) |found| return .{ .repo = found };
+        return .none;
     }
     // **2순위도 캐시를 거친다.** diff를 열어 둔 상태(활성 Term이 파일 Term)는 흔한데, 그때 1순위가 null이라
     // 매 tick 여기로 내려온다 — 캐시 없이 두면 walk-up syscall이 그 상태에서 프레임마다 그대로 돈다.
     if (self.git_repo) |current| {
-        if (repoRootForCached(self, current, buf)) |found| return found;
+        if (repoRootForCached(self, current, buf)) |found| return .{ .repo = found };
     }
     // 3순위는 캐시하지 않는다 — 1·2순위가 **둘 다** 답을 못 준 첫 진입에만 도는 경로라 매 프레임 반복되지 않고,
     // root가 여러 개면 캐시 슬롯 하나로는 오히려 서로를 밀어낸다.
     for (self.file_tree.roots.items) |root| {
-        if (repoRootFor(root.path, buf)) |found| return found;
+        if (repoRootFor(root.path, buf)) |found| return .{ .repo = found };
     }
-    return null;
+    return .unknown;
 }
 
 /// `repoRootFor`의 walk-up을 저주기로 캐시한다. **매 프레임 도는 경로이기 때문**이다: `repoRootFor`는 루트까지

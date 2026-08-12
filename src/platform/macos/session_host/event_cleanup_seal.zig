@@ -35,6 +35,35 @@ pub const TerminalCleanupStateSealInput = struct {
     identity_seal: CleanupSeal,
 };
 
+pub const TerminalDrainIdentitySealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    node_addr: u64,
+    node_incarnation: u64,
+    registry_incarnation: u64,
+    handoff_identity_seal: CleanupSeal,
+    handoff_state_seal: CleanupSeal,
+    handoff_state_generation: u64,
+    row_slot: u16,
+    row_kind_raw: u8,
+    row_generation: u64,
+    accounting_client_addr: u64,
+    accounting_transfer_id: u64,
+    accounting_byte_count: u64,
+    payload_addr: u64,
+    payload_len: u64,
+    allocator_ptr: u64,
+    allocator_vtable: u64,
+    callback_ordinal: u32,
+};
+
+pub const TerminalDrainStateSealInput = struct {
+    self_addr: u64,
+    lifecycle_raw: u8,
+    state_generation: u64,
+    identity_seal: CleanupSeal,
+};
+
 pub const CloseAuthorityIdentitySealInput = struct {
     self_addr: u64,
     thread_id: u64,

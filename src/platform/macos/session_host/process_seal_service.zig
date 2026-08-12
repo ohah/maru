@@ -34,6 +34,8 @@ const event_release_leaf_receipt_domain = "maru.event-release-leaf-receipt.v1";
 const event_release_phase_receipt_domain = "maru.event-release-phase-receipt.v1";
 const terminal_cleanup_identity_domain = "maru.terminal-cleanup-identity.v1";
 const terminal_cleanup_state_domain = "maru.terminal-cleanup-state.v1";
+const terminal_drain_identity_domain = "maru.terminal-drain-identity.v1";
+const terminal_drain_state_domain = "maru.terminal-drain-state.v1";
 const close_authority_identity_domain = "maru.close-authority-identity.v1";
 const close_authority_state_domain = "maru.close-authority-state.v1";
 const close_operation_pin_domain = "maru.close-operation-pin.v1";
@@ -70,6 +72,8 @@ pub const EventReleaseLeafReceiptSealInput = cleanup_seal.EventReleaseLeafReceip
 pub const EventReleasePhaseReceiptSealInput = cleanup_seal.EventReleasePhaseReceiptSealInput;
 pub const TerminalCleanupIdentitySealInput = cleanup_seal.TerminalCleanupIdentitySealInput;
 pub const TerminalCleanupStateSealInput = cleanup_seal.TerminalCleanupStateSealInput;
+pub const TerminalDrainIdentitySealInput = cleanup_seal.TerminalDrainIdentitySealInput;
+pub const TerminalDrainStateSealInput = cleanup_seal.TerminalDrainStateSealInput;
 pub const CloseAuthorityIdentitySealInput = cleanup_seal.CloseAuthorityIdentitySealInput;
 pub const CloseAuthorityStateSealInput = cleanup_seal.CloseAuthorityStateSealInput;
 pub const CloseOperationPinSealInput = cleanup_seal.CloseOperationPinSealInput;
@@ -637,6 +641,14 @@ pub fn terminalCleanupIdentitySeal(pid: u32, process_nonce: u64, input: Terminal
 
 pub fn terminalCleanupStateSeal(pid: u32, process_nonce: u64, input: TerminalCleanupStateSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, terminal_cleanup_state_domain, input);
+}
+
+pub fn terminalDrainIdentitySeal(pid: u32, process_nonce: u64, input: TerminalDrainIdentitySealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, terminal_drain_identity_domain, input);
+}
+
+pub fn terminalDrainStateSeal(pid: u32, process_nonce: u64, input: TerminalDrainStateSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, terminal_drain_state_domain, input);
 }
 
 pub fn closeAuthorityIdentitySeal(pid: u32, process_nonce: u64, input: CloseAuthorityIdentitySealInput) ReadyError!CleanupSeal {

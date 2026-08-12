@@ -6,10 +6,15 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const TerminalDrainRunnerChannel = if (builtin.is_test) struct {
+    extern var maru_c3b3_death_child_path: [1024]u8;
+    extern var maru_c3b3_death_child_path_len: usize;
+} else struct {};
 const client_mod = @import("client.zig");
 const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
 const batch_registry_mod = @import("generation_batch_registry.zig");
+const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const operation_thread_identity = @import("operation_thread_identity.zig");
 const process_seal_service = @import("process_seal_service.zig");
@@ -30,6 +35,7 @@ const generation_event_quarantine = @import("generation_event_quarantine.zig");
 const settlement_contract = @import("pending_event_settlement_contract.zig");
 
 const c = std.c;
+extern "c" fn getdtablesize() c_int;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
 const GenerationEventQuarantine = generation_event_quarantine.Registry(
     protocol.max_inventory_runtimes,
@@ -282,6 +288,20 @@ pub const testing = if (builtin.is_test) struct {
         if (event_release_proof_loss_marker_fd != null) @panic("event release proof-loss marker replayed");
         event_release_proof_loss_marker_fd = fd;
         event_release_death_stage_raw = stage_raw;
+    }
+
+    pub fn armTerminalDrainProofLoss(fd: std.c.fd_t, stage_raw: u8, callback_ordinal: u32) void {
+        if (terminal_drain_test_hook.stage != .none or callback_ordinal == 0)
+            @panic("terminal drain proof-loss hook replayed");
+        if (event_release_proof_loss_marker_fd != null)
+            @panic("terminal drain proof-loss marker replayed");
+        event_release_proof_loss_marker_fd = fd;
+        terminal_drain_test_hook = switch (stage_raw) {
+            1 => .{ .stage = .pre_callback, .target_ordinal = callback_ordinal },
+            2 => .{ .stage = .post_callback, .target_ordinal = callback_ordinal },
+            3 => .{},
+            else => @panic("terminal drain proof-loss stage is invalid"),
+        };
     }
 
     pub fn rollbackGenerationEventPreparationPending(
@@ -1820,6 +1840,128 @@ var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
 threadlocal var batch_release_callback_active: bool = false;
+const TerminalDrainCallbackBinding = struct {
+    continuation_addr: usize = 0,
+    continuation_seal: terminal_contract.Digest = [_]u8{0} ** 32,
+    node_addr: usize = 0,
+    row_slot: u16 = 0,
+    callback_ordinal: u32 = 0,
+};
+threadlocal var terminal_drain_callback_binding: TerminalDrainCallbackBinding = .{};
+const TerminalDrainContinuation = struct {
+    identity: terminal_contract.TerminalDrainIdentity = undefined,
+    state: terminal_contract.TerminalDrainState = undefined,
+    descriptor: batch_registry_mod.TerminalDrainDescriptor = undefined,
+    accounting: client_mod.Client.PreparedGenerationAccountingConsume = undefined,
+};
+const TerminalDrainTestHook = struct {
+    const Stage = enum(u8) { none, pre_callback, post_callback };
+    stage: Stage = .none,
+    target_ordinal: u32 = 0,
+};
+threadlocal var terminal_drain_test_hook: if (builtin.is_test) TerminalDrainTestHook else void =
+    if (builtin.is_test) .{} else {};
+threadlocal var terminal_drain_subprocess_stage_raw: if (builtin.is_test) u8 else void =
+    if (builtin.is_test) 0 else {};
+
+fn terminalDrainIdentitySealInput(
+    continuation: *const TerminalDrainContinuation,
+) process_seal_service.TerminalDrainIdentitySealInput {
+    const identity = continuation.identity;
+    return .{
+        .self_addr = identity.self_addr,
+        .thread_id = identity.thread_id,
+        .node_addr = identity.node_addr,
+        .node_incarnation = identity.node_incarnation,
+        .registry_incarnation = identity.registry_incarnation,
+        .handoff_identity_seal = identity.handoff_identity_seal,
+        .handoff_state_seal = identity.handoff_state_seal,
+        .handoff_state_generation = identity.handoff_state_generation,
+        .row_slot = identity.row_slot,
+        .row_kind_raw = identity.row_kind_raw,
+        .row_generation = identity.row_generation,
+        .accounting_client_addr = identity.accounting_client_addr,
+        .accounting_transfer_id = identity.accounting_transfer_id,
+        .accounting_byte_count = identity.accounting_byte_count,
+        .payload_addr = identity.payload_addr,
+        .payload_len = identity.payload_len,
+        .allocator_ptr = identity.allocator_ptr,
+        .allocator_vtable = identity.allocator_vtable,
+        .callback_ordinal = identity.callback_ordinal,
+    };
+}
+
+fn terminalDrainStateSealInput(
+    continuation: *const TerminalDrainContinuation,
+) process_seal_service.TerminalDrainStateSealInput {
+    return .{
+        .self_addr = continuation.identity.self_addr,
+        .lifecycle_raw = continuation.state.lifecycle_raw,
+        .state_generation = continuation.state.state_generation,
+        .identity_seal = continuation.state.identity_seal,
+    };
+}
+
+fn terminalDrainContinuationCurrent(
+    continuation: *const TerminalDrainContinuation,
+    expected: terminal_contract.TerminalDrainLifecycle,
+    expected_generation: u64,
+) bool {
+    if (continuation.identity.self_addr != @intFromPtr(continuation) or
+        continuation.identity.pid != currentPid() or
+        continuation.identity.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
+        continuation.identity.node_addr == 0 or continuation.identity.node_incarnation == 0 or
+        continuation.identity.registry_incarnation == 0 or continuation.identity.row_generation == 0 or
+        continuation.identity.accounting_client_addr == 0 or continuation.identity.accounting_transfer_id == 0 or
+        continuation.identity.accounting_byte_count == 0 or continuation.identity.callback_ordinal == 0 or
+        continuation.state.lifecycle_raw != @intFromEnum(expected) or
+        continuation.state.state_generation != expected_generation) return false;
+    const kind: terminal_contract.TerminalRowKind = switch (continuation.identity.row_kind_raw) {
+        @intFromEnum(terminal_contract.TerminalRowKind.surviving_descriptor) => .surviving_descriptor,
+        @intFromEnum(terminal_contract.TerminalRowKind.quarantined_no_free) => .quarantined_no_free,
+        else => return false,
+    };
+    if (kind != continuation.descriptor.kind or continuation.descriptor.row_generation != continuation.identity.row_generation or
+        continuation.descriptor.accounting.client_addr != continuation.identity.accounting_client_addr or
+        continuation.descriptor.accounting.transfer_id != continuation.identity.accounting_transfer_id or
+        continuation.descriptor.accounting.byte_count != continuation.identity.accounting_byte_count) return false;
+    const expected_identity = process_seal_service.terminalDrainIdentitySeal(
+        continuation.identity.pid,
+        continuation.identity.process_nonce,
+        terminalDrainIdentitySealInput(continuation),
+    ) catch return false;
+    if (!std.crypto.timing_safe.eql(terminal_contract.Digest, expected_identity, continuation.state.identity_seal)) return false;
+    const expected_state = process_seal_service.terminalDrainStateSeal(
+        continuation.identity.pid,
+        continuation.identity.process_nonce,
+        terminalDrainStateSealInput(continuation),
+    ) catch return false;
+    return std.crypto.timing_safe.eql(terminal_contract.Digest, expected_state, continuation.state.state_seal);
+}
+
+fn advanceTerminalDrainContinuationNoFail(
+    continuation: *TerminalDrainContinuation,
+    expected: terminal_contract.TerminalDrainLifecycle,
+    next: terminal_contract.TerminalDrainLifecycle,
+) void {
+    if (!terminalDrainContinuationCurrent(continuation, expected, continuation.state.state_generation) or
+        continuation.state.state_generation == std.math.maxInt(u64))
+        terminalDrainProofLoss("terminal drain lifecycle preimage drifted");
+    continuation.state.lifecycle_raw = @intFromEnum(next);
+    continuation.state.state_generation += 1;
+    continuation.state.state_seal = process_seal_service.terminalDrainStateSeal(
+        continuation.identity.pid,
+        continuation.identity.process_nonce,
+        terminalDrainStateSealInput(continuation),
+    ) catch terminalDrainProofLoss("terminal drain state seal failed");
+}
+
+fn terminalDrainProofLoss(comptime message: []const u8) noreturn {
+    _ = message;
+    if (builtin.is_test and event_release_proof_loss_marker_fd != null)
+        writeEventReleaseDeathMarker(0x48);
+    process_seal_service.fatalIntegrity(.proof_loss);
+}
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
 var generation_response_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
@@ -11000,6 +11142,7 @@ pub const ClientSlot = struct {
     ) BatchError!AttachmentBatchRead {
         if (!self.valid()) return error.MovedOrCopied;
         if (self.current.active_operation_generation != 0) return error.AdminBusy;
+        if (terminal_drain_callback_binding.continuation_addr != 0) return error.AdminBusy;
         // buffered payload의 free callback에서는 allocation 없는 exact pending sibling만 허용한다.
         // miss를 parser/socket으로 내리면 parent allocator callback 안에서 wire와 allocator를 재진입한다.
         if (batch_release_callback_active)
@@ -11079,6 +11222,9 @@ pub const ClientSlot = struct {
         self: *ClientSlot,
         token: batch_registry_mod.Token,
     ) BatchError!batch_registry_mod.GenerationReleaseResult {
+        // terminal drain callback은 같은 Client의 모든 batch release를 mutation 없이 닫는다.
+        // teardown이 registry owner를 내린 뒤 operation을 잡으면 Busy 대신 copied-owner 오류가 샌다.
+        if (terminal_drain_callback_binding.continuation_addr != 0) return error.AdminBusy;
         const operation = try self.beginRegisteredClientOperation();
         defer self.endRegisteredClientOperation(operation);
         if (!self.valid()) return error.MovedOrCopied;
@@ -11254,12 +11400,15 @@ pub const ClientSlot = struct {
         if (node.active_operation_generation != 0 or node.pin_owner.cleanup_pin_count != 0 or
             node.pin_owner.active_cleanup != 0 or !node.rpc_free_evidence.emptyExact()) return .busy;
 
+        var descriptors: [batch_registry_mod.max_entries]batch_registry_mod.TerminalDrainDescriptor = undefined;
+        var accounting_permits: [batch_registry_mod.max_entries]client_mod.Client.PreparedGenerationAccountingConsume = undefined;
         var row_count: u32 = 0;
         var accounting_bytes: u64 = 0;
         for (0..batch_registry_mod.max_entries) |slot| {
             const descriptor = node.batch_registry.terminalDrainDescriptor(slot) catch return .corrupt;
             if (descriptor) |item| {
                 if (!node.accounting_ledger.canConsume(item.accounting)) return .corrupt;
+                descriptors[row_count] = item;
                 row_count += 1;
                 accounting_bytes = std.math.add(u64, accounting_bytes, @intCast(item.accounting.byte_count)) catch
                     return .corrupt;
@@ -11269,20 +11418,114 @@ pub const ClientSlot = struct {
         if (row_count != handoff.token_count or row_count != handoff.accounting_count or
             accounting_bytes != handoff.accounting_bytes) return .corrupt;
 
+        // 첫 pass가 모든 row와 accounting을 검증했으므로 여기부터는 callback이나 allocation 없이
+        // releasing permit만 만든다. 이 suffix에서 실패하면 앞 permit을 되돌릴 수 없으므로 proof loss다.
+        for (descriptors[0..row_count], 0..) |descriptor, index| {
+            accounting_permits[index] = node.client.prepareGenerationAccountingConsume(
+                descriptor.accounting,
+            ) catch terminalDrainProofLoss("terminal drain accounting preparation drifted");
+        }
+
         node.batch_registry.beginTerminalDrainNoFail();
-        for (0..batch_registry_mod.max_entries) |slot| {
-            const descriptor = node.batch_registry.terminalDrainDescriptor(slot) catch unreachable;
-            if (descriptor) |item| {
-                const accounting = node.client.prepareGenerationAccountingConsume(item.accounting) catch
-                    @panic("terminal accounting preflight drifted");
-                if (item.kind == .surviving_descriptor) {
-                    batch_release_callback_active = true;
-                    item.allocator.?.free(item.bytes);
-                    batch_release_callback_active = false;
+        const ready = process_seal_service.currentReadyIdentity() catch
+            terminalDrainProofLoss("terminal drain process identity drifted");
+        var continuation: TerminalDrainContinuation = undefined;
+        for (descriptors[0..row_count], accounting_permits[0..row_count], 0..) |descriptor, accounting, index| {
+            continuation = .{
+                .identity = .{
+                    .self_addr = @intFromPtr(&continuation),
+                    .pid = ready.pid,
+                    .process_nonce = ready.process_nonce,
+                    .thread_id = @intCast(std.Thread.getCurrentId()),
+                    .node_addr = @intFromPtr(node),
+                    .node_incarnation = node.incarnation.tagged,
+                    .registry_incarnation = node.batch_registry.incarnation,
+                    .handoff_identity_seal = node.batch_registry.terminal_handoff.state.identity_seal,
+                    .handoff_state_seal = node.batch_registry.terminal_handoff.state.state_seal,
+                    .handoff_state_generation = node.batch_registry.terminal_handoff.state.state_generation,
+                    .row_slot = descriptor.row_slot,
+                    .row_kind_raw = @intFromEnum(descriptor.kind),
+                    .row_generation = descriptor.row_generation,
+                    .accounting_client_addr = descriptor.accounting.client_addr,
+                    .accounting_transfer_id = descriptor.accounting.transfer_id,
+                    .accounting_byte_count = descriptor.accounting.byte_count,
+                    .payload_addr = if (descriptor.bytes.len == 0) 0 else @intFromPtr(descriptor.bytes.ptr),
+                    .payload_len = descriptor.bytes.len,
+                    .allocator_ptr = if (descriptor.allocator) |allocator| @intFromPtr(allocator.ptr) else 0,
+                    .allocator_vtable = if (descriptor.allocator) |allocator| @intFromPtr(allocator.vtable) else 0,
+                    .callback_ordinal = @intCast(index + 1),
+                },
+                .state = .{
+                    .identity_seal = [_]u8{0} ** 32,
+                    .lifecycle_raw = @intFromEnum(terminal_contract.TerminalDrainLifecycle.prepared),
+                    .state_generation = 1,
+                    .state_seal = [_]u8{0} ** 32,
+                },
+                .descriptor = descriptor,
+                .accounting = accounting,
+            };
+            continuation.state.identity_seal = process_seal_service.terminalDrainIdentitySeal(
+                ready.pid,
+                ready.process_nonce,
+                terminalDrainIdentitySealInput(&continuation),
+            ) catch terminalDrainProofLoss("terminal drain identity seal failed");
+            continuation.state.state_seal = process_seal_service.terminalDrainStateSeal(
+                ready.pid,
+                ready.process_nonce,
+                terminalDrainStateSealInput(&continuation),
+            ) catch terminalDrainProofLoss("terminal drain state seal failed");
+            if (!terminalDrainContinuationCurrent(&continuation, .prepared, 1))
+                terminalDrainProofLoss("terminal drain prepared continuation drifted");
+            if (continuation.descriptor.kind == .surviving_descriptor) {
+                if (builtin.is_test and terminal_drain_test_hook.stage == .pre_callback and
+                    terminal_drain_test_hook.target_ordinal == continuation.identity.callback_ordinal)
+                {
+                    terminal_drain_test_hook = .{};
+                    writeEventReleaseDeathMarker(0x47);
+                    continuation.state.state_seal[0] ^= 1;
                 }
-                node.client.consumeGenerationAccountingUnchecked(accounting);
-                node.batch_registry.consumeTerminalDrainNoFail(slot);
+                if (!std.meta.eql(terminal_drain_callback_binding, TerminalDrainCallbackBinding{}))
+                    terminalDrainProofLoss("terminal drain callback binding was not pristine");
+                advanceTerminalDrainContinuationNoFail(&continuation, .prepared, .callback_active);
+                terminal_drain_callback_binding = .{
+                    .continuation_addr = @intFromPtr(&continuation),
+                    .continuation_seal = continuation.state.state_seal,
+                    .node_addr = continuation.identity.node_addr,
+                    .row_slot = continuation.identity.row_slot,
+                    .callback_ordinal = continuation.identity.callback_ordinal,
+                };
+                batch_release_callback_active = true;
+                continuation.descriptor.allocator.?.free(continuation.descriptor.bytes);
+                batch_release_callback_active = false;
+                if (builtin.is_test and terminal_drain_test_hook.stage == .post_callback and
+                    terminal_drain_test_hook.target_ordinal == continuation.identity.callback_ordinal)
+                {
+                    terminal_drain_test_hook = .{};
+                    writeEventReleaseDeathMarker(0x47);
+                    continuation.state.state_seal[0] ^= 1;
+                }
+                if (!terminalDrainContinuationCurrent(&continuation, .callback_active, 2) or
+                    terminal_drain_callback_binding.continuation_addr != @intFromPtr(&continuation) or
+                    !std.crypto.timing_safe.eql(terminal_contract.Digest, terminal_drain_callback_binding.continuation_seal, continuation.state.state_seal) or
+                    terminal_drain_callback_binding.node_addr != continuation.identity.node_addr or
+                    terminal_drain_callback_binding.row_slot != continuation.identity.row_slot or
+                    terminal_drain_callback_binding.callback_ordinal != continuation.identity.callback_ordinal)
+                    terminalDrainProofLoss("terminal drain callback proof drifted");
+                terminal_drain_callback_binding = .{};
+                advanceTerminalDrainContinuationNoFail(&continuation, .callback_active, .callback_returned);
             }
+            if (!terminalDrainContinuationCurrent(
+                &continuation,
+                if (continuation.descriptor.kind == .surviving_descriptor) .callback_returned else .prepared,
+                if (continuation.descriptor.kind == .surviving_descriptor) 3 else 1,
+            )) terminalDrainProofLoss("terminal drain consume proof drifted");
+            node.client.consumeGenerationAccountingUnchecked(continuation.accounting);
+            node.batch_registry.consumeTerminalDrainNoFail(continuation.identity.row_slot);
+            advanceTerminalDrainContinuationNoFail(
+                &continuation,
+                if (continuation.descriptor.kind == .surviving_descriptor) .callback_returned else .prepared,
+                .consumed,
+            );
         }
         node.batch_registry.finishTerminalCleanupNoFail();
         reserved_live = false;
@@ -11597,6 +11840,558 @@ test "CR3a-2d2 ClientSlot typed teardown은 quarantine payload를 free하지 않
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
     try std.testing.expectEqualStrings("quarantined", bytes);
     std.heap.page_allocator.free(bytes);
+}
+
+const TerminalDrainReentryProbe = struct {
+    parent: std.mem.Allocator,
+    slot: ?*ClientSlot = null,
+    callback_count: usize = 0,
+    callback_addr: usize = 0,
+    callback_len: usize = 0,
+    deinit_outcome: ?DeinitOutcome = null,
+    read_error: ?anyerror = null,
+    sibling_token: ?batch_registry_mod.Token = null,
+    sibling_error: ?anyerror = null,
+    independent_slot: ?*ClientSlot = null,
+    independent_token: ?batch_registry_mod.Token = null,
+    independent_read_ok: bool = false,
+    observed_releasing_items: usize = 0,
+    observed_accounting_items: usize = 0,
+    observed_registry_rows: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, return_address);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, return_address);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, return_address);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (builtin.is_test and event_release_proof_loss_marker_fd != null and
+            terminal_drain_subprocess_stage_raw >= 2)
+        {
+            writeEventReleaseDeathMarker(0x44);
+            writeEventReleaseDeathMarker(0x45);
+        }
+        self.callback_count += 1;
+        self.callback_addr = @intFromPtr(memory.ptr);
+        self.callback_len = memory.len;
+        if (self.slot) |slot| {
+            self.observed_releasing_items = slot.current.accounting_ledger.releasing_item_count;
+            self.observed_accounting_items = slot.current.accounting_ledger.item_count;
+            self.observed_registry_rows = slot.current.batch_registry.live_count;
+            self.deinit_outcome = slot.tryDeinit();
+            _ = slot.readAttachmentBatch(0xD305) catch |err| {
+                self.read_error = err;
+            };
+            if (self.sibling_token) |token| {
+                slot.releaseAttachmentBatch(token) catch |err| {
+                    self.sibling_error = err;
+                };
+            }
+            if (self.independent_slot != null and self.independent_token != null) {
+                const view = self.independent_slot.?.borrowAttachmentBatch(self.independent_token.?) catch null;
+                self.independent_read_ok = view != null;
+            }
+            self.slot = null;
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, return_address);
+        if (builtin.is_test and event_release_proof_loss_marker_fd != null and
+            terminal_drain_subprocess_stage_raw >= 2)
+        {
+            if (terminal_drain_subprocess_stage_raw == 3) {
+                if (self.deinit_outcome != .busy or self.sibling_error == null or
+                    self.sibling_error.? != error.AdminBusy)
+                    std.c._exit(125);
+                writeEventReleaseDeathMarker(0x49);
+            }
+            writeEventReleaseDeathMarker(0x46);
+        }
+    }
+};
+
+fn publishTerminalDrainFixture(
+    slot: *ClientSlot,
+    token: batch_registry_mod.Token,
+    kind: terminal_contract.TerminalRowKind,
+    stream_id: u64,
+) !void {
+    const summary = try slot.current.batch_registry.preflightTerminalToken(token, kind);
+    var ordered = terminal_contract.OrderedTokenHasher.init(1);
+    try ordered.add(summary.projection);
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(
+        1,
+        try ordered.finish(1),
+        @intFromBool(kind == .surviving_descriptor),
+        @intFromBool(kind == .quarantined_no_free),
+        summary.accounting_bytes,
+        &handoff,
+    );
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, stream_id);
+    slot.current.batch_registry.publishTerminalTokenNoFail(token, kind);
+}
+
+test "CR3a-2d3 component callback reentry는 같은 attachment teardown을 Busy로 보존한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD301);
+    const bytes = try probe.allocator().dupe(u8, "terminal-callback");
+    const sibling_bytes = try allocator.dupe(u8, "terminal-sibling");
+    const payload_addr = @intFromPtr(bytes.ptr);
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD301, .bytes = bytes, .allocator = probe.allocator() });
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD304, .bytes = sibling_bytes, .allocator = allocator });
+    source.pending_batch_bytes = bytes.len + sibling_bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD301);
+    const token = switch (try slot.readAttachmentBatch(0xD301)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const sibling_token = switch (try slot.readAttachmentBatch(0xD304)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const first_summary = try slot.current.batch_registry.preflightTerminalToken(token, .surviving_descriptor);
+    const sibling_summary = try slot.current.batch_registry.preflightTerminalToken(sibling_token, .surviving_descriptor);
+    var ordered = terminal_contract.OrderedTokenHasher.init(2);
+    try ordered.add(first_summary.projection);
+    try ordered.add(sibling_summary.projection);
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(
+        2,
+        try ordered.finish(2),
+        2,
+        0,
+        first_summary.accounting_bytes + sibling_summary.accounting_bytes,
+        &handoff,
+    );
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, 0xD301);
+    slot.current.batch_registry.publishTerminalTokenNoFail(token, .surviving_descriptor);
+    slot.current.batch_registry.publishTerminalTokenNoFail(sibling_token, .surviving_descriptor);
+
+    var independent_source = fixtureClient(allocator, 0xD306);
+    const independent_bytes = try allocator.dupe(u8, "independent");
+    try independent_source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD306, .bytes = independent_bytes, .allocator = allocator });
+    independent_source.pending_batch_bytes = independent_bytes.len;
+    var independent_slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&independent_slot, allocator, &independent_source, 0xD306);
+    const independent_token = switch (try independent_slot.readAttachmentBatch(0xD306)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var independent_live = true;
+    defer if (independent_live) {
+        if (independent_slot.borrowAttachmentBatch(independent_token)) |_| {
+            independent_slot.releaseAttachmentBatch(independent_token) catch {};
+        } else |_| {}
+        _ = independent_slot.tryDeinit();
+    };
+    probe.slot = &slot;
+    probe.sibling_token = sibling_token;
+    probe.independent_slot = &independent_slot;
+    probe.independent_token = independent_token;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 1), probe.callback_count);
+    try std.testing.expectEqual(payload_addr, probe.callback_addr);
+    try std.testing.expectEqual(bytes.len, probe.callback_len);
+    try std.testing.expectEqual(DeinitOutcome.busy, probe.deinit_outcome.?);
+    try std.testing.expect(probe.read_error.? == error.AdminBusy);
+    try std.testing.expect(probe.sibling_error.? == error.AdminBusy);
+    try std.testing.expect(probe.independent_read_ok);
+    try std.testing.expectEqual(@as(usize, 2), probe.observed_releasing_items);
+    try independent_slot.releaseAttachmentBatch(independent_token);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, independent_slot.tryDeinit());
+    independent_live = false;
+}
+
+test "CR3a-2d3 component callback reentry는 sibling batch mutation을 Busy로 보존한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD307);
+    const first = try probe.allocator().dupe(u8, "target");
+    const sibling = try allocator.dupe(u8, "sibling");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD307, .bytes = first, .allocator = probe.allocator() });
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD308, .bytes = sibling, .allocator = allocator });
+    source.pending_batch_bytes = first.len + sibling.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD307);
+    const first_token = switch (try slot.readAttachmentBatch(0xD307)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const sibling_token = switch (try slot.readAttachmentBatch(0xD308)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const first_summary = try slot.current.batch_registry.preflightTerminalToken(first_token, .surviving_descriptor);
+    const sibling_summary = try slot.current.batch_registry.preflightTerminalToken(sibling_token, .surviving_descriptor);
+    var ordered = terminal_contract.OrderedTokenHasher.init(2);
+    try ordered.add(first_summary.projection);
+    try ordered.add(sibling_summary.projection);
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(2, try ordered.finish(2), 2, 0, first_summary.accounting_bytes + sibling_summary.accounting_bytes, &handoff);
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, 0xD307);
+    slot.current.batch_registry.publishTerminalTokenNoFail(first_token, .surviving_descriptor);
+    slot.current.batch_registry.publishTerminalTokenNoFail(sibling_token, .surviving_descriptor);
+    probe.slot = &slot;
+    probe.sibling_token = sibling_token;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expect(probe.sibling_error.? == error.AdminBusy);
+    try std.testing.expectEqual(@as(usize, 2), probe.observed_registry_rows);
+    try std.testing.expectEqual(@as(usize, 2), probe.observed_accounting_items);
+}
+
+test "CR3a-2d3 component callback reentry는 독립 Client read-only operation을 허용한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD309);
+    const bytes = try probe.allocator().dupe(u8, "target");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD309, .bytes = bytes, .allocator = probe.allocator() });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD309);
+    const token = switch (try slot.readAttachmentBatch(0xD309)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try publishTerminalDrainFixture(&slot, token, .surviving_descriptor, 0xD309);
+
+    var independent_source = fixtureClient(allocator, 0xD30A);
+    const independent_bytes = try allocator.dupe(u8, "independent");
+    try independent_source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30A, .bytes = independent_bytes, .allocator = allocator });
+    independent_source.pending_batch_bytes = independent_bytes.len;
+    var independent_slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&independent_slot, allocator, &independent_source, 0xD30A);
+    const independent_token = switch (try independent_slot.readAttachmentBatch(0xD30A)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    probe.slot = &slot;
+    probe.independent_slot = &independent_slot;
+    probe.independent_token = independent_token;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expect(probe.independent_read_ok);
+    try independent_slot.releaseAttachmentBatch(independent_token);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, independent_slot.tryDeinit());
+}
+
+test "CR3a-2d3 component preflight 실패는 payload와 accounting과 registry를 바꾸지 않는다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD30B);
+    const bytes = try probe.allocator().dupe(u8, "preflight");
+    const payload_addr = @intFromPtr(bytes.ptr);
+    const payload_digest = std.hash.Wyhash.hash(0, bytes);
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30B, .bytes = bytes, .allocator = probe.allocator() });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD30B);
+    const token = switch (try slot.readAttachmentBatch(0xD30B)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try publishTerminalDrainFixture(&slot, token, .surviving_descriptor, 0xD30B);
+    const original = slot.current.batch_registry.terminal_handoff;
+    slot.current.batch_registry.terminal_handoff.token_count += 1;
+    try std.testing.expectEqual(DeinitOutcome.corrupt, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 0), probe.callback_count);
+    try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(@as(usize, 1), slot.current.batch_registry.live_count);
+    try std.testing.expectEqual(payload_addr, @intFromPtr(bytes.ptr));
+    try std.testing.expectEqual(payload_digest, std.hash.Wyhash.hash(0, bytes));
+    try std.testing.expectEqualStrings("preflight", bytes);
+    slot.current.batch_registry.terminal_handoff = original;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 1), probe.callback_count);
+}
+
+test "CR3a-2d3 component surviving descriptor는 callback과 free를 정확히 한 번 실행한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD302);
+    const bytes = try probe.allocator().dupe(u8, "terminal-once");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD302, .bytes = bytes, .allocator = probe.allocator() });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD302);
+    const token = switch (try slot.readAttachmentBatch(0xD302)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try publishTerminalDrainFixture(&slot, token, .surviving_descriptor, 0xD302);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 1), probe.callback_count);
+    try std.testing.expectEqual(DeinitOutcome.already_dead, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 1), probe.callback_count);
+}
+
+test "CR3a-2d3 component callback 복귀 뒤에만 accounting과 registry row를 consume한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD30C);
+    const bytes = try probe.allocator().dupe(u8, "ordered-consume");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30C, .bytes = bytes, .allocator = probe.allocator() });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD30C);
+    const token = switch (try slot.readAttachmentBatch(0xD30C)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try publishTerminalDrainFixture(&slot, token, .surviving_descriptor, 0xD30C);
+    probe.slot = &slot;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 1), probe.observed_releasing_items);
+    try std.testing.expectEqual(@as(usize, 1), probe.observed_accounting_items);
+    try std.testing.expectEqual(@as(usize, 1), probe.observed_registry_rows);
+}
+
+test "CR3a-2d3 component quarantine row는 allocator callback을 실행하지 않는다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD303);
+    const bytes = try probe.allocator().dupe(u8, "terminal-quarantine");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD303, .bytes = bytes, .allocator = probe.allocator() });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD303);
+    const token = switch (try slot.readAttachmentBatch(0xD303)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    batch_registry_mod.testing.armNextIndeterminate(&slot.current.batch_registry, token, .quarantined_no_free);
+    try std.testing.expectEqual(batch_registry_mod.GenerationReleaseResult.indeterminate_or_partial, try slot.releaseAttachmentBatchResult(token));
+    try publishTerminalDrainFixture(&slot, token, .quarantined_no_free, 0xD303);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 0), probe.callback_count);
+    allocator.free(bytes);
+}
+
+test "CR3a-2d3 component quarantine row는 accounting과 registry row만 정확히 consume한다" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD30D);
+    const bytes = try probe.allocator().dupe(u8, "quarantine-consume");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30D, .bytes = bytes, .allocator = probe.allocator() });
+    source.pending_batch_bytes = bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD30D);
+    const token = switch (try slot.readAttachmentBatch(0xD30D)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    batch_registry_mod.testing.armNextIndeterminate(&slot.current.batch_registry, token, .quarantined_no_free);
+    try std.testing.expectEqual(batch_registry_mod.GenerationReleaseResult.indeterminate_or_partial, try slot.releaseAttachmentBatchResult(token));
+    try publishTerminalDrainFixture(&slot, token, .quarantined_no_free, 0xD30D);
+    try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(@as(usize, 1), slot.current.batch_registry.live_count);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinitWithTerminalCleanup());
+    try std.testing.expectEqual(@as(usize, 0), probe.callback_count);
+    allocator.free(bytes);
+}
+
+const TerminalDrainProofStage = enum(u8) { pre_callback = 1, post_callback = 2, callback_reentry = 3 };
+const terminal_drain_marker_fd: std.c.fd_t = 198;
+
+fn terminalDrainMonotonicMs() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) std.c._exit(126);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
+fn killAndReapTerminalDrainChild(child: std.c.pid_t) !c_int {
+    const killed = std.c.kill(child, std.c.SIG.KILL);
+    if (killed != 0 and std.posix.errno(killed) != .SRCH)
+        return error.TestUnexpectedResult;
+    var status: c_int = 0;
+    while (true) {
+        const waited = std.c.waitpid(child, &status, 0);
+        if (waited == child) return status;
+        if (waited < 0 and std.posix.errno(waited) == .INTR) continue;
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn runTerminalDrainProofChild(stage: TerminalDrainProofStage, expected: []const u8, expected_exit: u8) !void {
+    if (TerminalDrainRunnerChannel.maru_c3b3_death_child_path_len == 0 or
+        TerminalDrainRunnerChannel.maru_c3b3_death_child_path_len >= TerminalDrainRunnerChannel.maru_c3b3_death_child_path.len)
+        return error.TestUnexpectedResult;
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_fds));
+    const child = std.c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) {
+        _ = std.c.close(pipe_fds[0]);
+        if (std.c.dup2(pipe_fds[1], terminal_drain_marker_fd) < 0) std.c._exit(126);
+        if (pipe_fds[1] != terminal_drain_marker_fd) _ = std.c.close(pipe_fds[1]);
+        const flags = std.c.fcntl(terminal_drain_marker_fd, std.c.F.GETFD);
+        if (flags < 0 or std.c.fcntl(terminal_drain_marker_fd, std.c.F.SETFD, flags & ~@as(c_int, std.c.FD_CLOEXEC)) < 0)
+            std.c._exit(126);
+        var fd: c_int = 3;
+        while (fd < getdtablesize()) : (fd += 1) {
+            if (fd != terminal_drain_marker_fd) _ = std.c.close(fd);
+        }
+        const path: [*:0]const u8 = @ptrCast(&TerminalDrainRunnerChannel.maru_c3b3_death_child_path);
+        const stage_arg: [*:0]const u8 = switch (stage) {
+            .pre_callback => "--maru-2d3-proof-stage=pre-callback",
+            .post_callback => "--maru-2d3-proof-stage=post-callback",
+            .callback_reentry => "--maru-2d3-proof-stage=callback-reentry",
+        };
+        const argv = [_:null]?[*:0]const u8{ path, stage_arg, "--maru-2d3-marker-fd=198" };
+        const env = [_:null]?[*:0]const u8{};
+        _ = std.c.execve(path, &argv, &env);
+        std.c._exit(127);
+    }
+    _ = std.c.close(pipe_fds[1]);
+    const flags = std.c.fcntl(pipe_fds[0], std.c.F.GETFL);
+    const nonblocking: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
+    if (flags < 0 or std.c.fcntl(pipe_fds[0], std.c.F.SETFL, flags | nonblocking) < 0)
+        return error.TestUnexpectedResult;
+    var transcript: [12]u8 = [_]u8{0} ** 12;
+    var transcript_len: usize = 0;
+    var status: c_int = 0;
+    var reaped = false;
+    var eof = false;
+    var trailing = false;
+    const deadline = terminalDrainMonotonicMs() + 2000;
+    while (!reaped or !eof) {
+        if (!eof) {
+            if (transcript_len == transcript.len) {
+                var extra: [1]u8 = undefined;
+                const count = std.c.read(pipe_fds[0], &extra, 1);
+                if (count > 0) trailing = true else if (count == 0) eof = true else if (std.posix.errno(count) != .AGAIN and std.posix.errno(count) != .INTR) return error.TestUnexpectedResult;
+            } else {
+                const count = std.c.read(pipe_fds[0], transcript[transcript_len..].ptr, transcript.len - transcript_len);
+                if (count > 0) transcript_len += @intCast(count) else if (count == 0) eof = true else if (std.posix.errno(count) != .AGAIN and std.posix.errno(count) != .INTR) return error.TestUnexpectedResult;
+            }
+            if (trailing) return error.TestUnexpectedResult;
+        }
+        if (!reaped) {
+            const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
+            if (waited == child) reaped = true else if (waited < 0 and std.posix.errno(waited) != .INTR) return error.TestUnexpectedResult;
+        }
+        if (reaped and eof) break;
+        if (terminalDrainMonotonicMs() >= deadline) {
+            status = try killAndReapTerminalDrainChild(child);
+            return error.TestUnexpectedResult;
+        }
+        var poll_fds = [_]std.c.pollfd{.{ .fd = pipe_fds[0], .events = std.c.POLL.IN | std.c.POLL.HUP, .revents = 0 }};
+        const polled = std.c.poll(&poll_fds, 1, 20);
+        if (polled < 0 and std.posix.errno(polled) != .INTR)
+            return error.TestUnexpectedResult;
+    }
+    _ = std.c.close(pipe_fds[0]);
+    try std.testing.expectEqualSlices(u8, expected, transcript[0..transcript_len]);
+    const unsigned: u32 = @bitCast(status);
+    try std.testing.expect(std.c.W.IFEXITED(unsigned));
+    try std.testing.expectEqual(expected_exit, @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned))));
+}
+
+fn dispatchTerminalDrainProofChild(stage: TerminalDrainProofStage) !void {
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstat(terminal_drain_marker_fd, &stat) != 0 or !std.posix.S.ISFIFO(stat.mode))
+        return;
+    testing.armTerminalDrainProofLoss(terminal_drain_marker_fd, @intFromEnum(stage), 1);
+    writeEventReleaseDeathMarker(0x41);
+    try ClientSlot.initializeProcessRuntime();
+    terminal_drain_subprocess_stage_raw = @intFromEnum(stage);
+    const allocator = std.testing.allocator;
+    var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xD3F0);
+    const first = try probe.allocator().dupe(u8, "proof-target");
+    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD3F0, .bytes = first, .allocator = probe.allocator() });
+    source.pending_batch_bytes = first.len;
+    if (stage == .callback_reentry) {
+        const sibling = try allocator.dupe(u8, "proof-sibling");
+        try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD3F1, .bytes = sibling, .allocator = allocator });
+        source.pending_batch_bytes += sibling.len;
+    }
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xD3F0);
+    const first_token = switch (try slot.readAttachmentBatch(0xD3F0)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var sibling_token: ?batch_registry_mod.Token = null;
+    if (stage == .callback_reentry) sibling_token = switch (try slot.readAttachmentBatch(0xD3F1)) {
+        .committed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const first_summary = try slot.current.batch_registry.preflightTerminalToken(first_token, .surviving_descriptor);
+    var ordered = terminal_contract.OrderedTokenHasher.init(if (sibling_token == null) 1 else 2);
+    try ordered.add(first_summary.projection);
+    var accounting_bytes = first_summary.accounting_bytes;
+    if (sibling_token) |token| {
+        const summary = try slot.current.batch_registry.preflightTerminalToken(token, .surviving_descriptor);
+        try ordered.add(summary.projection);
+        accounting_bytes += summary.accounting_bytes;
+    }
+    const count: u32 = if (sibling_token == null) 1 else 2;
+    var handoff: batch_registry_mod.TerminalCleanupHandoff = .{};
+    try slot.current.batch_registry.prepareTerminalCleanupSummary(count, try ordered.finish(count), count, 0, accounting_bytes, &handoff);
+    slot.beginTerminalCleanupPublicationNoFail(&handoff, 0xD3F0);
+    slot.current.batch_registry.publishTerminalTokenNoFail(first_token, .surviving_descriptor);
+    if (sibling_token) |token| slot.current.batch_registry.publishTerminalTokenNoFail(token, .surviving_descriptor);
+    probe.slot = &slot;
+    probe.sibling_token = sibling_token;
+    const outcome = slot.tryDeinitWithTerminalCleanup();
+    if (stage != .callback_reentry or outcome != .cleaned or probe.callback_count != 1)
+        std.process.exit(121);
+    std.process.exit(73);
+}
+
+test "CR3a-2d3 pre-callback child는 선택된 stage를 dispatch한다" {
+    try dispatchTerminalDrainProofChild(.pre_callback);
+}
+
+test "CR3a-2d3 post-callback child는 선택된 stage를 dispatch한다" {
+    try dispatchTerminalDrainProofChild(.post_callback);
+}
+
+test "CR3a-2d3 callback-reentry child는 선택된 stage를 dispatch한다" {
+    try dispatchTerminalDrainProofChild(.callback_reentry);
+}
+
+test "CR3a-2d3 subprocess는 callback 전 proof loss를 free 없이 fail-stop한다" {
+    if (TerminalDrainRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
+    try runTerminalDrainProofChild(.pre_callback, &.{ 0x41, 0x47, 0x48 }, 86);
+}
+
+test "CR3a-2d3 subprocess는 callback 뒤 proof loss를 두 번째 free 없이 fail-stop한다" {
+    if (TerminalDrainRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
+    try runTerminalDrainProofChild(.post_callback, &.{ 0x41, 0x44, 0x45, 0x46, 0x47, 0x48 }, 86);
+}
+
+test "CR3a-2d3 subprocess는 callback reentry transcript를 exact 검증한다" {
+    if (TerminalDrainRunnerChannel.maru_c3b3_death_child_path_len == 0) return error.SkipZigTest;
+    try runTerminalDrainProofChild(.callback_reentry, &.{ 0x41, 0x44, 0x45, 0x49, 0x46 }, 73);
 }
 
 test "CR3a-2d1 ClientSlot 첫 retryable은 payload token accounting을 그대로 보존한다" {

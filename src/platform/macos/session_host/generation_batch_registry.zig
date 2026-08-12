@@ -85,6 +85,8 @@ pub const TerminalPublicationOwner = struct {
 
 pub const TerminalDrainDescriptor = struct {
     kind: terminal_contract.TerminalRowKind,
+    row_slot: u16,
+    row_generation: u64,
     bytes: []u8,
     allocator: ?std.mem.Allocator,
     accounting: AccountingReceipt,
@@ -1233,12 +1235,16 @@ pub const Registry = struct {
             .empty => null,
             .terminal_surviving_descriptor => .{
                 .kind = .surviving_descriptor,
+                .row_slot = @intCast(slot),
+                .row_generation = entry.generation,
                 .bytes = entry.bytes,
                 .allocator = entry.allocator orelse return error.InvalidDescriptor,
                 .accounting = entry.accounting,
             },
             .terminal_quarantined_no_free => .{
                 .kind = .quarantined_no_free,
+                .row_slot = @intCast(slot),
+                .row_generation = entry.generation,
                 .bytes = &.{},
                 .allocator = null,
                 .accounting = entry.accounting,

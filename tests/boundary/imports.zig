@@ -1902,6 +1902,28 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pinProjectionFromEventReleasePermit" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "hashInt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registryEventReleaseFromComposite" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainRunnerChannel" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "terminal_contract" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "extern", .name = "getdtablesize" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainCallbackBinding" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "terminal_drain_callback_binding" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainContinuation" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainTestHook" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "terminal_drain_test_hook" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "terminal_drain_subprocess_stage_raw" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalDrainIdentitySealInput" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalDrainStateSealInput" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalDrainContinuationCurrent" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "advanceTerminalDrainContinuationNoFail" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalDrainProofLoss" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainReentryProbe" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishTerminalDrainFixture" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "TerminalDrainProofStage" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "terminal_drain_marker_fd" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalDrainMonotonicMs" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "killAndReapTerminalDrainChild" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "runTerminalDrainProofChild" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "dispatchTerminalDrainProofChild" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "rpc_decoder_callback_active" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRpcDecodedExecute" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRpcDecoded" },
@@ -2922,13 +2944,17 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
     );
     try std.testing.expectEqual(
-        // 기존 일곱 leaf와 C3-3b3 effect proof-loss leaf만 noreturn 권위를 가진다.
-        @as(usize, 8),
+        // 기존 일곱 leaf와 C3-3b3 effect, CR3a-2d3 terminal drain proof-loss leaf만 noreturn 권위를 가진다.
+        @as(usize, 9),
         countOccurrences(slot_product, ") noreturn {"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(slot_product, "fn effectProofLoss() noreturn {"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(slot_product, "fn terminalDrainProofLoss(comptime message: []const u8) noreturn {"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),

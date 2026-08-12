@@ -1524,8 +1524,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   나누며, 2b1만 green이어도 GUI raw context가 남아 있으므로 2b 전체를 구현으로 표시하지 않는다. 2c는 남은 exact primitive facade와
   `RemoteRuntime.client`를 포함한 raw escape zero,
   2d는 2d1 actual generation release 결과와 최초 retry 보존(구현 완료), 2d2 aggregate terminal handoff와 typed node
-  teardown(구현 완료),
-  2d3 permit/reentry/quarantine/proof-loss 제품 경계 순으로 닫는다. 2d1~3 전체가 green이기 전에는 2d 완료가 아니다. 2e는 actual socket
+  teardown(구현 완료), 2d3 permit/reentry/quarantine/proof-loss 제품 경계(구현 완료) 순으로 닫았으므로 2d 전체가 완료됐다. 2e는 actual socket
   attach/pump/deinit/uncertain/malformed/snapshot-failure/failed-release fixture와 전체 source
   boundary를 각각 증명한다. 각 gate는 production-type unit과 boundary를 재실행하며 전체가 green이기 전 CR3a-2 완료를 주장하지
   않는다.
@@ -1541,9 +1540,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   copied/stale/cross-node receipt와 partial source tombstone은 모두 제품 callback/free/node mutation 전에 거부한다.
   public bulk registry commit은 0개이며, node-final streaming publication 뒤 state seal이
   `published→draining→consumed→terminal`로 진행한다. 첫 indeterminate는 deinit에서 release callback을 재호출하지 않는다.
-  2d3은 구현 전이다. 첫 RED gate는 Debug·ReleaseFast 각각 final-address continuation 3개, callback reentry 3개,
+  2d3은 구현됐다. focused gate는 Debug·ReleaseFast 각각 final-address continuation 3개, callback reentry 3개,
   preflight/exact-once suffix 3개, quarantine 2개, 실제 attachment final-zero 1개인 unique component 12개와 fresh-exec
-  subprocess 3개, boundary 1개를 요구한다. pre-callback drift는 free 0, post-callback drift는 free exact 1 뒤 공통
+  subprocess 3개, boundary 1개를 실행한다. pre-callback drift는 free 0, post-callback drift는 free exact 1 뒤 공통
   `fatalIntegrity(.proof_loss)` exit 86이며 두 경우 모두 accounting/row/handoff completion/node destroy 0을 증명한다.
   2b1의 현재 자동 증거는 node-local 4,096-entry registry와 독립 exact accounting ledger, 18 MiB pending+transferred 합산,
   pointer-free token의 registry incarnation·entry generation·stream 결속, buffered/direct-parser all-or-none transfer,

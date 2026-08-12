@@ -17,13 +17,12 @@ PoC 로 "Zig 코어 + 네이티브 GPU 가 iOS/Android 에서 서는가" 를 실
 |---|---|---|
 | M0 | 계약 문서 + 폴더 구조. PoC 코드를 `src/platform/{mobile,ios,android}` 로 옮긴다 | 완료 |
 | M1 | **draw-list 배칭** — quad 당 draw call 을 인스턴스 드로우 한 번으로 | 완료 |
-| M1.5 | **`build.zig` 타깃** — 제품 빌드를 셸 스크립트에서 회수한다 | 진행 중 |
+| M1.5 | **`build.zig` 타깃** — 제품 빌드를 셸 스크립트에서 회수한다 | 완료 |
 | M2 | **Android `GameActivity` 이관** — `GameTextInput` 으로 IME 를 받는다 | 미착수 |
 | M3 | 원격 세션 연결 — `session_host` 클라이언트를 모바일에 붙인다 | 미착수 |
 | M4 | 스크롤·선택·복사 + 보조 키바 | 미착수 |
 | M5 | 회전·태블릿 레이아웃 | 미착수 |
 | M6 | 실기기 성능 예산 + 아틀라스 축출 | 미착수 |
-| M7 | CI 통합 | 미착수 |
 
 
 ## M0 — 폴더 구조
@@ -46,10 +45,28 @@ Vulkan 은 push constant 를 통째로 버리고 storage buffer + `gl_InstanceIn
 quad 마다 다른 값을 한 번의 draw call 에 실을 수 없기 때문이다. 그 결과 **프래그먼트가
 push constant 를 못 읽게 되어** 색·radius·kind 를 varying 으로 넘긴다.
 
+**CI 에는 붙이지 않는다(사용자 결정).** 모바일 빌드는 Xcode·NDK·에뮬레이터가 필요해
+러너 비용이 크고, 지금 단계에서 막아야 할 회귀가 없다. 검증은 로컬에서 `run.sh` 로 한다 —
+필요해지면 그때 넣는다.
+
 ## M1.5 — build.zig
 
 제품 코드를 셸 스크립트가 빌드하는 것은 정식 도입이 아니다. `build.zig` 가 모바일 타깃을
 소유하고, `tools/mobile-poc/run.sh` 는 **기기 조작**(설치·실행·캡쳐·계측)만 남긴다.
+
+```sh
+zig build mobile-libs -Doptimize=ReleaseSafe   # 세 타깃 전부
+zig build mobile-lib-ios-sim | mobile-lib-ios | mobile-lib-android
+```
+
+**Debug 는 iOS 에서 링크가 깨진다** — std 의 스택 트레이스가 시뮬레이터 SDK 에 없는
+`_dyld_get_image_header_containing_address` 를 참조한다. `simple_panic` 이 ReleaseSafe 에서
+그 경로를 걷어내고 **안전 검사는 그대로 산다**(PoC 때 기록한 내용이 그대로 확인됐다).
+
+**대체된 초기 하네스는 지웠다.** `chrome-ios`/`chrome-android-app` 이 `ios`·`ios-app`·
+`android`·`chrome-android` 가 하던 일을 포함한다 — 남겨 두면 어느 쪽이 진짜인지 흐려진다.
+측정 **결과**(표·스크린샷)는 전부 남는다. 여섯 기능 판정기(`features-*`)는 다른 모드가
+대체하지 않는 별도 측정이라 남긴다.
 
 ## M2 — GameActivity
 

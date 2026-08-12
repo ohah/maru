@@ -129,6 +129,72 @@ pub const VisualRow = struct {
     }
 };
 
+/// 문서 전체의 **시각 행 인덱스** — §2 캐시 표의 "시각행 수·시각행 ↔ 논리행"(L3 소유).
+///
+/// 스크롤바가 총 길이를 알고, 뷰포트가 **랩된 줄의 중간 행에서 멈추려면** 이것이 필요하다. 지금
+/// 뷰포트는 논리 줄 단위라 긴 줄 하나가 화면을 넘으면 그 아래를 볼 방법이 없다.
+///
+/// **뷰 열수·탭 폭·랩 여부에 의존하므로 그중 하나가 바뀌면 통째로 무효다**(§2). 문서가 바뀌면
+/// 당연히 무효다. 지금은 무효화를 호출자가 판단한다 — 캐시 수명 관리는 이 인덱스를 실제로 들고
+/// 있는 쪽(편집기 뷰 상태)이 생길 때 정한다.
+///
+/// **할당하지 않는다.** 호출자가 줄 수만큼의 `starts` 버퍼를 준다.
+pub const RowIndex = struct {
+    /// `starts[i]` = 줄 i가 시작하는 시각 행. 마지막 원소 뒤가 총 행 수이므로 길이는 줄 수 + 1이다.
+    starts: []const u32,
+
+    pub fn totalRows(self: RowIndex) u32 {
+        if (self.starts.len == 0) return 0;
+        return self.starts[self.starts.len - 1];
+    }
+
+    pub fn lineCount(self: RowIndex) usize {
+        return if (self.starts.len == 0) 0 else self.starts.len - 1;
+    }
+
+    /// 시각 행 → 논리 줄과 조각. 범위를 넘으면 `null`.
+    ///
+    /// **이진 탐색이다.** 선형으로 훑으면 스크롤할 때마다 문서 길이에 비례하는 비용이 든다.
+    pub fn resolve(self: RowIndex, visual_row: u32) ?VisualRow {
+        if (visual_row >= self.totalRows()) return null;
+        // starts[lo] <= visual_row < starts[lo+1]인 lo를 찾는다.
+        var lo: usize = 0;
+        var hi: usize = self.lineCount();
+        while (hi - lo > 1) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.starts[mid] <= visual_row) lo = mid else hi = mid;
+        }
+        return .{ .line = @intCast(lo), .piece = visual_row - self.starts[lo] };
+    }
+
+    /// 논리 줄의 **첫** 시각 행. 줄 단위로 이동할 때 쓴다(§5.2 "위치로 이동").
+    pub fn firstRowOf(self: RowIndex, line: usize) ?u32 {
+        if (line >= self.lineCount()) return null;
+        return self.starts[line];
+    }
+
+    /// 이 줄이 차지하는 시각 행 수.
+    pub fn rowsOf(self: RowIndex, line: usize) ?u32 {
+        if (line >= self.lineCount()) return null;
+        return self.starts[line + 1] - self.starts[line];
+    }
+};
+
+/// 줄별 행 수에서 인덱스를 만든다. `out`은 **줄 수 + 1** 길이여야 한다.
+///
+/// 행 수를 어떻게 세는지는 여기서 정하지 않는다 — `content.rowCount`가 전개를 거쳐 세고, 이 함수는
+/// 그 값을 누적할 뿐이다. **세는 규칙을 여기 복제하면 갈린다**(실측으로 겪었다).
+pub fn buildIndex(row_counts: []const u32, out: []u32) RowIndex {
+    std.debug.assert(out.len >= row_counts.len + 1);
+    var acc: u32 = 0;
+    for (row_counts, 0..) |n, i| {
+        out[i] = acc;
+        acc += n;
+    }
+    out[row_counts.len] = acc;
+    return .{ .starts = out[0 .. row_counts.len + 1] };
+}
+
 const testing = std.testing;
 
 fn collect(text: []const u8, view_cols: u16, wrap: bool, buf: [][]const u8) [][]const u8 {
@@ -142,6 +208,88 @@ fn collect(text: []const u8, view_cols: u16, wrap: bool, buf: [][]const u8) [][]
         buf[n] = p.slice(text);
     }
     return buf[0..n];
+}
+
+test "RowIndex: 시각 행에서 논리 줄과 조각을 찾는다" {
+    // 줄0: 1행, 줄1: 3행(랩), 줄2: 1행, 줄3: 2행 → 총 7행
+    const counts = [_]u32{ 1, 3, 1, 2 };
+    var buf: [8]u32 = undefined;
+    const idx = buildIndex(&counts, &buf);
+
+    try testing.expectEqual(@as(u32, 7), idx.totalRows());
+    try testing.expectEqual(@as(usize, 4), idx.lineCount());
+
+    const expected = [_]VisualRow{
+        .{ .line = 0, .piece = 0 },
+        .{ .line = 1, .piece = 0 },
+        .{ .line = 1, .piece = 1 },
+        .{ .line = 1, .piece = 2 },
+        .{ .line = 2, .piece = 0 },
+        .{ .line = 3, .piece = 0 },
+        .{ .line = 3, .piece = 1 },
+    };
+    for (expected, 0..) |want, row| {
+        const got = idx.resolve(@intCast(row)).?;
+        try testing.expectEqual(want.line, got.line);
+        try testing.expectEqual(want.piece, got.piece);
+    }
+    try testing.expect(idx.resolve(7) == null); // 문서 끝 너머
+}
+
+test "RowIndex: 줄에서 첫 시각 행을 찾는다 — resolve와 맞물린다" {
+    const counts = [_]u32{ 1, 3, 1, 2 };
+    var buf: [8]u32 = undefined;
+    const idx = buildIndex(&counts, &buf);
+
+    try testing.expectEqual(@as(u32, 0), idx.firstRowOf(0).?);
+    try testing.expectEqual(@as(u32, 1), idx.firstRowOf(1).?);
+    try testing.expectEqual(@as(u32, 4), idx.firstRowOf(2).?);
+    try testing.expectEqual(@as(u32, 5), idx.firstRowOf(3).?);
+    try testing.expect(idx.firstRowOf(4) == null);
+
+    try testing.expectEqual(@as(u32, 3), idx.rowsOf(1).?);
+
+    // 어느 줄이든 그 첫 행을 resolve하면 그 줄의 조각 0이다.
+    for (0..idx.lineCount()) |line| {
+        const pos = idx.resolve(idx.firstRowOf(line).?).?;
+        try testing.expectEqual(@as(u32, @intCast(line)), pos.line);
+        try testing.expectEqual(@as(u32, 0), pos.piece);
+    }
+}
+
+test "RowIndex: 모든 행이 정확히 한 번씩 매핑된다 — 이진 탐색이 어긋나지 않는다" {
+    // **줄 수를 홀짝·2의 거듭제곱 경계로 흔든다** — 이진 탐색은 그 자리에서 틀린다.
+    for ([_]usize{ 1, 2, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33 }) |n| {
+        var counts: [40]u32 = undefined;
+        for (0..n) |i| counts[i] = @intCast((i % 4) + 1); // 1~4행씩
+        var buf: [41]u32 = undefined;
+        const idx = buildIndex(counts[0..n], &buf);
+
+        var seen_line: u32 = 0;
+        var seen_piece: u32 = 0;
+        for (0..idx.totalRows()) |row| {
+            const pos = idx.resolve(@intCast(row)).?;
+            if (pos.line == seen_line) {
+                try testing.expectEqual(seen_piece, pos.piece);
+                seen_piece += 1;
+            } else {
+                try testing.expectEqual(seen_line + 1, pos.line); // 건너뛴 줄이 없다
+                try testing.expectEqual(@as(u32, 0), pos.piece);
+                seen_line = pos.line;
+                seen_piece = 1;
+            }
+        }
+        try testing.expectEqual(@as(u32, @intCast(n - 1)), seen_line); // 마지막 줄까지 닿았다
+    }
+}
+
+test "RowIndex: 빈 문서" {
+    var buf: [1]u32 = undefined;
+    const idx = buildIndex(&.{}, &buf);
+    try testing.expectEqual(@as(u32, 0), idx.totalRows());
+    try testing.expectEqual(@as(usize, 0), idx.lineCount());
+    try testing.expect(idx.resolve(0) == null);
+    try testing.expect(idx.firstRowOf(0) == null);
 }
 
 test "랩이 꺼지면 줄 전체가 한 조각이다 — 항등이다" {

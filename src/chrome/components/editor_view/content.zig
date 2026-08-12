@@ -45,6 +45,12 @@ pub const Props = struct {
     /// 0이 되어 위치가 0으로 눌린다) 그 clamp는 스크롤바 슬라이스에 속한다. 여기서 따로 0을 박으면
     /// 규칙이 두 곳에 생긴다.
     first_col: u16 = 0,
+    /// **첫 논리 줄에서 건너뛸 조각 수** — 랩된 줄의 *중간 행*부터 화면이 시작할 때 쓴다.
+    ///
+    /// 세로 스크롤이 시각 행 단위이려면 이것이 있어야 한다(`visual_map.RowIndex.resolve`가 주는
+    /// `piece`가 그대로 들어온다). 없으면 뷰포트가 논리 줄 경계에서만 멈출 수 있어, **랩된 줄
+    /// 하나가 화면보다 길면 그 아래를 볼 방법이 없다.**
+    first_piece: u32 = 0,
     cell_w_px: u16,
     cell_h_px: u16,
     /// 이 뷰의 폰트 크기(device px). 셀 크기와 **같은 폰트에서** 나와야 배치와 글자가 어긋나지 않는다.
@@ -129,6 +135,9 @@ pub fn build(
         var it = visual_map.pieces(expanded, view_cols, props.wrap);
         var piece_idx: u32 = 0;
         while (it.next()) |piece| : (piece_idx += 1) {
+            // **첫 줄의 앞 조각들은 화면 위로 지나간 부분이다.** 행을 세지도 배치를 채우지도
+            // 않는다 — 그 조각들은 화면에 없다.
+            if (line_idx == 0 and piece_idx < props.first_piece) continue;
             if (visual_row >= visual_out.len) break;
 
             // **빈 조각도 시각 행을 차지한다.** 그릴 글자가 없어도 그 행은 화면에서 한 줄이고 gutter가
@@ -180,6 +189,32 @@ pub fn build(
         .visual_rows = visual_row,
         .truncated_rows = truncated_rows,
     };
+}
+
+/// 이 줄이 차지하는 **시각 행 수**. 스크롤바가 문서 전체 길이를 알아야 해서 필요하다
+/// (§2 캐시 표의 "시각행 수·시각행 ↔ 논리행", L3 소유).
+///
+/// **전개를 거쳐 센다 — 열을 따로 세지 않는다.** 처음에는 `visual_map`에 "전개하지 않고 열만 세는"
+/// 경량 경로를 두었는데, 같은 규칙을 두 곳에 쓰자마자 갈렸다. 교차 검증으로 잰 불일치가 **990건 중
+/// 80건**이었고 원인이 매번 달랐다:
+///
+/// - 행 머리에서 넘치면 또 넘기던 것(뷰보다 넓은 글자)
+/// - 탭이 행 경계에서 **쪼개진다**는 것(2칸 글자와 달리 공백 여럿이라 이어진다)
+/// - `col`이 뷰 폭을 넘은 상태에서의 정수 언더플로(`가<TAB>나`·뷰 1열)
+/// - §3.8 표기가 **1칸 글자 여덟 개**로 쪼개져 여러 행에 걸치는 것
+///
+/// 마지막 하나까지 맞추려면 전개 로직을 통째로 복제해야 한다. 그래서 복제를 버리고 **전개 결과를
+/// 그대로 나눈다** — 규칙이 한 곳에만 있으므로 갈릴 수 없다.
+///
+/// `scratch`는 한 줄분이면 되고 줄마다 재사용한다. 모자라면 `expandTabs`가 절단하므로 행 수가
+/// 실제보다 적어지는데, 그것은 §3.8이 "초장문에서 기능을 줄인다"고 허용한 범위다.
+pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) u32 {
+    if (!wrap or view_cols == 0) return 1;
+    const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u16) });
+    var it = visual_map.pieces(r.text, view_cols, wrap);
+    var n: u32 = 0;
+    while (it.next()) |_| n += 1;
+    return n;
 }
 
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
@@ -597,6 +632,110 @@ fn testCols(t: []const u8) usize {
         i += step;
     }
     return n;
+}
+
+test "rowCount는 실제로 그리는 조각 수와 언제나 같다" {
+    // **이 테스트가 있는 이유**: 처음엔 "전개하지 않고 열만 세는" 경량 경로를 따로 두었는데, 같은
+    // 규칙을 두 곳에 쓰자마자 990건 중 80건이 갈렸다(원인이 매번 달랐다 — 행 머리 처리, 탭이
+    // 쪼개지는 것, 정수 언더플로, §3.8 표기가 1칸 글자 여덟 개로 나뉘는 것). 복제를 버리고 전개
+    // 결과를 그대로 세도록 바꾼 뒤 0건이 됐다.
+    //
+    // 그 복제가 되살아나지 않게 **여기서 두 경로가 같음을 고정한다.**
+    var out: [8192]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
+    const lines = [_][]const u8{
+        "",                            "a",
+        "0123456789" ** 6,
+        "가나다라마바사아자차" ** 3,
+        "\ta\tb\tc",
+        "\t\t\t가나다",
+        "a가b나c다" ** 6,
+        "ab\u{202E}cd",                "\u{202E}" ** 5,
+        "a\u{200D}\u{200D}b\u{200D}c",
+        "👨\u{200D}👩\u{200D}👧" ** 6,
+        "e\u{0301}\u{0301}가나" ** 4,
+        "  들여쓰기 있는 한글 줄입니다 길게 길게",
+        "\tx" ** 20,                   "\u{1F1F0}\u{1F1F7}" ** 8,
+        "\u{2764}\u{FE0F}" ** 10,      "\t",
+        "\t\t\t\t",
+        "가\t나",
+        "a\t가\tb", // ← 언더플로를 재현했던 모양
+        "\t가",
+        "가가\t가",
+    };
+    for (lines) |line| {
+        for ([_]u16{ 1, 2, 3, 5, 8, 13, 20, 52, 80 }) |cols| {
+            for ([_]u16{ 0, 1, 2, 4, 8 }) |tab| {
+                // 실제로 그리는 경로: 전개한 뒤 조각을 센다.
+                const r = expandTabs(line, tab, &out, .{ .count = 4000 });
+                var it = visual_map.pieces(r.text, cols, true);
+                var want: u32 = 0;
+                while (it.next()) |_| want += 1;
+
+                try testing.expectEqual(want, rowCount(line, tab, cols, true, &scratch));
+            }
+        }
+    }
+}
+
+test "first_piece: 랩된 줄의 중간 행부터 화면이 시작한다" {
+    // **세로 스크롤이 시각 행 단위이려면 이것이 있어야 한다.** 없으면 뷰포트가 논리 줄 경계에서만
+    // 멈출 수 있어, 랩된 줄 하나가 화면보다 길면 그 아래를 볼 방법이 없다.
+    const layout = geometry.compute(20, 2, .{});
+    var ops: [16]draw.Op = undefined;
+    var runs: [16]draw.Run = undefined;
+    var vrows: [8]visual_map.VisualRow = undefined;
+    var scratch: [256]u8 = undefined;
+
+    const rows = [_]Row{ .{ .bytes = "0123456789" ** 4 }, .{ .bytes = "next" } };
+    var props = testProps(layout, &rows);
+    props.wrap = true;
+
+    // 건너뛰지 않으면 첫 조각부터.
+    const all = build(props, &ops, &scratch, &runs, &vrows);
+    try testing.expectEqualStrings("012345678901", ops[0].text.runs[0].text);
+    const total = all.visual_rows;
+
+    // 두 조각을 건너뛰면 세 번째 조각이 화면 첫 행이다.
+    props.first_piece = 2;
+    const skipped = build(props, &ops, &scratch, &runs, &vrows);
+    try testing.expectEqual(@as(u32, 0), vrows[0].line);
+    try testing.expectEqual(@as(u32, 2), vrows[0].piece);
+    // **행이 정확히 둘 줄었다** — 건너뛴 조각은 세지도 배치를 채우지도 않는다.
+    try testing.expectEqual(total - 2, skipped.visual_rows);
+
+    // 첫 행이 화면 맨 위(y=0)에 온다.
+    try testing.expectEqual(@as(i32, 0), ops[0].text.origin.y);
+}
+
+test "first_piece는 첫 줄에만 적용된다 — 뒤따르는 줄이 잘리면 안 된다" {
+    const layout = geometry.compute(20, 2, .{});
+    var ops: [16]draw.Op = undefined;
+    var runs: [16]draw.Run = undefined;
+    var vrows: [8]visual_map.VisualRow = undefined;
+    var scratch: [256]u8 = undefined;
+
+    // 두 줄 다 랩된다. `first_piece`가 둘째 줄에도 걸리면 그 줄 앞부분이 사라진다.
+    const rows = [_]Row{ .{ .bytes = "aaaaaaaaaaaaaaaaaaaaaaaa" }, .{ .bytes = "bbbbbbbbbbbbbbbbbbbbbbbb" } };
+    var props = testProps(layout, &rows);
+    props.wrap = true;
+    props.first_piece = 1;
+
+    _ = build(props, &ops, &scratch, &runs, &vrows);
+    // 줄 1은 **조각 0부터** 나와야 한다.
+    var saw_line1_piece0 = false;
+    for (vrows[0..4]) |v| {
+        if (v.line == 1 and v.piece == 0) saw_line1_piece0 = true;
+    }
+    try testing.expect(saw_line1_piece0);
+}
+
+test "rowCount: 랩이 꺼지면 언제나 한 행이다" {
+    var scratch: [64]u8 = undefined;
+    try testing.expectEqual(@as(u32, 1), rowCount("0123456789" ** 10, 4, 20, false, &scratch));
+    try testing.expectEqual(@as(u32, 1), rowCount("", 4, 20, false, &scratch));
+    // 뷰 폭이 0이면 접을 수 없다 — 0으로 나누거나 무한히 도는 대신 한 행으로 둔다.
+    try testing.expectEqual(@as(u32, 1), rowCount("긴 줄", 4, 0, true, &scratch));
 }
 
 test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {

@@ -227,17 +227,16 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (void)growAtlas {
     unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !_atlasFont || !_glyphTex) return;
-    // **먼저 복사한다.** `maru_mobile_atlas_add` 가 미스 목록에서 그 항목을 지우면서 마지막
-    // 항목을 그 자리로 당겨 오므로, 인덱스를 앞으로만 진행하면 절반을 건너뛴다(실측).
-    if (n > 64) n = 64;
-    unsigned int want[64];
-    for (unsigned int i = 0; i < n; i++) want[i] = maru_mobile_missing_cp(i);
+    // **뒤에서부터 훑는다.** `maru_mobile_atlas_add` 가 미스 목록에서 그 항목을 지우면서
+    // **마지막 항목을 그 자리로** 당겨 오므로, 앞으로 진행하면 당겨진 것을 건너뛴다(실측).
+    // 뒤에서부터 가면 지워지는 자리가 항상 훑은 뒤쪽이라 앞쪽이 흔들리지 않는다 —
+    // 목록 크기를 host 가 따로 알 필요도 없어진다(그 상수를 양쪽에 두면 또 어긋난다).
     const unsigned int CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
     uint8_t *cell = calloc(CW * CH, 1);
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
     unsigned int added = 0;
-    for (unsigned int i = 0; i < n; i++) {
-        unsigned int cp = want[i];
+    for (int i = (int)n - 1; i >= 0; i--) {
+        unsigned int cp = maru_mobile_missing_cp((unsigned int)i);
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
         unsigned int col = slot >> 16, row = slot & 0xFFFF;

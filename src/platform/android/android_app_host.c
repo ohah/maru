@@ -1031,6 +1031,14 @@ static void recreateVulkan(struct android_app *app) {
 }
 
 void android_main(struct android_app *app) {
+    // **새 네이티브 스레드는 체인이 없다.** 액티비티가 파괴·재생성되면 `android_main` 이 다시
+    // 도는데, 프로세스가 살아 있으면 이 static 이 1 로 남아 콜백을 다시 안 걸어 **화면이 영영
+    // 안 그려진다**. 이전 스레드의 looper 는 이미 죽어 그 체인도 함께 사라졌으므로 여기서
+    // 0 으로 되돌리는 것이 맞다.
+    //
+    // 이 에뮬레이터에서는 액티비티가 죽을 때 프로세스도 죽어 재현되지 않았지만(실측: PID 가
+    // 바뀐다), 시스템이 프로세스를 살려 두는 경우가 있어 한 줄로 그 부류를 없앤다.
+    g_chor_started = 0;
     g_app = app;
     app->onAppCmd = onAppCmd;
     app->onInputEvent = onInputEvent;

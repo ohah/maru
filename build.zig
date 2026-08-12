@@ -439,6 +439,8 @@ pub fn build(b: *std.Build) void {
         });
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/TerminationTiming.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/TerminationWindowPolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/WebPanelHitTestGeometry.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
@@ -874,6 +876,8 @@ pub fn build(b: *std.Build) void {
         });
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/TerminationTiming.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/TerminationWindowPolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/WebPanelHitTestGeometry.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
@@ -1762,6 +1766,40 @@ pub fn build(b: *std.Build) void {
         const run_file_panel_termination_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_file_panel_termination_policy_tests.addFileArg(file_panel_termination_policy_test_bin);
         test_step.dependOn(&run_file_panel_termination_policy_tests.step);
+
+        // 종료 단계 계측은 실제 종료(앱 죽이기) 없이는 재현할 수 없어서, 시간 측정은 host가 하고 모으고
+        // 표현하는 규칙만 순수 타입으로 떼어 여기서 증명한다(요약 필드 이름·순서·반올림 고정).
+        const termination_timing_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        termination_timing_tests.addFileArg(b.path("src/platform/macos/TerminationTiming.swift"));
+        termination_timing_tests.addFileArg(b.path("tests/macos_termination_timing.swift"));
+        termination_timing_tests.addArg("-o");
+        const termination_timing_test_bin = termination_timing_tests.addOutputFileArg("maru-termination-timing-tests");
+        const run_termination_timing_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_termination_timing_tests.addFileArg(termination_timing_test_bin);
+        test_step.dependOn(&run_termination_timing_tests.step);
+
+        // 종료 중 창을 미리 숨기면 isKeyWindow가 전부 false가 되어 workspace 활성 창 마커가 사라진다. 실제 숨김은
+        // 앱을 죽여야 재현되므로 판정 규칙만 순수 타입으로 떼어 여기서 고정한다(같은 회귀의 재발 방지).
+        const termination_window_policy_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        termination_window_policy_tests.addFileArg(b.path("src/platform/macos/TerminationWindowPolicy.swift"));
+        termination_window_policy_tests.addFileArg(b.path("tests/macos_termination_window_policy.swift"));
+        termination_window_policy_tests.addArg("-o");
+        const termination_window_policy_test_bin = termination_window_policy_tests.addOutputFileArg("maru-termination-window-policy-tests");
+        const run_termination_window_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_termination_window_policy_tests.addFileArg(termination_window_policy_test_bin);
+        test_step.dependOn(&run_termination_window_policy_tests.step);
 
         const web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{
             "xcrun",

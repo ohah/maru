@@ -123,6 +123,18 @@ Java UI 스레드에서 오고 그리는 쪽은 NativeActivity 스레드라(실�
 | hit-test, 탭↔롱프레스 판정, 텍스트 선택 드래그 | **코어** | 데스크톱과 같은 의미여야 한다(롱프레스는 우클릭 자리). 합성 이벤트로 **헤드리스 검증**이 되는데, 모바일은 CI 가 없어 이 값이 특히 크다 |
 | 스크롤 관성·러버밴딩, 핀치 줌, 시스템 제스처 협조 | **플랫폼** | OS 느낌이라 직접 만들면 어색하고, 뒤로가기·엣지 스와이프와 충돌한다. 결과(Δ·scale)만 넘긴다 |
 
+**IME 가 입력을 고쳐 쓰지 못하게 한다.** 두 OS 다 텍스트 입력의 기본값이 **글 쓰기용**이라
+자동 대문자·자동 수정·스마트 문장부호가 켜져 있다. 터미널에서는 그것이 곧 손상이다 — iOS 는
+아무것도 선언하지 않아 `"` 가 `“ ”` 로, `--` 가 `- –` 로 바뀌어 들어갔다(실측). **셸 따옴표도
+`--` 플래그도 못 치는 상태였다.** 두 플랫폼이 같은 것을 끈다:
+
+| | 무엇으로 |
+|---|---|
+| iOS | `UITextInputTraits` — autocapitalization·autocorrection·spellChecking·smartQuotes·smartDashes·smartInsertDelete 를 전부 끈다 |
+| Android | `EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS` + `IME_FLAG_NO_EXTRACT_UI`·`NO_FULLSCREEN`·`ACTION_NONE` |
+
+**키보드 종류(`keyboardType`)는 안 건드린다** — ASCII 배열을 요구하면 한글 입력이 불편해진다.
+
 **버튼은 좌표로 실행하지 않는다.** chrome 이 이미 `UiActionId` + `snapshot_generation` 계약을
 갖고 있고([chrome 상호작용 이관](chrome-interaction-migration.md)의 intent table), 모바일도
 그 경로를 쓴다. 좌표나 인덱스를 들고 down→up 을 건너면 **그 사이에 화면이 바뀌었을 때 엉뚱한

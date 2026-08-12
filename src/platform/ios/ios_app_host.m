@@ -314,6 +314,19 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     if (!b) return;
     NSLog(@"MARU_INPUT text=%@ total=%u", text, maru_mobile_input(b, strlen(b)));
 }
+/// **IME 가 입력을 고쳐 쓰지 못하게 한다.** `UITextInput` 은 `UITextInputTraits` 를 함께 갖고,
+/// 아무것도 선언하지 않으면 iOS 기본값이 붙는다 — 자동 대문자·자동 수정·**스마트 문장부호**.
+/// 그래서 `"` 가 `“ ”` 로, `--` 가 `- –` 로 바뀌어 들어갔다(시뮬레이터 실측). 셸에서 따옴표도
+/// `--` 플래그도 못 치는 상태였다. Android 는 이미 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 로 같은
+/// 것을 끄고 있었고, 이쪽만 비어 있었다.
+///
+/// `keyboardType` 은 **안 건드린다** — ASCII 배열을 요구하면 한글 입력이 불편해진다.
+- (UITextAutocapitalizationType)autocapitalizationType { return UITextAutocapitalizationTypeNone; }
+- (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
+- (UITextSpellCheckingType)spellCheckingType { return UITextSpellCheckingTypeNo; }
+- (UITextSmartQuotesType)smartQuotesType { return UITextSmartQuotesTypeNo; }
+- (UITextSmartDashesType)smartDashesType { return UITextSmartDashesTypeNo; }
+- (UITextSmartInsertDeleteType)smartInsertDeleteType { return UITextSmartInsertDeleteTypeNo; }
 
 - (void)deleteBackward {
     if (self.doc.length) {  // 조합 중이면 조합에서 지운다 — 코어는 안 건드린다

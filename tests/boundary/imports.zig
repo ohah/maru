@@ -1924,6 +1924,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "killAndReapTerminalDrainChild" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "runTerminalDrainProofChild" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "dispatchTerminalDrainProofChild" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalDrainMarkerIsFifo" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "rpc_decoder_callback_active" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRpcDecodedExecute" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRpcDecoded" },

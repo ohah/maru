@@ -131,9 +131,12 @@ pub const IncidentWriterReceipt = struct {
     pid: u64 = 0,
     process_nonce: u64 = 0,
     service_addr: usize = 0,
+    app_instance_nonce: u128 = 0,
     slot_index: u8 = 0,
     record_generation: u64 = 0,
+    incident_sequence: u64 = 0,
     digest: [32]u8 = [_]u8{0} ** 32,
+    receipt_digest: [32]u8 = [_]u8{0} ** 32,
 };
 
 pub const IncidentWriterHandoff = struct {
@@ -236,15 +239,22 @@ pub const ConnectionIncidentService = struct {
         const record = self.ring.records[slot];
         if (!validEnvelope(&record) or (self.writer_inflight_slots & bit) != 0) return error.InvalidAuthority;
         const generation = std.mem.readInt(u64, record[8..16], .little);
+        var receipt: IncidentWriterReceipt = .{
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .service_addr = self.self_addr,
+            .app_instance_nonce = self.app_instance_nonce,
+            .slot_index = slot,
+            .record_generation = generation,
+            .incident_sequence = if (slot < incident_slot_count)
+                std.mem.readInt(u64, record[36..44], .little)
+            else
+                0,
+            .digest = record[224..256].*,
+        };
+        receipt.receipt_digest = writerReceiptDigest(receipt);
         out.* = .{
-            .receipt = .{
-                .pid = self.pid,
-                .process_nonce = self.process_nonce,
-                .service_addr = self.self_addr,
-                .slot_index = slot,
-                .record_generation = generation,
-                .digest = record[224..256].*,
-            },
+            .receipt = receipt,
             .record = record,
         };
         self.pending_slots &= ~bit;
@@ -263,9 +273,8 @@ pub const ConnectionIncidentService = struct {
         if (!self.validAuthority(current_pid, current_process_nonce) or
             handoff.receipt.pid != current_pid or handoff.receipt.process_nonce != current_process_nonce or
             handoff.receipt.service_addr != @intFromPtr(self) or handoff.receipt.slot_index >= self.ring.records.len or
-            !validEnvelope(&handoff.record) or
-            std.mem.readInt(u64, handoff.record[8..16], .little) != handoff.receipt.record_generation or
-            !std.mem.eql(u8, handoff.record[224..256], &handoff.receipt.digest)) return error.InvalidAuthority;
+            handoff.receipt.app_instance_nonce != self.app_instance_nonce or !validWriterHandoff(handoff))
+            return error.InvalidAuthority;
         lock(&self.mutex);
         defer self.mutex.unlock();
         if (!self.validAuthority(current_pid, current_process_nonce)) return error.InvalidAuthority;
@@ -301,8 +310,43 @@ pub const ConnectionIncidentService = struct {
 
 fn pristineWriterHandoff(value: *const IncidentWriterHandoff) bool {
     return value.receipt.pid == 0 and value.receipt.process_nonce == 0 and value.receipt.service_addr == 0 and
+        value.receipt.app_instance_nonce == 0 and
         value.receipt.slot_index == 0 and value.receipt.record_generation == 0 and
-        allZero(&value.receipt.digest) and allZero(&value.record);
+        value.receipt.incident_sequence == 0 and
+        allZero(&value.receipt.digest) and allZero(&value.receipt.receipt_digest) and allZero(&value.record);
+}
+
+/// 파일 I/O 경계가 서비스 mutex 없이도 receipt 필드 전체의 이동 중 drift를 거부하게 한다.
+/// 이 digest는 같은 프로세스의 악의적 코드를 막는 비밀 seal이 아니라, 값 인계의 구조적 결속이다.
+fn writerReceiptDigest(receipt: IncidentWriterReceipt) [32]u8 {
+    var bytes: [89]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], receipt.pid, .little);
+    std.mem.writeInt(u64, bytes[8..16], receipt.process_nonce, .little);
+    std.mem.writeInt(u64, bytes[16..24], @intCast(receipt.service_addr), .little);
+    std.mem.writeInt(u128, bytes[24..40], receipt.app_instance_nonce, .little);
+    bytes[40] = receipt.slot_index;
+    std.mem.writeInt(u64, bytes[41..49], receipt.record_generation, .little);
+    std.mem.writeInt(u64, bytes[49..57], receipt.incident_sequence, .little);
+    @memcpy(bytes[57..89], &receipt.digest);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(&bytes, &digest, .{});
+    return digest;
+}
+
+pub fn validWriterHandoff(handoff: IncidentWriterHandoff) bool {
+    if (!validEnvelope(&handoff.record) or handoff.receipt.pid == 0 or handoff.receipt.process_nonce == 0 or
+        handoff.receipt.service_addr == 0 or handoff.receipt.app_instance_nonce == 0 or
+        handoff.receipt.slot_index >= incident_slot_count + aggregate_slot_count or
+        handoff.receipt.record_generation == 0 or
+        !std.mem.eql(u8, &writerReceiptDigest(handoff.receipt), &handoff.receipt.receipt_digest) or
+        std.mem.readInt(u64, handoff.record[8..16], .little) != handoff.receipt.record_generation or
+        !std.mem.eql(u8, handoff.record[224..256], &handoff.receipt.digest)) return false;
+    if (handoff.receipt.slot_index < incident_slot_count) {
+        return handoff.record[2] == 1 and handoff.receipt.incident_sequence != 0 and
+            std.mem.readInt(u128, handoff.record[20..36], .little) == handoff.receipt.app_instance_nonce and
+            std.mem.readInt(u64, handoff.record[36..44], .little) == handoff.receipt.incident_sequence;
+    }
+    return handoff.record[2] == 2 and handoff.receipt.incident_sequence == 0;
 }
 
 fn rangesOverlap(a_addr: usize, a_len: usize, b_addr: usize, b_len: usize) bool {

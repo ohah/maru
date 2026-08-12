@@ -22,6 +22,8 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     defer allocator.free(backend);
     const poison = try readSource(allocator, "src/platform/macos/session_host/client_poison.zig");
     defer allocator.free(poison);
+    const storage = try readSource(allocator, "src/platform/macos/session_host/incident_artifact_store.zig");
+    defer allocator.free(storage);
 
     try std.testing.expectEqual(@as(usize, 1), count(incident, "const std = @import(\"std\");"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub const payload_size: usize = 208;"));
@@ -32,6 +34,11 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(incident, "pub fn recordRepeat("));
     try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b core "));
     try std.testing.expectEqual(@as(usize, 11), count(incident, "test \"CR0b writer"));
+    try std.testing.expectEqual(@as(usize, 6), count(storage, "test \"CR0b 저장소"));
+    const storage_product = storage[0 .. std.mem.indexOf(u8, storage, "\ntest \"") orelse storage.len];
+    try std.testing.expectEqual(@as(usize, 1), count(storage, "const incident = @import(\"connection_incident\");"));
+    try std.testing.expectEqual(@as(usize, 0), count(storage, "client.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(storage, "host_adapter.zig"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub fn takePendingForWriter("));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub fn completeWriterHandoff("));
     try std.testing.expectEqual(@as(usize, 0), count(client, "takePendingForWriter"));
@@ -40,13 +47,25 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(client, "completeWriterHandoff"));
     try std.testing.expectEqual(@as(usize, 0), count(adapter, "completeWriterHandoff"));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "completeWriterHandoff"));
+    try std.testing.expectEqual(@as(usize, 0), count(storage_product, "takePendingForWriter("));
+    try std.testing.expectEqual(@as(usize, 0), count(storage_product, "completeWriterHandoff("));
     try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductSourcesExcept(allocator, "takePendingForWriter(", "observability/connection_incident.zig"),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "takePendingForWriter(",
+            "observability/connection_incident.zig",
+            "platform/macos/session_host/incident_artifact_store.zig",
+        ),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductSourcesExcept(allocator, "completeWriterHandoff(", "observability/connection_incident.zig"),
+        try countProductSourcesExceptTwo(
+            allocator,
+            "completeWriterHandoff(",
+            "observability/connection_incident.zig",
+            "platform/macos/session_host/incident_artifact_store.zig",
+        ),
     );
     try std.testing.expectEqual(@as(usize, 0), count(client, "connection_incident.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(adapter, "connection_incident.zig"));
@@ -71,6 +90,15 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
 }
 
 fn countProductSourcesExcept(allocator: std.mem.Allocator, needle: []const u8, excluded_path: []const u8) !usize {
+    return countProductSourcesExceptTwo(allocator, needle, excluded_path, "");
+}
+
+fn countProductSourcesExceptTwo(
+    allocator: std.mem.Allocator,
+    needle: []const u8,
+    excluded_path: []const u8,
+    second_excluded_path: []const u8,
+) !usize {
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
     var walker = try dir.walk(allocator);
@@ -78,7 +106,8 @@ fn countProductSourcesExcept(allocator: std.mem.Allocator, needle: []const u8, e
     var total: usize = 0;
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        if (std.mem.eql(u8, entry.path, excluded_path)) continue;
+        if (std.mem.eql(u8, entry.path, excluded_path) or
+            (second_excluded_path.len != 0 and std.mem.eql(u8, entry.path, second_excluded_path))) continue;
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
         defer allocator.free(path);
         const source = try readSource(allocator, path);

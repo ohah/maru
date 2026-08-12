@@ -224,9 +224,9 @@ const editor_fixture_lines = [_][]const u8{
     long_line,
     // **오른쪽 경계에 2칸 글자가 걸치는 줄**(랩이 꺼진 화면). `expandTabs`의 상한은 cluster의
     // **시작** 열만 보므로 걸친 글자가 통째로 들어가고, 자르는 것은 렌더러의 픽셀 예산이다 —
-    // 그 결과가 반쪽인지 통째인지 빈칸인지는 **캡처로만** 보인다. 본문이 52열이므로 z를 51개 두면
-    // 한글이 열 51~52를 요구하는데 52는 화면 밖이다 — 정확히 걸치는 자리다.
-    ("z" ** 51) ++ "한글",
+    // 그 결과가 반쪽인지 통째인지 빈칸인지는 **캡처로만** 보인다. 본문이 50열이므로 z를 49개 두면
+    // 한글이 열 49~50을 요구하는데 50은 화면 밖이다 — 정확히 걸치는 자리다(폭이 바뀌면 함께 옮긴다).
+    ("z" ** 49) ++ "한글",
 };
 
 /// §3.8 적대적 입력 fixture. **실제 Trojan Source 패턴을 담는다.**
@@ -245,16 +245,16 @@ const editor_hazard_lines = [_][]const u8{
     "",
     "// 위에 숨은 문자가 있다(가족 이모지 줄은 정상)",
     "",
-    // **§3.8 표기가 오른쪽 경계에 걸치는 줄.** 본문이 52열이고 표기가 8칸이므로, BiDi 문자를
-    // 열 48에 두면 표기가 48~55를 요구해 **네 칸이 화면 밖**이다.
+    // **§3.8 표기가 오른쪽 경계에 걸치는 줄.** 본문이 50열이고 표기가 8칸이므로, BiDi 문자를
+    // 열 46에 두면 표기가 46~53을 요구해 **네 칸이 화면 밖**이다(폭이 바뀌면 함께 옮긴다).
     //
     // 표기를 통째로 빼면 앞뒤가 붙어 위험 문자의 존재가 사라진다 — 적대적 검증이 실제로 그 상태를
     // 만들었다(`ab<U+202E>cd` → `abcd`). 잘려서라도 남아야 §3.8의 불변식이 선다. 그것을 **캡처로**
     // 고정하는 것이 이 줄의 몫이다(단위 테스트는 문자열만 보고 화면을 보지 않는다).
-    ("x" ** 48) ++ "\u{202E}end",
+    ("x" ** 46) ++ "\u{202E}end",
     // 한 cluster에 hazard cp와 정상 cp가 함께 있는 경우(ZWJ가 앞 글자에 흡수된다). 이 모양이
     // **정수 언더플로 패닉**을 만들었다 — 캡처가 만들어진다는 것 자체가 그 회귀의 가드다.
-    ("y" ** 44) ++ "a\u{200D}\u{200D}b\u{200D}c",
+    ("y" ** 42) ++ "a\u{200D}\u{200D}b\u{200D}c",
 };
 
 /// §4.2 표시 폭 fixture. **라벨은 모두 8칸, 내용은 4칸 또는 6칸, `|`는 20열**이 되도록 짰다 —
@@ -272,20 +272,27 @@ const editor_wrap_lines = [_][]const u8{
     // **자.** 랩이 몇 열에서 접히는지 캡처에서 **읽을 수 있게** 한다 — 글자가 화면 오른쪽에 닿아
     // 끝나면 "폭에 맞게 접혔는지"와 "넘쳐서 잘렸는지"가 그림상 같아 보인다. 이어지는 행의 첫 숫자가
     // 앞 행 마지막 숫자 다음이면 조각이 정확히 맞물린 것이다.
-    "0123456789" ** 12,
+    //
+    // **주기가 7인 이유**: 본문 폭(50)과 서로소여야 행마다 시작 숫자가 달라진다. 10주기를 쓰다가
+    // 스크롤바가 자리를 먹어 폭이 50이 되자 주기와 정확히 맞아떨어져 **모든 행이 `0`으로 시작**했고,
+    // 그러면 랩이 통째로 깨져도 그림이 같아 자가 아무것도 판정하지 못한다(실제로 그 상태가 됐다).
+    "0123456" ** 18,
     "fn wrap(text: []const u8) void {",
     "    // This ASCII comment is deliberately longer than the content width so it folds onto the next visual row.",
     "    // 한글 주석도 본문 폭을 넘도록 길게 씁니다. 두 칸짜리 글자는 행 끝에 한 칸을 남기므로 나눗셈 근사와 어긋납니다.",
     "",
     "    return;",
     "}",
-    // **2칸 글자가 행 경계에 정확히 걸치는 줄.** 본문이 52열이므로 51칸을 ASCII로 채우면 다음
-    // 한글이 51~52를 요구하는데 52가 마지막 칸이라 **들어갈 수 없다** — 그 칸을 비우고 넘겨야 한다.
+    // **2칸 글자가 행 경계에 정확히 걸치는 줄.** 본문이 50열이므로 49칸을 ASCII로 채우면 다음
+    // 한글이 49~50을 요구하는데 50이 마지막 칸이라 **들어갈 수 없다** — 그 칸을 비우고 넘겨야 한다.
+    //
+    // **스크롤바가 자리를 먹으면서 본문이 52 → 50열이 됐다**(§4.1a). 이 상수는 폭에 매여 있으므로
+    // 폭이 바뀌면 함께 옮겨야 한다 — 안 맞추면 경계에 안 걸려 가드가 조용히 무력해진다.
     //
     // 이 줄이 없으면 "2칸 글자를 쪼개지 않는다"는 계약에 **가드가 없다.** 자연스러운 한글 문장은
     // `col`이 짝수로만 늘어 52에서 정확히 떨어지므로, 경계 판정을 `col + w > 폭`에서 `col >= 폭`으로
     // 바꿔도 그림이 같다(적대적 검증이 실제로 그 상태를 통과시켰다).
-    ("x" ** 51) ++ "가나다",
+    ("x" ** 49) ++ "가나다",
     // **왼쪽 경계에 2칸 글자가 걸치는 줄.** `editor-hscroll`이 20열을 밀므로, 19칸 뒤의 한글이
     // 열 19~20을 요구해 **첫 칸이 화면 밖**이 된다 — 반쪽을 그릴 수 없으니 통째로 빼야 한다.
     //
@@ -325,7 +332,15 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const cell_h_px = scenario.cell_h_px;
     const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
     const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
-    const total_cols: u16 = @intCast(viewport_w / cell_w_px);
+    // **스크롤바가 자리를 먹는다**(§4.1a) — 본문 위에 겹치면 오른쪽 끝 글자가 막대에 가려지고,
+    // §3.8이 "보이는 것과 파일 내용이 달라지면 안 된다"를 요구하는 편집기에서 그것은 특히 나쁘다.
+    const scrollbar_metrics = chrome.ui.scroll_area.ScrollbarMetrics{
+        .width_px = 8,
+        .inset_x_px = 4,
+        .min_thumb_px = 24,
+    };
+    const scrollbar_gutter_px: u32 = scrollbar_metrics.gutterPx();
+    const total_cols: u16 = @intCast((viewport_w -| scrollbar_gutter_px) / cell_w_px);
     const lines: []const []const u8 = switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
@@ -467,10 +482,37 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .font_px = scenario.font_px,
     }, buffers.ops[cw.ops..], buffers.text_bytes[cw.bytes..], buffers.text_runs[cw.runs..]);
 
+    // **문서 전체의 시각 행 수**가 있어야 막대 길이가 나온다(§4.1a) — 논리 줄로 세면 랩된 문서에서
+    // 실제보다 길어 보인다. 화면에 그린 행이 아니라 **문서 전체**를 세는 것이 요점이다.
+    var sb_counts: [row_capacity]u32 = undefined;
+    var sb_scratch: [4096]u8 = undefined;
+    const sb_counted = @min(line_count, row_capacity);
+    for (lines[0..sb_counted], 0..) |line, i| {
+        sb_counts[i] = editor_view.content.rowCount(line, 4, layout.content.width, wrap_on, &sb_scratch).rows;
+    }
+    var sb_total: u32 = 0;
+    for (sb_counts[0..sb_counted]) |rows| sb_total +|= rows;
+
+    const sw = editor_view.scrollbar.build(.{
+        .content = .{
+            .x = 0,
+            .y = 0,
+            .w = @floatFromInt(total_cols * cell_w_px),
+            // **실제로 보이는 높이**여야 한다. 창 전체 높이를 주면 문서가 늘 다 들어간다고 판정돼
+            // 막대가 안 그려진다(스크롤 시나리오는 화면을 일부러 좁힌다).
+            .h = @floatFromInt(@as(u32, visual_budget) * cell_h_px),
+            .gutter_w = @floatFromInt(scrollbar_gutter_px),
+        },
+        .total_visual_rows = sb_total,
+        .first_visual_row = @intCast(@min(first_line, std.math.maxInt(u32))),
+        .cell_h_px = cell_h_px,
+        .metrics = scrollbar_metrics,
+    }, buffers.ops[cw.ops + gw.ops ..]);
+
     return .{
         // 아직 hit-test 대상이 없다(줄 번호 클릭은 N2의 줄 선택, 본문 클릭은 캐럿 배치다). 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
-        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. gw.ops + cw.ops] },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0 .. gw.ops + cw.ops + sw.ops] },
     };
 }
 

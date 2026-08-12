@@ -16,7 +16,7 @@ flowchart TD
     chrome["L3 chrome (src/chrome): tokens·ChromeDraw·components·ChromeState·Host"] -->|"props로 모델만 읽음"| session
     session["L2 session core (src/session): workspace·split/tab/pane ops·IME·scroll·reorder"] --> contract
     contract["L1 renderer 중립 계약 (src/renderer): DrawList·Glyph*Frame"]
-    adapter["L4 platform adapter (platform/macos, 후속 platform/linux…): CoreText·render projection·GPU 백엔드·ABI·OS host"]
+    adapter["L4 platform adapter (platform/macos · platform/{mobile,ios,android} · 후속 platform/linux…): CoreText·render projection·GPU 백엔드·ABI·OS host"]
     adapter -.->|"OS만 담당, 위 3층을 구현/투영"| contract
     boundary["check-boundaries: 의존은 아래로만. L1~L3에 OS 타입(Metal·CoreText·AppKit) 0"] -.-> session
 ```
@@ -26,7 +26,9 @@ flowchart TD
 | **L1 renderer 중립 계약** | `src/renderer/` (존재) | `RenderSnapshot→DrawList→Glyph*Frame` + native DTO 투영(`metal_frame` — §8로 platform에서 이주, 이름만 "Metal"). 백엔드 무관 frame. | **재사용**(Ghostty가 같은 모양으로 입증) |
 | **L2 session core** | `src/session/` (신설) | workspace 모델·직렬화·복원, split/tab/pane 트리+연산, IME 결정, scroll/reorder 수학, **컨트롤 플레인/이동성 골격**(surface_id·window_membership·window_graph·live_surface_registry generic·control_plane wire·control_surface DTO·control_dispatch 라우터 — surface identity·scope 판정·JSON-RPC 스키마/프레이밍·move/merge 순수 로직) | **재사용**(순수 로직, OS 무관) |
 | **L3 chrome** | `src/chrome/` (신설) | tokens, ChromeDraw(semantic), components(view+hitTest), ChromeState, ChromeHost. session을 **props로만** 읽음 | **재사용**(theme/백엔드만 가장자리) |
-| **L4 platform adapter** | `platform/macos/` (+ 후속 OS) | CoreText shaper/raster, GPU 백엔드(Metal/WebGPU — L1 `metal_frame` DTO를 GPU로 그림), ABI, OS host(윈도우·입력·IME·PTY·클립보드) | **타깃별 신규** |
+| **L4 platform adapter** | `platform/macos/`, `platform/{mobile,ios,android}/` (+ 후속 OS) | CoreText shaper/raster, GPU 백엔드(Metal/Vulkan/WebGPU — L1 `metal_frame` DTO를 GPU로 그림), ABI, OS host(윈도우·입력·IME·PTY·클립보드) | **타깃별 신규** |
+
+**L4 안에 공유 하위층이 하나 있다(모바일).** `platform/mobile`은 iOS·Android가 함께 쓰는 C ABI + Zig 브리지이고 **OS 호출이 0**이다 — 창이 하나뿐이고, 좌표가 논리 px이고, 터치가 1급 입력이라는 점이 두 타깃의 공통이고 macOS와의 차이다. GPU 백엔드는 공유하지 않는다(Metal↔Vulkan). 계약은 [모바일 플랫폼](mobile-platform.md)이 단일 출처다.
 
 **의존 방향**: L3→L2→L1, L4가 가장자리에서 셋을 구현/투영. L1~L3에 OS 타입이 새지 않는다(check-boundaries로 강제 — §8).
 

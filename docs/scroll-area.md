@@ -37,8 +37,21 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
   thumb을 끌면 thumb rect가 바뀌어 tree가 매 프레임 새로 발행되므로 기본 `reconcile`이 매번 취소했다.
 - Session Dock 스크롤바를 content rect **안쪽**에 놓아 카드·버튼 위에 겹쳤다.
 - Session Dock의 로딩 스켈레톤 quad가 clip을 안 실어 스크롤 영역 밖까지 그려졌다.
+- Session Dock에서 펼친 카드를 스크롤로 목록 위까지 올리면 그 배경이 **고정 header/scope 위에 통째로**
+  그려졌다. clip은 정확히 실렸지만 그 값이 면적 0이었고, backend quad 규약은 폭 0을 **"클립 없음"**으로
+  읽는다(`maru_metal_shader.h`의 `clip.z == 0`). 즉 "한 픽셀도 안 보인다"가 "전부 보인다"로 뒤집혔다.
+  → **면적 0 clip을 든 quad는 발행하지 않는다.** `ui.paint`가 published entry에서 한 번 거르고,
+  `chrome_draw_lowering.appendBackgroundQuads`가 component 직접 발행 quad까지 마지막으로 거른다.
+  셀 텍스트 경로는 이미 맞게 처리하고 있었다(`maru_draw_cells_clipped`가 빈 scissor run을 건너뛴다) —
+  그래서 글자는 안 새고 배경만 샜다.
 
-넷 다 "스크롤 컨테이너라면 당연히 지켜야 하는 것"인데, 소유자가 없어서 소비처마다 다시 발견해야 했다.
+  **왜 골든이 이것을 못 잡았나**: Chrome Lab은 같은 도크를 렌더하면서도 제품과 **다른 lowerer**를 탄다
+  (`metal_lowering.lower`). 그 경로의 `appendQuad`는 `Op.Quad.clip`을 통째로 버리고 있어서, Lab 캡처는
+  이 결함을 재현조차 할 수 없었다 — 자를 것이 애초에 없으니 "안 잘려 새는" 그림도 안 나온다. 두 host가
+  같은 값을 보게 고쳤다(clip 전달 + 면적 0 skip). 이 갈라짐은 §"scrollTextViewport"가 "host마다 다시
+  계산하지 않는다 — 제품 host와 Lab이 갈리면 골든이 제품과 다른 그림을 증명한다"고 경고한 그 자리다.
+
+다섯 다 "스크롤 컨테이너라면 당연히 지켜야 하는 것"인데, 소유자가 없어서 소비처마다 다시 발견해야 했다.
 `ScrollArea`는 그 규율을 **한 번만** 맞게 구현해 두는 자리다.
 
 ## 2. 경계 — ScrollArea가 소유하는 것과 소유하지 않는 것

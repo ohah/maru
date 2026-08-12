@@ -960,7 +960,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       persistent-session-host의 2c3e 계약을 단일 출처로 따른다.
       C3 첫 RED는 EOF 3행, response 전 RX 3행, response 뒤 RX 3행, malformed/unknown-correlation 2행,
       unread revoke 대 queued TX 1행인 exact 12개 actual-socket 시나리오다.
-      response 전 RX 3행은 legacy/generation 공통 제품 fixture로 구현됐고 나머지 9행은 RED다.
+      12행 모두 legacy/generation 공통 제품 fixture로 구현됐고 C3 source boundary가 owner와 순서를 고정한다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

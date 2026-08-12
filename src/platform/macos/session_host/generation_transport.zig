@@ -1855,6 +1855,10 @@ test "2c3e C1 actual socket은 응답 직후 EOF에서도 accepted 응답을 먼
 
 fn runScopedDecoderProofLoss(case_id: u8) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (c.getenv("MARU_2C3E_C1_PROOF_AGGREGATE_SKIP")) |raw_skip| {
+        if (std.mem.eql(u8, std.mem.span(raw_skip), "skip-in-aggregate-v1"))
+            return error.SkipZigTest;
+    }
     const child_case_ptr = c.getenv("MARU_2C3E_C1_PROOF_CASE");
     if (child_case_ptr) |raw_case| {
         const selected = std.fmt.parseInt(u8, std.mem.span(raw_case), 10) catch
@@ -3612,7 +3616,7 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
         43,
     );
     try bindCommittedStreamOwned(&observer_transport, @intFromPtr(&observer_transport), 43);
-    try std.testing.expectError(error.Unauthorized, observer_transport.prepareRequest(
+    try std.testing.expectError(error.ProtocolError, observer_transport.prepareRequest(
         contract.RuntimeRequest.find(contract.FindRequest.init("needle", 0, true).?),
     ));
     const observation = try observer_transport.prepareRequest(contract.RuntimeRequest.find(

@@ -26814,6 +26814,18 @@ test "C3-3b6 AppSession은 app quit detach가 explicit terminate를 덮지 않�
         try std.testing.expectEqual(@intFromEnum(QuitDecision.accepted), shutdown_frame.quit_decision);
         try std.testing.expect(app_quitting);
 
+        // shutdown admin이 terminate를 끝낸 뒤에도 generation runtime.ended는 frame pump가 source-zero로
+        // 소비해야 한다. 이를 건너뛰면 deinit이 live attachment를 파괴하는 잘못을 숨기게 된다.
+        var shutdown_pump = try app_remote_backend.?.backend().pump(first.rt.handle);
+        var saw_shutdown_ended = false;
+        var shutdown_attempts: usize = 0;
+        while (shutdown_attempts < 100 and !saw_shutdown_ended) : (shutdown_attempts += 1) {
+            const summary = try shutdown_pump.drainAvailable();
+            saw_shutdown_ended = summary.ended != null;
+            if (!saw_shutdown_ended) _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(saw_shutdown_ended);
+
         // deinit이 host-backed Term을 **terminate**한다(detach 아님).
         session.deinit();
 

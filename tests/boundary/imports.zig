@@ -363,6 +363,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "executePreparedBlockingRpcStorageUntil", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preparedBlockingRpcStorageMatches", .receiver_type = immutable, .class = .guarded },
         .{ .name = "refreshBufferedAuthorityEvidence", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "ingestReadableOutOfBandEvidence", .receiver_type = mutable, .class = .guarded },
         .{ .name = "runtimeInventory", .receiver_type = mutable, .class = .guarded },
         .{ .name = "runtimeInventoryBounded", .receiver_type = mutable, .class = .guarded },
         .{ .name = "runtimeInventoryUntil", .receiver_type = mutable, .class = .guarded },
@@ -513,6 +514,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "executePreparedBlockingRpcStorageUntil", .funnel = "executePreparedBlockingRpcStorageUntil", .gate = "beginPublicMutation" },
         .{ .receiver = "preparedBlockingRpcStorageMatches", .funnel = "preparedBlockingRpcStorageMatches", .gate = "beginPublicMutation" },
         .{ .receiver = "refreshBufferedAuthorityEvidence", .funnel = "refreshBufferedAuthorityEvidence", .gate = "requireBlockingMode" },
+        .{ .receiver = "ingestReadableOutOfBandEvidence", .funnel = "ingestReadableOutOfBandEvidence", .gate = "requireBlockingMode" },
         .{ .receiver = "runtimeInventory", .funnel = "runtimeInventory", .gate = "requireBlockingMode" },
         .{ .receiver = "runtimeInventoryBounded", .funnel = "runtimeInventoryBounded", .gate = "requireBlockingMode" },
         .{ .receiver = "runtimeInventoryUntil", .funnel = "runtimeInventoryUntil", .gate = "requireBlockingMode" },
@@ -1480,6 +1482,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "pumpPendingOutputGuarded" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpPendingOutputUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendDontWait" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "ingestReadableOutOfBandEvidence" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pollReadableOrTerminal" },
             },
         },
         .{
@@ -2368,14 +2372,22 @@ test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
     };
     for (forbidden) |needle|
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
-    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "*anyopaque"));
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(source, "*anyopaque"));
     const decoder_start = std.mem.indexOf(u8, source, "pub const RpcDecoder =") orelse
         return error.TestUnexpectedResult;
-    const decoder_end = std.mem.indexOfPos(u8, source, decoder_start, "fn typeContainsPointer") orelse
+    const decoder_end = std.mem.indexOfPos(u8, source, decoder_start, "pub const RpcPreDecodeDisposition =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(source[decoder_start..decoder_end], "*anyopaque"),
+    );
+    const pre_decode_start = std.mem.indexOfPos(u8, source, decoder_end, "pub const RpcPreDecode =") orelse
+        return error.TestUnexpectedResult;
+    const pre_decode_end = std.mem.indexOfPos(u8, source, pre_decode_start, "fn typeContainsPointer") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source[pre_decode_start..pre_decode_end], "*anyopaque"),
     );
 }
 
@@ -2501,7 +2513,7 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
     try std.testing.expectEqual(@as(usize, methods.len), countOccurrences(product_source, "    pub fn "));
     for (methods) |signature|
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(product_source, signature));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(product_source, "*anyopaque"));
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(product_source, "*anyopaque"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "pub fn call("));
     const facade_start = std.mem.indexOf(u8, product_source, "pub const GenerationTransport = struct") orelse
         return error.TestUnexpectedResult;

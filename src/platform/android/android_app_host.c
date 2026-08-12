@@ -10,6 +10,7 @@
 #include <android_native_app_glue.h>
 #include <android/log.h>
 #include <android/bitmap.h>
+#include <android/asset_manager.h>
 #include <jni.h>
 #include <android/choreographer.h>
 #include <vulkan/vulkan.h>
@@ -49,8 +50,17 @@ static struct {
     VkSemaphore acquire_sem, submit_sem;
     VkFence fence;
     VkImageView glyph_view, icon_view;
-    VkImage glyph_image;   // 온디맨드 성장은 view 가 아니라 image 에 복사한다
+    VkImage glyph_image, icon_image;   // 온디맨드 성장은 view 가 아니라 image 에 복사한다
+    VkDeviceMemory glyph_mem, icon_mem;
+    VkSampler sampler;
+    VkDescriptorSetLayout dsl;
+    VkDescriptorPool dpool;
     uint32_t glyph_w, glyph_h;
+    // 창이 리사이즈되면 스왑체인을 다시 만들어야 한다. 안 그러면 화면이 영구히 언다.
+    int needs_recreate;
+    // 루프 지역 변수로 두면 teardown 이 g 를 지워도 남아, 재개 후 루프와 choreographer 가
+    // 둘 다 그린다.
+    int chor_started;
     VkDescriptorSet dset;
     VkBuffer quad_buf;        // draw-list 를 통째로 올리는 자리
     VkDeviceMemory quad_mem;
@@ -73,6 +83,7 @@ static struct {
 // drawFrame 은 app 을 안 받는다 — 온디맨드 래스터가 JNI 를 쓰려면 필요해서 들고 있는다.
 static struct android_app *g_app = NULL;
 static void growAtlas(struct android_app *app);  // drawFrame 이 먼저라 선언이 필요하다
+static void recreateVulkan(struct android_app *app);
 static uint8_t *g_glyph_px = NULL;
 static uint32_t g_gw, g_gh;
 
@@ -84,11 +95,7 @@ static uint32_t g_gw, g_gh;
 // 좌표는 호스트 아틀라스와 같은 배치를 쓴다(행 r 의 baseline = r*CH + CH - 8) — 그래야
 // 같은 셰이더가 두 아틀라스를 똑같이 샘플링한다.
 static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32_t *ow, uint32_t *oh) {
-    // iOS 쪽과 같은 글자 집합.
-    static const char *CHARS =
-        "$ zig build test All 11 passed.git status --short"
-        "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch"
-        "한글 터미널 세션 목록 설정 검색 알림";
+    static const char *CHARS = MARU_ATLAS_PREBAKE;   // 집합은 공용 헤더가 소유한다
     const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H, COLS = MARU_ATLAS_COLS;
 
     // UTF-8 → BMP 코드포인트, 중복 제거.
@@ -104,8 +111,9 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         for (uint32_t i = 0; i < n; i++) if (cps[i] == cp) { dup = 1; break; }
         if (!dup) cps[n++] = (uint16_t)cp;
     }
-    uint32_t rows = (n + COLS - 1) / COLS;
-    uint32_t W = COLS * CW, H = rows * CH;
+    // 미리 굽는 글자 수가 아니라 **고정 행 수**로 잡는다 — 남는 슬롯이 온디맨드
+    // 성장의 상한이 되기 때문이다.
+    uint32_t W = COLS * CW, H = MARU_ATLAS_ROWS * CH;
 
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
@@ -134,11 +142,15 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
     // Jetendard 는 영문과 한글을 한 파일에 담아 폴백이 필요 없다 — iOS 와 **같은 파일**을
     // 읽으므로 글자 모양과 advance 가 플랫폼을 넘어 같아진다.
     jclass tfCls = (*env)->FindClass(env, "android/graphics/Typeface");
+    // **APK asset 에서 읽는다**(위 셰이더와 같은 이유 — /data/local/tmp 는 개발 스크립트 자리다).
     jobject face = NULL;
-    jstring fpath = (*env)->NewStringUTF(env, "/data/local/tmp/Jetendard-Regular.ttf");
-    jmethodID mFromFile = (*env)->GetStaticMethodID(env, tfCls, "createFromFile",
-        "(Ljava/lang/String;)Landroid/graphics/Typeface;");
-    face = (*env)->CallStaticObjectMethod(env, tfCls, mFromFile, fpath);
+    jclass actCls2 = (*env)->GetObjectClass(env, app->activity->clazz);
+    jobject assets = (*env)->CallObjectMethod(env, app->activity->clazz,
+        (*env)->GetMethodID(env, actCls2, "getAssets", "()Landroid/content/res/AssetManager;"));
+    jmethodID mFromAsset = (*env)->GetStaticMethodID(env, tfCls, "createFromAsset",
+        "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/graphics/Typeface;");
+    face = (*env)->CallStaticObjectMethod(env, tfCls, mFromAsset, assets,
+        (*env)->NewStringUTF(env, "Jetendard-Regular.ttf"));
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); face = NULL; }
     if (!face) {  // 조용히 다른 글꼴이 되지 않게 남긴다
         LOGI("bundled_font_missing fallback=MONOSPACE");
@@ -189,18 +201,22 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
 
     *out = buf; *ow = W; *oh = H;
     g.atlas_cols = COLS;
-    g.atlas_rows = rows;
+    g.atlas_rows = MARU_ATLAS_ROWS;
     LOGI("atlas_ondevice=%ux%u glyphs=%u source=android.graphics.Paint", W, H, n);
     return 1;
 }
 
-static VkShaderModule loadSpv(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { LOGI("spv_missing=%s", path); return VK_NULL_HANDLE; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    uint32_t *buf = malloc(n);
-    if (fread(buf, 1, n, f) != (size_t)n) { fclose(f); free(buf); return VK_NULL_HANDLE; }
-    fclose(f);
+// **APK asset 에서 읽는다.** 예전에는 `/data/local/tmp` 였는데 그건 개발 스크립트가 넣어
+// 주는 자리라, `adb push` 를 안 한 기기에 설치하면 셰이더가 없어 초기화가 실패하고 화면이
+// **검은 채로** 남았다(로그 한 줄 말고는 단서도 없다).
+static VkShaderModule loadSpv(const char *name) {
+    AAssetManager *am = g_app ? g_app->activity->assetManager : NULL;
+    AAsset *a = am ? AAssetManager_open(am, name, AASSET_MODE_BUFFER) : NULL;
+    if (!a) { LOGI("spv_missing=%s", name); return VK_NULL_HANDLE; }
+    off_t n = AAsset_getLength(a);
+    uint32_t *buf = malloc((size_t)n);
+    memcpy(buf, AAsset_getBuffer(a), (size_t)n);
+    AAsset_close(a);
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                    .codeSize = n, .pCode = buf};
     VkShaderModule m = VK_NULL_HANDLE;
@@ -210,7 +226,8 @@ static VkShaderModule loadSpv(const char *path) {
 }
 
 static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t bpp,
-                         VkFormat fmt, VkImageView *outView, VkImage *outImage) {
+                         VkFormat fmt, VkImageView *outView, VkImage *outImage,
+                         VkDeviceMemory *outMem) {
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
                             .format = fmt, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -286,6 +303,7 @@ static int uploadTexture(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t
                                   .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
                                   .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     if (outImage) *outImage = img;
+    if (outMem) *outMem = mem;
     return vkCreateImageView(g.dev, &ivci, NULL, outView) == VK_SUCCESS;
 }
 
@@ -401,17 +419,19 @@ static int initVulkan(ANativeWindow *win) {
 
     // 텍스처: 글리프(호스트 아틀라스) + 아이콘(Zig 가 만든 coverage)
     if (g_glyph_px) {
-        uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &g.glyph_view, &g.glyph_image);
+        uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &g.glyph_view, &g.glyph_image, &g.glyph_mem);
         g.glyph_w = g_gw; g.glyph_h = g_gh;
     }
     uint32_t filled = maru_mobile_icon_build();
     uint32_t slot = maru_mobile_icon_slot_px(), cnt = maru_mobile_icon_count();
-    uploadTexture(maru_mobile_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM, &g.icon_view, NULL);
+    uploadTexture(maru_mobile_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM,
+                  &g.icon_view, &g.icon_image, &g.icon_mem);
     LOGI("icons filled=%u/%u", filled, cnt);
 
     VkSamplerCreateInfo sampci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                                   .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
     VkSampler samp; vkCreateSampler(g.dev, &sampci, NULL, &samp);
+    g.sampler = samp;
     VkDescriptorSetLayoutBinding binds[3] = {
         {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
@@ -423,11 +443,13 @@ static int initVulkan(ANativeWindow *win) {
     VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                              .bindingCount = 3, .pBindings = binds};
     VkDescriptorSetLayout dsl; vkCreateDescriptorSetLayout(g.dev, &dslci, NULL, &dsl);
+    g.dsl = dsl;
     VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
     VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                        .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = dps};
     VkDescriptorPool dpool; vkCreateDescriptorPool(g.dev, &dpci, NULL, &dpool);
+    g.dpool = dpool;
     VkDescriptorSetAllocateInfo dsai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                         .descriptorPool = dpool, .descriptorSetCount = 1, .pSetLayouts = &dsl};
     vkAllocateDescriptorSets(g.dev, &dsai, &g.dset);
@@ -468,8 +490,8 @@ static int initVulkan(ANativeWindow *win) {
                                        .setLayoutCount = 1, .pSetLayouts = &dsl};
     vkCreatePipelineLayout(g.dev, &plci, NULL, &g.layout);
 
-    VkShaderModule vs = loadSpv("/data/local/tmp/chrome.vert.spv");
-    VkShaderModule fs = loadSpv("/data/local/tmp/chrome.frag.spv");
+    VkShaderModule vs = loadSpv("chrome.vert.spv");
+    VkShaderModule fs = loadSpv("chrome.frag.spv");
     if (!vs || !fs) return 0;
     VkPipelineShaderStageCreateInfo st[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -519,8 +541,27 @@ static int initVulkan(ANativeWindow *win) {
 
 static void drawFrame(void) {
     if (!g.ready) return;
+    // **창 크기를 직접 본다.** 드라이버가 OUT_OF_DATE 를 안 알려 주는 경우가 있다(실측:
+    // 이 에뮬레이터는 리사이즈 뒤에도 계속 VK_SUCCESS 를 돌려주고, SurfaceFlinger 가 낡은
+    // 버퍼를 늘려 화면만 맞아 보인다 — 실제로는 잘못된 해상도로 그리고 있다).
+    if (g_app && g_app->window) {
+        uint32_t w = (uint32_t)ANativeWindow_getWidth(g_app->window);
+        uint32_t h = (uint32_t)ANativeWindow_getHeight(g_app->window);
+        if (w && h && (w != g.extent.width || h != g.extent.height)) {
+            g.needs_recreate = 1;
+            return;
+        }
+    }
+
     uint32_t idx = 0;
-    if (vkAcquireNextImageKHR(g.dev, g.swap, UINT64_MAX, g.acquire_sem, VK_NULL_HANDLE, &idx) != VK_SUCCESS) return;
+    VkResult acq = vkAcquireNextImageKHR(g.dev, g.swap, UINT64_MAX, g.acquire_sem, VK_NULL_HANDLE, &idx);
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR || acq == VK_SUBOPTIMAL_KHR) {
+        // 창이 리사이즈됐다. 다시 안 만들면 **화면이 영구히 언다** — `adjustResize` 와 자동
+        // 키보드가 첫 프레임에 이걸 일으키므로 실기기에서는 켜자마자 멈춘다.
+        g.needs_recreate = 1;
+        return;
+    }
+    if (acq != VK_SUCCESS) return;
 
     // **레이아웃은 Zig chrome 이 한다.** 플랫폼은 쓸 수 있는 크기만 넘기고 quad 를 받는다.
     //
@@ -582,7 +623,8 @@ static void drawFrame(void) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g.submit_sem, .swapchainCount = 1,
                            .pSwapchains = &g.swap, .pImageIndices = &idx};
-    vkQueuePresentKHR(g.queue, &pi);
+    VkResult pres = vkQueuePresentKHR(g.queue, &pi);
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) g.needs_recreate = 1;
     vkWaitForFences(g.dev, 1, &g.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(g.dev, 1, &g.fence);
 
@@ -738,6 +780,29 @@ static void teardownVulkan(void) {
     free(g.fbs); free(g.views); free(g.cbs);
     g.fbs = NULL; g.views = NULL; g.cbs = NULL;
     if (g.swap) vkDestroySwapchainKHR(g.dev, g.swap, NULL);
+
+    // **device 의 자식을 남기지 않는다.** 예전에는 스왑체인만 지우고 나머지를 살려 둔 채
+    // device 를 파괴해, 재개할 때마다 draw-list 버퍼(호스트 가시·매핑 상태)와 텍스처가
+    // 통째로 샜다.
+    if (g.quad_map) { vkUnmapMemory(g.dev, g.quad_mem); g.quad_map = NULL; }
+    if (g.quad_buf) vkDestroyBuffer(g.dev, g.quad_buf, NULL);
+    if (g.quad_mem) vkFreeMemory(g.dev, g.quad_mem, NULL);
+    if (g.pipe) vkDestroyPipeline(g.dev, g.pipe, NULL);
+    if (g.layout) vkDestroyPipelineLayout(g.dev, g.layout, NULL);
+    if (g.dpool) vkDestroyDescriptorPool(g.dev, g.dpool, NULL);
+    if (g.dsl) vkDestroyDescriptorSetLayout(g.dev, g.dsl, NULL);
+    if (g.sampler) vkDestroySampler(g.dev, g.sampler, NULL);
+    if (g.glyph_view) vkDestroyImageView(g.dev, g.glyph_view, NULL);
+    if (g.glyph_image) vkDestroyImage(g.dev, g.glyph_image, NULL);
+    if (g.glyph_mem) vkFreeMemory(g.dev, g.glyph_mem, NULL);
+    if (g.icon_view) vkDestroyImageView(g.dev, g.icon_view, NULL);
+    if (g.icon_image) vkDestroyImage(g.dev, g.icon_image, NULL);
+    if (g.icon_mem) vkFreeMemory(g.dev, g.icon_mem, NULL);
+    if (g.rp) vkDestroyRenderPass(g.dev, g.rp, NULL);
+    if (g.acquire_sem) vkDestroySemaphore(g.dev, g.acquire_sem, NULL);
+    if (g.submit_sem) vkDestroySemaphore(g.dev, g.submit_sem, NULL);
+    if (g.fence) vkDestroyFence(g.dev, g.fence, NULL);
+    if (g.pool) vkDestroyCommandPool(g.dev, g.pool, NULL);
     vkDestroyDevice(g.dev, NULL);
     if (g.surface) vkDestroySurfaceKHR(g.inst, g.surface, NULL);
     if (g.inst) vkDestroyInstance(g.inst, NULL);
@@ -816,11 +881,16 @@ static int rasterizeOneGlyph(struct android_app *app, uint32_t cp, uint8_t *out,
 static void growAtlas(struct android_app *app) {
     unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !g.glyph_image || !g.dev) return;
+    // **먼저 복사한다.** `maru_mobile_atlas_add` 가 미스 목록에서 그 항목을 지우면서 마지막
+    // 항목을 그 자리로 당겨 오므로, 인덱스를 앞으로만 진행하면 절반을 건너뛴다(실측).
+    if (n > 64) n = 64;
+    unsigned int want[64];
+    for (unsigned int i = 0; i < n; i++) want[i] = maru_mobile_missing_cp(i);
     const uint32_t CW = MARU_ATLAS_CELL_W, CH = MARU_ATLAS_CELL_H;
     uint8_t cell[MARU_ATLAS_CELL_W * MARU_ATLAS_CELL_H];
     unsigned int added = 0;
     for (unsigned int i = 0; i < n; i++) {
-        unsigned int cp = maru_mobile_missing_cp(i);
+        unsigned int cp = want[i];
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
@@ -889,6 +959,13 @@ static void growAtlas(struct android_app *app) {
         vkDestroyBuffer(g.dev, stage, NULL);
         vkFreeMemory(g.dev, mem, NULL);
 
+        // **원본 버퍼에도 넣는다.** 창이 죽었다 살아나면 이 버퍼로 텍스처를 다시 올리는데,
+        // GPU 이미지에만 넣으면 그때 성장분이 통째로 사라진다. 등록부는 그대로라 코어는
+        // "있다" 고 믿고 다시 굽지도 않아 영영 빈칸이 된다(실측 경로).
+        if (g_glyph_px && (row + 1) * CH <= g_gh) {
+            for (uint32_t y = 0; y < CH; y++)
+                memcpy(g_glyph_px + (row * CH + y) * g_gw + col * CW, cell + y * CW, CW);
+        }
         maru_mobile_atlas_add(cp, col, row, advance);
         added++;
     }
@@ -924,25 +1001,45 @@ static void frameCallback(int64_t frame_time_ns, void *data) {
     (void)frame_time_ns;
     g.vsync_count++;
     if ((g.vsync_count & 1) == 0) drawFrame();
+    // **여기서도 재생성을 봐야 한다.** 이 단계에서는 메인 루프가 pollOnce(-1) 로 막혀 있어
+    // 리사이즈 신호를 받아 줄 사람이 없다 — 그러면 화면이 그대로 언다.
+    if (g.needs_recreate && data) {
+        g.needs_recreate = 0;
+        recreateVulkan((struct android_app *)data);
+    }
     AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, data);
+}
+
+// 창 크기가 바뀌면 통째로 다시 세운다. 스왑체인만 갈아 끼우는 것보다 무겁지만 드물게
+// 일어나고, teardown 이 자식을 전부 지우므로 새는 것이 없다.
+static void recreateVulkan(struct android_app *app) {
+    if (!app->window) return;
+    teardownVulkan();
+    if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_recreated");
 }
 
 void android_main(struct android_app *app) {
     g_app = app;
     app->onAppCmd = onAppCmd;
     app->onInputEvent = onInputEvent;
-    int chor_started = 0;
     while (1) {
         int events;
         struct android_poll_source *source;
-        while (ALooper_pollOnce(g.ready ? 0 : -1, NULL, &events, (void **)&source) >= 0) {
+        // phase 1 은 choreographer 가 그리므로 여기서 **막아야 한다** — 0 을 주면 아무것도
+        // 안 막아 CPU 한 코어를 계속 문다(폰이 뜨겁고 배터리가 준다).
+        //
+        // **조건은 루프 안에서 매번 본다.** 밖에서 한 번 계산하면 INIT_WINDOW 를 처리해
+        // `g.ready` 가 1 이 된 뒤에도 낡은 -1 로 다시 막혀 영영 안 그린다(그렇게 짰다가 잡았다).
+        while (ALooper_pollOnce((g.ready && g.pace_phase == 0) ? 0 : -1,
+                                NULL, &events, (void **)&source) >= 0) {
             if (source) source->process(app, source);
             if (app->destroyRequested) return;
         }
+        if (g.needs_recreate) { g.needs_recreate = 0; recreateVulkan(app); continue; }
         if (g.pace_phase == 1) {
             // 이 단계부터는 루프가 직접 그리지 않는다 — vsync 콜백이 주기를 쥔다.
-            if (!chor_started) {
-                chor_started = 1;
+            if (!g.chor_started) {
+                g.chor_started = 1;
                 AChoreographer_postFrameCallback64(AChoreographer_getInstance(), frameCallback, app);
             }
             continue;

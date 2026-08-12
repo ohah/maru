@@ -679,13 +679,18 @@ static void drawFrame(void) {
     Push *dst = (Push *)g.quad_map;
     for (unsigned int i = 0; i < drawn; i++) {
         const MaruQuad *q = &quads[i];
-        float cols = (q->kind == 2) ? 1.0f : (float)g.atlas_cols;
+        // kind=3 은 슬롯의 **왼쪽 절반**이다(슬롯 하나가 양폭 상자다). 셰이더를 안 고치고
+        // 열과 나누는 수를 함께 2배로 줘서 낸다 — 셰이더에는 kind=1 로 넘긴다.
+        int half = (q->kind == 3);
+        float cols = (q->kind == 2) ? 1.0f : (float)g.atlas_cols * (half ? 2.0f : 1.0f);
         float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)g.atlas_rows;
+        float cx = (float)q->cell_x * (half ? 2.0f : 1.0f);
+        float qkind = half ? 1.0f : (float)q->kind;
         float oy = (float)g.inset_top;
         Push p = {{q->x * scale, q->y * scale + oy, (q->x + q->w) * scale, (q->y + q->h) * scale + oy},
                   {q->r, q->g, q->b, q->a},
-                  {q->radius * scale, (float)g.extent.width, (float)g.extent.height, (float)q->kind},
-                  {(float)q->cell_x, (float)q->cell_y, cols, rows}};
+                  {q->radius * scale, (float)g.extent.width, (float)g.extent.height, qkind},
+                  {cx, (float)q->cell_y, cols, rows}};
         dst[i] = p;
     }
     vkCmdDraw(cb, 4, drawn, 0, 0);

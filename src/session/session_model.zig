@@ -72,9 +72,18 @@ pub fn Model(comptime Rt: type) type {
             pending_url: ?[]u8 = null,
             /// 런타임 부착(PTY 세션·pump·생애 플래그) — generic `Rt`로 주입. platform이 `TermRuntime`을 넣는다.
             rt: Rt = .{},
-            /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd가 바뀔 때만 재계산. destroyTerm이 해제.
+            /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd 변경 또는 주기 만료에 재계산. destroyTerm이 해제.
             git_branch: ?[]const u8 = null,
             git_branch_cwd: ?[]const u8 = null,
+            /// 그 캐시를 마지막으로 계산한 시각(ns, awake clock; 0=아직 없음). **cwd만으로는 무효화되지 않기
+            /// 때문에** 있다: 같은 폴더에서 `git checkout`·`git init`·저장소 삭제가 일어나면 답이 바뀌는데 cwd는
+            /// 그대로다. 실제 앱에서 저장소를 지웠을 때 도크는 "git 저장소가 아닙니다"인데 상태바·사이드바는 옛
+            /// 브랜치를 계속 보여줬다(2026-08-12 GUI 확인).
+            ///
+            /// 갱신은 `.git` 변경 이벤트가 이 값을 앞당겨(platform `invalidateTermGitBranches`) 일어나고, 시간
+            /// 만료는 그 이벤트가 닿지 않는 저장소를 위한 백스톱이다. 그래서 이 필드는 "언제 다시 읽을지"의
+            /// 단일 지점이고, 이벤트와 백스톱이 같은 값을 통해 만난다.
+            git_branch_polled_ns: i128 = 0,
             /// 포그라운드가 어떤 에이전트 CLI인지(파생값). pollAgentKinds가 ≈0.5s마다 proc_name으로 갱신.
             agent_kind: AgentKind = .none,
             /// 터미널 observer가 foreground/screen/OSC/activity로 판정한 현재 상태와 전이 안정화 상태.

@@ -6373,6 +6373,11 @@ pub const AppSession = struct {
         // `.git` 내부 변경은 **git 상태 신호**다(stage·commit·checkout). 파일 트리 항목과는 무관하므로 목록만
         // 다시 읽고 끝낸다 — in-flight면 refreshGitStatus가 스스로 건너뛰어 이벤트가 몰려도 명령이 안 쌓인다.
         if (git_ops.isGitInternalPath(changed_path)) {
+            // 브랜치 표시도 **이 신호로** 갱신한다. `git checkout`은 cwd를 안 바꿔 OSC 7으로 감지되지 않고
+            // `.git/HEAD`만 바뀌는데, 그 이벤트가 이미 여기로 오고 있었다 — 목록만 다시 읽고 브랜치 캐시를
+            // 그대로 두면 "목록은 새 상태, 상태바는 옛 브랜치"가 된다(실제로 그랬다). 폴링은 이 이벤트가 닿지
+            // 않는 저장소를 위한 백스톱으로만 남는다(`git_branch_backstop_interval_ns`).
+            git_ops.invalidateTermGitBranches(self);
             git_ops.refreshGitStatus(self);
             return;
         }
@@ -51665,6 +51670,74 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
     );
     git_ops.followActiveTerminalRepo(session);
     try std.testing.expect(session.git_result != null);
+}
+
+// [GUI 확인 2026-08-12] 저장소를 지웠더니 **도크는 "git 저장소가 아닙니다"인데 상태바·사이드바는 옛 브랜치를
+// 계속 표시**했다. 원인은 `term.git_branch` 캐시의 키가 cwd 하나이고 무효화 경로가 **어디에도 없었다**는 것 —
+// 같은 폴더에서 `git checkout`·`git init`·저장소 삭제가 일어나면 답이 바뀌는데 cwd는 그대로라 영구 캐시가 된다.
+// 소스 컨트롤의 walk-up 캐시와 같은 주기로 만료시켜 고쳤고, 이 테스트가 **절약(주기 안 적중)과 갱신(만료 뒤
+// 재계산)을 함께** 고정한다 — 만료만 검증하면 매 프레임 fs를 읽는 회귀가 통과하고, 적중만 검증하면 stale이
+// 통과한다.
+test "상태바 브랜치: `.git` 이벤트가 갱신을 앞당기고, 하한과 백스톱이 fs 읽기를 묶는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    // 임시 저장소를 만든다 — 브랜치를 실제로 바꿔야 "같은 cwd, 다른 답"이 재현된다.
+    //
+    // **저장소 밖에 만든다.** `.zig-cache` 아래에 두면 ⑶에서 `.git`을 지운 뒤 walk-up이 상위로 올라가 maru
+    // 저장소의 `.git`을 찾아, "표시가 사라진다"가 아니라 "maru 브랜치가 보인다"가 된다(그 단언이 조용히 다른
+    // 것을 검증하게 된다).
+    const repo = "/tmp/maru-branch-cache-test";
+    _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+
+    const term = pane_ops.activePane(session).activeTerm();
+    // `/tmp`나 `/`가 저장소인 특이 머신에서는 ⑶이 성립하지 않는다 — 먼저 확인하고 건너뛴다.
+    {
+        var probe: [std.fs.max_path_bytes]u8 = undefined;
+        if (AppSession.repoRootFor("/tmp", &probe) != null) return error.SkipZigTest;
+    }
+    // 첫 호출: 캐시가 비어 있으니 읽는다.
+    try std.testing.expectEqualStrings("main", git_ops.termGitBranchForCwd(session, term, repo).?);
+
+    // 같은 cwd에서 브랜치를 바꾼다(체크아웃은 cwd를 건드리지 않는다 — 그게 이 결함의 핵심이었다).
+    if (!git_backend_mod.testRunQuiet(&.{ exe, "-C", repo, "checkout", "-q", "-b", "other" })) return error.SkipZigTest;
+
+    // ⑴ **주기 안에는 캐시를 쓴다.** 사이드바는 매 프레임 빌드되므로 이 절약이 사라지면 fs 읽기가 프레임마다 돈다.
+    try std.testing.expectEqualStrings("main", git_ops.termGitBranchForCwd(session, term, repo).?);
+
+    // ⑵ **`.git` 변경 이벤트가 갱신의 1차 경로다.** checkout은 cwd를 안 바꿔 OSC 7으로 감지되지 않으므로, 이
+    // 신호가 없으면 백스톱 주기까지(초 단위) 옛 브랜치가 남는다. 이벤트는 만료를 **앞당기기만** 하고 하한
+    // (`git_branch_event_floor_ns`)을 지키므로, 직후 호출은 아직 캐시를 쓰는 것이 정상이다.
+    var head_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const head_path = try std.fmt.bufPrint(&head_buf, "{s}/.git/HEAD", .{repo});
+    const before_event = term.git_branch_polled_ns;
+    session.fileTreeChanged(head_path);
+    try std.testing.expect(term.git_branch_polled_ns < before_event); // 만료를 앞당겼다
+    try std.testing.expectEqualStrings("main", git_ops.termGitBranchForCwd(session, term, repo).?); // 하한 안: 아직 캐시
+
+    // **이벤트 폭주에도 하한이 유지된다.** rebase는 `.git`을 수백 번 건드린다 — 이벤트마다 즉시 재계산하면
+    // 프레임마다 term 수만큼 fs를 읽어 폴링보다 나빠진다. 100번 보내도 "즉시 만료"로 떨어지지 않아야 한다.
+    for (0..100) |_| session.fileTreeChanged(head_path);
+    const now_ns = std.Io.Clock.awake.now(session.io).nanoseconds;
+    try std.testing.expect(now_ns - term.git_branch_polled_ns < git_ops.git_branch_backstop_interval_ns);
+
+    // ⑶ 하한이 지난 뒤에는 읽는다. 시계를 기다리지 않고 마지막 계산 시각을 과거로 밀어 만료를 만든다.
+    term.git_branch_polled_ns = 0;
+    try std.testing.expectEqualStrings("other", git_ops.termGitBranchForCwd(session, term, repo).?);
+
+    // ⑷ **저장소가 사라지면 표시도 사라진다**(GUI에서 실제로 stale하던 그 경로).
+    var git_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_dir = std.fmt.bufPrintZ(&git_dir_buf, "{s}/.git", .{repo}) catch return error.SkipZigTest;
+    _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", git_dir });
+    term.git_branch_polled_ns = 0;
+    try std.testing.expect(git_ops.termGitBranchForCwd(session, term, repo) == null);
 }
 
 // **무효화의 대칭**: 저장소 아닌 폴더에서 돌아왔을 때 목록이 되살아나는가. `.none` 정리는 새 읽기를 걸지 않고

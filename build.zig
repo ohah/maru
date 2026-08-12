@@ -2215,12 +2215,24 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr0b_optimize,
             }),
-            .filters = &.{"CR0b"},
+            .filters = &.{"CR0b core"},
         });
         const run_cr0b_contract_tests = b.addRunArtifact(cr0b_contract_tests);
         run_cr0b_contract_tests.addArg("--maru-expect-tests=20");
         run_cr0b_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_contract_tests.step);
+        const cr0b_writer_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/observability/connection_incident.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+            }),
+            .filters = &.{"CR0b writer"},
+        });
+        const run_cr0b_writer_tests = b.addRunArtifact(cr0b_writer_tests);
+        run_cr0b_writer_tests.addArg("--maru-expect-tests=11");
+        run_cr0b_writer_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_writer_tests.step);
         const cr0b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_cr0b_boundary.zig"),

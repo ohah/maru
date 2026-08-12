@@ -30,7 +30,24 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub const aggregate_slot_count: usize = 8;"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "fn recordRepeatForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(incident, "pub fn recordRepeat("));
-    try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b "));
+    try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b core "));
+    try std.testing.expectEqual(@as(usize, 11), count(incident, "test \"CR0b writer"));
+    try std.testing.expectEqual(@as(usize, 1), count(incident, "pub fn takePendingForWriter("));
+    try std.testing.expectEqual(@as(usize, 1), count(incident, "pub fn completeWriterHandoff("));
+    try std.testing.expectEqual(@as(usize, 0), count(client, "takePendingForWriter"));
+    try std.testing.expectEqual(@as(usize, 0), count(adapter, "takePendingForWriter"));
+    try std.testing.expectEqual(@as(usize, 0), count(backend, "takePendingForWriter"));
+    try std.testing.expectEqual(@as(usize, 0), count(client, "completeWriterHandoff"));
+    try std.testing.expectEqual(@as(usize, 0), count(adapter, "completeWriterHandoff"));
+    try std.testing.expectEqual(@as(usize, 0), count(backend, "completeWriterHandoff"));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "takePendingForWriter(", "observability/connection_incident.zig"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "completeWriterHandoff(", "observability/connection_incident.zig"),
+    );
     try std.testing.expectEqual(@as(usize, 0), count(client, "connection_incident.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(adapter, "connection_incident.zig"));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "connection_incident.zig"));
@@ -51,6 +68,24 @@ test "CR0b 경계는 중립 schema와 test-private repeat만 연다" {
         const poison_tag = try std.fmt.bufPrint(&implicit, "{s},", .{name});
         try std.testing.expectEqual(@as(usize, 1), count(poison_reason_block, poison_tag));
     }
+}
+
+fn countProductSourcesExcept(allocator: std.mem.Allocator, needle: []const u8, excluded_path: []const u8) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        if (std.mem.eql(u8, entry.path, excluded_path)) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        total += count(source, needle);
+    }
+    return total;
 }
 
 fn declarationBlock(source: []const u8, prefix: []const u8) ![]const u8 {

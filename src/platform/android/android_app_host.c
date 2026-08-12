@@ -8,6 +8,8 @@
 // 잡히고, maru 의 "네이티브 최소" 정책과도 맞는다.
 // `VK_USE_PLATFORM_ANDROID_KHR` 이 있어야 `vkCreateAndroidSurfaceKHR` 이 헤더에 노출된다 —
 // 없으면 surface 생성 함수가 통째로 안 보인다.
+// 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
+#include "../mobile/mobile_host_abi.h"
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <android_native_app_glue.h>
 #include <android/log.h>
@@ -25,29 +27,7 @@
 #define TAG "MaruChrome"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 
-typedef struct {
-    float x, y, w, h;
-    float r, g, b, a;
-    float radius;
-    unsigned int kind;
-    unsigned int cell_x, cell_y;
-} CQuad;
 
-extern unsigned int maru_chrome_build(unsigned int width, unsigned int height);
-extern const CQuad *maru_chrome_quads(void);
-extern const char *maru_chrome_last_error(void);
-extern void maru_atlas_add(unsigned int cp, unsigned int col, unsigned int row, unsigned int advance);
-extern void maru_atlas_geometry(unsigned int cell_w, unsigned int cell_h);
-extern unsigned int maru_icon_build(void);
-extern const unsigned char *maru_icon_atlas(void);
-extern unsigned int maru_icon_slot_px(void);
-extern unsigned int maru_icon_count(void);
-extern unsigned int maru_term_input(const char *bytes, size_t len);
-extern unsigned int maru_hit_cell(float x, float y);
-extern unsigned int maru_missing_count(void);
-extern unsigned int maru_missing_cp(unsigned int i);
-extern unsigned int maru_next_slot(unsigned int cols);
-extern void maru_missing_clear(void);
 
 typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4]; } Push;
 
@@ -172,7 +152,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         "(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
     jmethodID mMeasure = (*env)->GetMethodID(env, pCls, "measureText", "(Ljava/lang/String;)F");
 
-    maru_atlas_geometry(CW, CH);
+    maru_mobile_atlas_geometry(CW, CH);
     for (uint32_t i = 0; i < n; i++) {
         jstring s = (*env)->NewString(env, &cps[i], 1);
         uint32_t col = i % COLS, row = i / COLS;
@@ -181,7 +161,7 @@ static int rasterizeAtlasOnDevice(struct android_app *app, uint8_t **out, uint32
         jfloat adv = (*env)->CallFloatMethod(env, paint, mMeasure, s);
         uint32_t advance = (uint32_t)(adv + 0.5f);
         if (advance == 0) advance = CW / 2;
-        maru_atlas_add(cps[i], col, row, advance);
+        maru_mobile_atlas_add(cps[i], col, row, advance);
         (*env)->DeleteLocalRef(env, s);
     }
 
@@ -221,11 +201,11 @@ static void loadAtlas(void) {
     if (fscanf(f, "%u %u %u %u %u", &g_gw, &g_gh, &cw, &ch, &n) != 5) { fclose(f); return; }
     g.atlas_cols = g_gw / cw;
     g.atlas_rows = g_gh / ch;
-    maru_atlas_geometry(cw, ch);
+    maru_mobile_atlas_geometry(cw, ch);
     for (uint32_t i = 0; i < n; i++) {
         uint32_t cp, col, row, adv;
         if (fscanf(f, "%u %u %u %u", &cp, &col, &row, &adv) != 4) break;
-        maru_atlas_add(cp, col, row, adv);
+        maru_mobile_atlas_add(cp, col, row, adv);
     }
     fclose(f);
     FILE *gf = fopen("/data/local/tmp/atlas.gray", "rb");
@@ -446,9 +426,9 @@ static int initVulkan(ANativeWindow *win) {
         uploadTexture(g_glyph_px, g_gw, g_gh, 1, VK_FORMAT_R8_UNORM, &g.glyph_view, &g.glyph_image);
         g.glyph_w = g_gw; g.glyph_h = g_gh;
     }
-    uint32_t filled = maru_icon_build();
-    uint32_t slot = maru_icon_slot_px(), cnt = maru_icon_count();
-    uploadTexture(maru_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM, &g.icon_view, NULL);
+    uint32_t filled = maru_mobile_icon_build();
+    uint32_t slot = maru_mobile_icon_slot_px(), cnt = maru_mobile_icon_count();
+    uploadTexture(maru_mobile_icon_atlas(), slot, slot * cnt, 4, VK_FORMAT_R8G8B8A8_UNORM, &g.icon_view, NULL);
     LOGI("icons filled=%u/%u", filled, cnt);
 
     VkSamplerCreateInfo sampci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -548,11 +528,11 @@ static void drawFrame(void) {
     // 상태바·제스처바를 뺀 영역만 준다 — iOS 의 safeAreaInsets 와 같은 자리다.
     unsigned int lw = (unsigned int)(g.extent.width / scale);
     unsigned int lh = (unsigned int)((g.extent.height - g.inset_top - g.inset_bottom) / scale);
-    unsigned int n = maru_chrome_build(lw, lh);
+    unsigned int n = maru_mobile_build(lw, lh);
     // build 가 못 그린 글자를 그 슬롯에만 구워 넣는다 — 다음 프레임에 보인다.
     if (g_app) growAtlas(g_app);
-    const CQuad *quads = maru_chrome_quads();
-    if (g.frames == 0) LOGI("quads=%u err=%s logical=%ux%u", n, maru_chrome_last_error(), lw, lh);
+    const MaruQuad *quads = maru_mobile_quads();
+    if (g.frames == 0) LOGI("quads=%u err=%s logical=%ux%u", n, maru_mobile_last_error(), lw, lh);
 
     VkCommandBuffer cb = g.cbs[idx];
     vkResetCommandBuffer(cb, 0);
@@ -571,9 +551,9 @@ static void drawFrame(void) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 1, &g.dset, 0, NULL);
     for (unsigned int i = 0; i < n; i++) {
-        const CQuad *q = &quads[i];
+        const MaruQuad *q = &quads[i];
         float cols = (q->kind == 2) ? 1.0f : (float)g.atlas_cols;
-        float rows = (q->kind == 2) ? (float)maru_icon_count() : (float)g.atlas_rows;
+        float rows = (q->kind == 2) ? (float)maru_mobile_icon_count() : (float)g.atlas_rows;
         float oy = (float)g.inset_top;
         Push p = {{q->x * scale, q->y * scale + oy, (q->x + q->w) * scale, (q->y + q->h) * scale + oy},
                   {q->r, q->g, q->b, q->a},
@@ -698,7 +678,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
         float px = AMotionEvent_getX(ev, 0), py = AMotionEvent_getY(ev, 0);
         float lx = px / g.scale;
         float ly = (py - (float)g.inset_top) / g.scale;
-        unsigned int cell = maru_hit_cell(lx, ly);
+        unsigned int cell = maru_mobile_hit_cell(lx, ly);
         LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
              px, py, lx, ly, cell >> 16, cell & 0xFFFF);
         return 1;
@@ -707,7 +687,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
     if (AKeyEvent_getAction(ev) != AKEY_EVENT_ACTION_DOWN) return 0;
     char c = keycodeToAscii(AKeyEvent_getKeyCode(ev), AKeyEvent_getMetaState(ev));
     if (!c) return 0;
-    unsigned int total = maru_term_input(&c, 1);
+    unsigned int total = maru_mobile_input(&c, 1);
     LOGI("MARU_INPUT keycode=%d byte=0x%02x total=%u",
          AKeyEvent_getKeyCode(ev), (unsigned char)c, total);
     return 1;
@@ -802,15 +782,15 @@ static int rasterizeOneGlyph(struct android_app *app, uint32_t cp, uint8_t *out,
 // **아틀라스를 키운다.** 텍스처를 다시 만들지 않고 그 셀 자리에만 복사한다 —
 // 아틀라스 부분 업데이트(여섯 기능 4번)를 그대로 쓴다. iOS `replaceRegion:` 과 같은 자리다.
 static void growAtlas(struct android_app *app) {
-    unsigned int n = maru_missing_count();
+    unsigned int n = maru_mobile_missing_count();
     if (n == 0 || !g.glyph_image || !g.dev) return;
     const uint32_t CW = 24, CH = 32;
     uint8_t cell[24 * 32];
     unsigned int added = 0;
     for (unsigned int i = 0; i < n; i++) {
-        unsigned int cp = maru_missing_cp(i);
+        unsigned int cp = maru_mobile_missing_cp(i);
         if (cp == 0 || cp > 0xFFFF) continue;
-        unsigned int slot = maru_next_slot(g.atlas_cols);
+        unsigned int slot = maru_mobile_next_slot(g.atlas_cols);
         uint32_t col = slot >> 16, row = slot & 0xFFFF;
         if (row >= g.atlas_rows) break;  // 꽉 찼다 — 축출은 이 PoC 범위 밖이다
         memset(cell, 0, sizeof cell);
@@ -877,10 +857,10 @@ static void growAtlas(struct android_app *app) {
         vkDestroyBuffer(g.dev, stage, NULL);
         vkFreeMemory(g.dev, mem, NULL);
 
-        maru_atlas_add(cp, col, row, advance);
+        maru_mobile_atlas_add(cp, col, row, advance);
         added++;
     }
-    maru_missing_clear();
+    maru_mobile_missing_clear();
     if (added) LOGI("MARU_ATLAS grew=%u", added);
 }
 

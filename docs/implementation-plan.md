@@ -48,6 +48,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 세션 도크 카드 구현 계획](plans/agent-session-list.md)
 - [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
 - [웹 패널 구현 계획](plans/web-panel.md)
+- [모바일 플랫폼 구현 계획](plans/mobile-platform.md)
 - [Metal UI 구현·검증 순서](plans/metal-ui-layout.md)
 - [I/O–렌더 스레딩 Phase 2~4](plans/io-render-threading.md)
 - [TerminalCore 분해 기록](plans/terminal-core-decomposition.md)

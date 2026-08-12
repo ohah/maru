@@ -134,6 +134,10 @@ Android 는 `AConfiguration_getDensity` + `getRootWindowInsets` 다. 실측으�
 | iOS | `CADisplayLink.preferredFrameRateRange = 30` |
 | Android | `AChoreographer` vsync 를 받아 **한 번 걸러** present(Vulkan 에는 하위 주기 모드가 없다) |
 
+**두 플랫폼 다 자기 주기를 확인한다.** iOS 의 `preferredFrameRateRange` 는 **힌트라 무시될 수
+있고**, Android 는 우리가 직접 세는 것이라 어긋날 수 있다. 그래서 둘 다 표시 클럭 간격의
+중앙값을 재서 `MARU_PACE median_ms` 로 한 번 남긴다 — 30Hz 가 조용히 깨지면 그 줄로 드러난다.
+
 **계측은 동작을 바꾸지 않는다.** 예전에는 60Hz 로 시작해 80프레임쯤 뒤 계측이 끝나면 30Hz 로
 넘어갔다 — 측정의 부산물이 제품 동작이었고, iOS 엔 그 전환이 없어 두 플랫폼이 달랐다. 지금은
 둘 다 처음부터 30Hz 이고 `MARU_PACE` 는 도는 주기를 재서 한 번 기록만 한다.

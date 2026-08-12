@@ -861,5 +861,10 @@ pub export fn maru_mobile_quads() [*]const MaruQuad {
 /// build **뒤에** 읽는다. 그 프레임에 늘어났다면 플랫폼 버퍼가 아직 작으므로, 플랫폼은 자기
 /// 버퍼를 키우고(iOS) 또는 자원을 다시 세우고(Android) 그 프레임은 건너뛴다.
 pub export fn maru_mobile_max_quads() u32 {
+    // **0 은 답이 될 수 없다.** 플랫폼은 이 값으로 GPU 버퍼를 잡는데, Android 는 창이 서는
+    // 순간(=첫 build 보다 먼저) 한 번 잡는다. 빈 슬라이스인 채로 0 을 돌려줬더니 크기 0 짜리
+    // VkBuffer 를 만들었고 드라이버가 `pCreateInfo->size > 0` 단언에서 **에뮬레이터를 통째로
+    // abort** 시켰다. 처음 물어보면 그때 잡는다.
+    if (quad_buf.len == 0) _ = reserveQuad();
     return @intCast(quad_buf.len);
 }

@@ -97,6 +97,9 @@ present-ios)
     sleep 12
     xcrun simctl spawn "$DEV" log show --last 30s --predicate 'eventMessage CONTAINS "MARU_PACE"' \
         --style compact 2>/dev/null | grep -o 'MARU_PACE.*'
+    # **끝나면 물러난다.** 이 앱은 측정을 마치면 렌더를 멈춰서 마지막 프레임(붉은 화면)이
+    # 그대로 남는다 — 시뮬레이터를 보는 사람에게는 제품이 깨진 것처럼 보인다.
+    xcrun simctl terminate "$DEV" dev.maru.pace 2>/dev/null || true
     ;;
 chrome-android-app)
     # 앞의 chrome-android 는 오프스크린 텍스처를 PPM 으로 뽑는다. 이건 **에뮬레이터 화면에**

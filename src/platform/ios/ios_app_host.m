@@ -385,8 +385,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // **draw call 한 번.** `setVertexBytes:` 는 4KB 한계라 148 quad(9.5KB)도 못 싣는다 —
     // 버퍼를 잡고 채운 뒤 인스턴스로 그린다(Vulkan storage buffer 와 같은 모양).
     // 프래그먼트는 이미 varying 으로 받으므로 `setFragmentBytes:` 는 필요 없다.
-    if (_quadCap < n) {
-        _quadCap = n < 1024 ? 1024 : n * 2;
+    // **크기는 코어가 답한다.** 필요할 때마다 늘리면 두 플랫폼의 상한이 서로 다르고(Android
+    // 는 4096 에서 조용히 잘랐다), 큰 화면에서 첫 프레임에 한 번 재할당이 튄다.
+    if (_quadCap == 0) {
+        _quadCap = maru_mobile_max_quads();
         _quadBuf = [_dev newBufferWithLength:_quadCap * sizeof(Uni)
                                      options:MTLResourceStorageModeShared];
     }

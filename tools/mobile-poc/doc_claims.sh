@@ -34,6 +34,14 @@ ck "선언 집합 해시" "$h" "$z"
 echo "문서에 낡을 값이 없는가"
 ck "매트릭스에 테스트 개수 하드코딩" 0 "$(grep -c 'mobile_bridge_contract.zig`([0-9]*개)' docs/verification-matrix.md)"
 
+echo "문서가 자기 자신과 모순되지 않는가"
+# 슬라이스마다 절을 **고쳐야** 하는데 같은 제목으로 새로 **붙인** 적이 있다. 그러면 한
+# 문서에 반대되는 두 문장이 남고("키는 코어의 인코더를 탄다" ↔ "아직 안 탄다") 어느 쪽이
+# 참인지 문서만 봐서는 모른다. 제목과 굵은 첫 문장이 겹치는지로 잡는다.
+D=docs/mobile-platform.md
+ck "제목 중복" 0 "$(grep -E '^#{2,4} ' $D | sort | uniq -d | wc -l | tr -d ' ')"
+ck "굵은 첫 문장 중복" 0 "$(grep -oE '^\*\*[^*]{10,60}' $D | sort | uniq -d | wc -l | tr -d ' ')"
+
 echo "계획 ↔ 계약 슬라이스 참조"
 for m in M4a2 M4a3 M4a4 M4a5 M10; do
   ck "$m 이 계획 표에 있다" 1 "$(grep -cE "^\| $m \|" docs/plans/mobile-platform.md)"

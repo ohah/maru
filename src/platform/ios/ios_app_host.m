@@ -76,6 +76,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSUInteger _quadCap;
     BOOL _loggedDraw;
     char _lastErr[64];
+    // 주기 관측: 표시 클럭 간격을 모아 한 번 기록한다.
+    double _paceLast, _paceMs[60];
+    int _paceN;
+    BOOL _paceDone;
     CTFontRef _atlasFont;
     unsigned int _atlasH;
     CADisplayLink *_link;
@@ -314,7 +318,28 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     return self;
 }
 
+/// **요청한 주기가 실제로 나오는지 확인한다.** `preferredFrameRateRange` 는 힌트라 기기·상태에
+/// 따라 무시될 수 있는데, Android 는 실측 로그가 있고 iOS 만 없어 30Hz 가 조용히 깨져도 몰랐다.
+/// `CADisplayLink.timestamp` 는 직전 vsync 시각이라 벽시계보다 정확하다.
+- (void)recordPace {
+    if (_paceDone) return;
+    double now = _link.timestamp;
+    if (_paceLast > 0 && now > _paceLast && _paceN < 60) _paceMs[_paceN++] = (now - _paceLast) * 1000.0;
+    _paceLast = now;
+    if (_paceN < 60) return;
+    for (int i = 1; i < 60; i++) {
+        double k = _paceMs[i]; int j = i - 1;
+        while (j >= 0 && _paceMs[j] > k) { _paceMs[j + 1] = _paceMs[j]; j--; }
+        _paceMs[j + 1] = k;
+    }
+    _paceDone = YES;
+    double med = _paceMs[30];
+    NSLog(@"MARU_PACE median_ms=%.2f n=60 target=33.33 verdict=%s",
+          med, (med >= 25.0 && med <= 42.0) ? "PASS" : "FAIL");
+}
+
 - (void)tick {
+    [self recordPace];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);

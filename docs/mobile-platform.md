@@ -282,6 +282,29 @@ quad 구조체를 넓히면 `float4` 배수가 깨진다(그 정렬을 어겼다
 **합성은 슬롯의 왼쪽 절반에 채운다** — 대상이 전부 단폭이고, 그리는 쪽도 단폭 글자는 슬롯
 절반만 샘플링한다(위 글리프 기하).
 
+### IME — 두 플랫폼이 조합을 다르게 준다 (실측)
+
+**Android 는 조합을 조합으로 준다.** `InputConnection.setComposingText` 가 확정 전 문자열을
+따로 주므로, 화면에만 흐리게 그리고 코어는 확정된 것만 받는다. 계약대로다.
+
+**iOS 한글은 marked text 를 쓰지 않는다.** `UITextInput` 을 구현하고 UIKit 이 그것을 쓰는
+것까지 확인했는데도(`MARU_IME protocol=UITextInput`), 한글은 `setMarkedText` 대신
+**`deleteBackward` + `insertText` 로 지웠다 다시 쓴다**. 소프트 키보드로 `ㅎ`·`ㅏ`·`ㄴ` 을
+눌러 재현했고, 코어에 닿은 바이트가 `3 · +4 · +4` 였다 — `+4` 는 backspace 1 + 음절 3 이다.
+(iOS 메모에서 한글 조합에 밑줄이 안 그어지는 것과 같은 이유다. 일본어·중국어는 marked text 를
+쓰므로 `UITextInput` 구현이 그쪽에는 그대로 값을 한다.)
+
+**그래서 iOS 한글은 아직 계약을 못 지킨다** — 조합 중간 음절이 코어에 들어간다. 원격 세션이
+붙으면 셸이 `ㅎ하한` 을 받는다. 고치려면 iOS 쪽에 **"고쳐 쓰기" 를 알아보는 버퍼**가 필요하다:
+방금 넣은 문자열과 길이가 같은 `deleteBackward` 가 뒤따르면 그것을 진짜 backspace 가 아니라
+조합 수정으로 보고, 확정 신호(공백·Enter·다른 키·포커스 상실)에서만 코어로 보낸다. 그 설계는
+[계획 M2b](plans/mobile-platform.md)가 소유한다.
+
+**재현은 하네스가 소유한다** — `run.sh ime-ios`. `idb ui text` 는 **하드웨어 키보드 경로라
+IME 를 안 거치므로** 쓰면 안 된다(그걸로는 조합이 아니라 이미 조합된 결과가 온다). 화면 키를
+좌표로 눌러야 하고, 좌표는 `idb ui describe-all` 의 접근성 정보에서 얻는다. 하드웨어 키보드가
+붙어 있으면 소프트 키보드가 아예 안 뜬다(`ConnectHardwareKeyboard` 를 끈다).
+
 **키는 코어의 인코더를 탄다.** 플랫폼은 **인코딩 전** 상태(키 id·코드포인트·수정자)를
 `maru_mobile_key` 로 넘기고, 바이트는 `core.encodeKey` 가 만든다 — DECCKM(커서키 모드)·
 수정자(Ctrl·Alt)·kitty 프로토콜·application keypad 가 전부 거기 있다. 손으로 `\r`·`0x7F` 를

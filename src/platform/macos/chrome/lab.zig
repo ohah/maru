@@ -78,6 +78,13 @@ pub const ScenarioId = enum {
     /// `visual_map.RowIndex`가 시각 행을 논리 줄+조각으로 풀고, `content.first_piece`가 그 조각부터
     /// 그린다. 첫 행에 **줄 번호가 없는 것**이 그 증거다 — 이어지는 조각이기 때문이다.
     editor_wrap_scrolled,
+    /// N1 §4 — **낡은 스크롤 위치가 들어왔을 때.** 뷰 폭·탭 폭·랩 토글이 바뀌면 인덱스가 무효가
+    /// 되는데(§2) 그 전에 만든 스크롤 위치가 살아남으면 `first_piece`가 실제 조각 수를 넘는다.
+    ///
+    /// **그때 첫 논리 줄이 통째로 사라지면 안 된다** — 사라지면 다음 줄이 y=0에 자기 번호를 달고
+    /// 올라와, 사용자에게는 리사이즈 한 번에 화면이 문서의 다른 곳으로 튄 것처럼 보인다. 코드
+    /// 리뷰가 지적한 자리이고, 화면에 보이는 결함이므로 캡처로 고정한다.
+    editor_wrap_stale_scroll,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -146,7 +153,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => buildEditorGutterFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -322,7 +329,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const lines: []const []const u8 = switch (scenario.id) {
         .editor_hazard => &editor_hazard_lines,
         .editor_wide_glyph => &editor_width_lines,
-        .editor_wrap, .editor_hscroll, .editor_wrap_scrolled => &editor_wrap_lines,
+        .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => &editor_wrap_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -338,7 +345,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         // **화면을 6행으로 좁힌다.** 전체 높이면 전개 예산이 늘 넉넉해서, `first_piece`가 예산을
         // 갉아먹어 **화면 아래가 비는** 결함(코드 리뷰 #1)이 캡처에 나타나지 않는다 — 실제로 그
         // 상태로 골든이 전부 통과했다. 좁은 화면은 분할 pane에서 늘 일어나는 상태이기도 하다.
-        .editor_wrap_scrolled => .{ .first_row = 0, .rows = 6 },
+        .editor_wrap_scrolled, .editor_wrap_stale_scroll => .{ .first_row = 0, .rows = 6 },
         else => .{ .first_row = 0, .rows = @intCast(viewport_h / cell_h_px) },
     };
 
@@ -357,9 +364,17 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // **세로 스크롤이 시각 행 단위인 시나리오**는 여기서 갈린다. 랩된 줄 하나가 화면보다 길면
     // 논리 줄 단위로는 그 줄 머리에서만 멈출 수 있어 **아래를 볼 방법이 없다** — `RowIndex`가
     // 시각 행을 논리 줄+조각으로 풀고, 그 조각부터 그린다.
-    const wrap_on = scenario.id == .editor_wrap or scenario.id == .editor_wrap_scrolled;
+    const wrap_on = scenario.id == .editor_wrap or scenario.id == .editor_wrap_scrolled or
+        scenario.id == .editor_wrap_stale_scroll;
     var first_line: usize = vp.first_row;
     var first_piece: u32 = 0;
+    if (scenario.id == .editor_wrap_stale_scroll) {
+        // **낡은 위치를 흉내낸다.** 첫 줄(자, 세 조각)에 조각 99를 요구하는 상태 — 인덱스가 무효가
+        // 된 뒤에도 스크롤 위치가 살아남으면 이렇게 된다. 첫 줄이 사라지지 않고 **처음부터** 나와야
+        // 한다(캡처의 첫 행에 번호 `1`이 있는 것이 그 증거다).
+        first_line = 0;
+        first_piece = 99;
+    }
     if (scenario.id == .editor_wrap_scrolled) {
         var counts: [row_capacity]u32 = undefined;
         // **인덱스와 렌더러가 서로 다른 저장소 한도를 본다** — 인덱스는 줄마다 재사용하는 이
@@ -555,7 +570,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled => unreachable,
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

@@ -34,26 +34,31 @@ sh tools/mobile-poc/run.sh features-ios        # 같은 판정 (지금 멈춘다
 일을 포함하고, 남겨 두면 어느 쪽이 진짜인지 흐려진다. 측정 **결과**(아래 표·스크린샷)는
 전부 남는다. 여섯 기능 판정기는 다른 모드가 대체하지 않아 남겼다.
 
-## 남아 있는 그림
+## 그림은 어디에 두는가
 
-측정 결과는 숫자와 그림 둘 다다. **저장소만 보고도 각 그림이 무엇의 증거인지 알 수 있어야**
-하므로 여기에 적는다.
+**저장소에 캡처를 커밋하지 않는다**(사용자 결정). 재생성되는 산출물이고 리포만 무거워진다.
+`out/` 은 통째로 gitignore 이고, PR 에 붙일 그림은 이렇게 올린다:
 
-| 파일 | 무엇의 증거 | 다시 만들 수 있나 |
+```sh
+gh attach out/maru-chrome-android-app.png --markdown   # user-attachments URL 을 준다
+```
+
+그 URL 은 리포·브랜치와 무관하게 살아 있어, 브랜치 경로(`raw.githubusercontent.com/.../<branch>/...`)
+로 걸었을 때처럼 **머지 후 브랜치가 지워져 깨지는 일이 없다**.
+
+측정 결과는 숫자와 그림 둘 다이므로, **각 그림이 무엇의 증거이고 어떻게 다시 만드는지**는
+저장소가 계속 소유한다 — 그림 자체 대신 이 표가 남는다.
+
+| 그림 | 무엇의 증거 | 다시 만드는 법 |
 |---|---|---|
-| `out/maru-chrome-ios.png` | iOS 시뮬레이터의 현재 화면 | `chrome-ios` |
-| `out/maru-chrome-android-app.png` | Android 에뮬레이터의 현재 화면 | `chrome-android-app` |
-| `out/atlas-diff.png` | 같은 폰트로 구운 두 아틀라스의 픽셀 차이 | `atlas_diff.py`(아래 덤프 필요) |
-| `out/maru-input-ios.png` | iOS 입력이 코어까지 닿아 그려짐 | `idb ui text` 뒤 캡쳐 |
-| `out/maru-input-android.png` | Android 입력이 코어까지 닿아 그려짐 | `adb shell input tap` 뒤 캡쳐 |
-| `out/maru-lifecycle-android.png` | 홈↔복귀 뒤 렌더 재개 | `input keyevent KEYCODE_HOME` 뒤 재실행 |
-| `out/maru-ios-poc.png` | 1단계 — Metal 오프스크린 격자 | **아니오**(하네스 제거) |
-| `out/maru-android-poc.png` | 1단계 — Vulkan 오프스크린 격자 | **아니오** |
-| `out/maru-ios-app.png` | 2단계 — 시뮬레이터 앱에서 커서 깜빡임 | **아니오** |
-| `out/maru-chrome-android.png` | 3단계 — chrome 을 Vulkan 오프스크린으로 | **아니오** |
+| `maru-chrome-ios.png` | iOS 시뮬레이터의 현재 화면 | `run.sh chrome-ios` |
+| `maru-chrome-android-app.png` | Android 에뮬레이터의 현재 화면 | `run.sh chrome-android-app` |
+| `atlas-diff.png` | 같은 폰트로 구운 두 아틀라스의 픽셀 차이 | `atlas_diff.py`(아래 덤프 필요) |
+| `maru-input-ios.png` | iOS 입력이 코어까지 닿아 그려짐 | `idb ui text` 뒤 캡처 |
+| `maru-input-android.png` | Android 입력이 코어까지 닿아 그려짐 | `adb shell input text` 뒤 캡처 |
+| `maru-lifecycle-android.png` | 홈↔복귀 뒤 렌더 재개 | `input keyevent KEYCODE_HOME` 뒤 재실행 |
+| `synth-before-crop.png` | 합성 글리프가 없어 TUI 가 깨지는 자리 | `chrome-android-app` 뒤 대본의 TUI 줄을 잘라 확대 |
 
-아래 넷은 대체된 초기 단계의 결과다. 그 단계를 지운 뒤로 **다시 만들 수 없지만**, 당시
-판정의 근거라서 남긴다.
 
 ## 무엇을 판정하는가
 
@@ -206,8 +211,6 @@ Android 도 `NativeActivity` + Vulkan swapchain 으로 **에뮬레이터 화면�
 | 값이 다른 칸 | 4904 (ink 의 77.4%) | 대부분 가장자리 |
 | 평균 \|Δ\| | **17.5 / 255** (6.9%) | AA 커버리지 차이 |
 | 눈에 띄는 차이(\|Δ\|>32) | 656 (ink 의 10.4%) | 획 경계 한두 픽셀 |
-
-![아틀라스 대조](out/atlas-diff.png)
 
 위=iOS(초록), 가운데=Android(자홍), 아래=차이를 **3배 증폭**한 것. 증폭했는데도 차이가
 **글자 테두리에만** 있고 획 안쪽은 검다.

@@ -93,7 +93,15 @@ var preedit_buf: [128]u8 = undefined;
 var preedit_len: usize = 0;
 
 export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
-    const n = @min(len, preedit_buf.len);
+    // **UTF-8 경계에서 자른다.** 바이트 수로만 자르면 조합 중 한글이 반토막 나고, 그리는
+    // 쪽의 `Utf8View.init` 이 실패해 **조합 문자열 전체가 사라진다** — 화면이 멈춘 것처럼 보인다.
+    var n = @min(len, preedit_buf.len);
+    while (n > 0 and (ptr[n - 1] & 0xC0) == 0x80) n -= 1; // continuation byte 위로 올라간다
+    if (n > 0) {
+        const lead = ptr[n - 1];
+        const need: usize = if (lead & 0x80 == 0) 1 else if (lead & 0xE0 == 0xC0) 2 else if (lead & 0xF0 == 0xE0) 3 else 4;
+        if (n - 1 + need > @min(len, preedit_buf.len)) n -= 1; // 마지막 글자가 잘렸다
+    }
     @memcpy(preedit_buf[0..n], ptr[0..n]);
     preedit_len = n;
 }
@@ -162,6 +170,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         if (term_core) |*c| c.deinit();
         term_fba.reset();
         term_core = terminal.core.TerminalCore.init(term_fba.allocator(), .{ .cols = cols, .rows = rows }) catch {
+            // 조용히 비우면 본문만 사라진 채 아무 신호가 없다. 지금은 고정 버퍼라
+            // 큰 격자(태블릿 등)에서 모자랄 수 있다.
+            setLastError("terminal_core_init");
             term_core = null;
             return;
         };

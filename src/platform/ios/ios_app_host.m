@@ -122,13 +122,13 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
             (__bridge CFURLRef)[NSURL fileURLWithPath:fontPath]);
         if (descs && CFArrayGetCount(descs) > 0) {
             base = CTFontCreateWithFontDescriptor(
-                (CTFontDescriptorRef)CFArrayGetValueAtIndex(descs, 0), 22, NULL);
+                (CTFontDescriptorRef)CFArrayGetValueAtIndex(descs, 0), MARU_ATLAS_TEXT_PX, NULL);
         }
         if (descs) CFRelease(descs);
     }
     if (!base) {  // 번들 폰트가 없으면 예전 경로로 — 조용히 다른 글꼴이 되지 않게 로그를 남긴다
         NSLog(@"MARU_CHROME bundled_font_missing fallback=Menlo");
-        base = CTFontCreateWithName(CFSTR("Menlo"), 22, NULL);
+        base = CTFontCreateWithName(CFSTR("Menlo"), MARU_ATLAS_TEXT_PX, NULL);
     }
     CTFontRef korean = CFRetain(base);
 

@@ -665,7 +665,11 @@ static void drawFrame(void) {
     // 버퍼를 `maru_mobile_max_quads()` 만큼 잡았으므로 잘릴 일이 없다 — 잘린다면 그건
     // 계약이 깨진 것이라 조용히 넘기지 않고 남긴다.
     unsigned int drawn = n;
-    if (drawn > g.quad_cap) { drawn = g.quad_cap; LOGI("MARU_CHROME error=quad_cap_drift n=%u cap=%u", n, g.quad_cap); }
+    if (drawn > g.quad_cap) {
+        drawn = g.quad_cap;
+        static int logged_drift;  // 매 프레임 도배하지 않는다 — 한 번이면 안다
+        if (!logged_drift) { logged_drift = 1; LOGI("MARU_CHROME error=quad_cap_drift n=%u cap=%u", n, g.quad_cap); }
+    }
     Push *dst = (Push *)g.quad_map;
     for (unsigned int i = 0; i < drawn; i++) {
         const MaruQuad *q = &quads[i];

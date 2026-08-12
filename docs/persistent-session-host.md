@@ -19,7 +19,16 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > OSC 5379 `ssh_remote_dest`는 이제 attach 초기 metadata + revisioned full-state event로 GUI의 owned runtime
 > observation에 전달된다. sidebar cwd/git, auto title, cwd 상속/workspace capture/control collector, at-prompt/close,
 > Claude/Codex 감지, SSH drop/paste가 이 observation을 소비하며 host-backed placeholder `Surface.core`는 metadata
-> 출처로 쓰지 않는다. **P3-e4a~c는 구현됐고 P3-e4d parity gate는 부분 완료**다. 실제 host PTY OSC
+> 출처로 쓰지 않는다. **cwd는 이 중 절반만 온다** — observation이 싣는 것은 셸이 OSC 7으로 보고한 값이고,
+> "이 터미널이 서 있는 폴더"를 푸는 2단 규칙([editor-surface-dock.md](editor-surface-dock.md) §3.5)의 2단인
+> **커널 조회는 host-backed runtime에 존재하지 않는다**. `proc_pidinfo`는 PTY를 소유한 프로세스에서만 답하는데
+> 그건 `maru-sessiond`이고 host는 그 값을 재서 보내지 않는다(`session_host/remote_term_backend.zig`의
+> `processCwd`가 그래서 `null`을 낸다). 결과: **셸 통합이 없는 셸(bash/fish)과 재개 Term은 host-backed일 때
+> cwd가 아예 없다** — in-process에서는 커널이 답하는 바로 그 경우들이다. 사이드바 폴더·브랜치줄, 소스 컨트롤
+> 저장소 선택, 파일 탐색기 루트, 도크 범위 칩, 제어 평면 `TerminalMeta.cwd`가 함께 빈다(축이 하나라 갈리지는
+> 않는다). 메우려면 host가 관측 payload에 측정한 cwd를 더해야 하고 그건 wire schema 변경이라
+> [session-host-upgrade.md](session-host-upgrade.md)의 호환 규약을 건드린다 — **별도 슬라이스이며 아직 계획에
+> 없다.** **P3-e4a~c는 구현됐고 P3-e4d parity gate는 부분 완료**다. 실제 host PTY OSC
 > 7/2/5379 왕복·revision/coalescing·소유권 테스트는 존재하지만 detach 중 변경→재접속, controlled Claude/Codex
 > foreground, 다중 runtime event 격리, 실제 upload branch 제품 E2E가 남아 있어 runtime metadata parity 전체를
 > 완료로 선언하지 않는다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.

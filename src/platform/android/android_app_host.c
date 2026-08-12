@@ -679,10 +679,12 @@ static void drawFrame(void) {
 // API 가 없어서 JNI 로 `View.getRootWindowInsets()` 를 부른다 — iOS 의 `safeAreaInsets`
 // 와 같은 자리다. 값을 못 얻으면 0 으로 두고 진행한다(그리기를 막을 이유는 없다).
 static void queryInsets(struct android_app *app, int *top, int *bottom) {
-    *top = 0; *bottom = 0;
+    // **실패하면 이전 값을 지킨다.** 예전에는 먼저 0 으로 밀어 버려, 조회가 실패하면 UI 가
+    // 조용히 상태바 밑으로 들어갔다 — 화면만 이상하고 이유는 안 보인다.
+    int got_top = 0, got_bottom = 0, ok = 0;
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
-    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) { LOGI("insets_attach_failed"); return; }
     jobject act = app->activity->clazz;
     jclass actCls = (*env)->GetObjectClass(env, act);
     jmethodID mWin = (*env)->GetMethodID(env, actCls, "getWindow", "()Landroid/view/Window;");
@@ -693,7 +695,7 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
     jclass viewCls = (*env)->GetObjectClass(env, decor);
     jmethodID mRoot = (*env)->GetMethodID(env, viewCls, "getRootWindowInsets", "()Landroid/view/WindowInsets;");
     jobject ins = (*env)->CallObjectMethod(env, decor, mRoot);
-    if (!ins) { (*vm)->DetachCurrentThread(vm); return; }
+    if (!ins) { LOGI("insets_unavailable"); (*vm)->DetachCurrentThread(vm); return; }
     jclass typeCls = (*env)->FindClass(env, "android/view/WindowInsets$Type");
     jmethodID mBars = (*env)->GetStaticMethodID(env, typeCls, "systemBars", "()I");
     jint mask = (*env)->CallStaticIntMethod(env, typeCls, mBars);
@@ -702,10 +704,12 @@ static void queryInsets(struct android_app *app, int *top, int *bottom) {
     jobject box = (*env)->CallObjectMethod(env, ins, mGet, mask);
     if (box) {
         jclass boxCls = (*env)->GetObjectClass(env, box);
-        *top = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "top", "I"));
-        *bottom = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "bottom", "I"));
+        got_top = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "top", "I"));
+        got_bottom = (*env)->GetIntField(env, box, (*env)->GetFieldID(env, boxCls, "bottom", "I"));
+        ok = 1;
     }
     (*vm)->DetachCurrentThread(vm);
+    if (ok) { *top = got_top; *bottom = got_bottom; } else LOGI("insets_read_failed");
 }
 
 // **입력**: 문자는 IME 가 만든다. `MaruActivity.java` 가 `InputConnection` 으로 받아
@@ -1044,6 +1048,9 @@ static void frameCallback(int64_t frame_time_ns, void *data) {
 static void recreateVulkan(struct android_app *app) {
     if (!app->window) return;
     teardownVulkan();
+    // **inset 도 다시 읽는다.** 창이 커지거나 줄면 상태바·제스처바 영역도 달라지는데,
+    // 예전에는 창 생성 때 한 번만 읽어 그 뒤로 옛 값을 썼다 — iOS 는 매 프레임 읽는다.
+    queryInsets(app, &g.inset_top, &g.inset_bottom);
     if (initVulkan(app->window)) LOGI("MARU_LIFECYCLE vulkan_recreated");
 }
 

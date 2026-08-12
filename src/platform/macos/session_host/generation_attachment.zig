@@ -2149,6 +2149,115 @@ test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct 
     try std.testing.expectEqual(contract.BindingLifecycle.terminal, attachment.binding.lifecycle);
 }
 
+test "CR3a-2d1 generation attachment는 첫 retryable token을 teardown fresh permit으로 정리한다" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var release_probe = AttachmentEventNoFreeAllocator{ .parent = allocator };
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2D21,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    const receipt = try attachment.prepareControllerAttach(&adapter, 0x2D22);
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedFromPromotedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x2D23,
+        accepted,
+        response_bytes,
+        testAllocationProvenance(0x2D23),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x2D22,
+        .stream_id = 0x2D24,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+    try attachment.initScreen(screen_stream.codec_version);
+
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&snapshot, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "r", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&snapshot, allocator, row);
+    const bytes = try release_probe.allocator().dupe(u8, snapshot.items);
+    release_probe.target_addr = @intFromPtr(bytes.ptr);
+    release_probe.target_len = bytes.len;
+    const logical_client = adapter.logicalClient();
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 0x2D24,
+        .bytes = bytes,
+        .allocator = release_probe.allocator(),
+    });
+    logical_client.pending_batch_bytes = bytes.len;
+
+    const batch_registry_mod = @import("generation_batch_registry.zig");
+    const pending_lease = (try attachment.batch_adapter.interface().read_batch(
+        &attachment.batch_adapter,
+        0x2D24,
+    )) orelse return error.TestUnexpectedResult;
+    const pending_token = switch (pending_lease) {
+        .generation => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    try attachment.payload.?.pending_batches.append(allocator, pending_lease);
+    batch_registry_mod.testing.armNextRetryable(&adapter.slot.current.batch_registry, pending_token);
+    release_probe.armed = true;
+    try std.testing.expectError(error.LedgerInvariant, attachment.pumpScreen(std.testing.io));
+    try std.testing.expect(attachment.payload.?.failed_release != null);
+    try std.testing.expectEqual(@as(usize, 0), release_probe.target_free_count);
+    try std.testing.expectEqual(@as(usize, 1), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), adapter.slot.current.accounting_ledger.item_count);
+
+    const sibling_bytes = try allocator.dupe(u8, "sibling-after-retryable");
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 0x2D24,
+        .bytes = sibling_bytes,
+        .allocator = allocator,
+    });
+    logical_client.pending_batch_bytes += sibling_bytes.len;
+    const sibling_count = logical_client.pending_batches.items.len;
+    const sibling_bytes_count = logical_client.pending_batch_bytes;
+    try std.testing.expectError(error.LedgerInvariant, attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(sibling_count, logical_client.pending_batches.items.len);
+    try std.testing.expectEqual(sibling_bytes_count, logical_client.pending_batch_bytes);
+    try std.testing.expectEqual(@as(usize, 0), release_probe.target_free_count);
+
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    release_probe.armed = false;
+    try std.testing.expectEqual(@as(usize, 1), release_probe.target_free_count);
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.accounting_ledger.item_count);
+}
+
 test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;

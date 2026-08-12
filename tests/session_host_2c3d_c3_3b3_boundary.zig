@@ -129,7 +129,7 @@ test "C3-3b3 atomic settlement boundary" {
     }
 
     const gate_start = std.mem.indexOf(u8, build, "const event_c3_3b3_module") orelse return error.MissingGateStart;
-    const gate_end = std.mem.indexOfPos(u8, build, gate_start, "const control_c1_runtime_tests") orelse return error.MissingGateEnd;
+    const gate_end = std.mem.indexOfPos(u8, build, gate_start, "const event_2d1_registry_module") orelse return error.MissingGateEnd;
     const gate = build[gate_start..gate_end];
     try std.testing.expectEqual(@as(usize, 4), count(gate, ", 6);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=5"));

@@ -1898,6 +1898,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markPendingEventCorrelationTombstonedNoFail" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "markPendingEventMirrorTombstonedNoFail" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishPendingEventReleaseNoFail" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "releaseAttachmentBatchResult" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pinProjectionFromEventReleasePermit" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "hashInt" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "registryEventReleaseFromComposite" },
@@ -2158,7 +2159,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     const slot_aggregate = [_]struct { name: []const u8, mutation: []const u8 }{
         .{ .name = "reserveAttachmentBinding", .mutation = "cleanup_registry.reserve" },
         .{ .name = "prepareStreamOperationPermit", .mutation = "registerStreamOperationPermit" },
-        .{ .name = "releaseAttachmentBatch", .mutation = "prepareGenerationAccountingConsume" },
+        .{ .name = "releaseAttachmentBatchResult", .mutation = "prepareGenerationAccountingConsume" },
     };
     for (slot_aggregate) |contract_entry|
         try expectContainerMethodMarkersInOrder(
@@ -4172,6 +4173,30 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             .pump_references = 0,
         },
         .{
+            .name = "abortPreparedReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "beginPreparedReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "finishPreparedReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
             .name = "commitExternalAdoptionTakeUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/client.zig"},
             .pump_references = 1,
@@ -4382,7 +4407,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     }
     // Allocator restoration is now a checked one-shot token consume, so it intentionally no
     // longer contributes an `*Unchecked` declaration to this global authority inventory.
-    try std.testing.expectEqual(@as(usize, 46), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 49), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });

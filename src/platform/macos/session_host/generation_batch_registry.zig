@@ -24,6 +24,46 @@ pub const AccountingReceipt = struct {
     byte_count: usize,
 };
 
+pub const GenerationReleaseResult = enum(u8) {
+    completed,
+    retryable_preserved,
+    indeterminate_or_partial,
+};
+
+const PreparedReleaseLifecycle = enum(u8) { pristine, prepared, consumed, aborted };
+
+/// 실제 registry row를 움직이기 전에 token과 accounting을 final-address scratch에 고정한다.
+/// retryable 결과는 이 permit을 abort해 live row를 그대로 보존한 경우에만 발행할 수 있다.
+pub const PreparedRelease = struct {
+    self_addr: usize = 0,
+    token: Token = std.mem.zeroes(Token),
+    accounting: AccountingReceipt = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 },
+    lifecycle: PreparedReleaseLifecycle = .pristine,
+
+    pub fn pristine(self: *const PreparedRelease) bool {
+        return self.self_addr == 0 and self.lifecycle == .pristine and
+            self.accounting.client_addr == 0 and self.accounting.transfer_id == 0 and
+            self.accounting.byte_count == 0;
+    }
+};
+
+const TestingRetryableRelease = struct {
+    registry_addr: usize = 0,
+    token: Token = std.mem.zeroes(Token),
+};
+threadlocal var testing_retryable_release: TestingRetryableRelease = .{};
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn armNextRetryable(registry: *Registry, token: Token) void {
+        if (testing_retryable_release.registry_addr != 0)
+            @panic("generation release test verdict is not pristine");
+        testing_retryable_release = .{
+            .registry_addr = @intFromPtr(registry),
+            .token = token,
+        };
+    }
+} else struct {};
+
 const OwnedLifecycle = enum(u8) { empty, live, cleanup, settled };
 
 pub const OwnedBatch = struct {
@@ -743,6 +783,73 @@ pub const Registry = struct {
         return entry.accounting;
     }
 
+    pub fn prepareRelease(
+        self: *Registry,
+        token: Token,
+        out: *PreparedRelease,
+    ) Error!void {
+        if (!out.pristine()) return error.DestinationOccupied;
+        const pristine_cleanup: OwnedBatch = .{};
+        const receipt = try self.preflightRelease(token, &pristine_cleanup);
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .token = token,
+            .accounting = receipt,
+            .lifecycle = .prepared,
+        };
+    }
+
+    /// 준비된 row가 mutation 전 retryable이면 permit만 닫고 canonical live row는 보존한다.
+    pub fn releaseDecision(self: *Registry, prepared: *PreparedRelease) GenerationReleaseResult {
+        if (!self.preparedReleaseCurrent(prepared))
+            @panic("prepared generation release authority drifted");
+        if (!builtin.is_test) return .completed;
+        if (testing_retryable_release.registry_addr == @intFromPtr(self) and
+            std.meta.eql(testing_retryable_release.token, prepared.token))
+        {
+            testing_retryable_release = .{};
+            return .retryable_preserved;
+        }
+        return .completed;
+    }
+
+    pub fn abortPreparedReleaseUnchecked(self: *Registry, prepared: *PreparedRelease) void {
+        if (!self.preparedReleaseCurrent(prepared))
+            @panic("prepared generation release abort drifted");
+        prepared.lifecycle = .aborted;
+    }
+
+    pub fn beginPreparedReleaseUnchecked(
+        self: *Registry,
+        prepared: *PreparedRelease,
+        out: *OwnedBatch,
+    ) void {
+        if (!self.preparedReleaseCurrent(prepared) or !out.pristine())
+            @panic("prepared generation release begin drifted");
+        self.beginReleaseUnchecked(prepared.token, out);
+    }
+
+    pub fn finishPreparedReleaseUnchecked(
+        self: *Registry,
+        prepared: *PreparedRelease,
+        cleanup: *OwnedBatch,
+    ) void {
+        if (prepared.self_addr != @intFromPtr(prepared) or prepared.lifecycle != .prepared)
+            @panic("prepared generation release finish drifted");
+        self.finishReleaseUnchecked(prepared.token, cleanup);
+        prepared.lifecycle = .consumed;
+    }
+
+    fn preparedReleaseCurrent(self: *Registry, prepared: *const PreparedRelease) bool {
+        if (prepared.self_addr != @intFromPtr(prepared) or prepared.lifecycle != .prepared)
+            return false;
+        const entry = self.exactEntry(prepared.token) catch return false;
+        return entry.lifecycle == .live and entry.cleanup_addr == 0 and
+            entry.accounting.client_addr == prepared.accounting.client_addr and
+            entry.accounting.transfer_id == prepared.accounting.transfer_id and
+            entry.accounting.byte_count == prepared.accounting.byte_count;
+    }
+
     pub fn beginReleaseUnchecked(self: *Registry, token: Token, out: *OwnedBatch) void {
         self.beginRelease(token, out) catch
             @panic("preflighted generation batch release drifted");
@@ -1055,6 +1162,52 @@ test "CR3a-2b1 registry commit은 live sibling payload overlap을 publication �
     cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
     try cleanup.completeCleanup();
     try registry.finishRelease(first_token, &cleanup);
+}
+
+test "CR3a-2d1 registry generation release completed raw는 고정된다" {
+    try std.testing.expectEqual(@as(usize, 3), std.enums.values(GenerationReleaseResult).len);
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(GenerationReleaseResult.completed));
+}
+
+test "CR3a-2d1 registry generation release retryable raw는 고정된다" {
+    try std.testing.expectEqual(@as(usize, 3), std.enums.values(GenerationReleaseResult).len);
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(GenerationReleaseResult.retryable_preserved));
+}
+
+test "CR3a-2d1 registry generation release indeterminate raw는 고정된다" {
+    try std.testing.expectEqual(@as(usize, 3), std.enums.values(GenerationReleaseResult).len);
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(GenerationReleaseResult.indeterminate_or_partial));
+}
+
+test "CR3a-2d1 registry prepared release는 final address 복사와 stale token을 거부한다" {
+    var registry: Registry = .{};
+    try registry.initInPlace(0x2D01);
+    const allocator = std.testing.allocator;
+    const bytes = try allocator.dupe(u8, "prepared-release");
+    var owned: OwnedBatch = .{};
+    const reservation = try registry.reserve(7);
+    try registry.prepareIngress(reservation);
+    try OwnedBatch.initInPlace(&owned, false, 7, bytes, allocator, .{
+        .client_addr = 1,
+        .transfer_id = reservation.entry_generation,
+        .byte_count = bytes.len,
+    });
+    const token = try registry.commit(reservation, &owned);
+    var prepared: PreparedRelease = .{};
+    try registry.prepareRelease(token, &prepared);
+    var copied = prepared;
+    try std.testing.expect(!registry.preparedReleaseCurrent(&copied));
+    registry.abortPreparedReleaseUnchecked(&prepared);
+    try std.testing.expectEqual(@as(usize, 1), try registry.count());
+
+    var cleanup: OwnedBatch = .{};
+    registry.beginReleaseUnchecked(token, &cleanup);
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    cleanup.completeCleanupUnchecked();
+    registry.finishReleaseUnchecked(token, &cleanup);
 }
 
 comptime {

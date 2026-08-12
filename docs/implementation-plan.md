@@ -970,8 +970,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       병렬 `client`/nullable adapter 필드와 두-owner private 생성자·teardown shim을 제거한다. exact semantic facade 15개와
       legacy reviewed allowlist, generation raw Client source-zero는 persistent-session-host의 exact 목록을 그대로 사용한다.
    각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4
-   전에는 2c 전체 완료를 주장하지 않는다. CR3a-2d는
-   실제 owner의 typed failure/reentry/aggregate handoff를 닫고, CR3a-2e는 actual socket
+   전에는 2c 전체 완료를 주장하지 않는다. **CR3a-2d는 2d1→2d2→2d3의 세 세로 gate로 닫는다.**
+   2d1은 구현 완료했다. 실제 generation batch release가 `completed|retryable_preserved|indeterminate_or_partial`을 반환하는
+   owner-owned 결과와 최초 retryable 한 건의 attachment 보존·deinit 재시도를 배선했다. 2d2는 두 번째 retryable 또는
+   indeterminate에서 남은 batch/drop owner 전부를 node-owned terminal handoff receipt 하나로 이전하고
+   `ClientSlot.tryDeinit`의 drain/quarantine→Client→node 순서를 닫는다. 2d3은 allocator callback reentry,
+   permit/receipt proof loss, exact surviving descriptor drain과 no-free quarantine의 제품 subprocess/source boundary를 닫는다.
+   각 gate의 exact API·RED 인벤토리는 persistent-session-host의 CR3a-2d 절을 단일 출처로 삼으며, 2d1~3 전체가 green이기
+   전에는 2d 완료를 주장하지 않는다. CR3a-2e는 actual socket
    parity와 production boundary를 닫는다. HostAdapter는 RPC 전에 neutral binding의 node pin과 빈 cleanup entry를 예약하고 attach
    성공 뒤 stream ID를 무할당으로 결속하므로 post-attach lease mint 실패
    rollback을 만들지 않는다. external-pump의 `ExternalInboxLedger`와 movable attachment graph는 흡수·공유하지 않는다. 이때

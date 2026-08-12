@@ -25,6 +25,16 @@
   바인드하지 않는다" 이고 보안이 "같은 uid 안의 신뢰 차등" 이다 — peer-cred 는 기계를
   넘으면 존재하지 않는다. 원격 축(전송·인증·암호화)은 그 문서가 새로 소유해야 하고,
   정하기 전에는 모바일에서 붙일 수 없다([계획 M3](plans/mobile-platform.md)).
+- **모바일 config 는 데스크톱과 따로다(사용자 확정).** 파일도 스키마도 공유하지 않는다.
+  [설정](configuration.md)의 키 93개를 훑어 보면 이유가 드러난다 — `quick-terminal.*`·
+  `shell.command`·`input.option-as-meta`·`input.right-click` 처럼 **모바일에 뜻이 없는 것**이
+  큰 덩어리이고, 반대로 모바일에만 필요한 것(보조 키바 구성·터치 임계값·원격 접속 프로필·
+  배경 동작)은 데스크톱 스키마에 아예 없다. 공유하면 양쪽 다 쓰지 않는 키를 이고 간다.
+
+  **공유하는 것은 값이 아니라 기계다.** 파서·resolve 규율·"파일이 단일 출처" 원칙은
+  `src/config` 를 그대로 쓰고, 스키마와 파일 위치만 모바일 것으로 둔다. 원격 세션에 붙어도
+  **PC 의 config 를 끌어오지 않는다** — 화면 크기·입력 방식·전력 사정이 다른 기기의 값을
+  베끼면 대부분 틀린다. 계획은 [M10](plans/mobile-platform.md)이 소유한다.
 - **Android IME 는 자체 Java shim 이 받는다**(`NativeActivity` 유지). `NativeActivity` 만으로는
   소프트 키보드가 ASCII 물리 키 이벤트를 줄 때만 입력이 되고 **IME 를 못 받는다** — 한글
   조합이 필수인 터미널에서는 쓸 수 없다. 구글의 `GameActivity`/`GameTextInput` 이 그 자리를
@@ -274,7 +284,7 @@ DECCKM·수정자·kitty 프로토콜이 전부 빠져 있다. 보조 키바를 
 | 계약 | 모바일 상태 |
 |---|---|
 | [chrome 상호작용 이관](chrome-interaction-migration.md) — interactive node 가 semantic descriptor 를 내고 플랫폼이 네이티브 접근성 요소로 투영한다 | **어댑터 없음.** GPU quad 뿐이라 VoiceOver·TalkBack 에게는 빈 화면이다 |
-| [설정](configuration.md) — config 스키마·resolve 계약 | **config 를 안 읽는다.** `themeColors()` 가 값을 고정한다 — 폰트 크기 하나 못 바꾼다 |
+| [설정](configuration.md) — config 스키마·resolve 계약 | **아직 아무 config 도 안 읽는다.** `themeColors()`·`font_px` 가 값을 고정한다 — 폰트 크기 하나 못 바꾼다. 데스크톱 스키마를 따를 자리는 아니고(§1 — 모바일 config 는 따로다) **모바일 스키마가 아직 없는 것**이 공백이다 |
 | [배포](distribution.md) — 채널·서명·업데이트 | **모바일 스토어를 안 다룬다.** `AndroidManifest.xml` 의 `android:debuggable="true"` 는 개발용이라 배포 전에 반드시 뺀다 |
 
 계획은 [M9~M11](plans/mobile-platform.md)이 소유한다.

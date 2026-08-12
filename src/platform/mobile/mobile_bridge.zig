@@ -79,6 +79,12 @@ const term_feed =
 // 그게 터미널의 계약이고, 모바일에서도 같은 계약이 서는지 보는 자리다.
 var input_buf: [512]u8 = undefined;
 var input_len: usize = 0;
+/// 기록이 잘렸다 — 코어를 다시 세울 때 replay 하지 않는다(잘린 replay 는 escape sequence 를
+/// 반토막 내 화면을 더 망친다).
+var input_truncated: bool = false;
+/// **코어에 실제로 전달한** 누적 바이트. 반환값이 기록 길이였을 때는 버퍼가 찬 뒤에도
+/// 같은 수가 계속 나와서, 입력이 죽은 것을 로그로 알아챌 수 없었다.
+var delivered_len: usize = 0;
 
 // **조합 중 문자열은 코어에 안 넣는다.** 확정 전에 PTY 로 흘리면 셸이 `ㅎ` 같은 자모를
 // 명령어 일부로 받는다. 화면에만 흐리게 그릴 겉치레라 별도 상태로 둔다 — 데스크톱 maru 의
@@ -94,13 +100,23 @@ export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
 
 export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
     preedit_len = 0; // 확정됐으니 겉치레를 지운다
+
+    // **코어에 먹이는 것이 먼저다.** 예전에는 replay 버퍼가 꽉 차면 여기서 반환해,
+    // 누적 512바이트를 넘긴 순간부터 모든 키·IME 확정·백스페이스가 조용히 사라졌다
+    // (실측: `total=512` 에서 멈춤). replay 는 화면 크기가 바뀌어 코어를 다시 세울 때
+    // 쓰는 편의일 뿐이고, 그 편의가 입력 자체를 막아서는 안 된다.
+    if (term_core) |*c| c.write(ptr[0..len]) catch {};
+    delivered_len += len;
+
     const n = @min(len, input_buf.len - input_len);
-    if (n == 0) return @intCast(input_len);
+    if (n < len) {
+        // 버퍼가 모자라면 **기록만** 포기한다. 코어를 다시 세울 때 앞부분만 replay 하면
+        // escape sequence 가 잘려 화면이 더 이상해지므로, 아예 replay 를 끈다.
+        input_truncated = true;
+    }
     @memcpy(input_buf[input_len..][0..n], ptr[0..n]);
     input_len += n;
-    // 코어가 이미 서 있으면 바로 먹인다. 없으면 다음 init 때 feed 뒤에 붙는다.
-    if (term_core) |*c| c.write(ptr[0..n]) catch {};
-    return @intCast(input_len);
+    return @intCast(delivered_len);
 }
 
 // ── 포인터 조회 ───────────────────────────────────────────────────────────────
@@ -153,7 +169,8 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         term_rows = rows;
         term_core.?.write(term_feed) catch {};
         // 재생성이면 그동안 받은 입력도 다시 먹인다 — 화면이 되돌아가지 않는다.
-        if (input_len > 0) term_core.?.write(input_buf[0..input_len]) catch {};
+        // 기록이 잘렸으면 replay 하지 않는다(위 주석).
+        if (input_len > 0 and !input_truncated) term_core.?.write(input_buf[0..input_len]) catch {};
     }
     // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };
@@ -179,7 +196,11 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
             if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
             const glyph = atlasCell(cell.codepoint) orelse continue;
-            if (quad_count == quad_buf.len) return;
+            if (quad_count == quad_buf.len) {
+                // 조용히 자르면 남은 행과 아이콘 줄이 통째로 사라진 채 화면만 이상해진다.
+                setLastError("quad_buffer_full");
+                return;
+            }
             const rgb = cellRgb(cell.style, tk);
             // 진행 폭은 코어가 정한 셀 폭을 따른다 — 한글이 2셀이라는 판정이 코어 것이다.
             const x = @as(i32, @intFromFloat(rect.x)) + @as(i32, col) * @divTrunc(cw, 2);
@@ -187,7 +208,10 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             quad_buf[quad_count] = .{
                 .x = @floatFromInt(x),
                 .y = @floatFromInt(y),
-                .w = @floatFromInt(if (cell.width == 2) cw else @divTrunc(cw, 2) + 2),
+                // **셀 종횡비를 지킨다.** 셰이더가 아틀라스 셀 *전체* 를 quad 에 매핑하므로
+                // 폭을 줄이면 글자가 가로로 눌린다. 단폭·양폭 모두 같은 셀 하나를 그리고,
+                // 다른 것은 **다음 칸까지의 거리**(아래 x 계산)뿐이다.
+                .w = @floatFromInt(cw),
                 .h = @floatFromInt(font_px),
                 .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
                 .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
@@ -545,14 +569,20 @@ fn labelFor(id: u64) ?[]const u8 {
 /// catch 로 삼키면 화면이 비어 있는 이유를 알 수 없다(실측: 처음에 그렇게 짰다가 헤맸다).
 var last_error: [64]u8 = [_]u8{0} ** 64;
 
+/// 플랫폼이 `maru_mobile_last_error` 로 읽는 자리. 조용한 실패를 남기지 않기 위한 것이라
+/// **덮어쓰지 않는다** — 먼저 난 원인이 더 쓸모 있다.
+fn setLastError(name: []const u8) void {
+    if (last_error[0] != 0) return;
+    const n = @min(name.len, last_error.len - 1);
+    @memcpy(last_error[0..n], name[0..n]);
+}
+
 export fn maru_mobile_build(width: u32, height: u32) u32 {
     quad_count = 0;
     @memset(&last_error, 0);
     const tk = tokens.Tokens.rich(themeColors());
     buildUi(width, height, &tk) catch |err| {
-        const name = @errorName(err);
-        const n = @min(name.len, last_error.len - 1);
-        @memcpy(last_error[0..n], name[0..n]);
+        setLastError(@errorName(err));
         return 0;
     };
     return @intCast(quad_count);

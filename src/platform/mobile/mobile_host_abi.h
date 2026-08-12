@@ -18,6 +18,18 @@ extern "C" {
 #define MARU_ATLAS_CELL_W 24
 #define MARU_ATLAS_CELL_H 32
 #define MARU_ATLAS_COLS   16
+/// 아틀라스 전체 행 수. **미리 굽는 글자 수로 정하면 안 된다** — 온디맨드 성장이 남는
+/// 슬롯만큼만 되고, 한글은 수천 자라 금세 막힌다(실측: 여유 15칸에서 멈춤).
+/// 32행 = 512슬롯 = 384x1024 R8 텍스처(384KB). 축출 정책이 생기기 전까지의 상한이다.
+#define MARU_ATLAS_ROWS   32
+
+/// 앱이 뜨자마자 보일 글자만 미리 굽는다(나머지는 온디맨드 성장이 맡는다). **두 플랫폼이
+/// 같은 집합을 써야** 픽셀 대조가 의미를 갖는다 — 예전에는 두 host 에 같은 문자열이
+/// 따로 있어, 한쪽만 고치면 서로 다른 아틀라스를 비교하게 됐다.
+#define MARU_ATLAS_PREBAKE \
+    "$ zig build test All 11 passed.git status --short" \
+    "M src/chrome/ui/tree.zigmaru 0.1.0 (arm64)zshvimlogswebdocsinfrascratch" \
+    "한글 터미널 세션 목록 설정 검색 알림"
 
 /// 그릴 것 하나. ChromeDraw 의 op 은 union 이라 C 에서 다루기 번거로워 rect+색+radius 로
 /// 낮춰 넘긴다. **`float4` 배수로 맞춘다** — Metal 셰이더 구조체가 `float2` 에 8바이트

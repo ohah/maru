@@ -171,6 +171,36 @@ test "소프트 Enter 와 하드웨어 Enter 가 같은 바이트다" {
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
 
+// 조합 중 문자열(IME preedit)은 **코어에 안 들어가고 화면에만 흐리게** 떠야 한다 — 확정 전에
+// PTY 로 흘리면 셸이 자모를 명령어 일부로 받는다. 확정되면 겉치레는 사라진다.
+//
+// IME 가 실제로 조합을 보내는지는 **플랫폼 쪽 절반**이라 여기서 못 본다(에뮬레이터에 한글
+// IME 가 없고, 영어 Gboard 는 `NO_SUGGESTIONS` 때문에 조합 없이 확정한다). 우리가 소유한
+// 절반 — 받으면 그리고, 확정되면 지우고, 코어를 안 더럽힌다 — 만 여기서 고정한다.
+test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    const plain = bridge.maru_mobile_build(402, 874);
+    const before = bridge.maru_mobile_input("", 0); // 누적 바이트만 읽는다
+
+    bridge.maru_mobile_set_preedit("abc", 3);
+    const with_ghost = bridge.maru_mobile_build(402, 874);
+    try std.testing.expect(with_ghost > plain); // 겉치레가 그려졌다
+    try std.testing.expectEqual(before, bridge.maru_mobile_input("", 0)); // 코어엔 안 들어갔다
+
+    // 확정하면 겉치레가 사라진다.
+    _ = bridge.maru_mobile_input("x", 1);
+    const after = bridge.maru_mobile_build(402, 874);
+    try std.testing.expect(after < with_ghost);
+
+    // **UTF-8 경계에서 자른다.** 한글이 반토막 나면 그리는 쪽이 문자열을 통째로 버려
+    // 조합이 화면에서 사라진다 — 3바이트 글자를 2바이트만 준다.
+    bridge.maru_mobile_set_preedit("한", 2);
+    const truncated = bridge.maru_mobile_build(402, 874);
+    try std.testing.expect(truncated > 0); // 화면이 안 죽는다
+    bridge.maru_mobile_set_preedit("", 0);
+}
+
 // 헤더가 숫자 표의 단일 출처다. **한쪽만 고치면 host 가 모르는 id 를 보내고 키가 사라진다** —
 // 헤더를 읽어 브리지 매핑이 그 전부를 아는지 검사한다.
 test "헤더의 키 id 를 브리지가 전부 안다" {

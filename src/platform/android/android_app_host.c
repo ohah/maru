@@ -1154,6 +1154,14 @@ static void growAtlas(struct android_app *app) {
 }
 
 static void onAppCmd(struct android_app *app, int32_t cmd) {
+    // **포커스를 코어에 알린다**(DEC 1004 — vim 의 FocusGained/Lost). 모바일은 배경↔복귀가
+    // 데스크톱보다 훨씬 잦다. 코어를 만지므로 입력 스레드와 같은 자물쇠를 쓴다.
+    if (cmd == APP_CMD_GAINED_FOCUS || cmd == APP_CMD_LOST_FOCUS) {
+        pthread_mutex_lock(&g_bridge_lock);
+        maru_mobile_report_focus(cmd == APP_CMD_GAINED_FOCUS);
+        pthread_mutex_unlock(&g_bridge_lock);
+        return;
+    }
     if (cmd == APP_CMD_TERM_WINDOW) {
         teardownVulkan();
         return;

@@ -24283,11 +24283,14 @@ test "사이드바 에이전트 목록: Term 전수 나열·개수와 무관하�
 // 함께 증명하는 것: (a) 에이전트를 돌리는 Term이 **에이전트 행 하나로만** 나오고 터미널 행으로 중복되지
 // 않는다(= "터미널이 에이전트 실행 중이면 에이전트만"이 Term 1:1 규율에서 공짜로 나온다), (b) 터미널 1개짜리
 // 워크스페이스는 카드 헤더가 곧 그 Term이라 목록을 내지 않는다.
-// [사용자 결정 2026-08-12] 카드에 **running 집계 배지**를 되살린다. 목록으로 옮겼던 파형은 목록을 **접으면**
-// 어디에도 남지 않아, 같은 커밋이 내세운 "안 보이는 것을 없는 것처럼 만들지 않는다"가 접힘에서 뒤집혔다.
+// [사용자 결정 2026-08-12] **running 집계 배지는 `sessions` 토글 행에 산다.** 처음엔 카드(부모 탭)에 두었는데,
+// 카드와 그 아래 세션 행에 같은 파형이 겹쳐 보여 "부모 탭에서도 나온다"는 보고를 받았다(사용자 요청: 카드에서 제거).
+// 토글 행은 목록의 접힘과 무관하게 **항상 한 줄** 있으므로, 카드에 4번째 줄을 만들지 않고도 "무엇이 몇 개 도는가"가
+// 늘 보인다 — 배지를 되살린 원래 근거(접으면 파형이 어디에도 안 남는다)를 카드 없이 지킨다.
+//
 // 배지는 대표 하나를 고르는 옛 상태줄과 다른 정보다 — "무엇이 몇 개 도는가"를 종류별로 센다. 종류 아이콘은
 // 붙이지 않고 **색으로** 가른다(사용자 결정). 개수 1은 숫자를 생략한다(파형이 이미 "하나"를 말한다).
-test "사이드바 카드 배지: 종류별 running 개수를 세고, 개수 1은 숫자를 생략한다" {
+test "사이드바 running 배지: 종류별 running 개수를 세고, 개수 1은 숫자를 생략한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const session = try initSmokeSessionSized(a);
@@ -24295,7 +24298,7 @@ test "사이드바 카드 배지: 종류별 running 개수를 세고, 개수 1�
     defer session.deinit();
     const tab = session.tabs.items[0];
 
-    // running이 없으면 집계도 0 — 배지 줄은 ""이라 카드에서 생략된다(공백만 있으면 없던 줄이 렌더된다).
+    // running이 없으면 집계도 0 — 배지는 ""이라 토글 행에 개수 라벨만 남는다.
     {
         const counts = tab_ops.tabRunningCountsByKind(tab);
         try std.testing.expectEqual(@as(u16, 0), counts.total());
@@ -24334,12 +24337,14 @@ test "사이드바 카드 배지: 종류별 running 개수를 세고, 개수 1�
     {
         var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
         defer spans.deinit(a);
-        const line = try sidebar_ops.runningBadgeLine(session, tab, "", &spans, 0);
+        const line = try sidebar_ops.runningBadgeText(session, tab, 0, &spans, 0);
         defer a.free(line);
         // claude 2 + codex 1 → 파형+공백+2, 두 칸, 파형(개수 1은 숫자 생략).
         try std.testing.expect(std.mem.indexOf(u8, line, " 2") != null); // 숫자가 파형에 붙지 않는다
         try std.testing.expect(std.mem.indexOf(u8, line, "  ") != null); // 종류 사이는 두 칸
         try std.testing.expect(!std.mem.endsWith(u8, line, "1")); // 개수 1은 숫자를 붙이지 않는다
+        // 배지는 **본문만** 만든다 — 앞의 개수 라벨은 호출자가 붙이므로 여기서 들여쓰기가 새어 들어오면 안 된다.
+        try std.testing.expect(!std.mem.startsWith(u8, line, " "));
         // 구간은 종류마다 하나이고, 서로 겹치지 않으며, claude가 먼저다(색이 뒤바뀌면 종류가 뒤바뀐다).
         try std.testing.expectEqual(@as(usize, 2), spans.items.len);
         try std.testing.expectEqual(AgentKind.claude, spans.items[0].kind);
@@ -24357,12 +24362,26 @@ test "사이드바 카드 배지: 종류별 running 개수를 세고, 개수 1�
         try std.testing.expectEqual(@as(u16, 0), counts.codex);
     }
 
-    // running이 0이면 **빈 문자열**이어야 한다 — 공백만 있으면 카드에 없던 줄이 렌더된다(옛 사용자 제보 버그).
+    // 시작 열은 **인자 그대로** 반영돼야 한다. 토글 행에서 배지 앞에는 개수 라벨(`1  `)이 오는데, 그 폭이 span에
+    // 안 실리면 색만 왼쪽으로 밀려 파형 대신 라벨이 브랜드색을 받는다 — 조립과 색칠이 같은 좌표계를 봐야 한다는
+    // 규율이 깨지는 지점이라 숫자로 고정한다.
+    first.agent_state = .running;
+    {
+        var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
+        defer spans.deinit(a);
+        const line = try sidebar_ops.runningBadgeText(session, tab, 7, &spans, 3);
+        defer a.free(line);
+        try std.testing.expectEqual(@as(usize, 1), spans.items.len);
+        try std.testing.expectEqual(@as(u16, 7), spans.items[0].start_col); // prefix 폭만큼 밀려 시작한다
+        try std.testing.expectEqual(@as(usize, 3), spans.items[0].slot); // slot도 호출자 것을 그대로 쓴다
+    }
+
+    // running이 0이면 **빈 문자열**이고 구간도 없다 — 호출자는 개수 라벨만 그린다(배지 자리에 공백이 남지 않는다).
     first.agent_state = .idle;
     {
         var spans: std.ArrayList(sidebar_ops.BadgeSpan) = .empty;
         defer spans.deinit(a);
-        const line = try sidebar_ops.runningBadgeLine(session, tab, "  ", &spans, 0);
+        const line = try sidebar_ops.runningBadgeText(session, tab, 4, &spans, 0);
         defer a.free(line);
         try std.testing.expectEqual(@as(usize, 0), line.len);
         try std.testing.expectEqual(@as(usize, 0), spans.items.len);
@@ -24413,6 +24432,48 @@ test "사이드바 세션 목록: 터미널도 행이 되고, 에이전트 Term�
     try std.testing.expect(std.mem.indexOf(u8, term_label, "대기중") == null); // 터미널=상태 문구 없음
     try std.testing.expectEqual(icons.codepoint(.sparkle), sidebar_ops.sessionRowIconCodepoint(t0));
     try std.testing.expectEqual(@as(u21, 0), sidebar_ops.sessionRowIconCodepoint(t1)); // 일반 터미널=아이콘 없음
+}
+
+// [회귀 2026-08-12] running 배지를 토글 행에 붙인 뒤 **제품 캡처에서 목록이 통째로 사라졌다** — 카드만 남고
+// 토글·세션 행이 안 그려졌다. rows에는 토글이 있었으므로(위 테스트가 그것을 이미 고정한다) 원인은 조립 아래,
+// 즉 draw list 단계였다. `agent_state = .running`일 때만 재현됐다 — 배지 문자열이 들어가는 유일한 경로다.
+//
+// 이 테스트는 rows가 아니라 **그려진 결과**를 본다: 토글 슬롯(표시 row 인덱스 1)의 셀이 실제로 나왔는가.
+// rows만 보는 테스트는 이 결함을 통과시켰다("존재하지만 안 보인다"는 격차가 정확히 사용자가 본 증상이다).
+test "사이드바 토글 행: running 배지가 붙어도 그려진다(목록 소실 회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    try pane_ops.newTermInActivePane(session); // Term 2개 → 목록이 생긴다
+    const tab = session.tabs.items[0];
+    // **둘 다 running**이어야 재현된다. 하나만 running이면 배지가 `▁▅▇▃`로 끝나고(개수 1은 숫자 생략) 제품에서도
+    // 정상이었다 — 개수 2가 되어 숫자가 붙는 순간 목록이 사라졌으므로, 재현 조건은 "배지에 숫자가 붙는 상태"다.
+    for (tab.panes.items[0].terms.items) |t| {
+        t.agent_kind = .claude;
+        t.agent_state = .running;
+    }
+    sidebar_ops.rebuildSidebar(session) catch {};
+    try std.testing.expect(chrome.components.sidebar.onAgentToggle(session.sidebar_rows.items, 1));
+
+    var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl.deinit(a);
+
+    // 토글 행 slot = 표시 row 인덱스 1(카드가 0). 셀이 하나도 없으면 그 행은 화면에서 사라진 것이다.
+    var toggle_cells: usize = 0;
+    for (dl.cells) |c| {
+        if (c.row / coretext_frame_builder.sidebar_line_base == 1) toggle_cells += 1;
+    }
+    try std.testing.expect(toggle_cells > 0);
+
+    // **셀이 surface 폭 안에 있어야 한다.** 여기가 제품과 갈린 지점이었다 — draw list에 셀이 있어도 `col`이
+    // `size.cols`를 넘으면 셰이핑 단계가 `ShapedRecordOutsideSurface`로 실패하고, 그 프레임의 사이드바 텍스트가
+    // 통째로 사라진다(사용자가 본 "목록이 없어졌다"). 셀 존재만 보는 위 검사는 그것을 통과시킨다.
+    for (dl.cells) |c| {
+        try std.testing.expect(c.col < dl.size.cols);
+    }
 }
 
 test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {

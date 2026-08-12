@@ -1,8 +1,8 @@
-// PoC 6: **maru 의 실제 chrome 컴포넌트**가 낸 draw-list 를 시뮬레이터 화면에 그린다.
+// iOS host (L4). UIKit 창·생명주기·터치·키보드 + Metal 백엔드 + CoreText 폰트 래스터.
 //
-// 앞 단계는 색 격자를 손으로 그렸다. 여기서는 Zig 쪽 `chrome.ui.tree` 로 UI 를 조립하고
-// `paint` 가 뱉은 op 을 받아 그대로 그린다 — 플랫폼은 배치를 **모른다**. 그게 maru 의
-// 레이어 계약(L3 chrome 이 배치, L4 platform 이 그리기)이고, 이 PoC 가 확인하려는 것이다.
+// **플랫폼은 배치를 모른다.** Zig 쪽 `chrome.ui.tree` 로 조립한 UI 를 `paint` 가 quad 로
+// 낮춰 주면 여기서는 그리기만 한다 — 그게 maru 의 레이어 계약(L3 chrome 이 배치,
+// L4 platform 이 그리기)이다. 계약은 docs/mobile-platform.md 가 단일 출처다.
 // 선언은 `platform/mobile/mobile_host_abi.h` 가 단일 출처다 — 여기서 다시 적지 않는다.
 #include "../mobile/mobile_host_abi.h"
 #import <UIKit/UIKit.h>
@@ -207,7 +207,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 }
 
 - (BOOL)canBecomeFirstResponder { return YES; }
-// 소프트 키보드는 이 PoC 에서 화면 절반을 가린다. 빈 `inputView` 를 주면 키보드는 안 뜨고
+// 소프트 키보드는 화면 절반을 가린다. 빈 `inputView` 를 주면 키보드는 안 뜨고
 // **입력 대상 자격은 그대로** 남는다(하드웨어 키는 계속 `insertText:` 로 온다).
 - (UIView *)inputView { return [[UIView alloc] initWithFrame:CGRectZero]; }
 - (BOOL)hasText { return YES; }
@@ -236,7 +236,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         if (cp == 0 || cp > 0xFFFF) continue;
         unsigned int slot = maru_mobile_next_slot(_atlasCols);
         unsigned int col = slot >> 16, row = slot & 0xFFFF;
-        if (row >= _atlasRows) break;  // 아틀라스가 꽉 찼다 — 축출은 이 PoC 범위 밖이다
+        if (row >= _atlasRows) break;  // 아틀라스가 꽉 찼다 — 축출 정책은 아직 없다(계약 §4)
         memset(cell, 0, CW * CH);
         CGContextRef ctx = CGBitmapContextCreate(cell, CW, CH, 8, CW, cs, kCGImageAlphaNone);
         CGContextSetGrayFillColor(ctx, 1.0, 1.0);

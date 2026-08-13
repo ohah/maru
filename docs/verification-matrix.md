@@ -984,6 +984,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   네 번째 runtime gate는 final-address heap owner, exact 한 writer, nonblocking wake coalescing, lowest-bit drain, disk 실패 뒤 ring 보존,
   정상 join과 200 ms timeout detach/backing 보존, fork-before-pipe 거부를 Debug·ReleaseFast component 3개와 실제 daemon bootstrap
   boundary로 고정한다. process bootstrap과 writer thread는 구현됐으며 Client incident publication은 후속 CR0b gate 전까지 부분 구현이다.
+  다섯 번째 Client publication gate는 `HostPool.prepareManagedOwnedPublication -> HostAdapter.initManagedInPlace ->
+  ClientSlot.initManagedInPlace -> HostPool.commitOwnedPublication`의 실제 제품 순서를 고정한다. neutral binding/permit 6개,
+  HostPool reservation·generation·capacity·copy/replay·capacity OOM 원복·보호 범위 alias·copied pool 거부·managed source alias 11개, final-address ClientSlot binding 7개, AppSession current/restore 공용 publication leaf
+  publication leaf scenario 4개와 HostPool capacity OOM 1개, boundary 1개를 Debug·ReleaseFast에서 exact-count한다. 제품 `HostPool.addOwned` caller 0,
+  HostPool의 Client import/역참조 0, map publication 뒤 binding store 0, binding publication 뒤 fallible/callback 0을 함께 검증한다.
+  이 gate는 binding publication만 닫으며 first-reason+incident 단일 poison suffix는 여섯 번째 gate가 닫기 전 구현 완료로 세지 않는다.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote

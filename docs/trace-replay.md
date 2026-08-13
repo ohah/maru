@@ -230,11 +230,21 @@ CR0b가 artifact를 의무화하는 범위는 hello를 마치고 session-host의
 **managed Client**다. connect/hello 실패처럼 등록 전 Client가 없는 경로는 기존 typed error이며 reconnect admission 대상도 아니다.
 등록 owner는 Client를 외부에 publish하기 전에 final-address Client 안에 pointer-free
 `IncidentBinding {host_id,host_adapter_generation,connection_generation,wire_major,host_class_raw}`와 binding seal을 exact once
-게시한다. `HostPool` 등록은 map capacity와 다음 adapter generation을 mutation 없이 준비하는 `PreparedIncidentBinding`을 먼저 만들고,
-최종 Client 주소의 pristine binding을 봉인한 뒤 allocation/callback 없는 suffix에서 map row를 publish한다. 준비 실패는
-Client/binding/map mutation 0이고, binding 게시 뒤 map publication proof loss는 rollback이나 unbound fallback 없이 fail-stop한다.
-Client를 값으로 move한 뒤 binding을 복사하거나 pool publication 뒤 binding을 늦게 채우는 경로는 금지한다. standalone fixture나 등록 전
-Client는 identity-absent binding만 가질 수 있고 artifact-required reconnect 경로에 들어갈 수 없다.
+게시한다. 실제 소유권 순서는 `Client -> ClientSlot -> HostAdapter -> HostPool`이며 `HostPool`은 Client를 직접 import하거나
+역참조하지 않는다. `HostPool.prepareOwnedPublication(host_id,adapter_addr,out)`가 map capacity, key 부재, 다음
+`adapter_generation`을 mutation 없이 준비해 final-address process-sealed `PreparedHostPublication`에 봉인한다. 이 permit은
+`{self_addr,pid,process_nonce,pool_addr,host_id,adapter_addr,adapter_generation,owned,lifecycle,seal}`을 exact 보존한다.
+`HostAdapter.initManagedInPlace(out,node_allocator,source,permit)`이 permit의 exact adapter 주소와 host identity를 검증한 뒤
+`ClientSlot.initManagedInPlace`에 binding projection을 넘긴다. ClientSlot은 source를 heap-pinned `ClientNode.client`로 옮긴
+no-fail suffix 안에서 그 최종 Client 주소를 binding seal에 결속하고, `HostAdapter`는 pointer-free
+`IncidentBindingPublication {client_addr,binding_seal}`만 permit에 연결한다. 마지막으로
+`HostPool.commitOwnedPublication(permit,adapter)`이 permit·adapter identity·binding publication을 다시 검증한 뒤 allocation/callback
+없는 suffix에서 map row와 `adapter_generation`을 게시한다. capacity 확보를 포함한 모든 fallible 작업은 prepare 앞쪽에서 끝나며,
+prepare/adapter init 실패는 Client/binding/map mutation 0이다. Client binding 게시 뒤 map publication proof loss는 rollback,
+adapter/client destroy, unbound fallback 없이 `fatalIntegrity(.incident_authority)`로 닫는다. `HostPool.addOwned`의 제품 caller는 0이고
+test-only identity-absent fixture만 별도 helper를 쓴다. Client를 값으로 move한 뒤 binding을 복사하거나 pool publication 뒤 binding을
+늦게 채우는 경로는 금지한다. standalone fixture나 등록 전 Client는 identity-absent binding만 가질 수 있고 artifact-required reconnect
+경로에 들어갈 수 없다.
 poison caller는 `SourceSite`와 parser/outbound/count projection을 담은 pointer-free `IncidentInput`을 만든 뒤 canonical poison suffix에
 전달한다. 기존 reason-only poison wrapper는 identity-absent·reconnect-ineligible 경로에만 남기고, managed Client 제품 caller는
 source-boundary가 reason-only wrapper를 호출하지 못하게 한다.

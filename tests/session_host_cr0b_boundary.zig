@@ -14,6 +14,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     const allocator = std.testing.allocator;
     const incident = try readSource(allocator, "src/observability/connection_incident.zig");
     defer allocator.free(incident);
+    const binding = try readSource(allocator, "src/observability/incident_binding_contract.zig");
+    defer allocator.free(binding);
     const client = try readSource(allocator, "src/platform/macos/session_host/client.zig");
     defer allocator.free(client);
     const adapter = try readSource(allocator, "src/platform/macos/session_host/host_adapter.zig");
@@ -28,6 +30,10 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(runtime);
     const daemon = try readSource(allocator, "src/platform/macos/session_host/daemon.zig");
     defer allocator.free(daemon);
+    const pool = try readSource(allocator, "src/platform/macos/session_host/host_pool.zig");
+    defer allocator.free(pool);
+    const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
 
     try std.testing.expectEqual(@as(usize, 1), count(incident, "const std = @import(\"std\");"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub const payload_size: usize = 208;"));
@@ -37,6 +43,24 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(incident, "fn recordRepeatForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(incident, "pub fn recordRepeat("));
     try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b core "));
+    try std.testing.expectEqual(@as(usize, 6), count(binding, "test \"CR0b binding 계약은"));
+    try std.testing.expectEqual(@as(usize, 11), count(adapter, "test \"CR0b HostPool publication은"));
+    try std.testing.expectEqual(@as(usize, 3), count(pool, "return error.ManagedPublicationRequired;"));
+    try std.testing.expectEqual(@as(usize, 7), count(adapter, "test \"CR0b ClientSlot binding은"));
+    try std.testing.expectEqual(@as(usize, 0), count(binding, "@import(\"../platform"));
+    try std.testing.expectEqual(@as(usize, 0), count(binding, "client_slot.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(binding, "host_pool.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(pool, "client.zig"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "fn publishManagedRemoteAdapter("));
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "publishManagedRemoteAdapter(&app_remote_host_pool.?"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "pool.prepareManagedOwnedPublication(source.host_id,"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "pool.commitOwnedPublication(adapter,"));
+    try std.testing.expectEqual(@as(usize, 4), count(app_session, "test \"CR0b AppSession publication은"));
+    // 제품 정의가 파일 중간의 테스트 뒤에도 이어지므로 첫 test 이전 substring으로 자르면 실제 caller를 놓친다.
+    // 전체 source의 addOwned 두 호출은 아래 기존 test fixture에만 있고 managed 제품 entrypoint는 공용 transaction만 쓴다.
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, ".addOwned("));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "if (app_remote_backend != null and"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "backend.promoteToSpawnAndAttach(&app_remote_host_pool.?)"));
     try std.testing.expectEqual(@as(usize, 11), count(incident, "test \"CR0b writer"));
     try std.testing.expectEqual(@as(usize, 6), count(storage, "test \"CR0b 저장소"));
     try std.testing.expectEqual(@as(usize, 3), count(runtime, "test \"CR0b 기록기 수명은"));

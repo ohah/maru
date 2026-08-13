@@ -35,6 +35,7 @@ const client_deadline = @import("client_deadline.zig");
 const client_poison = @import("client_poison.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_source_transcript = @import("client_source_transcript.zig");
+const incident_binding_contract = @import("maru").observability.incident_binding_contract;
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -3536,6 +3537,13 @@ const ExternalSourceSealEncoder = struct {
         writer.writeTag(@intFromEnum(client.connection_profile.?));
         try writeSourceCompatibilityProfile(&writer, client.compatibility_profile.?);
         writer.writeU64(client.attach_instance_id);
+        writer.writeU64(client.incident_binding.client_addr);
+        writer.writeU128(client.incident_binding.host_id);
+        writer.writeU64(client.incident_binding.host_adapter_generation);
+        writer.writeU64(client.incident_binding.connection_generation);
+        writer.writeU16(client.incident_binding.wire_major);
+        writer.writeU8(client.incident_binding.host_class_raw);
+        try writer.writeBytes(&client.incident_binding.seal);
         writer.writeTag(@intFromEnum(client.ownership));
         writer.writeBool(client.unusable);
         writer.writeBool(client.first_poison_reason != null);
@@ -6514,6 +6522,8 @@ pub const Client = struct {
     /// when the second `Prepared` reuses the first one's address. `0` means "not published by
     /// `external_attach.prepare`" and is rejected by external adoption rather than trusted.
     attach_instance_id: u64 = 0,
+    /// managed HostAdapter publication이 final heap address에 봉인한 incident identity다.
+    incident_binding: incident_binding_contract.IncidentBinding = .{},
     parser: framing.FrameParser,
     // A Client may be transferred only once into the stable external-pump address. The moved-from
     // value remains deinit-safe, but is not a second transport owner.
@@ -14075,6 +14085,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "connection_profile",
     "compatibility_profile",
     "attach_instance_id",
+    "incident_binding",
     "parser",
     "ownership",
     "unusable",
@@ -21735,8 +21746,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\x39\xbd\xc5\xea\x1b\x40\x1e\x5a\x79\x3b\x54\x6b\xa5\x6c\xa3\x9c" ++
-        "\x3b\xeb\x28\xfd\x74\x6f\xf3\x31\x87\xd9\x15\x11\x4d\x1c\xce\x52";
+        "\xfb\xd9\xa8\xdb\x6d\x1c\x54\x8b\x32\x42\x31\xc0\x1a\x0f\xf5\x2d" ++
+        "\xd7\xc8\xcb\x11\x1a\x42\xd2\xda\xee\x4d\xd4\xcf\x89\xee\x11\xa5";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,

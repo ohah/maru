@@ -15,6 +15,8 @@ const generation_batch_adapter = @import("generation_batch_adapter.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
 const connection_lease = @import("connection_lease.zig");
 const host_manifest = @import("host_manifest.zig");
+const incident_binding_contract = @import("maru").observability.incident_binding_contract;
+const process_seal_service = @import("process_seal_service.zig");
 
 pub const Kind = enum {
     current,
@@ -62,6 +64,10 @@ pub const HostAdapter = struct {
 
     pub fn initializeProcessRuntime() client_slot_mod.ClientSlot.ProcessRuntimeInitError!void {
         try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    }
+
+    pub fn publicationProcessIdentity() ?client_slot_mod.PublicationProcessIdentity {
+        return client_slot_mod.ClientSlot.publicationProcessIdentity();
     }
 
     pub fn connectionGeneration(self: *const HostAdapter) u64 {
@@ -120,6 +126,144 @@ pub const HostAdapter = struct {
         );
         out.kind = kind;
         out.shutdown_manifest = .{};
+    }
+
+    pub fn initManagedInPlace(
+        out: *HostAdapter,
+        node_allocator: std.mem.Allocator,
+        source: *client_mod.Client,
+        permit: *incident_binding_contract.PreparedHostPublication,
+    ) InitError!void {
+        if (!validPreparedHostPublication(permit, permit.pool_addr, @intFromPtr(out)) or
+            permit.host_id != source.host_id)
+            return error.InvalidDestination;
+        const profile = compatibility.profileForMajor(source.wire_major) orelse return error.UnsupportedProtocol;
+        const kind: Kind = switch (profile.kind) {
+            .current => .current,
+            .previous => .previous,
+        };
+        if (source.screen_codec_version != profile.screen_codec_version) return error.UnsupportedProtocol;
+        var publication: incident_binding_contract.IncidentBindingPublication = .{};
+        try client_slot_mod.ClientSlot.initManagedInPlace(
+            &out.slot,
+            node_allocator,
+            source,
+            permit.host_id,
+            permit.adapter_generation,
+            switch (kind) {
+                .current => .current,
+                .previous => .previous,
+            },
+            &publication,
+        );
+        out.kind = kind;
+        out.shutdown_manifest = .{};
+        if (!incident_binding_contract.validPublicationShape(publication))
+            @panic("managed Client incident publication missing");
+        permit.lifecycle_raw = @intFromEnum(incident_binding_contract.PublicationLifecycle.bound);
+        permit.seal = process_seal_service.preparedHostPublicationSeal(permit.pid, permit.process_nonce, .{
+            .self_addr = permit.self_addr,
+            .pool_addr = permit.pool_addr,
+            .host_id = permit.host_id,
+            .adapter_addr = permit.adapter_addr,
+            .adapter_generation = permit.adapter_generation,
+            .owned_raw = permit.owned_raw,
+            .lifecycle_raw = permit.lifecycle_raw,
+        }) catch @panic("managed Client binding permit proof loss");
+    }
+
+    pub fn sealPreparedHostPublication(permit: *incident_binding_contract.PreparedHostPublication) !void {
+        const client_slot_identity = client_slot_mod.ClientSlot.publicationProcessIdentity() orelse
+            return error.ProcessSealUnavailable;
+        const pid = client_slot_identity.pid;
+        permit.pid = client_slot_identity.pid;
+        permit.process_nonce = client_slot_identity.process_nonce;
+        permit.lifecycle_raw = @intFromEnum(incident_binding_contract.PublicationLifecycle.prepared);
+        permit.seal = try process_seal_service.preparedHostPublicationSeal(pid, permit.process_nonce, .{
+            .self_addr = permit.self_addr,
+            .pool_addr = permit.pool_addr,
+            .host_id = permit.host_id,
+            .adapter_addr = permit.adapter_addr,
+            .adapter_generation = permit.adapter_generation,
+            .owned_raw = permit.owned_raw,
+            .lifecycle_raw = permit.lifecycle_raw,
+        });
+    }
+
+    pub fn validPreparedHostPublication(
+        permit: *const incident_binding_contract.PreparedHostPublication,
+        pool_addr: usize,
+        adapter_addr: usize,
+    ) bool {
+        if (!incident_binding_contract.validPreparedShape(permit.*, @intFromPtr(permit)) or
+            permit.pool_addr != pool_addr or permit.adapter_addr != adapter_addr)
+            return false;
+        const expected = process_seal_service.preparedHostPublicationSeal(permit.pid, permit.process_nonce, .{
+            .self_addr = permit.self_addr,
+            .pool_addr = permit.pool_addr,
+            .host_id = permit.host_id,
+            .adapter_addr = permit.adapter_addr,
+            .adapter_generation = permit.adapter_generation,
+            .owned_raw = permit.owned_raw,
+            .lifecycle_raw = permit.lifecycle_raw,
+        }) catch return false;
+        return std.mem.eql(u8, &expected, &permit.seal);
+    }
+
+    pub fn hostPublicationPrepared(permit: *const incident_binding_contract.PreparedHostPublication) bool {
+        return permit.lifecycle_raw == @intFromEnum(incident_binding_contract.PublicationLifecycle.prepared);
+    }
+
+    pub fn hostPublicationBound(permit: *const incident_binding_contract.PreparedHostPublication) bool {
+        return permit.lifecycle_raw == @intFromEnum(incident_binding_contract.PublicationLifecycle.bound);
+    }
+
+    pub fn incidentBindingPublication(self: *const HostAdapter) incident_binding_contract.IncidentBindingPublication {
+        const binding = self.slot.logicalClientConst().incident_binding;
+        if (!incident_binding_contract.validBindingShape(binding)) return .{};
+        const expected = process_seal_service.incidentBindingSeal(self.slot.pid, self.slot.process_nonce, .{
+            .client_addr = binding.client_addr,
+            .host_id = binding.host_id,
+            .host_adapter_generation = binding.host_adapter_generation,
+            .connection_generation = binding.connection_generation,
+            .wire_major = binding.wire_major,
+            .host_class_raw = binding.host_class_raw,
+        }) catch return .{};
+        if (!std.mem.eql(u8, &expected, &binding.seal)) return .{};
+        return .{ .client_addr = binding.client_addr, .binding_seal = binding.seal };
+    }
+
+    pub fn hostAdapterGeneration(self: *const HostAdapter) u64 {
+        return self.slot.logicalClientConst().incident_binding.host_adapter_generation;
+    }
+
+    pub fn incidentBindingMatchesPermit(
+        self: *const HostAdapter,
+        permit: *const incident_binding_contract.PreparedHostPublication,
+    ) bool {
+        const client = self.slot.logicalClientConst();
+        const binding = client.incident_binding;
+        return binding.client_addr == @intFromPtr(client) and binding.host_id == permit.host_id and
+            binding.host_adapter_generation == permit.adapter_generation and
+            binding.connection_generation == self.slot.connectionGeneration() and
+            binding.wire_major == client.wire_major and
+            binding.host_class_raw == @intFromEnum(switch (self.kind) {
+                .current => incident_binding_contract.HostClass.current,
+                .previous => incident_binding_contract.HostClass.previous,
+            }) and incident_binding_contract.validPublicationShape(self.incidentBindingPublication());
+    }
+
+    pub fn consumePreparedHostPublicationNoFail(permit: *incident_binding_contract.PreparedHostPublication) void {
+        permit.lifecycle_raw = @intFromEnum(incident_binding_contract.PublicationLifecycle.consumed);
+        permit.seal = process_seal_service.preparedHostPublicationSeal(permit.pid, permit.process_nonce, .{
+            .self_addr = permit.self_addr,
+            .pool_addr = permit.pool_addr,
+            .host_id = permit.host_id,
+            .adapter_addr = permit.adapter_addr,
+            .adapter_generation = permit.adapter_generation,
+            .owned_raw = permit.owned_raw,
+            .lifecycle_raw = permit.lifecycle_raw,
+        }) catch @panic("managed host publication consume proof loss");
     }
 
     /// GUI hello만으로는 endpoint provenance를 복원할 수 없으므로 discovery가 검증한 exact manifest를 adapter의
@@ -402,6 +546,426 @@ test "host adapter validation failure preserves Client ownership and destination
     try std.testing.expectError(error.UnsupportedProtocol, HostAdapter.initInPlace(out, allocator, &source));
     try std.testing.expectEqualSlices(u8, &before, &out_bytes);
     try std.testing.expect(source.canMoveToGenerationNode());
+}
+
+test "CR0b ClientSlot binding은 final Client 주소를 map publication보다 먼저 봉인한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC0B,
+        .wire_major = protocol.version_major,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    const host_id = source.host_id;
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(host_id, adapter, &permit);
+    try std.testing.expect(pool.get(host_id) == null);
+    try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
+    const publication = adapter.incidentBindingPublication();
+    try std.testing.expect(incident_binding_contract.validPublicationShape(publication));
+    try std.testing.expectEqual(@intFromPtr(adapter.slot.logicalClientConst()), publication.client_addr);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns_adapter = true;
+    try std.testing.expect(pool.get(host_id) == adapter);
+    try std.testing.expectEqual(
+        @intFromEnum(incident_binding_contract.PublicationLifecycle.consumed),
+        permit.lifecycle_raw,
+    );
+}
+
+test "CR0b HostPool publication은 active reservation과 copied permit을 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const first = try allocator.create(HostAdapter);
+    defer allocator.destroy(first);
+    const second = try allocator.create(HostAdapter);
+    defer allocator.destroy(second);
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xC1, first, &permit);
+    var other: incident_binding_contract.PreparedHostPublication = .{};
+    try std.testing.expectError(error.PublicationBusy, pool.prepareOwnedPublication(0xC2, second, &other));
+    const copied = permit;
+    try std.testing.expect(!HostAdapter.validPreparedHostPublication(&copied, @intFromPtr(&pool), @intFromPtr(first)));
+    pool.abortOwnedPublication(first, &permit);
+    try std.testing.expectEqual(incident_binding_contract.PreparedHostPublication{}, permit);
+}
+
+test "CR0b HostPool publication은 abort 뒤 generation과 capacity를 재사용한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var first: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xC3, adapter, &first);
+    const generation = first.adapter_generation;
+    pool.abortOwnedPublication(adapter, &first);
+    var second: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xC3, adapter, &second);
+    try std.testing.expectEqual(generation, second.adapter_generation);
+    pool.abortOwnedPublication(adapter, &second);
+}
+
+test "CR0b HostPool publication은 capacity OOM 뒤 reservation과 permit을 pristine으로 되돌린다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var pool = Pool.init(failing.allocator());
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try std.testing.expectError(error.OutOfMemory, pool.prepareOwnedPublication(0xC30, adapter, &permit));
+    try std.testing.expectEqual(incident_binding_contract.PreparedHostPublication{}, permit);
+    try std.testing.expect(pool.get(0xC30) == null);
+    try std.testing.expect(pool.adapterGeneration(0xC30) == null);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try pool.prepareOwnedPublication(0xC30, adapter, &permit);
+    try std.testing.expectEqual(@as(u64, 2), permit.adapter_generation);
+    pool.abortOwnedPublication(adapter, &permit);
+}
+
+test "CR0b HostPool publication은 permit과 pool·adapter의 정확·부분 겹침을 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+
+    const pool_bytes = std.mem.asBytes(&pool);
+    const pool_permit: *incident_binding_contract.PreparedHostPublication = @ptrCast(@alignCast(pool_bytes.ptr));
+    try std.testing.expectError(error.InvalidDestination, pool.prepareOwnedPublication(0xC31, adapter, pool_permit));
+
+    const adapter_bytes = std.mem.asBytes(adapter);
+    const adapter_permit: *incident_binding_contract.PreparedHostPublication = @ptrCast(@alignCast(adapter_bytes.ptr + @alignOf(incident_binding_contract.PreparedHostPublication)));
+    try std.testing.expectError(error.InvalidDestination, pool.prepareOwnedPublication(0xC31, adapter, adapter_permit));
+}
+
+test "CR0b HostPool publication은 managed permit과 source의 정확·부분 겹침을 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC33,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    defer source.deinit();
+    const source_before = source;
+    const source_bytes = std.mem.asBytes(&source);
+    const source_exact_permit: *incident_binding_contract.PreparedHostPublication = @ptrCast(@alignCast(source_bytes.ptr));
+    try std.testing.expectError(
+        error.InvalidDestination,
+        pool.prepareManagedOwnedPublication(source.host_id, adapter, &source, source_exact_permit),
+    );
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&source)));
+    const source_permit: *incident_binding_contract.PreparedHostPublication = @ptrCast(@alignCast(source_bytes.ptr + @alignOf(incident_binding_contract.PreparedHostPublication)));
+    try std.testing.expectError(
+        error.InvalidDestination,
+        pool.prepareManagedOwnedPublication(source.host_id, adapter, &source, source_permit),
+    );
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&source)));
+    try std.testing.expect(pool.get(source.host_id) == null);
+
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareManagedOwnedPublication(source.host_id, adapter, &source, &permit);
+    pool.abortOwnedPublication(adapter, &permit);
+}
+
+test "CR0b HostPool publication은 초기화 뒤 복사된 pool 주소를 owner로 인정하지 않는다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xC32, adapter, &permit);
+    pool.abortOwnedPublication(adapter, &permit);
+
+    var copied = pool;
+    var copied_permit: incident_binding_contract.PreparedHostPublication = .{};
+    try std.testing.expectError(error.InvalidOwner, copied.prepareOwnedPublication(0xC32, adapter, &copied_permit));
+    try std.testing.expectEqual(incident_binding_contract.PreparedHostPublication{}, copied_permit);
+    try std.testing.expect(pool.get(0xC32) == null);
+}
+
+test "CR0b HostPool publication은 bound permit을 exact once commit한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC4,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
+    try std.testing.expect(HostAdapter.hostPublicationBound(&permit));
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns_adapter = true;
+}
+
+test "CR0b ClientSlot binding은 N-1 class와 wire major를 봉인한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC5,
+        .wire_major = protocol.version_major - 1,
+        .screen_codec_version = screen_stream.codec_version - 1,
+        .parser = @import("framing.zig").FrameParser.initForMajor(allocator, protocol.version_major - 1),
+    };
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
+    const binding = adapter.slot.logicalClientConst().incident_binding;
+    try std.testing.expectEqual(@intFromEnum(incident_binding_contract.HostClass.previous), binding.host_class_raw);
+    try std.testing.expectEqual(protocol.version_major - 1, binding.wire_major);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns_adapter = true;
+}
+
+test "CR0b HostPool publication은 prepare 동안 row와 generation을 게시하지 않는다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xC6, adapter, &permit);
+    try std.testing.expect(pool.get(0xC6) == null);
+    try std.testing.expect(pool.adapterGeneration(0xC6) == null);
+    try std.testing.expectEqual(@as(u64, 2), permit.adapter_generation);
+    pool.abortOwnedPublication(adapter, &permit);
+}
+
+test "CR0b HostPool publication은 active reservation 동안 legacy add와 remove를 Busy로 닫는다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const reserved = try allocator.create(HostAdapter);
+    defer allocator.destroy(reserved);
+    const foreign = try allocator.create(HostAdapter);
+    defer allocator.destroy(foreign);
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xC7, reserved, &permit);
+    try std.testing.expectError(error.PublicationBusy, pool.addOwned(0xC8, foreign));
+    try std.testing.expectError(error.PublicationBusy, pool.addBorrowed(0xC8, foreign));
+    try std.testing.expectError(error.PublicationBusy, pool.remove(0xC7));
+    pool.abortOwnedPublication(reserved, &permit);
+}
+
+test "CR0b HostPool publication은 commit 뒤 다음 adapter generation만 발급한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const first = try allocator.create(HostAdapter);
+    var first_owned = false;
+    errdefer if (!first_owned) allocator.destroy(first);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC9,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var first_permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, first, &first_permit);
+    const first_generation = first_permit.adapter_generation;
+    try HostAdapter.initManagedInPlace(first, allocator, &source, &first_permit);
+    pool.commitOwnedPublication(first, &first_permit);
+    first_owned = true;
+
+    const second = try allocator.create(HostAdapter);
+    defer allocator.destroy(second);
+    var second_permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xCA, second, &second_permit);
+    try std.testing.expectEqual(first_generation + 1, second_permit.adapter_generation);
+    pool.abortOwnedPublication(second, &second_permit);
+}
+
+test "CR0b HostPool publication은 non-pristine permit을 reservation 전에 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var occupied: incident_binding_contract.PreparedHostPublication = .{ .host_id = 1 };
+    const before = occupied;
+    try std.testing.expectError(error.InvalidDestination, pool.prepareOwnedPublication(0xCB, adapter, &occupied));
+    try std.testing.expectEqual(before, occupied);
+    var pristine: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xCB, adapter, &pristine);
+    pool.abortOwnedPublication(adapter, &pristine);
+}
+
+test "CR0b ClientSlot binding은 current class와 exact connection generation을 봉인한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xCC,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
+    const binding = adapter.slot.logicalClientConst().incident_binding;
+    try std.testing.expectEqual(@intFromEnum(incident_binding_contract.HostClass.current), binding.host_class_raw);
+    try std.testing.expectEqual(adapter.connectionGeneration(), binding.connection_generation);
+    try std.testing.expectEqual(permit.adapter_generation, binding.host_adapter_generation);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns_adapter = true;
+}
+
+test "CR0b ClientSlot binding은 non-pristine publication destination을 source 이동 전에 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xCD,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    defer source.deinit();
+    var slot: client_slot_mod.ClientSlot = undefined;
+    var publication: incident_binding_contract.IncidentBindingPublication = .{ .client_addr = 1 };
+    const before = publication;
+    try std.testing.expectError(error.InvalidDestination, client_slot_mod.ClientSlot.initManagedInPlace(
+        &slot,
+        allocator,
+        &source,
+        source.host_id,
+        2,
+        .current,
+        &publication,
+    ));
+    try std.testing.expectEqual(before, publication);
+    try std.testing.expect(source.canMoveToGenerationNode());
+}
+
+test "CR0b ClientSlot binding은 zero adapter generation을 source 이동 전에 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xCE,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    defer source.deinit();
+    var slot: client_slot_mod.ClientSlot = undefined;
+    var publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try std.testing.expectError(error.InvalidDestination, client_slot_mod.ClientSlot.initManagedInPlace(
+        &slot,
+        allocator,
+        &source,
+        source.host_id,
+        0,
+        .current,
+        &publication,
+    ));
+    try std.testing.expectEqual(incident_binding_contract.IncidentBindingPublication{}, publication);
+    try std.testing.expect(source.canMoveToGenerationNode());
+}
+
+test "CR0b ClientSlot binding은 permit과 다른 host identity를 source 이동 전에 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    defer allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xCF,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    defer source.deinit();
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(0xD0, adapter, &permit);
+    try std.testing.expectError(error.InvalidDestination, HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit));
+    try std.testing.expect(source.canMoveToGenerationNode());
+    pool.abortOwnedPublication(adapter, &permit);
+}
+
+test "CR0b ClientSlot binding은 scalar splice를 valid publication으로 인정하지 않는다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Pool = @import("host_pool.zig").HostPool(HostAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    const adapter = try allocator.create(HostAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xD1,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var permit: incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
+    adapter.slot.logicalClient().incident_binding.connection_generation +%= 1;
+    try std.testing.expectEqual(incident_binding_contract.IncidentBindingPublication{}, adapter.incidentBindingPublication());
+    adapter.slot.logicalClient().incident_binding.connection_generation -%= 1;
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns_adapter = true;
 }
 
 test "copied host adapter rejects access before reading a freed generation node" {

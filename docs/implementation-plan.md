@@ -88,6 +88,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    exact 208-byte DTO와 256-byte envelope, 120 incident+8 aggregate의 32 KiB emergency ring, first-reason과 incident의 단일
    publication suffix, process/fork/sequence authority, ring handoff→bounded disk writer 순서, Debug fail-stop과 Release
    artifact-before-recovery gate를 구현한다. exact schema와 lifecycle은 trace-replay의 CR0b 절을 단일 출처로 삼는다.
+   Client publication은 실제 `Client -> ClientSlot -> HostAdapter -> HostPool` 소유권을 따르며, HostPool의 fallible generation/map
+   reservation을 먼저 봉인하고 final-address Client binding을 게시한 뒤 같은 permit의 no-fail map suffix로 끝낸다. HostPool이
+   Client를 직접 import하거나 pool publication 뒤 binding을 채우는 역방향 경로는 허용하지 않는다.
 3. **CR1 — poison 범위 축소와 scheduler:** semantic stream 오류가 shared connection을 불필요하게 poison하지 않도록 callsite를
    정리하고 partial read/write, sibling stream, artifact 실패를 결정적으로 교차하는 scheduler fixture를 만든다.
 4. **CR2 — stable shell 기반:** CR2a는 field inventory를 고정하고 `RemoteGeneration`만 추출한다. CR2b는 기존 Surface API를

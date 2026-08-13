@@ -262,8 +262,6 @@ pub fn reapTerminatedTerms(self: *AppSession) void {
     }
 }
 
-/// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
-/// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
 /// backend에 close를 보낼 대상인가 — **닫을 PTY가 실제로 있는 Term만** true다.
 ///
 /// **왜 술어인가.** 이 네 항이 `workspace.zig`의 창 닫기 판정과 **글자 그대로 같았고**, 편집기가
@@ -279,6 +277,8 @@ pub fn hasClosablePty(term: *const Term) bool {
         !term.rt.close_complete;
 }
 
+/// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
+/// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
 /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
 pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
     const tab = self.tabs.items[tab_index];

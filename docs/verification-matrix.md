@@ -982,8 +982,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   세 component군과 boundary 1개를 Debug·ReleaseFast에서 실행한다. process bootstrap/writer thread/Client publication은 후속
   CR0b gate가 닫기 전 구현 완료로 세지 않는다.
   네 번째 runtime gate는 final-address heap owner, exact 한 writer, nonblocking wake coalescing, lowest-bit drain, disk 실패 뒤 ring 보존,
-  정상 join과 200 ms timeout detach/backing 보존, fork-before-pipe 거부를 Debug·ReleaseFast component 3개와 실제 daemon bootstrap
-  boundary로 고정한다. process bootstrap과 writer thread는 구현됐으며 Client incident publication은 후속 CR0b gate 전까지 부분 구현이다.
+  정상 join과 200 ms timeout detach/backing 보존, fork-before-pipe 거부, aggregate issuer exhaustion의 실제 runtime fatal leaf를
+  Debug·ReleaseFast component 4개와 실제 daemon bootstrap boundary로 고정한다. process bootstrap과 writer thread는 구현됐으며 Client incident publication은 후속 CR0b gate 전까지 부분 구현이다.
+  최초 suffix 선행 substrate 5개는 service mutex 아래 모든 fallible ring plan을 준비하고 evidence commit 뒤에도 pending bit을 숨기며,
+  pristine abort/reuse와 service alias·copied/plan/seal drift·evidence 이후 abort 거부 및 pending exact-once publication을
+  Debug·ReleaseFast exact-count로 검증한다. public prepared DTO는 재귀 pointer 0이다. 네 단계 API는 같은 모듈의 기존 compatibility
+  `publish` wrapper가 각각 exact 1회 호출하지만 외부/platform 제품 caller는 아직 0이다. proof drift의 common fatal provenance와 Client id/key/reason publication은
+  아래 suffix 10 및 subprocess 4가 소유하므로 이 5개만으로 여섯 번째 gate나 CR0b 완료를 주장하지 않는다.
   다섯 번째 Client publication gate는 `HostPool.prepareManagedOwnedPublication -> HostAdapter.initManagedInPlace ->
   ClientSlot.initManagedInPlace -> HostPool.commitOwnedPublication`의 실제 제품 순서를 고정한다. neutral binding/permit 6개,
   HostPool reservation·generation·capacity·copy/replay·capacity OOM 원복·보호 범위 alias·copied pool 거부·managed source alias 11개, final-address ClientSlot binding 7개, AppSession current/restore 공용 publication leaf

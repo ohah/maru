@@ -2259,6 +2259,19 @@ pub fn build(b: *std.Build) void {
         run_cr0b_binding_contract_tests.addArg("--maru-expect-tests=6");
         run_cr0b_binding_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_binding_contract_tests.step);
+        const cr0b_service_transaction_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/observability/connection_incident.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"CR0b service transaction"},
+        });
+        const run_cr0b_service_transaction_tests = b.addRunArtifact(cr0b_service_transaction_tests);
+        run_cr0b_service_transaction_tests.addArg("--maru-expect-tests=5");
+        run_cr0b_service_transaction_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_service_transaction_tests.step);
         // 전용 runner가 exhaustion child의 canonical artifact 경로만 전달하고 일반 test 실행 의미는 그대로 위임한다.
         const cr0b_publisher_authority_tests = b.addTest(.{
             .root_module = b.createModule(.{
@@ -2385,7 +2398,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b 기록기 수명은"},
         });
         const run_cr0b_runtime_tests = b.addRunArtifact(cr0b_runtime_tests);
-        run_cr0b_runtime_tests.addArg("--maru-expect-tests=3");
+        run_cr0b_runtime_tests.addArg("--maru-expect-tests=4");
         run_cr0b_runtime_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_runtime_tests.step);
         const cr0b_boundary_tests = addProjectTest(b, .{
@@ -2558,7 +2571,6 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = b3_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             .filters = &.{"C3-3b2b1 trusted preparation"},
         });
@@ -2595,7 +2607,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         const event_c3_3b2b2_metadata_wire_module = b.createModule(.{
             .root_source_file = b.path(
@@ -4078,6 +4089,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = b3_optimize,
                 .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             .filters = &.{"C3-3b2a process seal"},
         });
@@ -4093,6 +4105,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
         const event_c3_3b2a_fresh_exec_helper = b.addExecutable(.{
             .name = "maru-session-host-process-seal-fresh-exec-helper",
@@ -4157,7 +4170,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = b3_optimize,
                 .link_libc = true,
             }),
-            .filters = &.{"macOS and Linux process identity"},
+            .filters = &.{"macOS와 Linux process identity"},
         });
         const run_event_c3_3b2a_identity_tests = b.addRunArtifact(event_c3_3b2a_identity_tests);
         run_event_c3_3b2a_identity_tests.addArg("--maru-expect-tests=1");

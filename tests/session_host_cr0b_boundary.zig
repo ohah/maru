@@ -49,6 +49,32 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(incident, "fn recordRepeatForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(incident, "pub fn recordRepeat("));
     try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b core "));
+    try std.testing.expectEqual(@as(usize, 5), count(incident, "test \"CR0b service transaction"));
+    inline for (.{
+        "prepareFirstPublication(",
+        "commitPreparedEvidenceNoFail(",
+        "publishPreparedPendingAndUnlockNoFail(",
+    }) |transaction_call| {
+        try std.testing.expectEqual(@as(usize, 1), count(incident, "self." ++ transaction_call));
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            try countProductSourcesExcept(allocator, transaction_call, "observability/connection_incident.zig"),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), count(incident, "self.abortPreparedPublication("));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, "abortPreparedPublication(", "observability/connection_incident.zig"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(incident, "@import(\"../platform"));
+    try std.testing.expectEqual(@as(usize, 0), count(incident, "client.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(incident, "incident_runtime.zig"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "const process_seal = @import(\"process_seal_service.zig\");"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(runtime, "error.CounterExhausted => {"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(incident, "fatalIntegrity("));
     try std.testing.expectEqual(@as(usize, 6), count(binding, "test \"CR0b binding 계약은"));
     try std.testing.expectEqual(@as(usize, 11), count(adapter, "test \"CR0b HostPool publication은"));
     try std.testing.expectEqual(@as(usize, 3), count(pool, "return error.ManagedPublicationRequired;"));
@@ -69,7 +95,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "backend.promoteToSpawnAndAttach(&app_remote_host_pool.?)"));
     try std.testing.expectEqual(@as(usize, 11), count(incident, "test \"CR0b writer"));
     try std.testing.expectEqual(@as(usize, 6), count(storage, "test \"CR0b 저장소"));
-    try std.testing.expectEqual(@as(usize, 3), count(runtime, "test \"CR0b 기록기 수명은"));
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "test \"CR0b 기록기 수명은"));
     const runtime_product = runtime[0 .. std.mem.indexOf(u8, runtime, "\ntest \"") orelse runtime.len];
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, ".takePendingForWriter("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, ".completeWriterHandoff("));

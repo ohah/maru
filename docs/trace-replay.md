@@ -223,8 +223,9 @@ process-global final-address `ConnectionIncidentService`가 `{self_addr,pid,proc
 last_issued_sequence,ring,pending_slots,writer_lifecycle,lifecycle}`를 소유한다. `process_nonce`와 `app_instance_nonce`는 daemon child가
 ClientSlot process runtime과 독립된 OS entropy로 각각 한 번 발급하며 0을 거부한다. fork 뒤 daemon bootstrap이 부모의 ClientSlot seal을
 재사용하거나 재초기화해서는 안 된다. service는 daemon bootstrap에서 ring과 함께 준비된 뒤 ready로 게시된다. fork child, copied/moved
-service, PID/process nonce 불일치, `last_issued_sequence == maxInt(u64)`에서의 다음 발급은 Client/ring/reconnect mutation 0 뒤
-`fatalIntegrity(.incident_authority)`로 닫는다. 초기값 0에서 첫 발급은 1이고 max sequence로 발급한 incident 자체는 유효하다.
+service, PID/process nonce 불일치는 mutex 접근 전 typed reject한다. 중립 service counter owner는
+`last_issued_sequence == maxInt(u64)`에서의 다음 발급을 mutation 0 `CounterExhausted`로 반환하고, 유일한 platform runtime adapter가 이를
+`fatalIntegrity(.counter_exhausted)`로 닫는다. 초기값 0에서 첫 발급은 1이고 max sequence로 발급한 incident 자체는 유효하다.
 
 CR0b가 artifact를 의무화하는 범위는 hello를 마치고 session-host의 `HostAdapter` 또는 app-global remote backend에 등록된
 **managed Client**다. connect/hello 실패처럼 등록 전 Client가 없는 경로는 기존 typed error이며 reconnect admission 대상도 아니다.

@@ -143,6 +143,42 @@ scroll-android)
     "$ADB" logcat -d -s MaruChrome 2>/dev/null | grep MARU_SCROLL | tail -1
     echo "  scroll-android-bottom.png · scroll-android-up.png · scroll-android-snap.png"
     ;;
+scroll-video-android)
+    # 정지 화면 세 장으로는 **관성이 보이지 않는다** — 손을 뗀 뒤에도 계속 흐르는지는
+    # 움직이는 그림이라야 안다. `scroll-android` 와 같은 대본을 쓰고 녹화만 더한다.
+    ADB=${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}
+    BR="$MOBILE/mobile_bridge.zig"
+    BAK="$OUT/bridge-scroll.bak"
+    mkdir -p "$OUT"
+    cp "$BR" "$BAK"
+    trap 'cp "$BAK" "$BR"' EXIT INT TERM
+    python3 "$POC/demo_probe.py" lines "$BR" 200 || exit 1
+    sh "$0" chrome-android-app >/dev/null 2>&1
+    cp "$BAK" "$BR"
+    n=0
+    while ! "$ADB" shell dumpsys window 2>/dev/null | grep -q "mCurrentFocus.*dev.maru.chrome"; do
+        n=$((n + 1))
+        [ "$n" -gt 15 ] && { echo "앱이 화면에 없다 — 녹화를 믿을 수 없다" >&2; exit 1; }
+        sleep 1
+    done
+    sleep 2
+    # **길이를 동작에 맞춘다.** 뒤가 정지 화면이면 "안 움직인다" 로 읽힌다.
+    "$ADB" shell screenrecord --time-limit 16 --bit-rate 6000000 /sdcard/scroll.mp4 &
+    REC=$!
+    sleep 1
+    # 과거로 네 번(한 번씩 끊어서 관성이 보이게) → 잠깐 멈춤(자리를 지키는지) →
+    # 현재로 세 번 → 입력하면 바닥으로 스냅.
+    for _ in 1 2 3 4; do "$ADB" shell input swipe 500 700 500 1700 250; sleep 1; done
+    sleep 2
+    for _ in 1 2 3; do "$ADB" shell input swipe 500 1700 500 700 250; sleep 1; done
+    "$ADB" shell input text "typing-snaps-to-bottom"
+    sleep 2
+    wait $REC 2>/dev/null || true
+    sleep 2
+    "$ADB" pull /sdcard/scroll.mp4 "$OUT/scroll-android.mp4" >/dev/null 2>&1
+    "$ADB" shell rm -f /sdcard/scroll.mp4
+    ls -la "$OUT/scroll-android.mp4"
+    ;;
 scroll-ios)
     # **스크롤은 스크롤백이 있어야 볼 게 생긴다.** 데모 대본은 화면보다 짧아 그대로는
     # `sb.count == 0` 이고 스크롤이 원리상 무동작이다 — 번호 붙은 줄을 넣어 빌드했다 뺀다.
@@ -282,7 +318,21 @@ chrome-android-app)
     "$BT/zipalign" -f 4 "$OUT/base.apk" "$OUT/maru-chrome.apk"
     "$BT/apksigner" sign --ks "$OUT/debug.keystore" --ks-pass pass:android \
         --key-pass pass:android "$OUT/maru-chrome.apk"
-    $ADB install -r "$OUT/maru-chrome.apk"
+    # **`adb install` 은 실패해도 exit 0 이다.** "Failure [...]" 를 찍고 0 을 내므로 `set -e`
+    # 가 못 잡고, 스크립트는 옛 APK 가 그대로 깔린 채로 성공을 보고한다 — 실제로 그 상태에서
+    # "고쳤는데 화면이 그대로" 를 한참 봤다. 출력을 판정한다.
+    out=$($ADB install -r "$OUT/maru-chrome.apk" 2>&1) || true
+    case "$out" in
+    *INSTALL_FAILED_UPDATE_INCOMPATIBLE*)
+        # 서명이 다르다 = 키스토어가 새로 만들어졌다(`out/` 을 비우면 그렇게 된다).
+        echo "  서명 불일치 — 기존 앱을 지우고 다시 설치한다"
+        $ADB uninstall dev.maru.chrome >/dev/null 2>&1 || true
+        out=$($ADB install -r "$OUT/maru-chrome.apk" 2>&1) || true
+        ;;
+    esac
+    case "$out" in
+    *Failure*) echo "설치 실패: $out" >&2; exit 1 ;;
+    esac
     $ADB logcat -c
     $ADB shell am start -n dev.maru.chrome/dev.maru.MaruActivity >/dev/null
     sleep 5

@@ -345,6 +345,87 @@ pub export fn maru_mobile_scroll(dy_px: f32) void {
     core.scrollViewport(lines);
 }
 
+// ── 포인터: 끌면 스크롤, 길게 누르면 선택 ────────────────────────────────────
+// **무엇으로 해석할지는 코어가 정한다**(§3.1). 플랫폼마다 판단하면 같은 손가락이 기기에 따라
+// 다른 뜻이 된다. 플랫폼이 갖는 것은 관성뿐이다(손을 뗀 뒤 `maru_mobile_scroll`).
+const long_press_ms: u64 = 500; // 데스크톱 우클릭 자리 — 모바일 관례값
+/// 이만큼 움직이면 "누르고 있는" 것이 아니라 끄는 것이다(논리 px).
+const long_press_slop: f32 = 10;
+
+var ptr_down = false;
+var ptr_down_x: f32 = 0;
+var ptr_down_y: f32 = 0;
+var ptr_down_ms: u64 = 0;
+var ptr_last_y: f32 = 0;
+var ptr_moved = false;
+/// 길게 눌러 선택에 들어갔다 — 이 뒤의 이동은 스크롤이 아니라 선택 확장이다.
+var selecting = false;
+
+/// 본문 안의 점을 셀로. 본문 밖이면 null.
+fn bodyCell(x: f32, y: f32) ?struct { row: u16, col: u16 } {
+    const packed_cell = maru_mobile_hit_cell(x, y);
+    if (packed_cell == 0xFFFF_FFFF) return null;
+    return .{ .row = @intCast(packed_cell & 0xFFFF), .col = @intCast(packed_cell >> 16) };
+}
+
+pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void {
+    const core = &(term_core orelse return);
+    switch (phase) {
+        0 => { // down
+            ptr_down = true;
+            ptr_down_x = x;
+            ptr_down_y = y;
+            ptr_down_ms = time_ms;
+            ptr_last_y = y;
+            ptr_moved = false;
+            // 새로 누르면 이전 선택은 사라진다 — 데스크톱에서 클릭이 선택을 푸는 것과 같다.
+            if (selecting or core.selectionViewportSpan() != null) {
+                core.selectionClear();
+                selecting = false;
+            }
+        },
+        1 => { // move
+            if (!ptr_down) return;
+            const dx = x - ptr_down_x;
+            const dy = y - ptr_down_y;
+            if (@abs(dx) > long_press_slop or @abs(dy) > long_press_slop) ptr_moved = true;
+
+            if (selecting) {
+                // 선택 확장. **셀 판정은 코어 것**이라 여기서 좌표를 다시 안 센다.
+                if (bodyCell(x, y)) |c| core.selectionExtend(c.row, c.col);
+                ptr_last_y = y;
+                return;
+            }
+            // 아직 선택이 아니면 **길게 누름을 먼저 본다** — 손가락이 거의 안 움직인 채로
+            // 시간이 지났으면 그 자리에서 단어를 잡는다(데스크톱 더블클릭 자리).
+            if (!ptr_moved and time_ms - ptr_down_ms >= long_press_ms) {
+                if (bodyCell(ptr_down_x, ptr_down_y)) |c| {
+                    core.selectWordAt(c.row, c.col, &.{});
+                    selecting = true;
+                    ptr_last_y = y;
+                    return;
+                }
+            }
+            // 그 밖에는 스크롤이다. 델타는 직전 move 대비다.
+            maru_mobile_scroll(y - ptr_last_y);
+            ptr_last_y = y;
+        },
+        else => { // up · cancel
+            ptr_down = false;
+            // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다.
+            if (phase == 3) {
+                core.selectionClear();
+                selecting = false;
+            }
+        },
+    }
+}
+
+pub export fn maru_mobile_has_selection() u32 {
+    const core = &(term_core orelse return 0);
+    return if (core.selectionViewportSpan() != null) 1 else 0;
+}
+
 /// 보조 키바 탭. **좌표는 여기서만 해석한다** — 그리는 자리와 판정하는 자리가 갈리면
 /// 눌러도 다른 키가 나간다. 1=이 탭은 키바가 먹었다, 0=키바 밖(플랫폼이 본문 처리로).
 pub export fn maru_mobile_keybar_tap(x: f32, y: f32) u32 {
@@ -621,6 +702,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const y_under = line_h - 4 * rule;
     const y_under2 = line_h - 2 * rule; // 이중밑줄의 **둘째** 줄은 그 아래
 
+    // 선택 범위는 프레임마다 한 번만 묻는다(행마다 물으면 같은 답을 rows 번 계산한다).
+    const sel = core.selectionViewportSpan();
+
     var row: u16 = 0;
     while (row < grid_rows) : (row += 1) {
         const y0 = oy + @as(i32, row) * line_h;
@@ -642,6 +726,27 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             over_run.note(col, if (p.overline) p.line else null, ox, y0 + y_over, cell_w, rule);
         }
         bg_run.flush(grid_cols, ox, y0, cell_w, line_h);
+
+        // ── 선택 표시. **배경 위·글자 아래**에 깔아야 글자가 읽힌다(위에 얹으면 가린다).
+        // 범위는 코어가 준다 — 어느 칸이 선택됐는지 다시 계산하면 갈린다.
+        if (sel) |s| {
+            if (row >= s.start.row and row <= s.end.row) {
+                const from: u16 = if (row == s.start.row) s.start.col else 0;
+                const to: u16 = if (row == s.end.row) s.end.col else grid_cols;
+                if (to > from and from < grid_cols) {
+                    const end_col = @min(to, grid_cols);
+                    if (reserveQuad()) {
+                        const rgb = tk.get(.selection);
+                        push(.{
+                            .x = ox + @as(i32, from) * cell_w,
+                            .y = y0,
+                            .w = @intCast(@as(i32, end_col - from) * cell_w),
+                            .h = @intCast(line_h),
+                        }, rgb, 0x80, 0, 0);
+                    }
+                }
+            }
+        }
         under_run.flush(grid_cols, ox, y0 + y_under, cell_w, rule);
         under2_run.flush(grid_cols, ox, y0 + y_under2, cell_w, rule);
         strike_run.flush(grid_cols, ox, y0 + y_strike, cell_w, rule);

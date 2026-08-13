@@ -1145,6 +1145,9 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 
     // 키바의 각 사각형을 기록한다 — **그리는 자리와 판정하는 자리가 같아야** 눌러도
     // 다른 키가 나가지 않는다(따로 계산하면 갈린다).
+    // **자리를 다 못 채웠으면 안 섰다고 답한다.** 세우기만 하고 안 내리면, 레이아웃에서
+    // 키바가 빠진 프레임에도 **옛 자리를 그대로 답해** 없는 키가 눌린다.
+    var bar_found: usize = 0;
     for (built.entries) |entry| {
         if (entry.id < key_bar_id_base or entry.id >= key_bar_id_base + key_bar.len) continue;
         key_bar_rects[entry.id - key_bar_id_base] = .{
@@ -1153,8 +1156,9 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
             .w = entry.rect.width,
             .h = entry.rect.height,
         };
-        key_bar_ready = true;
+        bar_found += 1;
     }
+    key_bar_ready = bar_found == key_bar.len;
 
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
     for (built.entries) |entry| {

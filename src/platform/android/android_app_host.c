@@ -78,6 +78,9 @@ static struct {
     uint32_t atlas_cols, atlas_rows;
     float scale;
     int inset_top, inset_bottom;
+    float touch_last_y;   // 직전 MOVE 의 논리 y — 이동량을 내는 기준
+    float touch_total_dy; // 이번 제스처의 누적 이동량(로그용)
+    float fling_vy;       // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
     int ready;
     int frames;
     double last_ms;
@@ -584,6 +587,14 @@ static int initVulkan(ANativeWindow *win) {
 
 static void drawFrame(void) {
     if (!g.ready) return;
+    // 손을 뗀 뒤 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다(iOS `stepFling` 과 같은 값).
+    if (g.fling_vy != 0.0f) {
+        pthread_mutex_lock(&g_bridge_lock);
+        maru_mobile_scroll(g.fling_vy);
+        pthread_mutex_unlock(&g_bridge_lock);
+        g.fling_vy *= 0.92f;
+        if (g.fling_vy < 0.5f && g.fling_vy > -0.5f) g.fling_vy = 0.0f;
+    }
     // **창 크기를 직접 본다.** 드라이버가 OUT_OF_DATE 를 안 알려 주는 경우가 있다(실측:
     // 이 에뮬레이터는 리사이즈 뒤에도 계속 VK_SUCCESS 를 돌려주고, SurfaceFlinger 가 낡은
     // 버퍼를 늘려 화면만 맞아 보인다 — 실제로는 잘못된 해상도로 그리고 있다).
@@ -867,10 +878,36 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
     // 되돌려야 셀이 안 어긋난다(그 값은 렌더가 쓴 것과 같은 변수에서 나온다).
     if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_MOTION) {
         int32_t action = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK;
-        if (action != AMOTION_EVENT_ACTION_DOWN) return 0;
         float px = AMotionEvent_getX(ev, 0), py = AMotionEvent_getY(ev, 0);
         float lx = px / g.scale;
         float ly = (py - (float)g.inset_top) / g.scale;
+        // **스크롤: 관성만 우리 것이고 의미는 코어 것이다**(docs/mobile-platform.md §3.1).
+        // Android 에는 iOS 의 `UIPanGestureRecognizer` 같은 것이 NativeActivity 경로에 없어서
+        // 이동량을 직접 센다. 줄 환산·clamp·alt screen 변환은 전부 코어가 한다.
+        if (action == AMOTION_EVENT_ACTION_MOVE) {
+            float dy = ly - g.touch_last_y;
+            g.touch_last_y = ly;
+            // 손을 뗀 뒤 흘릴 관성. 마지막 이동량을 프레임 몫으로 그대로 쓴다.
+            g.fling_vy = dy;
+            g.touch_total_dy += dy;
+            pthread_mutex_lock(&g_bridge_lock);
+            maru_mobile_scroll(dy);
+            pthread_mutex_unlock(&g_bridge_lock);
+            return 1;
+        }
+        if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL) {
+            // 제스처마다 한 줄. "손가락이 앱까지 닿았나" 를 로그로 판정할 수 있어야 한다 —
+            // 화면이 안 바뀔 때 코어까지 갔는지 아닌지를 이 줄이 가른다(실제로 그렇게 잡았다).
+            pthread_mutex_lock(&g_bridge_lock);
+            unsigned int vo = maru_mobile_view_offset();
+            pthread_mutex_unlock(&g_bridge_lock);
+            LOGI("MARU_SCROLL dy=%.1f view_offset=%u", g.touch_total_dy, vo);
+            return 1;
+        }
+        if (action != AMOTION_EVENT_ACTION_DOWN) return 0;
+        g.touch_last_y = ly;
+        g.touch_total_dy = 0;
+        g.fling_vy = 0;
         unsigned int cell = maru_mobile_hit_cell(lx, ly);
         LOGI("MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
              px, py, lx, ly, cell >> 16, cell & 0xFFFF);

@@ -120,6 +120,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     id<UITextInputDelegate> _inputDelegate;
     UITextInputStringTokenizer *_tokenizer;
     float _flingVy;   // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
+    float _ptrLastY;  // 직전 move 의 논리 y — 이동량을 내는 기준
 }
 
 // 호스트가 만든 한글·영어 아틀라스와, **Zig 가 만든** 아이콘 coverage 를 올린다.
@@ -256,6 +257,20 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 코어는 PTY 에서 온 것과 구분하지 않는다(Android 쪽과 같은 계약).
 // **터치**: 탭한 지점을 셀 좌표로 바꿔 코어에 알린다. 데스크톱의 포인터 조회와 같은 계약이고,
 // 여기서 확인하려는 것은 "터치가 논리 좌표를 거쳐 셀까지 닿는가"다.
+/// 논리 좌표 + 이벤트 시각. **판단은 코어가 한다** — 여기서는 좌표계만 되돌린다.
+- (void)sendPointer:(unsigned int)phase touches:(NSSet<UITouch *> *)touches {
+    UITouch *touch = touches.anyObject;
+    if (!touch) return;
+    CGPoint p = [touch locationInView:self];
+    UIEdgeInsets safe = self.safeAreaInsets;
+    float lx = (float)(p.x - safe.left);
+    float ly = (float)(p.y - safe.top);
+    // 손을 뗀 뒤 흘릴 관성만 우리 몫이다 — Android 와 같은 식(마지막 이동량).
+    if (phase == 1) { _flingVy = ly - _ptrLastY; _ptrLastY = ly; }
+    if (phase == 0) { _flingVy = 0; _ptrLastY = ly; }
+    maru_mobile_pointer(phase, lx, ly, (unsigned long long)(touch.timestamp * 1000.0));
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     UITouch *touch = touches.anyObject;
     CGPoint p = [touch locationInView:self];
@@ -271,34 +286,22 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     unsigned int cell = maru_mobile_hit_cell(lx, ly);
     NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
           p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
+    [self sendPointer:0 touches:touches];
 }
 
-// **스크롤: 관성만 우리 것이고 의미는 코어 것이다**(docs/mobile-platform.md §3.1).
-// 끄는 동안은 손가락이 움직인 만큼 그대로 넘기고, 손을 떼면 남은 속도를 프레임마다 감쇠시켜
-// 계속 넘긴다. 줄 환산·clamp·alt screen 변환은 전부 코어가 한다 — 여기서 판단하면 갈린다.
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    switch (pan.state) {
-        case UIGestureRecognizerStateBegan:
-            _flingVy = 0;
-            [pan setTranslation:CGPointZero inView:self];
-            break;
-        case UIGestureRecognizerStateChanged: {
-            CGPoint t = [pan translationInView:self];
-            maru_mobile_scroll((float)t.y);
-            [pan setTranslation:CGPointZero inView:self];
-            break;
-        }
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled:
-            // 손을 뗀 뒤의 관성. 초당 속도를 프레임(30Hz) 몫으로 나눠 tick 이 흘린다.
-            _flingVy = (float)[pan velocityInView:self].y / 30.0f;
-            // 제스처마다 한 줄. **화면이 안 바뀔 때 코어까지 갔는지**를 이 줄이 가른다 —
-            // Android 에서 실제로 그렇게 잡았다(view_offset 은 올라가는데 픽셀이 그대로였다).
-            NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u", _flingVy, maru_mobile_view_offset());
-            break;
-        default:
-            break;
-    }
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self sendPointer:1 touches:touches];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self sendPointer:2 touches:touches];
+    NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u sel=%u", _flingVy,
+          maru_mobile_view_offset(), maru_mobile_has_selection());
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self sendPointer:3 touches:touches];
+    _flingVy = 0;
 }
 
 /// tick 에서 부른다. 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다.
@@ -638,10 +641,9 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         _link.preferredFramesPerSecond = 30;
     }
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
-    // 스크롤 제스처. **OS 인식기를 쓴다** — 직접 만들면 뒤로가기·엣지 스와이프와 충돌하고
-    // 느낌이 어색해진다(§3.1: 관성·러버밴딩·시스템 제스처 협조는 플랫폼 몫).
-    [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                      action:@selector(handlePan:)]];
+    // **제스처 인식기를 안 쓴다.** 인식되는 순간 UIKit 이 touchesMoved 를 끊어(cancel) 길게
+    // 눌러 끄는 선택이 죽는다 — 원시 터치를 그대로 코어에 넘기고 뜻은 코어가 정한다(§3.1).
+    // 관성만 우리가 계산한다(Android 와 같은 식).
     // **길게 누름 지연은 OS 가 정한다.** 코어에 박으면 플랫폼 차이를 지운다 — 실측으로 iOS 는
     // 500ms, Android 는 400ms 였다(같은 값이 아니다). UIKit 의 기본값을 그대로 넘긴다.
     //

@@ -158,6 +158,34 @@ pub const IncidentBindingSealInput = struct {
     host_class_raw: u8,
 };
 
+pub const IncidentPublisherAuthoritySealInput = struct {
+    self_addr: u64,
+    registry_addr: u64,
+    registry_generation: u64,
+    runtime_addr: u64,
+    runtime_generation: u64,
+    service_addr: u64,
+    service_generation: u64,
+    service_process_nonce: u64,
+    owner_thread: u64,
+    app_instance_nonce: u128,
+    lifecycle_raw: u8,
+};
+
+pub const IncidentPublisherLeaseSealInput = struct {
+    self_addr: u64,
+    registry_addr: u64,
+    registry_generation: u64,
+    authority_addr: u64,
+    runtime_addr: u64,
+    runtime_generation: u64,
+    service_addr: u64,
+    service_generation: u64,
+    owner_thread: u64,
+    lease_generation: u64,
+    consumed_raw: u8,
+};
+
 pub const PendingTermCloseSealInput = struct {
     self_addr: u64,
     app_session_addr: u64,

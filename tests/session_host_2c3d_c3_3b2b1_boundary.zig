@@ -116,10 +116,15 @@ test "C3-3b2b1 trusted preparation seal boundary" {
         ),
     );
     try std.testing.expectEqual(
-        // C3-3b3 receipt/permit, b5 close owner, b6 shutdown owner, 2d2 terminal handoff와 CR0b Client binding이 검증한다.
-        @as(usize, 21),
+        // C3-3b3 receipt/permit, b5 close owner, b6 shutdown owner, 2d2 terminal handoff와 CR0b Client binding/publisher lease가 검증한다.
+        @as(usize, 22),
         try countProductSources(allocator, "@import(\"process_seal_service.zig\")"),
     );
+    const publisher_registry = try readSource(allocator, "src/platform/macos/session_host/incident_publisher_registry.zig");
+    defer allocator.free(publisher_registry);
+    try std.testing.expectEqual(@as(usize, 1), count(publisher_registry, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 0), count(publisher_registry, "client.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(publisher_registry, "incident_runtime.zig"));
     const daemon = try readSource(allocator, "src/platform/macos/session_host/daemon.zig");
     defer allocator.free(daemon);
     try std.testing.expectEqual(@as(usize, 0), count(daemon, "@import(\"process_seal_service.zig\")"));

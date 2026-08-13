@@ -337,8 +337,9 @@ service_generation,pid,client_process_nonce,service_process_nonce,owner_thread,a
 놓고 deadline까지 count를 재조회하며, mutex를 잡은 채 기다리지 않는다. 정확한 순서는 `Client fence -> registry mutex(acquire 후
 unlock) -> service mutex`; writer는 service mutex만, lease release와 teardown은 service mutex를 잡지 않는다. closing publication 뒤
 새 acquire는 mutation 0 typed reject이고 teardown은 active count 0 전 runtime/service를 해제하지 않는다.
-copied/moved owner·lease, same-address generation ABA, service/runtime address splice, lifecycle replay, fork child 사용을 fail-stop으로
-닫는다. 제품 poison suffix가 raw global pointer를 직접 읽거나 `ConnectionIncidentRuntime`을 import하는 caller는 0이고, platform
+copied/moved owner·lease, same-address generation ABA, service/runtime address splice, lifecycle replay, fork child의 pre-admission
+사용은 mutation 0 typed reject로 닫는다. process-sealed authority를 검증한 뒤의 proof drift와 issuer exhaustion만 common fatal
+leaf로 fail-stop한다. 제품 poison suffix가 raw global pointer를 직접 읽거나 `ConnectionIncidentRuntime`을 import하는 caller는 0이고, platform
 runtime adapter만 ClientSlot의 pointer-free 등록 facade를 호출한다.
 
 publication은 generic callback 대신 final-address `PreparedIncidentPublication`을 사용한다. closed kind는 `first|repeat`다. prepare는

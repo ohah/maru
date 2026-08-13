@@ -2259,6 +2259,36 @@ pub fn build(b: *std.Build) void {
         run_cr0b_binding_contract_tests.addArg("--maru-expect-tests=6");
         run_cr0b_binding_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_binding_contract_tests.step);
+        // 전용 runner가 exhaustion child의 canonical artifact 경로만 전달하고 일반 test 실행 의미는 그대로 위임한다.
+        const cr0b_publisher_authority_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/incident_publisher_registry.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b publisher"},
+            .test_runner = .{
+                .path = b.path("tools/session_host_cr0b_publisher_test_runner.zig"),
+                .mode = .simple,
+            },
+        });
+        cr0b_publisher_authority_tests.root_module.link_libc = true;
+        const cr0b_publisher_exhaustion_child = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/incident_publisher_registry.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b authority exhaustion child는"},
+        });
+        cr0b_publisher_exhaustion_child.root_module.link_libc = true;
+        const run_cr0b_publisher_authority_tests = b.addRunArtifact(cr0b_publisher_authority_tests);
+        run_cr0b_publisher_authority_tests.addArtifactArg(cr0b_publisher_exhaustion_child);
+        run_cr0b_publisher_authority_tests.addArg("--maru-expect-tests=7");
+        run_cr0b_publisher_authority_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_publisher_authority_tests.step);
         const cr0b_host_pool_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/host_adapter.zig"),

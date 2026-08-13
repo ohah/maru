@@ -26,6 +26,11 @@ ck "host 에 남은 하드코딩 22" 0 "$(grep -cE '(jfloat)22\.0f|CFSTR\("Menlo
 echo "§3 상한은 코어가 답한다"
 ck "host 에 남은 quad 상한 하드코딩" 0 "$(grep -cE 'quad_cap = [0-9]|_quadCap = [0-9]' $I $A | awk -F: '{s+=$2} END{print s+0}')"
 
+echo "ABI 헤더 ↔ Zig export 타입"
+# 이름 집합만 대조하면 **타입이 어긋나도 C 는 컴파일되고 값만 조용히 깨진다**
+# (u32 자리에 u64, 포인터 자리에 정수 같은 것).
+ck "타입이 어긋난 선언" 0 "$(python3 "$(dirname "$0")/abi_types.py" | grep -oE '^어긋난 선언 [0-9]+' | grep -oE '[0-9]+')"
+
 echo "ABI 헤더 ↔ Zig export"
 h=$(grep -oE 'maru_mobile_[a-z_]+' $H | sort -u | md5)
 z=$(grep -oE '^pub export fn maru_mobile_[a-z_]+' $B | grep -oE 'maru_mobile_[a-z_]+' | sort -u | md5)

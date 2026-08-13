@@ -1079,48 +1079,29 @@ fn detectLaunchCwdIsRoot(io: std.Io) bool {
 /// cwd가 비면 "". 폴더 아이콘 prefix는 호출부(buildSidebarTitleFrame)가 브랜치줄 octocat과 같은 패턴으로 붙인다 —
 /// 이 함수는 경로만 파생해, copy-path·click-to-open 등 다른 소비자가 PUA 글리프 없는 깨끗한 경로를 쓸 수 있다.
 /// 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
-/// 이 프로세스의 hostname — OSC 7 authority가 "우리"를 가리키는지 판정하는 기준값이다. 매 호출 조회하면
-/// syscall이 OSC 7 빈도(매 프롬프트)와 사이드바 rebuild 빈도로 따라붙으므로 **쓸 만한 값을 얻은 뒤로는**
-/// 캐시한다. **메인 스레드 전용** — 소비처(사이드바 조립·spawn cwd·경로 resolve)가 모두 메인이라 lazy
-/// init에 경합이 없다. 조회 실패면 빈 문자열이고, 그때 `hostIsLocal`은 보수적으로 원격을 택한다
-/// (docs/ssh-integration.md §9.2).
-var local_hostname_storage: [std.posix.HOST_NAME_MAX]u8 = undefined;
-var local_hostname_cached: ?[]const u8 = null;
-pub fn localHostname() []const u8 {
-    if (local_hostname_cached) |cached| return cached;
-    const name: []const u8 = std.posix.gethostname(&local_hostname_storage) catch "";
-    // **자리 잡기 전의 값은 캐시하지 않는다.** macOS는 네트워크 구성이 끝나기 전(부팅 직후·Wi-Fi 전환·
-    // 슬립 복귀)에 gethostname()이 실패하거나 `localhost`를 답한다. 앱이 그 창에서 뜨면 옛 구현은 그 값을
-    // 프로세스 수명 동안 굳혔고, 그러면 이후 모든 authority가 기준값과 어긋나 **로컬 세션이 통째로 원격으로
-    // 오판된다**(빈 이름은 hostIsLocal이 보수적으로 원격으로 읽고, `localhost`는 짧은 이름 비교에서도
-    // 실제 이름과 안 맞는다). 캐시를 미루면 다음 호출이 다시 물어보므로 이름이 자리 잡는 순간 판정이 저절로
-    // 회복된다.
-    //
-    // **미확정이 지속돼도 비용은 잡히지 않는다**: `gethostname`은 실측 382ns/call(macOS, `sysctl` 경로)이고
-    // 이 함수는 사이드바 rebuild마다 Term 수만큼 불린다 — Term 20개·60fps면 초당 0.5ms 미만이다. "곧 자리
-    // 잡으니 괜찮다"에 기대지 않는다(네트워크가 영영 안 붙는 머신에서는 그 전제가 틀리다). 캐시 적중 뒤에는
-    // syscall이 0이므로 정상 경로의 비용은 그대로다.
-    if (!hostnameIsSettled(name)) return name;
-    local_hostname_cached = name;
-    return name;
-}
-
-/// 그 hostname을 **캐시해도 되는가**. 조회 실패(빈 문자열)와 `localhost`는 "아직 이름이 없다"는 뜻이라, 굳히면
-/// 그 뒤의 모든 로컬 판정이 어긋난다(위 주석). 순수 판정으로 빼 두면 그 규칙을 테스트가 직접 짚는다.
-fn hostnameIsSettled(name: []const u8) bool {
-    return name.len > 0 and !std.ascii.eqlIgnoreCase(name, "localhost");
-}
-
-test "localHostname 캐시: 자리 잡지 않은 이름(빈 값·localhost)은 굳히지 않는다" {
-    // 굳히면 네트워크 구성 전에 뜬 앱이 **수명 내내** 로컬 세션을 원격으로 오판한다(사용자 보고 2026-08-13).
-    // 실제 캐시 변수는 전역이라 테스트가 gethostname을 흔들 수 없어, 그 결정을 내리는 판정을 직접 검증한다.
-    try std.testing.expect(!hostnameIsSettled("")); // 조회 실패
-    try std.testing.expect(!hostnameIsSettled("localhost"));
-    try std.testing.expect(!hostnameIsSettled("LocalHost")); // 호스트명은 대소문자 무시
-    try std.testing.expect(hostnameIsSettled("box.local"));
-    try std.testing.expect(hostnameIsSettled("box"));
-    // `localhost`로 시작할 뿐인 진짜 이름은 굳혀도 된다(부분 일치로 삼키지 않는다).
-    try std.testing.expect(hostnameIsSettled("localhost-vm.local"));
+/// 이 프로세스의 hostname — OSC 7 authority가 "우리"를 가리키는지 판정하는 기준값이다. 조회 실패면 빈
+/// 문자열이고, 그때 `hostIsLocal`은 보수적으로 원격을 택한다(docs/ssh-integration.md §9.2).
+///
+/// **캐시하지 않는다. hostname은 프로세스 수명 동안 바뀌기 때문이다.** macOS는 DHCP 도메인·Wi-Fi 전환·슬립
+/// 복귀로 접미를 갈고(`box.local` ↔ `box.lan`), 네트워크 구성 전에는 실패하거나 `localhost`를 답한다. 옛
+/// 구현은 첫 조회를 프로세스 수명 내내 굳혔는데, 그러면 그 뒤 이름이 바뀌는 순간 기준값이 낡아 **로컬
+/// 세션이 통째로 원격으로 오판된다** — `hostIsLocal`은 양쪽이 다 FQDN이면 완전 일치만 로컬로 인정하므로
+/// (동명 사내 서버 차단 규율) 접미 하나만 달라도 다른 호스트가 된다. 그 상태에서는 폴더줄에 `host:` 접두가
+/// 붙고 §9.4의 안전장치가 전부 발동해 cwd 상속·링크 감지·git 저장소 조회가 함께 꺼진다(사용자 보고
+/// 2026-08-13). "시작할 때 자리 잡았는지"만 보는 보정으로는 **시작 뒤에 바뀌는 경우**를 못 막는다.
+///
+/// **매 호출 조회해도 비용은 잡히지 않는다**: `gethostname`은 실측 382ns/call(macOS, `sysctl` 경로)이다.
+/// 사이드바 rebuild가 Term당 여러 번 여기에 닿지만(카드 한 줄을 만드는 데만 `termGitBranch`→`termCwd`와
+/// `sidebarHasCwd`→`termCwdForDisplay`→`termCwd`로 네 번쯤), Term 20개·60fps에 그 곱수를 얹어도 초당
+/// 2ms 안쪽이다. 캐시가 사던 유일한 값이 그 syscall 절약이므로 정확성과 맞바꿀 이유가 없다.
+///
+/// **버퍼는 호출자가 준다.** 전역 버퍼로 두면 매 호출이 그것을 덮는데 반환 타입은 평범한 getter처럼 보여,
+/// 두 번째 소비처가 값을 잠깐 들고 있다가 조용히 뒤바뀐 이름을 읽는다(캐시가 있던 동안에는 슬라이스가
+/// 프로세스 수명 내내 고정이라 안전했던 패턴이다 — 코드 리뷰 지적). 같은 파일의 `termCwd(self, term, buf)`가
+/// 쓰는 관행을 따라 out-buffer로 두면 그 제약이 주석이 아니라 시그니처가 된다. 조회 실패면 빈 문자열이고,
+/// 그때 `hostIsLocal`은 보수적으로 원격을 택한다(§9.2).
+pub fn localHostname(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
+    return std.posix.gethostname(buf) catch "";
 }
 
 /// 이 Term이 보고한 cwd가 **원격**인가 — 표시(폴더줄·상태바)와 안전(cwd 상속·경로 resolve·git 조회)이 공유하는
@@ -1130,9 +1111,10 @@ test "localHostname 캐시: 자리 잡지 않은 이름(빈 값·localhost)은 �
 /// 관측이 없거나(`unavailable`) cwd가 비면 **로컬로 본다** — "값이 없음"을 원격으로 승격하면 셸 통합이 없는
 /// 로컬 세션이 통째로 원격 취급돼 cwd 상속이 꺼진다. 원격 판정의 근거는 오직 authority다(§9.2).
 pub fn termCwdIsRemote(term: *const Term) bool {
+    var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined; // 이름은 여기서만 살아 있으면 된다(비교에 바로 쓴다)
     if (term.rt.observation.availability == .unavailable) return false;
     if (term.rt.observation.cwd.items.len == 0) return false;
-    return !terminal.TerminalCore.hostIsLocal(term.rt.observation.cwd_host.items, localHostname());
+    return !terminal.TerminalCore.hostIsLocal(term.rt.observation.cwd_host.items, localHostname(&host_buf));
 }
 
 /// 그 Term에 적용할 링크 감지 스코프 — config 프리셋에서 시작하되 **원격 cwd 세션에서는 파일 경로 스코프를 끈다**.
@@ -53586,7 +53568,10 @@ test "브랜치 메뉴도 `.unknown`을 저장소 없음으로 단정하지 않�
     settings_ops.requestBranchMenu(session);
     try std.testing.expect(session.chrome_host.notice.open); // 조용히 무시하지 않고 사용자에게 말한다
     try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, git_ops.notice_repo_unknown));
-    try std.testing.expect(!session.branch_menu_pending); // 읽을 저장소가 없으므로 요청도 걸리지 않는다
+    // **`branch_menu_pending`은 일부러 단언하지 않는다.** 위에서 백엔드를 `shutting_down`으로 두었으므로
+    // `submitBranches`는 어느 분기에서도 false를 돌려준다(git_backend.zig) — 그 상태에서 "요청이 안 걸렸다"를
+    // 단언하면 `.unknown` 분기가 사라져도 통과하는 공허한 검사가 된다(코드 리뷰에서 지적). 이 테스트가
+    // 고정하는 것은 **어느 안내를 내는가**이고, 그 판정이 도크와 갈리지 않는지다.
 }
 
 // [GUI 확인 2026-08-12] 저장소를 지웠더니 **도크는 "git 저장소가 아닙니다"인데 상태바·사이드바는 옛 브랜치를

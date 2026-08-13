@@ -201,7 +201,8 @@ flowchart TD
 
 - **로컬 판정**: authority가 비었거나(`file:///path` = VTE 규약의 localhost), `localhost`이거나, 로컬 hostname과 같으면 로컬이다. hostname 비교는 대소문자를 무시하고 FQDN의 첫 `.` 앞 짧은 이름도 함께 본다(원격 셸이 `${HOST}`에 짧은 이름을, 로컬이 FQDN을 쓰는 비대칭이 흔하다). 단 **양쪽이 다 FQDN인데 전체가 다르면 다른 호스트로 본다** — 첫 라벨만 비교하면 사내망의 동명 서버(`box.corp.com`)가 로컬(`box.home.net`)로 판정돼 원격 경로가 로컬 spawn·resolve로 샌다.
 - **로컬 보고자는 authority를 비운다**(`shell_integration.zig`의 `_maru_osc7`). maru가 spawn한 로컬 pty 전용 스크립트라 보고하는 cwd가 정의상 로컬인데, `${HOST}`를 실으면 그 값(**셸이 시작한** 시점의 hostname)과 앱이 대조하는 이름(**앱이 시작한** 시점의 hostname)이 서로 다른 스냅샷이 된다. macOS는 DHCP 도메인·Wi-Fi 전환·슬립 복귀로 접미를 바꾸므로(`box.local` ↔ `box.lan` ↔ `localhost`) 두 값이 갈릴 수 있고, 그러면 위의 FQDN 규율이 **자기 세션을 원격으로 단정**한다 — 폴더줄에 `host:` 접두가 붙고 §9.4의 안전장치가 전부 발동해 cwd 상속·링크·git 조회가 통째로 꺼진다(사용자 보고 2026-08-13: 로컬 저장소 안에서 소스 컨트롤 뷰가 "git 저장소가 아닙니다"). 판정을 느슨하게 푸는 대신 **로컬 보고자가 추측할 거리를 주지 않는 쪽**으로 막았다. 원격 rc의 스니펫은 계속 `${HOST}`를 싣는다(§9.5).
-- **로컬 hostname 캐시는 자리 잡은 값만 굳힌다**(`app_session.localHostname`). 조회 실패나 `localhost`는 "아직 이름이 없다"는 뜻이라, 그 값을 프로세스 수명 동안 캐시하면 네트워크 구성 전에 뜬 앱이 이후 모든 세션을 원격으로 오판한다. 캐시를 미루면 이름이 자리 잡는 순간 판정이 스스로 회복된다.
+- **로컬 hostname은 캐시하지 않는다**(`app_session.localHostname`). hostname은 프로세스 수명 동안 바뀌므로(DHCP 도메인·Wi-Fi 전환·슬립 복귀, 구성 전에는 실패나 `localhost`) 첫 조회를 굳히면 그 뒤 이름이 바뀌는 순간 기준값이 낡아 로컬 세션이 원격으로 오판된다. "시작할 때 자리 잡았는지"만 보는 보정으로는 **시작 뒤에 바뀌는 경우**를 못 막는다. `gethostname`은 실측 382ns/call이라 매 호출 조회해도 프레임 예산에 잡히지 않는다(Term 20개·60fps에서 초당 0.5ms 미만) — 캐시가 사던 유일한 값이 그것이므로 정확성과 맞바꾸지 않는다.
+- **한계: 사용자 rc가 자기 OSC 7 보고자를 등록하면 그쪽이 이긴다.** `.zshenv`는 `.zshrc`보다 먼저 실행되고 `add-zsh-hook`은 append라, 사용자 훅이 매 프롬프트 **나중에** 실행되어 마지막 보고가 최종값이 된다(pty 캡처로 확인: maru의 `file:///path` 뒤에 사용자의 `file://<host>/path`가 이어졌다). 그 rc가 `${HOST}`를 실으면 위 계약이 그 세션에서만 무력화된다. `_maru_osc133_ps1`이 OSC 133 B에 쓰는 "매 프롬프트 자신을 `precmd_functions` 맨 뒤로 재정렬" 패턴을 `_maru_osc7`에도 적용하면 막을 수 있지만, 두 훅이 같은 자리를 다투게 되고 "사용자 rc를 maru가 덮어써야 하는가"라는 정책 결정이 따라오므로 이 계약의 범위 밖에 둔다.
 - **그 밖은 원격**이며, 그 값은 **로컬 파일시스템 경로가 아니다.**
 - 베이스: OSC 7은 VTE가 정의한 사실상 표준이고 `file://<host>/<path>` 형식이 host를 이미 싣고 있다. 지금까지 버린 것은 "로컬 단일 호스트 가정" 때문이고(§1.1), 그 가정을 여기서 거둔다. iTerm2·WezTerm도 host를 보관해 원격 판정에 쓴다(동작 비교).
 
@@ -233,10 +234,11 @@ maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.termi
 - 보고자가 없으면 cwd는 접속 직전 로컬 값에 멈춘다. 그 값의 host는 로컬이므로 **원격으로 오인하지 않는다** — 잘못된 `<host>:` 접두가 붙지 않고, 폴더줄은 접속 전 로컬 경로를 계속 보여 준다(현행과 동일).
 - 원격이 **tmux 안**이면 보고자가 OSC 7을 DCS passthrough(`ESC P tmux; …`)로 감싸야 하고, 그 tmux에 `allow-passthrough`가 켜져 있어야 한다(§1.1). 둘 중 하나라도 없으면 tmux가 OSC 7을 흡수해 값이 오지 않는다.
 - maru가 제공하는 것은 **붙여 넣을 스니펫**이다(로컬 셸 통합의 `_maru_osc7`과 같은 percent-encoding 규약, tmux 래핑 포함). 설치는 사용자가 한 번 한다.
+- **원격 스니펫은 authority를 반드시 싣는다**(`file://${HOST}/…`). 여기서 참조하는 것은 `_maru_osc7`의 **percent-encoding 규약**이지 authority 처리가 아니다 — 그 함수는 로컬 전용이라 authority를 비우므로(§9.2), 그대로 베끼면 원격 셸이 자기 cwd를 로컬로 보고해 §9.4의 안전장치가 통째로 꺼진다(원격 경로가 로컬 파일로 resolve된다). 두 스니펫은 인코딩만 공유하고 authority 정책은 반대다.
 
 ### 9.6 검증
 
-- 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host), **빈 authority는 로컬 이름이 어떤 상태(빈 값·`localhost`·다른 도메인 접미)든 로컬**(로컬 보고자 계약의 반대편), 그리고 hostname 캐시가 자리 잡지 않은 값을 굳히지 않는지.
+- 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host), **빈 authority는 로컬 이름이 어떤 상태(빈 값·`localhost`·다른 도메인 접미)든 로컬**(로컬 보고자 계약의 반대편). 로컬 hostname은 **캐시가 없으므로** 고정할 상태가 없다 — 대신 `localHostname`이 호출자 버퍼에 매번 조회해 쓰는 형태라는 것이 시그니처로 강제된다.
 - 셸 스크립트 단위: 생성한 `.zshenv`가 `${HOST}`를 **싣지 않고** `file://` 뒤에 바로 인코딩된 경로를 붙이는지. 실제 zsh가 무엇을 보내는지는 pty 캡처로 확인한다(`ZDOTDIR=<캐시 디렉터리> script -q out zsh -i`로 `\e]7;file://…`를 잡는다 — 2026-08-13에 이 캡처가 "로컬 셸이 hostname을 싣는다"를 확정했다).
 - 세션 재현: 저장소 안에 선 Term에 authority만 어긋난 OSC 7을 보내면 폴더줄이 `<host>:<절대경로>`가 되고 저장소 판정이 `.unknown`으로 무너지는지, 그리고 **빈 authority(로컬 보고자 형식)에서는 같은 경로가 `.repo`로 돌아오는지**를 한 테스트에서 대조한다(수정의 효과가 곧 그 대조다).
 - 소비처: 원격 cwd에서 `newSurfaceCwd`가 null을 내는지, 클릭 resolve가 상대경로를 join하지 않는지, 폴더줄이 브랜치 없이도 `<host>:<path>`를 그리고 `~` 축약이 안 붙는지, 로컬 cwd는 기존 동작이 바이트 그대로인지(회귀).

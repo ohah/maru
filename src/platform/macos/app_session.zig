@@ -5038,7 +5038,7 @@ pub const AppSession = struct {
     }
 
     fn testCR0bCurrentManagedPublication() !void {
-        try RemoteSessionAdapter.initializeProcessRuntime();
+        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();
@@ -5061,7 +5061,7 @@ pub const AppSession = struct {
     }
 
     fn testCR0bRestoreFirstSiblingPreservation() !void {
-        try RemoteSessionAdapter.initializeProcessRuntime();
+        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();
@@ -5095,7 +5095,7 @@ pub const AppSession = struct {
     }
 
     fn testCR0bDuplicateFailureAtomicity() !void {
-        try RemoteSessionAdapter.initializeProcessRuntime();
+        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();
@@ -5127,7 +5127,7 @@ pub const AppSession = struct {
     }
 
     fn testCR0bInitFailureAbortReuse() !void {
-        try RemoteSessionAdapter.initializeProcessRuntime();
+        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();

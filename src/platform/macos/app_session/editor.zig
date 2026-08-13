@@ -237,11 +237,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
 
     const tokens = self.buildChromeTokens();
     const draws: chrome.ChromeDraw = .{ .layer = .sidebar, .ops = pf.ops };
-    // **bottom(2)** — 셀 패스 **앞**에 그리는 유일한 quad 층이다. 0/1/3/4는 셀 뒤라 배경이 자기
-    // 글자를 덮는다(`maru_metal_renderer.m`의 네 패스 배치). 실제로 3으로 두어 편집기 본문이
-    // 통째로 안 보였다 — 배경만 칠해진 빈 pane. §4.1b의 "op 순서상 맨 처음"은 op 배열 안에서만
-    // 참이고, quad와 셀은 파이프라인이 갈리므로 합성 층을 여기서 따로 맞춘다.
-    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, rect.x, rect.y, &self.gpu_quads, 2);
+    // **`layers.bottom`** — 셀 패스 앞에 그리는 유일한 층이다. 다른 층은 셀 뒤라 배경이 자기 글자를
+    // 덮는다. 실제로 여기 `3`이 들어가 편집기 본문이 통째로 안 보였다(배경만 칠해진 빈 pane) —
+    // 렌더러가 이름 없는 값을 전부 over로 몰아넣어 오타가 조용히 "동작"했다. 같은 컴포넌트를 그리는
+    // Chrome Lab은 처음부터 bottom이었고, 두 호출처가 갈린 것을 아무것도 강제하지 않았다.
+    // §4.1b의 "op 순서상 맨 처음"은 op 배열 안에서만 참이다 — quad와 셀은 파이프라인이 갈린다.
+    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, rect.x, rect.y, &self.gpu_quads, chrome_draw_lowering.layers.bottom);
 
     const cols: u16 = @intCast(@min(rect.w / @max(self.cell_width_px, 1), @as(u32, std.math.maxInt(u16))));
     const rows: u16 = @intCast(@min(rect.h / @max(self.cell_height_px, 1), @as(u32, std.math.maxInt(u16))));
@@ -383,9 +384,9 @@ const PaneFixture = struct {
     }
 };
 
-test "편집기 배경 quad는 셀 패스 앞 층(2)이다 — 뒤 층이면 자기 본문을 덮는다" {
-    // `maru_metal_renderer.m`은 quad를 네 패스로 그리고 그중 layer 2(bottom)만 셀 패스 **앞**에 온다.
-    // 0/1/3/4는 셀 뒤라 배경이 글자를 덮는다 — 그 파일 주석이 이미 그렇게 적어 두었는데도 3으로
+test "편집기 배경은 셀 패스 앞 층에 실린다 — 뒤 층이면 자기 본문을 덮는다" {
+    // `maru_metal_renderer.m`은 quad를 네 패스로 그리고 그중 `layers.bottom`만 셀 패스 **앞**에 온다.
+    // 나머지는 셀 뒤라 배경이 글자를 덮는다 — 그 파일 주석이 이미 그렇게 적어 두었는데도 `3`이
     // 실려 편집기 본문이 통째로 안 보였다. 이 테스트가 그 뮤턴트를 잡는다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -398,6 +399,8 @@ test "편집기 배경 quad는 셀 패스 앞 층(2)이다 — 뒤 층이면 자
 
     // ⑴ 배경이 실제로 나왔다. quad가 0이면 아래 for가 공허하게 통과한다.
     try testing.expect(fx.session.gpu_quads.items.len > 0);
+    // **리터럴로 판정한다.** `layers.bottom`으로 비교하면 그 상수를 3으로 바꿔도 통과한다 —
+    // 판정 대상과 기대값이 같은 출처면 테스트가 아니라 항등식이다.
     for (fx.session.gpu_quads.items) |q| try testing.expectEqual(@as(u32, 2), q.layer);
 
     // ⑵ **그리고 글자도 나왔다.** 이것이 없으면 배경만 칠하고 본문을 안 그리는 상태(=우리가 고친
@@ -462,9 +465,50 @@ test "편집기가 아닌 Term은 이 경로를 타지 않는다 — 터미널 p
     try testing.expectEqual(@as(usize, 0), fx.session.gpu_quads.items.len); // quad도 안 남긴다
 }
 
+test "split에서 편집기는 자기 leaf에만 그린다 — 옆 터미널 pane을 침범하지 않는다" {
+    // `appendPaneFrame`은 leaf마다 불린다. 사각을 인자가 아니라 세션 상태(활성 pane 등)에서
+    // 가져오는 순간 split에서 두 leaf가 같은 자리에 그려지는데, 단일 pane 테스트로는 그것이
+    // 절대 드러나지 않는다 — 단일 pane에서는 "활성 leaf"와 "이 leaf"가 늘 같기 때문이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 좌/우로 나눈 두 leaf 사각. 실제 split 트리를 세우지 않고 사각만 주는 이유는, 이 함수의
+    // 계약이 "받은 사각 안에만 그린다"이지 트리 순회가 아니기 때문이다.
+    const left: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 400, .h = 600 };
+    const right: maru.session.SplitRect = .{ .x = 500, .y = 50, .w = 400, .h = 600 };
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, left, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // 왼쪽 leaf 안에 완전히 들어간다 — 오른쪽 leaf로 한 픽셀도 넘지 않는다.
+    try testing.expect(drawn.rect.x >= left.x);
+    try testing.expect(drawn.rect.x + drawn.rect.w <= left.x + left.w);
+    try testing.expect(drawn.rect.x + drawn.rect.w <= right.x);
+    for (fx.session.gpu_quads.items) |q| {
+        try testing.expect(q.x >= @as(f32, @floatFromInt(left.x)));
+        try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(right.x)));
+    }
+
+    // 그리고 **같은 Term을 오른쪽 leaf로 그리면 오른쪽에 선다** — 사각이 인자에서 오지 세션
+    // 상태에서 오지 않는다는 뜻이다. 이 대조가 없으면 좌표를 어디서 얻든 위 단언은 통과한다.
+    var drawn_r = appendPaneFrame(fx.session, right, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn_r.dl.deinit(allocator);
+    try testing.expectEqual(drawn.rect.x + 400, drawn_r.rect.x);
+    try testing.expectEqual(drawn.rect.y, drawn_r.rect.y); // 세로는 그대로
+}
+
 test "사각이 0으로 접히면 그리지 않는다 — 빈 DrawList를 흘리지 않는다" {
     // padding이 pane보다 크거나 창이 접히는 순간이 실재한다. 그때 op을 내면 셀 격자가 0열/0행이라
     // lowering이 실패하거나 빈 프레임이 합성에 들어간다.
+    //
+    // **이 테스트는 위쪽 `rect.w == 0` 가드를 지키지 못한다**(적대적 검증 실측): 그 가드를 지워도
+    // `buildTextDrawList`가 `cols == 0`에서 `NoSpace`를 내 결국 같은 `null`이 나오고 quad도 안 남는다.
+    // 즉 여기서 고정하는 것은 **경계에서의 관측 가능한 동작**이지 특정 분기가 아니다. 가드는 그래도
+    // 남긴다 — 없으면 퇴화한 사각으로 프레임 조립이 한 번 돌고, "0이면 안 그린다"가 하류 에러의
+    // 부수효과가 되어 계약이 코드에 안 보인다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -473,6 +517,65 @@ test "사각이 0으로 접히면 그리지 않는다 — 빈 DrawList를 흘리
     fx.session.gpu_quads.clearRetainingCapacity();
     try testing.expect(appendPaneFrame(fx.session, .{ .x = 0, .y = 0, .w = 0, .h = 0 }, fx.term) == null);
     try testing.expectEqual(@as(usize, 0), fx.session.gpu_quads.items.len);
+}
+
+test "스크롤바 gutter가 폭을 다 먹는 좁은 pane에서도 죽지 않는다" {
+    // `rect.w`가 0은 아니지만 `metrics.gutterPx()`(12px)보다 좁으면 `total_cols`가 0으로 접힌다.
+    // 그 뒤 `scrollbar_gutter_px = rect.w - 0*cw = rect.w`가 되고, lowering의 `cols`도 1 근처다.
+    // 창을 극단적으로 좁히거나 split을 끝까지 밀면 실제로 나오는 상태다 — 크래시나 잘못된 큰
+    // 사각이 아니라 "안 그리거나 자기 사각 안에만 그린다"여야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // padding(6+6)을 뺀 뒤에도 남는 아주 좁은 leaf. grid.w는 0이 아니지만 gutter보다 좁다.
+    const narrow: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 20, .h = 300 };
+    const grid = pane_ops.paneGeometry(fx.session, narrow).grid;
+    try testing.expect(grid.w > 0 and grid.w < 12); // 전제: 정말 gutter보다 좁다
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    // **`if (…) |d|`로 감싸지 않는다.** null이면 조용히 통과하는 테스트가 되고, 그 순간 이 경계는
+    // 검사되지 않는다 — 지금은 `total_cols`가 0으로 접혀도 배경 op이 나오므로 실제로 그린다.
+    // 정책이 "이 폭에서는 안 그린다"로 바뀌면 여기서 빨간불이 나야 사람이 그 결정을 마주한다.
+    var drawn = appendPaneFrame(fx.session, narrow, fx.term) orelse return error.NarrowPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expectEqual(grid.w, drawn.rect.w);
+    for (fx.session.gpu_quads.items) |q| {
+        try testing.expect(q.w <= @as(f32, @floatFromInt(grid.w)));
+        try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(narrow.x + narrow.w)));
+    }
+}
+
+test "문서 끝을 넘긴 스크롤에서도 그리고 사각을 안 넘는다" {
+    // `editor_first_line`은 스크롤이 붙기 전이라 지금은 늘 0이지만, 붙는 순간 범위를 넘는 값이
+    // 들어온다(리사이즈로 문서가 짧아 보이는 프레임·복원된 옛 offset). `frame.build`는 `first_line`
+    // 이 `lines.len`을 넘으면 본문 행을 하나도 못 만드는데, 그때도 배경·gutter는 나와야 하고
+    // 무엇보다 사각을 넘으면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_first_line = fx.term.rt.editor_lines.len + 100; // 문서 끝 한참 뒤
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const grid = pane_ops.paneGeometry(fx.session, fx.leaf_rect).grid;
+    try testing.expectEqual(grid.w, drawn.rect.w);
+    for (fx.session.gpu_quads.items) |q| {
+        try testing.expect(q.x >= @as(f32, @floatFromInt(grid.x)));
+        try testing.expect(q.x + q.w <= @as(f32, @floatFromInt(grid.x + grid.w)));
+        try testing.expect(q.y + q.h <= @as(f32, @floatFromInt(grid.y + grid.h)));
+    }
+    // 셀도 격자 밖으로 안 나간다 — 음수 origin은 lowering이 버리지만 과대 row/col은 안 버린다.
+    const cols: u16 = @intCast(grid.w / fx.session.cell_width_px);
+    const rows: u16 = @intCast(grid.h / fx.session.cell_height_px);
+    for (drawn.dl.cells) |c| {
+        try testing.expect(c.col < cols);
+        try testing.expect(c.row < rows);
+    }
 }
 
 test "빈 파일도 열린다 — 기존 readFileAlloc은 null을 준다" {

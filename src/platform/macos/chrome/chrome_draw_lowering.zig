@@ -15,6 +15,25 @@ const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
 const system_text = @import("system_text.zig");
 
+/// `appendBackgroundQuads`의 `layer` 인자에 쓰는 합성 층 이름. 값의 뜻은 `maru_metal_renderer.m`의
+/// **네 패스 배치**가 정하고, 여기서는 그 숫자에 이름을 준다.
+///
+/// **왜 이름이 필요한가.** 렌더러는 `2`·`0`·`4`만 이름 있는 패스로 나누고 **나머지를 전부 over로
+/// 몰아넣는다** — 그래서 `3`도 "동작은 한다"(over에 그려진다). 그 관용이 오타를 침묵시킨다. 실제로
+/// 편집기 배경이 `3`으로 실려 자기 본문 글자를 통째로 덮었고, 같은 컴포넌트를 그리는 Chrome Lab은
+/// `2`를 쓰고 있었는데 **두 호출처가 갈린 것을 아무것도 강제하지 않았다**(2026-08-13).
+/// 한 컴포넌트를 여러 곳에서 내린다면 그 층을 이 이름들로 부르고, 이름이 없으면 새로 만든다.
+pub const layers = struct {
+    /// 사이드바 밴드 — 셀 패스 뒤(part1 뒤·part2 앞).
+    pub const under: u32 = 0;
+    /// 모달 등 최상위 — 셀 위.
+    pub const over: u32 = 1;
+    /// **셀 패스 앞**(유일). 텍스트 **밑에** 깔리는 배경은 전부 여기다 — 도크·탐색기·편집기 본문.
+    pub const bottom: u32 = 2;
+    /// 사이드바 bg strip 뒤·헤더 글리프 앞. 알림 종 배지처럼 글리프를 덮으면 안 되는 장식만.
+    pub const header: u32 = 4;
+};
+
 /// B1 rich Chrome text의 immutable placement artifact. semantic draw의 px origin을 cell
 /// DrawList와 함께 보존해, CoreText가 atlas slot을 준비한 뒤에도 final glyph quad가 row/col로
 /// 다시 절삭되지 않게 한다. Placement는 row 하나가 아니라 text op의 column span을 들고 있어,

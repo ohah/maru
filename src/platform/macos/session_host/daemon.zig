@@ -110,6 +110,15 @@ fn bootstrapIncidentRuntime(
     ) catch return error.ManifestFailed;
 }
 
+fn removeEmptyIncidentDirectory(dir_path: [:0]const u8) void {
+    const owner_fd = c.open(dir_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (owner_fd < 0) return;
+    defer _ = c.close(owner_fd);
+    // 기록이 하나라도 있으면 ENOTEMPTY로 그대로 보존한다. 비어 있는 bootstrap 흔적만 지워 기존 owner-directory
+    // teardown 계약을 유지하며, 파일을 순회하거나 이름을 신뢰하지 않는다.
+    _ = c.unlinkat(owner_fd, "incidents", posix.AT.REMOVEDIR);
+}
+
 /// session host 본체. `dir_path`(0700)에 `socket_path`(0600)로 bind하고 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
 /// 개별 연결의 serve 오류는 무시하고 다른 client를 계속 받는다(한 client가 host를 못 죽인다, §9 bounded client).
 /// `io`는 `runtime_manager`가 실 PTY runtime(reader/큐)을 소유하는 데 쓴다 — spawn/terminate가 이 io 위에서 돈다.
@@ -411,6 +420,7 @@ fn runSessionHostImpl(
     // 기록기 backing은 daemon lifetime보다 길 수 있으므로 stack owner에 두지 않는다. 정상 종료에서는 join 뒤
     // 해제하고, regular-file I/O가 200 ms를 넘긴 경우 runtime 스스로 detach하며 process 종료까지 backing을 보존한다.
     const incident_owner = bootstrapIncidentRuntime(allocator, dir_path) catch return error.ManifestFailed;
+    defer removeEmptyIncidentDirectory(dir_path);
     defer _ = incident_owner.shutdown() catch {};
 
     var registry = reg.TerminalRuntimeRegistry.init(allocator);

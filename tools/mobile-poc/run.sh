@@ -193,8 +193,10 @@ scroll-ios)
     cp "$BAK" "$BR"
     sleep 3
     xcrun simctl io "$UDID" screenshot "$OUT/scroll-ios-bottom.png" >/dev/null 2>&1
+    # **좌표는 포인트다**(402x874) — 스크린샷 픽셀(1206x2622)을 그대로 넣으면 화면 밖을 눌러
+    # 아무 일도 안 일어나고, 그것을 "터치가 앱에 안 닿는다" 로 오해했다(실제로 그랬다).
     # 아래로 끄는 손가락 = 과거로. 여러 번 해야 관성까지 눈에 들어온다.
-    for _ in 1 2 3; do idb ui swipe 200 700 200 1600 --udid "$UDID" >/dev/null 2>&1; done
+    for _ in 1 2 3; do idb ui swipe 200 250 200 700 --udid "$UDID" >/dev/null 2>&1; done
     sleep 2
     xcrun simctl io "$UDID" screenshot "$OUT/scroll-ios-up.png" >/dev/null 2>&1
     # 입력하면 바닥으로 스냅해야 한다(브리지 계약).

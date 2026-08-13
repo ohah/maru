@@ -96,7 +96,7 @@ cursor-android)
     # 이름 · DECSCUSR · 커서 자리(행;열). 1;4 = `$ zig build test` 의 `i`, 6;1 = `한`.
     for pair in "block 2 1;4" "underline 4 1;4" "bar 6 1;4" "wide 2 6;1"; do
         set -- $pair
-        python3 "$POC/cursor_probe.py" set "$BR" "$2" "$3" || exit 1
+        python3 "$POC/demo_probe.py" cursor "$BR" "$2" "$3" || exit 1
         sh "$0" chrome-android-app >/dev/null 2>&1
         # **앱이 화면에 떠 있을 때만 찍는다.** adb 가 성공해도 앱이 아직 안 떴거나 죽었으면
         # 홈 화면을 `cursor-block.png` 라는 이름으로 남기고 "확인했다" 가 된다 — 이 하네스가
@@ -113,6 +113,59 @@ cursor-android)
         cp "$BAK" "$BR"
         echo "  cursor-$1.png"
     done
+    ;;
+scroll-android)
+    # 스크롤은 **스크롤백이 있어야** 볼 게 생긴다(대본은 화면보다 짧다). 세 상태를 찍는다:
+    # 바닥 → 과거로 스크롤 → 입력하면 바닥으로 스냅.
+    ADB=${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}
+    BR="$MOBILE/mobile_bridge.zig"
+    BAK="$OUT/bridge-scroll.bak"
+    mkdir -p "$OUT"
+    cp "$BR" "$BAK"
+    trap 'cp "$BAK" "$BR"' EXIT INT TERM
+    python3 "$POC/demo_probe.py" lines "$BR" 120 || exit 1
+    sh "$0" chrome-android-app >/dev/null 2>&1
+    cp "$BAK" "$BR"
+    n=0
+    while ! "$ADB" shell dumpsys window 2>/dev/null | grep -q "mCurrentFocus.*dev.maru.chrome"; do
+        n=$((n + 1))
+        [ "$n" -gt 15 ] && { echo "앱이 화면에 없다 — 캡쳐를 믿을 수 없다" >&2; exit 1; }
+        sleep 1
+    done
+    sleep 2
+    "$ADB" exec-out screencap -p > "$OUT/scroll-bottom.png"
+    "$ADB" shell input swipe 500 700 500 1800 300   # 아래로 끄는 손가락 = 과거로
+    sleep 2
+    "$ADB" exec-out screencap -p > "$OUT/scroll-up.png"
+    "$ADB" shell input text "x"                     # 입력하면 바닥으로 스냅(브리지 계약)
+    sleep 2
+    "$ADB" exec-out screencap -p > "$OUT/scroll-snap.png"
+    "$ADB" logcat -d -s MaruChrome 2>/dev/null | grep MARU_SCROLL | tail -1
+    echo "  scroll-bottom.png · scroll-up.png · scroll-snap.png"
+    ;;
+scroll-ios)
+    # **스크롤은 스크롤백이 있어야 볼 게 생긴다.** 데모 대본은 화면보다 짧아 그대로는
+    # `sb.count == 0` 이고 스크롤이 원리상 무동작이다 — 번호 붙은 줄을 넣어 빌드했다 뺀다.
+    UDID=$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | head -1)
+    [ -n "$UDID" ] || { echo "부팅된 시뮬레이터가 없다" >&2; exit 1; }
+    BR="$MOBILE/mobile_bridge.zig"
+    BAK="$OUT/bridge-scroll.bak"
+    cp "$BR" "$BAK"
+    trap 'cp "$BAK" "$BR"' EXIT INT TERM
+    python3 "$POC/demo_probe.py" lines "$BR" 120 || exit 1
+    sh "$0" chrome-ios >/dev/null 2>&1
+    cp "$BAK" "$BR"
+    sleep 3
+    xcrun simctl io "$UDID" screenshot "$OUT/scroll-bottom.png" >/dev/null 2>&1
+    # 아래로 끄는 손가락 = 과거로. 여러 번 해야 관성까지 눈에 들어온다.
+    for _ in 1 2 3; do idb ui swipe 200 700 200 1600 --udid "$UDID" >/dev/null 2>&1; done
+    sleep 2
+    xcrun simctl io "$UDID" screenshot "$OUT/scroll-up.png" >/dev/null 2>&1
+    # 입력하면 바닥으로 스냅해야 한다(브리지 계약).
+    idb ui text "x" --udid "$UDID" >/dev/null 2>&1
+    sleep 1
+    xcrun simctl io "$UDID" screenshot "$OUT/scroll-snap.png" >/dev/null 2>&1
+    echo "  scroll-bottom.png · scroll-up.png · scroll-snap.png"
     ;;
 features-ios)
     xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=17.0 -fobjc-arc \

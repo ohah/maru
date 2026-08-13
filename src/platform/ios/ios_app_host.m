@@ -113,6 +113,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     NSMutableString *_composing;
     id<UITextInputDelegate> _inputDelegate;
     UITextInputStringTokenizer *_tokenizer;
+    float _flingVy;   // 손을 뗀 뒤 남은 관성(프레임당 논리 px)
 }
 
 // 호스트가 만든 한글·영어 아틀라스와, **Zig 가 만든** 아이콘 coverage 를 올린다.
@@ -259,6 +260,42 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     unsigned int cell = maru_mobile_hit_cell(lx, ly);
     NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
           p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);
+}
+
+// **스크롤: 관성만 우리 것이고 의미는 코어 것이다**(docs/mobile-platform.md §3.1).
+// 끄는 동안은 손가락이 움직인 만큼 그대로 넘기고, 손을 떼면 남은 속도를 프레임마다 감쇠시켜
+// 계속 넘긴다. 줄 환산·clamp·alt screen 변환은 전부 코어가 한다 — 여기서 판단하면 갈린다.
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            _flingVy = 0;
+            [pan setTranslation:CGPointZero inView:self];
+            break;
+        case UIGestureRecognizerStateChanged: {
+            CGPoint t = [pan translationInView:self];
+            maru_mobile_scroll((float)t.y);
+            [pan setTranslation:CGPointZero inView:self];
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+            // 손을 뗀 뒤의 관성. 초당 속도를 프레임(30Hz) 몫으로 나눠 tick 이 흘린다.
+            _flingVy = (float)[pan velocityInView:self].y / 30.0f;
+            // 제스처마다 한 줄. **화면이 안 바뀔 때 코어까지 갔는지**를 이 줄이 가른다 —
+            // Android 에서 실제로 그렇게 잡았다(view_offset 은 올라가는데 픽셀이 그대로였다).
+            NSLog(@"MARU_SCROLL fling=%.1f view_offset=%u", _flingVy, maru_mobile_view_offset());
+            break;
+        default:
+            break;
+    }
+}
+
+/// tick 에서 부른다. 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다.
+- (void)stepFling {
+    if (_flingVy == 0) return;
+    maru_mobile_scroll(_flingVy);
+    _flingVy *= 0.92f;                       // 실측 없이 고른 값 — 손 테스트로 맞춘다
+    if (fabsf(_flingVy) < 0.5f) _flingVy = 0; // 영원히 도는 것을 막는다
 }
 
 - (BOOL)canBecomeFirstResponder { return YES; }
@@ -590,6 +627,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
         _link.preferredFramesPerSecond = 30;
     }
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
+    // 스크롤 제스처. **OS 인식기를 쓴다** — 직접 만들면 뒤로가기·엣지 스와이프와 충돌하고
+    // 느낌이 어색해진다(§3.1: 관성·러버밴딩·시스템 제스처 협조는 플랫폼 몫).
+    [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                      action:@selector(handlePan:)]];
     return self;
 }
 
@@ -615,6 +656,7 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 
 - (void)tick {
     [self recordPace];
+    [self stepFling];   // 손을 뗀 뒤 남은 관성을 프레임마다 흘린다
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize px = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);

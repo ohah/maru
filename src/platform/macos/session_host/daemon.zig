@@ -834,6 +834,9 @@ test "daemon 자연 종료: 서빙 이력·runtime 0·client 0·유예를 모두
 
 test "CR0b daemon incident bootstrap prerequisite는 실제 daemon process owner domain을 발급한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // process seal을 이미 발급한 aggregate process에서는 같은 PID bootstrap을 다시 열 수 없다.
+    // build가 만든 exact-one prerequisite artifact만 fresh process owner를 설치한다.
+    if (builtin.test_functions.len != 1) return;
     // PID 기반 /tmp 이름은 stale crash나 병렬 실행과 충돌할 수 있다. tmpDir가 원자적으로 소유한
     // 경로와 recursive cleanup을 사용해 이 테스트가 다른 process의 artifact를 관측하지 않게 한다.
     var tmp = std.testing.tmpDir(.{});
@@ -866,6 +869,8 @@ test "CR0b daemon incident bootstrap prerequisite는 실제 daemon process owner
 
 test "CR0b bootstrap 4 daemon child는 실제 bootstrap transcript를 게시한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // parent runner가 주입한 exact-one child artifact에서만 fresh daemon domain을 발급한다.
+    if (builtin.test_functions.len != 1) return;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));

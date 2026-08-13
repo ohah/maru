@@ -57,7 +57,11 @@ pub const Style = struct {
 };
 
 pub const Cell = struct {
-    codepoint: u21 = ' ',
+    // 0 = **아직 아무도 안 쓴 칸**(터미널이 만든 빈 칸 — init·erase·scroll·resize 패딩). 프로그램이
+    // 실제로 쓴 공백(' ')과 구분해야 soft-wrap 이음에서 "없던 공백"이 안 생긴다: wrap 채움은 버리고
+    // 쓴 공백은 지켜야 하는데, 둘을 같은 값으로 두면 어떤 읽는 쪽도 구분할 수 없다(§안 쓴 칸).
+    // 화면·텍스트로 나갈 때는 공백으로 보인다(RowCodepoints·appendRowUtf8이 ' '로 푼다).
+    codepoint: u21 = 0,
     style: Style = .{},
     width: u2 = 1,
     continuation: bool = false,
@@ -71,10 +75,22 @@ pub const Cell = struct {
     link: u32 = 0,
 };
 
+/// **아무도 안 쓴 칸인가** — 터미널이 만든 빈 칸(codepoint 0)이다. 프로그램이 쓴 공백(' ')은 여기 안 든다.
+/// soft-wrap 이음처럼 "wrap 채움만 버리고 쓴 공백은 지켜야" 하는 자리가 이걸 쓴다. 배경색·continuation·
+/// grapheme가 있으면 화면상 의미가 있으므로 `isTextTrimBlank`과 같은 이유로 제외한다.
+pub fn isUnwritten(cell: Cell) bool {
+    return cell.codepoint == 0 and
+        !cell.continuation and
+        cell.grapheme_id == 0 and
+        std.meta.activeTag(cell.style.background) == .default;
+}
+
 /// 텍스트 추출/reflow가 뒤 padding을 자를 때 쓰는 blank-cell 단일 출처. 배경색·continuation·grapheme가 있으면
 /// 화면상 의미가 있으므로 단순 U+0020이어도 보존한다.
+/// **hard 줄끝**에서는 쓴 공백도 잘라낸다(복사에 줄끝 공백이 안 딸려가게) — 그래서 안 쓴 칸(0)과 쓴 공백을
+/// 여기서는 함께 본다. 둘을 갈라야 하는 자리는 위 `isUnwritten`을 쓴다.
 pub fn isTextTrimBlank(cell: Cell) bool {
-    return cell.codepoint == ' ' and
+    return (cell.codepoint == ' ' or cell.codepoint == 0) and
         !cell.continuation and
         cell.grapheme_id == 0 and
         std.meta.activeTag(cell.style.background) == .default;
@@ -163,7 +179,8 @@ pub const RowCodepoints = struct {
             if (cell.grapheme_id != 0 and cell.grapheme_id <= self.graphemes.len) {
                 self.pending = self.graphemes[cell.grapheme_id - 1];
             }
-            return cell.codepoint;
+            // 안 쓴 칸은 화면·텍스트에서 공백으로 보인다(값 0은 내부 표현일 뿐).
+            return if (cell.codepoint == 0) ' ' else cell.codepoint;
         }
         return null;
     }

@@ -92,7 +92,7 @@ pub const Overlay = struct {
             var found: ?u16 = null;
             var i: u16 = cursor_col;
             while (i < cols) : (i += 1) {
-                if (row_cells[i].codepoint != ' ' or row_cells[i].continuation) found = i;
+                if ((row_cells[i].codepoint != ' ' and row_cells[i].codepoint != 0) or row_cells[i].continuation) found = i;
             }
             break :blk found;
         };
@@ -105,7 +105,7 @@ pub const Overlay = struct {
             var i: u16 = cursor_col;
             while (i <= lc) : (i += 1) {
                 const c = row_cells[i];
-                if (c.continuation or c.codepoint == ' ') continue;
+                if (c.continuation or c.codepoint == ' ' or c.codepoint == 0) continue;
                 if (!c.style.dim) break :blk false;
                 saw_dim_content = true;
             }

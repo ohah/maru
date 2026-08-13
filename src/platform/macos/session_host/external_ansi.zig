@@ -376,7 +376,7 @@ fn styleIsUnsupported(style: terminal.Style) bool {
 }
 
 fn cellIsClearedBlank(cell: terminal.Cell) bool {
-    return cell.codepoint == ' ' and
+    return (cell.codepoint == ' ' or cell.codepoint == 0) and
         cell.grapheme_id == 0 and
         cell.width == 1 and
         std.meta.eql(cell.style, terminal.Style{});

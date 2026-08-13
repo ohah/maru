@@ -698,7 +698,8 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     UIEdgeInsets safe = self.safeAreaInsets;
     CGSize logical = CGSizeMake(self.bounds.size.width - safe.left - safe.right,
                                 self.bounds.size.height - safe.top - safe.bottom);
-    unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height);
+    unsigned int n = maru_mobile_build((unsigned int)logical.width, (unsigned int)logical.height,
+                                       (unsigned long long)(CACurrentMediaTime() * 1000.0));
     // **오류는 바뀔 때 알린다.** 시작 때 한 번만 읽으면 그 뒤에 생긴 실패(quad 넘침·코어
     // write·아틀라스 만원)는 기록만 되고 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.
     const char *err = maru_mobile_last_error();

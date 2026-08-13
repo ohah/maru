@@ -634,7 +634,10 @@ static void drawFrame(void) {
     // 그 동안 자물쇠를 쥐고 있으면 **타이핑이 GPU 를 기다리게 된다**. 성장이 만지는 등록부·
     // 미스 목록은 입력 스레드가 안 건드리므로 밖에 둬도 된다.
     pthread_mutex_lock(&g_bridge_lock);
-    unsigned int n = maru_mobile_build(lw, lh);
+    struct timespec fts;
+    clock_gettime(CLOCK_MONOTONIC, &fts);
+    unsigned int n = maru_mobile_build(lw, lh,
+        (unsigned long long)fts.tv_sec * 1000ULL + (unsigned long long)(fts.tv_nsec / 1000000));
     if (g.frames == 0) LOGI("quads=%u err=%s logical=%ux%u", n, maru_mobile_last_error(), lw, lh);
     // **오류는 바뀔 때 알린다.** frames==0 에서만 읽으면 그 뒤에 생긴 실패는 기록만 되고
     // 아무도 안 본다 — 계약 §5 가 약속한 것이 안 지켜진다.

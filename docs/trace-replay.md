@@ -50,6 +50,13 @@ event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대�
 
 `TerminalCore`가 OSC 133/7을 파싱하며 `types.ShellEvent`(`prompt_start`·`input_start`·`command_start`·`command_end{row,exit}`·`cwd_changed`)를 시간순으로 기록하고, 소비자가 `shellEvents()`로 읽고 `clearShellEvents()`로 비운다. 같은 도메인 데이터를 디버그 로그(`MARU_DEBUG`의 `shell.*` scoped 로그)·결정적 테스트·trace 직렬화가 공유한다(관측 가능성 원칙 — 임시 포맷을 따로 두지 않는다).
 
+**이 스트림은 제품 신호로 쓸 수 없다(현재 배선 기준).** 위 문장만 보면 아무 소비자나 붙일 수 있어 보이지만, 실제로 비우는 곳은 `app_session/term.zig`의 `drainShellEventsForFrame` **하나**이고 그 배선에 제약이 둘 있다.
+
+- **활성 Term 하나만 비운다**(`activeSurface(self).core`, 원격 surface는 통째로 skip). 비활성 Term의 이벤트는 아무도 드레인하지 않아 `shell_events_cap`(4096)에 닿으면 새 이벤트가 드롭되고 `shellEventsOverflowed()`가 계속 선다. 메모리는 상한이 있어 새지 않지만, **그 Term의 이벤트 스트림은 그 시점부터 불완전하다.**
+- **매 프레임 비운다.** 다른 소비자가 읽기 전에 사라지므로, 같은 프레임 안에서 그 자리에 함께 붙지 않는 한 아무것도 못 본다.
+
+지금 실해는 없다 — 유일한 소비자가 `MARU_DEBUG` 디버그 로그이고 제품 판정에 쓰이는 값이 없다. 하지만 **쓸 수 있어 보이는데 조용히 틀리는 자리**다. 실제로 cwd 축의 낡은 OSC 7 문제를 풀다 `cwd_changed`를 "OSC 7이 방금 왔다"는 신호로 쓰려던 시도가 여기서 막혔다([editor-surface-dock.md](editor-surface-dock.md) §3.5의 그 항목). 새 소비자가 필요하면 **`drainShellEventsForFrame`에 함께 붙이거나**, 그 전에 드레인 범위를 전체 Term으로 넓혀야 한다.
+
 **직렬화·역파싱이 구현됐다**(writer + reader): `observability/trace.zig`의 `renderShellEvents`/`writeEvent`(writer)가 이벤트 스트림을 `maru.trace.v1` 라인으로 굳히고, `parseEvents`(reader — shell.* 와 base kind 통합)가 그 라인을 `ParsedEvent{index, surface_id, event: Event}`로 되읽는다(`Event` union의 `cwd_changed`/`output`/`input`은 unescape된 소유 문자열). `parseEvents(renderShellEvents(events, cwd))`가 원 이벤트와 cwd를 복원한다(round-trip 테스트). 이벤트 이름은 trace 토큰과 1:1이다. escape/unescape는 `text_escape.zig` 단일 출처를 공유한다.
 
 ```text

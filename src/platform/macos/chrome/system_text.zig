@@ -518,6 +518,7 @@ test "prepareRequest keeps a Korean button label and an icon-in-rect on the meas
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var request = try prepareRequest(allocator, 17, &ops, &tk, 8, .{});
@@ -552,6 +553,7 @@ test "prepareRequest keeps runs scrolled above the pane so a translated cache st
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var request = try prepareRequest(allocator, 5, &ops, &tk, 8, .{});
@@ -582,6 +584,7 @@ test "prepareRequest owns the face bytes instead of borrowing the caller's appea
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var family_buf = "JetBrains Mono".*;
@@ -618,6 +621,7 @@ test "chrome text shapes with the requested family and keeps the system face whe
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
 
@@ -660,6 +664,7 @@ test "tail anchor truncates the head so the caret end survives" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
 
@@ -717,6 +722,7 @@ test "an unknown chrome family falls back to the system face instead of blanking
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var request = try prepareRequest(allocator, 3, &ops, &tk, 8, .{ .family = "MaruNoSuchFamily12345" });
@@ -1156,6 +1162,7 @@ test "owned request shapes proportional text before renderer registry resolution
         .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
         .selection = .{ .r = 60, .g = 80, .b = 120 },
         .cursor = .{ .r = 255, .g = 255, .b = 255 },
+        .terminal_background = .{ .r = 255, .g = 255, .b = 255 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 20, .g = 120, .b = 255 },
     });
     var request = try prepareRequest(allocator, 44, &ops, &tokens, 16, .{});

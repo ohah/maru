@@ -93,6 +93,12 @@ pub const ColorRole = enum {
     /// layer owns the conservative fallback instead of leaking literal RGB into a component.
     danger_bg,
     danger_fg,
+    /// **터미널 본문 배경.** chrome 표면(`surface_bg` — 사이드바·도크)과 **다른 색**이고, 그 차이가
+    /// 의미다: 이 색이 칠해진 자리는 "셸/문서 내용이 사는 곳"이다.
+    ///
+    /// 네이티브 편집기 뷰가 이것을 쓴다(§4.1b) — 편집기는 도크가 아니라 **터미널이 있던 자리**를
+    /// 채우므로, 탭을 오갈 때 같은 pane의 바탕이 밝아졌다 어두워지면 안 된다(2026-08-13 사용자 결정).
+    terminal_bg,
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -189,6 +195,9 @@ pub const ThemeColors = struct {
     search_match_current: Rgb,
     selection: Rgb,
     cursor: Rgb,
+    /// 터미널 본문 배경(`ResolvedTheme.background`). `sidebar_background`와 **별개 입력**이다 —
+    /// 둘은 테마에서 서로 다른 값이고, 편집기·터미널이 같은 바탕을 공유하려면 이 값이 필요하다.
+    terminal_background: Rgb,
     accent: Rgb, // maru accent(테마-구동) — accent_bar 역할이 소비. 호출자가 ResolvedTheme.accent를 넘긴다(null은 resolve가 앰버로 폴백).
 };
 
@@ -226,6 +235,7 @@ pub const Tokens = struct {
         // replace this mapping once, without changing Card variants or Metal lowering.
         palette.set(.danger_bg, .{ .r = 176, .g = 52, .b = 60 });
         palette.set(.danger_fg, .{ .r = 255, .g = 255, .b = 255 });
+        palette.set(.terminal_bg, theme.terminal_background);
         return .{ .palette = palette };
     }
 
@@ -299,6 +309,7 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .terminal_background = c.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = c.rgb(9, 9, 9),
     });
     try std.testing.expectEqual(c.rgb(2, 2, 2), tk.get(.surface_bg));
@@ -317,7 +328,7 @@ test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·
             return .{ .r = r, .g = g, .b = b };
         }
         fn theme(bg: Rgb) ThemeColors {
-            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .accent = rgb(9, 9, 9) };
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9) };
         }
     };
     // 어두운 패널 → keycap이 더 밝게(대비).
@@ -338,7 +349,7 @@ test "inset_bg는 dark/light 테마에서 surface와 반대 방향으로 분리�
             return .{ .r = r, .g = g, .b = b };
         }
         fn theme(bg: Rgb) ThemeColors {
-            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .accent = rgb(9, 9, 9) };
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .terminal_background = rgb(10, 10, 10), .accent = rgb(9, 9, 9) };
         }
     };
     inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(40, 40, 40))), Tokens.rich(c.theme(c.rgb(40, 40, 40))) }) |tk| {
@@ -364,6 +375,7 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .terminal_background = c.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = c.rgb(9, 9, 9),
     };
     const t = Tokens.tui(theme);
@@ -399,6 +411,7 @@ test "divider is always distinct from the panel in tui and rich, including the p
                 .search_match_current = rgb(6),
                 .selection = rgb(7),
                 .cursor = rgb(8),
+                .terminal_background = rgb(8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
                 .accent = rgb(9),
             };
         }
@@ -422,6 +435,7 @@ test "divider keeps the documented 24-channel separation away from gamut endpoin
         .search_match_current = .{ .r = 6, .g = 6, .b = 6 },
         .selection = .{ .r = 7, .g = 7, .b = 7 },
         .cursor = .{ .r = 8, .g = 8, .b = 8 },
+        .terminal_background = .{ .r = 8, .g = 8, .b = 8 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
     inline for ([_]Tokens{ Tokens.tui(theme), Tokens.rich(theme) }) |tk| {
@@ -441,6 +455,7 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
         .search_match_current = .{ .r = 6, .g = 6, .b = 6 },
         .selection = .{ .r = 7, .g = 7, .b = 7 },
         .cursor = .{ .r = 8, .g = 8, .b = 8 },
+        .terminal_background = .{ .r = 8, .g = 8, .b = 8 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
     const t = Tokens.tui(theme);

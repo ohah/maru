@@ -18,8 +18,12 @@ const chrome = @import("../../../chrome.zig");
 const draw = chrome.draw;
 const tokens = chrome.tokens;
 
-/// 바탕색. 도크·사이드바와 같은 표면이라 테마를 그대로 따른다.
-pub const background_role: tokens.ColorRole = .surface_bg;
+/// 바탕색. **터미널 본문과 같은 색**이다(`terminal_bg`) — 도크·사이드바의 `surface_bg`가 아니다.
+///
+/// 편집기는 도크가 아니라 **터미널이 있던 그 자리**를 채운다. 같은 pane에서 탭을 오갈 때 바탕이
+/// 밝아졌다 어두워지면 두 뷰가 서로 다른 곳처럼 보인다(2026-08-13 사용자 결정). 테마를 따르는 성질은
+/// 그대로다 — 라이트 테마에서는 이 토큰도 함께 밝아진다.
+pub const background_role: tokens.ColorRole = .terminal_bg;
 
 pub const Props = struct {
     /// 편집기 뷰가 차지하는 픽셀 사각. **gutter·본문·스크롤바 gutter를 한 사각으로 덮는다** —

@@ -850,6 +850,7 @@ test "SessionDock 헤더는 잘림과 분석 중을 개수와 분리해 말한�
             .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
             .selection = .{ .r = 7, .g = 8, .b = 9 },
             .cursor = .{ .r = 10, .g = 11, .b = 12 },
+            .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
             .accent = .{ .r = 13, .g = 14, .b = 15 },
         });
         var ops: [64]draw.Op = undefined;
@@ -905,6 +906,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [40]draw.Op = undefined;
@@ -1144,6 +1146,7 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [40]draw.Op = undefined;
@@ -1243,6 +1246,7 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
 
@@ -1513,6 +1517,7 @@ fn fixtureTokens() tokens.Tokens {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
 }
@@ -1562,6 +1567,7 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [24]draw.Op = undefined;
@@ -1628,6 +1634,7 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [48]draw.Op = undefined;
@@ -1699,6 +1706,7 @@ test "SessionDock initial loading paints inert three-line skeleton cards" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [32]draw.Op = undefined;
@@ -1766,6 +1774,7 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [48]draw.Op = undefined;
@@ -1857,6 +1866,7 @@ test "SessionDock scroll-area decoration quads inherit the container clip" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [64]draw.Op = undefined;
@@ -1939,6 +1949,7 @@ test "SessionDock never emits a quad whose clip has collapsed to zero area" {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [64]draw.Op = undefined;
@@ -2015,6 +2026,7 @@ test "SessionDock segment and sort labels carry the exact slot width as their me
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [48]draw.Op = undefined;
@@ -2097,6 +2109,7 @@ test "SessionDock segment labels take their foreground from the same resolver as
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [48]draw.Op = undefined;
@@ -2178,6 +2191,7 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
             .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
             .selection = .{ .r = 7, .g = 8, .b = 9 },
             .cursor = .{ .r = 10, .g = 11, .b = 12 },
+            .terminal_background = .{ .r = 10, .g = 11, .b = 12 }, // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
             .accent = .{ .r = 13, .g = 14, .b = 15 },
         });
         var ops: [48]draw.Op = undefined;

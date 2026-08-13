@@ -15927,6 +15927,7 @@ pub const AppSession = struct {
         const tc = chrome.tokens.ThemeColors{
             .foreground = t.foreground,
             .sidebar_background = t.sidebar_background,
+            .terminal_background = t.background, // 편집기 뷰가 터미널과 같은 바탕을 쓰도록(§4.1b)
             .sidebar_foreground = t.sidebar_foreground,
             .sidebar_active = t.sidebar_active,
             .search_match = t.search_match,
@@ -31863,6 +31864,7 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .terminal_background = c.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = c.rgb(9, 9, 9),
     });
     // cw=10, ch=20. 패널 2칸×2행(0,0,20,40). row1만 selection으로 덮고(painter order), 각 행에 텍스트.
@@ -31917,6 +31919,7 @@ test "rasterizeOverlayCells: 셀보다 얇은 fill은 셀 배경이 아니라 GP
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .terminal_background = c.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = c.rgb(9, 9, 9),
     });
     // cw=10, ch=20. 2칸×2행 패널 + 행0 마지막 픽셀(y=19)에 1px 구분선 — 옛 경로면 행0이 통째로 칠해졌다.
@@ -31961,6 +31964,7 @@ test "rasterizeOverlayCells: draw.Op.clip → OverlayRaster.clip_rect(렌더러 
         .search_match_current = cc.rgb(6, 6, 6),
         .selection = cc.rgb(7, 7, 7),
         .cursor = cc.rgb(8, 8, 8),
+        .terminal_background = cc.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = cc.rgb(9, 9, 9),
     });
     // clip op은 그리지 않고(셀·bounding-box 무영향) OverlayRaster.clip_rect로만 모인다 — 렌더러가 모달 셀 draw에 scissor.
@@ -32005,6 +32009,7 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
         .search_match_current = cc.rgb(6, 6, 6),
         .selection = cc.rgb(7, 7, 7),
         .cursor = cc.rgb(8, 8, 8),
+        .terminal_background = cc.rgb(8, 8, 8), // 픽스처: 터미널 배경 입력(§4.1b terminal_bg)
         .accent = cc.rgb(9, 9, 9),
     });
     // cw=10, ch=20. 패널 4칸×1행. "가b" — '가'(wide=2칸) col0, 'b' col2. continuation 칸(col1)은 emit 안 돼야 한다.

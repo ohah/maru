@@ -302,6 +302,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [self sendPointer:3 touches:touches];
     _flingVy = 0;
+    // **취소도 남긴다.** 로그가 없어서 "배경으로 나갈 때 iOS 가 취소를 보내는가" 를 두 번
+    // 헛짚었다 — 보내고 있었는데 그 사실이 안 보였다.
+    NSLog(@"MARU_SCROLL cancelled view_offset=%u sel=%u", maru_mobile_view_offset(),
+          maru_mobile_has_selection());
 }
 
 /// tick 에서 부른다. 남은 관성을 한 프레임 몫만큼 흘리고 감쇠시킨다.
@@ -775,6 +779,10 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
 // 스왑체인을 부술 필요는 없지만, CADisplayLink 를 멈추지 않으면 복귀 시 밀린 프레임이
 // 몰린다. 재개 후 다시 도는지가 판정 기준이다.
 - (void)applicationDidEnterBackground:(UIApplication *)app {
+    // **누르고 있던 손가락을 정리한다.** iOS 는 배경으로 나갈 때 `touchesCancelled` 를
+    // 보내지 않는다(로그로 확인했다) — 안 정리하면 브리지가 "누르고 있다" 를 들고 있다가
+    // 돌아온 프레임에서 옛 자리를 길게 누른 것으로 판정할 수 있다.
+    maru_mobile_pointer(3, 0, 0, 0);
     // **배경에서는 그리지 않는다.** 로그만 남기고 CADisplayLink 를 계속 돌리면 백그라운드
     // GPU 작업이 되어 앱이 종료될 수 있다(Apple 이 명시적으로 금지한다). Android 는
     // 창이 죽을 때 Vulkan 을 부수는데 iOS 만 아무것도 안 하고 있었다.

@@ -505,8 +505,14 @@ pub export fn maru_mobile_armed_mods() u32 {
     return armed_mods;
 }
 
+/// **지금 줄에 있는** 키 수. 총 개수가 아니라 보이는 수다 — `copy` 는 선택이 있을 때만
+/// 나타나므로, 총 개수를 답하면 host 도 테스트도 없는 키를 있다고 믿는다.
 pub export fn maru_mobile_keybar_count() u32 {
-    return key_bar.len;
+    var n: u32 = 0;
+    for (0..key_bar.len) |i| {
+        if (keyBarVisible(i)) n += 1;
+    }
+    return n;
 }
 
 /// 키 `index` 의 사각형(논리 px). x·y·w·h 를 각각 16비트로 담는다. 아직 안 섰으면 0.
@@ -1262,7 +1268,13 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         })};
         c.* = tree.card(.{
             .id = key_bar_id_base + i,
-            .style = .{ .flex = .{ .grow = 1 }, .height = .{ .px = 32.0 }, .margin = .{ .right = 3.0 } },
+            // **키 폭을 고정한다.** 전부 flex 로 나눠 가지면 `copy` 가 나타날 때 나머지 키가
+            // 전부 왼쪽으로 밀린다(실측: 마지막 키가 30px — 거의 한 칸). 선택을 잡은 직후
+            // 그 자리를 누르면 옆 키가 눌린다. `copy` 만 남는 자리를 쓴다.
+            .style = if (key_bar[i].is_copy)
+                .{ .flex = .{ .grow = 1 }, .height = .{ .px = 32.0 }, .margin = .{ .right = 3.0 } }
+            else
+                .{ .width = .{ .px = 30.0 }, .height = .{ .px = 32.0 }, .margin = .{ .right = 3.0 } },
             .variant = if (key_bar[i].sticky_mod != 0 and armed_mods != 0) .selected else .surface,
         }, &bar_kids[i]);
     }

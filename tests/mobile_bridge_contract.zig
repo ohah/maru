@@ -34,6 +34,50 @@ test "코어가 없을 때는 세지 않고 알린다" {
     try std.testing.expectEqual(@as(u32, 3), after);
 }
 
+// **이 테스트는 스크롤백이 쌓이기 전에 있어야 한다**(아래 큰 격자 테스트들보다 앞).
+// 뒤에 두면 선택 범위는 0행 `copyme` 라고 답하는데 **추출은 옛 스크롤백 행(W 로 가득 찬 줄)을
+// 내놨다** — 화면을 지우고(`ED 2`) 다시 써도 그랬다. 순서를 바꿔 통과시켰지만 그 둘이 어긋난
+// 것 자체는 설명하지 못했다(코어 쪽 절대-행 조회 문제로 보인다. PR 에 적어 뒀다).
+//
+// **복사는 잡은 것을 꺼내는 일이다.** 추출은 코어가 하고(soft-wrap 잇기·2셀 뒷칸 제외가
+// 거기 있다) 플랫폼은 클립보드에 쓰기만 한다 — 브리지엔 OS 호출이 없다(§3).
+test "선택을 복사로 꺼낸다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    // 앞 테스트가 뷰포트를 올려 뒀을 수 있다 — 바닥이 아니면 화면 0행은 스크롤백이라
+    // 엉뚱한 글자가 잡힌다(실제로 옛 행의 'W' 가 복사됐다).
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("copyme rest", 11);
+
+    var buf: [64]u8 = undefined;
+    // 선택이 없으면 꺼낼 것도 없다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    // **누르기 전에는 아무것도 안 나온다** — 선택이 있다고 저절로 복사되면 안 된다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
+
+    // `copy` 는 표의 마지막이다. 선택이 있으므로 줄에 나타나 있다.
+    const c = keyCenter(bridge.maru_mobile_keybar_count() - 1);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(c.x, c.y));
+    const n = bridge.maru_mobile_take_copy(&buf, buf.len);
+    try std.testing.expectEqualStrings("copyme", buf[0..n]);
+
+    // **한 번 가져가면 사라진다** — 매 프레임 같은 것을 다시 쓰지 않게.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
+    // 복사해도 선택은 남는다(데스크톱과 같다).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+
+    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    bridge.maru_mobile_clear_error();
+}
+
 // **build 보다 먼저 물어도 0 이 아니어야 한다.** Android 는 창이 서는 순간 이 값으로 GPU
 // 버퍼를 한 번 잡는데, 그게 첫 build 보다 앞이다. 0 을 돌려줬더니 크기 0 짜리 VkBuffer 를
 // 만들었고 드라이버가 단언에 걸려 **에뮬레이터를 통째로 abort** 시켰다(실측).
@@ -637,6 +681,20 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
             (before >> 48) & 0xFFFF == 0);
     }
     bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// 선택이 없으면 `copy` 는 **줄에서 빠진다** — 누를 수 없는 버튼이 계속 보이면 안 된다.
+test "copy 는 선택이 있을 때만 줄에 있다" {
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const last = bridge.maru_mobile_keybar_count() - 1;
+    // 선택이 없는 상태: 그 자리를 눌러도 안 먹는다.
+    const before = bridge.maru_mobile_keybar_rect(last);
+    _ = before;
+    var buf: [16]u8 = undefined;
+    const c0 = keyCenter(last);
+    _ = bridge.maru_mobile_keybar_tap(c0.x, c0.y);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_copy(&buf, buf.len));
     bridge.maru_mobile_clear_error();
 }
 

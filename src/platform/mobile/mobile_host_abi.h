@@ -187,6 +187,14 @@ void maru_mobile_set_long_press_ms(unsigned int ms);
 /// 안 된다** — 되물어야 안다.
 unsigned int maru_mobile_long_press_ms(void);
 
+/// 복사할 것이 있으면 `out` 에 채우고 바이트 수를 답한다(없으면 0). **추출은 코어가 한다** —
+/// soft-wrap 잇기·줄끝 개행·2셀 뒷칸 제외가 전부 거기 있다. 플랫폼은 **클립보드에 쓰기만**
+/// 한다(브리지엔 OS 호출이 없다, §3).
+///
+/// 한 번 가져가면 요청은 사라진다. 버퍼가 모자라면 자르고 `copy_truncated` 를 남긴다 —
+/// 조용히 자르지 않는다.
+unsigned int maru_mobile_take_copy(unsigned char *out, unsigned int cap);
+
 /// 선택 범위(뷰포트 기준, 각 16비트: start_row·start_col·end_row·end_col). **끝 열은 포함**
 /// 이다. 선택이 없으면 전부 1. host 가 복사 버튼 자리를 잡을 때 쓴다.
 unsigned long long maru_mobile_selection_span(void);

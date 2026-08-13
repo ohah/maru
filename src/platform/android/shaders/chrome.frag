@@ -12,6 +12,7 @@ layout(location = 2) in vec2 vUV;
 layout(location = 3) in vec4 vColor;
 layout(location = 4) in float vRadius;
 layout(location = 5) in float vKind;
+layout(location = 6) in vec4 vUVBounds;
 layout(location = 0) out vec4 outColor;
 void main() {
     float r = min(vRadius, min(vHalf.x, vHalf.y));
@@ -20,13 +21,17 @@ void main() {
     if (d > 0.5) discard;
 
     if (vKind > 1.5) {                           // 아이콘 — alpha 가 coverage 다
-        float cov = texture(icons, vUV).a;
+        vec2 ht = 0.5 / vec2(textureSize(icons, 0));
+        float cov = texture(icons, clamp(vUV, vUVBounds.xy + ht, vUVBounds.zw - ht)).a;
         if (cov < 0.04) discard;
         outColor = vec4(vColor.rgb, vColor.a * cov);
         return;
     }
     if (vKind > 0.5) {                           // 글리프
-        float cov = texture(glyphs, vUV).r;
+        // **자기 칸 안으로 자른다** — 칸 경계에서 이웃의 잉크가 딸려 오면 글자 위에 없는
+        // 획이 생긴다(위 슬롯이 블록 글자일 때 실제로 그랬다).
+        vec2 ht = 0.5 / vec2(textureSize(glyphs, 0));
+        float cov = texture(glyphs, clamp(vUV, vUVBounds.xy + ht, vUVBounds.zw - ht)).r;
         if (cov < 0.04) discard;
         outColor = vec4(vColor.rgb, vColor.a * cov);
         return;

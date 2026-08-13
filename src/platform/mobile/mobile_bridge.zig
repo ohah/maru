@@ -391,8 +391,14 @@ pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void
             if (@abs(dx) > long_press_slop or @abs(dy) > long_press_slop) ptr_moved = true;
 
             if (selecting) {
-                // 선택 확장. **셀 판정은 코어 것**이라 여기서 좌표를 다시 안 센다.
-                if (bodyCell(x, y)) |c| core.selectionExtend(c.row, c.col);
+                // **누른 칸을 벗어나기 전에는 안 늘린다.** 길게 눌러 단어를 잡은 직후에도
+                // move 는 계속 오는데, 그때마다 늘리면 head 가 **누른 칸으로 당겨져 단어
+                // 끝이 잘린다**(3칸 단어가 2칸이 되는 것을 픽셀로 재서 잡았다).
+                if (bodyCell(x, y)) |c| {
+                    if (bodyCell(ptr_down_x, ptr_down_y)) |d| {
+                        if (c.row != d.row or c.col != d.col) core.selectionExtend(c.row, c.col);
+                    }
+                }
                 ptr_last_y = y;
                 return;
             }
@@ -419,6 +425,15 @@ pub export fn maru_mobile_pointer(phase: u32, x: f32, y: f32, time_ms: u64) void
             }
         },
     }
+}
+
+/// 선택 범위(뷰포트 기준). start_row·start_col·end_row·end_col 을 각각 16비트로 담는다.
+/// **끝 열은 포함이다**(데스크톱 렌더와 같은 약속). 선택이 없으면 0xFFFF_FFFF_FFFF_FFFF.
+pub export fn maru_mobile_selection_span() u64 {
+    const core = &(term_core orelse return std.math.maxInt(u64));
+    const s = core.selectionViewportSpan() orelse return std.math.maxInt(u64);
+    return (@as(u64, s.start.row) << 48) | (@as(u64, s.start.col) << 32) |
+        (@as(u64, s.end.row) << 16) | @as(u64, s.end.col);
 }
 
 pub export fn maru_mobile_has_selection() u32 {
@@ -732,7 +747,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         if (sel) |s| {
             if (row >= s.start.row and row <= s.end.row) {
                 const from: u16 = if (row == s.start.row) s.start.col else 0;
-                const to: u16 = if (row == s.end.row) s.end.col else grid_cols;
+                // **끝 열은 포함이다**(데스크톱 렌더가 `col <= end.col` 로 쓴다). 배타로 그리면
+                // 선택이 한 칸씩 모자라 보인다 — 화면으로 잡았다.
+                const to: u16 = if (row == s.end.row) s.end.col +| 1 else grid_cols;
                 if (to > from and from < grid_cols) {
                     const end_col = @min(to, grid_cols);
                     if (reserveQuad()) {

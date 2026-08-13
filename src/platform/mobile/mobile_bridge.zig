@@ -163,6 +163,7 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
         setLastError("input_before_core");
         return @intCast(delivered_len);
     });
+    snapToBottomOnInput(core);
     // **개행은 문자가 아니라 Enter 키다.** IME 는 소프트 Return 을 `"\n"` 으로 커밋하는데,
     // 그대로 쓰면 LF 가 나간다 — 터미널은 CR 이고, 그 판단은 `encodeKey` 것이다. 하드웨어
     // Return 은 이미 키 경로로 CR 이 나가므로, 안 가르면 **같은 Enter 가 입력 수단에 따라
@@ -245,6 +246,7 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
         setLastError("key_unknown_id");
         return @intCast(delivered_len);
     };
+    snapToBottomOnInput(core);
     const ev: terminal.input.KeyEvent = .{ .key = key, .modifiers = .{
         .shift = mods & 1 != 0,
         .control = mods & 2 != 0,
@@ -254,6 +256,82 @@ pub export fn maru_mobile_key(key_id: u32, codepoint: u32, mods: u32) u32 {
     writeKey(core, ev.key, ev.modifiers);
     drainUnconsumed(core);
     return @intCast(delivered_len);
+}
+
+// ── 스크롤 ────────────────────────────────────────────────────────────────────
+// 한 줄이 안 되는 나머지. 폰의 미세한 델타를 버리면 **천천히 끌 때 아예 안 움직인다**.
+var scroll_px_carry: f32 = 0;
+
+/// 입력이 들어오면 바닥으로 스냅한다. 과거를 보는 중에 친 글자가 화면 밖에 찍히면 **친 것이
+/// 사라진 것처럼 보인다**. 데스크톱도 같다("입력하면 live 복귀").
+fn snapToBottomOnInput(core: *terminal.core.TerminalCore) void {
+    if (core.viewOffset() != 0) core.scrollToBottom();
+    scroll_px_carry = 0;
+}
+
+/// 플랫폼이 넘긴 논리 px 를 줄로 바꿔 코어에 태운다. **환산이 여기 있는 이유**는 셀 높이가
+/// 코어 쪽 값이기 때문이다 — 플랫폼은 배치를 모른다(§3).
+pub export fn maru_mobile_scroll(dy_px: f32) void {
+    const core = &(term_core orelse {
+        setLastError("scroll_before_core");
+        return;
+    });
+    if (body_line_h <= 0) return;
+    scroll_px_carry += dy_px;
+    const lines_f = @trunc(scroll_px_carry / @as(f32, @floatFromInt(body_line_h)));
+    if (lines_f == 0) return; // 나머지는 다음 호출로 넘긴다
+    scroll_px_carry -= lines_f * @as(f32, @floatFromInt(body_line_h));
+    const lines: i32 = @intFromFloat(lines_f);
+
+    // **alt screen 은 뷰포트가 아니라 프로그램의 것이다**(DECSET 1007). less·vim 이 자기
+    // 스크롤을 갖고 있으므로 화살표를 보낸다. 데스크톱이 정한 것과 같은 규칙이다.
+    if (core.alt_active and core.alternate_scroll) {
+        // 변환하는 순간 그 화면은 프로그램이 다시 그린다 — 남은 선택은 좌표가 어긋난 유령이다.
+        core.selectionClear();
+        const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
+        var n: u32 = @abs(lines);
+        // **한 번에 한 줄씩 쓰지 않는다.** 빠른 플릭이면 수십 줄이 되고, 줄마다 write 하면
+        // 뒷부분이 드랍된다(데스크톱이 겪어 배치로 바꾼 자리다).
+        var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+        const bytes = core.encodeKey(.{ .key = key }, &buf) catch {
+            setLastError("key_encode");
+            return;
+        };
+        var batch: [512]u8 = undefined;
+        const per_batch = batch.len / bytes.len;
+        while (n > 0) {
+            const count = @min(n, @as(u32, @intCast(per_batch)));
+            var used: usize = 0;
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                @memcpy(batch[used..][0..bytes.len], bytes);
+                used += bytes.len;
+            }
+            core.write(batch[0..used]) catch {
+                setLastError("core_write_input");
+                break;
+            };
+            // **이 바이트도 코어에 닿은 것이다.** 누적값이 "전달한 바이트" 라고 헤더에 적어
+            // 놓고 이 경로만 빼면, 같은 값이 어떤 때는 참이고 어떤 때는 아니게 된다.
+            delivered_len += used;
+            n -= count;
+        }
+        drainUnconsumed(core);
+        return;
+    }
+    // clamp 는 코어가 한다 — 여기서 또 하면 두 곳이 갈린다.
+    core.scrollViewport(lines);
+}
+
+pub export fn maru_mobile_scroll_to_bottom() void {
+    const core = &(term_core orelse return);
+    core.scrollToBottom();
+    scroll_px_carry = 0;
+}
+
+pub export fn maru_mobile_view_offset() u32 {
+    const core = &(term_core orelse return 0);
+    return @intCast(core.viewOffset());
 }
 
 /// 포커스 변화를 코어에 알린다(DEC 1004). 켜져 있으면 `CSI I`/`CSI O` 가 흐르고 vim 의
@@ -450,6 +528,11 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // resize 가 실패했을 때 없는 셀을 읽는다. 요청값과 갈릴 수 있는 자리를 아예 없앤다.
     const grid_cols = core.size.cols;
     const grid_rows = core.size.rows;
+    // **그리는 근거는 snapshot 이다 — 활성 화면이 아니다.** 스크롤백을 보는 동안 코어는 보이는
+    // 윈도를 따로 합성하는데(`viewport_cells`), `screen.cells` 를 직접 읽으면 그 합성을 지나쳐
+    // **스크롤해도 화면이 안 바뀐다**(view_offset 은 올라가는데 픽셀이 그대로였다 — 실측).
+    // 커서 가시성도 여기 있다: snapshot 이 DECTCEM **그리고** 스크롤 여부를 이미 합성한다.
+    const snap = core.renderSnapshot();
 
     // 포인터 조회가 **같은 값**을 쓰도록 기록한다 — 렌더와 판정이 갈리면 셀이 어긋난다.
     body_rect = .{ .x = rect.x, .y = rect.y, .w = rect.width, .h = rect.height };
@@ -488,7 +571,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         var over_run: Run = .{};
         var col: u16 = 0;
         while (col < grid_cols) : (col += 1) {
-            const p = paintCell(core.screen.cells[core.index(row, col)].style, tk);
+            const p = paintCell(snap.cells[core.index(row, col)].style, tk);
             bg_run.note(col, p.bg, ox, y0, cell_w, line_h);
             under_run.note(col, if (p.underline) p.line else null, ox, y0 + y_under, cell_w, rule);
             under2_run.note(col, if (p.underline_double) p.line else null, ox, y0 + y_under2, cell_w, rule);
@@ -504,7 +587,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         // ── 2) 글자
         col = 0;
         while (col < grid_cols) : (col += 1) {
-            const cell = core.screen.cells[core.index(row, col)];
+            const cell = snap.cells[core.index(row, col)];
             if (cell.continuation) continue; // 2셀 글자의 뒷칸은 앞칸이 이미 그렸다
             if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
             const glyph = atlasCell(cell.codepoint, styleBits(cell.style)) orelse continue;
@@ -539,22 +622,21 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     //
     // 커서가 없으면 화살표·선택이 **눈으로 검증되지 않는다**(로그가 유일한 판정자가 된다).
     // 그래서 이 자리가 이후 슬라이스 전부의 선행 조건이다.
-    // **가시성 규칙은 코어의 합성과 같아야 한다.** `screen.cursor.visible` 은 코어가 "내부
-    // 불변" 이라고 적어 둔 값이라 늘 참이고, 실제 판단은 snapshot 이 합성한다 —
-    // DECTCEM(`cursor_visible`) **그리고** 스크롤백을 보고 있지 않을 것(`view_offset == 0`).
-    // 내부 필드만 보면 스크롤백을 볼 때도 커서를 그린다(스크롤이 붙는 M4b 에서 드러날 자리).
-    if (core.cursor_visible and core.viewOffset() == 0) {
-        const cur = core.screen.cursor;
+    // **가시성 판단을 다시 하지 않는다.** `screen.cursor.visible` 은 코어가 "내부 불변" 이라
+    // 적어 둔 값이라 늘 참이고, 실제 규칙(DECTCEM **그리고** 스크롤백을 보고 있지 않을 것)은
+    // snapshot 이 이미 합성해 준다. 손으로 같은 규칙을 또 쓰면 한쪽만 낡는다.
+    if (snap.cursor.visible) {
+        const cur = snap.cursor;
         if (cur.col < grid_cols and cur.row < grid_rows) {
             const cx = ox + @as(i32, cur.col) * cell_w;
             // 격자와 **같은 식**으로 y 를 낸다 — 따로 계산하면 한 줄씩 어긋난다.
             const cy = oy + @as(i32, cur.row) * line_h;
             const rgb = tk.get(.cursor);
-            const shape = core.cursor_shape;
+            const shape = snap.cursor_shape;
             // **2셀 글자 위에서는 두 칸을 덮는다.** 한 칸만 덮으면 한글 절반에만 걸려
             // "커서가 글자 가운데 있는" 모양이 된다(글자 폭은 코어가 정한 값을 쓴다).
             // continuation 칸(width 0)에 놓이면 한 칸이다 — 코어가 거기 커서를 두지 않는다.
-            const cur_cell = core.screen.cells[core.index(cur.row, cur.col)];
+            const cur_cell = snap.cells[core.index(cur.row, cur.col)];
             const cur_w = if (cur_cell.width == 2) cell_w * 2 else cell_w;
             // 블록은 칸을 채우고, 밑줄은 아래 굵은 선, 막대는 왼쪽 세로선이다.
             const r: draw.Rect = switch (shape) {

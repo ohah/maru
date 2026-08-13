@@ -149,6 +149,22 @@ void maru_mobile_set_preedit(const char *bytes, unsigned long len);
 /// 커서(캐럿) 자리를 논리 px 로. **IME 후보창이 이걸 보고 따라온다** — 조합 중 후보 목록이
 /// 엉뚱한 자리에 뜨면 글자를 가린다. x·y·w·h 를 각각 16비트로 담는다(화면 밖이면 0).
 unsigned long long maru_mobile_caret_rect(void);
+/// 스크롤. **플랫폼은 논리 px 만 넘긴다** — 줄로 환산하려면 셀 높이를 알아야 하는데 그것은
+/// 코어 쪽 값이다(플랫폼은 배치를 모른다, docs/mobile-platform.md §3). 한 줄이 안 되는
+/// 나머지는 코어가 누적해 두므로 **작은 델타를 여러 번 보내도 잃지 않는다**.
+///
+/// `dy_px` 는 **손가락이 움직인 방향**이다 — 아래로 끌면 양수이고 과거(위)로 간다.
+///
+/// 관성·러버밴딩은 플랫폼이 갖는다(§3.1). 코어는 clamp 와 **alt screen 변환**만 한다 —
+/// alt + DECSET 1007 이면 뷰포트 대신 화살표 키가 나가고 선택이 풀린다.
+void maru_mobile_scroll(float dy_px);
+
+/// 뷰포트를 바닥(활성 화면)으로 되돌린다. 입력이 들어오면 브리지가 **스스로** 부르므로
+/// host 가 따로 부를 일은 제스처 취소 같은 자리뿐이다.
+void maru_mobile_scroll_to_bottom(void);
+
+/// 지금 스크롤백을 보고 있는가(0=바닥). host 가 스크롤 인디케이터를 그릴 때 쓴다.
+unsigned int maru_mobile_view_offset(void);
 
 /// 터치 지점(논리 px) → 셀. 상위 16비트=열, 하위 16비트=행. 본문 밖이면 0xFFFFFFFF.
 unsigned int maru_mobile_hit_cell(float x, float y);

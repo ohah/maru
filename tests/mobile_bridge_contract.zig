@@ -266,24 +266,96 @@ test "커서 세 모양과 숨김이 전부 화면에 반영된다" {
 // 불변" 이라고 적어 둔 값(늘 참)이고, 실제 판단은 DECTCEM **그리고** 스크롤백을 보고 있지
 // 않을 것이다 — 내부 필드만 보면 스크롤백을 볼 때도 커서를 그린다.
 //
-// **여기서 볼 수 있는 것은 그 규칙의 절반뿐이다.** 뷰포트를 올리는 것은 이스케이프가 아니라
-// UI 동작이고 아직 그 ABI 가 없어(M4b), 스크롤백을 보는 상태를 **만들 수단 자체가 없다**.
-// 이 테스트를 "스크롤백에서는 안 그린다" 로 이름 붙여 뒀더니 `viewOffset() == 0` 을 지워도
-// 그대로 통과했다 — 이름이 주장하는 것을 안 보는 테스트였다. 나머지 절반은 검증 매트릭스에
-// **미검증**으로 적어 두고 M4b 에서 닫는다.
-test "스크롤백이 쌓여 있어도 맨 아래를 보는 동안에는 커서를 그린다" {
+// 이 계약은 한동안 **테스트가 만들 수 없는 상태**였다 — 뷰포트를 올리는 것은 이스케이프가
+// 아니라 UI 동작이라, 스크롤 ABI 가 붙기 전(M4b1)에는 스크롤백을 보는 상태 자체를 못 만들었다.
+// 그때 이 테스트는 "스크롤백에서는 안 그린다" 라는 이름을 달고 있었지만 `viewOffset() == 0`
+// 을 지워도 그대로 통과했다(변이로 확인). 이제 만들 수 있으므로 양쪽을 다 본다.
+test "커서는 맨 아래에서만 그린다 — 스크롤백을 보는 동안에는 안 그린다" {
     var cp: u32 = 32;
     while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
     _ = bridge.maru_mobile_build(402, 874);
-    // 스크롤백을 만든다(화면보다 많이 찍는다)
     var i: u32 = 0;
     while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
-    const at_bottom = bridge.maru_mobile_build(402, 874);
+    // **비교는 같은 내용 안에서 한다.** 스크롤하면 보이는 줄이 통째로 달라져 quad 수가
+    // 바뀌므로, 상태를 건너뛰어 세면 커서 때문인지 내용 때문인지 갈리지 않는다. 각 상태에서
+    // DECTCEM 만 껐다 켜서 **그 차이**를 본다.
+    const bottom_on = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_input("\x1b[?25l", 6);
+    const bottom_off = bridge.maru_mobile_build(402, 874);
+    try std.testing.expectEqual(bottom_off + 1, bottom_on); // 바닥에서는 커서가 quad 하나
 
-    _ = bridge.maru_mobile_input("\x1b[?25l", 6); // 커서를 끈 상태와 비교해 quad 한 개 차이를 본다
-    const hidden = bridge.maru_mobile_build(402, 874);
-    try std.testing.expectEqual(hidden + 1, at_bottom);
-    _ = bridge.maru_mobile_input("\x1b[?25h", 6);
+    _ = bridge.maru_mobile_input("\x1b[?25h", 6); // 다시 켠다 — 이제 스크롤이 판정 대상이다
+    bridge.maru_mobile_scroll(400); // 아래로 끄는 손가락 = 과거로
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    const up_on = bridge.maru_mobile_build(402, 874);
+    _ = bridge.maru_mobile_scroll_to_bottom(); // 입력은 바닥으로 스냅하므로 DECTCEM 은 여기서
+    _ = bridge.maru_mobile_input("\x1b[?25l", 6);
+    bridge.maru_mobile_scroll(400);
+    const up_off = bridge.maru_mobile_build(402, 874);
+    // **커서가 켜져 있어도 스크롤백에서는 안 그린다** — 껐을 때와 수가 같아야 한다.
+    try std.testing.expectEqual(up_off, up_on);
+
+    _ = bridge.maru_mobile_input("\x1b[?25h", 6); // 원상 복구(입력이 바닥으로도 되돌린다)
+    bridge.maru_mobile_clear_error();
+}
+
+// 폰의 미세한 델타를 버리면 **천천히 끌 때 아예 안 움직인다**. 한 줄이 안 되는 나머지는
+// 누적해야 한다 — 그리고 그 누적은 바닥으로 스냅할 때 함께 비워져야 한다(안 그러면 다음
+// 스크롤이 옛 나머지만큼 튄다).
+test "한 줄이 안 되는 스크롤도 모이면 움직인다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    var i: u32 = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll_to_bottom();
+
+    var n: u32 = 0;
+    while (n < 5) : (n += 1) {
+        bridge.maru_mobile_scroll(4); // 줄 높이(22)보다 한참 작다
+        try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    }
+    bridge.maru_mobile_scroll(4); // 누적 24 > 22 — 여기서 한 줄
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_view_offset());
+    bridge.maru_mobile_scroll_to_bottom();
+}
+
+// **입력하면 바닥으로 스냅한다.** 과거를 보는 중에 친 글자가 화면 밖에 찍히면 친 것이
+// 사라진 것처럼 보인다(데스크톱의 "입력하면 live 복귀" 와 같은 규칙).
+test "과거를 보는 중에 입력하면 바닥으로 돌아온다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    var i: u32 = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll(400);
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    _ = bridge.maru_mobile_input("x", 1);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+
+    // 키 경로도 같아야 한다 — 입력 수단에 따라 갈리면 안 된다.
+    bridge.maru_mobile_scroll(400);
+    try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    _ = bridge.maru_mobile_key(5, 0, 0); // MARU_KEY_UP
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    bridge.maru_mobile_clear_error();
+}
+
+// **alt screen 의 스크롤은 프로그램의 것이다**(DECSET 1007). less·vim 이 자기 스크롤을 갖고
+// 있으므로 뷰포트를 움직이는 대신 화살표를 보낸다 — 데스크톱이 정한 것과 같은 규칙이다.
+test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    var i: u32 = 0;
+    while (i < 80) : (i += 1) _ = bridge.maru_mobile_input("line\r\n", 6);
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+
+    _ = bridge.maru_mobile_input("\x1b[?1049h", 8); // alt screen 진입
+    const before = bridge.maru_mobile_input("", 0);
+    bridge.maru_mobile_scroll(220); // 10줄
+    // 뷰포트는 그대로다(alt 는 스크롤백이 없어 어차피 0 이지만, 바이트가 나갔는지가 판정이다)
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_view_offset());
+    const after = bridge.maru_mobile_input("", 0);
+    try std.testing.expect(after > before); // 화살표가 실제로 코어에 갔다
+    try std.testing.expectEqual(@as(u32, 3 * 10), after - before); // CSI A × 10
+
+    _ = bridge.maru_mobile_input("\x1b[?1049l", 8); // 원래 화면으로
     bridge.maru_mobile_clear_error();
 }
 

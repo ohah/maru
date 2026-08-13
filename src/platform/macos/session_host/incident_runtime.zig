@@ -222,7 +222,7 @@ fn waitAtomic(value: *const std.atomic.Value(u8), expected: u8) !void {
 
 fn fixtureInput() incident.ConnectionIncident {
     return .{
-        .flags = 0,
+        .flags = 0x05,
         .incident_id = .{ .app_instance_nonce = 0, .sequence = 0 },
         .timestamp_ns = 1,
         .host_id = 1,

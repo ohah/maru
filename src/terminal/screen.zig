@@ -1048,6 +1048,14 @@ pub fn deleteChars(self: *TerminalCore, count: u16) void {
     self.screen.last_print = null;
 }
 
+/// **지워진 화면으로 이어지는 줄은 없다.** 활성 화면의 wrap 표시만 지우면 스크롤백 마지막
+/// 행이 계속 "다음 줄로 이어짐" 을 주장하고, 지운 뒤 새로 쓴 첫 줄이 그 줄의 연속으로 취급된다
+/// — 그 줄에서 단어를 잡으면 **스크롤백의 wrap 뭉치까지 통째로 선택**된다(모바일 복사가 W
+/// 수천 자를 담아 오는 것으로 드러났다). 0행이 0열부터 지워지는 모든 ED 에서 끊는다.
+fn breakScrollbackWrapLink(self: *TerminalCore) void {
+    if (self.screen.sb.count > 0) self.screen.sb.setRowWrapped(self.screen.sb.count - 1, false);
+}
+
 pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
     if (self.size.rows == 0 or self.size.cols == 0) return;
     // 모든 ED 모드는 deferred autowrap을 무효화한다(EL과 동일한 이유, xterm/Ghostty 동작).
@@ -1059,11 +1067,7 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
         2, 3 => {
             @memset(self.screen.cells, blank);
             @memset(self.screen.wrapped, false);
-            // **스크롤백에서 이어지던 줄도 끊는다.** 활성 화면의 표시만 지우면 스크롤백 마지막
-            // 행이 계속 "다음 줄로 이어짐" 을 주장하고, 지운 뒤 새로 쓴 첫 줄이 그 줄의 연속으로
-            // 취급된다 — 그 줄에서 단어를 잡으면 **스크롤백의 wrap 뭉치까지 통째로 선택**된다
-            // (모바일에서 복사가 W 수천 자를 담아 오는 것으로 드러났다).
-            if (self.screen.sb.count > 0) self.screen.sb.setRowWrapped(self.screen.sb.count - 1, false);
+            breakScrollbackWrapLink(self);
             @memset(self.screen.prompt_marks, .{}); // 전체 clear는 OSC 133 분류도 지운다
             self.semantic_state = .unknown; // 진행 중 영역도 끝낸다(셸이 곧 프롬프트를 재마킹)
             if (mode == 3) clearScrollback(self);
@@ -1075,6 +1079,7 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
             var i: usize = 0;
             while (i <= cursor_index and i < self.screen.cells.len) : (i += 1) self.screen.cells[i] = blank;
             for (0..@min(@as(usize, self.screen.cursor.row) + 1, self.screen.wrapped.len)) |r| self.screen.wrapped[r] = false;
+            breakScrollbackWrapLink(self); // 0행을 0열부터 지운다 — 이어지던 줄이 없어진다
             repairWideGlyphEdges(self, self.screen.cursor.row, 0, @min(self.screen.cursor.col + 1, self.size.cols));
             // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
             // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
@@ -1087,6 +1092,8 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
             var i: usize = cursor_index;
             while (i < self.screen.cells.len) : (i += 1) self.screen.cells[i] = blank;
             for (self.screen.cursor.row..self.size.rows) |r| self.screen.wrapped[r] = false;
+            // 커서가 홈이면 0행이 0열부터 지워진다 — `ESC[H ESC[J` 는 가장 흔한 지우기 관용구다.
+            if (self.screen.cursor.row == 0 and self.screen.cursor.col == 0) breakScrollbackWrapLink(self);
             repairWideGlyphEdges(self, self.screen.cursor.row, self.screen.cursor.col, self.size.cols);
             markDirty(self, self.screen.cursor.row);
             markDirty(self, self.size.rows - 1);

@@ -274,7 +274,9 @@ pub fn main(init: std.process.Init) !void {
     // a gray rounded rectangle look like a completed UI capture.
     var gpu_quads: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer gpu_quads.deinit(allocator);
-    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, 2);
+    // **제품과 같은 이름의 층을 쓴다.** 양쪽 다 리터럴 `2`였고, 제품이 `3`으로 흘러간 순간
+    // Lab 캡처는 여전히 옳은데 제품만 빈 화면이었다 — 이름을 공유하면 그 드리프트가 눈에 띈다.
+    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, chrome_draw_lowering.layers.bottom);
     // SB1 §5.3 — **뷰포트 바닥을 가로지르는 layer 0(under) quad.** 제품에서 이 자리에 오는 것은 카드 호버
     // 밴드다(rich 토큰에서 둥근 GPU quad로 내려간다). Lab은 `app_session`을 import하지 않아 그 밴드를 제품
     // 경로로 만들 수 없으므로, **같은 버킷·같은 기하**의 quad 하나를 하네스가 직접 심는다 — 골든이 보려는

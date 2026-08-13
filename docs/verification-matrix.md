@@ -994,7 +994,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   HostPool reservation·generation·capacity·copy/replay·capacity OOM 원복·보호 범위 alias·copied pool 거부·managed source alias 11개, final-address ClientSlot binding 7개, AppSession current/restore 공용 publication leaf
   publication leaf scenario 4개와 HostPool capacity OOM 1개, boundary 1개를 Debug·ReleaseFast에서 exact-count한다. 제품 `HostPool.addOwned` caller 0,
   HostPool의 Client import/역참조 0, map publication 뒤 binding store 0, binding publication 뒤 fallible/callback 0을 함께 검증한다.
-  이 gate는 binding publication, suffix가 소비할 pointer-free `IncidentInput`·`IncidentRepeatKey` 계약 3개,
+  이 gate는 binding publication, suffix가 소비할 pointer-free `IncidentInput`·`IncidentRepeatKey`와 canonical service record·input digest·aggregate fingerprint 계약 5개,
   held Client operation의 `id -> key -> reason` publication, owner-storage alias 거부, copied/bind drift 회수 prerequisite 3개만 닫으며
   first-reason+incident 단일 poison suffix는 여섯 번째 gate가 닫기 전 구현 완료로 세지 않는다.
   여섯 번째 Client poison publication gate는 아래 32개 unique component와 boundary 1개, 총 33개를 Debug·ReleaseFast에서

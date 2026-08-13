@@ -2268,7 +2268,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b poison publication 계약은"},
         });
         const run_cr0b_publication_contract_tests = b.addRunArtifact(cr0b_publication_contract_tests);
-        run_cr0b_publication_contract_tests.addArg("--maru-expect-tests=4");
+        run_cr0b_publication_contract_tests.addArg("--maru-expect-tests=5");
         run_cr0b_publication_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_publication_contract_tests.step);
         const cr0b_service_transaction_tests = addProjectTest(b, .{

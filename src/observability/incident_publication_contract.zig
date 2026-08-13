@@ -114,6 +114,82 @@ pub const PreparedIncidentPublication = struct {
     seal: Digest = [_]u8{0} ** 32,
 };
 
+pub const InputError = error{InvalidInput};
+
+/// service가 incident ID만 채우도록 나머지 wire 의미를 한 번에 고정한다.
+/// 별도 변환기가 flags나 timestamp 복제 규칙을 다시 추론하면 Client seal과 ring evidence가 갈라질 수 있다.
+pub fn serviceInput(value: IncidentInput) InputError!incident.ConnectionIncident {
+    if (!validInputShape(value)) return error.InvalidInput;
+    const reason: incident.ConnectionReason = @enumFromInt(value.reason_raw);
+    const expected = switch (reason) {
+        .event_queue_overflow,
+        .local_queue_exhausted,
+        .frame_malformed,
+        .response_correlation_lost,
+        .peer_contract_violation,
+        .local_invariant_violation,
+        .external_transfer_quarantined,
+        .attachment_cleanup_failed,
+        => false,
+        else => true,
+    };
+    var result: incident.ConnectionIncident = .{
+        .flags = 0x04 | @as(u8, @intFromBool(expected)),
+        .incident_id = .{ .app_instance_nonce = 1, .sequence = 1 },
+        .timestamp_ns = value.timestamp_ns,
+        .host_id = value.host_id,
+        .host_adapter_generation = value.host_adapter_generation,
+        .connection_generation = value.connection_generation,
+        .wire_major = value.wire_major,
+        .reason_raw = value.reason_raw,
+        .scope_raw = value.scope_raw,
+        .disposition_raw = value.disposition_raw,
+        .source_site_raw = value.source_site_raw,
+        .host_class_raw = value.host_class_raw,
+        .parser_phase_raw = value.parser_phase_raw,
+        .outbound_phase_raw = value.outbound_phase_raw,
+        .last_success_request_id = value.last_success_request_id,
+        .pending_request_count = value.pending_request_count,
+        .pending_stream_count = value.pending_stream_count,
+        .pending_event_count = value.pending_event_count,
+        .queue_item_count = value.queue_item_count,
+        .queue_bytes = value.queue_bytes,
+        .outbound_offset = value.outbound_offset,
+        .outbound_length = value.outbound_length,
+        .controller_generation = value.controller_generation,
+        .upgrade_epoch = value.upgrade_epoch,
+        .first_timestamp_ns = value.timestamp_ns,
+        .last_timestamp_ns = value.timestamp_ns,
+    };
+    incident.validateIncident(result) catch return error.InvalidInput;
+    result.incident_id = .{ .app_instance_nonce = 0, .sequence = 0 };
+    return result;
+}
+
+/// 입력 권위는 native struct padding이 아니라 fixed wire payload에서 incident ID 영역만 0으로 둔 transcript다.
+pub fn inputDigest(value: IncidentInput) InputError!Digest {
+    var canonical = try serviceInput(value);
+    canonical.incident_id = .{ .app_instance_nonce = 1, .sequence = 1 };
+    const payload = incident.encodeIncident(canonical) catch return error.InvalidInput;
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.incident-input.v1");
+    hasher.update(&payload);
+    var result: Digest = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+/// repeat capability가 허용하는 aggregate identity 네 필드만 별도 domain으로 봉인한다.
+pub fn fingerprint(value: IncidentInput) InputError!Digest {
+    _ = try serviceInput(value);
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.incident-fingerprint.v1");
+    hasher.update(&.{ value.reason_raw, value.scope_raw, value.source_site_raw, value.host_class_raw });
+    var result: Digest = undefined;
+    hasher.final(&result);
+    return result;
+}
+
 pub fn validInputShape(value: IncidentInput) bool {
     return value.timestamp_ns >= 0 and value.host_id != 0 and value.host_adapter_generation != 0 and
         value.connection_generation != 0 and value.wire_major != 0 and
@@ -214,4 +290,34 @@ test "CR0b poison publication 계약은 repeat key의 final address와 nonzero l
     key.seal[0] = 3;
     try std.testing.expect(validRepeatKeyShape(key, @intFromPtr(&key)));
     try std.testing.expect(!validRepeatKeyShape(key, @intFromPtr(&key) + 1));
+}
+
+test "CR0b poison publication 계약은 입력을 canonical service record와 digest로 한 번만 변환한다" {
+    const value: IncidentInput = .{
+        .timestamp_ns = 7,
+        .host_id = 1,
+        .host_adapter_generation = 2,
+        .connection_generation = 3,
+        .wire_major = 1,
+        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
+        .scope_raw = @intFromEnum(incident.Scope.connection),
+        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
+        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .host_class_raw = @intFromEnum(incident.HostClass.current),
+        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
+        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+    };
+    const record = try serviceInput(value);
+    try std.testing.expectEqual(incident.IncidentId{ .app_instance_nonce = 0, .sequence = 0 }, record.incident_id);
+    try std.testing.expectEqual(value.timestamp_ns, record.first_timestamp_ns);
+    try std.testing.expectEqual(value.timestamp_ns, record.last_timestamp_ns);
+    try std.testing.expect(record.flags & 0x04 != 0);
+    try std.testing.expect(!std.mem.allEqual(u8, &(try inputDigest(value)), 0));
+    try std.testing.expect(!std.mem.allEqual(u8, &(try fingerprint(value)), 0));
+
+    var changed = value;
+    changed.queue_bytes = 1;
+    try std.testing.expect(!std.mem.eql(u8, &(try inputDigest(value)), &(try inputDigest(changed))));
+    // queue 진단은 같은 poison aggregate capability를 새로 만들지 않는다.
+    try std.testing.expectEqualSlices(u8, &(try fingerprint(value)), &(try fingerprint(changed)));
 }

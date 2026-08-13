@@ -34,6 +34,7 @@ const runtime_event_wire = @import("runtime_event_wire.zig");
 const generation_event_quarantine = @import("generation_event_quarantine.zig");
 const settlement_contract = @import("pending_event_settlement_contract.zig");
 const incident_binding_contract = @import("maru").observability.incident_binding_contract;
+const incident_publication_contract = @import("maru").observability.incident_publication_contract;
 
 const c = std.c;
 extern "c" fn getdtablesize() c_int;
@@ -2378,6 +2379,294 @@ const RegisteredNodeOperation = struct {
     operation_id: u64,
     pid: u32,
 };
+
+pub const IncidentOperationQuery = struct {
+    slot_addr: u64,
+    slot_generation: u64,
+    node_addr: u64,
+};
+
+pub const IncidentOperationError = error{ InvalidOwner, Busy };
+
+fn finishSemanticDigest(hasher: *std.crypto.hash.Blake3) [32]u8 {
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn incidentAuthorityDigest(value: incident_publication_contract.IncidentOperationAuthority) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.incident-operation-authority.v1");
+    inline for (.{ value.slot_addr, value.slot_generation, value.node_addr, value.node_generation, value.client_addr, value.connection_generation, value.operation_id }) |field|
+        hasher.update(&std.mem.toBytes(std.mem.nativeToLittle(u64, field)));
+    hasher.update(&value.operation_receipt_seal);
+    hasher.update(&value.binding_seal);
+    return finishSemanticDigest(&hasher);
+}
+
+fn incidentCommitDigest(value: incident_publication_contract.FirstPublicationCommit) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.incident-first-publication-commit.v1");
+    hasher.update(&incidentAuthorityDigest(value.authority));
+    hasher.update(&value.input_digest);
+    hasher.update(&std.mem.toBytes(std.mem.nativeToLittle(u128, value.incident_id.app_instance_nonce)));
+    hasher.update(&std.mem.toBytes(std.mem.nativeToLittle(u64, value.incident_id.sequence)));
+    hasher.update(&value.fingerprint);
+    hasher.update(&.{value.reason_raw});
+    return finishSemanticDigest(&hasher);
+}
+
+fn incidentOperationReceiptDigest(operation_id: u64, node_incarnation: u64, process_nonce: u64) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.incident-operation-receipt.v1");
+    inline for (.{ operation_id, node_incarnation, process_nonce }) |field|
+        hasher.update(&std.mem.toBytes(std.mem.nativeToLittle(u64, field)));
+    return finishSemanticDigest(&hasher);
+}
+
+const IncidentPublicationTestHook = struct {
+    threadlocal var enabled: bool = false;
+    threadlocal var id_only: bool = false;
+    threadlocal var id_and_key: bool = false;
+    threadlocal var complete: bool = false;
+};
+
+fn incidentOperationSeal(
+    value: incident_publication_contract.PreparedIncidentClientOperation,
+    process_nonce: u64,
+) [32]u8 {
+    return process_seal_service.incidentClientOperationSeal(value.pid, process_nonce, .{
+        .self_addr = value.self_addr,
+        .slot_addr = value.authority.slot_addr,
+        .slot_generation = value.authority.slot_generation,
+        .node_addr = value.authority.node_addr,
+        .node_generation = value.authority.node_generation,
+        .client_addr = value.authority.client_addr,
+        .connection_generation = value.authority.connection_generation,
+        .operation_id = value.authority.operation_id,
+        .registry_index = value.registry_index,
+        .owner_thread = value.owner_thread,
+        .authority_digest = value.authority_digest,
+        .commit_digest = value.commit_digest,
+        .repeat_key_seal = value.repeat_key_seal,
+        .lifecycle_raw = value.lifecycle_raw,
+    }) catch process_seal_service.fatalIntegrity(.incident_authority);
+}
+
+fn incidentRepeatKeySeal(
+    pid: u32,
+    process_nonce: u64,
+    key: incident_publication_contract.IncidentRepeatKey,
+) [32]u8 {
+    return process_seal_service.incidentRepeatKeySeal(pid, process_nonce, .{
+        .self_addr = key.self_addr,
+        .client_addr = key.client_addr,
+        .connection_generation = key.connection_generation,
+        .app_instance_nonce = key.incident_id.app_instance_nonce,
+        .sequence = key.incident_id.sequence,
+        .fingerprint = key.fingerprint,
+        .binding_seal = key.binding_seal,
+        .lifecycle_raw = key.lifecycle_raw,
+    }) catch process_seal_service.fatalIntegrity(.incident_authority);
+}
+
+fn incidentOperationProofLoss(comptime stage: []const u8) noreturn {
+    _ = stage;
+    process_seal_service.fatalIntegrity(.incident_authority);
+}
+
+fn incidentOperationOwner(query: IncidentOperationQuery) ?ClientSlotRegistryEntry {
+    if (currentPid() == 0 or process_runtime_pid.load(.acquire) != currentPid()) return null;
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (client_slot_registry) |entry| {
+        if (entry.live and entry.ready and entry.slot_addr == query.slot_addr and
+            entry.slot_incarnation == query.slot_generation and entry.node_addr == query.node_addr and
+            entry.node_incarnation != 0 and operationThreadMatches(entry.owner_thread_incarnation))
+            return entry;
+    }
+    return null;
+}
+
+pub fn beginIncidentClientOperation(
+    query: IncidentOperationQuery,
+    out: *incident_publication_contract.PreparedIncidentClientOperation,
+) IncidentOperationError!void {
+    if (query.slot_addr == 0 or query.slot_generation == 0 or query.node_addr == 0)
+        return error.InvalidOwner;
+    const owner_before = incidentOperationOwner(query) orelse return error.InvalidOwner;
+    const slot_before: *const ClientSlot = @ptrFromInt(owner_before.slot_addr);
+    const node_before: *const ClientNode = @ptrFromInt(owner_before.node_addr);
+    const client_before = &node_before.client;
+    if (rangesOverlapTyped(out, slot_before) or rangesOverlapTyped(out, node_before) or
+        rangesOverlapTyped(out, client_before) or rangesOverlapTyped(out, &client_before.incident_binding) or
+        rangesOverlapTyped(out, &client_before.incident_repeat_key) or
+        rangesOverlapTyped(out, &client_slot_registry) or
+        rangesOverlapTyped(out, &registered_node_operations) or
+        rangesOverlapTyped(out, &registered_node_operation_free_stack) or
+        !std.meta.eql(out.*, incident_publication_contract.PreparedIncidentClientOperation{}))
+        return error.InvalidOwner;
+    const operation = beginRegisteredNodeOperation(.{
+        .slot_addr = query.slot_addr,
+        .slot_incarnation = query.slot_generation,
+        .node = .{ .address = query.node_addr },
+    }) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    errdefer endRegisteredNodeOperation(operation);
+    const owner = registeredNodeOperationOwnerEntry(operation) orelse return error.InvalidOwner;
+    const slot: *const ClientSlot = @ptrFromInt(owner.slot_addr);
+    const client = &operation.node.client;
+    if (client.incident_binding.client_addr != @intFromPtr(client) or
+        !incident_binding_contract.validBindingShape(client.incident_binding))
+        return error.InvalidOwner;
+    const receipt = incidentOperationReceiptDigest(operation.operation_id, owner.node_incarnation, slot.process_nonce);
+    var candidate: incident_publication_contract.PreparedIncidentClientOperation = .{
+        .self_addr = @intFromPtr(out),
+        .authority = .{
+            .slot_addr = owner.slot_addr,
+            .slot_generation = owner.slot_incarnation,
+            .node_addr = owner.node_addr,
+            .node_generation = owner.node_incarnation,
+            .client_addr = @intFromPtr(client),
+            .connection_generation = operation.node.connection_generation,
+            .operation_id = operation.operation_id,
+            .operation_receipt_seal = receipt,
+            .binding_seal = client.incident_binding.seal,
+        },
+        .registry_index = operation.registry_index,
+        .pid = operation.pid,
+        .owner_thread = @intCast(std.Thread.getCurrentId()),
+        .lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.held),
+    };
+    candidate.authority_digest = incidentAuthorityDigest(candidate.authority);
+    candidate.seal = incidentOperationSeal(candidate, slot.process_nonce);
+    out.* = candidate;
+}
+
+fn resolveIncidentClientOperation(
+    prepared: *const incident_publication_contract.PreparedIncidentClientOperation,
+) ?RegisteredNodeOperation {
+    if (prepared.self_addr != @intFromPtr(prepared) or prepared.pid != currentPid() or
+        prepared.owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())) or
+        (prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.held) and
+            prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound)) or
+        prepared.registry_index >= registered_node_operations.len)
+        return null;
+    const operation: RegisteredNodeOperation = .{
+        .node = @ptrFromInt(prepared.authority.node_addr),
+        .registry_index = prepared.registry_index,
+        .operation_id = prepared.authority.operation_id,
+        .pid = prepared.pid,
+    };
+    const owner = registeredNodeOperationOwnerEntry(operation) orelse return null;
+    const slot: *const ClientSlot = @ptrFromInt(owner.slot_addr);
+    const client = &operation.node.client;
+    if (!std.mem.eql(u8, &prepared.authority_digest, &incidentAuthorityDigest(prepared.authority)) or
+        !std.mem.eql(u8, &prepared.seal, &incidentOperationSeal(prepared.*, slot.process_nonce)) or
+        owner.slot_addr != prepared.authority.slot_addr or
+        owner.slot_incarnation != prepared.authority.slot_generation or
+        owner.node_addr != prepared.authority.node_addr or
+        owner.node_incarnation != prepared.authority.node_generation or
+        operation.node.connection_generation != prepared.authority.connection_generation or
+        @intFromPtr(client) != prepared.authority.client_addr or
+        slot.pid != prepared.pid or client.incident_binding.client_addr != prepared.authority.client_addr or
+        !std.mem.eql(u8, &client.incident_binding.seal, &prepared.authority.binding_seal))
+        return null;
+    const receipt = incidentOperationReceiptDigest(operation.operation_id, owner.node_incarnation, slot.process_nonce);
+    if (!std.mem.eql(u8, &receipt, &prepared.authority.operation_receipt_seal)) return null;
+    return operation;
+}
+
+pub fn bindIncidentClientPublication(
+    prepared: *incident_publication_contract.PreparedIncidentClientOperation,
+    commit: incident_publication_contract.FirstPublicationCommit,
+) IncidentOperationError!void {
+    const operation = resolveIncidentClientOperation(prepared) orelse return error.InvalidOwner;
+    if (!std.meta.eql(commit.authority, prepared.authority) or
+        std.mem.allEqual(u8, &commit.input_digest, 0) or
+        commit.incident_id.app_instance_nonce == 0 or commit.incident_id.sequence == 0 or
+        std.mem.allEqual(u8, &commit.fingerprint, 0) or
+        std.enums.fromInt(client_poison.ConnectionReason, commit.reason_raw) == null)
+        return error.InvalidOwner;
+    const client = &operation.node.client;
+    if (client.first_poison_reason != null or client.first_incident_id.sequence != 0 or
+        !std.meta.eql(client.incident_repeat_key, incident_publication_contract.IncidentRepeatKey{}))
+        return error.InvalidOwner;
+    prepared.commit_digest = incidentCommitDigest(commit);
+    const key: incident_publication_contract.IncidentRepeatKey = .{
+        .self_addr = @intFromPtr(&client.incident_repeat_key),
+        .pid = prepared.pid,
+        .process_nonce = @as(*const ClientSlot, @ptrFromInt(prepared.authority.slot_addr)).process_nonce,
+        .client_addr = prepared.authority.client_addr,
+        .connection_generation = prepared.authority.connection_generation,
+        .incident_id = commit.incident_id,
+        .fingerprint = commit.fingerprint,
+        .binding_seal = prepared.authority.binding_seal,
+        .lifecycle_raw = @intFromEnum(incident_publication_contract.RepeatKeyLifecycle.published),
+    };
+    prepared.repeat_key_seal = incidentRepeatKeySeal(prepared.pid, key.process_nonce, key);
+    prepared.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound);
+    const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
+    prepared.seal = incidentOperationSeal(prepared.*, slot.process_nonce);
+}
+
+pub fn commitFirstIncidentClientPublicationNoFail(
+    prepared: *incident_publication_contract.PreparedIncidentClientOperation,
+    commit: incident_publication_contract.FirstPublicationCommit,
+) void {
+    const operation = resolveIncidentClientOperation(prepared) orelse
+        incidentOperationProofLoss("commit resolve");
+    if (prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound) or
+        !std.mem.eql(u8, &prepared.commit_digest, &incidentCommitDigest(commit)))
+        incidentOperationProofLoss("commit digest");
+    const client = &operation.node.client;
+    if (client.first_poison_reason != null or client.first_incident_id.sequence != 0 or
+        !std.meta.eql(client.incident_repeat_key, incident_publication_contract.IncidentRepeatKey{}))
+        incidentOperationProofLoss("commit destination");
+    var key: incident_publication_contract.IncidentRepeatKey = .{
+        .self_addr = @intFromPtr(&client.incident_repeat_key),
+        .pid = prepared.pid,
+        .process_nonce = @as(*const ClientSlot, @ptrFromInt(prepared.authority.slot_addr)).process_nonce,
+        .client_addr = prepared.authority.client_addr,
+        .connection_generation = prepared.authority.connection_generation,
+        .incident_id = commit.incident_id,
+        .fingerprint = commit.fingerprint,
+        .binding_seal = prepared.authority.binding_seal,
+        .lifecycle_raw = @intFromEnum(incident_publication_contract.RepeatKeyLifecycle.published),
+        .seal = prepared.repeat_key_seal,
+    };
+    if (!std.mem.eql(u8, &key.seal, &incidentRepeatKeySeal(prepared.pid, key.process_nonce, key)))
+        incidentOperationProofLoss("repeat key seal");
+    client.first_incident_id = commit.incident_id;
+    if (builtin.is_test and IncidentPublicationTestHook.enabled)
+        IncidentPublicationTestHook.id_only = client.first_incident_id.sequence != 0 and
+            std.meta.eql(client.incident_repeat_key, incident_publication_contract.IncidentRepeatKey{}) and
+            client.first_poison_reason == null;
+    client.incident_repeat_key = key;
+    if (builtin.is_test and IncidentPublicationTestHook.enabled)
+        IncidentPublicationTestHook.id_and_key = client.first_incident_id.sequence != 0 and
+            client.incident_repeat_key.incident_id.sequence != 0 and client.first_poison_reason == null;
+    client.first_poison_reason = @enumFromInt(commit.reason_raw);
+    if (builtin.is_test and IncidentPublicationTestHook.enabled)
+        IncidentPublicationTestHook.complete = client.first_incident_id.sequence != 0 and
+            client.incident_repeat_key.incident_id.sequence != 0 and client.first_poison_reason != null;
+}
+
+pub fn finishIncidentClientOperationNoFail(
+    prepared: *incident_publication_contract.PreparedIncidentClientOperation,
+) void {
+    const operation = resolveIncidentClientOperation(prepared) orelse
+        incidentOperationProofLoss("finish resolve");
+    const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
+    var consumed = prepared.*;
+    consumed.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.consumed);
+    consumed.seal = incidentOperationSeal(consumed, slot.process_nonce);
+    endRegisteredNodeOperation(operation);
+    // Lifetime pin 반환 뒤에는 slot/node/client를 다시 읽지 않고 미리 봉인한 값만 게시한다.
+    prepared.* = consumed;
+}
 
 const max_registered_node_operations = 4096;
 const RegisteredNodeOperationEntry = struct {
@@ -13907,6 +14196,183 @@ fn fixtureClient(allocator: std.mem.Allocator, host_id: u128) client_mod.Client 
         .host_id = host_id,
         .parser = @import("framing.zig").FrameParser.init(allocator),
     };
+}
+
+test "CR0b Client incident operation은 held owner에서 id key reason을 순서대로 게시한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xC0B1);
+    var slot: ClientSlot = undefined;
+    var binding_publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try ClientSlot.initManagedInPlace(
+        &slot,
+        std.testing.allocator,
+        &source,
+        0xC0B1,
+        7,
+        .current,
+        &binding_publication,
+    );
+    defer slot.deinit();
+    var operation: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_generation = slot.incarnation.tagged,
+        .node_addr = @intFromPtr(slot.current),
+    }, &operation);
+    var commit: incident_publication_contract.FirstPublicationCommit = .{
+        .authority = operation.authority,
+        .incident_id = .{ .app_instance_nonce = 11, .sequence = 13 },
+        .reason_raw = @intFromEnum(client_poison.ConnectionReason.connection_eof),
+    };
+    commit.input_digest[0] = 1;
+    commit.fingerprint[0] = 2;
+    try bindIncidentClientPublication(&operation, commit);
+    try std.testing.expect(slot.current.client.first_poison_reason == null);
+    try std.testing.expectEqual(@as(u64, 0), slot.current.client.first_incident_id.sequence);
+    IncidentPublicationTestHook.enabled = true;
+    defer IncidentPublicationTestHook.enabled = false;
+    commitFirstIncidentClientPublicationNoFail(&operation, commit);
+    try std.testing.expect(IncidentPublicationTestHook.id_only);
+    try std.testing.expect(IncidentPublicationTestHook.id_and_key);
+    try std.testing.expect(IncidentPublicationTestHook.complete);
+    try std.testing.expectEqual(commit.incident_id, slot.current.client.first_incident_id);
+    try std.testing.expectEqual(commit.incident_id, slot.current.client.incident_repeat_key.incident_id);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.connection_eof,
+        slot.current.client.first_poison_reason.?,
+    );
+    finishIncidentClientOperationNoFail(&operation);
+    try std.testing.expectEqual(
+        incident_publication_contract.ClientOperationLifecycle.consumed,
+        @as(incident_publication_contract.ClientOperationLifecycle, @enumFromInt(operation.lifecycle_raw)),
+    );
+    var second: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(.{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_generation = slot.incarnation.tagged,
+        .node_addr = @intFromPtr(slot.current),
+    }, &second);
+    try std.testing.expect(second.authority.operation_id != operation.authority.operation_id);
+    finishIncidentClientOperationNoFail(&second);
+}
+
+test "CR0b Client incident operation은 owner 저장소와 겹친 destination을 발급 전에 거부한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xC0B2);
+    var slot: ClientSlot = undefined;
+    var binding_publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try ClientSlot.initManagedInPlace(
+        &slot,
+        std.testing.allocator,
+        &source,
+        0xC0B2,
+        8,
+        .current,
+        &binding_publication,
+    );
+    defer slot.deinit();
+    const query: IncidentOperationQuery = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_generation = slot.incarnation.tagged,
+        .node_addr = @intFromPtr(slot.current),
+    };
+    var before: [@sizeOf(ClientSlot)]u8 = undefined;
+    @memcpy(&before, std.mem.asBytes(&slot));
+    const exact: *incident_publication_contract.PreparedIncidentClientOperation = @ptrCast(@alignCast(&slot));
+    try std.testing.expectError(error.InvalidOwner, beginIncidentClientOperation(query, exact));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&slot));
+    const partial_addr = std.mem.alignForward(
+        usize,
+        @intFromPtr(&slot) + 1,
+        @alignOf(incident_publication_contract.PreparedIncidentClientOperation),
+    );
+    const partial: *incident_publication_contract.PreparedIncidentClientOperation = @ptrFromInt(partial_addr);
+    try std.testing.expectError(error.InvalidOwner, beginIncidentClientOperation(query, partial));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&slot));
+    const protected_starts = [_]usize{
+        @intFromPtr(slot.current),
+        @intFromPtr(&slot.current.client),
+        @intFromPtr(&slot.current.client.incident_binding),
+        @intFromPtr(&slot.current.client.incident_repeat_key),
+        @intFromPtr(&client_slot_registry),
+        @intFromPtr(&registered_node_operations),
+        @intFromPtr(&registered_node_operation_free_stack),
+    };
+    var executed: usize = 1;
+    for (protected_starts) |start| {
+        const aligned = std.mem.alignForward(
+            usize,
+            start,
+            @alignOf(incident_publication_contract.PreparedIncidentClientOperation),
+        );
+        const destination: *incident_publication_contract.PreparedIncidentClientOperation = @ptrFromInt(aligned);
+        try std.testing.expectError(error.InvalidOwner, beginIncidentClientOperation(query, destination));
+        try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&slot));
+        executed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 8), executed);
+    var canonical: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(query, &canonical);
+    finishIncidentClientOperationNoFail(&canonical);
+}
+
+test "CR0b Client incident operation은 copied authority와 bind drift를 거부하고 held owner를 회수한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xC0B3);
+    var slot: ClientSlot = undefined;
+    var binding_publication: incident_binding_contract.IncidentBindingPublication = .{};
+    try ClientSlot.initManagedInPlace(
+        &slot,
+        std.testing.allocator,
+        &source,
+        0xC0B3,
+        9,
+        .current,
+        &binding_publication,
+    );
+    defer slot.deinit();
+    const query: IncidentOperationQuery = .{
+        .slot_addr = @intFromPtr(&slot),
+        .slot_generation = slot.incarnation.tagged,
+        .node_addr = @intFromPtr(slot.current),
+    };
+    var operation: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(query, &operation);
+    var copied = operation;
+    var commit: incident_publication_contract.FirstPublicationCommit = .{
+        .authority = copied.authority,
+        .incident_id = .{ .app_instance_nonce = 17, .sequence = 19 },
+        .reason_raw = @intFromEnum(client_poison.ConnectionReason.connection_eof),
+    };
+    commit.input_digest[0] = 1;
+    commit.fingerprint[0] = 2;
+    try std.testing.expectError(error.InvalidOwner, bindIncidentClientPublication(&copied, commit));
+    const canonical = operation;
+    operation.seal[0] ^= 1;
+    try std.testing.expectError(error.InvalidOwner, bindIncidentClientPublication(&operation, commit));
+    operation = canonical;
+    operation.authority_digest[0] ^= 1;
+    try std.testing.expectError(error.InvalidOwner, bindIncidentClientPublication(&operation, commit));
+    operation = canonical;
+    operation.authority.connection_generation +%= 1;
+    commit.authority = operation.authority;
+    operation.authority_digest = incidentAuthorityDigest(operation.authority);
+    operation.seal = incidentOperationSeal(operation, slot.process_nonce);
+    try std.testing.expectError(error.InvalidOwner, bindIncidentClientPublication(&operation, commit));
+    operation = canonical;
+    commit.authority = canonical.authority;
+    commit.authority.connection_generation +%= 1;
+    try std.testing.expectError(error.InvalidOwner, bindIncidentClientPublication(&operation, commit));
+    try std.testing.expectEqual(
+        incident_publication_contract.ClientOperationLifecycle.held,
+        @as(incident_publication_contract.ClientOperationLifecycle, @enumFromInt(operation.lifecycle_raw)),
+    );
+    try std.testing.expect(slot.current.client.first_poison_reason == null);
+    finishIncidentClientOperationNoFail(&operation);
+    var reused: incident_publication_contract.PreparedIncidentClientOperation = .{};
+    try beginIncidentClientOperation(query, &reused);
+    try std.testing.expect(reused.authority.operation_id != operation.authority.operation_id);
+    finishIncidentClientOperationNoFail(&reused);
 }
 
 fn runC3a3ProductTakeFaultCase(fault: EventTakeActivationTestHook.Fault, seed: u128) !void {

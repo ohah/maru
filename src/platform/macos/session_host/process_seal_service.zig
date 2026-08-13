@@ -47,6 +47,8 @@ const prepared_host_publication_domain = "maru.prepared-host-publication.v1";
 const incident_binding_domain = "maru.incident-binding.v1";
 const incident_publisher_authority_domain = "maru.incident-publisher-authority.v1";
 const incident_publisher_lease_domain = "maru.incident-publisher-lease.v1";
+const incident_client_operation_domain = "maru.incident-client-operation.v1";
+const incident_repeat_key_domain = "maru.incident-repeat-key.v1";
 const pending_term_close_domain = "maru.pending-term-close.v1";
 const pending_term_close_graph_domain = "maru.pending-term-close-graph.v1";
 const shutdown_attempt_authority_domain = "maru.shutdown-attempt-authority.v1";
@@ -90,6 +92,8 @@ pub const PreparedHostPublicationSealInput = cleanup_seal.PreparedHostPublicatio
 pub const IncidentBindingSealInput = cleanup_seal.IncidentBindingSealInput;
 pub const IncidentPublisherAuthoritySealInput = cleanup_seal.IncidentPublisherAuthoritySealInput;
 pub const IncidentPublisherLeaseSealInput = cleanup_seal.IncidentPublisherLeaseSealInput;
+pub const IncidentClientOperationSealInput = cleanup_seal.IncidentClientOperationSealInput;
+pub const IncidentRepeatKeySealInput = cleanup_seal.IncidentRepeatKeySealInput;
 pub const PendingTermCloseSealInput = cleanup_seal.PendingTermCloseSealInput;
 pub const PendingTermCloseGraphSealInput = cleanup_seal.PendingTermCloseGraphSealInput;
 pub const ShutdownAttemptAuthoritySealInput = cleanup_seal.ShutdownAttemptAuthoritySealInput;
@@ -121,6 +125,8 @@ pub const IntegrityReason = enum(u8) {
     close_ticket_exhausted = 9,
     close_runtime_absent = 10,
     active_close_operation = 11,
+    incident_authority = 12,
+    unexpected_connection_poison = 13,
 };
 
 // Diagnostic evidence only: it grants no cleanup or recovery authority, and the first reason wins.
@@ -707,6 +713,14 @@ pub fn incidentPublisherAuthoritySeal(pid: u32, process_nonce: u64, input: Incid
 
 pub fn incidentPublisherLeaseSeal(pid: u32, process_nonce: u64, input: IncidentPublisherLeaseSealInput) ReadyError!CleanupSeal {
     return process_service.pendingSeal(pid, process_nonce, incident_publisher_lease_domain, input);
+}
+
+pub fn incidentClientOperationSeal(pid: u32, process_nonce: u64, input: IncidentClientOperationSealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, incident_client_operation_domain, input);
+}
+
+pub fn incidentRepeatKeySeal(pid: u32, process_nonce: u64, input: IncidentRepeatKeySealInput) ReadyError!CleanupSeal {
+    return process_service.pendingSeal(pid, process_nonce, incident_repeat_key_domain, input);
 }
 
 pub fn pendingTermCloseSeal(pid: u32, process_nonce: u64, input: PendingTermCloseSealInput) ReadyError!CleanupSeal {

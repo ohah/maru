@@ -48,6 +48,41 @@ pub const IncidentRepeatKey = struct {
 
 pub const RepeatKeyLifecycle = enum(u8) { pristine = 0, published = 1, consumed = 2 };
 
+pub const IncidentOperationAuthority = struct {
+    slot_addr: u64 = 0,
+    slot_generation: u64 = 0,
+    node_addr: u64 = 0,
+    node_generation: u64 = 0,
+    client_addr: u64 = 0,
+    connection_generation: u64 = 0,
+    operation_id: u64 = 0,
+    operation_receipt_seal: Digest = [_]u8{0} ** 32,
+    binding_seal: Digest = [_]u8{0} ** 32,
+};
+
+pub const FirstPublicationCommit = struct {
+    authority: IncidentOperationAuthority = .{},
+    input_digest: Digest = [_]u8{0} ** 32,
+    incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
+    fingerprint: Digest = [_]u8{0} ** 32,
+    reason_raw: u8 = 0,
+};
+
+pub const ClientOperationLifecycle = enum(u8) { pristine = 0, held = 1, bound = 2, consumed = 3 };
+
+pub const PreparedIncidentClientOperation = struct {
+    self_addr: u64 = 0,
+    authority: IncidentOperationAuthority = .{},
+    registry_index: u16 = 0,
+    pid: u32 = 0,
+    owner_thread: u64 = 0,
+    authority_digest: Digest = [_]u8{0} ** 32,
+    commit_digest: Digest = [_]u8{0} ** 32,
+    repeat_key_seal: Digest = [_]u8{0} ** 32,
+    lifecycle_raw: u8 = 0,
+    seal: Digest = [_]u8{0} ** 32,
+};
+
 pub fn validInputShape(value: IncidentInput) bool {
     return value.timestamp_ns >= 0 and value.host_id != 0 and value.host_adapter_generation != 0 and
         value.connection_generation != 0 and value.wire_major != 0 and
@@ -91,6 +126,9 @@ fn recursivelyPointerFree(comptime T: type) bool {
 test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-free로 유지한다" {
     try std.testing.expect(recursivelyPointerFree(IncidentInput));
     try std.testing.expect(recursivelyPointerFree(IncidentRepeatKey));
+    try std.testing.expect(recursivelyPointerFree(IncidentOperationAuthority));
+    try std.testing.expect(recursivelyPointerFree(FirstPublicationCommit));
+    try std.testing.expect(recursivelyPointerFree(PreparedIncidentClientOperation));
 }
 
 test "CR0b poison publication 계약은 입력의 closed raw 값과 outbound 범위를 검증한다" {

@@ -2340,6 +2340,19 @@ pub fn build(b: *std.Build) void {
         run_cr0b_client_slot_tests.addArg("--maru-expect-tests=7");
         run_cr0b_client_slot_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_client_slot_tests.step);
+        const cr0b_poison_suffix_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b Client incident operation은"},
+        });
+        const run_cr0b_poison_suffix_tests = b.addRunArtifact(cr0b_poison_suffix_tests);
+        run_cr0b_poison_suffix_tests.addArg("--maru-expect-tests=3");
+        run_cr0b_poison_suffix_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_poison_suffix_tests.step);
         const cr0b_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),

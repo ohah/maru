@@ -186,6 +186,34 @@ pub const IncidentPublisherLeaseSealInput = struct {
     consumed_raw: u8,
 };
 
+pub const IncidentClientOperationSealInput = struct {
+    self_addr: u64,
+    slot_addr: u64,
+    slot_generation: u64,
+    node_addr: u64,
+    node_generation: u64,
+    client_addr: u64,
+    connection_generation: u64,
+    operation_id: u64,
+    registry_index: u16,
+    owner_thread: u64,
+    authority_digest: CleanupSeal,
+    commit_digest: CleanupSeal,
+    repeat_key_seal: CleanupSeal,
+    lifecycle_raw: u8,
+};
+
+pub const IncidentRepeatKeySealInput = struct {
+    self_addr: u64,
+    client_addr: u64,
+    connection_generation: u64,
+    app_instance_nonce: u128,
+    sequence: u64,
+    fingerprint: CleanupSeal,
+    binding_seal: CleanupSeal,
+    lifecycle_raw: u8,
+};
+
 pub const PendingTermCloseSealInput = struct {
     self_addr: u64,
     app_session_addr: u64,

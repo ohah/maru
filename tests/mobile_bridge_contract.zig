@@ -789,3 +789,40 @@ test "슬롯이 다 차면 없음을 답한다" {
     }
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), bridge.maru_mobile_next_slot(cols));
 }
+
+// **조합 중 문자열이 통째로 사라지던 자리.** `set_preedit` 는 버퍼에 다 안 들어가는 마지막
+// 글자를 버리려고 연속 바이트를 거슬러 올라갔는데, **온전한 글자도 다시 안 늘렸다**. 그래서
+// 한글이 늘 첫 바이트만 남아 깨진 UTF-8 이 됐고, 그리는 쪽 `Utf8View.init` 이 실패해 **앞의
+// ASCII 까지 통째로** 안 그려졌다. 아래는 그 "통째로" 를 값으로 잡는다 — 화면에도 같은 글자가
+// 있어 절대 개수로는 못 가르므로 **빈 preedit 대비 증분**으로 본다.
+test "조합 중 문자열: 뒤에 여러 바이트 글자가 와도 앞 글자가 안 사라진다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    bridge.maru_mobile_set_preedit("", 0);
+    const base = bridge.maru_mobile_build(402, 874, now());
+
+    bridge.maru_mobile_set_preedit("Q", 1);
+    const ascii_only = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(base + 1, ascii_only); // 전제: ASCII 조합은 원래 그려진다
+
+    // 수정 전에는 여기서 **0** 이었다(= Q 까지 사라졌다).
+    bridge.maru_mobile_set_preedit("Q가", 4);
+    const with_hangul = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(with_hangul > base);
+
+    bridge.maru_mobile_set_preedit("", 0);
+}
+
+// 버퍼에 **다 안 들어가는** 마지막 글자는 그대로 버려야 한다(그게 원래 의도였다) — 잘린 바이트가
+// 남으면 다시 깨진 UTF-8 이 된다. 상한은 브리지 내부 버퍼라 여기서는 아주 긴 입력으로 민다.
+test "조합 중 문자열: 버퍼를 넘치면 잘린 글자를 통째로 버린다" {
+    var long_buf: [4096]u8 = undefined;
+    var n: usize = 0;
+    while (n + 3 <= long_buf.len) : (n += 3) @memcpy(long_buf[n..][0..3], "\xea\xb0\x80"); // '가' 반복
+    bridge.maru_mobile_set_preedit(&long_buf, n);
+    // 잘렸더라도 남은 바이트는 **온전한 UTF-8** 이어야 한다 — 아니면 그리는 쪽이 통째로 버린다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_set_preedit("", 0);
+}

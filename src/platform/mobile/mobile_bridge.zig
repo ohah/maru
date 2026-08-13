@@ -124,11 +124,17 @@ pub export fn maru_mobile_set_preedit(ptr: [*]const u8, len: usize) void {
     // **UTF-8 경계에서 자른다.** 바이트 수로만 자르면 조합 중 한글이 반토막 나고, 그리는
     // 쪽의 `Utf8View.init` 이 실패해 **조합 문자열 전체가 사라진다** — 화면이 멈춘 것처럼 보인다.
     var n = @min(len, preedit_buf.len);
-    while (n > 0 and (ptr[n - 1] & 0xC0) == 0x80) n -= 1; // continuation byte 위로 올라간다
-    if (n > 0) {
-        const lead = ptr[n - 1];
+    // 마지막 글자의 **시작 바이트**를 찾는다(이 자리를 따로 두어야 한다 — 예전에는 `n` 자체를
+    // 거슬러 올려 놓고 온전한 글자를 **다시 안 늘렸다**. 그래서 조합 중 한글이 늘 첫 바이트만
+    // 남아 깨진 UTF-8 이 됐고, 그리는 쪽 `Utf8View.init` 이 실패해 **조합 문자열이 통째로
+    // 사라졌다** — "Q가" 를 넣으면 Q 까지 안 보였다, 실측).
+    var start = n;
+    while (start > 0 and (ptr[start - 1] & 0xC0) == 0x80) start -= 1; // continuation byte 위로
+    if (start > 0) {
+        const lead = ptr[start - 1];
         const need: usize = if (lead & 0x80 == 0) 1 else if (lead & 0xE0 == 0xC0) 2 else if (lead & 0xF0 == 0xE0) 3 else 4;
-        if (n - 1 + need > @min(len, preedit_buf.len)) n -= 1; // 마지막 글자가 잘렸다
+        // 그 글자가 버퍼에 다 안 들어가면 **통째로** 버린다. 다 들어가면 n 은 그대로다.
+        if (start - 1 + need > n) n = start - 1;
     }
     @memcpy(preedit_buf[0..n], ptr[0..n]);
     preedit_len = n;

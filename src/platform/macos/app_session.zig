@@ -6383,6 +6383,9 @@ pub const AppSession = struct {
                     // 4e web Term은 sentinel core라 `live_initialized=false`지만 종료된 게 아니다 — 살아 있는 web
                     // 패널이 하나라도 있으면 세션(창)을 살려 둔다(안 그러면 터미널만 다 죽었을 때 web-only 창이 통째로 닫힘).
                     if (term.kind == .web) return false;
+                    // 편집기도 같다 — PTY가 없을 뿐 사용자가 보고 있는 문서다. 이 가드가 없으면
+                    // 편집기만 남은 창이 "터미널이 다 죽었다"로 판정돼 통째로 닫힌다.
+                    if (term.kind == .editor) return false;
                     // §7 종료 placeholder도 같은 이유로 "종료됨"이 아니다 — 사용자가 ⏎로 되살릴 자리다. 이 가드가 없으면
                     // 묘비만 남은 창에서 매 tick의 latchSessionEndOrHold가 통과해 (a) 창이 즉시 닫히거나 (b) startup_held로
                     // 오latch돼 "셸이 시작 직후 비정상 종료됐습니다"라는 거짓 안내가 뜬다. 창이 닫히면 Swift `windows`에서
@@ -14183,7 +14186,8 @@ pub const AppSession = struct {
                     self.pane_palette_copies.ensureTotalCapacity(self.allocator, leaf_rects.items.len) catch {};
                     for (leaf_rects.items) |lr| {
                         if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
-                        if (lr.leaf.activeTerm().kind == .web) continue; // web pane은 terminal frame 없음. terminal만 기존 경로를 탄다.
+                        // web·편집기 pane은 terminal frame이 없다 — 편집기는 자기 셀 프레임을 그린다(N1 §4).
+                        if (lr.leaf.activeTerm().kind != .terminal) continue;
                         const pane_surface = lr.leaf.activeTerm().surface;
                         const pane_core = &pane_surface.core;
                         // 코어 읽기(snapshot→DrawList 복사 + per-pane 색 상태)는 락 아래, CoreText shaping
@@ -16412,7 +16416,7 @@ pub const AppSession = struct {
                                 @panic("approved window teardown lost its terminal runtime");
                         }
                         term.rt.live_initialized = false;
-                    } else if (term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder) {
+                    } else if (term.rt.live_initialized or term.kind == .web or term.kind == .editor or term.rt.ended_placeholder) {
                         // 4e-1: web Term은 live_initialized=false지만 registry 슬롯(web arm sentinel)을 소유하므로 remove 대상이다.
                         // remove가 union arm 태그로 분기(terminal=reader join·web=경량)해 해당 슬롯 소유를 teardown한다.
                         // §7 종료 placeholder도 같다 — `live_initialized=false` + `remote == null` + `kind == .terminal`이라

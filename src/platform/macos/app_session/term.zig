@@ -124,7 +124,8 @@ pub fn termBarLocation(self: *AppSession, term: *Term) ?TermBarLoc {
 ///   adapter로의 라우팅을 **문서화된 계약대로** 거부한다([surface-runtime-api.md]). 거부는 runtime 쪽 사실일 뿐
 ///   레이아웃 사실이 아니므로, 표시 grid는 여기서 직접 맞춘다.
 pub fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
-    if (term.kind == .web) return;
+    // PTY가 없는 갈래는 runtime에 보낼 것이 없다. 편집기는 뷰 크기를 자기 프레임 빌드에서 읽는다(N1 §4).
+    if (term.kind == .web or term.kind == .editor) return;
     if (term.rt.ended_placeholder) {
         resizeTermCoreToLayout(self, term, size);
         return;
@@ -262,11 +263,26 @@ pub fn reapTerminatedTerms(self: *AppSession) void {
 
 /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
 /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
+/// backend에 close를 보낼 대상인가 — **닫을 PTY가 실제로 있는 Term만** true다.
+///
+/// **왜 술어인가.** 이 네 항이 `workspace.zig`의 창 닫기 판정과 **글자 그대로 같았고**, 편집기가
+/// 들어오며 다섯 항이 될 참이었다. 한쪽만 고치면 "빨간 버튼으로는 확인 모달이 뜨는데 탭 닫기는
+/// 그냥 닫힌다" 같은 식으로 조용히 갈린다 — 두 자리가 같은 질문을 하고 있으므로 이름을 준다.
+///
+/// PTY가 없는 갈래가 셋이다: web(sentinel), 편집기(문서만), 종료 placeholder(묘비). 셋 다 backend에
+/// 보낼 handle이 없고, `close_complete`는 이미 보낸 것이다.
+pub fn hasClosablePty(term: *const Term) bool {
+    return term.rt.live_initialized and
+        term.kind == .terminal and
+        !term.rt.ended_placeholder and
+        !term.rt.close_complete;
+}
+
 /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
 pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
     const tab = self.tabs.items[tab_index];
     const target = pane.terms.items[term_index];
-    if (target.rt.live_initialized and target.kind != .web and !target.rt.ended_placeholder and !target.rt.close_complete) {
+    if (hasClosablePty(target)) {
         if (self.backendFor(target).closeAndDetach(target.rt.handle) == .event_pending) return;
         target.rt.close_complete = true;
     }
@@ -579,7 +595,7 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
         self.allocator.free(u);
         term.pending_url = null;
     }
-    if (term.kind == .web or term.rt.ended_placeholder) {
+    if (term.kind == .web or term.kind == .editor or term.rt.ended_placeholder) {
         // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
         // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
         // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).

@@ -309,7 +309,9 @@ pub const inventory = [_]Proof{
     // SB1 §5.3이 사이드바 뷰포트 구간을 단일 출처로 모으며 또 바뀐다 — `SidebarViewport` 타입과 그 문서,
     // `SidebarScissor` 주석, 캡처 픽스처 호출 한 줄이 더해졌다(카드 호버 밴드가 상태바를 덮던 결함).
     // count는 2 그대로다 — 새 코드는 값 타입 하나와 주석뿐이고 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "e1b402a478c76bbb5c95b4a8b15d360ced4a7fcf26d75bc14c9efd4851db3f54" },
+    // SurfaceKind에 `editor`가 들어오며 또 바뀐다 — 세션 생존 판정·registry 슬롯·터미널 프레임
+    // 스킵 세 곳이 편집기를 함께 본다. count는 2 그대로다(값 비교만 늘었다).
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "3941b10e88af700e11c2abf4aa8db99a475b8fcc6bf047a3de5dc8289716240b" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

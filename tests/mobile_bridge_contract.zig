@@ -495,17 +495,26 @@ test "끌면 스크롤이고 길게 누르면 선택이다" {
     bridge.maru_mobile_clear_error();
 
     // ① 곧바로 끌면 스크롤이다 — 선택이 아니다.
-    bridge.maru_mobile_pointer(0, 200, 400, now());
-    bridge.maru_mobile_pointer(1, 200, 500, now()); // 100px 아래로(과거로)
+    // **글자가 있는 칸에서 시작한다** — 빈 칸에서 끌면 "움직였으면 길게 누름이 아니다" 규칙을
+    // 지워도 어차피 잡을 단어가 없어 테스트가 아무것도 못 본다.
+    const d = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, d.x, d.y, now());
+    bridge.maru_mobile_pointer(1, d.x, d.y + 100, now()); // 100px 아래로(과거로)
     try std.testing.expect(bridge.maru_mobile_view_offset() > 0);
+    // **프레임이 한참 지나도** 선택이 생기면 안 된다 — 판정은 build 에서 도므로 여기서
+    // 시간을 흘려 보지 않으면 "움직였으면 길게 누름이 아니다" 규칙을 아무도 안 본다.
+    holdPast(2000);
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
-    bridge.maru_mobile_pointer(2, 200, 500, now());
+    bridge.maru_mobile_pointer(2, d.x, d.y + 100, now());
     bridge.maru_mobile_scroll_to_bottom();
 
     // ② 거의 안 움직인 채 시간이 지나면 선택이다 — 그리고 그때는 **스크롤이 안 된다**.
     const before_off = bridge.maru_mobile_view_offset();
     const p = pointForCell(0, 1) orelse return error.TestUnexpectedResult; // "hello" 의 e
     bridge.maru_mobile_pointer(0, p.x, p.y, now());
+    // **문턱 전에는 안 잡힌다.** 프레임이 돌아도 시간이 안 됐으면 그대로다.
+    holdPast(100);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
     holdPast(600); // 손가락은 가만히 — move 없이 시간만 지나도 잡혀야 한다
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
     try std.testing.expectEqual(before_off, bridge.maru_mobile_view_offset());
@@ -539,6 +548,9 @@ test "선택은 화면에 quad 로 나타난다" {
 
     // **범위가 단어와 정확히 같아야 한다.** 눈으로는 한 칸 차이를 못 센다 — 실제로 끝 열을
     // 배타로 그려 한 칸 모자란 것을 화면만 보고는 못 잡았다. 끝 열은 **포함**이다.
+    // **프레임이 더 돌아도 잡은 범위가 안 줄어야 한다** — 판정이 매 프레임 다시 단어를
+    // 잡으면 확장이 통째로 없어진다(그 규칙을 안 보면 변이가 안 물린다).
+    holdPast(700);
     const span = bridge.maru_mobile_selection_span();
     try std.testing.expectEqual(@as(u64, 0), (span >> 48) & 0xFFFF); // start_row
     try std.testing.expectEqual(@as(u64, 0), (span >> 32) & 0xFFFF); // start_col — "hello" 의 h

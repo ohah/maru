@@ -893,6 +893,49 @@ test "화면을 지운 뒤 쓴 줄은 스크롤백 wrap의 연속이 아니다" 
     try std.testing.expectEqualStrings("copyme", text);
 }
 
+// **0행을 0열부터 지우는 모든 ED 가 같아야 한다.** 처음엔 ED 2 만 고쳤는데 `ESC[H ESC[J`(홈 +
+// ED 0)는 가장 흔한 지우기 관용구라 그대로 샜다(적대적 검증 2라운드에서 재서 잡았다).
+test "홈에서의 ED 0·ED 1 도 스크롤백 wrap 을 끊는다" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "\x1b[H\x1b[J", "\x1b[H\x1b[0J", "\x1b[9;99H\x1b[1J" }) |seq| {
+        var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+        defer c.deinit();
+        var i: usize = 0;
+        while (i < 40) : (i += 1) try c.write("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+        try c.write(seq);
+        try c.write("\x1b[Hcopyme rest");
+        c.selectWordAt(0, 1, &.{});
+        const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("copyme", text);
+    }
+}
+
+// 수정이 **정상 경우를 안 깨뜨리는지**. ED 없이 스크롤백에서 활성 화면으로 이어지는 줄은
+// 그대로 한 논리 줄이어야 하고, alt screen 의 ED 는 주 화면 스크롤백을 안 건드려야 한다.
+test "이어지던 줄은 그대로, alt 의 ED 는 주 화면과 무관" {
+    const allocator = std.testing.allocator;
+    {
+        var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+        defer c.deinit();
+        try c.write("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ");
+        c.selectWordAt(3, 1, &.{});
+        const t = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ", t);
+    }
+    {
+        var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+        defer c.deinit();
+        try c.write("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ");
+        const before = c.screen.sb.count;
+        const wrapped_before = c.scrollbackRowWrapped(before - 1);
+        try c.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?1049l");
+        try std.testing.expectEqual(before, c.screen.sb.count);
+        try std.testing.expectEqual(wrapped_before, c.scrollbackRowWrapped(c.screen.sb.count - 1));
+    }
+}
+
 // host-backed Find의 좌표계 계약. `runtime_manager.findOp`는 요청받은 매치로 host 화면을 먼저 스크롤한 뒤
 // 그 **스크롤된 화면 기준**으로 span을 계산해 응답한다. client는 그 스크롤을 delta로 받기 전이라, 응답 span을
 // 그대로 그리면 좌표계가 다른 화면에 하이라이트를 찍는다. 그래서 client가 view_offset을 대조해 정합할 때만

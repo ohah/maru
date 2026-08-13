@@ -83,6 +83,37 @@ pub const PreparedIncidentClientOperation = struct {
     seal: Digest = [_]u8{0} ** 32,
 };
 
+pub const PublicationKind = enum(u8) { first = 1, repeat = 2 };
+pub const PublicationLifecycle = enum(u8) { pristine = 0, held = 1, evidence_committed = 2, published = 3 };
+
+pub const PublisherLeaseProjection = struct {
+    registry_addr: u64 = 0,
+    registry_generation: u64 = 0,
+    authority_addr: u64 = 0,
+    runtime_addr: u64 = 0,
+    runtime_generation: u64 = 0,
+    service_addr: u64 = 0,
+    service_generation: u64 = 0,
+    pid: u32 = 0,
+    process_nonce: u64 = 0,
+    owner_thread: u64 = 0,
+    lease_generation: u64 = 0,
+    seal: Digest = [_]u8{0} ** 32,
+};
+
+/// Platform coordinator가 service mutex와 Client operation을 동시에 소유하는 동안만 유효하다.
+/// runtime/service 포인터를 넣지 않아 copied value가 새 권위를 만들지 못하게 한다.
+pub const PreparedIncidentPublication = struct {
+    self_addr: u64 = 0,
+    kind_raw: u8 = 0,
+    publisher: PublisherLeaseProjection = .{},
+    service: incident.PreparedServicePublication = .{},
+    client: PreparedIncidentClientOperation = .{},
+    input_digest: Digest = [_]u8{0} ** 32,
+    lifecycle_raw: u8 = 0,
+    seal: Digest = [_]u8{0} ** 32,
+};
+
 pub fn validInputShape(value: IncidentInput) bool {
     return value.timestamp_ns >= 0 and value.host_id != 0 and value.host_adapter_generation != 0 and
         value.connection_generation != 0 and value.wire_major != 0 and
@@ -129,6 +160,21 @@ test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-f
     try std.testing.expect(recursivelyPointerFree(IncidentOperationAuthority));
     try std.testing.expect(recursivelyPointerFree(FirstPublicationCommit));
     try std.testing.expect(recursivelyPointerFree(PreparedIncidentClientOperation));
+    try std.testing.expect(recursivelyPointerFree(PublisherLeaseProjection));
+    try std.testing.expect(recursivelyPointerFree(PreparedIncidentPublication));
+}
+
+test "CR0b poison publication 계약은 composite kind와 lifecycle raw를 닫힌 값으로 유지한다" {
+    inline for (.{ PublicationKind.first, PublicationKind.repeat }) |kind|
+        try std.testing.expect(std.enums.fromInt(PublicationKind, @intFromEnum(kind)) != null);
+    try std.testing.expect(std.enums.fromInt(PublicationKind, 0) == null);
+    inline for (.{
+        PublicationLifecycle.pristine,
+        PublicationLifecycle.held,
+        PublicationLifecycle.evidence_committed,
+        PublicationLifecycle.published,
+    }) |lifecycle| try std.testing.expect(std.enums.fromInt(PublicationLifecycle, @intFromEnum(lifecycle)) != null);
+    try std.testing.expect(std.enums.fromInt(PublicationLifecycle, 4) == null);
 }
 
 test "CR0b poison publication 계약은 입력의 closed raw 값과 outbound 범위를 검증한다" {

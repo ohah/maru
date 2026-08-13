@@ -1120,7 +1120,9 @@ pub fn logScreenIfDebug(self: *AppSession) void {
 /// **이 스트림을 제품 신호로 쓰지 마라.** 비우는 대상이 **활성 Term 하나**고(원격은 통째로 skip) 매 프레임
 /// 비우므로, 비활성 Term의 이벤트는 아무도 못 보고 활성 Term의 이벤트도 다른 소비자가 보기 전에 사라진다.
 /// `.cwd_changed`를 "OSC 7이 방금 왔다"는 신호로 쓰려다 여기서 걸렸다(docs/editor-surface-dock.md §3.5의
-/// 낡은 OSC 7 항목). 필요하면 이 자리에서 함께 drain하도록 소비자를 여기에 붙여라.
+/// 낡은 OSC 7 항목). 필요하면 이 자리에서 함께 drain하도록 소비자를 여기에 붙이거나, 그 전에 드레인 범위를
+/// 전체 Term으로 넓혀라. 스트림 자체의 단일 출처는 docs/trace-replay.md의 "Shell integration event"다 —
+/// 이 배선 제약도 거기 적혀 있다.
 pub fn drainShellEventsForFrame(self: *AppSession) void {
     if (!self.surface_initialized) return;
     if (!activeTermIsTerminal(self)) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip

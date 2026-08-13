@@ -1165,8 +1165,18 @@ static int bakeGlyph(GlyphBaker *b, uint32_t cp, uint32_t style, uint8_t *out,
     (*env)->CallVoidMethod(env, b->bmp,
         (*env)->GetMethodID(env, bmCls2, "eraseColor", "(I)V"), (jint)0);
 
-    jchar unit = (jchar)cp;
-    jstring s = (*env)->NewString(env, &unit, 1);
+    // **BMP 밖 글자도 이 경로로 온다**(컬러가 아닌 것들 — 수학 기호·CJK 확장 등). `(jchar)cp` 로
+    // 자르면 엉뚱한 글자가 된다. iOS 와 같은 규칙으로 서러게이트 쌍을 조립한다(비대칭 금지).
+    jchar units[2];
+    jsize unit_n = 0;
+    if (cp > 0xFFFF) {
+        unsigned int v = cp - 0x10000;
+        units[unit_n++] = (jchar)(0xD800 + (v >> 10));
+        units[unit_n++] = (jchar)(0xDC00 + (v & 0x3FF));
+    } else {
+        units[unit_n++] = (jchar)cp;
+    }
+    jstring s = (*env)->NewString(env, units, unit_n);
     (*env)->CallVoidMethod(env, b->canvas, b->draw, s, (jfloat)1.0f, (jfloat)(CH - 8), b->paint);
     jfloat adv = (*env)->CallFloatMethod(env, b->paint, b->measure, s);
     *advance = (uint32_t)(adv + 0.5f);

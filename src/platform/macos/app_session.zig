@@ -5038,7 +5038,8 @@ pub const AppSession = struct {
     }
 
     fn testCR0bCurrentManagedPublication() !void {
-        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
+        if (comptime !is_macos) return error.SkipZigTest;
+        try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();
@@ -5061,7 +5062,8 @@ pub const AppSession = struct {
     }
 
     fn testCR0bRestoreFirstSiblingPreservation() !void {
-        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
+        if (comptime !is_macos) return error.SkipZigTest;
+        try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();
@@ -5095,7 +5097,8 @@ pub const AppSession = struct {
     }
 
     fn testCR0bDuplicateFailureAtomicity() !void {
-        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
+        if (comptime !is_macos) return error.SkipZigTest;
+        try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();
@@ -5127,7 +5130,8 @@ pub const AppSession = struct {
     }
 
     fn testCR0bInitFailureAbortReuse() !void {
-        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
+        if (comptime !is_macos) return error.SkipZigTest;
+        try RemoteSessionAdapter.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var host_pool = RemoteHostPool.init(allocator);
         defer host_pool.deinit();

@@ -36,8 +36,6 @@ const upgrade_executor = @import("upgrade_executor.zig");
 const upgrade_loop = @import("upgrade_loop.zig");
 const poll_owner = @import("poll_owner.zig");
 const incident_runtime = @import("incident_runtime.zig");
-const host_adapter = @import("host_adapter.zig");
-const process_seal = @import("process_seal_service.zig");
 
 pub const RunError = socket_server.BindError || error{ OutOfMemory, OwnerLeaseFailed, ManifestFailed };
 
@@ -78,8 +76,6 @@ fn bootstrapIncidentRuntime(
     allocator: std.mem.Allocator,
     dir_path: [:0]const u8,
 ) !*incident_runtime.ConnectionIncidentRuntime {
-    try host_adapter.HostAdapter.initializeProcessRuntime();
-    const identity = try process_seal.currentReadyIdentity();
     const owner_fd = c.open(dir_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (owner_fd < 0) return error.ManifestFailed;
     defer _ = c.close(owner_fd);
@@ -98,13 +94,15 @@ fn bootstrapIncidentRuntime(
         return error.ManifestFailed;
     defer _ = c.close(incident_fd);
     var app_instance_nonce = newHostId();
-    // host_id와 별도 발급한다. artifact identity가 endpoint 교체나 host manifest generation에 종속되면
-    // 같은 프로세스의 장애 sequence가 외부 routing identity 변화로 갈라질 수 있다.
+    // 두 nonce는 host_id와 별도 발급한다. artifact identity가 endpoint 교체나 host manifest
+    // generation에 종속되면 같은 프로세스의 장애 sequence가 외부 routing identity 변화로 갈라질 수 있다.
     if (app_instance_nonce == 0) app_instance_nonce = newHostId();
+    var process_nonce: u64 = 0;
+    while (process_nonce == 0) process_nonce = @truncate(newHostId());
     return incident_runtime.ConnectionIncidentRuntime.create(
         allocator,
-        identity.pid,
-        identity.process_nonce,
+        @intCast(c.getpid()),
+        process_nonce,
         app_instance_nonce,
         incident_fd,
     ) catch return error.ManifestFailed;

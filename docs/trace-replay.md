@@ -220,8 +220,9 @@ remote_runtime_pump=11,remote_backend=12,external_attach=13,external_pump=14,app
 number는 artifact authority가 아니다.
 
 process-global final-address `ConnectionIncidentService`가 `{self_addr,pid,process_nonce,app_instance_nonce,
-last_issued_sequence,ring,pending_slots,writer_lifecycle,lifecycle}`를 소유한다. `app_instance_nonce`는 process seal nonce와 별도로 OS entropy에서 한 번
-발급하며 0을 거부한다. service는 process runtime bootstrap에서 ring과 함께 준비된 뒤 ready로 게시된다. fork child, copied/moved
+last_issued_sequence,ring,pending_slots,writer_lifecycle,lifecycle}`를 소유한다. `process_nonce`와 `app_instance_nonce`는 daemon child가
+ClientSlot process runtime과 독립된 OS entropy로 각각 한 번 발급하며 0을 거부한다. fork 뒤 daemon bootstrap이 부모의 ClientSlot seal을
+재사용하거나 재초기화해서는 안 된다. service는 daemon bootstrap에서 ring과 함께 준비된 뒤 ready로 게시된다. fork child, copied/moved
 service, PID/process nonce 불일치, `last_issued_sequence == maxInt(u64)`에서의 다음 발급은 Client/ring/reconnect mutation 0 뒤
 `fatalIntegrity(.incident_authority)`로 닫는다. 초기값 0에서 첫 발급은 1이고 max sequence로 발급한 incident 자체는 유효하다.
 

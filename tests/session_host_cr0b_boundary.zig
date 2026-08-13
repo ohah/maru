@@ -48,8 +48,10 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "incident_owner.shutdown()"));
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "defer removeEmptyIncidentDirectory(dir_path);"));
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "c.unlinkat(owner_fd, \"incidents\", posix.AT.REMOVEDIR)"));
-    try std.testing.expectEqual(@as(usize, 1), count(daemon, "host_adapter.HostAdapter.initializeProcessRuntime()"));
-    try std.testing.expectEqual(@as(usize, 1), count(daemon, "process_seal.currentReadyIdentity()"));
+    try std.testing.expectEqual(@as(usize, 0), count(daemon, "host_adapter.zig"));
+    try std.testing.expectEqual(@as(usize, 0), count(daemon, "process_seal_service.zig"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "@intCast(c.getpid())"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "while (process_nonce == 0)"));
     const storage_product = storage[0 .. std.mem.indexOf(u8, storage, "\ntest \"") orelse storage.len];
     try std.testing.expectEqual(@as(usize, 1), count(storage, "const incident = @import(\"maru\").observability.connection_incident;"));
     try std.testing.expectEqual(@as(usize, 0), count(storage, "client.zig"));

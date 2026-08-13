@@ -56,6 +56,31 @@ pub const ConnectionReason = enum(u8) {
 pub const Scope = enum(u8) { stream = 0, connection = 1, host = 2 };
 pub const Disposition = enum(u8) { retry_status = 0, reconnect = 1, no_retry = 2, gone = 3 };
 
+pub const IncidentDecision = struct {
+    expected: bool,
+    disposition: Disposition,
+};
+
+/// wire validator와 publication builder가 같은 reason 정책을 공유하게 하는 중립 SSOT다.
+pub fn decisionForReason(reason: ConnectionReason) IncidentDecision {
+    const expected = switch (reason) {
+        .event_queue_overflow,
+        .local_queue_exhausted,
+        .frame_malformed,
+        .response_correlation_lost,
+        .peer_contract_violation,
+        .local_invariant_violation,
+        .external_transfer_quarantined,
+        .attachment_cleanup_failed,
+        => false,
+        else => true,
+    };
+    return .{
+        .expected = expected,
+        .disposition = if (reason == .capability_incompatible) .no_retry else .reconnect,
+    };
+}
+
 pub const IncidentId = struct {
     app_instance_nonce: u128,
     sequence: u64,
@@ -686,22 +711,9 @@ pub fn validateIncident(value: ConnectionIncident) ValidationError!void {
         return error.InvalidIncident;
     if (value.reason_raw > @intFromEnum(ConnectionReason.attachment_cleanup_failed) or
         value.scope_raw != @intFromEnum(Scope.connection)) return error.InvalidIncident;
-    const reason: ConnectionReason = @enumFromInt(value.reason_raw);
-    const expected = switch (reason) {
-        .event_queue_overflow,
-        .local_queue_exhausted,
-        .frame_malformed,
-        .response_correlation_lost,
-        .peer_contract_violation,
-        .local_invariant_violation,
-        .external_transfer_quarantined,
-        .attachment_cleanup_failed,
-        => false,
-        else => true,
-    };
-    const disposition: Disposition = if (reason == .capability_incompatible) .no_retry else .reconnect;
-    if ((value.flags & 1 != 0) != expected or value.flags & 2 != 0 or
-        value.disposition_raw != @intFromEnum(disposition)) return error.InvalidIncident;
+    const decision = decisionForReason(@enumFromInt(value.reason_raw));
+    if ((value.flags & 1 != 0) != decision.expected or value.flags & 2 != 0 or
+        value.disposition_raw != @intFromEnum(decision.disposition)) return error.InvalidIncident;
     if (value.outbound_offset > value.outbound_length or value.occurrence_count != 1 or
         value.first_timestamp_ns != value.timestamp_ns or value.last_timestamp_ns != value.timestamp_ns or
         value.reserved0 != 0 or !allZero(&value.reserved_tail))

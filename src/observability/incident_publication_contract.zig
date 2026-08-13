@@ -120,21 +120,9 @@ pub const InputError = error{InvalidInput};
 /// 별도 변환기가 flags나 timestamp 복제 규칙을 다시 추론하면 Client seal과 ring evidence가 갈라질 수 있다.
 pub fn serviceInput(value: IncidentInput) InputError!incident.ConnectionIncident {
     if (!validInputShape(value)) return error.InvalidInput;
-    const reason: incident.ConnectionReason = @enumFromInt(value.reason_raw);
-    const expected = switch (reason) {
-        .event_queue_overflow,
-        .local_queue_exhausted,
-        .frame_malformed,
-        .response_correlation_lost,
-        .peer_contract_violation,
-        .local_invariant_violation,
-        .external_transfer_quarantined,
-        .attachment_cleanup_failed,
-        => false,
-        else => true,
-    };
+    const decision = incident.decisionForReason(@enumFromInt(value.reason_raw));
     var result: incident.ConnectionIncident = .{
-        .flags = 0x04 | @as(u8, @intFromBool(expected)),
+        .flags = 0x04 | @as(u8, @intFromBool(decision.expected)),
         .incident_id = .{ .app_instance_nonce = 1, .sequence = 1 },
         .timestamp_ns = value.timestamp_ns,
         .host_id = value.host_id,
@@ -166,7 +154,7 @@ pub fn serviceInput(value: IncidentInput) InputError!incident.ConnectionIncident
     return result;
 }
 
-/// 입력 권위는 native struct padding이 아니라 fixed wire payload에서 incident ID 영역만 0으로 둔 transcript다.
+/// encoder 검증용 고정 sentinel ID `{1,1}`을 쓰되 실제 service-issued ID와는 독립인 fixed wire transcript다.
 pub fn inputDigest(value: IncidentInput) InputError!Digest {
     var canonical = try serviceInput(value);
     canonical.incident_id = .{ .app_instance_nonce = 1, .sequence = 1 };
@@ -306,18 +294,94 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
         .host_class_raw = @intFromEnum(incident.HostClass.current),
         .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
         .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .last_success_request_id = 8,
+        .pending_request_count = 9,
+        .pending_stream_count = 10,
+        .pending_event_count = 11,
+        .queue_item_count = 12,
+        .queue_bytes = 13,
+        .controller_generation = 14,
+        .upgrade_epoch = 15,
     };
     const record = try serviceInput(value);
     try std.testing.expectEqual(incident.IncidentId{ .app_instance_nonce = 0, .sequence = 0 }, record.incident_id);
+    try std.testing.expectEqual(value.timestamp_ns, record.timestamp_ns);
+    try std.testing.expectEqual(value.host_id, record.host_id);
+    try std.testing.expectEqual(value.host_adapter_generation, record.host_adapter_generation);
+    try std.testing.expectEqual(value.connection_generation, record.connection_generation);
+    try std.testing.expectEqual(value.wire_major, record.wire_major);
+    try std.testing.expectEqual(value.reason_raw, record.reason_raw);
+    try std.testing.expectEqual(value.scope_raw, record.scope_raw);
+    try std.testing.expectEqual(value.disposition_raw, record.disposition_raw);
+    try std.testing.expectEqual(value.source_site_raw, record.source_site_raw);
+    try std.testing.expectEqual(value.host_class_raw, record.host_class_raw);
+    try std.testing.expectEqual(value.parser_phase_raw, record.parser_phase_raw);
+    try std.testing.expectEqual(value.outbound_phase_raw, record.outbound_phase_raw);
+    try std.testing.expectEqual(value.last_success_request_id, record.last_success_request_id);
+    try std.testing.expectEqual(value.pending_request_count, record.pending_request_count);
+    try std.testing.expectEqual(value.pending_stream_count, record.pending_stream_count);
+    try std.testing.expectEqual(value.pending_event_count, record.pending_event_count);
+    try std.testing.expectEqual(value.queue_item_count, record.queue_item_count);
+    try std.testing.expectEqual(value.queue_bytes, record.queue_bytes);
+    try std.testing.expectEqual(value.outbound_offset, record.outbound_offset);
+    try std.testing.expectEqual(value.outbound_length, record.outbound_length);
+    try std.testing.expectEqual(value.controller_generation, record.controller_generation);
+    try std.testing.expectEqual(value.upgrade_epoch, record.upgrade_epoch);
     try std.testing.expectEqual(value.timestamp_ns, record.first_timestamp_ns);
     try std.testing.expectEqual(value.timestamp_ns, record.last_timestamp_ns);
-    try std.testing.expect(record.flags & 0x04 != 0);
+    try std.testing.expectEqual(@as(u8, 0x05), record.flags);
     try std.testing.expect(!std.mem.allEqual(u8, &(try inputDigest(value)), 0));
     try std.testing.expect(!std.mem.allEqual(u8, &(try fingerprint(value)), 0));
 
-    var changed = value;
-    changed.queue_bytes = 1;
-    try std.testing.expect(!std.mem.eql(u8, &(try inputDigest(value)), &(try inputDigest(changed))));
-    // queue 진단은 같은 poison aggregate capability를 새로 만들지 않는다.
-    try std.testing.expectEqualSlices(u8, &(try fingerprint(value)), &(try fingerprint(changed)));
+    const base_digest = try inputDigest(value);
+    const base_fingerprint = try fingerprint(value);
+    var non_identity_cases = [_]IncidentInput{value} ** 14;
+    non_identity_cases[0].timestamp_ns += 1;
+    non_identity_cases[1].host_id += 1;
+    non_identity_cases[2].host_adapter_generation += 1;
+    non_identity_cases[3].connection_generation += 1;
+    non_identity_cases[4].wire_major += 1;
+    non_identity_cases[5].parser_phase_raw = @intFromEnum(incident.ParserPhase.header);
+    non_identity_cases[6].last_success_request_id += 1;
+    non_identity_cases[7].pending_request_count += 1;
+    non_identity_cases[8].pending_stream_count += 1;
+    non_identity_cases[9].pending_event_count += 1;
+    non_identity_cases[10].queue_item_count += 1;
+    non_identity_cases[11].queue_bytes += 1;
+    non_identity_cases[12].controller_generation += 1;
+    non_identity_cases[13].upgrade_epoch += 1;
+    for (non_identity_cases) |changed| {
+        try std.testing.expect(!std.mem.eql(u8, &base_digest, &(try inputDigest(changed))));
+        try std.testing.expectEqualSlices(u8, &base_fingerprint, &(try fingerprint(changed)));
+    }
+
+    var outbound = value;
+    outbound.outbound_phase_raw = @intFromEnum(incident.OutboundPhase.partial);
+    outbound.outbound_length = 2;
+    outbound.outbound_offset = 1;
+    try std.testing.expect(!std.mem.eql(u8, &base_digest, &(try inputDigest(outbound))));
+    try std.testing.expectEqualSlices(u8, &base_fingerprint, &(try fingerprint(outbound)));
+
+    var identity_cases = [_]IncidentInput{value} ** 4;
+    identity_cases[0].reason_raw = @intFromEnum(incident.ConnectionReason.read_timeout);
+    identity_cases[1].source_site_raw = @intFromEnum(incident.SourceSite.client_write);
+    identity_cases[2].host_class_raw = @intFromEnum(incident.HostClass.previous);
+    identity_cases[3].scope_raw = @intFromEnum(incident.Scope.host);
+    for (identity_cases[0..3]) |changed| {
+        try std.testing.expect(!std.mem.eql(u8, &base_digest, &(try inputDigest(changed))));
+        try std.testing.expect(!std.mem.eql(u8, &base_fingerprint, &(try fingerprint(changed))));
+    }
+    // connection-only wire v1에서는 scope 변화가 closed validation에서 거부된다.
+    try std.testing.expectError(error.InvalidInput, fingerprint(identity_cases[3]));
+
+    inline for (std.meta.fields(incident.ConnectionReason)) |field| {
+        const reason: incident.ConnectionReason = @enumFromInt(field.value);
+        var decision_case = value;
+        decision_case.reason_raw = @intFromEnum(reason);
+        const decision = incident.decisionForReason(reason);
+        decision_case.disposition_raw = @intFromEnum(decision.disposition);
+        const decision_record = try serviceInput(decision_case);
+        try std.testing.expectEqual(decision.expected, decision_record.flags & 1 != 0);
+        try std.testing.expectEqual(@intFromEnum(decision.disposition), decision_record.disposition_raw);
+    }
 }

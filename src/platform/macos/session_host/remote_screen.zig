@@ -615,8 +615,11 @@ test "remote screen: projection→assembler→cells preserves a real screen's te
     try testing.expectEqual(local.size.rows, remote.size.rows);
     try testing.expectEqual(local.cells.len, remote.cells.len);
     for (local.cells, remote.cells, 0..) |lc, rc, i| {
-        const lcp: u21 = if (lc.codepoint == 0) ' ' else lc.codepoint; // 투영은 빈 셀(0)을 공백으로 낸다.
-        try testing.expectEqual(lcp, rc.codepoint);
+        // 빈 칸은 양쪽 다 "안 쓴 칸"(codepoint 0)이거나 공백으로 나올 수 있다 — 표현이 아니라 **보이는
+        // 글자**가 같은지를 본다. 한쪽만 정규화하면 셀 모델이 바뀔 때 거짓 실패한다.
+        const lcp: u21 = if (lc.codepoint == 0) ' ' else lc.codepoint;
+        const rcp: u21 = if (rc.codepoint == 0) ' ' else rc.codepoint;
+        try testing.expectEqual(lcp, rcp);
         try testing.expectEqual(lc.width, rc.width);
         try testing.expectEqual(lc.continuation, rc.continuation);
         _ = i;
@@ -1006,8 +1009,11 @@ fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: termina
     // 다를 수 있어 해석된 본체로 대조).
     try testing.expectEqual(local.cells.len, remote.cells.len);
     for (local.cells, remote.cells) |lc, rc| {
-        const lcp: u21 = if (lc.codepoint == 0) ' ' else lc.codepoint; // 투영은 빈 셀(0)을 공백으로 낸다.
-        try testing.expectEqual(lcp, rc.codepoint);
+        // 빈 칸은 양쪽 다 "안 쓴 칸"(codepoint 0)이거나 공백으로 나올 수 있다 — 표현이 아니라 **보이는
+        // 글자**가 같은지를 본다. 한쪽만 정규화하면 셀 모델이 바뀔 때 거짓 실패한다.
+        const lcp: u21 = if (lc.codepoint == 0) ' ' else lc.codepoint;
+        const rcp: u21 = if (rc.codepoint == 0) ' ' else rc.codepoint;
+        try testing.expectEqual(lcp, rcp);
         try testing.expectEqual(lc.width, rc.width);
         try testing.expectEqual(lc.continuation, rc.continuation);
         try testing.expectEqual(lc.style, rc.style); // foreground/background/underline_color(Color intent) + bold/dim/italic/… 전부.

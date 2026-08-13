@@ -1171,3 +1171,31 @@ test "hard 줄끝: 프로그램이 쓴 뒤 공백도 복사에서 잘린다" {
     defer allocator.free(text);
     try std.testing.expectEqualStrings("hi", text);
 }
+
+// **바뀌는 동작을 값으로 박아 둔다.** 지우기가 비운 자리는 "글자가 없는 칸"이라, soft-wrap 행의
+// **뒤쪽**을 비우면 wrap 채움과 구분되지 않아 이어 붙일 때 빠진다(이 변경 전에는 공백으로 남았다).
+// 행 **가운데**를 비운 자리는 뒤에 글자가 있어 그대로 남는다 — 둘을 나란히 고정한다.
+test "지우기: soft-wrap 행 뒤쪽을 비우면 이음에서 빠지고, 가운데는 남는다" {
+    const allocator = std.testing.allocator;
+    { // DCH — 왼쪽으로 밀려 행 끝이 빈다
+        var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+        defer c.deinit();
+        try c.write("abcdefghijklmnopqrst");
+        try c.write("\x1b[1;1H\x1b[3P");
+        try std.testing.expect(c.screen.wrapped[0]);
+        c.selectLineAt(0);
+        const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("defghijklmnopqrst", text);
+    }
+    { // ECH — 행 가운데를 제자리 blank로(뒤에 글자가 남는다)
+        var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+        defer c.deinit();
+        try c.write("abcdefghijklmnopqrst");
+        try c.write("\x1b[1;4H\x1b[3X");
+        c.selectLineAt(0);
+        const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings("abc   ghijklmnopqrst", text);
+    }
+}

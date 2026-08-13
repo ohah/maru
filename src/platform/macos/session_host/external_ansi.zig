@@ -534,7 +534,11 @@ test "external ansi replaces every C0 C1 and DEL text codepoint" {
     // 한 칸 넓은 local viewport로 우하단 placeholder 정책과 독립해 C0/C1/DEL 전수만 검증한다.
     var frame = try project(std.testing.allocator, source.source(), .{ .cols = @intCast(cells.len + 1), .rows = 1 }, std.testing.io);
     defer frame.deinit();
-    try std.testing.expectEqual(@as(usize, 65), std.mem.count(u8, frame.bytes, "\xef\xbf\xbd"));
+    // NUL(0x00)만 예외다: 코어는 `codepoint < 0x20`을 셀에 쓰지 않으므로(screen.zig) **쓴 NUL은
+    // 존재할 수 없고**, 셀의 0은 "아무도 안 쓴 칸"을 뜻한다(types.Cell). 그래서 공백으로 나가고
+    // 나머지 64개(C0 0x01~0x1f·DEL·C1)만 U+FFFD로 치환된다 — 제어 바이트가 새는 일은 없다.
+    try std.testing.expectEqual(@as(usize, 64), std.mem.count(u8, frame.bytes, "\xef\xbf\xbd"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, frame.bytes, "\x00")); // NUL 은 어떤 형태로도 안 샌다
 }
 
 test "external ansi rejects malformed snapshot and unsupported style without publishing" {

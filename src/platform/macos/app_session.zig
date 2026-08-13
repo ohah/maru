@@ -1079,18 +1079,48 @@ fn detectLaunchCwdIsRoot(io: std.Io) bool {
 /// cwd가 비면 "". 폴더 아이콘 prefix는 호출부(buildSidebarTitleFrame)가 브랜치줄 octocat과 같은 패턴으로 붙인다 —
 /// 이 함수는 경로만 파생해, copy-path·click-to-open 등 다른 소비자가 PUA 글리프 없는 깨끗한 경로를 쓸 수 있다.
 /// 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
-/// 이 프로세스의 hostname — OSC 7 authority가 "우리"를 가리키는지 판정하는 기준값이다. 프로세스 수명 동안
-/// 바뀌지 않으므로 한 번만 조회해 캐시한다(OSC 7은 매 프롬프트 오고 폴더줄은 매 사이드바 rebuild마다 조립되므로,
-/// 캐시가 없으면 syscall이 그 빈도로 따라붙는다). **메인 스레드 전용** — 소비처(사이드바 조립·spawn cwd·경로
-/// resolve)가 모두 메인이라 lazy init에 경합이 없다. 조회 실패면 빈 문자열이고, 그때 `hostIsLocal`은 보수적으로
-/// 원격을 택한다(docs/ssh-integration.md §9.2).
+/// 이 프로세스의 hostname — OSC 7 authority가 "우리"를 가리키는지 판정하는 기준값이다. 매 호출 조회하면
+/// syscall이 OSC 7 빈도(매 프롬프트)와 사이드바 rebuild 빈도로 따라붙으므로 **쓸 만한 값을 얻은 뒤로는**
+/// 캐시한다. **메인 스레드 전용** — 소비처(사이드바 조립·spawn cwd·경로 resolve)가 모두 메인이라 lazy
+/// init에 경합이 없다. 조회 실패면 빈 문자열이고, 그때 `hostIsLocal`은 보수적으로 원격을 택한다
+/// (docs/ssh-integration.md §9.2).
 var local_hostname_storage: [std.posix.HOST_NAME_MAX]u8 = undefined;
 var local_hostname_cached: ?[]const u8 = null;
 pub fn localHostname() []const u8 {
     if (local_hostname_cached) |cached| return cached;
     const name: []const u8 = std.posix.gethostname(&local_hostname_storage) catch "";
+    // **자리 잡기 전의 값은 캐시하지 않는다.** macOS는 네트워크 구성이 끝나기 전(부팅 직후·Wi-Fi 전환·
+    // 슬립 복귀)에 gethostname()이 실패하거나 `localhost`를 답한다. 앱이 그 창에서 뜨면 옛 구현은 그 값을
+    // 프로세스 수명 동안 굳혔고, 그러면 이후 모든 authority가 기준값과 어긋나 **로컬 세션이 통째로 원격으로
+    // 오판된다**(빈 이름은 hostIsLocal이 보수적으로 원격으로 읽고, `localhost`는 짧은 이름 비교에서도
+    // 실제 이름과 안 맞는다). 캐시를 미루면 다음 호출이 다시 물어보므로 이름이 자리 잡는 순간 판정이 저절로
+    // 회복된다.
+    //
+    // **미확정이 지속돼도 비용은 잡히지 않는다**: `gethostname`은 실측 382ns/call(macOS, `sysctl` 경로)이고
+    // 이 함수는 사이드바 rebuild마다 Term 수만큼 불린다 — Term 20개·60fps면 초당 0.5ms 미만이다. "곧 자리
+    // 잡으니 괜찮다"에 기대지 않는다(네트워크가 영영 안 붙는 머신에서는 그 전제가 틀리다). 캐시 적중 뒤에는
+    // syscall이 0이므로 정상 경로의 비용은 그대로다.
+    if (!hostnameIsSettled(name)) return name;
     local_hostname_cached = name;
     return name;
+}
+
+/// 그 hostname을 **캐시해도 되는가**. 조회 실패(빈 문자열)와 `localhost`는 "아직 이름이 없다"는 뜻이라, 굳히면
+/// 그 뒤의 모든 로컬 판정이 어긋난다(위 주석). 순수 판정으로 빼 두면 그 규칙을 테스트가 직접 짚는다.
+fn hostnameIsSettled(name: []const u8) bool {
+    return name.len > 0 and !std.ascii.eqlIgnoreCase(name, "localhost");
+}
+
+test "localHostname 캐시: 자리 잡지 않은 이름(빈 값·localhost)은 굳히지 않는다" {
+    // 굳히면 네트워크 구성 전에 뜬 앱이 **수명 내내** 로컬 세션을 원격으로 오판한다(사용자 보고 2026-08-13).
+    // 실제 캐시 변수는 전역이라 테스트가 gethostname을 흔들 수 없어, 그 결정을 내리는 판정을 직접 검증한다.
+    try std.testing.expect(!hostnameIsSettled("")); // 조회 실패
+    try std.testing.expect(!hostnameIsSettled("localhost"));
+    try std.testing.expect(!hostnameIsSettled("LocalHost")); // 호스트명은 대소문자 무시
+    try std.testing.expect(hostnameIsSettled("box.local"));
+    try std.testing.expect(hostnameIsSettled("box"));
+    // `localhost`로 시작할 뿐인 진짜 이름은 굳혀도 된다(부분 일치로 삼키지 않는다).
+    try std.testing.expect(hostnameIsSettled("localhost-vm.local"));
 }
 
 /// 이 Term이 보고한 cwd가 **원격**인가 — 표시(폴더줄·상태바)와 안전(cwd 상속·경로 resolve·git 조회)이 공유하는
@@ -14407,15 +14437,10 @@ pub const AppSession = struct {
                             } else {
                                 // 아직 못 읽었거나 git 저장소가 아니다 — 둘을 구분해 적는다(정상 상태이므로 경고 아님).
                                 var repo_probe: [std.fs.max_path_bytes]u8 = undefined;
-                                // 안내 우선순위: 실행할 수 없음 → 볼 것이 없음 → 실패 → 진행 중.
-                                const notice: []const u8 = if (self.git_missing)
-                                    "git이 설치되어 있지 않습니다"
-                                else if (git_ops.gitRepoRoot(self, &repo_probe) == null)
-                                    "git 저장소가 아닙니다"
-                                else if (self.git_failed)
-                                    "git 읽기에 실패했습니다"
-                                else
-                                    "읽는 중…";
+                                // 문구 선택은 `git_ops.scmEmptyNotice`가 소유한다 — 판정의 3-상태를 문구에서도
+                                // 지켜야 하고(`.none`과 `.unknown`은 다른 사실이다), 렌더 안 표현식으로 두면
+                                // 그 구분을 테스트에서 짚을 수 없다.
+                                const notice: []const u8 = git_ops.scmEmptyNotice(self, &repo_probe);
                                 if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, scm_cols, notice, dock_fg)) |pdl| {
                                     self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,
@@ -53390,11 +53415,14 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
     // **타는 분기를 못 박는다.** `.unknown`(OSC 7이 안 먹어 아무도 답을 못 한 상태)이어도 위 skip 조건은 똑같이
     // 통과하는데, 그때 아래 단언들은 전혀 다른 경로를 검증하게 된다 — ⑵에서 실제로 그 착오가 있었다.
     // 이 단언이 `null`의 정체를 "저장소 없음 확정"으로 고정하고, 그 값이 곧 뷰가 "git 저장소가 아닙니다"를
-    // 고르는 조건이다(`git_missing`이 아니고 `gitRepoRoot == null`).
+    // 고르는 조건이다(`git_missing`이 아니고 판정이 `.none`).
     try std.testing.expectEqual(
         git_ops.RepoTarget.none,
         std.meta.activeTag(git_ops.gitRepoTarget(session, &probe_buf)),
     );
+    // 판정과 **문구가 같은 자리에서** 갈리는지도 함께 고정한다 — 판정만 검증하면 뷰가 다른 조건으로 문구를
+    // 고르는 회귀(실제로 있었다: `.unknown`까지 이 문구로 뭉갠 것)를 못 잡는다.
+    try std.testing.expectEqualStrings("git 저장소가 아닙니다", git_ops.scmEmptyNotice(session, &probe_buf));
 
     session.git_result = .{ .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
     session.git_failed = true;
@@ -53434,8 +53462,131 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
         git_ops.RepoTarget.unknown,
         std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
     );
+    // **`.unknown`은 "저장소가 아니다"와 다른 사실이고 문구도 달라야 한다.** 둘을 한 문구로 뭉개면, 저장소 안에
+    // 서 있는데 물어볼 곳만 없는 상태(원격 세션·diff 열람 중)에서 뷰가 없는 사실을 단정한다 — 2026-08-13에
+    // 로컬 세션이 원격으로 오판됐을 때 이 문구가 진짜 원인을 가린 그 결함이다.
+    try std.testing.expectEqualStrings("저장소를 확인할 수 없습니다", git_ops.scmEmptyNotice(session, &target_buf));
     git_ops.followActiveTerminalRepo(session);
     try std.testing.expect(session.git_result != null);
+}
+
+// [사용자 보고 2026-08-13] 로컬 저장소에 서 있는 터미널인데 소스 컨트롤 뷰가 "git 저장소가 아닙니다"를 냈다.
+// 같은 화면의 사이드바·상태바에는 `<host>:<절대경로>`가 `~` 축약 없이 찍혀 있었는데, **그 형식은 원격 판정일 때만**
+// 나온다(`sidebarCwdPath`). 즉 로컬 세션이 통째로 원격으로 읽히고 있었다.
+//
+// 셸이 실제로 무엇을 보내는지 pty로 캡처해 보니 `file://<그 머신의 hostname>/…`였고, 화면의 host 접두와 **같은
+// 문자열**이었다. 같은 문자열끼리는 `hostIsLocal`이 반드시 로컬을 내므로, 앱이 대조한 로컬 이름은 그 시점의 것이
+// 아니었다 — `localHostname()`이 앱 시작 때 한 번 읽은 값을 수명 내내 굳혔기 때문이다(macOS는 DHCP 도메인·Wi-Fi
+// 전환·슬립 복귀로 hostname 접미를 바꾸고, 구성 전에는 `localhost`나 실패를 답한다).
+//
+// 앱 입장에서 "낡은 로컬 이름"과 "어긋난 authority가 실린 OSC 7"은 **구별할 수 없는 같은 상태**다(둘 다 비교가
+// 어긋난다). 그래서 재현은 후자로 만들고, 그 상태가 화면 표시부터 저장소 판정·안내 문구까지 어떻게 한 줄기로
+// 무너지는지를 고정한다. 대조군은 **빈 authority** — maru의 로컬 셸 통합이 보내는 형식이고(shell_integration.zig),
+// 로컬 이름이 어떤 상태든 로컬로 읽혀 같은 경로가 정상으로 돌아온다. 그 대조가 곧 이 수정의 효과다.
+test "OSC 7 authority가 로컬 이름과 어긋나면 로컬 저장소가 통째로 원격 취급된다(2026-08-13 재현)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    // 격리된 저장소를 쓴다 — maru 저장소 안에서 돌면 하네스의 cwd가 walk-up으로 같은 답을 줘서, 판정이 바뀐 것인지
+    // 원래 그랬던 것인지 구별되지 않는다.
+    const repo = "/tmp/maru-stale-hostname-test";
+    _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    {
+        // `/tmp`나 `/`가 저장소인 특이 머신에서는 아래 대조가 의미를 잃는다.
+        var probe: [std.fs.max_path_bytes]u8 = undefined;
+        if (AppSession.repoRootFor("/tmp", &probe) != null) return error.SkipZigTest;
+    }
+    // 2·3순위가 답을 주면 `.unknown` 단언이 조용히 다른 분기를 검증한다 — 전제를 단언으로 못 박는다.
+    try std.testing.expect(session.git_repo == null);
+    try std.testing.expect(session.file_tree.rootCount() == 0);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var osc_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+
+    // ⑴ **재현**: 저장소 경로는 그대로 보고하고 authority만 로컬 이름과 어긋나게 싣는다.
+    try term.surface.core.write(try std.fmt.bufPrint(&osc_buf, "\x1b]7;file://stale-name.example{s}\x07", .{repo}));
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(termCwdIsRemote(term));
+    // 화면은 사용자가 본 그대로가 된다 — host 접두가 붙고 `~` 축약이 사라진다.
+    const shown = try sidebarCwdPath(session, term);
+    defer allocator.free(shown);
+    try std.testing.expectEqualStrings("stale-name.example:" ++ repo, shown);
+    // 판정은 1순위를 통째로 잃는다 — **저장소 안에 서 있는데도** 아무도 답하지 못한다.
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.unknown,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
+    );
+    // 그리고 안내는 "모른다"여야 한다 — "저장소가 아니다"라는 단정이 이 사건에서 진짜 원인을 가렸다.
+    try std.testing.expectEqualStrings("저장소를 확인할 수 없습니다", git_ops.scmEmptyNotice(session, &target_buf));
+
+    // ⑵ **대조군(= 수정)**: 로컬 셸 통합이 보내는 빈 authority면 같은 경로가 로컬로 읽혀 저장소가 잡힌다.
+    try term.surface.core.write(try std.fmt.bufPrint(&osc_buf, "\x1b]7;file://{s}\x07", .{repo}));
+    term_ops.refreshTermObservation(session, term, false, false);
+    try std.testing.expect(!termCwdIsRemote(term));
+    const local_shown = try sidebarCwdPath(session, term);
+    defer allocator.free(local_shown);
+    try std.testing.expectEqualStrings(repo, local_shown);
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.repo,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
+    );
+}
+
+// 안내를 내는 소비처는 **전수로** 같은 3-상태 구분을 써야 한다. 저장소 판정을 쓰는 자리는 넷인데 셋
+// (`refreshGitStatus`·`openDiffForScmRow`·`captureTurnSnapshot`)은 답이 없으면 조용히 돌아가고, 사용자에게
+// 말하는 것은 도크의 빈 안내와 **브랜치 메뉴** 둘뿐이다. 도크만 고치고 브랜치 메뉴를 놓쳤던 것을 적대적
+// 검증에서 잡았다.
+//
+// **위 재현 테스트와 분리해 둔다.** 한 함수에 담으면 앞 단계가 깨질 때 이 소비처는 실행조차 되지 않아 서로
+// 다른 소비처의 회귀가 한 신호로 뭉개진다 — mutation 검증에서 실제로 그 일이 일어났다(도크 문구를 되돌리자
+// 브랜치 메뉴 단언이 도달 불가가 됐다).
+test "브랜치 메뉴도 `.unknown`을 저장소 없음으로 단정하지 않는다(안내 소비처 전수)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    const repo = "/tmp/maru-branch-menu-unknown-test";
+    _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    {
+        var probe: [std.fs.max_path_bytes]u8 = undefined;
+        if (AppSession.repoRootFor("/tmp", &probe) != null) return error.SkipZigTest;
+    }
+    // 전제를 단언으로 못 박는다 — 2·3순위가 답하면 `.repo`로 빠져 이 테스트가 조용히 다른 분기를 검증한다.
+    try std.testing.expect(session.git_repo == null);
+    try std.testing.expect(session.file_tree.rootCount() == 0);
+
+    // 백엔드를 미리 만들어 둔다 — `requestBranchMenu`가 지연 생성하는 경로에서 스레드를 새로 띄우지 않게.
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    const term = pane_ops.activePane(session).activeTerm();
+    var osc_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try term.surface.core.write(try std.fmt.bufPrint(&osc_buf, "\x1b]7;file://stale-name.example{s}\x07", .{repo}));
+    term_ops.refreshTermObservation(session, term, false, false);
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual( // 이 테스트가 검증하려는 상태가 맞는지 먼저 고정한다
+        git_ops.RepoTarget.unknown,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &target_buf)),
+    );
+
+    settings_ops.requestBranchMenu(session);
+    try std.testing.expect(session.chrome_host.notice.open); // 조용히 무시하지 않고 사용자에게 말한다
+    try std.testing.expect(std.mem.startsWith(u8, &session.notice_message_buf, git_ops.notice_repo_unknown));
+    try std.testing.expect(!session.branch_menu_pending); // 읽을 저장소가 없으므로 요청도 걸리지 않는다
 }
 
 // [GUI 확인 2026-08-12] 저장소를 지웠더니 **도크는 "git 저장소가 아닙니다"인데 상태바·사이드바는 옛 브랜치를

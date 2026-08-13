@@ -79,7 +79,21 @@ const zsh_zshenv =
     \\  # OSC 7: 매 프롬프트 cwd 보고(VTE가 정의한 사실상 표준 — file://host/path, ECMA-48 아님).
     \\  # path를 percent-encode한다(unreserved 외 바이트 → %XX). 'emulate -L zsh'로 옵션을 지역화하고
     \\  # 'nomultibyte'로 바이트 단위 인덱싱해 UTF-8 path(한글 등)도 바이트별 인코딩 → 터미널 디코더가
-    \\  # 정확히 복원한다. host는 ${HOST}(빈 값이면 file:///path = localhost), 종결자는 ST(ESC \).
+    \\  # 정확히 복원한다. 종결자는 ST(ESC \).
+    \\  #
+    \\  # **authority(host)는 비워 보낸다** — `file://` + 경로 = `file:///path`, VTE 규약상 localhost다
+    \\  # (docs/ssh-integration.md §9.2의 "로컬 판정" 첫 항목). 이 스크립트는 maru가 직접 spawn한 **로컬
+    \\  # pty**에서만 로드되므로(원격 rc는 사용자가 별도 스니펫을 넣는다 — §9.5) 여기서 보고하는 cwd는
+    \\  # 정의상 로컬이고, 그 사실을 hostname 문자열로 추측하게 만들 이유가 없다.
+    \\  #
+    \\  # 예전에는 ${HOST}를 실었는데, 그 값은 **셸이 시작한 시점**의 gethostname()이고 앱이 대조하는
+    \\  # 로컬 이름은 **앱이 시작한 시점**의 gethostname()이다. macOS는 DHCP 도메인·Wi-Fi 전환·슬립 복귀로
+    \\  # hostname의 접미가 바뀌므로(`box.local` ↔ `box.lan` ↔ `localhost`) 두 스냅샷이 어긋날 수 있고,
+    \\  # hostIsLocal은 양쪽이 다 FQDN인데 전체가 다르면 **다른 호스트로 단정한다**(box.corp.com vs
+    \\  # box.home.net을 막는 규율 — core.zig). 그러면 로컬 세션이 통째로 원격 취급돼 폴더줄에 `host:`
+    \\  # 접두가 붙고 cwd 상속·링크 감지·git 저장소 조회가 전부 꺼진다(사용자 보고 2026-08-13: 소스 컨트롤
+    \\  # 뷰가 로컬 저장소에 서 있는데 "git 저장소가 아닙니다"). 로컬 보고자가 로컬임을 명시하면 그 추측
+    \\  # 자체가 사라진다. ssh로 들어가면 원격 스니펫이 ${HOST}를 실어 원격 판정은 그대로 동작한다.
     \\  _maru_osc7() {
     \\    'builtin' 'emulate' '-L' 'zsh'
     \\    'builtin' 'setopt' 'nomultibyte'
@@ -91,7 +105,7 @@ const zsh_zshenv =
     \\        (*) 'builtin' 'printf' '-v' _maru_hex '%02X' "'$_maru_c"; _maru_enc+="%$_maru_hex" ;;
     \\      esac
     \\    done
-    \\    'builtin' 'print' '-rn' -- $'\e]7;file://'"${HOST}${_maru_enc}"$'\e\\'
+    \\    'builtin' 'print' '-rn' -- $'\e]7;file://'"${_maru_enc}"$'\e\\'
     \\  }
     \\  # ssh 너머 TUI(claude/codex/tmux/vim)가 SIGKILL로 비정상 종료해 정리 시퀀스를 못 보낸 잔류
     \\  # 입력 모드를 매 프롬프트에서 끈다: focus(1004)·mouse(1000/1002/1003)·kitty keyboard 스택.
@@ -273,7 +287,14 @@ test "zsh integration script emits OSC 7 cwd reporting" {
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "]7;file://") != null); // OSC 7 file 스킴
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "nomultibyte") != null); // 바이트 단위 인코딩
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "%02X") != null); // 비-unreserved 바이트 → %XX
-    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "${HOST}") != null); // host(빈 값이면 localhost)
+    // **authority는 비어야 한다**(`file://` 바로 뒤에 경로). 로컬 pty 전용 스크립트라 보고하는 cwd는 정의상
+    // 로컬이고, host를 실으면 그 값(셸 시작 시점 hostname)과 앱이 대조하는 이름(앱 시작 시점 hostname)이
+    // 어긋날 때 로컬 세션이 원격으로 오판된다(§9.2 hostIsLocal의 FQDN 단정 — 그 회귀가 실제로 났다).
+    //
+    // **검사는 emit 줄에 건다.** 스크립트 전체에서 `${HOST}` 부재를 요구하면 그 결정을 설명하는 **주석까지**
+    // 걸려(주석도 이 문자열의 일부다) 수정 상태에서도 빨간불이 된다 — 적대적 검증에서 실제로 그 착오를 냈다.
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "]7;file://'\"${_maru_enc}\"") != null); // file:///path
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "]7;file://'\"${HOST}") == null); // 옛 형태로 되돌아가지 않았다
 }
 
 test "zsh integration script routes ssh through maru ssh only when opt-in env is injected" {

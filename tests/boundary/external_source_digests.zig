@@ -333,7 +333,12 @@ pub const inventory = [_]Proof{
     // Linux cross-compile에서도 같은 raw ABI를 갖게 했다. @field 반사 owner count는 2 그대로다.
     // 편집기 뷰별 랩 override(`Term.rt.editor_wrap`)와 `toggle_editor_wrap` dispatch가 붙어 또 바뀐다.
     // count는 2 그대로다 — 필드 하나와 switch 분기 한 줄이고 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "6bfc2bff0ab6f7b059057ae8731839b17f6edb5530a491c86fbc5d6b46aa8f36" },
+    //
+    // 로컬 세션이 원격으로 오판되던 결함을 고치며 또 바뀐다: `localHostname`이 자리 잡지 않은 이름
+    // (빈 값·`localhost`)을 더는 캐시하지 않고(+ 순수 판정 `hostnameIsSettled`), SCM 빈 안내의 문구
+    // 선택이 `git_ops.scmEmptyNotice` 호출 한 줄로 줄었으며, 재현 테스트가 추가됐다. count는 2 그대로다 —
+    // 셋 다 `@field` 반사 접근이나 Client 구성·receiver 집합을 건드리지 않는다(문자열 비교·switch·테스트).
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "832234d5296c672c5462bb4bbe6de4614291d8394154e3ca0aa9412d188f65b2" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2
@@ -358,7 +363,11 @@ pub const inventory = [_]Proof{
     // view options(⚙) 메뉴에 세션 아이콘 배치 토글(`sidebar.session-icon-gutter`)이 붙었다가 **되돌려졌다** —
     // 두 배치를 옵션으로 남기는 대신 인라인 하나로 확정했기 때문이다(사용자 결정). 그래서 값이 토글 도입
     // 이전으로 돌아왔다. count는 내내 2 그대로였다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "1c0783521f3ef6495bbcab342afa71a4a6d174fdd5ceee97f900a7d2d70a5469" },
+    //
+    // 브랜치 메뉴(`requestBranchMenu`)의 저장소 조회가 `gitRepoRoot`(2-상태 null)에서 `gitRepoTarget`
+    // (3-상태 switch)으로 바뀌며 움직인다 — `.unknown`을 "저장소가 아니다"로 단정하던 안내를 도크와 같은
+    // 구분으로 맞췄다. count는 2 그대로다 — 분기 하나와 안내 상수 참조뿐이고 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 2, .digest_hex = "96a49d40f4718ae32afa7b5a14b85ded0cffba6263297d0a62a58ab34ffc694c" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →

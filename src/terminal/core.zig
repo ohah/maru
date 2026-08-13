@@ -1322,9 +1322,13 @@ pub const TerminalCore = struct {
     }
 
     /// 그 cwd를 보고한 호스트(OSC 7 authority). 빈 authority(`file:///path` = VTE 규약 localhost)이거나
-    /// 한 번도 안 받았으면 빈 슬라이스다. **이 값만으로 원격이라 단정하지 않는다** — 로컬 셸도 자기
-    /// hostname을 실어 보내므로(maru 셸 통합의 `${HOST}`가 그렇다), 로컬 여부는 `hostIsLocal`이 로컬
+    /// 한 번도 안 받았으면 빈 슬라이스다. **이 값만으로 원격이라 단정하지 않는다** — 사용자 rc나 다른
+    /// 터미널의 통합은 로컬 셸에서도 자기 hostname을 실어 보내므로, 로컬 여부는 `hostIsLocal`이 로컬
     /// hostname과 대조해 정한다(docs/ssh-integration.md §9.2).
+    ///
+    /// maru 자신의 **로컬** 셸 통합은 authority를 비워 보낸다(shell_integration.zig) — 로컬 pty 전용
+    /// 스크립트라 보고하는 cwd가 정의상 로컬이고, hostname 두 스냅샷의 어긋남으로 자기 세션을 원격으로
+    /// 오판하는 경로를 아예 없애기 위해서다. 원격 rc의 스니펫은 계속 `${HOST}`를 싣는다(§9.5).
     pub fn currentCwdHost(self: *const TerminalCore) []const u8 {
         return self.cwd_host orelse "";
     }
@@ -2700,6 +2704,20 @@ test "hostIsLocal: empty/localhost/self are local, short-vs-FQDN matches, others
     // 로컬 이름을 못 얻으면 보수적으로 원격 — 없는 경로로 spawn하는 쪽이 host 접두가 붙는 쪽보다 나쁘다.
     try std.testing.expect(!TerminalCore.hostIsLocal("box", ""));
     try std.testing.expect(TerminalCore.hostIsLocal("", "")); // 단 빈 authority는 여전히 로컬
+}
+
+// 위 테스트의 `!hostIsLocal("box.corp.com", "box.local")`은 **같은 머신의 두 이름**일 수도 있다 — macOS는 DHCP
+// 도메인·Wi-Fi 전환·슬립 복귀로 hostname의 접미를 바꾸므로, 셸이 시작할 때 본 이름과 앱이 시작할 때 본 이름이
+// 갈릴 수 있다. 그 단정을 완화하면 사내망 동명 서버가 로컬로 새므로(위 주석) 판정은 그대로 두고, **로컬 보고자가
+// 추측할 거리를 주지 않는 쪽**으로 막았다: maru의 로컬 셸 통합은 authority를 비워 보낸다(shell_integration.zig).
+// 이 테스트가 그 계약의 반대편 — "빈 authority는 로컬 이름이 어떤 상태든 로컬" — 을 고정한다.
+test "hostIsLocal: 빈 authority는 로컬 이름의 상태와 무관하게 로컬이다(로컬 셸 통합의 계약)" {
+    try std.testing.expect(TerminalCore.hostIsLocal("", "")); // 이름을 못 얻은 순간
+    try std.testing.expect(TerminalCore.hostIsLocal("", "localhost")); // 네트워크 구성 전 임시 이름
+    try std.testing.expect(TerminalCore.hostIsLocal("", "box.lan")); // DHCP가 준 도메인
+    try std.testing.expect(TerminalCore.hostIsLocal("", "box.local")); // mDNS 이름
+    // 대조군: authority가 실려 있으면 판정은 예전 그대로다(원격 rc의 스니펫은 계속 ${HOST}를 싣는다 — §9.5).
+    try std.testing.expect(!TerminalCore.hostIsLocal("build-box", "box.local"));
 }
 
 test "OSC 7 percent-decodes the path (spaces, UTF-8 bytes round-trip)" {

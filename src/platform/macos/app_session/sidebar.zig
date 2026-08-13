@@ -1514,12 +1514,17 @@ pub fn spinnerBarsUtf8(self: *const AppSession, allocator: std.mem.Allocator) ![
     return allocator.dupe(u8, bars[0..used]);
 }
 
+/// running 상태의 **문구**만. 파형과 따로 두는 이유는 소비처가 둘로 갈리기 때문이다 — 카드·목록 행의 상태줄은
+/// 파형 + 문구를 함께 쓰지만(`runningStatusLine`), 토글 행의 접힘 요약은 **문구만** 쓴다(`agentSummaryLine`).
+/// 문자열을 두 곳에 따로 적으면 문구를 바꿀 때 한쪽만 바뀐다.
+pub const running_label = "진행중";
+
 /// running 상태줄/라벨 파형 문자열 "▁▅▇▃ 진행중"(owned). 사이드바 카드(workspaceStatusLine)와 단일 Term
 /// 폴백(agentStatusLine)이 **같은 문자열**을 쓰도록 단일화(code-review max — 옛 두 곳 중복 방지).
 pub fn runningStatusLine(self: *AppSession) ![]const u8 {
     const bars = try spinnerBarsUtf8(self, self.allocator);
     defer self.allocator.free(bars);
-    return std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
+    return std.fmt.allocPrint(self.allocator, "{s} " ++ running_label, .{bars});
 }
 
 /// 배지의 **색 구간** — 어느 열 범위가 어느 종류인지. 색칠 루프가 셀만 보고는 알 수 없기 때문에 있다:
@@ -1527,9 +1532,11 @@ pub fn runningStatusLine(self: *AppSession) ![]const u8 {
 /// 조립 루프가 문자열을 만들면서 같은 좌표계로 기록하고 색칠 루프가 그대로 읽는다 — 두 곳이 폭 계산을
 /// 각자 하면 색이 한 칸씩 밀린다.
 ///
-/// 배지가 `sessions` 토글 행으로 옮겨온 뒤로 이 구간은 **한 줄에 두 색 체계가 공존하는 것**을 푸는 유일한 근거이기도
-/// 하다: 같은 줄의 요약 파형(`· ▁▅▇▃ 진행중`)은 대표 kind 색을 쓰고 배지 파형은 종류별 색을 쓰는데, 둘 다 같은
-/// 블록 문자라 codepoint로는 갈리지 않는다. 색칠 루프가 구간을 **먼저** 보는 이유다.
+/// 그래서 색칠 루프는 이 구간을 스피너 판정보다 **먼저** 본다. 스피너 경로는 그 행의 **대표 kind 한 색**만 칠하므로,
+/// claude·codex가 함께 도는 줄에서 배지 둘이 모두 대표색을 받아 종류 구분(배지의 존재 이유)이 사라진다.
+///
+/// 접힘 요약은 이제 파형을 싣지 않지만(`agentSummaryLine`) 그 순서는 그대로 필요하다 — 위 이유는 배지 **둘 사이**의
+/// 문제라 요약과 무관하다. 요약이 파형을 다시 갖게 되면 그때는 "한 줄에 두 색 체계"까지 이 구간이 떠받친다.
 pub const BadgeSpan = struct {
     slot: usize,
     start_col: u16, // 포함
@@ -1723,6 +1730,22 @@ pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
     };
 }
 
+/// 토글 행 **접힘 요약**의 상태 텍스트(owned). 상태 문구는 `agentStatusLine`을 단일 출처로 그대로 쓰되,
+/// running만 파형을 뺀 문구(`running_label`)로 바꾼다.
+///
+/// 요약이 상태줄과 갈리는 이유는 **자리**다: 이 텍스트는 running 집계 배지와 한 줄을 나눠 쓰고, 배지는 접힘과
+/// 무관하게 늘 같은 파형을 그린다(docs/sidebar-agent-list.md §2). 상태줄을 통째로 실으면 같은 프레임의 파형이
+/// 한 줄에 **두 번** 나와, 왼쪽(무엇이 몇 개 도는가)과 오른쪽(대표 상태)이 같은 애니메이션을 중복해 보여준다
+/// (사용자 결정 2026-08-13 — 세션이 하나뿐이면 `▶ 1  ▁▅▇▃ · ▁▅▇▃ 진행중`처럼 두 파형이 같은 것을 말한다).
+///
+/// blocked/idle/unknown의 마커(`?`·`✓`·`·`)는 그대로 둔다 — 배지는 running만 세므로 그 상태들을 말하지 않고,
+/// 마커가 사라지면 요약이 상태 없는 문구가 된다.
+pub fn agentSummaryLine(self: *AppSession, term: *Term) ![]const u8 {
+    if (term.agent_kind != .none and term.agent_state == .running)
+        return self.allocator.dupe(u8, running_label);
+    return agentStatusLine(self, term);
+}
+
 pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     const cw = self.cell_width_px;
     if (cw == 0 or self.tabs.items.len == 0) return error.NoSidebar;
@@ -1822,9 +1845,11 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 // 아예 없어지기 때문이다(사용자 피드백 — 카드 상태줄을 없앤 판단의 빈틈). 펼친 상태에서는 각 행이
                 // 자기 상태를 보여주므로 요약이 잉여라 붙이지 않는다. 요약 상태는 기존 대표 규칙
                 // (blocked > running > idle > unknown)을 그대로 써 **주의가 필요한 것이 먼저** 드러나게 한다.
+                // 텍스트는 `agentStatusLine`이 아니라 `agentSummaryLine`이다 — running의 파형은 같은 줄의 집계
+                // 배지가 이미 그리므로 요약에서는 뺀다(그 함수의 doc이 근거).
                 const toggle_summary: []const u8 = if (t.collapsed and t.tab < self.tabs.items.len) blk: {
                     const rep = tab_ops.tabAgentRepresentative(self.tabs.items[t.tab]) orelse break :blk try self.allocator.dupe(u8, "");
-                    const st = try agentStatusLine(self, rep.term);
+                    const st = try agentSummaryLine(self, rep.term);
                     defer self.allocator.free(st);
                     if (st.len == 0) break :blk try self.allocator.dupe(u8, "");
                     break :blk try std.fmt.allocPrint(self.allocator, " \u{00b7} {s}", .{st});
@@ -2119,11 +2144,14 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // 위치가 바뀌어도 따라오고, 이름·경로 줄의 우연한 블록 문자가 오염되는 것도 막는다.
         const on_agent_row = slot < rrows.len and (rrows[slot] == .agent or rrows[slot] == .agent_toggle);
         const is_spinner = on_agent_row and isAgentSpinnerCp(c.codepoint);
-        // **집계 배지가 먼저다.** 배지는 `sessions` 토글 행에 있고 그 줄에는 대표 상태 요약(`· ▁▅▇▃ 진행중`)도 함께
-        // 온다 — 둘 다 같은 블록 문자라 codepoint로는 안 갈리고, 아래 스피너 경로가 먼저 잡으면 **두 종류의 배지가
-        // 모두 대표 kind 한 색**으로 칠해진다(배지의 존재 이유가 사라진다). 그래서 문자열을 만든 쪽이 기록한 열 구간
+        // **집계 배지가 먼저다.** 아래 스피너 경로는 그 행의 **대표 kind 한 색**만 칠하므로, 먼저 잡히면 claude·codex
+        // 배지가 모두 같은 색이 된다(배지의 존재 이유가 사라진다). 그래서 문자열을 만든 쪽이 기록한 열 구간
         // (`badge_spans`)을 스피너 판정보다 앞에서 본다. 개수 숫자도 같은 구간에 들어 파형과 같은 색을 받는다
-        // (한 배지 = 한 색). 구간에 걸리지 않은 셀은 그대로 아래 경로로 흘러 요약 파형이 대표색을 유지한다.
+        // (한 배지 = 한 색). 구간에 걸리지 않은 셀은 그대로 아래 경로로 흐른다.
+        //
+        // 접힘 요약은 파형을 싣지 않는다(`agentSummaryLine`) — 배지가 이미 같은 파형을 그리는 줄이라 상태줄을 통째로
+        // 실으면 한 줄에 같은 애니메이션이 두 번 나온다. 따라서 이 줄의 블록 문자는 지금 전부 배지 것이지만, 순서는
+        // 위 이유(배지 둘 사이의 색 구분)만으로 이미 필요하다.
         //
         // **줄까지 좁힌다.** `span.slot`은 *행*을 고를 뿐이고 한 행은 여러 *줄*을 가질 수 있어서, slot만 보면 같은 행의
         // 다른 줄에서 같은 열에 온 글자가 배지색을 받는다(카드 배지 시절 `line_index + 1 == line_count`로 좁히던

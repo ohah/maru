@@ -630,28 +630,39 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
 pub fn reapplyForcedAgentStates(self: *AppSession) void {
     const running_raw = std.c.getenv("MARU_FORCE_AGENT");
     const blocked_raw = std.c.getenv("MARU_FORCE_BLOCKED");
-    if (running_raw == null and blocked_raw == null) return;
-    const want: maru.session.agent_observer.State = if (blocked_raw != null) .blocked else .running;
-    const raw = blocked_raw orelse running_raw.?;
-    const want_n = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
+    // MARU_FORCE_AGENTS_COLLAPSED=1 — 카드 하위 세션 목록을 접어 토글 행의 **대표 상태 요약**(`· 진행중`)을
+    // 캡처한다. 그 요약은 접힘에서만 붙으므로(docs/sidebar-agent-list.md §2) 이 훅 없이는 스크린샷으로 만들 수
+    // 없다 — 접기는 사용자 클릭이고 캡처 하니스에는 포인터가 없다. 위 상태 훅과 같은 성격이라 같은 자리에 둔다.
+    //
+    // **상태 훅과 독립적으로도 동작한다.** 실제로 쓸 때는 `MARU_FORCE_AGENT`와 함께 주지만, 함께일 때만 도는
+    // 구조로 두면 이것만 준 사람에게 조용한 무동작이 된다(디버그 훅에서 가장 오해하기 쉬운 실패다).
+    const collapse = std.c.getenv("MARU_FORCE_AGENTS_COLLAPSED") != null;
+    if (running_raw == null and blocked_raw == null and !collapse) return;
 
     var n: usize = 0;
-    var stamp: u64 = 0;
-    outer: for (self.tabs.items) |tab| {
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |term| {
-                if (n >= want_n) break :outer;
-                term.agent_state = want;
-                term.agent_kind = .claude;
-                // 활동 시각은 **앞 Term이 가장 최근**이 되게 심는다 — 그래야 두 정렬이 화면에서 갈린다.
-                // 탭 순서면 [방금, 1분 전], 오래 기다린 순이면 [1분 전, 방금]이다. 같은 방향으로 심으면
-                // 두 목록이 똑같이 나와 정렬이 도는지 캡처로 못 가른다(첫 픽스처가 그래서 쓸모없었다).
-                term.agent_last_output_ms = self.awakeMs() -| (n * 60_000);
-                stamp += 1;
-                n += 1;
+    if (blocked_raw orelse running_raw) |raw| {
+        const want: maru.session.agent_observer.State = if (blocked_raw != null) .blocked else .running;
+        const want_n = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
+        var stamp: u64 = 0;
+        outer: for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (n >= want_n) break :outer;
+                    term.agent_state = want;
+                    term.agent_kind = .claude;
+                    // 활동 시각은 **앞 Term이 가장 최근**이 되게 심는다 — 그래야 두 정렬이 화면에서 갈린다.
+                    // 탭 순서면 [방금, 1분 전], 오래 기다린 순이면 [1분 전, 방금]이다. 같은 방향으로 심으면
+                    // 두 목록이 똑같이 나와 정렬이 도는지 캡처로 못 가른다(첫 픽스처가 그래서 쓸모없었다).
+                    term.agent_last_output_ms = self.awakeMs() -| (n * 60_000);
+                    stamp += 1;
+                    n += 1;
+                }
             }
         }
     }
+    if (collapse) for (self.tabs.items) |tab| {
+        tab.agents_collapsed = true;
+    };
     // **사이드바를 다시 투영한다.** `sidebar_rows`는 이벤트(Term 열기/닫기·접기·드래그)에서만 재빌드되고 tick에는
     // 돌지 않는다 — 그 설계 자체는 옳다(매 프레임 재투영은 낭비고, running 상태는 draw list가 라이브로 재조회한다).
     // 문제는 이 하니스가 **제품 이벤트를 거치지 않고** 상태를 심는다는 점이다: `MARU_FORCE_SPLIT`이 만든 pane과
@@ -659,8 +670,9 @@ pub fn reapplyForcedAgentStates(self: *AppSession) void {
     // 첫 투영 그대로 굳는다. 실제로 캡처에서 세션 목록이 통째로 안 나왔고, 그것을 코드 회귀로 오해하기 쉬웠다.
     //
     // 사용자 클릭과 **같은 경로**(rebuildSidebar)를 태워 rows를 현실과 맞춘다(메모리·docs의 self-verify 게이트 규율).
-    // env 미설정이면 위에서 이미 반환했으므로 제품 실행에는 영향이 없다.
-    if (n > 0) sidebar_ops.rebuildSidebar(self) catch {};
+    // env 미설정이면 위에서 이미 반환했으므로 제품 실행에는 영향이 없다. 접힘도 같은 이유로 재투영이 필요하다 —
+    // `agents_collapsed`는 rows에 굳어 들어가므로 세우기만 하고 다시 그리지 않으면 화면은 펼친 채로 남는다.
+    if (n > 0 or collapse) sidebar_ops.rebuildSidebar(self) catch {};
 }
 
 /// `MARU_NATIVE_EDITOR=<path>` — 네이티브 편집기로 파일을 **열어 보고 그 결과를 알린다**(N1).

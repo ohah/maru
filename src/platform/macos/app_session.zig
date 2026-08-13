@@ -24554,13 +24554,28 @@ test "사이드바 토글 행: running 배지가 붙어도 그려진다(목록 �
     try std.testing.expectEqual(expected_bars, claude_painted);
     try std.testing.expectEqual(expected_bars, codex_painted);
 
-    // **접으면 같은 줄에 요약 파형이 하나 더 붙는다** — 배지(종류별 색)와 요약(대표 kind 색)이 한 줄에 공존하는
-    // 유일한 상태이고, 색칠 루프가 구간을 스피너 판정보다 먼저 보는 이유 그 자체다. 배지가 접힘에서도 남아야
-    // 한다는 계약(«접힘과 무관하게 항상»)도 여기서 함께 지켜진다.
+    // **접으면 대표 상태 요약이 같은 줄에 붙는다.** 그 요약은 파형을 싣지 않는다(`agentSummaryLine`) — 배지가
+    // 이미 같은 프레임의 파형을 그리는 줄이라, 상태줄을 통째로 실으면 같은 애니메이션이 한 줄에 두 번 나온다
+    // (사용자 결정 2026-08-13, docs/sidebar-agent-list.md §2). 배지가 접힘에서도 남아야 한다는 계약
+    // («접힘과 무관하게 항상»)도 여기서 함께 지켜진다.
     tab.agents_collapsed = true;
+    // **폭을 넓히고 본다.** 기본 fixture 사이드바는 20칸이라 요약이 통째로 `…`로 잘려, 파형이 중복돼도 화면에
+    // 나타나지 않는다 — 그 폭에서는 아래 판정이 공허하다(실측: 요약을 상태줄로 되돌리는 mutation을 넣어도 통과했다).
+    // 잘리지 않는 폭에서만 "요약이 파형을 얹지 않는다"가 실제로 시험된다.
+    sidebar_ops.setSidebarWidthPx(session, @floatFromInt(sidebar_ops.sidebar_max_pt * session.scale_milli / 1000));
     sidebar_ops.rebuildSidebar(session) catch {};
     var dl2 = try sidebar_ops.buildSidebarTitleDrawList(session);
     defer dl2.deinit(a);
+
+    // 요약이 **정말 그려졌는지** 먼저 확인한다. 이것이 위 폭 확장의 근거이자 아래 판정의 전제다 — 요약이 잘려
+    // 사라지면 파형 칸 수는 저절로 맞아떨어지고, 그 통과는 아무것도 증명하지 않는다.
+    var summary_glyphs: usize = 0;
+    for (dl2.cells) |c| {
+        if (c.row / coretext_frame_builder.sidebar_line_base != 1) continue;
+        // `진행중`의 세 글자 — 말줄임(`…`)이 걸리면 하나도 남지 않는다.
+        if (c.codepoint == '\u{c9c4}' or c.codepoint == '\u{d589}' or c.codepoint == '\u{c911}') summary_glyphs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), summary_glyphs);
 
     var claude2: usize = 0;
     var codex2: usize = 0;
@@ -24575,12 +24590,11 @@ test "사이드바 토글 행: running 배지가 붙어도 그려진다(목록 �
             else => {},
         }
     }
-    // 판정은 **배지에만** 건다: 종류마다 자기 칸이 그대로 남아야 한다(«접힘과 무관하게 항상»). 접힘 요약이 이 줄에
-    // 파형을 하나 더 얹을 수도 있으므로 등호가 아니라 하한으로 본다 — 요약은 이 변경이 건드리지 않은 기존 경로이고
-    // (대표 규칙이 어느 종류로 갈지 정한다), 그 동작에 이 테스트를 묶으면 애먼 곳에서 깨진다.
-    // 배지가 접힘에서 사라지거나 구간이 밀리면 한쪽이 하한 아래로 떨어져 걸린다.
-    try std.testing.expect(claude2 >= expected_bars);
-    try std.testing.expect(codex2 >= expected_bars);
+    // 판정은 **등호**다. 종류마다 자기 칸이 그대로 남아야 하고(«접힘과 무관하게 항상»), 그 위에 요약 파형이
+    // 얹히지 않아야 한다 — 대표 kind는 하나뿐이므로 요약이 파형을 다시 싣는 순간 그쪽 종류만 칸 수가 늘어
+    // 여기서 걸린다(파형 중복 회귀 가드). 배지가 접힘에서 사라지거나 구간이 밀리면 반대로 모자라 걸린다.
+    try std.testing.expectEqual(expected_bars, claude2);
+    try std.testing.expectEqual(expected_bars, codex2);
 
     // **한 종류만 도는 경우**(여기선 codex)도 시작 자리가 같아야 한다. 조립은 종류 사이 간격을 `first` 분기로
     // 넣는데, 그 분기가 첫 배지에도 간격을 붙이면 배지 전체가 오른쪽으로 밀리고 색만 어긋난다 — claude·codex가
@@ -24758,6 +24772,62 @@ test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중
         try std.testing.expectEqual(@as(usize, 0), s.len);
     }
     try std.testing.expectEqual(AgentKind.none, tab_ops.tabAgentKind(tab));
+}
+
+// 토글 행의 **접힘 요약**은 상태줄과 running에서만 갈린다. 그 줄에는 running 집계 배지가 접힘과 무관하게 늘 같은
+// 파형을 그리므로(docs/sidebar-agent-list.md §2), 요약이 상태줄을 통째로 실으면 같은 프레임의 파형이 한 줄에 두 번
+// 나온다 — 사용자가 본 `▶ 1  ▁▅▇▃ · ▁▅▇▃ 진행중`이 그것이다(결정 2026-08-13). 이 테스트는 갈리는 자리가 running
+// **하나뿐**임을 고정한다: 나머지 상태의 마커(`?`·`✓`·`·`)까지 벗기면 요약이 상태 없는 문구가 된다.
+test "agentSummaryLine: running만 파형을 뺀 문구, 나머지 상태는 상태줄과 동일" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = tab_ops.activeTab(session).activePane().activeTerm();
+    term.agent_kind = .claude;
+
+    term.agent_state = .running;
+    {
+        const summary = try sidebar_ops.agentSummaryLine(session, term);
+        defer allocator.free(summary);
+        // 문구만 — 파형이 한 칸이라도 남으면 그 줄에서 배지와 겹친다.
+        try std.testing.expectEqualStrings(sidebar_ops.running_label, summary);
+        var it = std.unicode.Utf8Iterator{ .bytes = summary, .i = 0 };
+        while (it.nextCodepoint()) |cp| try std.testing.expect(!sidebar_ops.isAgentSpinnerCp(cp));
+        // 반면 상태줄은 파형을 그대로 유지한다(카드·목록 행이 쓰는 자리 — 거기엔 배지가 없다).
+        const status = try sidebar_ops.agentStatusLine(session, term);
+        defer allocator.free(status);
+        const first_len = std.unicode.utf8ByteSequenceLength(status[0]) catch 1;
+        try std.testing.expect(sidebar_ops.isAgentSpinnerCp(std.unicode.utf8Decode(status[0..first_len]) catch 0));
+        try std.testing.expect(std.mem.endsWith(u8, status, sidebar_ops.running_label));
+    }
+
+    // 나머지 상태는 **글자 하나 안 바뀐다** — 배지는 running만 세므로 이 상태들의 마커·문구를 대신 말해주지 않는다.
+    for ([_]@TypeOf(term.agent_state){ .blocked, .idle, .unknown }) |state| {
+        term.agent_state = state;
+        const summary = try sidebar_ops.agentSummaryLine(session, term);
+        defer allocator.free(summary);
+        const status = try sidebar_ops.agentStatusLine(session, term);
+        defer allocator.free(status);
+        try std.testing.expectEqualStrings(status, summary);
+    }
+
+    // 에이전트가 아니면 빈 문자열(그 자리에 요약을 붙이지 않는다) — 상태줄과 같은 규율.
+    term.agent_kind = .none;
+    term.agent_state = .running; // kind가 none이면 상태는 의미가 없다: running 분기가 kind를 먼저 봐야 한다.
+    {
+        const summary = try sidebar_ops.agentSummaryLine(session, term);
+        defer allocator.free(summary);
+        try std.testing.expectEqual(@as(usize, 0), summary.len);
+    }
 }
 
 // 상단 탭 바 running 표시는 파형(5칸)이 아니라 **정적 1칸 플래그 ●**(U+25CF) — tmux 창-플래그 관례로 이름 폭을 거의 안

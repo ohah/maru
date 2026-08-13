@@ -523,6 +523,20 @@ test "선택은 화면에 quad 로 나타난다" {
     const with_sel = bridge.maru_mobile_build(402, 874);
     try std.testing.expect(with_sel > plain); // 표시 quad 가 늘었다
 
+    // **범위가 단어와 정확히 같아야 한다.** 눈으로는 한 칸 차이를 못 센다 — 실제로 끝 열을
+    // 배타로 그려 한 칸 모자란 것을 화면만 보고는 못 잡았다. 끝 열은 **포함**이다.
+    const span = bridge.maru_mobile_selection_span();
+    try std.testing.expectEqual(@as(u64, 0), (span >> 48) & 0xFFFF); // start_row
+    try std.testing.expectEqual(@as(u64, 0), (span >> 32) & 0xFFFF); // start_col — "hello" 의 h
+    try std.testing.expectEqual(@as(u64, 0), (span >> 16) & 0xFFFF); // end_row
+    try std.testing.expectEqual(@as(u64, 4), span & 0xFFFF); // end_col — "hello" 의 o(포함)
+
+    // **누른 칸 안에서 계속 움직여도 단어가 안 줄어든다.** 길게 누른 뒤에도 move 는 계속
+    // 오는데 그때마다 head 를 당기면 3칸 단어가 2칸이 된다(픽셀로 재서 잡은 결함).
+    bridge.maru_mobile_pointer(1, q.x + 1, q.y + 1, 5650);
+    bridge.maru_mobile_pointer(1, q.x + 2, q.y, 5700);
+    try std.testing.expectEqual(span, bridge.maru_mobile_selection_span());
+
     bridge.maru_mobile_pointer(3, q.x + 2, q.y + 1, 5700);
     try std.testing.expectEqual(plain, bridge.maru_mobile_build(402, 874));
     bridge.maru_mobile_clear_error();

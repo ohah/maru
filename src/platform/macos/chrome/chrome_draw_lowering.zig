@@ -392,6 +392,29 @@ pub fn appendBackgroundQuads(
     origin_x_px: u32,
     origin_y_px: u32,
     out: *std.ArrayList(metal_frame.GpuQuad),
+    layer: u32,
+) void {
+    appendBackgroundQuadsWithTerminalOpacity(allocator, draws, tk, origin_x_px, origin_y_px, out, layer, 255);
+}
+
+/// 위와 같되 **`terminal_bg` 역할 quad의 알파에만** 창 투명도를 곱한다.
+///
+/// **왜 그 역할만인가.** 렌더러 규약이 그렇다 — `window.opacity`는 터미널 레이어 **clear color의
+/// alpha에만** 곱하고(`maru_metal_renderer.m`), 배경색이 명시된 셀은 건드리지 않는다. 그러니
+/// "터미널의 바탕"을 칠하는 quad는 같은 규칙을 따라야 하고, 도크·사이드바 표면(`surface_bg`)이나
+/// 스크롤바는 따르면 안 된다(반투명해지면 안 보인다).
+///
+/// **완전히 같아지지는 않는다.** 이 quad는 이미 opacity가 걸린 clear 위에 premultiplied-over로
+/// 겹치므로 유효 알파가 `op·(2−op)`가 되어 터미널(단일 op 레이어)보다 조금 더 불투명하다. 활성 탭
+/// cutout이 같은 한계를 갖고 있고(`app_session.zig`의 그 주석), 픽셀-정확은 아래 레이어를 도려내야
+/// 하는 systemic 변경이라 함께 보류한다. 불투명 solid보다 이쪽이 터미널에 훨씬 가깝다.
+pub fn appendBackgroundQuadsWithTerminalOpacity(
+    allocator: std.mem.Allocator,
+    draws: []const chrome.ChromeDraw,
+    tk: *const chrome.Tokens,
+    origin_x_px: u32,
+    origin_y_px: u32,
+    out: *std.ArrayList(metal_frame.GpuQuad),
     /// 이 draws가 놓일 합성 층(SV6a). 기본 2(bottom — 셀·텍스트 **아래**)는 도크·탐색기 배경처럼
     /// 텍스트 밑에 깔리는 것들의 자리다.
     ///
@@ -400,6 +423,8 @@ pub fn appendBackgroundQuads(
     /// 그것을 여기서 2로 고정하는 바람에 소비처가 뒤에서 `q.layer = 3`으로 되돌리고 있었다 — 같은
     /// 역할이 두 층에 흩어진 원인이다(docs/scroll-area.md "판단(2026-08-09)").
     layer: u32,
+    /// `terminal_bg` quad에 곱할 알파(255 = 그대로). 호출자가 `windowOpacityByte`를 넘긴다.
+    terminal_bg_alpha: u8,
 ) void {
     for (draws) |draws_for_layer| for (draws_for_layer.ops) |op| switch (op) {
         .quad => |quad| {
@@ -411,7 +436,12 @@ pub fn appendBackgroundQuads(
             // `ChromeDraw.Quad.alpha` is semantic paint data, not a Lab-only decoration.
             // Preserve it in the renderer's ARGB colors so loading skeletons and later hover
             // transitions keep the same token-relative contrast on the actual Metal host.
-            const fill = packRgba(tk.get(quad.fill_role), quad.alpha);
+            // 터미널 바탕을 칠하는 quad만 창 투명도를 함께 건다(위 doc — 렌더러 규약과 같은 축).
+            const fill_alpha: u8 = if (quad.fill_role == .terminal_bg)
+                @intCast((@as(u16, quad.alpha) * @as(u16, terminal_bg_alpha)) / 255)
+            else
+                quad.alpha;
+            const fill = packRgba(tk.get(quad.fill_role), fill_alpha);
             const border = if (quad.border_role) |role| packRgba(tk.get(role), quad.alpha) else 0;
             out.append(allocator, .{
                 // Component draw coordinates are local to the dock content. Text receives the

@@ -90,7 +90,7 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     const rows = asm_.rows_count;
     const cells = try allocator.alloc(terminal.Cell, @as(usize, cols) * rows);
     errdefer allocator.free(cells);
-    for (cells) |*c| c.* = .{}; // blank(codepoint=' ', width=1, default style)로 채운다(누락 열 대비).
+    for (cells) |*c| c.* = .{}; // blank(안 쓴 칸 codepoint=0, width=1, default style)로 채운다(누락 열 대비).
 
     var graphemes: std.ArrayListUnmanaged([]u21) = .empty;
     errdefer {

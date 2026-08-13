@@ -779,7 +779,7 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
             const wrapped = screen.absRowWrapped(self, line_abs);
             // wrapped 행은 안 쓴 칸만, 마지막(hard) 행은 뒤 빈칸을 전부 자른다(extractSelection과 같은 규칙).
             // 검색 텍스트에 wrap 채움이 끼면 wrap을 걸친 needle이 안 잡힌다.
-            const limit: usize = if (wrapped) screen.writtenLen(row) else screen.trimmedLen(row);
+            const limit: usize = if (wrapped) screen.textLen(row) else screen.trimmedLen(row);
             var col: usize = 0;
             while (col < limit) : (col += 1) {
                 const cell = row[col];
@@ -845,7 +845,7 @@ pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator)
         // 어디까지 읽을지는 줄끝의 종류가 정한다. hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 전부 자르고
         // (줄끝 공백이 복사에 안 딸려가게), soft-wrap 이음은 **안 쓴 칸만** 자른다 — 논리 줄 가운데라
         // 쓴 공백은 내용이고, wrap 채움은 이어 붙이면 없던 공백이 된다.
-        const limit: usize = if (wrapped_flag and abs != sel.end.row) screen.writtenLen(row_cells) else screen.trimmedLen(row_cells);
+        const limit: usize = if (wrapped_flag and abs != sel.end.row) screen.textLen(row_cells) else screen.trimmedLen(row_cells);
         const to: usize = @max(from, @min(full_to, limit));
         try appendRowUtf8(&out, allocator, row_cells, self.grapheme_store.items, from, to);
         if (abs != sel.end.row and !wrapped_flag) try out.append(allocator, '\n');
@@ -1134,4 +1134,40 @@ test "wrap 채움: 커서가 떠난 패딩 줄을 활성 reflow가 합쳐도 패
     const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
     defer allocator.free(text);
     try std.testing.expectEqualStrings(written, text);
+}
+
+// **배경을 칠해 둔 화면에서도 wrap 채움은 채움이다.** BCE(`\e[41m` + `ED 2`)로 모든 칸이 pen 배경을
+// 달면 2셀 글자가 밀리며 남은 칸도 배경을 단다. 그 칸을 "칠해졌으니 내용"으로 보면 유령 공백이
+// 되살아난다 — 텍스트 경로는 배경을 보지 않는다(적대적 검증 2라운드).
+test "wrap 채움: BCE로 칠한 화면에서도 밀린 칸이 복사에 안 낀다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer c.deinit();
+    try c.write("\x1b[41m\x1b[2J\x1b[H"); // 배경색으로 화면 전체를 지운다
+    try c.write("abcdefghi가나"); // 9칸 뒤 2셀 글자가 안 들어가 밀린다 → 남은 칸은 '칠해진 빈 칸'
+    try std.testing.expect(c.screen.wrapped[0]);
+
+    c.selectLineAt(0);
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    // wrap 경계의 채움 칸은 빠졌다. 줄 **끝**의 공백은 남는데, 그건 이 변경과 무관한 기존 정책이다 —
+    // `isTextTrimBlank`은 배경이 칠해진 빈칸을 "화면상 의미가 있다"고 보고 보존한다.
+    try std.testing.expectEqualStrings("abcdefghi가나      ", text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "i 가") == null); // 경계에 유령 공백이 없다
+}
+
+// **두 규칙은 짝이다.** soft-wrap 이음은 글자 없는 칸만 자르고(위 테스트들), hard 줄끝은 **쓴 공백까지**
+// 자른다 — 복사에 줄끝 공백이 딸려가지 않게. 아래가 없으면 뒤 규칙을 지워도 아무도 안 잡는다
+// (적대적 검증 3라운드에서 변이가 안 물어 드러났다).
+test "hard 줄끝: 프로그램이 쓴 뒤 공백도 복사에서 잘린다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer c.deinit();
+    try c.write("hi   "); // 줄 끝에 '쓴' 공백 3칸 — wrap이 아니라 hard 줄끝이다
+    try std.testing.expect(!c.screen.wrapped[0]);
+
+    c.selectLineAt(0);
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("hi", text);
 }

@@ -348,7 +348,18 @@ pub export fn maru_mobile_scroll(dy_px: f32) void {
 // ── 포인터: 끌면 스크롤, 길게 누르면 선택 ────────────────────────────────────
 // **무엇으로 해석할지는 코어가 정한다**(§3.1). 플랫폼마다 판단하면 같은 손가락이 기기에 따라
 // 다른 뜻이 된다. 플랫폼이 갖는 것은 관성뿐이다(손을 뗀 뒤 `maru_mobile_scroll`).
-const long_press_ms: u64 = 500; // 데스크톱 우클릭 자리 — 모바일 관례값
+/// **길게 누름 지연은 OS 가 정한다.** 두 플랫폼 다 사용자 접근성 설정으로 바꿀 수 있고
+/// (Android "길게 누르기 지연", iOS "터치 조절 → 유지 시간"), 하드코딩하면 그 설정을
+/// 무시하게 된다 — 손이 느린 사용자가 길게 눌러도 선택이 안 잡힌다.
+///
+/// 여기 값은 **플랫폼이 안 알려줄 때의 폴백**이다. 실측: 이 에뮬레이터의 OS 값은 400ms 다.
+var long_press_ms: u64 = 500;
+
+/// 플랫폼이 자기 OS 값을 알려 준다(Android `ViewConfiguration.getLongPressTimeout()`,
+/// iOS `UILongPressGestureRecognizer` 기본 0.5초). 0 은 무시한다.
+pub export fn maru_mobile_set_long_press_ms(ms: u32) void {
+    if (ms > 0) long_press_ms = ms;
+}
 /// 이만큼 움직이면 "누르고 있는" 것이 아니라 끄는 것이다(논리 px).
 const long_press_slop: f32 = 10;
 

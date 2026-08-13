@@ -105,6 +105,18 @@ pub fn textTrimmedLen(cells: []const Cell) usize {
     return len;
 }
 
+/// **누가 쓴 칸까지**의 길이 — 뒤에 붙은 "안 쓴 칸"만 제외한다. 쓴 공백은 남는다.
+/// soft-wrap 행이 쓰는 길이다: wrap 이음은 논리 줄 가운데라 쓴 공백을 지워선 안 되고, 반대로
+/// wrap 채움(터미널이 만든 빈 칸)은 내용이 아니므로 이어 붙이면 없던 공백이 된다.
+/// hard 줄끝은 `textTrimmedLen`(쓴 공백도 자름)을 쓴다 — 거기선 뒤 공백이 진짜 뒤 공백이다.
+pub fn writtenLen(cells: []const Cell) usize {
+    var len = cells.len;
+    while (len > 0) : (len -= 1) {
+        if (!isUnwritten(cells[len - 1])) break;
+    }
+    return len;
+}
+
 /// OSC 133 semantic prompt — 셸이 알려주는 한 행의 의미 분류. 터미널은 raw 바이트만 봐선
 /// 프롬프트/입력/출력을 구분 못 하므로, 셸 통합이 `OSC 133 ; A|B|C|D`로 경계를 마킹한다.
 /// 행 단위로 보관(`wrapped`와 같은 병렬 배열 패턴)해, 이후 단계가 거터 마크(✓/✗)·프롬프트

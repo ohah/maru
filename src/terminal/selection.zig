@@ -777,8 +777,9 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
         while (true) {
             const row = screen.absRow(self, line_abs) orelse break;
             const wrapped = screen.absRowWrapped(self, line_abs);
-            // wrapped 행은 전폭이 실제 내용(우측 끝에서 wrap), 마지막(hard) 행은 뒤 빈칸을 자른다(extractSelection과 같은 규칙).
-            const limit: usize = if (wrapped) row.len else screen.trimmedLen(row);
+            // wrapped 행은 안 쓴 칸만, 마지막(hard) 행은 뒤 빈칸을 전부 자른다(extractSelection과 같은 규칙).
+            // 검색 텍스트에 wrap 채움이 끼면 wrap을 걸친 needle이 안 잡힌다.
+            const limit: usize = if (wrapped) screen.writtenLen(row) else screen.trimmedLen(row);
             var col: usize = 0;
             while (col < limit) : (col += 1) {
                 const cell = row[col];
@@ -841,8 +842,11 @@ pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator)
         const wrapped_flag = screen.absRowWrapped(self, abs);
         const from: usize = if (abs == sel.start.row) sel.start.col else 0;
         const full_to: usize = if (abs == sel.end.row) @min(@as(usize, sel.end.col) + 1, row_cells.len) else row_cells.len;
-        // hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 잘라 복사한다 — 패딩이 텍스트로 들어가지 않게.
-        const to: usize = if (wrapped_flag and abs != sel.end.row) full_to else @max(from, @min(full_to, screen.trimmedLen(row_cells)));
+        // 어디까지 읽을지는 줄끝의 종류가 정한다. hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 전부 자르고
+        // (줄끝 공백이 복사에 안 딸려가게), soft-wrap 이음은 **안 쓴 칸만** 자른다 — 논리 줄 가운데라
+        // 쓴 공백은 내용이고, wrap 채움은 이어 붙이면 없던 공백이 된다.
+        const limit: usize = if (wrapped_flag and abs != sel.end.row) screen.writtenLen(row_cells) else screen.trimmedLen(row_cells);
+        const to: usize = @max(from, @min(full_to, limit));
         try appendRowUtf8(&out, allocator, row_cells, self.grapheme_store.items, from, to);
         if (abs != sel.end.row and !wrapped_flag) try out.append(allocator, '\n');
     }
@@ -1021,4 +1025,113 @@ test "find span은 scroll 후 좌표계라 스크롤 전 화면과 어긋난다(
     for ("MARUFIND", 0..) |ch, i| {
         try std.testing.expectEqual(@as(u21, ch), view2[span2.start.row][span2.start.col + i]);
     }
+}
+
+// **wrap 채움은 내용이 아니다.** 아래 넷은 전부 같은 뿌리에서 나온 결함이고(안 쓴 칸과 쓴 공백이
+// 같은 값이었다), 실제로 재서 확인한 뒤 여기 박았다. 규칙 하나(soft-wrap 행은 쓴 칸까지)를 되돌리면
+// 넷이 같이 깨진다.
+test "wrap 채움: 2셀 글자가 밀리며 남은 칸이 복사에 안 낀다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer c.deinit();
+    try c.write("abcdefghi가나다"); // 9칸 뒤 2셀 글자가 안 들어가 다음 행으로 밀린다 → 10번째 칸은 안 쓴 칸
+    try std.testing.expect(c.screen.wrapped[0]);
+
+    c.selectLineAt(0);
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("abcdefghi가나다", text);
+}
+
+test "wrap 채움: 프로그램이 쓴 공백은 wrap을 걸쳐도 지켜진다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+    defer c.deinit();
+    const written = "name                          |end"; // 정렬 출력이 wrap 경계를 공백으로 넘는다
+    try c.write(written);
+
+    c.selectLineAt(0);
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings(written, text);
+}
+
+test "wrap 채움: 넓히는 resize 뒤 그 줄을 복사해도 패딩이 안 낀다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 8 });
+    defer c.deinit();
+    const written = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"; // 10칸에서 자동 줄바꿈 5행
+    try c.write(written);
+    try c.resize(20, 8); // 커서 줄이라 reflow하지 않고 새 폭으로 pad한다
+
+    c.selectLineAt(0);
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings(written, text);
+}
+
+// 위 상태가 스크롤백으로 밀려 재-wrap되면 예전에는 패딩이 **진짜 셀로 구워져** 영구히 남았다.
+test "wrap 채움: 넓힌 줄이 재-wrap돼도 패딩이 안 구워진다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 8 });
+    defer c.deinit();
+    try c.write("abcdefghijklmnopqrst");
+    try c.resize(20, 8);
+    var i: usize = 0;
+    while (i < 12) : (i += 1) try c.write("\r\nX"); // 그 줄을 스크롤백으로 민다
+    try c.resize(30, 8); // 스크롤백 재-wrap
+    c.scrollViewport(-20);
+
+    const row = screen.absRow(&c, 0) orelse return error.TestUnexpectedResult;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendRowUtf8(&buf, allocator, row, c.grapheme_store.items, 0, screen.trimmedLen(row));
+    try std.testing.expectEqualStrings("abcdefghijklmnopqrst", buf.items);
+}
+
+test "wrap 채움: 넓힌 뒤에도 wrap을 걸친 needle이 검색된다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer c.deinit();
+    try c.write("abcdefghijklmnopqrst"); // "ijkl"이 행 경계를 걸친다
+    try c.resize(20, 4);
+
+    var out: std.ArrayList(types.Match) = .empty;
+    defer out.deinit(allocator);
+    try c.findMatches(allocator, "ijkl", &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+}
+
+// 위 재-wrap 테스트는 스크롤백 **읽기** 쪽이 가려 주므로, 저장 쪽은 저장된 행 길이로 따로 못 박는다.
+// soft-wrap 행의 저장 길이 = wrap이 일어난 칸 수여야 재-wrap이 논리 줄을 제 폭으로 되돌린다.
+test "wrap 채움: 패딩된 soft 행은 쓴 칸까지만 스크롤백에 저장된다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer c.deinit();
+    try c.write("abcdefghijklmnopqrst"); // 10칸 두 행(0행은 soft-wrap)
+    try c.resize(20, 4); // 커서 줄이라 verbatim + 새 폭으로 pad → 0행은 내용 10칸 + 안 쓴 칸 10칸
+    var i: usize = 0;
+    while (i < 8) : (i += 1) try c.write("\r\nX"); // 그 줄을 스크롤백으로 민다
+
+    const stored = c.scrollbackRow(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(c.screen.sb.rowWrapped(0));
+    try std.testing.expectEqual(@as(usize, 10), stored.len); // 20이 아니라 10
+}
+
+// 활성 화면 reflow는 스크롤백 rewrap과 다른 경로다. 패딩된 줄에서 커서가 떠난 뒤 다시 resize하면
+// 이 경로가 그 줄을 논리 줄로 합치는데, soft 행을 cols로 읽으면 패딩이 내용으로 섞인다.
+test "wrap 채움: 커서가 떠난 패딩 줄을 활성 reflow가 합쳐도 패딩이 안 낀다" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 10, .rows = 8 });
+    defer c.deinit();
+    const written = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ";
+    try c.write(written);
+    try c.resize(20, 8); // 커서 줄이라 reflow 없이 pad
+    try c.write("\r\n"); // 커서를 그 줄 밖으로 — 이제 이 줄은 활성 reflow 대상이다
+    try c.resize(30, 8);
+
+    c.selectLineAt(0);
+    const text = (try c.extractSelection(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings(written, text);
 }

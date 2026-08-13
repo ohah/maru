@@ -981,6 +981,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   0600 no-follow exclusive create, exact-content idempotence/collision 보존과 1 MiB oldest-first prune를 component 6개로 고정한다.
   세 component군과 boundary 1개를 Debug·ReleaseFast에서 실행한다. process bootstrap/writer thread/Client publication은 후속
   CR0b gate가 닫기 전 구현 완료로 세지 않는다.
+  네 번째 runtime gate는 final-address heap owner, exact 한 writer, nonblocking wake coalescing, lowest-bit drain, disk 실패 뒤 ring 보존,
+  정상 join과 200 ms timeout detach/backing 보존, fork-before-pipe 거부를 Debug·ReleaseFast component 3개와 실제 daemon bootstrap
+  boundary로 고정한다. process bootstrap과 writer thread는 구현됐으며 Client incident publication은 후속 CR0b gate 전까지 부분 구현이다.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
 - CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote

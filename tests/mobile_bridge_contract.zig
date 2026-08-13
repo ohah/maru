@@ -359,6 +359,100 @@ test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
     bridge.maru_mobile_clear_error();
 }
 
+// 키 `index` 의 한가운데. **자리를 손으로 적지 않는다** — 브리지가 그린 자리를 그대로 묻는다
+// (적어 두면 레이아웃이 바뀔 때 테스트만 맞고 제품이 틀리게 된다).
+fn keyCenter(index: u32) struct { x: f32, y: f32 } {
+    const packed_rect = bridge.maru_mobile_keybar_rect(index);
+    const x: f32 = @floatFromInt((packed_rect >> 48) & 0xFFFF);
+    const y: f32 = @floatFromInt((packed_rect >> 32) & 0xFFFF);
+    const w: f32 = @floatFromInt((packed_rect >> 16) & 0xFFFF);
+    const h: f32 = @floatFromInt(packed_rect & 0xFFFF);
+    return .{ .x = x + w / 2, .y = y + h / 2 };
+}
+
+// 보조 키바는 **소프트 키보드에 없는 키**(Ctrl·Esc·Tab·화살표)를 만드는 자리다. 좌표 해석을
+// 브리지가 소유하므로(그리는 자리와 판정하는 자리가 같아야 한다) 그 판정이 실제로 도는지 본다.
+//
+// 좌표는 **build 가 잡아 준 것**을 쓴다 — 테스트가 자리를 손으로 적으면 레이아웃이 바뀔 때
+// 테스트만 맞고 제품이 틀리게 된다.
+test "키바 탭이 키를 내고, 밖은 안 먹는다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+
+    // 키바가 서기 전(build 전)에는 아무것도 안 먹어야 한다 — 위에서 build 했으므로 여기서는
+    // "본문 한가운데" 로 확인한다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_keybar_tap(200, 400));
+
+    // esc: 첫 칸. 화면 폭 402 에 11개가 들어가므로 첫 칸은 왼쪽 끝 근처다.
+    const esc = keyCenter(0);
+    const before = bridge.maru_mobile_input("", 0);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(esc.x, esc.y));
+    const after = bridge.maru_mobile_input("", 0);
+    try std.testing.expectEqual(@as(u32, 1), after - before); // ESC = 1바이트
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+// 키바의 **Ctrl 은 다음 한 키에만** 실린다. 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가
+// 되고, 소프트 키보드로 친 글자에 안 실리면 키바를 만든 이유가 없다(그게 실제 쓰임이다).
+test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
+
+    const ctrl = keyCenter(2); // 표의 셋째가 ctrl
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y));
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods()); // MARU_MOD_CTRL
+
+    // **빈 화면에서 본다.** 앞 테스트들이 화면을 글자로 채워 놨으면 새 글자가 기존 칸을
+    // 덮어써서 quad 수가 안 늘고, 그러면 "제어문자라 안 찍혔다" 와 구분되지 않는다.
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    const n0 = bridge.maru_mobile_build(402, 874);
+
+    _ = bridge.maru_mobile_input("c", 1); // 소프트 키보드로 친 글자 — Ctrl 이 실려야 한다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods()); // 소비됐다
+    const n1 = bridge.maru_mobile_build(402, 874);
+    try std.testing.expectEqual(n0, n1); // Ctrl+C 는 0x03 — 화면에 글자를 안 남긴다
+
+    // **한 번만 듣는다**: 다음 글자는 평범한 `c` 라 화면에 남는다.
+    _ = bridge.maru_mobile_input("c", 1);
+    const n2 = bridge.maru_mobile_build(402, 874);
+    try std.testing.expect(n2 > n1);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+}
+
+// **이스케이프 시퀀스는 타이핑이 아니다.** 눌러 둔 Ctrl 을 시퀀스가 먹으면 두 가지가 한꺼번에
+// 깨진다 — 사용자가 누른 Ctrl 이 엉뚱한 데 쓰이고, ESC 는 문자 키 표에 없어서 **그 바이트가
+// 조용히 사라진다**(구현 중 실제로 그렇게 났다).
+test "이스케이프 시퀀스는 눌러 둔 수정자를 먹지 않는다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    bridge.maru_mobile_clear_error();
+    const ctrl = keyCenter(2);
+    _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
+
+    const before = bridge.maru_mobile_input("", 0);
+    const after = bridge.maru_mobile_input("\x1b[2J", 4); // 화면 지우기 — 사용자가 친 것이 아니다
+    try std.testing.expectEqual(@as(u32, 4), after - before); // 4바이트가 그대로 코어에 갔다
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods()); // 아직 눌려 있다
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    // 눌러 둔 것은 다음 **글자**가 가져간다.
+    _ = bridge.maru_mobile_input("c", 1);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
+}
+
+// 같은 키를 또 누르면 꺼져야 한다 — 잘못 눌렀을 때 되돌릴 방법이 없으면 다음 글자가
+// 제어문자가 되는 것을 보고만 있어야 한다.
+test "Ctrl 을 다시 누르면 꺼진다" {
+    _ = bridge.maru_mobile_build(402, 874);
+    const ctrl = keyCenter(2);
+    _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods());
+    _ = bridge.maru_mobile_keybar_tap(ctrl.x, ctrl.y);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_armed_mods());
+    bridge.maru_mobile_clear_error();
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

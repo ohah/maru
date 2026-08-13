@@ -257,6 +257,11 @@ typedef struct { float rect_px[4]; float color[4]; float misc[4]; float cell[4];
     // 플랫폼이 넘긴 것과 같은 논리 좌표계로 되돌린다 — 안 그러면 셀이 어긋난다.
     float lx = (float)(p.x - safe.left);
     float ly = (float)(p.y - safe.top);
+    // **보조 키바가 먼저다.** 키바 위를 눌렀는데 본문 셀 판정으로 가면 키가 안 나간다.
+    if (maru_mobile_keybar_tap(lx, ly)) {
+        NSLog(@"MARU_KEYBAR pt=(%.0f,%.0f) armed=%u", lx, ly, maru_mobile_armed_mods());
+        return;
+    }
     unsigned int cell = maru_mobile_hit_cell(lx, ly);
     NSLog(@"MARU_TOUCH pt=(%.0f,%.0f) logical=(%.0f,%.0f) cell=(%u,%u)",
           p.x, p.y, lx, ly, cell >> 16, cell & 0xFFFF);

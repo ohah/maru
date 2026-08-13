@@ -199,7 +199,9 @@ flowchart TD
 
 `TerminalCore`는 OSC 7의 authority를 버리지 않고 path와 함께 보관한다. 소비처는 둘을 함께 읽어 **로컬 cwd와 원격 cwd를 구분**한다.
 
-- **로컬 판정**: authority가 비었거나(`file:///path` = VTE 규약의 localhost), `localhost`이거나, 로컬 hostname과 같으면 로컬이다. hostname 비교는 대소문자를 무시하고 FQDN의 첫 `.` 앞 짧은 이름도 함께 본다(원격 셸이 `${HOST}`에 짧은 이름을, 로컬이 FQDN을 쓰는 비대칭이 흔하다).
+- **로컬 판정**: authority가 비었거나(`file:///path` = VTE 규약의 localhost), `localhost`이거나, 로컬 hostname과 같으면 로컬이다. hostname 비교는 대소문자를 무시하고 FQDN의 첫 `.` 앞 짧은 이름도 함께 본다(원격 셸이 `${HOST}`에 짧은 이름을, 로컬이 FQDN을 쓰는 비대칭이 흔하다). 단 **양쪽이 다 FQDN인데 전체가 다르면 다른 호스트로 본다** — 첫 라벨만 비교하면 사내망의 동명 서버(`box.corp.com`)가 로컬(`box.home.net`)로 판정돼 원격 경로가 로컬 spawn·resolve로 샌다.
+- **로컬 보고자는 authority를 비운다**(`shell_integration.zig`의 `_maru_osc7`). maru가 spawn한 로컬 pty 전용 스크립트라 보고하는 cwd가 정의상 로컬인데, `${HOST}`를 실으면 그 값(**셸이 시작한** 시점의 hostname)과 앱이 대조하는 이름(**앱이 시작한** 시점의 hostname)이 서로 다른 스냅샷이 된다. macOS는 DHCP 도메인·Wi-Fi 전환·슬립 복귀로 접미를 바꾸므로(`box.local` ↔ `box.lan` ↔ `localhost`) 두 값이 갈릴 수 있고, 그러면 위의 FQDN 규율이 **자기 세션을 원격으로 단정**한다 — 폴더줄에 `host:` 접두가 붙고 §9.4의 안전장치가 전부 발동해 cwd 상속·링크·git 조회가 통째로 꺼진다(사용자 보고 2026-08-13: 로컬 저장소 안에서 소스 컨트롤 뷰가 "git 저장소가 아닙니다"). 판정을 느슨하게 푸는 대신 **로컬 보고자가 추측할 거리를 주지 않는 쪽**으로 막았다. 원격 rc의 스니펫은 계속 `${HOST}`를 싣는다(§9.5).
+- **로컬 hostname 캐시는 자리 잡은 값만 굳힌다**(`app_session.localHostname`). 조회 실패나 `localhost`는 "아직 이름이 없다"는 뜻이라, 그 값을 프로세스 수명 동안 캐시하면 네트워크 구성 전에 뜬 앱이 이후 모든 세션을 원격으로 오판한다. 캐시를 미루면 이름이 자리 잡는 순간 판정이 스스로 회복된다.
 - **그 밖은 원격**이며, 그 값은 **로컬 파일시스템 경로가 아니다.**
 - 베이스: OSC 7은 VTE가 정의한 사실상 표준이고 `file://<host>/<path>` 형식이 host를 이미 싣고 있다. 지금까지 버린 것은 "로컬 단일 호스트 가정" 때문이고(§1.1), 그 가정을 여기서 거둔다. iTerm2·WezTerm도 host를 보관해 원격 판정에 쓴다(동작 비교).
 
@@ -234,7 +236,9 @@ maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.termi
 
 ### 9.6 검증
 
-- 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host).
+- 순수 단위: OSC 7 파싱이 authority를 보존(`file://h/p`·`file:///p`·`file://localhost/p`·authority만 있고 path 없는 malformed), 로컬 판정(빈 host·`localhost`·hostname 일치·짧은 이름 대 FQDN·대소문자 무시·다른 host), **빈 authority는 로컬 이름이 어떤 상태(빈 값·`localhost`·다른 도메인 접미)든 로컬**(로컬 보고자 계약의 반대편), 그리고 hostname 캐시가 자리 잡지 않은 값을 굳히지 않는지.
+- 셸 스크립트 단위: 생성한 `.zshenv`가 `${HOST}`를 **싣지 않고** `file://` 뒤에 바로 인코딩된 경로를 붙이는지. 실제 zsh가 무엇을 보내는지는 pty 캡처로 확인한다(`ZDOTDIR=<캐시 디렉터리> script -q out zsh -i`로 `\e]7;file://…`를 잡는다 — 2026-08-13에 이 캡처가 "로컬 셸이 hostname을 싣는다"를 확정했다).
+- 세션 재현: 저장소 안에 선 Term에 authority만 어긋난 OSC 7을 보내면 폴더줄이 `<host>:<절대경로>`가 되고 저장소 판정이 `.unknown`으로 무너지는지, 그리고 **빈 authority(로컬 보고자 형식)에서는 같은 경로가 `.repo`로 돌아오는지**를 한 테스트에서 대조한다(수정의 효과가 곧 그 대조다).
 - 소비처: 원격 cwd에서 `newSurfaceCwd`가 null을 내는지, 클릭 resolve가 상대경로를 join하지 않는지, 폴더줄이 브랜치 없이도 `<host>:<path>`를 그리고 `~` 축약이 안 붙는지, 로컬 cwd는 기존 동작이 바이트 그대로인지(회귀).
 - 전달 경로: in-process Term은 배선했다. **host-backed Term(`session.keep-alive-after-quit`, 기본 off)의 wire는 아직 `cwd_host`를 싣지 않는다** — 그 모드에서 host는 늘 빈 문자열이라 §9.2의 "빈 authority = 로컬"로 떨어져 이 문서 이전의 동작으로 degrade한다(새 오표시는 없고 §9.4 안전장치가 안 걸릴 뿐). 후속에서 `server.zig`·`runtime_event_wire.zig`·`runtime_metadata_wire.zig`에 필드를 더하며, 그때 `observationWireValid`의 UTF-8·크기 검증에도 포함해야 한다. **함께 고쳐야 할 두 자리**: host-backed 링크 경로(`remoteLinkSpanAt`의 hover 필터와 `linkAtFor`에 넘기는 `packLinkScopes`)는 아직 `linkScopesFromConfig`를 직접 부르므로, wire가 붙는 순간 §9.4의 파일 경로 차단이 그 모드에서만 빠진 채로 남는다.
 - **순수 함수 단언만으로는 부족하다.** 폴더줄은 사이드바 **draw list 셀을 직접 읽어** 확인한다 — 조립부가 판정 함수를 안 쓰거나 줄이 빈 문자열로 접히면 단위 테스트는 통과하면서 화면엔 아무것도 안 뜬다. 로컬→원격 전이의 **대조군**을 함께 둔다: 경로가 같고 host만 바뀌는 전이는 `title_generation` bump가 없으면 observation refresh 자체가 스킵돼 옛 host가 계속 그려진다(실제로 그렇게 발견했다).

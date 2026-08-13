@@ -1335,9 +1335,20 @@ pub fn requestBranchMenu(self: *AppSession) void {
         return;
     };
     var repo_buf: [1024]u8 = undefined;
-    const repo = git_ops.gitRepoRoot(self, &repo_buf) orelse {
-        self.showNotice("git 저장소가 아닙니다");
-        return;
+    // **도크의 빈 안내와 같은 3-상태 구분을 쓴다**(editor-surface-dock.md "빈 상태"). `gitRepoRoot`는
+    // "저장소가 아니다"(`.none`)와 "물어볼 곳이 없다"(`.unknown` — 원격 세션·파일 Term)를 같은 null로
+    // 뭉개므로, 그걸로 안내를 고르면 저장소 안에 서 있는 사용자에게 없는 사실을 단정한다. 도크만 고치고
+    // 이 경로를 놓쳤던 것을 적대적 검증에서 잡았다 — 안내를 내는 소비처는 전수로 같은 구분을 써야 한다.
+    const repo = switch (git_ops.gitRepoTarget(self, &repo_buf)) {
+        .repo => |found| found,
+        .none => {
+            self.showNotice(git_ops.notice_not_a_repo);
+            return;
+        },
+        .unknown => {
+            self.showNotice(git_ops.notice_repo_unknown);
+            return;
+        },
     };
     self.git_request_seq +%= 1;
     if (backend.submitBranches(git_exe, repo, self.git_request_seq)) self.branch_menu_pending = true;

@@ -451,6 +451,30 @@ pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
     return .unknown;
 }
 
+/// 저장소 판정이 사용자에게 보이는 **두 문구**. 도크의 빈 안내와 브랜치 메뉴가 같은 판정을 쓰므로 문자열도
+/// 한 자리에 둔다 — 복붙해 두면 한쪽만 고쳐져 같은 상태를 두 가지로 말한다(적대적 검증에서 브랜치 메뉴가
+/// 실제로 옛 단정에 남아 있었다).
+pub const notice_not_a_repo = "git 저장소가 아닙니다";
+pub const notice_repo_unknown = "저장소를 확인할 수 없습니다";
+
+/// 목록이 비었을 때 도크가 낼 **안내 문구**. 우선순위는 실행할 수 없음 → 볼 것이 없음 → 실패 → 진행 중이다.
+///
+/// **`gitRepoRoot`가 아니라 `gitRepoTarget`을 본다.** 전자는 "저장소가 아니다"(`.none`)와 "모른다"(`.unknown` —
+/// 원격 세션·파일 Term이라 물어볼 곳이 없다)를 같은 null로 뭉개므로, 그걸로 문구를 고르면 후자까지 "저장소가
+/// 아닙니다"로 단정해 **저장소 안에 서 있는 사용자에게 없는 사실을 알린다**(사용자 보고 2026-08-13: 로컬 세션이
+/// 원격으로 오판된 동안 이 문구가 진짜 원인을 가렸다).
+///
+/// 렌더 안 표현식으로 두지 않고 함수로 뺀 이유도 그것이다 — 세 상태를 테스트에서 각각 짚을 수 있어야 두 결론이
+/// 다시 한 문구로 접히는 회귀를 단위로 잡는다.
+pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
+    if (self.git_missing) return "git이 설치되어 있지 않습니다";
+    return switch (gitRepoTarget(self, probe)) {
+        .none => notice_not_a_repo,
+        .unknown => notice_repo_unknown,
+        .repo => if (self.git_failed) "git 읽기에 실패했습니다" else "읽는 중…",
+    };
+}
+
 /// `repoRootFor`의 walk-up을 저주기로 캐시한다. **매 프레임 도는 경로이기 때문**이다: `repoRootFor`는 루트까지
 /// 올라가며 경로 구성요소마다 `access(2)`를 한 번씩 쓴다(깊은 cwd면 호출당 여덟 번쯤). tick이 이걸 프레임마다
 /// 돌리면 blocking syscall이 초당 수천 번이 되어 프레임 페이싱과 배터리를 갉는다.

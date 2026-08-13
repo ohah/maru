@@ -954,8 +954,7 @@ test "host manifest codec preserves exact discovery authority and rejects non-ex
 
 test "host manifest publish-load is atomic owner-only and exact-host keyed" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(std.testing.io, &dir_buf, "host-manifest") orelse
-        return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "host-manifest");
     defer test_scratch.close(std.testing.io, dir);
     const descriptor: Descriptor = .{
         .host_id = 0xCAFE,
@@ -992,11 +991,7 @@ test "host manifest publish-load is atomic owner-only and exact-host keyed" {
 
 test "host manifest restoring adoption discard preserves disk and commit transfers exact cleanup authority" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(
-        std.testing.io,
-        &dir_buf,
-        "host-manifest-adopt",
-    ) orelse return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "host-manifest-adopt");
     defer test_scratch.close(std.testing.io, dir);
     const host_id: u128 = 0xAD07;
     var endpoint_buf: [128]u8 = undefined;
@@ -1071,8 +1066,7 @@ test "host manifest restoring adoption discard preserves disk and commit transfe
 
 test "host manifest initial publish is exclusive and old owner cleanup cannot unlink a replacement generation" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(std.testing.io, &dir_buf, "host-manifest-aba") orelse
-        return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "host-manifest-aba");
     defer test_scratch.close(std.testing.io, dir);
     const host_id: u128 = 0xBEEF;
     var endpoint_buf: [128]u8 = undefined;
@@ -1105,8 +1099,7 @@ test "host manifest initial publish is exclusive and old owner cleanup cannot un
 
 test "host manifest transaction rolls back precommit failure and poisons indeterminate rollback" {
     var dir_buf: [192]u8 = undefined;
-    const dir = test_scratch.open(std.testing.io, &dir_buf, "host-manifest-txn") orelse
-        return error.SkipZigTest;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "host-manifest-txn");
     defer test_scratch.close(std.testing.io, dir);
     const host_id: u128 = 0xD00D;
     var endpoint_buf: [128]u8 = undefined;

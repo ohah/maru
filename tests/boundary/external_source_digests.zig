@@ -329,7 +329,9 @@ pub const inventory = [_]Proof{
     // 고정하고 existing-pool spawn marker도 함께 회수해 digest가 바뀐다. @field 반사 owner와 Client 구성 경로 count는 2 그대로다.
     // 같은 rollback fixture가 HostAdapter test-only deinit trace로 created/rejected/sibling exact-once 회수를 역할별로
     // 관측해 digest가 다시 바뀐다. @field 반사 owner와 Client 구성 경로 count는 여전히 2다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "5c419dfb313025bbae902f5554b584cfb993b3b3ea0673f9c60f9d8dcd566f2c" },
+    // AppHost ABI의 closed incident outcome을 macOS 전용 owner 타입에서 중립 app_session enum으로 옮겨
+    // Linux cross-compile에서도 같은 raw ABI를 갖게 했다. @field 반사 owner count는 2 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 2, .digest_hex = "ed3ccead6c80777cccb9632b39363f69960b496ddd1817e33f24083cb3db4fee" },
     // F9로 `app_session.zig`에서 넘어온 `pending_writeback_lists` 반사 둘이 여기 산다. 새로 생긴 반사가
     // 아니라 이사한 것이다(위 app_session.zig 항목의 4 → 2와 짝이다).
     // F10에서 그룹 간 참조를 허브 재수출 대신 직접 `@import`으로 바꾸며 digest가 바뀐다. count는 2

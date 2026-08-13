@@ -25,6 +25,7 @@ const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
 const pane_ops = @import("pane.zig");
+const find_ops = @import("find.zig");
 
 /// 시각 확인 디버그 훅 — MARU_OPEN_SETTINGS env가 설정됐고 surface가 준비됐으면 세팅 화면을 한 번 자동으로 연다.
 /// 스크린샷 하니스(MARU_SCREENSHOT)가 입력 없이 모달 상태를 캡처하도록(self-verify). env 미설정이면 무동작 —
@@ -120,6 +121,26 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         // 위로 굴려 명령줄을 화면 밖으로 보낸다 — 그래야 배너가 그것을 대신 보여준다.
         surface.core.scrollViewport(30); // 양수 = 위(과거)로
         surface.unlockCore(self.io);
+    }
+    // MARU_FORCE_WRAP_SEARCH=1 — 자동 줄바꿈을 **2셀 글자가 마지막 한 칸에 못 들어가** 일어나게 만든 뒤,
+    // 그 경계를 걸친 검색어로 Find를 연다. 그 자리에 남는 칸은 터미널이 만든 wrap 채움이라 글자가 아닌데,
+    // 그것을 공백으로 세면 검색어가 끊겨 **0건**이 된다(수정 전 동작). 리사이즈·타이핑·검색창 입력이 필요해
+    // 캡처만으로는 만들 수 없는 상태라 여기서 강제한다(self-verify debug-gate — MARU_FORCE_SPLIT과 같은 성격).
+    if (std.c.getenv("MARU_FORCE_WRAP_SEARCH") != null) {
+        const surface = pane_ops.activePane(self).activeTerm().surface;
+        surface.lockCore(self.io);
+        const cols = surface.core.size.cols;
+        // 마지막 한 칸만 남기고 채운다 → 다음 2셀 글자가 통째로 다음 줄로 밀린다.
+        var col: u16 = 0;
+        while (col + 1 < cols) : (col += 1) surface.core.write("a") catch {};
+        surface.core.write("가나다 wrap 경계를 걸친 검색") catch {};
+        surface.unlockCore(self.io);
+
+        // 검색어 "a가" — 마지막 'a'와 다음 줄 '가' 사이를 걸친다. 그 사이의 wrap 채움을 공백으로 세면 안 잡힌다.
+        self.chrome_host.find.show();
+        self.chrome_host.find.input.appendChar(self.allocator, 'a') catch {};
+        self.chrome_host.find.input.appendChar(self.allocator, '\u{AC00}') catch {};
+        find_ops.recomputeFind(self);
     }
     if (std.c.getenv("MARU_FORCE_SPLIT") != null) {
         pane_ops.splitActivePane(self, .horizontal) catch {};

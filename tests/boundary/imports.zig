@@ -1233,6 +1233,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "incident_binding" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_publication_contract" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "connection_incident" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "first_incident_id" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "incident_repeat_key" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdStatIdentity" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FdSocketIdentity" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "fdStatIdentity" },

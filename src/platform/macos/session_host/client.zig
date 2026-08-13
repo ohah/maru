@@ -36,6 +36,8 @@ const client_poison = @import("client_poison.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_source_transcript = @import("client_source_transcript.zig");
 const incident_binding_contract = @import("maru").observability.incident_binding_contract;
+const incident_publication_contract = @import("maru").observability.incident_publication_contract;
+const connection_incident = @import("maru").observability.connection_incident;
 const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -1977,6 +1979,8 @@ const ExternalAdoptionSnapshot = struct {
     ownership: ClientOwnership,
     unusable: bool,
     first_poison_reason: ?client_poison.ConnectionReason,
+    first_incident_id: connection_incident.IncidentId,
+    incident_repeat_key: incident_publication_contract.IncidentRepeatKey,
     next_request_id: u64,
     parser_allocator: std.mem.Allocator,
     parser_expected_major: u16,
@@ -3548,6 +3552,9 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.unusable);
         writer.writeBool(client.first_poison_reason != null);
         if (client.first_poison_reason) |reason| writer.writeTag(@intFromEnum(reason));
+        writer.writeU128(client.first_incident_id.app_instance_nonce);
+        writer.writeU64(client.first_incident_id.sequence);
+        try writer.writeBytes(std.mem.asBytes(&client.incident_repeat_key));
         writer.writeU64(client.next_request_id);
 
         try writeSourceAllocator(&writer, client.parser.allocator, encoding, 0x1400);
@@ -5330,6 +5337,8 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .ownership = self.ownership,
         .unusable = self.unusable,
         .first_poison_reason = self.first_poison_reason,
+        .first_incident_id = self.first_incident_id,
+        .incident_repeat_key = self.incident_repeat_key,
         .next_request_id = self.next_request_id,
         .parser_allocator = self.parser.allocator,
         .parser_expected_major = self.parser.expected_major,
@@ -6533,6 +6542,10 @@ pub const Client = struct {
     unusable: bool = false,
     /// 최초 connection poison만 보존한다. 후속 EOF/cleanup 실패는 원인을 덮지 않는다.
     first_poison_reason: ?client_poison.ConnectionReason = null,
+    /// 최초 reason과 같은 held operation에서 게시되는 correlation이다. sequence 0은 아직 미게시 상태다.
+    first_incident_id: connection_incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
+    /// repeat는 raw incident ID 대신 final-address Client에 봉인된 이 권위만 소비한다.
+    incident_repeat_key: incident_publication_contract.IncidentRepeatKey = .{},
     next_request_id: u64 = 1,
     // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
@@ -14090,6 +14103,8 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "ownership",
     "unusable",
     "first_poison_reason",
+    "first_incident_id",
+    "incident_repeat_key",
     "next_request_id",
     "pending_stream",
     "pending_stream_bytes",

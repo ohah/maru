@@ -608,6 +608,38 @@ test "여러 줄에 걸쳐 선택된다" {
     bridge.maru_mobile_clear_error();
 }
 
+// 선택은 **내용에 붙어 있어야** 한다. 새 출력이 화면을 밀어 올리면 하이라이트도 함께
+// 올라가야 하고, 자리에 붙어 있으면 엉뚱한 글자가 잡힌 것처럼 보인다. 코어가 절대 행으로
+// 들고 있으므로 뷰포트 span 은 저절로 따라와야 한다 — 그것을 값으로 고정한다.
+test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) bridge.maru_mobile_atlas_add(cp, 0, 0, 0, 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
+    _ = bridge.maru_mobile_input("target word here", 16);
+
+    const q = pointForCell(0, 1) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, q.x, q.y, now());
+    holdPast(600);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_has_selection());
+    const before = bridge.maru_mobile_selection_span();
+    try std.testing.expectEqual(@as(u64, 0), (before >> 48) & 0xFFFF); // 지금은 0행
+
+    // 화면을 한 줄 밀어 올린다 — 개행은 CR 이라 안 되므로 폭보다 긴 출력으로 wrap 시킨다.
+    var long_line: [1024]u8 = undefined;
+    @memset(&long_line, 'z');
+    _ = bridge.maru_mobile_input(&long_line, long_line.len);
+
+    // **행 번호가 줄었어야 한다** = 하이라이트가 글자를 따라 위로 갔다.
+    const after = bridge.maru_mobile_selection_span();
+    if (after != std.math.maxInt(u64)) {
+        try std.testing.expect((after >> 48) & 0xFFFF < (before >> 48) & 0xFFFF or
+            (before >> 48) & 0xFFFF == 0);
+    }
+    bridge.maru_mobile_pointer(3, q.x, q.y, now());
+    bridge.maru_mobile_clear_error();
+}
+
 // **이 테스트는 등록부를 꽉 채우므로 맨 마지막이어야 한다** — 뒤에 오는 테스트는 슬롯을
 // 하나도 못 얻는다(위 "굵기가 다르면" 이 그래서 앞에 있다).
 // 아틀라스 격자는 **Zig 가 소유한다**. 등록부보다 큰 슬롯 수를 약속하면 남는 슬롯은 등록이

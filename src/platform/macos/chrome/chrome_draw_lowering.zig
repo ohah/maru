@@ -34,6 +34,16 @@ pub const layers = struct {
     pub const header: u32 = 4;
 };
 
+/// 이 층이 **셀·글리프보다 아래**인가. 컴포넌트 배경(자기 글자를 덮으면 안 되는 quad)이 실려도
+/// 되는 층인지 묻는 자리다.
+///
+/// **`under`(0)는 아래가 아니다.** 이름이 그렇게 읽히지만 렌더러는 그것을 part1 셀 **뒤**에 그린다
+/// (part2 앞일 뿐이다) — 그래서 part1에 글자를 내는 컴포넌트의 배경을 `under`에 실으면 `3`과 똑같이
+/// 글자가 덮인다. 이 함수가 없으면 그 함정을 호출처마다 다시 밟는다.
+pub fn isBelowText(l: u32) bool {
+    return l == layers.bottom;
+}
+
 /// B1 rich Chrome text의 immutable placement artifact. semantic draw의 px origin을 cell
 /// DrawList와 함께 보존해, CoreText가 atlas slot을 준비한 뒤에도 final glyph quad가 row/col로
 /// 다시 절삭되지 않게 한다. Placement는 row 하나가 아니라 text op의 column span을 들고 있어,
@@ -475,6 +485,21 @@ fn packRgba(rgb: maru.color.Rgb, alpha: u8) u32 {
 
 fn packRgb(rgb: maru.color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
+// 이 테스트가 증명하는 것: **"텍스트 아래"인 층은 `bottom` 하나뿐**이라는 것.
+//
+// 왜 터미널/편집기에서 중요한가 — 컴포넌트 배경은 자기 글자를 덮으면 안 되는데, 렌더러는 이름 없는
+// 값을 전부 over로 몰아넣어 잘못된 층도 조용히 "동작"한다. 실제로 편집기 배경이 `3`으로 실려 본문이
+// 통째로 안 보였다. 특히 `under`(0)는 이름 때문에 안전해 보이지만 렌더러가 part1 셀 **뒤**에 그리므로
+// 같은 사고가 난다 — 그 함정을 여기 고정해 두지 않으면 다음 호출처가 다시 밟는다.
+test "텍스트 아래 층은 bottom 하나뿐이다 — under는 이름과 달리 셀 뒤에 그려진다" {
+    try std.testing.expect(isBelowText(layers.bottom));
+    try std.testing.expect(!isBelowText(layers.under)); // 함정: 이름이 "아래"지만 part1 셀 뒤다
+    try std.testing.expect(!isBelowText(layers.over));
+    try std.testing.expect(!isBelowText(layers.header));
+    // 이름 없는 값(예전 편집기 배경이 실렸던 `3`)도 아래가 아니다 — 렌더러는 이것을 over로 몰아넣는다.
+    try std.testing.expect(!isBelowText(3));
 }
 
 test "Chrome draw lowering preserves an NFD cluster and paints cards behind text" {
